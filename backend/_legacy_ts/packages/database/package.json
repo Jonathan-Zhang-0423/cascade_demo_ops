@@ -1,0 +1,20 @@
+{
+    "name":  "@cascade/database",
+    "version":  "0.1.0",
+    "type":  "module",
+    "main":  "dist/index.js",
+    "types":  "dist/index.d.ts",
+    "scripts":  {
+                    "build":  "tsc -p tsconfig.json",
+                    "typecheck":  "tsc -p tsconfig.json --noEmit",
+                    "test":  "vitest run --passWithNoTests"
+                },
+    "dependencies":  {
+                         "@cascade/schemas":  "workspace:*",
+                         "@cascade/shared":  "workspace:*",
+                         "pg":  "^8.13.0"
+                     },
+    "devDependencies":  {
+                            "@types/pg":  "^8.11.0"
+                        }
+}

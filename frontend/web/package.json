@@ -1,0 +1,12 @@
+{
+  "name": "@cascade/web",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "echo web-ui-not-implemented-yet",
+    "build": "echo web-ui-not-implemented-yet",
+    "typecheck": "echo web-ui-not-implemented-yet",
+    "test": "echo web-ui-not-implemented-yet"
+  }
+}

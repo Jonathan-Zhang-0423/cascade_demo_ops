@@ -1,0 +1,21 @@
+{
+  "name": "cascade-demoops-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev:backend": "cd backend && go run ./cmd/api",
+    "dev:web": "pnpm --filter @cascade/web dev",
+    "build:backend": "cd backend && go build ./...",
+    "test:backend": "cd backend && go test ./...",
+    "build:web": "pnpm --filter @cascade/web build",
+    "test:web": "pnpm --filter @cascade/web test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
