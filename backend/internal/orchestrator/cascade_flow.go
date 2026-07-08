@@ -49,6 +49,36 @@ type GeneratedArtifacts struct {
 	StepByStepDocsPath string   `json:"step_by_step_docs_path,omitempty"`
 }
 
+type UserInput struct {
+	Mode                   model.AppMode `json:"mode"`
+	ProductURL             string        `json:"product_url"`
+	GitRepoURL             string        `json:"git_repo_url,omitempty"`
+	LocalRepoPath          string        `json:"local_repo_path,omitempty"`
+	ProductDescription     string        `json:"product_description,omitempty"`
+	TargetAudience         string        `json:"target_audience"`
+	BrandTone              string        `json:"brand_tone,omitempty"`
+	MustShow               []string      `json:"must_show,omitempty"`
+	MustNotShow            []string      `json:"must_not_show,omitempty"`
+	ForbiddenPages         []string      `json:"forbidden_pages,omitempty"`
+	ForbiddenData          []string      `json:"forbidden_data,omitempty"`
+	DemoUsername           string        `json:"demo_username,omitempty"`
+	DemoPassword           string        `json:"demo_password,omitempty"`
+	SSHHost                string        `json:"ssh_host,omitempty"`
+	SSHPort                int           `json:"ssh_port,omitempty"`
+	SSHUsername            string        `json:"ssh_username,omitempty"`
+	SSHPrivateKeySecretRef string        `json:"ssh_private_key_secret_ref,omitempty"`
+	SSHPasswordSecretRef   string        `json:"ssh_password_secret_ref,omitempty"`
+	SSHAllowedPaths        []string      `json:"ssh_allowed_paths,omitempty"`
+	SSHAllowedCommands     []string      `json:"ssh_allowed_commands,omitempty"`
+}
+
+type RehearsalResult struct {
+	PassRate       float64  `json:"pass_rate"`
+	RecordingPaths []string `json:"recording_paths,omitempty"`
+	ScreenshotRefs []string `json:"screenshot_refs,omitempty"`
+	FailureNotes   []string `json:"failure_notes,omitempty"`
+}
+
 type InputContextAgent interface {
 	BuildProjectContext(ctx context.Context, input UserInput) (*model.ProjectContext, error)
 }
@@ -69,29 +99,11 @@ type AssetGeneratorAgent interface {
 	GenerateAssets(ctx context.Context, graph *model.DemoWorkflowGraph, result RehearsalResult) (*GeneratedArtifacts, error)
 }
 
-type UserInput struct {
-	Mode               model.AppMode `json:"mode"`
-	ProductURL         string        `json:"product_url"`
-	GitRepoURL         string        `json:"git_repo_url,omitempty"`
-	LocalRepoPath      string        `json:"local_repo_path,omitempty"`
-	ProductDescription string        `json:"product_description,omitempty"`
-	TargetAudience     string        `json:"target_audience"`
-	DemoUsername       string        `json:"demo_username,omitempty"`
-	DemoPassword       string        `json:"demo_password,omitempty"`
-}
-
-type RehearsalResult struct {
-	PassRate       float64  `json:"pass_rate"`
-	RecordingPaths []string `json:"recording_paths,omitempty"`
-	ScreenshotRefs []string `json:"screenshot_refs,omitempty"`
-	FailureNotes   []string `json:"failure_notes,omitempty"`
-}
-
 type Dependencies struct {
-	InputContext  InputContextAgent
-	ProductMap    ProductMapAgent
-	GraphBuilder  GraphBuilderAgent
-	QAExecutor    QAExecutorAgent
+	InputContext   InputContextAgent
+	ProductMap     ProductMapAgent
+	GraphBuilder   GraphBuilderAgent
+	QAExecutor     QAExecutorAgent
 	AssetGenerator AssetGeneratorAgent
 }
 
@@ -157,10 +169,12 @@ func (f *CascadeFlow) ApproveAndContinue(ctx context.Context, state *CascadeStat
 		return nil, errors.New("state is nil")
 	}
 	if state.CurrentNode != NodeHumanApprove || state.Status != FlowStatusAwaitingHuman {
-		return fail(state, fmt.Errorf("flow is not awaiting human approval: node=%s status=%s", state.CurrentNode, state.Status)), errors.New("flow is not awaiting human approval")
+		err := fmt.Errorf("flow is not awaiting human approval: node=%s status=%s", state.CurrentNode, state.Status)
+		return fail(state, err), err
 	}
 	if approvedGraph == nil {
-		return fail(state, errors.New("approved graph is nil")), errors.New("approved graph is nil")
+		err := errors.New("approved graph is nil")
+		return fail(state, err), err
 	}
 
 	state.WorkflowGraph = approvedGraph

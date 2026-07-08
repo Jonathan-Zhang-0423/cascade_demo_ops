@@ -1,8 +1,7 @@
 package model
 
 // DemoWorkflowGraph is the executable product-demo knowledge graph.
-// It is the moat asset of Cascade DemoOps: videos, screenshots, and docs
-// are rendered artifacts derived from this graph, not the source of truth.
+// Videos, screenshots, and docs are rendered artifacts derived from this graph.
 type DemoWorkflowGraph struct {
 	ID         string         `json:"id"`
 	Version    int            `json:"version"`
@@ -14,20 +13,20 @@ type DemoWorkflowGraph struct {
 
 type GraphNode struct {
 	ID              string `json:"id"`
-	Action          string `json:"action"`           // click/fill/upload/navigate/wait/assert
-	Selector        string `json:"selector"`         // CSS/XPath/role selector hint
-	InputData       string `json:"input_data"`       // clean demo data for the step
-	ExpectedOutcome string `json:"expected_outcome"` // expected page title/text/element state
-	IsScreenshot    bool   `json:"is_screenshot"`    // whether this node should produce a screenshot
-	HasZoom         bool   `json:"has_zoom"`         // whether final video should zoom/callout this step
-	RetryPolicy     int    `json:"retry_policy"`     // max retry count before repair/human escalation
+	Action          string `json:"action"`
+	Selector        string `json:"selector"`
+	InputData       string `json:"input_data"`
+	ExpectedOutcome string `json:"expected_outcome"`
+	IsScreenshot    bool   `json:"is_screenshot"`
+	HasZoom         bool   `json:"has_zoom"`
+	RetryPolicy     int    `json:"retry_policy"`
 }
 
 type GraphEdge struct {
 	ID        string `json:"id"`
 	FromNode  string `json:"from_node"`
 	ToNode    string `json:"to_node"`
-	Condition string `json:"condition,omitempty"` // success/failure/optional branch condition
+	Condition string `json:"condition,omitempty"`
 }
 
 type AssetManifest struct {
