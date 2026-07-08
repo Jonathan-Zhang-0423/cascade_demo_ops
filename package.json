@@ -5,10 +5,12 @@
   "type": "module",
   "packageManager": "pnpm@9.0.0",
   "scripts": {
-    "dev:backend": "cd backend && go run ./cmd/api",
-    "dev:web": "pnpm --filter @cascade/web dev",
+    "dev:backend": "cd backend && go run .",
     "build:backend": "cd backend && go build ./...",
     "test:backend": "cd backend && go test ./...",
+    "dev:worker": "pnpm --filter @cascade/video-worker dev",
+    "build:worker": "pnpm --filter @cascade/video-worker build",
+    "dev:web": "pnpm --filter @cascade/web dev",
     "build:web": "pnpm --filter @cascade/web build",
     "test:web": "pnpm --filter @cascade/web test"
   },
