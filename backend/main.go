@@ -33,11 +33,16 @@ func main() {
 	}
 
 	flow, err := orchestrator.NewCascadeFlow(orchestrator.Dependencies{
-		InputContext:   agents.NewInputContextAgent(),
-		ProductMap:     agents.NewProductMapAgent(),
-		GraphBuilder:   agents.NewGraphBuilderAgent(),
-		QAExecutor:     agents.NewQAExecutorAgent(),
-		AssetGenerator: agents.NewAssetGeneratorAgent(),
+		InputContext:      agents.NewInputContextAgent(),
+		RequirementReader: agents.NewRequirementReaderAgent(),
+		CodeReader:        agents.NewCodeReaderAgent(),
+		PageReader:        agents.NewPageReaderAgent(),
+		Understanding:     agents.NewMultimodalUnderstandingAgent(),
+		ProductMap:        agents.NewProductMapAgent(),
+		GraphBuilder:      agents.NewGraphBuilderAgent(),
+		ScriptPackager:    agents.NewScriptPackagerAgent(),
+		QAExecutor:        agents.NewQAExecutorAgent(),
+		AssetGenerator:    agents.NewAssetGeneratorAgent(),
 	})
 	must(err)
 
@@ -57,7 +62,7 @@ func main() {
 	must(encoder.Encode(state))
 
 	if state.Status == orchestrator.FlowStatusAwaitingHuman {
-		fmt.Fprintln(os.Stderr, "workflow graph generated; waiting for HumanApprove")
+		fmt.Fprintln(os.Stderr, "workflow graph and script document generated; waiting for HumanApprove")
 	}
 }
 

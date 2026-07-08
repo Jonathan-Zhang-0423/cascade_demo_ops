@@ -17,10 +17,15 @@ type AgentTaskKind string
 
 const (
 	AgentTaskBuildProjectContext AgentTaskKind = "build_project_context"
+	AgentTaskReadRequirements    AgentTaskKind = "read_requirements"
+	AgentTaskReadCode            AgentTaskKind = "read_code"
+	AgentTaskReadPages           AgentTaskKind = "read_pages"
+	AgentTaskBuildUnderstanding  AgentTaskKind = "build_multimodal_understanding"
 	AgentTaskSnapshotRepo        AgentTaskKind = "snapshot_repo"
 	AgentTaskSnapshotBrowser     AgentTaskKind = "snapshot_browser"
 	AgentTaskBuildProductMap     AgentTaskKind = "build_product_map"
 	AgentTaskDraftWorkflowGraph  AgentTaskKind = "draft_workflow_graph"
+	AgentTaskPackageScript       AgentTaskKind = "package_script_document"
 	AgentTaskDiagnoseFailure     AgentTaskKind = "diagnose_failure"
 	AgentTaskPatchWorkflowGraph  AgentTaskKind = "patch_workflow_graph"
 	AgentTaskPlanAssets          AgentTaskKind = "plan_assets"
@@ -62,26 +67,32 @@ type AgentRunEnvelope struct {
 }
 
 type AgentInputPackage struct {
-	ProjectContext *ProjectContext    `json:"project_context,omitempty"`
-	ProductMap     *ProductMap        `json:"product_map,omitempty"`
-	WorkflowGraph  *DemoWorkflowGraph `json:"workflow_graph,omitempty"`
-	Evidence       []EvidenceRef      `json:"evidence,omitempty"`
-	ExecutionTrace *ExecutionTrace    `json:"execution_trace,omitempty"`
-	Task           string             `json:"task,omitempty"`
-	Constraints    []DemoRequirement  `json:"constraints,omitempty"`
-	Metadata       map[string]any     `json:"metadata,omitempty"`
+	ProjectContext      *ProjectContext                `json:"project_context,omitempty"`
+	RequirementBrief    *RequirementBrief              `json:"requirement_brief,omitempty"`
+	UnderstandingReport *MultimodalUnderstandingReport `json:"understanding_report,omitempty"`
+	ProductMap          *ProductMap                    `json:"product_map,omitempty"`
+	WorkflowGraph       *DemoWorkflowGraph             `json:"workflow_graph,omitempty"`
+	ScriptDocument      *ExecutionScriptDocument       `json:"script_document,omitempty"`
+	Evidence            []EvidenceRef                  `json:"evidence,omitempty"`
+	ExecutionTrace      *ExecutionTrace                `json:"execution_trace,omitempty"`
+	Task                string                         `json:"task,omitempty"`
+	Constraints         []DemoRequirement              `json:"constraints,omitempty"`
+	Metadata            map[string]any                 `json:"metadata,omitempty"`
 }
 
 type AgentOutputPackage struct {
-	Findings         []AgentFinding       `json:"findings,omitempty"`
-	ProductMap       *ProductMap          `json:"product_map,omitempty"`
-	WorkflowGraph    *DemoWorkflowGraph   `json:"workflow_graph,omitempty"`
-	GraphPatch       *GraphPatch          `json:"graph_patch,omitempty"`
-	FailureDiagnosis *FailureDiagnosis    `json:"failure_diagnosis,omitempty"`
-	AssetPlan        *AssetPlan           `json:"asset_plan,omitempty"`
-	HumanRequests    []HumanActionRequest `json:"human_requests,omitempty"`
-	SafetyReport     *SafetyReport        `json:"safety_report,omitempty"`
-	Confidence       float64              `json:"confidence,omitempty"`
+	Findings            []AgentFinding                 `json:"findings,omitempty"`
+	RequirementBrief    *RequirementBrief              `json:"requirement_brief,omitempty"`
+	UnderstandingReport *MultimodalUnderstandingReport `json:"understanding_report,omitempty"`
+	ProductMap          *ProductMap                    `json:"product_map,omitempty"`
+	WorkflowGraph       *DemoWorkflowGraph             `json:"workflow_graph,omitempty"`
+	ScriptDocument      *ExecutionScriptDocument       `json:"script_document,omitempty"`
+	GraphPatch          *GraphPatch                    `json:"graph_patch,omitempty"`
+	FailureDiagnosis    *FailureDiagnosis              `json:"failure_diagnosis,omitempty"`
+	AssetPlan           *AssetPlan                     `json:"asset_plan,omitempty"`
+	HumanRequests       []HumanActionRequest           `json:"human_requests,omitempty"`
+	SafetyReport        *SafetyReport                  `json:"safety_report,omitempty"`
+	Confidence          float64                        `json:"confidence,omitempty"`
 }
 
 type AgentFinding struct {

@@ -12,12 +12,17 @@ import (
 type NodeName string
 
 const (
-	NodeInputCtx        NodeName = "InputCtx"
-	NodeProductExplore  NodeName = "ProductExplore"
-	NodeGraphGenerate   NodeName = "GraphGenerate"
-	NodeHumanApprove    NodeName = "HumanApprove"
-	NodeExecuteRehearse NodeName = "ExecuteRehearse"
-	NodeAssetGenerate   NodeName = "AssetGenerate"
+	NodeInputCtx             NodeName = "InputCtx"
+	NodeRequirementRead      NodeName = "RequirementRead"
+	NodeCodeRead             NodeName = "CodeRead"
+	NodePageRead             NodeName = "PageRead"
+	NodeMultimodalUnderstand NodeName = "MultimodalUnderstand"
+	NodeProductExplore       NodeName = "ProductExplore"
+	NodeGraphGenerate        NodeName = "GraphGenerate"
+	NodeScriptPackage        NodeName = "ScriptPackage"
+	NodeHumanApprove         NodeName = "HumanApprove"
+	NodeExecuteRehearse      NodeName = "ExecuteRehearse"
+	NodeAssetGenerate        NodeName = "AssetGenerate"
 )
 
 type FlowStatus string
@@ -31,16 +36,24 @@ const (
 )
 
 type CascadeState struct {
-	ProjectID        string                   `json:"project_id"`
-	CurrentNode      NodeName                 `json:"current_node"`
-	Status           FlowStatus               `json:"status"`
-	ProjectContext   *model.ProjectContext    `json:"project_context,omitempty"`
-	ProductMap       *model.ProductMap        `json:"product_map,omitempty"`
-	WorkflowGraph    *model.DemoWorkflowGraph `json:"workflow_graph,omitempty"`
-	Approved         bool                     `json:"approved"`
-	RehearsePassRate float64                  `json:"rehearse_pass_rate"`
-	Artifacts        *GeneratedArtifacts      `json:"artifacts,omitempty"`
-	ErrorMessage     string                   `json:"error_message,omitempty"`
+	ProjectID              string                               `json:"project_id"`
+	CurrentNode            NodeName                             `json:"current_node"`
+	Status                 FlowStatus                           `json:"status"`
+	ProjectContext         *model.ProjectContext                `json:"project_context,omitempty"`
+	RequirementBrief       *model.RequirementBrief              `json:"requirement_brief,omitempty"`
+	CodeSnapshots          []model.CodeUnderstandingSnapshot    `json:"code_snapshots,omitempty"`
+	PageSnapshots          []model.PageUnderstandingSnapshot    `json:"page_snapshots,omitempty"`
+	UnderstandingReport    *model.MultimodalUnderstandingReport `json:"understanding_report,omitempty"`
+	ProductMap             *model.ProductMap                    `json:"product_map,omitempty"`
+	WorkflowGraph          *model.DemoWorkflowGraph             `json:"workflow_graph,omitempty"`
+	ScriptDocument         *model.ExecutionScriptDocument       `json:"script_document,omitempty"`
+	ScriptMarkdown         string                               `json:"script_markdown,omitempty"`
+	ScriptMarkdownPath     string                               `json:"script_markdown_path,omitempty"`
+	ScriptMarkdownArtifact *model.ArtifactRef                   `json:"script_markdown_artifact,omitempty"`
+	Approved               bool                                 `json:"approved"`
+	RehearsePassRate       float64                              `json:"rehearse_pass_rate"`
+	Artifacts              *GeneratedArtifacts                  `json:"artifacts,omitempty"`
+	ErrorMessage           string                               `json:"error_message,omitempty"`
 }
 
 type GeneratedArtifacts struct {
@@ -86,12 +99,32 @@ type InputContextAgent interface {
 	BuildProjectContext(ctx context.Context, input UserInput) (*model.ProjectContext, error)
 }
 
+type RequirementReaderAgent interface {
+	ReadRequirements(ctx context.Context, project *model.ProjectContext) (*model.RequirementBrief, error)
+}
+
+type CodeReaderAgent interface {
+	ReadCode(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) ([]model.CodeUnderstandingSnapshot, error)
+}
+
+type PageReaderAgent interface {
+	ReadPages(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) ([]model.PageUnderstandingSnapshot, error)
+}
+
+type MultimodalUnderstandingAgent interface {
+	BuildUnderstanding(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, codeSnapshots []model.CodeUnderstandingSnapshot, pageSnapshots []model.PageUnderstandingSnapshot) (*model.MultimodalUnderstandingReport, error)
+}
+
 type ProductMapAgent interface {
-	ExploreProduct(ctx context.Context, project *model.ProjectContext) (*model.ProductMap, error)
+	ExploreProduct(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport) (*model.ProductMap, error)
 }
 
 type GraphBuilderAgent interface {
-	GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap) (*model.DemoWorkflowGraph, error)
+	GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport) (*model.DemoWorkflowGraph, error)
+}
+
+type ScriptPackagerAgent interface {
+	PackageScript(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, graph *model.DemoWorkflowGraph) (*model.ScriptDocumentPackage, error)
 }
 
 type QAExecutorAgent interface {
@@ -103,11 +136,16 @@ type AssetGeneratorAgent interface {
 }
 
 type Dependencies struct {
-	InputContext   InputContextAgent
-	ProductMap     ProductMapAgent
-	GraphBuilder   GraphBuilderAgent
-	QAExecutor     QAExecutorAgent
-	AssetGenerator AssetGeneratorAgent
+	InputContext      InputContextAgent
+	RequirementReader RequirementReaderAgent
+	CodeReader        CodeReaderAgent
+	PageReader        PageReaderAgent
+	Understanding     MultimodalUnderstandingAgent
+	ProductMap        ProductMapAgent
+	GraphBuilder      GraphBuilderAgent
+	ScriptPackager    ScriptPackagerAgent
+	QAExecutor        QAExecutorAgent
+	AssetGenerator    AssetGeneratorAgent
 }
 
 type CascadeFlow struct {
@@ -118,11 +156,26 @@ func NewCascadeFlow(deps Dependencies) (*CascadeFlow, error) {
 	if deps.InputContext == nil {
 		return nil, errors.New("missing InputContext agent")
 	}
+	if deps.RequirementReader == nil {
+		return nil, errors.New("missing RequirementReader agent")
+	}
+	if deps.CodeReader == nil {
+		return nil, errors.New("missing CodeReader agent")
+	}
+	if deps.PageReader == nil {
+		return nil, errors.New("missing PageReader agent")
+	}
+	if deps.Understanding == nil {
+		return nil, errors.New("missing MultimodalUnderstanding agent")
+	}
 	if deps.ProductMap == nil {
 		return nil, errors.New("missing ProductMap agent")
 	}
 	if deps.GraphBuilder == nil {
 		return nil, errors.New("missing GraphBuilder agent")
+	}
+	if deps.ScriptPackager == nil {
+		return nil, errors.New("missing ScriptPackager agent")
 	}
 	if deps.QAExecutor == nil {
 		return nil, errors.New("missing QAExecutor agent")
@@ -133,8 +186,9 @@ func NewCascadeFlow(deps Dependencies) (*CascadeFlow, error) {
 	return &CascadeFlow{deps: deps}, nil
 }
 
-// Start runs the first three nodes and intentionally stops at HumanApprove.
-// The frontend should render/edit the graph, then call ApproveAndContinue.
+// Start runs local understanding, graph generation, and script packaging, then
+// intentionally stops at HumanApprove.
+// The frontend should render/edit the graph and script, then call ApproveAndContinue.
 func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState, error) {
 	state := &CascadeState{Status: FlowStatusRunning}
 
@@ -146,19 +200,59 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 	state.ProjectID = project.ID
 	state.ProjectContext = project
 
+	state.CurrentNode = NodeRequirementRead
+	brief, err := f.deps.RequirementReader.ReadRequirements(ctx, project)
+	if err != nil {
+		return fail(state, err), err
+	}
+	state.RequirementBrief = brief
+
+	state.CurrentNode = NodeCodeRead
+	codeSnapshots, err := f.deps.CodeReader.ReadCode(ctx, project, brief)
+	if err != nil {
+		return fail(state, err), err
+	}
+	state.CodeSnapshots = codeSnapshots
+
+	state.CurrentNode = NodePageRead
+	pageSnapshots, err := f.deps.PageReader.ReadPages(ctx, project, brief)
+	if err != nil {
+		return fail(state, err), err
+	}
+	state.PageSnapshots = pageSnapshots
+
+	state.CurrentNode = NodeMultimodalUnderstand
+	report, err := f.deps.Understanding.BuildUnderstanding(ctx, project, brief, codeSnapshots, pageSnapshots)
+	if err != nil {
+		return fail(state, err), err
+	}
+	state.UnderstandingReport = report
+
 	state.CurrentNode = NodeProductExplore
-	productMap, err := f.deps.ProductMap.ExploreProduct(ctx, project)
+	productMap, err := f.deps.ProductMap.ExploreProduct(ctx, project, report)
 	if err != nil {
 		return fail(state, err), err
 	}
 	state.ProductMap = productMap
 
 	state.CurrentNode = NodeGraphGenerate
-	graph, err := f.deps.GraphBuilder.GenerateGraph(ctx, project, productMap)
+	graph, err := f.deps.GraphBuilder.GenerateGraph(ctx, project, productMap, report)
 	if err != nil {
 		return fail(state, err), err
 	}
 	state.WorkflowGraph = graph
+
+	state.CurrentNode = NodeScriptPackage
+	scriptPackage, err := f.deps.ScriptPackager.PackageScript(ctx, project, report, productMap, graph)
+	if err != nil {
+		return fail(state, err), err
+	}
+	state.ScriptDocument = scriptPackage.Document
+	state.ScriptMarkdown = scriptPackage.Markdown
+	state.ScriptMarkdownArtifact = scriptPackage.MarkdownArtifact
+	if scriptPackage.MarkdownArtifact != nil {
+		state.ScriptMarkdownPath = scriptPackage.MarkdownArtifact.URI
+	}
 
 	state.CurrentNode = NodeHumanApprove
 	state.Status = FlowStatusAwaitingHuman

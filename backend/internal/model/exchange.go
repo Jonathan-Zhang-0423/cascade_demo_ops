@@ -344,6 +344,7 @@ type PackageArtifactDescriptor struct {
 type ReproducibilitySpec struct {
 	GraphHashSHA256       string            `json:"graph_hash_sha256"`
 	PackageHashSHA256     string            `json:"package_hash_sha256,omitempty"`
+	ScriptHashSHA256      string            `json:"script_hash_sha256,omitempty"`
 	InputFingerprints     map[string]string `json:"input_fingerprints,omitempty"`
 	BrowserRuntimePins    map[string]string `json:"browser_runtime_pins,omitempty"`
 	SourceSnapshotDigest  string            `json:"source_snapshot_digest,omitempty"`

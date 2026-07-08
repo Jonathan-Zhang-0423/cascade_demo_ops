@@ -24,11 +24,16 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		states = store.NewMemoryStateStore()
 	}
 	flow, err := orchestrator.NewCascadeFlow(orchestrator.Dependencies{
-		InputContext:   agents.NewInputContextAgent(),
-		ProductMap:     agents.NewProductMapAgent(),
-		GraphBuilder:   agents.NewGraphBuilderAgent(),
-		QAExecutor:     agents.NewQAExecutorAgent(),
-		AssetGenerator: agents.NewAssetGeneratorAgent(),
+		InputContext:      agents.NewInputContextAgent(),
+		RequirementReader: agents.NewRequirementReaderAgent(),
+		CodeReader:        agents.NewCodeReaderAgent(),
+		PageReader:        agents.NewPageReaderAgent(),
+		Understanding:     agents.NewMultimodalUnderstandingAgent(),
+		ProductMap:        agents.NewProductMapAgent(),
+		GraphBuilder:      agents.NewGraphBuilderAgent(),
+		ScriptPackager:    agents.NewScriptPackagerAgent(),
+		QAExecutor:        agents.NewQAExecutorAgent(),
+		AssetGenerator:    agents.NewAssetGeneratorAgent(),
 	})
 	if err != nil {
 		return nil, err
@@ -84,6 +89,39 @@ func (s *Service) GetWorkflowGraph(ctx context.Context, projectID string) (*mode
 		return nil, errors.New("workflow graph is missing")
 	}
 	return state.WorkflowGraph, nil
+}
+
+func (s *Service) GetUnderstandingReport(ctx context.Context, projectID string) (*model.MultimodalUnderstandingReport, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.UnderstandingReport == nil {
+		return nil, errors.New("understanding report is missing")
+	}
+	return state.UnderstandingReport, nil
+}
+
+func (s *Service) GetExecutionScriptDocument(ctx context.Context, projectID string) (*model.ExecutionScriptDocument, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.ScriptDocument == nil {
+		return nil, errors.New("execution script document is missing")
+	}
+	return state.ScriptDocument, nil
+}
+
+func (s *Service) GetExecutionScriptMarkdown(ctx context.Context, projectID string) (string, *model.ArtifactRef, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return "", nil, err
+	}
+	if state.ScriptMarkdown == "" {
+		return "", nil, errors.New("execution script markdown is missing")
+	}
+	return state.ScriptMarkdown, state.ScriptMarkdownArtifact, nil
 }
 
 func (s *Service) ApproveWorkflowGraph(ctx context.Context, projectID string, graph *model.DemoWorkflowGraph) (*orchestrator.CascadeState, error) {

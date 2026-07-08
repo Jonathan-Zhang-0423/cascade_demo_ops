@@ -628,3 +628,376 @@ export type ArtifactRef = {
   sensitive?: boolean;
   source_node_id?: string;
 };
+
+export type DataField = {
+  name: string;
+  type?: string;
+  required?: boolean;
+  sensitive?: boolean;
+};
+
+export type Feature = {
+  id?: string;
+  name: string;
+  kind?: string;
+  user_value: string;
+  business_value?: string;
+  priority?: string;
+  best_audience: string[];
+  best_use_cases?: DemoUseCase[];
+  supporting_pages?: string[];
+  key_actions?: string[];
+  dependencies?: string[];
+  risks?: string[];
+  evidence_ids?: string[];
+  evidence_refs?: EvidenceRef[];
+};
+
+export type WorkflowCandidate = {
+  id: string;
+  name: string;
+  use_case?: DemoUseCase;
+  audience_id?: string;
+  feature_refs?: string[];
+  page_refs?: string[];
+  estimated_steps?: number;
+  value_score?: number;
+  feasibility?: number;
+  risk_notes?: string[];
+  evidence_refs?: EvidenceRef[];
+};
+
+export type PathDigest = {
+  path_hash_sha256: string;
+  content_sha256?: string;
+  kind?: string;
+  language?: string;
+  entrypoint?: boolean;
+};
+
+export type RequirementBrief = {
+  id: string;
+  project_id?: string;
+  schema_version?: string;
+  scenario?: string;
+  target_audience?: string;
+  objective?: string;
+  primary_outcome?: string;
+  must_show?: string[];
+  must_not_show?: string[];
+  forbidden_pages?: string[];
+  forbidden_data?: string[];
+  use_cases?: DemoUseCase[];
+  required_assets?: AssetKind[];
+  brand_tone?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+};
+
+export type CodeUnderstandingSnapshot = {
+  id: string;
+  project_id?: string;
+  schema_version?: string;
+  repository_id?: string;
+  uri?: string;
+  branch?: string;
+  commit_sha?: string;
+  languages?: string[];
+  frameworks?: string[];
+  entrypoint_hashes?: string[];
+  routes?: RouteInsight[];
+  components?: ComponentInsight[];
+  selectors?: SelectorInsight[];
+  api_endpoints?: APIEndpointInsight[];
+  data_models?: DataModelInsight[];
+  sensitive_fields?: SensitiveFieldFinding[];
+  source_digest_sha256?: string;
+  file_count?: number;
+  path_digests?: PathDigest[];
+  evidence_refs?: EvidenceRef[];
+  summary?: string;
+  created_at?: string;
+};
+
+export type RouteInsight = {
+  id: string;
+  path: string;
+  name?: string;
+  source_path_hash_sha256?: string;
+  component_refs?: string[];
+  auth_required?: boolean;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type ComponentInsight = {
+  id: string;
+  name: string;
+  kind?: string;
+  file_path_hash_sha256?: string;
+  selector_hints?: string[];
+  action_labels?: string[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type SelectorInsight = {
+  kind: string;
+  value: string;
+  file_path_hash_sha256?: string;
+  stability_score?: number;
+  confidence?: number;
+  evidence_refs?: EvidenceRef[];
+};
+
+export type APIEndpointInsight = {
+  id: string;
+  method?: string;
+  path: string;
+  file_path_hash_sha256?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type DataModelInsight = {
+  id: string;
+  name: string;
+  kind?: string;
+  fields?: DataField[];
+  source_path_hash_sha256?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type SensitiveFieldFinding = {
+  name: string;
+  kind?: string;
+  reason?: string;
+  evidence_refs?: EvidenceRef[];
+};
+
+export type PageUnderstandingSnapshot = {
+  id: string;
+  project_id?: string;
+  schema_version?: string;
+  url?: string;
+  title?: string;
+  page_role?: string;
+  screenshot_ref?: ArtifactRef;
+  ocr_text?: string;
+  vision_summary?: string;
+  actions?: PageActionInsight[];
+  stable_selectors?: SelectorCandidate[];
+  states?: string[];
+  risk_findings?: AgentFinding[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  captured_at?: string;
+  created_at?: string;
+};
+
+export type PageActionInsight = {
+  id: string;
+  label?: string;
+  kind?: string;
+  selector_hint?: string;
+  target_url?: string;
+  feature_ref?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type MultimodalUnderstandingReport = {
+  id: string;
+  project_id: string;
+  schema_version: "demoops.multimodal_understanding_report.v1";
+  requirement_brief?: RequirementBrief;
+  code_snapshots?: CodeUnderstandingSnapshot[];
+  page_snapshots?: PageUnderstandingSnapshot[];
+  summary?: string;
+  feature_hypotheses?: Feature[];
+  workflow_candidates?: WorkflowCandidate[];
+  input_fingerprints?: Record<string, string>;
+  source_digest_sha256?: string;
+  evidence_refs?: EvidenceRef[];
+  safety_report?: SafetyReport;
+  confidence?: number;
+  created_at?: string;
+};
+
+export type AgentFinding = {
+  id: string;
+  kind: string;
+  severity: "info" | "warning" | "blocking";
+  title?: string;
+  summary: string;
+  rationale?: string;
+  suggested_action?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type SafetyReport = {
+  allowed_to_proceed: boolean;
+  policy_findings?: AgentFinding[];
+  masked_fields?: string[];
+  notes?: string[];
+};
+
+export type RecordingRunSpec = {
+  run_id?: string;
+  base_url: string;
+  allowed_domains: string[];
+  required_ip_allowlist?: string[];
+  auth_flow_ref?: string;
+  timezone?: string;
+  locale?: string;
+  browser: BrowserRunSpec;
+  timeline: RecordingTimeline;
+  outputs: RecordingOutputRequest;
+  redactions: RedactionPolicy;
+  failure_policy: RecordingFailurePolicy;
+  environment?: Record<string, string>;
+};
+
+export type BrowserRunSpec = {
+  engine: string;
+  version_policy?: string;
+  headless: boolean;
+  viewports?: ViewportSpec[];
+};
+
+export type RecordingTimeline = {
+  target_duration_sec: number;
+  max_duration_sec?: number;
+  capture_windows?: CaptureWindow[];
+  node_timing_hints?: NodeTimingHint[];
+};
+
+export type CaptureWindow = {
+  id: string;
+  node_id?: string;
+  start_ms: number;
+  duration_ms: number;
+  role?: string;
+};
+
+export type NodeTimingHint = {
+  node_id: string;
+  duration_ms?: number;
+  hold_after_ms?: number;
+};
+
+export type RecordingOutputRequest = {
+  raw_recording: boolean;
+  final_video: boolean;
+  screenshot_pack: boolean;
+  step_by_step_docs: boolean;
+  trace: boolean;
+  output_formats?: string[];
+  resolution_width?: number;
+  resolution_height?: number;
+};
+
+export type RedactionPolicy = {
+  mask_selectors?: string[];
+  text_patterns?: string[];
+  video_mask_policy?: string;
+  screenshot_mask_policy?: string;
+  redactions?: RedactionSpec[];
+};
+
+export type RecordingFailurePolicy = {
+  retry_attempts?: number;
+  selector_repair_allowed: boolean;
+  data_repair_allowed: boolean;
+  max_repair_attempts?: number;
+  human_escalation_conditions?: string[];
+};
+
+export type ReproducibilitySpec = {
+  graph_hash_sha256: string;
+  package_hash_sha256?: string;
+  script_hash_sha256?: string;
+  input_fingerprints?: Record<string, string>;
+  browser_runtime_pins?: Record<string, string>;
+  source_snapshot_digest?: string;
+  deterministic_seed?: string;
+  created_with_app_version?: string;
+};
+
+export type ExecutionScriptDocument = {
+  id: string;
+  project_id: string;
+  workflow_graph_id: string;
+  graph_version: number;
+  schema_version: "demoops.execution_script_document.v1";
+  status?: "draft" | "review_ready" | "approved";
+  title?: string;
+  summary?: string;
+  language?: string;
+  workflow_graph?: DemoWorkflowGraph;
+  recording_run_spec: RecordingRunSpec;
+  steps: ScriptStep[];
+  safety_policy: ScriptSafetyPolicy;
+  reproducibility: ReproducibilitySpec;
+  approval_checklist: ScriptApprovalChecklist;
+  evidence_refs?: EvidenceRef[];
+  markdown_artifact?: ArtifactRef;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type ScriptStep = {
+  id: string;
+  order: number;
+  node_id: string;
+  title?: string;
+  business_value?: string;
+  page_target: ScriptPageTarget;
+  action: ScriptActionInstruction;
+  expected_outcome: string;
+  validations: ValidationSpec[];
+  capture: CaptureSpec;
+  timing: NodeTimingHint;
+  narrative: NarrativeCue;
+  evidence_refs?: EvidenceRef[];
+  blocking: boolean;
+};
+
+export type ScriptPageTarget = {
+  url?: string;
+  selector?: string;
+  selector_alternatives?: SelectorCandidate[];
+  page_ref?: string;
+};
+
+export type ScriptActionInstruction = {
+  type: GraphActionType;
+  target: ActionTarget;
+  value?: string;
+  input_ref?: string;
+  secret_ref?: string;
+  parameters?: Record<string, unknown>;
+  timeout_ms?: number;
+  wait_until?: string;
+  preconditions?: StateAssertion[];
+};
+
+export type ScriptSafetyPolicy = {
+  allowed_domains?: string[];
+  forbidden_pages?: string[];
+  forbidden_data?: string[];
+  redactions: RedactionPolicy;
+  pii_handling?: string;
+};
+
+export type ScriptApprovalChecklist = {
+  human_approval_required: boolean;
+  source_summary_only: boolean;
+  credential_scope_review_required: boolean;
+  redactions_review_required: boolean;
+  ip_allowlist_acknowledgement_required: boolean;
+  blocking_reasons?: string[];
+};

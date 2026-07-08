@@ -47,6 +47,21 @@ func (b *DesktopBridge) GetWorkflowGraph(projectID string) BridgeResponse {
 	return bridgeValue(graph, err)
 }
 
+func (b *DesktopBridge) GetUnderstandingReport(projectID string) BridgeResponse {
+	report, err := b.service.GetUnderstandingReport(context.Background(), projectID)
+	return bridgeValue(report, err)
+}
+
+func (b *DesktopBridge) GetExecutionScriptDocument(projectID string) BridgeResponse {
+	document, err := b.service.GetExecutionScriptDocument(context.Background(), projectID)
+	return bridgeValue(document, err)
+}
+
+func (b *DesktopBridge) GetExecutionScriptMarkdown(projectID string) BridgeResponse {
+	markdown, artifact, err := b.service.GetExecutionScriptMarkdown(context.Background(), projectID)
+	return bridgeValue(map[string]any{"markdown": markdown, "artifact": artifact}, err)
+}
+
 func (b *DesktopBridge) ApproveWorkflowGraph(projectID string, graph *model.DemoWorkflowGraph) BridgeResponse {
 	state, err := b.service.ApproveWorkflowGraph(context.Background(), projectID, graph)
 	return bridgeValue(state, err)

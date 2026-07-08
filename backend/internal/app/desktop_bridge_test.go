@@ -28,6 +28,32 @@ func TestDesktopBridgeReturnsJSONSafeResponses(t *testing.T) {
 	if state.WorkflowGraph == nil {
 		t.Fatal("expected workflow graph in bridge response")
 	}
+	if state.UnderstandingReport == nil || state.ScriptDocument == nil || state.ScriptMarkdown == "" {
+		t.Fatal("expected understanding report and script document in bridge response")
+	}
+	reportResponse := bridge.GetUnderstandingReport(state.ProjectID)
+	if !reportResponse.OK {
+		t.Fatalf("GetUnderstandingReport error: %s", reportResponse.Error)
+	}
+	var report model.MultimodalUnderstandingReport
+	if err := json.Unmarshal(reportResponse.Data, &report); err != nil {
+		t.Fatalf("understanding report response is not JSON-safe: %v", err)
+	}
+	scriptResponse := bridge.GetExecutionScriptDocument(state.ProjectID)
+	if !scriptResponse.OK {
+		t.Fatalf("GetExecutionScriptDocument error: %s", scriptResponse.Error)
+	}
+	var script model.ExecutionScriptDocument
+	if err := json.Unmarshal(scriptResponse.Data, &script); err != nil {
+		t.Fatalf("script document response is not JSON-safe: %v", err)
+	}
+	markdownResponse := bridge.GetExecutionScriptMarkdown(state.ProjectID)
+	if !markdownResponse.OK {
+		t.Fatalf("GetExecutionScriptMarkdown error: %s", markdownResponse.Error)
+	}
+	if !strings.Contains(string(markdownResponse.Data), "执行步骤") {
+		t.Fatalf("expected markdown preview in bridge response: %s", markdownResponse.Data)
+	}
 }
 
 func TestDesktopBridgeArtifactURIResponseIsJSONSafe(t *testing.T) {
