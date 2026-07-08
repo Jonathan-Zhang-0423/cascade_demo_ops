@@ -12,7 +12,10 @@
     "build:worker": "pnpm --filter @cascade/video-worker build",
     "dev:web": "pnpm --filter @cascade/web dev",
     "build:web": "pnpm --filter @cascade/web build",
-    "test:web": "pnpm --filter @cascade/web test"
+    "test:web": "pnpm --filter @cascade/web test",
+    "build:desktop:win": "node scripts/build-desktop.mjs windows",
+    "build:desktop:mac": "node scripts/build-desktop.mjs darwin",
+    "package:desktop": "node scripts/package-desktop.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
