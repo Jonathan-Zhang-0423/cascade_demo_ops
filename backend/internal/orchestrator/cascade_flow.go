@@ -50,26 +50,29 @@ type GeneratedArtifacts struct {
 }
 
 type UserInput struct {
-	Mode                   model.AppMode `json:"mode"`
-	ProductURL             string        `json:"product_url"`
-	GitRepoURL             string        `json:"git_repo_url,omitempty"`
-	LocalRepoPath          string        `json:"local_repo_path,omitempty"`
-	ProductDescription     string        `json:"product_description,omitempty"`
-	TargetAudience         string        `json:"target_audience"`
-	BrandTone              string        `json:"brand_tone,omitempty"`
-	MustShow               []string      `json:"must_show,omitempty"`
-	MustNotShow            []string      `json:"must_not_show,omitempty"`
-	ForbiddenPages         []string      `json:"forbidden_pages,omitempty"`
-	ForbiddenData          []string      `json:"forbidden_data,omitempty"`
-	DemoUsername           string        `json:"demo_username,omitempty"`
-	DemoPassword           string        `json:"demo_password,omitempty"`
-	SSHHost                string        `json:"ssh_host,omitempty"`
-	SSHPort                int           `json:"ssh_port,omitempty"`
-	SSHUsername            string        `json:"ssh_username,omitempty"`
-	SSHPrivateKeySecretRef string        `json:"ssh_private_key_secret_ref,omitempty"`
-	SSHPasswordSecretRef   string        `json:"ssh_password_secret_ref,omitempty"`
-	SSHAllowedPaths        []string      `json:"ssh_allowed_paths,omitempty"`
-	SSHAllowedCommands     []string      `json:"ssh_allowed_commands,omitempty"`
+	Mode                   model.AppMode                    `json:"mode"`
+	ProductURL             string                           `json:"product_url"`
+	GitRepoURL             string                           `json:"git_repo_url,omitempty"`
+	LocalRepoPath          string                           `json:"local_repo_path,omitempty"`
+	ProductDescription     string                           `json:"product_description,omitempty"`
+	Code                   []model.CodeInput                `json:"code,omitempty"`
+	RequirementDocuments   []model.RequirementDocumentInput `json:"requirement_documents,omitempty"`
+	WebpageScreenshots     []model.WebpageScreenshotInput   `json:"webpage_screenshots,omitempty"`
+	TargetAudience         string                           `json:"target_audience"`
+	BrandTone              string                           `json:"brand_tone,omitempty"`
+	MustShow               []string                         `json:"must_show,omitempty"`
+	MustNotShow            []string                         `json:"must_not_show,omitempty"`
+	ForbiddenPages         []string                         `json:"forbidden_pages,omitempty"`
+	ForbiddenData          []string                         `json:"forbidden_data,omitempty"`
+	DemoUsername           string                           `json:"demo_username,omitempty"`
+	DemoPassword           string                           `json:"demo_password,omitempty"`
+	SSHHost                string                           `json:"ssh_host,omitempty"`
+	SSHPort                int                              `json:"ssh_port,omitempty"`
+	SSHUsername            string                           `json:"ssh_username,omitempty"`
+	SSHPrivateKeySecretRef string                           `json:"ssh_private_key_secret_ref,omitempty"`
+	SSHPasswordSecretRef   string                           `json:"ssh_password_secret_ref,omitempty"`
+	SSHAllowedPaths        []string                         `json:"ssh_allowed_paths,omitempty"`
+	SSHAllowedCommands     []string                         `json:"ssh_allowed_commands,omitempty"`
 }
 
 type RehearsalResult struct {

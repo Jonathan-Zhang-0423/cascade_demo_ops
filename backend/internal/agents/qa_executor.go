@@ -25,7 +25,7 @@ func (a *QAExecutorAgent) ExecuteAndRehearse(ctx context.Context, graph *model.D
 func screenshotRefs(graph *model.DemoWorkflowGraph) []string {
 	refs := make([]string, 0)
 	for _, node := range graph.Nodes {
-		if node.IsScreenshot {
+		if node.IsScreenshot || (node.Capture != nil && node.Capture.Screenshot) {
 			refs = append(refs, "screenshots/"+node.ID+".png")
 		}
 	}
