@@ -28,8 +28,8 @@ func TestDesktopBridgeReturnsJSONSafeResponses(t *testing.T) {
 	if state.WorkflowGraph == nil {
 		t.Fatal("expected workflow graph in bridge response")
 	}
-	if state.UnderstandingReport == nil || state.ScriptDocument == nil || state.ScriptMarkdown == "" {
-		t.Fatal("expected understanding report and script document in bridge response")
+	if state.UnderstandingReport == nil || state.ScriptDocument == nil || state.ScriptMarkdown == "" || state.ExecutableScriptBundle == nil {
+		t.Fatal("expected understanding report, script document, and executable bundle in bridge response")
 	}
 	reportResponse := bridge.GetUnderstandingReport(state.ProjectID)
 	if !reportResponse.OK {
@@ -53,6 +53,17 @@ func TestDesktopBridgeReturnsJSONSafeResponses(t *testing.T) {
 	}
 	if !strings.Contains(string(markdownResponse.Data), "执行步骤") {
 		t.Fatalf("expected markdown preview in bridge response: %s", markdownResponse.Data)
+	}
+	bundleResponse := bridge.GetExecutableScriptBundle(state.ProjectID)
+	if !bundleResponse.OK {
+		t.Fatalf("GetExecutableScriptBundle error: %s", bundleResponse.Error)
+	}
+	var bundle model.ExecutableRecordingScriptBundle
+	if err := json.Unmarshal(bundleResponse.Data, &bundle); err != nil {
+		t.Fatalf("bundle response is not JSON-safe: %v", err)
+	}
+	if bundle.PlaywrightScript.InlineSource == "" || bundle.Reproducibility.ScriptHashSHA256 == "" {
+		t.Fatalf("expected executable script and hashes in bundle: %+v", bundle)
 	}
 }
 

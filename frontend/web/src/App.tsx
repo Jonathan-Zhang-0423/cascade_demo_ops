@@ -405,6 +405,7 @@ function PackageApproval({
   function toggle(key: keyof ApprovalChecklistState) {
     onChecklistChange({ ...checklist, [key]: !checklist[key] });
   }
+  const bundle = workspace.executableScriptBundle;
 
   return (
     <div className="section-stack">
@@ -413,6 +414,9 @@ function PackageApproval({
         <div className="package-facts">
           <Fact label="执行包摘要" value={workspace.packagePreview.packageDigest} />
           <Fact label="流程图摘要" value={workspace.packagePreview.graphDigest} />
+          <Fact label="Plan Hash" value={bundle?.reproducibility.plan_hash_sha256 ?? "待生成"} />
+          <Fact label="Script Hash" value={bundle?.reproducibility.script_hash_sha256 ?? "待生成"} />
+          <Fact label="Bundle Hash" value={bundle?.reproducibility.bundle_hash_sha256 ?? "待生成"} />
           <Fact label="上传模式" value={workspace.packagePreview.sourceSummaryOnly ? "仅结构摘要" : "已阻塞"} />
           <Fact label="加密状态" value={workspace.packagePreview.encrypted ? "已启用" : "缺失"} />
         </div>
@@ -433,6 +437,7 @@ function PackageApproval({
           ))}
         </div>
       </div>
+      <ScriptBundleReview workspace={workspace} />
       <section className="table-section">
         <SectionTitle title="凭据授权" meta={`${workspace.packagePreview.credentialGrants.length} 项授权`} />
         <table>
@@ -473,6 +478,36 @@ function PackageApproval({
           模拟完成
         </button>
       </div>
+    </div>
+  );
+}
+
+function ScriptBundleReview({ workspace }: { workspace: ProjectWorkspaceView }) {
+  const bundle = workspace.executableScriptBundle;
+  const plan = bundle?.plan_json ?? workspace.scriptDocument;
+  const markdown = bundle?.approval_markdown.inline_markdown ?? workspace.scriptMarkdown ?? "执行包生成后展示中文思路文档。";
+  const source = bundle?.playwright_script.inline_source ?? "执行包生成后展示受限 TypeScript 脚本。";
+  const planJSON = plan ? JSON.stringify(plan, null, 2) : "执行包生成后展示 JSON 执行计划。";
+  return (
+    <section className="script-review-section">
+      <SectionTitle title="脚本包审批内容" meta={bundle?.schema_version ?? "待生成"} />
+      <div className="script-review-grid">
+        <ReviewPanel title="思路文档" meta="默认审批视图" content={markdown} />
+        <ReviewPanel title="执行计划 JSON" meta={plan?.schema_version ?? "未生成"} content={planJSON} />
+        <ReviewPanel title="可执行 TS 脚本" meta={bundle?.script_manifest.entry_function ?? "runCascadeRecording"} content={source} />
+      </div>
+    </section>
+  );
+}
+
+function ReviewPanel({ title, meta, content }: { title: string; meta: string; content: string }) {
+  return (
+    <div className="review-panel">
+      <div className="review-panel-header">
+        <strong>{title}</strong>
+        <span>{meta}</span>
+      </div>
+      <pre>{content}</pre>
     </div>
   );
 }

@@ -1,11 +1,12 @@
 import readline from "node:readline";
 import { record } from "./recorder.js";
 import { render } from "./renderer.js";
+import { executeScript, validateScript } from "./script-runner.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
   id: number | string;
-  method: "health" | "record" | "render";
+  method: "health" | "record" | "render" | "validate_script" | "execute_script";
   params?: unknown;
 };
 
@@ -39,6 +40,12 @@ async function dispatch(request: JsonRpcRequest): Promise<unknown> {
   }
   if (request.method === "render") {
     return render(request.params as never);
+  }
+  if (request.method === "validate_script") {
+    return validateScript(request.params as never);
+  }
+  if (request.method === "execute_script") {
+    return executeScript(request.params as never);
   }
   throw new Error(`unknown method: ${request.method}`);
 }

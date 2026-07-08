@@ -88,9 +88,10 @@ type ScriptApprovalChecklist struct {
 }
 
 type ScriptDocumentPackage struct {
-	Document         *ExecutionScriptDocument `json:"document"`
-	Markdown         string                   `json:"markdown,omitempty"`
-	MarkdownArtifact *ArtifactRef             `json:"markdown_artifact,omitempty"`
+	Document         *ExecutionScriptDocument         `json:"document"`
+	Markdown         string                           `json:"markdown,omitempty"`
+	MarkdownArtifact *ArtifactRef                     `json:"markdown_artifact,omitempty"`
+	ExecutableBundle *ExecutableRecordingScriptBundle `json:"executable_bundle,omitempty"`
 }
 
 func (d *ExecutionScriptDocument) ComputeScriptHash() (string, error) {

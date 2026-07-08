@@ -455,6 +455,74 @@ tbody tr:hover,
   font-size: 13px;
 }
 
+.script-review-section {
+  border: 1px solid #d6dde3;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.script-review-section .section-title {
+  padding: 12px 14px;
+  border-bottom: 1px solid #e1e6ea;
+  background: #fbfcfd;
+}
+
+.script-review-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.review-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 420px;
+  border: 1px solid #d6dde3;
+  border-radius: 8px;
+  background: #fbfcfd;
+  overflow: hidden;
+}
+
+.review-panel-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 10px;
+  border-bottom: 1px solid #e1e6ea;
+}
+
+.review-panel-header strong {
+  font-size: 13px;
+}
+
+.review-panel-header span {
+  color: #60717e;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-panel pre {
+  min-height: 0;
+  max-height: 520px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  color: #1f2c35;
+  background: #ffffff;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .blocked-list {
   display: grid;
   gap: 6px;

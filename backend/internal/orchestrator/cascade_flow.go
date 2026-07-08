@@ -36,24 +36,27 @@ const (
 )
 
 type CascadeState struct {
-	ProjectID              string                               `json:"project_id"`
-	CurrentNode            NodeName                             `json:"current_node"`
-	Status                 FlowStatus                           `json:"status"`
-	ProjectContext         *model.ProjectContext                `json:"project_context,omitempty"`
-	RequirementBrief       *model.RequirementBrief              `json:"requirement_brief,omitempty"`
-	CodeSnapshots          []model.CodeUnderstandingSnapshot    `json:"code_snapshots,omitempty"`
-	PageSnapshots          []model.PageUnderstandingSnapshot    `json:"page_snapshots,omitempty"`
-	UnderstandingReport    *model.MultimodalUnderstandingReport `json:"understanding_report,omitempty"`
-	ProductMap             *model.ProductMap                    `json:"product_map,omitempty"`
-	WorkflowGraph          *model.DemoWorkflowGraph             `json:"workflow_graph,omitempty"`
-	ScriptDocument         *model.ExecutionScriptDocument       `json:"script_document,omitempty"`
-	ScriptMarkdown         string                               `json:"script_markdown,omitempty"`
-	ScriptMarkdownPath     string                               `json:"script_markdown_path,omitempty"`
-	ScriptMarkdownArtifact *model.ArtifactRef                   `json:"script_markdown_artifact,omitempty"`
-	Approved               bool                                 `json:"approved"`
-	RehearsePassRate       float64                              `json:"rehearse_pass_rate"`
-	Artifacts              *GeneratedArtifacts                  `json:"artifacts,omitempty"`
-	ErrorMessage           string                               `json:"error_message,omitempty"`
+	ProjectID                string                                 `json:"project_id"`
+	CurrentNode              NodeName                               `json:"current_node"`
+	Status                   FlowStatus                             `json:"status"`
+	ProjectContext           *model.ProjectContext                  `json:"project_context,omitempty"`
+	RequirementBrief         *model.RequirementBrief                `json:"requirement_brief,omitempty"`
+	CodeSnapshots            []model.CodeUnderstandingSnapshot      `json:"code_snapshots,omitempty"`
+	PageSnapshots            []model.PageUnderstandingSnapshot      `json:"page_snapshots,omitempty"`
+	UnderstandingReport      *model.MultimodalUnderstandingReport   `json:"understanding_report,omitempty"`
+	ProductMap               *model.ProductMap                      `json:"product_map,omitempty"`
+	WorkflowGraph            *model.DemoWorkflowGraph               `json:"workflow_graph,omitempty"`
+	ScriptDocument           *model.ExecutionScriptDocument         `json:"script_document,omitempty"`
+	ScriptMarkdown           string                                 `json:"script_markdown,omitempty"`
+	ScriptMarkdownPath       string                                 `json:"script_markdown_path,omitempty"`
+	ScriptMarkdownArtifact   *model.ArtifactRef                     `json:"script_markdown_artifact,omitempty"`
+	ExecutableScriptBundle   *model.ExecutableRecordingScriptBundle `json:"executable_script_bundle,omitempty"`
+	ExecutableScriptArtifact *model.ArtifactRef                     `json:"executable_script_artifact,omitempty"`
+	ApprovalMarkdownArtifact *model.ArtifactRef                     `json:"approval_markdown_artifact,omitempty"`
+	Approved                 bool                                   `json:"approved"`
+	RehearsePassRate         float64                                `json:"rehearse_pass_rate"`
+	Artifacts                *GeneratedArtifacts                    `json:"artifacts,omitempty"`
+	ErrorMessage             string                                 `json:"error_message,omitempty"`
 }
 
 type GeneratedArtifacts struct {
@@ -252,6 +255,11 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 	state.ScriptMarkdownArtifact = scriptPackage.MarkdownArtifact
 	if scriptPackage.MarkdownArtifact != nil {
 		state.ScriptMarkdownPath = scriptPackage.MarkdownArtifact.URI
+	}
+	state.ExecutableScriptBundle = scriptPackage.ExecutableBundle
+	if scriptPackage.ExecutableBundle != nil {
+		state.ExecutableScriptArtifact = scriptPackage.ExecutableBundle.PlaywrightScript.Artifact
+		state.ApprovalMarkdownArtifact = scriptPackage.ExecutableBundle.ApprovalMarkdown.Artifact
 	}
 
 	state.CurrentNode = NodeHumanApprove

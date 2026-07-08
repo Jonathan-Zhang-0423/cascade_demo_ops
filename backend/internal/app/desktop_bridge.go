@@ -62,6 +62,11 @@ func (b *DesktopBridge) GetExecutionScriptMarkdown(projectID string) BridgeRespo
 	return bridgeValue(map[string]any{"markdown": markdown, "artifact": artifact}, err)
 }
 
+func (b *DesktopBridge) GetExecutableScriptBundle(projectID string) BridgeResponse {
+	bundle, err := b.service.GetExecutableScriptBundle(context.Background(), projectID)
+	return bridgeValue(bundle, err)
+}
+
 func (b *DesktopBridge) ApproveWorkflowGraph(projectID string, graph *model.DemoWorkflowGraph) BridgeResponse {
 	state, err := b.service.ApproveWorkflowGraph(context.Background(), projectID, graph)
 	return bridgeValue(state, err)

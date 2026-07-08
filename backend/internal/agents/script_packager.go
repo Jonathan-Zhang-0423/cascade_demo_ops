@@ -91,11 +91,118 @@ func (a *ScriptPackagerAgent) PackageScript(
 		CreatedAt: now,
 		Sensitive: false,
 	}
+	bundle, err := buildExecutableScriptBundle(project, report, graph, doc, markdown, now)
+	if err != nil {
+		return nil, err
+	}
 	return &model.ScriptDocumentPackage{
 		Document:         doc,
 		Markdown:         markdown,
 		MarkdownArtifact: doc.MarkdownArtifact,
+		ExecutableBundle: bundle,
 	}, nil
+}
+
+func buildExecutableScriptBundle(
+	project *model.ProjectContext,
+	report *model.MultimodalUnderstandingReport,
+	graph *model.DemoWorkflowGraph,
+	doc *model.ExecutionScriptDocument,
+	markdown string,
+	now time.Time,
+) (*model.ExecutableRecordingScriptBundle, error) {
+	source, err := NewScriptCodeGenerator().Generate(doc)
+	if err != nil {
+		return nil, err
+	}
+	planHash, err := doc.ComputeScriptHash()
+	if err != nil {
+		return nil, err
+	}
+	scriptHash := hashString(source)
+	markdownHash := hashString(markdown)
+	bundle := &model.ExecutableRecordingScriptBundle{
+		ID:              "bundle_" + doc.ID,
+		ProjectID:       project.ID,
+		WorkflowGraphID: graph.ID,
+		SchemaVersion:   model.ExecutableRecordingScriptBundleSchemaVersion,
+		Status:          model.ExecutableScriptBundleStatusReviewReady,
+		ScriptManifest: model.ExecutableScriptManifest{
+			ScriptID:            "recording_" + graph.ID,
+			Version:             1,
+			Language:            "typescript",
+			Runtime:             "playwright-restricted-sandbox",
+			EntryFunction:       "runCascadeRecording",
+			Generator:           scriptCodeGeneratorName,
+			GeneratorVersion:    scriptCodeGeneratorVersion,
+			DependencyAllowlist: []string{},
+			ContextAPIs:         []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"},
+			StepNodeIDs:         scriptStepNodeIDs(doc),
+		},
+		PlanJSON: doc,
+		PlaywrightScript: model.ExecutableScriptSource{
+			InlineSource: source,
+			Artifact: &model.ArtifactRef{
+				ID:        "artifact_" + doc.ID + "_playwright_ts",
+				Kind:      "playwright_recording_script",
+				URI:       "cascade://projects/" + project.ID + "/scripts/" + doc.ID + ".ts",
+				MimeType:  "text/typescript",
+				Label:     doc.Title + " 可执行脚本",
+				SHA256:    scriptHash,
+				SizeBytes: int64(len([]byte(source))),
+				CreatedAt: now,
+				Sensitive: false,
+			},
+			MimeType:  "text/typescript",
+			SHA256:    scriptHash,
+			SizeBytes: int64(len([]byte(source))),
+			Encrypted: false,
+		},
+		ApprovalMarkdown: model.ApprovalMarkdownDocument{
+			InlineMarkdown: markdown,
+			Artifact:       doc.MarkdownArtifact,
+			MimeType:       "text/markdown",
+			SHA256:         markdownHash,
+			SizeBytes:      int64(len([]byte(markdown))),
+		},
+		SecurityPolicy: model.ExecutableScriptSecurityPolicy{
+			AllowedDomains:       append([]string{}, doc.SafetyPolicy.AllowedDomains...),
+			ForbiddenPages:       append([]string{}, doc.SafetyPolicy.ForbiddenPages...),
+			ForbiddenData:        append([]string{}, doc.SafetyPolicy.ForbiddenData...),
+			Redactions:           doc.SafetyPolicy.Redactions,
+			SecretRefs:           scriptSecretRefs(doc),
+			AllowedContextAPIs:   []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"},
+			AllowedPageMethods:   []string{"goto", "click", "fill", "selectOption", "setInputFiles", "waitForTimeout", "waitForLoadState", "locator"},
+			ForbiddenImports:     []string{"fs", "node:fs", "child_process", "node:child_process", "http", "https", "net", "tls"},
+			ForbiddenIdentifiers: []string{"import", "require", "eval", "Function", "process", "global", "globalThis", "window", "document", "fetch", "XMLHttpRequest", "WebSocket"},
+			NetworkPolicy:        "allowed_domains_only_via_ctx_page",
+			FileSystemPolicy:     "no_direct_fs_access",
+		},
+		Reproducibility: model.ExecutableScriptReproducibility{
+			PlanHashSHA256:       planHash,
+			ScriptHashSHA256:     scriptHash,
+			MarkdownHashSHA256:   markdownHash,
+			GraphHashSHA256:      doc.Reproducibility.GraphHashSHA256,
+			SourceSnapshotDigest: reportSourceDigest(report),
+			GeneratorVersion:     scriptCodeGeneratorVersion,
+			DeterministicSeed:    doc.Reproducibility.DeterministicSeed,
+			InputFingerprints:    reportInputFingerprints(report),
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	bundleHash, err := bundle.ComputeBundleHash()
+	if err != nil {
+		return nil, err
+	}
+	bundle.Reproducibility.BundleHashSHA256 = bundleHash
+	validation := NewScriptBundleValidator().ValidateBundle(bundle)
+	bundle.Validation = &validation
+	if !validation.Valid {
+		bundle.Status = model.ExecutableScriptBundleStatusRejected
+		return nil, ensureValidBundle(bundle)
+	}
+	return bundle, nil
 }
 
 func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
@@ -145,6 +252,44 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 		_ = elapsedMS
 	}
 	return steps
+}
+
+func scriptStepNodeIDs(doc *model.ExecutionScriptDocument) []string {
+	if doc == nil {
+		return []string{}
+	}
+	nodeIDs := make([]string, 0, len(doc.Steps))
+	for _, step := range doc.Steps {
+		nodeIDs = append(nodeIDs, step.NodeID)
+	}
+	return nodeIDs
+}
+
+func scriptSecretRefs(doc *model.ExecutionScriptDocument) []string {
+	if doc == nil {
+		return []string{}
+	}
+	refs := []string{}
+	for _, step := range doc.Steps {
+		if step.Action.SecretRef != "" {
+			refs = append(refs, step.Action.SecretRef)
+		}
+	}
+	if doc.WorkflowGraph != nil {
+		for _, variable := range doc.WorkflowGraph.Variables {
+			if variable.SecretRef != "" {
+				refs = append(refs, variable.SecretRef)
+			}
+		}
+		for _, record := range doc.WorkflowGraph.TestData {
+			for _, ref := range record.SecretRefs {
+				if ref != "" {
+					refs = append(refs, ref)
+				}
+			}
+		}
+	}
+	return uniqueStrings(refs)
 }
 
 func recordingRunSpecFromGraph(project *model.ProjectContext, graph *model.DemoWorkflowGraph) model.RecordingRunSpec {
@@ -417,18 +562,45 @@ func renderScriptMarkdown(doc *model.ExecutionScriptDocument, productMap *model.
 	builder.WriteString("# " + firstNonEmpty(doc.Title, "演示执行脚本文档") + "\n\n")
 	builder.WriteString("## 摘要\n\n")
 	builder.WriteString(doc.Summary + "\n\n")
+	builder.WriteString("## 演示目标\n\n")
+	if doc.WorkflowGraph != nil && doc.WorkflowGraph.Intent != nil {
+		builder.WriteString("- 目标：" + firstNonEmpty(doc.WorkflowGraph.Intent.Objective, doc.Summary) + "\n")
+		builder.WriteString("- 受众：" + firstNonEmpty(audienceName(doc.WorkflowGraph.Intent.Audience), "中国客户") + "\n")
+		builder.WriteString("- 价值主张：" + firstNonEmpty(doc.WorkflowGraph.Intent.ValueProposition, "展示产品核心路径和可验证结果") + "\n\n")
+	} else {
+		builder.WriteString("- 目标：" + doc.Summary + "\n")
+		builder.WriteString("- 受众：中国客户\n\n")
+	}
+	builder.WriteString("## 生成依据\n\n")
 	if productMap != nil && productMap.Summary != "" {
 		builder.WriteString("- 产品理解：" + productMap.Summary + "\n")
 	}
+	builder.WriteString("- 需求、代码结构摘要、页面/截图证据已融合为可审计计划。\n")
+	builder.WriteString("- 本地代码只用于生成结构摘要和稳定选择器，不上传完整源码。\n")
 	builder.WriteString("- Graph 摘要：" + doc.Reproducibility.GraphHashSHA256 + "\n")
-	builder.WriteString("- Script 摘要：" + doc.Reproducibility.ScriptHashSHA256 + "\n")
-	builder.WriteString("- 目标时长：" + fmt.Sprintf("%d 秒\n\n", doc.RecordingRunSpec.Timeline.TargetDurationSec))
+	builder.WriteString("- Plan 摘要：" + doc.Reproducibility.ScriptHashSHA256 + "\n\n")
 
 	builder.WriteString("## 安全策略\n\n")
 	builder.WriteString("- 允许域名：" + strings.Join(doc.SafetyPolicy.AllowedDomains, ", ") + "\n")
 	builder.WriteString("- 禁止页面：" + strings.Join(doc.SafetyPolicy.ForbiddenPages, ", ") + "\n")
 	builder.WriteString("- 禁止数据：" + strings.Join(doc.SafetyPolicy.ForbiddenData, ", ") + "\n")
 	builder.WriteString("- 打码选择器：" + strings.Join(doc.SafetyPolicy.Redactions.MaskSelectors, ", ") + "\n\n")
+
+	builder.WriteString("## 录制策略\n\n")
+	builder.WriteString("- 目标时长：" + fmt.Sprintf("%d 秒\n", doc.RecordingRunSpec.Timeline.TargetDurationSec))
+	builder.WriteString("- 浏览器：" + firstNonEmpty(doc.RecordingRunSpec.Browser.Engine, "chromium") + " / " + firstNonEmpty(doc.RecordingRunSpec.Browser.VersionPolicy, "stable-pinned") + "\n")
+	builder.WriteString("- 语言与时区：" + firstNonEmpty(doc.RecordingRunSpec.Locale, "zh-CN") + " / " + firstNonEmpty(doc.RecordingRunSpec.Timezone, "Asia/Shanghai") + "\n")
+	builder.WriteString("- 输出资产：" + outputSummary(doc.RecordingRunSpec.Outputs) + "\n\n")
+
+	builder.WriteString("## 凭据与云端边界\n\n")
+	if len(scriptSecretRefs(doc)) > 0 {
+		builder.WriteString("- 凭据只通过 secret_ref 读取，不在脚本或文档中展示明文。\n")
+		builder.WriteString("- 凭据引用：" + strings.Join(scriptSecretRefs(doc), ", ") + "\n")
+	} else {
+		builder.WriteString("- 当前脚本未声明凭据引用。\n")
+	}
+	builder.WriteString("- 云端只允许在 allowed domains 内执行页面访问。\n")
+	builder.WriteString("- 云端执行前仍需校验 TS 脚本、JSON plan、hash、禁止 API 和打码策略。\n\n")
 
 	builder.WriteString("## 执行步骤\n\n")
 	for _, step := range doc.Steps {
@@ -446,6 +618,36 @@ func renderScriptMarkdown(doc *model.ExecutionScriptDocument, productMap *model.
 		builder.WriteString("- [ ] " + reason + "\n")
 	}
 	return builder.String()
+}
+
+func audienceName(audience *model.AudienceProfile) string {
+	if audience == nil {
+		return ""
+	}
+	return audience.Name
+}
+
+func outputSummary(outputs model.RecordingOutputRequest) string {
+	parts := []string{}
+	if outputs.RawRecording {
+		parts = append(parts, "原始录屏")
+	}
+	if outputs.FinalVideo {
+		parts = append(parts, "最终视频")
+	}
+	if outputs.StepByStepDocs {
+		parts = append(parts, "步骤文档")
+	}
+	if outputs.ScreenshotPack {
+		parts = append(parts, "截图包")
+	}
+	if outputs.Trace {
+		parts = append(parts, "执行轨迹")
+	}
+	if len(parts) == 0 {
+		return "仅验证执行"
+	}
+	return strings.Join(parts, " / ")
 }
 
 func captureSummary(capture model.CaptureSpec) string {

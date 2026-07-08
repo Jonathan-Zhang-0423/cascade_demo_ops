@@ -3,6 +3,7 @@ import type {
   DemoUseCase,
   DemoWorkflowGraph,
   EvidenceRef,
+  ExecutableRecordingScriptBundle,
   ExecutionScriptDocument,
   MultimodalUnderstandingReport,
   ProjectInputBundle,
@@ -118,6 +119,7 @@ export type ProjectWorkspaceView = {
   planReview: WorkflowPlanReviewView;
   scriptDocument?: ExecutionScriptDocument;
   scriptMarkdown?: string;
+  executableScriptBundle?: ExecutableRecordingScriptBundle;
   packagePreview: ExecutionPackagePreview;
   cloudRun: CloudRunStatusView;
   assets: AssetReviewView[];

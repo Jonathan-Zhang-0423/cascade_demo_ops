@@ -1001,3 +1001,84 @@ export type ScriptApprovalChecklist = {
   ip_allowlist_acknowledgement_required: boolean;
   blocking_reasons?: string[];
 };
+
+export type ExecutableScriptBundleStatus = "draft" | "review_ready" | "validated" | "rejected";
+
+export type ExecutableRecordingScriptBundle = {
+  id: string;
+  project_id: string;
+  workflow_graph_id: string;
+  schema_version: "demoops.executable_recording_script_bundle.v1";
+  status?: ExecutableScriptBundleStatus;
+  script_manifest: ExecutableScriptManifest;
+  plan_json: ExecutionScriptDocument;
+  playwright_script: ExecutableScriptSource;
+  approval_markdown: ApprovalMarkdownDocument;
+  security_policy: ExecutableScriptSecurityPolicy;
+  reproducibility: ExecutableScriptReproducibility;
+  validation?: ExecutableScriptValidation;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type ExecutableScriptManifest = {
+  script_id: string;
+  version: number;
+  language: string;
+  runtime: string;
+  entry_function: string;
+  generator: string;
+  generator_version: string;
+  dependency_allowlist?: string[];
+  context_apis?: string[];
+  step_node_ids: string[];
+};
+
+export type ExecutableScriptSource = {
+  inline_source?: string;
+  artifact?: ArtifactRef;
+  mime_type?: string;
+  sha256: string;
+  size_bytes?: number;
+  encrypted?: boolean;
+};
+
+export type ApprovalMarkdownDocument = {
+  inline_markdown?: string;
+  artifact?: ArtifactRef;
+  mime_type?: string;
+  sha256: string;
+  size_bytes?: number;
+};
+
+export type ExecutableScriptSecurityPolicy = {
+  allowed_domains?: string[];
+  forbidden_pages?: string[];
+  forbidden_data?: string[];
+  redactions: RedactionPolicy;
+  secret_refs?: string[];
+  allowed_context_apis?: string[];
+  allowed_page_methods?: string[];
+  forbidden_imports?: string[];
+  forbidden_identifiers?: string[];
+  network_policy?: string;
+  file_system_policy?: string;
+};
+
+export type ExecutableScriptReproducibility = {
+  plan_hash_sha256: string;
+  script_hash_sha256: string;
+  markdown_hash_sha256: string;
+  bundle_hash_sha256?: string;
+  graph_hash_sha256?: string;
+  source_snapshot_digest?: string;
+  generator_version?: string;
+  deterministic_seed?: string;
+  input_fingerprints?: Record<string, string>;
+};
+
+export type ExecutableScriptValidation = {
+  valid: boolean;
+  findings?: AgentFinding[];
+  validated_at?: string;
+};

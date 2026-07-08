@@ -59,8 +59,8 @@ func TestMultimodalFlowPackagesReviewableScriptDocument(t *testing.T) {
 	if state.Status != orchestrator.FlowStatusAwaitingHuman || state.CurrentNode != orchestrator.NodeHumanApprove {
 		t.Fatalf("expected script flow to stop at HumanApprove, got node=%s status=%s", state.CurrentNode, state.Status)
 	}
-	if state.UnderstandingReport == nil || state.ProductMap == nil || state.WorkflowGraph == nil || state.ScriptDocument == nil {
-		t.Fatalf("expected understanding, product map, graph, and script document: %+v", state)
+	if state.UnderstandingReport == nil || state.ProductMap == nil || state.WorkflowGraph == nil || state.ScriptDocument == nil || state.ExecutableScriptBundle == nil {
+		t.Fatalf("expected understanding, product map, graph, script document, and executable bundle: %+v", state)
 	}
 	if strings.Contains(strings.ToLower(state.ProductMap.Summary), "placeholder") {
 		t.Fatalf("product map should not use placeholder summary: %s", state.ProductMap.Summary)
@@ -75,7 +75,17 @@ func TestMultimodalFlowPackagesReviewableScriptDocument(t *testing.T) {
 	if !strings.Contains(state.ScriptMarkdown, "## 执行步骤") || !strings.Contains(state.ScriptMarkdown, "## 审批清单") {
 		t.Fatalf("markdown preview missing required Chinese sections:\n%s", state.ScriptMarkdown)
 	}
+	if state.ExecutableScriptBundle.Validation == nil || !state.ExecutableScriptBundle.Validation.Valid {
+		t.Fatalf("expected valid executable script bundle: %+v", state.ExecutableScriptBundle.Validation)
+	}
+	if state.ExecutableScriptBundle.PlaywrightScript.InlineSource == "" || !strings.Contains(state.ExecutableScriptBundle.PlaywrightScript.InlineSource, "runCascadeRecording") {
+		t.Fatalf("expected executable TypeScript script: %+v", state.ExecutableScriptBundle.PlaywrightScript)
+	}
 	scriptJSON, err := json.Marshal(state.ScriptDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleJSON, err := json.Marshal(state.ExecutableScriptBundle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +96,9 @@ func TestMultimodalFlowPackagesReviewableScriptDocument(t *testing.T) {
 	for _, forbidden := range []string{"raw-password-123", "BEGIN PRIVATE KEY", "function submitPayment", "src/components/BillingForm.tsx"} {
 		if strings.Contains(string(scriptJSON), forbidden) {
 			t.Fatalf("script document leaked forbidden token %q: %s", forbidden, scriptJSON)
+		}
+		if strings.Contains(string(bundleJSON), forbidden) {
+			t.Fatalf("executable bundle leaked forbidden token %q: %s", forbidden, bundleJSON)
 		}
 		if strings.Contains(string(codeJSON), forbidden) {
 			t.Fatalf("code snapshot leaked forbidden token %q: %s", forbidden, codeJSON)

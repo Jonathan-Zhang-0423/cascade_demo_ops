@@ -124,6 +124,17 @@ func (s *Service) GetExecutionScriptMarkdown(ctx context.Context, projectID stri
 	return state.ScriptMarkdown, state.ScriptMarkdownArtifact, nil
 }
 
+func (s *Service) GetExecutableScriptBundle(ctx context.Context, projectID string) (*model.ExecutableRecordingScriptBundle, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.ExecutableScriptBundle == nil {
+		return nil, errors.New("executable script bundle is missing")
+	}
+	return state.ExecutableScriptBundle, nil
+}
+
 func (s *Service) ApproveWorkflowGraph(ctx context.Context, projectID string, graph *model.DemoWorkflowGraph) (*orchestrator.CascadeState, error) {
 	state, err := s.states.Load(ctx, projectID)
 	if err != nil {

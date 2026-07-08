@@ -32,6 +32,12 @@ func TestClientExecutionPackageJSONRoundTripPreservesGraphAndEvidence(t *testing
 	if got.RecordingRunSpec.Redactions.MaskSelectors[0] != "[data-sensitive]" {
 		t.Fatalf("redactions did not round-trip: %#v", got.RecordingRunSpec.Redactions)
 	}
+	if got.ExecutableScriptBundle == nil || got.ExecutableScriptBundle.ScriptManifest.EntryFunction != "runCascadeRecording" {
+		t.Fatalf("executable script bundle did not round-trip: %#v", got.ExecutableScriptBundle)
+	}
+	if got.ExecutableScriptBundle.Reproducibility.ScriptHashSHA256 == "" || got.ExecutableScriptBundle.PlaywrightScript.InlineSource == "" {
+		t.Fatalf("executable script bundle lost executable fields: %#v", got.ExecutableScriptBundle)
+	}
 }
 
 func TestClientExecutionPackageAvoidsRawSecretAndSourceContent(t *testing.T) {
@@ -259,6 +265,8 @@ func sampleClientExecutionPackage(t *testing.T) ClientExecutionPackage {
 	if err != nil {
 		t.Fatal(err)
 	}
+	scriptDoc := sampleExecutionScriptDocumentForExchange(t, graph, graphDigest, now)
+	executableBundle := sampleExecutableBundleForExchange(t, scriptDoc, graphDigest, now)
 
 	return ClientExecutionPackage{
 		PackageID:     "pkg_1",
@@ -361,6 +369,7 @@ func sampleClientExecutionPackage(t *testing.T) ClientExecutionPackage {
 				HumanEscalationConditions: []string{"auth_failed", "forbidden_page_detected"},
 			},
 		},
+		ExecutableScriptBundle: executableBundle,
 		CredentialGrants: []CredentialGrant{{
 			GrantID:                  "grant_demo_login",
 			Kind:                     "demo_account",
@@ -419,4 +428,156 @@ func sampleClientExecutionPackage(t *testing.T) ClientExecutionPackage {
 			},
 		},
 	}
+}
+
+func sampleExecutionScriptDocumentForExchange(t *testing.T, graph *DemoWorkflowGraph, graphDigest string, now time.Time) *ExecutionScriptDocument {
+	t.Helper()
+	doc := &ExecutionScriptDocument{
+		ID:              "script_graph_1",
+		ProjectID:       "project_1",
+		WorkflowGraphID: graph.ID,
+		GraphVersion:    graph.Version,
+		SchemaVersion:   ExecutionScriptDocumentSchemaVersion,
+		Status:          ScriptDocumentStatusApproved,
+		Title:           "Team collaboration launch",
+		WorkflowGraph:   graph,
+		RecordingRunSpec: RecordingRunSpec{
+			RunID:          "run_1",
+			BaseURL:        "https://app.example.com",
+			AllowedDomains: []string{"app.example.com"},
+			Locale:         "en-US",
+			Browser:        BrowserRunSpec{Engine: "chromium", VersionPolicy: "stable-pinned", Headless: true},
+			Timeline:       RecordingTimeline{TargetDurationSec: 60},
+			Outputs:        RecordingOutputRequest{RawRecording: true, FinalVideo: true, StepByStepDocs: true, Trace: true},
+			Redactions:     RedactionPolicy{MaskSelectors: []string{"[data-sensitive]"}},
+			FailurePolicy:  RecordingFailurePolicy{RetryAttempts: 2, SelectorRepairAllowed: true},
+		},
+		Steps: []ScriptStep{
+			{
+				ID:              "step_01_open",
+				Order:           1,
+				NodeID:          "node_open_dashboard",
+				PageTarget:      ScriptPageTarget{URL: "https://app.example.com/dashboard"},
+				Action:          ScriptActionInstruction{Type: GraphActionNavigate, Target: ActionTarget{URL: "https://app.example.com/dashboard"}, TimeoutMS: 10000},
+				ExpectedOutcome: "Dashboard loads",
+				Validations:     []ValidationSpec{{ID: "validate_open", Kind: "expected_outcome", Required: true}},
+				Capture:         CaptureSpec{Screenshot: true, Video: true, MaskSelectors: []string{"[data-sensitive]"}},
+				Timing:          NodeTimingHint{NodeID: "node_open_dashboard", DurationMS: 5000},
+				Narrative:       NarrativeCue{Title: "Open dashboard"},
+				Blocking:        true,
+			},
+			{
+				ID:              "step_02_invite",
+				Order:           2,
+				NodeID:          "node_invite_member",
+				PageTarget:      ScriptPageTarget{Selector: "[data-testid='invite-member']"},
+				Action:          ScriptActionInstruction{Type: GraphActionClick, Target: ActionTarget{TestID: "invite-member"}, TimeoutMS: 10000},
+				ExpectedOutcome: "Invite modal appears",
+				Validations:     []ValidationSpec{{ID: "validate_invite", Kind: "expected_outcome", Required: true}},
+				Capture:         CaptureSpec{Screenshot: true, Video: true},
+				Timing:          NodeTimingHint{NodeID: "node_invite_member", DurationMS: 1800},
+				Narrative:       NarrativeCue{Title: "Invite teammate"},
+				Blocking:        true,
+			},
+		},
+		SafetyPolicy: ScriptSafetyPolicy{
+			AllowedDomains: []string{"app.example.com"},
+			ForbiddenPages: []string{"/billing"},
+			ForbiddenData:  []string{"customer_email", "api_key"},
+			Redactions:     RedactionPolicy{MaskSelectors: []string{"[data-sensitive]"}},
+			PIIHandling:    "mask_in_artifacts",
+		},
+		Reproducibility: ReproducibilitySpec{
+			GraphHashSHA256:      graphDigest,
+			InputFingerprints:    map[string]string{"source_tree": "sha_tree", "requirements": "sha_req"},
+			SourceSnapshotDigest: "sha_tree",
+			DeterministicSeed:    "seed_1",
+		},
+		ApprovalChecklist: ScriptApprovalChecklist{
+			HumanApprovalRequired:              true,
+			SourceSummaryOnly:                  true,
+			CredentialScopeReviewRequired:      true,
+			RedactionsReviewRequired:           true,
+			IPAllowlistAcknowledgementRequired: true,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	hash, err := doc.ComputeScriptHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Reproducibility.ScriptHashSHA256 = hash
+	return doc
+}
+
+func sampleExecutableBundleForExchange(t *testing.T, doc *ExecutionScriptDocument, graphDigest string, now time.Time) *ExecutableRecordingScriptBundle {
+	t.Helper()
+	source := `type CascadeRecordingContext = { page: any; secrets: any; capture: any; assert: any; log: any };
+type CascadeRecordingResult = { ok: boolean };
+export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise<CascadeRecordingResult> {
+  await ctx.capture.start({ planHash: "plan" });
+  await ctx.log.step("node_open_dashboard", "Open dashboard");
+  await ctx.page.goto("https://app.example.com/dashboard", { waitUntil: "networkidle", timeout: 10000 });
+  await ctx.log.step("node_invite_member", "Invite teammate");
+  await ctx.page.click("[data-testid='invite-member']", { timeout: 10000 });
+  await ctx.capture.stop();
+  return { ok: true };
+}`
+	scriptHash := SHA256Hex([]byte(source))
+	markdown := "# Team collaboration launch\n\n## 执行步骤\n\n1. Open dashboard\n2. Invite teammate"
+	markdownHash := SHA256Hex([]byte(markdown))
+	bundle := &ExecutableRecordingScriptBundle{
+		ID:              "bundle_script_graph_1",
+		ProjectID:       doc.ProjectID,
+		WorkflowGraphID: doc.WorkflowGraphID,
+		SchemaVersion:   ExecutableRecordingScriptBundleSchemaVersion,
+		Status:          ExecutableScriptBundleStatusReviewReady,
+		ScriptManifest: ExecutableScriptManifest{
+			ScriptID:            "recording_graph_1",
+			Version:             1,
+			Language:            "typescript",
+			Runtime:             "playwright-restricted-sandbox",
+			EntryFunction:       "runCascadeRecording",
+			Generator:           "cascade_deterministic_script_code_generator",
+			GeneratorVersion:    "0.1.0",
+			DependencyAllowlist: []string{},
+			ContextAPIs:         []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"},
+			StepNodeIDs:         []string{"node_open_dashboard", "node_invite_member"},
+		},
+		PlanJSON:         doc,
+		PlaywrightScript: ExecutableScriptSource{InlineSource: source, MimeType: "text/typescript", SHA256: scriptHash, SizeBytes: int64(len(source))},
+		ApprovalMarkdown: ApprovalMarkdownDocument{InlineMarkdown: markdown, MimeType: "text/markdown", SHA256: markdownHash, SizeBytes: int64(len(markdown))},
+		SecurityPolicy: ExecutableScriptSecurityPolicy{
+			AllowedDomains:       []string{"app.example.com"},
+			ForbiddenPages:       []string{"/billing"},
+			ForbiddenData:        []string{"customer_email", "api_key"},
+			Redactions:           RedactionPolicy{MaskSelectors: []string{"[data-sensitive]"}},
+			AllowedContextAPIs:   []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"},
+			AllowedPageMethods:   []string{"goto", "click"},
+			ForbiddenImports:     []string{"fs", "child_process"},
+			ForbiddenIdentifiers: []string{"import", "require", "eval", "process", "fetch"},
+			NetworkPolicy:        "allowed_domains_only_via_ctx_page",
+			FileSystemPolicy:     "no_direct_fs_access",
+		},
+		Reproducibility: ExecutableScriptReproducibility{
+			PlanHashSHA256:       doc.Reproducibility.ScriptHashSHA256,
+			ScriptHashSHA256:     scriptHash,
+			MarkdownHashSHA256:   markdownHash,
+			GraphHashSHA256:      graphDigest,
+			SourceSnapshotDigest: "sha_tree",
+			GeneratorVersion:     "0.1.0",
+			DeterministicSeed:    "seed_1",
+			InputFingerprints:    map[string]string{"source_tree": "sha_tree", "requirements": "sha_req"},
+		},
+		Validation: &ExecutableScriptValidation{Valid: true, ValidatedAt: now},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	hash, err := bundle.ComputeBundleHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.Reproducibility.BundleHashSHA256 = hash
+	return bundle
 }

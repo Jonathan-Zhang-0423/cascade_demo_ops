@@ -130,21 +130,22 @@ type ExchangePackagePolicy struct {
 }
 
 type ClientExecutionPackage struct {
-	PackageID             string                `json:"package_id"`
-	OrgID                 string                `json:"org_id"`
-	ProjectID             string                `json:"project_id"`
-	SchemaVersion         string                `json:"schema_version"`
-	CreatedAt             time.Time             `json:"created_at"`
-	ApprovedAt            time.Time             `json:"approved_at"`
-	ProjectContextSummary ProjectContextSummary `json:"project_context_summary"`
-	ProductMapSummary     ProductMapSummary     `json:"product_map_summary"`
-	WorkflowGraph         *DemoWorkflowGraph    `json:"workflow_graph"`
-	RecordingRunSpec      RecordingRunSpec      `json:"recording_run_spec"`
-	CredentialGrants      []CredentialGrant     `json:"credential_grants,omitempty"`
-	EvidenceBundle        EvidenceBundle        `json:"evidence_bundle"`
-	Reproducibility       ReproducibilitySpec   `json:"reproducibility"`
-	SafetyReport          PackageSafetyReport   `json:"safety_report"`
-	Metadata              map[string]any        `json:"metadata,omitempty"`
+	PackageID              string                           `json:"package_id"`
+	OrgID                  string                           `json:"org_id"`
+	ProjectID              string                           `json:"project_id"`
+	SchemaVersion          string                           `json:"schema_version"`
+	CreatedAt              time.Time                        `json:"created_at"`
+	ApprovedAt             time.Time                        `json:"approved_at"`
+	ProjectContextSummary  ProjectContextSummary            `json:"project_context_summary"`
+	ProductMapSummary      ProductMapSummary                `json:"product_map_summary"`
+	WorkflowGraph          *DemoWorkflowGraph               `json:"workflow_graph"`
+	RecordingRunSpec       RecordingRunSpec                 `json:"recording_run_spec"`
+	ExecutableScriptBundle *ExecutableRecordingScriptBundle `json:"executable_script_bundle,omitempty"`
+	CredentialGrants       []CredentialGrant                `json:"credential_grants,omitempty"`
+	EvidenceBundle         EvidenceBundle                   `json:"evidence_bundle"`
+	Reproducibility        ReproducibilitySpec              `json:"reproducibility"`
+	SafetyReport           PackageSafetyReport              `json:"safety_report"`
+	Metadata               map[string]any                   `json:"metadata,omitempty"`
 }
 
 type ProjectContextSummary struct {
