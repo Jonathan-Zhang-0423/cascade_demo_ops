@@ -5,7 +5,7 @@ import { render } from "./renderer.js";
 type JsonRpcRequest = {
   jsonrpc: "2.0";
   id: number | string;
-  method: "record" | "render";
+  method: "health" | "record" | "render";
   params?: unknown;
 };
 
@@ -30,6 +30,9 @@ rl.on("line", async (line) => {
 async function dispatch(request: JsonRpcRequest): Promise<unknown> {
   if (request.jsonrpc !== "2.0") {
     throw new Error("invalid JSON-RPC version");
+  }
+  if (request.method === "health") {
+    return { ok: true, service: "video-worker" };
   }
   if (request.method === "record") {
     return record(request.params as never);

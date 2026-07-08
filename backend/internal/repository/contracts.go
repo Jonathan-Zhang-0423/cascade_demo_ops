@@ -277,6 +277,107 @@ type AuditLogRecord struct {
 	CreatedAt    time.Time
 }
 
+type ExchangePackageRecord struct {
+	ID                   string
+	OrgID                string
+	ProjectID            string
+	EnvelopeID           string
+	PackageKind          model.ExchangePackageKind
+	Status               model.ExchangePackageStatus
+	SchemaVersion        string
+	PayloadSchemaVersion string
+	IdempotencyKey       string
+	PayloadDigestSHA256  string
+	PayloadSizeBytes     *int64
+	ProducerJSON         json.RawMessage
+	CryptoJSON           json.RawMessage
+	PolicyJSON           json.RawMessage
+	EnvelopeMetadataJSON json.RawMessage
+	ErrorJSON            json.RawMessage
+	CreatedAt            time.Time
+	ExpiresAt            *time.Time
+	AcceptedAt           *time.Time
+	CompletedAt          *time.Time
+}
+
+type PackageArtifactRecord struct {
+	ID                string
+	OrgID             string
+	ProjectID         string
+	ExchangePackageID string
+	ResultPackageID   string
+	Role              string
+	Kind              string
+	URI               string
+	MimeType          string
+	SHA256            string
+	SizeBytes         int64
+	Encrypted         bool
+	Sensitive         bool
+	CompressionAlg    string
+	MetadataJSON      json.RawMessage
+	CreatedAt         time.Time
+	ExpiresAt         *time.Time
+}
+
+type CloudRecordingJobRecord struct {
+	ID                string
+	OrgID             string
+	ProjectID         string
+	ExchangePackageID string
+	WorkflowGraphID   string
+	ExecutionRunID    string
+	Status            model.RecordingJobStatus
+	WorkerID          string
+	RunSpecJSON       json.RawMessage
+	RuntimeJSON       json.RawMessage
+	ErrorJSON         json.RawMessage
+	CreatedAt         time.Time
+	StartedAt         *time.Time
+	CompletedAt       *time.Time
+}
+
+type CredentialGrantRecord struct {
+	ID                        string
+	OrgID                     string
+	ProjectID                 string
+	ExchangePackageID         string
+	GrantID                   string
+	Kind                      string
+	Purpose                   string
+	Scope                     string
+	CloudSecretRef            string
+	EncryptedSecretArtifactID string
+	AllowedDomainsJSON        json.RawMessage
+	AllowedOperationsJSON     json.RawMessage
+	ExpiresAt                 *time.Time
+	RotationRequiredAfterRun  bool
+	DeleteAfterRun            bool
+	Status                    string
+	CreatedAt                 time.Time
+	UsedAt                    *time.Time
+}
+
+type ResultPackageRecord struct {
+	ID                  string
+	OrgID               string
+	ProjectID           string
+	ExchangePackageID   string
+	CloudRecordingJobID string
+	ResultID            string
+	Status              model.RecordingResultStatus
+	SchemaVersion       string
+	ResultDigestSHA256  string
+	TraceSummaryJSON    json.RawMessage
+	VerificationJSON    json.RawMessage
+	DeliveryJSON        json.RawMessage
+	ErrorJSON           json.RawMessage
+	CreatedAt           time.Time
+	DeliveredAt         *time.Time
+	AckedAt             *time.Time
+	ExpiresAt           *time.Time
+}
+
 type TenancyRepository interface {
 	CreateOrganization(ctx context.Context, org Organization) error
 	GetOrganization(ctx context.Context, orgID string) (Organization, error)
@@ -359,4 +460,28 @@ type AssetRepository interface {
 type AuditRepository interface {
 	WriteAuditLog(ctx context.Context, log AuditLogRecord) error
 	ListAuditLogs(ctx context.Context, orgID string, projectID string) ([]AuditLogRecord, error)
+}
+
+type ExchangeRepository interface {
+	CreateExchangePackage(ctx context.Context, record ExchangePackageRecord) error
+	GetExchangePackage(ctx context.Context, orgID string, exchangePackageID string) (ExchangePackageRecord, error)
+	GetExchangePackageByEnvelopeID(ctx context.Context, orgID string, envelopeID string) (ExchangePackageRecord, error)
+	GetExchangePackageByIdempotencyKey(ctx context.Context, orgID string, idempotencyKey string) (ExchangePackageRecord, error)
+	UpdateExchangePackageStatus(ctx context.Context, orgID string, exchangePackageID string, status model.ExchangePackageStatus, completedAt *time.Time, errJSON json.RawMessage) error
+
+	CreatePackageArtifact(ctx context.Context, artifact PackageArtifactRecord) error
+	ListPackageArtifacts(ctx context.Context, orgID string, exchangePackageID string, resultPackageID string) ([]PackageArtifactRecord, error)
+
+	CreateCloudRecordingJob(ctx context.Context, job CloudRecordingJobRecord) error
+	UpdateCloudRecordingJob(ctx context.Context, job CloudRecordingJobRecord) error
+	GetCloudRecordingJob(ctx context.Context, orgID string, jobID string) (CloudRecordingJobRecord, error)
+
+	CreateCredentialGrant(ctx context.Context, grant CredentialGrantRecord) error
+	ListCredentialGrants(ctx context.Context, orgID string, exchangePackageID string) ([]CredentialGrantRecord, error)
+	UpdateCredentialGrantStatus(ctx context.Context, orgID string, grantID string, status string, usedAt *time.Time) error
+
+	CreateResultPackage(ctx context.Context, result ResultPackageRecord) error
+	GetResultPackage(ctx context.Context, orgID string, resultPackageID string) (ResultPackageRecord, error)
+	GetResultPackageBySource(ctx context.Context, orgID string, exchangePackageID string) (ResultPackageRecord, error)
+	AcknowledgeResultPackage(ctx context.Context, orgID string, resultPackageID string, ackedAt time.Time) error
 }

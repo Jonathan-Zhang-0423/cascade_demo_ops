@@ -100,9 +100,84 @@ func TestCoreMigrationAllowsExpectedProjectInputKinds(t *testing.T) {
 	}
 }
 
+func TestExchangeMigrationContainsRequiredTables(t *testing.T) {
+	sql := readExchangeMigration(t)
+	requiredTables := []string{
+		"exchange_packages",
+		"package_artifacts",
+		"cloud_recording_jobs",
+		"credential_grants",
+		"result_packages",
+	}
+	for _, table := range requiredTables {
+		if !strings.Contains(sql, "CREATE TABLE "+table+" ") {
+			t.Fatalf("exchange migration is missing table %s", table)
+		}
+	}
+}
+
+func TestExchangeMigrationKeepsPlaintextPayloadsAndSecretsOutOfRows(t *testing.T) {
+	sql := strings.ToLower(readExchangeMigration(t))
+	forbidden := []string{
+		"payload_json",
+		"plaintext",
+		"raw_secret",
+		"secret_value",
+		"password text",
+		"private_key text",
+		"source_archive",
+		"bytea",
+	}
+	for _, token := range forbidden {
+		if strings.Contains(sql, token) {
+			t.Fatalf("exchange migration must not persist forbidden token %q", token)
+		}
+	}
+	required := []string{
+		"payload_digest_sha256 text not null",
+		"cloud_secret_ref text",
+		"encrypted_secret_artifact_id text",
+		"uri text not null",
+		"encrypted boolean not null default true",
+	}
+	for _, token := range required {
+		if !strings.Contains(sql, token) {
+			t.Fatalf("exchange migration is missing security token %q", token)
+		}
+	}
+}
+
+func TestExchangeMigrationHasIdempotencyStatusAndJSONBIndexes(t *testing.T) {
+	sql := strings.ToLower(readExchangeMigration(t))
+	required := []string{
+		"unique (org_id, idempotency_key)",
+		"exchange_packages_org_idempotency_idx",
+		"exchange_packages_payload_digest_idx",
+		"cloud_recording_jobs_worker_status_idx",
+		"package_artifacts_sha256_idx",
+		"result_packages_exchange_idx",
+		"exchange_packages_policy_json_gin",
+		"cloud_recording_jobs_run_spec_json_gin",
+		"result_packages_verification_json_gin",
+	}
+	for _, token := range required {
+		if !strings.Contains(sql, token) {
+			t.Fatalf("exchange migration is missing required index or constraint %s", token)
+		}
+	}
+}
+
 func readCoreMigration(t *testing.T) string {
+	return readMigration(t, "001_create_core_tables.sql")
+}
+
+func readExchangeMigration(t *testing.T) string {
+	return readMigration(t, "002_create_exchange_protocol_tables.sql")
+}
+
+func readMigration(t *testing.T, fileName string) string {
 	t.Helper()
-	path := filepath.Join("..", "..", "infra", "db", "migrations", "001_create_core_tables.sql")
+	path := filepath.Join("..", "..", "infra", "db", "migrations", fileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read migration: %v", err)

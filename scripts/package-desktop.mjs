@@ -1,11 +1,15 @@
-import { mkdirSync, cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, cpSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(".");
-const resourceRoot = resolve("dist", "package", "resources");
+const packageRoot = resolve("dist", "package");
+const resourceRoot = resolve(packageRoot, "resources");
 const videoWorkerDist = resolve("video-worker", "dist");
 const webDist = resolve("frontend", "web", "dist");
+const targetGOOS = process.platform === "win32" ? "windows" : "darwin";
+const desktopExt = targetGOOS === "windows" ? ".exe" : "";
+const desktopBinary = resolve("dist", "desktop", targetGOOS, `cascade-demoops-desktop${desktopExt}`);
 
 if (!fallbackWebBuild()) {
   runWithFallback("pnpm", ["--filter", "@cascade/web", "build"], fallbackWebBuild);
@@ -13,9 +17,10 @@ if (!fallbackWebBuild()) {
 if (!fallbackWorkerBuild()) {
   runWithFallback("pnpm", ["--filter", "@cascade/video-worker", "build"], fallbackWorkerBuild);
 }
-run("node", ["scripts/build-desktop.mjs", process.platform === "win32" ? "windows" : "darwin"]);
+run("node", ["scripts/build-desktop.mjs", targetGOOS]);
 
 mkdirSync(resourceRoot, { recursive: true });
+copyIfExists(desktopBinary, resolve(packageRoot, basename(desktopBinary)));
 copyIfExists(videoWorkerDist, resolve(resourceRoot, "sidecars", "video-worker", "dist"));
 copyIfExists(webDist, resolve(resourceRoot, "web"));
 writeFileSync(
@@ -101,6 +106,7 @@ function copyIfExists(from, to) {
     console.warn(`Skipping missing package resource: ${from}`);
     return;
   }
-  mkdirSync(to, { recursive: true });
+  const stat = statSync(from);
+  mkdirSync(stat.isDirectory() ? to : resolve(to, ".."), { recursive: true });
   cpSync(from, to, { recursive: true });
 }

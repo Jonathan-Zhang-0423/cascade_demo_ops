@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 
 	"cascade-demoops/backend/internal/config"
 )
@@ -35,7 +36,11 @@ type Manager struct {
 }
 
 func NewManager(runtime config.AppRuntimeConfig) *Manager {
-	return &Manager{runtime: runtime, nodeBinary: "node"}
+	nodeBinary := runtime.NodeBinaryPath
+	if nodeBinary == "" {
+		nodeBinary = defaultNodeBinary(runtime.ResourceRoot)
+	}
+	return &Manager{runtime: runtime, nodeBinary: nodeBinary}
 }
 
 func (m *Manager) VideoWorkerSpec() SidecarSpec {
@@ -49,7 +54,7 @@ func (m *Manager) VideoWorkerSpec() SidecarSpec {
 		Args:       []string{workerPath},
 		WorkingDir: filepath.Dir(workerPath),
 		Env:        map[string]string{"CASCADE_RUNTIME_PROFILE": string(m.runtime.Profile)},
-		Health:     &HealthCheck{Method: "record", TimeoutMS: 5000},
+		Health:     &HealthCheck{Method: "health", TimeoutMS: 5000},
 	}
 }
 
@@ -99,6 +104,9 @@ func (m *Manager) CallJSONRPC(ctx context.Context, spec SidecarSpec, method stri
 	if response.Error != nil {
 		return errors.New(response.Error.Message)
 	}
+	if result == nil {
+		return nil
+	}
 	return json.Unmarshal(response.Result, result)
 }
 
@@ -107,6 +115,23 @@ func (m *Manager) defaultVideoWorkerPath() string {
 		return filepath.Join(m.runtime.ResourceRoot, "sidecars", VideoWorkerName, "dist", "index.js")
 	}
 	return filepath.Join(m.runtime.DevRepoRoot, "video-worker", "dist", "index.js")
+}
+
+func defaultNodeBinary(resourceRoot string) string {
+	if resourceRoot != "" {
+		candidate := filepath.Join(resourceRoot, "runtimes", "node", nodeExecutableName())
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return "node"
+}
+
+func nodeExecutableName() string {
+	if runtime.GOOS == "windows" {
+		return "node.exe"
+	}
+	return "node"
 }
 
 type rpcRequest struct {

@@ -20,6 +20,14 @@ Runtime protocol:
 JSON-RPC 2.0 over stdio
 ```
 
+Required methods:
+
+```text
+health
+record
+render
+```
+
 The Go desktop runtime discovers the worker through `NODE_WORKER_PATH` in dev
 or through the packaged resource path in desktop builds. The user should not be
 required to install Node manually for production packaging; the final installer

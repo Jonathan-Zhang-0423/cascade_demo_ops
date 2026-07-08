@@ -31,13 +31,18 @@ NODE_WORKER_PATH=/path/to/video-worker/dist/index.js
 Packaged resources should use this shape:
 
 ```text
-resources/
-  desktop-runtime.json
-  web/
-  sidecars/
-    video-worker/
-      dist/
-        index.js
+dist/package/
+  cascade-demoops-desktop(.exe)
+  resources/
+    desktop-runtime.json
+    web/
+    sidecars/
+      video-worker/
+        dist/
+          index.js
+    runtimes/
+      node/
+        node(.exe)  # optional until production bundling is finalized
 ```
 
 Runtime data should live outside app resources:
@@ -77,11 +82,23 @@ shared desktop bridge and is intentionally Wails-ready without importing Wails
 yet. The next packaging step is to wire that bridge into a Wails app and embed
 the `frontend/web` build output.
 
+`desktop-runtime.json` is the resource manifest. In desktop profile, Go resolves
+resources in this order:
+
+```text
+env override
+exe_dir/resources
+exe_dir/../resources
+exe_dir/../../package/resources
+exe_dir
+```
+
 ## Sidecar Contract
 
-The video worker remains a JSON-RPC 2.0 stdio process. In dev, Go resolves it
-from `NODE_WORKER_PATH` or `video-worker/dist/index.js`. In packaged desktop
-builds, Go resolves it from:
+The video worker remains a JSON-RPC 2.0 stdio process. The worker exposes a
+`health` method for process checks. In dev, Go resolves it from
+`NODE_WORKER_PATH` or `video-worker/dist/index.js`. In packaged desktop builds,
+Go resolves it from the resource manifest:
 
 ```text
 resources/sidecars/video-worker/dist/index.js
@@ -89,6 +106,8 @@ resources/sidecars/video-worker/dist/index.js
 
 Production installers must provide the worker runtime or a bundled
 Node-compatible executable so users do not need to install Node manually.
+Go will prefer `NODE_BINARY_PATH`, then a bundled `resources/runtimes/node`
+binary, then system `node`.
 
 ## Data Boundary
 
@@ -99,3 +118,7 @@ Desktop mode is local-first:
 - The database stores artifact URIs and metadata only.
 - Secret values are never stored in the app database; only secret references
   and scope metadata may be persisted.
+
+Until the SQLite adapter is implemented, the desktop entry uses a file-backed
+orchestrator state store under the user data directory. This keeps desktop
+bootstrap runs durable without changing the final repository boundary.

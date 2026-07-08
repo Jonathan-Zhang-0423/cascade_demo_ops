@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cascade-demoops/backend/internal/config"
@@ -41,6 +42,44 @@ func TestDesktopBridgeArtifactURIResponseIsJSONSafe(t *testing.T) {
 	}
 	if payload["uri"] == "" {
 		t.Fatal("expected artifact uri")
+	}
+}
+
+func TestDesktopBridgeRuntimeConfigIsRedacted(t *testing.T) {
+	root := t.TempDir()
+	bridge, err := NewDesktopBridge(config.AppRuntimeConfig{
+		Profile:         config.ProfileCloud,
+		Environment:     "test",
+		Mode:            model.AppModeWeb,
+		DatabaseDialect: config.DatabasePostgres,
+		DatabaseURL:     "postgres://user:secret@example/db",
+		SQLitePath:      filepath.Join(root, "cascade_demoops.db"),
+		DataRoot:        root,
+		ArtifactRoot:    filepath.Join(root, "artifacts"),
+		CacheRoot:       filepath.Join(root, "cache"),
+		LogRoot:         filepath.Join(root, "logs"),
+		ResourceRoot:    filepath.Join(root, "resources"),
+		DevRepoRoot:     root,
+		SidecarPaths:    map[string]string{"video-worker": filepath.Join(root, "worker", "index.js")},
+		NodeBinaryPath:  filepath.Join(root, "node"),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := bridge.RuntimeConfig()
+	if !response.OK {
+		t.Fatalf("RuntimeConfig error: %s", response.Error)
+	}
+	payload := string(response.Data)
+	if strings.Contains(payload, "secret") || strings.Contains(payload, root) {
+		t.Fatalf("runtime config leaked sensitive values or local paths: %s", payload)
+	}
+	var view RuntimeConfigView
+	if err := json.Unmarshal(response.Data, &view); err != nil {
+		t.Fatal(err)
+	}
+	if !view.DatabaseConfigured || !view.NodeRuntimeConfigured || !view.Sidecars["video-worker"] {
+		t.Fatalf("unexpected runtime view: %+v", view)
 	}
 }
 

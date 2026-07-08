@@ -29,7 +29,7 @@ func NewDesktopBridge(runtime config.AppRuntimeConfig, states store.StateStore) 
 }
 
 func (b *DesktopBridge) RuntimeConfig() BridgeResponse {
-	return bridgeValue(b.service.RuntimeConfig(), nil)
+	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig()), nil)
 }
 
 func (b *DesktopBridge) CreateProject(input orchestrator.UserInput) BridgeResponse {
