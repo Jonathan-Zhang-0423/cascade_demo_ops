@@ -144,14 +144,10 @@ export async function executeScript(request: ExecuteScriptRequest): Promise<Exec
   if (!validation.valid) {
     return { ok: false, validation, error: "script validation failed" };
   }
-  const outputDir = request.output_dir || "artifacts/script-execution";
   const steps = request.bundle?.plan_json?.steps ?? [];
   return {
     ok: true,
     validation,
-    recording_path: `${outputDir}/recording.webm`,
-    screenshot_paths: steps.map((step, index) => `${outputDir}/step-${String(index + 1).padStart(3, "0")}.png`),
-    trace_path: `${outputDir}/trace.zip`,
     step_results: steps.map((step) => {
       const result: { node_id: string; status: string; duration_ms?: number } = {
         node_id: step.node_id ?? "unknown",
