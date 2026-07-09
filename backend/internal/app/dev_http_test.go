@@ -106,6 +106,60 @@ func TestDevHTTPBridgeInvalidLocalRepoPathDegradesWithoutFailing(t *testing.T) {
 	}
 }
 
+func TestDevHTTPBridgeExposesExecutionEvents(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		ProductDescription: "展示团队邀请流程",
+		TargetAudience:     "中国运营团队",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	postExecutionPackage(t, server, body)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/projects/local/execution-events", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	var events []DevExecutionEvent
+	if err := json.Unmarshal(bridge.Data, &events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected execution events")
+	}
+	payload := response.Body.String()
+	if !strings.Contains(payload, "RequirementReaderAgent") || !strings.Contains(payload, "ScriptPackagerAgent") {
+		t.Fatalf("events missing agent progress: %s", payload)
+	}
+	for _, forbidden := range []string{"raw-password", "BEGIN PRIVATE KEY", ".env", "postgres://user:secret"} {
+		if strings.Contains(payload, forbidden) {
+			t.Fatalf("execution events leaked forbidden value %q: %s", forbidden, payload)
+		}
+	}
+}
+
+func TestDevHTTPBridgeRedactsLocalPathsInErrors(t *testing.T) {
+	message := redactBridgeError(`open C:\Users\CascadeAI\AppData\Roaming\CascadeDemoOps\state.json.tmp: Access is denied.`)
+
+	if strings.Contains(message, `C:\Users`) || strings.Contains(message, "AppData") {
+		t.Fatalf("expected local path to be redacted: %s", message)
+	}
+	if !strings.Contains(message, "Access is denied") {
+		t.Fatalf("expected error reason to remain: %s", message)
+	}
+}
+
 func TestDevHTTPBridgeRuntimeHealthIsRedacted(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/runtime-health", nil)

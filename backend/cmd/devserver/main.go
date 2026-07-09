@@ -27,6 +27,7 @@ func main() {
 	must(config.LoadDotEnvFiles(config.DefaultDotEnvPaths(devRepoRoot)...))
 	runtimeConfig, err := config.RuntimeConfigFromEnvWithRoot(devRepoRoot)
 	must(err)
+	applyDevLocalRoots(&runtimeConfig, devRepoRoot)
 	stateStore := store.NewFileStateStore(filepath.Join(runtimeConfig.DataRoot, "dev_http_state"))
 	service, err := app.NewService(runtimeConfig, stateStore)
 	must(err)
@@ -43,5 +44,27 @@ func must(err error) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func applyDevLocalRoots(runtimeConfig *config.AppRuntimeConfig, devRepoRoot string) {
+	if runtimeConfig == nil || devRepoRoot == "" || runtimeConfig.Profile != config.ProfileDev {
+		return
+	}
+	root := filepath.Join(devRepoRoot, ".cascade-dev")
+	if os.Getenv("CASCADE_DATA_ROOT") == "" {
+		runtimeConfig.DataRoot = filepath.Join(root, "data")
+	}
+	if os.Getenv("SQLITE_PATH") == "" {
+		runtimeConfig.SQLitePath = filepath.Join(runtimeConfig.DataRoot, "cascade_demoops.db")
+	}
+	if os.Getenv("CASCADE_ARTIFACT_ROOT") == "" {
+		runtimeConfig.ArtifactRoot = filepath.Join(root, "artifacts")
+	}
+	if os.Getenv("CASCADE_CACHE_ROOT") == "" {
+		runtimeConfig.CacheRoot = filepath.Join(root, "cache")
+	}
+	if os.Getenv("CASCADE_LOG_ROOT") == "" {
+		runtimeConfig.LogRoot = filepath.Join(root, "logs")
 	}
 }

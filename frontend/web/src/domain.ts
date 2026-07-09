@@ -111,6 +111,16 @@ export type AssetReviewView = {
   provenance: string;
 };
 
+export type RuntimeLogEntry = {
+  id: string;
+  time: string;
+  level: "info" | "success" | "warning" | "error";
+  message: string;
+  detail?: string;
+  node?: string;
+  elapsedMS?: number;
+};
+
 export type ProjectWorkspaceView = {
   id: string;
   name: string;
@@ -128,6 +138,7 @@ export type ProjectWorkspaceView = {
   scriptMarkdown?: string;
   executableScriptBundle?: ExecutableRecordingScriptBundle;
   modelProvenance?: string[];
+  runtimeLogs?: RuntimeLogEntry[];
   packagePreview: ExecutionPackagePreview;
   cloudRun: CloudRunStatusView;
   assets: AssetReviewView[];

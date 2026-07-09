@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"time"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -151,6 +153,34 @@ type Dependencies struct {
 	AssetGenerator    AssetGeneratorAgent
 }
 
+type ProgressLevel string
+
+const (
+	ProgressLevelInfo    ProgressLevel = "info"
+	ProgressLevelSuccess ProgressLevel = "success"
+	ProgressLevelWarning ProgressLevel = "warning"
+	ProgressLevelError   ProgressLevel = "error"
+)
+
+type ProgressEvent struct {
+	Level     ProgressLevel `json:"level"`
+	Node      NodeName      `json:"node,omitempty"`
+	Message   string        `json:"message"`
+	Detail    string        `json:"detail,omitempty"`
+	ElapsedMS int64         `json:"elapsed_ms,omitempty"`
+}
+
+type progressSinkKey struct{}
+
+type ProgressSink func(ProgressEvent)
+
+func WithProgressSink(ctx context.Context, sink ProgressSink) context.Context {
+	if sink == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, progressSinkKey{}, sink)
+}
+
 type CascadeFlow struct {
 	deps Dependencies
 }
@@ -194,60 +224,90 @@ func NewCascadeFlow(deps Dependencies) (*CascadeFlow, error) {
 // The frontend should render/edit the graph and script, then call ApproveAndContinue.
 func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState, error) {
 	state := &CascadeState{Status: FlowStatusRunning}
+	startedAt := time.Now()
+	log.Printf("cascade_flow start product_url_present=%t local_repo_present=%t target_audience=%q", input.ProductURL != "", input.LocalRepoPath != "", input.TargetAudience)
+	emitProgress(ctx, ProgressEvent{
+		Level:   ProgressLevelInfo,
+		Message: "开始生成执行包",
+		Detail:  "已收到产品 URL、项目目录和演示需求，开始本地理解链路。",
+	})
 
 	state.CurrentNode = NodeInputCtx
+	nodeStart := logNodeStart(ctx, state.CurrentNode)
 	project, err := f.deps.InputContext.BuildProjectContext(ctx, input)
 	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
 	}
 	state.ProjectID = project.ID
 	state.ProjectContext = project
+	logNodeDone(ctx, state.CurrentNode, nodeStart, "InputContextAgent 完成上下文整理", "project_id="+project.ID)
 
 	state.CurrentNode = NodeRequirementRead
+	nodeStart = logNodeStart(ctx, state.CurrentNode)
 	brief, err := f.deps.RequirementReader.ReadRequirements(ctx, project)
 	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
 	}
 	state.RequirementBrief = brief
+	logNodeDone(ctx, state.CurrentNode, nodeStart, "RequirementReaderAgent 完成需求理解", fmt.Sprintf("scenario=%q use_cases=%d", brief.Scenario, len(brief.UseCases)))
 
 	state.CurrentNode = NodeCodeRead
+	nodeStart = logNodeStart(ctx, state.CurrentNode)
 	codeSnapshots, err := f.deps.CodeReader.ReadCode(ctx, project, brief)
 	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
 	}
 	state.CodeSnapshots = codeSnapshots
+	logNodeDone(ctx, state.CurrentNode, nodeStart, "CodeReaderAgent 完成只读代码摘要", fmt.Sprintf("snapshots=%d files=%d", len(codeSnapshots), codeFileCount(codeSnapshots)))
 
 	state.CurrentNode = NodePageRead
+	nodeStart = logNodeStart(ctx, state.CurrentNode)
 	pageSnapshots, err := f.deps.PageReader.ReadPages(ctx, project, brief)
 	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
 	}
 	state.PageSnapshots = pageSnapshots
+	logNodeDone(ctx, state.CurrentNode, nodeStart, "PageReaderAgent 完成页面材料读取", fmt.Sprintf("pages=%d", len(pageSnapshots)))
 
 	state.CurrentNode = NodeMultimodalUnderstand
+	nodeStart = logNodeStart(ctx, state.CurrentNode)
 	report, err := f.deps.Understanding.BuildUnderstanding(ctx, project, brief, codeSnapshots, pageSnapshots)
 	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
 	}
 	state.UnderstandingReport = report
+	logNodeDone(ctx, state.CurrentNode, nodeStart, "MultimodalUnderstandingAgent 完成融合理解", fmt.Sprintf("features=%d workflows=%d", len(report.FeatureHypotheses), len(report.WorkflowCandidates)))
 
 	state.CurrentNode = NodeProductExplore
+	nodeStart = logNodeStart(ctx, state.CurrentNode)
 	productMap, err := f.deps.ProductMap.ExploreProduct(ctx, project, report)
 	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
 	}
 	state.ProductMap = productMap
+	logNodeDone(ctx, state.CurrentNode, nodeStart, "ProductMapAgent 完成产品地图生成", fmt.Sprintf("pages=%d features=%d workflows=%d", len(productMap.Pages), len(productMap.Features), len(productMap.Workflows)))
 
 	state.CurrentNode = NodeGraphGenerate
+	nodeStart = logNodeStart(ctx, state.CurrentNode)
 	graph, err := f.deps.GraphBuilder.GenerateGraph(ctx, project, productMap, report)
 	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
 	}
 	state.WorkflowGraph = graph
+	logNodeDone(ctx, state.CurrentNode, nodeStart, "GraphBuilderAgent 完成执行图生成", fmt.Sprintf("graph_id=%s nodes=%d", graph.ID, len(graph.Nodes)))
 
 	state.CurrentNode = NodeScriptPackage
+	nodeStart = logNodeStart(ctx, state.CurrentNode)
 	scriptPackage, err := f.deps.ScriptPackager.PackageScript(ctx, project, report, productMap, graph)
 	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
 	}
 	state.ScriptDocument = scriptPackage.Document
@@ -264,6 +324,15 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 
 	state.CurrentNode = NodeHumanApprove
 	state.Status = FlowStatusAwaitingHuman
+	logNodeDone(ctx, NodeScriptPackage, nodeStart, "ScriptPackagerAgent 完成执行包封装", fmt.Sprintf("steps=%d bundle=%t", len(scriptPackage.Document.Steps), scriptPackage.ExecutableBundle != nil))
+	log.Printf("cascade_flow awaiting_human project_id=%s elapsed_ms=%d", state.ProjectID, time.Since(startedAt).Milliseconds())
+	emitProgress(ctx, ProgressEvent{
+		Level:     ProgressLevelSuccess,
+		Node:      NodeHumanApprove,
+		Message:   "执行包已生成，等待人工审批",
+		Detail:    fmt.Sprintf("project_id=%s", state.ProjectID),
+		ElapsedMS: time.Since(startedAt).Milliseconds(),
+	})
 	return state, nil
 }
 
@@ -314,4 +383,58 @@ func fail(state *CascadeState, err error) *CascadeState {
 	state.Status = FlowStatusFailed
 	state.ErrorMessage = err.Error()
 	return state
+}
+
+func logNodeStart(ctx context.Context, node NodeName) time.Time {
+	startedAt := time.Now()
+	log.Printf("cascade_flow node_start node=%s", node)
+	emitProgress(ctx, ProgressEvent{
+		Level:   ProgressLevelInfo,
+		Node:    node,
+		Message: fmt.Sprintf("开始执行 %s", node),
+	})
+	return startedAt
+}
+
+func logNodeDone(ctx context.Context, node NodeName, startedAt time.Time, message string, detail string) {
+	elapsedMS := time.Since(startedAt).Milliseconds()
+	log.Printf("cascade_flow node_done node=%s elapsed_ms=%d %s", node, elapsedMS, detail)
+	emitProgress(ctx, ProgressEvent{
+		Level:     ProgressLevelSuccess,
+		Node:      node,
+		Message:   message,
+		Detail:    detail,
+		ElapsedMS: elapsedMS,
+	})
+}
+
+func logNodeError(ctx context.Context, node NodeName, startedAt time.Time, err error) {
+	elapsedMS := time.Since(startedAt).Milliseconds()
+	log.Printf("cascade_flow node_error node=%s elapsed_ms=%d error=%s", node, elapsedMS, err)
+	emitProgress(ctx, ProgressEvent{
+		Level:     ProgressLevelError,
+		Node:      node,
+		Message:   fmt.Sprintf("%s 执行失败", node),
+		Detail:    err.Error(),
+		ElapsedMS: elapsedMS,
+	})
+}
+
+func emitProgress(ctx context.Context, event ProgressEvent) {
+	if ctx == nil {
+		return
+	}
+	sink, ok := ctx.Value(progressSinkKey{}).(ProgressSink)
+	if !ok || sink == nil {
+		return
+	}
+	sink(event)
+}
+
+func codeFileCount(snapshots []model.CodeUnderstandingSnapshot) int {
+	total := 0
+	for _, snapshot := range snapshots {
+		total += snapshot.FileCount
+	}
+	return total
 }

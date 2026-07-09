@@ -1,4 +1,4 @@
-import type { ModelDiagnosticResult, ProjectWorkspaceView, RuntimeHealthView, ScenarioID } from "./domain";
+import type { ModelDiagnosticResult, ProjectWorkspaceView, RuntimeHealthView, RuntimeLogEntry, ScenarioID } from "./domain";
 import type {
   AssetKind,
   DemoWorkflowGraph,
@@ -23,6 +23,7 @@ export type DesktopBridgeClient = {
   mode: "mock" | "local";
   runtimeHealth(): Promise<BridgeResult<RuntimeHealthView>>;
   modelDiagnostics(): Promise<BridgeResult<ModelDiagnosticResult[]>>;
+  executionEvents(projectID: string, afterID?: string): Promise<BridgeResult<RuntimeLogEntry[]>>;
   createProject(scenarioID: ScenarioID): Promise<BridgeResult<ProjectWorkspaceView>>;
   listProjects(): Promise<BridgeResult<ProjectWorkspaceView[]>>;
   loadProject(projectID: string): Promise<BridgeResult<ProjectWorkspaceView>>;
@@ -100,6 +101,17 @@ type LocalCascadeState = {
   error_message?: string;
 };
 
+type LocalExecutionEvent = {
+  id: number;
+  project_id: string;
+  level: "info" | "success" | "warning" | "error";
+  node?: string;
+  message: string;
+  detail?: string;
+  elapsed_ms?: number;
+  created_at: string;
+};
+
 type LocalProjectContext = {
   id: string;
   name?: string;
@@ -164,6 +176,14 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         return { ok: false, error: result.error ?? "模型诊断不可用" };
       }
       return ok(result.data.map(modelDiagnosticFromLocal));
+    },
+    async executionEvents(projectID, afterID) {
+      const query = afterID ? `?after=${encodeURIComponent(afterID)}` : "";
+      const result = await requestLocal<LocalExecutionEvent[]>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/execution-events${query}`);
+      if (!result.ok || !result.data) {
+        return { ok: false, error: result.error ?? "运行日志不可用" };
+      }
+      return ok(result.data.map(runtimeLogFromLocalEvent));
     },
     async createProject(scenarioID) {
       const workspace = createWorkspace(scenarioID);
@@ -309,6 +329,9 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         mockDiagnostic("seedance", "video_operation", "seedance-2.0"),
       ]);
     },
+    async executionEvents() {
+      return ok([]);
+    },
     async createProject(scenarioID) {
       const project = createWorkspace(scenarioID);
       projects.set(project.id, project);
@@ -451,6 +474,8 @@ function ok<T>(data: T): BridgeResult<T> {
 }
 
 async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit): Promise<BridgeResult<T>> {
+  const startedAt = Date.now();
+  console.info("[Cascade Dev Bridge] request", init?.method ?? "GET", path);
   try {
     const response = await fetch(`${baseURL}${path}`, {
       ...init,
@@ -461,15 +486,31 @@ async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit
     });
     const payload = (await response.json()) as LocalBridgeResponse<T>;
     if (!response.ok || !payload.ok) {
+      console.error("[Cascade Dev Bridge] error", init?.method ?? "GET", path, response.status, payload.error);
       return { ok: false, error: payload.error ?? `本地 Dev Bridge 请求失败: ${response.status}` };
     }
     if (payload.data === undefined) {
+      console.error("[Cascade Dev Bridge] missing data", init?.method ?? "GET", path);
       return { ok: false, error: "本地 Dev Bridge 响应缺少 data" };
     }
+    console.info("[Cascade Dev Bridge] done", init?.method ?? "GET", path, `${Date.now() - startedAt}ms`);
     return { ok: true, data: payload.data };
   } catch (error) {
+    console.error("[Cascade Dev Bridge] unavailable", init?.method ?? "GET", path, error);
     return { ok: false, error: error instanceof Error ? error.message : "本地 Dev Bridge 不可用" };
   }
+}
+
+function runtimeLogFromLocalEvent(event: LocalExecutionEvent): RuntimeLogEntry {
+  return {
+    id: String(event.id),
+    time: new Date(event.created_at).toLocaleTimeString("zh-CN", { hour12: false }),
+    level: event.level,
+    message: event.message,
+    ...(event.detail ? { detail: event.detail } : {}),
+    ...(event.node ? { node: event.node } : {}),
+    ...(typeof event.elapsed_ms === "number" ? { elapsedMS: event.elapsed_ms } : {}),
+  };
 }
 
 export function userInputFromWorkspace(workspace: ProjectWorkspaceView): LocalUserInput {
