@@ -43,6 +43,19 @@ func ValidateClientExecutionPackageIntake(envelope *ExchangeEnvelope, pkg *Clien
 	return nil
 }
 
+func ValidateClientExecutionPackageForCloudExecution(pkg *ClientExecutionPackage) error {
+	if pkg == nil {
+		return errors.New("client execution package is nil")
+	}
+	if pkg.PackageID == "" || pkg.OrgID == "" || pkg.ProjectID == "" {
+		return errors.New("client execution package missing required identity fields")
+	}
+	if pkg.SchemaVersion != ClientExecutionPackageSchemaVersion {
+		return fmt.Errorf("client execution package schema_version must be %q", ClientExecutionPackageSchemaVersion)
+	}
+	return validateClientExecutionPackageContents(pkg)
+}
+
 func ValidateRecordingResultPackageForRender(result *RecordingResultPackage, source *ClientExecutionPackage) error {
 	if result == nil {
 		return errors.New("recording result package is nil")
