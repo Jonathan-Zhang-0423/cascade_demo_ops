@@ -71,27 +71,27 @@ func (a *MultimodalUnderstandingAgent) BuildUnderstanding(
 type multimodalLLMOutput struct {
 	Summary  string `json:"summary"`
 	Features []struct {
-		ID            string              `json:"id"`
-		Name          string              `json:"name"`
-		Kind          string              `json:"kind"`
-		UserValue     string              `json:"user_value"`
-		BusinessValue string              `json:"business_value"`
-		Priority      string              `json:"priority"`
-		KeyActions    []string            `json:"key_actions"`
-		BestUseCases  []model.DemoUseCase `json:"best_use_cases"`
-		Risks         []string            `json:"risks"`
+		ID            string               `json:"id"`
+		Name          string               `json:"name"`
+		Kind          string               `json:"kind"`
+		UserValue     string               `json:"user_value"`
+		BusinessValue string               `json:"business_value"`
+		Priority      string               `json:"priority"`
+		KeyActions    flexibleStringSlice  `json:"key_actions"`
+		BestUseCases  flexibleDemoUseCases `json:"best_use_cases"`
+		Risks         flexibleStringSlice  `json:"risks"`
 	} `json:"features"`
 	Workflows []struct {
-		ID             string            `json:"id"`
-		Name           string            `json:"name"`
-		UseCase        model.DemoUseCase `json:"use_case"`
-		EstimatedSteps int               `json:"estimated_steps"`
-		ValueScore     float64           `json:"value_score"`
-		Feasibility    float64           `json:"feasibility"`
-		RiskNotes      []string          `json:"risk_notes"`
+		ID             string              `json:"id"`
+		Name           string              `json:"name"`
+		UseCase        flexibleDemoUseCase `json:"use_case"`
+		EstimatedSteps int                 `json:"estimated_steps"`
+		ValueScore     float64             `json:"value_score"`
+		Feasibility    float64             `json:"feasibility"`
+		RiskNotes      flexibleStringSlice `json:"risk_notes"`
 	} `json:"workflows"`
-	SafetyNotes []string `json:"safety_notes"`
-	Confidence  float64  `json:"confidence"`
+	SafetyNotes flexibleStringSlice `json:"safety_notes"`
+	Confidence  float64             `json:"confidence"`
 }
 
 func (a *MultimodalUnderstandingAgent) enhanceReportWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport) (*llm.CallTrace, error) {
@@ -117,14 +117,15 @@ func (a *MultimodalUnderstandingAgent) enhanceReportWithLLM(ctx context.Context,
 	}
 	var trace *llm.CallTrace
 	var err error
-	if len(report.PageSnapshots) > 0 {
+	images := imageInputsFromPages(report.PageSnapshots)
+	if len(images) > 0 {
 		trace, err = a.llm.GenerateMultimodal(ctx, config.ModelTaskMultimodalUnderstanding, llm.MultimodalRequest{
 			System:      request.System,
 			User:        request.User,
 			SchemaName:  request.SchemaName,
 			MaxTokens:   request.MaxTokens,
 			Temperature: request.Temperature,
-			Images:      imageInputsFromPages(report.PageSnapshots),
+			Images:      images,
 		}, &output)
 	} else {
 		trace, err = a.llm.GenerateJSON(ctx, config.ModelTaskPlanning, request, &output)
@@ -147,9 +148,9 @@ func (a *MultimodalUnderstandingAgent) enhanceReportWithLLM(ctx context.Context,
 				BusinessValue: feature.BusinessValue,
 				Priority:      firstNonEmpty(feature.Priority, "supporting"),
 				BestAudience:  []string{project.TargetAudience},
-				BestUseCases:  feature.BestUseCases,
-				KeyActions:    feature.KeyActions,
-				Risks:         feature.Risks,
+				BestUseCases:  []model.DemoUseCase(feature.BestUseCases),
+				KeyActions:    stringSlice(feature.KeyActions),
+				Risks:         stringSlice(feature.Risks),
 				EvidenceRefs:  report.EvidenceRefs,
 			})
 		}
@@ -161,19 +162,19 @@ func (a *MultimodalUnderstandingAgent) enhanceReportWithLLM(ctx context.Context,
 			report.WorkflowCandidates = append(report.WorkflowCandidates, &model.WorkflowCandidate{
 				ID:             firstNonEmpty(workflow.ID, "workflow_llm_"+shortHash(name)),
 				Name:           name,
-				UseCase:        workflow.UseCase,
+				UseCase:        demoUseCase(workflow.UseCase),
 				AudienceID:     "audience_primary",
 				FeatureRefs:    []string{"feature_primary_value"},
 				EstimatedSteps: workflow.EstimatedSteps,
 				ValueScore:     workflow.ValueScore,
 				Feasibility:    workflow.Feasibility,
-				RiskNotes:      workflow.RiskNotes,
+				RiskNotes:      stringSlice(workflow.RiskNotes),
 				EvidenceRefs:   report.EvidenceRefs,
 			})
 		}
 	}
 	if report.SafetyReport != nil {
-		report.SafetyReport.Notes = uniqueStrings(append(report.SafetyReport.Notes, output.SafetyNotes...))
+		report.SafetyReport.Notes = uniqueStrings(append(report.SafetyReport.Notes, stringSlice(output.SafetyNotes)...))
 	}
 	if output.Confidence > 0 {
 		report.Confidence = output.Confidence

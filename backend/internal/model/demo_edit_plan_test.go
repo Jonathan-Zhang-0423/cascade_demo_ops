@@ -59,8 +59,12 @@ func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
 		PlanID:               "edit_plan_run_1",
 		CatalogID:            catalog.CatalogID,
 		Objective:            "Create a concise demo from existing recorded UI assets.",
+		SourceAuthority:      DemoEditSourceAuthorityCustomerSideAgent,
+		ModelRole:            DemoEditModelRolePresentationOptimizerOnly,
 		SourceMaterialPolicy: DemoEditSourceMaterialPolicyExistingAssetsOnly,
 		ScriptOrderPolicy:    DemoEditScriptOrderPolicyPreserveRequiredStepOrder,
+		LockedFields:         DemoEditRequiredLockedFields,
+		ModelEditableFields:  DemoEditAllowedModelEditableFields,
 		TargetDurationMS:     60000,
 		Shots: []DemoEditShot{{
 			ID:                "shot_001_open_dashboard",
@@ -120,6 +124,18 @@ func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
 	}
 	if gotPlan.ScriptOrderPolicy != DemoEditScriptOrderPolicyPreserveRequiredStepOrder {
 		t.Fatalf("plan order policy = %q", gotPlan.ScriptOrderPolicy)
+	}
+	if gotPlan.SourceAuthority != DemoEditSourceAuthorityCustomerSideAgent {
+		t.Fatalf("plan source authority = %q", gotPlan.SourceAuthority)
+	}
+	if gotPlan.ModelRole != DemoEditModelRolePresentationOptimizerOnly {
+		t.Fatalf("plan model role = %q", gotPlan.ModelRole)
+	}
+	if !containsString(gotPlan.LockedFields, "source_artifact_id") || !containsString(gotPlan.LockedFields, "required_step_order") {
+		t.Fatalf("plan locked fields lost source facts: %+v", gotPlan.LockedFields)
+	}
+	if !containsString(gotPlan.ModelEditableFields, "overlays.text") || !containsString(gotPlan.ModelEditableFields, "global_style.pacing") {
+		t.Fatalf("plan editable fields lost presentation whitelist: %+v", gotPlan.ModelEditableFields)
 	}
 	if gotPlan.Shots[0].SourceTimeRangeMS == nil || gotPlan.Shots[0].SourceTimeRangeMS[0] != 0 || gotPlan.Shots[0].SourceTimeRangeMS[1] != 1200 {
 		t.Fatalf("source time range did not round-trip: %+v", gotPlan.Shots[0].SourceTimeRangeMS)
@@ -223,8 +239,12 @@ func TestDemoEditPlanWorkerJSONCompatibility(t *testing.T) {
   "plan_id": "edit_plan_run_1",
   "catalog_id": "catalog_run_1",
   "objective": "Create a concise demo from the recorded product interaction. Do not create new images or video.",
+  "source_authority": "customer_side_agent",
+  "model_role": "presentation_optimizer_only",
   "source_material_policy": "existing_assets_only",
   "script_order_policy": "preserve_required_step_order",
+  "locked_fields": ["source_authority", "model_role", "source_material_policy", "script_order_policy", "source_artifact_id", "source_step_id", "source_time_range_ms", "required_step_order"],
+  "model_editable_fields": ["purpose", "overlays.text", "global_style.color_grade", "global_style.pacing", "global_style.transition_style", "operations.zoom", "operations.speed", "operations.style"],
   "target_duration_ms": 60000,
   "shots": [{
     "id": "shot_001_open",
@@ -284,6 +304,12 @@ func TestDemoEditPlanWorkerJSONCompatibility(t *testing.T) {
 	}
 	if plan.Shots[0].SourceTimeRangeMS == nil || plan.Shots[0].SourceTimeRangeMS[0] != 0 {
 		t.Fatalf("worker plan time range did not map to Go DTO: %+v", plan.Shots[0].SourceTimeRangeMS)
+	}
+	if plan.SourceAuthority != DemoEditSourceAuthorityCustomerSideAgent || plan.ModelRole != DemoEditModelRolePresentationOptimizerOnly {
+		t.Fatalf("worker plan collaboration boundary did not map to Go DTO: %+v", plan)
+	}
+	if !containsString(plan.LockedFields, "source_time_range_ms") || !containsString(plan.ModelEditableFields, "operations.zoom") {
+		t.Fatalf("worker plan field ownership did not map to Go DTO: locked=%+v editable=%+v", plan.LockedFields, plan.ModelEditableFields)
 	}
 	if plan.Shots[0].Operations[1].Zoom == nil || *plan.Shots[0].Operations[1].Zoom != 1.18 {
 		t.Fatalf("worker plan zoom operation did not map to Go DTO: %+v", plan.Shots[0].Operations[1])

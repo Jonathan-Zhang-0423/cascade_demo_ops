@@ -39,6 +39,24 @@ POST /v1/result-packages/:id/ack
 
 The Go DTOs live in `backend/internal/model/exchange.go`.
 
+Cloud intake validation lives in
+`backend/internal/model/exchange_validation.go`. It validates the envelope,
+payload schema, identity binding, upload approval, executable script bundle,
+recording run spec, graph/script hash binding, and renderable recording result
+packages before downstream execution or rendering.
+
+The current service boundary lives in `backend/internal/app/exchange_intake.go`
+and maps the API contract to callable methods:
+
+- `Init` -> `POST /v1/execution-packages/init`
+- `Upload` -> `POST /v1/execution-packages`
+- `Status` -> `GET /v1/execution-packages/:id/status`
+- `GetResultPackage` -> `GET /v1/result-packages/:id`
+- `AckResultPackage` -> `POST /v1/result-packages/:id/ack`
+
+This layer currently uses in-memory state; production storage should implement
+the existing `repository.ExchangeRepository` contract.
+
 ## Security Boundary
 
 - App uploads only structure summaries, hashes, redacted evidence, and encrypted
@@ -86,3 +104,22 @@ Repair packages reuse the normal upload API. The repaired
 `ExecutableRecordingScriptBundle` carries `repair_lineage`. The repaired script
 must pass the same hash binding, AST/security validation, allowed-domain checks,
 and human approval flow as a first-run package.
+
+## Render Handoff
+
+The AIGC render stage must not consume an ad hoc payload. It receives either a
+validated `RecordingResultPackage` or a `RenderRequest` created from one via
+`executor.NewRenderRequestFromRecordingResult`.
+
+```text
+ClientExecutionPackage
+  -> validated executable script bundle
+  -> cloud recording run
+  -> RecordingResultPackage
+  -> RenderRequest
+  -> AssetTimelineCatalog
+  -> DemoEditPlan
+```
+
+This keeps the cloud-side video planning layer aligned with the customer-side
+agent protocol instead of inventing a second UI interaction format.

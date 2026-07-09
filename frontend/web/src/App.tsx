@@ -4,6 +4,7 @@ import { agentPipelineItems, codeSummaryFromWorkspace, updateWorkspaceInputs } f
 import { createBridgeClient } from "./bridge";
 import type {
 	ApprovalChecklistState,
+	ModelDiagnosticResult,
 	NavSection,
 	ProjectWorkspaceView,
 	RuntimeHealthView,
@@ -28,6 +29,9 @@ export function App() {
 	const [activeNav, setActiveNav] = useState<NavSection>("projects");
 	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createWorkspace("product_demo"));
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthView | undefined>();
+  const [modelDiagnostics, setModelDiagnostics] = useState<ModelDiagnosticResult[]>([]);
+  const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
+  const [diagnosticsError, setDiagnosticsError] = useState("");
   const [checklist, setChecklist] = useState<ApprovalChecklistState>(initialChecklist);
   const [selectedNodeID, setSelectedNodeID] = useState(workspace.planReview.graph.nodes[0]?.id ?? "");
   const [isGeneratingPackage, setIsGeneratingPackage] = useState(false);
@@ -81,6 +85,18 @@ export function App() {
       setActiveNav("execution_packages");
     }
     setIsGeneratingPackage(false);
+  }
+
+  async function runModelDiagnostics() {
+    setIsRunningDiagnostics(true);
+    setDiagnosticsError("");
+    const result = await bridge.modelDiagnostics();
+    if (result.ok && result.data) {
+      setModelDiagnostics(result.data);
+    } else {
+      setDiagnosticsError(result.error ?? "模型诊断失败");
+    }
+    setIsRunningDiagnostics(false);
   }
 
   async function uploadPackage() {
@@ -190,7 +206,16 @@ export function App() {
               />
             ) : null}
             {activeNav === "assets" ? <AssetReview workspace={workspace} onApprove={approveAssets} /> : null}
-            {activeNav === "settings" ? <SettingsPanel workspace={workspace} {...(runtimeHealth ? { runtimeHealth } : {})} /> : null}
+            {activeNav === "settings" ? (
+              <SettingsPanel
+                workspace={workspace}
+                diagnostics={modelDiagnostics}
+                diagnosticsError={diagnosticsError}
+                isRunningDiagnostics={isRunningDiagnostics}
+                onRunDiagnostics={runModelDiagnostics}
+                {...(runtimeHealth ? { runtimeHealth } : {})}
+              />
+            ) : null}
           </section>
           <Inspector workspace={workspace} selectedNode={selectedNode} blockedReasons={blockedReasons} />
         </div>
@@ -698,6 +723,7 @@ function PackageApproval({
           <Fact label="加密状态" value={workspace.packagePreview.encrypted ? "已启用" : "缺失"} />
           <Fact label="允许域名" value={workspace.planReview.allowedDomains.join("、")} />
           <Fact label="打码规则" value={workspace.planReview.redactionSelectors.join("、")} />
+          <Fact label="模型来源" value={workspace.modelProvenance?.join("；") ?? "待生成"} />
           {bundle?.repair_lineage ? <Fact label="修复来源" value={`${bundle.repair_lineage.source_result_id} / 第 ${bundle.repair_lineage.repair_attempt} 次`} /> : null}
         </div>
         <div className="checklist-panel">
@@ -879,7 +905,21 @@ function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView
   );
 }
 
-function SettingsPanel({ workspace, runtimeHealth }: { workspace: ProjectWorkspaceView; runtimeHealth?: RuntimeHealthView }) {
+function SettingsPanel({
+  workspace,
+  runtimeHealth,
+  diagnostics,
+  diagnosticsError,
+  isRunningDiagnostics,
+  onRunDiagnostics,
+}: {
+  workspace: ProjectWorkspaceView;
+  runtimeHealth?: RuntimeHealthView;
+  diagnostics: ModelDiagnosticResult[];
+  diagnosticsError: string;
+  isRunningDiagnostics: boolean;
+  onRunDiagnostics: () => void;
+}) {
   const providerRows = [
     ["GLM", "glm"],
     ["Kimi", "kimi"],
@@ -953,13 +993,57 @@ function SettingsPanel({ workspace, runtimeHealth }: { workspace: ProjectWorkspa
             </tr>
           </thead>
           <tbody>
-            {(routeRows.length > 0 ? routeRows : [["计划生成", "kimi", "kimi-2.5"], ["代码阅读", "glm", "glm-5.2"], ["多模态理解", "minimax", "minimax-m3"], ["视频操作", "seedance", "seedance-2.0"]]).map(([task, provider, modelName]) => (
+            {(routeRows.length > 0 ? routeRows : [["计划生成", "kimi", "kimi-k2.7-code"], ["代码阅读", "glm", "glm-5.2"], ["多模态理解", "minimax", "minimax-m3"], ["视频操作", "seedance", "seedance-2.0"]]).map(([task, provider, modelName]) => (
               <tr key={task}>
                 <td>{task}</td>
                 <td>{provider}</td>
                 <td>{modelName}</td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </section>
+      <section className="table-section">
+        <SectionTitle title="真实模型诊断" meta="只返回脱敏状态" />
+        <div className="action-row">
+          <button type="button" className="secondary-action" onClick={onRunDiagnostics} disabled={isRunningDiagnostics}>
+            <span className="button-icon">测</span>
+            {isRunningDiagnostics ? "诊断中" : "运行诊断"}
+          </button>
+          <small>{diagnosticsError || "用于确认 Kimi/GLM/MiniMax 等真实模型是否可调用。"}</small>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>任务</th>
+              <th>供应商</th>
+              <th>模型</th>
+              <th>Base</th>
+              <th>结果</th>
+              <th>错误</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(diagnostics.length > 0 ? diagnostics : []).map((item) => (
+              <tr key={`${item.provider}-${item.task ?? item.model}`}>
+                <td>{routeLabels[item.task ?? ""] ?? item.task ?? "未绑定任务"}</td>
+                <td>{item.provider}</td>
+                <td>{item.model}</td>
+                <td>{[item.baseURLHost, item.baseURLPath].filter(Boolean).join("") || "未配置"}</td>
+                <td>
+                  <StatusPill
+                    label={item.ok ? `可调用 ${item.latencyMS ?? 0}ms` : item.configured ? `失败${item.httpStatus ? ` ${item.httpStatus}` : ""}` : "未配置"}
+                    tone={item.ok ? "green" : item.configured ? "yellow" : "neutral"}
+                  />
+                </td>
+                <td>{item.errorClass ?? item.error ?? "无"}</td>
+              </tr>
+            ))}
+            {diagnostics.length === 0 ? (
+              <tr>
+                <td colSpan={6}>尚未运行诊断。</td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </section>

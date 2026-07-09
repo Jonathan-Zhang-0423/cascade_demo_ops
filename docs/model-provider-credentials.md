@@ -43,13 +43,21 @@ Seedance 的 key 读取顺序是：`SEEDANCE_API_KEY` -> `DOUBAO_API_KEY` -> `AR
 
 ## 当前状态
 
-本阶段只做配置边界预留，不接真实模型 API。多模态理解链路仍使用 deterministic mock，后续可以按 provider 增加 adapter。
+本阶段已经接入 provider-neutral LLM adapter。`CASCADE_LLM_MODE=real` 时会真实调用模型，失败直接返回脱敏错误；`auto` 会在模型不可用时降级 deterministic；`deterministic` 完全不调用外部模型。
+
+可通过桌面设置页的“真实模型诊断”或 Dev Bridge 接口检查当前配置：
+
+```text
+POST /v1/desktop/model-diagnostics
+```
+
+诊断结果只包含 provider、task、model、base URL 的 host/path、HTTP 状态、脱敏错误和延迟，不返回 API Key、Authorization 或 prompt。
 
 ## 默认任务路由
 
 | Task | Provider | Model | Override env |
 | --- | --- | --- | --- |
-| 计划/执行方案生成 | Kimi | `kimi-2.5` | `CASCADE_PLANNING_PROVIDER`, `CASCADE_PLANNING_MODEL` |
+| 计划/执行方案生成 | Kimi | `kimi-k2.7-code` | `CASCADE_PLANNING_PROVIDER`, `CASCADE_PLANNING_MODEL` |
 | 代码阅读/结构摘要 | GLM | `glm-5.2` | `CASCADE_CODE_READING_PROVIDER`, `CASCADE_CODE_READING_MODEL` |
 | 多模态需求/页面理解 | Minimax | `minimax-m3` | `CASCADE_MULTIMODAL_PROVIDER`, `CASCADE_MULTIMODAL_MODEL` |
 | 视频操作/视频生成能力 | Seedance | `seedance-2.0` | `CASCADE_VIDEO_PROVIDER`, `CASCADE_VIDEO_MODEL` |

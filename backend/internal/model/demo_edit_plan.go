@@ -18,6 +18,18 @@ const (
 	DemoEditScriptOrderPolicyPreserveRequiredStepOrder DemoEditScriptOrderPolicy = "preserve_required_step_order"
 )
 
+type DemoEditSourceAuthority string
+
+const (
+	DemoEditSourceAuthorityCustomerSideAgent DemoEditSourceAuthority = "customer_side_agent"
+)
+
+type DemoEditModelRole string
+
+const (
+	DemoEditModelRolePresentationOptimizerOnly DemoEditModelRole = "presentation_optimizer_only"
+)
+
 type EditOperationType string
 
 const (
@@ -91,6 +103,28 @@ var DemoEditProhibitedPlanKeys = []string{
 	"new_ui_action",
 	"browser_action",
 	"action_spec",
+}
+
+var DemoEditRequiredLockedFields = []string{
+	"source_authority",
+	"model_role",
+	"source_material_policy",
+	"script_order_policy",
+	"source_artifact_id",
+	"source_step_id",
+	"source_time_range_ms",
+	"required_step_order",
+}
+
+var DemoEditAllowedModelEditableFields = []string{
+	"purpose",
+	"overlays.text",
+	"global_style.color_grade",
+	"global_style.pacing",
+	"global_style.transition_style",
+	"operations.zoom",
+	"operations.speed",
+	"operations.style",
 }
 
 type AssetTimelineCatalog struct {
@@ -167,8 +201,12 @@ type DemoEditPlan struct {
 	PlanID               string                       `json:"plan_id"`
 	CatalogID            string                       `json:"catalog_id,omitempty"`
 	Objective            string                       `json:"objective,omitempty"`
+	SourceAuthority      DemoEditSourceAuthority      `json:"source_authority"`
+	ModelRole            DemoEditModelRole            `json:"model_role"`
 	SourceMaterialPolicy DemoEditSourceMaterialPolicy `json:"source_material_policy"`
 	ScriptOrderPolicy    DemoEditScriptOrderPolicy    `json:"script_order_policy"`
+	LockedFields         []string                     `json:"locked_fields"`
+	ModelEditableFields  []string                     `json:"model_editable_fields"`
 	TargetDurationMS     int                          `json:"target_duration_ms,omitempty"`
 	Shots                []DemoEditShot               `json:"shots"`
 	GlobalStyle          *DemoEditGlobalStyle         `json:"global_style,omitempty"`

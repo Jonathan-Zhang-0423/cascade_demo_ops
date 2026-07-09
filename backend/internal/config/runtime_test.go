@@ -89,7 +89,7 @@ func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := map[ModelTask]ModelTaskRoute{
-		ModelTaskPlanning:                {Provider: ModelProviderKimi, Model: "kimi-2.5"},
+		ModelTaskPlanning:                {Provider: ModelProviderKimi, Model: "kimi-k2.7-code"},
 		ModelTaskCodeReading:             {Provider: ModelProviderGLM, Model: "glm-5.2"},
 		ModelTaskMultimodalUnderstanding: {Provider: ModelProviderMinimax, Model: "minimax-m3"},
 		ModelTaskVideoOperation:          {Provider: ModelProviderSeedance, Model: "seedance-2.0"},
@@ -100,7 +100,7 @@ func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
 			t.Fatalf("%s route = %+v, want provider=%s model=%s", task, got, want.Provider, want.Model)
 		}
 	}
-	if cfg.ModelProviders[ModelProviderKimi].DefaultModel != "kimi-2.5" {
+	if cfg.ModelProviders[ModelProviderKimi].DefaultModel != "kimi-k2.7-code" {
 		t.Fatalf("kimi default model = %q", cfg.ModelProviders[ModelProviderKimi].DefaultModel)
 	}
 	if cfg.ModelProviders[ModelProviderGLM].DefaultModel != "glm-5.2" {
@@ -174,8 +174,8 @@ func TestRuntimeConfigAlwaysReservesDomesticProviderSlots(t *testing.T) {
 			t.Fatalf("unexpected provider placeholder for %s: %+v", provider, credential)
 		}
 	}
-	if cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel != "" {
-		t.Fatalf("deepseek default should be empty until explicitly used, got %q", cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel)
+	if cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel != "deepseek-v4-flash" {
+		t.Fatalf("deepseek default model = %q", cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel)
 	}
 }
 

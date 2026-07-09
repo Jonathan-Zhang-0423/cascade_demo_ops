@@ -1,0 +1,346 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/model"
+)
+
+func TestExchangeIntakeServiceLifecycle(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	service.now = fixedClock(time.Date(2026, 7, 9, 16, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{
+		OrgID:       pkg.OrgID,
+		ProjectID:   pkg.ProjectID,
+		PackageKind: model.ExchangePackageKindClientExecution,
+		Producer:    model.ExchangeProducer{AppVersion: "test", RuntimeProfile: "cloud"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, service.now())
+	uploadResp, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: envelope}, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploadResp.Status != model.ExchangePackageStatusAccepted || uploadResp.ExchangePackageID == "" || uploadResp.CloudJobID == "" {
+		t.Fatalf("unexpected upload response: %+v", uploadResp)
+	}
+
+	status, err := service.Status(ctx, pkg.OrgID, uploadResp.ExchangePackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != model.ExchangePackageStatusAccepted {
+		t.Fatalf("expected accepted status, got %+v", status)
+	}
+
+	result := sampleRecordingResultForAppTest(pkg)
+	completed, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, uploadResp.ExchangePackageID, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != model.ExchangePackageStatusCompleted || completed.ResultPackageID == "" {
+		t.Fatalf("expected completed package with result id, got %+v", completed)
+	}
+
+	gotResult, err := service.GetResultPackage(ctx, pkg.OrgID, completed.ResultPackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotResult.ResultID != result.ResultID || gotResult.SourcePackageID != pkg.PackageID {
+		t.Fatalf("result package mismatch: %+v", gotResult)
+	}
+
+	ack, err := service.AckResultPackage(ctx, pkg.OrgID, model.ResultPackageAckRequest{ResultPackageID: completed.ResultPackageID, AckedByInstallID: "install_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Status != model.RecordingResultStatusAcked || ack.ResultPackageID != completed.ResultPackageID {
+		t.Fatalf("unexpected ack response: %+v", ack)
+	}
+}
+
+func TestDesktopBridgeExchangePackageResponsesAreJSONSafe(t *testing.T) {
+	bridge, err := NewDesktopBridge(config.AppRuntimeConfig{
+		Profile:         config.ProfileCloud,
+		Environment:     "test",
+		Mode:            model.AppModeWeb,
+		DatabaseDialect: config.DatabaseSQLite,
+		DataRoot:        t.TempDir(),
+		ArtifactRoot:    t.TempDir(),
+		CacheRoot:       t.TempDir(),
+		LogRoot:         t.TempDir(),
+		ResourceRoot:    t.TempDir(),
+		DevRepoRoot:     t.TempDir(),
+		SidecarPaths:    map[string]string{},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg := sampleClientExecutionPackageForAppTest(t)
+
+	initResponse := bridge.InitExecutionPackage(model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if !initResponse.OK {
+		t.Fatalf("InitExecutionPackage error: %s", initResponse.Error)
+	}
+	var initPayload model.ExecutionPackageInitResponse
+	if err := json.Unmarshal(initResponse.Data, &initPayload); err != nil {
+		t.Fatal(err)
+	}
+	if initPayload.UploadID == "" {
+		t.Fatalf("expected upload id: %+v", initPayload)
+	}
+
+	envelope := sampleEnvelopeForAppTest(t, pkg, time.Now().UTC())
+	uploadResponse := bridge.UploadExecutionPackage(model.ExecutionPackageUploadRequest{UploadID: initPayload.UploadID, Envelope: envelope}, pkg)
+	if !uploadResponse.OK {
+		t.Fatalf("UploadExecutionPackage error: %s", uploadResponse.Error)
+	}
+	var uploadPayload model.ExecutionPackageUploadResponse
+	if err := json.Unmarshal(uploadResponse.Data, &uploadPayload); err != nil {
+		t.Fatal(err)
+	}
+	if uploadPayload.Status != model.ExchangePackageStatusAccepted {
+		t.Fatalf("expected accepted upload: %+v", uploadPayload)
+	}
+}
+
+func sampleClientExecutionPackageForAppTest(t *testing.T) model.ClientExecutionPackage {
+	t.Helper()
+	now := time.Date(2026, 7, 9, 15, 30, 0, 0, time.UTC)
+	graph := model.NewDemoWorkflowGraph("graph_1", "project_1", "https://app.example.com/dashboard")
+	graph.Status = model.GraphStatusApproved
+	graph.Nodes = []*model.GraphNode{{
+		ID:              "node_open_dashboard",
+		Type:            model.GraphNodeTypeAction,
+		ExpectedOutcome: "Dashboard loads",
+		ActionSpec:      &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://app.example.com/dashboard"}},
+		Capture:         &model.CaptureSpec{Screenshot: true, Video: true},
+	}}
+	graph.Edges = []*model.GraphEdge{}
+	graphDigest, err := model.DigestCanonicalJSON(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	doc := &model.ExecutionScriptDocument{
+		ID:              "script_1",
+		ProjectID:       "project_1",
+		WorkflowGraphID: graph.ID,
+		GraphVersion:    graph.Version,
+		SchemaVersion:   model.ExecutionScriptDocumentSchemaVersion,
+		Status:          model.ScriptDocumentStatusApproved,
+		WorkflowGraph:   graph,
+		RecordingRunSpec: model.RecordingRunSpec{
+			RunID:          "run_1",
+			BaseURL:        "https://app.example.com",
+			AllowedDomains: []string{"app.example.com"},
+			Browser:        model.BrowserRunSpec{Engine: "chromium", Headless: true},
+			Timeline:       model.RecordingTimeline{TargetDurationSec: 30},
+			Outputs:        model.RecordingOutputRequest{RawRecording: true, Trace: true, ScreenshotPack: true, StepByStepDocs: true},
+			Redactions:     model.RedactionPolicy{},
+			FailurePolicy:  model.RecordingFailurePolicy{RetryAttempts: 1, SelectorRepairAllowed: true},
+		},
+		Steps: []model.ScriptStep{{
+			ID:              "step_1",
+			Order:           1,
+			NodeID:          "node_open_dashboard",
+			PageTarget:      model.ScriptPageTarget{URL: "https://app.example.com/dashboard"},
+			Action:          model.ScriptActionInstruction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://app.example.com/dashboard"}},
+			ExpectedOutcome: "Dashboard loads",
+			Capture:         model.CaptureSpec{Screenshot: true, Video: true},
+			Timing:          model.NodeTimingHint{NodeID: "node_open_dashboard", DurationMS: 1200},
+			Narrative:       model.NarrativeCue{Title: "Open dashboard"},
+			Blocking:        true,
+		}},
+		SafetyPolicy:      model.ScriptSafetyPolicy{AllowedDomains: []string{"app.example.com"}, Redactions: model.RedactionPolicy{}},
+		Reproducibility:   model.ReproducibilitySpec{GraphHashSHA256: graphDigest},
+		ApprovalChecklist: model.ScriptApprovalChecklist{HumanApprovalRequired: true, SourceSummaryOnly: true},
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	docHash, err := doc.ComputeScriptHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Reproducibility.ScriptHashSHA256 = docHash
+
+	source := `type CascadeRecordingContext = { page: any; secrets: any; capture: any; assert: any; log: any };
+type CascadeRecordingResult = { ok: boolean };
+export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise<CascadeRecordingResult> {
+  await ctx.log.step("node_open_dashboard", "Open dashboard");
+  await ctx.page.goto("https://app.example.com/dashboard");
+  return { ok: true };
+}`
+	markdown := "# Approval\n\n1. Open dashboard"
+	scriptHash := model.SHA256Hex([]byte(source))
+	markdownHash := model.SHA256Hex([]byte(markdown))
+	bundle := &model.ExecutableRecordingScriptBundle{
+		ID:              "bundle_1",
+		ProjectID:       "project_1",
+		WorkflowGraphID: graph.ID,
+		SchemaVersion:   model.ExecutableRecordingScriptBundleSchemaVersion,
+		Status:          model.ExecutableScriptBundleStatusValidated,
+		ScriptManifest: model.ExecutableScriptManifest{
+			ScriptID:            "recording_graph_1",
+			Version:             1,
+			Language:            "typescript",
+			Runtime:             "playwright-restricted-sandbox",
+			EntryFunction:       "runCascadeRecording",
+			Generator:           "test",
+			GeneratorVersion:    "0.1.0",
+			DependencyAllowlist: []string{},
+			ContextAPIs:         []string{"ctx.page", "ctx.log"},
+			StepNodeIDs:         []string{"node_open_dashboard"},
+		},
+		PlanJSON:         doc,
+		PlaywrightScript: model.ExecutableScriptSource{InlineSource: source, MimeType: "text/typescript", SHA256: scriptHash, SizeBytes: int64(len(source))},
+		ApprovalMarkdown: model.ApprovalMarkdownDocument{InlineMarkdown: markdown, MimeType: "text/markdown", SHA256: markdownHash, SizeBytes: int64(len(markdown))},
+		SecurityPolicy: model.ExecutableScriptSecurityPolicy{
+			AllowedDomains:       []string{"app.example.com"},
+			Redactions:           model.RedactionPolicy{},
+			AllowedContextAPIs:   []string{"ctx.page", "ctx.log"},
+			AllowedPageMethods:   []string{"goto"},
+			ForbiddenIdentifiers: []string{"import", "require", "eval", "process", "fetch"},
+			NetworkPolicy:        "allowed_domains_only_via_ctx_page",
+			FileSystemPolicy:     "no_direct_fs_access",
+		},
+		Reproducibility: model.ExecutableScriptReproducibility{
+			PlanHashSHA256:     docHash,
+			ScriptHashSHA256:   scriptHash,
+			MarkdownHashSHA256: markdownHash,
+			GraphHashSHA256:    graphDigest,
+		},
+		Validation: &model.ExecutableScriptValidation{Valid: true, ValidatedAt: now},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	bundleHash, err := bundle.ComputeBundleHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.Reproducibility.BundleHashSHA256 = bundleHash
+
+	return model.ClientExecutionPackage{
+		PackageID:     "pkg_1",
+		OrgID:         "org_1",
+		ProjectID:     "project_1",
+		SchemaVersion: model.ClientExecutionPackageSchemaVersion,
+		CreatedAt:     now,
+		ApprovedAt:    now,
+		ProjectContextSummary: model.ProjectContextSummary{
+			ContextID:      "ctx_1",
+			SchemaVersion:  model.ProjectContextSchemaVersion,
+			Mode:           model.AppModeWeb,
+			ProductURL:     "https://app.example.com",
+			TargetAudience: "sales",
+		},
+		ProductMapSummary:      model.ProductMapSummary{ProductMapID: "map_1", Version: 1, Summary: "Dashboard flow"},
+		WorkflowGraph:          graph,
+		RecordingRunSpec:       doc.RecordingRunSpec,
+		ExecutableScriptBundle: bundle,
+		CredentialGrants: []model.CredentialGrant{{
+			GrantID:                  "grant_1",
+			Kind:                     "demo_account",
+			Purpose:                  "record_demo",
+			CloudSecretRef:           "vault://grant_1",
+			AllowedDomains:           []string{"app.example.com"},
+			RotationRequiredAfterRun: true,
+			DeleteAfterRun:           true,
+		}},
+		EvidenceBundle:  model.EvidenceBundle{EvidenceRefs: []model.EvidenceRef{{ID: "ev_1", Kind: model.EvidenceKindRequirementDoc}}},
+		Reproducibility: model.ReproducibilitySpec{GraphHashSHA256: graphDigest, ScriptHashSHA256: docHash},
+		SafetyReport: model.PackageSafetyReport{
+			AllowedToUpload: true,
+			UploadMode:      "structure_summary_only",
+			HumanApproval: model.UserApprovalRecord{
+				ApprovalID:       "approval_1",
+				ApprovedByUserID: "user_1",
+				ApprovedAt:       now,
+				PlanDigestSHA256: graphDigest,
+				ReviewedNodeIDs:  []string{"node_open_dashboard"},
+			},
+		},
+	}
+}
+
+func sampleEnvelopeForAppTest(t *testing.T, pkg model.ClientExecutionPackage, now time.Time) model.ExchangeEnvelope {
+	t.Helper()
+	digest, err := model.DigestCanonicalJSON(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return model.ExchangeEnvelope{
+		EnvelopeID:           "env_1",
+		OrgID:                pkg.OrgID,
+		ProjectID:            pkg.ProjectID,
+		PackageKind:          model.ExchangePackageKindClientExecution,
+		SchemaVersion:        model.ExchangeEnvelopeSchemaVersion,
+		PayloadSchemaVersion: model.ClientExecutionPackageSchemaVersion,
+		IdempotencyKey:       "idem_1",
+		CreatedAt:            now,
+		ExpiresAt:            now.Add(time.Hour),
+		Producer:             model.ExchangeProducer{AppVersion: "test", RuntimeProfile: "cloud"},
+		Crypto: model.ExchangeCrypto{
+			ServerKeyID:          "server_key_1",
+			ContentEncryptionAlg: "xchacha20-poly1305",
+			PayloadDigestSHA256:  digest,
+			SignatureAlg:         "ed25519",
+			SignatureKeyID:       "client_key_1",
+			Signature:            "signature",
+			Nonce:                "nonce_1",
+		},
+		PayloadRef: model.EncryptedPayloadRef{Kind: "inline", InlineCiphertext: "ciphertext", SHA256: "sha_ciphertext"},
+		Policy: model.ExchangePackagePolicy{
+			ReplayProtection:      true,
+			DeletePayloadAfterRun: true,
+			HumanApprovalRequired: true,
+			StructureSummaryOnly:  true,
+		},
+	}
+}
+
+func sampleRecordingResultForAppTest(pkg model.ClientExecutionPackage) model.RecordingResultPackage {
+	now := time.Date(2026, 7, 9, 16, 10, 0, 0, time.UTC)
+	artifact := model.ArtifactRef{ID: "artifact_raw_recording", Kind: "raw_recording", URI: "file:///tmp/recording.webm", MimeType: "video/webm", SourceNodeID: "node_open_dashboard"}
+	step := model.StepResult{NodeID: "node_open_dashboard", Status: "passed", DurationMS: 1200}
+	return model.RecordingResultPackage{
+		ResultID:        "result_1",
+		SourcePackageID: pkg.PackageID,
+		CloudJobID:      "job_1",
+		SchemaVersion:   model.RecordingResultPackageSchemaVersion,
+		Status:          model.RecordingResultStatusGenerated,
+		ExecutionTrace: &model.ExecutionTrace{
+			ID:              "trace_1",
+			WorkflowGraphID: pkg.WorkflowGraph.ID,
+			GraphVersion:    pkg.WorkflowGraph.Version,
+			PassRate:        1,
+			StepResults:     []model.StepResult{step},
+			Artifacts:       []model.ArtifactRef{artifact},
+		},
+		StepResults:     []model.StepResult{step},
+		GeneratedAssets: []model.ArtifactRef{artifact},
+		VerificationReport: model.VerificationReport{
+			PassRate:             1,
+			ReproducibilityMatch: true,
+		},
+		AuditTrail: model.CloudExecutionAuditTrail{CompletedAt: now},
+		Delivery: model.ResultDelivery{
+			AckRequired: true,
+			ExpiresAt:   now.Add(24 * time.Hour),
+		},
+		CreatedAt: now,
+	}
+}
+
+func fixedClock(now time.Time) func() time.Time {
+	return func() time.Time { return now }
+}

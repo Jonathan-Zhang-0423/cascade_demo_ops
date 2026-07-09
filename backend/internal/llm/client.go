@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +19,17 @@ import (
 )
 
 const DefaultTimeout = 45 * time.Second
+
+const (
+	errorClassRouteNotConfigured = "route_not_configured"
+	errorClassAPIKeyMissing      = "api_key_missing"
+	errorClassBaseURLMissing     = "base_url_missing"
+	errorClassModelMissing       = "model_missing"
+	errorClassHTTPError          = "http_error"
+	errorClassTimeout            = "timeout"
+	errorClassResponseParse      = "response_parse_failed"
+	errorClassJSONParse          = "json_parse_failed"
+)
 
 type Client interface {
 	GenerateJSON(ctx context.Context, task config.ModelTask, req JSONRequest, target any) (*CallTrace, error)
@@ -62,11 +74,30 @@ type CallTrace struct {
 	Model          string               `json:"model"`
 	Task           config.ModelTask     `json:"task"`
 	AdapterVersion string               `json:"adapter_version"`
+	Adapter        string               `json:"adapter,omitempty"`
 	Mode           config.LLMMode       `json:"mode"`
 	FallbackReason string               `json:"fallback_reason,omitempty"`
+	ErrorClass     string               `json:"error_class,omitempty"`
 	LatencyMS      int                  `json:"latency_ms,omitempty"`
 	InputTokens    int                  `json:"input_tokens,omitempty"`
 	OutputTokens   int                  `json:"output_tokens,omitempty"`
+}
+
+type DiagnosticResult struct {
+	Provider       config.ModelProvider `json:"provider"`
+	Task           config.ModelTask     `json:"task,omitempty"`
+	Model          string               `json:"model"`
+	AdapterVersion string               `json:"adapter_version"`
+	Mode           config.LLMMode       `json:"mode"`
+	BaseURLHost    string               `json:"base_url_host"`
+	BaseURLPath    string               `json:"base_url_path"`
+	Configured     bool                 `json:"configured"`
+	OK             bool                 `json:"ok"`
+	HTTPStatus     int                  `json:"http_status,omitempty"`
+	ErrorClass     string               `json:"error_class,omitempty"`
+	Error          string               `json:"error,omitempty"`
+	LatencyMS      int                  `json:"latency_ms,omitempty"`
+	CheckedAt      time.Time            `json:"checked_at"`
 }
 
 func (t *CallTrace) Label() string {
@@ -74,8 +105,14 @@ func (t *CallTrace) Label() string {
 		return ""
 	}
 	parts := []string{string(t.Provider), t.Model, t.AdapterVersion}
+	if t.Adapter != "" {
+		parts = append(parts, "adapter="+t.Adapter)
+	}
 	if t.FallbackReason != "" {
 		parts = append(parts, "fallback="+t.FallbackReason)
+	}
+	if t.ErrorClass != "" && t.FallbackReason == "" {
+		parts = append(parts, "error="+t.ErrorClass)
 	}
 	return strings.Join(parts, "/")
 }
@@ -91,8 +128,14 @@ func (t *CallTrace) Metadata() map[string]any {
 		"adapter_version": t.AdapterVersion,
 		"llm_mode":        string(t.Mode),
 	}
+	if t.Adapter != "" {
+		metadata["adapter"] = t.Adapter
+	}
 	if t.FallbackReason != "" {
 		metadata["fallback_reason"] = t.FallbackReason
+	}
+	if t.ErrorClass != "" {
+		metadata["error_class"] = t.ErrorClass
 	}
 	if t.LatencyMS > 0 {
 		metadata["latency_ms"] = t.LatencyMS
@@ -103,11 +146,237 @@ func (t *CallTrace) Metadata() map[string]any {
 type Router struct {
 	runtime config.AppRuntimeConfig
 	http    *http.Client
+	policy  CallPolicy
+}
+
+type CallPolicy struct {
+	Timeout              time.Duration
+	TransientStatusCodes map[int]bool
+	TransientSubstrings  []string
+}
+
+func DefaultCallPolicy() CallPolicy {
+	return CallPolicy{
+		Timeout: DefaultTimeout,
+		TransientStatusCodes: map[int]bool{
+			http.StatusTooManyRequests:    true,
+			http.StatusServiceUnavailable: true,
+		},
+		TransientSubstrings: []string{
+			"rate limit",
+			"ratelimit",
+			"overload",
+			"overloaded",
+			"quota",
+			"too many requests",
+			"temporarily unavailable",
+			"timeout",
+			"deadline exceeded",
+			"connection reset",
+			"socket hang up",
+		},
+	}
+}
+
+func (p CallPolicy) AllowsFallback(class string, err error) bool {
+	if class == errorClassTimeout || class == "http_429" || class == "http_503" {
+		return true
+	}
+	status := httpStatusFromFallback(class)
+	if status > 0 && p.TransientStatusCodes[status] {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, token := range p.TransientSubstrings {
+		if strings.Contains(message, token) {
+			return true
+		}
+	}
+	return false
+}
+
+type ProviderAdapter interface {
+	Name() string
+	BuildTextPayload(route config.ModelTaskRoute, req TextRequest) any
+	BuildMultimodalPayload(route config.ModelTaskRoute, req MultimodalRequest) any
+	Endpoint(provider config.ModelProviderCredential) string
+	ParseResponse(data []byte) (string, *openAIUsage, error)
+}
+
+type openAICompatibleAdapter struct {
+	name     string
+	provider config.ModelProvider
+}
+
+func newProviderAdapter(provider config.ModelProvider) ProviderAdapter {
+	switch provider {
+	case config.ModelProviderMinimax:
+		return minimaxAdapter{openAICompatibleAdapter{name: "minimax-openai-compatible", provider: provider}}
+	case config.ModelProviderGLM:
+		return openAICompatibleAdapter{name: "glm-openai-compatible", provider: provider}
+	case config.ModelProviderKimi:
+		return openAICompatibleAdapter{name: "kimi-openai-compatible", provider: provider}
+	case config.ModelProviderDeepSeek:
+		return openAICompatibleAdapter{name: "deepseek-openai-compatible", provider: provider}
+	case config.ModelProviderDoubao:
+		return openAICompatibleAdapter{name: "doubao-ark-openai-compatible", provider: provider}
+	case config.ModelProviderSeedance:
+		return openAICompatibleAdapter{name: "seedance-ark-openai-compatible", provider: provider}
+	default:
+		return openAICompatibleAdapter{name: "openai-compatible", provider: provider}
+	}
+}
+
+func (a openAICompatibleAdapter) Name() string {
+	return a.name
+}
+
+func (a openAICompatibleAdapter) Endpoint(provider config.ModelProviderCredential) string {
+	return chatCompletionsURL(provider.BaseURL)
+}
+
+func (a openAICompatibleAdapter) BuildTextPayload(route config.ModelTaskRoute, req TextRequest) any {
+	payload := openAIChatRequest{
+		Model:       route.Model,
+		Messages:    []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: req.User}},
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+	}
+	applyProviderRequestOptions(a.provider, &payload)
+	return payload
+}
+
+func (a openAICompatibleAdapter) BuildMultimodalPayload(route config.ModelTaskRoute, req MultimodalRequest) any {
+	content := []openAIContentPart{{Type: "text", Text: appendJSONInstruction(req.User, req.SchemaName, "")}}
+	for _, image := range req.Images {
+		ref := firstNonEmpty(image.DataURI, image.URL)
+		if ref == "" {
+			continue
+		}
+		content = append(content, openAIContentPart{Type: "image_url", ImageURL: &openAIImageURL{URL: ref}})
+	}
+	payload := openAIChatRequest{
+		Model:       route.Model,
+		Messages:    []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: content}},
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+	}
+	applyProviderRequestOptions(a.provider, &payload)
+	return payload
+}
+
+func (a openAICompatibleAdapter) ParseResponse(data []byte) (string, *openAIUsage, error) {
+	return parseChatResponse(data)
+}
+
+type minimaxAdapter struct {
+	openAICompatibleAdapter
+}
+
+func (a minimaxAdapter) BuildTextPayload(route config.ModelTaskRoute, req TextRequest) any {
+	return minimaxChatRequest{
+		Model: route.Model,
+		Messages: []openAIMessage{
+			{Role: "system", Content: req.System},
+			{Role: "user", Content: req.User},
+		},
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+		ExtraBody:   map[string]any{"reasoning_split": true},
+	}
+}
+
+func (a minimaxAdapter) BuildMultimodalPayload(route config.ModelTaskRoute, req MultimodalRequest) any {
+	content := []openAIContentPart{{Type: "text", Text: appendJSONInstruction(req.User, req.SchemaName, "")}}
+	for _, image := range req.Images {
+		ref := firstNonEmpty(image.DataURI, image.URL)
+		if ref == "" {
+			continue
+		}
+		content = append(content, openAIContentPart{Type: "image_url", ImageURL: &openAIImageURL{URL: ref}})
+	}
+	return minimaxChatRequest{
+		Model:       route.Model,
+		Messages:    []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: content}},
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+		ExtraBody:   map[string]any{"reasoning_split": true},
+	}
 }
 
 func NewRouter(runtime config.AppRuntimeConfig) *Router {
-	timeout := DefaultTimeout
-	return &Router{runtime: runtime, http: &http.Client{Timeout: timeout}}
+	policy := DefaultCallPolicy()
+	return &Router{runtime: runtime, http: &http.Client{Timeout: policy.Timeout}, policy: policy}
+}
+
+func (r *Router) DiagnoseProviders(ctx context.Context) []DiagnosticResult {
+	if r == nil {
+		return nil
+	}
+	tasks := make([]config.ModelTask, 0, len(r.runtime.ModelTaskRoutes))
+	for task := range r.runtime.ModelTaskRoutes {
+		tasks = append(tasks, task)
+	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i] < tasks[j] })
+	results := make([]DiagnosticResult, 0, len(tasks))
+	seen := map[string]bool{}
+	for _, task := range tasks {
+		route := r.runtime.ModelTaskRoutes[task]
+		key := string(route.Provider) + "|" + route.Model
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		results = append(results, r.DiagnoseTask(ctx, task))
+	}
+	return results
+}
+
+func (r *Router) DiagnoseTask(ctx context.Context, task config.ModelTask) DiagnosticResult {
+	now := time.Now().UTC()
+	if r == nil {
+		return DiagnosticResult{
+			Task:       task,
+			Mode:       config.LLMModeAuto,
+			Configured: false,
+			OK:         false,
+			ErrorClass: "router_missing",
+			Error:      "LLM router is not configured",
+			CheckedAt:  now,
+		}
+	}
+	route, provider, trace, err := r.resolve(task)
+	result := diagnosticResultForRoute(r.runtime, route, provider, task, trace, now)
+	if err != nil {
+		result.ErrorClass = fallbackReason(trace, "route_error")
+		result.Error = redactSensitive(err.Error())
+		return result
+	}
+	text, callTrace, err := r.callText(ctx, route, provider, TextRequest{
+		System:      "You are a provider diagnostic probe. Return only OK.",
+		User:        "Return OK. Do not include secrets or explanations.",
+		MaxTokens:   256,
+		Temperature: 0,
+	})
+	if callTrace != nil {
+		result.LatencyMS = callTrace.LatencyMS
+	}
+	if err != nil {
+		result.ErrorClass = fallbackReason(callTrace, "provider_error")
+		result.HTTPStatus = httpStatusFromFallback(result.ErrorClass)
+		result.Error = redactSensitive(err.Error())
+		return result
+	}
+	if strings.TrimSpace(text) == "" {
+		result.ErrorClass = "empty_response"
+		result.Error = "provider returned an empty response"
+		return result
+	}
+	result.OK = true
+	return result
 }
 
 func (r *Router) Mode() config.LLMMode {
@@ -136,20 +405,17 @@ func (r *Router) GenerateJSON(ctx context.Context, task config.ModelTask, req JS
 		trace = callTrace
 	}
 	if err != nil {
-		if r.Mode() == config.LLMModeReal {
+		class := fallbackReason(trace, "provider_error")
+		if !r.shouldFallback(class, err) {
 			return trace, err
 		}
-		reason := "provider_error"
-		if trace != nil && trace.FallbackReason != "" {
-			reason = trace.FallbackReason
-		}
-		return traceWithFallback(trace, reason), ErrDeterministicRequired{Reason: reason}
+		return traceWithFallback(trace, class), ErrDeterministicRequired{Reason: class}
 	}
 	if err := DecodeJSONContent(text, target); err != nil {
-		if r.Mode() == config.LLMModeReal {
+		if !r.shouldFallback(errorClassJSONParse, err) {
 			return trace, fmt.Errorf("llm JSON parse failed: %w", err)
 		}
-		return traceWithFallback(trace, "json_parse_failed"), ErrDeterministicRequired{Reason: "json_parse_failed"}
+		return traceWithFallback(trace, errorClassJSONParse), ErrDeterministicRequired{Reason: errorClassJSONParse}
 	}
 	return trace, nil
 }
@@ -164,14 +430,11 @@ func (r *Router) GenerateText(ctx context.Context, task config.ModelTask, req Te
 	}
 	text, trace, err := r.callText(ctx, route, provider, req)
 	if err != nil {
-		if r.Mode() == config.LLMModeReal {
+		class := fallbackReason(trace, "provider_error")
+		if !r.shouldFallback(class, err) {
 			return "", trace, err
 		}
-		reason := "provider_error"
-		if trace != nil && trace.FallbackReason != "" {
-			reason = trace.FallbackReason
-		}
-		return "", traceWithFallback(trace, reason), ErrDeterministicRequired{Reason: reason}
+		return "", traceWithFallback(trace, class), ErrDeterministicRequired{Reason: class}
 	}
 	return text, trace, nil
 }
@@ -189,20 +452,17 @@ func (r *Router) GenerateMultimodal(ctx context.Context, task config.ModelTask, 
 		trace = callTrace
 	}
 	if err != nil {
-		if r.Mode() == config.LLMModeReal {
+		class := fallbackReason(trace, "provider_error")
+		if !r.shouldFallback(class, err) {
 			return trace, err
 		}
-		reason := "provider_error"
-		if trace != nil && trace.FallbackReason != "" {
-			reason = trace.FallbackReason
-		}
-		return traceWithFallback(trace, reason), ErrDeterministicRequired{Reason: reason}
+		return traceWithFallback(trace, class), ErrDeterministicRequired{Reason: class}
 	}
 	if err := DecodeJSONContent(text, target); err != nil {
-		if r.Mode() == config.LLMModeReal {
+		if !r.shouldFallback(errorClassJSONParse, err) {
 			return trace, fmt.Errorf("llm JSON parse failed: %w", err)
 		}
-		return traceWithFallback(trace, "json_parse_failed"), ErrDeterministicRequired{Reason: "json_parse_failed"}
+		return traceWithFallback(trace, errorClassJSONParse), ErrDeterministicRequired{Reason: errorClassJSONParse}
 	}
 	return trace, nil
 }
@@ -245,85 +505,37 @@ func fallbackOrError(mode config.LLMMode, reason string) error {
 	return ErrDeterministicRequired{Reason: reason}
 }
 
-func (r *Router) callText(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, req TextRequest) (string, *CallTrace, error) {
-	if route.Provider == config.ModelProviderMinimax {
-		return r.callMiniMaxText(ctx, route, provider, req)
+func (r *Router) shouldFallback(class string, err error) bool {
+	if r == nil {
+		return false
 	}
-	return r.callOpenAIText(ctx, route, provider, req)
+	switch r.Mode() {
+	case config.LLMModeDeterministic:
+		return true
+	case config.LLMModeReal:
+		return false
+	default:
+		return r.policy.AllowsFallback(class, err)
+	}
+}
+
+func (r *Router) callText(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, req TextRequest) (string, *CallTrace, error) {
+	adapter := newProviderAdapter(route.Provider)
+	return r.doChat(ctx, route, provider, adapter, adapter.BuildTextPayload(route, req))
 }
 
 func (r *Router) callMultimodal(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, req MultimodalRequest) (string, *CallTrace, error) {
-	if route.Provider == config.ModelProviderMinimax {
-		return r.callMiniMaxMultimodal(ctx, route, provider, req)
-	}
-	return r.callOpenAIMultimodal(ctx, route, provider, req)
+	adapter := newProviderAdapter(route.Provider)
+	return r.doChat(ctx, route, provider, adapter, adapter.BuildMultimodalPayload(route, req))
 }
 
-func (r *Router) callOpenAIText(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, req TextRequest) (string, *CallTrace, error) {
-	payload := openAIChatRequest{
-		Model:       route.Model,
-		Messages:    []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: req.User}},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	}
-	return r.doChat(ctx, route, provider, chatCompletionsURL(provider.BaseURL), payload)
-}
-
-func (r *Router) callOpenAIMultimodal(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, req MultimodalRequest) (string, *CallTrace, error) {
-	content := []openAIContentPart{{Type: "text", Text: appendJSONInstruction(req.User, req.SchemaName, "")}}
-	for _, image := range req.Images {
-		ref := firstNonEmpty(image.DataURI, image.URL)
-		if ref == "" {
-			continue
-		}
-		content = append(content, openAIContentPart{Type: "image_url", ImageURL: &openAIImageURL{URL: ref}})
-	}
-	payload := openAIChatRequest{
-		Model:       route.Model,
-		Messages:    []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: content}},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	}
-	return r.doChat(ctx, route, provider, chatCompletionsURL(provider.BaseURL), payload)
-}
-
-func (r *Router) callMiniMaxText(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, req TextRequest) (string, *CallTrace, error) {
-	payload := minimaxChatRequest{
-		Model: route.Model,
-		Messages: []openAIMessage{
-			{Role: "system", Content: req.System},
-			{Role: "user", Content: req.User},
-		},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	}
-	return r.doChat(ctx, route, provider, chatCompletionsURL(provider.BaseURL), payload)
-}
-
-func (r *Router) callMiniMaxMultimodal(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, req MultimodalRequest) (string, *CallTrace, error) {
-	content := []openAIContentPart{{Type: "text", Text: appendJSONInstruction(req.User, req.SchemaName, "")}}
-	for _, image := range req.Images {
-		ref := firstNonEmpty(image.DataURI, image.URL)
-		if ref == "" {
-			continue
-		}
-		content = append(content, openAIContentPart{Type: "image_url", ImageURL: &openAIImageURL{URL: ref}})
-	}
-	payload := minimaxChatRequest{
-		Model:       route.Model,
-		Messages:    []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: content}},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	}
-	return r.doChat(ctx, route, provider, chatCompletionsURL(provider.BaseURL), payload)
-}
-
-func (r *Router) doChat(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, endpoint string, payload any) (string, *CallTrace, error) {
+func (r *Router) doChat(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, adapter ProviderAdapter, payload any) (string, *CallTrace, error) {
 	start := time.Now()
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", nil, err
 	}
+	endpoint := adapter.Endpoint(provider)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", nil, err
@@ -337,29 +549,90 @@ func (r *Router) doChat(ctx context.Context, route config.ModelTaskRoute, provid
 		Model:          route.Model,
 		Task:           route.Task,
 		AdapterVersion: firstNonEmpty(r.runtime.ModelAdapterVersion, config.ModelAdapterVersion),
+		Adapter:        adapter.Name(),
 		Mode:           r.Mode(),
 		LatencyMS:      int(time.Since(start).Milliseconds()),
 	}
 	if err != nil {
-		return "", traceWithFallback(trace, "http_error"), redactError(err)
+		class := errorClassHTTPError
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+			class = errorClassTimeout
+		}
+		return "", traceWithError(trace, class), redactError(err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return "", traceWithFallback(trace, "read_error"), redactError(err)
+		return "", traceWithError(trace, "read_error"), redactError(err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", traceWithFallback(trace, fmt.Sprintf("http_%d", resp.StatusCode)), redactProviderHTTPError(resp.StatusCode, data)
+		return "", traceWithError(trace, fmt.Sprintf("http_%d", resp.StatusCode)), redactProviderHTTPError(resp.StatusCode, data)
 	}
-	content, usage, err := parseChatResponse(data)
+	content, usage, err := adapter.ParseResponse(data)
 	if usage != nil {
 		trace.InputTokens = usage.PromptTokens
 		trace.OutputTokens = usage.CompletionTokens
 	}
 	if err != nil {
-		return "", traceWithFallback(trace, "response_parse_failed"), err
+		return "", traceWithError(trace, errorClassResponseParse), err
 	}
 	return content, trace, nil
+}
+
+func diagnosticResultForRoute(runtime config.AppRuntimeConfig, route config.ModelTaskRoute, provider config.ModelProviderCredential, task config.ModelTask, trace *CallTrace, checkedAt time.Time) DiagnosticResult {
+	modelName := firstNonEmpty(route.Model, provider.DefaultModel)
+	if trace != nil && trace.Model != "" {
+		modelName = trace.Model
+	}
+	mode := runtime.LLMMode
+	if mode == "" {
+		mode = config.LLMModeAuto
+	}
+	host, pathValue := safeURLParts(provider.BaseURL)
+	return DiagnosticResult{
+		Provider:       route.Provider,
+		Task:           task,
+		Model:          modelName,
+		AdapterVersion: firstNonEmpty(runtime.ModelAdapterVersion, config.ModelAdapterVersion),
+		Mode:           mode,
+		BaseURLHost:    host,
+		BaseURLPath:    pathValue,
+		Configured:     strings.TrimSpace(provider.APIKey) != "" && strings.TrimSpace(provider.BaseURL) != "" && strings.TrimSpace(modelName) != "",
+		OK:             false,
+		CheckedAt:      checkedAt,
+	}
+}
+
+func fallbackReason(trace *CallTrace, fallback string) string {
+	if trace != nil && trace.FallbackReason != "" {
+		return trace.FallbackReason
+	}
+	if trace != nil && trace.ErrorClass != "" {
+		return trace.ErrorClass
+	}
+	return fallback
+}
+
+func httpStatusFromFallback(reason string) int {
+	if !strings.HasPrefix(reason, "http_") {
+		return 0
+	}
+	var status int
+	if _, err := fmt.Sscanf(reason, "http_%d", &status); err != nil {
+		return 0
+	}
+	return status
+}
+
+func safeURLParts(raw string) (string, string) {
+	if strings.TrimSpace(raw) == "" {
+		return "", ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", ""
+	}
+	return parsed.Host, parsed.EscapedPath()
 }
 
 type ErrDeterministicRequired struct {
@@ -381,6 +654,16 @@ func traceWithFallback(trace *CallTrace, reason string) *CallTrace {
 	}
 	copy := *trace
 	copy.FallbackReason = reason
+	copy.ErrorClass = reason
+	return &copy
+}
+
+func traceWithError(trace *CallTrace, class string) *CallTrace {
+	if trace == nil {
+		return nil
+	}
+	copy := *trace
+	copy.ErrorClass = class
 	return &copy
 }
 
@@ -442,7 +725,19 @@ func parseChatResponse(data []byte) (string, *openAIUsage, error) {
 	if len(response.Choices) == 0 {
 		return "", &response.Usage, errors.New("chat response has no choices")
 	}
-	content := response.Choices[0].Message.Content
+	message := response.Choices[0].Message
+	content := message.Content
+	if content == "" {
+		content = message.ReasoningContent
+	}
+	if content == "" {
+		for _, detail := range message.ReasoningDetails {
+			if strings.TrimSpace(detail.Text) != "" {
+				content = detail.Text
+				break
+			}
+		}
+	}
 	if content == "" {
 		return "", &response.Usage, errors.New("chat response content is empty")
 	}
@@ -484,6 +779,20 @@ type openAIChatRequest struct {
 	Messages    []openAIMessage `json:"messages"`
 	Temperature float64         `json:"temperature,omitempty"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Thinking    *openAIThinking `json:"thinking,omitempty"`
+}
+
+type openAIThinking struct {
+	Type string `json:"type"`
+}
+
+func applyProviderRequestOptions(provider config.ModelProvider, payload *openAIChatRequest) {
+	if payload == nil {
+		return
+	}
+	if provider == config.ModelProviderGLM {
+		payload.Thinking = &openAIThinking{Type: "disabled"}
+	}
 }
 
 type minimaxChatRequest struct {
@@ -491,6 +800,7 @@ type minimaxChatRequest struct {
 	Messages    []openAIMessage `json:"messages"`
 	Temperature float64         `json:"temperature,omitempty"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
+	ExtraBody   map[string]any  `json:"extra_body,omitempty"`
 }
 
 type openAIMessage struct {
@@ -511,7 +821,11 @@ type openAIImageURL struct {
 type openAIChatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ReasoningDetails []struct {
+				Text string `json:"text"`
+			} `json:"reasoning_details"`
 		} `json:"message"`
 	} `json:"choices"`
 	Usage openAIUsage `json:"usage"`

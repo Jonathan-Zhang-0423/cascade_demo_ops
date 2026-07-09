@@ -81,6 +81,36 @@ func (b *DesktopBridge) ArtifactURI(projectID string, fileName string) BridgeRes
 	return bridgeValue(map[string]string{"uri": b.service.ArtifactURI(projectID, fileName)}, nil)
 }
 
+func (b *DesktopBridge) InitExecutionPackage(request model.ExecutionPackageInitRequest) BridgeResponse {
+	response, err := b.service.InitExecutionPackage(context.Background(), request)
+	return bridgeValue(response, err)
+}
+
+func (b *DesktopBridge) UploadExecutionPackage(request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage) BridgeResponse {
+	response, err := b.service.UploadExecutionPackage(context.Background(), request, payload)
+	return bridgeValue(response, err)
+}
+
+func (b *DesktopBridge) GetExecutionPackageStatus(orgID string, exchangePackageID string) BridgeResponse {
+	response, err := b.service.GetExecutionPackageStatus(context.Background(), orgID, exchangePackageID)
+	return bridgeValue(response, err)
+}
+
+func (b *DesktopBridge) CompleteExecutionPackageWithResult(orgID string, exchangePackageID string, result model.RecordingResultPackage) BridgeResponse {
+	response, err := b.service.CompleteExecutionPackageWithResult(context.Background(), orgID, exchangePackageID, result)
+	return bridgeValue(response, err)
+}
+
+func (b *DesktopBridge) GetResultPackage(orgID string, resultPackageID string) BridgeResponse {
+	response, err := b.service.GetResultPackage(context.Background(), orgID, resultPackageID)
+	return bridgeValue(response, err)
+}
+
+func (b *DesktopBridge) AcknowledgeResultPackage(orgID string, request model.ResultPackageAckRequest) BridgeResponse {
+	response, err := b.service.AcknowledgeResultPackage(context.Background(), orgID, request)
+	return bridgeValue(response, err)
+}
+
 func bridgeValue(value any, err error) BridgeResponse {
 	if err != nil {
 		return BridgeResponse{OK: false, Error: err.Error()}

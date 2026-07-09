@@ -102,16 +102,16 @@ func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectCo
 }
 
 type codeReaderLLMOutput struct {
-	Summary        string   `json:"summary"`
-	Frameworks     []string `json:"frameworks"`
-	HeroComponents []string `json:"hero_components"`
+	Summary        string              `json:"summary"`
+	Frameworks     flexibleStringSlice `json:"frameworks"`
+	HeroComponents flexibleStringSlice `json:"hero_components"`
 	RouteNames     []struct {
 		Path string `json:"path"`
 		Name string `json:"name"`
 	} `json:"route_names"`
-	SelectorNotes   []string `json:"selector_notes"`
-	SensitiveFields []string `json:"sensitive_fields"`
-	Confidence      float64  `json:"confidence"`
+	SelectorNotes   flexibleStringSlice `json:"selector_notes"`
+	SensitiveFields flexibleStringSlice `json:"sensitive_fields"`
+	Confidence      float64             `json:"confidence"`
 }
 
 func (a *CodeReaderAgent) enhanceSnapshotWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, snapshot *model.CodeUnderstandingSnapshot) (*llm.CallTrace, error) {
@@ -152,7 +152,7 @@ func (a *CodeReaderAgent) enhanceSnapshotWithLLM(ctx context.Context, project *m
 	if output.Summary != "" {
 		snapshot.Summary = output.Summary + "（仅基于结构摘要，不包含完整源码。）"
 	}
-	snapshot.Frameworks = uniqueStrings(append(snapshot.Frameworks, output.Frameworks...))
+	snapshot.Frameworks = uniqueStrings(append(snapshot.Frameworks, stringSlice(output.Frameworks)...))
 	for _, routeName := range output.RouteNames {
 		for i := range snapshot.Routes {
 			if snapshot.Routes[i].Path == routeName.Path && routeName.Name != "" {
@@ -161,7 +161,7 @@ func (a *CodeReaderAgent) enhanceSnapshotWithLLM(ctx context.Context, project *m
 			}
 		}
 	}
-	for _, componentName := range output.HeroComponents {
+	for _, componentName := range stringSlice(output.HeroComponents) {
 		for i := range snapshot.Components {
 			if strings.EqualFold(snapshot.Components[i].Name, componentName) {
 				snapshot.Components[i].ActionLabels = uniqueStrings(append(snapshot.Components[i].ActionLabels, "hero_candidate"))
@@ -169,7 +169,7 @@ func (a *CodeReaderAgent) enhanceSnapshotWithLLM(ctx context.Context, project *m
 			}
 		}
 	}
-	for _, sensitive := range output.SensitiveFields {
+	for _, sensitive := range stringSlice(output.SensitiveFields) {
 		snapshot.SensitiveFields = append(snapshot.SensitiveFields, model.SensitiveFieldFinding{Name: sensitive, Kind: "llm_sensitive_field", Reason: "GLM 基于结构摘要判断该字段需要打码或避开。"})
 	}
 	return trace, nil

@@ -24,24 +24,24 @@ func NewGraphBuilderAgentWithLLM(client llm.Client) *GraphBuilderAgent {
 }
 
 type graphLLMOutput struct {
-	Name             string   `json:"name"`
-	Summary          string   `json:"summary"`
-	Objective        string   `json:"objective"`
-	ValueProposition string   `json:"value_proposition"`
-	CTA              string   `json:"cta"`
-	SuccessCriteria  []string `json:"success_criteria"`
+	Name             string              `json:"name"`
+	Summary          string              `json:"summary"`
+	Objective        string              `json:"objective"`
+	ValueProposition string              `json:"value_proposition"`
+	CTA              string              `json:"cta"`
+	SuccessCriteria  flexibleStringSlice `json:"success_criteria"`
 	Steps            []struct {
-		NodeID          string   `json:"node_id"`
-		Title           string   `json:"title"`
-		Goal            string   `json:"goal"`
-		Action          string   `json:"action"`
-		Selector        string   `json:"selector"`
-		ExpectedOutcome string   `json:"expected_outcome"`
-		Voiceover       string   `json:"voiceover"`
-		Caption         string   `json:"caption"`
-		Callout         string   `json:"callout"`
-		DurationMS      int      `json:"duration_ms"`
-		Tags            []string `json:"tags"`
+		NodeID          string              `json:"node_id"`
+		Title           string              `json:"title"`
+		Goal            string              `json:"goal"`
+		Action          string              `json:"action"`
+		Selector        string              `json:"selector"`
+		ExpectedOutcome string              `json:"expected_outcome"`
+		Voiceover       string              `json:"voiceover"`
+		Caption         string              `json:"caption"`
+		Callout         string              `json:"callout"`
+		DurationMS      int                 `json:"duration_ms"`
+		Tags            flexibleStringSlice `json:"tags"`
 	} `json:"steps"`
 }
 
@@ -381,7 +381,7 @@ func (a *GraphBuilderAgent) enhanceGraphWithLLM(ctx context.Context, project *mo
 		if output.CTA != "" {
 			graph.Intent.CTA = output.CTA
 		}
-		graph.Intent.SuccessCriteria = uniqueStrings(append(graph.Intent.SuccessCriteria, output.SuccessCriteria...))
+		graph.Intent.SuccessCriteria = uniqueStrings(append(graph.Intent.SuccessCriteria, stringSlice(output.SuccessCriteria)...))
 	}
 	byID := map[string]*model.GraphNode{}
 	for _, node := range graph.Nodes {
@@ -418,7 +418,7 @@ func (a *GraphBuilderAgent) enhanceGraphWithLLM(ctx context.Context, project *mo
 		if step.DurationMS > 0 && step.DurationMS <= 30000 {
 			node.DurationHintMS = step.DurationMS
 		}
-		node.Tags = uniqueStrings(append(node.Tags, step.Tags...))
+		node.Tags = uniqueStrings(append(node.Tags, stringSlice(step.Tags)...))
 		if node.Narrative == nil {
 			node.Narrative = &model.NarrativeCue{}
 		}

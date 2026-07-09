@@ -135,16 +135,16 @@ func (a *RequirementReaderAgent) ReadRequirements(ctx context.Context, project *
 }
 
 type requirementLLMOutput struct {
-	Scenario       string              `json:"scenario"`
-	Objective      string              `json:"objective"`
-	PrimaryOutcome string              `json:"primary_outcome"`
-	MustShow       []string            `json:"must_show"`
-	MustNotShow    []string            `json:"must_not_show"`
-	ForbiddenPages []string            `json:"forbidden_pages"`
-	ForbiddenData  []string            `json:"forbidden_data"`
-	UseCases       []model.DemoUseCase `json:"use_cases"`
-	BrandTone      string              `json:"brand_tone"`
-	Confidence     float64             `json:"confidence"`
+	Scenario       string               `json:"scenario"`
+	Objective      string               `json:"objective"`
+	PrimaryOutcome string               `json:"primary_outcome"`
+	MustShow       []string             `json:"must_show"`
+	MustNotShow    []string             `json:"must_not_show"`
+	ForbiddenPages []string             `json:"forbidden_pages"`
+	ForbiddenData  []string             `json:"forbidden_data"`
+	UseCases       flexibleDemoUseCases `json:"use_cases"`
+	BrandTone      string               `json:"brand_tone"`
+	Confidence     float64              `json:"confidence"`
 }
 
 func (a *RequirementReaderAgent) enhanceWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) (*llm.CallTrace, error) {
@@ -242,6 +242,82 @@ func uniqueUseCases(values []model.DemoUseCase) []model.DemoUseCase {
 		result = append(result, value)
 	}
 	return result
+}
+
+type flexibleDemoUseCases []model.DemoUseCase
+
+type flexibleDemoUseCase model.DemoUseCase
+
+func (u *flexibleDemoUseCase) UnmarshalJSON(data []byte) error {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*u = flexibleDemoUseCase(demoUseCaseFromLLMValue(value))
+	return nil
+}
+
+func demoUseCase(value flexibleDemoUseCase) model.DemoUseCase {
+	return model.DemoUseCase(value)
+}
+
+func (u *flexibleDemoUseCases) UnmarshalJSON(data []byte) error {
+	var raw []any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		var single any
+		if singleErr := json.Unmarshal(data, &single); singleErr != nil {
+			return err
+		}
+		raw = []any{single}
+	}
+	values := make([]model.DemoUseCase, 0, len(raw))
+	for _, item := range raw {
+		if useCase := demoUseCaseFromLLMValue(item); useCase != "" {
+			values = append(values, useCase)
+		}
+	}
+	*u = uniqueUseCases(values)
+	return nil
+}
+
+func demoUseCaseFromLLMValue(value any) model.DemoUseCase {
+	switch typed := value.(type) {
+	case string:
+		return normalizeDemoUseCase(typed)
+	case map[string]any:
+		for _, key := range []string{"use_case", "id", "value", "name", "kind", "scenario"} {
+			if candidate, ok := typed[key].(string); ok {
+				if useCase := normalizeDemoUseCase(candidate); useCase != "" {
+					return useCase
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeDemoUseCase(value string) model.DemoUseCase {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, " ", "_")
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	switch {
+	case normalized == string(model.DemoUseCaseHelpCenter), strings.Contains(normalized, "help"):
+		return model.DemoUseCaseHelpCenter
+	case normalized == string(model.DemoUseCaseUserDocumentation), strings.Contains(normalized, "doc"), strings.Contains(value, "文档"):
+		return model.DemoUseCaseUserDocumentation
+	case normalized == string(model.DemoUseCaseLaunch), strings.Contains(normalized, "launch"), strings.Contains(value, "发布"), strings.Contains(value, "上线"):
+		return model.DemoUseCaseLaunch
+	case normalized == string(model.DemoUseCaseSales), strings.Contains(normalized, "sales"), strings.Contains(value, "销售"), strings.Contains(value, "售前"):
+		return model.DemoUseCaseSales
+	case normalized == string(model.DemoUseCaseSupport), strings.Contains(normalized, "support"), strings.Contains(value, "客服"), strings.Contains(value, "支持"):
+		return model.DemoUseCaseSupport
+	case normalized == string(model.DemoUseCaseOnboarding), strings.Contains(normalized, "onboarding"), strings.Contains(value, "培训"), strings.Contains(value, "新人"):
+		return model.DemoUseCaseOnboarding
+	case normalized == string(model.DemoUseCaseInvestor), strings.Contains(normalized, "investor"), strings.Contains(value, "投资"):
+		return model.DemoUseCaseInvestor
+	default:
+		return ""
+	}
 }
 
 func scenarioName(useCase model.DemoUseCase) string {

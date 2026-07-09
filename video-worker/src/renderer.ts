@@ -6,6 +6,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ASSET_TIMELINE_CATALOG_SCHEMA_VERSION = "demoops.asset_timeline_catalog.v1";
 const DEMO_EDIT_PLAN_SCHEMA_VERSION = "demoops.demo_edit_plan.v1";
 const DEMO_EDIT_PLAN_VALIDATION_SCHEMA_VERSION = "demoops.demo_edit_plan_validation.v1";
+const DEMO_EDIT_SOURCE_AUTHORITY = "customer_side_agent";
+const DEMO_EDIT_MODEL_ROLE = "presentation_optimizer_only";
 
 const ALLOWED_EDIT_OPERATIONS = [
   "trim",
@@ -42,6 +44,28 @@ const PROHIBITED_PLAN_KEYS = [
   "new_ui_action",
   "browser_action",
   "action_spec",
+] as const;
+
+const REQUIRED_LOCKED_FIELDS = [
+  "source_authority",
+  "model_role",
+  "source_material_policy",
+  "script_order_policy",
+  "source_artifact_id",
+  "source_step_id",
+  "source_time_range_ms",
+  "required_step_order",
+] as const;
+
+const ALLOWED_MODEL_EDITABLE_FIELDS = [
+  "purpose",
+  "overlays.text",
+  "global_style.color_grade",
+  "global_style.pacing",
+  "global_style.transition_style",
+  "operations.zoom",
+  "operations.speed",
+  "operations.style",
 ] as const;
 
 type EditOperationType = (typeof ALLOWED_EDIT_OPERATIONS)[number];
@@ -223,8 +247,12 @@ interface DemoEditPlan {
   plan_id: string;
   catalog_id?: string;
   objective?: string;
+  source_authority: typeof DEMO_EDIT_SOURCE_AUTHORITY;
+  model_role: typeof DEMO_EDIT_MODEL_ROLE;
   source_material_policy: "existing_assets_only";
   script_order_policy: "preserve_required_step_order";
+  locked_fields: string[];
+  model_editable_fields: string[];
   target_duration_ms?: number;
   shots: DemoEditShot[];
   global_style?: {
@@ -309,6 +337,8 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
     schema_version: "demoops.render_manifest.v1",
     status: "planned",
     source_material_policy: "existing_assets_only",
+    source_authority: DEMO_EDIT_SOURCE_AUTHORITY,
+    model_role: DEMO_EDIT_MODEL_ROLE,
     note: "This stage creates a validated source-only edit plan. A deterministic compositor must render the final video from referenced artifacts.",
     video_path: videoPath,
     step_by_step_docs_path: stepDocsPath,
@@ -454,8 +484,12 @@ function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): D
     plan_id: `edit_plan_${safeName(catalog.run_id)}`,
     catalog_id: catalog.catalog_id,
     objective: "Create a concise demo from the recorded product interaction. Do not create new images or video.",
+    source_authority: DEMO_EDIT_SOURCE_AUTHORITY,
+    model_role: DEMO_EDIT_MODEL_ROLE,
     source_material_policy: "existing_assets_only",
     script_order_policy: "preserve_required_step_order",
+    locked_fields: [...REQUIRED_LOCKED_FIELDS],
+    model_editable_fields: [...ALLOWED_MODEL_EDITABLE_FIELDS],
     target_duration_ms: (durationSec || Math.max(1, Math.ceil(catalog.timeline.duration_ms / 1000))) * 1000,
     shots,
     global_style: {
@@ -509,8 +543,12 @@ function normalizeEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog): D
     ...plan,
     schema_version: plan.schema_version || DEMO_EDIT_PLAN_SCHEMA_VERSION,
     catalog_id: plan.catalog_id || catalog.catalog_id,
+    source_authority: plan.source_authority || DEMO_EDIT_SOURCE_AUTHORITY,
+    model_role: plan.model_role || DEMO_EDIT_MODEL_ROLE,
     source_material_policy: plan.source_material_policy || "existing_assets_only",
     script_order_policy: plan.script_order_policy || "preserve_required_step_order",
+    locked_fields: plan.locked_fields || [...REQUIRED_LOCKED_FIELDS],
+    model_editable_fields: plan.model_editable_fields || [...ALLOWED_MODEL_EDITABLE_FIELDS],
   };
 }
 
@@ -530,6 +568,13 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   if (plan.script_order_policy !== "preserve_required_step_order") {
     errors.push(finding("invalid_script_order_policy", "script_order_policy must preserve required step order", "script_order_policy"));
   }
+  if (plan.source_authority !== DEMO_EDIT_SOURCE_AUTHORITY) {
+    errors.push(finding("invalid_source_authority", "source_authority must be customer_side_agent", "source_authority"));
+  }
+  if (plan.model_role !== DEMO_EDIT_MODEL_ROLE) {
+    errors.push(finding("invalid_model_role", "model_role must be presentation_optimizer_only", "model_role"));
+  }
+  validateCollaborationBoundary(plan, errors);
   if (!Array.isArray(plan.shots) || plan.shots.length === 0) {
     errors.push(finding("missing_shots", "DemoEditPlan must contain at least one shot", "shots"));
   }
@@ -577,6 +622,32 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   };
   if (plan.plan_id) report.plan_id = plan.plan_id;
   return report;
+}
+
+function validateCollaborationBoundary(plan: DemoEditPlan, errors: ValidationFinding[]): void {
+  if (!Array.isArray(plan.locked_fields)) {
+    errors.push(finding("missing_locked_fields", "locked_fields must declare customer-owned factual fields", "locked_fields"));
+  } else {
+    const missing = missingValues(REQUIRED_LOCKED_FIELDS, plan.locked_fields);
+    if (missing.length > 0) {
+      errors.push(finding("missing_locked_fields", `locked_fields must include: ${missing.join(", ")}`, "locked_fields"));
+    }
+  }
+
+  if (!Array.isArray(plan.model_editable_fields)) {
+    errors.push(finding("missing_model_editable_fields", "model_editable_fields must declare the cloud AIGC edit whitelist", "model_editable_fields"));
+    return;
+  }
+
+  const unsupported = unsupportedValues(plan.model_editable_fields, ALLOWED_MODEL_EDITABLE_FIELDS);
+  if (unsupported.length > 0) {
+    errors.push(finding("unsupported_model_editable_field", `model_editable_fields contains unsupported fields: ${unsupported.join(", ")}`, "model_editable_fields"));
+  }
+
+  const lockedEditable = overlappingValues(plan.locked_fields || [], plan.model_editable_fields);
+  if (lockedEditable.length > 0) {
+    errors.push(finding("locked_field_marked_editable", `locked fields cannot be model editable: ${lockedEditable.join(", ")}`, "model_editable_fields"));
+  }
 }
 
 function validateShotTimeRange(
@@ -754,6 +825,7 @@ function stepDocsFor(catalog: AssetTimelineCatalog, plan: DemoEditPlan): string 
     "",
     `Catalog: ${catalog.catalog_id}`,
     "Policy: existing source assets only",
+    "Authority: customer-side agent owns what is demonstrated; cloud AIGC only optimizes presentation",
     "",
     "## Shots",
     "",
@@ -770,6 +842,21 @@ function finding(code: string, message: string, pathValue?: string): ValidationF
   const result: ValidationFinding = { code, message };
   if (pathValue) result.path = pathValue;
   return result;
+}
+
+function missingValues<T extends string>(required: readonly T[], values: string[]): string[] {
+  const present = new Set(values);
+  return required.filter((value) => !present.has(value));
+}
+
+function unsupportedValues(values: string[], allowed: readonly string[]): string[] {
+  const allowlist = new Set(allowed);
+  return values.filter((value) => !allowlist.has(value));
+}
+
+function overlappingValues(left: string[], right: string[]): string[] {
+  const rightValues = new Set(right);
+  return left.filter((value) => rightValues.has(value));
 }
 
 async function readJSON<T>(filePath: string): Promise<T> {

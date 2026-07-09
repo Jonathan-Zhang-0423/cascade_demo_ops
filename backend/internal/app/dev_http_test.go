@@ -125,6 +125,25 @@ func TestDevHTTPBridgeRuntimeHealthIsRedacted(t *testing.T) {
 	}
 }
 
+func TestDevHTTPBridgeModelDiagnosticsAreRedacted(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/model-diagnostics", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	payload := response.Body.String()
+	if strings.Contains(payload, "secret") || strings.Contains(payload, "postgres://user:secret") {
+		t.Fatalf("model diagnostics leaked sensitive value: %s", payload)
+	}
+	if !strings.Contains(payload, "deterministic_mode") && !strings.Contains(payload, "route_not_configured") {
+		t.Fatalf("model diagnostics should expose safe failure class: %s", payload)
+	}
+}
+
 func TestEnsureLocalDevAddressRejectsNonLocalBinds(t *testing.T) {
 	if err := EnsureLocalDevAddress("127.0.0.1:4317"); err != nil {
 		t.Fatal(err)
@@ -157,6 +176,14 @@ func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
 		DevRepoRoot:     root,
 		SidecarPaths:    map[string]string{},
 		DatabaseURL:     "postgres://user:secret@example/db",
+		LLMMode:         config.LLMModeDeterministic,
+		ModelTaskRoutes: map[config.ModelTask]config.ModelTaskRoute{
+			config.ModelTaskPlanning: {
+				Task:     config.ModelTaskPlanning,
+				Provider: config.ModelProviderKimi,
+				Model:    "kimi-k2.7-code",
+			},
+		},
 	}, store.NewMemoryStateStore())
 	if err != nil {
 		t.Fatal(err)

@@ -92,7 +92,10 @@ describe("desktop bridge contract", () => {
             schema_version: "demoops.multimodal_understanding_report.v1",
             summary: "真实理解报告",
             feature_hypotheses: [{ id: "feature_real", name: "团队协作", value: "提升协作效率" }],
-            evidence_refs: [{ id: "ev_real", kind: "requirement_doc", summary: "需求摘要", confidence: 0.9 }],
+            evidence_refs: [
+              { id: "ev_real", kind: "requirement_doc", summary: "需求摘要", confidence: 0.9 },
+              { id: "ev_model", kind: "requirement_doc", summary: "RequirementReaderAgent 模型路由：kimi/kimi-k2.7-code/domestic-llm-adapter-v1/adapter=kimi-openai-compatible", confidence: 0.8 },
+            ],
             input_fingerprints: { product_url: "sha256:product" },
             source_digest_sha256: "sha256:source",
             confidence: 0.9,
@@ -197,6 +200,7 @@ describe("desktop bridge contract", () => {
     expect(result.data?.scriptMarkdown).toContain("真实中文思路文档");
     expect(result.data?.executableScriptBundle?.playwright_script.inline_source).toContain("runCascadeRecording");
     expect(result.data?.packagePreview.packageDigest).toBe("sha256:bundle");
+    expect(result.data?.modelProvenance?.[0]).toContain("kimi-openai-compatible");
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/execution-package",
       expect.objectContaining({ method: "POST" }),
@@ -257,7 +261,7 @@ describe("desktop bridge contract", () => {
           model_task_routes: {
             planning: {
               provider: "kimi",
-              model: "kimi-2.5",
+              model: "kimi-k2.7-code",
               provider_override: "CASCADE_PLANNING_PROVIDER",
               model_override: "CASCADE_PLANNING_MODEL",
             },
@@ -275,6 +279,49 @@ describe("desktop bridge contract", () => {
     expect(result.data?.modelAdapterVersion).toBe("domestic-llm-adapter-v1");
     expect(result.data?.modelProviders.kimi?.apiKeyEnv).toBe("KIMI_API_KEY");
     expect(result.data?.modelTaskRoutes.planning?.modelOverride).toBe("CASCADE_PLANNING_MODEL");
+  });
+
+  it("maps local model diagnostics into frontend camelCase DTOs", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        data: [
+          {
+            provider: "kimi",
+            task: "planning",
+            model: "kimi-k2.7-code",
+            adapter_version: "domestic-llm-adapter-v1",
+            mode: "real",
+            base_url_host: "api.moonshot.cn",
+            base_url_path: "/v1",
+            configured: true,
+            ok: false,
+            http_status: 401,
+            error_class: "http_401",
+            error: "provider HTTP 401: [redacted]",
+            latency_ms: 120,
+            checked_at: "2026-07-09T00:00:00Z",
+          },
+        ],
+      }),
+    })));
+
+    const bridge = createLocalBridgeClient();
+    const result = await bridge.modelDiagnostics();
+
+    expect(result.ok).toBe(true);
+    expect(result.data?.[0]).toMatchObject({
+      provider: "kimi",
+      task: "planning",
+      model: "kimi-k2.7-code",
+      baseURLHost: "api.moonshot.cn",
+      httpStatus: 401,
+      errorClass: "http_401",
+      latencyMS: 120,
+    });
+    expect(JSON.stringify(result.data)).not.toMatch(/sk-|Authorization/i);
   });
 
   it("uses same-origin local bridge by default so the demo stays on port 3000", async () => {

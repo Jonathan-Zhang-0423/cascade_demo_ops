@@ -127,6 +127,7 @@ export type ProjectWorkspaceView = {
   scriptDocument?: ExecutionScriptDocument;
   scriptMarkdown?: string;
   executableScriptBundle?: ExecutableRecordingScriptBundle;
+  modelProvenance?: string[];
   packagePreview: ExecutionPackagePreview;
   cloudRun: CloudRunStatusView;
   assets: AssetReviewView[];
@@ -142,6 +143,23 @@ export type RuntimeHealthView = {
   sidecars: Record<string, boolean>;
   modelProviders: Record<string, ProviderCredentialStatus>;
   modelTaskRoutes: Record<string, ModelTaskRouteStatus>;
+};
+
+export type ModelDiagnosticResult = {
+  provider: string;
+  task?: string;
+  model: string;
+  adapterVersion: string;
+  mode: string;
+  baseURLHost: string;
+  baseURLPath: string;
+  configured: boolean;
+  ok: boolean;
+  httpStatus?: number;
+  errorClass?: string;
+  error?: string;
+  latencyMS?: number;
+  checkedAt: string;
 };
 
 export type ProviderCredentialStatus = {

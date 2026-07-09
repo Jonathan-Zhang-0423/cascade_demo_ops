@@ -8,6 +8,13 @@ The model designs editing decisions only. It must not create new product UI
 actions, images, video clips, or synthetic screenshots. Final composition must
 use existing artifacts referenced by the catalog.
 
+The collaboration boundary is part of the protocol:
+
+```text
+Customer-side agent owns what must be demonstrated.
+Cloud-side AIGC may only optimize how the verified material is presented.
+```
+
 ## Objects
 
 - `AssetTimelineCatalog` (`demoops.asset_timeline_catalog.v1`) describes the
@@ -27,8 +34,30 @@ Every persisted edit plan must use:
 
 ```json
 {
+  "source_authority": "customer_side_agent",
+  "model_role": "presentation_optimizer_only",
   "source_material_policy": "existing_assets_only",
-  "script_order_policy": "preserve_required_step_order"
+  "script_order_policy": "preserve_required_step_order",
+  "locked_fields": [
+    "source_authority",
+    "model_role",
+    "source_material_policy",
+    "script_order_policy",
+    "source_artifact_id",
+    "source_step_id",
+    "source_time_range_ms",
+    "required_step_order"
+  ],
+  "model_editable_fields": [
+    "purpose",
+    "overlays.text",
+    "global_style.color_grade",
+    "global_style.pacing",
+    "global_style.transition_style",
+    "operations.zoom",
+    "operations.speed",
+    "operations.style"
+  ]
 }
 ```
 
@@ -36,6 +65,31 @@ The interaction script remains the primary storyline. A planner may trim,
 emphasize, caption, crop, zoom, pan, hold, change speed, apply transitions, blur
 regions, and color grade existing material, but required script steps must keep
 their original order.
+
+## Field Ownership
+
+The customer-side agent is the authority for product facts, required UI steps,
+business meaning, safety boundaries, and the interaction story. The cloud-side
+AIGC role is limited to presentation optimization.
+
+Locked fields cannot be treated as model-editable:
+
+- source authority and model role
+- source material and script order policies
+- `source_artifact_id`
+- `source_step_id`
+- `source_time_range_ms`
+- required step order
+
+Model-editable fields are intentionally narrow:
+
+- shot `purpose`
+- overlay text such as captions and callouts
+- global color, pacing, and transition style
+- zoom, speed, and operation style parameters
+
+If a plan declares locked fields as editable, omits required locked fields, or
+adds unsupported model-editable fields, validation must reject it before render.
 
 ## Source References
 

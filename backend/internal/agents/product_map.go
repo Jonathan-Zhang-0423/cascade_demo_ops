@@ -24,27 +24,27 @@ func NewProductMapAgentWithLLM(client llm.Client) *ProductMapAgent {
 type productMapLLMOutput struct {
 	Summary string `json:"summary"`
 	Pages   []struct {
-		ID      string   `json:"id"`
-		Title   string   `json:"title"`
-		Purpose string   `json:"purpose"`
-		Actions []string `json:"actions"`
+		ID      string              `json:"id"`
+		Title   string              `json:"title"`
+		Purpose string              `json:"purpose"`
+		Actions flexibleStringSlice `json:"actions"`
 	} `json:"pages"`
 	Features []struct {
-		ID            string   `json:"id"`
-		Name          string   `json:"name"`
-		Kind          string   `json:"kind"`
-		UserValue     string   `json:"user_value"`
-		BusinessValue string   `json:"business_value"`
-		Priority      string   `json:"priority"`
-		KeyActions    []string `json:"key_actions"`
+		ID            string              `json:"id"`
+		Name          string              `json:"name"`
+		Kind          string              `json:"kind"`
+		UserValue     string              `json:"user_value"`
+		BusinessValue string              `json:"business_value"`
+		Priority      string              `json:"priority"`
+		KeyActions    flexibleStringSlice `json:"key_actions"`
 	} `json:"features"`
 	Workflows []struct {
-		ID             string            `json:"id"`
-		Name           string            `json:"name"`
-		UseCase        model.DemoUseCase `json:"use_case"`
-		EstimatedSteps int               `json:"estimated_steps"`
-		ValueScore     float64           `json:"value_score"`
-		Feasibility    float64           `json:"feasibility"`
+		ID             string              `json:"id"`
+		Name           string              `json:"name"`
+		UseCase        flexibleDemoUseCase `json:"use_case"`
+		EstimatedSteps int                 `json:"estimated_steps"`
+		ValueScore     float64             `json:"value_score"`
+		Feasibility    float64             `json:"feasibility"`
 	} `json:"workflows"`
 }
 
@@ -143,7 +143,7 @@ func (a *ProductMapAgent) enhanceProductMapWithLLM(ctx context.Context, project 
 			if patch.Purpose != "" {
 				page.Purpose = patch.Purpose
 			}
-			page.Actions = uniqueStrings(append(page.Actions, patch.Actions...))
+			page.Actions = uniqueStrings(append(page.Actions, stringSlice(patch.Actions)...))
 		}
 	}
 	for _, patch := range output.Features {
@@ -156,7 +156,7 @@ func (a *ProductMapAgent) enhanceProductMapWithLLM(ctx context.Context, project 
 			BusinessValue: patch.BusinessValue,
 			Priority:      firstNonEmpty(patch.Priority, "supporting"),
 			BestAudience:  []string{project.TargetAudience},
-			KeyActions:    patch.KeyActions,
+			KeyActions:    stringSlice(patch.KeyActions),
 			EvidenceRefs:  productMap.EvidenceRefs,
 		})
 	}
@@ -165,7 +165,7 @@ func (a *ProductMapAgent) enhanceProductMapWithLLM(ctx context.Context, project 
 		productMap.Workflows = append(productMap.Workflows, &model.WorkflowCandidate{
 			ID:             firstNonEmpty(patch.ID, "workflow_llm_map_"+shortHash(name)),
 			Name:           name,
-			UseCase:        patch.UseCase,
+			UseCase:        demoUseCase(patch.UseCase),
 			AudienceID:     "audience_primary",
 			EstimatedSteps: patch.EstimatedSteps,
 			ValueScore:     patch.ValueScore,

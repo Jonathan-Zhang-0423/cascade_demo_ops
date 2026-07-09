@@ -1,4 +1,4 @@
-import type { ProjectWorkspaceView, RuntimeHealthView, ScenarioID } from "./domain";
+import type { ModelDiagnosticResult, ProjectWorkspaceView, RuntimeHealthView, ScenarioID } from "./domain";
 import type {
   AssetKind,
   DemoWorkflowGraph,
@@ -22,6 +22,7 @@ export type BridgeResult<T> = {
 export type DesktopBridgeClient = {
   mode: "mock" | "local";
   runtimeHealth(): Promise<BridgeResult<RuntimeHealthView>>;
+  modelDiagnostics(): Promise<BridgeResult<ModelDiagnosticResult[]>>;
   createProject(scenarioID: ScenarioID): Promise<BridgeResult<ProjectWorkspaceView>>;
   listProjects(): Promise<BridgeResult<ProjectWorkspaceView[]>>;
   loadProject(projectID: string): Promise<BridgeResult<ProjectWorkspaceView>>;
@@ -66,6 +67,23 @@ type LocalRuntimeHealth = {
     provider_override: string;
     model_override: string;
   }>;
+};
+
+type LocalModelDiagnostic = {
+  provider: string;
+  task?: string;
+  model: string;
+  adapter_version: string;
+  mode: string;
+  base_url_host: string;
+  base_url_path: string;
+  configured: boolean;
+  ok: boolean;
+  http_status?: number;
+  error_class?: string;
+  error?: string;
+  latency_ms?: number;
+  checked_at: string;
 };
 
 type LocalCascadeState = {
@@ -139,6 +157,13 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         return { ok: false, error: result.error ?? "本地运行时状态不可用" };
       }
       return ok(runtimeHealthFromLocal(result.data));
+    },
+    async modelDiagnostics() {
+      const result = await requestLocal<LocalModelDiagnostic[]>(baseURL, "/v1/desktop/model-diagnostics", { method: "POST" });
+      if (!result.ok || !result.data) {
+        return { ok: false, error: result.error ?? "模型诊断不可用" };
+      }
+      return ok(result.data.map(modelDiagnosticFromLocal));
     },
     async createProject(scenarioID) {
       const workspace = createWorkspace(scenarioID);
@@ -251,7 +276,7 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         modelTaskRoutes: {
           planning: {
             provider: "kimi",
-            model: "kimi-2.5",
+            model: "kimi-k2.7-code",
             providerOverride: "CASCADE_PLANNING_PROVIDER",
             modelOverride: "CASCADE_PLANNING_MODEL",
           },
@@ -275,6 +300,14 @@ export function createMockBridgeClient(): DesktopBridgeClient {
           },
         },
       });
+    },
+    async modelDiagnostics() {
+      return ok([
+        mockDiagnostic("kimi", "planning", "kimi-k2.7-code"),
+        mockDiagnostic("glm", "code_reading", "glm-5.2"),
+        mockDiagnostic("minimax", "multimodal_understanding", "minimax-m3"),
+        mockDiagnostic("seedance", "video_operation", "seedance-2.0"),
+      ]);
     },
     async createProject(scenarioID) {
       const project = createWorkspace(scenarioID);
@@ -536,10 +569,22 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
   if (scriptMarkdown) {
     workspace.scriptMarkdown = scriptMarkdown;
   }
-  if (bundle) {
+    if (bundle) {
     workspace.executableScriptBundle = bundle;
   }
+  const provenance = modelProvenanceFromState(report, scriptDocument);
+  if (provenance.length > 0) {
+    workspace.modelProvenance = provenance;
+  }
   return workspace;
+}
+
+function modelProvenanceFromState(report: MultimodalUnderstandingReport | undefined, scriptDocument: ExecutionScriptDocument | undefined): string[] {
+  const refs = [...(report?.evidence_refs ?? []), ...(scriptDocument?.evidence_refs ?? [])];
+  const values = refs
+    .map((ref) => ref.summary)
+    .filter((summary): summary is string => Boolean(summary?.includes("模型路由")));
+  return [...new Set(values)];
 }
 
 function sourceConnectionsFromState(project: LocalProjectContext | undefined, report: MultimodalUnderstandingReport | undefined, fallback: ProjectWorkspaceView) {
@@ -648,6 +693,42 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
     health.modelAdapterVersion = local.model_adapter_version;
   }
   return health;
+}
+
+function modelDiagnosticFromLocal(local: LocalModelDiagnostic): ModelDiagnosticResult {
+  return {
+    provider: local.provider,
+    ...(local.task ? { task: local.task } : {}),
+    model: local.model,
+    adapterVersion: local.adapter_version,
+    mode: local.mode,
+    baseURLHost: local.base_url_host,
+    baseURLPath: local.base_url_path,
+    configured: local.configured,
+    ok: local.ok,
+    ...(local.http_status !== undefined ? { httpStatus: local.http_status } : {}),
+    ...(local.error_class ? { errorClass: local.error_class } : {}),
+    ...(local.error ? { error: local.error } : {}),
+    ...(local.latency_ms !== undefined ? { latencyMS: local.latency_ms } : {}),
+    checkedAt: local.checked_at,
+  };
+}
+
+function mockDiagnostic(provider: string, task: string, model: string): ModelDiagnosticResult {
+  return {
+    provider,
+    task,
+    model,
+    adapterVersion: "domestic-llm-adapter-v1",
+    mode: "mock",
+    baseURLHost: `${provider}.example`,
+    baseURLPath: "/v1",
+    configured: false,
+    ok: false,
+    errorClass: "mock_mode",
+    error: "mock bridge 不调用真实模型",
+    checkedAt: new Date().toISOString(),
+  };
 }
 
 function mockUnderstandingReport(workspace: ProjectWorkspaceView): MultimodalUnderstandingReport {

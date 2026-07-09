@@ -25,6 +25,8 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 func (s *DevHTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/desktop/runtime-health", s.handleRuntimeHealth)
+	mux.HandleFunc("GET /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
+	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
 	return withDevCORS(mux)
@@ -32,6 +34,10 @@ func (s *DevHTTPServer) Handler() http.Handler {
 
 func (s *DevHTTPServer) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
 	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig()), nil)
+}
+
+func (s *DevHTTPServer) handleModelDiagnostics(w http.ResponseWriter, r *http.Request) {
+	writeBridgeValue(w, s.service.DiagnoseModels(r.Context()), nil)
 }
 
 func (s *DevHTTPServer) handleCreateProject(w http.ResponseWriter, r *http.Request) {
