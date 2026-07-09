@@ -1,0 +1,391 @@
+{
+  "id": "script_basic_three_in_one",
+  "project_id": "project_fixture_three_in_one",
+  "workflow_graph_id": "graph_fixture_three_in_one",
+  "graph_version": 1,
+  "schema_version": "demoops.execution_script_document.v1",
+  "status": "review_ready",
+  "title": "产品演示执行包三合一样例",
+  "summary": "打开产品工作台，进入团队协作页面，邀请成员，并验证邀请成功状态。",
+  "language": "zh-CN",
+  "workflow_graph": {
+    "id": "graph_fixture_three_in_one",
+    "project_id": "project_fixture_three_in_one",
+    "schema_version": "demoops.workflow_graph.v1",
+    "version": 1,
+    "status": "review_ready",
+    "name": "团队协作功能演示路径",
+    "summary": "通过四个可执行节点展示团队协作功能的核心价值。",
+    "entry_point": "https://demo.example.cn/dashboard",
+    "nodes": [
+      {
+        "id": "open_dashboard",
+        "type": "start",
+        "title": "打开产品工作台",
+        "action": "navigate",
+        "selector": "[data-testid='dashboard-shell']",
+        "input_data": "",
+        "expected_outcome": "工作台主界面加载完成",
+        "is_screenshot": true,
+        "has_zoom": false,
+        "retry_policy": 2,
+        "duration_hint_ms": 8000
+      },
+      {
+        "id": "open_team",
+        "type": "action",
+        "title": "进入团队协作页面",
+        "action": "click",
+        "selector": "[data-testid='team-nav']",
+        "input_data": "",
+        "expected_outcome": "团队页面可见",
+        "is_screenshot": true,
+        "has_zoom": false,
+        "retry_policy": 2,
+        "duration_hint_ms": 7000
+      },
+      {
+        "id": "invite_member",
+        "type": "action",
+        "title": "邀请一名团队成员",
+        "action": "fill",
+        "selector": "[data-testid='invite-email-input']",
+        "input_data": "input_ref:demo_invite_email",
+        "expected_outcome": "邀请请求已提交",
+        "is_screenshot": true,
+        "has_zoom": true,
+        "retry_policy": 2,
+        "duration_hint_ms": 12000
+      },
+      {
+        "id": "verify_success",
+        "type": "validation",
+        "title": "验证邀请成功状态",
+        "action": "assert",
+        "selector": "[data-testid='invite-success']",
+        "input_data": "",
+        "expected_outcome": "邀请成功提示可见",
+        "is_screenshot": true,
+        "has_zoom": true,
+        "retry_policy": 1,
+        "duration_hint_ms": 10000
+      }
+    ],
+    "edges": [
+      { "id": "edge_open_team", "from_node": "open_dashboard", "to_node": "open_team" },
+      { "id": "edge_team_invite", "from_node": "open_team", "to_node": "invite_member" },
+      { "id": "edge_invite_verify", "from_node": "invite_member", "to_node": "verify_success" }
+    ],
+    "assets": {
+      "demo_video_60s": true,
+      "screenshot_pack": true,
+      "step_by_step_docs": true,
+      "target_duration_sec": 60,
+      "requested_assets": [
+        { "id": "asset_video", "kind": "demo_video", "format": "mp4", "required": true, "status": "requested" },
+        { "id": "asset_docs", "kind": "step_by_step_docs", "format": "markdown", "required": true, "status": "requested" }
+      ]
+    }
+  },
+  "recording_run_spec": {
+    "run_id": "run_fixture_three_in_one",
+    "base_url": "https://demo.example.cn",
+    "allowed_domains": ["demo.example.cn"],
+    "required_ip_allowlist": ["203.0.113.10/32"],
+    "auth_flow_ref": "auth_flow_demo_login",
+    "timezone": "Asia/Shanghai",
+    "locale": "zh-CN",
+    "browser": {
+      "engine": "chromium",
+      "version_policy": "stable-pinned",
+      "headless": true,
+      "viewports": [
+        { "name": "desktop", "width": 1440, "height": 900, "device": "desktop" }
+      ]
+    },
+    "timeline": {
+      "target_duration_sec": 60,
+      "max_duration_sec": 90,
+      "node_timing_hints": [
+        { "node_id": "open_dashboard", "duration_ms": 8000, "hold_after_ms": 500 },
+        { "node_id": "open_team", "duration_ms": 7000, "hold_after_ms": 500 },
+        { "node_id": "invite_member", "duration_ms": 12000, "hold_after_ms": 800 },
+        { "node_id": "verify_success", "duration_ms": 10000, "hold_after_ms": 1000 }
+      ]
+    },
+    "outputs": {
+      "raw_recording": true,
+      "final_video": true,
+      "screenshot_pack": true,
+      "step_by_step_docs": true,
+      "trace": true,
+      "output_formats": ["mp4", "markdown", "png"],
+      "resolution_width": 1440,
+      "resolution_height": 900
+    },
+    "redactions": {
+      "mask_selectors": ["[data-sensitive]", "[data-testid='customer-email']"],
+      "text_patterns": ["[A-Z0-9._%+-]+@[A-Z0-9.-]+", "api[_-]?key", "token"],
+      "video_mask_policy": "mask_before_persist",
+      "screenshot_mask_policy": "mask_before_persist"
+    },
+    "failure_policy": {
+      "max_attempts": 2,
+      "retry_delay_ms": 1000,
+      "selector_repair_allowed": true,
+      "data_repair_allowed": false,
+      "human_escalation_conditions": ["forbidden_page_detected", "raw_secret_detected", "domain_violation"]
+    }
+  },
+  "steps": [
+    {
+      "id": "step_open_dashboard",
+      "order": 1,
+      "node_id": "open_dashboard",
+      "title": "打开产品工作台",
+      "business_value": "建立演示入口，让观众看到真实工作台上下文。",
+      "page_target": {
+        "url": "https://demo.example.cn/dashboard",
+        "selector": "[data-testid='dashboard-shell']",
+        "selector_alternatives": [
+          { "kind": "css", "value": "main", "confidence": 0.62, "stability_score": 0.45, "source": "page_summary" }
+        ],
+        "page_ref": "page_dashboard"
+      },
+      "action": {
+        "type": "navigate",
+        "target": { "url": "https://demo.example.cn/dashboard" },
+        "timeout_ms": 30000,
+        "wait_until": "networkidle"
+      },
+      "expected_outcome": "工作台主界面加载完成",
+      "validations": [
+        {
+          "id": "validation_dashboard_visible",
+          "kind": "visible",
+          "target": { "selector": "[data-testid='dashboard-shell']" },
+          "assertion": "dashboard shell is visible",
+          "severity": "blocking",
+          "required": true
+        }
+      ],
+      "capture": {
+        "screenshot": true,
+        "video": true,
+        "zoom": false,
+        "callout": false,
+        "mask_selectors": ["[data-sensitive]"],
+        "duration_hint_ms": 8000
+      },
+      "timing": { "node_id": "open_dashboard", "duration_ms": 8000, "hold_after_ms": 500 },
+      "narrative": {
+        "title": "打开产品工作台",
+        "voiceover": "首先打开产品工作台，进入本次演示的真实业务上下文。",
+        "caption": "打开产品工作台",
+        "tone": "professional",
+        "audience_lens": "产品和运营团队"
+      },
+      "evidence_refs": [
+        { "id": "ev_req_goal", "kind": "requirement_doc", "summary": "用户要求展示团队协作能力", "confidence": 0.86 }
+      ],
+      "blocking": true
+    },
+    {
+      "id": "step_open_team",
+      "order": 2,
+      "node_id": "open_team",
+      "title": "进入团队协作页面",
+      "business_value": "展示团队协作功能的入口清晰、路径短。",
+      "page_target": {
+        "url": "https://demo.example.cn/team",
+        "selector": "[data-testid='team-nav']",
+        "selector_alternatives": [
+          { "kind": "text", "value": "团队", "confidence": 0.72, "stability_score": 0.58, "source": "dom_summary" }
+        ],
+        "page_ref": "page_team"
+      },
+      "action": {
+        "type": "click",
+        "target": { "selector": "[data-testid='team-nav']", "text": "团队" },
+        "timeout_ms": 15000
+      },
+      "expected_outcome": "团队页面可见",
+      "validations": [
+        {
+          "id": "validation_team_page_visible",
+          "kind": "visible",
+          "target": { "selector": "[data-testid='team-page']" },
+          "assertion": "team page is visible",
+          "severity": "blocking",
+          "required": true
+        }
+      ],
+      "capture": {
+        "screenshot": true,
+        "video": true,
+        "zoom": false,
+        "callout": false,
+        "mask_selectors": ["[data-sensitive]"],
+        "duration_hint_ms": 7000
+      },
+      "timing": { "node_id": "open_team", "duration_ms": 7000, "hold_after_ms": 500 },
+      "narrative": {
+        "title": "进入团队协作",
+        "voiceover": "从工作台进入团队协作页面，展示用户能够快速找到关键功能。",
+        "caption": "进入团队协作页面",
+        "tone": "professional",
+        "audience_lens": "产品和销售团队"
+      },
+      "evidence_refs": [
+        { "id": "ev_code_selector_team_nav", "kind": "source_code", "summary": "代码摘要发现 team-nav 选择器", "confidence": 0.78 }
+      ],
+      "blocking": true
+    },
+    {
+      "id": "step_invite_member",
+      "order": 3,
+      "node_id": "invite_member",
+      "title": "邀请一名团队成员",
+      "business_value": "展示团队扩展和协作闭环的核心操作。",
+      "page_target": {
+        "url": "https://demo.example.cn/team",
+        "selector": "[data-testid='invite-email-input']",
+        "selector_alternatives": [
+          { "kind": "label", "value": "成员邮箱", "confidence": 0.68, "stability_score": 0.52, "source": "dom_summary" }
+        ],
+        "page_ref": "page_team"
+      },
+      "action": {
+        "type": "fill",
+        "target": { "selector": "[data-testid='invite-email-input']" },
+        "input_ref": "input_ref:demo_invite_email",
+        "timeout_ms": 15000
+      },
+      "expected_outcome": "邀请请求已提交",
+      "validations": [
+        {
+          "id": "validation_invite_pending",
+          "kind": "visible",
+          "target": { "selector": "[data-testid='invite-pending']" },
+          "assertion": "invite pending state is visible",
+          "severity": "blocking",
+          "required": true
+        }
+      ],
+      "capture": {
+        "screenshot": true,
+        "video": true,
+        "zoom": true,
+        "callout": true,
+        "mask_selectors": ["[data-testid='customer-email']"],
+        "duration_hint_ms": 12000
+      },
+      "timing": { "node_id": "invite_member", "duration_ms": 12000, "hold_after_ms": 800 },
+      "narrative": {
+        "title": "邀请团队成员",
+        "voiceover": "输入受控的演示邮箱并发送邀请，体现团队协作从配置到落地的关键动作。",
+        "caption": "邀请成员加入团队",
+        "callout": "成员邮箱会被打码",
+        "tone": "professional",
+        "audience_lens": "产品和客户成功团队"
+      },
+      "evidence_refs": [
+        { "id": "ev_req_invite_flow", "kind": "requirement_doc", "summary": "演示需求要求展示团队协作闭环", "confidence": 0.84 }
+      ],
+      "blocking": true
+    },
+    {
+      "id": "step_verify_success",
+      "order": 4,
+      "node_id": "verify_success",
+      "title": "验证邀请成功状态",
+      "business_value": "用可验证状态收束演示，证明流程完成。",
+      "page_target": {
+        "url": "https://demo.example.cn/team",
+        "selector": "[data-testid='invite-success']",
+        "page_ref": "page_team"
+      },
+      "action": {
+        "type": "assert",
+        "target": { "selector": "[data-testid='invite-success']" },
+        "timeout_ms": 20000
+      },
+      "expected_outcome": "邀请成功提示可见",
+      "validations": [
+        {
+          "id": "validation_invite_success",
+          "kind": "visible",
+          "target": { "selector": "[data-testid='invite-success']" },
+          "assertion": "invite success state is visible",
+          "severity": "blocking",
+          "required": true
+        }
+      ],
+      "capture": {
+        "screenshot": true,
+        "video": true,
+        "zoom": true,
+        "callout": true,
+        "mask_selectors": ["[data-sensitive]", "[data-testid='customer-email']"],
+        "duration_hint_ms": 10000
+      },
+      "timing": { "node_id": "verify_success", "duration_ms": 10000, "hold_after_ms": 1000 },
+      "narrative": {
+        "title": "验证成功结果",
+        "voiceover": "最后验证邀请成功状态，让演示以可检查的结果闭环。",
+        "caption": "验证邀请成功",
+        "tone": "professional",
+        "audience_lens": "产品和运营团队"
+      },
+      "evidence_refs": [
+        { "id": "ev_page_success_state", "kind": "browser_scan", "summary": "页面摘要包含邀请成功状态", "confidence": 0.76 }
+      ],
+      "blocking": true
+    }
+  ],
+  "safety_policy": {
+    "allowed_domains": ["demo.example.cn"],
+    "forbidden_pages": ["/billing", "/settings/api-keys"],
+    "forbidden_data": ["API Key", "访问令牌", "客户邮箱原文"],
+    "redactions": {
+      "mask_selectors": ["[data-sensitive]", "[data-testid='customer-email']"],
+      "text_patterns": ["[A-Z0-9._%+-]+@[A-Z0-9.-]+", "api[_-]?key", "token"],
+      "video_mask_policy": "mask_before_persist",
+      "screenshot_mask_policy": "mask_before_persist"
+    },
+    "pii_handling": "mask_in_artifacts"
+  },
+  "reproducibility": {
+    "graph_hash_sha256": "example_sha256_graph_basic_three_in_one",
+    "script_hash_sha256": "example_sha256_plan_basic_three_in_one",
+    "input_fingerprints": {
+      "product_url": "example_sha256_product_url",
+      "requirement_prompt": "example_sha256_requirement_prompt",
+      "source_summary": "example_sha256_source_summary"
+    },
+    "browser_runtime_pins": {
+      "browser": "chromium",
+      "version_policy": "stable-pinned"
+    },
+    "source_snapshot_digest": "example_sha256_source_digest_summary_only",
+    "deterministic_seed": "fixture_seed_basic_three_in_one",
+    "created_with_app_version": "0.1.0"
+  },
+  "approval_checklist": {
+    "human_approval_required": true,
+    "source_summary_only": true,
+    "credential_scope_review_required": true,
+    "redactions_review_required": true,
+    "ip_allowlist_acknowledgement_required": true,
+    "blocking_reasons": [
+      "上传前必须完成人工审批。",
+      "需要确认仅上传结构摘要，不上传完整源码。",
+      "需要复核凭据范围、禁用页面和打码规则。"
+    ]
+  },
+  "evidence_refs": [
+    { "id": "ev_req_goal", "kind": "requirement_doc", "summary": "用户要求展示团队协作能力", "confidence": 0.86 },
+    { "id": "ev_code_selector_team_nav", "kind": "source_code", "summary": "代码摘要发现 team-nav 选择器", "confidence": 0.78 },
+    { "id": "ev_page_success_state", "kind": "browser_scan", "summary": "页面摘要包含邀请成功状态", "confidence": 0.76 }
+  ]
+}

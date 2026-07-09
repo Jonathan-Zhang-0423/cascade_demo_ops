@@ -1,0 +1,16 @@
+{
+  "name": "basic-three-in-one",
+  "title": "产品演示执行包三合一样例",
+  "schema_version": "demoops.fixture.three_in_one_bundle.v1",
+  "description": "用于桌面 App 审批体验的最小三合一示例：中文思路文档、执行计划 JSON、受限 TS 录制脚本。",
+  "files": {
+    "approval_markdown": "approval.md",
+    "plan_json": "plan.json",
+    "playwright_script": "recording-script.ts",
+    "bundle_json": "bundle.json"
+  },
+  "safe_to_share": true,
+  "contains_real_secret": false,
+  "contains_full_source_code": false,
+  "created_for": "internal_demo_review"
+}

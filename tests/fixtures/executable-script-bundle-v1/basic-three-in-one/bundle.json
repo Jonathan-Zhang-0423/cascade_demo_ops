@@ -1,0 +1,93 @@
+{
+  "id": "bundle_basic_three_in_one",
+  "project_id": "project_fixture_three_in_one",
+  "workflow_graph_id": "graph_fixture_three_in_one",
+  "schema_version": "demoops.executable_recording_script_bundle.v1",
+  "status": "review_ready",
+  "script_manifest": {
+    "script_id": "recording_basic_three_in_one",
+    "version": 1,
+    "language": "typescript",
+    "runtime": "playwright-restricted-sandbox",
+    "entry_function": "runCascadeRecording",
+    "generator": "cascade_fixture_script_code_generator",
+    "generator_version": "0.1.0",
+    "dependency_allowlist": [],
+    "context_apis": ["ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"],
+    "step_node_ids": ["open_dashboard", "open_team", "invite_member", "verify_success"]
+  },
+  "plan_json_ref": {
+    "uri": "plan.json",
+    "mime_type": "application/json",
+    "sha256": "example_sha256_plan_basic_three_in_one",
+    "note": "fixture 使用文件引用避免 bundle 过长；真实上传包可内联 plan_json。"
+  },
+  "playwright_script": {
+    "artifact": {
+      "id": "artifact_recording_script_ts",
+      "kind": "playwright_recording_script",
+      "uri": "recording-script.ts",
+      "mime_type": "text/typescript",
+      "label": "受限 TS 录制脚本",
+      "sha256": "example_sha256_script_basic_three_in_one"
+    },
+    "mime_type": "text/typescript",
+    "sha256": "example_sha256_script_basic_three_in_one",
+    "encrypted": false
+  },
+  "approval_markdown": {
+    "artifact": {
+      "id": "artifact_approval_markdown",
+      "kind": "execution_script_markdown",
+      "uri": "approval.md",
+      "mime_type": "text/markdown",
+      "label": "中文审批思路文档",
+      "sha256": "example_sha256_markdown_basic_three_in_one"
+    },
+    "mime_type": "text/markdown",
+    "sha256": "example_sha256_markdown_basic_three_in_one"
+  },
+  "security_policy": {
+    "allowed_domains": ["demo.example.cn"],
+    "forbidden_pages": ["/billing", "/settings/api-keys"],
+    "forbidden_data": ["API Key", "访问令牌", "客户邮箱原文"],
+    "redactions": {
+      "mask_selectors": ["[data-sensitive]", "[data-testid='customer-email']"],
+      "text_patterns": ["[A-Z0-9._%+-]+@[A-Z0-9.-]+", "api[_-]?key", "token"],
+      "video_mask_policy": "mask_before_persist",
+      "screenshot_mask_policy": "mask_before_persist"
+    },
+    "secret_refs": ["vault://demo/local-login"],
+    "allowed_context_apis": ["ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"],
+    "allowed_page_methods": ["goto", "click", "fill", "waitForLoadState", "locator"],
+    "forbidden_imports": ["fs", "node:fs", "child_process", "node:child_process", "http", "https", "net", "tls"],
+    "forbidden_identifiers": ["import", "require", "eval", "Function", "process", "global", "globalThis", "window", "document", "fetch", "XMLHttpRequest", "WebSocket"],
+    "network_policy": "allowed_domains_only_via_ctx_page",
+    "file_system_policy": "no_direct_fs_access"
+  },
+  "reproducibility": {
+    "plan_hash_sha256": "example_sha256_plan_basic_three_in_one",
+    "script_hash_sha256": "example_sha256_script_basic_three_in_one",
+    "markdown_hash_sha256": "example_sha256_markdown_basic_three_in_one",
+    "bundle_hash_sha256": "example_sha256_bundle_basic_three_in_one",
+    "graph_hash_sha256": "example_sha256_graph_basic_three_in_one",
+    "source_snapshot_digest": "example_sha256_source_digest_summary_only",
+    "generator_version": "0.1.0",
+    "deterministic_seed": "fixture_seed_basic_three_in_one",
+    "input_fingerprints": {
+      "product_url": "example_sha256_product_url",
+      "requirement_prompt": "example_sha256_requirement_prompt",
+      "source_summary": "example_sha256_source_summary"
+    }
+  },
+  "validation": {
+    "valid": true,
+    "findings": [
+      {
+        "severity": "info",
+        "code": "fixture_only",
+        "message": "这是内部体验 fixture，真实执行前需要重新计算 hash 并运行完整 validator。"
+      }
+    ]
+  }
+}
