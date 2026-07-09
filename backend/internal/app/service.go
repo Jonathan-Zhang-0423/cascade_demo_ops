@@ -13,10 +13,11 @@ import (
 )
 
 type Service struct {
-	runtime config.AppRuntimeConfig
-	flow    *orchestrator.CascadeFlow
-	states  store.StateStore
-	layout  storage.LocalLayout
+	runtime  config.AppRuntimeConfig
+	flow     *orchestrator.CascadeFlow
+	states   store.StateStore
+	layout   storage.LocalLayout
+	exchange *ExchangeIntakeService
 }
 
 func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Service, error) {
@@ -39,10 +40,11 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		return nil, err
 	}
 	return &Service{
-		runtime: runtime,
-		flow:    flow,
-		states:  states,
-		layout:  storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
+		runtime:  runtime,
+		flow:     flow,
+		states:   states,
+		layout:   storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
+		exchange: NewExchangeIntakeService(nil),
 	}, nil
 }
 
@@ -160,4 +162,28 @@ func (s *Service) RunRehearsal(ctx context.Context, projectID string) (*orchestr
 
 func (s *Service) ArtifactURI(projectID string, fileName string) string {
 	return s.layout.ArtifactURI(projectID, fileName)
+}
+
+func (s *Service) InitExecutionPackage(ctx context.Context, request model.ExecutionPackageInitRequest) (model.ExecutionPackageInitResponse, error) {
+	return s.exchange.Init(ctx, request)
+}
+
+func (s *Service) UploadExecutionPackage(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage) (model.ExecutionPackageUploadResponse, error) {
+	return s.exchange.Upload(ctx, request, payload)
+}
+
+func (s *Service) GetExecutionPackageStatus(ctx context.Context, orgID string, exchangePackageID string) (model.ExecutionPackageStatusResponse, error) {
+	return s.exchange.Status(ctx, orgID, exchangePackageID)
+}
+
+func (s *Service) CompleteExecutionPackageWithResult(ctx context.Context, orgID string, exchangePackageID string, result model.RecordingResultPackage) (model.ExecutionPackageStatusResponse, error) {
+	return s.exchange.CompleteWithRecordingResult(ctx, orgID, exchangePackageID, result)
+}
+
+func (s *Service) GetResultPackage(ctx context.Context, orgID string, resultPackageID string) (model.RecordingResultPackage, error) {
+	return s.exchange.GetResultPackage(ctx, orgID, resultPackageID)
+}
+
+func (s *Service) AcknowledgeResultPackage(ctx context.Context, orgID string, request model.ResultPackageAckRequest) (model.ResultPackageAckResponse, error) {
+	return s.exchange.AckResultPackage(ctx, orgID, request)
 }
