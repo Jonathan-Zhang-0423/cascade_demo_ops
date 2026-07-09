@@ -3,6 +3,7 @@ package executor
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -125,7 +126,7 @@ func viewportFromRunSpec(spec model.RecordingRunSpec) Viewport {
 
 func artifactsFromRecordResult(source *model.ClientExecutionPackage, result RecordResult, createdAt time.Time) []model.ArtifactRef {
 	artifacts := append([]model.ArtifactRef{}, result.GeneratedAssets...)
-	if result.RecordingPath != "" {
+	if result.RecordingPath != "" && !artifactExistsForPath(artifacts, result.RecordingPath) && !artifactExistsForKind(artifacts, "raw_recording") {
 		artifacts = append(artifacts, model.ArtifactRef{
 			ID:        artifactID(source.PackageID, "raw_recording", 1),
 			Kind:      "raw_recording",
@@ -140,6 +141,9 @@ func artifactsFromRecordResult(source *model.ClientExecutionPackage, result Reco
 		if index < len(steps) {
 			nodeID = steps[index].NodeID
 		}
+		if artifactExistsForPath(artifacts, path) || artifactExistsForNodeKind(artifacts, nodeID, "screenshot") {
+			continue
+		}
 		artifacts = append(artifacts, model.ArtifactRef{
 			ID:           artifactID(source.PackageID, "screenshot", index+1),
 			Kind:         "screenshot",
@@ -149,7 +153,7 @@ func artifactsFromRecordResult(source *model.ClientExecutionPackage, result Reco
 			SourceNodeID: nodeID,
 		})
 	}
-	if result.TracePath != "" {
+	if result.TracePath != "" && !artifactExistsForPath(artifacts, result.TracePath) {
 		artifacts = append(artifacts, model.ArtifactRef{
 			ID:        artifactID(source.PackageID, "browser_trace", 1),
 			Kind:      "browser_trace",
@@ -168,6 +172,40 @@ func artifactsFromRecordResult(source *model.ClientExecutionPackage, result Reco
 		})
 	}
 	return uniqueArtifactRefs(artifacts)
+}
+
+func artifactExistsForKind(artifacts []model.ArtifactRef, kind string) bool {
+	for _, artifact := range artifacts {
+		if artifact.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func artifactExistsForNodeKind(artifacts []model.ArtifactRef, nodeID string, kind string) bool {
+	if nodeID == "" {
+		return false
+	}
+	for _, artifact := range artifacts {
+		if artifact.SourceNodeID == nodeID && artifact.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func artifactExistsForPath(artifacts []model.ArtifactRef, path string) bool {
+	key := normalizedArtifactURI(path)
+	if key == "" {
+		return false
+	}
+	for _, artifact := range artifacts {
+		if normalizedArtifactURI(artifact.URI) == key {
+			return true
+		}
+	}
+	return false
 }
 
 func stepResultsFromScriptPlan(source *model.ClientExecutionPackage, artifacts []model.ArtifactRef, startedAt time.Time, completedAt time.Time) []model.StepResult {
@@ -345,4 +383,40 @@ func mimeTypeForPath(path string, fallback string) string {
 	default:
 		return fallback
 	}
+}
+
+func normalizedArtifactURI(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) >= 2 && value[1] == ':' {
+		return strings.ToLower(filepath.Clean(value))
+	}
+	parsed, err := url.Parse(value)
+	if err == nil && parsed.Scheme == "file" {
+		rawPath := parsed.Path
+		if rawPath == "" {
+			rawPath = parsed.Opaque
+		}
+		if parsed.Host != "" {
+			if len(parsed.Host) == 2 && parsed.Host[1] == ':' {
+				rawPath = parsed.Host + rawPath
+			} else {
+				rawPath = "//" + parsed.Host + rawPath
+			}
+		}
+		if unescaped, unescapeErr := url.PathUnescape(rawPath); unescapeErr == nil {
+			rawPath = unescaped
+		}
+		filePath := filepath.FromSlash(rawPath)
+		if len(filePath) >= 3 && filePath[0] == filepath.Separator && filePath[2] == ':' {
+			filePath = filePath[1:]
+		}
+		return strings.ToLower(filepath.Clean(filePath))
+	}
+	if err == nil && parsed.Scheme != "" {
+		return value
+	}
+	return strings.ToLower(filepath.Clean(value))
 }

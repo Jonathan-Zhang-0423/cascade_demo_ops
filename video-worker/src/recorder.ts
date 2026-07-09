@@ -46,6 +46,10 @@ export async function record(request: RecordRequest): Promise<RecordResult> {
   await mkdir(outputDir, { recursive: true });
   if (request.executable_script_bundle) {
     const startedAt = new Date().toISOString();
+    const execution = await executeScript({ bundle: request.executable_script_bundle as never, output_dir: outputDir });
+    if (!execution.ok) {
+      throw new Error(execution.error || "script execution failed");
+    }
     if (shouldUsePlaywright(request)) {
       const browserResult = await recordWithPlaywright(request as never);
       const completedAt = new Date().toISOString();
@@ -57,11 +61,7 @@ export async function record(request: RecordRequest): Promise<RecordResult> {
       });
     }
 
-    const execution = await executeScript({ bundle: request.executable_script_bundle as never, output_dir: outputDir });
     const completedAt = new Date().toISOString();
-    if (!execution.ok) {
-      throw new Error(execution.error || "script execution failed");
-    }
     const tracePath = path.join(outputDir, "script_execution_trace.json");
     await writeJSON(tracePath, {
       schema_version: "demoops.script_execution_trace.v1",

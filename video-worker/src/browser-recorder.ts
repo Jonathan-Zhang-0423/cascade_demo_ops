@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -46,14 +48,19 @@ export type BrowserRecordResult = {
   screenshot_paths?: string[];
   trace_path?: string;
   step_results?: Array<{ node_id: string; status: string; duration_ms?: number; observed_state?: string }>;
-  generated_assets?: Array<{
-    id: string;
-    kind: string;
-    uri: string;
-    mime_type?: string;
-    source_node_id?: string;
-  }>;
+  generated_assets?: BrowserArtifactRef[];
   runtime_versions?: Record<string, string>;
+};
+
+type BrowserArtifactRef = {
+  id: string;
+  kind: string;
+  uri: string;
+  mime_type?: string;
+  sha256?: string;
+  size_bytes?: number;
+  created_at?: string;
+  source_node_id?: string;
 };
 
 export async function recordWithPlaywright(request: BrowserRecordRequest): Promise<BrowserRecordResult> {
@@ -89,16 +96,7 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
         const screenshotPath = await captureStepScreenshot(page, outputDir, step, index, request.recording_run_spec?.redactions?.mask_selectors || []);
         if (screenshotPath) {
           screenshotPaths.push(screenshotPath);
-          const screenshotAsset: NonNullable<BrowserRecordResult["generated_assets"]>[number] = {
-            id: `artifact_screenshot_${String(index + 1).padStart(3, "0")}`,
-            kind: "screenshot",
-            uri: fileURI(screenshotPath),
-            mime_type: "image/png",
-          };
-          if (step.node_id) {
-            screenshotAsset.source_node_id = step.node_id;
-          }
-          generatedAssets.push(screenshotAsset);
+          generatedAssets.push(await artifactRef(`artifact_screenshot_${String(index + 1).padStart(3, "0")}`, "screenshot", screenshotPath, "image/png", step.node_id));
         }
         const stepResult: NonNullable<BrowserRecordResult["step_results"]>[number] = {
           node_id: step.node_id || `step_${index + 1}`,
@@ -129,19 +127,9 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
 
   const recordingPath = await video?.path().catch(() => undefined);
   if (recordingPath) {
-    generatedAssets.unshift({
-      id: "artifact_raw_recording",
-      kind: "raw_recording",
-      uri: fileURI(recordingPath),
-      mime_type: "video/webm",
-    });
+    generatedAssets.unshift(await artifactRef("artifact_raw_recording", "raw_recording", recordingPath, "video/webm"));
   }
-  generatedAssets.push({
-    id: "artifact_browser_trace",
-    kind: "browser_trace",
-    uri: fileURI(tracePath),
-    mime_type: "application/zip",
-  });
+  generatedAssets.push(await artifactRef("artifact_browser_trace", "browser_trace", tracePath, "application/zip"));
 
   const result: BrowserRecordResult = {
     screenshot_paths: screenshotPaths,
@@ -222,4 +210,21 @@ function normalizeEngine(value?: string): BrowserEngineName {
 
 function fileURI(filePath: string): string {
   return pathToFileURL(path.resolve(filePath)).toString();
+}
+
+async function artifactRef(id: string, kind: string, filePath: string, mimeType: string, sourceNodeID?: string): Promise<BrowserArtifactRef> {
+  const data = await readFile(filePath);
+  const ref: BrowserArtifactRef = {
+    id,
+    kind,
+    uri: fileURI(filePath),
+    mime_type: mimeType,
+    sha256: createHash("sha256").update(data).digest("hex"),
+    size_bytes: data.length,
+    created_at: new Date().toISOString(),
+  };
+  if (sourceNodeID) {
+    ref.source_node_id = sourceNodeID;
+  }
+  return ref;
 }
