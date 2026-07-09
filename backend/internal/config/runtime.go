@@ -28,6 +28,16 @@ const (
 	DatabaseSQLite   DatabaseDialect = "sqlite"
 )
 
+type LLMMode string
+
+const (
+	LLMModeAuto          LLMMode = "auto"
+	LLMModeReal          LLMMode = "real"
+	LLMModeDeterministic LLMMode = "deterministic"
+)
+
+const ModelAdapterVersion = "domestic-llm-adapter-v1"
+
 type ModelProvider string
 
 const (
@@ -85,6 +95,8 @@ type AppRuntimeConfig struct {
 	DevRepoRoot          string
 	SidecarPaths         map[string]string
 	NodeBinaryPath       string
+	LLMMode              LLMMode
+	ModelAdapterVersion  string
 	ModelProviders       map[ModelProvider]ModelProviderCredential
 	ModelTaskRoutes      map[ModelTask]ModelTaskRoute
 }
@@ -125,6 +137,10 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 	if dialect != DatabasePostgres && dialect != DatabaseSQLite {
 		return AppRuntimeConfig{}, errors.New("unsupported DATABASE_DIALECT")
 	}
+	llmMode := LLMMode(envOrDefault("CASCADE_LLM_MODE", string(LLMModeAuto)))
+	if llmMode != LLMModeAuto && llmMode != LLMModeReal && llmMode != LLMModeDeterministic {
+		return AppRuntimeConfig{}, errors.New("unsupported CASCADE_LLM_MODE")
+	}
 
 	sqlitePath := envOrDefault("SQLITE_PATH", filepath.Join(dataRoot, "cascade_demoops.db"))
 	cfg := AppRuntimeConfig{
@@ -143,9 +159,11 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 		SidecarPaths: map[string]string{
 			"video-worker": os.Getenv("NODE_WORKER_PATH"),
 		},
-		NodeBinaryPath:  os.Getenv("NODE_BINARY_PATH"),
-		ModelProviders:  modelProviderCredentialsFromEnv(),
-		ModelTaskRoutes: modelTaskRoutesFromEnv(),
+		NodeBinaryPath:      os.Getenv("NODE_BINARY_PATH"),
+		LLMMode:             llmMode,
+		ModelAdapterVersion: ModelAdapterVersion,
+		ModelProviders:      modelProviderCredentialsFromEnv(),
+		ModelTaskRoutes:     modelTaskRoutesFromEnv(),
 	}
 	applyDesktopResourceManifest(&cfg)
 	return cfg, nil
@@ -213,7 +231,7 @@ func modelProviderCredentialsFromEnv() map[ModelProvider]ModelProviderCredential
 		fallbackModel      string
 	}{
 		{ModelProviderGLM, "GLM_API_KEY", nil, "GLM_BASE_URL", defaultGLMBaseURL, "GLM_MODEL", "glm-5.2"},
-		{ModelProviderKimi, "KIMI_API_KEY", nil, "KIMI_BASE_URL", defaultKimiBaseURL, "KIMI_MODEL", "kimi-2.5"},
+		{ModelProviderKimi, "KIMI_API_KEY", []string{"MOONSHOT_API_KEY"}, "KIMI_BASE_URL", defaultKimiBaseURL, "KIMI_MODEL", "kimi-2.5"},
 		{ModelProviderMinimax, "MINIMAX_API_KEY", nil, "MINIMAX_BASE_URL", defaultMinimaxBaseURL, "MINIMAX_MODEL", "minimax-m3"},
 		{ModelProviderSeedance, "SEEDANCE_API_KEY", []string{"DOUBAO_API_KEY", "ARK_API_KEY"}, "SEEDANCE_BASE_URL", defaultArkBaseURL, "SEEDANCE_MODEL", "seedance-2.0"},
 		{ModelProviderDoubao, "DOUBAO_API_KEY", []string{"ARK_API_KEY"}, "DOUBAO_BASE_URL", defaultArkBaseURL, "DOUBAO_MODEL", ""},

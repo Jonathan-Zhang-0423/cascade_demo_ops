@@ -7,6 +7,9 @@ import type {
   ExecutionScriptDocument,
   MultimodalUnderstandingReport,
   ProjectInputBundle,
+  RecordingResultPackage,
+  ScriptFailureDiagnostic,
+  ScriptRepairRequest,
 } from "../../src/types/workflowGraph";
 
 export type ScenarioID = "product_demo" | "ai_customer_service_demo" | "internal_onboarding_tutorial";
@@ -18,6 +21,7 @@ export type WorkspaceStage =
   | "plan_review"
   | "package_approval"
   | "cloud_run"
+  | "script_repair"
   | "result_review";
 
 export type NavSection = "projects" | "new_demo" | "execution_packages" | "assets" | "settings";
@@ -92,6 +96,9 @@ export type CloudRunStatusView = {
   progress: number;
   retryCount: number;
   lastError?: string;
+  resultPackage?: RecordingResultPackage;
+  failureDiagnostic?: ScriptFailureDiagnostic;
+  repairRequest?: ScriptRepairRequest;
 };
 
 export type AssetReviewView = {
@@ -111,7 +118,7 @@ export type ProjectWorkspaceView = {
   stage: WorkspaceStage;
   productURL: string;
   targetAudience: string;
-  status: "draft" | "understanding_ready" | "awaiting_approval" | "cloud_running" | "asset_ready";
+  status: "draft" | "understanding_ready" | "awaiting_approval" | "cloud_running" | "script_repair_required" | "asset_ready";
   inputBundle: ProjectInputBundle;
   sourceConnections: SourceConnectionView[];
   understanding: UnderstandingSummaryView;
@@ -130,6 +137,8 @@ export type RuntimeHealthView = {
   databaseConfigured: boolean;
   localDataConfigured: boolean;
   resourceManifestLoaded: boolean;
+  llmMode?: string;
+  modelAdapterVersion?: string;
   sidecars: Record<string, boolean>;
   modelProviders: Record<string, ProviderCredentialStatus>;
   modelTaskRoutes: Record<string, ModelTaskRouteStatus>;

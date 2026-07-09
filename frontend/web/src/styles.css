@@ -18,7 +18,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -240,7 +241,7 @@ h2 {
 
 .stage-strip {
   display: grid;
-  grid-template-columns: repeat(7, minmax(108px, 1fr));
+  grid-template-columns: repeat(8, minmax(92px, 1fr));
   gap: 6px;
 }
 
@@ -264,6 +265,83 @@ h2 {
   border: 1px solid #d6dde3;
   border-radius: 8px;
   overflow: hidden;
+}
+
+.stage-panel-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.95fr);
+  gap: 12px;
+}
+
+.stage-copy {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.stage-copy p {
+  color: #3a4953;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.input-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.field-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field-row.wide {
+  grid-column: 1 / -1;
+}
+
+.field-row span {
+  color: #60717e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.field-row input,
+.field-row textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #cbd5dc;
+  border-radius: 8px;
+  color: #172026;
+  background: #ffffff;
+  font-size: 13px;
+  outline: none;
+}
+
+.field-row input {
+  min-height: 36px;
+  padding: 0 10px;
+}
+
+.field-row textarea {
+  resize: vertical;
+  padding: 9px 10px;
+  line-height: 1.45;
+}
+
+.field-row input:focus,
+.field-row textarea:focus {
+  border-color: #2d8ac8;
+  box-shadow: 0 0 0 3px #dff0fb;
+}
+
+.input-note {
+  padding: 0 14px 14px;
+  color: #60717e;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .metric-cell {
@@ -431,6 +509,43 @@ tbody tr:hover,
 .checklist-panel {
   display: grid;
   gap: 10px;
+}
+
+.agent-pipeline {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.agent-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1.1fr) minmax(150px, 0.6fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 58px;
+  padding: 10px;
+  border: 1px solid #e1e6ea;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.agent-row div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.agent-row strong {
+  font-size: 13px;
+}
+
+.agent-row span,
+.agent-row small,
+.agent-row em {
+  color: #60717e;
+  font-size: 12px;
+  font-style: normal;
+  overflow-wrap: anywhere;
 }
 
 .fact-row {
@@ -704,5 +819,13 @@ tbody tr:hover,
 
   .inspector {
     position: static;
+  }
+
+  .stage-strip {
+    grid-template-columns: repeat(4, minmax(120px, 1fr));
+  }
+
+  .stage-panel-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

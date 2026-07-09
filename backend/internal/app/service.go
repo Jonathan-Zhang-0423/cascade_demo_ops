@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"cascade-demoops/backend/internal/agents"
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/storage"
@@ -23,15 +25,16 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	if states == nil {
 		states = store.NewMemoryStateStore()
 	}
+	llmRouter := llm.NewRouter(runtime)
 	flow, err := orchestrator.NewCascadeFlow(orchestrator.Dependencies{
 		InputContext:      agents.NewInputContextAgent(),
-		RequirementReader: agents.NewRequirementReaderAgent(),
-		CodeReader:        agents.NewCodeReaderAgent(),
+		RequirementReader: agents.NewRequirementReaderAgentWithLLM(llmRouter),
+		CodeReader:        agents.NewCodeReaderAgentWithLLM(llmRouter),
 		PageReader:        agents.NewPageReaderAgent(),
-		Understanding:     agents.NewMultimodalUnderstandingAgent(),
-		ProductMap:        agents.NewProductMapAgent(),
-		GraphBuilder:      agents.NewGraphBuilderAgent(),
-		ScriptPackager:    agents.NewScriptPackagerAgent(),
+		Understanding:     agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
+		ProductMap:        agents.NewProductMapAgentWithLLM(llmRouter),
+		GraphBuilder:      agents.NewGraphBuilderAgentWithLLM(llmRouter),
+		ScriptPackager:    agents.NewScriptPackagerAgentWithLLM(llmRouter),
 		QAExecutor:        agents.NewQAExecutorAgent(),
 		AssetGenerator:    agents.NewAssetGeneratorAgent(),
 	})
@@ -63,6 +66,25 @@ func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInpu
 		return nil, err
 	}
 	return state, nil
+}
+
+func (s *Service) LoadProject(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
+	return s.states.Load(ctx, projectID)
+}
+
+func (s *Service) GenerateExecutionPackage(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
+	return s.CreateProject(ctx, input)
+}
+
+func (s *Service) RegenerateExecutionPackage(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.ProjectContext == nil {
+		return nil, errors.New("project context is missing")
+	}
+	return s.CreateProject(ctx, userInputFromProjectContext(state.ProjectContext))
 }
 
 func (s *Service) SaveProjectInput(ctx context.Context, projectID string, inputs model.ProjectInputBundle) (*model.ProjectContext, error) {
@@ -160,4 +182,42 @@ func (s *Service) RunRehearsal(ctx context.Context, projectID string) (*orchestr
 
 func (s *Service) ArtifactURI(projectID string, fileName string) string {
 	return s.layout.ArtifactURI(projectID, fileName)
+}
+
+func userInputFromProjectContext(project *model.ProjectContext) orchestrator.UserInput {
+	input := orchestrator.UserInput{
+		Mode:               project.Mode,
+		ProductURL:         project.ProductURL,
+		GitRepoURL:         project.GitRepoURL,
+		LocalRepoPath:      project.LocalRepoPath,
+		ProductDescription: project.ProductDescription,
+		TargetAudience:     project.TargetAudience,
+		BrandTone:          project.BrandTone,
+		MustShow:           append([]string{}, project.MustShow...),
+		MustNotShow:        append([]string{}, project.MustNotShow...),
+		ForbiddenPages:     append([]string{}, project.ForbiddenPages...),
+		ForbiddenData:      append([]string{}, project.ForbiddenData...),
+	}
+	if project.Inputs != nil {
+		input.Code = append([]model.CodeInput{}, project.Inputs.Code...)
+		input.RequirementDocuments = append([]model.RequirementDocumentInput{}, project.Inputs.RequirementDocuments...)
+		input.WebpageScreenshots = append([]model.WebpageScreenshotInput{}, project.Inputs.WebpageScreenshots...)
+		if input.ProductURL == "" && len(project.Inputs.ProductURLs) > 0 {
+			input.ProductURL = project.Inputs.ProductURLs[0].URL
+		}
+		if input.LocalRepoPath == "" || input.GitRepoURL == "" {
+			for _, repo := range project.Inputs.Repositories {
+				if input.LocalRepoPath == "" && strings.TrimSpace(repo.LocalPath) != "" {
+					input.LocalRepoPath = repo.LocalPath
+				}
+				if input.GitRepoURL == "" && strings.TrimSpace(repo.URL) != "" {
+					input.GitRepoURL = repo.URL
+				}
+			}
+		}
+		if input.ProductDescription == "" {
+			input.ProductDescription = project.Inputs.RawUserPrompt
+		}
+	}
+	return input
 }

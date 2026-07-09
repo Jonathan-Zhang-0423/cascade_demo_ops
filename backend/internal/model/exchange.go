@@ -5,12 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
 const ExchangeEnvelopeSchemaVersion = "demoops.exchange_envelope.v1"
 const ClientExecutionPackageSchemaVersion = "demoops.client_execution_package.v1"
 const RecordingResultPackageSchemaVersion = "demoops.recording_result_package.v1"
+const ScriptFailureDiagnosticSchemaVersion = "demoops.script_failure_diagnostic.v1"
 
 type ExchangePackageKind string
 
@@ -145,6 +147,7 @@ type ClientExecutionPackage struct {
 	EvidenceBundle         EvidenceBundle                   `json:"evidence_bundle"`
 	Reproducibility        ReproducibilitySpec              `json:"reproducibility"`
 	SafetyReport           PackageSafetyReport              `json:"safety_report"`
+	RepairContext          *ScriptRepairContext             `json:"repair_context,omitempty"`
 	Metadata               map[string]any                   `json:"metadata,omitempty"`
 }
 
@@ -384,10 +387,100 @@ type RecordingResultPackage struct {
 	StepResults           []StepResult             `json:"step_results,omitempty"`
 	GeneratedAssets       []ArtifactRef            `json:"generated_assets,omitempty"`
 	VerificationReport    VerificationReport       `json:"verification_report"`
+	FailureDiagnostic     *ScriptFailureDiagnostic `json:"failure_diagnostic,omitempty"`
+	RepairRequest         *ScriptRepairRequest     `json:"repair_request,omitempty"`
 	GraphPatchSuggestions []GraphPatch             `json:"graph_patch_suggestions,omitempty"`
 	AuditTrail            CloudExecutionAuditTrail `json:"audit_trail"`
 	Delivery              ResultDelivery           `json:"delivery"`
 	CreatedAt             time.Time                `json:"created_at"`
+}
+
+type ScriptFailureDiagnostic struct {
+	ID                       string                      `json:"id"`
+	SchemaVersion            string                      `json:"schema_version"`
+	SourcePackageID          string                      `json:"source_package_id"`
+	CloudJobID               string                      `json:"cloud_job_id"`
+	FailedNodeID             string                      `json:"failed_node_id"`
+	FailedStepOrder          int                         `json:"failed_step_order,omitempty"`
+	Attempt                  int                         `json:"attempt,omitempty"`
+	Error                    AgentError                  `json:"error"`
+	CurrentURL               string                      `json:"current_url,omitempty"`
+	PageTitle                string                      `json:"page_title,omitempty"`
+	ScreenshotRefs           []PackageArtifactDescriptor `json:"screenshot_refs,omitempty"`
+	TraceRefs                []PackageArtifactDescriptor `json:"trace_refs,omitempty"`
+	ConsoleEvents            []ConsoleEventSummary       `json:"console_events,omitempty"`
+	NetworkEvents            []NetworkEventSummary       `json:"network_events,omitempty"`
+	DOMSnapshotRef           *PackageArtifactDescriptor  `json:"dom_snapshot_ref,omitempty"`
+	AccessibilitySnapshotRef *PackageArtifactDescriptor  `json:"accessibility_snapshot_ref,omitempty"`
+	RedactionReport          DiagnosticRedactionReport   `json:"redaction_report"`
+	RepairHints              []ScriptRepairHint          `json:"repair_hints,omitempty"`
+	CapturedAt               time.Time                   `json:"captured_at,omitempty"`
+}
+
+type ConsoleEventSummary struct {
+	Level     string    `json:"level"`
+	Message   string    `json:"message"`
+	URL       string    `json:"url,omitempty"`
+	Timestamp time.Time `json:"timestamp,omitempty"`
+}
+
+type NetworkEventSummary struct {
+	URL       string    `json:"url"`
+	Method    string    `json:"method,omitempty"`
+	Status    int       `json:"status,omitempty"`
+	Failure   string    `json:"failure,omitempty"`
+	Resource  string    `json:"resource,omitempty"`
+	Timestamp time.Time `json:"timestamp,omitempty"`
+	Redacted  bool      `json:"redacted,omitempty"`
+}
+
+type DiagnosticRedactionReport struct {
+	Applied             bool           `json:"applied"`
+	PolicyRef           string         `json:"policy_ref,omitempty"`
+	MaskedSelectors     []string       `json:"masked_selectors,omitempty"`
+	MaskedTextPatterns  []string       `json:"masked_text_patterns,omitempty"`
+	StrippedHeaders     []string       `json:"stripped_headers,omitempty"`
+	StrippedStorageKeys []string       `json:"stripped_storage_keys,omitempty"`
+	FullHTMLIncluded    bool           `json:"full_html_included"`
+	PolicyFindings      []AgentFinding `json:"policy_findings,omitempty"`
+}
+
+type ScriptRepairHint struct {
+	Kind               string              `json:"kind"`
+	Summary            string              `json:"summary"`
+	NodeID             string              `json:"node_id,omitempty"`
+	SelectorCandidates []SelectorCandidate `json:"selector_candidates,omitempty"`
+	SuggestedAction    string              `json:"suggested_action,omitempty"`
+	Confidence         float64             `json:"confidence,omitempty"`
+	EvidenceRefs       []EvidenceRef       `json:"evidence_refs,omitempty"`
+}
+
+type ScriptRepairRequest struct {
+	ID                     string    `json:"id"`
+	SourceResultID         string    `json:"source_result_id"`
+	SourcePackageID        string    `json:"source_package_id"`
+	CloudJobID             string    `json:"cloud_job_id"`
+	FailedBundleHashSHA256 string    `json:"failed_bundle_hash_sha256,omitempty"`
+	FailedPlanHashSHA256   string    `json:"failed_plan_hash_sha256,omitempty"`
+	MaxRepairAttempts      int       `json:"max_repair_attempts,omitempty"`
+	RepairAttempt          int       `json:"repair_attempt,omitempty"`
+	ApprovalRequired       bool      `json:"approval_required"`
+	RequestedAt            time.Time `json:"requested_at,omitempty"`
+	ExpiresAt              time.Time `json:"expires_at,omitempty"`
+}
+
+type ScriptRepairContext struct {
+	SourceResultID       string                   `json:"source_result_id"`
+	SourcePackageID      string                   `json:"source_package_id"`
+	SourceCloudJobID     string                   `json:"source_cloud_job_id"`
+	RepairAttempt        int                      `json:"repair_attempt"`
+	BaseBundleID         string                   `json:"base_bundle_id,omitempty"`
+	BaseBundleHashSHA256 string                   `json:"base_bundle_hash_sha256,omitempty"`
+	BasePlanHashSHA256   string                   `json:"base_plan_hash_sha256,omitempty"`
+	DiagnosticRefs       []EvidenceRef            `json:"diagnostic_refs,omitempty"`
+	FailureDiagnostic    *ScriptFailureDiagnostic `json:"failure_diagnostic,omitempty"`
+	UserApproval         *UserApprovalRecord      `json:"user_approval,omitempty"`
+	IdempotencyKey       string                   `json:"idempotency_key,omitempty"`
 }
 
 type VerificationReport struct {
@@ -414,6 +507,96 @@ type ResultDelivery struct {
 	ExpiresAt        time.Time                   `json:"expires_at,omitempty"`
 	AckRequired      bool                        `json:"ack_required"`
 	AckedAt          time.Time                   `json:"acked_at,omitempty"`
+}
+
+func (r *RecordingResultPackage) ValidateStatusContract() error {
+	if r == nil {
+		return errors.New("recording result package is nil")
+	}
+	if r.SchemaVersion != RecordingResultPackageSchemaVersion {
+		return errors.New("unsupported recording result package schema version")
+	}
+	if r.Status != RecordingResultStatusFailed {
+		return nil
+	}
+	if r.FailureDiagnostic == nil {
+		return errors.New("failed recording result requires failure_diagnostic")
+	}
+	if r.RepairRequest == nil {
+		return errors.New("failed recording result requires repair_request")
+	}
+	if !r.RepairRequest.ApprovalRequired {
+		return errors.New("script repair request must require approval")
+	}
+	if r.RepairRequest.SourceResultID != r.ResultID || r.RepairRequest.SourcePackageID != r.SourcePackageID || r.RepairRequest.CloudJobID != r.CloudJobID {
+		return errors.New("script repair request does not match failed result identity")
+	}
+	return r.FailureDiagnostic.ValidateSafety()
+}
+
+func (d *ScriptFailureDiagnostic) ValidateSafety() error {
+	if d == nil {
+		return errors.New("script failure diagnostic is nil")
+	}
+	if d.SchemaVersion != ScriptFailureDiagnosticSchemaVersion {
+		return errors.New("unsupported script failure diagnostic schema version")
+	}
+	if d.FailedNodeID == "" || d.Error.Code == "" {
+		return errors.New("script failure diagnostic missing failed node or error")
+	}
+	if !d.RedactionReport.Applied || d.RedactionReport.FullHTMLIncluded {
+		return errors.New("script failure diagnostic must be redacted and must not include full HTML")
+	}
+	for _, value := range diagnosticTextFields(d) {
+		if containsUnsafeDiagnosticToken(value) {
+			return errors.New("script failure diagnostic contains unsafe secret-like text")
+		}
+	}
+	for _, artifact := range diagnosticArtifacts(d) {
+		if !artifact.Sensitive || !artifact.Encrypted {
+			return errors.New("script failure diagnostic artifacts must be sensitive and encrypted")
+		}
+	}
+	return nil
+}
+
+func diagnosticTextFields(d *ScriptFailureDiagnostic) []string {
+	values := []string{d.CurrentURL, d.PageTitle, d.Error.Code, d.Error.Message}
+	for _, event := range d.ConsoleEvents {
+		values = append(values, event.Message, event.URL)
+	}
+	for _, event := range d.NetworkEvents {
+		values = append(values, event.URL, event.Failure)
+	}
+	for _, hint := range d.RepairHints {
+		values = append(values, hint.Summary, hint.SuggestedAction)
+	}
+	return values
+}
+
+func diagnosticArtifacts(d *ScriptFailureDiagnostic) []PackageArtifactDescriptor {
+	artifacts := append([]PackageArtifactDescriptor{}, d.ScreenshotRefs...)
+	artifacts = append(artifacts, d.TraceRefs...)
+	if d.DOMSnapshotRef != nil {
+		artifacts = append(artifacts, *d.DOMSnapshotRef)
+	}
+	if d.AccessibilitySnapshotRef != nil {
+		artifacts = append(artifacts, *d.AccessibilitySnapshotRef)
+	}
+	return artifacts
+}
+
+func containsUnsafeDiagnosticToken(value string) bool {
+	lower := strings.ToLower(value)
+	for _, token := range []string{"begin private key", "bearer ", "authorization:", "authorization=", "cookie:", "cookie=", "localstorage", "sessionstorage"} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	if strings.Contains(value, "sk-") {
+		return true
+	}
+	return false
 }
 
 type ExecutionPackageInitRequest struct {

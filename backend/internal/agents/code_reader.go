@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,16 +14,23 @@ import (
 	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 )
 
 type CodeReaderAgent struct {
 	MaxFiles     int
 	MaxFileBytes int64
+	llm          llm.Client
 }
 
 func NewCodeReaderAgent() *CodeReaderAgent {
 	return &CodeReaderAgent{MaxFiles: 600, MaxFileBytes: 256 * 1024}
+}
+
+func NewCodeReaderAgentWithLLM(client llm.Client) *CodeReaderAgent {
+	return &CodeReaderAgent{MaxFiles: 600, MaxFileBytes: 256 * 1024, llm: client}
 }
 
 func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) ([]model.CodeUnderstandingSnapshot, error) {
@@ -75,9 +83,96 @@ func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectCo
 		snapshot.Languages = uniqueStrings(snapshot.Languages)
 		snapshot.Frameworks = uniqueStrings(snapshot.Frameworks)
 		snapshot.EntrypointHashes = uniqueStrings(snapshot.EntrypointHashes)
+		trace, err := a.enhanceSnapshotWithLLM(ctx, project, brief, &snapshot)
+		if err != nil && !llm.IsDeterministicFallback(err) {
+			return nil, err
+		}
+		if trace != nil {
+			snapshot.EvidenceRefs = append(snapshot.EvidenceRefs, model.EvidenceRef{
+				ID:         "ev_model_code_" + shortHash(snapshot.ID+trace.Label()),
+				Kind:       model.EvidenceKindSourceCode,
+				Summary:    "CodeReaderAgent 模型路由：" + trace.Label(),
+				FieldPath:  "model_trace.code_reader",
+				Confidence: 0.68,
+			})
+		}
 		snapshots = append(snapshots, snapshot)
 	}
 	return snapshots, nil
+}
+
+type codeReaderLLMOutput struct {
+	Summary        string   `json:"summary"`
+	Frameworks     []string `json:"frameworks"`
+	HeroComponents []string `json:"hero_components"`
+	RouteNames     []struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+	} `json:"route_names"`
+	SelectorNotes   []string `json:"selector_notes"`
+	SensitiveFields []string `json:"sensitive_fields"`
+	Confidence      float64  `json:"confidence"`
+}
+
+func (a *CodeReaderAgent) enhanceSnapshotWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, snapshot *model.CodeUnderstandingSnapshot) (*llm.CallTrace, error) {
+	if a.llm == nil || snapshot == nil || snapshot.FileCount == 0 {
+		return nil, nil
+	}
+	payload := map[string]any{
+		"target_audience": project.TargetAudience,
+		"objective":       "",
+		"file_count":      snapshot.FileCount,
+		"languages":       snapshot.Languages,
+		"frameworks":      snapshot.Frameworks,
+		"routes":          limitRoutes(snapshot.Routes, 40),
+		"components":      limitComponents(snapshot.Components, 40),
+		"selectors":       limitSelectors(snapshot.Selectors, 40),
+		"api_endpoints":   limitAPIs(snapshot.APIEndpoints, 40),
+		"data_models":     limitDataModels(snapshot.DataModels, 30),
+		"sensitive_names": snapshot.SensitiveFields,
+		"source_digest":   snapshot.SourceDigestSHA256,
+	}
+	if brief != nil {
+		payload["objective"] = brief.Objective
+		payload["must_show"] = brief.MustShow
+	}
+	data, _ := json.Marshal(payload)
+	var output codeReaderLLMOutput
+	trace, err := a.llm.GenerateJSON(ctx, config.ModelTaskCodeReading, llm.JSONRequest{
+		System:       "你是 Cascade DemoOps 的代码阅读 agent。你只能基于已脱敏的代码结构摘要判断产品架构、路由、组件和稳定选择器，不能要求或输出完整源码。",
+		User:         string(data),
+		SchemaName:   "CodeUnderstandingPatch",
+		ResponseHint: "返回字段：summary, frameworks, hero_components, route_names[{path,name}], selector_notes, sensitive_fields, confidence。",
+		MaxTokens:    1400,
+		Temperature:  0.15,
+	}, &output)
+	if err != nil {
+		return trace, err
+	}
+	if output.Summary != "" {
+		snapshot.Summary = output.Summary + "（仅基于结构摘要，不包含完整源码。）"
+	}
+	snapshot.Frameworks = uniqueStrings(append(snapshot.Frameworks, output.Frameworks...))
+	for _, routeName := range output.RouteNames {
+		for i := range snapshot.Routes {
+			if snapshot.Routes[i].Path == routeName.Path && routeName.Name != "" {
+				snapshot.Routes[i].Name = routeName.Name
+				snapshot.Routes[i].Confidence = maxFloat(snapshot.Routes[i].Confidence, output.Confidence)
+			}
+		}
+	}
+	for _, componentName := range output.HeroComponents {
+		for i := range snapshot.Components {
+			if strings.EqualFold(snapshot.Components[i].Name, componentName) {
+				snapshot.Components[i].ActionLabels = uniqueStrings(append(snapshot.Components[i].ActionLabels, "hero_candidate"))
+				snapshot.Components[i].Confidence = maxFloat(snapshot.Components[i].Confidence, output.Confidence)
+			}
+		}
+	}
+	for _, sensitive := range output.SensitiveFields {
+		snapshot.SensitiveFields = append(snapshot.SensitiveFields, model.SensitiveFieldFinding{Name: sensitive, Kind: "llm_sensitive_field", Reason: "GLM 基于结构摘要判断该字段需要打码或避开。"})
+	}
+	return trace, nil
 }
 
 func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapshot *model.CodeUnderstandingSnapshot) error {
@@ -361,6 +456,48 @@ func selectorValues(selectors []model.SelectorInsight, pathHash string) []string
 
 func digestSnapshotIdentity(input model.CodeInput) string {
 	return hashString(strings.Join([]string{input.ID, input.Kind, input.URI, input.LocalPath, input.CommitSHA}, "|"))
+}
+
+func limitRoutes(values []model.RouteInsight, limit int) []model.RouteInsight {
+	if len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func limitComponents(values []model.ComponentInsight, limit int) []model.ComponentInsight {
+	if len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func limitSelectors(values []model.SelectorInsight, limit int) []model.SelectorInsight {
+	if len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func limitAPIs(values []model.APIEndpointInsight, limit int) []model.APIEndpointInsight {
+	if len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func limitDataModels(values []model.DataModelInsight, limit int) []model.DataModelInsight {
+	if len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func maxFloat(left float64, right float64) float64 {
+	if right > left {
+		return right
+	}
+	return left
 }
 
 func hashBytes(data []byte) string {

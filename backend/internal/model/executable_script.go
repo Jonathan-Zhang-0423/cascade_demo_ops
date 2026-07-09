@@ -26,8 +26,20 @@ type ExecutableRecordingScriptBundle struct {
 	SecurityPolicy   ExecutableScriptSecurityPolicy  `json:"security_policy"`
 	Reproducibility  ExecutableScriptReproducibility `json:"reproducibility"`
 	Validation       *ExecutableScriptValidation     `json:"validation,omitempty"`
+	RepairLineage    *ScriptRepairLineage            `json:"repair_lineage,omitempty"`
 	CreatedAt        time.Time                       `json:"created_at,omitempty"`
 	UpdatedAt        time.Time                       `json:"updated_at,omitempty"`
+}
+
+type ScriptRepairLineage struct {
+	BaseBundleID         string        `json:"base_bundle_id"`
+	BaseBundleHashSHA256 string        `json:"base_bundle_hash_sha256"`
+	SourceResultID       string        `json:"source_result_id"`
+	SourceCloudJobID     string        `json:"source_cloud_job_id"`
+	RepairAttempt        int           `json:"repair_attempt"`
+	ChangeSummary        string        `json:"change_summary,omitempty"`
+	DiagnosticRefs       []EvidenceRef `json:"diagnostic_refs,omitempty"`
+	CreatedAt            time.Time     `json:"created_at,omitempty"`
 }
 
 type ExecutableScriptManifest struct {
@@ -99,5 +111,6 @@ func (b *ExecutableRecordingScriptBundle) ComputeBundleHash() (string, error) {
 	copy := *b
 	copy.Reproducibility.BundleHashSHA256 = ""
 	copy.Validation = nil
+	copy.RepairLineage = nil
 	return DigestCanonicalJSON(copy)
 }

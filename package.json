@@ -6,6 +6,7 @@
   "packageManager": "pnpm@9.0.0",
   "scripts": {
     "dev:backend": "cd backend && go run .",
+    "dev:bridge": "cd backend && go run ./cmd/devserver",
     "build:backend": "cd backend && go build ./...",
     "test:backend": "cd backend && go test ./...",
     "dev:worker": "pnpm --filter @cascade/video-worker dev",

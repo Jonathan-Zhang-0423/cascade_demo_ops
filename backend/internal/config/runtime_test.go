@@ -32,6 +32,9 @@ func TestRuntimeConfigDefaultsToDevDesktopSQLite(t *testing.T) {
 	if cfg.SidecarPaths["video-worker"] != "" {
 		t.Fatalf("unexpected sidecar override %q", cfg.SidecarPaths["video-worker"])
 	}
+	if cfg.LLMMode != LLMModeAuto || cfg.ModelAdapterVersion != ModelAdapterVersion {
+		t.Fatalf("unexpected llm config: mode=%s adapter=%s", cfg.LLMMode, cfg.ModelAdapterVersion)
+	}
 }
 
 func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
@@ -208,6 +211,34 @@ func TestRuntimeConfigSeedanceCanUseDoubaoOrArkKeyFallback(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigKimiCanUseMoonshotKeyFallback(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("KIMI_API_KEY", "")
+	t.Setenv("MOONSHOT_API_KEY", "moonshot-key")
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kimi := cfg.ModelProviders[ModelProviderKimi]
+	if !kimi.Enabled || kimi.APIKey != "moonshot-key" || kimi.APIKeySourceEnv != "MOONSHOT_API_KEY" {
+		t.Fatalf("kimi should use moonshot fallback key: %+v", kimi)
+	}
+}
+
+func TestRuntimeConfigLLMModeOverride(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("CASCADE_LLM_MODE", "real")
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLMMode != LLMModeReal {
+		t.Fatalf("llm mode = %s", cfg.LLMMode)
+	}
+}
+
 func TestRuntimeConfigLoadsDesktopResourceManifest(t *testing.T) {
 	resourceRoot := t.TempDir()
 	manifest := `{
@@ -322,6 +353,7 @@ func clearModelProviderEnv(t *testing.T) {
 		"GLM_BASE_URL",
 		"GLM_MODEL",
 		"KIMI_API_KEY",
+		"MOONSHOT_API_KEY",
 		"KIMI_BASE_URL",
 		"KIMI_MODEL",
 		"MINIMAX_API_KEY",
@@ -345,6 +377,7 @@ func clearModelProviderEnv(t *testing.T) {
 		"CASCADE_MULTIMODAL_MODEL",
 		"CASCADE_VIDEO_PROVIDER",
 		"CASCADE_VIDEO_MODEL",
+		"CASCADE_LLM_MODE",
 	} {
 		t.Setenv(name, "")
 	}

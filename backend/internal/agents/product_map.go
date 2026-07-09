@@ -2,15 +2,51 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 )
 
-type ProductMapAgent struct{}
+type ProductMapAgent struct {
+	llm llm.Client
+}
 
 func NewProductMapAgent() *ProductMapAgent { return &ProductMapAgent{} }
+
+func NewProductMapAgentWithLLM(client llm.Client) *ProductMapAgent {
+	return &ProductMapAgent{llm: client}
+}
+
+type productMapLLMOutput struct {
+	Summary string `json:"summary"`
+	Pages   []struct {
+		ID      string   `json:"id"`
+		Title   string   `json:"title"`
+		Purpose string   `json:"purpose"`
+		Actions []string `json:"actions"`
+	} `json:"pages"`
+	Features []struct {
+		ID            string   `json:"id"`
+		Name          string   `json:"name"`
+		Kind          string   `json:"kind"`
+		UserValue     string   `json:"user_value"`
+		BusinessValue string   `json:"business_value"`
+		Priority      string   `json:"priority"`
+		KeyActions    []string `json:"key_actions"`
+	} `json:"features"`
+	Workflows []struct {
+		ID             string            `json:"id"`
+		Name           string            `json:"name"`
+		UseCase        model.DemoUseCase `json:"use_case"`
+		EstimatedSteps int               `json:"estimated_steps"`
+		ValueScore     float64           `json:"value_score"`
+		Feasibility    float64           `json:"feasibility"`
+	} `json:"workflows"`
+}
 
 func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport) (*model.ProductMap, error) {
 	if err := ctx.Err(); err != nil {
@@ -34,7 +70,7 @@ func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.Pro
 			summary = report.Summary
 		}
 	}
-	return &model.ProductMap{
+	productMap := &model.ProductMap{
 		ID:           "product_map_" + project.ID,
 		ProjectID:    project.ID,
 		Version:      1,
@@ -47,7 +83,97 @@ func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.Pro
 		DataModels:   dataModels,
 		Workflows:    workflows,
 		EvidenceRefs: evidenceRefs,
-	}, nil
+	}
+	trace, err := a.enhanceProductMapWithLLM(ctx, project, report, productMap)
+	if err != nil && !llm.IsDeterministicFallback(err) {
+		return nil, err
+	}
+	if trace != nil {
+		productMap.EvidenceRefs = append(productMap.EvidenceRefs, model.EvidenceRef{
+			ID:         "ev_model_product_map_" + shortHash(trace.Label()),
+			Kind:       model.EvidenceKindUserInput,
+			Summary:    "ProductMapAgent 模型路由：" + trace.Label(),
+			FieldPath:  "model_trace.product_map",
+			Confidence: 0.7,
+		})
+	}
+	return productMap, nil
+}
+
+func (a *ProductMapAgent) enhanceProductMapWithLLM(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap) (*llm.CallTrace, error) {
+	if a.llm == nil || project == nil || productMap == nil {
+		return nil, nil
+	}
+	payload := map[string]any{
+		"target_audience": project.TargetAudience,
+		"report_summary":  "",
+		"pages":           productMap.Pages,
+		"features":        productMap.Features,
+		"routes":          productMap.Routes,
+		"workflows":       productMap.Workflows,
+	}
+	if report != nil {
+		payload["report_summary"] = report.Summary
+		payload["brief"] = report.RequirementBrief
+	}
+	data, _ := json.Marshal(payload)
+	var output productMapLLMOutput
+	trace, err := a.llm.GenerateJSON(ctx, config.ModelTaskPlanning, llm.JSONRequest{
+		System:       "你是 Cascade DemoOps 的产品地图 agent。请基于理解报告把页面、功能和 workflow 命名成适合中国产品/运营团队审批的结构化产品地图。不要输出源码或密钥。",
+		User:         string(data),
+		SchemaName:   "ProductMapPatch",
+		ResponseHint: "返回字段：summary, pages[{id,title,purpose,actions}], features[{id,name,kind,user_value,business_value,priority,key_actions}], workflows[{id,name,use_case,estimated_steps,value_score,feasibility}]。",
+		MaxTokens:    1800,
+		Temperature:  0.2,
+	}, &output)
+	if err != nil {
+		return trace, err
+	}
+	if output.Summary != "" {
+		productMap.Summary = output.Summary
+	}
+	for _, patch := range output.Pages {
+		for _, page := range productMap.Pages {
+			if page == nil || page.ID != patch.ID {
+				continue
+			}
+			if patch.Title != "" {
+				page.Title = patch.Title
+			}
+			if patch.Purpose != "" {
+				page.Purpose = patch.Purpose
+			}
+			page.Actions = uniqueStrings(append(page.Actions, patch.Actions...))
+		}
+	}
+	for _, patch := range output.Features {
+		name := firstNonEmpty(patch.Name, "模型识别功能")
+		productMap.Features = append(productMap.Features, &model.Feature{
+			ID:            firstNonEmpty(patch.ID, "feature_llm_map_"+shortHash(name)),
+			Name:          name,
+			Kind:          firstNonEmpty(patch.Kind, "supporting"),
+			UserValue:     patch.UserValue,
+			BusinessValue: patch.BusinessValue,
+			Priority:      firstNonEmpty(patch.Priority, "supporting"),
+			BestAudience:  []string{project.TargetAudience},
+			KeyActions:    patch.KeyActions,
+			EvidenceRefs:  productMap.EvidenceRefs,
+		})
+	}
+	for _, patch := range output.Workflows {
+		name := firstNonEmpty(patch.Name, "模型建议流程")
+		productMap.Workflows = append(productMap.Workflows, &model.WorkflowCandidate{
+			ID:             firstNonEmpty(patch.ID, "workflow_llm_map_"+shortHash(name)),
+			Name:           name,
+			UseCase:        patch.UseCase,
+			AudienceID:     "audience_primary",
+			EstimatedSteps: patch.EstimatedSteps,
+			ValueScore:     patch.ValueScore,
+			Feasibility:    patch.Feasibility,
+			EvidenceRefs:   productMap.EvidenceRefs,
+		})
+	}
+	return trace, nil
 }
 
 func productMapEntryPoint(project *model.ProjectContext) string {

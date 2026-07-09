@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { ApprovalChecklistState } from "./domain";
 import { createWorkspace } from "./mockWorkspace";
-import { canUploadExecutionPackage, mapCloudStatus, packageApprovalBlockedReasons, updateGraphNode } from "./workflow";
+import {
+  canUploadExecutionPackage,
+  mapCloudStatus,
+  packageApprovalBlockedReasons,
+  projectStatusLabels,
+  resetApprovalChecklistForRepair,
+  updateGraphNode,
+  workflowStageLabels,
+} from "./workflow";
 
 describe("workflow helpers", () => {
   it("edits workflow graph nodes without mutating the original graph", () => {
@@ -46,11 +54,60 @@ describe("workflow helpers", () => {
     expect(canUploadExecutionPackage(preview, checklist, readySources)).toBe(true);
   });
 
+  it("treats the UI allowlist acknowledgement as enough for mock package upload", () => {
+    const workspace = createWorkspace("product_demo");
+    const checklist: ApprovalChecklistState = {
+      userApprovedPlan: true,
+      ipAllowlistAcknowledged: true,
+      sourceSummaryOnlyAcknowledged: true,
+      credentialGrantAcknowledged: true,
+      redactionsReviewed: true,
+    };
+    const readySources = workspace.sourceConnections.map((source) => ({ ...source, status: "ready" as const }));
+
+    expect(workspace.packagePreview.ipAllowlistAcknowledged).toBe(false);
+    expect(packageApprovalBlockedReasons(workspace.packagePreview, checklist, readySources)).toEqual([]);
+    expect(canUploadExecutionPackage(workspace.packagePreview, checklist, readySources)).toBe(true);
+  });
+
   it("maps cloud package and result states to app statuses", () => {
     expect(mapCloudStatus("uploaded")).toBe("queued");
     expect(mapCloudStatus("running")).toBe("running");
     expect(mapCloudStatus("completed")).toBe("succeeded");
     expect(mapCloudStatus("expired")).toBe("failed");
     expect(mapCloudStatus("unknown")).toBe("not_uploaded");
+  });
+
+  it("keeps the desktop workflow stage labels complete and ordered by app model", () => {
+    expect(Object.keys(workflowStageLabels)).toEqual([
+      "setup",
+      "inputs",
+      "understanding",
+      "plan_review",
+      "package_approval",
+      "cloud_run",
+      "script_repair",
+      "result_review",
+    ]);
+    expect(workflowStageLabels.script_repair).toBe("脚本修复");
+    expect(projectStatusLabels.script_repair_required).toBe("脚本待修复");
+  });
+
+  it("resets approval checklist when a repaired script package is generated", () => {
+    const checklist: ApprovalChecklistState = {
+      userApprovedPlan: true,
+      ipAllowlistAcknowledged: true,
+      sourceSummaryOnlyAcknowledged: true,
+      credentialGrantAcknowledged: true,
+      redactionsReviewed: true,
+    };
+
+    expect(resetApprovalChecklistForRepair(checklist)).toEqual({
+      userApprovedPlan: false,
+      ipAllowlistAcknowledged: false,
+      sourceSummaryOnlyAcknowledged: true,
+      credentialGrantAcknowledged: false,
+      redactionsReviewed: false,
+    });
   });
 });
