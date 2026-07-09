@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"time"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -12,16 +13,26 @@ type Service interface {
 }
 
 type RecordRequest struct {
-	Graph     *model.DemoWorkflowGraph `json:"graph"`
-	OutputDir string                   `json:"output_dir"`
-	Viewport  Viewport                 `json:"viewport"`
-	Headless  bool                     `json:"headless"`
+	Graph                  *model.DemoWorkflowGraph               `json:"graph"`
+	OutputDir              string                                 `json:"output_dir"`
+	Viewport               Viewport                               `json:"viewport"`
+	Headless               bool                                   `json:"headless"`
+	SourcePackageID        string                                 `json:"source_package_id,omitempty"`
+	RecordingRunSpec       *model.RecordingRunSpec                `json:"recording_run_spec,omitempty"`
+	ExecutableScriptBundle *model.ExecutableRecordingScriptBundle `json:"executable_script_bundle,omitempty"`
 }
 
 type RecordResult struct {
-	RecordingPath   string   `json:"recording_path"`
-	ScreenshotPaths []string `json:"screenshot_paths"`
-	TracePath       string   `json:"trace_path,omitempty"`
+	RecordingPath        string              `json:"recording_path,omitempty"`
+	ScreenshotPaths      []string            `json:"screenshot_paths,omitempty"`
+	TracePath            string              `json:"trace_path,omitempty"`
+	ArtifactManifestPath string              `json:"artifact_manifest_path,omitempty"`
+	GeneratedAssets      []model.ArtifactRef `json:"generated_assets,omitempty"`
+	StepResults          []model.StepResult  `json:"step_results,omitempty"`
+	WorkerID             string              `json:"worker_id,omitempty"`
+	RuntimeVersions      map[string]string   `json:"runtime_versions,omitempty"`
+	StartedAt            time.Time           `json:"started_at,omitempty"`
+	CompletedAt          time.Time           `json:"completed_at,omitempty"`
 }
 
 type RenderRequest struct {
