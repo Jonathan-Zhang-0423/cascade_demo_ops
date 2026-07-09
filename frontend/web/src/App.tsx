@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import type { GraphNode } from "../../src/types/workflowGraph";
-import { createMockBridgeClient } from "./bridge";
+import { agentPipelineItems, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
+import { createBridgeClient } from "./bridge";
 import type {
 	ApprovalChecklistState,
+	ModelDiagnosticResult,
 	NavSection,
 	ProjectWorkspaceView,
 	RuntimeHealthView,
@@ -11,37 +13,33 @@ import type {
 } from "./domain";
 import { createWorkspace, initialChecklist } from "./mockWorkspace";
 import { scenarioTemplates } from "./scenarios";
-import { canUploadExecutionPackage, packageApprovalBlockedReasons, updateGraphNode } from "./workflow";
+import {
+  canUploadExecutionPackage,
+  packageApprovalBlockedReasons,
+  projectStatusLabels,
+  resetApprovalChecklistForRepair,
+  updateGraphNode,
+  workflowStageLabels,
+} from "./workflow";
 
-const navItems: Array<{ id: NavSection; label: string; badge?: string }> = [
-  { id: "projects", label: "项目", badge: "1" },
-  { id: "new_demo", label: "新建演示" },
-  { id: "execution_packages", label: "执行包", badge: "1" },
-  { id: "assets", label: "成品资产", badge: "2" },
-  { id: "settings", label: "设置" },
-];
-
-const workflowStages: Array<{ id: WorkspaceStage; label: string }> = [
-  { id: "setup", label: "基础设置" },
-  { id: "inputs", label: "输入材料" },
-  { id: "understanding", label: "产品理解" },
-  { id: "plan_review", label: "方案审批" },
-  { id: "package_approval", label: "执行包审批" },
-  { id: "cloud_run", label: "云端录制" },
-  { id: "result_review", label: "成品验收" },
-];
+const workflowStages = Object.entries(workflowStageLabels).map(([id, label]) => ({ id: id as WorkspaceStage, label }));
 
 export function App() {
-	const bridge = useMemo(() => createMockBridgeClient(), []);
+	const bridge = useMemo(() => createBridgeClient(), []);
 	const [activeNav, setActiveNav] = useState<NavSection>("projects");
 	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createWorkspace("product_demo"));
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthView | undefined>();
+  const [modelDiagnostics, setModelDiagnostics] = useState<ModelDiagnosticResult[]>([]);
+  const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
+  const [diagnosticsError, setDiagnosticsError] = useState("");
   const [checklist, setChecklist] = useState<ApprovalChecklistState>(initialChecklist);
   const [selectedNodeID, setSelectedNodeID] = useState(workspace.planReview.graph.nodes[0]?.id ?? "");
+  const [isGeneratingPackage, setIsGeneratingPackage] = useState(false);
 
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
   const blockedReasons = packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections);
   const canUpload = canUploadExecutionPackage(workspace.packagePreview, checklist, workspace.sourceConnections);
+  const navItems = useMemo(() => buildNavItems(workspace), [workspace]);
 
   useEffect(() => {
     let mounted = true;
@@ -80,11 +78,25 @@ export function App() {
   }
 
   async function buildPackagePreview() {
+    setIsGeneratingPackage(true);
     const result = await bridge.buildExecutionPackagePreview(workspace);
     if (result.ok && result.data) {
       setWorkspace(result.data);
       setActiveNav("execution_packages");
     }
+    setIsGeneratingPackage(false);
+  }
+
+  async function runModelDiagnostics() {
+    setIsRunningDiagnostics(true);
+    setDiagnosticsError("");
+    const result = await bridge.modelDiagnostics();
+    if (result.ok && result.data) {
+      setModelDiagnostics(result.data);
+    } else {
+      setDiagnosticsError(result.error ?? "模型诊断失败");
+    }
+    setIsRunningDiagnostics(false);
   }
 
   async function uploadPackage() {
@@ -106,6 +118,23 @@ export function App() {
     if (result.ok && result.data) {
       setWorkspace(result.data);
       setActiveNav("assets");
+    }
+  }
+
+  async function simulateCloudFailure() {
+    const result = await bridge.simulateCloudFailure(workspace);
+    if (result.ok && result.data) {
+      setWorkspace(result.data);
+      setActiveNav("execution_packages");
+    }
+  }
+
+  async function repairFailedScript() {
+    const result = await bridge.repairFailedScript(workspace);
+    if (result.ok && result.data) {
+      setWorkspace(result.data);
+      setChecklist((current) => resetApprovalChecklistForRepair(current));
+      setActiveNav("execution_packages");
     }
   }
 
@@ -147,7 +176,7 @@ export function App() {
       </aside>
 
       <main className="workspace">
-        <ProjectHeader workspace={workspace} onBuildPackage={buildPackagePreview} />
+        <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage} onBuildPackage={buildPackagePreview} />
         <div className="workspace-grid">
           <section className="main-panel" aria-label="项目工作台">
             {activeNav === "new_demo" ? <ScenarioPicker activeID={workspace.scenarioID} onCreate={createScenario} /> : null}
@@ -158,6 +187,8 @@ export function App() {
                 onSelectNode={setSelectedNodeID}
                 onPatchNode={patchNode}
                 onStageChange={(stage) => patchWorkspace({ stage })}
+                onWorkspaceChange={setWorkspace}
+                onApproveAssets={approveAssets}
               />
             ) : null}
             {activeNav === "execution_packages" ? (
@@ -166,13 +197,25 @@ export function App() {
                 checklist={checklist}
                 blockedReasons={blockedReasons}
                 canUpload={canUpload}
+                isLocalMode={bridge.mode === "local"}
                 onChecklistChange={setChecklist}
                 onUpload={uploadPackage}
                 onCloudSuccess={simulateCloudSuccess}
+                onCloudFailure={simulateCloudFailure}
+                onRepairScript={repairFailedScript}
               />
             ) : null}
             {activeNav === "assets" ? <AssetReview workspace={workspace} onApprove={approveAssets} /> : null}
-            {activeNav === "settings" ? <SettingsPanel workspace={workspace} {...(runtimeHealth ? { runtimeHealth } : {})} /> : null}
+            {activeNav === "settings" ? (
+              <SettingsPanel
+                workspace={workspace}
+                diagnostics={modelDiagnostics}
+                diagnosticsError={diagnosticsError}
+                isRunningDiagnostics={isRunningDiagnostics}
+                onRunDiagnostics={runModelDiagnostics}
+                {...(runtimeHealth ? { runtimeHealth } : {})}
+              />
+            ) : null}
           </section>
           <Inspector workspace={workspace} selectedNode={selectedNode} blockedReasons={blockedReasons} />
         </div>
@@ -181,7 +224,15 @@ export function App() {
   );
 }
 
-function ProjectHeader({ workspace, onBuildPackage }: { workspace: ProjectWorkspaceView; onBuildPackage: () => void }) {
+function ProjectHeader({
+  workspace,
+  isGeneratingPackage,
+  onBuildPackage,
+}: {
+  workspace: ProjectWorkspaceView;
+  isGeneratingPackage: boolean;
+  onBuildPackage: () => void;
+}) {
   return (
     <header className="project-header">
       <div>
@@ -190,12 +241,12 @@ function ProjectHeader({ workspace, onBuildPackage }: { workspace: ProjectWorksp
         <div className="header-meta">
           <span>{workspace.productURL}</span>
           <span>{workspace.targetAudience}</span>
-          <StatusPill label={projectStatusLabel(workspace.status)} tone="blue" />
+          <StatusPill label={projectStatusLabels[workspace.status]} tone="blue" />
         </div>
       </div>
-      <button type="button" className="primary-action" onClick={onBuildPackage}>
+      <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onBuildPackage}>
         <span className="button-icon">包</span>
-        生成执行包
+        {isGeneratingPackage ? "生成中" : "生成执行包"}
       </button>
     </header>
   );
@@ -236,12 +287,16 @@ function ProjectFlow({
   onSelectNode,
   onPatchNode,
   onStageChange,
+  onWorkspaceChange,
+  onApproveAssets,
 }: {
   workspace: ProjectWorkspaceView;
   selectedNodeID: string;
   onSelectNode: (id: string) => void;
   onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
   onStageChange: (stage: WorkspaceStage) => void;
+  onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
+  onApproveAssets: () => void;
 }) {
   return (
     <div className="section-stack">
@@ -257,17 +312,244 @@ function ProjectFlow({
           </button>
         ))}
       </div>
-      <MetricsRow workspace={workspace} />
-      <InputsTable workspace={workspace} />
-      <UnderstandingPanel workspace={workspace} />
-      <GraphReviewTable
-        workspace={workspace}
-        selectedNodeID={selectedNodeID}
-        onSelectNode={onSelectNode}
-        onPatchNode={onPatchNode}
-      />
+      {workspace.stage === "setup" ? <SetupPanel workspace={workspace} /> : null}
+      {workspace.stage === "inputs" ? <InputsPanel workspace={workspace} onWorkspaceChange={onWorkspaceChange} /> : null}
+      {workspace.stage === "understanding" ? <UnderstandingStagePanel workspace={workspace} /> : null}
+      {workspace.stage === "plan_review" ? (
+        <PlanReviewPanel
+          workspace={workspace}
+          selectedNodeID={selectedNodeID}
+          onSelectNode={onSelectNode}
+          onPatchNode={onPatchNode}
+        />
+      ) : null}
+      {workspace.stage === "package_approval" ? <PackageStageSummary workspace={workspace} /> : null}
+      {workspace.stage === "cloud_run" ? <CloudRunPanel workspace={workspace} /> : null}
+      {workspace.stage === "script_repair" ? <ScriptRepairPanel workspace={workspace} /> : null}
+      {workspace.stage === "result_review" ? <ResultReviewPanel workspace={workspace} onApprove={onApproveAssets} /> : null}
     </div>
   );
+}
+
+function SetupPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  const template = scenarioTemplates.find((item) => item.id === workspace.scenarioID);
+  return (
+    <div className="stage-panel-grid">
+      <section className="table-section">
+        <SectionTitle title="基础设置" meta={scenarioLabel(workspace.scenarioID)} />
+        <div className="settings-grid">
+          <Fact label="产品地址" value={workspace.productURL} />
+          <Fact label="目标受众" value={workspace.targetAudience} />
+          <Fact label="目标时长" value={`${workspace.planReview.targetDurationSec} 秒`} />
+          <Fact label="输出资产" value={workspace.planReview.outputRequests.map(assetKindLabel).join("、")} />
+        </div>
+      </section>
+      <section className="table-section">
+        <SectionTitle title="模板目标" meta="业务可读" />
+        <div className="stage-copy">
+          <p>{template?.objective ?? workspace.planReview.graph.summary}</p>
+          <div className="chip-row">
+            {(template?.defaultChecklist ?? []).map((item) => (
+              <span key={item} className="chip">{item}</span>
+            ))}
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function InputsPanel({
+  workspace,
+  onWorkspaceChange,
+}: {
+  workspace: ProjectWorkspaceView;
+  onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
+}) {
+  const localRepoPath = workspace.inputBundle.repositories?.[0]?.local_path ?? "";
+  const forbiddenData = workspaceInputForbiddenData(workspace);
+  function patchInputs(patch: Parameters<typeof updateWorkspaceInputs>[1]) {
+    onWorkspaceChange(updateWorkspaceInputs(workspace, patch));
+  }
+  return (
+    <div className="section-stack">
+      <section className="table-section">
+        <SectionTitle title="输入材料配置" meta="Dev Bridge 路径输入" />
+        <div className="input-form-grid">
+          <label className="field-row">
+            <span>产品 URL</span>
+            <input value={workspace.productURL} onChange={(event) => patchInputs({ productURL: event.currentTarget.value })} placeholder="https://app.example.com" />
+          </label>
+          <label className="field-row">
+            <span>项目根目录</span>
+            <input value={localRepoPath} onChange={(event) => patchInputs({ localRepoPath: event.currentTarget.value })} placeholder="C:\\Users\\you\\Desktop\\your-project" />
+          </label>
+          <label className="field-row">
+            <span>目标受众</span>
+            <input value={workspace.targetAudience} onChange={(event) => patchInputs({ targetAudience: event.currentTarget.value })} placeholder="中国客户的产品和运营团队" />
+          </label>
+          <label className="field-row wide">
+            <span>本次演示需求</span>
+            <textarea value={workspace.inputBundle.raw_user_prompt ?? ""} onChange={(event) => patchInputs({ rawUserPrompt: event.currentTarget.value })} rows={4} placeholder="描述本次想展示的功能、受众、必须讲清楚的业务价值。" />
+          </label>
+          <label className="field-row">
+            <span>禁用页面</span>
+            <textarea value={workspace.planReview.forbiddenPages.join("\n")} onChange={(event) => patchInputs({ forbiddenPagesText: event.currentTarget.value })} rows={3} />
+          </label>
+          <label className="field-row">
+            <span>禁用数据</span>
+            <textarea value={forbiddenData.join("\n")} onChange={(event) => patchInputs({ forbiddenDataText: event.currentTarget.value })} rows={3} />
+          </label>
+        </div>
+        <div className="input-note">当前 Dev Bridge 使用文本路径输入；后续 Wails 壳会接入原生文件夹选择器。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
+      </section>
+      <InputsTable workspace={workspace} />
+      <CodeSummaryPanel workspace={workspace} />
+      <AgentPipelinePanel workspace={workspace} />
+      <section className="table-section">
+        <SectionTitle title="本地输入边界" meta="App 端处理" />
+        <div className="settings-grid">
+          <Fact label="代码策略" value="只生成结构摘要和 hash，不上传完整源码" />
+          <Fact label="凭据策略" value="仅保存 secret_ref，录制授权自动过期" />
+          <Fact label="页面材料" value={`${workspace.inputBundle.webpage_screenshots?.length ?? 0} 张截图 / URL 可访问`} />
+          <Fact label="需求材料" value={workspace.inputBundle.raw_user_prompt ? "已读取用户需求" : "待补充"} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function UnderstandingStagePanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  return (
+    <div className="section-stack">
+      <MetricsRow workspace={workspace} />
+      <UnderstandingPanel workspace={workspace} />
+      <CodeSummaryPanel workspace={workspace} />
+      <AgentPipelinePanel workspace={workspace} />
+      <section className="table-section">
+        <SectionTitle title="理解输出" meta="ProductMap / Evidence" />
+        <div className="settings-grid">
+          <Fact label="Product Map" value={workspace.understanding.productMapID} />
+          <Fact label="摘要置信度" value={`${Math.round(bestEvidenceConfidence(workspace) * 100)}%`} />
+          <Fact label="敏感提示" value={`${workspace.understanding.sensitiveWarnings.length} 项`} />
+          <Fact label="后续用途" value="生成执行图、脚本文档和审批说明" />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CodeSummaryPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  const summary = codeSummaryFromWorkspace(workspace);
+  const repoPath = workspace.inputBundle.repositories?.[0]?.local_path;
+  return (
+    <section className="table-section">
+      <SectionTitle title="代码阅读摘要" meta={repoPath ? "CodeReaderAgent" : "未提供项目根目录"} />
+      <div className="settings-grid">
+        <Fact label="扫描文件" value={summary.fileCount > 0 ? `${summary.fileCount} 个` : repoPath ? "路径不可读或无可扫描文件" : "未提供"} />
+        <Fact label="框架线索" value={summary.frameworks.length > 0 ? summary.frameworks.join("、") : "待识别"} />
+        <Fact label="路由/组件" value={`${summary.routes} 个路由 / ${summary.components} 个组件`} />
+        <Fact label="Selector" value={`${summary.selectors} 个稳定选择器候选`} />
+        <Fact label="Source Digest" value={summary.sourceDigest || "待生成"} />
+        <Fact label="读取策略" value={summary.degraded ? "已降级使用需求/页面材料" : "只读扫描结构摘要，不保存完整源码"} />
+      </div>
+    </section>
+  );
+}
+
+function AgentPipelinePanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  return (
+    <section className="table-section">
+      <SectionTitle title="Agent 分工" meta="本地执行包生成链路" />
+      <div className="agent-pipeline">
+        {agentPipelineItems(workspace).map((item) => (
+          <div key={item.id} className="agent-row">
+            <StatusPill label={agentStatusLabel(item.status)} tone={item.status === "completed" ? "green" : item.status === "attention" ? "yellow" : "neutral"} />
+            <div>
+              <strong>{item.name}</strong>
+              <span>{item.role}</span>
+            </div>
+            <small>{item.output}</small>
+            <em>{item.detail}</em>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PlanReviewPanel({
+  workspace,
+  selectedNodeID,
+  onSelectNode,
+  onPatchNode,
+}: {
+  workspace: ProjectWorkspaceView;
+  selectedNodeID: string;
+  onSelectNode: (id: string) => void;
+  onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
+}) {
+  return (
+    <div className="section-stack">
+      <GraphReviewTable workspace={workspace} selectedNodeID={selectedNodeID} onSelectNode={onSelectNode} onPatchNode={onPatchNode} />
+      <section className="table-section">
+        <SectionTitle title="录制策略" meta="RecordingRunSpec 预览" />
+        <div className="settings-grid">
+          <Fact label="允许域名" value={workspace.planReview.allowedDomains.join("、")} />
+          <Fact label="禁止页面" value={workspace.planReview.forbiddenPages.join("、")} />
+          <Fact label="打码选择器" value={workspace.planReview.redactionSelectors.join("、")} />
+          <Fact label="输出请求" value={workspace.planReview.outputRequests.map(assetKindLabel).join("、")} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function PackageStageSummary({ workspace }: { workspace: ProjectWorkspaceView }) {
+  return (
+    <section className="table-section">
+      <SectionTitle title="执行包审批入口" meta={workspace.packagePreview.packageID} />
+      <div className="settings-grid">
+        <Fact label="Plan Hash" value={workspace.executableScriptBundle?.reproducibility.plan_hash_sha256 ?? "待生成"} />
+        <Fact label="Script Hash" value={workspace.executableScriptBundle?.reproducibility.script_hash_sha256 ?? "待生成"} />
+        <Fact label="Bundle Hash" value={workspace.executableScriptBundle?.reproducibility.bundle_hash_sha256 ?? "待生成"} />
+        <Fact label="审批状态" value={projectStatusLabels[workspace.status]} />
+      </div>
+    </section>
+  );
+}
+
+function CloudRunPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  return (
+    <section className="table-section">
+      <SectionTitle title="云端录制" meta={cloudStatusLabel(workspace.cloudRun.status)} />
+      <div className="settings-grid">
+        <Fact label="Cloud Job" value={workspace.cloudRun.cloudJobID ?? "待创建"} />
+        <Fact label="当前步骤" value={workspace.cloudRun.currentStep} />
+        <Fact label="进度" value={`${workspace.cloudRun.progress}%`} />
+        <Fact label="重试次数" value={`${workspace.cloudRun.retryCount}`} />
+      </div>
+    </section>
+  );
+}
+
+function ScriptRepairPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  const diagnostic = workspace.cloudRun.failureDiagnostic;
+  return (
+    <section className="table-section">
+      <SectionTitle title="脚本修复" meta={diagnostic?.failed_node_id ?? "等待诊断"} />
+      <div className="settings-grid">
+        <Fact label="失败节点" value={diagnostic?.failed_node_id ?? "无"} />
+        <Fact label="错误信息" value={diagnostic?.error.message ?? "暂无错误"} />
+        <Fact label="诊断材料" value={`${(diagnostic?.screenshot_refs?.length ?? 0) + (diagnostic?.trace_refs?.length ?? 0)} 个加密 artifact`} />
+        <Fact label="修复要求" value="重新生成脚本包，并回到人工审批" />
+      </div>
+    </section>
+  );
+}
+
+function ResultReviewPanel({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {
+  return <AssetReview workspace={workspace} onApprove={onApprove} />;
 }
 
 function MetricsRow({ workspace }: { workspace: ProjectWorkspaceView }) {
@@ -404,17 +686,23 @@ function PackageApproval({
   checklist,
   blockedReasons,
   canUpload,
+  isLocalMode,
   onChecklistChange,
   onUpload,
   onCloudSuccess,
+  onCloudFailure,
+  onRepairScript,
 }: {
   workspace: ProjectWorkspaceView;
   checklist: ApprovalChecklistState;
   blockedReasons: string[];
   canUpload: boolean;
+  isLocalMode: boolean;
   onChecklistChange: (state: ApprovalChecklistState) => void;
   onUpload: () => void;
   onCloudSuccess: () => void;
+  onCloudFailure: () => void;
+  onRepairScript: () => void;
 }) {
   function toggle(key: keyof ApprovalChecklistState) {
     onChecklistChange({ ...checklist, [key]: !checklist[key] });
@@ -433,6 +721,10 @@ function PackageApproval({
           <Fact label="Bundle Hash" value={bundle?.reproducibility.bundle_hash_sha256 ?? "待生成"} />
           <Fact label="上传模式" value={workspace.packagePreview.sourceSummaryOnly ? "仅结构摘要" : "已阻塞"} />
           <Fact label="加密状态" value={workspace.packagePreview.encrypted ? "已启用" : "缺失"} />
+          <Fact label="允许域名" value={workspace.planReview.allowedDomains.join("、")} />
+          <Fact label="打码规则" value={workspace.planReview.redactionSelectors.join("、")} />
+          <Fact label="模型来源" value={workspace.modelProvenance?.join("；") ?? "待生成"} />
+          {bundle?.repair_lineage ? <Fact label="修复来源" value={`${bundle.repair_lineage.source_result_id} / 第 ${bundle.repair_lineage.repair_attempt} 次`} /> : null}
         </div>
         <div className="checklist-panel">
           {(
@@ -451,7 +743,11 @@ function PackageApproval({
           ))}
         </div>
       </div>
+      <CloudRunPanel workspace={workspace} />
       <ScriptBundleReview workspace={workspace} />
+      {workspace.cloudRun.failureDiagnostic ? (
+        <FailureDiagnosticPanel workspace={workspace} onRepairScript={onRepairScript} />
+      ) : null}
       <section className="table-section">
         <SectionTitle title="凭据授权" meta={`${workspace.packagePreview.credentialGrants.length} 项授权`} />
         <table>
@@ -483,16 +779,70 @@ function PackageApproval({
         </div>
       ) : null}
       <div className="action-row">
-        <button type="button" className="primary-action" disabled={!canUpload} onClick={onUpload}>
+        <button type="button" className="primary-action" disabled={!canUpload || isLocalMode} onClick={onUpload}>
           <span className="button-icon">云</span>
-          上传云端
+          {isLocalMode ? "云端上传后续接入" : "上传云端"}
         </button>
-        <button type="button" className="secondary-action" onClick={onCloudSuccess}>
+        <button type="button" className="secondary-action" disabled={isLocalMode} onClick={onCloudSuccess}>
           <span className="button-icon">成</span>
-          模拟完成
+          {isLocalMode ? "录制后续接入" : "模拟完成"}
+        </button>
+        <button type="button" className="secondary-action" disabled={isLocalMode} onClick={onCloudFailure}>
+          <span className="button-icon">诊</span>
+          {isLocalMode ? "诊断后续接入" : "模拟失败诊断"}
         </button>
       </div>
     </div>
+  );
+}
+
+function FailureDiagnosticPanel({ workspace, onRepairScript }: { workspace: ProjectWorkspaceView; onRepairScript: () => void }) {
+  const diagnostic = workspace.cloudRun.failureDiagnostic;
+  const repairRequest = workspace.cloudRun.repairRequest;
+  if (!diagnostic) {
+    return null;
+  }
+  return (
+    <section className="table-section">
+      <SectionTitle title="脚本失败诊断" meta={repairRequest?.approval_required ? "修复后必须重新审批" : "待确认"} />
+      <div className="settings-grid">
+        <Fact label="失败节点" value={diagnostic.failed_node_id} />
+        <Fact label="错误信息" value={diagnostic.error.message} />
+        <Fact label="当前页面" value={diagnostic.current_url ?? "未知"} />
+        <Fact label="打码状态" value={diagnostic.redaction_report.applied && !diagnostic.redaction_report.full_html_included ? "已脱敏" : "需复核"} />
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>诊断资产</th>
+            <th>类型</th>
+            <th>敏感</th>
+            <th>校验</th>
+          </tr>
+        </thead>
+        <tbody>
+          {[...(diagnostic.screenshot_refs ?? []), ...(diagnostic.trace_refs ?? [])].map((artifact) => (
+            <tr key={artifact.id}>
+              <td>{artifact.role ?? artifact.id}</td>
+              <td>{artifact.kind}</td>
+              <td>{artifact.sensitive ? "是" : "否"}</td>
+              <td>{artifact.sha256}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="blocked-list">
+        {(diagnostic.repair_hints ?? []).map((hint) => (
+          <span key={`${hint.kind}_${hint.node_id ?? hint.summary}`}>{hint.summary}</span>
+        ))}
+      </div>
+      <div className="action-row">
+        <button type="button" className="primary-action" onClick={onRepairScript}>
+          <span className="button-icon">修</span>
+          生成修复包
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -555,7 +905,21 @@ function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView
   );
 }
 
-function SettingsPanel({ workspace, runtimeHealth }: { workspace: ProjectWorkspaceView; runtimeHealth?: RuntimeHealthView }) {
+function SettingsPanel({
+  workspace,
+  runtimeHealth,
+  diagnostics,
+  diagnosticsError,
+  isRunningDiagnostics,
+  onRunDiagnostics,
+}: {
+  workspace: ProjectWorkspaceView;
+  runtimeHealth?: RuntimeHealthView;
+  diagnostics: ModelDiagnosticResult[];
+  diagnosticsError: string;
+  isRunningDiagnostics: boolean;
+  onRunDiagnostics: () => void;
+}) {
   const providerRows = [
     ["GLM", "glm"],
     ["Kimi", "kimi"],
@@ -564,12 +928,17 @@ function SettingsPanel({ workspace, runtimeHealth }: { workspace: ProjectWorkspa
     ["豆包 / Ark", "doubao"],
     ["DeepSeek", "deepseek"],
   ] as const;
-  const routeRows = [
-    ["计划生成", "Kimi", "kimi-2.5"],
-    ["代码阅读", "GLM", "glm-5.2"],
-    ["多模态理解", "Minimax", "minimax-m3"],
-    ["视频操作", "Seedance", "seedance-2.0"],
-  ];
+  const routeLabels: Record<string, string> = {
+    planning: "计划生成",
+    code_reading: "代码阅读",
+    multimodal_understanding: "多模态理解",
+    video_operation: "视频操作",
+  };
+  const routeRows = Object.entries(runtimeHealth?.modelTaskRoutes ?? {}).map(([task, route]) => [
+    routeLabels[task] ?? task,
+    route.provider,
+    route.model,
+  ]);
   return (
     <div className="section-stack">
       <SectionTitle title="设置" meta="运行时正常" />
@@ -578,6 +947,8 @@ function SettingsPanel({ workspace, runtimeHealth }: { workspace: ProjectWorkspa
         <Fact label="资产存储" value="本地文件存储" />
         <Fact label="允许域名" value={workspace.planReview.allowedDomains.join(", ")} />
         <Fact label="禁止页面" value={workspace.planReview.forbiddenPages.join(", ")} />
+        <Fact label="LLM 模式" value={runtimeHealth?.llmMode ?? "auto"} />
+        <Fact label="模型适配版本" value={runtimeHealth?.modelAdapterVersion ?? "domestic-llm-adapter-v1"} />
       </div>
       <section className="table-section">
         <SectionTitle title="模型供应商凭据" meta="仅显示占位状态" />
@@ -622,13 +993,57 @@ function SettingsPanel({ workspace, runtimeHealth }: { workspace: ProjectWorkspa
             </tr>
           </thead>
           <tbody>
-            {routeRows.map(([task, provider, modelName]) => (
+            {(routeRows.length > 0 ? routeRows : [["计划生成", "kimi", "kimi-k2.7-code"], ["代码阅读", "glm", "glm-5.2"], ["多模态理解", "minimax", "minimax-m3"], ["视频操作", "seedance", "seedance-2.0"]]).map(([task, provider, modelName]) => (
               <tr key={task}>
                 <td>{task}</td>
                 <td>{provider}</td>
                 <td>{modelName}</td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </section>
+      <section className="table-section">
+        <SectionTitle title="真实模型诊断" meta="只返回脱敏状态" />
+        <div className="action-row">
+          <button type="button" className="secondary-action" onClick={onRunDiagnostics} disabled={isRunningDiagnostics}>
+            <span className="button-icon">测</span>
+            {isRunningDiagnostics ? "诊断中" : "运行诊断"}
+          </button>
+          <small>{diagnosticsError || "用于确认 Kimi/GLM/MiniMax 等真实模型是否可调用。"}</small>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>任务</th>
+              <th>供应商</th>
+              <th>模型</th>
+              <th>Base</th>
+              <th>结果</th>
+              <th>错误</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(diagnostics.length > 0 ? diagnostics : []).map((item) => (
+              <tr key={`${item.provider}-${item.task ?? item.model}`}>
+                <td>{routeLabels[item.task ?? ""] ?? item.task ?? "未绑定任务"}</td>
+                <td>{item.provider}</td>
+                <td>{item.model}</td>
+                <td>{[item.baseURLHost, item.baseURLPath].filter(Boolean).join("") || "未配置"}</td>
+                <td>
+                  <StatusPill
+                    label={item.ok ? `可调用 ${item.latencyMS ?? 0}ms` : item.configured ? `失败${item.httpStatus ? ` ${item.httpStatus}` : ""}` : "未配置"}
+                    tone={item.ok ? "green" : item.configured ? "yellow" : "neutral"}
+                  />
+                </td>
+                <td>{item.errorClass ?? item.error ?? "无"}</td>
+              </tr>
+            ))}
+            {diagnostics.length === 0 ? (
+              <tr>
+                <td colSpan={6}>尚未运行诊断。</td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </section>
@@ -706,15 +1121,28 @@ function scenarioLabel(id: ScenarioID): string {
   return labels[id];
 }
 
-function projectStatusLabel(status: ProjectWorkspaceView["status"]): string {
-  const labels: Record<ProjectWorkspaceView["status"], string> = {
-    draft: "草稿",
-    understanding_ready: "理解完成",
-    awaiting_approval: "等待审批",
-    cloud_running: "云端录制中",
-    asset_ready: "成品就绪",
-  };
-  return labels[status];
+function buildNavItems(workspace: ProjectWorkspaceView): Array<{ id: NavSection; label: string; badge?: string }> {
+  const pendingAssets = workspace.assets.filter((asset) => asset.status === "generated").length;
+  const executionBadge =
+    workspace.cloudRun.status === "failed"
+      ? "诊断"
+      : workspace.executableScriptBundle
+        ? "待审"
+        : undefined;
+  return [
+    { id: "projects", label: "项目", badge: workflowStageLabels[workspace.stage] },
+    { id: "new_demo", label: "新建演示" },
+    { id: "execution_packages", label: "执行包", ...(executionBadge ? { badge: executionBadge } : {}) },
+    { id: "assets", label: "成品资产", ...(pendingAssets > 0 ? { badge: `${pendingAssets}` } : {}) },
+    { id: "settings", label: "设置" },
+  ];
+}
+
+function bestEvidenceConfidence(workspace: ProjectWorkspaceView): number {
+  if (workspace.understanding.evidenceRefs.length === 0) {
+    return 0;
+  }
+  return Math.max(...workspace.understanding.evidenceRefs.map((ref) => ref.confidence ?? 0));
 }
 
 function sourceKindLabel(kind: string): string {
@@ -783,4 +1211,21 @@ function credentialKindLabel(kind: string): string {
     temporary_token: "临时令牌",
   };
   return labels[kind] ?? kind;
+}
+
+function agentStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: "待执行",
+    completed: "已完成",
+    attention: "需注意",
+  };
+  return labels[status] ?? status;
+}
+
+function workspaceInputForbiddenData(workspace: ProjectWorkspaceView): string[] {
+  const metadataValue = workspace.inputBundle.metadata?.forbidden_data;
+  if (Array.isArray(metadataValue)) {
+    return metadataValue.filter((item): item is string => typeof item === "string");
+  }
+  return workspace.scriptDocument?.safety_policy.forbidden_data ?? ["客户邮箱", "API Key", "访问令牌"];
 }

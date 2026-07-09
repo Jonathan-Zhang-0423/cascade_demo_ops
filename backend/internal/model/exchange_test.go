@@ -66,6 +66,45 @@ func TestClientExecutionPackageAvoidsRawSecretAndSourceContent(t *testing.T) {
 	}
 }
 
+func TestClientExecutionPackageRepairContextRoundTrip(t *testing.T) {
+	pkg := sampleClientExecutionPackage(t)
+	diagnostic := sampleFailedRecordingResultPackage(time.Date(2026, 7, 8, 10, 30, 0, 0, time.UTC)).FailureDiagnostic
+	pkg.RepairContext = &ScriptRepairContext{
+		SourceResultID:       "result_1",
+		SourcePackageID:      "pkg_1",
+		SourceCloudJobID:     "job_1",
+		RepairAttempt:        1,
+		BaseBundleID:         pkg.ExecutableScriptBundle.ID,
+		BaseBundleHashSHA256: pkg.ExecutableScriptBundle.Reproducibility.BundleHashSHA256,
+		BasePlanHashSHA256:   pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256,
+		DiagnosticRefs:       []EvidenceRef{{ID: diagnostic.ID, Kind: EvidenceKindBrowserTrace}},
+		FailureDiagnostic:    diagnostic,
+		UserApproval: &UserApprovalRecord{
+			ApprovalID:       "repair_approval_1",
+			ApprovedByUserID: "user_1",
+			ApprovedAt:       time.Date(2026, 7, 8, 11, 0, 0, 0, time.UTC),
+			PlanDigestSHA256: pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256,
+			Notes:            []string{"修复 selector，未新增域名、凭据或禁用页面。"},
+		},
+		IdempotencyKey: "pkg_1:repair:1:sha_repaired_bundle",
+	}
+
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ClientExecutionPackage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RepairContext == nil || got.RepairContext.FailureDiagnostic == nil || got.RepairContext.UserApproval == nil {
+		t.Fatalf("repair context did not round-trip: %+v", got.RepairContext)
+	}
+	if got.RepairContext.RepairAttempt != 1 || got.RepairContext.FailureDiagnostic.ID != diagnostic.ID {
+		t.Fatalf("unexpected repair context: %+v", got.RepairContext)
+	}
+}
+
 func TestCanonicalDigestIsStableForEquivalentMaps(t *testing.T) {
 	left := map[string]any{"b": 2, "a": map[string]any{"z": true, "m": "value"}}
 	right := map[string]any{"a": map[string]any{"m": "value", "z": true}, "b": 2}
@@ -175,6 +214,56 @@ func TestRecordingResultPackageJSONRoundTrip(t *testing.T) {
 	}
 	if got.SchemaVersion != RecordingResultPackageSchemaVersion || got.Delivery.ResultPackageRef.URI == "" {
 		t.Fatalf("result package did not round-trip: %+v", got)
+	}
+}
+
+func TestFailedRecordingResultPackageCarriesRepairDiagnostic(t *testing.T) {
+	now := time.Date(2026, 7, 8, 10, 30, 0, 0, time.UTC)
+	result := sampleFailedRecordingResultPackage(now)
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got RecordingResultPackage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.FailureDiagnostic == nil || got.RepairRequest == nil {
+		t.Fatalf("failed result lost diagnostic or repair request: %+v", got)
+	}
+	if got.FailureDiagnostic.FailedNodeID != "node_invite_member" || got.FailureDiagnostic.ScreenshotRefs[0].Role != "failure_screenshot" {
+		t.Fatalf("failed diagnostic did not round-trip: %+v", got.FailureDiagnostic)
+	}
+	if err := got.ValidateStatusContract(); err != nil {
+		t.Fatalf("failed result status contract should be valid: %v", err)
+	}
+}
+
+func TestFailedRecordingResultPackageRequiresDiagnosticAndApproval(t *testing.T) {
+	result := sampleFailedRecordingResultPackage(time.Date(2026, 7, 8, 10, 30, 0, 0, time.UTC))
+	result.FailureDiagnostic = nil
+	if err := result.ValidateStatusContract(); err == nil {
+		t.Fatal("expected failed result without diagnostic to be rejected")
+	}
+
+	result = sampleFailedRecordingResultPackage(time.Date(2026, 7, 8, 10, 30, 0, 0, time.UTC))
+	result.RepairRequest.ApprovalRequired = false
+	if err := result.ValidateStatusContract(); err == nil {
+		t.Fatal("expected repair request without approval requirement to be rejected")
+	}
+}
+
+func TestFailureDiagnosticRejectsSecretLikeTextAndUnsafeArtifacts(t *testing.T) {
+	result := sampleFailedRecordingResultPackage(time.Date(2026, 7, 8, 10, 30, 0, 0, time.UTC))
+	result.FailureDiagnostic.ConsoleEvents[0].Message = "Authorization: Bearer token_literal_for_test"
+	if err := result.ValidateStatusContract(); err == nil {
+		t.Fatal("expected diagnostic with secret-like console text to be rejected")
+	}
+
+	result = sampleFailedRecordingResultPackage(time.Date(2026, 7, 8, 10, 30, 0, 0, time.UTC))
+	result.FailureDiagnostic.ScreenshotRefs[0].Sensitive = false
+	if err := result.ValidateStatusContract(); err == nil {
+		t.Fatal("expected non-sensitive failure screenshot descriptor to be rejected")
 	}
 }
 
@@ -427,6 +516,172 @@ func sampleClientExecutionPackage(t *testing.T) ClientExecutionPackage {
 				ReviewedNodeIDs:  []string{"node_open_dashboard", "node_invite_member"},
 			},
 		},
+	}
+}
+
+func sampleFailedRecordingResultPackage(now time.Time) RecordingResultPackage {
+	diagnostic := &ScriptFailureDiagnostic{
+		ID:              "diag_result_1",
+		SchemaVersion:   ScriptFailureDiagnosticSchemaVersion,
+		SourcePackageID: "pkg_1",
+		CloudJobID:      "job_1",
+		FailedNodeID:    "node_invite_member",
+		FailedStepOrder: 2,
+		Attempt:         1,
+		Error: AgentError{
+			Code:      "selector_timeout",
+			Message:   "Timed out waiting for selector [data-testid='invite-member']",
+			Retryable: true,
+		},
+		CurrentURL: "https://app.example.com/dashboard",
+		PageTitle:  "Dashboard",
+		ScreenshotRefs: []PackageArtifactDescriptor{{
+			ID:        "artifact_failure_screenshot",
+			Role:      "failure_screenshot",
+			Kind:      "webpage_screenshot",
+			URI:       "s3://cascade-results/failure/step-002.png.enc",
+			MimeType:  "image/png",
+			SHA256:    "sha_failure_screenshot",
+			Encrypted: true,
+			Sensitive: true,
+		}},
+		TraceRefs: []PackageArtifactDescriptor{{
+			ID:        "artifact_failure_trace",
+			Role:      "failure_trace",
+			Kind:      "browser_trace",
+			URI:       "s3://cascade-results/failure/trace.zip.enc",
+			MimeType:  "application/zip",
+			SHA256:    "sha_failure_trace",
+			Encrypted: true,
+			Sensitive: true,
+		}},
+		ConsoleEvents: []ConsoleEventSummary{{
+			Level:     "warning",
+			Message:   "Invite button disabled until team data loads",
+			Timestamp: now,
+		}},
+		NetworkEvents: []NetworkEventSummary{{
+			URL:       "https://app.example.com/api/team",
+			Method:    "GET",
+			Status:    200,
+			Resource:  "xhr",
+			Timestamp: now,
+			Redacted:  true,
+		}},
+		DOMSnapshotRef: &PackageArtifactDescriptor{
+			ID:        "artifact_failure_dom",
+			Role:      "failure_dom_snapshot",
+			Kind:      "dom_snapshot",
+			URI:       "s3://cascade-results/failure/dom.json.enc",
+			MimeType:  "application/json",
+			SHA256:    "sha_failure_dom",
+			Encrypted: true,
+			Sensitive: true,
+		},
+		AccessibilitySnapshotRef: &PackageArtifactDescriptor{
+			ID:        "artifact_failure_accessibility",
+			Role:      "failure_accessibility_snapshot",
+			Kind:      "accessibility_snapshot",
+			URI:       "s3://cascade-results/failure/a11y.json.enc",
+			MimeType:  "application/json",
+			SHA256:    "sha_failure_accessibility",
+			Encrypted: true,
+			Sensitive: true,
+		},
+		RedactionReport: DiagnosticRedactionReport{
+			Applied:             true,
+			PolicyRef:           "pkg_1.redactions",
+			MaskedSelectors:     []string{"[data-sensitive]"},
+			StrippedHeaders:     []string{"authorization", "cookie"},
+			StrippedStorageKeys: []string{"localStorage", "sessionStorage"},
+			FullHTMLIncluded:    false,
+		},
+		RepairHints: []ScriptRepairHint{{
+			Kind:            "selector_repair",
+			NodeID:          "node_invite_member",
+			Summary:         "Invite button selector changed after release.",
+			SuggestedAction: "Use role button with label Invite",
+			SelectorCandidates: []SelectorCandidate{{
+				Kind:           "role",
+				Value:          "button[name='Invite']",
+				Confidence:     0.82,
+				StabilityScore: 0.78,
+				Source:         "cloud_failure_accessibility_snapshot",
+			}},
+			Confidence: 0.8,
+		}},
+		CapturedAt: now,
+	}
+	return RecordingResultPackage{
+		ResultID:        "result_1",
+		SourcePackageID: "pkg_1",
+		CloudJobID:      "job_1",
+		SchemaVersion:   RecordingResultPackageSchemaVersion,
+		Status:          RecordingResultStatusFailed,
+		ExecutionTrace: &ExecutionTrace{
+			ID:              "trace_1",
+			WorkflowGraphID: "graph_1",
+			GraphVersion:    1,
+			PassRate:        0.5,
+			Artifacts: []ArtifactRef{{
+				ID:        "artifact_failure_screenshot",
+				Kind:      "webpage_screenshot",
+				URI:       "s3://cascade-results/failure/step-002.png.enc",
+				SHA256:    "sha_failure_screenshot",
+				Sensitive: true,
+			}},
+		},
+		StepResults: []StepResult{
+			{NodeID: "node_open_dashboard", Status: "passed", DurationMS: 1200},
+			{NodeID: "node_invite_member", Status: "failed", DurationMS: 10000, Error: &diagnostic.Error, Artifacts: []ArtifactRef{{
+				ID:           "artifact_failure_screenshot",
+				Kind:         "webpage_screenshot",
+				URI:          "s3://cascade-results/failure/step-002.png.enc",
+				SHA256:       "sha_failure_screenshot",
+				Sensitive:    true,
+				SourceNodeID: "node_invite_member",
+			}}},
+		},
+		VerificationReport: VerificationReport{
+			PassRate:             0.5,
+			FailedNodeIDs:        []string{"node_invite_member"},
+			ReproducibilityMatch: true,
+		},
+		FailureDiagnostic: diagnostic,
+		RepairRequest: &ScriptRepairRequest{
+			ID:                     "repair_request_1",
+			SourceResultID:         "result_1",
+			SourcePackageID:        "pkg_1",
+			CloudJobID:             "job_1",
+			FailedBundleHashSHA256: "sha_failed_bundle",
+			FailedPlanHashSHA256:   "sha_failed_plan",
+			MaxRepairAttempts:      2,
+			RepairAttempt:          1,
+			ApprovalRequired:       true,
+			RequestedAt:            now,
+			ExpiresAt:              now.Add(24 * time.Hour),
+		},
+		AuditTrail: CloudExecutionAuditTrail{
+			CloudWorkerID:       "worker_1",
+			StartedAt:           now.Add(-time.Minute),
+			CompletedAt:         now,
+			RuntimeVersions:     map[string]string{"browser": "chromium-stable"},
+			SourcePackageDigest: "sha_pkg",
+			GraphDigest:         "sha_graph",
+		},
+		Delivery: ResultDelivery{
+			ResultPackageRef: PackageArtifactDescriptor{
+				ID:        "result_package_artifact",
+				Kind:      "recording_result_package",
+				URI:       "s3://cascade-results/result-failed.json.enc",
+				SHA256:    "sha_failed_result",
+				Encrypted: true,
+				Sensitive: true,
+			},
+			AckRequired: true,
+			ExpiresAt:   now.Add(24 * time.Hour),
+		},
+		CreatedAt: now,
 	}
 }
 

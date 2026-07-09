@@ -927,6 +927,168 @@ export type ReproducibilitySpec = {
   created_with_app_version?: string;
 };
 
+export type PackageArtifactDescriptor = {
+  id: string;
+  role?: string;
+  kind: string;
+  uri: string;
+  mime_type?: string;
+  sha256: string;
+  size_bytes?: number;
+  encrypted: boolean;
+  sensitive?: boolean;
+  compression_alg?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type AgentError = {
+  code: string;
+  message: string;
+  retryable?: boolean;
+  evidence_refs?: EvidenceRef[];
+};
+
+export type ConsoleEventSummary = {
+  level: string;
+  message: string;
+  url?: string;
+  timestamp?: string;
+};
+
+export type NetworkEventSummary = {
+  url: string;
+  method?: string;
+  status?: number;
+  failure?: string;
+  resource?: string;
+  timestamp?: string;
+  redacted?: boolean;
+};
+
+export type DiagnosticRedactionReport = {
+  applied: boolean;
+  policy_ref?: string;
+  masked_selectors?: string[];
+  masked_text_patterns?: string[];
+  stripped_headers?: string[];
+  stripped_storage_keys?: string[];
+  full_html_included: boolean;
+  policy_findings?: AgentFinding[];
+};
+
+export type ScriptRepairHint = {
+  kind: string;
+  summary: string;
+  node_id?: string;
+  selector_candidates?: SelectorCandidate[];
+  suggested_action?: string;
+  confidence?: number;
+  evidence_refs?: EvidenceRef[];
+};
+
+export type ScriptFailureDiagnostic = {
+  id: string;
+  schema_version: "demoops.script_failure_diagnostic.v1";
+  source_package_id: string;
+  cloud_job_id: string;
+  failed_node_id: string;
+  failed_step_order?: number;
+  attempt?: number;
+  error: AgentError;
+  current_url?: string;
+  page_title?: string;
+  screenshot_refs?: PackageArtifactDescriptor[];
+  trace_refs?: PackageArtifactDescriptor[];
+  console_events?: ConsoleEventSummary[];
+  network_events?: NetworkEventSummary[];
+  dom_snapshot_ref?: PackageArtifactDescriptor;
+  accessibility_snapshot_ref?: PackageArtifactDescriptor;
+  redaction_report: DiagnosticRedactionReport;
+  repair_hints?: ScriptRepairHint[];
+  captured_at?: string;
+};
+
+export type ScriptRepairRequest = {
+  id: string;
+  source_result_id: string;
+  source_package_id: string;
+  cloud_job_id: string;
+  failed_bundle_hash_sha256?: string;
+  failed_plan_hash_sha256?: string;
+  max_repair_attempts?: number;
+  repair_attempt?: number;
+  approval_required: boolean;
+  requested_at?: string;
+  expires_at?: string;
+};
+
+export type ScriptRepairContext = {
+  source_result_id: string;
+  source_package_id: string;
+  source_cloud_job_id: string;
+  repair_attempt: number;
+  base_bundle_id?: string;
+  base_bundle_hash_sha256?: string;
+  base_plan_hash_sha256?: string;
+  diagnostic_refs?: EvidenceRef[];
+  failure_diagnostic?: ScriptFailureDiagnostic;
+  user_approval?: UserApprovalRecord;
+  idempotency_key?: string;
+};
+
+export type ScriptRepairLineage = {
+  base_bundle_id: string;
+  base_bundle_hash_sha256: string;
+  source_result_id: string;
+  source_cloud_job_id: string;
+  repair_attempt: number;
+  change_summary?: string;
+  diagnostic_refs?: EvidenceRef[];
+  created_at?: string;
+};
+
+export type UserApprovalRecord = {
+  approval_id: string;
+  approved_by_user_id?: string;
+  approved_at: string;
+  plan_digest_sha256: string;
+  reviewed_node_ids?: string[];
+  notes?: string[];
+};
+
+export type StepResult = {
+  node_id: string;
+  status: string;
+  started_at?: string;
+  completed_at?: string;
+  duration_ms?: number;
+  observed_state?: string;
+  validation_ids?: string[];
+  artifacts?: ArtifactRef[];
+  error?: AgentError;
+};
+
+export type VerificationReport = {
+  pass_rate?: number;
+  failed_node_ids?: string[];
+  policy_findings?: AgentFinding[];
+  reproducibility_match: boolean;
+};
+
+export type RecordingResultPackage = {
+  result_id: string;
+  source_package_id: string;
+  cloud_job_id: string;
+  schema_version: "demoops.recording_result_package.v1";
+  status: "generated" | "delivered" | "acked" | "failed";
+  step_results?: StepResult[];
+  generated_assets?: ArtifactRef[];
+  verification_report: VerificationReport;
+  failure_diagnostic?: ScriptFailureDiagnostic;
+  repair_request?: ScriptRepairRequest;
+  created_at: string;
+};
+
 export type ExecutionScriptDocument = {
   id: string;
   project_id: string;
@@ -1017,6 +1179,7 @@ export type ExecutableRecordingScriptBundle = {
   security_policy: ExecutableScriptSecurityPolicy;
   reproducibility: ExecutableScriptReproducibility;
   validation?: ExecutableScriptValidation;
+  repair_lineage?: ScriptRepairLineage;
   created_at?: string;
   updated_at?: string;
 };

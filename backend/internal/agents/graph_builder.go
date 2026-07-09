@@ -2,17 +2,48 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 )
 
-type GraphBuilderAgent struct{}
+type GraphBuilderAgent struct {
+	llm llm.Client
+}
 
 func NewGraphBuilderAgent() *GraphBuilderAgent { return &GraphBuilderAgent{} }
+
+func NewGraphBuilderAgentWithLLM(client llm.Client) *GraphBuilderAgent {
+	return &GraphBuilderAgent{llm: client}
+}
+
+type graphLLMOutput struct {
+	Name             string              `json:"name"`
+	Summary          string              `json:"summary"`
+	Objective        string              `json:"objective"`
+	ValueProposition string              `json:"value_proposition"`
+	CTA              string              `json:"cta"`
+	SuccessCriteria  flexibleStringSlice `json:"success_criteria"`
+	Steps            []struct {
+		NodeID          string              `json:"node_id"`
+		Title           string              `json:"title"`
+		Goal            string              `json:"goal"`
+		Action          string              `json:"action"`
+		Selector        string              `json:"selector"`
+		ExpectedOutcome string              `json:"expected_outcome"`
+		Voiceover       string              `json:"voiceover"`
+		Caption         string              `json:"caption"`
+		Callout         string              `json:"callout"`
+		DurationMS      int                 `json:"duration_ms"`
+		Tags            flexibleStringSlice `json:"tags"`
+	} `json:"steps"`
+}
 
 func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport) (*model.DemoWorkflowGraph, error) {
 	if err := ctx.Err(); err != nil {
@@ -262,6 +293,21 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 		ProductMapID: productMapID,
 		EvidenceRefs: reportEvidenceRefs(report),
 	}
+	trace, err := a.enhanceGraphWithLLM(ctx, project, productMap, report, graph)
+	if err != nil && !llm.IsDeterministicFallback(err) {
+		return nil, err
+	}
+	if trace != nil {
+		graph.Provenance.Model = trace.Label()
+		graph.EvidenceRefs = append(graph.EvidenceRefs, model.EvidenceRef{
+			ID:         "ev_model_graph_" + shortHash(trace.Label()),
+			Kind:       model.EvidenceKindUserInput,
+			Summary:    "GraphBuilderAgent 模型路由：" + trace.Label(),
+			FieldPath:  "model_trace.graph_builder",
+			Confidence: 0.7,
+		})
+		graph.Provenance.EvidenceRefs = graph.EvidenceRefs
+	}
 	graph.Maintenance = &model.MaintenancePolicy{
 		UpdateTriggers:   []string{"release_note_changed", "route_changed", "selector_validation_failed"},
 		StalenessDays:    30,
@@ -288,6 +334,155 @@ func primaryFeature(productMap *model.ProductMap) (string, string) {
 		return featureID, feature.Name
 	}
 	return "feature_primary_workflow", "用最短路径展示产品核心价值，并形成可审批、可复现的演示脚本。"
+}
+
+func (a *GraphBuilderAgent) enhanceGraphWithLLM(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, graph *model.DemoWorkflowGraph) (*llm.CallTrace, error) {
+	if a.llm == nil || project == nil || graph == nil {
+		return nil, nil
+	}
+	payload := map[string]any{
+		"target_audience": project.TargetAudience,
+		"product_url":     project.ProductURL,
+		"product_map":     productMap,
+		"report_summary":  "",
+		"brief":           nil,
+		"current_graph":   graphPatchInput(graph),
+	}
+	if report != nil {
+		payload["report_summary"] = report.Summary
+		payload["brief"] = report.RequirementBrief
+	}
+	data, _ := json.Marshal(payload)
+	var output graphLLMOutput
+	trace, err := a.llm.GenerateJSON(ctx, config.ModelTaskPlanning, llm.JSONRequest{
+		System:       "你是 Cascade DemoOps 的 Demo Workflow Graph agent。请把产品地图转成可审批、可执行、适合中国客户理解的演示流程。只能使用既有 node_id，并且 action 只能是 navigate/click/fill/select/upload/wait/assert/inspect/api_call。",
+		User:         string(data),
+		SchemaName:   "WorkflowGraphPatch",
+		ResponseHint: "返回字段：name, summary, objective, value_proposition, cta, success_criteria, steps[{node_id,title,goal,action,selector,expected_outcome,voiceover,caption,callout,duration_ms,tags}]。",
+		MaxTokens:    2200,
+		Temperature:  0.2,
+	}, &output)
+	if err != nil {
+		return trace, err
+	}
+	if output.Name != "" {
+		graph.Name = output.Name
+	}
+	if output.Summary != "" {
+		graph.Summary = output.Summary
+	}
+	if graph.Intent != nil {
+		if output.Objective != "" {
+			graph.Intent.Objective = output.Objective
+		}
+		if output.ValueProposition != "" {
+			graph.Intent.ValueProposition = output.ValueProposition
+		}
+		if output.CTA != "" {
+			graph.Intent.CTA = output.CTA
+		}
+		graph.Intent.SuccessCriteria = uniqueStrings(append(graph.Intent.SuccessCriteria, stringSlice(output.SuccessCriteria)...))
+	}
+	byID := map[string]*model.GraphNode{}
+	for _, node := range graph.Nodes {
+		if node != nil {
+			byID[node.ID] = node
+		}
+	}
+	for _, step := range output.Steps {
+		node := byID[step.NodeID]
+		if node == nil {
+			continue
+		}
+		if step.Title != "" {
+			node.Title = step.Title
+		}
+		if step.Goal != "" {
+			node.Goal = step.Goal
+		}
+		if action := validGraphAction(step.Action); action != "" {
+			node.Action = string(action)
+			if node.ActionSpec != nil {
+				node.ActionSpec.Type = action
+			}
+		}
+		if step.Selector != "" && !isHTTPURL(step.Selector) {
+			node.Selector = step.Selector
+			if node.ActionSpec != nil && node.ActionSpec.Target.Selector != "" {
+				node.ActionSpec.Target.Selector = step.Selector
+			}
+		}
+		if step.ExpectedOutcome != "" {
+			node.ExpectedOutcome = step.ExpectedOutcome
+		}
+		if step.DurationMS > 0 && step.DurationMS <= 30000 {
+			node.DurationHintMS = step.DurationMS
+		}
+		node.Tags = uniqueStrings(append(node.Tags, stringSlice(step.Tags)...))
+		if node.Narrative == nil {
+			node.Narrative = &model.NarrativeCue{}
+		}
+		if step.Voiceover != "" {
+			node.Narrative.Voiceover = step.Voiceover
+		}
+		if step.Caption != "" {
+			node.Narrative.Caption = step.Caption
+		}
+		if step.Callout != "" {
+			node.Narrative.Callout = step.Callout
+		}
+	}
+	return trace, nil
+}
+
+func graphPatchInput(graph *model.DemoWorkflowGraph) map[string]any {
+	nodes := []map[string]any{}
+	for _, node := range graph.Nodes {
+		if node == nil {
+			continue
+		}
+		nodes = append(nodes, map[string]any{
+			"id":               node.ID,
+			"type":             node.Type,
+			"title":            node.Title,
+			"action":           node.Action,
+			"selector":         node.Selector,
+			"expected_outcome": node.ExpectedOutcome,
+			"goal":             node.Goal,
+		})
+	}
+	return map[string]any{
+		"id":          graph.ID,
+		"name":        graph.Name,
+		"summary":     graph.Summary,
+		"entry_point": graph.EntryPoint,
+		"nodes":       nodes,
+	}
+}
+
+func validGraphAction(value string) model.GraphActionType {
+	switch model.GraphActionType(strings.TrimSpace(value)) {
+	case model.GraphActionNavigate:
+		return model.GraphActionNavigate
+	case model.GraphActionClick:
+		return model.GraphActionClick
+	case model.GraphActionFill:
+		return model.GraphActionFill
+	case model.GraphActionSelect:
+		return model.GraphActionSelect
+	case model.GraphActionUpload:
+		return model.GraphActionUpload
+	case model.GraphActionWait:
+		return model.GraphActionWait
+	case model.GraphActionAssert:
+		return model.GraphActionAssert
+	case model.GraphActionInspect:
+		return model.GraphActionInspect
+	case model.GraphActionAPICall:
+		return model.GraphActionAPICall
+	default:
+		return ""
+	}
 }
 
 func graphEntryPoint(project *model.ProjectContext, productMap *model.ProductMap) string {

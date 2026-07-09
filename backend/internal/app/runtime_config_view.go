@@ -15,6 +15,8 @@ type RuntimeConfigView struct {
 	ResourceRootConfigured bool                              `json:"resource_root_configured"`
 	ResourceManifestLoaded bool                              `json:"resource_manifest_loaded"`
 	NodeRuntimeConfigured  bool                              `json:"node_runtime_configured"`
+	LLMMode                config.LLMMode                    `json:"llm_mode"`
+	ModelAdapterVersion    string                            `json:"model_adapter_version"`
 	Sidecars               map[string]bool                   `json:"sidecars"`
 	ModelProviders         map[string]ProviderCredentialView `json:"model_providers"`
 	ModelTaskRoutes        map[string]ModelTaskRouteView     `json:"model_task_routes"`
@@ -47,6 +49,8 @@ func NewRuntimeConfigView(runtime config.AppRuntimeConfig) RuntimeConfigView {
 		ResourceRootConfigured: runtime.ResourceRoot != "",
 		ResourceManifestLoaded: runtime.ResourceManifestPath != "",
 		NodeRuntimeConfigured:  runtime.NodeBinaryPath != "",
+		LLMMode:                runtime.LLMMode,
+		ModelAdapterVersion:    runtime.ModelAdapterVersion,
 		Sidecars:               sidecarConfigured(runtime.SidecarPaths),
 		ModelProviders:         providerCredentialViews(runtime.ModelProviders),
 		ModelTaskRoutes:        modelTaskRouteViews(runtime.ModelTaskRoutes),

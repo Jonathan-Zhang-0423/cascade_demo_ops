@@ -16,6 +16,17 @@ App local understanding
   -> App acknowledges result delivery
 ```
 
+Failure repair loop:
+
+```text
+Cloud execute_script fails
+  -> Cloud captures redacted screenshot, trace, console/network summaries, DOM/a11y refs
+  -> Cloud returns failed RecordingResultPackage with ScriptFailureDiagnostic + ScriptRepairRequest
+  -> App agent repairs ExecutionScriptDocument + restricted TS script using local code context
+  -> user reviews repair approval markdown and approves
+  -> App uploads a new ClientExecutionPackage with RepairContext + ScriptRepairLineage
+```
+
 ## API Contract
 
 ```text
@@ -70,6 +81,29 @@ Every execution package carries:
 
 Cloud result packages return execution traces, step results, generated artifact
 checksums, runtime versions, and optional graph patch suggestions.
+
+## Failure Diagnostics
+
+When `RecordingResultPackage.status` is `failed`, the payload must include:
+
+- `failure_diagnostic`: failed node, machine-readable error, current URL/title,
+  encrypted sensitive screenshot/trace/DOM/a11y artifact refs, redacted
+  console/network summaries, redaction report, and repair hints.
+- `repair_request`: source result/package/job ids, failed plan and bundle hashes,
+  repair attempt, max repair attempts, and `approval_required=true`.
+
+Cloud must redact diagnostics before returning them to the App. Diagnostics must
+not include raw secrets, cookies, authorization headers, local/session storage
+tokens, full HTML, or customer source content. Failure artifacts use
+`package_artifacts` roles such as `failure_screenshot`, `failure_trace`,
+`failure_dom_snapshot`, and `failure_accessibility_snapshot`, and default to
+`sensitive=true` and encrypted transport.
+
+Repair packages reuse the normal upload API. The repaired
+`ClientExecutionPackage` carries `repair_context`, and the repaired
+`ExecutableRecordingScriptBundle` carries `repair_lineage`. The repaired script
+must pass the same hash binding, AST/security validation, allowed-domain checks,
+and human approval flow as a first-run package.
 
 ## Render Handoff
 

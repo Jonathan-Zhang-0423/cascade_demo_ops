@@ -3,6 +3,8 @@ package agents
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"net/url"
 	"regexp"
 	"sort"
@@ -65,4 +67,72 @@ func safeID(prefix string, value string) string {
 		normalized = normalized[:48]
 	}
 	return prefix + "_" + normalized
+}
+
+type flexibleStringSlice []string
+
+func (s *flexibleStringSlice) UnmarshalJSON(data []byte) error {
+	var values []string
+	if err := json.Unmarshal(data, &values); err == nil {
+		*s = uniqueStrings(values)
+		return nil
+	}
+	var raw []any
+	if err := json.Unmarshal(data, &raw); err == nil {
+		values = make([]string, 0, len(raw))
+		for _, item := range raw {
+			if value := stringFromLLMValue(item); value != "" {
+				values = append(values, value)
+			}
+		}
+		*s = uniqueStrings(values)
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		*s = splitLLMStringList(single)
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if single = stringFromLLMValue(value); single != "" {
+		*s = splitLLMStringList(single)
+	}
+	return nil
+}
+
+func stringSlice(values flexibleStringSlice) []string {
+	return []string(values)
+}
+
+func stringFromLLMValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case float64, bool:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	case map[string]any:
+		for _, key := range []string{"value", "name", "title", "label", "id", "summary", "description"} {
+			if candidate, ok := typed[key]; ok {
+				if value := stringFromLLMValue(candidate); value != "" {
+					return value
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func splitLLMStringList(value string) []string {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return nil
+	}
+	parts := regexp.MustCompile(`[,\n;；、]+`).Split(normalized, -1)
+	if len(parts) == 1 {
+		return uniqueStrings([]string{normalized})
+	}
+	return uniqueStrings(parts)
 }

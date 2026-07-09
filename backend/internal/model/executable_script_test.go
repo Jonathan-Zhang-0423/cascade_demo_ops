@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestExecutableRecordingScriptBundleJSONRoundTrip(t *testing.T) {
@@ -100,6 +101,55 @@ func TestExecutableRecordingScriptBundleHashIgnoresStoredBundleHashAndValidation
 	}
 	if first != second {
 		t.Fatalf("bundle hash should ignore stored bundle hash and validation: %s != %s", first, second)
+	}
+}
+
+func TestExecutableRecordingScriptBundleRepairLineageRoundTripAndHash(t *testing.T) {
+	bundle := &ExecutableRecordingScriptBundle{
+		ID:              "bundle_repair_1",
+		ProjectID:       "project_1",
+		WorkflowGraphID: "graph_1",
+		SchemaVersion:   ExecutableRecordingScriptBundleSchemaVersion,
+		PlanJSON:        minimalExecutionScriptDocumentForBundleTest(),
+		PlaywrightScript: ExecutableScriptSource{
+			InlineSource: "export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise<CascadeRecordingResult> { return { ok: true }; }",
+			SHA256:       "sha_script",
+		},
+		ApprovalMarkdown: ApprovalMarkdownDocument{InlineMarkdown: "# 修复审批", SHA256: "sha_markdown"},
+		SecurityPolicy:   ExecutableScriptSecurityPolicy{Redactions: RedactionPolicy{}},
+		Reproducibility:  ExecutableScriptReproducibility{PlanHashSHA256: "sha_plan", ScriptHashSHA256: "sha_script", MarkdownHashSHA256: "sha_markdown"},
+	}
+	baseHash, err := bundle.ComputeBundleHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.RepairLineage = &ScriptRepairLineage{
+		BaseBundleID:         "bundle_original",
+		BaseBundleHashSHA256: "sha_original_bundle",
+		SourceResultID:       "result_failed",
+		SourceCloudJobID:     "job_failed",
+		RepairAttempt:        1,
+		ChangeSummary:        "修复邀请按钮 selector。",
+		DiagnosticRefs:       []EvidenceRef{{ID: "diag_result_failed", Kind: EvidenceKindBrowserTrace}},
+		CreatedAt:            time.Date(2026, 7, 8, 11, 0, 0, 0, time.UTC),
+	}
+	repairHash, err := bundle.ComputeBundleHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseHash != repairHash {
+		t.Fatalf("repair lineage should not alter executable bundle hash: %s != %s", baseHash, repairHash)
+	}
+	data, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ExecutableRecordingScriptBundle
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RepairLineage == nil || got.RepairLineage.SourceResultID != "result_failed" || got.RepairLineage.RepairAttempt != 1 {
+		t.Fatalf("repair lineage did not round-trip: %+v", got.RepairLineage)
 	}
 }
 

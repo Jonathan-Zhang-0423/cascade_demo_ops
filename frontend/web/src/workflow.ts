@@ -1,5 +1,25 @@
 import type { DemoWorkflowGraph, GraphNode } from "../../src/types/workflowGraph";
-import type { ApprovalChecklistState, CloudRunStatus, ExecutionPackagePreview, SourceConnectionView } from "./domain";
+import type { ApprovalChecklistState, CloudRunStatus, ExecutionPackagePreview, ProjectWorkspaceView, SourceConnectionView, WorkspaceStage } from "./domain";
+
+export const workflowStageLabels: Record<WorkspaceStage, string> = {
+  setup: "基础设置",
+  inputs: "输入材料",
+  understanding: "产品理解",
+  plan_review: "方案审批",
+  package_approval: "执行包审批",
+  cloud_run: "云端录制",
+  script_repair: "脚本修复",
+  result_review: "成品验收",
+};
+
+export const projectStatusLabels: Record<ProjectWorkspaceView["status"], string> = {
+  draft: "草稿",
+  understanding_ready: "理解完成",
+  awaiting_approval: "等待审批",
+  cloud_running: "云端录制中",
+  script_repair_required: "脚本待修复",
+  asset_ready: "成品就绪",
+};
 
 export function updateGraphNode(graph: DemoWorkflowGraph, nodeID: string, patch: Partial<GraphNode>): DemoWorkflowGraph {
   return {
@@ -33,7 +53,7 @@ export function packageApprovalBlockedReasons(
   if (!checklist.userApprovedPlan) {
     blocked.add("上传前必须完成人工审批。");
   }
-  if (!checklist.ipAllowlistAcknowledged || !preview.ipAllowlistAcknowledged) {
+  if (!checklist.ipAllowlistAcknowledged && !preview.ipAllowlistAcknowledged) {
     blocked.add("需要确认 Cascade 云端执行 IP 已加入白名单。");
   }
   if (!checklist.sourceSummaryOnlyAcknowledged || !preview.sourceSummaryOnly) {
@@ -59,4 +79,14 @@ export function canUploadExecutionPackage(
   sources: SourceConnectionView[],
 ): boolean {
   return packageApprovalBlockedReasons(preview, checklist, sources).length === 0;
+}
+
+export function resetApprovalChecklistForRepair(current: ApprovalChecklistState): ApprovalChecklistState {
+  return {
+    userApprovedPlan: false,
+    ipAllowlistAcknowledged: false,
+    sourceSummaryOnlyAcknowledged: current.sourceSummaryOnlyAcknowledged,
+    credentialGrantAcknowledged: false,
+    redactionsReviewed: false,
+  };
 }

@@ -2,18 +2,27 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 )
 
-type ScriptPackagerAgent struct{}
+type ScriptPackagerAgent struct {
+	llm llm.Client
+}
 
 func NewScriptPackagerAgent() *ScriptPackagerAgent { return &ScriptPackagerAgent{} }
+
+func NewScriptPackagerAgentWithLLM(client llm.Client) *ScriptPackagerAgent {
+	return &ScriptPackagerAgent{llm: client}
+}
 
 func (a *ScriptPackagerAgent) PackageScript(
 	ctx context.Context,
@@ -81,6 +90,14 @@ func (a *ScriptPackagerAgent) PackageScript(
 	}
 	doc.Reproducibility.ScriptHashSHA256 = scriptHash
 	markdown := renderScriptMarkdown(doc, productMap)
+	markdown, trace, err := a.enhanceMarkdownWithLLM(ctx, project, report, productMap, graph, doc, markdown)
+	if err != nil && !llm.IsDeterministicFallback(err) {
+		return nil, err
+	}
+	if trace != nil && trace.FallbackReason == "" {
+		markdown += "\n\n## 模型生成记录\n\n"
+		markdown += "- 审批文档润色模型：" + trace.Label() + "\n"
+	}
 	doc.MarkdownArtifact = &model.ArtifactRef{
 		ID:        "artifact_" + doc.ID + "_markdown",
 		Kind:      "execution_script_markdown",
@@ -203,6 +220,57 @@ func buildExecutableScriptBundle(
 		return nil, ensureValidBundle(bundle)
 	}
 	return bundle, nil
+}
+
+type approvalMarkdownLLMOutput struct {
+	Markdown string `json:"markdown"`
+}
+
+func (a *ScriptPackagerAgent) enhanceMarkdownWithLLM(
+	ctx context.Context,
+	project *model.ProjectContext,
+	report *model.MultimodalUnderstandingReport,
+	productMap *model.ProductMap,
+	graph *model.DemoWorkflowGraph,
+	doc *model.ExecutionScriptDocument,
+	current string,
+) (string, *llm.CallTrace, error) {
+	if a.llm == nil || doc == nil {
+		return current, nil, nil
+	}
+	payload := map[string]any{
+		"target_audience": project.TargetAudience,
+		"report_summary":  "",
+		"product_map":     productMap,
+		"graph":           graphPatchInput(graph),
+		"script_steps":    doc.Steps,
+		"safety_policy":   doc.SafetyPolicy,
+		"hashes": map[string]string{
+			"graph_hash": doc.Reproducibility.GraphHashSHA256,
+			"plan_hash":  doc.Reproducibility.ScriptHashSHA256,
+		},
+		"current_markdown": current,
+	}
+	if report != nil {
+		payload["report_summary"] = report.Summary
+	}
+	data, _ := json.Marshal(payload)
+	var output approvalMarkdownLLMOutput
+	trace, err := a.llm.GenerateJSON(ctx, config.ModelTaskPlanning, llm.JSONRequest{
+		System:       "你是 Cascade DemoOps 的中文审批文档 agent。请润色执行包审批文档，让中国产品/运营用户能理解演示目标、生成依据、执行路径、安全边界和审批清单。不要新增与 JSON plan 不一致的步骤，不要输出源码、密钥或完整代码内容。",
+		User:         string(data),
+		SchemaName:   "ApprovalMarkdownPatch",
+		ResponseHint: "返回字段：markdown。markdown 必须包含：演示目标、生成依据、执行路径、每步动作、录制策略、安全/打码策略、凭据使用范围、云端执行边界、审批清单。",
+		MaxTokens:    2600,
+		Temperature:  0.25,
+	}, &output)
+	if err != nil {
+		return current, trace, err
+	}
+	if strings.TrimSpace(output.Markdown) == "" {
+		return current, trace, nil
+	}
+	return output.Markdown, trace, nil
 }
 
 func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {

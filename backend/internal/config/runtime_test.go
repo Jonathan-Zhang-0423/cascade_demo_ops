@@ -32,6 +32,9 @@ func TestRuntimeConfigDefaultsToDevDesktopSQLite(t *testing.T) {
 	if cfg.SidecarPaths["video-worker"] != "" {
 		t.Fatalf("unexpected sidecar override %q", cfg.SidecarPaths["video-worker"])
 	}
+	if cfg.LLMMode != LLMModeAuto || cfg.ModelAdapterVersion != ModelAdapterVersion {
+		t.Fatalf("unexpected llm config: mode=%s adapter=%s", cfg.LLMMode, cfg.ModelAdapterVersion)
+	}
 }
 
 func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
@@ -86,7 +89,7 @@ func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := map[ModelTask]ModelTaskRoute{
-		ModelTaskPlanning:                {Provider: ModelProviderKimi, Model: "kimi-2.5"},
+		ModelTaskPlanning:                {Provider: ModelProviderKimi, Model: "kimi-k2.7-code"},
 		ModelTaskCodeReading:             {Provider: ModelProviderGLM, Model: "glm-5.2"},
 		ModelTaskMultimodalUnderstanding: {Provider: ModelProviderMinimax, Model: "minimax-m3"},
 		ModelTaskVideoOperation:          {Provider: ModelProviderSeedance, Model: "seedance-2.0"},
@@ -97,7 +100,7 @@ func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
 			t.Fatalf("%s route = %+v, want provider=%s model=%s", task, got, want.Provider, want.Model)
 		}
 	}
-	if cfg.ModelProviders[ModelProviderKimi].DefaultModel != "kimi-2.5" {
+	if cfg.ModelProviders[ModelProviderKimi].DefaultModel != "kimi-k2.7-code" {
 		t.Fatalf("kimi default model = %q", cfg.ModelProviders[ModelProviderKimi].DefaultModel)
 	}
 	if cfg.ModelProviders[ModelProviderGLM].DefaultModel != "glm-5.2" {
@@ -171,8 +174,8 @@ func TestRuntimeConfigAlwaysReservesDomesticProviderSlots(t *testing.T) {
 			t.Fatalf("unexpected provider placeholder for %s: %+v", provider, credential)
 		}
 	}
-	if cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel != "" {
-		t.Fatalf("deepseek default should be empty until explicitly used, got %q", cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel)
+	if cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel != "deepseek-v4-flash" {
+		t.Fatalf("deepseek default model = %q", cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel)
 	}
 }
 
@@ -205,6 +208,34 @@ func TestRuntimeConfigSeedanceCanUseDoubaoOrArkKeyFallback(t *testing.T) {
 	}
 	if got := cfg.ModelProviders[ModelProviderDoubao].APIKeySourceEnv; got != "ARK_API_KEY" {
 		t.Fatalf("doubao fallback source = %q, want ARK_API_KEY", got)
+	}
+}
+
+func TestRuntimeConfigKimiCanUseMoonshotKeyFallback(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("KIMI_API_KEY", "")
+	t.Setenv("MOONSHOT_API_KEY", "moonshot-key")
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kimi := cfg.ModelProviders[ModelProviderKimi]
+	if !kimi.Enabled || kimi.APIKey != "moonshot-key" || kimi.APIKeySourceEnv != "MOONSHOT_API_KEY" {
+		t.Fatalf("kimi should use moonshot fallback key: %+v", kimi)
+	}
+}
+
+func TestRuntimeConfigLLMModeOverride(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("CASCADE_LLM_MODE", "real")
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLMMode != LLMModeReal {
+		t.Fatalf("llm mode = %s", cfg.LLMMode)
 	}
 }
 
@@ -322,6 +353,7 @@ func clearModelProviderEnv(t *testing.T) {
 		"GLM_BASE_URL",
 		"GLM_MODEL",
 		"KIMI_API_KEY",
+		"MOONSHOT_API_KEY",
 		"KIMI_BASE_URL",
 		"KIMI_MODEL",
 		"MINIMAX_API_KEY",
@@ -345,6 +377,7 @@ func clearModelProviderEnv(t *testing.T) {
 		"CASCADE_MULTIMODAL_MODEL",
 		"CASCADE_VIDEO_PROVIDER",
 		"CASCADE_VIDEO_MODEL",
+		"CASCADE_LLM_MODE",
 	} {
 		t.Setenv(name, "")
 	}

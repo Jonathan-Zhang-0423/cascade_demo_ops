@@ -9,7 +9,7 @@ type ScriptBundle = {
     step_node_ids?: string[];
   };
   plan_json?: {
-    steps?: Array<{ node_id?: string; timing?: { duration_ms?: number } }>;
+    steps?: Array<{ node_id?: string; order?: number; timing?: { duration_ms?: number } }>;
     recording_run_spec?: { allowed_domains?: string[] };
   };
   playwright_script?: { inline_source?: string; sha256?: string };
@@ -41,6 +41,7 @@ export type ScriptValidationResult = {
 
 export type ExecuteScriptRequest = ScriptValidationRequest & {
   output_dir?: string;
+  simulate_failure_node_id?: string;
 };
 
 export type ExecuteScriptResult = {
@@ -50,7 +51,23 @@ export type ExecuteScriptResult = {
   screenshot_paths?: string[];
   trace_path?: string;
   step_results?: Array<{ node_id: string; status: string; duration_ms?: number }>;
+  failure_diagnostic?: WorkerScriptFailureDiagnostic;
   error?: string;
+};
+
+export type WorkerScriptFailureDiagnostic = {
+  schema_version: "demoops.script_failure_diagnostic.v1";
+  failed_node_id: string;
+  failed_step_order?: number;
+  error: { code: string; message: string; retryable?: boolean };
+  current_url?: string;
+  page_title?: string;
+  screenshot_refs: Array<{ role: string; kind: string; uri: string; mime_type: string; sha256: string; encrypted: boolean; sensitive: boolean }>;
+  trace_refs: Array<{ role: string; kind: string; uri: string; mime_type: string; sha256: string; encrypted: boolean; sensitive: boolean }>;
+  console_events: Array<{ level: string; message: string }>;
+  network_events: Array<{ url: string; method?: string; status?: number; redacted?: boolean }>;
+  redaction_report: { applied: boolean; stripped_headers: string[]; stripped_storage_keys: string[]; full_html_included: false };
+  repair_hints: Array<{ kind: string; node_id: string; summary: string; suggested_action: string; confidence: number }>;
 };
 
 export async function validateScript(request: ScriptValidationRequest): Promise<ScriptValidationResult> {
@@ -142,9 +159,31 @@ export async function validateScript(request: ScriptValidationRequest): Promise<
 export async function executeScript(request: ExecuteScriptRequest): Promise<ExecuteScriptResult> {
   const validation = await validateScript(request);
   if (!validation.valid) {
-    return { ok: false, validation, error: "script validation failed" };
+    const failedNodeID = request.bundle?.plan_json?.steps?.[0]?.node_id ?? "validation";
+    return {
+      ok: false,
+      validation,
+      error: "script validation failed",
+      failure_diagnostic: buildFailureDiagnostic(request, failedNodeID, "script_validation_failed", "脚本校验失败，未进入浏览器执行。"),
+    };
   }
   const steps = request.bundle?.plan_json?.steps ?? [];
+  const simulatedFailureNodeID = request.simulate_failure_node_id;
+  if (simulatedFailureNodeID) {
+    return {
+      ok: false,
+      validation,
+      trace_path: `${outputDir}/trace.zip`,
+      screenshot_paths: [`${outputDir}/failure-${safeID(simulatedFailureNodeID)}.png`],
+      step_results: steps.map((step) => ({
+        node_id: step.node_id ?? "unknown",
+        status: step.node_id === simulatedFailureNodeID ? "failed" : "passed",
+        ...(step.timing?.duration_ms !== undefined ? { duration_ms: step.timing.duration_ms } : {}),
+      })),
+      failure_diagnostic: buildFailureDiagnostic(request, simulatedFailureNodeID, "selector_timeout", `等待节点 ${simulatedFailureNodeID} 的 selector 超时。`),
+      error: `script failed at node ${simulatedFailureNodeID}`,
+    };
+  }
   return {
     ok: true,
     validation,
@@ -232,6 +271,56 @@ function safeURL(value: string): URL | undefined {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function buildFailureDiagnostic(request: ExecuteScriptRequest, failedNodeID: string, code: string, message: string): WorkerScriptFailureDiagnostic {
+  const outputDir = request.output_dir || "artifacts/script-execution";
+  const step = request.bundle?.plan_json?.steps?.find((candidate) => candidate.node_id === failedNodeID);
+  return {
+    schema_version: "demoops.script_failure_diagnostic.v1",
+    failed_node_id: failedNodeID,
+    ...(step?.order !== undefined ? { failed_step_order: step.order } : {}),
+    error: { code, message, retryable: true },
+    screenshot_refs: [
+      {
+        role: "failure_screenshot",
+        kind: "webpage_screenshot",
+        uri: `${outputDir}/failure-${safeID(failedNodeID)}.png.enc`,
+        mime_type: "image/png",
+        sha256: sha256(`failure_screenshot:${failedNodeID}`),
+        encrypted: true,
+        sensitive: true,
+      },
+    ],
+    trace_refs: [
+      {
+        role: "failure_trace",
+        kind: "browser_trace",
+        uri: `${outputDir}/trace.zip.enc`,
+        mime_type: "application/zip",
+        sha256: sha256(`failure_trace:${failedNodeID}`),
+        encrypted: true,
+        sensitive: true,
+      },
+    ],
+    console_events: [{ level: "error", message }],
+    network_events: [],
+    redaction_report: {
+      applied: true,
+      stripped_headers: ["authorization", "cookie"],
+      stripped_storage_keys: ["localStorage", "sessionStorage"],
+      full_html_included: false,
+    },
+    repair_hints: [
+      {
+        kind: "selector_repair",
+        node_id: failedNodeID,
+        summary: "使用失败截图、DOM 摘要和可访问性摘要修复 selector 或等待条件。",
+        suggested_action: "在 App 端基于本地代码上下文重新生成脚本，并重新审批后上传。",
+        confidence: 0.7,
+      },
+    ],
+  };
 }
 
 function safeID(value: string): string {

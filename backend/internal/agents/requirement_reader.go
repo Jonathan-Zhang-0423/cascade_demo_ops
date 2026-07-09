@@ -2,15 +2,24 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 )
 
-type RequirementReaderAgent struct{}
+type RequirementReaderAgent struct {
+	llm llm.Client
+}
 
 func NewRequirementReaderAgent() *RequirementReaderAgent { return &RequirementReaderAgent{} }
+
+func NewRequirementReaderAgentWithLLM(client llm.Client) *RequirementReaderAgent {
+	return &RequirementReaderAgent{llm: client}
+}
 
 func (a *RequirementReaderAgent) ReadRequirements(ctx context.Context, project *model.ProjectContext) (*model.RequirementBrief, error) {
 	if err := ctx.Err(); err != nil {
@@ -109,7 +118,110 @@ func (a *RequirementReaderAgent) ReadRequirements(ctx context.Context, project *
 	if strings.TrimSpace(brief.Objective) == "" {
 		brief.Objective = "生成可审批、可复现、可执行的产品演示脚本。"
 	}
+	trace, err := a.enhanceWithLLM(ctx, project, brief)
+	if err != nil && !llm.IsDeterministicFallback(err) {
+		return nil, err
+	}
+	if trace != nil {
+		brief.EvidenceRefs = append(brief.EvidenceRefs, model.EvidenceRef{
+			ID:         "ev_model_requirement_" + shortHash(trace.Label()),
+			Kind:       model.EvidenceKindUserInput,
+			Summary:    "RequirementReaderAgent 模型路由：" + trace.Label(),
+			FieldPath:  "model_trace.requirement_reader",
+			Confidence: 0.7,
+		})
+	}
 	return brief, nil
+}
+
+type requirementLLMOutput struct {
+	Scenario       string               `json:"scenario"`
+	Objective      string               `json:"objective"`
+	PrimaryOutcome string               `json:"primary_outcome"`
+	MustShow       []string             `json:"must_show"`
+	MustNotShow    []string             `json:"must_not_show"`
+	ForbiddenPages []string             `json:"forbidden_pages"`
+	ForbiddenData  []string             `json:"forbidden_data"`
+	UseCases       flexibleDemoUseCases `json:"use_cases"`
+	BrandTone      string               `json:"brand_tone"`
+	Confidence     float64              `json:"confidence"`
+}
+
+func (a *RequirementReaderAgent) enhanceWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) (*llm.CallTrace, error) {
+	if a.llm == nil || project == nil || brief == nil {
+		return nil, nil
+	}
+	payload := map[string]any{
+		"target_audience":       project.TargetAudience,
+		"product_url_present":   project.ProductURL != "",
+		"product_description":   project.ProductDescription,
+		"raw_user_prompt":       "",
+		"requirement_documents": sanitizedRequirementDocs(project),
+		"must_show":             brief.MustShow,
+		"must_not_show":         brief.MustNotShow,
+		"forbidden_pages":       brief.ForbiddenPages,
+		"forbidden_data":        brief.ForbiddenData,
+		"brand_tone":            project.BrandTone,
+	}
+	if project.Inputs != nil {
+		payload["raw_user_prompt"] = project.Inputs.RawUserPrompt
+	}
+	data, _ := json.Marshal(payload)
+	var output requirementLLMOutput
+	trace, err := a.llm.GenerateJSON(ctx, config.ModelTaskPlanning, llm.JSONRequest{
+		System:       "你是 Cascade DemoOps 的需求理解 agent。请面向中国客户，把输入需求整理成可执行产品演示脚本的结构化 brief。禁止输出或推断任何明文密码、token、API key。",
+		User:         string(data),
+		SchemaName:   "RequirementBriefPatch",
+		ResponseHint: "返回字段：scenario, objective, primary_outcome, must_show, must_not_show, forbidden_pages, forbidden_data, use_cases, brand_tone, confidence。",
+		MaxTokens:    1200,
+		Temperature:  0.2,
+	}, &output)
+	if err != nil {
+		return trace, err
+	}
+	if output.Scenario != "" {
+		brief.Scenario = output.Scenario
+	}
+	if output.Objective != "" {
+		brief.Objective = output.Objective
+	}
+	if output.PrimaryOutcome != "" {
+		brief.PrimaryOutcome = output.PrimaryOutcome
+	}
+	brief.MustShow = uniqueStrings(append(brief.MustShow, output.MustShow...))
+	brief.MustNotShow = uniqueStrings(append(brief.MustNotShow, output.MustNotShow...))
+	brief.ForbiddenPages = uniqueStrings(append(brief.ForbiddenPages, output.ForbiddenPages...))
+	brief.ForbiddenData = uniqueStrings(append(brief.ForbiddenData, output.ForbiddenData...))
+	if len(output.UseCases) > 0 {
+		brief.UseCases = uniqueUseCases(append(brief.UseCases, output.UseCases...))
+	}
+	if output.BrandTone != "" {
+		brief.BrandTone = output.BrandTone
+	}
+	if output.Confidence > 0 {
+		brief.Confidence = output.Confidence
+	}
+	return trace, nil
+}
+
+func sanitizedRequirementDocs(project *model.ProjectContext) []map[string]any {
+	if project == nil || project.Inputs == nil {
+		return nil
+	}
+	docs := []map[string]any{}
+	for _, doc := range project.Inputs.RequirementDocuments {
+		body := doc.Body
+		if len(body) > 4000 {
+			body = body[:4000]
+		}
+		docs = append(docs, map[string]any{
+			"title":       doc.Title,
+			"kind":        doc.Kind,
+			"focus_areas": doc.FocusAreas,
+			"body":        body,
+		})
+	}
+	return docs
 }
 
 func artifactID(ref *model.ArtifactRef) string {
@@ -130,6 +242,82 @@ func uniqueUseCases(values []model.DemoUseCase) []model.DemoUseCase {
 		result = append(result, value)
 	}
 	return result
+}
+
+type flexibleDemoUseCases []model.DemoUseCase
+
+type flexibleDemoUseCase model.DemoUseCase
+
+func (u *flexibleDemoUseCase) UnmarshalJSON(data []byte) error {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*u = flexibleDemoUseCase(demoUseCaseFromLLMValue(value))
+	return nil
+}
+
+func demoUseCase(value flexibleDemoUseCase) model.DemoUseCase {
+	return model.DemoUseCase(value)
+}
+
+func (u *flexibleDemoUseCases) UnmarshalJSON(data []byte) error {
+	var raw []any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		var single any
+		if singleErr := json.Unmarshal(data, &single); singleErr != nil {
+			return err
+		}
+		raw = []any{single}
+	}
+	values := make([]model.DemoUseCase, 0, len(raw))
+	for _, item := range raw {
+		if useCase := demoUseCaseFromLLMValue(item); useCase != "" {
+			values = append(values, useCase)
+		}
+	}
+	*u = uniqueUseCases(values)
+	return nil
+}
+
+func demoUseCaseFromLLMValue(value any) model.DemoUseCase {
+	switch typed := value.(type) {
+	case string:
+		return normalizeDemoUseCase(typed)
+	case map[string]any:
+		for _, key := range []string{"use_case", "id", "value", "name", "kind", "scenario"} {
+			if candidate, ok := typed[key].(string); ok {
+				if useCase := normalizeDemoUseCase(candidate); useCase != "" {
+					return useCase
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeDemoUseCase(value string) model.DemoUseCase {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, " ", "_")
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	switch {
+	case normalized == string(model.DemoUseCaseHelpCenter), strings.Contains(normalized, "help"):
+		return model.DemoUseCaseHelpCenter
+	case normalized == string(model.DemoUseCaseUserDocumentation), strings.Contains(normalized, "doc"), strings.Contains(value, "文档"):
+		return model.DemoUseCaseUserDocumentation
+	case normalized == string(model.DemoUseCaseLaunch), strings.Contains(normalized, "launch"), strings.Contains(value, "发布"), strings.Contains(value, "上线"):
+		return model.DemoUseCaseLaunch
+	case normalized == string(model.DemoUseCaseSales), strings.Contains(normalized, "sales"), strings.Contains(value, "销售"), strings.Contains(value, "售前"):
+		return model.DemoUseCaseSales
+	case normalized == string(model.DemoUseCaseSupport), strings.Contains(normalized, "support"), strings.Contains(value, "客服"), strings.Contains(value, "支持"):
+		return model.DemoUseCaseSupport
+	case normalized == string(model.DemoUseCaseOnboarding), strings.Contains(normalized, "onboarding"), strings.Contains(value, "培训"), strings.Contains(value, "新人"):
+		return model.DemoUseCaseOnboarding
+	case normalized == string(model.DemoUseCaseInvestor), strings.Contains(normalized, "investor"), strings.Contains(value, "投资"):
+		return model.DemoUseCaseInvestor
+	default:
+		return ""
+	}
 }
 
 func scenarioName(useCase model.DemoUseCase) string {
