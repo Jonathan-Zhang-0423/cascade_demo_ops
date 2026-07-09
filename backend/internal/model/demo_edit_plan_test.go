@@ -1,0 +1,312 @@
+package model
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+)
+
+func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
+	now := time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC)
+	catalog := AssetTimelineCatalog{
+		SchemaVersion:   AssetTimelineCatalogSchemaVersion,
+		CatalogID:       "catalog_run_1",
+		WorkflowGraphID: "graph_1",
+		GraphVersion:    1,
+		RunID:           "run_1",
+		Source: AssetTimelineSource{
+			RecordingResultPackageID: "result_1",
+			ExecutionTraceID:         "trace_1",
+			GeneratedAt:              now,
+		},
+		Constraints: AssetTimelineConstraints{
+			SourceMaterialOnly:                true,
+			ProhibitNewImageOrVideoGeneration: true,
+			ScriptIsPrimaryStoryline:          true,
+			AllowedEditOperations:             DemoEditAllowedOperations,
+			ProhibitedPlanKeys:                DemoEditProhibitedPlanKeys,
+		},
+		Timeline: AssetTimelineInfo{DurationMS: 2400, RecordingArtifactID: "artifact_raw_recording"},
+		Steps: []TimelineStep{{
+			StepID:          "node_open_dashboard",
+			Order:           0,
+			Action:          "navigate",
+			Status:          "passed",
+			Required:        true,
+			StartMS:         0,
+			EndMS:           1200,
+			DurationMS:      1200,
+			ExpectedOutcome: "Dashboard loads",
+			SourceNode:      &TimelineSourceNode{Selector: "main", FocusSelector: "[data-testid='dashboard']"},
+			Artifacts:       []string{"artifact_raw_recording"},
+		}},
+		Artifacts: []TimelineArtifact{{
+			ID:         "artifact_raw_recording",
+			Kind:       "raw_recording",
+			URI:        "file:///tmp/demo.webm",
+			MimeType:   "video/webm",
+			Label:      "Raw browser recording",
+			DurationMS: 2400,
+		}},
+	}
+
+	startMS := 0
+	endMS := 1200
+	zoom := 1.18
+	sourceRange := MillisecondRange{0, 1200}
+	plan := DemoEditPlan{
+		SchemaVersion:        DemoEditPlanSchemaVersion,
+		PlanID:               "edit_plan_run_1",
+		CatalogID:            catalog.CatalogID,
+		Objective:            "Create a concise demo from existing recorded UI assets.",
+		SourceMaterialPolicy: DemoEditSourceMaterialPolicyExistingAssetsOnly,
+		ScriptOrderPolicy:    DemoEditScriptOrderPolicyPreserveRequiredStepOrder,
+		TargetDurationMS:     60000,
+		Shots: []DemoEditShot{{
+			ID:                "shot_001_open_dashboard",
+			SourceArtifactID:  "artifact_raw_recording",
+			SourceStepID:      "node_open_dashboard",
+			SourceTimeRangeMS: &sourceRange,
+			Purpose:           "Show dashboard loading",
+			Operations: []EditOperation{
+				{Type: EditOperationTrim, StartMS: &startMS, EndMS: &endMS},
+				{Type: EditOperationZoomPan, StartMS: &startMS, EndMS: &endMS, FocusSelector: "[data-testid='dashboard']", Zoom: &zoom},
+			},
+			Overlays: []EditOverlay{{
+				Type:         EditOverlayCaption,
+				Text:         "Dashboard loads",
+				SourceStepID: "node_open_dashboard",
+				StartMS:      &startMS,
+				EndMS:        &endMS,
+			}},
+		}},
+		GlobalStyle: &DemoEditGlobalStyle{ColorGrade: "neutral_product_ui", Pacing: "clear_and_direct", TransitionStyle: "simple_cut"},
+	}
+
+	catalogData, err := json.Marshal(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotCatalog AssetTimelineCatalog
+	if err := json.Unmarshal(catalogData, &gotCatalog); err != nil {
+		t.Fatal(err)
+	}
+	if gotCatalog.SchemaVersion != AssetTimelineCatalogSchemaVersion || !gotCatalog.Constraints.SourceMaterialOnly {
+		t.Fatalf("catalog lost source-only contract: %+v", gotCatalog)
+	}
+	if !gotCatalog.Constraints.ProhibitNewImageOrVideoGeneration || !gotCatalog.Constraints.ScriptIsPrimaryStoryline {
+		t.Fatalf("catalog lost generation/order constraints: %+v", gotCatalog.Constraints)
+	}
+	if !containsEditOperation(gotCatalog.Constraints.AllowedEditOperations, EditOperationZoomPan) {
+		t.Fatalf("catalog allowed operations missing zoom_pan: %+v", gotCatalog.Constraints.AllowedEditOperations)
+	}
+	if !containsString(gotCatalog.Constraints.ProhibitedPlanKeys, "image_prompt") || !containsString(gotCatalog.Constraints.ProhibitedPlanKeys, "new_ui_action") {
+		t.Fatalf("catalog prohibited keys missing generation/action guards: %+v", gotCatalog.Constraints.ProhibitedPlanKeys)
+	}
+
+	planData, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotPlan DemoEditPlan
+	if err := json.Unmarshal(planData, &gotPlan); err != nil {
+		t.Fatal(err)
+	}
+	if gotPlan.SchemaVersion != DemoEditPlanSchemaVersion {
+		t.Fatalf("plan schema = %q", gotPlan.SchemaVersion)
+	}
+	if gotPlan.SourceMaterialPolicy != DemoEditSourceMaterialPolicyExistingAssetsOnly {
+		t.Fatalf("plan source policy = %q", gotPlan.SourceMaterialPolicy)
+	}
+	if gotPlan.ScriptOrderPolicy != DemoEditScriptOrderPolicyPreserveRequiredStepOrder {
+		t.Fatalf("plan order policy = %q", gotPlan.ScriptOrderPolicy)
+	}
+	if gotPlan.Shots[0].SourceTimeRangeMS == nil || gotPlan.Shots[0].SourceTimeRangeMS[0] != 0 || gotPlan.Shots[0].SourceTimeRangeMS[1] != 1200 {
+		t.Fatalf("source time range did not round-trip: %+v", gotPlan.Shots[0].SourceTimeRangeMS)
+	}
+	if gotPlan.Shots[0].Operations[0].StartMS == nil || *gotPlan.Shots[0].Operations[0].StartMS != 0 {
+		t.Fatalf("operation start_ms=0 did not round-trip: %+v", gotPlan.Shots[0].Operations[0])
+	}
+	if gotPlan.Shots[0].Overlays[0].StartMS == nil || *gotPlan.Shots[0].Overlays[0].StartMS != 0 {
+		t.Fatalf("overlay start_ms=0 did not round-trip: %+v", gotPlan.Shots[0].Overlays[0])
+	}
+}
+
+func TestDemoEditPlanValidationReportJSONRoundTrip(t *testing.T) {
+	now := time.Date(2026, 7, 9, 10, 30, 0, 0, time.UTC)
+	report := DemoEditPlanValidationReport{
+		SchemaVersion: DemoEditPlanValidationSchemaVersion,
+		Valid:         false,
+		CheckedAt:     now,
+		PlanID:        "edit_plan_run_1",
+		Errors: []DemoEditPlanValidationFinding{{
+			Code:    "prohibited_generation_instruction",
+			Message: "Edit plan cannot contain generation field image_prompt",
+			Path:    "shots[0].image_prompt",
+		}},
+		Warnings: []DemoEditPlanValidationFinding{{
+			Code:    "required_step_omitted",
+			Message: "Required script step node_submit is not represented",
+			Path:    "shots",
+		}},
+	}
+
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got DemoEditPlanValidationReport
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != DemoEditPlanValidationSchemaVersion || got.Valid {
+		t.Fatalf("validation report lost status: %+v", got)
+	}
+	if got.CheckedAt.IsZero() || got.PlanID != "edit_plan_run_1" {
+		t.Fatalf("validation report lost identity fields: %+v", got)
+	}
+	if got.Errors[0].Code != "prohibited_generation_instruction" || got.Warnings[0].Code != "required_step_omitted" {
+		t.Fatalf("validation findings did not round-trip: %+v", got)
+	}
+}
+
+func TestDemoEditPlanWorkerJSONCompatibility(t *testing.T) {
+	catalogJSON := []byte(`{
+  "schema_version": "demoops.asset_timeline_catalog.v1",
+  "catalog_id": "catalog_run_1",
+  "workflow_graph_id": "graph_1",
+  "graph_version": 1,
+  "run_id": "run_1",
+  "source": {
+    "recording_result_package_id": "result_1",
+    "execution_trace_id": "trace_1",
+    "generated_at": "2026-07-09T10:00:00.000Z"
+  },
+  "constraints": {
+    "source_material_only": true,
+    "prohibit_new_image_or_video_generation": true,
+    "script_is_primary_storyline": true,
+    "allowed_edit_operations": ["trim", "zoom_pan", "caption"],
+    "prohibited_plan_keys": ["image_prompt", "video_prompt", "new_ui_action"]
+  },
+  "timeline": {
+    "duration_ms": 1200,
+    "recording_artifact_id": "artifact_raw_recording"
+  },
+  "steps": [{
+    "step_id": "open",
+    "order": 0,
+    "action": "navigate",
+    "status": "passed",
+    "required": true,
+    "start_ms": 0,
+    "end_ms": 1200,
+    "duration_ms": 1200,
+    "expected_outcome": "Product entry loads",
+    "source_node": {
+      "selector": "main",
+      "focus_selector": "main"
+    },
+    "artifacts": ["artifact_raw_recording"]
+  }],
+  "artifacts": [{
+    "id": "artifact_raw_recording",
+    "kind": "raw_recording",
+    "uri": "file:///tmp/demo.webm",
+    "mime_type": "video/webm",
+    "duration_ms": 1200,
+    "local_path": "/tmp/demo.webm"
+  }]
+}`)
+	planJSON := []byte(`{
+  "schema_version": "demoops.demo_edit_plan.v1",
+  "plan_id": "edit_plan_run_1",
+  "catalog_id": "catalog_run_1",
+  "objective": "Create a concise demo from the recorded product interaction. Do not create new images or video.",
+  "source_material_policy": "existing_assets_only",
+  "script_order_policy": "preserve_required_step_order",
+  "target_duration_ms": 60000,
+  "shots": [{
+    "id": "shot_001_open",
+    "source_artifact_id": "artifact_raw_recording",
+    "source_step_id": "open",
+    "source_time_range_ms": [0, 1200],
+    "purpose": "Product entry loads",
+    "operations": [{
+      "type": "trim",
+      "start_ms": 0,
+      "end_ms": 1200
+    }, {
+      "type": "zoom_pan",
+      "start_ms": 0,
+      "end_ms": 1200,
+      "focus_selector": "main",
+      "zoom": 1.18
+    }],
+    "overlays": [{
+      "type": "caption",
+      "text": "Product entry loads",
+      "source_step_id": "open",
+      "start_ms": 0,
+      "end_ms": 1200
+    }]
+  }],
+  "global_style": {
+    "color_grade": "neutral_product_ui",
+    "pacing": "clear_and_direct",
+    "transition_style": "simple_cut"
+  }
+}`)
+	reportJSON := []byte(`{
+  "schema_version": "demoops.demo_edit_plan_validation.v1",
+  "valid": true,
+  "checked_at": "2026-07-09T10:00:01.000Z",
+  "plan_id": "edit_plan_run_1",
+  "errors": [],
+  "warnings": []
+}`)
+
+	var catalog AssetTimelineCatalog
+	if err := json.Unmarshal(catalogJSON, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	var plan DemoEditPlan
+	if err := json.Unmarshal(planJSON, &plan); err != nil {
+		t.Fatal(err)
+	}
+	var report DemoEditPlanValidationReport
+	if err := json.Unmarshal(reportJSON, &report); err != nil {
+		t.Fatal(err)
+	}
+
+	if catalog.Source.GeneratedAt.IsZero() || catalog.Timeline.RecordingArtifactID != "artifact_raw_recording" {
+		t.Fatalf("worker catalog JSON did not map to Go DTO: %+v", catalog)
+	}
+	if plan.Shots[0].SourceTimeRangeMS == nil || plan.Shots[0].SourceTimeRangeMS[0] != 0 {
+		t.Fatalf("worker plan time range did not map to Go DTO: %+v", plan.Shots[0].SourceTimeRangeMS)
+	}
+	if plan.Shots[0].Operations[1].Zoom == nil || *plan.Shots[0].Operations[1].Zoom != 1.18 {
+		t.Fatalf("worker plan zoom operation did not map to Go DTO: %+v", plan.Shots[0].Operations[1])
+	}
+	if !report.Valid || report.CheckedAt.IsZero() {
+		t.Fatalf("worker validation report JSON did not map to Go DTO: %+v", report)
+	}
+}
+
+func containsEditOperation(values []EditOperationType, want EditOperationType) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
