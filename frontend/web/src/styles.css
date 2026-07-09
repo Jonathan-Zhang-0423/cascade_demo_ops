@@ -405,6 +405,66 @@ th {
   background: #fbfcfd;
 }
 
+.error-banner {
+  margin: 12px 14px 0;
+  padding: 10px 12px;
+  border: 1px solid #f2b8b5;
+  border-radius: 6px;
+  color: #9b1c1c;
+  background: #fff4f3;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.runtime-log-list {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.runtime-log-row {
+  display: grid;
+  grid-template-columns: 76px 160px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 8px 10px;
+  border: 1px solid #e1e6ea;
+  border-radius: 6px;
+  background: #fbfcfd;
+}
+
+.runtime-log-row span {
+  color: #60717e;
+  font-size: 12px;
+}
+
+.runtime-log-row strong {
+  font-size: 13px;
+}
+
+.runtime-log-row small {
+  color: #40515c;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.runtime-log-row.success {
+  border-color: #b6dfc2;
+  background: #f1fbf4;
+}
+
+.runtime-log-row.warning {
+  border-color: #ead28f;
+  background: #fff9e7;
+}
+
+.runtime-log-row.error {
+  border-color: #f2b8b5;
+  background: #fff4f3;
+}
+
 tbody tr:hover,
 .selected-row {
   background: #f1f8ff;

@@ -9,4 +9,6 @@ playwright-report/
 test-results/
 artifacts/
 storage/local/
+.cascade-dev/
+backend/.cache/
 .DS_Store

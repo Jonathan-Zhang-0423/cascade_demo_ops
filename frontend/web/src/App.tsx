@@ -8,6 +8,7 @@ import type {
 	NavSection,
 	ProjectWorkspaceView,
 	RuntimeHealthView,
+	RuntimeLogEntry,
 	ScenarioID,
 	WorkspaceStage,
 } from "./domain";
@@ -79,12 +80,81 @@ export function App() {
 
   async function buildPackagePreview() {
     setIsGeneratingPackage(true);
-    const result = await bridge.buildExecutionPackagePreview(workspace);
-    if (result.ok && result.data) {
-      setWorkspace(result.data);
-      setActiveNav("execution_packages");
+    setActiveNav("execution_packages");
+    const startedAt = new Date();
+    let lastEventID = "0";
+    let pollErrorShown = false;
+    const pollProjectID = workspace.id;
+    const pollRuntimeEvents = async () => {
+      const events = await bridge.executionEvents(pollProjectID, lastEventID);
+      if (events.ok && events.data) {
+        const numericIDs = events.data.map((entry) => Number(entry.id)).filter((id) => Number.isFinite(id));
+        if (numericIDs.length > 0) {
+          lastEventID = String(Math.max(Number(lastEventID) || 0, ...numericIDs));
+        }
+        if (events.data.length > 0) {
+          setWorkspace((current) => appendRuntimeLogs(current, events.data ?? []));
+        }
+      } else if (!pollErrorShown) {
+        pollErrorShown = true;
+        setWorkspace((current) => appendRuntimeLog(current, {
+          level: "warning",
+          message: "运行日志轮询不可用",
+          detail: events.error ?? "无法读取本地 Dev Bridge 运行事件。",
+        }));
+      }
+    };
+    setWorkspace((current) => appendRuntimeLog(current, {
+      level: "info",
+      message: "开始生成执行包",
+      detail: "正在调用本地 Dev Bridge：需求读取 -> 代码摘要 -> 产品理解 -> 执行图 -> TS 脚本包。",
+    }));
+    setWorkspace((current) => {
+      const { lastError: _lastError, ...cloudRun } = current.cloudRun;
+      return {
+        ...current,
+        stage: "package_approval",
+        cloudRun: {
+          ...cloudRun,
+          currentStep: "本地 Agent 正在生成执行包",
+        },
+      };
+    });
+    await pollRuntimeEvents();
+    const poller = window.setInterval(() => {
+      void pollRuntimeEvents();
+    }, 1500);
+    try {
+      const result = await bridge.buildExecutionPackagePreview(workspace);
+      window.clearInterval(poller);
+      await pollRuntimeEvents();
+      if (result.ok && result.data) {
+        setWorkspace((current) => appendRuntimeLog(mergeWorkspaceRuntimeLogs(result.data!, current), {
+          level: "success",
+          message: "执行包生成完成",
+          detail: `耗时 ${Math.round((Date.now() - startedAt.getTime()) / 1000)} 秒，已进入执行包审批。`,
+        }));
+        setActiveNav("execution_packages");
+      } else {
+        const message = result.error ?? "执行包生成失败";
+        setWorkspace((current) => appendRuntimeLog({
+          ...current,
+          cloudRun: {
+            ...current.cloudRun,
+            lastError: message,
+            currentStep: message,
+          },
+        }, {
+          level: "error",
+          message: "执行包生成失败",
+          detail: message,
+        }));
+        setActiveNav("execution_packages");
+      }
+    } finally {
+      window.clearInterval(poller);
+      setIsGeneratingPackage(false);
     }
-    setIsGeneratingPackage(false);
   }
 
   async function runModelDiagnostics() {
@@ -222,6 +292,43 @@ export function App() {
       </main>
     </div>
   );
+}
+
+function appendRuntimeLog(workspace: ProjectWorkspaceView, entry: Omit<RuntimeLogEntry, "id" | "time">): ProjectWorkspaceView {
+  const logEntry: RuntimeLogEntry = {
+    id: `log_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+    ...entry,
+  };
+  return appendRuntimeLogs(workspace, [logEntry]);
+}
+
+function appendRuntimeLogs(workspace: ProjectWorkspaceView, entries: RuntimeLogEntry[]): ProjectWorkspaceView {
+  if (entries.length === 0) {
+    return workspace;
+  }
+  const seen = new Set<string>();
+  const runtimeLogs = [...entries, ...(workspace.runtimeLogs ?? [])].filter((entry) => {
+    if (seen.has(entry.id)) {
+      return false;
+    }
+    seen.add(entry.id);
+    return true;
+  }).slice(0, 50);
+  return {
+    ...workspace,
+    runtimeLogs,
+  };
+}
+
+function mergeWorkspaceRuntimeLogs(next: ProjectWorkspaceView, current: ProjectWorkspaceView): ProjectWorkspaceView {
+  const lastError = next.cloudRun.lastError ?? current.cloudRun.lastError;
+  const merged: ProjectWorkspaceView = {
+    ...next,
+    cloudRun: lastError ? { ...next.cloudRun, lastError } : next.cloudRun,
+  };
+  const runtimeLogs = current.runtimeLogs ?? next.runtimeLogs;
+  return runtimeLogs ? { ...merged, runtimeLogs } : merged;
 }
 
 function ProjectHeader({
@@ -743,6 +850,7 @@ function PackageApproval({
           ))}
         </div>
       </div>
+      <RuntimeLogPanel workspace={workspace} />
       <CloudRunPanel workspace={workspace} />
       <ScriptBundleReview workspace={workspace} />
       {workspace.cloudRun.failureDiagnostic ? (
@@ -793,6 +901,32 @@ function PackageApproval({
         </button>
       </div>
     </div>
+  );
+}
+
+function RuntimeLogPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  const logs = workspace.runtimeLogs ?? [];
+  const lastError = workspace.cloudRun.lastError;
+  if (logs.length === 0 && !lastError) {
+    return null;
+  }
+  return (
+    <section className="table-section">
+      <SectionTitle title="本地运行日志" meta={lastError ? "存在错误" : `${logs.length} 条`} />
+      {lastError ? <div className="error-banner">{lastError}</div> : null}
+      <div className="runtime-log-list">
+        {logs.map((entry) => (
+          <div key={entry.id} className={`runtime-log-row ${entry.level}`}>
+            <span>{entry.time}</span>
+            <strong>{entry.node ? `${entry.node} · ${entry.message}` : entry.message}</strong>
+            <small>
+              {entry.detail ?? ""}
+              {typeof entry.elapsedMS === "number" ? `${entry.detail ? " · " : ""}${entry.elapsedMS}ms` : ""}
+            </small>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

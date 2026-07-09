@@ -324,6 +324,46 @@ describe("desktop bridge contract", () => {
     expect(JSON.stringify(result.data)).not.toMatch(/sk-|Authorization/i);
   });
 
+  it("maps local execution events into runtime logs", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        data: [
+          {
+            id: 12,
+            project_id: "project_real",
+            level: "success",
+            node: "CodeRead",
+            message: "CodeReaderAgent 完成只读代码摘要",
+            detail: "snapshots=1 files=119",
+            elapsed_ms: 10021,
+            created_at: "2026-07-09T10:26:22Z",
+          },
+        ],
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bridge = createLocalBridgeClient();
+    const result = await bridge.executionEvents("project_real", "10");
+
+    expect(result.ok).toBe(true);
+    expect(result.data?.[0]).toMatchObject({
+      id: "12",
+      level: "success",
+      node: "CodeRead",
+      message: "CodeReaderAgent 完成只读代码摘要",
+      detail: "snapshots=1 files=119",
+      elapsedMS: 10021,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/desktop/projects/project_real/execution-events?after=10",
+      expect.objectContaining({ headers: expect.objectContaining({ "Content-Type": "application/json" }) }),
+    );
+  });
+
   it("uses same-origin local bridge by default so the demo stays on port 3000", async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
