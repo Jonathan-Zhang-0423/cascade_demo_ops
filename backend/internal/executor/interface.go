@@ -25,15 +25,29 @@ type RecordResult struct {
 }
 
 type RenderRequest struct {
-	Graph          *model.DemoWorkflowGraph `json:"graph"`
-	RecordingPaths []string                 `json:"recording_paths"`
-	OutputDir      string                   `json:"output_dir"`
-	DurationSec    int                      `json:"duration_sec"`
+	Graph                      *model.DemoWorkflowGraph      `json:"graph,omitempty"`
+	RecordingPaths             []string                      `json:"recording_paths,omitempty"`
+	OutputDir                  string                        `json:"output_dir,omitempty"`
+	DurationSec                int                           `json:"duration_sec,omitempty"`
+	ExecutionTrace             *model.ExecutionTrace         `json:"execution_trace,omitempty"`
+	ExecutionTracePath         string                        `json:"execution_trace_path,omitempty"`
+	GeneratedAssets            []model.ArtifactRef           `json:"generated_assets,omitempty"`
+	ArtifactManifestPath       string                        `json:"artifact_manifest_path,omitempty"`
+	RecordingResultPackage     *model.RecordingResultPackage `json:"recording_result_package,omitempty"`
+	RecordingResultPackagePath string                        `json:"recording_result_package_path,omitempty"`
+	EditPlan                   *model.DemoEditPlan           `json:"edit_plan,omitempty"`
 }
 
 type RenderResult struct {
-	VideoPath          string `json:"video_path"`
-	StepByStepDocsPath string `json:"step_by_step_docs_path"`
+	VideoPath                string                              `json:"video_path"`
+	StepByStepDocsPath       string                              `json:"step_by_step_docs_path"`
+	AssetTimelineCatalogPath string                              `json:"asset_timeline_catalog_path,omitempty"`
+	DemoEditPlanPath         string                              `json:"demo_edit_plan_path,omitempty"`
+	ValidationReportPath     string                              `json:"validation_report_path,omitempty"`
+	RenderManifestPath       string                              `json:"render_manifest_path,omitempty"`
+	AssetTimelineCatalog     *model.AssetTimelineCatalog         `json:"asset_timeline_catalog,omitempty"`
+	DemoEditPlan             *model.DemoEditPlan                 `json:"demo_edit_plan,omitempty"`
+	ValidationReport         *model.DemoEditPlanValidationReport `json:"validation_report,omitempty"`
 }
 
 type Viewport struct {
