@@ -28,6 +28,47 @@ const (
 	DatabaseSQLite   DatabaseDialect = "sqlite"
 )
 
+type ModelProvider string
+
+const (
+	ModelProviderGLM      ModelProvider = "glm"
+	ModelProviderKimi     ModelProvider = "kimi"
+	ModelProviderMinimax  ModelProvider = "minimax"
+	ModelProviderSeedance ModelProvider = "seedance"
+	ModelProviderDoubao   ModelProvider = "doubao"
+	ModelProviderDeepSeek ModelProvider = "deepseek"
+)
+
+type ModelProviderCredential struct {
+	Provider           ModelProvider
+	APIKey             string
+	APIKeyEnv          string
+	APIKeySourceEnv    string
+	APIKeyFallbackEnvs []string
+	BaseURL            string
+	BaseURLEnv         string
+	DefaultModel       string
+	DefaultModelEnv    string
+	Enabled            bool
+}
+
+type ModelTask string
+
+const (
+	ModelTaskPlanning                ModelTask = "planning"
+	ModelTaskCodeReading             ModelTask = "code_reading"
+	ModelTaskMultimodalUnderstanding ModelTask = "multimodal_understanding"
+	ModelTaskVideoOperation          ModelTask = "video_operation"
+)
+
+type ModelTaskRoute struct {
+	Task             ModelTask
+	Provider         ModelProvider
+	Model            string
+	ProviderOverride string
+	ModelOverride    string
+}
+
 type AppRuntimeConfig struct {
 	Profile              RuntimeProfile
 	Environment          string
@@ -44,6 +85,8 @@ type AppRuntimeConfig struct {
 	DevRepoRoot          string
 	SidecarPaths         map[string]string
 	NodeBinaryPath       string
+	ModelProviders       map[ModelProvider]ModelProviderCredential
+	ModelTaskRoutes      map[ModelTask]ModelTaskRoute
 }
 
 type DesktopResourceManifest struct {
@@ -100,10 +143,101 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 		SidecarPaths: map[string]string{
 			"video-worker": os.Getenv("NODE_WORKER_PATH"),
 		},
-		NodeBinaryPath: os.Getenv("NODE_BINARY_PATH"),
+		NodeBinaryPath:  os.Getenv("NODE_BINARY_PATH"),
+		ModelProviders:  modelProviderCredentialsFromEnv(),
+		ModelTaskRoutes: modelTaskRoutesFromEnv(),
 	}
 	applyDesktopResourceManifest(&cfg)
 	return cfg, nil
+}
+
+func modelTaskRoutesFromEnv() map[ModelTask]ModelTaskRoute {
+	defaults := []ModelTaskRoute{
+		{
+			Task:             ModelTaskPlanning,
+			Provider:         ModelProviderKimi,
+			Model:            "kimi-2.5",
+			ProviderOverride: "CASCADE_PLANNING_PROVIDER",
+			ModelOverride:    "CASCADE_PLANNING_MODEL",
+		},
+		{
+			Task:             ModelTaskCodeReading,
+			Provider:         ModelProviderGLM,
+			Model:            "glm-5.2",
+			ProviderOverride: "CASCADE_CODE_READING_PROVIDER",
+			ModelOverride:    "CASCADE_CODE_READING_MODEL",
+		},
+		{
+			Task:             ModelTaskMultimodalUnderstanding,
+			Provider:         ModelProviderMinimax,
+			Model:            "minimax-m3",
+			ProviderOverride: "CASCADE_MULTIMODAL_PROVIDER",
+			ModelOverride:    "CASCADE_MULTIMODAL_MODEL",
+		},
+		{
+			Task:             ModelTaskVideoOperation,
+			Provider:         ModelProviderSeedance,
+			Model:            "seedance-2.0",
+			ProviderOverride: "CASCADE_VIDEO_PROVIDER",
+			ModelOverride:    "CASCADE_VIDEO_MODEL",
+		},
+	}
+	routes := make(map[ModelTask]ModelTaskRoute, len(defaults))
+	for _, route := range defaults {
+		if provider := os.Getenv(route.ProviderOverride); provider != "" {
+			route.Provider = ModelProvider(provider)
+		}
+		if modelName := os.Getenv(route.ModelOverride); modelName != "" {
+			route.Model = modelName
+		}
+		routes[route.Task] = route
+	}
+	return routes
+}
+
+func modelProviderCredentialsFromEnv() map[ModelProvider]ModelProviderCredential {
+	const (
+		defaultGLMBaseURL      = "https://open.bigmodel.cn/api/paas/v4"
+		defaultKimiBaseURL     = "https://api.moonshot.cn/v1"
+		defaultMinimaxBaseURL  = "https://api.minimaxi.com/v1"
+		defaultArkBaseURL      = "https://ark.cn-beijing.volces.com/api/v3"
+		defaultDeepSeekBaseURL = "https://api.deepseek.com"
+	)
+	specs := []struct {
+		provider           ModelProvider
+		apiKeyEnv          string
+		apiKeyFallbackEnvs []string
+		baseURLEnv         string
+		fallbackBaseURL    string
+		defaultModelEnv    string
+		fallbackModel      string
+	}{
+		{ModelProviderGLM, "GLM_API_KEY", nil, "GLM_BASE_URL", defaultGLMBaseURL, "GLM_MODEL", "glm-5.2"},
+		{ModelProviderKimi, "KIMI_API_KEY", nil, "KIMI_BASE_URL", defaultKimiBaseURL, "KIMI_MODEL", "kimi-2.5"},
+		{ModelProviderMinimax, "MINIMAX_API_KEY", nil, "MINIMAX_BASE_URL", defaultMinimaxBaseURL, "MINIMAX_MODEL", "minimax-m3"},
+		{ModelProviderSeedance, "SEEDANCE_API_KEY", []string{"DOUBAO_API_KEY", "ARK_API_KEY"}, "SEEDANCE_BASE_URL", defaultArkBaseURL, "SEEDANCE_MODEL", "seedance-2.0"},
+		{ModelProviderDoubao, "DOUBAO_API_KEY", []string{"ARK_API_KEY"}, "DOUBAO_BASE_URL", defaultArkBaseURL, "DOUBAO_MODEL", ""},
+		{ModelProviderDeepSeek, "DEEPSEEK_API_KEY", nil, "DEEPSEEK_BASE_URL", defaultDeepSeekBaseURL, "DEEPSEEK_MODEL", ""},
+	}
+	providers := make(map[ModelProvider]ModelProviderCredential, len(specs))
+	for _, spec := range specs {
+		apiKey, apiKeySourceEnv := envWithFallback(spec.apiKeyEnv, spec.apiKeyFallbackEnvs...)
+		baseURL := envOrDefault(spec.baseURLEnv, spec.fallbackBaseURL)
+		defaultModel := envOrDefault(spec.defaultModelEnv, spec.fallbackModel)
+		providers[spec.provider] = ModelProviderCredential{
+			Provider:           spec.provider,
+			APIKey:             apiKey,
+			APIKeyEnv:          spec.apiKeyEnv,
+			APIKeySourceEnv:    apiKeySourceEnv,
+			APIKeyFallbackEnvs: append([]string{}, spec.apiKeyFallbackEnvs...),
+			BaseURL:            baseURL,
+			BaseURLEnv:         spec.baseURLEnv,
+			DefaultModel:       defaultModel,
+			DefaultModelEnv:    spec.defaultModelEnv,
+			Enabled:            apiKey != "",
+		}
+	}
+	return providers
 }
 
 func DefaultUserDataRoot(appName string) string {
@@ -255,4 +389,16 @@ func envOrDefault(name string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envWithFallback(primary string, fallbacks ...string) (string, string) {
+	if value := os.Getenv(primary); value != "" {
+		return value, primary
+	}
+	for _, fallback := range fallbacks {
+		if value := os.Getenv(fallback); value != "" {
+			return value, fallback
+		}
+	}
+	return "", ""
 }

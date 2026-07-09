@@ -99,6 +99,27 @@ func TestDesktopBridgeRuntimeConfigIsRedacted(t *testing.T) {
 		DevRepoRoot:     root,
 		SidecarPaths:    map[string]string{"video-worker": filepath.Join(root, "worker", "index.js")},
 		NodeBinaryPath:  filepath.Join(root, "node"),
+		ModelProviders: map[config.ModelProvider]config.ModelProviderCredential{
+			config.ModelProviderGLM: {
+				Provider:        config.ModelProviderGLM,
+				APIKey:          "glm-secret-key",
+				APIKeyEnv:       "GLM_API_KEY",
+				BaseURL:         "https://glm.example",
+				BaseURLEnv:      "GLM_BASE_URL",
+				DefaultModel:    "glm-5.2",
+				DefaultModelEnv: "GLM_MODEL",
+				Enabled:         true,
+			},
+		},
+		ModelTaskRoutes: map[config.ModelTask]config.ModelTaskRoute{
+			config.ModelTaskCodeReading: {
+				Task:             config.ModelTaskCodeReading,
+				Provider:         config.ModelProviderGLM,
+				Model:            "glm-5.2",
+				ProviderOverride: "CASCADE_CODE_READING_PROVIDER",
+				ModelOverride:    "CASCADE_CODE_READING_MODEL",
+			},
+		},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +129,7 @@ func TestDesktopBridgeRuntimeConfigIsRedacted(t *testing.T) {
 		t.Fatalf("RuntimeConfig error: %s", response.Error)
 	}
 	payload := string(response.Data)
-	if strings.Contains(payload, "secret") || strings.Contains(payload, root) {
+	if strings.Contains(payload, "secret") || strings.Contains(payload, "glm-secret-key") || strings.Contains(payload, "https://glm.example") || strings.Contains(payload, root) {
 		t.Fatalf("runtime config leaked sensitive values or local paths: %s", payload)
 	}
 	var view RuntimeConfigView
@@ -117,6 +138,12 @@ func TestDesktopBridgeRuntimeConfigIsRedacted(t *testing.T) {
 	}
 	if !view.DatabaseConfigured || !view.NodeRuntimeConfigured || !view.Sidecars["video-worker"] {
 		t.Fatalf("unexpected runtime view: %+v", view)
+	}
+	if !view.ModelProviders["glm"].Configured || view.ModelProviders["glm"].APIKeyEnv != "GLM_API_KEY" {
+		t.Fatalf("expected redacted glm provider state: %+v", view.ModelProviders)
+	}
+	if view.ModelTaskRoutes["code_reading"].Provider != "glm" || view.ModelTaskRoutes["code_reading"].Model != "glm-5.2" {
+		t.Fatalf("expected code reading model route in runtime view: %+v", view.ModelTaskRoutes)
 	}
 }
 

@@ -35,6 +35,7 @@ func TestRuntimeConfigDefaultsToDevDesktopSQLite(t *testing.T) {
 }
 
 func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
+	clearModelProviderEnv(t)
 	t.Setenv("CASCADE_PROFILE", "cloud")
 	t.Setenv("APP_MODE", "web")
 	t.Setenv("APP_ENV", "staging")
@@ -43,6 +44,13 @@ func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
 	t.Setenv("CASCADE_DATA_ROOT", filepath.Join("tmp", "data"))
 	t.Setenv("CASCADE_ARTIFACT_ROOT", filepath.Join("tmp", "artifacts"))
 	t.Setenv("NODE_WORKER_PATH", filepath.Join("sidecars", "video-worker", "dist", "index.js"))
+	t.Setenv("GLM_API_KEY", "glm-test-key")
+	t.Setenv("KIMI_API_KEY", "kimi-test-key")
+	t.Setenv("MINIMAX_API_KEY", "minimax-test-key")
+	t.Setenv("SEEDANCE_API_KEY", "seedance-test-key")
+	t.Setenv("DOUBAO_API_KEY", "doubao-test-key")
+	t.Setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
+	t.Setenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
 	if err != nil {
@@ -59,6 +67,144 @@ func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
 	}
 	if cfg.SidecarPaths["video-worker"] == "" {
 		t.Fatal("expected video-worker sidecar override")
+	}
+	for _, provider := range []ModelProvider{ModelProviderGLM, ModelProviderKimi, ModelProviderMinimax, ModelProviderSeedance, ModelProviderDoubao, ModelProviderDeepSeek} {
+		credential := cfg.ModelProviders[provider]
+		if !credential.Enabled || credential.APIKey == "" || credential.APIKeyEnv == "" {
+			t.Fatalf("expected %s provider credential placeholder to be enabled: %+v", provider, credential)
+		}
+	}
+	if cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel != "deepseek-chat" {
+		t.Fatalf("deepseek model = %q", cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel)
+	}
+}
+
+func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
+	clearModelProviderEnv(t)
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := map[ModelTask]ModelTaskRoute{
+		ModelTaskPlanning:                {Provider: ModelProviderKimi, Model: "kimi-2.5"},
+		ModelTaskCodeReading:             {Provider: ModelProviderGLM, Model: "glm-5.2"},
+		ModelTaskMultimodalUnderstanding: {Provider: ModelProviderMinimax, Model: "minimax-m3"},
+		ModelTaskVideoOperation:          {Provider: ModelProviderSeedance, Model: "seedance-2.0"},
+	}
+	for task, want := range expected {
+		got := cfg.ModelTaskRoutes[task]
+		if got.Provider != want.Provider || got.Model != want.Model {
+			t.Fatalf("%s route = %+v, want provider=%s model=%s", task, got, want.Provider, want.Model)
+		}
+	}
+	if cfg.ModelProviders[ModelProviderKimi].DefaultModel != "kimi-2.5" {
+		t.Fatalf("kimi default model = %q", cfg.ModelProviders[ModelProviderKimi].DefaultModel)
+	}
+	if cfg.ModelProviders[ModelProviderGLM].DefaultModel != "glm-5.2" {
+		t.Fatalf("glm default model = %q", cfg.ModelProviders[ModelProviderGLM].DefaultModel)
+	}
+	if cfg.ModelProviders[ModelProviderMinimax].DefaultModel != "minimax-m3" {
+		t.Fatalf("minimax default model = %q", cfg.ModelProviders[ModelProviderMinimax].DefaultModel)
+	}
+	if cfg.ModelProviders[ModelProviderSeedance].DefaultModel != "seedance-2.0" {
+		t.Fatalf("seedance default model = %q", cfg.ModelProviders[ModelProviderSeedance].DefaultModel)
+	}
+}
+
+func TestRuntimeConfigDefaultsOfficialModelProviderBaseURLs(t *testing.T) {
+	clearModelProviderEnv(t)
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := map[ModelProvider]string{
+		ModelProviderGLM:      "https://open.bigmodel.cn/api/paas/v4",
+		ModelProviderKimi:     "https://api.moonshot.cn/v1",
+		ModelProviderMinimax:  "https://api.minimaxi.com/v1",
+		ModelProviderSeedance: "https://ark.cn-beijing.volces.com/api/v3",
+		ModelProviderDoubao:   "https://ark.cn-beijing.volces.com/api/v3",
+		ModelProviderDeepSeek: "https://api.deepseek.com",
+	}
+	for provider, want := range expected {
+		if got := cfg.ModelProviders[provider].BaseURL; got != want {
+			t.Fatalf("%s base url = %q, want %q", provider, got, want)
+		}
+	}
+}
+
+func TestRuntimeConfigAllowsModelTaskRouteOverrides(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("CASCADE_PLANNING_PROVIDER", "deepseek")
+	t.Setenv("CASCADE_PLANNING_MODEL", "deepseek-reasoner")
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := cfg.ModelTaskRoutes[ModelTaskPlanning]
+	if route.Provider != ModelProviderDeepSeek || route.Model != "deepseek-reasoner" {
+		t.Fatalf("planning override route = %+v", route)
+	}
+}
+
+func TestRuntimeConfigAlwaysReservesDomesticProviderSlots(t *testing.T) {
+	clearModelProviderEnv(t)
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := map[ModelProvider]string{
+		ModelProviderGLM:      "GLM_API_KEY",
+		ModelProviderKimi:     "KIMI_API_KEY",
+		ModelProviderMinimax:  "MINIMAX_API_KEY",
+		ModelProviderSeedance: "SEEDANCE_API_KEY",
+		ModelProviderDoubao:   "DOUBAO_API_KEY",
+		ModelProviderDeepSeek: "DEEPSEEK_API_KEY",
+	}
+	for provider, envName := range expected {
+		credential, ok := cfg.ModelProviders[provider]
+		if !ok {
+			t.Fatalf("missing provider slot %s", provider)
+		}
+		if credential.APIKeyEnv != envName || credential.Enabled || credential.APIKey != "" {
+			t.Fatalf("unexpected provider placeholder for %s: %+v", provider, credential)
+		}
+	}
+	if cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel != "" {
+		t.Fatalf("deepseek default should be empty until explicitly used, got %q", cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel)
+	}
+}
+
+func TestRuntimeConfigSeedanceCanUseDoubaoOrArkKeyFallback(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("SEEDANCE_API_KEY", "")
+	t.Setenv("DOUBAO_API_KEY", "doubao-key")
+	t.Setenv("ARK_API_KEY", "ark-key")
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedance := cfg.ModelProviders[ModelProviderSeedance]
+	if !seedance.Enabled || seedance.APIKey != "doubao-key" || seedance.APIKeySourceEnv != "DOUBAO_API_KEY" {
+		t.Fatalf("seedance should use doubao fallback key: %+v", seedance)
+	}
+	doubao := cfg.ModelProviders[ModelProviderDoubao]
+	if !doubao.Enabled || doubao.APIKey != "doubao-key" || doubao.APIKeySourceEnv != "DOUBAO_API_KEY" {
+		t.Fatalf("doubao should use primary doubao key: %+v", doubao)
+	}
+
+	t.Setenv("DOUBAO_API_KEY", "")
+	cfg, err = RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ModelProviders[ModelProviderSeedance].APIKeySourceEnv; got != "ARK_API_KEY" {
+		t.Fatalf("seedance fallback source = %q, want ARK_API_KEY", got)
+	}
+	if got := cfg.ModelProviders[ModelProviderDoubao].APIKeySourceEnv; got != "ARK_API_KEY" {
+		t.Fatalf("doubao fallback source = %q, want ARK_API_KEY", got)
 	}
 }
 
@@ -166,5 +312,40 @@ func TestDefaultUserDataRootForDesktopPlatforms(t *testing.T) {
 		if got := DefaultUserDataRootFor(goos, home, AppName); got != want {
 			t.Fatalf("%s root = %q, want %q", goos, got, want)
 		}
+	}
+}
+
+func clearModelProviderEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"GLM_API_KEY",
+		"GLM_BASE_URL",
+		"GLM_MODEL",
+		"KIMI_API_KEY",
+		"KIMI_BASE_URL",
+		"KIMI_MODEL",
+		"MINIMAX_API_KEY",
+		"MINIMAX_BASE_URL",
+		"MINIMAX_MODEL",
+		"SEEDANCE_API_KEY",
+		"SEEDANCE_BASE_URL",
+		"SEEDANCE_MODEL",
+		"DOUBAO_API_KEY",
+		"DOUBAO_BASE_URL",
+		"DOUBAO_MODEL",
+		"ARK_API_KEY",
+		"DEEPSEEK_API_KEY",
+		"DEEPSEEK_BASE_URL",
+		"DEEPSEEK_MODEL",
+		"CASCADE_PLANNING_PROVIDER",
+		"CASCADE_PLANNING_MODEL",
+		"CASCADE_CODE_READING_PROVIDER",
+		"CASCADE_CODE_READING_MODEL",
+		"CASCADE_MULTIMODAL_PROVIDER",
+		"CASCADE_MULTIMODAL_MODEL",
+		"CASCADE_VIDEO_PROVIDER",
+		"CASCADE_VIDEO_MODEL",
+	} {
+		t.Setenv(name, "")
 	}
 }

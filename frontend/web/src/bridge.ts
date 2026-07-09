@@ -38,6 +38,52 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         localDataConfigured: true,
         resourceManifestLoaded: true,
         sidecars: { "video-worker": true },
+        modelProviders: {
+          glm: { apiKeyEnv: "GLM_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: true },
+          kimi: { apiKeyEnv: "KIMI_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: true },
+          minimax: { apiKeyEnv: "MINIMAX_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: true },
+          seedance: {
+            apiKeyEnv: "SEEDANCE_API_KEY",
+            apiKeyFallbackEnvs: ["DOUBAO_API_KEY", "ARK_API_KEY"],
+            configured: false,
+            baseURLConfigured: true,
+            defaultModelConfigured: true,
+          },
+          doubao: {
+            apiKeyEnv: "DOUBAO_API_KEY",
+            apiKeyFallbackEnvs: ["ARK_API_KEY"],
+            configured: false,
+            baseURLConfigured: true,
+            defaultModelConfigured: false,
+          },
+          deepseek: { apiKeyEnv: "DEEPSEEK_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: false },
+        },
+        modelTaskRoutes: {
+          planning: {
+            provider: "kimi",
+            model: "kimi-2.5",
+            providerOverride: "CASCADE_PLANNING_PROVIDER",
+            modelOverride: "CASCADE_PLANNING_MODEL",
+          },
+          code_reading: {
+            provider: "glm",
+            model: "glm-5.2",
+            providerOverride: "CASCADE_CODE_READING_PROVIDER",
+            modelOverride: "CASCADE_CODE_READING_MODEL",
+          },
+          multimodal_understanding: {
+            provider: "minimax",
+            model: "minimax-m3",
+            providerOverride: "CASCADE_MULTIMODAL_PROVIDER",
+            modelOverride: "CASCADE_MULTIMODAL_MODEL",
+          },
+          video_operation: {
+            provider: "seedance",
+            model: "seedance-2.0",
+            providerOverride: "CASCADE_VIDEO_PROVIDER",
+            modelOverride: "CASCADE_VIDEO_MODEL",
+          },
+        },
       });
     },
     async createProject(scenarioID) {

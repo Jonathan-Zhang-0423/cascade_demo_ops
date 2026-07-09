@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { GraphNode } from "../../src/types/workflowGraph";
 import { createMockBridgeClient } from "./bridge";
 import type {
 	ApprovalChecklistState,
 	NavSection,
 	ProjectWorkspaceView,
+	RuntimeHealthView,
 	ScenarioID,
 	WorkspaceStage,
 } from "./domain";
@@ -34,12 +35,25 @@ export function App() {
 	const bridge = useMemo(() => createMockBridgeClient(), []);
 	const [activeNav, setActiveNav] = useState<NavSection>("projects");
 	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createWorkspace("product_demo"));
+  const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthView | undefined>();
   const [checklist, setChecklist] = useState<ApprovalChecklistState>(initialChecklist);
   const [selectedNodeID, setSelectedNodeID] = useState(workspace.planReview.graph.nodes[0]?.id ?? "");
 
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
   const blockedReasons = packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections);
   const canUpload = canUploadExecutionPackage(workspace.packagePreview, checklist, workspace.sourceConnections);
+
+  useEffect(() => {
+    let mounted = true;
+    bridge.runtimeHealth().then((result) => {
+      if (mounted && result.ok && result.data) {
+        setRuntimeHealth(result.data);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [bridge]);
 
   function patchWorkspace(patch: Partial<ProjectWorkspaceView>) {
     setWorkspace((current) => ({ ...current, ...patch }));
@@ -158,7 +172,7 @@ export function App() {
               />
             ) : null}
             {activeNav === "assets" ? <AssetReview workspace={workspace} onApprove={approveAssets} /> : null}
-            {activeNav === "settings" ? <SettingsPanel workspace={workspace} /> : null}
+            {activeNav === "settings" ? <SettingsPanel workspace={workspace} {...(runtimeHealth ? { runtimeHealth } : {})} /> : null}
           </section>
           <Inspector workspace={workspace} selectedNode={selectedNode} blockedReasons={blockedReasons} />
         </div>
@@ -541,7 +555,21 @@ function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView
   );
 }
 
-function SettingsPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+function SettingsPanel({ workspace, runtimeHealth }: { workspace: ProjectWorkspaceView; runtimeHealth?: RuntimeHealthView }) {
+  const providerRows = [
+    ["GLM", "glm"],
+    ["Kimi", "kimi"],
+    ["MiniMax", "minimax"],
+    ["Seedance", "seedance"],
+    ["豆包 / Ark", "doubao"],
+    ["DeepSeek", "deepseek"],
+  ] as const;
+  const routeRows = [
+    ["计划生成", "Kimi", "kimi-2.5"],
+    ["代码阅读", "GLM", "glm-5.2"],
+    ["多模态理解", "Minimax", "minimax-m3"],
+    ["视频操作", "Seedance", "seedance-2.0"],
+  ];
   return (
     <div className="section-stack">
       <SectionTitle title="设置" meta="运行时正常" />
@@ -551,6 +579,59 @@ function SettingsPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
         <Fact label="允许域名" value={workspace.planReview.allowedDomains.join(", ")} />
         <Fact label="禁止页面" value={workspace.planReview.forbiddenPages.join(", ")} />
       </div>
+      <section className="table-section">
+        <SectionTitle title="模型供应商凭据" meta="仅显示占位状态" />
+        <table>
+          <thead>
+            <tr>
+              <th>供应商</th>
+              <th>API Key 变量</th>
+              <th>Fallback</th>
+              <th>Base URL</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            {providerRows.map(([name, providerKey]) => {
+              const status = runtimeHealth?.modelProviders[providerKey];
+              const fallback = status?.apiKeyFallbackEnvs?.join(", ") || "无";
+              const source = status?.apiKeySourceEnv ? `使用 ${status.apiKeySourceEnv}` : "待配置";
+              return (
+                <tr key={providerKey}>
+                  <td>{name}</td>
+                  <td>{status?.apiKeyEnv ?? providerKey}</td>
+                  <td>{fallback}</td>
+                  <td>{status?.baseURLConfigured ? "已预设" : "待配置"}</td>
+                  <td>
+                    <StatusPill label={status?.configured ? source : "待配置"} tone={status?.configured ? "green" : "neutral"} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </section>
+      <section className="table-section">
+        <SectionTitle title="默认模型路由" meta="可通过环境变量覆盖" />
+        <table>
+          <thead>
+            <tr>
+              <th>任务</th>
+              <th>供应商</th>
+              <th>模型</th>
+            </tr>
+          </thead>
+          <tbody>
+            {routeRows.map(([task, provider, modelName]) => (
+              <tr key={task}>
+                <td>{task}</td>
+                <td>{provider}</td>
+                <td>{modelName}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
     </div>
   );
 }

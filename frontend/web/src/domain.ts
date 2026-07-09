@@ -131,6 +131,24 @@ export type RuntimeHealthView = {
   localDataConfigured: boolean;
   resourceManifestLoaded: boolean;
   sidecars: Record<string, boolean>;
+  modelProviders: Record<string, ProviderCredentialStatus>;
+  modelTaskRoutes: Record<string, ModelTaskRouteStatus>;
+};
+
+export type ProviderCredentialStatus = {
+  apiKeyEnv: string;
+  apiKeySourceEnv?: string;
+  apiKeyFallbackEnvs?: string[];
+  configured: boolean;
+  baseURLConfigured: boolean;
+  defaultModelConfigured: boolean;
+};
+
+export type ModelTaskRouteStatus = {
+  provider: string;
+  model: string;
+  providerOverride: string;
+  modelOverride: string;
 };
 
 export type ApprovalChecklistState = {
