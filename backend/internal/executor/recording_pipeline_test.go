@@ -117,6 +117,63 @@ func TestRunClientExecutionRecordingAndRenderStopsBeforeRenderOnRecordFailure(t 
 	}
 }
 
+func TestRunClientExecutionRecordingAndRenderReturnsFailedResultPackageWithoutRender(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	now := time.Date(2026, 7, 9, 20, 45, 0, 0, time.UTC)
+	service := &fakeRecordingRenderService{
+		recordResult: RecordResult{
+			GeneratedAssets: []model.ArtifactRef{{
+				ID:           "artifact_failure_screenshot_001",
+				Kind:         "failure_screenshot",
+				URI:          "file:///tmp/failure-step-001.png",
+				MimeType:     "image/png",
+				SHA256:       "failure_hash",
+				Sensitive:    true,
+				SourceNodeID: "node_start",
+				CreatedAt:    now,
+				Metadata:     map[string]any{"asset_role": "failure_screenshot", "include_in_demo": false},
+			}, {
+				ID:        "artifact_browser_trace",
+				Kind:      "browser_trace",
+				URI:       "file:///tmp/trace.zip",
+				MimeType:  "application/zip",
+				SHA256:    "trace_hash",
+				CreatedAt: now,
+			}},
+			StepResults: []model.StepResult{{NodeID: "node_start", Status: "failed", ObservedState: "Timeout waiting for selector"}},
+			FailureDiagnostic: &model.ScriptFailureDiagnostic{
+				ID:              "diag_node_start",
+				SchemaVersion:   model.ScriptFailureDiagnosticSchemaVersion,
+				FailedNodeID:    "node_start",
+				Error:           model.AgentError{Code: "selector_timeout", Message: "Timeout waiting for selector", Retryable: true},
+				CurrentURL:      "https://app.example.com/dashboard",
+				PageTitle:       "Dashboard",
+				RedactionReport: model.DiagnosticRedactionReport{Applied: true, FullHTMLIncluded: false},
+				CapturedAt:      now,
+			},
+			StartedAt:   now.Add(-time.Second),
+			CompletedAt: now,
+		},
+	}
+
+	result, err := RunClientExecutionRecordingAndRender(t.Context(), service, RecordingRenderPipelineRequest{
+		SourcePackage:      &pkg,
+		CloudJobID:         "job_1",
+		RecordingOutputDir: "artifacts/recording/job_1",
+		RenderOutputDir:    "artifacts/render/job_1",
+		ResultCreatedAt:    now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(service.calls) != 1 || service.calls[0] != "record" {
+		t.Fatalf("failed recording should stop before render, got calls %+v", service.calls)
+	}
+	if result.RecordingResultPackage.Status != model.RecordingResultStatusFailed || result.RecordingResultPackage.FailureDiagnostic == nil {
+		t.Fatalf("expected failed recording result package, got %+v", result.RecordingResultPackage)
+	}
+}
+
 func TestRunClientExecutionRecordingAndRenderRejectsMissingRenderOutput(t *testing.T) {
 	pkg := sampleClientExecutionPackageForExecutorTest(t)
 	service := &fakeRecordingRenderService{}

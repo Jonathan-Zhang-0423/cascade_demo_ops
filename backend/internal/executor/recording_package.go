@@ -114,10 +114,212 @@ func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 		},
 		CreatedAt: createdAt,
 	}
+	if result.FailureDiagnostic != nil || hasFailedStep(stepResults) {
+		applyFailureRecordingResult(source, &recordingResult, result.FailureDiagnostic, stepResults, artifacts, createdAt)
+		return recordingResult, nil
+	}
 	if err := model.ValidateRecordingResultPackageForRender(&recordingResult, source); err != nil {
 		return model.RecordingResultPackage{}, err
 	}
 	return recordingResult, nil
+}
+
+func applyFailureRecordingResult(source *model.ClientExecutionPackage, result *model.RecordingResultPackage, diagnostic *model.ScriptFailureDiagnostic, steps []model.StepResult, artifacts []model.ArtifactRef, createdAt time.Time) {
+	result.Status = model.RecordingResultStatusFailed
+	result.VerificationReport.PassRate = passRate(steps)
+	result.VerificationReport.FailedNodeIDs = failedNodeIDs(steps)
+	if diagnostic == nil {
+		diagnostic = diagnosticFromFailedStep(source, result.CloudJobID, steps, artifacts, createdAt)
+	}
+	normalizeFailureDiagnostic(source, result.CloudJobID, diagnostic, createdAt)
+	result.FailureDiagnostic = diagnostic
+	result.RepairRequest = repairRequestForFailure(source, result, diagnostic, createdAt)
+}
+
+func normalizeFailureDiagnostic(source *model.ClientExecutionPackage, cloudJobID string, diagnostic *model.ScriptFailureDiagnostic, capturedAt time.Time) {
+	if diagnostic == nil {
+		return
+	}
+	if diagnostic.ID == "" {
+		diagnostic.ID = "diag_" + safeID(diagnostic.FailedNodeID)
+	}
+	diagnostic.SchemaVersion = model.ScriptFailureDiagnosticSchemaVersion
+	if diagnostic.SourcePackageID == "" && source != nil {
+		diagnostic.SourcePackageID = source.PackageID
+	}
+	if diagnostic.CloudJobID == "" {
+		diagnostic.CloudJobID = cloudJobID
+	}
+	if diagnostic.Error.Code == "" {
+		diagnostic.Error.Code = "playwright_step_failed"
+	}
+	if diagnostic.Error.Message == "" {
+		diagnostic.Error.Message = "Playwright step failed."
+	}
+	if diagnostic.RedactionReport.PolicyRef == "" && source != nil {
+		diagnostic.RedactionReport.PolicyRef = source.PackageID + ".redactions"
+	}
+	diagnostic.RedactionReport.Applied = true
+	diagnostic.RedactionReport.FullHTMLIncluded = false
+	if diagnostic.CapturedAt.IsZero() {
+		diagnostic.CapturedAt = capturedAt
+	}
+}
+
+func diagnosticFromFailedStep(source *model.ClientExecutionPackage, cloudJobID string, steps []model.StepResult, artifacts []model.ArtifactRef, capturedAt time.Time) *model.ScriptFailureDiagnostic {
+	failed := firstFailedStep(steps)
+	failedNodeID := "unknown"
+	message := "Playwright step failed."
+	if failed != nil {
+		failedNodeID = failed.NodeID
+		if failed.Error != nil && failed.Error.Message != "" {
+			message = failed.Error.Message
+		} else if failed.ObservedState != "" {
+			message = failed.ObservedState
+		}
+	}
+	diagnostic := &model.ScriptFailureDiagnostic{
+		ID:              "diag_" + safeID(failedNodeID),
+		SchemaVersion:   model.ScriptFailureDiagnosticSchemaVersion,
+		SourcePackageID: source.PackageID,
+		CloudJobID:      cloudJobID,
+		FailedNodeID:    failedNodeID,
+		Error:           model.AgentError{Code: classifyFailureMessage(message), Message: message, Retryable: true},
+		RedactionReport: model.DiagnosticRedactionReport{Applied: true, PolicyRef: source.PackageID + ".redactions", FullHTMLIncluded: false},
+		CapturedAt:      capturedAt,
+	}
+	if failed != nil {
+		diagnostic.FailedStepOrder = stepOrderForNode(source, failed.NodeID)
+	}
+	for _, artifact := range artifactsForFailure(failedNodeID, artifacts) {
+		if artifact.Kind == "failure_screenshot" || artifact.Kind == "screenshot" || artifact.Kind == "webpage_screenshot" {
+			if diagnostic.CurrentURL == "" {
+				diagnostic.CurrentURL = stringMetadata(artifact.Metadata, "current_url")
+			}
+			if diagnostic.PageTitle == "" {
+				diagnostic.PageTitle = stringMetadata(artifact.Metadata, "page_title")
+			}
+			diagnostic.ScreenshotRefs = append(diagnostic.ScreenshotRefs, localDiagnosticArtifactDescriptor(artifact, "failure_screenshot"))
+		}
+		if artifact.Kind == "browser_trace" || artifact.Kind == "execution_trace" {
+			diagnostic.TraceRefs = append(diagnostic.TraceRefs, localDiagnosticArtifactDescriptor(artifact, "failure_trace"))
+		}
+	}
+	return diagnostic
+}
+
+func repairRequestForFailure(source *model.ClientExecutionPackage, result *model.RecordingResultPackage, diagnostic *model.ScriptFailureDiagnostic, requestedAt time.Time) *model.ScriptRepairRequest {
+	repairAttempt := 1
+	maxAttempts := 1
+	if source != nil {
+		maxAttempts = source.RecordingRunSpec.FailurePolicy.MaxRepairAttempts
+		if maxAttempts <= 0 {
+			maxAttempts = source.RecordingRunSpec.FailurePolicy.RetryAttempts
+		}
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	request := &model.ScriptRepairRequest{
+		ID:                "repair_" + safeID(result.ResultID),
+		SourceResultID:    result.ResultID,
+		SourcePackageID:   result.SourcePackageID,
+		CloudJobID:        result.CloudJobID,
+		MaxRepairAttempts: maxAttempts,
+		RepairAttempt:     repairAttempt,
+		ApprovalRequired:  true,
+		RequestedAt:       requestedAt,
+		ExpiresAt:         requestedAt.Add(24 * time.Hour),
+	}
+	if source != nil && source.ExecutableScriptBundle != nil {
+		request.FailedBundleHashSHA256 = source.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+		request.FailedPlanHashSHA256 = source.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
+	}
+	_ = diagnostic
+	return request
+}
+
+func hasFailedStep(steps []model.StepResult) bool {
+	return firstFailedStep(steps) != nil
+}
+
+func firstFailedStep(steps []model.StepResult) *model.StepResult {
+	for index := range steps {
+		if !strings.EqualFold(steps[index].Status, "passed") {
+			return &steps[index]
+		}
+	}
+	return nil
+}
+
+func stepOrderForNode(source *model.ClientExecutionPackage, nodeID string) int {
+	if source == nil || source.ExecutableScriptBundle == nil || source.ExecutableScriptBundle.PlanJSON == nil || nodeID == "" {
+		return 0
+	}
+	for _, step := range source.ExecutableScriptBundle.PlanJSON.Steps {
+		if step.NodeID == nodeID {
+			return step.Order
+		}
+	}
+	return 0
+}
+
+func artifactsForFailure(nodeID string, artifacts []model.ArtifactRef) []model.ArtifactRef {
+	matches := []model.ArtifactRef{}
+	for _, artifact := range artifacts {
+		if artifact.Kind == "browser_trace" || artifact.Kind == "execution_trace" {
+			matches = append(matches, artifact)
+			continue
+		}
+		if nodeID != "" && artifact.SourceNodeID == nodeID {
+			matches = append(matches, artifact)
+			continue
+		}
+		if artifact.Kind == "failure_screenshot" {
+			matches = append(matches, artifact)
+		}
+	}
+	return matches
+}
+
+func localDiagnosticArtifactDescriptor(artifact model.ArtifactRef, role string) model.PackageArtifactDescriptor {
+	metadata := map[string]any{"dev_local_artifact": true}
+	for key, value := range artifact.Metadata {
+		metadata[key] = value
+	}
+	return model.PackageArtifactDescriptor{
+		ID:        artifact.ID,
+		Role:      role,
+		Kind:      artifact.Kind,
+		URI:       artifact.URI,
+		MimeType:  artifact.MimeType,
+		SHA256:    artifact.SHA256,
+		SizeBytes: artifact.SizeBytes,
+		Encrypted: false,
+		Sensitive: artifact.Sensitive,
+		Metadata:  metadata,
+	}
+}
+
+func classifyFailureMessage(message string) string {
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "timeout"):
+		return "selector_timeout"
+	case strings.Contains(lower, "navigation") || strings.Contains(lower, "net::"):
+		return "navigation_failed"
+	case strings.Contains(lower, "selector"):
+		return "selector_missing"
+	default:
+		return "playwright_step_failed"
+	}
+}
+
+func stringMetadata(metadata map[string]any, key string) string {
+	if value, ok := metadata[key].(string); ok {
+		return value
+	}
+	return ""
 }
 
 func viewportFromRunSpec(spec model.RecordingRunSpec) Viewport {

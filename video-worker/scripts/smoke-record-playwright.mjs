@@ -11,6 +11,7 @@ const repoRoot = path.resolve(workerRoot, "..");
 const outputDir = resolveOutputDir();
 const keepOutput = process.env.CASCADE_RECORD_SMOKE_KEEP === "1" || Boolean(process.env.CASCADE_RECORD_SMOKE_OUTPUT_DIR);
 const targetURL = process.env.CASCADE_RECORD_SMOKE_TARGET_URL?.trim();
+const forceFailure = process.env.CASCADE_RECORD_SMOKE_FAIL === "1";
 
 const pageHTML = `<!doctype html>
 <html>
@@ -54,10 +55,15 @@ try {
   const baseURL = targetURL || (await listen(server));
   const request = buildRecordRequest(baseURL, { interactiveLocalPage: !targetURL });
   const result = await callWorker(request);
-  assertRealRecordingResult(result);
+  if (forceFailure) {
+    assertFailedRecordingResult(result);
+  } else {
+    assertRealRecordingResult(result);
+  }
   console.log(
     JSON.stringify({
       ok: true,
+      expected_failure: forceFailure,
       output_dir: outputDir,
       target_url: baseURL,
       recording: path.basename(result.recording_path),
@@ -133,6 +139,9 @@ function buildRecordRequest(baseURL, options) {
 }
 
 function buildInteractiveScript(baseURL) {
+  const failureBlock = forceFailure ? `  ctx.log("node_missing_selector");
+  await ctx.page.click("#does-not-exist", { timeout: 500 });
+` : "";
   const source = `type CascadeRecordingContext = { page: any; secrets: any; capture: any; assert: any; log: any };
 type CascadeRecordingResult = { ok: boolean };
 export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise<CascadeRecordingResult> {
@@ -140,7 +149,7 @@ export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise
   ctx.log("node_open");
   await ctx.page.fill("#email", "demo@example.com");
   ctx.log("node_fill");
-  await ctx.page.click("#start");
+${failureBlock}  await ctx.page.click("#start");
   ctx.log("node_click");
   ctx.log("node_assert");
   return { ok: true };
@@ -162,7 +171,7 @@ export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise
 }
 
 function buildInteractiveSteps(baseURL) {
-  return [
+  const steps = [
     {
       node_id: "node_open",
       action: { type: "navigate", target: { url: baseURL }, wait_until: "domcontentloaded", timeout_ms: 15000 },
@@ -188,6 +197,15 @@ function buildInteractiveSteps(baseURL) {
       expected_outcome: "Confirmation is visible",
     },
   ];
+  if (forceFailure) {
+    steps.splice(2, 0, {
+      node_id: "node_missing_selector",
+      action: { type: "click", target: { selector: "#does-not-exist" }, timeout_ms: 500 },
+      capture: { screenshot: true, scope: "viewport" },
+      expected_outcome: "This step intentionally fails for diagnostic smoke coverage",
+    });
+  }
+  return steps;
 }
 
 function buildRealPageSteps(baseURL) {
@@ -276,6 +294,30 @@ function assertRealRecordingResult(result) {
   }
   if (statSync(result.recording_path).size <= 0) {
     throw new Error("recording file is empty");
+  }
+}
+
+function assertFailedRecordingResult(result) {
+  assertRealRecordingResult({ ...result, screenshot_paths: result.screenshot_paths || [] });
+  const diagnostic = result.failure_diagnostic;
+  if (!diagnostic) {
+    throw new Error("expected failure_diagnostic");
+  }
+  if (diagnostic.failed_node_id !== "node_missing_selector") {
+    throw new Error(`unexpected failed node: ${diagnostic.failed_node_id}`);
+  }
+  if (!diagnostic.current_url || !diagnostic.page_title) {
+    throw new Error("failure diagnostic is missing current_url or page_title");
+  }
+  if (!Array.isArray(diagnostic.screenshot_refs) || diagnostic.screenshot_refs.length < 1) {
+    throw new Error("failure diagnostic is missing screenshot_refs");
+  }
+  if (!Array.isArray(diagnostic.trace_refs) || diagnostic.trace_refs.length < 1) {
+    throw new Error("failure diagnostic is missing trace_refs");
+  }
+  const failureScreenshot = result.generated_assets?.find((asset) => asset.kind === "failure_screenshot");
+  if (!failureScreenshot || !existsSync(new URL(failureScreenshot.uri))) {
+    throw new Error("failure screenshot asset is missing");
   }
 }
 

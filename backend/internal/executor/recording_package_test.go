@@ -173,6 +173,63 @@ func TestNewRecordingResultPackageFromRecordResultDoesNotDuplicateWorkerTraceOrM
 	}
 }
 
+func TestNewRecordingResultPackageFromRecordResultBuildsFailureDiagnostic(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	completedAt := time.Date(2026, 7, 9, 20, 30, 0, 0, time.UTC)
+	failureScreenshot := model.ArtifactRef{
+		ID:           "artifact_failure_screenshot_001",
+		Kind:         "failure_screenshot",
+		URI:          "file:///tmp/failure-step-001.png",
+		MimeType:     "image/png",
+		SHA256:       "failure_hash",
+		SizeBytes:    20,
+		CreatedAt:    completedAt,
+		Sensitive:    true,
+		SourceNodeID: "node_start",
+		Metadata:     map[string]any{"asset_role": "failure_screenshot", "include_in_demo": false},
+	}
+	trace := model.ArtifactRef{ID: "artifact_browser_trace", Kind: "browser_trace", URI: "file:///tmp/trace.zip", MimeType: "application/zip", SHA256: "trace_hash", SizeBytes: 30, CreatedAt: completedAt}
+	recordResult := RecordResult{
+		TracePath:       "file:///tmp/trace.zip",
+		GeneratedAssets: []model.ArtifactRef{failureScreenshot, trace},
+		StepResults: []model.StepResult{{
+			NodeID:        "node_start",
+			Status:        "failed",
+			DurationMS:    1000,
+			ObservedState: "Timeout waiting for selector",
+		}},
+		FailureDiagnostic: &model.ScriptFailureDiagnostic{
+			ID:              "diag_node_start",
+			SchemaVersion:   model.ScriptFailureDiagnosticSchemaVersion,
+			FailedNodeID:    "node_start",
+			FailedStepOrder: 1,
+			Error:           model.AgentError{Code: "selector_timeout", Message: "Timeout waiting for selector", Retryable: true},
+			CurrentURL:      "https://app.example.com/dashboard",
+			PageTitle:       "Dashboard",
+			ScreenshotRefs:  []model.PackageArtifactDescriptor{localDiagnosticArtifactDescriptor(failureScreenshot, "failure_screenshot")},
+			TraceRefs:       []model.PackageArtifactDescriptor{localDiagnosticArtifactDescriptor(trace, "failure_trace")},
+			RedactionReport: model.DiagnosticRedactionReport{Applied: true, FullHTMLIncluded: false},
+			CapturedAt:      completedAt,
+		},
+		StartedAt:   completedAt.Add(-time.Second),
+		CompletedAt: completedAt,
+	}
+
+	result, err := NewRecordingResultPackageFromRecordResult(&pkg, recordResult, "job_1", completedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != model.RecordingResultStatusFailed || result.FailureDiagnostic == nil || result.RepairRequest == nil {
+		t.Fatalf("expected failed result with diagnostic and repair request, got %+v", result)
+	}
+	if result.FailureDiagnostic.FailedNodeID != "node_start" || result.FailureDiagnostic.CurrentURL == "" {
+		t.Fatalf("unexpected failure diagnostic: %+v", result.FailureDiagnostic)
+	}
+	if result.RepairRequest.SourceResultID != result.ResultID || !result.RepairRequest.ApprovalRequired {
+		t.Fatalf("unexpected repair request: %+v", result.RepairRequest)
+	}
+}
+
 func TestNormalizedArtifactURIMatchesFileURIAndPath(t *testing.T) {
 	path := filepath.Join("artifacts", "recording", "job_1", "trace.zip")
 	absolutePath, err := filepath.Abs(path)
