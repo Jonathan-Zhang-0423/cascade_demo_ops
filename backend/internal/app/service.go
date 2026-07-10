@@ -3,6 +3,9 @@ package app
 import (
 	"context"
 	"errors"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"cascade-demoops/backend/internal/agents"
@@ -21,6 +24,12 @@ type Service struct {
 	states   store.StateStore
 	layout   storage.LocalLayout
 	exchange *ExchangeIntakeService
+}
+
+type ResultArtifactFile struct {
+	Artifact model.ArtifactRef
+	Path     string
+	MimeType string
 }
 
 func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Service, error) {
@@ -49,7 +58,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		flow:     flow,
 		states:   states,
 		layout:   storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
-		exchange: NewExchangeIntakeService(nil),
+		exchange: newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
 	}, nil
 }
 
@@ -245,6 +254,10 @@ func (s *Service) GetExecutionPackageStatus(ctx context.Context, orgID string, e
 	return s.exchange.Status(ctx, orgID, exchangePackageID)
 }
 
+func (s *Service) ListExecutionPackages(ctx context.Context, orgID string) (model.ExecutionPackageListResponse, error) {
+	return s.exchange.ListExecutionPackages(ctx, orgID)
+}
+
 func (s *Service) GetExecutionPackageDebugView(ctx context.Context, orgID string, exchangePackageID string) (ExecutionPackageDebugView, error) {
 	return s.GetExecutionPackageDebug(ctx, orgID, exchangePackageID)
 }
@@ -257,6 +270,81 @@ func (s *Service) GetResultPackage(ctx context.Context, orgID string, resultPack
 	return s.exchange.GetResultPackage(ctx, orgID, resultPackageID)
 }
 
+func (s *Service) ListResultPackages(ctx context.Context, orgID string) (model.ResultPackageListResponse, error) {
+	return s.exchange.ListResultPackages(ctx, orgID)
+}
+
+func (s *Service) GetResultArtifactFile(ctx context.Context, orgID string, resultPackageID string, artifactID string) (ResultArtifactFile, error) {
+	artifact, err := s.exchange.GetResultArtifact(ctx, orgID, resultPackageID, artifactID)
+	if err != nil {
+		return ResultArtifactFile{}, err
+	}
+	filePath, err := s.localArtifactPath(artifact.URI)
+	if err != nil {
+		return ResultArtifactFile{}, err
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return ResultArtifactFile{}, err
+	}
+	if info.IsDir() {
+		return ResultArtifactFile{}, errors.New("artifact path is a directory")
+	}
+	return ResultArtifactFile{Artifact: artifact, Path: filePath, MimeType: artifact.MimeType}, nil
+}
+
 func (s *Service) AcknowledgeResultPackage(ctx context.Context, orgID string, request model.ResultPackageAckRequest) (model.ResultPackageAckResponse, error) {
 	return s.exchange.AckResultPackage(ctx, orgID, request)
+}
+
+func (s *Service) localArtifactPath(uri string) (string, error) {
+	value := strings.TrimSpace(uri)
+	if value == "" {
+		return "", errors.New("artifact uri is required")
+	}
+	filePath := value
+	if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && !isWindowsDriveScheme(parsed.Scheme, value) {
+		if parsed.Scheme != "file" {
+			return "", errors.New("only local file artifacts are downloadable in dev exchange")
+		}
+		filePath = parsed.Path
+		if parsed.Host != "" {
+			if len(parsed.Host) == 2 && parsed.Host[1] == ':' {
+				filePath = parsed.Host + parsed.Path
+			} else {
+				filePath = `\\` + parsed.Host + parsed.Path
+			}
+		}
+		if unescaped, unescapeErr := url.PathUnescape(filePath); unescapeErr == nil {
+			filePath = unescaped
+		}
+		filePath = filepath.FromSlash(filePath)
+		if len(filePath) >= 3 && filePath[0] == filepath.Separator && filePath[2] == ':' {
+			filePath = filePath[1:]
+		}
+	}
+	cleanPath, err := filepath.Abs(filepath.Clean(filePath))
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(filepath.Clean(s.runtime.ArtifactRoot))
+	if err != nil {
+		return "", err
+	}
+	if !pathWithinRoot(cleanPath, root) {
+		return "", errors.New("artifact path is outside artifact root")
+	}
+	return cleanPath, nil
+}
+
+func pathWithinRoot(path string, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || rel != "" && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func isWindowsDriveScheme(scheme string, value string) bool {
+	return len(scheme) == 1 && len(value) >= 2 && value[1] == ':'
 }

@@ -110,8 +110,9 @@ POST /v1/dev/execution-packages/{exchange_package_id}/run
 X-Cascade-Org-ID: <org_id>
 ```
 
-This runs the uploaded package through the local Playwright recording/render
-pipeline and stores the result in the in-memory exchange service.
+This starts the uploaded package in the local Playwright recording/render
+pipeline and returns quickly with the current execution status. Poll `status`
+or the dev list endpoints until the package reaches `completed` or `failed`.
 
 ### Debug
 
@@ -145,6 +146,48 @@ Useful fields:
     "failed_stage": "preparing_worker"
   }
 }
+```
+
+### List Executions
+
+```http
+GET /v1/dev/execution-packages
+X-Cascade-Org-ID: <org_id>
+```
+
+Returns a lightweight index of uploaded execution packages for the org. This is
+for dev联调 and restart recovery: use it to find `exchange_package_id`,
+`cloud_job_id`, current status, stage, result id, and summary fields. It does
+not return the full package payload or executable script source.
+
+Example:
+
+```bash
+curl \
+  -H "Authorization: Bearer cascade-dev-20260710" \
+  -H "X-Cascade-Org-ID: org_devsmoke" \
+  http://127.0.0.1:4317/v1/dev/execution-packages
+```
+
+### List Results
+
+```http
+GET /v1/dev/result-packages
+X-Cascade-Org-ID: <org_id>
+```
+
+Returns a lightweight index of generated result packages for the org. Result
+items include `result_package_id`, source execution identity, status,
+`result_summary`, `failure_summary` when present, and dev `download_url` values
+for local deliverables.
+
+Example:
+
+```bash
+curl \
+  -H "Authorization: Bearer cascade-dev-20260710" \
+  -H "X-Cascade-Org-ID: org_devsmoke" \
+  http://127.0.0.1:4317/v1/dev/result-packages
 ```
 
 ### Status
@@ -207,7 +250,29 @@ Typical response after a successful dev run:
     "raw_recording_count": 1,
     "trace_count": 1,
     "primary_demo_video_uri": "D:\\Engine-7-8\\artifacts\\exchange\\xpkg_...\\render\\demo_30s.webm",
-    "raw_recording_uri": "D:\\Engine-7-8\\artifacts\\exchange\\xpkg_...\\recording\\recording.webm"
+    "raw_recording_uri": "D:\\Engine-7-8\\artifacts\\exchange\\xpkg_...\\recording\\recording.webm",
+    "deliverables": [
+      {
+        "kind": "demo_video",
+        "role": "final_demo",
+        "uri": "D:\\Engine-7-8\\artifacts\\exchange\\xpkg_...\\render\\demo_30s.webm",
+        "download_url": "/v1/dev/result-packages/result_pkg_.../deliverables/artifact_pkg_demo_video_001",
+        "include_in_demo": true
+      },
+      {
+        "kind": "raw_recording",
+        "role": "raw_recording",
+        "uri": "file:///D:/Engine-7-8/artifacts/exchange/xpkg_.../recording/page.webm",
+        "download_url": "/v1/dev/result-packages/result_pkg_.../deliverables/artifact_raw_recording",
+        "include_in_demo": true
+      },
+      {
+        "kind": "browser_trace",
+        "role": "debug_trace",
+        "uri": "file:///D:/Engine-7-8/artifacts/exchange/xpkg_.../recording/trace.zip",
+        "download_url": "/v1/dev/result-packages/result_pkg_.../deliverables/artifact_browser_trace"
+      }
+    ]
   },
   "updated_at": "2026-07-09T10:01:00Z"
 }
@@ -240,10 +305,125 @@ Body:
 `verified_checksums=true` is required. If the App detects a mismatch it must
 send `checksum_mismatch_ids` and the server will reject the ack.
 
+## Server Smoke
+
+After the server pulls this branch and starts the dev bridge, use `cmd/devsmoke`
+to verify the full cloud-side handoff without manually crafting protocol JSON.
+
+Start the server:
+
+```bash
+cd /path/to/cascade_demo_ops/backend
+export CASCADE_DEV_EXCHANGE_HTTP=1
+export CASCADE_DEV_EXCHANGE_TOKEN=cascade-dev-20260710
+export CASCADE_DEV_ALLOW_REMOTE_BIND=1
+export CASCADE_LLM_MODE=deterministic
+go run ./cmd/devserver --addr 0.0.0.0:4317
+```
+
+In another shell on the same server:
+
+```bash
+cd /path/to/cascade_demo_ops/backend
+go run ./cmd/devsmoke \
+  --base-url http://127.0.0.1:4317 \
+  --token cascade-dev-20260710 \
+  --mode success
+```
+
+Expected success result:
+
+```json
+{
+  "ok": true,
+  "mode": "success",
+  "status": "completed",
+  "stage": "completed",
+  "list_check": {
+    "execution_found": true,
+    "result_found": true
+  },
+  "result": {
+    "pass_rate": 1,
+    "demo_video_count": 1,
+    "raw_recording_count": 1,
+    "trace_count": 1,
+    "deliverables": [
+      {
+        "kind": "demo_video",
+        "role": "final_demo",
+        "uri": "...",
+        "download_url": "/v1/dev/result-packages/result_pkg_.../deliverables/artifact_pkg_demo_video_001"
+      }
+    ]
+  }
+}
+```
+
+Download a deliverable:
+
+```bash
+curl -L \
+  -H "Authorization: Bearer cascade-dev-20260710" \
+  -H "X-Cascade-Org-ID: org_devsmoke" \
+  -o demo.webm \
+  http://127.0.0.1:4317/v1/dev/result-packages/result_pkg_.../deliverables/artifact_pkg_demo_video_001
+```
+
+The dev download endpoint only serves files resolved under the configured
+`CASCADE_ARTIFACT_ROOT`. It rejects non-local URIs and paths outside the
+artifact root.
+
+Restart recovery smoke:
+
+```bash
+# 1. Run a normal success smoke and copy exchange_package_id from the output.
+go run ./cmd/devsmoke \
+  --base-url http://127.0.0.1:4317 \
+  --token cascade-dev-20260710 \
+  --mode success
+
+# 2. Restart cmd/devserver.
+
+# 3. Verify the persisted status/result/deliverable mapping.
+go run ./cmd/devsmoke \
+  --base-url http://127.0.0.1:4317 \
+  --token cascade-dev-20260710 \
+  --mode success \
+  --reuse-package-id xpkg_...
+```
+
+Run the diagnostic path:
+
+```bash
+go run ./cmd/devsmoke \
+  --base-url http://127.0.0.1:4317 \
+  --token cascade-dev-20260710 \
+  --mode failure
+```
+
+Expected failure result:
+
+```json
+{
+  "ok": true,
+  "mode": "failure",
+  "status": "failed",
+  "failure": {
+    "failed_node_id": "node_missing_selector",
+    "failure_screenshot_uri": "file:///...",
+    "failure_trace_uri": "file:///..."
+  }
+}
+```
+
 ## Notes
 
-- The channel is in-memory. Restarting the dev server clears upload sessions,
-  package status, and result packages.
+- The dev server persists exchange package status, result packages, and
+  deliverable mappings under `.cascade-dev/data/exchange_state`. Restarting the
+  dev server should preserve completed results and downloadable local artifacts.
+- Restarting the dev server clears unfinished upload sessions only when they
+  were not saved before a valid package upload.
 - The run endpoint uses `NODE_WORKER_PATH` when configured, otherwise it falls
   back to `video-worker/dist/index.js` under the repo root.
 - The renderer only uses existing recorded assets. It does not generate new

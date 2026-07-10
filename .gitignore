@@ -11,4 +11,6 @@ artifacts/
 storage/local/
 .cascade-dev/
 backend/.cache/
+.gocache/
+.gotmp/
 .DS_Store
