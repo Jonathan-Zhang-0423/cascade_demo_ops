@@ -46,6 +46,7 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
+	s.registerDevExchangeRoutes(mux)
 	return withDevLogging(withDevCORS(mux))
 }
 
@@ -232,7 +233,7 @@ func withDevCORS(next http.Handler) http.Handler {
 		if isAllowedDevOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Cascade-Org-ID")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
@@ -255,7 +256,13 @@ func EnsureLocalDevAddress(addr string) error {
 		return nil
 	}
 	if strings.HasPrefix(addr, ":") {
+		if devExchangeRemoteBindAllowed() {
+			return nil
+		}
 		return errors.New("dev bridge must bind to 127.0.0.1 or localhost")
+	}
+	if devExchangeRemoteBindAllowed() {
+		return nil
 	}
 	return errors.New("dev bridge refuses non-local bind address")
 }

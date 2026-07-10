@@ -66,16 +66,17 @@ type EvidenceRef struct {
 }
 
 type ArtifactRef struct {
-	ID           string    `json:"id"`
-	Kind         string    `json:"kind,omitempty"`
-	URI          string    `json:"uri"`
-	MimeType     string    `json:"mime_type,omitempty"`
-	Label        string    `json:"label,omitempty"`
-	SHA256       string    `json:"sha256,omitempty"`
-	SizeBytes    int64     `json:"size_bytes,omitempty"`
-	CreatedAt    time.Time `json:"created_at,omitempty"`
-	Sensitive    bool      `json:"sensitive,omitempty"`
-	SourceNodeID string    `json:"source_node_id,omitempty"`
+	ID           string         `json:"id"`
+	Kind         string         `json:"kind,omitempty"`
+	URI          string         `json:"uri"`
+	MimeType     string         `json:"mime_type,omitempty"`
+	Label        string         `json:"label,omitempty"`
+	SHA256       string         `json:"sha256,omitempty"`
+	SizeBytes    int64          `json:"size_bytes,omitempty"`
+	CreatedAt    time.Time      `json:"created_at,omitempty"`
+	Sensitive    bool           `json:"sensitive,omitempty"`
+	SourceNodeID string         `json:"source_node_id,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 }
 
 type RetentionSpec struct {

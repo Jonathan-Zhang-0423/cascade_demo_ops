@@ -41,6 +41,9 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	if status.Status != model.ExchangePackageStatusAccepted {
 		t.Fatalf("expected accepted status, got %+v", status)
 	}
+	if status.Stage != "accepted" || status.ProgressPercent != 10 || status.Message == "" {
+		t.Fatalf("expected accepted status to include dev-facing progress metadata, got %+v", status)
+	}
 
 	result := sampleRecordingResultForAppTest(pkg)
 	completed, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, uploadResp.ExchangePackageID, result)
@@ -49,6 +52,12 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	}
 	if completed.Status != model.ExchangePackageStatusCompleted || completed.ResultPackageID == "" {
 		t.Fatalf("expected completed package with result id, got %+v", completed)
+	}
+	if completed.Stage != "completed" || completed.ProgressPercent != 100 || completed.ResultSummary == nil {
+		t.Fatalf("expected completed status summary, got %+v", completed)
+	}
+	if completed.ResultSummary.DemoVideoCount != 1 || completed.ResultSummary.RawRecordingCount != 1 || completed.ResultSummary.PrimaryDemoVideoURI == "" {
+		t.Fatalf("unexpected result summary: %+v", completed.ResultSummary)
 	}
 
 	gotResult, err := service.GetResultPackage(ctx, pkg.OrgID, completed.ResultPackageID)
@@ -311,6 +320,7 @@ func sampleEnvelopeForAppTest(t *testing.T, pkg model.ClientExecutionPackage, no
 func sampleRecordingResultForAppTest(pkg model.ClientExecutionPackage) model.RecordingResultPackage {
 	now := time.Date(2026, 7, 9, 16, 10, 0, 0, time.UTC)
 	artifact := model.ArtifactRef{ID: "artifact_raw_recording", Kind: "raw_recording", URI: "file:///tmp/recording.webm", MimeType: "video/webm", SourceNodeID: "node_open_dashboard"}
+	demoVideo := model.ArtifactRef{ID: "artifact_demo_video", Kind: "demo_video", URI: "file:///tmp/demo.webm", MimeType: "video/webm", Metadata: map[string]any{"asset_role": "final_demo", "include_in_demo": true}}
 	step := model.StepResult{NodeID: "node_open_dashboard", Status: "passed", DurationMS: 1200}
 	return model.RecordingResultPackage{
 		ResultID:        "result_1",
@@ -327,7 +337,7 @@ func sampleRecordingResultForAppTest(pkg model.ClientExecutionPackage) model.Rec
 			Artifacts:       []model.ArtifactRef{artifact},
 		},
 		StepResults:     []model.StepResult{step},
-		GeneratedAssets: []model.ArtifactRef{artifact},
+		GeneratedAssets: []model.ArtifactRef{artifact, demoVideo},
 		VerificationReport: model.VerificationReport{
 			PassRate:             1,
 			ReproducibilityMatch: true,
