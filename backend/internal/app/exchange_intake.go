@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +49,11 @@ type exchangePackageState struct {
 	ExchangePackageID string
 	CloudJobID        string
 	Status            model.ExchangePackageStatus
+	Stage             string
+	FailedStage       string
+	Message           string
+	ProgressPercent   int
+	StageHistory      []model.ExecutionStageEvent
 	Envelope          model.ExchangeEnvelope
 	Payload           model.ClientExecutionPackage
 	CreatedAt         time.Time
@@ -157,6 +163,7 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
+	setPackageStageLocked(state, model.ExchangePackageStatusAccepted, "accepted", "Execution package accepted. Call the dev run endpoint to start recording and rendering.", 10, now)
 	s.packages[exchangePackageID] = state
 	s.packageByIdem[idempotencyKey(request.Envelope.OrgID, request.Envelope.IdempotencyKey)] = exchangePackageID
 	delete(s.uploads, request.UploadID)
@@ -174,17 +181,20 @@ func (s *ExchangeIntakeService) Status(ctx context.Context, orgID string, exchan
 	if err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
 	}
-	response := model.ExecutionPackageStatusResponse{
-		ExchangePackageID: state.ExchangePackageID,
-		CloudJobID:        state.CloudJobID,
-		Status:            state.Status,
-		Error:             state.Error,
-		UpdatedAt:         state.UpdatedAt,
+	return s.statusResponseLocked(state), nil
+}
+
+func (s *ExchangeIntakeService) PayloadSnapshot(ctx context.Context, orgID string, exchangePackageID string) (model.ClientExecutionPackage, error) {
+	if err := ctx.Err(); err != nil {
+		return model.ClientExecutionPackage{}, err
 	}
-	if resultID := s.resultByPackage[state.ExchangePackageID]; resultID != "" {
-		response.ResultPackageID = resultID
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.packageStateLocked(orgID, exchangePackageID)
+	if err != nil {
+		return model.ClientExecutionPackage{}, err
 	}
-	return response, nil
+	return state.Payload, nil
 }
 
 func (s *ExchangeIntakeService) CompleteWithRecordingResult(ctx context.Context, orgID string, exchangePackageID string, result model.RecordingResultPackage) (model.ExecutionPackageStatusResponse, error) {
@@ -199,11 +209,18 @@ func (s *ExchangeIntakeService) CompleteWithRecordingResult(ctx context.Context,
 	if err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
 	}
-	if err := model.ValidateRecordingResultPackageForRender(&result, &state.Payload); err != nil {
-		state.Status = model.ExchangePackageStatusFailed
-		state.Error = &model.AgentError{Code: "recording_result_invalid", Message: err.Error()}
-		state.UpdatedAt = now
-		return model.ExecutionPackageStatusResponse{ExchangePackageID: state.ExchangePackageID, CloudJobID: state.CloudJobID, Status: state.Status, Error: state.Error, UpdatedAt: state.UpdatedAt}, err
+	if result.Status == model.RecordingResultStatusFailed {
+		if err := result.ValidateStatusContract(); err != nil {
+			setPackageStageLocked(state, model.ExchangePackageStatusFailed, "failed", "Failed recording result package was rejected by cloud-side validation.", 100, now)
+			state.Error = &model.AgentError{Code: "failed_recording_result_invalid", Message: err.Error()}
+			return s.statusResponseLocked(state), err
+		}
+	} else {
+		if err := model.ValidateRecordingResultPackageForRender(&result, &state.Payload); err != nil {
+			setPackageStageLocked(state, model.ExchangePackageStatusFailed, "failed", "Recording result package was rejected by cloud-side validation.", 100, now)
+			state.Error = &model.AgentError{Code: "recording_result_invalid", Message: err.Error()}
+			return s.statusResponseLocked(state), err
+		}
 	}
 
 	resultPackageID := newExchangeID(defaultResultPackagePrefix, now)
@@ -215,16 +232,17 @@ func (s *ExchangeIntakeService) CompleteWithRecordingResult(ctx context.Context,
 		Retention:         retention,
 	}
 	s.resultByPackage[state.ExchangePackageID] = resultPackageID
-	state.Status = model.ExchangePackageStatusCompleted
-	state.UpdatedAt = now
+	if result.Status == model.RecordingResultStatusFailed {
+		setPackageStageLocked(state, model.ExchangePackageStatusFailed, "failed", "Recording failed. Failure diagnostics are ready in the result package.", 100, now)
+		state.FailedStage = "running_script"
+		if result.FailureDiagnostic != nil {
+			state.Error = &result.FailureDiagnostic.Error
+		}
+	} else {
+		setPackageStageLocked(state, model.ExchangePackageStatusCompleted, "completed", "Recording and rendering completed. Result package is ready.", 100, now)
+	}
 
-	return model.ExecutionPackageStatusResponse{
-		ExchangePackageID: state.ExchangePackageID,
-		CloudJobID:        state.CloudJobID,
-		Status:            state.Status,
-		ResultPackageID:   resultPackageID,
-		UpdatedAt:         state.UpdatedAt,
-	}, nil
+	return s.statusResponseLocked(state), nil
 }
 
 func (s *ExchangeIntakeService) GetResultPackage(ctx context.Context, orgID string, resultPackageID string) (model.RecordingResultPackage, error) {
@@ -299,6 +317,184 @@ func resultRetention(result model.RecordingResultPackage, now time.Time) model.R
 		return model.RetentionSpec{ExpiresAt: result.Delivery.ExpiresAt, Reason: "recording_result_delivery"}
 	}
 	return model.RetentionSpec{ExpiresAt: now.Add(24 * time.Hour), Reason: "default_recording_result_retention"}
+}
+
+func (s *ExchangeIntakeService) statusResponseLocked(state *exchangePackageState) model.ExecutionPackageStatusResponse {
+	stage, message, progress := exchangeStatusView(state)
+	response := model.ExecutionPackageStatusResponse{
+		ExchangePackageID: state.ExchangePackageID,
+		CloudJobID:        state.CloudJobID,
+		Status:            state.Status,
+		Stage:             stage,
+		Message:           message,
+		ProgressPercent:   progress,
+		StageHistory:      append([]model.ExecutionStageEvent{}, state.StageHistory...),
+		Error:             state.Error,
+		UpdatedAt:         state.UpdatedAt,
+	}
+	if state.Error != nil {
+		response.FailureSummary = failureSummary(state, nil)
+	}
+	if resultID := s.resultByPackage[state.ExchangePackageID]; resultID != "" {
+		response.ResultPackageID = resultID
+		if resultState := s.resultByID[resultID]; resultState != nil {
+			response.ResultSummary = summarizeRecordingResult(resultState.Result)
+			if resultState.Result.FailureDiagnostic != nil {
+				response.FailureSummary = failureSummary(state, resultState.Result.FailureDiagnostic)
+			}
+		}
+	}
+	return response
+}
+
+func setPackageStageLocked(state *exchangePackageState, status model.ExchangePackageStatus, stage string, message string, progress int, updatedAt time.Time) {
+	if state == nil {
+		return
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	state.Status = status
+	state.Stage = stage
+	state.Message = message
+	state.ProgressPercent = progress
+	state.UpdatedAt = updatedAt
+	state.StageHistory = append(state.StageHistory, model.ExecutionStageEvent{
+		Stage:           stage,
+		Status:          status,
+		Message:         message,
+		ProgressPercent: progress,
+		UpdatedAt:       updatedAt,
+	})
+}
+
+func failureSummary(state *exchangePackageState, diagnostic *model.ScriptFailureDiagnostic) *model.ExecutionFailureSummary {
+	if state == nil && diagnostic == nil {
+		return nil
+	}
+	summary := &model.ExecutionFailureSummary{}
+	if state != nil {
+		summary.FailedStage = state.FailedStage
+		if summary.FailedStage == "" {
+			summary.FailedStage = state.Stage
+		}
+		if state.Error != nil {
+			summary.Code = state.Error.Code
+			summary.Message = state.Error.Message
+			summary.Retryable = state.Error.Retryable
+		}
+	}
+	if diagnostic != nil {
+		summary.FailedNodeID = diagnostic.FailedNodeID
+		summary.CurrentURL = diagnostic.CurrentURL
+		summary.PageTitle = diagnostic.PageTitle
+		if len(diagnostic.ScreenshotRefs) > 0 {
+			summary.FailureScreenshotURI = diagnostic.ScreenshotRefs[0].URI
+		}
+		if len(diagnostic.TraceRefs) > 0 {
+			summary.FailureTraceURI = diagnostic.TraceRefs[0].URI
+		}
+		if summary.Code == "" {
+			summary.Code = diagnostic.Error.Code
+		}
+		if summary.Message == "" {
+			summary.Message = diagnostic.Error.Message
+		}
+		if !summary.Retryable {
+			summary.Retryable = diagnostic.Error.Retryable
+		}
+	}
+	if summary.Code == "" && summary.Message == "" && summary.FailedStage == "" && summary.FailedNodeID == "" {
+		return nil
+	}
+	return summary
+}
+
+func exchangeStatusView(state *exchangePackageState) (string, string, int) {
+	if state.Stage != "" || state.Message != "" || state.ProgressPercent > 0 {
+		return state.Stage, state.Message, state.ProgressPercent
+	}
+	switch state.Status {
+	case model.ExchangePackageStatusAccepted:
+		return "accepted", "Execution package accepted. Call the dev run endpoint to start recording and rendering.", 10
+	case model.ExchangePackageStatusRunning:
+		return "recording_rendering", "Recording and rendering are running.", 50
+	case model.ExchangePackageStatusCompleted:
+		return "completed", "Recording and rendering completed. Result package is ready.", 100
+	case model.ExchangePackageStatusFailed:
+		return "failed", "Execution failed.", 100
+	default:
+		return string(state.Status), "", 0
+	}
+}
+
+func summarizeRecordingResult(result model.RecordingResultPackage) *model.ExecutionResultSummary {
+	steps := result.StepResults
+	if len(steps) == 0 && result.ExecutionTrace != nil {
+		steps = result.ExecutionTrace.StepResults
+	}
+	assets := uniqueStatusArtifacts(append(append([]model.ArtifactRef{}, result.GeneratedAssets...), traceArtifacts(result.ExecutionTrace)...))
+	summary := &model.ExecutionResultSummary{
+		ResultID:            result.ResultID,
+		ResultStatus:        result.Status,
+		PassRate:            result.VerificationReport.PassRate,
+		StepCount:           len(steps),
+		GeneratedAssetCount: len(assets),
+	}
+	if summary.PassRate == 0 && result.ExecutionTrace != nil {
+		summary.PassRate = result.ExecutionTrace.PassRate
+	}
+	for _, step := range steps {
+		switch {
+		case strings.EqualFold(step.Status, "passed"):
+			summary.PassedStepCount++
+		case strings.EqualFold(step.Status, "failed"):
+			summary.FailedStepCount++
+		}
+	}
+	for _, asset := range assets {
+		switch strings.ToLower(asset.Kind) {
+		case "demo_video":
+			summary.DemoVideoCount++
+			if summary.PrimaryDemoVideoURI == "" {
+				summary.PrimaryDemoVideoURI = asset.URI
+			}
+		case "raw_recording":
+			summary.RawRecordingCount++
+			if summary.RawRecordingURI == "" {
+				summary.RawRecordingURI = asset.URI
+			}
+		case "screenshot", "webpage_screenshot":
+			summary.ScreenshotCount++
+		case "browser_trace", "execution_trace":
+			summary.TraceCount++
+		}
+	}
+	return summary
+}
+
+func traceArtifacts(trace *model.ExecutionTrace) []model.ArtifactRef {
+	if trace == nil {
+		return nil
+	}
+	return trace.Artifacts
+}
+
+func uniqueStatusArtifacts(artifacts []model.ArtifactRef) []model.ArtifactRef {
+	seen := map[string]bool{}
+	out := []model.ArtifactRef{}
+	for _, artifact := range artifacts {
+		key := artifact.ID
+		if key == "" {
+			key = artifact.URI
+		}
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, artifact)
+	}
+	return out
 }
 
 func idempotencyKey(orgID string, key string) string {

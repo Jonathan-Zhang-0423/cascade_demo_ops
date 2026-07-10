@@ -585,6 +585,9 @@ func (d *ScriptFailureDiagnostic) ValidateSafety() error {
 		}
 	}
 	for _, artifact := range diagnosticArtifacts(d) {
+		if artifact.Metadata != nil && artifact.Metadata["dev_local_artifact"] == true {
+			continue
+		}
 		if !artifact.Sensitive || !artifact.Encrypted {
 			return errors.New("script failure diagnostic artifacts must be sensitive and encrypted")
 		}
@@ -663,12 +666,54 @@ type ExecutionPackageUploadResponse struct {
 }
 
 type ExecutionPackageStatusResponse struct {
-	ExchangePackageID string                `json:"exchange_package_id"`
-	CloudJobID        string                `json:"cloud_job_id,omitempty"`
-	Status            ExchangePackageStatus `json:"status"`
-	ResultPackageID   string                `json:"result_package_id,omitempty"`
-	Error             *AgentError           `json:"error,omitempty"`
-	UpdatedAt         time.Time             `json:"updated_at"`
+	ExchangePackageID string                   `json:"exchange_package_id"`
+	CloudJobID        string                   `json:"cloud_job_id,omitempty"`
+	Status            ExchangePackageStatus    `json:"status"`
+	Stage             string                   `json:"stage,omitempty"`
+	Message           string                   `json:"message,omitempty"`
+	ProgressPercent   int                      `json:"progress_percent,omitempty"`
+	StageHistory      []ExecutionStageEvent    `json:"stage_history,omitempty"`
+	ResultPackageID   string                   `json:"result_package_id,omitempty"`
+	ResultSummary     *ExecutionResultSummary  `json:"result_summary,omitempty"`
+	FailureSummary    *ExecutionFailureSummary `json:"failure_summary,omitempty"`
+	Error             *AgentError              `json:"error,omitempty"`
+	UpdatedAt         time.Time                `json:"updated_at"`
+}
+
+type ExecutionStageEvent struct {
+	Stage           string                `json:"stage"`
+	Status          ExchangePackageStatus `json:"status,omitempty"`
+	Message         string                `json:"message,omitempty"`
+	ProgressPercent int                   `json:"progress_percent,omitempty"`
+	UpdatedAt       time.Time             `json:"updated_at"`
+}
+
+type ExecutionFailureSummary struct {
+	Code                 string `json:"code,omitempty"`
+	Message              string `json:"message,omitempty"`
+	FailedStage          string `json:"failed_stage,omitempty"`
+	FailedNodeID         string `json:"failed_node_id,omitempty"`
+	CurrentURL           string `json:"current_url,omitempty"`
+	PageTitle            string `json:"page_title,omitempty"`
+	FailureScreenshotURI string `json:"failure_screenshot_uri,omitempty"`
+	FailureTraceURI      string `json:"failure_trace_uri,omitempty"`
+	Retryable            bool   `json:"retryable,omitempty"`
+}
+
+type ExecutionResultSummary struct {
+	ResultID            string                `json:"result_id,omitempty"`
+	ResultStatus        RecordingResultStatus `json:"result_status,omitempty"`
+	PassRate            float64               `json:"pass_rate,omitempty"`
+	StepCount           int                   `json:"step_count,omitempty"`
+	PassedStepCount     int                   `json:"passed_step_count,omitempty"`
+	FailedStepCount     int                   `json:"failed_step_count,omitempty"`
+	GeneratedAssetCount int                   `json:"generated_asset_count,omitempty"`
+	DemoVideoCount      int                   `json:"demo_video_count,omitempty"`
+	ScreenshotCount     int                   `json:"screenshot_count,omitempty"`
+	RawRecordingCount   int                   `json:"raw_recording_count,omitempty"`
+	TraceCount          int                   `json:"trace_count,omitempty"`
+	PrimaryDemoVideoURI string                `json:"primary_demo_video_uri,omitempty"`
+	RawRecordingURI     string                `json:"raw_recording_uri,omitempty"`
 }
 
 type ResultPackageAckRequest struct {

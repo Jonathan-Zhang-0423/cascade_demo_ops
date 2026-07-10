@@ -12,27 +12,36 @@ type Service interface {
 	Render(ctx context.Context, request RenderRequest) (RenderResult, error)
 }
 
+type RecordingMode string
+
+const (
+	RecordingModeDryRun     RecordingMode = "dry_run"
+	RecordingModePlaywright RecordingMode = "playwright"
+)
+
 type RecordRequest struct {
 	Graph                  *model.DemoWorkflowGraph               `json:"graph"`
 	OutputDir              string                                 `json:"output_dir"`
 	Viewport               Viewport                               `json:"viewport"`
 	Headless               bool                                   `json:"headless"`
+	RecordingMode          RecordingMode                          `json:"recording_mode,omitempty"`
 	SourcePackageID        string                                 `json:"source_package_id,omitempty"`
 	RecordingRunSpec       *model.RecordingRunSpec                `json:"recording_run_spec,omitempty"`
 	ExecutableScriptBundle *model.ExecutableRecordingScriptBundle `json:"executable_script_bundle,omitempty"`
 }
 
 type RecordResult struct {
-	RecordingPath        string              `json:"recording_path,omitempty"`
-	ScreenshotPaths      []string            `json:"screenshot_paths,omitempty"`
-	TracePath            string              `json:"trace_path,omitempty"`
-	ArtifactManifestPath string              `json:"artifact_manifest_path,omitempty"`
-	GeneratedAssets      []model.ArtifactRef `json:"generated_assets,omitempty"`
-	StepResults          []model.StepResult  `json:"step_results,omitempty"`
-	WorkerID             string              `json:"worker_id,omitempty"`
-	RuntimeVersions      map[string]string   `json:"runtime_versions,omitempty"`
-	StartedAt            time.Time           `json:"started_at,omitempty"`
-	CompletedAt          time.Time           `json:"completed_at,omitempty"`
+	RecordingPath        string                         `json:"recording_path,omitempty"`
+	ScreenshotPaths      []string                       `json:"screenshot_paths,omitempty"`
+	TracePath            string                         `json:"trace_path,omitempty"`
+	ArtifactManifestPath string                         `json:"artifact_manifest_path,omitempty"`
+	GeneratedAssets      []model.ArtifactRef            `json:"generated_assets,omitempty"`
+	StepResults          []model.StepResult             `json:"step_results,omitempty"`
+	FailureDiagnostic    *model.ScriptFailureDiagnostic `json:"failure_diagnostic,omitempty"`
+	WorkerID             string                         `json:"worker_id,omitempty"`
+	RuntimeVersions      map[string]string              `json:"runtime_versions,omitempty"`
+	StartedAt            time.Time                      `json:"started_at,omitempty"`
+	CompletedAt          time.Time                      `json:"completed_at,omitempty"`
 }
 
 type RenderRequest struct {

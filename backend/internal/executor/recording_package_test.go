@@ -1,6 +1,9 @@
 package executor
 
 import (
+	"encoding/json"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +27,9 @@ func TestNewRecordRequestFromClientExecutionPackageUsesProtocolFields(t *testing
 	if request.Viewport.Width != 1920 || request.Viewport.Height != 1080 {
 		t.Fatalf("record request should prefer recording output resolution, got %+v", request.Viewport)
 	}
+	if request.RecordingMode != RecordingModePlaywright {
+		t.Fatalf("record request should default to real Playwright recording, got %q", request.RecordingMode)
+	}
 	if !request.Headless || request.RecordingRunSpec == nil || request.RecordingRunSpec.BaseURL != "https://app.example.com" {
 		t.Fatalf("record request did not carry run spec: %+v", request)
 	}
@@ -35,6 +41,16 @@ func TestNewRecordRequestFromClientExecutionPackageRejectsInvalidProtocolPackage
 
 	if _, err := NewRecordRequestFromClientExecutionPackage(&pkg, "artifacts/recording/job_1"); err == nil {
 		t.Fatal("expected invalid package to be rejected")
+	}
+}
+
+func TestRecordRequestJSONIncludesRecordingMode(t *testing.T) {
+	data, err := json.Marshal(RecordRequest{RecordingMode: RecordingModePlaywright})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"recording_mode":"playwright"`) {
+		t.Fatalf("recording mode must be serialized for video-worker: %s", data)
 	}
 }
 
@@ -75,6 +91,165 @@ func TestNewRecordingResultPackageFromRecordResultIsRenderable(t *testing.T) {
 	if renderRequest.RecordingResultPackage != &result || renderRequest.ExecutionTrace != result.ExecutionTrace {
 		t.Fatalf("render request should consume the recording result package: %+v", renderRequest)
 	}
+}
+
+func TestNewRecordingResultPackageFromRecordResultDedupesWorkerGeneratedAssets(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	completedAt := time.Date(2026, 7, 9, 19, 30, 0, 0, time.UTC)
+	recordingPath := "artifacts/recording/job_1/recording.webm"
+	screenshotPath := "artifacts/recording/job_1/step-001.png"
+	tracePath := "artifacts/recording/job_1/trace.zip"
+	recordResult := RecordResult{
+		RecordingPath:   recordingPath,
+		ScreenshotPaths: []string{screenshotPath},
+		TracePath:       tracePath,
+		GeneratedAssets: []model.ArtifactRef{
+			{ID: "artifact_raw_recording", Kind: "raw_recording", URI: recordingPath, MimeType: "video/webm", SHA256: "raw_hash", SizeBytes: 10, CreatedAt: completedAt},
+			{ID: "artifact_screenshot_001", Kind: "screenshot", URI: screenshotPath, MimeType: "image/png", SHA256: "screenshot_hash", SizeBytes: 20, CreatedAt: completedAt, SourceNodeID: "node_start", Metadata: map[string]any{"asset_role": "primary", "capture_scope": "viewport", "include_in_demo": true}},
+			{ID: "artifact_browser_trace", Kind: "browser_trace", URI: tracePath, MimeType: "application/zip", SHA256: "trace_hash", SizeBytes: 30, CreatedAt: completedAt},
+		},
+		StepResults: []model.StepResult{{NodeID: "node_start", Status: "passed"}},
+		StartedAt:   completedAt.Add(-2 * time.Second),
+		CompletedAt: completedAt,
+	}
+
+	result, err := NewRecordingResultPackageFromRecordResult(&pkg, recordResult, "job_1", completedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countArtifactsByKind(result.GeneratedAssets, "raw_recording"); got != 1 {
+		t.Fatalf("expected one raw recording artifact, got %d: %+v", got, result.GeneratedAssets)
+	}
+	if got := countArtifactsByKind(result.GeneratedAssets, "screenshot"); got != 1 {
+		t.Fatalf("expected one screenshot artifact, got %d: %+v", got, result.GeneratedAssets)
+	}
+	if got := countArtifactsByKind(result.GeneratedAssets, "browser_trace"); got != 1 {
+		t.Fatalf("expected one trace artifact, got %d: %+v", got, result.GeneratedAssets)
+	}
+	if len(result.StepResults) != 1 || len(result.StepResults[0].Artifacts) != 1 || result.StepResults[0].Artifacts[0].SHA256 != "screenshot_hash" {
+		t.Fatalf("expected step result to keep worker screenshot metadata, got %+v", result.StepResults)
+	}
+	if result.StepResults[0].Artifacts[0].Metadata["capture_scope"] != "viewport" {
+		t.Fatalf("expected step artifact metadata to be preserved, got %+v", result.StepResults[0].Artifacts[0].Metadata)
+	}
+	var screenshotDescriptor *model.PackageArtifactDescriptor
+	for index := range result.Delivery.AssetRefs {
+		if result.Delivery.AssetRefs[index].ID == "artifact_screenshot_001" {
+			screenshotDescriptor = &result.Delivery.AssetRefs[index]
+			break
+		}
+	}
+	if screenshotDescriptor == nil || screenshotDescriptor.Metadata["asset_role"] != "primary" || screenshotDescriptor.Metadata["source_node_id"] != "node_start" {
+		t.Fatalf("expected delivery descriptor to preserve screenshot metadata, got %+v", screenshotDescriptor)
+	}
+}
+
+func TestNewRecordingResultPackageFromRecordResultDoesNotDuplicateWorkerTraceOrManifest(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	completedAt := time.Date(2026, 7, 9, 19, 45, 0, 0, time.UTC)
+	tracePath := filepath.Join("artifacts", "recording", "job_1", "trace.zip")
+	manifestPath := filepath.Join("artifacts", "recording", "job_1", "recording_artifact_manifest.json")
+	traceURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(tracePath)}).String()
+	manifestURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(manifestPath)}).String()
+	recordResult := RecordResult{
+		RecordingPath:        "artifacts/recording/job_1/recording.webm",
+		TracePath:            tracePath,
+		ArtifactManifestPath: manifestPath,
+		GeneratedAssets:      []model.ArtifactRef{{ID: "artifact_browser_trace", Kind: "browser_trace", URI: traceURI}, {ID: "artifact_manifest", Kind: "artifact_manifest", URI: manifestURI}},
+		StepResults:          []model.StepResult{{NodeID: "node_start", Status: "passed"}},
+		StartedAt:            completedAt.Add(-2 * time.Second),
+		CompletedAt:          completedAt,
+	}
+
+	result, err := NewRecordingResultPackageFromRecordResult(&pkg, recordResult, "job_1", completedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countArtifactsByKind(result.GeneratedAssets, "browser_trace"); got != 1 {
+		t.Fatalf("expected one browser trace artifact, got %d: %+v", got, result.GeneratedAssets)
+	}
+	if got := countArtifactsByKind(result.GeneratedAssets, "artifact_manifest"); got != 1 {
+		t.Fatalf("expected one artifact manifest, got %d: %+v", got, result.GeneratedAssets)
+	}
+}
+
+func TestNewRecordingResultPackageFromRecordResultBuildsFailureDiagnostic(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	completedAt := time.Date(2026, 7, 9, 20, 30, 0, 0, time.UTC)
+	failureScreenshot := model.ArtifactRef{
+		ID:           "artifact_failure_screenshot_001",
+		Kind:         "failure_screenshot",
+		URI:          "file:///tmp/failure-step-001.png",
+		MimeType:     "image/png",
+		SHA256:       "failure_hash",
+		SizeBytes:    20,
+		CreatedAt:    completedAt,
+		Sensitive:    true,
+		SourceNodeID: "node_start",
+		Metadata:     map[string]any{"asset_role": "failure_screenshot", "include_in_demo": false},
+	}
+	trace := model.ArtifactRef{ID: "artifact_browser_trace", Kind: "browser_trace", URI: "file:///tmp/trace.zip", MimeType: "application/zip", SHA256: "trace_hash", SizeBytes: 30, CreatedAt: completedAt}
+	recordResult := RecordResult{
+		TracePath:       "file:///tmp/trace.zip",
+		GeneratedAssets: []model.ArtifactRef{failureScreenshot, trace},
+		StepResults: []model.StepResult{{
+			NodeID:        "node_start",
+			Status:        "failed",
+			DurationMS:    1000,
+			ObservedState: "Timeout waiting for selector",
+		}},
+		FailureDiagnostic: &model.ScriptFailureDiagnostic{
+			ID:              "diag_node_start",
+			SchemaVersion:   model.ScriptFailureDiagnosticSchemaVersion,
+			FailedNodeID:    "node_start",
+			FailedStepOrder: 1,
+			Error:           model.AgentError{Code: "selector_timeout", Message: "Timeout waiting for selector", Retryable: true},
+			CurrentURL:      "https://app.example.com/dashboard",
+			PageTitle:       "Dashboard",
+			ScreenshotRefs:  []model.PackageArtifactDescriptor{localDiagnosticArtifactDescriptor(failureScreenshot, "failure_screenshot")},
+			TraceRefs:       []model.PackageArtifactDescriptor{localDiagnosticArtifactDescriptor(trace, "failure_trace")},
+			RedactionReport: model.DiagnosticRedactionReport{Applied: true, FullHTMLIncluded: false},
+			CapturedAt:      completedAt,
+		},
+		StartedAt:   completedAt.Add(-time.Second),
+		CompletedAt: completedAt,
+	}
+
+	result, err := NewRecordingResultPackageFromRecordResult(&pkg, recordResult, "job_1", completedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != model.RecordingResultStatusFailed || result.FailureDiagnostic == nil || result.RepairRequest == nil {
+		t.Fatalf("expected failed result with diagnostic and repair request, got %+v", result)
+	}
+	if result.FailureDiagnostic.FailedNodeID != "node_start" || result.FailureDiagnostic.CurrentURL == "" {
+		t.Fatalf("unexpected failure diagnostic: %+v", result.FailureDiagnostic)
+	}
+	if result.RepairRequest.SourceResultID != result.ResultID || !result.RepairRequest.ApprovalRequired {
+		t.Fatalf("unexpected repair request: %+v", result.RepairRequest)
+	}
+}
+
+func TestNormalizedArtifactURIMatchesFileURIAndPath(t *testing.T) {
+	path := filepath.Join("artifacts", "recording", "job_1", "trace.zip")
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolutePath)}).String()
+	if normalizedArtifactURI(absolutePath) != normalizedArtifactURI(fileURI) {
+		t.Fatalf("expected file URI and path to normalize equally: %q vs %q", normalizedArtifactURI(absolutePath), normalizedArtifactURI(fileURI))
+	}
+}
+
+func countArtifactsByKind(artifacts []model.ArtifactRef, kind string) int {
+	count := 0
+	for _, artifact := range artifacts {
+		if artifact.Kind == kind {
+			count++
+		}
+	}
+	return count
 }
 
 func sampleClientExecutionPackageForExecutorTest(t *testing.T) model.ClientExecutionPackage {

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -159,6 +160,7 @@ interface ArtifactRef {
   created_at?: string;
   sensitive?: boolean;
   source_node_id?: string;
+  metadata?: Record<string, unknown>;
 }
 
 interface ArtifactManifest {
@@ -238,6 +240,10 @@ interface TimelineArtifact {
   size_bytes?: number;
   sensitive?: boolean;
   source_step_id?: string;
+  asset_role?: string;
+  include_in_demo?: boolean;
+  capture_scope?: string;
+  metadata?: Record<string, unknown>;
   duration_ms?: number;
   local_path?: string;
 }
@@ -309,6 +315,32 @@ interface ValidationFinding {
   path?: string;
 }
 
+interface CompositorResult {
+  status: "rendered" | "planned";
+  video_path: string;
+  method: "ffmpeg_trim_concat" | "copy_source_recording" | "pending_compositor";
+  ffmpeg_available?: boolean;
+  source_artifact_id?: string;
+  source_uri?: string;
+  output_container?: string;
+  shot_plan?: CompositorShot[];
+  applied_operations?: string[];
+  fallback_reason?: string;
+  note: string;
+}
+
+interface CompositorShot {
+  id: string;
+  source_artifact_id: string;
+  source_step_id?: string;
+  source_uri?: string;
+  source_path?: string;
+  source_time_range_ms?: [number, number];
+  duration_ms: number;
+  operations: string[];
+  overlays: Array<{ type: string; text?: string; start_ms?: number; end_ms?: number }>;
+}
+
 export async function render(request: RenderRequest): Promise<RenderResult> {
   const outputDir = request.output_dir || "artifacts/rendered";
   await mkdir(outputDir, { recursive: true });
@@ -323,7 +355,8 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
   }
 
   const targetDurationSec = Math.max(1, Math.round((editPlan.target_duration_ms || (request.duration_sec || 60) * 1000) / 1000));
-  const videoPath = path.join(outputDir, `demo_${targetDurationSec}s.mp4`);
+  const compositor = await composeFinalVideo(outputDir, targetDurationSec, catalog, editPlan);
+  const videoPath = compositor.video_path;
   const stepDocsPath = path.join(outputDir, "step_by_step.md");
   const catalogPath = path.join(outputDir, "asset_timeline_catalog.json");
   const editPlanPath = path.join(outputDir, "demo_edit_plan.json");
@@ -335,11 +368,12 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
   await writeJSON(validationReportPath, validationReport);
   await writeJSON(renderManifestPath, {
     schema_version: "demoops.render_manifest.v1",
-    status: "planned",
+    status: compositor.status,
     source_material_policy: "existing_assets_only",
     source_authority: DEMO_EDIT_SOURCE_AUTHORITY,
     model_role: DEMO_EDIT_MODEL_ROLE,
-    note: "This stage creates a validated source-only edit plan. A deterministic compositor must render the final video from referenced artifacts.",
+    compositor,
+    note: compositor.note,
     video_path: videoPath,
     step_by_step_docs_path: stepDocsPath,
     asset_timeline_catalog_path: catalogPath,
@@ -473,8 +507,10 @@ function timelineStep(
 }
 
 function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): DemoEditPlan {
-  const recordingArtifactID = catalog.timeline.recording_artifact_id || catalog.artifacts.find((artifact) => artifact.kind === "raw_recording")?.id;
-  const fallbackArtifactID = recordingArtifactID || catalog.artifacts[0]?.id || "missing_source_artifact";
+  const demoArtifacts = catalog.artifacts.filter(isDemoMaterial);
+  const recordingArtifactID =
+    findDemoArtifactByID(catalog, catalog.timeline.recording_artifact_id)?.id || demoArtifacts.find((artifact) => artifact.kind === "raw_recording")?.id;
+  const fallbackArtifactID = recordingArtifactID || demoArtifacts[0]?.id || "missing_source_artifact";
   const eligibleSteps = catalog.steps.filter((step) => step.status !== "failed");
   const steps = eligibleSteps.length > 0 ? eligibleSteps : catalog.steps;
   const shots = steps.map((step, index) => defaultShotForStep(step, index, recordingArtifactID || step.artifacts[0] || fallbackArtifactID));
@@ -588,6 +624,8 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
       errors.push(finding("unknown_source_artifact", `Shot references missing source artifact ${shot.source_artifact_id}`, `${shotPath}.source_artifact_id`));
     } else if (artifact.sensitive) {
       errors.push(finding("sensitive_source_artifact", `Shot references sensitive artifact ${shot.source_artifact_id}`, `${shotPath}.source_artifact_id`));
+    } else if (!isDemoMaterial(artifact)) {
+      errors.push(finding("non_demo_source_artifact", `Shot references non-demo/debug artifact ${shot.source_artifact_id}`, `${shotPath}.source_artifact_id`));
     }
 
     if (shot.source_step_id && !stepByID.has(shot.source_step_id)) {
@@ -693,6 +731,277 @@ function validateOverlays(overlays: EditOverlay[], stepByID: Map<string, Timelin
   });
 }
 
+async function composeFinalVideo(outputDir: string, targetDurationSec: number, catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): Promise<CompositorResult> {
+  const shotPlan = buildCompositorShotPlan(catalog, editPlan);
+  const primaryShot = shotPlan.find((shot) => shot.source_path);
+  if (shotPlan.length === 0 || !primaryShot) {
+    return plannedCompositorResult(
+      outputDir,
+      targetDurationSec,
+      shotPlan,
+      "No local raw recording artifact is available. The edit plan is valid, but final video rendering is waiting for a compositor input.",
+    );
+  }
+
+  const sourceStat = await stat(primaryShot.source_path as string).catch(() => undefined);
+  if (!sourceStat?.isFile()) {
+    return plannedCompositorResult(
+      outputDir,
+      targetDurationSec,
+      shotPlan,
+      `Raw recording artifact ${primaryShot.source_artifact_id} is not available as a local file. The edit plan is valid, but final video rendering is pending.`,
+    );
+  }
+
+  const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
+  const ffmpegAvailable = await isCommandAvailable(ffmpegPath);
+  const sourceArtifact = findDemoArtifactByID(catalog, primaryShot.source_artifact_id);
+  const extension = sourceArtifact ? videoExtensionForArtifact(sourceArtifact) : ".webm";
+  const videoPath = path.join(outputDir, `demo_${targetDurationSec}s${extension}`);
+  if (!ffmpegAvailable) {
+    await copyFile(primaryShot.source_path as string, videoPath);
+    const result: CompositorResult = {
+      status: "rendered",
+      video_path: videoPath,
+      method: "copy_source_recording",
+      ffmpeg_available: false,
+      source_artifact_id: primaryShot.source_artifact_id,
+      output_container: extension.replace(/^\./, ""),
+      shot_plan: shotPlan,
+      applied_operations: ["fallback_copy"],
+      fallback_reason: "ffmpeg_not_available",
+      note: "Rendered a deterministic fallback demo video by copying the source browser recording. The edit plan is valid and recorded in the render manifest, but trim/concat execution requires ffmpeg.",
+    };
+    if (primaryShot.source_uri) result.source_uri = primaryShot.source_uri;
+    return result;
+  }
+
+  const composed = await composeWithFFmpeg(ffmpegPath, outputDir, videoPath, shotPlan, extension);
+  if (!composed.rendered) {
+    await copyFile(primaryShot.source_path as string, videoPath);
+    const result: CompositorResult = {
+      status: "rendered",
+      video_path: videoPath,
+      method: "copy_source_recording",
+      ffmpeg_available: true,
+      source_artifact_id: primaryShot.source_artifact_id,
+      output_container: extension.replace(/^\./, ""),
+      shot_plan: shotPlan,
+      applied_operations: ["fallback_copy"],
+      fallback_reason: composed.error || "ffmpeg_render_failed",
+      note: "Rendered a deterministic fallback demo video by copying the source browser recording after ffmpeg trim/concat failed. No image or video generation was used.",
+    };
+    if (primaryShot.source_uri) result.source_uri = primaryShot.source_uri;
+    return result;
+  }
+
+  const result: CompositorResult = {
+    status: "rendered",
+    video_path: videoPath,
+    method: "ffmpeg_trim_concat",
+    ffmpeg_available: true,
+    source_artifact_id: primaryShot.source_artifact_id,
+    output_container: extension.replace(/^\./, ""),
+    shot_plan: shotPlan,
+    applied_operations: appliedOperations(shotPlan),
+    note: "Rendered a deterministic demo video by trimming and concatenating existing source browser recording segments. No image or video generation was used.",
+  };
+  if (primaryShot.source_uri) result.source_uri = primaryShot.source_uri;
+  return result;
+}
+
+function plannedCompositorResult(outputDir: string, targetDurationSec: number, shotPlan: CompositorShot[], note: string): CompositorResult {
+  return {
+    status: "planned",
+    video_path: path.join(outputDir, `demo_${targetDurationSec}s.mp4`),
+    method: "pending_compositor",
+    ffmpeg_available: false,
+    output_container: "mp4",
+    shot_plan: shotPlan,
+    fallback_reason: "missing_local_source_video",
+    note,
+  };
+}
+
+function firstCompositableVideoArtifact(catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): TimelineArtifact | undefined {
+	for (const shot of editPlan.shots) {
+		const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id);
+		if (artifact && isVideoArtifact(artifact)) return artifact;
+	}
+  const timelineRecording = findDemoArtifactByID(catalog, catalog.timeline.recording_artifact_id);
+  if (timelineRecording && isVideoArtifact(timelineRecording)) return timelineRecording;
+	return catalog.artifacts.find((artifact) => isDemoMaterial(artifact) && isVideoArtifact(artifact));
+}
+
+function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): CompositorShot[] {
+  const fallbackArtifact = firstCompositableVideoArtifact(catalog, editPlan);
+  return editPlan.shots
+    .map((shot) => {
+      const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id) || fallbackArtifact;
+      const sourcePath = artifact?.local_path || (artifact?.uri ? filePathFromURI(artifact.uri) : undefined);
+      const sourceRange = shot.source_time_range_ms || sourceRangeForStep(catalog, shot.source_step_id);
+      const durationMS = sourceRange ? Math.max(0, sourceRange[1] - sourceRange[0]) : 0;
+      const operations = (shot.operations || []).map((operation) => operation.type);
+      const overlays = (shot.overlays || []).map((overlay) => {
+        const plannedOverlay: CompositorShot["overlays"][number] = { type: overlay.type };
+        if (overlay.text !== undefined) plannedOverlay.text = overlay.text;
+        if (overlay.start_ms !== undefined) plannedOverlay.start_ms = overlay.start_ms;
+        if (overlay.end_ms !== undefined) plannedOverlay.end_ms = overlay.end_ms;
+        return plannedOverlay;
+      });
+      const planned: CompositorShot = {
+        id: shot.id,
+        source_artifact_id: artifact?.id || shot.source_artifact_id,
+        duration_ms: durationMS,
+        operations,
+        overlays,
+      };
+      if (shot.source_step_id) planned.source_step_id = shot.source_step_id;
+      if (artifact?.uri) planned.source_uri = artifact.uri;
+      if (sourcePath) planned.source_path = sourcePath;
+      if (sourceRange) planned.source_time_range_ms = sourceRange;
+      return planned;
+    })
+    .filter((shot) => shot.source_path && shot.source_time_range_ms && shot.duration_ms > 0);
+}
+
+function sourceRangeForStep(catalog: AssetTimelineCatalog, stepID?: string): [number, number] | undefined {
+  if (!stepID) return undefined;
+  const step = catalog.steps.find((candidate) => candidate.step_id === stepID);
+  if (!step) return undefined;
+  return [step.start_ms, step.end_ms];
+}
+
+function appliedOperations(shots: CompositorShot[]): string[] {
+  const values = new Set<string>();
+  for (const shot of shots) {
+    for (const operation of shot.operations) {
+      values.add(operation);
+    }
+    if (shot.source_time_range_ms) {
+      values.add("trim");
+    }
+    for (const overlay of shot.overlays) {
+      values.add(overlay.type);
+    }
+  }
+  return [...values].sort();
+}
+
+async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPath: string, shots: CompositorShot[], extension: string): Promise<{ rendered: boolean; error?: string }> {
+  const segmentsDir = path.join(outputDir, "segments");
+  await mkdir(segmentsDir, { recursive: true });
+  const segmentPaths: string[] = [];
+  for (const [index, shot] of shots.entries()) {
+    if (!shot.source_path || !shot.source_time_range_ms) {
+      continue;
+    }
+    const [startMS, endMS] = shot.source_time_range_ms;
+    const durationMS = endMS - startMS;
+    if (durationMS <= 0) {
+      continue;
+    }
+    const segmentPath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}${extension}`);
+    const result = await runCommand(ffmpegPath, [
+      "-y",
+      "-ss",
+      secondsArg(startMS),
+      "-i",
+      shot.source_path,
+      "-t",
+      secondsArg(durationMS),
+      "-c",
+      "copy",
+      segmentPath,
+    ]);
+    if (result.code !== 0) {
+      return { rendered: false, error: compactProcessError("ffmpeg_segment_failed", result) };
+    }
+    segmentPaths.push(segmentPath);
+  }
+  if (segmentPaths.length === 0) {
+    return { rendered: false, error: "no_segments_created" };
+  }
+  if (segmentPaths.length === 1) {
+    const onlySegmentPath = segmentPaths[0];
+    if (!onlySegmentPath) {
+      return { rendered: false, error: "missing_single_segment" };
+    }
+    await copyFile(onlySegmentPath, videoPath);
+    return { rendered: true };
+  }
+  const concatListPath = path.join(segmentsDir, "concat.txt");
+  await writeFile(concatListPath, segmentPaths.map((segmentPath) => `file '${ffmpegConcatPath(segmentPath)}'`).join("\n") + "\n", "utf8");
+  const concatResult = await runCommand(ffmpegPath, ["-y", "-f", "concat", "-safe", "0", "-i", concatListPath, "-c", "copy", videoPath]);
+  if (concatResult.code !== 0) {
+    return { rendered: false, error: compactProcessError("ffmpeg_concat_failed", concatResult) };
+  }
+  return { rendered: true };
+}
+
+async function isCommandAvailable(command: string): Promise<boolean> {
+  const result = await runCommand(command, ["-version"]);
+  return result.code === 0;
+}
+
+function runCommand(command: string, args: string[]): Promise<{ code: number | null; stderr: string; stdout: string; error?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      resolve({ code: -1, stderr, stdout, error: error.message });
+    });
+    child.on("close", (code) => {
+      resolve({ code, stderr, stdout });
+    });
+  });
+}
+
+function compactProcessError(prefix: string, result: { stderr: string; stdout: string; error?: string }): string {
+  const message = result.error || result.stderr || result.stdout || "unknown error";
+  return `${prefix}: ${message.replace(/\s+/g, " ").slice(0, 300)}`;
+}
+
+function secondsArg(valueMS: number): string {
+  return (Math.max(0, valueMS) / 1000).toFixed(3);
+}
+
+function ffmpegConcatPath(filePath: string): string {
+  return path.resolve(filePath).replace(/\\/g, "/").replace(/'/g, "'\\''");
+}
+
+function findDemoArtifactByID(catalog: AssetTimelineCatalog, id: string | undefined): TimelineArtifact | undefined {
+  if (!id) return undefined;
+  const artifact = catalog.artifacts.find((candidate) => candidate.id === id);
+  return artifact && isDemoMaterial(artifact) ? artifact : undefined;
+}
+
+function isDemoMaterial(artifact: TimelineArtifact): boolean {
+  if (artifact.include_in_demo === false) return false;
+  if (artifact.sensitive) return false;
+  if (artifact.kind === "browser_trace" || artifact.kind === "execution_trace" || artifact.kind === "artifact_manifest") return false;
+  if (artifact.asset_role?.startsWith("debug")) return false;
+  return true;
+}
+
+function isVideoArtifact(artifact: TimelineArtifact): boolean {
+  return artifact.kind === "raw_recording" || artifact.mime_type?.startsWith("video/") === true;
+}
+
+function videoExtensionForArtifact(artifact: TimelineArtifact): ".mp4" | ".webm" | ".mov" {
+  const uri = artifact.local_path || artifact.uri;
+  if (artifact.mime_type === "video/mp4" || uri.toLowerCase().endsWith(".mp4")) return ".mp4";
+  if (artifact.mime_type === "video/quicktime" || uri.toLowerCase().endsWith(".mov")) return ".mov";
+  return ".webm";
+}
+
 function prohibitedKeyFindings(value: unknown, pathValue = ""): ValidationFinding[] {
   if (!value || typeof value !== "object") {
     return [];
@@ -737,6 +1046,12 @@ async function timelineArtifactFromRef(artifact: ArtifactRef, durationMS?: numbe
   if (artifact.size_bytes !== undefined || fileStat?.size !== undefined) result.size_bytes = artifact.size_bytes || fileStat?.size || 0;
   if (artifact.sensitive !== undefined) result.sensitive = artifact.sensitive;
   if (artifact.source_node_id) result.source_step_id = artifact.source_node_id;
+  if (artifact.metadata) {
+    result.metadata = artifact.metadata;
+    if (typeof artifact.metadata.asset_role === "string") result.asset_role = artifact.metadata.asset_role;
+    if (typeof artifact.metadata.include_in_demo === "boolean") result.include_in_demo = artifact.metadata.include_in_demo;
+    if (typeof artifact.metadata.capture_scope === "string") result.capture_scope = artifact.metadata.capture_scope;
+  }
   if (durationMS !== undefined) result.duration_ms = durationMS;
   if (filePath) result.local_path = filePath;
   return result;

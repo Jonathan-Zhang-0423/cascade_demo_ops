@@ -245,6 +245,10 @@ func (s *Service) GetExecutionPackageStatus(ctx context.Context, orgID string, e
 	return s.exchange.Status(ctx, orgID, exchangePackageID)
 }
 
+func (s *Service) GetExecutionPackageDebugView(ctx context.Context, orgID string, exchangePackageID string) (ExecutionPackageDebugView, error) {
+	return s.GetExecutionPackageDebug(ctx, orgID, exchangePackageID)
+}
+
 func (s *Service) CompleteExecutionPackageWithResult(ctx context.Context, orgID string, exchangePackageID string, result model.RecordingResultPackage) (model.ExecutionPackageStatusResponse, error) {
 	return s.exchange.CompleteWithRecordingResult(ctx, orgID, exchangePackageID, result)
 }

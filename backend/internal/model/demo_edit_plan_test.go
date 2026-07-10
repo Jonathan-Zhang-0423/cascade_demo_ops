@@ -41,12 +41,16 @@ func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
 			Artifacts:       []string{"artifact_raw_recording"},
 		}},
 		Artifacts: []TimelineArtifact{{
-			ID:         "artifact_raw_recording",
-			Kind:       "raw_recording",
-			URI:        "file:///tmp/demo.webm",
-			MimeType:   "video/webm",
-			Label:      "Raw browser recording",
-			DurationMS: 2400,
+			ID:            "artifact_raw_recording",
+			Kind:          "raw_recording",
+			URI:           "file:///tmp/demo.webm",
+			MimeType:      "video/webm",
+			Label:         "Raw browser recording",
+			AssetRole:     "raw_recording",
+			IncludeInDemo: true,
+			CaptureScope:  "browser_context_video",
+			Metadata:      map[string]any{"asset_role": "raw_recording", "include_in_demo": true},
+			DurationMS:    2400,
 		}},
 	}
 
@@ -106,6 +110,9 @@ func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
 	}
 	if !containsString(gotCatalog.Constraints.ProhibitedPlanKeys, "image_prompt") || !containsString(gotCatalog.Constraints.ProhibitedPlanKeys, "new_ui_action") {
 		t.Fatalf("catalog prohibited keys missing generation/action guards: %+v", gotCatalog.Constraints.ProhibitedPlanKeys)
+	}
+	if gotCatalog.Artifacts[0].AssetRole != "raw_recording" || !gotCatalog.Artifacts[0].IncludeInDemo || gotCatalog.Artifacts[0].Metadata["asset_role"] != "raw_recording" {
+		t.Fatalf("catalog artifact metadata did not round-trip: %+v", gotCatalog.Artifacts[0])
 	}
 
 	planData, err := json.Marshal(plan)
@@ -230,6 +237,13 @@ func TestDemoEditPlanWorkerJSONCompatibility(t *testing.T) {
     "kind": "raw_recording",
     "uri": "file:///tmp/demo.webm",
     "mime_type": "video/webm",
+    "asset_role": "raw_recording",
+    "include_in_demo": true,
+    "capture_scope": "browser_context_video",
+    "metadata": {
+      "asset_role": "raw_recording",
+      "include_in_demo": true
+    },
     "duration_ms": 1200,
     "local_path": "/tmp/demo.webm"
   }]
@@ -301,6 +315,9 @@ func TestDemoEditPlanWorkerJSONCompatibility(t *testing.T) {
 
 	if catalog.Source.GeneratedAt.IsZero() || catalog.Timeline.RecordingArtifactID != "artifact_raw_recording" {
 		t.Fatalf("worker catalog JSON did not map to Go DTO: %+v", catalog)
+	}
+	if catalog.Artifacts[0].AssetRole != "raw_recording" || !catalog.Artifacts[0].IncludeInDemo || catalog.Artifacts[0].CaptureScope != "browser_context_video" {
+		t.Fatalf("worker catalog artifact purpose metadata did not map to Go DTO: %+v", catalog.Artifacts[0])
 	}
 	if plan.Shots[0].SourceTimeRangeMS == nil || plan.Shots[0].SourceTimeRangeMS[0] != 0 {
 		t.Fatalf("worker plan time range did not map to Go DTO: %+v", plan.Shots[0].SourceTimeRangeMS)

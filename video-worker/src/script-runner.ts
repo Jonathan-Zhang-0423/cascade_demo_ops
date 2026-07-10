@@ -170,6 +170,7 @@ export async function executeScript(request: ExecuteScriptRequest): Promise<Exec
   const steps = request.bundle?.plan_json?.steps ?? [];
   const simulatedFailureNodeID = request.simulate_failure_node_id;
   if (simulatedFailureNodeID) {
+    const outputDir = request.output_dir || "artifacts/script-execution";
     return {
       ok: false,
       validation,
