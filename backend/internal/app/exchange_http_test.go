@@ -74,6 +74,17 @@ func TestDevExchangeHTTPLifecycleAcceptsProtocolPackage(t *testing.T) {
 	if status.Stage != "accepted" || status.ProgressPercent != 10 || status.Message == "" {
 		t.Fatalf("status should include dev progress metadata: %+v", status)
 	}
+	if len(status.StageHistory) != 1 || status.StageHistory[0].Stage != "accepted" {
+		t.Fatalf("status should include stage history: %+v", status.StageHistory)
+	}
+
+	debug := exchangeHTTPDo[ExecutionPackageDebugView](t, server, http.MethodGet, "/v1/dev/execution-packages/"+uploadPayload.ExchangePackageID+"/debug?org_id="+pkg.OrgID, nil)
+	if debug.Package.PackageID != pkg.PackageID || debug.Package.ScriptStepCount != 1 || debug.Package.ScriptRuntime == "" {
+		t.Fatalf("unexpected debug package summary: %+v", debug.Package)
+	}
+	if debug.Runtime.ArtifactRoot == "" || debug.Status.ExchangePackageID != uploadPayload.ExchangePackageID {
+		t.Fatalf("unexpected debug runtime/status: %+v", debug)
+	}
 }
 
 func TestDevExchangeHTTPRunEndpointMarksMissingWorkerAsFailed(t *testing.T) {
@@ -102,6 +113,12 @@ func TestDevExchangeHTTPRunEndpointMarksMissingWorkerAsFailed(t *testing.T) {
 	}
 	if runStatus.Stage != "failed" || runStatus.ProgressPercent != 100 || runStatus.Message == "" {
 		t.Fatalf("failed dev run should include progress metadata, got %+v", runStatus)
+	}
+	if runStatus.FailureSummary == nil || runStatus.FailureSummary.FailedStage != "preparing_worker" {
+		t.Fatalf("failed dev run should report failed stage, got %+v", runStatus.FailureSummary)
+	}
+	if len(runStatus.StageHistory) < 3 {
+		t.Fatalf("failed dev run should include stage history, got %+v", runStatus.StageHistory)
 	}
 }
 

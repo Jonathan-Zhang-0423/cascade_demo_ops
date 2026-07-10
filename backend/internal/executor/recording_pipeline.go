@@ -16,6 +16,7 @@ type RecordingRenderPipelineRequest struct {
 	RenderOutputDir    string
 	RecordingMode      RecordingMode
 	ResultCreatedAt    time.Time
+	Progress           func(stage string, message string, progress int)
 }
 
 type RecordingRenderPipelineResult struct {
@@ -44,10 +45,12 @@ func RunClientExecutionRecordingAndRender(ctx context.Context, service Service, 
 	if request.RecordingMode != "" {
 		recordRequest.RecordingMode = request.RecordingMode
 	}
+	reportPipelineProgress(request, "running_script", "Running the protocol-provided Playwright script and recording browser artifacts.", 55)
 	recordResult, err := service.Record(ctx, recordRequest)
 	if err != nil {
 		return RecordingRenderPipelineResult{}, err
 	}
+	reportPipelineProgress(request, "packaging_recording", "Packaging raw recording, screenshots, trace, and execution results.", 70)
 	recordingResultPackage, err := NewRecordingResultPackageFromRecordResult(request.SourcePackage, recordResult, request.CloudJobID, request.ResultCreatedAt)
 	if err != nil {
 		return RecordingRenderPipelineResult{}, err
@@ -58,10 +61,14 @@ func RunClientExecutionRecordingAndRender(ctx context.Context, service Service, 
 		RecordResult:           recordResult,
 		RecordingResultPackage: recordingResultPackage,
 	}
+	if recordingResultPackage.Status == model.RecordingResultStatusFailed {
+		return result, nil
+	}
 	renderRequest, err := NewRenderRequestFromRecordingResult(request.SourcePackage, &result.RecordingResultPackage, request.RenderOutputDir)
 	if err != nil {
 		return RecordingRenderPipelineResult{}, err
 	}
+	reportPipelineProgress(request, "rendering", "Rendering the final demo video from existing captured assets.", 85)
 	renderResult, err := service.Render(ctx, renderRequest)
 	if err != nil {
 		return RecordingRenderPipelineResult{}, err
@@ -70,6 +77,12 @@ func RunClientExecutionRecordingAndRender(ctx context.Context, service Service, 
 	result.RenderResult = renderResult
 	attachRenderResultArtifacts(request.SourcePackage, &result.RecordingResultPackage, renderResult, result.RecordingResultPackage.CreatedAt)
 	return result, nil
+}
+
+func reportPipelineProgress(request RecordingRenderPipelineRequest, stage string, message string, progress int) {
+	if request.Progress != nil {
+		request.Progress(stage, message, progress)
+	}
 }
 
 func attachRenderResultArtifacts(source *model.ClientExecutionPackage, result *model.RecordingResultPackage, renderResult RenderResult, createdAt time.Time) {

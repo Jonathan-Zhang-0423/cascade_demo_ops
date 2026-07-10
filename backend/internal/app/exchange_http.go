@@ -43,6 +43,7 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/result-packages/{id}", s.requireDevExchangeAuth(s.handleResultPackageGet))
 	mux.HandleFunc("POST /v1/result-packages/{id}/ack", s.requireDevExchangeAuth(s.handleResultPackageAck))
 	mux.HandleFunc("POST /v1/dev/execution-packages/{id}/run", s.requireDevExchangeAuth(s.handleDevExecutionPackageRun))
+	mux.HandleFunc("GET /v1/dev/execution-packages/{id}/debug", s.requireDevExchangeAuth(s.handleDevExecutionPackageDebug))
 }
 
 func (s *DevHTTPServer) handleExecutionPackageInit(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +87,16 @@ func (s *DevHTTPServer) handleDevExecutionPackageRun(w http.ResponseWriter, r *h
 		return
 	}
 	response, err := s.service.RunUploadedExecutionPackage(r.Context(), orgID, r.PathValue("id"))
+	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleDevExecutionPackageDebug(w http.ResponseWriter, r *http.Request) {
+	orgID, err := orgIDFromRequest(r)
+	if err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "missing_org_id", err)
+		return
+	}
+	response, err := s.service.GetExecutionPackageDebugView(r.Context(), orgID, r.PathValue("id"))
 	writeExchangeValue(w, response, err)
 }
 

@@ -23,6 +23,7 @@ export interface RecordResult {
   artifact_manifest_path?: string;
   generated_assets?: ArtifactRef[];
   step_results?: Array<{ node_id: string; status: string; duration_ms?: number }>;
+  failure_diagnostic?: unknown;
   worker_id?: string;
   runtime_versions?: Record<string, string>;
   started_at?: string;

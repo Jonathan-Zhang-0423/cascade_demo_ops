@@ -1,7 +1,7 @@
 # Dev Exchange HTTP Test Channel
 
-This is a temporary dev-only channel for testing the customer-side agent to
-cloud-side agent handoff over HTTP.
+This is a temporary dev-only channel for testing the client execution package
+producer to cloud-side AIGC executor handoff over HTTP.
 
 It exposes the existing client/cloud exchange service from
 `backend/internal/app/exchange_intake.go`. It is not a production ingress.
@@ -23,8 +23,8 @@ cd D:\Engine-7-8\backend
 go run .\cmd\devserver --addr 127.0.0.1:4317
 ```
 
-For same-LAN testing, use an explicit host address only with the remote bind
-switch enabled:
+For server-based remote testing, run this on the cloud host and bind to all
+interfaces only with the remote bind switch enabled:
 
 ```powershell
 go run .\cmd\devserver --addr 0.0.0.0:4317
@@ -101,6 +101,40 @@ X-Cascade-Org-ID: <org_id>
 This runs the uploaded package through the local Playwright recording/render
 pipeline and stores the result in the in-memory exchange service.
 
+### Debug
+
+```http
+GET /v1/dev/execution-packages/{exchange_package_id}/debug
+X-Cascade-Org-ID: <org_id>
+```
+
+This dev-only view returns a redacted package summary, runtime readiness, stage
+history, result summary, and failure summary. It does not return the full
+payload or executable script source.
+
+Useful fields:
+
+```json
+{
+  "runtime": {
+    "video_worker_ready": true,
+    "node_ready": true,
+    "ffmpeg_ready": false
+  },
+  "package": {
+    "package_id": "pkg_...",
+    "base_url": "https://product.example.com",
+    "allowed_domains": ["product.example.com"],
+    "workflow_node_count": 3,
+    "script_step_count": 3
+  },
+  "failure": {
+    "code": "video_worker_missing",
+    "failed_stage": "preparing_worker"
+  }
+}
+```
+
 ### Status
 
 ```http
@@ -118,9 +152,25 @@ Typical response after upload:
   "stage": "accepted",
   "message": "Execution package accepted. Call the dev run endpoint to start recording and rendering.",
   "progress_percent": 10,
+  "stage_history": [
+    {
+      "stage": "accepted",
+      "status": "accepted",
+      "progress_percent": 10
+    }
+  ],
   "updated_at": "2026-07-09T10:00:00Z"
 }
 ```
+
+Run stages are:
+
+```text
+accepted -> validated -> preparing_worker -> running_script -> packaging_recording -> rendering -> completed
+```
+
+On failure the status becomes `failed`, and `failure_summary.failed_stage`
+shows the stage that failed.
 
 Typical response after a successful dev run:
 

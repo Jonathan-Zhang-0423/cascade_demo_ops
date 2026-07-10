@@ -44,6 +44,20 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	if status.Stage != "accepted" || status.ProgressPercent != 10 || status.Message == "" {
 		t.Fatalf("expected accepted status to include dev-facing progress metadata, got %+v", status)
 	}
+	if len(status.StageHistory) != 1 || status.StageHistory[0].Stage != "accepted" {
+		t.Fatalf("expected accepted stage history, got %+v", status.StageHistory)
+	}
+
+	if _, _, err := service.StartExecution(ctx, pkg.OrgID, uploadResp.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	running, err := service.MarkExecutionStage(ctx, pkg.OrgID, uploadResp.ExchangePackageID, "running_script", "Running test script.", 55)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if running.Stage != "running_script" || running.ProgressPercent != 55 || len(running.StageHistory) < 3 {
+		t.Fatalf("expected running stage history, got %+v", running)
+	}
 
 	result := sampleRecordingResultForAppTest(pkg)
 	completed, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, uploadResp.ExchangePackageID, result)
@@ -55,6 +69,9 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	}
 	if completed.Stage != "completed" || completed.ProgressPercent != 100 || completed.ResultSummary == nil {
 		t.Fatalf("expected completed status summary, got %+v", completed)
+	}
+	if len(completed.StageHistory) < 4 || completed.StageHistory[len(completed.StageHistory)-1].Stage != "completed" {
+		t.Fatalf("expected completed stage history, got %+v", completed.StageHistory)
 	}
 	if completed.ResultSummary.DemoVideoCount != 1 || completed.ResultSummary.RawRecordingCount != 1 || completed.ResultSummary.PrimaryDemoVideoURI == "" {
 		t.Fatalf("unexpected result summary: %+v", completed.ResultSummary)
@@ -119,6 +136,45 @@ func TestDesktopBridgeExchangePackageResponsesAreJSONSafe(t *testing.T) {
 	}
 	if uploadPayload.Status != model.ExchangePackageStatusAccepted {
 		t.Fatalf("expected accepted upload: %+v", uploadPayload)
+	}
+}
+
+func TestExchangeIntakeServiceCompletesWithFailedRecordingResult(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	service.now = fixedClock(time.Date(2026, 7, 9, 17, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, service.now())
+	envelope.Crypto.Nonce = "nonce_failed_result"
+	uploadResp, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: envelope}, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.StartExecution(ctx, pkg.OrgID, uploadResp.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	failed := sampleFailedRecordingResultForAppTest(pkg)
+
+	status, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, uploadResp.ExchangePackageID, failed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != model.ExchangePackageStatusFailed || status.ResultPackageID == "" || status.FailureSummary == nil {
+		t.Fatalf("expected failed status with result and summary, got %+v", status)
+	}
+	if status.FailureSummary.FailedNodeID != "node_open_dashboard" || status.FailureSummary.CurrentURL == "" {
+		t.Fatalf("unexpected failure summary: %+v", status.FailureSummary)
+	}
+	got, err := service.GetResultPackage(ctx, pkg.OrgID, status.ResultPackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.RecordingResultStatusFailed || got.FailureDiagnostic == nil {
+		t.Fatalf("expected failed result package, got %+v", got)
 	}
 }
 
@@ -278,6 +334,81 @@ export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise
 				ReviewedNodeIDs:  []string{"node_open_dashboard"},
 			},
 		},
+	}
+}
+
+func sampleFailedRecordingResultForAppTest(pkg model.ClientExecutionPackage) model.RecordingResultPackage {
+	now := time.Date(2026, 7, 9, 17, 10, 0, 0, time.UTC)
+	diagnostic := &model.ScriptFailureDiagnostic{
+		ID:              "diag_node_open_dashboard",
+		SchemaVersion:   model.ScriptFailureDiagnosticSchemaVersion,
+		SourcePackageID: pkg.PackageID,
+		CloudJobID:      "job_1",
+		FailedNodeID:    "node_open_dashboard",
+		FailedStepOrder: 1,
+		Error:           model.AgentError{Code: "navigation_failed", Message: "Navigation failed", Retryable: true},
+		CurrentURL:      "https://app.example.com/dashboard",
+		PageTitle:       "Dashboard",
+		ScreenshotRefs: []model.PackageArtifactDescriptor{{
+			ID:        "artifact_failure_screenshot_001",
+			Role:      "failure_screenshot",
+			Kind:      "failure_screenshot",
+			URI:       "file:///tmp/failure-step-001.png",
+			MimeType:  "image/png",
+			SHA256:    "failure_hash",
+			Encrypted: false,
+			Sensitive: true,
+			Metadata:  map[string]any{"dev_local_artifact": true},
+		}},
+		TraceRefs: []model.PackageArtifactDescriptor{{
+			ID:        "artifact_browser_trace",
+			Role:      "failure_trace",
+			Kind:      "browser_trace",
+			URI:       "file:///tmp/trace.zip",
+			MimeType:  "application/zip",
+			SHA256:    "trace_hash",
+			Encrypted: false,
+			Sensitive: false,
+			Metadata:  map[string]any{"dev_local_artifact": true},
+		}},
+		RedactionReport: model.DiagnosticRedactionReport{Applied: true, FullHTMLIncluded: false},
+		CapturedAt:      now,
+	}
+	return model.RecordingResultPackage{
+		ResultID:        "result_failed_1",
+		SourcePackageID: pkg.PackageID,
+		CloudJobID:      "job_1",
+		SchemaVersion:   model.RecordingResultPackageSchemaVersion,
+		Status:          model.RecordingResultStatusFailed,
+		ExecutionTrace: &model.ExecutionTrace{
+			ID:              "trace_failed_1",
+			WorkflowGraphID: pkg.WorkflowGraph.ID,
+			GraphVersion:    pkg.WorkflowGraph.Version,
+			PassRate:        0,
+			StepResults:     []model.StepResult{{NodeID: "node_open_dashboard", Status: "failed", Error: &diagnostic.Error}},
+			Artifacts:       []model.ArtifactRef{{ID: "artifact_failure_screenshot_001", Kind: "failure_screenshot", URI: "file:///tmp/failure-step-001.png", SHA256: "failure_hash", Sensitive: true, SourceNodeID: "node_open_dashboard"}},
+		},
+		StepResults:        []model.StepResult{{NodeID: "node_open_dashboard", Status: "failed", Error: &diagnostic.Error}},
+		GeneratedAssets:    []model.ArtifactRef{{ID: "artifact_failure_screenshot_001", Kind: "failure_screenshot", URI: "file:///tmp/failure-step-001.png", SHA256: "failure_hash", Sensitive: true, SourceNodeID: "node_open_dashboard"}},
+		VerificationReport: model.VerificationReport{PassRate: 0, FailedNodeIDs: []string{"node_open_dashboard"}, ReproducibilityMatch: true},
+		FailureDiagnostic:  diagnostic,
+		RepairRequest: &model.ScriptRepairRequest{
+			ID:               "repair_failed_1",
+			SourceResultID:   "result_failed_1",
+			SourcePackageID:  pkg.PackageID,
+			CloudJobID:       "job_1",
+			RepairAttempt:    1,
+			ApprovalRequired: true,
+			RequestedAt:      now,
+			ExpiresAt:        now.Add(24 * time.Hour),
+		},
+		AuditTrail: model.CloudExecutionAuditTrail{StartedAt: now.Add(-time.Second), CompletedAt: now},
+		Delivery: model.ResultDelivery{
+			ResultPackageRef: model.PackageArtifactDescriptor{ID: "result_failed_artifact", Kind: "recording_result_package", URI: "cascade://recording-results/result_failed_1", Encrypted: true},
+			AckRequired:      true,
+			ExpiresAt:        now.Add(24 * time.Hour),
+		},
+		CreatedAt: now,
 	}
 }
 
