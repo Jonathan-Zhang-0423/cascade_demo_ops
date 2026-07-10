@@ -133,15 +133,16 @@ type GraphPatchOperation struct {
 }
 
 type ExecutionTrace struct {
-	ID              string            `json:"id"`
-	WorkflowGraphID string            `json:"workflow_graph_id"`
-	GraphVersion    int               `json:"graph_version"`
-	StartedAt       time.Time         `json:"started_at,omitempty"`
-	CompletedAt     time.Time         `json:"completed_at,omitempty"`
-	PassRate        float64           `json:"pass_rate,omitempty"`
-	StepResults     []StepResult      `json:"step_results,omitempty"`
-	Artifacts       []ArtifactRef     `json:"artifacts,omitempty"`
-	Environment     map[string]string `json:"environment,omitempty"`
+	ID              string                    `json:"id"`
+	WorkflowGraphID string                    `json:"workflow_graph_id"`
+	GraphVersion    int                       `json:"graph_version"`
+	StartedAt       time.Time                 `json:"started_at,omitempty"`
+	CompletedAt     time.Time                 `json:"completed_at,omitempty"`
+	PassRate        float64                   `json:"pass_rate,omitempty"`
+	StepResults     []StepResult              `json:"step_results,omitempty"`
+	Artifacts       []ArtifactRef             `json:"artifacts,omitempty"`
+	Environment     map[string]string         `json:"environment,omitempty"`
+	Sandbox         *SandboxExecutionMetadata `json:"sandbox,omitempty"`
 }
 
 type StepResult struct {

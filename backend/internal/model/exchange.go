@@ -33,6 +33,21 @@ const PayloadRefKindInline = "inline"
 const PayloadRefKindArtifact = "artifact"
 const ResultRecipientAppInstallation = "app_installation"
 const ResultRecipientOrganization = "organization"
+const ArtifactRoleFinalDemoVideo = "final_demo_video"
+const ArtifactRoleRecordingOutput = "recording_output"
+const ArtifactKindVideo = "video"
+const ArtifactKindRecordingResultPackage = "recording_result_package"
+const SandboxProfileDev = "dev"
+const SandboxProfileMVPCloud = "mvp_cloud"
+const SandboxProfileEnterprise = "enterprise"
+const SandboxIsolationLocalSidecar = "local_sidecar"
+const SandboxIsolationContainer = "per_job_container"
+const SandboxIsolationMicroVM = "per_job_microvm"
+const SandboxNetworkDenyAll = "deny_all"
+const SandboxNetworkAllowedDomainsOnly = "allowed_domains_only"
+const SandboxNetworkNoCustomerNetwork = "no_customer_network"
+const SandboxFilesystemTmpfsWorkspace = "tmpfs_workspace"
+const SandboxFilesystemReadOnlyRoot = "read_only_root"
 
 type ExchangePackageKind string
 
@@ -244,7 +259,92 @@ type RecordingRunSpec struct {
 	Outputs             RecordingOutputRequest `json:"outputs"`
 	Redactions          RedactionPolicy        `json:"redactions"`
 	FailurePolicy       RecordingFailurePolicy `json:"failure_policy"`
+	SandboxPolicy       *SandboxPolicy         `json:"sandbox_policy,omitempty"`
 	Environment         map[string]string      `json:"environment,omitempty"`
+}
+
+type SandboxPolicy struct {
+	Profile          string                  `json:"profile,omitempty"`
+	IsolationMode    string                  `json:"isolation_mode,omitempty"`
+	NetworkPolicy    SandboxNetworkPolicy    `json:"network_policy"`
+	FilesystemPolicy SandboxFilesystemPolicy `json:"filesystem_policy"`
+	ResourceLimits   SandboxResourceLimits   `json:"resource_limits"`
+	BrowserPolicy    SandboxBrowserPolicy    `json:"browser_policy"`
+	SecretPolicy     SandboxSecretPolicy     `json:"secret_policy"`
+	ArtifactPolicy   SandboxArtifactPolicy   `json:"artifact_policy"`
+	DiagnosticPolicy SandboxDiagnosticPolicy `json:"diagnostic_policy"`
+	PolicyHashSHA256 string                  `json:"policy_hash_sha256,omitempty"`
+}
+
+type SandboxNetworkPolicy struct {
+	Mode                    string   `json:"mode,omitempty"`
+	AllowedDomains          []string `json:"allowed_domains,omitempty"`
+	AllowedCascadeEndpoints []string `json:"allowed_cascade_endpoints,omitempty"`
+	DeniedCIDRs             []string `json:"denied_cidrs,omitempty"`
+	ProxyRequired           bool     `json:"proxy_required"`
+	DNSPolicy               string   `json:"dns_policy,omitempty"`
+}
+
+type SandboxFilesystemPolicy struct {
+	Mode               string   `json:"mode,omitempty"`
+	WritablePaths      []string `json:"writable_paths,omitempty"`
+	NoHostMount        bool     `json:"no_host_mount"`
+	NoDockerSocket     bool     `json:"no_docker_socket"`
+	DeleteTempAfterRun bool     `json:"delete_temp_after_run"`
+}
+
+type SandboxResourceLimits struct {
+	MaxRuntimeSec int   `json:"max_runtime_sec,omitempty"`
+	MaxMemoryMB   int   `json:"max_memory_mb,omitempty"`
+	MaxCPUCount   int   `json:"max_cpu_count,omitempty"`
+	MaxDiskMB     int64 `json:"max_disk_mb,omitempty"`
+}
+
+type SandboxBrowserPolicy struct {
+	FreshContextPerRun bool     `json:"fresh_context_per_run"`
+	DisableExtensions  bool     `json:"disable_extensions"`
+	DisableDownloads   bool     `json:"disable_downloads"`
+	TraceSources       bool     `json:"trace_sources"`
+	AllowedPageMethods []string `json:"allowed_page_methods,omitempty"`
+	AllowedContextAPIs []string `json:"allowed_context_apis,omitempty"`
+}
+
+type SandboxSecretPolicy struct {
+	VaultOnly                bool     `json:"vault_only"`
+	AllowedSecretRefs        []string `json:"allowed_secret_refs,omitempty"`
+	InjectViaContextOnly     bool     `json:"inject_via_context_only"`
+	ForbidEnvInjection       bool     `json:"forbid_env_injection"`
+	RevokeAfterRun           bool     `json:"revoke_after_run"`
+	RotationRequiredAfterRun bool     `json:"rotation_required_after_run"`
+}
+
+type SandboxArtifactPolicy struct {
+	EncryptSensitiveArtifacts bool          `json:"encrypt_sensitive_artifacts"`
+	SensitiveByDefault        bool          `json:"sensitive_by_default"`
+	RecipientKind             string        `json:"recipient_kind,omitempty"`
+	RecipientKeyID            string        `json:"recipient_key_id,omitempty"`
+	Retention                 RetentionSpec `json:"retention,omitempty"`
+	RequireChecksum           bool          `json:"require_checksum"`
+}
+
+type SandboxDiagnosticPolicy struct {
+	RedactionRequired  bool     `json:"redaction_required"`
+	ForbidFullHTML     bool     `json:"forbid_full_html"`
+	StripHeaders       []string `json:"strip_headers,omitempty"`
+	StripStorageKeys   []string `json:"strip_storage_keys,omitempty"`
+	EncryptDiagnostics bool     `json:"encrypt_diagnostics"`
+	ReturnRepairHints  bool     `json:"return_repair_hints"`
+}
+
+type SandboxExecutionMetadata struct {
+	PolicyHashSHA256 string            `json:"policy_hash_sha256,omitempty"`
+	Profile          string            `json:"profile,omitempty"`
+	IsolationMode    string            `json:"isolation_mode,omitempty"`
+	NetworkMode      string            `json:"network_mode,omitempty"`
+	WorkerID         string            `json:"worker_id,omitempty"`
+	ContainerID      string            `json:"container_id,omitempty"`
+	MicroVMID        string            `json:"micro_vm_id,omitempty"`
+	RuntimeVersions  map[string]string `json:"runtime_versions,omitempty"`
 }
 
 type BrowserRunSpec struct {
@@ -521,13 +621,14 @@ type VerificationReport struct {
 }
 
 type CloudExecutionAuditTrail struct {
-	CloudWorkerID       string            `json:"cloud_worker_id,omitempty"`
-	StartedAt           time.Time         `json:"started_at,omitempty"`
-	CompletedAt         time.Time         `json:"completed_at,omitempty"`
-	RuntimeVersions     map[string]string `json:"runtime_versions,omitempty"`
-	SourcePackageDigest string            `json:"source_package_digest,omitempty"`
-	GraphDigest         string            `json:"graph_digest,omitempty"`
-	ExecutionIP         string            `json:"execution_ip,omitempty"`
+	CloudWorkerID       string                    `json:"cloud_worker_id,omitempty"`
+	StartedAt           time.Time                 `json:"started_at,omitempty"`
+	CompletedAt         time.Time                 `json:"completed_at,omitempty"`
+	RuntimeVersions     map[string]string         `json:"runtime_versions,omitempty"`
+	Sandbox             *SandboxExecutionMetadata `json:"sandbox,omitempty"`
+	SourcePackageDigest string                    `json:"source_package_digest,omitempty"`
+	GraphDigest         string                    `json:"graph_digest,omitempty"`
+	ExecutionIP         string                    `json:"execution_ip,omitempty"`
 }
 
 type ResultDelivery struct {
@@ -655,8 +756,9 @@ type ExecutionPackageInitResponse struct {
 }
 
 type ExecutionPackageUploadRequest struct {
-	UploadID string           `json:"upload_id"`
-	Envelope ExchangeEnvelope `json:"envelope"`
+	UploadID   string              `json:"upload_id"`
+	Envelope   ExchangeEnvelope    `json:"envelope"`
+	PayloadRef EncryptedPayloadRef `json:"payload_ref,omitempty"`
 }
 
 type ExecutionPackageUploadResponse struct {
@@ -717,9 +819,12 @@ type ExecutionResultSummary struct {
 }
 
 type ResultPackageAckRequest struct {
-	ResultPackageID  string    `json:"result_package_id"`
-	AckedByInstallID string    `json:"acked_by_install_id,omitempty"`
-	AckedAt          time.Time `json:"acked_at"`
+	ResultPackageID     string    `json:"result_package_id"`
+	AckedByInstallID    string    `json:"acked_by_install_id,omitempty"`
+	ReceivedAssetIDs    []string  `json:"received_asset_ids,omitempty"`
+	VerifiedChecksums   bool      `json:"verified_checksums,omitempty"`
+	ChecksumMismatchIDs []string  `json:"checksum_mismatch_ids,omitempty"`
+	AckedAt             time.Time `json:"acked_at"`
 }
 
 type ResultPackageAckResponse struct {
@@ -747,6 +852,166 @@ func DigestCanonicalJSON(value any) (string, error) {
 		return "", err
 	}
 	return SHA256Hex(data), nil
+}
+
+func DefaultSandboxPolicyForRunSpec(spec RecordingRunSpec) SandboxPolicy {
+	maxRuntime := spec.Timeline.TargetDurationSec + 120
+	if maxRuntime < 300 {
+		maxRuntime = 300
+	}
+	policy := SandboxPolicy{
+		Profile:       SandboxProfileMVPCloud,
+		IsolationMode: SandboxIsolationContainer,
+		NetworkPolicy: SandboxNetworkPolicy{
+			Mode:                    SandboxNetworkAllowedDomainsOnly,
+			AllowedDomains:          append([]string{}, spec.AllowedDomains...),
+			AllowedCascadeEndpoints: []string{"artifact", "kms", "vault"},
+			DeniedCIDRs:             []string{"169.254.169.254/32", "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
+			ProxyRequired:           true,
+			DNSPolicy:               "proxy_resolved",
+		},
+		FilesystemPolicy: SandboxFilesystemPolicy{
+			Mode:               SandboxFilesystemReadOnlyRoot,
+			WritablePaths:      []string{"/workspace", "/tmp"},
+			NoHostMount:        true,
+			NoDockerSocket:     true,
+			DeleteTempAfterRun: true,
+		},
+		ResourceLimits: SandboxResourceLimits{
+			MaxRuntimeSec: maxRuntime,
+			MaxMemoryMB:   2048,
+			MaxCPUCount:   2,
+			MaxDiskMB:     4096,
+		},
+		BrowserPolicy: SandboxBrowserPolicy{
+			FreshContextPerRun: true,
+			DisableExtensions:  true,
+			DisableDownloads:   true,
+			TraceSources:       false,
+			AllowedPageMethods: []string{
+				"goto", "click", "fill", "selectOption", "setInputFiles", "waitForTimeout", "waitForLoadState", "locator",
+			},
+			AllowedContextAPIs: []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"},
+		},
+		SecretPolicy: SandboxSecretPolicy{
+			VaultOnly:                true,
+			InjectViaContextOnly:     true,
+			ForbidEnvInjection:       true,
+			RevokeAfterRun:           true,
+			RotationRequiredAfterRun: true,
+		},
+		ArtifactPolicy: SandboxArtifactPolicy{
+			EncryptSensitiveArtifacts: true,
+			SensitiveByDefault:        true,
+			RecipientKind:             ResultRecipientAppInstallation,
+			RequireChecksum:           true,
+		},
+		DiagnosticPolicy: SandboxDiagnosticPolicy{
+			RedactionRequired:  true,
+			ForbidFullHTML:     true,
+			StripHeaders:       []string{"authorization", "cookie", "set-cookie"},
+			StripStorageKeys:   []string{"localStorage", "sessionStorage"},
+			EncryptDiagnostics: true,
+			ReturnRepairHints:  true,
+		},
+	}
+	policy.PolicyHashSHA256 = sandboxPolicyHash(policy)
+	return policy
+}
+
+func ResolveSandboxPolicy(spec RecordingRunSpec, bundle *ExecutableRecordingScriptBundle) SandboxPolicy {
+	if spec.SandboxPolicy != nil {
+		policy := *spec.SandboxPolicy
+		normalizeSandboxPolicy(&policy, spec)
+		return policy
+	}
+	policy := DefaultSandboxPolicyForRunSpec(spec)
+	if bundle != nil {
+		if len(bundle.SecurityPolicy.AllowedDomains) > 0 {
+			policy.NetworkPolicy.AllowedDomains = append([]string{}, bundle.SecurityPolicy.AllowedDomains...)
+		}
+		if len(bundle.SecurityPolicy.AllowedContextAPIs) > 0 {
+			policy.BrowserPolicy.AllowedContextAPIs = append([]string{}, bundle.SecurityPolicy.AllowedContextAPIs...)
+		}
+		if len(bundle.SecurityPolicy.AllowedPageMethods) > 0 {
+			policy.BrowserPolicy.AllowedPageMethods = append([]string{}, bundle.SecurityPolicy.AllowedPageMethods...)
+		}
+		policy.SecretPolicy.AllowedSecretRefs = append([]string{}, bundle.SecurityPolicy.SecretRefs...)
+	}
+	normalizeSandboxPolicy(&policy, spec)
+	return policy
+}
+
+func sandboxExecutionMetadataFromPolicy(policy SandboxPolicy) SandboxExecutionMetadata {
+	return SandboxExecutionMetadata{
+		PolicyHashSHA256: policy.PolicyHashSHA256,
+		Profile:          policy.Profile,
+		IsolationMode:    policy.IsolationMode,
+		NetworkMode:      policy.NetworkPolicy.Mode,
+	}
+}
+
+func ValidateSandboxPolicyForPackage(pkg *ClientExecutionPackage) error {
+	if pkg == nil {
+		return errors.New("client execution package is nil")
+	}
+	if explicitPolicy := pkg.RecordingRunSpec.SandboxPolicy; explicitPolicy != nil {
+		profile := explicitPolicy.Profile
+		if profile == "" {
+			profile = SandboxProfileMVPCloud
+		}
+		if profile != SandboxProfileDev && !explicitPolicy.NetworkPolicy.ProxyRequired {
+			return errors.New("cloud sandbox network egress proxy is required")
+		}
+	}
+	policy := ResolveSandboxPolicy(pkg.RecordingRunSpec, pkg.ExecutableScriptBundle)
+	if policy.IsolationMode == "" {
+		return errors.New("sandbox isolation_mode is required")
+	}
+	switch policy.IsolationMode {
+	case SandboxIsolationLocalSidecar, SandboxIsolationContainer, SandboxIsolationMicroVM:
+	default:
+		return fmt.Errorf("unsupported sandbox isolation_mode %q", policy.IsolationMode)
+	}
+	if policy.NetworkPolicy.Mode == "" {
+		return errors.New("sandbox network_policy.mode is required")
+	}
+	switch policy.NetworkPolicy.Mode {
+	case SandboxNetworkDenyAll, SandboxNetworkAllowedDomainsOnly, SandboxNetworkNoCustomerNetwork:
+	default:
+		return fmt.Errorf("unsupported sandbox network_policy.mode %q", policy.NetworkPolicy.Mode)
+	}
+	if policy.NetworkPolicy.Mode == SandboxNetworkAllowedDomainsOnly && len(policy.NetworkPolicy.AllowedDomains) == 0 {
+		return errors.New("sandbox allowed_domains is required for allowed_domains_only network policy")
+	}
+	if !allStringsAllowed(policy.NetworkPolicy.AllowedDomains, pkg.RecordingRunSpec.AllowedDomains) {
+		return errors.New("sandbox allowed_domains exceed recording_run_spec.allowed_domains")
+	}
+	if !policy.NetworkPolicy.ProxyRequired && policy.Profile != SandboxProfileDev {
+		return errors.New("cloud sandbox network egress proxy is required")
+	}
+	if !policy.FilesystemPolicy.NoHostMount || !policy.FilesystemPolicy.NoDockerSocket {
+		return errors.New("sandbox filesystem policy must disable host mounts and docker socket")
+	}
+	if policy.Profile != SandboxProfileDev && policy.IsolationMode == SandboxIsolationLocalSidecar {
+		return errors.New("local_sidecar isolation is only allowed for dev profile")
+	}
+	if policy.ResourceLimits.MaxRuntimeSec <= 0 || policy.ResourceLimits.MaxMemoryMB <= 0 || policy.ResourceLimits.MaxDiskMB <= 0 {
+		return errors.New("sandbox resource limits must include runtime, memory, and disk")
+	}
+	if !policy.BrowserPolicy.FreshContextPerRun || !policy.BrowserPolicy.DisableExtensions || !policy.BrowserPolicy.DisableDownloads || policy.BrowserPolicy.TraceSources {
+		return errors.New("sandbox browser policy must use fresh context, disable extensions/downloads, and disable trace sources")
+	}
+	if !policy.SecretPolicy.VaultOnly || !policy.SecretPolicy.InjectViaContextOnly || !policy.SecretPolicy.ForbidEnvInjection {
+		return errors.New("sandbox secret policy must use vault-only context injection")
+	}
+	if !policy.ArtifactPolicy.EncryptSensitiveArtifacts || !policy.ArtifactPolicy.RequireChecksum {
+		return errors.New("sandbox artifact policy must encrypt sensitive artifacts and require checksums")
+	}
+	if !policy.DiagnosticPolicy.RedactionRequired || !policy.DiagnosticPolicy.ForbidFullHTML || !policy.DiagnosticPolicy.EncryptDiagnostics {
+		return errors.New("sandbox diagnostic policy must require redaction, forbid full HTML, and encrypt diagnostics")
+	}
+	return nil
 }
 
 type EncryptedPayloadPackage struct {
@@ -976,6 +1241,49 @@ func (e *ExchangeEnvelope) ValidateForCanonicalPayload(canonicalPayload []byte, 
 	return nil
 }
 
+func (e *ExchangeEnvelope) ValidateMetadataForEncryptedUpload(now time.Time, seenNonces map[string]bool) error {
+	if e == nil {
+		return errors.New("exchange envelope is nil")
+	}
+	if e.SchemaVersion != ExchangeEnvelopeSchemaVersion {
+		return errors.New("unsupported exchange envelope schema version")
+	}
+	if e.EnvelopeID == "" || e.OrgID == "" || e.ProjectID == "" || e.IdempotencyKey == "" {
+		return errors.New("exchange envelope missing required identity fields")
+	}
+	if e.PackageKind == "" || e.PayloadSchemaVersion == "" {
+		return errors.New("exchange envelope missing package kind or payload schema version")
+	}
+	if err := e.ValidateCryptoPolicy(); err != nil {
+		return err
+	}
+	if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
+		return errors.New("exchange envelope is expired")
+	}
+	if e.Crypto.Nonce == "" {
+		return errors.New("exchange envelope nonce is required")
+	}
+	if seenNonces != nil && seenNonces[e.Crypto.Nonce] {
+		return errors.New("exchange envelope nonce has already been used")
+	}
+	if e.Crypto.PayloadDigestSHA256 == "" {
+		return errors.New("exchange envelope payload digest is required")
+	}
+	if e.Crypto.CiphertextDigestSHA256 == "" {
+		return errors.New("exchange envelope ciphertext digest is required")
+	}
+	if e.PayloadRef.SHA256 != "" && e.Crypto.CiphertextDigestSHA256 != e.PayloadRef.SHA256 {
+		return errors.New("exchange envelope ciphertext digest does not match payload_ref sha256")
+	}
+	if e.Crypto.Signature == "" || e.Crypto.SignatureKeyID == "" || e.Crypto.SignatureAlg == "" {
+		return errors.New("exchange envelope signature metadata is required")
+	}
+	if seenNonces != nil {
+		seenNonces[e.Crypto.Nonce] = true
+	}
+	return nil
+}
+
 func (e *ExchangeEnvelope) ValidateCryptoPolicy() error {
 	if e == nil {
 		return errors.New("exchange envelope is nil")
@@ -1118,4 +1426,93 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizeSandboxPolicy(policy *SandboxPolicy, spec RecordingRunSpec) {
+	if policy == nil {
+		return
+	}
+	if policy.Profile == "" {
+		policy.Profile = SandboxProfileMVPCloud
+	}
+	if policy.IsolationMode == "" {
+		if policy.Profile == SandboxProfileDev {
+			policy.IsolationMode = SandboxIsolationLocalSidecar
+		} else {
+			policy.IsolationMode = SandboxIsolationContainer
+		}
+	}
+	if policy.NetworkPolicy.Mode == "" {
+		policy.NetworkPolicy.Mode = SandboxNetworkAllowedDomainsOnly
+	}
+	if len(policy.NetworkPolicy.AllowedDomains) == 0 {
+		policy.NetworkPolicy.AllowedDomains = append([]string{}, spec.AllowedDomains...)
+	}
+	if len(policy.NetworkPolicy.DeniedCIDRs) == 0 {
+		policy.NetworkPolicy.DeniedCIDRs = []string{"169.254.169.254/32", "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	}
+	if policy.Profile != SandboxProfileDev {
+		policy.NetworkPolicy.ProxyRequired = true
+	}
+	if policy.FilesystemPolicy.Mode == "" {
+		policy.FilesystemPolicy.Mode = SandboxFilesystemReadOnlyRoot
+	}
+	if len(policy.FilesystemPolicy.WritablePaths) == 0 {
+		policy.FilesystemPolicy.WritablePaths = []string{"/workspace", "/tmp"}
+	}
+	if policy.ResourceLimits.MaxRuntimeSec <= 0 {
+		policy.ResourceLimits.MaxRuntimeSec = 300
+	}
+	if policy.ResourceLimits.MaxMemoryMB <= 0 {
+		policy.ResourceLimits.MaxMemoryMB = 2048
+	}
+	if policy.ResourceLimits.MaxCPUCount <= 0 {
+		policy.ResourceLimits.MaxCPUCount = 2
+	}
+	if policy.ResourceLimits.MaxDiskMB <= 0 {
+		policy.ResourceLimits.MaxDiskMB = 4096
+	}
+	if len(policy.BrowserPolicy.AllowedPageMethods) == 0 {
+		policy.BrowserPolicy.AllowedPageMethods = []string{"goto", "click", "fill", "selectOption", "setInputFiles", "waitForTimeout", "waitForLoadState", "locator"}
+	}
+	if len(policy.BrowserPolicy.AllowedContextAPIs) == 0 {
+		policy.BrowserPolicy.AllowedContextAPIs = []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"}
+	}
+	if policy.ArtifactPolicy.RecipientKind == "" {
+		policy.ArtifactPolicy.RecipientKind = ResultRecipientAppInstallation
+	}
+	if len(policy.DiagnosticPolicy.StripHeaders) == 0 {
+		policy.DiagnosticPolicy.StripHeaders = []string{"authorization", "cookie", "set-cookie"}
+	}
+	if len(policy.DiagnosticPolicy.StripStorageKeys) == 0 {
+		policy.DiagnosticPolicy.StripStorageKeys = []string{"localStorage", "sessionStorage"}
+	}
+	policy.PolicyHashSHA256 = sandboxPolicyHash(*policy)
+}
+
+func sandboxPolicyHash(policy SandboxPolicy) string {
+	copy := policy
+	copy.PolicyHashSHA256 = ""
+	digest, err := DigestCanonicalJSON(copy)
+	if err != nil {
+		return ""
+	}
+	return digest
+}
+
+func allStringsAllowed(values []string, allowed []string) bool {
+	allowedSet := map[string]bool{}
+	for _, value := range allowed {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized != "" {
+			allowedSet[normalized] = true
+		}
+	}
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" || !allowedSet[normalized] {
+			return false
+		}
+	}
+	return true
 }

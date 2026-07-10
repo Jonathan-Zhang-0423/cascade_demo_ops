@@ -18,10 +18,11 @@ const (
 )
 
 type exchangeUploadHTTPBody struct {
-	UploadID string                               `json:"upload_id,omitempty"`
-	Envelope model.ExchangeEnvelope               `json:"envelope,omitempty"`
-	Request  *model.ExecutionPackageUploadRequest `json:"request,omitempty"`
-	Payload  model.ClientExecutionPackage         `json:"payload"`
+	UploadID   string                               `json:"upload_id,omitempty"`
+	Envelope   model.ExchangeEnvelope               `json:"envelope,omitempty"`
+	PayloadRef model.EncryptedPayloadRef            `json:"payload_ref,omitempty"`
+	Request    *model.ExecutionPackageUploadRequest `json:"request,omitempty"`
+	Payload    model.ClientExecutionPackage         `json:"payload,omitempty"`
 }
 
 type exchangeHTTPError struct {
@@ -62,9 +63,12 @@ func (s *DevHTTPServer) handleExecutionPackageUpload(w http.ResponseWriter, r *h
 		writeExchangeError(w, http.StatusBadRequest, "bad_request", err)
 		return
 	}
-	request := model.ExecutionPackageUploadRequest{UploadID: body.UploadID, Envelope: body.Envelope}
+	request := model.ExecutionPackageUploadRequest{UploadID: body.UploadID, Envelope: body.Envelope, PayloadRef: body.PayloadRef}
 	if body.Request != nil {
 		request = *body.Request
+	}
+	if request.PayloadRef.Kind == "" {
+		request.PayloadRef = request.Envelope.PayloadRef
 	}
 	response, err := s.service.UploadExecutionPackage(r.Context(), request, body.Payload)
 	writeExchangeValue(w, response, err)

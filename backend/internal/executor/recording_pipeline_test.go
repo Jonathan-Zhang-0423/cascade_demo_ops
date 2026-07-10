@@ -58,6 +58,10 @@ func TestRunClientExecutionRecordingAndRenderCallsExecutorInProtocolOrder(t *tes
 	if demoVideo == nil || demoVideo.URI != "artifacts/render/job_1/final.mp4" || demoVideo.Metadata["asset_role"] != "final_demo" || demoVideo.Metadata["include_in_demo"] != true {
 		t.Fatalf("unexpected demo video artifact metadata: %+v", demoVideo)
 	}
+	finalVideoDescriptor := findPackageDescriptor(result.RecordingResultPackage.Delivery.AssetRefs, "artifact_pkg_1_demo_video_001")
+	if finalVideoDescriptor == nil || finalVideoDescriptor.Role != model.ArtifactRoleFinalDemoVideo || finalVideoDescriptor.Kind != model.ArtifactKindVideo || !finalVideoDescriptor.Encrypted || !finalVideoDescriptor.Sensitive {
+		t.Fatalf("expected encrypted final demo video delivery descriptor, got %+v", finalVideoDescriptor)
+	}
 	if service.renderRequest.RecordingResultPackage == nil || service.renderRequest.RecordingResultPackage.SourcePackageID != pkg.PackageID {
 		t.Fatalf("render request must consume recording result package: %+v", service.renderRequest)
 	}
@@ -219,6 +223,15 @@ func findPipelineArtifact(artifacts []model.ArtifactRef, kind string) *model.Art
 	for index := range artifacts {
 		if artifacts[index].Kind == kind {
 			return &artifacts[index]
+		}
+	}
+	return nil
+}
+
+func findPackageDescriptor(descriptors []model.PackageArtifactDescriptor, id string) *model.PackageArtifactDescriptor {
+	for index := range descriptors {
+		if descriptors[index].ID == id {
+			return &descriptors[index]
 		}
 	}
 	return nil

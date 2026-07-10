@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -144,9 +145,21 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 	if request.Envelope.OrgID != session.OrgID || request.Envelope.ProjectID != session.ProjectID || request.Envelope.PackageKind != session.PackageKind {
 		return model.ExecutionPackageUploadResponse{}, errors.New("upload request envelope does not match initialized session")
 	}
+	if request.PayloadRef.Kind == "" {
+		request.PayloadRef = request.Envelope.PayloadRef
+	}
+	if !reflect.DeepEqual(request.PayloadRef, request.Envelope.PayloadRef) {
+		return model.ExecutionPackageUploadResponse{}, errors.New("upload request payload_ref does not match exchange envelope")
+	}
 	if existingID := s.packageByIdem[idempotencyKey(request.Envelope.OrgID, request.Envelope.IdempotencyKey)]; existingID != "" {
 		existing := s.packages[existingID]
 		return model.ExecutionPackageUploadResponse{ExchangePackageID: existing.ExchangePackageID, CloudJobID: existing.CloudJobID, Status: existing.Status}, nil
+	}
+	if payload.PackageID == "" {
+		if err := request.Envelope.ValidateMetadataForEncryptedUpload(now, s.seenNonces); err != nil {
+			return model.ExecutionPackageUploadResponse{}, err
+		}
+		return s.acceptEnvelopeOnlyPackageLocked(request.Envelope, now)
 	}
 	if err := model.ValidateClientExecutionPackageIntake(&request.Envelope, &payload, now, s.seenNonces, s.verifier); err != nil {
 		return model.ExecutionPackageUploadResponse{}, err
@@ -168,6 +181,23 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 	s.packageByIdem[idempotencyKey(request.Envelope.OrgID, request.Envelope.IdempotencyKey)] = exchangePackageID
 	delete(s.uploads, request.UploadID)
 
+	return model.ExecutionPackageUploadResponse{ExchangePackageID: exchangePackageID, CloudJobID: cloudJobID, Status: state.Status}, nil
+}
+
+func (s *ExchangeIntakeService) acceptEnvelopeOnlyPackageLocked(envelope model.ExchangeEnvelope, now time.Time) (model.ExecutionPackageUploadResponse, error) {
+	exchangePackageID := newExchangeID(defaultExchangeIDPrefix, now)
+	cloudJobID := newExchangeID(defaultCloudJobIDPrefix, now)
+	state := &exchangePackageState{
+		ExchangePackageID: exchangePackageID,
+		CloudJobID:        cloudJobID,
+		Status:            model.ExchangePackageStatusAccepted,
+		Envelope:          envelope,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	setPackageStageLocked(state, model.ExchangePackageStatusAccepted, "accepted", "Encrypted execution package accepted. Isolated worker decryption is required before execution.", 10, now)
+	s.packages[exchangePackageID] = state
+	s.packageByIdem[idempotencyKey(envelope.OrgID, envelope.IdempotencyKey)] = exchangePackageID
 	return model.ExecutionPackageUploadResponse{ExchangePackageID: exchangePackageID, CloudJobID: cloudJobID, Status: state.Status}, nil
 }
 
@@ -272,6 +302,12 @@ func (s *ExchangeIntakeService) AckResultPackage(ctx context.Context, orgID stri
 	if request.ResultPackageID == "" {
 		return model.ResultPackageAckResponse{}, errors.New("result_package_id is required")
 	}
+	if !request.VerifiedChecksums {
+		return model.ResultPackageAckResponse{}, errors.New("result package ack requires verified_checksums=true")
+	}
+	if len(request.ChecksumMismatchIDs) > 0 {
+		return model.ResultPackageAckResponse{}, errors.New("result package ack rejected because checksum_mismatch_ids is not empty")
+	}
 	if request.AckedAt.IsZero() {
 		request.AckedAt = s.now()
 	}
@@ -286,10 +322,38 @@ func (s *ExchangeIntakeService) AckResultPackage(ctx context.Context, orgID stri
 	if err != nil {
 		return model.ResultPackageAckResponse{}, err
 	}
+	if len(request.ReceivedAssetIDs) > 0 {
+		if err := validateReceivedAssets(resultState.Result, request.ReceivedAssetIDs); err != nil {
+			return model.ResultPackageAckResponse{}, err
+		}
+	}
 	resultState.Result.Status = model.RecordingResultStatusAcked
 	resultState.Result.Delivery.AckedAt = request.AckedAt
 	state.UpdatedAt = request.AckedAt
 	return model.ResultPackageAckResponse{ResultPackageID: request.ResultPackageID, Status: model.RecordingResultStatusAcked, Retention: resultState.Retention}, nil
+}
+
+func validateReceivedAssets(result model.RecordingResultPackage, receivedAssetIDs []string) error {
+	known := map[string]bool{}
+	for _, asset := range result.Delivery.AssetRefs {
+		if asset.ID != "" {
+			known[asset.ID] = true
+		}
+	}
+	for _, asset := range result.GeneratedAssets {
+		if asset.ID != "" {
+			known[asset.ID] = true
+		}
+	}
+	for _, id := range receivedAssetIDs {
+		if strings.TrimSpace(id) == "" {
+			return errors.New("received_asset_ids contains an empty asset id")
+		}
+		if !known[id] {
+			return fmt.Errorf("received asset id %q is not part of result package", id)
+		}
+	}
+	return nil
 }
 
 func (s *ExchangeIntakeService) packageState(orgID string, exchangePackageID string) (*exchangePackageState, error) {

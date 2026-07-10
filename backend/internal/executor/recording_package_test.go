@@ -33,6 +33,9 @@ func TestNewRecordRequestFromClientExecutionPackageUsesProtocolFields(t *testing
 	if !request.Headless || request.RecordingRunSpec == nil || request.RecordingRunSpec.BaseURL != "https://app.example.com" {
 		t.Fatalf("record request did not carry run spec: %+v", request)
 	}
+	if request.SandboxPolicy == nil || request.SandboxPolicy.PolicyHashSHA256 == "" || request.SandboxPolicy.IsolationMode != model.SandboxIsolationContainer {
+		t.Fatalf("record request did not carry resolved sandbox policy: %+v", request.SandboxPolicy)
+	}
 }
 
 func TestNewRecordRequestFromClientExecutionPackageRejectsInvalidProtocolPackage(t *testing.T) {
@@ -45,12 +48,15 @@ func TestNewRecordRequestFromClientExecutionPackageRejectsInvalidProtocolPackage
 }
 
 func TestRecordRequestJSONIncludesRecordingMode(t *testing.T) {
-	data, err := json.Marshal(RecordRequest{RecordingMode: RecordingModePlaywright})
+	data, err := json.Marshal(RecordRequest{RecordingMode: RecordingModePlaywright, SandboxPolicy: &model.SandboxPolicy{Profile: model.SandboxProfileDev}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), `"recording_mode":"playwright"`) {
 		t.Fatalf("recording mode must be serialized for video-worker: %s", data)
+	}
+	if !strings.Contains(string(data), `"sandbox_policy"`) {
+		t.Fatalf("sandbox policy must be serialized for video-worker: %s", data)
 	}
 }
 
@@ -76,6 +82,12 @@ func TestNewRecordingResultPackageFromRecordResultIsRenderable(t *testing.T) {
 	}
 	if result.ExecutionTrace == nil || result.ExecutionTrace.WorkflowGraphID != pkg.WorkflowGraph.ID || result.ExecutionTrace.PassRate != 1 {
 		t.Fatalf("unexpected execution trace: %+v", result.ExecutionTrace)
+	}
+	if result.ExecutionTrace.Sandbox == nil || result.ExecutionTrace.Sandbox.PolicyHashSHA256 == "" || result.AuditTrail.Sandbox == nil {
+		t.Fatalf("expected sandbox metadata in trace and audit trail: trace=%+v audit=%+v", result.ExecutionTrace.Sandbox, result.AuditTrail.Sandbox)
+	}
+	if result.AuditTrail.Sandbox.PolicyHashSHA256 != result.ExecutionTrace.Sandbox.PolicyHashSHA256 {
+		t.Fatalf("sandbox policy hash mismatch between trace and audit trail: %+v vs %+v", result.ExecutionTrace.Sandbox, result.AuditTrail.Sandbox)
 	}
 	if len(result.GeneratedAssets) != 3 {
 		t.Fatalf("expected raw recording, screenshot, and trace artifacts, got %+v", result.GeneratedAssets)
@@ -206,8 +218,8 @@ func TestNewRecordingResultPackageFromRecordResultBuildsFailureDiagnostic(t *tes
 			Error:           model.AgentError{Code: "selector_timeout", Message: "Timeout waiting for selector", Retryable: true},
 			CurrentURL:      "https://app.example.com/dashboard",
 			PageTitle:       "Dashboard",
-			ScreenshotRefs:  []model.PackageArtifactDescriptor{localDiagnosticArtifactDescriptor(failureScreenshot, "failure_screenshot")},
-			TraceRefs:       []model.PackageArtifactDescriptor{localDiagnosticArtifactDescriptor(trace, "failure_trace")},
+			ScreenshotRefs:  []model.PackageArtifactDescriptor{localDiagnosticArtifactDescriptor(&pkg, failureScreenshot, "failure_screenshot")},
+			TraceRefs:       []model.PackageArtifactDescriptor{localDiagnosticArtifactDescriptor(&pkg, trace, "failure_trace")},
 			RedactionReport: model.DiagnosticRedactionReport{Applied: true, FullHTMLIncluded: false},
 			CapturedAt:      completedAt,
 		},
@@ -224,6 +236,12 @@ func TestNewRecordingResultPackageFromRecordResultBuildsFailureDiagnostic(t *tes
 	}
 	if result.FailureDiagnostic.FailedNodeID != "node_start" || result.FailureDiagnostic.CurrentURL == "" {
 		t.Fatalf("unexpected failure diagnostic: %+v", result.FailureDiagnostic)
+	}
+	if len(result.FailureDiagnostic.ScreenshotRefs) != 1 || !result.FailureDiagnostic.ScreenshotRefs[0].Encrypted || !result.FailureDiagnostic.ScreenshotRefs[0].Sensitive || result.FailureDiagnostic.ScreenshotRefs[0].RecipientKeyID == "" {
+		t.Fatalf("failure screenshot descriptor must be encrypted, sensitive, and recipient-bound: %+v", result.FailureDiagnostic.ScreenshotRefs)
+	}
+	if len(result.FailureDiagnostic.TraceRefs) != 1 || !result.FailureDiagnostic.TraceRefs[0].Encrypted || !result.FailureDiagnostic.TraceRefs[0].Sensitive || result.FailureDiagnostic.TraceRefs[0].RecipientKeyID == "" {
+		t.Fatalf("failure trace descriptor must be encrypted, sensitive, and recipient-bound: %+v", result.FailureDiagnostic.TraceRefs)
 	}
 	if result.RepairRequest.SourceResultID != result.ResultID || !result.RepairRequest.ApprovalRequired {
 		t.Fatalf("unexpected repair request: %+v", result.RepairRequest)

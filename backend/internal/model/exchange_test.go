@@ -206,6 +206,90 @@ func TestExchangeEnvelopeRequiresEncryptedPayloadAndKeyWrappingMetadata(t *testi
 	}
 }
 
+func TestDefaultSandboxPolicyForPackageValidatesAndHashes(t *testing.T) {
+	pkg := sampleClientExecutionPackage(t)
+	policy := ResolveSandboxPolicy(pkg.RecordingRunSpec, pkg.ExecutableScriptBundle)
+
+	if err := ValidateSandboxPolicyForPackage(&pkg); err != nil {
+		t.Fatal(err)
+	}
+	if policy.Profile != SandboxProfileMVPCloud || policy.IsolationMode != SandboxIsolationContainer {
+		t.Fatalf("unexpected default sandbox profile: %+v", policy)
+	}
+	if policy.NetworkPolicy.Mode != SandboxNetworkAllowedDomainsOnly || !policy.NetworkPolicy.ProxyRequired {
+		t.Fatalf("unexpected default network policy: %+v", policy.NetworkPolicy)
+	}
+	if policy.PolicyHashSHA256 == "" {
+		t.Fatal("expected sandbox policy hash")
+	}
+	again := ResolveSandboxPolicy(pkg.RecordingRunSpec, pkg.ExecutableScriptBundle)
+	if again.PolicyHashSHA256 != policy.PolicyHashSHA256 {
+		t.Fatalf("sandbox policy hash should be stable: %s != %s", again.PolicyHashSHA256, policy.PolicyHashSHA256)
+	}
+}
+
+func TestValidateSandboxPolicyRejectsNonDevLocalSidecar(t *testing.T) {
+	pkg := sampleClientExecutionPackage(t)
+	policy := DefaultSandboxPolicyForRunSpec(pkg.RecordingRunSpec)
+	policy.Profile = SandboxProfileMVPCloud
+	policy.IsolationMode = SandboxIsolationLocalSidecar
+	pkg.RecordingRunSpec.SandboxPolicy = &policy
+
+	err := ValidateSandboxPolicyForPackage(&pkg)
+	if err == nil || !strings.Contains(err.Error(), "local_sidecar") {
+		t.Fatalf("expected local sidecar rejection, got %v", err)
+	}
+}
+
+func TestValidateSandboxPolicyRejectsDomainsOutsideRunSpec(t *testing.T) {
+	pkg := sampleClientExecutionPackage(t)
+	policy := DefaultSandboxPolicyForRunSpec(pkg.RecordingRunSpec)
+	policy.NetworkPolicy.AllowedDomains = append(policy.NetworkPolicy.AllowedDomains, "evil.example.com")
+	pkg.RecordingRunSpec.SandboxPolicy = &policy
+
+	err := ValidateSandboxPolicyForPackage(&pkg)
+	if err == nil || !strings.Contains(err.Error(), "allowed_domains exceed") {
+		t.Fatalf("expected sandbox domain rejection, got %v", err)
+	}
+}
+
+func TestValidateSandboxPolicyRejectsExplicitCloudPolicyWithoutProxy(t *testing.T) {
+	pkg := sampleClientExecutionPackage(t)
+	policy := DefaultSandboxPolicyForRunSpec(pkg.RecordingRunSpec)
+	policy.NetworkPolicy.ProxyRequired = false
+	pkg.RecordingRunSpec.SandboxPolicy = &policy
+
+	err := ValidateSandboxPolicyForPackage(&pkg)
+	if err == nil || !strings.Contains(err.Error(), "egress proxy") {
+		t.Fatalf("expected sandbox proxy rejection, got %v", err)
+	}
+}
+
+func TestExchangeEnvelopeMetadataValidationForEncryptedPayloadRef(t *testing.T) {
+	pkg := sampleClientExecutionPackage(t)
+	now := time.Date(2026, 7, 8, 9, 5, 0, 0, time.UTC)
+	envelope := sampleEnvelopeForPayload(t, pkg, now)
+	envelope.PayloadRef = EncryptedPayloadRef{
+		Kind:       PayloadRefKindArtifact,
+		ArtifactID: "payload_artifact_1",
+		URI:        "s3://cascade-exchange/payload.enc",
+		SHA256:     "sha_ciphertext",
+		SizeBytes:  2048,
+		Encrypted:  true,
+		Sensitive:  true,
+	}
+	envelope.Crypto.CiphertextDigestSHA256 = envelope.PayloadRef.SHA256
+	if err := envelope.ValidateMetadataForEncryptedUpload(now, map[string]bool{}); err != nil {
+		t.Fatalf("expected encrypted payload ref metadata to be accepted: %v", err)
+	}
+	badCiphertextDigest := envelope
+	badCiphertextDigest.Crypto.Nonce = "nonce_bad_ciphertext_digest"
+	badCiphertextDigest.Crypto.CiphertextDigestSHA256 = "other_digest"
+	if err := badCiphertextDigest.ValidateMetadataForEncryptedUpload(now, map[string]bool{}); err == nil || !strings.Contains(err.Error(), "ciphertext digest") {
+		t.Fatalf("expected ciphertext digest mismatch to be rejected, got %v", err)
+	}
+}
+
 func TestRecordingResultPackageJSONRoundTrip(t *testing.T) {
 	now := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
 	result := RecordingResultPackage{
@@ -297,6 +381,28 @@ func TestRecordingResultDeliveryRequiresEncryptedRecipientBoundArtifacts(t *test
 	result.Delivery.ResultPackageRef.Encrypted = false
 	if err := result.ValidateDeliverySecurity(); err == nil || !strings.Contains(err.Error(), "must be encrypted") {
 		t.Fatalf("expected unencrypted result package ref to be rejected, got %v", err)
+	}
+}
+
+func TestResultPackageAckRequestCarriesAssetAndChecksumReceipt(t *testing.T) {
+	ackedAt := time.Date(2026, 7, 8, 11, 0, 0, 0, time.UTC)
+	request := ResultPackageAckRequest{
+		ResultPackageID:   "result_pkg_1",
+		AckedByInstallID:  "install_1",
+		ReceivedAssetIDs:  []string{"artifact_demo_video"},
+		VerifiedChecksums: true,
+		AckedAt:           ackedAt,
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ResultPackageAckRequest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ResultPackageID != request.ResultPackageID || !got.VerifiedChecksums || got.ReceivedAssetIDs[0] != "artifact_demo_video" {
+		t.Fatalf("ack request did not round-trip asset receipt fields: %+v", got)
 	}
 }
 

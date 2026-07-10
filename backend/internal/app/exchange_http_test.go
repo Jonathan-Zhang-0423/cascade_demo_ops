@@ -59,9 +59,10 @@ func TestDevExchangeHTTPLifecycleAcceptsProtocolPackage(t *testing.T) {
 
 	envelope := sampleEnvelopeForAppTest(t, pkg, now)
 	uploadPayload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
-		UploadID: initPayload.UploadID,
-		Envelope: envelope,
-		Payload:  pkg,
+		UploadID:   initPayload.UploadID,
+		Envelope:   envelope,
+		PayloadRef: envelope.PayloadRef,
+		Payload:    pkg,
 	})
 	if uploadPayload.ExchangePackageID == "" || uploadPayload.Status != model.ExchangePackageStatusAccepted {
 		t.Fatalf("unexpected upload response: %+v", uploadPayload)
@@ -87,6 +88,44 @@ func TestDevExchangeHTTPLifecycleAcceptsProtocolPackage(t *testing.T) {
 	}
 }
 
+func TestDevExchangeHTTPAcceptsEncryptedPayloadRefOnlyUpload(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 9, 15, 35, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID:       pkg.OrgID,
+		ProjectID:   pkg.ProjectID,
+		PackageKind: model.ExchangePackageKindClientExecution,
+	})
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Crypto.Nonce = "nonce_http_payload_ref_only"
+	envelope.PayloadRef.Kind = model.PayloadRefKindArtifact
+	envelope.PayloadRef.ArtifactID = "payload_artifact_1"
+	envelope.PayloadRef.URI = "s3://cascade-exchange/payload.enc"
+	envelope.PayloadRef.InlineCiphertext = ""
+	envelope.PayloadRef.SHA256 = "ciphertext_hash_1"
+	envelope.PayloadRef.SizeBytes = 2048
+	envelope.PayloadRef.Encrypted = true
+	envelope.PayloadRef.Sensitive = true
+	envelope.Crypto.CiphertextDigestSHA256 = envelope.PayloadRef.SHA256
+
+	uploadPayload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID:   initPayload.UploadID,
+		Envelope:   envelope,
+		PayloadRef: envelope.PayloadRef,
+	})
+	if uploadPayload.ExchangePackageID == "" || uploadPayload.Status != model.ExchangePackageStatusAccepted {
+		t.Fatalf("unexpected payload-ref upload response: %+v", uploadPayload)
+	}
+	status := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodGet, "/v1/execution-packages/"+uploadPayload.ExchangePackageID+"/status?org_id="+pkg.OrgID, nil)
+	if status.Stage != "accepted" || !strings.Contains(status.Message, "Encrypted execution package accepted") {
+		t.Fatalf("expected encrypted upload status message, got %+v", status)
+	}
+}
+
 func TestDevExchangeHTTPRunEndpointMarksMissingWorkerAsFailed(t *testing.T) {
 	t.Setenv(devExchangeHTTPEnv, "1")
 	t.Setenv(devExchangeTokenEnv, "test-token")
@@ -102,9 +141,10 @@ func TestDevExchangeHTTPRunEndpointMarksMissingWorkerAsFailed(t *testing.T) {
 	envelope := sampleEnvelopeForAppTest(t, pkg, now)
 	envelope.Crypto.Nonce = "nonce_run_endpoint"
 	uploadPayload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
-		UploadID: initPayload.UploadID,
-		Envelope: envelope,
-		Payload:  pkg,
+		UploadID:   initPayload.UploadID,
+		Envelope:   envelope,
+		PayloadRef: envelope.PayloadRef,
+		Payload:    pkg,
 	})
 
 	runStatus := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodPost, "/v1/dev/execution-packages/"+uploadPayload.ExchangePackageID+"/run", nil, cascadeOrgIDHeader, pkg.OrgID)

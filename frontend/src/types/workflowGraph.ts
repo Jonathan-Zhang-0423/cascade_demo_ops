@@ -858,7 +858,92 @@ export type RecordingRunSpec = {
   outputs: RecordingOutputRequest;
   redactions: RedactionPolicy;
   failure_policy: RecordingFailurePolicy;
+  sandbox_policy?: SandboxPolicy;
   environment?: Record<string, string>;
+};
+
+export type SandboxPolicy = {
+  profile?: "dev" | "mvp_cloud" | "enterprise" | string;
+  isolation_mode?: "local_sidecar" | "per_job_container" | "per_job_microvm" | string;
+  network_policy: SandboxNetworkPolicy;
+  filesystem_policy: SandboxFilesystemPolicy;
+  resource_limits: SandboxResourceLimits;
+  browser_policy: SandboxBrowserPolicy;
+  secret_policy: SandboxSecretPolicy;
+  artifact_policy: SandboxArtifactPolicy;
+  diagnostic_policy: SandboxDiagnosticPolicy;
+  policy_hash_sha256?: string;
+};
+
+export type SandboxNetworkPolicy = {
+  mode?: "deny_all" | "allowed_domains_only" | "no_customer_network" | string;
+  allowed_domains?: string[];
+  allowed_cascade_endpoints?: string[];
+  denied_cidrs?: string[];
+  proxy_required: boolean;
+  dns_policy?: string;
+};
+
+export type SandboxFilesystemPolicy = {
+  mode?: "tmpfs_workspace" | "read_only_root" | string;
+  writable_paths?: string[];
+  no_host_mount: boolean;
+  no_docker_socket: boolean;
+  delete_temp_after_run: boolean;
+};
+
+export type SandboxResourceLimits = {
+  max_runtime_sec?: number;
+  max_memory_mb?: number;
+  max_cpu_count?: number;
+  max_disk_mb?: number;
+};
+
+export type SandboxBrowserPolicy = {
+  fresh_context_per_run: boolean;
+  disable_extensions: boolean;
+  disable_downloads: boolean;
+  trace_sources: boolean;
+  allowed_page_methods?: string[];
+  allowed_context_apis?: string[];
+};
+
+export type SandboxSecretPolicy = {
+  vault_only: boolean;
+  allowed_secret_refs?: string[];
+  inject_via_context_only: boolean;
+  forbid_env_injection: boolean;
+  revoke_after_run: boolean;
+  rotation_required_after_run: boolean;
+};
+
+export type SandboxArtifactPolicy = {
+  encrypt_sensitive_artifacts: boolean;
+  sensitive_by_default: boolean;
+  recipient_kind?: string;
+  recipient_key_id?: string;
+  retention?: Record<string, unknown>;
+  require_checksum: boolean;
+};
+
+export type SandboxDiagnosticPolicy = {
+  redaction_required: boolean;
+  forbid_full_html: boolean;
+  strip_headers?: string[];
+  strip_storage_keys?: string[];
+  encrypt_diagnostics: boolean;
+  return_repair_hints: boolean;
+};
+
+export type SandboxExecutionMetadata = {
+  policy_hash_sha256?: string;
+  profile?: string;
+  isolation_mode?: string;
+  network_mode?: string;
+  worker_id?: string;
+  container_id?: string;
+  micro_vm_id?: string;
+  runtime_versions?: Record<string, string>;
 };
 
 export type BrowserRunSpec = {
@@ -939,6 +1024,133 @@ export type PackageArtifactDescriptor = {
   sensitive?: boolean;
   compression_alg?: string;
   recipient_key_id?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type ExchangeProducer = {
+  app_version?: string;
+  install_id?: string;
+  device_id?: string;
+  os?: string;
+  arch?: string;
+  runtime_profile?: string;
+};
+
+export type ExchangeCrypto = {
+  crypto_suite?: "aes-256-gcm" | "xchacha20-poly1305" | string;
+  key_wrapping_mode?: "server_kms" | "server_public_key" | "customer_kms" | string;
+  server_key_id: string;
+  key_encryption_alg?: string;
+  content_encryption_alg: string;
+  compression_alg?: "gzip" | "none" | string;
+  payload_digest_alg?: "sha256" | string;
+  payload_digest_sha256: string;
+  ciphertext_digest_sha256?: string;
+  signature_alg: string;
+  signature_key_id: string;
+  signature: string;
+  nonce: string;
+  encrypted_content_key?: string;
+  content_key_ref?: string;
+  kms_key_ref?: string;
+};
+
+export type EncryptedPayloadRef = {
+  kind: "inline" | "artifact" | string;
+  inline_ciphertext?: string;
+  artifact_id?: string;
+  uri?: string;
+  mime_type?: string;
+  sha256?: string;
+  size_bytes?: number;
+  encrypted?: boolean;
+  sensitive?: boolean;
+  compression_alg?: string;
+};
+
+export type ExchangeEnvelope = {
+  envelope_id: string;
+  org_id: string;
+  project_id: string;
+  package_kind: "client_execution" | string;
+  schema_version: "demoops.exchange_envelope.v1";
+  payload_schema_version: "demoops.client_execution_package.v1" | string;
+  idempotency_key: string;
+  created_at: string;
+  expires_at: string;
+  producer: ExchangeProducer;
+  crypto: ExchangeCrypto;
+  payload_ref: EncryptedPayloadRef;
+  attachments?: PackageArtifactDescriptor[];
+  policy: {
+    retention?: Record<string, unknown>;
+    data_residency?: string;
+    replay_protection: boolean;
+    max_execution_window_sec?: number;
+    delete_payload_after_run: boolean;
+    allow_delta_package?: boolean;
+    human_approval_required: boolean;
+    structure_summary_only: boolean;
+    required_ip_allowlist_ack: boolean;
+  };
+};
+
+export type ExecutionPackageInitRequest = {
+  org_id: string;
+  project_id: string;
+  package_kind: "client_execution";
+  producer?: ExchangeProducer;
+};
+
+export type ExecutionPackageInitResponse = {
+  upload_id: string;
+  server_public_key_id: string;
+  server_public_key_alg?: string;
+  key_wrapping_modes?: string[];
+  supported_crypto_suites?: string[];
+  supported_compression?: string[];
+  cascade_execution_ips: string[];
+  max_envelope_bytes: number;
+  max_attachment_bytes: number;
+  expires_at: string;
+};
+
+export type ExecutionPackageUploadRequest = {
+  upload_id: string;
+  envelope: ExchangeEnvelope;
+  payload_ref?: EncryptedPayloadRef;
+};
+
+export type ExecutionPackageUploadBody = ExecutionPackageUploadRequest & {
+  payload?: ClientExecutionPackage;
+};
+
+export type ResultPackageAckRequest = {
+  result_package_id: string;
+  acked_by_install_id?: string;
+  received_asset_ids?: string[];
+  verified_checksums?: boolean;
+  checksum_mismatch_ids?: string[];
+  acked_at?: string;
+};
+
+export type ClientExecutionPackage = {
+  package_id: string;
+  org_id: string;
+  project_id: string;
+  schema_version: "demoops.client_execution_package.v1";
+  created_at?: string;
+  approved_at?: string;
+  project_context_summary?: Record<string, unknown>;
+  product_map_summary?: Record<string, unknown>;
+  workflow_graph: DemoWorkflowGraph;
+  recording_run_spec: RecordingRunSpec;
+  executable_script_bundle: ExecutableRecordingScriptBundle;
+  credential_grants?: Record<string, unknown>[];
+  evidence_bundle?: Record<string, unknown>;
+  reproducibility: ReproducibilitySpec;
+  safety_report?: Record<string, unknown>;
+  repair_context?: ScriptRepairContext;
   metadata?: Record<string, unknown>;
 };
 
@@ -1069,11 +1281,36 @@ export type StepResult = {
   error?: AgentError;
 };
 
+export type ExecutionTrace = {
+  id: string;
+  workflow_graph_id: string;
+  graph_version: number;
+  started_at?: string;
+  completed_at?: string;
+  pass_rate?: number;
+  step_results?: StepResult[];
+  artifacts?: ArtifactRef[];
+  environment?: Record<string, string>;
+  sandbox?: SandboxExecutionMetadata;
+};
+
 export type VerificationReport = {
   pass_rate?: number;
   failed_node_ids?: string[];
   policy_findings?: AgentFinding[];
   reproducibility_match: boolean;
+  output_checksums?: Array<{ id?: string; kind?: string; sha256: string; size_bytes?: number }>;
+};
+
+export type CloudExecutionAuditTrail = {
+  cloud_worker_id?: string;
+  started_at?: string;
+  completed_at?: string;
+  runtime_versions?: Record<string, string>;
+  sandbox?: SandboxExecutionMetadata;
+  source_package_digest?: string;
+  graph_digest?: string;
+  execution_ip?: string;
 };
 
 export type RecordingResultPackage = {
@@ -1082,11 +1319,14 @@ export type RecordingResultPackage = {
   cloud_job_id: string;
   schema_version: "demoops.recording_result_package.v1";
   status: "generated" | "delivered" | "acked" | "failed";
+  execution_trace?: ExecutionTrace;
   step_results?: StepResult[];
   generated_assets?: ArtifactRef[];
   verification_report: VerificationReport;
   failure_diagnostic?: ScriptFailureDiagnostic;
   repair_request?: ScriptRepairRequest;
+  graph_patch_suggestions?: unknown[];
+  audit_trail?: CloudExecutionAuditTrail;
   delivery?: {
     result_package_ref: PackageArtifactDescriptor;
     asset_refs?: PackageArtifactDescriptor[];

@@ -24,8 +24,28 @@ type ScriptBundle = {
   reproducibility?: { script_hash_sha256?: string };
 };
 
+type SandboxPolicy = {
+  profile?: string;
+  isolation_mode?: string;
+  policy_hash_sha256?: string;
+  network_policy?: {
+    mode?: "deny_all" | "allowed_domains_only" | "no_customer_network" | string;
+    allowed_domains?: string[];
+    proxy_required?: boolean;
+  };
+  browser_policy?: {
+    allowed_page_methods?: string[];
+    allowed_context_apis?: string[];
+    trace_sources?: boolean;
+  };
+  secret_policy?: {
+    allowed_secret_refs?: string[];
+  };
+};
+
 export type ScriptValidationRequest = {
   bundle?: ScriptBundle;
+  sandbox_policy?: SandboxPolicy;
 };
 
 export type ScriptValidationFinding = {
@@ -52,7 +72,17 @@ export type ExecuteScriptResult = {
   trace_path?: string;
   step_results?: Array<{ node_id: string; status: string; duration_ms?: number }>;
   failure_diagnostic?: WorkerScriptFailureDiagnostic;
+  sandbox_metadata?: WorkerSandboxMetadata;
   error?: string;
+};
+
+export type WorkerSandboxMetadata = {
+  policy_hash_sha256?: string;
+  profile?: string;
+  isolation_mode?: string;
+  network_mode?: string;
+  worker_id?: string;
+  runtime_versions?: Record<string, string>;
 };
 
 export type WorkerScriptFailureDiagnostic = {
@@ -110,6 +140,9 @@ export async function validateScript(request: ScriptValidationRequest): Promise<
   for (const finding of validateAllowedContextUsage(source, bundle)) {
     findings.push(finding);
   }
+  for (const finding of validateSandboxPolicy(request.sandbox_policy, bundle)) {
+    findings.push(finding);
+  }
   for (const item of rawSecretPatterns) {
     if (item.pattern.test(source)) {
       findings.push(blocking(item.id, item.summary));
@@ -158,20 +191,23 @@ export async function validateScript(request: ScriptValidationRequest): Promise<
 
 export async function executeScript(request: ExecuteScriptRequest): Promise<ExecuteScriptResult> {
   const validation = await validateScript(request);
+  const sandboxMetadata = sandboxMetadataFromPolicy(request.sandbox_policy);
   if (!validation.valid) {
     const failedNodeID = request.bundle?.plan_json?.steps?.[0]?.node_id ?? "validation";
-    return {
+    const result: ExecuteScriptResult = {
       ok: false,
       validation,
       error: "script validation failed",
       failure_diagnostic: buildFailureDiagnostic(request, failedNodeID, "script_validation_failed", "脚本校验失败，未进入浏览器执行。"),
     };
+    if (sandboxMetadata) result.sandbox_metadata = sandboxMetadata;
+    return result;
   }
   const steps = request.bundle?.plan_json?.steps ?? [];
   const simulatedFailureNodeID = request.simulate_failure_node_id;
   if (simulatedFailureNodeID) {
     const outputDir = request.output_dir || "artifacts/script-execution";
-    return {
+    const result: ExecuteScriptResult = {
       ok: false,
       validation,
       trace_path: `${outputDir}/trace.zip`,
@@ -184,8 +220,10 @@ export async function executeScript(request: ExecuteScriptRequest): Promise<Exec
       failure_diagnostic: buildFailureDiagnostic(request, simulatedFailureNodeID, "selector_timeout", `等待节点 ${simulatedFailureNodeID} 的 selector 超时。`),
       error: `script failed at node ${simulatedFailureNodeID}`,
     };
+    if (sandboxMetadata) result.sandbox_metadata = sandboxMetadata;
+    return result;
   }
-  return {
+  const result: ExecuteScriptResult = {
     ok: true,
     validation,
     step_results: steps.map((step) => {
@@ -199,6 +237,8 @@ export async function executeScript(request: ExecuteScriptRequest): Promise<Exec
       return result;
     }),
   };
+  if (sandboxMetadata) result.sandbox_metadata = sandboxMetadata;
+  return result;
 }
 
 const defaultForbiddenImports = ["fs", "node:fs", "child_process", "node:child_process", "http", "https", "net", "tls"];
@@ -248,6 +288,43 @@ function validateAllowedContextUsage(source: string, bundle: ScriptBundle): Scri
   return findings;
 }
 
+function validateSandboxPolicy(policy: SandboxPolicy | undefined, bundle: ScriptBundle): ScriptValidationFinding[] {
+  const findings: ScriptValidationFinding[] = [];
+  if (!policy) return findings;
+  const networkMode = policy.network_policy?.mode;
+  if (networkMode && !["deny_all", "allowed_domains_only", "no_customer_network"].includes(networkMode)) {
+    findings.push(blocking("sandbox_network_mode_invalid", `未知沙箱网络策略：${networkMode}`));
+  }
+  const runAllowedDomains = bundle.plan_json?.recording_run_spec?.allowed_domains ?? [];
+  const sandboxAllowedDomains = policy.network_policy?.allowed_domains ?? [];
+  for (const domain of sandboxAllowedDomains) {
+    if (!hostAllowed(domain, runAllowedDomains)) {
+      findings.push(blocking("sandbox_domain_exceeds_plan", `沙箱 allowed domain 超出录制计划：${domain}`));
+    }
+  }
+  if (policy.profile !== "dev" && policy.network_policy?.proxy_required === false) {
+    findings.push(blocking("sandbox_proxy_required", "云端沙箱必须声明 egress proxy。"));
+  }
+  const allowedContextAPIs = policy.browser_policy?.allowed_context_apis ?? [];
+  const bundleContextAPIs = bundle.security_policy?.allowed_context_apis ?? [];
+  for (const api of bundleContextAPIs) {
+    if (allowedContextAPIs.length > 0 && !allowedContextAPIs.includes(api)) {
+      findings.push(blocking("bundle_context_api_exceeds_sandbox", `脚本包 ctx API 超出沙箱策略：${api}`));
+    }
+  }
+  const allowedPageMethods = policy.browser_policy?.allowed_page_methods ?? [];
+  const bundlePageMethods = bundle.security_policy?.allowed_page_methods ?? [];
+  for (const method of bundlePageMethods) {
+    if (allowedPageMethods.length > 0 && !allowedPageMethods.includes(method)) {
+      findings.push(blocking("bundle_page_method_exceeds_sandbox", `脚本包 page method 超出沙箱策略：${method}`));
+    }
+  }
+  if (policy.browser_policy?.trace_sources === true) {
+    findings.push(blocking("sandbox_trace_sources_forbidden", "沙箱 trace 不能包含源码。"));
+  }
+  return findings;
+}
+
 function extractGotoURLs(source: string): string[] {
   return [...source.matchAll(/ctx\.page\.goto\("([^"]+)"/g)]
     .map((match) => match[1])
@@ -260,6 +337,19 @@ function hostAllowed(host: string, allowedDomains: string[]): boolean {
     const allowed = domain.trim().toLowerCase();
     return Boolean(allowed) && (normalized === allowed || normalized.endsWith(`.${allowed}`));
   });
+}
+
+function sandboxMetadataFromPolicy(policy: SandboxPolicy | undefined): WorkerSandboxMetadata | undefined {
+  if (!policy) return undefined;
+  const metadata: WorkerSandboxMetadata = {
+    worker_id: "video-worker-local",
+    runtime_versions: { runner: "playwright-restricted-sandbox-validator" },
+  };
+  if (policy.policy_hash_sha256) metadata.policy_hash_sha256 = policy.policy_hash_sha256;
+  if (policy.profile) metadata.profile = policy.profile;
+  if (policy.isolation_mode) metadata.isolation_mode = policy.isolation_mode;
+  if (policy.network_policy?.mode) metadata.network_mode = policy.network_policy.mode;
+  return metadata;
 }
 
 function safeURL(value: string): URL | undefined {

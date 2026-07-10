@@ -39,6 +39,8 @@ export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise
 - 不得访问 `forbidden_pages`
 - 打码策略必须进入 `security_policy.redactions`
 
+这层 TS/AST 校验只是第一道门，不是完整安全边界。通过校验后仍必须进入云端 sandbox runner，由 `RecordingRunSpec.sandbox_policy` 约束网络、文件系统、浏览器上下文、secret 注入、artifact 加密和失败诊断脱敏。生产环境不能直接用 dev/local sidecar 执行真实客户数据。
+
 ## 审批视图
 
 桌面 App 默认展示中文 `approval_markdown`，并提供 JSON plan 和 TS 脚本作为可展开技术审计项。上传前必须确认：

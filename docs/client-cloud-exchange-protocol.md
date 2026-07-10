@@ -38,13 +38,16 @@ GET  /v1/result-packages/:id
 POST /v1/result-packages/:id/ack
 ```
 
+Production deployments may mount these routes under a gateway prefix, for
+example `/aigc/v1/...`. The route semantics stay the same.
+
 The Go DTOs live in `backend/internal/model/exchange.go`.
 
 Cloud intake validation lives in
 `backend/internal/model/exchange_validation.go`. It validates the envelope,
 payload schema, identity binding, upload approval, executable script bundle,
-recording run spec, graph/script hash binding, and renderable recording result
-packages before downstream execution or rendering.
+recording run spec, sandbox policy, graph/script hash binding, and renderable
+recording result packages before downstream execution or rendering.
 
 The current service boundary lives in `backend/internal/app/exchange_intake.go`
 and maps the API contract to callable methods:
@@ -58,6 +61,73 @@ and maps the API contract to callable methods:
 This layer currently uses in-memory state; production storage should implement
 the existing `repository.ExchangeRepository` contract.
 
+## Three-Part Script Bundle
+
+The App uploads one approved three-part bundle inside
+`ClientExecutionPackage.executable_script_bundle`:
+
+- `plan_json`: the machine-auditable `ExecutionScriptDocument`.
+- `playwright_script`: the restricted TypeScript Playwright script generated
+  deterministically from the plan.
+- `approval_markdown`: the Chinese reasoning and approval document shown to the
+  user.
+
+The three parts are hash-bound through `plan_hash_sha256`,
+`script_hash_sha256`, `markdown_hash_sha256`, and `bundle_hash_sha256`. The
+server validates these hashes before execution. The TS script remains an
+execution artifact; the JSON plan remains the audit source of truth.
+
+## Upload Shape
+
+Production upload bodies use an encrypted payload reference:
+
+```json
+{
+  "upload_id": "upload_...",
+  "envelope": {},
+  "payload_ref": {
+    "kind": "artifact",
+    "artifact_id": "payload_artifact_1",
+    "uri": "s3://cascade-exchange/payload.enc",
+    "sha256": "<ciphertext sha256>",
+    "size_bytes": 2048,
+    "encrypted": true,
+    "sensitive": true,
+    "compression_alg": "gzip"
+  }
+}
+```
+
+`payload_ref` must match `envelope.payload_ref`. The dev channel may also
+accept plaintext `payload` for local tests only; production should not persist
+or log that field.
+
+## Status and Ack
+
+Status polling is the stable App UI driver. The server should use these stages:
+
+```text
+accepted -> validating -> preparing_worker -> running_script -> packaging_recording -> rendering -> completed
+```
+
+Failed jobs use `status=failed` and return a `failure_summary` on the status
+endpoint. Detailed screenshots, traces, console/network summaries, and repair
+materials live in the encrypted failed `RecordingResultPackage`.
+
+After the App downloads artifacts and verifies checksums, it acknowledges
+delivery with:
+
+```json
+{
+  "acked_by_install_id": "install_...",
+  "received_asset_ids": ["artifact_pkg_1_demo_video_001"],
+  "verified_checksums": true
+}
+```
+
+`verified_checksums=true` is required. If checksum mismatches exist, the App
+sends `checksum_mismatch_ids` and the server rejects the ack.
+
 ## Security Boundary
 
 - App uploads only structure summaries, hashes, redacted evidence, and encrypted
@@ -69,6 +139,12 @@ the existing `repository.ExchangeRepository` contract.
   blobs.
 - Cloud execution must obey `allowed_domains`, IP allowlist requirements,
   forbidden pages, redactions, retention, and user approval metadata.
+- Cloud execution also resolves a `SandboxPolicy` from
+  `RecordingRunSpec.sandbox_policy` and the executable bundle security policy.
+  The default production profile is `mvp_cloud` with per-job container
+  isolation, allowed-domain-only egress through policy proxy, read-only root
+  filesystem, vault-only secret injection, encrypted sensitive artifacts, and
+  redacted encrypted diagnostics.
 - `exchange_packages` stores routing metadata only: org/project ids, status,
   schema versions, payload/ciphertext digests, crypto suite, key wrapping mode,
   server key id, policy, producer metadata, and errors. It must not store
@@ -111,6 +187,12 @@ Every execution package carries:
 
 Cloud result packages return execution traces, step results, generated artifact
 checksums, runtime versions, and optional graph patch suggestions.
+`ExecutionTrace.sandbox` and `CloudExecutionAuditTrail.sandbox` return the
+resolved sandbox policy hash, profile, isolation mode, network mode, worker id,
+and runtime versions for audit and reproducibility.
+Final videos are delivered as encrypted artifact descriptors with
+`role=final_demo_video`, `kind=video`, `encrypted=true`, `sensitive=true`, and
+the App recipient key id.
 
 ## Failure Diagnostics
 

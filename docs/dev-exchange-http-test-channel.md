@@ -85,11 +85,23 @@ Body:
 {
   "upload_id": "<upload_id from init>",
   "envelope": {},
-  "payload": {}
+  "payload_ref": {
+    "kind": "artifact",
+    "artifact_id": "payload_artifact_1",
+    "uri": "s3://cascade-exchange/payload.enc",
+    "sha256": "<ciphertext sha256>",
+    "size_bytes": 2048,
+    "encrypted": true,
+    "sensitive": true,
+    "compression_alg": "gzip"
+  }
 }
 ```
 
-`payload` must be a `demoops.client_execution_package.v1` payload.
+Production uploads use `payload_ref` only. The ref must match
+`envelope.payload_ref`; the service stores only envelope and artifact metadata.
+The dev channel also accepts a plaintext `payload` field for local end-to-end
+tests, where `payload` must be a `demoops.client_execution_package.v1` payload.
 
 ### Run
 
@@ -219,9 +231,14 @@ Body:
 
 ```json
 {
-  "acked_by_install_id": "customer-agent-dev"
+  "acked_by_install_id": "customer-agent-dev",
+  "received_asset_ids": ["artifact_pkg_1_demo_video_001"],
+  "verified_checksums": true
 }
 ```
+
+`verified_checksums=true` is required. If the App detects a mismatch it must
+send `checksum_mismatch_ids` and the server will reject the ack.
 
 ## Notes
 

@@ -12,6 +12,7 @@ export interface RecordRequest {
   headless?: boolean;
   source_package_id?: string;
   recording_run_spec?: unknown;
+  sandbox_policy?: unknown;
   executable_script_bundle?: unknown;
   recording_mode?: "dry_run" | "playwright";
 }
@@ -24,6 +25,7 @@ export interface RecordResult {
   generated_assets?: ArtifactRef[];
   step_results?: Array<{ node_id: string; status: string; duration_ms?: number }>;
   failure_diagnostic?: unknown;
+  sandbox_metadata?: unknown;
   worker_id?: string;
   runtime_versions?: Record<string, string>;
   started_at?: string;
@@ -48,15 +50,28 @@ export async function record(request: RecordRequest): Promise<RecordResult> {
   await mkdir(outputDir, { recursive: true });
   if (request.executable_script_bundle) {
     const startedAt = new Date().toISOString();
-    const execution = await executeScript({ bundle: request.executable_script_bundle as never, output_dir: outputDir });
+    const execution = await executeScript({ bundle: request.executable_script_bundle as never, output_dir: outputDir, sandbox_policy: request.sandbox_policy as never });
     if (!execution.ok) {
-      throw new Error(execution.error || "script execution failed");
+      const completedAt = new Date().toISOString();
+      const failedResult: RecordResult = {
+        worker_id: "video-worker-local",
+        runtime_versions: { runner: "playwright-restricted-sandbox-validation" },
+        started_at: startedAt,
+        completed_at: completedAt,
+      };
+      if (execution.trace_path) failedResult.trace_path = execution.trace_path;
+      if (execution.screenshot_paths) failedResult.screenshot_paths = execution.screenshot_paths;
+      if (execution.step_results) failedResult.step_results = execution.step_results;
+      if (execution.failure_diagnostic) failedResult.failure_diagnostic = execution.failure_diagnostic;
+      if (execution.sandbox_metadata) failedResult.sandbox_metadata = execution.sandbox_metadata;
+      return withRecordingMetadata(outputDir, failedResult);
     }
     if (shouldUsePlaywright(request)) {
       const browserResult = await recordWithPlaywright(request as never);
       const completedAt = new Date().toISOString();
       return withRecordingMetadata(outputDir, {
         ...browserResult,
+        sandbox_metadata: browserResult.sandbox_metadata || execution.sandbox_metadata,
         worker_id: "video-worker-local",
         started_at: startedAt,
         completed_at: completedAt,
@@ -86,6 +101,9 @@ export async function record(request: RecordRequest): Promise<RecordResult> {
       started_at: startedAt,
       completed_at: completedAt,
     };
+    if (execution.sandbox_metadata) {
+      dryRunResult.sandbox_metadata = execution.sandbox_metadata;
+    }
     if (execution.step_results) {
       dryRunResult.step_results = execution.step_results;
     }

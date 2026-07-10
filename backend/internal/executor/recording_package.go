@@ -22,6 +22,7 @@ func NewRecordRequestFromClientExecutionPackage(source *model.ClientExecutionPac
 		return RecordRequest{}, err
 	}
 	viewport := viewportFromRunSpec(source.RecordingRunSpec)
+	sandboxPolicy := model.ResolveSandboxPolicy(source.RecordingRunSpec, source.ExecutableScriptBundle)
 	return RecordRequest{
 		Graph:                  source.WorkflowGraph,
 		OutputDir:              outputDir,
@@ -30,6 +31,7 @@ func NewRecordRequestFromClientExecutionPackage(source *model.ClientExecutionPac
 		RecordingMode:          defaultRecordingModeForPackage(source),
 		SourcePackageID:        source.PackageID,
 		RecordingRunSpec:       &source.RecordingRunSpec,
+		SandboxPolicy:          &sandboxPolicy,
 		ExecutableScriptBundle: source.ExecutableScriptBundle,
 	}, nil
 }
@@ -59,6 +61,7 @@ func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 	if completedAt.IsZero() {
 		completedAt = createdAt
 	}
+	sandbox := sandboxMetadataForResult(source, result)
 	artifacts := artifactsFromRecordResult(source, result, createdAt)
 	stepResults := result.StepResults
 	if len(stepResults) == 0 {
@@ -76,6 +79,7 @@ func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 		StepResults:     stepResults,
 		Artifacts:       artifacts,
 		Environment:     source.RecordingRunSpec.Environment,
+		Sandbox:         sandbox,
 	}
 	recordingResult := model.RecordingResultPackage{
 		ResultID:        resultPackageResultID(source.PackageID),
@@ -97,6 +101,7 @@ func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 			StartedAt:           startedAt,
 			CompletedAt:         completedAt,
 			RuntimeVersions:     result.RuntimeVersions,
+			Sandbox:             sandbox,
 			SourcePackageDigest: source.Reproducibility.PackageHashSHA256,
 			GraphDigest:         source.Reproducibility.GraphHashSHA256,
 		},
@@ -128,6 +133,28 @@ func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 		return model.RecordingResultPackage{}, err
 	}
 	return recordingResult, nil
+}
+
+func sandboxMetadataForResult(source *model.ClientExecutionPackage, result RecordResult) *model.SandboxExecutionMetadata {
+	if result.SandboxMetadata != nil {
+		metadata := *result.SandboxMetadata
+		if len(metadata.RuntimeVersions) == 0 {
+			metadata.RuntimeVersions = result.RuntimeVersions
+		}
+		return &metadata
+	}
+	if source == nil {
+		return nil
+	}
+	policy := model.ResolveSandboxPolicy(source.RecordingRunSpec, source.ExecutableScriptBundle)
+	return &model.SandboxExecutionMetadata{
+		PolicyHashSHA256: policy.PolicyHashSHA256,
+		Profile:          policy.Profile,
+		IsolationMode:    policy.IsolationMode,
+		NetworkMode:      policy.NetworkPolicy.Mode,
+		WorkerID:         result.WorkerID,
+		RuntimeVersions:  result.RuntimeVersions,
+	}
 }
 
 func applyFailureRecordingResult(source *model.ClientExecutionPackage, result *model.RecordingResultPackage, diagnostic *model.ScriptFailureDiagnostic, steps []model.StepResult, artifacts []model.ArtifactRef, createdAt time.Time) {
@@ -205,10 +232,10 @@ func diagnosticFromFailedStep(source *model.ClientExecutionPackage, cloudJobID s
 			if diagnostic.PageTitle == "" {
 				diagnostic.PageTitle = stringMetadata(artifact.Metadata, "page_title")
 			}
-			diagnostic.ScreenshotRefs = append(diagnostic.ScreenshotRefs, localDiagnosticArtifactDescriptor(artifact, "failure_screenshot"))
+			diagnostic.ScreenshotRefs = append(diagnostic.ScreenshotRefs, localDiagnosticArtifactDescriptor(source, artifact, "failure_screenshot"))
 		}
 		if artifact.Kind == "browser_trace" || artifact.Kind == "execution_trace" {
-			diagnostic.TraceRefs = append(diagnostic.TraceRefs, localDiagnosticArtifactDescriptor(artifact, "failure_trace"))
+			diagnostic.TraceRefs = append(diagnostic.TraceRefs, localDiagnosticArtifactDescriptor(source, artifact, "failure_trace"))
 		}
 	}
 	return diagnostic
@@ -288,22 +315,23 @@ func artifactsForFailure(nodeID string, artifacts []model.ArtifactRef) []model.A
 	return matches
 }
 
-func localDiagnosticArtifactDescriptor(artifact model.ArtifactRef, role string) model.PackageArtifactDescriptor {
+func localDiagnosticArtifactDescriptor(source *model.ClientExecutionPackage, artifact model.ArtifactRef, role string) model.PackageArtifactDescriptor {
 	metadata := map[string]any{"dev_local_artifact": true}
 	for key, value := range artifact.Metadata {
 		metadata[key] = value
 	}
 	return model.PackageArtifactDescriptor{
-		ID:        artifact.ID,
-		Role:      role,
-		Kind:      artifact.Kind,
-		URI:       artifact.URI,
-		MimeType:  artifact.MimeType,
-		SHA256:    artifact.SHA256,
-		SizeBytes: artifact.SizeBytes,
-		Encrypted: false,
-		Sensitive: artifact.Sensitive,
-		Metadata:  metadata,
+		ID:             artifact.ID,
+		Role:           role,
+		Kind:           artifact.Kind,
+		URI:            artifact.URI,
+		MimeType:       artifact.MimeType,
+		SHA256:         firstNonEmptyString(artifact.SHA256, model.SHA256Hex([]byte(artifact.URI))),
+		SizeBytes:      artifact.SizeBytes,
+		Encrypted:      true,
+		Sensitive:      true,
+		RecipientKeyID: resultRecipientKeyID(source),
+		Metadata:       metadata,
 	}
 }
 
@@ -532,8 +560,8 @@ func assetDescriptorsFromArtifacts(source *model.ClientExecutionPackage, artifac
 		metadata := artifactDescriptorMetadata(source, artifact, createdAt)
 		descriptors = append(descriptors, model.PackageArtifactDescriptor{
 			ID:             artifact.ID,
-			Role:           "recording_output",
-			Kind:           artifact.Kind,
+			Role:           deliveryDescriptorRole(artifact),
+			Kind:           deliveryDescriptorKind(artifact),
 			URI:            artifact.URI,
 			MimeType:       artifact.MimeType,
 			SHA256:         firstNonEmptyString(artifact.SHA256, model.SHA256Hex([]byte(artifact.URI))),
@@ -545,6 +573,20 @@ func assetDescriptorsFromArtifacts(source *model.ClientExecutionPackage, artifac
 		})
 	}
 	return descriptors
+}
+
+func deliveryDescriptorRole(artifact model.ArtifactRef) string {
+	if strings.EqualFold(artifact.Kind, "demo_video") {
+		return model.ArtifactRoleFinalDemoVideo
+	}
+	return model.ArtifactRoleRecordingOutput
+}
+
+func deliveryDescriptorKind(artifact model.ArtifactRef) string {
+	if strings.EqualFold(artifact.Kind, "demo_video") {
+		return model.ArtifactKindVideo
+	}
+	return artifact.Kind
 }
 
 func resultRecipientKeyID(source *model.ClientExecutionPackage) string {

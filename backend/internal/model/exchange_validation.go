@@ -117,6 +117,9 @@ func validateClientExecutionPackageContents(pkg *ClientExecutionPackage) error {
 	if err := validateExecutableBundleAgainstPackage(pkg.ExecutableScriptBundle, pkg); err != nil {
 		return err
 	}
+	if err := ValidateSandboxPolicyForPackage(pkg); err != nil {
+		return err
+	}
 	for _, grant := range pkg.CredentialGrants {
 		if grant.GrantID == "" || grant.Kind == "" || grant.Purpose == "" {
 			return errors.New("credential grant missing required identity fields")

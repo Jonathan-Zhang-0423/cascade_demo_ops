@@ -10,13 +10,30 @@ type BrowserRecordRequest = {
   viewport?: { width: number; height: number };
   headless?: boolean;
   recording_run_spec?: {
+    allowed_domains?: string[];
     browser?: { engine?: string; headless?: boolean };
     redactions?: { mask_selectors?: string[] };
   };
+  sandbox_policy?: BrowserSandboxPolicy;
   executable_script_bundle?: {
     plan_json?: {
+      recording_run_spec?: { allowed_domains?: string[] };
       steps?: BrowserScriptStep[];
     };
+    security_policy?: {
+      allowed_domains?: string[];
+      forbidden_pages?: string[];
+    };
+  };
+};
+
+type BrowserSandboxPolicy = {
+  profile?: string;
+  isolation_mode?: string;
+  policy_hash_sha256?: string;
+  network_policy?: {
+    mode?: "deny_all" | "allowed_domains_only" | "no_customer_network" | string;
+    allowed_domains?: string[];
   };
 };
 
@@ -59,6 +76,16 @@ export type BrowserRecordResult = {
   step_results?: Array<{ node_id: string; status: string; duration_ms?: number; observed_state?: string }>;
   generated_assets?: BrowserArtifactRef[];
   failure_diagnostic?: BrowserFailureDiagnostic;
+  sandbox_metadata?: BrowserSandboxMetadata;
+  runtime_versions?: Record<string, string>;
+};
+
+type BrowserSandboxMetadata = {
+  policy_hash_sha256?: string;
+  profile?: string;
+  isolation_mode?: string;
+  network_mode?: string;
+  worker_id?: string;
   runtime_versions?: Record<string, string>;
 };
 
@@ -127,6 +154,17 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
 
   const page = await context.newPage();
+  const allowedDomains = effectiveAllowedDomains(request);
+  const forbiddenPages = request.executable_script_bundle?.security_policy?.forbidden_pages || [];
+  await page.route("**/*", async (route: any) => {
+    const requestURL = route.request().url();
+    const policyError = urlPolicyError(requestURL, allowedDomains, forbiddenPages, request.sandbox_policy?.network_policy?.mode);
+    if (policyError) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.continue();
+  });
   const steps = request.executable_script_bundle?.plan_json?.steps || [];
   const screenshotPaths: string[] = [];
   const stepResults: NonNullable<BrowserRecordResult["step_results"]> = [];
@@ -139,7 +177,7 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
     for (const [index, step] of steps.entries()) {
       const started = Date.now();
       try {
-        await runStep(page, step);
+        await runStep(page, step, allowedDomains, forbiddenPages, request.sandbox_policy?.network_policy?.mode);
         const screenshotPath = await captureStepScreenshot(page, outputDir, step, index, request.recording_run_spec?.redactions?.mask_selectors || []);
         if (screenshotPath) {
           const screenshotAsset = await artifactRef(
@@ -251,6 +289,10 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
     generated_assets: generatedAssets,
     runtime_versions: { runner: "playwright", browser: engineName },
   };
+  const sandboxMetadata = sandboxMetadataFromRequest(request, engineName);
+  if (sandboxMetadata) {
+    result.sandbox_metadata = sandboxMetadata;
+  }
   if (failureDiagnostic) {
     const traceAsset = generatedAssets.find((asset) => asset.kind === "browser_trace");
     if (traceAsset) {
@@ -264,12 +306,14 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
   return result;
 }
 
-async function runStep(page: any, step: BrowserScriptStep): Promise<void> {
+async function runStep(page: any, step: BrowserScriptStep, allowedDomains: string[], forbiddenPages: string[], networkMode?: string): Promise<void> {
   const action = step.action?.type || "inspect";
   const timeout = step.action?.timeout_ms || 10000;
   if (action === "navigate") {
     const url = step.action?.target?.url || step.page_target?.url;
     if (!url) throw new Error("navigate step missing URL");
+    const policyError = urlPolicyError(url, allowedDomains, forbiddenPages, networkMode);
+    if (policyError) throw new Error(policyError);
     await page.goto(url, { waitUntil: waitUntil(step.action?.wait_until), timeout });
     return;
   }
@@ -362,6 +406,7 @@ function waitUntil(value?: string): "load" | "domcontentloaded" | "networkidle" 
 
 function classifyPlaywrightError(message: string): string {
   const lower = message.toLowerCase();
+  if (lower.includes("domain_not_allowed")) return "domain_not_allowed";
   if (lower.includes("timeout")) return "selector_timeout";
   if (lower.includes("net::") || lower.includes("navigation")) return "navigation_failed";
   if (lower.includes("missing selector") || lower.includes("selector target")) return "selector_missing";
@@ -421,12 +466,65 @@ function diagnosticDescriptor(asset: BrowserArtifactRef, role: string): BrowserP
     role,
     kind: asset.kind,
     uri: asset.uri,
-    encrypted: false,
+    encrypted: true,
+    sensitive: true,
     metadata: { ...(asset.metadata || {}), dev_local_artifact: true },
   };
   if (asset.mime_type) descriptor.mime_type = asset.mime_type;
   if (asset.sha256) descriptor.sha256 = asset.sha256;
   if (asset.size_bytes !== undefined) descriptor.size_bytes = asset.size_bytes;
-  if (asset.sensitive !== undefined) descriptor.sensitive = asset.sensitive;
   return descriptor;
+}
+
+function effectiveAllowedDomains(request: BrowserRecordRequest): string[] {
+  return (
+    request.sandbox_policy?.network_policy?.allowed_domains ||
+    request.executable_script_bundle?.security_policy?.allowed_domains ||
+    request.recording_run_spec?.allowed_domains ||
+    request.executable_script_bundle?.plan_json?.recording_run_spec?.allowed_domains ||
+    []
+  );
+}
+
+function urlPolicyError(value: string, allowedDomains: string[], forbiddenPages: string[], networkMode?: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return `domain_not_allowed: invalid URL ${value}`;
+  }
+  if (networkMode === "deny_all" || networkMode === "no_customer_network") {
+    return `domain_not_allowed: sandbox network policy blocks customer navigation to ${parsed.host}`;
+  }
+  if (allowedDomains.length > 0 && !hostAllowed(parsed.host, allowedDomains)) {
+    return `domain_not_allowed: ${parsed.host} is not in allowed_domains`;
+  }
+  for (const forbidden of forbiddenPages) {
+    if (forbidden && parsed.pathname.includes(forbidden)) {
+      return `domain_not_allowed: forbidden page ${forbidden}`;
+    }
+  }
+  return undefined;
+}
+
+function hostAllowed(host: string, allowedDomains: string[]): boolean {
+  const normalized = host.toLowerCase();
+  return allowedDomains.some((domain) => {
+    const allowed = domain.trim().toLowerCase();
+    return Boolean(allowed) && (normalized === allowed || normalized.endsWith(`.${allowed}`));
+  });
+}
+
+function sandboxMetadataFromRequest(request: BrowserRecordRequest, browser: string): BrowserSandboxMetadata | undefined {
+  const policy = request.sandbox_policy;
+  if (!policy) return undefined;
+  const metadata: BrowserSandboxMetadata = {
+    worker_id: "video-worker-local",
+    runtime_versions: { runner: "playwright", browser },
+  };
+  if (policy.policy_hash_sha256) metadata.policy_hash_sha256 = policy.policy_hash_sha256;
+  if (policy.profile) metadata.profile = policy.profile;
+  if (policy.isolation_mode) metadata.isolation_mode = policy.isolation_mode;
+  if (policy.network_policy?.mode) metadata.network_mode = policy.network_policy.mode;
+  return metadata;
 }

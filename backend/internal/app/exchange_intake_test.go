@@ -85,12 +85,80 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 		t.Fatalf("result package mismatch: %+v", gotResult)
 	}
 
-	ack, err := service.AckResultPackage(ctx, pkg.OrgID, model.ResultPackageAckRequest{ResultPackageID: completed.ResultPackageID, AckedByInstallID: "install_1"})
+	ack, err := service.AckResultPackage(ctx, pkg.OrgID, model.ResultPackageAckRequest{ResultPackageID: completed.ResultPackageID, AckedByInstallID: "install_1", ReceivedAssetIDs: []string{"artifact_demo_video"}, VerifiedChecksums: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ack.Status != model.RecordingResultStatusAcked || ack.ResultPackageID != completed.ResultPackageID {
 		t.Fatalf("unexpected ack response: %+v", ack)
+	}
+}
+
+func TestExchangeIntakeAcceptsEncryptedPayloadRefWithoutPersistingPlainPayload(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	service.now = fixedClock(time.Date(2026, 7, 9, 16, 5, 0, 0, time.UTC))
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{
+		OrgID:       pkg.OrgID,
+		ProjectID:   pkg.ProjectID,
+		PackageKind: model.ExchangePackageKindClientExecution,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, service.now())
+	envelope.Crypto.Nonce = "nonce_payload_ref_only"
+	envelope.PayloadRef.Kind = model.PayloadRefKindArtifact
+	envelope.PayloadRef.ArtifactID = "payload_artifact_1"
+	envelope.PayloadRef.URI = "s3://cascade-exchange/payload.enc"
+	envelope.PayloadRef.InlineCiphertext = ""
+	envelope.PayloadRef.SHA256 = "ciphertext_hash_1"
+	envelope.PayloadRef.SizeBytes = 2048
+	envelope.PayloadRef.Encrypted = true
+	envelope.PayloadRef.Sensitive = true
+	envelope.Crypto.CiphertextDigestSHA256 = envelope.PayloadRef.SHA256
+	uploadResp, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: envelope, PayloadRef: envelope.PayloadRef}, model.ClientExecutionPackage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.Status(ctx, pkg.OrgID, uploadResp.ExchangePackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != model.ExchangePackageStatusAccepted || status.Stage != "accepted" {
+		t.Fatalf("expected encrypted payload ref upload to be accepted, got %+v", status)
+	}
+	if _, _, err := service.StartExecution(ctx, pkg.OrgID, uploadResp.ExchangePackageID); err == nil {
+		t.Fatal("expected envelope-only package to require worker decryption before execution")
+	}
+}
+
+func TestExchangeAckRequiresChecksumVerification(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	service.now = fixedClock(time.Date(2026, 7, 9, 16, 8, 0, 0, time.UTC))
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, service.now())
+	envelope.Crypto.Nonce = "nonce_ack_checksum"
+	uploadResp, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: envelope}, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := sampleRecordingResultForAppTest(pkg)
+	completed, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, uploadResp.ExchangePackageID, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AckResultPackage(ctx, pkg.OrgID, model.ResultPackageAckRequest{ResultPackageID: completed.ResultPackageID, AckedByInstallID: "install_1"}); err == nil {
+		t.Fatal("expected ack without verified_checksums to be rejected")
+	}
+	if _, err := service.AckResultPackage(ctx, pkg.OrgID, model.ResultPackageAckRequest{ResultPackageID: completed.ResultPackageID, AckedByInstallID: "install_1", VerifiedChecksums: true, ChecksumMismatchIDs: []string{"artifact_demo_video"}}); err == nil {
+		t.Fatal("expected ack with checksum mismatch ids to be rejected")
 	}
 }
 
