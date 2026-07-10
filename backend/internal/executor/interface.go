@@ -12,11 +12,19 @@ type Service interface {
 	Render(ctx context.Context, request RenderRequest) (RenderResult, error)
 }
 
+type RecordingMode string
+
+const (
+	RecordingModeDryRun     RecordingMode = "dry_run"
+	RecordingModePlaywright RecordingMode = "playwright"
+)
+
 type RecordRequest struct {
 	Graph                  *model.DemoWorkflowGraph               `json:"graph"`
 	OutputDir              string                                 `json:"output_dir"`
 	Viewport               Viewport                               `json:"viewport"`
 	Headless               bool                                   `json:"headless"`
+	RecordingMode          RecordingMode                          `json:"recording_mode,omitempty"`
 	SourcePackageID        string                                 `json:"source_package_id,omitempty"`
 	RecordingRunSpec       *model.RecordingRunSpec                `json:"recording_run_spec,omitempty"`
 	ExecutableScriptBundle *model.ExecutableRecordingScriptBundle `json:"executable_script_bundle,omitempty"`

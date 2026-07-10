@@ -176,6 +176,10 @@ func TestRecordingResultPackageJSONRoundTrip(t *testing.T) {
 			SHA256:    "sha_video",
 			MimeType:  "video/mp4",
 			Sensitive: true,
+			Metadata: map[string]any{
+				"asset_role":      "raw_recording",
+				"include_in_demo": true,
+			},
 		}},
 		VerificationReport: VerificationReport{
 			PassRate:             1,
@@ -214,6 +218,9 @@ func TestRecordingResultPackageJSONRoundTrip(t *testing.T) {
 	}
 	if got.SchemaVersion != RecordingResultPackageSchemaVersion || got.Delivery.ResultPackageRef.URI == "" {
 		t.Fatalf("result package did not round-trip: %+v", got)
+	}
+	if got.GeneratedAssets[0].Metadata["asset_role"] != "raw_recording" || got.GeneratedAssets[0].Metadata["include_in_demo"] != true {
+		t.Fatalf("generated asset metadata did not round-trip: %+v", got.GeneratedAssets[0].Metadata)
 	}
 }
 

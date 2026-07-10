@@ -628,12 +628,32 @@ type ExecutionPackageUploadResponse struct {
 }
 
 type ExecutionPackageStatusResponse struct {
-	ExchangePackageID string                `json:"exchange_package_id"`
-	CloudJobID        string                `json:"cloud_job_id,omitempty"`
-	Status            ExchangePackageStatus `json:"status"`
-	ResultPackageID   string                `json:"result_package_id,omitempty"`
-	Error             *AgentError           `json:"error,omitempty"`
-	UpdatedAt         time.Time             `json:"updated_at"`
+	ExchangePackageID string                  `json:"exchange_package_id"`
+	CloudJobID        string                  `json:"cloud_job_id,omitempty"`
+	Status            ExchangePackageStatus   `json:"status"`
+	Stage             string                  `json:"stage,omitempty"`
+	Message           string                  `json:"message,omitempty"`
+	ProgressPercent   int                     `json:"progress_percent,omitempty"`
+	ResultPackageID   string                  `json:"result_package_id,omitempty"`
+	ResultSummary     *ExecutionResultSummary `json:"result_summary,omitempty"`
+	Error             *AgentError             `json:"error,omitempty"`
+	UpdatedAt         time.Time               `json:"updated_at"`
+}
+
+type ExecutionResultSummary struct {
+	ResultID            string                `json:"result_id,omitempty"`
+	ResultStatus        RecordingResultStatus `json:"result_status,omitempty"`
+	PassRate            float64               `json:"pass_rate,omitempty"`
+	StepCount           int                   `json:"step_count,omitempty"`
+	PassedStepCount     int                   `json:"passed_step_count,omitempty"`
+	FailedStepCount     int                   `json:"failed_step_count,omitempty"`
+	GeneratedAssetCount int                   `json:"generated_asset_count,omitempty"`
+	DemoVideoCount      int                   `json:"demo_video_count,omitempty"`
+	ScreenshotCount     int                   `json:"screenshot_count,omitempty"`
+	RawRecordingCount   int                   `json:"raw_recording_count,omitempty"`
+	TraceCount          int                   `json:"trace_count,omitempty"`
+	PrimaryDemoVideoURI string                `json:"primary_demo_video_uri,omitempty"`
+	RawRecordingURI     string                `json:"raw_recording_uri,omitempty"`
 }
 
 type ResultPackageAckRequest struct {

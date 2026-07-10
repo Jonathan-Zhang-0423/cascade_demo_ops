@@ -27,10 +27,18 @@ func NewRecordRequestFromClientExecutionPackage(source *model.ClientExecutionPac
 		OutputDir:              outputDir,
 		Viewport:               viewport,
 		Headless:               source.RecordingRunSpec.Browser.Headless,
+		RecordingMode:          defaultRecordingModeForPackage(source),
 		SourcePackageID:        source.PackageID,
 		RecordingRunSpec:       &source.RecordingRunSpec,
 		ExecutableScriptBundle: source.ExecutableScriptBundle,
 	}, nil
+}
+
+func defaultRecordingModeForPackage(source *model.ClientExecutionPackage) RecordingMode {
+	if source == nil || source.ExecutableScriptBundle == nil {
+		return RecordingModeDryRun
+	}
+	return RecordingModePlaywright
 }
 
 func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPackage, result RecordResult, cloudJobID string, createdAt time.Time) (model.RecordingResultPackage, error) {
@@ -133,6 +141,10 @@ func artifactsFromRecordResult(source *model.ClientExecutionPackage, result Reco
 			URI:       result.RecordingPath,
 			MimeType:  mimeTypeForPath(result.RecordingPath, "video/webm"),
 			CreatedAt: createdAt,
+			Metadata: map[string]any{
+				"asset_role":      "raw_recording",
+				"include_in_demo": true,
+			},
 		})
 	}
 	steps := source.ExecutableScriptBundle.PlanJSON.Steps
@@ -151,24 +163,37 @@ func artifactsFromRecordResult(source *model.ClientExecutionPackage, result Reco
 			MimeType:     mimeTypeForPath(path, "image/png"),
 			CreatedAt:    createdAt,
 			SourceNodeID: nodeID,
+			Metadata: map[string]any{
+				"asset_role":      "primary",
+				"capture_scope":   "viewport",
+				"include_in_demo": true,
+			},
 		})
 	}
-	if result.TracePath != "" && !artifactExistsForPath(artifacts, result.TracePath) {
+	if result.TracePath != "" && !artifactExistsForPath(artifacts, result.TracePath) && !artifactExistsForAnyKind(artifacts, "browser_trace", "execution_trace") {
 		artifacts = append(artifacts, model.ArtifactRef{
 			ID:        artifactID(source.PackageID, "browser_trace", 1),
 			Kind:      "browser_trace",
 			URI:       result.TracePath,
 			MimeType:  mimeTypeForPath(result.TracePath, "application/zip"),
 			CreatedAt: createdAt,
+			Metadata: map[string]any{
+				"asset_role":      "debug_trace",
+				"include_in_demo": false,
+			},
 		})
 	}
-	if result.ArtifactManifestPath != "" {
+	if result.ArtifactManifestPath != "" && !artifactExistsForPath(artifacts, result.ArtifactManifestPath) && !artifactExistsForKind(artifacts, "artifact_manifest") {
 		artifacts = append(artifacts, model.ArtifactRef{
 			ID:        artifactID(source.PackageID, "artifact_manifest", 1),
 			Kind:      "artifact_manifest",
 			URI:       result.ArtifactManifestPath,
 			MimeType:  mimeTypeForPath(result.ArtifactManifestPath, "application/json"),
 			CreatedAt: createdAt,
+			Metadata: map[string]any{
+				"asset_role":      "debug_manifest",
+				"include_in_demo": false,
+			},
 		})
 	}
 	return uniqueArtifactRefs(artifacts)
@@ -177,6 +202,15 @@ func artifactsFromRecordResult(source *model.ClientExecutionPackage, result Reco
 func artifactExistsForKind(artifacts []model.ArtifactRef, kind string) bool {
 	for _, artifact := range artifacts {
 		if artifact.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func artifactExistsForAnyKind(artifacts []model.ArtifactRef, kinds ...string) bool {
+	for _, kind := range kinds {
+		if artifactExistsForKind(artifacts, kind) {
 			return true
 		}
 	}
@@ -287,6 +321,7 @@ func outputChecksums(artifacts []model.ArtifactRef) []model.ContentDigest {
 func assetDescriptorsFromArtifacts(source *model.ClientExecutionPackage, artifacts []model.ArtifactRef, createdAt time.Time) []model.PackageArtifactDescriptor {
 	descriptors := make([]model.PackageArtifactDescriptor, 0, len(artifacts))
 	for _, artifact := range artifacts {
+		metadata := artifactDescriptorMetadata(source, artifact, createdAt)
 		descriptors = append(descriptors, model.PackageArtifactDescriptor{
 			ID:        artifact.ID,
 			Role:      "recording_output",
@@ -297,14 +332,23 @@ func assetDescriptorsFromArtifacts(source *model.ClientExecutionPackage, artifac
 			SizeBytes: artifact.SizeBytes,
 			Encrypted: false,
 			Sensitive: artifact.Sensitive,
-			Metadata: map[string]any{
-				"source_package_id": source.PackageID,
-				"source_node_id":    artifact.SourceNodeID,
-				"created_at":        createdAt.Format(time.RFC3339Nano),
-			},
+			Metadata:  metadata,
 		})
 	}
 	return descriptors
+}
+
+func artifactDescriptorMetadata(source *model.ClientExecutionPackage, artifact model.ArtifactRef, createdAt time.Time) map[string]any {
+	metadata := map[string]any{}
+	for key, value := range artifact.Metadata {
+		metadata[key] = value
+	}
+	metadata["source_package_id"] = source.PackageID
+	if artifact.SourceNodeID != "" {
+		metadata["source_node_id"] = artifact.SourceNodeID
+	}
+	metadata["created_at"] = createdAt.Format(time.RFC3339Nano)
+	return metadata
 }
 
 func uniqueArtifactRefs(artifacts []model.ArtifactRef) []model.ArtifactRef {

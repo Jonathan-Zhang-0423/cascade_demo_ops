@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -38,7 +38,16 @@ type BrowserScriptStep = {
     wait_until?: string;
   };
   expected_outcome?: string;
-  capture?: { screenshot?: boolean; mask_selectors?: string[] };
+  capture?: {
+    screenshot?: boolean;
+    scope?: "viewport" | "full_page" | "element";
+    selector?: string;
+    full_page?: boolean;
+    dedupe?: boolean;
+    asset_role?: string;
+    include_in_demo?: boolean;
+    mask_selectors?: string[];
+  };
   timing?: { duration_ms?: number };
   blocking?: boolean;
 };
@@ -61,6 +70,7 @@ type BrowserArtifactRef = {
   size_bytes?: number;
   created_at?: string;
   source_node_id?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export async function recordWithPlaywright(request: BrowserRecordRequest): Promise<BrowserRecordResult> {
@@ -87,6 +97,7 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
   const stepResults: NonNullable<BrowserRecordResult["step_results"]> = [];
   const generatedAssets: NonNullable<BrowserRecordResult["generated_assets"]> = [];
   const video = page.video?.();
+  let previousScreenshotSHA256: string | undefined;
 
   try {
     for (const [index, step] of steps.entries()) {
@@ -95,8 +106,21 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
         await runStep(page, step);
         const screenshotPath = await captureStepScreenshot(page, outputDir, step, index, request.recording_run_spec?.redactions?.mask_selectors || []);
         if (screenshotPath) {
-          screenshotPaths.push(screenshotPath);
-          generatedAssets.push(await artifactRef(`artifact_screenshot_${String(index + 1).padStart(3, "0")}`, "screenshot", screenshotPath, "image/png", step.node_id));
+          const screenshotAsset = await artifactRef(
+            `artifact_screenshot_${String(index + 1).padStart(3, "0")}`,
+            "screenshot",
+            screenshotPath,
+            "image/png",
+            step.node_id,
+            screenshotMetadata(step),
+          );
+          if (shouldKeepScreenshot(step, screenshotAsset, previousScreenshotSHA256)) {
+            screenshotPaths.push(screenshotPath);
+            generatedAssets.push(screenshotAsset);
+            previousScreenshotSHA256 = screenshotAsset.sha256;
+          } else {
+            await unlink(screenshotPath).catch(() => undefined);
+          }
         }
         const stepResult: NonNullable<BrowserRecordResult["step_results"]>[number] = {
           node_id: step.node_id || `step_${index + 1}`,
@@ -127,9 +151,20 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
 
   const recordingPath = await video?.path().catch(() => undefined);
   if (recordingPath) {
-    generatedAssets.unshift(await artifactRef("artifact_raw_recording", "raw_recording", recordingPath, "video/webm"));
+    generatedAssets.unshift(
+      await artifactRef("artifact_raw_recording", "raw_recording", recordingPath, "video/webm", undefined, {
+        asset_role: "raw_recording",
+        include_in_demo: true,
+        capture_scope: "browser_context_video",
+      }),
+    );
   }
-  generatedAssets.push(await artifactRef("artifact_browser_trace", "browser_trace", tracePath, "application/zip"));
+  generatedAssets.push(
+    await artifactRef("artifact_browser_trace", "browser_trace", tracePath, "application/zip", undefined, {
+      asset_role: "debug_trace",
+      include_in_demo: false,
+    }),
+  );
 
   const result: BrowserRecordResult = {
     screenshot_paths: screenshotPaths,
@@ -180,8 +215,37 @@ async function captureStepScreenshot(page: any, outputDir: string, step: Browser
   const screenshotPath = path.join(outputDir, `step-${String(index + 1).padStart(3, "0")}.png`);
   const maskSelectors = [...globalMaskSelectors, ...(step.capture.mask_selectors || [])].filter(Boolean);
   const mask = maskSelectors.map((selector) => page.locator(selector));
-  await page.screenshot({ path: screenshotPath, fullPage: true, mask });
+  const scope = captureScope(step);
+  if (scope === "element") {
+    const selector = step.capture.selector || selectorForStep(step);
+    if (!selector) throw new Error(`step ${step.node_id || "unknown"} requested element screenshot without selector`);
+    await page.locator(selector).first().screenshot({ path: screenshotPath, mask });
+    return screenshotPath;
+  }
+  await page.screenshot({ path: screenshotPath, fullPage: scope === "full_page", mask });
   return screenshotPath;
+}
+
+function captureScope(step: BrowserScriptStep): "viewport" | "full_page" | "element" {
+  if (step.capture?.scope === "full_page" || step.capture?.full_page === true) return "full_page";
+  if (step.capture?.scope === "element") return "element";
+  return "viewport";
+}
+
+function shouldKeepScreenshot(step: BrowserScriptStep, asset: BrowserArtifactRef, previousSHA256?: string): boolean {
+  if (step.capture?.dedupe === false) return true;
+  if (!asset.sha256 || !previousSHA256) return true;
+  return asset.sha256 !== previousSHA256;
+}
+
+function screenshotMetadata(step: BrowserScriptStep): Record<string, unknown> {
+  return {
+    asset_role: step.capture?.asset_role || "primary",
+    include_in_demo: step.capture?.include_in_demo ?? true,
+    capture_scope: captureScope(step),
+    dedupe_policy: step.capture?.dedupe === false ? "disabled" : "adjacent_sha256",
+    action_type: step.action?.type || "inspect",
+  };
 }
 
 function locatorForStep(page: any, step: BrowserScriptStep): any {
@@ -212,7 +276,14 @@ function fileURI(filePath: string): string {
   return pathToFileURL(path.resolve(filePath)).toString();
 }
 
-async function artifactRef(id: string, kind: string, filePath: string, mimeType: string, sourceNodeID?: string): Promise<BrowserArtifactRef> {
+async function artifactRef(
+  id: string,
+  kind: string,
+  filePath: string,
+  mimeType: string,
+  sourceNodeID?: string,
+  metadata?: Record<string, unknown>,
+): Promise<BrowserArtifactRef> {
   const data = await readFile(filePath);
   const ref: BrowserArtifactRef = {
     id,
@@ -225,6 +296,9 @@ async function artifactRef(id: string, kind: string, filePath: string, mimeType:
   };
   if (sourceNodeID) {
     ref.source_node_id = sourceNodeID;
+  }
+  if (metadata && Object.keys(metadata).length > 0) {
+    ref.metadata = metadata;
   }
   return ref;
 }

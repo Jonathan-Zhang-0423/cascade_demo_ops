@@ -181,17 +181,21 @@ type TimelineSourceNode struct {
 }
 
 type TimelineArtifact struct {
-	ID           string `json:"id"`
-	Kind         string `json:"kind"`
-	URI          string `json:"uri"`
-	MimeType     string `json:"mime_type,omitempty"`
-	Label        string `json:"label,omitempty"`
-	SHA256       string `json:"sha256,omitempty"`
-	SizeBytes    int64  `json:"size_bytes,omitempty"`
-	Sensitive    bool   `json:"sensitive,omitempty"`
-	SourceStepID string `json:"source_step_id,omitempty"`
-	DurationMS   int    `json:"duration_ms,omitempty"`
-	LocalPath    string `json:"local_path,omitempty"`
+	ID            string         `json:"id"`
+	Kind          string         `json:"kind"`
+	URI           string         `json:"uri"`
+	MimeType      string         `json:"mime_type,omitempty"`
+	Label         string         `json:"label,omitempty"`
+	SHA256        string         `json:"sha256,omitempty"`
+	SizeBytes     int64          `json:"size_bytes,omitempty"`
+	Sensitive     bool           `json:"sensitive,omitempty"`
+	SourceStepID  string         `json:"source_step_id,omitempty"`
+	AssetRole     string         `json:"asset_role,omitempty"`
+	IncludeInDemo bool           `json:"include_in_demo,omitempty"`
+	CaptureScope  string         `json:"capture_scope,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	DurationMS    int            `json:"duration_ms,omitempty"`
+	LocalPath     string         `json:"local_path,omitempty"`
 }
 
 type MillisecondRange [2]int
