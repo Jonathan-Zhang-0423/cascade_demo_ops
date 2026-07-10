@@ -24,7 +24,12 @@ CREATE TABLE exchange_packages (
     payload_schema_version text NOT NULL,
     idempotency_key text NOT NULL,
     payload_digest_sha256 text NOT NULL,
+    ciphertext_digest_sha256 text,
     payload_size_bytes bigint CHECK (payload_size_bytes IS NULL OR payload_size_bytes >= 0),
+    crypto_suite text NOT NULL DEFAULT 'xchacha20-poly1305',
+    key_wrapping_mode text NOT NULL DEFAULT 'server_kms' CHECK (key_wrapping_mode IN ('server_kms', 'server_public_key', 'customer_kms')),
+    server_key_id text NOT NULL DEFAULT '',
+    content_key_ref text,
     producer_json jsonb NOT NULL DEFAULT '{}'::jsonb,
     crypto_json jsonb NOT NULL DEFAULT '{}'::jsonb,
     policy_json jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -52,6 +57,7 @@ CREATE TABLE package_artifacts (
     encrypted boolean NOT NULL DEFAULT true,
     sensitive boolean NOT NULL DEFAULT false,
     compression_alg text,
+    recipient_key_id text,
     metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     expires_at timestamptz
@@ -106,6 +112,9 @@ CREATE TABLE result_packages (
     status text NOT NULL CHECK (status IN ('generated', 'delivered', 'acked', 'failed')),
     schema_version text NOT NULL,
     result_digest_sha256 text,
+    recipient_kind text NOT NULL DEFAULT 'app_installation',
+    recipient_key_id text NOT NULL DEFAULT '',
+    encryption_alg text NOT NULL DEFAULT 'xchacha20-poly1305',
     trace_summary_json jsonb NOT NULL DEFAULT '{}'::jsonb,
     verification_json jsonb NOT NULL DEFAULT '{}'::jsonb,
     delivery_json jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -125,11 +134,14 @@ CREATE INDEX exchange_packages_project_created_at_idx ON exchange_packages(proje
 CREATE INDEX exchange_packages_status_idx ON exchange_packages(status);
 CREATE INDEX exchange_packages_org_idempotency_idx ON exchange_packages(org_id, idempotency_key);
 CREATE INDEX exchange_packages_payload_digest_idx ON exchange_packages(payload_digest_sha256);
+CREATE INDEX exchange_packages_ciphertext_digest_idx ON exchange_packages(ciphertext_digest_sha256);
+CREATE INDEX exchange_packages_crypto_suite_idx ON exchange_packages(crypto_suite, key_wrapping_mode);
 
 CREATE INDEX package_artifacts_project_created_at_idx ON package_artifacts(project_id, created_at DESC);
 CREATE INDEX package_artifacts_exchange_role_idx ON package_artifacts(exchange_package_id, role);
 CREATE INDEX package_artifacts_result_role_idx ON package_artifacts(result_package_id, role);
 CREATE INDEX package_artifacts_sha256_idx ON package_artifacts(sha256);
+CREATE INDEX package_artifacts_recipient_key_idx ON package_artifacts(recipient_key_id);
 
 CREATE INDEX cloud_recording_jobs_project_created_at_idx ON cloud_recording_jobs(project_id, created_at DESC);
 CREATE INDEX cloud_recording_jobs_exchange_idx ON cloud_recording_jobs(exchange_package_id);

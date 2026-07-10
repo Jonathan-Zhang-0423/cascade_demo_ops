@@ -31,6 +31,21 @@ func TestNewRenderRequestFromRecordingResultUsesTeamProtocolPayloads(t *testing.
 			Artifacts:       []model.ArtifactRef{{ID: "artifact_raw_recording", Kind: "raw_recording", URI: "file:///tmp/recording.webm"}},
 		},
 		GeneratedAssets: []model.ArtifactRef{{ID: "artifact_raw_recording", Kind: "raw_recording", URI: "file:///tmp/recording.webm"}},
+		Delivery: model.ResultDelivery{
+			ResultPackageRef: model.PackageArtifactDescriptor{
+				ID:        "result_package_artifact",
+				Role:      "recording_result",
+				Kind:      "recording_result_package",
+				URI:       "s3://cascade-results/result.json.enc",
+				SHA256:    "sha_result",
+				Encrypted: true,
+				Sensitive: true,
+			},
+			RecipientKind:  model.ResultRecipientAppInstallation,
+			RecipientKeyID: "install_result_key_1",
+			EncryptionAlg:  model.CryptoSuiteXChaCha20Poly1305,
+			AckRequired:    true,
+		},
 	}
 
 	request, err := NewRenderRequestFromRecordingResult(source, result, "artifacts/render")

@@ -154,6 +154,58 @@ func TestExchangeEnvelopeValidationCatchesDigestSignatureExpiryAndReplay(t *test
 	}
 }
 
+func TestExchangePayloadEncryptionRoundTripAndTamperDetection(t *testing.T) {
+	pkg := sampleClientExecutionPackage(t)
+	key, err := NewRandomContentKey(CryptoSuiteAES256GCM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := EncryptCanonicalJSONForExchange(pkg, key, CryptoSuiteAES256GCM, CompressionGzip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encrypted.CryptoSuite != CryptoSuiteAES256GCM || encrypted.CompressionAlg != CompressionGzip {
+		t.Fatalf("unexpected encrypted package metadata: %+v", encrypted)
+	}
+	expectedDigest, err := DigestCanonicalJSON(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encrypted.PlaintextDigestSHA256 != expectedDigest || encrypted.CiphertextDigestSHA256 == "" {
+		t.Fatalf("digest mismatch: %+v", encrypted)
+	}
+	var got ClientExecutionPackage
+	if err := DecryptCanonicalJSONFromExchange(encrypted, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.PackageID != pkg.PackageID || got.WorkflowGraph.ID != pkg.WorkflowGraph.ID {
+		t.Fatalf("decrypted payload mismatch: %+v", got)
+	}
+
+	encrypted.CiphertextDigestSHA256 = "tampered"
+	if err := DecryptCanonicalJSONFromExchange(encrypted, key, &got); err == nil {
+		t.Fatal("expected tampered ciphertext digest to be rejected")
+	}
+}
+
+func TestExchangeEnvelopeRequiresEncryptedPayloadAndKeyWrappingMetadata(t *testing.T) {
+	pkg := sampleClientExecutionPackage(t)
+	now := time.Date(2026, 7, 8, 9, 0, 0, 0, time.UTC)
+	envelope := sampleEnvelopeForPayload(t, pkg, now)
+	envelope.PayloadRef.Encrypted = false
+	if err := envelope.ValidateForPayload(pkg, now, map[string]bool{}, staticSignatureVerifier(true)); err == nil || !strings.Contains(err.Error(), "payload_ref must be encrypted") {
+		t.Fatalf("expected unencrypted payload ref to be rejected, got %v", err)
+	}
+
+	envelope = sampleEnvelopeForPayload(t, pkg, now)
+	envelope.Crypto.EncryptedContentKey = ""
+	envelope.Crypto.ContentKeyRef = ""
+	envelope.Crypto.KMSKeyRef = ""
+	if err := envelope.ValidateForPayload(pkg, now, map[string]bool{}, staticSignatureVerifier(true)); err == nil || !strings.Contains(err.Error(), "encrypted content key metadata") {
+		t.Fatalf("expected missing key metadata to be rejected, got %v", err)
+	}
+}
+
 func TestRecordingResultPackageJSONRoundTrip(t *testing.T) {
 	now := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
 	result := RecordingResultPackage{
@@ -193,13 +245,18 @@ func TestRecordingResultPackageJSONRoundTrip(t *testing.T) {
 		Delivery: ResultDelivery{
 			ResultPackageRef: PackageArtifactDescriptor{
 				ID:        "result_package_artifact",
+				Role:      "recording_result",
 				Kind:      "recording_result_package",
 				URI:       "s3://cascade-results/result.json.enc",
 				SHA256:    "sha_result",
 				Encrypted: true,
+				Sensitive: true,
 			},
-			AckRequired: true,
-			ExpiresAt:   now.Add(24 * time.Hour),
+			RecipientKind:  ResultRecipientAppInstallation,
+			RecipientKeyID: "install_result_key_1",
+			EncryptionAlg:  CryptoSuiteXChaCha20Poly1305,
+			AckRequired:    true,
+			ExpiresAt:      now.Add(24 * time.Hour),
 		},
 		CreatedAt: now,
 	}
@@ -214,6 +271,25 @@ func TestRecordingResultPackageJSONRoundTrip(t *testing.T) {
 	}
 	if got.SchemaVersion != RecordingResultPackageSchemaVersion || got.Delivery.ResultPackageRef.URI == "" {
 		t.Fatalf("result package did not round-trip: %+v", got)
+	}
+	if err := got.ValidateDeliverySecurity(); err != nil {
+		t.Fatalf("result delivery security should be valid: %v", err)
+	}
+}
+
+func TestRecordingResultDeliveryRequiresEncryptedRecipientBoundArtifacts(t *testing.T) {
+	result := sampleFailedRecordingResultPackage(time.Date(2026, 7, 8, 10, 30, 0, 0, time.UTC))
+	if err := result.ValidateDeliverySecurity(); err != nil {
+		t.Fatalf("expected secure failed result delivery: %v", err)
+	}
+	result.Delivery.RecipientKeyID = ""
+	if err := result.ValidateDeliverySecurity(); err == nil || !strings.Contains(err.Error(), "recipient_key_id") {
+		t.Fatalf("expected missing recipient key to be rejected, got %v", err)
+	}
+	result = sampleFailedRecordingResultPackage(time.Date(2026, 7, 8, 10, 30, 0, 0, time.UTC))
+	result.Delivery.ResultPackageRef.Encrypted = false
+	if err := result.ValidateDeliverySecurity(); err == nil || !strings.Contains(err.Error(), "must be encrypted") {
+		t.Fatalf("expected unencrypted result package ref to be rejected, got %v", err)
 	}
 }
 
@@ -291,22 +367,29 @@ func sampleEnvelopeForPayload(t *testing.T, pkg ClientExecutionPackage, now time
 		ExpiresAt:            now.Add(time.Hour),
 		Producer:             ExchangeProducer{AppVersion: "0.1.0", InstallID: "install_1", OS: "windows", RuntimeProfile: "desktop"},
 		Crypto: ExchangeCrypto{
-			ServerKeyID:          "srv_key_1",
-			ContentEncryptionAlg: "xchacha20-poly1305",
-			KeyEncryptionAlg:     "x25519-hkdf-sha256",
-			CompressionAlg:       "zstd",
-			PayloadDigestAlg:     "sha256",
-			PayloadDigestSHA256:  digest,
-			SignatureAlg:         "ed25519",
-			SignatureKeyID:       "install_signing_key_1",
-			Signature:            "signature_bytes_base64",
-			Nonce:                "nonce_1",
+			CryptoSuite:            CryptoSuiteXChaCha20Poly1305,
+			KeyWrappingMode:        KeyWrappingModeServerKMS,
+			ServerKeyID:            "srv_key_1",
+			ContentEncryptionAlg:   CryptoSuiteXChaCha20Poly1305,
+			KeyEncryptionAlg:       "x25519-hkdf-sha256",
+			CompressionAlg:         "zstd",
+			PayloadDigestAlg:       "sha256",
+			CiphertextDigestSHA256: "sha_ciphertext",
+			PayloadDigestSHA256:    digest,
+			SignatureAlg:           "ed25519",
+			SignatureKeyID:         "install_signing_key_1",
+			Signature:              "signature_bytes_base64",
+			Nonce:                  "nonce_1",
+			EncryptedContentKey:    "encrypted_content_key",
 		},
 		PayloadRef: EncryptedPayloadRef{
 			Kind:             "inline",
 			InlineCiphertext: "encrypted_payload",
 			SHA256:           "encrypted_payload_sha",
 			SizeBytes:        512,
+			Encrypted:        true,
+			Sensitive:        true,
+			CompressionAlg:   "zstd",
 		},
 		Policy: ExchangePackagePolicy{
 			ReplayProtection:       true,
@@ -671,15 +754,20 @@ func sampleFailedRecordingResultPackage(now time.Time) RecordingResultPackage {
 		},
 		Delivery: ResultDelivery{
 			ResultPackageRef: PackageArtifactDescriptor{
-				ID:        "result_package_artifact",
-				Kind:      "recording_result_package",
-				URI:       "s3://cascade-results/result-failed.json.enc",
-				SHA256:    "sha_failed_result",
-				Encrypted: true,
-				Sensitive: true,
+				ID:             "result_package_artifact",
+				Role:           "recording_result",
+				Kind:           "recording_result_package",
+				URI:            "s3://cascade-results/result-failed.json.enc",
+				SHA256:         "sha_failed_result",
+				Encrypted:      true,
+				Sensitive:      true,
+				RecipientKeyID: "install_result_key_1",
 			},
-			AckRequired: true,
-			ExpiresAt:   now.Add(24 * time.Hour),
+			RecipientKind:  ResultRecipientAppInstallation,
+			RecipientKeyID: "install_result_key_1",
+			EncryptionAlg:  CryptoSuiteXChaCha20Poly1305,
+			AckRequired:    true,
+			ExpiresAt:      now.Add(24 * time.Hour),
 		},
 		CreatedAt: now,
 	}

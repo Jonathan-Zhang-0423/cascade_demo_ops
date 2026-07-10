@@ -1,10 +1,18 @@
 package model
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -13,6 +21,18 @@ const ExchangeEnvelopeSchemaVersion = "demoops.exchange_envelope.v1"
 const ClientExecutionPackageSchemaVersion = "demoops.client_execution_package.v1"
 const RecordingResultPackageSchemaVersion = "demoops.recording_result_package.v1"
 const ScriptFailureDiagnosticSchemaVersion = "demoops.script_failure_diagnostic.v1"
+
+const CryptoSuiteXChaCha20Poly1305 = "xchacha20-poly1305"
+const CryptoSuiteAES256GCM = "aes-256-gcm"
+const KeyWrappingModeServerKMS = "server_kms"
+const KeyWrappingModeServerPublicKey = "server_public_key"
+const KeyWrappingModeCustomerKMS = "customer_kms"
+const CompressionGzip = "gzip"
+const CompressionNone = "none"
+const PayloadRefKindInline = "inline"
+const PayloadRefKindArtifact = "artifact"
+const ResultRecipientAppInstallation = "app_installation"
+const ResultRecipientOrganization = "organization"
 
 type ExchangePackageKind string
 
@@ -81,18 +101,22 @@ type ExchangeProducer struct {
 }
 
 type ExchangeCrypto struct {
-	ServerKeyID          string `json:"server_key_id"`
-	KeyEncryptionAlg     string `json:"key_encryption_alg,omitempty"`
-	ContentEncryptionAlg string `json:"content_encryption_alg"`
-	CompressionAlg       string `json:"compression_alg,omitempty"`
-	PayloadDigestAlg     string `json:"payload_digest_alg,omitempty"`
-	PayloadDigestSHA256  string `json:"payload_digest_sha256"`
-	SignatureAlg         string `json:"signature_alg"`
-	SignatureKeyID       string `json:"signature_key_id"`
-	Signature            string `json:"signature"`
-	Nonce                string `json:"nonce"`
-	EncryptedContentKey  string `json:"encrypted_content_key,omitempty"`
-	ContentKeyRef        string `json:"content_key_ref,omitempty"`
+	CryptoSuite            string `json:"crypto_suite,omitempty"`
+	KeyWrappingMode        string `json:"key_wrapping_mode,omitempty"`
+	ServerKeyID            string `json:"server_key_id"`
+	KeyEncryptionAlg       string `json:"key_encryption_alg,omitempty"`
+	ContentEncryptionAlg   string `json:"content_encryption_alg"`
+	CompressionAlg         string `json:"compression_alg,omitempty"`
+	PayloadDigestAlg       string `json:"payload_digest_alg,omitempty"`
+	PayloadDigestSHA256    string `json:"payload_digest_sha256"`
+	CiphertextDigestSHA256 string `json:"ciphertext_digest_sha256,omitempty"`
+	SignatureAlg           string `json:"signature_alg"`
+	SignatureKeyID         string `json:"signature_key_id"`
+	Signature              string `json:"signature"`
+	Nonce                  string `json:"nonce"`
+	EncryptedContentKey    string `json:"encrypted_content_key,omitempty"`
+	ContentKeyRef          string `json:"content_key_ref,omitempty"`
+	KMSKeyRef              string `json:"kms_key_ref,omitempty"`
 }
 
 type EncryptedPayloadRef struct {
@@ -103,6 +127,9 @@ type EncryptedPayloadRef struct {
 	MimeType         string `json:"mime_type,omitempty"`
 	SHA256           string `json:"sha256,omitempty"`
 	SizeBytes        int64  `json:"size_bytes,omitempty"`
+	Encrypted        bool   `json:"encrypted,omitempty"`
+	Sensitive        bool   `json:"sensitive,omitempty"`
+	CompressionAlg   string `json:"compression_alg,omitempty"`
 }
 
 type ExchangeAttachment struct {
@@ -116,6 +143,7 @@ type ExchangeAttachment struct {
 	Encrypted      bool           `json:"encrypted"`
 	Sensitive      bool           `json:"sensitive,omitempty"`
 	CompressionAlg string         `json:"compression_alg,omitempty"`
+	RecipientKeyID string         `json:"recipient_key_id,omitempty"`
 	Metadata       map[string]any `json:"metadata,omitempty"`
 }
 
@@ -342,6 +370,7 @@ type PackageArtifactDescriptor struct {
 	Encrypted      bool           `json:"encrypted"`
 	Sensitive      bool           `json:"sensitive,omitempty"`
 	CompressionAlg string         `json:"compression_alg,omitempty"`
+	RecipientKeyID string         `json:"recipient_key_id,omitempty"`
 	Metadata       map[string]any `json:"metadata,omitempty"`
 }
 
@@ -504,6 +533,9 @@ type CloudExecutionAuditTrail struct {
 type ResultDelivery struct {
 	ResultPackageRef PackageArtifactDescriptor   `json:"result_package_ref"`
 	AssetRefs        []PackageArtifactDescriptor `json:"asset_refs,omitempty"`
+	RecipientKind    string                      `json:"recipient_kind,omitempty"`
+	RecipientKeyID   string                      `json:"recipient_key_id,omitempty"`
+	EncryptionAlg    string                      `json:"encryption_alg,omitempty"`
 	ExpiresAt        time.Time                   `json:"expires_at,omitempty"`
 	AckRequired      bool                        `json:"ack_required"`
 	AckedAt          time.Time                   `json:"acked_at,omitempty"`
@@ -607,13 +639,16 @@ type ExecutionPackageInitRequest struct {
 }
 
 type ExecutionPackageInitResponse struct {
-	UploadID            string    `json:"upload_id"`
-	ServerPublicKeyID   string    `json:"server_public_key_id"`
-	ServerPublicKeyAlg  string    `json:"server_public_key_alg,omitempty"`
-	CascadeExecutionIPs []string  `json:"cascade_execution_ips"`
-	MaxEnvelopeBytes    int64     `json:"max_envelope_bytes"`
-	MaxAttachmentBytes  int64     `json:"max_attachment_bytes"`
-	ExpiresAt           time.Time `json:"expires_at"`
+	UploadID              string    `json:"upload_id"`
+	ServerPublicKeyID     string    `json:"server_public_key_id"`
+	ServerPublicKeyAlg    string    `json:"server_public_key_alg,omitempty"`
+	KeyWrappingModes      []string  `json:"key_wrapping_modes,omitempty"`
+	SupportedCryptoSuites []string  `json:"supported_crypto_suites,omitempty"`
+	SupportedCompression  []string  `json:"supported_compression,omitempty"`
+	CascadeExecutionIPs   []string  `json:"cascade_execution_ips"`
+	MaxEnvelopeBytes      int64     `json:"max_envelope_bytes"`
+	MaxAttachmentBytes    int64     `json:"max_attachment_bytes"`
+	ExpiresAt             time.Time `json:"expires_at"`
 }
 
 type ExecutionPackageUploadRequest struct {
@@ -669,6 +704,185 @@ func DigestCanonicalJSON(value any) (string, error) {
 	return SHA256Hex(data), nil
 }
 
+type EncryptedPayloadPackage struct {
+	PlaintextDigestSHA256  string `json:"plaintext_digest_sha256"`
+	CiphertextDigestSHA256 string `json:"ciphertext_digest_sha256"`
+	CompressedSizeBytes    int64  `json:"compressed_size_bytes"`
+	CiphertextSizeBytes    int64  `json:"ciphertext_size_bytes"`
+	NonceBase64            string `json:"nonce_base64"`
+	CiphertextBase64       string `json:"ciphertext_base64"`
+	CompressionAlg         string `json:"compression_alg"`
+	CryptoSuite            string `json:"crypto_suite"`
+}
+
+func EncryptCanonicalJSONForExchange(value any, contentKey []byte, suite string, compressionAlg string) (EncryptedPayloadPackage, error) {
+	canonical, err := CanonicalJSON(value)
+	if err != nil {
+		return EncryptedPayloadPackage{}, err
+	}
+	plaintextDigest := SHA256Hex(canonical)
+	compressed, err := compressPayload(canonical, compressionAlg)
+	if err != nil {
+		return EncryptedPayloadPackage{}, err
+	}
+	ciphertext, nonce, err := encryptPayloadBytes(compressed, contentKey, suite)
+	if err != nil {
+		return EncryptedPayloadPackage{}, err
+	}
+	return EncryptedPayloadPackage{
+		PlaintextDigestSHA256:  plaintextDigest,
+		CiphertextDigestSHA256: SHA256Hex(ciphertext),
+		CompressedSizeBytes:    int64(len(compressed)),
+		CiphertextSizeBytes:    int64(len(ciphertext)),
+		NonceBase64:            base64.StdEncoding.EncodeToString(nonce),
+		CiphertextBase64:       base64.StdEncoding.EncodeToString(ciphertext),
+		CompressionAlg:         normalizeCompression(compressionAlg),
+		CryptoSuite:            normalizeCryptoSuite(suite),
+	}, nil
+}
+
+func DecryptCanonicalJSONFromExchange(pkg EncryptedPayloadPackage, contentKey []byte, target any) error {
+	if target == nil {
+		return errors.New("target is required")
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(pkg.CiphertextBase64)
+	if err != nil {
+		return err
+	}
+	if pkg.CiphertextDigestSHA256 != "" && pkg.CiphertextDigestSHA256 != SHA256Hex(ciphertext) {
+		return errors.New("encrypted payload ciphertext digest mismatch")
+	}
+	nonce, err := base64.StdEncoding.DecodeString(pkg.NonceBase64)
+	if err != nil {
+		return err
+	}
+	compressed, err := decryptPayloadBytes(ciphertext, nonce, contentKey, pkg.CryptoSuite)
+	if err != nil {
+		return err
+	}
+	plain, err := decompressPayload(compressed, pkg.CompressionAlg)
+	if err != nil {
+		return err
+	}
+	if pkg.PlaintextDigestSHA256 != "" && pkg.PlaintextDigestSHA256 != SHA256Hex(plain) {
+		return errors.New("encrypted payload plaintext digest mismatch")
+	}
+	return json.Unmarshal(plain, target)
+}
+
+func NewRandomContentKey(suite string) ([]byte, error) {
+	switch normalizeCryptoSuite(suite) {
+	case CryptoSuiteAES256GCM:
+		key := make([]byte, 32)
+		_, err := rand.Read(key)
+		return key, err
+	case CryptoSuiteXChaCha20Poly1305:
+		return nil, errors.New("xchacha20-poly1305 crypto backend is not linked in this build")
+	default:
+		return nil, fmt.Errorf("unsupported crypto_suite %q", suite)
+	}
+}
+
+func compressPayload(data []byte, compressionAlg string) ([]byte, error) {
+	switch normalizeCompression(compressionAlg) {
+	case "", CompressionNone:
+		out := make([]byte, len(data))
+		copy(out, data)
+		return out, nil
+	case CompressionGzip:
+		var buf bytes.Buffer
+		writer := gzip.NewWriter(&buf)
+		if _, err := writer.Write(data); err != nil {
+			return nil, err
+		}
+		if err := writer.Close(); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	default:
+		return nil, fmt.Errorf("unsupported compression_alg %q", compressionAlg)
+	}
+}
+
+func decompressPayload(data []byte, compressionAlg string) ([]byte, error) {
+	switch normalizeCompression(compressionAlg) {
+	case "", CompressionNone:
+		out := make([]byte, len(data))
+		copy(out, data)
+		return out, nil
+	case CompressionGzip:
+		reader, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		defer reader.Close()
+		return io.ReadAll(reader)
+	default:
+		return nil, fmt.Errorf("unsupported compression_alg %q", compressionAlg)
+	}
+}
+
+func encryptPayloadBytes(plain []byte, contentKey []byte, suite string) ([]byte, []byte, error) {
+	normalizedSuite := normalizeCryptoSuite(suite)
+	if normalizedSuite != CryptoSuiteAES256GCM {
+		return nil, nil, fmt.Errorf("unsupported crypto_suite %q", suite)
+	}
+	if len(contentKey) != 32 {
+		return nil, nil, errors.New("content key must be 32 bytes")
+	}
+	aead, err := newAEAD(contentKey, normalizedSuite)
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, nil, err
+	}
+	return aead.Seal(nil, nonce, plain, nil), nonce, nil
+}
+
+func decryptPayloadBytes(ciphertext []byte, nonce []byte, contentKey []byte, suite string) ([]byte, error) {
+	normalizedSuite := normalizeCryptoSuite(suite)
+	if normalizedSuite != CryptoSuiteAES256GCM {
+		return nil, fmt.Errorf("unsupported crypto_suite %q", suite)
+	}
+	if len(contentKey) != 32 {
+		return nil, errors.New("content key must be 32 bytes")
+	}
+	aead, err := newAEAD(contentKey, normalizedSuite)
+	if err != nil {
+		return nil, err
+	}
+	if len(nonce) != aead.NonceSize() {
+		return nil, errors.New("invalid nonce size")
+	}
+	return aead.Open(nil, nonce, ciphertext, nil)
+}
+
+func newAEAD(contentKey []byte, suite string) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(contentKey)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func normalizeCryptoSuite(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return CryptoSuiteAES256GCM
+	}
+	return value
+}
+
+func normalizeCompression(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return CompressionNone
+	}
+	return value
+}
+
 func (e *ExchangeEnvelope) ValidateForPayload(payload any, now time.Time, seenNonces map[string]bool, verifier ExchangeSignatureVerifier) error {
 	canonicalPayload, err := CanonicalJSON(payload)
 	if err != nil {
@@ -689,6 +903,9 @@ func (e *ExchangeEnvelope) ValidateForCanonicalPayload(canonicalPayload []byte, 
 	}
 	if e.PackageKind == "" || e.PayloadSchemaVersion == "" {
 		return errors.New("exchange envelope missing package kind or payload schema version")
+	}
+	if err := e.ValidateCryptoPolicy(); err != nil {
+		return err
 	}
 	if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
 		return errors.New("exchange envelope is expired")
@@ -712,4 +929,148 @@ func (e *ExchangeEnvelope) ValidateForCanonicalPayload(canonicalPayload []byte, 
 		seenNonces[e.Crypto.Nonce] = true
 	}
 	return nil
+}
+
+func (e *ExchangeEnvelope) ValidateCryptoPolicy() error {
+	if e == nil {
+		return errors.New("exchange envelope is nil")
+	}
+	crypto := e.Crypto
+	suite := normalizeCryptoSuite(firstNonEmptyString(crypto.CryptoSuite, crypto.ContentEncryptionAlg))
+	if suite != CryptoSuiteAES256GCM && suite != CryptoSuiteXChaCha20Poly1305 {
+		return fmt.Errorf("unsupported crypto_suite %q", suite)
+	}
+	if crypto.CryptoSuite != "" && crypto.ContentEncryptionAlg != "" && crypto.CryptoSuite != crypto.ContentEncryptionAlg {
+		return errors.New("crypto_suite and content_encryption_alg must match")
+	}
+	wrappingMode := strings.ToLower(strings.TrimSpace(crypto.KeyWrappingMode))
+	if wrappingMode == "" {
+		wrappingMode = KeyWrappingModeServerPublicKey
+	}
+	switch wrappingMode {
+	case KeyWrappingModeServerKMS, KeyWrappingModeServerPublicKey, KeyWrappingModeCustomerKMS:
+	default:
+		return fmt.Errorf("unsupported key_wrapping_mode %q", wrappingMode)
+	}
+	if crypto.ServerKeyID == "" {
+		return errors.New("server_key_id is required")
+	}
+	if crypto.EncryptedContentKey == "" && crypto.ContentKeyRef == "" && crypto.KMSKeyRef == "" {
+		return errors.New("encrypted content key metadata is required")
+	}
+	if crypto.PayloadDigestAlg != "" && crypto.PayloadDigestAlg != "sha256" {
+		return errors.New("payload_digest_alg must be sha256")
+	}
+	if err := validateEncryptedPayloadRef(e.PayloadRef); err != nil {
+		return err
+	}
+	for _, attachment := range e.Attachments {
+		if err := validateExchangeAttachment(attachment); err != nil {
+			return err
+		}
+	}
+	if !e.Policy.StructureSummaryOnly {
+		return errors.New("exchange policy must require structure_summary_only")
+	}
+	if !e.Policy.DeletePayloadAfterRun {
+		return errors.New("exchange policy must delete payload after run")
+	}
+	return nil
+}
+
+func validateEncryptedPayloadRef(ref EncryptedPayloadRef) error {
+	switch ref.Kind {
+	case PayloadRefKindInline:
+		if ref.InlineCiphertext == "" {
+			return errors.New("inline payload_ref requires inline_ciphertext")
+		}
+	case PayloadRefKindArtifact:
+		if ref.ArtifactID == "" || ref.URI == "" {
+			return errors.New("artifact payload_ref requires artifact_id and uri")
+		}
+	default:
+		return errors.New("payload_ref kind must be inline or artifact")
+	}
+	if ref.SHA256 == "" {
+		return errors.New("payload_ref sha256 is required")
+	}
+	if ref.SizeBytes <= 0 {
+		return errors.New("payload_ref size_bytes must be positive")
+	}
+	if ref.Encrypted == false {
+		return errors.New("payload_ref must be encrypted")
+	}
+	return nil
+}
+
+func validateExchangeAttachment(attachment ExchangeAttachment) error {
+	if attachment.ID == "" || attachment.Role == "" || attachment.Kind == "" || attachment.URI == "" || attachment.SHA256 == "" {
+		return errors.New("exchange attachment missing required metadata")
+	}
+	if !attachment.Encrypted {
+		return errors.New("exchange attachment must be encrypted")
+	}
+	if isSensitiveArtifactRole(attachment.Role, attachment.Kind) && !attachment.Sensitive {
+		return errors.New("sensitive exchange attachment must be marked sensitive")
+	}
+	return nil
+}
+
+func (r *RecordingResultPackage) ValidateDeliverySecurity() error {
+	if r == nil {
+		return errors.New("recording result package is nil")
+	}
+	if r.Delivery.RecipientKind == "" {
+		return errors.New("result delivery recipient_kind is required")
+	}
+	if r.Delivery.RecipientKind != ResultRecipientAppInstallation && r.Delivery.RecipientKind != ResultRecipientOrganization {
+		return errors.New("unsupported result delivery recipient_kind")
+	}
+	if r.Delivery.RecipientKeyID == "" {
+		return errors.New("result delivery recipient_key_id is required")
+	}
+	if r.Delivery.EncryptionAlg == "" {
+		return errors.New("result delivery encryption_alg is required")
+	}
+	if err := validatePackageArtifactDescriptor(r.Delivery.ResultPackageRef); err != nil {
+		return fmt.Errorf("result package ref: %w", err)
+	}
+	for _, asset := range r.Delivery.AssetRefs {
+		if err := validatePackageArtifactDescriptor(asset); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePackageArtifactDescriptor(artifact PackageArtifactDescriptor) error {
+	if artifact.ID == "" || artifact.Kind == "" || artifact.URI == "" || artifact.SHA256 == "" {
+		return errors.New("artifact descriptor missing required metadata")
+	}
+	if !artifact.Encrypted {
+		return errors.New("artifact descriptor must be encrypted")
+	}
+	if isSensitiveArtifactRole(artifact.Role, artifact.Kind) && !artifact.Sensitive {
+		return errors.New("sensitive artifact descriptor must be marked sensitive")
+	}
+	return nil
+}
+
+func isSensitiveArtifactRole(role string, kind string) bool {
+	value := strings.ToLower(role + " " + kind)
+	for _, token := range []string{"failure", "trace", "dom", "accessibility", "recording", "result", "video", "screenshot", "secret"} {
+		if strings.Contains(value, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

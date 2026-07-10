@@ -938,6 +938,7 @@ export type PackageArtifactDescriptor = {
   encrypted: boolean;
   sensitive?: boolean;
   compression_alg?: string;
+  recipient_key_id?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -1086,6 +1087,16 @@ export type RecordingResultPackage = {
   verification_report: VerificationReport;
   failure_diagnostic?: ScriptFailureDiagnostic;
   repair_request?: ScriptRepairRequest;
+  delivery?: {
+    result_package_ref: PackageArtifactDescriptor;
+    asset_refs?: PackageArtifactDescriptor[];
+    recipient_kind?: string;
+    recipient_key_id?: string;
+    encryption_alg?: string;
+    expires_at?: string;
+    ack_required: boolean;
+    acked_at?: string;
+  };
   created_at: string;
 };
 

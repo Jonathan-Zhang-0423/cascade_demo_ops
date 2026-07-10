@@ -135,10 +135,17 @@ func TestExchangeMigrationKeepsPlaintextPayloadsAndSecretsOutOfRows(t *testing.T
 	}
 	required := []string{
 		"payload_digest_sha256 text not null",
+		"ciphertext_digest_sha256 text",
+		"crypto_suite text not null",
+		"key_wrapping_mode text not null",
+		"server_key_id text not null",
 		"cloud_secret_ref text",
 		"encrypted_secret_artifact_id text",
 		"uri text not null",
 		"encrypted boolean not null default true",
+		"recipient_kind text not null",
+		"recipient_key_id text not null",
+		"encryption_alg text not null",
 	}
 	for _, token := range required {
 		if !strings.Contains(sql, token) {
@@ -153,8 +160,11 @@ func TestExchangeMigrationHasIdempotencyStatusAndJSONBIndexes(t *testing.T) {
 		"unique (org_id, idempotency_key)",
 		"exchange_packages_org_idempotency_idx",
 		"exchange_packages_payload_digest_idx",
+		"exchange_packages_ciphertext_digest_idx",
+		"exchange_packages_crypto_suite_idx",
 		"cloud_recording_jobs_worker_status_idx",
 		"package_artifacts_sha256_idx",
+		"package_artifacts_recipient_key_idx",
 		"result_packages_exchange_idx",
 		"exchange_packages_policy_json_gin",
 		"cloud_recording_jobs_run_spec_json_gin",

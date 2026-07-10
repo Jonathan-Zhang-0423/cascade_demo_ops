@@ -278,26 +278,31 @@ type AuditLogRecord struct {
 }
 
 type ExchangePackageRecord struct {
-	ID                   string
-	OrgID                string
-	ProjectID            string
-	EnvelopeID           string
-	PackageKind          model.ExchangePackageKind
-	Status               model.ExchangePackageStatus
-	SchemaVersion        string
-	PayloadSchemaVersion string
-	IdempotencyKey       string
-	PayloadDigestSHA256  string
-	PayloadSizeBytes     *int64
-	ProducerJSON         json.RawMessage
-	CryptoJSON           json.RawMessage
-	PolicyJSON           json.RawMessage
-	EnvelopeMetadataJSON json.RawMessage
-	ErrorJSON            json.RawMessage
-	CreatedAt            time.Time
-	ExpiresAt            *time.Time
-	AcceptedAt           *time.Time
-	CompletedAt          *time.Time
+	ID                     string
+	OrgID                  string
+	ProjectID              string
+	EnvelopeID             string
+	PackageKind            model.ExchangePackageKind
+	Status                 model.ExchangePackageStatus
+	SchemaVersion          string
+	PayloadSchemaVersion   string
+	IdempotencyKey         string
+	PayloadDigestSHA256    string
+	CiphertextDigestSHA256 string
+	PayloadSizeBytes       *int64
+	CryptoSuite            string
+	KeyWrappingMode        string
+	ServerKeyID            string
+	ContentKeyRef          string
+	ProducerJSON           json.RawMessage
+	CryptoJSON             json.RawMessage
+	PolicyJSON             json.RawMessage
+	EnvelopeMetadataJSON   json.RawMessage
+	ErrorJSON              json.RawMessage
+	CreatedAt              time.Time
+	ExpiresAt              *time.Time
+	AcceptedAt             *time.Time
+	CompletedAt            *time.Time
 }
 
 type PackageArtifactRecord struct {
@@ -315,6 +320,7 @@ type PackageArtifactRecord struct {
 	Encrypted         bool
 	Sensitive         bool
 	CompressionAlg    string
+	RecipientKeyID    string
 	MetadataJSON      json.RawMessage
 	CreatedAt         time.Time
 	ExpiresAt         *time.Time
@@ -368,6 +374,9 @@ type ResultPackageRecord struct {
 	Status              model.RecordingResultStatus
 	SchemaVersion       string
 	ResultDigestSHA256  string
+	RecipientKind       string
+	RecipientKeyID      string
+	EncryptionAlg       string
 	TraceSummaryJSON    json.RawMessage
 	VerificationJSON    json.RawMessage
 	DeliveryJSON        json.RawMessage

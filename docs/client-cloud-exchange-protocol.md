@@ -8,11 +8,12 @@ Cascade cloud, then returns encrypted recording results and generated assets.
 ```text
 App local understanding
   -> user approves execution plan
-  -> App builds ClientExecutionPackage
-  -> App canonicalizes, compresses, encrypts, signs
+  -> App builds ClientExecutionPackage plaintext source locally
+  -> App canonicalizes, digests, compresses, encrypts, signs
   -> Cloud validates ExchangeEnvelope
+  -> Cloud decrypts only inside an isolated worker memory boundary
   -> Cloud records and renders from DemoWorkflowGraph + RecordingRunSpec
-  -> Cloud returns RecordingResultPackage
+  -> Cloud returns encrypted RecordingResultPackage/artifact refs
   -> App acknowledges result delivery
 ```
 
@@ -68,6 +69,35 @@ the existing `repository.ExchangeRepository` contract.
   blobs.
 - Cloud execution must obey `allowed_domains`, IP allowlist requirements,
   forbidden pages, redactions, retention, and user approval metadata.
+- `exchange_packages` stores routing metadata only: org/project ids, status,
+  schema versions, payload/ciphertext digests, crypto suite, key wrapping mode,
+  server key id, policy, producer metadata, and errors. It must not store
+  plaintext `ClientExecutionPackage`, workflow graph JSON, TS script, approval
+  markdown, source summaries, screenshots, trace files, or result package body.
+- `payload_ref` and all package/result artifact descriptors point to encrypted
+  bytes. Inline payloads are for small dev/test packages; production should use
+  encrypted artifact refs with checksum and size metadata.
+
+## Crypto Suite v1
+
+- Default key management is hybrid: Cascade server KMS/public key for MVP, with
+  `key_wrapping_mode=customer_kms` reserved for enterprise deployments.
+- `ExchangeEnvelope.crypto.crypto_suite` and
+  `content_encryption_alg` identify the content encryption suite. MVP supports
+  `aes-256-gcm` in the local contract helper and reserves
+  `xchacha20-poly1305` as the preferred modern suite when the crypto backend is
+  linked.
+- Each package or attachment uses a fresh random content key. The content key is
+  wrapped by `server_kms`, `server_public_key`, or `customer_kms`; databases
+  store only `encrypted_content_key`, `content_key_ref`, or `kms_key_ref`.
+- App installation signing keys sign the canonical payload digest plus envelope
+  metadata. Cloud rejects digest mismatch, bad signature, expiry, replayed nonce,
+  org/project mismatch, unsupported crypto suite, missing key-wrapping metadata,
+  and unencrypted payload refs.
+- Result packages and failure diagnostics are encrypted for the App recipient by
+  default: `delivery.recipient_kind=app_installation`,
+  `delivery.recipient_key_id=<install key id>`, and
+  `delivery.encryption_alg=<suite>`.
 
 ## Reproducibility Boundary
 

@@ -93,15 +93,21 @@ func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 		},
 		Delivery: model.ResultDelivery{
 			ResultPackageRef: model.PackageArtifactDescriptor{
-				ID:        resultPackageArtifactID(source.PackageID),
-				Role:      "recording_result",
-				Kind:      "recording_result_package",
-				URI:       fmt.Sprintf("cascade://recording-results/%s", resultPackageResultID(source.PackageID)),
-				Encrypted: true,
+				ID:             resultPackageArtifactID(source.PackageID),
+				Role:           "recording_result",
+				Kind:           "recording_result_package",
+				URI:            fmt.Sprintf("cascade://recording-results/%s", resultPackageResultID(source.PackageID)),
+				SHA256:         resultPackageDigest(source),
+				Encrypted:      true,
+				Sensitive:      true,
+				RecipientKeyID: resultRecipientKeyID(source),
 			},
-			AssetRefs:   assetDescriptorsFromArtifacts(source, artifacts, createdAt),
-			AckRequired: true,
-			ExpiresAt:   createdAt.Add(24 * time.Hour),
+			AssetRefs:      assetDescriptorsFromArtifacts(source, artifacts, createdAt),
+			RecipientKind:  model.ResultRecipientAppInstallation,
+			RecipientKeyID: resultRecipientKeyID(source),
+			EncryptionAlg:  model.CryptoSuiteXChaCha20Poly1305,
+			AckRequired:    true,
+			ExpiresAt:      createdAt.Add(24 * time.Hour),
 		},
 		CreatedAt: createdAt,
 	}
@@ -250,15 +256,16 @@ func assetDescriptorsFromArtifacts(source *model.ClientExecutionPackage, artifac
 	descriptors := make([]model.PackageArtifactDescriptor, 0, len(artifacts))
 	for _, artifact := range artifacts {
 		descriptors = append(descriptors, model.PackageArtifactDescriptor{
-			ID:        artifact.ID,
-			Role:      "recording_output",
-			Kind:      artifact.Kind,
-			URI:       artifact.URI,
-			MimeType:  artifact.MimeType,
-			SHA256:    artifact.SHA256,
-			SizeBytes: artifact.SizeBytes,
-			Encrypted: false,
-			Sensitive: artifact.Sensitive,
+			ID:             artifact.ID,
+			Role:           "recording_output",
+			Kind:           artifact.Kind,
+			URI:            artifact.URI,
+			MimeType:       artifact.MimeType,
+			SHA256:         firstNonEmptyString(artifact.SHA256, model.SHA256Hex([]byte(artifact.URI))),
+			SizeBytes:      artifact.SizeBytes,
+			Encrypted:      true,
+			Sensitive:      true,
+			RecipientKeyID: resultRecipientKeyID(source),
 			Metadata: map[string]any{
 				"source_package_id": source.PackageID,
 				"source_node_id":    artifact.SourceNodeID,
@@ -267,6 +274,27 @@ func assetDescriptorsFromArtifacts(source *model.ClientExecutionPackage, artifac
 		})
 	}
 	return descriptors
+}
+
+func resultRecipientKeyID(source *model.ClientExecutionPackage) string {
+	if source != nil && source.ProjectContextSummary.ContextID != "" {
+		return "app_installation:" + source.ProjectContextSummary.ContextID
+	}
+	return "app_installation:unknown"
+}
+
+func resultPackageDigest(source *model.ClientExecutionPackage) string {
+	if source == nil {
+		return ""
+	}
+	digest := source.Reproducibility.PackageHashSHA256
+	if digest == "" {
+		digest = source.Reproducibility.GraphHashSHA256
+	}
+	if digest == "" {
+		digest = model.SHA256Hex([]byte(source.PackageID))
+	}
+	return digest
 }
 
 func uniqueArtifactRefs(artifacts []model.ArtifactRef) []model.ArtifactRef {
@@ -345,4 +373,13 @@ func mimeTypeForPath(path string, fallback string) string {
 	default:
 		return fallback
 	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

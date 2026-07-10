@@ -110,7 +110,21 @@ func sampleRenderableRecordingResult(t *testing.T, pkg ClientExecutionPackage) R
 			ReproducibilityMatch: true,
 		},
 		AuditTrail: CloudExecutionAuditTrail{CompletedAt: now},
-		Delivery:   ResultDelivery{AckRequired: true},
-		CreatedAt:  now,
+		Delivery: ResultDelivery{
+			ResultPackageRef: PackageArtifactDescriptor{
+				ID:        "result_package_artifact",
+				Role:      "recording_result",
+				Kind:      "recording_result_package",
+				URI:       "s3://cascade-results/result.json.enc",
+				SHA256:    "sha_result",
+				Encrypted: true,
+				Sensitive: true,
+			},
+			RecipientKind:  ResultRecipientAppInstallation,
+			RecipientKeyID: "install_result_key_1",
+			EncryptionAlg:  CryptoSuiteXChaCha20Poly1305,
+			AckRequired:    true,
+		},
+		CreatedAt: now,
 	}
 }

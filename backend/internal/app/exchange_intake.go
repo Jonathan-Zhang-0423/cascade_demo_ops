@@ -91,13 +91,16 @@ func (s *ExchangeIntakeService) Init(ctx context.Context, request model.Executio
 
 	now := s.now()
 	response := model.ExecutionPackageInitResponse{
-		UploadID:            newExchangeID(defaultUploadIDPrefix, now),
-		ServerPublicKeyID:   defaultServerPublicKeyID,
-		ServerPublicKeyAlg:  defaultServerPublicKeyAlg,
-		CascadeExecutionIPs: []string{defaultCascadeExecutionIP},
-		MaxEnvelopeBytes:    defaultMaxEnvelopeBytes,
-		MaxAttachmentBytes:  defaultMaxAttachmentBytes,
-		ExpiresAt:           now.Add(defaultUploadTTL),
+		UploadID:              newExchangeID(defaultUploadIDPrefix, now),
+		ServerPublicKeyID:     defaultServerPublicKeyID,
+		ServerPublicKeyAlg:    defaultServerPublicKeyAlg,
+		KeyWrappingModes:      []string{model.KeyWrappingModeServerKMS, model.KeyWrappingModeServerPublicKey, model.KeyWrappingModeCustomerKMS},
+		SupportedCryptoSuites: []string{model.CryptoSuiteXChaCha20Poly1305, model.CryptoSuiteAES256GCM},
+		SupportedCompression:  []string{model.CompressionGzip, model.CompressionNone},
+		CascadeExecutionIPs:   []string{defaultCascadeExecutionIP},
+		MaxEnvelopeBytes:      defaultMaxEnvelopeBytes,
+		MaxAttachmentBytes:    defaultMaxAttachmentBytes,
+		ExpiresAt:             now.Add(defaultUploadTTL),
 	}
 
 	s.mu.Lock()

@@ -89,6 +89,9 @@ func ValidateRecordingResultPackageForRender(result *RecordingResultPackage, sou
 			return errors.New("recording result package contains artifact without id or uri")
 		}
 	}
+	if err := result.ValidateDeliverySecurity(); err != nil {
+		return err
+	}
 	return nil
 }
 
