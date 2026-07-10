@@ -15,11 +15,22 @@ import (
 )
 
 func (s *Service) RunUploadedExecutionPackage(ctx context.Context, orgID string, exchangePackageID string) (model.ExecutionPackageStatusResponse, error) {
-	pkg, cloudJobID, err := s.exchange.StartExecution(ctx, orgID, exchangePackageID)
+	started, err := s.exchange.TryStartExecution(ctx, orgID, exchangePackageID)
 	if err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
 	}
+	if !started.Started {
+		return started.Status, nil
+	}
+	go s.runUploadedExecutionPackage(context.Background(), orgID, exchangePackageID, started.Payload, started.CloudJobID)
+	return started.Status, nil
+}
 
+func (s *Service) runUploadedExecutionPackage(ctx context.Context, orgID string, exchangePackageID string, pkg model.ClientExecutionPackage, cloudJobID string) {
+	_, _ = s.runUploadedExecutionPackageSync(ctx, orgID, exchangePackageID, pkg, cloudJobID)
+}
+
+func (s *Service) runUploadedExecutionPackageSync(ctx context.Context, orgID string, exchangePackageID string, pkg model.ClientExecutionPackage, cloudJobID string) (model.ExecutionPackageStatusResponse, error) {
 	_, _ = s.exchange.MarkExecutionStage(ctx, orgID, exchangePackageID, "preparing_worker", "Checking local video-worker, Node runtime, and artifact output directories.", 35)
 	workerPath := s.localVideoWorkerPath()
 	if workerPath == "" {

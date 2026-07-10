@@ -782,6 +782,27 @@ type ExecutionPackageStatusResponse struct {
 	UpdatedAt         time.Time                `json:"updated_at"`
 }
 
+type ExecutionPackageListResponse struct {
+	Items []ExecutionPackageListItem `json:"items"`
+}
+
+type ExecutionPackageListItem struct {
+	ExchangePackageID string                   `json:"exchange_package_id"`
+	CloudJobID        string                   `json:"cloud_job_id,omitempty"`
+	OrgID             string                   `json:"org_id"`
+	ProjectID         string                   `json:"project_id"`
+	PackageID         string                   `json:"package_id,omitempty"`
+	Status            ExchangePackageStatus    `json:"status"`
+	Stage             string                   `json:"stage,omitempty"`
+	Message           string                   `json:"message,omitempty"`
+	ProgressPercent   int                      `json:"progress_percent,omitempty"`
+	ResultPackageID   string                   `json:"result_package_id,omitempty"`
+	ResultSummary     *ExecutionResultSummary  `json:"result_summary,omitempty"`
+	FailureSummary    *ExecutionFailureSummary `json:"failure_summary,omitempty"`
+	CreatedAt         time.Time                `json:"created_at"`
+	UpdatedAt         time.Time                `json:"updated_at"`
+}
+
 type ExecutionStageEvent struct {
 	Stage           string                `json:"stage"`
 	Status          ExchangePackageStatus `json:"status,omitempty"`
@@ -803,19 +824,32 @@ type ExecutionFailureSummary struct {
 }
 
 type ExecutionResultSummary struct {
-	ResultID            string                `json:"result_id,omitempty"`
-	ResultStatus        RecordingResultStatus `json:"result_status,omitempty"`
-	PassRate            float64               `json:"pass_rate,omitempty"`
-	StepCount           int                   `json:"step_count,omitempty"`
-	PassedStepCount     int                   `json:"passed_step_count,omitempty"`
-	FailedStepCount     int                   `json:"failed_step_count,omitempty"`
-	GeneratedAssetCount int                   `json:"generated_asset_count,omitempty"`
-	DemoVideoCount      int                   `json:"demo_video_count,omitempty"`
-	ScreenshotCount     int                   `json:"screenshot_count,omitempty"`
-	RawRecordingCount   int                   `json:"raw_recording_count,omitempty"`
-	TraceCount          int                   `json:"trace_count,omitempty"`
-	PrimaryDemoVideoURI string                `json:"primary_demo_video_uri,omitempty"`
-	RawRecordingURI     string                `json:"raw_recording_uri,omitempty"`
+	ResultID            string                 `json:"result_id,omitempty"`
+	ResultStatus        RecordingResultStatus  `json:"result_status,omitempty"`
+	PassRate            float64                `json:"pass_rate,omitempty"`
+	StepCount           int                    `json:"step_count,omitempty"`
+	PassedStepCount     int                    `json:"passed_step_count,omitempty"`
+	FailedStepCount     int                    `json:"failed_step_count,omitempty"`
+	GeneratedAssetCount int                    `json:"generated_asset_count,omitempty"`
+	DemoVideoCount      int                    `json:"demo_video_count,omitempty"`
+	ScreenshotCount     int                    `json:"screenshot_count,omitempty"`
+	RawRecordingCount   int                    `json:"raw_recording_count,omitempty"`
+	TraceCount          int                    `json:"trace_count,omitempty"`
+	PrimaryDemoVideoURI string                 `json:"primary_demo_video_uri,omitempty"`
+	RawRecordingURI     string                 `json:"raw_recording_uri,omitempty"`
+	Deliverables        []ExecutionDeliverable `json:"deliverables,omitempty"`
+}
+
+type ExecutionDeliverable struct {
+	ID            string `json:"id,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	Role          string `json:"role,omitempty"`
+	URI           string `json:"uri,omitempty"`
+	DownloadURL   string `json:"download_url,omitempty"`
+	MimeType      string `json:"mime_type,omitempty"`
+	SourceNodeID  string `json:"source_node_id,omitempty"`
+	IncludeInDemo bool   `json:"include_in_demo,omitempty"`
+	Sensitive     bool   `json:"sensitive,omitempty"`
 }
 
 type ResultPackageAckRequest struct {
@@ -831,6 +865,27 @@ type ResultPackageAckResponse struct {
 	ResultPackageID string                `json:"result_package_id"`
 	Status          RecordingResultStatus `json:"status"`
 	Retention       RetentionSpec         `json:"retention"`
+}
+
+type ResultPackageListResponse struct {
+	Items []ResultPackageListItem `json:"items"`
+}
+
+type ResultPackageListItem struct {
+	ResultPackageID   string                   `json:"result_package_id"`
+	ResultID          string                   `json:"result_id,omitempty"`
+	ExchangePackageID string                   `json:"exchange_package_id"`
+	SourcePackageID   string                   `json:"source_package_id,omitempty"`
+	CloudJobID        string                   `json:"cloud_job_id,omitempty"`
+	OrgID             string                   `json:"org_id"`
+	ProjectID         string                   `json:"project_id"`
+	Status            RecordingResultStatus    `json:"status"`
+	ResultSummary     *ExecutionResultSummary  `json:"result_summary,omitempty"`
+	FailureSummary    *ExecutionFailureSummary `json:"failure_summary,omitempty"`
+	CreatedAt         time.Time                `json:"created_at"`
+	ExpiresAt         time.Time                `json:"expires_at,omitempty"`
+	AckRequired       bool                     `json:"ack_required,omitempty"`
+	AckedAt           time.Time                `json:"acked_at,omitempty"`
 }
 
 type ExchangeSignatureVerifier interface {

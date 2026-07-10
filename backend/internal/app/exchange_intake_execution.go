@@ -7,28 +7,58 @@ import (
 	"cascade-demoops/backend/internal/model"
 )
 
+type executionStartResult struct {
+	Payload    model.ClientExecutionPackage
+	CloudJobID string
+	Status     model.ExecutionPackageStatusResponse
+	Started    bool
+}
+
 func (s *ExchangeIntakeService) StartExecution(ctx context.Context, orgID string, exchangePackageID string) (model.ClientExecutionPackage, string, error) {
-	if err := ctx.Err(); err != nil {
+	result, err := s.TryStartExecution(ctx, orgID, exchangePackageID)
+	if err != nil {
 		return model.ClientExecutionPackage{}, "", err
+	}
+	if !result.Started {
+		return model.ClientExecutionPackage{}, result.CloudJobID, errors.New("exchange package execution is already started or finished")
+	}
+	return result.Payload, result.CloudJobID, nil
+}
+
+func (s *ExchangeIntakeService) TryStartExecution(ctx context.Context, orgID string, exchangePackageID string) (executionStartResult, error) {
+	if err := ctx.Err(); err != nil {
+		return executionStartResult{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	state, err := s.packageStateLocked(orgID, exchangePackageID)
 	if err != nil {
-		return model.ClientExecutionPackage{}, "", err
+		return executionStartResult{}, err
 	}
+	status := s.statusResponseLocked(state)
 	if state.Status == model.ExchangePackageStatusCompleted {
-		return model.ClientExecutionPackage{}, "", errors.New("exchange package is already completed")
+		return executionStartResult{CloudJobID: state.CloudJobID, Status: status}, nil
 	}
 	if state.Status == model.ExchangePackageStatusFailed || state.Status == model.ExchangePackageStatusCanceled || state.Status == model.ExchangePackageStatusExpired {
-		return model.ClientExecutionPackage{}, "", errors.New("exchange package is not runnable")
+		return executionStartResult{CloudJobID: state.CloudJobID, Status: status}, nil
+	}
+	if state.Status == model.ExchangePackageStatusRunning || state.Status == model.ExchangePackageStatusQueued {
+		return executionStartResult{CloudJobID: state.CloudJobID, Status: status}, nil
 	}
 	if state.Payload.PackageID == "" {
-		return model.ClientExecutionPackage{}, "", errors.New("exchange package payload is not available")
+		return executionStartResult{}, errors.New("exchange package payload is not available")
 	}
 	setPackageStageLocked(state, model.ExchangePackageStatusRunning, "validated", "Execution package passed cloud-side validation and is ready to prepare the worker.", 25, s.now())
-	return state.Payload, state.CloudJobID, nil
+	if err := s.saveLocked(ctx); err != nil {
+		return executionStartResult{}, err
+	}
+	return executionStartResult{
+		Payload:    state.Payload,
+		CloudJobID: state.CloudJobID,
+		Status:     s.statusResponseLocked(state),
+		Started:    true,
+	}, nil
 }
 
 func (s *ExchangeIntakeService) MarkExecutionStage(ctx context.Context, orgID string, exchangePackageID string, stage string, message string, progress int) (model.ExecutionPackageStatusResponse, error) {
@@ -43,6 +73,9 @@ func (s *ExchangeIntakeService) MarkExecutionStage(ctx context.Context, orgID st
 		return model.ExecutionPackageStatusResponse{}, err
 	}
 	setPackageStageLocked(state, model.ExchangePackageStatusRunning, stage, message, progress, s.now())
+	if err := s.saveLocked(ctx); err != nil {
+		return model.ExecutionPackageStatusResponse{}, err
+	}
 	return s.statusResponseLocked(state), nil
 }
 
@@ -73,6 +106,9 @@ func (s *ExchangeIntakeService) FailExecution(ctx context.Context, orgID string,
 	state.Error = &model.AgentError{Code: code, Message: message}
 	if failedStage != "failed" {
 		state.Error.EvidenceRefs = append(state.Error.EvidenceRefs, model.EvidenceRef{ID: "failed_stage_" + failedStage, Kind: model.EvidenceKindExecutionRun, Summary: failedStage})
+	}
+	if saveErr := s.saveLocked(ctx); saveErr != nil {
+		return model.ExecutionPackageStatusResponse{}, saveErr
 	}
 	return s.statusResponseLocked(state), err
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ const (
 type ExchangeIntakeService struct {
 	mu              sync.Mutex
 	verifier        model.ExchangeSignatureVerifier
+	persistence     exchangeSnapshotStore
 	now             func() time.Time
 	uploads         map[string]exchangeUploadSession
 	packages        map[string]*exchangePackageState
@@ -70,8 +72,13 @@ type recordingResultState struct {
 }
 
 func NewExchangeIntakeService(verifier model.ExchangeSignatureVerifier) *ExchangeIntakeService {
-	return &ExchangeIntakeService{
+	return newExchangeIntakeService(verifier, nil)
+}
+
+func newExchangeIntakeService(verifier model.ExchangeSignatureVerifier, persistence exchangeSnapshotStore) *ExchangeIntakeService {
+	service := &ExchangeIntakeService{
 		verifier:        verifier,
+		persistence:     persistence,
 		now:             func() time.Time { return time.Now().UTC() },
 		uploads:         map[string]exchangeUploadSession{},
 		packages:        map[string]*exchangePackageState{},
@@ -80,6 +87,10 @@ func NewExchangeIntakeService(verifier model.ExchangeSignatureVerifier) *Exchang
 		resultByPackage: map[string]string{},
 		seenNonces:      map[string]bool{},
 	}
+	if persistence != nil {
+		_ = service.LoadSnapshot(context.Background())
+	}
+	return service
 }
 
 func (s *ExchangeIntakeService) Init(ctx context.Context, request model.ExecutionPackageInitRequest) (model.ExecutionPackageInitResponse, error) {
@@ -119,6 +130,9 @@ func (s *ExchangeIntakeService) Init(ctx context.Context, request model.Executio
 		PackageKind: request.PackageKind,
 		Producer:    request.Producer,
 		ExpiresAt:   response.ExpiresAt,
+	}
+	if err := s.saveLocked(ctx); err != nil {
+		return model.ExecutionPackageInitResponse{}, err
 	}
 	return response, nil
 }
@@ -180,6 +194,9 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 	s.packages[exchangePackageID] = state
 	s.packageByIdem[idempotencyKey(request.Envelope.OrgID, request.Envelope.IdempotencyKey)] = exchangePackageID
 	delete(s.uploads, request.UploadID)
+	if err := s.saveLocked(ctx); err != nil {
+		return model.ExecutionPackageUploadResponse{}, err
+	}
 
 	return model.ExecutionPackageUploadResponse{ExchangePackageID: exchangePackageID, CloudJobID: cloudJobID, Status: state.Status}, nil
 }
@@ -212,6 +229,45 @@ func (s *ExchangeIntakeService) Status(ctx context.Context, orgID string, exchan
 		return model.ExecutionPackageStatusResponse{}, err
 	}
 	return s.statusResponseLocked(state), nil
+}
+
+func (s *ExchangeIntakeService) ListExecutionPackages(ctx context.Context, orgID string) (model.ExecutionPackageListResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return model.ExecutionPackageListResponse{}, err
+	}
+	if strings.TrimSpace(orgID) == "" {
+		return model.ExecutionPackageListResponse{}, errors.New("org_id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	items := make([]model.ExecutionPackageListItem, 0, len(s.packages))
+	for _, state := range s.packages {
+		if state == nil || state.Envelope.OrgID != orgID {
+			continue
+		}
+		status := s.statusResponseLocked(state)
+		items = append(items, model.ExecutionPackageListItem{
+			ExchangePackageID: status.ExchangePackageID,
+			CloudJobID:        status.CloudJobID,
+			OrgID:             state.Envelope.OrgID,
+			ProjectID:         state.Envelope.ProjectID,
+			PackageID:         state.Payload.PackageID,
+			Status:            status.Status,
+			Stage:             status.Stage,
+			Message:           status.Message,
+			ProgressPercent:   status.ProgressPercent,
+			ResultPackageID:   status.ResultPackageID,
+			ResultSummary:     status.ResultSummary,
+			FailureSummary:    status.FailureSummary,
+			CreatedAt:         state.CreatedAt,
+			UpdatedAt:         status.UpdatedAt,
+		})
+	}
+	sort.SliceStable(items, func(left, right int) bool {
+		return items[left].UpdatedAt.After(items[right].UpdatedAt)
+	})
+	return model.ExecutionPackageListResponse{Items: items}, nil
 }
 
 func (s *ExchangeIntakeService) PayloadSnapshot(ctx context.Context, orgID string, exchangePackageID string) (model.ClientExecutionPackage, error) {
@@ -271,6 +327,9 @@ func (s *ExchangeIntakeService) CompleteWithRecordingResult(ctx context.Context,
 	} else {
 		setPackageStageLocked(state, model.ExchangePackageStatusCompleted, "completed", "Recording and rendering completed. Result package is ready.", 100, now)
 	}
+	if err := s.saveLocked(ctx); err != nil {
+		return model.ExecutionPackageStatusResponse{}, err
+	}
 
 	return s.statusResponseLocked(state), nil
 }
@@ -293,6 +352,76 @@ func (s *ExchangeIntakeService) GetResultPackage(ctx context.Context, orgID stri
 		state.Payload = model.ClientExecutionPackage{}
 	}
 	return resultState.Result, nil
+}
+
+func (s *ExchangeIntakeService) ListResultPackages(ctx context.Context, orgID string) (model.ResultPackageListResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return model.ResultPackageListResponse{}, err
+	}
+	if strings.TrimSpace(orgID) == "" {
+		return model.ResultPackageListResponse{}, errors.New("org_id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	items := make([]model.ResultPackageListItem, 0, len(s.resultByID))
+	for _, resultState := range s.resultByID {
+		if resultState == nil {
+			continue
+		}
+		state, ok := s.packages[resultState.ExchangePackageID]
+		if !ok || state == nil || state.Envelope.OrgID != orgID {
+			continue
+		}
+		result := resultState.Result
+		item := model.ResultPackageListItem{
+			ResultPackageID:   resultState.ResultPackageID,
+			ResultID:          result.ResultID,
+			ExchangePackageID: resultState.ExchangePackageID,
+			SourcePackageID:   result.SourcePackageID,
+			CloudJobID:        result.CloudJobID,
+			OrgID:             state.Envelope.OrgID,
+			ProjectID:         state.Envelope.ProjectID,
+			Status:            result.Status,
+			ResultSummary:     summarizeRecordingResult(result),
+			CreatedAt:         result.CreatedAt,
+			ExpiresAt:         result.Delivery.ExpiresAt,
+			AckRequired:       result.Delivery.AckRequired,
+			AckedAt:           result.Delivery.AckedAt,
+		}
+		if result.FailureDiagnostic != nil {
+			item.FailureSummary = failureSummary(state, result.FailureDiagnostic)
+		}
+		items = append(items, item)
+	}
+	sort.SliceStable(items, func(left, right int) bool {
+		return items[left].CreatedAt.After(items[right].CreatedAt)
+	})
+	return model.ResultPackageListResponse{Items: items}, nil
+}
+
+func (s *ExchangeIntakeService) GetResultArtifact(ctx context.Context, orgID string, resultPackageID string, artifactID string) (model.ArtifactRef, error) {
+	if err := ctx.Err(); err != nil {
+		return model.ArtifactRef{}, err
+	}
+	if strings.TrimSpace(artifactID) == "" {
+		return model.ArtifactRef{}, errors.New("artifact_id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resultState, ok := s.resultByID[resultPackageID]
+	if !ok {
+		return model.ArtifactRef{}, errors.New("result package not found")
+	}
+	if _, err := s.packageStateLocked(orgID, resultState.ExchangePackageID); err != nil {
+		return model.ArtifactRef{}, err
+	}
+	for _, artifact := range uniqueStatusArtifacts(append(append([]model.ArtifactRef{}, resultState.Result.GeneratedAssets...), traceArtifacts(resultState.Result.ExecutionTrace)...)) {
+		if artifact.ID == artifactID {
+			return artifact, nil
+		}
+	}
+	return model.ArtifactRef{}, errors.New("result artifact not found")
 }
 
 func (s *ExchangeIntakeService) AckResultPackage(ctx context.Context, orgID string, request model.ResultPackageAckRequest) (model.ResultPackageAckResponse, error) {
@@ -330,6 +459,9 @@ func (s *ExchangeIntakeService) AckResultPackage(ctx context.Context, orgID stri
 	resultState.Result.Status = model.RecordingResultStatusAcked
 	resultState.Result.Delivery.AckedAt = request.AckedAt
 	state.UpdatedAt = request.AckedAt
+	if err := s.saveLocked(ctx); err != nil {
+		return model.ResultPackageAckResponse{}, err
+	}
 	return model.ResultPackageAckResponse{ResultPackageID: request.ResultPackageID, Status: model.RecordingResultStatusAcked, Retention: resultState.Retention}, nil
 }
 
@@ -354,6 +486,65 @@ func validateReceivedAssets(result model.RecordingResultPackage, receivedAssetID
 		}
 	}
 	return nil
+}
+
+func (s *ExchangeIntakeService) LoadSnapshot(ctx context.Context) error {
+	if s == nil || s.persistence == nil {
+		return nil
+	}
+	snapshot, err := s.persistence.Load(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applySnapshotLocked(snapshot)
+	return nil
+}
+
+func (s *ExchangeIntakeService) saveLocked(ctx context.Context) error {
+	if s == nil || s.persistence == nil {
+		return nil
+	}
+	return s.persistence.Save(ctx, s.snapshotLocked())
+}
+
+func (s *ExchangeIntakeService) snapshotLocked() exchangeSnapshot {
+	return exchangeSnapshot{
+		Uploads:         cloneUploadSessions(s.uploads),
+		Packages:        clonePackageStates(s.packages),
+		PackageByIdem:   cloneStringMap(s.packageByIdem),
+		ResultByID:      cloneRecordingResultStates(s.resultByID),
+		ResultByPackage: cloneStringMap(s.resultByPackage),
+		SeenNonces:      cloneBoolMap(s.seenNonces),
+	}
+}
+
+func (s *ExchangeIntakeService) applySnapshotLocked(snapshot exchangeSnapshot) {
+	s.uploads = cloneUploadSessions(snapshot.Uploads)
+	s.packages = clonePackageStates(snapshot.Packages)
+	s.packageByIdem = cloneStringMap(snapshot.PackageByIdem)
+	s.resultByID = cloneRecordingResultStates(snapshot.ResultByID)
+	s.resultByPackage = cloneStringMap(snapshot.ResultByPackage)
+	s.seenNonces = cloneBoolMap(snapshot.SeenNonces)
+	if s.uploads == nil {
+		s.uploads = map[string]exchangeUploadSession{}
+	}
+	if s.packages == nil {
+		s.packages = map[string]*exchangePackageState{}
+	}
+	if s.packageByIdem == nil {
+		s.packageByIdem = map[string]string{}
+	}
+	if s.resultByID == nil {
+		s.resultByID = map[string]*recordingResultState{}
+	}
+	if s.resultByPackage == nil {
+		s.resultByPackage = map[string]string{}
+	}
+	if s.seenNonces == nil {
+		s.seenNonces = map[string]bool{}
+	}
 }
 
 func (s *ExchangeIntakeService) packageState(orgID string, exchangePackageID string) (*exchangePackageState, error) {
@@ -517,6 +708,9 @@ func summarizeRecordingResult(result model.RecordingResultPackage) *model.Execut
 		}
 	}
 	for _, asset := range assets {
+		if deliverable := executionDeliverableFromArtifact(asset); deliverable.URI != "" {
+			summary.Deliverables = append(summary.Deliverables, deliverable)
+		}
 		switch strings.ToLower(asset.Kind) {
 		case "demo_video":
 			summary.DemoVideoCount++
@@ -535,6 +729,20 @@ func summarizeRecordingResult(result model.RecordingResultPackage) *model.Execut
 		}
 	}
 	return summary
+}
+
+func executionDeliverableFromArtifact(asset model.ArtifactRef) model.ExecutionDeliverable {
+	role := stringMetadata(asset.Metadata, "asset_role")
+	return model.ExecutionDeliverable{
+		ID:            asset.ID,
+		Kind:          asset.Kind,
+		Role:          role,
+		URI:           asset.URI,
+		MimeType:      asset.MimeType,
+		SourceNodeID:  asset.SourceNodeID,
+		IncludeInDemo: boolMetadata(asset.Metadata, "include_in_demo"),
+		Sensitive:     asset.Sensitive,
+	}
 }
 
 func traceArtifacts(trace *model.ExecutionTrace) []model.ArtifactRef {
@@ -561,10 +769,88 @@ func uniqueStatusArtifacts(artifacts []model.ArtifactRef) []model.ArtifactRef {
 	return out
 }
 
+func stringMetadata(metadata map[string]any, key string) string {
+	if value, ok := metadata[key].(string); ok {
+		return value
+	}
+	return ""
+}
+
+func boolMetadata(metadata map[string]any, key string) bool {
+	if value, ok := metadata[key].(bool); ok {
+		return value
+	}
+	return false
+}
+
 func idempotencyKey(orgID string, key string) string {
 	return orgID + "\x00" + key
 }
 
 func newExchangeID(prefix string, now time.Time) string {
 	return fmt.Sprintf("%s_%d", prefix, now.UnixNano())
+}
+
+func cloneUploadSessions(values map[string]exchangeUploadSession) map[string]exchangeUploadSession {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]exchangeUploadSession, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func clonePackageStates(values map[string]*exchangePackageState) map[string]*exchangePackageState {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]*exchangePackageState, len(values))
+	for key, value := range values {
+		if value == nil {
+			continue
+		}
+		copyValue := *value
+		copyValue.StageHistory = append([]model.ExecutionStageEvent{}, value.StageHistory...)
+		out[key] = &copyValue
+	}
+	return out
+}
+
+func cloneRecordingResultStates(values map[string]*recordingResultState) map[string]*recordingResultState {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]*recordingResultState, len(values))
+	for key, value := range values {
+		if value == nil {
+			continue
+		}
+		copyValue := *value
+		out[key] = &copyValue
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneBoolMap(values map[string]bool) map[string]bool {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }

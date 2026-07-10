@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,12 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	}
 	if completed.ResultSummary.DemoVideoCount != 1 || completed.ResultSummary.RawRecordingCount != 1 || completed.ResultSummary.PrimaryDemoVideoURI == "" {
 		t.Fatalf("unexpected result summary: %+v", completed.ResultSummary)
+	}
+	if got := findDeliverable(completed.ResultSummary.Deliverables, "demo_video"); got == nil || got.Role != "final_demo" || !got.IncludeInDemo || got.URI == "" {
+		t.Fatalf("result summary should expose final demo deliverable, got %+v", completed.ResultSummary.Deliverables)
+	}
+	if got := findDeliverable(completed.ResultSummary.Deliverables, "raw_recording"); got == nil || got.URI == "" {
+		t.Fatalf("result summary should expose raw recording deliverable, got %+v", completed.ResultSummary.Deliverables)
 	}
 
 	gotResult, err := service.GetResultPackage(ctx, pkg.OrgID, completed.ResultPackageID)
@@ -243,6 +250,127 @@ func TestExchangeIntakeServiceCompletesWithFailedRecordingResult(t *testing.T) {
 	}
 	if got.Status != model.RecordingResultStatusFailed || got.FailureDiagnostic == nil {
 		t.Fatalf("expected failed result package, got %+v", got)
+	}
+}
+
+func TestExchangeIntakeServicePersistsCompletedResult(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	service := newExchangeIntakeService(nil, newFileExchangeSnapshotStore(root))
+	service.now = fixedClock(now)
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Crypto.Nonce = "nonce_persisted_result"
+	uploadResp, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: envelope}, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.StartExecution(ctx, pkg.OrgID, uploadResp.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, uploadResp.ExchangePackageID, sampleRecordingResultForAppTest(pkg))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := newExchangeIntakeService(nil, newFileExchangeSnapshotStore(root))
+	reloaded.now = fixedClock(now.Add(time.Minute))
+	status, err := reloaded.Status(ctx, pkg.OrgID, uploadResp.ExchangePackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != model.ExchangePackageStatusCompleted || status.ResultPackageID != completed.ResultPackageID || status.ResultSummary == nil {
+		t.Fatalf("persisted status mismatch: %+v", status)
+	}
+	if len(status.StageHistory) < 3 {
+		t.Fatalf("expected persisted stage history, got %+v", status.StageHistory)
+	}
+	result, err := reloaded.GetResultPackage(ctx, pkg.OrgID, completed.ResultPackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ResultID != "result_1" || result.SourcePackageID != pkg.PackageID {
+		t.Fatalf("persisted result mismatch: %+v", result)
+	}
+	artifact, err := reloaded.GetResultArtifact(ctx, pkg.OrgID, completed.ResultPackageID, "artifact_demo_video")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Kind != "demo_video" || artifact.URI == "" {
+		t.Fatalf("persisted artifact mismatch: %+v", artifact)
+	}
+}
+
+func TestExchangeIntakeServiceListsPackagesWithoutPayloadDump(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	now := time.Date(2026, 7, 10, 11, 0, 0, 0, time.UTC)
+	service.now = fixedClock(now)
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Crypto.Nonce = "nonce_list_packages"
+	uploadResp, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: envelope}, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.StartExecution(ctx, pkg.OrgID, uploadResp.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, uploadResp.ExchangePackageID, sampleRecordingResultForAppTest(pkg))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	executions, err := service.ListExecutionPackages(ctx, pkg.OrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(executions.Items) != 1 {
+		t.Fatalf("expected one execution package, got %+v", executions.Items)
+	}
+	execution := executions.Items[0]
+	if execution.ExchangePackageID != uploadResp.ExchangePackageID || execution.ResultPackageID != completed.ResultPackageID {
+		t.Fatalf("execution list identity mismatch: %+v", execution)
+	}
+	if execution.Status != model.ExchangePackageStatusCompleted || execution.ResultSummary == nil || execution.ResultSummary.DemoVideoCount != 1 {
+		t.Fatalf("execution list should include status summary, got %+v", execution)
+	}
+
+	results, err := service.ListResultPackages(ctx, pkg.OrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results.Items) != 1 {
+		t.Fatalf("expected one result package, got %+v", results.Items)
+	}
+	result := results.Items[0]
+	if result.ResultPackageID != completed.ResultPackageID || result.ExchangePackageID != uploadResp.ExchangePackageID {
+		t.Fatalf("result list identity mismatch: %+v", result)
+	}
+	if result.Status != model.RecordingResultStatusGenerated || result.ResultSummary == nil || result.ResultSummary.DemoVideoCount != 1 {
+		t.Fatalf("result list should include result summary, got %+v", result)
+	}
+
+	data, err := json.Marshal(struct {
+		Executions model.ExecutionPackageListResponse `json:"executions"`
+		Results    model.ResultPackageListResponse    `json:"results"`
+	}{Executions: executions, Results: results})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "runCascadeRecording") || strings.Contains(string(data), "InlineSource") {
+		t.Fatalf("list responses must not dump executable payloads: %s", string(data))
 	}
 }
 
@@ -571,4 +699,13 @@ func sampleRecordingResultForAppTest(pkg model.ClientExecutionPackage) model.Rec
 
 func fixedClock(now time.Time) func() time.Time {
 	return func() time.Time { return now }
+}
+
+func findDeliverable(deliverables []model.ExecutionDeliverable, kind string) *model.ExecutionDeliverable {
+	for index := range deliverables {
+		if deliverables[index].Kind == kind {
+			return &deliverables[index]
+		}
+	}
+	return nil
 }
