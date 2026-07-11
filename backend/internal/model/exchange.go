@@ -89,6 +89,14 @@ const (
 	RecordingResultStatusFailed    RecordingResultStatus = "failed"
 )
 
+type ResultDeliveryStatus string
+
+const (
+	ResultDeliveryStatusReady     ResultDeliveryStatus = "ready"
+	ResultDeliveryStatusDelivered ResultDeliveryStatus = "delivered"
+	ResultDeliveryStatusAcked     ResultDeliveryStatus = "acked"
+)
+
 type ExchangeEnvelope struct {
 	EnvelopeID           string                `json:"envelope_id"`
 	OrgID                string                `json:"org_id"`
@@ -632,14 +640,19 @@ type CloudExecutionAuditTrail struct {
 }
 
 type ResultDelivery struct {
-	ResultPackageRef PackageArtifactDescriptor   `json:"result_package_ref"`
-	AssetRefs        []PackageArtifactDescriptor `json:"asset_refs,omitempty"`
-	RecipientKind    string                      `json:"recipient_kind,omitempty"`
-	RecipientKeyID   string                      `json:"recipient_key_id,omitempty"`
-	EncryptionAlg    string                      `json:"encryption_alg,omitempty"`
-	ExpiresAt        time.Time                   `json:"expires_at,omitempty"`
-	AckRequired      bool                        `json:"ack_required"`
-	AckedAt          time.Time                   `json:"acked_at,omitempty"`
+	ResultPackageRef   PackageArtifactDescriptor   `json:"result_package_ref"`
+	AssetRefs          []PackageArtifactDescriptor `json:"asset_refs,omitempty"`
+	RecipientKind      string                      `json:"recipient_kind,omitempty"`
+	RecipientKeyID     string                      `json:"recipient_key_id,omitempty"`
+	EncryptionAlg      string                      `json:"encryption_alg,omitempty"`
+	ExpiresAt          time.Time                   `json:"expires_at,omitempty"`
+	AckRequired        bool                        `json:"ack_required"`
+	DeliveredAt        time.Time                   `json:"delivered_at,omitempty"`
+	DownloadedAssetIDs []string                    `json:"downloaded_asset_ids,omitempty"`
+	AckedAt            time.Time                   `json:"acked_at,omitempty"`
+	AckedByInstallID   string                      `json:"acked_by_install_id,omitempty"`
+	ReceivedAssetIDs   []string                    `json:"received_asset_ids,omitempty"`
+	VerifiedChecksums  bool                        `json:"verified_checksums,omitempty"`
 }
 
 func (r *RecordingResultPackage) ValidateStatusContract() error {
@@ -826,6 +839,7 @@ type ExecutionFailureSummary struct {
 type ExecutionResultSummary struct {
 	ResultID            string                 `json:"result_id,omitempty"`
 	ResultStatus        RecordingResultStatus  `json:"result_status,omitempty"`
+	DeliveryStatus      ResultDeliveryStatus   `json:"delivery_status,omitempty"`
 	PassRate            float64                `json:"pass_rate,omitempty"`
 	StepCount           int                    `json:"step_count,omitempty"`
 	PassedStepCount     int                    `json:"passed_step_count,omitempty"`
@@ -837,6 +851,10 @@ type ExecutionResultSummary struct {
 	TraceCount          int                    `json:"trace_count,omitempty"`
 	PrimaryDemoVideoURI string                 `json:"primary_demo_video_uri,omitempty"`
 	RawRecordingURI     string                 `json:"raw_recording_uri,omitempty"`
+	AckRequired         bool                   `json:"ack_required,omitempty"`
+	DeliveredAt         time.Time              `json:"delivered_at,omitempty"`
+	AckedAt             time.Time              `json:"acked_at,omitempty"`
+	ExpiresAt           time.Time              `json:"expires_at,omitempty"`
 	Deliverables        []ExecutionDeliverable `json:"deliverables,omitempty"`
 }
 
@@ -847,6 +865,8 @@ type ExecutionDeliverable struct {
 	URI           string `json:"uri,omitempty"`
 	DownloadURL   string `json:"download_url,omitempty"`
 	MimeType      string `json:"mime_type,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	SizeBytes     int64  `json:"size_bytes,omitempty"`
 	SourceNodeID  string `json:"source_node_id,omitempty"`
 	IncludeInDemo bool   `json:"include_in_demo,omitempty"`
 	Sensitive     bool   `json:"sensitive,omitempty"`
@@ -862,9 +882,14 @@ type ResultPackageAckRequest struct {
 }
 
 type ResultPackageAckResponse struct {
-	ResultPackageID string                `json:"result_package_id"`
-	Status          RecordingResultStatus `json:"status"`
-	Retention       RetentionSpec         `json:"retention"`
+	ResultPackageID   string                `json:"result_package_id"`
+	Status            RecordingResultStatus `json:"status"`
+	DeliveryStatus    ResultDeliveryStatus  `json:"delivery_status,omitempty"`
+	Retention         RetentionSpec         `json:"retention"`
+	AckedAt           time.Time             `json:"acked_at,omitempty"`
+	AckedByInstallID  string                `json:"acked_by_install_id,omitempty"`
+	ReceivedAssetIDs  []string              `json:"received_asset_ids,omitempty"`
+	VerifiedChecksums bool                  `json:"verified_checksums,omitempty"`
 }
 
 type ResultPackageListResponse struct {
@@ -880,12 +905,15 @@ type ResultPackageListItem struct {
 	OrgID             string                   `json:"org_id"`
 	ProjectID         string                   `json:"project_id"`
 	Status            RecordingResultStatus    `json:"status"`
+	DeliveryStatus    ResultDeliveryStatus     `json:"delivery_status,omitempty"`
 	ResultSummary     *ExecutionResultSummary  `json:"result_summary,omitempty"`
 	FailureSummary    *ExecutionFailureSummary `json:"failure_summary,omitempty"`
 	CreatedAt         time.Time                `json:"created_at"`
 	ExpiresAt         time.Time                `json:"expires_at,omitempty"`
 	AckRequired       bool                     `json:"ack_required,omitempty"`
+	DeliveredAt       time.Time                `json:"delivered_at,omitempty"`
 	AckedAt           time.Time                `json:"acked_at,omitempty"`
+	AckedByInstallID  string                   `json:"acked_by_install_id,omitempty"`
 }
 
 type ExchangeSignatureVerifier interface {

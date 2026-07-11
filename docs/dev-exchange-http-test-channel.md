@@ -103,6 +103,27 @@ Production uploads use `payload_ref` only. The ref must match
 The dev channel also accepts a plaintext `payload` field for local end-to-end
 tests, where `payload` must be a `demoops.client_execution_package.v1` payload.
 
+If upload validation fails, the response uses a stable error code plus safe
+field-level details. The server does not echo the script source, HTML, or
+secret values.
+
+```json
+{
+  "error": {
+    "code": "client_execution_package_invalid",
+    "message": "recording_run_spec.allowed_domains is required",
+    "details": [
+      {
+        "field": "payload.recording_run_spec.allowed_domains",
+        "reason": "required",
+        "message": "recording_run_spec.allowed_domains is required",
+        "hint": "Include the product domain in recording_run_spec.allowed_domains and keep script domains within that list."
+      }
+    ]
+  }
+}
+```
+
 ### Run
 
 ```http
@@ -113,6 +134,23 @@ X-Cascade-Org-ID: <org_id>
 This starts the uploaded package in the local Playwright recording/render
 pipeline and returns quickly with the current execution status. Poll `status`
 or the dev list endpoints until the package reaches `completed` or `failed`.
+The background execution window is taken from
+`envelope.policy.max_execution_window_sec`; when the field is absent or not
+positive, the dev server uses a 30 minute default. If the window expires, the
+package status becomes `failed` with error code `execution_timeout`.
+
+### Cancel
+
+```http
+POST /v1/dev/execution-packages/{exchange_package_id}/cancel
+X-Cascade-Org-ID: <org_id>
+```
+
+This dev-only control endpoint cancels a cloud-side run that is still in
+progress and returns the current status. Canceled packages remain queryable via
+`status`, `debug`, and the dev list endpoints with status `canceled` and error
+code `canceled_by_dev_request`. Completed, failed, expired, or already canceled
+packages are terminal and are returned without being overwritten.
 
 ### Debug
 
@@ -133,6 +171,15 @@ Useful fields:
     "video_worker_ready": true,
     "node_ready": true,
     "ffmpeg_ready": false
+  },
+  "readiness": {
+    "can_run": false,
+    "blockers": [
+      {
+        "code": "video_worker_missing",
+        "message": "Video-worker build artifact is not configured or not present."
+      }
+    ]
   },
   "package": {
     "package_id": "pkg_...",
@@ -179,7 +226,9 @@ X-Cascade-Org-ID: <org_id>
 Returns a lightweight index of generated result packages for the org. Result
 items include `result_package_id`, source execution identity, status,
 `result_summary`, `failure_summary` when present, and dev `download_url` values
-for local deliverables.
+for local deliverables. Result items also expose `delivery_status`,
+`delivered_at`, `acked_at`, and `acked_by_install_id` when the result package
+has been downloaded or acknowledged.
 
 Example:
 
@@ -225,7 +274,8 @@ accepted -> validated -> preparing_worker -> running_script -> packaging_recordi
 ```
 
 On failure the status becomes `failed`, and `failure_summary.failed_stage`
-shows the stage that failed.
+shows the stage that failed. When the dev cancel endpoint is used before
+completion, the status becomes `canceled`.
 
 Typical response after a successful dev run:
 
@@ -241,6 +291,7 @@ Typical response after a successful dev run:
   "result_summary": {
     "result_id": "result_pkg_1",
     "result_status": "generated",
+    "delivery_status": "ready",
     "pass_rate": 1,
     "step_count": 3,
     "passed_step_count": 3,
@@ -251,12 +302,16 @@ Typical response after a successful dev run:
     "trace_count": 1,
     "primary_demo_video_uri": "D:\\Engine-7-8\\artifacts\\exchange\\xpkg_...\\render\\demo_30s.webm",
     "raw_recording_uri": "D:\\Engine-7-8\\artifacts\\exchange\\xpkg_...\\recording\\recording.webm",
+    "ack_required": true,
+    "expires_at": "2026-07-10T10:01:00Z",
     "deliverables": [
       {
         "kind": "demo_video",
         "role": "final_demo",
         "uri": "D:\\Engine-7-8\\artifacts\\exchange\\xpkg_...\\render\\demo_30s.webm",
         "download_url": "/v1/dev/result-packages/result_pkg_.../deliverables/artifact_pkg_demo_video_001",
+        "sha256": "<file sha256>",
+        "size_bytes": 73648,
         "include_in_demo": true
       },
       {
@@ -264,6 +319,8 @@ Typical response after a successful dev run:
         "role": "raw_recording",
         "uri": "file:///D:/Engine-7-8/artifacts/exchange/xpkg_.../recording/page.webm",
         "download_url": "/v1/dev/result-packages/result_pkg_.../deliverables/artifact_raw_recording",
+        "sha256": "<file sha256>",
+        "size_bytes": 1048576,
         "include_in_demo": true
       },
       {
@@ -285,6 +342,10 @@ GET /v1/result-packages/{result_package_id}
 X-Cascade-Org-ID: <org_id>
 ```
 
+Calling this endpoint marks the result package as delivered. Later status and
+list responses should show `result_summary.delivery_status="delivered"` and a
+non-empty `delivered_at`.
+
 ### Ack
 
 ```http
@@ -304,6 +365,11 @@ Body:
 
 `verified_checksums=true` is required. If the App detects a mismatch it must
 send `checksum_mismatch_ids` and the server will reject the ack.
+
+Successful ack stores `acked_by_install_id`, `received_asset_ids`,
+`verified_checksums`, and `acked_at`. Later status and list responses should
+show `result_summary.result_status="acked"` and
+`result_summary.delivery_status="acked"`.
 
 ## Server Smoke
 
@@ -422,6 +488,9 @@ Expected failure result:
 - The dev server persists exchange package status, result packages, and
   deliverable mappings under `.cascade-dev/data/exchange_state`. Restarting the
   dev server should preserve completed results and downloadable local artifacts.
+- Restarting the dev server marks persisted `running` or `queued` packages as
+  `failed` with error code `interrupted_by_restart`, preserving the last known
+  execution stage in `failure_summary.failed_stage`.
 - Restarting the dev server clears unfinished upload sessions only when they
   were not saved before a valid package upload.
 - The run endpoint uses `NODE_WORKER_PATH` when configured, otherwise it falls

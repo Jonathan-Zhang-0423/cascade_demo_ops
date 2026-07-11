@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cascade-demoops/backend/internal/model"
@@ -24,7 +25,10 @@ const (
 	defaultExchangeIDPrefix    = "xpkg"
 	defaultUploadIDPrefix      = "upload"
 	defaultResultPackagePrefix = "result_pkg"
+	defaultExecutionTimeoutSec = 30 * 60
 )
+
+var exchangeIDSequence uint64
 
 type ExchangeIntakeService struct {
 	mu              sync.Mutex
@@ -142,7 +146,7 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 		return model.ExecutionPackageUploadResponse{}, err
 	}
 	if request.UploadID == "" {
-		return model.ExecutionPackageUploadResponse{}, errors.New("upload_id is required")
+		return model.ExecutionPackageUploadResponse{}, newExchangeProtocolError("upload_request_invalid", "upload_id", "required", "upload_id is required", "Call /v1/execution-packages/init first and reuse the returned upload_id.")
 	}
 
 	now := s.now()
@@ -151,19 +155,19 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 
 	session, ok := s.uploads[request.UploadID]
 	if !ok {
-		return model.ExecutionPackageUploadResponse{}, errors.New("upload session not found")
+		return model.ExecutionPackageUploadResponse{}, newExchangeProtocolError("upload_session_not_found", "upload_id", "not_found", "upload session not found", "Call /v1/execution-packages/init again and upload with the fresh upload_id.")
 	}
 	if now.After(session.ExpiresAt) {
-		return model.ExecutionPackageUploadResponse{}, errors.New("upload session expired")
+		return model.ExecutionPackageUploadResponse{}, newExchangeProtocolError("upload_session_expired", "upload_id", "expired", "upload session expired", "Call /v1/execution-packages/init again; upload sessions expire after the negotiated window.")
 	}
 	if request.Envelope.OrgID != session.OrgID || request.Envelope.ProjectID != session.ProjectID || request.Envelope.PackageKind != session.PackageKind {
-		return model.ExecutionPackageUploadResponse{}, errors.New("upload request envelope does not match initialized session")
+		return model.ExecutionPackageUploadResponse{}, newExchangeProtocolError("upload_session_mismatch", "envelope.identity", "mismatch", "upload request envelope does not match initialized session", "Use the same org_id, project_id, and package_kind that were used during init.")
 	}
 	if request.PayloadRef.Kind == "" {
 		request.PayloadRef = request.Envelope.PayloadRef
 	}
 	if !reflect.DeepEqual(request.PayloadRef, request.Envelope.PayloadRef) {
-		return model.ExecutionPackageUploadResponse{}, errors.New("upload request payload_ref does not match exchange envelope")
+		return model.ExecutionPackageUploadResponse{}, newExchangeProtocolError("upload_payload_ref_mismatch", "payload_ref", "mismatch", "upload request payload_ref does not match exchange envelope", "Send one payload_ref value and keep it identical to envelope.payload_ref.")
 	}
 	if existingID := s.packageByIdem[idempotencyKey(request.Envelope.OrgID, request.Envelope.IdempotencyKey)]; existingID != "" {
 		existing := s.packages[existingID]
@@ -171,12 +175,12 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 	}
 	if payload.PackageID == "" {
 		if err := request.Envelope.ValidateMetadataForEncryptedUpload(now, s.seenNonces); err != nil {
-			return model.ExecutionPackageUploadResponse{}, err
+			return model.ExecutionPackageUploadResponse{}, wrapExchangeValidationError("encrypted_payload_metadata_invalid", err)
 		}
 		return s.acceptEnvelopeOnlyPackageLocked(request.Envelope, now)
 	}
 	if err := model.ValidateClientExecutionPackageIntake(&request.Envelope, &payload, now, s.seenNonces, s.verifier); err != nil {
-		return model.ExecutionPackageUploadResponse{}, err
+		return model.ExecutionPackageUploadResponse{}, wrapExchangeValidationError("client_execution_package_invalid", err)
 	}
 
 	exchangePackageID := newExchangeID(defaultExchangeIDPrefix, now)
@@ -295,6 +299,9 @@ func (s *ExchangeIntakeService) CompleteWithRecordingResult(ctx context.Context,
 	if err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
 	}
+	if isTerminalExchangeStatus(state.Status) {
+		return s.statusResponseLocked(state), nil
+	}
 	if result.Status == model.RecordingResultStatusFailed {
 		if err := result.ValidateStatusContract(); err != nil {
 			setPackageStageLocked(state, model.ExchangePackageStatusFailed, "failed", "Failed recording result package was rejected by cloud-side validation.", 100, now)
@@ -351,6 +358,10 @@ func (s *ExchangeIntakeService) GetResultPackage(ctx context.Context, orgID stri
 	if state.Envelope.Policy.DeletePayloadAfterRun {
 		state.Payload = model.ClientExecutionPackage{}
 	}
+	markResultDeliveredLocked(resultState, "", s.now())
+	if err := s.saveLocked(ctx); err != nil {
+		return model.RecordingResultPackage{}, err
+	}
 	return resultState.Result, nil
 }
 
@@ -383,11 +394,14 @@ func (s *ExchangeIntakeService) ListResultPackages(ctx context.Context, orgID st
 			OrgID:             state.Envelope.OrgID,
 			ProjectID:         state.Envelope.ProjectID,
 			Status:            result.Status,
+			DeliveryStatus:    resultDeliveryStatus(result),
 			ResultSummary:     summarizeRecordingResult(result),
 			CreatedAt:         result.CreatedAt,
 			ExpiresAt:         result.Delivery.ExpiresAt,
 			AckRequired:       result.Delivery.AckRequired,
+			DeliveredAt:       result.Delivery.DeliveredAt,
 			AckedAt:           result.Delivery.AckedAt,
+			AckedByInstallID:  result.Delivery.AckedByInstallID,
 		}
 		if result.FailureDiagnostic != nil {
 			item.FailureSummary = failureSummary(state, result.FailureDiagnostic)
@@ -424,6 +438,24 @@ func (s *ExchangeIntakeService) GetResultArtifact(ctx context.Context, orgID str
 	return model.ArtifactRef{}, errors.New("result artifact not found")
 }
 
+func (s *ExchangeIntakeService) MarkResultArtifactDelivered(ctx context.Context, orgID string, resultPackageID string, artifactID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	resultState, ok := s.resultByID[resultPackageID]
+	if !ok {
+		return errors.New("result package not found")
+	}
+	if _, err := s.packageStateLocked(orgID, resultState.ExchangePackageID); err != nil {
+		return err
+	}
+	markResultDeliveredLocked(resultState, artifactID, s.now())
+	return s.saveLocked(ctx)
+}
+
 func (s *ExchangeIntakeService) AckResultPackage(ctx context.Context, orgID string, request model.ResultPackageAckRequest) (model.ResultPackageAckResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return model.ResultPackageAckResponse{}, err
@@ -457,12 +489,25 @@ func (s *ExchangeIntakeService) AckResultPackage(ctx context.Context, orgID stri
 		}
 	}
 	resultState.Result.Status = model.RecordingResultStatusAcked
+	markResultDeliveredLocked(resultState, "", request.AckedAt)
 	resultState.Result.Delivery.AckedAt = request.AckedAt
+	resultState.Result.Delivery.AckedByInstallID = request.AckedByInstallID
+	resultState.Result.Delivery.ReceivedAssetIDs = uniqueStrings(request.ReceivedAssetIDs)
+	resultState.Result.Delivery.VerifiedChecksums = request.VerifiedChecksums
 	state.UpdatedAt = request.AckedAt
 	if err := s.saveLocked(ctx); err != nil {
 		return model.ResultPackageAckResponse{}, err
 	}
-	return model.ResultPackageAckResponse{ResultPackageID: request.ResultPackageID, Status: model.RecordingResultStatusAcked, Retention: resultState.Retention}, nil
+	return model.ResultPackageAckResponse{
+		ResultPackageID:   request.ResultPackageID,
+		Status:            model.RecordingResultStatusAcked,
+		DeliveryStatus:    model.ResultDeliveryStatusAcked,
+		Retention:         resultState.Retention,
+		AckedAt:           request.AckedAt,
+		AckedByInstallID:  request.AckedByInstallID,
+		ReceivedAssetIDs:  append([]string{}, resultState.Result.Delivery.ReceivedAssetIDs...),
+		VerifiedChecksums: request.VerifiedChecksums,
+	}, nil
 }
 
 func validateReceivedAssets(result model.RecordingResultPackage, receivedAssetIDs []string) error {
@@ -473,6 +518,11 @@ func validateReceivedAssets(result model.RecordingResultPackage, receivedAssetID
 		}
 	}
 	for _, asset := range result.GeneratedAssets {
+		if asset.ID != "" {
+			known[asset.ID] = true
+		}
+	}
+	for _, asset := range traceArtifacts(result.ExecutionTrace) {
 		if asset.ID != "" {
 			known[asset.ID] = true
 		}
@@ -488,6 +538,21 @@ func validateReceivedAssets(result model.RecordingResultPackage, receivedAssetID
 	return nil
 }
 
+func markResultDeliveredLocked(resultState *recordingResultState, artifactID string, deliveredAt time.Time) {
+	if resultState == nil {
+		return
+	}
+	if deliveredAt.IsZero() {
+		deliveredAt = time.Now().UTC()
+	}
+	if resultState.Result.Delivery.DeliveredAt.IsZero() {
+		resultState.Result.Delivery.DeliveredAt = deliveredAt
+	}
+	if strings.TrimSpace(artifactID) != "" {
+		resultState.Result.Delivery.DownloadedAssetIDs = appendUniqueString(resultState.Result.Delivery.DownloadedAssetIDs, artifactID)
+	}
+}
+
 func (s *ExchangeIntakeService) LoadSnapshot(ctx context.Context) error {
 	if s == nil || s.persistence == nil {
 		return nil
@@ -499,6 +564,9 @@ func (s *ExchangeIntakeService) LoadSnapshot(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.applySnapshotLocked(snapshot)
+	if s.failInterruptedExecutionsLocked(s.now()) {
+		return s.saveLocked(ctx)
+	}
 	return nil
 }
 
@@ -545,6 +613,25 @@ func (s *ExchangeIntakeService) applySnapshotLocked(snapshot exchangeSnapshot) {
 	if s.seenNonces == nil {
 		s.seenNonces = map[string]bool{}
 	}
+}
+
+func (s *ExchangeIntakeService) failInterruptedExecutionsLocked(now time.Time) bool {
+	changed := false
+	for _, state := range s.packages {
+		if state == nil {
+			continue
+		}
+		if state.Status != model.ExchangePackageStatusRunning && state.Status != model.ExchangePackageStatusQueued {
+			continue
+		}
+		stage := state.Stage
+		if stage == "" {
+			stage = string(state.Status)
+		}
+		markPackageFailedLocked(state, "interrupted_by_restart", "Execution was interrupted by service restart before completion.", stage, now)
+		changed = true
+	}
+	return changed
 }
 
 func (s *ExchangeIntakeService) packageState(orgID string, exchangePackageID string) (*exchangePackageState, error) {
@@ -692,9 +779,14 @@ func summarizeRecordingResult(result model.RecordingResultPackage) *model.Execut
 	summary := &model.ExecutionResultSummary{
 		ResultID:            result.ResultID,
 		ResultStatus:        result.Status,
+		DeliveryStatus:      resultDeliveryStatus(result),
 		PassRate:            result.VerificationReport.PassRate,
 		StepCount:           len(steps),
 		GeneratedAssetCount: len(assets),
+		AckRequired:         result.Delivery.AckRequired,
+		DeliveredAt:         result.Delivery.DeliveredAt,
+		AckedAt:             result.Delivery.AckedAt,
+		ExpiresAt:           result.Delivery.ExpiresAt,
 	}
 	if summary.PassRate == 0 && result.ExecutionTrace != nil {
 		summary.PassRate = result.ExecutionTrace.PassRate
@@ -739,10 +831,22 @@ func executionDeliverableFromArtifact(asset model.ArtifactRef) model.ExecutionDe
 		Role:          role,
 		URI:           asset.URI,
 		MimeType:      asset.MimeType,
+		SHA256:        asset.SHA256,
+		SizeBytes:     asset.SizeBytes,
 		SourceNodeID:  asset.SourceNodeID,
 		IncludeInDemo: boolMetadata(asset.Metadata, "include_in_demo"),
 		Sensitive:     asset.Sensitive,
 	}
+}
+
+func resultDeliveryStatus(result model.RecordingResultPackage) model.ResultDeliveryStatus {
+	if !result.Delivery.AckedAt.IsZero() || result.Status == model.RecordingResultStatusAcked {
+		return model.ResultDeliveryStatusAcked
+	}
+	if !result.Delivery.DeliveredAt.IsZero() || result.Status == model.RecordingResultStatusDelivered {
+		return model.ResultDeliveryStatusDelivered
+	}
+	return model.ResultDeliveryStatusReady
 }
 
 func traceArtifacts(trace *model.ExecutionTrace) []model.ArtifactRef {
@@ -783,12 +887,33 @@ func boolMetadata(metadata map[string]any, key string) bool {
 	return false
 }
 
+func uniqueStrings(values []string) []string {
+	out := []string{}
+	for _, value := range values {
+		out = appendUniqueString(out, value)
+	}
+	return out
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
 func idempotencyKey(orgID string, key string) string {
 	return orgID + "\x00" + key
 }
 
 func newExchangeID(prefix string, now time.Time) string {
-	return fmt.Sprintf("%s_%d", prefix, now.UnixNano())
+	return fmt.Sprintf("%s_%d_%d", prefix, now.UnixNano(), atomic.AddUint64(&exchangeIDSequence, 1))
 }
 
 func cloneUploadSessions(values map[string]exchangeUploadSession) map[string]exchangeUploadSession {
