@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"cascade-demoops/backend/internal/agents"
 	"cascade-demoops/backend/internal/config"
@@ -18,12 +19,14 @@ import (
 )
 
 type Service struct {
-	runtime  config.AppRuntimeConfig
-	llm      *llm.Router
-	flow     *orchestrator.CascadeFlow
-	states   store.StateStore
-	layout   storage.LocalLayout
-	exchange *ExchangeIntakeService
+	runtime      config.AppRuntimeConfig
+	llm          *llm.Router
+	flow         *orchestrator.CascadeFlow
+	states       store.StateStore
+	layout       storage.LocalLayout
+	exchange     *ExchangeIntakeService
+	runningMu    sync.Mutex
+	runningTasks map[string]context.CancelFunc
 }
 
 type ResultArtifactFile struct {
@@ -53,12 +56,13 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		return nil, err
 	}
 	return &Service{
-		runtime:  runtime,
-		llm:      llmRouter,
-		flow:     flow,
-		states:   states,
-		layout:   storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
-		exchange: newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
+		runtime:      runtime,
+		llm:          llmRouter,
+		flow:         flow,
+		states:       states,
+		layout:       storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
+		exchange:     newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
+		runningTasks: map[string]context.CancelFunc{},
 	}, nil
 }
 
@@ -258,6 +262,11 @@ func (s *Service) ListExecutionPackages(ctx context.Context, orgID string) (mode
 	return s.exchange.ListExecutionPackages(ctx, orgID)
 }
 
+func (s *Service) CancelExecutionPackage(ctx context.Context, orgID string, exchangePackageID string) (model.ExecutionPackageStatusResponse, error) {
+	s.cancelRunningExecution(orgID, exchangePackageID)
+	return s.exchange.CancelExecution(ctx, orgID, exchangePackageID, "canceled_by_dev_request")
+}
+
 func (s *Service) GetExecutionPackageDebugView(ctx context.Context, orgID string, exchangePackageID string) (ExecutionPackageDebugView, error) {
 	return s.GetExecutionPackageDebug(ctx, orgID, exchangePackageID)
 }
@@ -289,6 +298,9 @@ func (s *Service) GetResultArtifactFile(ctx context.Context, orgID string, resul
 	}
 	if info.IsDir() {
 		return ResultArtifactFile{}, errors.New("artifact path is a directory")
+	}
+	if err := s.exchange.MarkResultArtifactDelivered(ctx, orgID, resultPackageID, artifactID); err != nil {
+		return ResultArtifactFile{}, err
 	}
 	return ResultArtifactFile{Artifact: artifact, Path: filePath, MimeType: artifact.MimeType}, nil
 }

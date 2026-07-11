@@ -135,6 +135,13 @@ func run(baseURL string, token string, mode string, reusePackageID string, timeo
 	if err != nil {
 		return err
 	}
+	ackCheck, ackedStatus, err := verifyResultAck(ctx, client, baseURL, token, orgID, mode, status, downloadCheck)
+	if err != nil {
+		return err
+	}
+	if ackedStatus.ExchangePackageID != "" {
+		status = ackedStatus
+	}
 
 	summary := smokeSummary{
 		OK:                true,
@@ -161,12 +168,18 @@ func run(baseURL string, token string, mode string, reusePackageID string, timeo
 			BaseURL:         debug.Package.BaseURL,
 		},
 		DownloadCheck: downloadCheck,
+		AckCheck:      ackCheck,
 		ListCheck:     listCheck,
 	}
 	if status.ResultSummary != nil {
+		var ackedAt *time.Time
+		if !status.ResultSummary.AckedAt.IsZero() {
+			ackedAt = &status.ResultSummary.AckedAt
+		}
 		summary.Result = &smokeResultSummary{
 			ResultID:            status.ResultSummary.ResultID,
 			ResultStatus:        string(status.ResultSummary.ResultStatus),
+			DeliveryStatus:      string(status.ResultSummary.DeliveryStatus),
 			PassRate:            status.ResultSummary.PassRate,
 			StepCount:           status.ResultSummary.StepCount,
 			DemoVideoCount:      status.ResultSummary.DemoVideoCount,
@@ -175,6 +188,7 @@ func run(baseURL string, token string, mode string, reusePackageID string, timeo
 			TraceCount:          status.ResultSummary.TraceCount,
 			PrimaryDemoVideoURI: status.ResultSummary.PrimaryDemoVideoURI,
 			RawRecordingURI:     status.ResultSummary.RawRecordingURI,
+			AckedAt:             ackedAt,
 			Deliverables:        smokeDeliverables(status.ResultSummary.Deliverables),
 		}
 	}
@@ -229,6 +243,7 @@ type smokeSummary struct {
 	Runtime           smokeRuntimeSummary  `json:"runtime"`
 	Package           smokePackageSummary  `json:"package"`
 	DownloadCheck     *smokeDownloadCheck  `json:"download_check,omitempty"`
+	AckCheck          *smokeAckCheck       `json:"ack_check,omitempty"`
 	ListCheck         *smokeListCheck      `json:"list_check,omitempty"`
 	Result            *smokeResultSummary  `json:"result,omitempty"`
 	Failure           *smokeFailureSummary `json:"failure,omitempty"`
@@ -252,6 +267,7 @@ type smokePackageSummary struct {
 type smokeResultSummary struct {
 	ResultID            string             `json:"result_id,omitempty"`
 	ResultStatus        string             `json:"result_status,omitempty"`
+	DeliveryStatus      string             `json:"delivery_status,omitempty"`
 	PassRate            float64            `json:"pass_rate"`
 	StepCount           int                `json:"step_count"`
 	DemoVideoCount      int                `json:"demo_video_count"`
@@ -260,6 +276,7 @@ type smokeResultSummary struct {
 	TraceCount          int                `json:"trace_count"`
 	PrimaryDemoVideoURI string             `json:"primary_demo_video_uri,omitempty"`
 	RawRecordingURI     string             `json:"raw_recording_uri,omitempty"`
+	AckedAt             *time.Time         `json:"acked_at,omitempty"`
 	Deliverables        []smokeDeliverable `json:"deliverables,omitempty"`
 }
 
@@ -276,6 +293,8 @@ type smokeDeliverable struct {
 	Role          string `json:"role,omitempty"`
 	URI           string `json:"uri,omitempty"`
 	DownloadURL   string `json:"download_url,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	SizeBytes     int64  `json:"size_bytes,omitempty"`
 	SourceNodeID  string `json:"source_node_id,omitempty"`
 	IncludeInDemo bool   `json:"include_in_demo,omitempty"`
 }
@@ -287,6 +306,14 @@ type smokeDownloadCheck struct {
 	ContentType  string `json:"content_type,omitempty"`
 	ArtifactID   string `json:"artifact_id,omitempty"`
 	ArtifactKind string `json:"artifact_kind,omitempty"`
+}
+
+type smokeAckCheck struct {
+	ResultPackageID   string   `json:"result_package_id,omitempty"`
+	Status            string   `json:"status,omitempty"`
+	DeliveryStatus    string   `json:"delivery_status,omitempty"`
+	ReceivedAssetIDs  []string `json:"received_asset_ids,omitempty"`
+	VerifiedChecksums bool     `json:"verified_checksums,omitempty"`
 }
 
 type smokeListCheck struct {
@@ -307,6 +334,8 @@ func smokeDeliverables(deliverables []model.ExecutionDeliverable) []smokeDeliver
 			Role:          deliverable.Role,
 			URI:           deliverable.URI,
 			DownloadURL:   deliverable.DownloadURL,
+			SHA256:        deliverable.SHA256,
+			SizeBytes:     deliverable.SizeBytes,
 			SourceNodeID:  deliverable.SourceNodeID,
 			IncludeInDemo: deliverable.IncludeInDemo,
 		})
@@ -360,6 +389,9 @@ func assertSmokeResult(mode string, status model.ExecutionPackageStatusResponse,
 	if deliverable := findExecutionDeliverable(status.ResultSummary.Deliverables, "demo_video"); deliverable == nil || deliverable.DownloadURL == "" {
 		return fmt.Errorf("success smoke result_summary missing demo download_url: %+v", status.ResultSummary.Deliverables)
 	}
+	if deliverable := findExecutionDeliverable(status.ResultSummary.Deliverables, "demo_video"); deliverable == nil || deliverable.SHA256 == "" || deliverable.SizeBytes <= 0 {
+		return fmt.Errorf("success smoke result_summary missing demo checksum metadata: %+v", status.ResultSummary.Deliverables)
+	}
 	return nil
 }
 
@@ -410,6 +442,39 @@ func verifyDownloadableDeliverable(ctx context.Context, client *http.Client, bas
 		ArtifactID:   response.Header.Get("X-Cascade-Artifact-ID"),
 		ArtifactKind: response.Header.Get("X-Cascade-Artifact-Kind"),
 	}, nil
+}
+
+func verifyResultAck(ctx context.Context, client *http.Client, baseURL string, token string, orgID string, mode string, status model.ExecutionPackageStatusResponse, downloadCheck *smokeDownloadCheck) (*smokeAckCheck, model.ExecutionPackageStatusResponse, error) {
+	if mode != "success" || status.ResultPackageID == "" || downloadCheck == nil || downloadCheck.ArtifactID == "" {
+		return nil, model.ExecutionPackageStatusResponse{}, nil
+	}
+	receivedAssetIDs := []string{downloadCheck.ArtifactID}
+	ack, err := postJSON[model.ResultPackageAckResponse](ctx, client, baseURL+"/v1/result-packages/"+url.PathEscape(status.ResultPackageID)+"/ack", token, orgID, model.ResultPackageAckRequest{
+		ResultPackageID:   status.ResultPackageID,
+		AckedByInstallID:  "devsmoke-local",
+		ReceivedAssetIDs:  receivedAssetIDs,
+		VerifiedChecksums: true,
+	})
+	if err != nil {
+		return nil, model.ExecutionPackageStatusResponse{}, fmt.Errorf("ack result package: %w", err)
+	}
+	if ack.Status != model.RecordingResultStatusAcked || ack.DeliveryStatus != model.ResultDeliveryStatusAcked || !ack.VerifiedChecksums {
+		return nil, model.ExecutionPackageStatusResponse{}, fmt.Errorf("unexpected ack response: %+v", ack)
+	}
+	ackedStatus, err := getJSON[model.ExecutionPackageStatusResponse](ctx, client, baseURL+"/v1/execution-packages/"+url.PathEscape(status.ExchangePackageID)+"/status", token, orgID)
+	if err != nil {
+		return nil, model.ExecutionPackageStatusResponse{}, fmt.Errorf("get acked status: %w", err)
+	}
+	if ackedStatus.ResultSummary == nil || ackedStatus.ResultSummary.ResultStatus != model.RecordingResultStatusAcked || ackedStatus.ResultSummary.DeliveryStatus != model.ResultDeliveryStatusAcked || ackedStatus.ResultSummary.AckedAt.IsZero() {
+		return nil, model.ExecutionPackageStatusResponse{}, fmt.Errorf("acked status missing ack summary: %+v", ackedStatus.ResultSummary)
+	}
+	return &smokeAckCheck{
+		ResultPackageID:   ack.ResultPackageID,
+		Status:            string(ack.Status),
+		DeliveryStatus:    string(ack.DeliveryStatus),
+		ReceivedAssetIDs:  append([]string{}, ack.ReceivedAssetIDs...),
+		VerifiedChecksums: ack.VerifiedChecksums,
+	}, ackedStatus, nil
 }
 
 func verifyListEndpoints(exchangePackageID string, status model.ExecutionPackageStatusResponse, executionList model.ExecutionPackageListResponse, resultList model.ResultPackageListResponse) (*smokeListCheck, error) {

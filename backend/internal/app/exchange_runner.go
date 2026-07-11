@@ -22,12 +22,27 @@ func (s *Service) RunUploadedExecutionPackage(ctx context.Context, orgID string,
 	if !started.Started {
 		return started.Status, nil
 	}
-	go s.runUploadedExecutionPackage(context.Background(), orgID, exchangePackageID, started.Payload, started.CloudJobID)
+	runCtx, cancel := context.WithCancel(context.Background())
+	s.registerRunningExecution(orgID, exchangePackageID, cancel)
+	go s.runUploadedExecutionPackage(runCtx, orgID, exchangePackageID, started.Payload, started.CloudJobID, started.TimeoutSec)
 	return started.Status, nil
 }
 
-func (s *Service) runUploadedExecutionPackage(ctx context.Context, orgID string, exchangePackageID string, pkg model.ClientExecutionPackage, cloudJobID string) {
-	_, _ = s.runUploadedExecutionPackageSync(ctx, orgID, exchangePackageID, pkg, cloudJobID)
+func (s *Service) runUploadedExecutionPackage(ctx context.Context, orgID string, exchangePackageID string, pkg model.ClientExecutionPackage, cloudJobID string, timeoutSec int) {
+	defer s.unregisterRunningExecution(orgID, exchangePackageID)
+	timeout := executionTimeout(timeoutSec)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	status, err := s.runUploadedExecutionPackageSync(runCtx, orgID, exchangePackageID, pkg, cloudJobID)
+	if errors.Is(runCtx.Err(), context.Canceled) {
+		_, _ = s.exchange.CancelExecution(context.Background(), orgID, exchangePackageID, "canceled_by_dev_request")
+		return
+	}
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) && shouldMarkExecutionTimeout(status) {
+		_, _ = s.failUploadedExecution(context.Background(), orgID, exchangePackageID, "execution_timeout", context.DeadlineExceeded)
+		return
+	}
+	_ = err
 }
 
 func (s *Service) runUploadedExecutionPackageSync(ctx context.Context, orgID string, exchangePackageID string, pkg model.ClientExecutionPackage, cloudJobID string) (model.ExecutionPackageStatusResponse, error) {
@@ -74,6 +89,9 @@ func (s *Service) GetExecutionPackageDebug(ctx context.Context, orgID string, ex
 	}
 	workerPath := s.localVideoWorkerPath()
 	nodeBinary := s.nodeBinaryForExecution()
+	workerReady := fileExists(workerPath)
+	nodeReady := commandReady(nodeBinary)
+	ffmpegReady := commandReady(os.Getenv("CASCADE_FFMPEG_PATH"))
 	return ExecutionPackageDebugView{
 		ExchangePackageID: exchangePackageID,
 		CloudJobID:        status.CloudJobID,
@@ -85,15 +103,16 @@ func (s *Service) GetExecutionPackageDebug(ctx context.Context, orgID string, ex
 			Environment:      s.runtime.Environment,
 			ArtifactRoot:     s.runtime.ArtifactRoot,
 			VideoWorkerPath:  workerPath,
-			VideoWorkerReady: fileExists(workerPath),
+			VideoWorkerReady: workerReady,
 			NodeBinary:       nodeBinary,
-			NodeReady:        commandReady(nodeBinary),
-			FFmpegReady:      commandReady(os.Getenv("CASCADE_FFMPEG_PATH")),
+			NodeReady:        nodeReady,
+			FFmpegReady:      ffmpegReady,
 			LLMMode:          string(s.runtime.LLMMode),
 		},
-		Package: debugPackageSummary(pkg),
-		Result:  status.ResultSummary,
-		Failure: status.FailureSummary,
+		Package:   debugPackageSummary(pkg),
+		Readiness: debugExecutionReadiness(status, pkg, workerReady, nodeReady),
+		Result:    status.ResultSummary,
+		Failure:   status.FailureSummary,
 	}, nil
 }
 
@@ -103,6 +122,60 @@ func (s *Service) failUploadedExecution(ctx context.Context, orgID string, excha
 		return status, failErr
 	}
 	return status, nil
+}
+
+func executionTimeout(timeoutSec int) time.Duration {
+	if timeoutSec <= 0 {
+		timeoutSec = defaultExecutionTimeoutSec
+	}
+	return time.Duration(timeoutSec) * time.Second
+}
+
+func shouldMarkExecutionTimeout(status model.ExecutionPackageStatusResponse) bool {
+	if status.ExchangePackageID == "" {
+		return true
+	}
+	if isTerminalExchangeStatus(status.Status) {
+		return false
+	}
+	return status.Status != model.ExchangePackageStatusFailed || status.Error == nil || status.Error.Code != "execution_timeout"
+}
+
+func (s *Service) registerRunningExecution(orgID string, exchangePackageID string, cancel context.CancelFunc) {
+	if s == nil || cancel == nil {
+		return
+	}
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	if s.runningTasks == nil {
+		s.runningTasks = map[string]context.CancelFunc{}
+	}
+	s.runningTasks[runningExecutionKey(orgID, exchangePackageID)] = cancel
+}
+
+func (s *Service) unregisterRunningExecution(orgID string, exchangePackageID string) {
+	if s == nil {
+		return
+	}
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	delete(s.runningTasks, runningExecutionKey(orgID, exchangePackageID))
+}
+
+func (s *Service) cancelRunningExecution(orgID string, exchangePackageID string) {
+	if s == nil {
+		return
+	}
+	s.runningMu.Lock()
+	cancel := s.runningTasks[runningExecutionKey(orgID, exchangePackageID)]
+	s.runningMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func runningExecutionKey(orgID string, exchangePackageID string) string {
+	return orgID + "\x00" + exchangePackageID
 }
 
 func (s *Service) localVideoWorkerPath() string {
@@ -131,6 +204,7 @@ type ExecutionPackageDebugView struct {
 	Status            model.ExecutionPackageStatusResponse `json:"status"`
 	Runtime           ExecutionDebugRuntime                `json:"runtime"`
 	Package           ExecutionDebugPackageSummary         `json:"package"`
+	Readiness         ExecutionDebugReadiness              `json:"readiness"`
 	Result            *model.ExecutionResultSummary        `json:"result,omitempty"`
 	Failure           *model.ExecutionFailureSummary       `json:"failure,omitempty"`
 }
@@ -167,6 +241,16 @@ type ExecutionDebugPackageSummary struct {
 	FinalVideoRequested   bool     `json:"final_video_requested"`
 }
 
+type ExecutionDebugReadiness struct {
+	CanRun   bool                    `json:"can_run"`
+	Blockers []ExecutionDebugBlocker `json:"blockers,omitempty"`
+}
+
+type ExecutionDebugBlocker struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 func debugPackageSummary(pkg model.ClientExecutionPackage) ExecutionDebugPackageSummary {
 	summary := ExecutionDebugPackageSummary{
 		PackageID:             pkg.PackageID,
@@ -192,6 +276,26 @@ func debugPackageSummary(pkg model.ClientExecutionPackage) ExecutionDebugPackage
 		}
 	}
 	return summary
+}
+
+func debugExecutionReadiness(status model.ExecutionPackageStatusResponse, pkg model.ClientExecutionPackage, workerReady bool, nodeReady bool) ExecutionDebugReadiness {
+	blockers := []ExecutionDebugBlocker{}
+	if isTerminalExchangeStatus(status.Status) {
+		blockers = append(blockers, ExecutionDebugBlocker{Code: "execution_terminal", Message: "Execution is already terminal and cannot be started again."})
+	}
+	if status.Status == model.ExchangePackageStatusRunning || status.Status == model.ExchangePackageStatusQueued {
+		blockers = append(blockers, ExecutionDebugBlocker{Code: "execution_already_started", Message: "Execution is already running or queued."})
+	}
+	if pkg.PackageID == "" {
+		blockers = append(blockers, ExecutionDebugBlocker{Code: "payload_unavailable", Message: "Plain client execution payload is not available to the cloud-side runner."})
+	}
+	if !workerReady {
+		blockers = append(blockers, ExecutionDebugBlocker{Code: "video_worker_missing", Message: "Video-worker build artifact is not configured or not present."})
+	}
+	if !nodeReady {
+		blockers = append(blockers, ExecutionDebugBlocker{Code: "node_runtime_missing", Message: "Node runtime is not available for the video-worker."})
+	}
+	return ExecutionDebugReadiness{CanRun: len(blockers) == 0, Blockers: blockers}
 }
 
 func fileExists(path string) bool {

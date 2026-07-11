@@ -2,7 +2,10 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"os"
 	"strings"
 	"time"
 
@@ -129,16 +132,31 @@ func renderArtifactsFromResult(source *model.ClientExecutionPackage, renderResul
 		if renderResult.RenderManifestPath != "" && spec.kind == "demo_video" {
 			metadata["render_manifest_path"] = renderResult.RenderManifestPath
 		}
+		sha, size := localFileDigest(spec.path)
 		artifacts = append(artifacts, model.ArtifactRef{
 			ID:        artifactID(source.PackageID, spec.kind, 1),
 			Kind:      spec.kind,
 			URI:       spec.path,
 			MimeType:  mimeTypeForPath(spec.path, spec.mimeFallback),
+			SHA256:    sha,
+			SizeBytes: size,
 			CreatedAt: createdAt,
 			Metadata:  metadata,
 		})
 	}
 	return artifacts
+}
+
+func localFileDigest(path string) (string, int64) {
+	if path == "" {
+		return "", 0
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), int64(len(data))
 }
 
 func appendUniqueArtifactDescriptors(left []model.PackageArtifactDescriptor, right ...model.PackageArtifactDescriptor) []model.PackageArtifactDescriptor {
