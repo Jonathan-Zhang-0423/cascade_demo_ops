@@ -16,6 +16,7 @@ const (
 	devExchangeHTTPEnv       = "CASCADE_DEV_EXCHANGE_HTTP"
 	devExchangeTokenEnv      = "CASCADE_DEV_EXCHANGE_TOKEN"
 	devExchangeRemoteBindEnv = "CASCADE_DEV_ALLOW_REMOTE_BIND"
+	devExchangeAutoRunEnv    = "CASCADE_EXCHANGE_AUTO_RUN"
 	cascadeOrgIDHeader       = "X-Cascade-Org-ID"
 )
 
@@ -78,6 +79,12 @@ func (s *DevHTTPServer) handleExecutionPackageUpload(w http.ResponseWriter, r *h
 		request.PayloadRef = request.Envelope.PayloadRef
 	}
 	response, err := s.service.UploadExecutionPackage(r.Context(), request, body.Payload)
+	if err == nil && devExchangeAutoRunEnabled() && body.Payload.PackageID != "" && response.Status == model.ExchangePackageStatusAccepted {
+		runStatus, runErr := s.service.RunUploadedExecutionPackage(r.Context(), responseOrgID(request.Envelope, body.Payload), response.ExchangePackageID)
+		if runErr == nil && runStatus.ExchangePackageID != "" {
+			response.Status = runStatus.Status
+		}
+	}
 	writeExchangeValue(w, response, err)
 }
 
@@ -315,6 +322,22 @@ func devExchangeHTTPEnabled() bool {
 
 func devExchangeRemoteBindAllowed() bool {
 	return devExchangeHTTPEnabled() && os.Getenv(devExchangeRemoteBindEnv) == "1" && strings.TrimSpace(os.Getenv(devExchangeTokenEnv)) != ""
+}
+
+func devExchangeAutoRunEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(devExchangeAutoRunEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func responseOrgID(envelope model.ExchangeEnvelope, payload model.ClientExecutionPackage) string {
+	if envelope.OrgID != "" {
+		return envelope.OrgID
+	}
+	return payload.OrgID
 }
 
 func safeDownloadFileName(path string, artifact model.ArtifactRef) string {
