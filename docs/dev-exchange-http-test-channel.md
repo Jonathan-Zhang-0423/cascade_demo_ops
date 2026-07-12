@@ -14,6 +14,9 @@ $env:CASCADE_DEV_EXCHANGE_TOKEN = "replace-with-shared-test-token"
 
 # Only when another machine must call this dev server directly:
 $env:CASCADE_DEV_ALLOW_REMOTE_BIND = "1"
+
+# Optional: start execution automatically after a valid plaintext upload:
+$env:CASCADE_EXCHANGE_AUTO_RUN = "1"
 ```
 
 Start the dev server:
@@ -102,6 +105,11 @@ Production uploads use `payload_ref` only. The ref must match
 `envelope.payload_ref`; the service stores only envelope and artifact metadata.
 The dev channel also accepts a plaintext `payload` field for local end-to-end
 tests, where `payload` must be a `demoops.client_execution_package.v1` payload.
+When `CASCADE_EXCHANGE_AUTO_RUN=1`, a valid plaintext upload is immediately
+started with the same cloud-side runner used by the dev `/run` endpoint. The
+upload response status becomes `running` when the start succeeds. Encrypted
+`payload_ref`-only uploads remain `accepted` until an isolated decryption worker
+is available; they are not auto-started by this dev bridge.
 
 If upload validation fails, the response uses a stable error code plus safe
 field-level details. The server does not echo the script source, HTML, or
@@ -134,6 +142,8 @@ X-Cascade-Org-ID: <org_id>
 This starts the uploaded package in the local Playwright recording/render
 pipeline and returns quickly with the current execution status. Poll `status`
 or the dev list endpoints until the package reaches `completed` or `failed`.
+This endpoint is still available when `CASCADE_EXCHANGE_AUTO_RUN=1`; duplicate
+starts return the current package status instead of launching a second run.
 The background execution window is taken from
 `envelope.policy.max_execution_window_sec`; when the field is absent or not
 positive, the dev server uses a 30 minute default. If the window expires, the
@@ -383,6 +393,7 @@ cd /path/to/cascade_demo_ops/backend
 export CASCADE_DEV_EXCHANGE_HTTP=1
 export CASCADE_DEV_EXCHANGE_TOKEN=cascade-dev-20260710
 export CASCADE_DEV_ALLOW_REMOTE_BIND=1
+export CASCADE_EXCHANGE_AUTO_RUN=1
 export CASCADE_LLM_MODE=deterministic
 go run ./cmd/devserver --addr 0.0.0.0:4317
 ```
