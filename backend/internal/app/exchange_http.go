@@ -16,6 +16,7 @@ const (
 	devExchangeHTTPEnv       = "CASCADE_DEV_EXCHANGE_HTTP"
 	devExchangeTokenEnv      = "CASCADE_DEV_EXCHANGE_TOKEN"
 	devExchangeRemoteBindEnv = "CASCADE_DEV_ALLOW_REMOTE_BIND"
+	devExchangeAutoRunEnv    = "CASCADE_EXCHANGE_AUTO_RUN"
 	cascadeOrgIDHeader       = "X-Cascade-Org-ID"
 )
 
@@ -32,8 +33,9 @@ type exchangeHTTPError struct {
 }
 
 type exchangeHTTPErrorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string                    `json:"code"`
+	Message string                    `json:"message"`
+	Details []exchangeHTTPErrorDetail `json:"details,omitempty"`
 }
 
 func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
@@ -48,6 +50,7 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/dev/execution-packages", s.requireDevExchangeAuth(s.handleDevExecutionPackageList))
 	mux.HandleFunc("GET /v1/dev/result-packages", s.requireDevExchangeAuth(s.handleDevResultPackageList))
 	mux.HandleFunc("POST /v1/dev/execution-packages/{id}/run", s.requireDevExchangeAuth(s.handleDevExecutionPackageRun))
+	mux.HandleFunc("POST /v1/dev/execution-packages/{id}/cancel", s.requireDevExchangeAuth(s.handleDevExecutionPackageCancel))
 	mux.HandleFunc("GET /v1/dev/execution-packages/{id}/debug", s.requireDevExchangeAuth(s.handleDevExecutionPackageDebug))
 	mux.HandleFunc("GET /v1/dev/result-packages/{id}/deliverables/{artifact_id}", s.requireDevExchangeAuth(s.handleDevResultDeliverableDownload))
 }
@@ -76,6 +79,12 @@ func (s *DevHTTPServer) handleExecutionPackageUpload(w http.ResponseWriter, r *h
 		request.PayloadRef = request.Envelope.PayloadRef
 	}
 	response, err := s.service.UploadExecutionPackage(r.Context(), request, body.Payload)
+	if err == nil && devExchangeAutoRunEnabled() && body.Payload.PackageID != "" && response.Status == model.ExchangePackageStatusAccepted {
+		runStatus, runErr := s.service.RunUploadedExecutionPackage(r.Context(), responseOrgID(request.Envelope, body.Payload), response.ExchangePackageID)
+		if runErr == nil && runStatus.ExchangePackageID != "" {
+			response.Status = runStatus.Status
+		}
+	}
 	writeExchangeValue(w, response, err)
 }
 
@@ -106,6 +115,16 @@ func (s *DevHTTPServer) handleDevExecutionPackageRun(w http.ResponseWriter, r *h
 		return
 	}
 	response, err := s.service.RunUploadedExecutionPackage(r.Context(), orgID, r.PathValue("id"))
+	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleDevExecutionPackageCancel(w http.ResponseWriter, r *http.Request) {
+	orgID, err := orgIDFromRequest(r)
+	if err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "missing_org_id", err)
+		return
+	}
+	response, err := s.service.CancelExecutionPackage(r.Context(), orgID, r.PathValue("id"))
 	writeExchangeValue(w, response, err)
 }
 
@@ -209,7 +228,7 @@ func orgIDFromRequest(r *http.Request) (string, error) {
 
 func writeExchangeValue(w http.ResponseWriter, value any, err error) {
 	if err != nil {
-		writeExchangeError(w, http.StatusBadRequest, "exchange_error", err)
+		writeExchangeError(w, http.StatusBadRequest, exchangeErrorCode(err, "exchange_error"), err)
 		return
 	}
 	value = withDeliverableDownloadURLs(value)
@@ -294,7 +313,7 @@ func writeExchangeError(w http.ResponseWriter, status int, code string, err erro
 	if err != nil {
 		message = redactBridgeError(err.Error())
 	}
-	_ = json.NewEncoder(w).Encode(exchangeHTTPError{Error: exchangeHTTPErrorBody{Code: code, Message: message}})
+	_ = json.NewEncoder(w).Encode(exchangeHTTPError{Error: exchangeHTTPErrorBody{Code: code, Message: message, Details: exchangeErrorDetails(err)}})
 }
 
 func devExchangeHTTPEnabled() bool {
@@ -303,6 +322,22 @@ func devExchangeHTTPEnabled() bool {
 
 func devExchangeRemoteBindAllowed() bool {
 	return devExchangeHTTPEnabled() && os.Getenv(devExchangeRemoteBindEnv) == "1" && strings.TrimSpace(os.Getenv(devExchangeTokenEnv)) != ""
+}
+
+func devExchangeAutoRunEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(devExchangeAutoRunEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func responseOrgID(envelope model.ExchangeEnvelope, payload model.ClientExecutionPackage) string {
+	if envelope.OrgID != "" {
+		return envelope.OrgID
+	}
+	return payload.OrgID
 }
 
 func safeDownloadFileName(path string, artifact model.ArtifactRef) string {

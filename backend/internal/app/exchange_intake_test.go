@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -77,7 +78,10 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	if completed.ResultSummary.DemoVideoCount != 1 || completed.ResultSummary.RawRecordingCount != 1 || completed.ResultSummary.PrimaryDemoVideoURI == "" {
 		t.Fatalf("unexpected result summary: %+v", completed.ResultSummary)
 	}
-	if got := findDeliverable(completed.ResultSummary.Deliverables, "demo_video"); got == nil || got.Role != "final_demo" || !got.IncludeInDemo || got.URI == "" {
+	if completed.ResultSummary.DeliveryStatus != model.ResultDeliveryStatusReady || !completed.ResultSummary.AckRequired || completed.ResultSummary.ExpiresAt.IsZero() {
+		t.Fatalf("result summary should expose ready delivery state, got %+v", completed.ResultSummary)
+	}
+	if got := findDeliverable(completed.ResultSummary.Deliverables, "demo_video"); got == nil || got.Role != "final_demo" || !got.IncludeInDemo || got.URI == "" || got.SHA256 != "sha_demo_video" || got.SizeBytes != 2048 {
 		t.Fatalf("result summary should expose final demo deliverable, got %+v", completed.ResultSummary.Deliverables)
 	}
 	if got := findDeliverable(completed.ResultSummary.Deliverables, "raw_recording"); got == nil || got.URI == "" {
@@ -91,13 +95,33 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	if gotResult.ResultID != result.ResultID || gotResult.SourcePackageID != pkg.PackageID {
 		t.Fatalf("result package mismatch: %+v", gotResult)
 	}
+	if gotResult.Delivery.DeliveredAt.IsZero() {
+		t.Fatalf("result package get should mark delivery, got %+v", gotResult.Delivery)
+	}
 
 	ack, err := service.AckResultPackage(ctx, pkg.OrgID, model.ResultPackageAckRequest{ResultPackageID: completed.ResultPackageID, AckedByInstallID: "install_1", ReceivedAssetIDs: []string{"artifact_demo_video"}, VerifiedChecksums: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ack.Status != model.RecordingResultStatusAcked || ack.ResultPackageID != completed.ResultPackageID {
+	if ack.Status != model.RecordingResultStatusAcked || ack.DeliveryStatus != model.ResultDeliveryStatusAcked || ack.ResultPackageID != completed.ResultPackageID || ack.AckedByInstallID != "install_1" || !ack.VerifiedChecksums {
 		t.Fatalf("unexpected ack response: %+v", ack)
+	}
+	if len(ack.ReceivedAssetIDs) != 1 || ack.ReceivedAssetIDs[0] != "artifact_demo_video" {
+		t.Fatalf("ack response should echo received asset ids, got %+v", ack)
+	}
+	ackedStatus, err := service.Status(ctx, pkg.OrgID, completed.ExchangePackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ackedStatus.ResultSummary == nil || ackedStatus.ResultSummary.ResultStatus != model.RecordingResultStatusAcked || ackedStatus.ResultSummary.DeliveryStatus != model.ResultDeliveryStatusAcked || ackedStatus.ResultSummary.AckedAt.IsZero() {
+		t.Fatalf("status should expose acked result summary, got %+v", ackedStatus.ResultSummary)
+	}
+	results, err := service.ListResultPackages(ctx, pkg.OrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results.Items) != 1 || results.Items[0].DeliveryStatus != model.ResultDeliveryStatusAcked || results.Items[0].AckedByInstallID != "install_1" || results.Items[0].AckedAt.IsZero() {
+		t.Fatalf("result list should expose acked delivery state, got %+v", results.Items)
 	}
 }
 
@@ -307,6 +331,125 @@ func TestExchangeIntakeServicePersistsCompletedResult(t *testing.T) {
 	}
 }
 
+func TestExchangeIntakeServiceFailsRunningPackageAfterRestart(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 7, 10, 10, 30, 0, 0, time.UTC)
+	service := newExchangeIntakeService(nil, newFileExchangeSnapshotStore(root))
+	service.now = fixedClock(now)
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Crypto.Nonce = "nonce_restart_running"
+	uploadResp, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: envelope}, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.StartExecution(ctx, pkg.OrgID, uploadResp.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.MarkExecutionStage(ctx, pkg.OrgID, uploadResp.ExchangePackageID, "running_script", "Running script when process exits.", 55); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := newExchangeIntakeService(nil, newFileExchangeSnapshotStore(root))
+	status, err := reloaded.Status(ctx, pkg.OrgID, uploadResp.ExchangePackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != model.ExchangePackageStatusFailed || status.Error == nil || status.Error.Code != "interrupted_by_restart" {
+		t.Fatalf("expected running package to fail after restart, got %+v", status)
+	}
+	if status.FailureSummary == nil || status.FailureSummary.FailedStage != "running_script" {
+		t.Fatalf("restart failure should preserve failed stage, got %+v", status.FailureSummary)
+	}
+
+	list, err := reloaded.ListExecutionPackages(ctx, pkg.OrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].FailureSummary == nil || list.Items[0].FailureSummary.Code != "interrupted_by_restart" {
+		t.Fatalf("list should expose restart failure summary, got %+v", list.Items)
+	}
+}
+
+func TestExchangeIntakeServiceCancelsRunningPackageAndPreservesTerminalStatus(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	service.now = fixedClock(time.Date(2026, 7, 10, 11, 10, 0, 0, time.UTC))
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, service.now())
+	envelope.Crypto.Nonce = "nonce_cancel_running"
+	uploadResp, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: envelope}, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.StartExecution(ctx, pkg.OrgID, uploadResp.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+
+	canceled, err := service.CancelExecution(ctx, pkg.OrgID, uploadResp.ExchangePackageID, "test_cancel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canceled.Status != model.ExchangePackageStatusCanceled || canceled.Stage != "canceled" || canceled.Error == nil || canceled.Error.Code != "test_cancel" {
+		t.Fatalf("expected canceled package status, got %+v", canceled)
+	}
+	if canceled.FailureSummary == nil || canceled.FailureSummary.Code != "test_cancel" {
+		t.Fatalf("canceled package should expose cancellation summary, got %+v", canceled.FailureSummary)
+	}
+
+	if updated, err := service.MarkExecutionStage(ctx, pkg.OrgID, uploadResp.ExchangePackageID, "running_script", "late progress", 80); err != nil {
+		t.Fatal(err)
+	} else if updated.Status != model.ExchangePackageStatusCanceled || updated.Stage != "canceled" {
+		t.Fatalf("late progress must not overwrite canceled status, got %+v", updated)
+	}
+	if completed, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, uploadResp.ExchangePackageID, sampleRecordingResultForAppTest(pkg)); err != nil {
+		t.Fatal(err)
+	} else if completed.Status != model.ExchangePackageStatusCanceled || completed.ResultPackageID != "" {
+		t.Fatalf("late result must not overwrite canceled status, got %+v", completed)
+	}
+	if failed, err := service.FailExecution(ctx, pkg.OrgID, uploadResp.ExchangePackageID, "late_failure", errors.New("late failure")); err != nil {
+		t.Fatal(err)
+	} else if failed.Status != model.ExchangePackageStatusCanceled || failed.Error == nil || failed.Error.Code != "test_cancel" {
+		t.Fatalf("late failure must not overwrite canceled status, got %+v", failed)
+	}
+}
+
+func TestExchangeIntakeServiceGeneratesUniqueUploadIDsUnderFixedClock(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	now := time.Date(2026, 7, 10, 11, 30, 0, 0, time.UTC)
+	service.now = fixedClock(now)
+	ctx := context.Background()
+	seen := map[string]bool{}
+	for index := 0; index < 20; index++ {
+		response, err := service.Init(ctx, model.ExecutionPackageInitRequest{
+			OrgID:       "org_1",
+			ProjectID:   "project_1",
+			PackageKind: model.ExchangePackageKindClientExecution,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.UploadID == "" {
+			t.Fatal("upload id is required")
+		}
+		if seen[response.UploadID] {
+			t.Fatalf("duplicate upload id generated: %s", response.UploadID)
+		}
+		seen[response.UploadID] = true
+	}
+}
+
 func TestExchangeIntakeServiceListsPackagesWithoutPayloadDump(t *testing.T) {
 	service := NewExchangeIntakeService(nil)
 	now := time.Date(2026, 7, 10, 11, 0, 0, 0, time.UTC)
@@ -371,6 +514,37 @@ func TestExchangeIntakeServiceListsPackagesWithoutPayloadDump(t *testing.T) {
 	}
 	if strings.Contains(string(data), "runCascadeRecording") || strings.Contains(string(data), "InlineSource") {
 		t.Fatalf("list responses must not dump executable payloads: %s", string(data))
+	}
+}
+
+func TestExecutionTimeoutUsesPolicyOrDefault(t *testing.T) {
+	if got := executionTimeout(2); got != 2*time.Second {
+		t.Fatalf("expected policy timeout to win, got %s", got)
+	}
+	if got := executionTimeout(0); got != time.Duration(defaultExecutionTimeoutSec)*time.Second {
+		t.Fatalf("expected default timeout, got %s", got)
+	}
+}
+
+func TestShouldMarkExecutionTimeoutDoesNotOverrideCompletedStatus(t *testing.T) {
+	if shouldMarkExecutionTimeout(model.ExecutionPackageStatusResponse{
+		ExchangePackageID: "xpkg_completed",
+		Status:            model.ExchangePackageStatusCompleted,
+	}) {
+		t.Fatal("completed package must not be overwritten by timeout")
+	}
+	if shouldMarkExecutionTimeout(model.ExecutionPackageStatusResponse{
+		ExchangePackageID: "xpkg_timeout",
+		Status:            model.ExchangePackageStatusFailed,
+		Error:             &model.AgentError{Code: "execution_timeout"},
+	}) {
+		t.Fatal("existing execution_timeout failure should not be rewritten")
+	}
+	if !shouldMarkExecutionTimeout(model.ExecutionPackageStatusResponse{
+		ExchangePackageID: "xpkg_running",
+		Status:            model.ExchangePackageStatusRunning,
+	}) {
+		t.Fatal("running package should be marked as timeout after deadline")
 	}
 }
 
@@ -653,8 +827,8 @@ func sampleEnvelopeForAppTest(t *testing.T, pkg model.ClientExecutionPackage, no
 
 func sampleRecordingResultForAppTest(pkg model.ClientExecutionPackage) model.RecordingResultPackage {
 	now := time.Date(2026, 7, 9, 16, 10, 0, 0, time.UTC)
-	artifact := model.ArtifactRef{ID: "artifact_raw_recording", Kind: "raw_recording", URI: "file:///tmp/recording.webm", MimeType: "video/webm", SourceNodeID: "node_open_dashboard"}
-	demoVideo := model.ArtifactRef{ID: "artifact_demo_video", Kind: "demo_video", URI: "file:///tmp/demo.webm", MimeType: "video/webm", Metadata: map[string]any{"asset_role": "final_demo", "include_in_demo": true}}
+	artifact := model.ArtifactRef{ID: "artifact_raw_recording", Kind: "raw_recording", URI: "file:///tmp/recording.webm", MimeType: "video/webm", SHA256: "sha_raw_recording", SizeBytes: 1024, SourceNodeID: "node_open_dashboard"}
+	demoVideo := model.ArtifactRef{ID: "artifact_demo_video", Kind: "demo_video", URI: "file:///tmp/demo.webm", MimeType: "video/webm", SHA256: "sha_demo_video", SizeBytes: 2048, Metadata: map[string]any{"asset_role": "final_demo", "include_in_demo": true}}
 	step := model.StepResult{NodeID: "node_open_dashboard", Status: "passed", DurationMS: 1200}
 	return model.RecordingResultPackage{
 		ResultID:        "result_1",

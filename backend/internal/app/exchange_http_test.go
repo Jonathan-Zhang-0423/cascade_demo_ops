@@ -89,6 +89,91 @@ func TestDevExchangeHTTPLifecycleAcceptsProtocolPackage(t *testing.T) {
 	if debug.Runtime.ArtifactRoot == "" || debug.Status.ExchangePackageID != uploadPayload.ExchangePackageID {
 		t.Fatalf("unexpected debug runtime/status: %+v", debug)
 	}
+	if debug.Readiness.CanRun || !debugHasBlocker(debug.Readiness, "video_worker_missing") {
+		t.Fatalf("debug readiness should expose missing worker blocker without raw payload: %+v", debug.Readiness)
+	}
+	if strings.Contains(mustJSON(t, debug), "runCascadeRecording") {
+		t.Fatalf("debug view leaked script source: %s", mustJSON(t, debug))
+	}
+}
+
+func TestDevExchangeHTTPUploadValidationReturnsSafeDetails(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 9, 15, 32, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	pkg.RecordingRunSpec.AllowedDomains = nil
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID:       pkg.OrgID,
+		ProjectID:   pkg.ProjectID,
+		PackageKind: model.ExchangePackageKindClientExecution,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/execution-packages", bytes.NewReader(mustMarshalJSON(t, exchangeUploadHTTPBody{
+		UploadID:   initPayload.UploadID,
+		Envelope:   envelope,
+		PayloadRef: envelope.PayloadRef,
+		Payload:    pkg,
+	})))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected validation failure, got %d: %s", response.Code, response.Body.String())
+	}
+	var payload exchangeHTTPError
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Code != "client_execution_package_invalid" {
+		t.Fatalf("expected protocol validation code, got %+v", payload.Error)
+	}
+	if len(payload.Error.Details) != 1 || payload.Error.Details[0].Field != "payload.recording_run_spec.allowed_domains" || payload.Error.Details[0].Reason != "required" {
+		t.Fatalf("expected safe field-level validation detail, got %+v", payload.Error.Details)
+	}
+	for _, forbidden := range []string{"runCascadeRecording", "BEGIN PRIVATE KEY", "raw-password"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("validation response leaked forbidden value %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestDevExchangeHTTPAutoRunStartsPlaintextUpload(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	t.Setenv(devExchangeAutoRunEnv, "1")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 9, 15, 33, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID:       pkg.OrgID,
+		ProjectID:   pkg.ProjectID,
+		PackageKind: model.ExchangePackageKindClientExecution,
+	})
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Crypto.Nonce = "nonce_http_auto_run"
+
+	uploadPayload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID:   initPayload.UploadID,
+		Envelope:   envelope,
+		PayloadRef: envelope.PayloadRef,
+		Payload:    pkg,
+	})
+	if uploadPayload.Status != model.ExchangePackageStatusRunning {
+		t.Fatalf("auto-run upload should return running status for plaintext payloads, got %+v", uploadPayload)
+	}
+
+	failed := waitForExchangeHTTPStatus(t, server, uploadPayload.ExchangePackageID, pkg.OrgID, model.ExchangePackageStatusFailed)
+	if failed.Error == nil || failed.Error.Code != "video_worker_missing" {
+		t.Fatalf("auto-run should have invoked the same runner and failed on missing test worker, got %+v", failed)
+	}
 }
 
 func TestDevExchangeHTTPAcceptsEncryptedPayloadRefOnlyUpload(t *testing.T) {
@@ -126,6 +211,49 @@ func TestDevExchangeHTTPAcceptsEncryptedPayloadRefOnlyUpload(t *testing.T) {
 	status := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodGet, "/v1/execution-packages/"+uploadPayload.ExchangePackageID+"/status?org_id="+pkg.OrgID, nil)
 	if status.Stage != "accepted" || !strings.Contains(status.Message, "Encrypted execution package accepted") {
 		t.Fatalf("expected encrypted upload status message, got %+v", status)
+	}
+	debug := exchangeHTTPDo[ExecutionPackageDebugView](t, server, http.MethodGet, "/v1/dev/execution-packages/"+uploadPayload.ExchangePackageID+"/debug?org_id="+pkg.OrgID, nil)
+	if debug.Readiness.CanRun || !debugHasBlocker(debug.Readiness, "payload_unavailable") {
+		t.Fatalf("encrypted payload-only debug readiness should block run until worker decryption is available, got %+v", debug.Readiness)
+	}
+}
+
+func TestDevExchangeHTTPAutoRunSkipsEncryptedPayloadRefOnlyUpload(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	t.Setenv(devExchangeAutoRunEnv, "true")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 9, 15, 38, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID:       pkg.OrgID,
+		ProjectID:   pkg.ProjectID,
+		PackageKind: model.ExchangePackageKindClientExecution,
+	})
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Crypto.Nonce = "nonce_http_auto_run_payload_ref_only"
+	envelope.PayloadRef.Kind = model.PayloadRefKindArtifact
+	envelope.PayloadRef.ArtifactID = "payload_artifact_auto_run_1"
+	envelope.PayloadRef.URI = "s3://cascade-exchange/payload-auto-run.enc"
+	envelope.PayloadRef.InlineCiphertext = ""
+	envelope.PayloadRef.SHA256 = "ciphertext_hash_auto_run_1"
+	envelope.PayloadRef.SizeBytes = 4096
+	envelope.PayloadRef.Encrypted = true
+	envelope.PayloadRef.Sensitive = true
+	envelope.Crypto.CiphertextDigestSHA256 = envelope.PayloadRef.SHA256
+
+	uploadPayload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID:   initPayload.UploadID,
+		Envelope:   envelope,
+		PayloadRef: envelope.PayloadRef,
+	})
+	if uploadPayload.Status != model.ExchangePackageStatusAccepted {
+		t.Fatalf("auto-run should skip encrypted payload-ref-only uploads, got %+v", uploadPayload)
+	}
+	status := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodGet, "/v1/execution-packages/"+uploadPayload.ExchangePackageID+"/status?org_id="+pkg.OrgID, nil)
+	if status.Status != model.ExchangePackageStatusAccepted || status.Stage != "accepted" {
+		t.Fatalf("payload-ref-only upload should remain accepted until decrypted execution is available, got %+v", status)
 	}
 }
 
@@ -172,6 +300,41 @@ func TestDevExchangeHTTPRunEndpointMarksMissingWorkerAsFailed(t *testing.T) {
 	}
 	if len(failed.StageHistory) < 3 {
 		t.Fatalf("failed dev run should include stage history, got %+v", failed.StageHistory)
+	}
+}
+
+func TestDevExchangeHTTPCancelEndpointCancelsRunningPackage(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 9, 15, 50, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID:       pkg.OrgID,
+		ProjectID:   pkg.ProjectID,
+		PackageKind: model.ExchangePackageKindClientExecution,
+	})
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Crypto.Nonce = "nonce_http_cancel"
+	uploadPayload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID:   initPayload.UploadID,
+		Envelope:   envelope,
+		PayloadRef: envelope.PayloadRef,
+		Payload:    pkg,
+	})
+	if _, _, err := server.service.exchange.StartExecution(t.Context(), pkg.OrgID, uploadPayload.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+
+	canceled := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodPost, "/v1/dev/execution-packages/"+uploadPayload.ExchangePackageID+"/cancel", nil, cascadeOrgIDHeader, pkg.OrgID)
+	if canceled.Status != model.ExchangePackageStatusCanceled || canceled.Stage != "canceled" || canceled.Error == nil || canceled.Error.Code != "canceled_by_dev_request" {
+		t.Fatalf("expected canceled status from endpoint, got %+v", canceled)
+	}
+
+	status := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodGet, "/v1/execution-packages/"+uploadPayload.ExchangePackageID+"/status?org_id="+pkg.OrgID, nil)
+	if status.Status != model.ExchangePackageStatusCanceled || status.FailureSummary == nil || status.FailureSummary.Code != "canceled_by_dev_request" {
+		t.Fatalf("status should preserve canceled state, got %+v", status)
 	}
 }
 
@@ -240,6 +403,17 @@ func TestDevExchangeHTTPStatusProvidesDownloadURLsAndServesDeliverable(t *testin
 	}
 	if response.Header().Get("X-Cascade-Artifact-ID") != "artifact_demo_video" {
 		t.Fatalf("missing artifact header: %+v", response.Header())
+	}
+	delivered := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodGet, "/v1/execution-packages/"+uploadPayload.ExchangePackageID+"/status?org_id="+pkg.OrgID, nil)
+	if delivered.ResultSummary == nil || delivered.ResultSummary.DeliveryStatus != model.ResultDeliveryStatusDelivered || delivered.ResultSummary.DeliveredAt.IsZero() {
+		t.Fatalf("download should mark result as delivered, got %+v", delivered.ResultSummary)
+	}
+	deliveredResult, err := server.service.GetResultPackage(t.Context(), pkg.OrgID, completed.ResultPackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deliveredResult.Delivery.DownloadedAssetIDs) != 1 || deliveredResult.Delivery.DownloadedAssetIDs[0] != "artifact_demo_video" {
+		t.Fatalf("download should persist downloaded asset id, got %+v", deliveredResult.Delivery)
 	}
 }
 
@@ -459,4 +633,22 @@ func mustJSON(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func mustMarshalJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func debugHasBlocker(readiness ExecutionDebugReadiness, code string) bool {
+	for _, blocker := range readiness.Blockers {
+		if blocker.Code == code {
+			return true
+		}
+	}
+	return false
 }
