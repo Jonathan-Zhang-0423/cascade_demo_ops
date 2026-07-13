@@ -99,6 +99,8 @@ type AppRuntimeConfig struct {
 	ModelAdapterVersion  string
 	ModelProviders       map[ModelProvider]ModelProviderCredential
 	ModelTaskRoutes      map[ModelTask]ModelTaskRoute
+	CloudExchangeBaseURL string
+	CloudExchangeToken   string
 }
 
 type DesktopResourceManifest struct {
@@ -159,11 +161,13 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 		SidecarPaths: map[string]string{
 			"video-worker": os.Getenv("NODE_WORKER_PATH"),
 		},
-		NodeBinaryPath:      os.Getenv("NODE_BINARY_PATH"),
-		LLMMode:             llmMode,
-		ModelAdapterVersion: ModelAdapterVersion,
-		ModelProviders:      modelProviderCredentialsFromEnv(),
-		ModelTaskRoutes:     modelTaskRoutesFromEnv(),
+		NodeBinaryPath:       os.Getenv("NODE_BINARY_PATH"),
+		LLMMode:              llmMode,
+		ModelAdapterVersion:  ModelAdapterVersion,
+		ModelProviders:       modelProviderCredentialsFromEnv(),
+		ModelTaskRoutes:      modelTaskRoutesFromEnv(),
+		CloudExchangeBaseURL: strings.TrimRight(strings.TrimSpace(envOrDefault("CASCADE_CLOUD_EXCHANGE_BASE_URL", os.Getenv("CASCADE_SERVER_BASE_URL"))), "/"),
+		CloudExchangeToken:   strings.TrimSpace(envOrDefault("CASCADE_CLOUD_EXCHANGE_TOKEN", os.Getenv("CASCADE_SERVER_TOKEN"))),
 	}
 	applyDesktopResourceManifest(&cfg)
 	return cfg, nil

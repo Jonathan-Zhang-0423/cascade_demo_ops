@@ -1,6 +1,8 @@
 package app
 
 import (
+	"net/url"
+
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
 )
@@ -20,6 +22,7 @@ type RuntimeConfigView struct {
 	Sidecars               map[string]bool                   `json:"sidecars"`
 	ModelProviders         map[string]ProviderCredentialView `json:"model_providers"`
 	ModelTaskRoutes        map[string]ModelTaskRouteView     `json:"model_task_routes"`
+	CloudExchange          CloudExchangeRuntimeView          `json:"cloud_exchange"`
 }
 
 type ProviderCredentialView struct {
@@ -38,6 +41,13 @@ type ModelTaskRouteView struct {
 	ModelOverride    string `json:"model_override"`
 }
 
+type CloudExchangeRuntimeView struct {
+	Configured      bool   `json:"configured"`
+	BaseURLHost     string `json:"base_url_host,omitempty"`
+	BaseURLPath     string `json:"base_url_path,omitempty"`
+	TokenConfigured bool   `json:"token_configured"`
+}
+
 func NewRuntimeConfigView(runtime config.AppRuntimeConfig) RuntimeConfigView {
 	return RuntimeConfigView{
 		Profile:                runtime.Profile,
@@ -54,6 +64,24 @@ func NewRuntimeConfigView(runtime config.AppRuntimeConfig) RuntimeConfigView {
 		Sidecars:               sidecarConfigured(runtime.SidecarPaths),
 		ModelProviders:         providerCredentialViews(runtime.ModelProviders),
 		ModelTaskRoutes:        modelTaskRouteViews(runtime.ModelTaskRoutes),
+		CloudExchange:          cloudExchangeRuntimeView(runtime),
+	}
+}
+
+func cloudExchangeRuntimeView(runtime config.AppRuntimeConfig) CloudExchangeRuntimeView {
+	host := ""
+	path := ""
+	if runtime.CloudExchangeBaseURL != "" {
+		if parsed, err := url.Parse(runtime.CloudExchangeBaseURL); err == nil {
+			host = parsed.Host
+			path = parsed.Path
+		}
+	}
+	return CloudExchangeRuntimeView{
+		Configured:      runtime.CloudExchangeBaseURL != "" && runtime.CloudExchangeToken != "",
+		BaseURLHost:     host,
+		BaseURLPath:     path,
+		TokenConfigured: runtime.CloudExchangeToken != "",
 	}
 }
 

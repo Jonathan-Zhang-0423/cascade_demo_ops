@@ -42,6 +42,7 @@ export function App() {
   const [checklist, setChecklist] = useState<ApprovalChecklistState>(initialChecklist);
   const [selectedNodeID, setSelectedNodeID] = useState(workspace.planReview.graph.nodes[0]?.id ?? "");
   const [isGeneratingPackage, setIsGeneratingPackage] = useState(false);
+  const [isRunningProduct, setIsRunningProduct] = useState(false);
 
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
   const blockedReasons = packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections);
@@ -163,6 +164,99 @@ export function App() {
     }
   }
 
+  async function runProductLifecycle() {
+    setIsRunningProduct(true);
+    setActiveNav("execution_packages");
+    const startedAt = new Date();
+    let lastEventID = "0";
+    let pollErrorShown = false;
+    const pollProjectID = workspace.id;
+    const pollRuntimeEvents = async () => {
+      const events = await bridge.executionEvents(pollProjectID, lastEventID);
+      if (events.ok && events.data) {
+        const numericIDs = events.data.map((entry) => Number(entry.id)).filter((id) => Number.isFinite(id));
+        if (numericIDs.length > 0) {
+          lastEventID = String(Math.max(Number(lastEventID) || 0, ...numericIDs));
+        }
+        if (events.data.length > 0) {
+          setWorkspace((current) => appendRuntimeLogs(current, events.data ?? []));
+        }
+      } else if (!pollErrorShown) {
+        pollErrorShown = true;
+        setWorkspace((current) => appendRuntimeLog(current, {
+          level: "warning",
+          message: "运行日志轮询不可用",
+          detail: events.error ?? "无法读取本地 Dev Bridge 运行事件。",
+        }));
+      }
+    };
+    setChecklist({
+      userApprovedPlan: true,
+      ipAllowlistAcknowledged: true,
+      sourceSummaryOnlyAcknowledged: true,
+      credentialGrantAcknowledged: true,
+      redactionsReviewed: true,
+    });
+    setWorkspace((current) => appendRuntimeLog({
+      ...current,
+      stage: "cloud_run",
+      status: "cloud_running",
+      cloudRun: {
+        ...current.cloudRun,
+        status: "running",
+        stage: "local_generated",
+        message: "产品实战自动流程已启动。",
+        currentStep: "本地 Agent 正在读取需求、项目目录和产品地址",
+        progress: 5,
+      },
+    }, {
+      level: "info",
+      message: "开始产品实战自动流程",
+      detail: "将自动完成本地理解、三合一执行包生成、服务器上传、状态轮询、结果包获取和 checksum ack。",
+    }));
+    await pollRuntimeEvents();
+    const poller = window.setInterval(() => {
+      void pollRuntimeEvents();
+    }, 1500);
+    try {
+      const result = await bridge.runProductLifecycle({
+        ...workspace,
+        packagePreview: { ...workspace.packagePreview, ipAllowlistAcknowledged: true },
+      });
+      window.clearInterval(poller);
+      await pollRuntimeEvents();
+      if (result.ok && result.data) {
+        const nextWorkspace = result.data;
+        setWorkspace((current) => appendRuntimeLog(mergeWorkspaceRuntimeLogs(nextWorkspace, current), {
+          level: nextWorkspace.cloudRun.status === "failed" ? "warning" : "success",
+          message: nextWorkspace.cloudRun.status === "failed" ? "服务器返回失败诊断" : "产品实战流程完成",
+          detail: `耗时 ${Math.round((Date.now() - startedAt.getTime()) / 1000)} 秒；当前阶段：${nextWorkspace.cloudRun.stage ?? nextWorkspace.cloudRun.status}。`,
+        }));
+        setActiveNav(nextWorkspace.cloudRun.status === "succeeded" ? "assets" : "execution_packages");
+      } else {
+        const message = result.error ?? "产品实战自动流程失败";
+        setWorkspace((current) => appendRuntimeLog({
+          ...current,
+          stage: "cloud_run",
+          cloudRun: {
+            ...current.cloudRun,
+            status: "failed",
+            lastError: message,
+            currentStep: message,
+            message,
+          },
+        }, {
+          level: "error",
+          message: "产品实战自动流程失败",
+          detail: message,
+        }));
+      }
+    } finally {
+      window.clearInterval(poller);
+      setIsRunningProduct(false);
+    }
+  }
+
   async function runModelDiagnostics() {
     setIsRunningDiagnostics(true);
     setDiagnosticsError("");
@@ -252,7 +346,7 @@ export function App() {
       </aside>
 
       <main className="workspace">
-        <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage} onBuildPackage={buildPackagePreview} />
+        <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage || isRunningProduct} onBuildPackage={runProductLifecycle} />
         <div className="workspace-grid">
           <section className="main-panel" aria-label="项目工作台">
             {activeNav === "new_demo" ? <ScenarioPicker activeID={workspace.scenarioID} onCreate={createScenario} /> : null}
@@ -275,7 +369,7 @@ export function App() {
                 canUpload={canUpload}
                 isLocalMode={bridge.mode === "local"}
                 onChecklistChange={setChecklist}
-                onUpload={uploadPackage}
+                onUpload={runProductLifecycle}
                 onCloudSuccess={simulateCloudSuccess}
                 onCloudFailure={simulateCloudFailure}
                 onRepairScript={repairFailedScript}
@@ -359,7 +453,7 @@ function ProjectHeader({
       </div>
       <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onBuildPackage}>
         <span className="button-icon">包</span>
-        {isGeneratingPackage ? "生成中" : "生成执行包"}
+        {isGeneratingPackage ? "执行中" : "开始实战流程"}
       </button>
     </header>
   );
@@ -966,9 +1060,9 @@ function PackageApproval({
         </div>
       ) : null}
       <div className="action-row">
-        <button type="button" className="primary-action" disabled={!canUpload || isLocalMode} onClick={onUpload}>
+        <button type="button" className="primary-action" disabled={!canUpload} onClick={onUpload}>
           <span className="button-icon">云</span>
-          {isLocalMode ? "云端上传后续接入" : "上传云端"}
+          {isLocalMode ? "自动上传并录制" : "上传云端"}
         </button>
         <button type="button" className="secondary-action" disabled={isLocalMode} onClick={onCloudSuccess}>
           <span className="button-icon">成</span>
@@ -1236,6 +1330,7 @@ function SettingsPanel({
         <Fact label="禁止页面" value={workspace.planReview.forbiddenPages.join(", ")} />
         <Fact label="LLM 模式" value={runtimeHealth?.llmMode ?? "auto"} />
         <Fact label="模型适配版本" value={runtimeHealth?.modelAdapterVersion ?? "domestic-llm-adapter-v1"} />
+        <Fact label="云端联调" value={runtimeHealth?.cloudExchange?.configured ? `${runtimeHealth.cloudExchange.baseURLHost}${runtimeHealth.cloudExchange.baseURLPath ?? ""}` : "待配置"} />
       </div>
       <section className="table-section">
         <SectionTitle title="模型供应商凭据" meta="仅显示占位状态" />

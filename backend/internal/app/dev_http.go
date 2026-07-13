@@ -24,6 +24,10 @@ type ExecutionPackageRequest struct {
 	UserInput *orchestrator.UserInput `json:"user_input,omitempty"`
 }
 
+type ClientExecutionPackageRequest struct {
+	OrgID string `json:"org_id,omitempty"`
+}
+
 type DevExecutionEvent struct {
 	ID        int64                      `json:"id"`
 	ProjectID string                     `json:"project_id"`
@@ -143,6 +147,54 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "/execution-package":
 		state, err := s.service.LoadProject(r.Context(), projectID)
 		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodPost && suffix == "/client-execution-package":
+		var request ClientExecutionPackageRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := decodeJSON(r, &request); err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		build, err := s.service.BuildClientExecutionPackage(r.Context(), projectID, request.OrgID)
+		writeBridgeValue(w, build, err)
+	case r.Method == http.MethodPost && suffix == "/cloud-lifecycle":
+		startedAt := time.Now()
+		var request CloudLifecycleRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := decodeJSON(r, &request); err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		if request.ProjectID == "" {
+			request.ProjectID = projectID
+		}
+		s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
+			Level:   orchestrator.ProgressLevelInfo,
+			Message: "开始产品实战自动流程",
+			Detail:  "本地生成执行包后将自动上传服务器、轮询状态并获取结果包。",
+		})
+		ctx := orchestrator.WithProgressSink(r.Context(), func(event orchestrator.ProgressEvent) {
+			s.emitProjectEvent(projectID, event)
+		})
+		result, err := s.service.RunCloudLifecycle(ctx, request)
+		if err != nil {
+			s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
+				Level:     orchestrator.ProgressLevelError,
+				Message:   "产品实战自动流程失败",
+				Detail:    err.Error(),
+				ElapsedMS: time.Since(startedAt).Milliseconds(),
+			})
+		} else {
+			s.events.CopyProjectEvents(projectID, result.State.ProjectID)
+			s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
+				Level:     orchestrator.ProgressLevelSuccess,
+				Message:   "产品实战自动流程完成",
+				Detail:    "服务器状态已进入终态，结果包和诊断信息已返回。",
+				ElapsedMS: time.Since(startedAt).Milliseconds(),
+			})
+		}
+		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodGet && suffix == "/execution-events":
 		afterID, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 		writeBridgeValue(w, s.events.List(projectID, afterID), nil)

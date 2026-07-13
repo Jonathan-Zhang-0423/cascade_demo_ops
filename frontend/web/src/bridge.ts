@@ -25,6 +25,9 @@ import type {
   ScriptFailureDiagnostic,
   ProjectIntelligencePack,
   ScriptReadinessReport,
+  ClientExecutionPackage,
+  ExchangeEnvelope,
+  EncryptedPayloadRef,
 } from "../../src/types/workflowGraph";
 import { createWorkspace } from "./mockWorkspace";
 import { getScenarioTemplate } from "./scenarios";
@@ -50,6 +53,7 @@ export type DesktopBridgeClient = {
   getExecutionScriptMarkdown(projectID: string): Promise<BridgeResult<{ markdown: string }>>;
   getExecutableScriptBundle(projectID: string): Promise<BridgeResult<ExecutableRecordingScriptBundle>>;
   buildExecutionPackagePreview(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  runProductLifecycle(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   initExecutionPackageUpload(workspace: ProjectWorkspaceView): Promise<BridgeResult<ExecutionPackageUploadInitView>>;
   uploadExecutionPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ExecutionPackageUploadView>>;
   pollExecutionPackageStatus(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
@@ -90,6 +94,12 @@ type LocalRuntimeHealth = {
     provider_override: string;
     model_override: string;
   }>;
+  cloud_exchange?: {
+    configured: boolean;
+    base_url_host?: string;
+    base_url_path?: string;
+    token_configured: boolean;
+  };
 };
 
 type LocalModelDiagnostic = {
@@ -124,6 +134,111 @@ type LocalCascadeState = {
   script_markdown?: string;
   executable_script_bundle?: ExecutableRecordingScriptBundle;
   error_message?: string;
+};
+
+type LocalClientExecutionPackageBuild = {
+  org_id: string;
+  project_id: string;
+  package: ClientExecutionPackage;
+  envelope: ExchangeEnvelope;
+  payload_ref: EncryptedPayloadRef;
+};
+
+type LocalCloudLifecycleResult = {
+  state?: LocalCascadeState;
+  build?: LocalClientExecutionPackageBuild;
+  init: LocalExecutionPackageInitResponse;
+  upload: LocalExecutionPackageUploadResponse;
+  status: LocalExecutionPackageStatusResponse;
+  result?: RecordingResultPackage;
+  ack?: LocalResultPackageAckResponse;
+  cloud_base_url?: string;
+};
+
+type LocalExecutionPackageInitResponse = {
+  upload_id: string;
+  server_public_key_id: string;
+  supported_crypto_suites?: string[];
+  cascade_execution_ips: string[];
+  max_envelope_bytes?: number;
+  expires_at?: string;
+};
+
+type LocalExecutionPackageUploadResponse = {
+  exchange_package_id: string;
+  cloud_job_id?: string;
+  status: string;
+};
+
+type LocalExecutionPackageStatusResponse = {
+  exchange_package_id: string;
+  cloud_job_id?: string;
+  status: string;
+  stage?: string;
+  message?: string;
+  progress_percent?: number;
+  stage_history?: LocalExecutionStageEvent[];
+  result_package_id?: string;
+  result_summary?: LocalExecutionResultSummary;
+  failure_summary?: LocalExecutionFailureSummary;
+  error?: { code: string; message: string; retryable?: boolean };
+  updated_at?: string;
+};
+
+type LocalExecutionStageEvent = {
+  stage: string;
+  status?: string;
+  message?: string;
+  progress_percent?: number;
+  updated_at?: string;
+};
+
+type LocalExecutionDeliverable = {
+  id?: string;
+  kind?: string;
+  role?: string;
+  uri?: string;
+  download_url?: string;
+  mime_type?: string;
+  sha256?: string;
+  size_bytes?: number;
+  source_node_id?: string;
+  include_in_demo?: boolean;
+  sensitive?: boolean;
+};
+
+type LocalExecutionResultSummary = {
+  result_id?: string;
+  result_status?: string;
+  delivery_status?: string;
+  pass_rate?: number;
+  step_count?: number;
+  demo_video_count?: number;
+  screenshot_count?: number;
+  raw_recording_count?: number;
+  trace_count?: number;
+  primary_demo_video_uri?: string;
+  raw_recording_uri?: string;
+  deliverables?: LocalExecutionDeliverable[];
+  acked_at?: string;
+};
+
+type LocalExecutionFailureSummary = {
+  code?: string;
+  message?: string;
+  failed_stage?: string;
+  failed_node_id?: string;
+  current_url?: string;
+  page_title?: string;
+  failure_screenshot_uri?: string;
+  failure_trace_uri?: string;
+  retryable?: boolean;
+};
+
+type LocalResultPackageAckResponse = {
+  result_package_id: string;
+  status: string;
+  delivery_status?: string;
 };
 
 type LocalExecutionEvent = {
@@ -263,6 +378,26 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       const generated = workspaceFromCascadeState(result.data, workspace);
       projects.set(generated.id, generated);
       return ok(generated);
+    },
+    async runProductLifecycle(workspace) {
+      const userInput = userInputFromWorkspace(workspace);
+      const result = await requestLocal<LocalCloudLifecycleResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud-lifecycle`, {
+        method: "POST",
+        body: JSON.stringify({
+          user_input: userInput,
+          org_id: "org_desktop",
+          auto_ack: true,
+          poll_interval_ms: 1000,
+          timeout_sec: 900,
+        }),
+      });
+      if (!result.ok || !result.data) {
+        return { ok: false, error: result.error ?? "产品实战自动流程失败" };
+      }
+      const generated = result.data.state ? workspaceFromCascadeState(result.data.state, workspace) : workspace;
+      const next = workspaceFromCloudLifecycleResult(generated, result.data);
+      projects.set(next.id, next);
+      return ok(next);
     },
     async initExecutionPackageUpload(workspace) {
       return ok(mockUploadInit(workspace, "local_future"));
@@ -443,6 +578,17 @@ export function createMockBridgeClient(): DesktopBridgeClient {
           artifactSummary: { total: 0, encrypted: 0, sensitive: 0 },
         },
       });
+    },
+    async runProductLifecycle(workspace) {
+      const preview = await this.buildExecutionPackagePreview(workspace);
+      if (!preview.ok || !preview.data) {
+        return preview;
+      }
+      const uploaded = await this.approveAndUploadPackage(preview.data);
+      if (!uploaded.ok || !uploaded.data) {
+        return uploaded;
+      }
+      return this.pollCloudRun(uploaded.data);
     },
     async initExecutionPackageUpload(workspace) {
       return ok(mockUploadInit(workspace, "mock"));
@@ -739,6 +885,161 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
     workspace.modelProvenance = provenance;
   }
   return workspace;
+}
+
+function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, lifecycle: LocalCloudLifecycleResult): ProjectWorkspaceView {
+  const status = lifecycle.status;
+  const resultPackage = lifecycle.result;
+  const mappedStatus = mapCloudRunStatus(status.status);
+  const artifactSummary = resultPackage ? artifactSummaryFromResult(resultPackage) : artifactSummaryFromStatus(status);
+  const failureDiagnostic = resultPackage?.failure_diagnostic;
+  const repairRequest = resultPackage?.repair_request;
+  const resultAssets = resultPackage ? assetsFromResultPackage(resultPackage, workspace) : workspace.assets;
+  const cloudJobID = lifecycle.upload.cloud_job_id || status.cloud_job_id;
+  const failureSummary = failureSummaryText(status.failure_summary, status.error);
+  const sandboxMetadata = resultPackage?.execution_trace?.sandbox ?? resultPackage?.audit_trail?.sandbox ?? workspace.cloudRun.sandboxMetadata;
+  return {
+    ...workspace,
+    stage: mappedStatus === "failed" ? "script_repair" : mappedStatus === "succeeded" ? "result_review" : "cloud_run",
+    status: mappedStatus === "failed" ? "script_repair_required" : mappedStatus === "succeeded" ? "asset_ready" : "cloud_running",
+    assets: resultAssets,
+    packagePreview: {
+      ...workspace.packagePreview,
+      ipAllowlistAcknowledged: true,
+      packageID: lifecycle.build?.package.package_id ?? workspace.packagePreview.packageID,
+      packageDigest: lifecycle.build?.envelope.crypto.payload_digest_sha256 ?? workspace.packagePreview.packageDigest,
+    },
+    cloudRun: {
+      ...workspace.cloudRun,
+      packageID: lifecycle.build?.package.package_id ?? workspace.cloudRun.packageID,
+      uploadID: lifecycle.init.upload_id,
+      exchangePackageID: lifecycle.upload.exchange_package_id || status.exchange_package_id,
+      status: mappedStatus,
+      stageHistory: lifecycleStagesFromStatus(status, resultPackage),
+      artifactSummary,
+      currentStep: status.message || cloudRunCurrentStep(status),
+      progress: status.progress_percent ?? (mappedStatus === "succeeded" || mappedStatus === "failed" ? 100 : workspace.cloudRun.progress),
+      retryCount: workspace.cloudRun.retryCount,
+      ...(cloudJobID ? { cloudJobID } : {}),
+      ...(status.result_package_id ? { resultPackageID: status.result_package_id } : {}),
+      ...(status.stage ? { stage: status.stage } : {}),
+      ...(status.message ? { message: status.message } : {}),
+      ...(failureSummary ? { failureSummary } : {}),
+      ...(sandboxMetadata ? { sandboxMetadata } : {}),
+      ...(resultPackage ? { resultPackage } : {}),
+      ...(failureDiagnostic ? { failureDiagnostic, lastError: failureDiagnostic.error.message } : {}),
+      ...(repairRequest ? { repairRequest } : {}),
+    },
+  };
+}
+
+function mapCloudRunStatus(status: string | undefined): "not_uploaded" | "queued" | "running" | "succeeded" | "failed" {
+  if (status === "accepted" || status === "queued" || status === "uploaded") return "queued";
+  if (status === "running" || status === "validating") return "running";
+  if (status === "completed" || status === "succeeded" || status === "acked") return "succeeded";
+  if (status === "failed" || status === "canceled" || status === "expired") return "failed";
+  return "not_uploaded";
+}
+
+function lifecycleStagesFromStatus(status: LocalExecutionPackageStatusResponse, resultPackage?: RecordingResultPackage): ServerLifecycleStageView[] {
+  const currentID = lifecycleStageIDFromCloudStage(status.stage, status.status);
+  const activeIndex = serverLifecycleStageOrder.indexOf(currentID);
+  const terminal = mapCloudRunStatus(status.status);
+  return serverLifecycleStageOrder.map((id, index) => {
+    let stageStatus: ServerLifecycleStageStatus = "pending";
+    if (index < activeIndex) {
+      stageStatus = "completed";
+    } else if (index === activeIndex) {
+      stageStatus = terminal === "failed" ? "failed" : terminal === "succeeded" ? "completed" : "active";
+    }
+    const event = status.stage_history?.find((item) => lifecycleStageIDFromCloudStage(item.stage, item.status) === id);
+    const time = event?.updated_at
+      ? new Date(event.updated_at).toLocaleTimeString("zh-CN", { hour12: false })
+      : stageStatus === "pending"
+        ? undefined
+        : new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    return {
+      id,
+      label: serverLifecycleStageLabels[id],
+      status: stageStatus,
+      progress: stageStatus === "completed" ? 100 : stageStatus === "active" ? status.progress_percent ?? event?.progress_percent ?? 20 : stageStatus === "failed" ? 100 : 0,
+      summary: event?.message ?? lifecycleSummaryFromCloud(id, status, resultPackage),
+      artifactCount: id === "result_returned" && resultPackage ? artifactSummaryFromResult(resultPackage).total : id === "browser_execution" && resultPackage?.status === "failed" ? diagnosticArtifactCount(resultPackage.failure_diagnostic) : 0,
+      ...(time ? { time } : {}),
+      ...(stageStatus === "failed" ? { errorCode: status.failure_summary?.code ?? status.error?.code ?? "recording_failed" } : {}),
+    };
+  });
+}
+
+function lifecycleStageIDFromCloudStage(stage: string | undefined, status?: string): ServerLifecycleStageID {
+  if (status === "completed" || stage === "completed") return "result_returned";
+  if (stage === "accepted") return "package_uploaded";
+  if (stage === "validated" || stage === "validating") return "script_validation";
+  if (stage === "preparing_worker") return "sandbox_preparing";
+  if (stage === "running_script") return "browser_execution";
+  if (stage === "packaging_recording" || stage === "rendering") return "video_rendering";
+  if (stage === "failed") return "browser_execution";
+  return "server_intake";
+}
+
+function lifecycleSummaryFromCloud(id: ServerLifecycleStageID, status: LocalExecutionPackageStatusResponse, resultPackage?: RecordingResultPackage): string {
+  if (id === "local_generated") return "App 已生成三合一执行包。";
+  if (id === "human_approved") return "产品实战模式已自动确认审批清单。";
+  if (id === "upload_initialized") return "上传会话已初始化。";
+  if (id === "package_uploaded") return status.exchange_package_id ? `exchange id: ${status.exchange_package_id}` : "执行包已上传。";
+  if (id === "server_intake") return "服务器接收 envelope、payload_ref 和明文 dev payload。";
+  if (id === "script_validation") return "服务器校验 hash、脚本策略和 allowed domains。";
+  if (id === "sandbox_preparing") return "服务器准备执行 worker 和 artifact workspace。";
+  if (id === "browser_execution") return status.failure_summary?.message ?? status.message ?? "浏览器执行脚本并采集素材。";
+  if (id === "video_rendering") return "服务器打包录屏、截图、trace 并渲染视频。";
+  return resultPackage ? `result id: ${resultPackage.result_id}` : "等待结果包返回。";
+}
+
+function cloudRunCurrentStep(status: LocalExecutionPackageStatusResponse): string {
+  if (status.failure_summary?.message) return status.failure_summary.message;
+  if (status.message) return status.message;
+  if (status.stage) return `服务器阶段：${status.stage}`;
+  return "等待服务器状态";
+}
+
+function failureSummaryText(failure?: LocalExecutionFailureSummary, error?: { code: string; message: string }): string | undefined {
+  if (!failure && !error) return undefined;
+  const code = failure?.code ?? error?.code ?? "recording_failed";
+  const message = failure?.message ?? error?.message ?? "服务器执行失败";
+  return `${code}: ${message}`;
+}
+
+function artifactSummaryFromStatus(status: LocalExecutionPackageStatusResponse): CloudArtifactSummary {
+  const deliverables = status.result_summary?.deliverables ?? [];
+  return { total: deliverables.length, encrypted: deliverables.filter((item) => item.sensitive).length, sensitive: deliverables.filter((item) => item.sensitive).length };
+}
+
+function assetsFromResultPackage(result: RecordingResultPackage, workspace: ProjectWorkspaceView) {
+  const refs = result.delivery?.asset_refs ?? [];
+  const assets = refs
+    .filter((ref) => ref.kind === "video" || ref.role === "final_demo_video" || ref.kind === "demo_video" || ref.kind === "step_docs" || ref.kind === "step_by_step_docs" || ref.kind === "screenshot_pack")
+    .map((ref) => ({
+      assetID: ref.id,
+      kind: assetKindFromArtifact(ref.kind, ref.role),
+      title: assetTitleFromArtifact(ref.kind, ref.role),
+      status: "generated" as const,
+      uri: ref.uri,
+      checksum: ref.sha256 ?? "",
+      provenance: `由 ${result.source_package_id} / ${result.cloud_job_id} 生成`,
+    }));
+  return assets.length > 0 ? assets : workspace.assets;
+}
+
+function assetKindFromArtifact(kind?: string, role?: string): "video" | "step_docs" | "screenshot_pack" {
+  if (kind === "step_docs" || kind === "step_by_step_docs" || role === "step_by_step_docs") return "step_docs";
+  if (kind === "screenshot_pack" || role === "screenshot_pack") return "screenshot_pack";
+  return "video";
+}
+
+function assetTitleFromArtifact(kind?: string, role?: string): string {
+  if (kind === "step_docs" || kind === "step_by_step_docs" || role === "step_by_step_docs") return "步骤说明文档";
+  if (kind === "screenshot_pack" || role === "screenshot_pack") return "截图包";
+  return "最终演示视频";
 }
 
 function modelProvenanceFromState(report: MultimodalUnderstandingReport | undefined, scriptDocument: ExecutionScriptDocument | undefined): string[] {
@@ -1165,6 +1466,14 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
   }
   if (local.model_adapter_version !== undefined) {
     health.modelAdapterVersion = local.model_adapter_version;
+  }
+  if (local.cloud_exchange) {
+    health.cloudExchange = {
+      configured: local.cloud_exchange.configured,
+      ...(local.cloud_exchange.base_url_host ? { baseURLHost: local.cloud_exchange.base_url_host } : {}),
+      ...(local.cloud_exchange.base_url_path ? { baseURLPath: local.cloud_exchange.base_url_path } : {}),
+      tokenConfigured: local.cloud_exchange.token_configured,
+    };
   }
   return health;
 }

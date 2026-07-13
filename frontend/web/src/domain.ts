@@ -216,6 +216,14 @@ export type RuntimeHealthView = {
   sidecars: Record<string, boolean>;
   modelProviders: Record<string, ProviderCredentialStatus>;
   modelTaskRoutes: Record<string, ModelTaskRouteStatus>;
+  cloudExchange?: CloudExchangeStatus;
+};
+
+export type CloudExchangeStatus = {
+  configured: boolean;
+  baseURLHost?: string;
+  baseURLPath?: string;
+  tokenConfigured: boolean;
 };
 
 export type ModelDiagnosticResult = {

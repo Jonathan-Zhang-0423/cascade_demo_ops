@@ -186,7 +186,7 @@ export function packageApprovalBlockedReasons(
   if (!checklist.sourceSummaryOnlyAcknowledged || !preview.sourceSummaryOnly) {
     blocked.add("需要确认仅上传代码结构摘要，不上传完整源码。");
   }
-  if (!checklist.credentialGrantAcknowledged || preview.credentialGrants.length === 0) {
+  if (preview.credentialGrants.length > 0 && !checklist.credentialGrantAcknowledged) {
     blocked.add("需要复核凭据授权范围和过期时间。");
   }
   if (!checklist.redactionsReviewed) {

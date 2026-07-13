@@ -198,6 +198,33 @@ func TestDevHTTPBridgeModelDiagnosticsAreRedacted(t *testing.T) {
 	}
 }
 
+func TestCloudDoJSONAcceptsWrappedAndDirectResponses(t *testing.T) {
+	for name, body := range map[string]string{
+		"wrapped": `{"ok":true,"data":{"upload_id":"upload_wrapped","server_public_key_id":"kms_wrapped","cascade_execution_ips":["203.0.113.10"]}}`,
+		"direct":  `{"upload_id":"upload_direct","server_public_key_id":"kms_direct","cascade_execution_ips":["203.0.113.11"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer upstream.Close()
+			req, err := http.NewRequest(http.MethodGet, upstream.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := cloudDoJSON[model.ExecutionPackageInitResponse](upstream.Client(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.UploadID == "" || got.ServerPublicKeyID == "" {
+				t.Fatalf("expected populated cloud response, got %+v", got)
+			}
+		})
+	}
+}
+
 func TestEnsureLocalDevAddressRejectsNonLocalBinds(t *testing.T) {
 	if err := EnsureLocalDevAddress("127.0.0.1:4317"); err != nil {
 		t.Fatal(err)
