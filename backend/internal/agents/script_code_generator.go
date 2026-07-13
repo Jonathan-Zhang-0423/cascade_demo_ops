@@ -170,7 +170,7 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 
 	writeStepAssertions(builder, step, selector, targetURL, timeoutMS)
 	if step.Capture.Screenshot {
-		builder.WriteString("  await ctx.capture.screenshot({ nodeId: " + jsString(step.NodeID) + ", selector: " + jsString(firstNonEmpty(step.Capture.FocusSelector, selector)) + ", maskSelectors: " + jsJSON(maskSelectors) + ", zoom: " + jsBool(step.Capture.Zoom) + ", callout: " + jsBool(step.Capture.Callout) + " });\n")
+		builder.WriteString("  await ctx.capture.screenshot(" + jsJSON(captureScreenshotOptions(step, selector, maskSelectors)) + ");\n")
 	}
 	if step.Capture.Video {
 		builder.WriteString("  await ctx.capture.mark(" + jsString(step.NodeID+":video") + ", { durationMs: " + fmt.Sprint(durationMS) + " });\n")
@@ -180,6 +180,23 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 	}
 	builder.WriteString("  stepResults.push({ nodeId: " + jsString(step.NodeID) + ", status: \"passed\", durationMs: " + fmt.Sprint(durationMS) + " });\n")
 	return nil
+}
+
+func captureScreenshotOptions(step model.ScriptStep, selector string, maskSelectors []string) map[string]any {
+	options := map[string]any{
+		"nodeId":        step.NodeID,
+		"selector":      firstNonEmpty(step.Capture.FocusSelector, selector),
+		"maskSelectors": maskSelectors,
+		"zoom":          step.Capture.Zoom,
+		"callout":       step.Capture.Callout,
+	}
+	if step.Capture.Scope != "" {
+		options["scope"] = step.Capture.Scope
+	}
+	if step.Capture.FullPage {
+		options["full_page"] = true
+	}
+	return options
 }
 
 func writeStepAssertions(builder *strings.Builder, step model.ScriptStep, selector string, targetURL string, timeoutMS int) {
