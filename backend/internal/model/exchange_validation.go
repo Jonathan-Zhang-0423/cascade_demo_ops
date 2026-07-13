@@ -298,12 +298,27 @@ func validateScriptDocumentAgainstPackage(doc *ExecutionScriptDocument, pkg *Cli
 		if step.NodeID == "" || !graphNodeIDs[step.NodeID] {
 			return fmt.Errorf("execution script document step node_id %q is not in workflow graph", step.NodeID)
 		}
+		if err := validateCaptureSpec(step.Capture, "execution script document step "+step.NodeID+" capture"); err != nil {
+			return err
+		}
 	}
 	if err := validateRecordingRunSpec(doc.RecordingRunSpec); err != nil {
 		return err
 	}
 	if !allDomainsAllowed(doc.RecordingRunSpec.AllowedDomains, pkg.RecordingRunSpec.AllowedDomains) {
 		return errors.New("execution script document allowed domains exceed package recording_run_spec.allowed_domains")
+	}
+	return nil
+}
+
+func validateCaptureSpec(capture CaptureSpec, path string) error {
+	switch capture.Scope {
+	case "", CaptureScopeViewport, CaptureScopeFullPage, CaptureScopeElement:
+	default:
+		return fmt.Errorf("%s scope must be one of %q, %q, or %q", path, CaptureScopeViewport, CaptureScopeFullPage, CaptureScopeElement)
+	}
+	if capture.FullPage && capture.Scope != "" && capture.Scope != CaptureScopeFullPage {
+		return fmt.Errorf("%s full_page conflicts with scope %q", path, capture.Scope)
 	}
 	return nil
 }

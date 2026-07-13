@@ -27,7 +27,13 @@ func TestScriptPackagerEmitsValidExecutableBundle(t *testing.T) {
 	if bundle.Validation == nil || !bundle.Validation.Valid {
 		t.Fatalf("expected valid generated bundle: %+v", bundle.Validation)
 	}
+	if got := bundle.PlanJSON.Steps[0].Capture.Scope; got != model.CaptureScopeFullPage {
+		t.Fatalf("expected capture scope to be preserved in plan_json, got %q", got)
+	}
 	source := bundle.PlaywrightScript.InlineSource
+	if !strings.Contains(source, `"scope":"full_page"`) || !strings.Contains(source, `"full_page":true`) {
+		t.Fatalf("generated script missing capture scope options:\n%s", source)
+	}
 	for _, node := range graph.Nodes {
 		if !strings.Contains(source, `"`+node.ID+`"`) {
 			t.Fatalf("generated script missing node id %s:\n%s", node.ID, source)
@@ -230,7 +236,7 @@ func executableBundleFixtures() (*model.ProjectContext, *model.MultimodalUnderst
 				TimeoutMS: 10000,
 				WaitUntil: "networkidle",
 			},
-			Capture:        &model.CaptureSpec{Screenshot: true, Video: true, MaskSelectors: []string{"[data-sensitive]"}},
+			Capture:        &model.CaptureSpec{Screenshot: true, Video: true, Scope: model.CaptureScopeFullPage, FullPage: true, MaskSelectors: []string{"[data-sensitive]"}},
 			DurationHintMS: 2000,
 		},
 		{

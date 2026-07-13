@@ -35,7 +35,7 @@ func TestExecutionScriptDocumentJSONRoundTrip(t *testing.T) {
 			PageTarget:      ScriptPageTarget{URL: "https://app.example.com"},
 			Action:          ScriptActionInstruction{Type: GraphActionNavigate, Target: ActionTarget{URL: "https://app.example.com"}},
 			ExpectedOutcome: "页面加载完成",
-			Capture:         CaptureSpec{Screenshot: true, Video: true},
+			Capture:         CaptureSpec{Screenshot: true, Video: true, Scope: CaptureScopeFullPage, FullPage: true},
 			Timing:          NodeTimingHint{NodeID: "start", DurationMS: 3000},
 			Narrative:       NarrativeCue{Title: "打开产品入口", Voiceover: "打开产品入口"},
 			Blocking:        true,
@@ -74,7 +74,7 @@ func TestExecutionScriptDocumentJSONRoundTrip(t *testing.T) {
 	if got.SchemaVersion != ExecutionScriptDocumentSchemaVersion || got.Language != "" && got.Language != "zh-CN" {
 		t.Fatalf("unexpected script document: %+v", got)
 	}
-	if got.Steps[0].NodeID != "start" || got.RecordingRunSpec.Locale != "zh-CN" {
+	if got.Steps[0].NodeID != "start" || got.RecordingRunSpec.Locale != "zh-CN" || got.Steps[0].Capture.Scope != CaptureScopeFullPage || !got.Steps[0].Capture.FullPage {
 		t.Fatalf("script document lost executable fields: %+v", got)
 	}
 }

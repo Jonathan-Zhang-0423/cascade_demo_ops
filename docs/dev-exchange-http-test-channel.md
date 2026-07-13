@@ -494,6 +494,60 @@ Expected failure result:
 }
 ```
 
+Run a one-command package-file replay smoke:
+
+```bash
+go run ./cmd/devsmoke \
+  --base-url http://127.0.0.1:4317 \
+  --token cascade-dev-20260710 \
+  --package-file-fixture \
+  --sample-output-dir "../.cascade-dev/samples/package-replay-{id}" \
+  --timeout 240s
+```
+
+This command first writes a real plaintext `execution-package.fixture.json` into
+the sample directory, then replays that file through the same `--package-file`
+upload path used for upstream handoff tests. It exercises package JSON loading,
+HTTP intake, script execution, screenshot/recording capture, render output,
+result package lookup, deliverable download, and result ack in one run.
+
+Replay a real upstream package file:
+
+```bash
+go run ./cmd/devsmoke \
+  --base-url http://127.0.0.1:4317 \
+  --token cascade-dev-20260710 \
+  --package-file ./execution-package.json \
+  --timeout 240s
+```
+
+`--package-file` accepts either a full upload body:
+
+```json
+{
+  "envelope": {},
+  "payload_ref": {},
+  "payload": {}
+}
+```
+
+or a raw `demoops.client_execution_package.v1` payload. When the file is a raw
+payload, `cmd/devsmoke` creates a dev envelope for replay. If the file only
+contains encrypted `payload_ref` metadata and no plaintext `payload`, the server
+will accept the upload but `cmd/devsmoke` will not wait for execution because
+the dev bridge has no plaintext script to run.
+
+For raw payload files that do not include enough identity metadata, pass:
+
+```bash
+go run ./cmd/devsmoke \
+  --base-url http://127.0.0.1:4317 \
+  --token cascade-dev-20260710 \
+  --package-file ./execution-package.json \
+  --org-id org_1 \
+  --project-id project_1
+```
+
 ## Notes
 
 - The dev server persists exchange package status, result packages, and

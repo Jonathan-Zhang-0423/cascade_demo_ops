@@ -53,6 +53,14 @@ const (
 	AssetKindSalesMaterial   AssetKind = "sales_material"
 )
 
+type CaptureScope string
+
+const (
+	CaptureScopeViewport CaptureScope = "viewport"
+	CaptureScopeFullPage CaptureScope = "full_page"
+	CaptureScopeElement  CaptureScope = "element"
+)
+
 // DemoWorkflowGraph is the executable product-demo knowledge graph.
 // Videos, screenshots, and docs are rendered artifacts derived from this graph.
 type DemoWorkflowGraph struct {
@@ -267,6 +275,8 @@ type CaptureSpec struct {
 	Video         bool            `json:"video,omitempty"`
 	Zoom          bool            `json:"zoom,omitempty"`
 	Callout       bool            `json:"callout,omitempty"`
+	Scope         CaptureScope    `json:"scope,omitempty"`
+	FullPage      bool            `json:"full_page,omitempty"`
 	FocusSelector string          `json:"focus_selector,omitempty"`
 	AssetRole     string          `json:"asset_role,omitempty"`
 	Crop          *CropRect       `json:"crop,omitempty"`
