@@ -91,10 +91,14 @@ func (a *ScriptPackagerAgent) PackageScript(
 	doc.Reproducibility.ScriptHashSHA256 = scriptHash
 	markdown := renderScriptMarkdown(doc, productMap)
 	markdown, trace, err := a.enhanceMarkdownWithLLM(ctx, project, report, productMap, graph, doc, markdown)
-	if err != nil && !llm.IsDeterministicFallback(err) {
-		return nil, err
-	}
-	if trace != nil && trace.FallbackReason == "" {
+	if err != nil {
+		markdown += "\n\n## 模型生成记录\n\n"
+		if trace != nil {
+			markdown += "- 审批文档润色模型：" + trace.Label() + "\n"
+		}
+		markdown += "- 审批文档润色失败，已使用本地确定性审批文档继续打包。\n"
+		err = nil
+	} else if trace != nil && trace.FallbackReason == "" {
 		markdown += "\n\n## 模型生成记录\n\n"
 		markdown += "- 审批文档润色模型：" + trace.Label() + "\n"
 	}

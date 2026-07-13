@@ -686,23 +686,84 @@ func DecodeJSONContent(content string, target any) error {
 	if target == nil {
 		return nil
 	}
-	jsonText := extractJSONObject(content)
+	jsonText, err := extractJSONValue(content)
+	if err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(strings.NewReader(jsonText))
 	return decoder.Decode(target)
 }
 
-func extractJSONObject(content string) string {
+func extractJSONValue(content string) (string, error) {
 	trimmed := strings.TrimSpace(content)
-	trimmed = strings.TrimPrefix(trimmed, "```json")
-	trimmed = strings.TrimPrefix(trimmed, "```")
-	trimmed = strings.TrimSuffix(trimmed, "```")
-	trimmed = strings.TrimSpace(trimmed)
-	start := strings.Index(trimmed, "{")
-	end := strings.LastIndex(trimmed, "}")
-	if start >= 0 && end > start {
-		return trimmed[start : end+1]
+	for start := 0; start < len(trimmed); start++ {
+		if trimmed[start] != '{' && trimmed[start] != '[' {
+			continue
+		}
+		if end, ok := balancedJSONEnd(trimmed, start); ok {
+			candidate := trimmed[start:end]
+			if json.Valid([]byte(candidate)) {
+				return candidate, nil
+			}
+		}
 	}
-	return trimmed
+	return "", fmt.Errorf("no valid JSON object found in model response: %s", redactSensitive(responseSnippet(trimmed)))
+}
+
+func balancedJSONEnd(value string, start int) (int, bool) {
+	if start < 0 || start >= len(value) {
+		return 0, false
+	}
+	stack := []byte{value[start]}
+	inString := false
+	escaped := false
+	for i := start + 1; i < len(value); i++ {
+		ch := value[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{', '[':
+			stack = append(stack, ch)
+		case '}', ']':
+			if len(stack) == 0 || !matchingJSONBracket(stack[len(stack)-1], ch) {
+				return 0, false
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				return i + 1, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func matchingJSONBracket(open byte, close byte) bool {
+	return (open == '{' && close == '}') || (open == '[' && close == ']')
+}
+
+func responseSnippet(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "" {
+		return "(empty response)"
+	}
+	if len(value) > 240 {
+		return value[:240] + "..."
+	}
+	return value
 }
 
 func chatCompletionsURL(base string) string {

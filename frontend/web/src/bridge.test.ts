@@ -565,6 +565,23 @@ describe("desktop bridge contract", () => {
     expect(result.data?.modelTaskRoutes.planning?.modelOverride).toBe("CASCADE_PLANNING_MODEL");
   });
 
+  it("reports non-json local bridge responses with status and snippet", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+      text: async () => "404 page not found",
+    })));
+
+    const bridge = createLocalBridgeClient();
+    const result = await bridge.runtimeHealth();
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("非 JSON 响应");
+    expect(result.error).toContain("HTTP 404 Not Found");
+    expect(result.error).toContain("404 page not found");
+  });
+
   it("maps local model diagnostics into frontend camelCase DTOs", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true,

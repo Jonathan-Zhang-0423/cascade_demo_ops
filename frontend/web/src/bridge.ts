@@ -736,7 +736,18 @@ async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit
         ...(init?.headers ?? {}),
       },
     });
-    const payload = (await response.json()) as LocalBridgeResponse<T>;
+    const responseText = await readLocalResponseText(response);
+    let payload: LocalBridgeResponse<T>;
+    try {
+      payload = JSON.parse(responseText) as LocalBridgeResponse<T>;
+    } catch {
+      const snippet = safeResponseSnippet(responseText);
+      console.error("[Cascade Dev Bridge] non-json", init?.method ?? "GET", path, response.status, snippet);
+      return {
+        ok: false,
+        error: `本地 Dev Bridge 返回非 JSON 响应: HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}; ${snippet}`,
+      };
+    }
     if (!response.ok || !payload.ok) {
       console.error("[Cascade Dev Bridge] error", init?.method ?? "GET", path, response.status, payload.error);
       return { ok: false, error: payload.error ?? `本地 Dev Bridge 请求失败: ${response.status}` };
@@ -751,6 +762,32 @@ async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit
     console.error("[Cascade Dev Bridge] unavailable", init?.method ?? "GET", path, error);
     return { ok: false, error: error instanceof Error ? error.message : "本地 Dev Bridge 不可用" };
   }
+}
+
+async function readLocalResponseText(response: Response): Promise<string> {
+  const readable = response as Response & {
+    text?: () => Promise<string>;
+    json?: () => Promise<unknown>;
+  };
+  if (typeof readable.text === "function") {
+    return readable.text();
+  }
+  if (typeof readable.json === "function") {
+    return JSON.stringify(await readable.json());
+  }
+  return "";
+}
+
+function safeResponseSnippet(value: string): string {
+  const redacted = value
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]")
+    .replace(/sk-[A-Za-z0-9_-]+/g, "sk-[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!redacted) {
+    return "(empty response)";
+  }
+  return redacted.length > 240 ? `${redacted.slice(0, 240)}...` : redacted;
 }
 
 function runtimeLogFromLocalEvent(event: LocalExecutionEvent): RuntimeLogEntry {

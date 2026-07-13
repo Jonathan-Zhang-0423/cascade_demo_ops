@@ -121,6 +121,32 @@ func TestRouterGLMDisablesThinkingForStructuredOutput(t *testing.T) {
 	}
 }
 
+func TestDecodeJSONContentIgnoresTrailingModelText(t *testing.T) {
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	err := DecodeJSONContent("```json\n{\"summary\":\"OK\"}\n```\n额外中文说明 å 不应进入 JSON 解析", &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Summary != "OK" {
+		t.Fatalf("unexpected decoded output: %+v", out)
+	}
+}
+
+func TestDecodeJSONContentKeepsBracesInsideStrings(t *testing.T) {
+	var out struct {
+		Markdown string `json:"markdown"`
+	}
+	err := DecodeJSONContent("{\"markdown\":\"包含 { 大括号 } 和 \\\"引号\\\"\"}\n后续说明", &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Markdown, "{ 大括号 }") {
+		t.Fatalf("unexpected markdown: %q", out.Markdown)
+	}
+}
+
 func TestRouterAutoFallsBackWithoutKey(t *testing.T) {
 	runtime := testRuntime(config.ModelProviderKimi, "https://example.invalid/v1")
 	runtime.ModelProviders[config.ModelProviderKimi] = config.ModelProviderCredential{

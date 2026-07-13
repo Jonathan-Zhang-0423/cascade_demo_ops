@@ -2,9 +2,12 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -40,6 +43,23 @@ func TestScriptPackagerEmitsValidExecutableBundle(t *testing.T) {
 	}
 }
 
+func TestScriptPackagerFallsBackWhenMarkdownLLMReturnsInvalidJSON(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	pkg, err := NewScriptPackagerAgentWithLLM(failingMarkdownLLM{}).PackageScript(context.Background(), project, report, productMap, graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.ExecutableBundle == nil {
+		t.Fatal("expected executable script bundle")
+	}
+	if !strings.Contains(pkg.Markdown, "审批文档润色失败") {
+		t.Fatalf("expected markdown fallback note, got:\n%s", pkg.Markdown)
+	}
+	if !strings.Contains(pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown, "审批文档润色失败") {
+		t.Fatalf("expected bundle approval markdown to carry fallback note:\n%s", pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown)
+	}
+}
+
 func TestScriptCodeGeneratorIsDeterministic(t *testing.T) {
 	_, report, productMap, graph := executableBundleFixtures()
 	project, _, _, _ := executableBundleFixtures()
@@ -58,6 +78,25 @@ func TestScriptCodeGeneratorIsDeterministic(t *testing.T) {
 	if first != second {
 		t.Fatal("script generator must be deterministic for the same execution plan")
 	}
+}
+
+type failingMarkdownLLM struct{}
+
+func (f failingMarkdownLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	return &llm.CallTrace{
+		Provider:       config.ModelProviderKimi,
+		Model:          "kimi-k2.7-code",
+		Task:           task,
+		AdapterVersion: config.ModelAdapterVersion,
+	}, errors.New("llm JSON parse failed: invalid character 'å' after object key:value pair")
+}
+
+func (f failingMarkdownLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, errors.New("not implemented")
+}
+
+func (f failingMarkdownLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, errors.New("not implemented")
 }
 
 func TestScriptBundleValidatorRejectsForbiddenAPI(t *testing.T) {

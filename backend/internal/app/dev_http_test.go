@@ -225,6 +225,26 @@ func TestCloudDoJSONAcceptsWrappedAndDirectResponses(t *testing.T) {
 	}
 }
 
+func TestCloudDoJSONReportsNonJSONResponses(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("404 page not found"))
+	}))
+	defer upstream.Close()
+	req, err := http.NewRequest(http.MethodGet, upstream.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = cloudDoJSON[model.ExecutionPackageInitResponse](upstream.Client(), req)
+	if err == nil {
+		t.Fatal("expected non-JSON response error")
+	}
+	if !strings.Contains(err.Error(), "non-JSON response") || !strings.Contains(err.Error(), "404 page not found") {
+		t.Fatalf("expected readable non-JSON error, got %v", err)
+	}
+}
+
 func TestEnsureLocalDevAddressRejectsNonLocalBinds(t *testing.T) {
 	if err := EnsureLocalDevAddress("127.0.0.1:4317"); err != nil {
 		t.Fatal(err)

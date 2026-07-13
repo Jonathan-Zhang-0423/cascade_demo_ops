@@ -467,6 +467,9 @@ func cloudDoJSON[T any](client *http.Client, req *http.Request) (T, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return zero, fmt.Errorf("%s %s returned %d: %s", req.Method, req.URL.String(), resp.StatusCode, redactBridgeError(string(data)))
 	}
+	if !json.Valid(data) {
+		return zero, fmt.Errorf("%s %s returned non-JSON response: %s", req.Method, req.URL.String(), redactBridgeError(responseSnippet(data)))
+	}
 	var wrapped struct {
 		OK    bool            `json:"ok"`
 		Data  json.RawMessage `json:"data,omitempty"`
@@ -491,6 +494,17 @@ func cloudDoJSON[T any](client *http.Client, req *http.Request) (T, error) {
 		return zero, err
 	}
 	return direct, nil
+}
+
+func responseSnippet(data []byte) string {
+	value := strings.Join(strings.Fields(string(data)), " ")
+	if value == "" {
+		return "(empty response)"
+	}
+	if len(value) > 240 {
+		return value[:240] + "..."
+	}
+	return value
 }
 
 func firstNonEmptyString(values ...string) string {
