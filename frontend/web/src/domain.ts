@@ -8,6 +8,7 @@ import type {
   MultimodalUnderstandingReport,
   ProjectInputBundle,
   RecordingResultPackage,
+  SandboxExecutionMetadata,
   ScriptFailureDiagnostic,
   ScriptRepairRequest,
 } from "../../src/types/workflowGraph";
@@ -88,10 +89,65 @@ export type CredentialGrantPreview = {
 
 export type CloudRunStatus = "not_uploaded" | "queued" | "running" | "succeeded" | "failed";
 
+export type ServerLifecycleStageID =
+  | "local_generated"
+  | "human_approved"
+  | "upload_initialized"
+  | "package_uploaded"
+  | "server_intake"
+  | "script_validation"
+  | "sandbox_preparing"
+  | "browser_execution"
+  | "video_rendering"
+  | "result_returned";
+
+export type ServerLifecycleStageStatus = "pending" | "active" | "completed" | "failed" | "blocked";
+
+export type ServerLifecycleStageView = {
+  id: ServerLifecycleStageID;
+  label: string;
+  status: ServerLifecycleStageStatus;
+  time?: string;
+  progress: number;
+  summary: string;
+  errorCode?: string;
+  artifactCount: number;
+};
+
+export type CloudArtifactSummary = {
+  encrypted: number;
+  sensitive: number;
+  total: number;
+};
+
+export type ExecutionPackageUploadInitView = {
+  uploadID: string;
+  serverPublicKeyID: string;
+  supportedCryptoSuites: string[];
+  cascadeExecutionIPs: string[];
+  maxEnvelopeBytes?: number;
+  expiresAt?: string;
+};
+
+export type ExecutionPackageUploadView = {
+  exchangePackageID: string;
+  cloudJobID: string;
+  status: CloudRunStatus;
+};
+
 export type CloudRunStatusView = {
   packageID: string;
+  uploadID?: string;
+  exchangePackageID?: string;
   cloudJobID?: string;
+  resultPackageID?: string;
   status: CloudRunStatus;
+  stage?: string;
+  message?: string;
+  stageHistory?: ServerLifecycleStageView[];
+  failureSummary?: string;
+  sandboxMetadata?: SandboxExecutionMetadata;
+  artifactSummary?: CloudArtifactSummary;
   currentStep: string;
   progress: number;
   retryCount: number;

@@ -1,4 +1,16 @@
-import type { ModelDiagnosticResult, ProjectWorkspaceView, RuntimeHealthView, RuntimeLogEntry, ScenarioID } from "./domain";
+import type {
+  CloudArtifactSummary,
+  ExecutionPackageUploadInitView,
+  ExecutionPackageUploadView,
+  ModelDiagnosticResult,
+  ProjectWorkspaceView,
+  RuntimeHealthView,
+  RuntimeLogEntry,
+  ScenarioID,
+  ServerLifecycleStageID,
+  ServerLifecycleStageStatus,
+  ServerLifecycleStageView,
+} from "./domain";
 import type {
   AssetKind,
   DemoWorkflowGraph,
@@ -7,11 +19,13 @@ import type {
   MultimodalUnderstandingReport,
   ProjectInputBundle,
   RecordingResultPackage,
+  SandboxExecutionMetadata,
+  SandboxPolicy,
   ScriptFailureDiagnostic,
 } from "../../src/types/workflowGraph";
 import { createWorkspace } from "./mockWorkspace";
 import { getScenarioTemplate } from "./scenarios";
-import { mapCloudStatus } from "./workflow";
+import { serverLifecycleStageLabels, serverLifecycleStageOrder } from "./workflow";
 
 export type BridgeResult<T> = {
   ok: boolean;
@@ -33,10 +47,15 @@ export type DesktopBridgeClient = {
   getExecutionScriptMarkdown(projectID: string): Promise<BridgeResult<{ markdown: string }>>;
   getExecutableScriptBundle(projectID: string): Promise<BridgeResult<ExecutableRecordingScriptBundle>>;
   buildExecutionPackagePreview(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  initExecutionPackageUpload(workspace: ProjectWorkspaceView): Promise<BridgeResult<ExecutionPackageUploadInitView>>;
+  uploadExecutionPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ExecutionPackageUploadView>>;
+  pollExecutionPackageStatus(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  getResultPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<RecordingResultPackage>>;
   approveAndUploadPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   pollCloudRun(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   simulateCloudFailure(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   repairFailedScript(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  ackResultPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   acknowledgeResult(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
 };
 
@@ -239,6 +258,25 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(generated.id, generated);
       return ok(generated);
     },
+    async initExecutionPackageUpload(workspace) {
+      return ok(mockUploadInit(workspace, "local_future"));
+    },
+    async uploadExecutionPackage(workspace) {
+      return ok({
+        exchangePackageID: workspace.cloudRun.exchangePackageID ?? `local_future_exchange_${workspace.id}`,
+        cloudJobID: workspace.cloudRun.cloudJobID ?? `local_future_job_${workspace.id}`,
+        status: "not_uploaded",
+      });
+    },
+    async pollExecutionPackageStatus(workspace) {
+      return ok(localFutureWorkspace(workspace, "云端上传和状态轮询将在服务器通道接入后启用。"));
+    },
+    async getResultPackage(workspace) {
+      if (workspace.cloudRun.resultPackage) {
+        return ok(workspace.cloudRun.resultPackage);
+      }
+      return { ok: false, error: "本地模式尚未生成服务器结果包" };
+    },
     async approveAndUploadPackage(workspace) {
       return ok(localFutureWorkspace(workspace, "云端上传将在下一阶段接入，本地模式仅生成执行包。"));
     },
@@ -250,6 +288,9 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     },
     async repairFailedScript(workspace) {
       return ok(localFutureWorkspace(workspace, "脚本修复将在失败诊断接入后启用。"));
+    },
+    async ackResultPackage(workspace) {
+      return ok(workspace);
     },
     async acknowledgeResult(workspace) {
       return ok(workspace);
@@ -384,22 +425,59 @@ export function createMockBridgeClient(): DesktopBridgeClient {
           packageDigest: executableScriptBundle.reproducibility.bundle_hash_sha256 ?? workspace.packagePreview.packageDigest,
           graphDigest: executableScriptBundle.reproducibility.plan_hash_sha256,
         },
-      });
-    },
-    async approveAndUploadPackage(workspace) {
-      return ok({
-        ...workspace,
-        stage: "cloud_run",
-        status: "cloud_running",
         cloudRun: {
           ...workspace.cloudRun,
-          status: mapCloudStatus("running"),
-          currentStep: "云端执行器正在打开产品地址",
-          progress: 38,
+          packageID: executableScriptBundle.id,
+          status: "not_uploaded",
+          stage: "local_generated",
+          message: "三合一方案包已生成，等待人工审批。",
+          currentStep: "执行包已在本地生成，等待人工审批",
+          progress: 0,
+          stageHistory: mockLifecycleStages(workspace, "local_generated"),
+          artifactSummary: { total: 0, encrypted: 0, sensitive: 0 },
         },
       });
     },
+    async initExecutionPackageUpload(workspace) {
+      return ok(mockUploadInit(workspace, "mock"));
+    },
+    async uploadExecutionPackage(workspace) {
+      return ok({
+        exchangePackageID: workspace.cloudRun.exchangePackageID ?? `xpkg_${workspace.id}`,
+        cloudJobID: workspace.cloudRun.cloudJobID ?? `job_${workspace.id}`,
+        status: "queued",
+      });
+    },
+    async pollExecutionPackageStatus(workspace) {
+      return ok(mockCloudRunningWorkspace(workspace));
+    },
+    async getResultPackage(workspace) {
+      return ok(workspace.cloudRun.resultPackage ?? mockSuccessfulRecordingResultPackage(workspace));
+    },
+    async approveAndUploadPackage(workspace) {
+      const upload = mockUploadInit(workspace, "mock");
+      const uploaded = await this.uploadExecutionPackage({
+        ...workspace,
+        cloudRun: {
+          ...workspace.cloudRun,
+          uploadID: upload.uploadID,
+          stage: "package_uploaded",
+          stageHistory: mockLifecycleStages(workspace, "package_uploaded"),
+        },
+      });
+      return ok(mockCloudRunningWorkspace({
+        ...workspace,
+        packagePreview: { ...workspace.packagePreview, ipAllowlistAcknowledged: true },
+        cloudRun: {
+          ...workspace.cloudRun,
+          uploadID: upload.uploadID,
+          exchangePackageID: uploaded.data?.exchangePackageID ?? `xpkg_${workspace.id}`,
+          cloudJobID: uploaded.data?.cloudJobID ?? `job_${workspace.id}`,
+        },
+      }));
+    },
     async pollCloudRun(workspace) {
+      const resultPackage = mockSuccessfulRecordingResultPackage(workspace);
       return ok({
         ...workspace,
         stage: "result_review",
@@ -407,8 +485,15 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         cloudRun: {
           ...workspace.cloudRun,
           status: "succeeded",
+          stage: "completed",
+          message: "服务器已返回加密结果包和成品资产 descriptor。",
           currentStep: "演示视频和步骤文档已生成",
           progress: 100,
+          resultPackageID: resultPackage.result_id,
+          resultPackage,
+          stageHistory: mockLifecycleStages(workspace, "result_returned", { resultPackage }),
+          sandboxMetadata: resultPackage.execution_trace?.sandbox ?? resultPackage.audit_trail?.sandbox ?? mockSandboxMetadata(workspace),
+          artifactSummary: artifactSummaryFromResult(resultPackage),
         },
       });
     },
@@ -421,9 +506,15 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         cloudRun: {
           ...workspace.cloudRun,
           status: "failed",
+          stage: "recording_failed",
+          message: "服务器在浏览器执行阶段返回失败诊断。",
           currentStep: "云端执行失败，已返回脱敏截图和错误诊断",
           progress: 62,
+          resultPackageID: failedResult.result_id,
           resultPackage: failedResult,
+          stageHistory: mockLifecycleStages(workspace, "browser_execution", { failed: true, resultPackage: failedResult }),
+          sandboxMetadata: failedResult.execution_trace?.sandbox ?? failedResult.audit_trail?.sandbox ?? mockSandboxMetadata(workspace),
+          artifactSummary: artifactSummaryFromResult(failedResult),
           ...(failedResult.failure_diagnostic ? { failureDiagnostic: failedResult.failure_diagnostic, lastError: failedResult.failure_diagnostic.error.message } : {}),
           ...(failedResult.repair_request ? { repairRequest: failedResult.repair_request } : {}),
         },
@@ -458,13 +549,22 @@ export function createMockBridgeClient(): DesktopBridgeClient {
           humanApprovalRequired: true,
           blockedReasons: ["修复后的脚本必须重新审批"],
         },
+        cloudRun: {
+          ...workspace.cloudRun,
+          status: "not_uploaded",
+          stage: "local_generated",
+          message: "修复后的三合一方案包已生成，等待重新审批。",
+          currentStep: "修复包已生成，等待人工审批",
+          progress: 0,
+          stageHistory: mockLifecycleStages(workspace, "local_generated"),
+        },
       });
     },
+    async ackResultPackage(workspace) {
+      return ok(ackWorkspaceAssets(workspace));
+    },
     async acknowledgeResult(workspace) {
-      return ok({
-        ...workspace,
-        assets: workspace.assets.map((asset) => ({ ...asset, status: "approved" })),
-      });
+      return ok(ackWorkspaceAssets(workspace));
     },
   };
 }
@@ -693,6 +793,318 @@ function localFutureWorkspace(workspace: ProjectWorkspaceView, message: string):
       status: "not_uploaded",
       progress: 0,
       lastError: message,
+      stage: "future_disabled",
+      message,
+      stageHistory: workspace.cloudRun.stageHistory ?? mockLifecycleStages(workspace, "local_generated"),
+    },
+  };
+}
+
+function mockUploadInit(workspace: ProjectWorkspaceView, prefix: string): ExecutionPackageUploadInitView {
+  return {
+    uploadID: `upload_${prefix}_${workspace.id}`,
+    serverPublicKeyID: "cascade-dev-kms-202607",
+    supportedCryptoSuites: ["aes-256-gcm"],
+    cascadeExecutionIPs: ["203.0.113.42"],
+    maxEnvelopeBytes: 8 * 1024 * 1024,
+    expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+  };
+}
+
+function mockCloudRunningWorkspace(workspace: ProjectWorkspaceView): ProjectWorkspaceView {
+  return {
+    ...workspace,
+    stage: "cloud_run",
+    status: "cloud_running",
+    cloudRun: {
+      ...workspace.cloudRun,
+      status: "running",
+      stage: "running_script",
+      message: "服务器已完成 intake 和脚本校验，正在一次性沙箱中执行浏览器录制。",
+      currentStep: "云端执行器正在打开产品地址",
+      progress: 38,
+      uploadID: workspace.cloudRun.uploadID ?? `upload_mock_${workspace.id}`,
+      exchangePackageID: workspace.cloudRun.exchangePackageID ?? `xpkg_${workspace.id}`,
+      cloudJobID: workspace.cloudRun.cloudJobID ?? `job_${workspace.id}`,
+      stageHistory: mockLifecycleStages(workspace, "browser_execution"),
+      sandboxMetadata: mockSandboxMetadata(workspace),
+      artifactSummary: { total: 0, encrypted: 0, sensitive: 0 },
+    },
+  };
+}
+
+function mockLifecycleStages(
+  workspace: ProjectWorkspaceView,
+  activeOrCompleted: ServerLifecycleStageID,
+  options?: { failed?: boolean; resultPackage?: RecordingResultPackage },
+): ServerLifecycleStageView[] {
+  const activeIndex = serverLifecycleStageOrder.indexOf(activeOrCompleted);
+  return serverLifecycleStageOrder.map((id, index) => {
+    let status: ServerLifecycleStageStatus = "pending";
+    if (index < activeIndex) {
+      status = "completed";
+    } else if (index === activeIndex) {
+      status = options?.failed ? "failed" : activeOrCompleted === "result_returned" ? "completed" : "active";
+    }
+    const stage: ServerLifecycleStageView = {
+      id,
+      label: serverLifecycleStageLabels[id],
+      status,
+      progress: status === "completed" ? 100 : status === "active" ? Math.max(10, Math.min(workspace.cloudRun.progress || 38, 95)) : status === "failed" ? Math.max(workspace.cloudRun.progress || 62, 62) : 0,
+      summary: mockLifecycleSummary(id, workspace, options),
+      artifactCount: lifecycleArtifactCount(id, options?.resultPackage),
+    };
+    if (status === "completed" || status === "active" || status === "failed") {
+      stage.time = new Date(Date.now() - Math.max(0, activeIndex - index) * 5000).toLocaleTimeString("zh-CN", { hour12: false });
+    }
+    if (status === "failed") {
+      stage.errorCode = options?.resultPackage?.failure_diagnostic?.error.code ?? "recording_failed";
+    }
+    return stage;
+  });
+}
+
+function mockLifecycleSummary(id: ServerLifecycleStageID, workspace: ProjectWorkspaceView, options?: { resultPackage?: RecordingResultPackage }): string {
+  if (id === "local_generated") {
+    return "App 已生成执行计划 JSON、受限 TS 脚本和中文审批文档。";
+  }
+  if (id === "human_approved") {
+    return "审批清单确认 hash、域名、凭据范围和打码策略。";
+  }
+  if (id === "upload_initialized") {
+    return `upload id: ${workspace.cloudRun.uploadID ?? `upload_mock_${workspace.id}`}`;
+  }
+  if (id === "package_uploaded") {
+    return `exchange id: ${workspace.cloudRun.exchangePackageID ?? `xpkg_${workspace.id}`}`;
+  }
+  if (id === "server_intake") {
+    return "服务器只落 metadata、digest、policy 和 artifact descriptor。";
+  }
+  if (id === "script_validation") {
+    return "已校验 TS AST、bundle hash、allowed domains 和 redaction policy。";
+  }
+  if (id === "sandbox_preparing") {
+    return "准备 per-job container、vault secret refs 和加密 artifact workspace。";
+  }
+  if (id === "browser_execution") {
+    return options?.resultPackage?.status === "failed" ? "浏览器执行失败，诊断材料已脱敏加密。" : "受限 ctx.page 正在按脚本录制素材。";
+  }
+  if (id === "video_rendering") {
+    return "无凭据渲染沙箱消费录屏、截图和 trace summary。";
+  }
+  return options?.resultPackage ? `result id: ${options.resultPackage.result_id}` : "等待返回 RecordingResultPackage。";
+}
+
+function lifecycleArtifactCount(id: ServerLifecycleStageID, resultPackage?: RecordingResultPackage): number {
+  if (!resultPackage) {
+    return 0;
+  }
+  if (id === "browser_execution" && resultPackage.status === "failed") {
+    return diagnosticArtifactCount(resultPackage.failure_diagnostic);
+  }
+  if (id === "result_returned") {
+    return artifactSummaryFromResult(resultPackage).total;
+  }
+  return 0;
+}
+
+function diagnosticArtifactCount(diagnostic: ScriptFailureDiagnostic | undefined): number {
+  if (!diagnostic) {
+    return 0;
+  }
+  return (diagnostic.screenshot_refs?.length ?? 0)
+    + (diagnostic.trace_refs?.length ?? 0)
+    + (diagnostic.dom_snapshot_ref ? 1 : 0)
+    + (diagnostic.accessibility_snapshot_ref ? 1 : 0);
+}
+
+function artifactSummaryFromResult(result: RecordingResultPackage): CloudArtifactSummary {
+  const descriptors = [
+    ...(result.delivery?.asset_refs ?? []),
+    ...(result.delivery?.result_package_ref ? [result.delivery.result_package_ref] : []),
+    ...(result.failure_diagnostic?.screenshot_refs ?? []),
+    ...(result.failure_diagnostic?.trace_refs ?? []),
+    ...(result.failure_diagnostic?.dom_snapshot_ref ? [result.failure_diagnostic.dom_snapshot_ref] : []),
+    ...(result.failure_diagnostic?.accessibility_snapshot_ref ? [result.failure_diagnostic.accessibility_snapshot_ref] : []),
+  ];
+  return {
+    total: descriptors.length,
+    encrypted: descriptors.filter((artifact) => artifact.encrypted).length,
+    sensitive: descriptors.filter((artifact) => artifact.sensitive).length,
+  };
+}
+
+function mockSandboxPolicy(workspace: ProjectWorkspaceView): SandboxPolicy {
+  return {
+    profile: "mvp_cloud",
+    isolation_mode: "per_job_container",
+    network_policy: {
+      mode: "allowed_domains_only",
+      allowed_domains: workspace.planReview.allowedDomains,
+      allowed_cascade_endpoints: ["kms.cascadeai.cn", "artifact.cascadeai.cn", "vault.cascadeai.cn"],
+      denied_cidrs: ["169.254.169.254/32", "127.0.0.0/8", "10.0.0.0/8"],
+      proxy_required: true,
+      dns_policy: "policy_proxy",
+    },
+    filesystem_policy: {
+      mode: "tmpfs_workspace",
+      writable_paths: ["/cascade/job-workspace"],
+      no_host_mount: true,
+      no_docker_socket: true,
+      delete_temp_after_run: true,
+    },
+    resource_limits: {
+      max_runtime_sec: 900,
+      max_memory_mb: 2048,
+      max_cpu_count: 2,
+      max_disk_mb: 4096,
+    },
+    browser_policy: {
+      fresh_context_per_run: true,
+      disable_extensions: true,
+      disable_downloads: true,
+      trace_sources: false,
+      allowed_page_methods: ["goto", "click", "fill", "locator", "waitForLoadState", "waitForTimeout"],
+      allowed_context_apis: ["ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"],
+    },
+    secret_policy: {
+      vault_only: true,
+      allowed_secret_refs: workspace.packagePreview.credentialGrants.map((grant) => grant.grantID),
+      inject_via_context_only: true,
+      forbid_env_injection: true,
+      revoke_after_run: true,
+      rotation_required_after_run: false,
+    },
+    artifact_policy: {
+      encrypt_sensitive_artifacts: true,
+      sensitive_by_default: true,
+      recipient_kind: "app_installation",
+      recipient_key_id: "app_installation_key_mock",
+      retention: { failed_diagnostic_ttl_hours: 24, result_ttl_days: 7 },
+      require_checksum: true,
+    },
+    diagnostic_policy: {
+      redaction_required: true,
+      forbid_full_html: true,
+      strip_headers: ["authorization", "cookie"],
+      strip_storage_keys: ["localStorage", "sessionStorage"],
+      encrypt_diagnostics: true,
+      return_repair_hints: true,
+    },
+    policy_hash_sha256: mockHash(`sandbox_${workspace.id}_${workspace.packagePreview.packageDigest}`),
+  };
+}
+
+function mockSandboxMetadata(workspace: ProjectWorkspaceView): SandboxExecutionMetadata {
+  return {
+    profile: "mvp_cloud",
+    isolation_mode: "per_job_container",
+    network_mode: "allowed_domains_only",
+    worker_id: "worker_mock_cn_1",
+    container_id: `container_${workspace.id}`,
+    policy_hash_sha256: workspace.scriptDocument?.recording_run_spec.sandbox_policy?.policy_hash_sha256 ?? mockHash(`sandbox_${workspace.id}_${workspace.packagePreview.packageDigest}`),
+    runtime_versions: {
+      chromium: "stable-pinned",
+      playwright: "1.x",
+      video_worker: "mock",
+    },
+  };
+}
+
+function mockSuccessfulRecordingResultPackage(workspace: ProjectWorkspaceView): RecordingResultPackage {
+  const videoRef = {
+    id: `asset_video_${workspace.id}`,
+    role: "final_demo_video",
+    kind: "video",
+    uri: `artifact://result/${workspace.id}/final-demo.mp4.enc`,
+    mime_type: "video/mp4",
+    sha256: mockHash(`final_video_${workspace.id}`),
+    size_bytes: 12_800_000,
+    encrypted: true,
+    sensitive: true,
+    recipient_key_id: "app_installation_key_mock",
+  };
+  const docsRef = {
+    id: `asset_docs_${workspace.id}`,
+    role: "step_docs",
+    kind: "step_docs",
+    uri: `artifact://result/${workspace.id}/step-docs.md.enc`,
+    mime_type: "text/markdown",
+    sha256: mockHash(`step_docs_${workspace.id}`),
+    size_bytes: 32000,
+    encrypted: true,
+    sensitive: true,
+    recipient_key_id: "app_installation_key_mock",
+  };
+  const packageRef = {
+    id: `result_package_${workspace.id}`,
+    role: "recording_result_package",
+    kind: "json",
+    uri: `artifact://result/${workspace.id}/result-package.json.enc`,
+    mime_type: "application/json",
+    sha256: mockHash(`result_package_${workspace.id}`),
+    size_bytes: 48000,
+    encrypted: true,
+    sensitive: true,
+    recipient_key_id: "app_installation_key_mock",
+  };
+  const sandbox = mockSandboxMetadata(workspace);
+  return {
+    result_id: `result_${workspace.id}`,
+    source_package_id: workspace.packagePreview.packageID,
+    cloud_job_id: workspace.cloudRun.cloudJobID ?? `job_${workspace.id}`,
+    schema_version: "demoops.recording_result_package.v1",
+    status: "generated",
+    execution_trace: {
+      id: `trace_${workspace.id}`,
+      workflow_graph_id: workspace.planReview.graph.id,
+      graph_version: workspace.planReview.graph.version,
+      pass_rate: 1,
+      step_results: workspace.planReview.graph.nodes.map((node) => ({ node_id: node.id, status: "passed", duration_ms: node.duration_hint_ms ?? 3000 })),
+      sandbox,
+    },
+    step_results: workspace.planReview.graph.nodes.map((node) => ({ node_id: node.id, status: "passed", duration_ms: node.duration_hint_ms ?? 3000 })),
+    generated_assets: [
+      { id: videoRef.id, kind: "video", uri: videoRef.uri, mime_type: videoRef.mime_type, sha256: videoRef.sha256, size_bytes: videoRef.size_bytes, sensitive: true },
+      { id: docsRef.id, kind: "step_docs", uri: docsRef.uri, mime_type: docsRef.mime_type, sha256: docsRef.sha256, size_bytes: docsRef.size_bytes, sensitive: true },
+    ],
+    verification_report: {
+      pass_rate: 1,
+      failed_node_ids: [],
+      reproducibility_match: true,
+      output_checksums: [
+        { id: videoRef.id, kind: videoRef.kind, sha256: videoRef.sha256, size_bytes: videoRef.size_bytes },
+        { id: docsRef.id, kind: docsRef.kind, sha256: docsRef.sha256, size_bytes: docsRef.size_bytes },
+      ],
+    },
+    audit_trail: {
+      sandbox,
+      source_package_digest: workspace.packagePreview.packageDigest,
+      graph_digest: workspace.packagePreview.graphDigest,
+      execution_ip: "203.0.113.42",
+      ...(sandbox.worker_id ? { cloud_worker_id: sandbox.worker_id } : {}),
+      ...(sandbox.runtime_versions ? { runtime_versions: sandbox.runtime_versions } : {}),
+    },
+    delivery: {
+      result_package_ref: packageRef,
+      asset_refs: [videoRef, docsRef],
+      recipient_kind: "app_installation",
+      recipient_key_id: "app_installation_key_mock",
+      encryption_alg: "aes-256-gcm",
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      ack_required: true,
+    },
+    created_at: new Date().toISOString(),
+  };
+}
+
+function ackWorkspaceAssets(workspace: ProjectWorkspaceView): ProjectWorkspaceView {
+  return {
+    ...workspace,
+    assets: workspace.assets.map((asset) => ({ ...asset, status: "approved" })),
+    cloudRun: {
+      ...workspace.cloudRun,
+      message: "App 已校验 checksum 并确认接收结果包。",
     },
   };
 }
@@ -836,6 +1248,7 @@ function mockScriptDocument(workspace: ProjectWorkspaceView): ExecutionScriptDoc
       outputs: { raw_recording: true, final_video: true, screenshot_pack: false, step_by_step_docs: true, trace: true },
       redactions: { mask_selectors: workspace.planReview.redactionSelectors },
       failure_policy: { retry_attempts: 2, selector_repair_allowed: true, data_repair_allowed: false, max_repair_attempts: 1 },
+      sandbox_policy: mockSandboxPolicy(workspace),
     },
     steps: graph.nodes.map((node, index) => {
       const pageTarget = {

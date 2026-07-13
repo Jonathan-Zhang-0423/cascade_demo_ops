@@ -42,6 +42,8 @@ describe("desktop bridge contract", () => {
     expect(failure.data?.cloudRun.failureDiagnostic?.redaction_report.applied).toBe(true);
     expect(failure.data?.cloudRun.failureDiagnostic?.screenshot_refs?.[0]?.sensitive).toBe(true);
     expect(failure.data?.cloudRun.repairRequest?.approval_required).toBe(true);
+    expect(failure.data?.cloudRun.stageHistory?.find((stage) => stage.id === "browser_execution")?.status).toBe("failed");
+    expect(failure.data?.cloudRun.artifactSummary?.encrypted).toBeGreaterThan(0);
   });
 
   it("generates repaired bundles with lineage and returns to approval", async () => {
@@ -59,6 +61,42 @@ describe("desktop bridge contract", () => {
     expect(repaired.data?.status).toBe("awaiting_approval");
     expect(repaired.data?.executableScriptBundle?.repair_lineage?.source_result_id).toBe(failure.data.cloudRun.repairRequest?.source_result_id);
     expect(repaired.data?.scriptMarkdown).toContain("本次修复说明");
+  });
+
+  it("runs the mock upload lifecycle through result ack", async () => {
+    const bridge = createMockBridgeClient();
+    const workspace = createWorkspace("product_demo");
+    const packageResult = await bridge.buildExecutionPackagePreview(workspace);
+    if (!packageResult.data) {
+      throw new Error("expected package workspace");
+    }
+
+    const init = await bridge.initExecutionPackageUpload(packageResult.data);
+    const upload = await bridge.uploadExecutionPackage({
+      ...packageResult.data,
+      cloudRun: { ...packageResult.data.cloudRun, ...(init.data?.uploadID ? { uploadID: init.data.uploadID } : {}) },
+    });
+    const running = await bridge.pollExecutionPackageStatus({
+      ...packageResult.data,
+      cloudRun: {
+        ...packageResult.data.cloudRun,
+        ...(init.data?.uploadID ? { uploadID: init.data.uploadID } : {}),
+        ...(upload.data?.exchangePackageID ? { exchangePackageID: upload.data.exchangePackageID } : {}),
+        ...(upload.data?.cloudJobID ? { cloudJobID: upload.data.cloudJobID } : {}),
+      },
+    });
+    const completed = await bridge.pollCloudRun(running.data ?? packageResult.data);
+    const resultPackage = await bridge.getResultPackage(completed.data ?? packageResult.data);
+    const acked = await bridge.ackResultPackage(completed.data ?? packageResult.data);
+
+    expect(init.data?.supportedCryptoSuites).toContain("aes-256-gcm");
+    expect(upload.data?.status).toBe("queued");
+    expect(running.data?.cloudRun.stageHistory?.some((stage) => stage.id === "script_validation" && stage.status === "completed")).toBe(true);
+    expect(completed.data?.stage).toBe("result_review");
+    expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "result_returned")?.status).toBe("completed");
+    expect(resultPackage.data?.delivery?.asset_refs?.[0]?.role).toBe("final_demo_video");
+    expect(resultPackage.data?.delivery?.asset_refs?.every((artifact) => artifact.encrypted && artifact.sensitive)).toBe(true);
+    expect(acked.data?.assets.every((asset) => asset.status === "approved")).toBe(true);
   });
 
   it("maps local dev bridge execution packages into the workspace approval view", async () => {

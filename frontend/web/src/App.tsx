@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { GraphNode } from "../../src/types/workflowGraph";
+import type { GraphNode, SandboxPolicy } from "../../src/types/workflowGraph";
 import { agentPipelineItems, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
 import { createBridgeClient } from "./bridge";
 import type {
@@ -16,9 +16,15 @@ import { createWorkspace, initialChecklist } from "./mockWorkspace";
 import { scenarioTemplates } from "./scenarios";
 import {
   canUploadExecutionPackage,
+  lifecycleStagesFromWorkspace,
+  lifecycleStatusLabel,
+  lifecycleStatusTone,
   packageApprovalBlockedReasons,
   projectStatusLabels,
   resetApprovalChecklistForRepair,
+  sandboxProfileLabel,
+  sandboxRiskLevel,
+  sandboxRiskMessage,
   updateGraphNode,
   workflowStageLabels,
 } from "./workflow";
@@ -614,44 +620,61 @@ function PlanReviewPanel({
 
 function PackageStageSummary({ workspace }: { workspace: ProjectWorkspaceView }) {
   return (
-    <section className="table-section">
-      <SectionTitle title="执行包审批入口" meta={workspace.packagePreview.packageID} />
-      <div className="settings-grid">
-        <Fact label="Plan Hash" value={workspace.executableScriptBundle?.reproducibility.plan_hash_sha256 ?? "待生成"} />
-        <Fact label="Script Hash" value={workspace.executableScriptBundle?.reproducibility.script_hash_sha256 ?? "待生成"} />
-        <Fact label="Bundle Hash" value={workspace.executableScriptBundle?.reproducibility.bundle_hash_sha256 ?? "待生成"} />
-        <Fact label="审批状态" value={projectStatusLabels[workspace.status]} />
-      </div>
-    </section>
+    <div className="section-stack">
+      <section className="table-section">
+        <SectionTitle title="执行包审批入口" meta={workspace.packagePreview.packageID} />
+        <div className="settings-grid">
+          <Fact label="Plan Hash" value={workspace.executableScriptBundle?.reproducibility.plan_hash_sha256 ?? "待生成"} />
+          <Fact label="Script Hash" value={workspace.executableScriptBundle?.reproducibility.script_hash_sha256 ?? "待生成"} />
+          <Fact label="Bundle Hash" value={workspace.executableScriptBundle?.reproducibility.bundle_hash_sha256 ?? "待生成"} />
+          <Fact label="审批状态" value={projectStatusLabels[workspace.status]} />
+        </div>
+      </section>
+      <ServerLifecyclePanel workspace={workspace} />
+    </div>
   );
 }
 
 function CloudRunPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   return (
-    <section className="table-section">
-      <SectionTitle title="云端录制" meta={cloudStatusLabel(workspace.cloudRun.status)} />
-      <div className="settings-grid">
-        <Fact label="Cloud Job" value={workspace.cloudRun.cloudJobID ?? "待创建"} />
-        <Fact label="当前步骤" value={workspace.cloudRun.currentStep} />
-        <Fact label="进度" value={`${workspace.cloudRun.progress}%`} />
-        <Fact label="重试次数" value={`${workspace.cloudRun.retryCount}`} />
-      </div>
-    </section>
+    <div className="section-stack">
+      <section className="table-section">
+        <SectionTitle title="云端录制" meta={cloudStatusLabel(workspace.cloudRun.status)} />
+        <div className="settings-grid">
+          <Fact label="Upload ID" value={workspace.cloudRun.uploadID ?? "待初始化"} />
+          <Fact label="Exchange Package" value={workspace.cloudRun.exchangePackageID ?? "待上传"} />
+          <Fact label="Cloud Job" value={workspace.cloudRun.cloudJobID ?? "待创建"} />
+          <Fact label="Result Package" value={workspace.cloudRun.resultPackageID ?? "待返回"} />
+          <Fact label="当前步骤" value={workspace.cloudRun.currentStep} />
+          <Fact label="进度" value={`${workspace.cloudRun.progress}%`} />
+          <Fact label="服务器消息" value={workspace.cloudRun.message ?? "等待状态轮询"} />
+          <Fact label="Artifact" value={artifactSummaryLabel(workspace)} />
+        </div>
+      </section>
+      <ServerLifecyclePanel workspace={workspace} />
+      <SandboxPolicyPanel workspace={workspace} />
+    </div>
   );
 }
 
 function ScriptRepairPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   const diagnostic = workspace.cloudRun.failureDiagnostic;
+  const lineage = workspace.executableScriptBundle?.repair_lineage;
   return (
-    <section className="table-section">
-      <SectionTitle title="脚本修复" meta={diagnostic?.failed_node_id ?? "等待诊断"} />
-      <div className="settings-grid">
-        <Fact label="失败节点" value={diagnostic?.failed_node_id ?? "无"} />
-        <Fact label="错误信息" value={diagnostic?.error.message ?? "暂无错误"} />
-        <Fact label="诊断材料" value={`${(diagnostic?.screenshot_refs?.length ?? 0) + (diagnostic?.trace_refs?.length ?? 0)} 个加密 artifact`} />
-        <Fact label="修复要求" value="重新生成脚本包，并回到人工审批" />
-      </div>
-    </section>
+    <div className="section-stack">
+      <section className="table-section">
+        <SectionTitle title="脚本修复" meta={diagnostic?.failed_node_id ?? "等待诊断"} />
+        <div className="settings-grid">
+          <Fact label="失败节点" value={diagnostic?.failed_node_id ?? "无"} />
+          <Fact label="错误信息" value={diagnostic?.error.message ?? "暂无错误"} />
+          <Fact label="诊断材料" value={`${(diagnostic?.screenshot_refs?.length ?? 0) + (diagnostic?.trace_refs?.length ?? 0)} 个加密 artifact`} />
+          <Fact label="修复要求" value="重新生成脚本包，并回到人工审批" />
+          <Fact label="来源 Result" value={workspace.cloudRun.repairRequest?.source_result_id ?? lineage?.source_result_id ?? "等待失败结果"} />
+          <Fact label="Repair Attempt" value={`${workspace.cloudRun.repairRequest?.repair_attempt ?? lineage?.repair_attempt ?? 0}`} />
+        </div>
+      </section>
+      <ServerLifecyclePanel workspace={workspace} />
+    </div>
   );
 }
 
@@ -852,6 +875,7 @@ function PackageApproval({
       </div>
       <RuntimeLogPanel workspace={workspace} />
       <CloudRunPanel workspace={workspace} />
+      <SandboxPolicyPanel workspace={workspace} />
       <ScriptBundleReview workspace={workspace} />
       {workspace.cloudRun.failureDiagnostic ? (
         <FailureDiagnosticPanel workspace={workspace} onRepairScript={onRepairScript} />
@@ -904,6 +928,75 @@ function PackageApproval({
   );
 }
 
+function ServerLifecyclePanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  const stages = lifecycleStagesFromWorkspace(workspace);
+  return (
+    <section className="table-section">
+      <SectionTitle title="服务器执行生命周期" meta={workspace.cloudRun.stage ?? cloudStatusLabel(workspace.cloudRun.status)} />
+      <div className="lifecycle-summary-grid">
+        <Fact label="Upload ID" value={workspace.cloudRun.uploadID ?? "待初始化"} />
+        <Fact label="Exchange Package" value={workspace.cloudRun.exchangePackageID ?? "待上传"} />
+        <Fact label="Cloud Job" value={workspace.cloudRun.cloudJobID ?? "待创建"} />
+        <Fact label="Result Package" value={workspace.cloudRun.resultPackageID ?? "待返回"} />
+      </div>
+      <div className="lifecycle-grid">
+        {stages.map((stage) => (
+          <div key={stage.id} className={`lifecycle-card ${stage.status}`}>
+            <div className="lifecycle-card-head">
+              <strong>{stage.label}</strong>
+              <StatusPill label={lifecycleStatusLabel(stage.status)} tone={lifecycleStatusTone(stage.status)} />
+            </div>
+            <div className="progress-track">
+              <span style={{ width: `${Math.max(0, Math.min(stage.progress, 100))}%` }} />
+            </div>
+            <p>{stage.summary}</p>
+            <div className="lifecycle-meta">
+              <span>{stage.time ?? "待执行"}</span>
+              <span>{stage.artifactCount} artifact</span>
+              {stage.errorCode ? <span>{stage.errorCode}</span> : null}
+            </div>
+          </div>
+        ))}
+      </div>
+      {workspace.cloudRun.failureSummary ? <div className="error-banner">{workspace.cloudRun.failureSummary}</div> : null}
+    </section>
+  );
+}
+
+function SandboxPolicyPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  const policy = workspace.scriptDocument?.recording_run_spec.sandbox_policy ?? workspace.executableScriptBundle?.plan_json.recording_run_spec.sandbox_policy;
+  const metadata = workspace.cloudRun.sandboxMetadata ?? workspace.cloudRun.resultPackage?.execution_trace?.sandbox ?? workspace.cloudRun.resultPackage?.audit_trail?.sandbox;
+  const risk = sandboxRiskLevel(policy);
+  return (
+    <section className="table-section">
+      <SectionTitle title="沙箱策略" meta={policy ? sandboxProfileLabel(policy.profile) : "待生成"} />
+      <div className="sandbox-layout">
+        <div className="settings-grid">
+          <Fact label="运行模式" value={sandboxProfileLabel(policy?.profile)} />
+          <Fact label="隔离方式" value={policy?.isolation_mode ?? "未声明"} />
+          <Fact label="网络出口" value={policy?.network_policy.mode ?? "未声明"} />
+          <Fact label="Proxy 强制" value={policy?.network_policy.proxy_required ? "是" : "否"} />
+          <Fact label="允许域名" value={(policy?.network_policy.allowed_domains ?? workspace.planReview.allowedDomains).join("、")} />
+          <Fact label="禁止页面" value={workspace.planReview.forbiddenPages.join("、") || "无"} />
+          <Fact label="资源限制" value={resourceLimitLabel(policy)} />
+          <Fact label="浏览器上下文" value={policy?.browser_policy.fresh_context_per_run ? "每次运行全新 context" : "未强制"} />
+          <Fact label="凭据注入" value={policy?.secret_policy.vault_only ? "仅 vault + ctx.secrets" : "需复核"} />
+          <Fact label="Artifact 加密" value={policy?.artifact_policy.encrypt_sensitive_artifacts ? "敏感产物强制加密" : "需复核"} />
+          <Fact label="诊断脱敏" value={policy?.diagnostic_policy.redaction_required && policy.diagnostic_policy.encrypt_diagnostics ? "脱敏后加密返回" : "需复核"} />
+          <Fact label="Policy Hash" value={policy?.policy_hash_sha256 ?? metadata?.policy_hash_sha256 ?? "待生成"} />
+        </div>
+        <div className={`sandbox-risk ${risk}`}>
+          <StatusPill label={risk === "ok" ? "生产推荐" : "需注意"} tone={risk === "ok" ? "green" : "yellow"} />
+          <strong>{sandboxRiskMessage(policy)}</strong>
+          <span>Worker: {metadata?.worker_id ?? "等待执行"}</span>
+          <span>Container: {metadata?.container_id ?? metadata?.micro_vm_id ?? "等待分配"}</span>
+          <span>Runtime: {metadata?.runtime_versions ? Object.entries(metadata.runtime_versions).map(([key, value]) => `${key} ${value}`).join(" / ") : "等待上报"}</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function RuntimeLogPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   const logs = workspace.runtimeLogs ?? [];
   const lastError = workspace.cloudRun.lastError;
@@ -933,6 +1026,7 @@ function RuntimeLogPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
 function FailureDiagnosticPanel({ workspace, onRepairScript }: { workspace: ProjectWorkspaceView; onRepairScript: () => void }) {
   const diagnostic = workspace.cloudRun.failureDiagnostic;
   const repairRequest = workspace.cloudRun.repairRequest;
+  const lineage = workspace.executableScriptBundle?.repair_lineage;
   if (!diagnostic) {
     return null;
   }
@@ -944,6 +1038,10 @@ function FailureDiagnosticPanel({ workspace, onRepairScript }: { workspace: Proj
         <Fact label="错误信息" value={diagnostic.error.message} />
         <Fact label="当前页面" value={diagnostic.current_url ?? "未知"} />
         <Fact label="打码状态" value={diagnostic.redaction_report.applied && !diagnostic.redaction_report.full_html_included ? "已脱敏" : "需复核"} />
+        <Fact label="失败 Result" value={repairRequest?.source_result_id ?? lineage?.source_result_id ?? "待生成"} />
+        <Fact label="Cloud Job" value={repairRequest?.cloud_job_id ?? lineage?.source_cloud_job_id ?? diagnostic.cloud_job_id} />
+        <Fact label="Base Bundle" value={repairRequest?.failed_bundle_hash_sha256 ?? lineage?.base_bundle_hash_sha256 ?? "待记录"} />
+        <Fact label="Repair Attempt" value={`${repairRequest?.repair_attempt ?? lineage?.repair_attempt ?? 0}`} />
       </div>
       <table>
         <thead>
@@ -1345,6 +1443,27 @@ function credentialKindLabel(kind: string): string {
     temporary_token: "临时令牌",
   };
   return labels[kind] ?? kind;
+}
+
+function artifactSummaryLabel(workspace: ProjectWorkspaceView): string {
+  const summary = workspace.cloudRun.artifactSummary;
+  if (!summary) {
+    return "等待服务器返回";
+  }
+  return `${summary.total} 个 / 加密 ${summary.encrypted} / 敏感 ${summary.sensitive}`;
+}
+
+function resourceLimitLabel(workspacePolicy: SandboxPolicy | undefined): string {
+  const limits = workspacePolicy?.resource_limits;
+  if (!limits) {
+    return "未声明";
+  }
+  return [
+    limits.max_runtime_sec ? `${limits.max_runtime_sec}s` : "",
+    limits.max_memory_mb ? `${limits.max_memory_mb}MB` : "",
+    limits.max_cpu_count ? `${limits.max_cpu_count} CPU` : "",
+    limits.max_disk_mb ? `${limits.max_disk_mb}MB 磁盘` : "",
+  ].filter(Boolean).join(" / ") || "未声明";
 }
 
 function agentStatusLabel(status: string): string {

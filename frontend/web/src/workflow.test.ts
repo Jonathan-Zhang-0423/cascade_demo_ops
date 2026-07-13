@@ -3,10 +3,13 @@ import type { ApprovalChecklistState } from "./domain";
 import { createWorkspace } from "./mockWorkspace";
 import {
   canUploadExecutionPackage,
+  lifecycleStagesFromWorkspace,
   mapCloudStatus,
   packageApprovalBlockedReasons,
   projectStatusLabels,
   resetApprovalChecklistForRepair,
+  sandboxRiskLevel,
+  sandboxRiskMessage,
   updateGraphNode,
   workflowStageLabels,
 } from "./workflow";
@@ -109,5 +112,40 @@ describe("workflow helpers", () => {
       credentialGrantAcknowledged: false,
       redactionsReviewed: false,
     });
+  });
+
+  it("derives lifecycle stages from the workspace when server history is absent", () => {
+    const workspace = {
+      ...createWorkspace("product_demo"),
+      stage: "package_approval" as const,
+      executableScriptBundle: {} as never,
+    };
+
+    const stages = lifecycleStagesFromWorkspace(workspace);
+
+    expect(stages).toHaveLength(10);
+    expect(stages[0]).toMatchObject({ id: "local_generated", status: "completed", progress: 100 });
+    expect(stages[1]).toMatchObject({ id: "human_approved", status: "pending" });
+  });
+
+  it("recognizes production and dev sandbox policy risk levels", () => {
+    const workspace = createWorkspace("product_demo");
+    const productionPolicy = {
+      profile: "mvp_cloud",
+      isolation_mode: "per_job_container",
+      network_policy: { mode: "allowed_domains_only", proxy_required: true },
+      filesystem_policy: { no_host_mount: true, no_docker_socket: true, delete_temp_after_run: true },
+      resource_limits: {},
+      browser_policy: { fresh_context_per_run: true, disable_extensions: true, disable_downloads: true, trace_sources: false },
+      secret_policy: { vault_only: true, inject_via_context_only: true, forbid_env_injection: true, revoke_after_run: true, rotation_required_after_run: false },
+      artifact_policy: { encrypt_sensitive_artifacts: true, sensitive_by_default: true, require_checksum: true },
+      diagnostic_policy: { redaction_required: true, forbid_full_html: true, encrypt_diagnostics: true, return_repair_hints: true },
+    };
+    const devPolicy = { ...productionPolicy, profile: "dev", isolation_mode: "local_sidecar" };
+
+    expect(sandboxRiskLevel(productionPolicy)).toBe("ok");
+    expect(sandboxRiskLevel(devPolicy)).toBe("warning");
+    expect(sandboxRiskMessage(undefined)).toContain("缺少 sandbox_policy");
+    expect(workspace.planReview.allowedDomains).toContain("app.example.com");
   });
 });

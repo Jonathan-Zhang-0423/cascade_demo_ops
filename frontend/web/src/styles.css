@@ -703,6 +703,123 @@ tbody tr:hover,
   gap: 6px;
 }
 
+.lifecycle-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px 14px 0;
+}
+
+.lifecycle-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.lifecycle-card {
+  display: grid;
+  gap: 8px;
+  min-height: 142px;
+  padding: 10px;
+  border: 1px solid #e1e6ea;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.lifecycle-card.completed {
+  border-color: #b6dfc2;
+  background: #f1fbf4;
+}
+
+.lifecycle-card.active {
+  border-color: #8cc6ec;
+  background: #f1f8ff;
+}
+
+.lifecycle-card.failed,
+.lifecycle-card.blocked {
+  border-color: #ead28f;
+  background: #fff9e7;
+}
+
+.lifecycle-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.lifecycle-card-head strong {
+  font-size: 13px;
+}
+
+.lifecycle-card p {
+  color: #3a4953;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.lifecycle-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  color: #60717e;
+  font-size: 11px;
+}
+
+.lifecycle-meta span {
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: rgb(255 255 255 / 70%);
+}
+
+.sandbox-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 12px;
+  padding: 14px;
+}
+
+.sandbox-layout .settings-grid {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.sandbox-risk {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d6dde3;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.sandbox-risk.ok {
+  border-color: #b6dfc2;
+  background: #f1fbf4;
+}
+
+.sandbox-risk.warning {
+  border-color: #ead28f;
+  background: #fff9e7;
+}
+
+.sandbox-risk strong {
+  color: #24323b;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.sandbox-risk span {
+  color: #60717e;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .asset-layout {
   grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
 }
@@ -886,6 +1003,15 @@ tbody tr:hover,
   }
 
   .stage-panel-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lifecycle-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lifecycle-summary-grid,
+  .sandbox-layout {
     grid-template-columns: minmax(0, 1fr);
   }
 }
