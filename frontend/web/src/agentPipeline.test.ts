@@ -76,4 +76,50 @@ describe("agent pipeline helpers", () => {
     expect(codeSummaryFromWorkspace(degraded).degraded).toBe(true);
     expect(codeReader?.status).toBe("attention");
   });
+
+  it("surfaces ProjectIntelligenceGraph status and uses intelligence metrics", () => {
+    const workspace = {
+      ...createWorkspace("product_demo"),
+      projectIntelligence: {
+        id: "pi_1",
+        project_id: "project_product_demo",
+        schema_version: "demoops.project_intelligence_pack.v1" as const,
+        source_digest_sha256: "sha256:intelligence",
+        architecture: {
+          id: "arch_1",
+          project_id: "project_product_demo",
+          frameworks: ["react"],
+          route_tree: [{ id: "route_1", path: "/dashboard" }],
+          modules: [{ id: "module_1", name: "web", component_refs: ["component_a", "component_b"] }],
+        },
+        feature_capabilities: [{ id: "cap_1", name: "团队协作", key_actions: ["inspect"] }],
+        interaction_surfaces: [{ id: "surface_1", title: "工作台", stable_selectors: [{ kind: "css", value: "main" }] }],
+        data_models: [{ id: "model_1", name: "Team" }],
+        confidence: 0.8,
+      },
+      scriptReadiness: {
+        id: "ready_1",
+        project_id: "project_product_demo",
+        schema_version: "demoops.script_readiness_report.v1" as const,
+        can_proceed: true,
+        warnings: [],
+        blockers: [],
+      },
+      agentGraphTrace: {
+        id: "trace_1",
+        project_id: "project_product_demo",
+        schema_version: "demoops.agent_graph_trace.v1" as const,
+        steps: [{ id: "step_1", node_id: "repo_index", tool: "RepoIndexTool", status: "completed" }],
+      },
+    };
+
+    const summary = codeSummaryFromWorkspace(workspace);
+    const intelligenceItem = agentPipelineItems(workspace).find((item) => item.id === "project_intelligence");
+
+    expect(summary.sourceDigest).toBe("sha256:intelligence");
+    expect(summary.routes).toBe(1);
+    expect(summary.components).toBe(2);
+    expect(intelligenceItem?.status).toBe("completed");
+    expect(intelligenceItem?.detail).toContain("1 个能力");
+  });
 });

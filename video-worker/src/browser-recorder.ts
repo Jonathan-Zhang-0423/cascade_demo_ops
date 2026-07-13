@@ -178,6 +178,7 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
       const started = Date.now();
       try {
         await runStep(page, step, allowedDomains, forbiddenPages, request.sandbox_policy?.network_policy?.mode);
+        await waitForStepDuration(page, step, started);
         const screenshotPath = await captureStepScreenshot(page, outputDir, step, index, request.recording_run_spec?.redactions?.mask_selectors || []);
         if (screenshotPath) {
           const screenshotAsset = await artifactRef(
@@ -336,6 +337,15 @@ async function runStep(page: any, step: BrowserScriptStep, allowedDomains: strin
   if (action === "assert" || action === "inspect") {
     const selector = selectorForStep(step);
     if (selector) await page.locator(selector).first().waitFor({ timeout });
+  }
+}
+
+async function waitForStepDuration(page: any, step: BrowserScriptStep, startedAtMS: number): Promise<void> {
+  const durationMS = step.timing?.duration_ms || 0;
+  if (durationMS <= 0) return;
+  const remainingMS = durationMS - (Date.now() - startedAtMS);
+  if (remainingMS > 0) {
+    await page.waitForTimeout(remainingMS);
   }
 }
 

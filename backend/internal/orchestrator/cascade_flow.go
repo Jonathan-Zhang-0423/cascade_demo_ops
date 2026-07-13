@@ -18,6 +18,7 @@ const (
 	NodeRequirementRead      NodeName = "RequirementRead"
 	NodeCodeRead             NodeName = "CodeRead"
 	NodePageRead             NodeName = "PageRead"
+	NodeProjectIntelligence  NodeName = "ProjectIntelligence"
 	NodeMultimodalUnderstand NodeName = "MultimodalUnderstand"
 	NodeProductExplore       NodeName = "ProductExplore"
 	NodeGraphGenerate        NodeName = "GraphGenerate"
@@ -45,6 +46,9 @@ type CascadeState struct {
 	RequirementBrief         *model.RequirementBrief                `json:"requirement_brief,omitempty"`
 	CodeSnapshots            []model.CodeUnderstandingSnapshot      `json:"code_snapshots,omitempty"`
 	PageSnapshots            []model.PageUnderstandingSnapshot      `json:"page_snapshots,omitempty"`
+	ProjectIntelligence      *model.ProjectIntelligencePack         `json:"project_intelligence,omitempty"`
+	ScriptReadinessReport    *model.ScriptReadinessReport           `json:"script_readiness_report,omitempty"`
+	AgentGraphTrace          *model.AgentGraphTrace                 `json:"agent_graph_trace,omitempty"`
 	UnderstandingReport      *model.MultimodalUnderstandingReport   `json:"understanding_report,omitempty"`
 	ProductMap               *model.ProductMap                      `json:"product_map,omitempty"`
 	WorkflowGraph            *model.DemoWorkflowGraph               `json:"workflow_graph,omitempty"`
@@ -116,16 +120,20 @@ type PageReaderAgent interface {
 	ReadPages(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) ([]model.PageUnderstandingSnapshot, error)
 }
 
+type ProjectIntelligenceAgent interface {
+	RunProjectIntelligence(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, codeSnapshots []model.CodeUnderstandingSnapshot, pageSnapshots []model.PageUnderstandingSnapshot) (*model.ProjectIntelligencePack, *model.ScriptReadinessReport, *model.AgentGraphTrace, error)
+}
+
 type MultimodalUnderstandingAgent interface {
-	BuildUnderstanding(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, codeSnapshots []model.CodeUnderstandingSnapshot, pageSnapshots []model.PageUnderstandingSnapshot) (*model.MultimodalUnderstandingReport, error)
+	BuildUnderstanding(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, codeSnapshots []model.CodeUnderstandingSnapshot, pageSnapshots []model.PageUnderstandingSnapshot, intelligence *model.ProjectIntelligencePack) (*model.MultimodalUnderstandingReport, error)
 }
 
 type ProductMapAgent interface {
-	ExploreProduct(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport) (*model.ProductMap, error)
+	ExploreProduct(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.ProductMap, error)
 }
 
 type GraphBuilderAgent interface {
-	GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport) (*model.DemoWorkflowGraph, error)
+	GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.DemoWorkflowGraph, error)
 }
 
 type ScriptPackagerAgent interface {
@@ -141,16 +149,17 @@ type AssetGeneratorAgent interface {
 }
 
 type Dependencies struct {
-	InputContext      InputContextAgent
-	RequirementReader RequirementReaderAgent
-	CodeReader        CodeReaderAgent
-	PageReader        PageReaderAgent
-	Understanding     MultimodalUnderstandingAgent
-	ProductMap        ProductMapAgent
-	GraphBuilder      GraphBuilderAgent
-	ScriptPackager    ScriptPackagerAgent
-	QAExecutor        QAExecutorAgent
-	AssetGenerator    AssetGeneratorAgent
+	InputContext        InputContextAgent
+	RequirementReader   RequirementReaderAgent
+	CodeReader          CodeReaderAgent
+	PageReader          PageReaderAgent
+	ProjectIntelligence ProjectIntelligenceAgent
+	Understanding       MultimodalUnderstandingAgent
+	ProductMap          ProductMapAgent
+	GraphBuilder        GraphBuilderAgent
+	ScriptPackager      ScriptPackagerAgent
+	QAExecutor          QAExecutorAgent
+	AssetGenerator      AssetGeneratorAgent
 }
 
 type ProgressLevel string
@@ -197,6 +206,9 @@ func NewCascadeFlow(deps Dependencies) (*CascadeFlow, error) {
 	}
 	if deps.PageReader == nil {
 		return nil, errors.New("missing PageReader agent")
+	}
+	if deps.ProjectIntelligence == nil {
+		return nil, errors.New("missing ProjectIntelligence agent")
 	}
 	if deps.Understanding == nil {
 		return nil, errors.New("missing MultimodalUnderstanding agent")
@@ -273,9 +285,31 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 	state.PageSnapshots = pageSnapshots
 	logNodeDone(ctx, state.CurrentNode, nodeStart, "PageReaderAgent 完成页面材料读取", fmt.Sprintf("pages=%d", len(pageSnapshots)))
 
+	state.CurrentNode = NodeProjectIntelligence
+	nodeStart = logNodeStart(ctx, state.CurrentNode)
+	intelligence, readiness, trace, err := f.deps.ProjectIntelligence.RunProjectIntelligence(ctx, project, brief, codeSnapshots, pageSnapshots)
+	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
+		return fail(state, err), err
+	}
+	state.ProjectIntelligence = intelligence
+	state.ScriptReadinessReport = readiness
+	state.AgentGraphTrace = trace
+	moduleCount := 0
+	featureCount := 0
+	surfaceCount := 0
+	if intelligence != nil {
+		if intelligence.Architecture != nil {
+			moduleCount = len(intelligence.Architecture.Modules)
+		}
+		featureCount = len(intelligence.FeatureCapabilities)
+		surfaceCount = len(intelligence.InteractionSurfaces)
+	}
+	logNodeDone(ctx, state.CurrentNode, nodeStart, "ProjectIntelligenceGraph 完成项目图谱理解", fmt.Sprintf("modules=%d capabilities=%d surfaces=%d", moduleCount, featureCount, surfaceCount))
+
 	state.CurrentNode = NodeMultimodalUnderstand
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
-	report, err := f.deps.Understanding.BuildUnderstanding(ctx, project, brief, codeSnapshots, pageSnapshots)
+	report, err := f.deps.Understanding.BuildUnderstanding(ctx, project, brief, codeSnapshots, pageSnapshots, intelligence)
 	if err != nil {
 		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
@@ -285,7 +319,7 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 
 	state.CurrentNode = NodeProductExplore
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
-	productMap, err := f.deps.ProductMap.ExploreProduct(ctx, project, report)
+	productMap, err := f.deps.ProductMap.ExploreProduct(ctx, project, report, intelligence)
 	if err != nil {
 		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
@@ -295,7 +329,7 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 
 	state.CurrentNode = NodeGraphGenerate
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
-	graph, err := f.deps.GraphBuilder.GenerateGraph(ctx, project, productMap, report)
+	graph, err := f.deps.GraphBuilder.GenerateGraph(ctx, project, productMap, report, intelligence)
 	if err != nil {
 		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err

@@ -29,6 +29,7 @@ func (a *MultimodalUnderstandingAgent) BuildUnderstanding(
 	brief *model.RequirementBrief,
 	codeSnapshots []model.CodeUnderstandingSnapshot,
 	pageSnapshots []model.PageUnderstandingSnapshot,
+	intelligence *model.ProjectIntelligencePack,
 ) (*model.MultimodalUnderstandingReport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -43,12 +44,12 @@ func (a *MultimodalUnderstandingAgent) BuildUnderstanding(
 		PageSnapshots:      pageSnapshots,
 		InputFingerprints:  inputFingerprints(project, codeSnapshots, pageSnapshots),
 		SourceDigestSHA256: combinedSourceDigest(codeSnapshots),
-		Summary:            understandingSummary(brief, codeSnapshots, pageSnapshots),
-		FeatureHypotheses:  featureHypotheses(project, brief, codeSnapshots, pageSnapshots),
-		WorkflowCandidates: workflowCandidates(project, brief, pageSnapshots),
-		EvidenceRefs:       combinedEvidenceRefs(brief, codeSnapshots, pageSnapshots),
-		SafetyReport:       safetyReportFromUnderstanding(project, codeSnapshots, pageSnapshots),
-		Confidence:         understandingConfidence(codeSnapshots, pageSnapshots),
+		Summary:            understandingSummary(brief, codeSnapshots, pageSnapshots, intelligence),
+		FeatureHypotheses:  featureHypotheses(project, brief, codeSnapshots, pageSnapshots, intelligence),
+		WorkflowCandidates: workflowCandidates(project, brief, pageSnapshots, intelligence),
+		EvidenceRefs:       combinedEvidenceRefs(brief, codeSnapshots, pageSnapshots, intelligence),
+		SafetyReport:       safetyReportFromUnderstanding(project, codeSnapshots, pageSnapshots, intelligence),
+		Confidence:         understandingConfidence(codeSnapshots, pageSnapshots, intelligence),
 		CreatedAt:          now,
 	}
 	trace, err := a.enhanceReportWithLLM(ctx, project, brief, report)
@@ -99,11 +100,12 @@ func (a *MultimodalUnderstandingAgent) enhanceReportWithLLM(ctx context.Context,
 		return nil, nil
 	}
 	payload := map[string]any{
-		"brief":           brief,
-		"code_summary":    compactCodeSnapshots(report.CodeSnapshots),
-		"page_summary":    compactPageSnapshots(report.PageSnapshots),
-		"safety_policy":   project.SecurityPolicy,
-		"target_audience": project.TargetAudience,
+		"brief":                brief,
+		"code_summary":         compactCodeSnapshots(report.CodeSnapshots),
+		"page_summary":         compactPageSnapshots(report.PageSnapshots),
+		"project_intelligence": compactProjectIntelligence(report.ProjectID, project.ProjectIntelligence),
+		"safety_policy":        project.SecurityPolicy,
+		"target_audience":      project.TargetAudience,
 	}
 	data, _ := json.Marshal(payload)
 	var output multimodalLLMOutput
@@ -215,16 +217,40 @@ func combinedSourceDigest(code []model.CodeUnderstandingSnapshot) string {
 	return hashString(strings.Join(uniqueStrings(parts), "|"))
 }
 
-func understandingSummary(brief *model.RequirementBrief, code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) string {
+func understandingSummary(brief *model.RequirementBrief, code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot, intelligence *model.ProjectIntelligencePack) string {
 	objective := "产品演示脚本"
 	if brief != nil && brief.Objective != "" {
 		objective = brief.Objective
 	}
+	if intelligence != nil && intelligence.Architecture != nil && intelligence.Architecture.Summary != "" {
+		return "已融合需求、代码结构摘要、页面/截图证据和项目理解图谱，架构摘要：" + intelligence.Architecture.Summary + "；目标是：" + objective
+	}
 	return "已融合需求、代码结构摘要和页面/截图证据，目标是：" + objective
 }
 
-func featureHypotheses(project *model.ProjectContext, brief *model.RequirementBrief, code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) []*model.Feature {
+func featureHypotheses(project *model.ProjectContext, brief *model.RequirementBrief, code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot, intelligence *model.ProjectIntelligencePack) []*model.Feature {
 	features := []*model.Feature{}
+	if intelligence != nil {
+		for _, capability := range intelligence.FeatureCapabilities {
+			features = append(features, &model.Feature{
+				ID:              firstNonEmpty(capability.ID, "feature_capability_"+shortHash(capability.Name)),
+				Name:            firstNonEmpty(capability.Name, "项目理解功能能力"),
+				Kind:            firstNonEmpty(capability.Kind, "supporting"),
+				UserValue:       firstNonEmpty(capability.UserValue, capability.BusinessValue, "该功能能力可用于构造演示路径。"),
+				BusinessValue:   capability.BusinessValue,
+				Priority:        firstNonEmpty(capability.Priority, "supporting"),
+				BestAudience:    []string{project.TargetAudience},
+				BestUseCases:    useCasesFromBrief(brief),
+				SupportingPages: append([]string{}, capability.SupportingPageRefs...),
+				KeyActions:      append([]string{}, capability.KeyActions...),
+				Risks:           append([]string{}, capability.Risks...),
+				EvidenceRefs:    capability.EvidenceRefs,
+			})
+			if len(features) >= 8 {
+				return features
+			}
+		}
+	}
 	if brief != nil {
 		features = append(features, &model.Feature{
 			ID:            "feature_primary_value",
@@ -278,10 +304,31 @@ func featureHypotheses(project *model.ProjectContext, brief *model.RequirementBr
 	return features
 }
 
-func workflowCandidates(project *model.ProjectContext, brief *model.RequirementBrief, pages []model.PageUnderstandingSnapshot) []*model.WorkflowCandidate {
+func workflowCandidates(project *model.ProjectContext, brief *model.RequirementBrief, pages []model.PageUnderstandingSnapshot, intelligence *model.ProjectIntelligencePack) []*model.WorkflowCandidate {
 	useCase := model.DemoUseCaseLaunch
 	if brief != nil && len(brief.UseCases) > 0 {
 		useCase = brief.UseCases[0]
+	}
+	candidates := []*model.WorkflowCandidate{}
+	if intelligence != nil {
+		for _, scenario := range intelligence.DemoScenarioPlans {
+			candidates = append(candidates, &model.WorkflowCandidate{
+				ID:             firstNonEmpty(scenario.ID, "workflow_scenario_"+shortHash(scenario.Name)),
+				Name:           firstNonEmpty(scenario.Name, "项目智能候选演示路径"),
+				UseCase:        firstNonEmptyUseCase(scenario.UseCase, useCase),
+				AudienceID:     firstNonEmpty(scenario.AudienceID, "audience_primary"),
+				FeatureRefs:    append([]string{}, scenario.FeatureRefs...),
+				PageRefs:       append([]string{}, scenario.PageRefs...),
+				EstimatedSteps: scenario.EstimatedSteps,
+				ValueScore:     scenario.ValueScore,
+				Feasibility:    scenario.Feasibility,
+				RiskNotes:      append([]string{}, scenario.RiskNotes...),
+				EvidenceRefs:   scenario.EvidenceRefs,
+			})
+		}
+		if len(candidates) > 0 {
+			return candidates
+		}
 	}
 	pageRefs := []string{}
 	for _, page := range pages {
@@ -301,7 +348,7 @@ func workflowCandidates(project *model.ProjectContext, brief *model.RequirementB
 	}}
 }
 
-func combinedEvidenceRefs(brief *model.RequirementBrief, code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) []model.EvidenceRef {
+func combinedEvidenceRefs(brief *model.RequirementBrief, code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot, intelligence *model.ProjectIntelligencePack) []model.EvidenceRef {
 	refs := []model.EvidenceRef{}
 	if brief != nil {
 		refs = append(refs, brief.EvidenceRefs...)
@@ -312,10 +359,13 @@ func combinedEvidenceRefs(brief *model.RequirementBrief, code []model.CodeUnders
 	for _, page := range pages {
 		refs = append(refs, page.EvidenceRefs...)
 	}
-	return refs
+	if intelligence != nil {
+		refs = append(refs, intelligence.EvidenceRefs...)
+	}
+	return uniqueEvidenceRefs(refs)
 }
 
-func safetyReportFromUnderstanding(project *model.ProjectContext, code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) *model.SafetyReport {
+func safetyReportFromUnderstanding(project *model.ProjectContext, code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot, intelligence *model.ProjectIntelligencePack) *model.SafetyReport {
 	findings := []model.AgentFinding{}
 	for _, snapshot := range code {
 		for _, sensitive := range snapshot.SensitiveFields {
@@ -331,15 +381,22 @@ func safetyReportFromUnderstanding(project *model.ProjectContext, code []model.C
 	for _, page := range pages {
 		findings = append(findings, page.RiskFindings...)
 	}
+	maskedFields := append([]string{}, project.ForbiddenData...)
+	notes := []string{"默认仅上传结构摘要和脱敏证据，不上传完整源码。"}
+	if intelligence != nil && intelligence.SafetyReport != nil {
+		findings = append(findings, intelligence.SafetyReport.PolicyFindings...)
+		maskedFields = append(maskedFields, intelligence.SafetyReport.MaskedFields...)
+		notes = append(notes, intelligence.SafetyReport.Notes...)
+	}
 	return &model.SafetyReport{
 		AllowedToProceed: true,
 		PolicyFindings:   findings,
-		MaskedFields:     append([]string{}, project.ForbiddenData...),
-		Notes:            []string{"默认仅上传结构摘要和脱敏证据，不上传完整源码。"},
+		MaskedFields:     uniqueStrings(maskedFields),
+		Notes:            uniqueStrings(notes),
 	}
 }
 
-func understandingConfidence(code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) float64 {
+func understandingConfidence(code []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot, intelligence *model.ProjectIntelligencePack) float64 {
 	confidence := 0.72
 	if len(code) > 0 {
 		confidence += 0.08
@@ -347,10 +404,62 @@ func understandingConfidence(code []model.CodeUnderstandingSnapshot, pages []mod
 	if len(pages) > 0 {
 		confidence += 0.08
 	}
+	if intelligence != nil && intelligence.Confidence > 0 {
+		confidence += 0.04
+	}
 	if confidence > 0.92 {
 		return 0.92
 	}
 	return confidence
+}
+
+func useCasesFromBrief(brief *model.RequirementBrief) []model.DemoUseCase {
+	if brief != nil && len(brief.UseCases) > 0 {
+		return append([]model.DemoUseCase{}, brief.UseCases...)
+	}
+	return []model.DemoUseCase{model.DemoUseCaseLaunch}
+}
+
+func firstNonEmptyUseCase(value model.DemoUseCase, fallback model.DemoUseCase) model.DemoUseCase {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func compactProjectIntelligence(projectID string, intelligence *model.ProjectIntelligencePack) map[string]any {
+	if intelligence == nil {
+		return nil
+	}
+	architecture := map[string]any{}
+	if intelligence.Architecture != nil {
+		architecture = map[string]any{
+			"summary":      intelligence.Architecture.Summary,
+			"frameworks":   intelligence.Architecture.Frameworks,
+			"languages":    intelligence.Architecture.Languages,
+			"module_count": len(intelligence.Architecture.Modules),
+			"route_count":  len(intelligence.Architecture.RouteTree),
+		}
+	}
+	return map[string]any{
+		"project_id":           projectID,
+		"architecture":         architecture,
+		"feature_capabilities": compactCapabilities(intelligence.FeatureCapabilities),
+		"interaction_surfaces": compactSurfaces(intelligence.InteractionSurfaces),
+		"api_count":            len(intelligence.APIContracts),
+		"data_model_count":     len(intelligence.DataModels),
+		"demo_scenario_plans":  limitScenarioPlans(intelligence.DemoScenarioPlans, 3),
+		"script_readiness":     intelligence.ScriptReadinessReport,
+		"source_digest_sha256": intelligence.SourceDigestSHA256,
+		"confidence":           intelligence.Confidence,
+	}
+}
+
+func limitScenarioPlans(plans []model.DemoScenarioPlan, maxItems int) []model.DemoScenarioPlan {
+	if len(plans) <= maxItems {
+		return plans
+	}
+	return plans[:maxItems]
 }
 
 func compactCodeSnapshots(snapshots []model.CodeUnderstandingSnapshot) []map[string]any {

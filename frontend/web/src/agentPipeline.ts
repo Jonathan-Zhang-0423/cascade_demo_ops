@@ -81,14 +81,15 @@ export function updateWorkspaceInputs(
 
 export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeSummaryView {
   const snapshots = workspace.understandingReport?.code_snapshots ?? [];
+  const architecture = workspace.projectIntelligence?.architecture;
   const fileCount = snapshots.reduce((total, snapshot) => total + (snapshot.file_count ?? 0), 0);
   return {
     fileCount,
-    frameworks: unique(snapshots.flatMap((snapshot) => snapshot.frameworks ?? [])),
-    routes: snapshots.reduce((total, snapshot) => total + (snapshot.routes?.length ?? 0), 0),
-    components: snapshots.reduce((total, snapshot) => total + (snapshot.components?.length ?? 0), 0),
+    frameworks: unique([...(architecture?.frameworks ?? []), ...snapshots.flatMap((snapshot) => snapshot.frameworks ?? [])]),
+    routes: architecture?.route_tree?.length ?? snapshots.reduce((total, snapshot) => total + (snapshot.routes?.length ?? 0), 0),
+    components: architecture?.modules?.reduce((total, module) => total + (module.component_refs?.length ?? 0), 0) ?? snapshots.reduce((total, snapshot) => total + (snapshot.components?.length ?? 0), 0),
     selectors: snapshots.reduce((total, snapshot) => total + (snapshot.selectors?.length ?? 0), 0),
-    sourceDigest: firstSourceDigest(snapshots, workspace.understandingReport?.source_digest_sha256),
+    sourceDigest: workspace.projectIntelligence?.source_digest_sha256 ?? firstSourceDigest(snapshots, workspace.understandingReport?.source_digest_sha256),
     degraded: hasRepoInput(workspace) && snapshots.length > 0 && fileCount === 0,
   };
 }
@@ -133,12 +134,22 @@ export function agentPipelineItems(workspace: ProjectWorkspaceView): AgentPipeli
       detail: `${workspace.understandingReport?.page_snapshots?.length ?? 0} 个页面快照`,
     },
     {
+      id: "project_intelligence",
+      name: "ProjectIntelligenceGraph",
+      role: "用工具图谱协作生成架构、功能、交互面、API、数据模型和可演示路径",
+      output: "ProjectIntelligencePack",
+      status: workspace.projectIntelligence ? readinessStatus(workspace) : workspace.understandingReport ? "pending" : "pending",
+      detail: workspace.projectIntelligence
+        ? `${workspace.projectIntelligence.feature_capabilities?.length ?? 0} 个能力 / ${workspace.projectIntelligence.interaction_surfaces?.length ?? 0} 个交互面 / ${workspace.agentGraphTrace?.steps?.length ?? 0} 个图节点`
+        : "等待代码和页面材料读取完成",
+    },
+    {
       id: "understanding",
       name: "MultimodalUnderstandingAgent",
       role: "融合需求、代码、页面证据",
       output: "MultimodalUnderstandingReport",
       status: workspace.understandingReport ? "completed" : "pending",
-      detail: workspace.understandingReport?.summary ?? "等待执行包生成",
+      detail: workspace.understandingReport?.summary ?? workspace.projectIntelligence?.architecture?.summary ?? "等待执行包生成",
     },
     {
       id: "product_map",
@@ -165,6 +176,16 @@ export function agentPipelineItems(workspace: ProjectWorkspaceView): AgentPipeli
       detail: workspace.executableScriptBundle?.reproducibility.bundle_hash_sha256 ?? "待生成执行包",
     },
   ];
+}
+
+function readinessStatus(workspace: ProjectWorkspaceView): AgentPipelineStatus {
+  if (workspace.scriptReadiness?.blockers?.length) {
+    return "attention";
+  }
+  if (workspace.scriptReadiness?.warnings?.length) {
+    return "attention";
+  }
+  return "completed";
 }
 
 function codeReaderStatus(workspace: ProjectWorkspaceView, summary: CodeSummaryView): AgentPipelineStatus {

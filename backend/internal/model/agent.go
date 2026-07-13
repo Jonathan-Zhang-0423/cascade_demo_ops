@@ -70,6 +70,9 @@ type AgentInputPackage struct {
 	ProjectContext         *ProjectContext                  `json:"project_context,omitempty"`
 	RequirementBrief       *RequirementBrief                `json:"requirement_brief,omitempty"`
 	UnderstandingReport    *MultimodalUnderstandingReport   `json:"understanding_report,omitempty"`
+	ProjectIntelligence    *ProjectIntelligencePack         `json:"project_intelligence,omitempty"`
+	ScriptReadinessReport  *ScriptReadinessReport           `json:"script_readiness_report,omitempty"`
+	AgentGraphTrace        *AgentGraphTrace                 `json:"agent_graph_trace,omitempty"`
 	ProductMap             *ProductMap                      `json:"product_map,omitempty"`
 	WorkflowGraph          *DemoWorkflowGraph               `json:"workflow_graph,omitempty"`
 	ScriptDocument         *ExecutionScriptDocument         `json:"script_document,omitempty"`
@@ -85,6 +88,9 @@ type AgentOutputPackage struct {
 	Findings               []AgentFinding                   `json:"findings,omitempty"`
 	RequirementBrief       *RequirementBrief                `json:"requirement_brief,omitempty"`
 	UnderstandingReport    *MultimodalUnderstandingReport   `json:"understanding_report,omitempty"`
+	ProjectIntelligence    *ProjectIntelligencePack         `json:"project_intelligence,omitempty"`
+	ScriptReadinessReport  *ScriptReadinessReport           `json:"script_readiness_report,omitempty"`
+	AgentGraphTrace        *AgentGraphTrace                 `json:"agent_graph_trace,omitempty"`
 	ProductMap             *ProductMap                      `json:"product_map,omitempty"`
 	WorkflowGraph          *DemoWorkflowGraph               `json:"workflow_graph,omitempty"`
 	ScriptDocument         *ExecutionScriptDocument         `json:"script_document,omitempty"`

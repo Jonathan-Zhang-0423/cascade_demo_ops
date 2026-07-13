@@ -185,16 +185,17 @@ func assertScriptMatchesGraph(t *testing.T, doc *model.ExecutionScriptDocument, 
 func newTestFlow(t *testing.T) *orchestrator.CascadeFlow {
 	t.Helper()
 	flow, err := orchestrator.NewCascadeFlow(orchestrator.Dependencies{
-		InputContext:      NewInputContextAgent(),
-		RequirementReader: NewRequirementReaderAgent(),
-		CodeReader:        NewCodeReaderAgent(),
-		PageReader:        NewPageReaderAgent(),
-		Understanding:     NewMultimodalUnderstandingAgent(),
-		ProductMap:        NewProductMapAgent(),
-		GraphBuilder:      NewGraphBuilderAgent(),
-		ScriptPackager:    NewScriptPackagerAgent(),
-		QAExecutor:        NewQAExecutorAgent(),
-		AssetGenerator:    NewAssetGeneratorAgent(),
+		InputContext:        NewInputContextAgent(),
+		RequirementReader:   NewRequirementReaderAgent(),
+		CodeReader:          NewCodeReaderAgent(),
+		PageReader:          NewPageReaderAgent(),
+		ProjectIntelligence: NewProjectIntelligenceGraph(),
+		Understanding:       NewMultimodalUnderstandingAgent(),
+		ProductMap:          NewProductMapAgent(),
+		GraphBuilder:        NewGraphBuilderAgent(),
+		ScriptPackager:      NewScriptPackagerAgent(),
+		QAExecutor:          NewQAExecutorAgent(),
+		AssetGenerator:      NewAssetGeneratorAgent(),
 	})
 	if err != nil {
 		t.Fatal(err)

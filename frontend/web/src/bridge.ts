@@ -21,7 +21,10 @@ import type {
   RecordingResultPackage,
   SandboxExecutionMetadata,
   SandboxPolicy,
+  AgentGraphTrace,
   ScriptFailureDiagnostic,
+  ProjectIntelligencePack,
+  ScriptReadinessReport,
 } from "../../src/types/workflowGraph";
 import { createWorkspace } from "./mockWorkspace";
 import { getScenarioTemplate } from "./scenarios";
@@ -112,6 +115,9 @@ type LocalCascadeState = {
   status?: string;
   project_context?: LocalProjectContext;
   understanding_report?: MultimodalUnderstandingReport;
+  project_intelligence?: ProjectIntelligencePack;
+  script_readiness_report?: ScriptReadinessReport;
+  agent_graph_trace?: AgentGraphTrace;
   product_map?: LocalProductMap;
   workflow_graph?: DemoWorkflowGraph;
   script_document?: ExecutionScriptDocument;
@@ -637,10 +643,16 @@ export function userInputFromWorkspace(workspace: ProjectWorkspaceView): LocalUs
   };
 }
 
+export function workspaceFromCascadeStateForTest(state: LocalCascadeState, fallback: ProjectWorkspaceView): ProjectWorkspaceView {
+  return workspaceFromCascadeState(state, fallback);
+}
+
 function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWorkspaceView): ProjectWorkspaceView {
   const project = state.project_context;
   const graph = state.workflow_graph ?? fallback.planReview.graph;
   const report = state.understanding_report;
+  const intelligence = state.project_intelligence;
+  const readiness = state.script_readiness_report ?? intelligence?.script_readiness_report;
   const bundle = state.executable_script_bundle;
   const scriptDocument = state.script_document ?? bundle?.plan_json;
   const runSpec = scriptDocument?.recording_run_spec;
@@ -666,12 +678,12 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
     sourceConnections: sourceConnectionsFromState(project, report, fallback),
     understanding: {
       productMapID: state.product_map?.id || fallback.understanding.productMapID,
-      routesDetected: report?.code_snapshots?.reduce((count, snapshot) => count + (snapshot.routes?.length ?? 0), 0) ?? fallback.understanding.routesDetected,
-      featuresDetected: report?.feature_hypotheses?.length ?? fallback.understanding.featuresDetected,
-      componentsSummarized: report?.code_snapshots?.reduce((count, snapshot) => count + (snapshot.components?.length ?? 0), 0) ?? fallback.understanding.componentsSummarized,
-      dataModelsSummarized: report?.code_snapshots?.reduce((count, snapshot) => count + (snapshot.data_models?.length ?? 0), 0) ?? fallback.understanding.dataModelsSummarized,
-      evidenceRefs: report?.evidence_refs ?? fallback.understanding.evidenceRefs,
-      sensitiveWarnings: report?.safety_report?.policy_findings?.map((finding) => finding.summary) ?? fallback.understanding.sensitiveWarnings,
+      routesDetected: intelligence?.architecture?.route_tree?.length ?? report?.code_snapshots?.reduce((count, snapshot) => count + (snapshot.routes?.length ?? 0), 0) ?? fallback.understanding.routesDetected,
+      featuresDetected: intelligence?.feature_capabilities?.length ?? report?.feature_hypotheses?.length ?? fallback.understanding.featuresDetected,
+      componentsSummarized: intelligence?.interaction_surfaces?.length ?? report?.code_snapshots?.reduce((count, snapshot) => count + (snapshot.components?.length ?? 0), 0) ?? fallback.understanding.componentsSummarized,
+      dataModelsSummarized: intelligence?.data_models?.length ?? report?.code_snapshots?.reduce((count, snapshot) => count + (snapshot.data_models?.length ?? 0), 0) ?? fallback.understanding.dataModelsSummarized,
+      evidenceRefs: intelligence?.evidence_refs ?? report?.evidence_refs ?? fallback.understanding.evidenceRefs,
+      sensitiveWarnings: intelligence?.safety_report?.policy_findings?.map((finding) => finding.summary) ?? report?.safety_report?.policy_findings?.map((finding) => finding.summary) ?? fallback.understanding.sensitiveWarnings,
     },
     planReview: {
       graph,
@@ -702,6 +714,15 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
   };
   if (report) {
     workspace.understandingReport = report;
+  }
+  if (intelligence) {
+    workspace.projectIntelligence = intelligence;
+  }
+  if (readiness) {
+    workspace.scriptReadiness = readiness;
+  }
+  if (state.agent_graph_trace) {
+    workspace.agentGraphTrace = state.agent_graph_trace;
   }
   if (scriptDocument) {
     workspace.scriptDocument = scriptDocument;

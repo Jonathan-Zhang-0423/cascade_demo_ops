@@ -26,31 +26,32 @@ const (
 // ProjectContext is the full MVP input contract consumed by the graph flow.
 // Web mode uses GitRepoURL + ProductURL. Desktop mode uses LocalRepoPath + ProductURL.
 type ProjectContext struct {
-	ID                 string              `json:"id"`
-	SchemaVersion      string              `json:"schema_version,omitempty"`
-	Mode               AppMode             `json:"mode"`
-	Name               string              `json:"name,omitempty"`
-	ProductURL         string              `json:"product_url"`
-	DemoAccount        *DemoAccount        `json:"demo_account,omitempty"`
-	GitRepoURL         string              `json:"git_repo_url,omitempty"`
-	LocalRepoPath      string              `json:"local_repo_path,omitempty"`
-	ServerAccess       *ServerAccess       `json:"server_access,omitempty"`
-	ProductDescription string              `json:"product_description,omitempty"`
-	TargetAudience     string              `json:"target_audience"`
-	BrandTone          string              `json:"brand_tone,omitempty"`
-	MustShow           []string            `json:"must_show"`
-	MustNotShow        []string            `json:"must_not_show"`
-	ForbiddenPages     []string            `json:"forbidden_pages"`
-	ForbiddenData      []string            `json:"forbidden_data"`
-	Inputs             *ProjectInputBundle `json:"inputs,omitempty"`
-	Goals              []DemoGoal          `json:"goals,omitempty"`
-	Audiences          []AudienceProfile   `json:"audiences,omitempty"`
-	BrandKit           *BrandKit           `json:"brand_kit,omitempty"`
-	AccessPolicy       *AccessPolicy       `json:"access_policy,omitempty"`
-	SecurityPolicy     *SecurityPolicy     `json:"security_policy,omitempty"`
-	KnowledgeRefs      []EvidenceRef       `json:"knowledge_refs,omitempty"`
-	CreatedAt          time.Time           `json:"created_at,omitempty"`
-	UpdatedAt          time.Time           `json:"updated_at,omitempty"`
+	ID                  string                   `json:"id"`
+	SchemaVersion       string                   `json:"schema_version,omitempty"`
+	Mode                AppMode                  `json:"mode"`
+	Name                string                   `json:"name,omitempty"`
+	ProductURL          string                   `json:"product_url"`
+	DemoAccount         *DemoAccount             `json:"demo_account,omitempty"`
+	GitRepoURL          string                   `json:"git_repo_url,omitempty"`
+	LocalRepoPath       string                   `json:"local_repo_path,omitempty"`
+	ServerAccess        *ServerAccess            `json:"server_access,omitempty"`
+	ProductDescription  string                   `json:"product_description,omitempty"`
+	TargetAudience      string                   `json:"target_audience"`
+	BrandTone           string                   `json:"brand_tone,omitempty"`
+	MustShow            []string                 `json:"must_show"`
+	MustNotShow         []string                 `json:"must_not_show"`
+	ForbiddenPages      []string                 `json:"forbidden_pages"`
+	ForbiddenData       []string                 `json:"forbidden_data"`
+	Inputs              *ProjectInputBundle      `json:"inputs,omitempty"`
+	ProjectIntelligence *ProjectIntelligencePack `json:"project_intelligence,omitempty"`
+	Goals               []DemoGoal               `json:"goals,omitempty"`
+	Audiences           []AudienceProfile        `json:"audiences,omitempty"`
+	BrandKit            *BrandKit                `json:"brand_kit,omitempty"`
+	AccessPolicy        *AccessPolicy            `json:"access_policy,omitempty"`
+	SecurityPolicy      *SecurityPolicy          `json:"security_policy,omitempty"`
+	KnowledgeRefs       []EvidenceRef            `json:"knowledge_refs,omitempty"`
+	CreatedAt           time.Time                `json:"created_at,omitempty"`
+	UpdatedAt           time.Time                `json:"updated_at,omitempty"`
 }
 
 type DemoAccount struct {

@@ -1,0 +1,1542 @@
+package agents
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"sort"
+	"strings"
+	"time"
+
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/llm"
+	"cascade-demoops/backend/internal/model"
+)
+
+type ProjectUnderstandingTool interface {
+	Name() string
+	Execute(ctx context.Context, state *ProjectUnderstandingState) (ToolPatch, error)
+}
+
+type ToolPatch struct {
+	OutputSummary string
+	ChangedFields []string
+	Confidence    float64
+	EvidenceRefs  []model.EvidenceRef
+}
+
+type ProjectUnderstandingState struct {
+	Project       *model.ProjectContext
+	Brief         *model.RequirementBrief
+	CodeSnapshots []model.CodeUnderstandingSnapshot
+	PageSnapshots []model.PageUnderstandingSnapshot
+	Pack          *model.ProjectIntelligencePack
+}
+
+type ProjectIntelligenceGraph struct {
+	llm   llm.Client
+	tools []ProjectUnderstandingTool
+}
+
+func NewProjectIntelligenceGraph() *ProjectIntelligenceGraph {
+	return &ProjectIntelligenceGraph{tools: defaultProjectUnderstandingTools()}
+}
+
+func NewProjectIntelligenceGraphWithLLM(client llm.Client) *ProjectIntelligenceGraph {
+	return &ProjectIntelligenceGraph{llm: client, tools: defaultProjectUnderstandingTools()}
+}
+
+func (g *ProjectIntelligenceGraph) RunProjectIntelligence(
+	ctx context.Context,
+	project *model.ProjectContext,
+	brief *model.RequirementBrief,
+	codeSnapshots []model.CodeUnderstandingSnapshot,
+	pageSnapshots []model.PageUnderstandingSnapshot,
+) (*model.ProjectIntelligencePack, *model.ScriptReadinessReport, *model.AgentGraphTrace, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	if project == nil {
+		return nil, nil, nil, errors.New("project context is required")
+	}
+	now := time.Now().UTC()
+	pack := &model.ProjectIntelligencePack{
+		ID:                 "project_intelligence_" + project.ID,
+		ProjectID:          project.ID,
+		SchemaVersion:      model.ProjectIntelligencePackSchemaVersion,
+		InputFingerprints:  inputFingerprints(project, codeSnapshots, pageSnapshots),
+		SourceDigestSHA256: combinedSourceDigest(codeSnapshots),
+		Confidence:         0.74,
+		CreatedAt:          now,
+	}
+	state := &ProjectUnderstandingState{
+		Project:       project,
+		Brief:         brief,
+		CodeSnapshots: append([]model.CodeUnderstandingSnapshot{}, codeSnapshots...),
+		PageSnapshots: append([]model.PageUnderstandingSnapshot{}, pageSnapshots...),
+		Pack:          pack,
+	}
+	trace := &model.AgentGraphTrace{
+		ID:            "agent_graph_trace_" + project.ID,
+		ProjectID:     project.ID,
+		SchemaVersion: model.AgentGraphTraceSchemaVersion,
+		GraphName:     "ProjectIntelligenceGraph",
+		StartedAt:     now,
+	}
+	tools := g.tools
+	if len(tools) == 0 {
+		tools = defaultProjectUnderstandingTools()
+	}
+	for _, tool := range tools {
+		tool := tool
+		err := traceGraphStep(ctx, trace, safeID("node", tool.Name()), "", tool.Name(), graphToolInputSummary(state), func() (string, float64, []model.EvidenceRef, string, error) {
+			patch, err := tool.Execute(ctx, state)
+			return patch.OutputSummary, patch.Confidence, patch.EvidenceRefs, "", err
+		})
+		if err != nil {
+			trace.CompletedAt = time.Now().UTC()
+			trace.Summary = "ProjectIntelligenceGraph 执行失败：" + err.Error()
+			return nil, nil, trace, err
+		}
+	}
+	for _, step := range agentSynthesisTraceSteps(state) {
+		step := step
+		err := traceGraphStep(ctx, trace, step.nodeID, step.agent, "", step.inputSummary, func() (string, float64, []model.EvidenceRef, string, error) {
+			return step.outputSummary, step.confidence, state.Pack.EvidenceRefs, "", nil
+		})
+		if err != nil {
+			trace.CompletedAt = time.Now().UTC()
+			trace.Summary = "ProjectIntelligenceGraph 执行失败：" + err.Error()
+			return nil, nil, trace, err
+		}
+	}
+	modelTrace, err := g.enhancePackWithLLM(ctx, project, brief, pack)
+	if err != nil && !llm.IsDeterministicFallback(err) {
+		trace.CompletedAt = time.Now().UTC()
+		trace.Summary = "ProjectIntelligenceGraph 模型增强失败：" + err.Error()
+		return nil, nil, trace, err
+	}
+	if modelTrace != nil {
+		fallback := modelTrace.FallbackReason
+		output := "Kimi 方案规划模型参与项目理解图谱润色。"
+		if fallback != "" {
+			output = "模型增强不可用，保留确定性 ProjectIntelligencePack。"
+		}
+		_ = traceGraphStep(ctx, trace, "llm_project_intelligence_refine", "DemoDirectorAgent", "", "summary-only intelligence pack", func() (string, float64, []model.EvidenceRef, string, error) {
+			return output, 0.7, nil, fallback, nil
+		})
+		pack.EvidenceRefs = append(pack.EvidenceRefs, model.EvidenceRef{
+			ID:         "ev_model_project_intelligence_" + shortHash(modelTrace.Label()),
+			Kind:       model.EvidenceKindUserInput,
+			Summary:    "ProjectIntelligenceGraph 模型路由：" + modelTrace.Label(),
+			FieldPath:  "model_trace.project_intelligence",
+			Confidence: 0.68,
+		})
+	}
+	finalizeProjectIntelligencePack(pack)
+	trace.CompletedAt = time.Now().UTC()
+	trace.Summary = fmt.Sprintf("项目理解图谱完成：模块=%d，功能=%d，交互面=%d，候选路径=%d。", len(pack.Architecture.Modules), len(pack.FeatureCapabilities), len(pack.InteractionSurfaces), len(pack.DemoScenarioPlans))
+	project.ProjectIntelligence = pack
+	project.KnowledgeRefs = append(project.KnowledgeRefs, pack.EvidenceRefs...)
+	return pack, pack.ScriptReadinessReport, trace, nil
+}
+
+type projectUnderstandingToolFunc struct {
+	name string
+	run  func(ctx context.Context, state *ProjectUnderstandingState) (ToolPatch, error)
+}
+
+func (t projectUnderstandingToolFunc) Name() string { return t.name }
+
+func (t projectUnderstandingToolFunc) Execute(ctx context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	if err := ctx.Err(); err != nil {
+		return ToolPatch{}, err
+	}
+	return t.run(ctx, state)
+}
+
+func defaultProjectUnderstandingTools() []ProjectUnderstandingTool {
+	return []ProjectUnderstandingTool{
+		projectUnderstandingToolFunc{name: "RepoIndexTool", run: runRepoIndexTool},
+		projectUnderstandingToolFunc{name: "RouteMapTool", run: runRouteMapTool},
+		projectUnderstandingToolFunc{name: "ComponentMapTool", run: runComponentMapTool},
+		projectUnderstandingToolFunc{name: "APIContractTool", run: runAPIContractTool},
+		projectUnderstandingToolFunc{name: "DataModelTool", run: runDataModelTool},
+		projectUnderstandingToolFunc{name: "SensitiveSurfaceTool", run: runSensitiveSurfaceTool},
+		projectUnderstandingToolFunc{name: "FeatureTraceTool", run: runFeatureTraceTool},
+		projectUnderstandingToolFunc{name: "ScriptFeasibilityTool", run: runScriptFeasibilityTool},
+	}
+}
+
+func runRepoIndexTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	architecture := buildArchitectureMap(state.Project, state.CodeSnapshots, state.PageSnapshots)
+	state.Pack.Architecture = architecture
+	state.Pack.EvidenceRefs = append(state.Pack.EvidenceRefs, architecture.EvidenceRefs...)
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("识别仓库=%d、框架=%d、模块=%d、入口=%d。", architecture.RepositoryCount, len(architecture.Frameworks), len(architecture.Modules), len(architecture.EntryPointHashes)),
+		ChangedFields: []string{"architecture"},
+		Confidence:    architecture.Confidence,
+		EvidenceRefs:  architecture.EvidenceRefs,
+	}, nil
+}
+
+func runRouteMapTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	if state.Pack.Architecture == nil {
+		state.Pack.Architecture = buildArchitectureMap(state.Project, state.CodeSnapshots, state.PageSnapshots)
+	}
+	state.Pack.Architecture.RouteTree = routeTreeFromSnapshots(state.CodeSnapshots, state.PageSnapshots)
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("提取路由/页面路径 %d 个。", len(state.Pack.Architecture.RouteTree)),
+		ChangedFields: []string{"architecture.route_tree"},
+		Confidence:    0.72,
+		EvidenceRefs:  state.Pack.Architecture.EvidenceRefs,
+	}, nil
+}
+
+func runComponentMapTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	surfaces := interactionSurfacesFromSnapshots(state.Project, state.CodeSnapshots, state.PageSnapshots)
+	state.Pack.InteractionSurfaces = surfaces
+	for _, surface := range surfaces {
+		state.Pack.EvidenceRefs = append(state.Pack.EvidenceRefs, surface.EvidenceRefs...)
+	}
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("识别页面交互面 %d 个。", len(surfaces)),
+		ChangedFields: []string{"interaction_surfaces"},
+		Confidence:    0.72,
+		EvidenceRefs:  state.Pack.EvidenceRefs,
+	}, nil
+}
+
+func runAPIContractTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	contracts := apiContractsFromSnapshots(state.CodeSnapshots)
+	state.Pack.APIContracts = contracts
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("提取 API contract 摘要 %d 个。", len(contracts)),
+		ChangedFields: []string{"api_contracts"},
+		Confidence:    0.68,
+		EvidenceRefs:  state.Pack.EvidenceRefs,
+	}, nil
+}
+
+func runDataModelTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	dataModels := dataModelSummariesFromSnapshots(state.CodeSnapshots)
+	state.Pack.DataModels = dataModels
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("提取数据模型摘要 %d 个。", len(dataModels)),
+		ChangedFields: []string{"data_models"},
+		Confidence:    0.68,
+		EvidenceRefs:  state.Pack.EvidenceRefs,
+	}, nil
+}
+
+func runSensitiveSurfaceTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	safety := safetyReportFromProjectIntelligence(state.Project, state.CodeSnapshots, state.PageSnapshots)
+	state.Pack.SafetyReport = safety
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("安全审查发现 %d 项策略提示。", len(safety.PolicyFindings)),
+		ChangedFields: []string{"safety_report"},
+		Confidence:    0.74,
+		EvidenceRefs:  state.Pack.EvidenceRefs,
+	}, nil
+}
+
+func runFeatureTraceTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	capabilities := featureCapabilitiesFromState(state)
+	state.Pack.FeatureCapabilities = capabilities
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("追踪需求到功能能力 %d 个。", len(capabilities)),
+		ChangedFields: []string{"feature_capabilities"},
+		Confidence:    0.76,
+		EvidenceRefs:  state.Pack.EvidenceRefs,
+	}, nil
+}
+
+func runScriptFeasibilityTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	scenarios := demoScenarioPlansFromState(state)
+	readiness := scriptReadinessFromState(state, scenarios)
+	state.Pack.DemoScenarioPlans = scenarios
+	state.Pack.ScriptReadinessReport = readiness
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("生成候选演示路径 %d 条；脚本可继续=%t。", len(scenarios), readiness.CanProceed),
+		ChangedFields: []string{"demo_scenario_plans", "script_readiness_report"},
+		Confidence:    readiness.Confidence,
+		EvidenceRefs:  readiness.EvidenceRefs,
+	}, nil
+}
+
+type agentSynthesisStep struct {
+	nodeID        string
+	agent         string
+	inputSummary  string
+	outputSummary string
+	confidence    float64
+}
+
+func agentSynthesisTraceSteps(state *ProjectUnderstandingState) []agentSynthesisStep {
+	pack := state.Pack
+	return []agentSynthesisStep{
+		{
+			nodeID:        "architecture_cartographer",
+			agent:         "ArchitectureCartographerAgent",
+			inputSummary:  "repo index + route map",
+			outputSummary: fmt.Sprintf("架构地图包含 %d 个模块和 %d 个路由节点。", len(pack.Architecture.Modules), len(pack.Architecture.RouteTree)),
+			confidence:    pack.Architecture.Confidence,
+		},
+		{
+			nodeID:        "feature_miner",
+			agent:         "FeatureMinerAgent",
+			inputSummary:  "requirement brief + components + routes",
+			outputSummary: fmt.Sprintf("功能能力卡片 %d 个，均绑定摘要证据。", len(pack.FeatureCapabilities)),
+			confidence:    0.76,
+		},
+		{
+			nodeID:        "ux_flow",
+			agent:         "UXFlowAgent",
+			inputSummary:  "page snapshots + selectors + actions",
+			outputSummary: fmt.Sprintf("交互面 %d 个，包含 selector/wait hint。", len(pack.InteractionSurfaces)),
+			confidence:    0.72,
+		},
+		{
+			nodeID:        "api_data",
+			agent:         "APIDataAgent",
+			inputSummary:  "api contracts + data models",
+			outputSummary: fmt.Sprintf("API 摘要 %d 个，数据模型 %d 个。", len(pack.APIContracts), len(pack.DataModels)),
+			confidence:    0.7,
+		},
+		{
+			nodeID:        "security_reviewer",
+			agent:         "SecurityReviewerAgent",
+			inputSummary:  "sensitive fields + forbidden policy",
+			outputSummary: fmt.Sprintf("安全策略提示 %d 项，masked fields=%d。", len(pack.SafetyReport.PolicyFindings), len(pack.SafetyReport.MaskedFields)),
+			confidence:    0.74,
+		},
+		{
+			nodeID:        "demo_director",
+			agent:         "DemoDirectorAgent",
+			inputSummary:  "feature capabilities + readiness",
+			outputSummary: fmt.Sprintf("候选 workflow %d 条，推荐 %s。", len(pack.DemoScenarioPlans), firstScenarioName(pack.DemoScenarioPlans)),
+			confidence:    0.78,
+		},
+		{
+			nodeID:        "script_engineer",
+			agent:         "ScriptEngineerAgent",
+			inputSummary:  "candidate workflows + interaction surface",
+			outputSummary: fmt.Sprintf("建议 stage=%d，目标时长=%d 秒。", pack.ScriptReadinessReport.SuggestedStageCount, pack.ScriptReadinessReport.SuggestedTargetDurationSec),
+			confidence:    pack.ScriptReadinessReport.Confidence,
+		},
+		{
+			nodeID:        "critic_verifier",
+			agent:         "CriticVerifierAgent",
+			inputSummary:  "architecture + workflows + safety + readiness",
+			outputSummary: criticOutputSummary(pack.ScriptReadinessReport),
+			confidence:    0.78,
+		},
+	}
+}
+
+func buildArchitectureMap(project *model.ProjectContext, snapshots []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) *model.ProjectArchitectureMap {
+	refs := []model.EvidenceRef{}
+	languages := []string{}
+	frameworks := []string{}
+	entryHashes := []string{}
+	modules := []model.ProjectModule{}
+	repositoryRefs := []string{}
+	sourceHashParts := []string{}
+	repoCount := 0
+	if project != nil && project.Inputs != nil {
+		repoCount = len(project.Inputs.Repositories)
+		for i, repo := range project.Inputs.Repositories {
+			ref := firstNonEmpty(repo.LastSnapshotID, repo.URL, repo.LocalPath, fmt.Sprintf("repo_%d", i+1))
+			repositoryRefs = append(repositoryRefs, "repo_"+shortHash(ref))
+			if repo.LocalPath != "" {
+				sourceHashParts = append(sourceHashParts, repo.LocalPath)
+			}
+			if repo.URL != "" {
+				sourceHashParts = append(sourceHashParts, repo.URL)
+			}
+		}
+	}
+	if repoCount == 0 {
+		repoCount = len(snapshots)
+	}
+	for index, snapshot := range snapshots {
+		refs = append(refs, snapshot.EvidenceRefs...)
+		languages = append(languages, snapshot.Languages...)
+		frameworks = append(frameworks, snapshot.Frameworks...)
+		entryHashes = append(entryHashes, snapshot.EntrypointHashes...)
+		if snapshot.SourceDigestSHA256 != "" {
+			sourceHashParts = append(sourceHashParts, snapshot.SourceDigestSHA256)
+		}
+		routeRefs := make([]string, 0, len(snapshot.Routes))
+		for _, route := range snapshot.Routes {
+			routeRefs = append(routeRefs, firstNonEmpty(route.ID, safeID("route", route.Path)))
+		}
+		componentRefs := make([]string, 0, len(snapshot.Components))
+		for _, component := range snapshot.Components {
+			componentRefs = append(componentRefs, firstNonEmpty(component.ID, safeID("component", component.Name)))
+		}
+		apiRefs := make([]string, 0, len(snapshot.APIEndpoints))
+		for _, endpoint := range snapshot.APIEndpoints {
+			apiRefs = append(apiRefs, firstNonEmpty(endpoint.ID, safeID("api", endpoint.Path)))
+		}
+		modelRefs := make([]string, 0, len(snapshot.DataModels))
+		for _, dataModel := range snapshot.DataModels {
+			modelRefs = append(modelRefs, firstNonEmpty(dataModel.ID, safeID("model", dataModel.Name)))
+		}
+		sourceHashes := make([]string, 0, len(snapshot.PathDigests))
+		for _, digest := range snapshot.PathDigests {
+			if digest.PathHashSHA256 != "" {
+				sourceHashes = append(sourceHashes, digest.PathHashSHA256)
+			}
+		}
+		modules = append(modules, model.ProjectModule{
+			ID:               "module_" + firstNonEmpty(snapshot.RepositoryID, snapshot.ID, fmt.Sprintf("%d", index+1)),
+			Name:             firstNonEmpty(snapshot.RepositoryID, snapshot.ID, fmt.Sprintf("代码模块 %d", index+1)),
+			Kind:             moduleKind(snapshot.Frameworks, snapshot.Languages),
+			Responsibility:   moduleResponsibility(snapshot),
+			RepositoryRefID:  firstNonEmpty(snapshot.RepositoryID, "repo_"+shortHash(snapshot.SourceDigestSHA256)),
+			FileCount:        snapshot.FileCount,
+			SourcePathHashes: limitStrings(uniqueStrings(sourceHashes), 40),
+			EntryPointHashes: append([]string{}, snapshot.EntrypointHashes...),
+			RouteRefs:        uniqueStrings(routeRefs),
+			ComponentRefs:    uniqueStrings(componentRefs),
+			APIRefs:          uniqueStrings(apiRefs),
+			DataModelRefs:    uniqueStrings(modelRefs),
+			EvidenceRefs:     snapshot.EvidenceRefs,
+			Confidence:       0.72,
+		})
+	}
+	frameworks = uniqueStrings(frameworks)
+	languages = uniqueStrings(languages)
+	return &model.ProjectArchitectureMap{
+		ID:                "architecture_" + project.ID,
+		ProjectID:         project.ID,
+		SchemaVersion:     model.ProjectIntelligencePackSchemaVersion,
+		RepositoryCount:   repoCount,
+		RepositoryRefIDs:  uniqueStrings(repositoryRefs),
+		WorkspaceRootHash: hashString(strings.Join(sourceHashParts, "|")),
+		PackageManagers:   packageManagersFromFrameworks(frameworks, languages),
+		Frameworks:        frameworks,
+		Languages:         languages,
+		RuntimeTargets:    runtimeTargetsFromFrameworks(frameworks, languages),
+		EntryPointHashes:  uniqueStrings(entryHashes),
+		Modules:           modules,
+		RouteTree:         routeTreeFromSnapshots(snapshots, pages),
+		Summary:           architectureSummary(frameworks, languages, modules),
+		EvidenceRefs:      uniqueEvidenceRefs(refs),
+		Confidence:        architectureConfidence(snapshots),
+	}
+}
+
+func routeTreeFromSnapshots(snapshots []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) []model.ArchitectureRouteNode {
+	nodes := []model.ArchitectureRouteNode{}
+	seen := map[string]bool{}
+	for _, snapshot := range snapshots {
+		for _, route := range snapshot.Routes {
+			path := strings.TrimSpace(route.Path)
+			if path == "" || seen[path] {
+				continue
+			}
+			seen[path] = true
+			nodes = append(nodes, model.ArchitectureRouteNode{
+				ID:            firstNonEmpty(route.ID, safeID("route", path)),
+				Path:          path,
+				Name:          firstNonEmpty(route.Name, routeNameFromPath(path)),
+				ParentPath:    parentRoutePath(path),
+				ComponentRefs: append([]string{}, route.ComponentRefs...),
+				AuthRequired:  route.AuthRequired,
+				EvidenceRefs:  route.EvidenceRefs,
+				Confidence:    route.Confidence,
+			})
+		}
+	}
+	for _, page := range pages {
+		path := pathFromURL(page.URL)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		nodes = append(nodes, model.ArchitectureRouteNode{
+			ID:           firstNonEmpty(page.ID, safeID("route", path)),
+			Path:         path,
+			Name:         firstNonEmpty(page.Title, page.PageRole, routeNameFromPath(path)),
+			ParentPath:   parentRoutePath(path),
+			EvidenceRefs: page.EvidenceRefs,
+			Confidence:   page.Confidence,
+		})
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Path < nodes[j].Path })
+	return nodes
+}
+
+func interactionSurfacesFromSnapshots(project *model.ProjectContext, snapshots []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) []model.InteractionSurface {
+	surfaces := []model.InteractionSurface{}
+	for i, page := range pages {
+		actions := []model.UIActionRef{}
+		selectors := append([]model.SelectorCandidate{}, page.StableSelectors...)
+		for _, action := range page.Actions {
+			actionID := firstNonEmpty(action.ID, safeID("action", action.Label+action.SelectorHint))
+			actions = append(actions, model.UIActionRef{
+				ID:           actionID,
+				Label:        action.Label,
+				Kind:         firstNonEmpty(action.Kind, "inspect"),
+				Selector:     action.SelectorHint,
+				TargetRoute:  action.TargetURL,
+				EvidenceRefs: action.EvidenceRefs,
+			})
+			if action.SelectorHint != "" {
+				selectors = append(selectors, model.SelectorCandidate{
+					Kind:           "css",
+					Value:          action.SelectorHint,
+					Confidence:     action.Confidence,
+					StabilityScore: 0.7,
+					Source:         "page_reader",
+					EvidenceRefs:   action.EvidenceRefs,
+				})
+			}
+		}
+		surfaces = append(surfaces, model.InteractionSurface{
+			ID:              firstNonEmpty(page.ID, fmt.Sprintf("surface_page_%d", i+1)),
+			PageID:          page.ID,
+			URL:             page.URL,
+			Title:           firstNonEmpty(page.Title, "产品页面"),
+			PageRole:        firstNonEmpty(page.PageRole, "product_page"),
+			Actions:         actions,
+			StableSelectors: uniqueSelectorCandidates(selectors),
+			States:          page.States,
+			WaitHints:       waitHintsForSurface(page.URL, selectors, page.States),
+			FeatureRefs:     featureRefsFromPageActions(page.Actions),
+			RiskFindings:    page.RiskFindings,
+			EvidenceRefs:    page.EvidenceRefs,
+			Confidence:      page.Confidence,
+		})
+	}
+	if len(surfaces) == 0 {
+		selectors := selectorsFromCodeSnapshots(snapshots)
+		actions := []model.UIActionRef{}
+		for i, selector := range limitSelectorCandidates(selectors, 12) {
+			actions = append(actions, model.UIActionRef{
+				ID:       fmt.Sprintf("action_selector_%d", i+1),
+				Label:    "检查稳定选择器",
+				Kind:     "inspect",
+				Selector: selector.Value,
+			})
+		}
+		surfaces = append(surfaces, model.InteractionSurface{
+			ID:              "surface_code_summary",
+			URL:             firstNonEmpty(project.ProductURL, "input://product_context"),
+			Title:           "代码摘要交互面",
+			PageRole:        "inspect_only",
+			Actions:         actions,
+			StableSelectors: selectors,
+			States:          []string{"structure_summary_available"},
+			WaitHints:       []string{"等待 body/main 可见", "截图前保持页面状态稳定"},
+			EvidenceRefs:    codeEvidenceRefs(snapshots),
+			Confidence:      0.62,
+		})
+	}
+	return surfaces
+}
+
+func apiContractsFromSnapshots(snapshots []model.CodeUnderstandingSnapshot) []model.APIContractSummary {
+	contracts := []model.APIContractSummary{}
+	for _, snapshot := range snapshots {
+		sensitive := sensitiveFieldNames(snapshot.SensitiveFields)
+		for _, endpoint := range snapshot.APIEndpoints {
+			path := strings.TrimSpace(endpoint.Path)
+			if path == "" {
+				continue
+			}
+			contracts = append(contracts, model.APIContractSummary{
+				ID:                 firstNonEmpty(endpoint.ID, safeID("api", path)),
+				Method:             firstNonEmpty(endpoint.Method, inferMethodFromPath(path)),
+				Path:               path,
+				Purpose:            "用于支撑页面数据加载或业务动作的 API 摘要。",
+				AuthRequired:       apiLikelyRequiresAuth(path, sensitive),
+				RequestFields:      apiFieldHints(path),
+				ResponseFields:     []string{"status", "data", "message"},
+				SensitiveFields:    sensitive,
+				FilePathHashSHA256: endpoint.FilePathHashSHA256,
+				EvidenceRefs:       endpoint.EvidenceRefs,
+				Confidence:         endpoint.Confidence,
+			})
+		}
+	}
+	return dedupeAPIContracts(contracts)
+}
+
+func dataModelSummariesFromSnapshots(snapshots []model.CodeUnderstandingSnapshot) []model.ProjectDataModelSummary {
+	out := []model.ProjectDataModelSummary{}
+	for _, snapshot := range snapshots {
+		sensitive := sensitiveFieldNames(snapshot.SensitiveFields)
+		for _, dataModel := range snapshot.DataModels {
+			out = append(out, model.ProjectDataModelSummary{
+				ID:                   firstNonEmpty(dataModel.ID, safeID("model", dataModel.Name)),
+				Name:                 dataModel.Name,
+				Kind:                 firstNonEmpty(dataModel.Kind, "domain_model"),
+				Fields:               append([]model.DataField{}, dataModel.Fields...),
+				SensitiveFields:      sensitiveModelFields(dataModel, sensitive),
+				SourcePathHashSHA256: dataModel.SourcePathHashSHA256,
+				EvidenceRefs:         dataModel.EvidenceRefs,
+				Confidence:           dataModel.Confidence,
+			})
+		}
+	}
+	return dedupeDataModels(out)
+}
+
+func safetyReportFromProjectIntelligence(project *model.ProjectContext, snapshots []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) *model.SafetyReport {
+	findings := []model.AgentFinding{}
+	maskedFields := append([]string{}, project.ForbiddenData...)
+	for _, snapshot := range snapshots {
+		for _, sensitive := range snapshot.SensitiveFields {
+			maskedFields = append(maskedFields, sensitive.Name)
+			findings = append(findings, model.AgentFinding{
+				ID:              "finding_project_intel_sensitive_" + shortHash(sensitive.Name+sensitive.Kind),
+				Kind:            "sensitive_surface",
+				Severity:        model.FindingSeverityWarning,
+				Title:           "敏感字段需打码",
+				Summary:         "代码结构摘要中发现敏感字段：" + sensitive.Name,
+				Rationale:       sensitive.Reason,
+				SuggestedAction: "将相关字段加入 redaction policy，并避免在旁白/截图中暴露原值。",
+				EvidenceRefs:    sensitive.EvidenceRefs,
+				Confidence:      0.74,
+			})
+		}
+	}
+	for _, page := range pages {
+		findings = append(findings, page.RiskFindings...)
+	}
+	for _, page := range project.ForbiddenPages {
+		findings = append(findings, model.AgentFinding{
+			ID:              "finding_forbidden_page_" + shortHash(page),
+			Kind:            "forbidden_page",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "禁止访问页面：" + page,
+			SuggestedAction: "GraphBuilderAgent 生成脚本时必须避开该路径。",
+			Confidence:      0.9,
+		})
+	}
+	return &model.SafetyReport{
+		AllowedToProceed: true,
+		PolicyFindings:   findings,
+		MaskedFields:     uniqueStrings(maskedFields),
+		Notes:            []string{"ProjectIntelligenceGraph 只保存结构摘要、hash、selector 和证据引用。"},
+	}
+}
+
+func featureCapabilitiesFromState(state *ProjectUnderstandingState) []model.FeatureCapability {
+	capabilities := []model.FeatureCapability{}
+	brief := state.Brief
+	objective := "展示产品核心价值路径"
+	if brief != nil {
+		objective = firstNonEmpty(brief.Objective, objective)
+	}
+	capabilities = append(capabilities, model.FeatureCapability{
+		ID:                   "capability_primary_value",
+		Name:                 firstNonEmpty(scenarioFromBrief(brief), "核心产品价值"),
+		Kind:                 "hero",
+		UserValue:            objective,
+		BusinessValue:        firstNonEmpty(primaryOutcomeFromBrief(brief), objective),
+		Priority:             "hero",
+		SupportingRouteRefs:  routeIDs(state.Pack.Architecture.RouteTree, 6),
+		SupportingPageRefs:   surfaceIDs(state.Pack.InteractionSurfaces, 4),
+		SupportingComponents: moduleComponentRefs(state.Pack.Architecture.Modules, 10),
+		SupportingAPIs:       apiIDs(state.Pack.APIContracts, 8),
+		SupportingDataModels: dataModelIDs(state.Pack.DataModels, 8),
+		KeyActions:           keyActionsFromBriefAndSurfaces(brief, state.Pack.InteractionSurfaces),
+		Risks:                riskNotesFromSafety(state.Pack.SafetyReport),
+		EvidenceRefs:         state.Pack.EvidenceRefs,
+		DemoValueScore:       0.9,
+		Confidence:           0.78,
+	})
+	for _, module := range state.Pack.Architecture.Modules {
+		if len(capabilities) >= 8 {
+			break
+		}
+		if len(module.ComponentRefs) == 0 && len(module.RouteRefs) == 0 {
+			continue
+		}
+		capabilities = append(capabilities, model.FeatureCapability{
+			ID:                   "capability_module_" + shortHash(module.ID),
+			Name:                 firstNonEmpty(module.Name, "项目模块"),
+			Kind:                 module.Kind,
+			UserValue:            "该模块可作为演示中可解释的产品能力支撑。",
+			BusinessValue:        module.Responsibility,
+			Priority:             "supporting",
+			SupportingRouteRefs:  limitStrings(module.RouteRefs, 6),
+			SupportingComponents: limitStrings(module.ComponentRefs, 8),
+			SupportingAPIs:       limitStrings(module.APIRefs, 6),
+			SupportingDataModels: limitStrings(module.DataModelRefs, 6),
+			KeyActions:           []string{"inspect", "capture", "validate"},
+			EvidenceRefs:         module.EvidenceRefs,
+			DemoValueScore:       0.7,
+			Confidence:           module.Confidence,
+		})
+	}
+	return capabilities
+}
+
+func demoScenarioPlansFromState(state *ProjectUnderstandingState) []model.DemoScenarioPlan {
+	brief := state.Brief
+	useCase := model.DemoUseCaseLaunch
+	if brief != nil && len(brief.UseCases) > 0 {
+		useCase = brief.UseCases[0]
+	} else if state.Project != nil && len(state.Project.Goals) > 0 {
+		useCase = state.Project.Goals[0].UseCase
+	}
+	featureRefs := capabilityIDs(state.Pack.FeatureCapabilities, 5)
+	pageRefs := surfaceIDs(state.Pack.InteractionSurfaces, 5)
+	routeRefs := routeIDs(state.Pack.Architecture.RouteTree, 6)
+	objective := firstNonEmpty(objectiveFromBrief(brief), state.Project.ProductDescription, "生成可审批、可执行的产品演示路径。")
+	value := firstNonEmpty(primaryOutcomeFromBrief(brief), objective)
+	stageCount := suggestedStageCount(state.Pack)
+	duration := maxInt(stageCount*12, 60)
+	plans := []model.DemoScenarioPlan{
+		{
+			ID:                   "scenario_primary_script_ready",
+			Name:                 firstNonEmpty(scenarioFromBrief(brief), "产品演示") + "主线演示",
+			UseCase:              useCase,
+			AudienceID:           "audience_primary",
+			Objective:            objective,
+			ValueProposition:     value,
+			FeatureRefs:          featureRefs,
+			PageRefs:             pageRefs,
+			RouteRefs:            routeRefs,
+			EstimatedSteps:       stageCount,
+			EstimatedDurationSec: duration,
+			NarrativeBeats:       narrativeBeatsFromPack(state.Pack),
+			RiskNotes:            riskNotesFromSafety(state.Pack.SafetyReport),
+			EvidenceRefs:         state.Pack.EvidenceRefs,
+			Feasibility:          0.78,
+			ValueScore:           0.88,
+			Confidence:           0.78,
+		},
+		{
+			ID:                   "scenario_inspect_only_fallback",
+			Name:                 "结构摘要检查型演示",
+			UseCase:              useCase,
+			AudienceID:           "audience_primary",
+			Objective:            "在 URL 或截图不足时，先用代码结构摘要解释功能能力和可执行性。",
+			ValueProposition:     "保障缺少页面材料时仍能生成可审批的 inspect-only 脚本包。",
+			FeatureRefs:          featureRefs[:minInt(len(featureRefs), 3)],
+			RouteRefs:            routeRefs[:minInt(len(routeRefs), 4)],
+			EstimatedSteps:       4,
+			EstimatedDurationSec: 45,
+			NarrativeBeats:       []string{"说明输入材料", "解释架构和功能能力", "标记缺失页面材料", "输出可审批脚本包"},
+			RiskNotes:            []string{"无可访问 URL 时不能进入真实浏览器录制，只能生成检查型脚本。"},
+			EvidenceRefs:         state.Pack.EvidenceRefs,
+			Feasibility:          0.66,
+			ValueScore:           0.62,
+			Confidence:           0.66,
+		},
+	}
+	if len(state.Pack.FeatureCapabilities) >= 3 {
+		plans = append(plans, model.DemoScenarioPlan{
+			ID:                   "scenario_feature_deep_dive",
+			Name:                 "核心能力深挖演示",
+			UseCase:              useCase,
+			AudienceID:           "audience_primary",
+			Objective:            "围绕最有价值的功能能力生成多 stage 演示。",
+			ValueProposition:     value,
+			FeatureRefs:          featureRefs,
+			PageRefs:             pageRefs,
+			RouteRefs:            routeRefs,
+			EstimatedSteps:       maxInt(stageCount, 5),
+			EstimatedDurationSec: maxInt(duration, 75),
+			NarrativeBeats:       append(narrativeBeatsFromPack(state.Pack), "展示最终业务结果"),
+			RiskNotes:            riskNotesFromSafety(state.Pack.SafetyReport),
+			EvidenceRefs:         state.Pack.EvidenceRefs,
+			Feasibility:          0.74,
+			ValueScore:           0.82,
+			Confidence:           0.72,
+		})
+	}
+	return plans
+}
+
+func scriptReadinessFromState(state *ProjectUnderstandingState, scenarios []model.DemoScenarioPlan) *model.ScriptReadinessReport {
+	blockers := []model.AgentFinding{}
+	warnings := []model.AgentFinding{}
+	missingInputs := []string{}
+	hasCode := codeFileCountFromSnapshots(state.CodeSnapshots) > 0 || len(state.CodeSnapshots) > 0
+	hasPage := len(state.PageSnapshots) > 0
+	hasURL := strings.TrimSpace(state.Project.ProductURL) != ""
+	if !hasURL {
+		missingInputs = append(missingInputs, "product_url")
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_missing_product_url",
+			Kind:            "missing_product_url",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "未提供可访问产品 URL，将降级生成 inspect-only 或截图驱动脚本。",
+			SuggestedAction: "补充测试环境 URL 可以生成真实浏览器导航步骤。",
+			Confidence:      0.8,
+		})
+	}
+	if !hasCode {
+		missingInputs = append(missingInputs, "local_repo_path")
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_missing_code_summary",
+			Kind:            "missing_code_summary",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "代码结构摘要不足，功能能力与 selector 证据会偏弱。",
+			SuggestedAction: "提供本地项目根目录以便 CodeReaderAgent 只读扫描。",
+			Confidence:      0.76,
+		})
+	}
+	if !hasPage {
+		missingInputs = append(missingInputs, "page_snapshot")
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_missing_page_snapshot",
+			Kind:            "missing_page_snapshot",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "缺少页面截图/DOM 摘要，视觉叙事和等待条件需要保守生成。",
+			SuggestedAction: "后续接入 Playwright 深度扫描或手动上传截图。",
+			Confidence:      0.72,
+		})
+	}
+	if !hasURL && !hasCode && !hasPage {
+		blockers = append(blockers, model.AgentFinding{
+			ID:              "readiness_no_executable_evidence",
+			Kind:            "no_executable_evidence",
+			Severity:        model.FindingSeverityBlocking,
+			Summary:         "缺少 URL、代码摘要和页面材料，无法生成可信执行路径。",
+			SuggestedAction: "至少补充一个产品 URL、本地项目根目录或页面截图。",
+			Confidence:      0.92,
+		})
+	}
+	selectorCoverage := selectorCoverage(state.Pack)
+	if selectorCoverage < 0.35 {
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_low_selector_coverage",
+			Kind:            "low_selector_coverage",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "稳定 selector 覆盖不足，云端执行时更容易需要修复闭环。",
+			SuggestedAction: "优先补充 data-testid、role/text selector 或页面可访问性摘要。",
+			Confidence:      0.78,
+		})
+	}
+	credentialCoverage := !routesNeedAuth(state.Pack.Architecture.RouteTree) || hasProjectCredential(state.Project)
+	if !credentialCoverage {
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_auth_without_credential",
+			Kind:            "credential_scope_missing",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "部分路由可能需要登录，但当前未声明 credential secret_ref。",
+			SuggestedAction: "审批上传前补充凭据授权范围，禁止在脚本中写入明文账号密码。",
+			Confidence:      0.74,
+		})
+	}
+	recommended := firstScenario(scenarios)
+	stageCount := maxInt(4, recommended.EstimatedSteps)
+	targetDuration := maxInt(recommended.EstimatedDurationSec, stageCount*12)
+	canProceed := len(blockers) == 0
+	summary := "脚本生成可继续，需在审批页复核安全策略和凭据范围。"
+	if !canProceed {
+		summary = "脚本生成存在阻塞，需要补充输入材料。"
+	}
+	return &model.ScriptReadinessReport{
+		ID:                         "script_readiness_" + state.Project.ID,
+		ProjectID:                  state.Project.ID,
+		SchemaVersion:              model.ScriptReadinessReportSchemaVersion,
+		CanProceed:                 canProceed,
+		Summary:                    summary,
+		Blockers:                   blockers,
+		Warnings:                   warnings,
+		MissingInputs:              uniqueStrings(missingInputs),
+		RepairSuggestions:          readinessRepairSuggestions(blockers, warnings),
+		RecommendedScenarioID:      recommended.ID,
+		RecommendedScenarioName:    recommended.Name,
+		SuggestedStageCount:        stageCount,
+		SuggestedTargetDurationSec: targetDuration,
+		SelectorCoverage:           selectorCoverage,
+		CredentialCoverage:         credentialCoverage,
+		EvidenceRefs:               state.Pack.EvidenceRefs,
+		Confidence:                 0.78,
+		CreatedAt:                  time.Now().UTC(),
+	}
+}
+
+type projectIntelligenceLLMOutput struct {
+	Summary   string `json:"summary"`
+	Scenarios []struct {
+		ID               string              `json:"id"`
+		Name             string              `json:"name"`
+		Objective        string              `json:"objective"`
+		ValueProposition string              `json:"value_proposition"`
+		NarrativeBeats   flexibleStringSlice `json:"narrative_beats"`
+		RiskNotes        flexibleStringSlice `json:"risk_notes"`
+		Confidence       float64             `json:"confidence"`
+	} `json:"scenarios"`
+	ReadinessNotes flexibleStringSlice `json:"readiness_notes"`
+	Confidence     float64             `json:"confidence"`
+}
+
+func (g *ProjectIntelligenceGraph) enhancePackWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, pack *model.ProjectIntelligencePack) (*llm.CallTrace, error) {
+	if g == nil || g.llm == nil || project == nil || pack == nil {
+		return nil, nil
+	}
+	payload := map[string]any{
+		"target_audience": project.TargetAudience,
+		"brief":           brief,
+		"architecture": map[string]any{
+			"summary":       pack.Architecture.Summary,
+			"frameworks":    pack.Architecture.Frameworks,
+			"languages":     pack.Architecture.Languages,
+			"module_count":  len(pack.Architecture.Modules),
+			"route_count":   len(pack.Architecture.RouteTree),
+			"source_digest": pack.SourceDigestSHA256,
+		},
+		"feature_capabilities": compactCapabilities(pack.FeatureCapabilities),
+		"interaction_surfaces": compactSurfaces(pack.InteractionSurfaces),
+		"api_count":            len(pack.APIContracts),
+		"data_model_count":     len(pack.DataModels),
+		"script_readiness":     pack.ScriptReadinessReport,
+	}
+	data, _ := json.Marshal(payload)
+	var output projectIntelligenceLLMOutput
+	trace, err := g.llm.GenerateJSON(ctx, config.ModelTaskPlanning, llm.JSONRequest{
+		System:       "你是 Cascade DemoOps 的项目智能理解 graph critic。请只基于结构摘要、hash、selector 和 evidence ref 润色项目理解摘要与候选演示路径。禁止输出源码、绝对路径、密钥或完整 HTML。",
+		User:         string(data),
+		SchemaName:   "ProjectIntelligencePatch",
+		ResponseHint: "返回字段：summary, scenarios[{id,name,objective,value_proposition,narrative_beats,risk_notes,confidence}], readiness_notes, confidence。",
+		MaxTokens:    1800,
+		Temperature:  0.18,
+	}, &output)
+	if err != nil {
+		return trace, err
+	}
+	if output.Summary != "" && pack.Architecture != nil {
+		pack.Architecture.Summary = output.Summary
+	}
+	for _, patch := range output.Scenarios {
+		for i := range pack.DemoScenarioPlans {
+			if patch.ID != "" && pack.DemoScenarioPlans[i].ID != patch.ID {
+				continue
+			}
+			if patch.Name != "" {
+				pack.DemoScenarioPlans[i].Name = patch.Name
+			}
+			if patch.Objective != "" {
+				pack.DemoScenarioPlans[i].Objective = patch.Objective
+			}
+			if patch.ValueProposition != "" {
+				pack.DemoScenarioPlans[i].ValueProposition = patch.ValueProposition
+			}
+			pack.DemoScenarioPlans[i].NarrativeBeats = uniqueStrings(append(pack.DemoScenarioPlans[i].NarrativeBeats, stringSlice(patch.NarrativeBeats)...))
+			pack.DemoScenarioPlans[i].RiskNotes = uniqueStrings(append(pack.DemoScenarioPlans[i].RiskNotes, stringSlice(patch.RiskNotes)...))
+			if patch.Confidence > 0 {
+				pack.DemoScenarioPlans[i].Confidence = patch.Confidence
+			}
+			break
+		}
+	}
+	if pack.ScriptReadinessReport != nil {
+		pack.ScriptReadinessReport.RepairSuggestions = uniqueStrings(append(pack.ScriptReadinessReport.RepairSuggestions, stringSlice(output.ReadinessNotes)...))
+	}
+	if output.Confidence > 0 {
+		pack.Confidence = output.Confidence
+	}
+	return trace, nil
+}
+
+func traceGraphStep(
+	ctx context.Context,
+	trace *model.AgentGraphTrace,
+	nodeID string,
+	agent string,
+	tool string,
+	inputSummary string,
+	work func() (string, float64, []model.EvidenceRef, string, error),
+) error {
+	started := time.Now().UTC()
+	output, confidence, evidenceRefs, fallback, err := work()
+	completed := time.Now().UTC()
+	status := "completed"
+	if err != nil {
+		status = "failed"
+		output = err.Error()
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil && err == nil {
+		err = ctxErr
+		status = "failed"
+		output = ctxErr.Error()
+	}
+	trace.Steps = append(trace.Steps, model.AgentGraphTraceStep{
+		ID:             "trace_step_" + shortHash(nodeID+agent+tool+started.String()),
+		NodeID:         nodeID,
+		Agent:          agent,
+		Tool:           tool,
+		Status:         status,
+		InputSummary:   inputSummary,
+		OutputSummary:  output,
+		ElapsedMS:      completed.Sub(started).Milliseconds(),
+		Confidence:     confidence,
+		FallbackReason: fallback,
+		EvidenceRefs:   uniqueEvidenceRefs(evidenceRefs),
+		StartedAt:      started,
+		CompletedAt:    completed,
+	})
+	return err
+}
+
+func finalizeProjectIntelligencePack(pack *model.ProjectIntelligencePack) {
+	if pack == nil {
+		return
+	}
+	pack.EvidenceRefs = uniqueEvidenceRefs(pack.EvidenceRefs)
+	if pack.Architecture == nil {
+		return
+	}
+	if pack.Confidence <= 0 {
+		pack.Confidence = pack.Architecture.Confidence
+	}
+}
+
+func graphToolInputSummary(state *ProjectUnderstandingState) string {
+	return fmt.Sprintf("brief=%t code_snapshots=%d page_snapshots=%d", state.Brief != nil, len(state.CodeSnapshots), len(state.PageSnapshots))
+}
+
+func architectureSummary(frameworks []string, languages []string, modules []model.ProjectModule) string {
+	parts := []string{}
+	if len(frameworks) > 0 {
+		parts = append(parts, "框架："+strings.Join(frameworks, "、"))
+	}
+	if len(languages) > 0 {
+		parts = append(parts, "语言："+strings.Join(languages, "、"))
+	}
+	parts = append(parts, fmt.Sprintf("模块边界：%d 个", len(modules)))
+	return strings.Join(parts, "；")
+}
+
+func architectureConfidence(snapshots []model.CodeUnderstandingSnapshot) float64 {
+	if len(snapshots) == 0 {
+		return 0.54
+	}
+	files := codeFileCountFromSnapshots(snapshots)
+	switch {
+	case files > 100:
+		return 0.82
+	case files > 20:
+		return 0.76
+	default:
+		return 0.68
+	}
+}
+
+func moduleKind(frameworks []string, languages []string) string {
+	values := strings.ToLower(strings.Join(append(frameworks, languages...), "|"))
+	switch {
+	case strings.Contains(values, "react"), strings.Contains(values, "vue"), strings.Contains(values, "svelte"), strings.Contains(values, "vite"), strings.Contains(values, "next"):
+		return "frontend"
+	case strings.Contains(values, "gin"), strings.Contains(values, "fiber"), strings.Contains(values, "echo"), strings.Contains(values, "go"):
+		return "backend"
+	default:
+		return "mixed"
+	}
+}
+
+func moduleResponsibility(snapshot model.CodeUnderstandingSnapshot) string {
+	parts := []string{}
+	if len(snapshot.Routes) > 0 {
+		parts = append(parts, fmt.Sprintf("路由 %d 个", len(snapshot.Routes)))
+	}
+	if len(snapshot.Components) > 0 {
+		parts = append(parts, fmt.Sprintf("组件 %d 个", len(snapshot.Components)))
+	}
+	if len(snapshot.APIEndpoints) > 0 {
+		parts = append(parts, fmt.Sprintf("API %d 个", len(snapshot.APIEndpoints)))
+	}
+	if len(parts) == 0 {
+		return firstNonEmpty(snapshot.Summary, "项目结构摘要模块。")
+	}
+	return "负责" + strings.Join(parts, "、") + "的摘要理解。"
+}
+
+func packageManagersFromFrameworks(frameworks []string, languages []string) []string {
+	joined := strings.ToLower(strings.Join(append(frameworks, languages...), "|"))
+	managers := []string{}
+	if strings.Contains(joined, "react") || strings.Contains(joined, "next") || strings.Contains(joined, "vite") || strings.Contains(joined, "vue") || strings.Contains(joined, "svelte") {
+		managers = append(managers, "npm/pnpm")
+	}
+	if strings.Contains(joined, "go") || strings.Contains(joined, "gin") || strings.Contains(joined, "fiber") || strings.Contains(joined, "echo") {
+		managers = append(managers, "go modules")
+	}
+	if len(managers) == 0 {
+		managers = append(managers, "unknown")
+	}
+	return uniqueStrings(managers)
+}
+
+func runtimeTargetsFromFrameworks(frameworks []string, languages []string) []string {
+	joined := strings.ToLower(strings.Join(append(frameworks, languages...), "|"))
+	targets := []string{}
+	if strings.Contains(joined, "react") || strings.Contains(joined, "next") || strings.Contains(joined, "vite") || strings.Contains(joined, "vue") || strings.Contains(joined, "svelte") {
+		targets = append(targets, "browser")
+	}
+	if strings.Contains(joined, "go") || strings.Contains(joined, "gin") || strings.Contains(joined, "fiber") || strings.Contains(joined, "echo") {
+		targets = append(targets, "server")
+	}
+	if strings.Contains(joined, "wails") {
+		targets = append(targets, "desktop")
+	}
+	if len(targets) == 0 {
+		targets = append(targets, "unknown")
+	}
+	return uniqueStrings(targets)
+}
+
+func pathFromURL(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Path == "" {
+		return ""
+	}
+	if parsed.Path == "/" {
+		return "/"
+	}
+	return strings.TrimRight(parsed.Path, "/")
+}
+
+func routeNameFromPath(path string) string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return "首页"
+	}
+	parts := strings.Split(trimmed, "/")
+	return parts[len(parts)-1]
+}
+
+func parentRoutePath(path string) string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" || !strings.Contains(trimmed, "/") {
+		return ""
+	}
+	parts := strings.Split(trimmed, "/")
+	return "/" + strings.Join(parts[:len(parts)-1], "/")
+}
+
+func selectorsFromCodeSnapshots(snapshots []model.CodeUnderstandingSnapshot) []model.SelectorCandidate {
+	candidates := []model.SelectorCandidate{}
+	for _, snapshot := range snapshots {
+		for _, selector := range snapshot.Selectors {
+			candidates = append(candidates, model.SelectorCandidate{
+				Kind:           selector.Kind,
+				Value:          selector.Value,
+				Confidence:     selector.Confidence,
+				StabilityScore: selector.StabilityScore,
+				Source:         "code_reader",
+				EvidenceRefs:   selector.EvidenceRefs,
+			})
+		}
+	}
+	return uniqueSelectorCandidates(candidates)
+}
+
+func uniqueSelectorCandidates(values []model.SelectorCandidate) []model.SelectorCandidate {
+	seen := map[string]bool{}
+	out := make([]model.SelectorCandidate, 0, len(values))
+	for _, value := range values {
+		key := value.Kind + "|" + value.Value
+		if strings.TrimSpace(value.Value) == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func limitSelectorCandidates(values []model.SelectorCandidate, limit int) []model.SelectorCandidate {
+	if len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func waitHintsForSurface(pageURL string, selectors []model.SelectorCandidate, states []string) []string {
+	hints := []string{"等待 body 可见", "截图前保持页面状态稳定"}
+	if isHTTPURL(pageURL) {
+		hints = append(hints, "导航后等待 networkidle 或主要区域可见")
+	}
+	if len(selectors) > 0 {
+		hints = append(hints, "优先等待稳定 selector："+selectors[0].Value)
+	}
+	if len(states) > 0 {
+		hints = append(hints, "确认页面状态："+strings.Join(states, "、"))
+	}
+	return uniqueStrings(hints)
+}
+
+func featureRefsFromPageActions(actions []model.PageActionInsight) []string {
+	refs := []string{}
+	for _, action := range actions {
+		if action.FeatureRef != "" {
+			refs = append(refs, action.FeatureRef)
+		}
+	}
+	return uniqueStrings(refs)
+}
+
+func codeEvidenceRefs(snapshots []model.CodeUnderstandingSnapshot) []model.EvidenceRef {
+	refs := []model.EvidenceRef{}
+	for _, snapshot := range snapshots {
+		refs = append(refs, snapshot.EvidenceRefs...)
+	}
+	return uniqueEvidenceRefs(refs)
+}
+
+func sensitiveFieldNames(values []model.SensitiveFieldFinding) []string {
+	names := []string{}
+	for _, value := range values {
+		names = append(names, value.Name)
+	}
+	return uniqueStrings(names)
+}
+
+func inferMethodFromPath(path string) string {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.Contains(lower, "create"), strings.Contains(lower, "invite"), strings.Contains(lower, "submit"):
+		return "POST"
+	case strings.Contains(lower, "delete"), strings.Contains(lower, "remove"):
+		return "DELETE"
+	default:
+		return "GET"
+	}
+}
+
+func apiLikelyRequiresAuth(path string, sensitive []string) bool {
+	lower := strings.ToLower(path)
+	return strings.Contains(lower, "user") || strings.Contains(lower, "team") || strings.Contains(lower, "account") || strings.Contains(lower, "project") || len(sensitive) > 0
+}
+
+func apiFieldHints(path string) []string {
+	lower := strings.ToLower(path)
+	fields := []string{"id"}
+	for _, token := range []string{"email", "team", "project", "invite", "message", "password"} {
+		if strings.Contains(lower, token) {
+			fields = append(fields, token)
+		}
+	}
+	return uniqueStrings(fields)
+}
+
+func dedupeAPIContracts(values []model.APIContractSummary) []model.APIContractSummary {
+	seen := map[string]bool{}
+	out := []model.APIContractSummary{}
+	for _, value := range values {
+		key := strings.ToUpper(value.Method) + " " + value.Path
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func sensitiveModelFields(dataModel model.DataModelInsight, fallback []string) []string {
+	fields := append([]string{}, fallback...)
+	for _, field := range dataModel.Fields {
+		if field.Sensitive {
+			fields = append(fields, field.Name)
+		}
+	}
+	return uniqueStrings(fields)
+}
+
+func dedupeDataModels(values []model.ProjectDataModelSummary) []model.ProjectDataModelSummary {
+	seen := map[string]bool{}
+	out := []model.ProjectDataModelSummary{}
+	for _, value := range values {
+		if value.Name == "" || seen[value.ID] {
+			continue
+		}
+		seen[value.ID] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func routeIDs(routes []model.ArchitectureRouteNode, limit int) []string {
+	out := []string{}
+	for _, route := range routes {
+		out = append(out, route.ID)
+	}
+	return limitStrings(uniqueStrings(out), limit)
+}
+
+func surfaceIDs(surfaces []model.InteractionSurface, limit int) []string {
+	out := []string{}
+	for _, surface := range surfaces {
+		out = append(out, surface.ID)
+	}
+	return limitStrings(uniqueStrings(out), limit)
+}
+
+func moduleComponentRefs(modules []model.ProjectModule, limit int) []string {
+	out := []string{}
+	for _, module := range modules {
+		out = append(out, module.ComponentRefs...)
+	}
+	return limitStrings(uniqueStrings(out), limit)
+}
+
+func apiIDs(values []model.APIContractSummary, limit int) []string {
+	out := []string{}
+	for _, value := range values {
+		out = append(out, value.ID)
+	}
+	return limitStrings(uniqueStrings(out), limit)
+}
+
+func dataModelIDs(values []model.ProjectDataModelSummary, limit int) []string {
+	out := []string{}
+	for _, value := range values {
+		out = append(out, value.ID)
+	}
+	return limitStrings(uniqueStrings(out), limit)
+}
+
+func capabilityIDs(values []model.FeatureCapability, limit int) []string {
+	out := []string{}
+	for _, value := range values {
+		out = append(out, value.ID)
+	}
+	return limitStrings(uniqueStrings(out), limit)
+}
+
+func keyActionsFromBriefAndSurfaces(brief *model.RequirementBrief, surfaces []model.InteractionSurface) []string {
+	actions := []string{}
+	if brief != nil {
+		actions = append(actions, brief.MustShow...)
+	}
+	for _, surface := range surfaces {
+		for _, action := range surface.Actions {
+			actions = append(actions, firstNonEmpty(action.Label, action.Kind))
+		}
+	}
+	if len(actions) == 0 {
+		actions = append(actions, "navigate", "inspect", "capture", "validate")
+	}
+	return limitStrings(uniqueStrings(actions), 12)
+}
+
+func riskNotesFromSafety(safety *model.SafetyReport) []string {
+	if safety == nil {
+		return nil
+	}
+	out := append([]string{}, safety.Notes...)
+	for _, finding := range safety.PolicyFindings {
+		out = append(out, finding.Summary)
+	}
+	return limitStrings(uniqueStrings(out), 10)
+}
+
+func narrativeBeatsFromPack(pack *model.ProjectIntelligencePack) []string {
+	beats := []string{"打开产品入口并确认页面稳定", "说明业务目标和目标受众"}
+	for _, capability := range pack.FeatureCapabilities {
+		if capability.Name != "" {
+			beats = append(beats, "展示："+capability.Name)
+		}
+		if len(beats) >= 5 {
+			break
+		}
+	}
+	beats = append(beats, "截图/录屏证明核心结果", "收束到审批和安全边界")
+	return uniqueStrings(beats)
+}
+
+func suggestedStageCount(pack *model.ProjectIntelligencePack) int {
+	count := 4
+	if len(pack.FeatureCapabilities) >= 2 {
+		count++
+	}
+	if len(pack.InteractionSurfaces) >= 2 {
+		count++
+	}
+	if count > 7 {
+		return 7
+	}
+	return count
+}
+
+func firstScenario(plans []model.DemoScenarioPlan) model.DemoScenarioPlan {
+	if len(plans) == 0 {
+		return model.DemoScenarioPlan{ID: "scenario_primary", Name: "默认演示路径", EstimatedSteps: 4, EstimatedDurationSec: 60}
+	}
+	return plans[0]
+}
+
+func firstScenarioName(plans []model.DemoScenarioPlan) string {
+	return firstScenario(plans).Name
+}
+
+func selectorCoverage(pack *model.ProjectIntelligencePack) float64 {
+	if pack == nil || len(pack.InteractionSurfaces) == 0 {
+		return 0
+	}
+	actionCount := 0
+	selectorCount := 0
+	for _, surface := range pack.InteractionSurfaces {
+		actionCount += len(surface.Actions)
+		selectorCount += len(surface.StableSelectors)
+	}
+	if actionCount == 0 {
+		if selectorCount > 0 {
+			return 1
+		}
+		return 0
+	}
+	coverage := float64(selectorCount) / float64(actionCount)
+	if coverage > 1 {
+		return 1
+	}
+	return coverage
+}
+
+func routesNeedAuth(routes []model.ArchitectureRouteNode) bool {
+	for _, route := range routes {
+		if route.AuthRequired {
+			return true
+		}
+	}
+	return false
+}
+
+func hasProjectCredential(project *model.ProjectContext) bool {
+	return project != nil && project.Inputs != nil && len(project.Inputs.Credentials) > 0
+}
+
+func readinessRepairSuggestions(blockers []model.AgentFinding, warnings []model.AgentFinding) []string {
+	suggestions := []string{}
+	for _, finding := range append(blockers, warnings...) {
+		if finding.SuggestedAction != "" {
+			suggestions = append(suggestions, finding.SuggestedAction)
+		}
+	}
+	if len(suggestions) == 0 {
+		suggestions = append(suggestions, "审批前复核 allowed domains、凭据范围和打码选择器。")
+	}
+	return uniqueStrings(suggestions)
+}
+
+func criticOutputSummary(readiness *model.ScriptReadinessReport) string {
+	if readiness == nil {
+		return "缺少脚本可行性报告，需回退到保守脚本。"
+	}
+	if !readiness.CanProceed {
+		return fmt.Sprintf("发现 %d 个阻塞，需补齐输入后重跑相关节点。", len(readiness.Blockers))
+	}
+	return fmt.Sprintf("通过一致性审查：warnings=%d，selector coverage=%.0f%%。", len(readiness.Warnings), readiness.SelectorCoverage*100)
+}
+
+func codeFileCountFromSnapshots(snapshots []model.CodeUnderstandingSnapshot) int {
+	total := 0
+	for _, snapshot := range snapshots {
+		total += snapshot.FileCount
+	}
+	return total
+}
+
+func uniqueEvidenceRefs(values []model.EvidenceRef) []model.EvidenceRef {
+	seen := map[string]bool{}
+	out := []model.EvidenceRef{}
+	for _, value := range values {
+		key := value.ID
+		if key == "" {
+			key = string(value.Kind) + "|" + value.Summary + "|" + value.FieldPath
+		}
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func limitStrings(values []string, limit int) []string {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func objectiveFromBrief(brief *model.RequirementBrief) string {
+	if brief == nil {
+		return ""
+	}
+	return brief.Objective
+}
+
+func primaryOutcomeFromBrief(brief *model.RequirementBrief) string {
+	if brief == nil {
+		return ""
+	}
+	return brief.PrimaryOutcome
+}
+
+func scenarioFromBrief(brief *model.RequirementBrief) string {
+	if brief == nil {
+		return ""
+	}
+	return brief.Scenario
+}
+
+func compactCapabilities(values []model.FeatureCapability) []map[string]any {
+	out := make([]map[string]any, 0, minInt(len(values), 12))
+	for _, value := range values {
+		if len(out) >= 12 {
+			break
+		}
+		out = append(out, map[string]any{
+			"id":          value.ID,
+			"name":        value.Name,
+			"kind":        value.Kind,
+			"user_value":  value.UserValue,
+			"key_actions": value.KeyActions,
+			"risks":       value.Risks,
+			"confidence":  value.Confidence,
+		})
+	}
+	return out
+}
+
+func compactSurfaces(values []model.InteractionSurface) []map[string]any {
+	out := make([]map[string]any, 0, minInt(len(values), 12))
+	for _, value := range values {
+		if len(out) >= 12 {
+			break
+		}
+		out = append(out, map[string]any{
+			"id":             value.ID,
+			"url_present":    value.URL != "",
+			"title":          value.Title,
+			"page_role":      value.PageRole,
+			"action_count":   len(value.Actions),
+			"selector_count": len(value.StableSelectors),
+			"states":         value.States,
+			"wait_hints":     value.WaitHints,
+			"risk_count":     len(value.RiskFindings),
+			"confidence":     value.Confidence,
+		})
+	}
+	return out
+}

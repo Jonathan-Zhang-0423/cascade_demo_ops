@@ -5,10 +5,13 @@ import type {
   EvidenceRef,
   ExecutableRecordingScriptBundle,
   ExecutionScriptDocument,
+  AgentGraphTrace,
   MultimodalUnderstandingReport,
   ProjectInputBundle,
+  ProjectIntelligencePack,
   RecordingResultPackage,
   SandboxExecutionMetadata,
+  ScriptReadinessReport,
   ScriptFailureDiagnostic,
   ScriptRepairRequest,
 } from "../../src/types/workflowGraph";
@@ -189,6 +192,9 @@ export type ProjectWorkspaceView = {
   sourceConnections: SourceConnectionView[];
   understanding: UnderstandingSummaryView;
   understandingReport?: MultimodalUnderstandingReport;
+  projectIntelligence?: ProjectIntelligencePack;
+  scriptReadiness?: ScriptReadinessReport;
+  agentGraphTrace?: AgentGraphTrace;
   planReview: WorkflowPlanReviewView;
   scriptDocument?: ExecutionScriptDocument;
   scriptMarkdown?: string;

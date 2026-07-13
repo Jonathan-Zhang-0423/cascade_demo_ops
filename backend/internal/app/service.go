@@ -41,16 +41,17 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	}
 	llmRouter := llm.NewRouter(runtime)
 	flow, err := orchestrator.NewCascadeFlow(orchestrator.Dependencies{
-		InputContext:      agents.NewInputContextAgent(),
-		RequirementReader: agents.NewRequirementReaderAgentWithLLM(llmRouter),
-		CodeReader:        agents.NewCodeReaderAgentWithLLM(llmRouter),
-		PageReader:        agents.NewPageReaderAgent(),
-		Understanding:     agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
-		ProductMap:        agents.NewProductMapAgentWithLLM(llmRouter),
-		GraphBuilder:      agents.NewGraphBuilderAgentWithLLM(llmRouter),
-		ScriptPackager:    agents.NewScriptPackagerAgentWithLLM(llmRouter),
-		QAExecutor:        agents.NewQAExecutorAgent(),
-		AssetGenerator:    agents.NewAssetGeneratorAgent(),
+		InputContext:        agents.NewInputContextAgent(),
+		RequirementReader:   agents.NewRequirementReaderAgentWithLLM(llmRouter),
+		CodeReader:          agents.NewCodeReaderAgentWithLLM(llmRouter),
+		PageReader:          agents.NewPageReaderAgent(),
+		ProjectIntelligence: agents.NewProjectIntelligenceGraphWithLLM(llmRouter),
+		Understanding:       agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
+		ProductMap:          agents.NewProductMapAgentWithLLM(llmRouter),
+		GraphBuilder:        agents.NewGraphBuilderAgentWithLLM(llmRouter),
+		ScriptPackager:      agents.NewScriptPackagerAgentWithLLM(llmRouter),
+		QAExecutor:          agents.NewQAExecutorAgent(),
+		AssetGenerator:      agents.NewAssetGeneratorAgent(),
 	})
 	if err != nil {
 		return nil, err

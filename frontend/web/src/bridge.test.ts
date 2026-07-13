@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { afterEach, vi } from "vitest";
-import { userInputFromWorkspace, createLocalBridgeClient, createMockBridgeClient } from "./bridge";
+import { userInputFromWorkspace, createLocalBridgeClient, createMockBridgeClient, workspaceFromCascadeStateForTest } from "./bridge";
 import { updateWorkspaceInputs } from "./agentPipeline";
 import { createWorkspace } from "./mockWorkspace";
 
@@ -124,6 +124,44 @@ describe("desktop bridge contract", () => {
             inputs: workspace.inputBundle,
           },
           product_map: { id: "map_real", summary: "真实产品地图" },
+          project_intelligence: {
+            id: "pi_real",
+            project_id: "project_real",
+            schema_version: "demoops.project_intelligence_pack.v1",
+            source_digest_sha256: "sha256:intelligence",
+            architecture: {
+              id: "arch_real",
+              project_id: "project_real",
+              summary: "React + Go 混合项目",
+              frameworks: ["react", "go"],
+              route_tree: [{ id: "route_dashboard", path: "/dashboard" }],
+              modules: [{ id: "module_web", name: "web", component_refs: ["component_a"] }],
+            },
+            feature_capabilities: [{ id: "cap_real", name: "团队协作", key_actions: ["inspect"] }],
+            interaction_surfaces: [{ id: "surface_real", title: "工作台", stable_selectors: [{ kind: "css", value: "main" }] }],
+            api_contracts: [{ id: "api_invites", path: "/api/team/invites" }],
+            data_models: [{ id: "model_team", name: "Team" }],
+            evidence_refs: [{ id: "ev_pi", kind: "code_snapshot", summary: "项目图谱摘要", confidence: 0.86 }],
+            safety_report: { allowed_to_proceed: true, policy_findings: [{ id: "finding_pi", kind: "summary_only", severity: "info", summary: "不上传完整源码" }] },
+            confidence: 0.86,
+          },
+          script_readiness_report: {
+            id: "ready_real",
+            project_id: "project_real",
+            schema_version: "demoops.script_readiness_report.v1",
+            can_proceed: true,
+            recommended_scenario_name: "团队协作主线演示",
+            selector_coverage: 0.75,
+            warnings: [],
+            blockers: [],
+          },
+          agent_graph_trace: {
+            id: "trace_real",
+            project_id: "project_real",
+            schema_version: "demoops.agent_graph_trace.v1",
+            graph_name: "ProjectIntelligenceGraph",
+            steps: [{ id: "trace_step_1", node_id: "repo_index", tool: "RepoIndexTool", status: "completed", output_summary: "识别项目结构" }],
+          },
           understanding_report: {
             id: "understanding_real",
             project_id: "project_real",
@@ -237,6 +275,10 @@ describe("desktop bridge contract", () => {
     expect(result.data?.stage).toBe("package_approval");
     expect(result.data?.scriptMarkdown).toContain("真实中文思路文档");
     expect(result.data?.executableScriptBundle?.playwright_script.inline_source).toContain("runCascadeRecording");
+    expect(result.data?.projectIntelligence?.architecture?.summary).toBe("React + Go 混合项目");
+    expect(result.data?.scriptReadiness?.recommended_scenario_name).toBe("团队协作主线演示");
+    expect(result.data?.agentGraphTrace?.steps?.[0]?.tool).toBe("RepoIndexTool");
+    expect(result.data?.understanding.routesDetected).toBe(1);
     expect(result.data?.packagePreview.packageDigest).toBe("sha256:bundle");
     expect(result.data?.modelProvenance?.[0]).toContain("kimi-openai-compatible");
     expect(fetchMock).toHaveBeenCalledWith(
@@ -250,6 +292,57 @@ describe("desktop bridge contract", () => {
     expect(body.user_input.product_url).toBe("https://real.example.com");
     expect(body.user_input.product_description).toBe("真实项目演示需求");
     expect(body.user_input.target_audience).toBe("中国运营团队");
+  });
+
+  it("maps project intelligence fields from local cascade state", () => {
+    const workspace = createWorkspace("product_demo");
+    const mapped = workspaceFromCascadeStateForTest({
+      project_id: "project_pi",
+      project_context: {
+        id: "project_pi",
+        product_url: "https://example.com",
+        target_audience: "运营团队",
+        inputs: workspace.inputBundle,
+      },
+      product_map: { id: "map_pi" },
+      workflow_graph: workspace.planReview.graph,
+      project_intelligence: {
+        id: "pi_1",
+        project_id: "project_pi",
+        schema_version: "demoops.project_intelligence_pack.v1",
+        source_digest_sha256: "sha256:pi",
+        architecture: {
+          id: "arch_1",
+          project_id: "project_pi",
+          summary: "架构摘要",
+          route_tree: [{ id: "route_1", path: "/home" }, { id: "route_2", path: "/team" }],
+          modules: [],
+        },
+        feature_capabilities: [{ id: "cap_1", name: "团队管理" }],
+        interaction_surfaces: [{ id: "surface_1", title: "团队页" }],
+        data_models: [{ id: "model_1", name: "Team" }],
+      },
+      script_readiness_report: {
+        id: "ready_1",
+        project_id: "project_pi",
+        schema_version: "demoops.script_readiness_report.v1",
+        can_proceed: true,
+      },
+      agent_graph_trace: {
+        id: "trace_1",
+        project_id: "project_pi",
+        schema_version: "demoops.agent_graph_trace.v1",
+        steps: [{ id: "trace_step_1", node_id: "route_map", tool: "RouteMapTool", status: "completed" }],
+      },
+    }, workspace);
+
+    expect(mapped.projectIntelligence?.source_digest_sha256).toBe("sha256:pi");
+    expect(mapped.scriptReadiness?.can_proceed).toBe(true);
+    expect(mapped.agentGraphTrace?.steps?.[0]?.tool).toBe("RouteMapTool");
+    expect(mapped.understanding.routesDetected).toBe(2);
+    expect(mapped.understanding.featuresDetected).toBe(1);
+    expect(mapped.understanding.componentsSummarized).toBe(1);
+    expect(mapped.understanding.dataModelsSummarized).toBe(1);
   });
 
   it("builds local user input from editable workspace fields", () => {

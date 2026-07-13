@@ -537,6 +537,7 @@ function UnderstandingStagePanel({ workspace }: { workspace: ProjectWorkspaceVie
     <div className="section-stack">
       <MetricsRow workspace={workspace} />
       <UnderstandingPanel workspace={workspace} />
+      <ProjectIntelligencePanel workspace={workspace} />
       <CodeSummaryPanel workspace={workspace} />
       <AgentPipelinePanel workspace={workspace} />
       <section className="table-section">
@@ -549,6 +550,60 @@ function UnderstandingStagePanel({ workspace }: { workspace: ProjectWorkspaceVie
         </div>
       </section>
     </div>
+  );
+}
+
+function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+  const intelligence = workspace.projectIntelligence;
+  const readiness = workspace.scriptReadiness ?? intelligence?.script_readiness_report;
+  if (!intelligence) {
+    return (
+      <section className="table-section">
+        <SectionTitle title="项目理解图谱" meta="待生成" />
+        <div className="settings-grid">
+          <Fact label="状态" value="生成执行包后展示架构、功能、交互面和可演示路径。" />
+          <Fact label="安全边界" value="仅保存结构摘要、hash、selector 和 evidence refs。" />
+        </div>
+      </section>
+    );
+  }
+  const architecture = intelligence.architecture;
+  const traceSteps = workspace.agentGraphTrace?.steps ?? [];
+  return (
+    <section className="table-section">
+      <SectionTitle title="项目理解图谱" meta={workspace.agentGraphTrace?.graph_name ?? "ProjectIntelligenceGraph"} />
+      <div className="settings-grid">
+        <Fact label="架构摘要" value={architecture?.summary ?? "已生成结构摘要"} />
+        <Fact label="框架/语言" value={[...(architecture?.frameworks ?? []), ...(architecture?.languages ?? [])].join("、") || "待识别"} />
+        <Fact label="模块/路由" value={`${architecture?.modules?.length ?? 0} 个模块 / ${architecture?.route_tree?.length ?? 0} 个路由`} />
+        <Fact label="功能能力" value={`${intelligence.feature_capabilities?.length ?? 0} 个`} />
+        <Fact label="交互面" value={`${intelligence.interaction_surfaces?.length ?? 0} 个`} />
+        <Fact label="API/数据模型" value={`${intelligence.api_contracts?.length ?? 0} 个 API / ${intelligence.data_models?.length ?? 0} 个模型`} />
+        <Fact label="推荐路径" value={readiness?.recommended_scenario_name ?? intelligence.demo_scenario_plans?.[0]?.name ?? "待选择"} />
+        <Fact label="脚本可行性" value={readiness?.can_proceed ? "可继续生成脚本" : "需复核输入材料"} />
+        <Fact label="Selector 覆盖" value={typeof readiness?.selector_coverage === "number" ? `${Math.round(readiness.selector_coverage * 100)}%` : "待计算"} />
+        <Fact label="Source Digest" value={intelligence.source_digest_sha256 ?? "待生成"} />
+      </div>
+      <div className="chip-row">
+        {(readiness?.warnings ?? []).slice(0, 4).map((warning) => (
+          <span key={warning.id} className="chip">{warning.summary}</span>
+        ))}
+        {(readiness?.blockers ?? []).slice(0, 4).map((blocker) => (
+          <span key={blocker.id} className="chip">{blocker.summary}</span>
+        ))}
+      </div>
+      {traceSteps.length > 0 ? (
+        <div className="runtime-log-list">
+          {traceSteps.slice(0, 10).map((step) => (
+            <div key={step.id} className={`runtime-log-row ${step.status === "completed" ? "success" : step.status === "failed" ? "error" : "info"}`}>
+              <span>{step.tool || step.agent || step.node_id}</span>
+              <strong>{step.output_summary ?? step.input_summary ?? step.node_id}</strong>
+              <small>{typeof step.elapsed_ms === "number" ? `${step.elapsed_ms}ms` : ""}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
   );
 }
 

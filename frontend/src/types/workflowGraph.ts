@@ -826,6 +826,210 @@ export type MultimodalUnderstandingReport = {
   created_at?: string;
 };
 
+export type ProjectIntelligencePack = {
+  id: string;
+  project_id: string;
+  schema_version: "demoops.project_intelligence_pack.v1" | string;
+  architecture?: ProjectArchitectureMap;
+  feature_capabilities?: FeatureCapability[];
+  interaction_surfaces?: InteractionSurface[];
+  api_contracts?: APIContractSummary[];
+  data_models?: ProjectDataModelSummary[];
+  demo_scenario_plans?: DemoScenarioPlan[];
+  script_readiness_report?: ScriptReadinessReport;
+  safety_report?: SafetyReport;
+  input_fingerprints?: Record<string, string>;
+  source_digest_sha256?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+};
+
+export type ProjectArchitectureMap = {
+  id: string;
+  project_id: string;
+  schema_version?: string;
+  repository_count?: number;
+  repository_ref_ids?: string[];
+  workspace_root_hash_sha256?: string;
+  package_managers?: string[];
+  frameworks?: string[];
+  languages?: string[];
+  runtime_targets?: string[];
+  entrypoint_hashes?: string[];
+  modules?: ProjectModule[];
+  route_tree?: ArchitectureRouteNode[];
+  summary?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type ProjectModule = {
+  id: string;
+  name: string;
+  kind?: string;
+  responsibility?: string;
+  repository_ref_id?: string;
+  file_count?: number;
+  source_path_hashes?: string[];
+  entrypoint_hashes?: string[];
+  route_refs?: string[];
+  component_refs?: string[];
+  api_refs?: string[];
+  data_model_refs?: string[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type ArchitectureRouteNode = {
+  id: string;
+  path: string;
+  name?: string;
+  parent_path?: string;
+  component_refs?: string[];
+  auth_required?: boolean;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type FeatureCapability = {
+  id: string;
+  name: string;
+  kind?: string;
+  user_value?: string;
+  business_value?: string;
+  priority?: string;
+  supporting_route_refs?: string[];
+  supporting_page_refs?: string[];
+  supporting_components?: string[];
+  supporting_apis?: string[];
+  supporting_data_models?: string[];
+  key_actions?: string[];
+  risks?: string[];
+  evidence_refs?: EvidenceRef[];
+  demo_value_score?: number;
+  confidence?: number;
+};
+
+export type InteractionSurface = {
+  id: string;
+  page_id?: string;
+  url?: string;
+  title?: string;
+  page_role?: string;
+  actions?: UIActionRef[];
+  stable_selectors?: SelectorCandidate[];
+  states?: string[];
+  wait_hints?: string[];
+  feature_refs?: string[];
+  risk_findings?: AgentFinding[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type UIActionRef = {
+  id?: string;
+  label?: string;
+  kind?: string;
+  selector?: string;
+  target_route?: string;
+  evidence_refs?: EvidenceRef[];
+};
+
+export type APIContractSummary = {
+  id: string;
+  method?: string;
+  path: string;
+  purpose?: string;
+  auth_required?: boolean;
+  request_fields?: string[];
+  response_fields?: string[];
+  sensitive_fields?: string[];
+  file_path_hash_sha256?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type ProjectDataModelSummary = {
+  id: string;
+  name: string;
+  kind?: string;
+  fields?: DataField[];
+  sensitive_fields?: string[];
+  source_path_hash_sha256?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type DemoScenarioPlan = {
+  id: string;
+  name: string;
+  use_case?: DemoUseCase;
+  audience_id?: string;
+  objective?: string;
+  value_proposition?: string;
+  feature_refs?: string[];
+  page_refs?: string[];
+  route_refs?: string[];
+  estimated_steps?: number;
+  estimated_duration_sec?: number;
+  narrative_beats?: string[];
+  risk_notes?: string[];
+  evidence_refs?: EvidenceRef[];
+  feasibility?: number;
+  value_score?: number;
+  confidence?: number;
+};
+
+export type ScriptReadinessReport = {
+  id: string;
+  project_id: string;
+  schema_version: "demoops.script_readiness_report.v1" | string;
+  can_proceed: boolean;
+  summary?: string;
+  blockers?: AgentFinding[];
+  warnings?: AgentFinding[];
+  missing_inputs?: string[];
+  repair_suggestions?: string[];
+  recommended_scenario_id?: string;
+  recommended_scenario_name?: string;
+  suggested_stage_count?: number;
+  suggested_target_duration_sec?: number;
+  selector_coverage?: number;
+  credential_coverage?: boolean;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+};
+
+export type AgentGraphTrace = {
+  id: string;
+  project_id: string;
+  schema_version: "demoops.agent_graph_trace.v1" | string;
+  graph_name?: string;
+  steps?: AgentGraphTraceStep[];
+  summary?: string;
+  fallback_reason?: string;
+  started_at?: string;
+  completed_at?: string;
+};
+
+export type AgentGraphTraceStep = {
+  id: string;
+  node_id: string;
+  agent?: string;
+  tool?: string;
+  status: string;
+  input_summary?: string;
+  output_summary?: string;
+  elapsed_ms?: number;
+  confidence?: number;
+  fallback_reason?: string;
+  evidence_refs?: EvidenceRef[];
+  started_at?: string;
+  completed_at?: string;
+};
+
 export type AgentFinding = {
   id: string;
   kind: string;

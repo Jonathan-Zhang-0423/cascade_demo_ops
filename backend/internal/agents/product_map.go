@@ -48,26 +48,44 @@ type productMapLLMOutput struct {
 	} `json:"workflows"`
 }
 
-func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport) (*model.ProductMap, error) {
+func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.ProductMap, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if intelligence == nil && project != nil {
+		intelligence = project.ProjectIntelligence
 	}
 	entryPoint := productMapEntryPoint(project)
 	if report != nil && len(report.PageSnapshots) > 0 && report.PageSnapshots[0].URL != "" {
 		entryPoint = report.PageSnapshots[0].URL
 	}
 	pages := productPagesFromUnderstanding(project, report, entryPoint)
+	pages = productPagesFromIntelligence(intelligence, pages, entryPoint)
 	features := productFeaturesFromUnderstanding(project, report)
+	features = productFeaturesFromIntelligence(project, intelligence, features)
 	routes := routeNodesFromUnderstanding(report, pages)
+	routes = routeNodesFromIntelligence(intelligence, routes, pages)
 	components := componentNodesFromUnderstanding(report)
+	components = componentNodesFromIntelligence(intelligence, components)
 	dataModels := dataModelNodesFromUnderstanding(report)
+	dataModels = dataModelNodesFromIntelligence(intelligence, dataModels)
 	workflows := workflowCandidatesFromUnderstanding(report, pages)
+	workflows = workflowCandidatesFromIntelligence(intelligence, workflows)
 	evidenceRefs := []model.EvidenceRef{}
 	summary := "基于多模态理解报告生成的产品地图。"
 	if report != nil {
 		evidenceRefs = report.EvidenceRefs
 		if report.Summary != "" {
 			summary = report.Summary
+		}
+	}
+	if intelligence != nil {
+		evidenceRefs = uniqueEvidenceRefs(append(evidenceRefs, intelligence.EvidenceRefs...))
+		if intelligence.Architecture != nil && intelligence.Architecture.Summary != "" {
+			if summary == "" {
+				summary = "基于项目智能图谱生成的产品地图。"
+			}
+			summary += " 项目图谱：" + intelligence.Architecture.Summary
 		}
 	}
 	productMap := &model.ProductMap{
@@ -84,7 +102,7 @@ func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.Pro
 		Workflows:    workflows,
 		EvidenceRefs: evidenceRefs,
 	}
-	trace, err := a.enhanceProductMapWithLLM(ctx, project, report, productMap)
+	trace, err := a.enhanceProductMapWithLLM(ctx, project, report, intelligence, productMap)
 	if err != nil && !llm.IsDeterministicFallback(err) {
 		return nil, err
 	}
@@ -100,17 +118,18 @@ func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.Pro
 	return productMap, nil
 }
 
-func (a *ProductMapAgent) enhanceProductMapWithLLM(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap) (*llm.CallTrace, error) {
+func (a *ProductMapAgent) enhanceProductMapWithLLM(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack, productMap *model.ProductMap) (*llm.CallTrace, error) {
 	if a.llm == nil || project == nil || productMap == nil {
 		return nil, nil
 	}
 	payload := map[string]any{
-		"target_audience": project.TargetAudience,
-		"report_summary":  "",
-		"pages":           productMap.Pages,
-		"features":        productMap.Features,
-		"routes":          productMap.Routes,
-		"workflows":       productMap.Workflows,
+		"target_audience":      project.TargetAudience,
+		"report_summary":       "",
+		"project_intelligence": compactProductIntelligenceForProductMap(intelligence),
+		"pages":                productMap.Pages,
+		"features":             productMap.Features,
+		"routes":               productMap.Routes,
+		"workflows":            productMap.Workflows,
 	}
 	if report != nil {
 		payload["report_summary"] = report.Summary
@@ -260,6 +279,298 @@ func productFeaturesFromUnderstanding(project *model.ProjectContext, report *mod
 		BestUseCases: []model.DemoUseCase{model.DemoUseCaseLaunch},
 		KeyActions:   []string{"navigate", "inspect", "validate"},
 	}}
+}
+
+func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, existing []*model.ProductPage, entryPoint string) []*model.ProductPage {
+	if intelligence == nil {
+		return existing
+	}
+	seen := map[string]bool{}
+	for _, page := range existing {
+		if page == nil {
+			continue
+		}
+		seen[firstNonEmpty(page.ID, page.URL, page.RoutePattern)] = true
+	}
+	for _, surface := range intelligence.InteractionSurfaces {
+		key := firstNonEmpty(surface.PageID, surface.ID, surface.URL)
+		if key == "" || seen[key] {
+			continue
+		}
+		actions := []string{}
+		for _, action := range surface.Actions {
+			actions = append(actions, firstNonEmpty(action.Kind, "inspect"))
+		}
+		if len(actions) == 0 {
+			actions = []string{"inspect", "capture"}
+		}
+		existing = append(existing, &model.ProductPage{
+			ID:             firstNonEmpty(surface.PageID, surface.ID),
+			URL:            firstNonEmpty(surface.URL, entryPoint),
+			Title:          firstNonEmpty(surface.Title, "项目理解页面"),
+			Purpose:        firstNonEmpty(surface.PageRole, "由 ProjectIntelligenceGraph 识别的可演示交互面。"),
+			Actions:        uniqueStrings(actions),
+			PrimaryActions: append([]model.UIActionRef{}, surface.Actions...),
+			States:         append([]string{}, surface.States...),
+			FeatureRefs:    append([]string{}, surface.FeatureRefs...),
+			EvidenceRefs:   surface.EvidenceRefs,
+			DemoValueScore: maxFloat(surface.Confidence, 0.68),
+		})
+		seen[key] = true
+	}
+	return existing
+}
+
+func productFeaturesFromIntelligence(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, existing []*model.Feature) []*model.Feature {
+	if intelligence == nil {
+		return existing
+	}
+	seen := map[string]bool{}
+	for _, feature := range existing {
+		if feature != nil {
+			seen[firstNonEmpty(feature.ID, feature.Name)] = true
+		}
+	}
+	for _, capability := range intelligence.FeatureCapabilities {
+		key := firstNonEmpty(capability.ID, capability.Name)
+		if key == "" || seen[key] {
+			continue
+		}
+		existing = append(existing, &model.Feature{
+			ID:              firstNonEmpty(capability.ID, "feature_capability_"+shortHash(capability.Name)),
+			Name:            firstNonEmpty(capability.Name, "项目理解功能能力"),
+			Kind:            firstNonEmpty(capability.Kind, "supporting"),
+			UserValue:       firstNonEmpty(capability.UserValue, capability.BusinessValue, "项目智能图谱识别的可演示能力。"),
+			BusinessValue:   capability.BusinessValue,
+			Priority:        firstNonEmpty(capability.Priority, "supporting"),
+			BestAudience:    []string{project.TargetAudience},
+			BestUseCases:    productUseCases(project),
+			SupportingPages: append([]string{}, capability.SupportingPageRefs...),
+			KeyActions:      append([]string{}, capability.KeyActions...),
+			Risks:           append([]string{}, capability.Risks...),
+			EvidenceRefs:    capability.EvidenceRefs,
+		})
+		seen[key] = true
+	}
+	return existing
+}
+
+func productUseCases(project *model.ProjectContext) []model.DemoUseCase {
+	if project == nil {
+		return []model.DemoUseCase{model.DemoUseCaseLaunch}
+	}
+	if len(project.Goals) > 0 {
+		useCases := make([]model.DemoUseCase, 0, len(project.Goals))
+		for _, goal := range project.Goals {
+			if goal.UseCase != "" {
+				useCases = append(useCases, goal.UseCase)
+			}
+		}
+		if len(useCases) > 0 {
+			return uniqueUseCases(useCases)
+		}
+	}
+	return []model.DemoUseCase{model.DemoUseCaseLaunch}
+}
+
+func routeNodesFromIntelligence(intelligence *model.ProjectIntelligencePack, existing []*model.RouteMapNode, pages []*model.ProductPage) []*model.RouteMapNode {
+	if intelligence == nil || intelligence.Architecture == nil {
+		return existing
+	}
+	seen := map[string]bool{}
+	for _, route := range existing {
+		if route != nil {
+			seen[firstNonEmpty(route.ID, route.Path)] = true
+		}
+	}
+	for _, route := range intelligence.Architecture.RouteTree {
+		key := firstNonEmpty(route.ID, route.Path)
+		if key == "" || seen[key] {
+			continue
+		}
+		existing = append(existing, &model.RouteMapNode{
+			ID:           firstNonEmpty(route.ID, safeID("route", route.Path)),
+			Path:         route.Path,
+			Name:         firstNonEmpty(route.Name, routeNameFromPath(route.Path)),
+			ParentID:     route.ParentPath,
+			ComponentIDs: append([]string{}, route.ComponentRefs...),
+			AuthRequired: route.AuthRequired,
+			EvidenceRefs: route.EvidenceRefs,
+		})
+		seen[key] = true
+	}
+	for _, page := range pages {
+		if page == nil {
+			continue
+		}
+		key := firstNonEmpty(page.ID, page.URL)
+		if key == "" || seen[key] {
+			continue
+		}
+		existing = append(existing, &model.RouteMapNode{
+			ID:           firstNonEmpty(page.ID, safeID("route", page.URL)),
+			Path:         firstNonEmpty(page.RoutePattern, pathFromURL(page.URL)),
+			Name:         firstNonEmpty(page.Title, routeNameFromPath(pathFromURL(page.URL))),
+			PageID:       page.ID,
+			AuthRequired: true,
+			EvidenceRefs: page.EvidenceRefs,
+		})
+		seen[key] = true
+	}
+	return existing
+}
+
+func componentNodesFromIntelligence(intelligence *model.ProjectIntelligencePack, existing []*model.ComponentNode) []*model.ComponentNode {
+	if intelligence == nil {
+		return existing
+	}
+	seen := map[string]bool{}
+	for _, component := range existing {
+		if component != nil {
+			seen[firstNonEmpty(component.ID, component.Name)] = true
+		}
+	}
+	for _, surface := range intelligence.InteractionSurfaces {
+		key := firstNonEmpty(surface.ID, surface.PageID, surface.URL)
+		if key == "" || seen[key] {
+			continue
+		}
+		selectors := []string{}
+		for _, selector := range surface.StableSelectors {
+			if selector.Value != "" {
+				selectors = append(selectors, selector.Value)
+			}
+		}
+		actions := make([]model.UIActionRef, 0, len(surface.Actions))
+		for _, action := range surface.Actions {
+			actions = append(actions, model.UIActionRef{
+				ID:           action.ID,
+				Label:        action.Label,
+				Kind:         action.Kind,
+				Selector:     action.Selector,
+				TargetRoute:  action.TargetRoute,
+				EvidenceRefs: action.EvidenceRefs,
+			})
+		}
+		existing = append(existing, &model.ComponentNode{
+			ID:           firstNonEmpty(surface.ID, safeID("component", surface.Title)),
+			Name:         firstNonEmpty(surface.Title, "交互面"),
+			Kind:         firstNonEmpty(surface.PageRole, "page_surface"),
+			Selectors:    uniqueStrings(selectors),
+			Actions:      actions,
+			FeatureRefs:  append([]string{}, surface.FeatureRefs...),
+			EvidenceRefs: surface.EvidenceRefs,
+		})
+		seen[key] = true
+	}
+	return existing
+}
+
+func dataModelNodesFromIntelligence(intelligence *model.ProjectIntelligencePack, existing []*model.DataModelNode) []*model.DataModelNode {
+	if intelligence == nil {
+		return existing
+	}
+	seen := map[string]bool{}
+	for _, dataModel := range existing {
+		if dataModel != nil {
+			seen[firstNonEmpty(dataModel.ID, dataModel.Name)] = true
+		}
+	}
+	for _, summary := range intelligence.DataModels {
+		key := firstNonEmpty(summary.ID, summary.Name)
+		if key == "" || seen[key] {
+			continue
+		}
+		existing = append(existing, &model.DataModelNode{
+			ID:           firstNonEmpty(summary.ID, safeID("model", summary.Name)),
+			Name:         firstNonEmpty(summary.Name, "数据模型"),
+			Kind:         firstNonEmpty(summary.Kind, "domain_model"),
+			Fields:       append([]model.DataField{}, summary.Fields...),
+			EvidenceRefs: summary.EvidenceRefs,
+		})
+		seen[key] = true
+	}
+	return existing
+}
+
+func workflowCandidatesFromIntelligence(intelligence *model.ProjectIntelligencePack, existing []*model.WorkflowCandidate) []*model.WorkflowCandidate {
+	if intelligence == nil {
+		return existing
+	}
+	seen := map[string]bool{}
+	for _, workflow := range existing {
+		if workflow != nil {
+			seen[firstNonEmpty(workflow.ID, workflow.Name)] = true
+		}
+	}
+	for _, plan := range intelligence.DemoScenarioPlans {
+		key := firstNonEmpty(plan.ID, plan.Name)
+		if key == "" || seen[key] {
+			continue
+		}
+		existing = append(existing, &model.WorkflowCandidate{
+			ID:             firstNonEmpty(plan.ID, safeID("workflow", plan.Name)),
+			Name:           firstNonEmpty(plan.Name, "项目智能候选路径"),
+			UseCase:        plan.UseCase,
+			AudienceID:     firstNonEmpty(plan.AudienceID, "audience_primary"),
+			FeatureRefs:    append([]string{}, plan.FeatureRefs...),
+			PageRefs:       append([]string{}, plan.PageRefs...),
+			EstimatedSteps: plan.EstimatedSteps,
+			ValueScore:     plan.ValueScore,
+			Feasibility:    plan.Feasibility,
+			RiskNotes:      append([]string{}, plan.RiskNotes...),
+			EvidenceRefs:   plan.EvidenceRefs,
+		})
+		seen[key] = true
+	}
+	return existing
+}
+
+func compactProductIntelligenceForProductMap(intelligence *model.ProjectIntelligencePack) map[string]any {
+	if intelligence == nil {
+		return nil
+	}
+	return map[string]any{
+		"architecture": map[string]any{
+			"summary": func() string {
+				if intelligence.Architecture != nil {
+					return intelligence.Architecture.Summary
+				}
+				return ""
+			}(),
+			"frameworks": func() []string {
+				if intelligence.Architecture != nil {
+					return intelligence.Architecture.Frameworks
+				}
+				return nil
+			}(),
+			"languages": func() []string {
+				if intelligence.Architecture != nil {
+					return intelligence.Architecture.Languages
+				}
+				return nil
+			}(),
+			"module_count": func() int {
+				if intelligence.Architecture != nil {
+					return len(intelligence.Architecture.Modules)
+				}
+				return 0
+			}(),
+			"route_count": func() int {
+				if intelligence.Architecture != nil {
+					return len(intelligence.Architecture.RouteTree)
+				}
+				return 0
+			}(),
+		},
+		"feature_capabilities": intelligence.FeatureCapabilities,
+		"interaction_surfaces": intelligence.InteractionSurfaces,
+		"api_count":            len(intelligence.APIContracts),
+		"data_model_count":     len(intelligence.DataModels),
+		"demo_scenario_plans":  intelligence.DemoScenarioPlans,
+		"script_readiness":     intelligence.ScriptReadinessReport,
+		"confidence":           intelligence.Confidence,
+	}
 }
 
 func routeNodesFromUnderstanding(report *model.MultimodalUnderstandingReport, pages []*model.ProductPage) []*model.RouteMapNode {

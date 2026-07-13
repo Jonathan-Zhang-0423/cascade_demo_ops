@@ -45,12 +45,15 @@ type graphLLMOutput struct {
 	} `json:"steps"`
 }
 
-func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport) (*model.DemoWorkflowGraph, error) {
+func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.DemoWorkflowGraph, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if project == nil {
 		return nil, errors.New("project context is required")
+	}
+	if intelligence == nil && project.ProjectIntelligence != nil {
+		intelligence = project.ProjectIntelligence
 	}
 	graphID := fmt.Sprintf("graph_%d", time.Now().UnixNano())
 	featureID, featureValue := primaryFeature(productMap)
@@ -279,10 +282,7 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 			FailurePolicy: &model.NodeFailurePolicy{RetryAttempts: 1},
 		},
 	}
-	graph.Edges = []*model.GraphEdge{
-		{ID: "e1", FromNode: "start", ToNode: "highlight_primary_value", Condition: "loaded", ConditionSpec: &model.EdgeCondition{Kind: "validation_passed", PassState: "state_product_entry"}, Priority: 1},
-		{ID: "e2", FromNode: "highlight_primary_value", ToNode: "close", Condition: "validated", ConditionSpec: &model.EdgeCondition{Kind: "validation_passed"}, Priority: 1},
-	}
+	augmentGraphWithIntelligence(graph, project, productMap, report, intelligence)
 	productMapID := ""
 	if productMap != nil {
 		productMapID = productMap.ID
@@ -293,7 +293,7 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 		ProductMapID: productMapID,
 		EvidenceRefs: reportEvidenceRefs(report),
 	}
-	trace, err := a.enhanceGraphWithLLM(ctx, project, productMap, report, graph)
+	trace, err := a.enhanceGraphWithLLM(ctx, project, productMap, report, intelligence, graph)
 	if err != nil && !llm.IsDeterministicFallback(err) {
 		return nil, err
 	}
@@ -313,7 +313,7 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 		StalenessDays:    30,
 		RegressionChecks: []string{"rehearse_primary_workflow"},
 	}
-	graph.EvidenceRefs = reportEvidenceRefs(report)
+	graph.EvidenceRefs = uniqueEvidenceRefs(append(reportEvidenceRefs(report), intelligenceEvidenceRefs(intelligence)...))
 	if graph.Assets != nil {
 		graph.Assets.Brand = project.BrandKit
 		graph.Assets.Provenance = &model.AssetProvenance{WorkflowGraphID: graph.ID, GraphVersion: graph.Version, GeneratedBy: "GraphBuilderAgent"}
@@ -336,17 +336,18 @@ func primaryFeature(productMap *model.ProductMap) (string, string) {
 	return "feature_primary_workflow", "用最短路径展示产品核心价值，并形成可审批、可复现的演示脚本。"
 }
 
-func (a *GraphBuilderAgent) enhanceGraphWithLLM(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, graph *model.DemoWorkflowGraph) (*llm.CallTrace, error) {
+func (a *GraphBuilderAgent) enhanceGraphWithLLM(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack, graph *model.DemoWorkflowGraph) (*llm.CallTrace, error) {
 	if a.llm == nil || project == nil || graph == nil {
 		return nil, nil
 	}
 	payload := map[string]any{
-		"target_audience": project.TargetAudience,
-		"product_url":     project.ProductURL,
-		"product_map":     productMap,
-		"report_summary":  "",
-		"brief":           nil,
-		"current_graph":   graphPatchInput(graph),
+		"target_audience":      project.TargetAudience,
+		"product_url":          project.ProductURL,
+		"product_map":          productMap,
+		"project_intelligence": compactGraphProjectIntelligence(intelligence),
+		"report_summary":       "",
+		"brief":                nil,
+		"current_graph":        graphPatchInput(graph),
 	}
 	if report != nil {
 		payload["report_summary"] = report.Summary
@@ -433,6 +434,361 @@ func (a *GraphBuilderAgent) enhanceGraphWithLLM(ctx context.Context, project *mo
 		}
 	}
 	return trace, nil
+}
+
+func augmentGraphWithIntelligence(graph *model.DemoWorkflowGraph, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) {
+	if graph == nil || len(graph.Nodes) < 3 {
+		return
+	}
+	if graph.Assets == nil {
+		graph.Assets = model.NewMVPAssetManifest()
+	}
+	if intelligence != nil && intelligence.ScriptReadinessReport != nil && intelligence.ScriptReadinessReport.SuggestedTargetDurationSec > 0 {
+		graph.Assets.TargetDurationSec = maxInt(graph.Assets.TargetDurationSec, intelligence.ScriptReadinessReport.SuggestedTargetDurationSec)
+	}
+	if graph.Assets.TargetDurationSec <= 0 {
+		graph.Assets.TargetDurationSec = 60
+	}
+
+	startNode := graph.Nodes[0]
+	primaryNode := graph.Nodes[1]
+	closeNode := graph.Nodes[len(graph.Nodes)-1]
+	ensureNodeDuration(startNode, 12000)
+	ensureNodeDuration(primaryNode, 12000)
+	ensureNodeDuration(closeNode, 10000)
+
+	nodes := []*model.GraphNode{startNode}
+	if node := stabilizationGraphNode(project, intelligence); node != nil {
+		nodes = append(nodes, node)
+	}
+	nodes = append(nodes, primaryNode)
+	if node := supportingGraphNode(project, productMap, report, intelligence); node != nil {
+		nodes = append(nodes, node)
+	}
+	nodes = append(nodes, closeNode)
+	graph.Nodes = nodes
+	graph.Edges = sequentialGraphEdges(nodes)
+	if len(graph.Narratives) > 0 {
+		graph.Narratives[0].NodeRefs = nodeIDs(nodes)
+	}
+	if graph.Assets.TargetDurationSec < 60 {
+		graph.Assets.TargetDurationSec = 60
+	}
+}
+
+func stabilizationGraphNode(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) *model.GraphNode {
+	selector := "main"
+	title := "等待页面稳定"
+	caption := "等待页面稳定，给观众一个自然的观察窗口。"
+	evidence := intelligenceEvidenceRefs(intelligence)
+	if surface := primarySurfaceFromIntelligence(intelligence); surface != nil {
+		title = firstNonEmpty(surface.Title, title)
+		caption = firstNonEmpty(surface.PageRole, caption)
+		if len(surface.StableSelectors) > 0 && surface.StableSelectors[0].Value != "" {
+			selector = surface.StableSelectors[0].Value
+		}
+		evidence = uniqueEvidenceRefs(append(evidence, surface.EvidenceRefs...))
+	}
+	node := &model.GraphNode{
+		ID:              "stabilize_entry",
+		Action:          string(model.GraphActionWait),
+		Selector:        selector,
+		ExpectedOutcome: "页面稳定后再继续演示",
+		IsScreenshot:    true,
+		HasZoom:         false,
+		RetryPolicy:     1,
+		Type:            model.GraphNodeTypeAction,
+		Title:           title,
+		Goal:            "给录制留出稳定过渡，避免画面闪烁。",
+		FeatureRefs:     nodeFeatureRefsFromProjectIntelligence(intelligence, project),
+		ActionSpec: &model.GraphAction{
+			Type:      model.GraphActionWait,
+			Target:    model.ActionTarget{Selector: selector, EvidenceRefs: evidence},
+			TimeoutMS: 12000,
+			WaitUntil: "networkidle",
+		},
+		Validations: []model.ValidationSpec{{
+			ID:        "validate_stabilize_entry",
+			Kind:      "page_stable",
+			Target:    model.ActionTarget{Selector: selector, EvidenceRefs: evidence},
+			Assertion: "页面已稳定，适合继续录制",
+			Expected:  true,
+			Severity:  "warning",
+			Required:  true,
+		}},
+		Narrative: &model.NarrativeCue{
+			Title:        "稳定过渡",
+			Caption:      caption,
+			AudienceLens: project.TargetAudience,
+		},
+		Capture:      &model.CaptureSpec{Screenshot: true, Video: true, AssetRole: "stabilization", MaskSelectors: maskSelectorsFromProject(project)},
+		EvidenceRefs: evidence,
+		FailurePolicy: &model.NodeFailurePolicy{
+			RetryAttempts: 1,
+		},
+		DurationHintMS: 12000,
+	}
+	return node
+}
+
+type supportingActionCandidate struct {
+	Label           string
+	Kind            string
+	Selector        string
+	ExpectedOutcome string
+	Caption         string
+	Callout         string
+	EvidenceRefs    []model.EvidenceRef
+}
+
+func supportingGraphNode(project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) *model.GraphNode {
+	candidate := secondaryActionCandidate(productMap, report, intelligence)
+	if candidate == nil {
+		return nil
+	}
+	selector := firstNonEmpty(candidate.Selector, "main")
+	evidence := uniqueEvidenceRefs(append(candidate.EvidenceRefs, intelligenceEvidenceRefs(intelligence)...))
+	node := &model.GraphNode{
+		ID:              "supporting_capability",
+		Action:          string(graphActionTypeFromKind(candidate.Kind, selector)),
+		Selector:        selector,
+		ExpectedOutcome: firstNonEmpty(candidate.ExpectedOutcome, "辅助能力可见"),
+		IsScreenshot:    true,
+		HasZoom:         true,
+		RetryPolicy:     2,
+		Type:            model.GraphNodeTypeCapture,
+		Title:           firstNonEmpty(candidate.Label, "展开辅助能力"),
+		Goal:            "在核心价值之后再展开一个补充能力，形成更自然的人类式演示节奏。",
+		FeatureRefs:     nodeFeatureRefsFromProductMap(productMap, intelligence),
+		ActionSpec: &model.GraphAction{
+			Type:      graphActionTypeFromKind(candidate.Kind, selector),
+			Target:    model.ActionTarget{Selector: selector, EvidenceRefs: evidence},
+			TimeoutMS: 12000,
+		},
+		Validations: []model.ValidationSpec{{
+			ID:        "validate_supporting_capability",
+			Kind:      "surface_visible",
+			Target:    model.ActionTarget{Selector: selector, EvidenceRefs: evidence},
+			Assertion: "补充能力可见且可录制",
+			Expected:  true,
+			Severity:  "warning",
+			Required:  true,
+		}},
+		Narrative: &model.NarrativeCue{
+			Title:        "展开补充能力",
+			Caption:      firstNonEmpty(candidate.Caption, candidate.ExpectedOutcome, "展示一个次级功能点。"),
+			Callout:      firstNonEmpty(candidate.Callout, "辅助能力"),
+			AudienceLens: project.TargetAudience,
+		},
+		Capture:      &model.CaptureSpec{Screenshot: true, Video: true, Zoom: true, Callout: true, FocusSelector: selector, AssetRole: "supporting_capability", MaskSelectors: maskSelectorsFromProject(project)},
+		EvidenceRefs: evidence,
+		FailurePolicy: &model.NodeFailurePolicy{
+			RetryAttempts: 2,
+		},
+		DurationHintMS: 12000,
+	}
+	return node
+}
+
+func secondaryActionCandidate(productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) *supportingActionCandidate {
+	if intelligence != nil {
+		for _, capability := range intelligence.FeatureCapabilities {
+			if len(capability.KeyActions) == 0 && len(capability.SupportingPageRefs) == 0 && len(capability.SupportingRouteRefs) == 0 {
+				continue
+			}
+			return &supportingActionCandidate{
+				Label:           capability.Name,
+				Kind:            firstString(capability.KeyActions, "inspect"),
+				Selector:        firstSelectorFromIntelligence(intelligence),
+				ExpectedOutcome: firstNonEmpty(capability.UserValue, capability.BusinessValue, "辅助能力可见"),
+				Caption:         firstNonEmpty(capability.UserValue, capability.BusinessValue, capability.Name),
+				Callout:         firstNonEmpty(capability.Kind, "辅助能力"),
+				EvidenceRefs:    capability.EvidenceRefs,
+			}
+		}
+	}
+	if productMap != nil {
+		for _, page := range productMap.Pages {
+			if page == nil {
+				continue
+			}
+			for _, action := range page.PrimaryActions {
+				return &supportingActionCandidate{
+					Label:           firstNonEmpty(action.Label, page.Title),
+					Kind:            firstNonEmpty(action.Kind, "inspect"),
+					Selector:        action.Selector,
+					ExpectedOutcome: firstNonEmpty(page.Purpose, "补充功能可见"),
+					Caption:         firstNonEmpty(page.Purpose, page.Title),
+					Callout:         "补充能力",
+					EvidenceRefs:    action.EvidenceRefs,
+				}
+			}
+		}
+	}
+	if report != nil {
+		for _, page := range report.PageSnapshots {
+			for _, action := range page.Actions {
+				return &supportingActionCandidate{
+					Label:           firstNonEmpty(action.Label, page.Title),
+					Kind:            firstNonEmpty(action.Kind, "inspect"),
+					Selector:        action.SelectorHint,
+					ExpectedOutcome: firstNonEmpty(page.VisionSummary, "补充页面区域可见"),
+					Caption:         firstNonEmpty(page.VisionSummary, page.Title),
+					Callout:         "补充能力",
+					EvidenceRefs:    action.EvidenceRefs,
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func sequentialGraphEdges(nodes []*model.GraphNode) []*model.GraphEdge {
+	edges := []*model.GraphEdge{}
+	for i := 0; i < len(nodes)-1; i++ {
+		from := nodes[i]
+		to := nodes[i+1]
+		if from == nil || to == nil {
+			continue
+		}
+		edges = append(edges, &model.GraphEdge{
+			ID:        fmt.Sprintf("e%d", i+1),
+			FromNode:  from.ID,
+			ToNode:    to.ID,
+			Condition: "validated",
+			ConditionSpec: &model.EdgeCondition{
+				Kind:      "validation_passed",
+				PassState: to.ID,
+			},
+			Priority: 1,
+		})
+	}
+	return edges
+}
+
+func ensureNodeDuration(node *model.GraphNode, minMS int) {
+	if node == nil {
+		return
+	}
+	if node.DurationHintMS < minMS {
+		node.DurationHintMS = minMS
+	}
+	if node.ActionSpec != nil && node.ActionSpec.TimeoutMS < minMS {
+		node.ActionSpec.TimeoutMS = minMS
+	}
+}
+
+func primarySurfaceFromIntelligence(intelligence *model.ProjectIntelligencePack) *model.InteractionSurface {
+	if intelligence == nil {
+		return nil
+	}
+	for i := range intelligence.InteractionSurfaces {
+		return &intelligence.InteractionSurfaces[i]
+	}
+	return nil
+}
+
+func nodeIDs(nodes []*model.GraphNode) []string {
+	ids := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node != nil && node.ID != "" {
+			ids = append(ids, node.ID)
+		}
+	}
+	return ids
+}
+
+func firstString(values []string, fallback string) string {
+	if len(values) == 0 {
+		return fallback
+	}
+	return values[0]
+}
+
+func firstSelectorFromIntelligence(intelligence *model.ProjectIntelligencePack) string {
+	if intelligence != nil {
+		for _, surface := range intelligence.InteractionSurfaces {
+			if len(surface.StableSelectors) > 0 && surface.StableSelectors[0].Value != "" {
+				return surface.StableSelectors[0].Value
+			}
+			for _, action := range surface.Actions {
+				if action.Selector != "" {
+					return action.Selector
+				}
+			}
+		}
+	}
+	return "main"
+}
+
+func nodeFeatureRefsFromProjectIntelligence(intelligence *model.ProjectIntelligencePack, project *model.ProjectContext) []string {
+	if intelligence == nil {
+		return []string{"feature_primary_value"}
+	}
+	refs := []string{}
+	for _, feature := range intelligence.FeatureCapabilities {
+		if feature.ID != "" {
+			refs = append(refs, feature.ID)
+		}
+	}
+	if len(refs) == 0 {
+		return []string{"feature_primary_value"}
+	}
+	return uniqueStrings(refs)
+}
+
+func nodeFeatureRefsFromProductMap(productMap *model.ProductMap, intelligence *model.ProjectIntelligencePack) []string {
+	refs := []string{}
+	if productMap != nil {
+		for _, feature := range productMap.Features {
+			if feature != nil && feature.ID != "" {
+				refs = append(refs, feature.ID)
+			}
+		}
+	}
+	if len(refs) == 0 && intelligence != nil {
+		for _, feature := range intelligence.FeatureCapabilities {
+			if feature.ID != "" {
+				refs = append(refs, feature.ID)
+			}
+		}
+	}
+	if len(refs) == 0 {
+		return []string{"feature_primary_value"}
+	}
+	return uniqueStrings(refs)
+}
+
+func intelligenceEvidenceRefs(intelligence *model.ProjectIntelligencePack) []model.EvidenceRef {
+	if intelligence == nil {
+		return nil
+	}
+	return intelligence.EvidenceRefs
+}
+
+func compactGraphProjectIntelligence(intelligence *model.ProjectIntelligencePack) map[string]any {
+	if intelligence == nil {
+		return nil
+	}
+	return map[string]any{
+		"architecture_summary": func() string {
+			if intelligence.Architecture != nil {
+				return intelligence.Architecture.Summary
+			}
+			return ""
+		}(),
+		"feature_count":  len(intelligence.FeatureCapabilities),
+		"surface_count":  len(intelligence.InteractionSurfaces),
+		"scenario_count": len(intelligence.DemoScenarioPlans),
+		"script_ready":   intelligence.ScriptReadinessReport != nil && intelligence.ScriptReadinessReport.CanProceed,
+		"target_duration_sec": func() int {
+			if intelligence.ScriptReadinessReport != nil {
+				return intelligence.ScriptReadinessReport.SuggestedTargetDurationSec
+			}
+			return 0
+		}(),
+		"confidence": intelligence.Confidence,
+	}
 }
 
 func graphPatchInput(graph *model.DemoWorkflowGraph) map[string]any {
