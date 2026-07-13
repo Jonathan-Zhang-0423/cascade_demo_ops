@@ -64,6 +64,18 @@ func TestValidateClientExecutionPackageIntakeRejectsManifestPlanDrift(t *testing
 	}
 }
 
+func TestValidateClientExecutionPackageIntakeRejectsInvalidCaptureScope(t *testing.T) {
+	now := time.Date(2026, 7, 9, 14, 40, 0, 0, time.UTC)
+	pkg := sampleClientExecutionPackage(t)
+	pkg.ExecutableScriptBundle.PlanJSON.Steps[0].Capture.Scope = CaptureScope("screen")
+	envelope := sampleEnvelopeForPayload(t, pkg, now)
+
+	err := ValidateClientExecutionPackageIntake(&envelope, &pkg, now, map[string]bool{}, staticSignatureVerifier(true))
+	if err == nil || !strings.Contains(err.Error(), "scope") {
+		t.Fatalf("expected invalid capture scope rejection, got %v", err)
+	}
+}
+
 func TestValidateRecordingResultPackageForRender(t *testing.T) {
 	pkg := sampleClientExecutionPackage(t)
 	result := sampleRenderableRecordingResult(t, pkg)

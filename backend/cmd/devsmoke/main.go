@@ -44,15 +44,28 @@ func main() {
 	repoPath := flag.String("repo-path", "", "optional local project root for read-only code summary")
 	loginEmail := flag.String("login-email", os.Getenv("CASCADE_SMOKE_LOGIN_EMAIL"), "dev-only login email for cascade-login-dashboard flow")
 	loginPassword := flag.String("login-password", os.Getenv("CASCADE_SMOKE_LOGIN_PASSWORD"), "dev-only login password for cascade-login-dashboard flow")
-	mode := flag.String("mode", "success", "smoke mode: success or failure")
+	mode := flag.String("mode", "success", "smoke mode: success, failure, or any")
 	autoRun := flag.Bool("auto-run", false, "server auto-runs plaintext uploads; skip the explicit dev /run call")
 	recordDuration := flag.Duration("record-duration", defaultRecordDuration, "target raw recording duration for external product URL smoke packages")
 	sampleOutputDir := flag.String("sample-output-dir", "", "optional local directory for sanitized package samples and downloaded deliverables")
 	reusePackageID := flag.String("reuse-package-id", "", "skip upload/run and verify an existing exchange package id")
+	packageFile := flag.String("package-file", "", "replay a client execution package JSON file instead of generating a synthetic smoke package")
+	packageFileFixture := flag.Bool("package-file-fixture", false, "generate a temporary client execution package JSON file and replay it through --package-file")
+	orgIDOverride := flag.String("org-id", "", "override org_id for package-file or reuse-package-id")
+	projectIDOverride := flag.String("project-id", "", "override project_id for package-file uploads")
 	timeout := flag.Duration("timeout", defaultTimeout, "end-to-end smoke timeout")
 	if err := flag.CommandLine.Parse(cleanShellInjectedArgs(os.Args[1:])); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	modeWasSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "mode" {
+			modeWasSet = true
+		}
+	})
+	if strings.TrimSpace(*packageFile) != "" && !modeWasSet {
+		*mode = "any"
 	}
 
 	options := smokeOptions{
@@ -68,6 +81,10 @@ func main() {
 		RecordDuration:  *recordDuration,
 		SampleOutputDir: *sampleOutputDir,
 		ReusePackageID:  *reusePackageID,
+		PackageFile:     *packageFile,
+		PackageFixture:  *packageFileFixture,
+		OrgID:           *orgIDOverride,
+		ProjectID:       *projectIDOverride,
 		Timeout:         *timeout,
 	}
 	if err := run(options); err != nil {
@@ -105,6 +122,10 @@ type smokeOptions struct {
 	RecordDuration  time.Duration
 	SampleOutputDir string
 	ReusePackageID  string
+	PackageFile     string
+	PackageFixture  bool
+	OrgID           string
+	ProjectID       string
 	Timeout         time.Duration
 }
 
@@ -117,6 +138,9 @@ func run(options smokeOptions) error {
 	options.LoginEmail = strings.TrimSpace(options.LoginEmail)
 	options.Mode = strings.TrimSpace(strings.ToLower(options.Mode))
 	options.ReusePackageID = strings.TrimSpace(options.ReusePackageID)
+	options.PackageFile = strings.TrimSpace(options.PackageFile)
+	options.OrgID = strings.TrimSpace(options.OrgID)
+	options.ProjectID = strings.TrimSpace(options.ProjectID)
 	if options.Flow == "" {
 		options.Flow = flowDefault
 	}
@@ -126,8 +150,17 @@ func run(options smokeOptions) error {
 	if options.Token == "" {
 		return errors.New("--token is required")
 	}
-	if options.Mode != "success" && options.Mode != "failure" {
+	if options.Mode != "success" && options.Mode != "failure" && options.Mode != "any" {
 		return fmt.Errorf("unsupported --mode %q", options.Mode)
+	}
+	if options.PackageFixture && options.PackageFile != "" {
+		return errors.New("--package-file-fixture cannot be combined with --package-file")
+	}
+	if options.PackageFixture && options.ReusePackageID != "" {
+		return errors.New("--package-file-fixture cannot be combined with --reuse-package-id")
+	}
+	if options.Mode == "any" && options.PackageFile == "" && options.ReusePackageID == "" && !options.PackageFixture {
+		return errors.New("--mode any requires --package-file, --reuse-package-id, or --package-file-fixture")
 	}
 	if options.Flow != flowDefault && options.Flow != flowCascadeLoginDashboard {
 		return fmt.Errorf("unsupported --flow %q", options.Flow)
@@ -146,52 +179,118 @@ func run(options smokeOptions) error {
 	defer cancel()
 
 	externalProduct := options.ProductURL != ""
-	if options.ProductURL == "" {
+	if options.ProductURL == "" && options.PackageFile == "" {
 		productServer := httptest.NewServer(http.HandlerFunc(handleSmokeProduct))
 		defer productServer.Close()
 		options.ProductURL = productServer.URL
 	}
 
-	orgID := "org_devsmoke"
-	projectID := "project_devsmoke"
+	orgID := options.OrgID
+	projectID := options.ProjectID
 	smokeID := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
 	client := &http.Client{Timeout: 60 * time.Second}
 	sampleDir := strings.TrimSpace(options.SampleOutputDir)
 	if sampleDir != "" {
 		sampleDir = strings.ReplaceAll(sampleDir, "{id}", smokeID)
 	}
+	source := "synthetic"
+	waitForTerminal := true
+	packageFilePath := options.PackageFile
+
+	if options.PackageFixture {
+		if orgID == "" {
+			orgID = "org_devsmoke"
+		}
+		if projectID == "" {
+			projectID = "project_devsmoke"
+		}
+		generatedPath, err := writeGeneratedReplayPackageFixture(ctx, options, smokeID, orgID, projectID, sampleDir, externalProduct)
+		if err != nil {
+			return err
+		}
+		options.PackageFile = generatedPath
+		packageFilePath = generatedPath
+	}
 
 	exchangePackageID := options.ReusePackageID
 	if exchangePackageID == "" {
+		uploadBody := replayUploadBody{}
+		payloadAvailable := true
+		producer := model.ExchangeProducer{AppVersion: "devsmoke", InstallID: "devsmoke-local", RuntimeProfile: "cloud-side-smoke"}
+		packageKind := model.ExchangePackageKindClientExecution
+
+		if options.PackageFile != "" {
+			replay, err := loadReplayPackageFile(options.PackageFile, smokeID)
+			if err != nil {
+				return err
+			}
+			if options.PackageFixture {
+				source = "package_file_fixture"
+			} else {
+				source = "package_file"
+			}
+			uploadBody = replay.UploadBody
+			payloadAvailable = replay.PayloadAvailable
+			if options.ProductURL == "" {
+				options.ProductURL = replay.ProductURL
+			}
+			if orgID == "" {
+				orgID = replay.OrgID
+			}
+			if projectID == "" {
+				projectID = replay.ProjectID
+			}
+			if uploadBody.Envelope.Producer.AppVersion != "" || uploadBody.Envelope.Producer.InstallID != "" {
+				producer = uploadBody.Envelope.Producer
+			}
+			if uploadBody.Envelope.PackageKind != "" {
+				packageKind = uploadBody.Envelope.PackageKind
+			}
+		} else {
+			if orgID == "" {
+				orgID = "org_devsmoke"
+			}
+			if projectID == "" {
+				projectID = "project_devsmoke"
+			}
+			codeSnapshot, err := readCodeSnapshot(ctx, options.RepoPath, projectID)
+			if err != nil {
+				return fmt.Errorf("read local repo summary: %w", err)
+			}
+			payload, envelope, err := buildClientExecutionPackage(smokeID, orgID, projectID, options.ProductURL, options.Mode, externalProduct, options.RecordDuration, options.Flow, options.LoginEmail, options.LoginPassword, codeSnapshot)
+			if err != nil {
+				return err
+			}
+			if sampleDir != "" {
+				if err := writeSanitizedPackageSample(sampleDir, payload, envelope, codeSnapshot, options.LoginEmail, options.LoginPassword); err != nil {
+					return fmt.Errorf("write sanitized package sample: %w", err)
+				}
+			}
+			uploadBody = replayUploadBody{
+				Envelope:   envelope,
+				PayloadRef: envelope.PayloadRef,
+				Payload:    payload,
+			}
+		}
+		if orgID == "" || projectID == "" {
+			return errors.New("org_id and project_id are required; provide them in --package-file or via --org-id/--project-id")
+		}
+
 		initResponse, err := postJSON[model.ExecutionPackageInitResponse](ctx, client, options.BaseURL+"/v1/execution-packages/init", options.Token, "", model.ExecutionPackageInitRequest{
 			OrgID:       orgID,
 			ProjectID:   projectID,
-			PackageKind: model.ExchangePackageKindClientExecution,
-			Producer:    model.ExchangeProducer{AppVersion: "devsmoke", InstallID: "devsmoke-local", RuntimeProfile: "cloud-side-smoke"},
+			PackageKind: packageKind,
+			Producer:    producer,
 		})
 		if err != nil {
 			return fmt.Errorf("init execution package: %w", err)
 		}
 
-		codeSnapshot, err := readCodeSnapshot(ctx, options.RepoPath, projectID)
-		if err != nil {
-			return fmt.Errorf("read local repo summary: %w", err)
+		uploadBody.UploadID = initResponse.UploadID
+		if uploadBody.PayloadRef.Kind == "" {
+			uploadBody.PayloadRef = uploadBody.Envelope.PayloadRef
 		}
-		payload, envelope, err := buildClientExecutionPackage(smokeID, orgID, projectID, options.ProductURL, options.Mode, externalProduct, options.RecordDuration, options.Flow, options.LoginEmail, options.LoginPassword, codeSnapshot)
-		if err != nil {
-			return err
-		}
-		if sampleDir != "" {
-			if err := writeSanitizedPackageSample(sampleDir, payload, envelope, codeSnapshot, options.LoginEmail, options.LoginPassword); err != nil {
-				return fmt.Errorf("write sanitized package sample: %w", err)
-			}
-		}
-		uploadResponse, err := postJSON[model.ExecutionPackageUploadResponse](ctx, client, options.BaseURL+"/v1/execution-packages", options.Token, "", map[string]any{
-			"upload_id":   initResponse.UploadID,
-			"envelope":    envelope,
-			"payload_ref": envelope.PayloadRef,
-			"payload":     payload,
-		})
+		uploadResponse, err := postJSON[model.ExecutionPackageUploadResponse](ctx, client, options.BaseURL+"/v1/execution-packages", options.Token, "", uploadBody)
 		if err != nil {
 			return fmt.Errorf("upload execution package: %w", err)
 		}
@@ -200,14 +299,24 @@ func run(options smokeOptions) error {
 		}
 		exchangePackageID = uploadResponse.ExchangePackageID
 
-		if !options.AutoRun {
+		if !payloadAvailable {
+			waitForTerminal = false
+		} else if !options.AutoRun {
 			if _, err := postJSON[model.ExecutionPackageStatusResponse](ctx, client, options.BaseURL+"/v1/dev/execution-packages/"+url.PathEscape(exchangePackageID)+"/run", options.Token, orgID, map[string]any{}); err != nil {
 				return fmt.Errorf("run uploaded execution package: %w", err)
 			}
 		}
+	} else if orgID == "" {
+		orgID = "org_devsmoke"
 	}
 
-	status, err := waitForTerminalStatus(ctx, client, options.BaseURL, options.Token, orgID, exchangePackageID)
+	var status model.ExecutionPackageStatusResponse
+	var err error
+	if waitForTerminal {
+		status, err = waitForTerminalStatus(ctx, client, options.BaseURL, options.Token, orgID, exchangePackageID)
+	} else {
+		status, err = getJSON[model.ExecutionPackageStatusResponse](ctx, client, options.BaseURL+"/v1/execution-packages/"+url.PathEscape(exchangePackageID)+"/status", options.Token, orgID)
+	}
 	if err != nil {
 		return fmt.Errorf("get execution package status: %w", err)
 	}
@@ -224,8 +333,12 @@ func run(options smokeOptions) error {
 		}
 		result = &got
 	}
-	if err := assertSmokeResult(options.Mode, status, debug, result); err != nil {
-		return err
+	if waitForTerminal {
+		if err := assertSmokeResult(options.Mode, status, debug, result); err != nil {
+			return err
+		}
+	} else if options.Mode != "any" {
+		return fmt.Errorf("package did not start because plaintext payload is unavailable; status=%q stage=%q", status.Status, status.Stage)
 	}
 	executionList, err := getJSON[model.ExecutionPackageListResponse](ctx, client, options.BaseURL+"/v1/dev/execution-packages", options.Token, orgID)
 	if err != nil {
@@ -244,11 +357,15 @@ func run(options smokeOptions) error {
 			return fmt.Errorf("download deliverables: %w", err)
 		}
 	}
-	downloadCheck, err := verifyDownloadableDeliverable(ctx, client, options.BaseURL, options.Token, orgID, options.Mode, status)
+	downloadMode := options.Mode
+	if options.Mode == "any" && status.Status == model.ExchangePackageStatusCompleted {
+		downloadMode = "success"
+	}
+	downloadCheck, err := verifyDownloadableDeliverable(ctx, client, options.BaseURL, options.Token, orgID, downloadMode, status)
 	if err != nil {
 		return err
 	}
-	ackCheck, ackedStatus, err := verifyResultAck(ctx, client, options.BaseURL, options.Token, orgID, options.Mode, status, downloadCheck)
+	ackCheck, ackedStatus, err := verifyResultAck(ctx, client, options.BaseURL, options.Token, orgID, downloadMode, status, downloadCheck)
 	if err != nil {
 		return err
 	}
@@ -259,6 +376,8 @@ func run(options smokeOptions) error {
 	summary := smokeSummary{
 		OK:                true,
 		Mode:              options.Mode,
+		Source:            source,
+		PackageFile:       packageFilePath,
 		BaseURL:           options.BaseURL,
 		ProductURL:        options.ProductURL,
 		ExchangePackageID: exchangePackageID,
@@ -345,6 +464,8 @@ func waitForTerminalStatus(ctx context.Context, client *http.Client, baseURL str
 type smokeSummary struct {
 	OK                bool                 `json:"ok"`
 	Mode              string               `json:"mode"`
+	Source            string               `json:"source,omitempty"`
+	PackageFile       string               `json:"package_file,omitempty"`
 	BaseURL           string               `json:"base_url"`
 	ProductURL        string               `json:"product_url"`
 	ExchangePackageID string               `json:"exchange_package_id"`
@@ -466,8 +587,11 @@ func assertSmokeResult(mode string, status model.ExecutionPackageStatusResponse,
 	if !debug.Runtime.NodeReady {
 		return errors.New("debug runtime reports node_ready=false")
 	}
-	if debug.Package.WorkflowNodeCount < 1 || debug.Package.ScriptStepCount < 1 {
+	if mode != "any" && (debug.Package.WorkflowNodeCount < 1 || debug.Package.ScriptStepCount < 1) {
 		return fmt.Errorf("debug package summary looks incomplete: %+v", debug.Package)
+	}
+	if mode == "any" {
+		return assertReplayResult(status, result)
 	}
 	if mode == "failure" {
 		if status.Status != model.ExchangePackageStatusFailed {
@@ -504,6 +628,24 @@ func assertSmokeResult(mode string, status model.ExecutionPackageStatusResponse,
 	}
 	if deliverable := findExecutionDeliverable(status.ResultSummary.Deliverables, "demo_video"); deliverable == nil || deliverable.SHA256 == "" || deliverable.SizeBytes <= 0 {
 		return fmt.Errorf("success smoke result_summary missing demo checksum metadata: %+v", status.ResultSummary.Deliverables)
+	}
+	return nil
+}
+
+func assertReplayResult(status model.ExecutionPackageStatusResponse, result *model.RecordingResultPackage) error {
+	switch status.Status {
+	case model.ExchangePackageStatusCompleted:
+		if status.ResultPackageID == "" || status.ResultSummary == nil || result == nil {
+			return errors.New("replay completed but result package or result_summary is missing")
+		}
+	case model.ExchangePackageStatusFailed:
+		if status.Error == nil && status.FailureSummary == nil {
+			return errors.New("replay failed without error or failure_summary")
+		}
+	case model.ExchangePackageStatusCanceled, model.ExchangePackageStatusExpired:
+		return nil
+	default:
+		return fmt.Errorf("replay expected a terminal status, got %q", status.Status)
 	}
 	return nil
 }
@@ -555,6 +697,48 @@ func verifyDownloadableDeliverable(ctx context.Context, client *http.Client, bas
 		ArtifactID:   response.Header.Get("X-Cascade-Artifact-ID"),
 		ArtifactKind: response.Header.Get("X-Cascade-Artifact-Kind"),
 	}, nil
+}
+
+func writeGeneratedReplayPackageFixture(ctx context.Context, options smokeOptions, smokeID string, orgID string, projectID string, sampleDir string, externalProduct bool) (string, error) {
+	codeSnapshot, err := readCodeSnapshot(ctx, options.RepoPath, projectID)
+	if err != nil {
+		return "", fmt.Errorf("read local repo summary: %w", err)
+	}
+	payload, envelope, err := buildClientExecutionPackage(smokeID, orgID, projectID, options.ProductURL, options.Mode, externalProduct, options.RecordDuration, options.Flow, options.LoginEmail, options.LoginPassword, codeSnapshot)
+	if err != nil {
+		return "", err
+	}
+	outputDir := sampleDir
+	if outputDir == "" {
+		tmpRoot := strings.TrimSpace(os.Getenv("GOTMPDIR"))
+		if tmpRoot == "" {
+			tmpRoot = os.TempDir()
+		}
+		outputDir, err = os.MkdirTemp(tmpRoot, "cascade-devsmoke-package-replay-*")
+		if err != nil {
+			return "", err
+		}
+	} else if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(outputDir, "execution-package.fixture.json")
+	if err := writeIndentedJSONFile(path, payload); err != nil {
+		return "", err
+	}
+	if sampleDir != "" {
+		if err := writeSanitizedPackageSample(sampleDir, payload, envelope, codeSnapshot, options.LoginEmail, options.LoginPassword); err != nil {
+			return "", fmt.Errorf("write sanitized package sample: %w", err)
+		}
+	}
+	return path, nil
+}
+
+func writeIndentedJSONFile(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 func writeSanitizedPackageSample(outputDir string, payload model.ClientExecutionPackage, envelope model.ExchangeEnvelope, snapshot *model.CodeUnderstandingSnapshot, secretValues ...string) error {
@@ -1671,6 +1855,77 @@ func envelopeForPayload(smokeID string, pkg model.ClientExecutionPackage, now ti
 	}, nil
 }
 
+type replayUploadBody struct {
+	UploadID   string                       `json:"upload_id,omitempty"`
+	Envelope   model.ExchangeEnvelope       `json:"envelope,omitempty"`
+	PayloadRef model.EncryptedPayloadRef    `json:"payload_ref,omitempty"`
+	Payload    model.ClientExecutionPackage `json:"payload,omitempty"`
+}
+
+type replayPackage struct {
+	UploadBody       replayUploadBody
+	OrgID            string
+	ProjectID        string
+	ProductURL       string
+	PayloadAvailable bool
+}
+
+func loadReplayPackageFile(path string, smokeID string) (replayPackage, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return replayPackage{}, fmt.Errorf("read --package-file: %w", err)
+	}
+	var body replayUploadBody
+	if err := json.Unmarshal(data, &body); err != nil {
+		return replayPackage{}, fmt.Errorf("decode --package-file: %w", err)
+	}
+	if body.Payload.PackageID == "" && body.Envelope.EnvelopeID == "" {
+		var payload model.ClientExecutionPackage
+		if err := json.Unmarshal(data, &payload); err != nil {
+			return replayPackage{}, fmt.Errorf("decode --package-file as client execution package: %w", err)
+		}
+		if payload.PackageID == "" {
+			return replayPackage{}, errors.New("--package-file must be either an upload body with envelope/payload or a ClientExecutionPackage payload")
+		}
+		body.Payload = payload
+	}
+	if body.Payload.PackageID != "" && body.Envelope.EnvelopeID == "" {
+		envelope, err := envelopeForPayload(smokeID, body.Payload, time.Now().UTC().Truncate(time.Microsecond))
+		if err != nil {
+			return replayPackage{}, fmt.Errorf("build replay envelope: %w", err)
+		}
+		body.Envelope = envelope
+	}
+	if body.Envelope.EnvelopeID == "" {
+		return replayPackage{}, errors.New("--package-file envelope is required when plaintext payload is not present")
+	}
+	if body.PayloadRef.Kind == "" {
+		body.PayloadRef = body.Envelope.PayloadRef
+	}
+	orgID := body.Envelope.OrgID
+	projectID := body.Envelope.ProjectID
+	productURL := ""
+	if body.Payload.PackageID != "" {
+		if orgID == "" {
+			orgID = body.Payload.OrgID
+		}
+		if projectID == "" {
+			projectID = body.Payload.ProjectID
+		}
+		productURL = body.Payload.ProjectContextSummary.ProductURL
+	}
+	if productURL == "" {
+		productURL = body.PayloadRef.URI
+	}
+	return replayPackage{
+		UploadBody:       body,
+		OrgID:            orgID,
+		ProjectID:        projectID,
+		ProductURL:       productURL,
+		PayloadAvailable: body.Payload.PackageID != "",
+	}, nil
+}
+
 func postJSON[T any](ctx context.Context, client *http.Client, endpoint string, token string, orgID string, body any) (T, error) {
 	var zero T
 	payload, err := json.Marshal(body)
@@ -1718,9 +1973,19 @@ func doJSON[T any](client *http.Client, req *http.Request) (T, error) {
 			Error struct {
 				Code    string `json:"code"`
 				Message string `json:"message"`
+				Details []struct {
+					Field   string `json:"field,omitempty"`
+					Reason  string `json:"reason,omitempty"`
+					Message string `json:"message"`
+					Hint    string `json:"hint,omitempty"`
+				} `json:"details,omitempty"`
 			} `json:"error"`
 		}
 		if json.Unmarshal(data, &exchangeErr) == nil && exchangeErr.Error.Code != "" {
+			if len(exchangeErr.Error.Details) > 0 {
+				details, _ := json.Marshal(exchangeErr.Error.Details)
+				return zero, fmt.Errorf("%s %s returned %d: %s: %s details=%s", req.Method, req.URL, resp.StatusCode, exchangeErr.Error.Code, exchangeErr.Error.Message, details)
+			}
 			return zero, fmt.Errorf("%s %s returned %d: %s: %s", req.Method, req.URL, resp.StatusCode, exchangeErr.Error.Code, exchangeErr.Error.Message)
 		}
 		return zero, fmt.Errorf("%s %s returned %d: %s", req.Method, req.URL, resp.StatusCode, strings.TrimSpace(string(data)))

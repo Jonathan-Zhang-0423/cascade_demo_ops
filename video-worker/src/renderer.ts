@@ -320,6 +320,8 @@ interface CompositorResult {
   video_path: string;
   method: "ffmpeg_trim_concat" | "copy_source_recording" | "pending_compositor";
   ffmpeg_available?: boolean;
+  quality_status?: "ok" | "degraded";
+  video_codec?: string;
   source_artifact_id?: string;
   source_uri?: string;
   output_container?: string;
@@ -339,6 +341,11 @@ interface CompositorShot {
   duration_ms: number;
   operations: string[];
   overlays: Array<{ type: string; text?: string; start_ms?: number; end_ms?: number }>;
+}
+
+interface VideoCodecConfig {
+  name: string;
+  args: string[];
 }
 
 export async function render(request: RenderRequest): Promise<RenderResult> {
@@ -765,6 +772,7 @@ async function composeFinalVideo(outputDir: string, targetDurationSec: number, c
       video_path: videoPath,
       method: "copy_source_recording",
       ffmpeg_available: false,
+      quality_status: "degraded",
       source_artifact_id: primaryShot.source_artifact_id,
       output_container: extension.replace(/^\./, ""),
       shot_plan: shotPlan,
@@ -784,6 +792,7 @@ async function composeFinalVideo(outputDir: string, targetDurationSec: number, c
       video_path: videoPath,
       method: "copy_source_recording",
       ffmpeg_available: true,
+      quality_status: "degraded",
       source_artifact_id: primaryShot.source_artifact_id,
       output_container: extension.replace(/^\./, ""),
       shot_plan: shotPlan,
@@ -800,12 +809,14 @@ async function composeFinalVideo(outputDir: string, targetDurationSec: number, c
     video_path: videoPath,
     method: "ffmpeg_trim_concat",
     ffmpeg_available: true,
+    quality_status: "ok",
     source_artifact_id: primaryShot.source_artifact_id,
     output_container: extension.replace(/^\./, ""),
     shot_plan: shotPlan,
     applied_operations: appliedOperations(shotPlan),
     note: "Rendered a deterministic demo video by trimming and concatenating existing source browser recording segments. No image or video generation was used.",
   };
+  if (composed.video_codec) result.video_codec = composed.video_codec;
   if (primaryShot.source_uri) result.source_uri = primaryShot.source_uri;
   return result;
 }
@@ -816,6 +827,7 @@ function plannedCompositorResult(outputDir: string, targetDurationSec: number, s
     video_path: path.join(outputDir, `demo_${targetDurationSec}s.mp4`),
     method: "pending_compositor",
     ffmpeg_available: false,
+    quality_status: "degraded",
     output_container: "mp4",
     shot_plan: shotPlan,
     fallback_reason: "missing_local_source_video",
@@ -888,10 +900,11 @@ function appliedOperations(shots: CompositorShot[]): string[] {
   return [...values].sort();
 }
 
-async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPath: string, shots: CompositorShot[], extension: string): Promise<{ rendered: boolean; error?: string }> {
+async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPath: string, shots: CompositorShot[], extension: string): Promise<{ rendered: boolean; error?: string; video_codec?: string }> {
   const segmentsDir = path.join(outputDir, "segments");
   await mkdir(segmentsDir, { recursive: true });
   const segmentPaths: string[] = [];
+  const codec = await preferredVideoCodec(ffmpegPath, extension);
   for (const [index, shot] of shots.entries()) {
     if (!shot.source_path || !shot.source_time_range_ms) {
       continue;
@@ -901,17 +914,29 @@ async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPat
     if (durationMS <= 0) {
       continue;
     }
+    const leadingOffsetMS = index === 0 && startMS === 0 ? Math.min(200, Math.max(0, durationMS - 100)) : 0;
+    const segmentStartMS = startMS + leadingOffsetMS;
+    const segmentDurationMS = durationMS - leadingOffsetMS;
+    if (segmentDurationMS <= 0) {
+      continue;
+    }
     const segmentPath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}${extension}`);
     const result = await runCommand(ffmpegPath, [
       "-y",
-      "-ss",
-      secondsArg(startMS),
       "-i",
       shot.source_path,
+      "-ss",
+      secondsArg(segmentStartMS),
       "-t",
-      secondsArg(durationMS),
-      "-c",
-      "copy",
+      secondsArg(segmentDurationMS),
+      "-map",
+      "0:v:0",
+      "-c:v",
+      codec.name,
+      ...codec.args,
+      "-an",
+      "-avoid_negative_ts",
+      "make_zero",
       segmentPath,
     ]);
     if (result.code !== 0) {
@@ -928,15 +953,31 @@ async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPat
       return { rendered: false, error: "missing_single_segment" };
     }
     await copyFile(onlySegmentPath, videoPath);
-    return { rendered: true };
+    return { rendered: true, video_codec: codec.name };
   }
   const concatListPath = path.join(segmentsDir, "concat.txt");
   await writeFile(concatListPath, segmentPaths.map((segmentPath) => `file '${ffmpegConcatPath(segmentPath)}'`).join("\n") + "\n", "utf8");
-  const concatResult = await runCommand(ffmpegPath, ["-y", "-f", "concat", "-safe", "0", "-i", concatListPath, "-c", "copy", videoPath]);
+  const concatResult = await runCommand(ffmpegPath, ["-y", "-f", "concat", "-safe", "0", "-i", concatListPath, "-c:v", codec.name, ...codec.args, "-an", videoPath]);
   if (concatResult.code !== 0) {
     return { rendered: false, error: compactProcessError("ffmpeg_concat_failed", concatResult) };
   }
-  return { rendered: true };
+  return { rendered: true, video_codec: codec.name };
+}
+
+async function preferredVideoCodec(ffmpegPath: string, extension: string): Promise<VideoCodecConfig> {
+  const encoderList = await runCommand(ffmpegPath, ["-hide_banner", "-encoders"]);
+  const encoders = `${encoderList.stdout}\n${encoderList.stderr}`;
+  const normalizedExtension = extension.toLowerCase();
+  if (normalizedExtension === ".mp4" || normalizedExtension === ".m4v" || normalizedExtension === ".mov") {
+    if (encoders.includes("libx264")) {
+      return { name: "libx264", args: ["-preset", "veryfast", "-crf", "23", "-g", "12", "-keyint_min", "12", "-pix_fmt", "yuv420p"] };
+    }
+    return { name: "mpeg4", args: ["-q:v", "4", "-g", "12"] };
+  }
+  if (encoders.includes("libvpx-vp9")) {
+    return { name: "libvpx-vp9", args: ["-b:v", "1M", "-g", "12", "-keyint_min", "12", "-deadline", "realtime", "-cpu-used", "4"] };
+  }
+  return { name: "libvpx", args: ["-b:v", "1M", "-g", "12", "-keyint_min", "12", "-deadline", "realtime", "-cpu-used", "4"] };
 }
 
 async function isCommandAvailable(command: string): Promise<boolean> {

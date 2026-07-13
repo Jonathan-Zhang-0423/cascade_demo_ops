@@ -59,6 +59,7 @@ type BrowserScriptStep = {
     screenshot?: boolean;
     scope?: "viewport" | "full_page" | "element";
     selector?: string;
+    focus_selector?: string;
     full_page?: boolean;
     dedupe?: boolean;
     asset_role?: string;
@@ -141,6 +142,9 @@ type ScreenshotCaptureResult = {
 };
 
 const screenshotTimeoutMS = 8000;
+const defaultViewport = { width: 1920, height: 1080 };
+const pageSettleTimeoutMS = 5000;
+const pageSettleFrameMS = 250;
 
 export async function recordWithPlaywright(request: BrowserRecordRequest): Promise<BrowserRecordResult> {
   const playwright = await import("playwright");
@@ -151,10 +155,11 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
   }
 
   const outputDir = request.output_dir;
-  const viewport = request.viewport || { width: 1440, height: 900 };
+  const viewport = request.viewport || defaultViewport;
   const browser = await engine.launch({ headless: request.recording_run_spec?.browser?.headless ?? request.headless ?? true });
   const context = await browser.newContext({
     viewport,
+    deviceScaleFactor: 1,
     recordVideo: { dir: outputDir, size: viewport },
   });
   const tracePath = path.join(outputDir, "trace.zip");
@@ -327,6 +332,7 @@ async function runStep(page: any, step: BrowserScriptStep, allowedDomains: strin
     const policyError = urlPolicyError(url, allowedDomains, forbiddenPages, networkMode);
     if (policyError) throw new Error(policyError);
     await page.goto(url, { waitUntil: waitUntil(step.action?.wait_until), timeout });
+    await waitForPageSettled(page);
     return;
   }
   if (action === "click") {
@@ -348,6 +354,7 @@ async function runStep(page: any, step: BrowserScriptStep, allowedDomains: strin
   if (action === "assert" || action === "inspect") {
     const selector = selectorForStep(step);
     if (selector) await page.locator(selector).first().waitFor({ timeout });
+    await waitForPageSettled(page, Math.min(timeout, pageSettleTimeoutMS));
   }
 }
 
@@ -367,8 +374,9 @@ async function captureStepScreenshot(page: any, outputDir: string, step: Browser
   const mask = maskSelectors.map((selector) => page.locator(selector));
   const scope = captureScope(step);
   try {
+    await waitForPageSettled(page);
     if (scope === "element") {
-      const selector = step.capture.selector || selectorForStep(step);
+      const selector = step.capture.selector || step.capture.focus_selector || selectorForStep(step);
       if (!selector) return { warning: `step ${step.node_id || "unknown"} requested element screenshot without selector` };
       await page.locator(selector).first().screenshot({ path: screenshotPath, mask, timeout: screenshotTimeoutMS });
       return { path: screenshotPath };
@@ -390,9 +398,10 @@ async function captureFailureScreenshot(page: any, outputDir: string, index: num
 }
 
 function captureScope(step: BrowserScriptStep): "viewport" | "full_page" | "element" {
-  if (step.capture?.scope === "full_page" || step.capture?.full_page === true) return "full_page";
   if (step.capture?.scope === "element") return "element";
-  return "viewport";
+  if (step.capture?.scope === "viewport" || step.capture?.full_page === false) return "viewport";
+  if (step.capture?.scope === "full_page" || step.capture?.full_page === true) return "full_page";
+  return "full_page";
 }
 
 function shouldKeepScreenshot(step: BrowserScriptStep, asset: BrowserArtifactRef, previousSHA256?: string): boolean {
@@ -428,6 +437,11 @@ function selectorForStep(step: BrowserScriptStep): string | undefined {
 function waitUntil(value?: string): "load" | "domcontentloaded" | "networkidle" {
   if (value === "domcontentloaded" || value === "networkidle") return value;
   return "load";
+}
+
+async function waitForPageSettled(page: any, timeoutMS = pageSettleTimeoutMS): Promise<void> {
+  await page.waitForLoadState("networkidle", { timeout: timeoutMS }).catch(() => undefined);
+  await page.waitForTimeout(pageSettleFrameMS).catch(() => undefined);
 }
 
 function classifyPlaywrightError(message: string): string {
