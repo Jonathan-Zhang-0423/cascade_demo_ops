@@ -135,6 +135,13 @@ type BrowserArtifactRef = {
   metadata?: Record<string, unknown>;
 };
 
+type ScreenshotCaptureResult = {
+  path?: string;
+  warning?: string;
+};
+
+const screenshotTimeoutMS = 8000;
+
 export async function recordWithPlaywright(request: BrowserRecordRequest): Promise<BrowserRecordResult> {
   const playwright = await import("playwright");
   const engineName = normalizeEngine(request.recording_run_spec?.browser?.engine);
@@ -179,7 +186,8 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
       try {
         await runStep(page, step, allowedDomains, forbiddenPages, request.sandbox_policy?.network_policy?.mode);
         await waitForStepDuration(page, step, started);
-        const screenshotPath = await captureStepScreenshot(page, outputDir, step, index, request.recording_run_spec?.redactions?.mask_selectors || []);
+        const screenshotCapture = await captureStepScreenshot(page, outputDir, step, index, request.recording_run_spec?.redactions?.mask_selectors || []);
+        const screenshotPath = screenshotCapture.path;
         if (screenshotPath) {
           const screenshotAsset = await artifactRef(
             `artifact_screenshot_${String(index + 1).padStart(3, "0")}`,
@@ -202,8 +210,11 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
           status: "passed",
           duration_ms: Date.now() - started,
         };
-        if (step.expected_outcome) {
-          stepResult.observed_state = step.expected_outcome;
+        const observedState = [step.expected_outcome, screenshotCapture.warning ? `screenshot_warning: ${screenshotCapture.warning}` : ""]
+          .filter(Boolean)
+          .join(" | ");
+        if (observedState) {
+          stepResult.observed_state = observedState;
         }
         stepResults.push(stepResult);
       } catch (error) {
@@ -349,20 +360,25 @@ async function waitForStepDuration(page: any, step: BrowserScriptStep, startedAt
   }
 }
 
-async function captureStepScreenshot(page: any, outputDir: string, step: BrowserScriptStep, index: number, globalMaskSelectors: string[]): Promise<string | undefined> {
-  if (!step.capture?.screenshot) return undefined;
+async function captureStepScreenshot(page: any, outputDir: string, step: BrowserScriptStep, index: number, globalMaskSelectors: string[]): Promise<ScreenshotCaptureResult> {
+  if (!step.capture?.screenshot) return {};
   const screenshotPath = path.join(outputDir, `step-${String(index + 1).padStart(3, "0")}.png`);
   const maskSelectors = [...globalMaskSelectors, ...(step.capture.mask_selectors || [])].filter(Boolean);
   const mask = maskSelectors.map((selector) => page.locator(selector));
   const scope = captureScope(step);
-  if (scope === "element") {
-    const selector = step.capture.selector || selectorForStep(step);
-    if (!selector) throw new Error(`step ${step.node_id || "unknown"} requested element screenshot without selector`);
-    await page.locator(selector).first().screenshot({ path: screenshotPath, mask });
-    return screenshotPath;
+  try {
+    if (scope === "element") {
+      const selector = step.capture.selector || selectorForStep(step);
+      if (!selector) return { warning: `step ${step.node_id || "unknown"} requested element screenshot without selector` };
+      await page.locator(selector).first().screenshot({ path: screenshotPath, mask, timeout: screenshotTimeoutMS });
+      return { path: screenshotPath };
+    }
+    await page.screenshot({ path: screenshotPath, fullPage: scope === "full_page", mask, timeout: screenshotTimeoutMS });
+    return { path: screenshotPath };
+  } catch (error) {
+    await unlink(screenshotPath).catch(() => undefined);
+    return { warning: redactDiagnosticText(error instanceof Error ? error.message : String(error)) };
   }
-  await page.screenshot({ path: screenshotPath, fullPage: scope === "full_page", mask });
-  return screenshotPath;
 }
 
 async function captureFailureScreenshot(page: any, outputDir: string, index: number, globalMaskSelectors: string[]): Promise<string | undefined> {
