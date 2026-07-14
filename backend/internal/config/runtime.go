@@ -199,7 +199,7 @@ func modelTaskRoutesFromEnv() map[ModelTask]ModelTaskRoute {
 		{
 			Task:             ModelTaskVideoOperation,
 			Provider:         ModelProviderSeedance,
-			Model:            "seedance-2.0",
+			Model:            "doubao-seedance-2-0-260128",
 			ProviderOverride: "CASCADE_VIDEO_PROVIDER",
 			ModelOverride:    "CASCADE_VIDEO_MODEL",
 		},
@@ -237,7 +237,7 @@ func modelProviderCredentialsFromEnv() map[ModelProvider]ModelProviderCredential
 		{ModelProviderGLM, "GLM_API_KEY", nil, "GLM_BASE_URL", defaultGLMBaseURL, "GLM_MODEL", "glm-5.2"},
 		{ModelProviderKimi, "KIMI_API_KEY", []string{"MOONSHOT_API_KEY"}, "KIMI_BASE_URL", defaultKimiBaseURL, "KIMI_MODEL", "kimi-k2.7-code"},
 		{ModelProviderMinimax, "MINIMAX_API_KEY", nil, "MINIMAX_BASE_URL", defaultMinimaxBaseURL, "MINIMAX_MODEL", "minimax-m3"},
-		{ModelProviderSeedance, "SEEDANCE_API_KEY", []string{"DOUBAO_API_KEY", "ARK_API_KEY"}, "SEEDANCE_BASE_URL", defaultArkBaseURL, "SEEDANCE_MODEL", "seedance-2.0"},
+		{ModelProviderSeedance, "SEEDANCE_API_KEY", []string{"DOUBAO_API_KEY", "ARK_API_KEY"}, "SEEDANCE_BASE_URL", defaultArkBaseURL, "SEEDANCE_MODEL", "doubao-seedance-2-0-260128"},
 		{ModelProviderDoubao, "DOUBAO_API_KEY", []string{"ARK_API_KEY"}, "DOUBAO_BASE_URL", defaultArkBaseURL, "DOUBAO_MODEL", ""},
 		{ModelProviderDeepSeek, "DEEPSEEK_API_KEY", nil, "DEEPSEEK_BASE_URL", defaultDeepSeekBaseURL, "DEEPSEEK_MODEL", "deepseek-v4-flash"},
 	}

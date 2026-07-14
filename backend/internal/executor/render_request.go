@@ -18,6 +18,7 @@ func NewRenderRequestFromRecordingResult(source *model.ClientExecutionPackage, r
 		Graph:                  source.WorkflowGraph,
 		OutputDir:              outputDir,
 		DurationSec:            durationSec,
+		RecordingRunSpec:       &source.RecordingRunSpec,
 		ExecutionTrace:         result.ExecutionTrace,
 		GeneratedAssets:        result.GeneratedAssets,
 		RecordingResultPackage: result,

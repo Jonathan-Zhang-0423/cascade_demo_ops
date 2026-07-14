@@ -109,8 +109,15 @@ func TestFullRecordingRenderPipelineSmoke(t *testing.T) {
 		renderResult.DemoEditPlanPath,
 		renderResult.ValidationReportPath,
 		renderResult.RenderManifestPath,
+		renderResult.MediaNormalizationReportPath,
+		renderResult.RequirementReportPath,
 	} {
 		if err := requireLocalFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if renderResult.SourceReferenceVideoPath != "" {
+		if err := requireLocalFile(renderResult.SourceReferenceVideoPath); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -134,23 +141,26 @@ func TestFullRecordingRenderPipelineSmoke(t *testing.T) {
 
 	summaryPath := filepath.Join(outputRoot, "full_pipeline_summary.json")
 	summary := map[string]any{
-		"input_package_id":               source.PackageID,
-		"input_schema_version":           source.SchemaVersion,
-		"output_root":                    outputRoot,
-		"recording_result_id":            recordingPackage.ResultID,
-		"recording_status":               recordingPackage.Status,
-		"generated_asset_count":          len(recordingPackage.GeneratedAssets),
-		"timeline_artifact_count":        len(renderResult.AssetTimelineCatalog.Artifacts),
-		"demo_edit_plan_path":            renderResult.DemoEditPlanPath,
-		"demo_edit_plan_valid":           renderResult.ValidationReport.Valid,
-		"render_manifest_path":           renderResult.RenderManifestPath,
-		"render_method":                  method,
-		"video_path":                     renderResult.VideoPath,
-		"final_video_file_created":       true,
-		"source_material_only":           renderResult.AssetTimelineCatalog.Constraints.SourceMaterialOnly,
-		"script_is_primary_storyline":    renderResult.AssetTimelineCatalog.Constraints.ScriptIsPrimaryStoryline,
-		"prohibit_new_image_or_video":    renderResult.AssetTimelineCatalog.Constraints.ProhibitNewImageOrVideoGeneration,
-		"customer_side_source_authority": renderResult.DemoEditPlan.SourceAuthority,
+		"input_package_id":                source.PackageID,
+		"input_schema_version":            source.SchemaVersion,
+		"output_root":                     outputRoot,
+		"recording_result_id":             recordingPackage.ResultID,
+		"recording_status":                recordingPackage.Status,
+		"generated_asset_count":           len(recordingPackage.GeneratedAssets),
+		"timeline_artifact_count":         len(renderResult.AssetTimelineCatalog.Artifacts),
+		"demo_edit_plan_path":             renderResult.DemoEditPlanPath,
+		"demo_edit_plan_valid":            renderResult.ValidationReport.Valid,
+		"render_manifest_path":            renderResult.RenderManifestPath,
+		"media_normalization_report_path": renderResult.MediaNormalizationReportPath,
+		"requirement_report_path":         renderResult.RequirementReportPath,
+		"source_reference_video_path":     renderResult.SourceReferenceVideoPath,
+		"render_method":                   method,
+		"video_path":                      renderResult.VideoPath,
+		"final_video_file_created":        true,
+		"source_material_only":            renderResult.AssetTimelineCatalog.Constraints.SourceMaterialOnly,
+		"script_is_primary_storyline":     renderResult.AssetTimelineCatalog.Constraints.ScriptIsPrimaryStoryline,
+		"prohibit_new_image_or_video":     renderResult.AssetTimelineCatalog.Constraints.ProhibitNewImageOrVideoGeneration,
+		"customer_side_source_authority":  renderResult.DemoEditPlan.SourceAuthority,
 	}
 	data, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
