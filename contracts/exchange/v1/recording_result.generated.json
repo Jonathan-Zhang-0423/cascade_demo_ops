@@ -1,0 +1,92 @@
+{
+  "result_id": "result_contract_generated",
+  "source_package_id": "pkg_contract_happy",
+  "cloud_job_id": "job_contract",
+  "schema_version": "demoops.recording_result_package.v1",
+  "status": "generated",
+  "execution_trace": {
+    "trace_id": "trace_contract",
+    "workflow_graph_id": "graph_contract",
+    "started_at": "2026-07-14T00:04:00Z",
+    "completed_at": "2026-07-14T00:05:00Z",
+    "sandbox": {
+      "policy_hash_sha256": "sha256:sandbox_policy",
+      "profile": "mvp_cloud",
+      "isolation_mode": "per_job_container",
+      "network_mode": "allowed_domains_only",
+      "worker_id": "worker_contract",
+      "runtime_versions": {
+        "playwright": "1.45.0",
+        "chromium": "stable"
+      }
+    }
+  },
+  "step_results": [
+    {
+      "node_id": "node_open_dashboard",
+      "status": "passed",
+      "duration_ms": 10000
+    },
+    {
+      "node_id": "node_invite_member",
+      "status": "passed",
+      "duration_ms": 10000
+    }
+  ],
+  "generated_assets": [
+    {
+      "id": "asset_video_contract",
+      "role": "final_demo_video",
+      "kind": "video",
+      "uri": "s3://cascade-results/org_contract/result_contract_generated/video.webm.enc",
+      "mime_type": "video/webm",
+      "sha256": "sha256:video",
+      "encrypted": true,
+      "sensitive": true
+    },
+    {
+      "id": "asset_raw_recording_contract",
+      "role": "raw_recording",
+      "kind": "video",
+      "uri": "s3://cascade-results/org_contract/result_contract_generated/raw.webm.enc",
+      "mime_type": "video/webm",
+      "sha256": "sha256:raw",
+      "encrypted": true,
+      "sensitive": true
+    }
+  ],
+  "verification_report": {
+    "pass_rate": 1,
+    "reproducibility_match": true
+  },
+  "delivery": {
+    "recipient_kind": "app_installation",
+    "recipient_key_id": "app_install_contract",
+    "encryption_alg": "aes-256-gcm",
+    "ack_required": true,
+    "result_package_ref": {
+      "id": "artifact_result_package_contract",
+      "role": "recording_result_package",
+      "kind": "recording_result_package",
+      "uri": "s3://cascade-results/org_contract/result_contract_generated/result.json.enc",
+      "mime_type": "application/json",
+      "sha256": "sha256:result",
+      "encrypted": true,
+      "sensitive": true
+    },
+    "asset_refs": [
+      {
+        "id": "asset_video_contract",
+        "role": "final_demo_video",
+        "kind": "video",
+        "uri": "s3://cascade-results/org_contract/result_contract_generated/video.webm.enc",
+        "mime_type": "video/webm",
+        "sha256": "sha256:video",
+        "encrypted": true,
+        "sensitive": true,
+        "recipient_key_id": "app_install_contract"
+      }
+    ]
+  },
+  "created_at": "2026-07-14T00:05:00Z"
+}

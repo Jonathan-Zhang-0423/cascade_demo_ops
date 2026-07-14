@@ -221,9 +221,16 @@ export type RuntimeHealthView = {
 
 export type CloudExchangeStatus = {
   configured: boolean;
+  exchangeDiscovered: boolean;
+  installationPaired: boolean;
+  sessionValid: boolean;
   baseURLHost?: string;
   baseURLPath?: string;
-  tokenConfigured: boolean;
+  serverKeyID?: string;
+  installIDSuffix?: string;
+  authMode: "installation_session" | "dev_token" | "unpaired" | string;
+  environment?: string;
+  devPlaintext?: boolean;
 };
 
 export type ModelDiagnosticResult = {

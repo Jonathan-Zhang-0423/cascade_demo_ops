@@ -22,12 +22,15 @@ type fileExchangeSnapshotStore struct {
 }
 
 type exchangeSnapshot struct {
-	Uploads         map[string]exchangeUploadSession `json:"uploads,omitempty"`
-	Packages        map[string]*exchangePackageState `json:"packages,omitempty"`
-	PackageByIdem   map[string]string                `json:"package_by_idem,omitempty"`
-	ResultByID      map[string]*recordingResultState `json:"result_by_id,omitempty"`
-	ResultByPackage map[string]string                `json:"result_by_package,omitempty"`
-	SeenNonces      map[string]bool                  `json:"seen_nonces,omitempty"`
+	Uploads         map[string]exchangeUploadSession             `json:"uploads,omitempty"`
+	Packages        map[string]*exchangePackageState             `json:"packages,omitempty"`
+	PackageByIdem   map[string]string                            `json:"package_by_idem,omitempty"`
+	ResultByID      map[string]*recordingResultState             `json:"result_by_id,omitempty"`
+	ResultByPackage map[string]string                            `json:"result_by_package,omitempty"`
+	SeenNonces      map[string]bool                              `json:"seen_nonces,omitempty"`
+	Installations   map[string]*exchangeInstallationState        `json:"installations,omitempty"`
+	Sessions        map[string]*exchangeInstallationSessionState `json:"sessions,omitempty"`
+	Challenges      map[string]exchangePairingChallengeState     `json:"challenges,omitempty"`
 }
 
 func newFileExchangeSnapshotStore(root string) *fileExchangeSnapshotStore {

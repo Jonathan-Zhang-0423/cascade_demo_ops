@@ -148,6 +148,56 @@ func TestScriptCodeGeneratorRejectsSensitiveInlineFillValue(t *testing.T) {
 	}
 }
 
+func TestObservationStepsAreNonBlockingAndDoNotRequireMainFallback(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	graph.Nodes = append(graph.Nodes[:1], graph.Nodes[2:]...)
+	graph.Nodes[1].ID = "node_observe"
+	graph.Nodes[1].Type = model.GraphNodeTypeCapture
+	graph.Nodes[1].Action = string(model.GraphActionInspect)
+	graph.Nodes[1].Selector = ""
+	graph.Nodes[1].ActionSpec = &model.GraphAction{
+		Type:      model.GraphActionInspect,
+		Target:    model.ActionTarget{},
+		TimeoutMS: 12000,
+	}
+	graph.Nodes[1].Validations = []model.ValidationSpec{{
+		ID:        "validate_observe",
+		Kind:      "surface_visible",
+		Assertion: "观察型素材节点可继续录制",
+		Severity:  "warning",
+		Required:  false,
+	}}
+	graph.Nodes[1].Capture = &model.CaptureSpec{Screenshot: true, Video: true, Zoom: true, Callout: true}
+
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observeStep *model.ScriptStep
+	for i := range pkg.Document.Steps {
+		if pkg.Document.Steps[i].NodeID == "node_observe" {
+			observeStep = &pkg.Document.Steps[i]
+			break
+		}
+	}
+	if observeStep == nil {
+		t.Fatal("expected observation step in generated plan")
+	}
+	if observeStep.Blocking {
+		t.Fatalf("observation step should be non-blocking: %+v", observeStep)
+	}
+	if observeStep.PageTarget.Selector == "main" || observeStep.Action.Target.Selector == "main" {
+		t.Fatalf("observation step should not inject brittle main selector fallback: %+v", observeStep)
+	}
+	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
+	if !strings.Contains(source, "observation step validation is non-blocking") {
+		t.Fatalf("generated script should mark observation validation as non-blocking:\n%s", source)
+	}
+	if strings.Contains(source, `ctx.assert.step("node_observe"`) {
+		t.Fatalf("observation step should not emit blocking assert.step:\n%s", source)
+	}
+}
+
 func validExecutableBundleFixture(t *testing.T) *model.ExecutableRecordingScriptBundle {
 	t.Helper()
 	project, report, productMap, graph := executableBundleFixtures()

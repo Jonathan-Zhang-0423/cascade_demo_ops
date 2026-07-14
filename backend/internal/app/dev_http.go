@@ -28,6 +28,20 @@ type ClientExecutionPackageRequest struct {
 	OrgID string `json:"org_id,omitempty"`
 }
 
+type CloudUploadRequest struct {
+	OrgID    string                       `json:"org_id,omitempty"`
+	UploadID string                       `json:"upload_id"`
+	Build    *ClientExecutionPackageBuild `json:"build,omitempty"`
+}
+
+type CloudResultAckRequest struct {
+	OrgID             string   `json:"org_id,omitempty"`
+	ResultPackageID   string   `json:"result_package_id,omitempty"`
+	ExchangePackageID string   `json:"exchange_package_id,omitempty"`
+	ReceivedAssetIDs  []string `json:"received_asset_ids,omitempty"`
+	VerifiedChecksums bool     `json:"verified_checksums"`
+}
+
 type DevExecutionEvent struct {
 	ID        int64                      `json:"id"`
 	ProjectID string                     `json:"project_id"`
@@ -50,12 +64,13 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
+	s.registerExchangeBootstrapRoutes(mux)
 	s.registerDevExchangeRoutes(mux)
 	return withDevLogging(withDevCORS(mux))
 }
 
 func (s *DevHTTPServer) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
-	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig()), nil)
+	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), nil)
 }
 
 func (s *DevHTTPServer) handleModelDiagnostics(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +172,88 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		build, err := s.service.BuildClientExecutionPackage(r.Context(), projectID, request.OrgID)
 		writeBridgeValue(w, build, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/init":
+		var request CloudUploadInitRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := decodeJSON(r, &request); err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
+		targetProjectID := firstNonEmptyString(request.ProjectID, projectID)
+		build, session, err := s.service.BuildCloudClientExecutionPackage(r.Context(), targetProjectID, orgID)
+		if err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		initResponse, err := s.service.InitCloudExecutionPackageUpload(r.Context(), build)
+		result := CloudUploadInitResult{Build: &build, Init: initResponse, CloudBase: session.BaseURL}
+		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/upload":
+		var request CloudUploadRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		var build ClientExecutionPackageBuild
+		var err error
+		var session ExchangeSession
+		build, session, err = s.service.BuildCloudClientExecutionPackage(r.Context(), projectID, request.OrgID)
+		if err != nil && request.Build != nil {
+			build = *request.Build
+			err = normalizeClientExecutionPackageForUpload(&build.Package)
+		}
+		if err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		var sessionErr error
+		if session.SessionToken == "" {
+			session, sessionErr = s.service.EnsureExchangeSession(r.Context(), build.Package.ProjectContextSummary.ProductURL, build.OrgID, build.ProjectID)
+		}
+		if sessionErr == nil {
+			build, err = s.service.signBuildWithExchangeSession(build, session)
+			if err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		upload, err := s.service.UploadBuiltCloudExecutionPackage(r.Context(), request.UploadID, build)
+		cloudBase := strings.TrimRight(s.service.runtime.CloudExchangeBaseURL, "/")
+		if sessionErr == nil {
+			cloudBase = session.BaseURL
+		}
+		result := CloudUploadPackageResult{Build: &build, Upload: upload, CloudBase: cloudBase}
+		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodGet && suffix == "/cloud/status":
+		status, err := s.service.GetCloudExecutionPackageStatus(r.Context(), CloudStatusRequest{
+			OrgID:             r.URL.Query().Get("org_id"),
+			ExchangePackageID: r.URL.Query().Get("exchange_package_id"),
+		})
+		writeBridgeValue(w, status, err)
+	case r.Method == http.MethodGet && suffix == "/cloud/result":
+		result, err := s.service.GetCloudResultPackage(r.Context(), CloudResultRequest{
+			OrgID:           r.URL.Query().Get("org_id"),
+			ResultPackageID: r.URL.Query().Get("result_package_id"),
+		})
+		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/ack":
+		var request CloudResultAckRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		ack, err := s.service.AckCloudResultPackage(r.Context(), CloudAckRequest{
+			OrgID:             request.OrgID,
+			ResultPackageID:   request.ResultPackageID,
+			ExchangePackageID: request.ExchangePackageID,
+			ReceivedAssetIDs:  request.ReceivedAssetIDs,
+			VerifiedChecksums: request.VerifiedChecksums,
+			AckedByInstallID:  defaultDesktopInstallID,
+			UseResultSummary:  len(request.ReceivedAssetIDs) == 0,
+		})
+		writeBridgeValue(w, ack, err)
 	case r.Method == http.MethodPost && suffix == "/cloud-lifecycle":
 		startedAt := time.Now()
 		var request CloudLifecycleRequest
@@ -245,12 +342,14 @@ func writeBridgeValue(w http.ResponseWriter, value any, err error) {
 	response := BridgeResponse{OK: true}
 	if err != nil {
 		status = http.StatusBadRequest
-		response = BridgeResponse{OK: false, Error: redactBridgeError(err.Error())}
+		info := bridgeErrorInfo(err)
+		response = BridgeResponse{OK: false, Error: info.Message, ErrorInfo: &info}
 	} else if value != nil {
 		data, marshalErr := json.Marshal(value)
 		if marshalErr != nil {
 			status = http.StatusInternalServerError
-			response = BridgeResponse{OK: false, Error: redactBridgeError(marshalErr.Error())}
+			info := bridgeErrorInfo(marshalErr)
+			response = BridgeResponse{OK: false, Error: info.Message, ErrorInfo: &info}
 		} else {
 			response.Data = data
 		}
@@ -327,7 +426,23 @@ var (
 func redactBridgeError(message string) string {
 	message = windowsPathPattern.ReplaceAllString(message, "[local_path]")
 	message = unixPathPattern.ReplaceAllString(message, "[local_path]")
+	message = userFacingBridgeError(message)
 	return message
+}
+
+func userFacingBridgeError(message string) string {
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "llm json parse failed"),
+		strings.Contains(lower, "cannot unmarshal"),
+		strings.Contains(lower, "invalid character"),
+		strings.Contains(lower, "unexpected non-whitespace character after json"):
+		return "模型返回的 JSON 结构不稳定，系统已记录诊断。请重试，或使用 CASCADE_LLM_MODE=auto 让产品流程在格式异常时安全降级。"
+	case strings.Contains(message, "执行包没有真实业务动作"):
+		return message
+	default:
+		return message
+	}
 }
 
 type devEventStore struct {

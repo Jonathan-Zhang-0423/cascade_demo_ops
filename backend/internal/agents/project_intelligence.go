@@ -473,6 +473,7 @@ func routeTreeFromSnapshots(snapshots []model.CodeUnderstandingSnapshot, pages [
 
 func interactionSurfacesFromSnapshots(project *model.ProjectContext, snapshots []model.CodeUnderstandingSnapshot, pages []model.PageUnderstandingSnapshot) []model.InteractionSurface {
 	surfaces := []model.InteractionSurface{}
+	codeSelectors := selectorsFromCodeSnapshots(snapshots)
 	for i, page := range pages {
 		actions := []model.UIActionRef{}
 		selectors := append([]model.SelectorCandidate{}, page.StableSelectors...)
@@ -497,6 +498,20 @@ func interactionSurfacesFromSnapshots(project *model.ProjectContext, snapshots [
 				})
 			}
 		}
+		for selectorIndex, selector := range limitSelectorCandidates(codeSelectors, 12) {
+			if selector.Value == "" {
+				continue
+			}
+			actionID := fmt.Sprintf("action_code_selector_%d", selectorIndex+1)
+			actions = append(actions, model.UIActionRef{
+				ID:           actionID,
+				Label:        labelFromSelector(selector.Value),
+				Kind:         actionKindFromSelector(selector.Value),
+				Selector:     selector.Value,
+				EvidenceRefs: selector.EvidenceRefs,
+			})
+			selectors = append(selectors, selector)
+		}
 		surfaces = append(surfaces, model.InteractionSurface{
 			ID:              firstNonEmpty(page.ID, fmt.Sprintf("surface_page_%d", i+1)),
 			PageID:          page.ID,
@@ -514,13 +529,14 @@ func interactionSurfacesFromSnapshots(project *model.ProjectContext, snapshots [
 		})
 	}
 	if len(surfaces) == 0 {
-		selectors := selectorsFromCodeSnapshots(snapshots)
+		selectors := codeSelectors
 		actions := []model.UIActionRef{}
 		for i, selector := range limitSelectorCandidates(selectors, 12) {
+			label := labelFromSelector(selector.Value)
 			actions = append(actions, model.UIActionRef{
 				ID:       fmt.Sprintf("action_selector_%d", i+1),
-				Label:    "检查稳定选择器",
-				Kind:     "inspect",
+				Label:    label,
+				Kind:     actionKindFromSelector(selector.Value),
 				Selector: selector.Value,
 			})
 		}
@@ -538,6 +554,37 @@ func interactionSurfacesFromSnapshots(project *model.ProjectContext, snapshots [
 		})
 	}
 	return surfaces
+}
+
+func labelFromSelector(selector string) string {
+	value := strings.Trim(selector, "[]'")
+	value = strings.NewReplacer("data-testid=", "", "\"", "", "'", "", "_", " ", "-", " ").Replace(value)
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "检查稳定选择器"
+	}
+	return value
+}
+
+func actionKindFromSelector(selector string) string {
+	lower := strings.ToLower(selector)
+	switch {
+	case containsAny(lower, "email", "username", "password", "input", "search", "name", "message", "phone"):
+		return "fill"
+	case containsAny(lower, "button", "btn", "submit", "confirm", "next", "start", "create", "add", "invite", "open", "new", "login", "signin", "sign-in"):
+		return "click"
+	default:
+		return "inspect"
+	}
+}
+
+func containsAny(value string, tokens ...string) bool {
+	for _, token := range tokens {
+		if strings.Contains(value, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func apiContractsFromSnapshots(snapshots []model.CodeUnderstandingSnapshot) []model.APIContractSummary {
@@ -872,6 +919,39 @@ type projectIntelligenceLLMOutput struct {
 	} `json:"scenarios"`
 	ReadinessNotes flexibleStringSlice `json:"readiness_notes"`
 	Confidence     float64             `json:"confidence"`
+}
+
+func (o *projectIntelligenceLLMOutput) UnmarshalJSON(data []byte) error {
+	type alias projectIntelligenceLLMOutput
+	var single alias
+	if err := json.Unmarshal(data, &single); err == nil {
+		*o = projectIntelligenceLLMOutput(single)
+		o.normalize()
+		return nil
+	}
+	var items []alias
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	merged := projectIntelligenceLLMOutput{}
+	for _, item := range items {
+		patch := projectIntelligenceLLMOutput(item)
+		if merged.Summary == "" {
+			merged.Summary = patch.Summary
+		}
+		merged.Scenarios = append(merged.Scenarios, patch.Scenarios...)
+		merged.ReadinessNotes = append(merged.ReadinessNotes, patch.ReadinessNotes...)
+		if patch.Confidence > merged.Confidence {
+			merged.Confidence = patch.Confidence
+		}
+	}
+	merged.normalize()
+	*o = merged
+	return nil
+}
+
+func (o *projectIntelligenceLLMOutput) normalize() {
+	o.ReadinessNotes = flexibleStringSlice(uniqueStrings([]string(o.ReadinessNotes)))
 }
 
 func (g *ProjectIntelligenceGraph) enhancePackWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, pack *model.ProjectIntelligencePack) (*llm.CallTrace, error) {

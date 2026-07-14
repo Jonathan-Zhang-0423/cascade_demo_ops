@@ -1270,6 +1270,7 @@ export type EncryptedPayloadRef = {
   encrypted?: boolean;
   sensitive?: boolean;
   compression_alg?: string;
+  dev_plaintext?: boolean;
 };
 
 export type ExchangeEnvelope = {
@@ -1310,9 +1311,20 @@ export type ExecutionPackageInitResponse = {
   upload_id: string;
   server_public_key_id: string;
   server_public_key_alg?: string;
+  server_public_keys?: Array<{
+    key_id: string;
+    alg: string;
+    public_key: string;
+    not_before?: string;
+    expires_at?: string;
+  }>;
   key_wrapping_modes?: string[];
   supported_crypto_suites?: string[];
   supported_compression?: string[];
+  required_signature_alg?: string;
+  installation_required?: boolean;
+  session_expires_at?: string;
+  result_recipient_key_id?: string;
   cascade_execution_ips: string[];
   max_envelope_bytes: number;
   max_attachment_bytes: number;

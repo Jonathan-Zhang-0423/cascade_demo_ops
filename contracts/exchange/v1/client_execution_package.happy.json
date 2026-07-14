@@ -1,0 +1,467 @@
+{
+  "package_id": "pkg_contract_happy",
+  "org_id": "org_contract",
+  "project_id": "project_contract",
+  "schema_version": "demoops.client_execution_package.v1",
+  "created_at": "2026-07-14T00:00:00Z",
+  "approved_at": "2026-07-14T00:01:00Z",
+  "project_context_summary": {
+    "context_id": "ctx_contract",
+    "schema_version": "demoops.project_context.v1",
+    "mode": "desktop",
+    "name": "Contract demo",
+    "product_url": "https://app.example.com",
+    "target_audience": "product operations",
+    "input_fingerprints": {
+      "requirements": "sha256:req",
+      "source_tree": "sha256:tree"
+    }
+  },
+  "product_map_summary": {
+    "product_map_id": "map_contract",
+    "version": 1,
+    "summary": "Structure-only product map summary.",
+    "routes": [
+      {
+        "id": "route_dashboard",
+        "path": "/dashboard",
+        "auth_required": true
+      }
+    ],
+    "components": [
+      {
+        "id": "component_invite",
+        "name": "InviteButton",
+        "kind": "button",
+        "selector_count": 2,
+        "action_count": 1
+      }
+    ]
+  },
+  "workflow_graph": {
+    "id": "graph_contract",
+    "project_id": "project_contract",
+    "version": 1,
+    "name": "Team invite walkthrough",
+    "status": "approved",
+    "nodes": [
+      {
+        "id": "node_open_dashboard",
+        "type": "action",
+        "title": "Open dashboard",
+        "expected_outcome": "Dashboard loads",
+        "action_spec": {
+          "type": "navigate",
+          "target": {
+            "url": "https://app.example.com/dashboard"
+          }
+        }
+      },
+      {
+        "id": "node_invite_member",
+        "type": "action",
+        "title": "Invite teammate",
+        "expected_outcome": "Invite flow starts",
+        "action_spec": {
+          "type": "click",
+          "target": {
+            "test_id": "invite-member"
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_open_to_invite",
+        "from_node": "node_open_dashboard",
+        "to_node": "node_invite_member"
+      }
+    ]
+  },
+  "recording_run_spec": {
+    "run_id": "run_contract",
+    "base_url": "https://app.example.com",
+    "allowed_domains": [
+      "app.example.com"
+    ],
+    "timezone": "Asia/Shanghai",
+    "locale": "zh-CN",
+    "browser": {
+      "engine": "chromium",
+      "headless": true
+    },
+    "timeline": {
+      "target_duration_sec": 60,
+      "node_timing_hints": [
+        {
+          "node_id": "node_invite_member",
+          "duration_ms": 10000,
+          "hold_after_ms": 10000
+        }
+      ]
+    },
+    "outputs": {
+      "raw_recording": true,
+      "final_video": true,
+      "screenshot_pack": true,
+      "step_by_step_docs": true,
+      "trace": true
+    },
+    "redactions": {
+      "mask_selectors": [
+        "[data-sensitive]"
+      ]
+    },
+    "failure_policy": {
+      "retry_attempts": 1,
+      "selector_repair_allowed": true,
+      "data_repair_allowed": false,
+      "max_repair_attempts": 1
+    },
+    "sandbox_policy": {
+      "profile": "mvp_cloud",
+      "isolation_mode": "per_job_container",
+      "network_policy": {
+        "mode": "allowed_domains_only",
+        "allowed_domains": [
+          "app.example.com"
+        ],
+        "proxy_required": true
+      },
+      "filesystem_policy": {
+        "mode": "read_only_root",
+        "writable_paths": [
+          "/workspace",
+          "/tmp"
+        ],
+        "no_host_mount": true,
+        "no_docker_socket": true,
+        "delete_temp_after_run": true
+      },
+      "resource_limits": {
+        "max_runtime_sec": 300,
+        "max_memory_mb": 2048,
+        "max_cpu_count": 2,
+        "max_disk_mb": 4096
+      },
+      "browser_policy": {
+        "fresh_context_per_run": true,
+        "disable_extensions": true,
+        "disable_downloads": true,
+        "trace_sources": false
+      },
+      "secret_policy": {
+        "vault_only": true,
+        "inject_via_context_only": true,
+        "forbid_env_injection": true,
+        "revoke_after_run": true
+      },
+      "artifact_policy": {
+        "encrypt_sensitive_artifacts": true,
+        "sensitive_by_default": true,
+        "recipient_kind": "app_installation",
+        "recipient_key_id": "app_install_contract",
+        "require_checksum": true
+      },
+      "diagnostic_policy": {
+        "redaction_required": true,
+        "forbid_full_html": true,
+        "strip_headers": [
+          "authorization",
+          "cookie"
+        ],
+        "strip_storage_keys": [
+          "localStorage",
+          "sessionStorage"
+        ],
+        "encrypt_diagnostics": true,
+        "return_repair_hints": true
+      }
+    }
+  },
+  "executable_script_bundle": {
+    "id": "bundle_contract",
+    "project_id": "project_contract",
+    "workflow_graph_id": "graph_contract",
+    "schema_version": "demoops.executable_recording_script_bundle.v1",
+    "status": "validated",
+    "script_manifest": {
+      "script_id": "script_contract",
+      "version": 1,
+      "language": "typescript",
+      "runtime": "playwright-restricted-sandbox",
+      "entry_function": "runCascadeRecording",
+      "dependency_allowlist": [],
+      "step_node_ids": [
+        "node_open_dashboard",
+        "node_invite_member"
+      ]
+    },
+    "plan_json": {
+      "id": "script_doc_contract",
+      "project_id": "project_contract",
+      "workflow_graph_id": "graph_contract",
+      "graph_version": 1,
+      "schema_version": "demoops.execution_script_document.v1",
+      "status": "review_ready",
+      "recording_run_spec": {
+        "base_url": "https://app.example.com",
+        "allowed_domains": [
+          "app.example.com"
+        ],
+        "browser": {
+          "engine": "chromium",
+          "headless": true
+        },
+        "timeline": {
+          "target_duration_sec": 60
+        },
+        "outputs": {
+          "raw_recording": true,
+          "final_video": true,
+          "screenshot_pack": true,
+          "step_by_step_docs": true,
+          "trace": true
+        },
+        "redactions": {
+          "mask_selectors": [
+            "[data-sensitive]"
+          ]
+        },
+        "failure_policy": {
+          "selector_repair_allowed": true,
+          "data_repair_allowed": false
+        }
+      },
+      "steps": [
+        {
+          "id": "step_open_dashboard",
+          "order": 1,
+          "node_id": "node_open_dashboard",
+          "title": "Open dashboard",
+          "page_target": {
+            "url": "https://app.example.com/dashboard"
+          },
+          "action": {
+            "type": "navigate",
+            "target": {
+              "url": "https://app.example.com/dashboard"
+            }
+          },
+          "expected_outcome": "Dashboard loads",
+          "validations": [],
+          "capture": {
+            "screenshot": true,
+            "video": true
+          },
+          "timing": {
+            "node_id": "node_open_dashboard",
+            "duration_ms": 10000
+          },
+          "narrative": {
+            "title": "Open dashboard"
+          },
+          "blocking": true
+        },
+        {
+          "id": "step_invite_member",
+          "order": 2,
+          "node_id": "node_invite_member",
+          "title": "Invite teammate",
+          "page_target": {
+            "selector": "[data-testid='invite-member']"
+          },
+          "action": {
+            "type": "click",
+            "target": {
+              "test_id": "invite-member"
+            }
+          },
+          "expected_outcome": "Invite flow starts",
+          "validations": [],
+          "capture": {
+            "screenshot": true,
+            "video": true
+          },
+          "timing": {
+            "node_id": "node_invite_member",
+            "duration_ms": 10000
+          },
+          "narrative": {
+            "title": "Invite teammate"
+          },
+          "evidence_refs": [
+            {
+              "id": "ev_selector_invite",
+              "kind": "source_code",
+              "summary": "testid selector summary"
+            }
+          ],
+          "blocking": true
+        }
+      ],
+      "safety_policy": {
+        "allowed_domains": [
+          "app.example.com"
+        ],
+        "forbidden_pages": [
+          "/billing"
+        ],
+        "forbidden_data": [
+          "api_key"
+        ],
+        "redactions": {
+          "mask_selectors": [
+            "[data-sensitive]"
+          ]
+        }
+      },
+      "reproducibility": {
+        "graph_hash_sha256": "sha256:graph",
+        "script_hash_sha256": "sha256:plan"
+      },
+      "approval_checklist": {
+        "human_approval_required": true,
+        "source_summary_only": true,
+        "credential_scope_review_required": true,
+        "redactions_review_required": true,
+        "ip_allowlist_acknowledgement_required": true
+      }
+    },
+    "playwright_script": {
+      "inline_source": "export async function runCascadeRecording(ctx) { await ctx.page.goto('https://app.example.com/dashboard'); await ctx.page.getByTestId('invite-member').click(); return { ok: true }; }",
+      "mime_type": "text/typescript",
+      "sha256": "sha256:script",
+      "size_bytes": 170,
+      "encrypted": false
+    },
+    "approval_markdown": {
+      "inline_markdown": "# Contract approval\n\nThis package uploads structure summaries only.",
+      "mime_type": "text/markdown",
+      "sha256": "sha256:markdown",
+      "size_bytes": 61
+    },
+    "security_policy": {
+      "allowed_domains": [
+        "app.example.com"
+      ],
+      "redactions": {
+        "mask_selectors": [
+          "[data-sensitive]"
+        ]
+      },
+      "allowed_context_apis": [
+        "ctx.page",
+        "ctx.secrets",
+        "ctx.capture",
+        "ctx.assert",
+        "ctx.log"
+      ],
+      "allowed_page_methods": [
+        "goto",
+        "click",
+        "getByTestId",
+        "waitForLoadState"
+      ],
+      "forbidden_imports": [],
+      "forbidden_identifiers": [
+        "eval",
+        "Function",
+        "process",
+        "fs",
+        "child_process"
+      ],
+      "network_policy": "allowed_domains_only_via_ctx_page",
+      "file_system_policy": "no_direct_fs_access"
+    },
+    "reproducibility": {
+      "plan_hash_sha256": "sha256:plan",
+      "script_hash_sha256": "sha256:script",
+      "markdown_hash_sha256": "sha256:markdown",
+      "bundle_hash_sha256": "sha256:bundle",
+      "graph_hash_sha256": "sha256:graph",
+      "source_snapshot_digest": "sha256:tree"
+    },
+    "validation": {
+      "valid": true,
+      "findings": []
+    }
+  },
+  "credential_grants": [
+    {
+      "grant_id": "grant_demo_login",
+      "kind": "demo_account",
+      "purpose": "cloud_recording_login",
+      "cloud_secret_ref": "vault://cloud/grants/grant_demo_login",
+      "allowed_domains": [
+        "app.example.com"
+      ],
+      "allowed_operations": [
+        "login",
+        "record_demo"
+      ],
+      "delete_after_run": true
+    }
+  ],
+  "evidence_bundle": {
+    "evidence_refs": [
+      {
+        "id": "ev_route_summary",
+        "kind": "source_code",
+        "summary": "Route and component structure summary"
+      }
+    ],
+    "source_trees": [
+      {
+        "repository_id": "repo_contract",
+        "root_digest_sha256": "sha256:tree",
+        "file_count": 128,
+        "path_digests": [
+          {
+            "path_hash_sha256": "sha256:path",
+            "content_sha256": "sha256:content",
+            "language": "tsx"
+          }
+        ]
+      }
+    ]
+  },
+  "reproducibility": {
+    "graph_hash_sha256": "sha256:graph",
+    "script_hash_sha256": "sha256:plan",
+    "source_snapshot_digest": "sha256:tree",
+    "input_fingerprints": {
+      "source_tree": "sha256:tree",
+      "requirements": "sha256:req"
+    },
+    "created_with_app_version": "desktop-web-dev"
+  },
+  "safety_report": {
+    "allowed_to_upload": true,
+    "upload_mode": "structure_summary_only",
+    "human_approval": {
+      "approval_id": "approval_contract",
+      "approved_by_user_id": "desktop_user",
+      "approved_at": "2026-07-14T00:01:00Z",
+      "plan_digest_sha256": "sha256:plan",
+      "reviewed_node_ids": [
+        "node_open_dashboard",
+        "node_invite_member"
+      ]
+    },
+    "forbidden_pages": [
+      "/billing"
+    ],
+    "forbidden_data": [
+      "api_key"
+    ],
+    "redaction_selectors": [
+      "[data-sensitive]"
+    ],
+    "pii_handling": "mask_in_artifacts"
+  },
+  "metadata": {
+    "producer": "desktop_contract_fixture",
+    "dev_plaintext_upload_mode": true
+  }
+}

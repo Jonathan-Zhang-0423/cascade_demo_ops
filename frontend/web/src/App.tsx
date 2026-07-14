@@ -1320,6 +1320,7 @@ function SettingsPanel({
     route.provider,
     route.model,
   ]);
+  const exchangeLabel = cloudExchangeLabel(runtimeHealth);
   return (
     <div className="section-stack">
       <SectionTitle title="设置" meta="运行时正常" />
@@ -1330,7 +1331,7 @@ function SettingsPanel({
         <Fact label="禁止页面" value={workspace.planReview.forbiddenPages.join(", ")} />
         <Fact label="LLM 模式" value={runtimeHealth?.llmMode ?? "auto"} />
         <Fact label="模型适配版本" value={runtimeHealth?.modelAdapterVersion ?? "domestic-llm-adapter-v1"} />
-        <Fact label="云端联调" value={runtimeHealth?.cloudExchange?.configured ? `${runtimeHealth.cloudExchange.baseURLHost}${runtimeHealth.cloudExchange.baseURLPath ?? ""}` : "待配置"} />
+        <Fact label="云端安全连接" value={exchangeLabel} />
       </div>
       <section className="table-section">
         <SectionTitle title="模型供应商凭据" meta="仅显示占位状态" />
@@ -1572,6 +1573,27 @@ function cloudStatusLabel(status: string): string {
     failed: "失败",
   };
   return labels[status] ?? status;
+}
+
+function cloudExchangeLabel(runtimeHealth: RuntimeHealthView | undefined): string {
+  const exchange = runtimeHealth?.cloudExchange;
+  if (!exchange) {
+    return "未配对云端";
+  }
+  const target = [exchange.baseURLHost, exchange.baseURLPath].filter(Boolean).join("");
+  if (exchange.authMode === "dev_token") {
+    return `${target || "云端"} · 旧联调令牌兼容`;
+  }
+  if (exchange.devPlaintext) {
+    return `${target || "云端"} · 联调明文通道，仅用于测试`;
+  }
+  if (exchange.sessionValid) {
+    return `${target || "云端"} · 已连接 · 安装密钥已启用`;
+  }
+  if (exchange.installationPaired) {
+    return `${target || "云端"} · 会话已过期，自动刷新中`;
+  }
+  return target ? `${target} · 未配对云端` : "未配对云端";
 }
 
 function assetKindLabel(kind: string): string {

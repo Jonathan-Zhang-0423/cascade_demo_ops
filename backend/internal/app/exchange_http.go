@@ -38,6 +38,19 @@ type exchangeHTTPErrorBody struct {
 	Details []exchangeHTTPErrorDetail `json:"details,omitempty"`
 }
 
+func (s *DevHTTPServer) registerExchangeBootstrapRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /.well-known/cascade-exchange", s.handleExchangeBootstrap)
+	mux.HandleFunc("GET /aigc/.well-known/cascade-exchange", s.handleExchangeBootstrap)
+	mux.HandleFunc("POST /v1/app-installations/register", s.handleAppInstallationRegister)
+	mux.HandleFunc("POST /aigc/v1/app-installations/register", s.handleAppInstallationRegister)
+	mux.HandleFunc("POST /v1/app-installations/session", s.handleAppInstallationSession)
+	mux.HandleFunc("POST /aigc/v1/app-installations/session", s.handleAppInstallationSession)
+	mux.HandleFunc("POST /v1/app-installations/refresh", s.handleAppInstallationRefresh)
+	mux.HandleFunc("POST /aigc/v1/app-installations/refresh", s.handleAppInstallationRefresh)
+	mux.HandleFunc("POST /v1/app-installations/revoke", s.requireDevExchangeAuth(s.handleAppInstallationRevoke))
+	mux.HandleFunc("POST /aigc/v1/app-installations/revoke", s.requireDevExchangeAuth(s.handleAppInstallationRevoke))
+}
+
 func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	if !devExchangeHTTPEnabled() {
 		return
@@ -53,6 +66,57 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/dev/execution-packages/{id}/cancel", s.requireDevExchangeAuth(s.handleDevExecutionPackageCancel))
 	mux.HandleFunc("GET /v1/dev/execution-packages/{id}/debug", s.requireDevExchangeAuth(s.handleDevExecutionPackageDebug))
 	mux.HandleFunc("GET /v1/dev/result-packages/{id}/deliverables/{artifact_id}", s.requireDevExchangeAuth(s.handleDevResultDeliverableDownload))
+	mux.HandleFunc("POST /aigc/v1/execution-packages/init", s.requireDevExchangeAuth(s.handleExecutionPackageInit))
+	mux.HandleFunc("POST /aigc/v1/execution-packages", s.requireDevExchangeAuth(s.handleExecutionPackageUpload))
+	mux.HandleFunc("GET /aigc/v1/execution-packages/{id}/status", s.requireDevExchangeAuth(s.handleExecutionPackageStatus))
+	mux.HandleFunc("GET /aigc/v1/result-packages/{id}", s.requireDevExchangeAuth(s.handleResultPackageGet))
+	mux.HandleFunc("POST /aigc/v1/result-packages/{id}/ack", s.requireDevExchangeAuth(s.handleResultPackageAck))
+	mux.HandleFunc("GET /aigc/v1/dev/execution-packages", s.requireDevExchangeAuth(s.handleDevExecutionPackageList))
+	mux.HandleFunc("GET /aigc/v1/dev/result-packages", s.requireDevExchangeAuth(s.handleDevResultPackageList))
+	mux.HandleFunc("POST /aigc/v1/dev/execution-packages/{id}/run", s.requireDevExchangeAuth(s.handleDevExecutionPackageRun))
+	mux.HandleFunc("POST /aigc/v1/dev/execution-packages/{id}/cancel", s.requireDevExchangeAuth(s.handleDevExecutionPackageCancel))
+	mux.HandleFunc("GET /aigc/v1/dev/execution-packages/{id}/debug", s.requireDevExchangeAuth(s.handleDevExecutionPackageDebug))
+	mux.HandleFunc("GET /aigc/v1/dev/result-packages/{id}/deliverables/{artifact_id}", s.requireDevExchangeAuth(s.handleDevResultDeliverableDownload))
+}
+
+func (s *DevHTTPServer) handleExchangeBootstrap(w http.ResponseWriter, r *http.Request) {
+	response, err := s.service.exchange.BootstrapDiscovery(r.Context(), exchangeBaseURLFromRequest(r), s.service.runtime.Environment)
+	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleAppInstallationRegister(w http.ResponseWriter, r *http.Request) {
+	var request model.AppInstallationRegisterRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "bad_request", err)
+		return
+	}
+	response, err := s.service.exchange.RegisterInstallation(r.Context(), request)
+	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleAppInstallationSession(w http.ResponseWriter, r *http.Request) {
+	var request model.AppInstallationSessionRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "bad_request", err)
+		return
+	}
+	response, err := s.service.exchange.CreateInstallationSession(r.Context(), request)
+	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleAppInstallationRefresh(w http.ResponseWriter, r *http.Request) {
+	response, err := s.service.exchange.RefreshInstallationSession(r.Context(), sessionTokenFromRequest(r))
+	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleAppInstallationRevoke(w http.ResponseWriter, r *http.Request) {
+	var request model.AppInstallationRevokeRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "bad_request", err)
+		return
+	}
+	err := s.service.exchange.RevokeInstallation(r.Context(), request)
+	writeExchangeValue(w, map[string]bool{"revoked": err == nil}, err)
 }
 
 func (s *DevHTTPServer) handleExecutionPackageInit(w http.ResponseWriter, r *http.Request) {
@@ -202,12 +266,14 @@ func (s *DevHTTPServer) handleResultPackageAck(w http.ResponseWriter, r *http.Re
 
 func (s *DevHTTPServer) requireDevExchangeAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := strings.TrimSpace(os.Getenv(devExchangeTokenEnv))
-		if token == "" {
-			writeExchangeError(w, http.StatusServiceUnavailable, "dev_exchange_token_missing", errors.New("dev exchange HTTP requires CASCADE_DEV_EXCHANGE_TOKEN"))
-			return
+		if token := sessionTokenFromRequest(r); token != "" {
+			if _, ok := s.service.exchange.AuthenticateInstallationSession(token); ok {
+				next(w, r)
+				return
+			}
 		}
-		if r.Header.Get("Authorization") != "Bearer "+token {
+		token := strings.TrimSpace(os.Getenv(devExchangeTokenEnv))
+		if token == "" || r.Header.Get("Authorization") != "Bearer "+token {
 			writeExchangeError(w, http.StatusUnauthorized, "unauthorized", errors.New("invalid dev exchange bearer token"))
 			return
 		}
@@ -331,6 +397,28 @@ func devExchangeAutoRunEnabled() bool {
 	default:
 		return false
 	}
+}
+
+func exchangeBaseURLFromRequest(r *http.Request) string {
+	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	prefix := ""
+	if strings.HasPrefix(r.URL.Path, "/aigc/") || r.URL.Path == "/aigc/.well-known/cascade-exchange" {
+		prefix = "/aigc"
+	} else if forwardedPrefix := strings.TrimRight(strings.TrimSpace(r.Header.Get("X-Forwarded-Prefix")), "/"); forwardedPrefix != "" {
+		prefix = forwardedPrefix
+	}
+	return strings.TrimRight(scheme+"://"+host+prefix, "/")
 }
 
 func responseOrgID(envelope model.ExchangeEnvelope, payload model.ClientExecutionPackage) string {

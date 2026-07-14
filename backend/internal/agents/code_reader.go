@@ -114,6 +114,48 @@ type codeReaderLLMOutput struct {
 	Confidence      float64             `json:"confidence"`
 }
 
+func (o *codeReaderLLMOutput) UnmarshalJSON(data []byte) error {
+	type alias codeReaderLLMOutput
+	var single alias
+	if err := json.Unmarshal(data, &single); err == nil {
+		*o = codeReaderLLMOutput(single)
+		o.normalize()
+		return nil
+	}
+	var items []alias
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	merged := codeReaderLLMOutput{}
+	for _, item := range items {
+		merged.merge(codeReaderLLMOutput(item))
+	}
+	merged.normalize()
+	*o = merged
+	return nil
+}
+
+func (o *codeReaderLLMOutput) merge(item codeReaderLLMOutput) {
+	if o.Summary == "" {
+		o.Summary = item.Summary
+	}
+	o.Frameworks = append(o.Frameworks, item.Frameworks...)
+	o.HeroComponents = append(o.HeroComponents, item.HeroComponents...)
+	o.RouteNames = append(o.RouteNames, item.RouteNames...)
+	o.SelectorNotes = append(o.SelectorNotes, item.SelectorNotes...)
+	o.SensitiveFields = append(o.SensitiveFields, item.SensitiveFields...)
+	if item.Confidence > o.Confidence {
+		o.Confidence = item.Confidence
+	}
+}
+
+func (o *codeReaderLLMOutput) normalize() {
+	o.Frameworks = flexibleStringSlice(uniqueStrings([]string(o.Frameworks)))
+	o.HeroComponents = flexibleStringSlice(uniqueStrings([]string(o.HeroComponents)))
+	o.SelectorNotes = flexibleStringSlice(uniqueStrings([]string(o.SelectorNotes)))
+	o.SensitiveFields = flexibleStringSlice(uniqueStrings([]string(o.SensitiveFields)))
+}
+
 func (a *CodeReaderAgent) enhanceSnapshotWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, snapshot *model.CodeUnderstandingSnapshot) (*llm.CallTrace, error) {
 	if a.llm == nil || snapshot == nil || snapshot.FileCount == 0 {
 		return nil, nil

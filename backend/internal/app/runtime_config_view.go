@@ -42,13 +42,20 @@ type ModelTaskRouteView struct {
 }
 
 type CloudExchangeRuntimeView struct {
-	Configured      bool   `json:"configured"`
-	BaseURLHost     string `json:"base_url_host,omitempty"`
-	BaseURLPath     string `json:"base_url_path,omitempty"`
-	TokenConfigured bool   `json:"token_configured"`
+	Configured         bool   `json:"configured"`
+	ExchangeDiscovered bool   `json:"exchange_discovered"`
+	InstallationPaired bool   `json:"installation_paired"`
+	SessionValid       bool   `json:"session_valid"`
+	BaseURLHost        string `json:"base_url_host,omitempty"`
+	BaseURLPath        string `json:"base_url_path,omitempty"`
+	ServerKeyID        string `json:"server_key_id,omitempty"`
+	InstallIDSuffix    string `json:"install_id_suffix,omitempty"`
+	AuthMode           string `json:"auth_mode"`
+	Environment        string `json:"environment,omitempty"`
+	DevPlaintext       bool   `json:"dev_plaintext,omitempty"`
 }
 
-func NewRuntimeConfigView(runtime config.AppRuntimeConfig) RuntimeConfigView {
+func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus ExchangeIdentityStatus) RuntimeConfigView {
 	return RuntimeConfigView{
 		Profile:                runtime.Profile,
 		Environment:            runtime.Environment,
@@ -64,24 +71,38 @@ func NewRuntimeConfigView(runtime config.AppRuntimeConfig) RuntimeConfigView {
 		Sidecars:               sidecarConfigured(runtime.SidecarPaths),
 		ModelProviders:         providerCredentialViews(runtime.ModelProviders),
 		ModelTaskRoutes:        modelTaskRouteViews(runtime.ModelTaskRoutes),
-		CloudExchange:          cloudExchangeRuntimeView(runtime),
+		CloudExchange:          cloudExchangeRuntimeView(runtime, exchangeStatus),
 	}
 }
 
-func cloudExchangeRuntimeView(runtime config.AppRuntimeConfig) CloudExchangeRuntimeView {
+func cloudExchangeRuntimeView(runtime config.AppRuntimeConfig, exchangeStatus ExchangeIdentityStatus) CloudExchangeRuntimeView {
 	host := ""
 	path := ""
-	if runtime.CloudExchangeBaseURL != "" {
+	if exchangeStatus.BaseURLHost != "" {
+		host = exchangeStatus.BaseURLHost
+		path = exchangeStatus.BaseURLPath
+	} else if runtime.CloudExchangeBaseURL != "" {
 		if parsed, err := url.Parse(runtime.CloudExchangeBaseURL); err == nil {
 			host = parsed.Host
 			path = parsed.Path
 		}
 	}
+	authMode := exchangeStatus.AuthMode
+	if authMode == "" {
+		authMode = "unpaired"
+	}
 	return CloudExchangeRuntimeView{
-		Configured:      runtime.CloudExchangeBaseURL != "" && runtime.CloudExchangeToken != "",
-		BaseURLHost:     host,
-		BaseURLPath:     path,
-		TokenConfigured: runtime.CloudExchangeToken != "",
+		Configured:         exchangeStatus.SessionValid || runtime.CloudExchangeBaseURL != "" || exchangeStatus.ExchangeDiscovered,
+		ExchangeDiscovered: exchangeStatus.ExchangeDiscovered || runtime.CloudExchangeBaseURL != "",
+		InstallationPaired: exchangeStatus.InstallationPaired,
+		SessionValid:       exchangeStatus.SessionValid,
+		BaseURLHost:        host,
+		BaseURLPath:        path,
+		ServerKeyID:        exchangeStatus.ServerKeyID,
+		InstallIDSuffix:    exchangeStatus.InstallIDSuffix,
+		AuthMode:           authMode,
+		Environment:        exchangeStatus.Environment,
+		DevPlaintext:       exchangeStatus.DevPlaintext,
 	}
 }
 

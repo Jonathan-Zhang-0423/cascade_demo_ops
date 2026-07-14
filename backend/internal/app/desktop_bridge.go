@@ -11,9 +11,10 @@ import (
 )
 
 type BridgeResponse struct {
-	OK    bool            `json:"ok"`
-	Error string          `json:"error,omitempty"`
-	Data  json.RawMessage `json:"data,omitempty"`
+	OK        bool             `json:"ok"`
+	Error     string           `json:"error,omitempty"`
+	ErrorInfo *BridgeErrorInfo `json:"error_info,omitempty"`
+	Data      json.RawMessage  `json:"data,omitempty"`
 }
 
 type DesktopBridge struct {
@@ -29,7 +30,8 @@ func NewDesktopBridge(runtime config.AppRuntimeConfig, states store.StateStore) 
 }
 
 func (b *DesktopBridge) RuntimeConfig() BridgeResponse {
-	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig()), nil)
+	ctx := context.Background()
+	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig(), b.service.ExchangeIdentityStatus(ctx)), nil)
 }
 
 func (b *DesktopBridge) CreateProject(input orchestrator.UserInput) BridgeResponse {
@@ -113,11 +115,13 @@ func (b *DesktopBridge) AcknowledgeResultPackage(orgID string, request model.Res
 
 func bridgeValue(value any, err error) BridgeResponse {
 	if err != nil {
-		return BridgeResponse{OK: false, Error: err.Error()}
+		info := bridgeErrorInfo(err)
+		return BridgeResponse{OK: false, Error: info.Message, ErrorInfo: &info}
 	}
 	data, marshalErr := json.Marshal(value)
 	if marshalErr != nil {
-		return BridgeResponse{OK: false, Error: marshalErr.Error()}
+		info := bridgeErrorInfo(marshalErr)
+		return BridgeResponse{OK: false, Error: info.Message, ErrorInfo: &info}
 	}
 	return BridgeResponse{OK: true, Data: data}
 }

@@ -348,10 +348,30 @@ async function runStep(page: any, step: BrowserScriptStep, allowedDomains: strin
     return;
   }
   if (action === "wait") {
+    const selector = selectorForStep(step);
+    if (selector) {
+      await page
+        .locator(selector)
+        .first()
+        .waitFor({ timeout: Math.min(timeout, 3000) })
+        .catch(() => undefined);
+    }
     await page.waitForTimeout(Math.max(0, step.timing?.duration_ms || 1000));
     return;
   }
-  if (action === "assert" || action === "inspect") {
+  if (action === "inspect") {
+    const selector = selectorForStep(step);
+    if (selector) {
+      await page
+        .locator(selector)
+        .first()
+        .waitFor({ timeout: Math.min(timeout, 3000) })
+        .catch(() => undefined);
+    }
+    await waitForPageSettled(page, Math.min(timeout, pageSettleTimeoutMS));
+    return;
+  }
+  if (action === "assert") {
     const selector = selectorForStep(step);
     if (selector) await page.locator(selector).first().waitFor({ timeout });
     await waitForPageSettled(page, Math.min(timeout, pageSettleTimeoutMS));

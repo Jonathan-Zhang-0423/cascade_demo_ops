@@ -153,6 +153,7 @@ type EncryptedPayloadRef struct {
 	Encrypted        bool   `json:"encrypted,omitempty"`
 	Sensitive        bool   `json:"sensitive,omitempty"`
 	CompressionAlg   string `json:"compression_alg,omitempty"`
+	DevPlaintext     bool   `json:"dev_plaintext,omitempty"`
 }
 
 type ExchangeAttachment struct {
@@ -756,16 +757,105 @@ type ExecutionPackageInitRequest struct {
 }
 
 type ExecutionPackageInitResponse struct {
-	UploadID              string    `json:"upload_id"`
-	ServerPublicKeyID     string    `json:"server_public_key_id"`
-	ServerPublicKeyAlg    string    `json:"server_public_key_alg,omitempty"`
-	KeyWrappingModes      []string  `json:"key_wrapping_modes,omitempty"`
-	SupportedCryptoSuites []string  `json:"supported_crypto_suites,omitempty"`
-	SupportedCompression  []string  `json:"supported_compression,omitempty"`
-	CascadeExecutionIPs   []string  `json:"cascade_execution_ips"`
-	MaxEnvelopeBytes      int64     `json:"max_envelope_bytes"`
-	MaxAttachmentBytes    int64     `json:"max_attachment_bytes"`
-	ExpiresAt             time.Time `json:"expires_at"`
+	UploadID              string                    `json:"upload_id"`
+	ServerPublicKeyID     string                    `json:"server_public_key_id"`
+	ServerPublicKeyAlg    string                    `json:"server_public_key_alg,omitempty"`
+	ServerPublicKeys      []ExchangeServerPublicKey `json:"server_public_keys,omitempty"`
+	KeyWrappingModes      []string                  `json:"key_wrapping_modes,omitempty"`
+	SupportedCryptoSuites []string                  `json:"supported_crypto_suites,omitempty"`
+	SupportedCompression  []string                  `json:"supported_compression,omitempty"`
+	RequiredSignatureAlg  string                    `json:"required_signature_alg,omitempty"`
+	InstallationRequired  bool                      `json:"installation_required,omitempty"`
+	SessionExpiresAt      time.Time                 `json:"session_expires_at,omitempty"`
+	ResultRecipientKeyID  string                    `json:"result_recipient_key_id,omitempty"`
+	CascadeExecutionIPs   []string                  `json:"cascade_execution_ips"`
+	MaxEnvelopeBytes      int64                     `json:"max_envelope_bytes"`
+	MaxAttachmentBytes    int64                     `json:"max_attachment_bytes"`
+	ExpiresAt             time.Time                 `json:"expires_at"`
+}
+
+type ExchangeBootstrapDiscoveryResponse struct {
+	SchemaVersion         string                    `json:"schema_version"`
+	ExchangeBaseURL       string                    `json:"exchange_base_url"`
+	ServerKeyset          []ExchangeServerPublicKey `json:"server_keyset"`
+	SupportedCryptoSuites []string                  `json:"supported_crypto_suites"`
+	SupportedCompression  []string                  `json:"supported_compression,omitempty"`
+	PairingMethods        []ExchangePairingMethod   `json:"pairing_methods"`
+	Challenge             ExchangePairingChallenge  `json:"challenge"`
+	ExpiresAt             time.Time                 `json:"expires_at"`
+	Environment           string                    `json:"environment"`
+	Terms                 ExchangeBootstrapTerms    `json:"terms"`
+}
+
+type ExchangeServerPublicKey struct {
+	KeyID     string    `json:"key_id"`
+	Alg       string    `json:"alg"`
+	PublicKey string    `json:"public_key"`
+	NotBefore time.Time `json:"not_before,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+type ExchangePairingMethod struct {
+	Kind        string `json:"kind"`
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
+	URL         string `json:"url,omitempty"`
+}
+
+type ExchangePairingChallenge struct {
+	ChallengeID string    `json:"challenge_id"`
+	Nonce       string    `json:"nonce"`
+	Alg         string    `json:"alg"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+type ExchangeBootstrapTerms struct {
+	RequireHTTPS bool `json:"require_https"`
+	DevPlaintext bool `json:"dev_plaintext,omitempty"`
+}
+
+type AppInstallationPublicKey struct {
+	KeyID     string `json:"key_id"`
+	Alg       string `json:"alg"`
+	PublicKey string `json:"public_key"`
+	Purpose   string `json:"purpose,omitempty"`
+}
+
+type AppInstallationRegisterRequest struct {
+	InstallID          string                   `json:"install_id"`
+	DeviceID           string                   `json:"device_id,omitempty"`
+	OrgID              string                   `json:"org_id,omitempty"`
+	ProjectID          string                   `json:"project_id,omitempty"`
+	AppVersion         string                   `json:"app_version,omitempty"`
+	RuntimeProfile     string                   `json:"runtime_profile,omitempty"`
+	SigningPublicKey   AppInstallationPublicKey `json:"signing_public_key"`
+	ResultPublicKey    AppInstallationPublicKey `json:"result_public_key"`
+	ChallengeID        string                   `json:"challenge_id"`
+	ChallengeSignature string                   `json:"challenge_signature"`
+}
+
+type AppInstallationSessionRequest struct {
+	InstallID          string `json:"install_id"`
+	DeviceID           string `json:"device_id,omitempty"`
+	ChallengeID        string `json:"challenge_id,omitempty"`
+	ChallengeSignature string `json:"challenge_signature,omitempty"`
+}
+
+type AppInstallationSessionResponse struct {
+	InstallID            string    `json:"install_id"`
+	SessionID            string    `json:"session_id"`
+	SessionToken         string    `json:"session_token"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	OrgID                string    `json:"org_id,omitempty"`
+	ProjectID            string    `json:"project_id,omitempty"`
+	ServerKeyID          string    `json:"server_key_id"`
+	ResultRecipientKeyID string    `json:"result_recipient_key_id"`
+	AuthMode             string    `json:"auth_mode"`
+}
+
+type AppInstallationRevokeRequest struct {
+	InstallID string `json:"install_id"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 type ExecutionPackageUploadRequest struct {

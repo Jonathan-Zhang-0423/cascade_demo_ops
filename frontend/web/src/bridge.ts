@@ -37,6 +37,7 @@ export type BridgeResult<T> = {
   ok: boolean;
   data?: T;
   error?: string;
+  errorInfo?: LocalBridgeErrorInfo | undefined;
 };
 
 export type DesktopBridgeClient = {
@@ -70,6 +71,22 @@ type LocalBridgeResponse<T> = {
   ok: boolean;
   data?: T;
   error?: string;
+  error_info?: LocalBridgeErrorInfo;
+};
+
+type LocalBridgeErrorInfo = {
+  code: string;
+  message: string;
+  details?: LocalBridgeErrorDetail[];
+  correlation_id?: string;
+  retryable?: boolean;
+};
+
+type LocalBridgeErrorDetail = {
+  field?: string;
+  reason?: string;
+  message: string;
+  hint?: string;
 };
 
 type LocalRuntimeHealth = {
@@ -96,9 +113,16 @@ type LocalRuntimeHealth = {
   }>;
   cloud_exchange?: {
     configured: boolean;
+    exchange_discovered?: boolean;
+    installation_paired?: boolean;
+    session_valid?: boolean;
     base_url_host?: string;
     base_url_path?: string;
-    token_configured: boolean;
+    server_key_id?: string;
+    install_id_suffix?: string;
+    auth_mode?: string;
+    environment?: string;
+    dev_plaintext?: boolean;
   };
 };
 
@@ -146,7 +170,7 @@ type LocalClientExecutionPackageBuild = {
 
 type LocalCloudLifecycleResult = {
   state?: LocalCascadeState;
-  build?: LocalClientExecutionPackageBuild;
+  build?: LocalClientExecutionPackageBuild | undefined;
   init: LocalExecutionPackageInitResponse;
   upload: LocalExecutionPackageUploadResponse;
   status: LocalExecutionPackageStatusResponse;
@@ -155,24 +179,36 @@ type LocalCloudLifecycleResult = {
   cloud_base_url?: string;
 };
 
+type LocalCloudUploadInitResult = {
+  build?: LocalClientExecutionPackageBuild | undefined;
+  init: LocalExecutionPackageInitResponse;
+  cloud_base_url?: string;
+};
+
+type LocalCloudUploadPackageResult = {
+  build?: LocalClientExecutionPackageBuild | undefined;
+  upload: LocalExecutionPackageUploadResponse;
+  cloud_base_url?: string;
+};
+
 type LocalExecutionPackageInitResponse = {
   upload_id: string;
   server_public_key_id: string;
   supported_crypto_suites?: string[];
   cascade_execution_ips: string[];
-  max_envelope_bytes?: number;
-  expires_at?: string;
+  max_envelope_bytes?: number | undefined;
+  expires_at?: string | undefined;
 };
 
 type LocalExecutionPackageUploadResponse = {
   exchange_package_id: string;
-  cloud_job_id?: string;
+  cloud_job_id?: string | undefined;
   status: string;
 };
 
 type LocalExecutionPackageStatusResponse = {
   exchange_package_id: string;
-  cloud_job_id?: string;
+  cloud_job_id?: string | undefined;
   status: string;
   stage?: string;
   message?: string;
@@ -301,6 +337,7 @@ export function createBridgeClient(): DesktopBridgeClient {
 
 export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL): DesktopBridgeClient {
   const projects = new Map<string, ProjectWorkspaceView>();
+  const cloudBuilds = new Map<string, LocalClientExecutionPackageBuild>();
   return {
     mode: "local",
     async runtimeHealth() {
@@ -400,29 +437,96 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return ok(next);
     },
     async initExecutionPackageUpload(workspace) {
-      return ok(mockUploadInit(workspace, "local_future"));
+      const result = await requestLocal<LocalCloudUploadInitResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/init`, {
+        method: "POST",
+        body: JSON.stringify({ org_id: "org_desktop" }),
+      });
+      if (!result.ok || !result.data) {
+        return bridgeFailure(result.error ?? "初始化服务器上传会话失败", result.errorInfo);
+      }
+      if (result.data.build) {
+        cloudBuilds.set(workspace.id, result.data.build);
+      }
+      const next = workspaceWithCloudInit(workspace, result.data);
+      projects.set(next.id, next);
+      return ok(uploadInitFromLocal(result.data.init));
     },
     async uploadExecutionPackage(workspace) {
-      return ok({
-        exchangePackageID: workspace.cloudRun.exchangePackageID ?? `local_future_exchange_${workspace.id}`,
-        cloudJobID: workspace.cloudRun.cloudJobID ?? `local_future_job_${workspace.id}`,
-        status: "not_uploaded",
+      const build = cloudBuilds.get(workspace.id);
+      const result = await requestLocal<LocalCloudUploadPackageResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/upload`, {
+        method: "POST",
+        body: JSON.stringify({
+          org_id: "org_desktop",
+          upload_id: workspace.cloudRun.uploadID,
+          ...(build ? { build } : {}),
+        }),
       });
+      if (!result.ok || !result.data) {
+        return bridgeFailure(result.error ?? "上传执行包失败", result.errorInfo);
+      }
+      if (result.data.build) {
+        cloudBuilds.set(workspace.id, result.data.build);
+      }
+      const next = workspaceWithCloudUpload(workspace, result.data);
+      projects.set(next.id, next);
+      return ok(uploadViewFromLocal(result.data.upload));
     },
     async pollExecutionPackageStatus(workspace) {
-      return ok(localFutureWorkspace(workspace, "云端上传和状态轮询将在服务器通道接入后启用。"));
+      const exchangePackageID = workspace.cloudRun.exchangePackageID;
+      if (!exchangePackageID) {
+        return { ok: false, error: "缺少 exchange package id，无法轮询服务器状态" };
+      }
+      const query = `?org_id=${encodeURIComponent("org_desktop")}&exchange_package_id=${encodeURIComponent(exchangePackageID)}`;
+      const result = await requestLocal<LocalExecutionPackageStatusResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/status${query}`);
+      if (!result.ok || !result.data) {
+        return bridgeFailure(result.error ?? "轮询服务器执行状态失败", result.errorInfo);
+      }
+      let next = workspaceWithCloudStatus(workspace, result.data);
+      if (result.data.result_package_id && isTerminalLocalStatus(result.data.status)) {
+        const resultPackage = await this.getResultPackage(next);
+        if (resultPackage.ok && resultPackage.data) {
+          next = workspaceWithResultPackage(next, resultPackage.data);
+        }
+      }
+      projects.set(next.id, next);
+      return ok(next);
     },
     async getResultPackage(workspace) {
       if (workspace.cloudRun.resultPackage) {
         return ok(workspace.cloudRun.resultPackage);
       }
-      return { ok: false, error: "本地模式尚未生成服务器结果包" };
+      const resultPackageID = workspace.cloudRun.resultPackageID;
+      if (!resultPackageID) {
+        return { ok: false, error: "缺少 result package id，无法读取服务器结果包" };
+      }
+      const query = `?org_id=${encodeURIComponent("org_desktop")}&result_package_id=${encodeURIComponent(resultPackageID)}`;
+      const result = await requestLocal<RecordingResultPackage>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/result${query}`);
+      if (!result.ok || !result.data) {
+        return bridgeFailure(result.error ?? "读取服务器结果包失败", result.errorInfo);
+      }
+      const next = workspaceWithResultPackage(workspace, result.data);
+      projects.set(next.id, next);
+      return ok(result.data);
     },
     async approveAndUploadPackage(workspace) {
-      return ok(localFutureWorkspace(workspace, "云端上传将在下一阶段接入，本地模式仅生成执行包。"));
+      const init = await this.initExecutionPackageUpload(workspace);
+      if (!init.ok || !init.data) {
+        return bridgeFailure(init.error ?? "初始化服务器上传会话失败", init.errorInfo);
+      }
+      const initialized = workspaceWithCloudInit(workspace, {
+        build: cloudBuilds.get(workspace.id),
+        init: localInitResponseFromView(init.data),
+      });
+      const upload = await this.uploadExecutionPackage(initialized);
+      if (!upload.ok || !upload.data) {
+        return bridgeFailure(upload.error ?? "上传执行包失败", upload.errorInfo);
+      }
+      const uploaded = workspaceWithCloudUpload(initialized, localUploadPackageResultFromView(upload.data, cloudBuilds.get(workspace.id)));
+      projects.set(uploaded.id, uploaded);
+      return ok(uploaded);
     },
     async pollCloudRun(workspace) {
-      return ok(localFutureWorkspace(workspace, "云端录制将在下一阶段接入。"));
+      return this.pollExecutionPackageStatus(workspace);
     },
     async simulateCloudFailure(workspace) {
       return ok(localFutureWorkspace(workspace, "失败诊断将在云端录制接入后启用。"));
@@ -431,10 +535,30 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return ok(localFutureWorkspace(workspace, "脚本修复将在失败诊断接入后启用。"));
     },
     async ackResultPackage(workspace) {
-      return ok(workspace);
+      const resultPackageID = workspace.cloudRun.resultPackageID ?? workspace.cloudRun.resultPackage?.result_id;
+      if (!resultPackageID) {
+        return { ok: false, error: "缺少 result package id，无法确认结果包" };
+      }
+      const receivedAssetIDs = workspace.cloudRun.resultPackage?.delivery?.asset_refs?.map((artifact) => artifact.id).filter(Boolean) ?? [];
+      const result = await requestLocal<LocalResultPackageAckResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/ack`, {
+        method: "POST",
+        body: JSON.stringify({
+          org_id: "org_desktop",
+          result_package_id: resultPackageID,
+          exchange_package_id: workspace.cloudRun.exchangePackageID,
+          received_asset_ids: receivedAssetIDs,
+          verified_checksums: true,
+        }),
+      });
+      if (!result.ok || !result.data) {
+        return bridgeFailure(result.error ?? "确认结果包失败", result.errorInfo);
+      }
+      const next = ackWorkspaceAssets(workspace);
+      projects.set(next.id, next);
+      return ok(next);
     },
     async acknowledgeResult(workspace) {
-      return ok(workspace);
+      return this.ackResultPackage(workspace);
     },
   };
 }
@@ -500,6 +624,19 @@ export function createMockBridgeClient(): DesktopBridgeClient {
             providerOverride: "CASCADE_VIDEO_PROVIDER",
             modelOverride: "CASCADE_VIDEO_MODEL",
           },
+        },
+        cloudExchange: {
+          configured: true,
+          exchangeDiscovered: true,
+          installationPaired: true,
+          sessionValid: true,
+          baseURLHost: "cascadeai.cn",
+          baseURLPath: "/aigc",
+          serverKeyID: "local-dev/server-public-key",
+          installIDSuffix: "mock0001",
+          authMode: "installation_session",
+          environment: "development",
+          devPlaintext: true,
         },
       });
     },
@@ -725,6 +862,14 @@ function ok<T>(data: T): BridgeResult<T> {
   return { ok: true, data };
 }
 
+function bridgeFailure<T>(error: string, errorInfo?: LocalBridgeErrorInfo): BridgeResult<T> {
+  return {
+    ok: false,
+    error,
+    ...(errorInfo ? { errorInfo } : {}),
+  };
+}
+
 async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit): Promise<BridgeResult<T>> {
   const startedAt = Date.now();
   console.info("[Cascade Dev Bridge] request", init?.method ?? "GET", path);
@@ -749,8 +894,12 @@ async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit
       };
     }
     if (!response.ok || !payload.ok) {
-      console.error("[Cascade Dev Bridge] error", init?.method ?? "GET", path, response.status, payload.error);
-      return { ok: false, error: payload.error ?? `本地 Dev Bridge 请求失败: ${response.status}` };
+      console.error("[Cascade Dev Bridge] error", init?.method ?? "GET", path, response.status, payload.error_info ?? payload.error);
+      return {
+        ok: false,
+        error: formatLocalBridgeError(payload.error_info, payload.error ?? `本地 Dev Bridge 请求失败: ${response.status}`),
+        ...(payload.error_info ? { errorInfo: payload.error_info } : {}),
+      };
     }
     if (payload.data === undefined) {
       console.error("[Cascade Dev Bridge] missing data", init?.method ?? "GET", path);
@@ -760,8 +909,25 @@ async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit
     return { ok: true, data: payload.data };
   } catch (error) {
     console.error("[Cascade Dev Bridge] unavailable", init?.method ?? "GET", path, error);
-    return { ok: false, error: error instanceof Error ? error.message : "本地 Dev Bridge 不可用" };
+    return { ok: false, error: userFacingBridgeError(error instanceof Error ? error.message : "本地 Dev Bridge 不可用") };
   }
+}
+
+function formatLocalBridgeError(errorInfo: LocalBridgeErrorInfo | undefined, fallback: string): string {
+  if (!errorInfo) {
+    return userFacingBridgeError(fallback);
+  }
+  const base = userFacingBridgeError(errorInfo.message || fallback);
+  const firstDetail = errorInfo.details?.[0];
+  const detailParts = [
+    firstDetail?.field ? `字段: ${firstDetail.field}` : "",
+    firstDetail?.reason ? `原因: ${firstDetail.reason}` : "",
+    firstDetail?.message && firstDetail.message !== errorInfo.message ? `详情: ${firstDetail.message}` : "",
+    firstDetail?.hint ? `建议: ${firstDetail.hint}` : "",
+  ].filter(Boolean);
+  const code = errorInfo.code ? `错误码: ${errorInfo.code}` : "";
+  const correlation = errorInfo.correlation_id ? `追踪: ${errorInfo.correlation_id}` : "";
+  return [base, code, ...detailParts, correlation].filter(Boolean).join("；");
 }
 
 async function readLocalResponseText(response: Response): Promise<string> {
@@ -788,6 +954,22 @@ function safeResponseSnippet(value: string): string {
     return "(empty response)";
   }
   return redacted.length > 240 ? `${redacted.slice(0, 240)}...` : redacted;
+}
+
+function userFacingBridgeError(message: string): string {
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("llm json parse failed") ||
+    lower.includes("cannot unmarshal") ||
+    lower.includes("invalid character") ||
+    lower.includes("unexpected non-whitespace character after json")
+  ) {
+    return "模型返回的 JSON 结构不稳定，系统已记录诊断。请重试，或把 CASCADE_LLM_MODE 设置为 auto 让产品流程在格式异常时安全降级。";
+  }
+  if (message.includes("执行包没有真实业务动作")) {
+    return message;
+  }
+  return message;
 }
 
 function runtimeLogFromLocalEvent(event: LocalExecutionEvent): RuntimeLogEntry {
@@ -968,6 +1150,153 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
       ...(repairRequest ? { repairRequest } : {}),
     },
   };
+}
+
+function workspaceWithCloudInit(workspace: ProjectWorkspaceView, result: LocalCloudUploadInitResult): ProjectWorkspaceView {
+  const build = result.build;
+  return {
+    ...workspace,
+    stage: "package_approval",
+    packagePreview: {
+      ...workspace.packagePreview,
+      ipAllowlistAcknowledged: true,
+      packageID: build?.package.package_id ?? workspace.packagePreview.packageID,
+      packageDigest: build?.envelope.crypto.payload_digest_sha256 ?? workspace.packagePreview.packageDigest,
+    },
+    cloudRun: {
+      ...workspace.cloudRun,
+      packageID: build?.package.package_id ?? workspace.cloudRun.packageID,
+      uploadID: result.init.upload_id,
+      status: "queued",
+      stage: "upload_initialized",
+      message: "服务器上传会话已初始化；当前 local bridge 使用 dev 明文 payload 联调。",
+      currentStep: "上传会话已初始化",
+      progress: 10,
+      stageHistory: localLifecycleStagesFromPartial("upload_initialized"),
+    },
+  };
+}
+
+function workspaceWithCloudUpload(workspace: ProjectWorkspaceView, result: LocalCloudUploadPackageResult): ProjectWorkspaceView {
+  const status: LocalExecutionPackageStatusResponse = {
+    exchange_package_id: result.upload.exchange_package_id,
+    status: result.upload.status,
+    stage: "accepted",
+    message: "执行包已上传服务器，等待校验和沙箱执行。",
+    progress_percent: result.upload.status === "running" ? 35 : 20,
+    ...(result.upload.cloud_job_id ? { cloud_job_id: result.upload.cloud_job_id } : {}),
+  };
+  const lifecycle: LocalCloudLifecycleResult = {
+    init: {
+      upload_id: workspace.cloudRun.uploadID ?? "",
+      server_public_key_id: "",
+      cascade_execution_ips: [],
+    },
+    upload: result.upload,
+    status,
+    ...(result.build ? { build: result.build } : {}),
+  };
+  return workspaceFromCloudLifecycleResult(workspace, lifecycle);
+}
+
+function workspaceWithCloudStatus(workspace: ProjectWorkspaceView, status: LocalExecutionPackageStatusResponse): ProjectWorkspaceView {
+  return workspaceFromCloudLifecycleResult(workspace, {
+    init: {
+      upload_id: workspace.cloudRun.uploadID ?? "",
+      server_public_key_id: "",
+      cascade_execution_ips: [],
+    },
+    upload: {
+      exchange_package_id: status.exchange_package_id || workspace.cloudRun.exchangePackageID || "",
+      status: status.status,
+      ...(status.cloud_job_id ?? workspace.cloudRun.cloudJobID ? { cloud_job_id: status.cloud_job_id ?? workspace.cloudRun.cloudJobID } : {}),
+    },
+    status,
+  });
+}
+
+function workspaceWithResultPackage(workspace: ProjectWorkspaceView, resultPackage: RecordingResultPackage): ProjectWorkspaceView {
+  const mappedStatus = resultPackage.status === "failed" ? "failed" : "succeeded";
+  const status: LocalExecutionPackageStatusResponse = {
+    exchange_package_id: workspace.cloudRun.exchangePackageID ?? "",
+    status: mappedStatus === "succeeded" ? "completed" : "failed",
+    stage: mappedStatus === "succeeded" ? "completed" : "failed",
+    message: mappedStatus === "succeeded" ? "服务器结果包已返回。" : "服务器返回失败诊断。",
+    progress_percent: 100,
+    result_package_id: resultPackage.result_id,
+    ...(workspace.cloudRun.cloudJobID ? { cloud_job_id: workspace.cloudRun.cloudJobID } : {}),
+  };
+  return workspaceFromCloudLifecycleResult(workspace, {
+    init: {
+      upload_id: workspace.cloudRun.uploadID ?? "",
+      server_public_key_id: "",
+      cascade_execution_ips: [],
+    },
+    upload: {
+      exchange_package_id: workspace.cloudRun.exchangePackageID ?? "",
+      status: status.status,
+      ...(workspace.cloudRun.cloudJobID ? { cloud_job_id: workspace.cloudRun.cloudJobID } : {}),
+    },
+    status,
+    result: resultPackage,
+  });
+}
+
+function uploadInitFromLocal(init: LocalExecutionPackageInitResponse): ExecutionPackageUploadInitView {
+  return {
+    uploadID: init.upload_id,
+    serverPublicKeyID: init.server_public_key_id,
+    supportedCryptoSuites: init.supported_crypto_suites ?? [],
+    cascadeExecutionIPs: init.cascade_execution_ips ?? [],
+    ...(typeof init.max_envelope_bytes === "number" ? { maxEnvelopeBytes: init.max_envelope_bytes } : {}),
+    ...(init.expires_at ? { expiresAt: init.expires_at } : {}),
+  };
+}
+
+function uploadViewFromLocal(upload: LocalExecutionPackageUploadResponse): ExecutionPackageUploadView {
+  return {
+    exchangePackageID: upload.exchange_package_id,
+    cloudJobID: upload.cloud_job_id ?? "",
+    status: mapCloudRunStatus(upload.status),
+  };
+}
+
+function localInitResponseFromView(init: ExecutionPackageUploadInitView): LocalExecutionPackageInitResponse {
+  return {
+    upload_id: init.uploadID,
+    server_public_key_id: init.serverPublicKeyID,
+    supported_crypto_suites: init.supportedCryptoSuites,
+    cascade_execution_ips: init.cascadeExecutionIPs,
+    ...(typeof init.maxEnvelopeBytes === "number" ? { max_envelope_bytes: init.maxEnvelopeBytes } : {}),
+    ...(init.expiresAt ? { expires_at: init.expiresAt } : {}),
+  };
+}
+
+function localUploadPackageResultFromView(upload: ExecutionPackageUploadView, build?: LocalClientExecutionPackageBuild): LocalCloudUploadPackageResult {
+  return {
+    ...(build ? { build } : {}),
+    upload: {
+      exchange_package_id: upload.exchangePackageID,
+      status: upload.status,
+      ...(upload.cloudJobID ? { cloud_job_id: upload.cloudJobID } : {}),
+    },
+  };
+}
+
+function localLifecycleStagesFromPartial(currentID: ServerLifecycleStageID): ServerLifecycleStageView[] {
+  const activeIndex = serverLifecycleStageOrder.indexOf(currentID);
+  return serverLifecycleStageOrder.map((id, index) => ({
+    id,
+    label: serverLifecycleStageLabels[id],
+    status: index < activeIndex ? "completed" : index === activeIndex ? "active" : "pending",
+    progress: index < activeIndex ? 100 : index === activeIndex ? 20 : 0,
+    summary: id === "upload_initialized" ? "服务器返回 upload id 和上传约束。" : "",
+    artifactCount: 0,
+  }));
+}
+
+function isTerminalLocalStatus(status: string | undefined): boolean {
+  return ["completed", "succeeded", "failed", "canceled", "expired"].includes(status ?? "");
 }
 
 function mapCloudRunStatus(status: string | undefined): "not_uploaded" | "queued" | "running" | "succeeded" | "failed" {
@@ -1162,7 +1491,7 @@ function localFutureWorkspace(workspace: ProjectWorkspaceView, message: string):
 function mockUploadInit(workspace: ProjectWorkspaceView, prefix: string): ExecutionPackageUploadInitView {
   return {
     uploadID: `upload_${prefix}_${workspace.id}`,
-    serverPublicKeyID: "cascade-dev-kms-202607",
+    serverPublicKeyID: "mock-kms-202607",
     supportedCryptoSuites: ["aes-256-gcm"],
     cascadeExecutionIPs: ["203.0.113.42"],
     maxEnvelopeBytes: 8 * 1024 * 1024,
@@ -1507,9 +1836,16 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
   if (local.cloud_exchange) {
     health.cloudExchange = {
       configured: local.cloud_exchange.configured,
+      exchangeDiscovered: Boolean(local.cloud_exchange.exchange_discovered),
+      installationPaired: Boolean(local.cloud_exchange.installation_paired),
+      sessionValid: Boolean(local.cloud_exchange.session_valid),
       ...(local.cloud_exchange.base_url_host ? { baseURLHost: local.cloud_exchange.base_url_host } : {}),
       ...(local.cloud_exchange.base_url_path ? { baseURLPath: local.cloud_exchange.base_url_path } : {}),
-      tokenConfigured: local.cloud_exchange.token_configured,
+      ...(local.cloud_exchange.server_key_id ? { serverKeyID: local.cloud_exchange.server_key_id } : {}),
+      ...(local.cloud_exchange.install_id_suffix ? { installIDSuffix: local.cloud_exchange.install_id_suffix } : {}),
+      authMode: local.cloud_exchange.auth_mode ?? "unpaired",
+      ...(local.cloud_exchange.environment ? { environment: local.cloud_exchange.environment } : {}),
+      devPlaintext: Boolean(local.cloud_exchange.dev_plaintext),
     };
   }
   return health;

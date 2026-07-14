@@ -48,6 +48,31 @@ type productMapLLMOutput struct {
 	} `json:"workflows"`
 }
 
+func (o *productMapLLMOutput) UnmarshalJSON(data []byte) error {
+	type alias productMapLLMOutput
+	var single alias
+	if err := json.Unmarshal(data, &single); err == nil {
+		*o = productMapLLMOutput(single)
+		return nil
+	}
+	var items []alias
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	merged := productMapLLMOutput{}
+	for _, item := range items {
+		patch := productMapLLMOutput(item)
+		if merged.Summary == "" {
+			merged.Summary = patch.Summary
+		}
+		merged.Pages = append(merged.Pages, patch.Pages...)
+		merged.Features = append(merged.Features, patch.Features...)
+		merged.Workflows = append(merged.Workflows, patch.Workflows...)
+	}
+	*o = merged
+	return nil
+}
+
 func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.ProductMap, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -294,7 +319,7 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 	}
 	for _, surface := range intelligence.InteractionSurfaces {
 		key := firstNonEmpty(surface.PageID, surface.ID, surface.URL)
-		if key == "" || seen[key] {
+		if key == "" {
 			continue
 		}
 		actions := []string{}
@@ -303,6 +328,20 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 		}
 		if len(actions) == 0 {
 			actions = []string{"inspect", "capture"}
+		}
+		if seen[key] {
+			for _, page := range existing {
+				if page == nil || firstNonEmpty(page.ID, page.URL, page.RoutePattern) != key {
+					continue
+				}
+				page.Actions = uniqueStrings(append(page.Actions, actions...))
+				page.PrimaryActions = append(page.PrimaryActions, surface.Actions...)
+				page.States = uniqueStrings(append(page.States, surface.States...))
+				page.FeatureRefs = uniqueStrings(append(page.FeatureRefs, surface.FeatureRefs...))
+				page.EvidenceRefs = uniqueEvidenceRefs(append(page.EvidenceRefs, surface.EvidenceRefs...))
+				break
+			}
+			continue
 		}
 		existing = append(existing, &model.ProductPage{
 			ID:             firstNonEmpty(surface.PageID, surface.ID),

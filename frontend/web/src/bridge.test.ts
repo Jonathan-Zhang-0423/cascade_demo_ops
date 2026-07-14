@@ -99,6 +99,114 @@ describe("desktop bridge contract", () => {
     expect(acked.data?.assets.every((asset) => asset.status === "approved")).toBe(true);
   });
 
+  it("runs local split cloud lifecycle through real bridge methods", async () => {
+    const workspace = createWorkspace("product_demo");
+    const build = {
+      org_id: "org_desktop",
+      project_id: workspace.id,
+      package: { package_id: "pkg_split_real" },
+      envelope: { crypto: { payload_digest_sha256: "sha256:payload-split" } },
+      payload_ref: { kind: "inline", sha256: "sha256:payload-split", encrypted: true, sensitive: true },
+    };
+    const resultPackage = {
+      result_id: "result_split_real",
+      source_package_id: "pkg_split_real",
+      cloud_job_id: "job_split_real",
+      schema_version: "demoops.recording_result_package.v1",
+      status: "generated",
+      verification_report: { reproducibility_match: true, pass_rate: 1 },
+      delivery: {
+        result_package_ref: {
+          id: "artifact_result_split",
+          kind: "result_package",
+          uri: "artifact://result.json",
+          sha256: "sha256:result",
+          encrypted: true,
+          sensitive: true,
+        },
+        asset_refs: [{
+          id: "artifact_video_split",
+          role: "final_demo_video",
+          kind: "video",
+          uri: "artifact://video.webm",
+          mime_type: "video/webm",
+          sha256: "sha256:video",
+          encrypted: true,
+          sensitive: true,
+        }],
+        ack_required: true,
+      },
+      created_at: "2026-07-14T00:00:00Z",
+    };
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("/cloud/init")) {
+        return bridgeJSON({
+          build,
+          init: {
+            upload_id: "upload_split_real",
+            server_public_key_id: "server-key",
+            supported_crypto_suites: ["aes-256-gcm"],
+            cascade_execution_ips: ["203.0.113.10"],
+          },
+        });
+      }
+      if (url.includes("/cloud/upload")) {
+        return bridgeJSON({
+          build,
+          upload: {
+            exchange_package_id: "xpkg_split_real",
+            cloud_job_id: "job_split_real",
+            status: "running",
+          },
+        });
+      }
+      if (url.includes("/cloud/status")) {
+        return bridgeJSON({
+          exchange_package_id: "xpkg_split_real",
+          cloud_job_id: "job_split_real",
+          status: "completed",
+          stage: "completed",
+          message: "录制完成",
+          progress_percent: 100,
+          result_package_id: "result_split_real",
+          stage_history: [
+            { stage: "accepted", status: "completed", message: "已接收", progress_percent: 20, updated_at: "2026-07-14T00:00:01Z" },
+            { stage: "validating", status: "completed", message: "脚本校验通过", progress_percent: 45, updated_at: "2026-07-14T00:00:03Z" },
+            { stage: "running_script", status: "completed", message: "浏览器执行完成", progress_percent: 80, updated_at: "2026-07-14T00:00:12Z" },
+            { stage: "completed", status: "completed", message: "结果返回", progress_percent: 100, updated_at: "2026-07-14T00:00:20Z" },
+          ],
+        });
+      }
+      if (url.includes("/cloud/result")) {
+        return bridgeJSON(resultPackage);
+      }
+      if (url.includes("/cloud/ack")) {
+        return bridgeJSON({ result_package_id: "result_split_real", status: "acked", delivery_status: "acked" });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bridge = createLocalBridgeClient("http://127.0.0.1:4317");
+    const uploaded = await bridge.approveAndUploadPackage(workspace);
+    const completed = await bridge.pollCloudRun(uploaded.data ?? workspace);
+    const acked = await bridge.ackResultPackage(completed.data ?? workspace);
+
+    expect(uploaded.ok).toBe(true);
+    expect(uploaded.data?.cloudRun.exchangePackageID).toBe("xpkg_split_real");
+    expect(completed.data?.stage).toBe("result_review");
+    expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "script_validation")?.status).toBe("completed");
+    expect(completed.data?.assets[0]?.assetID).toBe("artifact_video_split");
+    expect(acked.data?.assets[0]?.status).toBe("approved");
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/init",
+      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/upload",
+      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/status?org_id=org_desktop&exchange_package_id=xpkg_split_real",
+      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/result?org_id=org_desktop&result_package_id=result_split_real",
+      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/ack",
+    ]);
+  });
+
   it("maps local dev bridge execution packages into the workspace approval view", async () => {
     const workspace = updateWorkspaceInputs(createWorkspace("product_demo"), {
       productURL: "https://real.example.com",
@@ -343,7 +451,7 @@ describe("desktop bridge contract", () => {
           },
           init: {
             upload_id: "upload_cloud_real",
-            server_public_key_id: "cascade-dev-kms-202607",
+            server_public_key_id: "mock-kms-202607",
             supported_crypto_suites: ["aes-256-gcm"],
             cascade_execution_ips: ["203.0.113.10"],
           },
@@ -444,7 +552,7 @@ describe("desktop bridge contract", () => {
       product_description: "展示 Cascade 从项目理解到自动录制的完整流程",
       target_audience: "中国产品运营团队",
     });
-    expect(JSON.stringify(body)).not.toMatch(/000000|Authorization|sk-/i);
+    expect(JSON.stringify(body)).not.toMatch(/0{6}|Authorization|sk-/i);
   });
 
   it("maps project intelligence fields from local cascade state", () => {
@@ -582,6 +690,59 @@ describe("desktop bridge contract", () => {
     expect(result.error).toContain("404 page not found");
   });
 
+  it("sanitizes local bridge LLM JSON parse errors for runtime UI", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      text: async () => JSON.stringify({
+        ok: false,
+        error: "llm JSON parse failed: json: cannot unmarshal array into Go value of type agents.requirementLLMOutput",
+      }),
+    })));
+
+    const bridge = createLocalBridgeClient();
+    const result = await bridge.runtimeHealth();
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("模型返回的 JSON 结构不稳定");
+    expect(result.error).not.toContain("cannot unmarshal");
+    expect(result.error).not.toContain("agents.requirementLLMOutput");
+  });
+
+  it("formats structured bridge error details for field-level fixes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      text: async () => JSON.stringify({
+        ok: false,
+        error: "execution package has no real business action",
+        error_info: {
+          code: "preflight_failed",
+          message: "execution package has no real business action",
+          correlation_id: "bridge_test",
+          retryable: false,
+          details: [{
+            field: "payload.executable_script_bundle.plan_json.steps",
+            reason: "blocking",
+            message: "business action missing",
+            hint: "Add click/fill/select/upload/api_call.",
+          }],
+        },
+      }),
+    })));
+
+    const bridge = createLocalBridgeClient();
+    const result = await bridge.initExecutionPackageUpload(createWorkspace("product_demo"));
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("错误码: preflight_failed");
+    expect(result.error).toContain("字段: payload.executable_script_bundle.plan_json.steps");
+    expect(result.error).toContain("建议: Add click/fill/select/upload/api_call.");
+    expect(result.errorInfo?.code).toBe("preflight_failed");
+  });
+
   it("maps local model diagnostics into frontend camelCase DTOs", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true,
@@ -693,3 +854,11 @@ describe("desktop bridge contract", () => {
     );
   });
 });
+
+function bridgeJSON(data: unknown) {
+  return {
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ ok: true, data }),
+  };
+}

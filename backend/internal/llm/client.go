@@ -51,6 +51,7 @@ type TextRequest struct {
 	User        string
 	MaxTokens   int
 	Temperature float64
+	JSONMode    bool
 }
 
 type MultimodalRequest struct {
@@ -179,6 +180,9 @@ func DefaultCallPolicy() CallPolicy {
 }
 
 func (p CallPolicy) AllowsFallback(class string, err error) bool {
+	if class == errorClassJSONParse {
+		return true
+	}
 	if class == errorClassTimeout || class == "http_429" || class == "http_503" {
 		return true
 	}
@@ -245,6 +249,9 @@ func (a openAICompatibleAdapter) BuildTextPayload(route config.ModelTaskRoute, r
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
 	}
+	if req.JSONMode {
+		payload.ResponseFormat = &openAIResponseFormat{Type: "json_object"}
+	}
 	applyProviderRequestOptions(a.provider, &payload)
 	return payload
 }
@@ -259,10 +266,11 @@ func (a openAICompatibleAdapter) BuildMultimodalPayload(route config.ModelTaskRo
 		content = append(content, openAIContentPart{Type: "image_url", ImageURL: &openAIImageURL{URL: ref}})
 	}
 	payload := openAIChatRequest{
-		Model:       route.Model,
-		Messages:    []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: content}},
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		Model:          route.Model,
+		Messages:       []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: content}},
+		Temperature:    req.Temperature,
+		MaxTokens:      req.MaxTokens,
+		ResponseFormat: &openAIResponseFormat{Type: "json_object"},
 	}
 	applyProviderRequestOptions(a.provider, &payload)
 	return payload
@@ -400,6 +408,7 @@ func (r *Router) GenerateJSON(ctx context.Context, task config.ModelTask, req JS
 		User:        req.User,
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
+		JSONMode:    true,
 	})
 	if callTrace != nil {
 		trace = callTrace
@@ -513,7 +522,7 @@ func (r *Router) shouldFallback(class string, err error) bool {
 	case config.LLMModeDeterministic:
 		return true
 	case config.LLMModeReal:
-		return false
+		return class == errorClassJSONParse
 	default:
 		return r.policy.AllowsFallback(class, err)
 	}
@@ -836,14 +845,19 @@ func firstNonEmpty(values ...string) string {
 }
 
 type openAIChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	Temperature float64         `json:"temperature,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Thinking    *openAIThinking `json:"thinking,omitempty"`
+	Model          string                `json:"model"`
+	Messages       []openAIMessage       `json:"messages"`
+	Temperature    float64               `json:"temperature,omitempty"`
+	MaxTokens      int                   `json:"max_tokens,omitempty"`
+	Thinking       *openAIThinking       `json:"thinking,omitempty"`
+	ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 }
 
 type openAIThinking struct {
+	Type string `json:"type"`
+}
+
+type openAIResponseFormat struct {
 	Type string `json:"type"`
 }
 

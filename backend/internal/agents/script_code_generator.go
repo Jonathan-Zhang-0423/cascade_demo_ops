@@ -162,6 +162,10 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		builder.WriteString("  await ctx.log.info(\"assert step validates the current page state\", { nodeId: " + jsString(step.NodeID) + " });\n")
 	case model.GraphActionInspect:
 		builder.WriteString("  await ctx.log.info(\"inspect step uses the current page state\", { nodeId: " + jsString(step.NodeID) + " });\n")
+		if selector != "" {
+			softTimeoutMS := minInt(timeoutMS, 3000)
+			builder.WriteString("  await ctx.page.locator(" + jsString(selector) + ").waitFor({ timeout: " + fmt.Sprint(softTimeoutMS) + " }).catch(() => ctx.log.info(\"inspect selector not visible; continuing with viewport capture\", { nodeId: " + jsString(step.NodeID) + ", selector: " + jsString(selector) + " }));\n")
+		}
 	case model.GraphActionAPICall:
 		builder.WriteString("  await ctx.assert.apiCall(" + jsString(step.NodeID) + ", { parameters: " + jsJSON(step.Action.Parameters) + ", timeout: " + fmt.Sprint(timeoutMS) + " });\n")
 	default:
@@ -200,11 +204,18 @@ func captureScreenshotOptions(step model.ScriptStep, selector string, maskSelect
 }
 
 func writeStepAssertions(builder *strings.Builder, step model.ScriptStep, selector string, targetURL string, timeoutMS int) {
+	if step.Action.Type == model.GraphActionInspect || step.Action.Type == model.GraphActionWait {
+		builder.WriteString("  await ctx.log.info(\"observation step validation is non-blocking\", { nodeId: " + jsString(step.NodeID) + " });\n")
+		return
+	}
 	expected := firstNonEmpty(step.ExpectedOutcome, step.Narrative.Caption, step.Narrative.Voiceover)
 	if expected != "" {
 		builder.WriteString("  await ctx.assert.step(" + jsString(step.NodeID) + ", " + jsString(expected) + ", { selector: " + jsString(selector) + ", url: " + jsString(targetURL) + ", timeout: " + fmt.Sprint(timeoutMS) + " });\n")
 	}
 	for _, validation := range step.Validations {
+		if !validation.Required || validation.Severity != "blocking" {
+			continue
+		}
 		validationSelector := firstNonEmpty(validation.Target.Selector, selector)
 		validationExpected := fmt.Sprint(validation.Expected)
 		if validation.Assertion != "" {
@@ -255,16 +266,16 @@ func selectorCandidateValue(candidates []model.SelectorCandidate) string {
 
 func boundedHoldMS(holdMS int, durationMS int) int {
 	if holdMS > 0 {
-		if holdMS > 5000 {
-			return 5000
+		if holdMS > 10000 {
+			return 10000
 		}
 		return holdMS
 	}
 	if durationMS <= 0 {
 		return 0
 	}
-	if durationMS > 3000 {
-		return 3000
+	if durationMS > 10000 {
+		return 10000
 	}
 	return durationMS
 }

@@ -16,6 +16,7 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 	var gotPath string
 	var gotAuth string
 	var gotModel string
+	var gotResponseFormat map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
@@ -24,6 +25,7 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 			t.Fatal(err)
 		}
 		gotModel, _ = payload["model"].(string)
+		gotResponseFormat, _ = payload["response_format"].(map[string]any)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"真实模型摘要\"}"}}],"usage":{"prompt_tokens":12,"completion_tokens":6}}`))
 	}))
 	defer server.Close()
@@ -43,6 +45,9 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 	}
 	if gotPath != "/chat/completions" || gotAuth != "Bearer test-api-key" || gotModel != "kimi-k2.7-code" {
 		t.Fatalf("unexpected request path/auth/model: path=%s auth=%s model=%s", gotPath, gotAuth, gotModel)
+	}
+	if gotResponseFormat["type"] != "json_object" {
+		t.Fatalf("expected json_object response_format, got %+v", gotResponseFormat)
 	}
 	if out.Summary != "真实模型摘要" {
 		t.Fatalf("summary = %q", out.Summary)
@@ -206,7 +211,7 @@ func TestRouterAutoFallbacksOnRateLimit(t *testing.T) {
 	}
 }
 
-func TestRouterAutoDoesNotFallbackOnJSONParseFailure(t *testing.T) {
+func TestRouterAutoFallbacksOnJSONParseFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"not-json"}}]}`))
 	}))
@@ -217,8 +222,11 @@ func TestRouterAutoDoesNotFallbackOnJSONParseFailure(t *testing.T) {
 		Summary string `json:"summary"`
 	}
 	trace, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &out)
-	if err == nil || IsDeterministicFallback(err) {
-		t.Fatalf("expected JSON parse hard error, got trace=%+v err=%v", trace, err)
+	if !IsDeterministicFallback(err) {
+		t.Fatalf("expected JSON parse fallback, got trace=%+v err=%v", trace, err)
+	}
+	if trace == nil || trace.FallbackReason != errorClassJSONParse {
+		t.Fatalf("expected json_parse fallback trace, got %+v", trace)
 	}
 }
 
@@ -249,6 +257,27 @@ func TestRouterRealModeFailsWithoutKey(t *testing.T) {
 	_, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &out)
 	if err == nil || IsDeterministicFallback(err) {
 		t.Fatalf("expected real mode hard failure, got %v", err)
+	}
+}
+
+func TestRouterRealModeFallsBackOnJSONParseFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"[{\"summary\":\"array\"}]"}}]}`))
+	}))
+	defer server.Close()
+
+	runtime := testRuntime(config.ModelProviderKimi, server.URL)
+	runtime.LLMMode = config.LLMModeReal
+	router := NewRouter(runtime)
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	trace, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &out)
+	if !IsDeterministicFallback(err) {
+		t.Fatalf("expected real mode JSON parse fallback, got trace=%+v err=%v", trace, err)
+	}
+	if trace == nil || trace.FallbackReason != errorClassJSONParse {
+		t.Fatalf("expected json_parse fallback trace, got %+v", trace)
 	}
 }
 

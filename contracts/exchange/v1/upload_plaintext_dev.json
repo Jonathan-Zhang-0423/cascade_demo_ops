@@ -1,0 +1,64 @@
+{
+  "upload_id": "upload_contract_dev",
+  "envelope": {
+    "envelope_id": "env_contract_dev",
+    "org_id": "org_contract",
+    "project_id": "project_contract",
+    "package_kind": "client_execution",
+    "schema_version": "demoops.exchange_envelope.v1",
+    "payload_schema_version": "demoops.client_execution_package.v1",
+    "idempotency_key": "idem_contract_dev",
+    "created_at": "2026-07-14T00:02:00Z",
+    "expires_at": "2026-07-14T00:32:00Z",
+    "producer": {
+      "app_version": "desktop-web-dev",
+      "install_id": "desktop-dev-install",
+      "runtime_profile": "desktop-product-run"
+    },
+    "crypto": {
+      "crypto_suite": "aes-256-gcm",
+      "key_wrapping_mode": "server_public_key",
+      "server_key_id": "cloud-dev/server-public-key",
+      "content_encryption_alg": "aes-256-gcm",
+      "payload_digest_alg": "sha256",
+      "payload_digest_sha256": "sha256:payload_plaintext",
+      "ciphertext_digest_sha256": "sha256:payload_plaintext",
+      "signature_alg": "dev-static",
+      "signature_key_id": "desktop-dev-install",
+      "signature": "desktop-dev-signature",
+      "nonce": "nonce_contract_dev",
+      "encrypted_content_key": "desktop-dev-inline-content-key"
+    },
+    "payload_ref": {
+      "kind": "inline",
+      "inline_ciphertext": "desktop-dev-inline-ciphertext",
+      "mime_type": "application/json",
+      "sha256": "sha256:payload_plaintext",
+      "size_bytes": 1024,
+      "encrypted": true,
+      "sensitive": true,
+      "compression_alg": "none"
+    },
+    "policy": {
+      "replay_protection": true,
+      "max_execution_window_sec": 900,
+      "delete_payload_after_run": true,
+      "human_approval_required": true,
+      "structure_summary_only": true,
+      "required_ip_allowlist_ack": false
+    }
+  },
+  "payload_ref": {
+    "kind": "inline",
+    "inline_ciphertext": "desktop-dev-inline-ciphertext",
+    "mime_type": "application/json",
+    "sha256": "sha256:payload_plaintext",
+    "size_bytes": 1024,
+    "encrypted": true,
+    "sensitive": true,
+    "compression_alg": "none"
+  },
+  "payload": {
+    "$ref": "client_execution_package.happy.json"
+  }
+}

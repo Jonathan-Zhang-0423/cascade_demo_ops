@@ -41,6 +41,9 @@ type ExchangeIntakeService struct {
 	resultByID      map[string]*recordingResultState
 	resultByPackage map[string]string
 	seenNonces      map[string]bool
+	installations   map[string]*exchangeInstallationState
+	sessions        map[string]*exchangeInstallationSessionState
+	challenges      map[string]exchangePairingChallengeState
 }
 
 type exchangeUploadSession struct {
@@ -75,6 +78,36 @@ type recordingResultState struct {
 	Retention         model.RetentionSpec
 }
 
+type exchangeInstallationState struct {
+	InstallID        string
+	DeviceID         string
+	OrgID            string
+	ProjectID        string
+	AppVersion       string
+	RuntimeProfile   string
+	SigningPublicKey model.AppInstallationPublicKey
+	ResultPublicKey  model.AppInstallationPublicKey
+	Revoked          bool
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type exchangeInstallationSessionState struct {
+	SessionID            string
+	SessionToken         string
+	InstallID            string
+	OrgID                string
+	ProjectID            string
+	ResultRecipientKeyID string
+	ExpiresAt            time.Time
+	Revoked              bool
+}
+
+type exchangePairingChallengeState struct {
+	Challenge model.ExchangePairingChallenge
+	Used      bool
+}
+
 func NewExchangeIntakeService(verifier model.ExchangeSignatureVerifier) *ExchangeIntakeService {
 	return newExchangeIntakeService(verifier, nil)
 }
@@ -90,6 +123,12 @@ func newExchangeIntakeService(verifier model.ExchangeSignatureVerifier, persiste
 		resultByID:      map[string]*recordingResultState{},
 		resultByPackage: map[string]string{},
 		seenNonces:      map[string]bool{},
+		installations:   map[string]*exchangeInstallationState{},
+		sessions:        map[string]*exchangeInstallationSessionState{},
+		challenges:      map[string]exchangePairingChallengeState{},
+	}
+	if verifier == nil {
+		service.verifier = service
 	}
 	if persistence != nil {
 		_ = service.LoadSnapshot(context.Background())
@@ -113,12 +152,23 @@ func (s *ExchangeIntakeService) Init(ctx context.Context, request model.Executio
 
 	now := s.now()
 	response := model.ExecutionPackageInitResponse{
-		UploadID:              newExchangeID(defaultUploadIDPrefix, now),
-		ServerPublicKeyID:     defaultServerPublicKeyID,
-		ServerPublicKeyAlg:    defaultServerPublicKeyAlg,
+		UploadID:           newExchangeID(defaultUploadIDPrefix, now),
+		ServerPublicKeyID:  defaultServerPublicKeyID,
+		ServerPublicKeyAlg: defaultServerPublicKeyAlg,
+		ServerPublicKeys: []model.ExchangeServerPublicKey{{
+			KeyID:     defaultServerPublicKeyID,
+			Alg:       defaultServerPublicKeyAlg,
+			PublicKey: base64DevServerPublicKey(),
+			NotBefore: now.Add(-time.Hour),
+			ExpiresAt: now.Add(24 * time.Hour),
+		}},
 		KeyWrappingModes:      []string{model.KeyWrappingModeServerKMS, model.KeyWrappingModeServerPublicKey, model.KeyWrappingModeCustomerKMS},
 		SupportedCryptoSuites: []string{model.CryptoSuiteXChaCha20Poly1305, model.CryptoSuiteAES256GCM},
 		SupportedCompression:  []string{model.CompressionGzip, model.CompressionNone},
+		RequiredSignatureAlg:  exchangeInstallationKeyAlg,
+		InstallationRequired:  true,
+		SessionExpiresAt:      now.Add(defaultInstallationSessionTTL),
+		ResultRecipientKeyID:  installationResultKeyID(firstNonEmptyString(request.Producer.InstallID, defaultDesktopInstallID)),
 		CascadeExecutionIPs:   []string{defaultCascadeExecutionIP},
 		MaxEnvelopeBytes:      defaultMaxEnvelopeBytes,
 		MaxAttachmentBytes:    defaultMaxAttachmentBytes,
@@ -585,6 +635,9 @@ func (s *ExchangeIntakeService) snapshotLocked() exchangeSnapshot {
 		ResultByID:      cloneRecordingResultStates(s.resultByID),
 		ResultByPackage: cloneStringMap(s.resultByPackage),
 		SeenNonces:      cloneBoolMap(s.seenNonces),
+		Installations:   cloneInstallationStates(s.installations),
+		Sessions:        cloneInstallationSessionStates(s.sessions),
+		Challenges:      clonePairingChallengeStates(s.challenges),
 	}
 }
 
@@ -595,6 +648,9 @@ func (s *ExchangeIntakeService) applySnapshotLocked(snapshot exchangeSnapshot) {
 	s.resultByID = cloneRecordingResultStates(snapshot.ResultByID)
 	s.resultByPackage = cloneStringMap(snapshot.ResultByPackage)
 	s.seenNonces = cloneBoolMap(snapshot.SeenNonces)
+	s.installations = cloneInstallationStates(snapshot.Installations)
+	s.sessions = cloneInstallationSessionStates(snapshot.Sessions)
+	s.challenges = clonePairingChallengeStates(snapshot.Challenges)
 	if s.uploads == nil {
 		s.uploads = map[string]exchangeUploadSession{}
 	}
@@ -612,6 +668,15 @@ func (s *ExchangeIntakeService) applySnapshotLocked(snapshot exchangeSnapshot) {
 	}
 	if s.seenNonces == nil {
 		s.seenNonces = map[string]bool{}
+	}
+	if s.installations == nil {
+		s.installations = map[string]*exchangeInstallationState{}
+	}
+	if s.sessions == nil {
+		s.sessions = map[string]*exchangeInstallationSessionState{}
+	}
+	if s.challenges == nil {
+		s.challenges = map[string]exchangePairingChallengeState{}
 	}
 }
 
@@ -974,6 +1039,47 @@ func cloneBoolMap(values map[string]bool) map[string]bool {
 		return nil
 	}
 	out := make(map[string]bool, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneInstallationStates(values map[string]*exchangeInstallationState) map[string]*exchangeInstallationState {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]*exchangeInstallationState, len(values))
+	for key, value := range values {
+		if value == nil {
+			continue
+		}
+		copyValue := *value
+		out[key] = &copyValue
+	}
+	return out
+}
+
+func cloneInstallationSessionStates(values map[string]*exchangeInstallationSessionState) map[string]*exchangeInstallationSessionState {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]*exchangeInstallationSessionState, len(values))
+	for key, value := range values {
+		if value == nil {
+			continue
+		}
+		copyValue := *value
+		out[key] = &copyValue
+	}
+	return out
+}
+
+func clonePairingChallengeStates(values map[string]exchangePairingChallengeState) map[string]exchangePairingChallengeState {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]exchangePairingChallengeState, len(values))
 	for key, value := range values {
 		out[key] = value
 	}

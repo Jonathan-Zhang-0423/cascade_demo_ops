@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
@@ -73,6 +74,12 @@ func TestDevHTTPBridgeReadsLocalRepoSummary(t *testing.T) {
 	}
 	if !containsString(snapshot.Frameworks, "react") || len(snapshot.Selectors) == 0 || len(snapshot.Components) == 0 {
 		t.Fatalf("expected framework, selector, and component summary: %+v", snapshot)
+	}
+	if state.ScriptDocument == nil || !scriptDocumentHasBusinessAction(state.ScriptDocument) {
+		t.Fatalf("expected local repo selector evidence to produce a business action: %+v", state.ScriptDocument)
+	}
+	if _, err := buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC()); err != nil {
+		t.Fatalf("expected executable package to be uploadable with repo-derived action: %v", err)
 	}
 	payload, err := json.Marshal(state)
 	if err != nil {
@@ -157,6 +164,67 @@ func TestDevHTTPBridgeRedactsLocalPathsInErrors(t *testing.T) {
 	}
 	if !strings.Contains(message, "Access is denied") {
 		t.Fatalf("expected error reason to remain: %s", message)
+	}
+}
+
+func TestDevHTTPBridgeSanitizesLLMJSONErrors(t *testing.T) {
+	message := redactBridgeError(`llm JSON parse failed: json: cannot unmarshal array into Go value of type agents.requirementLLMOutput`)
+
+	if strings.Contains(message, "cannot unmarshal") || strings.Contains(message, "agents.requirementLLMOutput") {
+		t.Fatalf("expected technical JSON parse detail to be hidden: %s", message)
+	}
+	if !strings.Contains(message, "模型返回的 JSON 结构不稳定") {
+		t.Fatalf("expected user-facing LLM JSON error, got: %s", message)
+	}
+}
+
+func TestBuildClientExecutionPackageRejectsObservationOnlyScripts(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		ProductDescription: "只观察首页，不执行真实业务动作。",
+		TargetAudience:     "中国运营团队",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	if state.ScriptDocument == nil {
+		t.Fatal("expected script document")
+	}
+	if scriptDocumentHasBusinessAction(state.ScriptDocument) {
+		t.Fatalf("test fixture unexpectedly generated business action: %+v", state.ScriptDocument.Steps)
+	}
+	_, err = buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected observation-only script to be rejected before upload")
+	}
+	if !strings.Contains(err.Error(), "执行包没有真实业务动作") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNormalizeClientExecutionPackageRepairsRoundTripHashDrift(t *testing.T) {
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	pkg.ExecutableScriptBundle.PlaywrightScript.InlineSource += "\n"
+	if err := model.ValidateClientExecutionPackageForCloudExecution(&pkg); err == nil {
+		t.Fatal("expected stale script hash to fail validation before normalization")
+	}
+
+	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptHash := model.SHA256Hex([]byte(pkg.ExecutableScriptBundle.PlaywrightScript.InlineSource))
+	if pkg.ExecutableScriptBundle.PlaywrightScript.SHA256 != scriptHash {
+		t.Fatalf("expected playwright script hash to be recomputed, got %s want %s", pkg.ExecutableScriptBundle.PlaywrightScript.SHA256, scriptHash)
+	}
+	if pkg.ExecutableScriptBundle.Reproducibility.ScriptHashSHA256 != scriptHash {
+		t.Fatalf("expected reproducibility script hash to be recomputed, got %+v", pkg.ExecutableScriptBundle.Reproducibility)
+	}
+	if err := model.ValidateClientExecutionPackageForCloudExecution(&pkg); err != nil {
+		t.Fatalf("expected normalized package to pass cloud validation: %v", err)
 	}
 }
 

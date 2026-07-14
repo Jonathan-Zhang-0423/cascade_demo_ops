@@ -1,0 +1,71 @@
+{
+  "package_id": "pkg_contract_repair_1",
+  "org_id": "org_contract",
+  "project_id": "project_contract",
+  "schema_version": "demoops.client_execution_package.v1",
+  "created_at": "2026-07-14T00:10:00Z",
+  "approved_at": "2026-07-14T00:11:00Z",
+  "repair_context": {
+    "source_result_id": "result_contract_failed",
+    "source_package_id": "pkg_contract_happy",
+    "source_cloud_job_id": "job_contract_failed",
+    "repair_attempt": 1,
+    "base_bundle_id": "bundle_contract",
+    "base_bundle_hash_sha256": "sha256:bundle",
+    "base_plan_hash_sha256": "sha256:plan",
+    "diagnostic_refs": [
+      {
+        "id": "diag_contract_failed",
+        "kind": "browser_trace",
+        "summary": "Selector timeout diagnostic"
+      }
+    ],
+    "idempotency_key": "pkg_contract_happy:repair:1:sha256:bundle_repair"
+  },
+  "executable_script_bundle": {
+    "id": "bundle_contract_repair_1",
+    "project_id": "project_contract",
+    "workflow_graph_id": "graph_contract",
+    "schema_version": "demoops.executable_recording_script_bundle.v1",
+    "status": "validated",
+    "repair_lineage": {
+      "base_bundle_id": "bundle_contract",
+      "base_bundle_hash_sha256": "sha256:bundle",
+      "source_result_id": "result_contract_failed",
+      "source_cloud_job_id": "job_contract_failed",
+      "repair_attempt": 1,
+      "change_summary": "Increase selector wait and use test id selector.",
+      "diagnostic_refs": [
+        {
+          "id": "diag_contract_failed",
+          "kind": "browser_trace",
+          "summary": "Selector timeout diagnostic"
+        }
+      ],
+      "created_at": "2026-07-14T00:10:00Z"
+    },
+    "reproducibility": {
+      "plan_hash_sha256": "sha256:plan_repair",
+      "script_hash_sha256": "sha256:script_repair",
+      "markdown_hash_sha256": "sha256:markdown_repair",
+      "bundle_hash_sha256": "sha256:bundle_repair",
+      "graph_hash_sha256": "sha256:graph"
+    },
+    "validation": {
+      "valid": true,
+      "findings": []
+    }
+  },
+  "safety_report": {
+    "allowed_to_upload": true,
+    "upload_mode": "structure_summary_only",
+    "human_approval": {
+      "approval_id": "approval_contract_repair",
+      "approved_at": "2026-07-14T00:11:00Z",
+      "plan_digest_sha256": "sha256:plan_repair",
+      "notes": [
+        "Repair package was manually re-approved."
+      ]
+    }
+  }
+}

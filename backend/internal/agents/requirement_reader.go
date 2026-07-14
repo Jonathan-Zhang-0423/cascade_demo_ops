@@ -147,6 +147,58 @@ type requirementLLMOutput struct {
 	Confidence     float64              `json:"confidence"`
 }
 
+func (o *requirementLLMOutput) UnmarshalJSON(data []byte) error {
+	type alias requirementLLMOutput
+	var single alias
+	if err := json.Unmarshal(data, &single); err == nil {
+		*o = requirementLLMOutput(single)
+		o.normalize()
+		return nil
+	}
+	var items []alias
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	merged := requirementLLMOutput{}
+	for _, item := range items {
+		merged.merge(requirementLLMOutput(item))
+	}
+	merged.normalize()
+	*o = merged
+	return nil
+}
+
+func (o *requirementLLMOutput) merge(item requirementLLMOutput) {
+	if o.Scenario == "" {
+		o.Scenario = item.Scenario
+	}
+	if o.Objective == "" {
+		o.Objective = item.Objective
+	}
+	if o.PrimaryOutcome == "" {
+		o.PrimaryOutcome = item.PrimaryOutcome
+	}
+	o.MustShow = append(o.MustShow, item.MustShow...)
+	o.MustNotShow = append(o.MustNotShow, item.MustNotShow...)
+	o.ForbiddenPages = append(o.ForbiddenPages, item.ForbiddenPages...)
+	o.ForbiddenData = append(o.ForbiddenData, item.ForbiddenData...)
+	o.UseCases = append(o.UseCases, item.UseCases...)
+	if o.BrandTone == "" {
+		o.BrandTone = item.BrandTone
+	}
+	if item.Confidence > o.Confidence {
+		o.Confidence = item.Confidence
+	}
+}
+
+func (o *requirementLLMOutput) normalize() {
+	o.MustShow = uniqueStrings(o.MustShow)
+	o.MustNotShow = uniqueStrings(o.MustNotShow)
+	o.ForbiddenPages = uniqueStrings(o.ForbiddenPages)
+	o.ForbiddenData = uniqueStrings(o.ForbiddenData)
+	o.UseCases = uniqueUseCases(o.UseCases)
+}
+
 func (a *RequirementReaderAgent) enhanceWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) (*llm.CallTrace, error) {
 	if a.llm == nil || project == nil || brief == nil {
 		return nil, nil
@@ -301,6 +353,8 @@ func normalizeDemoUseCase(value string) model.DemoUseCase {
 	normalized = strings.ReplaceAll(normalized, " ", "_")
 	normalized = strings.ReplaceAll(normalized, "-", "_")
 	switch {
+	case normalized == "product_demo", normalized == "product_demonstration", strings.Contains(normalized, "product_demo"), strings.Contains(value, "产品演示"):
+		return model.DemoUseCaseLaunch
 	case normalized == string(model.DemoUseCaseHelpCenter), strings.Contains(normalized, "help"):
 		return model.DemoUseCaseHelpCenter
 	case normalized == string(model.DemoUseCaseUserDocumentation), strings.Contains(normalized, "doc"), strings.Contains(value, "文档"):

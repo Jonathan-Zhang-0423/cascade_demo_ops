@@ -44,6 +44,7 @@ func (a *ScriptPackagerAgent) PackageScript(
 		return nil, errors.New("workflow graph must contain at least one node")
 	}
 	now := time.Now().UTC()
+	quality := scriptQualityFromGraph(graph)
 	graphHash, err := model.DigestCanonicalJSON(graph)
 	if err != nil {
 		return nil, err
@@ -78,7 +79,7 @@ func (a *ScriptPackagerAgent) PackageScript(
 			CredentialScopeReviewRequired:      hasCredentials(project),
 			RedactionsReviewRequired:           true,
 			IPAllowlistAcknowledgementRequired: true,
-			BlockingReasons:                    scriptBlockingReasons(project, report),
+			BlockingReasons:                    scriptBlockingReasons(project, report, quality),
 		},
 		EvidenceRefs: reportEvidenceRefs(report),
 		CreatedAt:    now,
@@ -230,6 +231,26 @@ type approvalMarkdownLLMOutput struct {
 	Markdown string `json:"markdown"`
 }
 
+func (o *approvalMarkdownLLMOutput) UnmarshalJSON(data []byte) error {
+	type alias approvalMarkdownLLMOutput
+	var single alias
+	if err := json.Unmarshal(data, &single); err == nil {
+		*o = approvalMarkdownLLMOutput(single)
+		return nil
+	}
+	var items []alias
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.Markdown != "" {
+			o.Markdown = item.Markdown
+			return nil
+		}
+	}
+	return nil
+}
+
 func (a *ScriptPackagerAgent) enhanceMarkdownWithLLM(
 	ctx context.Context,
 	project *model.ProjectContext,
@@ -315,7 +336,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 			ExpectedOutcome: node.ExpectedOutcome,
 			Validations:     validations,
 			Capture:         capture,
-			Timing:          model.NodeTimingHint{NodeID: node.ID, DurationMS: durationMS, HoldAfterMS: 500},
+			Timing:          model.NodeTimingHint{NodeID: node.ID, DurationMS: durationMS, HoldAfterMS: stageHoldAfterMS(durationMS)},
 			Narrative:       narrative,
 			EvidenceRefs:    node.EvidenceRefs,
 			Blocking:        isBlockingStep(node),
@@ -324,6 +345,13 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 		_ = elapsedMS
 	}
 	return steps
+}
+
+func stageHoldAfterMS(durationMS int) int {
+	if durationMS >= 10000 {
+		return minInt(durationMS, 10000)
+	}
+	return minInt(maxInt(durationMS, 1500), 5000)
 }
 
 func scriptStepNodeIDs(doc *model.ExecutionScriptDocument) []string {
@@ -399,7 +427,7 @@ func recordingRunSpecFromGraph(project *model.ProjectContext, graph *model.DemoW
 		if durationMS <= 0 {
 			durationMS = 3000
 		}
-		timingHints = append(timingHints, model.NodeTimingHint{NodeID: node.ID, DurationMS: durationMS, HoldAfterMS: 500})
+		timingHints = append(timingHints, model.NodeTimingHint{NodeID: node.ID, DurationMS: durationMS, HoldAfterMS: stageHoldAfterMS(durationMS)})
 		if node.Capture != nil && (node.Capture.Video || node.Capture.Screenshot) {
 			captureWindows = append(captureWindows, model.CaptureWindow{
 				ID:         "capture_" + node.ID,
@@ -499,12 +527,61 @@ func isBlockingStep(node *model.GraphNode) bool {
 	if node.FailurePolicy != nil && node.FailurePolicy.HumanReviewRequired {
 		return true
 	}
+	actionType := graphActionTypeFromKind(node.Action, node.Selector)
+	if node.ActionSpec != nil {
+		actionType = node.ActionSpec.Type
+	}
 	for _, validation := range node.Validations {
 		if validation.Required && validation.Severity == "blocking" {
 			return true
 		}
 	}
+	if actionType == model.GraphActionInspect || actionType == model.GraphActionWait {
+		return false
+	}
 	return node.Type == model.GraphNodeTypeStart || node.Type == model.GraphNodeTypeAction || node.Type == model.GraphNodeTypeCapture
+}
+
+type scriptQualityReport struct {
+	ExecutableActionCount int
+	ObservationOnly       bool
+	Warnings              []string
+	Blockers              []string
+}
+
+func scriptQualityFromGraph(graph *model.DemoWorkflowGraph) scriptQualityReport {
+	report := scriptQualityReport{}
+	if graph == nil {
+		report.ObservationOnly = true
+		report.Blockers = append(report.Blockers, "执行图缺失，不能进入自动录制。")
+		return report
+	}
+	for _, node := range graph.Nodes {
+		if node == nil {
+			continue
+		}
+		actionType := graphActionTypeFromKind(node.Action, node.Selector)
+		if node.ActionSpec != nil {
+			actionType = node.ActionSpec.Type
+		}
+		if isBusinessAction(actionType) {
+			report.ExecutableActionCount++
+		}
+	}
+	report.ObservationOnly = report.ExecutableActionCount == 0
+	if report.ObservationOnly {
+		report.Blockers = append(report.Blockers, "当前执行图没有 click/fill/select/upload/api_call 等真实业务动作，不能自动上传录制。请补充页面扫描、截图标注或稳定 selector 证据。")
+	}
+	return report
+}
+
+func isBusinessAction(action model.GraphActionType) bool {
+	switch action {
+	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
+		return true
+	default:
+		return false
+	}
 }
 
 func scriptSafetyPolicy(project *model.ProjectContext, graph *model.DemoWorkflowGraph) model.ScriptSafetyPolicy {
@@ -610,8 +687,10 @@ func reportSourceDigest(report *model.MultimodalUnderstandingReport) string {
 	return report.SourceDigestSHA256
 }
 
-func scriptBlockingReasons(project *model.ProjectContext, report *model.MultimodalUnderstandingReport) []string {
+func scriptBlockingReasons(project *model.ProjectContext, report *model.MultimodalUnderstandingReport, quality scriptQualityReport) []string {
 	reasons := []string{"上传前必须完成人工审批。", "需要确认仅上传代码结构摘要，不上传完整源码。", "需要复核打码选择器和禁止访问数据。"}
+	reasons = append(reasons, quality.Blockers...)
+	reasons = append(reasons, quality.Warnings...)
 	if hasCredentials(project) {
 		reasons = append(reasons, "需要复核凭据授权范围和过期时间。")
 	}

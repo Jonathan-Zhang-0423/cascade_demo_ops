@@ -45,6 +45,43 @@ type graphLLMOutput struct {
 	} `json:"steps"`
 }
 
+func (o *graphLLMOutput) UnmarshalJSON(data []byte) error {
+	type alias graphLLMOutput
+	var single alias
+	if err := json.Unmarshal(data, &single); err == nil {
+		*o = graphLLMOutput(single)
+		return nil
+	}
+	var items []alias
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	merged := graphLLMOutput{}
+	for _, item := range items {
+		patch := graphLLMOutput(item)
+		if merged.Name == "" {
+			merged.Name = patch.Name
+		}
+		if merged.Summary == "" {
+			merged.Summary = patch.Summary
+		}
+		if merged.Objective == "" {
+			merged.Objective = patch.Objective
+		}
+		if merged.ValueProposition == "" {
+			merged.ValueProposition = patch.ValueProposition
+		}
+		if merged.CTA == "" {
+			merged.CTA = patch.CTA
+		}
+		merged.SuccessCriteria = append(merged.SuccessCriteria, patch.SuccessCriteria...)
+		merged.Steps = append(merged.Steps, patch.Steps...)
+	}
+	merged.SuccessCriteria = flexibleStringSlice(uniqueStrings([]string(merged.SuccessCriteria)))
+	*o = merged
+	return nil
+}
+
 func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.DemoWorkflowGraph, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -198,7 +235,7 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 		{
 			ID:              "highlight_primary_value",
 			Action:          string(primaryActionType),
-			Selector:        firstNonEmpty(primaryAction.Selector, "main"),
+			Selector:        primaryAction.Selector,
 			ExpectedOutcome: firstNonEmpty(primaryAction.ExpectedOutcome, featureValue),
 			IsScreenshot:    true,
 			HasZoom:         true,
@@ -219,8 +256,8 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 					Target:    primaryAction.Target,
 					Assertion: "核心演示目标可见或可执行",
 					Expected:  true,
-					Severity:  "blocking",
-					Required:  true,
+					Severity:  severityForAction(primaryActionType),
+					Required:  primaryActionType != model.GraphActionInspect,
 					RepairPolicy: &model.RepairPolicy{
 						AllowSelectorRepair: true,
 						AllowDataRepair:     false,
@@ -237,7 +274,7 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 				Tone:         project.BrandTone,
 				AudienceLens: project.TargetAudience,
 			},
-			Capture:      &model.CaptureSpec{Screenshot: true, Video: true, Zoom: true, Callout: true, FocusSelector: firstNonEmpty(primaryAction.Selector, "main"), AssetRole: "hero_feature", MaskSelectors: maskSelectorsFromProject(project)},
+			Capture:      &model.CaptureSpec{Screenshot: true, Video: true, Zoom: true, Callout: true, FocusSelector: primaryAction.Selector, AssetRole: "hero_feature", MaskSelectors: maskSelectorsFromProject(project)},
 			EvidenceRefs: primaryAction.EvidenceRefs,
 			FailurePolicy: &model.NodeFailurePolicy{
 				RetryAttempts: 2,
@@ -477,7 +514,7 @@ func augmentGraphWithIntelligence(graph *model.DemoWorkflowGraph, project *model
 }
 
 func stabilizationGraphNode(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) *model.GraphNode {
-	selector := "main"
+	selector := ""
 	title := "等待页面稳定"
 	caption := "等待页面稳定，给观众一个自然的观察窗口。"
 	evidence := intelligenceEvidenceRefs(intelligence)
@@ -546,7 +583,7 @@ func supportingGraphNode(project *model.ProjectContext, productMap *model.Produc
 	if candidate == nil {
 		return nil
 	}
-	selector := firstNonEmpty(candidate.Selector, "main")
+	selector := candidate.Selector
 	evidence := uniqueEvidenceRefs(append(candidate.EvidenceRefs, intelligenceEvidenceRefs(intelligence)...))
 	node := &model.GraphNode{
 		ID:              "supporting_capability",
@@ -572,7 +609,7 @@ func supportingGraphNode(project *model.ProjectContext, productMap *model.Produc
 			Assertion: "补充能力可见且可录制",
 			Expected:  true,
 			Severity:  "warning",
-			Required:  true,
+			Required:  false,
 		}},
 		Narrative: &model.NarrativeCue{
 			Title:        "展开补充能力",
@@ -676,6 +713,13 @@ func ensureNodeDuration(node *model.GraphNode, minMS int) {
 	if node.ActionSpec != nil && node.ActionSpec.TimeoutMS < minMS {
 		node.ActionSpec.TimeoutMS = minMS
 	}
+}
+
+func severityForAction(action model.GraphActionType) string {
+	if action == model.GraphActionInspect || action == model.GraphActionWait {
+		return "warning"
+	}
+	return "blocking"
 }
 
 func primarySurfaceFromIntelligence(intelligence *model.ProjectIntelligencePack) *model.InteractionSurface {
@@ -889,21 +933,47 @@ type graphPrimaryAction struct {
 
 func primaryPageAction(productMap *model.ProductMap, report *model.MultimodalUnderstandingReport) graphPrimaryAction {
 	if productMap != nil {
+		if action, ok := bestProductMapAction(productMap, false); ok {
+			return action
+		}
+		if action, ok := bestProductMapAction(productMap, true); ok {
+			return action
+		}
+	}
+	if report != nil {
+		if action, ok := bestPageSnapshotAction(report, false); ok {
+			return action
+		}
+		if action, ok := bestPageSnapshotAction(report, true); ok {
+			return action
+		}
+	}
+	return graphPrimaryAction{
+		Label:           "展示核心产品价值",
+		Kind:            "inspect",
+		ExpectedOutcome: "缺少可执行页面动作证据，当前只能观察入口页面",
+	}
+}
+
+func bestProductMapAction(productMap *model.ProductMap, allowObservation bool) (graphPrimaryAction, bool) {
+	if productMap == nil {
+		return graphPrimaryAction{}, false
+	}
+	for _, pass := range []string{"business", "login", "any"} {
 		for _, page := range productMap.Pages {
 			if page == nil {
 				continue
 			}
 			for _, action := range page.PrimaryActions {
+				if !actionAllowedForPass(action.Kind, action.Label, action.Selector, pass, allowObservation) {
+					continue
+				}
 				target := model.ActionTarget{
 					URL:          action.TargetRoute,
 					Selector:     action.Selector,
 					Label:        action.Label,
 					ComponentRef: action.ID,
 					EvidenceRefs: action.EvidenceRefs,
-				}
-				if target.Selector == "" {
-					target.Selector = "main"
-					target.SelectorAlternatives = []model.SelectorCandidate{{Kind: "css", Value: "[role='main']", Confidence: 0.5}}
 				}
 				return graphPrimaryAction{
 					Label:           firstNonEmpty(action.Label, "展示核心产品价值"),
@@ -912,22 +982,28 @@ func primaryPageAction(productMap *model.ProductMap, report *model.MultimodalUnd
 					Target:          target,
 					ExpectedOutcome: "关键动作或页面区域可见",
 					EvidenceRefs:    action.EvidenceRefs,
-				}
+				}, true
 			}
 		}
 	}
-	if report != nil {
+	return graphPrimaryAction{}, false
+}
+
+func bestPageSnapshotAction(report *model.MultimodalUnderstandingReport, allowObservation bool) (graphPrimaryAction, bool) {
+	if report == nil {
+		return graphPrimaryAction{}, false
+	}
+	for _, pass := range []string{"business", "login", "any"} {
 		for _, page := range report.PageSnapshots {
 			for _, action := range page.Actions {
+				if !actionAllowedForPass(action.Kind, action.Label, action.SelectorHint, pass, allowObservation) {
+					continue
+				}
 				target := model.ActionTarget{
 					URL:          action.TargetURL,
 					Selector:     action.SelectorHint,
 					Label:        action.Label,
 					EvidenceRefs: action.EvidenceRefs,
-				}
-				if target.Selector == "" {
-					target.Selector = "main"
-					target.SelectorAlternatives = []model.SelectorCandidate{{Kind: "css", Value: "[role='main']", Confidence: 0.5}}
 				}
 				return graphPrimaryAction{
 					Label:           firstNonEmpty(action.Label, "展示页面关键动作"),
@@ -936,17 +1012,36 @@ func primaryPageAction(productMap *model.ProductMap, report *model.MultimodalUnd
 					Target:          target,
 					ExpectedOutcome: firstNonEmpty(page.VisionSummary, "页面关键动作可见"),
 					EvidenceRefs:    action.EvidenceRefs,
-				}
+				}, true
 			}
 		}
 	}
-	return graphPrimaryAction{
-		Label:           "展示核心产品价值",
-		Kind:            "inspect",
-		Selector:        "main",
-		Target:          model.ActionTarget{Selector: "main", SelectorAlternatives: []model.SelectorCandidate{{Kind: "css", Value: "[role='main']", Confidence: 0.5}}},
-		ExpectedOutcome: "核心产品区域可见",
+	return graphPrimaryAction{}, false
+}
+
+func actionAllowedForPass(kind string, label string, selector string, pass string, allowObservation bool) bool {
+	actionType := graphActionTypeFromKind(kind, selector)
+	if !allowObservation && !isBusinessAction(actionType) {
+		return false
 	}
+	login := looksLikeLoginAction(label, selector)
+	switch pass {
+	case "business":
+		return !login && isBusinessAction(actionType)
+	case "login":
+		return login && isBusinessAction(actionType)
+	default:
+		return allowObservation || isBusinessAction(actionType)
+	}
+}
+
+func looksLikeLoginAction(values ...string) bool {
+	joined := strings.ToLower(strings.Join(values, " "))
+	return strings.Contains(joined, "login") ||
+		strings.Contains(joined, "signin") ||
+		strings.Contains(joined, "sign-in") ||
+		strings.Contains(joined, "password") ||
+		strings.Contains(joined, "username")
 }
 
 func graphActionTypeFromKind(kind string, selector string) model.GraphActionType {

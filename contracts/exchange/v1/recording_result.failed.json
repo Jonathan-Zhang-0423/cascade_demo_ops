@@ -1,0 +1,150 @@
+{
+  "result_id": "result_contract_failed",
+  "source_package_id": "pkg_contract_happy",
+  "cloud_job_id": "job_contract_failed",
+  "schema_version": "demoops.recording_result_package.v1",
+  "status": "failed",
+  "step_results": [
+    {
+      "node_id": "node_open_dashboard",
+      "status": "passed",
+      "duration_ms": 10000
+    },
+    {
+      "node_id": "node_invite_member",
+      "status": "failed",
+      "duration_ms": 8000,
+      "error": {
+        "code": "selector_timeout",
+        "message": "Invite button selector timed out",
+        "retryable": true
+      }
+    }
+  ],
+  "verification_report": {
+    "pass_rate": 0.5,
+    "failed_node_ids": [
+      "node_invite_member"
+    ],
+    "reproducibility_match": true
+  },
+  "failure_diagnostic": {
+    "id": "diag_contract_failed",
+    "schema_version": "demoops.script_failure_diagnostic.v1",
+    "source_package_id": "pkg_contract_happy",
+    "cloud_job_id": "job_contract_failed",
+    "failed_node_id": "node_invite_member",
+    "failed_step_order": 2,
+    "attempt": 1,
+    "error": {
+      "code": "selector_timeout",
+      "message": "Invite button selector timed out",
+      "retryable": true
+    },
+    "current_url": "https://app.example.com/dashboard",
+    "page_title": "Dashboard",
+    "screenshot_refs": [
+      {
+        "id": "artifact_failure_screenshot_contract",
+        "role": "failure_screenshot",
+        "kind": "webpage_screenshot",
+        "uri": "s3://cascade-results/org_contract/result_contract_failed/failure.png.enc",
+        "mime_type": "image/png",
+        "sha256": "sha256:failure_screenshot",
+        "encrypted": true,
+        "sensitive": true,
+        "recipient_key_id": "app_install_contract"
+      }
+    ],
+    "trace_refs": [
+      {
+        "id": "artifact_failure_trace_contract",
+        "role": "failure_trace",
+        "kind": "browser_trace",
+        "uri": "s3://cascade-results/org_contract/result_contract_failed/trace.zip.enc",
+        "mime_type": "application/zip",
+        "sha256": "sha256:failure_trace",
+        "encrypted": true,
+        "sensitive": true,
+        "recipient_key_id": "app_install_contract"
+      }
+    ],
+    "console_events": [
+      {
+        "level": "warning",
+        "message": "Invite button disabled until team data loads",
+        "timestamp": "2026-07-14T00:04:30Z"
+      }
+    ],
+    "network_events": [
+      {
+        "url": "https://app.example.com/api/team",
+        "method": "GET",
+        "status": 200,
+        "resource": "xhr",
+        "redacted": true
+      }
+    ],
+    "dom_snapshot_ref": {
+      "id": "artifact_failure_dom_contract",
+      "role": "failure_dom_snapshot",
+      "kind": "dom_snapshot",
+      "uri": "s3://cascade-results/org_contract/result_contract_failed/dom.json.enc",
+      "mime_type": "application/json",
+      "sha256": "sha256:failure_dom",
+      "encrypted": true,
+      "sensitive": true,
+      "recipient_key_id": "app_install_contract"
+    },
+    "accessibility_snapshot_ref": {
+      "id": "artifact_failure_a11y_contract",
+      "role": "failure_accessibility_snapshot",
+      "kind": "accessibility_snapshot",
+      "uri": "s3://cascade-results/org_contract/result_contract_failed/a11y.json.enc",
+      "mime_type": "application/json",
+      "sha256": "sha256:failure_a11y",
+      "encrypted": true,
+      "sensitive": true,
+      "recipient_key_id": "app_install_contract"
+    },
+    "redaction_report": {
+      "applied": true,
+      "policy_ref": "pkg_contract_happy.redactions",
+      "masked_selectors": [
+        "[data-sensitive]"
+      ],
+      "stripped_headers": [
+        "authorization",
+        "cookie"
+      ],
+      "stripped_storage_keys": [
+        "localStorage",
+        "sessionStorage"
+      ],
+      "full_html_included": false
+    },
+    "repair_hints": [
+      {
+        "kind": "selector_repair",
+        "node_id": "node_invite_member",
+        "summary": "Use a role or test id selector with a longer wait.",
+        "suggested_action": "Prefer getByTestId('invite-member') and wait for team data.",
+        "confidence": 0.82
+      }
+    ],
+    "captured_at": "2026-07-14T00:04:30Z"
+  },
+  "repair_request": {
+    "id": "repair_request_contract",
+    "source_result_id": "result_contract_failed",
+    "source_package_id": "pkg_contract_happy",
+    "cloud_job_id": "job_contract_failed",
+    "failed_bundle_hash_sha256": "sha256:bundle",
+    "failed_plan_hash_sha256": "sha256:plan",
+    "max_repair_attempts": 2,
+    "repair_attempt": 1,
+    "approval_required": true,
+    "requested_at": "2026-07-14T00:04:31Z"
+  },
+  "created_at": "2026-07-14T00:04:31Z"
+}
