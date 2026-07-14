@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -54,7 +55,10 @@ func (a *MultimodalUnderstandingAgent) BuildUnderstanding(
 	}
 	trace, err := a.enhanceReportWithLLM(ctx, project, brief, report)
 	if err != nil && !llm.IsDeterministicFallback(err) {
-		return nil, err
+		if report.SafetyReport != nil {
+			report.SafetyReport.Notes = uniqueStrings(append(report.SafetyReport.Notes, "模型融合理解增强失败，已使用本地确定性理解报告继续。"))
+		}
+		err = nil
 	}
 	if trace != nil {
 		report.EvidenceRefs = append(report.EvidenceRefs, model.EvidenceRef{
@@ -70,29 +74,143 @@ func (a *MultimodalUnderstandingAgent) BuildUnderstanding(
 }
 
 type multimodalLLMOutput struct {
-	Summary  string `json:"summary"`
-	Features []struct {
-		ID            string               `json:"id"`
-		Name          string               `json:"name"`
-		Kind          string               `json:"kind"`
-		UserValue     string               `json:"user_value"`
-		BusinessValue string               `json:"business_value"`
-		Priority      string               `json:"priority"`
-		KeyActions    flexibleStringSlice  `json:"key_actions"`
-		BestUseCases  flexibleDemoUseCases `json:"best_use_cases"`
-		Risks         flexibleStringSlice  `json:"risks"`
-	} `json:"features"`
-	Workflows []struct {
-		ID             string              `json:"id"`
-		Name           string              `json:"name"`
-		UseCase        flexibleDemoUseCase `json:"use_case"`
-		EstimatedSteps int                 `json:"estimated_steps"`
-		ValueScore     float64             `json:"value_score"`
-		Feasibility    float64             `json:"feasibility"`
-		RiskNotes      flexibleStringSlice `json:"risk_notes"`
-	} `json:"workflows"`
-	SafetyNotes flexibleStringSlice `json:"safety_notes"`
-	Confidence  float64             `json:"confidence"`
+	Summary     string                  `json:"summary"`
+	Features    []multimodalLLMFeature  `json:"features"`
+	Workflows   []multimodalLLMWorkflow `json:"workflows"`
+	SafetyNotes flexibleStringSlice     `json:"safety_notes"`
+	Confidence  float64                 `json:"confidence"`
+}
+
+type multimodalLLMFeature struct {
+	ID            string               `json:"id"`
+	Name          string               `json:"name"`
+	Kind          string               `json:"kind"`
+	UserValue     string               `json:"user_value"`
+	BusinessValue string               `json:"business_value"`
+	Priority      string               `json:"priority"`
+	KeyActions    flexibleStringSlice  `json:"key_actions"`
+	BestUseCases  flexibleDemoUseCases `json:"best_use_cases"`
+	Risks         flexibleStringSlice  `json:"risks"`
+}
+
+type multimodalLLMWorkflow struct {
+	ID             string              `json:"id"`
+	Name           string              `json:"name"`
+	UseCase        flexibleDemoUseCase `json:"use_case"`
+	EstimatedSteps int                 `json:"estimated_steps"`
+	ValueScore     float64             `json:"value_score"`
+	Feasibility    float64             `json:"feasibility"`
+	RiskNotes      flexibleStringSlice `json:"risk_notes"`
+}
+
+func (o *multimodalLLMOutput) UnmarshalJSON(data []byte) error {
+	type object multimodalLLMOutput
+	var obj object
+	if err := json.Unmarshal(data, &obj); err == nil {
+		*o = multimodalLLMOutput(obj)
+		return nil
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	for index, item := range items {
+		if o.Summary == "" {
+			o.Summary = firstNonEmpty(stringMapValue(item, "summary"), stringMapValue(item, "description"))
+		}
+		if confidence := floatMapValue(item, "confidence"); confidence > 0 {
+			o.Confidence = confidence
+		}
+		if safety := stringMapValue(item, "safety_note", "safety", "risk"); safety != "" {
+			o.SafetyNotes = append(o.SafetyNotes, safety)
+		}
+		if looksLikeWorkflowItem(item) {
+			o.Workflows = append(o.Workflows, multimodalWorkflowFromMap(item, index))
+			continue
+		}
+		o.Features = append(o.Features, multimodalFeatureFromMap(item, index))
+	}
+	o.SafetyNotes = flexibleStringSlice(uniqueStrings([]string(o.SafetyNotes)))
+	return nil
+}
+
+func stringMapValue(item map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := stringFromLLMValue(item[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func floatMapValue(item map[string]any, keys ...string) float64 {
+	for _, key := range keys {
+		switch typed := item[key].(type) {
+		case float64:
+			return typed
+		case int:
+			return float64(typed)
+		case json.Number:
+			value, _ := typed.Float64()
+			return value
+		}
+	}
+	return 0
+}
+
+func intMapValue(item map[string]any, keys ...string) int {
+	for _, key := range keys {
+		switch typed := item[key].(type) {
+		case float64:
+			return int(typed)
+		case int:
+			return typed
+		case json.Number:
+			value, _ := typed.Int64()
+			return int(value)
+		}
+	}
+	return 0
+}
+
+func looksLikeWorkflowItem(item map[string]any) bool {
+	for _, key := range []string{"estimated_steps", "value_score", "feasibility", "risk_notes", "workflow", "workflow_name"} {
+		if _, ok := item[key]; ok {
+			return true
+		}
+	}
+	if kind := strings.ToLower(stringMapValue(item, "kind", "type")); strings.Contains(kind, "workflow") || strings.Contains(kind, "flow") || strings.Contains(kind, "path") {
+		return true
+	}
+	return false
+}
+
+func multimodalFeatureFromMap(item map[string]any, index int) multimodalLLMFeature {
+	name := firstNonEmpty(stringMapValue(item, "name", "title", "feature", "capability"), fmt.Sprintf("模型识别能力 %d", index+1))
+	return multimodalLLMFeature{
+		ID:            firstNonEmpty(stringMapValue(item, "id"), "feature_llm_"+shortHash(name)),
+		Name:          name,
+		Kind:          firstNonEmpty(stringMapValue(item, "kind", "type"), "supporting"),
+		UserValue:     stringMapValue(item, "user_value", "value", "description", "summary"),
+		BusinessValue: stringMapValue(item, "business_value", "business", "outcome"),
+		Priority:      firstNonEmpty(stringMapValue(item, "priority"), "supporting"),
+		KeyActions:    flexibleStringSlice(splitLLMStringList(stringMapValue(item, "key_actions", "actions"))),
+		BestUseCases:  flexibleDemoUseCases{demoUseCaseFromLLMValue(item["use_case"])},
+		Risks:         flexibleStringSlice(splitLLMStringList(stringMapValue(item, "risks", "risk"))),
+	}
+}
+
+func multimodalWorkflowFromMap(item map[string]any, index int) multimodalLLMWorkflow {
+	name := firstNonEmpty(stringMapValue(item, "name", "title", "workflow", "workflow_name"), fmt.Sprintf("模型建议流程 %d", index+1))
+	return multimodalLLMWorkflow{
+		ID:             firstNonEmpty(stringMapValue(item, "id"), "workflow_llm_"+shortHash(name)),
+		Name:           name,
+		UseCase:        flexibleDemoUseCase(demoUseCaseFromLLMValue(item)),
+		EstimatedSteps: intMapValue(item, "estimated_steps", "steps"),
+		ValueScore:     floatMapValue(item, "value_score", "score"),
+		Feasibility:    floatMapValue(item, "feasibility"),
+		RiskNotes:      flexibleStringSlice(splitLLMStringList(stringMapValue(item, "risk_notes", "risks", "risk"))),
+	}
 }
 
 func (a *MultimodalUnderstandingAgent) enhanceReportWithLLM(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport) (*llm.CallTrace, error) {
