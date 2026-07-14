@@ -15,6 +15,7 @@ func TestRuntimeConfigDefaultsToDevDesktopSQLite(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("SQLITE_PATH", "")
 	t.Setenv("NODE_WORKER_PATH", "")
+	t.Setenv("CASCADE_ARK_MEDIA_MODE", "")
 
 	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
 	if err != nil {
@@ -32,8 +33,8 @@ func TestRuntimeConfigDefaultsToDevDesktopSQLite(t *testing.T) {
 	if cfg.SidecarPaths["video-worker"] != "" {
 		t.Fatalf("unexpected sidecar override %q", cfg.SidecarPaths["video-worker"])
 	}
-	if cfg.LLMMode != LLMModeAuto || cfg.ModelAdapterVersion != ModelAdapterVersion {
-		t.Fatalf("unexpected llm config: mode=%s adapter=%s", cfg.LLMMode, cfg.ModelAdapterVersion)
+	if cfg.LLMMode != LLMModeAuto || cfg.ArkMediaMode != ArkMediaModeDryRun || cfg.ModelAdapterVersion != ModelAdapterVersion {
+		t.Fatalf("unexpected model config: llm_mode=%s ark_media_mode=%s adapter=%s", cfg.LLMMode, cfg.ArkMediaMode, cfg.ModelAdapterVersion)
 	}
 }
 
@@ -51,9 +52,11 @@ func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
 	t.Setenv("KIMI_API_KEY", "kimi-test-key")
 	t.Setenv("MINIMAX_API_KEY", "minimax-test-key")
 	t.Setenv("SEEDANCE_API_KEY", "seedance-test-key")
+	t.Setenv("SEEDREAM_API_KEY", "seedream-test-key")
 	t.Setenv("DOUBAO_API_KEY", "doubao-test-key")
 	t.Setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
 	t.Setenv("DEEPSEEK_MODEL", "deepseek-chat")
+	t.Setenv("CASCADE_ARK_MEDIA_MODE", "real")
 
 	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
 	if err != nil {
@@ -71,11 +74,14 @@ func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
 	if cfg.SidecarPaths["video-worker"] == "" {
 		t.Fatal("expected video-worker sidecar override")
 	}
-	for _, provider := range []ModelProvider{ModelProviderGLM, ModelProviderKimi, ModelProviderMinimax, ModelProviderSeedance, ModelProviderDoubao, ModelProviderDeepSeek} {
+	for _, provider := range []ModelProvider{ModelProviderGLM, ModelProviderKimi, ModelProviderMinimax, ModelProviderSeedance, ModelProviderSeedream, ModelProviderDoubao, ModelProviderDeepSeek} {
 		credential := cfg.ModelProviders[provider]
 		if !credential.Enabled || credential.APIKey == "" || credential.APIKeyEnv == "" {
 			t.Fatalf("expected %s provider credential placeholder to be enabled: %+v", provider, credential)
 		}
+	}
+	if cfg.ArkMediaMode != ArkMediaModeReal {
+		t.Fatalf("ark media mode = %s", cfg.ArkMediaMode)
 	}
 	if cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel != "deepseek-chat" {
 		t.Fatalf("deepseek model = %q", cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel)
@@ -112,6 +118,9 @@ func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
 	if cfg.ModelProviders[ModelProviderSeedance].DefaultModel != "doubao-seedance-2-0-260128" {
 		t.Fatalf("seedance default model = %q", cfg.ModelProviders[ModelProviderSeedance].DefaultModel)
 	}
+	if cfg.ModelProviders[ModelProviderSeedream].DefaultModel != "doubao-seedream-5-0-pro-260628" {
+		t.Fatalf("seedream default model = %q", cfg.ModelProviders[ModelProviderSeedream].DefaultModel)
+	}
 }
 
 func TestRuntimeConfigDefaultsOfficialModelProviderBaseURLs(t *testing.T) {
@@ -125,6 +134,7 @@ func TestRuntimeConfigDefaultsOfficialModelProviderBaseURLs(t *testing.T) {
 		ModelProviderKimi:     "https://api.moonshot.cn/v1",
 		ModelProviderMinimax:  "https://api.minimaxi.com/v1",
 		ModelProviderSeedance: "https://ark.cn-beijing.volces.com/api/v3",
+		ModelProviderSeedream: "https://ark.cn-beijing.volces.com/api/v3",
 		ModelProviderDoubao:   "https://ark.cn-beijing.volces.com/api/v3",
 		ModelProviderDeepSeek: "https://api.deepseek.com",
 	}
@@ -162,6 +172,7 @@ func TestRuntimeConfigAlwaysReservesDomesticProviderSlots(t *testing.T) {
 		ModelProviderKimi:     "KIMI_API_KEY",
 		ModelProviderMinimax:  "MINIMAX_API_KEY",
 		ModelProviderSeedance: "SEEDANCE_API_KEY",
+		ModelProviderSeedream: "SEEDREAM_API_KEY",
 		ModelProviderDoubao:   "DOUBAO_API_KEY",
 		ModelProviderDeepSeek: "DEEPSEEK_API_KEY",
 	}
@@ -211,6 +222,31 @@ func TestRuntimeConfigSeedanceCanUseDoubaoOrArkKeyFallback(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigSeedreamCanUseDoubaoOrArkKeyFallback(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("SEEDREAM_API_KEY", "")
+	t.Setenv("DOUBAO_API_KEY", "doubao-key")
+	t.Setenv("ARK_API_KEY", "ark-key")
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedream := cfg.ModelProviders[ModelProviderSeedream]
+	if !seedream.Enabled || seedream.APIKey != "doubao-key" || seedream.APIKeySourceEnv != "DOUBAO_API_KEY" {
+		t.Fatalf("seedream should use doubao fallback key: %+v", seedream)
+	}
+
+	t.Setenv("DOUBAO_API_KEY", "")
+	cfg, err = RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ModelProviders[ModelProviderSeedream].APIKeySourceEnv; got != "ARK_API_KEY" {
+		t.Fatalf("seedream fallback source = %q, want ARK_API_KEY", got)
+	}
+}
+
 func TestRuntimeConfigKimiCanUseMoonshotKeyFallback(t *testing.T) {
 	clearModelProviderEnv(t)
 	t.Setenv("KIMI_API_KEY", "")
@@ -236,6 +272,15 @@ func TestRuntimeConfigLLMModeOverride(t *testing.T) {
 	}
 	if cfg.LLMMode != LLMModeReal {
 		t.Fatalf("llm mode = %s", cfg.LLMMode)
+	}
+}
+
+func TestRuntimeConfigRejectsUnsupportedArkMediaMode(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("CASCADE_ARK_MEDIA_MODE", "surprise")
+
+	if _, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo")); err == nil {
+		t.Fatal("expected unsupported CASCADE_ARK_MEDIA_MODE error")
 	}
 }
 
@@ -362,6 +407,9 @@ func clearModelProviderEnv(t *testing.T) {
 		"SEEDANCE_API_KEY",
 		"SEEDANCE_BASE_URL",
 		"SEEDANCE_MODEL",
+		"SEEDREAM_API_KEY",
+		"SEEDREAM_BASE_URL",
+		"SEEDREAM_MODEL",
 		"DOUBAO_API_KEY",
 		"DOUBAO_BASE_URL",
 		"DOUBAO_MODEL",
@@ -378,6 +426,7 @@ func clearModelProviderEnv(t *testing.T) {
 		"CASCADE_VIDEO_PROVIDER",
 		"CASCADE_VIDEO_MODEL",
 		"CASCADE_LLM_MODE",
+		"CASCADE_ARK_MEDIA_MODE",
 	} {
 		t.Setenv(name, "")
 	}

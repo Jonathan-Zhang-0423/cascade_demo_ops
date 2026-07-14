@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -19,7 +21,7 @@ const (
 	seedreamImagesEndpoint = "/images/generations"
 )
 
-func enrichRenderResultForDirector(source *model.ClientExecutionPackage, recording *model.RecordingResultPackage, renderResult *RenderResult, outputDir string, createdAt time.Time) error {
+func enrichRenderResultForDirector(ctx context.Context, source *model.ClientExecutionPackage, recording *model.RecordingResultPackage, renderResult *RenderResult, outputDir string, createdAt time.Time) error {
 	if source == nil {
 		return errors.New("source package is required for director input")
 	}
@@ -58,6 +60,28 @@ func enrichRenderResultForDirector(source *model.ClientExecutionPackage, recordi
 	}
 	renderResult.ArkMediaDryRunPlan = &arkPlan
 	renderResult.ArkMediaDryRunPlanPath = arkPlanPath
+
+	arkPlanRef := fileMaterialRef(artifactID(source.PackageID, "ark_media_dry_run_plan", 1), "ark_media_dry_run_plan", arkPlanPath, "application/json")
+	publicationPlan := NewArkAssetPublicationPlan(source, arkPlanRef, arkPlan, createdAt)
+	publicationPlanPath := filepath.Join(outputDir, "ark_asset_publication_plan.json")
+	if err := writeIndentedJSONFile(publicationPlanPath, publicationPlan); err != nil {
+		return err
+	}
+	renderResult.ArkAssetPublicationPlan = &publicationPlan
+	renderResult.ArkAssetPublicationPlanPath = publicationPlanPath
+
+	publicationPlanRef := fileMaterialRef(artifactID(source.PackageID, "ark_asset_publication_plan", 1), "ark_asset_publication_plan", publicationPlanPath, "application/json")
+	publisher := media.NewDryRunAssetPublisher(func() time.Time { return createdAt })
+	publicationResult, err := publisher.PublishArkAssets(ctx, publicationPlan, publicationPlanRef)
+	if err != nil {
+		return err
+	}
+	publicationResultPath := filepath.Join(outputDir, "ark_asset_publication_result.json")
+	if err := writeIndentedJSONFile(publicationResultPath, publicationResult); err != nil {
+		return err
+	}
+	renderResult.ArkAssetPublicationResult = &publicationResult
+	renderResult.ArkAssetPublicationResultPath = publicationResultPath
 	return nil
 }
 
@@ -106,6 +130,8 @@ func NewArkMediaDryRunPlan(source *model.ClientExecutionPackage, directorRef mod
 	videoModel := envOrDefaultTrimmed("SEEDANCE_MODEL", defaultSeedanceModel)
 	imageBaseURL := envOrDefaultTrimmed("SEEDREAM_BASE_URL", envOrDefaultTrimmed("DOUBAO_BASE_URL", defaultArkBaseURL))
 	imageModel := envOrDefaultTrimmed("SEEDREAM_MODEL", defaultSeedreamModel)
+	seedanceRefs := seedanceInputRefs(input.Materials)
+	seedreamRefs := screenshotInputRefs(input.Materials)
 
 	tasks := []model.ArkMediaTaskSpec{
 		{
@@ -125,7 +151,7 @@ func NewArkMediaDryRunPlan(source *model.ClientExecutionPackage, directorRef mod
 				"return_last_frame": true,
 				"watermark":         false,
 			},
-			InputRefs: seedanceInputRefs(input.Materials),
+			InputRefs: seedanceRefs,
 			OutputPolicy: model.ArkMediaOutputPolicy{
 				DownloadImmediately: true,
 				ExpectedFormats:     []string{"mp4", "png"},
@@ -148,7 +174,7 @@ func NewArkMediaDryRunPlan(source *model.ClientExecutionPackage, directorRef mod
 				"output_format":   "png",
 				"watermark":       false,
 			},
-			InputRefs: screenshotInputRefs(input.Materials),
+			InputRefs: seedreamRefs,
 			OutputPolicy: model.ArkMediaOutputPolicy{
 				DownloadImmediately: true,
 				ExpectedFormats:     []string{"png", "jpeg"},
@@ -157,22 +183,28 @@ func NewArkMediaDryRunPlan(source *model.ClientExecutionPackage, directorRef mod
 			},
 		},
 	}
+	constraints := arkMediaConstraints(videoModel, imageModel)
+	requirements := arkMediaSourceRequirements(seedanceRefs, seedreamRefs)
 
 	return model.ArkMediaDryRunPlan{
-		SchemaVersion:    model.ArkMediaDryRunPlanSchemaVersion,
-		PlanID:           "ark_media_dry_run_" + safeID(source.PackageID),
-		CreatedAt:        createdAt,
-		Mode:             "dry_run",
-		Reason:           "Real Ark media calls are disabled until DirectorInput, public asset upload/download, cost controls, and source-only policy checks are explicitly enabled.",
-		SourcePackageID:  source.PackageID,
-		DirectorInputRef: directorRef,
-		VideoProvider:    "seedance",
-		VideoBaseURL:     videoBaseURL,
-		VideoModel:       videoModel,
-		ImageProvider:    "seedream",
-		ImageBaseURL:     imageBaseURL,
-		ImageModel:       imageModel,
-		RecommendedTasks: tasks,
+		SchemaVersion:           model.ArkMediaDryRunPlanSchemaVersion,
+		PlanID:                  "ark_media_dry_run_" + safeID(source.PackageID),
+		CreatedAt:               createdAt,
+		Mode:                    "dry_run",
+		Reason:                  "Real Ark media calls are disabled until DirectorInput, public asset upload/download, cost controls, and source-only policy checks are explicitly enabled.",
+		SourcePackageID:         source.PackageID,
+		DirectorInputRef:        directorRef,
+		VideoProvider:           "seedance",
+		VideoBaseURL:            videoBaseURL,
+		VideoModel:              videoModel,
+		ImageProvider:           "seedream",
+		ImageBaseURL:            imageBaseURL,
+		ImageModel:              imageModel,
+		RecommendedTasks:        tasks,
+		ProviderConstraints:     constraints,
+		SourceAssetRequirements: requirements,
+		OutputHandling:          arkMediaOutputHandling(),
+		RealCallReadiness:       arkMediaRealCallReadiness(source, requirements),
 		RequiredBeforeRealCall: []string{
 			"publish selected source_reference_video or screenshots as time-limited URLs accessible by Ark, or encode small references as Base64 within provider limits",
 			"trim Seedance reference videos to 2-15 seconds each and no more than 15 seconds total",
@@ -180,6 +212,338 @@ func NewArkMediaDryRunPlan(source *model.ClientExecutionPackage, directorRef mod
 			"validate generated media is non-authoritative and cannot replace captured product UI evidence",
 			"record provider request/response metadata without persisting raw API keys",
 		},
+	}
+}
+
+func NewArkAssetPublicationPlan(source *model.ClientExecutionPackage, arkPlanRef model.DirectorMaterialRef, arkPlan model.ArkMediaDryRunPlan, createdAt time.Time) model.ArkAssetPublicationPlan {
+	items := arkAssetPublicationItems(arkPlan.SourceAssetRequirements)
+	blockers := []model.ArkMediaReadinessFinding{}
+	warnings := []model.ArkMediaReadinessFinding{}
+	for _, item := range items {
+		if item.Status == "ready" {
+			continue
+		}
+		finding := model.ArkMediaReadinessFinding{
+			Code:    item.Status,
+			Message: firstNonEmptyString(item.ActionRequired, "source asset is not ready for Ark media publication"),
+			RefID:   item.Ref.ID,
+			TaskID:  strings.Join(item.TaskIDs, ","),
+		}
+		if item.Required && item.Status != "ready_after_publication" {
+			blockers = append(blockers, finding)
+			continue
+		}
+		warnings = append(warnings, finding)
+	}
+	status := "ready"
+	if len(blockers) > 0 {
+		status = "blocked"
+	} else {
+		for _, item := range items {
+			if item.NeedsPublication {
+				status = "needs_publication"
+				break
+			}
+		}
+	}
+	sourcePackageID := arkPlan.SourcePackageID
+	if source != nil && source.PackageID != "" {
+		sourcePackageID = source.PackageID
+	}
+	return model.ArkAssetPublicationPlan{
+		SchemaVersion:       model.ArkAssetPublicationPlanSchemaVersion,
+		PlanID:              "ark_asset_publication_" + safeID(sourcePackageID),
+		CreatedAt:           createdAt,
+		Mode:                "dry_run",
+		SourcePackageID:     sourcePackageID,
+		ArkMediaDryRunRef:   arkPlanRef,
+		Status:              status,
+		PublicationStrategy: "publish selected local captured assets as short-lived HTTPS URLs or provider asset references before CASCADE_ARK_MEDIA_MODE=real",
+		URLTTLHours:         24,
+		Items:               items,
+		Blockers:            blockers,
+		Warnings:            warnings,
+		Notes: []string{
+			"Dry-run plan only; no bytes are uploaded and no provider calls are made.",
+			"Published assets must remain captured source material; generated media cannot replace product UI evidence.",
+		},
+	}
+}
+
+func arkAssetPublicationItems(requirements []model.ArkMediaSourceAssetRequirement) []model.ArkAssetPublicationItem {
+	byKey := map[string]int{}
+	items := []model.ArkAssetPublicationItem{}
+	for _, requirement := range requirements {
+		key := requirement.Ref.ID
+		if key == "" {
+			key = requirement.Ref.URI
+		}
+		if key == "" {
+			key = requirement.TaskID + ":" + requirement.Usage
+		}
+		if index, ok := byKey[key]; ok {
+			items[index].TaskIDs = compactStrings(append(items[index].TaskIDs, requirement.TaskID))
+			items[index].Required = items[index].Required || requirement.Required
+			items[index].AcceptedMimeTypes = mergeStrings(items[index].AcceptedMimeTypes, requirement.AcceptedMimeTypes)
+			if items[index].Usage != requirement.Usage {
+				items[index].Usage = compactStrings([]string{items[index].Usage, requirement.Usage})[0]
+			}
+			continue
+		}
+		item := arkAssetPublicationItem(requirement)
+		byKey[key] = len(items)
+		items = append(items, item)
+	}
+	return items
+}
+
+func arkAssetPublicationItem(requirement model.ArkMediaSourceAssetRequirement) model.ArkAssetPublicationItem {
+	public := isPublicHTTPSURL(requirement.Ref.URI)
+	mimeOK := mimeTypeAllowed(requirement.Ref.MimeType, requirement.AcceptedMimeTypes)
+	status := "ready"
+	action := ""
+	needsPublication := false
+	needsConversion := false
+	switch {
+	case requirement.Ref.ID == "" && requirement.Ref.URI == "":
+		status = "missing"
+		action = "produce this captured source asset before enabling real Ark media calls"
+	case !mimeOK:
+		status = "needs_conversion"
+		needsConversion = true
+		action = "convert this source asset to one of the accepted formats before publication"
+	case !public:
+		status = "ready_after_publication"
+		needsPublication = true
+		action = "publish this captured source asset as a short-lived HTTPS URL or provider asset reference"
+	}
+	return model.ArkAssetPublicationItem{
+		Ref:                 requirement.Ref,
+		TaskIDs:             compactStrings([]string{requirement.TaskID}),
+		Usage:               requirement.Usage,
+		Required:            requirement.Required,
+		AcceptedMimeTypes:   append([]string{}, requirement.AcceptedMimeTypes...),
+		CurrentURIIsPublic:  public,
+		NeedsPublication:    needsPublication,
+		NeedsConversion:     needsConversion,
+		RecommendedFileName: arkAssetPublicationFileName(requirement.Ref),
+		ExpectedPublicURI:   arkAssetExpectedPublicURI(requirement.Ref),
+		Status:              status,
+		ActionRequired:      action,
+	}
+}
+
+func arkAssetPublicationFileName(ref model.DirectorMaterialRef) string {
+	base := safeID(firstNonEmptyString(ref.ID, ref.Kind, "asset"))
+	ext := extensionForMimeType(ref.MimeType)
+	if ext == "" {
+		ext = strings.ToLower(filepath.Ext(ref.URI))
+	}
+	if ext == "" {
+		return base
+	}
+	return base + ext
+}
+
+func arkAssetExpectedPublicURI(ref model.DirectorMaterialRef) string {
+	if isPublicHTTPSURL(ref.URI) {
+		return ref.URI
+	}
+	return "https://<asset-host>/ark-inputs/" + arkAssetPublicationFileName(ref)
+}
+
+func extensionForMimeType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "application/json":
+		return ".json"
+	default:
+		return ""
+	}
+}
+
+func arkMediaConstraints(videoModel string, imageModel string) model.ArkMediaConstraints {
+	return model.ArkMediaConstraints{
+		Seedance: model.ArkMediaVideoConstraints{
+			Model:                      videoModel,
+			MinDurationSec:             4,
+			MaxDurationSec:             15,
+			MaxReferenceVideoTotalSec:  15,
+			MaxReferenceInputCount:     4,
+			AcceptedVideoMimeTypes:     []string{"video/mp4", "video/quicktime"},
+			AcceptedImageMimeTypes:     []string{"image/png", "image/jpeg"},
+			RequiresPublicHTTPAssets:   true,
+			AllowsAudioGeneration:      false,
+			NonAuthoritativeOutputOnly: true,
+		},
+		Seedream: model.ArkMediaImageConstraints{
+			Model:                      imageModel,
+			AcceptedOutputFormats:      []string{"png", "jpeg"},
+			RequiresPublicHTTPAssets:   true,
+			NonProductVisualsOnly:      true,
+			NonAuthoritativeOutputOnly: true,
+		},
+	}
+}
+
+func arkMediaSourceRequirements(seedanceRefs []model.DirectorMaterialRef, seedreamRefs []model.DirectorMaterialRef) []model.ArkMediaSourceAssetRequirement {
+	requirements := []model.ArkMediaSourceAssetRequirement{}
+	hasSeedanceVideo := false
+	for _, ref := range seedanceRefs {
+		required := strings.HasPrefix(ref.MimeType, "video/")
+		if required {
+			hasSeedanceVideo = true
+		}
+		requirements = append(requirements, arkMediaSourceRequirement("seedance_reference_director_preview", "reference_video_or_image", ref, required))
+	}
+	if !hasSeedanceVideo {
+		requirements = append(requirements, model.ArkMediaSourceAssetRequirement{
+			Ref:               model.DirectorMaterialRef{Kind: "source_reference_video", MimeType: "video/mp4"},
+			TaskID:            "seedance_reference_director_preview",
+			Usage:             "required_reference_video",
+			Required:          true,
+			AcceptedMimeTypes: []string{"video/mp4", "video/quicktime"},
+			RequiresPublicURI: true,
+			Status:            "missing",
+			ActionRequired:    "produce source_reference.mp4 from the captured recording before enabling real Seedance calls",
+		})
+	}
+	for _, ref := range seedreamRefs {
+		requirements = append(requirements, arkMediaSourceRequirement("seedream_non_product_visuals", "optional_style_reference_image", ref, false))
+	}
+	return requirements
+}
+
+func arkMediaSourceRequirement(taskID string, usage string, ref model.DirectorMaterialRef, required bool) model.ArkMediaSourceAssetRequirement {
+	accepted := acceptedArkMediaMimeTypes(ref)
+	public := isPublicHTTPSURL(ref.URI)
+	status := "ready"
+	action := ""
+	switch {
+	case ref.ID == "" && ref.URI == "":
+		status = "missing"
+		action = "provide a captured source asset before enabling this model task"
+	case !mimeTypeAllowed(ref.MimeType, accepted):
+		status = "unsupported_mime_type"
+		action = "convert or replace the source asset with an accepted format"
+	case !public:
+		status = "needs_public_uri"
+		action = "publish this asset as a time-limited HTTPS URL or provider asset reference before real Ark calls"
+	}
+	return model.ArkMediaSourceAssetRequirement{
+		Ref:                ref,
+		TaskID:             taskID,
+		Usage:              usage,
+		Required:           required,
+		AcceptedMimeTypes:  accepted,
+		RequiresPublicURI:  true,
+		CurrentURIIsPublic: public,
+		Status:             status,
+		ActionRequired:     action,
+	}
+}
+
+func acceptedArkMediaMimeTypes(ref model.DirectorMaterialRef) []string {
+	switch {
+	case strings.HasPrefix(ref.MimeType, "video/"):
+		return []string{"video/mp4", "video/quicktime"}
+	case strings.HasPrefix(ref.MimeType, "image/"):
+		return []string{"image/png", "image/jpeg"}
+	default:
+		return []string{"video/mp4", "video/quicktime", "image/png", "image/jpeg"}
+	}
+}
+
+func mimeTypeAllowed(value string, allowed []string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	for _, candidate := range allowed {
+		if value == strings.ToLower(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func arkMediaOutputHandling() model.ArkMediaOutputHandling {
+	return model.ArkMediaOutputHandling{
+		DownloadWithinHours:            24,
+		StoreAsArtifact:                true,
+		RecordRedactedProviderMetadata: true,
+		NonAuthoritativeOutputOnly:     true,
+		MustNotReplaceCapturedUI:       true,
+		ExpectedOutputs: []model.ArkMediaExpectedOutput{
+			{
+				TaskID:        "seedance_reference_director_preview",
+				Kind:          "generated_video_candidate",
+				Role:          "director_preview_candidate",
+				MimeTypes:     []string{"video/mp4"},
+				IncludeInDemo: false,
+			},
+			{
+				TaskID:        "seedance_reference_director_preview",
+				Kind:          "generated_image_candidate",
+				Role:          "last_frame_candidate",
+				MimeTypes:     []string{"image/png", "image/jpeg"},
+				IncludeInDemo: false,
+			},
+			{
+				TaskID:        "seedream_non_product_visuals",
+				Kind:          "generated_image_candidate",
+				Role:          "non_product_visual_candidate",
+				MimeTypes:     []string{"image/png", "image/jpeg"},
+				IncludeInDemo: false,
+			},
+		},
+	}
+}
+
+func arkMediaRealCallReadiness(source *model.ClientExecutionPackage, requirements []model.ArkMediaSourceAssetRequirement) model.ArkMediaRealCallReadiness {
+	blockers := []model.ArkMediaReadinessFinding{}
+	warnings := []model.ArkMediaReadinessFinding{}
+	for _, requirement := range requirements {
+		if requirement.Status == "ready" {
+			continue
+		}
+		finding := model.ArkMediaReadinessFinding{
+			Code:    requirement.Status,
+			Message: firstNonEmptyString(requirement.ActionRequired, "source asset is not ready for real Ark calls"),
+			RefID:   requirement.Ref.ID,
+			TaskID:  requirement.TaskID,
+		}
+		if requirement.Required {
+			blockers = append(blockers, finding)
+			continue
+		}
+		warnings = append(warnings, finding)
+	}
+	if source != nil && source.WorkflowGraph != nil && source.WorkflowGraph.Assets != nil && source.WorkflowGraph.Assets.TargetDurationSec > 15 {
+		warnings = append(warnings, model.ArkMediaReadinessFinding{
+			Code:    "seedance_duration_limit",
+			Message: "Seedance 2.0 supports short 4-15 second generations; longer demos must remain composed from captured footage plus optional short candidates.",
+			TaskID:  "seedance_reference_director_preview",
+		})
+	}
+	status := "ready_when_enabled"
+	if len(blockers) > 0 {
+		status = "blocked"
+	}
+	return model.ArkMediaRealCallReadiness{
+		Status:             status,
+		CanCallNow:         false,
+		CanCallWhenEnabled: len(blockers) == 0,
+		ModeGate:           "CASCADE_ARK_MEDIA_MODE must be set to real before any provider request is sent",
+		Blockers:           blockers,
+		Warnings:           warnings,
 	}
 }
 
@@ -382,8 +746,8 @@ func directorOpenQuestions(source *model.ClientExecutionPackage, renderResult Re
 	if renderResult.SourceReferenceVideoPath == "" {
 		questions = append(questions, "source_reference.mp4 was not produced; Seedance video reference requires mp4/mov input.")
 	}
-	if materials.SourceReferenceVideo != nil && !isPublicHTTPURL(materials.SourceReferenceVideo.URI) {
-		questions = append(questions, "source_reference_video is local; real Ark calls require a public URL, provider asset ID, or Base64 within request limits.")
+	if materials.SourceReferenceVideo != nil && !isPublicHTTPSURL(materials.SourceReferenceVideo.URI) {
+		questions = append(questions, "source_reference_video is local; real Ark calls require a public HTTPS URL, provider asset ID, or Base64 within request limits.")
 	}
 	if source.WorkflowGraph != nil && source.WorkflowGraph.Assets != nil && source.WorkflowGraph.Assets.TargetDurationSec > 15 {
 		questions = append(questions, "Seedance 2.0 single generation is 4-15 seconds; longer demos must be composed from captured footage and optional short generated segments.")
@@ -502,9 +866,13 @@ func compactStrings(values []string) []string {
 	return out
 }
 
-func isPublicHTTPURL(value string) bool {
+func isPublicHTTPSURL(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
-	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
+	return strings.HasPrefix(value, "https://")
+}
+
+func mergeStrings(left []string, right []string) []string {
+	return compactStrings(append(append([]string{}, left...), right...))
 }
 
 func joinEndpoint(baseURL string, endpoint string) string {

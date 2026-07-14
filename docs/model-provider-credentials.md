@@ -60,6 +60,6 @@ POST /v1/desktop/model-diagnostics
 | 计划/执行方案生成 | Kimi | `kimi-k2.7-code` | `CASCADE_PLANNING_PROVIDER`, `CASCADE_PLANNING_MODEL` |
 | 代码阅读/结构摘要 | GLM | `glm-5.2` | `CASCADE_CODE_READING_PROVIDER`, `CASCADE_CODE_READING_MODEL` |
 | 多模态需求/页面理解 | Minimax | `minimax-m3` | `CASCADE_MULTIMODAL_PROVIDER`, `CASCADE_MULTIMODAL_MODEL` |
-| 视频操作/视频生成能力 | Seedance | `seedance-2.0` | `CASCADE_VIDEO_PROVIDER`, `CASCADE_VIDEO_MODEL` |
+| 视频操作/视频生成能力 | Seedance | `doubao-seedance-2-0-260128` | `CASCADE_VIDEO_PROVIDER`, `CASCADE_VIDEO_MODEL` |
 
 DeepSeek 的 key 位已预留，当前不作为默认任务路由；后续可用于推理增强、备用规划或成本路由。

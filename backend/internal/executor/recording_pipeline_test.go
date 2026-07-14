@@ -105,6 +105,14 @@ func TestRunClientExecutionRecordingAndRenderCallsExecutorInProtocolOrder(t *tes
 	if arkPlanArtifact == nil || arkPlanArtifact.Metadata["asset_role"] != "media_generation_plan" || arkPlanArtifact.Metadata["include_in_demo"] != false {
 		t.Fatalf("unexpected Ark media dry-run artifact metadata: %+v", arkPlanArtifact)
 	}
+	arkPublicationPlanArtifact := findPipelineArtifact(result.RecordingResultPackage.GeneratedAssets, "ark_asset_publication_plan")
+	if arkPublicationPlanArtifact == nil || arkPublicationPlanArtifact.Metadata["asset_role"] != "media_asset_publication_plan" || arkPublicationPlanArtifact.Metadata["include_in_demo"] != false {
+		t.Fatalf("unexpected Ark asset publication artifact metadata: %+v", arkPublicationPlanArtifact)
+	}
+	arkPublicationResultArtifact := findPipelineArtifact(result.RecordingResultPackage.GeneratedAssets, "ark_asset_publication_result")
+	if arkPublicationResultArtifact == nil || arkPublicationResultArtifact.Metadata["asset_role"] != "media_asset_publication_result" || arkPublicationResultArtifact.Metadata["include_in_demo"] != false {
+		t.Fatalf("unexpected Ark asset publication result artifact metadata: %+v", arkPublicationResultArtifact)
+	}
 	finalVideoDescriptor := findPackageDescriptor(result.RecordingResultPackage.Delivery.AssetRefs, "artifact_pkg_1_demo_video_001")
 	if finalVideoDescriptor == nil || finalVideoDescriptor.Role != model.ArtifactRoleFinalDemoVideo || finalVideoDescriptor.Kind != model.ArtifactKindVideo || !finalVideoDescriptor.Encrypted || !finalVideoDescriptor.Sensitive {
 		t.Fatalf("expected encrypted final demo video delivery descriptor, got %+v", finalVideoDescriptor)
@@ -134,10 +142,26 @@ func TestRunClientExecutionRecordingAndRenderCallsExecutorInProtocolOrder(t *tes
 	if result.RenderResult.ArkMediaDryRunPlan == nil || result.RenderResult.ArkMediaDryRunPlan.VideoModel != "doubao-seedance-2-0-260128" {
 		t.Fatalf("Ark media dry-run plan did not use Seedance 2.0 model: %+v", result.RenderResult.ArkMediaDryRunPlan)
 	}
+	if result.RenderResult.ArkAssetPublicationPlan == nil || result.RenderResult.ArkAssetPublicationPlan.Status != "needs_publication" {
+		t.Fatalf("Ark asset publication plan was not generated: %+v", result.RenderResult.ArkAssetPublicationPlan)
+	}
+	if result.RenderResult.ArkAssetPublicationResult == nil || result.RenderResult.ArkAssetPublicationResult.CanUseForRealCall || !result.RenderResult.ArkAssetPublicationResult.ContainsDryRunRefs {
+		t.Fatalf("Ark asset publication dry-run result should not be real-call ready: %+v", result.RenderResult.ArkAssetPublicationResult)
+	}
 	var persistedDirector model.DirectorInput
 	readJSONFile(t, result.RenderResult.DirectorInputPath, &persistedDirector)
 	if persistedDirector.SchemaVersion != model.DirectorInputSchemaVersion || persistedDirector.SourcePackageID != pkg.PackageID {
 		t.Fatalf("unexpected persisted director input: %+v", persistedDirector)
+	}
+	var persistedPublication model.ArkAssetPublicationPlan
+	readJSONFile(t, result.RenderResult.ArkAssetPublicationPlanPath, &persistedPublication)
+	if persistedPublication.SchemaVersion != model.ArkAssetPublicationPlanSchemaVersion || persistedPublication.SourcePackageID != pkg.PackageID {
+		t.Fatalf("unexpected persisted Ark asset publication plan: %+v", persistedPublication)
+	}
+	var persistedPublicationResult model.ArkAssetPublicationResult
+	readJSONFile(t, result.RenderResult.ArkAssetPublicationResultPath, &persistedPublicationResult)
+	if persistedPublicationResult.SchemaVersion != model.ArkAssetPublicationResultSchemaVersion || persistedPublicationResult.SourcePackageID != pkg.PackageID || persistedPublicationResult.CanUseForRealCall {
+		t.Fatalf("unexpected persisted Ark asset publication result: %+v", persistedPublicationResult)
 	}
 }
 

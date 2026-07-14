@@ -108,6 +108,7 @@ func (s *Service) GetExecutionPackageDebug(ctx context.Context, orgID string, ex
 			NodeReady:        nodeReady,
 			FFmpegReady:      ffmpegReady,
 			LLMMode:          string(s.runtime.LLMMode),
+			ArkMediaMode:     string(s.runtime.ArkMediaMode),
 		},
 		Package:   debugPackageSummary(pkg),
 		Readiness: debugExecutionReadiness(status, pkg, workerReady, nodeReady),
@@ -221,6 +222,7 @@ type ExecutionDebugRuntime struct {
 	NodeReady        bool   `json:"node_ready"`
 	FFmpegReady      bool   `json:"ffmpeg_ready"`
 	LLMMode          string `json:"llm_mode,omitempty"`
+	ArkMediaMode     string `json:"ark_media_mode,omitempty"`
 }
 
 type ExecutionDebugPackageSummary struct {
