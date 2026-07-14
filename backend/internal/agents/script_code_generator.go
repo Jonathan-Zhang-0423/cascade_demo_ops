@@ -100,12 +100,19 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 	selector := scriptStepSelector(step)
 	targetURL := firstNonEmpty(step.Action.Target.URL, step.PageTarget.URL)
 	maskSelectors := uniqueStrings(append(append([]string{}, doc.SafetyPolicy.Redactions.MaskSelectors...), step.Capture.MaskSelectors...))
+	actionType := step.Action.Type
+	if businessActionNeedsExecutableSelector(actionType) && !selectorUsableForBusinessAction(selector) {
+		actionType = model.GraphActionInspect
+	}
 
 	builder.WriteString("\n")
 	builder.WriteString("  await ctx.log.step(" + jsString(step.NodeID) + ", " + jsString(title) + ");\n")
 	builder.WriteString("  await ctx.capture.mark(" + jsString(step.NodeID) + ", { order: " + fmt.Sprint(step.Order) + ", action: " + jsString(string(step.Action.Type)) + " });\n")
+	if naturalPause := preActionPauseMS(actionType, durationMS); naturalPause > 0 {
+		builder.WriteString("  await ctx.page.waitForTimeout(" + fmt.Sprint(naturalPause) + ");\n")
+	}
 
-	switch step.Action.Type {
+	switch actionType {
 	case model.GraphActionNavigate:
 		urlValue := firstNonEmpty(targetURL, doc.RecordingRunSpec.BaseURL)
 		if urlValue == "" {
@@ -121,6 +128,7 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 			break
 		}
 		builder.WriteString("  await ctx.page.click(" + jsString(selector) + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		builder.WriteString("  await ctx.page.waitForLoadState(\"networkidle\", { timeout: " + fmt.Sprint(minInt(timeoutMS, 6000)) + " }).catch(() => ctx.log.info(\"page did not reach networkidle after click; continuing with capture\", { nodeId: " + jsString(step.NodeID) + " }));\n")
 	case model.GraphActionFill:
 		if selector == "" {
 			builder.WriteString("  await ctx.log.info(\"fill step has no selector; recorded as manual inspection\", { nodeId: " + jsString(step.NodeID) + " });\n")
@@ -131,6 +139,7 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 			return err
 		}
 		builder.WriteString("  await ctx.page.fill(" + jsString(selector) + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		builder.WriteString("  await ctx.page.waitForTimeout(800);\n")
 	case model.GraphActionSelect:
 		if selector == "" {
 			builder.WriteString("  await ctx.log.info(\"select step has no selector; recorded as manual inspection\", { nodeId: " + jsString(step.NodeID) + " });\n")
@@ -141,6 +150,7 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 			return err
 		}
 		builder.WriteString("  await ctx.page.selectOption(" + jsString(selector) + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		builder.WriteString("  await ctx.page.waitForTimeout(800);\n")
 	case model.GraphActionUpload:
 		if selector == "" {
 			builder.WriteString("  await ctx.log.info(\"upload step has no selector; recorded as manual inspection\", { nodeId: " + jsString(step.NodeID) + " });\n")
@@ -152,6 +162,7 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 			break
 		}
 		builder.WriteString("  await ctx.page.setInputFiles(" + jsString(selector) + ", await ctx.secrets.getFile(" + jsString(fileRef) + "));\n")
+		builder.WriteString("  await ctx.page.waitForTimeout(1000);\n")
 	case model.GraphActionWait:
 		if selector != "" {
 			builder.WriteString("  await ctx.page.locator(" + jsString(selector) + ").waitFor({ timeout: " + fmt.Sprint(timeoutMS) + " });\n")
@@ -172,7 +183,7 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		return fmt.Errorf("unsupported graph action type %q", step.Action.Type)
 	}
 
-	writeStepAssertions(builder, step, selector, targetURL, timeoutMS)
+	writeStepAssertions(builder, step, actionType, selector, targetURL, timeoutMS)
 	if step.Capture.Screenshot {
 		builder.WriteString("  await ctx.capture.screenshot(" + jsJSON(captureScreenshotOptions(step, selector, maskSelectors)) + ");\n")
 	}
@@ -203,20 +214,28 @@ func captureScreenshotOptions(step model.ScriptStep, selector string, maskSelect
 	return options
 }
 
-func writeStepAssertions(builder *strings.Builder, step model.ScriptStep, selector string, targetURL string, timeoutMS int) {
-	if step.Action.Type == model.GraphActionInspect || step.Action.Type == model.GraphActionWait {
+func writeStepAssertions(builder *strings.Builder, step model.ScriptStep, actionType model.GraphActionType, selector string, targetURL string, timeoutMS int) {
+	if actionType == model.GraphActionInspect || actionType == model.GraphActionWait {
 		builder.WriteString("  await ctx.log.info(\"observation step validation is non-blocking\", { nodeId: " + jsString(step.NodeID) + " });\n")
 		return
 	}
 	expected := firstNonEmpty(step.ExpectedOutcome, step.Narrative.Caption, step.Narrative.Voiceover)
 	if expected != "" {
-		builder.WriteString("  await ctx.assert.step(" + jsString(step.NodeID) + ", " + jsString(expected) + ", { selector: " + jsString(selector) + ", url: " + jsString(targetURL) + ", timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		if selector == "" || selectorUsableForBlockingAssertion(selector) {
+			builder.WriteString("  await ctx.assert.step(" + jsString(step.NodeID) + ", " + jsString(expected) + ", { selector: " + jsString(selector) + ", url: " + jsString(targetURL) + ", timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		} else {
+			builder.WriteString("  await ctx.log.info(\"skip blocking assert.step for low-quality selector\", { nodeId: " + jsString(step.NodeID) + ", selector: " + jsString(selector) + " });\n")
+		}
 	}
 	for _, validation := range step.Validations {
 		if !validation.Required || validation.Severity != "blocking" {
 			continue
 		}
 		validationSelector := firstNonEmpty(validation.Target.Selector, selector)
+		if validationSelector != "" && !selectorUsableForBlockingAssertion(validationSelector) {
+			builder.WriteString("  await ctx.log.info(\"skip blocking validation for low-quality selector\", { nodeId: " + jsString(step.NodeID) + ", validationId: " + jsString(validation.ID) + ", selector: " + jsString(validationSelector) + " });\n")
+			continue
+		}
 		validationExpected := fmt.Sprint(validation.Expected)
 		if validation.Assertion != "" {
 			validationExpected = validation.Assertion
@@ -246,12 +265,12 @@ func scriptInputExpression(step model.ScriptStep) (string, error) {
 }
 
 func scriptStepSelector(step model.ScriptStep) string {
-	return firstNonEmpty(
+	return bestSelectorValue(
+		actionTargetTestIDSelector(step.Action.Target),
+		bestSelectorCandidate(step.Action.Target.SelectorAlternatives),
+		bestSelectorCandidate(step.PageTarget.SelectorAlternatives),
 		step.Action.Target.Selector,
 		step.PageTarget.Selector,
-		actionTargetTestIDSelector(step.Action.Target),
-		selectorCandidateValue(step.PageTarget.SelectorAlternatives),
-		selectorCandidateValue(step.Action.Target.SelectorAlternatives),
 	)
 }
 
@@ -278,6 +297,20 @@ func boundedHoldMS(holdMS int, durationMS int) int {
 		return 10000
 	}
 	return durationMS
+}
+
+func preActionPauseMS(actionType model.GraphActionType, durationMS int) int {
+	if durationMS < 10000 {
+		return 0
+	}
+	switch actionType {
+	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload:
+		return 1200
+	case model.GraphActionInspect, model.GraphActionWait:
+		return 0
+	default:
+		return 800
+	}
 }
 
 func jsString(value string) string {

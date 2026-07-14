@@ -170,6 +170,12 @@ type ScriptReadinessReport struct {
 	SuggestedStageCount        int            `json:"suggested_stage_count,omitempty"`
 	SuggestedTargetDurationSec int            `json:"suggested_target_duration_sec,omitempty"`
 	SelectorCoverage           float64        `json:"selector_coverage,omitempty"`
+	BusinessActionCount        int            `json:"business_action_count,omitempty"`
+	GenericSelectorCount       int            `json:"generic_selector_count,omitempty"`
+	LoginActionCount           int            `json:"login_action_count,omitempty"`
+	LoginDuplication           bool           `json:"login_duplication,omitempty"`
+	MinStageDurationMS         int            `json:"min_stage_duration_ms,omitempty"`
+	BlockingAssertionRiskCount int            `json:"blocking_assertion_risk_count,omitempty"`
 	CredentialCoverage         bool           `json:"credential_coverage"`
 	EvidenceRefs               []EvidenceRef  `json:"evidence_refs,omitempty"`
 	Confidence                 float64        `json:"confidence,omitempty"`

@@ -198,6 +198,91 @@ func TestObservationStepsAreNonBlockingAndDoNotRequireMainFallback(t *testing.T)
 	}
 }
 
+func TestScriptPackagerDowngradesGenericBusinessSelector(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	graph.Nodes[1].ID = "node_generic_click"
+	graph.Nodes[1].Action = string(model.GraphActionClick)
+	graph.Nodes[1].Selector = "main"
+	graph.Nodes[1].ActionSpec = &model.GraphAction{
+		Type:      model.GraphActionClick,
+		Target:    model.ActionTarget{Selector: "main"},
+		TimeoutMS: 12000,
+	}
+	graph.Nodes[1].Validations = []model.ValidationSpec{{
+		ID:        "validate_generic",
+		Kind:      "dom_visible",
+		Target:    model.ActionTarget{Selector: "main"},
+		Assertion: "generic selector should not block",
+		Severity:  "blocking",
+		Required:  true,
+	}}
+
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var genericStep *model.ScriptStep
+	for i := range pkg.Document.Steps {
+		if pkg.Document.Steps[i].NodeID == "node_generic_click" {
+			genericStep = &pkg.Document.Steps[i]
+			break
+		}
+	}
+	if genericStep == nil {
+		t.Fatal("expected downgraded generic step")
+	}
+	if genericStep.Action.Type != model.GraphActionInspect {
+		t.Fatalf("expected generic click to be downgraded to inspect, got %+v", genericStep.Action)
+	}
+	if genericStep.Blocking {
+		t.Fatalf("downgraded generic step should not be blocking: %+v", genericStep)
+	}
+	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
+	if strings.Contains(source, `ctx.page.click("main"`) {
+		t.Fatalf("generated script must not click generic main selector:\n%s", source)
+	}
+	if strings.Contains(source, `ctx.assert.step("node_generic_click"`) {
+		t.Fatalf("downgraded generic step must not emit blocking assert.step:\n%s", source)
+	}
+}
+
+func TestScriptPackagerEnforcesNaturalStageDuration(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range pkg.Document.Steps {
+		if step.Timing.DurationMS < 10000 {
+			t.Fatalf("expected every stage to be at least 10s, got %s=%d", step.NodeID, step.Timing.DurationMS)
+		}
+	}
+	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
+	if !strings.Contains(source, "await ctx.page.waitForTimeout(1200);") {
+		t.Fatalf("expected generated script to include a pre-action observation pause:\n%s", source)
+	}
+}
+
+func TestScriptCodeGeneratorPrefersTestIDOverGenericSelector(t *testing.T) {
+	bundle := validExecutableBundleFixture(t)
+	doc := bundle.PlanJSON
+	doc.Steps[1].Action.Type = model.GraphActionClick
+	doc.Steps[1].Action.Target.Selector = "main"
+	doc.Steps[1].Action.Target.TestID = "primary-action"
+	doc.Steps[1].PageTarget.Selector = "body"
+
+	source, err := NewScriptCodeGenerator().Generate(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(source, `ctx.page.click("[data-testid='primary-action']"`) {
+		t.Fatalf("expected generator to prefer test id selector:\n%s", source)
+	}
+	if strings.Contains(source, `ctx.page.click("main"`) {
+		t.Fatalf("generator must not click generic selector when test id is available:\n%s", source)
+	}
+}
+
 func validExecutableBundleFixture(t *testing.T) *model.ExecutableRecordingScriptBundle {
 	t.Helper()
 	project, report, productMap, graph := executableBundleFixtures()

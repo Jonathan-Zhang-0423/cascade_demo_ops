@@ -309,11 +309,27 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 		if durationMS <= 0 {
 			durationMS = 3000
 		}
+		durationMS = maxInt(durationMS, 10000)
 		capture := captureSpecForNode(node)
 		narrative := narrativeForNode(node)
 		action := scriptActionForNode(node)
 		target := scriptPageTargetForNode(node)
 		validations := append([]model.ValidationSpec{}, node.Validations...)
+		selector := bestSelectorForScriptStep(action, target)
+		if selector != "" {
+			action.Target.Selector = selector
+			target.Selector = selector
+			if capture.FocusSelector == "" && !selectorLooksGeneric(selector) {
+				capture.FocusSelector = selector
+			}
+		}
+		if businessActionNeedsExecutableSelector(action.Type) && !selectorUsableForBusinessAction(selector) {
+			action.Type = model.GraphActionInspect
+			action.Target.Selector = ""
+			target.Selector = ""
+			capture.FocusSelector = ""
+			validations = softenBlockingValidations(validations)
+		}
 		if len(validations) == 0 && node.ExpectedOutcome != "" {
 			validations = append(validations, model.ValidationSpec{
 				ID:        "validate_" + node.ID,
@@ -339,7 +355,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 			Timing:          model.NodeTimingHint{NodeID: node.ID, DurationMS: durationMS, HoldAfterMS: stageHoldAfterMS(durationMS)},
 			Narrative:       narrative,
 			EvidenceRefs:    node.EvidenceRefs,
-			Blocking:        isBlockingStep(node),
+			Blocking:        isBlockingScriptStep(node, action.Type, validations),
 		})
 		elapsedMS += durationMS
 		_ = elapsedMS
@@ -349,7 +365,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 
 func stageHoldAfterMS(durationMS int) int {
 	if durationMS >= 10000 {
-		return minInt(durationMS, 10000)
+		return minInt(durationMS/2, 6000)
 	}
 	return minInt(maxInt(durationMS, 1500), 5000)
 }
@@ -427,6 +443,7 @@ func recordingRunSpecFromGraph(project *model.ProjectContext, graph *model.DemoW
 		if durationMS <= 0 {
 			durationMS = 3000
 		}
+		durationMS = maxInt(durationMS, 10000)
 		timingHints = append(timingHints, model.NodeTimingHint{NodeID: node.ID, DurationMS: durationMS, HoldAfterMS: stageHoldAfterMS(durationMS)})
 		if node.Capture != nil && (node.Capture.Video || node.Capture.Screenshot) {
 			captureWindows = append(captureWindows, model.CaptureWindow{
@@ -542,8 +559,27 @@ func isBlockingStep(node *model.GraphNode) bool {
 	return node.Type == model.GraphNodeTypeStart || node.Type == model.GraphNodeTypeAction || node.Type == model.GraphNodeTypeCapture
 }
 
+func isBlockingScriptStep(node *model.GraphNode, actionType model.GraphActionType, validations []model.ValidationSpec) bool {
+	if node != nil && node.FailurePolicy != nil && node.FailurePolicy.HumanReviewRequired {
+		return true
+	}
+	for _, validation := range validations {
+		if validation.Required && validation.Severity == "blocking" {
+			return true
+		}
+	}
+	if actionType == model.GraphActionInspect || actionType == model.GraphActionWait {
+		return false
+	}
+	return actionType == model.GraphActionNavigate || isBusinessAction(actionType) || actionType == model.GraphActionAPICall
+}
+
 type scriptQualityReport struct {
 	ExecutableActionCount int
+	GenericSelectorCount  int
+	LoginActionCount      int
+	ShortStageCount       int
+	BlockingAssertRisk    int
 	ObservationOnly       bool
 	Warnings              []string
 	Blockers              []string
@@ -564,15 +600,82 @@ func scriptQualityFromGraph(graph *model.DemoWorkflowGraph) scriptQualityReport 
 		if node.ActionSpec != nil {
 			actionType = node.ActionSpec.Type
 		}
-		if isBusinessAction(actionType) {
+		selector := graphNodeSelector(node)
+		if selectorLooksGeneric(selector) {
+			report.GenericSelectorCount++
+		}
+		if looksLikeLoginAction(node.Title, node.Action, selector) {
+			report.LoginActionCount++
+		}
+		if node.DurationHintMS > 0 && node.DurationHintMS < 10000 {
+			report.ShortStageCount++
+		}
+		if actionType == model.GraphActionAssert && !selectorUsableForBlockingAssertion(selector) {
+			report.BlockingAssertRisk++
+		}
+		if isBusinessAction(actionType) && selectorUsableForBusinessAction(selector) {
 			report.ExecutableActionCount++
+		} else if isBusinessAction(actionType) {
+			report.Warnings = append(report.Warnings, "业务动作缺少稳定 selector，打包时将降级为观察节点。")
 		}
 	}
 	report.ObservationOnly = report.ExecutableActionCount == 0
 	if report.ObservationOnly {
 		report.Blockers = append(report.Blockers, "当前执行图没有 click/fill/select/upload/api_call 等真实业务动作，不能自动上传录制。请补充页面扫描、截图标注或稳定 selector 证据。")
 	}
+	if report.GenericSelectorCount > 0 {
+		report.Warnings = append(report.Warnings, "检测到 body/main/section/div 等泛 selector，业务动作不会使用这些 selector 作为 blocking 目标。")
+	}
+	if report.LoginActionCount > 1 {
+		report.Warnings = append(report.Warnings, "检测到重复登录动作，脚本应只登录一次并复用已登录会话。")
+	}
+	if report.ShortStageCount > 0 {
+		report.Warnings = append(report.Warnings, "检测到低于 10 秒的 stage，打包时会拉长为更自然的录制节奏。")
+	}
+	if report.BlockingAssertRisk > 0 {
+		report.Warnings = append(report.Warnings, "检测到泛 selector 上的 blocking assert 风险，打包时会降级为非阻塞观察。")
+	}
 	return report
+}
+
+func graphNodeSelector(node *model.GraphNode) string {
+	if node == nil {
+		return ""
+	}
+	values := []string{node.Selector}
+	if node.ActionSpec != nil {
+		values = append(values, node.ActionSpec.Target.Selector, actionTargetTestIDSelector(node.ActionSpec.Target))
+		values = append(values, bestSelectorCandidate(node.ActionSpec.Target.SelectorAlternatives))
+	}
+	if node.Capture != nil {
+		values = append(values, node.Capture.FocusSelector)
+	}
+	if selector := bestSelectorValue(values...); selector != "" {
+		return selector
+	}
+	return firstNonEmpty(values...)
+}
+
+func bestSelectorForScriptStep(action model.ScriptActionInstruction, target model.ScriptPageTarget) string {
+	return bestSelectorValue(
+		actionTargetTestIDSelector(action.Target),
+		bestSelectorCandidate(action.Target.SelectorAlternatives),
+		bestSelectorCandidate(target.SelectorAlternatives),
+		action.Target.Selector,
+		target.Selector,
+	)
+}
+
+func softenBlockingValidations(validations []model.ValidationSpec) []model.ValidationSpec {
+	out := make([]model.ValidationSpec, 0, len(validations))
+	for _, validation := range validations {
+		if validation.Severity == "blocking" || validation.Required {
+			validation.Severity = "warning"
+			validation.Required = false
+		}
+		out = append(out, validation)
+	}
+	return out
 }
 
 func isBusinessAction(action model.GraphActionType) bool {

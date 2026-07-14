@@ -119,7 +119,7 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 		}
 		objective = firstNonEmpty(report.RequirementBrief.Objective, objective)
 	}
-	primaryAction := primaryPageAction(productMap, report)
+	primaryAction := primaryPageAction(productMap, report, intelligence)
 	primaryActionType := graphActionTypeFromKind(primaryAction.Kind, primaryAction.Selector)
 
 	graph := model.NewDemoWorkflowGraph(graphID, project.ID, entryPoint)
@@ -629,6 +629,17 @@ func supportingGraphNode(project *model.ProjectContext, productMap *model.Produc
 
 func secondaryActionCandidate(productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) *supportingActionCandidate {
 	if intelligence != nil {
+		if action, ok := bestIntelligenceAction(intelligence, true); ok {
+			return &supportingActionCandidate{
+				Label:           action.Label,
+				Kind:            action.Kind,
+				Selector:        action.Selector,
+				ExpectedOutcome: action.ExpectedOutcome,
+				Caption:         action.ExpectedOutcome,
+				Callout:         "辅助能力",
+				EvidenceRefs:    action.EvidenceRefs,
+			}
+		}
 		for _, capability := range intelligence.FeatureCapabilities {
 			if len(capability.KeyActions) == 0 && len(capability.SupportingPageRefs) == 0 && len(capability.SupportingRouteRefs) == 0 {
 				continue
@@ -752,17 +763,17 @@ func firstString(values []string, fallback string) string {
 func firstSelectorFromIntelligence(intelligence *model.ProjectIntelligencePack) string {
 	if intelligence != nil {
 		for _, surface := range intelligence.InteractionSurfaces {
-			if len(surface.StableSelectors) > 0 && surface.StableSelectors[0].Value != "" {
-				return surface.StableSelectors[0].Value
+			if selector := bestSelectorCandidate(surface.StableSelectors); selector != "" {
+				return selector
 			}
 			for _, action := range surface.Actions {
-				if action.Selector != "" {
+				if selectorUsableForBusinessAction(action.Selector) {
 					return action.Selector
 				}
 			}
 		}
 	}
-	return "main"
+	return ""
 }
 
 func nodeFeatureRefsFromProjectIntelligence(intelligence *model.ProjectIntelligencePack, project *model.ProjectContext) []string {
@@ -931,7 +942,12 @@ type graphPrimaryAction struct {
 	EvidenceRefs    []model.EvidenceRef
 }
 
-func primaryPageAction(productMap *model.ProductMap, report *model.MultimodalUnderstandingReport) graphPrimaryAction {
+func primaryPageAction(productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) graphPrimaryAction {
+	if intelligence != nil {
+		if action, ok := bestIntelligenceAction(intelligence, false); ok {
+			return action
+		}
+	}
 	if productMap != nil {
 		if action, ok := bestProductMapAction(productMap, false); ok {
 			return action
@@ -948,11 +964,64 @@ func primaryPageAction(productMap *model.ProductMap, report *model.MultimodalUnd
 			return action
 		}
 	}
+	if intelligence != nil {
+		if action, ok := bestIntelligenceAction(intelligence, true); ok {
+			return action
+		}
+	}
 	return graphPrimaryAction{
 		Label:           "展示核心产品价值",
 		Kind:            "inspect",
 		ExpectedOutcome: "缺少可执行页面动作证据，当前只能观察入口页面",
 	}
+}
+
+func bestIntelligenceAction(intelligence *model.ProjectIntelligencePack, allowObservation bool) (graphPrimaryAction, bool) {
+	if intelligence == nil {
+		return graphPrimaryAction{}, false
+	}
+	var best *graphPrimaryAction
+	bestScore := -1
+	for _, surface := range intelligence.InteractionSurfaces {
+		for _, action := range surface.Actions {
+			if !actionAllowedForPass(action.Kind, action.Label, action.Selector, "business", allowObservation) &&
+				!actionAllowedForPass(action.Kind, action.Label, action.Selector, "any", allowObservation) {
+				continue
+			}
+			actionType := graphActionTypeFromKind(action.Kind, action.Selector)
+			score := selectorQualityScore(action.Selector)
+			if isBusinessAction(actionType) {
+				score += 100
+			}
+			if looksLikeLoginAction(action.Label, action.Selector) {
+				score -= 80
+			}
+			if score <= bestScore {
+				continue
+			}
+			target := model.ActionTarget{
+				URL:          firstNonEmpty(action.TargetRoute, surface.URL),
+				Selector:     action.Selector,
+				Label:        action.Label,
+				ComponentRef: action.ID,
+				EvidenceRefs: uniqueEvidenceRefs(append(action.EvidenceRefs, surface.EvidenceRefs...)),
+			}
+			candidate := graphPrimaryAction{
+				Label:           firstNonEmpty(action.Label, surface.Title, "展示核心产品价值"),
+				Kind:            firstNonEmpty(action.Kind, "inspect"),
+				Selector:        target.Selector,
+				Target:          target,
+				ExpectedOutcome: firstNonEmpty(surface.PageRole, "项目智能图谱识别的关键动作可见"),
+				EvidenceRefs:    target.EvidenceRefs,
+			}
+			best = &candidate
+			bestScore = score
+		}
+	}
+	if best == nil {
+		return graphPrimaryAction{}, false
+	}
+	return *best, true
 }
 
 func bestProductMapAction(productMap *model.ProductMap, allowObservation bool) (graphPrimaryAction, bool) {
@@ -1021,17 +1090,21 @@ func bestPageSnapshotAction(report *model.MultimodalUnderstandingReport, allowOb
 
 func actionAllowedForPass(kind string, label string, selector string, pass string, allowObservation bool) bool {
 	actionType := graphActionTypeFromKind(kind, selector)
-	if !allowObservation && !isBusinessAction(actionType) {
+	business := isBusinessAction(actionType)
+	if !allowObservation && !business {
 		return false
 	}
 	login := looksLikeLoginAction(label, selector)
 	switch pass {
 	case "business":
-		return !login && isBusinessAction(actionType)
+		return !login && business
 	case "login":
-		return login && isBusinessAction(actionType)
+		return login && business
 	default:
-		return allowObservation || isBusinessAction(actionType)
+		if business {
+			return true
+		}
+		return allowObservation && !login && strings.TrimSpace(selector) != ""
 	}
 }
 
@@ -1048,16 +1121,31 @@ func graphActionTypeFromKind(kind string, selector string) model.GraphActionType
 	normalized := strings.ToLower(strings.TrimSpace(kind))
 	switch normalized {
 	case "click", "button", "cta":
+		if !selectorUsableForBusinessAction(selector) {
+			return model.GraphActionInspect
+		}
 		return model.GraphActionClick
 	case "fill", "input", "type":
+		if !selectorUsableForBusinessAction(selector) {
+			return model.GraphActionInspect
+		}
 		return model.GraphActionFill
 	case "select":
+		if !selectorUsableForBusinessAction(selector) {
+			return model.GraphActionInspect
+		}
 		return model.GraphActionSelect
 	case "upload":
+		if !selectorUsableForBusinessAction(selector) {
+			return model.GraphActionInspect
+		}
 		return model.GraphActionUpload
 	case "wait":
 		return model.GraphActionWait
 	case "assert", "validate":
+		if !selectorUsableForBlockingAssertion(selector) {
+			return model.GraphActionInspect
+		}
 		return model.GraphActionAssert
 	case "navigate":
 		return model.GraphActionNavigate

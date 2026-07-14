@@ -854,7 +854,8 @@ func scriptReadinessFromState(state *ProjectUnderstandingState, scenarios []mode
 			Confidence:      0.92,
 		})
 	}
-	selectorCoverage := selectorCoverage(state.Pack)
+	selectorStats := selectorReadinessStats(state.Pack)
+	selectorCoverage := selectorStats.Coverage
 	if selectorCoverage < 0.35 {
 		warnings = append(warnings, model.AgentFinding{
 			ID:              "readiness_low_selector_coverage",
@@ -862,6 +863,36 @@ func scriptReadinessFromState(state *ProjectUnderstandingState, scenarios []mode
 			Severity:        model.FindingSeverityWarning,
 			Summary:         "稳定 selector 覆盖不足，云端执行时更容易需要修复闭环。",
 			SuggestedAction: "优先补充 data-testid、role/text selector 或页面可访问性摘要。",
+			Confidence:      0.78,
+		})
+	}
+	if selectorStats.BusinessActionCount == 0 {
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_no_stable_business_action",
+			Kind:            "no_stable_business_action",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "尚未识别到带稳定 selector 的业务动作，脚本会优先生成观察节点并等待补充页面证据。",
+			SuggestedAction: "补充 DOM/页面扫描或 data-testid、role/name、按钮文案等稳定 selector。",
+			Confidence:      0.82,
+		})
+	}
+	if selectorStats.GenericSelectorCount > 0 {
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_generic_selectors",
+			Kind:            "generic_selectors",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "识别到 body/main/section/div 等泛 selector，业务动作会自动降级，避免云端录制 selector_timeout。",
+			SuggestedAction: "为关键按钮、输入框和状态区域补充更稳定的 selector。",
+			Confidence:      0.8,
+		})
+	}
+	if selectorStats.LoginActionCount > 1 {
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_login_duplication",
+			Kind:            "login_duplication",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "候选动作中出现多次登录相关动作，生成脚本时应只登录一次并复用会话。",
+			SuggestedAction: "把登录作为前置 session stage，后续演示节点不要重复跳回登录页。",
 			Confidence:      0.78,
 		})
 	}
@@ -899,6 +930,12 @@ func scriptReadinessFromState(state *ProjectUnderstandingState, scenarios []mode
 		SuggestedStageCount:        stageCount,
 		SuggestedTargetDurationSec: targetDuration,
 		SelectorCoverage:           selectorCoverage,
+		BusinessActionCount:        selectorStats.BusinessActionCount,
+		GenericSelectorCount:       selectorStats.GenericSelectorCount,
+		LoginActionCount:           selectorStats.LoginActionCount,
+		LoginDuplication:           selectorStats.LoginActionCount > 1,
+		MinStageDurationMS:         10000,
+		BlockingAssertionRiskCount: selectorStats.BlockingAssertionRiskCount,
 		CredentialCoverage:         credentialCoverage,
 		EvidenceRefs:               state.Pack.EvidenceRefs,
 		Confidence:                 0.78,
@@ -1455,26 +1492,64 @@ func firstScenarioName(plans []model.DemoScenarioPlan) string {
 }
 
 func selectorCoverage(pack *model.ProjectIntelligencePack) float64 {
+	return selectorReadinessStats(pack).Coverage
+}
+
+type selectorReadinessMetrics struct {
+	Coverage                   float64
+	BusinessActionCount        int
+	GenericSelectorCount       int
+	LoginActionCount           int
+	BlockingAssertionRiskCount int
+}
+
+func selectorReadinessStats(pack *model.ProjectIntelligencePack) selectorReadinessMetrics {
+	metrics := selectorReadinessMetrics{}
 	if pack == nil || len(pack.InteractionSurfaces) == 0 {
-		return 0
+		return metrics
 	}
 	actionCount := 0
-	selectorCount := 0
 	for _, surface := range pack.InteractionSurfaces {
-		actionCount += len(surface.Actions)
-		selectorCount += len(surface.StableSelectors)
+		for _, selector := range surface.StableSelectors {
+			if selectorLooksGeneric(selector.Value) {
+				metrics.GenericSelectorCount++
+			}
+		}
+		for _, action := range surface.Actions {
+			actionCount++
+			actionType := graphActionTypeFromKind(action.Kind, action.Selector)
+			if looksLikeLoginAction(action.Label, action.Selector) {
+				metrics.LoginActionCount++
+			}
+			if selectorLooksGeneric(action.Selector) {
+				metrics.GenericSelectorCount++
+			}
+			if actionType == model.GraphActionAssert && !selectorUsableForBlockingAssertion(action.Selector) {
+				metrics.BlockingAssertionRiskCount++
+			}
+			if isBusinessAction(actionType) && selectorUsableForBusinessAction(action.Selector) {
+				metrics.BusinessActionCount++
+			}
+		}
 	}
 	if actionCount == 0 {
-		if selectorCount > 0 {
-			return 1
+		if len(pack.InteractionSurfaces) > 0 {
+			for _, surface := range pack.InteractionSurfaces {
+				for _, selector := range surface.StableSelectors {
+					if selectorUsableForBusinessAction(selector.Value) {
+						metrics.Coverage = 1
+						return metrics
+					}
+				}
+			}
 		}
-		return 0
+		return metrics
 	}
-	coverage := float64(selectorCount) / float64(actionCount)
-	if coverage > 1 {
-		return 1
+	metrics.Coverage = float64(metrics.BusinessActionCount) / float64(actionCount)
+	if metrics.Coverage > 1 {
+		metrics.Coverage = 1
 	}
-	return coverage
+	return metrics
 }
 
 func routesNeedAuth(routes []model.ArchitectureRouteNode) bool {
