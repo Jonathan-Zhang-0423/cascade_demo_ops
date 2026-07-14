@@ -99,6 +99,7 @@ func TestDesktopBridgeRuntimeConfigIsRedacted(t *testing.T) {
 		DevRepoRoot:     root,
 		SidecarPaths:    map[string]string{"video-worker": filepath.Join(root, "worker", "index.js")},
 		NodeBinaryPath:  filepath.Join(root, "node"),
+		ArkMediaMode:    config.ArkMediaModeDryRun,
 		ModelProviders: map[config.ModelProvider]config.ModelProviderCredential{
 			config.ModelProviderGLM: {
 				Provider:        config.ModelProviderGLM,
@@ -141,6 +142,9 @@ func TestDesktopBridgeRuntimeConfigIsRedacted(t *testing.T) {
 	}
 	if !view.ModelProviders["glm"].Configured || view.ModelProviders["glm"].APIKeyEnv != "GLM_API_KEY" {
 		t.Fatalf("expected redacted glm provider state: %+v", view.ModelProviders)
+	}
+	if view.ArkMediaMode != config.ArkMediaModeDryRun {
+		t.Fatalf("expected redacted ark media mode in runtime view: %+v", view)
 	}
 	if view.ModelTaskRoutes["code_reading"].Provider != "glm" || view.ModelTaskRoutes["code_reading"].Model != "glm-5.2" {
 		t.Fatalf("expected code reading model route in runtime view: %+v", view.ModelTaskRoutes)
