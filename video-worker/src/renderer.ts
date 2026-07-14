@@ -7,6 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ASSET_TIMELINE_CATALOG_SCHEMA_VERSION = "demoops.asset_timeline_catalog.v1";
 const DEMO_EDIT_PLAN_SCHEMA_VERSION = "demoops.demo_edit_plan.v1";
 const DEMO_EDIT_PLAN_VALIDATION_SCHEMA_VERSION = "demoops.demo_edit_plan_validation.v1";
+const MEDIA_NORMALIZATION_REPORT_SCHEMA_VERSION = "demoops.media_normalization_report.v1";
+const REQUIREMENT_SATISFACTION_REPORT_SCHEMA_VERSION = "demoops.requirement_satisfaction_report.v1";
 const DEMO_EDIT_SOURCE_AUTHORITY = "customer_side_agent";
 const DEMO_EDIT_MODEL_ROLE = "presentation_optimizer_only";
 
@@ -77,6 +79,7 @@ export interface RenderRequest {
   recording_paths?: string[];
   output_dir?: string;
   duration_sec?: number;
+  recording_run_spec?: RecordingRunSpec;
   execution_trace?: ExecutionTrace;
   execution_trace_path?: string;
   generated_assets?: ArtifactRef[];
@@ -88,20 +91,35 @@ export interface RenderRequest {
 
 export interface RenderResult {
   video_path: string;
+  source_reference_video_path?: string;
   step_by_step_docs_path: string;
   asset_timeline_catalog_path: string;
   demo_edit_plan_path: string;
   validation_report_path: string;
   render_manifest_path: string;
+  media_normalization_report_path?: string;
+  requirement_satisfaction_report_path?: string;
   asset_timeline_catalog: AssetTimelineCatalog;
   demo_edit_plan: DemoEditPlan;
   validation_report: DemoEditPlanValidationReport;
+  media_normalization_report?: MediaNormalizationReport;
+  requirement_satisfaction_report?: RequirementSatisfactionReport;
 }
 
 interface DemoWorkflowGraph {
   id: string;
   version?: number;
   nodes?: GraphNode[];
+  execution?: {
+    viewports?: ViewportSpec[];
+  };
+  assets?: {
+    demo_video_60s?: boolean;
+    screenshot_pack?: boolean;
+    step_by_step_docs?: boolean;
+    target_duration_sec?: number;
+    requested_assets?: RequestedAsset[];
+  };
 }
 
 interface GraphNode {
@@ -125,6 +143,49 @@ interface GraphNode {
     asset_role?: string;
   };
   duration_hint_ms?: number;
+}
+
+interface RequestedAsset {
+  id?: string;
+  kind?: string;
+  format?: string;
+  duration_sec?: number;
+  required?: boolean;
+  status?: string;
+}
+
+interface ViewportSpec {
+  name?: string;
+  width?: number;
+  height?: number;
+  device?: string;
+}
+
+interface RecordingRunSpec {
+  timeline?: {
+    target_duration_sec?: number;
+    max_duration_sec?: number;
+    capture_windows?: Array<{
+      id?: string;
+      node_id?: string;
+      start_ms?: number;
+      duration_ms?: number;
+      role?: string;
+    }>;
+  };
+  browser?: {
+    viewports?: ViewportSpec[];
+  };
+  outputs?: {
+    raw_recording?: boolean;
+    final_video?: boolean;
+    screenshot_pack?: boolean;
+    step_by_step_docs?: boolean;
+    trace?: boolean;
+    output_formats?: string[];
+    resolution_width?: number;
+    resolution_height?: number;
+  };
 }
 
 interface ExecutionTrace {
@@ -326,7 +387,9 @@ interface CompositorResult {
   source_uri?: string;
   output_container?: string;
   shot_plan?: CompositorShot[];
+  planned_operations?: string[];
   applied_operations?: string[];
+  skipped_operations?: Array<{ type: string; reason: string }>;
   fallback_reason?: string;
   note: string;
 }
@@ -348,6 +411,113 @@ interface VideoCodecConfig {
   args: string[];
 }
 
+interface CaptionCue {
+  start_ms: number;
+  end_ms: number;
+  text: string;
+}
+
+interface MediaNormalizationTarget {
+  container: "mp4";
+  video_codec: "h264";
+  audio_codec: "aac_silent";
+  width: number;
+  height: number;
+  fps: number;
+  pixel_format: "yuv420p";
+}
+
+interface MediaProbeSummary {
+  format?: string;
+  duration_sec?: number;
+  video_codec?: string;
+  audio_codec?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  pixel_format?: string;
+}
+
+interface MediaNormalizationReport {
+  schema_version: typeof MEDIA_NORMALIZATION_REPORT_SCHEMA_VERSION;
+  status: "ok" | "skipped" | "failed";
+  checked_at: string;
+  target: MediaNormalizationTarget;
+  ffmpeg_available: boolean;
+  ffprobe_available?: boolean;
+  source_artifact_id?: string;
+  source_uri?: string;
+  source_path?: string;
+  reference_video_path?: string;
+  input?: MediaProbeSummary;
+  output?: MediaProbeSummary;
+  validation?: Record<string, boolean>;
+  error?: string;
+  note?: string;
+}
+
+interface RequirementSatisfactionReport {
+  schema_version: typeof REQUIREMENT_SATISFACTION_REPORT_SCHEMA_VERSION;
+  status: "satisfied" | "satisfied_with_warnings" | "not_satisfied";
+  checked_at: string;
+  source_priority: {
+    product_requirements: string[];
+    recording_execution_plan: string[];
+    actual_material: string[];
+  };
+  requested: {
+    product_target_duration_sec: number | undefined;
+    recording_target_duration_sec: number | undefined;
+    recording_max_duration_sec: number | undefined;
+    final_video_formats: string[] | undefined;
+    screenshot_pack: boolean;
+    step_by_step_docs: boolean;
+    graph_viewports: ViewportSpec[] | undefined;
+    recording_viewports: ViewportSpec[] | undefined;
+    output_resolution: { width: number; height: number } | undefined;
+    required_assets: RequestedAsset[] | undefined;
+  };
+  actual: {
+    demo_video_path: string | undefined;
+    demo_video_format: string | undefined;
+    source_reference_video_path: string | undefined;
+    source_reference_video_format: string | undefined;
+    media_normalization_status: string | undefined;
+    screenshot_count: number;
+    step_by_step_docs_path: string | undefined;
+    timeline_duration_sec: number;
+    edit_plan_target_duration_sec: number | undefined;
+    rendered_operations: string[];
+    planned_overlay_types: string[];
+    applied_overlay_types: string[];
+  };
+  checks: RequirementCheck[];
+  warnings: RequirementFinding[];
+  errors: RequirementFinding[];
+}
+
+interface RequirementCheck {
+  code: string;
+  status: "pass" | "warn" | "fail";
+  message: string;
+}
+
+interface RequirementFinding {
+  code: string;
+  message: string;
+  path?: string;
+}
+
+const MEDIA_NORMALIZATION_TARGET: MediaNormalizationTarget = {
+  container: "mp4",
+  video_codec: "h264",
+  audio_codec: "aac_silent",
+  width: 1920,
+  height: 1080,
+  fps: 30,
+  pixel_format: "yuv420p",
+};
+
 export async function render(request: RenderRequest): Promise<RenderResult> {
   const outputDir = request.output_dir || "artifacts/rendered";
   await mkdir(outputDir, { recursive: true });
@@ -363,16 +533,21 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
 
   const targetDurationSec = Math.max(1, Math.round((editPlan.target_duration_ms || (request.duration_sec || 60) * 1000) / 1000));
   const compositor = await composeFinalVideo(outputDir, targetDurationSec, catalog, editPlan);
-  const videoPath = compositor.video_path;
+  const mediaNormalization = await normalizeSourceReferenceVideo(outputDir, catalog, editPlan, compositor.video_path);
+  const sourceReferenceVideoPath = mediaNormalization.report.status === "ok" ? mediaNormalization.report.reference_video_path : undefined;
+  const videoPath = sourceReferenceVideoPath || compositor.video_path;
   const stepDocsPath = path.join(outputDir, "step_by_step.md");
   const catalogPath = path.join(outputDir, "asset_timeline_catalog.json");
   const editPlanPath = path.join(outputDir, "demo_edit_plan.json");
   const validationReportPath = path.join(outputDir, "demo_edit_plan_validation.json");
   const renderManifestPath = path.join(outputDir, "render_manifest.json");
+  const requirementReport = buildRequirementSatisfactionReport(request, catalog, editPlan, compositor, mediaNormalization.report, videoPath, stepDocsPath);
+  const requirementReportPath = path.join(outputDir, "requirement_satisfaction_report.json");
 
   await writeJSON(catalogPath, catalog);
   await writeJSON(editPlanPath, editPlan);
   await writeJSON(validationReportPath, validationReport);
+  await writeJSON(requirementReportPath, requirementReport);
   await writeJSON(renderManifestPath, {
     schema_version: "demoops.render_manifest.v1",
     status: compositor.status,
@@ -382,24 +557,37 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
     compositor,
     note: compositor.note,
     video_path: videoPath,
+    source_reference_video_path: sourceReferenceVideoPath,
     step_by_step_docs_path: stepDocsPath,
     asset_timeline_catalog_path: catalogPath,
     demo_edit_plan_path: editPlanPath,
     validation_report_path: validationReportPath,
+    media_normalization_report_path: mediaNormalization.report_path,
+    media_normalization_report: mediaNormalization.report,
+    requirement_satisfaction_report_path: requirementReportPath,
+    requirement_satisfaction_report: requirementReport,
   });
   await writeFile(stepDocsPath, stepDocsFor(catalog, editPlan), "utf8");
 
-  return {
+  const result: RenderResult = {
     video_path: videoPath,
     step_by_step_docs_path: stepDocsPath,
     asset_timeline_catalog_path: catalogPath,
     demo_edit_plan_path: editPlanPath,
     validation_report_path: validationReportPath,
     render_manifest_path: renderManifestPath,
+    media_normalization_report_path: mediaNormalization.report_path,
+    requirement_satisfaction_report_path: requirementReportPath,
     asset_timeline_catalog: catalog,
     demo_edit_plan: editPlan,
     validation_report: validationReport,
+    media_normalization_report: mediaNormalization.report,
+    requirement_satisfaction_report: requirementReport,
   };
+  if (sourceReferenceVideoPath) {
+    result.source_reference_video_path = sourceReferenceVideoPath;
+  }
+  return result;
 }
 
 async function loadRenderInputs(request: RenderRequest): Promise<LoadedRenderInputs> {
@@ -776,7 +964,9 @@ async function composeFinalVideo(outputDir: string, targetDurationSec: number, c
       source_artifact_id: primaryShot.source_artifact_id,
       output_container: extension.replace(/^\./, ""),
       shot_plan: shotPlan,
+      planned_operations: plannedOperations(shotPlan),
       applied_operations: ["fallback_copy"],
+      skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, true),
       fallback_reason: "ffmpeg_not_available",
       note: "Rendered a deterministic fallback demo video by copying the source browser recording. The edit plan is valid and recorded in the render manifest, but trim/concat execution requires ffmpeg.",
     };
@@ -796,7 +986,9 @@ async function composeFinalVideo(outputDir: string, targetDurationSec: number, c
       source_artifact_id: primaryShot.source_artifact_id,
       output_container: extension.replace(/^\./, ""),
       shot_plan: shotPlan,
+      planned_operations: plannedOperations(shotPlan),
       applied_operations: ["fallback_copy"],
+      skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, true),
       fallback_reason: composed.error || "ffmpeg_render_failed",
       note: "Rendered a deterministic fallback demo video by copying the source browser recording after ffmpeg trim/concat failed. No image or video generation was used.",
     };
@@ -813,7 +1005,9 @@ async function composeFinalVideo(outputDir: string, targetDurationSec: number, c
     source_artifact_id: primaryShot.source_artifact_id,
     output_container: extension.replace(/^\./, ""),
     shot_plan: shotPlan,
-    applied_operations: appliedOperations(shotPlan),
+    planned_operations: plannedOperations(shotPlan),
+    applied_operations: appliedOperationsForCurrentCompositor(shotPlan),
+    skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, false),
     note: "Rendered a deterministic demo video by trimming and concatenating existing source browser recording segments. No image or video generation was used.",
   };
   if (composed.video_codec) result.video_codec = composed.video_codec;
@@ -830,19 +1024,511 @@ function plannedCompositorResult(outputDir: string, targetDurationSec: number, s
     quality_status: "degraded",
     output_container: "mp4",
     shot_plan: shotPlan,
+    planned_operations: plannedOperations(shotPlan),
+    applied_operations: [],
+    skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, true),
     fallback_reason: "missing_local_source_video",
     note,
   };
 }
 
+function buildRequirementSatisfactionReport(
+  request: RenderRequest,
+  catalog: AssetTimelineCatalog,
+  editPlan: DemoEditPlan,
+  compositor: CompositorResult,
+  mediaNormalization: MediaNormalizationReport,
+  finalVideoPath: string,
+  stepDocsPath: string,
+): RequirementSatisfactionReport {
+  const graph = request.graph;
+  const runSpec = request.recording_run_spec;
+  const checks: RequirementCheck[] = [];
+  const warnings: RequirementFinding[] = [];
+  const errors: RequirementFinding[] = [];
+  const productTargetDuration = resolveProductTargetDurationSec(graph);
+  const recordingTargetDurationSec = runSpec?.timeline?.target_duration_sec;
+  const editPlanTargetDurationSec = editPlan.target_duration_ms ? Math.round(editPlan.target_duration_ms / 1000) : undefined;
+  const finalFormat = formatForVideoPath(finalVideoPath);
+  const requestedFormats = requestedFinalVideoFormats(graph, runSpec);
+  const screenshotCount = catalog.artifacts.filter((artifact) => isScreenshotArtifact(artifact)).length;
+  const plannedOverlayTypes = plannedOverlayTypesForPlan(editPlan);
+  const appliedOverlayTypes = overlayTypesAppliedByCompositor(compositor);
+
+  if (productTargetDuration && recordingTargetDurationSec && productTargetDuration !== recordingTargetDurationSec) {
+    warnings.push(requirementFinding(
+      "duration_intent_conflict",
+      `Product requirement asks for ${productTargetDuration}s, while recording_run_spec asks for ${recordingTargetDurationSec}s. Final editing should treat the product requirement as delivery intent and the recording spec as capture strategy.`,
+      "workflow_graph.assets.target_duration_sec",
+    ));
+    checks.push({
+      code: "duration_intent_alignment",
+      status: "warn",
+      message: "Product-level and recording-level duration intents differ.",
+    });
+  } else {
+    checks.push({
+      code: "duration_intent_alignment",
+      status: "pass",
+      message: "No conflicting duration intent was detected.",
+    });
+  }
+
+  if (productTargetDuration && Math.ceil(catalog.timeline.duration_ms / 1000) < productTargetDuration) {
+    warnings.push(requirementFinding(
+      "requested_duration_exceeds_source_material",
+      `Requested product duration is ${productTargetDuration}s, but captured source material is about ${Math.ceil(catalog.timeline.duration_ms / 1000)}s. The renderer must extend only with source-derived holds, still frames, captions, or pacing changes.`,
+      "workflow_graph.assets.target_duration_sec",
+    ));
+  }
+
+  const graphViewport = firstViewport(graph?.execution?.viewports);
+  const recordingViewport = firstViewport(runSpec?.browser?.viewports);
+  const outputResolution = requestedOutputResolution(runSpec);
+  if (graphViewport && recordingViewport && (graphViewport.width !== recordingViewport.width || graphViewport.height !== recordingViewport.height)) {
+    warnings.push(requirementFinding(
+      "viewport_intent_conflict",
+      `workflow_graph.execution requests ${graphViewport.width}x${graphViewport.height}, while recording_run_spec captures ${recordingViewport.width}x${recordingViewport.height}.`,
+      "recording_run_spec.browser.viewports",
+    ));
+    checks.push({
+      code: "viewport_intent_alignment",
+      status: "warn",
+      message: "Workflow graph viewport and recording viewport differ.",
+    });
+  } else {
+    checks.push({
+      code: "viewport_intent_alignment",
+      status: "pass",
+      message: "No conflicting viewport intent was detected.",
+    });
+  }
+
+  if (outputResolution && mediaNormalization.output && (mediaNormalization.output.width !== outputResolution.width || mediaNormalization.output.height !== outputResolution.height)) {
+    warnings.push(requirementFinding(
+      "normalized_resolution_differs_from_recording_output",
+      `recording_run_spec.outputs requests ${outputResolution.width}x${outputResolution.height}, while normalized MP4 is ${mediaNormalization.output.width}x${mediaNormalization.output.height}.`,
+      "recording_run_spec.outputs",
+    ));
+  }
+
+  if (requiresScreenshotPack(graph, runSpec) && screenshotCount === 0) {
+    errors.push(requirementFinding("missing_required_screenshot_pack", "The package requested screenshots, but no screenshot artifact is available.", "workflow_graph.assets.screenshot_pack"));
+    checks.push({
+      code: "screenshot_pack",
+      status: "fail",
+      message: "Required screenshot pack is missing.",
+    });
+  } else if (requiresScreenshotPack(graph, runSpec)) {
+    checks.push({
+      code: "screenshot_pack",
+      status: "pass",
+      message: `Screenshot requirement has ${screenshotCount} captured artifact(s).`,
+    });
+  }
+
+  if (requiresStepByStepDocs(graph, runSpec) && !stepDocsPath) {
+    errors.push(requirementFinding("missing_step_by_step_docs", "Step-by-step docs were requested but no docs path was produced.", "workflow_graph.assets.step_by_step_docs"));
+  }
+
+  if (requestedFormats.includes("mp4") && finalFormat !== "mp4") {
+    errors.push(requirementFinding("requested_format_not_satisfied", `A final MP4 was requested, but the preferred final video is ${finalFormat || "unknown"}.`, "recording_run_spec.outputs.output_formats"));
+    checks.push({
+      code: "final_video_format",
+      status: "fail",
+      message: "Final video is not MP4.",
+    });
+  } else if (requestedFormats.includes("mp4")) {
+    checks.push({
+      code: "final_video_format",
+      status: "pass",
+      message: "Final video is available as MP4.",
+    });
+  }
+
+  if (mediaNormalization.status !== "ok") {
+    const findingValue = requirementFinding(
+      "media_normalization_not_ok",
+      `MP4/H.264 normalization status is ${mediaNormalization.status}${mediaNormalization.error ? `: ${mediaNormalization.error}` : ""}.`,
+      "media_normalization_report.status",
+    );
+    if (requestedFormats.includes("mp4")) {
+      errors.push(findingValue);
+    } else {
+      warnings.push(findingValue);
+    }
+  }
+
+  for (const overlayType of plannedOverlayTypes) {
+    if (!appliedOverlayTypes.includes(overlayType)) {
+      warnings.push(requirementFinding(
+        "planned_overlay_not_rendered",
+        `DemoEditPlan includes ${overlayType} overlays, but the current compositor did not render that overlay type into pixels.`,
+        "demo_edit_plan.shots.overlays",
+      ));
+    }
+  }
+
+  const status: RequirementSatisfactionReport["status"] = errors.length > 0 ? "not_satisfied" : warnings.length > 0 ? "satisfied_with_warnings" : "satisfied";
+  return {
+    schema_version: REQUIREMENT_SATISFACTION_REPORT_SCHEMA_VERSION,
+    status,
+    checked_at: new Date().toISOString(),
+    source_priority: {
+      product_requirements: ["workflow_graph.assets", "workflow_graph.execution", "workflow_graph.nodes[].capture"],
+      recording_execution_plan: ["recording_run_spec.timeline", "recording_run_spec.browser", "recording_run_spec.outputs"],
+      actual_material: ["execution_trace", "generated_assets", "asset_timeline_catalog"],
+    },
+    requested: {
+      product_target_duration_sec: productTargetDuration,
+      recording_target_duration_sec: recordingTargetDurationSec,
+      recording_max_duration_sec: runSpec?.timeline?.max_duration_sec,
+      final_video_formats: requestedFormats,
+      screenshot_pack: requiresScreenshotPack(graph, runSpec),
+      step_by_step_docs: requiresStepByStepDocs(graph, runSpec),
+      graph_viewports: graph?.execution?.viewports,
+      recording_viewports: runSpec?.browser?.viewports,
+      output_resolution: outputResolution,
+      required_assets: graph?.assets?.requested_assets?.filter((asset) => asset.required),
+    },
+    actual: {
+      demo_video_path: finalVideoPath,
+      demo_video_format: finalFormat,
+      source_reference_video_path: mediaNormalization.reference_video_path,
+      source_reference_video_format: formatForVideoPath(mediaNormalization.reference_video_path || ""),
+      media_normalization_status: mediaNormalization.status,
+      screenshot_count: screenshotCount,
+      step_by_step_docs_path: stepDocsPath,
+      timeline_duration_sec: Math.round(catalog.timeline.duration_ms / 1000),
+      edit_plan_target_duration_sec: editPlanTargetDurationSec,
+      rendered_operations: compositor.applied_operations || [],
+      planned_overlay_types: plannedOverlayTypes,
+      applied_overlay_types: appliedOverlayTypes,
+    },
+    checks,
+    warnings,
+    errors,
+  };
+}
+
+function resolveProductTargetDurationSec(graph: DemoWorkflowGraph | undefined): number | undefined {
+  const requestedDemoVideo = graph?.assets?.requested_assets?.find((asset) => asset.kind === "demo_video" && asset.duration_sec && asset.duration_sec > 0);
+  if (requestedDemoVideo?.duration_sec) return requestedDemoVideo.duration_sec;
+  const targetDuration = graph?.assets?.target_duration_sec;
+  return targetDuration && targetDuration > 0 ? targetDuration : undefined;
+}
+
+function requestedFinalVideoFormats(graph: DemoWorkflowGraph | undefined, runSpec: RecordingRunSpec | undefined): string[] {
+  const formats = (graph?.assets?.requested_assets || [])
+    .filter((asset) => asset.kind === "demo_video" && asset.format)
+    .map((asset) => (asset.format as string).toLowerCase());
+  for (const format of runSpec?.outputs?.output_formats || []) {
+    const normalized = format.toLowerCase();
+    if (["mp4", "webm", "mov", "m4v"].includes(normalized)) {
+      formats.push(normalized);
+    }
+  }
+  return [...new Set(formats)];
+}
+
+function firstViewport(viewports: ViewportSpec[] | undefined): ViewportSpec | undefined {
+  return viewports?.find((viewport) => viewport.width && viewport.height);
+}
+
+function requestedOutputResolution(runSpec: RecordingRunSpec | undefined): { width: number; height: number } | undefined {
+  const width = runSpec?.outputs?.resolution_width;
+  const height = runSpec?.outputs?.resolution_height;
+  return width && height ? { width, height } : undefined;
+}
+
+function requiresScreenshotPack(graph: DemoWorkflowGraph | undefined, runSpec: RecordingRunSpec | undefined): boolean {
+  return graph?.assets?.screenshot_pack === true || runSpec?.outputs?.screenshot_pack === true || (graph?.assets?.requested_assets || []).some((asset) => asset.kind === "screenshot_pack" && asset.required);
+}
+
+function requiresStepByStepDocs(graph: DemoWorkflowGraph | undefined, runSpec: RecordingRunSpec | undefined): boolean {
+  return graph?.assets?.step_by_step_docs === true || runSpec?.outputs?.step_by_step_docs === true || (graph?.assets?.requested_assets || []).some((asset) => asset.kind === "step_by_step_docs" && asset.required);
+}
+
+function isScreenshotArtifact(artifact: TimelineArtifact): boolean {
+  return artifact.kind === "screenshot" || artifact.kind === "webpage_screenshot" || artifact.mime_type === "image/png" || artifact.mime_type === "image/jpeg";
+}
+
+function formatForVideoPath(filePath: string | undefined): string | undefined {
+  if (!filePath) return undefined;
+  const extension = path.extname(filePath).replace(/^\./, "").toLowerCase();
+  return extension || undefined;
+}
+
+function plannedOverlayTypesForPlan(plan: DemoEditPlan): string[] {
+  const values = new Set<string>();
+  for (const shot of plan.shots) {
+    for (const overlay of shot.overlays || []) {
+      values.add(overlay.type);
+    }
+  }
+  return [...values].sort();
+}
+
+function overlayTypesAppliedByCompositor(compositor: CompositorResult): string[] {
+  const values = new Set<string>();
+  for (const operation of compositor.applied_operations || []) {
+    if (ALLOWED_OVERLAY_TYPES.includes(operation as OverlayType)) {
+      values.add(operation);
+    }
+  }
+  return [...values].sort();
+}
+
+function requirementFinding(code: string, message: string, pathValue?: string): RequirementFinding {
+  const result: RequirementFinding = { code, message };
+  if (pathValue) result.path = pathValue;
+  return result;
+}
+
+async function normalizeSourceReferenceVideo(
+  outputDir: string,
+  catalog: AssetTimelineCatalog,
+  editPlan: DemoEditPlan,
+  preferredSourcePath?: string,
+): Promise<{ report_path: string; report: MediaNormalizationReport }> {
+  const reportPath = path.join(outputDir, "media_normalization_report.json");
+  const report: MediaNormalizationReport = {
+    schema_version: MEDIA_NORMALIZATION_REPORT_SCHEMA_VERSION,
+    status: "skipped",
+    checked_at: new Date().toISOString(),
+    target: MEDIA_NORMALIZATION_TARGET,
+    ffmpeg_available: false,
+  };
+
+  const sourceArtifact = firstCompositableVideoArtifact(catalog, editPlan);
+  if (!sourceArtifact) {
+    report.note = "No source video artifact is available for media normalization.";
+    await writeJSON(reportPath, report);
+    return { report_path: reportPath, report };
+  }
+
+  const sourcePath = preferredSourcePath || sourceArtifact.local_path || filePathFromURI(sourceArtifact.uri);
+  report.source_artifact_id = sourceArtifact.id;
+  report.source_uri = sourceArtifact.uri;
+  if (sourcePath) report.source_path = sourcePath;
+  if (preferredSourcePath) {
+    report.note = "Normalized the rendered compositor output into the MP4/H.264 reference video used as the preferred final demo deliverable.";
+  }
+  if (!sourcePath) {
+    report.note = "The source video artifact is not available as a local file path.";
+    await writeJSON(reportPath, report);
+    return { report_path: reportPath, report };
+  }
+
+  const sourceStat = await stat(sourcePath).catch(() => undefined);
+  if (!sourceStat?.isFile()) {
+    report.note = `The source video artifact does not exist on disk: ${sourcePath}`;
+    await writeJSON(reportPath, report);
+    return { report_path: reportPath, report };
+  }
+
+  const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
+  const ffprobePath = ffprobePathFor(ffmpegPath);
+  const ffmpegAvailable = await isCommandAvailable(ffmpegPath);
+  const ffprobeAvailable = await isCommandAvailable(ffprobePath);
+  report.ffmpeg_available = ffmpegAvailable;
+  report.ffprobe_available = ffprobeAvailable;
+
+  if (ffprobeAvailable) {
+    report.input = await probeMedia(ffprobePath, sourcePath).catch((error: unknown) => ({
+      format: `probe_failed: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+  }
+
+  if (!ffmpegAvailable) {
+    report.status = "failed";
+    report.error = "ffmpeg_not_available";
+    await writeJSON(reportPath, report);
+    return { report_path: reportPath, report };
+  }
+
+  const codec = await preferredReferenceH264Codec(ffmpegPath);
+  if (!codec) {
+    report.status = "failed";
+    report.error = "h264_encoder_not_available";
+    await writeJSON(reportPath, report);
+    return { report_path: reportPath, report };
+  }
+
+  const referenceVideoPath = path.join(outputDir, "source_reference.mp4");
+  const transcodeResult = await runCommand(ffmpegPath, [
+    "-y",
+    "-i",
+    sourcePath,
+    "-f",
+    "lavfi",
+    "-i",
+    "anullsrc=channel_layout=stereo:sample_rate=48000",
+    "-map",
+    "0:v:0",
+    "-map",
+    "1:a:0",
+    "-vf",
+    `scale=${MEDIA_NORMALIZATION_TARGET.width}:${MEDIA_NORMALIZATION_TARGET.height}:force_original_aspect_ratio=decrease,pad=${MEDIA_NORMALIZATION_TARGET.width}:${MEDIA_NORMALIZATION_TARGET.height}:(ow-iw)/2:(oh-ih)/2,fps=${MEDIA_NORMALIZATION_TARGET.fps},format=${MEDIA_NORMALIZATION_TARGET.pixel_format}`,
+    "-c:v",
+    codec.name,
+    ...codec.args,
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
+    "-shortest",
+    "-movflags",
+    "+faststart",
+    referenceVideoPath,
+  ]);
+  if (transcodeResult.code !== 0) {
+    report.status = "failed";
+    report.error = compactProcessError("media_normalization_failed", transcodeResult);
+    await writeJSON(reportPath, report);
+    return { report_path: reportPath, report };
+  }
+
+  report.reference_video_path = referenceVideoPath;
+  if (ffprobeAvailable) {
+    report.output = await probeMedia(ffprobePath, referenceVideoPath).catch((error: unknown) => ({
+      format: `probe_failed: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+    report.validation = validateNormalizedMedia(report.output);
+    report.status = Object.values(report.validation).every(Boolean) ? "ok" : "failed";
+    if (report.status === "failed") {
+      report.error = "normalized_media_does_not_match_target";
+    }
+  } else {
+    report.status = "ok";
+    report.note = "Reference MP4 was created, but ffprobe is unavailable so detailed media validation was skipped.";
+  }
+
+  await writeJSON(reportPath, report);
+  return { report_path: reportPath, report };
+}
+
+function ffprobePathFor(ffmpegPath: string): string {
+  if (process.env.CASCADE_FFPROBE_PATH) {
+    return process.env.CASCADE_FFPROBE_PATH;
+  }
+  const baseName = path.basename(ffmpegPath).toLowerCase();
+  if (baseName === "ffmpeg.exe") {
+    return path.join(path.dirname(ffmpegPath), "ffprobe.exe");
+  }
+  if (baseName === "ffmpeg") {
+    return path.join(path.dirname(ffmpegPath), "ffprobe");
+  }
+  if (ffmpegPath.includes("/") || ffmpegPath.includes("\\")) {
+    return path.join(path.dirname(ffmpegPath), process.platform === "win32" ? "ffprobe.exe" : "ffprobe");
+  }
+  return "ffprobe";
+}
+
+async function preferredReferenceH264Codec(ffmpegPath: string): Promise<VideoCodecConfig | undefined> {
+  const encoderList = await runCommand(ffmpegPath, ["-hide_banner", "-encoders"]);
+  const encoders = `${encoderList.stdout}\n${encoderList.stderr}`;
+  const candidates: VideoCodecConfig[] = [
+    { name: "libx264", args: ["-preset", "veryfast", "-crf", "23", "-g", "30", "-keyint_min", "30", "-pix_fmt", "yuv420p"] },
+    { name: "h264_nvenc", args: ["-preset", "p5", "-cq", "23", "-g", "30", "-pix_fmt", "yuv420p"] },
+    { name: "h264_qsv", args: ["-global_quality", "23", "-g", "30", "-pix_fmt", "yuv420p"] },
+    { name: "h264_amf", args: ["-quality", "speed", "-qp_i", "23", "-qp_p", "23", "-g", "30", "-pix_fmt", "yuv420p"] },
+    { name: "h264_mf", args: ["-pix_fmt", "yuv420p"] },
+  ];
+  return candidates.find((candidate) => encoders.includes(candidate.name));
+}
+
+async function probeMedia(ffprobePath: string, filePath: string): Promise<MediaProbeSummary> {
+  const result = await runCommand(ffprobePath, [
+    "-v",
+    "error",
+    "-show_entries",
+    "format=format_name,duration:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,pix_fmt",
+    "-of",
+    "json",
+    filePath,
+  ]);
+  if (result.code !== 0) {
+    throw new Error(compactProcessError("ffprobe_failed", result));
+  }
+  return parseMediaProbeOutput(result.stdout);
+}
+
+function parseMediaProbeOutput(stdout: string): MediaProbeSummary {
+  const payload = JSON.parse(stdout) as {
+    format?: { format_name?: unknown; duration?: unknown };
+    streams?: Array<Record<string, unknown>>;
+  };
+  const summary: MediaProbeSummary = {};
+  const formatName = stringValue(payload.format?.format_name);
+  if (formatName) summary.format = formatName;
+  const duration = numberValue(payload.format?.duration);
+  if (duration !== undefined) summary.duration_sec = duration;
+
+  const videoStream = payload.streams?.find((stream) => stringValue(stream.codec_type) === "video");
+  if (videoStream) {
+    const codecName = stringValue(videoStream.codec_name);
+    const width = numberValue(videoStream.width);
+    const height = numberValue(videoStream.height);
+    const fps = parseFrameRate(stringValue(videoStream.avg_frame_rate) || stringValue(videoStream.r_frame_rate));
+    const pixelFormat = stringValue(videoStream.pix_fmt);
+    if (codecName) summary.video_codec = codecName;
+    if (width !== undefined) summary.width = width;
+    if (height !== undefined) summary.height = height;
+    if (fps !== undefined) summary.fps = fps;
+    if (pixelFormat) summary.pixel_format = pixelFormat;
+  }
+
+  const audioStream = payload.streams?.find((stream) => stringValue(stream.codec_type) === "audio");
+  if (audioStream) {
+    const codecName = stringValue(audioStream.codec_name);
+    if (codecName) summary.audio_codec = codecName;
+  }
+  return summary;
+}
+
+function validateNormalizedMedia(output: MediaProbeSummary | undefined): Record<string, boolean> {
+  return {
+    container_mp4: output?.format?.split(",").includes("mp4") === true,
+    video_codec_h264: output?.video_codec === "h264",
+    resolution_1920x1080: output?.width === MEDIA_NORMALIZATION_TARGET.width && output?.height === MEDIA_NORMALIZATION_TARGET.height,
+    fps_30: output?.fps !== undefined && Math.abs(output.fps - MEDIA_NORMALIZATION_TARGET.fps) <= 0.25,
+    pixel_format_yuv420p: output?.pixel_format === MEDIA_NORMALIZATION_TARGET.pixel_format,
+    audio_aac_or_silent: output?.audio_codec === "aac",
+  };
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function parseFrameRate(value: string | undefined): number | undefined {
+  if (!value || value === "0/0") return undefined;
+  const parts = value.split("/");
+  if (parts.length === 2) {
+    const numerator = Number(parts[0]);
+    const denominator = Number(parts[1]);
+    if (Number.isFinite(numerator) && Number.isFinite(denominator) && denominator !== 0) {
+      return Math.round((numerator / denominator) * 1000) / 1000;
+    }
+  }
+  const fps = Number(value);
+  return Number.isFinite(fps) ? fps : undefined;
+}
+
 function firstCompositableVideoArtifact(catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): TimelineArtifact | undefined {
-	for (const shot of editPlan.shots) {
-		const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id);
-		if (artifact && isVideoArtifact(artifact)) return artifact;
-	}
+  for (const shot of editPlan.shots) {
+    const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id);
+    if (artifact && isVideoArtifact(artifact)) return artifact;
+  }
   const timelineRecording = findDemoArtifactByID(catalog, catalog.timeline.recording_artifact_id);
   if (timelineRecording && isVideoArtifact(timelineRecording)) return timelineRecording;
-	return catalog.artifacts.find((artifact) => isDemoMaterial(artifact) && isVideoArtifact(artifact));
+  return catalog.artifacts.find((artifact) => isDemoMaterial(artifact) && isVideoArtifact(artifact));
 }
 
 function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): CompositorShot[] {
@@ -884,7 +1570,7 @@ function sourceRangeForStep(catalog: AssetTimelineCatalog, stepID?: string): [nu
   return [step.start_ms, step.end_ms];
 }
 
-function appliedOperations(shots: CompositorShot[]): string[] {
+function plannedOperations(shots: CompositorShot[]): string[] {
   const values = new Set<string>();
   for (const shot of shots) {
     for (const operation of shot.operations) {
@@ -898,6 +1584,120 @@ function appliedOperations(shots: CompositorShot[]): string[] {
     }
   }
   return [...values].sort();
+}
+
+function appliedOperationsForCurrentCompositor(shots: CompositorShot[]): string[] {
+  const values = new Set<string>();
+  for (const shot of shots) {
+    if (shot.source_time_range_ms) {
+      values.add("trim");
+    }
+    if (captionCuesForShot(shot).length > 0) {
+      values.add("caption");
+    }
+  }
+  if (shots.length > 1) {
+    values.add("concat");
+  }
+  return [...values].sort();
+}
+
+function skippedOperationsForCurrentCompositor(shots: CompositorShot[], skipTrim: boolean): Array<{ type: string; reason: string }> {
+  const skipped = new Map<string, string>();
+  for (const operation of plannedOperations(shots)) {
+    if (operation === "trim" && !skipTrim) {
+      continue;
+    }
+    if (operation === "trim") {
+      skipped.set(operation, "ffmpeg trim/concat was not executed in fallback mode");
+      continue;
+    }
+    if (operation === "caption" && !skipTrim && shots.some((shot) => captionCuesForShot(shot).length > 0)) {
+      continue;
+    }
+    skipped.set(operation, "current deterministic compositor does not burn this operation into pixels yet");
+  }
+  return [...skipped.entries()].map(([type, reason]) => ({ type, reason }));
+}
+
+function captionCuesForShot(shot: CompositorShot): CaptionCue[] {
+  const cues: CaptionCue[] = [];
+  for (const overlay of shot.overlays) {
+    if (overlay.type !== "caption" || !overlay.text?.trim()) {
+      continue;
+    }
+    const startMS = Math.max(0, overlay.start_ms ?? 0);
+    const endMS = Math.min(shot.duration_ms, Math.max(startMS + 500, overlay.end_ms ?? Math.min(shot.duration_ms, startMS + 3000)));
+    if (endMS <= startMS) {
+      continue;
+    }
+    cues.push({
+      start_ms: startMS,
+      end_ms: endMS,
+      text: overlay.text.trim(),
+    });
+  }
+  return cues;
+}
+
+function assSubtitleForCaptions(cues: CaptionCue[]): string {
+  const lines = [
+    "[Script Info]",
+    "ScriptType: v4.00+",
+    "PlayResX: 1920",
+    "PlayResY: 1080",
+    "WrapStyle: 2",
+    "ScaledBorderAndShadow: yes",
+    "YCbCr Matrix: TV.709",
+    "",
+    "[V4+ Styles]",
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    "Style: Default,Arial,34,&H00FFFFFF,&H00FFFFFF,&HAA000000,&HAA000000,0,0,0,0,100,100,0,0,3,1.2,0,2,160,160,72,1",
+    "",
+    "[Events]",
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+  ];
+  for (const cue of cues) {
+    lines.push(`Dialogue: 0,${assTimestamp(cue.start_ms)},${assTimestamp(cue.end_ms)},Default,,0,0,0,,${escapeAssText(wrapCaptionText(cue.text))}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function wrapCaptionText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 34) return normalized;
+  const words = normalized.split(" ");
+  if (words.length === 1) {
+    return normalized.replace(/(.{24})/g, "$1\n").trim();
+  }
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length > 34 && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.slice(0, 2).join("\n");
+}
+
+function escapeAssText(text: string): string {
+  return text.replace(/\r\n|\r|\n/g, "\\N").replace(/[{}]/g, "");
+}
+
+function assTimestamp(valueMS: number): string {
+  const totalCentiseconds = Math.max(0, Math.round(valueMS / 10));
+  const centiseconds = totalCentiseconds % 100;
+  const totalSeconds = Math.floor(totalCentiseconds / 100);
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
 }
 
 async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPath: string, shots: CompositorShot[], extension: string): Promise<{ rendered: boolean; error?: string; video_codec?: string }> {
@@ -921,7 +1721,14 @@ async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPat
       continue;
     }
     const segmentPath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}${extension}`);
-    const result = await runCommand(ffmpegPath, [
+    const videoFilters: string[] = [];
+    const captionCues = captionCuesForShot(shot);
+    if (captionCues.length > 0) {
+      const subtitlePath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}.ass`);
+      await writeFile(subtitlePath, assSubtitleForCaptions(captionCues), "utf8");
+      videoFilters.push(`subtitles='${ffmpegFilterPath(subtitlePath)}'`);
+    }
+    const ffmpegArgs = [
       "-y",
       "-i",
       shot.source_path,
@@ -931,6 +1738,11 @@ async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPat
       secondsArg(segmentDurationMS),
       "-map",
       "0:v:0",
+    ];
+    if (videoFilters.length > 0) {
+      ffmpegArgs.push("-vf", videoFilters.join(","));
+    }
+    ffmpegArgs.push(
       "-c:v",
       codec.name,
       ...codec.args,
@@ -938,7 +1750,8 @@ async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPat
       "-avoid_negative_ts",
       "make_zero",
       segmentPath,
-    ]);
+    );
+    const result = await runCommand(ffmpegPath, ffmpegArgs);
     if (result.code !== 0) {
       return { rendered: false, error: compactProcessError("ffmpeg_segment_failed", result) };
     }
@@ -1016,6 +1829,10 @@ function secondsArg(valueMS: number): string {
 
 function ffmpegConcatPath(filePath: string): string {
   return path.resolve(filePath).replace(/\\/g, "/").replace(/'/g, "'\\''");
+}
+
+function ffmpegFilterPath(filePath: string): string {
+  return path.resolve(filePath).replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
 }
 
 function findDemoArtifactByID(catalog: AssetTimelineCatalog, id: string | undefined): TimelineArtifact | undefined {

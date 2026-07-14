@@ -51,6 +51,7 @@ type RenderRequest struct {
 	RecordingPaths             []string                      `json:"recording_paths,omitempty"`
 	OutputDir                  string                        `json:"output_dir,omitempty"`
 	DurationSec                int                           `json:"duration_sec,omitempty"`
+	RecordingRunSpec           *model.RecordingRunSpec       `json:"recording_run_spec,omitempty"`
 	ExecutionTrace             *model.ExecutionTrace         `json:"execution_trace,omitempty"`
 	ExecutionTracePath         string                        `json:"execution_trace_path,omitempty"`
 	GeneratedAssets            []model.ArtifactRef           `json:"generated_assets,omitempty"`
@@ -61,15 +62,22 @@ type RenderRequest struct {
 }
 
 type RenderResult struct {
-	VideoPath                string                              `json:"video_path"`
-	StepByStepDocsPath       string                              `json:"step_by_step_docs_path"`
-	AssetTimelineCatalogPath string                              `json:"asset_timeline_catalog_path,omitempty"`
-	DemoEditPlanPath         string                              `json:"demo_edit_plan_path,omitempty"`
-	ValidationReportPath     string                              `json:"validation_report_path,omitempty"`
-	RenderManifestPath       string                              `json:"render_manifest_path,omitempty"`
-	AssetTimelineCatalog     *model.AssetTimelineCatalog         `json:"asset_timeline_catalog,omitempty"`
-	DemoEditPlan             *model.DemoEditPlan                 `json:"demo_edit_plan,omitempty"`
-	ValidationReport         *model.DemoEditPlanValidationReport `json:"validation_report,omitempty"`
+	VideoPath                    string                              `json:"video_path"`
+	SourceReferenceVideoPath     string                              `json:"source_reference_video_path,omitempty"`
+	StepByStepDocsPath           string                              `json:"step_by_step_docs_path"`
+	AssetTimelineCatalogPath     string                              `json:"asset_timeline_catalog_path,omitempty"`
+	DemoEditPlanPath             string                              `json:"demo_edit_plan_path,omitempty"`
+	DirectorInputPath            string                              `json:"director_input_path,omitempty"`
+	ArkMediaDryRunPlanPath       string                              `json:"ark_media_dry_run_plan_path,omitempty"`
+	ValidationReportPath         string                              `json:"validation_report_path,omitempty"`
+	RenderManifestPath           string                              `json:"render_manifest_path,omitempty"`
+	MediaNormalizationReportPath string                              `json:"media_normalization_report_path,omitempty"`
+	RequirementReportPath        string                              `json:"requirement_satisfaction_report_path,omitempty"`
+	AssetTimelineCatalog         *model.AssetTimelineCatalog         `json:"asset_timeline_catalog,omitempty"`
+	DemoEditPlan                 *model.DemoEditPlan                 `json:"demo_edit_plan,omitempty"`
+	DirectorInput                *model.DirectorInput                `json:"director_input,omitempty"`
+	ArkMediaDryRunPlan           *model.ArkMediaDryRunPlan           `json:"ark_media_dry_run_plan,omitempty"`
+	ValidationReport             *model.DemoEditPlanValidationReport `json:"validation_report,omitempty"`
 }
 
 type Viewport struct {
