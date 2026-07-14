@@ -90,6 +90,40 @@ func TestDevHTTPBridgeReadsLocalRepoSummary(t *testing.T) {
 	}
 }
 
+func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://cascadeai.cn",
+		LocalRepoPath:      repoPath,
+		ProductDescription: "演示登录（10s，账号yikai.xu@cascadeai.co密码000000），然后新建项目。",
+		TargetAudience:     "运营",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+
+	build, err := buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("expected credential text to be redacted before package preflight: %v", err)
+	}
+	payload, err := json.Marshal(build.Package)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	for _, forbidden := range []string{"000000", "yikai.xu@cascadeai.co"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("client execution package leaked credential %q: %s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, "secret_ref:local-dev/demo_password") {
+		t.Fatalf("expected package to preserve password secret_ref placeholder: %s", text)
+	}
+}
+
 func TestDevHTTPBridgeInvalidLocalRepoPathDegradesWithoutFailing(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{

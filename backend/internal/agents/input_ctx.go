@@ -35,6 +35,10 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 	if strings.TrimSpace(input.TargetAudience) == "" {
 		input.TargetAudience = "seed investor"
 	}
+	productDescription := RedactSensitiveUserText(input.ProductDescription)
+	mustShow := RedactSensitiveUserTexts(input.MustShow)
+	mustNotShow := RedactSensitiveUserTexts(input.MustNotShow)
+	requirementDocuments := redactRequirementDocuments(input.RequirementDocuments)
 
 	now := time.Now().UTC()
 	projectID := fmt.Sprintf("proj_%d", time.Now().UnixNano())
@@ -52,18 +56,18 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 		ProductURL:         input.ProductURL,
 		GitRepoURL:         input.GitRepoURL,
 		LocalRepoPath:      input.LocalRepoPath,
-		ProductDescription: input.ProductDescription,
+		ProductDescription: productDescription,
 		TargetAudience:     input.TargetAudience,
 		BrandTone:          input.BrandTone,
-		MustShow:           input.MustShow,
-		MustNotShow:        input.MustNotShow,
+		MustShow:           mustShow,
+		MustNotShow:        mustNotShow,
 		ForbiddenPages:     input.ForbiddenPages,
 		ForbiddenData:      input.ForbiddenData,
 		Inputs: &model.ProjectInputBundle{
 			ProductURLs:          productURLInputs(input),
 			Code:                 codeInputs(input),
 			Repositories:         repositoryInputs(input),
-			RequirementDocuments: input.RequirementDocuments,
+			RequirementDocuments: requirementDocuments,
 			WebpageScreenshots:   input.WebpageScreenshots,
 			KnowledgeSources:     knowledgeSourcesFromInputs(input),
 			Scenarios: []model.DemoScenario{
@@ -71,11 +75,11 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 					ID:              "scenario_primary",
 					UseCase:         useCase,
 					AudienceID:      audience.ID,
-					Objective:       input.ProductDescription,
+					Objective:       productDescription,
 					DurationSeconds: 60,
 					Priority:        1,
-					MustShow:        input.MustShow,
-					MustAvoid:       append([]string{}, input.MustNotShow...),
+					MustShow:        mustShow,
+					MustAvoid:       append([]string{}, mustNotShow...),
 				},
 			},
 		},
@@ -84,7 +88,7 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 				ID:               "goal_primary",
 				UseCase:          useCase,
 				AudienceID:       audience.ID,
-				ValueProposition: input.ProductDescription,
+				ValueProposition: productDescription,
 				SuccessCriteria:  []string{"graph can be approved", "rehearsal pass rate is at least 90%", "assets can be traced to graph nodes"},
 				Priority:         1,
 			},
@@ -183,6 +187,19 @@ func repositoryInputs(input orchestrator.UserInput) []model.RepositoryInput {
 	return repositories
 }
 
+func redactRequirementDocuments(documents []model.RequirementDocumentInput) []model.RequirementDocumentInput {
+	if len(documents) == 0 {
+		return documents
+	}
+	out := make([]model.RequirementDocumentInput, 0, len(documents))
+	for _, document := range documents {
+		document.Title = RedactSensitiveUserText(document.Title)
+		document.Body = RedactSensitiveUserText(document.Body)
+		out = append(out, document)
+	}
+	return out
+}
+
 func productURLInputs(input orchestrator.UserInput) []model.ProductURLInput {
 	if strings.TrimSpace(input.ProductURL) == "" {
 		return nil
@@ -229,7 +246,7 @@ func knowledgeSourcesFromInputs(input orchestrator.UserInput) []model.KnowledgeS
 			ID:       doc.ID,
 			Kind:     model.EvidenceKindRequirementDoc,
 			URI:      doc.URI,
-			Title:    doc.Title,
+			Title:    RedactSensitiveUserText(doc.Title),
 			Required: true,
 		}
 		if source.ID == "" {

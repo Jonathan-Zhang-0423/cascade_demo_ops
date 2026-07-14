@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/agents"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 )
@@ -424,6 +425,9 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 			"dev_plaintext_upload_mode": true,
 		},
 	}
+	if err := redactClientExecutionPackageText(&pkg); err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
 	findings := preflightClientExecutionPackage(state, &pkg)
 	pkg.SafetyReport.PolicyFindings = append(pkg.SafetyReport.PolicyFindings, findings...)
 	if blockers := blockingFindings(findings); len(blockers) > 0 {
@@ -517,7 +521,23 @@ func normalizeClientExecutionPackageForUpload(pkg *model.ClientExecutionPackage)
 	return nil
 }
 
+func redactClientExecutionPackageText(pkg *model.ClientExecutionPackage) error {
+	if pkg == nil {
+		return nil
+	}
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		return err
+	}
+	redacted := agents.RedactSensitiveUserText(string(data))
+	if redacted == string(data) {
+		return nil
+	}
+	return json.Unmarshal([]byte(redacted), pkg)
+}
+
 var scriptPlanHashLiteralPattern = regexp.MustCompile(`const cascadePlanHash = "([a-f0-9]{64})";`)
+var packagePasswordLeakagePattern = regexp.MustCompile(`(?i)(密码|口令)\s*[:：=]?\s*[^\s,，。;；)）]{4,}|\b(password|passwd|pwd|passcode)\b\s*[:：=]\s*[^\s,，。;；)）]{4,}`)
 
 func syncScriptPlanHashLiteral(source string, planHash string) string {
 	if source == "" || planHash == "" || !scriptPlanHashLiteralPattern.MatchString(source) {
@@ -761,7 +781,7 @@ func detectPackageLeakage(pkg *model.ClientExecutionPackage) string {
 		return ".env"
 	case strings.Contains(lower, "password=") || strings.Contains(lower, "password:"):
 		return "password literal"
-	case strings.Contains(string(data), strings.Repeat("0", 6)):
+	case packagePasswordLeakagePattern.Match(data):
 		return "raw password literal"
 	case strings.Contains(string(data), "function submitPayment"):
 		return "source code body"
