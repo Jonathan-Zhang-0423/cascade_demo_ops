@@ -78,6 +78,45 @@ func TestGraphBuilderAvoidsLoginWhenBusinessActionExists(t *testing.T) {
 	}
 }
 
+func TestGraphBuilderSkipsChromeToggleWhenBusinessActionExists(t *testing.T) {
+	project := graphQualityProject()
+	productMap := graphQualityProductMap(
+		model.UIActionRef{ID: "sidebar", Label: "button sidebar toggle", Kind: "click", Selector: "[data-testid='button-sidebar-toggle']"},
+		model.UIActionRef{ID: "new_project", Label: "New project", Kind: "click", Selector: "[data-testid='new-project']"},
+	)
+
+	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := graphNodeByID(graph, "highlight_primary_value")
+	if node == nil || node.ActionSpec == nil {
+		t.Fatalf("missing generated node: %+v", graph.Nodes)
+	}
+	if got := node.ActionSpec.Target.Selector; got != "[data-testid='new-project']" {
+		t.Fatalf("expected business selector instead of chrome toggle, got %q", got)
+	}
+}
+
+func TestGraphBuilderDowngradesChromeToggleOnlyAction(t *testing.T) {
+	project := graphQualityProject()
+	productMap := graphQualityProductMap(
+		model.UIActionRef{ID: "sidebar", Label: "button sidebar toggle", Kind: "click", Selector: "[data-testid='button-sidebar-toggle']"},
+	)
+
+	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := graphNodeByID(graph, "highlight_primary_value")
+	if node == nil || node.ActionSpec == nil {
+		t.Fatalf("missing generated node: %+v", graph.Nodes)
+	}
+	if node.ActionSpec.Type != model.GraphActionInspect {
+		t.Fatalf("chrome-only action should be downgraded to inspect, got %+v", node.ActionSpec)
+	}
+}
+
 func graphQualityProject() *model.ProjectContext {
 	return &model.ProjectContext{
 		ID:             "project_graph_quality",

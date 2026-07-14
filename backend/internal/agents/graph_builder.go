@@ -1089,6 +1089,9 @@ func bestPageSnapshotAction(report *model.MultimodalUnderstandingReport, allowOb
 }
 
 func actionAllowedForPass(kind string, label string, selector string, pass string, allowObservation bool) bool {
+	if actionLooksLikeChromeControl(label, selector) {
+		return false
+	}
 	actionType := graphActionTypeFromKind(kind, selector)
 	business := isBusinessAction(actionType)
 	if !allowObservation && !business {

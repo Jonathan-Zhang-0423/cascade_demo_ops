@@ -47,7 +47,7 @@ func selectorQualityScore(selector string) int {
 }
 
 func selectorUsableForBusinessAction(selector string) bool {
-	return selectorQualityScore(selector) >= 60 && !selectorLooksGeneric(selector)
+	return selectorQualityScore(selector) >= 60 && !selectorLooksGeneric(selector) && !selectorLooksLikeChromeControl(selector)
 }
 
 func selectorUsableForBlockingAssertion(selector string) bool {
@@ -67,6 +67,44 @@ func selectorLooksGeneric(selector string) bool {
 		return !containsAny(value, "data-testid", "data-test", "data-cy", "data-qa", "role=", "aria-label", "has-text", "text=", "name=", "placeholder=")
 	}
 	return false
+}
+
+func selectorLooksLikeChromeControl(selector string) bool {
+	value := normalizeSelector(selector)
+	if value == "" {
+		return false
+	}
+	if !containsAny(value,
+		"sidebar", "side-bar", "toggle", "collapse", "expand", "hamburger",
+		"menu", "nav", "navigation", "breadcrumb", "header", "footer",
+		"theme", "avatar", "profile", "account-menu", "dropdown", "drawer",
+		"layout", "shell", "chrome",
+	) {
+		return false
+	}
+	return !containsAny(value,
+		"create", "new", "project", "invite", "submit", "save", "generate",
+		"build", "upload", "search", "send", "run", "start", "confirm",
+	)
+}
+
+func actionLooksLikeChromeControl(label string, selector string) bool {
+	joined := normalizeSelector(label + " " + selector)
+	if joined == "" {
+		return false
+	}
+	if !containsAny(joined,
+		"sidebar", "side bar", "toggle", "collapse", "expand", "hamburger",
+		"menu", "nav", "navigation", "breadcrumb", "header", "footer",
+		"theme", "avatar", "profile", "account menu", "dropdown", "drawer",
+		"layout", "shell", "chrome",
+	) {
+		return false
+	}
+	return !containsAny(joined,
+		"create", "new", "project", "invite", "submit", "save", "generate",
+		"build", "upload", "search", "send", "run", "start", "confirm",
+	)
 }
 
 func businessActionNeedsExecutableSelector(action model.GraphActionType) bool {
