@@ -18,6 +18,7 @@ type RuntimeConfigView struct {
 	ResourceManifestLoaded bool                              `json:"resource_manifest_loaded"`
 	NodeRuntimeConfigured  bool                              `json:"node_runtime_configured"`
 	LLMMode                config.LLMMode                    `json:"llm_mode"`
+	ArkMediaMode           config.ArkMediaMode               `json:"ark_media_mode"`
 	ModelAdapterVersion    string                            `json:"model_adapter_version"`
 	Sidecars               map[string]bool                   `json:"sidecars"`
 	ModelProviders         map[string]ProviderCredentialView `json:"model_providers"`
@@ -67,6 +68,7 @@ func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus Exchan
 		ResourceManifestLoaded: runtime.ResourceManifestPath != "",
 		NodeRuntimeConfigured:  runtime.NodeBinaryPath != "",
 		LLMMode:                runtime.LLMMode,
+		ArkMediaMode:           runtime.ArkMediaMode,
 		ModelAdapterVersion:    runtime.ModelAdapterVersion,
 		Sidecars:               sidecarConfigured(runtime.SidecarPaths),
 		ModelProviders:         providerCredentialViews(runtime.ModelProviders),

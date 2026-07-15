@@ -279,6 +279,9 @@ func TestDevHTTPBridgeRuntimeHealthIsRedacted(t *testing.T) {
 	if !strings.Contains(payload, "model_providers") {
 		t.Fatalf("runtime health missing provider status: %s", payload)
 	}
+	if !strings.Contains(payload, "ark_media_mode") {
+		t.Fatalf("runtime health missing ark media mode: %s", payload)
+	}
 }
 
 func TestDevHTTPBridgeModelDiagnosticsAreRedacted(t *testing.T) {

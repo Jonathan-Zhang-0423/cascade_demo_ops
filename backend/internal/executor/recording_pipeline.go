@@ -76,6 +76,10 @@ func RunClientExecutionRecordingAndRender(ctx context.Context, service Service, 
 	if err != nil {
 		return RecordingRenderPipelineResult{}, err
 	}
+	reportPipelineProgress(request, "preparing_director_input", "Preparing source-only director input and Ark media dry-run plan.", 92)
+	if err := enrichRenderResultForDirector(ctx, request.SourcePackage, &result.RecordingResultPackage, &renderResult, request.RenderOutputDir, result.RecordingResultPackage.CreatedAt); err != nil {
+		return RecordingRenderPipelineResult{}, err
+	}
 	result.RenderRequest = renderRequest
 	result.RenderResult = renderResult
 	attachRenderResultArtifacts(request.SourcePackage, &result.RecordingResultPackage, renderResult, result.RecordingResultPackage.CreatedAt)
@@ -113,11 +117,18 @@ func renderArtifactsFromResult(source *model.ClientExecutionPackage, renderResul
 	}
 	specs := []renderArtifactSpec{
 		{path: renderResult.VideoPath, kind: "demo_video", mimeFallback: "video/mp4", role: "final_demo", includeInDemo: true},
+		{path: renderResult.SourceReferenceVideoPath, kind: "source_reference_video", mimeFallback: "video/mp4", role: "model_reference_video"},
 		{path: renderResult.StepByStepDocsPath, kind: "step_by_step_docs", mimeFallback: "text/markdown", role: "step_by_step_docs"},
 		{path: renderResult.AssetTimelineCatalogPath, kind: "asset_timeline_catalog", mimeFallback: "application/json", role: "render_metadata"},
 		{path: renderResult.DemoEditPlanPath, kind: "demo_edit_plan", mimeFallback: "application/json", role: "render_plan"},
+		{path: renderResult.DirectorInputPath, kind: "director_input", mimeFallback: "application/json", role: "model_director_input"},
+		{path: renderResult.ArkMediaDryRunPlanPath, kind: "ark_media_dry_run_plan", mimeFallback: "application/json", role: "media_generation_plan"},
+		{path: renderResult.ArkAssetPublicationPlanPath, kind: "ark_asset_publication_plan", mimeFallback: "application/json", role: "media_asset_publication_plan"},
+		{path: renderResult.ArkAssetPublicationResultPath, kind: "ark_asset_publication_result", mimeFallback: "application/json", role: "media_asset_publication_result"},
 		{path: renderResult.ValidationReportPath, kind: "demo_edit_plan_validation", mimeFallback: "application/json", role: "render_validation"},
 		{path: renderResult.RenderManifestPath, kind: "render_manifest", mimeFallback: "application/json", role: "render_manifest"},
+		{path: renderResult.MediaNormalizationReportPath, kind: "media_normalization_report", mimeFallback: "application/json", role: "media_normalization"},
+		{path: renderResult.RequirementReportPath, kind: "requirement_satisfaction_report", mimeFallback: "application/json", role: "requirement_satisfaction"},
 	}
 	artifacts := []model.ArtifactRef{}
 	for _, spec := range specs {

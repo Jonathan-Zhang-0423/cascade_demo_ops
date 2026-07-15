@@ -36,6 +36,14 @@ const (
 	LLMModeDeterministic LLMMode = "deterministic"
 )
 
+type ArkMediaMode string
+
+const (
+	ArkMediaModeDisabled ArkMediaMode = "disabled"
+	ArkMediaModeDryRun   ArkMediaMode = "dry_run"
+	ArkMediaModeReal     ArkMediaMode = "real"
+)
+
 const ModelAdapterVersion = "domestic-llm-adapter-v1"
 
 type ModelProvider string
@@ -45,6 +53,7 @@ const (
 	ModelProviderKimi     ModelProvider = "kimi"
 	ModelProviderMinimax  ModelProvider = "minimax"
 	ModelProviderSeedance ModelProvider = "seedance"
+	ModelProviderSeedream ModelProvider = "seedream"
 	ModelProviderDoubao   ModelProvider = "doubao"
 	ModelProviderDeepSeek ModelProvider = "deepseek"
 )
@@ -96,6 +105,7 @@ type AppRuntimeConfig struct {
 	SidecarPaths         map[string]string
 	NodeBinaryPath       string
 	LLMMode              LLMMode
+	ArkMediaMode         ArkMediaMode
 	ModelAdapterVersion  string
 	ModelProviders       map[ModelProvider]ModelProviderCredential
 	ModelTaskRoutes      map[ModelTask]ModelTaskRoute
@@ -143,6 +153,10 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 	if llmMode != LLMModeAuto && llmMode != LLMModeReal && llmMode != LLMModeDeterministic {
 		return AppRuntimeConfig{}, errors.New("unsupported CASCADE_LLM_MODE")
 	}
+	arkMediaMode := ArkMediaMode(envOrDefault("CASCADE_ARK_MEDIA_MODE", string(ArkMediaModeDryRun)))
+	if arkMediaMode != ArkMediaModeDisabled && arkMediaMode != ArkMediaModeDryRun && arkMediaMode != ArkMediaModeReal {
+		return AppRuntimeConfig{}, errors.New("unsupported CASCADE_ARK_MEDIA_MODE")
+	}
 
 	sqlitePath := envOrDefault("SQLITE_PATH", filepath.Join(dataRoot, "cascade_demoops.db"))
 	cfg := AppRuntimeConfig{
@@ -163,6 +177,7 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 		},
 		NodeBinaryPath:       os.Getenv("NODE_BINARY_PATH"),
 		LLMMode:              llmMode,
+		ArkMediaMode:         arkMediaMode,
 		ModelAdapterVersion:  ModelAdapterVersion,
 		ModelProviders:       modelProviderCredentialsFromEnv(),
 		ModelTaskRoutes:      modelTaskRoutesFromEnv(),
@@ -199,7 +214,7 @@ func modelTaskRoutesFromEnv() map[ModelTask]ModelTaskRoute {
 		{
 			Task:             ModelTaskVideoOperation,
 			Provider:         ModelProviderSeedance,
-			Model:            "seedance-2.0",
+			Model:            "doubao-seedance-2-0-260128",
 			ProviderOverride: "CASCADE_VIDEO_PROVIDER",
 			ModelOverride:    "CASCADE_VIDEO_MODEL",
 		},
@@ -237,7 +252,8 @@ func modelProviderCredentialsFromEnv() map[ModelProvider]ModelProviderCredential
 		{ModelProviderGLM, "GLM_API_KEY", nil, "GLM_BASE_URL", defaultGLMBaseURL, "GLM_MODEL", "glm-5.2"},
 		{ModelProviderKimi, "KIMI_API_KEY", []string{"MOONSHOT_API_KEY"}, "KIMI_BASE_URL", defaultKimiBaseURL, "KIMI_MODEL", "kimi-k2.7-code"},
 		{ModelProviderMinimax, "MINIMAX_API_KEY", nil, "MINIMAX_BASE_URL", defaultMinimaxBaseURL, "MINIMAX_MODEL", "minimax-m3"},
-		{ModelProviderSeedance, "SEEDANCE_API_KEY", []string{"DOUBAO_API_KEY", "ARK_API_KEY"}, "SEEDANCE_BASE_URL", defaultArkBaseURL, "SEEDANCE_MODEL", "seedance-2.0"},
+		{ModelProviderSeedance, "SEEDANCE_API_KEY", []string{"DOUBAO_API_KEY", "ARK_API_KEY"}, "SEEDANCE_BASE_URL", defaultArkBaseURL, "SEEDANCE_MODEL", "doubao-seedance-2-0-260128"},
+		{ModelProviderSeedream, "SEEDREAM_API_KEY", []string{"DOUBAO_API_KEY", "ARK_API_KEY"}, "SEEDREAM_BASE_URL", defaultArkBaseURL, "SEEDREAM_MODEL", "doubao-seedream-5-0-pro-260628"},
 		{ModelProviderDoubao, "DOUBAO_API_KEY", []string{"ARK_API_KEY"}, "DOUBAO_BASE_URL", defaultArkBaseURL, "DOUBAO_MODEL", ""},
 		{ModelProviderDeepSeek, "DEEPSEEK_API_KEY", nil, "DEEPSEEK_BASE_URL", defaultDeepSeekBaseURL, "DEEPSEEK_MODEL", "deepseek-v4-flash"},
 	}
