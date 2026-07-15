@@ -221,14 +221,14 @@ export function App() {
         ...current.cloudRun,
         status: "running",
         stage: "local_generated",
-        message: "产品实战自动流程已启动。",
+        message: "本地理解与脚本生成已启动。",
         currentStep: "本地 Agent 正在读取需求、项目目录和产品地址",
         progress: 5,
       },
     }, {
       level: "info",
       message: "开始产品实战自动流程",
-      detail: "将自动完成本地理解、三合一执行包生成、服务器上传、状态轮询、结果包获取和 checksum ack。",
+      detail: "先完成本地理解和三合一执行包生成；脚本就绪后再单独连接服务器上传和轮询。",
     }));
     await pollRuntimeEvents();
     const poller = window.setInterval(() => {
@@ -245,7 +245,7 @@ export function App() {
         const nextWorkspace = result.data;
         setWorkspace((current) => appendRuntimeLog(mergeWorkspaceRuntimeLogs(nextWorkspace, current), {
           level: nextWorkspace.cloudRun.status === "failed" ? "warning" : "success",
-          message: nextWorkspace.cloudRun.status === "failed" ? "服务器返回失败诊断" : "产品实战流程完成",
+          message: nextWorkspace.cloudRun.status === "failed" ? "本地脚本已就绪，服务器阶段失败" : "产品实战流程完成",
           detail: `耗时 ${Math.round((Date.now() - startedAt.getTime()) / 1000)} 秒；当前阶段：${nextWorkspace.cloudRun.stage ?? nextWorkspace.cloudRun.status}。`,
         }));
         setActiveNav(nextWorkspace.cloudRun.status === "succeeded" ? "assets" : "execution_packages");

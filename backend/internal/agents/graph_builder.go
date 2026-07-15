@@ -92,7 +92,7 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 	if intelligence == nil && project.ProjectIntelligence != nil {
 		intelligence = project.ProjectIntelligence
 	}
-	intelligence = ensureRuntimeAdaptiveInteractionPlan(project, intelligence)
+	intelligence = ensureProjectIntelligenceForGraph(project, intelligence)
 	if err := requireVerifiedInteractionPlan(project, intelligence); err != nil {
 		return nil, err
 	}
@@ -385,13 +385,13 @@ func requireVerifiedInteractionPlan(project *model.ProjectContext, intelligence 
 	return nil
 }
 
-func ensureRuntimeAdaptiveInteractionPlan(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) *model.ProjectIntelligencePack {
+func ensureProjectIntelligenceForGraph(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) *model.ProjectIntelligencePack {
 	if project == nil {
 		return intelligence
 	}
 	if intelligence == nil {
 		intelligence = &model.ProjectIntelligencePack{
-			ID:            "intel_runtime_adaptive_" + project.ID,
+			ID:            "intel_graph_input_" + project.ID,
 			ProjectID:     project.ID,
 			SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
 			Confidence:    0.46,
@@ -401,13 +401,11 @@ func ensureRuntimeAdaptiveInteractionPlan(project *model.ProjectContext, intelli
 	if intelligence.DemoIntent == nil {
 		intelligence.DemoIntent = demoIntentFromProjectContext(project)
 	}
+	if intelligence.RunIntentScope == nil {
+		intelligence.RunIntentScope = runIntentScopeForProject(project)
+	}
 	if intelligence.VerifiedInteraction != nil && intelligence.VerifiedInteraction.BusinessActionCount > 0 {
 		return intelligence
-	}
-	plan, missing := adaptivePlanFromIntentEvidence(project, intelligence, nil, "graph_builder_runtime_adaptive", intelligence.MissingEvidenceReport)
-	if plan != nil && plan.BusinessActionCount > 0 {
-		intelligence.VerifiedInteraction = plan
-		intelligence.MissingEvidenceReport = missing
 	}
 	return intelligence
 }
@@ -453,7 +451,7 @@ func (a *GraphBuilderAgent) generateGraphFromVerifiedInteractions(ctx context.Co
 	}
 	plan := intelligence.VerifiedInteraction
 	graphID := fmt.Sprintf("graph_%d", time.Now().UnixNano())
-	entryPoint := firstNonEmpty(plan.SourceURL, graphEntryPoint(project, productMap), project.ProductURL)
+	entryPoint := scopedProductURL(project, intelligence.RunIntentScope, firstNonEmpty(plan.SourceURL, graphEntryPoint(project, productMap), project.ProductURL))
 	if entryPoint == "" {
 		entryPoint = "input://product_context"
 	}
@@ -469,8 +467,8 @@ func (a *GraphBuilderAgent) generateGraphFromVerifiedInteractions(ctx context.Co
 	}
 	graph := model.NewDemoWorkflowGraph(graphID, project.ID, entryPoint)
 	graph.Status = model.GraphStatusReviewReady
-	graph.Name = "需求驱动的自适应演示流程"
-	graph.Summary = "基于用户需求、代码证据和页面预扫描结果生成；页面证据不足时使用运行时自适应发现，而不是生成无关控件脚本。"
+	graph.Name = "需求驱动的已验证演示流程"
+	graph.Summary = "基于用户需求、代码证据和页面预扫描结果生成；页面证据不足时阻止脚本生成，避免访问控制面或无关控件。"
 	graph.Intent = &model.WorkflowIntent{
 		UseCase:            useCase,
 		Audience:           primaryAudience(project),
@@ -483,11 +481,21 @@ func (a *GraphBuilderAgent) generateGraphFromVerifiedInteractions(ctx context.Co
 	graph.Requirements = append(requirementsFromProject(project), graphRequirementsFromIntent(intelligence.DemoIntent)...)
 	graph.Variables = append(graph.Variables, demoCredentialVariables(project)...)
 	graph.Nodes = []*model.GraphNode{verifiedStartNode(project, entryPoint, featureID, reportEvidenceRefs(report))}
+	businessNodeCount := 0
 	for index, action := range plan.Actions {
+		if !isURLAllowedByRunScope(intelligence.RunIntentScope, action.URL) || isControlPlaneSignal(intelligence.RunIntentScope, action.URL, action.Label, action.Selector) {
+			continue
+		}
 		node := graphNodeFromVerifiedAction(project, action, index+1, featureID)
 		if node != nil {
 			graph.Nodes = append(graph.Nodes, node)
+			if node.ActionSpec != nil && isBusinessAction(node.ActionSpec.Type) {
+				businessNodeCount++
+			}
 		}
+	}
+	if businessNodeCount == 0 {
+		return nil, errors.New("missing_product_evidence: no scoped product business action remained after filtering control-plane and chrome candidates")
 	}
 	graph.Nodes = append(graph.Nodes, verifiedCloseNode(project, featureID, reportEvidenceRefs(report)))
 	graph.Edges = sequentialGraphEdges(graph.Nodes)
@@ -796,7 +804,7 @@ func verifiedGraphValidations(entryPoint string) []*model.ValidationSpec {
 }
 
 func verifiedSuccessCriteria(plan *model.VerifiedInteractionPlan) []string {
-	criteria := []string{"入口页面可打开", "脚本只围绕需求目标生成业务动作", "页面证据不足时使用运行时自适应 selector 发现并返回诊断"}
+	criteria := []string{"入口页面可打开", "脚本只围绕需求目标生成业务动作", "所有业务动作来自已验证的产品页面证据"}
 	if plan != nil {
 		for _, action := range plan.Actions {
 			if action.IsBusiness {

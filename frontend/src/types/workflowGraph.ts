@@ -831,6 +831,7 @@ export type ProjectIntelligencePack = {
   project_id: string;
   schema_version: "demoops.project_intelligence_pack.v1" | string;
   demo_intent?: DemoIntentSpec;
+  run_intent_scope?: RunIntentScope;
   architecture?: ProjectArchitectureMap;
   feature_capabilities?: FeatureCapability[];
   feature_trace?: FeatureTraceResult;
@@ -846,6 +847,18 @@ export type ProjectIntelligencePack = {
   source_digest_sha256?: string;
   evidence_refs?: EvidenceRef[];
   confidence?: number;
+  created_at?: string;
+};
+
+export type RunIntentScope = {
+  id: string;
+  project_id: string;
+  schema_version?: string;
+  product_origin?: string;
+  product_url?: string;
+  allowed_origins?: string[];
+  forbidden_path_prefixes?: string[];
+  forbidden_signals?: string[];
   created_at?: string;
 };
 

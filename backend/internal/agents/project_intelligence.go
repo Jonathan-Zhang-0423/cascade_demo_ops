@@ -66,6 +66,7 @@ func (g *ProjectIntelligenceGraph) RunProjectIntelligence(
 		ID:                 "project_intelligence_" + project.ID,
 		ProjectID:          project.ID,
 		SchemaVersion:      model.ProjectIntelligencePackSchemaVersion,
+		RunIntentScope:     runIntentScopeForProject(project),
 		InputFingerprints:  inputFingerprints(project, codeSnapshots, pageSnapshots),
 		SourceDigestSHA256: combinedSourceDigest(codeSnapshots),
 		Confidence:         0.74,
@@ -805,6 +806,9 @@ func traceGoalToEvidence(goal model.DemoIntentGoal, state *ProjectUnderstandingS
 		keywords = intentKeywordsForText(goal.Label)
 	}
 	for _, route := range state.Pack.Architecture.RouteTree {
+		if !isURLAllowedByRunScope(state.Pack.RunIntentScope, route.Path) || isControlPlaneSignal(state.Pack.RunIntentScope, route.Path, route.Name) {
+			continue
+		}
 		if keywordMatchScore(keywords, route.Path, route.Name) > 0 {
 			trace.MatchedRouteRefs = append(trace.MatchedRouteRefs, route.ID)
 			trace.EvidenceRefs = append(trace.EvidenceRefs, route.EvidenceRefs...)
@@ -817,6 +821,9 @@ func traceGoalToEvidence(goal model.DemoIntentGoal, state *ProjectUnderstandingS
 		}
 	}
 	for _, api := range state.Pack.APIContracts {
+		if isControlPlaneSignal(state.Pack.RunIntentScope, api.Path, api.Purpose) {
+			continue
+		}
 		if keywordMatchScore(keywords, api.Path, api.Purpose, strings.Join(api.RequestFields, " "), strings.Join(api.ResponseFields, " ")) > 0 {
 			trace.MatchedAPIRefs = append(trace.MatchedAPIRefs, api.ID)
 			trace.EvidenceRefs = append(trace.EvidenceRefs, api.EvidenceRefs...)
@@ -829,6 +836,9 @@ func traceGoalToEvidence(goal model.DemoIntentGoal, state *ProjectUnderstandingS
 		}
 	}
 	for _, probe := range probes {
+		if !isURLAllowedByRunScope(state.Pack.RunIntentScope, probe.URL) || isControlPlaneSignal(state.Pack.RunIntentScope, probe.URL, probe.Label, probe.Selector) {
+			continue
+		}
 		score := interactionProbeGoalScore(goal, probe)
 		if score <= 0 {
 			continue
@@ -869,14 +879,18 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 			if selector == "" {
 				continue
 			}
+			actionURL := firstNonEmpty(action.TargetURL, page.URL)
+			if !isURLAllowedByRunScope(state.Pack.RunIntentScope, actionURL) || isControlPlaneSignal(state.Pack.RunIntentScope, actionURL, action.Label, selector) {
+				continue
+			}
 			kind := firstNonEmpty(action.Kind, actionKindFromSelector(selector))
 			probes = append(probes, model.InteractionProbe{
 				ID:             firstNonEmpty(action.ID, "probe_page_"+shortHash(page.ID+selector)),
 				Label:          firstNonEmpty(action.Label, labelFromSelector(selector)),
 				Kind:           kind,
 				Selector:       selector,
-				URL:            firstNonEmpty(action.TargetURL, page.URL),
-				RouteRef:       safeID("route", pathFromURL(firstNonEmpty(action.TargetURL, page.URL))),
+				URL:            actionURL,
+				RouteRef:       safeID("route", pathFromURL(actionURL)),
 				Source:         "page_reader",
 				IsBusiness:     isBusinessAction(graphActionTypeFromKind(kind, selector)),
 				IsChrome:       actionLooksLikeChromeControl(action.Label, selector),
@@ -887,6 +901,9 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 		}
 		for _, selector := range page.StableSelectors {
 			if selector.Value == "" {
+				continue
+			}
+			if !isURLAllowedByRunScope(state.Pack.RunIntentScope, page.URL) || isControlPlaneSignal(state.Pack.RunIntentScope, page.URL, selector.Value) {
 				continue
 			}
 			kind := actionKindFromSelector(selector.Value)
@@ -916,6 +933,9 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 				if selector == "" {
 					continue
 				}
+				if isControlPlaneSignal(state.Pack.RunIntentScope, component.Name, strings.Join(component.ActionLabels, " "), selector) {
+					continue
+				}
 				kind := actionKindFromSelector(selector)
 				probes = append(probes, model.InteractionProbe{
 					ID:            "probe_component_" + shortHash(component.ID+selector),
@@ -933,6 +953,9 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 		}
 		for _, selector := range snapshot.Selectors {
 			if selector.Value == "" {
+				continue
+			}
+			if isControlPlaneSignal(state.Pack.RunIntentScope, selector.Value) {
 				continue
 			}
 			component := componentByPathHash[selector.FilePathHashSHA256]

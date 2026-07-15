@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +17,6 @@ import (
 )
 
 func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T) {
-	t.Parallel()
 	wellKnownHits := 0
 	registerHits := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,4 +85,55 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T
 	if session.BaseURL != server.URL+"/aigc" || session.SessionToken != "cassess_test" {
 		t.Fatalf("unexpected exchange session: %+v", session)
 	}
+}
+
+func TestEnsureExchangeSessionReportsCloudAuthUnavailableWhenRegisterMissing(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != "https://cascadeai.cn/aigc/v1/app-installations/register" {
+			t.Errorf("unexpected exchange request URL: %s", r.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Status:     "404 Not Found",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("404 page not found")),
+			Request:    r,
+		}, nil
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile:              config.ProfileDev,
+		Environment:          "development",
+		Mode:                 model.AppModeDesktop,
+		DatabaseDialect:      config.DatabaseSQLite,
+		SQLitePath:           filepath.Join(root, "cascade_demoops.db"),
+		DataRoot:             root,
+		ArtifactRoot:         filepath.Join(root, "artifacts"),
+		CacheRoot:            filepath.Join(root, "cache"),
+		LogRoot:              filepath.Join(root, "logs"),
+		ResourceRoot:         root,
+		DevRepoRoot:          root,
+		CloudExchangeBaseURL: "https://cascadeai.cn/aigc",
+		LLMMode:              config.LLMModeDeterministic,
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.EnsureExchangeSession(context.Background(), "https://cascadeai.cn", "org_1", "project_1")
+	if err == nil {
+		t.Fatal("expected cloud auth unavailable error")
+	}
+	if code := bridgeErrorCode(err); code != "cloud_auth_unavailable" {
+		t.Fatalf("expected cloud_auth_unavailable, got %q: %v", code, err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }

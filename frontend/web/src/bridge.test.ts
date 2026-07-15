@@ -409,115 +409,123 @@ describe("desktop bridge contract", () => {
       rawUserPrompt: "展示 Cascade 从项目理解到自动录制的完整流程",
       targetAudience: "中国产品运营团队",
     });
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        ok: true,
-        data: {
-          state: {
-            project_id: "project_cloud_real",
-            current_node: "HumanApprove",
-            status: "awaiting_human_approval",
-            project_context: {
-              id: "project_cloud_real",
-              product_url: "https://cascadeai.cn",
-              product_description: "展示 Cascade 从项目理解到自动录制的完整流程",
-              target_audience: "中国产品运营团队",
-              inputs: workspace.inputBundle,
-            },
-            workflow_graph: workspace.planReview.graph,
-            script_markdown: "# 产品实战思路文档\n\n自动生成并上传服务器录制。",
-            executable_script_bundle: {
-              ...workspace.executableScriptBundle,
-              id: "bundle_cloud_real",
-              project_id: "project_cloud_real",
-              reproducibility: {
-                ...workspace.executableScriptBundle?.reproducibility,
-                graph_hash_sha256: "sha256:graph-cloud",
-                plan_hash_sha256: "sha256:plan-cloud",
-                script_hash_sha256: "sha256:script-cloud",
-                markdown_hash_sha256: "sha256:markdown-cloud",
-                bundle_hash_sha256: "sha256:bundle-cloud",
-              },
-            },
-          },
-          build: {
-            org_id: "org_desktop",
-            project_id: "project_cloud_real",
-            package: { package_id: "pkg_bundle_cloud_real" },
-            envelope: { crypto: { payload_digest_sha256: "sha256:payload-cloud" } },
-            payload_ref: { kind: "inline", sha256: "sha256:payload-cloud", encrypted: true, sensitive: true },
-          },
-          init: {
-            upload_id: "upload_cloud_real",
-            server_public_key_id: "mock-kms-202607",
-            supported_crypto_suites: ["aes-256-gcm"],
-            cascade_execution_ips: ["203.0.113.10"],
-          },
-          upload: {
-            exchange_package_id: "xpkg_cloud_real",
-            cloud_job_id: "job_cloud_real",
-            status: "running",
-          },
-          status: {
-            exchange_package_id: "xpkg_cloud_real",
-            cloud_job_id: "job_cloud_real",
-            status: "completed",
-            stage: "completed",
-            message: "录制完成，结果包已生成。",
-            progress_percent: 100,
-            result_package_id: "result_cloud_real",
-            stage_history: [
-              { stage: "accepted", status: "completed", message: "执行包已接收", progress_percent: 20, updated_at: "2026-07-13T10:00:00Z" },
-              { stage: "validating", status: "completed", message: "脚本校验通过", progress_percent: 45, updated_at: "2026-07-13T10:00:04Z" },
-              { stage: "running_script", status: "completed", message: "浏览器脚本执行完成", progress_percent: 80, updated_at: "2026-07-13T10:00:20Z" },
-              { stage: "completed", status: "completed", message: "结果包返回", progress_percent: 100, updated_at: "2026-07-13T10:00:30Z" },
-            ],
-            result_summary: {
-              result_id: "result_cloud_real",
-              demo_video_count: 1,
-              deliverables: [{ id: "artifact_video_real", kind: "video", role: "final_demo_video", uri: "artifact://video.webm", sensitive: true }],
-            },
-          },
-          result: {
-            result_id: "result_cloud_real",
-            source_package_id: "pkg_bundle_cloud_real",
-            cloud_job_id: "job_cloud_real",
-            schema_version: "demoops.recording_result_package.v1",
-            status: "generated",
-            verification_report: { reproducibility_match: true, pass_rate: 1 },
-            delivery: {
-              result_package_ref: {
-                id: "artifact_result_real",
-                kind: "result_package",
-                uri: "artifact://result.json",
-                sha256: "sha256:result",
-                encrypted: true,
-                sensitive: true,
-              },
-              asset_refs: [{
-                id: "artifact_video_real",
-                role: "final_demo_video",
-                kind: "video",
-                uri: "artifact://video.webm",
-                mime_type: "video/webm",
-                sha256: "sha256:video",
-                encrypted: true,
-                sensitive: true,
-              }],
-              ack_required: true,
-            },
-            created_at: "2026-07-13T10:00:31Z",
-          },
-          ack: {
-            result_package_id: "result_cloud_real",
-            status: "acked",
-            delivery_status: "acked",
-          },
+    const preparedState = {
+      project_id: "project_cloud_real",
+      current_node: "HumanApprove",
+      status: "awaiting_human_approval",
+      project_context: {
+        id: "project_cloud_real",
+        product_url: "https://cascadeai.cn",
+        product_description: "展示 Cascade 从项目理解到自动录制的完整流程",
+        target_audience: "中国产品运营团队",
+        inputs: workspace.inputBundle,
+      },
+      workflow_graph: workspace.planReview.graph,
+      script_markdown: "# 产品实战思路文档\n\n自动生成并上传服务器录制。",
+      executable_script_bundle: {
+        ...workspace.executableScriptBundle,
+        id: "bundle_cloud_real",
+        project_id: "project_cloud_real",
+        reproducibility: {
+          ...workspace.executableScriptBundle?.reproducibility,
+          graph_hash_sha256: "sha256:graph-cloud",
+          plan_hash_sha256: "sha256:plan-cloud",
+          script_hash_sha256: "sha256:script-cloud",
+          markdown_hash_sha256: "sha256:markdown-cloud",
+          bundle_hash_sha256: "sha256:bundle-cloud",
         },
-      }),
-    }));
+      },
+    };
+    const build = {
+      org_id: "org_desktop",
+      project_id: "project_cloud_real",
+      package: { package_id: "pkg_bundle_cloud_real" },
+      envelope: { crypto: { payload_digest_sha256: "sha256:payload-cloud" } },
+      payload_ref: { kind: "inline", sha256: "sha256:payload-cloud", encrypted: true, sensitive: true },
+    };
+    const init = {
+      upload_id: "upload_cloud_real",
+      server_public_key_id: "mock-kms-202607",
+      supported_crypto_suites: ["aes-256-gcm"],
+      cascade_execution_ips: ["203.0.113.10"],
+    };
+    const upload = {
+      exchange_package_id: "xpkg_cloud_real",
+      cloud_job_id: "job_cloud_real",
+      status: "running",
+    };
+    const status = {
+      exchange_package_id: "xpkg_cloud_real",
+      cloud_job_id: "job_cloud_real",
+      status: "completed",
+      stage: "completed",
+      message: "录制完成，结果包已生成。",
+      progress_percent: 100,
+      result_package_id: "result_cloud_real",
+      stage_history: [
+        { stage: "accepted", status: "completed", message: "执行包已接收", progress_percent: 20, updated_at: "2026-07-13T10:00:00Z" },
+        { stage: "validating", status: "completed", message: "脚本校验通过", progress_percent: 45, updated_at: "2026-07-13T10:00:04Z" },
+        { stage: "running_script", status: "completed", message: "浏览器脚本执行完成", progress_percent: 80, updated_at: "2026-07-13T10:00:20Z" },
+        { stage: "completed", status: "completed", message: "结果包返回", progress_percent: 100, updated_at: "2026-07-13T10:00:30Z" },
+      ],
+      result_summary: {
+        result_id: "result_cloud_real",
+        demo_video_count: 1,
+        deliverables: [{ id: "artifact_video_real", kind: "video", role: "final_demo_video", uri: "artifact://video.webm", sensitive: true }],
+      },
+    };
+    const resultPackage = {
+      result_id: "result_cloud_real",
+      source_package_id: "pkg_bundle_cloud_real",
+      cloud_job_id: "job_cloud_real",
+      schema_version: "demoops.recording_result_package.v1",
+      status: "generated",
+      verification_report: { reproducibility_match: true, pass_rate: 1 },
+      delivery: {
+        result_package_ref: {
+          id: "artifact_result_real",
+          kind: "result_package",
+          uri: "artifact://result.json",
+          sha256: "sha256:result",
+          encrypted: true,
+          sensitive: true,
+        },
+        asset_refs: [{
+          id: "artifact_video_real",
+          role: "final_demo_video",
+          kind: "video",
+          uri: "artifact://video.webm",
+          mime_type: "video/webm",
+          sha256: "sha256:video",
+          encrypted: true,
+          sensitive: true,
+        }],
+        ack_required: true,
+      },
+      created_at: "2026-07-13T10:00:31Z",
+    };
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      let data: unknown = {};
+      if (url.includes("/product-run/prepare")) {
+        data = { state: preparedState, build };
+      } else if (url.includes("/cloud/init")) {
+        data = { build, init };
+      } else if (url.includes("/cloud/upload")) {
+        data = { build, upload };
+      } else if (url.includes("/cloud/status")) {
+        data = status;
+      } else if (url.includes("/cloud/result")) {
+        data = resultPackage;
+      } else if (url.includes("/cloud/ack")) {
+        data = { result_package_id: "result_cloud_real", status: "acked", delivery_status: "acked" };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, data }),
+      };
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const bridge = createLocalBridgeClient("http://127.0.0.1:4317");
@@ -535,16 +543,18 @@ describe("desktop bridge contract", () => {
       checksum: "sha256:video",
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud-lifecycle",
+      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/product-run/prepare",
       expect.objectContaining({ method: "POST" }),
     );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4317/v1/desktop/projects/project_cloud_real/cloud/init",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock.mock.calls.map((call) => String(call[0])).some((url) => url.includes("/cloud-lifecycle"))).toBe(false);
     const firstCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     const body = JSON.parse(String(firstCall[1].body));
     expect(body).toMatchObject({
       org_id: "org_desktop",
-      auto_ack: true,
-      poll_interval_ms: 1000,
-      timeout_sec: 900,
     });
     expect(body.user_input).toMatchObject({
       product_url: "https://cascadeai.cn",
@@ -553,6 +563,80 @@ describe("desktop bridge contract", () => {
       target_audience: "中国产品运营团队",
     });
     expect(JSON.stringify(body)).not.toMatch(/0{6}|Authorization|sk-/i);
+  });
+
+  it("keeps prepared script package when cloud auth capability is unavailable", async () => {
+    const workspace = updateWorkspaceInputs(createWorkspace("product_demo"), {
+      productURL: "https://cascadeai.cn",
+      localRepoPath: "C:\\Users\\CascadeAI\\Desktop\\CascadeAI\\Cascade",
+      rawUserPrompt: "演示创建项目和查看工作台",
+      targetAudience: "中国产品运营团队",
+    });
+    const build = {
+      org_id: "org_desktop",
+      project_id: "project_cloud_auth",
+      package: { package_id: "pkg_ready_local" },
+      envelope: { crypto: { payload_digest_sha256: "sha256:payload-ready" } },
+      payload_ref: { kind: "inline", sha256: "sha256:payload-ready", encrypted: true, sensitive: true },
+    };
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/cloud/init")) {
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({
+            ok: false,
+            error: "服务器尚未部署 App installation 自动配对接口，无法在无手动 token 的情况下上传执行包。",
+            error_info: {
+              code: "cloud_auth_unavailable",
+              message: "服务器尚未部署 App installation 自动配对接口，无法在无手动 token 的情况下上传执行包。",
+              correlation_id: "bridge_test",
+              retryable: false,
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          data: {
+            state: {
+              project_id: "project_cloud_auth",
+              current_node: "HumanApprove",
+              status: "awaiting_human_approval",
+              project_context: {
+                id: "project_cloud_auth",
+                product_url: "https://cascadeai.cn",
+                product_description: "演示创建项目和查看工作台",
+                target_audience: "中国产品运营团队",
+                inputs: workspace.inputBundle,
+              },
+              workflow_graph: workspace.planReview.graph,
+              script_markdown: "# 本地脚本已就绪",
+              executable_script_bundle: workspace.executableScriptBundle,
+            },
+            build,
+          },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bridge = createLocalBridgeClient("http://127.0.0.1:4317");
+    const result = await bridge.runProductLifecycle(workspace);
+
+    expect(result.ok).toBe(true);
+    expect(result.data?.stage).toBe("package_approval");
+    expect(result.data?.cloudRun.status).toBe("failed");
+    expect(result.data?.cloudRun.stage).toBe("cloud_auth_unavailable");
+    expect(result.data?.packagePreview.packageID).toBe("pkg_ready_local");
+    const calledURLs = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(calledURLs.some((url) => url.includes("/product-run/prepare"))).toBe(true);
+    expect(calledURLs.some((url) => url.includes("/cloud/upload"))).toBe(false);
+    expect(calledURLs.some((url) => url.includes("/cloud-lifecycle"))).toBe(false);
   });
 
   it("maps project intelligence fields from local cascade state", () => {

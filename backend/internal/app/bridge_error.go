@@ -134,6 +134,7 @@ func isLLMJSONError(lower string) bool {
 
 func isMissingEvidenceError(lower string) bool {
 	return strings.Contains(lower, "missing verified interaction evidence") ||
+		strings.Contains(lower, "missing_product_evidence") ||
 		strings.Contains(lower, "verified interaction plan is missing") ||
 		strings.Contains(lower, "no verified business action")
 }

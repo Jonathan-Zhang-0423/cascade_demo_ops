@@ -144,7 +144,7 @@ type ScreenshotCaptureResult = {
 const screenshotTimeoutMS = 8000;
 const defaultViewport = { width: 1920, height: 1080 };
 const pageSettleTimeoutMS = 5000;
-const pageSettleFrameMS = 250;
+const pageSettleMinimumMS = 1000;
 
 export async function recordWithPlaywright(request: BrowserRecordRequest): Promise<BrowserRecordResult> {
   const playwright = await import("playwright");
@@ -412,6 +412,7 @@ async function captureStepScreenshot(page: any, outputDir: string, step: Browser
 async function captureFailureScreenshot(page: any, outputDir: string, index: number, globalMaskSelectors: string[]): Promise<string | undefined> {
   const screenshotPath = path.join(outputDir, `failure-step-${String(index + 1).padStart(3, "0")}.png`);
   const mask = globalMaskSelectors.filter(Boolean).map((selector) => page.locator(selector));
+  await waitForPageSettled(page, Math.min(pageSettleTimeoutMS, 3000));
   await page.screenshot({ path: screenshotPath, fullPage: false, mask }).catch(() => undefined);
   const fileStat = await stat(screenshotPath).catch(() => undefined);
   return fileStat?.isFile() ? screenshotPath : undefined;
@@ -460,8 +461,37 @@ function waitUntil(value?: string): "load" | "domcontentloaded" | "networkidle" 
 }
 
 async function waitForPageSettled(page: any, timeoutMS = pageSettleTimeoutMS): Promise<void> {
+  const timeout = Math.max(timeoutMS, pageSettleMinimumMS);
+  await page.waitForLoadState("domcontentloaded", { timeout }).catch(() => undefined);
   await page.waitForLoadState("networkidle", { timeout: timeoutMS }).catch(() => undefined);
-  await page.waitForTimeout(pageSettleFrameMS).catch(() => undefined);
+  await page.waitForTimeout(pageSettleMinimumMS).catch(() => undefined);
+  await page.evaluate(() => {
+    const doc = (globalThis as any).document;
+    return doc?.fonts?.ready;
+  }).catch(() => undefined);
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    const raf = (globalThis as any).requestAnimationFrame;
+    if (typeof raf !== "function") {
+      resolve();
+      return;
+    }
+    raf(() => raf(() => resolve()));
+  })).catch(() => undefined);
+  await page.waitForFunction(
+    () => {
+      const state = globalThis as any;
+      const doc = state.document;
+      if (!doc) return true;
+      const controls = doc.querySelectorAll("button,a[href],input,textarea,select,[role='button'],[role='link'],[data-testid],[data-test],[data-cy]").length;
+      const bodyTextLength = (doc.body?.innerText || "").trim().length;
+      const signature = `${doc.readyState}|${bodyTextLength}|${controls}|${Math.round(doc.body?.getBoundingClientRect().height || 0)}`;
+      const stable = state.__cascadeRecordingRenderSignature === signature;
+      state.__cascadeRecordingRenderSignature = signature;
+      return stable && doc.readyState !== "loading";
+    },
+    undefined,
+    { timeout: Math.min(timeout, 2500), polling: 250 },
+  ).catch(() => undefined);
 }
 
 function classifyPlaywrightError(message: string): string {

@@ -638,12 +638,12 @@ func scriptQualityFromGraph(graph *model.DemoWorkflowGraph) scriptQualityReport 
 		if isBusinessAction(actionType) && selectorUsableForBusinessAction(selector) && nodeVerifiedForBusinessAction(node) {
 			report.ExecutableActionCount++
 		} else if isBusinessAction(actionType) {
-			report.Warnings = append(report.Warnings, "业务动作缺少稳定 selector 时会使用运行时自适应发现；失败会进入诊断和修复闭环。")
+			report.Warnings = append(report.Warnings, "业务动作缺少稳定且已验证的 selector，上传前应补充页面扫描、截图标注或 data-testid/role/name 证据。")
 		}
 	}
 	report.ObservationOnly = report.ExecutableActionCount == 0
 	if report.ObservationOnly {
-		report.Blockers = append(report.Blockers, "当前执行图没有 click/fill/select/upload/api_call 等真实业务动作，不能自动上传录制。请确认需求目标能生成运行时自适应业务动作。")
+		report.Blockers = append(report.Blockers, "当前执行图没有 click/fill/select/upload/api_call 等已验证真实业务动作，不能自动上传录制。请确认需求目标能在产品页面中找到可见、可用、可解释的控件证据。")
 	}
 	if report.GenericSelectorCount > 0 {
 		report.Warnings = append(report.Warnings, "检测到 body/main/section/div 等泛 selector，业务动作不会使用这些 selector 作为 blocking 目标。")
@@ -716,7 +716,7 @@ func scriptSafetyPolicy(project *model.ProjectContext, graph *model.DemoWorkflow
 	}
 	return model.ScriptSafetyPolicy{
 		AllowedDomains: allowedDomains(project, graph),
-		ForbiddenPages: append([]string{}, project.ForbiddenPages...),
+		ForbiddenPages: uniqueStrings(append(append([]string{}, project.ForbiddenPages...), defaultControlPlaneForbiddenPaths()...)),
 		ForbiddenData:  append([]string{}, project.ForbiddenData...),
 		Redactions:     redactionPolicyForProject(project, graph),
 		PIIHandling:    piiHandling,

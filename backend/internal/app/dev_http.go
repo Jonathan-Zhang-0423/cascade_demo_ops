@@ -190,6 +190,44 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		initResponse, err := s.service.InitCloudExecutionPackageUpload(r.Context(), build)
 		result := CloudUploadInitResult{Build: &build, Init: initResponse, CloudBase: session.BaseURL}
 		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/product-run/prepare":
+		startedAt := time.Now()
+		var request CloudLifecycleRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := decodeJSON(r, &request); err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		if request.ProjectID == "" {
+			request.ProjectID = projectID
+		}
+		s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
+			Level:   orchestrator.ProgressLevelInfo,
+			Message: "开始本地产品实战准备",
+			Detail:  "只运行本地理解、页面预扫描、执行图和脚本包生成；不会连接云端 exchange。",
+		})
+		ctx := orchestrator.WithProgressSink(r.Context(), func(event orchestrator.ProgressEvent) {
+			s.emitProjectEvent(projectID, event)
+		})
+		result, err := s.service.PrepareProductRun(ctx, request)
+		if err != nil {
+			s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
+				Level:     orchestrator.ProgressLevelError,
+				Message:   "本地产品实战准备失败",
+				Detail:    err.Error(),
+				ElapsedMS: time.Since(startedAt).Milliseconds(),
+			})
+		} else {
+			s.events.CopyProjectEvents(projectID, result.State.ProjectID)
+			s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
+				Level:     orchestrator.ProgressLevelSuccess,
+				Message:   "本地脚本包已准备完成",
+				Detail:    "已生成三合一执行包预览；后续服务器连接和上传会单独执行。",
+				ElapsedMS: time.Since(startedAt).Milliseconds(),
+			})
+		}
+		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/upload":
 		var request CloudUploadRequest
 		if err := decodeJSON(r, &request); err != nil {
@@ -269,7 +307,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
 			Level:   orchestrator.ProgressLevelInfo,
 			Message: "开始产品实战自动流程",
-			Detail:  "本地生成执行包后将自动上传服务器、轮询状态并获取结果包。",
+			Detail:  "兼容旧接口：本地生成执行包后将自动上传服务器、轮询状态并获取结果包。",
 		})
 		ctx := orchestrator.WithProgressSink(r.Context(), func(event orchestrator.ProgressEvent) {
 			s.emitProjectEvent(projectID, event)

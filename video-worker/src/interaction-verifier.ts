@@ -3,6 +3,7 @@ type VerifyInteractionRequest = {
   timeout_ms?: number;
   headless?: boolean;
   allowed_domains?: string[];
+  forbidden_path_prefixes?: string[];
   candidates?: InteractionCandidate[];
   intent_goals?: InteractionGoal[];
   demo_username?: string;
@@ -58,6 +59,8 @@ type VerifiedInteractionCandidate = InteractionCandidate & {
   verified_at?: string;
 };
 
+const minimumEvidenceSettleMS = 1000;
+
 export async function verifyInteractions(request: VerifyInteractionRequest): Promise<VerifyInteractionResult> {
   const productURL = request.product_url || request.candidates?.find((candidate) => candidate.url)?.url;
   const scanID = `browser_scan_${hashText(`${productURL || "missing"}|${Date.now()}`)}`;
@@ -71,6 +74,16 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
       error: { code: "product_url_missing", message: "product_url is required for readonly interaction verification." },
     };
   }
+  if (isURLForbiddenByScope(productURL, request)) {
+    return {
+      ok: false,
+      verification_mode: "playwright_readonly_scan",
+      browser_scan_id: scanID,
+      source_url: productURL,
+      results,
+      error: { code: "control_plane_scope_violation", message: "product_url points to a forbidden control-plane path." },
+    };
+  }
 
   const playwright = await import("playwright");
   const browser = await playwright.chromium.launch({ headless: request.headless ?? true });
@@ -82,7 +95,7 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
   };
   try {
     await page.goto(productURL, { waitUntil: "domcontentloaded", timeout });
-    await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 8000) }).catch(() => undefined);
+    await waitForPageEvidenceReady(page, Math.min(timeout, 8000));
     const loginStatus = await attemptLoginIfCredentialsProvided(page, {
       ...(request.demo_username ? { username: request.demo_username } : {}),
       ...(request.demo_password ? { password: request.demo_password } : {}),
@@ -138,7 +151,7 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
         });
       }
     }
-    const discovered = await discoverBusinessActions(page, request.intent_goals || [], currentURL, pageTitle);
+    const discovered = await discoverBusinessActionsAcrossSafePages(page, request.intent_goals || [], request, currentURL, pageTitle);
     diagnostics.discovered_business_control_count = discovered.length;
     const seenSelectors = new Set(results.map((result) => normalizeSelectorText(result.selector)));
     for (const item of discovered) {
@@ -169,6 +182,7 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
 async function discoverBusinessActions(
   page: any,
   goals: InteractionGoal[],
+  request: VerifyInteractionRequest,
   pageURL: string,
   pageTitle: string,
 ): Promise<VerifiedInteractionCandidate[]> {
@@ -204,6 +218,7 @@ async function discoverBusinessActions(
 
   const scored = visibleControls
     .filter((control: any) => control.visible && !control.disabled)
+    .filter((control: any) => !isURLForbiddenByScope(control.attrs?.href, request))
     .map((control: any) => {
       const label = controlLabel(control);
       const selector = selectorForControl(control, label);
@@ -212,7 +227,7 @@ async function discoverBusinessActions(
       const goal = bestGoalForControl(label, selector, goals);
       return { control, label, selector, kind, score, goal };
     })
-    .filter((item: any) => item.selector && item.score >= 35 && !looksLikeChromeControl(`${item.label} ${item.selector}`))
+    .filter((item: any) => item.selector && item.score >= 35 && !looksLikeChromeControl(`${item.label} ${item.selector}`) && !looksLikeControlPlaneSignal(`${item.label} ${item.selector}`))
     .sort((a: any, b: any) => b.score - a.score)
     .slice(0, 8);
 
@@ -238,6 +253,64 @@ async function discoverBusinessActions(
     }
     return result;
   });
+}
+
+async function discoverBusinessActionsAcrossSafePages(
+  page: any,
+  goals: InteractionGoal[],
+  request: VerifyInteractionRequest,
+  pageURL: string,
+  pageTitle: string,
+): Promise<VerifiedInteractionCandidate[]> {
+  const out: VerifiedInteractionCandidate[] = [];
+  const seen = new Set<string>();
+  const add = (items: VerifiedInteractionCandidate[]) => {
+    for (const item of items) {
+      const key = normalizeSelectorText(`${item.selector}|${item.label}|${item.page_url}`);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+  };
+  add(await discoverBusinessActions(page, goals, request, pageURL, pageTitle));
+  if (out.length >= 3) return out;
+
+  const links = await safeExplorationLinks(page, goals, request);
+  const originalURL = page.url();
+  for (const link of links.slice(0, 4)) {
+    if (out.length >= 6) break;
+    await page.goto(link.href, { waitUntil: "domcontentloaded", timeout: Math.min(request.timeout_ms || 20000, 8000) }).catch(() => undefined);
+    await waitForPageEvidenceReady(page, Math.min(request.timeout_ms || 20000, 5000));
+    const title = await page.title().catch(() => "");
+    add(await discoverBusinessActions(page, goals, request, page.url(), title));
+  }
+  if (page.url() !== originalURL) {
+    await page.goto(originalURL, { waitUntil: "domcontentloaded", timeout: Math.min(request.timeout_ms || 20000, 6000) }).catch(() => undefined);
+    await waitForPageEvidenceReady(page, Math.min(request.timeout_ms || 20000, 5000));
+  }
+  return out;
+}
+
+async function safeExplorationLinks(page: any, goals: InteractionGoal[], request: VerifyInteractionRequest): Promise<Array<{ href: string; label: string; score: number }>> {
+  const links = await page.locator("a[href], [role='link'][href]").evaluateAll((elements: any[]) => {
+    return elements.slice(0, 160).map((element) => {
+      const html = element as any;
+      const text = (html.innerText || html.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120);
+      return {
+        href: html.href || element.getAttribute("href") || "",
+        label: [
+          text,
+          element.getAttribute("aria-label") || "",
+          element.getAttribute("title") || "",
+          element.getAttribute("data-testid") || "",
+        ].filter(Boolean).join(" "),
+      };
+    });
+  }).catch(() => []);
+  return links
+    .map((link: any) => ({ ...link, score: safeLinkScore(link.label, link.href, goals) }))
+    .filter((link: any) => link.href && link.score > 0 && !isURLForbiddenByScope(link.href, request))
+    .sort((a: any, b: any) => b.score - a.score);
 }
 
 function controlLabel(control: any): string {
@@ -281,7 +354,7 @@ function actionKindForControl(control: any): string {
 
 function businessControlScore(label: string, selector: string, goals: InteractionGoal[], kind: string): number {
   const normalized = normalizeSelectorText(`${label} ${selector}`);
-  if (!normalized || looksLikeChromeControl(normalized) || looksLikeLoginControl(normalized)) return 0;
+  if (!normalized || looksLikeChromeControl(normalized) || looksLikeLoginControl(normalized) || looksLikeControlPlaneSignal(normalized)) return 0;
   let score = 10;
   let hasBusinessSignal = false;
   if (selector.includes("data-testid") || selector.includes("data-test") || selector.includes("data-cy")) score += 35;
@@ -304,6 +377,19 @@ function businessControlScore(label: string, selector: string, goals: Interactio
     }
   }
   if (!hasBusinessSignal) return 0;
+  return score;
+}
+
+function safeLinkScore(label: string, href: string, goals: InteractionGoal[]): number {
+  const normalized = normalizeSelectorText(`${label} ${href}`);
+  if (!normalized || looksLikeControlPlaneSignal(normalized) || looksLikeDestructiveControl(normalized) || looksLikeLoginControl(normalized)) return 0;
+  let score = 0;
+  for (const keyword of ["dashboard", "workspace", "project", "demo", "asset", "workflow", "工作台", "项目", "演示", "资产", "工作流", "开始", "创建", "生成"]) {
+    if (normalized.includes(keyword)) score += 18;
+  }
+  for (const goal of goals) {
+    score += goalKeywords(goal).filter((keyword) => keyword && normalized.includes(keyword)).length * 25;
+  }
   return score;
 }
 
@@ -341,6 +427,41 @@ function looksLikeChromeControl(value: string): boolean {
 
 function looksLikeLoginControl(value: string): boolean {
   return /(登录|登陆|登入|sign\s*in|log\s*in|login|logout|退出|注册|创建账户|create\s*account|sign\s*up|register)/i.test(value);
+}
+
+function looksLikeControlPlaneSignal(value: string): boolean {
+  return /(\/aigc\b|\.well-known|\/v1\/|app-installations|execution-packages|result-packages|cascade-exchange|exchange envelope|cloud exchange|authorization bearer)/i.test(value);
+}
+
+function looksLikeDestructiveControl(value: string): boolean {
+  return /(delete|remove|destroy|drop|pay|payment|billing|invoice|apikey|api key|secret|删除|移除|销毁|付款|支付|账单|密钥|令牌)/i.test(value);
+}
+
+function isURLForbiddenByScope(value: string | undefined, request: VerifyInteractionRequest): boolean {
+  if (!value) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return looksLikeControlPlaneSignal(value);
+  }
+  const host = parsed.host.toLowerCase();
+  const allowed = request.allowed_domains || [];
+  if (allowed.length > 0) {
+    const matched = allowed.some((domain) => {
+      const normalized = domain.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").toLowerCase();
+      return normalized === host || host.endsWith(`.${normalized}`);
+    });
+    if (!matched) return true;
+  }
+  const path = parsed.pathname.toLowerCase();
+  for (const prefix of request.forbidden_path_prefixes || []) {
+    const normalized = `/${prefix.replace(/^\/+/, "").toLowerCase()}`;
+    if (normalized !== "/" && (path === normalized || path.startsWith(`${normalized.replace(/\/$/, "")}/`))) {
+      return true;
+    }
+  }
+  return looksLikeControlPlaneSignal(parsed.toString());
 }
 
 function looksLikeLoginURL(value: string): boolean {
@@ -388,8 +509,7 @@ async function attemptLoginIfCredentialsProvided(
     const trigger = await firstVisibleLoginTrigger(page);
     if (trigger) {
       await trigger.click({ timeout: 2500 }).catch(() => undefined);
-      await page.waitForLoadState("domcontentloaded", { timeout: Math.min(credentials.timeout, 6000) }).catch(() => undefined);
-      await page.waitForLoadState("networkidle", { timeout: Math.min(credentials.timeout, 6000) }).catch(() => undefined);
+      await waitForPageEvidenceReady(page, Math.min(credentials.timeout, 6000));
     }
   }
 
@@ -413,9 +533,7 @@ async function attemptLoginIfCredentialsProvided(
   } else {
     await passwordInput.press("Enter", { timeout: 2000 }).catch(() => undefined);
   }
-  await page.waitForLoadState("domcontentloaded", { timeout: Math.min(credentials.timeout, 8000) }).catch(() => undefined);
-  await page.waitForLoadState("networkidle", { timeout: Math.min(credentials.timeout, 8000) }).catch(() => undefined);
-  await page.waitForTimeout(1000).catch(() => undefined);
+  await waitForPageEvidenceReady(page, Math.min(credentials.timeout, 8000));
   const passwordStillVisible = await firstVisibleLocator(page, passwordInputSelectors(), 900);
   if (passwordStillVisible) {
     return "submitted_login_form_still_visible";
@@ -432,15 +550,48 @@ async function navigateToLikelyLoginPath(page: any, timeout: number): Promise<an
   for (const path of paths) {
     const target = new URL(path, current.origin).toString();
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: Math.min(timeout, 6000) }).catch(() => undefined);
-    await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 5000) }).catch(() => undefined);
+    await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
     const passwordInput = await firstVisibleLocator(page, passwordInputSelectors(), 1500);
     if (passwordInput) {
       return passwordInput;
     }
   }
   await page.goto(current.toString(), { waitUntil: "domcontentloaded", timeout: Math.min(timeout, 6000) }).catch(() => undefined);
-  await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 5000) }).catch(() => undefined);
+  await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
   return undefined;
+}
+
+async function waitForPageEvidenceReady(page: any, timeoutMS = 8000): Promise<void> {
+  await page.waitForLoadState("domcontentloaded", { timeout: timeoutMS }).catch(() => undefined);
+  await page.waitForLoadState("networkidle", { timeout: timeoutMS }).catch(() => undefined);
+  await page.waitForTimeout(minimumEvidenceSettleMS).catch(() => undefined);
+  await page.evaluate(() => {
+    const doc = (globalThis as any).document;
+    return doc?.fonts?.ready;
+  }).catch(() => undefined);
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    const raf = (globalThis as any).requestAnimationFrame;
+    if (typeof raf !== "function") {
+      resolve();
+      return;
+    }
+    raf(() => raf(() => resolve()));
+  })).catch(() => undefined);
+  await page.waitForFunction(
+    () => {
+      const state = globalThis as any;
+      const doc = state.document;
+      if (!doc) return true;
+      const controls = doc.querySelectorAll("button,a[href],input,textarea,select,[role='button'],[role='link'],[data-testid],[data-test],[data-cy]").length;
+      const bodyTextLength = (doc.body?.innerText || "").trim().length;
+      const signature = `${doc.readyState}|${bodyTextLength}|${controls}|${Math.round(doc.body?.getBoundingClientRect().height || 0)}`;
+      const stable = state.__cascadeEvidenceRenderSignature === signature;
+      state.__cascadeEvidenceRenderSignature = signature;
+      return stable && doc.readyState !== "loading";
+    },
+    undefined,
+    { timeout: Math.min(timeoutMS, 2500), polling: 250 },
+  ).catch(() => undefined);
 }
 
 async function firstVisibleLoginTrigger(page: any): Promise<any | undefined> {

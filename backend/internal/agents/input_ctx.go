@@ -61,7 +61,7 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 		BrandTone:          input.BrandTone,
 		MustShow:           mustShow,
 		MustNotShow:        mustNotShow,
-		ForbiddenPages:     input.ForbiddenPages,
+		ForbiddenPages:     uniqueStrings(append(append([]string{}, input.ForbiddenPages...), defaultControlPlaneForbiddenPaths()...)),
 		ForbiddenData:      input.ForbiddenData,
 		Inputs: &model.ProjectInputBundle{
 			ProductURLs:          productURLInputs(input),
@@ -108,7 +108,7 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 			AuditLogRequired:        true,
 		},
 		SecurityPolicy: &model.SecurityPolicy{
-			ForbiddenPages:       input.ForbiddenPages,
+			ForbiddenPages:       uniqueStrings(append(append([]string{}, input.ForbiddenPages...), defaultControlPlaneForbiddenPaths()...)),
 			ForbiddenData:        input.ForbiddenData,
 			PIIHandling:          "mask_in_artifacts",
 			NetworkCapturePolicy: "metadata_only_by_default",

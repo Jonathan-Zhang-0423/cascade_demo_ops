@@ -173,6 +173,41 @@ func TestDevHTTPBridgeInvalidLocalRepoPathDegradesWithoutFailing(t *testing.T) {
 	}
 }
 
+func TestPrepareProductRunDoesNotRequireCloudExchange(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	body, err := json.Marshal(CloudLifecycleRequest{UserInput: &orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		ProductDescription: "演示新建项目并查看工作台。",
+		TargetAudience:     "中国运营团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/local/product-run/prepare", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if !bridge.OK {
+		t.Fatalf("prepare should not require cloud exchange: %s", bridge.Error)
+	}
+	var prepared ProductRunPrepareResult
+	if err := json.Unmarshal(bridge.Data, &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.State == nil || prepared.Build == nil || prepared.Build.Package.PackageID == "" {
+		t.Fatalf("prepare should return local state and build, got %+v", prepared)
+	}
+}
+
 func TestDevHTTPBridgeExposesExecutionEvents(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
@@ -247,7 +282,7 @@ func TestDevHTTPBridgeSanitizesLLMJSONErrors(t *testing.T) {
 	}
 }
 
-func TestBuildClientExecutionPackageGeneralizesObservationOnlyInput(t *testing.T) {
+func TestBuildClientExecutionPackageBlocksObservationOnlyInput(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
 		Mode:               model.AppModeDesktop,
@@ -258,27 +293,22 @@ func TestBuildClientExecutionPackageGeneralizesObservationOnlyInput(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := postExecutionPackage(t, server, body)
-	if state.ScriptDocument == nil {
-		t.Fatal("expected adaptive script document")
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/local/execution-package", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected observation-only input to block fake scripts, got status %d: %s", response.Code, response.Body.String())
 	}
-	hasAdaptiveBusinessAction := false
-	for _, step := range state.ScriptDocument.Steps {
-		if step.Action.Type != model.GraphActionClick && step.Action.Type != model.GraphActionFill && step.Action.Type != model.GraphActionSelect && step.Action.Type != model.GraphActionUpload {
-			continue
-		}
-		for _, candidate := range step.Action.Target.SelectorAlternatives {
-			if candidate.Source == "runtime_adaptive" {
-				hasAdaptiveBusinessAction = true
-				break
-			}
-		}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
 	}
-	if !hasAdaptiveBusinessAction {
-		t.Fatalf("expected observation-only input to produce runtime adaptive business action, got %+v", state.ScriptDocument.Steps)
+	if bridge.OK || bridge.ErrorInfo == nil || bridge.ErrorInfo.Code != "missing_evidence" {
+		t.Fatalf("expected missing_evidence bridge error, got %+v", bridge)
 	}
-	if state.MissingEvidenceReport != nil && state.MissingEvidenceReport.Blocking {
-		t.Fatalf("missing evidence should be warning-only in adaptive mode: %+v", state.MissingEvidenceReport)
+	if !strings.Contains(bridge.Error, "页面预扫描") && !strings.Contains(bridge.Error, "verified") {
+		t.Fatalf("expected actionable missing evidence message, got %q", bridge.Error)
 	}
 }
 

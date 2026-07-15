@@ -283,6 +283,8 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 
 	writeStepAssertions(builder, step, actionType, selector, targetURL, timeoutMS)
 	if step.Capture.Screenshot {
+		builder.WriteString("  await ctx.page.waitForLoadState(\"networkidle\", { timeout: " + fmt.Sprint(minInt(timeoutMS, 6000)) + " }).catch(() => undefined);\n")
+		builder.WriteString("  await ctx.page.waitForTimeout(1000);\n")
 		builder.WriteString("  await ctx.capture.screenshot(" + jsJSON(captureScreenshotOptions(step, selector, maskSelectors)) + ");\n")
 	}
 	if step.Capture.Video {

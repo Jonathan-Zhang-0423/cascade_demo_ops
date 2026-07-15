@@ -106,7 +106,7 @@ func TestMultimodalFlowPackagesReviewableScriptDocument(t *testing.T) {
 	}
 }
 
-func TestMultimodalFlowFallsBackToRuntimeAdaptiveBusinessAction(t *testing.T) {
+func TestMultimodalFlowBlocksWhenScreenshotHasNoVerifiedBusinessAction(t *testing.T) {
 	repo := createFixtureRepo(t)
 	flow := newTestFlow(t)
 	state, err := flow.Start(context.Background(), orchestrator.UserInput{
@@ -122,17 +122,11 @@ func TestMultimodalFlowFallsBackToRuntimeAdaptiveBusinessAction(t *testing.T) {
 			VisionSummary: "截图显示产品核心页面。",
 		}},
 	})
-	if err != nil {
-		t.Fatalf("expected runtime adaptive fallback instead of blocking flow: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no verified business action") {
+		t.Fatalf("expected missing evidence block instead of fake runtime adaptive script, state=%+v err=%v", state, err)
 	}
-	if state == nil || state.VerifiedInteractionPlan == nil || state.VerifiedInteractionPlan.BusinessActionCount == 0 {
-		t.Fatalf("expected adaptive verified interaction plan, got state=%+v", state)
-	}
-	if state.MissingEvidenceReport == nil || state.MissingEvidenceReport.Blocking {
-		t.Fatalf("expected non-blocking adaptive missing evidence warning, got %+v", state.MissingEvidenceReport)
-	}
-	if state.ScriptDocument == nil || !scriptDocumentHasExecutableBusinessAction(state.ScriptDocument) {
-		t.Fatalf("expected adaptive flow to produce executable business action, got %+v", state.ScriptDocument)
+	if state == nil || state.MissingEvidenceReport == nil || !state.MissingEvidenceReport.Blocking {
+		t.Fatalf("expected blocking missing evidence report, got state=%+v", state)
 	}
 }
 

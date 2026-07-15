@@ -172,6 +172,15 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, productURL string, 
 	response, err := cloudPostPublicJSON[model.AppInstallationSessionResponse](ctx, client, discovery.ExchangeBaseURL+"/v1/app-installations/register", register)
 	if err != nil {
 		if !isLocalExchangeBaseURL(baseURL) {
+			if isOptionalExchangeDiscoveryError(err) {
+				return ExchangeSession{}, newExchangeProtocolError(
+					"cloud_auth_unavailable",
+					"cloud_exchange.auth",
+					"installation_endpoint_missing",
+					"服务器尚未部署 App installation 自动配对接口，无法在无手动 token 的情况下上传执行包。",
+					"请让云端启用 /v1/app-installations/register，或由 Dev Bridge/服务端预置 legacy exchange 凭据；不要要求最终用户手动填写 token。",
+				)
+			}
 			return ExchangeSession{}, err
 		}
 		response = localInstallationSession(record, register, discovery, time.Now().UTC())

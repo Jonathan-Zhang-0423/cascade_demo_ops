@@ -36,21 +36,15 @@ func TestGraphBuilderPrefersExecutableBusinessSelector(t *testing.T) {
 	}
 }
 
-func TestGraphBuilderFallsBackToRuntimeAdaptiveWhenOnlyGenericSelectorExists(t *testing.T) {
+func TestGraphBuilderBlocksWhenOnlyGenericSelectorExists(t *testing.T) {
 	project := graphQualityProject()
 	productMap := graphQualityProductMap(
 		model.UIActionRef{ID: "generic", Label: "Click main", Kind: "click", Selector: "main"},
 	)
 
-	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence())
-	if err != nil {
-		t.Fatalf("generic-only evidence should no longer block; expected runtime adaptive graph, got %v", err)
-	}
-	if graphNodeBySelector(graph, "main") != nil {
-		t.Fatalf("runtime adaptive fallback must not click generic selector: %+v", graph.Nodes)
-	}
-	if !graphHasRuntimeAdaptiveBusinessNode(graph) {
-		t.Fatalf("expected runtime adaptive business node, got %+v", graph.Nodes)
+	_, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence())
+	if err == nil || !strings.Contains(err.Error(), "no verified business action") {
+		t.Fatalf("generic-only evidence must block fake scripts, got %v", err)
 	}
 }
 
@@ -99,21 +93,15 @@ func TestGraphBuilderSkipsChromeToggleWhenBusinessActionExists(t *testing.T) {
 	}
 }
 
-func TestGraphBuilderFallsBackToRuntimeAdaptiveWhenOnlyChromeToggleExists(t *testing.T) {
+func TestGraphBuilderBlocksWhenOnlyChromeToggleExists(t *testing.T) {
 	project := graphQualityProject()
 	productMap := graphQualityProductMap(
 		model.UIActionRef{ID: "sidebar", Label: "button sidebar toggle", Kind: "click", Selector: "[data-testid='button-sidebar-toggle']"},
 	)
 
-	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence())
-	if err != nil {
-		t.Fatalf("chrome-only evidence should no longer block; expected runtime adaptive graph, got %v", err)
-	}
-	if graphNodeBySelector(graph, "[data-testid='button-sidebar-toggle']") != nil {
-		t.Fatalf("runtime adaptive fallback must not click chrome toggle: %+v", graph.Nodes)
-	}
-	if !graphHasRuntimeAdaptiveBusinessNode(graph) {
-		t.Fatalf("expected runtime adaptive business node, got %+v", graph.Nodes)
+	_, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence())
+	if err == nil || !strings.Contains(err.Error(), "no verified business action") {
+		t.Fatalf("chrome-only evidence must block fake scripts, got %v", err)
 	}
 }
 

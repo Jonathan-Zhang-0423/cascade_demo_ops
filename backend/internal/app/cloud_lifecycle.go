@@ -96,6 +96,11 @@ type CloudLifecycleResult struct {
 	CloudBase string                               `json:"cloud_base_url,omitempty"`
 }
 
+type ProductRunPrepareResult struct {
+	State *orchestrator.CascadeState   `json:"state"`
+	Build *ClientExecutionPackageBuild `json:"build,omitempty"`
+}
+
 func (s *Service) BuildClientExecutionPackage(ctx context.Context, projectID string, orgID string) (ClientExecutionPackageBuild, error) {
 	state, err := s.states.Load(ctx, projectID)
 	if err != nil {
@@ -118,6 +123,34 @@ func (s *Service) BuildCloudClientExecutionPackage(ctx context.Context, projectI
 		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
 	}
 	return build, session, nil
+}
+
+func (s *Service) PrepareProductRun(ctx context.Context, request CloudLifecycleRequest) (ProductRunPrepareResult, error) {
+	orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
+	projectID := strings.TrimSpace(request.ProjectID)
+	var (
+		state *orchestrator.CascadeState
+		err   error
+	)
+	if request.UserInput != nil {
+		state, err = s.GenerateExecutionPackage(ctx, *request.UserInput)
+		if err != nil {
+			return ProductRunPrepareResult{}, err
+		}
+		projectID = state.ProjectID
+	} else if projectID != "" {
+		state, err = s.states.Load(ctx, projectID)
+		if err != nil {
+			return ProductRunPrepareResult{}, err
+		}
+	} else {
+		return ProductRunPrepareResult{}, errors.New("user_input or project_id is required")
+	}
+	build, err := buildClientExecutionPackageFromState(state, orgID, time.Now().UTC())
+	if err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	return ProductRunPrepareResult{State: state, Build: &build}, nil
 }
 
 func (s *Service) signBuildWithExchangeSession(build ClientExecutionPackageBuild, session ExchangeSession) (ClientExecutionPackageBuild, error) {

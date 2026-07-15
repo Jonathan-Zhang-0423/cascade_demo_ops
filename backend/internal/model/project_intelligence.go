@@ -14,6 +14,7 @@ type ProjectIntelligencePack struct {
 	ProjectID             string                    `json:"project_id"`
 	SchemaVersion         string                    `json:"schema_version"`
 	DemoIntent            *DemoIntentSpec           `json:"demo_intent,omitempty"`
+	RunIntentScope        *RunIntentScope           `json:"run_intent_scope,omitempty"`
 	Architecture          *ProjectArchitectureMap   `json:"architecture,omitempty"`
 	FeatureCapabilities   []FeatureCapability       `json:"feature_capabilities,omitempty"`
 	FeatureTrace          *FeatureTraceResult       `json:"feature_trace,omitempty"`
@@ -30,6 +31,18 @@ type ProjectIntelligencePack struct {
 	EvidenceRefs          []EvidenceRef             `json:"evidence_refs,omitempty"`
 	Confidence            float64                   `json:"confidence,omitempty"`
 	CreatedAt             time.Time                 `json:"created_at,omitempty"`
+}
+
+type RunIntentScope struct {
+	ID                    string    `json:"id"`
+	ProjectID             string    `json:"project_id"`
+	SchemaVersion         string    `json:"schema_version,omitempty"`
+	ProductOrigin         string    `json:"product_origin,omitempty"`
+	ProductURL            string    `json:"product_url,omitempty"`
+	AllowedOrigins        []string  `json:"allowed_origins,omitempty"`
+	ForbiddenPathPrefixes []string  `json:"forbidden_path_prefixes,omitempty"`
+	ForbiddenSignals      []string  `json:"forbidden_signals,omitempty"`
+	CreatedAt             time.Time `json:"created_at,omitempty"`
 }
 
 type DemoIntentSpec struct {

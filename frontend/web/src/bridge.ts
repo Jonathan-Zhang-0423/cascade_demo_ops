@@ -188,6 +188,11 @@ type LocalCloudLifecycleResult = {
   cloud_base_url?: string;
 };
 
+type LocalProductRunPrepareResult = {
+  state: LocalCascadeState;
+  build?: LocalClientExecutionPackageBuild | undefined;
+};
+
 type LocalCloudUploadInitResult = {
   build?: LocalClientExecutionPackageBuild | undefined;
   init: LocalExecutionPackageInitResponse;
@@ -429,23 +434,70 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     },
     async runProductLifecycle(workspace, options) {
       const userInput = userInputFromWorkspace(workspace, options);
-      const result = await requestLocal<LocalCloudLifecycleResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud-lifecycle`, {
+      const prepared = await requestLocal<LocalProductRunPrepareResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/product-run/prepare`, {
         method: "POST",
         body: JSON.stringify({
           user_input: userInput,
           org_id: "org_desktop",
-          auto_ack: true,
-          poll_interval_ms: 1000,
-          timeout_sec: 900,
         }),
       });
-      if (!result.ok || !result.data) {
-        return { ok: false, error: result.error ?? "产品实战自动流程失败" };
+      if (!prepared.ok || !prepared.data) {
+        return bridgeFailure(prepared.error ?? "本地产品实战准备失败", prepared.errorInfo);
       }
-      const generated = result.data.state ? workspaceFromCascadeState(result.data.state, workspace) : workspace;
-      const next = workspaceFromCloudLifecycleResult(generated, result.data);
-      projects.set(next.id, next);
-      return ok(next);
+      let current = workspaceFromCascadeState(prepared.data.state, workspace);
+      if (prepared.data.build) {
+        cloudBuilds.set(current.id, prepared.data.build);
+        current = workspaceWithPreparedBuild(current, prepared.data.build);
+      }
+      projects.set(current.id, current);
+
+      const init = await this.initExecutionPackageUpload(current);
+      if (!init.ok || !init.data) {
+        const failed = workspaceWithCloudPhaseFailure(current, "cloud_auth_unavailable", init.error ?? "服务器连接/上传初始化失败", init.errorInfo);
+        projects.set(failed.id, failed);
+        return ok(failed);
+      }
+      current = workspaceWithCloudInit(current, {
+        build: cloudBuilds.get(current.id),
+        init: localInitResponseFromView(init.data),
+      });
+      projects.set(current.id, current);
+
+      const upload = await this.uploadExecutionPackage(current);
+      if (!upload.ok || !upload.data) {
+        const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", upload.error ?? "上传执行包失败", upload.errorInfo);
+        projects.set(failed.id, failed);
+        return ok(failed);
+      }
+      current = workspaceWithCloudUpload(current, localUploadPackageResultFromView(upload.data, cloudBuilds.get(current.id)));
+      projects.set(current.id, current);
+
+      const deadline = Date.now() + 900_000;
+      while (!isTerminalCloudRun(current.cloudRun.status) && Date.now() < deadline) {
+        const polled = await this.pollExecutionPackageStatus(current);
+        if (!polled.ok || !polled.data) {
+          const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", polled.error ?? "轮询服务器执行状态失败", polled.errorInfo);
+          projects.set(failed.id, failed);
+          return ok(failed);
+        }
+        current = polled.data;
+        if (!isTerminalCloudRun(current.cloudRun.status)) {
+          await delay(1000);
+        }
+      }
+      if (!isTerminalCloudRun(current.cloudRun.status)) {
+        const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", "服务器录制状态轮询超时", undefined);
+        projects.set(failed.id, failed);
+        return ok(failed);
+      }
+      if (current.cloudRun.status === "succeeded" && current.cloudRun.resultPackageID) {
+        const acked = await this.ackResultPackage(current);
+        if (acked.ok && acked.data) {
+          current = acked.data;
+        }
+      }
+      projects.set(current.id, current);
+      return ok(current);
     },
     async initExecutionPackageUpload(workspace) {
       const result = await requestLocal<LocalCloudUploadInitResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/init`, {
@@ -1179,6 +1231,68 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
   };
 }
 
+function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: LocalClientExecutionPackageBuild): ProjectWorkspaceView {
+  return {
+    ...workspace,
+    stage: "package_approval",
+    status: "awaiting_approval",
+    packagePreview: {
+      ...workspace.packagePreview,
+      ipAllowlistAcknowledged: true,
+      packageID: build.package.package_id ?? workspace.packagePreview.packageID,
+      packageDigest: build.envelope.crypto.payload_digest_sha256 ?? workspace.packagePreview.packageDigest,
+    },
+    cloudRun: {
+      ...workspace.cloudRun,
+      packageID: build.package.package_id ?? workspace.cloudRun.packageID,
+      status: "not_uploaded",
+      stage: "local_generated",
+      message: "本地理解与脚本生成已完成；等待服务器连接和上传。",
+      currentStep: "三合一方案包已准备完成",
+      progress: 18,
+      stageHistory: localLifecycleStagesFromPartial("local_generated"),
+    },
+  };
+}
+
+function workspaceWithCloudPhaseFailure(
+  workspace: ProjectWorkspaceView,
+  stage: string,
+  message: string,
+  errorInfo?: LocalBridgeErrorInfo,
+): ProjectWorkspaceView {
+  const failedStage: ServerLifecycleStageView = {
+    id: "upload_initialized",
+    label: serverLifecycleStageLabels.upload_initialized,
+    status: "failed",
+    progress: 100,
+    summary: message,
+    artifactCount: 0,
+  };
+  if (errorInfo?.code) {
+    failedStage.errorCode = errorInfo.code;
+  }
+  return {
+    ...workspace,
+    stage: "package_approval",
+    status: "awaiting_approval",
+    cloudRun: {
+      ...workspace.cloudRun,
+      status: "failed",
+      stage,
+      message,
+      currentStep: message,
+      progress: Math.max(workspace.cloudRun.progress, 18),
+      lastError: message,
+      failureSummary: errorInfo?.code ? `${errorInfo.code}: ${message}` : message,
+      stageHistory: [
+        ...localLifecycleStagesFromPartial("local_generated").filter((item) => item.id !== "upload_initialized"),
+        failedStage,
+      ],
+    },
+  };
+}
+
 function workspaceWithCloudInit(workspace: ProjectWorkspaceView, result: LocalCloudUploadInitResult): ProjectWorkspaceView {
   const build = result.build;
   return {
@@ -1324,6 +1438,14 @@ function localLifecycleStagesFromPartial(currentID: ServerLifecycleStageID): Ser
 
 function isTerminalLocalStatus(status: string | undefined): boolean {
   return ["completed", "succeeded", "failed", "canceled", "expired"].includes(status ?? "");
+}
+
+function isTerminalCloudRun(status: ProjectWorkspaceView["cloudRun"]["status"]): boolean {
+  return status === "succeeded" || status === "failed";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function mapCloudRunStatus(status: string | undefined): "not_uploaded" | "queued" | "running" | "succeeded" | "failed" {
