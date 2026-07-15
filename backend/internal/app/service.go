@@ -48,6 +48,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		ProjectIntelligence: agents.NewProjectIntelligenceGraphWithLLM(llmRouter),
 		Understanding:       agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
 		ProductMap:          agents.NewProductMapAgentWithLLM(llmRouter),
+		PageVerifier:        agents.NewPageInteractionVerifierAgentWithRuntime(runtime),
 		GraphBuilder:        agents.NewGraphBuilderAgentWithLLM(llmRouter),
 		ScriptPackager:      agents.NewScriptPackagerAgentWithLLM(llmRouter),
 		QAExecutor:          agents.NewQAExecutorAgent(),

@@ -2,11 +2,12 @@ import readline from "node:readline";
 import { record } from "./recorder.js";
 import { render } from "./renderer.js";
 import { executeScript, validateScript } from "./script-runner.js";
+import { verifyInteractions } from "./interaction-verifier.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
   id: number | string;
-  method: "health" | "record" | "render" | "validate_script" | "execute_script";
+  method: "health" | "record" | "render" | "validate_script" | "execute_script" | "verify_interactions";
   params?: unknown;
 };
 
@@ -46,6 +47,9 @@ async function dispatch(request: JsonRpcRequest): Promise<unknown> {
   }
   if (request.method === "execute_script") {
     return executeScript(request.params as never);
+  }
+  if (request.method === "verify_interactions") {
+    return verifyInteractions(request.params as never);
   }
   throw new Error(`unknown method: ${request.method}`);
 }

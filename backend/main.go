@@ -40,6 +40,7 @@ func main() {
 		ProjectIntelligence: agents.NewProjectIntelligenceGraph(),
 		Understanding:       agents.NewMultimodalUnderstandingAgent(),
 		ProductMap:          agents.NewProductMapAgent(),
+		PageVerifier:        agents.NewPageInteractionVerifierAgent(),
 		GraphBuilder:        agents.NewGraphBuilderAgent(),
 		ScriptPackager:      agents.NewScriptPackagerAgent(),
 		QAExecutor:          agents.NewQAExecutorAgent(),

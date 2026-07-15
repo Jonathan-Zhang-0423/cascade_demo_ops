@@ -13,9 +13,13 @@ type ProjectIntelligencePack struct {
 	ID                    string                    `json:"id"`
 	ProjectID             string                    `json:"project_id"`
 	SchemaVersion         string                    `json:"schema_version"`
+	DemoIntent            *DemoIntentSpec           `json:"demo_intent,omitempty"`
 	Architecture          *ProjectArchitectureMap   `json:"architecture,omitempty"`
 	FeatureCapabilities   []FeatureCapability       `json:"feature_capabilities,omitempty"`
+	FeatureTrace          *FeatureTraceResult       `json:"feature_trace,omitempty"`
 	InteractionSurfaces   []InteractionSurface      `json:"interaction_surfaces,omitempty"`
+	VerifiedInteraction   *VerifiedInteractionPlan  `json:"verified_interaction_plan,omitempty"`
+	MissingEvidenceReport *MissingEvidenceReport    `json:"missing_evidence_report,omitempty"`
 	APIContracts          []APIContractSummary      `json:"api_contracts,omitempty"`
 	DataModels            []ProjectDataModelSummary `json:"data_models,omitempty"`
 	DemoScenarioPlans     []DemoScenarioPlan        `json:"demo_scenario_plans,omitempty"`
@@ -26,6 +30,138 @@ type ProjectIntelligencePack struct {
 	EvidenceRefs          []EvidenceRef             `json:"evidence_refs,omitempty"`
 	Confidence            float64                   `json:"confidence,omitempty"`
 	CreatedAt             time.Time                 `json:"created_at,omitempty"`
+}
+
+type DemoIntentSpec struct {
+	ID              string           `json:"id"`
+	ProjectID       string           `json:"project_id"`
+	SchemaVersion   string           `json:"schema_version,omitempty"`
+	Objective       string           `json:"objective,omitempty"`
+	TargetAudience  string           `json:"target_audience,omitempty"`
+	Goals           []DemoIntentGoal `json:"goals,omitempty"`
+	ForbiddenTopics []string         `json:"forbidden_topics,omitempty"`
+	EvidenceRefs    []EvidenceRef    `json:"evidence_refs,omitempty"`
+	Confidence      float64          `json:"confidence,omitempty"`
+	CreatedAt       time.Time        `json:"created_at,omitempty"`
+}
+
+type DemoIntentGoal struct {
+	ID               string        `json:"id"`
+	Label            string        `json:"label"`
+	Kind             string        `json:"kind,omitempty"`
+	Required         bool          `json:"required"`
+	BusinessCritical bool          `json:"business_critical"`
+	TargetKeywords   []string      `json:"target_keywords,omitempty"`
+	PreferredAction  string        `json:"preferred_action,omitempty"`
+	TargetPageHint   string        `json:"target_page_hint,omitempty"`
+	SuccessState     string        `json:"success_state,omitempty"`
+	Forbidden        bool          `json:"forbidden,omitempty"`
+	EvidenceRefs     []EvidenceRef `json:"evidence_refs,omitempty"`
+	Confidence       float64       `json:"confidence,omitempty"`
+}
+
+type FeatureTraceResult struct {
+	ID            string             `json:"id"`
+	ProjectID     string             `json:"project_id"`
+	IntentID      string             `json:"intent_id,omitempty"`
+	SchemaVersion string             `json:"schema_version,omitempty"`
+	Traces        []FeatureGoalTrace `json:"traces,omitempty"`
+	EvidenceRefs  []EvidenceRef      `json:"evidence_refs,omitempty"`
+	Confidence    float64            `json:"confidence,omitempty"`
+	CreatedAt     time.Time          `json:"created_at,omitempty"`
+}
+
+type FeatureGoalTrace struct {
+	IntentGoalID      string             `json:"intent_goal_id"`
+	IntentLabel       string             `json:"intent_label,omitempty"`
+	MatchedRouteRefs  []string           `json:"matched_route_refs,omitempty"`
+	MatchedComponents []string           `json:"matched_components,omitempty"`
+	MatchedAPIRefs    []string           `json:"matched_api_refs,omitempty"`
+	MatchedDataModels []string           `json:"matched_data_models,omitempty"`
+	SelectorEvidence  []InteractionProbe `json:"selector_evidence,omitempty"`
+	EvidenceRefs      []EvidenceRef      `json:"evidence_refs,omitempty"`
+	Confidence        float64            `json:"confidence,omitempty"`
+	MissingEvidence   []string           `json:"missing_evidence,omitempty"`
+}
+
+type InteractionProbe struct {
+	ID             string              `json:"id"`
+	IntentGoalID   string              `json:"intent_goal_id,omitempty"`
+	Label          string              `json:"label,omitempty"`
+	Kind           string              `json:"kind,omitempty"`
+	Selector       string              `json:"selector,omitempty"`
+	URL            string              `json:"url,omitempty"`
+	RouteRef       string              `json:"route_ref,omitempty"`
+	ComponentRef   string              `json:"component_ref,omitempty"`
+	Source         string              `json:"source,omitempty"`
+	Score          float64             `json:"score,omitempty"`
+	IsBusiness     bool                `json:"is_business"`
+	IsChrome       bool                `json:"is_chrome"`
+	SelectorScore  int                 `json:"selector_score,omitempty"`
+	WaitConditions []string            `json:"wait_conditions,omitempty"`
+	EvidenceRefs   []EvidenceRef       `json:"evidence_refs,omitempty"`
+	Alternatives   []SelectorCandidate `json:"alternatives,omitempty"`
+}
+
+type VerifiedInteractionPlan struct {
+	ID                  string                      `json:"id"`
+	ProjectID           string                      `json:"project_id"`
+	IntentID            string                      `json:"intent_id,omitempty"`
+	SchemaVersion       string                      `json:"schema_version,omitempty"`
+	Actions             []VerifiedInteractionAction `json:"actions,omitempty"`
+	BusinessActionCount int                         `json:"business_action_count,omitempty"`
+	VerificationMode    string                      `json:"verification_mode,omitempty"`
+	BrowserScanID       string                      `json:"browser_scan_id,omitempty"`
+	SourceURL           string                      `json:"source_url,omitempty"`
+	EvidenceRefs        []EvidenceRef               `json:"evidence_refs,omitempty"`
+	Confidence          float64                     `json:"confidence,omitempty"`
+	CreatedAt           time.Time                   `json:"created_at,omitempty"`
+}
+
+type VerifiedInteractionAction struct {
+	ID                 string              `json:"id"`
+	IntentGoalID       string              `json:"intent_goal_id,omitempty"`
+	Label              string              `json:"label,omitempty"`
+	Kind               string              `json:"kind,omitempty"`
+	Selector           string              `json:"selector,omitempty"`
+	URL                string              `json:"url,omitempty"`
+	RouteRef           string              `json:"route_ref,omitempty"`
+	ComponentRef       string              `json:"component_ref,omitempty"`
+	ExpectedOutcome    string              `json:"expected_outcome,omitempty"`
+	SuccessState       string              `json:"success_state,omitempty"`
+	WaitConditions     []string            `json:"wait_conditions,omitempty"`
+	DurationHintMS     int                 `json:"duration_hint_ms,omitempty"`
+	IsBusiness         bool                `json:"is_business"`
+	VerificationStatus string              `json:"verification_status"`
+	VerificationSource string              `json:"verification_source,omitempty"`
+	VerifiedAt         time.Time           `json:"verified_at,omitempty"`
+	SelectorScore      int                 `json:"selector_score,omitempty"`
+	EvidenceRefs       []EvidenceRef       `json:"evidence_refs,omitempty"`
+	Alternatives       []SelectorCandidate `json:"alternatives,omitempty"`
+}
+
+type MissingEvidenceReport struct {
+	ID            string                `json:"id"`
+	ProjectID     string                `json:"project_id"`
+	IntentID      string                `json:"intent_id,omitempty"`
+	SchemaVersion string                `json:"schema_version,omitempty"`
+	Blocking      bool                  `json:"blocking"`
+	Summary       string                `json:"summary,omitempty"`
+	Items         []MissingEvidenceItem `json:"items,omitempty"`
+	EvidenceRefs  []EvidenceRef         `json:"evidence_refs,omitempty"`
+	CreatedAt     time.Time             `json:"created_at,omitempty"`
+}
+
+type MissingEvidenceItem struct {
+	ID              string        `json:"id"`
+	IntentGoalID    string        `json:"intent_goal_id,omitempty"`
+	IntentLabel     string        `json:"intent_label,omitempty"`
+	MissingKind     string        `json:"missing_kind"`
+	Severity        string        `json:"severity"`
+	Message         string        `json:"message"`
+	SuggestedAction string        `json:"suggested_action,omitempty"`
+	FieldPath       string        `json:"field_path,omitempty"`
+	EvidenceRefs    []EvidenceRef `json:"evidence_refs,omitempty"`
 }
 
 type ProjectArchitectureMap struct {

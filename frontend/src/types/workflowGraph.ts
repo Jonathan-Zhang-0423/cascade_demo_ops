@@ -830,9 +830,13 @@ export type ProjectIntelligencePack = {
   id: string;
   project_id: string;
   schema_version: "demoops.project_intelligence_pack.v1" | string;
+  demo_intent?: DemoIntentSpec;
   architecture?: ProjectArchitectureMap;
   feature_capabilities?: FeatureCapability[];
+  feature_trace?: FeatureTraceResult;
   interaction_surfaces?: InteractionSurface[];
+  verified_interaction_plan?: VerifiedInteractionPlan;
+  missing_evidence_report?: MissingEvidenceReport;
   api_contracts?: APIContractSummary[];
   data_models?: ProjectDataModelSummary[];
   demo_scenario_plans?: DemoScenarioPlan[];
@@ -843,6 +847,138 @@ export type ProjectIntelligencePack = {
   evidence_refs?: EvidenceRef[];
   confidence?: number;
   created_at?: string;
+};
+
+export type DemoIntentSpec = {
+  id: string;
+  project_id: string;
+  schema_version?: string;
+  objective?: string;
+  target_audience?: string;
+  goals?: DemoIntentGoal[];
+  forbidden_topics?: string[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+};
+
+export type DemoIntentGoal = {
+  id: string;
+  label: string;
+  kind?: string;
+  required: boolean;
+  business_critical: boolean;
+  target_keywords?: string[];
+  preferred_action?: string;
+  target_page_hint?: string;
+  success_state?: string;
+  forbidden?: boolean;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type FeatureTraceResult = {
+  id: string;
+  project_id: string;
+  intent_id?: string;
+  schema_version?: string;
+  traces?: FeatureGoalTrace[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+};
+
+export type FeatureGoalTrace = {
+  intent_goal_id: string;
+  intent_label?: string;
+  matched_route_refs?: string[];
+  matched_components?: string[];
+  matched_api_refs?: string[];
+  matched_data_models?: string[];
+  selector_evidence?: InteractionProbe[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  missing_evidence?: string[];
+};
+
+export type InteractionProbe = {
+  id: string;
+  intent_goal_id?: string;
+  label?: string;
+  kind?: string;
+  selector?: string;
+  url?: string;
+  route_ref?: string;
+  component_ref?: string;
+  source?: string;
+  score?: number;
+  is_business: boolean;
+  is_chrome: boolean;
+  selector_score?: number;
+  wait_conditions?: string[];
+  evidence_refs?: EvidenceRef[];
+  alternatives?: SelectorCandidate[];
+};
+
+export type VerifiedInteractionPlan = {
+  id: string;
+  project_id: string;
+  intent_id?: string;
+  schema_version?: string;
+  actions?: VerifiedInteractionAction[];
+  business_action_count?: number;
+  verification_mode?: string;
+  browser_scan_id?: string;
+  source_url?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+};
+
+export type VerifiedInteractionAction = {
+  id: string;
+  intent_goal_id?: string;
+  label?: string;
+  kind?: string;
+  selector?: string;
+  url?: string;
+  route_ref?: string;
+  component_ref?: string;
+  expected_outcome?: string;
+  success_state?: string;
+  wait_conditions?: string[];
+  duration_hint_ms?: number;
+  is_business: boolean;
+  verification_status: string;
+  verification_source?: string;
+  verified_at?: string;
+  selector_score?: number;
+  evidence_refs?: EvidenceRef[];
+  alternatives?: SelectorCandidate[];
+};
+
+export type MissingEvidenceReport = {
+  id: string;
+  project_id: string;
+  intent_id?: string;
+  schema_version?: string;
+  blocking: boolean;
+  summary?: string;
+  items?: MissingEvidenceItem[];
+  evidence_refs?: EvidenceRef[];
+  created_at?: string;
+};
+
+export type MissingEvidenceItem = {
+  id: string;
+  intent_goal_id?: string;
+  intent_label?: string;
+  missing_kind: string;
+  severity: string;
+  message: string;
+  suggested_action?: string;
+  field_path?: string;
+  evidence_refs?: EvidenceRef[];
 };
 
 export type ProjectArchitectureMap = {

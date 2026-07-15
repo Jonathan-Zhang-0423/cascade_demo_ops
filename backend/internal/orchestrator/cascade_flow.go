@@ -14,18 +14,19 @@ import (
 type NodeName string
 
 const (
-	NodeInputCtx             NodeName = "InputCtx"
-	NodeRequirementRead      NodeName = "RequirementRead"
-	NodeCodeRead             NodeName = "CodeRead"
-	NodePageRead             NodeName = "PageRead"
-	NodeProjectIntelligence  NodeName = "ProjectIntelligence"
-	NodeMultimodalUnderstand NodeName = "MultimodalUnderstand"
-	NodeProductExplore       NodeName = "ProductExplore"
-	NodeGraphGenerate        NodeName = "GraphGenerate"
-	NodeScriptPackage        NodeName = "ScriptPackage"
-	NodeHumanApprove         NodeName = "HumanApprove"
-	NodeExecuteRehearse      NodeName = "ExecuteRehearse"
-	NodeAssetGenerate        NodeName = "AssetGenerate"
+	NodeInputCtx              NodeName = "InputCtx"
+	NodeRequirementRead       NodeName = "RequirementRead"
+	NodeCodeRead              NodeName = "CodeRead"
+	NodePageRead              NodeName = "PageRead"
+	NodeProjectIntelligence   NodeName = "ProjectIntelligence"
+	NodeMultimodalUnderstand  NodeName = "MultimodalUnderstand"
+	NodeProductExplore        NodeName = "ProductExplore"
+	NodePageInteractionVerify NodeName = "PageInteractionVerify"
+	NodeGraphGenerate         NodeName = "GraphGenerate"
+	NodeScriptPackage         NodeName = "ScriptPackage"
+	NodeHumanApprove          NodeName = "HumanApprove"
+	NodeExecuteRehearse       NodeName = "ExecuteRehearse"
+	NodeAssetGenerate         NodeName = "AssetGenerate"
 )
 
 type FlowStatus string
@@ -51,6 +52,8 @@ type CascadeState struct {
 	AgentGraphTrace          *model.AgentGraphTrace                 `json:"agent_graph_trace,omitempty"`
 	UnderstandingReport      *model.MultimodalUnderstandingReport   `json:"understanding_report,omitempty"`
 	ProductMap               *model.ProductMap                      `json:"product_map,omitempty"`
+	VerifiedInteractionPlan  *model.VerifiedInteractionPlan         `json:"verified_interaction_plan,omitempty"`
+	MissingEvidenceReport    *model.MissingEvidenceReport           `json:"missing_evidence_report,omitempty"`
 	WorkflowGraph            *model.DemoWorkflowGraph               `json:"workflow_graph,omitempty"`
 	ScriptDocument           *model.ExecutionScriptDocument         `json:"script_document,omitempty"`
 	ScriptMarkdown           string                                 `json:"script_markdown,omitempty"`
@@ -97,6 +100,11 @@ type UserInput struct {
 	SSHAllowedCommands     []string                         `json:"ssh_allowed_commands,omitempty"`
 }
 
+type PageVerificationCredentials struct {
+	DemoUsername string
+	DemoPassword string
+}
+
 type RehearsalResult struct {
 	PassRate       float64  `json:"pass_rate"`
 	RecordingPaths []string `json:"recording_paths,omitempty"`
@@ -132,6 +140,10 @@ type ProductMapAgent interface {
 	ExploreProduct(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.ProductMap, error)
 }
 
+type PageInteractionVerifierAgent interface {
+	VerifyInteractions(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, intelligence *model.ProjectIntelligencePack, credentials PageVerificationCredentials) (*model.VerifiedInteractionPlan, *model.MissingEvidenceReport, error)
+}
+
 type GraphBuilderAgent interface {
 	GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.DemoWorkflowGraph, error)
 }
@@ -156,6 +168,7 @@ type Dependencies struct {
 	ProjectIntelligence ProjectIntelligenceAgent
 	Understanding       MultimodalUnderstandingAgent
 	ProductMap          ProductMapAgent
+	PageVerifier        PageInteractionVerifierAgent
 	GraphBuilder        GraphBuilderAgent
 	ScriptPackager      ScriptPackagerAgent
 	QAExecutor          QAExecutorAgent
@@ -215,6 +228,9 @@ func NewCascadeFlow(deps Dependencies) (*CascadeFlow, error) {
 	}
 	if deps.ProductMap == nil {
 		return nil, errors.New("missing ProductMap agent")
+	}
+	if deps.PageVerifier == nil {
+		return nil, errors.New("missing PageInteractionVerifier agent")
 	}
 	if deps.GraphBuilder == nil {
 		return nil, errors.New("missing GraphBuilder agent")
@@ -326,6 +342,38 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 	}
 	state.ProductMap = productMap
 	logNodeDone(ctx, state.CurrentNode, nodeStart, "ProductMapAgent 完成产品地图生成", fmt.Sprintf("pages=%d features=%d workflows=%d", len(productMap.Pages), len(productMap.Features), len(productMap.Workflows)))
+
+	state.CurrentNode = NodePageInteractionVerify
+	nodeStart = logNodeStart(ctx, state.CurrentNode)
+	verifiedPlan, missingReport, err := f.deps.PageVerifier.VerifyInteractions(ctx, project, brief, report, productMap, intelligence, PageVerificationCredentials{
+		DemoUsername: input.DemoUsername,
+		DemoPassword: input.DemoPassword,
+	})
+	if err != nil {
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
+		return fail(state, err), err
+	}
+	state.VerifiedInteractionPlan = verifiedPlan
+	state.MissingEvidenceReport = missingReport
+	if intelligence != nil {
+		intelligence.VerifiedInteraction = verifiedPlan
+		intelligence.MissingEvidenceReport = missingReport
+	}
+	if missingReport != nil && missingReport.Blocking {
+		markReadinessBlockedByMissingEvidence(readiness, missingReport)
+		summary := missingReport.Summary
+		if summary == "" {
+			summary = "没有页面验证过的业务动作"
+		}
+		err := fmt.Errorf("missing verified interaction evidence: %s", summary)
+		logNodeError(ctx, state.CurrentNode, nodeStart, err)
+		return fail(state, err), err
+	}
+	verifiedCount := 0
+	if verifiedPlan != nil {
+		verifiedCount = len(verifiedPlan.Actions)
+	}
+	logNodeDone(ctx, state.CurrentNode, nodeStart, "PageInteractionVerifierAgent 完成页面交互预验证", fmt.Sprintf("verified_actions=%d missing=%t", verifiedCount, missingReport != nil))
 
 	state.CurrentNode = NodeGraphGenerate
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
@@ -463,6 +511,27 @@ func emitProgress(ctx context.Context, event ProgressEvent) {
 		return
 	}
 	sink(event)
+}
+
+func markReadinessBlockedByMissingEvidence(readiness *model.ScriptReadinessReport, report *model.MissingEvidenceReport) {
+	if readiness == nil || report == nil {
+		return
+	}
+	readiness.CanProceed = false
+	readiness.Summary = "页面交互验证存在阻塞，需要补齐证据后再生成脚本。"
+	readiness.Blockers = append(readiness.Blockers, model.AgentFinding{
+		ID:              "readiness_missing_verified_interaction",
+		Kind:            "missing_verified_interaction",
+		Severity:        model.FindingSeverityBlocking,
+		Summary:         report.Summary,
+		SuggestedAction: "补充真实页面预扫描、截图标注或稳定 selector 后重新生成执行包。",
+		Confidence:      0.9,
+	})
+	for _, item := range report.Items {
+		if item.SuggestedAction != "" {
+			readiness.RepairSuggestions = append(readiness.RepairSuggestions, item.SuggestedAction)
+		}
+	}
 }
 
 func codeFileCount(snapshots []model.CodeUnderstandingSnapshot) int {

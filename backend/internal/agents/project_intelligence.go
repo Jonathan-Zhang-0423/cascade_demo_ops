@@ -165,6 +165,7 @@ func defaultProjectUnderstandingTools() []ProjectUnderstandingTool {
 		projectUnderstandingToolFunc{name: "APIContractTool", run: runAPIContractTool},
 		projectUnderstandingToolFunc{name: "DataModelTool", run: runDataModelTool},
 		projectUnderstandingToolFunc{name: "SensitiveSurfaceTool", run: runSensitiveSurfaceTool},
+		projectUnderstandingToolFunc{name: "DemoIntentTool", run: runDemoIntentTool},
 		projectUnderstandingToolFunc{name: "FeatureTraceTool", run: runFeatureTraceTool},
 		projectUnderstandingToolFunc{name: "ScriptFeasibilityTool", run: runScriptFeasibilityTool},
 	}
@@ -242,14 +243,29 @@ func runSensitiveSurfaceTool(_ context.Context, state *ProjectUnderstandingState
 	}, nil
 }
 
+func runDemoIntentTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	intent := demoIntentFromState(state)
+	state.Pack.DemoIntent = intent
+	state.Pack.EvidenceRefs = append(state.Pack.EvidenceRefs, intent.EvidenceRefs...)
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("拆解需求目标 %d 个，业务关键目标 %d 个。", len(intent.Goals), businessIntentGoalCount(intent.Goals)),
+		ChangedFields: []string{"demo_intent"},
+		Confidence:    intent.Confidence,
+		EvidenceRefs:  intent.EvidenceRefs,
+	}, nil
+}
+
 func runFeatureTraceTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	trace := featureTraceFromState(state)
 	capabilities := featureCapabilitiesFromState(state)
 	state.Pack.FeatureCapabilities = capabilities
+	state.Pack.FeatureTrace = trace
+	state.Pack.EvidenceRefs = append(state.Pack.EvidenceRefs, trace.EvidenceRefs...)
 	return ToolPatch{
-		OutputSummary: fmt.Sprintf("追踪需求到功能能力 %d 个。", len(capabilities)),
-		ChangedFields: []string{"feature_capabilities"},
-		Confidence:    0.76,
-		EvidenceRefs:  state.Pack.EvidenceRefs,
+		OutputSummary: fmt.Sprintf("按需求追踪功能能力 %d 个，目标证据链 %d 条。", len(capabilities), len(trace.Traces)),
+		ChangedFields: []string{"feature_capabilities", "feature_trace"},
+		Confidence:    trace.Confidence,
+		EvidenceRefs:  trace.EvidenceRefs,
 	}, nil
 }
 
@@ -672,6 +688,274 @@ func safetyReportFromProjectIntelligence(project *model.ProjectContext, snapshot
 		MaskedFields:     uniqueStrings(maskedFields),
 		Notes:            []string{"ProjectIntelligenceGraph 只保存结构摘要、hash、selector 和证据引用。"},
 	}
+}
+
+func demoIntentFromState(state *ProjectUnderstandingState) *model.DemoIntentSpec {
+	now := time.Now().UTC()
+	project := state.Project
+	brief := state.Brief
+	objective := "生成可审批、可执行的产品演示路径。"
+	audience := ""
+	if project != nil {
+		objective = firstNonEmpty(objectiveFromBrief(brief), project.ProductDescription, objective)
+		audience = project.TargetAudience
+	}
+	if brief != nil {
+		audience = firstNonEmpty(brief.TargetAudience, audience)
+	}
+	goals := []model.DemoIntentGoal{}
+	if hasProjectCredential(project) || intentTextContains(state, "登录", "login", "signin", "sign in") {
+		goals = append(goals, model.DemoIntentGoal{
+			ID:               "intent_login",
+			Label:            "登录并进入工作台",
+			Kind:             "auth",
+			Required:         true,
+			BusinessCritical: false,
+			TargetKeywords:   []string{"login", "signin", "sign-in", "登录", "邮箱", "email", "password", "密码"},
+			PreferredAction:  "fill",
+			SuccessState:     "进入已登录工作台或目标页面",
+			Confidence:       0.78,
+		})
+	}
+	for _, rawGoal := range requirementGoalTexts(state) {
+		goal := intentGoalFromText(rawGoal)
+		if goal.Label == "" {
+			continue
+		}
+		if containsIntentGoal(goals, goal.ID, goal.Label) {
+			continue
+		}
+		goals = append(goals, goal)
+	}
+	if !hasBusinessIntentGoal(goals) {
+		label := firstNonEmpty(scenarioFromBrief(brief), objective, "核心业务流程")
+		goals = append(goals, model.DemoIntentGoal{
+			ID:               "intent_primary_business",
+			Label:            label,
+			Kind:             "business_action",
+			Required:         true,
+			BusinessCritical: true,
+			TargetKeywords:   intentKeywordsForText(label),
+			PreferredAction:  "click",
+			SuccessState:     firstNonEmpty(primaryOutcomeFromBrief(brief), "目标业务状态可见"),
+			Confidence:       0.66,
+		})
+	}
+	forbidden := []string{}
+	if project != nil {
+		forbidden = append(forbidden, project.MustNotShow...)
+		forbidden = append(forbidden, project.ForbiddenPages...)
+		forbidden = append(forbidden, project.ForbiddenData...)
+	}
+	if brief != nil {
+		forbidden = append(forbidden, brief.MustNotShow...)
+		forbidden = append(forbidden, brief.ForbiddenPages...)
+		forbidden = append(forbidden, brief.ForbiddenData...)
+	}
+	return &model.DemoIntentSpec{
+		ID:              "demo_intent_" + project.ID,
+		ProjectID:       project.ID,
+		SchemaVersion:   model.ProjectIntelligencePackSchemaVersion,
+		Objective:       objective,
+		TargetAudience:  audience,
+		Goals:           goals,
+		ForbiddenTopics: uniqueStrings(forbidden),
+		EvidenceRefs:    requirementEvidenceRefs(brief),
+		Confidence:      intentConfidence(goals),
+		CreatedAt:       now,
+	}
+}
+
+func featureTraceFromState(state *ProjectUnderstandingState) *model.FeatureTraceResult {
+	now := time.Now().UTC()
+	if state.Pack.DemoIntent == nil {
+		state.Pack.DemoIntent = demoIntentFromState(state)
+	}
+	probes := interactionProbesFromState(state)
+	traces := make([]model.FeatureGoalTrace, 0, len(state.Pack.DemoIntent.Goals))
+	evidenceRefs := []model.EvidenceRef{}
+	for _, goal := range state.Pack.DemoIntent.Goals {
+		trace := traceGoalToEvidence(goal, state, probes)
+		traces = append(traces, trace)
+		evidenceRefs = append(evidenceRefs, trace.EvidenceRefs...)
+		for _, probe := range trace.SelectorEvidence {
+			evidenceRefs = append(evidenceRefs, probe.EvidenceRefs...)
+		}
+	}
+	return &model.FeatureTraceResult{
+		ID:            "feature_trace_" + state.Project.ID,
+		ProjectID:     state.Project.ID,
+		IntentID:      state.Pack.DemoIntent.ID,
+		SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+		Traces:        traces,
+		EvidenceRefs:  uniqueEvidenceRefs(evidenceRefs),
+		Confidence:    featureTraceConfidence(traces),
+		CreatedAt:     now,
+	}
+}
+
+func traceGoalToEvidence(goal model.DemoIntentGoal, state *ProjectUnderstandingState, probes []model.InteractionProbe) model.FeatureGoalTrace {
+	trace := model.FeatureGoalTrace{
+		IntentGoalID: goal.ID,
+		IntentLabel:  goal.Label,
+		Confidence:   0.5,
+	}
+	keywords := goal.TargetKeywords
+	if len(keywords) == 0 {
+		keywords = intentKeywordsForText(goal.Label)
+	}
+	for _, route := range state.Pack.Architecture.RouteTree {
+		if keywordMatchScore(keywords, route.Path, route.Name) > 0 {
+			trace.MatchedRouteRefs = append(trace.MatchedRouteRefs, route.ID)
+			trace.EvidenceRefs = append(trace.EvidenceRefs, route.EvidenceRefs...)
+		}
+	}
+	for _, module := range state.Pack.Architecture.Modules {
+		if keywordMatchScore(keywords, module.Name, module.Responsibility, strings.Join(module.ComponentRefs, " ")) > 0 {
+			trace.MatchedComponents = append(trace.MatchedComponents, module.ComponentRefs...)
+			trace.EvidenceRefs = append(trace.EvidenceRefs, module.EvidenceRefs...)
+		}
+	}
+	for _, api := range state.Pack.APIContracts {
+		if keywordMatchScore(keywords, api.Path, api.Purpose, strings.Join(api.RequestFields, " "), strings.Join(api.ResponseFields, " ")) > 0 {
+			trace.MatchedAPIRefs = append(trace.MatchedAPIRefs, api.ID)
+			trace.EvidenceRefs = append(trace.EvidenceRefs, api.EvidenceRefs...)
+		}
+	}
+	for _, dataModel := range state.Pack.DataModels {
+		if keywordMatchScore(keywords, dataModel.Name, strings.Join(dataFieldNames(dataModel.Fields), " ")) > 0 {
+			trace.MatchedDataModels = append(trace.MatchedDataModels, dataModel.ID)
+			trace.EvidenceRefs = append(trace.EvidenceRefs, dataModel.EvidenceRefs...)
+		}
+	}
+	for _, probe := range probes {
+		score := interactionProbeGoalScore(goal, probe)
+		if score <= 0 {
+			continue
+		}
+		probe.IntentGoalID = goal.ID
+		probe.Score = score
+		if goal.BusinessCritical && (probe.IsChrome || !probe.IsBusiness) {
+			continue
+		}
+		trace.SelectorEvidence = append(trace.SelectorEvidence, probe)
+	}
+	sort.Slice(trace.SelectorEvidence, func(i, j int) bool {
+		return trace.SelectorEvidence[i].Score > trace.SelectorEvidence[j].Score
+	})
+	if len(trace.SelectorEvidence) > 6 {
+		trace.SelectorEvidence = trace.SelectorEvidence[:6]
+	}
+	if len(trace.MatchedRouteRefs) == 0 {
+		trace.MissingEvidence = append(trace.MissingEvidence, "route")
+	}
+	if goal.BusinessCritical && len(trace.SelectorEvidence) == 0 {
+		trace.MissingEvidence = append(trace.MissingEvidence, "selector")
+	}
+	trace.MatchedRouteRefs = limitStrings(uniqueStrings(trace.MatchedRouteRefs), 8)
+	trace.MatchedComponents = limitStrings(uniqueStrings(trace.MatchedComponents), 8)
+	trace.MatchedAPIRefs = limitStrings(uniqueStrings(trace.MatchedAPIRefs), 8)
+	trace.MatchedDataModels = limitStrings(uniqueStrings(trace.MatchedDataModels), 8)
+	trace.EvidenceRefs = uniqueEvidenceRefs(trace.EvidenceRefs)
+	trace.Confidence = goalTraceConfidence(trace)
+	return trace
+}
+
+func interactionProbesFromState(state *ProjectUnderstandingState) []model.InteractionProbe {
+	probes := []model.InteractionProbe{}
+	for _, page := range state.PageSnapshots {
+		for _, action := range page.Actions {
+			selector := strings.TrimSpace(action.SelectorHint)
+			if selector == "" {
+				continue
+			}
+			kind := firstNonEmpty(action.Kind, actionKindFromSelector(selector))
+			probes = append(probes, model.InteractionProbe{
+				ID:             firstNonEmpty(action.ID, "probe_page_"+shortHash(page.ID+selector)),
+				Label:          firstNonEmpty(action.Label, labelFromSelector(selector)),
+				Kind:           kind,
+				Selector:       selector,
+				URL:            firstNonEmpty(action.TargetURL, page.URL),
+				RouteRef:       safeID("route", pathFromURL(firstNonEmpty(action.TargetURL, page.URL))),
+				Source:         "page_reader",
+				IsBusiness:     isBusinessAction(graphActionTypeFromKind(kind, selector)),
+				IsChrome:       actionLooksLikeChromeControl(action.Label, selector),
+				SelectorScore:  selectorQualityScore(selector),
+				WaitConditions: waitHintsForSurface(page.URL, []model.SelectorCandidate{{Kind: "css", Value: selector}}, page.States),
+				EvidenceRefs:   uniqueEvidenceRefs(append(action.EvidenceRefs, page.EvidenceRefs...)),
+			})
+		}
+		for _, selector := range page.StableSelectors {
+			if selector.Value == "" {
+				continue
+			}
+			kind := actionKindFromSelector(selector.Value)
+			probes = append(probes, model.InteractionProbe{
+				ID:             "probe_page_selector_" + shortHash(page.ID+selector.Value),
+				Label:          labelFromSelector(selector.Value),
+				Kind:           kind,
+				Selector:       selector.Value,
+				URL:            page.URL,
+				RouteRef:       safeID("route", pathFromURL(page.URL)),
+				Source:         "page_reader",
+				IsBusiness:     isBusinessAction(graphActionTypeFromKind(kind, selector.Value)),
+				IsChrome:       actionLooksLikeChromeControl(labelFromSelector(selector.Value), selector.Value),
+				SelectorScore:  selectorQualityScore(selector.Value),
+				WaitConditions: waitHintsForSurface(page.URL, []model.SelectorCandidate{selector}, page.States),
+				EvidenceRefs:   uniqueEvidenceRefs(append(selector.EvidenceRefs, page.EvidenceRefs...)),
+			})
+		}
+	}
+	componentByPathHash := map[string]model.ComponentInsight{}
+	for _, snapshot := range state.CodeSnapshots {
+		for _, component := range snapshot.Components {
+			if component.FilePathHashSHA256 != "" {
+				componentByPathHash[component.FilePathHashSHA256] = component
+			}
+			for _, selector := range component.SelectorHints {
+				if selector == "" {
+					continue
+				}
+				kind := actionKindFromSelector(selector)
+				probes = append(probes, model.InteractionProbe{
+					ID:            "probe_component_" + shortHash(component.ID+selector),
+					Label:         firstNonEmpty(firstString(component.ActionLabels, ""), labelFromSelector(selector), component.Name),
+					Kind:          kind,
+					Selector:      selector,
+					ComponentRef:  component.ID,
+					Source:        "code_reader",
+					IsBusiness:    isBusinessAction(graphActionTypeFromKind(kind, selector)),
+					IsChrome:      actionLooksLikeChromeControl(component.Name+" "+strings.Join(component.ActionLabels, " "), selector),
+					SelectorScore: selectorQualityScore(selector),
+					EvidenceRefs:  component.EvidenceRefs,
+				})
+			}
+		}
+		for _, selector := range snapshot.Selectors {
+			if selector.Value == "" {
+				continue
+			}
+			component := componentByPathHash[selector.FilePathHashSHA256]
+			kind := actionKindFromSelector(selector.Value)
+			label := labelFromSelector(selector.Value)
+			if component.Name != "" {
+				label = firstNonEmpty(firstString(component.ActionLabels, ""), label, component.Name)
+			}
+			probes = append(probes, model.InteractionProbe{
+				ID:            "probe_code_selector_" + shortHash(selector.FilePathHashSHA256+selector.Value),
+				Label:         label,
+				Kind:          kind,
+				Selector:      selector.Value,
+				ComponentRef:  component.ID,
+				Source:        "code_reader",
+				IsBusiness:    isBusinessAction(graphActionTypeFromKind(kind, selector.Value)),
+				IsChrome:      actionLooksLikeChromeControl(label, selector.Value),
+				SelectorScore: selectorQualityScore(selector.Value),
+				EvidenceRefs:  uniqueEvidenceRefs(append(selector.EvidenceRefs, component.EvidenceRefs...)),
+			})
+		}
+	}
+	return dedupeInteractionProbes(probes)
 }
 
 func featureCapabilitiesFromState(state *ProjectUnderstandingState) []model.FeatureCapability {
@@ -1586,6 +1870,251 @@ func criticOutputSummary(readiness *model.ScriptReadinessReport) string {
 		return fmt.Sprintf("发现 %d 个阻塞，需补齐输入后重跑相关节点。", len(readiness.Blockers))
 	}
 	return fmt.Sprintf("通过一致性审查：warnings=%d，selector coverage=%.0f%%。", len(readiness.Warnings), readiness.SelectorCoverage*100)
+}
+
+func businessIntentGoalCount(goals []model.DemoIntentGoal) int {
+	count := 0
+	for _, goal := range goals {
+		if goal.BusinessCritical {
+			count++
+		}
+	}
+	return count
+}
+
+func intentTextContains(state *ProjectUnderstandingState, tokens ...string) bool {
+	return keywordMatchScore(tokens, strings.Join(requirementGoalTexts(state), " ")) > 0
+}
+
+func requirementGoalTexts(state *ProjectUnderstandingState) []string {
+	values := []string{}
+	if state == nil {
+		return values
+	}
+	if state.Project != nil {
+		values = append(values, state.Project.ProductDescription)
+		values = append(values, state.Project.MustShow...)
+	}
+	if state.Brief != nil {
+		values = append(values, state.Brief.Scenario, state.Brief.Objective, state.Brief.PrimaryOutcome)
+		values = append(values, state.Brief.MustShow...)
+	}
+	return uniqueStrings(values)
+}
+
+func intentGoalFromText(text string) model.DemoIntentGoal {
+	label := strings.TrimSpace(text)
+	if label == "" {
+		return model.DemoIntentGoal{}
+	}
+	keywords := intentKeywordsForText(label)
+	kind := "business_action"
+	preferredAction := "click"
+	success := "目标业务状态可见"
+	lower := strings.ToLower(label)
+	switch {
+	case containsAny(lower, "登录", "login", "signin", "sign in", "密码", "password"):
+		kind = "auth"
+		preferredAction = "fill"
+		success = "进入已登录状态"
+	case containsAny(lower, "搜索", "search", "筛选", "filter"):
+		preferredAction = "fill"
+		success = "搜索或筛选结果可见"
+	case containsAny(lower, "上传", "upload", "导入", "import"):
+		preferredAction = "upload"
+		success = "上传结果或导入状态可见"
+	case containsAny(lower, "查看", "展示", "说明", "inspect", "observe"):
+		preferredAction = "inspect"
+		success = "目标区域可见"
+	}
+	return model.DemoIntentGoal{
+		ID:               "intent_" + shortHash(label),
+		Label:            label,
+		Kind:             kind,
+		Required:         true,
+		BusinessCritical: kind != "auth" && preferredAction != "inspect",
+		TargetKeywords:   keywords,
+		PreferredAction:  preferredAction,
+		SuccessState:     success,
+		Confidence:       0.72,
+	}
+}
+
+func containsIntentGoal(goals []model.DemoIntentGoal, id string, label string) bool {
+	for _, goal := range goals {
+		if goal.ID == id || strings.EqualFold(goal.Label, label) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBusinessIntentGoal(goals []model.DemoIntentGoal) bool {
+	for _, goal := range goals {
+		if goal.BusinessCritical {
+			return true
+		}
+	}
+	return false
+}
+
+func intentKeywordsForText(text string) []string {
+	lower := strings.ToLower(text)
+	keywords := []string{}
+	dictionary := []string{
+		"新建", "创建", "项目", "工程", "create", "new", "project",
+		"邀请", "成员", "团队", "invite", "member", "team",
+		"生成", "构建", "执行", "运行", "generate", "build", "run", "agent",
+		"上传", "导入", "upload", "import",
+		"搜索", "筛选", "search", "filter",
+		"登录", "邮箱", "密码", "login", "signin", "email", "password",
+		"成功", "完成", "状态", "success", "complete", "done",
+	}
+	for _, token := range dictionary {
+		if strings.Contains(lower, strings.ToLower(token)) {
+			keywords = append(keywords, token)
+		}
+	}
+	for _, token := range strings.FieldsFunc(lower, func(r rune) bool {
+		return r == ' ' || r == ',' || r == ';' || r == '，' || r == '。' || r == '/' || r == '-' || r == '_' || r == ':'
+	}) {
+		token = strings.TrimSpace(token)
+		if len([]rune(token)) >= 2 && !containsAny(token, "http", "https") {
+			keywords = append(keywords, token)
+		}
+	}
+	if len(keywords) == 0 && strings.TrimSpace(text) != "" {
+		keywords = append(keywords, strings.TrimSpace(text))
+	}
+	return limitStrings(uniqueStrings(keywords), 10)
+}
+
+func requirementEvidenceRefs(brief *model.RequirementBrief) []model.EvidenceRef {
+	if brief == nil {
+		return nil
+	}
+	return brief.EvidenceRefs
+}
+
+func intentConfidence(goals []model.DemoIntentGoal) float64 {
+	if len(goals) == 0 {
+		return 0.4
+	}
+	if hasBusinessIntentGoal(goals) {
+		return 0.78
+	}
+	return 0.62
+}
+
+func keywordMatchScore(keywords []string, values ...string) int {
+	if len(keywords) == 0 {
+		return 0
+	}
+	haystack := strings.ToLower(strings.Join(values, " "))
+	if strings.TrimSpace(haystack) == "" {
+		return 0
+	}
+	score := 0
+	for _, keyword := range keywords {
+		keyword = strings.ToLower(strings.TrimSpace(keyword))
+		if keyword == "" {
+			continue
+		}
+		if strings.Contains(haystack, keyword) {
+			score++
+		}
+	}
+	return score
+}
+
+func dataFieldNames(fields []model.DataField) []string {
+	names := []string{}
+	for _, field := range fields {
+		names = append(names, field.Name)
+	}
+	return uniqueStrings(names)
+}
+
+func interactionProbeGoalScore(goal model.DemoIntentGoal, probe model.InteractionProbe) float64 {
+	keywords := goal.TargetKeywords
+	if len(keywords) == 0 {
+		keywords = intentKeywordsForText(goal.Label)
+	}
+	match := keywordMatchScore(keywords, probe.Label, probe.Selector, probe.ComponentRef, probe.RouteRef, probe.URL)
+	if match == 0 {
+		return 0
+	}
+	score := float64(match*20) + float64(probe.SelectorScore)
+	if probe.Source == "page_reader" {
+		score += 20
+	}
+	if probe.IsBusiness {
+		score += 30
+	}
+	if goal.PreferredAction != "" && graphActionTypeFromKind(probe.Kind, probe.Selector) == graphActionTypeFromKind(goal.PreferredAction, probe.Selector) {
+		score += 15
+	}
+	if looksLikeLoginAction(probe.Label, probe.Selector) && goal.Kind != "auth" {
+		score -= 80
+	}
+	if probe.IsChrome {
+		score -= 120
+	}
+	if selectorLooksGeneric(probe.Selector) {
+		score -= 60
+	}
+	return score
+}
+
+func featureTraceConfidence(traces []model.FeatureGoalTrace) float64 {
+	if len(traces) == 0 {
+		return 0.42
+	}
+	total := 0.0
+	for _, trace := range traces {
+		total += trace.Confidence
+	}
+	return total / float64(len(traces))
+}
+
+func goalTraceConfidence(trace model.FeatureGoalTrace) float64 {
+	score := 0.45
+	if len(trace.MatchedRouteRefs) > 0 {
+		score += 0.12
+	}
+	if len(trace.MatchedComponents) > 0 {
+		score += 0.1
+	}
+	if len(trace.MatchedAPIRefs) > 0 {
+		score += 0.06
+	}
+	if len(trace.SelectorEvidence) > 0 {
+		score += 0.2
+	}
+	if len(trace.MissingEvidence) > 0 {
+		score -= 0.12
+	}
+	if score < 0.1 {
+		return 0.1
+	}
+	if score > 0.95 {
+		return 0.95
+	}
+	return score
+}
+
+func dedupeInteractionProbes(values []model.InteractionProbe) []model.InteractionProbe {
+	seen := map[string]bool{}
+	out := make([]model.InteractionProbe, 0, len(values))
+	for _, value := range values {
+		key := value.Source + "|" + value.Selector + "|" + value.Label
+		if strings.TrimSpace(value.Selector) == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func codeFileCountFromSnapshots(snapshots []model.CodeUnderstandingSnapshot) int {
