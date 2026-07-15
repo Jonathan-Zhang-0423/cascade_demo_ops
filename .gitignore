@@ -11,6 +11,9 @@ artifacts/
 storage/local/
 .cascade-dev/
 .cascade-smoke/
+client_execution_package.json
+exchange_envelope.json
+replay-bundle.tar.gz
 backend/.cache/
 .gocache/
 .gotmp/
