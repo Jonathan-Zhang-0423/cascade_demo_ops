@@ -14,6 +14,7 @@
     "dev:web": "pnpm --filter @cascade/web dev",
     "build:web": "pnpm --filter @cascade/web build",
     "test:web": "pnpm --filter @cascade/web test",
+    "verify": "node scripts/verify-local.mjs",
     "build:desktop:win": "node scripts/build-desktop.mjs windows",
     "build:desktop:mac": "node scripts/build-desktop.mjs darwin",
     "package:desktop": "node scripts/package-desktop.mjs"
