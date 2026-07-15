@@ -193,6 +193,130 @@ func TestDemoEditPlanValidationReportJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDirectorEditPlanPatchJSONRoundTrip(t *testing.T) {
+	now := time.Date(2026, 7, 15, 23, 10, 0, 0, time.UTC)
+	startMS := 0
+	endMS := 1200
+	sourceRange := MillisecondRange{0, 1200}
+	zoom := 1.12
+	patch := DirectorEditPlanPatch{
+		SchemaVersion:   DirectorEditPlanPatchSchemaVersion,
+		PatchID:         "director_edit_plan_patch_1",
+		CreatedAt:       now,
+		SourcePackageID: "pkg_1",
+		DirectorInputID: "director_input_1",
+		SuggestionID:    "director_suggestion_1",
+		BasePlanID:      "edit_plan_1",
+		Status:          "proposed",
+		ApplicationMode: "manual_review_or_controlled_apply_required",
+		Policy: DirectorEditPlanPatchPolicy{
+			AutoApply:                                  false,
+			RequiresValidation:                         true,
+			RequiresRendererValidation:                 true,
+			ExistingAssetsOnly:                         true,
+			PreserveRequiredStepOrder:                  true,
+			PreserveLockedSourceFields:                 true,
+			RuntimeAdaptiveRequiresCaptureConfirmation: true,
+			AllowedEditableFields:                      DemoEditAllowedModelEditableFields,
+			LockedFields:                               DemoEditRequiredLockedFields,
+		},
+		ShotPatches: []DirectorEditPlanShotPatch{{
+			ShotID:            "shot_001",
+			SourceArtifactID:  "artifact_raw_recording",
+			SourceStepID:      "node_start",
+			SourceTimeRangeMS: &sourceRange,
+			ProposedPurpose:   "Highlight the verified source step.",
+			AddOperations: []EditOperation{{
+				Type:    EditOperationZoomPan,
+				StartMS: &startMS,
+				EndMS:   &endMS,
+				Zoom:    &zoom,
+			}},
+			AddOverlays: []EditOverlay{{
+				Type:         EditOverlayCaption,
+				Text:         "Dashboard is ready.",
+				SourceStepID: "node_start",
+				StartMS:      &startMS,
+				EndMS:        &endMS,
+			}},
+			PrioritySource: "user_explicit_metadata",
+			SourceTrace: []DirectorSourceTrace{{
+				Source:     "user_explicit_metadata",
+				FieldPath:  "metadata.user_demo_intent.captions[0]",
+				Confidence: "high",
+			}},
+		}},
+		GlobalStylePatch: &DemoEditGlobalStyle{ColorGrade: "neutral_enterprise"},
+	}
+	report := DirectorEditPlanPatchValidationReport{
+		SchemaVersion: DirectorEditPlanPatchValidationSchemaVersion,
+		PatchID:       patch.PatchID,
+		BasePlanID:    patch.BasePlanID,
+		Valid:         true,
+		CheckedAt:     now,
+		Policies:      []string{"patch_is_not_auto_applied"},
+	}
+	applyResult := DirectorEditPlanPatchApplyResult{
+		SchemaVersion:      DirectorEditPlanPatchApplyResultSchemaVersion,
+		ResultID:           "director_patch_apply_1",
+		CreatedAt:          now,
+		PatchID:            patch.PatchID,
+		BasePlanID:         patch.BasePlanID,
+		OutputPlanID:       "edit_plan_1_director_applied",
+		Status:             "applied_and_rerendered",
+		Applied:            true,
+		RerenderRequested:  true,
+		Rerendered:         true,
+		AppliedShotIDs:     []string{"shot_001"},
+		OutputVideoPath:    "artifacts/render/demo_12s.mp4",
+		OutputPlanPath:     "artifacts/render/demo_edit_plan.json",
+		RenderManifestPath: "artifacts/render/render_manifest.json",
+		Notes:              []string{"controlled apply"},
+	}
+
+	patchData, err := json.Marshal(patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotPatch DirectorEditPlanPatch
+	if err := json.Unmarshal(patchData, &gotPatch); err != nil {
+		t.Fatal(err)
+	}
+	if gotPatch.SchemaVersion != DirectorEditPlanPatchSchemaVersion || gotPatch.Policy.AutoApply {
+		t.Fatalf("director patch identity/policy did not round-trip: %+v", gotPatch)
+	}
+	if gotPatch.ShotPatches[0].SourceTimeRangeMS == nil || gotPatch.ShotPatches[0].SourceTimeRangeMS[1] != 1200 {
+		t.Fatalf("director patch source range did not round-trip: %+v", gotPatch.ShotPatches[0])
+	}
+	if gotPatch.ShotPatches[0].AddOverlays[0].StartMS == nil || *gotPatch.ShotPatches[0].AddOverlays[0].StartMS != 0 {
+		t.Fatalf("director patch overlay start_ms=0 did not round-trip: %+v", gotPatch.ShotPatches[0].AddOverlays[0])
+	}
+
+	reportData, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotReport DirectorEditPlanPatchValidationReport
+	if err := json.Unmarshal(reportData, &gotReport); err != nil {
+		t.Fatal(err)
+	}
+	if gotReport.SchemaVersion != DirectorEditPlanPatchValidationSchemaVersion || !gotReport.Valid || gotReport.PatchID != patch.PatchID {
+		t.Fatalf("director patch validation report did not round-trip: %+v", gotReport)
+	}
+
+	applyData, err := json.Marshal(applyResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotApply DirectorEditPlanPatchApplyResult
+	if err := json.Unmarshal(applyData, &gotApply); err != nil {
+		t.Fatal(err)
+	}
+	if gotApply.SchemaVersion != DirectorEditPlanPatchApplyResultSchemaVersion || !gotApply.Applied || !gotApply.Rerendered || gotApply.OutputPlanID == "" {
+		t.Fatalf("director patch apply result did not round-trip: %+v", gotApply)
+	}
+}
+
 func TestDemoEditPlanWorkerJSONCompatibility(t *testing.T) {
 	catalogJSON := []byte(`{
   "schema_version": "demoops.asset_timeline_catalog.v1",

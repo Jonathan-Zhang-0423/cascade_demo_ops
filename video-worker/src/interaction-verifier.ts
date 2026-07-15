@@ -1,3 +1,5 @@
+import { launchOptionsWithProxy } from "./playwright-proxy.js";
+
 type VerifyInteractionRequest = {
   product_url?: string;
   timeout_ms?: number;
@@ -73,7 +75,7 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
   }
 
   const playwright = await import("playwright");
-  const browser = await playwright.chromium.launch({ headless: request.headless ?? true });
+  const browser = await playwright.chromium.launch(launchOptionsWithProxy({ headless: request.headless ?? true }));
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
   const page = await context.newPage();
   const timeout = request.timeout_ms || 20000;

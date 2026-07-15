@@ -21,8 +21,17 @@ func TestNewRecordRequestFromClientExecutionPackageUsesProtocolFields(t *testing
 	if request.Graph != pkg.WorkflowGraph {
 		t.Fatal("record request should use the approved workflow graph from the client package")
 	}
-	if request.SourcePackageID != pkg.PackageID || request.ExecutableScriptBundle != pkg.ExecutableScriptBundle {
+	if request.SourcePackageID != pkg.PackageID || request.ExecutableScriptBundle == nil || request.ExecutableScriptBundle.ID != pkg.ExecutableScriptBundle.ID {
 		t.Fatalf("record request did not retain protocol package references: %+v", request)
+	}
+	if request.ExecutableScriptBundle.PlanJSON == pkg.ExecutableScriptBundle.PlanJSON {
+		t.Fatal("record request should use an execution-normalized plan copy when graph screenshot requirements are present")
+	}
+	if got := request.ExecutableScriptBundle.PlanJSON.Steps[0].Capture; !got.Screenshot || got.Dedupe == nil || *got.Dedupe {
+		t.Fatalf("graph-required screenshots should disable step screenshot dedupe for worker execution: %+v", got)
+	}
+	if pkg.ExecutableScriptBundle.PlanJSON.Steps[0].Capture.Dedupe != nil {
+		t.Fatalf("record request normalization must not mutate the source package: %+v", pkg.ExecutableScriptBundle.PlanJSON.Steps[0].Capture)
 	}
 	if request.Viewport.Width != 1920 || request.Viewport.Height != 1080 {
 		t.Fatalf("record request should prefer recording output resolution, got %+v", request.Viewport)
@@ -35,6 +44,54 @@ func TestNewRecordRequestFromClientExecutionPackageUsesProtocolFields(t *testing
 	}
 	if request.SandboxPolicy == nil || request.SandboxPolicy.PolicyHashSHA256 == "" || request.SandboxPolicy.IsolationMode != model.SandboxIsolationContainer {
 		t.Fatalf("record request did not carry resolved sandbox policy: %+v", request.SandboxPolicy)
+	}
+}
+
+func TestNewRecordRequestFromClientExecutionPackageRestoresGraphRequiredStepScreenshot(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	pkg.WorkflowGraph.Nodes = append(pkg.WorkflowGraph.Nodes, &model.GraphNode{
+		ID:              "node_hold",
+		Type:            model.GraphNodeTypeCapture,
+		Action:          string(model.GraphActionWait),
+		Title:           "Hold product page",
+		ExpectedOutcome: "Product page remains visible",
+		IsScreenshot:    true,
+		Capture:         &model.CaptureSpec{Screenshot: true, Video: true, AssetRole: "primary"},
+	})
+	pkg.ExecutableScriptBundle.ScriptManifest.StepNodeIDs = append(pkg.ExecutableScriptBundle.ScriptManifest.StepNodeIDs, "node_hold")
+	pkg.ExecutableScriptBundle.PlanJSON.Steps = append(pkg.ExecutableScriptBundle.PlanJSON.Steps, model.ScriptStep{
+		ID:              "step_2",
+		Order:           2,
+		NodeID:          "node_hold",
+		Action:          model.ScriptActionInstruction{Type: model.GraphActionWait},
+		ExpectedOutcome: "Product page remains visible",
+		Capture:         model.CaptureSpec{Screenshot: false, Video: true},
+		Timing:          model.NodeTimingHint{NodeID: "node_hold", DurationMS: 1200},
+		Blocking:        true,
+	})
+	pkg.ExecutableScriptBundle.PlaywrightScript.InlineSource += "\n// \"node_hold\"\n"
+	refreshTestPackageDigests(t, &pkg)
+
+	request, err := NewRecordRequestFromClientExecutionPackage(&pkg, "artifacts/recording/job_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var holdStep *model.ScriptStep
+	for index := range request.ExecutableScriptBundle.PlanJSON.Steps {
+		if request.ExecutableScriptBundle.PlanJSON.Steps[index].NodeID == "node_hold" {
+			holdStep = &request.ExecutableScriptBundle.PlanJSON.Steps[index]
+			break
+		}
+	}
+	if holdStep == nil {
+		t.Fatalf("normalized plan lost node_hold: %+v", request.ExecutableScriptBundle.PlanJSON.Steps)
+	}
+	if !holdStep.Capture.Screenshot || holdStep.Capture.Dedupe == nil || *holdStep.Capture.Dedupe || holdStep.Capture.AssetRole != "primary" {
+		t.Fatalf("graph-required screenshot was not restored for worker execution: %+v", holdStep.Capture)
+	}
+	if pkg.ExecutableScriptBundle.PlanJSON.Steps[1].Capture.Screenshot || pkg.ExecutableScriptBundle.PlanJSON.Steps[1].Capture.Dedupe != nil {
+		t.Fatalf("source package should remain unchanged: %+v", pkg.ExecutableScriptBundle.PlanJSON.Steps[1].Capture)
 	}
 }
 
@@ -422,4 +479,34 @@ export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise
 			},
 		},
 	}
+}
+
+func refreshTestPackageDigests(t *testing.T, pkg *model.ClientExecutionPackage) {
+	t.Helper()
+	graphDigest, err := model.DigestCanonicalJSON(pkg.WorkflowGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg.ExecutableScriptBundle.PlanJSON.Reproducibility.GraphHashSHA256 = graphDigest
+	planHash, err := pkg.ExecutableScriptBundle.PlanJSON.ComputeScriptHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg.ExecutableScriptBundle.PlanJSON.Reproducibility.ScriptHashSHA256 = planHash
+	source := pkg.ExecutableScriptBundle.PlaywrightScript.InlineSource
+	scriptHash := model.SHA256Hex([]byte(source))
+	pkg.ExecutableScriptBundle.PlaywrightScript.SHA256 = scriptHash
+	pkg.ExecutableScriptBundle.PlaywrightScript.SizeBytes = int64(len(source))
+	pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256 = planHash
+	pkg.ExecutableScriptBundle.Reproducibility.ScriptHashSHA256 = scriptHash
+	pkg.ExecutableScriptBundle.Reproducibility.GraphHashSHA256 = graphDigest
+	pkg.ExecutableScriptBundle.Reproducibility.BundleHashSHA256 = ""
+	bundleHash, err := pkg.ExecutableScriptBundle.ComputeBundleHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg.ExecutableScriptBundle.Reproducibility.BundleHashSHA256 = bundleHash
+	pkg.Reproducibility.GraphHashSHA256 = graphDigest
+	pkg.Reproducibility.ScriptHashSHA256 = planHash
+	pkg.SafetyReport.HumanApproval.PlanDigestSHA256 = graphDigest
 }

@@ -48,6 +48,31 @@ const steps = [
     group: "node",
   },
   {
+    name: "Video worker requirement report smoke",
+    ...pnpmStep("--filter", "@cascade/video-worker", "smoke:render:requirements"),
+    cwd: root,
+    group: "node",
+  },
+  {
+    name: "Video worker generated candidate smoke",
+    ...pnpmStep("--filter", "@cascade/video-worker", "smoke:render:candidates"),
+    cwd: root,
+    group: "node",
+  },
+  {
+    name: "Video worker format fallback smoke",
+    ...pnpmStep("--filter", "@cascade/video-worker", "smoke:render:format-fallback"),
+    cwd: root,
+    group: "node",
+  },
+  {
+    name: "Server render validation fixture smoke",
+    command: process.execPath,
+    args: [resolve(root, "scripts", "smoke-validate-server-render.mjs")],
+    cwd: root,
+    group: "node",
+  },
+  {
     name: "Web tests",
     ...pnpmStep("--filter", "@cascade/web", "test"),
     cwd: root,
@@ -203,6 +228,8 @@ Runs the strict local validation suite:
   - go build ./...
   - go test ./...
   - video-worker typecheck/build
+  - video-worker render smoke checks
+  - server render validation fixture smoke
   - web tests/build
   - git diff --check
 
