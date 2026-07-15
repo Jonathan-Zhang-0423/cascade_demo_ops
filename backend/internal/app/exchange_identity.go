@@ -120,12 +120,17 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, productURL string, 
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	discovery, err := cloudGetPublicJSON[model.ExchangeBootstrapDiscoveryResponse](ctx, client, baseURL+"/.well-known/cascade-exchange")
-	if err != nil {
-		if !isLocalExchangeBaseURL(baseURL) {
-			return ExchangeSession{}, err
-		}
+	var discovery model.ExchangeBootstrapDiscoveryResponse
+	if useConfiguredExchangeBootstrap(baseURL, s.runtime.CloudExchangeBaseURL, s.runtime.Environment) {
 		discovery = localBootstrapDiscovery(baseURL, s.runtime.Environment, time.Now().UTC())
+	} else {
+		discovery, err = cloudGetPublicJSON[model.ExchangeBootstrapDiscoveryResponse](ctx, client, baseURL+"/.well-known/cascade-exchange")
+		if err != nil {
+			if !isLocalExchangeBaseURL(baseURL) && !isOptionalExchangeDiscoveryError(err) {
+				return ExchangeSession{}, err
+			}
+			discovery = localBootstrapDiscovery(baseURL, s.runtime.Environment, time.Now().UTC())
+		}
 	}
 	if len(discovery.ServerKeyset) > 0 {
 		record.ServerKeyID = discovery.ServerKeyset[0].KeyID
@@ -216,6 +221,26 @@ func (s *Service) discoverExchangeBaseURL(productURL string) (string, error) {
 		return "", errors.New("exchange discovery requires HTTPS outside localhost")
 	}
 	return parsed.Scheme + "://" + parsed.Host + "/aigc", nil
+}
+
+func useConfiguredExchangeBootstrap(baseURL string, configuredBaseURL string, environment string) bool {
+	if strings.TrimSpace(configuredBaseURL) == "" {
+		return false
+	}
+	if isLocalExchangeBaseURL(baseURL) {
+		return true
+	}
+	return environment != "production"
+}
+
+func isOptionalExchangeDiscoveryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, " returned 404:") ||
+		strings.Contains(lower, " returned 405:") ||
+		strings.Contains(lower, "404 page not found")
 }
 
 func localBootstrapDiscovery(baseURL string, environment string, now time.Time) model.ExchangeBootstrapDiscoveryResponse {
