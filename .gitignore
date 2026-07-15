@@ -11,6 +11,7 @@ artifacts/
 storage/local/
 .cascade-dev/
 .cascade-smoke/
+.cache/
 backend/.cache/
 .gocache/
 .gotmp/

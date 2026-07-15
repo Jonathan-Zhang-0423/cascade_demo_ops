@@ -627,6 +627,28 @@ describe("desktop bridge contract", () => {
     });
   });
 
+  it("adds demo credentials only to transient bridge input", () => {
+    const workspace = updateWorkspaceInputs(createWorkspace("product_demo"), {
+      productURL: "https://demo.example.cn",
+      localRepoPath: "D:\\apps\\demo",
+      rawUserPrompt: "展示登录后的核心工作流",
+    });
+    const input = userInputFromWorkspace(workspace, {
+      demoCredentials: {
+        username: "demo-user@example.cn",
+        password: "demo-password-123",
+      },
+    });
+
+    expect(input).toMatchObject({
+      demo_username: "demo-user@example.cn",
+      demo_password: "demo-password-123",
+    });
+    const workspaceJSON = JSON.stringify(workspace);
+    expect(workspaceJSON).not.toContain("demo-user@example.cn");
+    expect(workspaceJSON).not.toContain("demo-password-123");
+  });
+
   it("maps local dev runtime health into frontend camelCase DTOs", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true,

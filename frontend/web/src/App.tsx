@@ -35,6 +35,7 @@ export function App() {
 	const bridge = useMemo(() => createBridgeClient(), []);
 	const [activeNav, setActiveNav] = useState<NavSection>("projects");
 	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createWorkspace("product_demo"));
+  const [demoCredentials, setDemoCredentials] = useState({ username: "", password: "" });
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthView | undefined>();
   const [modelDiagnostics, setModelDiagnostics] = useState<ModelDiagnosticResult[]>([]);
   const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
@@ -75,12 +76,27 @@ export function App() {
     }));
   }
 
+  function bridgeRunOptions() {
+    const username = demoCredentials.username.trim();
+    const password = demoCredentials.password;
+    if (!username && !password) {
+      return undefined;
+    }
+    return {
+      demoCredentials: {
+        ...(username ? { username } : {}),
+        ...(password ? { password } : {}),
+      },
+    };
+  }
+
   async function createScenario(scenarioID: ScenarioID) {
     const result = await bridge.createProject(scenarioID);
     if (result.ok && result.data) {
       setWorkspace(result.data);
       setSelectedNodeID(result.data.planReview.graph.nodes[0]?.id ?? "");
       setChecklist(initialChecklist);
+      setDemoCredentials({ username: "", password: "" });
       setActiveNav("projects");
     }
   }
@@ -132,7 +148,7 @@ export function App() {
       void pollRuntimeEvents();
     }, 1500);
     try {
-      const result = await bridge.buildExecutionPackagePreview(workspace);
+      const result = await bridge.buildExecutionPackagePreview(workspace, bridgeRunOptions());
       window.clearInterval(poller);
       await pollRuntimeEvents();
       if (result.ok && result.data) {
@@ -222,7 +238,7 @@ export function App() {
       const result = await bridge.runProductLifecycle({
         ...workspace,
         packagePreview: { ...workspace.packagePreview, ipAllowlistAcknowledged: true },
-      });
+      }, bridgeRunOptions());
       window.clearInterval(poller);
       await pollRuntimeEvents();
       if (result.ok && result.data) {
@@ -353,10 +369,12 @@ export function App() {
             {activeNav === "projects" ? (
               <ProjectFlow
                 workspace={workspace}
+                demoCredentials={demoCredentials}
                 selectedNodeID={selectedNode?.id ?? ""}
                 onSelectNode={setSelectedNodeID}
                 onPatchNode={patchNode}
                 onStageChange={(stage) => patchWorkspace({ stage })}
+                onDemoCredentialsChange={setDemoCredentials}
                 onWorkspaceChange={setWorkspace}
                 onApproveAssets={approveAssets}
               />
@@ -490,18 +508,22 @@ function ScenarioPicker({ activeID, onCreate }: { activeID: ScenarioID; onCreate
 
 function ProjectFlow({
   workspace,
+  demoCredentials,
   selectedNodeID,
   onSelectNode,
   onPatchNode,
   onStageChange,
+  onDemoCredentialsChange,
   onWorkspaceChange,
   onApproveAssets,
 }: {
   workspace: ProjectWorkspaceView;
+  demoCredentials: { username: string; password: string };
   selectedNodeID: string;
   onSelectNode: (id: string) => void;
   onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
   onStageChange: (stage: WorkspaceStage) => void;
+  onDemoCredentialsChange: (credentials: { username: string; password: string }) => void;
   onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
   onApproveAssets: () => void;
 }) {
@@ -520,7 +542,14 @@ function ProjectFlow({
         ))}
       </div>
       {workspace.stage === "setup" ? <SetupPanel workspace={workspace} /> : null}
-      {workspace.stage === "inputs" ? <InputsPanel workspace={workspace} onWorkspaceChange={onWorkspaceChange} /> : null}
+      {workspace.stage === "inputs" ? (
+        <InputsPanel
+          workspace={workspace}
+          demoCredentials={demoCredentials}
+          onDemoCredentialsChange={onDemoCredentialsChange}
+          onWorkspaceChange={onWorkspaceChange}
+        />
+      ) : null}
       {workspace.stage === "understanding" ? <UnderstandingStagePanel workspace={workspace} /> : null}
       {workspace.stage === "plan_review" ? (
         <PlanReviewPanel
@@ -568,9 +597,13 @@ function SetupPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
 
 function InputsPanel({
   workspace,
+  demoCredentials,
+  onDemoCredentialsChange,
   onWorkspaceChange,
 }: {
   workspace: ProjectWorkspaceView;
+  demoCredentials: { username: string; password: string };
+  onDemoCredentialsChange: (credentials: { username: string; password: string }) => void;
   onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
 }) {
   const localRepoPath = workspace.inputBundle.repositories?.[0]?.local_path ?? "";
@@ -595,6 +628,25 @@ function InputsPanel({
             <span>目标受众</span>
             <input value={workspace.targetAudience} onChange={(event) => patchInputs({ targetAudience: event.currentTarget.value })} placeholder="中国客户的产品和运营团队" />
           </label>
+          <label className="field-row">
+            <span>演示账号</span>
+            <input
+              value={demoCredentials.username}
+              onChange={(event) => onDemoCredentialsChange({ ...demoCredentials, username: event.currentTarget.value })}
+              autoComplete="off"
+              placeholder="用于本地登录预扫描"
+            />
+          </label>
+          <label className="field-row">
+            <span>演示密码</span>
+            <input
+              type="password"
+              value={demoCredentials.password}
+              onChange={(event) => onDemoCredentialsChange({ ...demoCredentials, password: event.currentTarget.value })}
+              autoComplete="new-password"
+              placeholder="仅传给本地 Dev Bridge"
+            />
+          </label>
           <label className="field-row wide">
             <span>本次演示需求</span>
             <textarea value={workspace.inputBundle.raw_user_prompt ?? ""} onChange={(event) => patchInputs({ rawUserPrompt: event.currentTarget.value })} rows={4} placeholder="描述本次想展示的功能、受众、必须讲清楚的业务价值。" />
@@ -608,7 +660,7 @@ function InputsPanel({
             <textarea value={forbiddenData.join("\n")} onChange={(event) => patchInputs({ forbiddenDataText: event.currentTarget.value })} rows={3} />
           </label>
         </div>
-        <div className="input-note">当前 Dev Bridge 使用文本路径输入；后续 Wails 壳会接入原生文件夹选择器。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
+        <div className="input-note">当前 Dev Bridge 使用文本路径输入；演示账号密码只作为本地登录预扫描的瞬时凭据，不进入执行包、审批文档或云端 payload。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
       </section>
       <InputsTable workspace={workspace} />
       <CodeSummaryPanel workspace={workspace} />
@@ -663,6 +715,9 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
   }
   const architecture = intelligence.architecture;
   const traceSteps = workspace.agentGraphTrace?.steps ?? [];
+  const intentGoals = intelligence.demo_intent?.goals ?? [];
+  const verifiedPlan = intelligence.verified_interaction_plan;
+  const missingEvidence = intelligence.missing_evidence_report;
   return (
     <section className="table-section">
       <SectionTitle title="项目理解图谱" meta={workspace.agentGraphTrace?.graph_name ?? "ProjectIntelligenceGraph"} />
@@ -676,8 +731,40 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
         <Fact label="推荐路径" value={readiness?.recommended_scenario_name ?? intelligence.demo_scenario_plans?.[0]?.name ?? "待选择"} />
         <Fact label="脚本可行性" value={readiness?.can_proceed ? "可继续生成脚本" : "需复核输入材料"} />
         <Fact label="Selector 覆盖" value={typeof readiness?.selector_coverage === "number" ? `${Math.round(readiness.selector_coverage * 100)}%` : "待计算"} />
+        <Fact label="需求目标" value={`${intentGoals.length} 个`} />
+        <Fact label="页面验证" value={verifiedPlan ? `${verifiedPlan.business_action_count ?? 0} 个业务动作 · ${verifiedPlan.verification_mode ?? "待识别"}` : "未完成"} />
+        <Fact label="缺失证据" value={missingEvidence?.blocking ? "阻塞脚本生成" : missingEvidence ? "有提示" : "无阻塞"} />
         <Fact label="Source Digest" value={intelligence.source_digest_sha256 ?? "待生成"} />
       </div>
+      {intentGoals.length > 0 ? (
+        <div className="runtime-log-list">
+          {intentGoals.slice(0, 5).map((goal) => {
+            const trace = intelligence.feature_trace?.traces?.find((item) => item.intent_goal_id === goal.id);
+            const action = verifiedPlan?.actions?.find((item) => item.intent_goal_id === goal.id);
+            const missing = missingEvidence?.items?.find((item) => item.intent_goal_id === goal.id);
+            return (
+              <div key={goal.id} className={`runtime-log-row ${action ? "success" : missing ? "warning" : "info"}`}>
+                <span>{goal.business_critical ? "业务目标" : "前置目标"}</span>
+                <strong>{goal.label}</strong>
+                <small>
+                  {action
+                    ? `已验证 ${action.selector ?? action.label ?? ""}`
+                    : missing
+                      ? `${missing.missing_kind} · ${missing.message}`
+                      : `候选 ${trace?.selector_evidence?.length ?? 0} 个`}
+                </small>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+      {missingEvidence?.items?.length ? (
+        <div className="error-banner">
+          {missingEvidence.summary ?? "缺少页面验证证据"}
+          {" · "}
+          {missingEvidence.items.slice(0, 2).map((item) => item.suggested_action || item.message).join("；")}
+        </div>
+      ) : null}
       <div className="chip-row">
         {(readiness?.warnings ?? []).slice(0, 4).map((warning) => (
           <span key={warning.id} className="chip">{warning.summary}</span>

@@ -53,8 +53,8 @@ export type DesktopBridgeClient = {
   getExecutionScriptDocument(projectID: string): Promise<BridgeResult<ExecutionScriptDocument>>;
   getExecutionScriptMarkdown(projectID: string): Promise<BridgeResult<{ markdown: string }>>;
   getExecutableScriptBundle(projectID: string): Promise<BridgeResult<ExecutableRecordingScriptBundle>>;
-  buildExecutionPackagePreview(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
-  runProductLifecycle(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  buildExecutionPackagePreview(workspace: ProjectWorkspaceView, options?: BridgeRunOptions): Promise<BridgeResult<ProjectWorkspaceView>>;
+  runProductLifecycle(workspace: ProjectWorkspaceView, options?: BridgeRunOptions): Promise<BridgeResult<ProjectWorkspaceView>>;
   initExecutionPackageUpload(workspace: ProjectWorkspaceView): Promise<BridgeResult<ExecutionPackageUploadInitView>>;
   uploadExecutionPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ExecutionPackageUploadView>>;
   pollExecutionPackageStatus(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
@@ -65,6 +65,13 @@ export type DesktopBridgeClient = {
   repairFailedScript(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   ackResultPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   acknowledgeResult(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+};
+
+export type BridgeRunOptions = {
+  demoCredentials?: {
+    username?: string;
+    password?: string;
+  };
 };
 
 type LocalBridgeResponse<T> = {
@@ -152,6 +159,8 @@ type LocalCascadeState = {
   project_intelligence?: ProjectIntelligencePack;
   script_readiness_report?: ScriptReadinessReport;
   agent_graph_trace?: AgentGraphTrace;
+  verified_interaction_plan?: ProjectIntelligencePack["verified_interaction_plan"];
+  missing_evidence_report?: ProjectIntelligencePack["missing_evidence_report"];
   product_map?: LocalProductMap;
   workflow_graph?: DemoWorkflowGraph;
   script_document?: ExecutionScriptDocument;
@@ -324,6 +333,8 @@ type LocalUserInput = {
   must_not_show?: string[];
   forbidden_pages?: string[];
   forbidden_data?: string[];
+  demo_username?: string;
+  demo_password?: string;
 };
 
 const defaultLocalBridgeURL = "";
@@ -403,8 +414,8 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       const loaded = await this.loadProject(projectID);
       return loaded.ok && loaded.data?.executableScriptBundle ? ok(loaded.data.executableScriptBundle) : { ok: false, error: loaded.error ?? "可执行脚本包尚未生成" };
     },
-    async buildExecutionPackagePreview(workspace) {
-      const userInput = userInputFromWorkspace(workspace);
+    async buildExecutionPackagePreview(workspace, options) {
+      const userInput = userInputFromWorkspace(workspace, options);
       const result = await requestLocal<LocalCascadeState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/execution-package`, {
         method: "POST",
         body: JSON.stringify({ user_input: userInput }),
@@ -416,8 +427,8 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(generated.id, generated);
       return ok(generated);
     },
-    async runProductLifecycle(workspace) {
-      const userInput = userInputFromWorkspace(workspace);
+    async runProductLifecycle(workspace, options) {
+      const userInput = userInputFromWorkspace(workspace, options);
       const result = await requestLocal<LocalCloudLifecycleResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud-lifecycle`, {
         method: "POST",
         body: JSON.stringify({
@@ -984,7 +995,7 @@ function runtimeLogFromLocalEvent(event: LocalExecutionEvent): RuntimeLogEntry {
   };
 }
 
-export function userInputFromWorkspace(workspace: ProjectWorkspaceView): LocalUserInput {
+export function userInputFromWorkspace(workspace: ProjectWorkspaceView, options?: BridgeRunOptions): LocalUserInput {
   const template = getScenarioTemplate(workspace.scenarioID);
   const repository = workspace.inputBundle.repositories?.find((repo) => repo.local_path);
   const requirementDocuments = workspace.inputBundle.requirement_documents;
@@ -992,6 +1003,8 @@ export function userInputFromWorkspace(workspace: ProjectWorkspaceView): LocalUs
   const forbiddenData = Array.isArray(workspace.inputBundle.metadata?.forbidden_data)
     ? workspace.inputBundle.metadata.forbidden_data.filter((item): item is string => typeof item === "string")
     : ["客户邮箱", "API Key", "访问令牌"];
+  const username = options?.demoCredentials?.username?.trim();
+  const password = options?.demoCredentials?.password;
   return {
     mode: "desktop",
     product_url: workspace.productURL,
@@ -1005,6 +1018,8 @@ export function userInputFromWorkspace(workspace: ProjectWorkspaceView): LocalUs
     must_not_show: ["原始密码", "API Key 明文", "客户隐私数据"],
     forbidden_pages: workspace.planReview.forbiddenPages,
     forbidden_data: forbiddenData,
+    ...(username ? { demo_username: username } : {}),
+    ...(password ? { demo_password: password } : {}),
   };
 }
 
@@ -1016,7 +1031,19 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
   const project = state.project_context;
   const graph = state.workflow_graph ?? fallback.planReview.graph;
   const report = state.understanding_report;
-  const intelligence = state.project_intelligence;
+  let intelligence = state.project_intelligence;
+  if (intelligence) {
+    const merged: ProjectIntelligencePack = { ...intelligence };
+    const verified = state.verified_interaction_plan ?? intelligence.verified_interaction_plan;
+    const missing = state.missing_evidence_report ?? intelligence.missing_evidence_report;
+    if (verified) {
+      merged.verified_interaction_plan = verified;
+    }
+    if (missing) {
+      merged.missing_evidence_report = missing;
+    }
+    intelligence = merged;
+  }
   const readiness = state.script_readiness_report ?? intelligence?.script_readiness_report;
   const bundle = state.executable_script_bundle;
   const scriptDocument = state.script_document ?? bundle?.plan_json;
