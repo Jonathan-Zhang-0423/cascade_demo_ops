@@ -323,7 +323,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 				capture.FocusSelector = selector
 			}
 		}
-		if businessActionNeedsExecutableSelector(action.Type) && !selectorUsableForBusinessAction(selector) {
+		if businessActionNeedsExecutableSelector(action.Type) && (!selectorUsableForBusinessAction(selector) || !nodeVerifiedForBusinessAction(node)) {
 			action.Type = model.GraphActionInspect
 			action.Target.Selector = ""
 			target.Selector = ""
@@ -361,6 +361,28 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 		_ = elapsedMS
 	}
 	return steps
+}
+
+func nodeVerifiedForBusinessAction(node *model.GraphNode) bool {
+	if node == nil {
+		return false
+	}
+	if node.Metadata == nil {
+		return false
+	}
+	status, _ := node.Metadata["verification_status"].(string)
+	if status != "verified" {
+		if status != "runtime_adaptive" {
+			return false
+		}
+	}
+	if _, ok := node.Metadata["verified_interaction_id"].(string); ok {
+		return true
+	}
+	if _, ok := node.Metadata["verified_interaction_id"]; ok {
+		return true
+	}
+	return false
 }
 
 func stageHoldAfterMS(durationMS int) int {
@@ -613,15 +635,15 @@ func scriptQualityFromGraph(graph *model.DemoWorkflowGraph) scriptQualityReport 
 		if actionType == model.GraphActionAssert && !selectorUsableForBlockingAssertion(selector) {
 			report.BlockingAssertRisk++
 		}
-		if isBusinessAction(actionType) && selectorUsableForBusinessAction(selector) {
+		if isBusinessAction(actionType) && selectorUsableForBusinessAction(selector) && nodeVerifiedForBusinessAction(node) {
 			report.ExecutableActionCount++
 		} else if isBusinessAction(actionType) {
-			report.Warnings = append(report.Warnings, "业务动作缺少稳定 selector，打包时将降级为观察节点。")
+			report.Warnings = append(report.Warnings, "业务动作缺少稳定 selector 时会使用运行时自适应发现；失败会进入诊断和修复闭环。")
 		}
 	}
 	report.ObservationOnly = report.ExecutableActionCount == 0
 	if report.ObservationOnly {
-		report.Blockers = append(report.Blockers, "当前执行图没有 click/fill/select/upload/api_call 等真实业务动作，不能自动上传录制。请补充页面扫描、截图标注或稳定 selector 证据。")
+		report.Blockers = append(report.Blockers, "当前执行图没有 click/fill/select/upload/api_call 等真实业务动作，不能自动上传录制。请确认需求目标能生成运行时自适应业务动作。")
 	}
 	if report.GenericSelectorCount > 0 {
 		report.Warnings = append(report.Warnings, "检测到 body/main/section/div 等泛 selector，业务动作不会使用这些 selector 作为 blocking 目标。")

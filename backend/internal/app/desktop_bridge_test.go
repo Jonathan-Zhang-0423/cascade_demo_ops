@@ -15,8 +15,10 @@ func TestDesktopBridgeReturnsJSONSafeResponses(t *testing.T) {
 	bridge := newTestBridge(t)
 	response := bridge.CreateProject(orchestrator.UserInput{
 		Mode:               model.AppModeDesktop,
-		ProductDescription: "Desktop package smoke test",
+		ProductURL:         "https://app.example.com",
+		ProductDescription: "Desktop package smoke test，展示团队邀请成员。",
 		TargetAudience:     "seed investor",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
 	})
 	if !response.OK {
 		t.Fatalf("CreateProject error: %s", response.Error)

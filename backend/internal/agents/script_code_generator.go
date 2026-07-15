@@ -78,10 +78,74 @@ func writeScriptPrelude(builder *strings.Builder, doc *model.ExecutionScriptDocu
 	builder.WriteString("const cascadeAllowedDomains = " + jsJSON(doc.SafetyPolicy.AllowedDomains) + ";\n")
 	builder.WriteString("const cascadeForbiddenPages = " + jsJSON(doc.SafetyPolicy.ForbiddenPages) + ";\n")
 	builder.WriteString("const cascadeRedactionSelectors = " + jsJSON(redactions) + ";\n\n")
+	usernameRef, passwordRef := demoCredentialSecretRefs(doc)
+	builder.WriteString("const cascadeBaseURL = " + jsString(doc.RecordingRunSpec.BaseURL) + ";\n")
+	builder.WriteString("const cascadeDemoUsernameSecretRef = " + jsString(usernameRef) + ";\n")
+	builder.WriteString("const cascadeDemoPasswordSecretRef = " + jsString(passwordRef) + ";\n")
+	builder.WriteString("let cascadeLoginAttempted = false;\n\n")
+	writeScriptRuntimeHelpers(builder)
 	builder.WriteString("export async function runCascadeRecording(ctx: CascadeRecordingContext): Promise<CascadeRecordingResult> {\n")
 	builder.WriteString("  const stepResults: CascadeStepResult[] = [];\n")
 	builder.WriteString("  await ctx.capture.start({ planHash: cascadePlanHash, nodeIds: cascadeNodeIds, allowedDomains: cascadeAllowedDomains, forbiddenPages: cascadeForbiddenPages });\n")
 	builder.WriteString("  await ctx.capture.applyRedactions(cascadeRedactionSelectors);\n")
+}
+
+func writeScriptRuntimeHelpers(builder *strings.Builder) {
+	builder.WriteString("async function cascadeResolveSelector(ctx: CascadeRecordingContext, nodeId: string, candidates: string[], timeoutMs: number): Promise<string> {\n")
+	builder.WriteString("  const unique = Array.from(new Set(candidates.map((item) => item.trim()).filter(Boolean)));\n")
+	builder.WriteString("  const perCandidateTimeout = Math.max(700, Math.min(2500, Math.floor(timeoutMs / Math.max(unique.length, 1))));\n")
+	builder.WriteString("  for (const selector of unique) {\n")
+	builder.WriteString("    const found = await ctx.page.locator(selector).waitFor({ state: \"visible\", timeout: perCandidateTimeout }).then(() => true).catch(() => false);\n")
+	builder.WriteString("    if (found) {\n")
+	builder.WriteString("      await ctx.log.info(\"adaptive selector resolved\", { nodeId, selector });\n")
+	builder.WriteString("      return selector;\n")
+	builder.WriteString("    }\n")
+	builder.WriteString("  }\n")
+	builder.WriteString("  throw new Error(\"adaptive selector not found for \" + nodeId + \": \" + unique.join(\" | \"));\n")
+	builder.WriteString("}\n\n")
+	builder.WriteString("async function cascadeTryClick(ctx: CascadeRecordingContext, nodeId: string, candidates: string[], timeoutMs: number): Promise<boolean> {\n")
+	builder.WriteString("  const selector = await cascadeResolveSelector(ctx, nodeId, candidates, timeoutMs).catch(() => \"\");\n")
+	builder.WriteString("  if (!selector) return false;\n")
+	builder.WriteString("  await ctx.page.click(selector, { timeout: timeoutMs }).catch(() => undefined);\n")
+	builder.WriteString("  await ctx.page.waitForLoadState(\"networkidle\", { timeout: Math.min(timeoutMs, 6000) }).catch(() => undefined);\n")
+	builder.WriteString("  return true;\n")
+	builder.WriteString("}\n\n")
+	builder.WriteString("async function cascadeEnsureDemoLogin(ctx: CascadeRecordingContext): Promise<void> {\n")
+	builder.WriteString("  if (cascadeLoginAttempted || !cascadeDemoUsernameSecretRef || !cascadeDemoPasswordSecretRef) return;\n")
+	builder.WriteString("  cascadeLoginAttempted = true;\n")
+	builder.WriteString("  const usernameSelectors = [\"input[type='email']\", \"input[name='email']\", \"input[name='username']\", \"input[name='account']\", \"input[autocomplete='username']\", \"input[autocomplete='email']\", \"input[id*='email' i]\", \"input[id*='user' i]\", \"input[type='text']\"];\n")
+	builder.WriteString("  const passwordSelectors = [\"input[type='password']\", \"input[name='password']\", \"input[id*='password' i]\", \"input[autocomplete='current-password']\"];\n")
+	builder.WriteString("  const submitSelectors = [\"button[type='submit']\", \"input[type='submit']\", \"button:has-text('登录')\", \"button:has-text('登陆')\", \"button:has-text('Sign in')\", \"button:has-text('Login')\", \"[role='button']:has-text('登录')\", \"[role='button']:has-text('Sign in')\"];\n")
+	builder.WriteString("  const triggerSelectors = [\"a:has-text('登录')\", \"a:has-text('控制台')\", \"a:has-text('Console')\", \"a:has-text('Dashboard')\", \"a:has-text('Sign in')\", \"a:has-text('Login')\", \"button:has-text('登录')\", \"button:has-text('Sign in')\", \"a[href*='login']\", \"a[href*='signin']\", \"a[href*='sign-in']\", \"a[href*='dashboard']\", \"a[href*='console']\"];\n")
+	builder.WriteString("  let passwordSelector = await cascadeResolveSelector(ctx, \"login_password_probe\", passwordSelectors, 1400).catch(() => \"\");\n")
+	builder.WriteString("  if (!passwordSelector) {\n")
+	builder.WriteString("    await cascadeTryClick(ctx, \"login_trigger\", triggerSelectors, 2500);\n")
+	builder.WriteString("    passwordSelector = await cascadeResolveSelector(ctx, \"login_password_after_trigger\", passwordSelectors, 2500).catch(() => \"\");\n")
+	builder.WriteString("  }\n")
+	builder.WriteString("  if (!passwordSelector && cascadeBaseURL) {\n")
+	builder.WriteString("    for (const path of [\"/login\", \"/signin\", \"/sign-in\", \"/auth/login\", \"/app/login\", \"/dashboard\", \"/console\"]) {\n")
+	builder.WriteString("      await ctx.page.goto(new URL(path, cascadeBaseURL).toString(), { waitUntil: \"domcontentloaded\", timeout: 6000 }).catch(() => undefined);\n")
+	builder.WriteString("      await ctx.page.waitForLoadState(\"networkidle\", { timeout: 5000 }).catch(() => undefined);\n")
+	builder.WriteString("      passwordSelector = await cascadeResolveSelector(ctx, \"login_password_path\" + path, passwordSelectors, 1600).catch(() => \"\");\n")
+	builder.WriteString("      if (passwordSelector) break;\n")
+	builder.WriteString("    }\n")
+	builder.WriteString("  }\n")
+	builder.WriteString("  if (!passwordSelector) {\n")
+	builder.WriteString("    await ctx.log.info(\"demo login form not found; continuing with adaptive business discovery\", { nodeId: \"login\" });\n")
+	builder.WriteString("    return;\n")
+	builder.WriteString("  }\n")
+	builder.WriteString("  const usernameSelector = await cascadeResolveSelector(ctx, \"login_username\", usernameSelectors, 2500).catch(() => \"\");\n")
+	builder.WriteString("  if (!usernameSelector) {\n")
+	builder.WriteString("    await ctx.log.info(\"demo login username input not found; continuing without login\", { nodeId: \"login\" });\n")
+	builder.WriteString("    return;\n")
+	builder.WriteString("  }\n")
+	builder.WriteString("  await ctx.page.fill(usernameSelector, await ctx.secrets.get(cascadeDemoUsernameSecretRef), { timeout: 2500 });\n")
+	builder.WriteString("  await ctx.page.fill(passwordSelector, await ctx.secrets.get(cascadeDemoPasswordSecretRef), { timeout: 2500 });\n")
+	builder.WriteString("  const submitSelector = await cascadeResolveSelector(ctx, \"login_submit\", submitSelectors, 2500).catch(() => \"\");\n")
+	builder.WriteString("  if (submitSelector) await ctx.page.click(submitSelector, { timeout: 3000 });\n")
+	builder.WriteString("  await ctx.page.waitForLoadState(\"networkidle\", { timeout: 8000 }).catch(() => undefined);\n")
+	builder.WriteString("  await ctx.page.waitForTimeout(1200);\n")
+	builder.WriteString("}\n\n")
 }
 
 func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocument, step model.ScriptStep) error {
@@ -104,6 +168,7 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 	if businessActionNeedsExecutableSelector(actionType) && !selectorUsableForBusinessAction(selector) {
 		actionType = model.GraphActionInspect
 	}
+	runtimeAdaptive := scriptStepIsRuntimeAdaptive(step)
 
 	builder.WriteString("\n")
 	builder.WriteString("  await ctx.log.step(" + jsString(step.NodeID) + ", " + jsString(title) + ");\n")
@@ -122,12 +187,21 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		waitUntil := firstNonEmpty(step.Action.WaitUntil, "networkidle")
 		builder.WriteString("  await ctx.page.goto(" + jsString(urlValue) + ", { waitUntil: " + jsString(waitUntil) + ", timeout: " + fmt.Sprint(timeoutMS) + " });\n")
 		builder.WriteString("  await ctx.page.waitForLoadState(" + jsString(waitUntil) + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		builder.WriteString("  await cascadeEnsureDemoLogin(ctx);\n")
 	case model.GraphActionClick:
 		if selector == "" {
 			builder.WriteString("  await ctx.log.info(\"click step has no selector; recorded as manual inspection\", { nodeId: " + jsString(step.NodeID) + " });\n")
 			break
 		}
-		builder.WriteString("  await ctx.page.click(" + jsString(selector) + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		candidates := scriptStepCandidateSelectors(step, selector)
+		if runtimeAdaptive || len(candidates) > 1 {
+			selectorVar := "selector_" + jsIdentifier(step.NodeID)
+			builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive selector unresolved; continuing with capture\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
+			builder.WriteString("  if (" + selectorVar + ") await ctx.page.click(" + selectorVar + ", { timeout: " + fmt.Sprint(timeoutMS) + " }).catch((error) => ctx.log.info(\"adaptive click failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
+			builder.WriteString("  else await ctx.log.info(\"adaptive click skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+		} else {
+			builder.WriteString("  await ctx.page.click(" + jsString(selector) + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		}
 		builder.WriteString("  await ctx.page.waitForLoadState(\"networkidle\", { timeout: " + fmt.Sprint(minInt(timeoutMS, 6000)) + " }).catch(() => ctx.log.info(\"page did not reach networkidle after click; continuing with capture\", { nodeId: " + jsString(step.NodeID) + " }));\n")
 	case model.GraphActionFill:
 		if selector == "" {
@@ -138,7 +212,15 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		if err != nil {
 			return err
 		}
-		builder.WriteString("  await ctx.page.fill(" + jsString(selector) + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		candidates := scriptStepCandidateSelectors(step, selector)
+		if runtimeAdaptive || len(candidates) > 1 {
+			selectorVar := "selector_" + jsIdentifier(step.NodeID)
+			builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive fill target unresolved; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
+			builder.WriteString("  if (" + selectorVar + ") await ctx.page.fill(" + selectorVar + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " }).catch((error) => ctx.log.info(\"adaptive fill failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
+			builder.WriteString("  else await ctx.log.info(\"adaptive fill skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+		} else {
+			builder.WriteString("  await ctx.page.fill(" + jsString(selector) + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		}
 		builder.WriteString("  await ctx.page.waitForTimeout(800);\n")
 	case model.GraphActionSelect:
 		if selector == "" {
@@ -149,7 +231,15 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		if err != nil {
 			return err
 		}
-		builder.WriteString("  await ctx.page.selectOption(" + jsString(selector) + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		candidates := scriptStepCandidateSelectors(step, selector)
+		if runtimeAdaptive || len(candidates) > 1 {
+			selectorVar := "selector_" + jsIdentifier(step.NodeID)
+			builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive select target unresolved; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
+			builder.WriteString("  if (" + selectorVar + ") await ctx.page.selectOption(" + selectorVar + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " }).catch((error) => ctx.log.info(\"adaptive select failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
+			builder.WriteString("  else await ctx.log.info(\"adaptive select skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+		} else {
+			builder.WriteString("  await ctx.page.selectOption(" + jsString(selector) + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+		}
 		builder.WriteString("  await ctx.page.waitForTimeout(800);\n")
 	case model.GraphActionUpload:
 		if selector == "" {
@@ -161,7 +251,15 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 			builder.WriteString("  await ctx.log.info(\"upload step has no file ref; skipped file selection\", { nodeId: " + jsString(step.NodeID) + " });\n")
 			break
 		}
-		builder.WriteString("  await ctx.page.setInputFiles(" + jsString(selector) + ", await ctx.secrets.getFile(" + jsString(fileRef) + "));\n")
+		candidates := scriptStepCandidateSelectors(step, selector)
+		if runtimeAdaptive || len(candidates) > 1 {
+			selectorVar := "selector_" + jsIdentifier(step.NodeID)
+			builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive upload target unresolved; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
+			builder.WriteString("  if (" + selectorVar + ") await ctx.page.setInputFiles(" + selectorVar + ", await ctx.secrets.getFile(" + jsString(fileRef) + ")).catch((error) => ctx.log.info(\"adaptive upload failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
+			builder.WriteString("  else await ctx.log.info(\"adaptive upload skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+		} else {
+			builder.WriteString("  await ctx.page.setInputFiles(" + jsString(selector) + ", await ctx.secrets.getFile(" + jsString(fileRef) + "));\n")
+		}
 		builder.WriteString("  await ctx.page.waitForTimeout(1000);\n")
 	case model.GraphActionWait:
 		if selector != "" {
@@ -219,6 +317,10 @@ func writeStepAssertions(builder *strings.Builder, step model.ScriptStep, action
 		builder.WriteString("  await ctx.log.info(\"observation step validation is non-blocking\", { nodeId: " + jsString(step.NodeID) + " });\n")
 		return
 	}
+	if scriptStepIsRuntimeAdaptive(step) {
+		builder.WriteString("  await ctx.log.info(\"runtime adaptive step validation is diagnostic-only\", { nodeId: " + jsString(step.NodeID) + " });\n")
+		return
+	}
 	expected := firstNonEmpty(step.ExpectedOutcome, step.Narrative.Caption, step.Narrative.Voiceover)
 	if expected != "" {
 		if selector == "" || selectorUsableForBlockingAssertion(selector) {
@@ -251,6 +353,31 @@ func writeStepAssertions(builder *strings.Builder, step model.ScriptStep, action
 	}
 }
 
+func scriptStepIsRuntimeAdaptive(step model.ScriptStep) bool {
+	if strings.Contains(strings.ToLower(strings.Join(stepNodeValidationKinds(step.Validations), " ")), "runtime_adaptive") {
+		return true
+	}
+	for _, candidate := range step.Action.Target.SelectorAlternatives {
+		if strings.Contains(strings.ToLower(candidate.Source), "runtime_adaptive") {
+			return true
+		}
+	}
+	for _, candidate := range step.PageTarget.SelectorAlternatives {
+		if strings.Contains(strings.ToLower(candidate.Source), "runtime_adaptive") {
+			return true
+		}
+	}
+	return false
+}
+
+func stepNodeValidationKinds(validations []model.ValidationSpec) []string {
+	kinds := make([]string, 0, len(validations))
+	for _, validation := range validations {
+		kinds = append(kinds, validation.Kind)
+	}
+	return kinds
+}
+
 func scriptInputExpression(step model.ScriptStep) (string, error) {
 	if step.Action.SecretRef != "" {
 		return "await ctx.secrets.get(" + jsString(step.Action.SecretRef) + ")", nil
@@ -272,6 +399,68 @@ func scriptStepSelector(step model.ScriptStep) string {
 		step.Action.Target.Selector,
 		step.PageTarget.Selector,
 	)
+}
+
+func scriptStepCandidateSelectors(step model.ScriptStep, primary string) []string {
+	candidates := []string{}
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || selectorLooksGeneric(value) {
+			return
+		}
+		for _, existing := range candidates {
+			if normalizeSelector(existing) == normalizeSelector(value) {
+				return
+			}
+		}
+		candidates = append(candidates, value)
+	}
+	add(primary)
+	add(actionTargetTestIDSelector(step.Action.Target))
+	for _, candidate := range step.Action.Target.SelectorAlternatives {
+		add(candidate.Value)
+	}
+	for _, candidate := range step.PageTarget.SelectorAlternatives {
+		add(candidate.Value)
+	}
+	for _, label := range []string{step.Action.Target.Text, step.Action.Target.Label} {
+		for _, selector := range adaptiveSelectorsForScriptLabel(label) {
+			add(selector)
+		}
+	}
+	return candidates
+}
+
+func adaptiveSelectorsForScriptLabel(label string) []string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return nil
+	}
+	escaped := strings.ReplaceAll(strings.ReplaceAll(label, `\`, `\\`), `"`, `\"`)
+	return []string{
+		`button:has-text("` + escaped + `")`,
+		`a:has-text("` + escaped + `")`,
+		`[role="button"]:has-text("` + escaped + `")`,
+		`[aria-label*="` + escaped + `"]`,
+		`text=` + label,
+	}
+}
+
+func demoCredentialSecretRefs(doc *model.ExecutionScriptDocument) (string, string) {
+	if doc == nil || doc.WorkflowGraph == nil {
+		return "", ""
+	}
+	username := ""
+	password := ""
+	for _, variable := range doc.WorkflowGraph.Variables {
+		switch variable.Name {
+		case "demo_username":
+			username = firstNonEmpty(username, variable.SecretRef)
+		case "demo_password":
+			password = firstNonEmpty(password, variable.SecretRef)
+		}
+	}
+	return username, password
 }
 
 func selectorCandidateValue(candidates []model.SelectorCandidate) string {
@@ -330,6 +519,30 @@ func jsJSON(value any) string {
 		return "null"
 	}
 	return string(data)
+}
+
+func jsIdentifier(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "value"
+	}
+	var builder strings.Builder
+	for i, r := range value {
+		allowed := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
+		if i > 0 {
+			allowed = allowed || (r >= '0' && r <= '9')
+		}
+		if allowed {
+			builder.WriteRune(r)
+		} else {
+			builder.WriteByte('_')
+		}
+	}
+	out := strings.Trim(builder.String(), "_")
+	if out == "" {
+		return "value"
+	}
+	return out
 }
 
 func looksSensitiveLiteral(value string) bool {

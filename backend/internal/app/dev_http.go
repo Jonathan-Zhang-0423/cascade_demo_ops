@@ -420,12 +420,12 @@ func EnsureLocalDevAddress(addr string) error {
 
 var (
 	windowsPathPattern = regexp.MustCompile(`[A-Za-z]:\\[^:\r\n"]+`)
-	unixPathPattern    = regexp.MustCompile(`(/[^:\r\n"\s]+)+`)
+	unixPathPattern    = regexp.MustCompile(`(^|[\s"'(])(/[^:\r\n"\s]+)+`)
 )
 
 func redactBridgeError(message string) string {
 	message = windowsPathPattern.ReplaceAllString(message, "[local_path]")
-	message = unixPathPattern.ReplaceAllString(message, "[local_path]")
+	message = unixPathPattern.ReplaceAllString(message, "$1[local_path]")
 	message = userFacingBridgeError(message)
 	return message
 }

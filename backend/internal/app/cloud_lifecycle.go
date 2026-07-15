@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -525,15 +526,83 @@ func redactClientExecutionPackageText(pkg *model.ClientExecutionPackage) error {
 	if pkg == nil {
 		return nil
 	}
-	data, err := json.Marshal(pkg)
-	if err != nil {
-		return err
+	redactStringFields(reflect.ValueOf(pkg), map[uintptr]bool{})
+	return nil
+}
+
+func redactStringFields(value reflect.Value, seen map[uintptr]bool) {
+	if !value.IsValid() {
+		return
 	}
-	redacted := agents.RedactSensitiveUserText(string(data))
-	if redacted == string(data) {
-		return nil
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return
+		}
+		ptr := value.Pointer()
+		if ptr != 0 && seen[ptr] {
+			return
+		}
+		if ptr != 0 {
+			seen[ptr] = true
+		}
+		redactStringFields(value.Elem(), seen)
+		return
 	}
-	return json.Unmarshal([]byte(redacted), pkg)
+	if value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return
+		}
+		inner := value.Elem()
+		if inner.Kind() == reflect.String {
+			redacted := agents.RedactSensitiveUserText(inner.String())
+			if redacted != inner.String() && value.CanSet() {
+				value.Set(reflect.ValueOf(redacted))
+			}
+			return
+		}
+		redactStringFields(inner, seen)
+		return
+	}
+	switch value.Kind() {
+	case reflect.String:
+		if value.CanSet() {
+			value.SetString(agents.RedactSensitiveUserText(value.String()))
+		}
+	case reflect.Struct:
+		if value.Type().PkgPath() == "time" {
+			return
+		}
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Field(i)
+			if field.CanSet() || field.Kind() == reflect.Pointer || field.Kind() == reflect.Slice || field.Kind() == reflect.Map || field.Kind() == reflect.Struct || field.Kind() == reflect.Interface {
+				redactStringFields(field, seen)
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < value.Len(); i++ {
+			redactStringFields(value.Index(i), seen)
+		}
+	case reflect.Map:
+		if value.IsNil() {
+			return
+		}
+		for _, key := range value.MapKeys() {
+			item := value.MapIndex(key)
+			if item.Kind() == reflect.String {
+				redacted := agents.RedactSensitiveUserText(item.String())
+				if redacted != item.String() {
+					value.SetMapIndex(key, reflect.ValueOf(redacted))
+				}
+				continue
+			}
+			if item.Kind() == reflect.Interface && !item.IsNil() && item.Elem().Kind() == reflect.String {
+				redacted := agents.RedactSensitiveUserText(item.Elem().String())
+				if redacted != item.Elem().String() {
+					value.SetMapIndex(key, reflect.ValueOf(any(redacted)))
+				}
+			}
+		}
+	}
 }
 
 var scriptPlanHashLiteralPattern = regexp.MustCompile(`const cascadePlanHash = "([a-f0-9]{64})";`)
@@ -706,7 +775,7 @@ func actionTargetHasStableHandle(target model.ActionTarget) bool {
 }
 
 func isLoginStep(step model.ScriptStep) bool {
-	text := strings.ToLower(strings.Join([]string{
+	values := []string{
 		step.NodeID,
 		step.Title,
 		step.BusinessValue,
@@ -715,13 +784,20 @@ func isLoginStep(step model.ScriptStep) bool {
 		step.Action.Target.Text,
 		step.Action.Target.Label,
 		step.Action.Target.TestID,
-		step.Action.Target.URL,
-	}, " "))
+	}
+	if step.Action.Type == model.GraphActionNavigate {
+		values = append(values, step.Action.Target.URL)
+	}
+	text := strings.ToLower(strings.Join(values, " "))
 	return strings.Contains(text, "login") ||
 		strings.Contains(text, "sign in") ||
 		strings.Contains(text, "signin") ||
+		strings.Contains(text, "sign up") ||
+		strings.Contains(text, "register") ||
 		strings.Contains(text, "登录") ||
-		strings.Contains(text, "登入")
+		strings.Contains(text, "登入") ||
+		strings.Contains(text, "注册") ||
+		strings.Contains(text, "创建账户")
 }
 
 func urlAllowedByDomains(rawURL string, allowedDomains []string) bool {

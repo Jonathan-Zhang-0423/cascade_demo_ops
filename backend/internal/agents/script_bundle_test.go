@@ -283,6 +283,55 @@ func TestScriptCodeGeneratorPrefersTestIDOverGenericSelector(t *testing.T) {
 	}
 }
 
+func TestScriptPackagerKeepsRuntimeAdaptiveBusinessAction(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	graph.Nodes[1].Action = "click"
+	graph.Nodes[1].Title = "新建项目"
+	graph.Nodes[1].Selector = `button:has-text("新建项目")`
+	graph.Nodes[1].ExpectedOutcome = "进入新建项目流程"
+	graph.Nodes[1].ActionSpec = &model.GraphAction{
+		Type: model.GraphActionClick,
+		Target: model.ActionTarget{
+			Selector: `button:has-text("新建项目")`,
+			Label:    "新建项目",
+			SelectorAlternatives: []model.SelectorCandidate{
+				{Kind: "css", Value: `[data-testid="new-project"]`, Source: "runtime_adaptive", Confidence: 0.72},
+				{Kind: "css", Value: `[role="button"]:has-text("新建项目")`, Source: "runtime_adaptive", Confidence: 0.66},
+			},
+		},
+		TimeoutMS: 12000,
+	}
+	graph.Nodes[1].Metadata = map[string]any{
+		"verification_status":     "runtime_adaptive",
+		"verified_interaction_id": "adaptive_new_project",
+	}
+
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adaptiveStep *model.ScriptStep
+	for i := range pkg.Document.Steps {
+		if pkg.Document.Steps[i].NodeID == "node_invite" {
+			adaptiveStep = &pkg.Document.Steps[i]
+			break
+		}
+	}
+	if adaptiveStep == nil {
+		t.Fatal("expected adaptive business step")
+	}
+	if adaptiveStep.Action.Type != model.GraphActionClick {
+		t.Fatalf("runtime adaptive business action should remain executable, got %+v", adaptiveStep.Action)
+	}
+	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
+	if !strings.Contains(source, `cascadeResolveSelector(ctx, "node_invite"`) {
+		t.Fatalf("expected adaptive selector resolution in generated script:\n%s", source)
+	}
+	if !strings.Contains(source, `ctx.page.click(selector_node_invite`) {
+		t.Fatalf("expected click to use runtime-resolved selector:\n%s", source)
+	}
+}
+
 func validExecutableBundleFixture(t *testing.T) *model.ExecutableRecordingScriptBundle {
 	t.Helper()
 	project, report, productMap, graph := executableBundleFixtures()
@@ -392,6 +441,7 @@ func executableBundleFixtures() (*model.ProjectContext, *model.MultimodalUnderst
 			},
 			Capture:        &model.CaptureSpec{Screenshot: true, Video: true, Zoom: true, MaskSelectors: []string{"[data-testid='invite-email']"}},
 			DurationHintMS: 3000,
+			Metadata:       map[string]any{"verification_status": "verified", "verified_interaction_id": "verified_invite_email"},
 		},
 		{
 			ID:              "node_success",

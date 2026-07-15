@@ -27,6 +27,7 @@ func TestDevHTTPBridgeGeneratesExecutionPackage(t *testing.T) {
 		TargetAudience:     "中国产品运营团队",
 		ForbiddenPages:     []string{"/billing", "/settings/api-keys"},
 		ForbiddenData:      []string{"客户邮箱", "API Key"},
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
 	}
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &input})
 	if err != nil {
@@ -58,6 +59,7 @@ func TestDevHTTPBridgeReadsLocalRepoSummary(t *testing.T) {
 		LocalRepoPath:      repoPath,
 		ProductDescription: "展示团队邀请流程",
 		TargetAudience:     "中国运营团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +101,7 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 		LocalRepoPath:      repoPath,
 		ProductDescription: "演示登录（10s，账号yikai.xu@cascadeai.co密码000000），然后新建项目。",
 		TargetAudience:     "运营",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://cascadeai.cn")},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +127,28 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 	}
 }
 
+func TestRedactClientExecutionPackageTextDoesNotCorruptGeneratedScript(t *testing.T) {
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	pkg.ExecutableScriptBundle.PlaywrightScript.InlineSource += `
+const passwordSelector = "input[type='password']";
+const cascadeDemoPasswordSecretRef = "local-dev/demo_password";
+`
+	if err := redactClientExecutionPackageText(&pkg); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(payload) {
+		t.Fatalf("redacted package must remain valid JSON: %s", payload)
+	}
+	source := pkg.ExecutableScriptBundle.PlaywrightScript.InlineSource
+	if !strings.Contains(source, "passwordSelector") || !strings.Contains(source, "local-dev/demo_password") {
+		t.Fatalf("script control-flow text should not be corrupted by credential redaction:\n%s", source)
+	}
+}
+
 func TestDevHTTPBridgeInvalidLocalRepoPathDegradesWithoutFailing(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
@@ -132,6 +157,7 @@ func TestDevHTTPBridgeInvalidLocalRepoPathDegradesWithoutFailing(t *testing.T) {
 		LocalRepoPath:      filepath.Join(t.TempDir(), "missing"),
 		ProductDescription: "展示团队邀请流程",
 		TargetAudience:     "中国运营团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +180,7 @@ func TestDevHTTPBridgeExposesExecutionEvents(t *testing.T) {
 		ProductURL:         "https://app.example.com",
 		ProductDescription: "展示团队邀请流程",
 		TargetAudience:     "中国运营团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -199,6 +226,14 @@ func TestDevHTTPBridgeRedactsLocalPathsInErrors(t *testing.T) {
 	if !strings.Contains(message, "Access is denied") {
 		t.Fatalf("expected error reason to remain: %s", message)
 	}
+
+	urlMessage := redactBridgeError(`页面预扫描完成，最终URL=https://cascadeai.cn/login 页面标题=Cascade AI。 open /home/ubuntu/.env: denied`)
+	if !strings.Contains(urlMessage, "https://cascadeai.cn/login") {
+		t.Fatalf("expected public URL to remain readable: %s", urlMessage)
+	}
+	if strings.Contains(urlMessage, "/home/ubuntu") || !strings.Contains(urlMessage, "[local_path]") {
+		t.Fatalf("expected local unix path to be redacted: %s", urlMessage)
+	}
 }
 
 func TestDevHTTPBridgeSanitizesLLMJSONErrors(t *testing.T) {
@@ -212,7 +247,7 @@ func TestDevHTTPBridgeSanitizesLLMJSONErrors(t *testing.T) {
 	}
 }
 
-func TestBuildClientExecutionPackageRejectsObservationOnlyScripts(t *testing.T) {
+func TestBuildClientExecutionPackageGeneralizesObservationOnlyInput(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
 		Mode:               model.AppModeDesktop,
@@ -225,17 +260,46 @@ func TestBuildClientExecutionPackageRejectsObservationOnlyScripts(t *testing.T) 
 	}
 	state := postExecutionPackage(t, server, body)
 	if state.ScriptDocument == nil {
-		t.Fatal("expected script document")
+		t.Fatal("expected adaptive script document")
 	}
-	if scriptDocumentHasBusinessAction(state.ScriptDocument) {
-		t.Fatalf("test fixture unexpectedly generated business action: %+v", state.ScriptDocument.Steps)
+	hasAdaptiveBusinessAction := false
+	for _, step := range state.ScriptDocument.Steps {
+		if step.Action.Type != model.GraphActionClick && step.Action.Type != model.GraphActionFill && step.Action.Type != model.GraphActionSelect && step.Action.Type != model.GraphActionUpload {
+			continue
+		}
+		for _, candidate := range step.Action.Target.SelectorAlternatives {
+			if candidate.Source == "runtime_adaptive" {
+				hasAdaptiveBusinessAction = true
+				break
+			}
+		}
 	}
-	_, err = buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC())
-	if err == nil {
-		t.Fatal("expected observation-only script to be rejected before upload")
+	if !hasAdaptiveBusinessAction {
+		t.Fatalf("expected observation-only input to produce runtime adaptive business action, got %+v", state.ScriptDocument.Steps)
 	}
-	if !strings.Contains(err.Error(), "执行包没有真实业务动作") {
-		t.Fatalf("unexpected error: %v", err)
+	if state.MissingEvidenceReport != nil && state.MissingEvidenceReport.Blocking {
+		t.Fatalf("missing evidence should be warning-only in adaptive mode: %+v", state.MissingEvidenceReport)
+	}
+}
+
+func verifiedActionScreenshotInput() model.WebpageScreenshotInput {
+	return verifiedActionScreenshotInputForURL("https://app.example.com")
+}
+
+func verifiedActionScreenshotInputForURL(pageURL string) model.WebpageScreenshotInput {
+	return model.WebpageScreenshotInput{
+		ID:            "shot_verified_actions",
+		URL:           pageURL,
+		Title:         "工作台",
+		PageRole:      "dashboard",
+		Artifact:      model.ArtifactRef{ID: "artifact_verified_actions", URI: "file://redacted/verified.png", SHA256: "sha_verified"},
+		OCRText:       "团队邀请成员 新建项目",
+		VisionSummary: "页面包含团队邀请成员与新建项目入口。",
+		CapturedAt:    time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
+		Annotations: []model.ScreenshotAnnotation{
+			{ID: "ann_invite_member", Kind: "click", Label: "团队邀请成员", SelectorHint: "[data-testid='invite-member']", FeatureRef: "feature_team_invite"},
+			{ID: "ann_new_project", Kind: "click", Label: "新建项目", SelectorHint: "[data-testid='new-project']", FeatureRef: "feature_new_project"},
+		},
 	}
 }
 

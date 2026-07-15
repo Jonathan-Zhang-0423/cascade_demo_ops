@@ -106,7 +106,7 @@ func TestMultimodalFlowPackagesReviewableScriptDocument(t *testing.T) {
 	}
 }
 
-func TestMultimodalFlowBuildsInspectOnlyScriptWithoutURL(t *testing.T) {
+func TestMultimodalFlowFallsBackToRuntimeAdaptiveBusinessAction(t *testing.T) {
 	repo := createFixtureRepo(t)
 	flow := newTestFlow(t)
 	state, err := flow.Start(context.Background(), orchestrator.UserInput{
@@ -123,18 +123,30 @@ func TestMultimodalFlowBuildsInspectOnlyScriptWithoutURL(t *testing.T) {
 		}},
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("expected runtime adaptive fallback instead of blocking flow: %v", err)
 	}
-	if state.WorkflowGraph == nil || len(state.WorkflowGraph.Nodes) == 0 {
-		t.Fatal("expected workflow graph")
+	if state == nil || state.VerifiedInteractionPlan == nil || state.VerifiedInteractionPlan.BusinessActionCount == 0 {
+		t.Fatalf("expected adaptive verified interaction plan, got state=%+v", state)
 	}
-	first := state.WorkflowGraph.Nodes[0]
-	if first.ActionSpec == nil || first.ActionSpec.Type != model.GraphActionInspect {
-		t.Fatalf("expected inspect-only start without URL, got %+v", first.ActionSpec)
+	if state.MissingEvidenceReport == nil || state.MissingEvidenceReport.Blocking {
+		t.Fatalf("expected non-blocking adaptive missing evidence warning, got %+v", state.MissingEvidenceReport)
 	}
-	if state.ScriptDocument == nil || state.ScriptDocument.Steps[0].Action.Type != model.GraphActionInspect {
-		t.Fatalf("expected script to preserve inspect-only action: %+v", state.ScriptDocument)
+	if state.ScriptDocument == nil || !scriptDocumentHasExecutableBusinessAction(state.ScriptDocument) {
+		t.Fatalf("expected adaptive flow to produce executable business action, got %+v", state.ScriptDocument)
 	}
+}
+
+func scriptDocumentHasExecutableBusinessAction(doc *model.ExecutionScriptDocument) bool {
+	if doc == nil {
+		return false
+	}
+	for _, step := range doc.Steps {
+		switch step.Action.Type {
+		case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
+			return true
+		}
+	}
+	return false
 }
 
 func assertScriptMatchesGraph(t *testing.T, doc *model.ExecutionScriptDocument, graph *model.DemoWorkflowGraph) {
@@ -192,6 +204,7 @@ func newTestFlow(t *testing.T) *orchestrator.CascadeFlow {
 		ProjectIntelligence: NewProjectIntelligenceGraph(),
 		Understanding:       NewMultimodalUnderstandingAgent(),
 		ProductMap:          NewProductMapAgent(),
+		PageVerifier:        NewPageInteractionVerifierAgent(),
 		GraphBuilder:        NewGraphBuilderAgent(),
 		ScriptPackager:      NewScriptPackagerAgent(),
 		QAExecutor:          NewQAExecutorAgent(),

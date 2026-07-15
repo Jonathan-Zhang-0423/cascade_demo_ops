@@ -68,6 +68,8 @@ func bridgeErrorCode(err error) string {
 	switch {
 	case isLLMJSONError(lower):
 		return "llm_output_invalid"
+	case isMissingEvidenceError(lower):
+		return "missing_evidence"
 	case strings.Contains(lower, "cloud") || strings.Contains(lower, "returned "):
 		return "cloud_exchange_error"
 	case strings.Contains(lower, "required") || strings.Contains(lower, "missing"):
@@ -85,6 +87,15 @@ func bridgeErrorDetails(err error) []exchangeHTTPErrorDetail {
 	}
 	if details := exchangeErrorDetails(err); len(details) > 0 {
 		return details
+	}
+	lower := strings.ToLower(err.Error())
+	if isMissingEvidenceError(lower) {
+		return []exchangeHTTPErrorDetail{{
+			Field:   "project_intelligence.verified_interaction_plan",
+			Reason:  "blocking",
+			Message: redactBridgeError(err.Error()),
+			Hint:    "页面预扫描没有确认目标业务动作。请确认登录后进入工作台、目标功能控件可见，或补充截图标注 / data-testid / role/name 后重试。",
+		}}
 	}
 	var preflightErr *packagePreflightError
 	if errors.As(err, &preflightErr) {
@@ -119,6 +130,12 @@ func isLLMJSONError(lower string) bool {
 		strings.Contains(lower, "cannot unmarshal") ||
 		strings.Contains(lower, "invalid character") ||
 		strings.Contains(lower, "unexpected non-whitespace character after json")
+}
+
+func isMissingEvidenceError(lower string) bool {
+	return strings.Contains(lower, "missing verified interaction evidence") ||
+		strings.Contains(lower, "verified interaction plan is missing") ||
+		strings.Contains(lower, "no verified business action")
 }
 
 func preflightFieldFromFinding(finding model.AgentFinding) string {

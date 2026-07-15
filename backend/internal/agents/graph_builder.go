@@ -92,6 +92,13 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 	if intelligence == nil && project.ProjectIntelligence != nil {
 		intelligence = project.ProjectIntelligence
 	}
+	intelligence = ensureRuntimeAdaptiveInteractionPlan(project, intelligence)
+	if err := requireVerifiedInteractionPlan(project, intelligence); err != nil {
+		return nil, err
+	}
+	if intelligence != nil && intelligence.VerifiedInteraction != nil {
+		return a.generateGraphFromVerifiedInteractions(ctx, project, productMap, report, intelligence)
+	}
 	graphID := fmt.Sprintf("graph_%d", time.Now().UnixNano())
 	featureID, featureValue := primaryFeature(productMap)
 	audience := primaryAudience(project)
@@ -356,6 +363,479 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 		graph.Assets.Provenance = &model.AssetProvenance{WorkflowGraphID: graph.ID, GraphVersion: graph.Version, GeneratedBy: "GraphBuilderAgent"}
 	}
 	return graph, nil
+}
+
+func requireVerifiedInteractionPlan(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) error {
+	if intelligence == nil {
+		return errors.New("verified interaction plan is required before graph generation")
+	}
+	if intelligence.VerifiedInteraction == nil {
+		if intelligence.MissingEvidenceReport != nil && intelligence.MissingEvidenceReport.Summary != "" {
+			return fmt.Errorf("verified interaction plan is missing: %s", intelligence.MissingEvidenceReport.Summary)
+		}
+		return errors.New("verified interaction plan is missing; run PageInteractionVerifierAgent before GraphBuilderAgent")
+	}
+	if intelligence.VerifiedInteraction.BusinessActionCount <= 0 {
+		if intelligence.MissingEvidenceReport != nil && intelligence.MissingEvidenceReport.Summary != "" {
+			return fmt.Errorf("no verified business action: %s", intelligence.MissingEvidenceReport.Summary)
+		}
+		return errors.New("no verified business action; graph generation blocked to avoid fake scripts")
+	}
+	_ = project
+	return nil
+}
+
+func ensureRuntimeAdaptiveInteractionPlan(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) *model.ProjectIntelligencePack {
+	if project == nil {
+		return intelligence
+	}
+	if intelligence == nil {
+		intelligence = &model.ProjectIntelligencePack{
+			ID:            "intel_runtime_adaptive_" + project.ID,
+			ProjectID:     project.ID,
+			SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+			Confidence:    0.46,
+			CreatedAt:     time.Now().UTC(),
+		}
+	}
+	if intelligence.DemoIntent == nil {
+		intelligence.DemoIntent = demoIntentFromProjectContext(project)
+	}
+	if intelligence.VerifiedInteraction != nil && intelligence.VerifiedInteraction.BusinessActionCount > 0 {
+		return intelligence
+	}
+	plan, missing := adaptivePlanFromIntentEvidence(project, intelligence, nil, "graph_builder_runtime_adaptive", intelligence.MissingEvidenceReport)
+	if plan != nil && plan.BusinessActionCount > 0 {
+		intelligence.VerifiedInteraction = plan
+		intelligence.MissingEvidenceReport = missing
+	}
+	return intelligence
+}
+
+func demoIntentFromProjectContext(project *model.ProjectContext) *model.DemoIntentSpec {
+	text := firstNonEmpty(project.ProductDescription, strings.Join(project.MustShow, " "), project.Name, "核心业务流程")
+	goal := intentGoalFromText(text)
+	if goal.Label == "" {
+		goal = model.DemoIntentGoal{
+			ID:               "intent_primary_business",
+			Label:            "核心业务流程",
+			Kind:             "business_action",
+			Required:         true,
+			BusinessCritical: true,
+			TargetKeywords:   []string{"项目", "生成", "工作台", "project", "generate", "dashboard"},
+			PreferredAction:  "click",
+			SuccessState:     "目标业务状态可见",
+			Confidence:       0.5,
+		}
+	}
+	if !goal.BusinessCritical {
+		goal.BusinessCritical = true
+		goal.Required = true
+		if goal.PreferredAction == "" || goal.PreferredAction == "inspect" {
+			goal.PreferredAction = "click"
+		}
+	}
+	return &model.DemoIntentSpec{
+		ID:             "demo_intent_" + project.ID,
+		ProjectID:      project.ID,
+		SchemaVersion:  model.ProjectIntelligencePackSchemaVersion,
+		Objective:      text,
+		TargetAudience: project.TargetAudience,
+		Goals:          []model.DemoIntentGoal{goal},
+		Confidence:     0.52,
+		CreatedAt:      time.Now().UTC(),
+	}
+}
+
+func (a *GraphBuilderAgent) generateGraphFromVerifiedInteractions(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.DemoWorkflowGraph, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	plan := intelligence.VerifiedInteraction
+	graphID := fmt.Sprintf("graph_%d", time.Now().UnixNano())
+	entryPoint := firstNonEmpty(plan.SourceURL, graphEntryPoint(project, productMap), project.ProductURL)
+	if entryPoint == "" {
+		entryPoint = "input://product_context"
+	}
+	featureID, featureValue := primaryFeature(productMap)
+	if intelligence.DemoIntent != nil {
+		featureValue = firstNonEmpty(intelligence.DemoIntent.Objective, featureValue)
+	}
+	useCase := model.DemoUseCaseLaunch
+	if report != nil && report.RequirementBrief != nil && len(report.RequirementBrief.UseCases) > 0 {
+		useCase = report.RequirementBrief.UseCases[0]
+	} else if len(project.Goals) > 0 {
+		useCase = project.Goals[0].UseCase
+	}
+	graph := model.NewDemoWorkflowGraph(graphID, project.ID, entryPoint)
+	graph.Status = model.GraphStatusReviewReady
+	graph.Name = "需求驱动的自适应演示流程"
+	graph.Summary = "基于用户需求、代码证据和页面预扫描结果生成；页面证据不足时使用运行时自适应发现，而不是生成无关控件脚本。"
+	graph.Intent = &model.WorkflowIntent{
+		UseCase:            useCase,
+		Audience:           primaryAudience(project),
+		Objective:          featureValue,
+		ValueProposition:   firstNonEmpty(primaryOutcomeFromBrief(reportRequirementBrief(report)), featureValue),
+		PrimaryFeatureRefs: []string{featureID},
+		SuccessCriteria:    verifiedSuccessCriteria(plan),
+		CTA:                "请复核已验证动作、hash、安全策略后审批上传。",
+	}
+	graph.Requirements = append(requirementsFromProject(project), graphRequirementsFromIntent(intelligence.DemoIntent)...)
+	graph.Variables = append(graph.Variables, demoCredentialVariables(project)...)
+	graph.Nodes = []*model.GraphNode{verifiedStartNode(project, entryPoint, featureID, reportEvidenceRefs(report))}
+	for index, action := range plan.Actions {
+		node := graphNodeFromVerifiedAction(project, action, index+1, featureID)
+		if node != nil {
+			graph.Nodes = append(graph.Nodes, node)
+		}
+	}
+	graph.Nodes = append(graph.Nodes, verifiedCloseNode(project, featureID, reportEvidenceRefs(report)))
+	graph.Edges = sequentialGraphEdges(graph.Nodes)
+	graph.States = verifiedGraphStates(entryPoint, plan, featureID)
+	graph.Validations = verifiedGraphValidations(entryPoint)
+	graph.Narratives = []*model.NarrativeSegment{{
+		ID:           "narrative_verified_workflow",
+		NodeRefs:     nodeIDs(graph.Nodes),
+		Title:        "需求驱动演示主线",
+		Summary:      featureValue,
+		Voiceover:    featureValue,
+		Tone:         project.BrandTone,
+		AudienceLens: project.TargetAudience,
+		EvidenceRefs: uniqueEvidenceRefs(append(reportEvidenceRefs(report), plan.EvidenceRefs...)),
+	}}
+	graph.Assets = model.NewMVPAssetManifest()
+	graph.Assets.TargetDurationSec = maxInt(len(graph.Nodes)*12, 60)
+	graph.Maintenance = &model.MaintenancePolicy{
+		UpdateTriggers:   []string{"requirement_changed", "browser_scan_failed", "selector_validation_failed", "route_changed"},
+		StalenessDays:    14,
+		RegressionChecks: []string{"verify_interaction_plan", "rehearse_verified_workflow"},
+	}
+	graph.EvidenceRefs = uniqueEvidenceRefs(append(intelligenceEvidenceRefs(intelligence), plan.EvidenceRefs...))
+	graph.Provenance = &model.GraphProvenance{
+		CreatedBy:    "GraphBuilderAgent",
+		Model:        "deterministic_verified_interaction_v1",
+		ProductMapID: productMapID(productMap),
+		EvidenceRefs: graph.EvidenceRefs,
+	}
+	if graph.Assets != nil {
+		graph.Assets.Brand = project.BrandKit
+		graph.Assets.Provenance = &model.AssetProvenance{WorkflowGraphID: graph.ID, GraphVersion: graph.Version, GeneratedBy: "GraphBuilderAgent"}
+	}
+	return graph, nil
+}
+
+func verifiedStartNode(project *model.ProjectContext, entryPoint string, featureID string, evidence []model.EvidenceRef) *model.GraphNode {
+	actionType := model.GraphActionInspect
+	action := "inspect"
+	target := model.ActionTarget{}
+	selector := ""
+	expected := "产品入口上下文可用于验证需求动作"
+	if isHTTPURL(entryPoint) {
+		actionType = model.GraphActionNavigate
+		action = "navigate"
+		target = model.ActionTarget{URL: entryPoint}
+		selector = entryPoint
+		expected = "产品入口页面加载完成"
+	}
+	return &model.GraphNode{
+		ID:              "start",
+		Action:          action,
+		Selector:        selector,
+		ExpectedOutcome: expected,
+		IsScreenshot:    true,
+		RetryPolicy:     2,
+		Type:            model.GraphNodeTypeStart,
+		Title:           "打开产品入口",
+		Goal:            "进入页面并给后续已验证动作建立稳定上下文。",
+		FeatureRefs:     []string{featureID},
+		ActionSpec:      &model.GraphAction{Type: actionType, Target: target, TimeoutMS: 30000, WaitUntil: "networkidle"},
+		StateAfter: []model.StateAssertion{{
+			ID:        "state_after_start_body_visible",
+			Kind:      "dom_visible",
+			Target:    model.ActionTarget{Selector: "body"},
+			Operator:  "is_visible",
+			Expected:  true,
+			Required:  true,
+			TimeoutMS: 10000,
+		}},
+		Validations: []model.ValidationSpec{{
+			ID:        "node_start_loaded",
+			Kind:      "page_loaded",
+			Target:    target,
+			Assertion: "产品入口可打开",
+			Expected:  true,
+			Severity:  "blocking",
+			Required:  true,
+		}},
+		Narrative:      &model.NarrativeCue{Title: "从产品入口开始", Caption: "打开产品环境并等待页面稳定。", AudienceLens: project.TargetAudience},
+		Capture:        &model.CaptureSpec{Screenshot: true, Video: true, AssetRole: "opening_context", MaskSelectors: maskSelectorsFromProject(project)},
+		EvidenceRefs:   evidence,
+		FailurePolicy:  &model.NodeFailurePolicy{RetryAttempts: 2, RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2}},
+		DurationHintMS: 12000,
+		Metadata:       map[string]any{"verification_status": "entry_navigation"},
+	}
+}
+
+func demoCredentialVariables(project *model.ProjectContext) []model.GraphVariable {
+	if project == nil || project.DemoAccount == nil {
+		return nil
+	}
+	variables := []model.GraphVariable{}
+	if project.DemoAccount.UsernameSecretRef != "" {
+		variables = append(variables, model.GraphVariable{
+			Name:      "demo_username",
+			Kind:      "credential_username",
+			SecretRef: project.DemoAccount.UsernameSecretRef,
+			Required:  true,
+			Sensitive: true,
+		})
+	}
+	if project.DemoAccount.PasswordSecretRef != "" {
+		variables = append(variables, model.GraphVariable{
+			Name:      "demo_password",
+			Kind:      "credential_password",
+			SecretRef: project.DemoAccount.PasswordSecretRef,
+			Required:  true,
+			Sensitive: true,
+		})
+	}
+	return variables
+}
+
+func graphNodeFromVerifiedAction(project *model.ProjectContext, action model.VerifiedInteractionAction, order int, featureID string) *model.GraphNode {
+	selector := strings.TrimSpace(action.Selector)
+	if selector == "" {
+		return nil
+	}
+	actionType := graphActionTypeFromKind(action.Kind, selector)
+	if businessActionNeedsExecutableSelector(actionType) && !selectorUsableForBusinessAction(selector) {
+		return nil
+	}
+	adaptive := action.VerificationStatus == "runtime_adaptive"
+	required := (action.IsBusiness || looksLikeLoginAction(action.Label, selector)) && !adaptive
+	severity := "warning"
+	if required {
+		severity = "blocking"
+	}
+	nodeID := safeID("verified", firstNonEmpty(action.ID, action.IntentGoalID, selector))
+	target := model.ActionTarget{
+		URL:                  action.URL,
+		Selector:             selector,
+		Label:                action.Label,
+		ComponentRef:         action.ComponentRef,
+		SelectorAlternatives: action.Alternatives,
+		EvidenceRefs:         action.EvidenceRefs,
+	}
+	return &model.GraphNode{
+		ID:              nodeID,
+		Action:          string(actionType),
+		Selector:        selector,
+		ExpectedOutcome: firstNonEmpty(action.ExpectedOutcome, action.SuccessState, "目标业务动作完成"),
+		IsScreenshot:    true,
+		HasZoom:         action.IsBusiness,
+		RetryPolicy:     2,
+		Type:            model.GraphNodeTypeAction,
+		Title:           firstNonEmpty(action.Label, fmt.Sprintf("业务动作 %d", order)),
+		Goal:            firstNonEmpty(action.SuccessState, "执行用户需求中对应的页面动作。"),
+		PageRef:         action.RouteRef,
+		FeatureRefs:     []string{featureID, action.IntentGoalID},
+		ActionSpec: &model.GraphAction{
+			Type:      actionType,
+			Target:    target,
+			TimeoutMS: maxInt(action.DurationHintMS, 12000),
+		},
+		StateAfter: []model.StateAssertion{{
+			ID:           "state_after_" + nodeID,
+			Kind:         "dom_visible",
+			Target:       target,
+			Operator:     "is_visible",
+			Expected:     true,
+			Required:     required,
+			TimeoutMS:    12000,
+			EvidenceRefs: action.EvidenceRefs,
+		}},
+		Validations: []model.ValidationSpec{{
+			ID:           "validate_" + nodeID,
+			Kind:         firstNonEmpty(validationKindForInteraction(action), "verified_interaction"),
+			Target:       target,
+			Assertion:    firstNonEmpty(action.SuccessState, validationAssertionForInteraction(action)),
+			Expected:     true,
+			Severity:     severity,
+			Required:     required,
+			EvidenceRefs: action.EvidenceRefs,
+			RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2},
+		}},
+		Narrative: &model.NarrativeCue{
+			Title:        firstNonEmpty(action.Label, "执行业务动作"),
+			Voiceover:    firstNonEmpty(action.ExpectedOutcome, action.SuccessState, action.Label),
+			Caption:      firstNonEmpty(action.ExpectedOutcome, action.SuccessState, action.Label),
+			Callout:      firstNonEmpty(action.Label, "业务动作"),
+			Tone:         project.BrandTone,
+			AudienceLens: project.TargetAudience,
+		},
+		Capture: &model.CaptureSpec{
+			Screenshot:    true,
+			Video:         true,
+			Zoom:          action.IsBusiness,
+			Callout:       action.IsBusiness,
+			FocusSelector: selector,
+			AssetRole:     firstNonEmpty(assetRoleForInteraction(action), "verified_business_action"),
+			MaskSelectors: maskSelectorsFromProject(project),
+		},
+		EvidenceRefs: action.EvidenceRefs,
+		FailurePolicy: &model.NodeFailurePolicy{
+			RetryAttempts: 2,
+			RepairPolicy:  &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2},
+		},
+		DurationHintMS: maxInt(action.DurationHintMS, 12000),
+		Tags:           uniqueStrings([]string{"verified_interaction", action.IntentGoalID, action.VerificationSource, action.VerificationStatus}),
+		Metadata: map[string]any{
+			"verified_interaction_id": action.ID,
+			"intent_goal_id":          action.IntentGoalID,
+			"verification_status":     action.VerificationStatus,
+			"verification_source":     action.VerificationSource,
+			"selector_score":          action.SelectorScore,
+			"runtime_adaptive":        adaptive,
+		},
+	}
+}
+
+func validationKindForInteraction(action model.VerifiedInteractionAction) string {
+	if action.VerificationStatus == "runtime_adaptive" {
+		return "runtime_adaptive_interaction"
+	}
+	return "verified_interaction"
+}
+
+func validationAssertionForInteraction(action model.VerifiedInteractionAction) string {
+	if action.VerificationStatus == "runtime_adaptive" {
+		return "运行时按需求目标和候选 selector 找到业务控件并执行"
+	}
+	return "页面预扫描确认 selector 可执行"
+}
+
+func assetRoleForInteraction(action model.VerifiedInteractionAction) string {
+	if action.VerificationStatus == "runtime_adaptive" {
+		return "adaptive_business_action"
+	}
+	return "verified_business_action"
+}
+
+func verifiedCloseNode(project *model.ProjectContext, featureID string, evidence []model.EvidenceRef) *model.GraphNode {
+	return &model.GraphNode{
+		ID:              "close",
+		Action:          string(model.GraphActionInspect),
+		Selector:        "",
+		ExpectedOutcome: "已完成需求驱动的已验证演示路径",
+		IsScreenshot:    true,
+		RetryPolicy:     1,
+		Type:            model.GraphNodeTypeEnd,
+		Title:           "收束演示",
+		Goal:            "停留在最终页面状态，给观众观察结果。",
+		FeatureRefs:     []string{featureID},
+		ActionSpec:      &model.GraphAction{Type: model.GraphActionInspect, Target: model.ActionTarget{}, TimeoutMS: 10000},
+		Validations: []model.ValidationSpec{{
+			ID:        "node_close_observe",
+			Kind:      "observation",
+			Assertion: "演示结束时保持页面上下文可观察",
+			Expected:  true,
+			Severity:  "warning",
+			Required:  false,
+		}},
+		Narrative:      &model.NarrativeCue{Title: "展示最终状态", Caption: "保留最终页面状态，方便审阅结果。", AudienceLens: project.TargetAudience},
+		Capture:        &model.CaptureSpec{Screenshot: true, Video: true, AssetRole: "closing_state", MaskSelectors: maskSelectorsFromProject(project)},
+		EvidenceRefs:   evidence,
+		FailurePolicy:  &model.NodeFailurePolicy{RetryAttempts: 1},
+		DurationHintMS: 10000,
+		Metadata:       map[string]any{"verification_status": "non_blocking_observation"},
+	}
+}
+
+func verifiedGraphStates(entryPoint string, plan *model.VerifiedInteractionPlan, featureID string) []*model.GraphState {
+	states := []*model.GraphState{{
+		ID:          "state_product_entry",
+		Name:        "产品入口已加载",
+		Kind:        "page",
+		URLPattern:  entryPoint,
+		DOMHints:    []model.SelectorCandidate{{Kind: "css", Value: "body", Confidence: 0.6, Source: "graph_builder"}},
+		FeatureRefs: []string{featureID},
+	}}
+	for _, action := range plan.Actions {
+		if action.Selector == "" {
+			continue
+		}
+		states = append(states, &model.GraphState{
+			ID:           "state_" + safeID("", action.ID),
+			Name:         firstNonEmpty(action.SuccessState, action.Label, "已验证动作状态"),
+			Kind:         "verified_interaction",
+			URLPattern:   firstNonEmpty(action.URL, entryPoint),
+			DOMHints:     []model.SelectorCandidate{{Kind: "css", Value: action.Selector, Confidence: 0.9, StabilityScore: float64(action.SelectorScore) / 100, Source: action.VerificationSource, LastValidatedAt: action.VerifiedAt, EvidenceRefs: action.EvidenceRefs}},
+			FeatureRefs:  []string{featureID, action.IntentGoalID},
+			EvidenceRefs: action.EvidenceRefs,
+		})
+	}
+	return states
+}
+
+func verifiedGraphValidations(entryPoint string) []*model.ValidationSpec {
+	return []*model.ValidationSpec{{
+		ID:        "validate_entry_loaded",
+		Kind:      "page_loaded",
+		Target:    model.ActionTarget{URL: entryPoint},
+		Assertion: "入口页面可打开",
+		Expected:  true,
+		Severity:  "blocking",
+		Required:  true,
+		RepairPolicy: &model.RepairPolicy{
+			AllowSelectorRepair: true,
+			AllowDataRepair:     false,
+			AllowStepSkip:       false,
+			MaxAttempts:         2,
+		},
+	}}
+}
+
+func verifiedSuccessCriteria(plan *model.VerifiedInteractionPlan) []string {
+	criteria := []string{"入口页面可打开", "脚本只围绕需求目标生成业务动作", "页面证据不足时使用运行时自适应 selector 发现并返回诊断"}
+	if plan != nil {
+		for _, action := range plan.Actions {
+			if action.IsBusiness {
+				criteria = append(criteria, firstNonEmpty(action.SuccessState, action.ExpectedOutcome, action.Label))
+			}
+		}
+	}
+	return uniqueStrings(criteria)
+}
+
+func graphRequirementsFromIntent(intent *model.DemoIntentSpec) []model.GraphRequirement {
+	if intent == nil {
+		return nil
+	}
+	requirements := []model.GraphRequirement{}
+	for _, goal := range intent.Goals {
+		requirements = append(requirements, model.GraphRequirement{
+			ID:           goal.ID,
+			Kind:         "demo_intent_goal",
+			Description:  goal.Label,
+			Required:     goal.Required,
+			EvidenceRefs: goal.EvidenceRefs,
+		})
+	}
+	return requirements
+}
+
+func reportRequirementBrief(report *model.MultimodalUnderstandingReport) *model.RequirementBrief {
+	if report == nil {
+		return nil
+	}
+	return report.RequirementBrief
+}
+
+func productMapID(productMap *model.ProductMap) string {
+	if productMap == nil {
+		return ""
+	}
+	return productMap.ID
 }
 
 func primaryFeature(productMap *model.ProductMap) (string, string) {

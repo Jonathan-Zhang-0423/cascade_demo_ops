@@ -15,13 +15,15 @@ func TestGraphBuilderPrefersExecutableBusinessSelector(t *testing.T) {
 		model.UIActionRef{ID: "create", Label: "Create campaign", Kind: "click", Selector: "[data-testid='create-campaign']"},
 	)
 
-	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), nil)
+	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence(
+		model.VerifiedInteractionAction{ID: "create", IntentGoalID: "intent_create", Label: "Create campaign", Kind: "click", Selector: "[data-testid='create-campaign']", IsBusiness: true, VerificationStatus: "verified", VerificationSource: "playwright_readonly_scan", SelectorScore: 100},
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := graphNodeByID(graph, "highlight_primary_value")
+	node := graphNodeBySelector(graph, "[data-testid='create-campaign']")
 	if node == nil {
-		t.Fatal("missing highlight_primary_value node")
+		t.Fatal("missing verified create node")
 	}
 	if node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionClick {
 		t.Fatalf("expected executable click node, got %+v", node.ActionSpec)
@@ -34,27 +36,21 @@ func TestGraphBuilderPrefersExecutableBusinessSelector(t *testing.T) {
 	}
 }
 
-func TestGraphBuilderDowngradesGenericBusinessSelector(t *testing.T) {
+func TestGraphBuilderFallsBackToRuntimeAdaptiveWhenOnlyGenericSelectorExists(t *testing.T) {
 	project := graphQualityProject()
 	productMap := graphQualityProductMap(
 		model.UIActionRef{ID: "generic", Label: "Click main", Kind: "click", Selector: "main"},
 	)
 
-	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), nil)
+	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("generic-only evidence should no longer block; expected runtime adaptive graph, got %v", err)
 	}
-	node := graphNodeByID(graph, "highlight_primary_value")
-	if node == nil || node.ActionSpec == nil {
-		t.Fatalf("missing generated node: %+v", graph.Nodes)
+	if graphNodeBySelector(graph, "main") != nil {
+		t.Fatalf("runtime adaptive fallback must not click generic selector: %+v", graph.Nodes)
 	}
-	if node.ActionSpec.Type != model.GraphActionInspect {
-		t.Fatalf("generic selector must be downgraded to inspect, got %+v", node.ActionSpec)
-	}
-	for _, validation := range node.Validations {
-		if validation.Severity == "blocking" || validation.Required {
-			t.Fatalf("generic inspect node must not carry blocking validation: %+v", validation)
-		}
+	if !graphHasRuntimeAdaptiveBusinessNode(graph) {
+		t.Fatalf("expected runtime adaptive business node, got %+v", graph.Nodes)
 	}
 }
 
@@ -65,11 +61,14 @@ func TestGraphBuilderAvoidsLoginWhenBusinessActionExists(t *testing.T) {
 		model.UIActionRef{ID: "invite", Label: "Invite teammate", Kind: "click", Selector: "[data-testid='invite-user']"},
 	)
 
-	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), nil)
+	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence(
+		model.VerifiedInteractionAction{ID: "login", IntentGoalID: "intent_login", Label: "Login", Kind: "click", Selector: "[data-testid='login-submit']", IsBusiness: false, VerificationStatus: "verified", VerificationSource: "playwright_readonly_scan", SelectorScore: 100},
+		model.VerifiedInteractionAction{ID: "invite", IntentGoalID: "intent_invite", Label: "Invite teammate", Kind: "click", Selector: "[data-testid='invite-user']", IsBusiness: true, VerificationStatus: "verified", VerificationSource: "playwright_readonly_scan", SelectorScore: 100},
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := graphNodeByID(graph, "highlight_primary_value")
+	node := graphNodeBySelector(graph, "[data-testid='invite-user']")
 	if node == nil || node.ActionSpec == nil {
 		t.Fatalf("missing generated node: %+v", graph.Nodes)
 	}
@@ -85,11 +84,13 @@ func TestGraphBuilderSkipsChromeToggleWhenBusinessActionExists(t *testing.T) {
 		model.UIActionRef{ID: "new_project", Label: "New project", Kind: "click", Selector: "[data-testid='new-project']"},
 	)
 
-	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), nil)
+	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence(
+		model.VerifiedInteractionAction{ID: "new_project", IntentGoalID: "intent_new_project", Label: "New project", Kind: "click", Selector: "[data-testid='new-project']", IsBusiness: true, VerificationStatus: "verified", VerificationSource: "playwright_readonly_scan", SelectorScore: 100},
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := graphNodeByID(graph, "highlight_primary_value")
+	node := graphNodeBySelector(graph, "[data-testid='new-project']")
 	if node == nil || node.ActionSpec == nil {
 		t.Fatalf("missing generated node: %+v", graph.Nodes)
 	}
@@ -98,22 +99,21 @@ func TestGraphBuilderSkipsChromeToggleWhenBusinessActionExists(t *testing.T) {
 	}
 }
 
-func TestGraphBuilderDowngradesChromeToggleOnlyAction(t *testing.T) {
+func TestGraphBuilderFallsBackToRuntimeAdaptiveWhenOnlyChromeToggleExists(t *testing.T) {
 	project := graphQualityProject()
 	productMap := graphQualityProductMap(
 		model.UIActionRef{ID: "sidebar", Label: "button sidebar toggle", Kind: "click", Selector: "[data-testid='button-sidebar-toggle']"},
 	)
 
-	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), nil)
+	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("chrome-only evidence should no longer block; expected runtime adaptive graph, got %v", err)
 	}
-	node := graphNodeByID(graph, "highlight_primary_value")
-	if node == nil || node.ActionSpec == nil {
-		t.Fatalf("missing generated node: %+v", graph.Nodes)
+	if graphNodeBySelector(graph, "[data-testid='button-sidebar-toggle']") != nil {
+		t.Fatalf("runtime adaptive fallback must not click chrome toggle: %+v", graph.Nodes)
 	}
-	if node.ActionSpec.Type != model.GraphActionInspect {
-		t.Fatalf("chrome-only action should be downgraded to inspect, got %+v", node.ActionSpec)
+	if !graphHasRuntimeAdaptiveBusinessNode(graph) {
+		t.Fatalf("expected runtime adaptive business node, got %+v", graph.Nodes)
 	}
 }
 
@@ -168,4 +168,65 @@ func graphNodeByID(graph *model.DemoWorkflowGraph, id string) *model.GraphNode {
 		}
 	}
 	return nil
+}
+
+func graphNodeBySelector(graph *model.DemoWorkflowGraph, selector string) *model.GraphNode {
+	if graph == nil {
+		return nil
+	}
+	for _, node := range graph.Nodes {
+		if node != nil && node.ActionSpec != nil && node.ActionSpec.Target.Selector == selector {
+			return node
+		}
+	}
+	return nil
+}
+
+func graphHasRuntimeAdaptiveBusinessNode(graph *model.DemoWorkflowGraph) bool {
+	if graph == nil {
+		return false
+	}
+	for _, node := range graph.Nodes {
+		if node == nil || node.ActionSpec == nil || !isBusinessAction(node.ActionSpec.Type) {
+			continue
+		}
+		if node.Metadata != nil && node.Metadata["runtime_adaptive"] == true {
+			return true
+		}
+	}
+	return false
+}
+
+func graphQualityIntelligence(actions ...model.VerifiedInteractionAction) *model.ProjectIntelligencePack {
+	businessCount := 0
+	for i := range actions {
+		if actions[i].DurationHintMS == 0 {
+			actions[i].DurationHintMS = 12000
+		}
+		if actions[i].VerificationStatus == "" {
+			actions[i].VerificationStatus = "verified"
+		}
+		if actions[i].IsBusiness {
+			businessCount++
+		}
+	}
+	return &model.ProjectIntelligencePack{
+		ID:            "intel_graph_quality",
+		ProjectID:     "project_graph_quality",
+		SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+		DemoIntent: &model.DemoIntentSpec{
+			ID:        "intent_graph_quality",
+			ProjectID: "project_graph_quality",
+			Goals:     []model.DemoIntentGoal{{ID: "intent_create", Label: "Create campaign", BusinessCritical: true, Required: true}},
+		},
+		VerifiedInteraction: &model.VerifiedInteractionPlan{
+			ID:                  "verified_graph_quality",
+			ProjectID:           "project_graph_quality",
+			IntentID:            "intent_graph_quality",
+			SchemaVersion:       model.ProjectIntelligencePackSchemaVersion,
+			Actions:             actions,
+			BusinessActionCount: businessCount,
+			VerificationMode:    "unit_test",
+		},
+	}
 }
