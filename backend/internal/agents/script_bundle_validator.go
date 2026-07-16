@@ -53,8 +53,15 @@ func (v *ScriptBundleValidator) ValidateBundle(bundle *model.ExecutableRecording
 func validateManifest(bundle *model.ExecutableRecordingScriptBundle) []model.AgentFinding {
 	findings := []model.AgentFinding{}
 	manifest := bundle.ScriptManifest
-	if manifest.EntryFunction != "runCascadeRecording" {
-		findings = append(findings, scriptValidationFinding("entry_function_mismatch", model.FindingSeverityBlocking, "脚本入口函数必须是 runCascadeRecording。"))
+	switch manifest.Runtime {
+	case model.ExecutableScriptRuntimePlaywrightRestrictedSandbox:
+		if manifest.EntryFunction != "runCascadeRecording" {
+			findings = append(findings, scriptValidationFinding("entry_function_mismatch", model.FindingSeverityBlocking, "受限 Playwright 脚本入口函数必须是 runCascadeRecording。"))
+		}
+	case model.ExecutableScriptRuntimeBrowserAgentOutlineV1:
+		if manifest.EntryFunction != "runBrowserAgentOutline" {
+			findings = append(findings, scriptValidationFinding("entry_function_mismatch", model.FindingSeverityBlocking, "browser agent 大纲入口函数必须是 runBrowserAgentOutline。"))
+		}
 	}
 	if manifest.Language != "typescript" {
 		if manifest.Runtime == model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {

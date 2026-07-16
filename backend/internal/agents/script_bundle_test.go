@@ -408,6 +408,7 @@ func validLegacyExecutableBundleFixture(t *testing.T) *model.ExecutableRecording
 	hash := hashString(source)
 	bundle.ScriptManifest.Language = "typescript"
 	bundle.ScriptManifest.Runtime = model.ExecutableScriptRuntimePlaywrightRestrictedSandbox
+	bundle.ScriptManifest.EntryFunction = "runCascadeRecording"
 	bundle.ScriptManifest.Generator = scriptCodeGeneratorName
 	bundle.ScriptManifest.GeneratorVersion = scriptCodeGeneratorVersion
 	bundle.ScriptManifest.ContextAPIs = []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"}

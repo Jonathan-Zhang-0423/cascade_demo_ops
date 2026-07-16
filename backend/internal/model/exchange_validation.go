@@ -167,12 +167,21 @@ func validateExecutableBundleAgainstPackage(bundle *ExecutableRecordingScriptBun
 	if bundle.ProjectID != pkg.ProjectID || bundle.WorkflowGraphID != pkg.WorkflowGraph.ID {
 		return errors.New("executable script bundle identity does not match client package")
 	}
-	if bundle.ScriptManifest.EntryFunction != "runCascadeRecording" {
-		return errors.New("executable script bundle entry_function must be runCascadeRecording")
-	}
 	runtime := strings.TrimSpace(bundle.ScriptManifest.Runtime)
 	if runtime == "" {
 		return errors.New("executable script bundle script_manifest.runtime is required")
+	}
+	switch runtime {
+	case ExecutableScriptRuntimePlaywrightRestrictedSandbox:
+		if bundle.ScriptManifest.EntryFunction != "runCascadeRecording" {
+			return errors.New("restricted Playwright bundle entry_function must be runCascadeRecording")
+		}
+	case ExecutableScriptRuntimeBrowserAgentOutlineV1:
+		if bundle.ScriptManifest.EntryFunction != "runBrowserAgentOutline" {
+			return errors.New("browser-agent outline bundle entry_function must be runBrowserAgentOutline")
+		}
+	default:
+		return fmt.Errorf("executable script bundle runtime %q is not supported", runtime)
 	}
 	if len(bundle.ScriptManifest.DependencyAllowlist) > 0 {
 		return errors.New("executable script bundle dependency_allowlist must be empty")
@@ -198,8 +207,6 @@ func validateExecutableBundleAgainstPackage(bundle *ExecutableRecordingScriptBun
 		if err := validateBrowserAgentOutlineBundle(bundle); err != nil {
 			return err
 		}
-	default:
-		return fmt.Errorf("executable script bundle runtime %q is not supported", runtime)
 	}
 	if bundle.ApprovalMarkdown.SHA256 == "" {
 		return errors.New("approval_markdown sha256 is required")

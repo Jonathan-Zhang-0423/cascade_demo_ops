@@ -181,7 +181,7 @@ func buildExecutableScriptBundle(
 			Version:             1,
 			Language:            "browser-agent-outline",
 			Runtime:             model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
-			EntryFunction:       "runCascadeRecording",
+			EntryFunction:       "runBrowserAgentOutline",
 			Generator:           browserAgentOutlineGeneratorName,
 			GeneratorVersion:    browserAgentOutlineGeneratorVersion,
 			DependencyAllowlist: []string{},

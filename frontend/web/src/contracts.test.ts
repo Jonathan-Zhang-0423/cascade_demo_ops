@@ -23,6 +23,21 @@ describe("exchange contract fixtures", () => {
     expect(payload).not.toMatch(/raw-password|Bearer\s+|Authorization:|Cookie:|sk-|BEGIN PRIVATE KEY|\.env|0{6}/i);
   });
 
+  it("loads browser-agent outline execution package fixtures", () => {
+    const pkg = readFixture<ClientExecutionPackage>("client_execution_package.browser_agent_outline.json");
+    const bundle = pkg.executable_script_bundle;
+    const payload = JSON.stringify(pkg);
+
+    expect(bundle?.script_manifest.runtime).toBe("browser-agent-outline-v1");
+    expect(bundle?.script_manifest.entry_function).toBe("runBrowserAgentOutline");
+    expect(bundle?.playwright_script.inline_source).toBeUndefined();
+    expect(bundle?.stage_approval_plan?.stages.length).toBeGreaterThan(0);
+    expect(bundle?.script_outline?.stages.length).toBe(bundle?.stage_approval_plan?.stages.length);
+    expect(bundle?.agent_prompt_policy?.immutable_fields).toContain("stage order");
+    expect(bundle?.project_understanding_dossier?.schema_version).toBe("demoops.project_understanding_dossier.v1");
+    expect(payload).not.toMatch(/runCascadeRecording|raw-password|Bearer\s+|Authorization:|Cookie:|sk-|BEGIN PRIVATE KEY|\.env|0{6}/i);
+  });
+
   it("keeps upload payload_ref aligned with envelope payload_ref", () => {
     for (const fileName of ["upload_plaintext_dev.json", "upload_encrypted_metadata_only.json"]) {
       const upload = readFixture<{

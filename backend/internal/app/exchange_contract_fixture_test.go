@@ -29,6 +29,26 @@ func TestExchangeContractFixturesLoadInGo(t *testing.T) {
 		t.Fatalf("fixture script entry must be runCascadeRecording: %+v", pkg.ExecutableScriptBundle.ScriptManifest)
 	}
 
+	outlineFixture := readContractFixture(t, "client_execution_package.browser_agent_outline.json")
+	assertNoContractLeakage(t, outlineFixture)
+	if strings.Contains(string(outlineFixture), "runCascadeRecording") {
+		t.Fatal("browser-agent outline fixture must not include executable Playwright TS entry points")
+	}
+	var outlinePkg model.ClientExecutionPackage
+	if err := json.Unmarshal(outlineFixture, &outlinePkg); err != nil {
+		t.Fatal(err)
+	}
+	outlineBundle := outlinePkg.ExecutableScriptBundle
+	if outlineBundle == nil || outlineBundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		t.Fatalf("outline fixture missing browser-agent runtime: %+v", outlineBundle)
+	}
+	if outlineBundle.ScriptManifest.EntryFunction != "runBrowserAgentOutline" {
+		t.Fatalf("outline fixture entry function mismatch: %+v", outlineBundle.ScriptManifest)
+	}
+	if outlineBundle.PlaywrightScript.InlineSource != "" || outlineBundle.StageApprovalPlan == nil || outlineBundle.ScriptOutline == nil || outlineBundle.AgentPromptPolicy == nil {
+		t.Fatalf("outline fixture must carry outline contract without inline TS: %+v", outlineBundle)
+	}
+
 	generatedFixture := readContractFixture(t, "recording_result.generated.json")
 	assertNoContractLeakage(t, generatedFixture)
 	var generated model.RecordingResultPackage
