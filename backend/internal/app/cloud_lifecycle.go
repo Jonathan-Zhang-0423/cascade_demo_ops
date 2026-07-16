@@ -670,7 +670,7 @@ func redactStringFields(value reflect.Value, seen map[uintptr]bool) {
 }
 
 var scriptPlanHashLiteralPattern = regexp.MustCompile(`const cascadePlanHash = "([a-f0-9]{64})";`)
-var packagePasswordLeakagePattern = regexp.MustCompile(`(?i)(密码|口令)\s*[:：=]?\s*[^\s,，。;；)）]{4,}|\b(password|passwd|pwd|passcode)\b\s*[:：=]\s*[^\s,，。;；)）]{4,}`)
+var packagePasswordLeakagePattern = regexp.MustCompile(`(?i)(密码|口令)\s*[:：=]\s*[^\s,，。;；)）]{4,}|\b(password|passwd|pwd|passcode)\b\s*[:：=]\s*[^\s,，。;；)）]{4,}`)
 var packageAPIKeyLeakagePattern = regexp.MustCompile(`(?i)\bsk-[A-Za-z0-9_-]{16,}\b`)
 var packageEnvFileLeakagePattern = regexp.MustCompile(`(?i)([A-Za-z]:)?[\\/][^"'\s]*\.env(?:\.[A-Za-z0-9_-]+)?|\.env(?:\.[A-Za-z0-9_-]+)?\s*[:=]`)
 

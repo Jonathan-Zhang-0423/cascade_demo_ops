@@ -146,7 +146,7 @@ func TestPackageLeakageDetectionAllowsSafetyPolicyAPIKeyWords(t *testing.T) {
 			},
 		},
 		SafetyReport: model.PackageSafetyReport{
-			PIIHandling: "不要展示 .env 内容",
+			PIIHandling: "凭据密码只允许通过 secret_ref 注入，禁止展示口令相关内容。不要展示 .env 内容",
 		},
 	}
 	if leakage := detectPackageLeakage(pkg); leakage != "" {
@@ -159,6 +159,10 @@ func TestPackageLeakageDetectionAllowsSafetyPolicyAPIKeyWords(t *testing.T) {
 	pkg.Metadata = map[string]any{"bad_path": "/home/app/.env"}
 	if leakage := detectPackageLeakage(pkg); leakage != ".env" {
 		t.Fatalf("expected .env path to be blocked, got %q", leakage)
+	}
+	pkg.Metadata = map[string]any{"bad_password": "密码：000000"}
+	if leakage := detectPackageLeakage(pkg); leakage != "raw password literal" {
+		t.Fatalf("expected raw password literal to be blocked, got %q", leakage)
 	}
 }
 
