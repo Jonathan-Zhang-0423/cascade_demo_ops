@@ -166,6 +166,61 @@ func TestPackageLeakageDetectionAllowsSafetyPolicyAPIKeyWords(t *testing.T) {
 	}
 }
 
+func TestPackageSummariesUseRawRequirementScope(t *testing.T) {
+	project := &model.ProjectContext{
+		ID:                 "project_scope",
+		SchemaVersion:      model.ProjectContextSchemaVersion,
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://cascadeai.cn",
+		TargetAudience:     "内部团队",
+		ProductDescription: "演示登录（10s），新建项目（10s，俄罗斯方块，构建模式），agent实际构建演示（60s等待进入项目看实际发生了什么）。",
+		Goals: []model.DemoGoal{{
+			ID:               "goal_bad",
+			ValueProposition: "graph can be approved",
+			SuccessCriteria:  []string{"graph can be approved", "rehearsal pass rate is at least 90%"},
+		}},
+	}
+	contextSummary := projectContextSummaryForPackage(project, &orchestrator.CascadeState{}, "")
+	text := mustJSONForTest(t, contextSummary)
+	if strings.Contains(text, "graph can be approved") || strings.Contains(text, "rehearsal pass rate") {
+		t.Fatalf("project summary leaked model-expanded success criteria: %s", text)
+	}
+
+	productMap := &model.ProductMap{
+		ID:      "map_scope",
+		Version: 1,
+		Summary: "Graph 审批机制以及排练通过率≥90%的质量保障。",
+		Pages: []*model.ProductPage{{
+			ID:      "page_dashboard",
+			Actions: []string{"打开产品入口", "点击全部审批按钮", "点击取消计划按钮"},
+			PrimaryActions: []model.UIActionRef{
+				{ID: "build", Label: "build phase indicator", Kind: "inspect", Selector: "[data-testid='build-phase-indicator']"},
+				{ID: "approve", Label: "button approve all", Kind: "click", Selector: "[data-testid='button-approve-all']"},
+			},
+		}},
+		Features: []*model.Feature{{ID: "feature_bad", Name: "排练通过率与质量保障", UserValue: "rehearsal pass rate is at least 90%"}},
+	}
+	productSummary := productMapSummaryForPackage(project, productMap)
+	text = mustJSONForTest(t, productSummary)
+	for _, forbidden := range []string{"graph can be approved", "rehearsal pass rate", "排练通过率", "button-approve-all", "点击取消计划按钮"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("product summary leaked out-of-scope token %q: %s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, "build-phase-indicator") {
+		t.Fatalf("product summary dropped in-scope build evidence: %s", text)
+	}
+}
+
+func mustJSONForTest(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 func TestRedactClientExecutionPackageTextDoesNotCorruptGeneratedScript(t *testing.T) {
 	pkg := sampleClientExecutionPackageForAppTest(t)
 	pkg.ExecutableScriptBundle.PlaywrightScript.InlineSource += `

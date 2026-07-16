@@ -427,7 +427,7 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 		CreatedAt:              now,
 		ApprovedAt:             now,
 		ProjectContextSummary:  projectContextSummaryForPackage(project, state, graphDigest),
-		ProductMapSummary:      productMapSummaryForPackage(state.ProductMap),
+		ProductMapSummary:      productMapSummaryForPackage(project, state.ProductMap),
 		WorkflowGraph:          graph,
 		RecordingRunSpec:       runSpec,
 		ExecutableScriptBundle: state.ExecutableScriptBundle,
@@ -1116,6 +1116,7 @@ func projectContextSummaryForPackage(project *model.ProjectContext, state *orche
 	if graphDigest != "" {
 		inputFingerprints["workflow_graph"] = graphDigest
 	}
+	goals := demoGoalsForPackage(project)
 	return model.ProjectContextSummary{
 		ContextID:         "ctx_" + project.ID,
 		SchemaVersion:     model.ProjectContextSchemaVersion,
@@ -1123,7 +1124,7 @@ func projectContextSummaryForPackage(project *model.ProjectContext, state *orche
 		Name:              project.Name,
 		ProductURL:        project.ProductURL,
 		TargetAudience:    project.TargetAudience,
-		Goals:             append([]model.DemoGoal{}, project.Goals...),
+		Goals:             goals,
 		Audiences:         append([]model.AudienceProfile{}, project.Audiences...),
 		AccessPolicy:      project.AccessPolicy,
 		SecurityPolicy:    project.SecurityPolicy,
@@ -1131,9 +1132,13 @@ func projectContextSummaryForPackage(project *model.ProjectContext, state *orche
 	}
 }
 
-func productMapSummaryForPackage(productMap *model.ProductMap) model.ProductMapSummary {
+func productMapSummaryForPackage(project *model.ProjectContext, productMap *model.ProductMap) model.ProductMapSummary {
 	if productMap == nil {
 		return model.ProductMapSummary{}
+	}
+	intentText := ""
+	if project != nil {
+		intentText = project.ProductDescription
 	}
 	components := make([]model.ComponentSummary, 0, len(productMap.Components))
 	for _, component := range productMap.Components {
@@ -1166,16 +1171,117 @@ func productMapSummaryForPackage(productMap *model.ProductMap) model.ProductMapS
 	return model.ProductMapSummary{
 		ProductMapID: productMap.ID,
 		Version:      productMap.Version,
-		Summary:      productMap.Summary,
-		Pages:        productMap.Pages,
-		Features:     productMap.Features,
+		Summary:      packageProductMapSummary(intentText, productMap.Summary),
+		Pages:        sanitizeProductPagesForPackage(productMap.Pages, intentText),
+		Features:     sanitizeFeaturesForPackage(productMap.Features, intentText),
 		Routes:       productMap.Routes,
 		Components:   components,
 		DataModels:   dataModels,
 		Roles:        productMap.Roles,
-		Workflows:    productMap.Workflows,
+		Workflows:    sanitizeWorkflowsForPackage(productMap.Workflows, intentText),
 		EvidenceRefs: append([]model.EvidenceRef{}, productMap.EvidenceRefs...),
 	}
+}
+
+func demoGoalsForPackage(project *model.ProjectContext) []model.DemoGoal {
+	if project == nil || strings.TrimSpace(project.ProductDescription) == "" {
+		if project == nil {
+			return nil
+		}
+		return append([]model.DemoGoal{}, project.Goals...)
+	}
+	return []model.DemoGoal{{
+		ID:               "goal_primary",
+		UseCase:          model.DemoUseCaseLaunch,
+		AudienceID:       "audience_primary",
+		ValueProposition: project.ProductDescription,
+		SuccessCriteria: []string{
+			"登录展示约 10 秒",
+			"新建项目：俄罗斯方块，并选择构建模式",
+			"进入项目后观察 agent 实际构建约 60 秒",
+		},
+		Priority: 1,
+	}}
+}
+
+func packageProductMapSummary(intentText string, fallback string) string {
+	if strings.TrimSpace(intentText) == "" {
+		return fallback
+	}
+	return "需求作用域产品地图：" + strings.TrimSpace(intentText)
+}
+
+func sanitizeProductPagesForPackage(pages []*model.ProductPage, intentText string) []*model.ProductPage {
+	out := make([]*model.ProductPage, 0, len(pages))
+	for _, page := range pages {
+		if page == nil {
+			continue
+		}
+		copied := *page
+		copied.Actions = filterPackageSummaryStrings(page.Actions, intentText)
+		copied.PrimaryActions = filterPackageSummaryActions(page.PrimaryActions, intentText)
+		out = append(out, &copied)
+	}
+	return out
+}
+
+func sanitizeFeaturesForPackage(features []*model.Feature, intentText string) []*model.Feature {
+	out := make([]*model.Feature, 0, len(features))
+	for _, feature := range features {
+		if feature == nil || packageSummaryTextOutOfScope(feature.Name+" "+feature.UserValue+" "+feature.BusinessValue, intentText) {
+			continue
+		}
+		out = append(out, feature)
+	}
+	return out
+}
+
+func sanitizeWorkflowsForPackage(workflows []*model.WorkflowCandidate, intentText string) []*model.WorkflowCandidate {
+	out := make([]*model.WorkflowCandidate, 0, len(workflows))
+	for _, workflow := range workflows {
+		if workflow == nil || packageSummaryTextOutOfScope(workflow.Name+" "+string(workflow.UseCase)+" "+strings.Join(workflow.RiskNotes, " "), intentText) {
+			continue
+		}
+		out = append(out, workflow)
+	}
+	return out
+}
+
+func filterPackageSummaryStrings(values []string, intentText string) []string {
+	out := []string{}
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" || packageSummaryTextOutOfScope(value, intentText) {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func filterPackageSummaryActions(actions []model.UIActionRef, intentText string) []model.UIActionRef {
+	out := []model.UIActionRef{}
+	for _, action := range actions {
+		if packageSummaryTextOutOfScope(action.Label+" "+action.Selector+" "+action.Kind, intentText) {
+			continue
+		}
+		out = append(out, action)
+	}
+	return out
+}
+
+func packageSummaryTextOutOfScope(value string, intentText string) bool {
+	text := strings.ToLower(value)
+	intent := strings.ToLower(intentText)
+	if text == "" {
+		return false
+	}
+	blockers := []string{"graph can be approved", "rehearsal pass rate", "排练通过率", "可审批", "审批", "approve", "approved", "批准", "regenerate", "重新生成", "revise", "修订", "polish", "润色", "cancel", "取消", "delete", "删除", "remove", "移除", "stop", "停止"}
+	for _, blocker := range blockers {
+		if strings.Contains(text, strings.ToLower(blocker)) && !strings.Contains(intent, strings.ToLower(blocker)) {
+			return true
+		}
+	}
+	return false
 }
 
 func evidenceBundleForPackage(state *orchestrator.CascadeState) model.EvidenceBundle {
