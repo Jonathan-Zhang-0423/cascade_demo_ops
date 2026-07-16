@@ -671,6 +671,7 @@ func redactStringFields(value reflect.Value, seen map[uintptr]bool) {
 
 var scriptPlanHashLiteralPattern = regexp.MustCompile(`const cascadePlanHash = "([a-f0-9]{64})";`)
 var packagePasswordLeakagePattern = regexp.MustCompile(`(?i)(密码|口令)\s*[:：=]?\s*[^\s,，。;；)）]{4,}|\b(password|passwd|pwd|passcode)\b\s*[:：=]\s*[^\s,，。;；)）]{4,}`)
+var packageAPIKeyLeakagePattern = regexp.MustCompile(`(?i)\bsk-[A-Za-z0-9_-]{16,}\b`)
 
 func syncScriptPlanHashLiteral(source string, planHash string) string {
 	if source == "" || planHash == "" || !scriptPlanHashLiteralPattern.MatchString(source) {
@@ -1031,7 +1032,7 @@ func detectPackageLeakage(pkg *model.ClientExecutionPackage) string {
 		return "private key"
 	case strings.Contains(lower, "bearer "):
 		return "authorization token"
-	case strings.Contains(lower, "sk-"):
+	case packageAPIKeyLeakagePattern.Match(data):
 		return "api key"
 	case strings.Contains(lower, ".env"):
 		return ".env"

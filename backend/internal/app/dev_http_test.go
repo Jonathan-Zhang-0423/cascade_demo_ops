@@ -131,6 +131,30 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 	}
 }
 
+func TestPackageLeakageDetectionAllowsSafetyPolicyAPIKeyWords(t *testing.T) {
+	pkg := &model.ClientExecutionPackage{
+		PackageID:     "pkg_leakage_policy_words",
+		OrgID:         "org_test",
+		ProjectID:     "project_test",
+		SchemaVersion: model.ClientExecutionPackageSchemaVersion,
+		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
+			ScriptOutline: &model.BrowserAgentScriptOutline{
+				ForbiddenActions: []string{"api_key_read", "raw_secret_exfiltration"},
+				AllowedExplorationScope: model.BrowserAgentExplorationScope{
+					ForbiddenKeywords: []string{"api key", "token"},
+				},
+			},
+		},
+	}
+	if leakage := detectPackageLeakage(pkg); leakage != "" {
+		t.Fatalf("safety policy words must not be treated as leaked API keys: %s", leakage)
+	}
+	pkg.Metadata = map[string]any{"bad_example": "sk-1234567890abcdef123456"}
+	if leakage := detectPackageLeakage(pkg); leakage != "api key" {
+		t.Fatalf("expected real sk-like token to be blocked, got %q", leakage)
+	}
+}
+
 func TestRedactClientExecutionPackageTextDoesNotCorruptGeneratedScript(t *testing.T) {
 	pkg := sampleClientExecutionPackageForAppTest(t)
 	pkg.ExecutableScriptBundle.PlaywrightScript.InlineSource += `
