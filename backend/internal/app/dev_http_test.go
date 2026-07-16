@@ -145,13 +145,20 @@ func TestPackageLeakageDetectionAllowsSafetyPolicyAPIKeyWords(t *testing.T) {
 				},
 			},
 		},
+		SafetyReport: model.PackageSafetyReport{
+			PIIHandling: "不要展示 .env 内容",
+		},
 	}
 	if leakage := detectPackageLeakage(pkg); leakage != "" {
-		t.Fatalf("safety policy words must not be treated as leaked API keys: %s", leakage)
+		t.Fatalf("safety policy words must not be treated as leaked secrets: %s", leakage)
 	}
 	pkg.Metadata = map[string]any{"bad_example": "sk-1234567890abcdef123456"}
 	if leakage := detectPackageLeakage(pkg); leakage != "api key" {
 		t.Fatalf("expected real sk-like token to be blocked, got %q", leakage)
+	}
+	pkg.Metadata = map[string]any{"bad_path": "/home/app/.env"}
+	if leakage := detectPackageLeakage(pkg); leakage != ".env" {
+		t.Fatalf("expected .env path to be blocked, got %q", leakage)
 	}
 }
 
