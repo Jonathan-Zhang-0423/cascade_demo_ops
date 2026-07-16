@@ -202,6 +202,9 @@ func TestIntentFallbackRejectsMismatchedAndNegativeCodeCandidates(t *testing.T) 
 
 func TestProductMapAndDossierFilterUnsafeIntentEvidence(t *testing.T) {
 	intelligence := &model.ProjectIntelligencePack{
+		DemoIntent: &model.DemoIntentSpec{
+			Objective: "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒",
+		},
 		InteractionSurfaces: []model.InteractionSurface{{
 			ID:     "surface_dashboard",
 			PageID: "page_dashboard",
@@ -210,6 +213,7 @@ func TestProductMapAndDossierFilterUnsafeIntentEvidence(t *testing.T) {
 				{ID: "new", Label: "button new project", Kind: "click", Selector: "[data-testid='button-new-project']"},
 				{ID: "cancel", Label: "button regenerate cancel", Kind: "click", Selector: "[data-testid='button-regenerate-cancel']"},
 				{ID: "rename", Label: "button confirm rename", Kind: "click", Selector: "[data-testid='button-confirm-rename']"},
+				{ID: "approve", Label: "button approve all", Kind: "click", Selector: "[data-testid='button-approve-all']"},
 			},
 		}},
 	}
@@ -220,8 +224,8 @@ func TestProductMapAndDossierFilterUnsafeIntentEvidence(t *testing.T) {
 	if got := pages[0].PrimaryActions[0].Selector; got != "[data-testid='button-new-project']" {
 		t.Fatalf("unexpected retained action: %s", got)
 	}
-	summary := dossierEvidenceSummary([]string{"[data-testid='button-new-project'], [data-testid='button-regenerate-cancel'], [data-testid='button-confirm-rename']"})
-	if strings.Contains(summary, "button-regenerate-cancel") || strings.Contains(summary, "button-confirm-rename") {
+	summary := dossierEvidenceSummary([]string{"[data-testid='button-new-project'], [data-testid='button-regenerate-cancel'], [data-testid='button-confirm-rename'], [data-testid='button-approve-all']"}, projectIntelligenceIntentText(intelligence))
+	if strings.Contains(summary, "button-regenerate-cancel") || strings.Contains(summary, "button-confirm-rename") || strings.Contains(summary, "button-approve-all") {
 		t.Fatalf("dossier summary retained unsafe token: %s", summary)
 	}
 	if !strings.Contains(summary, "button-new-project") {

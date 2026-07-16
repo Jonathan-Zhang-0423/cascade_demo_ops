@@ -310,6 +310,7 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 	if intelligence == nil {
 		return existing
 	}
+	intentText := projectIntelligenceIntentText(intelligence)
 	seen := map[string]bool{}
 	for _, page := range existing {
 		if page == nil {
@@ -325,7 +326,7 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 		actions := []string{}
 		primaryActions := []model.UIActionRef{}
 		for _, action := range surface.Actions {
-			if !actionAllowedForIntentEvidence(action.Label, action.Selector) {
+			if !actionAllowedForIntentEvidenceForIntent(action.Label, action.Selector, intentText) {
 				continue
 			}
 			actions = append(actions, firstNonEmpty(action.Kind, "inspect"))
@@ -487,7 +488,7 @@ func componentNodesFromIntelligence(intelligence *model.ProjectIntelligencePack,
 		}
 		actions := make([]model.UIActionRef, 0, len(surface.Actions))
 		for _, action := range surface.Actions {
-			if !actionAllowedForIntentEvidence(action.Label, action.Selector) {
+			if !actionAllowedForIntentEvidenceForIntent(action.Label, action.Selector, projectIntelligenceIntentText(intelligence)) {
 				continue
 			}
 			actions = append(actions, model.UIActionRef{
