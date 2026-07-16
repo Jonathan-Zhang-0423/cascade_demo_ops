@@ -149,7 +149,7 @@ type GraphBuilderAgent interface {
 }
 
 type ScriptPackagerAgent interface {
-	PackageScript(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, graph *model.DemoWorkflowGraph) (*model.ScriptDocumentPackage, error)
+	PackageScript(ctx context.Context, project *model.ProjectContext, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, graph *model.DemoWorkflowGraph, intelligence ...*model.ProjectIntelligencePack) (*model.ScriptDocumentPackage, error)
 }
 
 type QAExecutorAgent interface {
@@ -387,7 +387,7 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 
 	state.CurrentNode = NodeScriptPackage
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
-	scriptPackage, err := f.deps.ScriptPackager.PackageScript(ctx, project, report, productMap, graph)
+	scriptPackage, err := f.deps.ScriptPackager.PackageScript(ctx, project, report, productMap, graph, intelligence)
 	if err != nil {
 		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err

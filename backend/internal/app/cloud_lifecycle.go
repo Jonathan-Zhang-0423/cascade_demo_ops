@@ -533,6 +533,37 @@ func normalizeClientExecutionPackageForUpload(pkg *model.ClientExecutionPackage)
 		}
 		bundle.Reproducibility.ScriptHashSHA256 = scriptHash
 	}
+	if bundle.StageApprovalPlan != nil {
+		stagePlanHash, err := model.DigestCanonicalJSON(bundle.StageApprovalPlan)
+		if err != nil {
+			return err
+		}
+		bundle.Reproducibility.StagePlanHashSHA256 = stagePlanHash
+	}
+	if bundle.ScriptOutline != nil {
+		outlineHash, err := model.DigestCanonicalJSON(bundle.ScriptOutline)
+		if err != nil {
+			return err
+		}
+		bundle.Reproducibility.OutlineHashSHA256 = outlineHash
+	}
+	if bundle.AgentPromptPolicy != nil {
+		promptHash, err := model.DigestCanonicalJSON(bundle.AgentPromptPolicy)
+		if err != nil {
+			return err
+		}
+		bundle.Reproducibility.PromptPolicyHashSHA256 = promptHash
+	}
+	if bundle.UnderstandingDossier != nil {
+		dossierHash, err := model.DigestCanonicalJSON(bundle.UnderstandingDossier)
+		if err != nil {
+			return err
+		}
+		bundle.Reproducibility.UnderstandingDossierHashSHA256 = dossierHash
+		if bundle.UnderstandingDossierRef != nil {
+			bundle.UnderstandingDossierRef.SHA256 = dossierHash
+		}
+	}
 	if bundle.ApprovalMarkdown.InlineMarkdown != "" {
 		markdown := bundle.ApprovalMarkdown.InlineMarkdown
 		markdownHash := model.SHA256Hex([]byte(markdown))
@@ -672,6 +703,7 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 		))
 	}
 	doc := pkg.ExecutableScriptBundle.PlanJSON
+	outlineRuntime := pkg.ExecutableScriptBundle.ScriptManifest.Runtime == model.ExecutableScriptRuntimeBrowserAgentOutlineV1
 	if !scriptDocumentHasBusinessAction(doc) {
 		findings = append(findings, packagePreflightFinding(
 			"business_action_missing",
@@ -709,7 +741,7 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 		if isLoginStep(step) {
 			repeatedLoginCount++
 		}
-		if actionRequiresSelector(step.Action.Type) && !actionTargetHasStableHandle(step.Action.Target) {
+		if !outlineRuntime && actionRequiresSelector(step.Action.Type) && !actionTargetHasStableHandle(step.Action.Target) {
 			findings = append(findings, packagePreflightFinding(
 				"selector_missing_"+shortID(step.NodeID),
 				model.FindingSeverityBlocking,
@@ -733,7 +765,7 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 				"Keep each business stage around 10 seconds with natural wait/capture pacing.",
 			))
 		}
-		if len(step.EvidenceRefs) == 0 && actionRequiresSelector(step.Action.Type) {
+		if !outlineRuntime && len(step.EvidenceRefs) == 0 && actionRequiresSelector(step.Action.Type) {
 			findings = append(findings, packagePreflightFinding(
 				"evidence_missing_"+shortID(step.NodeID),
 				model.FindingSeverityWarning,
@@ -741,6 +773,9 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 				"Bind ProjectIntelligenceGraph route/component/API/selector evidence to the graph node.",
 			))
 		}
+	}
+	if outlineRuntime {
+		findings = append(findings, preflightBrowserAgentOutline(pkg.ExecutableScriptBundle)...)
 	}
 	if repeatedLoginCount > 1 {
 		findings = append(findings, packagePreflightFinding(
@@ -769,6 +804,118 @@ func blockingFindings(findings []model.AgentFinding) []model.AgentFinding {
 		}
 	}
 	return blockers
+}
+
+func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle) []model.AgentFinding {
+	findings := []model.AgentFinding{}
+	if bundle == nil {
+		return findings
+	}
+	if bundle.StageApprovalPlan == nil {
+		findings = append(findings, packagePreflightFinding(
+			"stage_approval_plan_missing",
+			model.FindingSeverityBlocking,
+			"browser agent outline package is missing stage_approval_plan",
+			"Regenerate the package so the user can approve stage JSON before upload.",
+		))
+	}
+	if bundle.ScriptOutline == nil {
+		findings = append(findings, packagePreflightFinding(
+			"script_outline_missing",
+			model.FindingSeverityBlocking,
+			"browser agent outline package is missing script_outline",
+			"Regenerate the package so the server browser agent receives route/component interaction guidance.",
+		))
+	}
+	if bundle.AgentPromptPolicy == nil {
+		findings = append(findings, packagePreflightFinding(
+			"agent_prompt_policy_missing",
+			model.FindingSeverityBlocking,
+			"browser agent outline package is missing agent_prompt_policy",
+			"Regenerate the package so server-side repairs have explicit editable and immutable boundaries.",
+		))
+	}
+	if bundle.StageApprovalPlan != nil {
+		for _, stage := range bundle.StageApprovalPlan.Stages {
+			if strings.TrimSpace(stage.Objective) == "" {
+				findings = append(findings, packagePreflightFinding(
+					"stage_objective_missing_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"stage approval item is missing objective: "+stage.NodeID,
+					"Bind each stage to a user-approved business objective before upload.",
+				))
+			}
+			if !stageApprovalHasEvidence(stage) {
+				findings = append(findings, packagePreflightFinding(
+					"stage_evidence_missing_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"stage approval item is missing route/component/API evidence: "+stage.NodeID,
+					"Continue local project drilldown until the stage has evidence refs or route/component/API/data model bindings.",
+				))
+			}
+			if stage.DurationMS > 0 && stage.DurationMS < 10000 {
+				findings = append(findings, packagePreflightFinding(
+					"stage_duration_short_"+shortID(stage.NodeID),
+					model.FindingSeverityWarning,
+					"stage approval duration is shorter than 10 seconds: "+stage.NodeID,
+					"Keep each stage around 10 seconds or more so the server recording has natural pacing.",
+				))
+			}
+		}
+		for _, uncertainty := range bundle.StageApprovalPlan.UncertaintyReport {
+			if uncertainty.Blocking {
+				findings = append(findings, packagePreflightFinding(
+					"stage_uncertainty_blocking_"+shortID(uncertainty.ID),
+					model.FindingSeverityBlocking,
+					"stage approval plan has blocking uncertainty: "+uncertainty.Summary,
+					firstNonEmptyString(uncertainty.SuggestedAction, "Continue reading the related code or ask the user for clarification before upload."),
+				))
+			}
+		}
+	}
+	if bundle.ScriptOutline != nil {
+		for _, stage := range bundle.ScriptOutline.Stages {
+			if len(stage.Interactions) == 0 {
+				findings = append(findings, packagePreflightFinding(
+					"outline_interaction_missing_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"script outline stage has no interaction guidance: "+stage.NodeID,
+					"Add route, component, target role/name/selector candidates, and wait conditions for this stage.",
+				))
+			}
+		}
+		for _, uncertainty := range bundle.ScriptOutline.UncertaintyReport {
+			if uncertainty.Blocking {
+				findings = append(findings, packagePreflightFinding(
+					"outline_uncertainty_blocking_"+shortID(uncertainty.ID),
+					model.FindingSeverityBlocking,
+					"script outline has blocking uncertainty: "+uncertainty.Summary,
+					firstNonEmptyString(uncertainty.SuggestedAction, "Continue local evidence gathering before upload."),
+				))
+			}
+		}
+	}
+	if bundle.AgentPromptPolicy != nil {
+		if strings.TrimSpace(bundle.AgentPromptPolicy.SystemPrompt) == "" || len(bundle.AgentPromptPolicy.ImmutableFields) == 0 || len(bundle.AgentPromptPolicy.EditableFields) == 0 {
+			findings = append(findings, packagePreflightFinding(
+				"prompt_policy_incomplete",
+				model.FindingSeverityBlocking,
+				"agent prompt policy is incomplete",
+				"Declare system prompt, immutable fields, and editable fields for the server browser agent.",
+			))
+		}
+	}
+	return findings
+}
+
+func stageApprovalHasEvidence(stage model.StageApprovalStage) bool {
+	return len(stage.EvidenceRefs) > 0 ||
+		len(stage.ComponentRefs) > 0 ||
+		len(stage.APIRefs) > 0 ||
+		len(stage.StyleRefs) > 0 ||
+		len(stage.DataModelRefs) > 0 ||
+		len(stage.Interaction.EvidenceRefs) > 0 ||
+		len(stage.Interaction.Target.EvidenceRefs) > 0
 }
 
 func packagePreflightFinding(id string, severity model.FindingSeverity, summary string, suggestedAction string) model.AgentFinding {

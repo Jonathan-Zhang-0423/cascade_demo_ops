@@ -170,8 +170,9 @@ func validateExecutableBundleAgainstPackage(bundle *ExecutableRecordingScriptBun
 	if bundle.ScriptManifest.EntryFunction != "runCascadeRecording" {
 		return errors.New("executable script bundle entry_function must be runCascadeRecording")
 	}
-	if bundle.ScriptManifest.Language != "typescript" || bundle.ScriptManifest.Runtime != "playwright-restricted-sandbox" {
-		return errors.New("executable script bundle must use restricted TypeScript Playwright runtime")
+	runtime := strings.TrimSpace(bundle.ScriptManifest.Runtime)
+	if runtime == "" {
+		return errors.New("executable script bundle script_manifest.runtime is required")
 	}
 	if len(bundle.ScriptManifest.DependencyAllowlist) > 0 {
 		return errors.New("executable script bundle dependency_allowlist must be empty")
@@ -188,23 +189,17 @@ func validateExecutableBundleAgainstPackage(bundle *ExecutableRecordingScriptBun
 	if err := validateScriptManifestAgainstPlan(bundle); err != nil {
 		return err
 	}
-	if bundle.PlaywrightScript.InlineSource == "" && bundle.PlaywrightScript.Artifact == nil {
-		return errors.New("executable script bundle playwright_script must include inline_source or artifact")
-	}
-	if bundle.PlaywrightScript.SHA256 == "" {
-		return errors.New("playwright_script sha256 is required")
-	}
-	if bundle.PlaywrightScript.InlineSource != "" {
-		scriptHash := SHA256Hex([]byte(bundle.PlaywrightScript.InlineSource))
-		if bundle.PlaywrightScript.SHA256 != scriptHash {
-			return errors.New("playwright_script sha256 mismatch")
+	switch runtime {
+	case ExecutableScriptRuntimePlaywrightRestrictedSandbox:
+		if err := validateRestrictedPlaywrightBundle(bundle); err != nil {
+			return err
 		}
-		if bundle.Reproducibility.ScriptHashSHA256 == "" {
-			return errors.New("executable script bundle reproducibility script hash is required")
+	case ExecutableScriptRuntimeBrowserAgentOutlineV1:
+		if err := validateBrowserAgentOutlineBundle(bundle); err != nil {
+			return err
 		}
-		if bundle.Reproducibility.ScriptHashSHA256 != scriptHash {
-			return errors.New("executable script bundle reproducibility script hash mismatch")
-		}
+	default:
+		return fmt.Errorf("executable script bundle runtime %q is not supported", runtime)
 	}
 	if bundle.ApprovalMarkdown.SHA256 == "" {
 		return errors.New("approval_markdown sha256 is required")
@@ -251,6 +246,170 @@ func validateExecutableBundleAgainstPackage(bundle *ExecutableRecordingScriptBun
 		return errors.New("executable script bundle allowed domains exceed recording_run_spec.allowed_domains")
 	}
 	return nil
+}
+
+func validateRestrictedPlaywrightBundle(bundle *ExecutableRecordingScriptBundle) error {
+	if bundle.ScriptManifest.Language != "typescript" {
+		return errors.New("executable script bundle language must be typescript for restricted Playwright runtime")
+	}
+	if bundle.PlaywrightScript.InlineSource == "" && bundle.PlaywrightScript.Artifact == nil {
+		return errors.New("executable script bundle playwright_script must include inline_source or artifact")
+	}
+	if bundle.PlaywrightScript.SHA256 == "" {
+		return errors.New("playwright_script sha256 is required")
+	}
+	if bundle.PlaywrightScript.InlineSource == "" {
+		return nil
+	}
+	scriptHash := SHA256Hex([]byte(bundle.PlaywrightScript.InlineSource))
+	if bundle.PlaywrightScript.SHA256 != scriptHash {
+		return errors.New("playwright_script sha256 mismatch")
+	}
+	if bundle.Reproducibility.ScriptHashSHA256 == "" {
+		return errors.New("executable script bundle reproducibility script hash is required")
+	}
+	if bundle.Reproducibility.ScriptHashSHA256 != scriptHash {
+		return errors.New("executable script bundle reproducibility script hash mismatch")
+	}
+	return nil
+}
+
+func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) error {
+	if bundle.StageApprovalPlan == nil {
+		return errors.New("browser-agent outline bundle stage_approval_plan is required")
+	}
+	if bundle.ScriptOutline == nil {
+		return errors.New("browser-agent outline bundle script_outline is required")
+	}
+	if bundle.AgentPromptPolicy == nil {
+		return errors.New("browser-agent outline bundle agent_prompt_policy is required")
+	}
+	if bundle.StageApprovalPlan.SchemaVersion != StageApprovalPlanSchemaVersion {
+		return fmt.Errorf("stage_approval_plan schema_version must be %q", StageApprovalPlanSchemaVersion)
+	}
+	if bundle.ScriptOutline.SchemaVersion != BrowserAgentScriptOutlineSchemaVersion {
+		return fmt.Errorf("script_outline schema_version must be %q", BrowserAgentScriptOutlineSchemaVersion)
+	}
+	if bundle.AgentPromptPolicy.SchemaVersion != BrowserAgentPromptPolicySchemaVersion {
+		return fmt.Errorf("agent_prompt_policy schema_version must be %q", BrowserAgentPromptPolicySchemaVersion)
+	}
+	if bundle.StageApprovalPlan.ProjectID != bundle.ProjectID || bundle.StageApprovalPlan.WorkflowGraphID != bundle.WorkflowGraphID {
+		return errors.New("stage_approval_plan identity does not match executable script bundle")
+	}
+	if bundle.ScriptOutline.ProjectID != bundle.ProjectID || bundle.ScriptOutline.WorkflowGraphID != bundle.WorkflowGraphID {
+		return errors.New("script_outline identity does not match executable script bundle")
+	}
+	if bundle.AgentPromptPolicy.ProjectID != bundle.ProjectID || bundle.AgentPromptPolicy.WorkflowGraphID != bundle.WorkflowGraphID {
+		return errors.New("agent_prompt_policy identity does not match executable script bundle")
+	}
+	if bundle.ScriptOutline.Runtime != ExecutableScriptRuntimeBrowserAgentOutlineV1 || bundle.AgentPromptPolicy.Runtime != ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		return errors.New("browser-agent outline bundle runtime fields must be browser-agent-outline-v1")
+	}
+	if len(bundle.StageApprovalPlan.Stages) == 0 || len(bundle.ScriptOutline.Stages) == 0 {
+		return errors.New("browser-agent outline bundle requires stage plan and outline stages")
+	}
+	if len(bundle.AgentPromptPolicy.ImmutableFields) == 0 || len(bundle.AgentPromptPolicy.EditableFields) == 0 || strings.TrimSpace(bundle.AgentPromptPolicy.SystemPrompt) == "" {
+		return errors.New("agent_prompt_policy must declare system_prompt, immutable_fields, and editable_fields")
+	}
+	planNodeIDs := map[string]bool{}
+	for _, step := range bundle.PlanJSON.Steps {
+		planNodeIDs[step.NodeID] = true
+	}
+	stageNodeIDs := map[string]bool{}
+	for _, stage := range bundle.StageApprovalPlan.Stages {
+		if stage.NodeID == "" || !planNodeIDs[stage.NodeID] {
+			return fmt.Errorf("stage_approval_plan stage node_id %q is not in plan_json", stage.NodeID)
+		}
+		if strings.TrimSpace(stage.Objective) == "" {
+			return fmt.Errorf("stage_approval_plan stage %q is missing objective", stage.NodeID)
+		}
+		if stage.DurationMS > 0 && stage.DurationMS < 10000 {
+			return fmt.Errorf("stage_approval_plan stage %q duration must be at least 10000ms", stage.NodeID)
+		}
+		if !stageHasEvidence(stage) {
+			return fmt.Errorf("stage_approval_plan stage %q is missing evidence chain", stage.NodeID)
+		}
+		stageNodeIDs[stage.NodeID] = true
+	}
+	outlineNodeIDs := map[string]bool{}
+	for _, stage := range bundle.ScriptOutline.Stages {
+		if stage.NodeID == "" || !planNodeIDs[stage.NodeID] {
+			return fmt.Errorf("script_outline stage node_id %q is not in plan_json", stage.NodeID)
+		}
+		if strings.TrimSpace(stage.Objective) == "" {
+			return fmt.Errorf("script_outline stage %q is missing objective", stage.NodeID)
+		}
+		if len(stage.Interactions) == 0 {
+			return fmt.Errorf("script_outline stage %q is missing interactions", stage.NodeID)
+		}
+		if len(stage.EvidenceRefs) == 0 && len(stage.Components) == 0 {
+			return fmt.Errorf("script_outline stage %q is missing evidence chain", stage.NodeID)
+		}
+		outlineNodeIDs[stage.NodeID] = true
+	}
+	for nodeID := range planNodeIDs {
+		if !stageNodeIDs[nodeID] {
+			return fmt.Errorf("stage_approval_plan missing plan node_id %q", nodeID)
+		}
+		if !outlineNodeIDs[nodeID] {
+			return fmt.Errorf("script_outline missing plan node_id %q", nodeID)
+		}
+	}
+	for _, uncertainty := range append(append([]StageUncertainty{}, bundle.StageApprovalPlan.UncertaintyReport...), bundle.ScriptOutline.UncertaintyReport...) {
+		if uncertainty.Blocking {
+			return fmt.Errorf("browser-agent outline contains blocking uncertainty %q", uncertainty.ID)
+		}
+	}
+	stageHash, err := DigestCanonicalJSON(bundle.StageApprovalPlan)
+	if err != nil {
+		return err
+	}
+	if bundle.Reproducibility.StagePlanHashSHA256 == "" || bundle.Reproducibility.StagePlanHashSHA256 != stageHash {
+		return errors.New("executable script bundle stage plan hash mismatch")
+	}
+	outlineHash, err := DigestCanonicalJSON(bundle.ScriptOutline)
+	if err != nil {
+		return err
+	}
+	if bundle.Reproducibility.OutlineHashSHA256 == "" || bundle.Reproducibility.OutlineHashSHA256 != outlineHash {
+		return errors.New("executable script bundle outline hash mismatch")
+	}
+	promptHash, err := DigestCanonicalJSON(bundle.AgentPromptPolicy)
+	if err != nil {
+		return err
+	}
+	if bundle.Reproducibility.PromptPolicyHashSHA256 == "" || bundle.Reproducibility.PromptPolicyHashSHA256 != promptHash {
+		return errors.New("executable script bundle prompt policy hash mismatch")
+	}
+	if bundle.UnderstandingDossier != nil {
+		dossierHash, err := DigestCanonicalJSON(bundle.UnderstandingDossier)
+		if err != nil {
+			return err
+		}
+		if bundle.Reproducibility.UnderstandingDossierHashSHA256 == "" || bundle.Reproducibility.UnderstandingDossierHashSHA256 != dossierHash {
+			return errors.New("executable script bundle understanding dossier hash mismatch")
+		}
+	}
+	if bundle.PlaywrightScript.InlineSource != "" {
+		scriptHash := SHA256Hex([]byte(bundle.PlaywrightScript.InlineSource))
+		if bundle.PlaywrightScript.SHA256 != "" && bundle.PlaywrightScript.SHA256 != scriptHash {
+			return errors.New("playwright_script sha256 mismatch")
+		}
+		if bundle.Reproducibility.ScriptHashSHA256 != "" && bundle.Reproducibility.ScriptHashSHA256 != scriptHash {
+			return errors.New("executable script bundle reproducibility script hash mismatch")
+		}
+	}
+	return nil
+}
+
+func stageHasEvidence(stage StageApprovalStage) bool {
+	return len(stage.EvidenceRefs) > 0 ||
+		len(stage.ComponentRefs) > 0 ||
+		len(stage.APIRefs) > 0 ||
+		len(stage.StyleRefs) > 0 ||
+		len(stage.DataModelRefs) > 0 ||
+		len(stage.Interaction.EvidenceRefs) > 0 ||
+		len(stage.Interaction.Target.EvidenceRefs) > 0
 }
 
 func validateScriptManifestAgainstPlan(bundle *ExecutableRecordingScriptBundle) error {

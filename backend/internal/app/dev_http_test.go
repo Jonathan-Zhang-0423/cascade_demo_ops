@@ -40,8 +40,12 @@ func TestDevHTTPBridgeGeneratesExecutionPackage(t *testing.T) {
 	if state.UnderstandingReport == nil || state.ProductMap == nil || state.WorkflowGraph == nil || state.ScriptDocument == nil || state.ExecutableScriptBundle == nil {
 		t.Fatalf("execution package missing required payloads: %+v", state)
 	}
-	if state.ExecutableScriptBundle.PlaywrightScript.InlineSource == "" || state.ExecutableScriptBundle.Reproducibility.BundleHashSHA256 == "" {
-		t.Fatalf("expected executable script source and hashes: %+v", state.ExecutableScriptBundle)
+	if state.ExecutableScriptBundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 ||
+		state.ExecutableScriptBundle.StageApprovalPlan == nil ||
+		state.ExecutableScriptBundle.ScriptOutline == nil ||
+		state.ExecutableScriptBundle.AgentPromptPolicy == nil ||
+		state.ExecutableScriptBundle.Reproducibility.BundleHashSHA256 == "" {
+		t.Fatalf("expected browser agent outline bundle and hashes: %+v", state.ExecutableScriptBundle)
 	}
 	for _, forbidden := range []string{"raw-password", "BEGIN PRIVATE KEY", ".env", "postgres://user:secret"} {
 		if strings.Contains(payload, forbidden) {

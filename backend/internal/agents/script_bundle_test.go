@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -30,21 +31,30 @@ func TestScriptPackagerEmitsValidExecutableBundle(t *testing.T) {
 	if got := bundle.PlanJSON.Steps[0].Capture.Scope; got != model.CaptureScopeFullPage {
 		t.Fatalf("expected capture scope to be preserved in plan_json, got %q", got)
 	}
-	source := bundle.PlaywrightScript.InlineSource
-	if !strings.Contains(source, `"scope":"full_page"`) || !strings.Contains(source, `"full_page":true`) {
-		t.Fatalf("generated script missing capture scope options:\n%s", source)
+	if bundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		t.Fatalf("expected browser agent outline runtime, got %+v", bundle.ScriptManifest)
+	}
+	if bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil || bundle.AgentPromptPolicy == nil || bundle.UnderstandingDossier == nil {
+		t.Fatalf("outline bundle missing required outline artifacts: %+v", bundle)
 	}
 	for _, node := range graph.Nodes {
-		if !strings.Contains(source, `"`+node.ID+`"`) {
-			t.Fatalf("generated script missing node id %s:\n%s", node.ID, source)
+		if !outlineBundleContainsNode(bundle, node.ID) {
+			t.Fatalf("outline bundle missing node id %s", node.ID)
 		}
+	}
+	if !strings.Contains(strings.Join(bundle.ScriptOutline.Stages[0].CapturePoints, " "), "capture_stage_screenshot") {
+		t.Fatalf("outline should preserve capture points: %+v", bundle.ScriptOutline.Stages[0])
+	}
+	payload, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, forbidden := range []string{"raw-password-123", "BEGIN PRIVATE KEY", "import ", "require(", "process.", "fetch("} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf("generated script leaked forbidden token %q:\n%s", forbidden, source)
+		if strings.Contains(string(payload), forbidden) {
+			t.Fatalf("outline bundle leaked forbidden token %q:\n%s", forbidden, payload)
 		}
 	}
-	if bundle.Reproducibility.PlanHashSHA256 == "" || bundle.Reproducibility.ScriptHashSHA256 == "" || bundle.Reproducibility.BundleHashSHA256 == "" {
+	if bundle.Reproducibility.PlanHashSHA256 == "" || bundle.Reproducibility.StagePlanHashSHA256 == "" || bundle.Reproducibility.OutlineHashSHA256 == "" || bundle.Reproducibility.PromptPolicyHashSHA256 == "" || bundle.Reproducibility.BundleHashSHA256 == "" {
 		t.Fatalf("bundle missing reproducibility hashes: %+v", bundle.Reproducibility)
 	}
 }
@@ -106,7 +116,7 @@ func (f failingMarkdownLLM) GenerateMultimodal(ctx context.Context, task config.
 }
 
 func TestScriptBundleValidatorRejectsForbiddenAPI(t *testing.T) {
-	bundle := validExecutableBundleFixture(t)
+	bundle := validLegacyExecutableBundleFixture(t)
 	source := "import fs from \"fs\";\n" + bundle.PlaywrightScript.InlineSource
 	setBundleSourceForTest(bundle, source)
 	validation := NewScriptBundleValidator().ValidateBundle(bundle)
@@ -117,7 +127,7 @@ func TestScriptBundleValidatorRejectsForbiddenAPI(t *testing.T) {
 }
 
 func TestScriptBundleValidatorRejectsRawSecret(t *testing.T) {
-	bundle := validExecutableBundleFixture(t)
+	bundle := validLegacyExecutableBundleFixture(t)
 	source := bundle.PlaywrightScript.InlineSource + "\nconst token = \"sk-abcdefghijklmnop\";\n"
 	setBundleSourceForTest(bundle, source)
 	validation := NewScriptBundleValidator().ValidateBundle(bundle)
@@ -128,7 +138,7 @@ func TestScriptBundleValidatorRejectsRawSecret(t *testing.T) {
 }
 
 func TestScriptBundleValidatorRejectsNodeMismatch(t *testing.T) {
-	bundle := validExecutableBundleFixture(t)
+	bundle := validLegacyExecutableBundleFixture(t)
 	source := strings.ReplaceAll(bundle.PlaywrightScript.InlineSource, `"node_open"`, `"node_missing"`)
 	setBundleSourceForTest(bundle, source)
 	validation := NewScriptBundleValidator().ValidateBundle(bundle)
@@ -189,12 +199,12 @@ func TestObservationStepsAreNonBlockingAndDoNotRequireMainFallback(t *testing.T)
 	if observeStep.PageTarget.Selector == "main" || observeStep.Action.Target.Selector == "main" {
 		t.Fatalf("observation step should not inject brittle main selector fallback: %+v", observeStep)
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	if !strings.Contains(source, "observation step validation is non-blocking") {
-		t.Fatalf("generated script should mark observation validation as non-blocking:\n%s", source)
+	outlineStage := outlineStageByNodeID(pkg.ExecutableBundle, "node_observe")
+	if outlineStage == nil {
+		t.Fatal("expected observation outline stage")
 	}
-	if strings.Contains(source, `ctx.assert.step("node_observe"`) {
-		t.Fatalf("observation step should not emit blocking assert.step:\n%s", source)
+	if outlineStage.Interactions[0].Kind != model.GraphActionInspect {
+		t.Fatalf("observation outline should remain inspect: %+v", outlineStage)
 	}
 }
 
@@ -237,12 +247,9 @@ func TestScriptPackagerDowngradesGenericBusinessSelector(t *testing.T) {
 	if genericStep.Blocking {
 		t.Fatalf("downgraded generic step should not be blocking: %+v", genericStep)
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	if strings.Contains(source, `ctx.page.click("main"`) {
-		t.Fatalf("generated script must not click generic main selector:\n%s", source)
-	}
-	if strings.Contains(source, `ctx.assert.step("node_generic_click"`) {
-		t.Fatalf("downgraded generic step must not emit blocking assert.step:\n%s", source)
+	outlineStage := outlineStageByNodeID(pkg.ExecutableBundle, "node_generic_click")
+	if outlineStage == nil || len(outlineStage.Interactions) == 0 || outlineStage.Interactions[0].Kind != model.GraphActionInspect {
+		t.Fatalf("downgraded generic step should be inspect in outline: %+v", outlineStage)
 	}
 }
 
@@ -257,9 +264,16 @@ func TestScriptPackagerEnforcesNaturalStageDuration(t *testing.T) {
 			t.Fatalf("expected every stage to be at least 10s, got %s=%d", step.NodeID, step.Timing.DurationMS)
 		}
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	if !strings.Contains(source, "await ctx.page.waitForTimeout(1200);") {
-		t.Fatalf("expected generated script to include a pre-action observation pause:\n%s", source)
+	if pkg.ExecutableBundle.StageApprovalPlan == nil {
+		t.Fatal("expected stage approval plan")
+	}
+	for _, stage := range pkg.ExecutableBundle.StageApprovalPlan.Stages {
+		if stage.DurationMS < 10000 {
+			t.Fatalf("expected outline stage to be at least 10s, got %+v", stage)
+		}
+		if !containsString(stage.WaitConditions, "wait_after_entry_at_least_1000ms") {
+			t.Fatalf("expected render wait condition in stage: %+v", stage)
+		}
 	}
 }
 
@@ -323,12 +337,12 @@ func TestScriptPackagerKeepsRuntimeAdaptiveBusinessAction(t *testing.T) {
 	if adaptiveStep.Action.Type != model.GraphActionClick {
 		t.Fatalf("runtime adaptive business action should remain executable, got %+v", adaptiveStep.Action)
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	if !strings.Contains(source, `cascadeResolveSelector(ctx, "node_invite"`) {
-		t.Fatalf("expected adaptive selector resolution in generated script:\n%s", source)
+	outlineStage := outlineStageByNodeID(pkg.ExecutableBundle, "node_invite")
+	if outlineStage == nil || len(outlineStage.Components) == 0 {
+		t.Fatalf("expected adaptive selector guidance in outline: %+v", outlineStage)
 	}
-	if !strings.Contains(source, `ctx.page.click(selector_node_invite`) {
-		t.Fatalf("expected click to use runtime-resolved selector:\n%s", source)
+	if !strings.Contains(outlineAuditText(outlineStage), "new-project") && !strings.Contains(outlineAuditText(outlineStage), "新建项目") {
+		t.Fatalf("expected adaptive outline to carry selector alternatives: %+v", outlineStage)
 	}
 }
 
@@ -382,6 +396,79 @@ func validExecutableBundleFixture(t *testing.T) *model.ExecutableRecordingScript
 		t.Fatal("expected executable bundle")
 	}
 	return pkg.ExecutableBundle
+}
+
+func validLegacyExecutableBundleFixture(t *testing.T) *model.ExecutableRecordingScriptBundle {
+	t.Helper()
+	bundle := validExecutableBundleFixture(t)
+	source, err := NewScriptCodeGenerator().Generate(bundle.PlanJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := hashString(source)
+	bundle.ScriptManifest.Language = "typescript"
+	bundle.ScriptManifest.Runtime = model.ExecutableScriptRuntimePlaywrightRestrictedSandbox
+	bundle.ScriptManifest.Generator = scriptCodeGeneratorName
+	bundle.ScriptManifest.GeneratorVersion = scriptCodeGeneratorVersion
+	bundle.ScriptManifest.ContextAPIs = []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"}
+	bundle.PlaywrightScript = model.ExecutableScriptSource{
+		InlineSource: source,
+		MimeType:     "text/typescript",
+		SHA256:       hash,
+		SizeBytes:    int64(len([]byte(source))),
+	}
+	bundle.Reproducibility.ScriptHashSHA256 = hash
+	bundle.Reproducibility.BundleHashSHA256 = ""
+	bundle.Validation = nil
+	bundleHash, err := bundle.ComputeBundleHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.Reproducibility.BundleHashSHA256 = bundleHash
+	validation := NewScriptBundleValidator().ValidateBundle(bundle)
+	if !validation.Valid {
+		t.Fatalf("legacy fixture should be valid: %+v", validation)
+	}
+	bundle.Validation = &validation
+	return bundle
+}
+
+func outlineBundleContainsNode(bundle *model.ExecutableRecordingScriptBundle, nodeID string) bool {
+	if bundle == nil || bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil {
+		return false
+	}
+	for _, stage := range bundle.StageApprovalPlan.Stages {
+		if stage.NodeID == nodeID {
+			return true
+		}
+	}
+	for _, stage := range bundle.ScriptOutline.Stages {
+		if stage.NodeID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func outlineStageByNodeID(bundle *model.ExecutableRecordingScriptBundle, nodeID string) *model.BrowserAgentOutlineStage {
+	if bundle == nil || bundle.ScriptOutline == nil {
+		return nil
+	}
+	for i := range bundle.ScriptOutline.Stages {
+		if bundle.ScriptOutline.Stages[i].NodeID == nodeID {
+			return &bundle.ScriptOutline.Stages[i]
+		}
+	}
+	return nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func setBundleSourceForTest(bundle *model.ExecutableRecordingScriptBundle, source string) {

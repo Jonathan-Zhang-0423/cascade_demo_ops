@@ -18,6 +18,11 @@ type ScriptPackagerAgent struct {
 	llm llm.Client
 }
 
+const (
+	browserAgentOutlineGeneratorName    = "cascade_browser_agent_outline_packager"
+	browserAgentOutlineGeneratorVersion = "0.1.0"
+)
+
 func NewScriptPackagerAgent() *ScriptPackagerAgent { return &ScriptPackagerAgent{} }
 
 func NewScriptPackagerAgentWithLLM(client llm.Client) *ScriptPackagerAgent {
@@ -30,6 +35,7 @@ func (a *ScriptPackagerAgent) PackageScript(
 	report *model.MultimodalUnderstandingReport,
 	productMap *model.ProductMap,
 	graph *model.DemoWorkflowGraph,
+	intelligence ...*model.ProjectIntelligencePack,
 ) (*model.ScriptDocumentPackage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -113,7 +119,7 @@ func (a *ScriptPackagerAgent) PackageScript(
 		CreatedAt: now,
 		Sensitive: false,
 	}
-	bundle, err := buildExecutableScriptBundle(project, report, graph, doc, markdown, now)
+	bundle, err := buildExecutableScriptBundle(project, report, productMap, graph, doc, markdown, now, firstIntelligencePack(intelligence...))
 	if err != nil {
 		return nil, err
 	}
@@ -128,23 +134,41 @@ func (a *ScriptPackagerAgent) PackageScript(
 func buildExecutableScriptBundle(
 	project *model.ProjectContext,
 	report *model.MultimodalUnderstandingReport,
+	productMap *model.ProductMap,
 	graph *model.DemoWorkflowGraph,
 	doc *model.ExecutionScriptDocument,
 	markdown string,
 	now time.Time,
+	intelligence *model.ProjectIntelligencePack,
 ) (*model.ExecutableRecordingScriptBundle, error) {
-	source, err := NewScriptCodeGenerator().Generate(doc)
-	if err != nil {
-		return nil, err
-	}
-	if findings := auditScriptIntentCoverage(project, doc, source); len(findings) > 0 {
-		return nil, fmt.Errorf("script_intent_mismatch: %s", strings.Join(findings, "；"))
-	}
 	planHash, err := doc.ComputeScriptHash()
 	if err != nil {
 		return nil, err
 	}
-	scriptHash := hashString(source)
+	stagePlan := buildStageApprovalPlan(project, report, graph, doc, intelligence, now)
+	outline := buildBrowserAgentScriptOutline(project, graph, doc, stagePlan, intelligence, now)
+	promptPolicy := buildBrowserAgentPromptPolicy(project, graph, doc, outline, now)
+	dossier := buildProjectUnderstandingDossier(project, report, productMap, graph, intelligence, now)
+	auditText := outlineAuditText(stagePlan, outline, promptPolicy)
+	if findings := auditScriptIntentCoverage(project, doc, auditText); len(findings) > 0 {
+		return nil, fmt.Errorf("script_intent_mismatch: %s", strings.Join(findings, "；"))
+	}
+	stagePlanHash, err := model.DigestCanonicalJSON(stagePlan)
+	if err != nil {
+		return nil, err
+	}
+	outlineHash, err := model.DigestCanonicalJSON(outline)
+	if err != nil {
+		return nil, err
+	}
+	promptPolicyHash, err := model.DigestCanonicalJSON(promptPolicy)
+	if err != nil {
+		return nil, err
+	}
+	dossierHash, err := model.DigestCanonicalJSON(dossier)
+	if err != nil {
+		return nil, err
+	}
 	markdownHash := hashString(markdown)
 	bundle := &model.ExecutableRecordingScriptBundle{
 		ID:              "bundle_" + doc.ID,
@@ -155,34 +179,36 @@ func buildExecutableScriptBundle(
 		ScriptManifest: model.ExecutableScriptManifest{
 			ScriptID:            "recording_" + graph.ID,
 			Version:             1,
-			Language:            "typescript",
-			Runtime:             "playwright-restricted-sandbox",
+			Language:            "browser-agent-outline",
+			Runtime:             model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
 			EntryFunction:       "runCascadeRecording",
-			Generator:           scriptCodeGeneratorName,
-			GeneratorVersion:    scriptCodeGeneratorVersion,
+			Generator:           browserAgentOutlineGeneratorName,
+			GeneratorVersion:    browserAgentOutlineGeneratorVersion,
 			DependencyAllowlist: []string{},
-			ContextAPIs:         []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"},
+			ContextAPIs:         []string{"browser_agent.page", "browser_agent.secrets", "browser_agent.capture", "browser_agent.assert", "browser_agent.log"},
 			StepNodeIDs:         scriptStepNodeIDs(doc),
 		},
 		PlanJSON: doc,
 		PlaywrightScript: model.ExecutableScriptSource{
-			InlineSource: source,
-			Artifact: &model.ArtifactRef{
-				ID:        "artifact_" + doc.ID + "_playwright_ts",
-				Kind:      "playwright_recording_script",
-				URI:       "cascade://projects/" + project.ID + "/scripts/" + doc.ID + ".ts",
-				MimeType:  "text/typescript",
-				Label:     doc.Title + " 可执行脚本",
-				SHA256:    scriptHash,
-				SizeBytes: int64(len([]byte(source))),
-				CreatedAt: now,
-				Sensitive: false,
-			},
-			MimeType:  "text/typescript",
-			SHA256:    scriptHash,
-			SizeBytes: int64(len([]byte(source))),
+			MimeType:  "application/x.browser-agent-outline+json",
+			SHA256:    "",
+			SizeBytes: 0,
 			Encrypted: false,
 		},
+		StageApprovalPlan: stagePlan,
+		ScriptOutline:     outline,
+		AgentPromptPolicy: promptPolicy,
+		UnderstandingDossierRef: &model.ArtifactRef{
+			ID:        "artifact_" + doc.ID + "_understanding_dossier",
+			Kind:      "project_understanding_dossier",
+			URI:       "cascade://projects/" + project.ID + "/scripts/" + doc.ID + ".dossier.json",
+			MimeType:  "application/json",
+			Label:     doc.Title + " 项目理解包",
+			SHA256:    dossierHash,
+			CreatedAt: now,
+			Sensitive: false,
+		},
+		UnderstandingDossier: dossier,
 		ApprovalMarkdown: model.ApprovalMarkdownDocument{
 			InlineMarkdown: markdown,
 			Artifact:       doc.MarkdownArtifact,
@@ -204,14 +230,17 @@ func buildExecutableScriptBundle(
 			FileSystemPolicy:     "no_direct_fs_access",
 		},
 		Reproducibility: model.ExecutableScriptReproducibility{
-			PlanHashSHA256:       planHash,
-			ScriptHashSHA256:     scriptHash,
-			MarkdownHashSHA256:   markdownHash,
-			GraphHashSHA256:      doc.Reproducibility.GraphHashSHA256,
-			SourceSnapshotDigest: reportSourceDigest(report),
-			GeneratorVersion:     scriptCodeGeneratorVersion,
-			DeterministicSeed:    doc.Reproducibility.DeterministicSeed,
-			InputFingerprints:    reportInputFingerprints(report),
+			PlanHashSHA256:                 planHash,
+			StagePlanHashSHA256:            stagePlanHash,
+			OutlineHashSHA256:              outlineHash,
+			PromptPolicyHashSHA256:         promptPolicyHash,
+			UnderstandingDossierHashSHA256: dossierHash,
+			MarkdownHashSHA256:             markdownHash,
+			GraphHashSHA256:                doc.Reproducibility.GraphHashSHA256,
+			SourceSnapshotDigest:           reportSourceDigest(report),
+			GeneratorVersion:               browserAgentOutlineGeneratorVersion,
+			DeterministicSeed:              doc.Reproducibility.DeterministicSeed,
+			InputFingerprints:              reportInputFingerprints(report),
 		},
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -228,6 +257,662 @@ func buildExecutableScriptBundle(
 		return nil, ensureValidBundle(bundle)
 	}
 	return bundle, nil
+}
+
+func firstIntelligencePack(values ...*model.ProjectIntelligencePack) *model.ProjectIntelligencePack {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func buildStageApprovalPlan(project *model.ProjectContext, report *model.MultimodalUnderstandingReport, graph *model.DemoWorkflowGraph, doc *model.ExecutionScriptDocument, intelligence *model.ProjectIntelligencePack, now time.Time) *model.StageApprovalPlan {
+	stages := make([]model.StageApprovalStage, 0, len(doc.Steps))
+	for _, step := range doc.Steps {
+		node := scriptPackagerGraphNodeByID(graph, step.NodeID)
+		evidence := evidenceForStage(report, intelligence, step, node)
+		interaction := browserAgentInteractionFromStep(step, evidence)
+		durationMS := step.Timing.DurationMS
+		if durationMS <= 0 {
+			durationMS = 10000
+		}
+		durationMS = maxInt(durationMS, 10000)
+		stages = append(stages, model.StageApprovalStage{
+			ID:             "stage_" + step.ID,
+			Order:          step.Order,
+			NodeID:         step.NodeID,
+			Title:          firstNonEmpty(step.Title, step.NodeID),
+			Objective:      firstNonEmpty(step.BusinessValue, step.ExpectedOutcome, step.Narrative.Voiceover, step.Title),
+			BusinessIntent: firstNonEmpty(step.BusinessValue, step.Narrative.Voiceover, step.ExpectedOutcome),
+			DurationMS:     durationMS,
+			TargetRoute:    routeForScriptStep(step, node),
+			TargetURL:      firstNonEmpty(step.PageTarget.URL, step.Action.Target.URL),
+			ComponentRefs:  uniqueStrings(componentRefsForStage(step, node, intelligence)),
+			APIRefs:        uniqueStrings(apiRefsForStage(node, intelligence)),
+			StyleRefs:      uniqueStrings(styleRefsForStage(node, intelligence)),
+			DataModelRefs:  uniqueStrings(dataModelRefsForStage(node, intelligence)),
+			InputContent:   inputContentForStage(step, evidence),
+			Interaction:    interaction,
+			SuccessState:   firstNonEmpty(step.ExpectedOutcome, validationSummary(step.Validations)),
+			WaitConditions: waitConditionsForStep(step),
+			CapturePoints:  capturePointsForStep(step),
+			RiskNotes:      stageRiskNotes(step, node),
+			EvidenceRefs:   evidence,
+			Confidence:     confidenceForStage(node, intelligence),
+		})
+	}
+	return &model.StageApprovalPlan{
+		ID:                "stage_plan_" + doc.ID,
+		ProjectID:         project.ID,
+		WorkflowGraphID:   graph.ID,
+		SchemaVersion:     model.StageApprovalPlanSchemaVersion,
+		Title:             firstNonEmpty(doc.Title, graph.Name, "演示 Stage 审批计划"),
+		Summary:           firstNonEmpty(doc.Summary, graph.Summary),
+		Runtime:           model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+		Language:          "zh-CN",
+		Stages:            stages,
+		SafetyPolicy:      doc.SafetyPolicy,
+		UncertaintyReport: uncertaintyReportForBundle(project, intelligence, graph),
+		EvidenceRefs:      evidenceForDocument(report, intelligence, doc),
+		Confidence:        confidenceForDossier(report, intelligence),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+}
+
+func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.DemoWorkflowGraph, doc *model.ExecutionScriptDocument, stagePlan *model.StageApprovalPlan, intelligence *model.ProjectIntelligencePack, now time.Time) *model.BrowserAgentScriptOutline {
+	stages := make([]model.BrowserAgentOutlineStage, 0, len(stagePlan.Stages))
+	for _, stage := range stagePlan.Stages {
+		step := scriptStepByNodeID(doc, stage.NodeID)
+		components := []model.BrowserAgentComponentTarget{}
+		if step != nil {
+			components = append(components, componentTargetsForStep(*step, stage, intelligence)...)
+		}
+		interactions := []model.BrowserAgentInteraction{stage.Interaction}
+		stages = append(stages, model.BrowserAgentOutlineStage{
+			ID:             "outline_" + stage.ID,
+			StageID:        stage.ID,
+			Order:          stage.Order,
+			NodeID:         stage.NodeID,
+			Objective:      stage.Objective,
+			Route:          stage.TargetRoute,
+			URL:            stage.TargetURL,
+			Components:     components,
+			Interactions:   interactions,
+			WaitConditions: stage.WaitConditions,
+			CapturePoints:  stage.CapturePoints,
+			SuccessState:   stage.SuccessState,
+			DurationMS:     stage.DurationMS,
+			CanModify:      []string{"selector", "selector_alternatives", "wait_conditions", "retry_strategy", "non_destructive_exploration_path", "capture_timing"},
+			MustPreserve:   []string{"stage_id", "node_id", "objective", "business_intent", "input_semantics", "success_state", "duration_floor", "safety_policy"},
+			EvidenceRefs:   stage.EvidenceRefs,
+			Confidence:     stage.Confidence,
+		})
+	}
+	allowedRoutes := []string{}
+	for _, stage := range stagePlan.Stages {
+		allowedRoutes = append(allowedRoutes, stage.TargetRoute, stage.TargetURL)
+	}
+	allowedOrigins := []string{}
+	for _, domain := range doc.SafetyPolicy.AllowedDomains {
+		if strings.Contains(domain, "://") {
+			allowedOrigins = append(allowedOrigins, baseURL(domain))
+		} else if domain != "" {
+			allowedOrigins = append(allowedOrigins, "https://"+domain)
+		}
+	}
+	if origin := baseURL(firstNonEmpty(project.ProductURL, graph.EntryPoint, doc.RecordingRunSpec.BaseURL)); origin != "" {
+		allowedOrigins = append(allowedOrigins, origin)
+	}
+	return &model.BrowserAgentScriptOutline{
+		ID:              "outline_" + doc.ID,
+		ProjectID:       project.ID,
+		WorkflowGraphID: graph.ID,
+		SchemaVersion:   model.BrowserAgentScriptOutlineSchemaVersion,
+		Runtime:         model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+		BaseURL:         firstNonEmpty(doc.RecordingRunSpec.BaseURL, baseURL(project.ProductURL)),
+		ProductOrigin:   baseURL(firstNonEmpty(project.ProductURL, graph.EntryPoint, doc.RecordingRunSpec.BaseURL)),
+		Summary:         "服务器 browser agent 按此大纲在产品域内自适应探索、修正 selector 与等待策略，并保持用户意图与安全边界不变。",
+		Stages:          stages,
+		AllowedExplorationScope: model.BrowserAgentExplorationScope{
+			AllowedOrigins:        uniqueStrings(allowedOrigins),
+			AllowedRoutes:         uniqueStrings(allowedRoutes),
+			ForbiddenPathPrefixes: uniqueStrings(append(append([]string{}, doc.SafetyPolicy.ForbiddenPages...), defaultControlPlaneForbiddenPaths()...)),
+			ForbiddenKeywords:     []string{"delete", "remove", "pay", "billing", "api key", "token", "删除", "支付", "账单", "密钥"},
+			MaxDepth:              3,
+			AllowNonDestructive:   true,
+		},
+		ForbiddenActions:     []string{"delete", "remove", "payment", "billing_change", "api_key_read", "raw_secret_exfiltration", "full_source_upload"},
+		ServerEditableFields: []string{"script_outline.stages[].components[].selector", "script_outline.stages[].components[].selector_alternatives", "script_outline.stages[].wait_conditions", "script_outline.stages[].interactions[].target", "script_outline.stages[].interactions[].wait_conditions", "script_outline.stages[].capture_points"},
+		ImmutableFields:      []string{"stage_approval_plan.stages[].objective", "stage_approval_plan.stages[].business_intent", "stage_approval_plan.stages[].input_content", "stage_approval_plan.safety_policy", "security_policy", "recording_run_spec.allowed_domains", "recording_run_spec.forbidden_pages"},
+		UncertaintyReport:    uncertaintyReportForBundle(project, intelligence, graph),
+		EvidenceRefs:         evidenceForDocument(nil, intelligence, doc),
+		Confidence:           confidenceForDossier(nil, intelligence),
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+}
+
+func buildBrowserAgentPromptPolicy(project *model.ProjectContext, graph *model.DemoWorkflowGraph, doc *model.ExecutionScriptDocument, outline *model.BrowserAgentScriptOutline, now time.Time) *model.BrowserAgentPromptPolicy {
+	_ = graph
+	_ = outline
+	systemPrompt := strings.Join([]string{
+		"你是 Cascade 云端 Browser Agent，负责把 App 端审批过的 StageApprovalPlan 和 BrowserAgentScriptOutline 转成可执行网页操作。",
+		"你可以在 allowed origins 内做非破坏性探索，修正 selector、等待条件、轻量导航路径和截图时机。",
+		"你不能修改用户需求意图、stage 顺序、stage 目标、填充内容语义、凭据 secret_ref、安全策略、禁止页面、打码规则和 allowed domains。",
+		"如果代码/页面证据不足以确认某个业务动作，必须返回 failure diagnostic 和 repair_request，不得编造 route、组件、API 或成功状态。",
+		"所有凭据只能通过 secret_ref 使用，不得写入日志、trace、截图元数据、错误响应或输出 artifact。",
+	}, "\n")
+	return &model.BrowserAgentPromptPolicy{
+		ID:              "prompt_policy_" + doc.ID,
+		ProjectID:       project.ID,
+		WorkflowGraphID: doc.WorkflowGraphID,
+		SchemaVersion:   model.BrowserAgentPromptPolicySchemaVersion,
+		Runtime:         model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+		SystemPrompt:    systemPrompt,
+		ImmutableFields: []string{
+			"user_intent", "stage_order", "stage_objective", "business_intent", "input_semantics",
+			"success_state", "credential_secret_ref", "allowed_domains", "forbidden_pages",
+			"forbidden_data", "redaction_policy", "human_approval_record",
+		},
+		EditableFields: []string{
+			"selector", "selector_alternatives", "role_name_locator", "wait_conditions",
+			"non_destructive_exploration_path", "retry_strategy", "capture_timing",
+			"diagnostic_detail", "repair_hints",
+		},
+		ForbiddenChanges: []string{
+			"不得新增用户没有审批的业务 stage。",
+			"不得把登录、侧边栏、头像、主题切换等 chrome 控件当成核心业务 stage，除非用户需求明确要求。",
+			"不得访问 /aigc、/.well-known、/v1/execution-packages、/v1/app-installations、debug、result 等控制面路径。",
+			"不得读取或回传 raw secret、cookie、Authorization、本地源码或完整 HTML。",
+		},
+		RepairPolicy: []string{
+			"selector、role/name、等待条件可以由服务器自适应修复。",
+			"填充内容语义、stage 目标、安全边界不可修复为其他含义。",
+			"连续失败后返回结构化 failure_diagnostic，而不是自动扩大权限。",
+		},
+		EvidencePolicy: []string{
+			"每个动作必须追溯到 StageApprovalPlan、ProjectUnderstandingDossier 或页面运行时证据。",
+			"不确定时先继续在产品域内小步探索；仍不确定则停止并回传缺失证据。",
+		},
+		SafetyBoundaries:    append(append([]string{}, doc.SafetyPolicy.ForbiddenPages...), doc.SafetyPolicy.ForbiddenData...),
+		HumanReviewRequired: true,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+}
+
+func buildProjectUnderstandingDossier(project *model.ProjectContext, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, graph *model.DemoWorkflowGraph, intelligence *model.ProjectIntelligencePack, now time.Time) *model.ProjectUnderstandingDossier {
+	dossier := &model.ProjectUnderstandingDossier{
+		ID:                   "dossier_" + graph.ID,
+		ProjectID:            project.ID,
+		WorkflowGraphID:      graph.ID,
+		SchemaVersion:        model.ProjectUnderstandingDossierSchemaVersion,
+		Summary:              firstNonEmpty(project.ProductDescription, graph.Summary),
+		RequirementObjective: firstNonEmpty(project.ProductDescription, graph.Summary),
+		SourceDigestSHA256:   reportSourceDigest(report),
+		InputFingerprints:    reportInputFingerprints(report),
+		EvidenceRefs:         evidenceForDocument(report, intelligence, nil),
+		Confidence:           confidenceForDossier(report, intelligence),
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	if intelligence != nil && intelligence.Architecture != nil {
+		dossier.ArchitectureSummary = intelligence.Architecture.Summary
+		for _, route := range intelligence.Architecture.RouteTree {
+			dossier.RouteEvidence = append(dossier.RouteEvidence, model.DossierEvidence{
+				ID:           route.ID,
+				Kind:         "route",
+				Label:        firstNonEmpty(route.Name, route.Path),
+				Route:        route.Path,
+				Summary:      "需求相关路由候选：" + route.Path,
+				EvidenceRefs: route.EvidenceRefs,
+				Confidence:   route.Confidence,
+			})
+		}
+		for _, module := range intelligence.Architecture.Modules {
+			for _, componentRef := range module.ComponentRefs {
+				dossier.ComponentEvidence = append(dossier.ComponentEvidence, model.DossierEvidence{
+					ID:           "component_" + shortHash(module.ID+componentRef),
+					Kind:         "component_ref",
+					Label:        componentRef,
+					ComponentRef: componentRef,
+					Summary:      module.Responsibility,
+					EvidenceRefs: module.EvidenceRefs,
+					Confidence:   module.Confidence,
+				})
+			}
+			for _, apiRef := range module.APIRefs {
+				dossier.APIEvidence = append(dossier.APIEvidence, model.DossierEvidence{
+					ID:           "api_" + shortHash(module.ID+apiRef),
+					Kind:         "api_ref",
+					Label:        apiRef,
+					Summary:      module.Responsibility,
+					EvidenceRefs: module.EvidenceRefs,
+					Confidence:   module.Confidence,
+				})
+			}
+			for _, modelRef := range module.DataModelRefs {
+				dossier.DataModelEvidence = append(dossier.DataModelEvidence, model.DossierEvidence{
+					ID:           "model_" + shortHash(module.ID+modelRef),
+					Kind:         "data_model_ref",
+					Label:        modelRef,
+					Summary:      module.Responsibility,
+					EvidenceRefs: module.EvidenceRefs,
+					Confidence:   module.Confidence,
+				})
+			}
+		}
+	}
+	if productMap != nil {
+		if dossier.ArchitectureSummary == "" {
+			dossier.ArchitectureSummary = productMap.Summary
+		}
+		for _, route := range productMap.Routes {
+			if route == nil {
+				continue
+			}
+			dossier.RouteEvidence = append(dossier.RouteEvidence, model.DossierEvidence{ID: route.ID, Kind: "route", Label: firstNonEmpty(route.Name, route.Path), Route: route.Path, Summary: "产品地图路由：" + route.Path, EvidenceRefs: route.EvidenceRefs, Confidence: 0.7})
+		}
+		for _, component := range productMap.Components {
+			if component == nil {
+				continue
+			}
+			dossier.ComponentEvidence = append(dossier.ComponentEvidence, model.DossierEvidence{ID: component.ID, Kind: component.Kind, Label: component.Name, ComponentRef: component.ID, FilePathHashSHA256: hashString(component.FilePath), Summary: strings.Join(component.Selectors, ", "), EvidenceRefs: component.EvidenceRefs, Confidence: 0.7})
+			for _, action := range component.Actions {
+				dossier.InteractionEvidence = append(dossier.InteractionEvidence, model.DossierEvidence{ID: firstNonEmpty(action.ID, "interaction_"+shortHash(component.ID+action.Label+action.Selector)), Kind: action.Kind, Label: action.Label, ComponentRef: component.ID, Summary: action.Selector, EvidenceRefs: action.EvidenceRefs, Confidence: 0.7})
+			}
+		}
+		for _, dataModel := range productMap.DataModels {
+			if dataModel == nil {
+				continue
+			}
+			dossier.DataModelEvidence = append(dossier.DataModelEvidence, model.DossierEvidence{ID: dataModel.ID, Kind: dataModel.Kind, Label: dataModel.Name, SourcePathHashSHA256: hashString(dataModel.SourcePath), Summary: dataFieldSummary(dataModel.Fields), EvidenceRefs: dataModel.EvidenceRefs, Confidence: 0.65})
+		}
+	}
+	if report != nil {
+		for _, snapshot := range report.CodeSnapshots {
+			for _, route := range snapshot.Routes {
+				dossier.RouteEvidence = append(dossier.RouteEvidence, model.DossierEvidence{ID: route.ID, Kind: "code_route", Label: firstNonEmpty(route.Name, route.Path), Route: route.Path, SourcePathHashSHA256: route.SourcePathHash, EvidenceRefs: route.EvidenceRefs, Confidence: route.Confidence})
+			}
+			for _, component := range snapshot.Components {
+				dossier.ComponentEvidence = append(dossier.ComponentEvidence, model.DossierEvidence{ID: component.ID, Kind: component.Kind, Label: component.Name, FilePathHashSHA256: component.FilePathHashSHA256, Summary: strings.Join(append(component.SelectorHints, component.ActionLabels...), ", "), EvidenceRefs: component.EvidenceRefs, Confidence: component.Confidence})
+			}
+			for _, endpoint := range snapshot.APIEndpoints {
+				dossier.APIEvidence = append(dossier.APIEvidence, model.DossierEvidence{ID: endpoint.ID, Kind: endpoint.Method, Label: endpoint.Path, FilePathHashSHA256: endpoint.FilePathHashSHA256, Summary: endpoint.Path, EvidenceRefs: endpoint.EvidenceRefs, Confidence: endpoint.Confidence})
+			}
+			for _, dataModel := range snapshot.DataModels {
+				dossier.DataModelEvidence = append(dossier.DataModelEvidence, model.DossierEvidence{ID: dataModel.ID, Kind: dataModel.Kind, Label: dataModel.Name, SourcePathHashSHA256: dataModel.SourcePathHashSHA256, Summary: dataFieldSummary(dataModel.Fields), EvidenceRefs: dataModel.EvidenceRefs, Confidence: dataModel.Confidence})
+			}
+			for _, sensitive := range snapshot.SensitiveFields {
+				dossier.SecurityEvidence = append(dossier.SecurityEvidence, model.DossierEvidence{ID: "sensitive_" + shortHash(sensitive.Name+sensitive.Kind), Kind: sensitive.Kind, Label: sensitive.Name, Summary: sensitive.Reason, EvidenceRefs: sensitive.EvidenceRefs, Confidence: 0.75})
+			}
+		}
+	}
+	dossier.UncertaintyReport = uncertaintyReportForBundle(project, intelligence, graph)
+	return dossier
+}
+
+func outlineAuditText(values ...any) string {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func scriptPackagerGraphNodeByID(graph *model.DemoWorkflowGraph, nodeID string) *model.GraphNode {
+	if graph == nil {
+		return nil
+	}
+	for _, node := range graph.Nodes {
+		if node != nil && node.ID == nodeID {
+			return node
+		}
+	}
+	return nil
+}
+
+func scriptStepByNodeID(doc *model.ExecutionScriptDocument, nodeID string) *model.ScriptStep {
+	if doc == nil {
+		return nil
+	}
+	for i := range doc.Steps {
+		if doc.Steps[i].NodeID == nodeID {
+			return &doc.Steps[i]
+		}
+	}
+	return nil
+}
+
+func browserAgentInteractionFromStep(step model.ScriptStep, evidence []model.EvidenceRef) model.BrowserAgentInteraction {
+	target := step.Action.Target
+	if target.Selector == "" {
+		target.Selector = step.PageTarget.Selector
+	}
+	if target.URL == "" {
+		target.URL = step.PageTarget.URL
+	}
+	if len(target.SelectorAlternatives) == 0 {
+		target.SelectorAlternatives = append(target.SelectorAlternatives, step.PageTarget.SelectorAlternatives...)
+	}
+	return model.BrowserAgentInteraction{
+		Kind:           step.Action.Type,
+		Target:         target,
+		Value:          RedactSensitiveUserText(step.Action.Value),
+		InputRef:       step.Action.InputRef,
+		SecretRef:      step.Action.SecretRef,
+		Parameters:     step.Action.Parameters,
+		WaitUntil:      step.Action.WaitUntil,
+		WaitConditions: waitConditionsForStep(step),
+		NonDestructive: !isBusinessAction(step.Action.Type),
+		SelectorPolicy: "server_may_repair_within_stage_evidence",
+		EvidenceRefs:   evidence,
+	}
+}
+
+func inputContentForStage(step model.ScriptStep, evidence []model.EvidenceRef) []model.StageInputContent {
+	if step.Action.Value == "" && step.Action.InputRef == "" && step.Action.SecretRef == "" {
+		return nil
+	}
+	value := RedactSensitiveUserText(step.Action.Value)
+	if step.Action.SecretRef != "" {
+		value = ""
+	}
+	return []model.StageInputContent{{
+		Kind:         string(step.Action.Type),
+		Label:        firstNonEmpty(step.Action.Target.Label, step.Action.Target.Text, step.Title),
+		Value:        value,
+		InputRef:     step.Action.InputRef,
+		SecretRef:    step.Action.SecretRef,
+		Editable:     false,
+		EvidenceRefs: evidence,
+	}}
+}
+
+func routeForScriptStep(step model.ScriptStep, node *model.GraphNode) string {
+	for _, value := range []string{step.PageTarget.URL, step.Action.Target.URL} {
+		if route := pathFromURL(value); route != "" {
+			return route
+		}
+	}
+	if node != nil {
+		if route := pathFromURL(node.Selector); route != "" {
+			return route
+		}
+		if node.PageRef != "" {
+			return node.PageRef
+		}
+	}
+	return ""
+}
+
+func componentRefsForStage(step model.ScriptStep, node *model.GraphNode, intelligence *model.ProjectIntelligencePack) []string {
+	refs := []string{step.Action.Target.ComponentRef}
+	if node != nil {
+		refs = append(refs, node.FeatureRefs...)
+		if node.ActionSpec != nil {
+			refs = append(refs, node.ActionSpec.Target.ComponentRef)
+		}
+	}
+	if intelligence != nil && intelligence.FeatureTrace != nil {
+		for _, trace := range intelligence.FeatureTrace.Traces {
+			refs = append(refs, trace.MatchedComponents...)
+		}
+	}
+	return refs
+}
+
+func apiRefsForStage(node *model.GraphNode, intelligence *model.ProjectIntelligencePack) []string {
+	refs := []string{}
+	if node != nil {
+		if value, ok := node.Metadata["api_ref"].(string); ok {
+			refs = append(refs, value)
+		}
+	}
+	if intelligence != nil && intelligence.FeatureTrace != nil {
+		for _, trace := range intelligence.FeatureTrace.Traces {
+			refs = append(refs, trace.MatchedAPIRefs...)
+		}
+	}
+	return refs
+}
+
+func styleRefsForStage(node *model.GraphNode, intelligence *model.ProjectIntelligencePack) []string {
+	refs := []string{}
+	if node != nil {
+		if value, ok := node.Metadata["style_ref"].(string); ok {
+			refs = append(refs, value)
+		}
+	}
+	if intelligence != nil && intelligence.Architecture != nil {
+		for _, module := range intelligence.Architecture.Modules {
+			if strings.Contains(strings.ToLower(module.Kind+" "+module.Responsibility+" "+module.Name), "style") {
+				refs = append(refs, module.ID)
+			}
+		}
+	}
+	return refs
+}
+
+func dataModelRefsForStage(node *model.GraphNode, intelligence *model.ProjectIntelligencePack) []string {
+	refs := []string{}
+	if node != nil {
+		if value, ok := node.Metadata["data_model_ref"].(string); ok {
+			refs = append(refs, value)
+		}
+	}
+	if intelligence != nil && intelligence.FeatureTrace != nil {
+		for _, trace := range intelligence.FeatureTrace.Traces {
+			refs = append(refs, trace.MatchedDataModels...)
+		}
+	}
+	return refs
+}
+
+func componentTargetsForStep(step model.ScriptStep, stage model.StageApprovalStage, intelligence *model.ProjectIntelligencePack) []model.BrowserAgentComponentTarget {
+	target := step.Action.Target
+	if target.Selector == "" {
+		target.Selector = step.PageTarget.Selector
+	}
+	components := []model.BrowserAgentComponentTarget{{
+		ComponentRef:         firstNonEmpty(target.ComponentRef, firstString(stage.ComponentRefs, "")),
+		RouteRef:             stage.TargetRoute,
+		Role:                 target.Role,
+		Name:                 firstNonEmpty(target.Label, target.Text),
+		Text:                 target.Text,
+		Label:                target.Label,
+		TestID:               target.TestID,
+		Selector:             target.Selector,
+		SelectorAlternatives: append(append([]model.SelectorCandidate{}, target.SelectorAlternatives...), step.PageTarget.SelectorAlternatives...),
+		EvidenceRefs:         mergeStageEvidenceRefs(stage.EvidenceRefs, target.EvidenceRefs),
+		Confidence:           stage.Confidence,
+	}}
+	if intelligence != nil && intelligence.VerifiedInteraction != nil {
+		for _, action := range intelligence.VerifiedInteraction.Actions {
+			if action.IntentGoalID == "" && action.ID == "" {
+				continue
+			}
+			if action.ComponentRef == "" && action.Selector == "" && len(action.Alternatives) == 0 {
+				continue
+			}
+			components = append(components, model.BrowserAgentComponentTarget{
+				ComponentRef:         action.ComponentRef,
+				RouteRef:             action.RouteRef,
+				Label:                action.Label,
+				Selector:             action.Selector,
+				SelectorAlternatives: action.Alternatives,
+				EvidenceRefs:         action.EvidenceRefs,
+				Confidence:           stage.Confidence,
+			})
+		}
+	}
+	return components
+}
+
+func waitConditionsForStep(step model.ScriptStep) []string {
+	conditions := []string{}
+	if step.Action.WaitUntil != "" {
+		conditions = append(conditions, "load_state:"+step.Action.WaitUntil)
+	}
+	for _, precondition := range step.Action.Preconditions {
+		conditions = append(conditions, firstNonEmpty(precondition.Kind, precondition.Operator))
+	}
+	for _, validation := range step.Validations {
+		conditions = append(conditions, firstNonEmpty(validation.Assertion, validation.Kind))
+	}
+	if step.ExpectedOutcome != "" {
+		conditions = append(conditions, "success:"+step.ExpectedOutcome)
+	}
+	conditions = append(conditions, "wait_after_entry_at_least_1000ms", "wait_for_render_stable_before_capture")
+	return uniqueStrings(conditions)
+}
+
+func capturePointsForStep(step model.ScriptStep) []string {
+	points := []string{}
+	if step.Capture.Video {
+		points = append(points, "record_stage_video")
+	}
+	if step.Capture.Screenshot {
+		points = append(points, "capture_stage_screenshot_after_render_stable")
+	}
+	if step.Capture.FocusSelector != "" {
+		points = append(points, "focus:"+step.Capture.FocusSelector)
+	}
+	if step.Capture.Zoom {
+		points = append(points, "zoom_primary_interaction")
+	}
+	if step.Capture.Callout {
+		points = append(points, "mark_callout")
+	}
+	return uniqueStrings(points)
+}
+
+func stageRiskNotes(step model.ScriptStep, node *model.GraphNode) []string {
+	notes := []string{}
+	if step.Action.SecretRef != "" {
+		notes = append(notes, "凭据只允许通过 secret_ref 注入。")
+	}
+	if selectorLooksGeneric(step.Action.Target.Selector) || selectorLooksGeneric(step.PageTarget.Selector) {
+		notes = append(notes, "当前 selector 偏泛化，服务器只能在同 stage 证据范围内修复。")
+	}
+	if node != nil && node.Sensitive {
+		notes = append(notes, "该节点标记为 sensitive，截图/trace 必须打码。")
+	}
+	return notes
+}
+
+func evidenceForStage(report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack, step model.ScriptStep, node *model.GraphNode) []model.EvidenceRef {
+	refs := []model.EvidenceRef{}
+	refs = append(refs, step.EvidenceRefs...)
+	if node != nil {
+		refs = append(refs, node.EvidenceRefs...)
+	}
+	if len(refs) == 0 {
+		refs = append(refs, evidenceForDocument(report, intelligence, nil)...)
+	}
+	if len(refs) == 0 {
+		refs = append(refs, model.EvidenceRef{ID: "ev_stage_" + shortHash(step.NodeID+step.Title), Kind: model.EvidenceKindRequirementDoc, Summary: "Stage 来自用户需求和本地结构化计划。", Confidence: 0.55})
+	}
+	return uniqueEvidenceRefs(refs)
+}
+
+func evidenceForDocument(report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack, doc *model.ExecutionScriptDocument) []model.EvidenceRef {
+	refs := []model.EvidenceRef{}
+	if report != nil {
+		refs = append(refs, report.EvidenceRefs...)
+		if report.RequirementBrief != nil {
+			refs = append(refs, report.RequirementBrief.EvidenceRefs...)
+		}
+		for _, snapshot := range report.CodeSnapshots {
+			refs = append(refs, snapshot.EvidenceRefs...)
+		}
+		for _, snapshot := range report.PageSnapshots {
+			refs = append(refs, snapshot.EvidenceRefs...)
+		}
+	}
+	if intelligence != nil {
+		refs = append(refs, intelligence.EvidenceRefs...)
+	}
+	if doc != nil {
+		refs = append(refs, doc.EvidenceRefs...)
+	}
+	return uniqueEvidenceRefs(refs)
+}
+
+func mergeStageEvidenceRefs(groups ...[]model.EvidenceRef) []model.EvidenceRef {
+	refs := []model.EvidenceRef{}
+	for _, group := range groups {
+		refs = append(refs, group...)
+	}
+	return uniqueEvidenceRefs(refs)
+}
+
+func uncertaintyReportForBundle(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, graph *model.DemoWorkflowGraph) []model.StageUncertainty {
+	items := []model.StageUncertainty{}
+	if intelligence != nil && intelligence.MissingEvidenceReport != nil {
+		for _, item := range intelligence.MissingEvidenceReport.Items {
+			items = append(items, model.StageUncertainty{
+				ID:              item.ID,
+				Kind:            item.MissingKind,
+				Summary:         item.Message,
+				Blocking:        item.Severity == "blocking" || intelligence.MissingEvidenceReport.Blocking,
+				SuggestedAction: item.SuggestedAction,
+				EvidenceRefs:    item.EvidenceRefs,
+			})
+		}
+	}
+	if graph == nil || len(graph.Nodes) == 0 {
+		items = append(items, model.StageUncertainty{ID: "uncertain_graph_empty_" + shortHash(project.ID), Kind: "workflow_graph", Summary: "执行图为空，无法生成 stage 大纲。", Blocking: true})
+	}
+	return items
+}
+
+func confidenceForStage(node *model.GraphNode, intelligence *model.ProjectIntelligencePack) float64 {
+	confidence := 0.72
+	if node != nil && nodeVerifiedForBusinessAction(node) {
+		confidence = 0.86
+	}
+	if intelligence != nil && intelligence.Confidence > 0 {
+		confidence = (confidence + intelligence.Confidence) / 2
+	}
+	return confidence
+}
+
+func confidenceForDossier(report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) float64 {
+	values := []float64{}
+	if report != nil && report.Confidence > 0 {
+		values = append(values, report.Confidence)
+	}
+	if intelligence != nil && intelligence.Confidence > 0 {
+		values = append(values, intelligence.Confidence)
+	}
+	if len(values) == 0 {
+		return 0.72
+	}
+	total := 0.0
+	for _, value := range values {
+		total += value
+	}
+	return total / float64(len(values))
+}
+
+func validationSummary(validations []model.ValidationSpec) string {
+	parts := []string{}
+	for _, validation := range validations {
+		parts = append(parts, firstNonEmpty(validation.Assertion, validation.Kind))
+	}
+	return strings.Join(uniqueStrings(parts), "；")
+}
+
+func dataFieldSummary(fields []model.DataField) string {
+	names := make([]string, 0, len(fields))
+	for _, field := range fields {
+		names = append(names, field.Name)
+	}
+	return strings.Join(uniqueStrings(names), ", ")
 }
 
 func auditScriptIntentCoverage(project *model.ProjectContext, doc *model.ExecutionScriptDocument, source string) []string {

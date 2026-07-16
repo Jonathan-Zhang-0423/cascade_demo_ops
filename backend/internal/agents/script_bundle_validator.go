@@ -24,18 +24,22 @@ func (v *ScriptBundleValidator) ValidateBundle(bundle *model.ExecutableRecording
 		}
 	}
 	source := bundle.PlaywrightScript.InlineSource
-	if source == "" {
-		findings = append(findings, scriptValidationFinding("script_missing", model.FindingSeverityBlocking, "可执行 TypeScript 脚本为空或未内联。"))
-	}
 	if bundle.PlanJSON == nil {
 		findings = append(findings, scriptValidationFinding("plan_missing", model.FindingSeverityBlocking, "脚本包缺少 JSON 执行计划。"))
 	}
 	findings = append(findings, validateManifest(bundle)...)
-	findings = append(findings, validateForbiddenScriptTokens(source, bundle.SecurityPolicy)...)
-	findings = append(findings, validateAllowedContextUsage(source, bundle.SecurityPolicy)...)
-	findings = append(findings, validateRawSecretPatterns(source)...)
+	if bundle.ScriptManifest.Runtime == model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		findings = append(findings, validateBrowserAgentOutlineContract(bundle)...)
+	} else {
+		if source == "" {
+			findings = append(findings, scriptValidationFinding("script_missing", model.FindingSeverityBlocking, "可执行 TypeScript 脚本为空或未内联。"))
+		}
+		findings = append(findings, validateForbiddenScriptTokens(source, bundle.SecurityPolicy)...)
+		findings = append(findings, validateAllowedContextUsage(source, bundle.SecurityPolicy)...)
+		findings = append(findings, validateRawSecretPatterns(source)...)
+		findings = append(findings, validateScriptDomainPolicy(bundle, source)...)
+	}
 	findings = append(findings, validatePlanScriptBinding(bundle, source)...)
-	findings = append(findings, validateScriptDomainPolicy(bundle, source)...)
 	valid := true
 	for _, finding := range findings {
 		if finding.Severity == model.FindingSeverityBlocking {
@@ -53,18 +57,134 @@ func validateManifest(bundle *model.ExecutableRecordingScriptBundle) []model.Age
 		findings = append(findings, scriptValidationFinding("entry_function_mismatch", model.FindingSeverityBlocking, "脚本入口函数必须是 runCascadeRecording。"))
 	}
 	if manifest.Language != "typescript" {
-		findings = append(findings, scriptValidationFinding("language_mismatch", model.FindingSeverityBlocking, "脚本语言必须是 TypeScript。"))
+		if manifest.Runtime == model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+			if manifest.Language != "browser-agent-outline" && manifest.Language != "json" {
+				findings = append(findings, scriptValidationFinding("language_mismatch", model.FindingSeverityBlocking, "browser agent 大纲运行时的 language 必须是 browser-agent-outline 或 json。"))
+			}
+		} else {
+			findings = append(findings, scriptValidationFinding("language_mismatch", model.FindingSeverityBlocking, "脚本语言必须是 TypeScript。"))
+		}
 	}
-	if manifest.Runtime != "playwright-restricted-sandbox" {
-		findings = append(findings, scriptValidationFinding("runtime_mismatch", model.FindingSeverityBlocking, "脚本运行时必须是受限 Playwright 沙箱。"))
+	switch manifest.Runtime {
+	case model.ExecutableScriptRuntimePlaywrightRestrictedSandbox, model.ExecutableScriptRuntimeBrowserAgentOutlineV1:
+	default:
+		findings = append(findings, scriptValidationFinding("runtime_mismatch", model.FindingSeverityBlocking, "脚本运行时必须是受限 Playwright 沙箱或 browser agent 大纲模式。"))
 	}
-	if !strings.Contains(bundle.PlaywrightScript.InlineSource, "runCascadeRecording(ctx: CascadeRecordingContext): Promise<CascadeRecordingResult>") {
+	if manifest.Runtime == model.ExecutableScriptRuntimePlaywrightRestrictedSandbox && !strings.Contains(bundle.PlaywrightScript.InlineSource, "runCascadeRecording(ctx: CascadeRecordingContext): Promise<CascadeRecordingResult>") {
 		findings = append(findings, scriptValidationFinding("entry_signature_missing", model.FindingSeverityBlocking, "脚本缺少固定导出函数签名。"))
 	}
 	if len(manifest.DependencyAllowlist) > 0 {
 		findings = append(findings, scriptValidationFinding("dependency_allowlist_not_empty", model.FindingSeverityBlocking, "v1 可执行脚本不允许声明外部依赖。"))
 	}
 	return findings
+}
+
+func validateBrowserAgentOutlineContract(bundle *model.ExecutableRecordingScriptBundle) []model.AgentFinding {
+	findings := []model.AgentFinding{}
+	if bundle.StageApprovalPlan == nil {
+		findings = append(findings, scriptValidationFinding("stage_plan_missing", model.FindingSeverityBlocking, "browser agent 大纲模式缺少 stage_approval_plan。"))
+	} else {
+		if bundle.StageApprovalPlan.SchemaVersion != model.StageApprovalPlanSchemaVersion {
+			findings = append(findings, scriptValidationFinding("stage_plan_schema_mismatch", model.FindingSeverityBlocking, "stage_approval_plan schema_version 不正确。"))
+		}
+		if len(bundle.StageApprovalPlan.Stages) == 0 {
+			findings = append(findings, scriptValidationFinding("stage_plan_empty", model.FindingSeverityBlocking, "stage_approval_plan 没有可审批 stage。"))
+		}
+		for _, stage := range bundle.StageApprovalPlan.Stages {
+			if strings.TrimSpace(stage.Objective) == "" {
+				findings = append(findings, scriptValidationFinding("stage_objective_missing_"+stage.NodeID, model.FindingSeverityBlocking, "stage 缺少业务目标："+stage.NodeID))
+			}
+			if stage.DurationMS > 0 && stage.DurationMS < 10000 {
+				findings = append(findings, scriptValidationFinding("stage_duration_short_"+stage.NodeID, model.FindingSeverityBlocking, "stage 时长低于 10 秒："+stage.NodeID))
+			}
+			if !outlineStageApprovalHasEvidence(stage) {
+				findings = append(findings, scriptValidationFinding("stage_evidence_missing_"+stage.NodeID, model.FindingSeverityBlocking, "stage 缺少 route/component/API/selector 证据链："+stage.NodeID))
+			}
+		}
+		for _, uncertainty := range bundle.StageApprovalPlan.UncertaintyReport {
+			if uncertainty.Blocking {
+				findings = append(findings, scriptValidationFinding("stage_uncertainty_blocking_"+uncertainty.ID, model.FindingSeverityBlocking, "stage plan 存在阻塞不确定项："+uncertainty.Summary))
+			}
+		}
+	}
+	if bundle.ScriptOutline == nil {
+		findings = append(findings, scriptValidationFinding("outline_missing", model.FindingSeverityBlocking, "browser agent 大纲模式缺少 script_outline。"))
+	} else {
+		if bundle.ScriptOutline.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+			findings = append(findings, scriptValidationFinding("outline_runtime_mismatch", model.FindingSeverityBlocking, "script_outline runtime 必须是 browser-agent-outline-v1。"))
+		}
+		if len(bundle.ScriptOutline.Stages) == 0 {
+			findings = append(findings, scriptValidationFinding("outline_empty", model.FindingSeverityBlocking, "script_outline 没有 stage 大纲。"))
+		}
+		for _, stage := range bundle.ScriptOutline.Stages {
+			if strings.TrimSpace(stage.Objective) == "" {
+				findings = append(findings, scriptValidationFinding("outline_stage_objective_missing_"+stage.NodeID, model.FindingSeverityBlocking, "script_outline stage 缺少目标："+stage.NodeID))
+			}
+			if len(stage.Interactions) == 0 {
+				findings = append(findings, scriptValidationFinding("outline_stage_interactions_missing_"+stage.NodeID, model.FindingSeverityBlocking, "script_outline stage 缺少交互大纲："+stage.NodeID))
+			}
+			if len(stage.EvidenceRefs) == 0 && len(stage.Components) == 0 {
+				findings = append(findings, scriptValidationFinding("outline_stage_evidence_missing_"+stage.NodeID, model.FindingSeverityBlocking, "script_outline stage 缺少证据："+stage.NodeID))
+			}
+		}
+		for _, uncertainty := range bundle.ScriptOutline.UncertaintyReport {
+			if uncertainty.Blocking {
+				findings = append(findings, scriptValidationFinding("outline_uncertainty_blocking_"+uncertainty.ID, model.FindingSeverityBlocking, "script_outline 存在阻塞不确定项："+uncertainty.Summary))
+			}
+		}
+	}
+	if bundle.AgentPromptPolicy == nil {
+		findings = append(findings, scriptValidationFinding("prompt_policy_missing", model.FindingSeverityBlocking, "browser agent 大纲模式缺少 agent_prompt_policy。"))
+	} else {
+		if strings.TrimSpace(bundle.AgentPromptPolicy.SystemPrompt) == "" {
+			findings = append(findings, scriptValidationFinding("prompt_policy_system_missing", model.FindingSeverityBlocking, "agent_prompt_policy 缺少 system_prompt。"))
+		}
+		if len(bundle.AgentPromptPolicy.ImmutableFields) == 0 {
+			findings = append(findings, scriptValidationFinding("prompt_policy_immutable_missing", model.FindingSeverityBlocking, "agent_prompt_policy 缺少不可修改字段声明。"))
+		}
+		if len(bundle.AgentPromptPolicy.EditableFields) == 0 {
+			findings = append(findings, scriptValidationFinding("prompt_policy_editable_missing", model.FindingSeverityBlocking, "agent_prompt_policy 缺少可修改字段声明。"))
+		}
+	}
+	if bundle.StageApprovalPlan != nil {
+		if hash, err := model.DigestCanonicalJSON(bundle.StageApprovalPlan); err != nil {
+			findings = append(findings, scriptValidationFinding("stage_plan_hash_error", model.FindingSeverityBlocking, err.Error()))
+		} else if bundle.Reproducibility.StagePlanHashSHA256 != "" && bundle.Reproducibility.StagePlanHashSHA256 != hash {
+			findings = append(findings, scriptValidationFinding("stage_plan_hash_mismatch", model.FindingSeverityBlocking, "stage_approval_plan hash 与当前内容不一致。"))
+		}
+	}
+	if bundle.ScriptOutline != nil {
+		if hash, err := model.DigestCanonicalJSON(bundle.ScriptOutline); err != nil {
+			findings = append(findings, scriptValidationFinding("outline_hash_error", model.FindingSeverityBlocking, err.Error()))
+		} else if bundle.Reproducibility.OutlineHashSHA256 != "" && bundle.Reproducibility.OutlineHashSHA256 != hash {
+			findings = append(findings, scriptValidationFinding("outline_hash_mismatch", model.FindingSeverityBlocking, "script_outline hash 与当前内容不一致。"))
+		}
+	}
+	if bundle.AgentPromptPolicy != nil {
+		if hash, err := model.DigestCanonicalJSON(bundle.AgentPromptPolicy); err != nil {
+			findings = append(findings, scriptValidationFinding("prompt_policy_hash_error", model.FindingSeverityBlocking, err.Error()))
+		} else if bundle.Reproducibility.PromptPolicyHashSHA256 != "" && bundle.Reproducibility.PromptPolicyHashSHA256 != hash {
+			findings = append(findings, scriptValidationFinding("prompt_policy_hash_mismatch", model.FindingSeverityBlocking, "agent_prompt_policy hash 与当前内容不一致。"))
+		}
+	}
+	if bundle.UnderstandingDossier != nil {
+		if hash, err := model.DigestCanonicalJSON(bundle.UnderstandingDossier); err != nil {
+			findings = append(findings, scriptValidationFinding("dossier_hash_error", model.FindingSeverityBlocking, err.Error()))
+		} else if bundle.Reproducibility.UnderstandingDossierHashSHA256 != "" && bundle.Reproducibility.UnderstandingDossierHashSHA256 != hash {
+			findings = append(findings, scriptValidationFinding("dossier_hash_mismatch", model.FindingSeverityBlocking, "project_understanding_dossier hash 与当前内容不一致。"))
+		}
+	}
+	return findings
+}
+
+func outlineStageApprovalHasEvidence(stage model.StageApprovalStage) bool {
+	return len(stage.EvidenceRefs) > 0 ||
+		len(stage.ComponentRefs) > 0 ||
+		len(stage.APIRefs) > 0 ||
+		len(stage.StyleRefs) > 0 ||
+		len(stage.DataModelRefs) > 0 ||
+		len(stage.Interaction.EvidenceRefs) > 0 ||
+		len(stage.Interaction.Target.EvidenceRefs) > 0
 }
 
 func validateForbiddenScriptTokens(source string, policy model.ExecutableScriptSecurityPolicy) []model.AgentFinding {
@@ -188,7 +308,7 @@ func validatePlanScriptBinding(bundle *model.ExecutableRecordingScriptBundle, so
 			findings = append(findings, scriptValidationFinding("step_node_duplicate_"+step.NodeID, model.FindingSeverityBlocking, "JSON 执行计划存在重复 node_id："+step.NodeID))
 		}
 		seen[step.NodeID] = true
-		if !strings.Contains(source, `"`+step.NodeID+`"`) {
+		if bundle.ScriptManifest.Runtime == model.ExecutableScriptRuntimePlaywrightRestrictedSandbox && !strings.Contains(source, `"`+step.NodeID+`"`) {
 			findings = append(findings, scriptValidationFinding("step_node_missing_in_script_"+step.NodeID, model.FindingSeverityBlocking, "TypeScript 脚本缺少对应 graph node："+step.NodeID))
 		}
 	}

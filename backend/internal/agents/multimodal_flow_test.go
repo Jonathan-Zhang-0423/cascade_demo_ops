@@ -78,8 +78,11 @@ func TestMultimodalFlowPackagesReviewableScriptDocument(t *testing.T) {
 	if state.ExecutableScriptBundle.Validation == nil || !state.ExecutableScriptBundle.Validation.Valid {
 		t.Fatalf("expected valid executable script bundle: %+v", state.ExecutableScriptBundle.Validation)
 	}
-	if state.ExecutableScriptBundle.PlaywrightScript.InlineSource == "" || !strings.Contains(state.ExecutableScriptBundle.PlaywrightScript.InlineSource, "runCascadeRecording") {
-		t.Fatalf("expected executable TypeScript script: %+v", state.ExecutableScriptBundle.PlaywrightScript)
+	if state.ExecutableScriptBundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 ||
+		state.ExecutableScriptBundle.StageApprovalPlan == nil ||
+		state.ExecutableScriptBundle.ScriptOutline == nil ||
+		state.ExecutableScriptBundle.AgentPromptPolicy == nil {
+		t.Fatalf("expected browser agent outline bundle: %+v", state.ExecutableScriptBundle)
 	}
 	scriptJSON, err := json.Marshal(state.ScriptDocument)
 	if err != nil {

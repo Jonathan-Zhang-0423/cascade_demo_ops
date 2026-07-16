@@ -145,19 +145,19 @@ func TestIntentFallbackGeneratesTetrisBuildWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, graphQualityReport(project), graphQualityProductMap(), graph)
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, graphQualityReport(project), graphQualityProductMap(), graph, intelligence)
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	for _, want := range []string{"新建项目", "俄罗斯方块", "构建模式", "启动 agent 实际构建", "waitForTimeout(60000)"} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("expected generated script to contain %q:\n%s", want, source)
+	outlineText := outlineAuditText(pkg.ExecutableBundle.StageApprovalPlan, pkg.ExecutableBundle.ScriptOutline)
+	for _, want := range []string{"新建项目", "俄罗斯方块", "构建模式", "启动 agent 实际构建", "60000"} {
+		if !strings.Contains(outlineText, want) {
+			t.Fatalf("expected generated outline to contain %q:\n%s", want, outlineText)
 		}
 	}
 	for _, forbidden := range []string{"user-email-display", "user-name-display", `fill(selector_intent_project_name, "",`} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf("generated script must not contain %q:\n%s", forbidden, source)
+		if strings.Contains(outlineText, forbidden) {
+			t.Fatalf("generated outline must not contain %q:\n%s", forbidden, outlineText)
 		}
 	}
 }
