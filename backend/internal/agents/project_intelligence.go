@@ -160,13 +160,14 @@ func (t projectUnderstandingToolFunc) Execute(ctx context.Context, state *Projec
 
 func defaultProjectUnderstandingTools() []ProjectUnderstandingTool {
 	return []ProjectUnderstandingTool{
+		projectUnderstandingToolFunc{name: "IntentParseTool", run: runDemoIntentTool},
 		projectUnderstandingToolFunc{name: "RepoIndexTool", run: runRepoIndexTool},
-		projectUnderstandingToolFunc{name: "RouteMapTool", run: runRouteMapTool},
-		projectUnderstandingToolFunc{name: "ComponentMapTool", run: runComponentMapTool},
-		projectUnderstandingToolFunc{name: "APIContractTool", run: runAPIContractTool},
-		projectUnderstandingToolFunc{name: "DataModelTool", run: runDataModelTool},
+		projectUnderstandingToolFunc{name: "RouteDrilldownTool", run: runRouteMapTool},
+		projectUnderstandingToolFunc{name: "ComponentDrilldownTool", run: runComponentMapTool},
+		projectUnderstandingToolFunc{name: "StyleDrilldownTool", run: runStyleDrilldownTool},
+		projectUnderstandingToolFunc{name: "APIBackendDrilldownTool", run: runAPIContractTool},
+		projectUnderstandingToolFunc{name: "DataModelDrilldownTool", run: runDataModelTool},
 		projectUnderstandingToolFunc{name: "SensitiveSurfaceTool", run: runSensitiveSurfaceTool},
-		projectUnderstandingToolFunc{name: "DemoIntentTool", run: runDemoIntentTool},
 		projectUnderstandingToolFunc{name: "FeatureTraceTool", run: runFeatureTraceTool},
 		projectUnderstandingToolFunc{name: "ScriptFeasibilityTool", run: runScriptFeasibilityTool},
 	}
@@ -208,6 +209,25 @@ func runComponentMapTool(_ context.Context, state *ProjectUnderstandingState) (T
 		ChangedFields: []string{"interaction_surfaces"},
 		Confidence:    0.72,
 		EvidenceRefs:  state.Pack.EvidenceRefs,
+	}, nil
+}
+
+func runStyleDrilldownTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	styleRefs := []model.EvidenceRef{}
+	styleFiles := 0
+	for _, snapshot := range state.CodeSnapshots {
+		for _, digest := range snapshot.PathDigests {
+			if digest.Kind == "style" {
+				styleFiles++
+			}
+		}
+		styleRefs = append(styleRefs, snapshot.EvidenceRefs...)
+	}
+	return ToolPatch{
+		OutputSummary: fmt.Sprintf("需求相关样式/视觉定义文件摘要 %d 个，仅保存 hash 与结构证据。", styleFiles),
+		ChangedFields: []string{"architecture.modules.style_refs"},
+		Confidence:    0.62,
+		EvidenceRefs:  uniqueEvidenceRefs(styleRefs),
 	}, nil
 }
 
@@ -258,9 +278,9 @@ func runDemoIntentTool(_ context.Context, state *ProjectUnderstandingState) (Too
 
 func runFeatureTraceTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
 	trace := featureTraceFromState(state)
+	state.Pack.FeatureTrace = trace
 	capabilities := featureCapabilitiesFromState(state)
 	state.Pack.FeatureCapabilities = capabilities
-	state.Pack.FeatureTrace = trace
 	state.Pack.EvidenceRefs = append(state.Pack.EvidenceRefs, trace.EvidenceRefs...)
 	return ToolPatch{
 		OutputSummary: fmt.Sprintf("按需求追踪功能能力 %d 个，目标证据链 %d 条。", len(capabilities), len(trace.Traces)),
@@ -453,7 +473,7 @@ func routeTreeFromSnapshots(snapshots []model.CodeUnderstandingSnapshot, pages [
 	for _, snapshot := range snapshots {
 		for _, route := range snapshot.Routes {
 			path := strings.TrimSpace(route.Path)
-			if path == "" || seen[path] {
+			if path == "" || seen[path] || !browserRouteAllowedForCode(path) {
 				continue
 			}
 			seen[path] = true
@@ -471,7 +491,7 @@ func routeTreeFromSnapshots(snapshots []model.CodeUnderstandingSnapshot, pages [
 	}
 	for _, page := range pages {
 		path := pathFromURL(page.URL)
-		if path == "" || seen[path] {
+		if path == "" || seen[path] || !browserRouteAllowedForCode(path) {
 			continue
 		}
 		seen[path] = true
@@ -632,7 +652,7 @@ func apiContractsFromSnapshots(snapshots []model.CodeUnderstandingSnapshot) []mo
 		sensitive := sensitiveFieldNames(snapshot.SensitiveFields)
 		for _, endpoint := range snapshot.APIEndpoints {
 			path := strings.TrimSpace(endpoint.Path)
-			if path == "" {
+			if path == "" || !apiPathAllowedForCode(path) {
 				continue
 			}
 			contracts = append(contracts, model.APIContractSummary{
@@ -1010,6 +1030,7 @@ func featureCapabilitiesFromState(state *ProjectUnderstandingState) []model.Feat
 	if brief != nil {
 		objective = firstNonEmpty(brief.Objective, objective)
 	}
+	traceRoutes, traceComponents, traceAPIs, traceModels, traceActions, traceEvidence := featureTraceSupport(state.Pack.FeatureTrace)
 	capabilities = append(capabilities, model.FeatureCapability{
 		ID:                   "capability_primary_value",
 		Name:                 firstNonEmpty(scenarioFromBrief(brief), "核心产品价值"),
@@ -1017,22 +1038,25 @@ func featureCapabilitiesFromState(state *ProjectUnderstandingState) []model.Feat
 		UserValue:            objective,
 		BusinessValue:        firstNonEmpty(primaryOutcomeFromBrief(brief), objective),
 		Priority:             "hero",
-		SupportingRouteRefs:  routeIDs(state.Pack.Architecture.RouteTree, 6),
-		SupportingPageRefs:   surfaceIDs(state.Pack.InteractionSurfaces, 4),
-		SupportingComponents: moduleComponentRefs(state.Pack.Architecture.Modules, 10),
-		SupportingAPIs:       apiIDs(state.Pack.APIContracts, 8),
-		SupportingDataModels: dataModelIDs(state.Pack.DataModels, 8),
-		KeyActions:           keyActionsFromBriefAndSurfaces(brief, state.Pack.InteractionSurfaces),
+		SupportingRouteRefs:  limitStrings(traceRoutes, 8),
+		SupportingPageRefs:   surfaceIDs(intentRelevantSurfaces(state.Pack.InteractionSurfaces, traceActions), 4),
+		SupportingComponents: limitStrings(traceComponents, 10),
+		SupportingAPIs:       limitStrings(traceAPIs, 8),
+		SupportingDataModels: limitStrings(traceModels, 8),
+		KeyActions:           keyActionsFromTraceOrBrief(brief, traceActions, state.Pack.InteractionSurfaces),
 		Risks:                riskNotesFromSafety(state.Pack.SafetyReport),
-		EvidenceRefs:         state.Pack.EvidenceRefs,
+		EvidenceRefs:         uniqueEvidenceRefs(append(traceEvidence, state.Pack.EvidenceRefs...)),
 		DemoValueScore:       0.9,
-		Confidence:           0.78,
+		Confidence:           maxFloat(0.68, featureTraceConfidenceValue(state.Pack.FeatureTrace)),
 	})
 	for _, module := range state.Pack.Architecture.Modules {
 		if len(capabilities) >= 8 {
 			break
 		}
 		if len(module.ComponentRefs) == 0 && len(module.RouteRefs) == 0 {
+			continue
+		}
+		if !moduleSupportsIntent(module, state.Pack.FeatureTrace, state) {
 			continue
 		}
 		capabilities = append(capabilities, model.FeatureCapability{
@@ -1053,6 +1077,106 @@ func featureCapabilitiesFromState(state *ProjectUnderstandingState) []model.Feat
 		})
 	}
 	return capabilities
+}
+
+func featureTraceSupport(trace *model.FeatureTraceResult) ([]string, []string, []string, []string, []model.InteractionProbe, []model.EvidenceRef) {
+	routeRefs := []string{}
+	componentRefs := []string{}
+	apiRefs := []string{}
+	modelRefs := []string{}
+	actions := []model.InteractionProbe{}
+	evidence := []model.EvidenceRef{}
+	if trace == nil {
+		return routeRefs, componentRefs, apiRefs, modelRefs, actions, evidence
+	}
+	for _, item := range trace.Traces {
+		routeRefs = append(routeRefs, item.MatchedRouteRefs...)
+		componentRefs = append(componentRefs, item.MatchedComponents...)
+		apiRefs = append(apiRefs, item.MatchedAPIRefs...)
+		modelRefs = append(modelRefs, item.MatchedDataModels...)
+		evidence = append(evidence, item.EvidenceRefs...)
+		for _, probe := range item.SelectorEvidence {
+			if probe.IsChrome || selectorLooksReadOnlySurface(probe.Selector) || selectorLooksGeneric(probe.Selector) {
+				continue
+			}
+			actions = append(actions, probe)
+			evidence = append(evidence, probe.EvidenceRefs...)
+		}
+	}
+	return uniqueStrings(routeRefs), uniqueStrings(componentRefs), uniqueStrings(apiRefs), uniqueStrings(modelRefs), dedupeInteractionProbes(actions), uniqueEvidenceRefs(evidence)
+}
+
+func intentRelevantSurfaces(surfaces []model.InteractionSurface, actions []model.InteractionProbe) []model.InteractionSurface {
+	if len(actions) == 0 {
+		return nil
+	}
+	selectors := map[string]bool{}
+	for _, action := range actions {
+		if action.Selector != "" {
+			selectors[normalizeSelector(action.Selector)] = true
+		}
+	}
+	out := []model.InteractionSurface{}
+	for _, surface := range surfaces {
+		for _, action := range surface.Actions {
+			if selectors[normalizeSelector(action.Selector)] {
+				out = append(out, surface)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func keyActionsFromTraceOrBrief(brief *model.RequirementBrief, actions []model.InteractionProbe, surfaces []model.InteractionSurface) []string {
+	values := []string{}
+	for _, action := range actions {
+		if action.IsBusiness && !action.IsChrome {
+			values = append(values, firstNonEmpty(action.Label, action.Kind, labelFromSelector(action.Selector)))
+		}
+	}
+	if len(values) == 0 && brief != nil {
+		values = append(values, brief.MustShow...)
+	}
+	if len(values) == 0 {
+		values = append(values, keyActionsFromBriefAndSurfaces(brief, surfaces)...)
+	}
+	return limitStrings(uniqueStrings(values), 12)
+}
+
+func moduleSupportsIntent(module model.ProjectModule, trace *model.FeatureTraceResult, state *ProjectUnderstandingState) bool {
+	if trace != nil {
+		for _, item := range trace.Traces {
+			if intersectsStrings(module.RouteRefs, item.MatchedRouteRefs) ||
+				intersectsStrings(module.ComponentRefs, item.MatchedComponents) ||
+				intersectsStrings(module.APIRefs, item.MatchedAPIRefs) ||
+				intersectsStrings(module.DataModelRefs, item.MatchedDataModels) {
+				return true
+			}
+		}
+	}
+	keywords := intentKeywordsForText(strings.Join(requirementGoalTexts(state), " "))
+	return keywordMatchScore(keywords, module.Name, module.Responsibility, strings.Join(module.ComponentRefs, " "), strings.Join(module.RouteRefs, " ")) > 0
+}
+
+func intersectsStrings(left []string, right []string) bool {
+	seen := map[string]bool{}
+	for _, value := range left {
+		seen[value] = true
+	}
+	for _, value := range right {
+		if seen[value] {
+			return true
+		}
+	}
+	return false
+}
+
+func featureTraceConfidenceValue(trace *model.FeatureTraceResult) float64 {
+	if trace != nil && trace.Confidence > 0 {
+		return trace.Confidence
+	}
+	return 0.68
 }
 
 func demoScenarioPlansFromState(state *ProjectUnderstandingState) []model.DemoScenarioPlan {
@@ -1495,6 +1619,15 @@ func moduleResponsibility(snapshot model.CodeUnderstandingSnapshot) string {
 	if len(snapshot.APIEndpoints) > 0 {
 		parts = append(parts, fmt.Sprintf("API %d 个", len(snapshot.APIEndpoints)))
 	}
+	styleFiles := 0
+	for _, digest := range snapshot.PathDigests {
+		if digest.Kind == "style" {
+			styleFiles++
+		}
+	}
+	if styleFiles > 0 {
+		parts = append(parts, fmt.Sprintf("样式定义 %d 个", styleFiles))
+	}
 	if len(parts) == 0 {
 		return firstNonEmpty(snapshot.Summary, "项目结构摘要模块。")
 	}
@@ -1567,6 +1700,12 @@ func selectorsFromCodeSnapshots(snapshots []model.CodeUnderstandingSnapshot) []m
 	candidates := []model.SelectorCandidate{}
 	for _, snapshot := range snapshots {
 		for _, selector := range snapshot.Selectors {
+			if selector.Value == "" ||
+				selectorLooksGeneric(selector.Value) ||
+				selectorLooksReadOnlySurface(selector.Value) ||
+				selectorLooksLikeChromeControl(selector.Value) {
+				continue
+			}
 			candidates = append(candidates, model.SelectorCandidate{
 				Kind:           selector.Kind,
 				Value:          selector.Value,

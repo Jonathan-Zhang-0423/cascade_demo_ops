@@ -130,7 +130,7 @@ export function App() {
     setWorkspace((current) => appendRuntimeLog(current, {
       level: "info",
       message: "开始生成执行包",
-      detail: "正在调用本地 Dev Bridge：需求读取 -> 代码摘要 -> 产品理解 -> 执行图 -> TS 脚本包。",
+      detail: "正在调用本地 Dev Bridge：需求读取 -> 代码 drilldown -> 项目理解 -> Stage JSON -> Browser Agent 大纲。",
     }));
     setWorkspace((current) => {
       const { lastError: _lastError, ...cloudRun } = current.cloudRun;
@@ -692,7 +692,7 @@ function UnderstandingStagePanel({ workspace }: { workspace: ProjectWorkspaceVie
           <Fact label="Product Map" value={workspace.understanding.productMapID} />
           <Fact label="摘要置信度" value={`${Math.round(bestEvidenceConfidence(workspace) * 100)}%`} />
           <Fact label="敏感提示" value={`${workspace.understanding.sensitiveWarnings.length} 项`} />
-          <Fact label="后续用途" value="生成执行图、脚本文档和审批说明" />
+          <Fact label="后续用途" value="生成 Stage 审批 JSON、Browser Agent 大纲和证据链" />
         </div>
       </section>
     </div>
@@ -1332,7 +1332,7 @@ function ScriptBundleReview({ workspace }: { workspace: ProjectWorkspaceView }) 
   const source = bundle?.playwright_script.inline_source ?? "legacy TS 模式下展示受限 TypeScript 脚本；Browser Agent 大纲模式不要求 App 生成完整 TS。";
   return (
     <section className="script-review-section">
-      <SectionTitle title="脚本包审批内容" meta={bundle?.schema_version ?? "待生成"} />
+      <SectionTitle title="脚本包审批内容" meta={isOutlineRuntime ? "Browser Agent 受约束路线图" : bundle?.schema_version ?? "待生成"} />
       <div className="script-review-grid">
         <ReviewPanel title="思路文档" meta="默认审批视图" content={markdown} />
         {isOutlineRuntime ? (

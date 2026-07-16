@@ -73,7 +73,7 @@ func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectCo
 			snapshot.EntrypointHashes = append(snapshot.EntrypointHashes, hashString(entrypoint))
 		}
 		if input.LocalPath != "" {
-			if err := a.scanLocalPath(ctx, input.LocalPath, &snapshot); err != nil {
+			if err := a.scanLocalPath(ctx, input.LocalPath, &snapshot, project, brief); err != nil {
 				snapshot.Summary = "代码路径暂不可扫描，已保留输入摘要和 evidence ref。"
 			}
 		}
@@ -217,7 +217,15 @@ func (a *CodeReaderAgent) enhanceSnapshotWithLLM(ctx context.Context, project *m
 	return trace, nil
 }
 
-func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapshot *model.CodeUnderstandingSnapshot) error {
+type codeCandidateFile struct {
+	path  string
+	rel   string
+	name  string
+	size  int64
+	score int
+}
+
+func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapshot *model.CodeUnderstandingSnapshot, project *model.ProjectContext, brief *model.RequirementBrief) error {
 	info, err := os.Stat(root)
 	if err != nil {
 		return err
@@ -226,9 +234,7 @@ func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapsh
 		return nil
 	}
 	root = filepath.Clean(root)
-	pathDigests := make([]model.PathDigest, 0)
-	contentDigests := make([]string, 0)
-	fileCount := 0
+	candidates := []codeCandidateFile{}
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
@@ -243,21 +249,54 @@ func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapsh
 			}
 			return nil
 		}
-		if fileCount >= a.MaxFiles || !isScannableFile(name) {
+		if !isScannableFile(name) {
 			return nil
 		}
 		fileInfo, err := entry.Info()
 		if err != nil || fileInfo.Size() > a.MaxFileBytes {
 			return nil
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			rel = name
 		}
+		if shouldSkipCodeFileRel(rel, name) {
+			return nil
+		}
+		candidates = append(candidates, codeCandidateFile{
+			path:  path,
+			rel:   rel,
+			name:  name,
+			size:  fileInfo.Size(),
+			score: codeFilePriority(rel, name, project, brief),
+		})
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].score == candidates[j].score {
+			return filepath.ToSlash(candidates[i].rel) < filepath.ToSlash(candidates[j].rel)
+		}
+		return candidates[i].score > candidates[j].score
+	})
+	if len(candidates) > a.MaxFiles {
+		candidates = candidates[:a.MaxFiles]
+	}
+	pathDigests := make([]model.PathDigest, 0)
+	contentDigests := make([]string, 0)
+	fileCount := 0
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		data, err := os.ReadFile(candidate.path)
+		if err != nil {
+			continue
+		}
+		name := candidate.name
+		rel := candidate.rel
 		pathHash := hashString(filepath.ToSlash(rel))
 		contentHash := hashBytes(data)
 		kind := codeKindForFile(name)
@@ -285,30 +324,72 @@ func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapsh
 		inspectAPIs(text, pathHash, snapshot)
 		inspectDataModels(text, pathHash, snapshot)
 		inspectSensitiveFields(text, snapshot)
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 	sort.Strings(contentDigests)
 	snapshot.FileCount = fileCount
 	snapshot.PathDigests = pathDigests
 	snapshot.SourceDigestSHA256 = hashString(strings.Join(contentDigests, "\n"))
+	normalizeCodeSnapshotForIntent(snapshot, project, brief)
 	return nil
 }
 
 func shouldSkipDir(name string) bool {
 	switch strings.ToLower(name) {
-	case ".git", "node_modules", "dist", "build", ".next", "coverage", "vendor", "tmp", ".turbo":
+	case ".git", "node_modules", "dist", "build", "out", ".next", "coverage", "vendor", "tmp", ".turbo", ".cache":
 		return true
 	default:
 		return false
 	}
 }
 
+func shouldSkipCodeFileRel(rel string, name string) bool {
+	lower := strings.ToLower(filepath.ToSlash(rel))
+	if strings.EqualFold(name, "package.json") || strings.EqualFold(name, "go.mod") {
+		return false
+	}
+	return containsAny(lower,
+		"/nix/store", "nix/store", "/.git/", "/node_modules/", "/dist/", "/build/", "/out/", "/.next/",
+		"/coverage/", "/vendor/", "/fixtures/", "/fixture/", "/mock/", "/mocks/", "/__tests__/",
+		"/reports/", "/report/", "/fonts/", "/font/", "/assets/fonts/",
+		".test.", ".spec.", ".stories.", ".generated.", ".snap.",
+	)
+}
+
+func codeFilePriority(rel string, name string, project *model.ProjectContext, brief *model.RequirementBrief) int {
+	lower := strings.ToLower(filepath.ToSlash(rel))
+	score := 20
+	if strings.EqualFold(name, "package.json") || strings.EqualFold(name, "go.mod") {
+		score += 90
+	}
+	switch {
+	case containsAny(lower, "/src/", "/app/", "/pages/", "/routes/", "/router/", "/components/", "/features/"):
+		score += 80
+	case containsAny(lower, "/internal/", "/cmd/", "/pkg/", "/server/", "/backend/", "/api/"):
+		score += 60
+	}
+	if containsAny(lower, ".tsx", ".vue", ".svelte") {
+		score += 35
+	}
+	if containsAny(lower, ".ts", ".js", ".jsx", ".go") {
+		score += 25
+	}
+	if containsAny(lower, "style", "css", "theme", "tailwind") {
+		score += 15
+	}
+	for _, keyword := range codeIntentKeywords(project, brief) {
+		if keyword != "" && strings.Contains(lower, strings.ToLower(keyword)) {
+			score += 35
+		}
+	}
+	if shouldSkipCodeFileRel(rel, name) {
+		score -= 1000
+	}
+	return score
+}
+
 func isScannableFile(name string) bool {
 	switch strings.ToLower(filepath.Ext(name)) {
-	case ".go", ".ts", ".tsx", ".js", ".jsx", ".vue", ".svelte", ".json", ".md", ".sql", ".py", ".rb", ".php", ".rs", ".cs", ".java", ".kt":
+	case ".go", ".ts", ".tsx", ".js", ".jsx", ".vue", ".svelte", ".json", ".md", ".sql", ".py", ".rb", ".php", ".rs", ".cs", ".java", ".kt", ".css", ".scss", ".sass", ".less":
 		return true
 	default:
 		return strings.EqualFold(name, "go.mod") || strings.EqualFold(name, "package.json")
@@ -333,6 +414,8 @@ func languageForFile(name string) string {
 		return "python"
 	case ".sql":
 		return "sql"
+	case ".css", ".scss", ".sass", ".less":
+		return "css"
 	default:
 		return ""
 	}
@@ -345,6 +428,8 @@ func codeKindForFile(name string) string {
 		return "manifest"
 	case strings.HasSuffix(lower, ".md"):
 		return "docs"
+	case strings.HasSuffix(lower, ".css") || strings.HasSuffix(lower, ".scss") || strings.HasSuffix(lower, ".sass") || strings.HasSuffix(lower, ".less") || strings.Contains(lower, "tailwind"):
+		return "style"
 	case strings.Contains(lower, "route") || strings.Contains(lower, "router"):
 		return "route"
 	case strings.Contains(lower, "schema") || strings.Contains(lower, "model"):
@@ -383,13 +468,14 @@ func inspectRoutes(text string, pathHash string, snapshot *model.CodeUnderstandi
 			continue
 		}
 		path := match[1]
-		if !strings.HasPrefix(path, "/") || strings.Contains(path, " ") || len(path) > 100 {
+		if !browserRouteAllowedForCode(path) {
 			continue
 		}
 		snapshot.Routes = append(snapshot.Routes, model.RouteInsight{
 			ID:             safeID("route", path),
 			Path:           path,
 			SourcePathHash: pathHash,
+			EvidenceRefs:   []model.EvidenceRef{codeEvidenceRef("route", pathHash, path)},
 			Confidence:     0.62,
 		})
 	}
@@ -405,12 +491,19 @@ func inspectSelectors(text string, pathHash string, snapshot *model.CodeUndersta
 			continue
 		}
 		selector := "[data-testid='" + value + "']"
+		confidence := 0.76
+		stability := 0.86
+		if actionLooksLikeChromeControl(value, selector) || selectorLooksReadOnlySurface(selector) {
+			confidence = 0.42
+			stability = 0.45
+		}
 		snapshot.Selectors = append(snapshot.Selectors, model.SelectorInsight{
 			Kind:               "css",
 			Value:              selector,
 			FilePathHashSHA256: pathHash,
-			StabilityScore:     0.86,
-			Confidence:         0.76,
+			StabilityScore:     stability,
+			Confidence:         confidence,
+			EvidenceRefs:       []model.EvidenceRef{codeEvidenceRef("selector", pathHash, selector)},
 		})
 	}
 }
@@ -427,6 +520,8 @@ func inspectComponents(name string, text string, pathHash string, snapshot *mode
 			Kind:               "ui_component",
 			FilePathHashSHA256: pathHash,
 			SelectorHints:      selectorValues(snapshot.Selectors, pathHash),
+			ActionLabels:       componentActionLabels(componentName, selectorValues(snapshot.Selectors, pathHash)),
+			EvidenceRefs:       []model.EvidenceRef{codeEvidenceRef("component", pathHash, componentName)},
 			Confidence:         0.64,
 		})
 	}
@@ -437,6 +532,8 @@ func inspectComponents(name string, text string, pathHash string, snapshot *mode
 			Kind:               "ui_component",
 			FilePathHashSHA256: pathHash,
 			SelectorHints:      selectorValues(snapshot.Selectors, pathHash),
+			ActionLabels:       componentActionLabels("UIComponent-"+shortHash(pathHash), selectorValues(snapshot.Selectors, pathHash)),
+			EvidenceRefs:       []model.EvidenceRef{codeEvidenceRef("component", pathHash, "UIComponent-"+shortHash(pathHash))},
 			Confidence:         0.45,
 		})
 	}
@@ -448,10 +545,14 @@ func inspectAPIs(text string, pathHash string, snapshot *model.CodeUnderstanding
 			continue
 		}
 		path := match[1]
+		if !apiPathAllowedForCode(path) {
+			continue
+		}
 		snapshot.APIEndpoints = append(snapshot.APIEndpoints, model.APIEndpointInsight{
 			ID:                 safeID("api", path),
 			Path:               path,
 			FilePathHashSHA256: pathHash,
+			EvidenceRefs:       []model.EvidenceRef{codeEvidenceRef("api", pathHash, path)},
 			Confidence:         0.58,
 		})
 	}
@@ -468,6 +569,7 @@ func inspectDataModels(text string, pathHash string, snapshot *model.CodeUnderst
 			Name:                 name,
 			Kind:                 "type",
 			SourcePathHashSHA256: pathHash,
+			EvidenceRefs:         []model.EvidenceRef{codeEvidenceRef("data_model", pathHash, name)},
 			Confidence:           0.58,
 		})
 	}
@@ -533,6 +635,229 @@ func limitDataModels(values []model.DataModelInsight, limit int) []model.DataMod
 		return values
 	}
 	return values[:limit]
+}
+
+func normalizeCodeSnapshotForIntent(snapshot *model.CodeUnderstandingSnapshot, project *model.ProjectContext, brief *model.RequirementBrief) {
+	if snapshot == nil {
+		return
+	}
+	keywords := codeIntentKeywords(project, brief)
+	snapshot.Routes = rankedRoutesForIntent(snapshot.Routes, keywords, 80)
+	snapshot.Components = rankedComponentsForIntent(snapshot.Components, keywords, 120)
+	snapshot.Selectors = rankedSelectorsForIntent(snapshot.Selectors, keywords, 100)
+	snapshot.APIEndpoints = rankedAPIsForIntent(snapshot.APIEndpoints, keywords, 80)
+	snapshot.DataModels = rankedDataModelsForIntent(snapshot.DataModels, keywords, 80)
+}
+
+func codeIntentKeywords(project *model.ProjectContext, brief *model.RequirementBrief) []string {
+	parts := []string{}
+	if project != nil {
+		parts = append(parts, project.ProductDescription, project.TargetAudience, project.Name)
+		parts = append(parts, project.MustShow...)
+	}
+	if brief != nil {
+		parts = append(parts, brief.Scenario, brief.Objective, brief.PrimaryOutcome, brief.TargetAudience)
+		parts = append(parts, brief.MustShow...)
+	}
+	keywords := []string{}
+	for _, part := range parts {
+		keywords = append(keywords, intentKeywordsForText(part)...)
+	}
+	return uniqueStrings(keywords)
+}
+
+func rankedRoutesForIntent(values []model.RouteInsight, keywords []string, limit int) []model.RouteInsight {
+	seen := map[string]bool{}
+	out := []model.RouteInsight{}
+	for _, value := range values {
+		if !browserRouteAllowedForCode(value.Path) || seen[value.Path] {
+			continue
+		}
+		seen[value.Path] = true
+		value.Confidence = maxFloat(value.Confidence, 0.62)
+		out = append(out, value)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left := routeIntentScore(out[i], keywords)
+		right := routeIntentScore(out[j], keywords)
+		if left == right {
+			return out[i].Path < out[j].Path
+		}
+		return left > right
+	})
+	return limitRoutes(out, limit)
+}
+
+func routeIntentScore(value model.RouteInsight, keywords []string) int {
+	score := int(value.Confidence * 100)
+	score += keywordMatchScore(keywords, value.Path, value.Name) * 30
+	if containsAny(strings.ToLower(value.Path), "project", "build", "generate", "workspace", "dashboard", "app") {
+		score += 10
+	}
+	return score
+}
+
+func rankedComponentsForIntent(values []model.ComponentInsight, keywords []string, limit int) []model.ComponentInsight {
+	seen := map[string]bool{}
+	out := []model.ComponentInsight{}
+	for _, value := range values {
+		key := firstNonEmpty(value.ID, value.Name, value.FilePathHashSHA256)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left := componentIntentScore(out[i], keywords)
+		right := componentIntentScore(out[j], keywords)
+		if left == right {
+			return out[i].Name < out[j].Name
+		}
+		return left > right
+	})
+	return limitComponents(out, limit)
+}
+
+func componentIntentScore(value model.ComponentInsight, keywords []string) int {
+	score := int(value.Confidence * 100)
+	score += keywordMatchScore(keywords, value.Name, strings.Join(value.ActionLabels, " "), strings.Join(value.SelectorHints, " ")) * 30
+	if actionLooksLikeChromeControl(value.Name+" "+strings.Join(value.ActionLabels, " "), strings.Join(value.SelectorHints, " ")) {
+		score -= 80
+	}
+	return score
+}
+
+func rankedSelectorsForIntent(values []model.SelectorInsight, keywords []string, limit int) []model.SelectorInsight {
+	seen := map[string]bool{}
+	out := []model.SelectorInsight{}
+	for _, value := range values {
+		if value.Value == "" || selectorLooksGeneric(value.Value) || seen[value.Value] {
+			continue
+		}
+		if selectorLooksReadOnlySurface(value.Value) {
+			continue
+		}
+		if selectorLooksLikeChromeControl(value.Value) && keywordMatchScore(keywords, value.Value) == 0 {
+			continue
+		}
+		seen[value.Value] = true
+		out = append(out, value)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left := selectorIntentScore(out[i], keywords)
+		right := selectorIntentScore(out[j], keywords)
+		if left == right {
+			return out[i].Value < out[j].Value
+		}
+		return left > right
+	})
+	return limitSelectors(out, limit)
+}
+
+func selectorIntentScore(value model.SelectorInsight, keywords []string) int {
+	score := selectorQualityScore(value.Value) + int(value.Confidence*20) + int(value.StabilityScore*20)
+	score += keywordMatchScore(keywords, value.Value) * 35
+	if selectorLooksReadOnlySurface(value.Value) || selectorLooksLikeChromeControl(value.Value) {
+		score -= 90
+	}
+	return score
+}
+
+func rankedAPIsForIntent(values []model.APIEndpointInsight, keywords []string, limit int) []model.APIEndpointInsight {
+	seen := map[string]bool{}
+	out := []model.APIEndpointInsight{}
+	for _, value := range values {
+		if !apiPathAllowedForCode(value.Path) || seen[value.Path] {
+			continue
+		}
+		seen[value.Path] = true
+		out = append(out, value)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left := int(out[i].Confidence*100) + keywordMatchScore(keywords, out[i].Path)*30
+		right := int(out[j].Confidence*100) + keywordMatchScore(keywords, out[j].Path)*30
+		if left == right {
+			return out[i].Path < out[j].Path
+		}
+		return left > right
+	})
+	return limitAPIs(out, limit)
+}
+
+func rankedDataModelsForIntent(values []model.DataModelInsight, keywords []string, limit int) []model.DataModelInsight {
+	seen := map[string]bool{}
+	out := []model.DataModelInsight{}
+	for _, value := range values {
+		if value.Name == "" || seen[value.Name] {
+			continue
+		}
+		seen[value.Name] = true
+		out = append(out, value)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left := int(out[i].Confidence*100) + keywordMatchScore(keywords, out[i].Name, strings.Join(dataFieldNames(out[i].Fields), " "))*30
+		right := int(out[j].Confidence*100) + keywordMatchScore(keywords, out[j].Name, strings.Join(dataFieldNames(out[j].Fields), " "))*30
+		if left == right {
+			return out[i].Name < out[j].Name
+		}
+		return left > right
+	})
+	return limitDataModels(out, limit)
+}
+
+func browserRouteAllowedForCode(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" || !strings.HasPrefix(path, "/") || strings.Contains(path, " ") || len(path) > 100 {
+		return false
+	}
+	lower := strings.ToLower(path)
+	if strings.HasPrefix(lower, "/api/") || lower == "/api" {
+		return false
+	}
+	if pathHasForbiddenPrefix(lower, defaultControlPlaneForbiddenPaths()) {
+		return false
+	}
+	if containsAny(lower, "/nix/store", "/node_modules", "/fonts/", "/font/", ".woff", ".ttf", ".otf", ".png", ".jpg", ".jpeg", ".svg", ".map") {
+		return false
+	}
+	if containsAny(lower, "/usr/", "/var/", "/home/", "/users/") {
+		return false
+	}
+	return true
+}
+
+func apiPathAllowedForCode(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" || !strings.HasPrefix(path, "/") || strings.Contains(path, " ") || len(path) > 120 {
+		return false
+	}
+	lower := strings.ToLower(path)
+	if pathHasForbiddenPrefix(lower, []string{"/aigc", "/.well-known", "/v1/execution-packages", "/v1/result-packages", "/v1/app-installations", "/dev/execution-packages", "/execution-packages", "/result-packages", "/app-installations"}) {
+		return false
+	}
+	if containsAny(lower, "cascade-exchange", "exchange-packages", "authorization") {
+		return false
+	}
+	return true
+}
+
+func componentActionLabels(name string, selectors []string) []string {
+	labels := []string{name}
+	for _, selector := range selectors {
+		labels = append(labels, labelFromSelector(selector))
+	}
+	return uniqueStrings(labels)
+}
+
+func codeEvidenceRef(kind string, pathHash string, value string) model.EvidenceRef {
+	return model.EvidenceRef{
+		ID:         "ev_code_" + kind + "_" + shortHash(pathHash+"|"+value),
+		Kind:       model.EvidenceKindSourceCode,
+		Summary:    kind + " evidence from local read-only code scan",
+		FieldPath:  "code_snapshot." + kind,
+		Confidence: 0.68,
+	}
 }
 
 func maxFloat(left float64, right float64) float64 {
