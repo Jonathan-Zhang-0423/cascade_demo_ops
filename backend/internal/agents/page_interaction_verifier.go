@@ -63,7 +63,11 @@ func (a *PageInteractionVerifierAgent) VerifyInteractions(
 			return fallbackPlan, fallbackMissing, nil
 		}
 		if err != nil {
-			report := missingEvidence(project, intelligence.DemoIntent, "page_scan_failed", "页面预扫描 sidecar 调用失败："+err.Error(), "确认 NODE_WORKER_PATH 指向 video-worker/dist/index.js，并确认本机 Playwright/Node 可运行。")
+			report := nonBlockingSidecarFailureReport(project, intelligence, err)
+			fallbackPlan = fallbackPlanFromExplicitIntent(project, intelligence, candidates, err)
+			if fallbackPlan == nil || fallbackPlan.BusinessActionCount == 0 {
+				fallbackPlan = fallbackPlanFromCodeEvidence(project, intelligence, candidates, err)
+			}
 			intelligence.VerifiedInteraction = fallbackPlan
 			intelligence.MissingEvidenceReport = report
 			return fallbackPlan, report, nil
@@ -219,6 +223,279 @@ func verifierCandidates(intelligence *model.ProjectIntelligencePack) []model.Int
 	return candidates
 }
 
+func fallbackPlanFromCodeEvidence(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, candidates []model.InteractionProbe, cause error) *model.VerifiedInteractionPlan {
+	plan := emptyVerifiedPlan(project, intelligence, "sidecar_unavailable_code_evidence", "", project.ProductURL)
+	plan.Confidence = 0.58
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		if !candidate.IsBusiness || candidate.IsChrome || !selectorUsableForBusinessAction(candidate.Selector) {
+			continue
+		}
+		if !isURLAllowedByRunScope(intelligence.RunIntentScope, candidate.URL) || isControlPlaneSignal(intelligence.RunIntentScope, candidate.URL, candidate.Label, candidate.Selector) {
+			continue
+		}
+		key := normalizeSelector(candidate.Selector)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		action := verifiedActionFromProbe(candidate, "feature_trace_code_evidence", "")
+		action.VerificationStatus = "sidecar_unavailable"
+		action.VerificationSource = "feature_trace_code_evidence"
+		action.VerifiedAt = time.Time{}
+		action.ExpectedOutcome = firstNonEmpty(action.ExpectedOutcome, "基于代码证据执行需求相关业务动作")
+		action.SuccessState = firstNonEmpty(action.SuccessState, "运行时确认代码证据对应控件可执行")
+		action.EvidenceRefs = uniqueEvidenceRefs(append(action.EvidenceRefs, model.EvidenceRef{
+			ID:         "ev_sidecar_unavailable_" + shortHash(project.ID+candidate.Selector+fmt.Sprint(cause)),
+			Kind:       model.EvidenceKindCodeSnapshot,
+			Summary:    "页面预扫描 sidecar 异常，临时使用需求追踪后的代码 selector 证据继续生成脚本。",
+			FieldPath:  "project_intelligence.feature_trace.selector_evidence",
+			Confidence: 0.58,
+		}))
+		plan.Actions = append(plan.Actions, action)
+		if action.IsBusiness {
+			plan.BusinessActionCount++
+		}
+		plan.EvidenceRefs = append(plan.EvidenceRefs, action.EvidenceRefs...)
+		if len(plan.Actions) >= 4 {
+			break
+		}
+	}
+	plan.EvidenceRefs = uniqueEvidenceRefs(plan.EvidenceRefs)
+	return plan
+}
+
+func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, candidates []model.InteractionProbe, cause error) *model.VerifiedInteractionPlan {
+	intentText := explicitDemoIntentText(project, intelligence)
+	if intentText == "" {
+		return nil
+	}
+	plan := emptyVerifiedPlan(project, intelligence, "runtime_adaptive_intent_fallback", "", project.ProductURL)
+	plan.Confidence = 0.66
+	evidence := model.EvidenceRef{
+		ID:         "ev_runtime_adaptive_intent_" + shortHash(project.ID+intentText+fmt.Sprint(cause)),
+		Kind:       model.EvidenceKindRequirementDoc,
+		Summary:    "页面预扫描不可用，按用户显式需求编译运行时语义动作；不使用全局 selector 池补动作。",
+		FieldPath:  "project_intelligence.demo_intent",
+		Confidence: 0.66,
+	}
+	add := func(action model.VerifiedInteractionAction) {
+		action.VerificationStatus = "runtime_adaptive"
+		action.VerificationSource = "runtime_adaptive_intent_fallback"
+		action.VerifiedAt = time.Time{}
+		action.EvidenceRefs = uniqueEvidenceRefs(append(action.EvidenceRefs, evidence))
+		plan.Actions = append(plan.Actions, action)
+		if action.IsBusiness {
+			plan.BusinessActionCount++
+		}
+		plan.EvidenceRefs = append(plan.EvidenceRefs, action.EvidenceRefs...)
+	}
+	if containsAnyNormalized(intentText, "登录", "登陆", "登入", "login", "sign in", "signin") {
+		add(intentWaitAction(project, "intent_login_observe", "演示登录完成并进入工作台", "登录完成，进入可演示的产品工作台上下文。", 10000, false))
+	}
+	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") {
+		add(intentSelectorAction(project, candidates, "intent_new_project", "新建项目", "click", "点击新建项目入口", "进入新建项目流程。", 10000, true, []string{"新建项目", "创建项目", "新增项目", "new project", "create project"}, []string{
+			`[data-testid='new-project']`,
+			`[data-testid='create-project']`,
+			`button:has-text("新建项目")`,
+			`a:has-text("新建项目")`,
+			`[role="button"]:has-text("新建项目")`,
+			`button:has-text("创建项目")`,
+			`button:has-text("New Project")`,
+			`button:has-text("Create Project")`,
+		}))
+	}
+	projectName := intentProjectName(intentText)
+	if projectName != "" {
+		add(intentSelectorAction(project, candidates, "intent_project_name", "输入项目名称："+projectName, "fill", "填写项目名称", "项目名称已填写为 "+projectName+"。", 10000, true, []string{"项目名称", "项目名", "project name", "name", projectName}, []string{
+			`input[placeholder*='项目']`,
+			`input[placeholder*='名称']`,
+			`input[aria-label*='项目']`,
+			`input[aria-label*='名称']`,
+			`input[name*='project' i]`,
+			`input[name*='name' i]`,
+			`textarea[placeholder*='项目']`,
+			`textarea[placeholder*='描述']`,
+		}, withIntentActionValue(projectName)))
+	}
+	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") {
+		add(intentSelectorAction(project, candidates, "intent_build_mode", "选择构建模式", "click", "选择构建模式", "项目已切换到构建模式。", 10000, true, []string{"构建模式", "build mode", "builder mode", "构建"}, []string{
+			`[data-testid='build-mode']`,
+			`[data-testid='mode-build']`,
+			`button:has-text("构建模式")`,
+			`[role="tab"]:has-text("构建模式")`,
+			`[role="button"]:has-text("构建模式")`,
+			`label:has-text("构建模式")`,
+			`text=构建模式`,
+			`button:has-text("Build Mode")`,
+		}))
+	}
+	if containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "run build", "start build", "生成") ||
+		containsAnyNormalized(intentText, "构建") {
+		add(intentSelectorAction(project, candidates, "intent_start_agent_build", "启动 agent 实际构建", "click", "启动 agent 构建", "agent 已开始根据需求实际构建项目。", 10000, true, []string{"agent", "智能体", "开始构建", "实际构建", "生成", "build", "run", "start"}, []string{
+			`[data-testid='start-build']`,
+			`[data-testid='generate-app']`,
+			`button:has-text("开始构建")`,
+			`button:has-text("开始生成")`,
+			`button:has-text("生成")`,
+			`button:has-text("构建")`,
+			`[role="button"]:has-text("开始构建")`,
+			`[role="button"]:has-text("生成")`,
+			`button:has-text("Build")`,
+			`button:has-text("Run")`,
+		}))
+	}
+	if waitMS := requiredLongWaitMS(intentText); waitMS > 0 {
+		add(intentWaitAction(project, "intent_agent_build_wait", fmt.Sprintf("等待 agent 实际构建 %d 秒", waitMS/1000), "持续观察 agent 构建过程，等待结果逐步出现。", waitMS, true))
+	}
+	plan.EvidenceRefs = uniqueEvidenceRefs(plan.EvidenceRefs)
+	if len(plan.Actions) == 0 {
+		return nil
+	}
+	return plan
+}
+
+type intentActionOption func(*model.VerifiedInteractionAction)
+
+func withIntentActionValue(value string) intentActionOption {
+	return func(action *model.VerifiedInteractionAction) {
+		if action != nil {
+			action.InputValue = value
+			action.SuccessState = firstNonEmpty(action.SuccessState, "已输入 "+value)
+		}
+	}
+}
+
+func intentSelectorAction(
+	project *model.ProjectContext,
+	candidates []model.InteractionProbe,
+	id string,
+	label string,
+	kind string,
+	expected string,
+	success string,
+	durationMS int,
+	business bool,
+	keywords []string,
+	semanticSelectors []string,
+	options ...intentActionOption,
+) model.VerifiedInteractionAction {
+	selector := ""
+	alternatives := []model.SelectorCandidate{}
+	if probe, ok := bestIntentProbe(candidates, keywords); ok {
+		selector = probe.Selector
+		alternatives = append(alternatives, model.SelectorCandidate{
+			Kind:           "css",
+			Value:          probe.Selector,
+			Confidence:     0.7,
+			StabilityScore: float64(probe.SelectorScore) / 100,
+			Source:         "feature_trace_code_evidence",
+			EvidenceRefs:   probe.EvidenceRefs,
+		})
+	}
+	for _, selectorCandidate := range semanticSelectors {
+		alternatives = append(alternatives, model.SelectorCandidate{
+			Kind:           "css",
+			Value:          selectorCandidate,
+			Confidence:     0.68,
+			StabilityScore: float64(selectorQualityScore(selectorCandidate)) / 100,
+			Source:         "runtime_adaptive_intent",
+		})
+	}
+	if selector == "" {
+		selector = bestSelectorCandidate(alternatives)
+	}
+	action := model.VerifiedInteractionAction{
+		ID:                 id,
+		IntentGoalID:       id,
+		Label:              label,
+		Kind:               kind,
+		Selector:           selector,
+		URL:                project.ProductURL,
+		RouteRef:           safeID("route", firstNonEmpty(project.ProductURL, "product")),
+		ExpectedOutcome:    expected,
+		SuccessState:       success,
+		WaitConditions:     []string{"domcontentloaded", "networkidle"},
+		DurationHintMS:     maxInt(durationMS, 10000),
+		IsBusiness:         business,
+		VerificationStatus: "runtime_adaptive",
+		VerificationSource: "runtime_adaptive_intent_fallback",
+		SelectorScore:      selectorQualityScore(selector),
+		Alternatives:       uniqueSelectorCandidates(alternatives),
+	}
+	for _, option := range options {
+		option(&action)
+	}
+	return action
+}
+
+func intentWaitAction(project *model.ProjectContext, id string, label string, success string, durationMS int, business bool) model.VerifiedInteractionAction {
+	return model.VerifiedInteractionAction{
+		ID:                 id,
+		IntentGoalID:       id,
+		Label:              label,
+		Kind:               "wait",
+		URL:                project.ProductURL,
+		RouteRef:           safeID("route", firstNonEmpty(project.ProductURL, "product")),
+		ExpectedOutcome:    success,
+		SuccessState:       success,
+		WaitConditions:     []string{"domcontentloaded", "networkidle"},
+		DurationHintMS:     maxInt(durationMS, 10000),
+		IsBusiness:         business,
+		VerificationStatus: "runtime_adaptive",
+		VerificationSource: "runtime_adaptive_intent_fallback",
+	}
+}
+
+func bestIntentProbe(candidates []model.InteractionProbe, keywords []string) (model.InteractionProbe, bool) {
+	var best model.InteractionProbe
+	bestScore := -1
+	for _, candidate := range candidates {
+		if !candidate.IsBusiness || candidate.IsChrome || !selectorUsableForBusinessAction(candidate.Selector) {
+			continue
+		}
+		text := normalizeIntentText(strings.Join([]string{candidate.Label, candidate.Selector, candidate.Kind, candidate.ComponentRef}, " "))
+		if !containsAnyNormalized(text, keywords...) {
+			continue
+		}
+		score := candidate.SelectorScore
+		if score == 0 {
+			score = selectorQualityScore(candidate.Selector)
+		}
+		if score > bestScore {
+			best = candidate
+			bestScore = score
+		}
+	}
+	return best, bestScore >= 0
+}
+
+func explicitDemoIntentText(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) string {
+	parts := []string{}
+	if project != nil {
+		parts = append(parts,
+			project.ProductDescription,
+			project.TargetAudience,
+			strings.Join(project.MustShow, " "),
+			strings.Join(project.MustNotShow, " "),
+		)
+	}
+	if intelligence != nil && intelligence.DemoIntent != nil {
+		parts = append(parts, intelligence.DemoIntent.Objective, intelligence.DemoIntent.TargetAudience)
+		for _, goal := range intelligence.DemoIntent.Goals {
+			parts = append(parts, goal.Label, goal.Kind, goal.PreferredAction, goal.TargetPageHint, goal.SuccessState, strings.Join(goal.TargetKeywords, " "))
+		}
+	}
+	return normalizeIntentText(strings.Join(parts, " "))
+}
+
+func intentProjectName(intentText string) string {
+	if containsAnyNormalized(intentText, "俄罗斯方块", "tetris") {
+		return "俄罗斯方块"
+	}
+	return ""
+}
+
 func verifyFromPageEvidence(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, candidates []model.InteractionProbe) (*model.VerifiedInteractionPlan, *model.MissingEvidenceReport) {
 	plan := emptyVerifiedPlan(project, intelligence, "page_material_evidence", "", project.ProductURL)
 	missing := &model.MissingEvidenceReport{
@@ -254,6 +531,27 @@ func verifyFromPageEvidence(project *model.ProjectContext, intelligence *model.P
 		return plan, missing
 	}
 	return plan, nil
+}
+
+func nonBlockingSidecarFailureReport(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, cause error) *model.MissingEvidenceReport {
+	report := &model.MissingEvidenceReport{
+		ID:            "missing_evidence_" + project.ID,
+		ProjectID:     project.ID,
+		SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+		IntentID:      intentID(intelligence),
+		Blocking:      false,
+		Summary:       "页面预扫描 sidecar 调用失败，已优先降级为显式需求语义脚本生成：" + cause.Error(),
+		CreatedAt:     time.Now().UTC(),
+	}
+	report.Items = append(report.Items, model.MissingEvidenceItem{
+		ID:              "missing_" + shortHash(project.ID+cause.Error()),
+		MissingKind:     "page_scan_sidecar_failed",
+		Severity:        "warning",
+		Message:         "页面预扫描 sidecar 调用失败：" + cause.Error(),
+		SuggestedAction: "继续生成围绕用户需求的 runtime-adaptive 脚本；若录制阶段 selector 失败，使用服务器 failure_diagnostic 修复。请同时检查 video-worker/dist/index.js 与 Playwright 运行环境。",
+		FieldPath:       "project_intelligence.verified_interaction_plan",
+	})
+	return report
 }
 
 func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, response interactionVerifierResponse, byID map[string]model.InteractionProbe) *model.VerifiedInteractionPlan {

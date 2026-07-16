@@ -137,6 +137,9 @@ func buildExecutableScriptBundle(
 	if err != nil {
 		return nil, err
 	}
+	if findings := auditScriptIntentCoverage(project, doc, source); len(findings) > 0 {
+		return nil, fmt.Errorf("script_intent_mismatch: %s", strings.Join(findings, "；"))
+	}
 	planHash, err := doc.ComputeScriptHash()
 	if err != nil {
 		return nil, err
@@ -225,6 +228,165 @@ func buildExecutableScriptBundle(
 		return nil, ensureValidBundle(bundle)
 	}
 	return bundle, nil
+}
+
+func auditScriptIntentCoverage(project *model.ProjectContext, doc *model.ExecutionScriptDocument, source string) []string {
+	if project == nil || doc == nil {
+		return nil
+	}
+	intentText := normalizeIntentText(strings.Join([]string{
+		project.ProductDescription,
+		project.TargetAudience,
+		strings.Join(project.MustShow, " "),
+		strings.Join(project.ForbiddenPages, " "),
+	}, " "))
+	if intentText == "" {
+		return nil
+	}
+	planText := normalizeIntentText(scriptDocumentSemanticText(doc))
+	sourceText := normalizeIntentText(source)
+	combined := planText + " " + sourceText
+	findings := []string{}
+	requireText := func(trigger []string, required []string, message string) {
+		if !containsAnyNormalized(intentText, trigger...) {
+			return
+		}
+		if !containsAnyNormalized(combined, required...) {
+			findings = append(findings, message)
+		}
+	}
+	requireText(
+		[]string{"登录", "登陆", "登入", "login", "sign in", "signin"},
+		[]string{"cascadeensuredemologin", "demo_username", "demo_password", "登录", "login", "signin"},
+		"需求要求演示登录，但执行脚本没有明确登录动作或本地凭据 secret_ref",
+	)
+	requireText(
+		[]string{"新建项目", "创建项目", "新增项目", "new project", "create project"},
+		[]string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project name"},
+		"需求要求新建项目，但执行脚本没有新建项目动作",
+	)
+	requireText(
+		[]string{"俄罗斯方块", "tetris"},
+		[]string{"俄罗斯方块", "tetris"},
+		"需求要求项目内容为俄罗斯方块，但执行脚本没有输入或选择俄罗斯方块",
+	)
+	requireText(
+		[]string{"构建模式", "build mode", "builder mode", "构建"},
+		[]string{"构建模式", "build mode", "builder mode", "构建"},
+		"需求要求选择构建模式，但执行脚本没有构建模式动作",
+	)
+	if containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "run build", "build") &&
+		!containsAnyNormalized(combined, "agent", "智能体", "实际构建", "开始构建", "生成", "构建", "run build", "start build") {
+		findings = append(findings, "需求要求 agent 实际构建演示，但执行脚本没有启动或观察构建动作")
+	}
+	if requiredWait := requiredLongWaitMS(intentText); requiredWait > 0 && !scriptHasWaitAtLeast(doc, sourceText, requiredWait) {
+		findings = append(findings, fmt.Sprintf("需求要求等待至少 %d 秒，但执行脚本没有对应的长等待 stage", requiredWait/1000))
+	}
+	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "俄罗斯方块", "构建模式") &&
+		containsAnyNormalized(combined, "user-email-display", "user-name-display") {
+		findings = append(findings, "执行脚本选择了账号展示字段作为业务动作，偏离新建项目/构建需求")
+	}
+	return uniqueStrings(findings)
+}
+
+func scriptDocumentSemanticText(doc *model.ExecutionScriptDocument) string {
+	if doc == nil {
+		return ""
+	}
+	parts := []string{doc.Title, doc.Summary}
+	if doc.WorkflowGraph != nil {
+		parts = append(parts, doc.WorkflowGraph.Name, doc.WorkflowGraph.Summary, doc.WorkflowGraph.EntryPoint)
+		if doc.WorkflowGraph.Intent != nil {
+			parts = append(parts, doc.WorkflowGraph.Intent.Objective, doc.WorkflowGraph.Intent.ValueProposition)
+			parts = append(parts, doc.WorkflowGraph.Intent.SuccessCriteria...)
+		}
+		for _, requirement := range doc.WorkflowGraph.Requirements {
+			parts = append(parts, requirement.Description)
+		}
+	}
+	for _, step := range doc.Steps {
+		parts = append(parts,
+			step.ID,
+			step.NodeID,
+			step.Title,
+			step.BusinessValue,
+			step.ExpectedOutcome,
+			step.PageTarget.URL,
+			step.PageTarget.Selector,
+			step.Action.Value,
+			step.Action.InputRef,
+			step.Action.SecretRef,
+			step.Action.Target.Selector,
+			step.Action.Target.Label,
+			step.Action.Target.Text,
+			step.Action.Target.TestID,
+			step.Narrative.Title,
+			step.Narrative.Caption,
+			step.Narrative.Voiceover,
+			step.Narrative.Callout,
+		)
+		for _, candidate := range step.Action.Target.SelectorAlternatives {
+			parts = append(parts, candidate.Value)
+		}
+		for _, candidate := range step.PageTarget.SelectorAlternatives {
+			parts = append(parts, candidate.Value)
+		}
+		for _, validation := range step.Validations {
+			parts = append(parts, validation.Assertion, fmt.Sprint(validation.Expected), validation.Target.Selector, validation.Target.Label, validation.Target.Text)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func normalizeIntentText(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "（", "(")
+	value = strings.ReplaceAll(value, "）", ")")
+	value = strings.ReplaceAll(value, "　", " ")
+	value = strings.Join(strings.Fields(value), " ")
+	return value
+}
+
+func containsAnyNormalized(value string, needles ...string) bool {
+	value = normalizeIntentText(value)
+	for _, needle := range needles {
+		if needle = normalizeIntentText(needle); needle != "" && strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func requiredLongWaitMS(intentText string) int {
+	intentText = normalizeIntentText(intentText)
+	for _, token := range []string{"60s", "60 s", "60秒", "60 秒", "一分钟", "1分钟", "1 分钟"} {
+		if strings.Contains(intentText, token) {
+			return 60000
+		}
+	}
+	return 0
+}
+
+func scriptHasWaitAtLeast(doc *model.ExecutionScriptDocument, sourceText string, waitMS int) bool {
+	if doc != nil {
+		for _, step := range doc.Steps {
+			if step.Timing.DurationMS >= waitMS ||
+				step.Timing.HoldAfterMS >= waitMS ||
+				(step.Action.Type == model.GraphActionWait && step.Action.TimeoutMS >= waitMS) {
+				return true
+			}
+		}
+	}
+	for _, marker := range []string{
+		fmt.Sprintf("waitfortimeout(%d", waitMS),
+		fmt.Sprintf("durationms: %d", waitMS),
+		fmt.Sprintf("durationms=%d", waitMS),
+	} {
+		if strings.Contains(sourceText, normalizeIntentText(marker)) {
+			return true
+		}
+	}
+	return false
 }
 
 type approvalMarkdownLLMOutput struct {
@@ -372,7 +534,7 @@ func nodeVerifiedForBusinessAction(node *model.GraphNode) bool {
 	}
 	status, _ := node.Metadata["verification_status"].(string)
 	if status != "verified" {
-		if status != "runtime_adaptive" {
+		if status != "runtime_adaptive" && status != "sidecar_unavailable" {
 			return false
 		}
 	}

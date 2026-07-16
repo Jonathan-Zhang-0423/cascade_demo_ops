@@ -89,7 +89,8 @@ func (m *Manager) CallJSONRPC(ctx context.Context, spec SidecarSpec, method stri
 	request := rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params}
 	if err := json.NewEncoder(stdin).Encode(request); err != nil {
 		_ = cmd.Process.Kill()
-		return err
+		waitErr := cmd.Wait()
+		return fmt.Errorf("write sidecar request: %w; wait=%v; stderr=%s", err, waitErr, stderr.String())
 	}
 	_ = stdin.Close()
 

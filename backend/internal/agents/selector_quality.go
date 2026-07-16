@@ -47,7 +47,7 @@ func selectorQualityScore(selector string) int {
 }
 
 func selectorUsableForBusinessAction(selector string) bool {
-	return selectorQualityScore(selector) >= 60 && !selectorLooksGeneric(selector) && !selectorLooksLikeChromeControl(selector)
+	return selectorQualityScore(selector) >= 60 && !selectorLooksGeneric(selector) && !selectorLooksLikeChromeControl(selector) && !selectorLooksReadOnlySurface(selector)
 }
 
 func selectorUsableForBlockingAssertion(selector string) bool {

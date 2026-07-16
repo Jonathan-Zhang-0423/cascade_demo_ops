@@ -959,6 +959,7 @@ export type VerifiedInteractionAction = {
   component_ref?: string;
   expected_outcome?: string;
   success_state?: string;
+  input_value?: string;
   wait_conditions?: string[];
   duration_hint_ms?: number;
   is_business: boolean;

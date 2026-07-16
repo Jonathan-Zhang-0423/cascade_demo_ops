@@ -142,6 +142,7 @@ type VerifiedInteractionAction struct {
 	ComponentRef       string              `json:"component_ref,omitempty"`
 	ExpectedOutcome    string              `json:"expected_outcome,omitempty"`
 	SuccessState       string              `json:"success_state,omitempty"`
+	InputValue         string              `json:"input_value,omitempty"`
 	WaitConditions     []string            `json:"wait_conditions,omitempty"`
 	DurationHintMS     int                 `json:"duration_hint_ms,omitempty"`
 	IsBusiness         bool                `json:"is_business"`

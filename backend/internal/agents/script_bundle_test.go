@@ -332,6 +332,45 @@ func TestScriptPackagerKeepsRuntimeAdaptiveBusinessAction(t *testing.T) {
 	}
 }
 
+func TestScriptPackagerRejectsScriptThatMissesExplicitDemoIntent(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	project.ProductDescription = "演示登录（10s），新建项目（10s，俄罗斯方块，构建模式），agent实际构建演示（60s等待）"
+	graph.Name = "错误的新建项目演示"
+	graph.Summary = "这份图错误地只包含账号展示和登录按钮。"
+	graph.Nodes[1].ID = "node_user_email_display"
+	graph.Nodes[1].Title = "user email display"
+	graph.Nodes[1].Action = string(model.GraphActionFill)
+	graph.Nodes[1].Selector = "[data-testid='user-email-display']"
+	graph.Nodes[1].ExpectedOutcome = "user email display"
+	graph.Nodes[1].ActionSpec = &model.GraphAction{
+		Type:      model.GraphActionFill,
+		Target:    model.ActionTarget{Selector: "[data-testid='user-email-display']", Label: "user email display"},
+		TimeoutMS: 12000,
+	}
+	graph.Nodes[1].Metadata = map[string]any{"verification_status": "sidecar_unavailable", "verified_interaction_id": "code_user_email"}
+	graph.Nodes[2].ID = "node_login_button"
+	graph.Nodes[2].Title = "login btn"
+	graph.Nodes[2].Action = string(model.GraphActionClick)
+	graph.Nodes[2].Selector = "[data-testid='login-btn']"
+	graph.Nodes[2].ExpectedOutcome = "login btn"
+	graph.Nodes[2].ActionSpec = &model.GraphAction{
+		Type:      model.GraphActionClick,
+		Target:    model.ActionTarget{Selector: "[data-testid='login-btn']", Label: "login btn"},
+		TimeoutMS: 12000,
+	}
+	graph.Nodes[2].Metadata = map[string]any{"verification_status": "sidecar_unavailable", "verified_interaction_id": "code_login_btn"}
+
+	_, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph)
+	if err == nil {
+		t.Fatal("expected explicit intent mismatch to reject bad executable script")
+	}
+	for _, want := range []string{"script_intent_mismatch", "俄罗斯方块", "构建模式", "60 秒"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected error to mention %q, got %v", want, err)
+		}
+	}
+}
+
 func validExecutableBundleFixture(t *testing.T) *model.ExecutableRecordingScriptBundle {
 	t.Helper()
 	project, report, productMap, graph := executableBundleFixtures()

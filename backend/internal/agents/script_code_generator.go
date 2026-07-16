@@ -169,6 +169,7 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		actionType = model.GraphActionInspect
 	}
 	runtimeAdaptive := scriptStepIsRuntimeAdaptive(step)
+	requireAdaptiveResolution := step.Blocking || isBusinessAction(actionType)
 
 	builder.WriteString("\n")
 	builder.WriteString("  await ctx.log.step(" + jsString(step.NodeID) + ", " + jsString(title) + ");\n")
@@ -196,9 +197,14 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		candidates := scriptStepCandidateSelectors(step, selector)
 		if runtimeAdaptive || len(candidates) > 1 {
 			selectorVar := "selector_" + jsIdentifier(step.NodeID)
-			builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive selector unresolved; continuing with capture\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
-			builder.WriteString("  if (" + selectorVar + ") await ctx.page.click(" + selectorVar + ", { timeout: " + fmt.Sprint(timeoutMS) + " }).catch((error) => ctx.log.info(\"adaptive click failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
-			builder.WriteString("  else await ctx.log.info(\"adaptive click skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+			if requireAdaptiveResolution {
+				builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ");\n")
+				builder.WriteString("  await ctx.page.click(" + selectorVar + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+			} else {
+				builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive selector unresolved; continuing with capture\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
+				builder.WriteString("  if (" + selectorVar + ") await ctx.page.click(" + selectorVar + ", { timeout: " + fmt.Sprint(timeoutMS) + " }).catch((error) => ctx.log.info(\"adaptive click failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
+				builder.WriteString("  else await ctx.log.info(\"adaptive click skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+			}
 		} else {
 			builder.WriteString("  await ctx.page.click(" + jsString(selector) + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
 		}
@@ -215,9 +221,14 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		candidates := scriptStepCandidateSelectors(step, selector)
 		if runtimeAdaptive || len(candidates) > 1 {
 			selectorVar := "selector_" + jsIdentifier(step.NodeID)
-			builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive fill target unresolved; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
-			builder.WriteString("  if (" + selectorVar + ") await ctx.page.fill(" + selectorVar + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " }).catch((error) => ctx.log.info(\"adaptive fill failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
-			builder.WriteString("  else await ctx.log.info(\"adaptive fill skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+			if requireAdaptiveResolution {
+				builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ");\n")
+				builder.WriteString("  await ctx.page.fill(" + selectorVar + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+			} else {
+				builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive fill target unresolved; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
+				builder.WriteString("  if (" + selectorVar + ") await ctx.page.fill(" + selectorVar + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " }).catch((error) => ctx.log.info(\"adaptive fill failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
+				builder.WriteString("  else await ctx.log.info(\"adaptive fill skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+			}
 		} else {
 			builder.WriteString("  await ctx.page.fill(" + jsString(selector) + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
 		}
@@ -234,9 +245,14 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		candidates := scriptStepCandidateSelectors(step, selector)
 		if runtimeAdaptive || len(candidates) > 1 {
 			selectorVar := "selector_" + jsIdentifier(step.NodeID)
-			builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive select target unresolved; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
-			builder.WriteString("  if (" + selectorVar + ") await ctx.page.selectOption(" + selectorVar + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " }).catch((error) => ctx.log.info(\"adaptive select failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
-			builder.WriteString("  else await ctx.log.info(\"adaptive select skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+			if requireAdaptiveResolution {
+				builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ");\n")
+				builder.WriteString("  await ctx.page.selectOption(" + selectorVar + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
+			} else {
+				builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive select target unresolved; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
+				builder.WriteString("  if (" + selectorVar + ") await ctx.page.selectOption(" + selectorVar + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " }).catch((error) => ctx.log.info(\"adaptive select failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
+				builder.WriteString("  else await ctx.log.info(\"adaptive select skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+			}
 		} else {
 			builder.WriteString("  await ctx.page.selectOption(" + jsString(selector) + ", " + valueExpr + ", { timeout: " + fmt.Sprint(timeoutMS) + " });\n")
 		}
@@ -254,9 +270,14 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 		candidates := scriptStepCandidateSelectors(step, selector)
 		if runtimeAdaptive || len(candidates) > 1 {
 			selectorVar := "selector_" + jsIdentifier(step.NodeID)
-			builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive upload target unresolved; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
-			builder.WriteString("  if (" + selectorVar + ") await ctx.page.setInputFiles(" + selectorVar + ", await ctx.secrets.getFile(" + jsString(fileRef) + ")).catch((error) => ctx.log.info(\"adaptive upload failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
-			builder.WriteString("  else await ctx.log.info(\"adaptive upload skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+			if requireAdaptiveResolution {
+				builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ");\n")
+				builder.WriteString("  await ctx.page.setInputFiles(" + selectorVar + ", await ctx.secrets.getFile(" + jsString(fileRef) + "));\n")
+			} else {
+				builder.WriteString("  const " + selectorVar + " = await cascadeResolveSelector(ctx, " + jsString(step.NodeID) + ", " + jsJSON(candidates) + ", " + fmt.Sprint(timeoutMS) + ").catch(async (error) => { await ctx.log.info(\"adaptive upload target unresolved; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }); return \"\"; });\n")
+				builder.WriteString("  if (" + selectorVar + ") await ctx.page.setInputFiles(" + selectorVar + ", await ctx.secrets.getFile(" + jsString(fileRef) + ")).catch((error) => ctx.log.info(\"adaptive upload failed; continuing\", { nodeId: " + jsString(step.NodeID) + ", error: String(error).slice(0, 180) }));\n")
+				builder.WriteString("  else await ctx.log.info(\"adaptive upload skipped because no candidate matched\", { nodeId: " + jsString(step.NodeID) + " });\n")
+			}
 		} else {
 			builder.WriteString("  await ctx.page.setInputFiles(" + jsString(selector) + ", await ctx.secrets.getFile(" + jsString(fileRef) + "));\n")
 		}

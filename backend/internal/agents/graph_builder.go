@@ -612,15 +612,16 @@ func demoCredentialVariables(project *model.ProjectContext) []model.GraphVariabl
 
 func graphNodeFromVerifiedAction(project *model.ProjectContext, action model.VerifiedInteractionAction, order int, featureID string) *model.GraphNode {
 	selector := strings.TrimSpace(action.Selector)
-	if selector == "" {
+	actionType := graphActionTypeFromKind(action.Kind, selector)
+	if selector == "" && actionType != model.GraphActionWait && actionType != model.GraphActionInspect {
 		return nil
 	}
-	actionType := graphActionTypeFromKind(action.Kind, selector)
 	if businessActionNeedsExecutableSelector(actionType) && !selectorUsableForBusinessAction(selector) {
 		return nil
 	}
 	adaptive := action.VerificationStatus == "runtime_adaptive"
-	required := (action.IsBusiness || looksLikeLoginAction(action.Label, selector)) && !adaptive
+	sidecarUnavailable := action.VerificationStatus == "sidecar_unavailable"
+	required := (action.IsBusiness || looksLikeLoginAction(action.Label, selector)) && !adaptive && !sidecarUnavailable
 	severity := "warning"
 	if required {
 		severity = "blocking"
@@ -650,6 +651,7 @@ func graphNodeFromVerifiedAction(project *model.ProjectContext, action model.Ver
 		ActionSpec: &model.GraphAction{
 			Type:      actionType,
 			Target:    target,
+			Value:     action.InputValue,
 			TimeoutMS: maxInt(action.DurationHintMS, 12000),
 		},
 		StateAfter: []model.StateAssertion{{
@@ -704,6 +706,7 @@ func graphNodeFromVerifiedAction(project *model.ProjectContext, action model.Ver
 			"verification_source":     action.VerificationSource,
 			"selector_score":          action.SelectorScore,
 			"runtime_adaptive":        adaptive,
+			"sidecar_unavailable":     sidecarUnavailable,
 		},
 	}
 }
@@ -712,6 +715,9 @@ func validationKindForInteraction(action model.VerifiedInteractionAction) string
 	if action.VerificationStatus == "runtime_adaptive" {
 		return "runtime_adaptive_interaction"
 	}
+	if action.VerificationStatus == "sidecar_unavailable" {
+		return "code_evidence_interaction"
+	}
 	return "verified_interaction"
 }
 
@@ -719,12 +725,18 @@ func validationAssertionForInteraction(action model.VerifiedInteractionAction) s
 	if action.VerificationStatus == "runtime_adaptive" {
 		return "运行时按需求目标和候选 selector 找到业务控件并执行"
 	}
+	if action.VerificationStatus == "sidecar_unavailable" {
+		return "页面预扫描不可用，运行时按需求追踪后的代码 selector 证据执行"
+	}
 	return "页面预扫描确认 selector 可执行"
 }
 
 func assetRoleForInteraction(action model.VerifiedInteractionAction) string {
 	if action.VerificationStatus == "runtime_adaptive" {
 		return "adaptive_business_action"
+	}
+	if action.VerificationStatus == "sidecar_unavailable" {
+		return "code_evidence_business_action"
 	}
 	return "verified_business_action"
 }

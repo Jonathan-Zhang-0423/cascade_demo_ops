@@ -585,6 +585,9 @@ func labelFromSelector(selector string) string {
 
 func actionKindFromSelector(selector string) string {
 	lower := strings.ToLower(selector)
+	if selectorLooksReadOnlySurface(lower) {
+		return "inspect"
+	}
 	switch {
 	case containsAny(lower, "email", "username", "password", "input", "search", "name", "message", "phone"):
 		return "fill"
@@ -593,6 +596,25 @@ func actionKindFromSelector(selector string) string {
 	default:
 		return "inspect"
 	}
+}
+
+func selectorLooksReadOnlySurface(selector string) bool {
+	lower := strings.ToLower(selector)
+	if lower == "" {
+		return false
+	}
+	if containsAny(lower,
+		"display", "readonly", "read-only", "read_only", "label", "caption", "title",
+		"avatar", "profile", "user-email", "user_email", "user-name", "user_name",
+		"email-display", "name-display", "current-user", "account-email", "account-name",
+	) {
+		return true
+	}
+	if containsAny(lower, "status", "badge", "summary", "stat", "metric", "count") &&
+		!containsAny(lower, "button", "btn", "create", "new", "start", "run", "build", "generate", "submit") {
+		return true
+	}
+	return false
 }
 
 func containsAny(value string, tokens ...string) bool {

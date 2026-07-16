@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -102,6 +103,62 @@ func TestGraphBuilderBlocksWhenOnlyChromeToggleExists(t *testing.T) {
 	_, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, productMap, graphQualityReport(project), graphQualityIntelligence())
 	if err == nil || !strings.Contains(err.Error(), "no verified business action") {
 		t.Fatalf("chrome-only evidence must block fake scripts, got %v", err)
+	}
+}
+
+func TestProjectIntelligenceTreatsDisplaySelectorsAsReadOnly(t *testing.T) {
+	for _, selector := range []string{
+		"[data-testid='user-email-display']",
+		"[data-testid='user-name-display']",
+		"[data-testid='current-user-avatar']",
+	} {
+		if got := actionKindFromSelector(selector); got != "inspect" {
+			t.Fatalf("expected %s to be inspect-only, got %q", selector, got)
+		}
+		if selectorUsableForBusinessAction(selector) {
+			t.Fatalf("display selector must not be usable for business action: %s", selector)
+		}
+	}
+}
+
+func TestIntentFallbackGeneratesTetrisBuildWorkflow(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "演示登录（10s），新建项目（10s，俄罗斯方块，构建模式），agent实际构建演示（60s等待）"
+	project.DemoAccount = &model.DemoAccount{UsernameSecretRef: "local-dev/demo_username", PasswordSecretRef: "local-dev/demo_password"}
+	intelligence := graphQualityIntelligence()
+	intelligence.RunIntentScope = runIntentScopeForProject(project)
+	intelligence.DemoIntent.Objective = project.ProductDescription
+	intelligence.DemoIntent.Goals = []model.DemoIntentGoal{
+		{ID: "intent_login", Label: "登录", Required: true},
+		{ID: "intent_new_project", Label: "新建项目", Required: true, BusinessCritical: true, TargetKeywords: []string{"新建项目", "new project"}},
+		{ID: "intent_tetris", Label: "俄罗斯方块", Required: true, BusinessCritical: true, TargetKeywords: []string{"俄罗斯方块", "tetris"}},
+		{ID: "intent_build_mode", Label: "构建模式", Required: true, BusinessCritical: true, TargetKeywords: []string{"构建模式", "build mode"}},
+		{ID: "intent_agent_build", Label: "agent实际构建演示", Required: true, BusinessCritical: true, TargetKeywords: []string{"agent", "构建", "生成"}},
+	}
+	plan := fallbackPlanFromExplicitIntent(project, intelligence, nil, errors.New("sidecar unavailable"))
+	if plan == nil || plan.BusinessActionCount < 4 {
+		t.Fatalf("expected explicit intent fallback business actions, got %+v", plan)
+	}
+	intelligence.VerifiedInteraction = plan
+
+	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, graphQualityProductMap(), graphQualityReport(project), intelligence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, graphQualityReport(project), graphQualityProductMap(), graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
+	for _, want := range []string{"新建项目", "俄罗斯方块", "构建模式", "启动 agent 实际构建", "waitForTimeout(60000)"} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("expected generated script to contain %q:\n%s", want, source)
+		}
+	}
+	for _, forbidden := range []string{"user-email-display", "user-name-display", `fill(selector_intent_project_name, "",`} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("generated script must not contain %q:\n%s", forbidden, source)
+		}
 	}
 }
 
