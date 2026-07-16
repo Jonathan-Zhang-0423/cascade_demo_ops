@@ -107,6 +107,12 @@ func TestGraphBuilderBlocksWhenOnlyChromeToggleExists(t *testing.T) {
 }
 
 func TestProjectIntelligenceTreatsDisplaySelectorsAsReadOnly(t *testing.T) {
+	if got := actionKindFromSelector("input[aria-label*='项目']"); got != "fill" {
+		t.Fatalf("expected aria-label input to be fillable, got %q", got)
+	}
+	if !selectorUsableForBusinessAction("input[aria-label*='项目']") {
+		t.Fatal("aria-label input should be usable for business fill actions")
+	}
 	for _, selector := range []string{
 		"[data-testid='user-email-display']",
 		"[data-testid='user-name-display']",
@@ -144,6 +150,10 @@ func TestIntentFallbackGeneratesTetrisBuildWorkflow(t *testing.T) {
 	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, graphQualityProductMap(), graphQualityReport(project), intelligence)
 	if err != nil {
 		t.Fatal(err)
+	}
+	projectNameNode := graphNodeByID(graph, "verified_intent_project_name")
+	if projectNameNode == nil || projectNameNode.ActionSpec == nil || projectNameNode.ActionSpec.Type != model.GraphActionFill {
+		t.Fatalf("project name stage must be a fill action, got %+v", projectNameNode)
 	}
 	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, graphQualityReport(project), graphQualityProductMap(), graph, intelligence)
 	if err != nil {

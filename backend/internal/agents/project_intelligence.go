@@ -624,6 +624,12 @@ func selectorLooksReadOnlySurface(selector string) bool {
 		return false
 	}
 	if containsAny(lower,
+		"input[", "textarea[", "select[", "button[", "[role=\"button\"", "[role='button'",
+		"[role=\"textbox\"", "[role='textbox'", "placeholder=", "name=", "aria-label", "aria-labelledby",
+	) {
+		return false
+	}
+	if containsAny(lower,
 		"display", "readonly", "read-only", "read_only", "label", "caption", "title",
 		"avatar", "profile", "user-email", "user_email", "user-name", "user_name",
 		"email-display", "name-display", "current-user", "account-email", "account-name",
