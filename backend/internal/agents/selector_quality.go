@@ -107,6 +107,28 @@ func actionLooksLikeChromeControl(label string, selector string) bool {
 	)
 }
 
+func actionLooksUnsafeOrOffIntent(label string, selector string) bool {
+	joined := normalizeIntentText(label + " " + selector)
+	if joined == "" {
+		return false
+	}
+	if containsAnyNormalized(joined,
+		"cancel", "取消", "delete", "删除", "remove", "移除", "stop", "停止",
+		"bulk delete", "批量删除", "regenerate cancel", "取消重新生成",
+	) {
+		return true
+	}
+	if containsAnyNormalized(joined, "rename", "重命名") &&
+		containsAnyNormalized(joined, "confirm", "确认", "submit", "提交") {
+		return true
+	}
+	return false
+}
+
+func actionAllowedForIntentEvidence(label string, selector string) bool {
+	return !actionLooksLikeChromeControl(label, selector) && !actionLooksUnsafeOrOffIntent(label, selector)
+}
+
 func businessActionNeedsExecutableSelector(action model.GraphActionType) bool {
 	switch action {
 	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload:

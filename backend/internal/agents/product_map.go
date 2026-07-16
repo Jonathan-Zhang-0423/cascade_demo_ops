@@ -323,8 +323,13 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 			continue
 		}
 		actions := []string{}
+		primaryActions := []model.UIActionRef{}
 		for _, action := range surface.Actions {
+			if !actionAllowedForIntentEvidence(action.Label, action.Selector) {
+				continue
+			}
 			actions = append(actions, firstNonEmpty(action.Kind, "inspect"))
+			primaryActions = append(primaryActions, action)
 		}
 		if len(actions) == 0 {
 			actions = []string{"inspect", "capture"}
@@ -335,7 +340,7 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 					continue
 				}
 				page.Actions = uniqueStrings(append(page.Actions, actions...))
-				page.PrimaryActions = append(page.PrimaryActions, surface.Actions...)
+				page.PrimaryActions = append(page.PrimaryActions, primaryActions...)
 				page.States = uniqueStrings(append(page.States, surface.States...))
 				page.FeatureRefs = uniqueStrings(append(page.FeatureRefs, surface.FeatureRefs...))
 				page.EvidenceRefs = uniqueEvidenceRefs(append(page.EvidenceRefs, surface.EvidenceRefs...))
@@ -349,7 +354,7 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 			Title:          firstNonEmpty(surface.Title, "项目理解页面"),
 			Purpose:        firstNonEmpty(surface.PageRole, "由 ProjectIntelligenceGraph 识别的可演示交互面。"),
 			Actions:        uniqueStrings(actions),
-			PrimaryActions: append([]model.UIActionRef{}, surface.Actions...),
+			PrimaryActions: append([]model.UIActionRef{}, primaryActions...),
 			States:         append([]string{}, surface.States...),
 			FeatureRefs:    append([]string{}, surface.FeatureRefs...),
 			EvidenceRefs:   surface.EvidenceRefs,
@@ -482,6 +487,9 @@ func componentNodesFromIntelligence(intelligence *model.ProjectIntelligencePack,
 		}
 		actions := make([]model.UIActionRef, 0, len(surface.Actions))
 		for _, action := range surface.Actions {
+			if !actionAllowedForIntentEvidence(action.Label, action.Selector) {
+				continue
+			}
 			actions = append(actions, model.UIActionRef{
 				ID:           action.ID,
 				Label:        action.Label,

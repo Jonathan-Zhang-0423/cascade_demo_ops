@@ -520,8 +520,11 @@ func buildProjectUnderstandingDossier(project *model.ProjectContext, report *mod
 			if component == nil {
 				continue
 			}
-			dossier.ComponentEvidence = append(dossier.ComponentEvidence, model.DossierEvidence{ID: component.ID, Kind: component.Kind, Label: component.Name, ComponentRef: component.ID, FilePathHashSHA256: hashString(component.FilePath), Summary: strings.Join(component.Selectors, ", "), EvidenceRefs: component.EvidenceRefs, Confidence: 0.7})
+			dossier.ComponentEvidence = append(dossier.ComponentEvidence, model.DossierEvidence{ID: component.ID, Kind: component.Kind, Label: component.Name, ComponentRef: component.ID, FilePathHashSHA256: hashString(component.FilePath), Summary: dossierEvidenceSummary(component.Selectors), EvidenceRefs: component.EvidenceRefs, Confidence: 0.7})
 			for _, action := range component.Actions {
+				if !actionAllowedForIntentEvidence(action.Label, action.Selector) {
+					continue
+				}
 				dossier.InteractionEvidence = append(dossier.InteractionEvidence, model.DossierEvidence{ID: firstNonEmpty(action.ID, "interaction_"+shortHash(component.ID+action.Label+action.Selector)), Kind: action.Kind, Label: action.Label, ComponentRef: component.ID, Summary: action.Selector, EvidenceRefs: action.EvidenceRefs, Confidence: 0.7})
 			}
 		}
@@ -538,7 +541,7 @@ func buildProjectUnderstandingDossier(project *model.ProjectContext, report *mod
 				dossier.RouteEvidence = append(dossier.RouteEvidence, model.DossierEvidence{ID: route.ID, Kind: "code_route", Label: firstNonEmpty(route.Name, route.Path), Route: route.Path, SourcePathHashSHA256: route.SourcePathHash, EvidenceRefs: route.EvidenceRefs, Confidence: route.Confidence})
 			}
 			for _, component := range snapshot.Components {
-				dossier.ComponentEvidence = append(dossier.ComponentEvidence, model.DossierEvidence{ID: component.ID, Kind: component.Kind, Label: component.Name, FilePathHashSHA256: component.FilePathHashSHA256, Summary: strings.Join(append(component.SelectorHints, component.ActionLabels...), ", "), EvidenceRefs: component.EvidenceRefs, Confidence: component.Confidence})
+				dossier.ComponentEvidence = append(dossier.ComponentEvidence, model.DossierEvidence{ID: component.ID, Kind: component.Kind, Label: component.Name, FilePathHashSHA256: component.FilePathHashSHA256, Summary: dossierEvidenceSummary(append(component.SelectorHints, component.ActionLabels...)), EvidenceRefs: component.EvidenceRefs, Confidence: component.Confidence})
 			}
 			for _, endpoint := range snapshot.APIEndpoints {
 				dossier.APIEvidence = append(dossier.APIEvidence, model.DossierEvidence{ID: endpoint.ID, Kind: endpoint.Method, Label: endpoint.Path, FilePathHashSHA256: endpoint.FilePathHashSHA256, Summary: endpoint.Path, EvidenceRefs: endpoint.EvidenceRefs, Confidence: endpoint.Confidence})
@@ -553,6 +556,20 @@ func buildProjectUnderstandingDossier(project *model.ProjectContext, report *mod
 	}
 	dossier.UncertaintyReport = uncertaintyReportForBundle(project, intelligence, graph)
 	return dossier
+}
+
+func dossierEvidenceSummary(values []string) string {
+	tokens := []string{}
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			token := strings.TrimSpace(part)
+			if token == "" || actionLooksUnsafeOrOffIntent(token, token) {
+				continue
+			}
+			tokens = append(tokens, token)
+		}
+	}
+	return strings.Join(uniqueStrings(tokens), ", ")
 }
 
 func outlineAuditText(values ...any) string {
