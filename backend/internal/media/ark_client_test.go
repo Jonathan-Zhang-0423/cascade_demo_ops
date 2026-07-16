@@ -81,6 +81,35 @@ func TestArkMediaClientRealCreateContentGenerationTaskUsesArkEndpointAndBearer(t
 	}
 }
 
+func TestArkMediaClientRealGetContentGenerationTaskParsesOutput(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"task_1","status":"succeeded","model":"doubao-seedance-2-0-260128","output":{"video_url":"https://asset.example/demo.mp4"}}`))
+	}))
+	defer server.Close()
+
+	runtime := testArkRuntime(config.ArkMediaModeReal, server.URL+"/api/v3")
+	client := NewClient(runtime, server.Client())
+
+	result, err := client.GetContentGenerationTask(t.Context(), "task_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/api/v3/contents/generations/tasks/task_1" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer seedance-secret" {
+		t.Fatalf("authorization header = %q", gotAuth)
+	}
+	if result.Response == nil || result.Response.Status != "succeeded" || result.Response.Output["video_url"] != "https://asset.example/demo.mp4" {
+		t.Fatalf("unexpected task result: %+v", result)
+	}
+}
+
 func TestArkMediaClientRealGenerateImagesUsesSeedreamProvider(t *testing.T) {
 	var gotPath string
 	var gotAuth string

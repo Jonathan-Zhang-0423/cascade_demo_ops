@@ -23,6 +23,7 @@ func NewRecordRequestFromClientExecutionPackage(source *model.ClientExecutionPac
 	}
 	viewport := viewportFromRunSpec(source.RecordingRunSpec)
 	sandboxPolicy := model.ResolveSandboxPolicy(source.RecordingRunSpec, source.ExecutableScriptBundle)
+	executableBundle := executableBundleWithGraphCaptureRequirements(source)
 	return RecordRequest{
 		Graph:                  source.WorkflowGraph,
 		OutputDir:              outputDir,
@@ -32,8 +33,94 @@ func NewRecordRequestFromClientExecutionPackage(source *model.ClientExecutionPac
 		SourcePackageID:        source.PackageID,
 		RecordingRunSpec:       &source.RecordingRunSpec,
 		SandboxPolicy:          &sandboxPolicy,
-		ExecutableScriptBundle: source.ExecutableScriptBundle,
+		ExecutableScriptBundle: executableBundle,
 	}, nil
+}
+
+func executableBundleWithGraphCaptureRequirements(source *model.ClientExecutionPackage) *model.ExecutableRecordingScriptBundle {
+	if source == nil || source.ExecutableScriptBundle == nil || source.ExecutableScriptBundle.PlanJSON == nil || source.WorkflowGraph == nil {
+		if source == nil {
+			return nil
+		}
+		return source.ExecutableScriptBundle
+	}
+	graphNodes := map[string]*model.GraphNode{}
+	for _, node := range source.WorkflowGraph.Nodes {
+		if node != nil && node.ID != "" {
+			graphNodes[node.ID] = node
+		}
+	}
+	if len(graphNodes) == 0 {
+		return source.ExecutableScriptBundle
+	}
+	steps := source.ExecutableScriptBundle.PlanJSON.Steps
+	updatedSteps := make([]model.ScriptStep, len(steps))
+	changed := false
+	for index, step := range steps {
+		updated := step
+		if node := graphNodes[step.NodeID]; nodeRequiresScreenshot(node) {
+			updated.Capture = mergeGraphCaptureRequirement(updated.Capture, node)
+			changed = true
+		}
+		updatedSteps[index] = updated
+	}
+	if !changed {
+		return source.ExecutableScriptBundle
+	}
+	bundle := *source.ExecutableScriptBundle
+	plan := *source.ExecutableScriptBundle.PlanJSON
+	plan.Steps = updatedSteps
+	bundle.PlanJSON = &plan
+	return &bundle
+}
+
+func mergeGraphCaptureRequirement(stepCapture model.CaptureSpec, node *model.GraphNode) model.CaptureSpec {
+	graphCapture := model.CaptureSpec{}
+	if node != nil && node.Capture != nil {
+		graphCapture = *node.Capture
+	}
+	disableDedupe := false
+	stepCapture.Screenshot = true
+	stepCapture.Dedupe = &disableDedupe
+	if graphCapture.Video {
+		stepCapture.Video = true
+	}
+	if graphCapture.Zoom {
+		stepCapture.Zoom = true
+	}
+	if graphCapture.Callout {
+		stepCapture.Callout = true
+	}
+	if stepCapture.Scope == "" && graphCapture.Scope != "" {
+		stepCapture.Scope = graphCapture.Scope
+	}
+	if !stepCapture.FullPage && graphCapture.FullPage {
+		stepCapture.FullPage = true
+	}
+	if stepCapture.FocusSelector == "" && graphCapture.FocusSelector != "" {
+		stepCapture.FocusSelector = graphCapture.FocusSelector
+	}
+	if stepCapture.AssetRole == "" && graphCapture.AssetRole != "" {
+		stepCapture.AssetRole = graphCapture.AssetRole
+	}
+	if stepCapture.Crop == nil && graphCapture.Crop != nil {
+		crop := *graphCapture.Crop
+		stepCapture.Crop = &crop
+	}
+	if len(stepCapture.MaskSelectors) == 0 && len(graphCapture.MaskSelectors) > 0 {
+		stepCapture.MaskSelectors = append([]string{}, graphCapture.MaskSelectors...)
+	}
+	if len(stepCapture.Redactions) == 0 && len(graphCapture.Redactions) > 0 {
+		stepCapture.Redactions = append([]model.RedactionSpec{}, graphCapture.Redactions...)
+	}
+	return stepCapture
+}
+
+func nodeRequiresScreenshot(node *model.GraphNode) bool {
+	if node == nil {
+		return false
+	}
+	return node.IsScreenshot || (node.Capture != nil && node.Capture.Screenshot)
 }
 
 func defaultRecordingModeForPackage(source *model.ClientExecutionPackage) RecordingMode {

@@ -13,6 +13,8 @@ The command runs:
 - `go build ./...`
 - `go test ./...`
 - `@cascade/video-worker` typecheck and build
+- video-worker render smoke checks
+- server render validation fixture smoke
 - `@cascade/web` tests and build
 - `git diff --check`
 
@@ -92,3 +94,38 @@ The same value can be provided as an environment variable:
 $env:CASCADE_WSL_PROXY_PORT = "7897"
 corepack.cmd pnpm verify -- --wsl-go
 ```
+
+## Server Render Validation
+
+After a Linux/ffmpeg server replays a real package with `cmd/devsmoke`, validate
+the produced render directory directly:
+
+```bash
+node scripts/validate-server-render.mjs \
+  .cascade-dev/artifacts/exchange/<exchange_package_id>/render
+```
+
+The strict server check expects:
+
+- final video container: MP4
+- video codec: H.264
+- audio codec: AAC
+- resolution: `1920x1080`
+- fps: about `30`
+- no compositor fallback copy
+- planned `caption` / `trim` operations applied when present
+- no blocking `requirement_satisfaction_report` errors
+- `media_normalization_report.status == "ok"`
+
+Optional overrides:
+
+```bash
+node scripts/validate-server-render.mjs <render-dir> \
+  --expect-resolution 1920x1080 \
+  --expect-fps 30 \
+  --require-operation caption \
+  --require-operation trim
+```
+
+`--skip-ffprobe` is only for local fixture tests. Do not use it for server
+acceptance, because it skips the actual media codec/resolution/audio probe.

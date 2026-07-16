@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { launchOptionsWithProxy } from "./playwright-proxy.js";
 
 type BrowserEngineName = "chromium" | "firefox" | "webkit";
 
@@ -156,7 +157,7 @@ export async function recordWithPlaywright(request: BrowserRecordRequest): Promi
 
   const outputDir = request.output_dir;
   const viewport = request.viewport || defaultViewport;
-  const browser = await engine.launch({ headless: request.recording_run_spec?.browser?.headless ?? request.headless ?? true });
+  const browser = await engine.launch(launchOptionsWithProxy({ headless: request.recording_run_spec?.browser?.headless ?? request.headless ?? true }));
   const context = await browser.newContext({
     viewport,
     deviceScaleFactor: 1,

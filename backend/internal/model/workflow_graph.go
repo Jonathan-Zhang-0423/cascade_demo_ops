@@ -275,6 +275,7 @@ type CaptureSpec struct {
 	Video         bool            `json:"video,omitempty"`
 	Zoom          bool            `json:"zoom,omitempty"`
 	Callout       bool            `json:"callout,omitempty"`
+	Dedupe        *bool           `json:"dedupe,omitempty"`
 	Scope         CaptureScope    `json:"scope,omitempty"`
 	FullPage      bool            `json:"full_page,omitempty"`
 	FocusSelector string          `json:"focus_selector,omitempty"`

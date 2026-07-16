@@ -127,6 +127,7 @@ interface GraphNode {
   action?: string;
   selector?: string;
   expected_outcome?: string;
+  is_screenshot?: boolean;
   action_spec?: {
     type?: string;
     target?: {
@@ -139,6 +140,10 @@ interface GraphNode {
     };
   };
   capture?: {
+    screenshot?: boolean;
+    video?: boolean;
+    zoom?: boolean;
+    full_page?: boolean;
     focus_selector?: string;
     asset_role?: string;
   };
@@ -465,6 +470,11 @@ interface RequirementSatisfactionReport {
     recording_execution_plan: string[];
     actual_material: string[];
   };
+  adopted_values: {
+    target_duration_sec: RequirementAdoptedValue<number>;
+    output_resolution: RequirementAdoptedValue<{ width: number; height: number }>;
+    final_video_format: RequirementAdoptedValue<string>;
+  };
   requested: {
     product_target_duration_sec: number | undefined;
     recording_target_duration_sec: number | undefined;
@@ -476,6 +486,8 @@ interface RequirementSatisfactionReport {
     recording_viewports: ViewportSpec[] | undefined;
     output_resolution: { width: number; height: number } | undefined;
     required_assets: RequestedAsset[] | undefined;
+    required_step_ids: string[];
+    screenshot_step_ids: string[];
   };
   actual: {
     demo_video_path: string | undefined;
@@ -490,10 +502,43 @@ interface RequirementSatisfactionReport {
     rendered_operations: string[];
     planned_overlay_types: string[];
     applied_overlay_types: string[];
+    represented_step_ids: string[];
+    passed_step_count: number;
+    failed_step_ids: string[];
+    screenshot_step_ids: string[];
   };
+  step_checks: RequirementStepCheck[];
+  asset_checks: RequirementAssetCheck[];
   checks: RequirementCheck[];
   warnings: RequirementFinding[];
   errors: RequirementFinding[];
+}
+
+interface RequirementAdoptedValue<T> {
+  value?: T | undefined;
+  source: string;
+  reason: string;
+  ignored?: Array<{ source: string; value?: T | undefined; reason: string }>;
+}
+
+interface RequirementStepCheck {
+  step_id: string;
+  action: string;
+  required: boolean;
+  execution_status: string;
+  represented_in_edit_plan: boolean;
+  screenshot_required: boolean;
+  screenshot_artifact_ids: string[];
+  status: "pass" | "warn" | "fail";
+  findings: RequirementFinding[];
+}
+
+interface RequirementAssetCheck {
+  kind: string;
+  required: boolean;
+  status: "pass" | "warn" | "fail";
+  artifact_ids: string[];
+  message: string;
 }
 
 interface RequirementCheck {
@@ -532,7 +577,9 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
   }
 
   const targetDurationSec = Math.max(1, Math.round((editPlan.target_duration_ms || (request.duration_sec || 60) * 1000) / 1000));
-  const compositor = await composeFinalVideo(outputDir, targetDurationSec, catalog, editPlan);
+  const requestedFormats = requestedFinalVideoFormats(request.graph, request.recording_run_spec);
+  const targetContainer = preferredFinalVideoContainer(requestedFormats);
+  const compositor = await composeFinalVideo(outputDir, targetDurationSec, catalog, editPlan, targetContainer);
   const mediaNormalization = await normalizeSourceReferenceVideo(outputDir, catalog, editPlan, compositor.video_path);
   const sourceReferenceVideoPath = mediaNormalization.report.status === "ok" ? mediaNormalization.report.reference_video_path : undefined;
   const videoPath = sourceReferenceVideoPath || compositor.video_path;
@@ -819,6 +866,8 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
       errors.push(finding("unknown_source_artifact", `Shot references missing source artifact ${shot.source_artifact_id}`, `${shotPath}.source_artifact_id`));
     } else if (artifact.sensitive) {
       errors.push(finding("sensitive_source_artifact", `Shot references sensitive artifact ${shot.source_artifact_id}`, `${shotPath}.source_artifact_id`));
+    } else if (isGeneratedCandidateArtifact(artifact)) {
+      validateGeneratedCandidateShot(shot, artifact, shotPath, errors);
     } else if (!isDemoMaterial(artifact)) {
       errors.push(finding("non_demo_source_artifact", `Shot references non-demo/debug artifact ${shot.source_artifact_id}`, `${shotPath}.source_artifact_id`));
     }
@@ -926,7 +975,13 @@ function validateOverlays(overlays: EditOverlay[], stepByID: Map<string, Timelin
   });
 }
 
-async function composeFinalVideo(outputDir: string, targetDurationSec: number, catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): Promise<CompositorResult> {
+async function composeFinalVideo(
+  outputDir: string,
+  targetDurationSec: number,
+  catalog: AssetTimelineCatalog,
+  editPlan: DemoEditPlan,
+  targetContainer?: "mp4" | "webm" | "mov" | "m4v",
+): Promise<CompositorResult> {
   const shotPlan = buildCompositorShotPlan(catalog, editPlan);
   const primaryShot = shotPlan.find((shot) => shot.source_path);
   if (shotPlan.length === 0 || !primaryShot) {
@@ -951,7 +1006,9 @@ async function composeFinalVideo(outputDir: string, targetDurationSec: number, c
   const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
   const ffmpegAvailable = await isCommandAvailable(ffmpegPath);
   const sourceArtifact = findDemoArtifactByID(catalog, primaryShot.source_artifact_id);
-  const extension = sourceArtifact ? videoExtensionForArtifact(sourceArtifact) : ".webm";
+  const sourceExtension = sourceArtifact ? videoExtensionForArtifact(sourceArtifact) : ".webm";
+  const targetExtension = extensionForContainer(targetContainer);
+  const extension = ffmpegAvailable ? targetExtension || sourceExtension : sourceExtension;
   const videoPath = path.join(outputDir, `demo_${targetDurationSec}s${extension}`);
   if (!ffmpegAvailable) {
     await copyFile(primaryShot.source_path as string, videoPath);
@@ -962,13 +1019,13 @@ async function composeFinalVideo(outputDir: string, targetDurationSec: number, c
       ffmpeg_available: false,
       quality_status: "degraded",
       source_artifact_id: primaryShot.source_artifact_id,
-      output_container: extension.replace(/^\./, ""),
+      output_container: sourceExtension.replace(/^\./, ""),
       shot_plan: shotPlan,
       planned_operations: plannedOperations(shotPlan),
       applied_operations: ["fallback_copy"],
       skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, true),
       fallback_reason: "ffmpeg_not_available",
-      note: "Rendered a deterministic fallback demo video by copying the source browser recording. The edit plan is valid and recorded in the render manifest, but trim/concat execution requires ffmpeg.",
+      note: "Rendered a deterministic fallback demo video by copying the source browser recording. The edit plan is valid and recorded in the render manifest, but requested delivery formatting and trim/concat execution require ffmpeg.",
     };
     if (primaryShot.source_uri) result.source_uri = primaryShot.source_uri;
     return result;
@@ -976,15 +1033,16 @@ async function composeFinalVideo(outputDir: string, targetDurationSec: number, c
 
   const composed = await composeWithFFmpeg(ffmpegPath, outputDir, videoPath, shotPlan, extension);
   if (!composed.rendered) {
-    await copyFile(primaryShot.source_path as string, videoPath);
+    const fallbackVideoPath = path.join(outputDir, `demo_${targetDurationSec}s${sourceExtension}`);
+    await copyFile(primaryShot.source_path as string, fallbackVideoPath);
     const result: CompositorResult = {
       status: "rendered",
-      video_path: videoPath,
+      video_path: fallbackVideoPath,
       method: "copy_source_recording",
       ffmpeg_available: true,
       quality_status: "degraded",
       source_artifact_id: primaryShot.source_artifact_id,
-      output_container: extension.replace(/^\./, ""),
+      output_container: sourceExtension.replace(/^\./, ""),
       shot_plan: shotPlan,
       planned_operations: plannedOperations(shotPlan),
       applied_operations: ["fallback_copy"],
@@ -1054,6 +1112,13 @@ function buildRequirementSatisfactionReport(
   const screenshotCount = catalog.artifacts.filter((artifact) => isScreenshotArtifact(artifact)).length;
   const plannedOverlayTypes = plannedOverlayTypesForPlan(editPlan);
   const appliedOverlayTypes = overlayTypesAppliedByCompositor(compositor);
+  const adoptedValues = adoptedRequirementValues(graph, runSpec, editPlanTargetDurationSec, requestedFormats, finalFormat);
+  const stepChecks = buildStepRequirementChecks(graph, catalog, editPlan);
+  const assetChecks = buildAssetRequirementChecks(graph, runSpec, catalog, compositor, mediaNormalization, finalVideoPath, stepDocsPath);
+  const representedStepIDs = representedStepIDsForPlan(editPlan);
+  const failedStepIDs = catalog.steps.filter((step) => isFailedExecutionStatus(step.status)).map((step) => step.step_id);
+  const passedStepCount = catalog.steps.filter((step) => isPassedExecutionStatus(step.status)).length;
+  const actualScreenshotStepIDs = screenshotStepIDsForCatalog(catalog);
 
   if (productTargetDuration && recordingTargetDurationSec && productTargetDuration !== recordingTargetDurationSec) {
     warnings.push(requirementFinding(
@@ -1071,6 +1136,25 @@ function buildRequirementSatisfactionReport(
       code: "duration_intent_alignment",
       status: "pass",
       message: "No conflicting duration intent was detected.",
+    });
+  }
+
+  if (adoptedValues.target_duration_sec.value && editPlanTargetDurationSec && adoptedValues.target_duration_sec.value !== editPlanTargetDurationSec) {
+    warnings.push(requirementFinding(
+      "edit_plan_duration_differs_from_delivery_intent",
+      `Delivery intent resolves to ${adoptedValues.target_duration_sec.value}s from ${adoptedValues.target_duration_sec.source}, while the current deterministic edit plan targets ${editPlanTargetDurationSec}s.`,
+      "demo_edit_plan.target_duration_ms",
+    ));
+    checks.push({
+      code: "target_duration_resolution",
+      status: "warn",
+      message: "Delivery duration intent is preserved separately from the current deterministic render duration.",
+    });
+  } else {
+    checks.push({
+      code: "target_duration_resolution",
+      status: "pass",
+      message: `Resolved target duration from ${adoptedValues.target_duration_sec.source}.`,
     });
   }
 
@@ -1159,6 +1243,34 @@ function buildRequirementSatisfactionReport(
     }
   }
 
+  for (const stepCheck of stepChecks) {
+    checks.push({
+      code: `step_${safeName(stepCheck.step_id)}`,
+      status: stepCheck.status,
+      message: stepRequirementMessage(stepCheck),
+    });
+    for (const findingValue of stepCheck.findings) {
+      if (stepCheck.status === "fail") {
+        errors.push(findingValue);
+      } else if (stepCheck.status === "warn") {
+        warnings.push(findingValue);
+      }
+    }
+  }
+
+  for (const assetCheck of assetChecks) {
+    checks.push({
+      code: `asset_${safeName(assetCheck.kind)}`,
+      status: assetCheck.status,
+      message: assetCheck.message,
+    });
+    if (assetCheck.status === "fail") {
+      errors.push(requirementFinding("required_asset_not_satisfied", assetCheck.message, `assets.${assetCheck.kind}`));
+    } else if (assetCheck.status === "warn") {
+      warnings.push(requirementFinding("asset_satisfied_with_warning", assetCheck.message, `assets.${assetCheck.kind}`));
+    }
+  }
+
   for (const overlayType of plannedOverlayTypes) {
     if (!appliedOverlayTypes.includes(overlayType)) {
       warnings.push(requirementFinding(
@@ -1179,6 +1291,7 @@ function buildRequirementSatisfactionReport(
       recording_execution_plan: ["recording_run_spec.timeline", "recording_run_spec.browser", "recording_run_spec.outputs"],
       actual_material: ["execution_trace", "generated_assets", "asset_timeline_catalog"],
     },
+    adopted_values: adoptedValues,
     requested: {
       product_target_duration_sec: productTargetDuration,
       recording_target_duration_sec: recordingTargetDurationSec,
@@ -1190,6 +1303,8 @@ function buildRequirementSatisfactionReport(
       recording_viewports: runSpec?.browser?.viewports,
       output_resolution: outputResolution,
       required_assets: graph?.assets?.requested_assets?.filter((asset) => asset.required),
+      required_step_ids: catalog.steps.filter((step) => step.required).map((step) => step.step_id),
+      screenshot_step_ids: requestedScreenshotStepIDs(graph, catalog),
     },
     actual: {
       demo_video_path: finalVideoPath,
@@ -1204,11 +1319,320 @@ function buildRequirementSatisfactionReport(
       rendered_operations: compositor.applied_operations || [],
       planned_overlay_types: plannedOverlayTypes,
       applied_overlay_types: appliedOverlayTypes,
+      represented_step_ids: representedStepIDs,
+      passed_step_count: passedStepCount,
+      failed_step_ids: failedStepIDs,
+      screenshot_step_ids: actualScreenshotStepIDs,
     },
+    step_checks: stepChecks,
+    asset_checks: assetChecks,
     checks,
     warnings,
     errors,
   };
+}
+
+function adoptedRequirementValues(
+  graph: DemoWorkflowGraph | undefined,
+  runSpec: RecordingRunSpec | undefined,
+  editPlanTargetDurationSec: number | undefined,
+  requestedFormats: string[],
+  finalFormat: string | undefined,
+): RequirementSatisfactionReport["adopted_values"] {
+  const productTargetDuration = resolveProductTargetDurationSec(graph);
+  const recordingTargetDuration = runSpec?.timeline?.target_duration_sec;
+  const targetDuration: RequirementAdoptedValue<number> = {
+    value: productTargetDuration || recordingTargetDuration || editPlanTargetDurationSec,
+    source: productTargetDuration
+      ? "workflow_graph.assets"
+      : recordingTargetDuration
+        ? "recording_run_spec.timeline"
+        : editPlanTargetDurationSec
+          ? "demo_edit_plan.target_duration_ms"
+          : "default",
+    reason: productTargetDuration
+      ? "Product-level delivery intent has priority over this run's capture strategy."
+      : recordingTargetDuration
+        ? "No product-level duration was provided, so the recording execution plan defines the target."
+        : "No upstream duration intent was provided, so the edit plan/default renderer duration is used.",
+  };
+  const ignoredDurations: RequirementAdoptedValue<number>["ignored"] = [];
+  if (productTargetDuration && recordingTargetDuration && productTargetDuration !== recordingTargetDuration) {
+    ignoredDurations.push({
+      source: "recording_run_spec.timeline",
+      value: recordingTargetDuration,
+      reason: "Recording duration is treated as capture strategy when product delivery intent is present.",
+    });
+  }
+  if (targetDuration.value && editPlanTargetDurationSec && targetDuration.value !== editPlanTargetDurationSec) {
+    ignoredDurations.push({
+      source: "demo_edit_plan.target_duration_ms",
+      value: editPlanTargetDurationSec,
+      reason: "Current deterministic render duration is preserved as actual behavior, but not treated as the product delivery target.",
+    });
+  }
+  if (ignoredDurations.length > 0) targetDuration.ignored = ignoredDurations;
+
+  const outputResolution = requestedOutputResolution(runSpec);
+  const recordingViewport = firstViewport(runSpec?.browser?.viewports);
+  const graphViewport = firstViewport(graph?.execution?.viewports);
+  const resolution = outputResolution || recordingViewportSize(recordingViewport) || recordingViewportSize(graphViewport) || {
+    width: MEDIA_NORMALIZATION_TARGET.width,
+    height: MEDIA_NORMALIZATION_TARGET.height,
+  };
+  const resolutionSource = outputResolution
+    ? "recording_run_spec.outputs"
+    : recordingViewport
+      ? "recording_run_spec.browser.viewports"
+      : graphViewport
+        ? "workflow_graph.execution.viewports"
+        : "media_normalization_target";
+  const outputResolutionValue: RequirementAdoptedValue<{ width: number; height: number }> = {
+    value: resolution,
+    source: resolutionSource,
+    reason: outputResolution
+      ? "Explicit output resolution controls captured and normalized deliverables."
+      : "Fallback resolution follows the most specific viewport or the normalization target.",
+  };
+  if (outputResolution && graphViewport && (outputResolution.width !== graphViewport.width || outputResolution.height !== graphViewport.height)) {
+    outputResolutionValue.ignored = [{
+      source: "workflow_graph.execution.viewports",
+      value: recordingViewportSize(graphViewport),
+      reason: "Explicit recording output resolution is more specific for final media normalization.",
+    }];
+  }
+
+  const preferredFormat = requestedFormats.includes("mp4") ? "mp4" : requestedFormats[0] || finalFormat || "mp4";
+  return {
+    target_duration_sec: targetDuration,
+    output_resolution: outputResolutionValue,
+    final_video_format: {
+      value: preferredFormat,
+      source: requestedFormats.length > 0 ? "workflow_graph.assets.requested_assets + recording_run_spec.outputs.output_formats" : "renderer_default",
+      reason: requestedFormats.includes("mp4")
+        ? "MP4 is preferred for delivery and future model/media compatibility."
+        : "No MP4 requirement was provided, so the first requested/current format is used.",
+    },
+  };
+}
+
+function buildStepRequirementChecks(graph: DemoWorkflowGraph | undefined, catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): RequirementStepCheck[] {
+  const nodeByID = new Map((graph?.nodes || []).map((node) => [node.id, node]));
+  const representedSteps = new Set(representedStepIDsForPlan(editPlan));
+  return catalog.steps.map((step) => {
+    const node = nodeByID.get(step.step_id);
+    const screenshotArtifacts = screenshotArtifactsForStep(catalog, step);
+    const screenshotRequired = nodeRequiresScreenshot(node);
+    const findings: RequirementFinding[] = [];
+    let status: RequirementStepCheck["status"] = "pass";
+
+    if (step.required && isFailedExecutionStatus(step.status)) {
+      status = "fail";
+      findings.push(requirementFinding(
+        "required_step_failed",
+        `Required script step ${step.step_id} ended with status ${step.status}.`,
+        `execution_trace.step_results.${step.step_id}`,
+      ));
+    } else if (step.required && !isPassedExecutionStatus(step.status)) {
+      status = "warn";
+      findings.push(requirementFinding(
+        "required_step_not_confirmed_passed",
+        `Required script step ${step.step_id} is ${step.status}; it is not confirmed as passed.`,
+        `execution_trace.step_results.${step.step_id}`,
+      ));
+    }
+
+    if (step.required && !representedSteps.has(step.step_id) && !isFailedExecutionStatus(step.status)) {
+      status = worseRequirementStatus(status, "warn");
+      findings.push(requirementFinding(
+        "required_step_not_represented_in_edit_plan",
+        `Required script step ${step.step_id} passed but is not represented in DemoEditPlan shots.`,
+        "demo_edit_plan.shots",
+      ));
+    }
+
+    if (screenshotRequired && screenshotArtifacts.length === 0) {
+      status = worseRequirementStatus(status, "fail");
+      findings.push(requirementFinding(
+        "required_step_screenshot_missing",
+        `Step ${step.step_id} requested a screenshot, but no screenshot artifact is linked to it.`,
+        `workflow_graph.nodes.${step.step_id}.capture`,
+      ));
+    }
+
+    return {
+      step_id: step.step_id,
+      action: step.action,
+      required: step.required,
+      execution_status: step.status,
+      represented_in_edit_plan: representedSteps.has(step.step_id),
+      screenshot_required: screenshotRequired,
+      screenshot_artifact_ids: screenshotArtifacts.map((artifact) => artifact.id),
+      status,
+      findings,
+    };
+  });
+}
+
+function buildAssetRequirementChecks(
+  graph: DemoWorkflowGraph | undefined,
+  runSpec: RecordingRunSpec | undefined,
+  catalog: AssetTimelineCatalog,
+  compositor: CompositorResult,
+  mediaNormalization: MediaNormalizationReport,
+  finalVideoPath: string,
+  stepDocsPath: string,
+): RequirementAssetCheck[] {
+  const checks: RequirementAssetCheck[] = [];
+  const requestedAssets = graph?.assets?.requested_assets || [];
+  const requiredAssetKinds = new Set(requestedAssets.filter((asset) => asset.required && asset.kind).map((asset) => asset.kind as string));
+  if (runSpec?.outputs?.final_video || requiredAssetKinds.has("demo_video")) requiredAssetKinds.add("demo_video");
+  if (requiresScreenshotPack(graph, runSpec)) requiredAssetKinds.add("screenshot_pack");
+  if (requiresStepByStepDocs(graph, runSpec)) requiredAssetKinds.add("step_by_step_docs");
+  if (runSpec?.outputs?.raw_recording) requiredAssetKinds.add("raw_recording");
+  if (runSpec?.outputs?.trace) requiredAssetKinds.add("trace");
+
+  for (const kind of [...requiredAssetKinds].sort()) {
+    checks.push(assetRequirementCheck(kind, catalog, compositor, mediaNormalization, finalVideoPath, stepDocsPath));
+  }
+  return checks;
+}
+
+function assetRequirementCheck(
+  kind: string,
+  catalog: AssetTimelineCatalog,
+  compositor: CompositorResult,
+  mediaNormalization: MediaNormalizationReport,
+  finalVideoPath: string,
+  stepDocsPath: string,
+): RequirementAssetCheck {
+  switch (kind) {
+    case "demo_video": {
+      const rendered = compositor.status === "rendered" && Boolean(finalVideoPath);
+      return {
+        kind,
+        required: true,
+        status: rendered ? "pass" : "fail",
+        artifact_ids: rendered ? ["final_demo_video"] : [],
+        message: rendered
+          ? `Final demo video was rendered to ${finalVideoPath}.`
+          : "Final demo video is required, but the compositor only produced a planned output.",
+      };
+    }
+    case "screenshot_pack": {
+      const screenshots = catalog.artifacts.filter((artifact) => isScreenshotArtifact(artifact));
+      return {
+        kind,
+        required: true,
+        status: screenshots.length > 0 ? "pass" : "fail",
+        artifact_ids: screenshots.map((artifact) => artifact.id),
+        message: screenshots.length > 0
+          ? `Screenshot pack has ${screenshots.length} screenshot artifact(s).`
+          : "Screenshot pack is required, but no screenshot artifact is available.",
+      };
+    }
+    case "step_by_step_docs": {
+      return {
+        kind,
+        required: true,
+        status: stepDocsPath ? "pass" : "fail",
+        artifact_ids: stepDocsPath ? ["step_by_step_docs"] : [],
+        message: stepDocsPath ? `Step-by-step docs were written to ${stepDocsPath}.` : "Step-by-step docs are required, but no docs path was produced.",
+      };
+    }
+    case "raw_recording": {
+      const recordings = catalog.artifacts.filter((artifact) => artifact.kind === "raw_recording" || (!isGeneratedCandidateArtifact(artifact) && isVideoArtifact(artifact)));
+      return {
+        kind,
+        required: true,
+        status: recordings.length > 0 ? "pass" : "fail",
+        artifact_ids: recordings.map((artifact) => artifact.id),
+        message: recordings.length > 0 ? "Raw recording source material is available." : "Raw recording was requested but no video source artifact is available.",
+      };
+    }
+    case "trace": {
+      const traces = catalog.artifacts.filter((artifact) => artifact.kind === "browser_trace" || artifact.kind === "execution_trace");
+      return {
+        kind,
+        required: true,
+        status: traces.length > 0 ? "pass" : "fail",
+        artifact_ids: traces.map((artifact) => artifact.id),
+        message: traces.length > 0 ? "Trace artifact is available for diagnostics." : "Trace output was requested but no trace artifact is available.",
+      };
+    }
+    case "source_reference_video": {
+      const ready = mediaNormalization.status === "ok" && Boolean(mediaNormalization.reference_video_path);
+      return {
+        kind,
+        required: true,
+        status: ready ? "pass" : "fail",
+        artifact_ids: ready ? ["source_reference_video"] : [],
+        message: ready ? "Source reference MP4 is ready for future model input." : "Source reference video is required but media normalization did not succeed.",
+      };
+    }
+    default:
+      return {
+        kind,
+        required: true,
+        status: "fail",
+        artifact_ids: catalog.artifacts.filter((artifact) => artifact.kind === kind).map((artifact) => artifact.id),
+        message: `Required asset kind ${kind} is not produced by the current renderer.`,
+      };
+  }
+}
+
+function representedStepIDsForPlan(plan: DemoEditPlan): string[] {
+  return [...new Set(plan.shots.map((shot) => shot.source_step_id).filter((stepID): stepID is string => Boolean(stepID)))];
+}
+
+function requestedScreenshotStepIDs(graph: DemoWorkflowGraph | undefined, catalog: AssetTimelineCatalog): string[] {
+  const nodeByID = new Map((graph?.nodes || []).map((node) => [node.id, node]));
+  return catalog.steps.filter((step) => nodeRequiresScreenshot(nodeByID.get(step.step_id))).map((step) => step.step_id);
+}
+
+function screenshotStepIDsForCatalog(catalog: AssetTimelineCatalog): string[] {
+  const stepIDs = new Set<string>();
+  for (const step of catalog.steps) {
+    if (screenshotArtifactsForStep(catalog, step).length > 0) {
+      stepIDs.add(step.step_id);
+    }
+  }
+  return [...stepIDs];
+}
+
+function screenshotArtifactsForStep(catalog: AssetTimelineCatalog, step: TimelineStep): TimelineArtifact[] {
+  const stepArtifactIDs = new Set(step.artifacts || []);
+  return catalog.artifacts.filter((artifact) => {
+    if (!isScreenshotArtifact(artifact)) return false;
+    return artifact.source_step_id === step.step_id || stepArtifactIDs.has(artifact.id);
+  });
+}
+
+function nodeRequiresScreenshot(node: GraphNode | undefined): boolean {
+  return node?.is_screenshot === true || node?.capture?.screenshot === true;
+}
+
+function isPassedExecutionStatus(status: string | undefined): boolean {
+  return String(status || "").toLowerCase() === "passed";
+}
+
+function isFailedExecutionStatus(status: string | undefined): boolean {
+  const normalized = String(status || "").toLowerCase();
+  return normalized === "failed" || normalized === "error" || normalized === "timed_out" || normalized === "timeout";
+}
+
+function worseRequirementStatus(left: RequirementCheck["status"], right: RequirementCheck["status"]): RequirementCheck["status"] {
+  const rank = { pass: 0, warn: 1, fail: 2 };
+  return rank[right] > rank[left] ? right : left;
+}
+
+function stepRequirementMessage(check: RequirementStepCheck): string {
+  const screenshot = check.screenshot_required ? `, screenshots=${check.screenshot_artifact_ids.length}` : "";
+  return `Step ${check.step_id} status=${check.execution_status}, represented=${check.represented_in_edit_plan}${screenshot}.`;
+}
+
+function recordingViewportSize(viewport: ViewportSpec | undefined): { width: number; height: number } | undefined {
+  return viewport?.width && viewport?.height ? { width: viewport.width, height: viewport.height } : undefined;
 }
 
 function resolveProductTargetDurationSec(graph: DemoWorkflowGraph | undefined): number | undefined {
@@ -1231,6 +1655,27 @@ function requestedFinalVideoFormats(graph: DemoWorkflowGraph | undefined, runSpe
   return [...new Set(formats)];
 }
 
+function preferredFinalVideoContainer(formats: string[]): "mp4" | "webm" | "mov" | "m4v" | undefined {
+  if (formats.includes("mp4")) return "mp4";
+  const first = formats.find((format): format is "mp4" | "webm" | "mov" | "m4v" => ["mp4", "webm", "mov", "m4v"].includes(format));
+  return first;
+}
+
+function extensionForContainer(container: "mp4" | "webm" | "mov" | "m4v" | undefined): ".mp4" | ".webm" | ".mov" | ".m4v" | undefined {
+  switch (container) {
+    case "mp4":
+      return ".mp4";
+    case "webm":
+      return ".webm";
+    case "mov":
+      return ".mov";
+    case "m4v":
+      return ".m4v";
+    default:
+      return undefined;
+  }
+}
+
 function firstViewport(viewports: ViewportSpec[] | undefined): ViewportSpec | undefined {
   return viewports?.find((viewport) => viewport.width && viewport.height);
 }
@@ -1250,6 +1695,7 @@ function requiresStepByStepDocs(graph: DemoWorkflowGraph | undefined, runSpec: R
 }
 
 function isScreenshotArtifact(artifact: TimelineArtifact): boolean {
+  if (isGeneratedCandidateArtifact(artifact)) return false;
   return artifact.kind === "screenshot" || artifact.kind === "webpage_screenshot" || artifact.mime_type === "image/png" || artifact.mime_type === "image/jpeg";
 }
 
@@ -1838,15 +2284,79 @@ function ffmpegFilterPath(filePath: string): string {
 function findDemoArtifactByID(catalog: AssetTimelineCatalog, id: string | undefined): TimelineArtifact | undefined {
   if (!id) return undefined;
   const artifact = catalog.artifacts.find((candidate) => candidate.id === id);
-  return artifact && isDemoMaterial(artifact) ? artifact : undefined;
+  return artifact && (isDemoMaterial(artifact) || isApprovedGeneratedCandidateArtifact(artifact)) ? artifact : undefined;
 }
 
 function isDemoMaterial(artifact: TimelineArtifact): boolean {
+  if (isGeneratedCandidateArtifact(artifact)) return false;
   if (artifact.include_in_demo === false) return false;
   if (artifact.sensitive) return false;
   if (artifact.kind === "browser_trace" || artifact.kind === "execution_trace" || artifact.kind === "artifact_manifest") return false;
   if (artifact.asset_role?.startsWith("debug")) return false;
   return true;
+}
+
+function isGeneratedCandidateArtifact(artifact: TimelineArtifact | undefined): boolean {
+  if (!artifact) return false;
+  const metadata = artifact.metadata || {};
+  return (
+    artifact.kind.startsWith("generated_") ||
+    metadata.source_material_policy === "non_authoritative_generated_candidate" ||
+    typeof metadata.provider_output_url === "string"
+  );
+}
+
+function isApprovedGeneratedCandidateArtifact(artifact: TimelineArtifact | undefined): boolean {
+  if (!artifact) return false;
+  if (!isGeneratedCandidateArtifact(artifact)) return false;
+  const metadata = artifact.metadata || {};
+  return (
+    artifact.kind === "generated_video_candidate" &&
+    artifact.sensitive !== true &&
+    metadata.approved_for_demo === true &&
+    metadata.non_authoritative === true &&
+    metadata.source_material_policy === "non_authoritative_generated_candidate"
+  );
+}
+
+function validateGeneratedCandidateShot(shot: DemoEditShot, artifact: TimelineArtifact, shotPath: string, errors: ValidationFinding[]): void {
+  if (!isApprovedGeneratedCandidateArtifact(artifact)) {
+    errors.push(
+      finding(
+        "generated_candidate_not_approved",
+        "Generated candidate artifacts require metadata.approved_for_demo=true, metadata.non_authoritative=true, and non_authoritative_generated_candidate policy before use.",
+        `${shotPath}.source_artifact_id`,
+      ),
+    );
+    return;
+  }
+  if (shot.source_step_id) {
+    errors.push(
+      finding(
+        "generated_candidate_cannot_represent_script_step",
+        "Generated candidate artifacts are presentation-only and cannot represent a customer-side product interaction step.",
+        `${shotPath}.source_step_id`,
+      ),
+    );
+  }
+  if (!shot.source_time_range_ms) {
+    errors.push(
+      finding(
+        "generated_candidate_missing_time_range",
+        "Generated video candidate shots must declare source_time_range_ms so the compositor uses an explicit approved segment.",
+        `${shotPath}.source_time_range_ms`,
+      ),
+    );
+  }
+  if (!isVideoArtifact(artifact)) {
+    errors.push(
+      finding(
+        "generated_candidate_not_video",
+        "The current deterministic compositor can only render approved generated video candidates, not generated images.",
+        `${shotPath}.source_artifact_id`,
+      ),
+    );
+  }
 }
 
 function isVideoArtifact(artifact: TimelineArtifact): boolean {
@@ -2051,7 +2561,9 @@ function fileURI(filePath: string): string {
 
 function filePathFromURI(uri: string): string | undefined {
   if (!uri.startsWith("file://")) {
-    return undefined;
+    if (uri.startsWith("http://") || uri.startsWith("https://") || uri.startsWith("asset://")) return undefined;
+    if (!uri.trim()) return undefined;
+    return path.isAbsolute(uri) ? uri : path.resolve(uri);
   }
   return fileURLToPath(uri);
 }
