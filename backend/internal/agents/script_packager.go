@@ -445,7 +445,7 @@ func buildBrowserAgentPromptPolicy(project *model.ProjectContext, graph *model.D
 }
 
 func buildProjectUnderstandingDossier(project *model.ProjectContext, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, graph *model.DemoWorkflowGraph, intelligence *model.ProjectIntelligencePack, now time.Time) *model.ProjectUnderstandingDossier {
-	intentText := projectIntelligenceIntentText(intelligence)
+	intentText := projectIntentText(project, intelligence)
 	dossier := &model.ProjectUnderstandingDossier{
 		ID:                   "dossier_" + graph.ID,
 		ProjectID:            project.ID,

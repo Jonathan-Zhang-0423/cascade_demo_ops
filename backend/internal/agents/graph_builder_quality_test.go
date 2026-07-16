@@ -201,9 +201,11 @@ func TestIntentFallbackRejectsMismatchedAndNegativeCodeCandidates(t *testing.T) 
 }
 
 func TestProductMapAndDossierFilterUnsafeIntentEvidence(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒"
 	intelligence := &model.ProjectIntelligencePack{
 		DemoIntent: &model.DemoIntentSpec{
-			Objective: "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒",
+			Objective: "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒，并展示 graph can be approved",
 		},
 		InteractionSurfaces: []model.InteractionSurface{{
 			ID:     "surface_dashboard",
@@ -217,14 +219,14 @@ func TestProductMapAndDossierFilterUnsafeIntentEvidence(t *testing.T) {
 			},
 		}},
 	}
-	pages := productPagesFromIntelligence(intelligence, nil, "https://app.example.com")
+	pages := productPagesFromIntelligence(project, intelligence, nil, "https://app.example.com")
 	if len(pages) != 1 || len(pages[0].PrimaryActions) != 1 {
 		t.Fatalf("expected only safe primary action, got %+v", pages)
 	}
 	if got := pages[0].PrimaryActions[0].Selector; got != "[data-testid='button-new-project']" {
 		t.Fatalf("unexpected retained action: %s", got)
 	}
-	summary := dossierEvidenceSummary([]string{"[data-testid='button-new-project'], [data-testid='button-regenerate-cancel'], [data-testid='button-confirm-rename'], [data-testid='button-approve-all']"}, projectIntelligenceIntentText(intelligence))
+	summary := dossierEvidenceSummary([]string{"[data-testid='button-new-project'], [data-testid='button-regenerate-cancel'], [data-testid='button-confirm-rename'], [data-testid='button-approve-all']"}, projectIntentText(project, intelligence))
 	if strings.Contains(summary, "button-regenerate-cancel") || strings.Contains(summary, "button-confirm-rename") || strings.Contains(summary, "button-approve-all") {
 		t.Fatalf("dossier summary retained unsafe token: %s", summary)
 	}

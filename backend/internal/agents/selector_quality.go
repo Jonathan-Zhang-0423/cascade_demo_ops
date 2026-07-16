@@ -164,6 +164,15 @@ func projectIntelligenceIntentText(intelligence *model.ProjectIntelligencePack) 
 	return strings.Join(parts, " ")
 }
 
+func projectIntentText(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) string {
+	if project != nil {
+		if text := strings.TrimSpace(project.ProductDescription); text != "" {
+			return text
+		}
+	}
+	return projectIntelligenceIntentText(intelligence)
+}
+
 func businessActionNeedsExecutableSelector(action model.GraphActionType) bool {
 	switch action {
 	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload:

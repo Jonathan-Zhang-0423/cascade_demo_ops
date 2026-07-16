@@ -85,13 +85,13 @@ func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.Pro
 		entryPoint = report.PageSnapshots[0].URL
 	}
 	pages := productPagesFromUnderstanding(project, report, entryPoint)
-	pages = productPagesFromIntelligence(intelligence, pages, entryPoint)
+	pages = productPagesFromIntelligence(project, intelligence, pages, entryPoint)
 	features := productFeaturesFromUnderstanding(project, report)
 	features = productFeaturesFromIntelligence(project, intelligence, features)
 	routes := routeNodesFromUnderstanding(report, pages)
 	routes = routeNodesFromIntelligence(intelligence, routes, pages)
 	components := componentNodesFromUnderstanding(report)
-	components = componentNodesFromIntelligence(intelligence, components)
+	components = componentNodesFromIntelligence(project, intelligence, components)
 	dataModels := dataModelNodesFromUnderstanding(report)
 	dataModels = dataModelNodesFromIntelligence(intelligence, dataModels)
 	workflows := workflowCandidatesFromUnderstanding(report, pages)
@@ -306,11 +306,11 @@ func productFeaturesFromUnderstanding(project *model.ProjectContext, report *mod
 	}}
 }
 
-func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, existing []*model.ProductPage, entryPoint string) []*model.ProductPage {
+func productPagesFromIntelligence(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, existing []*model.ProductPage, entryPoint string) []*model.ProductPage {
 	if intelligence == nil {
 		return existing
 	}
-	intentText := projectIntelligenceIntentText(intelligence)
+	intentText := projectIntentText(project, intelligence)
 	seen := map[string]bool{}
 	for _, page := range existing {
 		if page == nil {
@@ -465,10 +465,11 @@ func routeNodesFromIntelligence(intelligence *model.ProjectIntelligencePack, exi
 	return existing
 }
 
-func componentNodesFromIntelligence(intelligence *model.ProjectIntelligencePack, existing []*model.ComponentNode) []*model.ComponentNode {
+func componentNodesFromIntelligence(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, existing []*model.ComponentNode) []*model.ComponentNode {
 	if intelligence == nil {
 		return existing
 	}
+	intentText := projectIntentText(project, intelligence)
 	seen := map[string]bool{}
 	for _, component := range existing {
 		if component != nil {
@@ -488,7 +489,7 @@ func componentNodesFromIntelligence(intelligence *model.ProjectIntelligencePack,
 		}
 		actions := make([]model.UIActionRef, 0, len(surface.Actions))
 		for _, action := range surface.Actions {
-			if !actionAllowedForIntentEvidenceForIntent(action.Label, action.Selector, projectIntelligenceIntentText(intelligence)) {
+			if !actionAllowedForIntentEvidenceForIntent(action.Label, action.Selector, intentText) {
 				continue
 			}
 			actions = append(actions, model.UIActionRef{
