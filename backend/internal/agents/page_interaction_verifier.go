@@ -398,7 +398,7 @@ func intentSelectorAction(
 ) model.VerifiedInteractionAction {
 	selector := ""
 	alternatives := []model.SelectorCandidate{}
-	if probe, ok := bestIntentProbe(candidates, keywords); ok {
+	if probe, ok := bestIntentProbe(candidates, keywords, kind); ok {
 		selector = probe.Selector
 		alternatives = append(alternatives, model.SelectorCandidate{
 			Kind:           "css",
@@ -463,11 +463,14 @@ func intentWaitAction(project *model.ProjectContext, id string, label string, su
 	}
 }
 
-func bestIntentProbe(candidates []model.InteractionProbe, keywords []string) (model.InteractionProbe, bool) {
+func bestIntentProbe(candidates []model.InteractionProbe, keywords []string, preferredKind string) (model.InteractionProbe, bool) {
 	var best model.InteractionProbe
 	bestScore := -1
 	for _, candidate := range candidates {
 		if !candidate.IsBusiness || candidate.IsChrome || !selectorUsableForBusinessAction(candidate.Selector) {
+			continue
+		}
+		if !candidateKindMatchesIntent(candidate, preferredKind) || candidateLooksNegativeForIntent(candidate, keywords) {
 			continue
 		}
 		text := normalizeIntentText(strings.Join([]string{candidate.Label, candidate.Selector, candidate.Kind, candidate.ComponentRef}, " "))
@@ -484,6 +487,32 @@ func bestIntentProbe(candidates []model.InteractionProbe, keywords []string) (mo
 		}
 	}
 	return best, bestScore >= 0
+}
+
+func candidateKindMatchesIntent(candidate model.InteractionProbe, preferredKind string) bool {
+	preferred := graphActionTypeFromKind(preferredKind, "")
+	if preferred == "" {
+		return true
+	}
+	actual := graphActionTypeFromKind(candidate.Kind, candidate.Selector)
+	if actual == preferred {
+		return true
+	}
+	if preferred == model.GraphActionClick && actual == model.GraphActionInspect && containsAnyNormalized(candidate.Label+" "+candidate.Selector, "button", "btn", "submit", "start", "create", "new", "build", "generate") {
+		return true
+	}
+	return false
+}
+
+func candidateLooksNegativeForIntent(candidate model.InteractionProbe, keywords []string) bool {
+	text := normalizeIntentText(strings.Join([]string{candidate.Label, candidate.Selector, candidate.Kind, candidate.ComponentRef}, " "))
+	if text == "" {
+		return false
+	}
+	if !containsAnyNormalized(text, "cancel", "取消", "stop", "停止", "delete", "删除", "remove", "移除", "close", "关闭", "regenerate", "重新生成") {
+		return false
+	}
+	return !containsAnyNormalized(strings.Join(keywords, " "), "cancel", "取消", "stop", "停止", "delete", "删除", "remove", "移除", "close", "关闭", "regenerate", "重新生成")
 }
 
 func explicitDemoIntentText(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) string {

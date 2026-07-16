@@ -155,10 +155,38 @@ func TestIntentFallbackGeneratesTetrisBuildWorkflow(t *testing.T) {
 			t.Fatalf("expected generated outline to contain %q:\n%s", want, outlineText)
 		}
 	}
-	for _, forbidden := range []string{"user-email-display", "user-name-display", `fill(selector_intent_project_name, "",`} {
+	for _, forbidden := range []string{"user-email-display", "user-name-display", "button-regenerate-cancel", "button-confirm-rename", `fill(selector_intent_project_name, "",`} {
 		if strings.Contains(outlineText, forbidden) {
 			t.Fatalf("generated outline must not contain %q:\n%s", forbidden, outlineText)
 		}
+	}
+}
+
+func TestIntentFallbackRejectsMismatchedAndNegativeCodeCandidates(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒"
+	intelligence := graphQualityIntelligence()
+	intelligence.RunIntentScope = runIntentScopeForProject(project)
+	intelligence.DemoIntent.Objective = project.ProductDescription
+	candidates := []model.InteractionProbe{
+		{ID: "bad_name", Label: "确认重命名", Kind: "click", Selector: "[data-testid='button-confirm-rename']", Source: "code_reader", IsBusiness: true, SelectorScore: 100},
+		{ID: "bad_cancel", Label: "取消重新生成", Kind: "click", Selector: "[data-testid='button-regenerate-cancel']", Source: "code_reader", IsBusiness: true, SelectorScore: 100},
+	}
+	plan := fallbackPlanFromExplicitIntent(project, intelligence, candidates, errors.New("page scan unavailable"))
+	if plan == nil {
+		t.Fatal("expected runtime-adaptive plan")
+	}
+	text := ""
+	for _, action := range plan.Actions {
+		text += action.Label + " " + action.Selector + "\n"
+	}
+	for _, forbidden := range []string{"button-confirm-rename", "button-regenerate-cancel"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("fallback must not bind mismatched/negative selector %q:\n%s", forbidden, text)
+		}
+	}
+	if !(strings.Contains(text, "input[placeholder*='项目']") || strings.Contains(text, "input[aria-label*='项目']")) || !strings.Contains(text, "[data-testid='start-build']") {
+		t.Fatalf("expected semantic selector alternatives to be used:\n%s", text)
 	}
 }
 
