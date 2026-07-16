@@ -15,6 +15,8 @@ storage/local/
 client_execution_package.json
 exchange_envelope.json
 replay-bundle.tar.gz
+/colleague-bundle-*/
+/colleague-bundle-*.tar.gz
 backend/.cache/
 .gocache/
 .gotmp/
