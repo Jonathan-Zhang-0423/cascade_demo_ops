@@ -456,9 +456,7 @@ func (a *GraphBuilderAgent) generateGraphFromVerifiedInteractions(ctx context.Co
 		entryPoint = "input://product_context"
 	}
 	featureID, featureValue := primaryFeature(productMap)
-	if intelligence.DemoIntent != nil {
-		featureValue = firstNonEmpty(intelligence.DemoIntent.Objective, featureValue)
-	}
+	featureValue = firstNonEmpty(project.ProductDescription, featureValue)
 	useCase := model.DemoUseCaseLaunch
 	if report != nil && report.RequirementBrief != nil && len(report.RequirementBrief.UseCases) > 0 {
 		useCase = report.RequirementBrief.UseCases[0]
@@ -473,12 +471,12 @@ func (a *GraphBuilderAgent) generateGraphFromVerifiedInteractions(ctx context.Co
 		UseCase:            useCase,
 		Audience:           primaryAudience(project),
 		Objective:          featureValue,
-		ValueProposition:   firstNonEmpty(primaryOutcomeFromBrief(reportRequirementBrief(report)), featureValue),
+		ValueProposition:   featureValue,
 		PrimaryFeatureRefs: []string{featureID},
 		SuccessCriteria:    verifiedSuccessCriteria(plan),
 		CTA:                "请复核已验证动作、hash、安全策略后审批上传。",
 	}
-	graph.Requirements = append(requirementsFromProject(project), graphRequirementsFromIntent(intelligence.DemoIntent)...)
+	graph.Requirements = requirementsFromProject(project)
 	graph.Variables = append(graph.Variables, demoCredentialVariables(project)...)
 	graph.Nodes = []*model.GraphNode{verifiedStartNode(project, entryPoint, featureID, reportEvidenceRefs(report))}
 	businessNodeCount := 0
@@ -825,23 +823,6 @@ func verifiedSuccessCriteria(plan *model.VerifiedInteractionPlan) []string {
 		}
 	}
 	return uniqueStrings(criteria)
-}
-
-func graphRequirementsFromIntent(intent *model.DemoIntentSpec) []model.GraphRequirement {
-	if intent == nil {
-		return nil
-	}
-	requirements := []model.GraphRequirement{}
-	for _, goal := range intent.Goals {
-		requirements = append(requirements, model.GraphRequirement{
-			ID:           goal.ID,
-			Kind:         "demo_intent_goal",
-			Description:  goal.Label,
-			Required:     goal.Required,
-			EvidenceRefs: goal.EvidenceRefs,
-		})
-	}
-	return requirements
 }
 
 func reportRequirementBrief(report *model.MultimodalUnderstandingReport) *model.RequirementBrief {
