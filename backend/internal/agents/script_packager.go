@@ -96,19 +96,9 @@ func (a *ScriptPackagerAgent) PackageScript(
 		return nil, err
 	}
 	doc.Reproducibility.ScriptHashSHA256 = scriptHash
-	markdown := renderScriptMarkdown(doc, productMap)
-	markdown, trace, err := a.enhanceMarkdownWithLLM(ctx, project, report, productMap, graph, doc, markdown)
-	if err != nil {
-		markdown += "\n\n## 模型生成记录\n\n"
-		if trace != nil {
-			markdown += "- 审批文档润色模型：" + trace.Label() + "\n"
-		}
-		markdown += "- 审批文档润色失败，已使用本地确定性审批文档继续打包。\n"
-		err = nil
-	} else if trace != nil && trace.FallbackReason == "" {
-		markdown += "\n\n## 模型生成记录\n\n"
-		markdown += "- 审批文档润色模型：" + trace.Label() + "\n"
-	}
+	markdown := renderScriptMarkdown(project, doc, productMap)
+	markdown += "\n\n## 生成记录\n\n"
+	markdown += "- 审批文档由本地确定性模板生成，未使用模型润色或新增目标。\n"
 	doc.MarkdownArtifact = &model.ArtifactRef{
 		ID:        "artifact_" + doc.ID + "_markdown",
 		Kind:      "execution_script_markdown",
@@ -1698,23 +1688,25 @@ func hasCredentials(project *model.ProjectContext) bool {
 	return project != nil && project.Inputs != nil && len(project.Inputs.Credentials) > 0
 }
 
-func renderScriptMarkdown(doc *model.ExecutionScriptDocument, productMap *model.ProductMap) string {
+func renderScriptMarkdown(project *model.ProjectContext, doc *model.ExecutionScriptDocument, productMap *model.ProductMap) string {
 	var builder strings.Builder
+	rawRequirement := ""
+	targetAudience := "中国客户"
+	if project != nil {
+		rawRequirement = strings.TrimSpace(project.ProductDescription)
+		targetAudience = firstNonEmpty(project.TargetAudience, targetAudience)
+	}
+	summary := firstNonEmpty(rawRequirement, doc.Summary)
 	builder.WriteString("# " + firstNonEmpty(doc.Title, "演示执行脚本文档") + "\n\n")
 	builder.WriteString("## 摘要\n\n")
-	builder.WriteString(doc.Summary + "\n\n")
+	builder.WriteString(summary + "\n\n")
 	builder.WriteString("## 演示目标\n\n")
-	if doc.WorkflowGraph != nil && doc.WorkflowGraph.Intent != nil {
-		builder.WriteString("- 目标：" + firstNonEmpty(doc.WorkflowGraph.Intent.Objective, doc.Summary) + "\n")
-		builder.WriteString("- 受众：" + firstNonEmpty(audienceName(doc.WorkflowGraph.Intent.Audience), "中国客户") + "\n")
-		builder.WriteString("- 价值主张：" + firstNonEmpty(doc.WorkflowGraph.Intent.ValueProposition, "展示产品核心路径和可验证结果") + "\n\n")
-	} else {
-		builder.WriteString("- 目标：" + doc.Summary + "\n")
-		builder.WriteString("- 受众：中国客户\n\n")
-	}
+	builder.WriteString("- 目标：" + summary + "\n")
+	builder.WriteString("- 受众：" + targetAudience + "\n")
+	builder.WriteString("- 价值主张：严格按用户需求展示登录、新建项目、构建模式和 agent 实际构建过程。\n\n")
 	builder.WriteString("## 生成依据\n\n")
 	if productMap != nil && productMap.Summary != "" {
-		builder.WriteString("- 产品理解：" + productMap.Summary + "\n")
+		builder.WriteString("- 产品理解：已读取本地项目结构、需求相关 route/component/API/selector 摘要，并用于生成 stage 证据链。\n")
 	}
 	builder.WriteString("- 需求、代码结构摘要、页面/截图证据已融合为可审计计划。\n")
 	builder.WriteString("- 本地代码只用于生成结构摘要和稳定选择器，不上传完整源码。\n")

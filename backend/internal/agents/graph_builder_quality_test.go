@@ -170,6 +170,12 @@ func TestIntentFallbackGeneratesTetrisBuildWorkflow(t *testing.T) {
 			t.Fatalf("generated outline must not contain %q:\n%s", forbidden, outlineText)
 		}
 	}
+	markdown := pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown
+	for _, forbidden := range []string{"graph can be approved", "排练通过率", "rehearsal pass rate"} {
+		if strings.Contains(markdown, forbidden) {
+			t.Fatalf("approval markdown must not add unrequested goal %q:\n%s", forbidden, markdown)
+		}
+	}
 }
 
 func TestIntentFallbackRejectsMismatchedAndNegativeCodeCandidates(t *testing.T) {

@@ -59,7 +59,7 @@ func TestScriptPackagerEmitsValidExecutableBundle(t *testing.T) {
 	}
 }
 
-func TestScriptPackagerFallsBackWhenMarkdownLLMReturnsInvalidJSON(t *testing.T) {
+func TestScriptPackagerUsesDeterministicApprovalMarkdown(t *testing.T) {
 	project, report, productMap, graph := executableBundleFixtures()
 	pkg, err := NewScriptPackagerAgentWithLLM(failingMarkdownLLM{}).PackageScript(context.Background(), project, report, productMap, graph)
 	if err != nil {
@@ -68,11 +68,11 @@ func TestScriptPackagerFallsBackWhenMarkdownLLMReturnsInvalidJSON(t *testing.T) 
 	if pkg.ExecutableBundle == nil {
 		t.Fatal("expected executable script bundle")
 	}
-	if !strings.Contains(pkg.Markdown, "审批文档润色失败") {
-		t.Fatalf("expected markdown fallback note, got:\n%s", pkg.Markdown)
+	if !strings.Contains(pkg.Markdown, "未使用模型润色或新增目标") {
+		t.Fatalf("expected deterministic markdown note, got:\n%s", pkg.Markdown)
 	}
-	if !strings.Contains(pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown, "审批文档润色失败") {
-		t.Fatalf("expected bundle approval markdown to carry fallback note:\n%s", pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown)
+	if !strings.Contains(pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown, "未使用模型润色或新增目标") {
+		t.Fatalf("expected bundle approval markdown to carry deterministic note:\n%s", pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown)
 	}
 }
 
