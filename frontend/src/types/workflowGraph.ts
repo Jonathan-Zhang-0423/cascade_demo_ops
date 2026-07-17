@@ -714,10 +714,20 @@ export type CodeUnderstandingSnapshot = {
   sensitive_fields?: SensitiveFieldFinding[];
   source_digest_sha256?: string;
   file_count?: number;
+  read_budget?: CodeReadBudget;
   path_digests?: PathDigest[];
   evidence_refs?: EvidenceRef[];
   summary?: string;
   created_at?: string;
+};
+
+export type CodeReadBudget = {
+  mode?: string;
+  repo_index_file_limit?: number;
+  drilldown_rounds?: number;
+  files_per_round?: number;
+  total_file_limit?: number;
+  max_file_bytes?: number;
 };
 
 export type RouteInsight = {
@@ -1736,6 +1746,7 @@ export type ScriptStep = {
   business_value?: string;
   page_target: ScriptPageTarget;
   action: ScriptActionInstruction;
+  target_contract?: BrowserAgentTargetContract;
   expected_outcome: string;
   validations: ValidationSpec[];
   capture: CaptureSpec;
@@ -1792,6 +1803,12 @@ export type ExecutableRecordingScriptBundle = {
   script_manifest: ExecutableScriptManifest;
   plan_json: ExecutionScriptDocument;
   playwright_script: ExecutableScriptSource;
+  stage_approval_plan?: StageApprovalPlan;
+  script_outline?: BrowserAgentScriptOutline;
+  agent_prompt_policy?: BrowserAgentPromptPolicy;
+  browser_agent_contract?: BrowserAgentContract;
+  understanding_dossier_ref?: ArtifactRef;
+  project_understanding_dossier?: ProjectUnderstandingDossier;
   approval_markdown: ApprovalMarkdownDocument;
   security_policy: ExecutableScriptSecurityPolicy;
   reproducibility: ExecutableScriptReproducibility;
@@ -1847,7 +1864,12 @@ export type ExecutableScriptSecurityPolicy = {
 
 export type ExecutableScriptReproducibility = {
   plan_hash_sha256: string;
-  script_hash_sha256: string;
+  script_hash_sha256?: string;
+  stage_plan_hash_sha256?: string;
+  outline_hash_sha256?: string;
+  prompt_policy_hash_sha256?: string;
+  understanding_dossier_hash_sha256?: string;
+  browser_agent_contract_hash_sha256?: string;
   markdown_hash_sha256: string;
   bundle_hash_sha256?: string;
   graph_hash_sha256?: string;
@@ -1855,6 +1877,309 @@ export type ExecutableScriptReproducibility = {
   generator_version?: string;
   deterministic_seed?: string;
   input_fingerprints?: Record<string, string>;
+};
+
+export type StageApprovalPlan = {
+  id: string;
+  project_id: string;
+  workflow_graph_id: string;
+  schema_version: "demoops.stage_approval_plan.v1" | string;
+  title?: string;
+  summary?: string;
+  runtime?: string;
+  language?: string;
+  stages: StageApprovalStage[];
+  safety_policy: ScriptSafetyPolicy;
+  uncertainty_report?: StageUncertainty[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type StageApprovalStage = {
+  id: string;
+  order: number;
+  node_id: string;
+  title?: string;
+  objective?: string;
+  business_intent?: string;
+  duration_ms?: number;
+  entry_route?: string;
+  target_route?: string;
+  target_route_template?: string;
+  expected_route_after_action?: string;
+  runtime_route_verification_required?: boolean;
+  candidate_routes?: BrowserAgentRouteCandidate[];
+  target_url?: string;
+  component_refs?: string[];
+  api_refs?: string[];
+  style_refs?: string[];
+  data_model_refs?: string[];
+  input_content?: StageInputContent[];
+  interaction: BrowserAgentInteraction;
+  target_contract?: BrowserAgentTargetContract;
+  success_state?: string;
+  wait_conditions?: string[];
+  capture_points?: string[];
+  risk_notes?: string[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type StageInputContent = {
+  kind?: string;
+  label?: string;
+  value?: string;
+  input_ref?: string;
+  secret_ref?: string;
+  editable?: boolean;
+  evidence_refs?: EvidenceRef[];
+};
+
+export type BrowserAgentScriptOutline = {
+  id: string;
+  project_id: string;
+  workflow_graph_id: string;
+  schema_version: "demoops.browser_agent_script_outline.v1" | string;
+  runtime: string;
+  base_url?: string;
+  product_origin?: string;
+  summary?: string;
+  stages: BrowserAgentOutlineStage[];
+  allowed_exploration_scope: BrowserAgentExplorationScope;
+  forbidden_actions?: string[];
+  server_editable_fields?: string[];
+  immutable_fields?: string[];
+  uncertainty_report?: StageUncertainty[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type BrowserAgentExplorationScope = {
+  allowed_origins?: string[];
+  allowed_routes?: string[];
+  forbidden_path_prefixes?: string[];
+  forbidden_keywords?: string[];
+  max_depth?: number;
+  allow_non_destructive: boolean;
+};
+
+export type BrowserAgentRouteCandidate = {
+  route: string;
+  route_id?: string;
+  name?: string;
+  source?: string;
+  matched_keyword?: string;
+  auth_required?: boolean;
+  runtime_dynamic?: boolean;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type BrowserAgentOutlineStage = {
+  id: string;
+  stage_id: string;
+  order: number;
+  node_id: string;
+  objective?: string;
+  entry_route?: string;
+  route?: string;
+  target_route_template?: string;
+  expected_route_after_action?: string;
+  runtime_route_verification_required?: boolean;
+  candidate_routes?: BrowserAgentRouteCandidate[];
+  url?: string;
+  components?: BrowserAgentComponentTarget[];
+  interactions?: BrowserAgentInteraction[];
+  target_contract?: BrowserAgentTargetContract;
+  wait_conditions?: string[];
+  capture_points?: string[];
+  success_state?: string;
+  duration_ms?: number;
+  can_modify?: string[];
+  must_preserve?: string[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type BrowserAgentTargetContract = {
+  semantic_id: string;
+  purpose?: string;
+  allowed_roles?: string[];
+  allowed_names?: string[];
+  forbidden_names?: string[];
+  component_ref?: string;
+  destructive: boolean;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type BrowserAgentComponentTarget = {
+  component_ref?: string;
+  route_ref?: string;
+  role?: string;
+  name?: string;
+  text?: string;
+  label?: string;
+  test_id?: string;
+  selector?: string;
+  selector_alternatives?: SelectorCandidate[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type BrowserAgentInteraction = {
+  kind: GraphActionType;
+  target?: ActionTarget;
+  value?: string;
+  input_ref?: string;
+  secret_ref?: string;
+  parameters?: Record<string, unknown>;
+  wait_until?: string;
+  wait_conditions?: string[];
+  non_destructive?: boolean;
+  selector_policy?: string;
+  evidence_refs?: EvidenceRef[];
+};
+
+export type BrowserAgentPromptPolicy = {
+  id: string;
+  project_id: string;
+  workflow_graph_id: string;
+  schema_version: "demoops.browser_agent_prompt_policy.v1" | string;
+  runtime: string;
+  system_prompt: string;
+  immutable_fields: string[];
+  editable_fields: string[];
+  forbidden_changes: string[];
+  repair_policy?: string[];
+  evidence_policy?: string[];
+  safety_boundaries?: string[];
+  human_review_required: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type BrowserAgentContract = {
+  id: string;
+  project_id: string;
+  workflow_graph_id: string;
+  schema_version: "demoops.browser_agent_contract.v1" | string;
+  mode: string;
+  business_authority: BrowserAgentBusinessAuthority;
+  repair_policy: BrowserAgentRepairPolicy;
+  observation_policy: BrowserAgentObservationPolicy;
+  model_policy: BrowserAgentModelPolicy;
+  conflict_policy: BrowserAgentConflictPolicy;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type BrowserAgentBusinessAuthority = {
+  source: string;
+  script_may_change_business_intent: boolean;
+  runtime_page_may_change_business_intent: boolean;
+  agent_may_change_business_intent: boolean;
+};
+
+export type BrowserAgentRepairPolicy = {
+  allowed_repair_kinds?: string[];
+  editable_fields?: string[];
+  immutable_fields?: string[];
+  max_repair_attempts?: number;
+  max_patch_operations?: number;
+  max_agent_runtime_ms?: number;
+  min_auto_apply_confidence?: number;
+  same_node_only: boolean;
+  same_action_type_only: boolean;
+  same_domain_only: boolean;
+  step_insert_allowed: boolean;
+  step_delete_allowed: boolean;
+  step_reorder_allowed: boolean;
+  step_skip_allowed: boolean;
+};
+
+export type BrowserAgentObservationPolicy = {
+  allowed_fields?: string[];
+  full_html_allowed: boolean;
+  cookies_allowed: boolean;
+  authorization_headers_allowed: boolean;
+  storage_content_allowed: boolean;
+  input_values_allowed: boolean;
+  source_code_allowed: boolean;
+  max_interactive_elements?: number;
+  max_text_length?: number;
+  mask_selectors?: string[];
+};
+
+export type BrowserAgentModelPolicy = {
+  provider_ref?: string;
+  deployment_mode?: string;
+  customer_data_export_allowed: boolean;
+  training_usage_allowed: boolean;
+  retention_allowed: boolean;
+  data_residency?: string;
+  request_timeout_ms?: number;
+};
+
+export type BrowserAgentConflictPolicy = {
+  on_graph_plan_conflict?: string;
+  on_target_contract_conflict?: string;
+  on_runtime_intent_conflict?: string;
+  on_ambiguous_target?: string;
+  on_outcome_verification_failure?: string;
+  on_repair_limit_exceeded?: string;
+};
+
+export type ProjectUnderstandingDossier = {
+  id: string;
+  project_id: string;
+  workflow_graph_id?: string;
+  schema_version: "demoops.project_understanding_dossier.v1" | string;
+  summary?: string;
+  requirement_objective?: string;
+  architecture_summary?: string;
+  route_evidence?: DossierEvidence[];
+  component_evidence?: DossierEvidence[];
+  style_evidence?: DossierEvidence[];
+  api_evidence?: DossierEvidence[];
+  data_model_evidence?: DossierEvidence[];
+  interaction_evidence?: DossierEvidence[];
+  security_evidence?: DossierEvidence[];
+  uncertainty_report?: StageUncertainty[];
+  source_digest_sha256?: string;
+  input_fingerprints?: Record<string, string>;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type DossierEvidence = {
+  id: string;
+  kind?: string;
+  label?: string;
+  summary?: string;
+  route?: string;
+  component_ref?: string;
+  file_path_hash_sha256?: string;
+  source_path_hash_sha256?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type StageUncertainty = {
+  id: string;
+  stage_id?: string;
+  node_id?: string;
+  kind?: string;
+  summary?: string;
+  blocking?: boolean;
+  suggested_action?: string;
+  evidence_refs?: EvidenceRef[];
 };
 
 export type ExecutableScriptValidation = {

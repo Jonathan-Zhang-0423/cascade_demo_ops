@@ -107,6 +107,72 @@ func actionLooksLikeChromeControl(label string, selector string) bool {
 	)
 }
 
+func actionLooksUnsafeOrOffIntent(label string, selector string) bool {
+	joined := normalizeIntentText(label + " " + selector)
+	if joined == "" {
+		return false
+	}
+	if containsAnyNormalized(joined,
+		"cancel", "取消", "delete", "删除", "remove", "移除", "stop", "停止",
+		"bulk delete", "批量删除", "regenerate cancel", "取消重新生成",
+	) {
+		return true
+	}
+	if containsAnyNormalized(joined, "rename", "重命名") &&
+		containsAnyNormalized(joined, "confirm", "确认", "submit", "提交") {
+		return true
+	}
+	return false
+}
+
+func actionAllowedForIntentEvidence(label string, selector string) bool {
+	return actionAllowedForIntentEvidenceForIntent(label, selector, "")
+}
+
+func actionAllowedForIntentEvidenceForIntent(label string, selector string, intentText string) bool {
+	if actionLooksLikeChromeControl(label, selector) || actionLooksUnsafeOrOffIntent(label, selector) {
+		return false
+	}
+	intent := normalizeIntentText(intentText)
+	joined := normalizeIntentText(label + " " + selector)
+	if intent == "" || joined == "" {
+		return true
+	}
+	switch {
+	case containsAnyNormalized(joined, "regenerate", "重新生成"):
+		return containsAnyNormalized(intent, "regenerate", "重新生成")
+	case containsAnyNormalized(joined, "revise", "修订", "修改计划", "改计划"):
+		return containsAnyNormalized(intent, "revise", "修订", "修改计划", "改计划")
+	case containsAnyNormalized(joined, "polish", "润色"):
+		return containsAnyNormalized(intent, "polish", "润色")
+	case containsAnyNormalized(joined, "approve", "审批", "批准"):
+		return containsAnyNormalized(intent, "approve", "审批", "批准", "验收")
+	}
+	return true
+}
+
+func projectIntelligenceIntentText(intelligence *model.ProjectIntelligencePack) string {
+	if intelligence == nil || intelligence.DemoIntent == nil {
+		return ""
+	}
+	parts := []string{intelligence.DemoIntent.Objective, intelligence.DemoIntent.TargetAudience}
+	parts = append(parts, intelligence.DemoIntent.ForbiddenTopics...)
+	for _, goal := range intelligence.DemoIntent.Goals {
+		parts = append(parts, goal.Label, goal.Kind, goal.PreferredAction, goal.TargetPageHint, goal.SuccessState)
+		parts = append(parts, goal.TargetKeywords...)
+	}
+	return strings.Join(parts, " ")
+}
+
+func projectIntentText(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) string {
+	if project != nil {
+		if text := strings.TrimSpace(project.ProductDescription); text != "" {
+			return text
+		}
+	}
+	return projectIntelligenceIntentText(intelligence)
+}
+
 func businessActionNeedsExecutableSelector(action model.GraphActionType) bool {
 	switch action {
 	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload:

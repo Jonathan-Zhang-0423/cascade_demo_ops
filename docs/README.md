@@ -4,7 +4,7 @@
 
 - [Server 侧 Browser Agent、执行与本地视频编辑系统架构 v2](./server-browser-agent-execution-editor-architecture-v2.md)
 
-该文档是 Server 侧新功能、协议演进和代码重构的唯一架构基线。它定义了：
+该文档是 Server 侧目标架构基线。它定义了：
 
 - 外部业务动作证据与 Server Browser Agent 页面证据的融合；
 - 冲突检查、分项置信度、硬门槛和执行草案编译；
@@ -12,20 +12,20 @@
 - 受 Repair Policy 约束的 Runtime Repair Patch Overlay；
 - 录屏、素材目录、本地轻量视频编辑器和 FFmpeg 渲染交付。
 
-如果其他文档与该架构发生冲突，Server 侧新开发以 v2 文档为准。v2 是目标架构，部分模块仍在迁移或尚未实现，不能仅凭文档假定代码已经具备对应能力。
+v2 是目标架构，部分模块仍在迁移或尚未实现，不能仅凭文档假定代码已经具备对应能力。对已经落地的交换包和 Browser Agent Outline 字段，当前协议文档与代码优先；架构迁移必须通过新 schema/version 完成，不能用设计文档覆盖现行契约。
 
-## Legacy v1：当前实现兼容基线
+## 当前交换与执行包协议
 
-以下规范仍被现有代码、fixtures 或测试使用，因此暂时保留。它们用于兼容和迁移验证，不再决定 Server 侧新功能方向：
+以下规范对应当前代码、fixtures 和联调接口：
 
 - [Client to Cloud Exchange Protocol](./client-cloud-exchange-protocol.md)
 - [执行脚本文档协议 v1](./execution-script-document-v1.md)
 - [可执行录制脚本包协议 v1](./executable-recording-script-bundle-v1.md)
 
-迁移期间遵循两条规则：
+其中 `browser-agent-outline-v1` 是当前主路径，`playwright-restricted-sandbox` 是 Legacy 兼容路径。协议演进遵循两条规则：
 
-1. 尚未迁移的现有接口和数据结构继续按对应 v1 文档运行。
-2. 新增模块、重构后的接口和最终收敛方向必须符合 Server 侧 v2 权威架构。
+1. 已落地接口和数据结构继续按当前 version 校验。
+2. 不兼容变更必须增加 schema/version，并提供迁移和兼容测试。
 
 ## 当前实现状态、部署与验证
 

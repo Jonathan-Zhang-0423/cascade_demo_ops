@@ -107,6 +107,12 @@ func TestGraphBuilderBlocksWhenOnlyChromeToggleExists(t *testing.T) {
 }
 
 func TestProjectIntelligenceTreatsDisplaySelectorsAsReadOnly(t *testing.T) {
+	if got := actionKindFromSelector("input[aria-label*='项目']"); got != "fill" {
+		t.Fatalf("expected aria-label input to be fillable, got %q", got)
+	}
+	if !selectorUsableForBusinessAction("input[aria-label*='项目']") {
+		t.Fatal("aria-label input should be usable for business fill actions")
+	}
 	for _, selector := range []string{
 		"[data-testid='user-email-display']",
 		"[data-testid='user-name-display']",
@@ -145,20 +151,93 @@ func TestIntentFallbackGeneratesTetrisBuildWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, graphQualityReport(project), graphQualityProductMap(), graph)
+	projectNameNode := graphNodeByID(graph, "verified_intent_project_name")
+	if projectNameNode == nil || projectNameNode.ActionSpec == nil || projectNameNode.ActionSpec.Type != model.GraphActionFill {
+		t.Fatalf("project name stage must be a fill action, got %+v", projectNameNode)
+	}
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, graphQualityReport(project), graphQualityProductMap(), graph, intelligence)
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	for _, want := range []string{"新建项目", "俄罗斯方块", "构建模式", "启动 agent 实际构建", "waitForTimeout(60000)"} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("expected generated script to contain %q:\n%s", want, source)
+	outlineText := outlineAuditText(pkg.ExecutableBundle.StageApprovalPlan, pkg.ExecutableBundle.ScriptOutline)
+	for _, want := range []string{"新建项目", "俄罗斯方块", "构建模式", "启动 agent 实际构建", "60000"} {
+		if !strings.Contains(outlineText, want) {
+			t.Fatalf("expected generated outline to contain %q:\n%s", want, outlineText)
 		}
 	}
-	for _, forbidden := range []string{"user-email-display", "user-name-display", `fill(selector_intent_project_name, "",`} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf("generated script must not contain %q:\n%s", forbidden, source)
+	for _, forbidden := range []string{"user-email-display", "user-name-display", "button-regenerate-cancel", "button-confirm-rename", `fill(selector_intent_project_name, "",`} {
+		if strings.Contains(outlineText, forbidden) {
+			t.Fatalf("generated outline must not contain %q:\n%s", forbidden, outlineText)
 		}
+	}
+	markdown := pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown
+	for _, forbidden := range []string{"graph can be approved", "排练通过率", "rehearsal pass rate"} {
+		if strings.Contains(markdown, forbidden) {
+			t.Fatalf("approval markdown must not add unrequested goal %q:\n%s", forbidden, markdown)
+		}
+	}
+}
+
+func TestIntentFallbackRejectsMismatchedAndNegativeCodeCandidates(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒"
+	intelligence := graphQualityIntelligence()
+	intelligence.RunIntentScope = runIntentScopeForProject(project)
+	intelligence.DemoIntent.Objective = project.ProductDescription
+	candidates := []model.InteractionProbe{
+		{ID: "bad_name", Label: "确认重命名", Kind: "click", Selector: "[data-testid='button-confirm-rename']", Source: "code_reader", IsBusiness: true, SelectorScore: 100},
+		{ID: "bad_cancel", Label: "取消重新生成", Kind: "click", Selector: "[data-testid='button-regenerate-cancel']", Source: "code_reader", IsBusiness: true, SelectorScore: 100},
+	}
+	plan := fallbackPlanFromExplicitIntent(project, intelligence, candidates, errors.New("page scan unavailable"))
+	if plan == nil {
+		t.Fatal("expected runtime-adaptive plan")
+	}
+	text := ""
+	for _, action := range plan.Actions {
+		text += action.Label + " " + action.Selector + "\n"
+	}
+	for _, forbidden := range []string{"button-confirm-rename", "button-regenerate-cancel"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("fallback must not bind mismatched/negative selector %q:\n%s", forbidden, text)
+		}
+	}
+	if !(strings.Contains(text, "input[placeholder*='项目']") || strings.Contains(text, "input[aria-label*='项目']")) || !strings.Contains(text, "[data-testid='start-build']") {
+		t.Fatalf("expected semantic selector alternatives to be used:\n%s", text)
+	}
+}
+
+func TestProductMapAndDossierFilterUnsafeIntentEvidence(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒"
+	intelligence := &model.ProjectIntelligencePack{
+		DemoIntent: &model.DemoIntentSpec{
+			Objective: "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒，并展示 graph can be approved",
+		},
+		InteractionSurfaces: []model.InteractionSurface{{
+			ID:     "surface_dashboard",
+			PageID: "page_dashboard",
+			URL:    "https://app.example.com/dashboard",
+			Actions: []model.UIActionRef{
+				{ID: "new", Label: "button new project", Kind: "click", Selector: "[data-testid='button-new-project']"},
+				{ID: "cancel", Label: "button regenerate cancel", Kind: "click", Selector: "[data-testid='button-regenerate-cancel']"},
+				{ID: "rename", Label: "button confirm rename", Kind: "click", Selector: "[data-testid='button-confirm-rename']"},
+				{ID: "approve", Label: "button approve all", Kind: "click", Selector: "[data-testid='button-approve-all']"},
+			},
+		}},
+	}
+	pages := productPagesFromIntelligence(project, intelligence, nil, "https://app.example.com")
+	if len(pages) != 1 || len(pages[0].PrimaryActions) != 1 {
+		t.Fatalf("expected only safe primary action, got %+v", pages)
+	}
+	if got := pages[0].PrimaryActions[0].Selector; got != "[data-testid='button-new-project']" {
+		t.Fatalf("unexpected retained action: %s", got)
+	}
+	summary := dossierEvidenceSummary([]string{"[data-testid='button-new-project'], [data-testid='button-regenerate-cancel'], [data-testid='button-confirm-rename'], [data-testid='button-approve-all']"}, projectIntentText(project, intelligence))
+	if strings.Contains(summary, "button-regenerate-cancel") || strings.Contains(summary, "button-confirm-rename") || strings.Contains(summary, "button-approve-all") {
+		t.Fatalf("dossier summary retained unsafe token: %s", summary)
+	}
+	if !strings.Contains(summary, "button-new-project") {
+		t.Fatalf("dossier summary dropped safe token: %s", summary)
 	}
 }
 

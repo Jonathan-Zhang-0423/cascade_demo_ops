@@ -2156,9 +2156,224 @@ function mockScriptDocument(workspace: ProjectWorkspaceView): ExecutionScriptDoc
 }
 
 function mockScriptMarkdown(workspace: ProjectWorkspaceView): string {
-  return `# ${workspace.planReview.graph.name}\n\n## 演示目标\n\n${workspace.planReview.graph.summary}\n\n## 生成依据\n\n- 需求、代码结构摘要和页面证据已融合。\n- 本地代码只用于生成结构摘要，不上传完整源码。\n\n## 安全策略\n\n- 允许域名：${workspace.planReview.allowedDomains.join(", ")}\n- 禁止页面：${workspace.planReview.forbiddenPages.join(", ")}\n- 打码选择器：${workspace.planReview.redactionSelectors.join(", ")}\n\n## 录制策略\n\n- 目标时长：${workspace.planReview.targetDurationSec} 秒\n- 输出资产：演示视频 / 步骤文档\n\n## 凭据与云端边界\n\n- 凭据只通过 secret_ref 使用，不展示明文。\n- 云端执行前必须校验 TS 脚本、JSON plan、hash 和 allowed domains。\n\n## 执行步骤\n\n${workspace.planReview.graph.nodes
+  return `# ${workspace.planReview.graph.name}\n\n## 演示目标\n\n${workspace.planReview.graph.summary}\n\n## 生成依据\n\n- 需求、代码结构摘要和页面证据已融合。\n- 本地代码只用于生成结构摘要，不上传完整源码。\n\n## 安全策略\n\n- 允许域名：${workspace.planReview.allowedDomains.join(", ")}\n- 禁止页面：${workspace.planReview.forbiddenPages.join(", ")}\n- 打码选择器：${workspace.planReview.redactionSelectors.join(", ")}\n\n## 录制策略\n\n- 目标时长：${workspace.planReview.targetDurationSec} 秒\n- 输出资产：演示视频 / 步骤文档\n\n## 凭据与云端边界\n\n- 凭据只通过 secret_ref 使用，不展示明文。\n- 云端执行前必须校验 Stage JSON、Browser Agent 大纲、hash 和 allowed domains。\n\n## 执行步骤\n\n${workspace.planReview.graph.nodes
     .map((node, index) => `${index + 1}. ${node.title ?? node.action}: ${node.expected_outcome}`)
     .join("\n")}\n\n## 审批清单\n\n- [ ] 上传前必须完成人工审批。`;
+}
+
+function mockStageApprovalPlan(workspace: ProjectWorkspaceView, plan: ExecutionScriptDocument) {
+  return {
+    id: `stage_plan_${plan.id}`,
+    project_id: workspace.id,
+    workflow_graph_id: plan.workflow_graph_id,
+    schema_version: "demoops.stage_approval_plan.v1",
+    title: plan.title ?? workspace.planReview.graph.name ?? "Browser Agent Outline",
+    summary: "App 端确认用户意图、stage 顺序、业务目标和证据链；服务器 browser agent 只在该边界内自适应探索。",
+    runtime: "browser-agent-outline-v1",
+    language: "zh-CN",
+    stages: plan.steps.map((step) => {
+      const duration = Math.max(step.timing.duration_ms ?? 0, 10000);
+      const route = routeFromStep(workspace, step);
+      return {
+        id: `stage_${step.node_id}`,
+        order: step.order,
+        node_id: step.node_id,
+        title: step.title ?? step.node_id,
+        objective: step.expected_outcome,
+        business_intent: step.business_value ?? step.narrative.voiceover ?? step.narrative.caption ?? step.expected_outcome,
+        duration_ms: duration,
+        target_route: route,
+        target_url: step.page_target.url ?? step.action.target.url ?? workspace.productURL,
+        component_refs: [`component:${step.node_id}`],
+        api_refs: step.action.type === "api_call" ? [`api:${step.node_id}`] : [],
+        style_refs: [`style:${step.node_id}`],
+        data_model_refs: [`model:${step.node_id}`],
+        input_content: step.action.value
+          ? [{ kind: "user_text", label: step.title ?? step.node_id, value: step.action.value, editable: false, evidence_refs: step.evidence_refs ?? [] }]
+          : step.action.secret_ref
+            ? [{ kind: "secret_ref", label: "演示凭据", secret_ref: step.action.secret_ref, editable: false, evidence_refs: step.evidence_refs ?? [] }]
+            : [],
+        interaction: {
+          kind: step.action.type,
+          target: step.action.target,
+          ...(step.action.value ? { value: step.action.value } : {}),
+          ...(step.action.input_ref ? { input_ref: step.action.input_ref } : {}),
+          ...(step.action.secret_ref ? { secret_ref: step.action.secret_ref } : {}),
+          wait_until: step.action.wait_until ?? "render_stable",
+          wait_conditions: ["wait_after_entry_at_least_1000ms", "wait_for_render_stable_before_capture"],
+          non_destructive: !["upload", "api_call"].includes(step.action.type),
+          selector_policy: "server_may_adapt_selector_within_evidence_chain",
+          evidence_refs: step.evidence_refs ?? [],
+        },
+        success_state: step.expected_outcome,
+        wait_conditions: ["wait_after_entry_at_least_1000ms", "wait_for_network_or_dom_stable", "wait_for_render_stable_before_capture"],
+        capture_points: step.capture.screenshot ? ["stage_entry_after_render", "stage_success_state"] : ["stage_success_state"],
+        risk_notes: ["不得改写用户意图、stage 顺序、填充语义或安全边界。"],
+        evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
+        confidence: 0.82,
+      };
+    }),
+    safety_policy: plan.safety_policy,
+    evidence_refs: workspace.understanding.evidenceRefs,
+    confidence: 0.82,
+  };
+}
+
+function mockBrowserAgentOutline(workspace: ProjectWorkspaceView, plan: ExecutionScriptDocument) {
+  const origin = originFromURL(workspace.productURL);
+  return {
+    id: `outline_${plan.id}`,
+    project_id: workspace.id,
+    workflow_graph_id: plan.workflow_graph_id,
+    schema_version: "demoops.browser_agent_script_outline.v1",
+    runtime: "browser-agent-outline-v1",
+    base_url: workspace.productURL,
+    product_origin: origin,
+    summary: "服务器 browser agent 按 stage JSON 执行：可探索同源产品页面，可调整 selector/等待/截图时机，不可改变用户需求和安全范围。",
+    stages: plan.steps.map((step) => {
+      const selector = step.action.target.selector ?? step.page_target.selector ?? "";
+      const route = routeFromStep(workspace, step);
+      return {
+        id: `outline_stage_${step.node_id}`,
+        stage_id: `stage_${step.node_id}`,
+        order: step.order,
+        node_id: step.node_id,
+        objective: step.expected_outcome,
+        route,
+        url: step.page_target.url ?? step.action.target.url ?? workspace.productURL,
+        components: [
+          {
+            component_ref: `component:${step.node_id}`,
+            route_ref: route,
+            role: roleFromAction(step.action.type),
+            name: step.title ?? step.action.type,
+            text: step.action.value || step.title || step.action.type,
+            selector,
+            selector_alternatives: selector ? [{ kind: "css", value: selector, confidence: 0.72, stability_score: 0.68, source: "workflow_graph" }] : [],
+            evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
+            confidence: selector ? 0.78 : 0.64,
+          },
+        ],
+        interactions: [
+          {
+            kind: step.action.type,
+            target: step.action.target,
+            ...(step.action.value ? { value: step.action.value } : {}),
+            ...(step.action.input_ref ? { input_ref: step.action.input_ref } : {}),
+            ...(step.action.secret_ref ? { secret_ref: step.action.secret_ref } : {}),
+            wait_until: step.action.wait_until ?? "render_stable",
+            wait_conditions: ["wait_after_entry_at_least_1000ms", "wait_for_render_stable_before_capture"],
+            non_destructive: step.action.type !== "api_call",
+            selector_policy: "prefer_role_name_testid_then_verified_css; never use control-plane urls",
+            evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
+          },
+        ],
+        wait_conditions: ["wait_after_entry_at_least_1000ms", "wait_for_render_stable_before_capture"],
+        capture_points: ["after_entry_render_stable", "after_success_state"],
+        success_state: step.expected_outcome,
+        duration_ms: Math.max(step.timing.duration_ms ?? 0, 10000),
+        can_modify: ["selector", "selector_alternatives", "wait_conditions", "capture_points", "non_destructive_exploration_path"],
+        must_preserve: ["objective", "business_intent", "input semantics", "stage order", "allowed domains", "forbidden pages"],
+        evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
+        confidence: 0.8,
+      };
+    }),
+    allowed_exploration_scope: {
+      allowed_origins: origin ? [origin] : [],
+      allowed_routes: Array.from(new Set(plan.steps.map((step) => routeFromStep(workspace, step)).filter(Boolean))),
+      forbidden_path_prefixes: ["/aigc", "/.well-known", "/v1", "/api/debug", ...workspace.planReview.forbiddenPages],
+      forbidden_keywords: ["delete", "remove", "billing", "api key", "payment", "logout"],
+      max_depth: 3,
+      allow_non_destructive: true,
+    },
+    forbidden_actions: ["delete", "payment", "billing_update", "api_key_create", "logout", "control_plane_exchange_call"],
+    server_editable_fields: ["script_outline.stages[].components[].selector", "script_outline.stages[].components[].selector_alternatives", "script_outline.stages[].wait_conditions", "script_outline.stages[].capture_points"],
+    immutable_fields: ["stage_approval_plan.stages[].objective", "stage_approval_plan.stages[].business_intent", "stage_approval_plan.stages[].input_content", "security_policy", "recording_run_spec.allowed_domains"],
+    evidence_refs: workspace.understanding.evidenceRefs,
+    confidence: 0.8,
+  };
+}
+
+function mockBrowserAgentPromptPolicy(workspace: ProjectWorkspaceView, plan: ExecutionScriptDocument) {
+  return {
+    id: `prompt_policy_${plan.id}`,
+    project_id: workspace.id,
+    workflow_graph_id: plan.workflow_graph_id,
+    schema_version: "demoops.browser_agent_prompt_policy.v1",
+    runtime: "browser-agent-outline-v1",
+    system_prompt:
+      "你是 Cascade 云端 browser agent。严格执行 StageApprovalPlan 与 BrowserAgentScriptOutline。可以在同源产品页面内自适应探索、替换 selector、调整等待和截图时机；不得改变用户需求、stage 目标、填充语义、凭据引用、安全边界或访问控制面路径。任何不确定项必须回传诊断，不得猜测。",
+    immutable_fields: ["user intent", "stage order", "stage objectives", "input semantics", "secret_ref", "allowed_domains", "forbidden_pages", "redaction policy"],
+    editable_fields: ["selector", "selector alternatives", "wait conditions", "non destructive exploration path", "capture timing"],
+    forbidden_changes: ["不要访问 /aigc、/.well-known、/v1、execution-packages、app-installations 等控制面接口", "不要把 secret_ref 展开为明文", "不要创建破坏性数据或支付/删除类操作"],
+    repair_policy: ["selector 不可见时优先用 role/name/text/testid 在同一业务语义内修复", "页面未加载完成时延长等待并重新扫描 DOM/a11y", "无法确认业务动作时返回 missing_product_evidence"],
+    evidence_policy: ["每个动作必须绑定 stage、route/component 或页面扫描证据", "服务器可补充 runtime evidence，但不可覆盖 App 审批目标"],
+    safety_boundaries: [`allowed_domains=${workspace.planReview.allowedDomains.join(",")}`, `forbidden_pages=${workspace.planReview.forbiddenPages.join(",")}`, "result artifacts sensitive/encrypted"],
+    human_review_required: true,
+  };
+}
+
+function mockUnderstandingDossier(workspace: ProjectWorkspaceView, plan: ExecutionScriptDocument) {
+  const routeEvidence = plan.steps.map((step) => ({
+    id: `route_ev_${step.node_id}`,
+    kind: "route",
+    label: step.title ?? step.node_id,
+    summary: `需求 stage ${step.node_id} 对应页面：${step.page_target.url ?? step.action.target.url ?? workspace.productURL}`,
+    route: routeFromStep(workspace, step),
+    component_ref: `component:${step.node_id}`,
+    file_path_hash_sha256: mockHash(`route:${workspace.id}:${step.node_id}`),
+    evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
+    confidence: 0.78,
+  }));
+  const componentEvidence = plan.steps.map((step) => ({
+    id: `component_ev_${step.node_id}`,
+    kind: "component",
+    label: step.title ?? step.action.type,
+    summary: `与需求动作 ${step.action.type} 相关的可交互组件摘要；服务器可在运行时用页面扫描确认最终 selector。`,
+    route: routeFromStep(workspace, step),
+    component_ref: `component:${step.node_id}`,
+    source_path_hash_sha256: mockHash(`component:${workspace.id}:${step.node_id}`),
+    evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
+    confidence: 0.76,
+  }));
+  return {
+    id: `dossier_${plan.id}`,
+    project_id: workspace.id,
+    workflow_graph_id: plan.workflow_graph_id,
+    schema_version: "demoops.project_understanding_dossier.v1",
+    summary: "需求相关项目理解包：只包含 route/component/style/API/data model 摘要、hash 和证据引用，不上传完整源码。",
+    requirement_objective: workspace.inputBundle.raw_user_prompt ?? workspace.planReview.graph.summary ?? "Approved demo objective",
+    architecture_summary: `已围绕 ${workspace.planReview.graph.name} 追踪路由、交互组件、样式状态和后端/API 依赖摘要。`,
+    route_evidence: routeEvidence,
+    component_evidence: componentEvidence,
+    style_evidence: plan.steps.map((step) => ({
+      id: `style_ev_${step.node_id}`,
+      kind: "style",
+      label: step.title ?? step.node_id,
+      summary: "样式证据以哈希与摘要形式提供，服务器不得据此猜测未证实页面。",
+      component_ref: `component:${step.node_id}`,
+      file_path_hash_sha256: mockHash(`style:${workspace.id}:${step.node_id}`),
+      evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
+      confidence: 0.7,
+    })),
+    api_evidence: [],
+    data_model_evidence: [],
+    interaction_evidence: componentEvidence,
+    security_evidence: [
+      {
+        id: `security_ev_${workspace.id}`,
+        kind: "security",
+        label: "凭据与打码边界",
+        summary: "凭据只以 secret_ref 注入；截图和 trace 需按 sensitive artifact 处理。",
+        evidence_refs: workspace.understanding.evidenceRefs,
+        confidence: 0.9,
+      },
+    ],
+    source_digest_sha256: workspace.packagePreview.packageDigest,
+    input_fingerprints: { package: workspace.packagePreview.packageDigest, graph: workspace.packagePreview.graphDigest },
+    evidence_refs: workspace.understanding.evidenceRefs,
+    confidence: 0.78,
+  };
 }
 
 function mockExecutableScriptBundle(
@@ -2168,10 +2383,16 @@ function mockExecutableScriptBundle(
   const plan = workspace.scriptDocument ?? mockScriptDocument(workspace);
   const markdown = workspace.scriptMarkdown ?? mockScriptMarkdown(workspace);
   const planHash = mockHash(JSON.stringify(plan));
-  const source = mockExecutableScriptSource(plan, planHash);
-  const scriptHash = mockHash(source);
+  const stagePlan = mockStageApprovalPlan(workspace, plan);
+  const outline = mockBrowserAgentOutline(workspace, plan);
+  const promptPolicy = mockBrowserAgentPromptPolicy(workspace, plan);
+  const dossier = mockUnderstandingDossier(workspace, plan);
+  const stagePlanHash = mockHash(JSON.stringify(stagePlan));
+  const outlineHash = mockHash(JSON.stringify(outline));
+  const promptPolicyHash = mockHash(JSON.stringify(promptPolicy));
+  const dossierHash = mockHash(JSON.stringify(dossier));
   const markdownHash = mockHash(markdown);
-  const bundleSeed = `${planHash}|${scriptHash}|${markdownHash}|${workspace.id}`;
+  const bundleSeed = `${planHash}|${stagePlanHash}|${outlineHash}|${promptPolicyHash}|${dossierHash}|${markdownHash}|${workspace.id}`;
   return {
     id: `bundle_${plan.id}`,
     project_id: workspace.id,
@@ -2181,23 +2402,34 @@ function mockExecutableScriptBundle(
     script_manifest: {
       script_id: `recording_${plan.workflow_graph_id}`,
       version: 1,
-      language: "typescript",
-      runtime: "playwright-restricted-sandbox",
-      entry_function: "runCascadeRecording",
-      generator: "cascade_deterministic_script_code_generator",
+      language: "browser-agent-outline",
+      runtime: "browser-agent-outline-v1",
+      entry_function: "runBrowserAgentOutline",
+      generator: "cascade_browser_agent_outline_packager",
       generator_version: "0.1.0",
       dependency_allowlist: [],
-      context_apis: ["ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"],
+      context_apis: ["browser_agent.explore", "browser_agent.act", "browser_agent.capture", "browser_agent.report"],
       step_node_ids: plan.steps.map((step) => step.node_id),
     },
     plan_json: plan,
     playwright_script: {
-      inline_source: source,
-      mime_type: "text/typescript",
-      sha256: scriptHash,
-      size_bytes: source.length,
+      mime_type: "application/x.browser-agent-outline+json",
+      sha256: "",
+      size_bytes: 0,
       encrypted: false,
     },
+    stage_approval_plan: stagePlan,
+    script_outline: outline,
+    agent_prompt_policy: promptPolicy,
+    understanding_dossier_ref: {
+      id: `artifact_${plan.id}_understanding_dossier`,
+      kind: "project_understanding_dossier",
+      uri: `inline://project-understanding/${plan.id}`,
+      mime_type: "application/json",
+      sha256: dossierHash,
+      sensitive: true,
+    },
+    project_understanding_dossier: dossier,
     approval_markdown: {
       inline_markdown: markdown,
       mime_type: "text/markdown",
@@ -2207,8 +2439,8 @@ function mockExecutableScriptBundle(
     security_policy: {
       redactions: plan.safety_policy.redactions,
       secret_refs: plan.steps.map((step) => step.action.secret_ref).filter((ref): ref is string => Boolean(ref)),
-      allowed_context_apis: ["ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"],
-      allowed_page_methods: ["goto", "click", "fill", "selectOption", "setInputFiles", "waitForTimeout", "waitForLoadState", "locator"],
+      allowed_context_apis: ["browser_agent.explore", "browser_agent.act", "browser_agent.capture", "browser_agent.report"],
+      allowed_page_methods: ["goto", "click", "fill", "selectOption", "setInputFiles", "waitForLoadState", "locator"],
       forbidden_imports: ["fs", "node:fs", "child_process", "node:child_process", "http", "https", "net", "tls"],
       forbidden_identifiers: ["import", "require", "eval", "Function", "process", "global", "globalThis", "window", "document", "fetch"],
       network_policy: "allowed_domains_only_via_ctx_page",
@@ -2219,12 +2451,15 @@ function mockExecutableScriptBundle(
     },
     reproducibility: {
       plan_hash_sha256: planHash,
-      script_hash_sha256: scriptHash,
+      stage_plan_hash_sha256: stagePlanHash,
+      outline_hash_sha256: outlineHash,
+      prompt_policy_hash_sha256: promptPolicyHash,
+      understanding_dossier_hash_sha256: dossierHash,
       markdown_hash_sha256: markdownHash,
       bundle_hash_sha256: mockHash(bundleSeed),
       graph_hash_sha256: workspace.packagePreview.graphDigest,
       source_snapshot_digest: workspace.packagePreview.packageDigest,
-      generator_version: "0.1.0",
+      generator_version: "browser-agent-outline-v1",
       deterministic_seed: `seed_${workspace.id}`,
       input_fingerprints: { package: workspace.packagePreview.packageDigest },
     },
@@ -2393,7 +2628,7 @@ function mockRepairApprovalMarkdown(workspace: ProjectWorkspaceView, diagnostic:
 - 错误信息：${diagnostic.error.message}
 - 修复依据：云端返回的脱敏截图、trace、DOM 摘要和可访问性摘要。
 - 修改范围：仅调整 selector/等待条件，不新增域名、不改变凭据范围、不访问禁用页面。
-- 审批要求：修复后的执行计划和 TS 脚本必须重新人工审批后才能上传。`;
+- 审批要求：修复后的 Stage JSON 和 Browser Agent 大纲必须重新人工审批后才能上传。`;
 }
 
 function mockExecutableScriptSource(plan: ExecutionScriptDocument, planHash: string): string {
@@ -2429,6 +2664,36 @@ function mockExecutableScriptSource(plan: ExecutionScriptDocument, planHash: str
   lines.push("  return { ok: true, planHash: cascadePlanHash, stepResults };");
   lines.push("}");
   return lines.join("\n");
+}
+
+function routeFromStep(workspace: ProjectWorkspaceView, step: ExecutionScriptDocument["steps"][number]): string {
+  const url = step.page_target.url ?? step.action.target.url ?? workspace.productURL;
+  try {
+    return new URL(url).pathname || "/";
+  } catch {
+    return url.startsWith("/") ? url : "/";
+  }
+}
+
+function originFromURL(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
+}
+
+function roleFromAction(action: string): string {
+  if (action === "fill") {
+    return "textbox";
+  }
+  if (action === "select") {
+    return "combobox";
+  }
+  if (action === "navigate" || action === "inspect" || action === "assert" || action === "wait") {
+    return "region";
+  }
+  return "button";
 }
 
 function mockHash(value: string): string {

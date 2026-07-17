@@ -52,6 +52,14 @@ func (a *PageInteractionVerifierAgent) VerifyInteractions(
 	if a.manager != nil && project.ProductURL != "" {
 		plan, missing, err := a.verifyWithSidecar(ctx, project, intelligence, candidates, credentials)
 		if err == nil && plan != nil {
+			if plan.BusinessActionCount <= 0 {
+				if fallbackPlan := fallbackPlanFromExplicitIntent(project, intelligence, candidates, errors.New("page scan did not verify a business action")); fallbackPlan != nil && fallbackPlan.BusinessActionCount > 0 {
+					fallbackMissing := nonBlockingEvidenceFallbackReport(project, intelligence, "page_scan_no_business_action", "页面预扫描未确认业务控件，已按显式需求生成 runtime-adaptive 大纲。", missing)
+					intelligence.VerifiedInteraction = fallbackPlan
+					intelligence.MissingEvidenceReport = fallbackMissing
+					return fallbackPlan, fallbackMissing, nil
+				}
+			}
 			intelligence.VerifiedInteraction = plan
 			intelligence.MissingEvidenceReport = missing
 			return plan, missing, nil
@@ -74,6 +82,14 @@ func (a *PageInteractionVerifierAgent) VerifyInteractions(
 		}
 	}
 	plan, missing := verifyFromPageEvidence(project, intelligence, candidates)
+	if project.ProductURL != "" && (plan == nil || plan.BusinessActionCount <= 0) {
+		if fallbackPlan := fallbackPlanFromExplicitIntent(project, intelligence, candidates, errors.New("page material did not verify a business action")); fallbackPlan != nil && fallbackPlan.BusinessActionCount > 0 {
+			fallbackMissing := nonBlockingEvidenceFallbackReport(project, intelligence, "page_material_no_business_action", "缺少页面预扫描证据，已按显式需求生成 runtime-adaptive 大纲。", missing)
+			intelligence.VerifiedInteraction = fallbackPlan
+			intelligence.MissingEvidenceReport = fallbackMissing
+			return fallbackPlan, fallbackMissing, nil
+		}
+	}
 	intelligence.VerifiedInteraction = plan
 	intelligence.MissingEvidenceReport = missing
 	_ = brief
@@ -382,7 +398,7 @@ func intentSelectorAction(
 ) model.VerifiedInteractionAction {
 	selector := ""
 	alternatives := []model.SelectorCandidate{}
-	if probe, ok := bestIntentProbe(candidates, keywords); ok {
+	if probe, ok := bestIntentProbe(candidates, keywords, kind); ok {
 		selector = probe.Selector
 		alternatives = append(alternatives, model.SelectorCandidate{
 			Kind:           "css",
@@ -447,11 +463,14 @@ func intentWaitAction(project *model.ProjectContext, id string, label string, su
 	}
 }
 
-func bestIntentProbe(candidates []model.InteractionProbe, keywords []string) (model.InteractionProbe, bool) {
+func bestIntentProbe(candidates []model.InteractionProbe, keywords []string, preferredKind string) (model.InteractionProbe, bool) {
 	var best model.InteractionProbe
 	bestScore := -1
 	for _, candidate := range candidates {
 		if !candidate.IsBusiness || candidate.IsChrome || !selectorUsableForBusinessAction(candidate.Selector) {
+			continue
+		}
+		if !candidateKindMatchesIntent(candidate, preferredKind) || candidateLooksNegativeForIntent(candidate, keywords) {
 			continue
 		}
 		text := normalizeIntentText(strings.Join([]string{candidate.Label, candidate.Selector, candidate.Kind, candidate.ComponentRef}, " "))
@@ -468,6 +487,32 @@ func bestIntentProbe(candidates []model.InteractionProbe, keywords []string) (mo
 		}
 	}
 	return best, bestScore >= 0
+}
+
+func candidateKindMatchesIntent(candidate model.InteractionProbe, preferredKind string) bool {
+	preferred := graphActionTypeFromKind(preferredKind, "")
+	if preferred == "" {
+		return true
+	}
+	actual := graphActionTypeFromKind(candidate.Kind, candidate.Selector)
+	if actual == preferred {
+		return true
+	}
+	if preferred == model.GraphActionClick && actual == model.GraphActionInspect && containsAnyNormalized(candidate.Label+" "+candidate.Selector, "button", "btn", "submit", "start", "create", "new", "build", "generate") {
+		return true
+	}
+	return false
+}
+
+func candidateLooksNegativeForIntent(candidate model.InteractionProbe, keywords []string) bool {
+	text := normalizeIntentText(strings.Join([]string{candidate.Label, candidate.Selector, candidate.Kind, candidate.ComponentRef}, " "))
+	if text == "" {
+		return false
+	}
+	if !containsAnyNormalized(text, "cancel", "取消", "stop", "停止", "delete", "删除", "remove", "移除", "close", "关闭", "regenerate", "重新生成") {
+		return false
+	}
+	return !containsAnyNormalized(strings.Join(keywords, " "), "cancel", "取消", "stop", "停止", "delete", "删除", "remove", "移除", "close", "关闭", "regenerate", "重新生成")
 }
 
 func explicitDemoIntentText(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) string {
@@ -551,6 +596,38 @@ func nonBlockingSidecarFailureReport(project *model.ProjectContext, intelligence
 		SuggestedAction: "继续生成围绕用户需求的 runtime-adaptive 脚本；若录制阶段 selector 失败，使用服务器 failure_diagnostic 修复。请同时检查 video-worker/dist/index.js 与 Playwright 运行环境。",
 		FieldPath:       "project_intelligence.verified_interaction_plan",
 	})
+	return report
+}
+
+func nonBlockingEvidenceFallbackReport(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, kind string, summary string, original *model.MissingEvidenceReport) *model.MissingEvidenceReport {
+	report := &model.MissingEvidenceReport{
+		ID:            "missing_evidence_" + project.ID,
+		ProjectID:     project.ID,
+		SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+		IntentID:      intentID(intelligence),
+		Blocking:      false,
+		Summary:       summary,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if original != nil {
+		for _, item := range original.Items {
+			item.Severity = "warning"
+			if item.SuggestedAction == "" {
+				item.SuggestedAction = "服务器 browser agent 将在产品域内自适应探索；如仍失败会返回 failure_diagnostic 和 repair_request。"
+			}
+			report.Items = append(report.Items, item)
+		}
+	}
+	if len(report.Items) == 0 {
+		report.Items = append(report.Items, model.MissingEvidenceItem{
+			ID:              "missing_" + shortHash(project.ID+kind+summary),
+			MissingKind:     kind,
+			Severity:        "warning",
+			Message:         summary,
+			SuggestedAction: "继续生成受 StageApprovalPlan 约束的 runtime-adaptive 大纲；服务器端只允许在产品域内修正 selector、等待和探索路径。",
+			FieldPath:       "project_intelligence.verified_interaction_plan",
+		})
+	}
 	return report
 }
 

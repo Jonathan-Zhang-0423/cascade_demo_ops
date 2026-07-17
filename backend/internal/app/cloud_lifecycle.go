@@ -150,7 +150,175 @@ func (s *Service) PrepareProductRun(ctx context.Context, request CloudLifecycleR
 	if err != nil {
 		return ProductRunPrepareResult{}, err
 	}
-	return ProductRunPrepareResult{State: state, Build: &build}, nil
+	return ProductRunPrepareResult{State: compactStateForPrepareResponse(state, &build), Build: &build}, nil
+}
+
+func compactStateForPrepareResponse(state *orchestrator.CascadeState, build *ClientExecutionPackageBuild) *orchestrator.CascadeState {
+	if state == nil {
+		return nil
+	}
+	out := &orchestrator.CascadeState{
+		ProjectID:               state.ProjectID,
+		CurrentNode:             state.CurrentNode,
+		Status:                  state.Status,
+		ProjectContext:          compactProjectContextForPrepareResponse(state.ProjectContext),
+		RequirementBrief:        state.RequirementBrief,
+		ScriptReadinessReport:   state.ScriptReadinessReport,
+		VerifiedInteractionPlan: compactVerifiedInteractionPlanForPrepareResponse(state.VerifiedInteractionPlan),
+		MissingEvidenceReport:   compactMissingEvidenceReportForPrepareResponse(state.MissingEvidenceReport),
+		Approved:                state.Approved,
+		RehearsePassRate:        state.RehearsePassRate,
+		Artifacts:               state.Artifacts,
+		ErrorMessage:            state.ErrorMessage,
+	}
+	if build != nil {
+		out.WorkflowGraph = build.Package.WorkflowGraph
+		if build.Package.ExecutableScriptBundle != nil {
+			out.ExecutableScriptBundle = build.Package.ExecutableScriptBundle
+			out.ScriptDocument = build.Package.ExecutableScriptBundle.PlanJSON
+			out.ScriptMarkdown = build.Package.ExecutableScriptBundle.ApprovalMarkdown.InlineMarkdown
+			out.ScriptMarkdownArtifact = build.Package.ExecutableScriptBundle.ApprovalMarkdown.Artifact
+			out.ApprovalMarkdownArtifact = build.Package.ExecutableScriptBundle.ApprovalMarkdown.Artifact
+		}
+	}
+	if state.ProjectIntelligence != nil {
+		out.ProjectIntelligence = &model.ProjectIntelligencePack{
+			ID:                    state.ProjectIntelligence.ID,
+			ProjectID:             state.ProjectIntelligence.ProjectID,
+			SchemaVersion:         state.ProjectIntelligence.SchemaVersion,
+			DemoIntent:            compactDemoIntentForPrepareResponse(state.ProjectIntelligence.DemoIntent),
+			RunIntentScope:        state.ProjectIntelligence.RunIntentScope,
+			VerifiedInteraction:   out.VerifiedInteractionPlan,
+			MissingEvidenceReport: out.MissingEvidenceReport,
+			ScriptReadinessReport: out.ScriptReadinessReport,
+			SourceDigestSHA256:    state.ProjectIntelligence.SourceDigestSHA256,
+			EvidenceRefs:          compactEvidenceRefsForUpload(state.ProjectIntelligence.EvidenceRefs, 8),
+			Confidence:            state.ProjectIntelligence.Confidence,
+			CreatedAt:             state.ProjectIntelligence.CreatedAt,
+		}
+	}
+	return out
+}
+
+func compactProjectContextForPrepareResponse(project *model.ProjectContext) *model.ProjectContext {
+	if project == nil {
+		return nil
+	}
+	out := &model.ProjectContext{
+		ID:                 project.ID,
+		SchemaVersion:      project.SchemaVersion,
+		Mode:               project.Mode,
+		Name:               project.Name,
+		ProductURL:         project.ProductURL,
+		DemoAccount:        project.DemoAccount,
+		GitRepoURL:         project.GitRepoURL,
+		LocalRepoPath:      project.LocalRepoPath,
+		ProductDescription: truncateForUpload(project.ProductDescription, 1000),
+		TargetAudience:     project.TargetAudience,
+		BrandTone:          project.BrandTone,
+		MustShow:           limitStringsForUpload(project.MustShow, 8),
+		MustNotShow:        limitStringsForUpload(project.MustNotShow, 8),
+		ForbiddenPages:     limitStringsForUpload(project.ForbiddenPages, 16),
+		ForbiddenData:      limitStringsForUpload(project.ForbiddenData, 16),
+		Goals:              project.Goals,
+		AccessPolicy:       project.AccessPolicy,
+		SecurityPolicy:     project.SecurityPolicy,
+		CreatedAt:          project.CreatedAt,
+		UpdatedAt:          project.UpdatedAt,
+	}
+	if project.Inputs != nil {
+		out.Inputs = &model.ProjectInputBundle{
+			ProductURLs:          project.Inputs.ProductURLs,
+			Repositories:         project.Inputs.Repositories,
+			Credentials:          project.Inputs.Credentials,
+			Requirements:         project.Inputs.Requirements,
+			RawUserPrompt:        truncateForUpload(project.Inputs.RawUserPrompt, 1000),
+			RequirementDocuments: compactRequirementDocumentsForPrepareResponse(project.Inputs.RequirementDocuments),
+		}
+	}
+	return out
+}
+
+func compactRequirementDocumentsForPrepareResponse(docs []model.RequirementDocumentInput) []model.RequirementDocumentInput {
+	if len(docs) == 0 {
+		return nil
+	}
+	if len(docs) > 3 {
+		docs = docs[:3]
+	}
+	out := make([]model.RequirementDocumentInput, len(docs))
+	for i, doc := range docs {
+		doc.Body = truncateForUpload(doc.Body, 1000)
+		doc.EvidenceRefs = compactEvidenceRefsForUpload(doc.EvidenceRefs, 2)
+		doc.Metadata = nil
+		out[i] = doc
+	}
+	return out
+}
+
+func compactDemoIntentForPrepareResponse(intent *model.DemoIntentSpec) *model.DemoIntentSpec {
+	if intent == nil {
+		return nil
+	}
+	out := *intent
+	out.Objective = truncateForUpload(out.Objective, 1000)
+	out.ForbiddenTopics = limitStringsForUpload(out.ForbiddenTopics, 12)
+	out.EvidenceRefs = compactEvidenceRefsForUpload(out.EvidenceRefs, 4)
+	if len(out.Goals) > 8 {
+		out.Goals = out.Goals[:8]
+	}
+	for i := range out.Goals {
+		out.Goals[i].TargetKeywords = limitStringsForUpload(out.Goals[i].TargetKeywords, 8)
+		out.Goals[i].EvidenceRefs = compactEvidenceRefsForUpload(out.Goals[i].EvidenceRefs, 2)
+	}
+	return &out
+}
+
+func compactVerifiedInteractionPlanForPrepareResponse(plan *model.VerifiedInteractionPlan) *model.VerifiedInteractionPlan {
+	if plan == nil {
+		return nil
+	}
+	out := *plan
+	out.EvidenceRefs = compactEvidenceRefsForUpload(out.EvidenceRefs, 6)
+	if len(out.Actions) > 12 {
+		out.Actions = out.Actions[:12]
+	}
+	for i := range out.Actions {
+		action := &out.Actions[i]
+		action.ExpectedOutcome = truncateForUpload(action.ExpectedOutcome, 180)
+		action.SuccessState = truncateForUpload(action.SuccessState, 180)
+		action.InputValue = RedactSensitiveForPrepareResponse(action.InputValue)
+		action.WaitConditions = limitStringsForUpload(action.WaitConditions, 4)
+		action.EvidenceRefs = compactEvidenceRefsForUpload(action.EvidenceRefs, 2)
+		action.Alternatives = compactSelectorCandidatesForUpload(action.Alternatives, 2)
+	}
+	return &out
+}
+
+func compactMissingEvidenceReportForPrepareResponse(report *model.MissingEvidenceReport) *model.MissingEvidenceReport {
+	if report == nil {
+		return nil
+	}
+	out := *report
+	out.Summary = truncateForUpload(out.Summary, 500)
+	out.EvidenceRefs = compactEvidenceRefsForUpload(out.EvidenceRefs, 4)
+	if len(out.Items) > 6 {
+		out.Items = out.Items[:6]
+	}
+	for i := range out.Items {
+		item := &out.Items[i]
+		item.Message = truncateForUpload(item.Message, 240)
+		item.SuggestedAction = truncateForUpload(item.SuggestedAction, 240)
+		item.EvidenceRefs = compactEvidenceRefsForUpload(item.EvidenceRefs, 2)
+	}
+	return &out
+}
+
+func RedactSensitiveForPrepareResponse(value string) string {
+	if value == "" {
+		return ""
+	}
+	return agents.RedactSensitiveUserText(truncateForUpload(value, 120))
 }
 
 func (s *Service) signBuildWithExchangeSession(build ClientExecutionPackageBuild, session ExchangeSession) (ClientExecutionPackageBuild, error) {
@@ -418,6 +586,14 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
+	graphForPackage, err := cloneWorkflowGraphForPackage(graph)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	bundleForPackage, err := cloneExecutableBundleForPackage(state.ExecutableScriptBundle)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
 	packageID := "pkg_" + firstNonEmptyString(state.ExecutableScriptBundle.ID, state.ScriptDocument.ID, graph.ID)
 	pkg := model.ClientExecutionPackage{
 		PackageID:              packageID,
@@ -427,10 +603,10 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 		CreatedAt:              now,
 		ApprovedAt:             now,
 		ProjectContextSummary:  projectContextSummaryForPackage(project, state, graphDigest),
-		ProductMapSummary:      productMapSummaryForPackage(state.ProductMap),
-		WorkflowGraph:          graph,
+		ProductMapSummary:      productMapSummaryForPackage(project, state.ProductMap),
+		WorkflowGraph:          graphForPackage,
 		RecordingRunSpec:       runSpec,
-		ExecutableScriptBundle: state.ExecutableScriptBundle,
+		ExecutableScriptBundle: bundleForPackage,
 		EvidenceBundle:         evidenceBundleForPackage(state),
 		Reproducibility: model.ReproducibilitySpec{
 			GraphHashSHA256:       graphDigest,
@@ -459,6 +635,7 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 			"dev_plaintext_upload_mode": true,
 		},
 	}
+	applyBrowserAgentOutlineUploadView(&pkg)
 	if err := redactClientExecutionPackageText(&pkg); err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
@@ -533,6 +710,44 @@ func normalizeClientExecutionPackageForUpload(pkg *model.ClientExecutionPackage)
 		}
 		bundle.Reproducibility.ScriptHashSHA256 = scriptHash
 	}
+	if bundle.StageApprovalPlan != nil {
+		stagePlanHash, err := model.DigestCanonicalJSON(bundle.StageApprovalPlan)
+		if err != nil {
+			return err
+		}
+		bundle.Reproducibility.StagePlanHashSHA256 = stagePlanHash
+	}
+	if bundle.ScriptOutline != nil {
+		outlineHash, err := model.DigestCanonicalJSON(bundle.ScriptOutline)
+		if err != nil {
+			return err
+		}
+		bundle.Reproducibility.OutlineHashSHA256 = outlineHash
+	}
+	if bundle.AgentPromptPolicy != nil {
+		promptHash, err := model.DigestCanonicalJSON(bundle.AgentPromptPolicy)
+		if err != nil {
+			return err
+		}
+		bundle.Reproducibility.PromptPolicyHashSHA256 = promptHash
+	}
+	if bundle.BrowserAgentContract != nil {
+		contractHash, err := model.DigestCanonicalJSON(bundle.BrowserAgentContract)
+		if err != nil {
+			return err
+		}
+		bundle.Reproducibility.BrowserAgentContractHashSHA256 = contractHash
+	}
+	if bundle.UnderstandingDossier != nil {
+		dossierHash, err := model.DigestCanonicalJSON(bundle.UnderstandingDossier)
+		if err != nil {
+			return err
+		}
+		bundle.Reproducibility.UnderstandingDossierHashSHA256 = dossierHash
+		if bundle.UnderstandingDossierRef != nil {
+			bundle.UnderstandingDossierRef.SHA256 = dossierHash
+		}
+	}
 	if bundle.ApprovalMarkdown.InlineMarkdown != "" {
 		markdown := bundle.ApprovalMarkdown.InlineMarkdown
 		markdownHash := model.SHA256Hex([]byte(markdown))
@@ -553,6 +768,465 @@ func normalizeClientExecutionPackageForUpload(pkg *model.ClientExecutionPackage)
 	}
 	bundle.Reproducibility.BundleHashSHA256 = bundleHash
 	return nil
+}
+
+func cloneWorkflowGraphForPackage(graph *model.DemoWorkflowGraph) (*model.DemoWorkflowGraph, error) {
+	if graph == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(graph)
+	if err != nil {
+		return nil, err
+	}
+	var out model.DemoWorkflowGraph
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func cloneExecutableBundleForPackage(bundle *model.ExecutableRecordingScriptBundle) (*model.ExecutableRecordingScriptBundle, error) {
+	if bundle == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(bundle)
+	if err != nil {
+		return nil, err
+	}
+	var out model.ExecutableRecordingScriptBundle
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func applyBrowserAgentOutlineUploadView(pkg *model.ClientExecutionPackage) {
+	if pkg == nil || pkg.ExecutableScriptBundle == nil ||
+		pkg.ExecutableScriptBundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		return
+	}
+	bundle := pkg.ExecutableScriptBundle
+	bundle.PlaywrightScript = model.ExecutableScriptSource{MimeType: "application/x.browser-agent-outline+json"}
+	if bundle.PlanJSON != nil {
+		bundle.PlanJSON.WorkflowGraph = nil
+		bundle.PlanJSON.EvidenceRefs = compactEvidenceRefsForUpload(bundle.PlanJSON.EvidenceRefs, 8)
+		for i := range bundle.PlanJSON.Steps {
+			compactScriptStepForUpload(&bundle.PlanJSON.Steps[i])
+		}
+	}
+	compactStageApprovalPlanForUpload(bundle.StageApprovalPlan)
+	compactBrowserAgentOutlineForUpload(bundle.ScriptOutline)
+	compactBrowserAgentContractForUpload(bundle.BrowserAgentContract)
+	bundle.UnderstandingDossier = nil
+	pkg.WorkflowGraph = minimalWorkflowGraphForUpload(pkg.WorkflowGraph, bundle)
+	pkg.ProductMapSummary = minimalProductMapSummaryForUpload(pkg.ProductMapSummary, bundle)
+	pkg.ProductMapSummary.EvidenceRefs = compactEvidenceRefsForUpload(pkg.ProductMapSummary.EvidenceRefs, 4)
+	pkg.ProjectContextSummary.Audiences = nil
+	pkg.ProjectContextSummary.BrandKit = nil
+	pkg.ProjectContextSummary.KnowledgeRefs = nil
+	pkg.EvidenceBundle = model.EvidenceBundle{EvidenceRefs: compactEvidenceRefsForUpload(evidenceRefsForUpload(pkg), 16)}
+	if pkg.Metadata == nil {
+		pkg.Metadata = map[string]any{}
+	}
+	pkg.Metadata["upload_view"] = "browser_agent_outline_minimal"
+	pkg.Metadata["full_project_understanding"] = "local_only"
+}
+
+func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model.ExecutableRecordingScriptBundle) *model.DemoWorkflowGraph {
+	if graph == nil {
+		return nil
+	}
+	out := &model.DemoWorkflowGraph{
+		ID:            graph.ID,
+		ProjectID:     graph.ProjectID,
+		SchemaVersion: graph.SchemaVersion,
+		Version:       graph.Version,
+		Status:        graph.Status,
+		Name:          graph.Name,
+		Summary:       truncateForUpload(graph.Summary, 240),
+		EntryPoint:    graph.EntryPoint,
+		Nodes:         []*model.GraphNode{},
+		Edges:         []*model.GraphEdge{},
+		EvidenceRefs:  compactEvidenceRefsForUpload(graph.EvidenceRefs, 4),
+		CreatedAt:     graph.CreatedAt,
+		UpdatedAt:     graph.UpdatedAt,
+	}
+	if bundle == nil || bundle.PlanJSON == nil {
+		return out
+	}
+	var previous string
+	for _, step := range bundle.PlanJSON.Steps {
+		nodeID := firstNonEmptyString(step.NodeID, step.ID)
+		out.Nodes = append(out.Nodes, &model.GraphNode{
+			ID:              nodeID,
+			Action:          string(step.Action.Type),
+			ExpectedOutcome: truncateForUpload(step.ExpectedOutcome, 200),
+			Type:            model.GraphNodeTypeAction,
+			Title:           truncateForUpload(firstNonEmptyString(step.Title, step.NodeID), 120),
+			Goal:            truncateForUpload(step.BusinessValue, 200),
+			PageRef:         firstNonEmptyString(step.PageTarget.URL, step.Action.Target.URL),
+			EvidenceRefs:    compactEvidenceRefsForUpload(step.EvidenceRefs, 3),
+			DurationHintMS:  step.Timing.DurationMS,
+		})
+		if previous != "" && nodeID != "" {
+			out.Edges = append(out.Edges, &model.GraphEdge{
+				ID:       "edge_" + shortID(previous) + "_" + shortID(nodeID),
+				FromNode: previous,
+				ToNode:   nodeID,
+				Priority: len(out.Edges) + 1,
+			})
+		}
+		previous = nodeID
+	}
+	return out
+}
+
+func minimalProductMapSummaryForUpload(summary model.ProductMapSummary, bundle *model.ExecutableRecordingScriptBundle) model.ProductMapSummary {
+	routeRefs := map[string]bool{}
+	componentRefs := map[string]bool{}
+	if bundle != nil && bundle.StageApprovalPlan != nil {
+		for _, stage := range bundle.StageApprovalPlan.Stages {
+			addUploadRef(routeRefs, stage.TargetRoute)
+			addUploadRef(routeRefs, stage.TargetURL)
+			for _, ref := range stage.ComponentRefs {
+				addUploadRef(componentRefs, ref)
+			}
+		}
+	}
+	out := model.ProductMapSummary{
+		ProductMapID: summary.ProductMapID,
+		Version:      summary.Version,
+		Summary:      summary.Summary,
+		EvidenceRefs: limitEvidenceRefs(summary.EvidenceRefs, 16),
+	}
+	for _, route := range summary.Routes {
+		if route == nil || len(out.Routes) >= 16 {
+			break
+		}
+		if uploadRefMatches(routeRefs, route.Path) || uploadRefMatches(routeRefs, route.ID) || uploadComponentOverlap(componentRefs, route.ComponentIDs) {
+			copied := *route
+			copied.EvidenceRefs = limitEvidenceRefs(copied.EvidenceRefs, 4)
+			out.Routes = append(out.Routes, &copied)
+		}
+	}
+	for _, component := range summary.Components {
+		if len(out.Components) >= 16 {
+			break
+		}
+		if len(componentRefs) == 0 || componentRefs[component.ID] {
+			component.EvidenceRefs = limitEvidenceRefs(component.EvidenceRefs, 4)
+			out.Components = append(out.Components, component)
+		}
+	}
+	return out
+}
+
+func evidenceRefsForUpload(pkg *model.ClientExecutionPackage) []model.EvidenceRef {
+	refs := append([]model.EvidenceRef{}, pkg.EvidenceBundle.EvidenceRefs...)
+	bundle := pkg.ExecutableScriptBundle
+	if bundle == nil {
+		return refs
+	}
+	if bundle.StageApprovalPlan != nil {
+		refs = append(refs, bundle.StageApprovalPlan.EvidenceRefs...)
+		for _, stage := range bundle.StageApprovalPlan.Stages {
+			refs = append(refs, stage.EvidenceRefs...)
+		}
+	}
+	if bundle.ScriptOutline != nil {
+		refs = append(refs, bundle.ScriptOutline.EvidenceRefs...)
+		for _, stage := range bundle.ScriptOutline.Stages {
+			refs = append(refs, stage.EvidenceRefs...)
+		}
+	}
+	return refs
+}
+
+func limitEvidenceRefs(refs []model.EvidenceRef, limit int) []model.EvidenceRef {
+	if limit <= 0 || len(refs) == 0 {
+		return nil
+	}
+	out := []model.EvidenceRef{}
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		key := ref.ID + "|" + string(ref.Kind) + "|" + ref.FieldPath + "|" + ref.ArtifactID
+		if key == "|||" {
+			key = ref.Summary
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, ref)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func compactScriptStepForUpload(step *model.ScriptStep) {
+	if step == nil {
+		return
+	}
+	step.BusinessValue = truncateForUpload(step.BusinessValue, 240)
+	step.ExpectedOutcome = truncateForUpload(step.ExpectedOutcome, 240)
+	step.EvidenceRefs = compactEvidenceRefsForUpload(step.EvidenceRefs, 3)
+	step.PageTarget.SelectorAlternatives = compactSelectorCandidatesForUpload(step.PageTarget.SelectorAlternatives, 2)
+	step.Action.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(step.Action.Target.SelectorAlternatives, 2)
+	step.Action.Target.EvidenceRefs = compactEvidenceRefsForUpload(step.Action.Target.EvidenceRefs, 2)
+	if step.TargetContract != nil {
+		compactTargetContractForUpload(step.TargetContract)
+	}
+	for i := range step.Validations {
+		compactValidationForUpload(&step.Validations[i])
+	}
+	if len(step.Validations) > 3 {
+		step.Validations = step.Validations[:3]
+	}
+	step.Capture.MaskSelectors = limitStringsForUpload(step.Capture.MaskSelectors, 3)
+	step.Capture.Redactions = limitRedactionsForUpload(step.Capture.Redactions, 3)
+	step.Narrative.Voiceover = truncateForUpload(step.Narrative.Voiceover, 240)
+	step.Narrative.Caption = truncateForUpload(step.Narrative.Caption, 160)
+	step.Narrative.Callout = truncateForUpload(step.Narrative.Callout, 120)
+}
+
+func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {
+	if plan == nil {
+		return
+	}
+	plan.Summary = truncateForUpload(plan.Summary, 320)
+	plan.EvidenceRefs = compactEvidenceRefsForUpload(plan.EvidenceRefs, 8)
+	for i := range plan.Stages {
+		stage := &plan.Stages[i]
+		stage.Objective = truncateForUpload(stage.Objective, 240)
+		stage.BusinessIntent = truncateForUpload(stage.BusinessIntent, 240)
+		stage.SuccessState = truncateForUpload(stage.SuccessState, 240)
+		stage.ComponentRefs = limitStringsForUpload(stage.ComponentRefs, 4)
+		stage.APIRefs = limitStringsForUpload(stage.APIRefs, 4)
+		stage.StyleRefs = limitStringsForUpload(stage.StyleRefs, 3)
+		stage.DataModelRefs = limitStringsForUpload(stage.DataModelRefs, 3)
+		stage.WaitConditions = limitStringsForUpload(stage.WaitConditions, 4)
+		stage.CapturePoints = limitStringsForUpload(stage.CapturePoints, 4)
+		stage.RiskNotes = limitStringsForUpload(stage.RiskNotes, 3)
+		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 3)
+		stage.Interaction.EvidenceRefs = compactEvidenceRefsForUpload(stage.Interaction.EvidenceRefs, 2)
+		stage.Interaction.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(stage.Interaction.Target.SelectorAlternatives, 2)
+		stage.Interaction.Target.EvidenceRefs = compactEvidenceRefsForUpload(stage.Interaction.Target.EvidenceRefs, 2)
+		if stage.TargetContract != nil {
+			compactTargetContractForUpload(stage.TargetContract)
+		}
+		for j := range stage.InputContent {
+			stage.InputContent[j].EvidenceRefs = compactEvidenceRefsForUpload(stage.InputContent[j].EvidenceRefs, 1)
+			stage.InputContent[j].Value = truncateForUpload(stage.InputContent[j].Value, 120)
+		}
+	}
+	plan.UncertaintyReport = compactStageUncertaintiesForUpload(plan.UncertaintyReport, 4)
+	plan.SafetyPolicy.ForbiddenPages = limitStringsForUpload(plan.SafetyPolicy.ForbiddenPages, 12)
+	plan.SafetyPolicy.ForbiddenData = limitStringsForUpload(plan.SafetyPolicy.ForbiddenData, 12)
+	plan.SafetyPolicy.Redactions.MaskSelectors = limitStringsForUpload(plan.SafetyPolicy.Redactions.MaskSelectors, 6)
+}
+
+func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutline) {
+	if outline == nil {
+		return
+	}
+	outline.Summary = truncateForUpload(outline.Summary, 320)
+	outline.EvidenceRefs = compactEvidenceRefsForUpload(outline.EvidenceRefs, 8)
+	outline.AllowedExplorationScope.AllowedOrigins = limitStringsForUpload(outline.AllowedExplorationScope.AllowedOrigins, 4)
+	outline.AllowedExplorationScope.AllowedRoutes = limitStringsForUpload(outline.AllowedExplorationScope.AllowedRoutes, 8)
+	outline.AllowedExplorationScope.ForbiddenPathPrefixes = limitStringsForUpload(outline.AllowedExplorationScope.ForbiddenPathPrefixes, 16)
+	outline.AllowedExplorationScope.ForbiddenKeywords = limitStringsForUpload(outline.AllowedExplorationScope.ForbiddenKeywords, 12)
+	outline.ForbiddenActions = limitStringsForUpload(outline.ForbiddenActions, 12)
+	outline.ServerEditableFields = limitStringsForUpload(outline.ServerEditableFields, 12)
+	outline.ImmutableFields = limitStringsForUpload(outline.ImmutableFields, 12)
+	for i := range outline.Stages {
+		stage := &outline.Stages[i]
+		stage.Objective = truncateForUpload(stage.Objective, 240)
+		stage.SuccessState = truncateForUpload(stage.SuccessState, 240)
+		stage.WaitConditions = limitStringsForUpload(stage.WaitConditions, 4)
+		stage.CapturePoints = limitStringsForUpload(stage.CapturePoints, 4)
+		stage.CanModify = limitStringsForUpload(stage.CanModify, 8)
+		stage.MustPreserve = limitStringsForUpload(stage.MustPreserve, 8)
+		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 3)
+		if stage.TargetContract != nil {
+			compactTargetContractForUpload(stage.TargetContract)
+		}
+		if len(stage.Components) > 3 {
+			stage.Components = stage.Components[:3]
+		}
+		for j := range stage.Components {
+			component := &stage.Components[j]
+			component.SelectorAlternatives = compactSelectorCandidatesForUpload(component.SelectorAlternatives, 2)
+			component.EvidenceRefs = compactEvidenceRefsForUpload(component.EvidenceRefs, 2)
+		}
+		if len(stage.Interactions) > 1 {
+			stage.Interactions = stage.Interactions[:1]
+		}
+		for j := range stage.Interactions {
+			interaction := &stage.Interactions[j]
+			interaction.EvidenceRefs = compactEvidenceRefsForUpload(interaction.EvidenceRefs, 2)
+			interaction.WaitConditions = limitStringsForUpload(interaction.WaitConditions, 3)
+			interaction.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(interaction.Target.SelectorAlternatives, 2)
+			interaction.Target.EvidenceRefs = compactEvidenceRefsForUpload(interaction.Target.EvidenceRefs, 2)
+		}
+	}
+	outline.UncertaintyReport = compactStageUncertaintiesForUpload(outline.UncertaintyReport, 4)
+}
+
+func compactBrowserAgentContractForUpload(contract *model.BrowserAgentContract) {
+	if contract == nil {
+		return
+	}
+	contract.RepairPolicy.AllowedRepairKinds = limitStringsForUpload(contract.RepairPolicy.AllowedRepairKinds, 8)
+	contract.RepairPolicy.EditableFields = limitStringsForUpload(contract.RepairPolicy.EditableFields, 12)
+	contract.RepairPolicy.ImmutableFields = limitStringsForUpload(contract.RepairPolicy.ImmutableFields, 12)
+	contract.ObservationPolicy.AllowedFields = limitStringsForUpload(contract.ObservationPolicy.AllowedFields, 12)
+	contract.ObservationPolicy.MaskSelectors = limitStringsForUpload(contract.ObservationPolicy.MaskSelectors, 8)
+}
+
+func compactValidationForUpload(validation *model.ValidationSpec) {
+	if validation == nil {
+		return
+	}
+	validation.Assertion = truncateForUpload(validation.Assertion, 180)
+	validation.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(validation.Target.SelectorAlternatives, 2)
+	validation.Target.EvidenceRefs = compactEvidenceRefsForUpload(validation.Target.EvidenceRefs, 2)
+	validation.EvidenceRefs = compactEvidenceRefsForUpload(validation.EvidenceRefs, 2)
+}
+
+func compactTargetContractForUpload(contract *model.BrowserAgentTargetContract) {
+	if contract == nil {
+		return
+	}
+	contract.Purpose = truncateForUpload(contract.Purpose, 180)
+	contract.AllowedRoles = limitStringsForUpload(contract.AllowedRoles, 4)
+	contract.AllowedNames = limitStringsForUpload(contract.AllowedNames, 6)
+	contract.ForbiddenNames = limitStringsForUpload(contract.ForbiddenNames, 6)
+	contract.EvidenceRefs = compactEvidenceRefsForUpload(contract.EvidenceRefs, 2)
+}
+
+func compactSelectorCandidatesForUpload(candidates []model.SelectorCandidate, limit int) []model.SelectorCandidate {
+	if limit <= 0 || len(candidates) == 0 {
+		return nil
+	}
+	out := make([]model.SelectorCandidate, 0, limit)
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		key := candidate.Kind + "|" + candidate.Value
+		if key == "|" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		candidate.Source = truncateForUpload(candidate.Source, 80)
+		candidate.EvidenceRefs = compactEvidenceRefsForUpload(candidate.EvidenceRefs, 1)
+		out = append(out, candidate)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func compactEvidenceRefsForUpload(refs []model.EvidenceRef, limit int) []model.EvidenceRef {
+	limited := limitEvidenceRefs(refs, limit)
+	for i := range limited {
+		limited[i].Summary = truncateForUpload(limited[i].Summary, 140)
+	}
+	return limited
+}
+
+func compactStageUncertaintiesForUpload(items []model.StageUncertainty, limit int) []model.StageUncertainty {
+	if limit <= 0 || len(items) == 0 {
+		return nil
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]model.StageUncertainty, len(items))
+	for i, item := range items {
+		item.Summary = truncateForUpload(item.Summary, 180)
+		item.SuggestedAction = truncateForUpload(item.SuggestedAction, 180)
+		item.EvidenceRefs = compactEvidenceRefsForUpload(item.EvidenceRefs, 2)
+		out[i] = item
+	}
+	return out
+}
+
+func limitRedactionsForUpload(redactions []model.RedactionSpec, limit int) []model.RedactionSpec {
+	if limit <= 0 || len(redactions) == 0 {
+		return nil
+	}
+	if len(redactions) > limit {
+		redactions = redactions[:limit]
+	}
+	out := make([]model.RedactionSpec, len(redactions))
+	for i, redaction := range redactions {
+		redaction.Reason = truncateForUpload(redaction.Reason, 120)
+		out[i] = redaction
+	}
+	return out
+}
+
+func limitStringsForUpload(values []string, limit int) []string {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(truncateForUpload(value, 160))
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func truncateForUpload(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len([]rune(value)) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	if limit <= 1 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-1]) + "…"
+}
+
+func addUploadRef(refs map[string]bool, value string) {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		refs[value] = true
+	}
+}
+
+func uploadRefMatches(refs map[string]bool, value string) bool {
+	if len(refs) == 0 {
+		return true
+	}
+	value = strings.TrimSpace(value)
+	for ref := range refs {
+		if value != "" && (strings.Contains(value, ref) || strings.Contains(ref, value)) {
+			return true
+		}
+	}
+	return false
+}
+
+func uploadComponentOverlap(refs map[string]bool, values []string) bool {
+	for _, value := range values {
+		if refs[value] {
+			return true
+		}
+	}
+	return false
 }
 
 func redactClientExecutionPackageText(pkg *model.ClientExecutionPackage) error {
@@ -639,7 +1313,9 @@ func redactStringFields(value reflect.Value, seen map[uintptr]bool) {
 }
 
 var scriptPlanHashLiteralPattern = regexp.MustCompile(`const cascadePlanHash = "([a-f0-9]{64})";`)
-var packagePasswordLeakagePattern = regexp.MustCompile(`(?i)(密码|口令)\s*[:：=]?\s*[^\s,，。;；)）]{4,}|\b(password|passwd|pwd|passcode)\b\s*[:：=]\s*[^\s,，。;；)）]{4,}`)
+var packagePasswordLeakagePattern = regexp.MustCompile(`(?i)(密码|口令)\s*[:：=]\s*[^\s,，。;；)）]{4,}|\b(password|passwd|pwd|passcode)\b\s*[:：=]\s*[^\s,，。;；)）]{4,}`)
+var packageAPIKeyLeakagePattern = regexp.MustCompile(`(?i)\bsk-[A-Za-z0-9_-]{16,}\b`)
+var packageEnvFileLeakagePattern = regexp.MustCompile(`(?i)([A-Za-z]:)?[\\/][^"'\s]*\.env(?:\.[A-Za-z0-9_-]+)?|\.env(?:\.[A-Za-z0-9_-]+)?\s*[:=]`)
 
 func syncScriptPlanHashLiteral(source string, planHash string) string {
 	if source == "" || planHash == "" || !scriptPlanHashLiteralPattern.MatchString(source) {
@@ -672,6 +1348,7 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 		))
 	}
 	doc := pkg.ExecutableScriptBundle.PlanJSON
+	outlineRuntime := pkg.ExecutableScriptBundle.ScriptManifest.Runtime == model.ExecutableScriptRuntimeBrowserAgentOutlineV1
 	if !scriptDocumentHasBusinessAction(doc) {
 		findings = append(findings, packagePreflightFinding(
 			"business_action_missing",
@@ -709,7 +1386,7 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 		if isLoginStep(step) {
 			repeatedLoginCount++
 		}
-		if actionRequiresSelector(step.Action.Type) && !actionTargetHasStableHandle(step.Action.Target) {
+		if !outlineRuntime && actionRequiresSelector(step.Action.Type) && !actionTargetHasStableHandle(step.Action.Target) {
 			findings = append(findings, packagePreflightFinding(
 				"selector_missing_"+shortID(step.NodeID),
 				model.FindingSeverityBlocking,
@@ -733,7 +1410,7 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 				"Keep each business stage around 10 seconds with natural wait/capture pacing.",
 			))
 		}
-		if len(step.EvidenceRefs) == 0 && actionRequiresSelector(step.Action.Type) {
+		if !outlineRuntime && len(step.EvidenceRefs) == 0 && actionRequiresSelector(step.Action.Type) {
 			findings = append(findings, packagePreflightFinding(
 				"evidence_missing_"+shortID(step.NodeID),
 				model.FindingSeverityWarning,
@@ -741,6 +1418,9 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 				"Bind ProjectIntelligenceGraph route/component/API/selector evidence to the graph node.",
 			))
 		}
+	}
+	if outlineRuntime {
+		findings = append(findings, preflightBrowserAgentOutline(pkg.ExecutableScriptBundle)...)
 	}
 	if repeatedLoginCount > 1 {
 		findings = append(findings, packagePreflightFinding(
@@ -758,6 +1438,16 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 			"Upload only structure summary, hashes, selectors, and secret_ref; never raw secrets or full source.",
 		))
 	}
+	if outlineRuntime {
+		if data, err := json.Marshal(pkg); err == nil && len(data) > 512*1024 {
+			findings = append(findings, packagePreflightFinding(
+				"payload_too_large",
+				model.FindingSeverityBlocking,
+				fmt.Sprintf("browser-agent outline package is too large: %d bytes", len(data)),
+				"Upload only markdown, stage JSON, browser-agent outline, contract, hashes, and compact evidence refs.",
+			))
+		}
+	}
 	return findings
 }
 
@@ -769,6 +1459,184 @@ func blockingFindings(findings []model.AgentFinding) []model.AgentFinding {
 		}
 	}
 	return blockers
+}
+
+func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle) []model.AgentFinding {
+	findings := []model.AgentFinding{}
+	if bundle == nil {
+		return findings
+	}
+	if bundle.StageApprovalPlan == nil {
+		findings = append(findings, packagePreflightFinding(
+			"stage_approval_plan_missing",
+			model.FindingSeverityBlocking,
+			"browser agent outline package is missing stage_approval_plan",
+			"Regenerate the package so the user can approve stage JSON before upload.",
+		))
+	}
+	if bundle.ScriptOutline == nil {
+		findings = append(findings, packagePreflightFinding(
+			"script_outline_missing",
+			model.FindingSeverityBlocking,
+			"browser agent outline package is missing script_outline",
+			"Regenerate the package so the server browser agent receives route/component interaction guidance.",
+		))
+	}
+	if bundle.AgentPromptPolicy == nil {
+		findings = append(findings, packagePreflightFinding(
+			"agent_prompt_policy_missing",
+			model.FindingSeverityBlocking,
+			"browser agent outline package is missing agent_prompt_policy",
+			"Regenerate the package so server-side repairs have explicit editable and immutable boundaries.",
+		))
+	}
+	if bundle.BrowserAgentContract == nil {
+		findings = append(findings, packagePreflightFinding(
+			"browser_agent_contract_missing",
+			model.FindingSeverityBlocking,
+			"browser agent outline package is missing browser_agent_contract",
+			"Regenerate the package so server-side browser agent repair has explicit policy, observation, and conflict boundaries.",
+		))
+	}
+	if bundle.PlanJSON != nil {
+		for _, step := range bundle.PlanJSON.Steps {
+			if browserAgentStepNeedsValidation(step) && !browserAgentStepHasRequiredValidation(step) {
+				findings = append(findings, packagePreflightFinding(
+					"required_validation_missing_"+shortID(step.NodeID),
+					model.FindingSeverityBlocking,
+					"business step is missing required outcome validation: "+step.NodeID,
+					"Add a required validation such as url_matches, element_visible, text_contains, or page_title_contains.",
+				))
+			}
+			if browserAgentStepNeedsValidation(step) && (step.TargetContract == nil || strings.TrimSpace(step.TargetContract.SemanticID) == "") {
+				findings = append(findings, packagePreflightFinding(
+					"target_contract_missing_"+shortID(step.NodeID),
+					model.FindingSeverityBlocking,
+					"business step is missing target_contract: "+step.NodeID,
+					"Bind each business action to semantic_id, allowed role/name, forbidden names, and component evidence.",
+				))
+			}
+		}
+	}
+	if bundle.StageApprovalPlan != nil {
+		for _, stage := range bundle.StageApprovalPlan.Stages {
+			if strings.TrimSpace(stage.Objective) == "" {
+				findings = append(findings, packagePreflightFinding(
+					"stage_objective_missing_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"stage approval item is missing objective: "+stage.NodeID,
+					"Bind each stage to a user-approved business objective before upload.",
+				))
+			}
+			if !stageApprovalHasEvidence(stage) {
+				findings = append(findings, packagePreflightFinding(
+					"stage_evidence_missing_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"stage approval item is missing route/component/API evidence: "+stage.NodeID,
+					"Continue local project drilldown until the stage has evidence refs or route/component/API/data model bindings.",
+				))
+			}
+			if stage.TargetContract == nil || strings.TrimSpace(stage.TargetContract.SemanticID) == "" {
+				findings = append(findings, packagePreflightFinding(
+					"stage_target_contract_missing_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"stage approval item is missing target_contract: "+stage.NodeID,
+					"Regenerate the stage plan from intent-traced route/component/action evidence.",
+				))
+			}
+			if stage.DurationMS > 0 && stage.DurationMS < 10000 {
+				findings = append(findings, packagePreflightFinding(
+					"stage_duration_short_"+shortID(stage.NodeID),
+					model.FindingSeverityWarning,
+					"stage approval duration is shorter than 10 seconds: "+stage.NodeID,
+					"Keep each stage around 10 seconds or more so the server recording has natural pacing.",
+				))
+			}
+		}
+		for _, uncertainty := range bundle.StageApprovalPlan.UncertaintyReport {
+			if uncertainty.Blocking {
+				findings = append(findings, packagePreflightFinding(
+					"stage_uncertainty_blocking_"+shortID(uncertainty.ID),
+					model.FindingSeverityBlocking,
+					"stage approval plan has blocking uncertainty: "+uncertainty.Summary,
+					firstNonEmptyString(uncertainty.SuggestedAction, "Continue reading the related code or ask the user for clarification before upload."),
+				))
+			}
+		}
+	}
+	if bundle.ScriptOutline != nil {
+		for _, stage := range bundle.ScriptOutline.Stages {
+			if len(stage.Interactions) == 0 {
+				findings = append(findings, packagePreflightFinding(
+					"outline_interaction_missing_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"script outline stage has no interaction guidance: "+stage.NodeID,
+					"Add route, component, target role/name/selector candidates, and wait conditions for this stage.",
+				))
+			}
+			if stage.TargetContract == nil || strings.TrimSpace(stage.TargetContract.SemanticID) == "" {
+				findings = append(findings, packagePreflightFinding(
+					"outline_target_contract_missing_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"script outline stage is missing target_contract: "+stage.NodeID,
+					"Provide semantic_id, allowed role/name, forbidden names, and component evidence for the server browser agent.",
+				))
+			}
+		}
+		for _, uncertainty := range bundle.ScriptOutline.UncertaintyReport {
+			if uncertainty.Blocking {
+				findings = append(findings, packagePreflightFinding(
+					"outline_uncertainty_blocking_"+shortID(uncertainty.ID),
+					model.FindingSeverityBlocking,
+					"script outline has blocking uncertainty: "+uncertainty.Summary,
+					firstNonEmptyString(uncertainty.SuggestedAction, "Continue local evidence gathering before upload."),
+				))
+			}
+		}
+	}
+	if bundle.AgentPromptPolicy != nil {
+		if strings.TrimSpace(bundle.AgentPromptPolicy.SystemPrompt) == "" || len(bundle.AgentPromptPolicy.ImmutableFields) == 0 || len(bundle.AgentPromptPolicy.EditableFields) == 0 {
+			findings = append(findings, packagePreflightFinding(
+				"prompt_policy_incomplete",
+				model.FindingSeverityBlocking,
+				"agent prompt policy is incomplete",
+				"Declare system prompt, immutable fields, and editable fields for the server browser agent.",
+			))
+		}
+	}
+	return findings
+}
+
+func stageApprovalHasEvidence(stage model.StageApprovalStage) bool {
+	return len(stage.EvidenceRefs) > 0 ||
+		len(stage.ComponentRefs) > 0 ||
+		len(stage.APIRefs) > 0 ||
+		len(stage.StyleRefs) > 0 ||
+		len(stage.DataModelRefs) > 0 ||
+		len(stage.Interaction.EvidenceRefs) > 0 ||
+		len(stage.Interaction.Target.EvidenceRefs) > 0
+}
+
+func browserAgentStepNeedsValidation(step model.ScriptStep) bool {
+	switch step.Action.Type {
+	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
+		return true
+	default:
+		return false
+	}
+}
+
+func browserAgentStepHasRequiredValidation(step model.ScriptStep) bool {
+	for _, validation := range step.Validations {
+		if !validation.Required {
+			continue
+		}
+		switch validation.Kind {
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+			return true
+		}
+	}
+	return false
 }
 
 func packagePreflightFinding(id string, severity model.FindingSeverity, summary string, suggestedAction string) model.AgentFinding {
@@ -884,9 +1752,9 @@ func detectPackageLeakage(pkg *model.ClientExecutionPackage) string {
 		return "private key"
 	case strings.Contains(lower, "bearer "):
 		return "authorization token"
-	case strings.Contains(lower, "sk-"):
+	case packageAPIKeyLeakagePattern.Match(data):
 		return "api key"
-	case strings.Contains(lower, ".env"):
+	case packageEnvFileLeakagePattern.Match(data):
 		return ".env"
 	case strings.Contains(lower, "password=") || strings.Contains(lower, "password:"):
 		return "password literal"
@@ -967,6 +1835,7 @@ func projectContextSummaryForPackage(project *model.ProjectContext, state *orche
 	if graphDigest != "" {
 		inputFingerprints["workflow_graph"] = graphDigest
 	}
+	goals := demoGoalsForPackage(project)
 	return model.ProjectContextSummary{
 		ContextID:         "ctx_" + project.ID,
 		SchemaVersion:     model.ProjectContextSchemaVersion,
@@ -974,7 +1843,7 @@ func projectContextSummaryForPackage(project *model.ProjectContext, state *orche
 		Name:              project.Name,
 		ProductURL:        project.ProductURL,
 		TargetAudience:    project.TargetAudience,
-		Goals:             append([]model.DemoGoal{}, project.Goals...),
+		Goals:             goals,
 		Audiences:         append([]model.AudienceProfile{}, project.Audiences...),
 		AccessPolicy:      project.AccessPolicy,
 		SecurityPolicy:    project.SecurityPolicy,
@@ -982,9 +1851,13 @@ func projectContextSummaryForPackage(project *model.ProjectContext, state *orche
 	}
 }
 
-func productMapSummaryForPackage(productMap *model.ProductMap) model.ProductMapSummary {
+func productMapSummaryForPackage(project *model.ProjectContext, productMap *model.ProductMap) model.ProductMapSummary {
 	if productMap == nil {
 		return model.ProductMapSummary{}
+	}
+	intentText := ""
+	if project != nil {
+		intentText = project.ProductDescription
 	}
 	components := make([]model.ComponentSummary, 0, len(productMap.Components))
 	for _, component := range productMap.Components {
@@ -1017,16 +1890,117 @@ func productMapSummaryForPackage(productMap *model.ProductMap) model.ProductMapS
 	return model.ProductMapSummary{
 		ProductMapID: productMap.ID,
 		Version:      productMap.Version,
-		Summary:      productMap.Summary,
-		Pages:        productMap.Pages,
-		Features:     productMap.Features,
+		Summary:      packageProductMapSummary(intentText, productMap.Summary),
+		Pages:        sanitizeProductPagesForPackage(productMap.Pages, intentText),
+		Features:     sanitizeFeaturesForPackage(productMap.Features, intentText),
 		Routes:       productMap.Routes,
 		Components:   components,
 		DataModels:   dataModels,
 		Roles:        productMap.Roles,
-		Workflows:    productMap.Workflows,
+		Workflows:    sanitizeWorkflowsForPackage(productMap.Workflows, intentText),
 		EvidenceRefs: append([]model.EvidenceRef{}, productMap.EvidenceRefs...),
 	}
+}
+
+func demoGoalsForPackage(project *model.ProjectContext) []model.DemoGoal {
+	if project == nil || strings.TrimSpace(project.ProductDescription) == "" {
+		if project == nil {
+			return nil
+		}
+		return append([]model.DemoGoal{}, project.Goals...)
+	}
+	return []model.DemoGoal{{
+		ID:               "goal_primary",
+		UseCase:          model.DemoUseCaseLaunch,
+		AudienceID:       "audience_primary",
+		ValueProposition: project.ProductDescription,
+		SuccessCriteria: []string{
+			"登录展示约 10 秒",
+			"新建项目：俄罗斯方块，并选择构建模式",
+			"进入项目后观察 agent 实际构建约 60 秒",
+		},
+		Priority: 1,
+	}}
+}
+
+func packageProductMapSummary(intentText string, fallback string) string {
+	if strings.TrimSpace(intentText) == "" {
+		return fallback
+	}
+	return "需求作用域产品地图：" + strings.TrimSpace(intentText)
+}
+
+func sanitizeProductPagesForPackage(pages []*model.ProductPage, intentText string) []*model.ProductPage {
+	out := make([]*model.ProductPage, 0, len(pages))
+	for _, page := range pages {
+		if page == nil {
+			continue
+		}
+		copied := *page
+		copied.Actions = filterPackageSummaryStrings(page.Actions, intentText)
+		copied.PrimaryActions = filterPackageSummaryActions(page.PrimaryActions, intentText)
+		out = append(out, &copied)
+	}
+	return out
+}
+
+func sanitizeFeaturesForPackage(features []*model.Feature, intentText string) []*model.Feature {
+	out := make([]*model.Feature, 0, len(features))
+	for _, feature := range features {
+		if feature == nil || packageSummaryTextOutOfScope(feature.Name+" "+feature.UserValue+" "+feature.BusinessValue, intentText) {
+			continue
+		}
+		out = append(out, feature)
+	}
+	return out
+}
+
+func sanitizeWorkflowsForPackage(workflows []*model.WorkflowCandidate, intentText string) []*model.WorkflowCandidate {
+	out := make([]*model.WorkflowCandidate, 0, len(workflows))
+	for _, workflow := range workflows {
+		if workflow == nil || packageSummaryTextOutOfScope(workflow.Name+" "+string(workflow.UseCase)+" "+strings.Join(workflow.RiskNotes, " "), intentText) {
+			continue
+		}
+		out = append(out, workflow)
+	}
+	return out
+}
+
+func filterPackageSummaryStrings(values []string, intentText string) []string {
+	out := []string{}
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" || packageSummaryTextOutOfScope(value, intentText) {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func filterPackageSummaryActions(actions []model.UIActionRef, intentText string) []model.UIActionRef {
+	out := []model.UIActionRef{}
+	for _, action := range actions {
+		if packageSummaryTextOutOfScope(action.Label+" "+action.Selector+" "+action.Kind, intentText) {
+			continue
+		}
+		out = append(out, action)
+	}
+	return out
+}
+
+func packageSummaryTextOutOfScope(value string, intentText string) bool {
+	text := strings.ToLower(value)
+	intent := strings.ToLower(intentText)
+	if text == "" {
+		return false
+	}
+	blockers := []string{"graph can be approved", "rehearsal pass rate", "排练通过率", "可审批", "审批", "approve", "approved", "批准", "regenerate", "重新生成", "revise", "修订", "polish", "润色", "cancel", "取消", "delete", "删除", "remove", "移除", "stop", "停止"}
+	for _, blocker := range blockers {
+		if strings.Contains(text, strings.ToLower(blocker)) && !strings.Contains(intent, strings.ToLower(blocker)) {
+			return true
+		}
+	}
+	return false
 }
 
 func evidenceBundleForPackage(state *orchestrator.CascadeState) model.EvidenceBundle {

@@ -1,0 +1,9 @@
+{
+  "name": "cascade-fixture-tetris-builder",
+  "private": true,
+  "scripts": {
+    "dev": "go run ./server.go --addr 127.0.0.1:4177"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

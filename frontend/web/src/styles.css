@@ -961,6 +961,22 @@ tbody tr:hover,
   background: #fbfcfd;
 }
 
+.script-review-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
+.script-review-summary span {
+  border: 1px solid #d6dde3;
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: #465864;
+  background: #f6f8fa;
+  font-size: 12px;
+}
+
 .script-review-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -85,13 +85,13 @@ func (a *ProductMapAgent) ExploreProduct(ctx context.Context, project *model.Pro
 		entryPoint = report.PageSnapshots[0].URL
 	}
 	pages := productPagesFromUnderstanding(project, report, entryPoint)
-	pages = productPagesFromIntelligence(intelligence, pages, entryPoint)
+	pages = productPagesFromIntelligence(project, intelligence, pages, entryPoint)
 	features := productFeaturesFromUnderstanding(project, report)
 	features = productFeaturesFromIntelligence(project, intelligence, features)
 	routes := routeNodesFromUnderstanding(report, pages)
 	routes = routeNodesFromIntelligence(intelligence, routes, pages)
 	components := componentNodesFromUnderstanding(report)
-	components = componentNodesFromIntelligence(intelligence, components)
+	components = componentNodesFromIntelligence(project, intelligence, components)
 	dataModels := dataModelNodesFromUnderstanding(report)
 	dataModels = dataModelNodesFromIntelligence(intelligence, dataModels)
 	workflows := workflowCandidatesFromUnderstanding(report, pages)
@@ -306,10 +306,11 @@ func productFeaturesFromUnderstanding(project *model.ProjectContext, report *mod
 	}}
 }
 
-func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, existing []*model.ProductPage, entryPoint string) []*model.ProductPage {
+func productPagesFromIntelligence(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, existing []*model.ProductPage, entryPoint string) []*model.ProductPage {
 	if intelligence == nil {
 		return existing
 	}
+	intentText := projectIntentText(project, intelligence)
 	seen := map[string]bool{}
 	for _, page := range existing {
 		if page == nil {
@@ -323,8 +324,13 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 			continue
 		}
 		actions := []string{}
+		primaryActions := []model.UIActionRef{}
 		for _, action := range surface.Actions {
+			if !actionAllowedForIntentEvidenceForIntent(action.Label, action.Selector, intentText) {
+				continue
+			}
 			actions = append(actions, firstNonEmpty(action.Kind, "inspect"))
+			primaryActions = append(primaryActions, action)
 		}
 		if len(actions) == 0 {
 			actions = []string{"inspect", "capture"}
@@ -335,7 +341,7 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 					continue
 				}
 				page.Actions = uniqueStrings(append(page.Actions, actions...))
-				page.PrimaryActions = append(page.PrimaryActions, surface.Actions...)
+				page.PrimaryActions = append(page.PrimaryActions, primaryActions...)
 				page.States = uniqueStrings(append(page.States, surface.States...))
 				page.FeatureRefs = uniqueStrings(append(page.FeatureRefs, surface.FeatureRefs...))
 				page.EvidenceRefs = uniqueEvidenceRefs(append(page.EvidenceRefs, surface.EvidenceRefs...))
@@ -349,7 +355,7 @@ func productPagesFromIntelligence(intelligence *model.ProjectIntelligencePack, e
 			Title:          firstNonEmpty(surface.Title, "项目理解页面"),
 			Purpose:        firstNonEmpty(surface.PageRole, "由 ProjectIntelligenceGraph 识别的可演示交互面。"),
 			Actions:        uniqueStrings(actions),
-			PrimaryActions: append([]model.UIActionRef{}, surface.Actions...),
+			PrimaryActions: append([]model.UIActionRef{}, primaryActions...),
 			States:         append([]string{}, surface.States...),
 			FeatureRefs:    append([]string{}, surface.FeatureRefs...),
 			EvidenceRefs:   surface.EvidenceRefs,
@@ -459,10 +465,11 @@ func routeNodesFromIntelligence(intelligence *model.ProjectIntelligencePack, exi
 	return existing
 }
 
-func componentNodesFromIntelligence(intelligence *model.ProjectIntelligencePack, existing []*model.ComponentNode) []*model.ComponentNode {
+func componentNodesFromIntelligence(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, existing []*model.ComponentNode) []*model.ComponentNode {
 	if intelligence == nil {
 		return existing
 	}
+	intentText := projectIntentText(project, intelligence)
 	seen := map[string]bool{}
 	for _, component := range existing {
 		if component != nil {
@@ -482,6 +489,9 @@ func componentNodesFromIntelligence(intelligence *model.ProjectIntelligencePack,
 		}
 		actions := make([]model.UIActionRef, 0, len(surface.Actions))
 		for _, action := range surface.Actions {
+			if !actionAllowedForIntentEvidenceForIntent(action.Label, action.Selector, intentText) {
+				continue
+			}
 			actions = append(actions, model.UIActionRef{
 				ID:           action.ID,
 				Label:        action.Label,

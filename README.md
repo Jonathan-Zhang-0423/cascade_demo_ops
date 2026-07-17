@@ -5,10 +5,9 @@ Server-side engine for browser exploration, deterministic execution, recording, 
 Authoritative Server-side v2 flow:
 
 ```text
-External business-action evidence + Server Browser Agent exploration
-  -> evidence fusion, conflict checks, and confidence gates
-  -> deterministic execution-draft compilation
-  -> draft-hash authorization
+Approved Stage JSON + Browser Agent outline + understanding dossier
+  -> intake validation and hash binding
+  -> bounded Server Browser Agent exploration and execution planning
   -> Playwright execution + Outcome Verifier
   -> policy-constrained Runtime Repair Patch when allowed
   -> recording, local lightweight editing, FFmpeg rendering, and delivery
@@ -23,7 +22,7 @@ The original authorized draft remains immutable; permitted repairs are auditable
 Models may resolve or suggest targets, while deterministic services enforce execution and safety boundaries.
 ```
 
-The v2 architecture is the target direction and is still being implemented. Existing v1 contracts remain compatibility baselines until their code paths are migrated.
+The v2 architecture is the target direction and is still being implemented. The versioned exchange and `browser-agent-outline-v1` contracts remain authoritative for implemented code paths until an explicit schema migration lands.
 
 Documentation:
 

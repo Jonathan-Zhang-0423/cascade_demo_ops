@@ -25,8 +25,13 @@ describe("desktop bridge contract", () => {
     const payload = JSON.stringify(result.data);
 
     expect(result.ok).toBe(true);
-    expect(result.data?.executableScriptBundle?.playwright_script.inline_source).toContain("runCascadeRecording");
+    expect(result.data?.executableScriptBundle?.script_manifest.runtime).toBe("browser-agent-outline-v1");
+    expect(result.data?.executableScriptBundle?.playwright_script.inline_source).toBeUndefined();
+    expect(result.data?.executableScriptBundle?.stage_approval_plan?.stages.length).toBeGreaterThan(0);
+    expect(result.data?.executableScriptBundle?.script_outline?.stages.length).toBeGreaterThan(0);
+    expect(result.data?.executableScriptBundle?.agent_prompt_policy?.immutable_fields.length).toBeGreaterThan(0);
     expect(payload).not.toContain("function submitPayment");
+    expect(payload).not.toContain("runCascadeRecording");
     expect(payload).not.toContain("raw-password");
     expect(payload).toContain("sourceSummaryOnly");
   });
@@ -60,6 +65,7 @@ describe("desktop bridge contract", () => {
     expect(repaired.data?.stage).toBe("package_approval");
     expect(repaired.data?.status).toBe("awaiting_approval");
     expect(repaired.data?.executableScriptBundle?.repair_lineage?.source_result_id).toBe(failure.data.cloudRun.repairRequest?.source_result_id);
+    expect(repaired.data?.executableScriptBundle?.script_manifest.runtime).toBe("browser-agent-outline-v1");
     expect(repaired.data?.scriptMarkdown).toContain("本次修复说明");
   });
 

@@ -1,7 +1,7 @@
 # Client to Cloud Exchange Protocol
 
 > [!IMPORTANT]
-> **Legacy v1 / 当前实现兼容基线。** 本文件用于兼容现有代码、fixtures 和迁移验证，不代表 Server 侧新功能路线。Server 侧 v2 架构以 [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md) 为准；迁移完成前，已落地接口仍按本文执行。
+> **当前交换协议。** `browser-agent-outline-v1` 是最新执行包主路径，受限 TypeScript 是 Legacy 兼容子路径。Server 本地视频编辑器不改变本协议，只消费执行后形成的录屏、素材目录和编辑计划。
 
 This protocol moves an approved desktop execution plan from the customer app to
 Cascade cloud, then returns encrypted recording results and generated assets.
@@ -26,7 +26,7 @@ Failure repair loop:
 Cloud execute_script fails
   -> Cloud captures redacted screenshot, trace, console/network summaries, DOM/a11y refs
   -> Cloud returns failed RecordingResultPackage with ScriptFailureDiagnostic + ScriptRepairRequest
-  -> App agent repairs ExecutionScriptDocument + restricted TS script using local code context
+  -> App agent repairs StageApprovalPlan + BrowserAgentScriptOutline using local code context
   -> user reviews repair approval markdown and approves
   -> App uploads a new ClientExecutionPackage with RepairContext + ScriptRepairLineage
 ```
@@ -64,21 +64,39 @@ and maps the API contract to callable methods:
 This layer currently uses in-memory state; production storage should implement
 the existing `repository.ExchangeRepository` contract.
 
-## Three-Part Script Bundle
+## Executable Script Bundle
 
-The App uploads one approved three-part bundle inside
-`ClientExecutionPackage.executable_script_bundle`:
+The App uploads one approved `ExecutableRecordingScriptBundle` inside
+`ClientExecutionPackage.executable_script_bundle`. The new product path uses
+`runtime=browser-agent-outline-v1`:
 
 - `plan_json`: the machine-auditable `ExecutionScriptDocument`.
-- `playwright_script`: the restricted TypeScript Playwright script generated
-  deterministically from the plan.
+- `stage_approval_plan`: user-approved stage JSON with route/component/API
+  evidence, input semantics, success state, risks, confidence, and timing.
+- `script_outline`: the server browser agent outline with product routes,
+  interaction targets, candidate selector/role/name hints, waits, capture
+  points, and bounded exploration scope.
+- `agent_prompt_policy`: immutable vs server-editable fields and the browser
+  agent system policy.
+- `project_understanding_dossier` or `understanding_dossier_ref`: requirement
+  related project understanding, stored as summaries, hashes, evidence refs, and
+  redacted snippets rather than full source.
 - `approval_markdown`: the Chinese reasoning and approval document shown to the
   user.
 
-The three parts are hash-bound through `plan_hash_sha256`,
-`script_hash_sha256`, `markdown_hash_sha256`, and `bundle_hash_sha256`. The
-server validates these hashes before execution. The TS script remains an
-execution artifact; the JSON plan remains the audit source of truth.
+These fields are hash-bound through `plan_hash_sha256`,
+`stage_plan_hash_sha256`, `outline_hash_sha256`,
+`prompt_policy_hash_sha256`, `understanding_dossier_hash_sha256`,
+`markdown_hash_sha256`, and `bundle_hash_sha256`. The server validates these
+hashes before execution.
+
+The legacy `runtime=playwright-restricted-sandbox` remains supported for old
+servers and CI fixtures. In that mode, `playwright_script.inline_source` is a
+deterministic restricted TypeScript artifact and must export
+`runCascadeRecording`. In outline mode, `playwright_script` may be empty and the
+manifest entry function is `runBrowserAgentOutline`; the cloud browser agent is
+responsible for final adaptive exploration and executable script repair inside
+the approved boundaries.
 
 ## Upload Shape
 
@@ -216,9 +234,11 @@ tokens, full HTML, or customer source content. Failure artifacts use
 
 Repair packages reuse the normal upload API. The repaired
 `ClientExecutionPackage` carries `repair_context`, and the repaired
-`ExecutableRecordingScriptBundle` carries `repair_lineage`. The repaired script
-must pass the same hash binding, AST/security validation, allowed-domain checks,
-and human approval flow as a first-run package.
+`ExecutableRecordingScriptBundle` carries `repair_lineage`. In the outline
+runtime, repairs update the approved stage plan, script outline, prompt policy,
+and evidence chain; in the legacy TS runtime, repairs update the restricted
+script. Both paths must pass the same hash binding, allowed-domain checks,
+safety validation, and human approval flow as a first-run package.
 
 ## Render Handoff
 

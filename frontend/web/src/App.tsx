@@ -131,7 +131,7 @@ export function App() {
     setWorkspace((current) => appendRuntimeLog(current, {
       level: "info",
       message: "开始生成执行包",
-      detail: "正在调用本地 Dev Bridge：需求读取 -> 代码摘要 -> 产品理解 -> 执行图 -> TS 脚本包。",
+      detail: "正在调用本地 Dev Bridge：需求读取 -> 代码 drilldown -> 项目理解 -> Stage JSON -> Browser Agent 大纲。",
     }));
     setWorkspace((current) => {
       const { lastError: _lastError, ...cloudRun } = current.cloudRun;
@@ -694,7 +694,7 @@ function UnderstandingStagePanel({ workspace }: { workspace: ProjectWorkspaceVie
           <Fact label="Product Map" value={workspace.understanding.productMapID} />
           <Fact label="摘要置信度" value={`${Math.round(bestEvidenceConfidence(workspace) * 100)}%`} />
           <Fact label="敏感提示" value={`${workspace.understanding.sensitiveWarnings.length} 项`} />
-          <Fact label="后续用途" value="生成执行图、脚本文档和审批说明" />
+          <Fact label="后续用途" value="生成 Stage 审批 JSON、Browser Agent 大纲和证据链" />
         </div>
       </section>
     </div>
@@ -862,8 +862,10 @@ function PackageStageSummary({ workspace }: { workspace: ProjectWorkspaceView })
       <section className="table-section">
         <SectionTitle title="执行包审批入口" meta={workspace.packagePreview.packageID} />
         <div className="settings-grid">
+          <Fact label="Runtime" value={workspace.executableScriptBundle?.script_manifest.runtime ?? "待生成"} />
           <Fact label="Plan Hash" value={workspace.executableScriptBundle?.reproducibility.plan_hash_sha256 ?? "待生成"} />
-          <Fact label="Script Hash" value={workspace.executableScriptBundle?.reproducibility.script_hash_sha256 ?? "待生成"} />
+          <Fact label="Outline Hash" value={workspace.executableScriptBundle?.reproducibility.outline_hash_sha256 ?? workspace.executableScriptBundle?.reproducibility.script_hash_sha256 ?? "待生成"} />
+          <Fact label="Prompt Hash" value={workspace.executableScriptBundle?.reproducibility.prompt_policy_hash_sha256 ?? "待生成"} />
           <Fact label="Bundle Hash" value={workspace.executableScriptBundle?.reproducibility.bundle_hash_sha256 ?? "待生成"} />
           <Fact label="审批状态" value={projectStatusLabels[workspace.status]} />
         </div>
@@ -1084,8 +1086,11 @@ function PackageApproval({
         <div className="package-facts">
           <Fact label="执行包摘要" value={workspace.packagePreview.packageDigest} />
           <Fact label="流程图摘要" value={workspace.packagePreview.graphDigest} />
+          <Fact label="Runtime" value={bundle?.script_manifest.runtime ?? "待生成"} />
           <Fact label="Plan Hash" value={bundle?.reproducibility.plan_hash_sha256 ?? "待生成"} />
-          <Fact label="Script Hash" value={bundle?.reproducibility.script_hash_sha256 ?? "待生成"} />
+          <Fact label="Stage Hash" value={bundle?.reproducibility.stage_plan_hash_sha256 ?? "待生成"} />
+          <Fact label="Outline Hash" value={bundle?.reproducibility.outline_hash_sha256 ?? bundle?.reproducibility.script_hash_sha256 ?? "待生成"} />
+          <Fact label="Prompt Hash" value={bundle?.reproducibility.prompt_policy_hash_sha256 ?? "待生成"} />
           <Fact label="Bundle Hash" value={bundle?.reproducibility.bundle_hash_sha256 ?? "待生成"} />
           <Fact label="上传模式" value={workspace.packagePreview.sourceSummaryOnly ? "仅结构摘要" : "已阻塞"} />
           <Fact label="加密状态" value={workspace.packagePreview.encrypted ? "已启用" : "缺失"} />
@@ -1320,15 +1325,44 @@ function ScriptBundleReview({ workspace }: { workspace: ProjectWorkspaceView }) 
   const bundle = workspace.executableScriptBundle;
   const plan = bundle?.plan_json ?? workspace.scriptDocument;
   const markdown = bundle?.approval_markdown.inline_markdown ?? workspace.scriptMarkdown ?? "执行包生成后展示中文思路文档。";
-  const source = bundle?.playwright_script.inline_source ?? "执行包生成后展示受限 TypeScript 脚本。";
   const planJSON = plan ? JSON.stringify(plan, null, 2) : "执行包生成后展示 JSON 执行计划。";
+  const isOutlineRuntime = bundle?.script_manifest.runtime === "browser-agent-outline-v1";
+  const stagePlanJSON = bundle?.stage_approval_plan ? JSON.stringify(bundle.stage_approval_plan, null, 2) : "生成后展示用户审批用 Stage JSON。";
+  const outlineJSON = bundle?.script_outline ? JSON.stringify(bundle.script_outline, null, 2) : "生成后展示 Browser Agent 脚本大纲。";
+  const promptPolicyJSON = bundle?.agent_prompt_policy ? JSON.stringify(bundle.agent_prompt_policy, null, 2) : "生成后展示可修改/不可修改规则。";
+  const agentContractJSON = bundle?.browser_agent_contract ? JSON.stringify(bundle.browser_agent_contract, null, 2) : "生成后展示 Browser Agent 执行/修复合同。";
+  const dossierJSON = bundle?.project_understanding_dossier ? JSON.stringify(bundle.project_understanding_dossier, null, 2) : "生成后展示需求相关项目理解证据。";
+  const source = bundle?.playwright_script.inline_source ?? "legacy TS 模式下展示受限 TypeScript 脚本；Browser Agent 大纲模式不要求 App 生成完整 TS。";
+  const bundleBytes = bundle ? new Blob([JSON.stringify(bundle)]).size : 0;
+  const stageCount = bundle?.stage_approval_plan?.stages?.length ?? 0;
+  const targetContractCount = bundle?.stage_approval_plan?.stages?.filter((stage) => stage.target_contract?.semantic_id).length ?? 0;
   return (
     <section className="script-review-section">
-      <SectionTitle title="脚本包审批内容" meta={bundle?.schema_version ?? "待生成"} />
+      <SectionTitle title="脚本包审批内容" meta={isOutlineRuntime ? "Browser Agent 受约束路线图" : bundle?.schema_version ?? "待生成"} />
+      {bundle ? (
+        <div className="script-review-summary">
+          <span>runtime: {bundle.script_manifest.runtime}</span>
+          <span>bundle: {formatBytes(bundleBytes)}</span>
+          <span>target contract: {targetContractCount}/{stageCount}</span>
+          <span>{bundle.browser_agent_contract ? "Browser Agent 合同已绑定" : "缺少 Browser Agent 合同"}</span>
+        </div>
+      ) : null}
       <div className="script-review-grid">
         <ReviewPanel title="思路文档" meta="默认审批视图" content={markdown} />
-        <ReviewPanel title="执行计划 JSON" meta={plan?.schema_version ?? "未生成"} content={planJSON} />
-        <ReviewPanel title="可执行 TS 脚本" meta={bundle?.script_manifest.entry_function ?? "runCascadeRecording"} content={source} />
+        {isOutlineRuntime ? (
+          <>
+            <ReviewPanel title="Stage JSON" meta={bundle?.stage_approval_plan?.schema_version ?? "未生成"} content={stagePlanJSON} />
+            <ReviewPanel title="Browser Agent 大纲" meta={bundle?.script_outline?.runtime ?? "browser-agent-outline-v1"} content={outlineJSON} />
+            <ReviewPanel title="Browser Agent 合同" meta={bundle?.browser_agent_contract?.schema_version ?? "未生成"} content={agentContractJSON} />
+            <ReviewPanel title="可修改规则" meta={bundle?.agent_prompt_policy?.schema_version ?? "未生成"} content={promptPolicyJSON} />
+            <ReviewPanel title="证据链" meta={bundle?.project_understanding_dossier?.schema_version ?? "未生成"} content={dossierJSON} />
+          </>
+        ) : (
+          <>
+            <ReviewPanel title="执行计划 JSON" meta={plan?.schema_version ?? "未生成"} content={planJSON} />
+            <ReviewPanel title="可执行 TS 脚本" meta={bundle?.script_manifest.entry_function ?? "runCascadeRecording"} content={source} />
+          </>
+        )}
       </div>
     </section>
   );
@@ -1344,6 +1378,19 @@ function ReviewPanel({ title, meta, content }: { title: string; meta: string; co
       <pre>{content}</pre>
     </div>
   );
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
 function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {

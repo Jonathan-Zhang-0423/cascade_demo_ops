@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cascade Fixture - Tetris Builder</title>
+  </head>
+  <body>
+    <main class="auth-page" data-route="/login" data-page="login">
+      <section class="auth-panel">
+        <p class="eyebrow">Cascade Demo Fixture</p>
+        <h1>登录到项目构建工作台</h1>
+        <label>
+          演示账号
+          <input data-testid="login-email" aria-label="演示账号" value="demo@example.com" />
+        </label>
+        <label>
+          演示密码
+          <input data-testid="login-password" aria-label="演示密码" type="password" value="fixture-password" />
+        </label>
+        <button data-testid="login-submit" onclick="location.href='/app'">登录并进入工作台</button>
+      </section>
+    </main>
+    <script type="module" src="/src/App.js"></script>
+  </body>
+</html>

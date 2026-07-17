@@ -64,8 +64,12 @@ func TestDesktopBridgeReturnsJSONSafeResponses(t *testing.T) {
 	if err := json.Unmarshal(bundleResponse.Data, &bundle); err != nil {
 		t.Fatalf("bundle response is not JSON-safe: %v", err)
 	}
-	if bundle.PlaywrightScript.InlineSource == "" || bundle.Reproducibility.ScriptHashSHA256 == "" {
-		t.Fatalf("expected executable script and hashes in bundle: %+v", bundle)
+	if bundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 ||
+		bundle.StageApprovalPlan == nil ||
+		bundle.ScriptOutline == nil ||
+		bundle.AgentPromptPolicy == nil ||
+		bundle.Reproducibility.OutlineHashSHA256 == "" {
+		t.Fatalf("expected browser agent outline and hashes in bundle: %+v", bundle)
 	}
 }
 

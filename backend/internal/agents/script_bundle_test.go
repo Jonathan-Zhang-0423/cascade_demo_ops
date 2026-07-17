@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -30,26 +31,35 @@ func TestScriptPackagerEmitsValidExecutableBundle(t *testing.T) {
 	if got := bundle.PlanJSON.Steps[0].Capture.Scope; got != model.CaptureScopeFullPage {
 		t.Fatalf("expected capture scope to be preserved in plan_json, got %q", got)
 	}
-	source := bundle.PlaywrightScript.InlineSource
-	if !strings.Contains(source, `"scope":"full_page"`) || !strings.Contains(source, `"full_page":true`) {
-		t.Fatalf("generated script missing capture scope options:\n%s", source)
+	if bundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		t.Fatalf("expected browser agent outline runtime, got %+v", bundle.ScriptManifest)
+	}
+	if bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil || bundle.AgentPromptPolicy == nil || bundle.UnderstandingDossier == nil {
+		t.Fatalf("outline bundle missing required outline artifacts: %+v", bundle)
 	}
 	for _, node := range graph.Nodes {
-		if !strings.Contains(source, `"`+node.ID+`"`) {
-			t.Fatalf("generated script missing node id %s:\n%s", node.ID, source)
+		if !outlineBundleContainsNode(bundle, node.ID) {
+			t.Fatalf("outline bundle missing node id %s", node.ID)
 		}
+	}
+	if !strings.Contains(strings.Join(bundle.ScriptOutline.Stages[0].CapturePoints, " "), "capture_stage_screenshot") {
+		t.Fatalf("outline should preserve capture points: %+v", bundle.ScriptOutline.Stages[0])
+	}
+	payload, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, forbidden := range []string{"raw-password-123", "BEGIN PRIVATE KEY", "import ", "require(", "process.", "fetch("} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf("generated script leaked forbidden token %q:\n%s", forbidden, source)
+		if strings.Contains(string(payload), forbidden) {
+			t.Fatalf("outline bundle leaked forbidden token %q:\n%s", forbidden, payload)
 		}
 	}
-	if bundle.Reproducibility.PlanHashSHA256 == "" || bundle.Reproducibility.ScriptHashSHA256 == "" || bundle.Reproducibility.BundleHashSHA256 == "" {
+	if bundle.Reproducibility.PlanHashSHA256 == "" || bundle.Reproducibility.StagePlanHashSHA256 == "" || bundle.Reproducibility.OutlineHashSHA256 == "" || bundle.Reproducibility.PromptPolicyHashSHA256 == "" || bundle.Reproducibility.BundleHashSHA256 == "" {
 		t.Fatalf("bundle missing reproducibility hashes: %+v", bundle.Reproducibility)
 	}
 }
 
-func TestScriptPackagerFallsBackWhenMarkdownLLMReturnsInvalidJSON(t *testing.T) {
+func TestScriptPackagerUsesDeterministicApprovalMarkdown(t *testing.T) {
 	project, report, productMap, graph := executableBundleFixtures()
 	pkg, err := NewScriptPackagerAgentWithLLM(failingMarkdownLLM{}).PackageScript(context.Background(), project, report, productMap, graph)
 	if err != nil {
@@ -58,11 +68,174 @@ func TestScriptPackagerFallsBackWhenMarkdownLLMReturnsInvalidJSON(t *testing.T) 
 	if pkg.ExecutableBundle == nil {
 		t.Fatal("expected executable script bundle")
 	}
-	if !strings.Contains(pkg.Markdown, "审批文档润色失败") {
-		t.Fatalf("expected markdown fallback note, got:\n%s", pkg.Markdown)
+	if !strings.Contains(pkg.Markdown, "未使用模型润色或新增目标") {
+		t.Fatalf("expected deterministic markdown note, got:\n%s", pkg.Markdown)
 	}
-	if !strings.Contains(pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown, "审批文档润色失败") {
-		t.Fatalf("expected bundle approval markdown to carry fallback note:\n%s", pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown)
+	if !strings.Contains(pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown, "未使用模型润色或新增目标") {
+		t.Fatalf("expected bundle approval markdown to carry deterministic note:\n%s", pkg.ExecutableBundle.ApprovalMarkdown.InlineMarkdown)
+	}
+}
+
+func TestScriptPackagerRouteAwarePlanFiltersSourcePaths(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	graph.Nodes[1].Title = "新建项目"
+	graph.Nodes[1].Goal = "进入新建项目流程并填写项目名称。"
+	graph.Nodes[1].ExpectedOutcome = "进入新建项目流程"
+	graph.Nodes[1].ActionSpec.Target.Selector = "[data-testid='new-project']"
+	graph.Nodes[1].ActionSpec.Target.Label = "新建项目"
+	intelligence := &model.ProjectIntelligencePack{
+		ID:            "intel_routes",
+		ProjectID:     project.ID,
+		SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+		RunIntentScope: &model.RunIntentScope{
+			ProductOrigin: "https://app.example.com",
+			ProductURL:    project.ProductURL,
+		},
+		Architecture: &model.ProjectArchitectureMap{
+			RouteTree: []model.ArchitectureRouteNode{
+				{ID: "route_source_file", Path: "/project/src/App.tsx", Name: "source file", EvidenceRefs: []model.EvidenceRef{{ID: "ev_source_route", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_app", Path: "/app", Name: "应用工作台", EvidenceRefs: []model.EvidenceRef{{ID: "ev_app_route", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_login", Path: "/login", Name: "登录页", EvidenceRefs: []model.EvidenceRef{{ID: "ev_login_route", Kind: model.EvidenceKindSourceCode}}},
+			},
+		},
+	}
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph, intelligence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := stageApprovalByNodeID(pkg.ExecutableBundle, "node_invite")
+	if stage == nil {
+		t.Fatal("expected node_invite stage")
+	}
+	if strings.Contains(stage.TargetRoute, "src/") || strings.Contains(stage.TargetRouteTemplate, "src/") {
+		t.Fatalf("stage route should not use source path: %+v", stage)
+	}
+	if stage.TargetRoute != "/app" {
+		t.Fatalf("expected business route to resolve to /app, got %+v", stage)
+	}
+	if len(stage.CandidateRoutes) == 0 || stage.CandidateRoutes[0].Route != "/app" {
+		t.Fatalf("expected /app candidate route, got %+v", stage.CandidateRoutes)
+	}
+	if !strings.Contains(pkg.Markdown, "页面路由：/app") {
+		t.Fatalf("approval markdown should show route-aware page route, got:\n%s", pkg.Markdown)
+	}
+}
+
+func TestScriptPackagerRouteAwarePlanUsesProductSubRoutes(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	project.ProductURL = "https://cascadeai.cn"
+	project.AccessPolicy.AllowedDomains = []string{"cascadeai.cn"}
+	graph.EntryPoint = "https://cascadeai.cn"
+	graph.Nodes = []*model.GraphNode{
+		{
+			ID:              "start",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "打开产品入口",
+			ExpectedOutcome: "产品入口页面加载完成",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://cascadeai.cn"}, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+		},
+		{
+			ID:              "login",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "演示登录完成并进入工作台",
+			ExpectedOutcome: "登录完成，进入可演示的产品工作台上下文。",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionWait, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+		},
+		{
+			ID:              "new_project",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "新建项目",
+			Goal:            "点击新建项目入口。",
+			ExpectedOutcome: "点击新建项目入口",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='new-project']", Label: "新建项目"}, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+			Metadata:        map[string]any{"verification_status": "verified"},
+		},
+		{
+			ID:              "project_name",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "输入项目名称：俄罗斯方块",
+			Goal:            "填写项目名称。",
+			ExpectedOutcome: "填写项目名称",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionFill, Target: model.ActionTarget{Selector: "input[aria-label*='项目']", Label: "项目名称"}, Value: "俄罗斯方块", TimeoutMS: 10000},
+			DurationHintMS:  10000,
+			Metadata:        map[string]any{"verification_status": "verified"},
+		},
+		{
+			ID:              "build_mode",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "选择构建模式",
+			Goal:            "选择构建模式。",
+			ExpectedOutcome: "选择构建模式",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='build-mode']", Label: "构建模式"}, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+			Metadata:        map[string]any{"verification_status": "verified"},
+		},
+		{
+			ID:              "start_agent_build",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "启动 agent 实际构建",
+			Goal:            "启动 agent 构建。",
+			ExpectedOutcome: "启动 agent 构建",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='start-build']", Label: "启动构建"}, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+			Metadata:        map[string]any{"verification_status": "verified"},
+		},
+		{
+			ID:              "agent_build_wait",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "等待 agent 实际构建 60 秒",
+			Goal:            "持续观察 agent 构建过程。",
+			ExpectedOutcome: "持续观察 agent 构建过程，等待结果逐步出现。",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionWait, TimeoutMS: 60000},
+			DurationHintMS:  60000,
+			Metadata:        map[string]any{"verification_status": "runtime_adaptive"},
+		},
+	}
+	intelligence := cascadeRouteIntelligenceForTest(project)
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph, intelligence)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	login := stageApprovalByNodeID(pkg.ExecutableBundle, "login")
+	if login == nil || login.TargetRoute != "/login" || login.ExpectedRouteAfterAction != "/app" {
+		t.Fatalf("expected user login to use /login then /app, got %+v", login)
+	}
+	newProject := stageApprovalByNodeID(pkg.ExecutableBundle, "new_project")
+	if newProject == nil || newProject.TargetRoute != "/app" || newProject.ExpectedRouteAfterAction != "/app" {
+		t.Fatalf("expected new project entry to stay in app workspace, got %+v", newProject)
+	}
+	projectName := stageApprovalByNodeID(pkg.ExecutableBundle, "project_name")
+	if projectName == nil || projectName.TargetRoute != "/app" || projectName.ExpectedRouteAfterAction != "/app" {
+		t.Fatalf("expected project name fill to stay in app workspace, got %+v", projectName)
+	}
+	buildMode := stageApprovalByNodeID(pkg.ExecutableBundle, "build_mode")
+	if buildMode == nil || buildMode.TargetRoute != "/app" || buildMode.ExpectedRouteAfterAction != "/app" {
+		t.Fatalf("expected build mode selection to stay in app workspace, got %+v", buildMode)
+	}
+	startBuild := stageApprovalByNodeID(pkg.ExecutableBundle, "start_agent_build")
+	if startBuild == nil || startBuild.TargetRouteTemplate != "/project/:id" || startBuild.ExpectedRouteAfterAction != "/project/:id" || startBuild.TargetURL != "" {
+		t.Fatalf("expected start build to resolve to dynamic project route without fabricated URL, got %+v", startBuild)
+	}
+	waitBuild := stageApprovalByNodeID(pkg.ExecutableBundle, "agent_build_wait")
+	if waitBuild == nil || waitBuild.EntryRoute != "/project/:id" || waitBuild.TargetRouteTemplate != "/project/:id" {
+		t.Fatalf("expected build wait to continue on dynamic project route, got %+v", waitBuild)
+	}
+	if !strings.Contains(pkg.Markdown, "页面路由：/project/:id") {
+		t.Fatalf("approval markdown should expose dynamic project route, got:\n%s", pkg.Markdown)
+	}
+	for _, stage := range pkg.ExecutableBundle.StageApprovalPlan.Stages {
+		for _, candidate := range stage.CandidateRoutes {
+			if strings.Contains(candidate.Route, "/admin/login") && stage.NodeID == "login" {
+				t.Fatalf("normal user login should not prefer admin login candidate: %+v", stage.CandidateRoutes)
+			}
+			if strings.Contains(candidate.Route, "/aigc") || strings.Contains(candidate.Route, "/.well-known") || strings.Contains(candidate.Route, "/src/") {
+				t.Fatalf("stage includes forbidden/control/source route candidate: %+v", candidate)
+			}
+		}
 	}
 }
 
@@ -106,7 +279,7 @@ func (f failingMarkdownLLM) GenerateMultimodal(ctx context.Context, task config.
 }
 
 func TestScriptBundleValidatorRejectsForbiddenAPI(t *testing.T) {
-	bundle := validExecutableBundleFixture(t)
+	bundle := validLegacyExecutableBundleFixture(t)
 	source := "import fs from \"fs\";\n" + bundle.PlaywrightScript.InlineSource
 	setBundleSourceForTest(bundle, source)
 	validation := NewScriptBundleValidator().ValidateBundle(bundle)
@@ -117,7 +290,7 @@ func TestScriptBundleValidatorRejectsForbiddenAPI(t *testing.T) {
 }
 
 func TestScriptBundleValidatorRejectsRawSecret(t *testing.T) {
-	bundle := validExecutableBundleFixture(t)
+	bundle := validLegacyExecutableBundleFixture(t)
 	source := bundle.PlaywrightScript.InlineSource + "\nconst token = \"sk-abcdefghijklmnop\";\n"
 	setBundleSourceForTest(bundle, source)
 	validation := NewScriptBundleValidator().ValidateBundle(bundle)
@@ -128,7 +301,7 @@ func TestScriptBundleValidatorRejectsRawSecret(t *testing.T) {
 }
 
 func TestScriptBundleValidatorRejectsNodeMismatch(t *testing.T) {
-	bundle := validExecutableBundleFixture(t)
+	bundle := validLegacyExecutableBundleFixture(t)
 	source := strings.ReplaceAll(bundle.PlaywrightScript.InlineSource, `"node_open"`, `"node_missing"`)
 	setBundleSourceForTest(bundle, source)
 	validation := NewScriptBundleValidator().ValidateBundle(bundle)
@@ -189,12 +362,12 @@ func TestObservationStepsAreNonBlockingAndDoNotRequireMainFallback(t *testing.T)
 	if observeStep.PageTarget.Selector == "main" || observeStep.Action.Target.Selector == "main" {
 		t.Fatalf("observation step should not inject brittle main selector fallback: %+v", observeStep)
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	if !strings.Contains(source, "observation step validation is non-blocking") {
-		t.Fatalf("generated script should mark observation validation as non-blocking:\n%s", source)
+	outlineStage := outlineStageByNodeID(pkg.ExecutableBundle, "node_observe")
+	if outlineStage == nil {
+		t.Fatal("expected observation outline stage")
 	}
-	if strings.Contains(source, `ctx.assert.step("node_observe"`) {
-		t.Fatalf("observation step should not emit blocking assert.step:\n%s", source)
+	if outlineStage.Interactions[0].Kind != model.GraphActionInspect {
+		t.Fatalf("observation outline should remain inspect: %+v", outlineStage)
 	}
 }
 
@@ -237,12 +410,9 @@ func TestScriptPackagerDowngradesGenericBusinessSelector(t *testing.T) {
 	if genericStep.Blocking {
 		t.Fatalf("downgraded generic step should not be blocking: %+v", genericStep)
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	if strings.Contains(source, `ctx.page.click("main"`) {
-		t.Fatalf("generated script must not click generic main selector:\n%s", source)
-	}
-	if strings.Contains(source, `ctx.assert.step("node_generic_click"`) {
-		t.Fatalf("downgraded generic step must not emit blocking assert.step:\n%s", source)
+	outlineStage := outlineStageByNodeID(pkg.ExecutableBundle, "node_generic_click")
+	if outlineStage == nil || len(outlineStage.Interactions) == 0 || outlineStage.Interactions[0].Kind != model.GraphActionInspect {
+		t.Fatalf("downgraded generic step should be inspect in outline: %+v", outlineStage)
 	}
 }
 
@@ -257,9 +427,16 @@ func TestScriptPackagerEnforcesNaturalStageDuration(t *testing.T) {
 			t.Fatalf("expected every stage to be at least 10s, got %s=%d", step.NodeID, step.Timing.DurationMS)
 		}
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	if !strings.Contains(source, "await ctx.page.waitForTimeout(1200);") {
-		t.Fatalf("expected generated script to include a pre-action observation pause:\n%s", source)
+	if pkg.ExecutableBundle.StageApprovalPlan == nil {
+		t.Fatal("expected stage approval plan")
+	}
+	for _, stage := range pkg.ExecutableBundle.StageApprovalPlan.Stages {
+		if stage.DurationMS < 10000 {
+			t.Fatalf("expected outline stage to be at least 10s, got %+v", stage)
+		}
+		if !containsString(stage.WaitConditions, "wait_after_entry_at_least_1000ms") {
+			t.Fatalf("expected render wait condition in stage: %+v", stage)
+		}
 	}
 }
 
@@ -323,12 +500,12 @@ func TestScriptPackagerKeepsRuntimeAdaptiveBusinessAction(t *testing.T) {
 	if adaptiveStep.Action.Type != model.GraphActionClick {
 		t.Fatalf("runtime adaptive business action should remain executable, got %+v", adaptiveStep.Action)
 	}
-	source := pkg.ExecutableBundle.PlaywrightScript.InlineSource
-	if !strings.Contains(source, `cascadeResolveSelector(ctx, "node_invite"`) {
-		t.Fatalf("expected adaptive selector resolution in generated script:\n%s", source)
+	outlineStage := outlineStageByNodeID(pkg.ExecutableBundle, "node_invite")
+	if outlineStage == nil || len(outlineStage.Components) == 0 {
+		t.Fatalf("expected adaptive selector guidance in outline: %+v", outlineStage)
 	}
-	if !strings.Contains(source, `ctx.page.click(selector_node_invite`) {
-		t.Fatalf("expected click to use runtime-resolved selector:\n%s", source)
+	if !strings.Contains(outlineAuditText(outlineStage), "new-project") && !strings.Contains(outlineAuditText(outlineStage), "新建项目") {
+		t.Fatalf("expected adaptive outline to carry selector alternatives: %+v", outlineStage)
 	}
 }
 
@@ -382,6 +559,117 @@ func validExecutableBundleFixture(t *testing.T) *model.ExecutableRecordingScript
 		t.Fatal("expected executable bundle")
 	}
 	return pkg.ExecutableBundle
+}
+
+func validLegacyExecutableBundleFixture(t *testing.T) *model.ExecutableRecordingScriptBundle {
+	t.Helper()
+	bundle := validExecutableBundleFixture(t)
+	source, err := NewScriptCodeGenerator().Generate(bundle.PlanJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := hashString(source)
+	bundle.ScriptManifest.Language = "typescript"
+	bundle.ScriptManifest.Runtime = model.ExecutableScriptRuntimePlaywrightRestrictedSandbox
+	bundle.ScriptManifest.EntryFunction = "runCascadeRecording"
+	bundle.ScriptManifest.Generator = scriptCodeGeneratorName
+	bundle.ScriptManifest.GeneratorVersion = scriptCodeGeneratorVersion
+	bundle.ScriptManifest.ContextAPIs = []string{"ctx.page", "ctx.secrets", "ctx.capture", "ctx.assert", "ctx.log"}
+	bundle.PlaywrightScript = model.ExecutableScriptSource{
+		InlineSource: source,
+		MimeType:     "text/typescript",
+		SHA256:       hash,
+		SizeBytes:    int64(len([]byte(source))),
+	}
+	bundle.Reproducibility.ScriptHashSHA256 = hash
+	bundle.Reproducibility.BundleHashSHA256 = ""
+	bundle.Validation = nil
+	bundleHash, err := bundle.ComputeBundleHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.Reproducibility.BundleHashSHA256 = bundleHash
+	validation := NewScriptBundleValidator().ValidateBundle(bundle)
+	if !validation.Valid {
+		t.Fatalf("legacy fixture should be valid: %+v", validation)
+	}
+	bundle.Validation = &validation
+	return bundle
+}
+
+func outlineBundleContainsNode(bundle *model.ExecutableRecordingScriptBundle, nodeID string) bool {
+	if bundle == nil || bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil {
+		return false
+	}
+	for _, stage := range bundle.StageApprovalPlan.Stages {
+		if stage.NodeID == nodeID {
+			return true
+		}
+	}
+	for _, stage := range bundle.ScriptOutline.Stages {
+		if stage.NodeID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func outlineStageByNodeID(bundle *model.ExecutableRecordingScriptBundle, nodeID string) *model.BrowserAgentOutlineStage {
+	if bundle == nil || bundle.ScriptOutline == nil {
+		return nil
+	}
+	for i := range bundle.ScriptOutline.Stages {
+		if bundle.ScriptOutline.Stages[i].NodeID == nodeID {
+			return &bundle.ScriptOutline.Stages[i]
+		}
+	}
+	return nil
+}
+
+func stageApprovalByNodeID(bundle *model.ExecutableRecordingScriptBundle, nodeID string) *model.StageApprovalStage {
+	if bundle == nil || bundle.StageApprovalPlan == nil {
+		return nil
+	}
+	for i := range bundle.StageApprovalPlan.Stages {
+		if bundle.StageApprovalPlan.Stages[i].NodeID == nodeID {
+			return &bundle.StageApprovalPlan.Stages[i]
+		}
+	}
+	return nil
+}
+
+func cascadeRouteIntelligenceForTest(project *model.ProjectContext) *model.ProjectIntelligencePack {
+	return &model.ProjectIntelligencePack{
+		ID:            "intel_cascade_routes",
+		ProjectID:     project.ID,
+		SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+		RunIntentScope: &model.RunIntentScope{
+			ProductOrigin: "https://cascadeai.cn",
+			ProductURL:    project.ProductURL,
+		},
+		Architecture: &model.ProjectArchitectureMap{
+			RouteTree: []model.ArchitectureRouteNode{
+				{ID: "route_home", Path: "/", Name: "首页", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_home", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_login", Path: "/login", Name: "用户登录页", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_login", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_admin_login", Path: "/admin/login", Name: "管理员登录页", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_admin_login", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_auth", Path: "/auth", Name: "认证回调", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_auth", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_app", Path: "/app", Name: "应用工作台", AuthRequired: true, EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_app", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_project_detail", Path: "/project/:id", Name: "项目详情与构建工作区", AuthRequired: true, EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_project", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_builder_square", Path: "/BuilderSquare", Name: "应用广场", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_square", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_aigc", Path: "/aigc/v1/execution-packages", Name: "exchange control plane", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_control", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_source_file", Path: "/project/src/App.tsx", Name: "source file", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_source", Kind: model.EvidenceKindSourceCode}}},
+			},
+		},
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func setBundleSourceForTest(bundle *model.ExecutableRecordingScriptBundle, source string) {
