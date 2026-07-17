@@ -1,5 +1,8 @@
 # 可执行录制脚本包协议 v1
 
+> [!IMPORTANT]
+> **Legacy v1 / 当前实现兼容基线。** 本文件用于兼容现有代码、fixtures 和迁移验证，不代表 Server 侧新功能路线。Server 侧 v2 架构以 [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md) 为准；迁移完成前，已落地脚本包仍按本文校验。
+
 `ExecutableRecordingScriptBundle` 是 App 端生成、用户审批、云端校验执行的双轨脚本包。它包含三份互相 hash 绑定的产物：
 
 - `plan_json`：`ExecutionScriptDocument`，唯一审计源。

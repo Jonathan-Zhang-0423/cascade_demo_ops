@@ -10,6 +10,7 @@ const DEMO_EDIT_PLAN_VALIDATION_SCHEMA_VERSION = "demoops.demo_edit_plan_validat
 const MEDIA_NORMALIZATION_REPORT_SCHEMA_VERSION = "demoops.media_normalization_report.v1";
 const REQUIREMENT_SATISFACTION_REPORT_SCHEMA_VERSION = "demoops.requirement_satisfaction_report.v1";
 const DEMO_EDIT_SOURCE_AUTHORITY = "customer_side_agent";
+const ALLOWED_SOURCE_AUTHORITIES = [DEMO_EDIT_SOURCE_AUTHORITY, "server_local_editor"] as const;
 const DEMO_EDIT_MODEL_ROLE = "presentation_optimizer_only";
 
 const ALLOWED_EDIT_OPERATIONS = [
@@ -73,6 +74,7 @@ const ALLOWED_MODEL_EDITABLE_FIELDS = [
 
 type EditOperationType = (typeof ALLOWED_EDIT_OPERATIONS)[number];
 type OverlayType = (typeof ALLOWED_OVERLAY_TYPES)[number];
+type DemoEditSourceAuthority = (typeof ALLOWED_SOURCE_AUTHORITIES)[number];
 
 export interface RenderRequest {
   graph?: DemoWorkflowGraph;
@@ -87,6 +89,17 @@ export interface RenderRequest {
   recording_result_package?: RecordingResultPackage;
   recording_result_package_path?: string;
   edit_plan?: DemoEditPlan;
+  render_profile?: RenderProfile;
+}
+
+export interface RenderProfile {
+  mode?: "preview" | "final";
+  width?: number;
+  height?: number;
+  fps?: number;
+  format?: "mp4" | "webm" | "mov";
+  preset?: string;
+  crf?: number;
 }
 
 export interface RenderResult {
@@ -251,7 +264,7 @@ interface LoadedRenderInputs {
   generatedAssets: ArtifactRef[];
 }
 
-interface AssetTimelineCatalog {
+export interface AssetTimelineCatalog {
   schema_version: string;
   catalog_id: string;
   workflow_graph_id: string;
@@ -314,12 +327,12 @@ interface TimelineArtifact {
   local_path?: string;
 }
 
-interface DemoEditPlan {
+export interface DemoEditPlan {
   schema_version?: string;
   plan_id: string;
   catalog_id?: string;
   objective?: string;
-  source_authority: typeof DEMO_EDIT_SOURCE_AUTHORITY;
+  source_authority: DemoEditSourceAuthority;
   model_role: typeof DEMO_EDIT_MODEL_ROLE;
   source_material_policy: "existing_assets_only";
   script_order_policy: "preserve_required_step_order";
@@ -366,7 +379,7 @@ interface EditOverlay {
   end_ms?: number;
 }
 
-interface DemoEditPlanValidationReport {
+export interface DemoEditPlanValidationReport {
   schema_version: string;
   valid: boolean;
   checked_at: string;
@@ -578,9 +591,12 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
 
   const targetDurationSec = Math.max(1, Math.round((editPlan.target_duration_ms || (request.duration_sec || 60) * 1000) / 1000));
   const requestedFormats = requestedFinalVideoFormats(request.graph, request.recording_run_spec);
-  const targetContainer = preferredFinalVideoContainer(requestedFormats);
-  const compositor = await composeFinalVideo(outputDir, targetDurationSec, catalog, editPlan, targetContainer);
-  const mediaNormalization = await normalizeSourceReferenceVideo(outputDir, catalog, editPlan, compositor.video_path);
+  const targetContainer = request.render_profile?.format || preferredFinalVideoContainer(requestedFormats);
+  const compositor = await composeFinalVideo(outputDir, targetDurationSec, catalog, editPlan, targetContainer, request.render_profile);
+  const mediaNormalization =
+    request.render_profile?.mode === "preview"
+      ? await skippedPreviewNormalization(outputDir, request.render_profile)
+      : await normalizeSourceReferenceVideo(outputDir, catalog, editPlan, compositor.video_path);
   const sourceReferenceVideoPath = mediaNormalization.report.status === "ok" ? mediaNormalization.report.reference_video_path : undefined;
   const videoPath = sourceReferenceVideoPath || compositor.video_path;
   const stepDocsPath = path.join(outputDir, "step_by_step.md");
@@ -846,8 +862,8 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   if (plan.script_order_policy !== "preserve_required_step_order") {
     errors.push(finding("invalid_script_order_policy", "script_order_policy must preserve required step order", "script_order_policy"));
   }
-  if (plan.source_authority !== DEMO_EDIT_SOURCE_AUTHORITY) {
-    errors.push(finding("invalid_source_authority", "source_authority must be customer_side_agent", "source_authority"));
+  if (!ALLOWED_SOURCE_AUTHORITIES.includes(plan.source_authority)) {
+    errors.push(finding("invalid_source_authority", `source_authority must be one of: ${ALLOWED_SOURCE_AUTHORITIES.join(", ")}`, "source_authority"));
   }
   if (plan.model_role !== DEMO_EDIT_MODEL_ROLE) {
     errors.push(finding("invalid_model_role", "model_role must be presentation_optimizer_only", "model_role"));
@@ -981,6 +997,7 @@ async function composeFinalVideo(
   catalog: AssetTimelineCatalog,
   editPlan: DemoEditPlan,
   targetContainer?: "mp4" | "webm" | "mov" | "m4v",
+  renderProfile?: RenderProfile,
 ): Promise<CompositorResult> {
   const shotPlan = buildCompositorShotPlan(catalog, editPlan);
   const primaryShot = shotPlan.find((shot) => shot.source_path);
@@ -1031,7 +1048,7 @@ async function composeFinalVideo(
     return result;
   }
 
-  const composed = await composeWithFFmpeg(ffmpegPath, outputDir, videoPath, shotPlan, extension);
+  const composed = await composeWithFFmpeg(ffmpegPath, outputDir, videoPath, shotPlan, extension, renderProfile);
   if (!composed.rendered) {
     const fallbackVideoPath = path.join(outputDir, `demo_${targetDurationSec}s${sourceExtension}`);
     await copyFile(primaryShot.source_path as string, fallbackVideoPath);
@@ -1655,6 +1672,13 @@ function requestedFinalVideoFormats(graph: DemoWorkflowGraph | undefined, runSpe
   return [...new Set(formats)];
 }
 
+export function validateEditPlan(request: { catalog: AssetTimelineCatalog; edit_plan: DemoEditPlan }): DemoEditPlanValidationReport {
+  if (!request?.catalog || !request?.edit_plan) {
+    throw new Error("catalog and edit_plan are required");
+  }
+  return validateDemoEditPlan(normalizeEditPlan(request.edit_plan, request.catalog), request.catalog);
+}
+
 function preferredFinalVideoContainer(formats: string[]): "mp4" | "webm" | "mov" | "m4v" | undefined {
   if (formats.includes("mp4")) return "mp4";
   const first = formats.find((format): format is "mp4" | "webm" | "mov" | "m4v" => ["mp4", "webm", "mov", "m4v"].includes(format));
@@ -1850,6 +1874,28 @@ async function normalizeSourceReferenceVideo(
     report.note = "Reference MP4 was created, but ffprobe is unavailable so detailed media validation was skipped.";
   }
 
+  await writeJSON(reportPath, report);
+  return { report_path: reportPath, report };
+}
+
+async function skippedPreviewNormalization(
+  outputDir: string,
+  profile: RenderProfile,
+): Promise<{ report_path: string; report: MediaNormalizationReport }> {
+  const reportPath = path.join(outputDir, "media_normalization_report.json");
+  const report: MediaNormalizationReport = {
+    schema_version: MEDIA_NORMALIZATION_REPORT_SCHEMA_VERSION,
+    status: "skipped",
+    checked_at: new Date().toISOString(),
+    target: {
+      ...MEDIA_NORMALIZATION_TARGET,
+      width: boundedInteger(profile.width, 1280, 320, 3840),
+      height: boundedInteger(profile.height, 720, 180, 2160),
+      fps: boundedInteger(profile.fps, 30, 1, 60),
+    },
+    ffmpeg_available: true,
+    note: "Preview rendering uses the requested low-cost profile and skips final-delivery normalization.",
+  };
   await writeJSON(reportPath, report);
   return { report_path: reportPath, report };
 }
@@ -2146,11 +2192,18 @@ function assTimestamp(valueMS: number): string {
   return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
 }
 
-async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPath: string, shots: CompositorShot[], extension: string): Promise<{ rendered: boolean; error?: string; video_codec?: string }> {
+async function composeWithFFmpeg(
+  ffmpegPath: string,
+  outputDir: string,
+  videoPath: string,
+  shots: CompositorShot[],
+  extension: string,
+  renderProfile?: RenderProfile,
+): Promise<{ rendered: boolean; error?: string; video_codec?: string }> {
   const segmentsDir = path.join(outputDir, "segments");
   await mkdir(segmentsDir, { recursive: true });
   const segmentPaths: string[] = [];
-  const codec = await preferredVideoCodec(ffmpegPath, extension);
+  const codec = await preferredVideoCodec(ffmpegPath, extension, renderProfile);
   for (const [index, shot] of shots.entries()) {
     if (!shot.source_path || !shot.source_time_range_ms) {
       continue;
@@ -2168,6 +2221,12 @@ async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPat
     }
     const segmentPath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}${extension}`);
     const videoFilters: string[] = [];
+    if (renderProfile) {
+      const width = boundedInteger(renderProfile.width, renderProfile.mode === "preview" ? 1280 : 1920, 320, 3840);
+      const height = boundedInteger(renderProfile.height, renderProfile.mode === "preview" ? 720 : 1080, 180, 2160);
+      const fps = boundedInteger(renderProfile.fps, 30, 1, 60);
+      videoFilters.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p`);
+    }
     const captionCues = captionCuesForShot(shot);
     if (captionCues.length > 0) {
       const subtitlePath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}.ass`);
@@ -2223,13 +2282,15 @@ async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPat
   return { rendered: true, video_codec: codec.name };
 }
 
-async function preferredVideoCodec(ffmpegPath: string, extension: string): Promise<VideoCodecConfig> {
+async function preferredVideoCodec(ffmpegPath: string, extension: string, renderProfile?: RenderProfile): Promise<VideoCodecConfig> {
   const encoderList = await runCommand(ffmpegPath, ["-hide_banner", "-encoders"]);
   const encoders = `${encoderList.stdout}\n${encoderList.stderr}`;
   const normalizedExtension = extension.toLowerCase();
   if (normalizedExtension === ".mp4" || normalizedExtension === ".m4v" || normalizedExtension === ".mov") {
     if (encoders.includes("libx264")) {
-      return { name: "libx264", args: ["-preset", "veryfast", "-crf", "23", "-g", "12", "-keyint_min", "12", "-pix_fmt", "yuv420p"] };
+      const preset = allowedPreset(renderProfile?.preset, renderProfile?.mode === "preview" ? "ultrafast" : "medium");
+      const crf = boundedInteger(renderProfile?.crf, renderProfile?.mode === "preview" ? 28 : 21, 0, 51);
+      return { name: "libx264", args: ["-preset", preset, "-crf", String(crf), "-g", "30", "-keyint_min", "30", "-pix_fmt", "yuv420p"] };
     }
     return { name: "mpeg4", args: ["-q:v", "4", "-g", "12"] };
   }
@@ -2237,6 +2298,16 @@ async function preferredVideoCodec(ffmpegPath: string, extension: string): Promi
     return { name: "libvpx-vp9", args: ["-b:v", "1M", "-g", "12", "-keyint_min", "12", "-deadline", "realtime", "-cpu-used", "4"] };
   }
   return { name: "libvpx", args: ["-b:v", "1M", "-g", "12", "-keyint_min", "12", "-deadline", "realtime", "-cpu-used", "4"] };
+}
+
+function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.round(value as number)));
+}
+
+function allowedPreset(value: string | undefined, fallback: string): string {
+  const allowed = new Set(["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]);
+  return value && allowed.has(value) ? value : fallback;
 }
 
 async function isCommandAvailable(command: string): Promise<boolean> {
@@ -2419,8 +2490,9 @@ async function timelineArtifactFromRef(artifact: ArtifactRef, durationMS?: numbe
     if (typeof artifact.metadata.asset_role === "string") result.asset_role = artifact.metadata.asset_role;
     if (typeof artifact.metadata.include_in_demo === "boolean") result.include_in_demo = artifact.metadata.include_in_demo;
     if (typeof artifact.metadata.capture_scope === "string") result.capture_scope = artifact.metadata.capture_scope;
+    if (typeof artifact.metadata.duration_ms === "number") result.duration_ms = artifact.metadata.duration_ms;
   }
-  if (durationMS !== undefined) result.duration_ms = durationMS;
+  if (durationMS !== undefined && result.duration_ms === undefined) result.duration_ms = durationMS;
   if (filePath) result.local_path = filePath;
   return result;
 }

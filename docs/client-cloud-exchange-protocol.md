@@ -1,5 +1,8 @@
 # Client to Cloud Exchange Protocol
 
+> [!IMPORTANT]
+> **Legacy v1 / 当前实现兼容基线。** 本文件用于兼容现有代码、fixtures 和迁移验证，不代表 Server 侧新功能路线。Server 侧 v2 架构以 [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md) 为准；迁移完成前，已落地接口仍按本文执行。
+
 This protocol moves an approved desktop execution plan from the customer app to
 Cascade cloud, then returns encrypted recording results and generated assets.
 

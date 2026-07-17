@@ -1,5 +1,8 @@
 # MVP Project Structure
 
+> [!IMPORTANT]
+> **Historical project-structure proposal.** Existing package names may still reflect this design, but it must not be used as the roadmap for new modules. Follow [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md) for Server-side development.
+
 ## Design Goal
 
 MVP uses four implementation layers, while preserving future upgrade space for richer model adapters, world models, software-interaction RL models, and legacy AIGC integration.

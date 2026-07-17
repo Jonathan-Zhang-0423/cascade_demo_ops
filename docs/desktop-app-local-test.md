@@ -1,5 +1,8 @@
 # 桌面端 App 本地稳定试用方法
 
+> [!IMPORTANT]
+> **Legacy v1 / 当前联调方法。** 本文件只用于运行尚未迁移的桌面端 v1 闭环，不代表 Server 侧 v2 产品流程或后续职责边界。v2 架构见 [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md)。
+
 这套流程用于在没有 Wails 正式壳的情况下，稳定体验桌面端 v1 的核心闭环：
 
 ```text
