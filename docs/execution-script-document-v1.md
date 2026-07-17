@@ -1,5 +1,8 @@
 # 执行脚本文档协议 v1
 
+> [!IMPORTANT]
+> **Legacy v1 / 当前实现兼容基线。** 本文件用于兼容现有代码、fixtures 和迁移验证，不代表 Server 侧新功能路线。Server 侧 v2 架构以 [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md) 为准；迁移完成前，已落地数据结构仍按本文校验。
+
 `ExecutionScriptDocument` 是 App 本地理解后、人工审批前的核心封装产物。它不是自由文本脚本，而是由 `DemoWorkflowGraph` 严格派生的可执行 JSON 规范；Markdown 只用于中文审批预览。
 
 ## 产物边界

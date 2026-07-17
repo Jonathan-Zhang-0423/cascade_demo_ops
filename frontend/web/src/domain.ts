@@ -28,7 +28,7 @@ export type WorkspaceStage =
   | "script_repair"
   | "result_review";
 
-export type NavSection = "projects" | "new_demo" | "execution_packages" | "assets" | "settings";
+export type NavSection = "projects" | "new_demo" | "execution_packages" | "assets" | "editor" | "settings";
 
 export type ScenarioTemplate = {
   id: ScenarioID;

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 
 	"cascade-demoops/backend/internal/executor"
+	"cascade-demoops/backend/internal/model"
 )
 
 type LocalDriver struct {
@@ -32,6 +33,18 @@ func (d *LocalDriver) Record(ctx context.Context, request executor.RecordRequest
 func (d *LocalDriver) Render(ctx context.Context, request executor.RenderRequest) (executor.RenderResult, error) {
 	var result executor.RenderResult
 	err := d.call(ctx, "render", request, &result)
+	return result, err
+}
+
+func (d *LocalDriver) ProbeMedia(ctx context.Context, request executor.MediaProbeRequest) (executor.MediaProbeResult, error) {
+	var result executor.MediaProbeResult
+	err := d.call(ctx, "probe_media", request, &result)
+	return result, err
+}
+
+func (d *LocalDriver) ValidateEditPlan(ctx context.Context, request executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error) {
+	var result model.DemoEditPlanValidationReport
+	err := d.call(ctx, "validate_edit_plan", request, &result)
 	return result, err
 }
 

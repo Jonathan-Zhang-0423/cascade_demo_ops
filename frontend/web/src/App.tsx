@@ -14,6 +14,7 @@ import type {
 } from "./domain";
 import { createWorkspace, initialChecklist } from "./mockWorkspace";
 import { scenarioTemplates } from "./scenarios";
+import { VideoEditor } from "./VideoEditor";
 import {
   canUploadExecutionPackage,
   lifecycleStagesFromWorkspace,
@@ -363,7 +364,7 @@ export function App() {
 
       <main className="workspace">
         <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage || isRunningProduct} onBuildPackage={runProductLifecycle} />
-        <div className="workspace-grid">
+        <div className={activeNav === "editor" ? "workspace-grid editor-wide" : "workspace-grid"}>
           <section className="main-panel" aria-label="项目工作台">
             {activeNav === "new_demo" ? <ScenarioPicker activeID={workspace.scenarioID} onCreate={createScenario} /> : null}
             {activeNav === "projects" ? (
@@ -394,6 +395,7 @@ export function App() {
               />
             ) : null}
             {activeNav === "assets" ? <AssetReview workspace={workspace} onApprove={approveAssets} /> : null}
+            {activeNav === "editor" ? <VideoEditor /> : null}
             {activeNav === "settings" ? (
               <SettingsPanel
                 workspace={workspace}
@@ -405,7 +407,7 @@ export function App() {
               />
             ) : null}
           </section>
-          <Inspector workspace={workspace} selectedNode={selectedNode} blockedReasons={blockedReasons} />
+          {activeNav !== "editor" ? <Inspector workspace={workspace} selectedNode={selectedNode} blockedReasons={blockedReasons} /> : null}
         </div>
       </main>
     </div>
@@ -1651,6 +1653,7 @@ function buildNavItems(workspace: ProjectWorkspaceView): Array<{ id: NavSection;
     { id: "new_demo", label: "新建演示" },
     { id: "execution_packages", label: "执行包", ...(executionBadge ? { badge: executionBadge } : {}) },
     { id: "assets", label: "成品资产", ...(pendingAssets > 0 ? { badge: `${pendingAssets}` } : {}) },
+    { id: "editor", label: "视频编辑" },
     { id: "settings", label: "设置" },
   ];
 }

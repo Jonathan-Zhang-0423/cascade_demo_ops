@@ -22,6 +22,7 @@ type DemoEditSourceAuthority string
 
 const (
 	DemoEditSourceAuthorityCustomerSideAgent DemoEditSourceAuthority = "customer_side_agent"
+	DemoEditSourceAuthorityServerLocalEditor DemoEditSourceAuthority = "server_local_editor"
 )
 
 type DemoEditModelRole string

@@ -1,5 +1,8 @@
 # Cascade 沙箱环境方案 v1
 
+> [!IMPORTANT]
+> **Legacy v1 / 安全实现参考。** 本文件中的隔离、凭据和审计约束仍可作为现有实现基线，但“APP 生成完整执行包、Server 失败后退回修复”的总流程已被 v2 架构替代。新链路设计以 [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md) 为准。
+
 Cascade v1 采用多层沙箱，而不是把安全边界压在单一 Node 进程里。默认生产路线是：App 本地生成并审批三合一方案包，云端在一次性隔离容器里校验和录制，视频渲染阶段再进入无凭据沙箱。
 
 ## 分层边界

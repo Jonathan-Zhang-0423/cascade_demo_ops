@@ -1,5 +1,8 @@
 # 可执行录制脚本包协议 v1
 
+> [!IMPORTANT]
+> **当前实现协议。** `browser-agent-outline-v1` 是最新主路径，`playwright-restricted-sandbox` 是 Legacy 兼容子路径。本文件约束交换包格式，不规定 APP 侧内部实现；Server 本地视频编辑器独立消费录制素材和 `DemoEditPlan`。
+
 `ExecutableRecordingScriptBundle` 是 App 端生成、用户审批、云端校验执行的统一脚本包。v1 支持两个 runtime：
 
 - `browser-agent-outline-v1`：新产品主路径。App 端生成高置信 stage 审批 JSON、Browser Agent 脚本大纲、prompt policy 和项目理解证据包；云端 browser agent 在这些边界内自适应探索、生成/修正最终可执行脚本。

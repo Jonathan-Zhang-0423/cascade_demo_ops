@@ -11,6 +11,8 @@ import (
 
 	"cascade-demoops/backend/internal/agents"
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/driver"
+	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
@@ -27,6 +29,14 @@ type Service struct {
 	exchange     *ExchangeIntakeService
 	runningMu    sync.Mutex
 	runningTasks map[string]context.CancelFunc
+	editorMu     sync.Mutex
+	editorWorker editorWorker
+}
+
+type editorWorker interface {
+	ProbeMedia(context.Context, executor.MediaProbeRequest) (executor.MediaProbeResult, error)
+	ValidateEditPlan(context.Context, executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error)
+	Render(context.Context, executor.RenderRequest) (executor.RenderResult, error)
 }
 
 type ResultArtifactFile struct {
@@ -57,7 +67,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	if err != nil {
 		return nil, err
 	}
-	return &Service{
+	service := &Service{
 		runtime:      runtime,
 		llm:          llmRouter,
 		flow:         flow,
@@ -65,7 +75,9 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		layout:       storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
 		exchange:     newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
 		runningTasks: map[string]context.CancelFunc{},
-	}, nil
+	}
+	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath())
+	return service, nil
 }
 
 func (s *Service) RuntimeConfig() config.AppRuntimeConfig {

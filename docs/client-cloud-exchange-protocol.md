@@ -1,5 +1,8 @@
 # Client to Cloud Exchange Protocol
 
+> [!IMPORTANT]
+> **当前交换协议。** `browser-agent-outline-v1` 是最新执行包主路径，受限 TypeScript 是 Legacy 兼容子路径。Server 本地视频编辑器不改变本协议，只消费执行后形成的录屏、素材目录和编辑计划。
+
 This protocol moves an approved desktop execution plan from the customer app to
 Cascade cloud, then returns encrypted recording results and generated assets.
 
