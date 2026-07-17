@@ -1,0 +1,124 @@
+:root {
+  color: #172026;
+  background: #f6f7f1;
+  font-family: Inter, "Microsoft YaHei", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.auth-page,
+.workspace,
+.project-page {
+  min-height: 100vh;
+  padding: 40px;
+}
+
+.auth-page {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #eef7f1, #f7f3e8);
+}
+
+.auth-panel,
+.creation-flow,
+.agent-panel {
+  max-width: 720px;
+  border: 1px solid #d9ded1;
+  border-radius: 8px;
+  background: #fff;
+  padding: 28px;
+  box-shadow: 0 14px 35px rgb(23 32 38 / 8%);
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: #51735c;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+h1,
+h2 {
+  margin: 0 0 18px;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+  font-weight: 700;
+}
+
+input {
+  width: 100%;
+  border: 1px solid #cbd4c4;
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+
+button {
+  border: 1px solid #b8c5b1;
+  border-radius: 6px;
+  background: #fff;
+  color: #172026;
+  cursor: pointer;
+  padding: 11px 16px;
+  font-weight: 700;
+}
+
+button.primary,
+button.selected {
+  border-color: #2f6f57;
+  background: #2f6f57;
+  color: white;
+}
+
+.topbar,
+.project-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+fieldset {
+  display: flex;
+  gap: 12px;
+  border: 0;
+  margin: 0 0 20px;
+  padding: 0;
+}
+
+legend {
+  width: 100%;
+  margin-bottom: 10px;
+  font-weight: 700;
+}
+
+.project-hero span {
+  border-radius: 999px;
+  background: #e8efe8;
+  color: #315845;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.agent-panel ol {
+  display: grid;
+  gap: 14px;
+  padding-left: 22px;
+}
