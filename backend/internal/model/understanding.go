@@ -43,10 +43,20 @@ type CodeUnderstandingSnapshot struct {
 	SensitiveFields    []SensitiveFieldFinding `json:"sensitive_fields,omitempty"`
 	SourceDigestSHA256 string                  `json:"source_digest_sha256,omitempty"`
 	FileCount          int                     `json:"file_count,omitempty"`
+	ReadBudget         *CodeReadBudget         `json:"read_budget,omitempty"`
 	PathDigests        []PathDigest            `json:"path_digests,omitempty"`
 	EvidenceRefs       []EvidenceRef           `json:"evidence_refs,omitempty"`
 	Summary            string                  `json:"summary,omitempty"`
 	CreatedAt          time.Time               `json:"created_at,omitempty"`
+}
+
+type CodeReadBudget struct {
+	Mode               string `json:"mode,omitempty"`
+	RepoIndexFileLimit int    `json:"repo_index_file_limit,omitempty"`
+	DrilldownRounds    int    `json:"drilldown_rounds,omitempty"`
+	FilesPerRound      int    `json:"files_per_round,omitempty"`
+	TotalFileLimit     int    `json:"total_file_limit,omitempty"`
+	MaxFileBytes       int64  `json:"max_file_bytes,omitempty"`
 }
 
 type RouteInsight struct {

@@ -291,6 +291,9 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 	if bundle.AgentPromptPolicy == nil {
 		return errors.New("browser-agent outline bundle agent_prompt_policy is required")
 	}
+	if bundle.BrowserAgentContract == nil {
+		return errors.New("browser-agent outline bundle browser_agent_contract is required")
+	}
 	if bundle.StageApprovalPlan.SchemaVersion != StageApprovalPlanSchemaVersion {
 		return fmt.Errorf("stage_approval_plan schema_version must be %q", StageApprovalPlanSchemaVersion)
 	}
@@ -300,6 +303,9 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 	if bundle.AgentPromptPolicy.SchemaVersion != BrowserAgentPromptPolicySchemaVersion {
 		return fmt.Errorf("agent_prompt_policy schema_version must be %q", BrowserAgentPromptPolicySchemaVersion)
 	}
+	if bundle.BrowserAgentContract.SchemaVersion != BrowserAgentContractSchemaVersion {
+		return fmt.Errorf("browser_agent_contract schema_version must be %q", BrowserAgentContractSchemaVersion)
+	}
 	if bundle.StageApprovalPlan.ProjectID != bundle.ProjectID || bundle.StageApprovalPlan.WorkflowGraphID != bundle.WorkflowGraphID {
 		return errors.New("stage_approval_plan identity does not match executable script bundle")
 	}
@@ -308,6 +314,9 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 	}
 	if bundle.AgentPromptPolicy.ProjectID != bundle.ProjectID || bundle.AgentPromptPolicy.WorkflowGraphID != bundle.WorkflowGraphID {
 		return errors.New("agent_prompt_policy identity does not match executable script bundle")
+	}
+	if bundle.BrowserAgentContract.ProjectID != bundle.ProjectID || bundle.BrowserAgentContract.WorkflowGraphID != bundle.WorkflowGraphID {
+		return errors.New("browser_agent_contract identity does not match executable script bundle")
 	}
 	if bundle.ScriptOutline.Runtime != ExecutableScriptRuntimeBrowserAgentOutlineV1 || bundle.AgentPromptPolicy.Runtime != ExecutableScriptRuntimeBrowserAgentOutlineV1 {
 		return errors.New("browser-agent outline bundle runtime fields must be browser-agent-outline-v1")
@@ -336,6 +345,9 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 		if !stageHasEvidence(stage) {
 			return fmt.Errorf("stage_approval_plan stage %q is missing evidence chain", stage.NodeID)
 		}
+		if stage.TargetContract == nil || strings.TrimSpace(stage.TargetContract.SemanticID) == "" {
+			return fmt.Errorf("stage_approval_plan stage %q is missing target_contract", stage.NodeID)
+		}
 		stageNodeIDs[stage.NodeID] = true
 	}
 	outlineNodeIDs := map[string]bool{}
@@ -352,7 +364,18 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 		if len(stage.EvidenceRefs) == 0 && len(stage.Components) == 0 {
 			return fmt.Errorf("script_outline stage %q is missing evidence chain", stage.NodeID)
 		}
+		if stage.TargetContract == nil || strings.TrimSpace(stage.TargetContract.SemanticID) == "" {
+			return fmt.Errorf("script_outline stage %q is missing target_contract", stage.NodeID)
+		}
 		outlineNodeIDs[stage.NodeID] = true
+	}
+	for _, step := range bundle.PlanJSON.Steps {
+		if stepRequiresBrowserAgentValidation(step) && !stepHasRequiredBrowserAgentValidation(step) {
+			return fmt.Errorf("execution script document step %q is missing required browser-agent validation", step.NodeID)
+		}
+		if stepRequiresBrowserAgentValidation(step) && (step.TargetContract == nil || strings.TrimSpace(step.TargetContract.SemanticID) == "") {
+			return fmt.Errorf("execution script document step %q is missing target_contract", step.NodeID)
+		}
 	}
 	for nodeID := range planNodeIDs {
 		if !stageNodeIDs[nodeID] {
@@ -388,6 +411,13 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 	if bundle.Reproducibility.PromptPolicyHashSHA256 == "" || bundle.Reproducibility.PromptPolicyHashSHA256 != promptHash {
 		return errors.New("executable script bundle prompt policy hash mismatch")
 	}
+	contractHash, err := DigestCanonicalJSON(bundle.BrowserAgentContract)
+	if err != nil {
+		return err
+	}
+	if bundle.Reproducibility.BrowserAgentContractHashSHA256 == "" || bundle.Reproducibility.BrowserAgentContractHashSHA256 != contractHash {
+		return errors.New("executable script bundle browser agent contract hash mismatch")
+	}
 	if bundle.UnderstandingDossier != nil {
 		dossierHash, err := DigestCanonicalJSON(bundle.UnderstandingDossier)
 		if err != nil {
@@ -417,6 +447,28 @@ func stageHasEvidence(stage StageApprovalStage) bool {
 		len(stage.DataModelRefs) > 0 ||
 		len(stage.Interaction.EvidenceRefs) > 0 ||
 		len(stage.Interaction.Target.EvidenceRefs) > 0
+}
+
+func stepRequiresBrowserAgentValidation(step ScriptStep) bool {
+	switch step.Action.Type {
+	case GraphActionNavigate, GraphActionClick, GraphActionFill, GraphActionSelect, GraphActionUpload, GraphActionAPICall:
+		return true
+	default:
+		return false
+	}
+}
+
+func stepHasRequiredBrowserAgentValidation(step ScriptStep) bool {
+	for _, validation := range step.Validations {
+		if !validation.Required {
+			continue
+		}
+		switch validation.Kind {
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+			return true
+		}
+	}
+	return false
 }
 
 func validateScriptManifestAgainstPlan(bundle *ExecutableRecordingScriptBundle) error {

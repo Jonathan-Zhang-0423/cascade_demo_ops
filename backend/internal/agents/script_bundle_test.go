@@ -76,6 +76,169 @@ func TestScriptPackagerUsesDeterministicApprovalMarkdown(t *testing.T) {
 	}
 }
 
+func TestScriptPackagerRouteAwarePlanFiltersSourcePaths(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	graph.Nodes[1].Title = "新建项目"
+	graph.Nodes[1].Goal = "进入新建项目流程并填写项目名称。"
+	graph.Nodes[1].ExpectedOutcome = "进入新建项目流程"
+	graph.Nodes[1].ActionSpec.Target.Selector = "[data-testid='new-project']"
+	graph.Nodes[1].ActionSpec.Target.Label = "新建项目"
+	intelligence := &model.ProjectIntelligencePack{
+		ID:            "intel_routes",
+		ProjectID:     project.ID,
+		SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+		RunIntentScope: &model.RunIntentScope{
+			ProductOrigin: "https://app.example.com",
+			ProductURL:    project.ProductURL,
+		},
+		Architecture: &model.ProjectArchitectureMap{
+			RouteTree: []model.ArchitectureRouteNode{
+				{ID: "route_source_file", Path: "/project/src/App.tsx", Name: "source file", EvidenceRefs: []model.EvidenceRef{{ID: "ev_source_route", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_app", Path: "/app", Name: "应用工作台", EvidenceRefs: []model.EvidenceRef{{ID: "ev_app_route", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_login", Path: "/login", Name: "登录页", EvidenceRefs: []model.EvidenceRef{{ID: "ev_login_route", Kind: model.EvidenceKindSourceCode}}},
+			},
+		},
+	}
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph, intelligence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := stageApprovalByNodeID(pkg.ExecutableBundle, "node_invite")
+	if stage == nil {
+		t.Fatal("expected node_invite stage")
+	}
+	if strings.Contains(stage.TargetRoute, "src/") || strings.Contains(stage.TargetRouteTemplate, "src/") {
+		t.Fatalf("stage route should not use source path: %+v", stage)
+	}
+	if stage.TargetRoute != "/app" {
+		t.Fatalf("expected business route to resolve to /app, got %+v", stage)
+	}
+	if len(stage.CandidateRoutes) == 0 || stage.CandidateRoutes[0].Route != "/app" {
+		t.Fatalf("expected /app candidate route, got %+v", stage.CandidateRoutes)
+	}
+	if !strings.Contains(pkg.Markdown, "页面路由：/app") {
+		t.Fatalf("approval markdown should show route-aware page route, got:\n%s", pkg.Markdown)
+	}
+}
+
+func TestScriptPackagerRouteAwarePlanUsesProductSubRoutes(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	project.ProductURL = "https://cascadeai.cn"
+	project.AccessPolicy.AllowedDomains = []string{"cascadeai.cn"}
+	graph.EntryPoint = "https://cascadeai.cn"
+	graph.Nodes = []*model.GraphNode{
+		{
+			ID:              "start",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "打开产品入口",
+			ExpectedOutcome: "产品入口页面加载完成",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://cascadeai.cn"}, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+		},
+		{
+			ID:              "login",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "演示登录完成并进入工作台",
+			ExpectedOutcome: "登录完成，进入可演示的产品工作台上下文。",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionWait, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+		},
+		{
+			ID:              "new_project",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "新建项目",
+			Goal:            "点击新建项目入口。",
+			ExpectedOutcome: "点击新建项目入口",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='new-project']", Label: "新建项目"}, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+			Metadata:        map[string]any{"verification_status": "verified"},
+		},
+		{
+			ID:              "project_name",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "输入项目名称：俄罗斯方块",
+			Goal:            "填写项目名称。",
+			ExpectedOutcome: "填写项目名称",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionFill, Target: model.ActionTarget{Selector: "input[aria-label*='项目']", Label: "项目名称"}, Value: "俄罗斯方块", TimeoutMS: 10000},
+			DurationHintMS:  10000,
+			Metadata:        map[string]any{"verification_status": "verified"},
+		},
+		{
+			ID:              "build_mode",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "选择构建模式",
+			Goal:            "选择构建模式。",
+			ExpectedOutcome: "选择构建模式",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='build-mode']", Label: "构建模式"}, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+			Metadata:        map[string]any{"verification_status": "verified"},
+		},
+		{
+			ID:              "start_agent_build",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "启动 agent 实际构建",
+			Goal:            "启动 agent 构建。",
+			ExpectedOutcome: "启动 agent 构建",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='start-build']", Label: "启动构建"}, TimeoutMS: 10000},
+			DurationHintMS:  10000,
+			Metadata:        map[string]any{"verification_status": "verified"},
+		},
+		{
+			ID:              "agent_build_wait",
+			Type:            model.GraphNodeTypeAction,
+			Title:           "等待 agent 实际构建 60 秒",
+			Goal:            "持续观察 agent 构建过程。",
+			ExpectedOutcome: "持续观察 agent 构建过程，等待结果逐步出现。",
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionWait, TimeoutMS: 60000},
+			DurationHintMS:  60000,
+			Metadata:        map[string]any{"verification_status": "runtime_adaptive"},
+		},
+	}
+	intelligence := cascadeRouteIntelligenceForTest(project)
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph, intelligence)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	login := stageApprovalByNodeID(pkg.ExecutableBundle, "login")
+	if login == nil || login.TargetRoute != "/login" || login.ExpectedRouteAfterAction != "/app" {
+		t.Fatalf("expected user login to use /login then /app, got %+v", login)
+	}
+	newProject := stageApprovalByNodeID(pkg.ExecutableBundle, "new_project")
+	if newProject == nil || newProject.TargetRoute != "/app" || newProject.ExpectedRouteAfterAction != "/app" {
+		t.Fatalf("expected new project entry to stay in app workspace, got %+v", newProject)
+	}
+	projectName := stageApprovalByNodeID(pkg.ExecutableBundle, "project_name")
+	if projectName == nil || projectName.TargetRoute != "/app" || projectName.ExpectedRouteAfterAction != "/app" {
+		t.Fatalf("expected project name fill to stay in app workspace, got %+v", projectName)
+	}
+	buildMode := stageApprovalByNodeID(pkg.ExecutableBundle, "build_mode")
+	if buildMode == nil || buildMode.TargetRoute != "/app" || buildMode.ExpectedRouteAfterAction != "/app" {
+		t.Fatalf("expected build mode selection to stay in app workspace, got %+v", buildMode)
+	}
+	startBuild := stageApprovalByNodeID(pkg.ExecutableBundle, "start_agent_build")
+	if startBuild == nil || startBuild.TargetRouteTemplate != "/project/:id" || startBuild.ExpectedRouteAfterAction != "/project/:id" || startBuild.TargetURL != "" {
+		t.Fatalf("expected start build to resolve to dynamic project route without fabricated URL, got %+v", startBuild)
+	}
+	waitBuild := stageApprovalByNodeID(pkg.ExecutableBundle, "agent_build_wait")
+	if waitBuild == nil || waitBuild.EntryRoute != "/project/:id" || waitBuild.TargetRouteTemplate != "/project/:id" {
+		t.Fatalf("expected build wait to continue on dynamic project route, got %+v", waitBuild)
+	}
+	if !strings.Contains(pkg.Markdown, "页面路由：/project/:id") {
+		t.Fatalf("approval markdown should expose dynamic project route, got:\n%s", pkg.Markdown)
+	}
+	for _, stage := range pkg.ExecutableBundle.StageApprovalPlan.Stages {
+		for _, candidate := range stage.CandidateRoutes {
+			if strings.Contains(candidate.Route, "/admin/login") && stage.NodeID == "login" {
+				t.Fatalf("normal user login should not prefer admin login candidate: %+v", stage.CandidateRoutes)
+			}
+			if strings.Contains(candidate.Route, "/aigc") || strings.Contains(candidate.Route, "/.well-known") || strings.Contains(candidate.Route, "/src/") {
+				t.Fatalf("stage includes forbidden/control/source route candidate: %+v", candidate)
+			}
+		}
+	}
+}
+
 func TestScriptCodeGeneratorIsDeterministic(t *testing.T) {
 	_, report, productMap, graph := executableBundleFixtures()
 	project, _, _, _ := executableBundleFixtures()
@@ -461,6 +624,43 @@ func outlineStageByNodeID(bundle *model.ExecutableRecordingScriptBundle, nodeID 
 		}
 	}
 	return nil
+}
+
+func stageApprovalByNodeID(bundle *model.ExecutableRecordingScriptBundle, nodeID string) *model.StageApprovalStage {
+	if bundle == nil || bundle.StageApprovalPlan == nil {
+		return nil
+	}
+	for i := range bundle.StageApprovalPlan.Stages {
+		if bundle.StageApprovalPlan.Stages[i].NodeID == nodeID {
+			return &bundle.StageApprovalPlan.Stages[i]
+		}
+	}
+	return nil
+}
+
+func cascadeRouteIntelligenceForTest(project *model.ProjectContext) *model.ProjectIntelligencePack {
+	return &model.ProjectIntelligencePack{
+		ID:            "intel_cascade_routes",
+		ProjectID:     project.ID,
+		SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+		RunIntentScope: &model.RunIntentScope{
+			ProductOrigin: "https://cascadeai.cn",
+			ProductURL:    project.ProductURL,
+		},
+		Architecture: &model.ProjectArchitectureMap{
+			RouteTree: []model.ArchitectureRouteNode{
+				{ID: "route_home", Path: "/", Name: "首页", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_home", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_login", Path: "/login", Name: "用户登录页", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_login", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_admin_login", Path: "/admin/login", Name: "管理员登录页", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_admin_login", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_auth", Path: "/auth", Name: "认证回调", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_auth", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_app", Path: "/app", Name: "应用工作台", AuthRequired: true, EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_app", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_project_detail", Path: "/project/:id", Name: "项目详情与构建工作区", AuthRequired: true, EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_project", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_builder_square", Path: "/BuilderSquare", Name: "应用广场", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_square", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_aigc", Path: "/aigc/v1/execution-packages", Name: "exchange control plane", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_control", Kind: model.EvidenceKindSourceCode}}},
+				{ID: "route_source_file", Path: "/project/src/App.tsx", Name: "source file", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route_source", Kind: model.EvidenceKindSourceCode}}},
+			},
+		},
+	}
 }
 
 func containsString(values []string, target string) bool {

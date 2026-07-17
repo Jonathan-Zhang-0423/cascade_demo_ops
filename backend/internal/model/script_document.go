@@ -35,20 +35,21 @@ type ExecutionScriptDocument struct {
 }
 
 type ScriptStep struct {
-	ID              string                  `json:"id"`
-	Order           int                     `json:"order"`
-	NodeID          string                  `json:"node_id"`
-	Title           string                  `json:"title,omitempty"`
-	BusinessValue   string                  `json:"business_value,omitempty"`
-	PageTarget      ScriptPageTarget        `json:"page_target"`
-	Action          ScriptActionInstruction `json:"action"`
-	ExpectedOutcome string                  `json:"expected_outcome"`
-	Validations     []ValidationSpec        `json:"validations"`
-	Capture         CaptureSpec             `json:"capture"`
-	Timing          NodeTimingHint          `json:"timing"`
-	Narrative       NarrativeCue            `json:"narrative"`
-	EvidenceRefs    []EvidenceRef           `json:"evidence_refs,omitempty"`
-	Blocking        bool                    `json:"blocking"`
+	ID              string                      `json:"id"`
+	Order           int                         `json:"order"`
+	NodeID          string                      `json:"node_id"`
+	Title           string                      `json:"title,omitempty"`
+	BusinessValue   string                      `json:"business_value,omitempty"`
+	PageTarget      ScriptPageTarget            `json:"page_target"`
+	Action          ScriptActionInstruction     `json:"action"`
+	TargetContract  *BrowserAgentTargetContract `json:"target_contract,omitempty"`
+	ExpectedOutcome string                      `json:"expected_outcome"`
+	Validations     []ValidationSpec            `json:"validations"`
+	Capture         CaptureSpec                 `json:"capture"`
+	Timing          NodeTimingHint              `json:"timing"`
+	Narrative       NarrativeCue                `json:"narrative"`
+	EvidenceRefs    []EvidenceRef               `json:"evidence_refs,omitempty"`
+	Blocking        bool                        `json:"blocking"`
 }
 
 type ScriptPageTarget struct {

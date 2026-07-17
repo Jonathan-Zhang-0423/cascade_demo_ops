@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,7 +57,8 @@ func (a *ScriptPackagerAgent) PackageScript(
 		return nil, err
 	}
 	runSpec := recordingRunSpecFromGraph(project, graph)
-	steps := scriptStepsFromGraph(graph)
+	intelligencePack := firstIntelligencePack(intelligence...)
+	steps := scriptStepsFromGraph(graph, intelligencePack)
 	doc := &model.ExecutionScriptDocument{
 		ID:               "script_" + graph.ID,
 		ProjectID:        project.ID,
@@ -109,7 +111,7 @@ func (a *ScriptPackagerAgent) PackageScript(
 		CreatedAt: now,
 		Sensitive: false,
 	}
-	bundle, err := buildExecutableScriptBundle(project, report, productMap, graph, doc, markdown, now, firstIntelligencePack(intelligence...))
+	bundle, err := buildExecutableScriptBundle(project, report, productMap, graph, doc, markdown, now, intelligencePack)
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +140,7 @@ func buildExecutableScriptBundle(
 	stagePlan := buildStageApprovalPlan(project, report, graph, doc, intelligence, now)
 	outline := buildBrowserAgentScriptOutline(project, graph, doc, stagePlan, intelligence, now)
 	promptPolicy := buildBrowserAgentPromptPolicy(project, graph, doc, outline, now)
+	browserAgentContract := buildBrowserAgentContract(project, graph, doc, now)
 	dossier := buildProjectUnderstandingDossier(project, report, productMap, graph, intelligence, now)
 	auditText := outlineAuditText(stagePlan, outline, promptPolicy)
 	if findings := auditScriptIntentCoverage(project, doc, auditText); len(findings) > 0 {
@@ -152,6 +155,10 @@ func buildExecutableScriptBundle(
 		return nil, err
 	}
 	promptPolicyHash, err := model.DigestCanonicalJSON(promptPolicy)
+	if err != nil {
+		return nil, err
+	}
+	browserAgentContractHash, err := model.DigestCanonicalJSON(browserAgentContract)
 	if err != nil {
 		return nil, err
 	}
@@ -185,9 +192,10 @@ func buildExecutableScriptBundle(
 			SizeBytes: 0,
 			Encrypted: false,
 		},
-		StageApprovalPlan: stagePlan,
-		ScriptOutline:     outline,
-		AgentPromptPolicy: promptPolicy,
+		StageApprovalPlan:    stagePlan,
+		ScriptOutline:        outline,
+		AgentPromptPolicy:    promptPolicy,
+		BrowserAgentContract: browserAgentContract,
 		UnderstandingDossierRef: &model.ArtifactRef{
 			ID:        "artifact_" + doc.ID + "_understanding_dossier",
 			Kind:      "project_understanding_dossier",
@@ -224,6 +232,7 @@ func buildExecutableScriptBundle(
 			StagePlanHashSHA256:            stagePlanHash,
 			OutlineHashSHA256:              outlineHash,
 			PromptPolicyHashSHA256:         promptPolicyHash,
+			BrowserAgentContractHashSHA256: browserAgentContractHash,
 			UnderstandingDossierHashSHA256: dossierHash,
 			MarkdownHashSHA256:             markdownHash,
 			GraphHashSHA256:                doc.Reproducibility.GraphHashSHA256,
@@ -258,40 +267,60 @@ func firstIntelligencePack(values ...*model.ProjectIntelligencePack) *model.Proj
 	return nil
 }
 
+type stageRouteContract struct {
+	EntryRoute                       string
+	TargetRoute                      string
+	TargetRouteTemplate              string
+	ExpectedRouteAfterAction         string
+	TargetURL                        string
+	RuntimeRouteVerificationRequired bool
+	CandidateRoutes                  []model.BrowserAgentRouteCandidate
+}
+
 func buildStageApprovalPlan(project *model.ProjectContext, report *model.MultimodalUnderstandingReport, graph *model.DemoWorkflowGraph, doc *model.ExecutionScriptDocument, intelligence *model.ProjectIntelligencePack, now time.Time) *model.StageApprovalPlan {
 	stages := make([]model.StageApprovalStage, 0, len(doc.Steps))
+	previousRoute := routePathFromCandidate(graph.EntryPoint)
 	for _, step := range doc.Steps {
 		node := scriptPackagerGraphNodeByID(graph, step.NodeID)
 		evidence := evidenceForStage(report, intelligence, step, node)
 		interaction := browserAgentInteractionFromStep(step, evidence)
+		targetContract := targetContractForStep(step, node, evidence)
+		routeContract := routeContractForStep(step, node, intelligence, previousRoute)
 		durationMS := step.Timing.DurationMS
 		if durationMS <= 0 {
 			durationMS = 10000
 		}
 		durationMS = maxInt(durationMS, 10000)
 		stages = append(stages, model.StageApprovalStage{
-			ID:             "stage_" + step.ID,
-			Order:          step.Order,
-			NodeID:         step.NodeID,
-			Title:          firstNonEmpty(step.Title, step.NodeID),
-			Objective:      firstNonEmpty(step.BusinessValue, step.ExpectedOutcome, step.Narrative.Voiceover, step.Title),
-			BusinessIntent: firstNonEmpty(step.BusinessValue, step.Narrative.Voiceover, step.ExpectedOutcome),
-			DurationMS:     durationMS,
-			TargetRoute:    routeForScriptStep(step, node),
-			TargetURL:      firstNonEmpty(step.PageTarget.URL, step.Action.Target.URL),
-			ComponentRefs:  uniqueStrings(componentRefsForStage(step, node, intelligence)),
-			APIRefs:        uniqueStrings(apiRefsForStage(node, intelligence)),
-			StyleRefs:      uniqueStrings(styleRefsForStage(node, intelligence)),
-			DataModelRefs:  uniqueStrings(dataModelRefsForStage(node, intelligence)),
-			InputContent:   inputContentForStage(step, evidence),
-			Interaction:    interaction,
-			SuccessState:   firstNonEmpty(step.ExpectedOutcome, validationSummary(step.Validations)),
-			WaitConditions: waitConditionsForStep(step),
-			CapturePoints:  capturePointsForStep(step),
-			RiskNotes:      stageRiskNotes(step, node),
-			EvidenceRefs:   evidence,
-			Confidence:     confidenceForStage(node, intelligence),
+			ID:                               "stage_" + step.ID,
+			Order:                            step.Order,
+			NodeID:                           step.NodeID,
+			Title:                            firstNonEmpty(step.Title, step.NodeID),
+			Objective:                        firstNonEmpty(step.BusinessValue, step.ExpectedOutcome, step.Narrative.Voiceover, step.Title),
+			BusinessIntent:                   firstNonEmpty(step.BusinessValue, step.Narrative.Voiceover, step.ExpectedOutcome),
+			DurationMS:                       durationMS,
+			EntryRoute:                       routeContract.EntryRoute,
+			TargetRoute:                      routeContract.TargetRoute,
+			TargetRouteTemplate:              routeContract.TargetRouteTemplate,
+			ExpectedRouteAfterAction:         routeContract.ExpectedRouteAfterAction,
+			RuntimeRouteVerificationRequired: routeContract.RuntimeRouteVerificationRequired,
+			CandidateRoutes:                  routeContract.CandidateRoutes,
+			TargetURL:                        routeContract.TargetURL,
+			ComponentRefs:                    uniqueStrings(componentRefsForStage(step, node, intelligence)),
+			APIRefs:                          uniqueStrings(apiRefsForStage(node, intelligence)),
+			StyleRefs:                        uniqueStrings(styleRefsForStage(node, intelligence)),
+			DataModelRefs:                    uniqueStrings(dataModelRefsForStage(node, intelligence)),
+			InputContent:                     inputContentForStage(step, evidence),
+			Interaction:                      interaction,
+			TargetContract:                   targetContract,
+			SuccessState:                     firstNonEmpty(step.ExpectedOutcome, validationSummary(step.Validations)),
+			WaitConditions:                   waitConditionsForStep(step),
+			CapturePoints:                    capturePointsForStep(step),
+			RiskNotes:                        stageRiskNotes(step, node),
+			EvidenceRefs:                     evidence,
+			Confidence:                       confidenceForStage(node, intelligence),
 		})
+		previousRoute = nextRouteAfterStage(routeContract, previousRoute)
 	}
 	return &model.StageApprovalPlan{
 		ID:                "stage_plan_" + doc.ID,
@@ -322,28 +351,37 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 		}
 		interactions := []model.BrowserAgentInteraction{stage.Interaction}
 		stages = append(stages, model.BrowserAgentOutlineStage{
-			ID:             "outline_" + stage.ID,
-			StageID:        stage.ID,
-			Order:          stage.Order,
-			NodeID:         stage.NodeID,
-			Objective:      stage.Objective,
-			Route:          stage.TargetRoute,
-			URL:            stage.TargetURL,
-			Components:     components,
-			Interactions:   interactions,
-			WaitConditions: stage.WaitConditions,
-			CapturePoints:  stage.CapturePoints,
-			SuccessState:   stage.SuccessState,
-			DurationMS:     stage.DurationMS,
-			CanModify:      []string{"selector", "selector_alternatives", "wait_conditions", "retry_strategy", "non_destructive_exploration_path", "capture_timing"},
-			MustPreserve:   []string{"stage_id", "node_id", "objective", "business_intent", "input_semantics", "success_state", "duration_floor", "safety_policy"},
-			EvidenceRefs:   stage.EvidenceRefs,
-			Confidence:     stage.Confidence,
+			ID:                               "outline_" + stage.ID,
+			StageID:                          stage.ID,
+			Order:                            stage.Order,
+			NodeID:                           stage.NodeID,
+			Objective:                        stage.Objective,
+			EntryRoute:                       stage.EntryRoute,
+			Route:                            stage.TargetRoute,
+			TargetRouteTemplate:              stage.TargetRouteTemplate,
+			ExpectedRouteAfterAction:         stage.ExpectedRouteAfterAction,
+			RuntimeRouteVerificationRequired: stage.RuntimeRouteVerificationRequired,
+			CandidateRoutes:                  stage.CandidateRoutes,
+			URL:                              stage.TargetURL,
+			Components:                       components,
+			Interactions:                     interactions,
+			TargetContract:                   stage.TargetContract,
+			WaitConditions:                   stage.WaitConditions,
+			CapturePoints:                    stage.CapturePoints,
+			SuccessState:                     stage.SuccessState,
+			DurationMS:                       stage.DurationMS,
+			CanModify:                        []string{"selector", "selector_alternatives", "wait_conditions", "retry_strategy", "non_destructive_exploration_path", "capture_timing"},
+			MustPreserve:                     []string{"stage_id", "node_id", "objective", "business_intent", "input_semantics", "success_state", "duration_floor", "safety_policy"},
+			EvidenceRefs:                     stage.EvidenceRefs,
+			Confidence:                       stage.Confidence,
 		})
 	}
 	allowedRoutes := []string{}
 	for _, stage := range stagePlan.Stages {
-		allowedRoutes = append(allowedRoutes, stage.TargetRoute, stage.TargetURL)
+		allowedRoutes = append(allowedRoutes, stage.EntryRoute, stage.TargetRoute, stage.TargetRouteTemplate, stage.ExpectedRouteAfterAction, stage.TargetURL)
+		for _, candidate := range stage.CandidateRoutes {
+			allowedRoutes = append(allowedRoutes, candidate.Route)
+		}
 	}
 	allowedOrigins := []string{}
 	for _, domain := range doc.SafetyPolicy.AllowedDomains {
@@ -431,6 +469,100 @@ func buildBrowserAgentPromptPolicy(project *model.ProjectContext, graph *model.D
 		HumanReviewRequired: true,
 		CreatedAt:           now,
 		UpdatedAt:           now,
+	}
+}
+
+func buildBrowserAgentContract(project *model.ProjectContext, graph *model.DemoWorkflowGraph, doc *model.ExecutionScriptDocument, now time.Time) *model.BrowserAgentContract {
+	maskSelectors := append([]string{}, doc.SafetyPolicy.Redactions.MaskSelectors...)
+	maskSelectors = append(maskSelectors, "input[type=password]", "[data-sensitive=true]")
+	return &model.BrowserAgentContract{
+		ID:              "browser_agent_contract_" + doc.ID,
+		ProjectID:       project.ID,
+		WorkflowGraphID: graph.ID,
+		SchemaVersion:   model.BrowserAgentContractSchemaVersion,
+		Mode:            "suggest_only",
+		BusinessAuthority: model.BrowserAgentBusinessAuthority{
+			Source:                             "workflow_graph_plan_json_and_validations",
+			ScriptMayChangeBusinessIntent:      false,
+			RuntimePageMayChangeBusinessIntent: false,
+			AgentMayChangeBusinessIntent:       false,
+		},
+		RepairPolicy: model.BrowserAgentRepairPolicy{
+			AllowedRepairKinds: []string{"selector_strategy", "selector_alternative", "semantic_target", "wait_condition", "frame_target"},
+			EditableFields: []string{
+				"action.target.selector",
+				"action.target.selector_alternatives",
+				"action.target.test_id",
+				"action.target.role",
+				"action.target.text",
+				"action.target.label",
+				"action.target.frame",
+				"action.timeout_ms",
+				"action.wait_until",
+			},
+			ImmutableFields: []string{
+				"node_id",
+				"action.type",
+				"action.value",
+				"action.input_ref",
+				"action.secret_ref",
+				"page_target.url",
+				"expected_outcome",
+				"validations",
+				"blocking",
+			},
+			MaxRepairAttempts:      2,
+			MaxPatchOperations:     3,
+			MaxAgentRuntimeMS:      30000,
+			MinAutoApplyConfidence: 0.9,
+			SameNodeOnly:           true,
+			SameActionTypeOnly:     true,
+			SameDomainOnly:         true,
+			StepInsertAllowed:      false,
+			StepDeleteAllowed:      false,
+			StepReorderAllowed:     false,
+			StepSkipAllowed:        false,
+		},
+		ObservationPolicy: model.BrowserAgentObservationPolicy{
+			AllowedFields: []string{
+				"url_without_query",
+				"page_title",
+				"accessibility_snapshot",
+				"interactive_elements",
+				"element_attributes",
+				"redacted_screenshot",
+				"redacted_console_summary",
+				"redacted_network_summary",
+			},
+			FullHTMLAllowed:        false,
+			CookiesAllowed:         false,
+			AuthorizationAllowed:   false,
+			StorageContentAllowed:  false,
+			InputValuesAllowed:     false,
+			SourceCodeAllowed:      false,
+			MaxInteractiveElements: 200,
+			MaxTextLength:          12000,
+			MaskSelectors:          uniqueStrings(maskSelectors),
+		},
+		ModelPolicy: model.BrowserAgentModelPolicy{
+			ProviderRef:               "approved_browser_agent_model",
+			DeploymentMode:            "approved_cloud",
+			CustomerDataExportAllowed: false,
+			TrainingUsageAllowed:      false,
+			RetentionAllowed:          false,
+			DataResidency:             "CN",
+			RequestTimeoutMS:          15000,
+		},
+		ConflictPolicy: model.BrowserAgentConflictPolicy{
+			OnGraphPlanConflict:          "reject_package",
+			OnTargetContractConflict:     "stop_and_report",
+			OnRuntimeIntentConflict:      "stop_and_report",
+			OnAmbiguousTarget:            "require_approval",
+			OnOutcomeVerificationFailure: "retry_within_limit",
+			OnRepairLimitExceeded:        "return_to_customer_app",
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 }
 
@@ -642,17 +774,38 @@ func inputContentForStage(step model.ScriptStep, evidence []model.EvidenceRef) [
 
 func routeForScriptStep(step model.ScriptStep, node *model.GraphNode) string {
 	for _, value := range []string{step.PageTarget.URL, step.Action.Target.URL} {
-		if route := pathFromURL(value); route != "" {
+		if route := routePathFromCandidate(value); route != "" {
 			return route
 		}
 	}
 	if node != nil {
-		if route := pathFromURL(node.Selector); route != "" {
+		if route := routePathFromCandidate(node.PageRef); route != "" {
 			return route
 		}
-		if node.PageRef != "" {
-			return node.PageRef
+	}
+	return ""
+}
+
+func routePathFromCandidate(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if isHTTPURL(value) {
+		parsed, err := url.Parse(value)
+		if err != nil {
+			return ""
 		}
+		if parsed.Path == "" {
+			return "/"
+		}
+		return pathFromURL(value)
+	}
+	if strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") && !strings.ContainsAny(value, "[]'\"<>") {
+		if value == "/" {
+			return value
+		}
+		return strings.TrimRight(value, "/")
 	}
 	return ""
 }
@@ -718,6 +871,543 @@ func dataModelRefsForStage(node *model.GraphNode, intelligence *model.ProjectInt
 		}
 	}
 	return refs
+}
+
+func routeContractForStep(step model.ScriptStep, node *model.GraphNode, intelligence *model.ProjectIntelligencePack, previousRoute string) stageRouteContract {
+	return routeContractForNode(node, step.Action, step.PageTarget, intelligence, previousRoute)
+}
+
+func routeContractForNode(node *model.GraphNode, action model.ScriptActionInstruction, target model.ScriptPageTarget, intelligence *model.ProjectIntelligencePack, previousRoute string) stageRouteContract {
+	contract := stageRouteContract{
+		EntryRoute: firstNonEmpty(previousRoute, "/"),
+		TargetURL:  firstNonEmpty(target.URL, action.Target.URL),
+	}
+	if contract.TargetURL == "" && node != nil {
+		contract.TargetURL = urlIfHTTP(node.PageRef)
+	}
+	semanticText := routeSemanticText(node, action, target)
+	route := routePathFromCandidate(firstNonEmpty(target.PageRef, action.Target.URL, target.URL))
+	if route == "" && node != nil {
+		route = routePathFromCandidate(node.PageRef)
+	}
+	candidates := routeCandidatesForStage(semanticText, intelligence, 4)
+	if (route == "" || route == "/") && routeIsUserLoginStage(semanticText) {
+		route = userLoginRouteTemplate(intelligence)
+	}
+	if (route == "" || route == "/") && (routeCreationStageShouldRemainInWorkspace(semanticText) || routeIsBuildModeSelectionStage(semanticText)) {
+		route = appWorkspaceRouteTemplate(intelligence)
+	}
+	if routeShouldContinueOnProjectDetail(semanticText, contract.EntryRoute) {
+		route = contract.EntryRoute
+	}
+	if (route == "" || route == "/") && len(candidates) > 0 && candidates[0].Route != "/" {
+		route = candidates[0].Route
+	}
+	if !routeCandidateAllowed(route) || routeLooksLikeSourcePath(route) {
+		route = ""
+	}
+	if route == "" {
+		route = routeFallbackForStage(semanticText, contract.EntryRoute, intelligence)
+	}
+	contract.TargetRoute = route
+	contract.TargetRouteTemplate = routeTemplateForStage(route, semanticText, intelligence)
+	contract.ExpectedRouteAfterAction = expectedRouteAfterActionForStage(semanticText, contract.EntryRoute, contract.TargetRouteTemplate, intelligence)
+	contract.CandidateRoutes = candidates
+	contract.RuntimeRouteVerificationRequired = true
+	if routeExactInArchitecture(contract.TargetRouteTemplate, intelligence) && contract.ExpectedRouteAfterAction == "" {
+		contract.RuntimeRouteVerificationRequired = false
+	}
+	if contract.TargetRouteTemplate != "" {
+		if routeTemplateDynamic(contract.TargetRouteTemplate) && routePathFromCandidate(contract.TargetURL) == "/" && contract.TargetRouteTemplate != "/" {
+			contract.TargetURL = ""
+		}
+		if inferredURL := routeURLFromTemplate(contract.TargetRouteTemplate, intelligence); inferredURL != "" &&
+			(contract.TargetURL == "" || (routePathFromCandidate(contract.TargetURL) == "/" && contract.TargetRouteTemplate != "/")) {
+			contract.TargetURL = inferredURL
+		}
+	}
+	if contract.TargetRoute == "" {
+		contract.TargetRoute = contract.EntryRoute
+	}
+	if contract.TargetRouteTemplate == "" {
+		contract.TargetRouteTemplate = contract.TargetRoute
+	}
+	return contract
+}
+
+func routeSemanticText(node *model.GraphNode, action model.ScriptActionInstruction, target model.ScriptPageTarget) string {
+	parts := []string{
+		string(action.Type),
+		target.URL,
+		target.Selector,
+		target.PageRef,
+		action.Target.URL,
+		action.Target.Selector,
+		action.Target.Label,
+		action.Target.Text,
+		action.Target.TestID,
+		action.Value,
+	}
+	if node != nil {
+		parts = append(parts, node.ID, node.Title, node.Goal, node.Description, node.ExpectedOutcome, node.PageRef, node.Selector)
+		if node.Narrative != nil {
+			parts = append(parts, node.Narrative.Title, node.Narrative.Caption, node.Narrative.Voiceover, node.Narrative.Callout)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func routeIsUserLoginStage(value string) bool {
+	return containsAnyNormalized(value, "登录", "登陆", "登入", "login", "signin", "sign in")
+}
+
+func routeIsAdminIntent(value string) bool {
+	return containsAnyNormalized(value, "admin", "管理员", "后台", "管理端")
+}
+
+func routeIsProjectCreationStage(value string) bool {
+	return containsAnyNormalized(value, "新建项目", "创建项目", "项目名称", "俄罗斯方块", "project name", "new project", "create project")
+}
+
+func routeIsNewProjectEntryStage(value string) bool {
+	return containsAnyNormalized(value, "新建项目", "创建项目", "new project", "create project") &&
+		!containsAnyNormalized(value, "项目名称", "填写", "输入", "俄罗斯方块", "project name")
+}
+
+func routeCreationStageShouldRemainInWorkspace(value string) bool {
+	return routeIsNewProjectEntryStage(value) || containsAnyNormalized(value, "项目名称", "填写", "输入", "俄罗斯方块", "project name")
+}
+
+func routeIsBuildModeSelectionStage(value string) bool {
+	return containsAnyNormalized(value, "选择构建模式", "构建模式", "build mode") &&
+		!containsAnyNormalized(value, "启动", "开始", "实际构建", "等待", "观察", "agent", "智能体", "generate", "run")
+}
+
+func routeIsProjectBuildStage(value string) bool {
+	return !routeIsBuildModeSelectionStage(value) &&
+		containsAnyNormalized(value, "开始构建", "启动构建", "实际构建", "等待构建", "观察构建", "agent", "智能体", "build", "builder", "generate", "run")
+}
+
+func routeShouldContinueOnProjectDetail(semanticText string, previousRoute string) bool {
+	return routeTemplateDynamic(previousRoute) && routeIsProjectBuildStage(semanticText)
+}
+
+func routeCandidatesForStage(semanticText string, intelligence *model.ProjectIntelligencePack, limit int) []model.BrowserAgentRouteCandidate {
+	if intelligence == nil || intelligence.Architecture == nil || limit <= 0 {
+		return nil
+	}
+	type scoredRoute struct {
+		route model.BrowserAgentRouteCandidate
+		score int
+	}
+	scored := []scoredRoute{}
+	keywords := routeKeywordsForStage(semanticText)
+	for _, route := range intelligence.Architecture.RouteTree {
+		path := normalizeRouteTemplate(route.Path)
+		if !routeCandidateAllowed(path) {
+			continue
+		}
+		score := routeMatchScore(path, route.Name, semanticText, keywords)
+		if score <= 0 {
+			continue
+		}
+		scored = append(scored, scoredRoute{
+			route: model.BrowserAgentRouteCandidate{
+				Route:          path,
+				RouteID:        route.ID,
+				Name:           route.Name,
+				Source:         "code_route_tree",
+				MatchedKeyword: bestMatchedKeyword(path+" "+route.Name, keywords),
+				AuthRequired:   route.AuthRequired,
+				RuntimeDynamic: routeTemplateDynamic(path),
+				EvidenceRefs:   route.EvidenceRefs,
+				Confidence:     minFloat64(0.92, 0.55+float64(score)*0.08),
+			},
+			score: score,
+		})
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return len(scored[i].route.Route) > len(scored[j].route.Route)
+		}
+		return scored[i].score > scored[j].score
+	})
+	out := []model.BrowserAgentRouteCandidate{}
+	seen := map[string]bool{}
+	for _, item := range scored {
+		if seen[item.route.Route] {
+			continue
+		}
+		seen[item.route.Route] = true
+		out = append(out, item.route)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func routeKeywordsForStage(semanticText string) []string {
+	normalized := normalizeIntentText(semanticText)
+	keywords := []string{}
+	if routeIsUserLoginStage(normalized) {
+		keywords = append(keywords, "login", "登录", "signin")
+	}
+	if routeIsProjectCreationStage(normalized) || routeIsBuildModeSelectionStage(normalized) {
+		keywords = append(keywords, "app", "project", "projects", "new", "create", "workspace", "应用", "项目")
+	}
+	if routeIsProjectBuildStage(normalized) {
+		keywords = append(keywords, "project", "build", "builder", "generate", "agent", "构建")
+	}
+	if len(keywords) == 0 {
+		keywords = append(keywords, intentKeywordsForText(semanticText)...)
+	}
+	return uniqueStrings(keywords)
+}
+
+func routeMatchScore(path string, name string, semanticText string, keywords []string) int {
+	score := 0
+	search := normalizeIntentText(path + " " + name)
+	stageText := normalizeIntentText(semanticText)
+	userLogin := routeIsUserLoginStage(stageText)
+	adminIntent := routeIsAdminIntent(stageText)
+	projectCreation := routeIsProjectCreationStage(stageText)
+	newProjectEntry := routeIsNewProjectEntryStage(stageText)
+	buildModeSelection := routeIsBuildModeSelectionStage(stageText)
+	projectBuild := routeIsProjectBuildStage(stageText)
+	for _, keyword := range keywords {
+		keyword = normalizeIntentText(keyword)
+		if keyword == "" {
+			continue
+		}
+		if strings.Contains(search, keyword) {
+			score += 3
+		}
+	}
+	switch {
+	case userLogin && strings.Contains(search, "login"):
+		score += 10
+	case (projectCreation || buildModeSelection) && containsAnyNormalized(search, "app", "project", "workspace"):
+		score += 7
+	case projectBuild && containsAnyNormalized(search, "build", "builder", "project"):
+		score += 7
+	}
+	if userLogin && path == "/login" {
+		score += 8
+	}
+	if userLogin && strings.Contains(path, "/admin") && !adminIntent {
+		score -= 14
+	}
+	if strings.Contains(path, "/admin") && !adminIntent {
+		score -= 4
+	}
+	if strings.Contains(path, "?") {
+		score -= 4
+	}
+	if path == "/" {
+		score -= 2
+	}
+	if strings.Contains(search, "invite") && !containsAnyNormalized(stageText, "invite", "邀请") {
+		score -= 10
+	}
+	if strings.Contains(search, "buildersquare") && !containsAnyNormalized(stageText, "buildersquare", "广场", "发布", "浏览") {
+		score -= 8
+	}
+	if path == "/app" && (newProjectEntry || buildModeSelection || (projectCreation && !projectBuild)) {
+		score += 8
+	}
+	if routeTemplateDynamic(path) && strings.Contains(path, "project") && (projectBuild || (projectCreation && !newProjectEntry)) {
+		score += 10
+	}
+	if (path == "/project/:id" || path == "/project/:project_id") && (projectBuild || projectCreation) {
+		score += 8
+	}
+	if routeLooksLikeSourcePath(path) {
+		score -= 100
+	}
+	return score
+}
+
+func routeFallbackForStage(semanticText string, previousRoute string, intelligence *model.ProjectIntelligencePack) string {
+	normalized := normalizeIntentText(semanticText)
+	if routeIsUserLoginStage(normalized) {
+		if routeIsAdminIntent(normalized) {
+			return firstExistingRouteTemplate([]string{"/admin/login", "/login", "/signin", "/auth"}, intelligence, "/login")
+		}
+		return userLoginRouteTemplate(intelligence)
+	}
+	if routeShouldContinueOnProjectDetail(normalized, previousRoute) {
+		return previousRoute
+	}
+	if routeIsProjectBuildStage(normalized) {
+		return projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, firstNonEmpty(previousRoute, "/project/:id")))
+	}
+	if routeIsBuildModeSelectionStage(normalized) {
+		return appWorkspaceRouteTemplate(intelligence)
+	}
+	if routeIsProjectCreationStage(normalized) {
+		if routeIsNewProjectEntryStage(normalized) {
+			return appWorkspaceRouteTemplate(intelligence)
+		}
+		return appWorkspaceRouteTemplate(intelligence)
+	}
+	return firstNonEmpty(previousRoute, "/")
+}
+
+func expectedRouteAfterActionForStage(semanticText string, entryRoute string, targetRoute string, intelligence *model.ProjectIntelligencePack) string {
+	normalized := normalizeIntentText(semanticText)
+	switch {
+	case routeIsUserLoginStage(normalized):
+		return firstExistingRouteTemplate([]string{"/app", "/dashboard", "/workspace"}, intelligence, "/app")
+	case routeIsProjectBuildStage(normalized):
+		return projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, firstNonEmpty(targetRoute, entryRoute, "/project/:id")))
+	case routeIsBuildModeSelectionStage(normalized):
+		return appWorkspaceRouteTemplate(intelligence)
+	case routeIsProjectCreationStage(normalized):
+		if routeCreationStageShouldRemainInWorkspace(normalized) {
+			return appWorkspaceRouteTemplate(intelligence)
+		}
+		return dynamicProjectRouteTemplate(intelligence, "/project/:id")
+	}
+	if routeTemplateDynamic(targetRoute) {
+		return targetRoute
+	}
+	return ""
+}
+
+func firstExistingRouteTemplate(candidates []string, intelligence *model.ProjectIntelligencePack, fallback string) string {
+	for _, candidate := range candidates {
+		if routeExactInArchitecture(candidate, intelligence) {
+			return candidate
+		}
+	}
+	return fallback
+}
+
+func firstExistingDynamicRouteTemplate(candidates []string, intelligence *model.ProjectIntelligencePack, fallback string) string {
+	if intelligence != nil && intelligence.Architecture != nil {
+		for _, item := range intelligence.Architecture.RouteTree {
+			path := normalizeRouteTemplate(item.Path)
+			if !routeCandidateAllowed(path) || !routeTemplateDynamic(path) {
+				continue
+			}
+			for _, candidate := range candidates {
+				if routeTemplateEquivalent(path, candidate) {
+					return path
+				}
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		if routeExactInArchitecture(candidate, intelligence) {
+			return normalizeRouteTemplate(candidate)
+		}
+	}
+	return fallback
+}
+
+func routeTemplateEquivalent(left string, right string) bool {
+	left = normalizeRouteTemplate(left)
+	right = normalizeRouteTemplate(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if left == right {
+		return true
+	}
+	return routeTemplateSignature(left) == routeTemplateSignature(right)
+}
+
+func routeTemplateSignature(route string) string {
+	route = normalizeRouteTemplate(route)
+	parts := strings.Split(route, "/")
+	for i, part := range parts {
+		if strings.HasPrefix(part, ":") || strings.HasPrefix(part, "*") {
+			parts[i] = ":param"
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func userLoginRouteTemplate(intelligence *model.ProjectIntelligencePack) string {
+	return firstExistingRouteTemplate([]string{"/login", "/signin", "/auth", "/admin/login", "/"}, intelligence, "/login")
+}
+
+func appWorkspaceRouteTemplate(intelligence *model.ProjectIntelligencePack) string {
+	return firstExistingRouteTemplate([]string{"/app", "/dashboard", "/workspace", "/"}, intelligence, "/app")
+}
+
+func dynamicProjectRouteTemplate(intelligence *model.ProjectIntelligencePack, fallback string) string {
+	return firstExistingDynamicRouteTemplate([]string{
+		"/project/:id",
+		"/project/:project_id",
+		"/projects/:id",
+		"/projects/:project_id",
+		"/app/projects/:id",
+		"/app/projects/:project_id",
+	}, intelligence, fallback)
+}
+
+func projectBuildRouteTemplate(intelligence *model.ProjectIntelligencePack, fallback string) string {
+	return firstExistingDynamicRouteTemplate([]string{
+		"/project/:id/build",
+		"/project/:project_id/build",
+		"/projects/:id/build",
+		"/projects/:project_id/build",
+		"/app/projects/:id/build",
+		"/app/projects/:project_id/build",
+		"/project/:id",
+		"/project/:project_id",
+		"/projects/:id",
+		"/projects/:project_id",
+		"/app/projects/:id",
+		"/app/projects/:project_id",
+	}, intelligence, fallback)
+}
+
+func routeExactInArchitecture(route string, intelligence *model.ProjectIntelligencePack) bool {
+	route = normalizeRouteTemplate(route)
+	if route == "" || intelligence == nil || intelligence.Architecture == nil {
+		return false
+	}
+	for _, item := range intelligence.Architecture.RouteTree {
+		if normalizeRouteTemplate(item.Path) == route {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeRouteTemplate(route string) string {
+	route = strings.TrimSpace(route)
+	if route == "" {
+		return ""
+	}
+	if strings.Contains(route, "://") {
+		route = pathFromURL(route)
+	}
+	if route == "" {
+		return ""
+	}
+	if !strings.HasPrefix(route, "/") {
+		return ""
+	}
+	if i := strings.Index(route, "?"); i >= 0 {
+		route = route[:i]
+	}
+	route = strings.TrimRight(route, "/")
+	if route == "" {
+		return "/"
+	}
+	route = strings.ReplaceAll(route, "{id}", ":id")
+	route = strings.ReplaceAll(route, "[id]", ":id")
+	return route
+}
+
+func routeCandidateAllowed(route string) bool {
+	if route == "" {
+		return false
+	}
+	lower := strings.ToLower(route)
+	if containsAny(lower, "/aigc", "/.well-known", "/v1", "execution-packages", "app-installations", "debug", "result-packages") {
+		return false
+	}
+	if strings.Contains(lower, "callback") || strings.Contains(lower, "error=") || strings.Contains(lower, "bind_") {
+		return false
+	}
+	if routeLooksLikeSourcePath(lower) {
+		return false
+	}
+	return true
+}
+
+func routeLooksLikeSourcePath(route string) bool {
+	lower := strings.ToLower(strings.TrimSpace(route))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "*") || strings.Contains(lower, "\\") {
+		return true
+	}
+	if containsAny(lower, "/src/", "/components/", "/styles/", "/tests/", "/fixtures/", "/node_modules/", "/dist/", "/build/") {
+		return true
+	}
+	for _, suffix := range []string{".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".json", ".md", ".html", ".svg", ".png", ".jpg", ".jpeg", ".webp"} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func routeTemplateForStage(route string, semanticText string, intelligence *model.ProjectIntelligencePack) string {
+	route = normalizeRouteTemplate(route)
+	if route == "" {
+		return ""
+	}
+	normalized := normalizeIntentText(semanticText)
+	if routeTemplateDynamic(route) {
+		return route
+	}
+	if routeIsProjectBuildStage(normalized) {
+		if strings.Contains(route, "project") {
+			return projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, "/project/:id"))
+		}
+		return route
+	}
+	if routeIsProjectCreationStage(normalized) && !routeIsNewProjectEntryStage(normalized) && strings.Contains(route, "project") {
+		return dynamicProjectRouteTemplate(intelligence, "/project/:id")
+	}
+	return route
+}
+
+func routeTemplateDynamic(route string) bool {
+	return strings.Contains(route, ":") || strings.Contains(route, "*")
+}
+
+func routeURLFromTemplate(route string, intelligence *model.ProjectIntelligencePack) string {
+	origin := ""
+	if intelligence != nil && intelligence.RunIntentScope != nil {
+		origin = intelligence.RunIntentScope.ProductOrigin
+		if origin == "" {
+			origin = baseURL(intelligence.RunIntentScope.ProductURL)
+		}
+	}
+	if origin == "" {
+		return ""
+	}
+	if route == "" {
+		return origin
+	}
+	if routeTemplateDynamic(route) {
+		return ""
+	}
+	if route == "/" {
+		return origin
+	}
+	return strings.TrimRight(origin, "/") + route
+}
+
+func nextRouteAfterStage(contract stageRouteContract, previousRoute string) string {
+	return firstNonEmpty(contract.ExpectedRouteAfterAction, contract.TargetRouteTemplate, contract.TargetRoute, previousRoute, "/")
+}
+
+func bestMatchedKeyword(value string, keywords []string) string {
+	value = normalizeIntentText(value)
+	for _, keyword := range keywords {
+		keyword = normalizeIntentText(keyword)
+		if keyword != "" && strings.Contains(value, keyword) {
+			return keyword
+		}
+	}
+	return ""
+}
+
+func minFloat64(left float64, right float64) float64 {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func componentTargetsForStep(step model.ScriptStep, stage model.StageApprovalStage, intelligence *model.ProjectIntelligencePack) []model.BrowserAgentComponentTarget {
@@ -1153,9 +1843,10 @@ func (a *ScriptPackagerAgent) enhanceMarkdownWithLLM(
 	return output.Markdown, trace, nil
 }
 
-func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
+func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.ProjectIntelligencePack) []model.ScriptStep {
 	steps := make([]model.ScriptStep, 0, len(graph.Nodes))
 	elapsedMS := 0
+	previousRoute := routePathFromCandidate(graph.EntryPoint)
 	for i, node := range graph.Nodes {
 		if node == nil {
 			continue
@@ -1170,6 +1861,18 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 		action := scriptActionForNode(node)
 		target := scriptPageTargetForNode(node)
 		validations := append([]model.ValidationSpec{}, node.Validations...)
+		routeContract := routeContractForNode(node, action, target, intelligence, previousRoute)
+		if routeContract.TargetRoute != "" {
+			target.PageRef = routeContract.TargetRoute
+		}
+		if routeContract.TargetURL != "" {
+			if target.URL == "" {
+				target.URL = routeContract.TargetURL
+			}
+			if action.Target.URL == "" {
+				action.Target.URL = routeContract.TargetURL
+			}
+		}
 		selector := bestSelectorForScriptStep(action, target)
 		if selector != "" {
 			action.Target.Selector = selector
@@ -1185,17 +1888,8 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 			capture.FocusSelector = ""
 			validations = softenBlockingValidations(validations)
 		}
-		if len(validations) == 0 && node.ExpectedOutcome != "" {
-			validations = append(validations, model.ValidationSpec{
-				ID:        "validate_" + node.ID,
-				Kind:      "expected_outcome",
-				Target:    action.Target,
-				Assertion: node.ExpectedOutcome,
-				Expected:  true,
-				Severity:  "blocking",
-				Required:  true,
-			})
-		}
+		validations = ensureRequiredValidationsForStep(node, action, target, validations)
+		targetContract := targetContractForNode(node, action, target, validations)
 		steps = append(steps, model.ScriptStep{
 			ID:              fmt.Sprintf("step_%02d_%s", i+1, node.ID),
 			Order:           i + 1,
@@ -1204,6 +1898,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 			BusinessValue:   firstNonEmpty(node.Goal, node.Description),
 			PageTarget:      target,
 			Action:          action,
+			TargetContract:  targetContract,
 			ExpectedOutcome: node.ExpectedOutcome,
 			Validations:     validations,
 			Capture:         capture,
@@ -1212,6 +1907,11 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph) []model.ScriptStep {
 			EvidenceRefs:    node.EvidenceRefs,
 			Blocking:        isBlockingScriptStep(node, action.Type, validations),
 		})
+		if routeContract.ExpectedRouteAfterAction != "" {
+			previousRoute = routeContract.ExpectedRouteAfterAction
+		} else if routeContract.TargetRoute != "" {
+			previousRoute = routeContract.TargetRoute
+		}
 		elapsedMS += durationMS
 		_ = elapsedMS
 	}
@@ -1238,6 +1938,136 @@ func nodeVerifiedForBusinessAction(node *model.GraphNode) bool {
 		return true
 	}
 	return false
+}
+
+func ensureRequiredValidationsForStep(node *model.GraphNode, action model.ScriptActionInstruction, target model.ScriptPageTarget, validations []model.ValidationSpec) []model.ValidationSpec {
+	out := append([]model.ValidationSpec{}, validations...)
+	if hasRequiredValidation(out) || node == nil {
+		return out
+	}
+	switch action.Type {
+	case model.GraphActionNavigate:
+		if url := firstNonEmpty(action.Target.URL, target.URL); url != "" {
+			out = append(out, model.ValidationSpec{
+				ID:        "validate_url_" + node.ID,
+				Kind:      "url_matches",
+				Assertion: "导航后 URL 应保持在目标产品路由内",
+				Expected:  url,
+				Severity:  "blocking",
+				Required:  true,
+			})
+		}
+	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
+		validationTarget := action.Target
+		if validationTarget.Selector == "" && target.Selector != "" {
+			validationTarget.Selector = target.Selector
+		}
+		kind := "element_visible"
+		expected := any(true)
+		if validationTarget.Selector == "" && validationTarget.TestID == "" && validationTarget.Role == "" && validationTarget.Text == "" && validationTarget.Label == "" {
+			kind = "text_contains"
+			validationTarget.Text = firstNonEmpty(node.ExpectedOutcome, node.Title, node.Goal)
+		}
+		out = append(out, model.ValidationSpec{
+			ID:        "validate_business_" + node.ID,
+			Kind:      kind,
+			Target:    validationTarget,
+			Assertion: firstNonEmpty(node.ExpectedOutcome, "关键业务控件可见并完成操作"),
+			Expected:  expected,
+			Severity:  "blocking",
+			Required:  true,
+		})
+	}
+	return out
+}
+
+func hasRequiredValidation(validations []model.ValidationSpec) bool {
+	for _, validation := range validations {
+		if validation.Required && validationKindAllowedForBrowserAgent(validation.Kind) {
+			return true
+		}
+	}
+	return false
+}
+
+func validationKindAllowedForBrowserAgent(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+		return true
+	default:
+		return false
+	}
+}
+
+func targetContractForStep(step model.ScriptStep, node *model.GraphNode, evidence []model.EvidenceRef) *model.BrowserAgentTargetContract {
+	contract := targetContractForNode(node, step.Action, step.PageTarget, step.Validations)
+	if contract == nil {
+		return nil
+	}
+	contract.EvidenceRefs = uniqueEvidenceRefs(append(contract.EvidenceRefs, evidence...))
+	return contract
+}
+
+func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstruction, pageTarget model.ScriptPageTarget, validations []model.ValidationSpec) *model.BrowserAgentTargetContract {
+	if node == nil {
+		return nil
+	}
+	target := action.Target
+	semanticSeed := strings.Join([]string{
+		node.ID,
+		string(action.Type),
+		firstNonEmpty(target.ComponentRef, node.PageRef, pageTarget.PageRef),
+		firstNonEmpty(target.TestID, target.Role, target.Label, target.Text, target.Selector, node.Title),
+	}, "|")
+	allowedNames := uniqueStrings(nonEmptyStrings(
+		target.Label,
+		target.Text,
+		target.TestID,
+		node.Title,
+		node.Goal,
+		node.ExpectedOutcome,
+	))
+	allowedRoles := []string{}
+	if target.Role != "" {
+		allowedRoles = append(allowedRoles, target.Role)
+	} else if action.Type == model.GraphActionClick {
+		allowedRoles = append(allowedRoles, "button", "link")
+	} else if action.Type == model.GraphActionFill || action.Type == model.GraphActionSelect || action.Type == model.GraphActionUpload {
+		allowedRoles = append(allowedRoles, "textbox", "combobox", "radio", "checkbox")
+	}
+	for _, validation := range validations {
+		allowedNames = append(allowedNames, validation.Target.Label, validation.Target.Text, validation.Target.TestID)
+		if validation.Target.Role != "" {
+			allowedRoles = append(allowedRoles, validation.Target.Role)
+		}
+	}
+	return &model.BrowserAgentTargetContract{
+		SemanticID:     "semantic_" + shortHash(semanticSeed),
+		Purpose:        firstNonEmpty(node.Goal, node.Description, node.ExpectedOutcome, node.Title),
+		AllowedRoles:   uniqueStrings(allowedRoles),
+		AllowedNames:   limitStrings(uniqueStrings(allowedNames), 12),
+		ForbiddenNames: []string{"删除", "移除", "支付", "账单", "API Key", "Delete", "Remove", "Pay", "Billing"},
+		ComponentRef:   firstNonEmpty(target.ComponentRef, firstString(node.FeatureRefs, ""), node.PageRef),
+		Destructive:    destructiveActionText(node.Title + " " + node.Goal + " " + node.Description + " " + target.Label + " " + target.Text),
+		EvidenceRefs:   uniqueEvidenceRefs(node.EvidenceRefs),
+		Confidence:     0.76,
+	}
+}
+
+func destructiveActionText(value string) bool {
+	lower := strings.ToLower(value)
+	return containsAny(lower, "delete", "remove", "pay", "billing", "api key", "删除", "移除", "支付", "账单", "密钥")
+}
+
+func nonEmptyStrings(values ...string) []string {
+	out := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func stageHoldAfterMS(durationMS int) int {
@@ -1740,7 +2570,11 @@ func renderScriptMarkdown(project *model.ProjectContext, doc *model.ExecutionScr
 		builder.WriteString(fmt.Sprintf("### %d. %s\n\n", step.Order, firstNonEmpty(step.Title, step.NodeID)))
 		builder.WriteString("- 节点：" + step.NodeID + "\n")
 		builder.WriteString("- 动作：" + string(step.Action.Type) + "\n")
-		builder.WriteString("- 目标：" + firstNonEmpty(step.PageTarget.URL, step.PageTarget.Selector, "页面上下文") + "\n")
+		builder.WriteString("- 页面路由：" + firstNonEmpty(step.PageTarget.PageRef, routePathFromCandidate(firstNonEmpty(step.PageTarget.URL, step.Action.Target.URL)), "运行时确认") + "\n")
+		builder.WriteString("- 运行时 URL：" + firstNonEmpty(step.PageTarget.URL, step.Action.Target.URL, "由 Browser Agent 在产品域内探索确认") + "\n")
+		if selector := firstNonEmpty(step.Action.Target.Selector, step.PageTarget.Selector); selector != "" {
+			builder.WriteString("- 目标控件：" + selector + "\n")
+		}
 		builder.WriteString("- 预期：" + step.ExpectedOutcome + "\n")
 		builder.WriteString("- 录制：" + captureSummary(step.Capture) + "\n")
 		builder.WriteString("- 旁白：" + firstNonEmpty(step.Narrative.Voiceover, step.Narrative.Caption, step.BusinessValue) + "\n\n")

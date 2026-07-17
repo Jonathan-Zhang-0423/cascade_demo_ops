@@ -1328,17 +1328,30 @@ function ScriptBundleReview({ workspace }: { workspace: ProjectWorkspaceView }) 
   const stagePlanJSON = bundle?.stage_approval_plan ? JSON.stringify(bundle.stage_approval_plan, null, 2) : "生成后展示用户审批用 Stage JSON。";
   const outlineJSON = bundle?.script_outline ? JSON.stringify(bundle.script_outline, null, 2) : "生成后展示 Browser Agent 脚本大纲。";
   const promptPolicyJSON = bundle?.agent_prompt_policy ? JSON.stringify(bundle.agent_prompt_policy, null, 2) : "生成后展示可修改/不可修改规则。";
+  const agentContractJSON = bundle?.browser_agent_contract ? JSON.stringify(bundle.browser_agent_contract, null, 2) : "生成后展示 Browser Agent 执行/修复合同。";
   const dossierJSON = bundle?.project_understanding_dossier ? JSON.stringify(bundle.project_understanding_dossier, null, 2) : "生成后展示需求相关项目理解证据。";
   const source = bundle?.playwright_script.inline_source ?? "legacy TS 模式下展示受限 TypeScript 脚本；Browser Agent 大纲模式不要求 App 生成完整 TS。";
+  const bundleBytes = bundle ? new Blob([JSON.stringify(bundle)]).size : 0;
+  const stageCount = bundle?.stage_approval_plan?.stages?.length ?? 0;
+  const targetContractCount = bundle?.stage_approval_plan?.stages?.filter((stage) => stage.target_contract?.semantic_id).length ?? 0;
   return (
     <section className="script-review-section">
       <SectionTitle title="脚本包审批内容" meta={isOutlineRuntime ? "Browser Agent 受约束路线图" : bundle?.schema_version ?? "待生成"} />
+      {bundle ? (
+        <div className="script-review-summary">
+          <span>runtime: {bundle.script_manifest.runtime}</span>
+          <span>bundle: {formatBytes(bundleBytes)}</span>
+          <span>target contract: {targetContractCount}/{stageCount}</span>
+          <span>{bundle.browser_agent_contract ? "Browser Agent 合同已绑定" : "缺少 Browser Agent 合同"}</span>
+        </div>
+      ) : null}
       <div className="script-review-grid">
         <ReviewPanel title="思路文档" meta="默认审批视图" content={markdown} />
         {isOutlineRuntime ? (
           <>
             <ReviewPanel title="Stage JSON" meta={bundle?.stage_approval_plan?.schema_version ?? "未生成"} content={stagePlanJSON} />
             <ReviewPanel title="Browser Agent 大纲" meta={bundle?.script_outline?.runtime ?? "browser-agent-outline-v1"} content={outlineJSON} />
+            <ReviewPanel title="Browser Agent 合同" meta={bundle?.browser_agent_contract?.schema_version ?? "未生成"} content={agentContractJSON} />
             <ReviewPanel title="可修改规则" meta={bundle?.agent_prompt_policy?.schema_version ?? "未生成"} content={promptPolicyJSON} />
             <ReviewPanel title="证据链" meta={bundle?.project_understanding_dossier?.schema_version ?? "未生成"} content={dossierJSON} />
           </>
@@ -1363,6 +1376,19 @@ function ReviewPanel({ title, meta, content }: { title: string; meta: string; co
       <pre>{content}</pre>
     </div>
   );
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
 function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {

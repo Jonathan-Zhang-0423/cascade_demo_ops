@@ -131,6 +131,56 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 	}
 }
 
+func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "生成一套团队协作功能的产品演示执行包。",
+		TargetAudience:     "内部产品团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://cascadeai.cn")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	build, err := buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := build.Package.ExecutableScriptBundle
+	if bundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		t.Fatalf("expected outline runtime, got %s", bundle.ScriptManifest.Runtime)
+	}
+	if bundle.PlaywrightScript.InlineSource != "" {
+		t.Fatal("outline upload package must not include Playwright inline source")
+	}
+	if bundle.UnderstandingDossier != nil {
+		t.Fatal("outline upload package must not inline full project understanding dossier")
+	}
+	if bundle.PlanJSON.WorkflowGraph != nil {
+		t.Fatal("outline upload package must not duplicate workflow_graph inside plan_json")
+	}
+	if bundle.BrowserAgentContract == nil || bundle.Reproducibility.BrowserAgentContractHashSHA256 == "" {
+		t.Fatalf("outline upload package missing browser agent contract or hash: %+v", bundle.Reproducibility)
+	}
+	for _, step := range bundle.PlanJSON.Steps {
+		if step.TargetContract == nil || step.TargetContract.SemanticID == "" {
+			t.Fatalf("step missing target contract: %+v", step)
+		}
+		if browserAgentStepNeedsValidation(step) && !browserAgentStepHasRequiredValidation(step) {
+			t.Fatalf("step missing required browser-agent validation: %+v", step)
+		}
+	}
+	payload, err := json.Marshal(build.Package)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) > 512*1024 {
+		t.Fatalf("outline upload package too large: %d bytes", len(payload))
+	}
+}
+
 func TestPackageLeakageDetectionAllowsSafetyPolicyAPIKeyWords(t *testing.T) {
 	pkg := &model.ClientExecutionPackage{
 		PackageID:     "pkg_leakage_policy_words",

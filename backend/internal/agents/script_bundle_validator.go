@@ -153,6 +153,26 @@ func validateBrowserAgentOutlineContract(bundle *model.ExecutableRecordingScript
 			findings = append(findings, scriptValidationFinding("prompt_policy_editable_missing", model.FindingSeverityBlocking, "agent_prompt_policy 缺少可修改字段声明。"))
 		}
 	}
+	if bundle.BrowserAgentContract == nil {
+		findings = append(findings, scriptValidationFinding("browser_agent_contract_missing", model.FindingSeverityBlocking, "browser agent 大纲模式缺少 browser_agent_contract。"))
+	} else {
+		if bundle.BrowserAgentContract.SchemaVersion != model.BrowserAgentContractSchemaVersion {
+			findings = append(findings, scriptValidationFinding("browser_agent_contract_schema_mismatch", model.FindingSeverityBlocking, "browser_agent_contract schema_version 不正确。"))
+		}
+		if len(bundle.BrowserAgentContract.RepairPolicy.EditableFields) == 0 || len(bundle.BrowserAgentContract.RepairPolicy.ImmutableFields) == 0 {
+			findings = append(findings, scriptValidationFinding("browser_agent_contract_repair_policy_missing", model.FindingSeverityBlocking, "browser_agent_contract 缺少字段级 repair policy。"))
+		}
+	}
+	if bundle.PlanJSON != nil {
+		for _, step := range bundle.PlanJSON.Steps {
+			if stepRequiresBrowserAgentValidation(step) && !scriptStepHasRequiredBrowserAgentValidation(step) {
+				findings = append(findings, scriptValidationFinding("step_required_validation_missing_"+step.NodeID, model.FindingSeverityBlocking, "关键业务步骤缺少 required validation："+step.NodeID))
+			}
+			if stepRequiresBrowserAgentValidation(step) && (step.TargetContract == nil || strings.TrimSpace(step.TargetContract.SemanticID) == "") {
+				findings = append(findings, scriptValidationFinding("step_target_contract_missing_"+step.NodeID, model.FindingSeverityBlocking, "关键业务步骤缺少 target_contract："+step.NodeID))
+			}
+		}
+	}
 	if bundle.StageApprovalPlan != nil {
 		if hash, err := model.DigestCanonicalJSON(bundle.StageApprovalPlan); err != nil {
 			findings = append(findings, scriptValidationFinding("stage_plan_hash_error", model.FindingSeverityBlocking, err.Error()))
@@ -174,6 +194,13 @@ func validateBrowserAgentOutlineContract(bundle *model.ExecutableRecordingScript
 			findings = append(findings, scriptValidationFinding("prompt_policy_hash_mismatch", model.FindingSeverityBlocking, "agent_prompt_policy hash 与当前内容不一致。"))
 		}
 	}
+	if bundle.BrowserAgentContract != nil {
+		if hash, err := model.DigestCanonicalJSON(bundle.BrowserAgentContract); err != nil {
+			findings = append(findings, scriptValidationFinding("browser_agent_contract_hash_error", model.FindingSeverityBlocking, err.Error()))
+		} else if bundle.Reproducibility.BrowserAgentContractHashSHA256 != "" && bundle.Reproducibility.BrowserAgentContractHashSHA256 != hash {
+			findings = append(findings, scriptValidationFinding("browser_agent_contract_hash_mismatch", model.FindingSeverityBlocking, "browser_agent_contract hash 与当前内容不一致。"))
+		}
+	}
 	if bundle.UnderstandingDossier != nil {
 		if hash, err := model.DigestCanonicalJSON(bundle.UnderstandingDossier); err != nil {
 			findings = append(findings, scriptValidationFinding("dossier_hash_error", model.FindingSeverityBlocking, err.Error()))
@@ -192,6 +219,28 @@ func outlineStageApprovalHasEvidence(stage model.StageApprovalStage) bool {
 		len(stage.DataModelRefs) > 0 ||
 		len(stage.Interaction.EvidenceRefs) > 0 ||
 		len(stage.Interaction.Target.EvidenceRefs) > 0
+}
+
+func stepRequiresBrowserAgentValidation(step model.ScriptStep) bool {
+	switch step.Action.Type {
+	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
+		return true
+	default:
+		return false
+	}
+}
+
+func scriptStepHasRequiredBrowserAgentValidation(step model.ScriptStep) bool {
+	for _, validation := range step.Validations {
+		if !validation.Required {
+			continue
+		}
+		switch validation.Kind {
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+			return true
+		}
+	}
+	return false
 }
 
 func validateForbiddenScriptTokens(source string, policy model.ExecutableScriptSecurityPolicy) []model.AgentFinding {

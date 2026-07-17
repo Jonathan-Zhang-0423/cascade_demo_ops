@@ -22,15 +22,18 @@ import (
 type CodeReaderAgent struct {
 	MaxFiles     int
 	MaxFileBytes int64
+	Budget       model.CodeReadBudget
 	llm          llm.Client
 }
 
 func NewCodeReaderAgent() *CodeReaderAgent {
-	return &CodeReaderAgent{MaxFiles: 600, MaxFileBytes: 256 * 1024}
+	budget := defaultCodeReadBudget()
+	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, Budget: budget}
 }
 
 func NewCodeReaderAgentWithLLM(client llm.Client) *CodeReaderAgent {
-	return &CodeReaderAgent{MaxFiles: 600, MaxFileBytes: 256 * 1024, llm: client}
+	budget := defaultCodeReadBudget()
+	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, Budget: budget, llm: client}
 }
 
 func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) ([]model.CodeUnderstandingSnapshot, error) {
@@ -234,6 +237,8 @@ func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapsh
 		return nil
 	}
 	root = filepath.Clean(root)
+	budget := a.effectiveBudget()
+	snapshot.ReadBudget = &budget
 	candidates := []codeCandidateFile{}
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -281,9 +286,7 @@ func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapsh
 		}
 		return candidates[i].score > candidates[j].score
 	})
-	if len(candidates) > a.MaxFiles {
-		candidates = candidates[:a.MaxFiles]
-	}
+	candidates = selectCodeCandidatesForIntent(candidates, budget, project, brief)
 	pathDigests := make([]model.PathDigest, 0)
 	contentDigests := make([]string, 0)
 	fileCount := 0
@@ -331,6 +334,141 @@ func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapsh
 	snapshot.SourceDigestSHA256 = hashString(strings.Join(contentDigests, "\n"))
 	normalizeCodeSnapshotForIntent(snapshot, project, brief)
 	return nil
+}
+
+func defaultCodeReadBudget() model.CodeReadBudget {
+	return model.CodeReadBudget{
+		Mode:               "intent_driven_progressive",
+		RepoIndexFileLimit: 40,
+		DrilldownRounds:    4,
+		FilesPerRound:      10,
+		TotalFileLimit:     80,
+		MaxFileBytes:       160 * 1024,
+	}
+}
+
+func (a *CodeReaderAgent) effectiveBudget() model.CodeReadBudget {
+	budget := a.Budget
+	defaults := defaultCodeReadBudget()
+	if strings.TrimSpace(budget.Mode) == "" {
+		budget.Mode = defaults.Mode
+	}
+	if budget.RepoIndexFileLimit <= 0 {
+		budget.RepoIndexFileLimit = defaults.RepoIndexFileLimit
+	}
+	if budget.DrilldownRounds <= 0 {
+		budget.DrilldownRounds = defaults.DrilldownRounds
+	}
+	if budget.FilesPerRound <= 0 {
+		budget.FilesPerRound = defaults.FilesPerRound
+	}
+	if budget.TotalFileLimit <= 0 {
+		budget.TotalFileLimit = firstPositiveInt(a.MaxFiles, defaults.TotalFileLimit)
+	}
+	if budget.TotalFileLimit > defaults.TotalFileLimit {
+		budget.TotalFileLimit = defaults.TotalFileLimit
+	}
+	if budget.MaxFileBytes <= 0 {
+		budget.MaxFileBytes = firstPositiveInt64(a.MaxFileBytes, defaults.MaxFileBytes)
+	}
+	a.MaxFileBytes = budget.MaxFileBytes
+	return budget
+}
+
+func selectCodeCandidatesForIntent(candidates []codeCandidateFile, budget model.CodeReadBudget, project *model.ProjectContext, brief *model.RequirementBrief) []codeCandidateFile {
+	if len(candidates) == 0 {
+		return nil
+	}
+	selected := []codeCandidateFile{}
+	selectedKeys := map[string]bool{}
+	add := func(candidate codeCandidateFile) bool {
+		if len(selected) >= budget.TotalFileLimit || selectedKeys[candidate.rel] {
+			return false
+		}
+		selectedKeys[candidate.rel] = true
+		selected = append(selected, candidate)
+		return true
+	}
+	for _, candidate := range candidates {
+		if len(selected) >= budget.RepoIndexFileLimit || len(selected) >= budget.TotalFileLimit {
+			break
+		}
+		if isRepoIndexCandidate(candidate.rel, candidate.name) {
+			add(candidate)
+		}
+	}
+	keywords := codeIntentKeywords(project, brief)
+	for round := 0; round < budget.DrilldownRounds && len(selected) < budget.TotalFileLimit; round++ {
+		addedThisRound := 0
+		for _, candidate := range candidates {
+			if addedThisRound >= budget.FilesPerRound || len(selected) >= budget.TotalFileLimit {
+				break
+			}
+			if selectedKeys[candidate.rel] || !candidateRelevantForIntentRound(candidate, keywords, round) {
+				continue
+			}
+			if add(candidate) {
+				addedThisRound++
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		if len(selected) >= budget.TotalFileLimit {
+			break
+		}
+		if selectedKeys[candidate.rel] || candidate.score < 70 {
+			continue
+		}
+		add(candidate)
+	}
+	return selected
+}
+
+func isRepoIndexCandidate(rel string, name string) bool {
+	lower := strings.ToLower(filepath.ToSlash(rel))
+	if strings.EqualFold(name, "package.json") || strings.EqualFold(name, "go.mod") {
+		return true
+	}
+	return containsAny(lower,
+		"/app.", "/main.", "/index.", "/router", "/routes/", "/pages/",
+		"vite.config", "next.config", "tailwind.config", "wails.json",
+	)
+}
+
+func candidateRelevantForIntentRound(candidate codeCandidateFile, keywords []string, round int) bool {
+	lower := strings.ToLower(filepath.ToSlash(candidate.rel))
+	name := strings.ToLower(candidate.name)
+	switch round {
+	case 0:
+		return keywordMatchScore(keywords, lower, name) > 0
+	case 1:
+		return containsAny(lower, "/features/", "/components/", "/pages/", "/routes/", "/app/") &&
+			(keywordMatchScore(keywords, lower, name) > 0 || candidate.score >= 105)
+	case 2:
+		return containsAny(lower, "/api/", "/server/", "/backend/", "/internal/", "/cmd/", "/pkg/") &&
+			(keywordMatchScore(keywords, lower, name) > 0 || candidate.score >= 90)
+	default:
+		return containsAny(lower, "style", ".css", ".scss", ".sass", ".less", "theme", "tailwind") &&
+			(keywordMatchScore(keywords, lower, name) > 0 || candidate.score >= 70)
+	}
+}
+
+func firstPositiveInt(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func firstPositiveInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func shouldSkipDir(name string) bool {

@@ -77,6 +77,52 @@ func TestCodeReaderScopesEvidenceToIntentAndFiltersNoise(t *testing.T) {
 	}
 }
 
+func TestCodeReaderUsesIntentDrivenBudget(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/pages/projects/NewProject.tsx", `
+		export function NewProjectPage() {
+			const route = "/projects/new"
+			return <button data-testid="new-project">新建项目</button>
+		}
+	`)
+	for i := 0; i < 180; i++ {
+		writeFixtureFile(t, root, filepath.ToSlash(filepath.Join("src", "unrelated", "File"+string(rune('a'+(i%26)))+string(rune('a'+((i/26)%26)))+".tsx")), `
+			export function Filler() { return <div data-testid="profile-avatar">avatar</div> }
+		`)
+	}
+	project := &model.ProjectContext{
+		ID:                 "project_budget",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示新建项目，俄罗斯方块，构建模式",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_budget",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_budget",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"新建项目", "构建模式"}}
+
+	snapshots, err := NewCodeReaderAgent().ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	if snapshot.ReadBudget == nil || snapshot.ReadBudget.TotalFileLimit != 80 {
+		t.Fatalf("expected default intent-driven read budget, got %+v", snapshot.ReadBudget)
+	}
+	if snapshot.FileCount > 80 {
+		t.Fatalf("CodeReader should not read more than budgeted files, read %d", snapshot.FileCount)
+	}
+	if !routeInsightContains(snapshot.Routes, "/projects/new") {
+		t.Fatalf("budgeted read dropped relevant route: %+v", snapshot.Routes)
+	}
+	if selectorInsightContains(snapshot.Selectors, "[data-testid='profile-avatar']") {
+		t.Fatalf("budgeted read should not keep unrelated chrome selectors: %+v", snapshot.Selectors)
+	}
+}
+
 func TestVerifierFallsBackToRuntimeAdaptiveWhenScanFindsNoBusinessAction(t *testing.T) {
 	project := graphQualityProject()
 	project.ProductDescription = "演示登录（10s），新建项目（10s，俄罗斯方块，构建模式），agent实际构建演示（60s等待）"
