@@ -12,6 +12,10 @@ export default defineConfig({
         target: "http://127.0.0.1:4317",
         changeOrigin: true,
       },
+      "/v1/editor": {
+        target: "http://127.0.0.1:4317",
+        changeOrigin: true,
+      },
     },
   },
   build: {

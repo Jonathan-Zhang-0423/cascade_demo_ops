@@ -88,6 +88,7 @@ export interface RenderRequest {
   artifact_manifest_path?: string;
   recording_result_package?: RecordingResultPackage;
   recording_result_package_path?: string;
+  asset_timeline_catalog?: AssetTimelineCatalog;
   edit_plan?: DemoEditPlan;
   render_profile?: RenderProfile;
 }
@@ -345,6 +346,12 @@ export interface DemoEditPlan {
     pacing?: string;
     transition_style?: string;
   };
+  audio?: {
+    mode: "source" | "mute";
+    volume_percent: number;
+    split_points_ms?: number[];
+    segment_settings?: Array<{ start_ms: number; end_ms: number; mode: "source" | "mute"; volume_percent: number }>;
+  };
 }
 
 interface DemoEditShot {
@@ -401,6 +408,8 @@ interface CompositorResult {
   ffmpeg_available?: boolean;
   quality_status?: "ok" | "degraded";
   video_codec?: string;
+  audio_codec?: string;
+  audio_mode?: "source" | "mute";
   source_artifact_id?: string;
   source_uri?: string;
   output_container?: string;
@@ -438,7 +447,7 @@ interface CaptionCue {
 interface MediaNormalizationTarget {
   container: "mp4";
   video_codec: "h264";
-  audio_codec: "aac_silent";
+  audio_codec: "aac";
   width: number;
   height: number;
   fps: number;
@@ -569,7 +578,7 @@ interface RequirementFinding {
 const MEDIA_NORMALIZATION_TARGET: MediaNormalizationTarget = {
   container: "mp4",
   video_codec: "h264",
-  audio_codec: "aac_silent",
+  audio_codec: "aac",
   width: 1920,
   height: 1080,
   fps: 30,
@@ -581,7 +590,7 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
   await mkdir(outputDir, { recursive: true });
 
   const loaded = await loadRenderInputs(request);
-  const catalog = await buildAssetTimelineCatalog(request, loaded);
+  const catalog = request.asset_timeline_catalog || (await buildAssetTimelineCatalog(request, loaded));
   const editPlan = request.edit_plan ? normalizeEditPlan(request.edit_plan, catalog) : defaultEditPlan(catalog, request.duration_sec);
   const validationReport = validateDemoEditPlan(editPlan, catalog);
 
@@ -593,6 +602,12 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
   const requestedFormats = requestedFinalVideoFormats(request.graph, request.recording_run_spec);
   const targetContainer = request.render_profile?.format || preferredFinalVideoContainer(requestedFormats);
   const compositor = await composeFinalVideo(outputDir, targetDurationSec, catalog, editPlan, targetContainer, request.render_profile);
+  if (request.render_profile && compositor.status !== "rendered") {
+    throw new Error(`editor compositor did not render the edit plan: ${compositor.fallback_reason || compositor.method}`);
+  }
+  if (request.render_profile && compositor.method !== "ffmpeg_trim_concat") {
+    throw new Error(`editor compositor refused degraded output: ${compositor.fallback_reason || compositor.method}`);
+  }
   const mediaNormalization =
     request.render_profile?.mode === "preview"
       ? await skippedPreviewNormalization(outputDir, request.render_profile)
@@ -791,6 +806,7 @@ function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): D
       pacing: "clear_and_direct",
       transition_style: "simple_cut",
     },
+    audio: { mode: "source", volume_percent: 100 },
   };
 }
 
@@ -843,6 +859,16 @@ function normalizeEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog): D
     script_order_policy: plan.script_order_policy || "preserve_required_step_order",
     locked_fields: plan.locked_fields || [...REQUIRED_LOCKED_FIELDS],
     model_editable_fields: plan.model_editable_fields || [...ALLOWED_MODEL_EDITABLE_FIELDS],
+    audio: plan.audio || { mode: "source", volume_percent: 100 },
+  };
+}
+
+function normalizeAudioPolicy(audio: DemoEditPlan["audio"]): NonNullable<DemoEditPlan["audio"]> {
+  return {
+    mode: audio?.mode ?? "source",
+    volume_percent: audio?.volume_percent ?? 100,
+    ...(audio?.split_points_ms?.length ? { split_points_ms: [...audio.split_points_ms] } : {}),
+    ...(audio?.segment_settings?.length ? { segment_settings: audio.segment_settings.map((segment) => ({ ...segment })) } : {}),
   };
 }
 
@@ -868,6 +894,13 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   if (plan.model_role !== DEMO_EDIT_MODEL_ROLE) {
     errors.push(finding("invalid_model_role", "model_role must be presentation_optimizer_only", "model_role"));
   }
+  if (plan.audio && plan.audio.mode !== "source" && plan.audio.mode !== "mute") {
+    errors.push(finding("invalid_audio_mode", "audio.mode must be source or mute", "audio.mode"));
+  }
+  if (plan.audio && (!Number.isFinite(plan.audio.volume_percent) || plan.audio.volume_percent < 0 || plan.audio.volume_percent > 200)) {
+    errors.push(finding("invalid_audio_volume", "audio.volume_percent must be between 0 and 200", "audio.volume_percent"));
+  }
+  validateAudioSplitPoints(plan, errors);
   validateCollaborationBoundary(plan, errors);
   if (!Array.isArray(plan.shots) || plan.shots.length === 0) {
     errors.push(finding("missing_shots", "DemoEditPlan must contain at least one shot", "shots"));
@@ -1048,7 +1081,8 @@ async function composeFinalVideo(
     return result;
   }
 
-  const composed = await composeWithFFmpeg(ffmpegPath, outputDir, videoPath, shotPlan, extension, renderProfile);
+  const audio = normalizeAudioPolicy(editPlan.audio);
+  const composed = await composeWithFFmpeg(ffmpegPath, outputDir, videoPath, shotPlan, extension, renderProfile, audio);
   if (!composed.rendered) {
     const fallbackVideoPath = path.join(outputDir, `demo_${targetDurationSec}s${sourceExtension}`);
     await copyFile(primaryShot.source_path as string, fallbackVideoPath);
@@ -1086,6 +1120,8 @@ async function composeFinalVideo(
     note: "Rendered a deterministic demo video by trimming and concatenating existing source browser recording segments. No image or video generation was used.",
   };
   if (composed.video_codec) result.video_codec = composed.video_codec;
+  if (composed.audio_codec) result.audio_codec = composed.audio_codec;
+  result.audio_mode = audio.mode;
   if (primaryShot.source_uri) result.source_uri = primaryShot.source_uri;
   return result;
 }
@@ -1672,6 +1708,44 @@ function requestedFinalVideoFormats(graph: DemoWorkflowGraph | undefined, runSpe
   return [...new Set(formats)];
 }
 
+function validateAudioSplitPoints(plan: DemoEditPlan, errors: ValidationFinding[]): void {
+  const durationMS = plan.shots.reduce((total, shot) => total + (shot.source_time_range_ms ? Math.max(0, shot.source_time_range_ms[1] - shot.source_time_range_ms[0]) : 0), 0);
+  if (!plan.audio) return;
+  let previous = 0;
+  (plan.audio.split_points_ms ?? []).forEach((point, index) => {
+    const pathValue = `audio.split_points_ms[${index}]`;
+    if (!Number.isFinite(point) || !Number.isInteger(point)) {
+      errors.push(finding("invalid_audio_split_point", "audio split points must be integer milliseconds", pathValue));
+    } else if (point <= 0 || point >= durationMS) {
+      errors.push(finding("audio_split_point_outside_timeline", `audio split point must be inside the ${durationMS}ms output timeline`, pathValue));
+    } else if (point <= previous) {
+      errors.push(finding("audio_split_points_not_ordered", "audio split points must be unique and strictly increasing", pathValue));
+    }
+    previous = point;
+  });
+  const boundaries = new Set([0, durationMS, ...(plan.audio.split_points_ms ?? [])]);
+  let previousEndMS = 0;
+  (plan.audio.segment_settings ?? []).forEach((segment, index) => {
+    const pathValue = `audio.segment_settings[${index}]`;
+    if (!Number.isInteger(segment.start_ms) || !Number.isInteger(segment.end_ms) || segment.start_ms < 0 || segment.end_ms <= segment.start_ms || segment.end_ms > durationMS) {
+      errors.push(finding("invalid_audio_segment_range", `audio segment must be an integer [start, end] range inside the ${durationMS}ms output timeline`, pathValue));
+    }
+    if (!boundaries.has(segment.start_ms) || !boundaries.has(segment.end_ms)) {
+      errors.push(finding("audio_segment_not_aligned", "audio segment settings must align with declared split points or timeline boundaries", pathValue));
+    }
+    if (index > 0 && segment.start_ms < previousEndMS) {
+      errors.push(finding("audio_segments_overlap", "audio segment settings must be ordered and non-overlapping", pathValue));
+    }
+    if (segment.mode !== "source" && segment.mode !== "mute") {
+      errors.push(finding("invalid_audio_segment_mode", "audio segment mode must be source or mute", `${pathValue}.mode`));
+    }
+    if (!Number.isFinite(segment.volume_percent) || segment.volume_percent < 0 || segment.volume_percent > 200) {
+      errors.push(finding("invalid_audio_segment_volume", "audio segment volume_percent must be between 0 and 200", `${pathValue}.volume_percent`));
+    }
+    previousEndMS = segment.end_ms;
+  });
+}
+
 export function validateEditPlan(request: { catalog: AssetTimelineCatalog; edit_plan: DemoEditPlan }): DemoEditPlanValidationReport {
   if (!request?.catalog || !request?.edit_plan) {
     throw new Error("catalog and edit_plan are required");
@@ -1826,18 +1900,20 @@ async function normalizeSourceReferenceVideo(
   }
 
   const referenceVideoPath = path.join(outputDir, "source_reference.mp4");
-  const transcodeResult = await runCommand(ffmpegPath, [
+  const sourceHasAudio = await hasAudioStream(ffmpegPath, sourcePath);
+  const transcodeArgs = [
     "-y",
     "-i",
     sourcePath,
-    "-f",
-    "lavfi",
-    "-i",
-    "anullsrc=channel_layout=stereo:sample_rate=48000",
+  ];
+  if (!sourceHasAudio) {
+    transcodeArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
+  }
+  transcodeArgs.push(
     "-map",
     "0:v:0",
     "-map",
-    "1:a:0",
+    sourceHasAudio ? "0:a:0" : "1:a:0",
     "-vf",
     `scale=${MEDIA_NORMALIZATION_TARGET.width}:${MEDIA_NORMALIZATION_TARGET.height}:force_original_aspect_ratio=decrease,pad=${MEDIA_NORMALIZATION_TARGET.width}:${MEDIA_NORMALIZATION_TARGET.height}:(ow-iw)/2:(oh-ih)/2,fps=${MEDIA_NORMALIZATION_TARGET.fps},format=${MEDIA_NORMALIZATION_TARGET.pixel_format}`,
     "-c:v",
@@ -1851,7 +1927,8 @@ async function normalizeSourceReferenceVideo(
     "-movflags",
     "+faststart",
     referenceVideoPath,
-  ]);
+  );
+  const transcodeResult = await runCommand(ffmpegPath, transcodeArgs);
   if (transcodeResult.code !== 0) {
     report.status = "failed";
     report.error = compactProcessError("media_normalization_failed", transcodeResult);
@@ -2199,11 +2276,15 @@ async function composeWithFFmpeg(
   shots: CompositorShot[],
   extension: string,
   renderProfile?: RenderProfile,
-): Promise<{ rendered: boolean; error?: string; video_codec?: string }> {
+  audioPolicy: NonNullable<DemoEditPlan["audio"]> = { mode: "source", volume_percent: 100 },
+): Promise<{ rendered: boolean; error?: string; video_codec?: string; audio_codec?: string }> {
   const segmentsDir = path.join(outputDir, "segments");
   await mkdir(segmentsDir, { recursive: true });
   const segmentPaths: string[] = [];
   const codec = await preferredVideoCodec(ffmpegPath, extension, renderProfile);
+  const audioCodec = await preferredAudioCodec(ffmpegPath, extension);
+  const sourceAudio = new Map<string, boolean>();
+  let outputCursorMS = 0;
   for (const [index, shot] of shots.entries()) {
     if (!shot.source_path || !shot.source_time_range_ms) {
       continue;
@@ -2213,9 +2294,8 @@ async function composeWithFFmpeg(
     if (durationMS <= 0) {
       continue;
     }
-    const leadingOffsetMS = index === 0 && startMS === 0 ? Math.min(200, Math.max(0, durationMS - 100)) : 0;
-    const segmentStartMS = startMS + leadingOffsetMS;
-    const segmentDurationMS = durationMS - leadingOffsetMS;
+    const segmentStartMS = startMS;
+    const segmentDurationMS = durationMS;
     if (segmentDurationMS <= 0) {
       continue;
     }
@@ -2233,25 +2313,40 @@ async function composeWithFFmpeg(
       await writeFile(subtitlePath, assSubtitleForCaptions(captionCues), "utf8");
       videoFilters.push(`subtitles='${ffmpegFilterPath(subtitlePath)}'`);
     }
-    const ffmpegArgs = [
-      "-y",
-      "-i",
-      shot.source_path,
+    let sourceHasAudio = sourceAudio.get(shot.source_path);
+    if (sourceHasAudio === undefined) {
+      sourceHasAudio = await hasAudioStream(ffmpegPath, shot.source_path);
+      sourceAudio.set(shot.source_path, sourceHasAudio);
+    }
+    const volumeExpression = audioVolumeExpression(audioPolicy, outputCursorMS, segmentDurationMS, segmentStartMS);
+    const useSourceAudio = volumeExpression.usesSource && sourceHasAudio;
+    const ffmpegArgs = ["-y", "-i", shot.source_path];
+    if (!useSourceAudio) {
+      ffmpegArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
+    }
+    ffmpegArgs.push(
       "-ss",
       secondsArg(segmentStartMS),
       "-t",
       secondsArg(segmentDurationMS),
       "-map",
       "0:v:0",
-    ];
+      "-map",
+      useSourceAudio ? "0:a:0" : "1:a:0",
+    );
     if (videoFilters.length > 0) {
       ffmpegArgs.push("-vf", videoFilters.join(","));
+    }
+    if (useSourceAudio) {
+      ffmpegArgs.push("-af", `asetpts=PTS-STARTPTS,volume='${volumeExpression.expression}':eval=frame,aresample=48000`);
     }
     ffmpegArgs.push(
       "-c:v",
       codec.name,
       ...codec.args,
-      "-an",
+      "-c:a",
+      audioCodec.name,
+      ...audioCodec.args,
       "-avoid_negative_ts",
       "make_zero",
       segmentPath,
@@ -2261,6 +2356,7 @@ async function composeWithFFmpeg(
       return { rendered: false, error: compactProcessError("ffmpeg_segment_failed", result) };
     }
     segmentPaths.push(segmentPath);
+    outputCursorMS += segmentDurationMS;
   }
   if (segmentPaths.length === 0) {
     return { rendered: false, error: "no_segments_created" };
@@ -2271,15 +2367,50 @@ async function composeWithFFmpeg(
       return { rendered: false, error: "missing_single_segment" };
     }
     await copyFile(onlySegmentPath, videoPath);
-    return { rendered: true, video_codec: codec.name };
+    return { rendered: true, video_codec: codec.name, audio_codec: audioCodec.name };
   }
   const concatListPath = path.join(segmentsDir, "concat.txt");
   await writeFile(concatListPath, segmentPaths.map((segmentPath) => `file '${ffmpegConcatPath(segmentPath)}'`).join("\n") + "\n", "utf8");
-  const concatResult = await runCommand(ffmpegPath, ["-y", "-f", "concat", "-safe", "0", "-i", concatListPath, "-c:v", codec.name, ...codec.args, "-an", videoPath]);
+  const concatResult = await runCommand(ffmpegPath, [
+    "-y", "-f", "concat", "-safe", "0", "-i", concatListPath,
+    "-map", "0:v:0", "-map", "0:a:0", "-c:v", codec.name, ...codec.args,
+    "-c:a", audioCodec.name, ...audioCodec.args, videoPath,
+  ]);
   if (concatResult.code !== 0) {
     return { rendered: false, error: compactProcessError("ffmpeg_concat_failed", concatResult) };
   }
-  return { rendered: true, video_codec: codec.name };
+  return { rendered: true, video_codec: codec.name, audio_codec: audioCodec.name };
+}
+
+export function audioVolumeExpression(audioPolicy: NonNullable<DemoEditPlan["audio"]>, outputStartMS: number, durationMS: number, sourceTimestampOffsetMS = 0): { expression: string; usesSource: boolean } {
+  const outputEndMS = outputStartMS + durationMS;
+  const baseVolume = audioPolicy.mode === "mute" ? 0 : audioPolicy.volume_percent / 100;
+  const overlapping = (audioPolicy.segment_settings ?? []).filter((segment) => segment.end_ms > outputStartMS && segment.start_ms < outputEndMS);
+  let expression = baseVolume.toFixed(2);
+  let usesSource = baseVolume > 0;
+  for (const segment of [...overlapping].reverse()) {
+    const startSec = (sourceTimestampOffsetMS + Math.max(0, segment.start_ms - outputStartMS)) / 1000;
+    const endSec = (sourceTimestampOffsetMS + Math.min(durationMS, segment.end_ms - outputStartMS)) / 1000;
+    const volume = segment.mode === "mute" ? 0 : segment.volume_percent / 100;
+    if (volume > 0) usesSource = true;
+    expression = `if(between(t,${startSec.toFixed(3)},${endSec.toFixed(3)}),${volume.toFixed(2)},${expression})`;
+  }
+  return { expression, usesSource };
+}
+
+async function preferredAudioCodec(ffmpegPath: string, extension: string): Promise<VideoCodecConfig> {
+  if (extension.toLowerCase() === ".webm") {
+    const encoderList = await runCommand(ffmpegPath, ["-hide_banner", "-encoders"]);
+    const encoders = `${encoderList.stdout}\n${encoderList.stderr}`;
+    if (encoders.includes("libopus")) return { name: "libopus", args: ["-b:a", "128k", "-ar", "48000", "-ac", "2"] };
+    return { name: "libvorbis", args: ["-q:a", "4", "-ar", "48000", "-ac", "2"] };
+  }
+  return { name: "aac", args: ["-b:a", "128k", "-ar", "48000", "-ac", "2"] };
+}
+
+async function hasAudioStream(ffmpegPath: string, filePath: string): Promise<boolean> {
+  const result = await runCommand(ffmpegPath, ["-hide_banner", "-i", filePath]);
+  return /Stream\s+#\S+.*Audio:/i.test(`${result.stderr}\n${result.stdout}`);
 }
 
 async function preferredVideoCodec(ffmpegPath: string, extension: string, renderProfile?: RenderProfile): Promise<VideoCodecConfig> {

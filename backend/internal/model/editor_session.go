@@ -26,6 +26,7 @@ const (
 	EditorRenderStatusRunning    EditorRenderStatus = "running"
 	EditorRenderStatusReady      EditorRenderStatus = "ready"
 	EditorRenderStatusFailed     EditorRenderStatus = "failed"
+	EditorRenderStatusCancelled  EditorRenderStatus = "cancelled"
 )
 
 type EditorRenderProfile struct {
@@ -40,6 +41,10 @@ type EditorRenderProfile struct {
 
 type EditorRenderState struct {
 	Status             EditorRenderStatus `json:"status"`
+	JobID              string             `json:"job_id,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
+	Progress           int                `json:"progress,omitempty"`
+	CancelRequested    bool               `json:"cancel_requested,omitempty"`
 	Revision           int                `json:"revision,omitempty"`
 	StartedAt          time.Time          `json:"started_at,omitempty"`
 	CompletedAt        time.Time          `json:"completed_at,omitempty"`
@@ -85,9 +90,25 @@ type EditorCreateSessionRequest struct {
 	SourcePath string `json:"source_path,omitempty"`
 }
 
+type EditorCreateFromResultPackageRequest struct {
+	Name                string                  `json:"name,omitempty"`
+	ResultPackagePath   string                  `json:"result_package_path,omitempty"`
+	ResultPackage       *RecordingResultPackage `json:"result_package,omitempty"`
+	RecordingArtifactID string                  `json:"recording_artifact_id,omitempty"`
+	RecordingPath       string                  `json:"recording_path,omitempty"`
+	ArtifactPaths       map[string]string       `json:"artifact_paths,omitempty"`
+}
+
 type EditorImportAssetRequest struct {
 	Path  string `json:"path"`
 	Label string `json:"label,omitempty"`
+}
+
+type EditorAudioAnalysisRequest struct {
+	AssetID            string  `json:"asset_id"`
+	BucketMS           int     `json:"bucket_ms,omitempty"`
+	SilenceThresholdDB float64 `json:"silence_threshold_db,omitempty"`
+	MinSilenceMS       int     `json:"min_silence_ms,omitempty"`
 }
 
 type EditorSavePlanRequest struct {

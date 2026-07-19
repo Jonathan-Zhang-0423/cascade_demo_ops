@@ -31,10 +31,19 @@ type Service struct {
 	runningTasks map[string]context.CancelFunc
 	editorMu     sync.Mutex
 	editorWorker editorWorker
+	editorJobsMu sync.Mutex
+	editorJobs   map[string]editorRenderTask
+}
+
+type editorRenderTask struct {
+	JobID  string
+	Kind   string
+	Cancel context.CancelFunc
 }
 
 type editorWorker interface {
 	ProbeMedia(context.Context, executor.MediaProbeRequest) (executor.MediaProbeResult, error)
+	AnalyzeAudio(context.Context, executor.AudioAnalysisRequest) (executor.AudioAnalysisResult, error)
 	ValidateEditPlan(context.Context, executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error)
 	Render(context.Context, executor.RenderRequest) (executor.RenderResult, error)
 }
@@ -75,6 +84,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		layout:       storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
 		exchange:     newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
 		runningTasks: map[string]context.CancelFunc{},
+		editorJobs:   map[string]editorRenderTask{},
 	}
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath())
 	return service, nil

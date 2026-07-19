@@ -362,10 +362,10 @@ export function App() {
         </div>
       </aside>
 
-      <main className="workspace">
-        <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage || isRunningProduct} onBuildPackage={runProductLifecycle} />
+      <main className={activeNav === "editor" ? "workspace editor-workspace-mode" : "workspace"}>
+        {activeNav !== "editor" ? <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage || isRunningProduct} onBuildPackage={runProductLifecycle} /> : null}
         <div className={activeNav === "editor" ? "workspace-grid editor-wide" : "workspace-grid"}>
-          <section className="main-panel" aria-label="项目工作台">
+          <section className={activeNav === "editor" ? "main-panel editor-main-panel" : "main-panel"} aria-label="项目工作台">
             {activeNav === "new_demo" ? <ScenarioPicker activeID={workspace.scenarioID} onCreate={createScenario} /> : null}
             {activeNav === "projects" ? (
               <ProjectFlow

@@ -55,6 +55,12 @@ export async function probeMediaFile(request: MediaProbeRequest): Promise<MediaP
   const ffprobePath = process.env.CASCADE_FFPROBE_PATH || ffprobePathFor(process.env.CASCADE_FFMPEG_PATH || "ffmpeg");
   const availability = await runCommand(ffprobePath, ["-version"]);
   if (availability.code !== 0) {
+    const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
+    const ffmpegAvailability = await runCommand(ffmpegPath, ["-version"]);
+    if (ffmpegAvailability.code === 0) {
+      const fallback = await runCommand(ffmpegPath, ["-hide_banner", "-i", inputPath]);
+      applyFFmpegProbeFallback(result, fallback.stderr || fallback.stdout);
+    }
     return result;
   }
   result.ffprobe_available = true;
@@ -96,6 +102,34 @@ export async function probeMediaFile(request: MediaProbeRequest): Promise<MediaP
   const audioCodec = stringValue(audio?.codec_name);
   if (audioCodec) result.audio_codec = audioCodec;
   return result;
+}
+
+export function applyFFmpegProbeFallback(result: MediaProbeResult, output: string): void {
+  const duration = output.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
+  if (duration) {
+    const hours = Number(duration[1]);
+    const minutes = Number(duration[2]);
+    const seconds = Number(duration[3]);
+    if ([hours, minutes, seconds].every(Number.isFinite)) {
+      result.duration_ms = Math.max(0, Math.round((hours * 3600 + minutes * 60 + seconds) * 1000));
+    }
+  }
+  const videoLine = output.split(/\r?\n/).find((line) => /Video:/i.test(line));
+  if (videoLine) {
+    const codec = videoLine.match(/Video:\s*([^,\s]+)/i)?.[1];
+    const resolution = videoLine.match(/(?:^|[\s,])(\d{2,5})x(\d{2,5})(?:[\s,]|$)/);
+    const fps = videoLine.match(/(\d+(?:\.\d+)?)\s*fps/i)?.[1];
+    const pixelFormat = videoLine.match(/Video:[^,]+,\s*([^,\s]+)/i)?.[1];
+    if (codec) result.video_codec = codec;
+    if (resolution) {
+      result.width = Number(resolution[1]);
+      result.height = Number(resolution[2]);
+    }
+    if (fps && Number.isFinite(Number(fps))) result.fps = Number(fps);
+    if (pixelFormat && !/^\d+x\d+$/i.test(pixelFormat)) result.pixel_format = pixelFormat;
+  }
+  const audioCodec = output.match(/Audio:\s*([^,\s]+)/i)?.[1];
+  if (audioCodec) result.audio_codec = audioCodec;
 }
 
 function ffprobePathFor(ffmpegPath: string): string {

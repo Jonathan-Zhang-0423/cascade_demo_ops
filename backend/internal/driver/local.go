@@ -42,6 +42,12 @@ func (d *LocalDriver) ProbeMedia(ctx context.Context, request executor.MediaProb
 	return result, err
 }
 
+func (d *LocalDriver) AnalyzeAudio(ctx context.Context, request executor.AudioAnalysisRequest) (executor.AudioAnalysisResult, error) {
+	var result executor.AudioAnalysisResult
+	err := d.call(ctx, "analyze_audio", request, &result)
+	return result, err
+}
+
 func (d *LocalDriver) ValidateEditPlan(ctx context.Context, request executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error) {
 	var result model.DemoEditPlanValidationReport
 	err := d.call(ctx, "validate_edit_plan", request, &result)
@@ -52,7 +58,8 @@ func (d *LocalDriver) call(ctx context.Context, method string, params any, resul
 	if d.WorkerPath == "" {
 		return errors.New("node worker path is required")
 	}
-	cmd := exec.CommandContext(ctx, d.NodeBinary, d.WorkerPath)
+	cmd := exec.Command(d.NodeBinary, d.WorkerPath)
+	configureProcessTree(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -75,9 +82,19 @@ func (d *LocalDriver) call(ctx context.Context, method string, params any, resul
 	_ = stdin.Close()
 
 	var response rpcResponse
-	if err := json.NewDecoder(stdout).Decode(&response); err != nil {
+	decodeDone := make(chan error, 1)
+	go func() { decodeDone <- json.NewDecoder(stdout).Decode(&response) }()
+	select {
+	case <-ctx.Done():
+		_ = terminateProcessTree(cmd)
 		_ = cmd.Wait()
-		return fmt.Errorf("decode node worker response: %w; stderr=%s", err, stderr.String())
+		return ctx.Err()
+	case err := <-decodeDone:
+		if err != nil {
+			_ = terminateProcessTree(cmd)
+			_ = cmd.Wait()
+			return fmt.Errorf("decode node worker response: %w; stderr=%s", err, stderr.String())
+		}
 	}
 	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("node worker failed: %w; stderr=%s", err, stderr.String())
