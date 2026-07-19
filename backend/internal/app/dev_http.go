@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -66,6 +67,7 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
 	mux.HandleFunc("GET /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions", s.handleEditorSessions)
+	mux.HandleFunc("POST /v1/editor/sessions/from-result-package", s.handleEditorSessionFromResultPackage)
 	mux.HandleFunc("/v1/editor/sessions/", s.handleEditorSessionRoute)
 	s.registerExchangeBootstrapRoutes(mux)
 	s.registerDevExchangeRoutes(mux)
@@ -92,6 +94,16 @@ func (s *DevHTTPServer) handleEditorSessions(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+func (s *DevHTTPServer) handleEditorSessionFromResultPackage(w http.ResponseWriter, r *http.Request) {
+	var request model.EditorCreateFromResultPackageRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	session, err := s.service.CreateEditorSessionFromResultPackage(r.Context(), request)
+	writeBridgeValue(w, session, err)
+}
+
 func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.Request) {
 	sessionID, suffix, ok := splitEditorSessionRoute(r.URL.Path)
 	if !ok {
@@ -110,6 +122,8 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 		}
 		session, err := s.service.ImportEditorAsset(r.Context(), sessionID, request)
 		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/uploads":
+		s.handleEditorUpload(w, r, sessionID)
 	case r.Method == http.MethodPost && suffix == "/plan":
 		var request model.EditorSavePlanRequest
 		if err := decodeJSON(r, &request); err != nil {
@@ -121,16 +135,58 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 	case r.Method == http.MethodPost && suffix == "/validate":
 		report, err := s.service.ValidateEditorPlan(r.Context(), sessionID)
 		writeBridgeValue(w, report, err)
+	case r.Method == http.MethodPost && suffix == "/audio-analysis":
+		var request model.EditorAudioAnalysisRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		analysis, err := s.service.AnalyzeEditorAudio(r.Context(), sessionID, request)
+		writeBridgeValue(w, analysis, err)
 	case r.Method == http.MethodPost && suffix == "/preview":
-		session, err := s.service.RenderEditorSession(r.Context(), sessionID, true)
+		session, err := s.service.StartEditorRender(sessionID, true)
 		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && suffix == "/render":
-		session, err := s.service.RenderEditorSession(r.Context(), sessionID, false)
+		session, err := s.service.StartEditorRender(sessionID, false)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/preview/cancel":
+		session, err := s.service.CancelEditorRender(sessionID, "preview")
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/render/cancel":
+		session, err := s.service.CancelEditorRender(sessionID, "final")
 		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodGet && strings.HasPrefix(suffix, "/media/"):
 		handleEditorMedia(w, r, s.service, sessionID, strings.TrimPrefix(suffix, "/media/"))
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func (s *DevHTTPServer) handleEditorUpload(w http.ResponseWriter, r *http.Request, sessionID string) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxEditorUploadBytes+(1<<20))
+	reader, err := r.MultipartReader()
+	if err != nil {
+		writeBridgeValue(w, nil, errors.New("editor upload requires multipart/form-data"))
+		return
+	}
+	for {
+		part, nextErr := reader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			writeBridgeValue(w, nil, errors.New("editor upload file field is required"))
+			return
+		}
+		if nextErr != nil {
+			writeBridgeValue(w, nil, nextErr)
+			return
+		}
+		if part.FormName() != "file" || part.FileName() == "" {
+			_ = part.Close()
+			continue
+		}
+		session, importErr := s.service.ImportEditorUpload(r.Context(), sessionID, part.FileName(), part)
+		_ = part.Close()
+		writeBridgeValue(w, session, importErr)
+		return
 	}
 }
 

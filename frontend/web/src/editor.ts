@@ -26,6 +26,20 @@ export type EditorArtifact = {
   metadata?: Record<string, unknown>;
 };
 
+export type EditorTimelineStep = {
+  step_id: string;
+  order: number;
+  action: string;
+  status: string;
+  required: boolean;
+  start_ms: number;
+  end_ms: number;
+  duration_ms: number;
+  expected_outcome?: string;
+  observed_state?: string;
+  artifacts?: string[];
+};
+
 export type EditorOverlay = {
   type: string;
   text?: string;
@@ -57,14 +71,40 @@ export type EditorPlan = {
   target_duration_ms?: number;
   shots: EditorShot[];
   global_style?: Record<string, string>;
+  audio?: {
+    mode: "source" | "mute";
+    volume_percent: number;
+    split_points_ms?: number[];
+    segment_settings?: Array<{ start_ms: number; end_ms: number; mode: "source" | "mute"; volume_percent: number }>;
+  };
 };
 
 export type EditorRenderState = {
-  status: "not_started" | "running" | "ready" | "failed";
+  status: "not_started" | "running" | "ready" | "failed" | "cancelled";
+  job_id?: string;
+  phase?: string;
+  progress?: number;
+  cancel_requested?: boolean;
   revision?: number;
   video_path?: string;
   render_manifest_path?: string;
   error?: string;
+};
+
+export type EditorAudioAnalysis = {
+  schema_version: "demoops.audio_analysis.v1";
+  artifact_id: string;
+  path: string;
+  has_audio: boolean;
+  duration_ms: number;
+  bucket_ms: number;
+  sample_rate_hz: number;
+  peak_dbfs: number[];
+  rms_dbfs: number[];
+  silence_ranges_ms: Array<[number, number]>;
+  silence_threshold_db: number;
+  min_silence_ms: number;
+  ffmpeg_available: boolean;
 };
 
 export type EditorProviderCapability = {
@@ -89,7 +129,16 @@ export type EditorSession = {
   revision: number;
   asset_catalog: {
     catalog_id: string;
+    workflow_graph_id?: string;
+    graph_version?: number;
+    run_id?: string;
+    source?: {
+      recording_result_package_id?: string;
+      execution_trace_id?: string;
+      generated_at?: string;
+    };
     timeline: { duration_ms: number; recording_artifact_id?: string };
+    steps?: EditorTimelineStep[];
     artifacts: EditorArtifact[];
   };
   edit_plan: EditorPlan;
@@ -107,12 +156,16 @@ export type EditorClient = {
   mode: "local" | "mock";
   listSessions(): Promise<EditorClientResult<EditorSession[]>>;
   createSession(name: string, sourcePath?: string): Promise<EditorClientResult<EditorSession>>;
+  createSessionFromResultPackage(resultPackagePath: string, recordingPath?: string, name?: string): Promise<EditorClientResult<EditorSession>>;
   getSession(sessionID: string): Promise<EditorClientResult<EditorSession>>;
   importAsset(sessionID: string, sourcePath: string): Promise<EditorClientResult<EditorSession>>;
+  uploadAsset(sessionID: string, file: File): Promise<EditorClientResult<EditorSession>>;
   savePlan(sessionID: string, expectedRevision: number, plan: EditorPlan): Promise<EditorClientResult<EditorSession>>;
   validate(sessionID: string): Promise<EditorClientResult<EditorValidationReport>>;
+  analyzeAudio(sessionID: string, assetID: string, options?: { bucketMS?: number; silenceThresholdDB?: number; minSilenceMS?: number }): Promise<EditorClientResult<EditorAudioAnalysis>>;
   preview(sessionID: string): Promise<EditorClientResult<EditorSession>>;
   render(sessionID: string): Promise<EditorClientResult<EditorSession>>;
+  cancelRender(sessionID: string, kind: "preview" | "final"): Promise<EditorClientResult<EditorSession>>;
   mediaURL(sessionID: string, kind: "preview" | "final" | "asset", assetID?: string): string;
 };
 
@@ -129,7 +182,17 @@ export function createEditorClient(): EditorClient {
         ...init,
         headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
       });
-      const payload = (await response.json()) as BridgeEnvelope<T>;
+      return decodeEditorBridgeResponse<T>(response);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  const upload = async (sessionID: string, file: File): Promise<EditorClientResult<EditorSession>> => {
+    try {
+      const form = new FormData();
+      form.append("file", file, file.name);
+      const response = await fetch(`${baseURL}/v1/editor/sessions/${encodeURIComponent(sessionID)}/uploads`, { method: "POST", body: form });
+      const payload = (await response.json()) as BridgeEnvelope<EditorSession>;
       if (!response.ok || !payload.ok || payload.data === undefined) {
         return { ok: false, error: payload.error || `HTTP ${response.status}` };
       }
@@ -146,25 +209,60 @@ export function createEditorClient(): EditorClient {
         method: "POST",
         body: JSON.stringify({ name, ...(sourcePath ? { source_path: sourcePath } : {}) }),
       }),
+    createSessionFromResultPackage: (resultPackagePath, recordingPath, name) =>
+      request<EditorSession>("/v1/editor/sessions/from-result-package", {
+        method: "POST",
+        body: JSON.stringify({
+          result_package_path: resultPackagePath,
+          ...(recordingPath ? { recording_path: recordingPath } : {}),
+          ...(name ? { name } : {}),
+        }),
+      }),
     getSession: (sessionID) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}`),
     importAsset: (sessionID, sourcePath) =>
       request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/assets`, {
         method: "POST",
         body: JSON.stringify({ path: sourcePath }),
       }),
+    uploadAsset: upload,
     savePlan: (sessionID, expectedRevision, plan) =>
       request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/plan`, {
         method: "POST",
         body: JSON.stringify({ expected_revision: expectedRevision, edit_plan: plan }),
       }),
     validate: (sessionID) => request<EditorValidationReport>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/validate`, { method: "POST" }),
+    analyzeAudio: (sessionID, assetID, options) => request<EditorAudioAnalysis>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/audio-analysis`, {
+      method: "POST",
+      body: JSON.stringify({
+        asset_id: assetID,
+        bucket_ms: options?.bucketMS ?? 100,
+        silence_threshold_db: options?.silenceThresholdDB ?? -45,
+        min_silence_ms: options?.minSilenceMS ?? 500,
+      }),
+    }),
     preview: (sessionID) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/preview`, { method: "POST" }),
     render: (sessionID) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/render`, { method: "POST" }),
+    cancelRender: (sessionID, kind) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/${kind === "preview" ? "preview" : "render"}/cancel`, { method: "POST" }),
     mediaURL: (sessionID, kind, assetID) => {
       const ref = kind === "asset" ? `assets/${encodeURIComponent(assetID || "")}` : kind;
       return `${baseURL}/v1/editor/sessions/${encodeURIComponent(sessionID)}/media/${ref}`;
     },
   };
+}
+
+export async function decodeEditorBridgeResponse<T>(response: Response): Promise<EditorClientResult<T>> {
+  const raw = await response.text();
+  let payload: BridgeEnvelope<T> | undefined;
+  try {
+    payload = JSON.parse(raw) as BridgeEnvelope<T>;
+  } catch {
+    const snippet = raw.replace(/\s+/g, " ").trim().slice(0, 160);
+    return { ok: false, error: `HTTP ${response.status}${snippet ? `: ${snippet}` : ""}` };
+  }
+  if (!response.ok || !payload.ok || payload.data === undefined) {
+    return { ok: false, error: payload.error || `HTTP ${response.status}` };
+  }
+  return { ok: true, data: payload.data };
 }
 
 function createMockEditorClient(): EditorClient {
@@ -177,6 +275,11 @@ function createMockEditorClient(): EditorClient {
     },
     async createSession(name) {
       const session = mockSession(name);
+      sessions.set(session.session_id, session);
+      return result(session);
+    },
+    async createSessionFromResultPackage(_resultPackagePath, _recordingPath, name) {
+      const session = mockSession(name || "结果包剪辑");
       sessions.set(session.session_id, session);
       return result(session);
     },
@@ -195,6 +298,9 @@ function createMockEditorClient(): EditorClient {
       sessions.set(sessionID, next);
       return result(next);
     },
+    async uploadAsset(sessionID, file) {
+      return this.importAsset(sessionID, file.name);
+    },
     async savePlan(sessionID, expectedRevision, plan) {
       const session = sessions.get(sessionID);
       if (!session) return { ok: false, error: "未找到编辑项目" };
@@ -208,6 +314,21 @@ function createMockEditorClient(): EditorClient {
       if (!session) return { ok: false, error: "未找到编辑项目" };
       return result({ schema_version: "demoops.demo_edit_plan_validation.v1", valid: session.edit_plan.shots.length > 0, checked_at: new Date().toISOString(), errors: [], warnings: [] });
     },
+    async analyzeAudio(sessionID, assetID, options) {
+      const session = sessions.get(sessionID);
+      const artifact = session?.asset_catalog.artifacts.find((item) => item.id === assetID);
+      if (!artifact) return { ok: false, error: "未找到待分析素材" };
+      const bucketMS = options?.bucketMS ?? 100;
+      const durationMS = artifact.duration_ms ?? 0;
+      const buckets = Math.ceil(durationMS / bucketMS);
+      return result({
+        schema_version: "demoops.audio_analysis.v1", artifact_id: assetID, path: artifact.local_path ?? artifact.uri,
+        has_audio: true, duration_ms: durationMS, bucket_ms: bucketMS, sample_rate_hz: 1000,
+        peak_dbfs: Array.from({ length: buckets }, (_, index) => -12 - Math.abs(Math.sin(index / 3)) * 24),
+        rms_dbfs: Array.from({ length: buckets }, (_, index) => -18 - Math.abs(Math.sin(index / 3)) * 24),
+        silence_ranges_ms: [], silence_threshold_db: options?.silenceThresholdDB ?? -45, min_silence_ms: options?.minSilenceMS ?? 500, ffmpeg_available: true,
+      });
+    },
     async preview(sessionID) {
       const session = sessions.get(sessionID);
       if (!session) return { ok: false, error: "未找到编辑项目" };
@@ -217,6 +338,14 @@ function createMockEditorClient(): EditorClient {
       const session = sessions.get(sessionID);
       if (!session) return { ok: false, error: "未找到编辑项目" };
       return result({ ...session, final_render: { status: "ready", revision: session.revision } });
+    },
+    async cancelRender(sessionID, kind) {
+      const session = sessions.get(sessionID);
+      if (!session) return { ok: false, error: "未找到编辑项目" };
+      const field = kind === "preview" ? "preview" : "final_render";
+      const next = { ...session, [field]: { ...session[field], status: "cancelled" as const, phase: "cancelled" } };
+      sessions.set(sessionID, next);
+      return result(next);
     },
     mediaURL: () => "",
   };
@@ -242,6 +371,7 @@ function mockSession(name: string): EditorSession {
       script_order_policy: "preserve_required_step_order",
       locked_fields: [],
       model_editable_fields: [],
+      audio: { mode: "source", volume_percent: 100 },
       shots: [],
     },
     preview_profile: { width: 1280, height: 720, fps: 30, format: "mp4", crf: 28 },

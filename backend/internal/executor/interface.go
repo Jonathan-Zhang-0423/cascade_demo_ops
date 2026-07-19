@@ -33,6 +33,29 @@ type MediaProbeResult struct {
 	FFProbeAvailable bool    `json:"ffprobe_available"`
 }
 
+type AudioAnalysisRequest struct {
+	Path               string  `json:"path"`
+	BucketMS           int     `json:"bucket_ms,omitempty"`
+	SilenceThresholdDB float64 `json:"silence_threshold_db,omitempty"`
+	MinSilenceMS       int     `json:"min_silence_ms,omitempty"`
+}
+
+type AudioAnalysisResult struct {
+	SchemaVersion      string    `json:"schema_version"`
+	ArtifactID         string    `json:"artifact_id,omitempty"`
+	Path               string    `json:"path"`
+	HasAudio           bool      `json:"has_audio"`
+	DurationMS         int       `json:"duration_ms"`
+	BucketMS           int       `json:"bucket_ms"`
+	SampleRateHZ       int       `json:"sample_rate_hz"`
+	PeakDBFS           []float64 `json:"peak_dbfs"`
+	RMSDBFS            []float64 `json:"rms_dbfs"`
+	SilenceRangesMS    [][2]int  `json:"silence_ranges_ms"`
+	SilenceThresholdDB float64   `json:"silence_threshold_db"`
+	MinSilenceMS       int       `json:"min_silence_ms"`
+	FFmpegAvailable    bool      `json:"ffmpeg_available"`
+}
+
 type EditPlanValidationRequest struct {
 	Catalog  model.AssetTimelineCatalog `json:"catalog"`
 	EditPlan model.DemoEditPlan         `json:"edit_plan"`
@@ -84,6 +107,7 @@ type RenderRequest struct {
 	ArtifactManifestPath       string                        `json:"artifact_manifest_path,omitempty"`
 	RecordingResultPackage     *model.RecordingResultPackage `json:"recording_result_package,omitempty"`
 	RecordingResultPackagePath string                        `json:"recording_result_package_path,omitempty"`
+	AssetTimelineCatalog       *model.AssetTimelineCatalog   `json:"asset_timeline_catalog,omitempty"`
 	EditPlan                   *model.DemoEditPlan           `json:"edit_plan,omitempty"`
 	RenderProfile              *model.EditorRenderProfile    `json:"render_profile,omitempty"`
 }

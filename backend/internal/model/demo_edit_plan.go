@@ -215,6 +215,21 @@ type DemoEditPlan struct {
 	TargetDurationMS     int                          `json:"target_duration_ms,omitempty"`
 	Shots                []DemoEditShot               `json:"shots"`
 	GlobalStyle          *DemoEditGlobalStyle         `json:"global_style,omitempty"`
+	Audio                *DemoEditAudioPolicy         `json:"audio,omitempty"`
+}
+
+type DemoEditAudioPolicy struct {
+	Mode            string                         `json:"mode"`
+	VolumePercent   int                            `json:"volume_percent"`
+	SplitPointsMS   []int                          `json:"split_points_ms,omitempty"`
+	SegmentSettings []DemoEditAudioSegmentSettings `json:"segment_settings,omitempty"`
+}
+
+type DemoEditAudioSegmentSettings struct {
+	StartMS       int    `json:"start_ms"`
+	EndMS         int    `json:"end_ms"`
+	Mode          string `json:"mode"`
+	VolumePercent int    `json:"volume_percent"`
 }
 
 type DemoEditGlobalStyle struct {

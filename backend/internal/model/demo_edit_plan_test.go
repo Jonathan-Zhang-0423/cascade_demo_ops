@@ -70,6 +70,10 @@ func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
 		LockedFields:         DemoEditRequiredLockedFields,
 		ModelEditableFields:  DemoEditAllowedModelEditableFields,
 		TargetDurationMS:     60000,
+		Audio: &DemoEditAudioPolicy{
+			Mode: "source", VolumePercent: 85, SplitPointsMS: []int{500},
+			SegmentSettings: []DemoEditAudioSegmentSettings{{StartMS: 500, EndMS: 1200, Mode: "mute", VolumePercent: 85}},
+		},
 		Shots: []DemoEditShot{{
 			ID:                "shot_001_open_dashboard",
 			SourceArtifactID:  "artifact_raw_recording",
@@ -137,6 +141,9 @@ func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
 	}
 	if gotPlan.ModelRole != DemoEditModelRolePresentationOptimizerOnly {
 		t.Fatalf("plan model role = %q", gotPlan.ModelRole)
+	}
+	if gotPlan.Audio == nil || gotPlan.Audio.Mode != "source" || gotPlan.Audio.VolumePercent != 85 || len(gotPlan.Audio.SplitPointsMS) != 1 || gotPlan.Audio.SplitPointsMS[0] != 500 || len(gotPlan.Audio.SegmentSettings) != 1 || gotPlan.Audio.SegmentSettings[0].Mode != "mute" {
+		t.Fatalf("plan audio policy did not round-trip: %+v", gotPlan.Audio)
 	}
 	if !containsString(gotPlan.LockedFields, "source_artifact_id") || !containsString(gotPlan.LockedFields, "required_step_order") {
 		t.Fatalf("plan locked fields lost source facts: %+v", gotPlan.LockedFields)
