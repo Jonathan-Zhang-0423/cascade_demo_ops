@@ -188,6 +188,7 @@ func compactStateForPrepareResponse(state *orchestrator.CascadeState, build *Cli
 			SchemaVersion:         state.ProjectIntelligence.SchemaVersion,
 			DemoIntent:            compactDemoIntentForPrepareResponse(state.ProjectIntelligence.DemoIntent),
 			RunIntentScope:        state.ProjectIntelligence.RunIntentScope,
+			BusinessStagePlan:     compactBusinessStagePlanForPrepareResponse(state.ProjectIntelligence.BusinessStagePlan),
 			VerifiedInteraction:   out.VerifiedInteractionPlan,
 			MissingEvidenceReport: out.MissingEvidenceReport,
 			ScriptReadinessReport: out.ScriptReadinessReport,
@@ -272,6 +273,60 @@ func compactDemoIntentForPrepareResponse(intent *model.DemoIntentSpec) *model.De
 		out.Goals[i].EvidenceRefs = compactEvidenceRefsForUpload(out.Goals[i].EvidenceRefs, 2)
 	}
 	return &out
+}
+
+func compactBusinessStagePlanForPrepareResponse(plan *model.BusinessStagePlan) *model.BusinessStagePlan {
+	if plan == nil {
+		return nil
+	}
+	out := *plan
+	out.EvidenceRefs = compactEvidenceRefsForUpload(out.EvidenceRefs, 6)
+	out.BlockingUncertainties = compactStageUncertaintiesForPrepareResponse(out.BlockingUncertainties, 8)
+	if len(out.Stages) > 12 {
+		out.Stages = out.Stages[:12]
+	}
+	for i := range out.Stages {
+		stage := &out.Stages[i]
+		stage.UserIntent = truncateForUpload(stage.UserIntent, 1000)
+		stage.Objective = truncateForUpload(stage.Objective, 240)
+		stage.Action.InputValue = RedactSensitiveForPrepareResponse(stage.Action.InputValue)
+		stage.Action.WaitConditions = limitStringsForUpload(stage.Action.WaitConditions, 4)
+		stage.Action.CapturePoints = limitStringsForUpload(stage.Action.CapturePoints, 4)
+		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 4)
+		stage.Uncertainties = compactStageUncertaintiesForPrepareResponse(stage.Uncertainties, 4)
+		if len(stage.Targets) > 4 {
+			stage.Targets = stage.Targets[:4]
+		}
+		for j := range stage.Targets {
+			target := &stage.Targets[j]
+			target.EvidenceRefs = compactEvidenceRefsForUpload(target.EvidenceRefs, 2)
+			target.Alternatives = compactSelectorCandidatesForUpload(target.Alternatives, 2)
+		}
+		if len(stage.EvidenceRequirements) > 4 {
+			stage.EvidenceRequirements = stage.EvidenceRequirements[:4]
+		}
+		for j := range stage.EvidenceRequirements {
+			stage.EvidenceRequirements[j].EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRequirements[j].EvidenceRefs, 2)
+		}
+	}
+	return &out
+}
+
+func compactStageUncertaintiesForPrepareResponse(values []model.StageUncertainty, limit int) []model.StageUncertainty {
+	if len(values) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	out := make([]model.StageUncertainty, len(values))
+	for i, value := range values {
+		value.Summary = truncateForUpload(value.Summary, 240)
+		value.SuggestedAction = truncateForUpload(value.SuggestedAction, 240)
+		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 2)
+		out[i] = value
+	}
+	return out
 }
 
 func compactVerifiedInteractionPlanForPrepareResponse(plan *model.VerifiedInteractionPlan) *model.VerifiedInteractionPlan {
@@ -1380,10 +1435,13 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 			"Add DOM/a11y scan evidence, screenshot annotations, or test ids before regenerating.",
 		))
 	}
+	stageKindValidation := preflightBusinessStageKinds(pkg.ExecutableScriptBundle)
+	findings = append(findings, stageKindValidation...)
+	useLegacyLoginCheck := !bundleHasBusinessStageKinds(pkg.ExecutableScriptBundle)
 	repeatedLoginCount := 0
 	allowedDomains := pkg.RecordingRunSpec.AllowedDomains
 	for _, step := range doc.Steps {
-		if isLoginStep(step) {
+		if useLegacyLoginCheck && isLoginStep(step) {
 			repeatedLoginCount++
 		}
 		if !outlineRuntime && actionRequiresSelector(step.Action.Type) && !actionTargetHasStableHandle(step.Action.Target) {
@@ -1528,7 +1586,7 @@ func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle)
 					"Bind each stage to a user-approved business objective before upload.",
 				))
 			}
-			if !stageApprovalHasEvidence(stage) {
+			if stageEvidenceRequired(stage) && !stageApprovalHasEvidence(stage) {
 				findings = append(findings, packagePreflightFinding(
 					"stage_evidence_missing_"+shortID(stage.NodeID),
 					model.FindingSeverityBlocking,
@@ -1607,6 +1665,168 @@ func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle)
 	return findings
 }
 
+func bundleHasBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) bool {
+	if bundle == nil || bundle.StageApprovalPlan == nil {
+		return false
+	}
+	for _, stage := range bundle.StageApprovalPlan.Stages {
+		if stage.StageKind != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) []model.AgentFinding {
+	findings := []model.AgentFinding{}
+	if bundle == nil || bundle.StageApprovalPlan == nil || !bundleHasBusinessStageKinds(bundle) {
+		return findings
+	}
+	sessionSetupCount := 0
+	coreBusinessCount := 0
+	hasSubmit := false
+	hasPostSubmitTransition := false
+	hasObserveProgress := false
+	for _, stage := range bundle.StageApprovalPlan.Stages {
+		switch stage.StageKind {
+		case model.BusinessStageKindSessionSetup:
+			sessionSetupCount++
+		case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
+			coreBusinessCount++
+		}
+		if stage.StageKind != model.BusinessStageKindSessionSetup && stageLooksLikeLoginOrCredential(stage) {
+			findings = append(findings, packagePreflightFinding(
+				"login_outside_session_"+shortID(stage.NodeID),
+				model.FindingSeverityBlocking,
+				"non-session business stage contains login or credential semantics: "+stage.NodeID,
+				"Keep login only in the session_setup stage; later stages must reuse the authenticated state.",
+			))
+		}
+		if stage.StageKind == model.BusinessStageKindBusinessInput && !stagePreservesBusinessInput(stage) {
+			findings = append(findings, packagePreflightFinding(
+				"business_input_semantics_missing_"+shortID(stage.NodeID),
+				model.FindingSeverityBlocking,
+				"business_input stage does not preserve user input semantics: "+stage.NodeID,
+				"Keep the user-approved fill content such as project name or feature request in input_content/action value.",
+			))
+		}
+		if stage.StageKind == model.BusinessStageKindBusinessSubmit {
+			hasSubmit = true
+			if strings.TrimSpace(stage.ExpectedRouteAfterAction) != "" && strings.TrimSpace(stage.ExpectedRouteAfterAction) != strings.TrimSpace(stage.EntryRoute) {
+				hasPostSubmitTransition = true
+			}
+		}
+		if stage.StageKind == model.BusinessStageKindObserveProgress {
+			hasObserveProgress = true
+			if stage.DurationMS < 60000 && stageRequiresSixtySecondObserve(stage) {
+				findings = append(findings, packagePreflightFinding(
+					"observe_progress_duration_short_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"observe_progress stage lost the required 60 second wait: "+stage.NodeID,
+					"Preserve duration_ms >= 60000 for the agent build observation stage.",
+				))
+			}
+			if stage.Interaction.Kind == model.GraphActionClick || stage.Interaction.Kind == model.GraphActionFill || stage.Interaction.Kind == model.GraphActionSelect {
+				findings = append(findings, packagePreflightFinding(
+					"observe_progress_has_business_action_"+shortID(stage.NodeID),
+					model.FindingSeverityBlocking,
+					"observe_progress stage must not click or fill: "+stage.NodeID,
+					"Use wait/inspect/capture only while observing build progress.",
+				))
+			}
+		}
+	}
+	if sessionSetupCount > 1 {
+		findings = append(findings, packagePreflightFinding(
+			"duplicate_session_setup",
+			model.FindingSeverityBlocking,
+			"business stage plan contains repeated session_setup stages",
+			"Generate exactly one session_setup stage, then reuse the authenticated session for all business stages.",
+		))
+	}
+	if coreBusinessCount == 0 {
+		findings = append(findings, packagePreflightFinding(
+			"business_stage_missing",
+			model.FindingSeverityBlocking,
+			"business stage plan has no core business stage",
+			"Add business_action/business_input/mode_selection/business_submit stages derived from the user requirement.",
+		))
+	}
+	if hasSubmit && !hasPostSubmitTransition {
+		findings = append(findings, packagePreflightFinding(
+			"business_submit_transition_missing",
+			model.FindingSeverityBlocking,
+			"business_submit stage is missing route/state transition",
+			"Set expected_route_after_action to project_detail or build_running so the browser agent knows the post-submit state.",
+		))
+	}
+	if hasSubmit && !hasObserveProgress {
+		findings = append(findings, packagePreflightFinding(
+			"observe_progress_missing",
+			model.FindingSeverityWarning,
+			"business_submit has no follow-up observe_progress stage",
+			"Add an observe_progress stage to let the recording capture the agent build process.",
+		))
+	}
+	return findings
+}
+
+func stageLooksLikeLoginOrCredential(stage model.StageApprovalStage) bool {
+	values := []string{
+		stage.ID,
+		stage.NodeID,
+		stage.Title,
+		stage.Objective,
+		stage.BusinessIntent,
+		stage.TargetRoute,
+		stage.TargetRouteTemplate,
+		stage.EntryRoute,
+		stage.ExpectedRouteAfterAction,
+		stage.Interaction.Target.Label,
+		stage.Interaction.Target.Text,
+		stage.Interaction.Target.TestID,
+		stage.Interaction.Target.Selector,
+		stage.Interaction.Value,
+		stage.Interaction.InputRef,
+		stage.Interaction.SecretRef,
+	}
+	for _, input := range stage.InputContent {
+		values = append(values, input.Kind, input.Label, input.Value, input.InputRef, input.SecretRef)
+	}
+	text := strings.ToLower(strings.Join(values, " "))
+	return strings.Contains(text, "login") ||
+		strings.Contains(text, "sign in") ||
+		strings.Contains(text, "signin") ||
+		strings.Contains(text, "sign up") ||
+		strings.Contains(text, "register") ||
+		strings.Contains(text, "password") ||
+		strings.Contains(text, "demo_password") ||
+		strings.Contains(text, "登录") ||
+		strings.Contains(text, "登陆") ||
+		strings.Contains(text, "注册") ||
+		strings.Contains(text, "密码")
+}
+
+func stagePreservesBusinessInput(stage model.StageApprovalStage) bool {
+	for _, input := range stage.InputContent {
+		text := strings.TrimSpace(input.Value + " " + input.InputRef + " " + input.Label)
+		if text != "" && !strings.Contains(strings.ToLower(text), "password") && !strings.Contains(text, "密码") {
+			return true
+		}
+	}
+	return strings.TrimSpace(stage.Interaction.Value) != ""
+}
+
+func stageRequiresSixtySecondObserve(stage model.StageApprovalStage) bool {
+	text := strings.ToLower(strings.Join([]string{stage.Title, stage.Objective, stage.BusinessIntent, stage.SuccessState}, " "))
+	return strings.Contains(text, "60") ||
+		strings.Contains(text, "一分钟") ||
+		strings.Contains(text, "1分钟") ||
+		strings.Contains(text, "agent") ||
+		strings.Contains(text, "build") ||
+		strings.Contains(text, "构建")
+}
+
 func stageApprovalHasEvidence(stage model.StageApprovalStage) bool {
 	return len(stage.EvidenceRefs) > 0 ||
 		len(stage.ComponentRefs) > 0 ||
@@ -1615,6 +1835,18 @@ func stageApprovalHasEvidence(stage model.StageApprovalStage) bool {
 		len(stage.DataModelRefs) > 0 ||
 		len(stage.Interaction.EvidenceRefs) > 0 ||
 		len(stage.Interaction.Target.EvidenceRefs) > 0
+}
+
+func stageEvidenceRequired(stage model.StageApprovalStage) bool {
+	if stage.StageKind == "" {
+		return true
+	}
+	switch stage.StageKind {
+	case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
+		return true
+	default:
+		return false
+	}
 }
 
 func browserAgentStepNeedsValidation(step model.ScriptStep) bool {

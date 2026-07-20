@@ -19,6 +19,7 @@ type ProjectIntelligencePack struct {
 	FeatureCapabilities   []FeatureCapability       `json:"feature_capabilities,omitempty"`
 	FeatureTrace          *FeatureTraceResult       `json:"feature_trace,omitempty"`
 	InteractionSurfaces   []InteractionSurface      `json:"interaction_surfaces,omitempty"`
+	BusinessStagePlan     *BusinessStagePlan        `json:"business_stage_plan,omitempty"`
 	VerifiedInteraction   *VerifiedInteractionPlan  `json:"verified_interaction_plan,omitempty"`
 	MissingEvidenceReport *MissingEvidenceReport    `json:"missing_evidence_report,omitempty"`
 	APIContracts          []APIContractSummary      `json:"api_contracts,omitempty"`
@@ -95,6 +96,106 @@ type FeatureGoalTrace struct {
 	EvidenceRefs      []EvidenceRef      `json:"evidence_refs,omitempty"`
 	Confidence        float64            `json:"confidence,omitempty"`
 	MissingEvidence   []string           `json:"missing_evidence,omitempty"`
+}
+
+type BusinessStageKind string
+
+const (
+	BusinessStageKindSessionSetup    BusinessStageKind = "session_setup"
+	BusinessStageKindBusinessAction  BusinessStageKind = "business_action"
+	BusinessStageKindBusinessInput   BusinessStageKind = "business_input"
+	BusinessStageKindModeSelection   BusinessStageKind = "mode_selection"
+	BusinessStageKindBusinessSubmit  BusinessStageKind = "business_submit"
+	BusinessStageKindObserveProgress BusinessStageKind = "observe_progress"
+	BusinessStageKindFinalObserve    BusinessStageKind = "final_observe"
+)
+
+type BusinessRouteState string
+
+const (
+	BusinessRouteStateUnauthenticated BusinessRouteState = "unauthenticated"
+	BusinessRouteStateWorkspace       BusinessRouteState = "workspace"
+	BusinessRouteStateCreationFlow    BusinessRouteState = "creation_flow"
+	BusinessRouteStateProjectDetail   BusinessRouteState = "project_detail"
+	BusinessRouteStateBuildRunning    BusinessRouteState = "build_running"
+)
+
+type BusinessStagePlan struct {
+	ID                     string             `json:"id"`
+	ProjectID              string             `json:"project_id"`
+	IntentID               string             `json:"intent_id,omitempty"`
+	SchemaVersion          string             `json:"schema_version,omitempty"`
+	Stages                 []BusinessStage    `json:"stages"`
+	CoreBusinessStageCount int                `json:"core_business_stage_count,omitempty"`
+	BlockingUncertainties  []StageUncertainty `json:"blocking_uncertainties,omitempty"`
+	EvidenceRefs           []EvidenceRef      `json:"evidence_refs,omitempty"`
+	Confidence             float64            `json:"confidence,omitempty"`
+	CreatedAt              time.Time          `json:"created_at,omitempty"`
+}
+
+type BusinessStage struct {
+	ID                       string                    `json:"id"`
+	Order                    int                       `json:"order"`
+	Kind                     BusinessStageKind         `json:"kind"`
+	Title                    string                    `json:"title,omitempty"`
+	Objective                string                    `json:"objective,omitempty"`
+	UserIntent               string                    `json:"user_intent,omitempty"`
+	RouteState               BusinessRouteState        `json:"route_state,omitempty"`
+	EntryRoute               string                    `json:"entry_route,omitempty"`
+	ExpectedRouteAfterAction string                    `json:"expected_route_after_action,omitempty"`
+	DurationMS               int                       `json:"duration_ms,omitempty"`
+	Action                   BusinessActionSemantics   `json:"action"`
+	Targets                  []BusinessTargetCandidate `json:"targets,omitempty"`
+	EvidenceRequirements     []EvidenceRequirement     `json:"evidence_requirements,omitempty"`
+	Uncertainties            []StageUncertainty        `json:"uncertainties,omitempty"`
+	EvidenceRefs             []EvidenceRef             `json:"evidence_refs,omitempty"`
+	Confidence               float64                   `json:"confidence,omitempty"`
+}
+
+type BusinessActionSemantics struct {
+	Type           string            `json:"type,omitempty"`
+	Label          string            `json:"label,omitempty"`
+	InputSemantic  string            `json:"input_semantic,omitempty"`
+	InputValue     string            `json:"input_value,omitempty"`
+	InputRef       string            `json:"input_ref,omitempty"`
+	SecretRef      string            `json:"secret_ref,omitempty"`
+	SuccessState   string            `json:"success_state,omitempty"`
+	WaitConditions []string          `json:"wait_conditions,omitempty"`
+	CapturePoints  []string          `json:"capture_points,omitempty"`
+	Parameters     map[string]string `json:"parameters,omitempty"`
+	NonDestructive bool              `json:"non_destructive,omitempty"`
+}
+
+type BusinessTargetCandidate struct {
+	ID                 string              `json:"id"`
+	IntentGoalID       string              `json:"intent_goal_id,omitempty"`
+	Label              string              `json:"label,omitempty"`
+	Kind               string              `json:"kind,omitempty"`
+	Selector           string              `json:"selector,omitempty"`
+	URL                string              `json:"url,omitempty"`
+	RouteRef           string              `json:"route_ref,omitempty"`
+	Route              string              `json:"route,omitempty"`
+	ComponentRef       string              `json:"component_ref,omitempty"`
+	Role               string              `json:"role,omitempty"`
+	Text               string              `json:"text,omitempty"`
+	TestID             string              `json:"test_id,omitempty"`
+	SelectorScore      int                 `json:"selector_score,omitempty"`
+	Confidence         float64             `json:"confidence,omitempty"`
+	IsVerified         bool                `json:"is_verified,omitempty"`
+	VerificationStatus string              `json:"verification_status,omitempty"`
+	VerificationSource string              `json:"verification_source,omitempty"`
+	EvidenceRefs       []EvidenceRef       `json:"evidence_refs,omitempty"`
+	Alternatives       []SelectorCandidate `json:"alternatives,omitempty"`
+}
+
+type EvidenceRequirement struct {
+	Kind         string        `json:"kind"`
+	Required     bool          `json:"required"`
+	Satisfied    bool          `json:"satisfied"`
+	Summary      string        `json:"summary,omitempty"`
+	FieldPath    string        `json:"field_path,omitempty"`
+	EvidenceRefs []EvidenceRef `json:"evidence_refs,omitempty"`
+	Confidence   float64       `json:"confidence,omitempty"`
 }
 
 type InteractionProbe struct {

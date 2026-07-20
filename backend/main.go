@@ -33,18 +33,19 @@ func main() {
 	}
 
 	flow, err := orchestrator.NewCascadeFlow(orchestrator.Dependencies{
-		InputContext:        agents.NewInputContextAgent(),
-		RequirementReader:   agents.NewRequirementReaderAgent(),
-		CodeReader:          agents.NewCodeReaderAgent(),
-		PageReader:          agents.NewPageReaderAgent(),
-		ProjectIntelligence: agents.NewProjectIntelligenceGraph(),
-		Understanding:       agents.NewMultimodalUnderstandingAgent(),
-		ProductMap:          agents.NewProductMapAgent(),
-		PageVerifier:        agents.NewPageInteractionVerifierAgent(),
-		GraphBuilder:        agents.NewGraphBuilderAgent(),
-		ScriptPackager:      agents.NewScriptPackagerAgent(),
-		QAExecutor:          agents.NewQAExecutorAgent(),
-		AssetGenerator:      agents.NewAssetGeneratorAgent(),
+		InputContext:         agents.NewInputContextAgent(),
+		RequirementReader:    agents.NewRequirementReaderAgent(),
+		CodeReader:           agents.NewCodeReaderAgent(),
+		PageReader:           agents.NewPageReaderAgent(),
+		ProjectIntelligence:  agents.NewProjectIntelligenceGraph(),
+		Understanding:        agents.NewMultimodalUnderstandingAgent(),
+		ProductMap:           agents.NewProductMapAgent(),
+		PageVerifier:         agents.NewPageInteractionVerifierAgent(),
+		BusinessStagePlanner: agents.NewBusinessStagePlannerAgent(),
+		GraphBuilder:         agents.NewGraphBuilderAgent(),
+		ScriptPackager:       agents.NewScriptPackagerAgent(),
+		QAExecutor:           agents.NewQAExecutorAgent(),
+		AssetGenerator:       agents.NewAssetGeneratorAgent(),
 	})
 	must(err)
 

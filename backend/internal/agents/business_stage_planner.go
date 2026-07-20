@@ -1,0 +1,747 @@
+package agents
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"cascade-demoops/backend/internal/model"
+)
+
+type BusinessStagePlannerAgent struct{}
+
+func NewBusinessStagePlannerAgent() *BusinessStagePlannerAgent {
+	return &BusinessStagePlannerAgent{}
+}
+
+func (a *BusinessStagePlannerAgent) PlanBusinessStages(
+	ctx context.Context,
+	project *model.ProjectContext,
+	brief *model.RequirementBrief,
+	report *model.MultimodalUnderstandingReport,
+	productMap *model.ProductMap,
+	intelligence *model.ProjectIntelligencePack,
+	verifiedPlan *model.VerifiedInteractionPlan,
+) (*model.BusinessStagePlan, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if project == nil {
+		return nil, errors.New("project context is required")
+	}
+	if intelligence == nil {
+		intelligence = project.ProjectIntelligence
+	}
+	intentText := businessStageIntentText(project, brief, report, intelligence)
+	now := time.Now().UTC()
+	routeHints := businessRouteHints(project, productMap, intelligence)
+	source := businessTargetSource{
+		project:      project,
+		brief:        brief,
+		report:       report,
+		intelligence: intelligence,
+		verifiedPlan: verifiedPlan,
+	}
+	builder := &businessStagePlanBuilder{
+		project:    project,
+		intentText: intentText,
+		routeHints: routeHints,
+		source:     source,
+		now:        now,
+	}
+
+	if builder.needsSessionSetup() {
+		builder.addStage(stageSpec{
+			id:             "session_setup",
+			kind:           model.BusinessStageKindSessionSetup,
+			title:          "登录并建立演示会话",
+			objective:      "使用本地授权的演示账号完成登录，进入可演示的工作台状态。",
+			actionType:     string(model.GraphActionFill),
+			actionLabel:    "登录演示账号",
+			successState:   "登录完成，页面进入工作台或目标业务页面。",
+			routeState:     model.BusinessRouteStateUnauthenticated,
+			entryRoute:     routeHints.login,
+			expectedRoute:  routeHints.workspace,
+			durationMS:     10000,
+			keywords:       []string{"login", "signin", "sign in", "email", "password", "登录", "邮箱", "密码"},
+			capture:        []string{"登录页表单", "登录后工作台"},
+			nonDestructive: true,
+		})
+	}
+
+	projectName := intentProjectName(intentText)
+	if projectName == "" && containsAnyNormalized(intentText, "俄罗斯方块", "tetris") {
+		projectName = "俄罗斯方块"
+	}
+	wantsNewProject := containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != ""
+	if wantsNewProject {
+		builder.addStage(stageSpec{
+			id:            "new_project_entry",
+			kind:          model.BusinessStageKindBusinessAction,
+			title:         "进入新建项目流程",
+			objective:     "在工作台中找到并进入新建项目流程。",
+			actionType:    string(model.GraphActionClick),
+			actionLabel:   "点击新建项目入口",
+			successState:  "新建项目表单、弹窗或创建流程可见。",
+			routeState:    model.BusinessRouteStateWorkspace,
+			entryRoute:    routeHints.workspace,
+			expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
+			durationMS:    10000,
+			keywords:      []string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project"},
+			capture:       []string{"工作台项目入口", "新建项目流程"},
+		})
+		if projectName != "" {
+			builder.addStage(stageSpec{
+				id:            "project_name_input",
+				kind:          model.BusinessStageKindBusinessInput,
+				title:         "填写项目名称",
+				objective:     "把演示项目名称填写为“" + projectName + "”。",
+				actionType:    string(model.GraphActionFill),
+				actionLabel:   "填写项目名称",
+				inputSemantic: "project_name",
+				inputValue:    projectName,
+				successState:  "项目名称已填写为“" + projectName + "”。",
+				routeState:    model.BusinessRouteStateCreationFlow,
+				entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
+				expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
+				durationMS:    10000,
+				keywords:      []string{"项目名称", "项目名", "project name", "name", projectName, "tetris", "俄罗斯方块"},
+				capture:       []string{"项目名称输入框", "已填写的项目名称"},
+			})
+		}
+	}
+
+	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") {
+		builder.addStage(stageSpec{
+			id:            "select_build_mode",
+			kind:          model.BusinessStageKindModeSelection,
+			title:         "选择构建模式",
+			objective:     "在项目创建流程中选择构建模式。",
+			actionType:    string(model.GraphActionClick),
+			actionLabel:   "选择构建模式",
+			inputSemantic: "build_mode",
+			successState:  "构建模式已被选中，后续可以启动 agent 构建。",
+			routeState:    model.BusinessRouteStateCreationFlow,
+			entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
+			expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
+			durationMS:    10000,
+			keywords:      []string{"构建模式", "build mode", "builder mode", "构建", "mode"},
+			capture:       []string{"构建模式选项", "已选择构建模式"},
+		})
+	}
+
+	wantsBuild := containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "启动构建", "run build", "start build", "生成", "构建")
+	if wantsBuild {
+		builder.addStage(stageSpec{
+			id:            "start_agent_build",
+			kind:          model.BusinessStageKindBusinessSubmit,
+			title:         "启动 agent 实际构建",
+			objective:     "提交项目创建信息并启动 agent 进入实际构建过程。",
+			actionType:    string(model.GraphActionClick),
+			actionLabel:   "启动 agent 构建",
+			successState:  "agent 构建过程开始，页面出现构建进度、日志或项目详情。",
+			routeState:    model.BusinessRouteStateProjectDetail,
+			entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
+			expectedRoute: firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning),
+			durationMS:    10000,
+			keywords:      []string{"agent", "智能体", "开始构建", "启动构建", "实际构建", "生成", "构建", "build", "run", "start", "generate"},
+			capture:       []string{"启动构建按钮", "构建开始状态"},
+		})
+	}
+
+	waitMS := requiredLongWaitMS(intentText)
+	if waitMS == 0 && wantsBuild {
+		waitMS = 60000
+	}
+	if waitMS > 0 {
+		builder.addStage(stageSpec{
+			id:             "observe_agent_progress",
+			kind:           model.BusinessStageKindObserveProgress,
+			title:          fmt.Sprintf("观察 agent 构建过程 %d 秒", waitMS/1000),
+			objective:      fmt.Sprintf("进入项目后持续观察 agent 实际构建过程，保留不少于 %d 秒的自然等待。", waitMS/1000),
+			actionType:     string(model.GraphActionWait),
+			actionLabel:    "观察构建进度",
+			successState:   "构建进度、日志、预览或项目状态持续可见。",
+			routeState:     model.BusinessRouteStateBuildRunning,
+			entryRoute:     firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail, routeHints.workspace),
+			expectedRoute:  firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail, routeHints.workspace),
+			durationMS:     waitMS,
+			keywords:       []string{"构建进度", "构建日志", "agent", "智能体", "progress", "log", "preview", "build"},
+			capture:        []string{"构建过程", "构建日志或预览变化"},
+			nonDestructive: true,
+		})
+	}
+
+	if len(builder.stages) == 0 && intentIsObservationOnly(intentText) {
+		builder.addStage(stageSpec{
+			id:             "observation_only",
+			kind:           model.BusinessStageKindFinalObserve,
+			title:          "仅观察产品首页",
+			objective:      "按用户要求只观察首页，不生成真实业务动作。",
+			actionType:     string(model.GraphActionInspect),
+			actionLabel:    "观察首页",
+			successState:   "首页保持可观察。",
+			routeState:     model.BusinessRouteStateWorkspace,
+			entryRoute:     firstNonEmpty(routeHints.workspace, routePathFromCandidate(project.ProductURL), "/"),
+			expectedRoute:  firstNonEmpty(routeHints.workspace, routePathFromCandidate(project.ProductURL), "/"),
+			durationMS:     10000,
+			keywords:       []string{"首页", "观察", "home", "homepage", "inspect"},
+			capture:        []string{"首页截图"},
+			nonDestructive: true,
+		})
+	}
+
+	if len(builder.stages) == 0 {
+		builder.addStage(stageSpec{
+			id:            "primary_business_action",
+			kind:          model.BusinessStageKindBusinessAction,
+			title:         "执行核心业务动作",
+			objective:     firstNonEmpty(intentText, "围绕用户需求执行核心业务动作。"),
+			actionType:    string(model.GraphActionClick),
+			actionLabel:   "核心业务动作",
+			successState:  "目标业务状态可见。",
+			routeState:    model.BusinessRouteStateWorkspace,
+			entryRoute:    firstNonEmpty(routeHints.workspace, "/"),
+			expectedRoute: firstNonEmpty(routeHints.workspace, "/"),
+			durationMS:    10000,
+			keywords:      intentKeywordsForText(intentText),
+			capture:       []string{"核心业务控件", "业务结果状态"},
+		})
+	}
+
+	builder.addStage(stageSpec{
+		id:             "final_observe",
+		kind:           model.BusinessStageKindFinalObserve,
+		title:          "收束并观察最终状态",
+		objective:      "停留在最终业务页面，截图并让观众看清楚当前结果。",
+		actionType:     string(model.GraphActionInspect),
+		actionLabel:    "观察最终状态",
+		successState:   "最终业务状态保持可观察。",
+		routeState:     builder.finalRouteState(),
+		entryRoute:     builder.finalEntryRoute(),
+		expectedRoute:  builder.finalEntryRoute(),
+		durationMS:     10000,
+		keywords:       []string{"结果", "状态", "预览", "详情", "result", "preview", "detail"},
+		capture:        []string{"最终状态截图"},
+		nonDestructive: true,
+	})
+
+	return builder.plan(), nil
+}
+
+type stageSpec struct {
+	id             string
+	kind           model.BusinessStageKind
+	title          string
+	objective      string
+	actionType     string
+	actionLabel    string
+	inputSemantic  string
+	inputValue     string
+	successState   string
+	routeState     model.BusinessRouteState
+	entryRoute     string
+	expectedRoute  string
+	durationMS     int
+	keywords       []string
+	capture        []string
+	nonDestructive bool
+}
+
+type businessStagePlanBuilder struct {
+	project    *model.ProjectContext
+	intentText string
+	routeHints businessRouteSet
+	source     businessTargetSource
+	now        time.Time
+	stages     []model.BusinessStage
+}
+
+func (b *businessStagePlanBuilder) needsSessionSetup() bool {
+	return b.project.DemoAccount != nil || containsAnyNormalized(b.intentText, "登录", "登陆", "login", "sign in", "signin")
+}
+
+func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
+	order := len(b.stages) + 1
+	stageID := "business_stage_" + spec.id
+	targets := b.source.targetsForStage(spec)
+	evidence := evidenceRefsForBusinessTargets(targets)
+	requirements := b.source.evidenceRequirementsForStage(spec, targets)
+	uncertainties := businessStageUncertainties(spec, requirements, evidence)
+	stage := model.BusinessStage{
+		ID:                       stageID,
+		Order:                    order,
+		Kind:                     spec.kind,
+		Title:                    spec.title,
+		Objective:                spec.objective,
+		UserIntent:               b.intentText,
+		RouteState:               spec.routeState,
+		EntryRoute:               firstNonEmpty(spec.entryRoute, "/"),
+		ExpectedRouteAfterAction: firstNonEmpty(spec.expectedRoute, spec.entryRoute, "/"),
+		DurationMS:               maxInt(spec.durationMS, 10000),
+		Action: model.BusinessActionSemantics{
+			Type:           spec.actionType,
+			Label:          spec.actionLabel,
+			InputSemantic:  spec.inputSemantic,
+			InputValue:     spec.inputValue,
+			SuccessState:   spec.successState,
+			WaitConditions: businessStageWaitConditions(spec),
+			CapturePoints:  spec.capture,
+			NonDestructive: spec.nonDestructive || spec.kind == model.BusinessStageKindObserveProgress || spec.kind == model.BusinessStageKindFinalObserve || spec.kind == model.BusinessStageKindSessionSetup,
+		},
+		Targets:              targets,
+		EvidenceRequirements: requirements,
+		Uncertainties:        uncertainties,
+		EvidenceRefs:         uniqueEvidenceRefs(evidence),
+		Confidence:           businessStageConfidence(spec, targets, requirements),
+	}
+	b.stages = append(b.stages, stage)
+}
+
+func (b *businessStagePlanBuilder) finalRouteState() model.BusinessRouteState {
+	for i := len(b.stages) - 1; i >= 0; i-- {
+		if b.stages[i].RouteState != "" {
+			return b.stages[i].RouteState
+		}
+	}
+	return model.BusinessRouteStateWorkspace
+}
+
+func (b *businessStagePlanBuilder) finalEntryRoute() string {
+	for i := len(b.stages) - 1; i >= 0; i-- {
+		if route := firstNonEmpty(b.stages[i].ExpectedRouteAfterAction, b.stages[i].EntryRoute); route != "" {
+			return route
+		}
+	}
+	return firstNonEmpty(b.routeHints.workspace, "/")
+}
+
+func (b *businessStagePlanBuilder) plan() *model.BusinessStagePlan {
+	coreCount := 0
+	uncertainties := []model.StageUncertainty{}
+	evidence := []model.EvidenceRef{}
+	for _, stage := range b.stages {
+		if businessStageKindIsCore(stage.Kind) {
+			coreCount++
+		}
+		uncertainties = append(uncertainties, stage.Uncertainties...)
+		evidence = append(evidence, stage.EvidenceRefs...)
+	}
+	intentID := ""
+	if b.source.intelligence != nil && b.source.intelligence.DemoIntent != nil {
+		intentID = b.source.intelligence.DemoIntent.ID
+	}
+	return &model.BusinessStagePlan{
+		ID:                     "business_stage_plan_" + b.project.ID,
+		ProjectID:              b.project.ID,
+		IntentID:               intentID,
+		SchemaVersion:          model.ProjectIntelligencePackSchemaVersion,
+		Stages:                 b.stages,
+		CoreBusinessStageCount: coreCount,
+		BlockingUncertainties:  uncertainties,
+		EvidenceRefs:           uniqueEvidenceRefs(evidence),
+		Confidence:             businessStagePlanConfidence(b.stages),
+		CreatedAt:              b.now,
+	}
+}
+
+type businessTargetSource struct {
+	project      *model.ProjectContext
+	brief        *model.RequirementBrief
+	report       *model.MultimodalUnderstandingReport
+	intelligence *model.ProjectIntelligencePack
+	verifiedPlan *model.VerifiedInteractionPlan
+}
+
+func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTargetCandidate {
+	targets := []model.BusinessTargetCandidate{}
+	targets = append(targets, s.targetsFromVerifiedPlan(spec)...)
+	targets = append(targets, s.targetsFromFeatureTrace(spec)...)
+	targets = uniqueBusinessTargetCandidates(targets)
+	if len(targets) > 5 {
+		targets = targets[:5]
+	}
+	return targets
+}
+
+func (s businessTargetSource) targetsFromVerifiedPlan(spec stageSpec) []model.BusinessTargetCandidate {
+	if s.verifiedPlan == nil {
+		return nil
+	}
+	out := []model.BusinessTargetCandidate{}
+	for _, action := range s.verifiedPlan.Actions {
+		if !businessActionMatchesStage(spec, action.Label, action.Kind, action.Selector, action.InputValue, action.ComponentRef) {
+			continue
+		}
+		if spec.kind != model.BusinessStageKindSessionSetup && looksLikeLoginAction(action.Label, action.Selector) {
+			continue
+		}
+		out = append(out, businessTargetFromVerifiedAction(action))
+	}
+	return out
+}
+
+func (s businessTargetSource) targetsFromFeatureTrace(spec stageSpec) []model.BusinessTargetCandidate {
+	if s.intelligence == nil || s.intelligence.FeatureTrace == nil {
+		return nil
+	}
+	out := []model.BusinessTargetCandidate{}
+	for _, trace := range s.intelligence.FeatureTrace.Traces {
+		traceText := strings.Join(append([]string{trace.IntentLabel, trace.IntentGoalID}, trace.MatchedComponents...), " ")
+		if !containsAnyNormalized(traceText, spec.keywords...) && !businessStageMatchesTraceKind(spec, trace) {
+			continue
+		}
+		for _, probe := range trace.SelectorEvidence {
+			if !businessProbeAllowedForStage(spec, probe) {
+				continue
+			}
+			out = append(out, businessTargetFromProbe(probe))
+		}
+		if len(trace.SelectorEvidence) == 0 && len(trace.MatchedComponents) > 0 {
+			for _, component := range trace.MatchedComponents {
+				out = append(out, model.BusinessTargetCandidate{
+					ID:           "target_component_" + shortHash(spec.id+component),
+					IntentGoalID: trace.IntentGoalID,
+					Label:        firstNonEmpty(trace.IntentLabel, spec.actionLabel),
+					Kind:         spec.actionType,
+					Route:        spec.entryRoute,
+					ComponentRef: component,
+					Confidence:   maxFloat64(trace.Confidence, 0.55),
+					EvidenceRefs: trace.EvidenceRefs,
+				})
+			}
+		}
+	}
+	return out
+}
+
+func (s businessTargetSource) evidenceRequirementsForStage(spec stageSpec, targets []model.BusinessTargetCandidate) []model.EvidenceRequirement {
+	routeSatisfied := strings.TrimSpace(spec.entryRoute) != ""
+	targetSatisfied := len(targets) > 0 || spec.kind == model.BusinessStageKindObserveProgress || spec.kind == model.BusinessStageKindFinalObserve
+	selectorSatisfied := false
+	componentSatisfied := false
+	for _, target := range targets {
+		if selectorUsableForBusinessAction(target.Selector) || len(target.Alternatives) > 0 {
+			selectorSatisfied = true
+		}
+		if target.ComponentRef != "" || len(target.EvidenceRefs) > 0 {
+			componentSatisfied = true
+		}
+	}
+	if spec.kind == model.BusinessStageKindObserveProgress || spec.kind == model.BusinessStageKindFinalObserve {
+		selectorSatisfied = true
+	}
+	if spec.kind == model.BusinessStageKindSessionSetup {
+		selectorSatisfied = true
+		componentSatisfied = targetSatisfied
+	}
+	return []model.EvidenceRequirement{
+		{
+			Kind:       "route",
+			Required:   true,
+			Satisfied:  routeSatisfied,
+			Summary:    "阶段必须绑定产品域内的入口路由或状态。",
+			FieldPath:  "business_stage_plan.stages[].entry_route",
+			Confidence: boolConfidence(routeSatisfied),
+		},
+		{
+			Kind:       "component_or_semantic_target",
+			Required:   businessStageKindIsCore(spec.kind),
+			Satisfied:  targetSatisfied || componentSatisfied,
+			Summary:    "核心业务阶段需要组件证据或清晰的语义目标，供 server browser agent 自适应定位。",
+			FieldPath:  "business_stage_plan.stages[].targets",
+			Confidence: boolConfidence(targetSatisfied || componentSatisfied),
+		},
+		{
+			Kind:       "selector_candidate",
+			Required:   false,
+			Satisfied:  selectorSatisfied,
+			Summary:    "selector 可由页面扫描或 server browser agent 在语义约束内补全；App 端不因为缺 selector 删除阶段。",
+			FieldPath:  "business_stage_plan.stages[].targets[].selector",
+			Confidence: boolConfidence(selectorSatisfied),
+		},
+	}
+}
+
+func businessTargetFromVerifiedAction(action model.VerifiedInteractionAction) model.BusinessTargetCandidate {
+	return model.BusinessTargetCandidate{
+		ID:                 firstNonEmpty(action.ID, "target_verified_"+shortHash(action.Label+action.Selector)),
+		IntentGoalID:       action.IntentGoalID,
+		Label:              action.Label,
+		Kind:               action.Kind,
+		Selector:           action.Selector,
+		URL:                action.URL,
+		RouteRef:           action.RouteRef,
+		Route:              routePathFromCandidate(action.URL),
+		ComponentRef:       action.ComponentRef,
+		SelectorScore:      action.SelectorScore,
+		Confidence:         0.72,
+		IsVerified:         action.VerificationStatus == "verified",
+		VerificationStatus: action.VerificationStatus,
+		VerificationSource: action.VerificationSource,
+		EvidenceRefs:       action.EvidenceRefs,
+		Alternatives:       action.Alternatives,
+	}
+}
+
+func businessTargetFromProbe(probe model.InteractionProbe) model.BusinessTargetCandidate {
+	return model.BusinessTargetCandidate{
+		ID:                 firstNonEmpty(probe.ID, "target_probe_"+shortHash(probe.Label+probe.Selector)),
+		IntentGoalID:       probe.IntentGoalID,
+		Label:              probe.Label,
+		Kind:               probe.Kind,
+		Selector:           probe.Selector,
+		URL:                probe.URL,
+		RouteRef:           probe.RouteRef,
+		Route:              routePathFromCandidate(probe.URL),
+		ComponentRef:       probe.ComponentRef,
+		SelectorScore:      probe.SelectorScore,
+		Confidence:         maxFloat64(probe.Score/10, probe.Score),
+		IsVerified:         false,
+		VerificationStatus: "code_evidence",
+		VerificationSource: probe.Source,
+		EvidenceRefs:       probe.EvidenceRefs,
+		Alternatives:       probe.Alternatives,
+	}
+}
+
+func businessProbeAllowedForStage(spec stageSpec, probe model.InteractionProbe) bool {
+	if spec.kind != model.BusinessStageKindSessionSetup && (probe.IsChrome || looksLikeLoginAction(probe.Label, probe.Selector)) {
+		return false
+	}
+	if businessStageKindIsCore(spec.kind) && !probe.IsBusiness {
+		return false
+	}
+	if !businessActionMatchesStage(spec, probe.Label, probe.Kind, probe.Selector, "", probe.ComponentRef) {
+		return false
+	}
+	return true
+}
+
+func businessActionMatchesStage(spec stageSpec, label string, kind string, selector string, value string, componentRef string) bool {
+	text := strings.Join([]string{label, kind, selector, value, componentRef}, " ")
+	if containsAnyNormalized(text, spec.keywords...) {
+		return true
+	}
+	if spec.inputValue != "" && containsAnyNormalized(text, spec.inputValue) {
+		return true
+	}
+	switch spec.kind {
+	case model.BusinessStageKindBusinessInput:
+		return graphActionTypeFromKind(kind, selector) == model.GraphActionFill && containsAnyNormalized(text, "name", "项目", "input", "textarea")
+	case model.BusinessStageKindModeSelection:
+		return containsAnyNormalized(text, "mode", "构建", "build")
+	case model.BusinessStageKindBusinessSubmit:
+		return containsAnyNormalized(text, "submit", "start", "run", "generate", "build", "开始", "启动", "生成", "构建")
+	case model.BusinessStageKindSessionSetup:
+		return looksLikeLoginAction(label, selector) || containsAnyNormalized(text, "email", "password", "login", "signin", "登录", "密码")
+	default:
+		return false
+	}
+}
+
+func businessStageMatchesTraceKind(spec stageSpec, trace model.FeatureGoalTrace) bool {
+	switch spec.kind {
+	case model.BusinessStageKindBusinessInput:
+		return containsAnyNormalized(trace.IntentLabel, spec.inputValue, "项目名称", "project name")
+	case model.BusinessStageKindModeSelection:
+		return containsAnyNormalized(trace.IntentLabel, "构建模式", "build mode")
+	case model.BusinessStageKindBusinessSubmit:
+		return containsAnyNormalized(trace.IntentLabel, "agent", "构建", "build", "generate")
+	default:
+		return containsAnyNormalized(trace.IntentLabel, spec.actionLabel, spec.title)
+	}
+}
+
+func businessStageUncertainties(spec stageSpec, requirements []model.EvidenceRequirement, evidence []model.EvidenceRef) []model.StageUncertainty {
+	out := []model.StageUncertainty{}
+	for _, req := range requirements {
+		if req.Satisfied {
+			continue
+		}
+		blocking := req.Required && req.Kind == "route"
+		out = append(out, model.StageUncertainty{
+			ID:              "uncertainty_" + spec.id + "_" + req.Kind,
+			StageID:         "business_stage_" + spec.id,
+			Kind:            req.Kind,
+			Summary:         req.Summary,
+			Blocking:        blocking,
+			SuggestedAction: "继续读取与该需求目标相关的 route/component/API 代码，或让 server browser agent 在受约束范围内运行时确认。",
+			EvidenceRefs:    evidence,
+		})
+	}
+	return out
+}
+
+func businessStageWaitConditions(spec stageSpec) []string {
+	switch spec.kind {
+	case model.BusinessStageKindSessionSetup:
+		return []string{"domcontentloaded", "networkidle", "authenticated_workspace_visible"}
+	case model.BusinessStageKindObserveProgress:
+		return []string{"domcontentloaded", "networkidle", "progress_or_log_changes_visible"}
+	case model.BusinessStageKindFinalObserve:
+		return []string{"domcontentloaded", "final_state_visible"}
+	default:
+		return []string{"domcontentloaded", "networkidle", "target_state_visible"}
+	}
+}
+
+func businessStageConfidence(spec stageSpec, targets []model.BusinessTargetCandidate, requirements []model.EvidenceRequirement) float64 {
+	score := 0.58
+	if len(targets) > 0 {
+		score += 0.16
+	}
+	for _, req := range requirements {
+		if req.Satisfied {
+			score += 0.04
+		}
+	}
+	if spec.kind == model.BusinessStageKindObserveProgress || spec.kind == model.BusinessStageKindFinalObserve {
+		score += 0.06
+	}
+	return minFloat64(score, 0.92)
+}
+
+func businessStagePlanConfidence(stages []model.BusinessStage) float64 {
+	if len(stages) == 0 {
+		return 0
+	}
+	total := 0.0
+	for _, stage := range stages {
+		total += stage.Confidence
+	}
+	return minFloat64(total/float64(len(stages)), 0.94)
+}
+
+func businessStageKindIsCore(kind model.BusinessStageKind) bool {
+	switch kind {
+	case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
+		return true
+	default:
+		return false
+	}
+}
+
+func evidenceRefsForBusinessTargets(targets []model.BusinessTargetCandidate) []model.EvidenceRef {
+	refs := []model.EvidenceRef{}
+	for _, target := range targets {
+		refs = append(refs, target.EvidenceRefs...)
+	}
+	return uniqueEvidenceRefs(refs)
+}
+
+func uniqueBusinessTargetCandidates(targets []model.BusinessTargetCandidate) []model.BusinessTargetCandidate {
+	out := []model.BusinessTargetCandidate{}
+	seen := map[string]bool{}
+	for _, target := range targets {
+		key := firstNonEmpty(target.ID, target.Selector, target.ComponentRef, target.Label)
+		if key == "" {
+			continue
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, target)
+	}
+	return out
+}
+
+type businessRouteSet struct {
+	login         string
+	workspace     string
+	creation      string
+	projectDetail string
+	buildRunning  string
+}
+
+func businessRouteHints(project *model.ProjectContext, productMap *model.ProductMap, intelligence *model.ProjectIntelligencePack) businessRouteSet {
+	workspace := appWorkspaceRouteTemplate(intelligence)
+	if workspace == "" || workspace == "/" {
+		workspace = firstBusinessRouteFromProductMap(productMap, []string{"app", "dashboard", "workspace", "project"})
+	}
+	return businessRouteSet{
+		login:         userLoginRouteTemplate(intelligence),
+		workspace:     firstNonEmpty(workspace, routePathFromCandidate(project.ProductURL), "/"),
+		creation:      firstExistingRouteTemplate([]string{"/projects/new", "/project/new", "/app/projects/new", "/app"}, intelligence, firstNonEmpty(workspace, "/")),
+		projectDetail: dynamicProjectRouteTemplate(intelligence, "/project/:id"),
+		buildRunning:  projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, "/project/:id")),
+	}
+}
+
+func firstBusinessRouteFromProductMap(productMap *model.ProductMap, keywords []string) string {
+	if productMap == nil {
+		return ""
+	}
+	for _, route := range productMap.Routes {
+		if route == nil {
+			continue
+		}
+		if containsAnyNormalized(route.Path+" "+route.Name, keywords...) {
+			if path := routePathFromCandidate(route.Path); path != "" {
+				return path
+			}
+		}
+	}
+	for _, page := range productMap.Pages {
+		if page == nil {
+			continue
+		}
+		if containsAnyNormalized(page.URL+" "+page.Title, keywords...) {
+			if path := routePathFromCandidate(page.URL); path != "" {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+func businessStageIntentText(project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) string {
+	parts := []string{}
+	if project != nil {
+		parts = append(parts, project.ProductDescription, project.TargetAudience, strings.Join(project.MustShow, " "), strings.Join(project.MustNotShow, " "))
+		if project.Inputs != nil {
+			parts = append(parts, project.Inputs.RawUserPrompt)
+			for _, doc := range project.Inputs.RequirementDocuments {
+				parts = append(parts, doc.Title, doc.Body)
+			}
+		}
+	}
+	if brief != nil {
+		parts = append(parts, brief.Scenario, brief.Objective, strings.Join(brief.MustShow, " "), strings.Join(brief.MustNotShow, " "))
+	}
+	if report != nil && report.RequirementBrief != nil {
+		parts = append(parts, report.RequirementBrief.Scenario, report.RequirementBrief.Objective)
+	}
+	if intelligence != nil && intelligence.DemoIntent != nil {
+		parts = append(parts, intelligence.DemoIntent.Objective, intelligence.DemoIntent.TargetAudience)
+		for _, goal := range intelligence.DemoIntent.Goals {
+			parts = append(parts, goal.Label, goal.Kind, goal.PreferredAction, goal.TargetPageHint, goal.SuccessState, strings.Join(goal.TargetKeywords, " "))
+		}
+	}
+	return normalizeIntentText(strings.Join(parts, " "))
+}
+
+func intentIsObservationOnly(intentText string) bool {
+	if intentText == "" {
+		return false
+	}
+	return containsAnyNormalized(intentText, "只观察", "仅观察", "观察首页", "不执行真实业务动作", "不要执行", "inspect only", "observation only", "homepage only") &&
+		!containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "构建模式", "开始构建", "启动构建", "实际构建", "俄罗斯方块", "new project", "create project", "build mode", "start build")
+}
+
+func boolConfidence(ok bool) float64 {
+	if ok {
+		return 0.8
+	}
+	return 0.35
+}
+
+func maxFloat64(left float64, right float64) float64 {
+	if left > right {
+		return left
+	}
+	return right
+}

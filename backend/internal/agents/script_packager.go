@@ -295,6 +295,9 @@ func buildStageApprovalPlan(project *model.ProjectContext, report *model.Multimo
 			ID:                               "stage_" + step.ID,
 			Order:                            step.Order,
 			NodeID:                           step.NodeID,
+			BusinessStageID:                  businessStageIDForNode(node),
+			StageKind:                        businessStageKindForNode(node),
+			RouteState:                       businessRouteStateForNode(node),
 			Title:                            firstNonEmpty(step.Title, step.NodeID),
 			Objective:                        firstNonEmpty(step.BusinessValue, step.ExpectedOutcome, step.Narrative.Voiceover, step.Title),
 			BusinessIntent:                   firstNonEmpty(step.BusinessValue, step.Narrative.Voiceover, step.ExpectedOutcome),
@@ -355,6 +358,9 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 			StageID:                          stage.ID,
 			Order:                            stage.Order,
 			NodeID:                           stage.NodeID,
+			BusinessStageID:                  stage.BusinessStageID,
+			StageKind:                        stage.StageKind,
+			RouteState:                       stage.RouteState,
 			Objective:                        stage.Objective,
 			EntryRoute:                       stage.EntryRoute,
 			Route:                            stage.TargetRoute,
@@ -727,6 +733,36 @@ func scriptStepByNodeID(doc *model.ExecutionScriptDocument, nodeID string) *mode
 	return nil
 }
 
+func businessStageIDForNode(node *model.GraphNode) string {
+	if node == nil || node.Metadata == nil {
+		return ""
+	}
+	if value, ok := node.Metadata["business_stage_id"].(string); ok {
+		return value
+	}
+	return ""
+}
+
+func businessStageKindForNode(node *model.GraphNode) model.BusinessStageKind {
+	if node == nil || node.Metadata == nil {
+		return ""
+	}
+	if value, ok := node.Metadata["business_stage_kind"].(string); ok {
+		return model.BusinessStageKind(value)
+	}
+	return ""
+}
+
+func businessRouteStateForNode(node *model.GraphNode) model.BusinessRouteState {
+	if node == nil || node.Metadata == nil {
+		return ""
+	}
+	if value, ok := node.Metadata["business_route_state"].(string); ok {
+		return model.BusinessRouteState(value)
+	}
+	return ""
+}
+
 func browserAgentInteractionFromStep(step model.ScriptStep, evidence []model.EvidenceRef) model.BrowserAgentInteraction {
 	target := step.Action.Target
 	if target.Selector == "" {
@@ -882,6 +918,14 @@ func routeContractForNode(node *model.GraphNode, action model.ScriptActionInstru
 		EntryRoute: firstNonEmpty(previousRoute, "/"),
 		TargetURL:  firstNonEmpty(target.URL, action.Target.URL),
 	}
+	if node != nil {
+		if stageEntry, ok := node.Metadata["business_stage_entry_route"].(string); ok && strings.TrimSpace(stageEntry) != "" {
+			contract.EntryRoute = stageEntry
+		}
+		if expected, ok := node.Metadata["expected_route_after_action"].(string); ok && strings.TrimSpace(expected) != "" {
+			contract.ExpectedRouteAfterAction = expected
+		}
+	}
 	if contract.TargetURL == "" && node != nil {
 		contract.TargetURL = urlIfHTTP(node.PageRef)
 	}
@@ -911,7 +955,9 @@ func routeContractForNode(node *model.GraphNode, action model.ScriptActionInstru
 	}
 	contract.TargetRoute = route
 	contract.TargetRouteTemplate = routeTemplateForStage(route, semanticText, intelligence)
-	contract.ExpectedRouteAfterAction = expectedRouteAfterActionForStage(semanticText, contract.EntryRoute, contract.TargetRouteTemplate, intelligence)
+	if contract.ExpectedRouteAfterAction == "" {
+		contract.ExpectedRouteAfterAction = expectedRouteAfterActionForStage(semanticText, contract.EntryRoute, contract.TargetRouteTemplate, intelligence)
+	}
 	contract.CandidateRoutes = candidates
 	contract.RuntimeRouteVerificationRequired = true
 	if routeExactInArchitecture(contract.TargetRouteTemplate, intelligence) && contract.ExpectedRouteAfterAction == "" {
@@ -1881,7 +1927,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 				capture.FocusSelector = selector
 			}
 		}
-		if businessActionNeedsExecutableSelector(action.Type) && (!selectorUsableForBusinessAction(selector) || !nodeVerifiedForBusinessAction(node)) {
+		if businessActionNeedsExecutableSelector(action.Type) && !nodeAllowsRuntimeAdaptiveTarget(node) && (!selectorUsableForBusinessAction(selector) || !nodeVerifiedForBusinessAction(node)) {
 			action.Type = model.GraphActionInspect
 			action.Target.Selector = ""
 			target.Selector = ""
@@ -1938,6 +1984,19 @@ func nodeVerifiedForBusinessAction(node *model.GraphNode) bool {
 		return true
 	}
 	return false
+}
+
+func nodeAllowsRuntimeAdaptiveTarget(node *model.GraphNode) bool {
+	if node == nil || node.Metadata == nil {
+		return false
+	}
+	if _, ok := node.Metadata["business_stage_id"].(string); ok {
+		return true
+	}
+	if status, _ := node.Metadata["verification_status"].(string); status == "runtime_adaptive" || status == "business_stage_plan" {
+		return true
+	}
+	return node.Metadata["runtime_adaptive"] == true
 }
 
 func ensureRequiredValidationsForStep(node *model.GraphNode, action model.ScriptActionInstruction, target model.ScriptPageTarget, validations []model.ValidationSpec) []model.ValidationSpec {
@@ -2186,7 +2245,7 @@ func recordingRunSpecFromGraph(project *model.ProjectContext, graph *model.DemoW
 
 func scriptActionForNode(node *model.GraphNode) model.ScriptActionInstruction {
 	if node.ActionSpec != nil {
-		return model.ScriptActionInstruction{
+		action := model.ScriptActionInstruction{
 			Type:          node.ActionSpec.Type,
 			Target:        node.ActionSpec.Target,
 			Value:         node.ActionSpec.Value,
@@ -2197,6 +2256,18 @@ func scriptActionForNode(node *model.GraphNode) model.ScriptActionInstruction {
 			WaitUntil:     node.ActionSpec.WaitUntil,
 			Preconditions: node.ActionSpec.Preconditions,
 		}
+		if businessStageKindForNode(node) == model.BusinessStageKindSessionSetup && node.Metadata != nil {
+			action.Type = model.GraphActionFill
+			action.Value = ""
+			if secretRef, ok := node.Metadata["demo_password_secret_ref"].(string); ok {
+				action.SecretRef = secretRef
+			}
+			if usernameRef, ok := node.Metadata["demo_username_secret_ref"].(string); ok {
+				action.InputRef = usernameRef
+			}
+			action.Target.Label = firstNonEmpty(action.Target.Label, "登录表单")
+		}
+		return action
 	}
 	actionType := graphActionTypeFromKind(node.Action, node.Selector)
 	return model.ScriptActionInstruction{

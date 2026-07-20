@@ -716,6 +716,7 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
   const architecture = intelligence.architecture;
   const traceSteps = workspace.agentGraphTrace?.steps ?? [];
   const intentGoals = intelligence.demo_intent?.goals ?? [];
+  const businessStages = intelligence.business_stage_plan?.stages ?? [];
   const verifiedPlan = intelligence.verified_interaction_plan;
   const missingEvidence = intelligence.missing_evidence_report;
   return (
@@ -736,6 +737,25 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
         <Fact label="缺失证据" value={missingEvidence?.blocking ? "阻塞脚本生成" : missingEvidence ? "有提示" : "无阻塞"} />
         <Fact label="Source Digest" value={intelligence.source_digest_sha256 ?? "待生成"} />
       </div>
+      {businessStages.length > 0 ? (
+        <div className="runtime-log-list">
+          {businessStages.slice(0, 8).map((stage) => (
+            <div key={stage.id} className={`runtime-log-row ${stage.uncertainties?.some((item) => item.blocking) ? "warning" : "info"}`}>
+              <span>{stage.kind}</span>
+              <strong>{stage.title || stage.objective || stage.id}</strong>
+              <small>
+                {[
+                  stage.route_state,
+                  stage.entry_route,
+                  stage.expected_route_after_action,
+                  `${stage.duration_ms ?? 0}ms`,
+                  `${stage.targets?.length ?? 0} targets`,
+                ].filter(Boolean).join(" · ")}
+              </small>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {intentGoals.length > 0 ? (
         <div className="runtime-log-list">
           {intentGoals.slice(0, 5).map((goal) => {

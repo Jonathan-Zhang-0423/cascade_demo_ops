@@ -846,6 +846,7 @@ export type ProjectIntelligencePack = {
   feature_capabilities?: FeatureCapability[];
   feature_trace?: FeatureTraceResult;
   interaction_surfaces?: InteractionSurface[];
+  business_stage_plan?: BusinessStagePlan;
   verified_interaction_plan?: VerifiedInteractionPlan;
   missing_evidence_report?: MissingEvidenceReport;
   api_contracts?: APIContractSummary[];
@@ -922,6 +923,102 @@ export type FeatureGoalTrace = {
   evidence_refs?: EvidenceRef[];
   confidence?: number;
   missing_evidence?: string[];
+};
+
+export type BusinessStageKind =
+  | "session_setup"
+  | "business_action"
+  | "business_input"
+  | "mode_selection"
+  | "business_submit"
+  | "observe_progress"
+  | "final_observe"
+  | string;
+
+export type BusinessRouteState =
+  | "unauthenticated"
+  | "workspace"
+  | "creation_flow"
+  | "project_detail"
+  | "build_running"
+  | string;
+
+export type BusinessStagePlan = {
+  id: string;
+  project_id: string;
+  intent_id?: string;
+  schema_version?: string;
+  stages: BusinessStage[];
+  core_business_stage_count?: number;
+  blocking_uncertainties?: StageUncertainty[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+};
+
+export type BusinessStage = {
+  id: string;
+  order: number;
+  kind: BusinessStageKind;
+  title?: string;
+  objective?: string;
+  user_intent?: string;
+  route_state?: BusinessRouteState;
+  entry_route?: string;
+  expected_route_after_action?: string;
+  duration_ms?: number;
+  action: BusinessActionSemantics;
+  targets?: BusinessTargetCandidate[];
+  evidence_requirements?: EvidenceRequirement[];
+  uncertainties?: StageUncertainty[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type BusinessActionSemantics = {
+  type?: string;
+  label?: string;
+  input_semantic?: string;
+  input_value?: string;
+  input_ref?: string;
+  secret_ref?: string;
+  success_state?: string;
+  wait_conditions?: string[];
+  capture_points?: string[];
+  parameters?: Record<string, string>;
+  non_destructive?: boolean;
+};
+
+export type BusinessTargetCandidate = {
+  id: string;
+  intent_goal_id?: string;
+  label?: string;
+  kind?: string;
+  selector?: string;
+  url?: string;
+  route_ref?: string;
+  route?: string;
+  component_ref?: string;
+  role?: string;
+  text?: string;
+  test_id?: string;
+  selector_score?: number;
+  confidence?: number;
+  is_verified?: boolean;
+  verification_status?: string;
+  verification_source?: string;
+  evidence_refs?: EvidenceRef[];
+  alternatives?: SelectorCandidate[];
+};
+
+export type EvidenceRequirement = {
+  kind: string;
+  required: boolean;
+  satisfied: boolean;
+  summary?: string;
+  field_path?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
 };
 
 export type InteractionProbe = {
@@ -1901,6 +1998,9 @@ export type StageApprovalStage = {
   id: string;
   order: number;
   node_id: string;
+  business_stage_id?: string;
+  stage_kind?: BusinessStageKind;
+  route_state?: BusinessRouteState;
   title?: string;
   objective?: string;
   business_intent?: string;
@@ -1984,6 +2084,9 @@ export type BrowserAgentOutlineStage = {
   stage_id: string;
   order: number;
   node_id: string;
+  business_stage_id?: string;
+  stage_kind?: BusinessStageKind;
+  route_state?: BusinessRouteState;
   objective?: string;
   entry_route?: string;
   route?: string;

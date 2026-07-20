@@ -106,6 +106,93 @@ func TestGraphBuilderBlocksWhenOnlyChromeToggleExists(t *testing.T) {
 	}
 }
 
+func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
+	project := graphQualityProject()
+	stagePlan := &model.BusinessStagePlan{
+		ID:                     "business_stage_plan_test",
+		ProjectID:              project.ID,
+		SchemaVersion:          model.ProjectIntelligencePackSchemaVersion,
+		CoreBusinessStageCount: 2,
+		Stages: []model.BusinessStage{
+			{
+				ID:                       "business_stage_session_setup",
+				Order:                    1,
+				Kind:                     model.BusinessStageKindSessionSetup,
+				Title:                    "登录",
+				Objective:                "登录并进入工作台",
+				RouteState:               model.BusinessRouteStateUnauthenticated,
+				EntryRoute:               "/login",
+				ExpectedRouteAfterAction: "/app",
+				DurationMS:               10000,
+				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "登录", SuccessState: "进入工作台"},
+			},
+			{
+				ID:                       "business_stage_project_name_input",
+				Order:                    2,
+				Kind:                     model.BusinessStageKindBusinessInput,
+				Title:                    "填写项目名称",
+				Objective:                "填写俄罗斯方块项目名称",
+				RouteState:               model.BusinessRouteStateCreationFlow,
+				EntryRoute:               "/app",
+				ExpectedRouteAfterAction: "/app",
+				DurationMS:               10000,
+				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "项目名称", InputSemantic: "project_name", InputValue: "俄罗斯方块", SuccessState: "项目名称已填写"},
+				Targets:                  []model.BusinessTargetCandidate{{ID: "target_project_name", Label: "项目名称", Kind: "fill", Selector: "[data-testid='project-name']", SelectorScore: 100}},
+				EvidenceRefs:             []model.EvidenceRef{{ID: "ev_project_name", Kind: model.EvidenceKindSourceCode}},
+			},
+			{
+				ID:                       "business_stage_observe_agent_progress",
+				Order:                    3,
+				Kind:                     model.BusinessStageKindObserveProgress,
+				Title:                    "观察 agent 构建过程 60 秒",
+				Objective:                "持续观察 agent 实际构建过程",
+				RouteState:               model.BusinessRouteStateBuildRunning,
+				EntryRoute:               "/project/:id",
+				ExpectedRouteAfterAction: "/project/:id",
+				DurationMS:               60000,
+				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionWait), Label: "观察构建进度", SuccessState: "构建过程可见"},
+			},
+		},
+	}
+	intelligence := graphQualityIntelligence(
+		model.VerifiedInteractionAction{ID: "unrelated_sidebar", Label: "button sidebar toggle", Kind: "click", Selector: "[data-testid='button-sidebar-toggle']", IsBusiness: true, VerificationStatus: "verified", SelectorScore: 100},
+	)
+	intelligence.BusinessStagePlan = stagePlan
+
+	graph, err := NewGraphBuilderAgent().GenerateGraph(context.Background(), project, graphQualityProductMap(), graphQualityReport(project), intelligence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.Nodes) != len(stagePlan.Stages) {
+		t.Fatalf("graph should use one node per business stage, got %d want %d", len(graph.Nodes), len(stagePlan.Stages))
+	}
+	if graph.Nodes[1].ID != "business_stage_project_name_input" || graph.Nodes[1].ActionSpec.Type != model.GraphActionFill {
+		t.Fatalf("business input stage did not become fill node: %+v", graph.Nodes[1])
+	}
+	if got := graph.Nodes[1].ActionSpec.Value; got != "俄罗斯方块" {
+		t.Fatalf("project name semantic value lost: %q", got)
+	}
+	if graph.Nodes[2].ActionSpec.Type != model.GraphActionWait || graph.Nodes[2].DurationHintMS < 60000 {
+		t.Fatalf("observe_progress must be wait-only and keep 60s duration: %+v", graph.Nodes[2])
+	}
+	if graphNodeBySelector(graph, "[data-testid='button-sidebar-toggle']") != nil {
+		t.Fatal("verified interaction selector pool should not override business stage spine")
+	}
+
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, graphQualityReport(project), graphQualityProductMap(), graph, intelligence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := stageApprovalByNodeID(pkg.ExecutableBundle, "business_stage_project_name_input")
+	if stage == nil || stage.StageKind != model.BusinessStageKindBusinessInput || stage.RouteState != model.BusinessRouteStateCreationFlow {
+		t.Fatalf("stage approval did not preserve business stage metadata: %+v", stage)
+	}
+	outline := outlineStageByNodeID(pkg.ExecutableBundle, "business_stage_observe_agent_progress")
+	if outline == nil || outline.StageKind != model.BusinessStageKindObserveProgress || outline.DurationMS < 60000 {
+		t.Fatalf("outline did not preserve observe_progress metadata: %+v", outline)
+	}
+}
+
 func TestProjectIntelligenceTreatsDisplaySelectorsAsReadOnly(t *testing.T) {
 	if got := actionKindFromSelector("input[aria-label*='项目']"); got != "fill" {
 		t.Fatalf("expected aria-label input to be fillable, got %q", got)

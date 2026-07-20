@@ -144,6 +144,10 @@ type PageInteractionVerifierAgent interface {
 	VerifyInteractions(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, intelligence *model.ProjectIntelligencePack, credentials PageVerificationCredentials) (*model.VerifiedInteractionPlan, *model.MissingEvidenceReport, error)
 }
 
+type BusinessStagePlannerAgent interface {
+	PlanBusinessStages(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, intelligence *model.ProjectIntelligencePack, verifiedPlan *model.VerifiedInteractionPlan) (*model.BusinessStagePlan, error)
+}
+
 type GraphBuilderAgent interface {
 	GenerateGraph(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.DemoWorkflowGraph, error)
 }
@@ -161,18 +165,19 @@ type AssetGeneratorAgent interface {
 }
 
 type Dependencies struct {
-	InputContext        InputContextAgent
-	RequirementReader   RequirementReaderAgent
-	CodeReader          CodeReaderAgent
-	PageReader          PageReaderAgent
-	ProjectIntelligence ProjectIntelligenceAgent
-	Understanding       MultimodalUnderstandingAgent
-	ProductMap          ProductMapAgent
-	PageVerifier        PageInteractionVerifierAgent
-	GraphBuilder        GraphBuilderAgent
-	ScriptPackager      ScriptPackagerAgent
-	QAExecutor          QAExecutorAgent
-	AssetGenerator      AssetGeneratorAgent
+	InputContext         InputContextAgent
+	RequirementReader    RequirementReaderAgent
+	CodeReader           CodeReaderAgent
+	PageReader           PageReaderAgent
+	ProjectIntelligence  ProjectIntelligenceAgent
+	Understanding        MultimodalUnderstandingAgent
+	ProductMap           ProductMapAgent
+	PageVerifier         PageInteractionVerifierAgent
+	BusinessStagePlanner BusinessStagePlannerAgent
+	GraphBuilder         GraphBuilderAgent
+	ScriptPackager       ScriptPackagerAgent
+	QAExecutor           QAExecutorAgent
+	AssetGenerator       AssetGeneratorAgent
 }
 
 type ProgressLevel string
@@ -359,7 +364,18 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 		intelligence.VerifiedInteraction = verifiedPlan
 		intelligence.MissingEvidenceReport = missingReport
 	}
-	if missingReport != nil && missingReport.Blocking {
+	var businessStagePlan *model.BusinessStagePlan
+	if f.deps.BusinessStagePlanner != nil {
+		businessStagePlan, err = f.deps.BusinessStagePlanner.PlanBusinessStages(ctx, project, brief, report, productMap, intelligence, verifiedPlan)
+		if err != nil {
+			logNodeError(ctx, state.CurrentNode, nodeStart, err)
+			return fail(state, err), err
+		}
+		if intelligence != nil {
+			intelligence.BusinessStagePlan = businessStagePlan
+		}
+	}
+	if missingReport != nil && missingReport.Blocking && !businessStagePlanUsable(businessStagePlan) {
 		markReadinessBlockedByMissingEvidence(readiness, missingReport)
 		summary := missingReport.Summary
 		if summary == "" {
@@ -416,6 +432,22 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 		ElapsedMS: time.Since(startedAt).Milliseconds(),
 	})
 	return state, nil
+}
+
+func businessStagePlanUsable(plan *model.BusinessStagePlan) bool {
+	if plan == nil || len(plan.Stages) == 0 {
+		return false
+	}
+	if plan.CoreBusinessStageCount > 0 {
+		return true
+	}
+	for _, stage := range plan.Stages {
+		switch stage.Kind {
+		case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
+			return true
+		}
+	}
+	return false
 }
 
 // ApproveAndContinue resumes the flow after a human has reviewed and possibly

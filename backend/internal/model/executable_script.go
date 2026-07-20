@@ -158,6 +158,9 @@ type StageApprovalStage struct {
 	ID                               string                       `json:"id"`
 	Order                            int                          `json:"order"`
 	NodeID                           string                       `json:"node_id"`
+	BusinessStageID                  string                       `json:"business_stage_id,omitempty"`
+	StageKind                        BusinessStageKind            `json:"stage_kind,omitempty"`
+	RouteState                       BusinessRouteState           `json:"route_state,omitempty"`
 	Title                            string                       `json:"title,omitempty"`
 	Objective                        string                       `json:"objective,omitempty"`
 	BusinessIntent                   string                       `json:"business_intent,omitempty"`
@@ -241,6 +244,9 @@ type BrowserAgentOutlineStage struct {
 	StageID                          string                        `json:"stage_id"`
 	Order                            int                           `json:"order"`
 	NodeID                           string                        `json:"node_id"`
+	BusinessStageID                  string                        `json:"business_stage_id,omitempty"`
+	StageKind                        BusinessStageKind             `json:"stage_kind,omitempty"`
+	RouteState                       BusinessRouteState            `json:"route_state,omitempty"`
 	Objective                        string                        `json:"objective,omitempty"`
 	EntryRoute                       string                        `json:"entry_route,omitempty"`
 	Route                            string                        `json:"route,omitempty"`

@@ -93,6 +93,9 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 		intelligence = project.ProjectIntelligence
 	}
 	intelligence = ensureProjectIntelligenceForGraph(project, intelligence)
+	if intelligence != nil && intelligence.BusinessStagePlan != nil && len(intelligence.BusinessStagePlan.Stages) > 0 {
+		return a.generateGraphFromBusinessStagePlan(ctx, project, productMap, report, intelligence)
+	}
 	if err := requireVerifiedInteractionPlan(project, intelligence); err != nil {
 		return nil, err
 	}
@@ -408,6 +411,387 @@ func ensureProjectIntelligenceForGraph(project *model.ProjectContext, intelligen
 		return intelligence
 	}
 	return intelligence
+}
+
+func (a *GraphBuilderAgent) generateGraphFromBusinessStagePlan(ctx context.Context, project *model.ProjectContext, productMap *model.ProductMap, report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack) (*model.DemoWorkflowGraph, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	stagePlan := intelligence.BusinessStagePlan
+	if stagePlan == nil || len(stagePlan.Stages) == 0 {
+		return nil, errors.New("business stage plan is required before graph generation")
+	}
+	entryPoint := scopedProductURL(project, intelligence.RunIntentScope, firstNonEmpty(project.ProductURL, graphEntryPoint(project, productMap)))
+	if entryPoint == "" {
+		entryPoint = graphEntryPoint(project, productMap)
+	}
+	featureID, featureValue := primaryFeature(productMap)
+	featureValue = firstNonEmpty(project.ProductDescription, featureValue)
+	useCase := model.DemoUseCaseLaunch
+	if report != nil && report.RequirementBrief != nil && len(report.RequirementBrief.UseCases) > 0 {
+		useCase = report.RequirementBrief.UseCases[0]
+	} else if len(project.Goals) > 0 {
+		useCase = project.Goals[0].UseCase
+	}
+
+	graphID := fmt.Sprintf("graph_%d", time.Now().UnixNano())
+	graph := model.NewDemoWorkflowGraph(graphID, project.ID, entryPoint)
+	graph.Status = model.GraphStatusReviewReady
+	graph.Name = "业务阶段驱动的 Browser Agent 演示大纲"
+	graph.Summary = "按用户需求生成业务阶段状态机，再绑定代码/页面证据，交给云端 browser agent 在受约束范围内自适应执行。"
+	graph.Intent = &model.WorkflowIntent{
+		UseCase:            useCase,
+		Audience:           primaryAudience(project),
+		Objective:          firstNonEmpty(stagePlanObjective(stagePlan), featureValue),
+		ValueProposition:   featureValue,
+		PrimaryFeatureRefs: []string{featureID},
+		SuccessCriteria:    businessStageSuccessCriteria(stagePlan),
+		CTA:                "请审核业务阶段、输入语义、路由状态和 server agent 可修改边界。",
+	}
+	graph.Requirements = requirementsFromProject(project)
+	graph.Variables = append(graph.Variables, demoCredentialVariables(project)...)
+	graph.Nodes = make([]*model.GraphNode, 0, len(stagePlan.Stages))
+	for _, stage := range stagePlan.Stages {
+		node := graphNodeFromBusinessStage(project, stage, entryPoint, featureID)
+		if node != nil {
+			graph.Nodes = append(graph.Nodes, node)
+		}
+	}
+	if len(graph.Nodes) == 0 {
+		return nil, errors.New("business stage plan produced no graph nodes")
+	}
+	graph.Edges = sequentialGraphEdges(graph.Nodes)
+	graph.States = businessStageGraphStates(entryPoint, stagePlan, featureID)
+	graph.Validations = verifiedGraphValidations(entryPoint)
+	graph.Narratives = []*model.NarrativeSegment{{
+		ID:           "narrative_business_stage_workflow",
+		NodeRefs:     nodeIDs(graph.Nodes),
+		Title:        "业务阶段主线",
+		Summary:      firstNonEmpty(stagePlanObjective(stagePlan), featureValue),
+		Voiceover:    featureValue,
+		Tone:         project.BrandTone,
+		AudienceLens: project.TargetAudience,
+		EvidenceRefs: uniqueEvidenceRefs(append(reportEvidenceRefs(report), stagePlan.EvidenceRefs...)),
+	}}
+	graph.Assets = model.NewMVPAssetManifest()
+	graph.Assets.TargetDurationSec = maxInt(totalBusinessStageDurationMS(stagePlan)/1000, 60)
+	graph.Maintenance = &model.MaintenancePolicy{
+		UpdateTriggers:   []string{"requirement_changed", "business_stage_changed", "route_changed", "browser_agent_diagnostic"},
+		StalenessDays:    14,
+		RegressionChecks: []string{"verify_business_stage_plan", "run_browser_agent_outline"},
+	}
+	graph.EvidenceRefs = uniqueEvidenceRefs(append(intelligenceEvidenceRefs(intelligence), stagePlan.EvidenceRefs...))
+	graph.Provenance = &model.GraphProvenance{
+		CreatedBy:    "GraphBuilderAgent",
+		Model:        "deterministic_business_stage_plan_v1",
+		ProductMapID: productMapID(productMap),
+		EvidenceRefs: graph.EvidenceRefs,
+	}
+	if graph.Assets != nil {
+		graph.Assets.Brand = project.BrandKit
+		graph.Assets.Provenance = &model.AssetProvenance{WorkflowGraphID: graph.ID, GraphVersion: graph.Version, GeneratedBy: "GraphBuilderAgent"}
+	}
+	return graph, nil
+}
+
+func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.BusinessStage, entryPoint string, featureID string) *model.GraphNode {
+	actionType := businessStageGraphActionType(stage)
+	target := businessStageActionTarget(stage, entryPoint)
+	selector := target.Selector
+	targetURL := firstNonEmpty(target.URL, urlForBusinessStage(stage, entryPoint))
+	if target.URL == "" {
+		target.URL = targetURL
+	}
+	pageRef := firstNonEmpty(stage.EntryRoute, routePathFromCandidate(targetURL), entryPoint)
+	nodeType := model.GraphNodeTypeAction
+	if stage.Kind == model.BusinessStageKindSessionSetup {
+		nodeType = model.GraphNodeTypeStart
+	} else if stage.Kind == model.BusinessStageKindFinalObserve {
+		nodeType = model.GraphNodeTypeEnd
+	}
+	if stage.Kind == model.BusinessStageKindObserveProgress || stage.Kind == model.BusinessStageKindFinalObserve {
+		actionType = model.GraphActionWait
+		if stage.Kind == model.BusinessStageKindFinalObserve {
+			actionType = model.GraphActionInspect
+		}
+		target.Selector = ""
+		selector = ""
+	}
+	actionValue := stage.Action.InputValue
+	if stage.Kind == model.BusinessStageKindSessionSetup {
+		actionValue = ""
+	}
+	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup
+	validations := []model.ValidationSpec{businessStageValidation(stage, actionType, target, required)}
+	metadata := map[string]any{
+		"business_stage_id":           stage.ID,
+		"business_stage_kind":         string(stage.Kind),
+		"business_route_state":        string(stage.RouteState),
+		"business_stage_order":        stage.Order,
+		"business_stage_entry_route":  stage.EntryRoute,
+		"verification_status":         "business_stage_plan",
+		"runtime_adaptive":            true,
+		"expected_route_after_action": stage.ExpectedRouteAfterAction,
+	}
+	if len(stage.Uncertainties) > 0 {
+		metadata["uncertainty_count"] = len(stage.Uncertainties)
+	}
+	if stage.Kind == model.BusinessStageKindSessionSetup && project.DemoAccount != nil {
+		metadata["demo_username_secret_ref"] = project.DemoAccount.UsernameSecretRef
+		metadata["demo_password_secret_ref"] = project.DemoAccount.PasswordSecretRef
+	}
+	return &model.GraphNode{
+		ID:              stage.ID,
+		Action:          string(actionType),
+		Selector:        selector,
+		InputData:       actionValue,
+		ExpectedOutcome: firstNonEmpty(stage.Action.SuccessState, stage.Objective),
+		IsScreenshot:    true,
+		HasZoom:         required,
+		RetryPolicy:     2,
+		Type:            nodeType,
+		Title:           firstNonEmpty(stage.Title, string(stage.Kind)),
+		Goal:            firstNonEmpty(stage.Objective, stage.Action.Label),
+		PageRef:         pageRef,
+		FeatureRefs:     uniqueStrings([]string{featureID, stage.ID}),
+		ActionSpec: &model.GraphAction{
+			Type:      actionType,
+			Target:    target,
+			Value:     actionValue,
+			InputRef:  stage.Action.InputRef,
+			SecretRef: stage.Action.SecretRef,
+			TimeoutMS: maxInt(stage.DurationMS, 10000),
+			WaitUntil: businessStageWaitUntil(stage),
+		},
+		StateAfter: []model.StateAssertion{{
+			ID:           "state_after_" + stage.ID,
+			Kind:         businessStageStateAssertionKind(stage, actionType),
+			Target:       target,
+			Operator:     "is_visible",
+			Expected:     true,
+			Required:     required && actionType != model.GraphActionWait,
+			TimeoutMS:    12000,
+			EvidenceRefs: stage.EvidenceRefs,
+		}},
+		Validations: validations,
+		Narrative: &model.NarrativeCue{
+			Title:        firstNonEmpty(stage.Title, stage.Action.Label),
+			Voiceover:    firstNonEmpty(stage.Objective, stage.Action.SuccessState),
+			Caption:      firstNonEmpty(stage.Action.SuccessState, stage.Objective),
+			Callout:      firstNonEmpty(stage.Action.Label, stage.Title),
+			Tone:         project.BrandTone,
+			AudienceLens: project.TargetAudience,
+		},
+		Capture: &model.CaptureSpec{
+			Screenshot:    true,
+			Video:         true,
+			Zoom:          required,
+			Callout:       required,
+			FocusSelector: selector,
+			AssetRole:     "business_stage_" + string(stage.Kind),
+			MaskSelectors: maskSelectorsFromProject(project),
+		},
+		EvidenceRefs: uniqueEvidenceRefs(stage.EvidenceRefs),
+		FailurePolicy: &model.NodeFailurePolicy{
+			RetryAttempts: 2,
+			RepairPolicy: &model.RepairPolicy{
+				AllowSelectorRepair: true,
+				AllowDataRepair:     false,
+				AllowStepSkip:       false,
+				MaxAttempts:         2,
+			},
+		},
+		DurationHintMS: maxInt(stage.DurationMS, 10000),
+		Sensitive:      stage.Kind == model.BusinessStageKindSessionSetup,
+		Tags:           uniqueStrings([]string{"business_stage_plan", string(stage.Kind), string(stage.RouteState)}),
+		Metadata:       metadata,
+	}
+}
+
+func businessStageGraphActionType(stage model.BusinessStage) model.GraphActionType {
+	switch stage.Kind {
+	case model.BusinessStageKindSessionSetup:
+		return model.GraphActionNavigate
+	case model.BusinessStageKindBusinessInput:
+		return model.GraphActionFill
+	case model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessSubmit:
+		return model.GraphActionClick
+	case model.BusinessStageKindObserveProgress:
+		return model.GraphActionWait
+	case model.BusinessStageKindFinalObserve:
+		return model.GraphActionInspect
+	default:
+		return graphActionTypeFromKind(stage.Action.Type, "")
+	}
+}
+
+func businessStageActionTarget(stage model.BusinessStage, entryPoint string) model.ActionTarget {
+	target := model.ActionTarget{URL: urlForBusinessStage(stage, entryPoint)}
+	if len(stage.Targets) == 0 {
+		target.Label = stage.Action.Label
+		target.Text = stage.Action.Label
+		return target
+	}
+	best := stage.Targets[0]
+	for _, candidate := range stage.Targets {
+		if candidate.SelectorScore > best.SelectorScore {
+			best = candidate
+		}
+	}
+	target.URL = firstNonEmpty(best.URL, urlForBusinessStage(stage, entryPoint))
+	target.Selector = best.Selector
+	target.Label = firstNonEmpty(best.Label, stage.Action.Label)
+	target.Text = best.Text
+	target.Role = best.Role
+	target.TestID = best.TestID
+	target.ComponentRef = best.ComponentRef
+	target.EvidenceRefs = best.EvidenceRefs
+	target.SelectorAlternatives = append(target.SelectorAlternatives, best.Alternatives...)
+	for _, candidate := range stage.Targets {
+		if candidate.Selector != "" && candidate.Selector != target.Selector {
+			target.SelectorAlternatives = append(target.SelectorAlternatives, model.SelectorCandidate{
+				Kind:           "css",
+				Value:          candidate.Selector,
+				Confidence:     candidate.Confidence,
+				StabilityScore: float64(candidate.SelectorScore) / 100,
+				Source:         firstNonEmpty(candidate.VerificationSource, "business_stage_plan"),
+				EvidenceRefs:   candidate.EvidenceRefs,
+			})
+		}
+	}
+	target.SelectorAlternatives = uniqueSelectorCandidates(target.SelectorAlternatives)
+	return target
+}
+
+func businessStageValidation(stage model.BusinessStage, action model.GraphActionType, target model.ActionTarget, required bool) model.ValidationSpec {
+	kind := "element_visible"
+	expected := any(true)
+	if action == model.GraphActionNavigate {
+		kind = "url_matches"
+		expected = firstNonEmpty(target.URL, stage.EntryRoute)
+	} else if action == model.GraphActionWait || action == model.GraphActionInspect {
+		kind = "text_contains"
+		expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)
+		required = false
+	}
+	return model.ValidationSpec{
+		ID:           "validate_" + stage.ID,
+		Kind:         kind,
+		Target:       target,
+		Assertion:    firstNonEmpty(stage.Action.SuccessState, stage.Objective),
+		Expected:     expected,
+		Severity:     severityForBusinessStage(stage, required),
+		Required:     required,
+		EvidenceRefs: stage.EvidenceRefs,
+		RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2},
+	}
+}
+
+func businessStageStateAssertionKind(stage model.BusinessStage, action model.GraphActionType) string {
+	if action == model.GraphActionNavigate {
+		return "page_loaded"
+	}
+	if stage.Kind == model.BusinessStageKindObserveProgress || stage.Kind == model.BusinessStageKindFinalObserve {
+		return "observation"
+	}
+	return "dom_visible"
+}
+
+func severityForBusinessStage(stage model.BusinessStage, required bool) string {
+	if required {
+		return "blocking"
+	}
+	return "warning"
+}
+
+func businessStageWaitUntil(stage model.BusinessStage) string {
+	for _, condition := range stage.Action.WaitConditions {
+		if condition == "networkidle" || condition == "domcontentloaded" || condition == "load" {
+			return condition
+		}
+	}
+	return "networkidle"
+}
+
+func urlForBusinessStage(stage model.BusinessStage, entryPoint string) string {
+	if isHTTPURL(stage.EntryRoute) {
+		return stage.EntryRoute
+	}
+	if isHTTPURL(entryPoint) && strings.HasPrefix(stage.EntryRoute, "/") {
+		return strings.TrimRight(baseURL(entryPoint), "/") + stage.EntryRoute
+	}
+	return entryPoint
+}
+
+func businessStageKindIsCoreForGraph(kind model.BusinessStageKind) bool {
+	switch kind {
+	case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
+		return true
+	default:
+		return false
+	}
+}
+
+func businessStageSuccessCriteria(plan *model.BusinessStagePlan) []string {
+	out := []string{"业务阶段顺序必须与用户需求一致", "登录仅作为 session_setup 前置条件", "server browser agent 只能修正 selector/等待/探索路径"}
+	if plan != nil {
+		for _, stage := range plan.Stages {
+			if stage.Action.SuccessState != "" {
+				out = append(out, stage.Action.SuccessState)
+			}
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func stagePlanObjective(plan *model.BusinessStagePlan) string {
+	if plan == nil {
+		return ""
+	}
+	parts := []string{}
+	for _, stage := range plan.Stages {
+		if stage.Kind == model.BusinessStageKindFinalObserve {
+			continue
+		}
+		parts = append(parts, stage.Objective)
+	}
+	return strings.Join(nonEmptyStrings(parts...), "；")
+}
+
+func businessStageGraphStates(entryPoint string, plan *model.BusinessStagePlan, featureID string) []*model.GraphState {
+	states := []*model.GraphState{{
+		ID:          "state_product_entry",
+		Name:        "产品入口已加载",
+		Kind:        "page",
+		URLPattern:  entryPoint,
+		DOMHints:    []model.SelectorCandidate{{Kind: "css", Value: "body", Confidence: 0.6, Source: "business_stage_plan"}},
+		FeatureRefs: []string{featureID},
+	}}
+	if plan == nil {
+		return states
+	}
+	for _, stage := range plan.Stages {
+		states = append(states, &model.GraphState{
+			ID:           "state_" + stage.ID,
+			Name:         firstNonEmpty(stage.Title, string(stage.RouteState)),
+			Kind:         string(stage.RouteState),
+			URLPattern:   firstNonEmpty(stage.EntryRoute, stage.ExpectedRouteAfterAction, entryPoint),
+			FeatureRefs:  []string{featureID, stage.ID},
+			EvidenceRefs: stage.EvidenceRefs,
+		})
+	}
+	return states
+}
+
+func totalBusinessStageDurationMS(plan *model.BusinessStagePlan) int {
+	total := 0
+	if plan == nil {
+		return total
+	}
+	for _, stage := range plan.Stages {
+		total += maxInt(stage.DurationMS, 10000)
+	}
+	return total
 }
 
 func demoIntentFromProjectContext(project *model.ProjectContext) *model.DemoIntentSpec {

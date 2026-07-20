@@ -41,18 +41,19 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	}
 	llmRouter := llm.NewRouter(runtime)
 	flow, err := orchestrator.NewCascadeFlow(orchestrator.Dependencies{
-		InputContext:        agents.NewInputContextAgent(),
-		RequirementReader:   agents.NewRequirementReaderAgentWithLLM(llmRouter),
-		CodeReader:          agents.NewCodeReaderAgentWithLLM(llmRouter),
-		PageReader:          agents.NewPageReaderAgent(),
-		ProjectIntelligence: agents.NewProjectIntelligenceGraphWithLLM(llmRouter),
-		Understanding:       agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
-		ProductMap:          agents.NewProductMapAgentWithLLM(llmRouter),
-		PageVerifier:        agents.NewPageInteractionVerifierAgentWithRuntime(runtime),
-		GraphBuilder:        agents.NewGraphBuilderAgentWithLLM(llmRouter),
-		ScriptPackager:      agents.NewScriptPackagerAgentWithLLM(llmRouter),
-		QAExecutor:          agents.NewQAExecutorAgent(),
-		AssetGenerator:      agents.NewAssetGeneratorAgent(),
+		InputContext:         agents.NewInputContextAgent(),
+		RequirementReader:    agents.NewRequirementReaderAgentWithLLM(llmRouter),
+		CodeReader:           agents.NewCodeReaderAgentWithLLM(llmRouter),
+		PageReader:           agents.NewPageReaderAgent(),
+		ProjectIntelligence:  agents.NewProjectIntelligenceGraphWithLLM(llmRouter),
+		Understanding:        agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
+		ProductMap:           agents.NewProductMapAgentWithLLM(llmRouter),
+		PageVerifier:         agents.NewPageInteractionVerifierAgentWithRuntime(runtime),
+		BusinessStagePlanner: agents.NewBusinessStagePlannerAgent(),
+		GraphBuilder:         agents.NewGraphBuilderAgentWithLLM(llmRouter),
+		ScriptPackager:       agents.NewScriptPackagerAgentWithLLM(llmRouter),
+		QAExecutor:           agents.NewQAExecutorAgent(),
+		AssetGenerator:       agents.NewAssetGeneratorAgent(),
 	})
 	if err != nil {
 		return nil, err
@@ -99,7 +100,14 @@ func (s *Service) LoadProject(ctx context.Context, projectID string) (*orchestra
 }
 
 func (s *Service) GenerateExecutionPackage(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
-	return s.CreateProject(ctx, input)
+	state, err := s.CreateProject(ctx, input)
+	if err != nil {
+		return state, err
+	}
+	if stateHasNoCoreBusinessAction(state) {
+		return state, errors.New("missing verified interaction evidence: execution package has no real business action")
+	}
+	return state, nil
 }
 
 func (s *Service) RegenerateExecutionPackage(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
@@ -111,6 +119,16 @@ func (s *Service) RegenerateExecutionPackage(ctx context.Context, projectID stri
 		return nil, errors.New("project context is missing")
 	}
 	return s.CreateProject(ctx, userInputFromProjectContext(state.ProjectContext))
+}
+
+func stateHasNoCoreBusinessAction(state *orchestrator.CascadeState) bool {
+	if state == nil {
+		return true
+	}
+	if state.ProjectIntelligence != nil && state.ProjectIntelligence.BusinessStagePlan != nil {
+		return state.ProjectIntelligence.BusinessStagePlan.CoreBusinessStageCount == 0
+	}
+	return !scriptDocumentHasBusinessAction(state.ScriptDocument)
 }
 
 func (s *Service) SaveProjectInput(ctx context.Context, projectID string, inputs model.ProjectInputBundle) (*model.ProjectContext, error) {
