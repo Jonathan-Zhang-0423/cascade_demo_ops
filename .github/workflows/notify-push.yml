@@ -1,0 +1,52 @@
+name: Notify on Push
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment push summary on head commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const isDispatch = context.eventName === 'workflow_dispatch';
+            const after = context.payload.after;
+            const commits = context.payload.commits || [];
+            if (!isDispatch && (!after || /^0+$/.test(after))) {
+              core.info('Branch deletion push; skipping.');
+              return;
+            }
+            if (!isDispatch && commits.length === 0) {
+              core.info('No commits in payload; skipping.');
+              return;
+            }
+            const branch = context.ref.replace('refs/heads/', '');
+            const sha = isDispatch ? context.sha : after;
+            let body;
+            if (isDispatch) {
+              body = `🔔 @snowtownseal Notification workflow test on \`${branch}\` (manual trigger).`;
+            } else {
+              const pusher = context.payload.pusher?.name || 'unknown';
+              const lines = commits.map((c) => {
+                const msg = (c.message || '').split('\n')[0];
+                const who = (c.author && (c.author.username || c.author.name)) || 'unknown';
+                return `- \`${c.id.slice(0, 7)}\` ${msg} — ${who}`;
+              });
+              body = [
+                `🔔 @snowtownseal New push to \`${branch}\` by **${pusher}** (${commits.length} commit${commits.length > 1 ? 's' : ''})`,
+                '',
+                ...lines,
+                '',
+                `[Compare changes](${context.payload.compare})`,
+              ].join('\n');
+            }
+            await github.rest.repos.createCommitComment({ owner, repo, commit_sha: sha, body });
+            core.info(`Comment created on ${sha}`);
