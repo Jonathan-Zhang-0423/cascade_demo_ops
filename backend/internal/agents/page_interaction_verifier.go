@@ -569,6 +569,7 @@ func verifyFromPageEvidence(project *model.ProjectContext, intelligence *model.P
 		missing.Blocking = true
 		missing.Summary = "no verified business action: 页面材料没有确认任何可执行业务动作，已阻止生成录制脚本。"
 	} else if len(missing.Items) > 0 {
+		downgradeMissingEvidenceItems(missing.Items)
 		missing.Summary = "部分候选动作缺少页面预扫描，已只保留页面材料验证过的动作。"
 	}
 	if len(missing.Items) > 0 {
@@ -629,6 +630,15 @@ func nonBlockingEvidenceFallbackReport(project *model.ProjectContext, intelligen
 		})
 	}
 	return report
+}
+
+func downgradeMissingEvidenceItems(items []model.MissingEvidenceItem) {
+	for index := range items {
+		items[index].Severity = "warning"
+		if items[index].SuggestedAction == "" {
+			items[index].SuggestedAction = "服务器 browser agent 将在产品域内自适应探索；如仍失败会返回 failure_diagnostic 和 repair_request。"
+		}
+	}
 }
 
 func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, response interactionVerifierResponse, byID map[string]model.InteractionProbe) *model.VerifiedInteractionPlan {

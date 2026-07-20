@@ -288,6 +288,7 @@ func readStructuredCodeSnapshotFromCandidates(ctx context.Context, snapshot *mod
 		inspectFilesystemRoutes(rel, pathHash, snapshot)
 		inspectRoutes(text, pathHash, snapshot)
 		inspectSelectors(text, pathHash, snapshot)
+		inspectSemanticControls(text, pathHash, snapshot)
 		inspectComponents(name, text, pathHash, snapshot)
 		inspectAPIs(text, pathHash, snapshot)
 		inspectDataModels(text, pathHash, snapshot)
@@ -2770,6 +2771,102 @@ func inspectSelectors(text string, pathHash string, snapshot *model.CodeUndersta
 	}
 }
 
+func inspectSemanticControls(text string, pathHash string, snapshot *model.CodeUnderstandingSnapshot) {
+	add := func(kind string, selector string, label string, confidence float64, stability float64) {
+		selector = strings.TrimSpace(selector)
+		label = strings.TrimSpace(label)
+		if selector == "" || !semanticControlLabelAllowed(label) || selectorLooksGeneric(selector) || selectorLooksReadOnlySurface(selector) {
+			return
+		}
+		if actionLooksLikeChromeControl(label, selector) && !semanticControlLabelLooksBusiness(label) {
+			return
+		}
+		snapshot.Selectors = append(snapshot.Selectors, model.SelectorInsight{
+			Kind:               kind,
+			Value:              selector,
+			FilePathHashSHA256: pathHash,
+			StabilityScore:     stability,
+			Confidence:         confidence,
+			EvidenceRefs:       []model.EvidenceRef{codeEvidenceRef("semantic_selector", pathHash, selector)},
+		})
+	}
+	for _, tagMatch := range semanticControlTagPattern.FindAllStringSubmatch(text, 40) {
+		if len(tagMatch) < 2 {
+			continue
+		}
+		tagText := tagMatch[0]
+		tag := strings.ToLower(tagMatch[1])
+		for _, attrMatch := range semanticAttrPattern.FindAllStringSubmatch(tagText, 8) {
+			if len(attrMatch) < 3 {
+				continue
+			}
+			attr := strings.ToLower(attrMatch[1])
+			value := cleanSemanticControlLabel(attrMatch[2])
+			switch attr {
+			case "aria-label":
+				add("css", `[aria-label*="`+escapeDoubleQuotedSelectorValue(value)+`"]`, value, 0.68, 0.74)
+			case "placeholder":
+				if tag == "input" || tag == "textarea" {
+					add("css", `[`+attr+`*="`+escapeDoubleQuotedSelectorValue(value)+`"]`, value, 0.66, 0.7)
+				}
+			case "name":
+				if tag == "input" || tag == "textarea" || tag == "select" {
+					add("css", tag+`[name="`+escapeDoubleQuotedSelectorValue(value)+`"]`, value, 0.62, 0.66)
+				}
+			}
+		}
+	}
+	for _, match := range buttonTextPattern.FindAllStringSubmatch(text, 30) {
+		if len(match) < 2 {
+			continue
+		}
+		label := cleanSemanticControlLabel(match[1])
+		add("text", `button:has-text("`+escapeDoubleQuotedSelectorValue(label)+`")`, label, 0.66, 0.62)
+	}
+	for _, match := range linkTextPattern.FindAllStringSubmatch(text, 20) {
+		if len(match) < 2 {
+			continue
+		}
+		label := cleanSemanticControlLabel(match[1])
+		add("text", `a:has-text("`+escapeDoubleQuotedSelectorValue(label)+`")`, label, 0.6, 0.58)
+	}
+}
+
+func cleanSemanticControlLabel(value string) string {
+	value = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(value, " ")
+	value = strings.TrimSpace(value)
+	value = whitespacePattern.ReplaceAllString(value, " ")
+	return value
+}
+
+func semanticControlLabelAllowed(label string) bool {
+	label = strings.TrimSpace(label)
+	if len([]rune(label)) < 2 || len([]rune(label)) > 60 {
+		return false
+	}
+	if strings.ContainsAny(label, "{}<>`") || strings.Contains(label, "://") || looksSensitiveLiteral(label) {
+		return false
+	}
+	lower := strings.ToLower(label)
+	if containsAny(lower, "authorization", "cookie", "bearer ", "api key", "private key") {
+		return false
+	}
+	return true
+}
+
+func semanticControlLabelLooksBusiness(label string) bool {
+	return containsAnyNormalized(label,
+		"create", "new", "project", "submit", "save", "generate", "build", "start", "run", "confirm", "next",
+		"新建", "创建", "项目", "提交", "保存", "生成", "构建", "开始", "启动", "确认", "下一步",
+	)
+}
+
+func escapeDoubleQuotedSelectorValue(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	return value
+}
+
 func inspectComponents(name string, text string, pathHash string, snapshot *model.CodeUnderstandingSnapshot) {
 	for _, match := range componentPattern.FindAllStringSubmatch(text, 12) {
 		if len(match) < 2 {
@@ -3135,9 +3232,13 @@ func hashBytes(data []byte) string {
 }
 
 var (
-	routePattern     = regexp.MustCompile(`["'](\/[A-Za-z0-9_\-\/:{}.*?=&%]+)["']`)
-	testIDPattern    = regexp.MustCompile(`(?:data-testid=["']|getByTestId\(["'])([A-Za-z0-9_\-:.]+)`)
-	componentPattern = regexp.MustCompile(`(?:function|const|class)\s+([A-Z][A-Za-z0-9_]+)`)
-	apiPattern       = regexp.MustCompile(`["'](\/api\/[A-Za-z0-9_\-\/:{}.*?=&%]+)["']`)
-	dataModelPattern = regexp.MustCompile(`(?:type|interface|struct)\s+([A-Z][A-Za-z0-9_]+)`)
+	routePattern              = regexp.MustCompile(`["'](\/[A-Za-z0-9_\-\/:{}.*?=&%]+)["']`)
+	testIDPattern             = regexp.MustCompile(`(?:data-testid=["']|getByTestId\(["'])([A-Za-z0-9_\-:.]+)`)
+	semanticControlTagPattern = regexp.MustCompile(`(?is)<(input|textarea|select|button|a)\b[^>]*>`)
+	semanticAttrPattern       = regexp.MustCompile(`(?is)\b(aria-label|placeholder|name)=["']([^"']{1,80})["']`)
+	buttonTextPattern         = regexp.MustCompile(`(?is)<button\b[^>]*>([^<>{}]{1,80})</button>`)
+	linkTextPattern           = regexp.MustCompile(`(?is)<a\b[^>]*>([^<>{}]{1,80})</a>`)
+	componentPattern          = regexp.MustCompile(`(?:function|const|class)\s+([A-Z][A-Za-z0-9_]+)`)
+	apiPattern                = regexp.MustCompile(`["'](\/api\/[A-Za-z0-9_\-\/:{}.*?=&%]+)["']`)
+	dataModelPattern          = regexp.MustCompile(`(?:type|interface|struct)\s+([A-Z][A-Za-z0-9_]+)`)
 )

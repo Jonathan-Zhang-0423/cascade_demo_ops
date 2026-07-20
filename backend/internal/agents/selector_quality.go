@@ -79,6 +79,7 @@ func selectorLooksLikeChromeControl(selector string) bool {
 		"menu", "nav", "navigation", "breadcrumb", "header", "footer",
 		"theme", "avatar", "profile", "account-menu", "dropdown", "drawer",
 		"layout", "shell", "chrome",
+		"侧边栏", "菜单", "导航", "面包屑", "页头", "页脚", "主题", "头像", "个人资料", "账户", "抽屉", "折叠", "展开",
 	) {
 		return false
 	}
@@ -98,6 +99,7 @@ func actionLooksLikeChromeControl(label string, selector string) bool {
 		"menu", "nav", "navigation", "breadcrumb", "header", "footer",
 		"theme", "avatar", "profile", "account menu", "dropdown", "drawer",
 		"layout", "shell", "chrome",
+		"侧边栏", "菜单", "导航", "面包屑", "页头", "页脚", "主题", "头像", "个人资料", "账户", "抽屉", "折叠", "展开",
 	) {
 		return false
 	}

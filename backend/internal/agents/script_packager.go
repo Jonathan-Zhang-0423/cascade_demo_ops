@@ -1749,7 +1749,7 @@ func uncertaintyReportForBundle(project *model.ProjectContext, intelligence *mod
 				ID:              item.ID,
 				Kind:            item.MissingKind,
 				Summary:         item.Message,
-				Blocking:        item.Severity == "blocking" || intelligence.MissingEvidenceReport.Blocking,
+				Blocking:        missingEvidenceItemBlocks(intelligence.MissingEvidenceReport, item),
 				SuggestedAction: item.SuggestedAction,
 				EvidenceRefs:    item.EvidenceRefs,
 			})
@@ -1759,6 +1759,13 @@ func uncertaintyReportForBundle(project *model.ProjectContext, intelligence *mod
 		items = append(items, model.StageUncertainty{ID: "uncertain_graph_empty_" + shortHash(project.ID), Kind: "workflow_graph", Summary: "执行图为空，无法生成 stage 大纲。", Blocking: true})
 	}
 	return items
+}
+
+func missingEvidenceItemBlocks(report *model.MissingEvidenceReport, item model.MissingEvidenceItem) bool {
+	if report == nil || !report.Blocking {
+		return false
+	}
+	return item.Severity == "" || item.Severity == "blocking"
 }
 
 func confidenceForStage(node *model.GraphNode, intelligence *model.ProjectIntelligencePack) float64 {

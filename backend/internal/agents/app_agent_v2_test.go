@@ -187,6 +187,62 @@ func TestCodeReaderInfersFilesystemRoutesFromSelectedFiles(t *testing.T) {
 	}
 }
 
+func TestCodeReaderExtractsSemanticControlSelectors(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"next":"latest","react":"latest"}}`)
+	writeFixtureFile(t, root, "src/app/workspace/projects/new/page.tsx", `
+		export default function NewProjectPage() {
+			return <form>
+				<input aria-label="项目名称" placeholder="项目名称" name="projectName" />
+				<button>新建项目</button>
+				<button>菜单</button>
+				<a>打开项目</a>
+			</form>
+		}
+	`)
+	project := &model.ProjectContext{
+		ID:                 "project_semantic_controls",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示新建项目，项目名称俄罗斯方块，构建模式",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_semantic_controls",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_semantic_controls",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"新建项目", "俄罗斯方块"}}
+	agent := NewCodeReaderAgent()
+	agent.Budget = model.CodeReadBudget{
+		Mode:                   "tool_driven_intent_drilldown",
+		RepoIndexFileLimit:     1,
+		DrilldownRounds:        1,
+		FilesPerRound:          1,
+		TotalFileLimit:         3,
+		MaxFileBytes:           80 * 1024,
+		ToolSearchFileLimit:    20,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  8,
+	}
+
+	snapshots, err := agent.ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	for _, selector := range []string{`[aria-label*="项目名称"]`, `[placeholder*="项目名称"]`, `input[name="projectName"]`, `button:has-text("新建项目")`, `a:has-text("打开项目")`} {
+		if !selectorInsightContains(snapshot.Selectors, selector) {
+			t.Fatalf("expected semantic selector %s, got %+v", selector, snapshot.Selectors)
+		}
+	}
+	if selectorInsightContains(snapshot.Selectors, `button:has-text("菜单")`) {
+		t.Fatalf("chrome menu text should not become semantic business selector: %+v", snapshot.Selectors)
+	}
+	if !routeInsightContains(snapshot.Routes, "/workspace/projects/new") {
+		t.Fatalf("semantic control fixture should retain filesystem route evidence, got %+v", snapshot.Routes)
+	}
+}
+
 func TestFilesystemRoutesForRelCoversCommonFileRouters(t *testing.T) {
 	cases := map[string]string{
 		"src/app/workspace/projects/[id]/page.tsx": "/workspace/projects/:id",
