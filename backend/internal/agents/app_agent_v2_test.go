@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,6 +79,48 @@ func TestCodeReaderScopesEvidenceToIntentAndFiltersNoise(t *testing.T) {
 	}
 	if selectorInsightContains(snapshot.Selectors, "[data-testid='button-sidebar-toggle']") {
 		t.Fatalf("chrome selector should not survive intent-scoped selector evidence: %+v", snapshot.Selectors)
+	}
+}
+
+func TestProjectInvestigationCollectCodeCandidatesUsesGitDiscoveryFirst(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	root := t.TempDir()
+	writeFixtureFile(t, root, ".gitignore", "ignored/\n")
+	writeFixtureFile(t, root, "src/pages/projects/NewProject.tsx", `
+		export function NewProjectPage() {
+			return <button data-testid="new-project">新建项目</button>
+		}
+	`)
+	writeFixtureFile(t, root, "src/pages/projects/NewlyAdded.tsx", `
+		export function NewlyAdded() {
+			return <button data-testid="newly-added">Newly added</button>
+		}
+	`)
+	writeFixtureFile(t, root, "ignored/IgnoredPage.tsx", `
+		export function IgnoredPage() {
+			return <button data-testid="ignored-page">Ignored</button>
+		}
+	`)
+	if err := exec.Command("git", "-C", root, "init").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "-C", root, "add", ".gitignore", "src/pages/projects/NewProject.tsx").Run(); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := collectCodeCandidates(context.Background(), root, 80*1024, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !candidateRelContains(candidates, "src/pages/projects/NewProject.tsx") {
+		t.Fatalf("expected git-discovered tracked file in candidates, got %+v", candidates)
+	}
+	if !candidateRelContains(candidates, "src/pages/projects/NewlyAdded.tsx") {
+		t.Fatalf("expected git-discovered untracked file in candidates, got %+v", candidates)
+	}
+	if candidateRelContains(candidates, "ignored/IgnoredPage.tsx") {
+		t.Fatalf("expected ignored file to stay out of candidates, got %+v", candidates)
 	}
 }
 
@@ -1524,41 +1567,8 @@ func writeFixtureFile(t *testing.T, root string, rel string, content string) {
 
 func collectCodeCandidatesForTest(t *testing.T, root string, project *model.ProjectContext, brief *model.RequirementBrief) []codeCandidateFile {
 	t.Helper()
-	candidates := []codeCandidateFile{}
-	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		name := entry.Name()
-		if entry.IsDir() {
-			if shouldSkipDir(name) && path != root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !isScannableFile(name) {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			rel = name
-		}
-		if shouldSkipCodeFileRel(rel, name) {
-			return nil
-		}
-		candidates = append(candidates, codeCandidateFile{
-			path:  path,
-			rel:   rel,
-			name:  name,
-			size:  info.Size(),
-			score: codeFilePriority(rel, name, project, brief),
-		})
-		return nil
-	}); err != nil {
+	candidates, err := collectCodeCandidates(context.Background(), root, 80*1024, project, brief)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return candidates

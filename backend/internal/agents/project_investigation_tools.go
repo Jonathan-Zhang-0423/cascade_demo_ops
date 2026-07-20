@@ -63,8 +63,18 @@ func collectCodeCandidates(ctx context.Context, root string, maxFileBytes int64,
 		return nil, nil
 	}
 	root = filepath.Clean(root)
+	if rels, ok := gitDiscoveredRelativeFiles(ctx, root); ok {
+		candidates := codeCandidatesFromRelativePaths(root, rels, maxFileBytes, project, brief)
+		if len(candidates) > 0 {
+			return candidates, nil
+		}
+	}
+	return walkCodeCandidates(ctx, root, maxFileBytes, project, brief)
+}
+
+func walkCodeCandidates(ctx context.Context, root string, maxFileBytes int64, project *model.ProjectContext, brief *model.RequirementBrief) ([]codeCandidateFile, error) {
 	candidates := []codeCandidateFile{}
-	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
@@ -104,13 +114,88 @@ func collectCodeCandidates(ctx context.Context, root string, maxFileBytes int64,
 	if err != nil {
 		return nil, err
 	}
+	sortCodeCandidates(candidates)
+	return candidates, nil
+}
+
+func gitDiscoveredRelativeFiles(ctx context.Context, root string) ([]string, bool) {
+	if strings.TrimSpace(root) == "" {
+		return nil, false
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil, false
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, "git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	output, err := cmd.Output()
+	if cmdCtx.Err() != nil || err != nil {
+		return nil, false
+	}
+	values := []string{}
+	for _, raw := range strings.Split(string(output), "\x00") {
+		rel := strings.TrimSpace(raw)
+		if rel == "" {
+			continue
+		}
+		values = append(values, rel)
+	}
+	values = uniqueStrings(values)
+	if len(values) == 0 {
+		return nil, false
+	}
+	return values, true
+}
+
+func codeCandidatesFromRelativePaths(root string, rels []string, maxFileBytes int64, project *model.ProjectContext, brief *model.RequirementBrief) []codeCandidateFile {
+	candidates := []codeCandidateFile{}
+	seen := map[string]bool{}
+	for _, rel := range rels {
+		normalized, ok := safeRelativeCodePath(rel)
+		if !ok || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		path := filepath.Join(root, filepath.FromSlash(normalized))
+		fileInfo, err := os.Stat(path)
+		if err != nil || fileInfo.IsDir() || (maxFileBytes > 0 && fileInfo.Size() > maxFileBytes) {
+			continue
+		}
+		name := filepath.Base(normalized)
+		if !isScannableFile(name) || shouldSkipCodeFileRel(normalized, name) {
+			continue
+		}
+		candidates = append(candidates, codeCandidateFile{
+			path:  path,
+			rel:   normalized,
+			name:  name,
+			size:  fileInfo.Size(),
+			score: codeFilePriority(normalized, name, project, brief),
+		})
+	}
+	sortCodeCandidates(candidates)
+	return candidates
+}
+
+func safeRelativeCodePath(rel string) (string, bool) {
+	rel = strings.TrimSpace(filepath.ToSlash(rel))
+	if rel == "" || filepath.IsAbs(rel) || strings.Contains(rel, "\x00") {
+		return "", false
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, ":") {
+		return "", false
+	}
+	return clean, true
+}
+
+func sortCodeCandidates(candidates []codeCandidateFile) {
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].score == candidates[j].score {
 			return filepath.ToSlash(candidates[i].rel) < filepath.ToSlash(candidates[j].rel)
 		}
 		return candidates[i].score > candidates[j].score
 	})
-	return candidates, nil
 }
 
 func (s *ProjectInvestigationToolSuite) shellMetadataToolCall(ctx context.Context, root string, candidates []codeCandidateFile) model.CodeInvestigationToolCall {
