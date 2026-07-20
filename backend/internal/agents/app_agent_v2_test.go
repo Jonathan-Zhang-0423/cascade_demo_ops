@@ -947,6 +947,52 @@ func TestProjectInvestigationToolSuiteRunsEvidenceReviewAndAdaptiveNextQuery(t *
 	}
 }
 
+func TestProjectInvestigationToolSuiteDoesNotRunAPIHandlerSearchForPureUIRound(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/orbital-lab"
+			return <button data-testid="launch-orbital-lab">Launch orbital lab</button>
+		}
+	`)
+	writeFixtureFile(t, root, "backend/server/OrbitalAPI.go", `
+		package server
+		func handleOrbitalLaunch() {
+			path := "/api/orbital-lab/launch"
+			_ = path
+		}
+	`)
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(uiOnlyInvestigationPlannerLLM{}).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        1,
+			FilesPerRound:          1,
+			TotalFileLimit:         2,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_ui_tool_policy", ProductDescription: "演示 orbital lab"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_ui_tool_policy", Objective: "演示 orbital lab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if investigationToolCallCount(result.Trace, "find_api_handlers") != 0 {
+		t.Fatalf("pure UI grep round should not mechanically run API handler search, got %+v", result.Trace.ToolCalls)
+	}
+	question := investigationQuestion(result.Trace, "question_product_entry")
+	if question == nil || len(question.NextActions) == 0 || question.NextActions[0].Tool != "find_api_handlers" {
+		t.Fatalf("missing API evidence should be represented as next action, got %+v", result.Trace.Questions)
+	}
+}
+
 func TestProjectInvestigationToolSuiteSurfacesNextActionsForRemainingGaps(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -1331,6 +1377,19 @@ func investigationToolCallWithMetadata(trace *model.CodeInvestigationTrace, tool
 		}
 	}
 	return nil
+}
+
+func investigationToolCallCount(trace *model.CodeInvestigationTrace, tool string) int {
+	count := 0
+	if trace == nil {
+		return count
+	}
+	for _, call := range trace.ToolCalls {
+		if call.Tool == tool {
+			count++
+		}
+	}
+	return count
 }
 
 func grepToolCallCount(trace *model.CodeInvestigationTrace) int {

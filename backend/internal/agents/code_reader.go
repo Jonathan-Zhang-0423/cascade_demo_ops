@@ -392,6 +392,13 @@ type codeInvestigationQuery struct {
 	dependsOnToolID  string
 }
 
+type codeInvestigationToolPolicy struct {
+	followImports    bool
+	findReferences   bool
+	findAPIHandlers  bool
+	expectedEvidence []string
+}
+
 type codeSearchMatch struct {
 	candidate codeCandidateFile
 	score     int
@@ -587,6 +594,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			continue
 		}
 		executedQueries[queryKey] = true
+		toolPolicy := toolPolicyForInvestigationQuery(query)
 		grepBudget, ok := budgetForRemainingToolSearch(budget, trace.TotalFilesSearched)
 		if !ok {
 			break
@@ -621,7 +629,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			SelectedFileCount: len(selectedThisRound),
 			PathHashes:        pathHashesForCandidates(selectedThisRound, len(selectedThisRound)),
 			SnippetRefs:       limitCodeSnippetRefs(snippetsThisRound, 12),
-			Metadata:          investigationQueryMetadata(query),
+			Metadata:          investigationQueryMetadataWithToolPolicy(query, toolPolicy),
 			Confidence:        confidenceForSearchCall(len(search.matches), len(selectedThisRound)),
 			ElapsedMS:         time.Since(start).Milliseconds(),
 		})
@@ -630,11 +638,18 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			snippetCallID = fmt.Sprintf("tool_read_evidence_snippets_%d_%s", i+1, shortHash(query.query))
 			trace.ToolCalls = append(trace.ToolCalls, evidenceSnippetToolCall(snippetCallID, query, snippetsThisRound))
 		}
-		followedImports, importScan, err := followImportsFromCandidates(ctx, selectedThisRound, candidateIndex, selectedKeys, budget, importAliasRules)
-		if err != nil {
-			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+		followedImports := []codeCandidateFile{}
+		importScan := importFollowScan{
+			aliasRuleCount:  len(importAliasRules),
+			aliasRuleHashes: importAliasRuleHashes(importAliasRules, 8),
 		}
-		trace.TotalBytesRead += importScan.bytesRead
+		if toolPolicy.followImports {
+			followedImports, importScan, err = followImportsFromCandidates(ctx, selectedThisRound, candidateIndex, selectedKeys, budget, importAliasRules)
+			if err != nil {
+				return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+			}
+			trace.TotalBytesRead += importScan.bytesRead
+		}
 		followedThisRound := []codeCandidateFile{}
 		for _, candidate := range followedImports {
 			if len(followedThisRound) >= minInt(4, budget.FilesPerRound) || len(selected) >= budget.TotalFileLimit {
@@ -653,7 +668,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		referenceBudget, ok := budgetForRemainingToolSearch(budget, trace.TotalFilesSearched)
 		referencedFiles := []codeCandidateFile{}
 		referenceScan := referenceSearchScan{}
-		if ok {
+		if ok && toolPolicy.findReferences {
 			referencedFiles, referenceScan, err = findReferencesFromCandidates(ctx, referenceSources, candidates, selectedKeys, referenceBudget)
 		}
 		if err != nil {
@@ -679,7 +694,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		apiBudget, ok := budgetForRemainingToolSearch(budget, trace.TotalFilesSearched)
 		apiHandlerFiles := []codeCandidateFile{}
 		apiHandlerScan := apiHandlerSearchScan{}
-		if ok {
+		if ok && toolPolicy.findAPIHandlers {
 			apiHandlerFiles, apiHandlerScan, err = findAPIHandlersFromCandidates(ctx, apiSources, candidates, selectedKeys, apiBudget)
 		}
 		if err != nil {
@@ -1015,6 +1030,90 @@ func investigationQueryMetadata(query codeInvestigationQuery) map[string]any {
 		return nil
 	}
 	return metadata
+}
+
+func investigationQueryMetadataWithToolPolicy(query codeInvestigationQuery, policy codeInvestigationToolPolicy) map[string]any {
+	metadata := investigationQueryMetadata(query)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["tool_policy"] = []string{}
+	tools := []string{"grep_text"}
+	if policy.followImports {
+		tools = append(tools, "follow_imports")
+	}
+	if policy.findReferences {
+		tools = append(tools, "find_references")
+	}
+	if policy.findAPIHandlers {
+		tools = append(tools, "find_api_handlers")
+	}
+	metadata["tool_policy"] = tools
+	return metadata
+}
+
+func toolPolicyForInvestigationQuery(query codeInvestigationQuery) codeInvestigationToolPolicy {
+	policy := codeInvestigationToolPolicy{
+		followImports:    true,
+		findReferences:   true,
+		findAPIHandlers:  false,
+		expectedEvidence: uniqueStrings(query.expectedEvidence),
+	}
+	suggested := sanitizeInvestigationToolName(query.suggestedTool)
+	switch suggested {
+	case "follow_imports":
+		policy.followImports = true
+		policy.findReferences = false
+		policy.findAPIHandlers = false
+		return policy
+	case "find_references":
+		policy.followImports = false
+		policy.findReferences = true
+		policy.findAPIHandlers = false
+		return policy
+	case "find_api_handlers":
+		policy.followImports = false
+		policy.findReferences = true
+		policy.findAPIHandlers = true
+		return policy
+	case "grep_text":
+		if expectedOnlyStyleOrRoute(query.expectedEvidence) {
+			policy.findAPIHandlers = false
+			return policy
+		}
+	}
+	if expectedIncludesEvidence(query.expectedEvidence, "style_or_state") && !expectedIncludesEvidence(query.expectedEvidence, "api_or_data_model") {
+		policy.findAPIHandlers = false
+		return policy
+	}
+	if expectedIncludesEvidence(query.expectedEvidence, "api_or_data_model") {
+		policy.findAPIHandlers = true
+	}
+	return policy
+}
+
+func expectedIncludesEvidence(expected []string, value string) bool {
+	for _, item := range expected {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func expectedOnlyStyleOrRoute(expected []string) bool {
+	if len(expected) == 0 {
+		return false
+	}
+	for _, item := range expected {
+		switch item {
+		case "style_or_state", "route", "component_or_selector":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func compactRepoMapForInvestigation(candidates []codeCandidateFile, limit int) map[string]any {
