@@ -838,6 +838,7 @@ function CodeSummaryPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
                   .filter(Boolean)
                   .join(" · ")}
               </small>
+              {question.nextActions.length > 0 ? <em>{formatQuestionNextActions(question.nextActions)}</em> : null}
             </div>
           ))}
         </div>
@@ -1770,6 +1771,17 @@ function formatQuestionTools(
         tool.pathHashCount > 0 ? `${tool.pathHashCount} hash` : "",
       ].filter(Boolean);
       return details.length > 0 ? `${tool.tool}(${details.join("/")})` : tool.tool;
+    })
+    .join(" -> ");
+}
+
+function formatQuestionNextActions(actions: Array<{ tool: string; reason?: string; query_terms?: string[]; expected_evidence?: string[] }>): string {
+  return actions
+    .slice(0, 3)
+    .map((action) => {
+      const terms = (action.query_terms ?? []).slice(0, 4).join("、");
+      const evidence = (action.expected_evidence ?? []).slice(0, 3).join("、");
+      return [action.tool, terms ? `检索：${terms}` : "", evidence ? `补证：${evidence}` : "", action.reason ?? ""].filter(Boolean).join(" · ");
     })
     .join(" -> ");
 }

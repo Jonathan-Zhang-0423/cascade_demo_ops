@@ -387,6 +387,9 @@ type codeInvestigationQuery struct {
 	query            string
 	terms            []string
 	expectedEvidence []string
+	plannedFrom      string
+	suggestedTool    string
+	dependsOnToolID  string
 }
 
 type codeSearchMatch struct {
@@ -693,10 +696,14 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		reviewCall := evidenceReviewToolCall(i+1, query, review)
 		trace.ToolCalls = append(trace.ToolCalls, reviewCall)
 		applyEvidenceReviewToQuestion(trace, query, review, nonEmptyToolCallIDs(grepCallID, snippetCallID, followCallID, referenceCallID, apiHandlerCallID, reviewCall.ID)...)
-		if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < budget.DrilldownRounds+2 {
-			nextKey := strings.Join(next.terms, "|")
-			if !executedQueries[nextKey] && !codeInvestigationQueryExists(queries, nextKey) {
-				queries = append(queries, next)
+		beforeFollowUp := len(queries)
+		queries = appendNextActionInvestigationQueries(queries, trace, query, review, reviewCall.ID, executedQueries, maxAdaptiveRounds)
+		if len(queries) == beforeFollowUp {
+			if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < maxAdaptiveRounds {
+				nextKey := strings.Join(next.terms, "|")
+				if !executedQueries[nextKey] && !codeInvestigationQueryExists(queries, nextKey) {
+					queries = append(queries, next)
+				}
 			}
 		}
 	}
@@ -980,6 +987,15 @@ func investigationQueryMetadata(query codeInvestigationQuery) map[string]any {
 	}
 	if len(query.expectedEvidence) > 0 {
 		metadata["expected_evidence"] = query.expectedEvidence
+	}
+	if query.plannedFrom != "" {
+		metadata["planned_from"] = query.plannedFrom
+	}
+	if query.suggestedTool != "" {
+		metadata["suggested_tool"] = query.suggestedTool
+	}
+	if query.dependsOnToolID != "" {
+		metadata["depends_on_tool_call_id"] = query.dependsOnToolID
 	}
 	if len(metadata) == 0 {
 		return nil
@@ -2155,6 +2171,92 @@ func adaptiveQueryFromEvidenceReview(previous codeInvestigationQuery, review cod
 	}, true
 }
 
+func appendNextActionInvestigationQueries(queries []codeInvestigationQuery, trace *model.CodeInvestigationTrace, base codeInvestigationQuery, review codeInvestigationEvidenceReview, dependsOnToolCallID string, executed map[string]bool, limit int) []codeInvestigationQuery {
+	if trace == nil || base.questionID == "" || limit <= 0 || len(queries) >= limit {
+		return queries
+	}
+	question, ok := investigationQuestionForID(trace, base.questionID)
+	if ok && question.Status == "answered" {
+		return queries
+	}
+	if !ok {
+		question = model.CodeInvestigationQuestion{
+			ID:               base.questionID,
+			Question:         base.purpose,
+			QueryTerms:       base.terms,
+			ExpectedEvidence: base.expectedEvidence,
+			Status:           "partial",
+		}
+	}
+	if len(question.NextActions) == 0 {
+		question.NextActions = nextActionsForEvidenceReview(base, review, dependsOnToolCallID)
+	}
+	if len(question.NextActions) == 0 {
+		return queries
+	}
+	for _, next := range codeInvestigationQueriesFromNextActions(question, base) {
+		if len(queries) >= limit {
+			break
+		}
+		key := strings.Join(next.terms, "|")
+		if executed[key] || codeInvestigationQueryExists(queries, key) {
+			continue
+		}
+		queries = append(queries, next)
+	}
+	return queries
+}
+
+func investigationQuestionForID(trace *model.CodeInvestigationTrace, id string) (model.CodeInvestigationQuestion, bool) {
+	if trace == nil || strings.TrimSpace(id) == "" {
+		return model.CodeInvestigationQuestion{}, false
+	}
+	for _, question := range trace.Questions {
+		if question.ID == id {
+			return question, true
+		}
+	}
+	return model.CodeInvestigationQuestion{}, false
+}
+
+func codeInvestigationQueriesFromNextActions(question model.CodeInvestigationQuestion, base codeInvestigationQuery) []codeInvestigationQuery {
+	out := []codeInvestigationQuery{}
+	for _, action := range question.NextActions {
+		terms := sanitizeInvestigationTerms(action.QueryTerms)
+		if len(terms) == 0 {
+			continue
+		}
+		expected := uniqueStrings(action.ExpectedEvidence)
+		if len(expected) == 0 {
+			expected = question.ExpectedEvidence
+		}
+		if len(expected) == 0 {
+			expected = base.expectedEvidence
+		}
+		purpose := firstNonEmpty(action.Reason, question.Question, base.purpose, "继续补齐项目理解证据。")
+		out = append(out, codeInvestigationQuery{
+			questionID:       firstNonEmpty(question.ID, base.questionID),
+			purpose:          "根据 next_actions 补证：" + purpose,
+			query:            strings.Join(terms, " OR "),
+			terms:            terms,
+			expectedEvidence: expected,
+			plannedFrom:      "next_actions",
+			suggestedTool:    sanitizeInvestigationToolName(action.Tool),
+			dependsOnToolID:  action.DependsOnToolCallID,
+		})
+	}
+	return dedupeCodeInvestigationQueries(out)
+}
+
+func sanitizeInvestigationToolName(value string) string {
+	switch strings.TrimSpace(value) {
+	case "repo_index", "grep_text", "follow_imports", "find_references", "find_api_handlers", "evidence_review":
+		return strings.TrimSpace(value)
+	default:
+		return ""
+	}
+}
+
 func codeInvestigationQueryExists(values []codeInvestigationQuery, key string) bool {
 	for _, value := range values {
 		if strings.Join(value.terms, "|") == key {
@@ -2174,6 +2276,7 @@ func applyEvidenceReviewToQuestion(trace *model.CodeInvestigationTrace, query co
 		}
 		trace.Questions[i].ToolCallIDs = uniqueStrings(append(trace.Questions[i].ToolCallIDs, toolCallIDs...))
 		trace.Questions[i].RemainingGaps = append([]string{}, review.gaps...)
+		trace.Questions[i].NextActions = nextActionsForEvidenceReview(query, review, lastNonEmptyString(toolCallIDs...))
 		trace.Questions[i].EvidenceSummary = fmt.Sprintf("files=%d routes=%d components=%d selectors=%d apis=%d models=%d style=%d", review.fileCount, review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.dataModelCount, review.styleCount)
 		trace.Questions[i].Confidence = evidenceReviewConfidence(review)
 		switch {
@@ -2199,7 +2302,99 @@ func finalizeInvestigationQuestions(trace *model.CodeInvestigationTrace) {
 		if len(trace.Questions[i].RemainingGaps) == 0 && trace.Questions[i].Status == "open" {
 			trace.Questions[i].RemainingGaps = append([]string{}, trace.Questions[i].ExpectedEvidence...)
 		}
+		if len(trace.Questions[i].NextActions) == 0 && trace.Questions[i].Status != "answered" {
+			trace.Questions[i].NextActions = nextActionsForOpenQuestion(trace.Questions[i])
+		}
 	}
+}
+
+func nextActionsForEvidenceReview(query codeInvestigationQuery, review codeInvestigationEvidenceReview, dependsOnToolCallID string) []model.CodeInvestigationNextAction {
+	if len(review.gaps) == 0 {
+		return nil
+	}
+	return nextActionsForGaps(review.gaps, query.terms, query.expectedEvidence, dependsOnToolCallID)
+}
+
+func nextActionsForOpenQuestion(question model.CodeInvestigationQuestion) []model.CodeInvestigationNextAction {
+	gaps := question.RemainingGaps
+	if len(gaps) == 0 {
+		gaps = question.ExpectedEvidence
+	}
+	return nextActionsForGaps(gaps, question.QueryTerms, question.ExpectedEvidence, "")
+}
+
+func nextActionsForGaps(gaps []string, baseTerms []string, expected []string, dependsOnToolCallID string) []model.CodeInvestigationNextAction {
+	out := []model.CodeInvestigationNextAction{}
+	for _, gap := range uniqueStrings(gaps) {
+		action := model.CodeInvestigationNextAction{
+			Tool:                toolForEvidenceGap(gap),
+			Reason:              reasonForEvidenceGap(gap),
+			QueryTerms:          sanitizeInvestigationTerms(append(termsForEvidenceGap(gap), limitStrings(baseTerms, 4)...)),
+			ExpectedEvidence:    uniqueStrings([]string{gap}),
+			DependsOnToolCallID: dependsOnToolCallID,
+		}
+		if len(action.QueryTerms) == 0 {
+			continue
+		}
+		if len(expected) > 0 {
+			action.ExpectedEvidence = uniqueStrings(append(action.ExpectedEvidence, expected...))
+		}
+		out = append(out, action)
+		if len(out) >= 3 {
+			break
+		}
+	}
+	return out
+}
+
+func toolForEvidenceGap(gap string) string {
+	switch gap {
+	case "api_or_data_model":
+		return "find_api_handlers"
+	case "component_or_selector", "style_or_state", "route":
+		return "grep_text"
+	default:
+		return "grep_text"
+	}
+}
+
+func reasonForEvidenceGap(gap string) string {
+	switch gap {
+	case "route":
+		return "还缺目标业务页面或状态路由证据，需要继续定位 route/page/router 文件。"
+	case "component_or_selector":
+		return "还缺可交互组件或语义 selector 证据，需要继续定位按钮、表单、输入框或组件定义。"
+	case "api_or_data_model":
+		return "还缺后端接口、handler、mutation 或数据模型证据，需要沿前端 API 调用查后端实现。"
+	case "style_or_state":
+		return "还缺样式、loading/progress 状态或交互反馈证据，需要继续定位样式和状态代码。"
+	default:
+		return "当前调查问题仍有证据缺口，需要继续受限 grep 和结构化读取。"
+	}
+}
+
+func termsForEvidenceGap(gap string) []string {
+	switch gap {
+	case "route":
+		return []string{"route", "router", "page", "workspace", "dashboard", "projects"}
+	case "component_or_selector":
+		return []string{"data-testid", "aria-label", "button", "form", "input", "component"}
+	case "api_or_data_model":
+		return []string{"api", "endpoint", "handler", "mutation", "schema", "model"}
+	case "style_or_state":
+		return []string{"style", "className", "css", "tailwind", "state", "loading", "progress"}
+	default:
+		return []string{"route", "component", "api"}
+	}
+}
+
+func lastNonEmptyString(values ...string) string {
+	for i := len(values) - 1; i >= 0; i-- {
+		if strings.TrimSpace(values[i]) != "" {
+			return values[i]
+		}
+	}
+	return ""
 }
 
 func investigationQuestionProgressSummary(trace *model.CodeInvestigationTrace) string {

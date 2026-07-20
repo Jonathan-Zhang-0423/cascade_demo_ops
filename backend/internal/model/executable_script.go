@@ -271,13 +271,14 @@ type BrowserAgentOutlineStage struct {
 }
 
 type InvestigationQuestionRef struct {
-	ID              string   `json:"id"`
-	IntentLabel     string   `json:"intent_label,omitempty"`
-	Status          string   `json:"status,omitempty"`
-	EvidenceSummary string   `json:"evidence_summary,omitempty"`
-	RemainingGaps   []string `json:"remaining_gaps,omitempty"`
-	ToolCallIDs     []string `json:"tool_call_ids,omitempty"`
-	Confidence      float64  `json:"confidence,omitempty"`
+	ID              string                        `json:"id"`
+	IntentLabel     string                        `json:"intent_label,omitempty"`
+	Status          string                        `json:"status,omitempty"`
+	EvidenceSummary string                        `json:"evidence_summary,omitempty"`
+	RemainingGaps   []string                      `json:"remaining_gaps,omitempty"`
+	NextActions     []CodeInvestigationNextAction `json:"next_actions,omitempty"`
+	ToolCallIDs     []string                      `json:"tool_call_ids,omitempty"`
+	Confidence      float64                       `json:"confidence,omitempty"`
 }
 
 type BrowserAgentComponentTarget struct {

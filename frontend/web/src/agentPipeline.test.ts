@@ -100,6 +100,15 @@ describe("agent pipeline helpers", () => {
                   intent_label: "新建项目",
                   status: "answered",
                   evidence_summary: "确认创建流程入口和父级 route。",
+                  next_actions: [
+                    {
+                      tool: "grep_text",
+                      reason: "继续查找新建项目的子路由和按钮语义。",
+                      query_terms: ["new project", "create project", "workspace"],
+                      expected_evidence: ["route", "component_or_selector"],
+                      depends_on_tool_call_id: "tool_grep",
+                    },
+                  ],
                   tool_call_ids: ["tool_grep", "tool_find_references"],
                   confidence: 0.82,
                 },
@@ -139,6 +148,7 @@ describe("agent pipeline helpers", () => {
     expect(questions).toHaveLength(1);
     expect(questions[0]?.toolCalls.map((call) => call.tool)).toEqual(["grep_text", "find_references"]);
     expect(questions[0]?.toolCalls.map((call) => call.summary).join("\n")).not.toContain("create-tetris-project");
+    expect(questions[0]?.nextActions?.[0]?.tool).toBe("grep_text");
   });
 
   it("surfaces ProjectIntelligenceGraph status and uses intelligence metrics", () => {

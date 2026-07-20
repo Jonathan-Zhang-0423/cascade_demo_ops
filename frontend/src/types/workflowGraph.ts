@@ -757,6 +757,7 @@ export type CodeInvestigationQuestion = {
   status?: string;
   evidence_summary?: string;
   remaining_gaps?: string[];
+  next_actions?: CodeInvestigationNextAction[];
   tool_call_ids?: string[];
   confidence?: number;
 };
@@ -2176,8 +2177,17 @@ export type InvestigationQuestionRef = {
   status?: string;
   evidence_summary?: string;
   remaining_gaps?: string[];
+  next_actions?: CodeInvestigationNextAction[];
   tool_call_ids?: string[];
   confidence?: number;
+};
+
+export type CodeInvestigationNextAction = {
+  tool: string;
+  reason?: string;
+  query_terms?: string[];
+  expected_evidence?: string[];
+  depends_on_tool_call_id?: string;
 };
 
 export type BrowserAgentTargetContract = {

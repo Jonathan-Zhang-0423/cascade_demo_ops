@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -905,6 +906,61 @@ func TestProjectInvestigationToolSuiteRunsEvidenceReviewAndAdaptiveNextQuery(t *
 	}
 }
 
+func TestProjectInvestigationToolSuiteSurfacesNextActionsForRemainingGaps(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/orbital-lab"
+			return <button data-testid="launch-orbital-lab">Launch orbital lab</button>
+		}
+	`)
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(uiOnlyInvestigationPlannerLLM{}).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        1,
+			FilesPerRound:          1,
+			TotalFileLimit:         2,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_next_actions", ProductDescription: "演示 orbital lab"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_next_actions", Objective: "演示 orbital lab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	question := investigationQuestion(result.Trace, "question_product_entry")
+	if question == nil {
+		t.Fatalf("expected product entry question, got %+v", result.Trace.Questions)
+	}
+	if question.Status == "answered" {
+		t.Fatalf("expected unresolved question with next actions, got %+v", question)
+	}
+	if len(question.NextActions) == 0 {
+		t.Fatalf("expected next actions for remaining gaps, got %+v", question)
+	}
+	if question.NextActions[0].Tool != "find_api_handlers" {
+		t.Fatalf("expected api gap to suggest backend handler search, got %+v", question.NextActions)
+	}
+	if len(question.NextActions[0].QueryTerms) == 0 || len(question.NextActions[0].ExpectedEvidence) == 0 {
+		t.Fatalf("expected next action to carry query terms and expected evidence, got %+v", question.NextActions[0])
+	}
+	traceJSON, err := json.Marshal(question)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(traceJSON), "Launch orbital lab") {
+		t.Fatalf("next actions trace should not leak source text: %+v", question)
+	}
+}
+
 func TestProjectInvestigationToolSuiteExecutesAdaptiveQueryBeyondInitialPlannerRounds(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -944,6 +1000,13 @@ func TestProjectInvestigationToolSuiteExecutesAdaptiveQueryBeyondInitialPlannerR
 	}
 	if grepToolCallCount(result.Trace) < 3 {
 		t.Fatalf("expected adaptive grep after the two initial planner rounds, got %+v", result.Trace.ToolCalls)
+	}
+	nextActionGrep := investigationToolCallWithMetadata(result.Trace, "grep_text", "planned_from", "next_actions")
+	if nextActionGrep == nil {
+		t.Fatalf("expected next_actions to schedule a follow-up grep_text call, got %+v", result.Trace.ToolCalls)
+	}
+	if nextActionGrep.Metadata["suggested_tool"] != "find_api_handlers" {
+		t.Fatalf("expected next_actions follow-up to preserve suggested tool, got %+v", nextActionGrep.Metadata)
 	}
 	if !candidateRelContains(result.SelectedCandidates, "OrbitalAPI.go") {
 		t.Fatalf("expected adaptive query beyond initial planner rounds to select backend API file, got %+v", result.SelectedCandidates)
@@ -1208,6 +1271,22 @@ func investigationToolCall(trace *model.CodeInvestigationTrace, tool string) *mo
 	for i := range trace.ToolCalls {
 		if trace.ToolCalls[i].Tool == tool {
 			return &trace.ToolCalls[i]
+		}
+	}
+	return nil
+}
+
+func investigationToolCallWithMetadata(trace *model.CodeInvestigationTrace, tool string, key string, value string) *model.CodeInvestigationToolCall {
+	if trace == nil {
+		return nil
+	}
+	for i := range trace.ToolCalls {
+		call := &trace.ToolCalls[i]
+		if call.Tool != tool || call.Metadata == nil {
+			continue
+		}
+		if fmt.Sprint(call.Metadata[key]) == value {
+			return call
 		}
 	}
 	return nil

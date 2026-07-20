@@ -78,16 +78,25 @@ type CodeInvestigationTrace struct {
 }
 
 type CodeInvestigationQuestion struct {
-	ID               string   `json:"id"`
-	Question         string   `json:"question"`
-	IntentLabel      string   `json:"intent_label,omitempty"`
-	ExpectedEvidence []string `json:"expected_evidence,omitempty"`
-	QueryTerms       []string `json:"query_terms,omitempty"`
-	Status           string   `json:"status,omitempty"`
-	EvidenceSummary  string   `json:"evidence_summary,omitempty"`
-	RemainingGaps    []string `json:"remaining_gaps,omitempty"`
-	ToolCallIDs      []string `json:"tool_call_ids,omitempty"`
-	Confidence       float64  `json:"confidence,omitempty"`
+	ID               string                        `json:"id"`
+	Question         string                        `json:"question"`
+	IntentLabel      string                        `json:"intent_label,omitempty"`
+	ExpectedEvidence []string                      `json:"expected_evidence,omitempty"`
+	QueryTerms       []string                      `json:"query_terms,omitempty"`
+	Status           string                        `json:"status,omitempty"`
+	EvidenceSummary  string                        `json:"evidence_summary,omitempty"`
+	RemainingGaps    []string                      `json:"remaining_gaps,omitempty"`
+	NextActions      []CodeInvestigationNextAction `json:"next_actions,omitempty"`
+	ToolCallIDs      []string                      `json:"tool_call_ids,omitempty"`
+	Confidence       float64                       `json:"confidence,omitempty"`
+}
+
+type CodeInvestigationNextAction struct {
+	Tool                string   `json:"tool"`
+	Reason              string   `json:"reason,omitempty"`
+	QueryTerms          []string `json:"query_terms,omitempty"`
+	ExpectedEvidence    []string `json:"expected_evidence,omitempty"`
+	DependsOnToolCallID string   `json:"depends_on_tool_call_id,omitempty"`
 }
 
 type CodeInvestigationToolCall struct {

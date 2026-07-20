@@ -440,6 +440,7 @@ func buildBrowserAgentPromptPolicy(project *model.ProjectContext, graph *model.D
 		"你可以在 allowed origins 内做非破坏性探索，修正 selector、等待条件、轻量导航路径和截图时机。",
 		"你不能修改用户需求意图、stage 顺序、stage 目标、填充内容语义、凭据 secret_ref、安全策略、禁止页面、打码规则和 allowed domains。",
 		"Stage 中的 investigation_question_refs 是 App 端代码调查问题与证据缺口摘要；如果引用问题仍有 remaining_gaps，只能在当前产品域内通过页面观察和非破坏探索补证，不得编造代码证据。",
+		"investigation_question_refs.next_actions 是 App 端建议的后续补证工具方向；你可以据此加强页面观察和 selector 修正，但不得据此访问控制面路径、执行 shell 或假装已读代码。",
 		"如果代码/页面证据不足以确认某个业务动作，必须返回 failure diagnostic 和 repair_request，不得编造 route、组件、API 或成功状态。",
 		"所有凭据只能通过 secret_ref 使用，不得写入日志、trace、截图元数据、错误响应或输出 artifact。",
 	}, "\n")
@@ -474,6 +475,7 @@ func buildBrowserAgentPromptPolicy(project *model.ProjectContext, graph *model.D
 		EvidencePolicy: []string{
 			"每个动作必须追溯到 StageApprovalPlan、ProjectUnderstandingDossier 或页面运行时证据。",
 			"优先使用 stage.investigation_question_refs 判断 App 端已确认的代码证据范围和仍需运行时补证的缺口。",
+			"next_actions 只能作为补证建议；运行时结果必须来自真实页面 observation 或返回 repair_request。",
 			"不确定时先继续在产品域内小步探索；仍不确定则停止并回传缺失证据。",
 		},
 		SafetyBoundaries:    append(append([]string{}, doc.SafetyPolicy.ForbiddenPages...), doc.SafetyPolicy.ForbiddenData...),
@@ -1623,6 +1625,7 @@ func investigationQuestionRefsForStage(report *model.MultimodalUnderstandingRepo
 			Status:          question.Status,
 			EvidenceSummary: question.EvidenceSummary,
 			RemainingGaps:   limitStrings(question.RemainingGaps, 4),
+			NextActions:     limitInvestigationNextActions(question.NextActions, 3),
 			ToolCallIDs:     limitStrings(question.ToolCallIDs, 4),
 			Confidence:      question.Confidence,
 		})
@@ -1745,6 +1748,13 @@ func investigationQuestionRefExists(refs []model.InvestigationQuestionRef, id st
 		}
 	}
 	return false
+}
+
+func limitInvestigationNextActions(values []model.CodeInvestigationNextAction, limit int) []model.CodeInvestigationNextAction {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	return values[:limit]
 }
 
 func uncertaintyReportForBundle(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, graph *model.DemoWorkflowGraph) []model.StageUncertainty {

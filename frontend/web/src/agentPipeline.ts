@@ -1,4 +1,4 @@
-import type { CodeInvestigationQuestion, CodeInvestigationToolCall, CodeInvestigationTrace, CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
+import type { CodeInvestigationNextAction, CodeInvestigationQuestion, CodeInvestigationToolCall, CodeInvestigationTrace, CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
 import type { ProjectWorkspaceView } from "./domain";
 
 export type AgentPipelineStatus = "pending" | "completed" | "attention";
@@ -47,6 +47,7 @@ export type CodeInvestigationQuestionView = {
   status: string;
   evidenceSummary: string;
   remainingGaps: string[];
+  nextActions: CodeInvestigationNextAction[];
   confidence?: number;
   toolCalls: CodeInvestigationToolView[];
 };
@@ -160,6 +161,7 @@ export function codeInvestigationQuestionsFromWorkspace(workspace: ProjectWorksp
         status: question.status || "pending",
         evidenceSummary: question.evidence_summary || "尚未形成证据摘要",
         remainingGaps: question.remaining_gaps ?? [],
+        nextActions: question.next_actions ?? [],
         ...(typeof question.confidence === "number" ? { confidence: question.confidence } : {}),
         toolCalls: toolViewsForQuestion(trace, question),
       });
