@@ -931,7 +931,8 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 		"investigation_questions": compactInvestigationQuestionsForPlanner(questions),
 		"budget":                  budget,
 		"repo_map":                compactRepoMapForInvestigation(candidates, 120),
-		"instructions":            []string{"围绕 investigation_questions 返回 2-5 个 grep 查询计划。", "terms 必须是业务语义、路由、组件、API、状态或样式关键词。", "不要输出 shell 命令、绝对路径、源码片段、token、cookie、Authorization。", "不要把 /aigc、/.well-known、/v1/execution-packages、app-installations 等控制面路径作为产品证据。"},
+		"tool_cards":              projectInvestigationToolCards(),
+		"instructions":            []string{"围绕 investigation_questions 返回 2-5 个 grep_text 初始查询计划；后续 evidence_review planner 会基于 tool_cards 选择更精细工具。", "terms 必须是业务语义、路由、组件、API、状态或样式关键词。", "不要输出 shell 命令、绝对路径、源码片段、token、cookie、Authorization。", "不要把 /aigc、/.well-known、/v1/execution-packages、app-installations 等控制面路径作为产品证据。"},
 	}
 	data, _ := json.Marshal(payload)
 	var output codeInvestigationLLMOutput
@@ -1323,6 +1324,83 @@ func compactRepoMapForInvestigation(candidates []codeCandidateFile, limit int) m
 		"style_like":      limitStrings(uniqueStrings(styleLike), 40),
 		"shell_metadata":  manifestMetadataFromCandidates(candidates),
 		"omitted_details": "repo_map contains relative paths only; no source content or absolute local paths.",
+	}
+}
+
+func projectInvestigationToolCards() []map[string]any {
+	return []map[string]any{
+		{
+			"tool":             "shell_metadata",
+			"phase":            "startup",
+			"when_to_use":      "建立仓库技术栈、manifest、依赖和 git 文件数量的只读背景。",
+			"input_contract":   "自动运行；planner 不需要传命令。",
+			"output_contract":  "manifest/package manager/dependency names/git tracked count；不返回 scripts 命令值、源码或绝对路径。",
+			"persistent_trace": "safe metadata only",
+			"cost":             "very_low",
+		},
+		{
+			"tool":             "grep_text",
+			"phase":            "initial_and_followup",
+			"when_to_use":      "用业务关键词、route、组件名、selector、API path 或状态词定位第一批候选文件。",
+			"input_contract":   "query_terms[2-8]；禁止控制面路径、shell 语法、secret/token/cookie。",
+			"output_contract":  "path hashes, snippet refs, transient redacted snippet observations",
+			"persistent_trace": "hashes and snippet line refs only",
+			"cost":             "bounded_by_tool_search_budget",
+		},
+		{
+			"tool":             "list_related_files",
+			"phase":            "followup",
+			"when_to_use":      "已有命中文件后，先看同目录/父目录附近有哪些 route/component/API/client/style 文件。",
+			"input_contract":   "query_terms from current business target or matched file name.",
+			"output_contract":  "file_name, kind, dir_hash, path_hash, score, reason；不读取源码，不返回路径。",
+			"persistent_trace": "hashes and counts only",
+			"cost":             "very_low",
+		},
+		{
+			"tool":             "inspect_file_outline",
+			"phase":            "followup",
+			"when_to_use":      "已有候选文件名但不确定其作用时，读取少量候选文件的结构轮廓。",
+			"input_contract":   "query_terms naming a matched file/component/API client/route symbol.",
+			"output_contract":  "file_name, symbol_names, route_paths, api_paths, selector_hints, data_model_names；不输出源码。",
+			"persistent_trace": "hashes and aggregate counts only",
+			"cost":             "low_bounded_file_reads",
+		},
+		{
+			"tool":             "read_window",
+			"phase":            "followup",
+			"when_to_use":      "需要比 grep snippet 更近的局部上下文来判断下一步符号或业务状态。",
+			"input_contract":   "query_terms tied to previous snippet refs; no arbitrary path.",
+			"output_contract":  "transient redacted local window observations plus snippet hashes.",
+			"persistent_trace": "hashes and line refs only",
+			"cost":             "low_bounded_windows",
+		},
+		{
+			"tool":             "follow_imports",
+			"phase":            "followup",
+			"when_to_use":      "命中文件直接 import 了相关组件、hook、client 或样式模块时沿 import 小步追踪。",
+			"input_contract":   "uses currently selected files only.",
+			"output_contract":  "selected imported file hashes; no source text.",
+			"persistent_trace": "hashes and import counts only",
+			"cost":             "low",
+		},
+		{
+			"tool":             "find_references",
+			"phase":            "followup",
+			"when_to_use":      "已有组件名、函数名、selector 或 API symbol，需要找父级 route/调用方。",
+			"input_contract":   "symbol terms extracted from selected files.",
+			"output_contract":  "referencing file hashes; no source text.",
+			"persistent_trace": "hashes and term hashes only",
+			"cost":             "medium_bounded_search",
+		},
+		{
+			"tool":             "find_api_handlers",
+			"phase":            "followup",
+			"when_to_use":      "前端代码暴露 /api path 或 mutation，需要追踪后端 handler/schema/model。",
+			"input_contract":   "api_or_data_model expected evidence and API paths from selected files.",
+			"output_contract":  "backend handler/model file hashes; no source text.",
+			"persistent_trace": "hashes and API path hashes only",
+			"cost":             "medium_bounded_search",
+		},
 	}
 }
 
@@ -2935,6 +3013,7 @@ func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(c
 		"snippet_observations":      compactSnippetObservationsForPlanner(snippetObservations, 6),
 		"related_file_observations": compactRelatedFileObservationsForPlanner(relatedFileObservations, 12),
 		"file_outline_observations": compactFileOutlineObservationsForPlanner(fileOutlineObservations, 12),
+		"tool_cards":                projectInvestigationToolCards(),
 		"budget": map[string]any{
 			"remaining_search_files": maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched),
 			"remaining_selected":     maxInt(0, budget.TotalFileLimit-trace.TotalFilesSelected),

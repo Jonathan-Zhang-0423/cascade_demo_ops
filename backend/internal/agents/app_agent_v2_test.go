@@ -1046,6 +1046,50 @@ func TestProjectInvestigationToolSuitePlansNextActionFromObservationLLM(t *testi
 	}
 }
 
+func TestProjectInvestigationPlannerReceivesToolCardsInPrompts(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			return <button data-testid="launch-tool-card-lab">Launch tool card lab</button>
+		}
+	`)
+	planner := &toolInventoryPlannerLLM{}
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	_, err := NewProjectInvestigationToolSuite(planner).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        1,
+			FilesPerRound:          1,
+			TotalFileLimit:         3,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    50,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_tool_cards", ProductDescription: "演示 tool card lab"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_tool_cards", Objective: "演示 tool card lab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(planner.initialRequest, `"tool_cards"`) {
+		t.Fatalf("expected initial planner payload to include tool cards, got %s", planner.initialRequest)
+	}
+	if !strings.Contains(planner.initialRequest, `"inspect_file_outline"`) || !strings.Contains(planner.initialRequest, `"list_related_files"`) {
+		t.Fatalf("expected initial planner payload to describe follow-up tools, got %s", planner.initialRequest)
+	}
+	if !strings.Contains(planner.nextActionRequest, `"tool_cards"`) {
+		t.Fatalf("expected next-action planner payload to include tool cards, got %s", planner.nextActionRequest)
+	}
+	if !strings.Contains(planner.nextActionRequest, `"read_window"`) || !strings.Contains(planner.nextActionRequest, `"find_api_handlers"`) {
+		t.Fatalf("expected next-action planner payload to describe read_window and api handler tools, got %s", planner.nextActionRequest)
+	}
+}
+
 func TestProjectInvestigationPlannerReceivesRedactedTransientSnippetObservation(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -2097,5 +2141,53 @@ func (l *fileOutlinePlannerLLM) GenerateText(ctx context.Context, task config.Mo
 }
 
 func (l *fileOutlinePlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
+}
+
+type toolInventoryPlannerLLM struct {
+	initialRequest    string
+	nextActionRequest string
+}
+
+func (l *toolInventoryPlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	var data []byte
+	switch target.(type) {
+	case *codeInvestigationLLMOutput:
+		l.initialRequest = req.User
+		data = []byte(`{
+			"summary": "start with the visible tool-card lab control",
+			"queries": [
+				{"purpose": "定位 tool card lab 页面和启动控件", "terms": ["tool-card", "launch-tool-card-lab"]}
+			],
+			"confidence": 0.81
+		}`)
+	case *codeInvestigationNextActionsLLMOutput:
+		l.nextActionRequest = req.User
+		data = []byte(`{
+			"summary": "next inspect nearby files and then API handler hints",
+			"next_actions": [
+				{
+					"tool": "inspect_file_outline",
+					"reason": "先看命中文件附近的结构轮廓。",
+					"query_terms": ["tool-card"],
+					"expected_evidence": ["api_or_data_model"]
+				}
+			],
+			"confidence": 0.85
+		}`)
+	default:
+		data = []byte(`{}`)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-tool-inventory-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (l *toolInventoryPlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (l *toolInventoryPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
 	return nil, nil
 }
