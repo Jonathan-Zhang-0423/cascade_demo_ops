@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -140,7 +141,11 @@ func TestRepairContractFixtureCarriesLineage(t *testing.T) {
 
 func readContractFixture(t *testing.T, fileName string) []byte {
 	t.Helper()
-	path := filepath.Join("..", "..", "..", "contracts", "exchange", "v1", fileName)
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve exchange contract fixture path")
+	}
+	path := filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", "contracts", "exchange", "v1", fileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
