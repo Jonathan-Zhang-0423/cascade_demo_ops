@@ -1,4 +1,4 @@
-import type { CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
+import type { CodeInvestigationQuestion, CodeInvestigationToolCall, CodeInvestigationTrace, CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
 import type { ProjectWorkspaceView } from "./domain";
 
 export type AgentPipelineStatus = "pending" | "completed" | "attention";
@@ -26,7 +26,29 @@ export type CodeSummaryView = {
   investigationQuestions: number;
   openInvestigationQuestions: number;
   snippetWindows: number;
+  toolBreakdown: Record<string, number>;
   degraded: boolean;
+};
+
+export type CodeInvestigationToolView = {
+  id: string;
+  tool: string;
+  summary: string;
+  selectedFiles: number;
+  matchedFiles: number;
+  snippetWindows: number;
+  pathHashCount: number;
+};
+
+export type CodeInvestigationQuestionView = {
+  id: string;
+  label: string;
+  question: string;
+  status: string;
+  evidenceSummary: string;
+  remainingGaps: string[];
+  confidence?: number;
+  toolCalls: CodeInvestigationToolView[];
 };
 
 export function updateWorkspaceInputs(
@@ -90,6 +112,7 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
   const snapshots = workspace.understandingReport?.code_snapshots ?? [];
   const architecture = workspace.projectIntelligence?.architecture;
   const fileCount = snapshots.reduce((total, snapshot) => total + (snapshot.file_count ?? 0), 0);
+  const toolCalls = snapshots.flatMap((snapshot) => snapshot.investigation_trace?.tool_calls ?? []);
   return {
     fileCount,
     frameworks: unique([...(architecture?.frameworks ?? []), ...snapshots.flatMap((snapshot) => snapshot.frameworks ?? [])]),
@@ -110,8 +133,39 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
       (total, snapshot) => total + (snapshot.investigation_trace?.tool_calls?.reduce((sum, call) => sum + (call.snippet_refs?.length ?? 0), 0) ?? 0),
       0,
     ),
+    toolBreakdown: toolCalls.reduce<Record<string, number>>((counts, call) => {
+      counts[call.tool] = (counts[call.tool] ?? 0) + 1;
+      return counts;
+    }, {}),
     degraded: hasRepoInput(workspace) && snapshots.length > 0 && fileCount === 0,
   };
+}
+
+export function codeInvestigationQuestionsFromWorkspace(workspace: ProjectWorkspaceView, limit = 6): CodeInvestigationQuestionView[] {
+  const snapshots = workspace.understandingReport?.code_snapshots ?? [];
+  const out: CodeInvestigationQuestionView[] = [];
+  for (const snapshot of snapshots) {
+    const trace = snapshot.investigation_trace;
+    if (!trace?.questions?.length) {
+      continue;
+    }
+    for (const question of trace.questions) {
+      if (out.length >= limit) {
+        return out;
+      }
+      out.push({
+        id: question.id,
+        label: question.intent_label || question.id,
+        question: question.question,
+        status: question.status || "pending",
+        evidenceSummary: question.evidence_summary || "尚未形成证据摘要",
+        remainingGaps: question.remaining_gaps ?? [],
+        ...(typeof question.confidence === "number" ? { confidence: question.confidence } : {}),
+        toolCalls: toolViewsForQuestion(trace, question),
+      });
+    }
+  }
+  return out;
 }
 
 export function agentPipelineItems(workspace: ProjectWorkspaceView): AgentPipelineItem[] {
@@ -196,6 +250,48 @@ export function agentPipelineItems(workspace: ProjectWorkspaceView): AgentPipeli
       detail: workspace.executableScriptBundle?.reproducibility.bundle_hash_sha256 ?? "待生成执行包",
     },
   ];
+}
+
+function toolViewsForQuestion(trace: CodeInvestigationTrace, question: CodeInvestigationQuestion): CodeInvestigationToolView[] {
+  const calls = trace.tool_calls ?? [];
+  const explicitIDs = new Set(question.tool_call_ids ?? []);
+  const selected = calls.filter((call) => explicitIDs.has(call.id) || metadataQuestionID(call) === question.id);
+  const seen = new Set<string>();
+  return selected
+    .filter((call) => {
+      if (seen.has(call.id)) {
+        return false;
+      }
+      seen.add(call.id);
+      return true;
+    })
+    .map((call) => ({
+      id: call.id,
+      tool: call.tool,
+      summary: safeToolSummary(call),
+      selectedFiles: call.selected_file_count ?? 0,
+      matchedFiles: call.matched_file_count ?? 0,
+      snippetWindows: call.snippet_refs?.length ?? 0,
+      pathHashCount: call.path_hashes?.length ?? 0,
+    }));
+}
+
+function metadataQuestionID(call: CodeInvestigationToolCall): string | undefined {
+  const value = call.metadata?.question_id;
+  return typeof value === "string" ? value : undefined;
+}
+
+function safeToolSummary(call: CodeInvestigationToolCall): string {
+  if (call.output_summary) {
+    return call.output_summary;
+  }
+  const parts = [
+    call.matched_file_count !== undefined ? `matched=${call.matched_file_count}` : "",
+    call.selected_file_count !== undefined ? `selected=${call.selected_file_count}` : "",
+    call.snippet_refs?.length ? `windows=${call.snippet_refs.length}` : "",
+    call.path_hashes?.length ? `path_hashes=${call.path_hashes.length}` : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "已执行";
 }
 
 function readinessStatus(workspace: ProjectWorkspaceView): AgentPipelineStatus {

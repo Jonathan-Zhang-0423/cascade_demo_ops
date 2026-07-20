@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { GraphNode, SandboxPolicy } from "../../src/types/workflowGraph";
-import { agentPipelineItems, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
+import { agentPipelineItems, codeInvestigationQuestionsFromWorkspace, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
 import { createBridgeClient } from "./bridge";
 import type {
 	ApprovalChecklistState,
@@ -810,6 +810,7 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
 
 function CodeSummaryPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   const summary = codeSummaryFromWorkspace(workspace);
+  const questions = codeInvestigationQuestionsFromWorkspace(workspace);
   const repoPath = workspace.inputBundle.repositories?.[0]?.local_path;
   return (
     <section className="table-section">
@@ -822,9 +823,25 @@ function CodeSummaryPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
         <Fact label="调查工具" value={summary.toolCalls > 0 ? `${summary.toolCalls} 次调用 / grep ${summary.searchedFiles} 文件 / ${summary.snippetWindows} 个证据窗口` : "待生成"} />
         <Fact label="调查问题" value={summary.investigationQuestions > 0 ? `${summary.investigationQuestions} 个问题 / ${summary.openInvestigationQuestions} 个待补证据` : "待生成"} />
         <Fact label="结构化读取" value={summary.selectedFiles > 0 ? `${summary.selectedFiles} 个文件 · ${summary.investigationMode || "intent drilldown"}` : "待生成"} />
+        <Fact label="工具链" value={formatToolBreakdown(summary.toolBreakdown)} />
         <Fact label="Source Digest" value={summary.sourceDigest || "待生成"} />
         <Fact label="读取策略" value={summary.degraded ? "已降级使用需求/页面材料" : "只读扫描结构摘要，不保存完整源码"} />
       </div>
+      {questions.length > 0 ? (
+        <div className="runtime-log-list">
+          {questions.map((question) => (
+            <div key={question.id} className={`runtime-log-row ${question.status === "answered" ? "success" : question.remainingGaps.length ? "warning" : "info"}`}>
+              <span>{question.status}</span>
+              <strong>{question.label}</strong>
+              <small>
+                {[question.evidenceSummary, question.remainingGaps.length ? `缺口：${question.remainingGaps.slice(0, 2).join("、")}` : "", formatQuestionTools(question.toolCalls)]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </small>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -1719,6 +1736,42 @@ function evidenceKindLabel(kind: string | undefined): string {
     release_note: "发布说明",
   };
   return labels[kind] ?? kind;
+}
+
+function formatToolBreakdown(counts: Record<string, number>): string {
+  const items = Object.entries(counts).filter(([, count]) => count > 0);
+  if (items.length === 0) {
+    return "待生成";
+  }
+  return items
+    .sort((left, right) => {
+      if (right[1] === left[1]) {
+        return left[0].localeCompare(right[0]);
+      }
+      return right[1] - left[1];
+    })
+    .slice(0, 5)
+    .map(([tool, count]) => `${tool}×${count}`)
+    .join(" / ");
+}
+
+function formatQuestionTools(
+  tools: Array<{ tool: string; selectedFiles: number; snippetWindows: number; pathHashCount: number }>,
+): string {
+  if (tools.length === 0) {
+    return "";
+  }
+  return tools
+    .slice(0, 5)
+    .map((tool) => {
+      const details = [
+        tool.selectedFiles > 0 ? `${tool.selectedFiles} 文件` : "",
+        tool.snippetWindows > 0 ? `${tool.snippetWindows} 窗口` : "",
+        tool.pathHashCount > 0 ? `${tool.pathHashCount} hash` : "",
+      ].filter(Boolean);
+      return details.length > 0 ? `${tool.tool}(${details.join("/")})` : tool.tool;
+    })
+    .join(" -> ");
 }
 
 function cloudStatusLabel(status: string): string {

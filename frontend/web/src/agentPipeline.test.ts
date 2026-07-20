@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentPipelineItems, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
+import { agentPipelineItems, codeInvestigationQuestionsFromWorkspace, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
 import { createWorkspace } from "./mockWorkspace";
 
 describe("agent pipeline helpers", () => {
@@ -75,6 +75,70 @@ describe("agent pipeline helpers", () => {
 
     expect(codeSummaryFromWorkspace(degraded).degraded).toBe(true);
     expect(codeReader?.status).toBe("attention");
+  });
+
+  it("surfaces investigation questions and bounded tool chains without raw inputs", () => {
+    const workspace = {
+      ...createWorkspace("product_demo"),
+      understandingReport: {
+        id: "understanding_tools",
+        project_id: "project_product_demo",
+        schema_version: "demoops.multimodal_understanding_report.v1" as const,
+        code_snapshots: [
+          {
+            id: "code_tools",
+            project_id: "project_product_demo",
+            schema_version: "demoops.multimodal_understanding_report.v1",
+            file_count: 3,
+            investigation_trace: {
+              id: "trace_tools",
+              mode: "tool_driven_intent_drilldown",
+              questions: [
+                {
+                  id: "question_project_creation",
+                  question: "新建项目流程在哪里实现？",
+                  intent_label: "新建项目",
+                  status: "answered",
+                  evidence_summary: "确认创建流程入口和父级 route。",
+                  tool_call_ids: ["tool_grep", "tool_find_references"],
+                  confidence: 0.82,
+                },
+              ],
+              tool_calls: [
+                {
+                  id: "tool_grep",
+                  tool: "grep_text",
+                  input_summary: "terms=create-tetris-project",
+                  output_summary: "searched=12 matched=1 selected=1",
+                  matched_file_count: 1,
+                  selected_file_count: 1,
+                  path_hashes: ["sha256:path"],
+                },
+                {
+                  id: "tool_find_references",
+                  tool: "find_references",
+                  input_summary: "reference_terms=create-tetris-project",
+                  output_summary: "searched=8 matched=1 selected=1",
+                  matched_file_count: 1,
+                  selected_file_count: 1,
+                  path_hashes: ["sha256:parent"],
+                  metadata: { question_id: "question_project_creation", reference_term_hashes: ["sha256:term"] },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+
+    const summary = codeSummaryFromWorkspace(workspace);
+    const questions = codeInvestigationQuestionsFromWorkspace(workspace);
+
+    expect(summary.toolBreakdown.grep_text).toBe(1);
+    expect(summary.toolBreakdown.find_references).toBe(1);
+    expect(questions).toHaveLength(1);
+    expect(questions[0]?.toolCalls.map((call) => call.tool)).toEqual(["grep_text", "find_references"]);
+    expect(questions[0]?.toolCalls.map((call) => call.summary).join("\n")).not.toContain("create-tetris-project");
   });
 
   it("surfaces ProjectIntelligenceGraph status and uses intelligence metrics", () => {
