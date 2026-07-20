@@ -144,7 +144,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			successState:  "agent 构建过程开始，页面出现构建进度、日志或项目详情。",
 			routeState:    model.BusinessRouteStateProjectDetail,
 			entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
-			expectedRoute: firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning),
+			expectedRoute: firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail),
 			durationMS:    10000,
 			keywords:      []string{"agent", "智能体", "开始构建", "启动构建", "实际构建", "生成", "构建", "build", "run", "start", "generate"},
 			capture:       []string{"启动构建按钮", "构建开始状态"},
@@ -658,17 +658,100 @@ type businessRouteSet struct {
 }
 
 func businessRouteHints(project *model.ProjectContext, productMap *model.ProductMap, intelligence *model.ProjectIntelligencePack) businessRouteSet {
-	workspace := appWorkspaceRouteTemplate(intelligence)
+	workspace := firstNonEmpty(
+		semanticArchitectureRouteTemplate(intelligence, []string{"workspace", "dashboard", "app", "工作台", "控制台"}, false, false),
+		appWorkspaceRouteTemplate(intelligence),
+	)
 	if workspace == "" || workspace == "/" {
 		workspace = firstBusinessRouteFromProductMap(productMap, []string{"app", "dashboard", "workspace", "project"})
 	}
+	creation := firstNonEmpty(
+		semanticArchitectureRouteTemplate(intelligence, []string{"new", "create", "project", "项目", "新建", "创建"}, false, false),
+		firstExistingRouteTemplate([]string{"/workspace/projects/new", "/projects/new", "/project/new", "/app/projects/new", "/app"}, intelligence, firstNonEmpty(workspace, "/")),
+	)
+	projectDetail := firstNonEmpty(
+		dynamicProjectRouteTemplate(intelligence, "/project/:id"),
+		semanticArchitectureRouteTemplate(intelligence, []string{"project", "detail", "workspace", "项目", "详情"}, true, true),
+	)
+	buildRunning := firstNonEmpty(
+		projectBuildRouteTemplate(intelligence, projectDetail),
+		semanticArchitectureRouteTemplate(intelligence, []string{"build", "progress", "log", "preview", "agent", "构建", "进度", "日志", "预览"}, true, false),
+	)
 	return businessRouteSet{
 		login:         userLoginRouteTemplate(intelligence),
 		workspace:     firstNonEmpty(workspace, routePathFromCandidate(project.ProductURL), "/"),
-		creation:      firstExistingRouteTemplate([]string{"/projects/new", "/project/new", "/app/projects/new", "/app"}, intelligence, firstNonEmpty(workspace, "/")),
-		projectDetail: dynamicProjectRouteTemplate(intelligence, "/project/:id"),
-		buildRunning:  projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, "/project/:id")),
+		creation:      creation,
+		projectDetail: projectDetail,
+		buildRunning:  buildRunning,
 	}
+}
+
+func semanticArchitectureRouteTemplate(intelligence *model.ProjectIntelligencePack, keywords []string, preferDynamic bool, requireDynamic bool) string {
+	if intelligence == nil || intelligence.Architecture == nil {
+		return ""
+	}
+	bestRoute := ""
+	bestScore := 0
+	for _, item := range intelligence.Architecture.RouteTree {
+		path := normalizeRouteTemplate(item.Path)
+		if !routeCandidateAllowed(path) {
+			continue
+		}
+		dynamic := routeTemplateDynamic(path)
+		if requireDynamic && !dynamic {
+			continue
+		}
+		score := semanticArchitectureRouteScore(path, item, keywords)
+		if score <= 0 {
+			continue
+		}
+		if dynamic == preferDynamic {
+			score++
+		}
+		if item.AuthRequired {
+			score++
+		}
+		if score > bestScore || (score == bestScore && routeSpecificity(path) > routeSpecificity(bestRoute)) {
+			bestRoute = path
+			bestScore = score
+		}
+	}
+	return bestRoute
+}
+
+func semanticArchitectureRouteScore(path string, item model.ArchitectureRouteNode, keywords []string) int {
+	text := normalizeIntentText(strings.Join(append([]string{path, item.Name}, item.ComponentRefs...), " "))
+	score := 0
+	for _, keyword := range keywords {
+		keyword = normalizeIntentText(keyword)
+		if keyword == "" {
+			continue
+		}
+		if strings.Contains(text, keyword) {
+			score += 2
+		}
+	}
+	if containsAnyNormalized(text, "new", "create", "新建", "创建") && containsAnyNormalized(strings.Join(keywords, " "), "new", "create", "新建", "创建") {
+		score += 3
+	}
+	if routeTemplateDynamic(path) && containsAnyNormalized(strings.Join(keywords, " "), "detail", "build", "progress", "详情", "构建", "进度") {
+		score += 2
+	}
+	if strings.Contains(path, "/build") && containsAnyNormalized(strings.Join(keywords, " "), "build", "progress", "构建", "进度") {
+		score += 3
+	}
+	return score
+}
+
+func routeSpecificity(route string) int {
+	if route == "" {
+		return 0
+	}
+	score := strings.Count(strings.Trim(route, "/"), "/") + 1
+	if routeTemplateDynamic(route) {
+		score++
+	}
+	return score
 }
 
 func firstBusinessRouteFromProductMap(productMap *model.ProductMap, keywords []string) string {

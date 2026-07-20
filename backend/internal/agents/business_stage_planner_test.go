@@ -108,3 +108,41 @@ func TestBusinessStagePlannerDoesNotBindLoginToProjectNameStage(t *testing.T) {
 		}
 	}
 }
+
+func TestBusinessStagePlannerUsesCodeDiscoveredStageRoutes(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "演示登录，新建项目，项目名称俄罗斯方块，选择构建模式，启动 agent 构建并观察 60 秒。"
+	project.DemoAccount = &model.DemoAccount{UsernameSecretRef: "secret://demo/username", PasswordSecretRef: "secret://demo/password"}
+	intelligence := graphQualityIntelligence()
+	intelligence.DemoIntent.Objective = project.ProductDescription
+	intelligence.Architecture = &model.ProjectArchitectureMap{
+		RouteTree: []model.ArchitectureRouteNode{
+			{ID: "route_login", Path: "/login", Name: "登录"},
+			{ID: "route_workspace", Path: "/workspace", Name: "工作台", AuthRequired: true},
+			{ID: "route_project_new", Path: "/workspace/projects/new", Name: "新建项目", AuthRequired: true},
+			{ID: "route_project_detail", Path: "/workspace/projects/:id", Name: "项目详情", AuthRequired: true},
+			{ID: "route_project_build", Path: "/workspace/projects/:id/build", Name: "构建进度", AuthRequired: true},
+		},
+	}
+
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, intelligence, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageByKind := map[model.BusinessStageKind]model.BusinessStage{}
+	for _, stage := range plan.Stages {
+		stageByKind[stage.Kind] = stage
+	}
+	if got := stageByKind[model.BusinessStageKindBusinessAction].ExpectedRouteAfterAction; got != "/workspace/projects/new" {
+		t.Fatalf("new project stage should transition to discovered creation route, got %q", got)
+	}
+	if got := stageByKind[model.BusinessStageKindBusinessInput].EntryRoute; got != "/workspace/projects/new" {
+		t.Fatalf("project name stage should use discovered creation route, got %q", got)
+	}
+	if got := stageByKind[model.BusinessStageKindBusinessSubmit].ExpectedRouteAfterAction; got != "/workspace/projects/:id/build" {
+		t.Fatalf("start build stage should transition to discovered build route, got %q", got)
+	}
+	if got := stageByKind[model.BusinessStageKindObserveProgress].EntryRoute; got != "/workspace/projects/:id/build" {
+		t.Fatalf("observe stage should use discovered build route, got %q", got)
+	}
+}

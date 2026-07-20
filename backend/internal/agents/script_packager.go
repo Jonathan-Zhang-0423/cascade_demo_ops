@@ -1237,12 +1237,12 @@ func firstExistingRouteTemplate(candidates []string, intelligence *model.Project
 
 func firstExistingDynamicRouteTemplate(candidates []string, intelligence *model.ProjectIntelligencePack, fallback string) string {
 	if intelligence != nil && intelligence.Architecture != nil {
-		for _, item := range intelligence.Architecture.RouteTree {
-			path := normalizeRouteTemplate(item.Path)
-			if !routeCandidateAllowed(path) || !routeTemplateDynamic(path) {
-				continue
-			}
-			for _, candidate := range candidates {
+		for _, candidate := range candidates {
+			for _, item := range intelligence.Architecture.RouteTree {
+				path := normalizeRouteTemplate(item.Path)
+				if !routeCandidateAllowed(path) || !routeTemplateDynamic(path) {
+					continue
+				}
 				if routeTemplateEquivalent(path, candidate) {
 					return path
 				}
@@ -1294,6 +1294,8 @@ func dynamicProjectRouteTemplate(intelligence *model.ProjectIntelligencePack, fa
 		"/project/:project_id",
 		"/projects/:id",
 		"/projects/:project_id",
+		"/workspace/projects/:id",
+		"/workspace/projects/:project_id",
 		"/app/projects/:id",
 		"/app/projects/:project_id",
 	}, intelligence, fallback)
@@ -1305,12 +1307,16 @@ func projectBuildRouteTemplate(intelligence *model.ProjectIntelligencePack, fall
 		"/project/:project_id/build",
 		"/projects/:id/build",
 		"/projects/:project_id/build",
+		"/workspace/projects/:id/build",
+		"/workspace/projects/:project_id/build",
 		"/app/projects/:id/build",
 		"/app/projects/:project_id/build",
 		"/project/:id",
 		"/project/:project_id",
 		"/projects/:id",
 		"/projects/:project_id",
+		"/workspace/projects/:id",
+		"/workspace/projects/:project_id",
 		"/app/projects/:id",
 		"/app/projects/:project_id",
 	}, intelligence, fallback)
