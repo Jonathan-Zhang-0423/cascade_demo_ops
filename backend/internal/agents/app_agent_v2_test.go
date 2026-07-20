@@ -1094,6 +1094,64 @@ func TestProjectInvestigationPlannerReceivesRedactedTransientSnippetObservation(
 	}
 }
 
+func TestProjectInvestigationPlannerCanRequestReadWindowBeforeNextSearch(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/window-lab"
+			const handlerHint = "handleWindowLaunch"
+			return <button data-testid="launch-window-lab">Launch window lab</button>
+		}
+	`)
+	writeFixtureFile(t, root, "backend/server/WindowAPI.go", `
+		package server
+		func handleWindowLaunch() {}
+	`)
+	planner := &readWindowPlannerLLM{}
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(planner).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        1,
+			FilesPerRound:          1,
+			TotalFileLimit:         5,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_read_window", ProductDescription: "演示 window lab"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_read_window", Objective: "演示 window lab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if investigationToolCallCount(result.Trace, "read_window") == 0 {
+		t.Fatalf("expected planner-requested read_window tool call, got %+v", result.Trace.ToolCalls)
+	}
+	nextActionGrep := investigationToolCallWithMetadataValues(result.Trace, "grep_text", map[string]string{
+		"planned_from":   "next_actions",
+		"suggested_tool": "grep_text",
+	})
+	if nextActionGrep == nil || nextActionGrep.Metadata["suggested_tool"] != "grep_text" {
+		t.Fatalf("expected read_window observation to drive a follow-up grep, got %+v", result.Trace.ToolCalls)
+	}
+	if !candidateRelContains(result.SelectedCandidates, "WindowAPI.go") {
+		t.Fatalf("expected read_window-driven query to select backend handler, got %+v", result.SelectedCandidates)
+	}
+	traceJSON, err := json.Marshal(result.Trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(traceJSON), "handlerHint") || strings.Contains(string(traceJSON), "Launch window lab") {
+		t.Fatalf("read_window trace must not persist raw window text: %s", string(traceJSON))
+	}
+}
+
 func TestProjectInvestigationToolSuiteSurfacesNextActionsForRemainingGaps(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -1480,6 +1538,29 @@ func investigationToolCallWithMetadata(trace *model.CodeInvestigationTrace, tool
 	return nil
 }
 
+func investigationToolCallWithMetadataValues(trace *model.CodeInvestigationTrace, tool string, values map[string]string) *model.CodeInvestigationToolCall {
+	if trace == nil {
+		return nil
+	}
+	for i := range trace.ToolCalls {
+		call := &trace.ToolCalls[i]
+		if call.Tool != tool || call.Metadata == nil {
+			continue
+		}
+		matched := true
+		for key, value := range values {
+			if fmt.Sprint(call.Metadata[key]) != value {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return call
+		}
+	}
+	return nil
+}
+
 func investigationToolCallCount(trace *model.CodeInvestigationTrace, tool string) int {
 	count := 0
 	if trace == nil {
@@ -1687,5 +1768,66 @@ func (l *snippetObservationCapturePlannerLLM) GenerateText(ctx context.Context, 
 }
 
 func (l *snippetObservationCapturePlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
+}
+
+type readWindowPlannerLLM struct {
+	nextActionCalls int
+}
+
+func (l *readWindowPlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	var data []byte
+	switch target.(type) {
+	case *codeInvestigationLLMOutput:
+		data = []byte(`{
+			"summary": "find the visible window lab control first",
+			"queries": [
+				{"purpose": "定位 window lab 页面和启动控件", "terms": ["window", "lab", "launch-window-lab"]}
+			],
+			"confidence": 0.84
+		}`)
+	case *codeInvestigationNextActionsLLMOutput:
+		l.nextActionCalls++
+		if l.nextActionCalls == 1 {
+			data = []byte(`{
+				"summary": "read a little more around the UI snippet before deciding backend terms",
+				"next_actions": [
+					{
+						"tool": "read_window",
+						"reason": "上一轮 snippet 只显示控件，需要读取附近小窗口找 handler hint。",
+						"query_terms": ["launch-window-lab"],
+						"expected_evidence": ["api_or_data_model"]
+					}
+				],
+				"confidence": 0.82
+			}`)
+		} else {
+			data = []byte(`{
+				"summary": "window observation exposed the handler hint; grep backend symbol next",
+				"next_actions": [
+					{
+						"tool": "grep_text",
+						"reason": "read_window 观察到 handleWindowLaunch，继续定位后端实现。",
+						"query_terms": ["handleWindowLaunch"],
+						"expected_evidence": ["api_or_data_model"]
+					}
+				],
+				"confidence": 0.88
+			}`)
+		}
+	default:
+		data = []byte(`{}`)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-read-window-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (l *readWindowPlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (l *readWindowPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
 	return nil, nil
 }
