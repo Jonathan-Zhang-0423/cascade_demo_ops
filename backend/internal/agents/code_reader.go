@@ -285,6 +285,7 @@ func readStructuredCodeSnapshotFromCandidates(ctx context.Context, snapshot *mod
 		}
 		text := string(data)
 		inspectFrameworks(name, text, snapshot)
+		inspectFilesystemRoutes(rel, pathHash, snapshot)
 		inspectRoutes(text, pathHash, snapshot)
 		inspectSelectors(text, pathHash, snapshot)
 		inspectComponents(name, text, pathHash, snapshot)
@@ -2384,6 +2385,186 @@ func inspectRoutes(text string, pathHash string, snapshot *model.CodeUnderstandi
 			Confidence:     0.62,
 		})
 	}
+}
+
+func inspectFilesystemRoutes(rel string, pathHash string, snapshot *model.CodeUnderstandingSnapshot) {
+	for _, path := range filesystemRoutesForRel(rel) {
+		if !browserRouteAllowedForCode(path) {
+			continue
+		}
+		snapshot.Routes = append(snapshot.Routes, model.RouteInsight{
+			ID:             safeID("route", path),
+			Path:           path,
+			Name:           filesystemRouteNameFromPath(path),
+			SourcePathHash: pathHash,
+			EvidenceRefs:   []model.EvidenceRef{codeEvidenceRef("route_path", pathHash, path)},
+			Confidence:     0.56,
+		})
+	}
+}
+
+func filesystemRoutesForRel(rel string) []string {
+	normalized := strings.Trim(filepath.ToSlash(rel), "/")
+	lower := strings.ToLower(normalized)
+	if normalized == "" || shouldSkipCodeFileRel(normalized, filepath.Base(normalized)) {
+		return nil
+	}
+	if strings.HasSuffix(lower, ".css") || strings.HasSuffix(lower, ".scss") || strings.HasSuffix(lower, ".sass") || strings.HasSuffix(lower, ".less") {
+		return nil
+	}
+	parts := strings.Split(normalized, "/")
+	routes := []string{}
+	if idx := routeRootIndex(parts, "app"); idx >= 0 {
+		if route, ok := routeFromAppParts(parts[idx+1:]); ok {
+			routes = append(routes, route)
+		}
+	}
+	if idx := routeRootIndex(parts, "pages"); idx >= 0 {
+		if route, ok := routeFromPagesParts(parts[idx+1:]); ok {
+			routes = append(routes, route)
+		}
+	}
+	if idx := routeRootIndex(parts, "routes"); idx >= 0 {
+		if route, ok := routeFromRoutesParts(parts[idx+1:]); ok {
+			routes = append(routes, route)
+		}
+	}
+	return uniqueStrings(routes)
+}
+
+func routeRootIndex(parts []string, root string) int {
+	for i, part := range parts {
+		if strings.EqualFold(part, root) {
+			return i
+		}
+	}
+	return -1
+}
+
+func routeFromAppParts(parts []string) (string, bool) {
+	if len(parts) == 0 {
+		return "", false
+	}
+	file := strings.ToLower(parts[len(parts)-1])
+	base := strings.TrimSuffix(file, filepath.Ext(file))
+	if base != "page" && base != "route" && base != "layout" {
+		return "", false
+	}
+	routeParts := routeSegmentsFromParts(parts[:len(parts)-1])
+	return buildFilesystemRoute(routeParts)
+}
+
+func routeFromPagesParts(parts []string) (string, bool) {
+	if len(parts) == 0 {
+		return "", false
+	}
+	file := parts[len(parts)-1]
+	ext := filepath.Ext(file)
+	if ext == "" {
+		return "", false
+	}
+	base := strings.TrimSuffix(file, ext)
+	if strings.EqualFold(base, "_app") || strings.EqualFold(base, "_document") || strings.EqualFold(base, "_error") || strings.EqualFold(base, "api") {
+		return "", false
+	}
+	routeParts := append(routeSegmentsFromParts(parts[:len(parts)-1]), normalizeRouteFileSegment(base))
+	return buildFilesystemRoute(routeParts)
+}
+
+func routeFromRoutesParts(parts []string) (string, bool) {
+	if len(parts) == 0 {
+		return "", false
+	}
+	file := parts[len(parts)-1]
+	ext := filepath.Ext(file)
+	base := strings.TrimSuffix(file, ext)
+	switch {
+	case strings.EqualFold(base, "+page"), strings.EqualFold(base, "+layout"):
+		return buildFilesystemRoute(routeSegmentsFromParts(parts[:len(parts)-1]))
+	case strings.EqualFold(base, "index"):
+		return buildFilesystemRoute(routeSegmentsFromParts(parts[:len(parts)-1]))
+	default:
+		routeParts := append(routeSegmentsFromParts(parts[:len(parts)-1]), normalizeRouteFileSegment(base))
+		return buildFilesystemRoute(routeParts)
+	}
+}
+
+func routeSegmentsFromParts(parts []string) []string {
+	out := []string{}
+	for _, part := range parts {
+		segment := normalizeRouteFileSegment(part)
+		if segment == "" {
+			continue
+		}
+		out = append(out, segment)
+	}
+	return out
+}
+
+func normalizeRouteFileSegment(segment string) string {
+	segment = strings.TrimSpace(segment)
+	if segment == "" || strings.EqualFold(segment, "index") {
+		return ""
+	}
+	if strings.HasPrefix(segment, "(") && strings.HasSuffix(segment, ")") {
+		return ""
+	}
+	if strings.HasPrefix(segment, "@") {
+		return ""
+	}
+	if strings.HasPrefix(segment, "[[...") && strings.HasSuffix(segment, "]]") {
+		name := strings.TrimSuffix(strings.TrimPrefix(segment, "[[..."), "]]")
+		if name == "" {
+			return ""
+		}
+		return ":" + name + "*"
+	}
+	if strings.HasPrefix(segment, "[...") && strings.HasSuffix(segment, "]") {
+		name := strings.TrimSuffix(strings.TrimPrefix(segment, "[..."), "]")
+		if name == "" {
+			return ""
+		}
+		return ":" + name + "*"
+	}
+	if strings.HasPrefix(segment, "[") && strings.HasSuffix(segment, "]") {
+		name := strings.TrimSuffix(strings.TrimPrefix(segment, "["), "]")
+		if name == "" {
+			return ""
+		}
+		return ":" + name
+	}
+	return strings.Trim(segment, "_")
+}
+
+func buildFilesystemRoute(parts []string) (string, bool) {
+	clean := []string{}
+	for _, part := range parts {
+		part = strings.Trim(part, "/")
+		if part == "" {
+			continue
+		}
+		clean = append(clean, part)
+	}
+	route := "/" + strings.Join(clean, "/")
+	if route == "/" || browserRouteAllowedForCode(route) {
+		return route, true
+	}
+	return "", false
+}
+
+func filesystemRouteNameFromPath(path string) string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return "Home"
+	}
+	parts := strings.Split(trimmed, "/")
+	name := parts[len(parts)-1]
+	name = strings.TrimPrefix(name, ":")
+	name = strings.TrimSuffix(name, "*")
+	if name == "" {
+		name = trimmed
+	}
+	return strings.ReplaceAll(name, "-", " ")
 }
 
 func inspectSelectors(text string, pathHash string, snapshot *model.CodeUnderstandingSnapshot) {

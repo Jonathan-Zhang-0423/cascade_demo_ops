@@ -135,6 +135,78 @@ func TestCodeReaderUsesIntentDrivenBudget(t *testing.T) {
 	}
 }
 
+func TestCodeReaderInfersFilesystemRoutesFromSelectedFiles(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"next":"latest","react":"latest"}}`)
+	writeFixtureFile(t, root, "src/app/workspace/projects/new/page.tsx", `
+		export default function NewProjectPage() {
+			return <button data-testid="create-tetris-project">创建俄罗斯方块</button>
+		}
+	`)
+	writeFixtureFile(t, root, "src/app/aigc/.well-known/cascade-exchange/page.tsx", `
+		export default function ExchangeDebug() { return <main>debug</main> }
+	`)
+	project := &model.ProjectContext{
+		ID:                 "project_file_routes",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示新建项目，俄罗斯方块，构建模式",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_file_routes",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_file_routes",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"新建项目", "俄罗斯方块"}}
+	agent := NewCodeReaderAgent()
+	agent.Budget = model.CodeReadBudget{
+		Mode:                   "tool_driven_intent_drilldown",
+		RepoIndexFileLimit:     1,
+		DrilldownRounds:        1,
+		FilesPerRound:          2,
+		TotalFileLimit:         4,
+		MaxFileBytes:           80 * 1024,
+		ToolSearchFileLimit:    20,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  8,
+	}
+
+	snapshots, err := agent.ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	if !routeInsightContains(snapshot.Routes, "/workspace/projects/new") {
+		t.Fatalf("expected filesystem route /workspace/projects/new, got %+v", snapshot.Routes)
+	}
+	if routeInsightContains(snapshot.Routes, "/aigc/.well-known/cascade-exchange") {
+		t.Fatalf("control-plane filesystem route should be filtered, got %+v", snapshot.Routes)
+	}
+	if !selectorInsightContains(snapshot.Selectors, "[data-testid='create-tetris-project']") {
+		t.Fatalf("expected selected page selector, got %+v", snapshot.Selectors)
+	}
+}
+
+func TestFilesystemRoutesForRelCoversCommonFileRouters(t *testing.T) {
+	cases := map[string]string{
+		"src/app/workspace/projects/[id]/page.tsx": "/workspace/projects/:id",
+		"src/app/(marketing)/login/page.tsx":       "/login",
+		"src/pages/projects/[id].tsx":              "/projects/:id",
+		"src/pages/index.tsx":                      "/",
+		"src/routes/builder/+page.svelte":          "/builder",
+		"src/routes/projects/[id]/+page.svelte":    "/projects/:id",
+	}
+	for rel, expected := range cases {
+		routes := filesystemRoutesForRel(rel)
+		if !stringSliceContains(routes, expected) {
+			t.Fatalf("expected %s -> %s, got %+v", rel, expected, routes)
+		}
+	}
+	if routes := filesystemRoutesForRel("src/app/aigc/.well-known/cascade-exchange/page.tsx"); stringSliceContains(routes, "/aigc/.well-known/cascade-exchange") {
+		t.Fatalf("control-plane route should be filtered, got %+v", routes)
+	}
+}
+
 func TestProjectInvestigationToolSuiteTracksQuestionProgress(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
