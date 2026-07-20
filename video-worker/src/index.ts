@@ -5,7 +5,6 @@ import { executeScript, validateScript } from "./script-runner.js";
 import { verifyInteractions } from "./interaction-verifier.js";
 import { probeMediaFile } from "./media-probe.js";
 import { validateEditPlan } from "./renderer.js";
-import { analyzeAudioFile } from "./audio-analysis.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -47,9 +46,6 @@ async function dispatch(request: JsonRpcRequest): Promise<unknown> {
   }
   if (request.method === "probe_media") {
     return probeMediaFile(request.params as never);
-  }
-  if (request.method === "analyze_audio") {
-    return analyzeAudioFile(request.params as never);
   }
   if (request.method === "validate_edit_plan") {
     return validateEditPlan(request.params as never);

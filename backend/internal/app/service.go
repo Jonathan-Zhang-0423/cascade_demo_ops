@@ -43,7 +43,6 @@ type editorRenderTask struct {
 
 type editorWorker interface {
 	ProbeMedia(context.Context, executor.MediaProbeRequest) (executor.MediaProbeResult, error)
-	AnalyzeAudio(context.Context, executor.AudioAnalysisRequest) (executor.AudioAnalysisResult, error)
 	ValidateEditPlan(context.Context, executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error)
 	Render(context.Context, executor.RenderRequest) (executor.RenderResult, error)
 }
@@ -296,7 +295,18 @@ func (s *Service) GetExecutionPackageDebugView(ctx context.Context, orgID string
 }
 
 func (s *Service) CompleteExecutionPackageWithResult(ctx context.Context, orgID string, exchangePackageID string, result model.RecordingResultPackage) (model.ExecutionPackageStatusResponse, error) {
-	return s.exchange.CompleteWithRecordingResult(ctx, orgID, exchangePackageID, result)
+	status, err := s.exchange.CompleteWithRecordingResult(ctx, orgID, exchangePackageID, result)
+	if err != nil {
+		return model.ExecutionPackageStatusResponse{}, err
+	}
+	// A completed local recording should immediately become an editable session.
+	// Failure to materialize a local source must not roll back the completed
+	// recording result; remote/encrypted artifacts are handled only after they
+	// have been downloaded and decrypted into Server-managed storage.
+	if result.Status != model.RecordingResultStatusFailed {
+		_, _, _ = s.EnsureEditorSessionFromResultPackage(ctx, model.EditorCreateFromResultPackageRequest{ResultPackage: &result})
+	}
+	return status, nil
 }
 
 func (s *Service) GetResultPackage(ctx context.Context, orgID string, resultPackageID string) (model.RecordingResultPackage, error) {

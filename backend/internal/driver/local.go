@@ -42,12 +42,6 @@ func (d *LocalDriver) ProbeMedia(ctx context.Context, request executor.MediaProb
 	return result, err
 }
 
-func (d *LocalDriver) AnalyzeAudio(ctx context.Context, request executor.AudioAnalysisRequest) (executor.AudioAnalysisResult, error) {
-	var result executor.AudioAnalysisResult
-	err := d.call(ctx, "analyze_audio", request, &result)
-	return result, err
-}
-
 func (d *LocalDriver) ValidateEditPlan(ctx context.Context, request executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error) {
 	var result model.DemoEditPlanValidationReport
 	err := d.call(ctx, "validate_edit_plan", request, &result)

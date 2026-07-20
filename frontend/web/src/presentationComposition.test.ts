@@ -34,6 +34,7 @@ const session: EditorSession = {
     timeline: { duration_ms: 4000 },
     artifacts: [
       { id: "raw", kind: "raw_recording", uri: "file:///raw.mp4", duration_ms: 4000 },
+      { id: "screenshot", kind: "step_screenshot", uri: "file:///step.png", mime_type: "image/png", metadata: { presentation_only: true } },
       { id: "narration", kind: "narration_audio", uri: "file:///narration.wav", duration_ms: 2500 },
     ],
   },
@@ -76,6 +77,20 @@ describe("presentation composition", () => {
       { mode: "source", volumePercent: 80 },
       { mode: "mute", volumePercent: 80 },
     ]);
+  });
+
+  it("keeps a step screenshot as a timed still without inventing source audio", () => {
+    const withStill = structuredClone(plan);
+    withStill.shots.push({
+      id: "still", source_artifact_id: "screenshot", source_step_id: "open", presentation_kind: "still", output_duration_ms: 1500,
+      purpose: "Confirm the saved state", overlays: [{ type: "caption", text: "Saved", start_ms: 0, end_ms: 1500 }],
+    });
+    const composition = compilePresentationComposition(session, withStill);
+    expect(composition.durationInFrames).toBe(120);
+    expect(composition.sequences.filter((sequence) => sequence.kind === "still")[0]).toMatchObject({
+      fromFrame: 75, durationInFrames: 45, sourceArtifactId: "screenshot", sourceStepId: "open",
+    });
+    expect(composition.sequences.filter((sequence) => sequence.kind === "audio")).toHaveLength(1);
   });
 
   it("compiles confirmed narration and global captions on output time", () => {

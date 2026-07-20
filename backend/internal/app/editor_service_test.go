@@ -191,6 +191,10 @@ func TestEditorSessionFromResultPackageBuildsStepTimeline(t *testing.T) {
 	if err := os.WriteFile(sourcePath, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	screenshotPath := filepath.Join(filepath.Dir(sourcePath), "open-dashboard.png")
+	if err := os.WriteFile(screenshotPath, []byte("png-fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	service.editorWorker = &fakeEditorWorker{probeResult: executor.MediaProbeResult{
 		Path: sourcePath, FileName: "recording.mp4", SizeBytes: 7, SHA256: "sha256:fixture", MimeType: "video/mp4", DurationMS: 7000,
 	}}
@@ -200,10 +204,13 @@ func TestEditorSessionFromResultPackageBuildsStepTimeline(t *testing.T) {
 		SchemaVersion: "demoops.recording_result_package.v1", Status: model.RecordingResultStatusGenerated,
 		ExecutionTrace: &model.ExecutionTrace{ID: "trace_1", WorkflowGraphID: "graph_1", StartedAt: startedAt},
 		StepResults: []model.StepResult{
-			{NodeID: "open_dashboard", Status: "passed", StartedAt: startedAt, DurationMS: 2000, ObservedState: "打开仪表盘"},
+			{NodeID: "open_dashboard", Status: "passed", StartedAt: startedAt, DurationMS: 2000, ObservedState: "打开仪表盘", Artifacts: []model.ArtifactRef{{ID: "screenshot_open", Kind: "screenshot", URI: localFileURI(screenshotPath), MimeType: "image/png", SHA256: "sha256:screenshot", Metadata: map[string]any{"include_in_demo": true}}}},
 			{NodeID: "create_project", Status: "passed", StartedAt: startedAt.Add(2500 * time.Millisecond), DurationMS: 3000, ObservedState: "创建项目"},
 		},
 		GeneratedAssets: []model.ArtifactRef{{ID: "raw_1", Kind: "raw_recording", URI: localFileURI(sourcePath), SHA256: "sha256:fixture"}},
+	}
+	if path, err := resolveResultReferenceArtifact(&result, model.EditorCreateFromResultPackageRequest{}, result.StepResults[0].Artifacts[0]); err != nil || path != screenshotPath {
+		t.Fatalf("screenshot reference did not resolve locally: path=%q err=%v", path, err)
 	}
 
 	session, err := service.CreateEditorSessionFromResultPackage(t.Context(), model.EditorCreateFromResultPackageRequest{ResultPackage: &result})
@@ -224,6 +231,33 @@ func TestEditorSessionFromResultPackageBuildsStepTimeline(t *testing.T) {
 	}
 	if sourceID := session.AssetCatalog.Artifacts[0].Metadata["source_artifact_id"]; sourceID != "raw_1" {
 		t.Fatalf("source artifact id = %v", sourceID)
+	}
+	if len(session.AssetCatalog.Artifacts) != 2 || session.AssetCatalog.Artifacts[1].Kind != "step_screenshot" || session.AssetCatalog.Artifacts[1].SourceStepID != "open_dashboard" {
+		t.Fatalf("step screenshot was not registered as a presentation material: %+v", session.AssetCatalog.Artifacts)
+	}
+}
+
+func TestEnsureEditorSessionFromResultPackageReusesResultHandoff(t *testing.T) {
+	service := newTestEditorService(t)
+	sourcePath := filepath.Join(t.TempDir(), "recording.mp4")
+	if err := os.WriteFile(sourcePath, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service.editorWorker = &fakeEditorWorker{probeResult: executor.MediaProbeResult{
+		Path: sourcePath, FileName: "recording.mp4", SizeBytes: 7, SHA256: "sha256:fixture", MimeType: "video/mp4", DurationMS: 3000,
+	}}
+	result := model.RecordingResultPackage{
+		ResultID: "result_editor_handoff", SourcePackageID: "package_handoff", CloudJobID: "job_handoff",
+		SchemaVersion: "demoops.recording_result_package.v1", Status: model.RecordingResultStatusGenerated,
+		GeneratedAssets: []model.ArtifactRef{{ID: "raw_handoff", Kind: "raw_recording", URI: localFileURI(sourcePath), SHA256: "sha256:fixture"}},
+	}
+	first, created, err := service.EnsureEditorSessionFromResultPackage(t.Context(), model.EditorCreateFromResultPackageRequest{ResultPackage: &result})
+	if err != nil || !created {
+		t.Fatalf("expected first handoff to create a session: session=%+v created=%v err=%v", first, created, err)
+	}
+	second, created, err := service.EnsureEditorSessionFromResultPackage(t.Context(), model.EditorCreateFromResultPackageRequest{ResultPackage: &result})
+	if err != nil || created || second.SessionID != first.SessionID {
+		t.Fatalf("expected repeated handoff to reuse the session: first=%+v second=%+v created=%v err=%v", first, second, created, err)
 	}
 }
 
@@ -358,8 +392,6 @@ func newTestEditorService(t *testing.T) *Service {
 
 type fakeEditorWorker struct {
 	probeResult   executor.MediaProbeResult
-	audioAnalysis executor.AudioAnalysisResult
-	audioRequest  executor.AudioAnalysisRequest
 	validation    model.DemoEditPlanValidationReport
 	renderRequest executor.RenderRequest
 	renderErr     error
@@ -374,15 +406,6 @@ func (f *fakeEditorWorker) ProbeMedia(_ context.Context, request executor.MediaP
 	}
 	if result.FileName == "" {
 		result.FileName = filepath.Base(request.Path)
-	}
-	return result, nil
-}
-
-func (f *fakeEditorWorker) AnalyzeAudio(_ context.Context, request executor.AudioAnalysisRequest) (executor.AudioAnalysisResult, error) {
-	f.audioRequest = request
-	result := f.audioAnalysis
-	if result.Path == "" {
-		result.Path = request.Path
 	}
 	return result, nil
 }

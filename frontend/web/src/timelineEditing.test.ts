@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EditorPlan, EditorShot, EditorTimelineStep } from "./editor";
-import { activeCaptionText, audioPreviewState, buildAudioSegments, deleteShotInPlan, mergeAudioSegmentInPlan, muteAudioRangeInPlan, patchAudioSegmentInPlan, reorderShotInPlan, requiredStepCoverage, snapMilliseconds, sourceSnapPoints, splitAudioAtOutputMS, splitShotAtOutputMS, targetIndexForOutputMS, trimShotInPlan } from "./timelineEditing";
+import { activeCaptionText, audioPreviewState, buildAudioSegments, deleteShotInPlan, mergeAudioSegmentInPlan, muteAudioRangeInPlan, patchAudioSegmentInPlan, reorderShotInPlan, requiredStepCoverage, setStillDurationInPlan, snapMilliseconds, sourceSnapPoints, splitAudioAtOutputMS, splitShotAtOutputMS, targetIndexForOutputMS, trimShotInPlan } from "./timelineEditing";
 
 const steps: EditorTimelineStep[] = [
   { step_id: "open", order: 0, action: "navigate", status: "passed", required: true, start_ms: 1000, end_ms: 3000, duration_ms: 2000 },
@@ -27,6 +27,7 @@ function plan(shots: EditorShot[]): EditorPlan {
 describe("timeline editing", () => {
   it("snaps to frames and source evidence boundaries", () => {
     expect(snapMilliseconds(1009, 30).valueMS).toBe(1000);
+    expect(snapMilliseconds(1009, 30, [], 120, false)).toMatchObject({ valueMS: 1009, snapped: false });
     expect(snapMilliseconds(2940, 30, [3000], 100)).toMatchObject({ valueMS: 3000, snapped: true, snapPointMS: 3000 });
     expect(sourceSnapPoints(shot("one", "open", [1000, 3000]), steps[0], { id: "raw", kind: "raw_recording", uri: "file:///raw", duration_ms: 8000 })).toEqual([0, 1000, 3000, 8000]);
   });
@@ -65,6 +66,33 @@ describe("timeline editing", () => {
     expect(blocked.blockedReason).toContain("步骤顺序");
     expect(targetIndexForOutputMS(locked, 500)).toBe(0);
     expect(targetIndexForOutputMS(locked, 5000)).toBe(1);
+  });
+
+  it("lets a presentation-only still move without changing the locked business order", () => {
+    const withStill = plan([
+      shot("one", "open", [0, 1000]),
+      { id: "still", source_artifact_id: "step_screenshot", source_step_id: "open", presentation_kind: "still", output_duration_ms: 1500, purpose: "Saved screenshot" },
+      shot("two", "create", [1000, 2000]),
+    ]);
+    const reordered = reorderShotInPlan(withStill, "still", 2, steps);
+    expect(reordered.changed).toBe(true);
+    expect(reordered.plan.shots.map((item) => item.id)).toEqual(["one", "two", "still"]);
+    expect(targetIndexForOutputMS(reordered.plan, 2250)).toBe(2);
+  });
+
+  it("changes a still duration on the output timeline and preserves audio timing", () => {
+    const withStill = {
+      ...plan([
+        shot("one", "open", [0, 1000]),
+        { id: "still", source_artifact_id: "step_screenshot", presentation_kind: "still" as const, output_duration_ms: 1500, purpose: "Saved screenshot", overlays: [{ type: "caption", text: "Saved", start_ms: 0, end_ms: 1500 }] },
+        shot("two", "create", [1000, 2000]),
+      ]),
+      audio: { mode: "source" as const, volume_percent: 100, split_points_ms: [2300, 2600] },
+    };
+    const result = setStillDurationInPlan({ plan: withStill, shotID: "still", durationMS: 2000, fps: 30 });
+    expect(result.changed).toBe(true);
+    expect(result.plan.shots[1]).toMatchObject({ output_duration_ms: 2000, overlays: [{ end_ms: 1500 }] });
+    expect(result.plan.audio?.split_points_ms).toEqual([2300, 3100]);
   });
 
   it("requires the full declared source range for required step evidence", () => {

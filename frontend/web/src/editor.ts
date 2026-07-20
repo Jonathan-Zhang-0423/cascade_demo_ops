@@ -23,6 +23,8 @@ export type EditorArtifact = {
   size_bytes?: number;
   duration_ms?: number;
   local_path?: string;
+  source_step_id?: string;
+  include_in_demo?: boolean;
   metadata?: Record<string, unknown>;
 };
 
@@ -52,6 +54,8 @@ export type EditorShot = {
   source_artifact_id: string;
   source_step_id?: string;
   source_time_range_ms?: [number, number];
+  presentation_kind?: "video" | "still";
+  output_duration_ms?: number;
   purpose: string;
   operations?: Array<{ type: string; [key: string]: unknown }>;
   overlays?: EditorOverlay[];
@@ -105,22 +109,6 @@ export type EditorRenderState = {
   video_path?: string;
   render_manifest_path?: string;
   error?: string;
-};
-
-export type EditorAudioAnalysis = {
-  schema_version: "demoops.audio_analysis.v1";
-  artifact_id: string;
-  path: string;
-  has_audio: boolean;
-  duration_ms: number;
-  bucket_ms: number;
-  sample_rate_hz: number;
-  peak_dbfs: number[];
-  rms_dbfs: number[];
-  silence_ranges_ms: Array<[number, number]>;
-  silence_threshold_db: number;
-  min_silence_ms: number;
-  ffmpeg_available: boolean;
 };
 
 export type EditorProviderCapability = {
@@ -178,7 +166,6 @@ export type EditorClient = {
   uploadAsset(sessionID: string, file: File): Promise<EditorClientResult<EditorSession>>;
   savePlan(sessionID: string, expectedRevision: number, plan: EditorPlan): Promise<EditorClientResult<EditorSession>>;
   validate(sessionID: string): Promise<EditorClientResult<EditorValidationReport>>;
-  analyzeAudio(sessionID: string, assetID: string, options?: { bucketMS?: number; silenceThresholdDB?: number; minSilenceMS?: number }): Promise<EditorClientResult<EditorAudioAnalysis>>;
   preview(sessionID: string): Promise<EditorClientResult<EditorSession>>;
   render(sessionID: string): Promise<EditorClientResult<EditorSession>>;
   cancelRender(sessionID: string, kind: "preview" | "final"): Promise<EditorClientResult<EditorSession>>;
@@ -247,15 +234,6 @@ export function createEditorClient(): EditorClient {
         body: JSON.stringify({ expected_revision: expectedRevision, edit_plan: plan }),
       }),
     validate: (sessionID) => request<EditorValidationReport>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/validate`, { method: "POST" }),
-    analyzeAudio: (sessionID, assetID, options) => request<EditorAudioAnalysis>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/audio-analysis`, {
-      method: "POST",
-      body: JSON.stringify({
-        asset_id: assetID,
-        bucket_ms: options?.bucketMS ?? 100,
-        silence_threshold_db: options?.silenceThresholdDB ?? -45,
-        min_silence_ms: options?.minSilenceMS ?? 500,
-      }),
-    }),
     preview: (sessionID) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/preview`, { method: "POST" }),
     render: (sessionID) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/render`, { method: "POST" }),
     cancelRender: (sessionID, kind) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/${kind === "preview" ? "preview" : "render"}/cancel`, { method: "POST" }),
@@ -342,21 +320,6 @@ function createMockEditorClient(): EditorClient {
       const session = sessions.get(sessionID);
       if (!session) return { ok: false, error: "未找到编辑项目" };
       return result({ schema_version: "demoops.demo_edit_plan_validation.v1", valid: session.edit_plan.shots.length > 0, checked_at: new Date().toISOString(), errors: [], warnings: [] });
-    },
-    async analyzeAudio(sessionID, assetID, options) {
-      const session = sessions.get(sessionID);
-      const artifact = session?.asset_catalog.artifacts.find((item) => item.id === assetID);
-      if (!artifact) return { ok: false, error: "未找到待分析素材" };
-      const bucketMS = options?.bucketMS ?? 100;
-      const durationMS = artifact.duration_ms ?? 0;
-      const buckets = Math.ceil(durationMS / bucketMS);
-      return result({
-        schema_version: "demoops.audio_analysis.v1", artifact_id: assetID, path: artifact.local_path ?? artifact.uri,
-        has_audio: true, duration_ms: durationMS, bucket_ms: bucketMS, sample_rate_hz: 1000,
-        peak_dbfs: Array.from({ length: buckets }, (_, index) => -12 - Math.abs(Math.sin(index / 3)) * 24),
-        rms_dbfs: Array.from({ length: buckets }, (_, index) => -18 - Math.abs(Math.sin(index / 3)) * 24),
-        silence_ranges_ms: [], silence_threshold_db: options?.silenceThresholdDB ?? -45, min_silence_ms: options?.minSilenceMS ?? 500, ffmpeg_available: true,
-      });
     },
     async preview(sessionID) {
       const session = sessions.get(sessionID);

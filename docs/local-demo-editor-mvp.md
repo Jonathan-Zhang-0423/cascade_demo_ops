@@ -68,6 +68,23 @@ revision 保存 + DemoEditPlan 校验
 
 “分析音频”只产生客观信号数据和自动静音候选，不自动修改 `DemoEditPlan`。候选的“信号置信度”由静音阈值与区间平均 RMS 的差值确定，只表示该区间接近数字静音的程度，不表示业务步骤正确性。用户点击“静音”后才会在候选首尾增加 `split_points_ms` 并写入 `segment_settings`；点击“忽略”只影响当前页面，不改计划。仅凭音频删除停顿会改变视频时长并可能损害业务证据，因此当前不执行这类自动动作。
 
+## 步骤截图展示片段（第一版）
+
+结果包中已安全登记的步骤截图会以 `kind=step_screenshot`、`metadata.presentation_only=true` 存入素材区。用户可预览截图，再明确点击“加入时间线”；系统不会自动插入，也不会把截图视为业务动作完成的证据。
+
+加入后对应的 `DemoEditShot` 使用：
+
+```json
+{
+  "presentation_kind": "still",
+  "output_duration_ms": 1500
+}
+```
+
+静态片段仅允许引用非敏感、`include_in_demo=true` 的本地 PNG/JPEG 步骤截图，展示时长范围为 250–15000ms。它可以在视频轨排序、删除和添加字幕，并可拖动片段右边缘或填写属性面板调整展示时长；第一版不支持分割、源入/出点裁剪或自动插入。截图尾部改变时，位于其后的音频编辑边界会同步平移，位于截图内部的边界保持在原输出位置。`source_step_id` 只用于追溯截图来源；业务步骤覆盖与必需步骤顺序校验会忽略该静态片段。
+
+FFmpeg 渲染时将图片循环为目标分辨率和 FPS 的视频帧，同时补入 48kHz 立体声静音音轨，再与录屏片段 concat。因此静态画面可安全插入有声或静音的成片时间线。
+
 ## API
 
 ```text
@@ -79,7 +96,6 @@ POST /v1/editor/sessions/{session_id}/assets
 POST /v1/editor/sessions/{session_id}/uploads
 POST /v1/editor/sessions/{session_id}/plan
 POST /v1/editor/sessions/{session_id}/validate
-POST /v1/editor/sessions/{session_id}/audio-analysis
 POST /v1/editor/sessions/{session_id}/preview
 POST /v1/editor/sessions/{session_id}/preview/cancel
 POST /v1/editor/sessions/{session_id}/render
@@ -88,19 +104,6 @@ GET  /v1/editor/sessions/{session_id}/media/preview
 GET  /v1/editor/sessions/{session_id}/media/final
 GET  /v1/editor/sessions/{session_id}/media/assets/{asset_id}
 ```
-
-音频分析请求以会话内 `asset_id` 为输入，Bridge 只解析该素材已登记的 `local_path`，不接受前端任意文件路径：
-
-```json
-{
-  "asset_id": "asset_xxx",
-  "bucket_ms": 100,
-  "silence_threshold_db": -45,
-  "min_silence_ms": 500
-}
-```
-
-返回 `demoops.audio_analysis.v1`，包含 `has_audio`、`duration_ms`、`peak_dbfs`、`rms_dbfs` 和 `silence_ranges_ms`。素材无音轨时明确返回 `has_audio=false` 和空数组；FFmpeg 不可用或解码失败时接口失败，不伪造波形。
 
 预览和最终渲染均为后台任务。启动接口立即返回 `job_id`、`phase` 和当前状态，前端轮询会话；取消通过 Go context 终止 Node worker 及其 FFmpeg 子进程。当前 JSON-RPC 尚未返回 FFmpeg 帧级事件，因此进度只表达排队、校验、渲染和完成阶段，不伪造逐帧百分比。
 
@@ -157,7 +160,6 @@ VITE_CASCADE_BRIDGE=local
 
 ## 下一阶段
 
-1. Windows 应用控制解除后重建 Bridge，验收 `segment_settings` 保存/重载和 `/audio-analysis` HTTP 闭环。
-2. 将音频分析结果缓存到素材 SHA-256 + 参数键，避免每次打开项目重复解码。
-3. 完成 FFmpeg Windows 打包和字体一致性验证。
+1. Windows 应用控制解除后重建 Bridge，验收 `segment_settings` 保存/重载。
+2. 完成 FFmpeg Windows 打包和字体一致性验证。
 4. 将审查通过的 Seedance 候选素材接入素材区。

@@ -135,14 +135,6 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 	case r.Method == http.MethodPost && suffix == "/validate":
 		report, err := s.service.ValidateEditorPlan(r.Context(), sessionID)
 		writeBridgeValue(w, report, err)
-	case r.Method == http.MethodPost && suffix == "/audio-analysis":
-		var request model.EditorAudioAnalysisRequest
-		if err := decodeJSON(r, &request); err != nil {
-			writeBridgeValue(w, nil, err)
-			return
-		}
-		analysis, err := s.service.AnalyzeEditorAudio(r.Context(), sessionID, request)
-		writeBridgeValue(w, analysis, err)
 	case r.Method == http.MethodPost && suffix == "/preview":
 		session, err := s.service.StartEditorRender(sessionID, true)
 		writeBridgeValue(w, session, err)

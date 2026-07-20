@@ -39,7 +39,7 @@ export type AudioPreviewState = {
   limited: boolean;
 };
 
-export function snapMilliseconds(valueMS: number, fps: number, snapPointsMS: number[] = [], thresholdMS = 120): TimelineSnapResult {
+export function snapMilliseconds(valueMS: number, fps: number, snapPointsMS: number[] = [], thresholdMS = 120, snapToFrame = true): TimelineSnapResult {
   const frameMS = frameToMilliseconds(millisecondsToFrame(valueMS, fps), fps);
   let explicitPoint: number | undefined;
   let explicitDistance = Number.POSITIVE_INFINITY;
@@ -51,6 +51,7 @@ export function snapMilliseconds(valueMS: number, fps: number, snapPointsMS: num
     }
   }
   if (explicitPoint !== undefined) return { valueMS: Math.max(0, explicitPoint), snapped: true, snapPointMS: explicitPoint };
+  if (!snapToFrame) return { valueMS: Math.max(0, Math.round(valueMS)), snapped: false };
   return { valueMS: Math.max(0, frameMS), snapped: frameMS !== valueMS };
 }
 
@@ -63,13 +64,14 @@ export function trimShotInPlan(args: {
   sourceDurationMS?: number;
   snapPointsMS?: number[];
   minDurationMS?: number;
+  snapToFrame?: boolean;
 }): TimelineEditResult {
   const index = args.plan.shots.findIndex((shot) => shot.id === args.shotID);
   const shot = args.plan.shots[index];
   if (!shot?.source_time_range_ms) return { plan: args.plan, changed: false, blockedReason: "片段没有可裁剪的源时间范围。" };
   const minDurationMS = Math.max(frameToMilliseconds(1, args.fps), args.minDurationMS ?? 500);
   const [baseStart, baseEnd] = shot.source_time_range_ms;
-  const snapped = snapMilliseconds(args.valueMS, args.fps, args.snapPointsMS ?? [], Math.max(80, frameToMilliseconds(4, args.fps)));
+  const snapped = snapMilliseconds(args.valueMS, args.fps, args.snapPointsMS ?? [], Math.max(80, frameToMilliseconds(4, args.fps)), args.snapToFrame ?? true);
   const sourceDurationMS = Math.max(baseEnd, args.sourceDurationMS ?? baseEnd);
   const nextStart = args.edge === "start" ? Math.min(baseEnd - minDurationMS, Math.max(0, snapped.valueMS)) : baseStart;
   const nextEnd = args.edge === "end" ? Math.max(baseStart + minDurationMS, Math.min(sourceDurationMS, snapped.valueMS)) : baseEnd;
@@ -85,12 +87,35 @@ export function trimShotInPlan(args: {
   return { plan: nextPlan, changed: true };
 }
 
+export function setStillDurationInPlan(args: {
+  plan: EditorPlan;
+  shotID: string;
+  durationMS: number;
+  fps: number;
+  snapToFrame?: boolean;
+}): TimelineEditResult {
+  const index = args.plan.shots.findIndex((shot) => shot.id === args.shotID);
+  const shot = args.plan.shots[index];
+  if (!shot || shot.presentation_kind !== "still") return { plan: args.plan, changed: false, blockedReason: "当前片段不是可调整时长的步骤截图。" };
+  const oldDurationMS = shotDurationMS(shot);
+  const snapped = snapMilliseconds(args.durationMS, args.fps, [], 0, args.snapToFrame ?? true);
+  const durationMS = Math.max(250, Math.min(15000, Math.round(snapped.valueMS)));
+  if (durationMS === oldDurationMS) return { plan: args.plan, changed: false };
+  const shots = [...args.plan.shots];
+  shots[index] = { ...shot, output_duration_ms: durationMS, overlays: trimOverlays(shot, 0, durationMS) };
+  return {
+    plan: remapAudioForDurationChange(args.plan, { ...args.plan, shots }, index, oldDurationMS, durationMS, "end"),
+    changed: true,
+  };
+}
+
 export function splitShotAtOutputMS(args: {
   plan: EditorPlan;
   outputMS: number;
   fps: number;
   newShotID: string;
   minDurationMS?: number;
+  snapToFrame?: boolean;
 }): SplitShotResult {
   let outputCursorMS = 0;
   let shotIndex = -1;
@@ -114,7 +139,7 @@ export function splitShotAtOutputMS(args: {
   }
 
   const [sourceStartMS, sourceEndMS] = shot.source_time_range_ms;
-  const sourceSplitMS = Math.round(snapMilliseconds(sourceStartMS + args.outputMS - shotOutputStartMS, args.fps).valueMS);
+  const sourceSplitMS = Math.round(snapMilliseconds(sourceStartMS + args.outputMS - shotOutputStartMS, args.fps, [], 120, args.snapToFrame ?? true).valueMS);
   const minDurationMS = Math.max(frameToMilliseconds(1, args.fps), args.minDurationMS ?? 500);
   if (sourceSplitMS - sourceStartMS < minDurationMS || sourceEndMS - sourceSplitMS < minDurationMS) {
     return { plan: args.plan, changed: false, blockedReason: "播放头距离片段边缘过近，无法分割。" };
@@ -181,8 +206,8 @@ export function audioPreviewState(plan: EditorPlan, totalDurationMS: number, pla
   };
 }
 
-export function splitAudioAtOutputMS(args: { plan: EditorPlan; outputMS: number; totalDurationMS: number; fps: number; minDurationMS?: number }): TimelineEditResult {
-  const snappedMS = Math.round(snapMilliseconds(args.outputMS, args.fps).valueMS);
+export function splitAudioAtOutputMS(args: { plan: EditorPlan; outputMS: number; totalDurationMS: number; fps: number; minDurationMS?: number; snapToFrame?: boolean }): TimelineEditResult {
+  const snappedMS = Math.round(snapMilliseconds(args.outputMS, args.fps, [], 120, args.snapToFrame ?? true).valueMS);
   const segment = buildAudioSegments(args.plan, args.totalDurationMS).find((item) => snappedMS > item.startMS && snappedMS < item.endMS);
   if (!segment) return { plan: args.plan, changed: false, blockedReason: "播放头不在音频片段内。" };
   const minDurationMS = Math.max(frameToMilliseconds(1, args.fps), args.minDurationMS ?? 500);
@@ -315,8 +340,7 @@ export function sourceSnapPoints(shot: EditorShot, step: EditorTimelineStep | un
 export function targetIndexForOutputMS(plan: EditorPlan, outputMS: number): number {
   let cursor = 0;
   for (const [index, shot] of plan.shots.entries()) {
-    const range = shot.source_time_range_ms;
-    const durationMS = range ? Math.max(0, range[1] - range[0]) : 0;
+    const durationMS = shotDurationMS(shot);
     if (outputMS < cursor + durationMS / 2) return index;
     cursor += durationMS;
   }
@@ -327,6 +351,7 @@ function preservesRequiredStepOrder(shots: EditorShot[], steps: EditorTimelineSt
   const order = new Map(steps.filter((step) => step.required).map((step) => [step.step_id, step.order]));
   let last = -1;
   for (const shot of shots) {
+    if (shot.presentation_kind === "still") continue;
     if (!shot.source_step_id || !order.has(shot.source_step_id)) continue;
     const current = order.get(shot.source_step_id)!;
     if (current < last) return false;
@@ -385,7 +410,7 @@ function validAudioSplitPoints(plan: EditorPlan, totalDurationMS: number): numbe
 
 function normalizeAudioSplitPoints(plan: EditorPlan): EditorPlan {
   if (!plan.audio?.split_points_ms?.length && !plan.audio?.segment_settings?.length) return plan;
-  const totalDurationMS = plan.shots.reduce((total, shot) => total + (shot.source_time_range_ms ? Math.max(0, shot.source_time_range_ms[1] - shot.source_time_range_ms[0]) : 0), 0);
+  const totalDurationMS = plan.shots.reduce((total, shot) => total + shotDurationMS(shot), 0);
   const audio = { ...(plan.audio ?? { mode: "source" as const, volume_percent: 100 }), split_points_ms: validAudioSplitPoints(plan, totalDurationMS) };
   const segments = buildAudioSegments({ ...plan, audio }, totalDurationMS);
   return { ...plan, audio: { ...audio, segment_settings: compactAudioSegmentSettings(segments, audio.mode, audio.volume_percent) } };
@@ -429,6 +454,7 @@ function remapAudioForShotRemoval(basePlan: EditorPlan, nextPlan: EditorPlan, sh
 }
 
 function shotDurationMS(shot: EditorShot): number {
+  if (shot.presentation_kind === "still") return Math.max(0, shot.output_duration_ms ?? 0);
   return shot.source_time_range_ms ? Math.max(0, shot.source_time_range_ms[1] - shot.source_time_range_ms[0]) : 0;
 }
 
