@@ -1212,6 +1212,70 @@ func TestProjectInvestigationPlannerCanListRelatedFilesBeforeNextSearch(t *testi
 	}
 }
 
+func TestProjectInvestigationPlannerCanInspectFileOutlineBeforeNextSearch(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/features/window/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/window-lab"
+			return <button data-testid="launch-window-lab">Launch window lab</button>
+		}
+	`)
+	writeFixtureFile(t, root, "src/features/window/WindowAPIClient.ts", `
+		export async function startWindowBuild() {
+			return fetch("/api/window-lab/start", { method: "POST" })
+		}
+	`)
+	writeFixtureFile(t, root, "backend/server/WindowHandler.go", `
+		package server
+		func registerWindowRoutes() {
+			router.POST("/api/window-lab/start", handleWindowLabStart)
+		}
+		func handleWindowLabStart() {}
+	`)
+	planner := &fileOutlinePlannerLLM{}
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(planner).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        2,
+			FilesPerRound:          1,
+			TotalFileLimit:         6,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    100,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_file_outline", ProductDescription: "演示 window lab"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_file_outline", Objective: "演示 window lab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if investigationToolCallCount(result.Trace, "inspect_file_outline") == 0 {
+		t.Fatalf("expected planner-requested inspect_file_outline tool call, got %+v", result.Trace.ToolCalls)
+	}
+	if !strings.Contains(planner.outlineRequest, "startWindowBuild") || !strings.Contains(planner.outlineRequest, "/api/window-lab/start") {
+		t.Fatalf("expected planner payload to include file outline symbols and API paths, got %s", planner.outlineRequest)
+	}
+	if strings.Contains(planner.outlineRequest, "src/features/window") {
+		t.Fatalf("file outline observation should not expose repository paths: %s", planner.outlineRequest)
+	}
+	if !candidateRelContains(result.SelectedCandidates, "WindowHandler.go") {
+		t.Fatalf("expected outline-driven query to select backend handler, got %+v", result.SelectedCandidates)
+	}
+	traceJSON, err := json.Marshal(result.Trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(traceJSON), "src/features/window") || strings.Contains(string(traceJSON), "startWindowBuild") || strings.Contains(string(traceJSON), "return fetch") {
+		t.Fatalf("inspect_file_outline trace should not leak paths or source text: %s", string(traceJSON))
+	}
+}
+
 func TestProjectInvestigationToolSuiteSurfacesNextActionsForRemainingGaps(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -1954,5 +2018,84 @@ func (l *listRelatedFilesPlannerLLM) GenerateText(ctx context.Context, task conf
 }
 
 func (l *listRelatedFilesPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
+}
+
+type fileOutlinePlannerLLM struct {
+	nextActionCalls int
+	outlineRequest  string
+}
+
+func (l *fileOutlinePlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	var data []byte
+	switch target.(type) {
+	case *codeInvestigationLLMOutput:
+		data = []byte(`{
+			"summary": "find the window lab UI file first",
+			"queries": [
+				{"purpose": "定位 window lab 页面和启动控件", "terms": ["window", "lab", "launch-window-lab"]}
+			],
+			"confidence": 0.84
+		}`)
+	case *codeInvestigationNextActionsLLMOutput:
+		l.nextActionCalls++
+		if strings.Contains(req.User, `"file_outline_observations":[`) {
+			l.outlineRequest = req.User
+		}
+		switch l.nextActionCalls {
+		case 1:
+			data = []byte(`{
+				"summary": "inspect related files around the matched feature directory",
+				"next_actions": [
+					{
+						"tool": "list_related_files",
+						"reason": "先看命中页面同级有哪些 API/client/component 文件，再决定下一步。",
+						"query_terms": ["window"],
+						"expected_evidence": ["api_or_data_model"]
+					}
+				],
+				"confidence": 0.83
+			}`)
+		case 2:
+			data = []byte(`{
+				"summary": "inspect the related API client outline",
+				"next_actions": [
+					{
+						"tool": "inspect_file_outline",
+						"reason": "根据邻近文件列表，先读 API client 的结构轮廓。",
+						"query_terms": ["WindowAPIClient"],
+						"expected_evidence": ["api_or_data_model"]
+					}
+				],
+				"confidence": 0.86
+			}`)
+		default:
+			data = []byte(`{
+				"summary": "outline shows the API path; grep the backend handler next",
+				"next_actions": [
+					{
+						"tool": "grep_text",
+						"reason": "outline 里看到 /api/window-lab/start，继续定位后端实现。",
+						"query_terms": ["/api/window-lab/start"],
+						"expected_evidence": ["api_or_data_model"]
+					}
+				],
+				"confidence": 0.89
+			}`)
+		}
+	default:
+		data = []byte(`{}`)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-file-outline-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (l *fileOutlinePlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (l *fileOutlinePlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
 	return nil, nil
 }
