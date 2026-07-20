@@ -471,6 +471,45 @@ type codeInvestigationLLMOutput struct {
 	Confidence float64 `json:"confidence"`
 }
 
+type codeInvestigationNextActionsLLMOutput struct {
+	Summary     string                               `json:"summary"`
+	NextActions []codeInvestigationNextActionLLMItem `json:"next_actions"`
+	Actions     []codeInvestigationNextActionLLMItem `json:"actions"`
+	Confidence  float64                              `json:"confidence"`
+}
+
+type codeInvestigationNextActionLLMItem struct {
+	Tool             string              `json:"tool"`
+	Reason           string              `json:"reason"`
+	QueryTerms       flexibleStringSlice `json:"query_terms"`
+	Terms            flexibleStringSlice `json:"terms"`
+	ExpectedEvidence flexibleStringSlice `json:"expected_evidence"`
+}
+
+func (o *codeInvestigationNextActionsLLMOutput) normalize() {
+	if len(o.NextActions) == 0 && len(o.Actions) > 0 {
+		o.NextActions = o.Actions
+	}
+	normalized := make([]codeInvestigationNextActionLLMItem, 0, len(o.NextActions))
+	for _, action := range o.NextActions {
+		terms := sanitizeInvestigationTerms(append(stringSlice(action.QueryTerms), stringSlice(action.Terms)...))
+		expected := sanitizeExpectedEvidenceKinds(stringSlice(action.ExpectedEvidence))
+		tool := sanitizeInvestigationToolName(action.Tool)
+		if tool == "" {
+			tool = toolForExpectedEvidence(expected)
+		}
+		if len(terms) == 0 || tool == "" {
+			continue
+		}
+		action.Tool = tool
+		action.QueryTerms = flexibleStringSlice(terms)
+		action.Terms = nil
+		action.ExpectedEvidence = flexibleStringSlice(expected)
+		normalized = append(normalized, action)
+	}
+	o.NextActions = normalized
+}
+
 func (o *codeInvestigationLLMOutput) UnmarshalJSON(data []byte) error {
 	type alias codeInvestigationLLMOutput
 	var single alias
@@ -724,9 +763,15 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		review.gaps = evidenceGapsForExpected(review, query.expectedEvidence)
 		reviewCall := evidenceReviewToolCall(i+1, query, review)
 		trace.ToolCalls = append(trace.ToolCalls, reviewCall)
-		applyEvidenceReviewToQuestion(trace, query, review, nonEmptyToolCallIDs(grepCallID, snippetCallID, followCallID, referenceCallID, apiHandlerCallID, reviewCall.ID)...)
+		nextActions, nextActionPlanningCall := s.planNextActionsFromEvidenceObservation(ctx, query, review, trace, budget, reviewCall.ID)
+		nextActionPlanningCallID := ""
+		if nextActionPlanningCall.ID != "" {
+			nextActionPlanningCallID = nextActionPlanningCall.ID
+			trace.ToolCalls = append(trace.ToolCalls, nextActionPlanningCall)
+		}
+		applyEvidenceReviewToQuestion(trace, query, review, nextActions, nonEmptyToolCallIDs(grepCallID, snippetCallID, followCallID, referenceCallID, apiHandlerCallID, reviewCall.ID, nextActionPlanningCallID)...)
 		beforeFollowUp := len(queries)
-		queries = appendNextActionInvestigationQueries(queries, trace, query, review, reviewCall.ID, executedQueries, maxAdaptiveRounds)
+		queries = appendNextActionInvestigationQueries(queries, trace, query, review, nextActions, lastNonEmptyString(nextActionPlanningCallID, reviewCall.ID), executedQueries, maxAdaptiveRounds)
 		if len(queries) == beforeFollowUp {
 			if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < maxAdaptiveRounds {
 				nextKey := strings.Join(next.terms, "|")
@@ -2315,7 +2360,112 @@ func adaptiveQueryFromEvidenceReview(previous codeInvestigationQuery, review cod
 	}, true
 }
 
-func appendNextActionInvestigationQueries(queries []codeInvestigationQuery, trace *model.CodeInvestigationTrace, base codeInvestigationQuery, review codeInvestigationEvidenceReview, dependsOnToolCallID string, executed map[string]bool, limit int) []codeInvestigationQuery {
+func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(ctx context.Context, query codeInvestigationQuery, review codeInvestigationEvidenceReview, trace *model.CodeInvestigationTrace, budget model.CodeReadBudget, dependsOnToolCallID string) ([]model.CodeInvestigationNextAction, model.CodeInvestigationToolCall) {
+	if len(review.gaps) == 0 {
+		return nil, model.CodeInvestigationToolCall{}
+	}
+	start := time.Now()
+	fallback := nextActionsForEvidenceReview(query, review, dependsOnToolCallID)
+	call := model.CodeInvestigationToolCall{
+		ID:           fmt.Sprintf("tool_plan_next_actions_%s", shortHash(query.query+"|"+strings.Join(review.gaps, ","))),
+		Tool:         "plan_next_actions",
+		Purpose:      "基于上一轮工具观察和 remaining gaps 规划下一步受限代码调查工具；只输出工具名、查询词和期望证据，不读取源码。",
+		Query:        query.query,
+		InputSummary: fmt.Sprintf("question_id=%s gaps=%s remaining_search_budget=%d", query.questionID, strings.Join(review.gaps, ","), maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched)),
+		Metadata: map[string]any{
+			"question_id":                query.questionID,
+			"gaps":                       review.gaps,
+			"allowed_tools":              []string{"grep_text", "follow_imports", "find_references", "find_api_handlers", "evidence_review"},
+			"depends_on_tool_call_id":    dependsOnToolCallID,
+			"remaining_search_budget":    maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched),
+			"previous_query_term_count":  len(query.terms),
+			"expected_evidence":          query.expectedEvidence,
+			"observation_selected_files": review.fileCount,
+		},
+		Confidence: 0.6,
+	}
+	if s == nil || s.llm == nil {
+		call.OutputSummary = fmt.Sprintf("LLM 不可用，使用确定性 next_actions %d 条。", len(fallback))
+		call.SelectedFileCount = len(fallback)
+		call.FallbackReason = "llm_not_configured"
+		call.ElapsedMS = time.Since(start).Milliseconds()
+		return fallback, call
+	}
+	payload := map[string]any{
+		"active_question": map[string]any{
+			"id":                query.questionID,
+			"purpose":           query.purpose,
+			"query_terms":       query.terms,
+			"expected_evidence": query.expectedEvidence,
+		},
+		"last_observation": map[string]any{
+			"files":       review.fileCount,
+			"routes":      review.routeCount,
+			"components":  review.componentCount,
+			"selectors":   review.selectorCount,
+			"apis":        review.apiCount,
+			"models":      review.dataModelCount,
+			"style":       review.styleCount,
+			"gaps":        review.gaps,
+			"path_hashes": limitStrings(review.pathHashes, 8),
+			"confidence":  evidenceReviewConfidence(review),
+			"depends_on":  dependsOnToolCallID,
+		},
+		"recent_tool_observations": compactRecentInvestigationToolCalls(trace, 8),
+		"budget": map[string]any{
+			"remaining_search_files": maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched),
+			"remaining_selected":     maxInt(0, budget.TotalFileLimit-trace.TotalFilesSelected),
+			"files_per_round":        budget.FilesPerRound,
+		},
+		"allowed_tools": []string{"grep_text", "follow_imports", "find_references", "find_api_handlers"},
+		"instructions": []string{
+			"像代码助手一样基于 observation 决定下一步最小必要工具。",
+			"只返回 1-3 个 next_actions；不要输出 shell、绝对路径、源码片段、token、cookie、Authorization。",
+			"query_terms 必须是业务语义、组件名、路由词、API/handler/model 词或状态词。",
+			"不要把 /aigc、/.well-known、/v1/execution-packages、app-installations 等控制面路径作为产品证据。",
+		},
+	}
+	data, _ := json.Marshal(payload)
+	var output codeInvestigationNextActionsLLMOutput
+	modelTrace, err := s.llm.GenerateJSON(ctx, config.ModelTaskCodeReading, llm.JSONRequest{
+		System:       "你是 Cascade DemoOps 的代码调查观察器。你根据上一轮本地工具 observation 选择下一步最小必要工具调用，不读取完整源码，不扩大到无关文件。",
+		User:         string(data),
+		SchemaName:   "CodeInvestigationNextActions",
+		ResponseHint: "返回字段：summary, next_actions[{tool, reason, query_terms[], expected_evidence[]}], confidence。tool 只能是 grep_text/follow_imports/find_references/find_api_handlers。",
+		MaxTokens:    900,
+		Temperature:  0.08,
+	}, &output)
+	call.ElapsedMS = time.Since(start).Milliseconds()
+	if modelTrace != nil {
+		call.EvidenceRefs = append(call.EvidenceRefs, model.EvidenceRef{
+			ID:         "ev_code_next_action_planner_" + shortHash(modelTrace.Label()),
+			Kind:       model.EvidenceKindSourceCode,
+			Summary:    "CodeReaderAgent 下一步工具规划模型路由：" + modelTrace.Label(),
+			FieldPath:  "code_snapshot.investigation_trace.tool_calls.plan_next_actions",
+			Confidence: 0.6,
+		})
+	}
+	if err != nil {
+		call.OutputSummary = fmt.Sprintf("模型下一步工具规划不可用，使用确定性 next_actions %d 条。", len(fallback))
+		call.SelectedFileCount = len(fallback)
+		call.FallbackReason = llmFallbackReason(err, modelTrace)
+		return fallback, call
+	}
+	output.normalize()
+	actions := nextActionsFromLLMOutput(output, query, review, dependsOnToolCallID)
+	if len(actions) == 0 {
+		call.OutputSummary = fmt.Sprintf("模型未返回有效 next_actions，使用确定性 next_actions %d 条。", len(fallback))
+		call.SelectedFileCount = len(fallback)
+		call.FallbackReason = "empty_llm_next_actions"
+		return fallback, call
+	}
+	call.OutputSummary = fmt.Sprintf("模型基于 observation 规划 next_actions %d 条：%s", len(actions), output.Summary)
+	call.SelectedFileCount = len(actions)
+	call.Confidence = maxFloat(0.68, output.Confidence)
+	return actions, call
+}
+
+func appendNextActionInvestigationQueries(queries []codeInvestigationQuery, trace *model.CodeInvestigationTrace, base codeInvestigationQuery, review codeInvestigationEvidenceReview, plannedNextActions []model.CodeInvestigationNextAction, dependsOnToolCallID string, executed map[string]bool, limit int) []codeInvestigationQuery {
 	if trace == nil || base.questionID == "" || limit <= 0 || len(queries) >= limit {
 		return queries
 	}
@@ -2331,6 +2481,9 @@ func appendNextActionInvestigationQueries(queries []codeInvestigationQuery, trac
 			ExpectedEvidence: base.expectedEvidence,
 			Status:           "partial",
 		}
+	}
+	if len(question.NextActions) == 0 {
+		question.NextActions = plannedNextActions
 	}
 	if len(question.NextActions) == 0 {
 		question.NextActions = nextActionsForEvidenceReview(base, review, dependsOnToolCallID)
@@ -2392,6 +2545,41 @@ func codeInvestigationQueriesFromNextActions(question model.CodeInvestigationQue
 	return dedupeCodeInvestigationQueries(out)
 }
 
+func nextActionsFromLLMOutput(output codeInvestigationNextActionsLLMOutput, query codeInvestigationQuery, review codeInvestigationEvidenceReview, dependsOnToolCallID string) []model.CodeInvestigationNextAction {
+	out := []model.CodeInvestigationNextAction{}
+	for _, item := range output.NextActions {
+		terms := sanitizeInvestigationTerms(stringSlice(item.QueryTerms))
+		if len(terms) == 0 {
+			continue
+		}
+		expected := sanitizeExpectedEvidenceKinds(stringSlice(item.ExpectedEvidence))
+		if len(expected) == 0 {
+			expected = review.gaps
+		}
+		if len(expected) == 0 {
+			expected = query.expectedEvidence
+		}
+		tool := sanitizeInvestigationToolName(item.Tool)
+		if tool == "" {
+			tool = toolForExpectedEvidence(expected)
+		}
+		if tool == "" {
+			continue
+		}
+		out = append(out, model.CodeInvestigationNextAction{
+			Tool:                tool,
+			Reason:              firstNonEmpty(item.Reason, "根据上一轮 observation 继续补齐证据缺口。"),
+			QueryTerms:          terms,
+			ExpectedEvidence:    uniqueStrings(expected),
+			DependsOnToolCallID: dependsOnToolCallID,
+		})
+		if len(out) >= 3 {
+			break
+		}
+	}
+	return out
+}
+
 func sanitizeInvestigationToolName(value string) string {
 	switch strings.TrimSpace(value) {
 	case "repo_index", "grep_text", "follow_imports", "find_references", "find_api_handlers", "evidence_review":
@@ -2399,6 +2587,69 @@ func sanitizeInvestigationToolName(value string) string {
 	default:
 		return ""
 	}
+}
+
+func sanitizeExpectedEvidenceKinds(values []string) []string {
+	out := []string{}
+	for _, value := range values {
+		switch strings.TrimSpace(value) {
+		case "route", "component_or_selector", "api_or_data_model", "style_or_state":
+			out = append(out, strings.TrimSpace(value))
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func toolForExpectedEvidence(expected []string) string {
+	for _, item := range expected {
+		if item == "api_or_data_model" {
+			return "find_api_handlers"
+		}
+	}
+	for _, item := range expected {
+		if item == "component_or_selector" || item == "route" || item == "style_or_state" {
+			return "grep_text"
+		}
+	}
+	return ""
+}
+
+func compactRecentInvestigationToolCalls(trace *model.CodeInvestigationTrace, limit int) []map[string]any {
+	if trace == nil || limit <= 0 {
+		return nil
+	}
+	start := maxInt(0, len(trace.ToolCalls)-limit)
+	out := []map[string]any{}
+	for _, call := range trace.ToolCalls[start:] {
+		item := map[string]any{
+			"id":                  call.ID,
+			"tool":                call.Tool,
+			"query_hash":          shortHash(call.Query),
+			"output_summary":      call.OutputSummary,
+			"matched_file_count":  call.MatchedFileCount,
+			"selected_file_count": call.SelectedFileCount,
+			"confidence":          call.Confidence,
+		}
+		if call.FallbackReason != "" {
+			item["fallback_reason"] = call.FallbackReason
+		}
+		if len(call.PathHashes) > 0 {
+			item["path_hashes"] = limitStrings(call.PathHashes, 6)
+		}
+		if call.Metadata != nil {
+			if questionID, ok := call.Metadata["question_id"]; ok {
+				item["question_id"] = questionID
+			}
+			if gaps, ok := call.Metadata["gaps"]; ok {
+				item["gaps"] = gaps
+			}
+			if toolPolicy, ok := call.Metadata["tool_policy"]; ok {
+				item["tool_policy"] = toolPolicy
+			}
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func codeInvestigationQueryExists(values []codeInvestigationQuery, key string) bool {
@@ -2410,7 +2661,7 @@ func codeInvestigationQueryExists(values []codeInvestigationQuery, key string) b
 	return false
 }
 
-func applyEvidenceReviewToQuestion(trace *model.CodeInvestigationTrace, query codeInvestigationQuery, review codeInvestigationEvidenceReview, toolCallIDs ...string) {
+func applyEvidenceReviewToQuestion(trace *model.CodeInvestigationTrace, query codeInvestigationQuery, review codeInvestigationEvidenceReview, nextActions []model.CodeInvestigationNextAction, toolCallIDs ...string) {
 	if trace == nil || query.questionID == "" {
 		return
 	}
@@ -2420,7 +2671,10 @@ func applyEvidenceReviewToQuestion(trace *model.CodeInvestigationTrace, query co
 		}
 		trace.Questions[i].ToolCallIDs = uniqueStrings(append(trace.Questions[i].ToolCallIDs, toolCallIDs...))
 		trace.Questions[i].RemainingGaps = append([]string{}, review.gaps...)
-		trace.Questions[i].NextActions = nextActionsForEvidenceReview(query, review, lastNonEmptyString(toolCallIDs...))
+		trace.Questions[i].NextActions = nextActions
+		if len(trace.Questions[i].NextActions) == 0 {
+			trace.Questions[i].NextActions = nextActionsForEvidenceReview(query, review, lastNonEmptyString(toolCallIDs...))
+		}
 		trace.Questions[i].EvidenceSummary = fmt.Sprintf("files=%d routes=%d components=%d selectors=%d apis=%d models=%d style=%d", review.fileCount, review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.dataModelCount, review.styleCount)
 		trace.Questions[i].Confidence = evidenceReviewConfidence(review)
 		switch {

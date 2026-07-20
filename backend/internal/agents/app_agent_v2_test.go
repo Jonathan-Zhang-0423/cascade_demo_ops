@@ -993,6 +993,59 @@ func TestProjectInvestigationToolSuiteDoesNotRunAPIHandlerSearchForPureUIRound(t
 	}
 }
 
+func TestProjectInvestigationToolSuitePlansNextActionFromObservationLLM(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/orbital-lab"
+			return <button data-testid="launch-orbital-lab">Launch orbital lab</button>
+		}
+	`)
+	writeFixtureFile(t, root, "backend/server/OrbitalAPI.go", `
+		package server
+		func handleOrbitalLaunch() {
+			// backend handler evidence deliberately has no frontend selector.
+		}
+	`)
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(observationNextActionPlannerLLM{}).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        1,
+			FilesPerRound:          1,
+			TotalFileLimit:         4,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_observation_next_action", ProductDescription: "演示 orbital lab"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_observation_next_action", Objective: "演示 orbital lab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plannerCall := investigationToolCall(result.Trace, "plan_next_actions")
+	if plannerCall == nil || plannerCall.FallbackReason != "" {
+		t.Fatalf("expected observation LLM to plan next action, got %+v", result.Trace.ToolCalls)
+	}
+	nextActionGrep := investigationToolCallWithMetadata(result.Trace, "grep_text", "planned_from", "next_actions")
+	if nextActionGrep == nil {
+		t.Fatalf("expected observation-planned next action to schedule grep, got %+v", result.Trace.ToolCalls)
+	}
+	if !candidateRelContains(result.SelectedCandidates, "OrbitalAPI.go") {
+		t.Fatalf("expected observation-planned query to select backend handler file, got %+v", result.SelectedCandidates)
+	}
+	question := investigationQuestion(result.Trace, "question_product_entry")
+	if question == nil || len(question.NextActions) == 0 || !stringSliceContains(question.NextActions[0].QueryTerms, "handleOrbitalLaunch") {
+		t.Fatalf("expected question next_actions to use observation-planned terms, got %+v", result.Trace.Questions)
+	}
+}
+
 func TestProjectInvestigationToolSuiteSurfacesNextActionsForRemainingGaps(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -1493,5 +1546,48 @@ func (twoRoundUIOnlyInvestigationPlannerLLM) GenerateText(ctx context.Context, t
 }
 
 func (twoRoundUIOnlyInvestigationPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
+}
+
+type observationNextActionPlannerLLM struct{}
+
+func (observationNextActionPlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	var data []byte
+	switch target.(type) {
+	case *codeInvestigationLLMOutput:
+		data = []byte(`{
+			"summary": "first locate the orbital lab UI control",
+			"queries": [
+				{"purpose": "定位 orbital lab 页面和启动控件", "terms": ["orbital", "lab", "launch-orbital-lab"]}
+			],
+			"confidence": 0.84
+		}`)
+	case *codeInvestigationNextActionsLLMOutput:
+		data = []byte(`{
+			"summary": "UI evidence is missing backend support; inspect the likely handler symbol next.",
+			"next_actions": [
+				{
+					"tool": "grep_text",
+					"reason": "上一轮只确认了 route/component，继续按 handler 符号查后端实现。",
+					"query_terms": ["handleOrbitalLaunch", "orbital"],
+					"expected_evidence": ["api_or_data_model"]
+				}
+			],
+			"confidence": 0.86
+		}`)
+	default:
+		data = []byte(`{}`)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-observation-next-action-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (observationNextActionPlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (observationNextActionPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
 	return nil, nil
 }
