@@ -449,6 +449,81 @@ func TestCodeReaderFindsReferencesBackToParentRoute(t *testing.T) {
 	}
 }
 
+func TestCodeReaderFindsBackendAPIHandlersFromFrontendCalls(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/features/CreateProject.tsx", `
+		export function CreateProject() {
+			async function submit() {
+				await fetch("/api/workflows/start", { method: "POST", body: JSON.stringify({ name: "俄罗斯方块", mode: "build" }) })
+			}
+			return <button data-testid="create-tetris-project" onClick={submit}>创建俄罗斯方块</button>
+		}
+	`)
+	writeFixtureFile(t, root, "src/pages/Workspace.tsx", `
+		import { CreateProject } from "../features/CreateProject"
+		export function Workspace() {
+			const route = "/workspace/projects/new"
+			return <CreateProject />
+		}
+	`)
+	writeFixtureFile(t, root, "backend/internal/service/handler.go", `
+		package service
+		type StartWorkflowRequest struct { Name string; Mode string }
+		func RegisterWorkflowRoutes(router Router) {
+			router.POST("/api/workflows/start", handleStartWorkflow)
+		}
+	`)
+	writeFixtureFile(t, root, "backend/internal/debug/exchange.go", `
+		package debug
+		func RegisterDebug(router Router) { router.POST("/aigc/v1/app-installations/register", noop) }
+	`)
+	project := &model.ProjectContext{
+		ID:                 "project_find_api_handlers",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示新建项目，项目名称俄罗斯方块，构建模式启动 agent",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_find_api_handlers",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_find_api_handlers",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"新建项目", "俄罗斯方块", "构建模式"}}
+	agent := NewCodeReaderAgent()
+	agent.Budget = model.CodeReadBudget{
+		Mode:                   "tool_driven_intent_drilldown",
+		RepoIndexFileLimit:     1,
+		DrilldownRounds:        1,
+		FilesPerRound:          1,
+		TotalFileLimit:         5,
+		MaxFileBytes:           80 * 1024,
+		ToolSearchFileLimit:    40,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  10,
+	}
+
+	snapshots, err := agent.ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	if !investigationHasTool(snapshot.InvestigationTrace, "find_api_handlers") {
+		t.Fatalf("expected find_api_handlers tool call, got %+v", snapshot.InvestigationTrace.ToolCalls)
+	}
+	if !apiInsightContains(snapshot.APIEndpoints, "/api/workflows/start") {
+		t.Fatalf("expected frontend/backend API evidence, got %+v", snapshot.APIEndpoints)
+	}
+	if !dataModelInsightContains(snapshot.DataModels, "StartWorkflowRequest") {
+		t.Fatalf("expected backend request model from handler file, got %+v", snapshot.DataModels)
+	}
+	apiCall := investigationToolCall(snapshot.InvestigationTrace, "find_api_handlers")
+	metadataJSON, _ := json.Marshal(apiCall.Metadata)
+	if strings.Contains(string(metadataJSON), "/api/workflows/start") {
+		t.Fatalf("find_api_handlers metadata should hash API paths, got %s", metadataJSON)
+	}
+}
+
 func TestCodeReaderLLMPlannerCanChooseNextGrepQuery(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -821,6 +896,15 @@ func apiInsightContains(values []model.APIEndpointInsight, path string) bool {
 func apiContractContains(values []model.APIContractSummary, path string) bool {
 	for _, value := range values {
 		if value.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func dataModelInsightContains(values []model.DataModelInsight, name string) bool {
+	for _, value := range values {
+		if value.Name == name {
 			return true
 		}
 	}

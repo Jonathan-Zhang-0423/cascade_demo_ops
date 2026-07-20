@@ -415,6 +415,15 @@ type referenceSearchScan struct {
 	terms         []string
 }
 
+type apiHandlerSearchScan struct {
+	seedFileCount int
+	pathCount     int
+	searched      int
+	matched       int
+	bytesRead     int64
+	apiPaths      []string
+}
+
 type codeInvestigationEvidenceReview struct {
 	fileCount      int
 	routeCount     int
@@ -634,7 +643,28 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			referenceCallID = fmt.Sprintf("tool_find_references_%d_%s", i+1, shortHash(query.query))
 			trace.ToolCalls = append(trace.ToolCalls, findReferencesToolCall(referenceCallID, query, referenceScan, referencedThisRound))
 		}
-		reviewCandidates := append(append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...), referencedThisRound...)
+		apiSources := append(append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...), referencedThisRound...)
+		apiHandlerFiles, apiHandlerScan, err := findAPIHandlersFromCandidates(ctx, apiSources, candidates, selectedKeys, budget)
+		if err != nil {
+			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+		}
+		trace.TotalFilesSearched += apiHandlerScan.searched
+		trace.TotalBytesRead += apiHandlerScan.bytesRead
+		apiHandlersThisRound := []codeCandidateFile{}
+		for _, candidate := range apiHandlerFiles {
+			if len(apiHandlersThisRound) >= minInt(3, budget.FilesPerRound) || len(selected) >= budget.TotalFileLimit {
+				break
+			}
+			if add(candidate) {
+				apiHandlersThisRound = append(apiHandlersThisRound, candidate)
+			}
+		}
+		apiHandlerCallID := ""
+		if len(apiHandlersThisRound) > 0 || apiHandlerScan.pathCount > 0 {
+			apiHandlerCallID = fmt.Sprintf("tool_find_api_handlers_%d_%s", i+1, shortHash(query.query))
+			trace.ToolCalls = append(trace.ToolCalls, findAPIHandlersToolCall(apiHandlerCallID, query, apiHandlerScan, apiHandlersThisRound))
+		}
+		reviewCandidates := append(append(append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...), referencedThisRound...), apiHandlersThisRound...)
 		review, err := reviewInvestigationEvidence(ctx, reviewCandidates, project, brief)
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
@@ -642,7 +672,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		review.gaps = evidenceGapsForExpected(review, query.expectedEvidence)
 		reviewCall := evidenceReviewToolCall(i+1, query, review)
 		trace.ToolCalls = append(trace.ToolCalls, reviewCall)
-		applyEvidenceReviewToQuestion(trace, query, review, nonEmptyToolCallIDs(grepCallID, snippetCallID, followCallID, referenceCallID, reviewCall.ID)...)
+		applyEvidenceReviewToQuestion(trace, query, review, nonEmptyToolCallIDs(grepCallID, snippetCallID, followCallID, referenceCallID, apiHandlerCallID, reviewCall.ID)...)
 		if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < budget.DrilldownRounds+2 {
 			nextKey := strings.Join(next.terms, "|")
 			if !executedQueries[nextKey] && !codeInvestigationQueryExists(queries, nextKey) {
@@ -1504,6 +1534,188 @@ func hashStringsForInvestigationTerms(values []string, limit int) []string {
 		out = append(out, hashString(value))
 	}
 	return out
+}
+
+func findAPIHandlersFromCandidates(ctx context.Context, seeds []codeCandidateFile, candidates []codeCandidateFile, selectedKeys map[string]bool, budget model.CodeReadBudget) ([]codeCandidateFile, apiHandlerSearchScan, error) {
+	scan := apiHandlerSearchScan{}
+	if len(seeds) == 0 || len(candidates) == 0 {
+		return nil, scan, nil
+	}
+	apiPaths := []string{}
+	seedKeys := map[string]bool{}
+	for _, seed := range seeds {
+		if err := ctx.Err(); err != nil {
+			return nil, scan, err
+		}
+		seedKeys[seed.rel] = true
+		if seed.size > budget.ToolSearchBytesPerFile {
+			continue
+		}
+		data, err := os.ReadFile(seed.path)
+		if err != nil {
+			continue
+		}
+		scan.seedFileCount++
+		scan.bytesRead += int64(len(data))
+		apiPaths = append(apiPaths, apiPathsFromText(string(data))...)
+	}
+	apiPaths = limitStrings(uniqueStrings(apiPaths), 8)
+	scan.apiPaths = apiPaths
+	scan.pathCount = len(apiPaths)
+	if len(apiPaths) == 0 {
+		return nil, scan, nil
+	}
+	type apiHandlerMatch struct {
+		candidate codeCandidateFile
+		score     int
+	}
+	matches := []apiHandlerMatch{}
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, scan, err
+		}
+		if selectedKeys[candidate.rel] || seedKeys[candidate.rel] || !candidateWorthAPIHandlerSearch(candidate) {
+			continue
+		}
+		if scan.searched >= maxInt(16, budget.ToolSearchFileLimit/3) {
+			break
+		}
+		score := apiHandlerPathScore(apiPaths, filepath.ToSlash(candidate.rel), candidate.name) * 8
+		if candidate.size <= budget.ToolSearchBytesPerFile {
+			data, err := os.ReadFile(candidate.path)
+			if err == nil {
+				scan.searched++
+				scan.bytesRead += int64(len(data))
+				contentScore := apiHandlerContentScore(apiPaths, string(data))
+				if contentScore > 0 {
+					score += contentScore + candidate.score/5
+				}
+			}
+		} else if score > 0 {
+			scan.searched++
+		}
+		if score <= 0 {
+			continue
+		}
+		scan.matched++
+		matches = append(matches, apiHandlerMatch{candidate: candidate, score: score})
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score == matches[j].score {
+			return filepath.ToSlash(matches[i].candidate.rel) < filepath.ToSlash(matches[j].candidate.rel)
+		}
+		return matches[i].score > matches[j].score
+	})
+	out := []codeCandidateFile{}
+	for _, match := range matches {
+		if len(out) >= minInt(6, maxInt(2, budget.FilesPerRound*2)) {
+			break
+		}
+		out = append(out, match.candidate)
+	}
+	return out, scan, nil
+}
+
+func apiPathsFromText(text string) []string {
+	paths := []string{}
+	for _, match := range apiPattern.FindAllStringSubmatch(text, 40) {
+		if len(match) < 2 {
+			continue
+		}
+		path := strings.TrimSpace(match[1])
+		if apiPathAllowedForCode(path) {
+			paths = append(paths, path)
+		}
+	}
+	return uniqueStrings(paths)
+}
+
+func candidateWorthAPIHandlerSearch(candidate codeCandidateFile) bool {
+	lower := strings.ToLower(filepath.ToSlash(candidate.rel))
+	if shouldSkipCodeFileRel(candidate.rel, candidate.name) || strings.EqualFold(candidate.name, "package.json") || strings.EqualFold(candidate.name, "go.mod") {
+		return false
+	}
+	return pathHasAnySegment(lower, "api", "server", "backend", "internal", "cmd", "pkg", "routes", "router", "pages", "app")
+}
+
+func apiHandlerPathScore(apiPaths []string, values ...string) int {
+	text := strings.ToLower(strings.Join(values, " "))
+	score := 0
+	for _, path := range apiPaths {
+		for _, segment := range apiPathSegments(path) {
+			if strings.Contains(text, segment) {
+				score++
+			}
+		}
+	}
+	return score
+}
+
+func apiHandlerContentScore(apiPaths []string, text string) int {
+	lower := strings.ToLower(text)
+	score := 0
+	for _, path := range apiPaths {
+		pathLower := strings.ToLower(path)
+		if strings.Contains(lower, pathLower) {
+			score += 140
+			continue
+		}
+		segments := apiPathSegments(path)
+		if len(segments) == 0 {
+			continue
+		}
+		matches := 0
+		for _, segment := range segments {
+			if strings.Contains(lower, segment) {
+				matches++
+			}
+		}
+		if matches >= minInt(2, len(segments)) {
+			score += matches * 22
+		}
+	}
+	return score
+}
+
+func apiPathSegments(path string) []string {
+	path = strings.Trim(strings.ToLower(path), "/")
+	if path == "" {
+		return nil
+	}
+	out := []string{}
+	for _, segment := range strings.Split(path, "/") {
+		segment = strings.Trim(segment, "{}:")
+		if segment == "" || segment == "api" || segment == "v1" || segment == "v2" || strings.HasPrefix(segment, "[") {
+			continue
+		}
+		if len(segment) < 3 {
+			continue
+		}
+		out = append(out, segment)
+	}
+	return uniqueStrings(out)
+}
+
+func findAPIHandlersToolCall(id string, query codeInvestigationQuery, scan apiHandlerSearchScan, selected []codeCandidateFile) model.CodeInvestigationToolCall {
+	return model.CodeInvestigationToolCall{
+		ID:                id,
+		Tool:              "find_api_handlers",
+		Purpose:           "从已确认前端组件/API 调用中提取允许的产品 API 路径，反查后端 route/handler 文件；不执行服务端代码，不输出 API 路径原文。",
+		Query:             query.query,
+		InputSummary:      fmt.Sprintf("seed_files=%d api_paths=%d", scan.seedFileCount, scan.pathCount),
+		OutputSummary:     fmt.Sprintf("searched=%d matched=%d selected=%d", scan.searched, scan.matched, len(selected)),
+		MatchedFileCount:  scan.matched,
+		SelectedFileCount: len(selected),
+		PathHashes:        pathHashesForCandidates(selected, len(selected)),
+		Metadata: map[string]any{
+			"question_id":      query.questionID,
+			"seed_file_count":  scan.seedFileCount,
+			"api_path_hashes":  hashStringsForInvestigationTerms(scan.apiPaths, 8),
+			"search_policy":    "product_api_paths_only",
+			"selection_policy": "bounded_backend_handler_lookup",
+		},
+		Confidence: 0.7,
+	}
 }
 
 func reviewInvestigationEvidence(ctx context.Context, candidates []codeCandidateFile, project *model.ProjectContext, brief *model.RequirementBrief) (codeInvestigationEvidenceReview, error) {
