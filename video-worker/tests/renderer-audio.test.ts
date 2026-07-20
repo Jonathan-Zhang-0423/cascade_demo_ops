@@ -30,6 +30,14 @@ const catalog: AssetTimelineCatalog = {
     include_in_demo: true,
     duration_ms: 2000,
   }, {
+    id: "step_screenshot",
+    kind: "step_screenshot",
+    uri: "file:///tmp/step.png",
+    mime_type: "image/png",
+    asset_role: "presentation_reference",
+    include_in_demo: true,
+    metadata: { presentation_only: true },
+  }, {
     id: "narration_1",
     kind: "narration_audio",
     uri: "file:///tmp/narration.wav",
@@ -56,6 +64,17 @@ function plan(): DemoEditPlan {
 describe("editor audio policy", () => {
   it("keeps legacy plans valid with source audio defaults", () => {
     expect(validateEditPlan({ catalog, edit_plan: plan() }).valid).toBe(true);
+  });
+
+  it("accepts only a timed presentation-only step screenshot as a still", () => {
+    const valid = plan();
+    valid.shots.push({ id: "still", source_artifact_id: "step_screenshot", presentation_kind: "still", output_duration_ms: 1500, purpose: "Show saved state" });
+    expect(validateEditPlan({ catalog, edit_plan: valid }).valid).toBe(true);
+
+    const invalid = structuredClone(valid);
+    invalid.shots[1]!.output_duration_ms = 100;
+    invalid.shots[1]!.source_time_range_ms = [0, 100];
+    expect(validateEditPlan({ catalog, edit_plan: invalid }).errors.map((item) => item.code)).toEqual(expect.arrayContaining(["invalid_still_output_duration", "still_source_time_range_not_allowed"]));
   });
 
   it("rejects invalid modes and out-of-range volume", () => {

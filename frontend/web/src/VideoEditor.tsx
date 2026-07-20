@@ -3,10 +3,7 @@ import { createEditorClient } from "./editor";
 import type { EditorArtifact, EditorPlan, EditorSession, EditorShot, EditorTimelineStep, EditorValidationReport } from "./editor";
 import { editorPlansEqual, emptyEditorHistory, recordEditorHistory, redoEditorHistory, undoEditorHistory } from "./editorHistory";
 import { compilePresentationComposition, finalRendererSupports } from "./presentationComposition";
-import { buildOutputWaveform, buildSilenceCandidates, waveformBarsForRange } from "./audioAnalysis";
-import { activeCaptionText, audioPreviewState, buildAudioSegments, deleteShotInPlan, mergeAudioSegmentInPlan, muteAudioRangeInPlan, patchAudioSegmentInPlan, reorderShotInPlan, requiredStepCoverage, sourceSnapPoints, splitAudioAtOutputMS, splitShotAtOutputMS, targetIndexForOutputMS, trimShotInPlan } from "./timelineEditing";
-import type { AudioEditCandidate } from "./audioAnalysis";
-import type { EditorAudioAnalysis } from "./editor";
+import { activeCaptionText, audioPreviewState, buildAudioSegments, deleteShotInPlan, mergeAudioSegmentInPlan, patchAudioSegmentInPlan, reorderShotInPlan, requiredStepCoverage, setStillDurationInPlan, snapMilliseconds, sourceSnapPoints, splitAudioAtOutputMS, splitShotAtOutputMS, targetIndexForOutputMS, trimShotInPlan } from "./timelineEditing";
 import "./editorWorkspace.css";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
@@ -26,6 +23,7 @@ type TimelineShot = {
 
 type TimelineInteraction =
   | { kind: "trim"; shotID: string; edge: "start" | "end"; startClientX: number; startValueMS: number; basePlan: EditorPlan }
+  | { kind: "still-duration"; shotID: string; startClientX: number; startValueMS: number; basePlan: EditorPlan }
   | { kind: "move"; shotID: string; basePlan: EditorPlan }
   | { kind: "playhead" };
 
@@ -44,6 +42,7 @@ export function VideoEditor() {
   const [history, setHistory] = useState(emptyEditorHistory);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [selectedShotID, setSelectedShotID] = useState("");
+  const [selectedAssetID, setSelectedAssetID] = useState("");
   const [selectedTrack, setSelectedTrack] = useState<SelectedTrack>("video");
   const [selectedAudioSegmentID, setSelectedAudioSegmentID] = useState("");
   const [newName, setNewName] = useState("产品演示剪辑");
@@ -61,13 +60,17 @@ export function VideoEditor() {
   const [playheadMS, setPlayheadMS] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [timelineScale, setTimelineScale] = useState(48);
+  const [frameSnappingEnabled, setFrameSnappingEnabled] = useState(() => {
+    try {
+      return typeof window === "undefined" || window.localStorage.getItem("cascade.editor.frame-snapping") !== "false";
+    } catch {
+      return true;
+    }
+  });
   const [hiddenTracks, setHiddenTracks] = useState<Record<TimelineTrack, boolean>>({ evidence: false, video: false, caption: false, audio: false });
   const [timelineInteractionKind, setTimelineInteractionKind] = useState<TimelineInteraction["kind"]>();
   const [snapGuideMS, setSnapGuideMS] = useState<number>();
   const [pendingFile, setPendingFile] = useState<File>();
-  const [audioAnalyses, setAudioAnalyses] = useState<Record<string, EditorAudioAnalysis>>({});
-  const [audioAnalysisBusy, setAudioAnalysisBusy] = useState(false);
-  const [dismissedAudioCandidateIDs, setDismissedAudioCandidateIDs] = useState<string[]>([]);
   const sessionRef = useRef<EditorSession>();
   const draftPlanRef = useRef<EditorPlan>();
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -84,11 +87,24 @@ export function VideoEditor() {
   }, [session]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem("cascade.editor.frame-snapping", String(frameSnappingEnabled));
+    } catch {
+      // Storage is a convenience only; editing remains available when it is disabled.
+    }
+  }, [frameSnappingEnabled]);
+
+  useEffect(() => {
     draftPlanRef.current = draftPlan;
   }, [draftPlan]);
 
   useEffect(() => {
     void refreshSessions();
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void refreshSessions(), 2000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -154,16 +170,17 @@ export function VideoEditor() {
   const selectedShot = draftPlan?.shots.find((shot) => shot.id === selectedShotID) ?? draftPlan?.shots[0];
   const selectedIndex = selectedShot ? draftPlan?.shots.findIndex((shot) => shot.id === selectedShot.id) ?? -1 : -1;
   const selectedStep = session?.asset_catalog.steps?.find((step) => step.step_id === selectedShot?.source_step_id);
-  const selectedArtifact = session?.asset_catalog.artifacts.find((artifact) => artifact.id === selectedShot?.source_artifact_id);
+  const selectedArtifact = session?.asset_catalog.artifacts.find((artifact) => artifact.id === selectedAssetID) ?? session?.asset_catalog.artifacts.find((artifact) => artifact.id === selectedShot?.source_artifact_id);
   const timelineShots = useMemo(() => buildTimelineShots(draftPlan), [draftPlan]);
   const totalDurationMS = timelineShots.at(-1)?.endMS ?? 0;
   const audioSegments = useMemo(() => draftPlan ? buildAudioSegments(draftPlan, totalDurationMS) : [], [draftPlan, totalDurationMS]);
   const selectedAudioSegment = audioSegments.find((segment) => segment.id === selectedAudioSegmentID) ?? audioSegments[0];
   const presentationComposition = useMemo(() => session && draftPlan ? compilePresentationComposition(session, draftPlan) : undefined, [session, draftPlan]);
   const previewURL = session?.preview.status === "ready" && client.mode === "local" ? `${client.mediaURL(session.session_id, "preview")}?r=${session.preview.revision ?? session.revision}` : "";
-  const sourceURL = session && selectedShot && client.mode === "local" ? client.mediaURL(session.session_id, "asset", selectedShot.source_artifact_id) : "";
+  const sourceURL = session && selectedArtifact && client.mode === "local" ? client.mediaURL(session.session_id, "asset", selectedArtifact.id) : "";
   const mediaURL = previewMode === "rendered" && previewURL ? previewURL : sourceURL;
   const effectivePreviewMode: PreviewMode = previewMode === "rendered" && previewURL ? "rendered" : "source";
+  const imagePreview = effectivePreviewMode === "source" && Boolean(selectedArtifact?.mime_type?.startsWith("image/"));
   const currentValidation = saveState === "saved" ? validationReport ?? session?.validation : undefined;
   const exportChecks = useMemo(() => buildExportChecks(session, draftPlan, currentValidation), [session, draftPlan, currentValidation]);
   const failedChecks = exportChecks.filter((check) => check.tone === "error");
@@ -172,8 +189,6 @@ export function VideoEditor() {
   const selectedTimelineShot = timelineShots.find((item) => item.shot.id === selectedShot?.id);
   const sourcePreviewCaption = activeCaptionText(selectedShot, Math.max(0, playheadMS - (selectedTimelineShot?.startMS ?? 0)));
   const sourcePreviewAudio = useMemo(() => draftPlan ? audioPreviewState(draftPlan, totalDurationMS, playheadMS) : undefined, [draftPlan, totalDurationMS, playheadMS]);
-  const outputWaveform = useMemo(() => draftPlan ? buildOutputWaveform(draftPlan, audioAnalyses) : [], [draftPlan, audioAnalyses]);
-  const audioCandidates = useMemo(() => draftPlan ? buildSilenceCandidates(draftPlan, audioAnalyses).filter((candidate) => !dismissedAudioCandidateIDs.includes(candidate.id)) : [], [draftPlan, audioAnalyses, dismissedAudioCandidateIDs]);
 
   useEffect(() => {
     if (previewMode === "rendered" && !previewURL) setPreviewMode("source");
@@ -244,11 +259,10 @@ export function VideoEditor() {
     setIsPlaying(false);
     editGroupRef.current = undefined;
     setSelectedShotID(next.edit_plan.shots[0]?.id ?? "");
+    setSelectedAssetID(next.edit_plan.shots[0]?.source_artifact_id ?? next.asset_catalog.artifacts[0]?.id ?? "");
     setSelectedTrack("video");
     setSelectedAudioSegmentID("");
     setHiddenTracks({ evidence: false, video: false, caption: false, audio: false });
-    setAudioAnalyses({});
-    setDismissedAudioCandidateIDs([]);
     setMessage("");
     if (next.preview.status === "ready") setPreviewMode("rendered");
     else setPreviewMode("source");
@@ -365,6 +379,25 @@ export function VideoEditor() {
     setSnapGuideMS(undefined);
   }
 
+  function beginStillDuration(event: React.PointerEvent<HTMLSpanElement>, item: TimelineShot) {
+    if (!draftPlan || session?.status === "rendering" || event.button !== 0 || item.shot.presentation_kind !== "still") return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedShotID(item.shot.id);
+    setSelectedTrack("video");
+    const interaction: TimelineInteraction = {
+      kind: "still-duration",
+      shotID: item.shot.id,
+      startClientX: event.clientX,
+      startValueMS: item.durationMS,
+      basePlan: draftPlan,
+    };
+    timelineInteractionRef.current = interaction;
+    setTimelineInteractionKind("still-duration");
+    setSnapGuideMS(undefined);
+  }
+
   function beginMove(event: React.PointerEvent<HTMLButtonElement>, item: TimelineShot) {
     if (!draftPlan || session?.status === "rendering" || event.button !== 0) return;
     event.preventDefault();
@@ -407,6 +440,26 @@ export function VideoEditor() {
       return;
     }
     const baseShot = interaction.basePlan.shots.find((shot) => shot.id === interaction.shotID);
+    if (interaction.kind === "still-duration") {
+      const deltaMS = (clientX - interaction.startClientX) / timelineScale * 1000;
+      const result = setStillDurationInPlan({
+        plan: interaction.basePlan,
+        shotID: interaction.shotID,
+        durationMS: interaction.startValueMS + deltaMS,
+        fps: session?.final_profile.fps ?? 30,
+        snapToFrame: frameSnappingEnabled,
+      });
+      draftPlanRef.current = result.plan;
+      setDraftPlan(result.plan);
+      setSaveState(result.changed ? "dirty" : planSaveState(interaction.basePlan, sessionRef.current));
+      setValidationReport(undefined);
+      const item = buildTimelineShots(result.plan).find((candidate) => candidate.shot.id === interaction.shotID);
+      if (item) {
+        setSnapGuideMS(item.endMS);
+        setPlayheadMS(Math.min(item.endMS, Math.max(item.startMS, playheadMS)));
+      }
+      return;
+    }
     if (!baseShot?.source_time_range_ms) return;
     const deltaMS = (clientX - interaction.startClientX) / timelineScale * 1000;
     const step = session?.asset_catalog.steps?.find((candidate) => candidate.step_id === baseShot.source_step_id);
@@ -418,6 +471,7 @@ export function VideoEditor() {
       valueMS: interaction.startValueMS + deltaMS,
       fps: session?.final_profile.fps ?? 30,
       snapPointsMS: sourceSnapPoints(baseShot, step, artifact),
+      snapToFrame: frameSnappingEnabled,
       ...(artifact?.duration_ms === undefined ? {} : { sourceDurationMS: artifact.duration_ms }),
     });
     draftPlanRef.current = result.plan;
@@ -475,10 +529,17 @@ export function VideoEditor() {
   }
 
   function updatePlayheadFromClientX(clientX: number) {
-    seekTimeline(outputMSFromClientX(clientX));
+    const outputMS = outputMSFromClientX(clientX);
+    const snapped = snapMilliseconds(outputMS, session?.final_profile.fps ?? 30, [], 0, frameSnappingEnabled);
+    seekTimeline(snapped.valueMS);
   }
 
   function selectShotPreviewTime(shot: EditorShot, item: TimelineShot, outputMS: number) {
+    if (shot.presentation_kind === "still") {
+      pendingSeekRef.current = undefined;
+      setPlayheadMS(Math.max(item.startMS, Math.min(item.endMS, outputMS)));
+      return;
+    }
     const sourceStartMS = shot.source_time_range_ms?.[0] ?? 0;
     const sourceSeconds = (sourceStartMS + Math.max(0, outputMS - item.startMS)) / 1000;
     pendingSeekRef.current = { shotID: shot.id, sourceSeconds, outputMS };
@@ -505,6 +566,7 @@ export function VideoEditor() {
       valueMS: Math.max(0, Math.round(seconds * 1000)),
       fps: session?.final_profile.fps ?? 30,
       snapPointsMS: sourceSnapPoints(selectedShot, step, artifact),
+      snapToFrame: frameSnappingEnabled,
       ...(artifact?.duration_ms === undefined ? {} : { sourceDurationMS: artifact.duration_ms }),
     });
     if (!result.changed) {
@@ -512,6 +574,47 @@ export function VideoEditor() {
       return;
     }
     commitPlan(result.plan, `range-${position}:${selectedShot.id}`);
+  }
+
+  function patchStillDuration(seconds: number) {
+    if (!selectedShot || selectedShot.presentation_kind !== "still" || !Number.isFinite(seconds)) return;
+    if (!draftPlan) return;
+    const result = setStillDurationInPlan({
+      plan: draftPlan,
+      shotID: selectedShot.id,
+      durationMS: seconds * 1000,
+      fps: session?.final_profile.fps ?? 30,
+      snapToFrame: frameSnappingEnabled,
+    });
+    if (!result.changed) return;
+    commitPlan(result.plan, `still-duration:${selectedShot.id}`);
+  }
+
+  function addStillToTimeline(asset: EditorArtifact) {
+    if (!draftPlan || !isTimelineStillAsset(asset)) {
+      setMessage("只有已登记的步骤截图可以作为展示画面加入时间线。");
+      return;
+    }
+    const id = `still_${Date.now()}`;
+    const shot: EditorShot = {
+      id,
+      source_artifact_id: asset.id,
+      ...(asset.source_step_id ? { source_step_id: asset.source_step_id } : {}),
+      presentation_kind: "still",
+      output_duration_ms: 1500,
+      purpose: asset.label?.trim() || "步骤截图",
+      operations: [],
+      overlays: [],
+    };
+    const insertAt = selectedIndex >= 0 ? selectedIndex + 1 : draftPlan.shots.length;
+    const shots = [...draftPlan.shots];
+    shots.splice(insertAt, 0, shot);
+    commitPlan({ ...draftPlan, shots }, `add-still:${asset.id}:${id}`);
+    setSelectedShotID(id);
+    setSelectedAssetID(asset.id);
+    setSelectedTrack("video");
+    setPreviewMode("source");
+    setMessage("步骤截图已加入时间线，默认展示 1.5 秒；它只作展示参考，不代表业务步骤证据。");
   }
 
   function patchCaption(text: string) {
@@ -557,47 +660,6 @@ export function VideoEditor() {
     setMessage("已合并音频边界，视频时间线保持不变。");
   }
 
-  async function analyzeTimelineAudio() {
-    if (!session || !draftPlan || audioAnalysisBusy) return;
-    const artifactIDs = [...new Set(draftPlan.shots.map((shot) => shot.source_artifact_id))];
-    if (!artifactIDs.length) {
-      setMessage("时间线中没有可分析的源素材。");
-      return;
-    }
-    setAudioAnalysisBusy(true);
-    const results = await Promise.all(artifactIDs.map(async (artifactID) => ({ artifactID, result: await client.analyzeAudio(session.session_id, artifactID) })));
-    setAudioAnalysisBusy(false);
-    const successful = results.filter((item): item is { artifactID: string; result: { ok: true; data: EditorAudioAnalysis } } => item.result.ok && Boolean(item.result.data));
-    if (successful.length) {
-      setAudioAnalyses((current) => ({ ...current, ...Object.fromEntries(successful.map((item) => [item.artifactID, item.result.data])) }));
-      setDismissedAudioCandidateIDs([]);
-    }
-    const failures = results.filter((item) => !item.result.ok);
-    if (failures.length) {
-      const oldBridge = failures.every((item) => /HTTP 404|unknown method/i.test(item.result.error ?? ""));
-      setMessage(oldBridge ? "当前运行的 Bridge 版本尚未包含音频分析接口；源码已就绪，需在 Go 应用控制解除后重建 Bridge。" : `已分析 ${successful.length}/${results.length} 个素材；失败：${failures.map((item) => item.result.error ?? item.artifactID).join("；")}`);
-    } else {
-      const noAudio = successful.filter((item) => !item.result.data.has_audio).length;
-      setMessage(`音频分析完成：${successful.length} 个素材${noAudio ? `，${noAudio} 个没有音轨` : ""}。静音区间仅作为待确认候选。`);
-    }
-  }
-
-  function applyAudioCandidate(candidate: AudioEditCandidate) {
-    if (!draftPlan) return;
-    const result = muteAudioRangeInPlan({ plan: draftPlan, startMS: candidate.startMS, endMS: candidate.endMS, totalDurationMS });
-    if (!result.changed) {
-      setMessage(result.blockedReason ?? "该区间已经静音。");
-      return;
-    }
-    commitPlan(result.plan, `audio-candidate:${candidate.id}`);
-    const segments = buildAudioSegments(result.plan, totalDurationMS);
-    const segment = segments.find((item) => item.startMS >= candidate.startMS && item.endMS <= candidate.endMS);
-    setSelectedTrack("audio");
-    setSelectedAudioSegmentID(segment?.id ?? "");
-    setDismissedAudioCandidateIDs((current) => [...current, candidate.id]);
-    setMessage("已接受自动静音候选；仅修改音频，视频和业务步骤未改变。");
-  }
-
   function deleteSelected() {
     if (selectedTrack === "audio") {
       patchSelectedAudioSegment({ mode: "mute" });
@@ -623,7 +685,7 @@ export function VideoEditor() {
   function splitShot() {
     if (!draftPlan) return;
     if (selectedTrack === "audio") {
-      const result = splitAudioAtOutputMS({ plan: draftPlan, outputMS: playheadMS, totalDurationMS, fps: session?.final_profile.fps ?? 30 });
+      const result = splitAudioAtOutputMS({ plan: draftPlan, outputMS: playheadMS, totalDurationMS, fps: session?.final_profile.fps ?? 30, snapToFrame: frameSnappingEnabled });
       if (!result.changed) {
         setMessage(result.blockedReason ?? "当前播放头位置无法分割音频。");
         return;
@@ -634,11 +696,16 @@ export function VideoEditor() {
       setMessage(`已在播放头 ${formatTimecode(playheadMS)} 处分割音频。`);
       return;
     }
+    if (selectedShot?.presentation_kind === "still") {
+      setMessage("步骤截图是静态展示画面，第一版请在右侧直接设置展示时长，暂不支持分割。");
+      return;
+    }
     const result = splitShotAtOutputMS({
       plan: draftPlan,
       outputMS: playheadMS,
       fps: session?.final_profile.fps ?? 30,
       newShotID: `shot_${Date.now()}`,
+      snapToFrame: frameSnappingEnabled,
     });
     if (!result.changed || !result.rightShotID) {
       setMessage(result.blockedReason ?? "当前播放头位置无法分割。");
@@ -783,6 +850,7 @@ export function VideoEditor() {
 
   function selectShot(shot: EditorShot, outputMS?: number, activateTrack = true) {
     setSelectedShotID(shot.id);
+    setSelectedAssetID(shot.source_artifact_id);
     if (activateTrack) setSelectedTrack("video");
     setPreviewMode("source");
     const timelineShot = timelineShots.find((item) => item.shot.id === shot.id);
@@ -790,6 +858,21 @@ export function VideoEditor() {
     const offsetMS = Math.max(0, nextOutputMS - (timelineShot?.startMS ?? 0));
     const sourceStartMS = shot.source_time_range_ms?.[0] ?? 0;
     selectShotPreviewTime(shot, timelineShot ?? { shot, index: 0, startMS: nextOutputMS - offsetMS, endMS: nextOutputMS - offsetMS + shotDuration(shot), durationMS: shotDuration(shot) }, nextOutputMS);
+  }
+
+  function selectAsset(asset: EditorArtifact) {
+    setSelectedAssetID(asset.id);
+    const shot = draftPlan?.shots.find((item) => item.source_artifact_id === asset.id);
+    if (shot) {
+      selectShot(shot);
+      return;
+    }
+    videoRef.current?.pause();
+    setIsPlaying(false);
+    setPreviewMode("source");
+    setMessage(isTimelineStillAsset(asset)
+      ? "步骤截图已在预览区打开；确认需要展示后，可点击素材卡下方的“加入时间线”。"
+      : `${assetKindLabel(asset)}已在预览区打开；该素材仅作展示，尚不能加入时间线。`);
   }
 
   function selectAudioSegment(segment: ReturnType<typeof buildAudioSegments>[number], outputMS?: number) {
@@ -865,7 +948,7 @@ export function VideoEditor() {
             if (next) loadSession(next);
           }}>
             <option value="">选择编辑项目</option>
-            {sessions.map((item) => <option key={item.session_id} value={item.session_id}>{sessionDisplayName(item)}</option>)}
+            {sessions.map((item) => <option key={item.session_id} value={item.session_id}>{sessionSelectLabel(item)}</option>)}
           </select>
           {session ? <span className="studio-revision">r{session.revision}</span> : null}
           <button className={`studio-save-state ${saveState}`} disabled={!session || saveState === "saved" || busy === "save"} onClick={savePlan}>{saveStateLabel(saveState)}</button>
@@ -908,7 +991,7 @@ export function VideoEditor() {
               </div>
               <div className="studio-media-content">
                 <button className="studio-import-zone" onClick={() => setImportOpen(true)}>＋ 从本机选择，或导入结果包</button>
-                <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} onSelectShot={(shot) => selectShot(shot)} />
+                <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} selectedAssetID={selectedArtifact?.id} onSelectShot={(shot) => selectShot(shot)} onSelectAsset={selectAsset} onAddStill={addStillToTimeline} />
               </div>
             </section>
 
@@ -924,7 +1007,7 @@ export function VideoEditor() {
               <div className="studio-video-stage">
                 {mediaURL ? (
                   <div className="studio-video-frame">
-                    <video
+                    {imagePreview ? <img className="studio-image-preview" src={mediaURL} alt={selectedArtifact?.label ?? "步骤截图"} /> : <video
                       ref={videoRef}
                       key={`${effectivePreviewMode}-${mediaURL}`}
                       src={mediaURL}
@@ -937,18 +1020,18 @@ export function VideoEditor() {
                           videoRef.current.currentTime = selectedShot.source_time_range_ms[0] / 1000;
                         }
                       }}
-                    />
-                    {effectivePreviewMode === "source" && sourcePreviewCaption ? <div className="studio-caption-preview">{sourcePreviewCaption}</div> : null}
-                    {selectedStep ? <div className={`studio-step-preview ${stepTone(selectedStep.status)}`}>步骤 {stepDisplayNumber(selectedStep, session.asset_catalog.steps ?? [])} · {stepTitle(selectedStep)}</div> : null}
+                    />}
+                    {effectivePreviewMode === "source" && !imagePreview && sourcePreviewCaption ? <div className="studio-caption-preview">{sourcePreviewCaption}</div> : null}
+                    {selectedStep && !imagePreview ? <div className={`studio-step-preview ${stepTone(selectedStep.status)}`}>步骤 {stepDisplayNumber(selectedStep, session.asset_catalog.steps ?? [])} · {stepTitle(selectedStep)}</div> : null}
                   </div>
                 ) : (
                   <div className="studio-video-placeholder"><strong>还没有可预览的素材</strong><span>导入本地录屏或 RecordingResultPackage 后开始编辑。</span><button className="studio-primary-button" onClick={() => setImportOpen(true)}>导入素材</button></div>
                 )}
               </div>
               <div className="studio-transport">
-                <button className="studio-icon-button" disabled={!mediaURL} onClick={() => seekTimeline(playheadMS - 1000 / session.preview_profile.fps)}>│‹</button>
-                <button className="studio-play-button" disabled={!mediaURL} onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
-                <button className="studio-icon-button" disabled={!mediaURL} onClick={() => seekTimeline(playheadMS + 1000 / session.preview_profile.fps)}>›│</button>
+                <button className="studio-icon-button" disabled={!mediaURL || imagePreview} onClick={() => seekTimeline(playheadMS - 1000 / session.preview_profile.fps)}>│‹</button>
+                <button className="studio-play-button" disabled={!mediaURL || imagePreview} onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
+                <button className="studio-icon-button" disabled={!mediaURL || imagePreview} onClick={() => seekTimeline(playheadMS + 1000 / session.preview_profile.fps)}>›│</button>
                 <span>{formatTimecode(playheadMS)} / {formatTimecode(totalDurationMS)}</span>
                 <span className="studio-render-status">预览：{renderStateLabel(session.preview)} · 成片：{renderStateLabel(session.final_render)}</span>
               </div>
@@ -972,39 +1055,40 @@ export function VideoEditor() {
                     <small className="studio-property-note">仅修改当前音频段；全局默认仍为 {draftPlan?.audio?.mode === "mute" ? "静音" : `${draftPlan?.audio?.volume_percent ?? 100}%`}。</small>
                     {selectedAudioSegment.volumePercent > 100 ? <small className="studio-property-note">浏览器源素材预览最高为 100%；导出时 FFmpeg 会应用 {selectedAudioSegment.volumePercent}% 的实际增益。</small> : null}
                   </PropertySection>
-                  <PropertySection title="自动静音候选" meta={audioCandidates.length ? `${audioCandidates.length} 个待确认` : "无待确认项"}>
-                    {audioCandidates.slice(0, 5).map((candidate) => <div className="studio-audio-candidate-card" key={candidate.id}><div><strong>{formatTimecode(candidate.startMS)}—{formatTimecode(candidate.endMS)}</strong><small>信号置信度 {Math.round(candidate.signalConfidence * 100)}% · 仅代表低音量检测</small></div><div><button className="studio-outline-button" onClick={() => applyAudioCandidate(candidate)}>静音</button><button className="studio-ghost-button" onClick={() => setDismissedAudioCandidateIDs((current) => [...current, candidate.id])}>忽略</button></div></div>)}
-                    {!audioCandidates.length ? <small className="studio-property-note">点击时间线“分析音频”生成候选；系统不会自动修改计划。</small> : null}
-                  </PropertySection>
                 </div>
               ) : selectedShot ? (
                 <div className="studio-properties-scroll">
                   <PropertySection title="片段" meta={selectedShot.id}>
                     <label className="studio-field"><span>片段说明</span><input value={selectedShot.purpose} onChange={(event) => patchShot({ purpose: event.target.value }, "purpose")} /></label>
-                    <div className="studio-field-pair">
-                      <label className="studio-field"><span>入点</span><input type="number" min="0" step="0.1" value={(selectedShot.source_time_range_ms?.[0] ?? 0) / 1000} onChange={(event) => patchRange(0, Number(event.target.value))} /></label>
-                      <label className="studio-field"><span>出点</span><input type="number" min="0.5" step="0.1" value={(selectedShot.source_time_range_ms?.[1] ?? 1000) / 1000} onChange={(event) => patchRange(1, Number(event.target.value))} /></label>
-                    </div>
-                    <label className="studio-field"><span>持续时间</span><input value={formatTimecode(shotDuration(selectedShot))} readOnly /></label>
+                    {selectedShot.presentation_kind === "still" ? <>
+                      <label className="studio-field"><span>展示时长（秒）</span><input type="number" min="0.25" max="15" step="0.1" value={(selectedShot.output_duration_ms ?? 1500) / 1000} onChange={(event) => patchStillDuration(Number(event.target.value))} /></label>
+                      <small className="studio-property-note">静态截图将按此时长铺满画面并生成静音音轨；仅作展示参考，不替代业务步骤证据。</small>
+                    </> : <>
+                      <div className="studio-field-pair">
+                        <label className="studio-field"><span>入点</span><input type="number" min="0" step="0.1" value={(selectedShot.source_time_range_ms?.[0] ?? 0) / 1000} onChange={(event) => patchRange(0, Number(event.target.value))} /></label>
+                        <label className="studio-field"><span>出点</span><input type="number" min="0.5" step="0.1" value={(selectedShot.source_time_range_ms?.[1] ?? 1000) / 1000} onChange={(event) => patchRange(1, Number(event.target.value))} /></label>
+                      </div>
+                      <label className="studio-field"><span>持续时间</span><input value={formatTimecode(shotDuration(selectedShot))} readOnly /></label>
+                    </>}
                   </PropertySection>
 
                   <PropertySection title="字幕" meta="确定性烧录">
                     <label className="studio-field"><span>烧录文本</span><textarea rows={4} value={captionText(selectedShot)} onChange={(event) => patchCaption(event.target.value)} placeholder="输入需要烧录到画面的字幕" /></label>
                   </PropertySection>
 
-                  <PropertySection title="音频" meta={draftPlan?.audio?.mode === "mute" ? "静音" : "源音轨"}>
+                  {selectedShot.presentation_kind !== "still" ? <PropertySection title="音频" meta={draftPlan?.audio?.mode === "mute" ? "静音" : "源音轨"}>
                     <div className="studio-radio-row">
                       <label><input type="radio" name="studio-audio-mode" checked={(draftPlan?.audio?.mode ?? "source") === "source"} onChange={() => patchAudio({ mode: "source" })} />保留源音频</label>
                       <label><input type="radio" name="studio-audio-mode" checked={draftPlan?.audio?.mode === "mute"} onChange={() => patchAudio({ mode: "mute" })} />静音</label>
                     </div>
                     <label className="studio-field"><span>音量 {draftPlan?.audio?.volume_percent ?? 100}%</span><input type="range" min="0" max="200" step="5" disabled={draftPlan?.audio?.mode === "mute"} value={draftPlan?.audio?.volume_percent ?? 100} onChange={(event) => patchAudio({ volume_percent: Number(event.target.value) })} /></label>
-                  </PropertySection>
+                  </PropertySection> : null}
 
-                  <PropertySection title="业务证据" meta={selectedStep?.required ? "事实锁定" : "展示片段"}>
+                  <PropertySection title={selectedShot.presentation_kind === "still" ? "展示素材" : "业务证据"} meta={selectedShot.presentation_kind === "still" ? "不代表业务步骤" : selectedStep?.required ? "事实锁定" : "展示片段"}>
                     <div className={`studio-evidence-card ${selectedStep ? stepTone(selectedStep.status) : "neutral"}`}>
-                      <EvidenceFact label="来源步骤" value={selectedShot.source_step_id ?? "未绑定"} />
+                      <EvidenceFact label="来源步骤" value={selectedShot.source_step_id ?? "未绑定（展示素材）"} />
                       <EvidenceFact label="执行状态" value={selectedStep?.status ?? "本地素材"} />
-                      <EvidenceFact label="源时间范围" value={selectedShot.source_time_range_ms ? `${formatTimecode(selectedShot.source_time_range_ms[0])}—${formatTimecode(selectedShot.source_time_range_ms[1])}` : "未声明"} />
+                      <EvidenceFact label={selectedShot.presentation_kind === "still" ? "展示时长" : "源时间范围"} value={selectedShot.presentation_kind === "still" ? formatTimecode(shotDuration(selectedShot)) : selectedShot.source_time_range_ms ? `${formatTimecode(selectedShot.source_time_range_ms[0])}—${formatTimecode(selectedShot.source_time_range_ms[1])}` : "未声明"} />
                       <EvidenceFact label="素材校验" value={selectedArtifact?.sha256 ? "SHA-256 已记录" : "未提供校验值"} />
                     </div>
                   </PropertySection>
@@ -1025,8 +1109,7 @@ export function VideoEditor() {
                 <button className="studio-icon-button" title="后移" disabled={selectedTrack !== "video" || !selectedShot || selectedIndex >= (draftPlan?.shots.length ?? 0) - 1} onClick={() => moveShot(1)}>→</button>
                 <button className="studio-icon-button studio-split-icon-button" aria-label={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} title={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} disabled={!draftPlan} onClick={splitShot}><ScissorsIcon /></button>
                 <button className="studio-icon-button" title={selectedTrack === "audio" ? "静音所选音频段" : "删除"} disabled={selectedTrack === "video" ? !selectedShot : !selectedAudioSegment} onClick={deleteSelected}>⌫</button>
-                <button className="studio-outline-button studio-analyze-audio" disabled={!draftPlan?.shots.length || audioAnalysisBusy} onClick={() => void analyzeTimelineAudio()}>{audioAnalysisBusy ? "分析中…" : outputWaveform.length ? "重新分析音频" : "分析音频"}</button>
-                <span className="studio-snap-status">● 帧吸附</span>
+                <label className={`studio-snap-toggle ${frameSnappingEnabled ? "enabled" : ""}`} title="开启后，拖动播放头、裁剪和分割会对齐到视频帧；业务步骤边界仍始终受保护。"><input type="checkbox" checked={frameSnappingEnabled} onChange={(event) => setFrameSnappingEnabled(event.currentTarget.checked)} /><span>帧吸附</span></label>
               </div>
               <div className="studio-timeline-tools"><span>{presentationComposition?.durationInFrames ?? 0} 帧 · 总时长 {formatTimecode(totalDurationMS)}</span><input type="range" min="28" max="100" value={timelineScale} onChange={(event) => setTimelineScale(Number(event.target.value))} /></div>
             </div>
@@ -1042,6 +1125,7 @@ export function VideoEditor() {
                 <TimeRuler totalDurationMS={totalDurationMS} scale={timelineScale} />
                 <div className={`studio-track-row studio-evidence-track ${hiddenTracks.evidence ? "track-hidden" : ""}`}>
                   {!hiddenTracks.evidence && timelineShots.map((item) => {
+                    if (item.shot.presentation_kind === "still") return <div key={item.shot.id} className="studio-evidence-clip presentation" style={clipStyle(item, timelineScale)}><span>◇</span><strong>展示截图（非业务证据）</strong></div>;
                     const step = session.asset_catalog.steps?.find((candidate) => candidate.step_id === item.shot.source_step_id);
                     return <div key={item.shot.id} className={`studio-evidence-clip ${step ? stepTone(step.status) : "neutral"}`} style={clipStyle(item, timelineScale)}><span>{step?.required ? "🔒" : "◇"}</span><strong>{step ? `${stepDisplayNumber(step, session.asset_catalog.steps ?? [])} ${stepTitle(step)}` : "本地展示片段"}</strong></div>;
                   })}
@@ -1050,16 +1134,18 @@ export function VideoEditor() {
                   {!hiddenTracks.video && timelineShots.map((item) => (
                     <button
                       key={item.shot.id}
-                      className={`studio-timeline-clip video ${selectedTrack === "video" && selectedShot?.id === item.shot.id ? "selected" : ""} ${timelineInteractionKind === "move" && selectedShotID === item.shot.id ? "dragging" : ""}`}
+                      className={`studio-timeline-clip video ${item.shot.presentation_kind === "still" ? "still" : ""} ${selectedTrack === "video" && selectedShot?.id === item.shot.id ? "selected" : ""} ${timelineInteractionKind === "move" && selectedShotID === item.shot.id ? "dragging" : ""}`}
                       style={clipStyle(item, timelineScale)}
                       onPointerDown={(event) => beginMove(event, item)}
                       onClick={() => selectVideoClip(item)}
                     >
-                      <span className="studio-trim-handle start" title="拖动裁剪入点" onPointerDown={(event) => beginTrim(event, item, "start")} />
+                      {item.shot.presentation_kind !== "still" ? <span className="studio-trim-handle start" title="拖动裁剪入点" onPointerDown={(event) => beginTrim(event, item, "start")} /> : null}
                       <span className="studio-clip-index">{item.index + 1}</span>
-                      <strong>{item.shot.purpose}</strong>
+                      <strong>{item.shot.presentation_kind === "still" ? `▣ ${item.shot.purpose}` : item.shot.purpose}</strong>
                       <small>{formatDuration(item.durationMS)}</small>
-                      <span className="studio-trim-handle end" title="拖动裁剪出点" onPointerDown={(event) => beginTrim(event, item, "end")} />
+                      {item.shot.presentation_kind === "still"
+                        ? <span className="studio-trim-handle still-duration" title="拖动调整展示时长" onPointerDown={(event) => beginStillDuration(event, item)} />
+                        : <span className="studio-trim-handle end" title="拖动裁剪出点" onPointerDown={(event) => beginTrim(event, item, "end")} />}
                     </button>
                   ))}
                 </div>
@@ -1069,10 +1155,8 @@ export function VideoEditor() {
                 <div className={`studio-track-row studio-audio-track ${hiddenTracks.audio ? "track-hidden" : ""}`}>
                   {!hiddenTracks.audio && audioSegments.map((segment) => {
                     const clipWidth = Math.max(1, segment.durationMS / 1000 * timelineScale);
-                    const bars = waveformBarsForRange(outputWaveform, segment.startMS, segment.endMS, Math.floor(clipWidth / 3));
-                    return <button key={segment.id} className={`studio-audio-clip ${segment.mode === "mute" ? "muted" : ""} ${selectedTrack === "audio" && selectedAudioSegment?.id === segment.id ? "selected" : ""}`} style={{ left: segment.startMS / 1000 * timelineScale, width: clipWidth }} title={`${segment.mode === "mute" ? "静音" : `音量 ${segment.volumePercent}%`} · ${formatTimecode(segment.startMS)}—${formatTimecode(segment.endMS)}`} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); selectAudioSegment(segment); }}><span className="studio-audio-waveform" aria-hidden="true">{bars.map((height, index) => <i key={index} style={{ height: `${Math.round(height * 90)}%` }} />)}</span><strong>{segment.mode === "mute" ? "静音" : `源音频 ${segment.index + 1} · ${segment.volumePercent}%`}</strong><small>{formatDuration(segment.durationMS)}</small></button>;
+                    return <button key={segment.id} className={`studio-audio-clip ${segment.mode === "mute" ? "muted" : ""} ${selectedTrack === "audio" && selectedAudioSegment?.id === segment.id ? "selected" : ""}`} style={{ left: segment.startMS / 1000 * timelineScale, width: clipWidth }} title={`${segment.mode === "mute" ? "静音" : `音量 ${segment.volumePercent}%`} · ${formatTimecode(segment.startMS)}—${formatTimecode(segment.endMS)}`} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); selectAudioSegment(segment); }}><strong>{segment.mode === "mute" ? "静音" : `源音频 ${segment.index + 1} · ${segment.volumePercent}%`}</strong><small>{formatDuration(segment.durationMS)}</small></button>;
                   })}
-                  {!hiddenTracks.audio && audioCandidates.map((candidate) => <span key={candidate.id} className="studio-audio-candidate-range" style={{ left: candidate.startMS / 1000 * timelineScale, width: Math.max(2, (candidate.endMS - candidate.startMS) / 1000 * timelineScale) }} />)}
                 </div>
                 <div className="studio-playhead" style={{ left: playheadMS / 1000 * timelineScale }} />
                 {snapGuideMS !== undefined ? <div className="studio-snap-guide" style={{ left: snapGuideMS / 1000 * timelineScale }} /> : null}
@@ -1096,7 +1180,7 @@ export function VideoEditor() {
   );
 }
 
-function MediaPanelContent({ tab, session, plan, selectedShotID, onSelectShot }: { tab: MediaTab; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; onSelectShot: (shot: EditorShot) => void }) {
+function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID, onSelectShot, onSelectAsset, onAddStill }: { tab: MediaTab; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; selectedAssetID: string | undefined; onSelectShot: (shot: EditorShot) => void; onSelectAsset: (asset: EditorArtifact) => void; onAddStill: (asset: EditorArtifact) => void }) {
   if (tab === "captions") {
     const shots = plan?.shots.filter((shot) => captionText(shot)) ?? [];
     return <div className="studio-list-content">{shots.map((shot) => <button key={shot.id} className={selectedShotID === shot.id ? "selected" : ""} onClick={() => onSelectShot(shot)}><strong>{captionText(shot)}</strong><small>{shot.purpose}</small></button>)}{shots.length === 0 ? <PanelEmpty text="当前计划没有字幕。" /> : null}</div>;
@@ -1116,7 +1200,7 @@ function MediaPanelContent({ tab, session, plan, selectedShotID, onSelectShot }:
       <div className="studio-asset-grid">
         {session.asset_catalog.artifacts.filter((artifact) => !isGeneratedArtifact(artifact)).map((artifact) => {
           const shot = plan?.shots.find((candidate) => candidate.source_artifact_id === artifact.id);
-          return <AssetCard key={artifact.id} artifact={artifact} selected={shot?.id === selectedShotID} onClick={shot ? () => onSelectShot(shot) : undefined} />;
+          return <AssetCard key={artifact.id} artifact={artifact} selected={artifact.id === selectedAssetID || shot?.id === selectedShotID} onClick={() => onSelectAsset(artifact)} {...(isTimelineStillAsset(artifact) ? { actionLabel: "加入时间线", onAction: () => onAddStill(artifact) } : {})} />;
         })}
       </div>
       {session.asset_catalog.artifacts.length === 0 ? <PanelEmpty text="导入浏览器录屏或本地视频后，系统会创建第一个片段。" /> : null}
@@ -1124,12 +1208,11 @@ function MediaPanelContent({ tab, session, plan, selectedShotID, onSelectShot }:
   );
 }
 
-function AssetCard({ artifact, selected, generated, onClick }: { artifact: EditorArtifact; selected?: boolean; generated?: boolean; onClick?: (() => void) | undefined }) {
-  const content = <><div className={`studio-asset-thumb ${generated ? "generated" : ""}`}><span className={`studio-asset-status ${generated ? "review" : ""}`}>{generated ? "待审查" : artifact.sha256 ? "已校验" : "本地"}</span><span className="studio-asset-duration">{formatDuration(artifact.duration_ms ?? 0)}</span></div><div><strong>{artifact.label ?? artifact.id}</strong><small>{mediaResolution(artifact)} · {artifact.mime_type ?? artifact.kind}</small></div></>;
+function AssetCard({ artifact, selected, generated, onClick, actionLabel, onAction }: { artifact: EditorArtifact; selected?: boolean; generated?: boolean; onClick?: (() => void) | undefined; actionLabel?: string; onAction?: () => void }) {
+  const content = <><div className={`studio-asset-thumb ${generated ? "generated" : ""} ${artifact.mime_type?.startsWith("image/") ? "screenshot" : ""}`}><span className={`studio-asset-status ${generated ? "review" : ""}`}>{generated ? "待审查" : artifact.sha256 ? "已校验" : "本地"}</span><span className="studio-asset-duration">{assetKindLabel(artifact)}</span></div><div><strong>{artifact.label ?? artifact.id}</strong><small>{mediaResolution(artifact)} · {artifact.mime_type ?? artifact.kind}</small></div></>;
   if (!onClick) return <article className="studio-asset-card static" aria-label={`${artifact.label ?? artifact.id}（仅展示）`}>{content}</article>;
-  return (
-    <button className={`studio-asset-card ${selected ? "selected" : ""}`} onClick={onClick}>{content}</button>
-  );
+  if (!actionLabel || !onAction) return <button className={`studio-asset-card ${selected ? "selected" : ""}`} onClick={onClick}>{content}</button>;
+  return <article className={`studio-asset-card with-action ${selected ? "selected" : ""}`}><button className="studio-asset-preview-button" onClick={onClick}>{content}</button><button className="studio-asset-action" onClick={onAction}>{actionLabel}</button></article>;
 }
 
 function ImportDialog(props: {
@@ -1280,6 +1363,7 @@ export function preservesRequiredStepOrder(shots: EditorShot[], steps: EditorTim
   const order = new Map(steps.filter((step) => step.required).map((step) => [step.step_id, step.order]));
   let last = -1;
   for (const shot of shots) {
+    if (shot.presentation_kind === "still") continue;
     if (!shot.source_step_id || !order.has(shot.source_step_id)) continue;
     const current = order.get(shot.source_step_id)!;
     if (current < last) return false;
@@ -1301,6 +1385,7 @@ function clipStyle(item: TimelineShot, scale: number): React.CSSProperties {
 }
 
 function shotDuration(shot?: EditorShot): number {
+  if (shot?.presentation_kind === "still") return Math.max(0, shot.output_duration_ms ?? 0);
   return shot?.source_time_range_ms ? Math.max(0, shot.source_time_range_ms[1] - shot.source_time_range_ms[0]) : 0;
 }
 
@@ -1345,6 +1430,11 @@ function sessionDisplayName(session: EditorSession): string {
   return `本地编辑项目 · ${session.session_id.slice(-6)}`;
 }
 
+function sessionSelectLabel(session: EditorSession): string {
+  const waitingForEdit = Boolean(session.asset_catalog.source?.recording_result_package_id) && session.final_render.status === "not_started";
+  return `${sessionDisplayName(session)}${waitingForEdit ? " · 待编辑" : ""}`;
+}
+
 function mediaTabLabel(tab: MediaTab): string {
   return ({ media: "媒体", captions: "字幕", callouts: "标注", generated: "生成" } as const)[tab];
 }
@@ -1355,9 +1445,19 @@ function mediaResolution(artifact?: EditorArtifact): string {
   return typeof width === "number" && typeof height === "number" ? `${width}×${height}` : "待探测";
 }
 
+function assetKindLabel(artifact: EditorArtifact): string {
+  if (artifact.mime_type?.startsWith("image/") || artifact.kind === "step_screenshot") return "步骤截图";
+  if (artifact.kind === "narration_audio") return "配音素材";
+  return artifact.kind === "raw_recording" ? "原始录屏" : artifact.kind;
+}
+
 function isGeneratedArtifact(artifact?: EditorArtifact): boolean {
   if (!artifact) return false;
-  return artifact.kind.includes("generated") || artifact.kind.includes("candidate") || artifact.metadata?.presentation_only === true;
+  return artifact.kind.includes("generated") || artifact.kind.includes("candidate") || artifact.metadata?.source_material_policy === "non_authoritative_generated_candidate";
+}
+
+function isTimelineStillAsset(artifact?: EditorArtifact): boolean {
+  return Boolean(artifact && artifact.kind === "step_screenshot" && artifact.mime_type?.startsWith("image/") && artifact.metadata?.presentation_only === true && artifact.include_in_demo !== false);
 }
 
 function stepTitle(step: EditorTimelineStep): string {

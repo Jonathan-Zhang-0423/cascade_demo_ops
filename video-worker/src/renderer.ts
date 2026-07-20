@@ -375,6 +375,8 @@ interface DemoEditShot {
   source_artifact_id: string;
   source_step_id?: string;
   source_time_range_ms?: [number, number];
+  presentation_kind?: "video" | "still";
+  output_duration_ms?: number;
   purpose: string;
   operations?: EditOperation[];
   overlays?: EditOverlay[];
@@ -444,6 +446,7 @@ interface CompositorShot {
   source_uri?: string;
   source_path?: string;
   source_time_range_ms?: [number, number];
+  presentation_kind: "video" | "still";
   duration_ms: number;
   operations: string[];
   overlays: Array<{ type: string; text?: string; start_ms?: number; end_ms?: number }>;
@@ -941,6 +944,7 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   plan.shots.forEach((shot, shotIndex) => {
     const shotPath = `shots[${shotIndex}]`;
     const artifact = artifactByID.get(shot.source_artifact_id);
+    const still = isStillShot(shot);
     if (!artifact) {
       errors.push(finding("unknown_source_artifact", `Shot references missing source artifact ${shot.source_artifact_id}`, `${shotPath}.source_artifact_id`));
     } else if (artifact.sensitive) {
@@ -954,7 +958,9 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
     if (shot.source_step_id && !stepByID.has(shot.source_step_id)) {
       errors.push(finding("unknown_source_step", `Shot references missing source step ${shot.source_step_id}`, `${shotPath}.source_step_id`));
     }
-    if (shot.source_step_id && requiredOrder.has(shot.source_step_id)) {
+    // A still can retain its capture step for traceability, but must not count
+    // as the business evidence or participate in its locked order.
+    if (!still && shot.source_step_id && requiredOrder.has(shot.source_step_id)) {
       const currentOrder = requiredOrder.get(shot.source_step_id) as number;
       if (currentOrder < lastRequiredStepOrder) {
         errors.push(finding("required_step_order_changed", "Required script steps cannot be reordered by the edit plan", `${shotPath}.source_step_id`));
@@ -962,12 +968,13 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
       lastRequiredStepOrder = Math.max(lastRequiredStepOrder, currentOrder);
     }
 
+    validateShotPresentation(shot, artifact, shotPath, errors);
     validateShotTimeRange(shot, artifact, catalog, `${shotPath}.source_time_range_ms`, errors);
     validateOperations(shot.operations || [], `${shotPath}.operations`, errors);
     validateOverlays(shot.overlays || [], stepByID, `${shotPath}.overlays`, errors);
   });
 
-  const representedSteps = new Set(plan.shots.map((shot) => shot.source_step_id).filter((stepID): stepID is string => Boolean(stepID)));
+  const representedSteps = new Set(plan.shots.filter((shot) => !isStillShot(shot)).map((shot) => shot.source_step_id).filter((stepID): stepID is string => Boolean(stepID)));
   for (const step of catalog.steps) {
     if (step.required && step.status !== "failed" && !representedSteps.has(step.step_id)) {
       warnings.push(finding("required_step_omitted", `Required script step ${step.step_id} is not represented in the edit plan`, "shots"));
@@ -983,6 +990,35 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   };
   if (plan.plan_id) report.plan_id = plan.plan_id;
   return report;
+}
+
+function isStillShot(shot: DemoEditShot): boolean {
+  return shot.presentation_kind === "still";
+}
+
+function validateShotPresentation(shot: DemoEditShot, artifact: TimelineArtifact | undefined, shotPath: string, errors: ValidationFinding[]): void {
+  if (shot.presentation_kind && shot.presentation_kind !== "video" && shot.presentation_kind !== "still") {
+    errors.push(finding("invalid_presentation_kind", "presentation_kind must be video or still", `${shotPath}.presentation_kind`));
+    return;
+  }
+  if (!isStillShot(shot)) {
+    if (shot.output_duration_ms !== undefined) {
+      errors.push(finding("video_output_duration_not_supported", "video shots derive duration from source_time_range_ms", `${shotPath}.output_duration_ms`));
+    }
+    return;
+  }
+  if (!artifact || artifact.kind !== "step_screenshot" || !artifact.mime_type?.startsWith("image/") || artifact.metadata?.presentation_only !== true) {
+    errors.push(finding("invalid_still_source", "still shots must reference a non-sensitive presentation_only step_screenshot image", `${shotPath}.source_artifact_id`));
+  }
+  if (shot.source_time_range_ms) {
+    errors.push(finding("still_source_time_range_not_allowed", "still shots use output_duration_ms instead of source_time_range_ms", `${shotPath}.source_time_range_ms`));
+  }
+  if (!Number.isInteger(shot.output_duration_ms) || (shot.output_duration_ms ?? 0) < 250 || (shot.output_duration_ms ?? 0) > 15000) {
+    errors.push(finding("invalid_still_output_duration", "still output_duration_ms must be an integer between 250 and 15000", `${shotPath}.output_duration_ms`));
+  }
+  if ((shot.operations?.length ?? 0) > 0) {
+    errors.push(finding("still_operations_not_supported", "still shots do not support edit operations in the first renderer version", `${shotPath}.operations`));
+  }
 }
 
 function validateCollaborationBoundary(plan: DemoEditPlan, errors: ValidationFinding[]): void {
@@ -1018,6 +1054,7 @@ function validateShotTimeRange(
   pathValue: string,
   errors: ValidationFinding[],
 ): void {
+  if (isStillShot(shot)) return;
   if (!shot.source_time_range_ms) {
     if (artifact?.kind === "raw_recording") {
       errors.push(finding("missing_time_range", "Raw recording shots must declare source_time_range_ms", pathValue));
@@ -1870,7 +1907,12 @@ function validateOutputRange(range: [number, number], totalDurationMS: number, p
 }
 
 function outputDurationMS(plan: DemoEditPlan): number {
-  return plan.shots.reduce((total, shot) => total + (shot.source_time_range_ms ? Math.max(0, shot.source_time_range_ms[1] - shot.source_time_range_ms[0]) : 0), 0);
+  return plan.shots.reduce((total, shot) => total + shotOutputDurationMS(shot), 0);
+}
+
+function shotOutputDurationMS(shot: DemoEditShot): number {
+  if (isStillShot(shot)) return Math.max(0, shot.output_duration_ms ?? 0);
+  return shot.source_time_range_ms ? Math.max(0, shot.source_time_range_ms[1] - shot.source_time_range_ms[0]) : 0;
 }
 
 export function validateEditPlan(request: { catalog: AssetTimelineCatalog; edit_plan: DemoEditPlan }): DemoEditPlanValidationReport {
@@ -2231,10 +2273,12 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
   const fallbackArtifact = firstCompositableVideoArtifact(catalog, editPlan);
   return editPlan.shots
     .map((shot) => {
-      const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id) || fallbackArtifact;
+      const still = isStillShot(shot);
+      // Never fall back from a missing screenshot to an unrelated recording.
+      const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id) || (still ? undefined : fallbackArtifact);
       const sourcePath = artifact?.local_path || (artifact?.uri ? filePathFromURI(artifact.uri) : undefined);
-      const sourceRange = shot.source_time_range_ms || sourceRangeForStep(catalog, shot.source_step_id);
-      const durationMS = sourceRange ? Math.max(0, sourceRange[1] - sourceRange[0]) : 0;
+      const sourceRange = still ? undefined : shot.source_time_range_ms || sourceRangeForStep(catalog, shot.source_step_id);
+      const durationMS = still ? Math.max(0, shot.output_duration_ms ?? 0) : sourceRange ? Math.max(0, sourceRange[1] - sourceRange[0]) : 0;
       const operations = (shot.operations || []).map((operation) => operation.type);
       const overlays = (shot.overlays || []).map((overlay) => {
         const plannedOverlay: CompositorShot["overlays"][number] = { type: overlay.type };
@@ -2246,6 +2290,7 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
       const planned: CompositorShot = {
         id: shot.id,
         source_artifact_id: artifact?.id || shot.source_artifact_id,
+        presentation_kind: still ? "still" : "video",
         duration_ms: durationMS,
         operations,
         overlays,
@@ -2256,7 +2301,7 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
       if (sourceRange) planned.source_time_range_ms = sourceRange;
       return planned;
     })
-    .filter((shot) => shot.source_path && shot.source_time_range_ms && shot.duration_ms > 0);
+    .filter((shot) => shot.source_path && shot.duration_ms > 0 && (shot.presentation_kind === "still" || shot.source_time_range_ms));
 }
 
 function sourceRangeForStep(catalog: AssetTimelineCatalog, stepID?: string): [number, number] | undefined {
@@ -2272,7 +2317,7 @@ function plannedOperations(shots: CompositorShot[], editPlan?: DemoEditPlan): st
     for (const operation of shot.operations) {
       values.add(operation);
     }
-    if (shot.source_time_range_ms) {
+    if (shot.presentation_kind === "video" && shot.source_time_range_ms) {
       values.add("trim");
     }
     for (const overlay of shot.overlays) {
@@ -2291,7 +2336,7 @@ function plannedOperations(shots: CompositorShot[], editPlan?: DemoEditPlan): st
 function appliedOperationsForCurrentCompositor(shots: CompositorShot[], editPlan: DemoEditPlan): string[] {
   const values = new Set<string>();
   for (const shot of shots) {
-    if (shot.source_time_range_ms) {
+    if (shot.presentation_kind === "video" && shot.source_time_range_ms) {
       values.add("trim");
     }
     if (captionCuesForShot(shot).length > 0) {
@@ -2430,16 +2475,14 @@ async function composeWithFFmpeg(
   const sourceAudio = new Map<string, boolean>();
   let outputCursorMS = 0;
   for (const [index, shot] of shots.entries()) {
-    if (!shot.source_path || !shot.source_time_range_ms) {
+    if (!shot.source_path) {
       continue;
     }
-    const [startMS, endMS] = shot.source_time_range_ms;
-    const durationMS = endMS - startMS;
-    if (durationMS <= 0) {
-      continue;
-    }
-    const segmentStartMS = startMS;
-    const segmentDurationMS = durationMS;
+    const still = shot.presentation_kind === "still";
+    if (!still && !shot.source_time_range_ms) continue;
+    const [startMS, endMS] = shot.source_time_range_ms ?? [0, shot.duration_ms];
+    const segmentStartMS = still ? 0 : startMS;
+    const segmentDurationMS = still ? shot.duration_ms : endMS - startMS;
     if (segmentDurationMS <= 0) {
       continue;
     }
@@ -2457,26 +2500,25 @@ async function composeWithFFmpeg(
       await writeFile(subtitlePath, assSubtitleForCaptions(captionCues), "utf8");
       videoFilters.push(`subtitles='${ffmpegFilterPath(subtitlePath)}'`);
     }
-    let sourceHasAudio = sourceAudio.get(shot.source_path);
-    if (sourceHasAudio === undefined) {
-      sourceHasAudio = await hasAudioStream(ffmpegPath, shot.source_path);
-      sourceAudio.set(shot.source_path, sourceHasAudio);
-    }
     const volumeExpression = audioVolumeExpression(audioPolicy, outputCursorMS, segmentDurationMS, segmentStartMS);
-    const useSourceAudio = volumeExpression.usesSource && sourceHasAudio;
-    const ffmpegArgs = ["-y", "-i", shot.source_path];
-    if (!useSourceAudio) {
-      ffmpegArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
+    let useSourceAudio = false;
+    const ffmpegArgs = still
+      ? ["-y", "-loop", "1", "-i", shot.source_path, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+      : ["-y", "-i", shot.source_path];
+    if (!still) {
+      let sourceHasAudio = sourceAudio.get(shot.source_path);
+      if (sourceHasAudio === undefined) {
+        sourceHasAudio = await hasAudioStream(ffmpegPath, shot.source_path);
+        sourceAudio.set(shot.source_path, sourceHasAudio);
+      }
+      useSourceAudio = volumeExpression.usesSource && sourceHasAudio;
+      if (!useSourceAudio) ffmpegArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
     }
+    if (!still) ffmpegArgs.push("-ss", secondsArg(segmentStartMS));
     ffmpegArgs.push(
-      "-ss",
-      secondsArg(segmentStartMS),
-      "-t",
-      secondsArg(segmentDurationMS),
-      "-map",
-      "0:v:0",
-      "-map",
-      useSourceAudio ? "0:a:0" : "1:a:0",
+      "-t", secondsArg(segmentDurationMS),
+      "-map", "0:v:0",
+      "-map", useSourceAudio ? "0:a:0" : "1:a:0",
     );
     if (videoFilters.length > 0) {
       ffmpegArgs.push("-vf", videoFilters.join(","));
@@ -2493,6 +2535,7 @@ async function composeWithFFmpeg(
       ...audioCodec.args,
       "-avoid_negative_ts",
       "make_zero",
+      "-shortest",
       segmentPath,
     );
     const result = await runCommand(ffmpegPath, ffmpegArgs);

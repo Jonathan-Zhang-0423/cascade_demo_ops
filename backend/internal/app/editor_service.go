@@ -136,7 +136,7 @@ func (s *Service) CreateEditorSessionFromResultPackage(ctx context.Context, requ
 	if err != nil {
 		return model.EditorSession{}, err
 	}
-	applyResultPackageToEditorSession(&latest, result, artifact)
+	applyResultPackageToEditorSession(&latest, result, artifact, request)
 	if validation, validateErr := s.editorWorker.ValidateEditPlan(ctx, executor.EditPlanValidationRequest{Catalog: latest.AssetCatalog, EditPlan: latest.EditPlan}); validateErr == nil {
 		latest.Validation = &validation
 	}
@@ -145,6 +145,34 @@ func (s *Service) CreateEditorSessionFromResultPackage(ctx context.Context, requ
 		return model.EditorSession{}, err
 	}
 	return latest, nil
+}
+
+// EnsureEditorSessionFromResultPackage creates the local editing handoff once
+// per recording result. Repeated delivery notifications reuse the existing
+// session instead of creating duplicate entries in the editor inbox.
+func (s *Service) EnsureEditorSessionFromResultPackage(ctx context.Context, request model.EditorCreateFromResultPackageRequest) (model.EditorSession, bool, error) {
+	result, err := loadEditorResultPackage(request)
+	if err != nil {
+		return model.EditorSession{}, false, err
+	}
+	resultID := strings.TrimSpace(result.ResultID)
+	if resultID == "" {
+		return model.EditorSession{}, false, errors.New("recording result package result_id is required")
+	}
+	sessions, err := s.ListEditorSessions(ctx)
+	if err != nil {
+		return model.EditorSession{}, false, err
+	}
+	for _, session := range sessions {
+		if session.AssetCatalog.Source.RecordingResultPackageID == resultID {
+			return session, false, nil
+		}
+	}
+	normalized := request
+	normalized.ResultPackage = result
+	normalized.ResultPackagePath = ""
+	created, err := s.CreateEditorSessionFromResultPackage(ctx, normalized)
+	return created, err == nil, err
 }
 
 func (s *Service) ListEditorSessions(_ context.Context) ([]model.EditorSession, error) {
@@ -380,38 +408,6 @@ func (s *Service) ValidateEditorPlan(ctx context.Context, sessionID string) (mod
 		return model.DemoEditPlanValidationReport{}, err
 	}
 	return s.editorWorker.ValidateEditPlan(ctx, executor.EditPlanValidationRequest{Catalog: session.AssetCatalog, EditPlan: session.EditPlan})
-}
-
-func (s *Service) AnalyzeEditorAudio(ctx context.Context, sessionID string, request model.EditorAudioAnalysisRequest) (executor.AudioAnalysisResult, error) {
-	if s.editorWorker == nil {
-		return executor.AudioAnalysisResult{}, errors.New("editor worker is unavailable")
-	}
-	session, err := s.GetEditorSession(ctx, sessionID)
-	if err != nil {
-		return executor.AudioAnalysisResult{}, err
-	}
-	assetID := strings.TrimSpace(request.AssetID)
-	if assetID == "" {
-		return executor.AudioAnalysisResult{}, errors.New("asset_id is required")
-	}
-	var sourcePath string
-	for _, artifact := range session.AssetCatalog.Artifacts {
-		if artifact.ID == assetID {
-			sourcePath = strings.TrimSpace(artifact.LocalPath)
-			break
-		}
-	}
-	if sourcePath == "" {
-		return executor.AudioAnalysisResult{}, fmt.Errorf("editor asset %s has no readable local path", assetID)
-	}
-	result, err := s.editorWorker.AnalyzeAudio(ctx, executor.AudioAnalysisRequest{
-		Path: sourcePath, BucketMS: request.BucketMS, SilenceThresholdDB: request.SilenceThresholdDB, MinSilenceMS: request.MinSilenceMS,
-	})
-	if err != nil {
-		return executor.AudioAnalysisResult{}, err
-	}
-	result.ArtifactID = assetID
-	return result, nil
 }
 
 func (s *Service) RenderEditorSession(ctx context.Context, sessionID string, preview bool) (model.EditorSession, error) {
@@ -888,7 +884,9 @@ func localPathFromURI(value string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
+	if runtime.GOOS == "windows" && len(parsed.Host) == 2 && parsed.Host[1] == ':' {
+		decoded = parsed.Host + decoded
+	} else if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
 		decoded = "//" + parsed.Host + decoded
 	}
 	if runtime.GOOS == "windows" && len(decoded) >= 3 && decoded[0] == '/' && decoded[2] == ':' {
@@ -897,7 +895,7 @@ func localPathFromURI(value string) (string, error) {
 	return filepath.Abs(filepath.Clean(filepath.FromSlash(decoded)))
 }
 
-func applyResultPackageToEditorSession(session *model.EditorSession, result *model.RecordingResultPackage, source model.ArtifactRef) {
+func applyResultPackageToEditorSession(session *model.EditorSession, result *model.RecordingResultPackage, source model.ArtifactRef, request model.EditorCreateFromResultPackageRequest) {
 	traceID := ""
 	workflowGraphID := session.AssetCatalog.WorkflowGraphID
 	traceStartedAt := time.Time{}
@@ -925,6 +923,7 @@ func applyResultPackageToEditorSession(session *model.EditorSession, result *mod
 	asset.Metadata["source_artifact_id"] = source.ID
 	asset.Metadata["source_artifact_uri"] = source.URI
 	asset.Metadata["declared_sha256"] = source.SHA256
+	appendResultScreenshotAssets(session, result, request, source.ID)
 
 	timelineSteps := make([]model.TimelineStep, 0, len(steps))
 	shots := make([]model.DemoEditShot, 0, len(steps))
@@ -960,6 +959,89 @@ func applyResultPackageToEditorSession(session *model.EditorSession, result *mod
 		session.EditPlan.Shots = shots
 	}
 	session.EditPlan.TargetDurationMS = editorPlanDuration(session.EditPlan)
+}
+
+func appendResultScreenshotAssets(session *model.EditorSession, result *model.RecordingResultPackage, request model.EditorCreateFromResultPackageRequest, recordingArtifactID string) {
+	type candidate struct {
+		artifact model.ArtifactRef
+		stepID   string
+	}
+	seen := map[string]bool{}
+	candidates := make([]candidate, 0)
+	add := func(artifact model.ArtifactRef, stepID string) {
+		if artifact.ID == "" || artifact.ID == recordingArtifactID || seen[artifact.ID] || !isEditorScreenshotArtifact(artifact) || artifact.Sensitive || isDiagnosticScreenshotArtifact(artifact) {
+			return
+		}
+		seen[artifact.ID] = true
+		candidates = append(candidates, candidate{artifact: artifact, stepID: firstNonEmptyString(stepID, artifact.SourceNodeID)})
+	}
+	for _, artifact := range result.GeneratedAssets {
+		add(artifact, "")
+	}
+	if result.ExecutionTrace != nil {
+		for _, artifact := range result.ExecutionTrace.Artifacts {
+			add(artifact, "")
+		}
+	}
+	for _, step := range result.StepResults {
+		for _, artifact := range step.Artifacts {
+			add(artifact, step.NodeID)
+		}
+	}
+	for _, item := range candidates {
+		path, err := resolveResultReferenceArtifact(result, request, item.artifact)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		metadata := map[string]any{
+			"source":              "recording_result_package",
+			"source_artifact_id":  item.artifact.ID,
+			"source_artifact_uri": item.artifact.URI,
+			"presentation_only":   true,
+		}
+		for key, value := range item.artifact.Metadata {
+			metadata[key] = value
+		}
+		session.AssetCatalog.Artifacts = append(session.AssetCatalog.Artifacts, model.TimelineArtifact{
+			ID: item.artifact.ID, Kind: "step_screenshot", URI: localFileURI(path), MimeType: item.artifact.MimeType,
+			Label: firstNonEmptyString(item.artifact.Label, item.artifact.ID), SHA256: item.artifact.SHA256, SizeBytes: info.Size(),
+			SourceStepID: item.stepID, AssetRole: "presentation_reference", IncludeInDemo: editorArtifactIncludeInDemo(item.artifact),
+			Metadata: metadata, LocalPath: path,
+		})
+	}
+}
+
+func resolveResultReferenceArtifact(result *model.RecordingResultPackage, request model.EditorCreateFromResultPackageRequest, artifact model.ArtifactRef) (string, error) {
+	if override := strings.TrimSpace(request.ArtifactPaths[artifact.ID]); override != "" {
+		return localPathFromURI(override)
+	}
+	if resultArtifactEncrypted(result, artifact.ID) {
+		return "", fmt.Errorf("artifact %s is encrypted", artifact.ID)
+	}
+	if localPath, ok := artifact.Metadata["local_path"].(string); ok && strings.TrimSpace(localPath) != "" {
+		return localPathFromURI(localPath)
+	}
+	return localPathFromURI(artifact.URI)
+}
+
+func isEditorScreenshotArtifact(artifact model.ArtifactRef) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(artifact.MimeType)), "image/") || strings.Contains(strings.ToLower(artifact.Kind), "screenshot")
+}
+
+func isDiagnosticScreenshotArtifact(artifact model.ArtifactRef) bool {
+	role, _ := artifact.Metadata["asset_role"].(string)
+	return strings.Contains(strings.ToLower(artifact.Kind+" "+role), "failure") || strings.Contains(strings.ToLower(role), "diagnostic")
+}
+
+func editorArtifactIncludeInDemo(artifact model.ArtifactRef) bool {
+	if value, ok := artifact.Metadata["include_in_demo"].(bool); ok {
+		return value
+	}
+	return true
 }
 
 func editorStepRange(step model.StepResult, traceStartedAt time.Time, cursor, recordingDuration int) (int, int) {

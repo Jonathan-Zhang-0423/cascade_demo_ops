@@ -34,7 +34,7 @@ export function finalRendererSupports(type: string): boolean {
   return capabilityKey ? editorCapabilities[capabilityKey].finalRenderer : false;
 }
 
-export type PresentationSequenceKind = "video" | "audio" | "narration" | "caption" | "callout";
+export type PresentationSequenceKind = "video" | "still" | "audio" | "narration" | "caption" | "callout";
 
 export type PresentationSequence = {
   id: string;
@@ -83,13 +83,15 @@ export function compilePresentationComposition(session: EditorSession, plan: Edi
 
   for (const shot of plan.shots) {
     const range = shot.source_time_range_ms;
-    if (!range) continue;
-    const durationInFrames = Math.max(1, millisecondsToFrame(range[1] - range[0], fps));
+    const still = shot.presentation_kind === "still";
+    if (!still && !range) continue;
+    const durationMS = still ? Math.max(0, shot.output_duration_ms ?? 0) : Math.max(0, range![1] - range![0]);
+    const durationInFrames = Math.max(1, millisecondsToFrame(durationMS, fps));
     const artifact = artifacts.get(shot.source_artifact_id);
     const common = sequenceSource(shot, artifact, fps);
     sequences.push({
-      id: `video_${shot.id}`,
-      kind: "video",
+      id: `${still ? "still" : "video"}_${shot.id}`,
+      kind: still ? "still" : "video",
       fromFrame: cursorFrame,
       durationInFrames,
       layer: 0,
@@ -99,35 +101,37 @@ export function compilePresentationComposition(session: EditorSession, plan: Edi
         operations: (shot.operations ?? []).map((operation) => operation.type),
       },
     });
-    let audioCursorFrame = cursorFrame;
-    const audioEndFrame = cursorFrame + durationInFrames;
-    const audioBoundaries = [...audioSplitFrames].filter((frame) => frame > cursorFrame && frame < audioEndFrame).sort((left, right) => left - right);
-    for (const [audioPartIndex, boundaryFrame] of [...audioBoundaries, audioEndFrame].entries()) {
-      const partDurationInFrames = boundaryFrame - audioCursorFrame;
-      const sourceOffsetFrames = audioCursorFrame - cursorFrame;
-      const audioStartMS = frameToMilliseconds(audioCursorFrame, fps);
-      const audioEndMS = frameToMilliseconds(boundaryFrame, fps);
-      const segmentSettings = plan.audio?.segment_settings?.find((segment) => segment.start_ms === audioStartMS && segment.end_ms === audioEndMS);
-      sequences.push({
-        id: `audio_${shot.id}_${audioPartIndex}`,
-        kind: "audio",
-        fromFrame: audioCursorFrame,
-        durationInFrames: partDurationInFrames,
-        layer: 1,
-        ...common,
-        sourceStartFrame: (common.sourceStartFrame ?? 0) + sourceOffsetFrames,
-        sourceEndFrame: (common.sourceStartFrame ?? 0) + sourceOffsetFrames + partDurationInFrames,
-        props: {
-          mode: segmentSettings?.mode ?? plan.audio?.mode ?? "source",
-          volumePercent: segmentSettings?.volume_percent ?? plan.audio?.volume_percent ?? 100,
-        },
-      });
-      audioCursorFrame = boundaryFrame;
+    if (!still) {
+      let audioCursorFrame = cursorFrame;
+      const audioEndFrame = cursorFrame + durationInFrames;
+      const audioBoundaries = [...audioSplitFrames].filter((frame) => frame > cursorFrame && frame < audioEndFrame).sort((left, right) => left - right);
+      for (const [audioPartIndex, boundaryFrame] of [...audioBoundaries, audioEndFrame].entries()) {
+        const partDurationInFrames = boundaryFrame - audioCursorFrame;
+        const sourceOffsetFrames = audioCursorFrame - cursorFrame;
+        const audioStartMS = frameToMilliseconds(audioCursorFrame, fps);
+        const audioEndMS = frameToMilliseconds(boundaryFrame, fps);
+        const segmentSettings = plan.audio?.segment_settings?.find((segment) => segment.start_ms === audioStartMS && segment.end_ms === audioEndMS);
+        sequences.push({
+          id: `audio_${shot.id}_${audioPartIndex}`,
+          kind: "audio",
+          fromFrame: audioCursorFrame,
+          durationInFrames: partDurationInFrames,
+          layer: 1,
+          ...common,
+          sourceStartFrame: (common.sourceStartFrame ?? 0) + sourceOffsetFrames,
+          sourceEndFrame: (common.sourceStartFrame ?? 0) + sourceOffsetFrames + partDurationInFrames,
+          props: {
+            mode: segmentSettings?.mode ?? plan.audio?.mode ?? "source",
+            volumePercent: segmentSettings?.volume_percent ?? plan.audio?.volume_percent ?? 100,
+          },
+        });
+        audioCursorFrame = boundaryFrame;
+      }
     }
     for (const [overlayIndex, overlay] of (shot.overlays ?? []).entries()) {
       const overlayStartFrame = millisecondsToFrame(overlay.start_ms ?? 0, fps);
       const availableFrames = Math.max(1, durationInFrames - overlayStartFrame);
-      const requestedFrames = millisecondsToFrame((overlay.end_ms ?? range[1] - range[0]) - (overlay.start_ms ?? 0), fps);
+      const requestedFrames = millisecondsToFrame((overlay.end_ms ?? durationMS) - (overlay.start_ms ?? 0), fps);
       sequences.push({
         id: `overlay_${shot.id}_${overlayIndex}`,
         kind: overlay.type === "caption" ? "caption" : "callout",

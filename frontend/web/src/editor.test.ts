@@ -21,9 +21,6 @@ describe("local demo editor client", () => {
     expect(imported.data?.revision).toBe(2);
     expect(imported.data?.edit_plan.shots).toHaveLength(1);
 
-    const analysis = await client.analyzeAudio(session.session_id, imported.data!.asset_catalog.artifacts[0]!.id, { bucketMS: 100 });
-    expect(analysis.data).toMatchObject({ schema_version: "demoops.audio_analysis.v1", bucket_ms: 100, has_audio: true });
-
     const plan = structuredClone(imported.data!.edit_plan);
     plan.shots[0]!.source_time_range_ms = [1000, 5000];
     const saved = await client.savePlan(session.session_id, imported.data!.revision, plan);

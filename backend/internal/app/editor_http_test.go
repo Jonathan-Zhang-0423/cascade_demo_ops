@@ -93,23 +93,6 @@ func TestEditorHTTPUploadVideo(t *testing.T) {
 	}
 }
 
-func TestEditorHTTPAnalyzesAudioByManagedAssetID(t *testing.T) {
-	service := newTestEditorService(t)
-	worker := &fakeEditorWorker{audioAnalysis: executor.AudioAnalysisResult{
-		SchemaVersion: "demoops.audio_analysis.v1", HasAudio: true, DurationMS: 1000, BucketMS: 100,
-		PeakDBFS: []float64{-6}, RMSDBFS: []float64{-12}, SilenceRangesMS: [][2]int{{500, 1000}}, FFmpegAvailable: true,
-	}}
-	service.editorWorker = worker
-	session := createRenderableEditorSession(t, service, worker)
-	assetID := session.AssetCatalog.Artifacts[0].ID
-	analysis := editorHTTPValue[executor.AudioAnalysisResult](t, NewDevHTTPServer(service), http.MethodPost, "/v1/editor/sessions/"+session.SessionID+"/audio-analysis", map[string]any{
-		"asset_id": assetID, "bucket_ms": 100, "silence_threshold_db": -45, "min_silence_ms": 500,
-	})
-	if analysis.ArtifactID != assetID || worker.audioRequest.Path != session.AssetCatalog.Artifacts[0].LocalPath {
-		t.Fatalf("analysis did not resolve the managed asset: analysis=%+v request=%+v", analysis, worker.audioRequest)
-	}
-}
-
 func editorHTTPValue[T any](t *testing.T, server *DevHTTPServer, method, path string, body any) T {
 	t.Helper()
 	var payload []byte

@@ -238,23 +238,23 @@ type DemoEditAudioSegmentSettings struct {
 // output timeline. Its source must already be an imported audio asset; model
 // generated candidates require user confirmation before they are added here.
 type DemoEditNarrationClip struct {
-	ID                     string            `json:"id"`
-	SourceArtifactID       string            `json:"source_artifact_id"`
-	SourceTimeRangeMS      *MillisecondRange `json:"source_time_range_ms,omitempty"`
-	OutputTimeRangeMS      MillisecondRange  `json:"output_time_range_ms"`
-	VolumePercent          int               `json:"volume_percent"`
-	DuckSourceAudio        bool              `json:"duck_source_audio,omitempty"`
-	DuckSourceToPercent    int               `json:"duck_source_to_percent,omitempty"`
-	Source                 string            `json:"source"`
+	ID                  string            `json:"id"`
+	SourceArtifactID    string            `json:"source_artifact_id"`
+	SourceTimeRangeMS   *MillisecondRange `json:"source_time_range_ms,omitempty"`
+	OutputTimeRangeMS   MillisecondRange  `json:"output_time_range_ms"`
+	VolumePercent       int               `json:"volume_percent"`
+	DuckSourceAudio     bool              `json:"duck_source_audio,omitempty"`
+	DuckSourceToPercent int               `json:"duck_source_to_percent,omitempty"`
+	Source              string            `json:"source"`
 }
 
 // DemoEditCaptionCue is an output-timeline caption. It complements shot
 // overlays and is intended for narration or user-configured explanatory text.
 type DemoEditCaptionCue struct {
-	ID           string            `json:"id"`
-	OutputRangeMS MillisecondRange  `json:"output_range_ms"`
-	Text         string            `json:"text"`
-	Source       string            `json:"source"`
+	ID            string           `json:"id"`
+	OutputRangeMS MillisecondRange `json:"output_range_ms"`
+	Text          string           `json:"text"`
+	Source        string           `json:"source"`
 }
 
 type DemoEditGlobalStyle struct {
@@ -268,9 +268,16 @@ type DemoEditShot struct {
 	SourceArtifactID  string            `json:"source_artifact_id"`
 	SourceStepID      string            `json:"source_step_id,omitempty"`
 	SourceTimeRangeMS *MillisecondRange `json:"source_time_range_ms,omitempty"`
-	Purpose           string            `json:"purpose"`
-	Operations        []EditOperation   `json:"operations,omitempty"`
-	Overlays          []EditOverlay     `json:"overlays,omitempty"`
+	// PresentationKind is "video" by default. "still" is reserved for a
+	// user-approved presentation reference such as a safe step screenshot.
+	// It never replaces the business-step video evidence.
+	PresentationKind string `json:"presentation_kind,omitempty"`
+	// OutputDurationMS is required for a still image because an image has no
+	// intrinsic timeline duration. Video shots continue to use source range.
+	OutputDurationMS int             `json:"output_duration_ms,omitempty"`
+	Purpose          string          `json:"purpose"`
+	Operations       []EditOperation `json:"operations,omitempty"`
+	Overlays         []EditOverlay   `json:"overlays,omitempty"`
 }
 
 type EditOperation struct {

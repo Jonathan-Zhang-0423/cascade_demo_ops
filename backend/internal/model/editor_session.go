@@ -104,13 +104,6 @@ type EditorImportAssetRequest struct {
 	Label string `json:"label,omitempty"`
 }
 
-type EditorAudioAnalysisRequest struct {
-	AssetID            string  `json:"asset_id"`
-	BucketMS           int     `json:"bucket_ms,omitempty"`
-	SilenceThresholdDB float64 `json:"silence_threshold_db,omitempty"`
-	MinSilenceMS       int     `json:"min_silence_ms,omitempty"`
-}
-
 type EditorSavePlanRequest struct {
 	ExpectedRevision int          `json:"expected_revision"`
 	EditPlan         DemoEditPlan `json:"edit_plan"`
