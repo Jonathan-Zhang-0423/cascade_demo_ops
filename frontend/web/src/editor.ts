@@ -77,6 +77,22 @@ export type EditorPlan = {
     split_points_ms?: number[];
     segment_settings?: Array<{ start_ms: number; end_ms: number; mode: "source" | "mute"; volume_percent: number }>;
   };
+  narrations?: Array<{
+    id: string;
+    source_artifact_id: string;
+    source_time_range_ms?: [number, number];
+    output_time_range_ms: [number, number];
+    volume_percent: number;
+    duck_source_audio?: boolean;
+    duck_source_to_percent?: number;
+    source: "user_recorded" | "user_uploaded" | "tts_confirmed";
+  }>;
+  caption_cues?: Array<{
+    id: string;
+    output_range_ms: [number, number];
+    text: string;
+    source: "user_configured" | "asr_confirmed" | "model_confirmed";
+  }>;
 };
 
 export type EditorRenderState = {
@@ -252,6 +268,9 @@ export function createEditorClient(): EditorClient {
 
 export async function decodeEditorBridgeResponse<T>(response: Response): Promise<EditorClientResult<T>> {
   const raw = await response.text();
+  if ([502, 503, 504].includes(response.status)) {
+    return { ok: false, error: "本地编辑服务不可用（Bridge: 127.0.0.1:4317）。请启动本地编辑器服务后重试。" };
+  }
   let payload: BridgeEnvelope<T> | undefined;
   try {
     payload = JSON.parse(raw) as BridgeEnvelope<T>;
@@ -292,7 +311,17 @@ function createMockEditorClient(): EditorClient {
       if (!session) return { ok: false, error: "未找到编辑项目" };
       const assetID = `asset_${Date.now()}`;
       const fileName = sourcePath.split(/[\\/]/).pop();
-      const artifact: EditorArtifact = { id: assetID, kind: "raw_recording", uri: sourcePath, duration_ms: 15_000, ...(fileName ? { label: fileName } : {}) };
+      const isNarrationAudio = /\.(wav|mp3|m4a|aac|ogg|flac)$/i.test(sourcePath);
+      const artifact: EditorArtifact = {
+        id: assetID, kind: isNarrationAudio ? "narration_audio" : "raw_recording", uri: sourcePath, duration_ms: 15_000,
+        ...(isNarrationAudio ? { mime_type: "audio/wav", metadata: { presentation_only: true } } : {}),
+        ...(fileName ? { label: fileName } : {}),
+      };
+      if (isNarrationAudio) {
+        const next = { ...session, revision: session.revision + 1, asset_catalog: { ...session.asset_catalog, artifacts: [...session.asset_catalog.artifacts, artifact] } };
+        sessions.set(sessionID, next);
+        return result(next);
+      }
       const shot: EditorShot = { id: `shot_${Date.now()}`, source_artifact_id: assetID, source_time_range_ms: [0, 15_000], purpose: artifact.label || "本地素材", operations: [{ type: "trim" }], overlays: [] };
       const next = { ...session, revision: session.revision + 1, asset_catalog: { ...session.asset_catalog, artifacts: [...session.asset_catalog.artifacts, artifact] }, edit_plan: { ...session.edit_plan, shots: [...session.edit_plan.shots, shot] } };
       sessions.set(sessionID, next);

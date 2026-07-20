@@ -23,7 +23,10 @@ import (
 
 const MaxEditorUploadBytes int64 = 8 << 30
 
-var editorUploadExtensions = map[string]bool{".mp4": true, ".webm": true, ".mov": true, ".m4v": true}
+var editorUploadExtensions = map[string]bool{
+	".mp4": true, ".webm": true, ".mov": true, ".m4v": true,
+	".wav": true, ".mp3": true, ".m4a": true, ".aac": true, ".ogg": true, ".flac": true,
+}
 
 func (s *Service) CreateEditorSession(ctx context.Context, request model.EditorCreateSessionRequest) (model.EditorSession, error) {
 	now := time.Now().UTC()
@@ -202,6 +205,7 @@ func (s *Service) ImportEditorAsset(ctx context.Context, sessionID string, reque
 	if label == "" {
 		label = probe.FileName
 	}
+	isNarrationAudio := strings.HasPrefix(strings.ToLower(probe.MimeType), "audio/")
 	artifact := model.TimelineArtifact{
 		ID:            assetID,
 		Kind:          "raw_recording",
@@ -225,7 +229,26 @@ func (s *Service) ImportEditorAsset(ctx context.Context, sessionID string, reque
 			"ffprobe_available": probe.FFProbeAvailable,
 		},
 	}
+	if isNarrationAudio {
+		artifact.Kind = "narration_audio"
+		artifact.AssetRole = "narration_audio"
+		artifact.Metadata["presentation_only"] = true
+	}
 	session.AssetCatalog.Artifacts = append(session.AssetCatalog.Artifacts, artifact)
+	if isNarrationAudio {
+		session.Revision++
+		session.UpdatedAt = time.Now().UTC()
+		session.Preview = model.EditorRenderState{Status: model.EditorRenderStatusNotStarted}
+		session.FinalRender = model.EditorRenderState{Status: model.EditorRenderStatusNotStarted}
+		validation, validateErr := s.editorWorker.ValidateEditPlan(ctx, executor.EditPlanValidationRequest{Catalog: session.AssetCatalog, EditPlan: session.EditPlan})
+		if validateErr == nil {
+			session.Validation = &validation
+		}
+		if err := s.saveEditorSessionUnlocked(session); err != nil {
+			return model.EditorSession{}, err
+		}
+		return session, nil
+	}
 	if session.AssetCatalog.Timeline.RecordingArtifactID == "" {
 		session.AssetCatalog.Timeline.RecordingArtifactID = assetID
 	}
@@ -271,7 +294,7 @@ func (s *Service) importEditorUpload(ctx context.Context, sessionID, fileName st
 	label := filepath.Base(strings.TrimSpace(fileName))
 	extension := strings.ToLower(filepath.Ext(label))
 	if label == "." || label == "" || !editorUploadExtensions[extension] {
-		return model.EditorSession{}, errors.New("editor upload must be mp4, webm, mov, or m4v")
+		return model.EditorSession{}, errors.New("editor upload must be mp4, webm, mov, m4v, wav, mp3, m4a, aac, ogg, or flac")
 	}
 	uploadID, err := newEditorID("upload")
 	if err != nil {

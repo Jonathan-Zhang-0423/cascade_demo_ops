@@ -41,10 +41,19 @@ describe("local demo editor client", () => {
 
     const uploaded = await client.uploadAsset(session.session_id, new File(["fixture"], "recording.mp4", { type: "video/mp4" }));
     expect(uploaded.data?.asset_catalog.artifacts.at(-1)?.label).toBe("recording.mp4");
+
+    const narration = await client.uploadAsset(session.session_id, new File(["fixture"], "narration.wav", { type: "audio/wav" }));
+    expect(narration.data?.asset_catalog.artifacts.at(-1)).toMatchObject({ kind: "narration_audio", label: "narration.wav" });
+    expect(narration.data?.edit_plan.shots).toHaveLength(2);
   });
 
   it("reports an old Bridge plain-text 404 without hiding the HTTP status", async () => {
     const result = await decodeEditorBridgeResponse(new Response("404 page not found\n", { status: 404 }));
     expect(result).toEqual({ ok: false, error: "HTTP 404: 404 page not found" });
+  });
+
+  it("explains a local Bridge proxy failure instead of reporting only a generic save error", async () => {
+    const result = await decodeEditorBridgeResponse(new Response("upstream unavailable", { status: 504 }));
+    expect(result).toEqual({ ok: false, error: "本地编辑服务不可用（Bridge: 127.0.0.1:4317）。请启动本地编辑器服务后重试。" });
   });
 });

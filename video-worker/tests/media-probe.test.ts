@@ -1,6 +1,9 @@
+import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { applyFFmpegProbeFallback, type MediaProbeResult } from "../src/media-probe.js";
+import { applyFFmpegProbeFallback, probeMediaFile, type MediaProbeResult } from "../src/media-probe.js";
 
 describe("FFmpeg media probe fallback", () => {
   it("extracts duration and stream metadata without ffprobe", () => {
@@ -49,5 +52,16 @@ describe("FFmpeg media probe fallback", () => {
     expect(result.duration_ms).toBeUndefined();
     expect(result.video_codec).toBeUndefined();
     expect(result.audio_codec).toBeUndefined();
+  });
+
+  it("accepts an imported audio extension before optional FFprobe metadata is available", async () => {
+    const inputPath = path.join(tmpdir(), `cascade-media-probe-${Date.now()}.wav`);
+    try {
+      await writeFile(inputPath, "fixture");
+      const result = await probeMediaFile({ path: inputPath });
+      expect(result).toMatchObject({ file_name: path.basename(inputPath), mime_type: "audio/wav" });
+    } finally {
+      await import("node:fs/promises").then(({ rm }) => rm(inputPath, { force: true }));
+    }
   });
 });

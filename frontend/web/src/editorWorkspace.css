@@ -388,12 +388,12 @@
   text-align: left;
 }
 
-.studio-asset-card:hover:not(:disabled),
+button.studio-asset-card:hover,
 .studio-asset-card.selected {
   border-color: var(--studio-mint);
 }
 
-.studio-asset-card:disabled {
+.studio-asset-card.static {
   opacity: 0.78;
 }
 
@@ -718,6 +718,10 @@
   scrollbar-color: #3b4551 transparent;
 }
 
+.studio-properties-panel > .studio-properties-empty {
+  min-height: 0;
+}
+
 .studio-property-section {
   padding-bottom: 13px;
   margin-bottom: 13px;
@@ -730,21 +734,28 @@
 }
 
 .studio-property-title {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 48%);
+  align-items: baseline;
+  column-gap: 8px;
   margin-bottom: 9px;
 }
 
 .studio-property-title strong {
+  min-width: 0;
+  overflow: hidden;
   font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .studio-property-title span {
-  max-width: 150px;
+  min-width: 0;
+  max-width: none;
   overflow: hidden;
   color: var(--studio-muted);
   font-size: 8px;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -803,6 +814,7 @@
 }
 
 .studio-radio-row {
+  flex-wrap: wrap;
   gap: 12px;
   color: var(--studio-muted);
   font-size: 8px;
@@ -812,6 +824,8 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .studio-radio-row input {
@@ -865,9 +879,18 @@
 .studio-property-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  align-items: center;
   gap: 7px;
+  min-width: 0;
   padding: 10px;
   border-top: 1px solid var(--studio-line);
+}
+
+.studio-property-actions > button {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .studio-timeline-panel {
@@ -931,13 +954,76 @@
 }
 
 .studio-track-labels > div {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px;
   align-items: center;
-  justify-content: space-between;
+  column-gap: 7px;
   padding: 0 9px;
   border-bottom: 1px solid #262e37;
   color: #5d6873;
   font-size: 8px;
+}
+
+.studio-track-labels > div.track-label-hidden {
+  color: var(--studio-muted-dark);
+}
+
+.studio-track-labels > div > strong {
+  min-width: 0;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.studio-track-label-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 48px;
+  height: 25px;
+  gap: 4px;
+  line-height: 0;
+}
+
+.studio-track-visibility-toggle {
+  display: grid;
+  place-items: center;
+  flex: 0 0 25px;
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: #99a9b7;
+  background: transparent;
+  line-height: 0;
+}
+
+.studio-track-visibility-toggle:hover {
+  color: #e4fff3;
+  background: #2b3c42;
+}
+
+.studio-eye-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.studio-lock-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: #f3c56c;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
 }
 
 .studio-track-labels strong {
@@ -988,6 +1074,10 @@
   position: relative;
   height: 43px;
   border-bottom: 1px solid #262e37;
+}
+
+.studio-track-row.track-hidden {
+  background: repeating-linear-gradient(135deg, rgb(87 100 112 / 9%) 0 6px, transparent 6px 12px);
 }
 
 .studio-evidence-clip,
@@ -1590,4 +1680,245 @@
     top: 4px;
     height: 30px;
   }
+}
+
+/* Readability pass: the editor is used for detailed timeline work, so its
+   interactive controls deliberately exceed the compact dashboard defaults. */
+.studio-shell {
+  grid-template-rows: 64px minmax(0, 1fr);
+  font-size: 14px;
+}
+
+.studio-project-select {
+  width: min(380px, 29vw);
+  min-height: 40px;
+  padding-left: 11px;
+  font-size: 16px;
+}
+
+.studio-revision,
+.studio-save-state {
+  font-size: 12px;
+}
+
+.studio-icon-button {
+  width: 38px;
+  height: 38px;
+  font-size: 18px;
+}
+
+.studio-ghost-button,
+.studio-outline-button,
+.studio-primary-button,
+.studio-validation-button {
+  min-height: 40px;
+  padding: 0 15px;
+  font-size: 14px;
+}
+
+.studio-panel-heading {
+  min-height: 48px;
+  padding: 0 14px;
+}
+
+.studio-panel-heading strong {
+  font-size: 14px;
+}
+
+.studio-panel-heading small,
+.studio-panel-heading span,
+.studio-panel-tabs button,
+.studio-import-zone,
+.studio-file-field {
+  font-size: 12px;
+}
+
+.studio-panel-tabs {
+  min-height: 42px;
+}
+
+.studio-import-zone,
+.studio-file-field {
+  min-height: 72px;
+}
+
+.studio-asset-card strong {
+  font-size: 12px;
+}
+
+.studio-asset-card small,
+.studio-asset-status,
+.studio-asset-duration,
+.studio-list-content small,
+.studio-panel-empty {
+  font-size: 10px;
+}
+
+.studio-property-title strong {
+  font-size: 13px;
+}
+
+.studio-property-title span,
+.studio-field,
+.studio-radio-row,
+.studio-evidence-card > div,
+.studio-property-note,
+.studio-report-findings strong,
+.studio-report-findings p {
+  font-size: 11px;
+}
+
+.studio-field input,
+.studio-field textarea,
+.studio-field select {
+  min-height: 38px;
+  padding: 0 10px;
+  font-size: 14px;
+}
+
+.studio-field textarea {
+  min-height: 82px;
+  padding-top: 9px;
+}
+
+.studio-property-actions button,
+.studio-analyze-audio,
+.studio-audio-candidate-card button {
+  min-height: 38px;
+  font-size: 13px;
+}
+
+.studio-timeline-panel {
+  grid-template-rows: 50px minmax(0, 1fr);
+}
+
+.studio-timeline-tools,
+.studio-timeline-tools > strong {
+  font-size: 13px;
+}
+
+.studio-timeline-tools input[type="range"] {
+  width: 112px;
+}
+
+.studio-timeline-body {
+  grid-template-columns: 132px minmax(0, 1fr);
+}
+
+.studio-track-labels {
+  grid-template-rows: 28px repeat(4, 50px);
+}
+
+.studio-track-labels > div,
+.studio-track-labels strong,
+.studio-time-ruler {
+  font-size: 11px;
+}
+
+.studio-time-ruler,
+.studio-track-row {
+  height: 50px;
+}
+
+.studio-time-ruler {
+  height: 28px;
+}
+
+.studio-evidence-clip,
+.studio-timeline-clip,
+.studio-audio-clip {
+  top: 5px;
+  height: 40px;
+  font-size: 11px;
+}
+
+.studio-timeline-clip small,
+.studio-audio-clip small,
+.studio-evidence-clip {
+  font-size: 10px;
+}
+
+.studio-trim-handle {
+  width: 12px;
+}
+
+.studio-timeline-clip .studio-trim-handle {
+  z-index: 5;
+  width: 16px;
+  opacity: 0.84;
+  border: 1px solid rgb(160 255 217 / 52%);
+  background: rgb(50 142 108 / 88%);
+  transition: width 120ms ease, background 120ms ease, opacity 120ms ease;
+  pointer-events: auto;
+}
+
+.studio-timeline-clip .studio-trim-handle::after {
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  width: 2px;
+  content: "";
+  border-radius: 2px;
+  background: #d9fff0;
+  box-shadow: 4px 0 0 rgb(217 255 240 / 85%);
+}
+
+.studio-timeline-clip .studio-trim-handle.start::after {
+  left: 4px;
+}
+
+.studio-timeline-clip .studio-trim-handle.end::after {
+  right: 8px;
+}
+
+.studio-timeline-clip:hover .studio-trim-handle,
+.studio-timeline-clip.selected .studio-trim-handle {
+  width: 18px;
+  opacity: 1;
+  background: #2b9d75;
+}
+
+.studio-split-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-color: #3d7d69;
+  color: #c3f7e2;
+  background: #17352c;
+}
+
+.studio-split-button:hover:not(:disabled),
+.studio-split-icon-button:hover:not(:disabled) {
+  border-color: var(--studio-mint);
+  color: #ecfff7;
+  background: #1d493a;
+}
+
+.studio-scissors-icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.9;
+}
+
+.studio-split-icon-button .studio-scissors-icon {
+  width: 21px;
+  height: 21px;
+}
+
+.studio-toast {
+  min-width: 310px;
+  padding: 13px 14px;
+  font-size: 13px;
+}
+
+.studio-toast button {
+  width: 30px;
+  height: 30px;
+  font-size: 18px;
 }

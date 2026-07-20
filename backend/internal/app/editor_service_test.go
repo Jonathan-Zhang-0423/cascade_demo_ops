@@ -131,6 +131,35 @@ func TestEditorSessionImportsUploadedVideoIntoManagedStorage(t *testing.T) {
 	}
 }
 
+func TestEditorSessionImportsAudioAsReadOnlyNarrationMaterial(t *testing.T) {
+	service := newTestEditorService(t)
+	worker := &fakeEditorWorker{}
+	service.editorWorker = worker
+	session, err := service.CreateEditorSession(t.Context(), model.EditorCreateSessionRequest{Name: "配音素材"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.probeResult = executor.MediaProbeResult{FileName: "narration.wav", SizeBytes: 7, SHA256: "sha256:narration", MimeType: "audio/wav", DurationMS: 2500, AudioCodec: "pcm_s16le"}
+
+	imported, err := service.ImportEditorUpload(t.Context(), session.SessionID, "narration.wav", strings.NewReader("fixture"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imported.AssetCatalog.Artifacts) != 1 || len(imported.EditPlan.Shots) != 0 {
+		t.Fatalf("audio import must add an asset without adding a video shot: %+v", imported)
+	}
+	asset := imported.AssetCatalog.Artifacts[0]
+	if asset.Kind != "narration_audio" || asset.AssetRole != "narration_audio" || asset.Metadata["presentation_only"] != true {
+		t.Fatalf("audio import did not retain narration boundary: %+v", asset)
+	}
+	if imported.AssetCatalog.Timeline.DurationMS != 0 || imported.AssetCatalog.Timeline.RecordingArtifactID != "" {
+		t.Fatalf("audio import must not change the video timeline: %+v", imported.AssetCatalog.Timeline)
+	}
+	if filepath.Ext(asset.LocalPath) != ".wav" || !pathWithinRoot(asset.LocalPath, service.editorSessionsRoot()) {
+		t.Fatalf("audio upload is outside managed storage: %s", asset.LocalPath)
+	}
+}
+
 func TestEditorSessionRejectsUnsupportedOrOversizedUpload(t *testing.T) {
 	service := newTestEditorService(t)
 	service.editorWorker = &fakeEditorWorker{}
