@@ -23,6 +23,8 @@ export type CodeSummaryView = {
   searchedFiles: number;
   selectedFiles: number;
   investigationMode: string;
+  investigationQuestions: number;
+  openInvestigationQuestions: number;
   degraded: boolean;
 };
 
@@ -98,6 +100,11 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
     searchedFiles: snapshots.reduce((total, snapshot) => total + (snapshot.investigation_trace?.total_files_searched ?? 0), 0),
     selectedFiles: snapshots.reduce((total, snapshot) => total + (snapshot.investigation_trace?.total_files_selected ?? snapshot.file_count ?? 0), 0),
     investigationMode: snapshots.find((snapshot) => snapshot.investigation_trace?.mode)?.investigation_trace?.mode ?? "",
+    investigationQuestions: snapshots.reduce((total, snapshot) => total + (snapshot.investigation_trace?.questions?.length ?? 0), 0),
+    openInvestigationQuestions: snapshots.reduce(
+      (total, snapshot) => total + (snapshot.investigation_trace?.questions?.filter((question) => question.status !== "answered").length ?? 0),
+      0,
+    ),
     degraded: hasRepoInput(workspace) && snapshots.length > 0 && fileCount === 0,
   };
 }
@@ -130,7 +137,7 @@ export function agentPipelineItems(workspace: ProjectWorkspaceView): AgentPipeli
       detail: codeSummary.degraded
         ? "路径不可读或无可扫描文件，已降级使用其他材料"
         : codeSummary.fileCount > 0
-          ? `${codeSummary.fileCount} 个结构化读取 / ${codeSummary.toolCalls || 0} 次工具调用 / ${codeSummary.frameworks.join("、") || "框架待识别"}`
+          ? `${codeSummary.fileCount} 个结构化读取 / ${codeSummary.toolCalls || 0} 次工具调用 / ${codeSummary.investigationQuestions || 0} 个调查问题`
           : "未提供项目根目录",
     },
     {

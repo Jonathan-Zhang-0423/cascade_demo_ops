@@ -380,9 +380,11 @@ func (a *CodeReaderAgent) investigationToolSuite() *ProjectInvestigationToolSuit
 }
 
 type codeInvestigationQuery struct {
-	purpose string
-	query   string
-	terms   []string
+	questionID       string
+	purpose          string
+	query            string
+	terms            []string
+	expectedEvidence []string
 }
 
 type codeSearchMatch struct {
@@ -404,6 +406,7 @@ type codeInvestigationEvidenceReview struct {
 	selectorCount  int
 	apiCount       int
 	dataModelCount int
+	styleCount     int
 	gaps           []string
 	pathHashes     []string
 }
@@ -475,7 +478,9 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		TotalFilesDiscovered: len(candidates),
 		CreatedAt:            time.Now().UTC(),
 	}
+	trace.Questions = buildCodeInvestigationQuestions(project, brief, budget)
 	if len(candidates) == 0 {
+		finalizeInvestigationQuestions(trace)
 		trace.CompletedAt = time.Now().UTC()
 		trace.Summary = "未发现可调查的代码文件。"
 		return ProjectInvestigationResult{Trace: trace}, nil
@@ -515,7 +520,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		ElapsedMS:         time.Since(start).Milliseconds(),
 	})
 
-	queries, planningCall := s.planCodeInvestigationQueries(ctx, candidates, budget, project, brief)
+	queries, planningCall := s.planCodeInvestigationQueries(ctx, candidates, budget, project, brief, trace.Questions)
 	trace.ToolCalls = append(trace.ToolCalls, planningCall)
 	executedQueries := map[string]bool{}
 	maxSearchRounds := maxInt(1, budget.DrilldownRounds)
@@ -549,8 +554,9 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 				selectedThisRound = append(selectedThisRound, match.candidate)
 			}
 		}
+		grepCallID := fmt.Sprintf("tool_grep_text_%d_%s", i+1, shortHash(query.query))
 		trace.ToolCalls = append(trace.ToolCalls, model.CodeInvestigationToolCall{
-			ID:                fmt.Sprintf("tool_grep_text_%d_%s", i+1, shortHash(query.query)),
+			ID:                grepCallID,
 			Tool:              "grep_text",
 			Purpose:           query.purpose,
 			Query:             query.query,
@@ -559,6 +565,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			MatchedFileCount:  len(search.matches),
 			SelectedFileCount: len(selectedThisRound),
 			PathHashes:        pathHashesForCandidates(selectedThisRound, len(selectedThisRound)),
+			Metadata:          investigationQueryMetadata(query),
 			Confidence:        confidenceForSearchCall(len(search.matches), len(selectedThisRound)),
 			ElapsedMS:         time.Since(start).Milliseconds(),
 		})
@@ -566,7 +573,10 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
 		}
-		trace.ToolCalls = append(trace.ToolCalls, evidenceReviewToolCall(i+1, query, review))
+		review.gaps = evidenceGapsForExpected(review, query.expectedEvidence)
+		reviewCall := evidenceReviewToolCall(i+1, query, review)
+		trace.ToolCalls = append(trace.ToolCalls, reviewCall)
+		applyEvidenceReviewToQuestion(trace, query, review, grepCallID, reviewCall.ID)
 		if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < budget.DrilldownRounds+2 {
 			nextKey := strings.Join(next.terms, "|")
 			if !executedQueries[nextKey] && !codeInvestigationQueryExists(queries, nextKey) {
@@ -605,19 +615,20 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		}
 	}
 	trace.TotalFilesSelected = len(selected)
+	finalizeInvestigationQuestions(trace)
 	trace.CompletedAt = time.Now().UTC()
-	trace.Summary = fmt.Sprintf("工具化调查选择 %d/%d 个文件用于结构化读取。", len(selected), len(candidates))
+	trace.Summary = fmt.Sprintf("工具化调查选择 %d/%d 个文件用于结构化读取；%s", len(selected), len(candidates), investigationQuestionProgressSummary(trace))
 	return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, nil
 }
 
-func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context.Context, candidates []codeCandidateFile, budget model.CodeReadBudget, project *model.ProjectContext, brief *model.RequirementBrief) ([]codeInvestigationQuery, model.CodeInvestigationToolCall) {
+func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context.Context, candidates []codeCandidateFile, budget model.CodeReadBudget, project *model.ProjectContext, brief *model.RequirementBrief, questions []model.CodeInvestigationQuestion) ([]codeInvestigationQuery, model.CodeInvestigationToolCall) {
 	start := time.Now()
-	fallback := buildCodeInvestigationQueries(project, brief, budget)
+	fallback := buildCodeInvestigationQueries(project, brief, budget, questions)
 	call := model.CodeInvestigationToolCall{
 		ID:           "tool_plan_investigation_" + shortHash(strings.Join(codeIntentTextParts(project, brief), "|")),
 		Tool:         "plan_investigation",
-		Purpose:      "根据用户需求和精简仓库地图决定下一轮 grep_text 查询；不读取完整源码，不执行 shell。",
-		InputSummary: fmt.Sprintf("candidate_files=%d deterministic_queries=%d", len(candidates), len(fallback)),
+		Purpose:      "根据需求调查问题和精简仓库地图决定下一轮 grep_text 查询；不读取完整源码，不执行 shell。",
+		InputSummary: fmt.Sprintf("candidate_files=%d investigation_questions=%d deterministic_queries=%d", len(candidates), len(questions), len(fallback)),
 		Confidence:   0.58,
 	}
 	if s == nil || s.llm == nil {
@@ -628,10 +639,11 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 		return fallback, call
 	}
 	payload := map[string]any{
-		"intent":       strings.Join(codeIntentTextParts(project, brief), "\n"),
-		"budget":       budget,
-		"repo_map":     compactRepoMapForInvestigation(candidates, 120),
-		"instructions": []string{"返回 2-5 个 grep 查询计划。", "terms 必须是业务语义、路由、组件、API 或状态关键词。", "不要输出 shell 命令、绝对路径、源码片段、token、cookie、Authorization。", "不要把 /aigc、/.well-known、/v1/execution-packages、app-installations 等控制面路径作为产品证据。"},
+		"intent":                  strings.Join(codeIntentTextParts(project, brief), "\n"),
+		"investigation_questions": compactInvestigationQuestionsForPlanner(questions),
+		"budget":                  budget,
+		"repo_map":                compactRepoMapForInvestigation(candidates, 120),
+		"instructions":            []string{"围绕 investigation_questions 返回 2-5 个 grep 查询计划。", "terms 必须是业务语义、路由、组件、API、状态或样式关键词。", "不要输出 shell 命令、绝对路径、源码片段、token、cookie、Authorization。", "不要把 /aigc、/.well-known、/v1/execution-packages、app-installations 等控制面路径作为产品证据。"},
 	}
 	data, _ := json.Marshal(payload)
 	var output codeInvestigationLLMOutput
@@ -659,7 +671,7 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 		call.FallbackReason = llmFallbackReason(err, modelTrace)
 		return fallback, call
 	}
-	queries := codeInvestigationQueriesFromLLM(output, budget)
+	queries := codeInvestigationQueriesFromLLM(output, budget, questions)
 	if len(queries) == 0 {
 		call.OutputSummary = fmt.Sprintf("模型未返回有效查询，使用确定性查询计划 %d 条。", len(fallback))
 		call.SelectedFileCount = len(fallback)
@@ -696,17 +708,20 @@ func llmFallbackReason(err error, trace *llm.CallTrace) string {
 	return "planner_error"
 }
 
-func codeInvestigationQueriesFromLLM(output codeInvestigationLLMOutput, budget model.CodeReadBudget) []codeInvestigationQuery {
+func codeInvestigationQueriesFromLLM(output codeInvestigationLLMOutput, budget model.CodeReadBudget, questions []model.CodeInvestigationQuestion) []codeInvestigationQuery {
 	queries := []codeInvestigationQuery{}
 	for _, item := range output.Queries {
 		terms := sanitizeInvestigationTerms(stringSlice(item.Terms))
 		if len(terms) == 0 {
 			continue
 		}
+		question := closestInvestigationQuestion(terms, questions)
 		queries = append(queries, codeInvestigationQuery{
-			purpose: firstNonEmpty(item.Purpose, "按模型规划的业务语义检索相关代码。"),
-			query:   strings.Join(terms, " OR "),
-			terms:   terms,
+			questionID:       question.ID,
+			purpose:          firstNonEmpty(item.Purpose, "按模型规划的业务语义检索相关代码。"),
+			query:            strings.Join(terms, " OR "),
+			terms:            terms,
+			expectedEvidence: question.ExpectedEvidence,
 		})
 	}
 	if budget.DrilldownRounds > 0 && len(queries) > budget.DrilldownRounds {
@@ -733,6 +748,127 @@ func dedupeCodeInvestigationQueries(values []codeInvestigationQuery) []codeInves
 		out = append(out, value)
 	}
 	return out
+}
+
+func buildCodeInvestigationQuestions(project *model.ProjectContext, brief *model.RequirementBrief, budget model.CodeReadBudget) []model.CodeInvestigationQuestion {
+	intentText := strings.Join(codeIntentTextParts(project, brief), " ")
+	intentTerms := intentKeywordsForText(intentText)
+	questions := []model.CodeInvestigationQuestion{}
+	add := func(id string, label string, question string, terms []string, expected []string) {
+		terms = sanitizeInvestigationTerms(terms)
+		expected = uniqueStrings(expected)
+		if id == "" || question == "" || len(terms) == 0 {
+			return
+		}
+		questions = append(questions, model.CodeInvestigationQuestion{
+			ID:               id,
+			Question:         question,
+			IntentLabel:      label,
+			ExpectedEvidence: expected,
+			QueryTerms:       terms,
+			Status:           "open",
+		})
+	}
+	if containsAnyNormalized(intentText, "登录", "登陆", "login", "signin", "邮箱", "密码") {
+		add(
+			"question_session_setup",
+			"登录与会话建立",
+			"登录入口、认证表单、会话进入工作台的代码路径在哪里？",
+			[]string{"登录", "登陆", "login", "signin", "sign", "email", "password", "auth", "session", "workspace", "dashboard"},
+			[]string{"route", "component_or_selector", "api_or_data_model"},
+		)
+	}
+	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "project", "俄罗斯方块", "tetris") {
+		add(
+			"question_project_creation",
+			"新建项目",
+			"新建项目流程、项目名称输入、俄罗斯方块填充语义和创建接口分别由哪些文件实现？",
+			[]string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project name", "new", "create", "project", "projects", "项目", "项目名称", "俄罗斯方块", "tetris"},
+			[]string{"route", "component_or_selector", "api_or_data_model"},
+		)
+	}
+	if containsAnyNormalized(intentText, "构建模式", "build mode", "agent", "构建", "生成") {
+		add(
+			"question_build_mode_agent",
+			"构建模式与 Agent 执行",
+			"构建模式选择、启动 agent、进度/日志/项目详情状态由哪些组件和后端能力支撑？",
+			[]string{"构建模式", "build mode", "builder mode", "mode", "agent", "开始构建", "启动构建", "generate", "build", "builder", "progress", "log"},
+			[]string{"route", "component_or_selector", "api_or_data_model", "style_or_state"},
+		)
+	}
+	if containsAnyNormalized(intentText, "样式", "style", "视觉", "页面", "组件") {
+		add(
+			"question_relevant_style_state",
+			"需求相关样式与状态",
+			"需求相关页面的样式、loading/progress 状态和交互反馈在哪里定义？",
+			[]string{"style", "className", "css", "tailwind", "state", "loading", "progress"},
+			[]string{"component_or_selector", "style_or_state"},
+		)
+	}
+	if len(questions) == 0 {
+		add(
+			"question_product_entry",
+			"产品入口与核心流程",
+			"产品入口、路由、核心组件和主要业务接口在哪里？",
+			append(intentTerms, "route", "router", "page", "component", "button", "form", "project", "dashboard"),
+			[]string{"route", "component_or_selector", "api_or_data_model"},
+		)
+	}
+	limit := budget.DrilldownRounds + 2
+	if limit <= 0 {
+		limit = 4
+	}
+	if len(questions) > limit {
+		questions = questions[:limit]
+	}
+	return questions
+}
+
+func compactInvestigationQuestionsForPlanner(questions []model.CodeInvestigationQuestion) []map[string]any {
+	out := make([]map[string]any, 0, len(questions))
+	for _, question := range questions {
+		out = append(out, map[string]any{
+			"id":                question.ID,
+			"question":          question.Question,
+			"intent_label":      question.IntentLabel,
+			"expected_evidence": question.ExpectedEvidence,
+			"query_terms":       question.QueryTerms,
+		})
+	}
+	return out
+}
+
+func closestInvestigationQuestion(terms []string, questions []model.CodeInvestigationQuestion) model.CodeInvestigationQuestion {
+	best := model.CodeInvestigationQuestion{}
+	bestScore := 0
+	for _, question := range questions {
+		score := keywordMatchScore(terms, strings.Join(question.QueryTerms, " "), question.Question, question.IntentLabel)
+		if score > bestScore {
+			bestScore = score
+			best = question
+		}
+	}
+	if best.ID == "" {
+		return model.CodeInvestigationQuestion{
+			ID:               "question_ad_hoc",
+			ExpectedEvidence: []string{"route", "component_or_selector", "api_or_data_model"},
+		}
+	}
+	return best
+}
+
+func investigationQueryMetadata(query codeInvestigationQuery) map[string]any {
+	metadata := map[string]any{}
+	if query.questionID != "" {
+		metadata["question_id"] = query.questionID
+	}
+	if len(query.expectedEvidence) > 0 {
+		metadata["expected_evidence"] = query.expectedEvidence
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
 }
 
 func compactRepoMapForInvestigation(candidates []codeCandidateFile, limit int) map[string]any {
@@ -848,7 +984,29 @@ func sanitizeInvestigationTerms(terms []string) []string {
 	return limitStrings(uniqueStrings(out), 8)
 }
 
-func buildCodeInvestigationQueries(project *model.ProjectContext, brief *model.RequirementBrief, budget model.CodeReadBudget) []codeInvestigationQuery {
+func buildCodeInvestigationQueries(project *model.ProjectContext, brief *model.RequirementBrief, budget model.CodeReadBudget, questions []model.CodeInvestigationQuestion) []codeInvestigationQuery {
+	if len(questions) > 0 {
+		queries := make([]codeInvestigationQuery, 0, len(questions))
+		for _, question := range questions {
+			terms := sanitizeInvestigationTerms(question.QueryTerms)
+			if len(terms) == 0 {
+				continue
+			}
+			queries = append(queries, codeInvestigationQuery{
+				questionID:       question.ID,
+				purpose:          question.Question,
+				query:            strings.Join(terms, " OR "),
+				terms:            terms,
+				expectedEvidence: question.ExpectedEvidence,
+			})
+		}
+		if len(queries) > 0 {
+			if budget.DrilldownRounds > 0 && len(queries) > budget.DrilldownRounds {
+				return queries[:budget.DrilldownRounds]
+			}
+			return queries
+		}
+	}
 	intentText := strings.Join(codeIntentTextParts(project, brief), " ")
 	intentTerms := intentKeywordsForText(intentText)
 	queries := []codeInvestigationQuery{}
@@ -858,9 +1016,10 @@ func buildCodeInvestigationQueries(project *model.ProjectContext, brief *model.R
 			return
 		}
 		queries = append(queries, codeInvestigationQuery{
-			purpose: purpose,
-			query:   strings.Join(terms, " OR "),
-			terms:   terms,
+			purpose:          purpose,
+			query:            strings.Join(terms, " OR "),
+			terms:            terms,
+			expectedEvidence: []string{"route", "component_or_selector", "api_or_data_model"},
 		})
 	}
 	if len(intentTerms) > 0 {
@@ -980,6 +1139,9 @@ func reviewInvestigationEvidence(ctx context.Context, candidates []codeCandidate
 		inspectComponents(candidate.name, text, pathHash, snapshot)
 		inspectAPIs(text, pathHash, snapshot)
 		inspectDataModels(text, pathHash, snapshot)
+		if codeKindForFile(candidate.name) == "style" || containsAny(strings.ToLower(filepath.ToSlash(candidate.rel)), ".css", ".scss", ".sass", ".less", "tailwind") || containsAny(text, "className", "loading", "progress") {
+			review.styleCount++
+		}
 		review.fileCount++
 		review.pathHashes = append(review.pathHashes, pathHash)
 	}
@@ -990,27 +1152,49 @@ func reviewInvestigationEvidence(ctx context.Context, candidates []codeCandidate
 	review.apiCount = len(snapshot.APIEndpoints)
 	review.dataModelCount = len(snapshot.DataModels)
 	review.pathHashes = uniqueStrings(review.pathHashes)
-	if review.routeCount == 0 {
-		review.gaps = append(review.gaps, "route")
-	}
-	if review.componentCount == 0 && review.selectorCount == 0 {
-		review.gaps = append(review.gaps, "component_or_selector")
-	}
-	if review.apiCount == 0 && review.dataModelCount == 0 {
-		review.gaps = append(review.gaps, "api_or_data_model")
-	}
 	return review, nil
+}
+
+func evidenceGapsForExpected(review codeInvestigationEvidenceReview, expected []string) []string {
+	if len(expected) == 0 {
+		expected = []string{"route", "component_or_selector", "api_or_data_model"}
+	}
+	gaps := []string{}
+	for _, item := range uniqueStrings(expected) {
+		switch item {
+		case "route":
+			if review.routeCount == 0 {
+				gaps = append(gaps, "route")
+			}
+		case "component_or_selector":
+			if review.componentCount == 0 && review.selectorCount == 0 {
+				gaps = append(gaps, "component_or_selector")
+			}
+		case "api_or_data_model":
+			if review.apiCount == 0 && review.dataModelCount == 0 {
+				gaps = append(gaps, "api_or_data_model")
+			}
+		case "style_or_state":
+			if review.styleCount == 0 {
+				gaps = append(gaps, "style_or_state")
+			}
+		}
+	}
+	return gaps
 }
 
 func evidenceReviewToolCall(round int, query codeInvestigationQuery, review codeInvestigationEvidenceReview) model.CodeInvestigationToolCall {
 	metadata := map[string]any{
 		"round":            round,
+		"question_id":      query.questionID,
+		"expected":         query.expectedEvidence,
 		"file_count":       review.fileCount,
 		"route_count":      review.routeCount,
 		"component_count":  review.componentCount,
 		"selector_count":   review.selectorCount,
 		"api_count":        review.apiCount,
 		"data_model_count": review.dataModelCount,
+		"style_count":      review.styleCount,
 		"gaps":             review.gaps,
 	}
 	return model.CodeInvestigationToolCall{
@@ -1019,7 +1203,7 @@ func evidenceReviewToolCall(round int, query codeInvestigationQuery, review code
 		Purpose:           "读取本轮 grep 命中的少量文件，审查是否已经覆盖 route/component/selector/API/data model 证据；仅输出计数、hash 和缺口。",
 		Query:             query.query,
 		InputSummary:      fmt.Sprintf("selected_files=%d", review.fileCount),
-		OutputSummary:     fmt.Sprintf("routes=%d components=%d selectors=%d apis=%d models=%d gaps=%s", review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.dataModelCount, strings.Join(review.gaps, ",")),
+		OutputSummary:     fmt.Sprintf("routes=%d components=%d selectors=%d apis=%d models=%d style=%d gaps=%s", review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.dataModelCount, review.styleCount, strings.Join(review.gaps, ",")),
 		SelectedFileCount: review.fileCount,
 		PathHashes:        limitStrings(review.pathHashes, 12),
 		Metadata:          metadata,
@@ -1037,6 +1221,9 @@ func evidenceReviewConfidence(review codeInvestigationEvidenceReview) float64 {
 	}
 	if review.apiCount > 0 || review.dataModelCount > 0 {
 		score += 0.12
+	}
+	if review.styleCount > 0 {
+		score += 0.06
 	}
 	if score > 0.9 {
 		return 0.9
@@ -1061,6 +1248,9 @@ func adaptiveQueryFromEvidenceReview(previous codeInvestigationQuery, review cod
 		case "api_or_data_model":
 			gapTerms = append(gapTerms, "api", "endpoint", "handler", "mutation", "schema", "model")
 			purposeParts = append(purposeParts, "api/data")
+		case "style_or_state":
+			gapTerms = append(gapTerms, "style", "className", "css", "tailwind", "state", "loading", "progress")
+			purposeParts = append(purposeParts, "style/state")
 		}
 	}
 	terms := append(gapTerms, limitStrings(previous.terms, 4)...)
@@ -1069,9 +1259,11 @@ func adaptiveQueryFromEvidenceReview(previous codeInvestigationQuery, review cod
 		return codeInvestigationQuery{}, false
 	}
 	return codeInvestigationQuery{
-		purpose: strings.Join(purposeParts, " + "),
-		query:   strings.Join(terms, " OR "),
-		terms:   terms,
+		questionID:       previous.questionID,
+		purpose:          strings.Join(purposeParts, " + "),
+		query:            strings.Join(terms, " OR "),
+		terms:            terms,
+		expectedEvidence: previous.expectedEvidence,
 	}, true
 }
 
@@ -1082,6 +1274,64 @@ func codeInvestigationQueryExists(values []codeInvestigationQuery, key string) b
 		}
 	}
 	return false
+}
+
+func applyEvidenceReviewToQuestion(trace *model.CodeInvestigationTrace, query codeInvestigationQuery, review codeInvestigationEvidenceReview, toolCallIDs ...string) {
+	if trace == nil || query.questionID == "" {
+		return
+	}
+	for i := range trace.Questions {
+		if trace.Questions[i].ID != query.questionID {
+			continue
+		}
+		trace.Questions[i].ToolCallIDs = uniqueStrings(append(trace.Questions[i].ToolCallIDs, toolCallIDs...))
+		trace.Questions[i].RemainingGaps = append([]string{}, review.gaps...)
+		trace.Questions[i].EvidenceSummary = fmt.Sprintf("files=%d routes=%d components=%d selectors=%d apis=%d models=%d style=%d", review.fileCount, review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.dataModelCount, review.styleCount)
+		trace.Questions[i].Confidence = evidenceReviewConfidence(review)
+		switch {
+		case review.fileCount == 0:
+			trace.Questions[i].Status = "open"
+		case len(review.gaps) == 0:
+			trace.Questions[i].Status = "answered"
+		default:
+			trace.Questions[i].Status = "partial"
+		}
+		return
+	}
+}
+
+func finalizeInvestigationQuestions(trace *model.CodeInvestigationTrace) {
+	if trace == nil {
+		return
+	}
+	for i := range trace.Questions {
+		if trace.Questions[i].Status == "" {
+			trace.Questions[i].Status = "open"
+		}
+		if len(trace.Questions[i].RemainingGaps) == 0 && trace.Questions[i].Status == "open" {
+			trace.Questions[i].RemainingGaps = append([]string{}, trace.Questions[i].ExpectedEvidence...)
+		}
+	}
+}
+
+func investigationQuestionProgressSummary(trace *model.CodeInvestigationTrace) string {
+	if trace == nil || len(trace.Questions) == 0 {
+		return "未生成调查问题"
+	}
+	answered := 0
+	partial := 0
+	open := 0
+	for _, question := range trace.Questions {
+		switch question.Status {
+		case "answered":
+			answered++
+		case "partial":
+			partial++
+		default:
+			open++
+		}
+	}
+	return fmt.Sprintf("调查问题 answered=%d partial=%d open=%d", answered, partial, open)
 }
 
 func candidateWorthToolSearch(candidate codeCandidateFile, query codeInvestigationQuery) bool {

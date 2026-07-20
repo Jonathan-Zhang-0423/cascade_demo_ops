@@ -67,6 +67,7 @@ type CodeInvestigationTrace struct {
 	ID                   string                      `json:"id"`
 	Mode                 string                      `json:"mode,omitempty"`
 	Summary              string                      `json:"summary,omitempty"`
+	Questions            []CodeInvestigationQuestion `json:"questions,omitempty"`
 	ToolCalls            []CodeInvestigationToolCall `json:"tool_calls,omitempty"`
 	TotalFilesDiscovered int                         `json:"total_files_discovered,omitempty"`
 	TotalFilesSearched   int                         `json:"total_files_searched,omitempty"`
@@ -74,6 +75,19 @@ type CodeInvestigationTrace struct {
 	TotalBytesRead       int64                       `json:"total_bytes_read,omitempty"`
 	CreatedAt            time.Time                   `json:"created_at,omitempty"`
 	CompletedAt          time.Time                   `json:"completed_at,omitempty"`
+}
+
+type CodeInvestigationQuestion struct {
+	ID               string   `json:"id"`
+	Question         string   `json:"question"`
+	IntentLabel      string   `json:"intent_label,omitempty"`
+	ExpectedEvidence []string `json:"expected_evidence,omitempty"`
+	QueryTerms       []string `json:"query_terms,omitempty"`
+	Status           string   `json:"status,omitempty"`
+	EvidenceSummary  string   `json:"evidence_summary,omitempty"`
+	RemainingGaps    []string `json:"remaining_gaps,omitempty"`
+	ToolCallIDs      []string `json:"tool_call_ids,omitempty"`
+	Confidence       float64  `json:"confidence,omitempty"`
 }
 
 type CodeInvestigationToolCall struct {

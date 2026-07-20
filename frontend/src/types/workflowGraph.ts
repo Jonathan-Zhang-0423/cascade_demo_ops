@@ -738,6 +738,7 @@ export type CodeInvestigationTrace = {
   id: string;
   mode?: string;
   summary?: string;
+  questions?: CodeInvestigationQuestion[];
   tool_calls?: CodeInvestigationToolCall[];
   total_files_discovered?: number;
   total_files_searched?: number;
@@ -745,6 +746,19 @@ export type CodeInvestigationTrace = {
   total_bytes_read?: number;
   created_at?: string;
   completed_at?: string;
+};
+
+export type CodeInvestigationQuestion = {
+  id: string;
+  question: string;
+  intent_label?: string;
+  expected_evidence?: string[];
+  query_terms?: string[];
+  status?: string;
+  evidence_summary?: string;
+  remaining_gaps?: string[];
+  tool_call_ids?: string[];
+  confidence?: number;
 };
 
 export type CodeInvestigationToolCall = {

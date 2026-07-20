@@ -625,11 +625,35 @@ func compactCodeInvestigationTrace(trace *model.CodeInvestigationTrace) map[stri
 	return map[string]any{
 		"mode":                   trace.Mode,
 		"summary":                trace.Summary,
+		"questions":              compactCodeInvestigationQuestions(trace.Questions, 6),
 		"total_files_discovered": trace.TotalFilesDiscovered,
 		"total_files_searched":   trace.TotalFilesSearched,
 		"total_files_selected":   trace.TotalFilesSelected,
 		"tool_calls":             toolCalls,
 	}
+}
+
+func compactCodeInvestigationQuestions(questions []model.CodeInvestigationQuestion, maxItems int) []map[string]any {
+	if len(questions) == 0 || maxItems <= 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, minInt(len(questions), maxItems))
+	for _, question := range questions {
+		if len(out) >= maxItems {
+			break
+		}
+		out = append(out, map[string]any{
+			"id":                question.ID,
+			"question":          question.Question,
+			"intent_label":      question.IntentLabel,
+			"expected_evidence": question.ExpectedEvidence,
+			"status":            question.Status,
+			"remaining_gaps":    question.RemainingGaps,
+			"evidence_summary":  question.EvidenceSummary,
+			"confidence":        question.Confidence,
+		})
+	}
+	return out
 }
 
 func compactInvestigationToolMetadata(metadata map[string]any) map[string]any {

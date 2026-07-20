@@ -130,6 +130,64 @@ func TestCodeReaderUsesIntentDrivenBudget(t *testing.T) {
 	if !investigationHasTool(snapshot.InvestigationTrace, "repo_index") || !investigationHasTool(snapshot.InvestigationTrace, "grep_text") {
 		t.Fatalf("expected repo_index and grep_text tool calls, got %+v", snapshot.InvestigationTrace.ToolCalls)
 	}
+	if !investigationHasQuestion(snapshot.InvestigationTrace, "question_project_creation") {
+		t.Fatalf("expected project creation investigation question, got %+v", snapshot.InvestigationTrace.Questions)
+	}
+}
+
+func TestProjectInvestigationToolSuiteTracksQuestionProgress(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/NewProject.tsx", `
+		export function NewProject() {
+			const route = "/workspace/projects/new"
+			return <form>
+				<input aria-label="项目名称" />
+				<button data-testid="create-tetris-project">新建项目</button>
+			</form>
+		}
+	`)
+	writeFixtureFile(t, root, "backend/server/projects.go", `
+		package server
+		func createProject() {
+			path := "/api/projects/create"
+			_ = path
+		}
+	`)
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(nil).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        3,
+			FilesPerRound:          2,
+			TotalFileLimit:         6,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_question_trace", ProductDescription: "演示新建项目，项目名称俄罗斯方块"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_question_trace", Objective: "演示新建项目，项目名称俄罗斯方块", MustShow: []string{"新建项目", "俄罗斯方块"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	question := investigationQuestion(result.Trace, "question_project_creation")
+	if question == nil {
+		t.Fatalf("expected project creation investigation question, got %+v", result.Trace.Questions)
+	}
+	if question.Status != "answered" {
+		t.Fatalf("expected project creation question to be answered, got %+v", question)
+	}
+	if len(question.ToolCallIDs) == 0 {
+		t.Fatalf("expected question to reference tool calls, got %+v", question)
+	}
+	if !strings.Contains(result.Trace.Summary, "调查问题") {
+		t.Fatalf("expected trace summary to include question progress, got %q", result.Trace.Summary)
+	}
 }
 
 func TestCodeReaderUsesGrepToolBeforeStructuredReads(t *testing.T) {
@@ -647,6 +705,22 @@ func runtimeAdaptiveActionContains(plan *model.VerifiedInteractionPlan, text str
 
 func investigationHasTool(trace *model.CodeInvestigationTrace, tool string) bool {
 	return investigationToolCall(trace, tool) != nil
+}
+
+func investigationHasQuestion(trace *model.CodeInvestigationTrace, id string) bool {
+	return investigationQuestion(trace, id) != nil
+}
+
+func investigationQuestion(trace *model.CodeInvestigationTrace, id string) *model.CodeInvestigationQuestion {
+	if trace == nil {
+		return nil
+	}
+	for i := range trace.Questions {
+		if trace.Questions[i].ID == id {
+			return &trace.Questions[i]
+		}
+	}
+	return nil
 }
 
 func investigationToolCall(trace *model.CodeInvestigationTrace, tool string) *model.CodeInvestigationToolCall {
