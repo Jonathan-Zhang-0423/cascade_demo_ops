@@ -397,6 +397,7 @@ type codeInvestigationToolPolicy struct {
 	findReferences   bool
 	findAPIHandlers  bool
 	readWindow       bool
+	listRelatedFiles bool
 	expectedEvidence []string
 }
 
@@ -422,6 +423,16 @@ type codeSnippetObservation struct {
 	MatchedTerms []string
 	SignalKinds  []string
 	Preview      string
+}
+
+type relatedFileObservation struct {
+	ID       string
+	DirHash  string
+	FileName string
+	Kind     string
+	PathHash string
+	Score    int
+	Reason   string
 }
 
 type importFollowScan struct {
@@ -510,7 +521,7 @@ func (o *codeInvestigationNextActionsLLMOutput) normalize() {
 		if tool == "" {
 			tool = toolForExpectedEvidence(expected)
 		}
-		if tool != "read_window" && len(terms) == 0 {
+		if tool != "read_window" && tool != "list_related_files" && len(terms) == 0 {
 			continue
 		}
 		action.Tool = tool
@@ -631,6 +642,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 	trace.ToolCalls = append(trace.ToolCalls, planningCall)
 	executedQueries := map[string]bool{}
 	snippetObservationCache := map[string][]codeSnippetObservation{}
+	relatedFileObservationCache := map[string][]relatedFileObservation{}
 	maxSearchRounds := maxInt(1, budget.DrilldownRounds)
 	maxAdaptiveRounds := maxSearchRounds + 2
 	for i := 0; i < len(queries) && i < maxAdaptiveRounds; i++ {
@@ -703,8 +715,23 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			snippetsThisRound = append(snippetsThisRound, windowRefs...)
 			snippetObservationsThisRound = append(snippetObservationsThisRound, windowObservations...)
 		}
+		relatedFileObservationsThisRound := []relatedFileObservation{}
+		listRelatedCallID := ""
+		if toolPolicy.listRelatedFiles {
+			seedCandidates := append([]codeCandidateFile{}, selectedThisRound...)
+			seedCandidates = append(seedCandidates, candidateSeedsFromSnippetObservations(snippetObservationCache[query.questionID], candidates)...)
+			var listCall model.CodeInvestigationToolCall
+			relatedFileObservationsThisRound, listCall = listRelatedFilesForSelectedCandidates(i+1, query, candidates, seedCandidates, budget)
+			if listCall.ID != "" {
+				listRelatedCallID = listCall.ID
+				trace.ToolCalls = append(trace.ToolCalls, listCall)
+			}
+		}
 		if len(snippetObservationsThisRound) > 0 {
 			snippetObservationCache[query.questionID] = appendSnippetObservationCache(snippetObservationCache[query.questionID], snippetObservationsThisRound, 12)
+		}
+		if len(relatedFileObservationsThisRound) > 0 {
+			relatedFileObservationCache[query.questionID] = appendRelatedFileObservationCache(relatedFileObservationCache[query.questionID], relatedFileObservationsThisRound, 20)
 		}
 		followedImports := []codeCandidateFile{}
 		importScan := importFollowScan{
@@ -792,13 +819,13 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		review.gaps = evidenceGapsForExpected(review, query.expectedEvidence)
 		reviewCall := evidenceReviewToolCall(i+1, query, review)
 		trace.ToolCalls = append(trace.ToolCalls, reviewCall)
-		nextActions, nextActionPlanningCall := s.planNextActionsFromEvidenceObservation(ctx, query, review, trace, budget, snippetObservationsThisRound, reviewCall.ID)
+		nextActions, nextActionPlanningCall := s.planNextActionsFromEvidenceObservation(ctx, query, review, trace, budget, snippetObservationsThisRound, relatedFileObservationsThisRound, reviewCall.ID)
 		nextActionPlanningCallID := ""
 		if nextActionPlanningCall.ID != "" {
 			nextActionPlanningCallID = nextActionPlanningCall.ID
 			trace.ToolCalls = append(trace.ToolCalls, nextActionPlanningCall)
 		}
-		applyEvidenceReviewToQuestion(trace, query, review, nextActions, nonEmptyToolCallIDs(grepCallID, snippetCallID, readWindowCallID, followCallID, referenceCallID, apiHandlerCallID, reviewCall.ID, nextActionPlanningCallID)...)
+		applyEvidenceReviewToQuestion(trace, query, review, nextActions, nonEmptyToolCallIDs(grepCallID, snippetCallID, readWindowCallID, listRelatedCallID, followCallID, referenceCallID, apiHandlerCallID, reviewCall.ID, nextActionPlanningCallID)...)
 		beforeFollowUp := len(queries)
 		queries = appendNextActionInvestigationQueries(queries, trace, query, review, nextActions, lastNonEmptyString(nextActionPlanningCallID, reviewCall.ID), executedQueries, maxAdaptiveRounds)
 		if len(queries) == beforeFollowUp {
@@ -1125,6 +1152,9 @@ func investigationQueryMetadataWithToolPolicy(query codeInvestigationQuery, poli
 	if policy.readWindow {
 		tools = append(tools, "read_window")
 	}
+	if policy.listRelatedFiles {
+		tools = append(tools, "list_related_files")
+	}
 	metadata["tool_policy"] = tools
 	return metadata
 }
@@ -1138,6 +1168,13 @@ func toolPolicyForInvestigationQuery(query codeInvestigationQuery) codeInvestiga
 	}
 	suggested := sanitizeInvestigationToolName(query.suggestedTool)
 	switch suggested {
+	case "list_related_files":
+		policy.followImports = false
+		policy.findReferences = false
+		policy.findAPIHandlers = false
+		policy.readWindow = false
+		policy.listRelatedFiles = true
+		return policy
 	case "read_window":
 		policy.followImports = false
 		policy.findReferences = false
@@ -2350,6 +2387,115 @@ func readEvidenceWindowsFromSnippetObservations(ctx context.Context, round int, 
 	}
 }
 
+func listRelatedFilesForSelectedCandidates(round int, query codeInvestigationQuery, candidates []codeCandidateFile, seeds []codeCandidateFile, budget model.CodeReadBudget) ([]relatedFileObservation, model.CodeInvestigationToolCall) {
+	callID := fmt.Sprintf("tool_list_related_files_%d_%s", round, shortHash(query.query))
+	seedDirs := relatedSeedDirectories(seeds)
+	observations := []relatedFileObservation{}
+	if len(seedDirs) > 0 {
+		seen := map[string]bool{}
+		for _, candidate := range candidates {
+			if len(observations) >= minInt(20, maxInt(6, budget.FilesPerRound*6)) {
+				break
+			}
+			rel := filepath.ToSlash(candidate.rel)
+			if shouldSkipCodeFileRel(candidate.rel, candidate.name) || seen[rel] {
+				continue
+			}
+			reason := relatedFileReason(rel, seedDirs, query.terms)
+			if reason == "" {
+				continue
+			}
+			seen[rel] = true
+			observations = append(observations, relatedFileObservation{
+				ID:       "related_file_" + shortHash(rel+"|"+query.query),
+				DirHash:  hashString(filepath.ToSlash(filepath.Dir(rel))),
+				FileName: candidate.name,
+				Kind:     codeKindForFile(candidate.name),
+				PathHash: hashString(rel),
+				Score:    candidate.score,
+				Reason:   reason,
+			})
+		}
+	}
+	pathHashes := []string{}
+	for _, observation := range observations {
+		pathHashes = append(pathHashes, observation.PathHash)
+	}
+	return observations, model.CodeInvestigationToolCall{
+		ID:                callID,
+		Tool:              "list_related_files",
+		Purpose:           "按 planner 请求，仅列出上一轮命中文件附近的候选 route/component/API 文件；不读取源码，不返回绝对路径。",
+		Query:             query.query,
+		InputSummary:      fmt.Sprintf("seed_files=%d candidate_files=%d", len(seeds), len(candidates)),
+		OutputSummary:     fmt.Sprintf("related_files=%d", len(observations)),
+		MatchedFileCount:  len(observations),
+		SelectedFileCount: 0,
+		PathHashes:        limitStrings(uniqueStrings(pathHashes), 20),
+		Metadata:          investigationQueryMetadata(query),
+		Confidence:        confidenceForSearchCall(len(observations), len(observations)),
+	}
+}
+
+func relatedSeedDirectories(seeds []codeCandidateFile) []string {
+	out := []string{}
+	for _, seed := range seeds {
+		rel := strings.Trim(filepath.ToSlash(seed.rel), "/")
+		if rel == "" || shouldSkipCodeFileRel(seed.rel, seed.name) {
+			continue
+		}
+		dir := filepath.ToSlash(filepath.Dir(rel))
+		if dir == "." || dir == "" {
+			continue
+		}
+		out = append(out, dir)
+		parent := filepath.ToSlash(filepath.Dir(dir))
+		if parent != "." && parent != "" {
+			out = append(out, parent)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func relatedFileReason(rel string, seedDirs []string, terms []string) string {
+	lower := strings.ToLower(filepath.ToSlash(rel))
+	for _, dir := range seedDirs {
+		dir = strings.Trim(strings.ToLower(filepath.ToSlash(dir)), "/")
+		if dir != "" && (strings.HasPrefix(lower, dir+"/") || strings.Contains(lower, "/"+dir+"/")) {
+			if keywordMatchScore(terms, lower) > 0 {
+				return "same_or_parent_directory_and_query_terms"
+			}
+			return "same_or_parent_directory"
+		}
+	}
+	if keywordMatchScore(terms, lower) > 0 && pathHasAnySegment(lower, "pages", "app", "routes", "components", "features", "api", "server", "backend", "internal") {
+		return "query_terms_in_product_path"
+	}
+	return ""
+}
+
+func candidateSeedsFromSnippetObservations(snippets []codeSnippetObservation, candidates []codeCandidateFile) []codeCandidateFile {
+	if len(snippets) == 0 {
+		return nil
+	}
+	wanted := map[string]bool{}
+	for _, snippet := range snippets {
+		if snippet.PathHash != "" {
+			wanted[snippet.PathHash] = true
+		}
+	}
+	out := []codeCandidateFile{}
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		pathHash := hashString(filepath.ToSlash(candidate.rel))
+		if !wanted[pathHash] || seen[candidate.rel] {
+			continue
+		}
+		seen[candidate.rel] = true
+		out = append(out, candidate)
+	}
+	return out
+}
+
 func snippetEvidenceForQuery(candidate codeCandidateFile, data []byte, query codeInvestigationQuery) ([]model.CodeSnippetRef, []codeSnippetObservation) {
 	if len(data) == 0 || len(query.terms) == 0 {
 		return nil, nil
@@ -2505,8 +2651,8 @@ func adaptiveQueryFromEvidenceReview(previous codeInvestigationQuery, review cod
 	}, true
 }
 
-func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(ctx context.Context, query codeInvestigationQuery, review codeInvestigationEvidenceReview, trace *model.CodeInvestigationTrace, budget model.CodeReadBudget, snippetObservations []codeSnippetObservation, dependsOnToolCallID string) ([]model.CodeInvestigationNextAction, model.CodeInvestigationToolCall) {
-	if len(review.gaps) == 0 {
+func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(ctx context.Context, query codeInvestigationQuery, review codeInvestigationEvidenceReview, trace *model.CodeInvestigationTrace, budget model.CodeReadBudget, snippetObservations []codeSnippetObservation, relatedFileObservations []relatedFileObservation, dependsOnToolCallID string) ([]model.CodeInvestigationNextAction, model.CodeInvestigationToolCall) {
+	if len(review.gaps) == 0 && len(relatedFileObservations) == 0 {
 		return nil, model.CodeInvestigationToolCall{}
 	}
 	start := time.Now()
@@ -2516,16 +2662,17 @@ func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(c
 		Tool:         "plan_next_actions",
 		Purpose:      "基于上一轮工具观察和 remaining gaps 规划下一步受限代码调查工具；只输出工具名、查询词和期望证据，不读取源码。",
 		Query:        query.query,
-		InputSummary: fmt.Sprintf("question_id=%s gaps=%s remaining_search_budget=%d", query.questionID, strings.Join(review.gaps, ","), maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched)),
+		InputSummary: fmt.Sprintf("question_id=%s gaps=%s related_file_observations=%d remaining_search_budget=%d", query.questionID, strings.Join(review.gaps, ","), len(relatedFileObservations), maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched)),
 		Metadata: map[string]any{
-			"question_id":                query.questionID,
-			"gaps":                       review.gaps,
-			"allowed_tools":              []string{"grep_text", "read_window", "follow_imports", "find_references", "find_api_handlers", "evidence_review"},
-			"depends_on_tool_call_id":    dependsOnToolCallID,
-			"remaining_search_budget":    maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched),
-			"previous_query_term_count":  len(query.terms),
-			"expected_evidence":          query.expectedEvidence,
-			"observation_selected_files": review.fileCount,
+			"question_id":                    query.questionID,
+			"gaps":                           review.gaps,
+			"related_file_observation_count": len(relatedFileObservations),
+			"allowed_tools":                  []string{"grep_text", "list_related_files", "read_window", "follow_imports", "find_references", "find_api_handlers", "evidence_review"},
+			"depends_on_tool_call_id":        dependsOnToolCallID,
+			"remaining_search_budget":        maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched),
+			"previous_query_term_count":      len(query.terms),
+			"expected_evidence":              query.expectedEvidence,
+			"observation_selected_files":     review.fileCount,
 		},
 		Confidence: 0.6,
 	}
@@ -2556,17 +2703,19 @@ func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(c
 			"confidence":  evidenceReviewConfidence(review),
 			"depends_on":  dependsOnToolCallID,
 		},
-		"recent_tool_observations": compactRecentInvestigationToolCalls(trace, 8),
-		"snippet_observations":     compactSnippetObservationsForPlanner(snippetObservations, 6),
+		"recent_tool_observations":  compactRecentInvestigationToolCalls(trace, 8),
+		"snippet_observations":      compactSnippetObservationsForPlanner(snippetObservations, 6),
+		"related_file_observations": compactRelatedFileObservationsForPlanner(relatedFileObservations, 12),
 		"budget": map[string]any{
 			"remaining_search_files": maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched),
 			"remaining_selected":     maxInt(0, budget.TotalFileLimit-trace.TotalFilesSelected),
 			"files_per_round":        budget.FilesPerRound,
 		},
-		"allowed_tools": []string{"grep_text", "read_window", "follow_imports", "find_references", "find_api_handlers"},
+		"allowed_tools": []string{"grep_text", "list_related_files", "read_window", "follow_imports", "find_references", "find_api_handlers"},
 		"instructions": []string{
 			"像代码助手一样基于 observation 决定下一步最小必要工具。",
 			"只返回 1-3 个 next_actions；不要输出 shell、绝对路径、源码片段、token、cookie、Authorization。",
+			"如果需要先了解命中文件附近有哪些 route/component/API 文件，使用 list_related_files；它只列文件名、类型和 hash。",
 			"如果需要更靠近 grep 命中的局部上下文，优先使用 read_window；它只能读取上一轮 snippet 附近的小窗口。",
 			"query_terms 必须是业务语义、组件名、路由词、API/handler/model 词或状态词。",
 			"不要把 /aigc、/.well-known、/v1/execution-packages、app-installations 等控制面路径作为产品证据。",
@@ -2578,7 +2727,7 @@ func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(c
 		System:       "你是 Cascade DemoOps 的代码调查观察器。你根据上一轮本地工具 observation 选择下一步最小必要工具调用，不读取完整源码，不扩大到无关文件。",
 		User:         string(data),
 		SchemaName:   "CodeInvestigationNextActions",
-		ResponseHint: "返回字段：summary, next_actions[{tool, reason, query_terms[], expected_evidence[]}], confidence。tool 只能是 grep_text/read_window/follow_imports/find_references/find_api_handlers。",
+		ResponseHint: "返回字段：summary, next_actions[{tool, reason, query_terms[], expected_evidence[]}], confidence。tool 只能是 grep_text/list_related_files/read_window/follow_imports/find_references/find_api_handlers。",
 		MaxTokens:    900,
 		Temperature:  0.08,
 	}, &output)
@@ -2729,7 +2878,7 @@ func nextActionsFromLLMOutput(output codeInvestigationNextActionsLLMOutput, quer
 
 func sanitizeInvestigationToolName(value string) string {
 	switch strings.TrimSpace(value) {
-	case "repo_index", "grep_text", "read_window", "follow_imports", "find_references", "find_api_handlers", "evidence_review":
+	case "repo_index", "grep_text", "list_related_files", "read_window", "follow_imports", "find_references", "find_api_handlers", "evidence_review":
 		return strings.TrimSpace(value)
 	default:
 		return ""
@@ -2826,8 +2975,54 @@ func compactSnippetObservationsForPlanner(values []codeSnippetObservation, limit
 	return out
 }
 
+func compactRelatedFileObservationsForPlanner(values []relatedFileObservation, limit int) []map[string]any {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	out := []map[string]any{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		if len(out) >= limit {
+			break
+		}
+		if value.ID == "" || seen[value.ID] {
+			continue
+		}
+		seen[value.ID] = true
+		out = append(out, map[string]any{
+			"id":        value.ID,
+			"dir_hash":  value.DirHash,
+			"file_name": value.FileName,
+			"kind":      value.Kind,
+			"path_hash": value.PathHash,
+			"score":     value.Score,
+			"reason":    value.Reason,
+		})
+	}
+	return out
+}
+
 func appendSnippetObservationCache(existing []codeSnippetObservation, next []codeSnippetObservation, limit int) []codeSnippetObservation {
 	out := append([]codeSnippetObservation{}, existing...)
+	seen := map[string]bool{}
+	for _, value := range out {
+		seen[value.ID] = true
+	}
+	for _, value := range next {
+		if value.ID == "" || seen[value.ID] {
+			continue
+		}
+		seen[value.ID] = true
+		out = append(out, value)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
+}
+
+func appendRelatedFileObservationCache(existing []relatedFileObservation, next []relatedFileObservation, limit int) []relatedFileObservation {
+	out := append([]relatedFileObservation{}, existing...)
 	seen := map[string]bool{}
 	for _, value := range out {
 		seen[value.ID] = true
