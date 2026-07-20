@@ -386,6 +386,69 @@ func TestCodeReaderFollowsImportsFromGrepSelectedFiles(t *testing.T) {
 	}
 }
 
+func TestCodeReaderFindsReferencesBackToParentRoute(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/components/Wizard.tsx", `
+		export function Wizard() {
+			const endpoint = "/api/workflows/start"
+			return <button data-testid="wizard-next">Continue</button>
+		}
+	`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		import { Wizard } from "../components/Wizard"
+		export function Flow() {
+			const route = "/workspace/projects/new"
+			return <Wizard />
+		}
+	`)
+	writeFixtureFile(t, root, "src/views/Unrelated.tsx", `
+		export function Unrelated() { return <button data-testid="profile-avatar">avatar</button> }
+	`)
+	project := &model.ProjectContext{
+		ID:                 "project_find_references",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示 wizard 新建流程",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_find_references",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_find_references",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"wizard"}}
+	agent := NewCodeReaderAgent()
+	agent.Budget = model.CodeReadBudget{
+		Mode:                   "tool_driven_intent_drilldown",
+		RepoIndexFileLimit:     1,
+		DrilldownRounds:        1,
+		FilesPerRound:          1,
+		TotalFileLimit:         3,
+		MaxFileBytes:           80 * 1024,
+		ToolSearchFileLimit:    40,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  10,
+	}
+
+	snapshots, err := agent.ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	if !investigationHasTool(snapshot.InvestigationTrace, "find_references") {
+		t.Fatalf("expected find_references tool call, got %+v", snapshot.InvestigationTrace.ToolCalls)
+	}
+	if !routeInsightContains(snapshot.Routes, "/workspace/projects/new") {
+		t.Fatalf("expected parent route found through references, got %+v", snapshot.Routes)
+	}
+	if !selectorInsightContains(snapshot.Selectors, "[data-testid='wizard-next']") {
+		t.Fatalf("expected child selector retained, got %+v", snapshot.Selectors)
+	}
+	if selectorInsightContains(snapshot.Selectors, "[data-testid='profile-avatar']") {
+		t.Fatalf("unrelated view should not be selected by find_references: %+v", snapshot.Selectors)
+	}
+}
+
 func TestCodeReaderLLMPlannerCanChooseNextGrepQuery(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)

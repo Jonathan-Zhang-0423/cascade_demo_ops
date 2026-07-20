@@ -406,6 +406,15 @@ type importFollowScan struct {
 	bytesRead       int64
 }
 
+type referenceSearchScan struct {
+	seedFileCount int
+	termCount     int
+	searched      int
+	matched       int
+	bytesRead     int64
+	terms         []string
+}
+
 type codeInvestigationEvidenceReview struct {
 	fileCount      int
 	routeCount     int
@@ -604,7 +613,28 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			followCallID = fmt.Sprintf("tool_follow_imports_%d_%s", i+1, shortHash(query.query))
 			trace.ToolCalls = append(trace.ToolCalls, followImportsToolCall(followCallID, query, importScan, followedThisRound))
 		}
-		reviewCandidates := append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...)
+		referenceSources := append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...)
+		referencedFiles, referenceScan, err := findReferencesFromCandidates(ctx, referenceSources, candidates, selectedKeys, budget)
+		if err != nil {
+			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+		}
+		trace.TotalFilesSearched += referenceScan.searched
+		trace.TotalBytesRead += referenceScan.bytesRead
+		referencedThisRound := []codeCandidateFile{}
+		for _, candidate := range referencedFiles {
+			if len(referencedThisRound) >= minInt(3, budget.FilesPerRound) || len(selected) >= budget.TotalFileLimit {
+				break
+			}
+			if add(candidate) {
+				referencedThisRound = append(referencedThisRound, candidate)
+			}
+		}
+		referenceCallID := ""
+		if len(referencedThisRound) > 0 || referenceScan.termCount > 0 {
+			referenceCallID = fmt.Sprintf("tool_find_references_%d_%s", i+1, shortHash(query.query))
+			trace.ToolCalls = append(trace.ToolCalls, findReferencesToolCall(referenceCallID, query, referenceScan, referencedThisRound))
+		}
+		reviewCandidates := append(append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...), referencedThisRound...)
 		review, err := reviewInvestigationEvidence(ctx, reviewCandidates, project, brief)
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
@@ -612,7 +642,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		review.gaps = evidenceGapsForExpected(review, query.expectedEvidence)
 		reviewCall := evidenceReviewToolCall(i+1, query, review)
 		trace.ToolCalls = append(trace.ToolCalls, reviewCall)
-		applyEvidenceReviewToQuestion(trace, query, review, nonEmptyToolCallIDs(grepCallID, snippetCallID, followCallID, reviewCall.ID)...)
+		applyEvidenceReviewToQuestion(trace, query, review, nonEmptyToolCallIDs(grepCallID, snippetCallID, followCallID, referenceCallID, reviewCall.ID)...)
 		if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < budget.DrilldownRounds+2 {
 			nextKey := strings.Join(next.terms, "|")
 			if !executedQueries[nextKey] && !codeInvestigationQueryExists(queries, nextKey) {
@@ -1305,6 +1335,175 @@ func followImportsToolCall(id string, query codeInvestigationQuery, scan importF
 		},
 		Confidence: 0.7,
 	}
+}
+
+func findReferencesFromCandidates(ctx context.Context, seeds []codeCandidateFile, candidates []codeCandidateFile, selectedKeys map[string]bool, budget model.CodeReadBudget) ([]codeCandidateFile, referenceSearchScan, error) {
+	scan := referenceSearchScan{}
+	if len(seeds) == 0 || len(candidates) == 0 {
+		return nil, scan, nil
+	}
+	terms := []string{}
+	seedKeys := map[string]bool{}
+	for _, seed := range seeds {
+		if err := ctx.Err(); err != nil {
+			return nil, scan, err
+		}
+		seedKeys[seed.rel] = true
+		if seed.size > budget.ToolSearchBytesPerFile {
+			continue
+		}
+		data, err := os.ReadFile(seed.path)
+		if err != nil {
+			continue
+		}
+		scan.seedFileCount++
+		scan.bytesRead += int64(len(data))
+		terms = append(terms, referenceTermsFromCandidate(seed, string(data))...)
+	}
+	terms = sanitizeInvestigationTerms(terms)
+	terms = filterReferenceSearchTerms(terms)
+	scan.terms = limitStrings(terms, 8)
+	scan.termCount = len(scan.terms)
+	if len(scan.terms) == 0 {
+		return nil, scan, nil
+	}
+	type referenceMatch struct {
+		candidate codeCandidateFile
+		score     int
+	}
+	matches := []referenceMatch{}
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, scan, err
+		}
+		if selectedKeys[candidate.rel] || seedKeys[candidate.rel] || !candidateWorthReferenceSearch(candidate) {
+			continue
+		}
+		if scan.searched >= maxInt(20, budget.ToolSearchFileLimit/2) {
+			break
+		}
+		score := keywordMatchScore(scan.terms, filepath.ToSlash(candidate.rel), candidate.name) * 10
+		if candidate.size <= budget.ToolSearchBytesPerFile {
+			data, err := os.ReadFile(candidate.path)
+			if err == nil {
+				scan.searched++
+				scan.bytesRead += int64(len(data))
+				contentScore := keywordMatchScore(scan.terms, string(data))
+				if contentScore > 0 {
+					score += contentScore*60 + candidate.score/5
+				}
+			}
+		} else if score > 0 {
+			scan.searched++
+		}
+		if score <= 0 {
+			continue
+		}
+		scan.matched++
+		matches = append(matches, referenceMatch{candidate: candidate, score: score})
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score == matches[j].score {
+			return filepath.ToSlash(matches[i].candidate.rel) < filepath.ToSlash(matches[j].candidate.rel)
+		}
+		return matches[i].score > matches[j].score
+	})
+	out := []codeCandidateFile{}
+	for _, match := range matches {
+		if len(out) >= minInt(6, maxInt(2, budget.FilesPerRound*2)) {
+			break
+		}
+		out = append(out, match.candidate)
+	}
+	return out, scan, nil
+}
+
+func referenceTermsFromCandidate(candidate codeCandidateFile, text string) []string {
+	terms := []string{}
+	base := strings.TrimSuffix(candidate.name, filepath.Ext(candidate.name))
+	if referenceTermAllowed(base) {
+		terms = append(terms, base)
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`\b(?:export\s+)?(?:function|class|interface|type|const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)`),
+		regexp.MustCompile(`\bdata-testid=["']([^"']+)["']`),
+	}
+	for _, pattern := range patterns {
+		for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			if referenceTermAllowed(match[1]) {
+				terms = append(terms, match[1])
+			}
+		}
+	}
+	return limitStrings(uniqueStrings(terms), 12)
+}
+
+func filterReferenceSearchTerms(terms []string) []string {
+	out := []string{}
+	for _, term := range terms {
+		if referenceTermAllowed(term) {
+			out = append(out, term)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func referenceTermAllowed(term string) bool {
+	term = strings.TrimSpace(term)
+	if len([]rune(term)) < 4 || len([]rune(term)) > 40 {
+		return false
+	}
+	lower := strings.ToLower(term)
+	if containsAny(lower, "password", "secret", "token", "cookie", "authorization") {
+		return false
+	}
+	switch lower {
+	case "index", "page", "layout", "props", "state", "data", "item", "items", "button", "input", "form", "default", "string", "number":
+		return false
+	}
+	return regexp.MustCompile(`^[A-Za-z0-9_:-]+$`).MatchString(term)
+}
+
+func candidateWorthReferenceSearch(candidate codeCandidateFile) bool {
+	lower := strings.ToLower(filepath.ToSlash(candidate.rel))
+	if shouldSkipCodeFileRel(candidate.rel, candidate.name) || strings.EqualFold(candidate.name, "package.json") || strings.EqualFold(candidate.name, "go.mod") {
+		return false
+	}
+	return pathHasAnySegment(lower, "src", "app", "pages", "routes", "router", "components", "features", "server", "backend", "api", "internal", "cmd", "pkg")
+}
+
+func findReferencesToolCall(id string, query codeInvestigationQuery, scan referenceSearchScan, selected []codeCandidateFile) model.CodeInvestigationToolCall {
+	return model.CodeInvestigationToolCall{
+		ID:                id,
+		Tool:              "find_references",
+		Purpose:           "从已确认组件/API/selector 提取少量符号词，反向查找使用点、父级 route 或调用方；不输出源码文本，不扩大到全仓读取。",
+		Query:             query.query,
+		InputSummary:      fmt.Sprintf("seed_files=%d reference_terms=%d", scan.seedFileCount, scan.termCount),
+		OutputSummary:     fmt.Sprintf("searched=%d matched=%d selected=%d", scan.searched, scan.matched, len(selected)),
+		MatchedFileCount:  scan.matched,
+		SelectedFileCount: len(selected),
+		PathHashes:        pathHashesForCandidates(selected, len(selected)),
+		Metadata: map[string]any{
+			"question_id":           query.questionID,
+			"seed_file_count":       scan.seedFileCount,
+			"reference_term_hashes": hashStringsForInvestigationTerms(scan.terms, 8),
+			"search_policy":         "symbol_and_selector_terms_only",
+			"selection_policy":      "bounded_parent_usage_lookup",
+		},
+		Confidence: 0.68,
+	}
+}
+
+func hashStringsForInvestigationTerms(values []string, limit int) []string {
+	values = limitStrings(uniqueStrings(values), limit)
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, hashString(value))
+	}
+	return out
 }
 
 func reviewInvestigationEvidence(ctx context.Context, candidates []codeCandidateFile, project *model.ProjectContext, brief *model.RequirementBrief) (codeInvestigationEvidenceReview, error) {
