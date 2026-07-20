@@ -1046,6 +1046,54 @@ func TestProjectInvestigationToolSuitePlansNextActionFromObservationLLM(t *testi
 	}
 }
 
+func TestProjectInvestigationPlannerReceivesRedactedTransientSnippetObservation(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const launchSecret = "super-secret"
+			const ownerEmail = "reader@example.com"
+			const route = "/workspace/orbital-lab"
+			return <button data-testid="launch-orbital-lab">Launch orbital lab</button>
+		}
+	`)
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	planner := &snippetObservationCapturePlannerLLM{}
+	result, err := NewProjectInvestigationToolSuite(planner).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        1,
+			FilesPerRound:          1,
+			TotalFileLimit:         3,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_snippet_observation", ProductDescription: "演示 orbital lab"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_snippet_observation", Objective: "演示 orbital lab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(planner.firstSnippetObservationRequest, "launch-orbital-lab") {
+		t.Fatalf("expected transient planner payload to include redacted snippet context, got %s", planner.firstSnippetObservationRequest)
+	}
+	if strings.Contains(planner.firstSnippetObservationRequest, "super-secret") || strings.Contains(planner.firstSnippetObservationRequest, "reader@example.com") {
+		t.Fatalf("transient planner payload leaked sensitive snippet data: %s", planner.firstSnippetObservationRequest)
+	}
+	traceJSON, err := json.Marshal(result.Trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(traceJSON), "Launch orbital lab") || strings.Contains(string(traceJSON), "super-secret") || strings.Contains(string(traceJSON), "reader@example.com") {
+		t.Fatalf("persistent investigation trace leaked raw snippet text: %s", string(traceJSON))
+	}
+}
+
 func TestProjectInvestigationToolSuiteSurfacesNextActionsForRemainingGaps(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -1589,5 +1637,55 @@ func (observationNextActionPlannerLLM) GenerateText(ctx context.Context, task co
 }
 
 func (observationNextActionPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
+}
+
+type snippetObservationCapturePlannerLLM struct {
+	lastNextActionRequest          string
+	firstSnippetObservationRequest string
+}
+
+func (l *snippetObservationCapturePlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	var data []byte
+	switch target.(type) {
+	case *codeInvestigationLLMOutput:
+		data = []byte(`{
+			"summary": "locate the UI route first",
+			"queries": [
+				{"purpose": "定位 orbital lab 控件", "terms": ["orbital", "lab", "launch-orbital-lab"]}
+			],
+			"confidence": 0.84
+		}`)
+	case *codeInvestigationNextActionsLLMOutput:
+		l.lastNextActionRequest = req.User
+		if l.firstSnippetObservationRequest == "" && strings.Contains(req.User, `"snippet_observations":[`) {
+			l.firstSnippetObservationRequest = req.User
+		}
+		data = []byte(`{
+			"summary": "use the observed UI context to continue backend lookup",
+			"next_actions": [
+				{
+					"tool": "grep_text",
+					"reason": "snippet observation showed the launch control; continue with handler terms.",
+					"query_terms": ["orbital", "handler"],
+					"expected_evidence": ["api_or_data_model"]
+				}
+			],
+			"confidence": 0.82
+		}`)
+	default:
+		data = []byte(`{}`)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-snippet-observation-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (l *snippetObservationCapturePlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (l *snippetObservationCapturePlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
 	return nil, nil
 }

@@ -400,16 +400,27 @@ type codeInvestigationToolPolicy struct {
 }
 
 type codeSearchMatch struct {
-	candidate codeCandidateFile
-	score     int
-	terms     []string
-	snippets  []model.CodeSnippetRef
+	candidate           codeCandidateFile
+	score               int
+	terms               []string
+	snippets            []model.CodeSnippetRef
+	snippetObservations []codeSnippetObservation
 }
 
 type codeSearchResult struct {
 	matches   []codeSearchMatch
 	searched  int
 	bytesRead int64
+}
+
+type codeSnippetObservation struct {
+	ID           string
+	PathHash     string
+	LineStart    int
+	LineEnd      int
+	MatchedTerms []string
+	SignalKinds  []string
+	Preview      string
 }
 
 type importFollowScan struct {
@@ -647,6 +658,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		trace.TotalBytesRead += search.bytesRead
 		selectedThisRound := []codeCandidateFile{}
 		snippetsThisRound := []model.CodeSnippetRef{}
+		snippetObservationsThisRound := []codeSnippetObservation{}
 		for _, match := range search.matches {
 			if len(selectedThisRound) >= budget.FilesPerRound || len(selected) >= budget.TotalFileLimit {
 				break
@@ -654,6 +666,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			if add(match.candidate) {
 				selectedThisRound = append(selectedThisRound, match.candidate)
 				snippetsThisRound = append(snippetsThisRound, match.snippets...)
+				snippetObservationsThisRound = append(snippetObservationsThisRound, match.snippetObservations...)
 			}
 		}
 		grepCallID := fmt.Sprintf("tool_grep_text_%d_%s", i+1, shortHash(query.query))
@@ -763,7 +776,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		review.gaps = evidenceGapsForExpected(review, query.expectedEvidence)
 		reviewCall := evidenceReviewToolCall(i+1, query, review)
 		trace.ToolCalls = append(trace.ToolCalls, reviewCall)
-		nextActions, nextActionPlanningCall := s.planNextActionsFromEvidenceObservation(ctx, query, review, trace, budget, reviewCall.ID)
+		nextActions, nextActionPlanningCall := s.planNextActionsFromEvidenceObservation(ctx, query, review, trace, budget, snippetObservationsThisRound, reviewCall.ID)
 		nextActionPlanningCallID := ""
 		if nextActionPlanningCall.ID != "" {
 			nextActionPlanningCallID = nextActionPlanningCall.ID
@@ -1370,6 +1383,7 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 		score := keywordMatchScore(query.terms, filepath.ToSlash(candidate.rel), candidate.name) * 30
 		matchedTerms := matchedTermsForText(query.terms, filepath.ToSlash(candidate.rel)+" "+candidate.name)
 		snippetRefs := []model.CodeSnippetRef{}
+		snippetObservations := []codeSnippetObservation{}
 		if candidate.size <= budget.ToolSearchBytesPerFile {
 			data, err := os.ReadFile(candidate.path)
 			if err == nil {
@@ -1380,7 +1394,7 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 				if contentScore > 0 {
 					score += contentScore*50 + minInt(len(data)/1024, 20)
 					matchedTerms = uniqueStrings(append(matchedTerms, matchedTermsForText(query.terms, text)...))
-					snippetRefs = snippetRefsForQuery(candidate, data, query)
+					snippetRefs, snippetObservations = snippetEvidenceForQuery(candidate, data, query)
 				}
 			}
 		} else if score > 0 {
@@ -1395,7 +1409,7 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 		if score <= 0 {
 			continue
 		}
-		result.matches = append(result.matches, codeSearchMatch{candidate: candidate, score: score + candidate.score/4, terms: matchedTerms, snippets: snippetRefs})
+		result.matches = append(result.matches, codeSearchMatch{candidate: candidate, score: score + candidate.score/4, terms: matchedTerms, snippets: snippetRefs, snippetObservations: snippetObservations})
 	}
 	sort.SliceStable(result.matches, func(i, j int) bool {
 		if result.matches[i].score == result.matches[j].score {
@@ -2218,14 +2232,15 @@ func evidenceSnippetToolCall(id string, query codeInvestigationQuery, snippets [
 	}
 }
 
-func snippetRefsForQuery(candidate codeCandidateFile, data []byte, query codeInvestigationQuery) []model.CodeSnippetRef {
+func snippetEvidenceForQuery(candidate codeCandidateFile, data []byte, query codeInvestigationQuery) ([]model.CodeSnippetRef, []codeSnippetObservation) {
 	if len(data) == 0 || len(query.terms) == 0 {
-		return nil
+		return nil, nil
 	}
 	lines := strings.Split(string(data), "\n")
 	pathHash := hashString(filepath.ToSlash(candidate.rel))
 	contentHash := hashBytes(data)
 	refs := []model.CodeSnippetRef{}
+	observations := []codeSnippetObservation{}
 	seen := map[string]bool{}
 	for index, line := range lines {
 		matched := matchedTermsForText(query.terms, line)
@@ -2240,21 +2255,33 @@ func snippetRefsForQuery(candidate codeCandidateFile, data []byte, query codeInv
 		}
 		seen[key] = true
 		window := strings.Join(lines[lineStart-1:lineEnd], "\n")
+		redactedPreview := redactSensitiveInvestigationPreview(window)
+		signalKinds := signalKindsForSnippet(candidate.name, window)
+		snippetID := "snippet_" + shortHash(key+"|"+query.query)
 		refs = append(refs, model.CodeSnippetRef{
-			ID:                    "snippet_" + shortHash(key+"|"+query.query),
+			ID:                    snippetID,
 			PathHashSHA256:        pathHash,
 			ContentSHA256:         contentHash,
 			LineStart:             lineStart,
 			LineEnd:               lineEnd,
 			MatchedTerms:          limitStrings(matched, 6),
-			SignalKinds:           signalKindsForSnippet(candidate.name, window),
-			RedactedPreviewSHA256: hashString(redactSensitiveInvestigationPreview(window)),
+			SignalKinds:           signalKinds,
+			RedactedPreviewSHA256: hashString(redactedPreview),
+		})
+		observations = append(observations, codeSnippetObservation{
+			ID:           snippetID,
+			PathHash:     pathHash,
+			LineStart:    lineStart,
+			LineEnd:      lineEnd,
+			MatchedTerms: limitStrings(matched, 6),
+			SignalKinds:  signalKinds,
+			Preview:      redactedPreview,
 		})
 		if len(refs) >= 3 {
 			break
 		}
 	}
-	return refs
+	return refs, observations
 }
 
 func signalKindsForSnippet(name string, text string) []string {
@@ -2360,7 +2387,7 @@ func adaptiveQueryFromEvidenceReview(previous codeInvestigationQuery, review cod
 	}, true
 }
 
-func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(ctx context.Context, query codeInvestigationQuery, review codeInvestigationEvidenceReview, trace *model.CodeInvestigationTrace, budget model.CodeReadBudget, dependsOnToolCallID string) ([]model.CodeInvestigationNextAction, model.CodeInvestigationToolCall) {
+func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(ctx context.Context, query codeInvestigationQuery, review codeInvestigationEvidenceReview, trace *model.CodeInvestigationTrace, budget model.CodeReadBudget, snippetObservations []codeSnippetObservation, dependsOnToolCallID string) ([]model.CodeInvestigationNextAction, model.CodeInvestigationToolCall) {
 	if len(review.gaps) == 0 {
 		return nil, model.CodeInvestigationToolCall{}
 	}
@@ -2412,6 +2439,7 @@ func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(c
 			"depends_on":  dependsOnToolCallID,
 		},
 		"recent_tool_observations": compactRecentInvestigationToolCalls(trace, 8),
+		"snippet_observations":     compactSnippetObservationsForPlanner(snippetObservations, 6),
 		"budget": map[string]any{
 			"remaining_search_files": maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched),
 			"remaining_selected":     maxInt(0, budget.TotalFileLimit-trace.TotalFilesSelected),
@@ -2648,6 +2676,33 @@ func compactRecentInvestigationToolCalls(trace *model.CodeInvestigationTrace, li
 			}
 		}
 		out = append(out, item)
+	}
+	return out
+}
+
+func compactSnippetObservationsForPlanner(values []codeSnippetObservation, limit int) []map[string]any {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	out := []map[string]any{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		if len(out) >= limit {
+			break
+		}
+		if value.ID == "" || seen[value.ID] || strings.TrimSpace(value.Preview) == "" {
+			continue
+		}
+		seen[value.ID] = true
+		out = append(out, map[string]any{
+			"id":            value.ID,
+			"path_hash":     value.PathHash,
+			"line_start":    value.LineStart,
+			"line_end":      value.LineEnd,
+			"matched_terms": limitStrings(value.MatchedTerms, 6),
+			"signal_kinds":  limitStrings(value.SignalKinds, 6),
+			"preview":       value.Preview,
+		})
 	}
 	return out
 }
