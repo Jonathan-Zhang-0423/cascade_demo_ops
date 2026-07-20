@@ -587,8 +587,12 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			continue
 		}
 		executedQueries[queryKey] = true
+		grepBudget, ok := budgetForRemainingToolSearch(budget, trace.TotalFilesSearched)
+		if !ok {
+			break
+		}
 		start = time.Now()
-		search, err := searchCodeCandidatesForQuery(ctx, candidates, selectedKeys, query, budget)
+		search, err := searchCodeCandidatesForQuery(ctx, candidates, selectedKeys, query, grepBudget)
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
 		}
@@ -611,7 +615,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			Tool:              "grep_text",
 			Purpose:           query.purpose,
 			Query:             query.query,
-			InputSummary:      fmt.Sprintf("terms=%s search_file_limit=%d bytes_per_file=%d", strings.Join(query.terms, ","), budget.ToolSearchFileLimit, budget.ToolSearchBytesPerFile),
+			InputSummary:      fmt.Sprintf("terms=%s search_file_limit=%d bytes_per_file=%d", strings.Join(query.terms, ","), grepBudget.ToolSearchFileLimit, grepBudget.ToolSearchBytesPerFile),
 			OutputSummary:     fmt.Sprintf("searched=%d matched=%d selected=%d", search.searched, len(search.matches), len(selectedThisRound)),
 			MatchedFileCount:  len(search.matches),
 			SelectedFileCount: len(selectedThisRound),
@@ -646,7 +650,12 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			trace.ToolCalls = append(trace.ToolCalls, followImportsToolCall(followCallID, query, importScan, followedThisRound))
 		}
 		referenceSources := append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...)
-		referencedFiles, referenceScan, err := findReferencesFromCandidates(ctx, referenceSources, candidates, selectedKeys, budget)
+		referenceBudget, ok := budgetForRemainingToolSearch(budget, trace.TotalFilesSearched)
+		referencedFiles := []codeCandidateFile{}
+		referenceScan := referenceSearchScan{}
+		if ok {
+			referencedFiles, referenceScan, err = findReferencesFromCandidates(ctx, referenceSources, candidates, selectedKeys, referenceBudget)
+		}
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
 		}
@@ -667,7 +676,12 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			trace.ToolCalls = append(trace.ToolCalls, findReferencesToolCall(referenceCallID, query, referenceScan, referencedThisRound))
 		}
 		apiSources := append(append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...), referencedThisRound...)
-		apiHandlerFiles, apiHandlerScan, err := findAPIHandlersFromCandidates(ctx, apiSources, candidates, selectedKeys, budget)
+		apiBudget, ok := budgetForRemainingToolSearch(budget, trace.TotalFilesSearched)
+		apiHandlerFiles := []codeCandidateFile{}
+		apiHandlerScan := apiHandlerSearchScan{}
+		if ok {
+			apiHandlerFiles, apiHandlerScan, err = findAPIHandlersFromCandidates(ctx, apiSources, candidates, selectedKeys, apiBudget)
+		}
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
 		}
@@ -1251,6 +1265,37 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 	return result, nil
 }
 
+func budgetForRemainingToolSearch(budget model.CodeReadBudget, searched int) (model.CodeReadBudget, bool) {
+	if budget.ToolSearchFileLimit <= 0 {
+		return budget, true
+	}
+	remaining := budget.ToolSearchFileLimit - searched
+	if remaining <= 0 {
+		return budget, false
+	}
+	if remaining < budget.ToolSearchFileLimit {
+		budget.ToolSearchFileLimit = remaining
+	}
+	return budget, true
+}
+
+func derivedToolSearchLimit(limit int, divisor int, floor int) int {
+	if limit <= 0 {
+		return floor
+	}
+	if divisor <= 0 {
+		divisor = 1
+	}
+	scaled := limit / divisor
+	if scaled <= 0 {
+		scaled = 1
+	}
+	if limit < floor {
+		return limit
+	}
+	return maxInt(floor, scaled)
+}
+
 func codeCandidateIndex(candidates []codeCandidateFile) map[string]codeCandidateFile {
 	index := map[string]codeCandidateFile{}
 	for _, candidate := range candidates {
@@ -1603,7 +1648,7 @@ func findReferencesFromCandidates(ctx context.Context, seeds []codeCandidateFile
 		if selectedKeys[candidate.rel] || seedKeys[candidate.rel] || !candidateWorthReferenceSearch(candidate) {
 			continue
 		}
-		if scan.searched >= maxInt(20, budget.ToolSearchFileLimit/2) {
+		if scan.searched >= derivedToolSearchLimit(budget.ToolSearchFileLimit, 2, 20) {
 			break
 		}
 		score := keywordMatchScore(scan.terms, filepath.ToSlash(candidate.rel), candidate.name) * 10
@@ -1771,7 +1816,7 @@ func findAPIHandlersFromCandidates(ctx context.Context, seeds []codeCandidateFil
 		if selectedKeys[candidate.rel] || seedKeys[candidate.rel] || !candidateWorthAPIHandlerSearch(candidate) {
 			continue
 		}
-		if scan.searched >= maxInt(16, budget.ToolSearchFileLimit/3) {
+		if scan.searched >= derivedToolSearchLimit(budget.ToolSearchFileLimit, 3, 16) {
 			break
 		}
 		score := apiHandlerPathScore(apiPaths, filepath.ToSlash(candidate.rel), candidate.name) * 8

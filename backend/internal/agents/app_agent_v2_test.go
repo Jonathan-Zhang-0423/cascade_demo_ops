@@ -136,6 +136,47 @@ func TestCodeReaderUsesIntentDrivenBudget(t *testing.T) {
 	}
 }
 
+func TestProjectInvestigationToolSuiteRespectsGlobalToolSearchBudget(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/pages/projects/NewProject.tsx", `
+		export function NewProjectPage() {
+			const route = "/projects/new"
+			return <button data-testid="new-project">新建项目</button>
+		}
+	`)
+	for i := 0; i < 60; i++ {
+		writeFixtureFile(t, root, filepath.ToSlash(filepath.Join("src", "features", fmt.Sprintf("Filler%02d.tsx", i))), `
+			export function Filler() { return <button data-testid="profile-avatar">avatar</button> }
+		`)
+	}
+	budget := model.CodeReadBudget{
+		Mode:                   "tool_driven_intent_drilldown",
+		RepoIndexFileLimit:     1,
+		DrilldownRounds:        4,
+		FilesPerRound:          1,
+		TotalFileLimit:         8,
+		MaxFileBytes:           80 * 1024,
+		ToolSearchFileLimit:    12,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  8,
+	}
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(nil).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget:     budget,
+		Project:    &model.ProjectContext{ID: "project_global_search_budget", ProductDescription: "演示新建项目，俄罗斯方块，构建模式，agent实际构建"},
+		Brief:      &model.RequirementBrief{ProjectID: "project_global_search_budget", Objective: "演示新建项目，俄罗斯方块，构建模式，agent实际构建"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Trace.TotalFilesSearched > budget.ToolSearchFileLimit {
+		t.Fatalf("tool search should be globally budgeted, searched=%d limit=%d calls=%+v", result.Trace.TotalFilesSearched, budget.ToolSearchFileLimit, result.Trace.ToolCalls)
+	}
+}
+
 func TestCodeReaderInfersFilesystemRoutesFromSelectedFiles(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"next":"latest","react":"latest"}}`)
