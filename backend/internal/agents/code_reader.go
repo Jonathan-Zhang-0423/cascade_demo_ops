@@ -405,6 +405,19 @@ type importFollowScan struct {
 	sourceFileCount int
 	importCount     int
 	bytesRead       int64
+	aliasRuleCount  int
+	aliasRuleHashes []string
+}
+
+type importAliasRule struct {
+	Prefix       string
+	TargetPrefix string
+}
+
+type importAliasScan struct {
+	configFileCount int
+	ruleCount       int
+	bytesRead       int64
 }
 
 type referenceSearchScan struct {
@@ -515,6 +528,11 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 	selected := []codeCandidateFile{}
 	selectedKeys := map[string]bool{}
 	candidateIndex := codeCandidateIndex(candidates)
+	importAliasRules, importAliasScan, err := importAliasRulesFromCandidates(ctx, candidates, budget)
+	if err != nil {
+		return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+	}
+	trace.TotalBytesRead += importAliasScan.bytesRead
 	add := func(candidate codeCandidateFile) bool {
 		if len(selected) >= budget.TotalFileLimit || selectedKeys[candidate.rel] {
 			return false
@@ -604,7 +622,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			snippetCallID = fmt.Sprintf("tool_read_evidence_snippets_%d_%s", i+1, shortHash(query.query))
 			trace.ToolCalls = append(trace.ToolCalls, evidenceSnippetToolCall(snippetCallID, query, snippetsThisRound))
 		}
-		followedImports, importScan, err := followImportsFromCandidates(ctx, selectedThisRound, candidateIndex, selectedKeys, budget)
+		followedImports, importScan, err := followImportsFromCandidates(ctx, selectedThisRound, candidateIndex, selectedKeys, budget, importAliasRules)
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
 		}
@@ -1234,8 +1252,11 @@ func codeCandidateIndex(candidates []codeCandidateFile) map[string]codeCandidate
 	return index
 }
 
-func followImportsFromCandidates(ctx context.Context, sources []codeCandidateFile, index map[string]codeCandidateFile, selectedKeys map[string]bool, budget model.CodeReadBudget) ([]codeCandidateFile, importFollowScan, error) {
-	scan := importFollowScan{}
+func followImportsFromCandidates(ctx context.Context, sources []codeCandidateFile, index map[string]codeCandidateFile, selectedKeys map[string]bool, budget model.CodeReadBudget, aliasRules []importAliasRule) ([]codeCandidateFile, importFollowScan, error) {
+	scan := importFollowScan{
+		aliasRuleCount:  len(aliasRules),
+		aliasRuleHashes: importAliasRuleHashes(aliasRules, 8),
+	}
 	if len(sources) == 0 || len(index) == 0 {
 		return nil, scan, nil
 	}
@@ -1254,13 +1275,13 @@ func followImportsFromCandidates(ctx context.Context, sources []codeCandidateFil
 		}
 		scan.sourceFileCount++
 		scan.bytesRead += int64(len(data))
-		imports := relativeImportSpecs(string(data))
+		imports := relativeImportSpecs(string(data), aliasRules)
 		scan.importCount += len(imports)
 		for _, spec := range imports {
 			if len(out) >= minInt(8, maxInt(2, budget.FilesPerRound*2)) {
 				return out, scan, nil
 			}
-			candidate, ok := resolveImportCandidate(source, spec, index)
+			candidate, ok := resolveImportCandidate(source, spec, index, aliasRules)
 			if !ok || selectedKeys[candidate.rel] || seen[candidate.rel] || shouldSkipCodeFileRel(candidate.rel, candidate.name) {
 				continue
 			}
@@ -1277,7 +1298,148 @@ func followImportsFromCandidates(ctx context.Context, sources []codeCandidateFil
 	return out, scan, nil
 }
 
-func relativeImportSpecs(text string) []string {
+func importAliasRulesFromCandidates(ctx context.Context, candidates []codeCandidateFile, budget model.CodeReadBudget) ([]importAliasRule, importAliasScan, error) {
+	scan := importAliasScan{}
+	rules := []importAliasRule{}
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return rules, scan, err
+		}
+		if !candidateWorthAliasConfig(candidate) {
+			continue
+		}
+		if scan.configFileCount >= 8 {
+			break
+		}
+		if candidate.size > budget.ToolSearchBytesPerFile {
+			continue
+		}
+		data, err := os.ReadFile(candidate.path)
+		if err != nil {
+			continue
+		}
+		scan.configFileCount++
+		scan.bytesRead += int64(len(data))
+		configRules := importAliasRulesFromJSONConfig(candidate.rel, data)
+		rules = append(rules, configRules...)
+	}
+	rules = dedupeImportAliasRules(rules)
+	scan.ruleCount = len(rules)
+	return rules, scan, nil
+}
+
+func candidateWorthAliasConfig(candidate codeCandidateFile) bool {
+	name := strings.ToLower(candidate.name)
+	return name == "tsconfig.json" || name == "jsconfig.json" ||
+		(strings.HasPrefix(name, "tsconfig.") && strings.HasSuffix(name, ".json")) ||
+		(strings.HasPrefix(name, "jsconfig.") && strings.HasSuffix(name, ".json"))
+}
+
+func importAliasRulesFromJSONConfig(configRel string, data []byte) []importAliasRule {
+	type tsConfig struct {
+		CompilerOptions struct {
+			BaseURL string              `json:"baseUrl"`
+			Paths   map[string][]string `json:"paths"`
+		} `json:"compilerOptions"`
+	}
+	var parsed tsConfig
+	if err := json.Unmarshal(cleanJSONConfig(data), &parsed); err != nil {
+		return nil
+	}
+	configDir := filepath.ToSlash(filepath.Dir(filepath.ToSlash(configRel)))
+	if configDir == "." {
+		configDir = ""
+	}
+	baseURL := strings.Trim(filepath.ToSlash(parsed.CompilerOptions.BaseURL), "/")
+	rules := []importAliasRule{}
+	for alias, targets := range parsed.CompilerOptions.Paths {
+		for _, target := range targets {
+			if rule, ok := importAliasRuleFromConfig(alias, target, configDir, baseURL); ok {
+				rules = append(rules, rule)
+			}
+		}
+	}
+	return rules
+}
+
+func cleanJSONConfig(data []byte) []byte {
+	text := string(data)
+	lineComment := regexp.MustCompile(`(?m)//.*$`)
+	blockComment := regexp.MustCompile(`(?s)/\*.*?\*/`)
+	text = lineComment.ReplaceAllString(text, "")
+	text = blockComment.ReplaceAllString(text, "")
+	trailingComma := regexp.MustCompile(`,\s*([}\]])`)
+	text = trailingComma.ReplaceAllString(text, "$1")
+	return []byte(text)
+}
+
+func importAliasRuleFromConfig(alias string, target string, configDir string, baseURL string) (importAliasRule, bool) {
+	alias = filepath.ToSlash(strings.TrimSpace(alias))
+	target = filepath.ToSlash(strings.TrimSpace(target))
+	if alias == "" || target == "" || strings.Contains(alias, "\x00") || strings.Contains(target, "\x00") {
+		return importAliasRule{}, false
+	}
+	aliasPrefix := strings.TrimSuffix(alias, "*")
+	targetPrefix := strings.TrimSuffix(target, "*")
+	if aliasPrefix == "" || targetPrefix == "" || strings.Contains(aliasPrefix, "://") || strings.Contains(targetPrefix, "://") {
+		return importAliasRule{}, false
+	}
+	if strings.HasPrefix(targetPrefix, "/") || strings.Contains(targetPrefix, ":") {
+		return importAliasRule{}, false
+	}
+	baseParts := []string{}
+	if configDir != "" {
+		baseParts = append(baseParts, configDir)
+	}
+	if baseURL != "" && baseURL != "." {
+		baseParts = append(baseParts, baseURL)
+	}
+	baseParts = append(baseParts, targetPrefix)
+	targetRel := filepath.ToSlash(filepath.Clean(filepath.Join(baseParts...)))
+	targetRel = strings.Trim(targetRel, "/")
+	if targetRel == "." || targetRel == "" || strings.HasPrefix(targetRel, "../") || strings.Contains(targetRel, "/../") {
+		return importAliasRule{}, false
+	}
+	lowerTarget := strings.ToLower(targetRel)
+	if pathHasAnySegment(lowerTarget, "node_modules", "dist", "build", "out", ".next", "coverage", "vendor") {
+		return importAliasRule{}, false
+	}
+	lowerAlias := strings.ToLower(aliasPrefix)
+	if pathHasForbiddenPrefix(lowerAlias, []string{"/aigc", "/.well-known", "/v1/", "../"}) {
+		return importAliasRule{}, false
+	}
+	return importAliasRule{Prefix: aliasPrefix, TargetPrefix: targetRel}, true
+}
+
+func dedupeImportAliasRules(values []importAliasRule) []importAliasRule {
+	seen := map[string]bool{}
+	out := []importAliasRule{}
+	for _, value := range values {
+		key := value.Prefix + "=>" + value.TargetPrefix
+		if value.Prefix == "" || value.TargetPrefix == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if len(out[i].Prefix) == len(out[j].Prefix) {
+			return out[i].Prefix < out[j].Prefix
+		}
+		return len(out[i].Prefix) > len(out[j].Prefix)
+	})
+	return out
+}
+
+func importAliasRuleHashes(rules []importAliasRule, limit int) []string {
+	values := []string{}
+	for _, rule := range rules {
+		values = append(values, rule.Prefix+"=>"+rule.TargetPrefix)
+	}
+	return hashStringsForInvestigationTerms(values, limit)
+}
+
+func relativeImportSpecs(text string, aliasRules []importAliasRule) []string {
 	specs := []string{}
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?m)\bimport\s+(?:[^'"]+\s+from\s+)?['"]([^'"]+)['"]`),
@@ -1290,7 +1452,7 @@ func relativeImportSpecs(text string) []string {
 				continue
 			}
 			spec := strings.TrimSpace(match[1])
-			if importSpecAllowedForFollow(spec) {
+			if importSpecAllowedForFollow(spec, aliasRules) {
 				specs = append(specs, spec)
 			}
 		}
@@ -1298,7 +1460,7 @@ func relativeImportSpecs(text string) []string {
 	return limitStrings(uniqueStrings(specs), 24)
 }
 
-func importSpecAllowedForFollow(spec string) bool {
+func importSpecAllowedForFollow(spec string, aliasRules []importAliasRule) bool {
 	if spec == "" || strings.Contains(spec, "\x00") || strings.Contains(spec, "://") {
 		return false
 	}
@@ -1306,11 +1468,16 @@ func importSpecAllowedForFollow(spec string) bool {
 	if strings.HasPrefix(lower, ".") || strings.HasPrefix(lower, "@/") || strings.HasPrefix(lower, "src/") {
 		return !pathHasForbiddenPrefix(lower, []string{"/aigc", "/.well-known", "/v1/", "../..", "/node_modules", "/dist", "/build"})
 	}
+	for _, rule := range aliasRules {
+		if rule.Prefix != "" && strings.HasPrefix(spec, rule.Prefix) {
+			return !pathHasForbiddenPrefix(lower, []string{"/aigc", "/.well-known", "/v1/", "../..", "/node_modules", "/dist", "/build"})
+		}
+	}
 	return false
 }
 
-func resolveImportCandidate(source codeCandidateFile, spec string, index map[string]codeCandidateFile) (codeCandidateFile, bool) {
-	candidates := importResolutionKeys(source, spec)
+func resolveImportCandidate(source codeCandidateFile, spec string, index map[string]codeCandidateFile, aliasRules []importAliasRule) (codeCandidateFile, bool) {
+	candidates := importResolutionKeys(source, spec, aliasRules)
 	for _, key := range candidates {
 		if candidate, ok := index[strings.ToLower(filepath.ToSlash(key))]; ok {
 			return candidate, true
@@ -1319,7 +1486,7 @@ func resolveImportCandidate(source codeCandidateFile, spec string, index map[str
 	return codeCandidateFile{}, false
 }
 
-func importResolutionKeys(source codeCandidateFile, spec string) []string {
+func importResolutionKeys(source codeCandidateFile, spec string, aliasRules []importAliasRule) []string {
 	spec = filepath.ToSlash(strings.TrimSpace(spec))
 	keys := []string{}
 	addBase := func(base string) {
@@ -1344,6 +1511,13 @@ func importResolutionKeys(source codeCandidateFile, spec string) []string {
 	case strings.HasPrefix(spec, "src/"):
 		addBase(spec)
 	}
+	for _, rule := range aliasRules {
+		if rule.Prefix == "" || !strings.HasPrefix(spec, rule.Prefix) {
+			continue
+		}
+		remainder := strings.TrimPrefix(spec, rule.Prefix)
+		addBase(filepath.ToSlash(filepath.Join(rule.TargetPrefix, remainder)))
+	}
 	return uniqueStrings(keys)
 }
 
@@ -1362,7 +1536,9 @@ func followImportsToolCall(id string, query codeInvestigationQuery, scan importF
 			"question_id":       query.questionID,
 			"source_file_count": scan.sourceFileCount,
 			"import_count":      scan.importCount,
-			"policy":            "relative_imports_and_src_alias_only",
+			"alias_rule_count":  scan.aliasRuleCount,
+			"alias_rule_hashes": scan.aliasRuleHashes,
+			"policy":            "relative_imports_src_alias_and_configured_tsconfig_paths_only",
 		},
 		Confidence: 0.7,
 	}

@@ -458,6 +458,90 @@ func TestCodeReaderFollowsImportsFromGrepSelectedFiles(t *testing.T) {
 	}
 }
 
+func TestCodeReaderFollowsConfiguredAliasImports(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "tsconfig.json", `{
+		"compilerOptions": {
+			"baseUrl": ".",
+			"paths": {
+				"@features/*": ["src/features/*"],
+				"@unsafe/*": ["node_modules/*"]
+			}
+		}
+	}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		import { Wizard } from "@features/Wizard"
+		import React from "react"
+		export function Flow() {
+			const route = "/workspace/projects/new"
+			return <Wizard />
+		}
+	`)
+	writeFixtureFile(t, root, "src/features/Wizard.tsx", `
+		export function Wizard() {
+			const endpoint = "/api/workflows/start"
+			return <button data-testid="wizard-next">Continue</button>
+		}
+	`)
+	writeFixtureFile(t, root, "src/features/ChromeShell.tsx", `
+		export function ChromeShell() { return <button data-testid="profile-avatar">avatar</button> }
+	`)
+	project := &model.ProjectContext{
+		ID:                 "project_alias_imports",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示新建项目，俄罗斯方块",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_alias_imports",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_alias_imports",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"新建项目", "俄罗斯方块"}}
+	agent := NewCodeReaderAgent()
+	agent.Budget = model.CodeReadBudget{
+		Mode:                   "tool_driven_intent_drilldown",
+		RepoIndexFileLimit:     1,
+		DrilldownRounds:        1,
+		FilesPerRound:          1,
+		TotalFileLimit:         4,
+		MaxFileBytes:           80 * 1024,
+		ToolSearchFileLimit:    40,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  10,
+	}
+
+	snapshots, err := agent.ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	if !investigationHasTool(snapshot.InvestigationTrace, "follow_imports") {
+		t.Fatalf("expected follow_imports tool call, got %+v", snapshot.InvestigationTrace.ToolCalls)
+	}
+	if !selectorInsightContains(snapshot.Selectors, "[data-testid='wizard-next']") {
+		t.Fatalf("expected selector from alias imported component, got %+v", snapshot.Selectors)
+	}
+	if !apiInsightContains(snapshot.APIEndpoints, "/api/workflows/start") {
+		t.Fatalf("expected API evidence from alias imported component, got %+v", snapshot.APIEndpoints)
+	}
+	if selectorInsightContains(snapshot.Selectors, "[data-testid='profile-avatar']") {
+		t.Fatalf("unrelated alias-adjacent component should not be selected: %+v", snapshot.Selectors)
+	}
+	followCall := investigationToolCall(snapshot.InvestigationTrace, "follow_imports")
+	if followCall.Metadata["alias_rule_count"] != 1 {
+		t.Fatalf("expected only safe tsconfig alias rule to be used, got %+v", followCall.Metadata)
+	}
+	if hashes, ok := followCall.Metadata["alias_rule_hashes"].([]string); !ok || len(hashes) == 0 {
+		t.Fatalf("expected alias rules to be represented as hashes, got %+v", followCall.Metadata)
+	}
+	metadataJSON, _ := json.Marshal(followCall.Metadata)
+	if strings.Contains(string(metadataJSON), "@features") || strings.Contains(string(metadataJSON), "src/features") {
+		t.Fatalf("follow_imports metadata should hash alias rules, got %s", metadataJSON)
+	}
+}
+
 func TestCodeReaderFindsReferencesBackToParentRoute(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
