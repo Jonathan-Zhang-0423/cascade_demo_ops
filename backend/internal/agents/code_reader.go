@@ -400,6 +400,12 @@ type codeSearchResult struct {
 	bytesRead int64
 }
 
+type importFollowScan struct {
+	sourceFileCount int
+	importCount     int
+	bytesRead       int64
+}
+
 type codeInvestigationEvidenceReview struct {
 	fileCount      int
 	routeCount     int
@@ -489,6 +495,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 	trace.ToolCalls = append(trace.ToolCalls, s.shellMetadataToolCall(ctx, root, candidates))
 	selected := []codeCandidateFile{}
 	selectedKeys := map[string]bool{}
+	candidateIndex := codeCandidateIndex(candidates)
 	add := func(candidate codeCandidateFile) bool {
 		if len(selected) >= budget.TotalFileLimit || selectedKeys[candidate.rel] {
 			return false
@@ -578,14 +585,34 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			snippetCallID = fmt.Sprintf("tool_read_evidence_snippets_%d_%s", i+1, shortHash(query.query))
 			trace.ToolCalls = append(trace.ToolCalls, evidenceSnippetToolCall(snippetCallID, query, snippetsThisRound))
 		}
-		review, err := reviewInvestigationEvidence(ctx, selectedThisRound, project, brief)
+		followedImports, importScan, err := followImportsFromCandidates(ctx, selectedThisRound, candidateIndex, selectedKeys, budget)
+		if err != nil {
+			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+		}
+		trace.TotalBytesRead += importScan.bytesRead
+		followedThisRound := []codeCandidateFile{}
+		for _, candidate := range followedImports {
+			if len(followedThisRound) >= minInt(4, budget.FilesPerRound) || len(selected) >= budget.TotalFileLimit {
+				break
+			}
+			if add(candidate) {
+				followedThisRound = append(followedThisRound, candidate)
+			}
+		}
+		followCallID := ""
+		if len(followedThisRound) > 0 || importScan.importCount > 0 {
+			followCallID = fmt.Sprintf("tool_follow_imports_%d_%s", i+1, shortHash(query.query))
+			trace.ToolCalls = append(trace.ToolCalls, followImportsToolCall(followCallID, query, importScan, followedThisRound))
+		}
+		reviewCandidates := append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...)
+		review, err := reviewInvestigationEvidence(ctx, reviewCandidates, project, brief)
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
 		}
 		review.gaps = evidenceGapsForExpected(review, query.expectedEvidence)
 		reviewCall := evidenceReviewToolCall(i+1, query, review)
 		trace.ToolCalls = append(trace.ToolCalls, reviewCall)
-		applyEvidenceReviewToQuestion(trace, query, review, nonEmptyToolCallIDs(grepCallID, snippetCallID, reviewCall.ID)...)
+		applyEvidenceReviewToQuestion(trace, query, review, nonEmptyToolCallIDs(grepCallID, snippetCallID, followCallID, reviewCall.ID)...)
 		if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < budget.DrilldownRounds+2 {
 			nextKey := strings.Join(next.terms, "|")
 			if !executedQueries[nextKey] && !codeInvestigationQueryExists(queries, nextKey) {
@@ -1126,6 +1153,158 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 		result.matches = result.matches[:budget.ToolSearchResultLimit]
 	}
 	return result, nil
+}
+
+func codeCandidateIndex(candidates []codeCandidateFile) map[string]codeCandidateFile {
+	index := map[string]codeCandidateFile{}
+	for _, candidate := range candidates {
+		rel := filepath.ToSlash(candidate.rel)
+		lower := strings.ToLower(rel)
+		index[lower] = candidate
+		ext := strings.ToLower(filepath.Ext(rel))
+		if ext != "" {
+			index[strings.TrimSuffix(lower, ext)] = candidate
+		}
+		dir, file := filepath.Split(lower)
+		if strings.HasPrefix(file, "index.") {
+			index[strings.TrimSuffix(strings.TrimSuffix(dir, "/"), "\\")] = candidate
+		}
+	}
+	return index
+}
+
+func followImportsFromCandidates(ctx context.Context, sources []codeCandidateFile, index map[string]codeCandidateFile, selectedKeys map[string]bool, budget model.CodeReadBudget) ([]codeCandidateFile, importFollowScan, error) {
+	scan := importFollowScan{}
+	if len(sources) == 0 || len(index) == 0 {
+		return nil, scan, nil
+	}
+	out := []codeCandidateFile{}
+	seen := map[string]bool{}
+	for _, source := range sources {
+		if err := ctx.Err(); err != nil {
+			return out, scan, err
+		}
+		if source.size > budget.ToolSearchBytesPerFile {
+			continue
+		}
+		data, err := os.ReadFile(source.path)
+		if err != nil {
+			continue
+		}
+		scan.sourceFileCount++
+		scan.bytesRead += int64(len(data))
+		imports := relativeImportSpecs(string(data))
+		scan.importCount += len(imports)
+		for _, spec := range imports {
+			if len(out) >= minInt(8, maxInt(2, budget.FilesPerRound*2)) {
+				return out, scan, nil
+			}
+			candidate, ok := resolveImportCandidate(source, spec, index)
+			if !ok || selectedKeys[candidate.rel] || seen[candidate.rel] || shouldSkipCodeFileRel(candidate.rel, candidate.name) {
+				continue
+			}
+			seen[candidate.rel] = true
+			out = append(out, candidate)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].score == out[j].score {
+			return filepath.ToSlash(out[i].rel) < filepath.ToSlash(out[j].rel)
+		}
+		return out[i].score > out[j].score
+	})
+	return out, scan, nil
+}
+
+func relativeImportSpecs(text string) []string {
+	specs := []string{}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?m)\bimport\s+(?:[^'"]+\s+from\s+)?['"]([^'"]+)['"]`),
+		regexp.MustCompile(`(?m)\bexport\s+[^'"]+\s+from\s+['"]([^'"]+)['"]`),
+		regexp.MustCompile(`(?m)\brequire\(\s*['"]([^'"]+)['"]\s*\)`),
+	}
+	for _, pattern := range patterns {
+		for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			spec := strings.TrimSpace(match[1])
+			if importSpecAllowedForFollow(spec) {
+				specs = append(specs, spec)
+			}
+		}
+	}
+	return limitStrings(uniqueStrings(specs), 24)
+}
+
+func importSpecAllowedForFollow(spec string) bool {
+	if spec == "" || strings.Contains(spec, "\x00") || strings.Contains(spec, "://") {
+		return false
+	}
+	lower := strings.ToLower(spec)
+	if strings.HasPrefix(lower, ".") || strings.HasPrefix(lower, "@/") || strings.HasPrefix(lower, "src/") {
+		return !pathHasForbiddenPrefix(lower, []string{"/aigc", "/.well-known", "/v1/", "../..", "/node_modules", "/dist", "/build"})
+	}
+	return false
+}
+
+func resolveImportCandidate(source codeCandidateFile, spec string, index map[string]codeCandidateFile) (codeCandidateFile, bool) {
+	candidates := importResolutionKeys(source, spec)
+	for _, key := range candidates {
+		if candidate, ok := index[strings.ToLower(filepath.ToSlash(key))]; ok {
+			return candidate, true
+		}
+	}
+	return codeCandidateFile{}, false
+}
+
+func importResolutionKeys(source codeCandidateFile, spec string) []string {
+	spec = filepath.ToSlash(strings.TrimSpace(spec))
+	keys := []string{}
+	addBase := func(base string) {
+		base = strings.Trim(filepath.ToSlash(base), "/")
+		if base == "" {
+			return
+		}
+		keys = append(keys, base)
+		for _, ext := range []string{".tsx", ".ts", ".jsx", ".js", ".vue", ".svelte", ".go", ".json", ".css", ".scss"} {
+			keys = append(keys, base+ext)
+		}
+		for _, ext := range []string{".tsx", ".ts", ".jsx", ".js", ".vue", ".svelte"} {
+			keys = append(keys, filepath.ToSlash(filepath.Join(base, "index"+ext)))
+		}
+	}
+	switch {
+	case strings.HasPrefix(spec, "."):
+		base := filepath.Clean(filepath.Join(filepath.Dir(filepath.ToSlash(source.rel)), spec))
+		addBase(base)
+	case strings.HasPrefix(spec, "@/"):
+		addBase("src/" + strings.TrimPrefix(spec, "@/"))
+	case strings.HasPrefix(spec, "src/"):
+		addBase(spec)
+	}
+	return uniqueStrings(keys)
+}
+
+func followImportsToolCall(id string, query codeInvestigationQuery, scan importFollowScan, selected []codeCandidateFile) model.CodeInvestigationToolCall {
+	return model.CodeInvestigationToolCall{
+		ID:                id,
+		Tool:              "follow_imports",
+		Purpose:           "从 grep 命中文件小步跟随相对 import / src alias 到直接相关组件、hook、API 模块；不执行代码，不展开第三方包。",
+		Query:             query.query,
+		InputSummary:      fmt.Sprintf("source_files=%d imports_seen=%d", scan.sourceFileCount, scan.importCount),
+		OutputSummary:     fmt.Sprintf("followed_import_files=%d", len(selected)),
+		MatchedFileCount:  scan.importCount,
+		SelectedFileCount: len(selected),
+		PathHashes:        pathHashesForCandidates(selected, len(selected)),
+		Metadata: map[string]any{
+			"question_id":       query.questionID,
+			"source_file_count": scan.sourceFileCount,
+			"import_count":      scan.importCount,
+			"policy":            "relative_imports_and_src_alias_only",
+		},
+		Confidence: 0.7,
+	}
 }
 
 func reviewInvestigationEvidence(ctx context.Context, candidates []codeCandidateFile, project *model.ProjectContext, brief *model.RequirementBrief) (codeInvestigationEvidenceReview, error) {

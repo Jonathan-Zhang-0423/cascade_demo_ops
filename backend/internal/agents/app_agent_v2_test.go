@@ -320,6 +320,72 @@ func TestCodeReaderUsesGrepToolBeforeStructuredReads(t *testing.T) {
 	}
 }
 
+func TestCodeReaderFollowsImportsFromGrepSelectedFiles(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		import { Wizard } from "../components/Wizard"
+		export function Flow() {
+			const route = "/workspace/projects/new"
+			return <Wizard />
+		}
+	`)
+	writeFixtureFile(t, root, "src/components/Wizard.tsx", `
+		export function Wizard() {
+			const endpoint = "/api/workflows/start"
+			return <button data-testid="wizard-next">Continue</button>
+		}
+	`)
+	writeFixtureFile(t, root, "src/components/ChromeShell.tsx", `
+		export function ChromeShell() { return <button data-testid="profile-avatar">avatar</button> }
+	`)
+	project := &model.ProjectContext{
+		ID:                 "project_follow_imports",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示新建项目，俄罗斯方块",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_follow_imports",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_follow_imports",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"新建项目", "俄罗斯方块"}}
+	agent := NewCodeReaderAgent()
+	agent.Budget = model.CodeReadBudget{
+		Mode:                   "tool_driven_intent_drilldown",
+		RepoIndexFileLimit:     1,
+		DrilldownRounds:        1,
+		FilesPerRound:          1,
+		TotalFileLimit:         3,
+		MaxFileBytes:           80 * 1024,
+		ToolSearchFileLimit:    40,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  10,
+	}
+
+	snapshots, err := agent.ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	if snapshot.FileCount > 3 {
+		t.Fatalf("expected import following to remain budgeted, read %d files", snapshot.FileCount)
+	}
+	if !investigationHasTool(snapshot.InvestigationTrace, "follow_imports") {
+		t.Fatalf("expected follow_imports tool call, got %+v", snapshot.InvestigationTrace.ToolCalls)
+	}
+	if !selectorInsightContains(snapshot.Selectors, "[data-testid='wizard-next']") {
+		t.Fatalf("expected selector from imported component, got %+v", snapshot.Selectors)
+	}
+	if !apiInsightContains(snapshot.APIEndpoints, "/api/workflows/start") {
+		t.Fatalf("expected API evidence from imported component, got %+v", snapshot.APIEndpoints)
+	}
+	if selectorInsightContains(snapshot.Selectors, "[data-testid='profile-avatar']") {
+		t.Fatalf("unrelated chrome component should not be pulled by import following: %+v", snapshot.Selectors)
+	}
+}
+
 func TestCodeReaderLLMPlannerCanChooseNextGrepQuery(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
