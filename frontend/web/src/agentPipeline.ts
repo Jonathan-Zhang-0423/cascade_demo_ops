@@ -25,6 +25,7 @@ export type CodeSummaryView = {
   investigationMode: string;
   investigationQuestions: number;
   openInvestigationQuestions: number;
+  snippetWindows: number;
   degraded: boolean;
 };
 
@@ -103,6 +104,10 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
     investigationQuestions: snapshots.reduce((total, snapshot) => total + (snapshot.investigation_trace?.questions?.length ?? 0), 0),
     openInvestigationQuestions: snapshots.reduce(
       (total, snapshot) => total + (snapshot.investigation_trace?.questions?.filter((question) => question.status !== "answered").length ?? 0),
+      0,
+    ),
+    snippetWindows: snapshots.reduce(
+      (total, snapshot) => total + (snapshot.investigation_trace?.tool_calls?.reduce((sum, call) => sum + (call.snippet_refs?.length ?? 0), 0) ?? 0),
       0,
     ),
     degraded: hasRepoInput(workspace) && snapshots.length > 0 && fileCount === 0,

@@ -617,6 +617,8 @@ func compactCodeInvestigationTrace(trace *model.CodeInvestigationTrace) map[stri
 			"output_summary":      call.OutputSummary,
 			"matched_file_count":  call.MatchedFileCount,
 			"selected_file_count": call.SelectedFileCount,
+			"snippet_count":       len(call.SnippetRefs),
+			"snippet_refs":        compactCodeSnippetRefs(call.SnippetRefs, 6),
 			"confidence":          call.Confidence,
 			"fallback_reason":     call.FallbackReason,
 			"metadata":            compactInvestigationToolMetadata(call.Metadata),
@@ -651,6 +653,28 @@ func compactCodeInvestigationQuestions(questions []model.CodeInvestigationQuesti
 			"remaining_gaps":    question.RemainingGaps,
 			"evidence_summary":  question.EvidenceSummary,
 			"confidence":        question.Confidence,
+		})
+	}
+	return out
+}
+
+func compactCodeSnippetRefs(refs []model.CodeSnippetRef, maxItems int) []map[string]any {
+	if len(refs) == 0 || maxItems <= 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, minInt(len(refs), maxItems))
+	for _, ref := range refs {
+		if len(out) >= maxItems {
+			break
+		}
+		out = append(out, map[string]any{
+			"id":             ref.ID,
+			"path_hash":      ref.PathHashSHA256,
+			"line_start":     ref.LineStart,
+			"line_end":       ref.LineEnd,
+			"matched_terms":  ref.MatchedTerms,
+			"signal_kinds":   ref.SignalKinds,
+			"content_digest": ref.ContentSHA256,
 		})
 	}
 	return out

@@ -91,20 +91,32 @@ type CodeInvestigationQuestion struct {
 }
 
 type CodeInvestigationToolCall struct {
-	ID                string         `json:"id"`
-	Tool              string         `json:"tool"`
-	Purpose           string         `json:"purpose,omitempty"`
-	Query             string         `json:"query,omitempty"`
-	InputSummary      string         `json:"input_summary,omitempty"`
-	OutputSummary     string         `json:"output_summary,omitempty"`
-	MatchedFileCount  int            `json:"matched_file_count,omitempty"`
-	SelectedFileCount int            `json:"selected_file_count,omitempty"`
-	PathHashes        []string       `json:"path_hashes,omitempty"`
-	EvidenceRefs      []EvidenceRef  `json:"evidence_refs,omitempty"`
-	Metadata          map[string]any `json:"metadata,omitempty"`
-	Confidence        float64        `json:"confidence,omitempty"`
-	ElapsedMS         int64          `json:"elapsed_ms,omitempty"`
-	FallbackReason    string         `json:"fallback_reason,omitempty"`
+	ID                string           `json:"id"`
+	Tool              string           `json:"tool"`
+	Purpose           string           `json:"purpose,omitempty"`
+	Query             string           `json:"query,omitempty"`
+	InputSummary      string           `json:"input_summary,omitempty"`
+	OutputSummary     string           `json:"output_summary,omitempty"`
+	MatchedFileCount  int              `json:"matched_file_count,omitempty"`
+	SelectedFileCount int              `json:"selected_file_count,omitempty"`
+	PathHashes        []string         `json:"path_hashes,omitempty"`
+	SnippetRefs       []CodeSnippetRef `json:"snippet_refs,omitempty"`
+	EvidenceRefs      []EvidenceRef    `json:"evidence_refs,omitempty"`
+	Metadata          map[string]any   `json:"metadata,omitempty"`
+	Confidence        float64          `json:"confidence,omitempty"`
+	ElapsedMS         int64            `json:"elapsed_ms,omitempty"`
+	FallbackReason    string           `json:"fallback_reason,omitempty"`
+}
+
+type CodeSnippetRef struct {
+	ID                    string   `json:"id"`
+	PathHashSHA256        string   `json:"path_hash_sha256"`
+	ContentSHA256         string   `json:"content_sha256,omitempty"`
+	LineStart             int      `json:"line_start,omitempty"`
+	LineEnd               int      `json:"line_end,omitempty"`
+	MatchedTerms          []string `json:"matched_terms,omitempty"`
+	SignalKinds           []string `json:"signal_kinds,omitempty"`
+	RedactedPreviewSHA256 string   `json:"redacted_preview_sha256,omitempty"`
 }
 
 type RouteInsight struct {

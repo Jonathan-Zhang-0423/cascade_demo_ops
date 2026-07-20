@@ -190,6 +190,59 @@ func TestProjectInvestigationToolSuiteTracksQuestionProgress(t *testing.T) {
 	}
 }
 
+func TestProjectInvestigationToolSuiteRecordsSnippetRefsWithoutSourceText(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/NewProject.tsx", `
+		export function NewProject() {
+			const password = "raw-password-123"
+			const route = "/workspace/projects/new"
+			return <button data-testid="create-tetris-project">新建项目：俄罗斯方块</button>
+		}
+	`)
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(nil).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        2,
+			FilesPerRound:          2,
+			TotalFileLimit:         4,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    40,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_snippet_trace", ProductDescription: "演示新建项目，俄罗斯方块"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_snippet_trace", Objective: "演示新建项目，俄罗斯方块"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snippetCall := investigationToolCall(result.Trace, "read_evidence_snippets")
+	if snippetCall == nil {
+		t.Fatalf("expected read_evidence_snippets tool call, got %+v", result.Trace.ToolCalls)
+	}
+	if len(snippetCall.SnippetRefs) == 0 {
+		t.Fatalf("expected snippet refs, got %+v", snippetCall)
+	}
+	if snippetCall.SnippetRefs[0].LineStart <= 0 || len(snippetCall.SnippetRefs[0].SignalKinds) == 0 {
+		t.Fatalf("snippet ref should expose line window and signal kind, got %+v", snippetCall.SnippetRefs[0])
+	}
+	traceJSON, _ := json.Marshal(result.Trace)
+	for _, forbidden := range []string{"raw-password-123", "const password", "create-tetris-project"} {
+		if strings.Contains(string(traceJSON), forbidden) {
+			t.Fatalf("investigation trace leaked source text %q:\n%s", forbidden, traceJSON)
+		}
+	}
+	question := investigationQuestion(result.Trace, "question_project_creation")
+	if question == nil || !stringSliceContains(question.ToolCallIDs, snippetCall.ID) {
+		t.Fatalf("expected question to reference snippet tool call, question=%+v snippet_call=%s", question, snippetCall.ID)
+	}
+}
+
 func TestCodeReaderUsesGrepToolBeforeStructuredReads(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -746,6 +799,15 @@ func grepToolCallCount(trace *model.CodeInvestigationTrace) int {
 		}
 	}
 	return count
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func candidateRelContains(candidates []codeCandidateFile, text string) bool {

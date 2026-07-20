@@ -771,11 +771,23 @@ export type CodeInvestigationToolCall = {
   matched_file_count?: number;
   selected_file_count?: number;
   path_hashes?: string[];
+  snippet_refs?: CodeSnippetRef[];
   evidence_refs?: EvidenceRef[];
   metadata?: Record<string, unknown>;
   confidence?: number;
   elapsed_ms?: number;
   fallback_reason?: string;
+};
+
+export type CodeSnippetRef = {
+  id: string;
+  path_hash_sha256: string;
+  content_sha256?: string;
+  line_start?: number;
+  line_end?: number;
+  matched_terms?: string[];
+  signal_kinds?: string[];
+  redacted_preview_sha256?: string;
 };
 
 export type RouteInsight = {

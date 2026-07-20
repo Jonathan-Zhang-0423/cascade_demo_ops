@@ -391,6 +391,7 @@ type codeSearchMatch struct {
 	candidate codeCandidateFile
 	score     int
 	terms     []string
+	snippets  []model.CodeSnippetRef
 }
 
 type codeSearchResult struct {
@@ -546,12 +547,14 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		trace.TotalFilesSearched += search.searched
 		trace.TotalBytesRead += search.bytesRead
 		selectedThisRound := []codeCandidateFile{}
+		snippetsThisRound := []model.CodeSnippetRef{}
 		for _, match := range search.matches {
 			if len(selectedThisRound) >= budget.FilesPerRound || len(selected) >= budget.TotalFileLimit {
 				break
 			}
 			if add(match.candidate) {
 				selectedThisRound = append(selectedThisRound, match.candidate)
+				snippetsThisRound = append(snippetsThisRound, match.snippets...)
 			}
 		}
 		grepCallID := fmt.Sprintf("tool_grep_text_%d_%s", i+1, shortHash(query.query))
@@ -565,10 +568,16 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			MatchedFileCount:  len(search.matches),
 			SelectedFileCount: len(selectedThisRound),
 			PathHashes:        pathHashesForCandidates(selectedThisRound, len(selectedThisRound)),
+			SnippetRefs:       limitCodeSnippetRefs(snippetsThisRound, 12),
 			Metadata:          investigationQueryMetadata(query),
 			Confidence:        confidenceForSearchCall(len(search.matches), len(selectedThisRound)),
 			ElapsedMS:         time.Since(start).Milliseconds(),
 		})
+		snippetCallID := ""
+		if len(snippetsThisRound) > 0 {
+			snippetCallID = fmt.Sprintf("tool_read_evidence_snippets_%d_%s", i+1, shortHash(query.query))
+			trace.ToolCalls = append(trace.ToolCalls, evidenceSnippetToolCall(snippetCallID, query, snippetsThisRound))
+		}
 		review, err := reviewInvestigationEvidence(ctx, selectedThisRound, project, brief)
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
@@ -576,7 +585,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		review.gaps = evidenceGapsForExpected(review, query.expectedEvidence)
 		reviewCall := evidenceReviewToolCall(i+1, query, review)
 		trace.ToolCalls = append(trace.ToolCalls, reviewCall)
-		applyEvidenceReviewToQuestion(trace, query, review, grepCallID, reviewCall.ID)
+		applyEvidenceReviewToQuestion(trace, query, review, nonEmptyToolCallIDs(grepCallID, snippetCallID, reviewCall.ID)...)
 		if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < budget.DrilldownRounds+2 {
 			nextKey := strings.Join(next.terms, "|")
 			if !executedQueries[nextKey] && !codeInvestigationQueryExists(queries, nextKey) {
@@ -1079,6 +1088,7 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 		}
 		score := keywordMatchScore(query.terms, filepath.ToSlash(candidate.rel), candidate.name) * 30
 		matchedTerms := matchedTermsForText(query.terms, filepath.ToSlash(candidate.rel)+" "+candidate.name)
+		snippetRefs := []model.CodeSnippetRef{}
 		if candidate.size <= budget.ToolSearchBytesPerFile {
 			data, err := os.ReadFile(candidate.path)
 			if err == nil {
@@ -1089,6 +1099,7 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 				if contentScore > 0 {
 					score += contentScore*50 + minInt(len(data)/1024, 20)
 					matchedTerms = uniqueStrings(append(matchedTerms, matchedTermsForText(query.terms, text)...))
+					snippetRefs = snippetRefsForQuery(candidate, data, query)
 				}
 			}
 		} else if score > 0 {
@@ -1103,7 +1114,7 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 		if score <= 0 {
 			continue
 		}
-		result.matches = append(result.matches, codeSearchMatch{candidate: candidate, score: score + candidate.score/4, terms: matchedTerms})
+		result.matches = append(result.matches, codeSearchMatch{candidate: candidate, score: score + candidate.score/4, terms: matchedTerms, snippets: snippetRefs})
 	}
 	sort.SliceStable(result.matches, func(i, j int) bool {
 		if result.matches[i].score == result.matches[j].score {
@@ -1209,6 +1220,115 @@ func evidenceReviewToolCall(round int, query codeInvestigationQuery, review code
 		Metadata:          metadata,
 		Confidence:        evidenceReviewConfidence(review),
 	}
+}
+
+func evidenceSnippetToolCall(id string, query codeInvestigationQuery, snippets []model.CodeSnippetRef) model.CodeInvestigationToolCall {
+	refs := limitCodeSnippetRefs(snippets, 18)
+	pathHashes := []string{}
+	signalKinds := []string{}
+	for _, ref := range refs {
+		pathHashes = append(pathHashes, ref.PathHashSHA256)
+		signalKinds = append(signalKinds, ref.SignalKinds...)
+	}
+	return model.CodeInvestigationToolCall{
+		ID:                id,
+		Tool:              "read_evidence_snippets",
+		Purpose:           "只定位 grep 命中文件中的局部证据窗口；持久化 hash、行号、匹配词和信号类型，不保存源码文本或绝对路径。",
+		Query:             query.query,
+		InputSummary:      fmt.Sprintf("question_id=%s matched_terms=%s", query.questionID, strings.Join(query.terms, ",")),
+		OutputSummary:     fmt.Sprintf("snippet_windows=%d signal_kinds=%s", len(refs), strings.Join(limitStrings(uniqueStrings(signalKinds), 8), ",")),
+		SelectedFileCount: len(uniqueStrings(pathHashes)),
+		PathHashes:        limitStrings(uniqueStrings(pathHashes), 12),
+		SnippetRefs:       refs,
+		Metadata:          investigationQueryMetadata(query),
+		Confidence:        0.7,
+	}
+}
+
+func snippetRefsForQuery(candidate codeCandidateFile, data []byte, query codeInvestigationQuery) []model.CodeSnippetRef {
+	if len(data) == 0 || len(query.terms) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	pathHash := hashString(filepath.ToSlash(candidate.rel))
+	contentHash := hashBytes(data)
+	refs := []model.CodeSnippetRef{}
+	seen := map[string]bool{}
+	for index, line := range lines {
+		matched := matchedTermsForText(query.terms, line)
+		if len(matched) == 0 {
+			continue
+		}
+		lineStart := maxInt(1, index)
+		lineEnd := minInt(len(lines), index+2)
+		key := fmt.Sprintf("%s:%d:%d", pathHash, lineStart, lineEnd)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		window := strings.Join(lines[lineStart-1:lineEnd], "\n")
+		refs = append(refs, model.CodeSnippetRef{
+			ID:                    "snippet_" + shortHash(key+"|"+query.query),
+			PathHashSHA256:        pathHash,
+			ContentSHA256:         contentHash,
+			LineStart:             lineStart,
+			LineEnd:               lineEnd,
+			MatchedTerms:          limitStrings(matched, 6),
+			SignalKinds:           signalKindsForSnippet(candidate.name, window),
+			RedactedPreviewSHA256: hashString(redactSensitiveInvestigationPreview(window)),
+		})
+		if len(refs) >= 3 {
+			break
+		}
+	}
+	return refs
+}
+
+func signalKindsForSnippet(name string, text string) []string {
+	lower := strings.ToLower(text + " " + name)
+	kinds := []string{}
+	if containsAny(lower, "route", "router", "path:", "url:", "href=", "navigate", "/api/", "/app", "/dashboard", "/workspace") {
+		kinds = append(kinds, "route")
+	}
+	if containsAny(lower, "data-testid", "aria-label", "<button", "<input", "role=", "selector", "component") {
+		kinds = append(kinds, "component_or_selector")
+	}
+	if containsAny(lower, "/api/", "endpoint", "handler", "mutation", "fetch(", "post(", "get(", "schema", "model") {
+		kinds = append(kinds, "api_or_data_model")
+	}
+	if containsAny(lower, "classname", ".css", ".scss", "tailwind", "loading", "progress", "state") {
+		kinds = append(kinds, "style_or_state")
+	}
+	if len(kinds) == 0 {
+		kinds = append(kinds, "text_match")
+	}
+	return uniqueStrings(kinds)
+}
+
+func redactSensitiveInvestigationPreview(value string) string {
+	value = regexp.MustCompile(`(?i)(password|passwd|token|secret|authorization|cookie)\s*[:=]\s*["']?[^"'\s,;]+`).ReplaceAllString(value, "$1=<redacted>")
+	value = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`).ReplaceAllString(value, "<email>")
+	if len(value) > 240 {
+		value = value[:240]
+	}
+	return value
+}
+
+func limitCodeSnippetRefs(values []model.CodeSnippetRef, limit int) []model.CodeSnippetRef {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func nonEmptyToolCallIDs(values ...string) []string {
+	out := []string{}
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func evidenceReviewConfidence(review codeInvestigationEvidenceReview) float64 {
