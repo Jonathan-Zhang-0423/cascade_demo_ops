@@ -715,6 +715,7 @@ export type CodeUnderstandingSnapshot = {
   source_digest_sha256?: string;
   file_count?: number;
   read_budget?: CodeReadBudget;
+  investigation_trace?: CodeInvestigationTrace;
   path_digests?: PathDigest[];
   evidence_refs?: EvidenceRef[];
   summary?: string;
@@ -728,6 +729,39 @@ export type CodeReadBudget = {
   files_per_round?: number;
   total_file_limit?: number;
   max_file_bytes?: number;
+  tool_search_file_limit?: number;
+  tool_search_bytes_per_file?: number;
+  tool_search_result_limit?: number;
+};
+
+export type CodeInvestigationTrace = {
+  id: string;
+  mode?: string;
+  summary?: string;
+  tool_calls?: CodeInvestigationToolCall[];
+  total_files_discovered?: number;
+  total_files_searched?: number;
+  total_files_selected?: number;
+  total_bytes_read?: number;
+  created_at?: string;
+  completed_at?: string;
+};
+
+export type CodeInvestigationToolCall = {
+  id: string;
+  tool: string;
+  purpose?: string;
+  query?: string;
+  input_summary?: string;
+  output_summary?: string;
+  matched_file_count?: number;
+  selected_file_count?: number;
+  path_hashes?: string[];
+  evidence_refs?: EvidenceRef[];
+  metadata?: Record<string, unknown>;
+  confidence?: number;
+  elapsed_ms?: number;
+  fallback_reason?: string;
 };
 
 export type RouteInsight = {

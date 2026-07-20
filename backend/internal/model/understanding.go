@@ -44,6 +44,7 @@ type CodeUnderstandingSnapshot struct {
 	SourceDigestSHA256 string                  `json:"source_digest_sha256,omitempty"`
 	FileCount          int                     `json:"file_count,omitempty"`
 	ReadBudget         *CodeReadBudget         `json:"read_budget,omitempty"`
+	InvestigationTrace *CodeInvestigationTrace `json:"investigation_trace,omitempty"`
 	PathDigests        []PathDigest            `json:"path_digests,omitempty"`
 	EvidenceRefs       []EvidenceRef           `json:"evidence_refs,omitempty"`
 	Summary            string                  `json:"summary,omitempty"`
@@ -51,12 +52,45 @@ type CodeUnderstandingSnapshot struct {
 }
 
 type CodeReadBudget struct {
-	Mode               string `json:"mode,omitempty"`
-	RepoIndexFileLimit int    `json:"repo_index_file_limit,omitempty"`
-	DrilldownRounds    int    `json:"drilldown_rounds,omitempty"`
-	FilesPerRound      int    `json:"files_per_round,omitempty"`
-	TotalFileLimit     int    `json:"total_file_limit,omitempty"`
-	MaxFileBytes       int64  `json:"max_file_bytes,omitempty"`
+	Mode                   string `json:"mode,omitempty"`
+	RepoIndexFileLimit     int    `json:"repo_index_file_limit,omitempty"`
+	DrilldownRounds        int    `json:"drilldown_rounds,omitempty"`
+	FilesPerRound          int    `json:"files_per_round,omitempty"`
+	TotalFileLimit         int    `json:"total_file_limit,omitempty"`
+	MaxFileBytes           int64  `json:"max_file_bytes,omitempty"`
+	ToolSearchFileLimit    int    `json:"tool_search_file_limit,omitempty"`
+	ToolSearchBytesPerFile int64  `json:"tool_search_bytes_per_file,omitempty"`
+	ToolSearchResultLimit  int    `json:"tool_search_result_limit,omitempty"`
+}
+
+type CodeInvestigationTrace struct {
+	ID                   string                      `json:"id"`
+	Mode                 string                      `json:"mode,omitempty"`
+	Summary              string                      `json:"summary,omitempty"`
+	ToolCalls            []CodeInvestigationToolCall `json:"tool_calls,omitempty"`
+	TotalFilesDiscovered int                         `json:"total_files_discovered,omitempty"`
+	TotalFilesSearched   int                         `json:"total_files_searched,omitempty"`
+	TotalFilesSelected   int                         `json:"total_files_selected,omitempty"`
+	TotalBytesRead       int64                       `json:"total_bytes_read,omitempty"`
+	CreatedAt            time.Time                   `json:"created_at,omitempty"`
+	CompletedAt          time.Time                   `json:"completed_at,omitempty"`
+}
+
+type CodeInvestigationToolCall struct {
+	ID                string         `json:"id"`
+	Tool              string         `json:"tool"`
+	Purpose           string         `json:"purpose,omitempty"`
+	Query             string         `json:"query,omitempty"`
+	InputSummary      string         `json:"input_summary,omitempty"`
+	OutputSummary     string         `json:"output_summary,omitempty"`
+	MatchedFileCount  int            `json:"matched_file_count,omitempty"`
+	SelectedFileCount int            `json:"selected_file_count,omitempty"`
+	PathHashes        []string       `json:"path_hashes,omitempty"`
+	EvidenceRefs      []EvidenceRef  `json:"evidence_refs,omitempty"`
+	Metadata          map[string]any `json:"metadata,omitempty"`
+	Confidence        float64        `json:"confidence,omitempty"`
+	ElapsedMS         int64          `json:"elapsed_ms,omitempty"`
+	FallbackReason    string         `json:"fallback_reason,omitempty"`
 }
 
 type RouteInsight struct {

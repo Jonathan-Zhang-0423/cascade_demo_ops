@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,20 +19,21 @@ import (
 )
 
 type CodeReaderAgent struct {
-	MaxFiles     int
-	MaxFileBytes int64
-	Budget       model.CodeReadBudget
-	llm          llm.Client
+	MaxFiles           int
+	MaxFileBytes       int64
+	Budget             model.CodeReadBudget
+	InvestigationTools *ProjectInvestigationToolSuite
+	llm                llm.Client
 }
 
 func NewCodeReaderAgent() *CodeReaderAgent {
 	budget := defaultCodeReadBudget()
-	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, Budget: budget}
+	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, Budget: budget, InvestigationTools: NewProjectInvestigationToolSuite(nil)}
 }
 
 func NewCodeReaderAgentWithLLM(client llm.Client) *CodeReaderAgent {
 	budget := defaultCodeReadBudget()
-	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, Budget: budget, llm: client}
+	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, Budget: budget, InvestigationTools: NewProjectInvestigationToolSuite(client), llm: client}
 }
 
 func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) ([]model.CodeUnderstandingSnapshot, error) {
@@ -229,64 +229,25 @@ type codeCandidateFile struct {
 }
 
 func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapshot *model.CodeUnderstandingSnapshot, project *model.ProjectContext, brief *model.RequirementBrief) error {
-	info, err := os.Stat(root)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return nil
-	}
 	root = filepath.Clean(root)
 	budget := a.effectiveBudget()
 	snapshot.ReadBudget = &budget
-	candidates := []codeCandidateFile{}
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		name := entry.Name()
-		if entry.IsDir() {
-			if shouldSkipDir(name) && path != root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !isScannableFile(name) {
-			return nil
-		}
-		fileInfo, err := entry.Info()
-		if err != nil || fileInfo.Size() > a.MaxFileBytes {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			rel = name
-		}
-		if shouldSkipCodeFileRel(rel, name) {
-			return nil
-		}
-		candidates = append(candidates, codeCandidateFile{
-			path:  path,
-			rel:   rel,
-			name:  name,
-			size:  fileInfo.Size(),
-			score: codeFilePriority(rel, name, project, brief),
-		})
-		return nil
-	})
+	investigationResult, err := a.investigationToolSuite().InvestigateLocalPath(ctx, root, budget, project, brief)
 	if err != nil {
 		return err
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].score == candidates[j].score {
-			return filepath.ToSlash(candidates[i].rel) < filepath.ToSlash(candidates[j].rel)
-		}
-		return candidates[i].score > candidates[j].score
-	})
-	candidates = selectCodeCandidatesForIntent(candidates, budget, project, brief)
+	snapshot.InvestigationTrace = investigationResult.Trace
+	if err := readStructuredCodeSnapshotFromCandidates(ctx, snapshot, investigationResult.SelectedCandidates, budget); err != nil {
+		return err
+	}
+	normalizeCodeSnapshotForIntent(snapshot, project, brief)
+	return nil
+}
+
+func readStructuredCodeSnapshotFromCandidates(ctx context.Context, snapshot *model.CodeUnderstandingSnapshot, candidates []codeCandidateFile, budget model.CodeReadBudget) error {
+	if snapshot == nil {
+		return nil
+	}
 	pathDigests := make([]model.PathDigest, 0)
 	contentDigests := make([]string, 0)
 	fileCount := 0
@@ -305,6 +266,9 @@ func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapsh
 		kind := codeKindForFile(name)
 		language := languageForFile(name)
 		fileCount++
+		if snapshot.InvestigationTrace != nil {
+			snapshot.InvestigationTrace.TotalBytesRead += int64(len(data))
+		}
 		pathDigests = append(pathDigests, model.PathDigest{
 			PathHashSHA256: pathHash,
 			ContentSHA256:  contentHash,
@@ -332,18 +296,35 @@ func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapsh
 	snapshot.FileCount = fileCount
 	snapshot.PathDigests = pathDigests
 	snapshot.SourceDigestSHA256 = hashString(strings.Join(contentDigests, "\n"))
-	normalizeCodeSnapshotForIntent(snapshot, project, brief)
+	if snapshot.InvestigationTrace != nil {
+		snapshot.InvestigationTrace.TotalFilesSelected = fileCount
+		snapshot.InvestigationTrace.CompletedAt = time.Now().UTC()
+		snapshot.InvestigationTrace.Summary = fmt.Sprintf("工具化调查完成：发现 %d 个候选文件，grep 搜索 %d 个文件，最终结构化读取 %d 个文件。", snapshot.InvestigationTrace.TotalFilesDiscovered, snapshot.InvestigationTrace.TotalFilesSearched, fileCount)
+		snapshot.InvestigationTrace.ToolCalls = append(snapshot.InvestigationTrace.ToolCalls, model.CodeInvestigationToolCall{
+			ID:                "tool_read_structured_files_" + shortHash(snapshot.ID),
+			Tool:              "read_structured_files",
+			Purpose:           "只读取已由 repo index / grep_text 选中的需求相关文件，并提取路由、组件、selector、API、数据模型摘要。",
+			InputSummary:      fmt.Sprintf("selected_files=%d max_file_bytes=%d", len(candidates), budget.MaxFileBytes),
+			OutputSummary:     fmt.Sprintf("structured_files=%d routes=%d components=%d selectors=%d apis=%d", fileCount, len(snapshot.Routes), len(snapshot.Components), len(snapshot.Selectors), len(snapshot.APIEndpoints)),
+			SelectedFileCount: fileCount,
+			PathHashes:        pathHashesForCandidates(candidates, fileCount),
+			Confidence:        0.78,
+		})
+	}
 	return nil
 }
 
 func defaultCodeReadBudget() model.CodeReadBudget {
 	return model.CodeReadBudget{
-		Mode:               "intent_driven_progressive",
-		RepoIndexFileLimit: 40,
-		DrilldownRounds:    4,
-		FilesPerRound:      10,
-		TotalFileLimit:     80,
-		MaxFileBytes:       160 * 1024,
+		Mode:                   "intent_driven_progressive",
+		RepoIndexFileLimit:     40,
+		DrilldownRounds:        4,
+		FilesPerRound:          10,
+		TotalFileLimit:         80,
+		MaxFileBytes:           160 * 1024,
+		ToolSearchFileLimit:    180,
+		ToolSearchBytesPerFile: 64 * 1024,
+		ToolSearchResultLimit:  25,
 	}
 }
 
@@ -371,8 +352,821 @@ func (a *CodeReaderAgent) effectiveBudget() model.CodeReadBudget {
 	if budget.MaxFileBytes <= 0 {
 		budget.MaxFileBytes = firstPositiveInt64(a.MaxFileBytes, defaults.MaxFileBytes)
 	}
+	if budget.ToolSearchFileLimit <= 0 {
+		budget.ToolSearchFileLimit = defaults.ToolSearchFileLimit
+	}
+	if budget.ToolSearchBytesPerFile <= 0 {
+		budget.ToolSearchBytesPerFile = defaults.ToolSearchBytesPerFile
+	}
+	if budget.ToolSearchResultLimit <= 0 {
+		budget.ToolSearchResultLimit = defaults.ToolSearchResultLimit
+	}
 	a.MaxFileBytes = budget.MaxFileBytes
 	return budget
+}
+
+func (a *CodeReaderAgent) investigationToolSuite() *ProjectInvestigationToolSuite {
+	if a == nil {
+		return NewProjectInvestigationToolSuite(nil)
+	}
+	if a.InvestigationTools != nil {
+		if a.InvestigationTools.llm == nil && a.llm != nil {
+			a.InvestigationTools.llm = a.llm
+		}
+		return a.InvestigationTools
+	}
+	a.InvestigationTools = NewProjectInvestigationToolSuite(a.llm)
+	return a.InvestigationTools
+}
+
+type codeInvestigationQuery struct {
+	purpose string
+	query   string
+	terms   []string
+}
+
+type codeSearchMatch struct {
+	candidate codeCandidateFile
+	score     int
+	terms     []string
+}
+
+type codeSearchResult struct {
+	matches   []codeSearchMatch
+	searched  int
+	bytesRead int64
+}
+
+type codeInvestigationEvidenceReview struct {
+	fileCount      int
+	routeCount     int
+	componentCount int
+	selectorCount  int
+	apiCount       int
+	dataModelCount int
+	gaps           []string
+	pathHashes     []string
+}
+
+type codeInvestigationLLMOutput struct {
+	Summary string `json:"summary"`
+	Queries []struct {
+		Purpose string              `json:"purpose"`
+		Terms   flexibleStringSlice `json:"terms"`
+		Query   string              `json:"query"`
+	} `json:"queries"`
+	Confidence float64 `json:"confidence"`
+}
+
+func (o *codeInvestigationLLMOutput) UnmarshalJSON(data []byte) error {
+	type alias codeInvestigationLLMOutput
+	var single alias
+	if err := json.Unmarshal(data, &single); err == nil {
+		*o = codeInvestigationLLMOutput(single)
+		o.normalize()
+		return nil
+	}
+	var items []alias
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	merged := codeInvestigationLLMOutput{}
+	for _, item := range items {
+		if merged.Summary == "" {
+			merged.Summary = item.Summary
+		}
+		merged.Queries = append(merged.Queries, item.Queries...)
+		if item.Confidence > merged.Confidence {
+			merged.Confidence = item.Confidence
+		}
+	}
+	*o = merged
+	o.normalize()
+	return nil
+}
+
+func (o *codeInvestigationLLMOutput) normalize() {
+	normalized := make([]struct {
+		Purpose string              `json:"purpose"`
+		Terms   flexibleStringSlice `json:"terms"`
+		Query   string              `json:"query"`
+	}, 0, len(o.Queries))
+	for _, query := range o.Queries {
+		terms := sanitizeInvestigationTerms(append(stringSlice(query.Terms), splitQueryTerms(query.Query)...))
+		if len(terms) == 0 {
+			continue
+		}
+		query.Terms = flexibleStringSlice(terms)
+		query.Query = strings.Join(terms, " OR ")
+		normalized = append(normalized, query)
+	}
+	o.Queries = normalized
+}
+
+func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request ProjectInvestigationRequest) (ProjectInvestigationResult, error) {
+	root := request.Root
+	candidates := request.Candidates
+	budget := request.Budget
+	project := request.Project
+	brief := request.Brief
+	trace := &model.CodeInvestigationTrace{
+		ID:                   "code_investigation_" + shortHash(root+"|"+budget.Mode+"|"+strings.Join(codeIntentTextParts(project, brief), "|")),
+		Mode:                 "tool_driven_intent_drilldown",
+		TotalFilesDiscovered: len(candidates),
+		CreatedAt:            time.Now().UTC(),
+	}
+	if len(candidates) == 0 {
+		trace.CompletedAt = time.Now().UTC()
+		trace.Summary = "未发现可调查的代码文件。"
+		return ProjectInvestigationResult{Trace: trace}, nil
+	}
+	trace.ToolCalls = append(trace.ToolCalls, s.shellMetadataToolCall(ctx, root, candidates))
+	selected := []codeCandidateFile{}
+	selectedKeys := map[string]bool{}
+	add := func(candidate codeCandidateFile) bool {
+		if len(selected) >= budget.TotalFileLimit || selectedKeys[candidate.rel] {
+			return false
+		}
+		selectedKeys[candidate.rel] = true
+		selected = append(selected, candidate)
+		return true
+	}
+
+	start := time.Now()
+	repoIndexSelected := []codeCandidateFile{}
+	for _, candidate := range candidates {
+		if len(repoIndexSelected) >= budget.RepoIndexFileLimit || len(selected) >= budget.TotalFileLimit {
+			break
+		}
+		if isRepoIndexCandidate(candidate.rel, candidate.name) && add(candidate) {
+			repoIndexSelected = append(repoIndexSelected, candidate)
+		}
+	}
+	trace.ToolCalls = append(trace.ToolCalls, model.CodeInvestigationToolCall{
+		ID:                "tool_repo_index_" + shortHash(root),
+		Tool:              "repo_index",
+		Purpose:           "列出 manifest、入口、路由目录和配置文件，建立项目调查的第一层地图。",
+		InputSummary:      fmt.Sprintf("candidate_files=%d repo_index_limit=%d", len(candidates), budget.RepoIndexFileLimit),
+		OutputSummary:     fmt.Sprintf("selected_index_files=%d", len(repoIndexSelected)),
+		MatchedFileCount:  len(repoIndexSelected),
+		SelectedFileCount: len(repoIndexSelected),
+		PathHashes:        pathHashesForCandidates(repoIndexSelected, len(repoIndexSelected)),
+		Confidence:        0.76,
+		ElapsedMS:         time.Since(start).Milliseconds(),
+	})
+
+	queries, planningCall := s.planCodeInvestigationQueries(ctx, candidates, budget, project, brief)
+	trace.ToolCalls = append(trace.ToolCalls, planningCall)
+	executedQueries := map[string]bool{}
+	maxSearchRounds := maxInt(1, budget.DrilldownRounds)
+	maxAdaptiveRounds := maxSearchRounds + 2
+	for i := 0; i < len(queries) && i < maxAdaptiveRounds; i++ {
+		query := queries[i]
+		if err := ctx.Err(); err != nil {
+			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+		}
+		if len(selected) >= budget.TotalFileLimit {
+			break
+		}
+		queryKey := strings.Join(query.terms, "|")
+		if executedQueries[queryKey] {
+			continue
+		}
+		executedQueries[queryKey] = true
+		start = time.Now()
+		search, err := searchCodeCandidatesForQuery(ctx, candidates, selectedKeys, query, budget)
+		if err != nil {
+			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+		}
+		trace.TotalFilesSearched += search.searched
+		trace.TotalBytesRead += search.bytesRead
+		selectedThisRound := []codeCandidateFile{}
+		for _, match := range search.matches {
+			if len(selectedThisRound) >= budget.FilesPerRound || len(selected) >= budget.TotalFileLimit {
+				break
+			}
+			if add(match.candidate) {
+				selectedThisRound = append(selectedThisRound, match.candidate)
+			}
+		}
+		trace.ToolCalls = append(trace.ToolCalls, model.CodeInvestigationToolCall{
+			ID:                fmt.Sprintf("tool_grep_text_%d_%s", i+1, shortHash(query.query)),
+			Tool:              "grep_text",
+			Purpose:           query.purpose,
+			Query:             query.query,
+			InputSummary:      fmt.Sprintf("terms=%s search_file_limit=%d bytes_per_file=%d", strings.Join(query.terms, ","), budget.ToolSearchFileLimit, budget.ToolSearchBytesPerFile),
+			OutputSummary:     fmt.Sprintf("searched=%d matched=%d selected=%d", search.searched, len(search.matches), len(selectedThisRound)),
+			MatchedFileCount:  len(search.matches),
+			SelectedFileCount: len(selectedThisRound),
+			PathHashes:        pathHashesForCandidates(selectedThisRound, len(selectedThisRound)),
+			Confidence:        confidenceForSearchCall(len(search.matches), len(selectedThisRound)),
+			ElapsedMS:         time.Since(start).Milliseconds(),
+		})
+		review, err := reviewInvestigationEvidence(ctx, selectedThisRound, project, brief)
+		if err != nil {
+			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+		}
+		trace.ToolCalls = append(trace.ToolCalls, evidenceReviewToolCall(i+1, query, review))
+		if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < budget.DrilldownRounds+2 {
+			nextKey := strings.Join(next.terms, "|")
+			if !executedQueries[nextKey] && !codeInvestigationQueryExists(queries, nextKey) {
+				queries = append(queries, next)
+			}
+		}
+	}
+
+	if len(selected) < budget.TotalFileLimit {
+		start = time.Now()
+		fallbackSelected := []codeCandidateFile{}
+		for _, candidate := range candidates {
+			if len(fallbackSelected) >= minInt(6, budget.FilesPerRound) || len(selected) >= budget.TotalFileLimit {
+				break
+			}
+			if selectedKeys[candidate.rel] || !focusedFallbackCandidate(candidate) {
+				continue
+			}
+			if add(candidate) {
+				fallbackSelected = append(fallbackSelected, candidate)
+			}
+		}
+		if len(fallbackSelected) > 0 {
+			trace.ToolCalls = append(trace.ToolCalls, model.CodeInvestigationToolCall{
+				ID:                "tool_focused_fallback_" + shortHash(root),
+				Tool:              "focused_fallback",
+				Purpose:           "当 grep 命中不足时，只补充少量入口、路由或高置信产品文件，不使用全局 selector 池凑数。",
+				InputSummary:      fmt.Sprintf("remaining_budget=%d", budget.TotalFileLimit-len(selected)+len(fallbackSelected)),
+				OutputSummary:     fmt.Sprintf("selected=%d", len(fallbackSelected)),
+				MatchedFileCount:  len(fallbackSelected),
+				SelectedFileCount: len(fallbackSelected),
+				PathHashes:        pathHashesForCandidates(fallbackSelected, len(fallbackSelected)),
+				Confidence:        0.58,
+				ElapsedMS:         time.Since(start).Milliseconds(),
+			})
+		}
+	}
+	trace.TotalFilesSelected = len(selected)
+	trace.CompletedAt = time.Now().UTC()
+	trace.Summary = fmt.Sprintf("工具化调查选择 %d/%d 个文件用于结构化读取。", len(selected), len(candidates))
+	return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, nil
+}
+
+func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context.Context, candidates []codeCandidateFile, budget model.CodeReadBudget, project *model.ProjectContext, brief *model.RequirementBrief) ([]codeInvestigationQuery, model.CodeInvestigationToolCall) {
+	start := time.Now()
+	fallback := buildCodeInvestigationQueries(project, brief, budget)
+	call := model.CodeInvestigationToolCall{
+		ID:           "tool_plan_investigation_" + shortHash(strings.Join(codeIntentTextParts(project, brief), "|")),
+		Tool:         "plan_investigation",
+		Purpose:      "根据用户需求和精简仓库地图决定下一轮 grep_text 查询；不读取完整源码，不执行 shell。",
+		InputSummary: fmt.Sprintf("candidate_files=%d deterministic_queries=%d", len(candidates), len(fallback)),
+		Confidence:   0.58,
+	}
+	if s == nil || s.llm == nil {
+		call.OutputSummary = fmt.Sprintf("LLM 不可用，使用确定性查询计划 %d 条。", len(fallback))
+		call.SelectedFileCount = len(fallback)
+		call.FallbackReason = "llm_not_configured"
+		call.ElapsedMS = time.Since(start).Milliseconds()
+		return fallback, call
+	}
+	payload := map[string]any{
+		"intent":       strings.Join(codeIntentTextParts(project, brief), "\n"),
+		"budget":       budget,
+		"repo_map":     compactRepoMapForInvestigation(candidates, 120),
+		"instructions": []string{"返回 2-5 个 grep 查询计划。", "terms 必须是业务语义、路由、组件、API 或状态关键词。", "不要输出 shell 命令、绝对路径、源码片段、token、cookie、Authorization。", "不要把 /aigc、/.well-known、/v1/execution-packages、app-installations 等控制面路径作为产品证据。"},
+	}
+	data, _ := json.Marshal(payload)
+	var output codeInvestigationLLMOutput
+	modelTrace, err := s.llm.GenerateJSON(ctx, config.ModelTaskCodeReading, llm.JSONRequest{
+		System:       "你是 Cascade DemoOps 的代码调查 planner。你的任务像 Codex 一样先决定应该 grep 什么，再让本地安全工具读取少量命中文件。你不能要求 shell，不能要求完整源码，不能输出敏感数据。",
+		User:         string(data),
+		SchemaName:   "CodeInvestigationPlan",
+		ResponseHint: "返回字段：summary, queries[{purpose, terms[], query}], confidence。terms 每条 2-8 个，query 可省略。",
+		MaxTokens:    1200,
+		Temperature:  0.12,
+	}, &output)
+	call.ElapsedMS = time.Since(start).Milliseconds()
+	if modelTrace != nil {
+		call.EvidenceRefs = append(call.EvidenceRefs, model.EvidenceRef{
+			ID:         "ev_code_investigation_planner_" + shortHash(modelTrace.Label()),
+			Kind:       model.EvidenceKindSourceCode,
+			Summary:    "CodeReaderAgent 调查计划模型路由：" + modelTrace.Label(),
+			FieldPath:  "code_snapshot.investigation_trace.tool_calls.plan_investigation",
+			Confidence: 0.62,
+		})
+	}
+	if err != nil {
+		call.OutputSummary = fmt.Sprintf("模型调查计划不可用，使用确定性查询计划 %d 条。", len(fallback))
+		call.SelectedFileCount = len(fallback)
+		call.FallbackReason = llmFallbackReason(err, modelTrace)
+		return fallback, call
+	}
+	queries := codeInvestigationQueriesFromLLM(output, budget)
+	if len(queries) == 0 {
+		call.OutputSummary = fmt.Sprintf("模型未返回有效查询，使用确定性查询计划 %d 条。", len(fallback))
+		call.SelectedFileCount = len(fallback)
+		call.FallbackReason = "empty_llm_plan"
+		return fallback, call
+	}
+	queries = append(queries, fallback...)
+	queries = dedupeCodeInvestigationQueries(queries)
+	if budget.DrilldownRounds > 0 && len(queries) > budget.DrilldownRounds {
+		queries = queries[:budget.DrilldownRounds]
+	}
+	call.Query = querySummaryForInvestigation(queries)
+	call.OutputSummary = fmt.Sprintf("模型生成调查查询 %d 条：%s", len(queries), output.Summary)
+	call.SelectedFileCount = len(queries)
+	call.Confidence = maxFloat(0.68, output.Confidence)
+	return queries, call
+}
+
+func llmFallbackReason(err error, trace *llm.CallTrace) string {
+	if trace != nil {
+		if trace.FallbackReason != "" {
+			return trace.FallbackReason
+		}
+		if trace.ErrorClass != "" {
+			return trace.ErrorClass
+		}
+	}
+	if err == nil {
+		return ""
+	}
+	if llm.IsDeterministicFallback(err) {
+		return "deterministic_fallback"
+	}
+	return "planner_error"
+}
+
+func codeInvestigationQueriesFromLLM(output codeInvestigationLLMOutput, budget model.CodeReadBudget) []codeInvestigationQuery {
+	queries := []codeInvestigationQuery{}
+	for _, item := range output.Queries {
+		terms := sanitizeInvestigationTerms(stringSlice(item.Terms))
+		if len(terms) == 0 {
+			continue
+		}
+		queries = append(queries, codeInvestigationQuery{
+			purpose: firstNonEmpty(item.Purpose, "按模型规划的业务语义检索相关代码。"),
+			query:   strings.Join(terms, " OR "),
+			terms:   terms,
+		})
+	}
+	if budget.DrilldownRounds > 0 && len(queries) > budget.DrilldownRounds {
+		queries = queries[:budget.DrilldownRounds]
+	}
+	return queries
+}
+
+func dedupeCodeInvestigationQueries(values []codeInvestigationQuery) []codeInvestigationQuery {
+	seen := map[string]bool{}
+	out := make([]codeInvestigationQuery, 0, len(values))
+	for _, value := range values {
+		terms := sanitizeInvestigationTerms(value.terms)
+		if len(terms) == 0 {
+			continue
+		}
+		key := strings.Join(terms, "|")
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		value.terms = terms
+		value.query = strings.Join(terms, " OR ")
+		out = append(out, value)
+	}
+	return out
+}
+
+func compactRepoMapForInvestigation(candidates []codeCandidateFile, limit int) map[string]any {
+	manifest := []string{}
+	entrypoints := []string{}
+	routeLike := []string{}
+	componentLike := []string{}
+	apiLike := []string{}
+	styleLike := []string{}
+	directories := map[string]int{}
+	for _, candidate := range candidates {
+		rel := filepath.ToSlash(candidate.rel)
+		lower := strings.ToLower(rel)
+		dir := firstPathSegment(rel)
+		if dir != "" {
+			directories[dir]++
+		}
+		switch {
+		case strings.EqualFold(candidate.name, "package.json") || strings.EqualFold(candidate.name, "go.mod"):
+			manifest = append(manifest, rel)
+		case isEntrypointFile(candidate.name, candidate.rel):
+			entrypoints = append(entrypoints, rel)
+		case pathHasAnySegment(lower, "routes", "router", "pages", "app"):
+			routeLike = append(routeLike, rel)
+		case pathHasAnySegment(lower, "components", "features", "views"):
+			componentLike = append(componentLike, rel)
+		case pathHasAnySegment(lower, "api", "server", "backend", "internal", "cmd", "pkg"):
+			apiLike = append(apiLike, rel)
+		case containsAny(lower, "style", ".css", ".scss", ".sass", ".less", "tailwind"):
+			styleLike = append(styleLike, rel)
+		}
+	}
+	return map[string]any{
+		"file_count":      len(candidates),
+		"directories":     topDirectoryCounts(directories, 24),
+		"manifests":       limitStrings(uniqueStrings(manifest), 16),
+		"entrypoints":     limitStrings(uniqueStrings(entrypoints), 24),
+		"route_like":      limitStrings(uniqueStrings(routeLike), limit),
+		"component_like":  limitStrings(uniqueStrings(componentLike), limit),
+		"api_like":        limitStrings(uniqueStrings(apiLike), limit),
+		"style_like":      limitStrings(uniqueStrings(styleLike), 40),
+		"shell_metadata":  manifestMetadataFromCandidates(candidates),
+		"omitted_details": "repo_map contains relative paths only; no source content or absolute local paths.",
+	}
+}
+
+func firstPathSegment(rel string) string {
+	parts := strings.Split(strings.Trim(filepath.ToSlash(rel), "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
+}
+
+func topDirectoryCounts(values map[string]int, limit int) []map[string]any {
+	type item struct {
+		name  string
+		count int
+	}
+	items := make([]item, 0, len(values))
+	for name, count := range values {
+		items = append(items, item{name: name, count: count})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].count == items[j].count {
+			return items[i].name < items[j].name
+		}
+		return items[i].count > items[j].count
+	})
+	out := make([]map[string]any, 0, minInt(len(items), limit))
+	for _, item := range items {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, map[string]any{"name": item.name, "count": item.count})
+	}
+	return out
+}
+
+func querySummaryForInvestigation(queries []codeInvestigationQuery) string {
+	parts := make([]string, 0, len(queries))
+	for _, query := range queries {
+		parts = append(parts, query.query)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func splitQueryTerms(query string) []string {
+	return strings.FieldsFunc(query, func(r rune) bool {
+		return r == '|' || r == ',' || r == ';' || r == '\n' || r == '\r' || r == '，' || r == '；'
+	})
+}
+
+func sanitizeInvestigationTerms(terms []string) []string {
+	out := []string{}
+	for _, term := range terms {
+		term = strings.TrimSpace(term)
+		if term == "" || len([]rune(term)) > 40 {
+			continue
+		}
+		lower := strings.ToLower(term)
+		if strings.HasPrefix(lower, "-") || containsAny(lower, "&&", "||", ";", "`", "$(", "powershell", "cmd.exe", "bash ", "sh ") {
+			continue
+		}
+		if pathHasForbiddenPrefix(lower, []string{"/aigc", "/.well-known", "/v1/execution-packages", "/v1/result-packages", "/v1/app-installations", "/execution-packages", "/result-packages", "/app-installations"}) {
+			continue
+		}
+		if containsAny(lower, "authorization", "cookie", "bearer ", "cascade-exchange") {
+			continue
+		}
+		out = append(out, term)
+	}
+	return limitStrings(uniqueStrings(out), 8)
+}
+
+func buildCodeInvestigationQueries(project *model.ProjectContext, brief *model.RequirementBrief, budget model.CodeReadBudget) []codeInvestigationQuery {
+	intentText := strings.Join(codeIntentTextParts(project, brief), " ")
+	intentTerms := intentKeywordsForText(intentText)
+	queries := []codeInvestigationQuery{}
+	add := func(purpose string, terms []string) {
+		terms = uniqueStrings(terms)
+		if len(terms) == 0 {
+			return
+		}
+		queries = append(queries, codeInvestigationQuery{
+			purpose: purpose,
+			query:   strings.Join(terms, " OR "),
+			terms:   terms,
+		})
+	}
+	if len(intentTerms) > 0 {
+		add("按用户演示需求关键词检索 route/component/API/selector 代码证据。", intentTerms)
+	}
+	if containsAnyNormalized(intentText, "登录", "登陆", "login", "signin", "邮箱", "密码") {
+		add("定位登录入口、账号表单和认证状态代码。", []string{"登录", "登陆", "login", "signin", "email", "password", "auth"})
+	}
+	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "project", "俄罗斯方块", "tetris") {
+		add("定位新建项目流程、项目名称输入和创建 API。", []string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project name", "项目名称", "俄罗斯方块", "tetris"})
+	}
+	if containsAnyNormalized(intentText, "构建模式", "build mode", "agent", "构建", "生成") {
+		add("定位构建模式、agent 启动、进度日志和项目详情页面。", []string{"构建模式", "build mode", "agent", "开始构建", "启动构建", "generate", "build", "progress", "log"})
+	}
+	if containsAnyNormalized(intentText, "样式", "style", "视觉", "页面", "组件") {
+		add("定位需求相关页面组件的样式和状态定义。", []string{"style", "className", "css", "theme", "state", "loading", "progress"})
+	}
+	if len(queries) == 0 {
+		add("需求文本较少，检索产品入口、路由和核心组件线索。", []string{"route", "router", "page", "component", "button", "form", "project", "dashboard"})
+	}
+	if budget.DrilldownRounds > 0 && len(queries) > budget.DrilldownRounds {
+		queries = queries[:budget.DrilldownRounds]
+	}
+	return queries
+}
+
+func codeIntentTextParts(project *model.ProjectContext, brief *model.RequirementBrief) []string {
+	parts := []string{}
+	if project != nil {
+		parts = append(parts, project.ProductDescription, project.TargetAudience, project.Name)
+		parts = append(parts, project.MustShow...)
+		if project.Inputs != nil {
+			parts = append(parts, project.Inputs.RawUserPrompt)
+			for _, doc := range project.Inputs.RequirementDocuments {
+				parts = append(parts, doc.Title, doc.Body)
+			}
+		}
+	}
+	if brief != nil {
+		parts = append(parts, brief.Scenario, brief.Objective, brief.PrimaryOutcome, brief.TargetAudience)
+		parts = append(parts, brief.MustShow...)
+	}
+	return parts
+}
+
+func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidateFile, selectedKeys map[string]bool, query codeInvestigationQuery, budget model.CodeReadBudget) (codeSearchResult, error) {
+	result := codeSearchResult{}
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if selectedKeys[candidate.rel] || !candidateWorthToolSearch(candidate, query) {
+			continue
+		}
+		if result.searched >= budget.ToolSearchFileLimit {
+			break
+		}
+		score := keywordMatchScore(query.terms, filepath.ToSlash(candidate.rel), candidate.name) * 30
+		matchedTerms := matchedTermsForText(query.terms, filepath.ToSlash(candidate.rel)+" "+candidate.name)
+		if candidate.size <= budget.ToolSearchBytesPerFile {
+			data, err := os.ReadFile(candidate.path)
+			if err == nil {
+				result.searched++
+				result.bytesRead += int64(len(data))
+				text := string(data)
+				contentScore := keywordMatchScore(query.terms, text)
+				if contentScore > 0 {
+					score += contentScore*50 + minInt(len(data)/1024, 20)
+					matchedTerms = uniqueStrings(append(matchedTerms, matchedTermsForText(query.terms, text)...))
+				}
+			}
+		} else if score > 0 {
+			result.searched++
+		}
+		if score <= 0 {
+			continue
+		}
+		if containsAny(strings.ToLower(filepath.ToSlash(candidate.rel)), "/fixtures/", "/mocks/", "/reports/", "/fonts/") {
+			score -= 100
+		}
+		if score <= 0 {
+			continue
+		}
+		result.matches = append(result.matches, codeSearchMatch{candidate: candidate, score: score + candidate.score/4, terms: matchedTerms})
+	}
+	sort.SliceStable(result.matches, func(i, j int) bool {
+		if result.matches[i].score == result.matches[j].score {
+			return filepath.ToSlash(result.matches[i].candidate.rel) < filepath.ToSlash(result.matches[j].candidate.rel)
+		}
+		return result.matches[i].score > result.matches[j].score
+	})
+	if budget.ToolSearchResultLimit > 0 && len(result.matches) > budget.ToolSearchResultLimit {
+		result.matches = result.matches[:budget.ToolSearchResultLimit]
+	}
+	return result, nil
+}
+
+func reviewInvestigationEvidence(ctx context.Context, candidates []codeCandidateFile, project *model.ProjectContext, brief *model.RequirementBrief) (codeInvestigationEvidenceReview, error) {
+	review := codeInvestigationEvidenceReview{}
+	if len(candidates) == 0 {
+		review.gaps = []string{"route", "component_or_selector", "api_or_data_model"}
+		return review, nil
+	}
+	snapshot := &model.CodeUnderstandingSnapshot{ID: "evidence_review_" + shortHash(fmt.Sprintf("%d", len(candidates)))}
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return review, err
+		}
+		data, err := os.ReadFile(candidate.path)
+		if err != nil {
+			continue
+		}
+		pathHash := hashString(filepath.ToSlash(candidate.rel))
+		text := string(data)
+		inspectRoutes(text, pathHash, snapshot)
+		inspectSelectors(text, pathHash, snapshot)
+		inspectComponents(candidate.name, text, pathHash, snapshot)
+		inspectAPIs(text, pathHash, snapshot)
+		inspectDataModels(text, pathHash, snapshot)
+		review.fileCount++
+		review.pathHashes = append(review.pathHashes, pathHash)
+	}
+	normalizeCodeSnapshotForIntent(snapshot, project, brief)
+	review.routeCount = len(snapshot.Routes)
+	review.componentCount = len(snapshot.Components)
+	review.selectorCount = len(snapshot.Selectors)
+	review.apiCount = len(snapshot.APIEndpoints)
+	review.dataModelCount = len(snapshot.DataModels)
+	review.pathHashes = uniqueStrings(review.pathHashes)
+	if review.routeCount == 0 {
+		review.gaps = append(review.gaps, "route")
+	}
+	if review.componentCount == 0 && review.selectorCount == 0 {
+		review.gaps = append(review.gaps, "component_or_selector")
+	}
+	if review.apiCount == 0 && review.dataModelCount == 0 {
+		review.gaps = append(review.gaps, "api_or_data_model")
+	}
+	return review, nil
+}
+
+func evidenceReviewToolCall(round int, query codeInvestigationQuery, review codeInvestigationEvidenceReview) model.CodeInvestigationToolCall {
+	metadata := map[string]any{
+		"round":            round,
+		"file_count":       review.fileCount,
+		"route_count":      review.routeCount,
+		"component_count":  review.componentCount,
+		"selector_count":   review.selectorCount,
+		"api_count":        review.apiCount,
+		"data_model_count": review.dataModelCount,
+		"gaps":             review.gaps,
+	}
+	return model.CodeInvestigationToolCall{
+		ID:                fmt.Sprintf("tool_evidence_review_%d_%s", round, shortHash(query.query)),
+		Tool:              "evidence_review",
+		Purpose:           "读取本轮 grep 命中的少量文件，审查是否已经覆盖 route/component/selector/API/data model 证据；仅输出计数、hash 和缺口。",
+		Query:             query.query,
+		InputSummary:      fmt.Sprintf("selected_files=%d", review.fileCount),
+		OutputSummary:     fmt.Sprintf("routes=%d components=%d selectors=%d apis=%d models=%d gaps=%s", review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.dataModelCount, strings.Join(review.gaps, ",")),
+		SelectedFileCount: review.fileCount,
+		PathHashes:        limitStrings(review.pathHashes, 12),
+		Metadata:          metadata,
+		Confidence:        evidenceReviewConfidence(review),
+	}
+}
+
+func evidenceReviewConfidence(review codeInvestigationEvidenceReview) float64 {
+	score := 0.42
+	if review.routeCount > 0 {
+		score += 0.16
+	}
+	if review.componentCount > 0 || review.selectorCount > 0 {
+		score += 0.18
+	}
+	if review.apiCount > 0 || review.dataModelCount > 0 {
+		score += 0.12
+	}
+	if score > 0.9 {
+		return 0.9
+	}
+	return score
+}
+
+func adaptiveQueryFromEvidenceReview(previous codeInvestigationQuery, review codeInvestigationEvidenceReview) (codeInvestigationQuery, bool) {
+	if len(review.gaps) == 0 {
+		return codeInvestigationQuery{}, false
+	}
+	gapTerms := []string{}
+	purposeParts := []string{"根据 evidence_review 缺口继续 drilldown"}
+	for _, gap := range review.gaps {
+		switch gap {
+		case "route":
+			gapTerms = append(gapTerms, "route", "router", "page", "workspace", "dashboard")
+			purposeParts = append(purposeParts, "route")
+		case "component_or_selector":
+			gapTerms = append(gapTerms, "data-testid", "aria-label", "button", "form", "input", "component")
+			purposeParts = append(purposeParts, "component/selector")
+		case "api_or_data_model":
+			gapTerms = append(gapTerms, "api", "endpoint", "handler", "mutation", "schema", "model")
+			purposeParts = append(purposeParts, "api/data")
+		}
+	}
+	terms := append(gapTerms, limitStrings(previous.terms, 4)...)
+	terms = sanitizeInvestigationTerms(terms)
+	if len(terms) == 0 {
+		return codeInvestigationQuery{}, false
+	}
+	return codeInvestigationQuery{
+		purpose: strings.Join(purposeParts, " + "),
+		query:   strings.Join(terms, " OR "),
+		terms:   terms,
+	}, true
+}
+
+func codeInvestigationQueryExists(values []codeInvestigationQuery, key string) bool {
+	for _, value := range values {
+		if strings.Join(value.terms, "|") == key {
+			return true
+		}
+	}
+	return false
+}
+
+func candidateWorthToolSearch(candidate codeCandidateFile, query codeInvestigationQuery) bool {
+	lower := strings.ToLower(filepath.ToSlash(candidate.rel))
+	if strings.EqualFold(candidate.name, "package.json") || strings.EqualFold(candidate.name, "go.mod") {
+		return false
+	}
+	if shouldSkipCodeFileRel(candidate.rel, candidate.name) {
+		return false
+	}
+	if keywordMatchScore(query.terms, lower, candidate.name) > 0 {
+		return true
+	}
+	return pathHasAnySegment(lower, "src", "app", "pages", "routes", "router", "components", "features", "server", "backend", "api", "internal", "cmd", "pkg")
+}
+
+func focusedFallbackCandidate(candidate codeCandidateFile) bool {
+	lower := strings.ToLower(filepath.ToSlash(candidate.rel))
+	if shouldSkipCodeFileRel(candidate.rel, candidate.name) {
+		return false
+	}
+	if isRepoIndexCandidate(candidate.rel, candidate.name) {
+		return true
+	}
+	if candidate.score >= 135 && pathHasAnySegment(lower, "routes", "router", "pages", "app", "features") {
+		return true
+	}
+	if candidate.score >= 150 && pathHasAnySegment(lower, "api", "server", "backend", "internal") {
+		return true
+	}
+	return false
+}
+
+func pathHasAnySegment(rel string, segments ...string) bool {
+	normalized := strings.Trim(strings.ToLower(filepath.ToSlash(rel)), "/")
+	if normalized == "" {
+		return false
+	}
+	parts := strings.Split(normalized, "/")
+	for _, part := range parts {
+		for _, segment := range segments {
+			segment = strings.Trim(strings.ToLower(segment), "/")
+			if segment != "" && part == segment {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func matchedTermsForText(terms []string, text string) []string {
+	lower := strings.ToLower(text)
+	out := []string{}
+	for _, term := range terms {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(term)) {
+			out = append(out, term)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func confidenceForSearchCall(matched int, selected int) float64 {
+	switch {
+	case selected > 0:
+		return 0.76
+	case matched > 0:
+		return 0.62
+	default:
+		return 0.42
+	}
+}
+
+func pathHashesForCandidates(candidates []codeCandidateFile, limit int) []string {
+	if limit <= 0 || limit > len(candidates) {
+		limit = len(candidates)
+	}
+	hashes := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		hashes = append(hashes, hashString(filepath.ToSlash(candidates[i].rel)))
+	}
+	return uniqueStrings(hashes)
 }
 
 func selectCodeCandidatesForIntent(candidates []codeCandidateFile, budget model.CodeReadBudget, project *model.ProjectContext, brief *model.RequirementBrief) []codeCandidateFile {
@@ -429,8 +1223,11 @@ func isRepoIndexCandidate(rel string, name string) bool {
 	if strings.EqualFold(name, "package.json") || strings.EqualFold(name, "go.mod") {
 		return true
 	}
+	if isEntrypointFile(name, rel) {
+		return true
+	}
 	return containsAny(lower,
-		"/app.", "/main.", "/index.", "/router", "/routes/", "/pages/",
+		"/router", "/routes.", "/route-map", "/route_map",
 		"vite.config", "next.config", "tailwind.config", "wails.json",
 	)
 }
@@ -442,10 +1239,10 @@ func candidateRelevantForIntentRound(candidate codeCandidateFile, keywords []str
 	case 0:
 		return keywordMatchScore(keywords, lower, name) > 0
 	case 1:
-		return containsAny(lower, "/features/", "/components/", "/pages/", "/routes/", "/app/") &&
+		return pathHasAnySegment(lower, "features", "components", "pages", "routes", "app") &&
 			(keywordMatchScore(keywords, lower, name) > 0 || candidate.score >= 105)
 	case 2:
-		return containsAny(lower, "/api/", "/server/", "/backend/", "/internal/", "/cmd/", "/pkg/") &&
+		return pathHasAnySegment(lower, "api", "server", "backend", "internal", "cmd", "pkg") &&
 			(keywordMatchScore(keywords, lower, name) > 0 || candidate.score >= 90)
 	default:
 		return containsAny(lower, "style", ".css", ".scss", ".sass", ".less", "theme", "tailwind") &&
@@ -485,6 +1282,9 @@ func shouldSkipCodeFileRel(rel string, name string) bool {
 	if strings.EqualFold(name, "package.json") || strings.EqualFold(name, "go.mod") {
 		return false
 	}
+	if pathHasAnySegment(lower, ".git", "node_modules", "dist", "build", "out", ".next", "coverage", "vendor", "fixtures", "fixture", "mock", "mocks", "__tests__", "reports", "report", "fonts", "font") {
+		return true
+	}
 	return containsAny(lower,
 		"/nix/store", "nix/store", "/.git/", "/node_modules/", "/dist/", "/build/", "/out/", "/.next/",
 		"/coverage/", "/vendor/", "/fixtures/", "/fixture/", "/mock/", "/mocks/", "/__tests__/",
@@ -500,9 +1300,9 @@ func codeFilePriority(rel string, name string, project *model.ProjectContext, br
 		score += 90
 	}
 	switch {
-	case containsAny(lower, "/src/", "/app/", "/pages/", "/routes/", "/router/", "/components/", "/features/"):
+	case pathHasAnySegment(lower, "src", "app", "pages", "routes", "router", "components", "features"):
 		score += 80
-	case containsAny(lower, "/internal/", "/cmd/", "/pkg/", "/server/", "/backend/", "/api/"):
+	case pathHasAnySegment(lower, "internal", "cmd", "pkg", "server", "backend", "api"):
 		score += 60
 	}
 	if containsAny(lower, ".tsx", ".vue", ".svelte") {
@@ -581,10 +1381,17 @@ func isEntrypointFile(name string, rel string) bool {
 	lower := strings.ToLower(filepath.ToSlash(rel))
 	return strings.EqualFold(name, "main.go") ||
 		strings.EqualFold(name, "package.json") ||
+		fileBaseLooksLikeEntrypoint(name) ||
 		strings.Contains(lower, "/app.") ||
 		strings.Contains(lower, "/main.") ||
-		strings.Contains(lower, "/index.") ||
-		strings.Contains(lower, "/routes/")
+		strings.Contains(lower, "/index.")
+}
+
+func fileBaseLooksLikeEntrypoint(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasPrefix(lower, "app.") ||
+		strings.HasPrefix(lower, "main.") ||
+		strings.HasPrefix(lower, "index.")
 }
 
 func inspectFrameworks(name string, text string, snapshot *model.CodeUnderstandingSnapshot) {

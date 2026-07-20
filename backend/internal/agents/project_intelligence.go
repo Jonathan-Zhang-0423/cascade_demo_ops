@@ -28,24 +28,26 @@ type ToolPatch struct {
 }
 
 type ProjectUnderstandingState struct {
-	Project       *model.ProjectContext
-	Brief         *model.RequirementBrief
-	CodeSnapshots []model.CodeUnderstandingSnapshot
-	PageSnapshots []model.PageUnderstandingSnapshot
-	Pack          *model.ProjectIntelligencePack
+	Project            *model.ProjectContext
+	Brief              *model.RequirementBrief
+	CodeSnapshots      []model.CodeUnderstandingSnapshot
+	PageSnapshots      []model.PageUnderstandingSnapshot
+	Pack               *model.ProjectIntelligencePack
+	InvestigationTools *ProjectInvestigationToolSuite
 }
 
 type ProjectIntelligenceGraph struct {
-	llm   llm.Client
-	tools []ProjectUnderstandingTool
+	llm                llm.Client
+	tools              []ProjectUnderstandingTool
+	investigationTools *ProjectInvestigationToolSuite
 }
 
 func NewProjectIntelligenceGraph() *ProjectIntelligenceGraph {
-	return &ProjectIntelligenceGraph{tools: defaultProjectUnderstandingTools()}
+	return &ProjectIntelligenceGraph{tools: defaultProjectUnderstandingTools(), investigationTools: NewProjectInvestigationToolSuite(nil)}
 }
 
 func NewProjectIntelligenceGraphWithLLM(client llm.Client) *ProjectIntelligenceGraph {
-	return &ProjectIntelligenceGraph{llm: client, tools: defaultProjectUnderstandingTools()}
+	return &ProjectIntelligenceGraph{llm: client, tools: defaultProjectUnderstandingTools(), investigationTools: NewProjectInvestigationToolSuite(client)}
 }
 
 func (g *ProjectIntelligenceGraph) RunProjectIntelligence(
@@ -73,11 +75,12 @@ func (g *ProjectIntelligenceGraph) RunProjectIntelligence(
 		CreatedAt:          now,
 	}
 	state := &ProjectUnderstandingState{
-		Project:       project,
-		Brief:         brief,
-		CodeSnapshots: append([]model.CodeUnderstandingSnapshot{}, codeSnapshots...),
-		PageSnapshots: append([]model.PageUnderstandingSnapshot{}, pageSnapshots...),
-		Pack:          pack,
+		Project:            project,
+		Brief:              brief,
+		CodeSnapshots:      append([]model.CodeUnderstandingSnapshot{}, codeSnapshots...),
+		PageSnapshots:      append([]model.PageUnderstandingSnapshot{}, pageSnapshots...),
+		Pack:               pack,
+		InvestigationTools: g.investigationToolSuite(),
 	}
 	trace := &model.AgentGraphTrace{
 		ID:            "agent_graph_trace_" + project.ID,
@@ -144,6 +147,20 @@ func (g *ProjectIntelligenceGraph) RunProjectIntelligence(
 	return pack, pack.ScriptReadinessReport, trace, nil
 }
 
+func (g *ProjectIntelligenceGraph) investigationToolSuite() *ProjectInvestigationToolSuite {
+	if g == nil {
+		return NewProjectInvestigationToolSuite(nil)
+	}
+	if g.investigationTools != nil {
+		if g.investigationTools.llm == nil && g.llm != nil {
+			g.investigationTools.llm = g.llm
+		}
+		return g.investigationTools
+	}
+	g.investigationTools = NewProjectInvestigationToolSuite(g.llm)
+	return g.investigationTools
+}
+
 type projectUnderstandingToolFunc struct {
 	name string
 	run  func(ctx context.Context, state *ProjectUnderstandingState) (ToolPatch, error)
@@ -185,30 +202,40 @@ func runRepoIndexTool(_ context.Context, state *ProjectUnderstandingState) (Tool
 	}, nil
 }
 
-func runRouteMapTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+func runRouteMapTool(ctx context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
 	if state.Pack.Architecture == nil {
 		state.Pack.Architecture = buildArchitectureMap(state.Project, state.CodeSnapshots, state.PageSnapshots)
 	}
+	drillRefs, drillFiles, err := runProjectUnderstandingFocusedInvestigation(ctx, state, "route_drilldown", []string{"route", "router", "page", "workspace", "dashboard", "project", "new project", "create project"})
+	if err != nil {
+		return ToolPatch{}, err
+	}
 	state.Pack.Architecture.RouteTree = routeTreeFromSnapshots(state.CodeSnapshots, state.PageSnapshots)
+	state.Pack.EvidenceRefs = append(state.Pack.EvidenceRefs, drillRefs...)
 	return ToolPatch{
-		OutputSummary: fmt.Sprintf("提取路由/页面路径 %d 个。", len(state.Pack.Architecture.RouteTree)),
+		OutputSummary: fmt.Sprintf("提取路由/页面路径 %d 个；工具化 route drilldown 读取 %d 个文件。", len(state.Pack.Architecture.RouteTree), drillFiles),
 		ChangedFields: []string{"architecture.route_tree"},
 		Confidence:    0.72,
-		EvidenceRefs:  state.Pack.Architecture.EvidenceRefs,
+		EvidenceRefs:  uniqueEvidenceRefs(append(state.Pack.Architecture.EvidenceRefs, drillRefs...)),
 	}, nil
 }
 
-func runComponentMapTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+func runComponentMapTool(ctx context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	drillRefs, drillFiles, err := runProjectUnderstandingFocusedInvestigation(ctx, state, "component_drilldown", []string{"component", "button", "form", "input", "dialog", "modal", "data-testid", "role", "new project", "build mode"})
+	if err != nil {
+		return ToolPatch{}, err
+	}
 	surfaces := interactionSurfacesFromSnapshots(state.Project, state.CodeSnapshots, state.PageSnapshots)
 	state.Pack.InteractionSurfaces = surfaces
 	for _, surface := range surfaces {
 		state.Pack.EvidenceRefs = append(state.Pack.EvidenceRefs, surface.EvidenceRefs...)
 	}
+	state.Pack.EvidenceRefs = append(state.Pack.EvidenceRefs, drillRefs...)
 	return ToolPatch{
-		OutputSummary: fmt.Sprintf("识别页面交互面 %d 个。", len(surfaces)),
+		OutputSummary: fmt.Sprintf("识别页面交互面 %d 个；工具化 component drilldown 读取 %d 个文件。", len(surfaces), drillFiles),
 		ChangedFields: []string{"interaction_surfaces"},
 		Confidence:    0.72,
-		EvidenceRefs:  state.Pack.EvidenceRefs,
+		EvidenceRefs:  uniqueEvidenceRefs(append(state.Pack.EvidenceRefs, drillRefs...)),
 	}, nil
 }
 
@@ -231,14 +258,19 @@ func runStyleDrilldownTool(_ context.Context, state *ProjectUnderstandingState) 
 	}, nil
 }
 
-func runAPIContractTool(_ context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+func runAPIContractTool(ctx context.Context, state *ProjectUnderstandingState) (ToolPatch, error) {
+	drillRefs, drillFiles, err := runProjectUnderstandingFocusedInvestigation(ctx, state, "api_backend_drilldown", []string{"api", "handler", "endpoint", "mutation", "create project", "project", "build", "agent", "submit"})
+	if err != nil {
+		return ToolPatch{}, err
+	}
 	contracts := apiContractsFromSnapshots(state.CodeSnapshots)
 	state.Pack.APIContracts = contracts
+	state.Pack.EvidenceRefs = append(state.Pack.EvidenceRefs, drillRefs...)
 	return ToolPatch{
-		OutputSummary: fmt.Sprintf("提取 API contract 摘要 %d 个。", len(contracts)),
+		OutputSummary: fmt.Sprintf("提取 API contract 摘要 %d 个；工具化 API drilldown 读取 %d 个文件。", len(contracts), drillFiles),
 		ChangedFields: []string{"api_contracts"},
 		Confidence:    0.68,
-		EvidenceRefs:  state.Pack.EvidenceRefs,
+		EvidenceRefs:  uniqueEvidenceRefs(append(state.Pack.EvidenceRefs, drillRefs...)),
 	}, nil
 }
 
@@ -301,6 +333,145 @@ func runScriptFeasibilityTool(_ context.Context, state *ProjectUnderstandingStat
 		Confidence:    readiness.Confidence,
 		EvidenceRefs:  readiness.EvidenceRefs,
 	}, nil
+}
+
+func runProjectUnderstandingFocusedInvestigation(ctx context.Context, state *ProjectUnderstandingState, purpose string, terms []string) ([]model.EvidenceRef, int, error) {
+	if state == nil || state.Project == nil || state.InvestigationTools == nil {
+		return nil, 0, nil
+	}
+	roots := localProjectCodeRoots(state.Project)
+	if len(roots) == 0 {
+		return nil, 0, nil
+	}
+	budget := focusedProjectUnderstandingBudget()
+	brief := focusedInvestigationBrief(state, purpose, terms)
+	refs := []model.EvidenceRef{}
+	fileCount := 0
+	for _, root := range roots {
+		if err := ctx.Err(); err != nil {
+			return refs, fileCount, err
+		}
+		result, err := state.InvestigationTools.InvestigateLocalPath(ctx, root, budget, state.Project, brief)
+		if err != nil {
+			refs = append(refs, model.EvidenceRef{
+				ID:         "ev_project_investigation_error_" + shortHash(purpose+root+err.Error()),
+				Kind:       model.EvidenceKindSourceCode,
+				Summary:    "ProjectIntelligenceGraph 工具化调查失败，保留已有摘要：" + purpose,
+				FieldPath:  "project_intelligence.investigation." + purpose,
+				Confidence: 0.3,
+			})
+			continue
+		}
+		if result.Trace != nil {
+			refs = append(refs, investigationTraceEvidenceRef(purpose, result.Trace))
+		}
+		if len(result.SelectedCandidates) == 0 {
+			continue
+		}
+		snapshot := model.CodeUnderstandingSnapshot{
+			ID:                 "focused_code_" + purpose + "_" + shortHash(root),
+			ProjectID:          state.Project.ID,
+			SchemaVersion:      model.MultimodalUnderstandingReportSchemaVersion,
+			RepositoryID:       "focused_" + purpose,
+			Summary:            "ProjectIntelligenceGraph 工具化 " + purpose + " 摘要；仅保存 hash、路由、组件、selector、API 和数据模型结构。",
+			ReadBudget:         &budget,
+			InvestigationTrace: result.Trace,
+			EvidenceRefs: []model.EvidenceRef{{
+				ID:         "ev_project_investigation_" + purpose + "_" + shortHash(root),
+				Kind:       model.EvidenceKindSourceCode,
+				Summary:    "ProjectIntelligenceGraph 使用 ProjectInvestigationToolSuite 执行 " + purpose,
+				FieldPath:  "project_intelligence.investigation." + purpose,
+				Confidence: 0.72,
+			}},
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := readStructuredCodeSnapshotFromCandidates(ctx, &snapshot, result.SelectedCandidates, budget); err != nil {
+			return refs, fileCount, err
+		}
+		normalizeCodeSnapshotForIntent(&snapshot, state.Project, brief)
+		snapshot.Languages = uniqueStrings(snapshot.Languages)
+		snapshot.Frameworks = uniqueStrings(snapshot.Frameworks)
+		snapshot.EntrypointHashes = uniqueStrings(snapshot.EntrypointHashes)
+		state.CodeSnapshots = append(state.CodeSnapshots, snapshot)
+		fileCount += snapshot.FileCount
+		refs = append(refs, snapshot.EvidenceRefs...)
+	}
+	return uniqueEvidenceRefs(refs), fileCount, nil
+}
+
+func focusedProjectUnderstandingBudget() model.CodeReadBudget {
+	defaults := defaultCodeReadBudget()
+	return model.CodeReadBudget{
+		Mode:                   "project_intelligence_focused_drilldown",
+		RepoIndexFileLimit:     3,
+		DrilldownRounds:        2,
+		FilesPerRound:          5,
+		TotalFileLimit:         14,
+		MaxFileBytes:           defaults.MaxFileBytes,
+		ToolSearchFileLimit:    120,
+		ToolSearchBytesPerFile: defaults.ToolSearchBytesPerFile,
+		ToolSearchResultLimit:  12,
+	}
+}
+
+func focusedInvestigationBrief(state *ProjectUnderstandingState, purpose string, terms []string) *model.RequirementBrief {
+	brief := &model.RequirementBrief{
+		ID:        "focused_brief_" + purpose + "_" + shortHash(strings.Join(terms, "|")),
+		ProjectID: state.Project.ID,
+		Objective: strings.TrimSpace(strings.Join(append(requirementGoalTexts(state), purpose, strings.Join(terms, " ")), " ")),
+		MustShow:  uniqueStrings(append(intentLabelsFromState(state), terms...)),
+		CreatedAt: time.Now().UTC(),
+	}
+	if state.Brief != nil {
+		brief.TargetAudience = state.Brief.TargetAudience
+		brief.ForbiddenPages = append([]string{}, state.Brief.ForbiddenPages...)
+		brief.ForbiddenData = append([]string{}, state.Brief.ForbiddenData...)
+		brief.MustNotShow = append([]string{}, state.Brief.MustNotShow...)
+	}
+	return brief
+}
+
+func intentLabelsFromState(state *ProjectUnderstandingState) []string {
+	labels := []string{}
+	if state != nil && state.Pack != nil && state.Pack.DemoIntent != nil {
+		for _, goal := range state.Pack.DemoIntent.Goals {
+			labels = append(labels, goal.Label)
+			labels = append(labels, goal.TargetKeywords...)
+		}
+	}
+	return uniqueStrings(labels)
+}
+
+func localProjectCodeRoots(project *model.ProjectContext) []string {
+	roots := []string{}
+	if project == nil || project.Inputs == nil {
+		return roots
+	}
+	for _, input := range project.Inputs.Code {
+		if strings.TrimSpace(input.LocalPath) != "" {
+			roots = append(roots, input.LocalPath)
+		}
+	}
+	for _, repo := range project.Inputs.Repositories {
+		if strings.TrimSpace(repo.LocalPath) != "" {
+			roots = append(roots, repo.LocalPath)
+		}
+	}
+	return uniqueStrings(roots)
+}
+
+func investigationTraceEvidenceRef(purpose string, trace *model.CodeInvestigationTrace) model.EvidenceRef {
+	summary := "ProjectInvestigationToolSuite " + purpose
+	if trace != nil && trace.Summary != "" {
+		summary += "：" + trace.Summary
+	}
+	return model.EvidenceRef{
+		ID:         "ev_project_investigation_trace_" + purpose + "_" + shortHash(summary),
+		Kind:       model.EvidenceKindSourceCode,
+		Summary:    summary,
+		FieldPath:  "project_intelligence.investigation_trace." + purpose,
+		Confidence: 0.68,
+	}
 }
 
 type agentSynthesisStep struct {
@@ -1572,7 +1743,17 @@ func finalizeProjectIntelligencePack(pack *model.ProjectIntelligencePack) {
 }
 
 func graphToolInputSummary(state *ProjectUnderstandingState) string {
-	return fmt.Sprintf("brief=%t code_snapshots=%d page_snapshots=%d", state.Brief != nil, len(state.CodeSnapshots), len(state.PageSnapshots))
+	return fmt.Sprintf("brief=%t code_snapshots=%d code_files=%d code_tools=%d page_snapshots=%d", state.Brief != nil, len(state.CodeSnapshots), codeFileCountFromSnapshots(state.CodeSnapshots), codeInvestigationToolCallCount(state.CodeSnapshots), len(state.PageSnapshots))
+}
+
+func codeInvestigationToolCallCount(snapshots []model.CodeUnderstandingSnapshot) int {
+	count := 0
+	for _, snapshot := range snapshots {
+		if snapshot.InvestigationTrace != nil {
+			count += len(snapshot.InvestigationTrace.ToolCalls)
+		}
+	}
+	return count
 }
 
 func architectureSummary(frameworks []string, languages []string, modules []model.ProjectModule) string {

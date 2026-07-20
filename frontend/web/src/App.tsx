@@ -819,6 +819,8 @@ function CodeSummaryPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
         <Fact label="框架线索" value={summary.frameworks.length > 0 ? summary.frameworks.join("、") : "待识别"} />
         <Fact label="路由/组件" value={`${summary.routes} 个路由 / ${summary.components} 个组件`} />
         <Fact label="Selector" value={`${summary.selectors} 个稳定选择器候选`} />
+        <Fact label="调查工具" value={summary.toolCalls > 0 ? `${summary.toolCalls} 次调用 / grep ${summary.searchedFiles} 文件` : "待生成"} />
+        <Fact label="结构化读取" value={summary.selectedFiles > 0 ? `${summary.selectedFiles} 个文件 · ${summary.investigationMode || "intent drilldown"}` : "待生成"} />
         <Fact label="Source Digest" value={summary.sourceDigest || "待生成"} />
         <Fact label="读取策略" value={summary.degraded ? "已降级使用需求/页面材料" : "只读扫描结构摘要，不保存完整源码"} />
       </div>

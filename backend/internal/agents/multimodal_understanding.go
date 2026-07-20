@@ -594,10 +594,62 @@ func compactCodeSnapshots(snapshots []model.CodeUnderstandingSnapshot) []map[str
 			"selectors":     limitSelectors(snapshot.Selectors, 30),
 			"api_endpoints": limitAPIs(snapshot.APIEndpoints, 30),
 			"data_models":   limitDataModels(snapshot.DataModels, 20),
+			"investigation": compactCodeInvestigationTrace(snapshot.InvestigationTrace),
 			"source_digest": snapshot.SourceDigestSHA256,
 		})
 	}
 	return result
+}
+
+func compactCodeInvestigationTrace(trace *model.CodeInvestigationTrace) map[string]any {
+	if trace == nil {
+		return nil
+	}
+	toolCalls := make([]map[string]any, 0, minInt(len(trace.ToolCalls), 8))
+	for _, call := range trace.ToolCalls {
+		if len(toolCalls) >= 8 {
+			break
+		}
+		toolCalls = append(toolCalls, map[string]any{
+			"tool":                call.Tool,
+			"purpose":             call.Purpose,
+			"query":               call.Query,
+			"output_summary":      call.OutputSummary,
+			"matched_file_count":  call.MatchedFileCount,
+			"selected_file_count": call.SelectedFileCount,
+			"confidence":          call.Confidence,
+			"fallback_reason":     call.FallbackReason,
+			"metadata":            compactInvestigationToolMetadata(call.Metadata),
+		})
+	}
+	return map[string]any{
+		"mode":                   trace.Mode,
+		"summary":                trace.Summary,
+		"total_files_discovered": trace.TotalFilesDiscovered,
+		"total_files_searched":   trace.TotalFilesSearched,
+		"total_files_selected":   trace.TotalFilesSelected,
+		"tool_calls":             toolCalls,
+	}
+}
+
+func compactInvestigationToolMetadata(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{"package_managers", "script_names", "dependency_names", "manifest_count", "git_tracked_file_count", "config_files"} {
+		value, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case []string:
+			out[key] = limitStrings(typed, 20)
+		default:
+			out[key] = typed
+		}
+	}
+	return out
 }
 
 func compactPageSnapshots(snapshots []model.PageUnderstandingSnapshot) []map[string]any {

@@ -2,11 +2,14 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 )
@@ -121,6 +124,348 @@ func TestCodeReaderUsesIntentDrivenBudget(t *testing.T) {
 	if selectorInsightContains(snapshot.Selectors, "[data-testid='profile-avatar']") {
 		t.Fatalf("budgeted read should not keep unrelated chrome selectors: %+v", snapshot.Selectors)
 	}
+	if snapshot.InvestigationTrace == nil {
+		t.Fatalf("expected tool-driven investigation trace")
+	}
+	if !investigationHasTool(snapshot.InvestigationTrace, "repo_index") || !investigationHasTool(snapshot.InvestigationTrace, "grep_text") {
+		t.Fatalf("expected repo_index and grep_text tool calls, got %+v", snapshot.InvestigationTrace.ToolCalls)
+	}
+}
+
+func TestCodeReaderUsesGrepToolBeforeStructuredReads(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	for i := 0; i < 24; i++ {
+		writeFixtureFile(t, root, filepath.ToSlash(filepath.Join("src", "components", "ChromeShell"+string(rune('a'+i))+".tsx")), `
+			export function ChromeShell() { return <button data-testid="profile-avatar">avatar</button> }
+		`)
+	}
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/projects/create"
+			return <form>
+				<input aria-label="项目名称" />
+				<button data-testid="create-tetris-project">新建项目：俄罗斯方块</button>
+			</form>
+		}
+		const createProjectAPI = "/api/projects/create"
+	`)
+
+	project := &model.ProjectContext{
+		ID:                 "project_grep_drilldown",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示新建项目，项目名称俄罗斯方块，构建模式",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_grep_drilldown",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_grep_drilldown",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"新建项目", "俄罗斯方块", "构建模式"}}
+	agent := NewCodeReaderAgent()
+	agent.Budget = model.CodeReadBudget{
+		Mode:                   "tool_driven_intent_drilldown",
+		RepoIndexFileLimit:     1,
+		DrilldownRounds:        1,
+		FilesPerRound:          1,
+		TotalFileLimit:         2,
+		MaxFileBytes:           80 * 1024,
+		ToolSearchFileLimit:    80,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  10,
+	}
+
+	snapshots, err := agent.ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	if snapshot.FileCount > 2 {
+		t.Fatalf("expected bounded structured reads, got %d", snapshot.FileCount)
+	}
+	if !routeInsightContains(snapshot.Routes, "/workspace/projects/create") {
+		t.Fatalf("grep-selected file should provide route evidence, got %+v", snapshot.Routes)
+	}
+	if !selectorInsightContains(snapshot.Selectors, "[data-testid='create-tetris-project']") {
+		t.Fatalf("grep-selected file should provide business selector, got %+v", snapshot.Selectors)
+	}
+	if selectorInsightContains(snapshot.Selectors, "[data-testid='profile-avatar']") {
+		t.Fatalf("unrelated chrome files should not be structurally read: %+v", snapshot.Selectors)
+	}
+	trace := snapshot.InvestigationTrace
+	if trace == nil {
+		t.Fatalf("expected investigation trace")
+	}
+	grepCall := investigationToolCall(trace, "grep_text")
+	if grepCall == nil {
+		t.Fatalf("expected grep_text tool call, got %+v", trace.ToolCalls)
+	}
+	if grepCall.SelectedFileCount != 1 || grepCall.MatchedFileCount == 0 {
+		t.Fatalf("expected grep to select the content-relevant file, got %+v", grepCall)
+	}
+	if trace.TotalFilesSearched <= trace.TotalFilesSelected {
+		t.Fatalf("expected search to inspect candidates before bounded structured reads, got searched=%d selected=%d", trace.TotalFilesSearched, trace.TotalFilesSelected)
+	}
+}
+
+func TestCodeReaderLLMPlannerCanChooseNextGrepQuery(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	for i := 0; i < 16; i++ {
+		writeFixtureFile(t, root, filepath.ToSlash(filepath.Join("src", "components", "GenericPanel"+string(rune('a'+i))+".tsx")), `
+			export function GenericPanel() { return <button data-testid="profile-avatar">avatar</button> }
+		`)
+	}
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/orbital-lab"
+			return <button data-testid="launch-orbital-lab">Launch orbital lab</button>
+		}
+	`)
+
+	project := &model.ProjectContext{
+		ID:                 "project_llm_planner",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示研发工作流",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_llm_planner",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_llm_planner",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"研发工作流"}}
+	agent := NewCodeReaderAgentWithLLM(codeInvestigationPlannerLLM{})
+	agent.Budget = model.CodeReadBudget{
+		Mode:                   "tool_driven_intent_drilldown",
+		RepoIndexFileLimit:     1,
+		DrilldownRounds:        1,
+		FilesPerRound:          1,
+		TotalFileLimit:         2,
+		MaxFileBytes:           80 * 1024,
+		ToolSearchFileLimit:    80,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  10,
+	}
+
+	snapshots, err := agent.ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	if !routeInsightContains(snapshot.Routes, "/workspace/orbital-lab") {
+		t.Fatalf("LLM-planned grep query should select orbital-lab route evidence, got %+v", snapshot.Routes)
+	}
+	if !selectorInsightContains(snapshot.Selectors, "[data-testid='launch-orbital-lab']") {
+		t.Fatalf("LLM-planned grep query should select orbital-lab selector evidence, got %+v", snapshot.Selectors)
+	}
+	plannerCall := investigationToolCall(snapshot.InvestigationTrace, "plan_investigation")
+	if plannerCall == nil {
+		t.Fatalf("expected plan_investigation call, got %+v", snapshot.InvestigationTrace)
+	}
+	if plannerCall.FallbackReason != "" {
+		t.Fatalf("expected model planner, got fallback %+v", plannerCall)
+	}
+	if !strings.Contains(plannerCall.Query, "orbital-lab") {
+		t.Fatalf("expected planner query to include model-selected term, got %+v", plannerCall)
+	}
+}
+
+func TestProjectInvestigationToolSuiteIsReusableWithoutCodeReader(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{
+		"scripts": {
+			"dev": "CASCADE_TOKEN=super-secret vite",
+			"build": "vite build"
+		},
+		"dependencies": {"react":"latest","vite":"latest"}
+	}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/orbital-lab"
+			return <button data-testid="launch-orbital-lab">Launch orbital lab</button>
+		}
+	`)
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(codeInvestigationPlannerLLM{}).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        1,
+			FilesPerRound:          1,
+			TotalFileLimit:         2,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_reusable_tools", ProductDescription: "演示研发工作流"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_reusable_tools", Objective: "演示研发工作流"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.SelectedCandidates) != 2 {
+		t.Fatalf("expected manifest plus model-planned target file, got %+v", result.SelectedCandidates)
+	}
+	if result.Trace == nil || !investigationHasTool(result.Trace, "plan_investigation") || !investigationHasTool(result.Trace, "grep_text") {
+		t.Fatalf("expected reusable tool trace with planner and grep calls, got %+v", result.Trace)
+	}
+	shellCall := investigationToolCall(result.Trace, "shell_metadata")
+	if shellCall == nil {
+		t.Fatalf("expected shell_metadata tool call, got %+v", result.Trace.ToolCalls)
+	}
+	metadataJSON, _ := json.Marshal(shellCall.Metadata)
+	if !strings.Contains(string(metadataJSON), "dev") || !strings.Contains(string(metadataJSON), "build") || !strings.Contains(string(metadataJSON), "react") {
+		t.Fatalf("expected metadata to expose script/dependency names, got %s", string(metadataJSON))
+	}
+	if strings.Contains(string(metadataJSON), "super-secret") || strings.Contains(string(metadataJSON), "CASCADE_TOKEN") || strings.Contains(shellCall.OutputSummary, "super-secret") {
+		t.Fatalf("shell metadata leaked script command values: %s / %s", string(metadataJSON), shellCall.OutputSummary)
+	}
+	if !candidateRelContains(result.SelectedCandidates, "Flow.tsx") {
+		t.Fatalf("expected suite to select Flow.tsx, got %+v", result.SelectedCandidates)
+	}
+}
+
+func TestProjectInvestigationToolSuiteRunsEvidenceReviewAndAdaptiveNextQuery(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/orbital-lab"
+			return <button data-testid="launch-orbital-lab">Launch orbital lab</button>
+		}
+	`)
+	writeFixtureFile(t, root, "backend/server/OrbitalAPI.go", `
+		package server
+		func handleOrbitalLaunch() {
+			path := "/api/orbital-lab/launch"
+			_ = path
+		}
+	`)
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(uiOnlyInvestigationPlannerLLM{}).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        2,
+			FilesPerRound:          1,
+			TotalFileLimit:         4,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_multi_round_tools", ProductDescription: "演示 orbital lab"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_multi_round_tools", Objective: "演示 orbital lab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grepToolCallCount(result.Trace) < 2 {
+		t.Fatalf("expected adaptive second grep round, got %+v", result.Trace.ToolCalls)
+	}
+	if !investigationHasTool(result.Trace, "evidence_review") {
+		t.Fatalf("expected evidence_review tool call, got %+v", result.Trace.ToolCalls)
+	}
+	if !candidateRelContains(result.SelectedCandidates, "OrbitalAPI.go") {
+		t.Fatalf("expected adaptive API query to select backend API file, got %+v", result.SelectedCandidates)
+	}
+}
+
+func TestProjectInvestigationToolSuiteExecutesAdaptiveQueryBeyondInitialPlannerRounds(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/orbital-lab"
+			return <button data-testid="launch-orbital-lab">Launch orbital lab</button>
+		}
+	`)
+	writeFixtureFile(t, root, "backend/server/OrbitalAPI.go", `
+		package server
+		func handleOrbitalLaunch() {
+			path := "/api/orbital-lab/launch"
+			_ = path
+		}
+	`)
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(twoRoundUIOnlyInvestigationPlannerLLM{}).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        2,
+			FilesPerRound:          1,
+			TotalFileLimit:         5,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_adaptive_budget", ProductDescription: "演示 orbital lab"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_adaptive_budget", Objective: "演示 orbital lab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grepToolCallCount(result.Trace) < 3 {
+		t.Fatalf("expected adaptive grep after the two initial planner rounds, got %+v", result.Trace.ToolCalls)
+	}
+	if !candidateRelContains(result.SelectedCandidates, "OrbitalAPI.go") {
+		t.Fatalf("expected adaptive query beyond initial planner rounds to select backend API file, got %+v", result.SelectedCandidates)
+	}
+}
+
+func TestProjectIntelligenceGraphUsesInvestigationSuiteForFocusedDrilldown(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/views/Flow.tsx", `
+		export function Flow() {
+			const route = "/workspace/orbital-lab"
+			return <button data-testid="launch-orbital-lab">Launch orbital lab</button>
+		}
+		const launchAPI = "/api/orbital-lab/launch"
+	`)
+	project := &model.ProjectContext{
+		ID:                 "project_pi_drilldown",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示 orbital-lab 研发工作流",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_pi_drilldown",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_pi_drilldown",
+		}}},
+	}
+	brief := &model.RequirementBrief{
+		ProjectID: project.ID,
+		Objective: "演示 orbital-lab 研发工作流",
+		MustShow:  []string{"orbital-lab", "launch-orbital-lab"},
+	}
+
+	pack, _, graphTrace, err := NewProjectIntelligenceGraph().RunProjectIntelligence(context.Background(), project, brief, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pack == nil || pack.Architecture == nil || !architectureRouteContains(pack.Architecture.RouteTree, "/workspace/orbital-lab") {
+		t.Fatalf("expected focused route drilldown to add orbital route, got %+v", pack)
+	}
+	if !interactionSurfaceContainsSelector(pack.InteractionSurfaces, "[data-testid='launch-orbital-lab']") {
+		t.Fatalf("expected focused component drilldown to add orbital selector, got %+v", pack.InteractionSurfaces)
+	}
+	if !apiContractContains(pack.APIContracts, "/api/orbital-lab/launch") {
+		t.Fatalf("expected focused API drilldown to add orbital API, got %+v", pack.APIContracts)
+	}
+	if !agentGraphTraceOutputContains(graphTrace, "工具化 route drilldown") {
+		t.Fatalf("expected graph trace to mention focused route drilldown, got %+v", graphTrace)
+	}
 }
 
 func TestVerifierFallsBackToRuntimeAdaptiveWhenScanFindsNoBusinessAction(t *testing.T) {
@@ -173,6 +518,48 @@ func writeFixtureFile(t *testing.T, root string, rel string, content string) {
 	}
 }
 
+func collectCodeCandidatesForTest(t *testing.T, root string, project *model.ProjectContext, brief *model.RequirementBrief) []codeCandidateFile {
+	t.Helper()
+	candidates := []codeCandidateFile{}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		name := entry.Name()
+		if entry.IsDir() {
+			if shouldSkipDir(name) && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isScannableFile(name) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			rel = name
+		}
+		if shouldSkipCodeFileRel(rel, name) {
+			return nil
+		}
+		candidates = append(candidates, codeCandidateFile{
+			path:  path,
+			rel:   rel,
+			name:  name,
+			size:  info.Size(),
+			score: codeFilePriority(rel, name, project, brief),
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return candidates
+}
+
 func routeInsightContains(values []model.RouteInsight, path string) bool {
 	for _, value := range values {
 		if value.Path == path {
@@ -185,6 +572,52 @@ func routeInsightContains(values []model.RouteInsight, path string) bool {
 func apiInsightContains(values []model.APIEndpointInsight, path string) bool {
 	for _, value := range values {
 		if value.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func apiContractContains(values []model.APIContractSummary, path string) bool {
+	for _, value := range values {
+		if value.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func architectureRouteContains(values []model.ArchitectureRouteNode, path string) bool {
+	for _, value := range values {
+		if value.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func interactionSurfaceContainsSelector(values []model.InteractionSurface, selector string) bool {
+	for _, surface := range values {
+		for _, candidate := range surface.StableSelectors {
+			if candidate.Value == selector {
+				return true
+			}
+		}
+		for _, action := range surface.Actions {
+			if action.Selector == selector {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func agentGraphTraceOutputContains(trace *model.AgentGraphTrace, text string) bool {
+	if trace == nil {
+		return false
+	}
+	for _, step := range trace.Steps {
+		if strings.Contains(step.OutputSummary, text) || strings.Contains(step.InputSummary, text) {
 			return true
 		}
 	}
@@ -210,4 +643,115 @@ func runtimeAdaptiveActionContains(plan *model.VerifiedInteractionPlan, text str
 		}
 	}
 	return false
+}
+
+func investigationHasTool(trace *model.CodeInvestigationTrace, tool string) bool {
+	return investigationToolCall(trace, tool) != nil
+}
+
+func investigationToolCall(trace *model.CodeInvestigationTrace, tool string) *model.CodeInvestigationToolCall {
+	if trace == nil {
+		return nil
+	}
+	for i := range trace.ToolCalls {
+		if trace.ToolCalls[i].Tool == tool {
+			return &trace.ToolCalls[i]
+		}
+	}
+	return nil
+}
+
+func grepToolCallCount(trace *model.CodeInvestigationTrace) int {
+	count := 0
+	if trace == nil {
+		return count
+	}
+	for _, call := range trace.ToolCalls {
+		if call.Tool == "grep_text" {
+			count++
+		}
+	}
+	return count
+}
+
+func candidateRelContains(candidates []codeCandidateFile, text string) bool {
+	for _, candidate := range candidates {
+		if strings.Contains(filepath.ToSlash(candidate.rel), text) {
+			return true
+		}
+	}
+	return false
+}
+
+type codeInvestigationPlannerLLM struct{}
+
+func (codeInvestigationPlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	data := []byte(`{
+		"summary": "repo map shows a Flow view likely tied to the requested workflow; search its semantic id.",
+		"queries": [
+			{"purpose": "定位研发工作流的核心页面和启动控件", "terms": ["orbital-lab", "launch-orbital-lab"]}
+		],
+		"confidence": 0.86
+	}`)
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (codeInvestigationPlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (codeInvestigationPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
+}
+
+type uiOnlyInvestigationPlannerLLM struct{}
+
+func (uiOnlyInvestigationPlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	data := []byte(`{
+		"summary": "first inspect the visible launch control",
+		"queries": [
+			{"purpose": "定位可见启动控件", "terms": ["launch-orbital-lab"]}
+		],
+		"confidence": 0.82
+	}`)
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-ui-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (uiOnlyInvestigationPlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (uiOnlyInvestigationPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
+}
+
+type twoRoundUIOnlyInvestigationPlannerLLM struct{}
+
+func (twoRoundUIOnlyInvestigationPlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	data := []byte(`{
+		"summary": "planner fills the configured rounds before evidence review asks for backend evidence",
+		"queries": [
+			{"purpose": "定位可见启动控件", "terms": ["launch-orbital-lab"]},
+			{"purpose": "检查无关 UI 文案", "terms": ["unrelated-ui-token"]}
+		],
+		"confidence": 0.82
+	}`)
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-two-round-ui-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (twoRoundUIOnlyInvestigationPlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (twoRoundUIOnlyInvestigationPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
 }
