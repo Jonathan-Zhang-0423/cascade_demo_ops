@@ -14,6 +14,7 @@ type ImportMode = "upload" | "path" | "result" | "empty";
 type MediaTab = "media" | "captions" | "callouts" | "generated";
 type PreviewMode = "source" | "rendered";
 type SelectedTrack = "video" | "audio";
+type TimelineTrack = "evidence" | "video" | "caption" | "audio";
 
 type TimelineShot = {
   shot: EditorShot;
@@ -60,6 +61,7 @@ export function VideoEditor() {
   const [playheadMS, setPlayheadMS] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [timelineScale, setTimelineScale] = useState(48);
+  const [hiddenTracks, setHiddenTracks] = useState<Record<TimelineTrack, boolean>>({ evidence: false, video: false, caption: false, audio: false });
   const [timelineInteractionKind, setTimelineInteractionKind] = useState<TimelineInteraction["kind"]>();
   const [snapGuideMS, setSnapGuideMS] = useState<number>();
   const [pendingFile, setPendingFile] = useState<File>();
@@ -130,6 +132,11 @@ export function VideoEditor() {
       if (event.code === "Space" && !editingText && session) {
         event.preventDefault();
         togglePlayback();
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && session) {
+        event.preventDefault();
+        void persistDraft(true);
+        return;
       }
       if ((event.ctrlKey || event.metaKey) && !editingText && event.key.toLowerCase() === "z") {
         event.preventDefault();
@@ -239,6 +246,7 @@ export function VideoEditor() {
     setSelectedShotID(next.edit_plan.shots[0]?.id ?? "");
     setSelectedTrack("video");
     setSelectedAudioSegmentID("");
+    setHiddenTracks({ evidence: false, video: false, caption: false, audio: false });
     setAudioAnalyses({});
     setDismissedAudioCandidateIDs([]);
     setMessage("");
@@ -291,13 +299,14 @@ export function VideoEditor() {
     const result = await client.uploadAsset(session.session_id, file);
     setBusy("");
     if (!result.ok || !result.data) {
-      setMessage(result.error ?? "视频上传失败");
+      setMessage(result.error ?? "素材上传失败");
       return;
     }
     loadSession(result.data);
     setPendingFile(undefined);
     setImportOpen(false);
-    setMessage("视频已上传到 Server 管理目录并加入时间线。");
+    const isAudio = file.type.startsWith("audio/") || /\.(wav|mp3|m4a|aac|ogg|flac)$/i.test(file.name);
+    setMessage(isAudio ? "音频已上传到 Server 管理目录，可作为只读配音素材使用。" : "视频已上传到 Server 管理目录并加入时间线。");
   }
 
   async function createFromResultPackage() {
@@ -339,6 +348,7 @@ export function VideoEditor() {
     if (!draftPlan || session?.status === "rendering" || event.button !== 0 || !item.shot.source_time_range_ms) return;
     event.preventDefault();
     event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
     setSelectedShotID(item.shot.id);
     setSelectedTrack("video");
     setPreviewMode("source");
@@ -437,6 +447,10 @@ export function VideoEditor() {
     setHistory((current) => recordEditorHistory(current, interaction.basePlan));
     editGroupRef.current = undefined;
     setSaveState("dirty");
+  }
+
+  function toggleTimelineTrack(track: TimelineTrack) {
+    setHiddenTracks((current) => ({ ...current, [track]: !current[track] }));
   }
 
   function cancelTimelineInteraction() {
@@ -851,7 +865,7 @@ export function VideoEditor() {
             if (next) loadSession(next);
           }}>
             <option value="">选择编辑项目</option>
-            {sessions.map((item) => <option key={item.session_id} value={item.session_id}>{item.name}</option>)}
+            {sessions.map((item) => <option key={item.session_id} value={item.session_id}>{sessionDisplayName(item)}</option>)}
           </select>
           {session ? <span className="studio-revision">r{session.revision}</span> : null}
           <button className={`studio-save-state ${saveState}`} disabled={!session || saveState === "saved" || busy === "save"} onClick={savePlan}>{saveStateLabel(saveState)}</button>
@@ -860,7 +874,7 @@ export function VideoEditor() {
         <div className="studio-history-actions">
           <button className="studio-icon-button" title="撤销 Ctrl+Z" disabled={!draftPlan || history.past.length === 0 || busy !== ""} onClick={undo}>↶</button>
           <button className="studio-icon-button" title="重做 Ctrl+Shift+Z" disabled={!draftPlan || history.future.length === 0 || busy !== ""} onClick={redo}>↷</button>
-          <button className="studio-icon-button" title={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} disabled={!draftPlan || busy !== ""} onClick={splitShot}>⌁</button>
+          <button className="studio-icon-button studio-split-icon-button" aria-label={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} title={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} disabled={!draftPlan || busy !== ""} onClick={splitShot}><ScissorsIcon /></button>
         </div>
 
         <div className="studio-topbar-actions">
@@ -943,7 +957,7 @@ export function VideoEditor() {
             <aside className="studio-panel studio-properties-panel">
               <div className="studio-panel-heading"><strong>属性</strong><small>{selectedTrack === "audio" && selectedAudioSegment ? `音频 ${selectedAudioSegment.index + 1}/${audioSegments.length}` : selectedShot ? `视频 ${selectedIndex + 1}/${draftPlan?.shots.length ?? 0}` : "未选择"}</small></div>
               {selectedTrack === "audio" && selectedAudioSegment ? (
-                <div className="studio-properties-content">
+                <div className="studio-properties-scroll">
                   <PropertySection title="音频片段" meta={selectedAudioSegment.id}>
                     <label className="studio-field"><span>时间范围</span><input value={`${formatTimecode(selectedAudioSegment.startMS)}—${formatTimecode(selectedAudioSegment.endMS)}`} readOnly /></label>
                     <label className="studio-field"><span>持续时间</span><input value={formatTimecode(selectedAudioSegment.durationMS)} readOnly /></label>
@@ -997,7 +1011,7 @@ export function VideoEditor() {
                 </div>
               ) : <div className="studio-properties-empty">选择时间线片段后编辑属性。</div>}
               <div className="studio-property-actions">
-                <button className="studio-outline-button" title={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} disabled={!draftPlan} onClick={splitShot}>分割{selectedTrack === "audio" ? "音频" : "视频"}</button>
+                <button className="studio-outline-button studio-split-button" title={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} disabled={!draftPlan} onClick={splitShot}><ScissorsIcon /><span>分割{selectedTrack === "audio" ? "音频" : "视频"}</span></button>
                 <button className="studio-ghost-button" disabled={selectedTrack === "video" ? !selectedShot : !selectedAudioSegment} onClick={deleteSelected}>{selectedTrack === "audio" ? "静音此段" : "删除"}</button>
               </div>
             </aside>
@@ -1009,7 +1023,7 @@ export function VideoEditor() {
                 <strong>时间线</strong>
                 <button className="studio-icon-button" title="前移" disabled={selectedTrack !== "video" || !selectedShot || selectedIndex <= 0} onClick={() => moveShot(-1)}>←</button>
                 <button className="studio-icon-button" title="后移" disabled={selectedTrack !== "video" || !selectedShot || selectedIndex >= (draftPlan?.shots.length ?? 0) - 1} onClick={() => moveShot(1)}>→</button>
-                <button className="studio-icon-button" title={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} disabled={!draftPlan} onClick={splitShot}>⌁</button>
+                <button className="studio-icon-button studio-split-icon-button" aria-label={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} title={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} disabled={!draftPlan} onClick={splitShot}><ScissorsIcon /></button>
                 <button className="studio-icon-button" title={selectedTrack === "audio" ? "静音所选音频段" : "删除"} disabled={selectedTrack === "video" ? !selectedShot : !selectedAudioSegment} onClick={deleteSelected}>⌫</button>
                 <button className="studio-outline-button studio-analyze-audio" disabled={!draftPlan?.shots.length || audioAnalysisBusy} onClick={() => void analyzeTimelineAudio()}>{audioAnalysisBusy ? "分析中…" : outputWaveform.length ? "重新分析音频" : "分析音频"}</button>
                 <span className="studio-snap-status">● 帧吸附</span>
@@ -1019,21 +1033,21 @@ export function VideoEditor() {
             <div className="studio-timeline-body" ref={timelineScrollRef}>
               <div className="studio-track-labels">
                 <div />
-                <div><strong>业务步骤</strong><span>🔒</span></div>
-                <div><strong>视频</strong><span>◉</span></div>
-                <div><strong>字幕 / 标注</strong><span>◉</span></div>
-                <div><strong>音频</strong><span>◉</span></div>
+                <TrackLabel track="evidence" label="业务步骤" locked hidden={hiddenTracks.evidence} onToggle={toggleTimelineTrack} />
+                <TrackLabel track="video" label="视频" hidden={hiddenTracks.video} onToggle={toggleTimelineTrack} />
+                <TrackLabel track="caption" label="字幕 / 标注" hidden={hiddenTracks.caption} onToggle={toggleTimelineTrack} />
+                <TrackLabel track="audio" label="音频" hidden={hiddenTracks.audio} onToggle={toggleTimelineTrack} />
               </div>
               <div ref={timelineContentRef} className={`studio-timeline-scroll ${timelineInteractionKind ? `interacting ${timelineInteractionKind}` : ""}`} style={{ width: timelineWidth, backgroundSize: `${timeRulerStep(totalDurationMS) * timelineScale}px 100%` }} onPointerDown={beginPlayheadDrag}>
                 <TimeRuler totalDurationMS={totalDurationMS} scale={timelineScale} />
-                <div className="studio-track-row studio-evidence-track">
-                  {timelineShots.map((item) => {
+                <div className={`studio-track-row studio-evidence-track ${hiddenTracks.evidence ? "track-hidden" : ""}`}>
+                  {!hiddenTracks.evidence && timelineShots.map((item) => {
                     const step = session.asset_catalog.steps?.find((candidate) => candidate.step_id === item.shot.source_step_id);
                     return <div key={item.shot.id} className={`studio-evidence-clip ${step ? stepTone(step.status) : "neutral"}`} style={clipStyle(item, timelineScale)}><span>{step?.required ? "🔒" : "◇"}</span><strong>{step ? `${stepDisplayNumber(step, session.asset_catalog.steps ?? [])} ${stepTitle(step)}` : "本地展示片段"}</strong></div>;
                   })}
                 </div>
-                <div className="studio-track-row studio-video-track">
-                  {timelineShots.map((item) => (
+                <div className={`studio-track-row studio-video-track ${hiddenTracks.video ? "track-hidden" : ""}`}>
+                  {!hiddenTracks.video && timelineShots.map((item) => (
                     <button
                       key={item.shot.id}
                       className={`studio-timeline-clip video ${selectedTrack === "video" && selectedShot?.id === item.shot.id ? "selected" : ""} ${timelineInteractionKind === "move" && selectedShotID === item.shot.id ? "dragging" : ""}`}
@@ -1049,16 +1063,16 @@ export function VideoEditor() {
                     </button>
                   ))}
                 </div>
-                <div className="studio-track-row studio-caption-track">
-                  {timelineShots.map((item) => captionText(item.shot) ? <button key={item.shot.id} className="studio-timeline-clip caption" style={clipStyle(item, timelineScale)} onPointerDown={(event) => event.stopPropagation()} onClick={() => selectShot(item.shot)}><strong>{captionText(item.shot)}</strong></button> : null)}
+                <div className={`studio-track-row studio-caption-track ${hiddenTracks.caption ? "track-hidden" : ""}`}>
+                  {!hiddenTracks.caption && timelineShots.map((item) => captionText(item.shot) ? <button key={item.shot.id} className="studio-timeline-clip caption" style={clipStyle(item, timelineScale)} onPointerDown={(event) => event.stopPropagation()} onClick={() => selectShot(item.shot)}><strong>{captionText(item.shot)}</strong></button> : null)}
                 </div>
-                <div className="studio-track-row studio-audio-track">
-                  {audioSegments.map((segment) => {
+                <div className={`studio-track-row studio-audio-track ${hiddenTracks.audio ? "track-hidden" : ""}`}>
+                  {!hiddenTracks.audio && audioSegments.map((segment) => {
                     const clipWidth = Math.max(1, segment.durationMS / 1000 * timelineScale);
                     const bars = waveformBarsForRange(outputWaveform, segment.startMS, segment.endMS, Math.floor(clipWidth / 3));
                     return <button key={segment.id} className={`studio-audio-clip ${segment.mode === "mute" ? "muted" : ""} ${selectedTrack === "audio" && selectedAudioSegment?.id === segment.id ? "selected" : ""}`} style={{ left: segment.startMS / 1000 * timelineScale, width: clipWidth }} title={`${segment.mode === "mute" ? "静音" : `音量 ${segment.volumePercent}%`} · ${formatTimecode(segment.startMS)}—${formatTimecode(segment.endMS)}`} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); selectAudioSegment(segment); }}><span className="studio-audio-waveform" aria-hidden="true">{bars.map((height, index) => <i key={index} style={{ height: `${Math.round(height * 90)}%` }} />)}</span><strong>{segment.mode === "mute" ? "静音" : `源音频 ${segment.index + 1} · ${segment.volumePercent}%`}</strong><small>{formatDuration(segment.durationMS)}</small></button>;
                   })}
-                  {audioCandidates.map((candidate) => <span key={candidate.id} className="studio-audio-candidate-range" style={{ left: candidate.startMS / 1000 * timelineScale, width: Math.max(2, (candidate.endMS - candidate.startMS) / 1000 * timelineScale) }} />)}
+                  {!hiddenTracks.audio && audioCandidates.map((candidate) => <span key={candidate.id} className="studio-audio-candidate-range" style={{ left: candidate.startMS / 1000 * timelineScale, width: Math.max(2, (candidate.endMS - candidate.startMS) / 1000 * timelineScale) }} />)}
                 </div>
                 <div className="studio-playhead" style={{ left: playheadMS / 1000 * timelineScale }} />
                 {snapGuideMS !== undefined ? <div className="studio-snap-guide" style={{ left: snapGuideMS / 1000 * timelineScale }} /> : null}
@@ -1111,11 +1125,10 @@ function MediaPanelContent({ tab, session, plan, selectedShotID, onSelectShot }:
 }
 
 function AssetCard({ artifact, selected, generated, onClick }: { artifact: EditorArtifact; selected?: boolean; generated?: boolean; onClick?: (() => void) | undefined }) {
+  const content = <><div className={`studio-asset-thumb ${generated ? "generated" : ""}`}><span className={`studio-asset-status ${generated ? "review" : ""}`}>{generated ? "待审查" : artifact.sha256 ? "已校验" : "本地"}</span><span className="studio-asset-duration">{formatDuration(artifact.duration_ms ?? 0)}</span></div><div><strong>{artifact.label ?? artifact.id}</strong><small>{mediaResolution(artifact)} · {artifact.mime_type ?? artifact.kind}</small></div></>;
+  if (!onClick) return <article className="studio-asset-card static" aria-label={`${artifact.label ?? artifact.id}（仅展示）`}>{content}</article>;
   return (
-    <button className={`studio-asset-card ${selected ? "selected" : ""}`} disabled={!onClick} onClick={onClick}>
-      <div className={`studio-asset-thumb ${generated ? "generated" : ""}`}><span className={`studio-asset-status ${generated ? "review" : ""}`}>{generated ? "待审查" : artifact.sha256 ? "已校验" : "本地"}</span><span className="studio-asset-duration">{formatDuration(artifact.duration_ms ?? 0)}</span></div>
-      <div><strong>{artifact.label ?? artifact.id}</strong><small>{mediaResolution(artifact)} · {artifact.mime_type ?? artifact.kind}</small></div>
-    </button>
+    <button className={`studio-asset-card ${selected ? "selected" : ""}`} onClick={onClick}>{content}</button>
   );
 }
 
@@ -1144,13 +1157,13 @@ function ImportDialog(props: {
         <div className="studio-modal-header"><strong>导入素材或结果包</strong><button className="studio-icon-button" onClick={props.onClose}>×</button></div>
         <div className="studio-modal-content">
           <div className="studio-import-choices">
-            <ImportChoice active={props.mode === "upload"} title="本机视频" detail="浏览器选择并上传到 Server 管理目录" onClick={() => props.onModeChange("upload")} />
+            <ImportChoice active={props.mode === "upload"} title="本机视频或音频" detail="浏览器选择并上传到 Server 管理目录" onClick={() => props.onModeChange("upload")} />
             <ImportChoice active={props.mode === "path"} title="Server 路径" detail="读取本机已有视频，不重复上传" onClick={() => props.onModeChange("path")} />
             <ImportChoice active={props.mode === "result"} title="结果包" detail="保留步骤时间和证据来源" onClick={() => props.onModeChange("result")} />
             <ImportChoice active={props.mode === "empty"} title="空项目" detail="先建项目，稍后再加入素材" onClick={() => props.onModeChange("empty")} />
           </div>
           {(props.mode === "empty" || props.mode === "result" || (!props.hasSession && props.mode === "path")) ? <label className="studio-field"><span>项目名称</span><input value={props.newName} onChange={(event) => props.onNameChange(event.target.value)} /></label> : null}
-          {props.mode === "upload" ? <label className="studio-file-field"><span>{props.pendingFile?.name ?? (props.hasSession ? "选择 MP4、WebM、MOV 或 M4V" : "请先创建空项目")}</span><input type="file" accept="video/mp4,video/webm,video/quicktime,.m4v" disabled={!props.hasSession} onChange={(event) => props.onFileChange(event.target.files?.[0])} /></label> : null}
+          {props.mode === "upload" ? <label className="studio-file-field"><span>{props.pendingFile?.name ?? (props.hasSession ? "选择视频或 WAV、MP3、M4A、AAC、OGG、FLAC 音频" : "请先创建空项目")}</span><input type="file" accept="video/mp4,video/webm,video/quicktime,.m4v,audio/wav,audio/mpeg,audio/mp4,audio/aac,audio/ogg,audio/flac,.wav,.mp3,.m4a,.aac,.ogg,.flac" disabled={!props.hasSession} onChange={(event) => props.onFileChange(event.target.files?.[0])} /></label> : null}
           {props.mode === "path" ? <label className="studio-field"><span>Server 本机视频路径</span><input value={props.sourcePath} onChange={(event) => props.onSourcePathChange(event.target.value)} placeholder="D:\recordings\demo.mp4" /></label> : null}
           {props.mode === "result" ? <><label className="studio-field"><span>结果包 JSON 路径</span><input value={props.resultPackagePath} onChange={(event) => props.onResultPackagePathChange(event.target.value)} placeholder="D:\results\recording-result.json" /></label><label className="studio-field"><span>已下载解密的录屏路径（远程或加密素材必填）</span><input value={props.resultRecordingPath} onChange={(event) => props.onResultRecordingPathChange(event.target.value)} placeholder="D:\results\raw-recording.mp4" /></label></> : null}
           <p className="studio-dialog-note">原始素材保持只读；导入后执行 SHA-256、FFprobe 和媒体兼容性检查。</p>
@@ -1191,6 +1204,24 @@ function EvidenceFact({ label, value }: { label: string; value: string }) {
 
 function PanelEmpty({ text }: { text: string }) {
   return <div className="studio-panel-empty">{text}</div>;
+}
+
+function ScissorsIcon() {
+  return <svg className="studio-scissors-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="6" cy="7" r="2.75" /><circle cx="6" cy="17" r="2.75" /><path d="m8.35 8.55 10.15 6.9" /><path d="m8.35 15.45 10.15-6.9" /></svg>;
+}
+
+function TrackLabel({ track, label, locked = false, hidden, onToggle }: { track: TimelineTrack; label: string; locked?: boolean; hidden: boolean; onToggle: (track: TimelineTrack) => void }) {
+  return <div className={hidden ? "track-label-hidden" : ""}><strong>{label}</strong><span className="studio-track-label-actions">{locked ? <LockIcon /> : null}<button className="studio-track-visibility-toggle" aria-label={`${hidden ? "显示" : "隐藏"}${label}轨道片段`} title={`${hidden ? "显示" : "隐藏"}${label}轨道片段；仅影响时间线显示`} onClick={() => onToggle(track)}><EyeIcon hidden={hidden} /></button></span></div>;
+}
+
+function LockIcon() {
+  return <svg className="studio-lock-icon" viewBox="0 0 24 24" aria-label="业务步骤受约束"><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /><path d="M12 14v2" /></svg>;
+}
+
+function EyeIcon({ hidden }: { hidden: boolean }) {
+  return hidden
+    ? <svg className="studio-eye-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m3 3 18 18" /><path d="M10.7 6.2A10.8 10.8 0 0 1 12 6.1c5.5 0 8.8 5.9 8.8 5.9a16.6 16.6 0 0 1-3 3.6" /><path d="M6.2 6.3A16.5 16.5 0 0 0 3.2 12S6.5 17.9 12 17.9a9.2 9.2 0 0 0 2.2-.3" /><path d="M9.7 9.7a3.2 3.2 0 0 0 4.6 4.6" /></svg>
+    : <svg className="studio-eye-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.2 12S6.5 6.1 12 6.1 20.8 12 20.8 12 17.5 17.9 12 17.9 3.2 12 3.2 12Z" /><circle cx="12" cy="12" r="3.1" /></svg>;
 }
 
 function TimeRuler({ totalDurationMS, scale }: { totalDurationMS: number; scale: number }) {
@@ -1306,6 +1337,12 @@ function renderStateLabel(state: EditorSession["preview"]): string {
 
 function saveStateLabel(state: SaveState): string {
   return ({ saved: "已保存", dirty: "待自动保存", saving: "保存中", error: "保存失败" } as const)[state];
+}
+
+function sessionDisplayName(session: EditorSession): string {
+  const name = session.name.trim();
+  if (name && !/[?]{2,}/.test(name)) return name;
+  return `本地编辑项目 · ${session.session_id.slice(-6)}`;
 }
 
 function mediaTabLabel(tab: MediaTab): string {

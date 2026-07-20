@@ -30,6 +30,12 @@ const SUPPORTED_EXTENSIONS = new Map([
   [".webm", "video/webm"],
   [".mov", "video/quicktime"],
   [".m4v", "video/x-m4v"],
+  [".wav", "audio/wav"],
+  [".mp3", "audio/mpeg"],
+  [".m4a", "audio/mp4"],
+  [".aac", "audio/aac"],
+  [".ogg", "audio/ogg"],
+  [".flac", "audio/flac"],
 ]);
 
 export async function probeMediaFile(request: MediaProbeRequest): Promise<MediaProbeResult> {

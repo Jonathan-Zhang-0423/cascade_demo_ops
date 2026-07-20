@@ -34,7 +34,7 @@ export function finalRendererSupports(type: string): boolean {
   return capabilityKey ? editorCapabilities[capabilityKey].finalRenderer : false;
 }
 
-export type PresentationSequenceKind = "video" | "audio" | "caption" | "callout";
+export type PresentationSequenceKind = "video" | "audio" | "narration" | "caption" | "callout";
 
 export type PresentationSequence = {
   id: string;
@@ -142,6 +142,43 @@ export function compilePresentationComposition(session: EditorSession, plan: Edi
       });
     }
     cursorFrame += durationInFrames;
+  }
+
+  for (const narration of plan.narrations ?? []) {
+    const artifact = artifacts.get(narration.source_artifact_id);
+    const [outputStartMS, outputEndMS] = narration.output_time_range_ms;
+    const [sourceStartMS, sourceEndMS] = narration.source_time_range_ms ?? [0, Math.max(0, outputEndMS - outputStartMS)];
+    const fromFrame = millisecondsToFrame(outputStartMS, fps);
+    const durationInFrames = Math.max(1, millisecondsToFrame(outputEndMS - outputStartMS, fps));
+    sequences.push({
+      id: `narration_${narration.id}`,
+      kind: "narration",
+      fromFrame,
+      durationInFrames,
+      layer: 2,
+      sourceArtifactId: narration.source_artifact_id,
+      sourceStartFrame: millisecondsToFrame(sourceStartMS, fps),
+      sourceEndFrame: millisecondsToFrame(sourceEndMS, fps),
+      ...(artifact?.uri ? { sourceURI: artifact.uri } : {}),
+      props: {
+        volumePercent: narration.volume_percent,
+        duckSourceAudio: narration.duck_source_audio ?? false,
+        duckSourceToPercent: narration.duck_source_to_percent ?? 30,
+        source: narration.source,
+      },
+    });
+  }
+
+  for (const cue of plan.caption_cues ?? []) {
+    const [startMS, endMS] = cue.output_range_ms;
+    sequences.push({
+      id: `caption_cue_${cue.id}`,
+      kind: "caption",
+      fromFrame: millisecondsToFrame(startMS, fps),
+      durationInFrames: Math.max(1, millisecondsToFrame(endMS - startMS, fps)),
+      layer: 11,
+      props: { type: "caption", text: cue.text, source: cue.source },
+    });
   }
 
   return {

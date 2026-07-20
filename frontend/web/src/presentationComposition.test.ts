@@ -32,7 +32,10 @@ const session: EditorSession = {
   asset_catalog: {
     catalog_id: "catalog",
     timeline: { duration_ms: 4000 },
-    artifacts: [{ id: "raw", kind: "raw_recording", uri: "file:///raw.mp4", duration_ms: 4000 }],
+    artifacts: [
+      { id: "raw", kind: "raw_recording", uri: "file:///raw.mp4", duration_ms: 4000 },
+      { id: "narration", kind: "narration_audio", uri: "file:///narration.wav", duration_ms: 2500 },
+    ],
   },
   edit_plan: plan,
   preview_profile: { width: 1280, height: 720, fps: 30, format: "mp4" },
@@ -73,5 +76,22 @@ describe("presentation composition", () => {
       { mode: "source", volumePercent: 80 },
       { mode: "mute", volumePercent: 80 },
     ]);
+  });
+
+  it("compiles confirmed narration and global captions on output time", () => {
+    const narratedPlan = structuredClone(plan);
+    narratedPlan.narrations = [{
+      id: "intro", source_artifact_id: "narration", source_time_range_ms: [100, 1600], output_time_range_ms: [500, 2000],
+      volume_percent: 100, duck_source_audio: true, duck_source_to_percent: 30, source: "user_recorded",
+    }];
+    narratedPlan.caption_cues = [{ id: "intro", output_range_ms: [500, 2000], text: "打开产品工作台。", source: "user_configured" }];
+    const sequences = compilePresentationComposition(session, narratedPlan).sequences;
+    expect(sequences.filter((sequence) => sequence.kind === "narration")[0]).toMatchObject({
+      fromFrame: 15, durationInFrames: 45, sourceArtifactId: "narration", sourceStartFrame: 3, sourceEndFrame: 48,
+      props: { volumePercent: 100, duckSourceAudio: true, duckSourceToPercent: 30 },
+    });
+    expect(sequences.filter((sequence) => sequence.id === "caption_cue_intro")[0]).toMatchObject({
+      kind: "caption", fromFrame: 15, durationInFrames: 45, props: { text: "打开产品工作台。", source: "user_configured" },
+    });
   });
 });

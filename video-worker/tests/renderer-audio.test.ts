@@ -1,6 +1,10 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { audioVolumeExpression, validateEditPlan, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
+import { audioVolumeExpression, render, validateEditPlan, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
 
 const catalog: AssetTimelineCatalog = {
   schema_version: "demoops.asset_timeline_catalog.v1",
@@ -25,6 +29,14 @@ const catalog: AssetTimelineCatalog = {
     asset_role: "raw_recording",
     include_in_demo: true,
     duration_ms: 2000,
+  }, {
+    id: "narration_1",
+    kind: "narration_audio",
+    uri: "file:///tmp/narration.wav",
+    mime_type: "audio/wav",
+    asset_role: "narration_audio",
+    include_in_demo: true,
+    duration_ms: 1800,
   }],
 };
 
@@ -97,5 +109,56 @@ describe("editor audio policy", () => {
     expect(audioVolumeExpression(audio, 2000, 2000)).toEqual({ expression: "if(between(t,0.000,1.000),0.00,if(between(t,1.000,2.000),0.60,1.00))", usesSource: true });
     expect(audioVolumeExpression(audio, 0, 2000, 500)).toEqual({ expression: "if(between(t,1.500,2.500),0.00,1.00)", usesSource: true });
     expect(audioVolumeExpression({ mode: "mute", volume_percent: 100 }, 0, 2000)).toEqual({ expression: "0.00", usesSource: false });
+  });
+
+  it("accepts confirmed narration and caption cues but rejects invalid candidate data", () => {
+    const valid = plan();
+    valid.narrations = [{
+      id: "intro", source_artifact_id: "narration_1", source_time_range_ms: [0, 1500], output_time_range_ms: [200, 1700],
+      volume_percent: 100, duck_source_audio: true, duck_source_to_percent: 30, source: "user_recorded",
+    }];
+    valid.caption_cues = [{ id: "intro", output_range_ms: [200, 1700], text: "打开产品工作台。", source: "user_configured" }];
+    expect(validateEditPlan({ catalog, edit_plan: valid }).valid).toBe(true);
+
+    const invalid = plan();
+    invalid.narrations = [{
+      id: "", source_artifact_id: "asset_audio", output_time_range_ms: [0, 2100], volume_percent: 250, duck_source_to_percent: 101, source: "model_candidate" as "user_recorded",
+    }];
+    invalid.caption_cues = [{ id: "", output_range_ms: [1000, 1000], text: "", source: "asr_candidate" as "user_configured" }];
+    expect(validateEditPlan({ catalog, edit_plan: invalid }).errors.map((item) => item.code)).toEqual(expect.arrayContaining([
+      "invalid_narration_id", "invalid_narration_artifact", "invalid_narration_range", "narration_source_too_short", "invalid_narration_volume", "invalid_narration_duck", "invalid_narration_source",
+      "invalid_caption_cue_id", "invalid_caption_cue_range", "empty_caption_cue", "invalid_caption_cue_source",
+    ]));
+  });
+
+  it("does not mark an unprocessed source recording as rendered when FFmpeg is unavailable", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-audio-post-process-"));
+    const previousFFmpeg = process.env.CASCADE_FFMPEG_PATH;
+    try {
+      const videoPath = path.join(root, "recording.mp4");
+      const narrationPath = path.join(root, "narration.wav");
+      await writeFile(videoPath, "not parsed because FFmpeg is intentionally unavailable");
+      await writeFile(narrationPath, "not parsed because FFmpeg is intentionally unavailable");
+      process.env.CASCADE_FFMPEG_PATH = "definitely-not-installed-ffmpeg-for-audio-post-process";
+      const renderCatalog: AssetTimelineCatalog = structuredClone(catalog);
+      renderCatalog.artifacts[0] = { ...renderCatalog.artifacts[0], uri: pathToFileURL(videoPath).href };
+      renderCatalog.artifacts[1] = { ...renderCatalog.artifacts[1], uri: pathToFileURL(narrationPath).href };
+      const editPlan = plan();
+      editPlan.narrations = [{
+        id: "intro", source_artifact_id: "narration_1", source_time_range_ms: [0, 1500], output_time_range_ms: [200, 1700],
+        volume_percent: 100, duck_source_audio: true, duck_source_to_percent: 30, source: "user_recorded",
+      }];
+      editPlan.caption_cues = [{ id: "intro", output_range_ms: [200, 1700], text: "Open the product workspace.", source: "user_configured" }];
+      const result = await render({ output_dir: path.join(root, "render"), asset_timeline_catalog: renderCatalog, edit_plan: editPlan });
+      const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
+      expect(manifest.status).toBe("planned");
+      expect(manifest.compositor.fallback_reason).toBe("ffmpeg_not_available_for_audio_caption_post_process");
+      expect(manifest.compositor.applied_operations).toEqual([]);
+      expect(manifest.compositor.planned_operations).toEqual(expect.arrayContaining(["narration", "caption"]));
+    } finally {
+      if (previousFFmpeg === undefined) delete process.env.CASCADE_FFMPEG_PATH;
+      else process.env.CASCADE_FFMPEG_PATH = previousFFmpeg;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
