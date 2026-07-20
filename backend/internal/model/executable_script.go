@@ -183,6 +183,7 @@ type StageApprovalStage struct {
 	WaitConditions                   []string                     `json:"wait_conditions,omitempty"`
 	CapturePoints                    []string                     `json:"capture_points,omitempty"`
 	RiskNotes                        []string                     `json:"risk_notes,omitempty"`
+	InvestigationQuestionRefs        []InvestigationQuestionRef   `json:"investigation_question_refs,omitempty"`
 	EvidenceRefs                     []EvidenceRef                `json:"evidence_refs,omitempty"`
 	Confidence                       float64                      `json:"confidence,omitempty"`
 }
@@ -264,8 +265,19 @@ type BrowserAgentOutlineStage struct {
 	DurationMS                       int                           `json:"duration_ms,omitempty"`
 	CanModify                        []string                      `json:"can_modify,omitempty"`
 	MustPreserve                     []string                      `json:"must_preserve,omitempty"`
+	InvestigationQuestionRefs        []InvestigationQuestionRef    `json:"investigation_question_refs,omitempty"`
 	EvidenceRefs                     []EvidenceRef                 `json:"evidence_refs,omitempty"`
 	Confidence                       float64                       `json:"confidence,omitempty"`
+}
+
+type InvestigationQuestionRef struct {
+	ID              string   `json:"id"`
+	IntentLabel     string   `json:"intent_label,omitempty"`
+	Status          string   `json:"status,omitempty"`
+	EvidenceSummary string   `json:"evidence_summary,omitempty"`
+	RemainingGaps   []string `json:"remaining_gaps,omitempty"`
+	ToolCallIDs     []string `json:"tool_call_ids,omitempty"`
+	Confidence      float64  `json:"confidence,omitempty"`
 }
 
 type BrowserAgentComponentTarget struct {

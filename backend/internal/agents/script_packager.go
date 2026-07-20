@@ -286,6 +286,7 @@ func buildStageApprovalPlan(project *model.ProjectContext, report *model.Multimo
 		interaction := browserAgentInteractionFromStep(step, evidence)
 		targetContract := targetContractForStep(step, node, evidence)
 		routeContract := routeContractForStep(step, node, intelligence, previousRoute)
+		questionRefs := investigationQuestionRefsForStage(report, intelligence, step, node)
 		durationMS := step.Timing.DurationMS
 		if durationMS <= 0 {
 			durationMS = 10000
@@ -320,6 +321,7 @@ func buildStageApprovalPlan(project *model.ProjectContext, report *model.Multimo
 			WaitConditions:                   waitConditionsForStep(step),
 			CapturePoints:                    capturePointsForStep(step),
 			RiskNotes:                        stageRiskNotes(step, node),
+			InvestigationQuestionRefs:        questionRefs,
 			EvidenceRefs:                     evidence,
 			Confidence:                       confidenceForStage(node, intelligence),
 		})
@@ -378,6 +380,7 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 			DurationMS:                       stage.DurationMS,
 			CanModify:                        []string{"selector", "selector_alternatives", "wait_conditions", "retry_strategy", "non_destructive_exploration_path", "capture_timing"},
 			MustPreserve:                     []string{"stage_id", "node_id", "objective", "business_intent", "input_semantics", "success_state", "duration_floor", "safety_policy"},
+			InvestigationQuestionRefs:        stage.InvestigationQuestionRefs,
 			EvidenceRefs:                     stage.EvidenceRefs,
 			Confidence:                       stage.Confidence,
 		})
@@ -436,6 +439,7 @@ func buildBrowserAgentPromptPolicy(project *model.ProjectContext, graph *model.D
 		"你是 Cascade 云端 Browser Agent，负责把 App 端审批过的 StageApprovalPlan 和 BrowserAgentScriptOutline 转成可执行网页操作。",
 		"你可以在 allowed origins 内做非破坏性探索，修正 selector、等待条件、轻量导航路径和截图时机。",
 		"你不能修改用户需求意图、stage 顺序、stage 目标、填充内容语义、凭据 secret_ref、安全策略、禁止页面、打码规则和 allowed domains。",
+		"Stage 中的 investigation_question_refs 是 App 端代码调查问题与证据缺口摘要；如果引用问题仍有 remaining_gaps，只能在当前产品域内通过页面观察和非破坏探索补证，不得编造代码证据。",
 		"如果代码/页面证据不足以确认某个业务动作，必须返回 failure diagnostic 和 repair_request，不得编造 route、组件、API 或成功状态。",
 		"所有凭据只能通过 secret_ref 使用，不得写入日志、trace、截图元数据、错误响应或输出 artifact。",
 	}, "\n")
@@ -469,6 +473,7 @@ func buildBrowserAgentPromptPolicy(project *model.ProjectContext, graph *model.D
 		},
 		EvidencePolicy: []string{
 			"每个动作必须追溯到 StageApprovalPlan、ProjectUnderstandingDossier 或页面运行时证据。",
+			"优先使用 stage.investigation_question_refs 判断 App 端已确认的代码证据范围和仍需运行时补证的缺口。",
 			"不确定时先继续在产品域内小步探索；仍不确定则停止并回传缺失证据。",
 		},
 		SafetyBoundaries:    append(append([]string{}, doc.SafetyPolicy.ForbiddenPages...), doc.SafetyPolicy.ForbiddenData...),
@@ -1592,6 +1597,148 @@ func mergeStageEvidenceRefs(groups ...[]model.EvidenceRef) []model.EvidenceRef {
 		refs = append(refs, group...)
 	}
 	return uniqueEvidenceRefs(refs)
+}
+
+func investigationQuestionRefsForStage(report *model.MultimodalUnderstandingReport, intelligence *model.ProjectIntelligencePack, step model.ScriptStep, node *model.GraphNode) []model.InvestigationQuestionRef {
+	questions := codeInvestigationQuestionsForPackage(report)
+	if len(questions) == 0 {
+		return nil
+	}
+	stageKind := businessStageKindForNode(node)
+	preferred := preferredInvestigationQuestionIDsForStage(stageKind, step, node)
+	refs := []model.InvestigationQuestionRef{}
+	add := func(question model.CodeInvestigationQuestion) {
+		if question.ID == "" || investigationQuestionRefExists(refs, question.ID) {
+			return
+		}
+		refs = append(refs, model.InvestigationQuestionRef{
+			ID:              question.ID,
+			IntentLabel:     question.IntentLabel,
+			Status:          question.Status,
+			EvidenceSummary: question.EvidenceSummary,
+			RemainingGaps:   limitStrings(question.RemainingGaps, 4),
+			ToolCallIDs:     limitStrings(question.ToolCallIDs, 4),
+			Confidence:      question.Confidence,
+		})
+	}
+	for _, id := range preferred {
+		for _, question := range questions {
+			if question.ID == id {
+				add(question)
+			}
+		}
+	}
+	if len(refs) >= 2 {
+		return refs
+	}
+	stageText := investigationStageMatchText(step, node, intelligence)
+	type scoredQuestion struct {
+		question model.CodeInvestigationQuestion
+		score    int
+	}
+	scored := []scoredQuestion{}
+	for _, question := range questions {
+		score := keywordMatchScore(question.QueryTerms, stageText)
+		if score == 0 {
+			score = keywordMatchScore(intentKeywordsForText(question.IntentLabel+" "+question.Question), stageText)
+		}
+		if score > 0 {
+			scored = append(scored, scoredQuestion{question: question, score: score})
+		}
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return scored[i].question.ID < scored[j].question.ID
+		}
+		return scored[i].score > scored[j].score
+	})
+	for _, item := range scored {
+		if len(refs) >= 2 {
+			break
+		}
+		add(item.question)
+	}
+	return refs
+}
+
+func codeInvestigationQuestionsForPackage(report *model.MultimodalUnderstandingReport) []model.CodeInvestigationQuestion {
+	if report == nil {
+		return nil
+	}
+	questions := []model.CodeInvestigationQuestion{}
+	seen := map[string]bool{}
+	for _, snapshot := range report.CodeSnapshots {
+		if snapshot.InvestigationTrace == nil {
+			continue
+		}
+		for _, question := range snapshot.InvestigationTrace.Questions {
+			if question.ID == "" || seen[question.ID] {
+				continue
+			}
+			seen[question.ID] = true
+			questions = append(questions, question)
+		}
+	}
+	return questions
+}
+
+func preferredInvestigationQuestionIDsForStage(kind model.BusinessStageKind, step model.ScriptStep, node *model.GraphNode) []string {
+	switch kind {
+	case model.BusinessStageKindSessionSetup:
+		return []string{"question_session_setup"}
+	case model.BusinessStageKindBusinessInput, model.BusinessStageKindBusinessAction:
+		if containsAnyNormalized(investigationStageMatchText(step, node, nil), "新建项目", "创建项目", "项目名称", "俄罗斯方块", "new project", "create project", "project") {
+			return []string{"question_project_creation"}
+		}
+	case model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit, model.BusinessStageKindObserveProgress, model.BusinessStageKindFinalObserve:
+		return []string{"question_build_mode_agent", "question_project_creation"}
+	}
+	return nil
+}
+
+func investigationStageMatchText(step model.ScriptStep, node *model.GraphNode, intelligence *model.ProjectIntelligencePack) string {
+	parts := []string{
+		step.ID,
+		step.NodeID,
+		step.Title,
+		step.BusinessValue,
+		step.ExpectedOutcome,
+		step.Narrative.Voiceover,
+		step.Action.Target.Selector,
+		step.Action.Target.Label,
+		step.Action.Target.Text,
+		step.Action.Value,
+	}
+	if node != nil {
+		parts = append(parts, node.ID, node.Title, node.Goal, node.Description, node.Action, node.Selector, node.InputData, node.ExpectedOutcome)
+		if node.ActionSpec != nil {
+			parts = append(parts, node.ActionSpec.Value, node.ActionSpec.Target.Selector, node.ActionSpec.Target.Label, node.ActionSpec.Target.Text, node.ActionSpec.Target.TestID, node.ActionSpec.Target.ComponentRef)
+		}
+		if node.Metadata != nil {
+			for _, key := range []string{"stage_kind", "business_stage_id", "route_state"} {
+				if value, ok := node.Metadata[key].(string); ok {
+					parts = append(parts, value)
+				}
+			}
+		}
+	}
+	if intelligence != nil && intelligence.BusinessStagePlan != nil {
+		for _, stage := range intelligence.BusinessStagePlan.Stages {
+			if node != nil && (stage.ID == businessStageIDForNode(node) || stage.ID == node.ID) {
+				parts = append(parts, stage.Title, stage.Objective, stage.UserIntent, stage.Action.Label, stage.Action.InputSemantic, stage.Action.InputValue, string(stage.Kind), string(stage.RouteState))
+			}
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func investigationQuestionRefExists(refs []model.InvestigationQuestionRef, id string) bool {
+	for _, ref := range refs {
+		if ref.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func uncertaintyReportForBundle(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, graph *model.DemoWorkflowGraph) []model.StageUncertainty {

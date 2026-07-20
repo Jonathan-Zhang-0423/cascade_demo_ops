@@ -2071,6 +2071,7 @@ export type StageApprovalStage = {
   wait_conditions?: string[];
   capture_points?: string[];
   risk_notes?: string[];
+  investigation_question_refs?: InvestigationQuestionRef[];
   evidence_refs?: EvidenceRef[];
   confidence?: number;
 };
@@ -2152,7 +2153,18 @@ export type BrowserAgentOutlineStage = {
   duration_ms?: number;
   can_modify?: string[];
   must_preserve?: string[];
+  investigation_question_refs?: InvestigationQuestionRef[];
   evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type InvestigationQuestionRef = {
+  id: string;
+  intent_label?: string;
+  status?: string;
+  evidence_summary?: string;
+  remaining_gaps?: string[];
+  tool_call_ids?: string[];
   confidence?: number;
 };
 

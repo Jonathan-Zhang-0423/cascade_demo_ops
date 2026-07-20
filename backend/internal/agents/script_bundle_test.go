@@ -76,6 +76,51 @@ func TestScriptPackagerUsesDeterministicApprovalMarkdown(t *testing.T) {
 	}
 }
 
+func TestScriptPackagerCarriesInvestigationQuestionsIntoStageAndOutline(t *testing.T) {
+	project, report, productMap, graph := executableBundleFixtures()
+	report.CodeSnapshots = []model.CodeUnderstandingSnapshot{{
+		ID:        "code_with_questions",
+		ProjectID: project.ID,
+		InvestigationTrace: &model.CodeInvestigationTrace{
+			ID:   "trace_questions",
+			Mode: "tool_driven_intent_drilldown",
+			Questions: []model.CodeInvestigationQuestion{{
+				ID:               "question_team_invite",
+				Question:         "邀请成员流程、邮箱输入和提交结果由哪些组件/API 支撑？",
+				IntentLabel:      "邀请成员",
+				ExpectedEvidence: []string{"route", "component_or_selector", "api_or_data_model"},
+				QueryTerms:       []string{"invite", "email", "member", "邀请", "成员"},
+				Status:           "partial",
+				EvidenceSummary:  "files=2 routes=1 components=1 selectors=1 apis=0 models=0",
+				RemainingGaps:    []string{"api_or_data_model"},
+				ToolCallIDs:      []string{"tool_grep_text_invite", "tool_evidence_review_invite"},
+				Confidence:       0.74,
+			}},
+		},
+	}}
+	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := stageApprovalByNodeID(pkg.ExecutableBundle, "node_invite")
+	if stage == nil {
+		t.Fatal("expected invite stage")
+	}
+	if !investigationQuestionRefsContain(stage.InvestigationQuestionRefs, "question_team_invite") {
+		t.Fatalf("stage should reference investigation question, got %+v", stage.InvestigationQuestionRefs)
+	}
+	outlineStage := outlineStageByNodeID(pkg.ExecutableBundle, "node_invite")
+	if outlineStage == nil {
+		t.Fatal("expected invite outline stage")
+	}
+	if !investigationQuestionRefsContain(outlineStage.InvestigationQuestionRefs, "question_team_invite") {
+		t.Fatalf("outline stage should carry investigation question refs, got %+v", outlineStage.InvestigationQuestionRefs)
+	}
+	if !strings.Contains(pkg.ExecutableBundle.AgentPromptPolicy.SystemPrompt, "investigation_question_refs") {
+		t.Fatalf("prompt policy should explain investigation_question_refs, got:\n%s", pkg.ExecutableBundle.AgentPromptPolicy.SystemPrompt)
+	}
+}
+
 func TestScriptPackagerRouteAwarePlanFiltersSourcePaths(t *testing.T) {
 	project, report, productMap, graph := executableBundleFixtures()
 	graph.Nodes[1].Title = "新建项目"
@@ -636,6 +681,15 @@ func stageApprovalByNodeID(bundle *model.ExecutableRecordingScriptBundle, nodeID
 		}
 	}
 	return nil
+}
+
+func investigationQuestionRefsContain(refs []model.InvestigationQuestionRef, id string) bool {
+	for _, ref := range refs {
+		if ref.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func cascadeRouteIntelligenceForTest(project *model.ProjectContext) *model.ProjectIntelligencePack {
