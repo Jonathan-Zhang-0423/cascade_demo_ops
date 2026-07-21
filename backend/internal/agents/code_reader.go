@@ -26,6 +26,8 @@ type CodeReaderAgent struct {
 	llm                llm.Client
 }
 
+const maxCodeReadTotalFileLimit = 80
+
 func NewCodeReaderAgent() *CodeReaderAgent {
 	budget := defaultCodeReadBudget()
 	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, Budget: budget, InvestigationTools: NewProjectInvestigationToolSuite(nil)}
@@ -302,7 +304,7 @@ func readStructuredCodeSnapshotFromCandidates(ctx context.Context, snapshot *mod
 		snapshot.InvestigationTrace.TotalFilesSelected = fileCount
 		snapshot.InvestigationTrace.CompletedAt = time.Now().UTC()
 		snapshot.InvestigationTrace.Summary = fmt.Sprintf("工具化调查完成：发现 %d 个候选文件，grep 搜索 %d 个文件，最终结构化读取 %d 个文件。", snapshot.InvestigationTrace.TotalFilesDiscovered, snapshot.InvestigationTrace.TotalFilesSearched, fileCount)
-		snapshot.InvestigationTrace.ToolCalls = append(snapshot.InvestigationTrace.ToolCalls, model.CodeInvestigationToolCall{
+		call := model.CodeInvestigationToolCall{
 			ID:                "tool_read_structured_files_" + shortHash(snapshot.ID),
 			Tool:              "read_structured_files",
 			Purpose:           "只读取已由 repo index / grep_text 选中的需求相关文件，并提取路由、组件、selector、API、数据模型摘要。",
@@ -311,7 +313,10 @@ func readStructuredCodeSnapshotFromCandidates(ctx context.Context, snapshot *mod
 			SelectedFileCount: fileCount,
 			PathHashes:        pathHashesForCandidates(candidates, fileCount),
 			Confidence:        0.78,
-		})
+		}
+		annotateInvestigationToolCall(&call)
+		snapshot.InvestigationTrace.ToolCalls = append(snapshot.InvestigationTrace.ToolCalls, call)
+		snapshot.InvestigationQuality = codeInvestigationQualityForSnapshot(snapshot)
 	}
 	return nil
 }
@@ -319,14 +324,14 @@ func readStructuredCodeSnapshotFromCandidates(ctx context.Context, snapshot *mod
 func defaultCodeReadBudget() model.CodeReadBudget {
 	return model.CodeReadBudget{
 		Mode:                   "intent_driven_progressive",
-		RepoIndexFileLimit:     40,
+		RepoIndexFileLimit:     24,
 		DrilldownRounds:        4,
-		FilesPerRound:          10,
-		TotalFileLimit:         80,
-		MaxFileBytes:           160 * 1024,
-		ToolSearchFileLimit:    180,
-		ToolSearchBytesPerFile: 64 * 1024,
-		ToolSearchResultLimit:  25,
+		FilesPerRound:          6,
+		TotalFileLimit:         32,
+		MaxFileBytes:           128 * 1024,
+		ToolSearchFileLimit:    120,
+		ToolSearchBytesPerFile: 48 * 1024,
+		ToolSearchResultLimit:  18,
 	}
 }
 
@@ -348,8 +353,8 @@ func (a *CodeReaderAgent) effectiveBudget() model.CodeReadBudget {
 	if budget.TotalFileLimit <= 0 {
 		budget.TotalFileLimit = firstPositiveInt(a.MaxFiles, defaults.TotalFileLimit)
 	}
-	if budget.TotalFileLimit > defaults.TotalFileLimit {
-		budget.TotalFileLimit = defaults.TotalFileLimit
+	if budget.TotalFileLimit > maxCodeReadTotalFileLimit {
+		budget.TotalFileLimit = maxCodeReadTotalFileLimit
 	}
 	if budget.MaxFileBytes <= 0 {
 		budget.MaxFileBytes = firstPositiveInt64(a.MaxFileBytes, defaults.MaxFileBytes)
@@ -389,16 +394,20 @@ type codeInvestigationQuery struct {
 	expectedEvidence []string
 	plannedFrom      string
 	suggestedTool    string
+	parentTool       string
+	commandKind      string
 	dependsOnToolID  string
 }
 
 type codeInvestigationToolPolicy struct {
+	grepText           bool
 	followImports      bool
 	findReferences     bool
 	findAPIHandlers    bool
 	readWindow         bool
 	listRelatedFiles   bool
 	inspectFileOutline bool
+	shellRun           bool
 	expectedEvidence   []string
 }
 
@@ -494,6 +503,7 @@ type codeInvestigationEvidenceReview struct {
 	componentCount int
 	selectorCount  int
 	apiCount       int
+	backendCount   int
 	dataModelCount int
 	styleCount     int
 	gaps           []string
@@ -501,13 +511,19 @@ type codeInvestigationEvidenceReview struct {
 }
 
 type codeInvestigationLLMOutput struct {
-	Summary string `json:"summary"`
-	Queries []struct {
-		Purpose string              `json:"purpose"`
-		Terms   flexibleStringSlice `json:"terms"`
-		Query   string              `json:"query"`
-	} `json:"queries"`
-	Confidence float64 `json:"confidence"`
+	Summary    string                      `json:"summary"`
+	Queries    []codeInvestigationPlanItem `json:"queries"`
+	Confidence float64                     `json:"confidence"`
+}
+
+type codeInvestigationPlanItem struct {
+	Purpose          string              `json:"purpose"`
+	Terms            flexibleStringSlice `json:"terms"`
+	Query            string              `json:"query"`
+	Tool             string              `json:"tool"`
+	CommandKind      string              `json:"command_kind"`
+	Command          string              `json:"command"`
+	ExpectedEvidence flexibleStringSlice `json:"expected_evidence"`
 }
 
 type codeInvestigationNextActionsLLMOutput struct {
@@ -522,6 +538,8 @@ type codeInvestigationNextActionLLMItem struct {
 	Reason           string              `json:"reason"`
 	QueryTerms       flexibleStringSlice `json:"query_terms"`
 	Terms            flexibleStringSlice `json:"terms"`
+	CommandKind      string              `json:"command_kind"`
+	Command          string              `json:"command"`
 	ExpectedEvidence flexibleStringSlice `json:"expected_evidence"`
 }
 
@@ -537,7 +555,11 @@ func (o *codeInvestigationNextActionsLLMOutput) normalize() {
 		if tool == "" {
 			tool = toolForExpectedEvidence(expected)
 		}
-		if tool != "read_window" && tool != "list_related_files" && len(terms) == 0 {
+		action.CommandKind = sanitizeShellRunCommandKind(action.CommandKind, action.Command)
+		if tool == "shell_run" && action.CommandKind == "" {
+			action.CommandKind = shellRunCommandKindForTerms(terms)
+		}
+		if investigationToolRequiresTerms(tool, action.CommandKind) && len(terms) == 0 {
 			continue
 		}
 		action.Tool = tool
@@ -577,16 +599,21 @@ func (o *codeInvestigationLLMOutput) UnmarshalJSON(data []byte) error {
 }
 
 func (o *codeInvestigationLLMOutput) normalize() {
-	normalized := make([]struct {
-		Purpose string              `json:"purpose"`
-		Terms   flexibleStringSlice `json:"terms"`
-		Query   string              `json:"query"`
-	}, 0, len(o.Queries))
+	normalized := make([]codeInvestigationPlanItem, 0, len(o.Queries))
 	for _, query := range o.Queries {
 		terms := sanitizeInvestigationTerms(append(stringSlice(query.Terms), splitQueryTerms(query.Query)...))
-		if len(terms) == 0 {
+		tool := sanitizeInvestigationToolName(query.Tool)
+		if tool == "" {
+			tool = "grep_text"
+		}
+		query.CommandKind = sanitizeShellRunCommandKind(query.CommandKind, query.Command)
+		if tool == "shell_run" && query.CommandKind == "" {
+			query.CommandKind = shellRunCommandKindForTerms(terms)
+		}
+		if investigationToolRequiresTerms(tool, query.CommandKind) && len(terms) == 0 {
 			continue
 		}
+		query.Tool = tool
 		query.Terms = flexibleStringSlice(terms)
 		query.Query = strings.Join(terms, " OR ")
 		normalized = append(normalized, query)
@@ -670,53 +697,87 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		if len(selected) >= budget.TotalFileLimit {
 			break
 		}
-		queryKey := strings.Join(query.terms, "|")
+		queryKey := codeInvestigationQueryExecutionKey(query)
 		if executedQueries[queryKey] {
+			continue
+		}
+		if codeInvestigationQuestionAnswered(trace, query.questionID) && shouldSkipAnsweredInvestigationQuery(query) {
 			continue
 		}
 		executedQueries[queryKey] = true
 		toolPolicy := toolPolicyForInvestigationQuery(query)
+		if s != nil && s.llm != nil && query.plannedFrom == "initial_plan" && sanitizeInvestigationToolName(query.suggestedTool) == "grep_text" {
+			toolPolicy.followImports = false
+			toolPolicy.findReferences = false
+			toolPolicy.findAPIHandlers = false
+		}
 		cachedSnippetObservations := snippetObservationCache[query.questionID]
 		grepBudget, ok := budgetForRemainingToolSearch(budget, trace.TotalFilesSearched)
-		if !ok {
+		if !ok && investigationToolPolicyRequiresSearchBudget(toolPolicy) {
 			break
 		}
-		start = time.Now()
-		search, err := searchCodeCandidatesForQuery(ctx, candidates, selectedKeys, query, grepBudget)
-		if err != nil {
-			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
+		if !ok {
+			grepBudget = budget
+			grepBudget.ToolSearchFileLimit = 0
 		}
-		trace.TotalFilesSearched += search.searched
-		trace.TotalBytesRead += search.bytesRead
 		selectedThisRound := []codeCandidateFile{}
 		snippetsThisRound := []model.CodeSnippetRef{}
 		snippetObservationsThisRound := []codeSnippetObservation{}
-		for _, match := range search.matches {
-			if len(selectedThisRound) >= budget.FilesPerRound || len(selected) >= budget.TotalFileLimit {
-				break
+		grepCallID := ""
+		if toolPolicy.grepText {
+			start = time.Now()
+			search, err := searchCodeCandidatesForQuery(ctx, candidates, selectedKeys, query, grepBudget)
+			if err != nil {
+				return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
 			}
-			if add(match.candidate) {
-				selectedThisRound = append(selectedThisRound, match.candidate)
-				snippetsThisRound = append(snippetsThisRound, match.snippets...)
-				snippetObservationsThisRound = append(snippetObservationsThisRound, match.snippetObservations...)
+			trace.TotalFilesSearched += search.searched
+			trace.TotalBytesRead += search.bytesRead
+			for _, match := range search.matches {
+				if len(selectedThisRound) >= budget.FilesPerRound || len(selected) >= budget.TotalFileLimit {
+					break
+				}
+				if add(match.candidate) {
+					selectedThisRound = append(selectedThisRound, match.candidate)
+					snippetsThisRound = append(snippetsThisRound, match.snippets...)
+					snippetObservationsThisRound = append(snippetObservationsThisRound, match.snippetObservations...)
+				}
+			}
+			grepCallID = fmt.Sprintf("tool_grep_text_%d_%s", i+1, shortHash(query.query))
+			trace.ToolCalls = append(trace.ToolCalls, model.CodeInvestigationToolCall{
+				ID:                grepCallID,
+				Tool:              "grep_text",
+				Purpose:           query.purpose,
+				Query:             query.query,
+				InputSummary:      fmt.Sprintf("terms=%s search_file_limit=%d bytes_per_file=%d", strings.Join(query.terms, ","), grepBudget.ToolSearchFileLimit, grepBudget.ToolSearchBytesPerFile),
+				OutputSummary:     fmt.Sprintf("searched=%d matched=%d selected=%d", search.searched, len(search.matches), len(selectedThisRound)),
+				MatchedFileCount:  len(search.matches),
+				SelectedFileCount: len(selectedThisRound),
+				PathHashes:        pathHashesForCandidates(selectedThisRound, len(selectedThisRound)),
+				SnippetRefs:       limitCodeSnippetRefs(snippetsThisRound, 12),
+				Metadata:          investigationQueryMetadataWithToolPolicy(query, toolPolicy),
+				Confidence:        confidenceForSearchCall(len(search.matches), len(selectedThisRound)),
+				ElapsedMS:         time.Since(start).Milliseconds(),
+			})
+		}
+		shellRunCallID := ""
+		shellRunThisRound := []codeCandidateFile{}
+		if toolPolicy.shellRun {
+			shellRunSelected, shellRunScan, shellRunCall := runReadOnlyShellInvestigationTool(ctx, i+1, root, candidates, selectedKeys, query, grepBudget)
+			trace.TotalFilesSearched += shellRunScan.searched
+			trace.TotalBytesRead += shellRunScan.bytesRead
+			if shellRunCall.ID != "" {
+				shellRunCallID = shellRunCall.ID
+				trace.ToolCalls = append(trace.ToolCalls, shellRunCall)
+			}
+			for _, candidate := range shellRunSelected {
+				if len(shellRunThisRound) >= minInt(3, budget.FilesPerRound) || len(selected) >= budget.TotalFileLimit {
+					break
+				}
+				if add(candidate) {
+					shellRunThisRound = append(shellRunThisRound, candidate)
+				}
 			}
 		}
-		grepCallID := fmt.Sprintf("tool_grep_text_%d_%s", i+1, shortHash(query.query))
-		trace.ToolCalls = append(trace.ToolCalls, model.CodeInvestigationToolCall{
-			ID:                grepCallID,
-			Tool:              "grep_text",
-			Purpose:           query.purpose,
-			Query:             query.query,
-			InputSummary:      fmt.Sprintf("terms=%s search_file_limit=%d bytes_per_file=%d", strings.Join(query.terms, ","), grepBudget.ToolSearchFileLimit, grepBudget.ToolSearchBytesPerFile),
-			OutputSummary:     fmt.Sprintf("searched=%d matched=%d selected=%d", search.searched, len(search.matches), len(selectedThisRound)),
-			MatchedFileCount:  len(search.matches),
-			SelectedFileCount: len(selectedThisRound),
-			PathHashes:        pathHashesForCandidates(selectedThisRound, len(selectedThisRound)),
-			SnippetRefs:       limitCodeSnippetRefs(snippetsThisRound, 12),
-			Metadata:          investigationQueryMetadataWithToolPolicy(query, toolPolicy),
-			Confidence:        confidenceForSearchCall(len(search.matches), len(selectedThisRound)),
-			ElapsedMS:         time.Since(start).Milliseconds(),
-		})
 		snippetCallID := ""
 		if len(snippetsThisRound) > 0 {
 			snippetCallID = fmt.Sprintf("tool_read_evidence_snippets_%d_%s", i+1, shortHash(query.query))
@@ -794,7 +855,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			followCallID = fmt.Sprintf("tool_follow_imports_%d_%s", i+1, shortHash(query.query))
 			trace.ToolCalls = append(trace.ToolCalls, followImportsToolCall(followCallID, query, importScan, followedThisRound))
 		}
-		referenceSources := append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...)
+		referenceSources := append(append(append([]codeCandidateFile{}, selectedThisRound...), shellRunThisRound...), followedThisRound...)
 		referenceBudget, ok := budgetForRemainingToolSearch(budget, trace.TotalFilesSearched)
 		referencedFiles := []codeCandidateFile{}
 		referenceScan := referenceSearchScan{}
@@ -820,7 +881,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			referenceCallID = fmt.Sprintf("tool_find_references_%d_%s", i+1, shortHash(query.query))
 			trace.ToolCalls = append(trace.ToolCalls, findReferencesToolCall(referenceCallID, query, referenceScan, referencedThisRound))
 		}
-		apiSources := append(append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...), referencedThisRound...)
+		apiSources := append(append(append(append([]codeCandidateFile{}, selectedThisRound...), shellRunThisRound...), followedThisRound...), referencedThisRound...)
 		apiBudget, ok := budgetForRemainingToolSearch(budget, trace.TotalFilesSearched)
 		apiHandlerFiles := []codeCandidateFile{}
 		apiHandlerScan := apiHandlerSearchScan{}
@@ -846,7 +907,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			apiHandlerCallID = fmt.Sprintf("tool_find_api_handlers_%d_%s", i+1, shortHash(query.query))
 			trace.ToolCalls = append(trace.ToolCalls, findAPIHandlersToolCall(apiHandlerCallID, query, apiHandlerScan, apiHandlersThisRound))
 		}
-		reviewCandidates := append(append(append(append([]codeCandidateFile{}, selectedThisRound...), followedThisRound...), referencedThisRound...), apiHandlersThisRound...)
+		reviewCandidates := append(append(append(append(append([]codeCandidateFile{}, selectedThisRound...), shellRunThisRound...), followedThisRound...), referencedThisRound...), apiHandlersThisRound...)
 		review, err := reviewInvestigationEvidence(ctx, reviewCandidates, project, brief)
 		if err != nil {
 			return ProjectInvestigationResult{SelectedCandidates: selected, Trace: trace}, err
@@ -860,10 +921,10 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 			nextActionPlanningCallID = nextActionPlanningCall.ID
 			trace.ToolCalls = append(trace.ToolCalls, nextActionPlanningCall)
 		}
-		applyEvidenceReviewToQuestion(trace, query, review, nextActions, nonEmptyToolCallIDs(grepCallID, snippetCallID, readWindowCallID, listRelatedCallID, inspectFileOutlineCallID, followCallID, referenceCallID, apiHandlerCallID, reviewCall.ID, nextActionPlanningCallID)...)
+		applyEvidenceReviewToQuestion(trace, query, review, nextActions, nonEmptyToolCallIDs(grepCallID, shellRunCallID, snippetCallID, readWindowCallID, listRelatedCallID, inspectFileOutlineCallID, followCallID, referenceCallID, apiHandlerCallID, reviewCall.ID, nextActionPlanningCallID)...)
 		beforeFollowUp := len(queries)
 		queries = appendNextActionInvestigationQueries(queries, trace, query, review, nextActions, lastNonEmptyString(nextActionPlanningCallID, reviewCall.ID), executedQueries, maxAdaptiveRounds)
-		if len(queries) == beforeFollowUp {
+		if len(queries) == beforeFollowUp && (s == nil || s.llm == nil) {
 			if next, ok := adaptiveQueryFromEvidenceReview(query, review); ok && len(queries) < maxAdaptiveRounds {
 				nextKey := strings.Join(next.terms, "|")
 				if !executedQueries[nextKey] && !codeInvestigationQueryExists(queries, nextKey) {
@@ -873,7 +934,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		}
 	}
 
-	if len(selected) < budget.TotalFileLimit {
+	if len(selected) < budget.TotalFileLimit && shouldRunFocusedFallback(trace, selected) {
 		start = time.Now()
 		fallbackSelected := []codeCandidateFile{}
 		for _, candidate := range candidates {
@@ -903,6 +964,7 @@ func (s *ProjectInvestigationToolSuite) Investigate(ctx context.Context, request
 		}
 	}
 	trace.TotalFilesSelected = len(selected)
+	annotateInvestigationTraceToolCalls(trace)
 	finalizeInvestigationQuestions(trace)
 	trace.CompletedAt = time.Now().UTC()
 	trace.Summary = fmt.Sprintf("工具化调查选择 %d/%d 个文件用于结构化读取；%s", len(selected), len(candidates), investigationQuestionProgressSummary(trace))
@@ -915,7 +977,7 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 	call := model.CodeInvestigationToolCall{
 		ID:           "tool_plan_investigation_" + shortHash(strings.Join(codeIntentTextParts(project, brief), "|")),
 		Tool:         "plan_investigation",
-		Purpose:      "根据需求调查问题和精简仓库地图决定下一轮 grep_text 查询；不读取完整源码，不执行 shell。",
+		Purpose:      "根据需求调查问题、精简仓库地图和 tool_cards 决定首轮最小调查工具；不读取完整源码，不执行任意 shell。",
 		InputSummary: fmt.Sprintf("candidate_files=%d investigation_questions=%d deterministic_queries=%d", len(candidates), len(questions), len(fallback)),
 		Confidence:   0.58,
 	}
@@ -932,15 +994,16 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 		"budget":                  budget,
 		"repo_map":                compactRepoMapForInvestigation(candidates, 120),
 		"tool_cards":              projectInvestigationToolCards(),
-		"instructions":            []string{"围绕 investigation_questions 返回 2-5 个 grep_text 初始查询计划；后续 evidence_review planner 会基于 tool_cards 选择更精细工具。", "terms 必须是业务语义、路由、组件、API、状态或样式关键词。", "不要输出 shell 命令、绝对路径、源码片段、token、cookie、Authorization。", "不要把 /aigc、/.well-known、/v1/execution-packages、app-installations 等控制面路径作为产品证据。"},
+		"allowed_initial_tools":   []string{"grep_text", "shell_run"},
+		"instructions":            []string{"围绕 investigation_questions 返回 2-5 个初始调查计划；优先选择最小必要工具。", "默认使用 grep_text；如果需要先像 CLI 助手一样看文件名/文件清单，可使用 shell_run，但只能设置 command_kind=git_ls_files、rg_files 或 rg_search_summary。", "terms 必须是业务语义、路由、组件、API、状态、文件名或样式关键词；git_ls_files/rg_files 可在必要时少量或不带 terms。", "不要输出任意 shell 命令、绝对路径、源码片段、token、cookie、Authorization。", "不要把 /aigc、/.well-known、/v1/execution-packages、app-installations 等控制面路径作为产品证据。"},
 	}
 	data, _ := json.Marshal(payload)
 	var output codeInvestigationLLMOutput
 	modelTrace, err := s.llm.GenerateJSON(ctx, config.ModelTaskCodeReading, llm.JSONRequest{
-		System:       "你是 Cascade DemoOps 的代码调查 planner。你的任务像 Codex 一样先决定应该 grep 什么，再让本地安全工具读取少量命中文件。你不能要求 shell，不能要求完整源码，不能输出敏感数据。",
+		System:       "你是 Cascade DemoOps 的代码调查 planner。你的任务像 Codex 一样先决定应该调用哪个本地安全工具，再逐步定位少量需求相关文件。你不能要求任意 shell，不能要求完整源码，不能输出敏感数据。",
 		User:         string(data),
 		SchemaName:   "CodeInvestigationPlan",
-		ResponseHint: "返回字段：summary, queries[{purpose, terms[], query}], confidence。terms 每条 2-8 个，query 可省略。",
+		ResponseHint: "返回字段：summary, queries[{purpose, tool, terms[], query, command_kind, expected_evidence[]}], confidence。tool 只能是 grep_text 或 shell_run；shell_run 只能用 command_kind=git_ls_files/rg_files/rg_search_summary。",
 		MaxTokens:    1200,
 		Temperature:  0.12,
 	}, &output)
@@ -1001,16 +1064,35 @@ func codeInvestigationQueriesFromLLM(output codeInvestigationLLMOutput, budget m
 	queries := []codeInvestigationQuery{}
 	for _, item := range output.Queries {
 		terms := sanitizeInvestigationTerms(stringSlice(item.Terms))
-		if len(terms) == 0 {
+		tool := sanitizeInvestigationToolName(item.Tool)
+		if tool == "" {
+			tool = "grep_text"
+		}
+		commandKind := sanitizeShellRunCommandKind(item.CommandKind, item.Command)
+		if tool == "shell_run" && commandKind == "" {
+			commandKind = shellRunCommandKindForTerms(terms)
+		}
+		if investigationToolRequiresTerms(tool, commandKind) && len(terms) == 0 {
 			continue
 		}
 		question := closestInvestigationQuestion(terms, questions)
+		expected := sanitizeExpectedEvidenceKinds(stringSlice(item.ExpectedEvidence))
+		if len(expected) == 0 {
+			expected = question.ExpectedEvidence
+		}
+		queryText := strings.Join(terms, " OR ")
+		if queryText == "" {
+			queryText = commandKind
+		}
 		queries = append(queries, codeInvestigationQuery{
 			questionID:       question.ID,
 			purpose:          firstNonEmpty(item.Purpose, "按模型规划的业务语义检索相关代码。"),
-			query:            strings.Join(terms, " OR "),
+			query:            queryText,
 			terms:            terms,
-			expectedEvidence: question.ExpectedEvidence,
+			expectedEvidence: expected,
+			plannedFrom:      "initial_plan",
+			suggestedTool:    tool,
+			commandKind:      commandKind,
 		})
 	}
 	if budget.DrilldownRounds > 0 && len(queries) > budget.DrilldownRounds {
@@ -1024,16 +1106,30 @@ func dedupeCodeInvestigationQueries(values []codeInvestigationQuery) []codeInves
 	out := make([]codeInvestigationQuery, 0, len(values))
 	for _, value := range values {
 		terms := sanitizeInvestigationTerms(value.terms)
-		if len(terms) == 0 {
+		tool := sanitizeInvestigationToolName(value.suggestedTool)
+		if tool == "" {
+			tool = "grep_text"
+		}
+		commandKind := sanitizeShellRunCommandKind(value.commandKind, "")
+		if tool == "shell_run" && commandKind == "" {
+			commandKind = shellRunCommandKindForTerms(terms)
+		}
+		if investigationToolRequiresTerms(tool, commandKind) && len(terms) == 0 {
 			continue
 		}
-		key := strings.Join(terms, "|")
+		value.suggestedTool = tool
+		value.commandKind = commandKind
+		key := codeInvestigationQueryExecutionKey(value)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
 		value.terms = terms
-		value.query = strings.Join(terms, " OR ")
+		if len(terms) > 0 {
+			value.query = strings.Join(terms, " OR ")
+		} else if value.query == "" {
+			value.query = commandKind
+		}
 		out = append(out, value)
 	}
 	return out
@@ -1160,6 +1256,9 @@ func investigationQueryMetadata(query codeInvestigationQuery) map[string]any {
 	if query.suggestedTool != "" {
 		metadata["suggested_tool"] = query.suggestedTool
 	}
+	if query.commandKind != "" {
+		metadata["command_kind"] = query.commandKind
+	}
 	if query.dependsOnToolID != "" {
 		metadata["depends_on_tool_call_id"] = query.dependsOnToolID
 	}
@@ -1175,7 +1274,10 @@ func investigationQueryMetadataWithToolPolicy(query codeInvestigationQuery, poli
 		metadata = map[string]any{}
 	}
 	metadata["tool_policy"] = []string{}
-	tools := []string{"grep_text"}
+	tools := []string{}
+	if policy.grepText {
+		tools = append(tools, "grep_text")
+	}
 	if policy.followImports {
 		tools = append(tools, "follow_imports")
 	}
@@ -1194,12 +1296,16 @@ func investigationQueryMetadataWithToolPolicy(query codeInvestigationQuery, poli
 	if policy.inspectFileOutline {
 		tools = append(tools, "inspect_file_outline")
 	}
+	if policy.shellRun {
+		tools = append(tools, "shell_run")
+	}
 	metadata["tool_policy"] = tools
 	return metadata
 }
 
 func toolPolicyForInvestigationQuery(query codeInvestigationQuery) codeInvestigationToolPolicy {
 	policy := codeInvestigationToolPolicy{
+		grepText:         true,
 		followImports:    true,
 		findReferences:   true,
 		findAPIHandlers:  false,
@@ -1208,6 +1314,7 @@ func toolPolicyForInvestigationQuery(query codeInvestigationQuery) codeInvestiga
 	suggested := sanitizeInvestigationToolName(query.suggestedTool)
 	switch suggested {
 	case "inspect_file_outline":
+		policy.grepText = false
 		policy.followImports = false
 		policy.findReferences = false
 		policy.findAPIHandlers = false
@@ -1216,6 +1323,7 @@ func toolPolicyForInvestigationQuery(query codeInvestigationQuery) codeInvestiga
 		policy.inspectFileOutline = true
 		return policy
 	case "list_related_files":
+		policy.grepText = false
 		policy.followImports = false
 		policy.findReferences = false
 		policy.findAPIHandlers = false
@@ -1223,6 +1331,7 @@ func toolPolicyForInvestigationQuery(query codeInvestigationQuery) codeInvestiga
 		policy.listRelatedFiles = true
 		return policy
 	case "read_window":
+		policy.grepText = false
 		policy.followImports = false
 		policy.findReferences = false
 		policy.findAPIHandlers = false
@@ -1234,14 +1343,26 @@ func toolPolicyForInvestigationQuery(query codeInvestigationQuery) codeInvestiga
 		policy.findAPIHandlers = false
 		return policy
 	case "find_references":
+		policy.grepText = false
 		policy.followImports = false
 		policy.findReferences = true
 		policy.findAPIHandlers = false
 		return policy
 	case "find_api_handlers":
+		policy.grepText = query.plannedFrom == "next_actions" && sanitizeInvestigationToolName(query.parentTool) != "shell_run"
 		policy.followImports = false
 		policy.findReferences = true
 		policy.findAPIHandlers = true
+		return policy
+	case "shell_run":
+		policy.grepText = false
+		policy.followImports = false
+		policy.findReferences = false
+		policy.findAPIHandlers = false
+		policy.readWindow = false
+		policy.listRelatedFiles = false
+		policy.inspectFileOutline = false
+		policy.shellRun = true
 		return policy
 	case "grep_text":
 		if expectedOnlyStyleOrRoute(query.expectedEvidence) {
@@ -1346,6 +1467,15 @@ func projectInvestigationToolCards() []map[string]any {
 			"output_contract":  "path hashes, snippet refs, transient redacted snippet observations",
 			"persistent_trace": "hashes and snippet line refs only",
 			"cost":             "bounded_by_tool_search_budget",
+		},
+		{
+			"tool":             "shell_run",
+			"phase":            "followup",
+			"when_to_use":      "需要像 CLI 助手一样做只读仓库探测时使用；仅支持 git/rg 类 discovery 和匹配摘要。",
+			"input_contract":   "command_kind=git_ls_files|rg_files|rg_search_summary，query_terms[0-8]；禁止传任意 shell 命令、路径写入、网络命令或 secret。若模型给出 command 字符串，后端只会映射到安全 command_kind。",
+			"output_contract":  "command_kind、文件计数、扩展名分布、path hashes；不返回源码行、完整相对路径、绝对路径或 shell stdout。",
+			"persistent_trace": "safe command category, counts and hashes only",
+			"cost":             "low_bounded_read_only_shell",
 		},
 		{
 			"tool":             "list_related_files",
@@ -2323,6 +2453,9 @@ func reviewInvestigationEvidence(ctx context.Context, candidates []codeCandidate
 		inspectComponents(candidate.name, text, pathHash, snapshot)
 		inspectAPIs(text, pathHash, snapshot)
 		inspectDataModels(text, pathHash, snapshot)
+		if candidateLooksBackendImplementation(candidate) {
+			review.backendCount++
+		}
 		if codeKindForFile(candidate.name) == "style" || containsAny(strings.ToLower(filepath.ToSlash(candidate.rel)), ".css", ".scss", ".sass", ".less", "tailwind") || containsAny(text, "className", "loading", "progress") {
 			review.styleCount++
 		}
@@ -2357,6 +2490,8 @@ func evidenceGapsForExpected(review codeInvestigationEvidenceReview, expected []
 		case "api_or_data_model":
 			if review.apiCount == 0 && review.dataModelCount == 0 {
 				gaps = append(gaps, "api_or_data_model")
+			} else if review.apiCount > 0 && review.dataModelCount == 0 && review.backendCount == 0 {
+				gaps = append(gaps, "api_or_data_model")
 			}
 		case "style_or_state":
 			if review.styleCount == 0 {
@@ -2377,6 +2512,7 @@ func evidenceReviewToolCall(round int, query codeInvestigationQuery, review code
 		"component_count":  review.componentCount,
 		"selector_count":   review.selectorCount,
 		"api_count":        review.apiCount,
+		"backend_count":    review.backendCount,
 		"data_model_count": review.dataModelCount,
 		"style_count":      review.styleCount,
 		"gaps":             review.gaps,
@@ -2387,7 +2523,7 @@ func evidenceReviewToolCall(round int, query codeInvestigationQuery, review code
 		Purpose:           "读取本轮 grep 命中的少量文件，审查是否已经覆盖 route/component/selector/API/data model 证据；仅输出计数、hash 和缺口。",
 		Query:             query.query,
 		InputSummary:      fmt.Sprintf("selected_files=%d", review.fileCount),
-		OutputSummary:     fmt.Sprintf("routes=%d components=%d selectors=%d apis=%d models=%d style=%d gaps=%s", review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.dataModelCount, review.styleCount, strings.Join(review.gaps, ",")),
+		OutputSummary:     fmt.Sprintf("routes=%d components=%d selectors=%d apis=%d backend=%d models=%d style=%d gaps=%s", review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.backendCount, review.dataModelCount, review.styleCount, strings.Join(review.gaps, ",")),
 		SelectedFileCount: review.fileCount,
 		PathHashes:        limitStrings(review.pathHashes, 12),
 		Metadata:          metadata,
@@ -2973,7 +3109,7 @@ func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(c
 			"gaps":                           review.gaps,
 			"related_file_observation_count": len(relatedFileObservations),
 			"file_outline_observation_count": len(fileOutlineObservations),
-			"allowed_tools":                  []string{"grep_text", "list_related_files", "inspect_file_outline", "read_window", "follow_imports", "find_references", "find_api_handlers", "evidence_review"},
+			"allowed_tools":                  []string{"grep_text", "shell_run", "list_related_files", "inspect_file_outline", "read_window", "follow_imports", "find_references", "find_api_handlers", "evidence_review"},
 			"depends_on_tool_call_id":        dependsOnToolCallID,
 			"remaining_search_budget":        maxInt(0, budget.ToolSearchFileLimit-trace.TotalFilesSearched),
 			"previous_query_term_count":      len(query.terms),
@@ -3002,6 +3138,7 @@ func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(c
 			"components":  review.componentCount,
 			"selectors":   review.selectorCount,
 			"apis":        review.apiCount,
+			"backend":     review.backendCount,
 			"models":      review.dataModelCount,
 			"style":       review.styleCount,
 			"gaps":        review.gaps,
@@ -3019,10 +3156,11 @@ func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(c
 			"remaining_selected":     maxInt(0, budget.TotalFileLimit-trace.TotalFilesSelected),
 			"files_per_round":        budget.FilesPerRound,
 		},
-		"allowed_tools": []string{"grep_text", "list_related_files", "inspect_file_outline", "read_window", "follow_imports", "find_references", "find_api_handlers"},
+		"allowed_tools": []string{"grep_text", "shell_run", "list_related_files", "inspect_file_outline", "read_window", "follow_imports", "find_references", "find_api_handlers"},
 		"instructions": []string{
 			"像代码助手一样基于 observation 决定下一步最小必要工具。",
-			"只返回 1-3 个 next_actions；不要输出 shell、绝对路径、源码片段、token、cookie、Authorization。",
+			"只返回 1-3 个 next_actions；不要输出任意 shell 命令、绝对路径、源码片段、token、cookie、Authorization。",
+			"如果需要 shell_run，只能设置 command_kind=git_ls_files、rg_files 或 rg_search_summary；不要生成命令字符串。",
 			"如果需要先了解命中文件附近有哪些 route/component/API 文件，使用 list_related_files；它只列文件名、类型和 hash。",
 			"如果需要把已命中的文件读成更像 Codex 的结构化轮廓，使用 inspect_file_outline；它只返回符号名、route/API/selector/data model 摘要，不输出源码。",
 			"如果需要更靠近 grep 命中的局部上下文，优先使用 read_window；它只能读取上一轮 snippet 附近的小窗口。",
@@ -3036,7 +3174,7 @@ func (s *ProjectInvestigationToolSuite) planNextActionsFromEvidenceObservation(c
 		System:       "你是 Cascade DemoOps 的代码调查观察器。你根据上一轮本地工具 observation 选择下一步最小必要工具调用，不读取完整源码，不扩大到无关文件。",
 		User:         string(data),
 		SchemaName:   "CodeInvestigationNextActions",
-		ResponseHint: "返回字段：summary, next_actions[{tool, reason, query_terms[], expected_evidence[]}], confidence。tool 只能是 grep_text/list_related_files/inspect_file_outline/read_window/follow_imports/find_references/find_api_handlers。",
+		ResponseHint: "返回字段：summary, next_actions[{tool, reason, query_terms[], command_kind, expected_evidence[]}], confidence。tool 只能是 grep_text/shell_run/list_related_files/inspect_file_outline/read_window/follow_imports/find_references/find_api_handlers。",
 		MaxTokens:    900,
 		Temperature:  0.08,
 	}, &output)
@@ -3075,7 +3213,7 @@ func appendNextActionInvestigationQueries(queries []codeInvestigationQuery, trac
 		return queries
 	}
 	question, ok := investigationQuestionForID(trace, base.questionID)
-	if ok && question.Status == "answered" {
+	if ok && question.Status == "answered" && !hasAllowedPostAnswerNextAction(plannedNextActions) {
 		return queries
 	}
 	if !ok {
@@ -3090,6 +3228,9 @@ func appendNextActionInvestigationQueries(queries []codeInvestigationQuery, trac
 	if len(question.NextActions) == 0 {
 		question.NextActions = plannedNextActions
 	}
+	if question.Status == "answered" {
+		question.NextActions = allowedPostAnswerNextActions(question.NextActions)
+	}
 	if len(question.NextActions) == 0 {
 		question.NextActions = nextActionsForEvidenceReview(base, review, dependsOnToolCallID)
 	}
@@ -3100,7 +3241,7 @@ func appendNextActionInvestigationQueries(queries []codeInvestigationQuery, trac
 		if len(queries) >= limit {
 			break
 		}
-		key := strings.Join(next.terms, "|")
+		key := codeInvestigationQueryExecutionKey(next)
 		if executed[key] || codeInvestigationQueryExists(queries, key) {
 			continue
 		}
@@ -3125,9 +3266,6 @@ func codeInvestigationQueriesFromNextActions(question model.CodeInvestigationQue
 	out := []codeInvestigationQuery{}
 	for _, action := range question.NextActions {
 		terms := sanitizeInvestigationTerms(action.QueryTerms)
-		if len(terms) == 0 {
-			continue
-		}
 		expected := uniqueStrings(action.ExpectedEvidence)
 		if len(expected) == 0 {
 			expected = question.ExpectedEvidence
@@ -3135,15 +3273,29 @@ func codeInvestigationQueriesFromNextActions(question model.CodeInvestigationQue
 		if len(expected) == 0 {
 			expected = base.expectedEvidence
 		}
+		tool := sanitizeInvestigationToolName(action.Tool)
+		commandKind := sanitizeShellRunCommandKind(action.CommandKind, "")
+		if tool == "shell_run" && commandKind == "" {
+			commandKind = shellRunCommandKindForTerms(terms)
+		}
+		if investigationToolRequiresTerms(tool, commandKind) && len(terms) == 0 {
+			continue
+		}
 		purpose := firstNonEmpty(action.Reason, question.Question, base.purpose, "继续补齐项目理解证据。")
+		queryText := strings.Join(terms, " OR ")
+		if queryText == "" {
+			queryText = commandKind
+		}
 		out = append(out, codeInvestigationQuery{
 			questionID:       firstNonEmpty(question.ID, base.questionID),
 			purpose:          "根据 next_actions 补证：" + purpose,
-			query:            strings.Join(terms, " OR "),
+			query:            queryText,
 			terms:            terms,
 			expectedEvidence: expected,
 			plannedFrom:      "next_actions",
-			suggestedTool:    sanitizeInvestigationToolName(action.Tool),
+			suggestedTool:    tool,
+			parentTool:       base.suggestedTool,
+			commandKind:      commandKind,
 			dependsOnToolID:  action.DependsOnToolCallID,
 		})
 	}
@@ -3154,9 +3306,6 @@ func nextActionsFromLLMOutput(output codeInvestigationNextActionsLLMOutput, quer
 	out := []model.CodeInvestigationNextAction{}
 	for _, item := range output.NextActions {
 		terms := sanitizeInvestigationTerms(stringSlice(item.QueryTerms))
-		if len(terms) == 0 {
-			continue
-		}
 		expected := sanitizeExpectedEvidenceKinds(stringSlice(item.ExpectedEvidence))
 		if len(expected) == 0 {
 			expected = review.gaps
@@ -3168,6 +3317,13 @@ func nextActionsFromLLMOutput(output codeInvestigationNextActionsLLMOutput, quer
 		if tool == "" {
 			tool = toolForExpectedEvidence(expected)
 		}
+		commandKind := sanitizeShellRunCommandKind(item.CommandKind, item.Command)
+		if tool == "shell_run" && commandKind == "" {
+			commandKind = shellRunCommandKindForTerms(terms)
+		}
+		if investigationToolRequiresTerms(tool, commandKind) && len(terms) == 0 {
+			continue
+		}
 		if tool == "" {
 			continue
 		}
@@ -3175,6 +3331,7 @@ func nextActionsFromLLMOutput(output codeInvestigationNextActionsLLMOutput, quer
 			Tool:                tool,
 			Reason:              firstNonEmpty(item.Reason, "根据上一轮 observation 继续补齐证据缺口。"),
 			QueryTerms:          terms,
+			CommandKind:         commandKind,
 			ExpectedEvidence:    uniqueStrings(expected),
 			DependsOnToolCallID: dependsOnToolCallID,
 		})
@@ -3187,11 +3344,54 @@ func nextActionsFromLLMOutput(output codeInvestigationNextActionsLLMOutput, quer
 
 func sanitizeInvestigationToolName(value string) string {
 	switch strings.TrimSpace(value) {
-	case "repo_index", "grep_text", "list_related_files", "inspect_file_outline", "read_window", "follow_imports", "find_references", "find_api_handlers", "evidence_review":
+	case "repo_index", "grep_text", "shell_run", "list_related_files", "inspect_file_outline", "read_window", "follow_imports", "find_references", "find_api_handlers", "evidence_review":
 		return strings.TrimSpace(value)
 	default:
 		return ""
 	}
+}
+
+func sanitizeShellRunCommandKind(kind string, command string) string {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	switch kind {
+	case "git_ls_files", "rg_files", "rg_search_summary":
+		return kind
+	}
+	command = strings.ToLower(strings.TrimSpace(command))
+	switch {
+	case command == "":
+		return ""
+	case strings.Contains(command, "git") && strings.Contains(command, "ls-files"):
+		return "git_ls_files"
+	case strings.Contains(command, "rg") && strings.Contains(command, "--files"):
+		return "rg_files"
+	case strings.Contains(command, "rg") && (strings.Contains(command, "-l") || strings.Contains(command, "--files-with-matches")):
+		return "rg_search_summary"
+	default:
+		return ""
+	}
+}
+
+func shellRunCommandKindForTerms(terms []string) string {
+	if len(terms) == 0 {
+		return "git_ls_files"
+	}
+	return "rg_search_summary"
+}
+
+func investigationToolRequiresTerms(tool string, commandKind string) bool {
+	switch tool {
+	case "read_window", "list_related_files":
+		return false
+	case "shell_run":
+		return commandKind != "git_ls_files" && commandKind != "rg_files"
+	default:
+		return true
+	}
+}
+
+func investigationToolPolicyRequiresSearchBudget(policy codeInvestigationToolPolicy) bool {
+	return policy.grepText || policy.shellRun || policy.findReferences || policy.findAPIHandlers
 }
 
 func sanitizeExpectedEvidenceKinds(values []string) []string {
@@ -3402,39 +3602,329 @@ func appendRelatedFileObservationCache(existing []relatedFileObservation, next [
 
 func codeInvestigationQueryExists(values []codeInvestigationQuery, key string) bool {
 	for _, value := range values {
-		if strings.Join(value.terms, "|") == key {
+		if codeInvestigationQueryExecutionKey(value) == key {
 			return true
 		}
 	}
 	return false
 }
 
+func codeInvestigationQueryExecutionKey(query codeInvestigationQuery) string {
+	return strings.Join([]string{
+		query.questionID,
+		query.suggestedTool,
+		query.commandKind,
+		strings.Join(query.terms, "|"),
+		strings.Join(query.expectedEvidence, "|"),
+	}, "|")
+}
+
+func annotateInvestigationTraceToolCalls(trace *model.CodeInvestigationTrace) {
+	if trace == nil {
+		return
+	}
+	for i := range trace.ToolCalls {
+		annotateInvestigationToolCall(&trace.ToolCalls[i])
+	}
+}
+
+func annotateInvestigationToolCall(call *model.CodeInvestigationToolCall) {
+	if call == nil {
+		return
+	}
+	if call.SelectionReason == "" {
+		call.SelectionReason = investigationToolSelectionReason(*call)
+	}
+	if call.ReadPolicy == "" {
+		call.ReadPolicy = investigationToolReadPolicy(call.Tool)
+	}
+	if call.SourceTextPolicy == "" {
+		call.SourceTextPolicy = investigationToolSourceTextPolicy(call.Tool)
+	}
+}
+
+func investigationToolSelectionReason(call model.CodeInvestigationToolCall) string {
+	plannedFrom := metadataStringValue(call.Metadata, "planned_from")
+	suggestedTool := metadataStringValue(call.Metadata, "suggested_tool")
+	commandKind := metadataStringValue(call.Metadata, "command_kind")
+	switch call.Tool {
+	case "shell_metadata":
+		return "启动阶段自动探测仓库 manifest、依赖名和 git 文件数量，建立只读背景。"
+	case "repo_index":
+		return "启动阶段选择 manifest、入口和路由/配置文件建立第一层项目地图。"
+	case "plan_investigation":
+		return "基于需求问题、repo map 和 tool cards 选择首轮最小调查工具。"
+	case "grep_text":
+		if suggestedTool != "" && suggestedTool != "grep_text" {
+			return "兼容旧计划的 grep_text 调用；当前工具策略建议 " + suggestedTool + "。"
+		}
+		if plannedFrom != "" {
+			return "planner 从 " + plannedFrom + " 选择 grep_text，用业务关键词做有界文件搜索。"
+		}
+		return "planner 选择 grep_text，用业务关键词做有界文件搜索。"
+	case "shell_run":
+		if commandKind != "" {
+			return "planner 选择只读 shell_run/" + commandKind + "，先做仓库 discovery 或匹配摘要。"
+		}
+		return "planner 选择只读 shell_run，先做仓库 discovery 或匹配摘要。"
+	case "read_evidence_snippets":
+		return "grep 命中后读取局部证据窗口引用，只持久化 hash、行号和信号类型。"
+	case "read_window":
+		return "planner 基于上一轮 snippet observation 选择 read_window，读取更近的小窗口补上下文。"
+	case "list_related_files":
+		return "planner 基于已命中文件选择 list_related_files，先看邻近文件关系再决定下一步。"
+	case "inspect_file_outline":
+		return "planner 选择 inspect_file_outline，读取少量候选文件的符号/route/API/selector 轮廓。"
+	case "follow_imports":
+		return "工具策略沿当前命中文件的直接 import 小步追踪相关组件、hook、client 或样式模块。"
+	case "find_references":
+		return "工具策略从已确认符号反向查找父级 route、调用方或引用文件。"
+	case "find_api_handlers":
+		return "工具策略从前端 API path/mutation 追踪后端 handler/schema/model。"
+	case "evidence_review":
+		return "每轮工具后审查 route/component/selector/API/data model 证据覆盖和缺口。"
+	case "plan_next_actions":
+		return "基于上一轮 observation 和 remaining gaps 规划下一步最小工具调用。"
+	case "focused_fallback":
+		return "grep 命中不足时只补少量入口/路由/高置信产品文件，不使用全局 selector 池凑数。"
+	case "read_structured_files":
+		return "最终只结构化读取已被工具选择的需求相关文件，提取摘要和 evidence ref。"
+	default:
+		if call.Purpose != "" {
+			return call.Purpose
+		}
+		return "执行受限代码调查工具。"
+	}
+}
+
+func investigationToolReadPolicy(tool string) string {
+	switch tool {
+	case "shell_metadata":
+		return "manifest/git_metadata_only"
+	case "repo_index":
+		return "repo_map_hashes_only"
+	case "plan_investigation", "plan_next_actions":
+		return "planner_context_only_no_file_read"
+	case "grep_text":
+		return "bounded_keyword_search"
+	case "shell_run":
+		return "allowlisted_read_only_git_rg"
+	case "read_evidence_snippets":
+		return "bounded_snippet_refs"
+	case "read_window":
+		return "bounded_local_windows_from_prior_snippets"
+	case "list_related_files":
+		return "directory_relationships_no_source_read"
+	case "inspect_file_outline":
+		return "bounded_file_outline_parse"
+	case "follow_imports":
+		return "direct_import_follow_limited"
+	case "find_references":
+		return "bounded_reverse_reference_search"
+	case "find_api_handlers":
+		return "bounded_product_api_handler_search"
+	case "evidence_review":
+		return "selected_round_files_summary"
+	case "focused_fallback":
+		return "small_entry_route_fallback"
+	case "read_structured_files":
+		return "selected_files_structured_parse"
+	default:
+		return "bounded_read_only_tool"
+	}
+}
+
+func investigationToolSourceTextPolicy(tool string) string {
+	switch tool {
+	case "shell_metadata", "repo_index", "list_related_files", "shell_run", "plan_investigation", "plan_next_actions", "focused_fallback":
+		return "no_source_text_persisted"
+	case "grep_text", "read_evidence_snippets", "read_window":
+		return "transient_redacted_observations_hashes_persisted"
+	case "inspect_file_outline", "follow_imports", "find_references", "find_api_handlers", "evidence_review", "read_structured_files":
+		return "local_parse_summary_hashes_persisted"
+	default:
+		return "no_raw_source_persisted"
+	}
+}
+
+func metadataStringValue(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	switch value := metadata[key].(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return ""
+	}
+}
+
+func codeInvestigationQualityForSnapshot(snapshot *model.CodeUnderstandingSnapshot) *model.CodeInvestigationQualitySummary {
+	if snapshot == nil || snapshot.InvestigationTrace == nil {
+		return nil
+	}
+	trace := snapshot.InvestigationTrace
+	toolCalls := len(trace.ToolCalls)
+	specializedTools := 0
+	shellRunTools := 0
+	for _, call := range trace.ToolCalls {
+		if investigationToolIsSpecialized(call.Tool) {
+			specializedTools++
+		}
+		if call.Tool == "shell_run" {
+			shellRunTools++
+		}
+	}
+	answered := 0
+	open := 0
+	gaps := []string{}
+	for _, question := range trace.Questions {
+		if question.Status == "answered" {
+			answered++
+			continue
+		}
+		open++
+		gaps = append(gaps, question.RemainingGaps...)
+	}
+	discovered := trace.TotalFilesDiscovered
+	selected := firstPositiveInt(trace.TotalFilesSelected, snapshot.FileCount)
+	searched := trace.TotalFilesSearched
+	selectedRatio := safeRatio(selected, discovered)
+	searchRatio := safeRatio(searched, discovered)
+	overreadRisk := codeInvestigationOverreadRisk(discovered, searched, selected, searchRatio, selectedRatio)
+	quality := &model.CodeInvestigationQualitySummary{
+		Mode:                     trace.Mode,
+		ToolDriven:               toolCalls > 0,
+		ToolCallCount:            toolCalls,
+		SpecializedToolCallCount: specializedTools,
+		ShellRunToolCallCount:    shellRunTools,
+		TotalFilesDiscovered:     discovered,
+		TotalFilesSearched:       searched,
+		TotalFilesSelected:       selected,
+		StructuredFileCount:      snapshot.FileCount,
+		SelectedFileRatio:        selectedRatio,
+		SearchFileRatio:          searchRatio,
+		AnsweredQuestionCount:    answered,
+		OpenQuestionCount:        open,
+		RemainingGaps:            uniqueStrings(gaps),
+		SourceTextPolicy:         "no_raw_source_persisted",
+		OverreadRisk:             overreadRisk,
+		Confidence:               codeInvestigationQualityConfidence(toolCalls, specializedTools, open, overreadRisk),
+	}
+	quality.Summary = codeInvestigationQualitySummaryText(quality)
+	return quality
+}
+
+func investigationToolIsSpecialized(tool string) bool {
+	switch tool {
+	case "shell_run", "read_window", "list_related_files", "inspect_file_outline", "follow_imports", "find_references", "find_api_handlers":
+		return true
+	default:
+		return false
+	}
+}
+
+func codeInvestigationOverreadRisk(discovered int, searched int, selected int, searchRatio float64, selectedRatio float64) string {
+	switch {
+	case discovered == 0:
+		return "unknown"
+	case selected > 80 || (discovered >= 80 && searchRatio > 0.9) || (discovered >= 40 && selected > 30 && selectedRatio > 0.6):
+		return "high"
+	case selected > 40 || (discovered >= 80 && searchRatio > 0.55) || (discovered >= 40 && selected > 20 && selectedRatio > 0.35):
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func codeInvestigationQualityConfidence(toolCalls int, specializedTools int, openQuestions int, overreadRisk string) float64 {
+	confidence := 0.45
+	if toolCalls > 0 {
+		confidence += 0.16
+	}
+	if specializedTools > 0 {
+		confidence += 0.12
+	}
+	if openQuestions == 0 {
+		confidence += 0.12
+	}
+	switch overreadRisk {
+	case "low":
+		confidence += 0.12
+	case "medium":
+		confidence += 0.04
+	case "high":
+		confidence -= 0.12
+	}
+	if confidence < 0 {
+		return 0
+	}
+	if confidence > 0.95 {
+		return 0.95
+	}
+	return confidence
+}
+
+func codeInvestigationQualitySummaryText(quality *model.CodeInvestigationQualitySummary) string {
+	if quality == nil {
+		return ""
+	}
+	return fmt.Sprintf("工具化调查：%d 次工具调用，%d 次专用工具，结构化读取 %d/%d 文件，过读风险=%s，未解问题=%d。",
+		quality.ToolCallCount,
+		quality.SpecializedToolCallCount,
+		quality.StructuredFileCount,
+		quality.TotalFilesDiscovered,
+		quality.OverreadRisk,
+		quality.OpenQuestionCount,
+	)
+}
+
+func safeRatio(numerator int, denominator int) float64 {
+	if denominator <= 0 || numerator <= 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
+}
+
 func applyEvidenceReviewToQuestion(trace *model.CodeInvestigationTrace, query codeInvestigationQuery, review codeInvestigationEvidenceReview, nextActions []model.CodeInvestigationNextAction, toolCallIDs ...string) {
 	if trace == nil || query.questionID == "" {
 		return
+	}
+	apply := func(question *model.CodeInvestigationQuestion) {
+		question.ToolCallIDs = uniqueStrings(append(question.ToolCallIDs, toolCallIDs...))
+		question.RemainingGaps = append([]string{}, review.gaps...)
+		question.NextActions = nextActions
+		if len(question.NextActions) == 0 {
+			question.NextActions = nextActionsForEvidenceReview(query, review, lastNonEmptyString(toolCallIDs...))
+		}
+		question.EvidenceSummary = fmt.Sprintf("files=%d routes=%d components=%d selectors=%d apis=%d models=%d style=%d", review.fileCount, review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.dataModelCount, review.styleCount)
+		question.Confidence = evidenceReviewConfidence(review)
+		switch {
+		case review.fileCount == 0:
+			question.Status = "open"
+		case len(review.gaps) == 0:
+			question.Status = "answered"
+		default:
+			question.Status = "partial"
+		}
 	}
 	for i := range trace.Questions {
 		if trace.Questions[i].ID != query.questionID {
 			continue
 		}
-		trace.Questions[i].ToolCallIDs = uniqueStrings(append(trace.Questions[i].ToolCallIDs, toolCallIDs...))
-		trace.Questions[i].RemainingGaps = append([]string{}, review.gaps...)
-		trace.Questions[i].NextActions = nextActions
-		if len(trace.Questions[i].NextActions) == 0 {
-			trace.Questions[i].NextActions = nextActionsForEvidenceReview(query, review, lastNonEmptyString(toolCallIDs...))
-		}
-		trace.Questions[i].EvidenceSummary = fmt.Sprintf("files=%d routes=%d components=%d selectors=%d apis=%d models=%d style=%d", review.fileCount, review.routeCount, review.componentCount, review.selectorCount, review.apiCount, review.dataModelCount, review.styleCount)
-		trace.Questions[i].Confidence = evidenceReviewConfidence(review)
-		switch {
-		case review.fileCount == 0:
-			trace.Questions[i].Status = "open"
-		case len(review.gaps) == 0:
-			trace.Questions[i].Status = "answered"
-		default:
-			trace.Questions[i].Status = "partial"
-		}
+		apply(&trace.Questions[i])
 		return
 	}
+	question := model.CodeInvestigationQuestion{
+		ID:               query.questionID,
+		Question:         firstNonEmpty(query.purpose, "LLM 规划的补充调查问题"),
+		ExpectedEvidence: uniqueStrings(query.expectedEvidence),
+		QueryTerms:       uniqueStrings(query.terms),
+	}
+	apply(&question)
+	trace.Questions = append(trace.Questions, question)
 }
 
 func finalizeInvestigationQuestions(trace *model.CodeInvestigationTrace) {
@@ -3452,6 +3942,85 @@ func finalizeInvestigationQuestions(trace *model.CodeInvestigationTrace) {
 			trace.Questions[i].NextActions = nextActionsForOpenQuestion(trace.Questions[i])
 		}
 	}
+}
+
+func codeInvestigationQuestionAnswered(trace *model.CodeInvestigationTrace, id string) bool {
+	if strings.TrimSpace(id) == "" {
+		return false
+	}
+	question, ok := investigationQuestionForID(trace, id)
+	return ok && question.Status == "answered"
+}
+
+func shouldSkipAnsweredInvestigationQuery(query codeInvestigationQuery) bool {
+	if postAnswerInvestigationQueryAllowed(query) {
+		return false
+	}
+	return true
+}
+
+func postAnswerInvestigationQueryAllowed(query codeInvestigationQuery) bool {
+	tool := sanitizeInvestigationToolName(query.suggestedTool)
+	if query.plannedFrom == "initial_plan" && initialObservationToolAllowedAfterAnswer(tool) {
+		return true
+	}
+	if query.plannedFrom == "next_actions" && strings.TrimSpace(query.dependsOnToolID) != "" && postAnswerToolAllowed(tool) {
+		return true
+	}
+	return false
+}
+
+func initialObservationToolAllowedAfterAnswer(tool string) bool {
+	switch tool {
+	case "read_window", "list_related_files", "inspect_file_outline", "follow_imports", "find_references", "find_api_handlers":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasAllowedPostAnswerNextAction(actions []model.CodeInvestigationNextAction) bool {
+	return len(allowedPostAnswerNextActions(actions)) > 0
+}
+
+func allowedPostAnswerNextActions(actions []model.CodeInvestigationNextAction) []model.CodeInvestigationNextAction {
+	out := []model.CodeInvestigationNextAction{}
+	for _, action := range actions {
+		tool := sanitizeInvestigationToolName(action.Tool)
+		if strings.TrimSpace(action.DependsOnToolCallID) == "" || !postAnswerToolAllowed(tool) {
+			continue
+		}
+		out = append(out, action)
+	}
+	return out
+}
+
+func postAnswerToolAllowed(tool string) bool {
+	switch tool {
+	case "read_window", "list_related_files", "inspect_file_outline", "follow_imports", "find_references", "find_api_handlers", "grep_text":
+		return true
+	default:
+		return false
+	}
+}
+
+func allCodeInvestigationQuestionsAnswered(trace *model.CodeInvestigationTrace) bool {
+	if trace == nil || len(trace.Questions) == 0 {
+		return false
+	}
+	for _, question := range trace.Questions {
+		if question.Status != "answered" {
+			return false
+		}
+	}
+	return true
+}
+
+func shouldRunFocusedFallback(trace *model.CodeInvestigationTrace, selected []codeCandidateFile) bool {
+	if len(selected) == 0 {
+		return true
+	}
+	return !allCodeInvestigationQuestionsAnswered(trace)
 }
 
 func nextActionsForEvidenceReview(query codeInvestigationQuery, review codeInvestigationEvidenceReview, dependsOnToolCallID string) []model.CodeInvestigationNextAction {
@@ -3592,6 +4161,18 @@ func focusedFallbackCandidate(candidate codeCandidateFile) bool {
 		return true
 	}
 	return false
+}
+
+func candidateLooksBackendImplementation(candidate codeCandidateFile) bool {
+	lower := strings.ToLower(filepath.ToSlash(candidate.rel))
+	if shouldSkipCodeFileRel(candidate.rel, candidate.name) {
+		return false
+	}
+	if pathHasAnySegment(lower, "api", "server", "backend", "internal", "cmd", "pkg", "handlers", "handler") {
+		return true
+	}
+	name := strings.ToLower(candidate.name)
+	return containsAny(name, "handler", "controller", "server")
 }
 
 func pathHasAnySegment(rel string, segments ...string) bool {

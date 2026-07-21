@@ -716,6 +716,7 @@ export type CodeUnderstandingSnapshot = {
   file_count?: number;
   read_budget?: CodeReadBudget;
   investigation_trace?: CodeInvestigationTrace;
+  investigation_quality?: CodeInvestigationQualitySummary;
   path_digests?: PathDigest[];
   evidence_refs?: EvidenceRef[];
   summary?: string;
@@ -732,6 +733,27 @@ export type CodeReadBudget = {
   tool_search_file_limit?: number;
   tool_search_bytes_per_file?: number;
   tool_search_result_limit?: number;
+};
+
+export type CodeInvestigationQualitySummary = {
+  mode?: string;
+  tool_driven?: boolean;
+  tool_call_count?: number;
+  specialized_tool_call_count?: number;
+  shell_run_tool_call_count?: number;
+  total_files_discovered?: number;
+  total_files_searched?: number;
+  total_files_selected?: number;
+  structured_file_count?: number;
+  selected_file_ratio?: number;
+  search_file_ratio?: number;
+  answered_question_count?: number;
+  open_question_count?: number;
+  remaining_gaps?: string[];
+  source_text_policy?: string;
+  overread_risk?: string;
+  summary?: string;
+  confidence?: number;
 };
 
 export type CodeInvestigationTrace = {
@@ -769,6 +791,9 @@ export type CodeInvestigationToolCall = {
   query?: string;
   input_summary?: string;
   output_summary?: string;
+  selection_reason?: string;
+  read_policy?: string;
+  source_text_policy?: string;
   matched_file_count?: number;
   selected_file_count?: number;
   path_hashes?: string[];
@@ -1314,6 +1339,18 @@ export type ScriptReadinessReport = {
   suggested_stage_count?: number;
   suggested_target_duration_sec?: number;
   selector_coverage?: number;
+  business_action_count?: number;
+  generic_selector_count?: number;
+  login_action_count?: number;
+  login_duplication?: boolean;
+  min_stage_duration_ms?: number;
+  blocking_assertion_risk_count?: number;
+  code_investigation_tool_driven?: boolean;
+  code_investigation_overread_risk?: string;
+  code_investigation_specialized_tool_call_count?: number;
+  code_investigation_open_question_count?: number;
+  code_investigation_summary?: string;
+  code_investigation_gaps?: string[];
   credential_coverage?: boolean;
   evidence_refs?: EvidenceRef[];
   confidence?: number;
@@ -2186,6 +2223,7 @@ export type CodeInvestigationNextAction = {
   tool: string;
   reason?: string;
   query_terms?: string[];
+  command_kind?: string;
   expected_evidence?: string[];
   depends_on_tool_call_id?: string;
 };

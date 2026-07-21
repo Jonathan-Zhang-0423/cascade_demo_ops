@@ -25,30 +25,31 @@ type RequirementBrief struct {
 }
 
 type CodeUnderstandingSnapshot struct {
-	ID                 string                  `json:"id"`
-	ProjectID          string                  `json:"project_id,omitempty"`
-	SchemaVersion      string                  `json:"schema_version,omitempty"`
-	RepositoryID       string                  `json:"repository_id,omitempty"`
-	URI                string                  `json:"uri,omitempty"`
-	Branch             string                  `json:"branch,omitempty"`
-	CommitSHA          string                  `json:"commit_sha,omitempty"`
-	Languages          []string                `json:"languages,omitempty"`
-	Frameworks         []string                `json:"frameworks,omitempty"`
-	EntrypointHashes   []string                `json:"entrypoint_hashes,omitempty"`
-	Routes             []RouteInsight          `json:"routes,omitempty"`
-	Components         []ComponentInsight      `json:"components,omitempty"`
-	Selectors          []SelectorInsight       `json:"selectors,omitempty"`
-	APIEndpoints       []APIEndpointInsight    `json:"api_endpoints,omitempty"`
-	DataModels         []DataModelInsight      `json:"data_models,omitempty"`
-	SensitiveFields    []SensitiveFieldFinding `json:"sensitive_fields,omitempty"`
-	SourceDigestSHA256 string                  `json:"source_digest_sha256,omitempty"`
-	FileCount          int                     `json:"file_count,omitempty"`
-	ReadBudget         *CodeReadBudget         `json:"read_budget,omitempty"`
-	InvestigationTrace *CodeInvestigationTrace `json:"investigation_trace,omitempty"`
-	PathDigests        []PathDigest            `json:"path_digests,omitempty"`
-	EvidenceRefs       []EvidenceRef           `json:"evidence_refs,omitempty"`
-	Summary            string                  `json:"summary,omitempty"`
-	CreatedAt          time.Time               `json:"created_at,omitempty"`
+	ID                   string                           `json:"id"`
+	ProjectID            string                           `json:"project_id,omitempty"`
+	SchemaVersion        string                           `json:"schema_version,omitempty"`
+	RepositoryID         string                           `json:"repository_id,omitempty"`
+	URI                  string                           `json:"uri,omitempty"`
+	Branch               string                           `json:"branch,omitempty"`
+	CommitSHA            string                           `json:"commit_sha,omitempty"`
+	Languages            []string                         `json:"languages,omitempty"`
+	Frameworks           []string                         `json:"frameworks,omitempty"`
+	EntrypointHashes     []string                         `json:"entrypoint_hashes,omitempty"`
+	Routes               []RouteInsight                   `json:"routes,omitempty"`
+	Components           []ComponentInsight               `json:"components,omitempty"`
+	Selectors            []SelectorInsight                `json:"selectors,omitempty"`
+	APIEndpoints         []APIEndpointInsight             `json:"api_endpoints,omitempty"`
+	DataModels           []DataModelInsight               `json:"data_models,omitempty"`
+	SensitiveFields      []SensitiveFieldFinding          `json:"sensitive_fields,omitempty"`
+	SourceDigestSHA256   string                           `json:"source_digest_sha256,omitempty"`
+	FileCount            int                              `json:"file_count,omitempty"`
+	ReadBudget           *CodeReadBudget                  `json:"read_budget,omitempty"`
+	InvestigationTrace   *CodeInvestigationTrace          `json:"investigation_trace,omitempty"`
+	InvestigationQuality *CodeInvestigationQualitySummary `json:"investigation_quality,omitempty"`
+	PathDigests          []PathDigest                     `json:"path_digests,omitempty"`
+	EvidenceRefs         []EvidenceRef                    `json:"evidence_refs,omitempty"`
+	Summary              string                           `json:"summary,omitempty"`
+	CreatedAt            time.Time                        `json:"created_at,omitempty"`
 }
 
 type CodeReadBudget struct {
@@ -61,6 +62,27 @@ type CodeReadBudget struct {
 	ToolSearchFileLimit    int    `json:"tool_search_file_limit,omitempty"`
 	ToolSearchBytesPerFile int64  `json:"tool_search_bytes_per_file,omitempty"`
 	ToolSearchResultLimit  int    `json:"tool_search_result_limit,omitempty"`
+}
+
+type CodeInvestigationQualitySummary struct {
+	Mode                     string   `json:"mode,omitempty"`
+	ToolDriven               bool     `json:"tool_driven,omitempty"`
+	ToolCallCount            int      `json:"tool_call_count,omitempty"`
+	SpecializedToolCallCount int      `json:"specialized_tool_call_count,omitempty"`
+	ShellRunToolCallCount    int      `json:"shell_run_tool_call_count,omitempty"`
+	TotalFilesDiscovered     int      `json:"total_files_discovered,omitempty"`
+	TotalFilesSearched       int      `json:"total_files_searched,omitempty"`
+	TotalFilesSelected       int      `json:"total_files_selected,omitempty"`
+	StructuredFileCount      int      `json:"structured_file_count,omitempty"`
+	SelectedFileRatio        float64  `json:"selected_file_ratio,omitempty"`
+	SearchFileRatio          float64  `json:"search_file_ratio,omitempty"`
+	AnsweredQuestionCount    int      `json:"answered_question_count,omitempty"`
+	OpenQuestionCount        int      `json:"open_question_count,omitempty"`
+	RemainingGaps            []string `json:"remaining_gaps,omitempty"`
+	SourceTextPolicy         string   `json:"source_text_policy,omitempty"`
+	OverreadRisk             string   `json:"overread_risk,omitempty"`
+	Summary                  string   `json:"summary,omitempty"`
+	Confidence               float64  `json:"confidence,omitempty"`
 }
 
 type CodeInvestigationTrace struct {
@@ -95,6 +117,7 @@ type CodeInvestigationNextAction struct {
 	Tool                string   `json:"tool"`
 	Reason              string   `json:"reason,omitempty"`
 	QueryTerms          []string `json:"query_terms,omitempty"`
+	CommandKind         string   `json:"command_kind,omitempty"`
 	ExpectedEvidence    []string `json:"expected_evidence,omitempty"`
 	DependsOnToolCallID string   `json:"depends_on_tool_call_id,omitempty"`
 }
@@ -106,6 +129,9 @@ type CodeInvestigationToolCall struct {
 	Query             string           `json:"query,omitempty"`
 	InputSummary      string           `json:"input_summary,omitempty"`
 	OutputSummary     string           `json:"output_summary,omitempty"`
+	SelectionReason   string           `json:"selection_reason,omitempty"`
+	ReadPolicy        string           `json:"read_policy,omitempty"`
+	SourceTextPolicy  string           `json:"source_text_policy,omitempty"`
 	MatchedFileCount  int              `json:"matched_file_count,omitempty"`
 	SelectedFileCount int              `json:"selected_file_count,omitempty"`
 	PathHashes        []string         `json:"path_hashes,omitempty"`

@@ -80,6 +80,30 @@ func TestCodeReaderScopesEvidenceToIntentAndFiltersNoise(t *testing.T) {
 	if selectorInsightContains(snapshot.Selectors, "[data-testid='button-sidebar-toggle']") {
 		t.Fatalf("chrome selector should not survive intent-scoped selector evidence: %+v", snapshot.Selectors)
 	}
+	if snapshot.InvestigationQuality == nil {
+		t.Fatalf("expected code investigation quality summary")
+	}
+	if !snapshot.InvestigationQuality.ToolDriven {
+		t.Fatalf("expected tool-driven investigation quality, got %+v", snapshot.InvestigationQuality)
+	}
+	if snapshot.InvestigationQuality.TotalFilesSelected != snapshot.FileCount || snapshot.InvestigationQuality.StructuredFileCount != snapshot.FileCount {
+		t.Fatalf("quality summary should track structured read count, got quality=%+v file_count=%d", snapshot.InvestigationQuality, snapshot.FileCount)
+	}
+	if snapshot.InvestigationQuality.SourceTextPolicy != "no_raw_source_persisted" || snapshot.InvestigationQuality.OverreadRisk == "" {
+		t.Fatalf("quality summary should expose source policy and overread risk, got %+v", snapshot.InvestigationQuality)
+	}
+	if snapshot.InvestigationQuality.OverreadRisk == "high" {
+		t.Fatalf("small intent-scoped fixture should not be marked high overread, got %+v", snapshot.InvestigationQuality)
+	}
+	qualityJSON, err := json.Marshal(snapshot.InvestigationQuality)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"button-sidebar-toggle", "/aigc/.well-known/cascade-exchange", "/v1/app-installations/register", "/nix/store", "src/pages/projects/NewProject.tsx"} {
+		if strings.Contains(string(qualityJSON), forbidden) {
+			t.Fatalf("investigation quality leaked forbidden detail %q: %s", forbidden, string(qualityJSON))
+		}
+	}
 }
 
 func TestProjectInvestigationCollectCodeCandidatesUsesGitDiscoveryFirst(t *testing.T) {
@@ -156,10 +180,10 @@ func TestCodeReaderUsesIntentDrivenBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := snapshots[0]
-	if snapshot.ReadBudget == nil || snapshot.ReadBudget.TotalFileLimit != 80 {
+	if snapshot.ReadBudget == nil || snapshot.ReadBudget.TotalFileLimit != 32 || snapshot.ReadBudget.FilesPerRound != 6 || snapshot.ReadBudget.RepoIndexFileLimit != 24 {
 		t.Fatalf("expected default intent-driven read budget, got %+v", snapshot.ReadBudget)
 	}
-	if snapshot.FileCount > 80 {
+	if snapshot.FileCount > 32 {
 		t.Fatalf("CodeReader should not read more than budgeted files, read %d", snapshot.FileCount)
 	}
 	if !routeInsightContains(snapshot.Routes, "/projects/new") {
@@ -171,11 +195,71 @@ func TestCodeReaderUsesIntentDrivenBudget(t *testing.T) {
 	if snapshot.InvestigationTrace == nil {
 		t.Fatalf("expected tool-driven investigation trace")
 	}
+	if snapshot.InvestigationQuality == nil || snapshot.InvestigationQuality.OverreadRisk == "high" {
+		t.Fatalf("default small-step budget should avoid high overread risk, got %+v", snapshot.InvestigationQuality)
+	}
 	if !investigationHasTool(snapshot.InvestigationTrace, "repo_index") || !investigationHasTool(snapshot.InvestigationTrace, "grep_text") {
 		t.Fatalf("expected repo_index and grep_text tool calls, got %+v", snapshot.InvestigationTrace.ToolCalls)
 	}
 	if !investigationHasQuestion(snapshot.InvestigationTrace, "question_project_creation") {
 		t.Fatalf("expected project creation investigation question, got %+v", snapshot.InvestigationTrace.Questions)
+	}
+}
+
+func TestCodeReaderStopsAfterInvestigationQuestionsAreAnswered(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/pages/projects/NewProject.tsx", `
+		export function NewProjectPage() {
+			const route = "/projects/new"
+			const createPath = "/api/projects/create"
+			return <button data-testid="new-project">新建项目</button>
+		}
+	`)
+	writeFixtureFile(t, root, "backend/server/ProjectHandler.go", `
+		package server
+		func registerProjectRoutes() {
+			router.POST("/api/projects/create", handleCreateProject)
+		}
+		func handleCreateProject() {}
+	`)
+	for i := 0; i < 12; i++ {
+		writeFixtureFile(t, root, filepath.ToSlash(filepath.Join("src", "pages", "fallback", fmt.Sprintf("Fallback%d.tsx", i))), `
+			export function FallbackPage() {
+				return <button data-testid="profile-avatar">avatar</button>
+			}
+		`)
+	}
+	project := &model.ProjectContext{
+		ID:                 "project_early_stop",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示新建项目",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_early_stop",
+			Kind:         "repository",
+			LocalPath:    root,
+			RepositoryID: "repo_early_stop",
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"新建项目"}}
+
+	snapshots, err := NewCodeReaderAgent().ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshots[0]
+	if snapshot.InvestigationTrace == nil {
+		t.Fatalf("expected investigation trace")
+	}
+	question := investigationQuestion(snapshot.InvestigationTrace, "question_project_creation")
+	if question == nil || question.Status != "answered" {
+		t.Fatalf("expected project creation question to be answered, got %+v", snapshot.InvestigationTrace.Questions)
+	}
+	if investigationHasTool(snapshot.InvestigationTrace, "focused_fallback") {
+		t.Fatalf("answered investigation should not run focused fallback, got %+v", snapshot.InvestigationTrace.ToolCalls)
+	}
+	if selectorInsightContains(snapshot.Selectors, "[data-testid='profile-avatar']") {
+		t.Fatalf("early stop should not read fallback chrome selectors, got %+v", snapshot.Selectors)
 	}
 }
 
@@ -1125,11 +1209,144 @@ func TestProjectInvestigationPlannerReceivesToolCardsInPrompts(t *testing.T) {
 	if !strings.Contains(planner.initialRequest, `"inspect_file_outline"`) || !strings.Contains(planner.initialRequest, `"list_related_files"`) {
 		t.Fatalf("expected initial planner payload to describe follow-up tools, got %s", planner.initialRequest)
 	}
+	if !strings.Contains(planner.initialRequest, `"shell_run"`) || !strings.Contains(planner.initialRequest, `"allowed_initial_tools"`) {
+		t.Fatalf("expected initial planner payload to expose shell_run as an allowed initial tool, got %s", planner.initialRequest)
+	}
 	if !strings.Contains(planner.nextActionRequest, `"tool_cards"`) {
 		t.Fatalf("expected next-action planner payload to include tool cards, got %s", planner.nextActionRequest)
 	}
 	if !strings.Contains(planner.nextActionRequest, `"read_window"`) || !strings.Contains(planner.nextActionRequest, `"find_api_handlers"`) {
 		t.Fatalf("expected next-action planner payload to describe read_window and api handler tools, got %s", planner.nextActionRequest)
+	}
+	if !strings.Contains(planner.nextActionRequest, `"shell_run"`) || !strings.Contains(planner.nextActionRequest, "rg_search_summary") {
+		t.Fatalf("expected next-action planner payload to describe read-only shell_run command kinds, got %s", planner.nextActionRequest)
+	}
+}
+
+func TestProjectInvestigationPlannerCanRequestReadOnlyShellRun(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/features/shell-lab/ShellLab.tsx", `
+		export function ShellLab() {
+			const route = "/workspace/shell-lab"
+			return <button data-testid="launch-shell-lab">Launch shell lab</button>
+		}
+	`)
+	writeFixtureFile(t, root, "src/services/BuildClient.ts", `
+		export function startBuild() {
+			return fetch("/api/build/start")
+		}
+	`)
+	planner := shellRunPlannerLLM{}
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(planner).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        1,
+			FilesPerRound:          1,
+			TotalFileLimit:         4,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_shell_run", ProductDescription: "演示 shell lab 启动"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_shell_run", Objective: "演示 shell lab 启动"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellCall := investigationToolCall(result.Trace, "shell_run")
+	if shellCall == nil {
+		t.Fatalf("expected planner-requested shell_run call, got %+v", result.Trace.ToolCalls)
+	}
+	if shellCall.SelectedFileCount == 0 {
+		t.Fatalf("shell_run should select a relevant API client candidate, got %+v", shellCall)
+	}
+	if fmt.Sprint(shellCall.Metadata["command_kind"]) != "rg_files" {
+		t.Fatalf("expected shell_run command_kind rg_files, got %+v", shellCall.Metadata)
+	}
+	if shellCall.SelectionReason == "" || shellCall.ReadPolicy != "allowlisted_read_only_git_rg" || shellCall.SourceTextPolicy != "no_source_text_persisted" {
+		t.Fatalf("shell_run trace should expose selection/read/source policies, got %+v", shellCall)
+	}
+	if unexpectedGrep := investigationToolCallWithMetadataValues(result.Trace, "grep_text", map[string]string{"planned_from": "next_actions", "suggested_tool": "shell_run"}); unexpectedGrep != nil {
+		t.Fatalf("shell_run next action should not first run grep_text, got %+v", unexpectedGrep)
+	}
+	if !candidateRelContains(result.SelectedCandidates, "BuildClient.ts") {
+		t.Fatalf("expected shell_run planned query to select API client, got %+v", result.SelectedCandidates)
+	}
+	question := investigationQuestion(result.Trace, "question_ad_hoc")
+	if question == nil || !stringSliceContains(question.ToolCallIDs, shellCall.ID) {
+		t.Fatalf("expected ad hoc question to reference shell_run tool call, got %+v", result.Trace.Questions)
+	}
+	traceJSON, err := json.Marshal(result.Trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"src/services/BuildClient.ts", "/api/build/start", "fetch(", "rg --files", "git ls-files"} {
+		if strings.Contains(string(traceJSON), forbidden) {
+			t.Fatalf("persistent shell_run trace leaked forbidden detail %q: %s", forbidden, string(traceJSON))
+		}
+	}
+}
+
+func TestProjectInvestigationInitialPlannerCanStartWithReadOnlyShellRun(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/services/BuildClient.ts", `
+		export function startBuild() {
+			return fetch("/api/build/start")
+		}
+	`)
+	planner := initialShellRunPlannerLLM{}
+	candidates := collectCodeCandidatesForTest(t, root, nil, nil)
+	result, err := NewProjectInvestigationToolSuite(planner).Investigate(context.Background(), ProjectInvestigationRequest{
+		Root:       root,
+		Candidates: candidates,
+		Budget: model.CodeReadBudget{
+			Mode:                   "tool_driven_intent_drilldown",
+			RepoIndexFileLimit:     1,
+			DrilldownRounds:        1,
+			FilesPerRound:          1,
+			TotalFileLimit:         3,
+			MaxFileBytes:           80 * 1024,
+			ToolSearchFileLimit:    80,
+			ToolSearchBytesPerFile: 32 * 1024,
+			ToolSearchResultLimit:  10,
+		},
+		Project: &model.ProjectContext{ID: "project_initial_shell_run", ProductDescription: "演示 BuildClient 构建启动"},
+		Brief:   &model.RequirementBrief{ProjectID: "project_initial_shell_run", Objective: "演示 BuildClient 构建启动"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellCall := investigationToolCall(result.Trace, "shell_run")
+	if shellCall == nil {
+		t.Fatalf("expected initial planner shell_run call, got %+v", result.Trace.ToolCalls)
+	}
+	if grepCall := investigationToolCall(result.Trace, "grep_text"); grepCall != nil {
+		t.Fatalf("initial shell_run plan should not first run grep_text, got %+v", grepCall)
+	}
+	if fmt.Sprint(shellCall.Metadata["planned_from"]) != "initial_plan" || fmt.Sprint(shellCall.Metadata["command_kind"]) != "rg_files" {
+		t.Fatalf("expected initial shell_run metadata, got %+v", shellCall.Metadata)
+	}
+	if shellCall.SelectionReason == "" || shellCall.ReadPolicy != "allowlisted_read_only_git_rg" || shellCall.SourceTextPolicy != "no_source_text_persisted" {
+		t.Fatalf("initial shell_run trace should expose selection/read/source policies, got %+v", shellCall)
+	}
+	if !candidateRelContains(result.SelectedCandidates, "BuildClient.ts") {
+		t.Fatalf("expected initial shell_run to select BuildClient, got %+v", result.SelectedCandidates)
+	}
+	traceJSON, err := json.Marshal(result.Trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"src/services/BuildClient.ts", "/api/build/start", "fetch(", "rg --files", "git ls-files"} {
+		if strings.Contains(string(traceJSON), forbidden) {
+			t.Fatalf("initial shell_run trace leaked forbidden detail %q: %s", forbidden, string(traceJSON))
+		}
 	}
 }
 
@@ -1220,6 +1437,9 @@ func TestProjectInvestigationPlannerCanRequestReadWindowBeforeNextSearch(t *test
 	if investigationToolCallCount(result.Trace, "read_window") == 0 {
 		t.Fatalf("expected planner-requested read_window tool call, got %+v", result.Trace.ToolCalls)
 	}
+	if unexpectedGrep := investigationToolCallWithMetadataValues(result.Trace, "grep_text", map[string]string{"planned_from": "next_actions", "suggested_tool": "read_window"}); unexpectedGrep != nil {
+		t.Fatalf("read_window next action should not first run grep_text, got %+v", unexpectedGrep)
+	}
 	nextActionGrep := investigationToolCallWithMetadataValues(result.Trace, "grep_text", map[string]string{
 		"planned_from":   "next_actions",
 		"suggested_tool": "grep_text",
@@ -1280,6 +1500,9 @@ func TestProjectInvestigationPlannerCanListRelatedFilesBeforeNextSearch(t *testi
 	}
 	if investigationToolCallCount(result.Trace, "list_related_files") == 0 {
 		t.Fatalf("expected planner-requested list_related_files tool call, got %+v", result.Trace.ToolCalls)
+	}
+	if unexpectedGrep := investigationToolCallWithMetadataValues(result.Trace, "grep_text", map[string]string{"planned_from": "next_actions", "suggested_tool": "list_related_files"}); unexpectedGrep != nil {
+		t.Fatalf("list_related_files next action should not first run grep_text, got %+v", unexpectedGrep)
 	}
 	if !strings.Contains(planner.relatedFilesRequest, "WindowAPIClient.ts") {
 		t.Fatalf("expected planner payload to include related file name observation, got %s", planner.relatedFilesRequest)
@@ -1344,6 +1567,9 @@ func TestProjectInvestigationPlannerCanInspectFileOutlineBeforeNextSearch(t *tes
 	}
 	if investigationToolCallCount(result.Trace, "inspect_file_outline") == 0 {
 		t.Fatalf("expected planner-requested inspect_file_outline tool call, got %+v", result.Trace.ToolCalls)
+	}
+	if unexpectedGrep := investigationToolCallWithMetadataValues(result.Trace, "grep_text", map[string]string{"planned_from": "next_actions", "suggested_tool": "inspect_file_outline"}); unexpectedGrep != nil {
+		t.Fatalf("inspect_file_outline next action should not first run grep_text, got %+v", unexpectedGrep)
 	}
 	if !strings.Contains(planner.outlineRequest, "startWindowBuild") || !strings.Contains(planner.outlineRequest, "/api/window-lab/start") {
 		t.Fatalf("expected planner payload to include file outline symbols and API paths, got %s", planner.outlineRequest)
@@ -1515,6 +1741,72 @@ func TestProjectIntelligenceGraphUsesInvestigationSuiteForFocusedDrilldown(t *te
 	}
 }
 
+func TestScriptReadinessBlocksHighOverreadCodeInvestigation(t *testing.T) {
+	state := projectUnderstandingStateWithCodeInvestigationQuality(&model.CodeInvestigationQualitySummary{
+		Mode:                     "tool_driven_intent_drilldown",
+		ToolDriven:               true,
+		ToolCallCount:            4,
+		SpecializedToolCallCount: 0,
+		TotalFilesDiscovered:     100,
+		TotalFilesSearched:       95,
+		TotalFilesSelected:       90,
+		StructuredFileCount:      90,
+		SelectedFileRatio:        0.9,
+		SearchFileRatio:          0.95,
+		SourceTextPolicy:         "no_raw_source_persisted",
+		OverreadRisk:             "high",
+		Summary:                  "工具化调查：4 次工具调用，结构化读取 90/100 文件，过读风险=high。",
+		Confidence:               0.32,
+	})
+
+	readiness := scriptReadinessFromState(state, nil)
+	if readiness.CanProceed {
+		t.Fatalf("high overread code investigation should block packaging, got %+v", readiness)
+	}
+	if !agentFindingsContainKind(readiness.Blockers, "code_investigation_overread") {
+		t.Fatalf("expected code investigation overread blocker, got %+v", readiness.Blockers)
+	}
+	if readiness.CodeInvestigationOverreadRisk != "high" || readiness.CodeInvestigationSpecializedToolCallCount != 0 {
+		t.Fatalf("readiness should carry code investigation metrics, got %+v", readiness)
+	}
+}
+
+func TestScriptReadinessCarriesToolDrivenCodeInvestigationQuality(t *testing.T) {
+	state := projectUnderstandingStateWithCodeInvestigationQuality(&model.CodeInvestigationQualitySummary{
+		Mode:                     "tool_driven_intent_drilldown",
+		ToolDriven:               true,
+		ToolCallCount:            7,
+		SpecializedToolCallCount: 3,
+		ShellRunToolCallCount:    1,
+		TotalFilesDiscovered:     40,
+		TotalFilesSearched:       12,
+		TotalFilesSelected:       6,
+		StructuredFileCount:      6,
+		SelectedFileRatio:        0.15,
+		SearchFileRatio:          0.3,
+		OpenQuestionCount:        1,
+		RemainingGaps:            []string{"确认构建模式后端 handler"},
+		SourceTextPolicy:         "no_raw_source_persisted",
+		OverreadRisk:             "low",
+		Summary:                  "工具化调查：7 次工具调用，3 次专用工具，结构化读取 6/40 文件，过读风险=low。",
+		Confidence:               0.86,
+	})
+
+	readiness := scriptReadinessFromState(state, []model.DemoScenarioPlan{{ID: "scenario_tetris", Name: "俄罗斯方块构建演示", EstimatedSteps: 6, EstimatedDurationSec: 80}})
+	if !readiness.CanProceed {
+		t.Fatalf("low-risk tool-driven investigation should allow packaging, got %+v", readiness)
+	}
+	if readiness.CodeInvestigationOverreadRisk != "low" || !readiness.CodeInvestigationToolDriven || readiness.CodeInvestigationSpecializedToolCallCount != 3 {
+		t.Fatalf("readiness should expose tool-driven code investigation quality, got %+v", readiness)
+	}
+	if !stringSliceContains(readiness.CodeInvestigationGaps, "确认构建模式后端 handler") {
+		t.Fatalf("readiness should carry bounded investigation gaps, got %+v", readiness.CodeInvestigationGaps)
+	}
+	if !agentFindingsContainKind(readiness.Warnings, "code_investigation_open_questions") {
+		t.Fatalf("expected open question warning, got %+v", readiness.Warnings)
+	}
+}
+
 func TestVerifierFallsBackToRuntimeAdaptiveWhenScanFindsNoBusinessAction(t *testing.T) {
 	project := graphQualityProject()
 	project.ProductDescription = "演示登录（10s），新建项目（10s，俄罗斯方块，构建模式），agent实际构建演示（60s等待）"
@@ -1572,6 +1864,67 @@ func collectCodeCandidatesForTest(t *testing.T, root string, project *model.Proj
 		t.Fatal(err)
 	}
 	return candidates
+}
+
+func projectUnderstandingStateWithCodeInvestigationQuality(quality *model.CodeInvestigationQualitySummary) *ProjectUnderstandingState {
+	project := &model.ProjectContext{
+		ID:                 "project_investigation_readiness",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示登录，新建项目，俄罗斯方块，构建模式，agent实际构建演示",
+	}
+	return &ProjectUnderstandingState{
+		Project: project,
+		Brief: &model.RequirementBrief{
+			ProjectID: project.ID,
+			Objective: project.ProductDescription,
+			MustShow:  []string{"新建项目", "俄罗斯方块", "构建模式"},
+		},
+		CodeSnapshots: []model.CodeUnderstandingSnapshot{{
+			ID:                   "code_investigation_readiness",
+			ProjectID:            project.ID,
+			SchemaVersion:        model.MultimodalUnderstandingReportSchemaVersion,
+			FileCount:            firstPositiveInt(quality.StructuredFileCount, quality.TotalFilesSelected, 6),
+			InvestigationQuality: quality,
+		}},
+		PageSnapshots: []model.PageUnderstandingSnapshot{{
+			ID:            "page_workspace",
+			ProjectID:     project.ID,
+			SchemaVersion: model.MultimodalUnderstandingReportSchemaVersion,
+			URL:           "https://cascadeai.cn/workspace",
+			Title:         "Workspace",
+		}},
+		Pack: &model.ProjectIntelligencePack{
+			ID:            "project_intelligence_readiness",
+			ProjectID:     project.ID,
+			SchemaVersion: model.ProjectIntelligencePackSchemaVersion,
+			Architecture: &model.ProjectArchitectureMap{
+				ID:        "arch_readiness",
+				ProjectID: project.ID,
+				RouteTree: []model.ArchitectureRouteNode{{ID: "route_workspace", Path: "/workspace"}},
+			},
+			InteractionSurfaces: []model.InteractionSurface{{
+				ID:    "surface_workspace",
+				URL:   "https://cascadeai.cn/workspace",
+				Title: "Workspace",
+				Actions: []model.UIActionRef{{
+					ID:       "action_new_project",
+					Label:    "新建项目",
+					Kind:     "click",
+					Selector: "[data-testid='new-project']",
+				}},
+				StableSelectors: []model.SelectorCandidate{{Kind: "css", Value: "[data-testid='new-project']", StabilityScore: 0.92}},
+			}},
+		},
+	}
+}
+
+func agentFindingsContainKind(findings []model.AgentFinding, kind string) bool {
+	for _, finding := range findings {
+		if finding.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func routeInsightContains(values []model.RouteInsight, path string) bool {
@@ -1683,6 +2036,20 @@ func investigationQuestion(trace *model.CodeInvestigationTrace, id string) *mode
 	for i := range trace.Questions {
 		if trace.Questions[i].ID == id {
 			return &trace.Questions[i]
+		}
+	}
+	return nil
+}
+
+func investigationQuestionWithNextAction(trace *model.CodeInvestigationTrace, tool string) *model.CodeInvestigationQuestion {
+	if trace == nil {
+		return nil
+	}
+	for i := range trace.Questions {
+		for _, action := range trace.Questions[i].NextActions {
+			if action.Tool == tool {
+				return &trace.Questions[i]
+			}
 		}
 	}
 	return nil
@@ -2199,5 +2566,87 @@ func (l *toolInventoryPlannerLLM) GenerateText(ctx context.Context, task config.
 }
 
 func (l *toolInventoryPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
+}
+
+type shellRunPlannerLLM struct{}
+
+func (shellRunPlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	var data []byte
+	switch target.(type) {
+	case *codeInvestigationLLMOutput:
+		data = []byte(`{
+			"summary": "start with the visible shell lab control",
+			"queries": [
+				{"purpose": "定位 shell lab 页面和启动控件", "terms": ["shell-lab", "launch-shell-lab"]}
+			],
+			"confidence": 0.82
+		}`)
+	case *codeInvestigationNextActionsLLMOutput:
+		data = []byte(`{
+			"summary": "the UI file is found; use read-only shell discovery to find the nearby API client by filename.",
+			"next_actions": [
+				{
+					"tool": "shell_run",
+					"command_kind": "rg_files",
+					"reason": "像 CLI 助手一样先做只读文件名探测，定位 BuildClient。",
+					"query_terms": ["BuildClient"],
+					"expected_evidence": ["api_or_data_model"]
+				}
+			],
+			"confidence": 0.87
+		}`)
+	default:
+		data = []byte(`{}`)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-shell-run-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (shellRunPlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (shellRunPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	return nil, nil
+}
+
+type initialShellRunPlannerLLM struct{}
+
+func (initialShellRunPlannerLLM) GenerateJSON(ctx context.Context, task config.ModelTask, req llm.JSONRequest, target any) (*llm.CallTrace, error) {
+	var data []byte
+	switch target.(type) {
+	case *codeInvestigationLLMOutput:
+		data = []byte(`{
+			"summary": "start by listing matching file names before reading content.",
+			"queries": [
+				{
+					"tool": "shell_run",
+					"command_kind": "rg_files",
+					"purpose": "首轮先用只读文件名探测定位 BuildClient。",
+					"terms": ["BuildClient"],
+					"expected_evidence": ["api_or_data_model"]
+				}
+			],
+			"confidence": 0.86
+		}`)
+	case *codeInvestigationNextActionsLLMOutput:
+		data = []byte(`{"summary":"no follow-up needed","next_actions":[],"confidence":0.6}`)
+	default:
+		data = []byte(`{}`)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return nil, err
+	}
+	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "test-initial-shell-run-planner", Task: task, AdapterVersion: "test", Mode: config.LLMModeDeterministic}, nil
+}
+
+func (initialShellRunPlannerLLM) GenerateText(ctx context.Context, task config.ModelTask, req llm.TextRequest) (string, *llm.CallTrace, error) {
+	return "", nil, nil
+}
+
+func (initialShellRunPlannerLLM) GenerateMultimodal(ctx context.Context, task config.ModelTask, req llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
 	return nil, nil
 }

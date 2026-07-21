@@ -1,4 +1,4 @@
-import type { CodeInvestigationNextAction, CodeInvestigationQuestion, CodeInvestigationToolCall, CodeInvestigationTrace, CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
+import type { CodeInvestigationNextAction, CodeInvestigationQualitySummary, CodeInvestigationQuestion, CodeInvestigationToolCall, CodeInvestigationTrace, CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
 import type { ProjectWorkspaceView } from "./domain";
 
 export type AgentPipelineStatus = "pending" | "completed" | "attention";
@@ -26,6 +26,15 @@ export type CodeSummaryView = {
   investigationQuestions: number;
   openInvestigationQuestions: number;
   snippetWindows: number;
+  specializedToolCalls: number;
+  shellRunToolCalls: number;
+  selectedFileRatio: number;
+  searchFileRatio: number;
+  investigationQualitySummary: string;
+  investigationOverreadRisk: string;
+  investigationSourceTextPolicy: string;
+  remainingInvestigationGaps: string[];
+  investigationQualityConfidence: number | undefined;
   toolBreakdown: Record<string, number>;
   degraded: boolean;
 };
@@ -34,6 +43,9 @@ export type CodeInvestigationToolView = {
   id: string;
   tool: string;
   summary: string;
+  selectionReason?: string;
+  readPolicy?: string;
+  sourceTextPolicy?: string;
   selectedFiles: number;
   matchedFiles: number;
   snippetWindows: number;
@@ -114,6 +126,7 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
   const architecture = workspace.projectIntelligence?.architecture;
   const fileCount = snapshots.reduce((total, snapshot) => total + (snapshot.file_count ?? 0), 0);
   const toolCalls = snapshots.flatMap((snapshot) => snapshot.investigation_trace?.tool_calls ?? []);
+  const qualitySummaries = snapshots.map((snapshot) => snapshot.investigation_quality).filter(isCodeInvestigationQualitySummary);
   return {
     fileCount,
     frameworks: unique([...(architecture?.frameworks ?? []), ...snapshots.flatMap((snapshot) => snapshot.frameworks ?? [])]),
@@ -134,6 +147,15 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
       (total, snapshot) => total + (snapshot.investigation_trace?.tool_calls?.reduce((sum, call) => sum + (call.snippet_refs?.length ?? 0), 0) ?? 0),
       0,
     ),
+    specializedToolCalls: qualitySummaries.reduce((total, quality) => total + (quality.specialized_tool_call_count ?? 0), 0),
+    shellRunToolCalls: qualitySummaries.reduce((total, quality) => total + (quality.shell_run_tool_call_count ?? 0), 0),
+    selectedFileRatio: maxNumber(qualitySummaries.map((quality) => quality.selected_file_ratio)),
+    searchFileRatio: maxNumber(qualitySummaries.map((quality) => quality.search_file_ratio)),
+    investigationQualitySummary: qualitySummaries.find((quality) => quality.summary)?.summary ?? "",
+    investigationOverreadRisk: worstOverreadRisk(qualitySummaries.map((quality) => quality.overread_risk)),
+    investigationSourceTextPolicy: unique(qualitySummaries.map((quality) => quality.source_text_policy ?? "")).join(" / "),
+    remainingInvestigationGaps: unique(qualitySummaries.flatMap((quality) => quality.remaining_gaps ?? [])),
+    investigationQualityConfidence: averageConfidence(qualitySummaries.map((quality) => quality.confidence)),
     toolBreakdown: toolCalls.reduce<Record<string, number>>((counts, call) => {
       counts[call.tool] = (counts[call.tool] ?? 0) + 1;
       return counts;
@@ -271,6 +293,9 @@ function toolViewsForQuestion(trace: CodeInvestigationTrace, question: CodeInves
       id: call.id,
       tool: call.tool,
       summary: safeToolSummary(call),
+      ...(call.selection_reason ? { selectionReason: call.selection_reason } : {}),
+      ...(call.read_policy ? { readPolicy: call.read_policy } : {}),
+      ...(call.source_text_policy ? { sourceTextPolicy: call.source_text_policy } : {}),
       selectedFiles: call.selected_file_count ?? 0,
       matchedFiles: call.matched_file_count ?? 0,
       snippetWindows: call.snippet_refs?.length ?? 0,
@@ -313,6 +338,9 @@ function codeReaderStatus(workspace: ProjectWorkspaceView, summary: CodeSummaryV
   if (summary.degraded) {
     return "attention";
   }
+  if (summary.investigationOverreadRisk === "high") {
+    return "attention";
+  }
   return summary.fileCount > 0 || workspace.understandingReport?.code_snapshots?.length ? "completed" : "pending";
 }
 
@@ -342,6 +370,40 @@ function domainsFromURL(productURL: string, fallback: string[]): string[] {
 
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
+}
+
+function isCodeInvestigationQualitySummary(value: CodeInvestigationQualitySummary | undefined): value is CodeInvestigationQualitySummary {
+  return Boolean(value);
+}
+
+function worstOverreadRisk(values: Array<string | undefined>): string {
+  const normalized = new Set(values.filter(Boolean));
+  if (normalized.has("high")) {
+    return "high";
+  }
+  if (normalized.has("medium")) {
+    return "medium";
+  }
+  if (normalized.has("low")) {
+    return "low";
+  }
+  if (normalized.has("unknown")) {
+    return "unknown";
+  }
+  return "";
+}
+
+function maxNumber(values: Array<number | undefined>): number {
+  const valid = values.filter((value): value is number => typeof value === "number");
+  return valid.length ? Math.max(...valid) : 0;
+}
+
+function averageConfidence(values: Array<number | undefined>): number | undefined {
+  const valid = values.filter((value): value is number => typeof value === "number");
+  if (!valid.length) {
+    return undefined;
+  }
+  return valid.reduce((total, value) => total + value, 0) / valid.length;
 }
 
 function isString(value: unknown): value is string {

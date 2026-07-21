@@ -732,6 +732,25 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
         <Fact label="推荐路径" value={readiness?.recommended_scenario_name ?? intelligence.demo_scenario_plans?.[0]?.name ?? "待选择"} />
         <Fact label="脚本可行性" value={readiness?.can_proceed ? "可继续生成脚本" : "需复核输入材料"} />
         <Fact label="Selector 覆盖" value={typeof readiness?.selector_coverage === "number" ? `${Math.round(readiness.selector_coverage * 100)}%` : "待计算"} />
+        <Fact
+          label="代码调查"
+          value={
+            readiness?.code_investigation_summary ||
+            (readiness?.code_investigation_tool_driven
+              ? `${formatOverreadRisk(readiness.code_investigation_overread_risk)} · 专用工具 ${readiness.code_investigation_specialized_tool_call_count ?? 0} 次`
+              : "待评估")
+          }
+        />
+        <Fact
+          label="调查缺口"
+          value={
+            readiness?.code_investigation_gaps?.length
+              ? readiness.code_investigation_gaps.slice(0, 3).join("、")
+              : readiness?.code_investigation_open_question_count
+                ? `${readiness.code_investigation_open_question_count} 个未解问题`
+                : "无阻塞缺口"
+          }
+        />
         <Fact label="需求目标" value={`${intentGoals.length} 个`} />
         <Fact label="页面验证" value={verifiedPlan ? `${verifiedPlan.business_action_count ?? 0} 个业务动作 · ${verifiedPlan.verification_mode ?? "待识别"}` : "未完成"} />
         <Fact label="缺失证据" value={missingEvidence?.blocking ? "阻塞脚本生成" : missingEvidence ? "有提示" : "无阻塞"} />
@@ -820,12 +839,31 @@ function CodeSummaryPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
         <Fact label="框架线索" value={summary.frameworks.length > 0 ? summary.frameworks.join("、") : "待识别"} />
         <Fact label="路由/组件" value={`${summary.routes} 个路由 / ${summary.components} 个组件`} />
         <Fact label="Selector" value={`${summary.selectors} 个稳定选择器候选`} />
-        <Fact label="调查工具" value={summary.toolCalls > 0 ? `${summary.toolCalls} 次调用 / grep ${summary.searchedFiles} 文件 / ${summary.snippetWindows} 个证据窗口` : "待生成"} />
+        <Fact
+          label="调查工具"
+          value={summary.toolCalls > 0 ? `${summary.toolCalls} 次调用 / 专用 ${summary.specializedToolCalls} 次 / shell ${summary.shellRunToolCalls} 次` : "待生成"}
+        />
+        <Fact
+          label="检索范围"
+          value={
+            summary.searchedFiles > 0 || summary.selectedFiles > 0
+              ? `grep ${summary.searchedFiles} 文件 / 读取 ${summary.selectedFiles} 文件 / 选中率 ${formatPercent(summary.selectedFileRatio)}`
+              : "待生成"
+          }
+        />
         <Fact label="调查问题" value={summary.investigationQuestions > 0 ? `${summary.investigationQuestions} 个问题 / ${summary.openInvestigationQuestions} 个待补证据` : "待生成"} />
         <Fact label="结构化读取" value={summary.selectedFiles > 0 ? `${summary.selectedFiles} 个文件 · ${summary.investigationMode || "intent drilldown"}` : "待生成"} />
         <Fact label="工具链" value={formatToolBreakdown(summary.toolBreakdown)} />
+        <Fact
+          label="调查质量"
+          value={
+            summary.investigationQualitySummary ||
+            (summary.toolCalls > 0 ? `${formatOverreadRisk(summary.investigationOverreadRisk)} · 置信度 ${formatQualityConfidence(summary.investigationQualityConfidence)}` : "待生成")
+          }
+        />
+        <Fact label="未解缺口" value={summary.remainingInvestigationGaps.length ? summary.remainingInvestigationGaps.slice(0, 3).join("、") : "无阻塞缺口"} />
         <Fact label="Source Digest" value={summary.sourceDigest || "待生成"} />
-        <Fact label="读取策略" value={summary.degraded ? "已降级使用需求/页面材料" : "只读扫描结构摘要，不保存完整源码"} />
+        <Fact label="读取策略" value={summary.degraded ? "已降级使用需求/页面材料" : summary.investigationSourceTextPolicy || "只读扫描结构摘要，不保存完整源码"} />
       </div>
       {questions.length > 0 ? (
         <div className="runtime-log-list">
@@ -1756,8 +1794,32 @@ function formatToolBreakdown(counts: Record<string, number>): string {
     .join(" / ");
 }
 
+function formatPercent(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return "0%";
+  }
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatQualityConfidence(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "待评估";
+  }
+  return formatPercent(value);
+}
+
+function formatOverreadRisk(risk: string | undefined): string {
+  const labels: Record<string, string> = {
+    high: "过读风险高",
+    medium: "过读风险中",
+    low: "过读风险低",
+    unknown: "过读风险待评估",
+  };
+  return labels[risk ?? ""] ?? "过读风险待评估";
+}
+
 function formatQuestionTools(
-  tools: Array<{ tool: string; selectedFiles: number; snippetWindows: number; pathHashCount: number }>,
+  tools: Array<{ tool: string; selectedFiles: number; snippetWindows: number; pathHashCount: number; readPolicy?: string; sourceTextPolicy?: string }>,
 ): string {
   if (tools.length === 0) {
     return "";
@@ -1769,6 +1831,8 @@ function formatQuestionTools(
         tool.selectedFiles > 0 ? `${tool.selectedFiles} 文件` : "",
         tool.snippetWindows > 0 ? `${tool.snippetWindows} 窗口` : "",
         tool.pathHashCount > 0 ? `${tool.pathHashCount} hash` : "",
+        tool.readPolicy ? tool.readPolicy : "",
+        tool.sourceTextPolicy ? tool.sourceTextPolicy : "",
       ].filter(Boolean);
       return details.length > 0 ? `${tool.tool}(${details.join("/")})` : tool.tool;
     })

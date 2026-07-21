@@ -90,9 +90,32 @@ describe("agent pipeline helpers", () => {
             project_id: "project_product_demo",
             schema_version: "demoops.multimodal_understanding_report.v1",
             file_count: 3,
+            investigation_quality: {
+              mode: "tool_driven_intent_drilldown",
+              tool_driven: true,
+              tool_call_count: 2,
+              specialized_tool_call_count: 1,
+              shell_run_tool_call_count: 0,
+              total_files_discovered: 30,
+              total_files_searched: 12,
+              total_files_selected: 3,
+              structured_file_count: 3,
+              selected_file_ratio: 0.1,
+              search_file_ratio: 0.4,
+              answered_question_count: 1,
+              open_question_count: 1,
+              remaining_gaps: ["需要确认后端 handler"],
+              source_text_policy: "no_raw_source_persisted",
+              overread_risk: "low",
+              summary: "工具化调查：2 次工具调用，1 次专用工具，结构化读取 3/30 文件。",
+              confidence: 0.85,
+            },
             investigation_trace: {
               id: "trace_tools",
               mode: "tool_driven_intent_drilldown",
+              total_files_discovered: 30,
+              total_files_searched: 12,
+              total_files_selected: 3,
               questions: [
                 {
                   id: "question_project_creation",
@@ -119,6 +142,9 @@ describe("agent pipeline helpers", () => {
                   tool: "grep_text",
                   input_summary: "terms=create-tetris-project",
                   output_summary: "searched=12 matched=1 selected=1",
+                  selection_reason: "planner 选择 grep_text，用业务关键词做有界文件搜索。",
+                  read_policy: "bounded_keyword_search",
+                  source_text_policy: "transient_redacted_observations_hashes_persisted",
                   matched_file_count: 1,
                   selected_file_count: 1,
                   path_hashes: ["sha256:path"],
@@ -145,10 +171,60 @@ describe("agent pipeline helpers", () => {
 
     expect(summary.toolBreakdown.grep_text).toBe(1);
     expect(summary.toolBreakdown.find_references).toBe(1);
+    expect(summary.specializedToolCalls).toBe(1);
+    expect(summary.shellRunToolCalls).toBe(0);
+    expect(summary.selectedFileRatio).toBe(0.1);
+    expect(summary.searchFileRatio).toBe(0.4);
+    expect(summary.investigationQualitySummary).toContain("工具化调查");
+    expect(summary.investigationOverreadRisk).toBe("low");
+    expect(summary.investigationSourceTextPolicy).toBe("no_raw_source_persisted");
+    expect(summary.remainingInvestigationGaps).toEqual(["需要确认后端 handler"]);
+    expect(summary.investigationQualityConfidence).toBe(0.85);
     expect(questions).toHaveLength(1);
     expect(questions[0]?.toolCalls.map((call) => call.tool)).toEqual(["grep_text", "find_references"]);
+    expect(questions[0]?.toolCalls[0]?.readPolicy).toBe("bounded_keyword_search");
+    expect(questions[0]?.toolCalls[0]?.sourceTextPolicy).toBe("transient_redacted_observations_hashes_persisted");
+    expect(questions[0]?.toolCalls[0]?.selectionReason).toContain("grep_text");
     expect(questions[0]?.toolCalls.map((call) => call.summary).join("\n")).not.toContain("create-tetris-project");
     expect(questions[0]?.nextActions?.[0]?.tool).toBe("grep_text");
+  });
+
+  it("marks CodeReader attention when investigation quality reports high overread risk", () => {
+    const workspace = updateWorkspaceInputs(createWorkspace("product_demo"), { localRepoPath: "C:\\Users\\demo\\project" });
+    const risky = {
+      ...workspace,
+      understandingReport: {
+        id: "understanding_risky",
+        project_id: workspace.id,
+        schema_version: "demoops.multimodal_understanding_report.v1" as const,
+        code_snapshots: [
+          {
+            id: "code_risky",
+            project_id: workspace.id,
+            schema_version: "demoops.multimodal_understanding_report.v1",
+            file_count: 90,
+            investigation_quality: {
+              tool_driven: true,
+              tool_call_count: 4,
+              specialized_tool_call_count: 0,
+              total_files_discovered: 100,
+              total_files_searched: 95,
+              total_files_selected: 90,
+              overread_risk: "high",
+              source_text_policy: "no_raw_source_persisted",
+              summary: "结构化读取范围过大。",
+              confidence: 0.32,
+            },
+          },
+        ],
+      },
+    };
+
+    const summary = codeSummaryFromWorkspace(risky);
+    const codeReader = agentPipelineItems(risky).find((item) => item.id === "code_reader");
+
+    expect(summary.investigationOverreadRisk).toBe("high");
+    expect(codeReader?.status).toBe("attention");
   });
 
   it("surfaces ProjectIntelligenceGraph status and uses intelligence metrics", () => {
@@ -178,6 +254,13 @@ describe("agent pipeline helpers", () => {
         can_proceed: true,
         warnings: [],
         blockers: [],
+        selector_coverage: 0.86,
+        code_investigation_tool_driven: true,
+        code_investigation_overread_risk: "low",
+        code_investigation_specialized_tool_call_count: 3,
+        code_investigation_open_question_count: 0,
+        code_investigation_summary: "工具化调查：7 次工具调用，3 次专用工具，结构化读取 6/40 文件。",
+        code_investigation_gaps: [],
       },
       agentGraphTrace: {
         id: "trace_1",

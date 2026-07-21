@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,6 +70,12 @@ func collectCodeCandidates(ctx context.Context, root string, maxFileBytes int64,
 			return candidates, nil
 		}
 	}
+	if rels, ok := rgDiscoveredRelativeFiles(ctx, root); ok {
+		candidates := codeCandidatesFromRelativePaths(root, rels, maxFileBytes, project, brief)
+		if len(candidates) > 0 {
+			return candidates, nil
+		}
+	}
 	return walkCodeCandidates(ctx, root, maxFileBytes, project, brief)
 }
 
@@ -128,6 +135,36 @@ func gitDiscoveredRelativeFiles(ctx context.Context, root string) ([]string, boo
 	cmdCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
 	defer cancel()
 	cmd := exec.CommandContext(cmdCtx, "git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	output, err := cmd.Output()
+	if cmdCtx.Err() != nil || err != nil {
+		return nil, false
+	}
+	values := []string{}
+	for _, raw := range strings.Split(string(output), "\x00") {
+		rel := strings.TrimSpace(raw)
+		if rel == "" {
+			continue
+		}
+		values = append(values, rel)
+	}
+	values = uniqueStrings(values)
+	if len(values) == 0 {
+		return nil, false
+	}
+	return values, true
+}
+
+func rgDiscoveredRelativeFiles(ctx context.Context, root string) ([]string, bool) {
+	if strings.TrimSpace(root) == "" {
+		return nil, false
+	}
+	if _, err := exec.LookPath("rg"); err != nil {
+		return nil, false
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, "rg", "--files", "-0")
+	cmd.Dir = root
 	output, err := cmd.Output()
 	if cmdCtx.Err() != nil || err != nil {
 		return nil, false
@@ -223,6 +260,270 @@ func (s *ProjectInvestigationToolSuite) shellMetadataToolCall(ctx context.Contex
 		ElapsedMS:      time.Since(start).Milliseconds(),
 		FallbackReason: fallback,
 	}
+}
+
+type shellRunInvestigationScan struct {
+	commandKind    string
+	searched       int
+	matched        int
+	bytesRead      int64
+	usedExternal   bool
+	fallbackReason string
+	extensionStats []map[string]any
+}
+
+func runReadOnlyShellInvestigationTool(ctx context.Context, round int, root string, candidates []codeCandidateFile, selectedKeys map[string]bool, query codeInvestigationQuery, budget model.CodeReadBudget) ([]codeCandidateFile, shellRunInvestigationScan, model.CodeInvestigationToolCall) {
+	start := time.Now()
+	kind := sanitizeShellRunCommandKind(query.commandKind, "")
+	if kind == "" {
+		kind = shellRunCommandKindForTerms(query.terms)
+	}
+	scan := shellRunInvestigationScan{commandKind: kind}
+	selected := []codeCandidateFile{}
+	callID := fmt.Sprintf("tool_shell_run_%d_%s", round, shortHash(kind+"|"+query.query))
+	if kind == "" || len(candidates) == 0 {
+		return selected, scan, model.CodeInvestigationToolCall{
+			ID:            callID,
+			Tool:          "shell_run",
+			Purpose:       "只读 shell_run 被拒绝或没有候选文件；不执行任意 shell，不持久化 stdout。",
+			Query:         query.query,
+			InputSummary:  "command_kind=unavailable",
+			OutputSummary: "matched=0 selected=0",
+			Metadata:      shellRunMetadata(query, scan),
+			Confidence:    0.45,
+			ElapsedMS:     time.Since(start).Milliseconds(),
+		}
+	}
+	switch kind {
+	case "git_ls_files", "rg_files":
+		rels, usedExternal, fallback := readOnlyShellFileList(ctx, root, kind, candidates)
+		scan.usedExternal = usedExternal
+		scan.fallbackReason = fallback
+		scan.searched = len(rels)
+		matched := candidatesMatchingShellFileList(candidates, rels, selectedKeys, query.terms)
+		scan.matched = len(matched)
+		selected = limitShellRunSelectedCandidates(matched, budget)
+	case "rg_search_summary":
+		rels, usedExternal, fallback := rgFilesWithMatches(ctx, root, query.terms)
+		scan.usedExternal = usedExternal
+		scan.fallbackReason = fallback
+		if usedExternal {
+			scan.searched = len(rels)
+			matched := candidatesMatchingShellFileList(candidates, rels, selectedKeys, nil)
+			scan.matched = len(matched)
+			selected = limitShellRunSelectedCandidates(matched, budget)
+		} else {
+			search, err := searchCodeCandidatesForQuery(ctx, candidates, selectedKeys, query, budget)
+			if err == nil {
+				scan.searched = search.searched
+				scan.bytesRead = search.bytesRead
+				scan.matched = len(search.matches)
+				for _, match := range search.matches {
+					selected = append(selected, match.candidate)
+				}
+				selected = limitShellRunSelectedCandidates(selected, budget)
+			}
+		}
+	}
+	scan.extensionStats = extensionStatsForCandidates(selected, 8)
+	pathHashes := pathHashesForCandidates(selected, len(selected))
+	return selected, scan, model.CodeInvestigationToolCall{
+		ID:                callID,
+		Tool:              "shell_run",
+		Purpose:           "安全只读 shell_run 语义工具：仅允许 git/rg discovery 或文件匹配摘要；不执行任意命令、不返回源码行或路径。",
+		Query:             query.query,
+		InputSummary:      fmt.Sprintf("command_kind=%s query_terms=%d allowlist=git_ls_files,rg_files,rg_search_summary", kind, len(query.terms)),
+		OutputSummary:     fmt.Sprintf("command_kind=%s matched=%d selected=%d external=%t", kind, scan.matched, len(selected), scan.usedExternal),
+		MatchedFileCount:  scan.matched,
+		SelectedFileCount: len(selected),
+		PathHashes:        pathHashes,
+		Metadata:          shellRunMetadata(query, scan),
+		Confidence:        confidenceForSearchCall(scan.matched, len(selected)),
+		ElapsedMS:         time.Since(start).Milliseconds(),
+		FallbackReason:    scan.fallbackReason,
+	}
+}
+
+func readOnlyShellFileList(ctx context.Context, root string, kind string, candidates []codeCandidateFile) ([]string, bool, string) {
+	switch kind {
+	case "git_ls_files":
+		if rels, ok := gitDiscoveredRelativeFiles(ctx, root); ok {
+			return rels, true, ""
+		}
+		return candidateRelativePaths(candidates), false, "git_ls_files_unavailable"
+	case "rg_files":
+		if rels, ok := rgDiscoveredRelativeFiles(ctx, root); ok {
+			return rels, true, ""
+		}
+		return candidateRelativePaths(candidates), false, "rg_files_unavailable"
+	default:
+		return nil, false, "unsupported_command_kind"
+	}
+}
+
+func rgFilesWithMatches(ctx context.Context, root string, terms []string) ([]string, bool, string) {
+	terms = sanitizeInvestigationTerms(terms)
+	if strings.TrimSpace(root) == "" || len(terms) == 0 {
+		return nil, false, "missing_root_or_terms"
+	}
+	if _, err := exec.LookPath("rg"); err != nil {
+		return nil, false, "rg_unavailable"
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+	args := []string{"--files-with-matches", "--fixed-strings"}
+	for _, glob := range []string{"!.git/**", "!node_modules/**", "!dist/**", "!build/**", "!.next/**", "!.cache/**", "!reports/**", "!fixtures/**", "!mocks/**", "!fonts/**"} {
+		args = append(args, "--glob", glob)
+	}
+	for _, term := range terms {
+		args = append(args, "-e", term)
+	}
+	args = append(args, ".")
+	cmd := exec.CommandContext(cmdCtx, "rg", args...)
+	cmd.Dir = root
+	output, err := cmd.Output()
+	if cmdCtx.Err() != nil {
+		return nil, false, "rg_timeout"
+	}
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return []string{}, true, ""
+		}
+		return nil, false, "rg_search_unavailable"
+	}
+	values := []string{}
+	for _, raw := range strings.Split(string(output), "\n") {
+		rel := strings.TrimSpace(raw)
+		if rel == "" {
+			continue
+		}
+		values = append(values, rel)
+	}
+	return uniqueStrings(values), true, ""
+}
+
+func candidatesMatchingShellFileList(candidates []codeCandidateFile, rels []string, selectedKeys map[string]bool, terms []string) []codeCandidateFile {
+	if len(rels) == 0 {
+		return nil
+	}
+	allowedRels := map[string]bool{}
+	for _, rel := range rels {
+		normalized, ok := safeRelativeCodePath(rel)
+		if !ok {
+			continue
+		}
+		allowedRels[strings.ToLower(filepath.ToSlash(normalized))] = true
+	}
+	ranked := []codeCandidateFile{}
+	for _, candidate := range candidates {
+		rel := filepath.ToSlash(candidate.rel)
+		lower := strings.ToLower(rel)
+		if len(allowedRels) > 0 && !allowedRels[lower] {
+			continue
+		}
+		if len(terms) > 0 && keywordMatchScore(terms, rel, candidate.name) == 0 {
+			continue
+		}
+		if shouldSkipCodeFileRel(candidate.rel, candidate.name) {
+			continue
+		}
+		ranked = append(ranked, candidate)
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		left := candidateShellRunScore(ranked[i], terms)
+		right := candidateShellRunScore(ranked[j], terms)
+		if left == right {
+			return filepath.ToSlash(ranked[i].rel) < filepath.ToSlash(ranked[j].rel)
+		}
+		return left > right
+	})
+	return ranked
+}
+
+func candidateShellRunScore(candidate codeCandidateFile, terms []string) int {
+	score := candidate.score
+	score += keywordMatchScore(terms, filepath.ToSlash(candidate.rel), candidate.name) * 60
+	if isRepoIndexCandidate(candidate.rel, candidate.name) {
+		score += 8
+	}
+	return score
+}
+
+func limitShellRunSelectedCandidates(candidates []codeCandidateFile, budget model.CodeReadBudget) []codeCandidateFile {
+	limit := minInt(6, maxInt(1, budget.FilesPerRound))
+	if len(candidates) <= limit {
+		return candidates
+	}
+	return candidates[:limit]
+}
+
+func candidateRelativePaths(candidates []codeCandidateFile) []string {
+	out := []string{}
+	for _, candidate := range candidates {
+		out = append(out, filepath.ToSlash(candidate.rel))
+	}
+	return uniqueStrings(out)
+}
+
+func shellRunMetadata(query codeInvestigationQuery, scan shellRunInvestigationScan) map[string]any {
+	metadata := map[string]any{
+		"question_id":           query.questionID,
+		"planned_from":          query.plannedFrom,
+		"depends_on_tool_call":  query.dependsOnToolID,
+		"command_kind":          scan.commandKind,
+		"execution_policy":      "read_only_allowlist_no_stdout_persistence",
+		"used_external_command": scan.usedExternal,
+		"searched":              scan.searched,
+		"matched":               scan.matched,
+		"bytes_read":            scan.bytesRead,
+		"term_hashes":           hashStringSlice(query.terms, 8),
+		"extension_stats":       scan.extensionStats,
+	}
+	if scan.fallbackReason != "" {
+		metadata["fallback_reason"] = scan.fallbackReason
+	}
+	return metadata
+}
+
+func extensionStatsForCandidates(candidates []codeCandidateFile, limit int) []map[string]any {
+	counts := map[string]int{}
+	for _, candidate := range candidates {
+		ext := strings.ToLower(filepath.Ext(candidate.name))
+		if ext == "" {
+			ext = "(none)"
+		}
+		counts[ext]++
+	}
+	type item struct {
+		ext   string
+		count int
+	}
+	items := []item{}
+	for ext, count := range counts {
+		items = append(items, item{ext: ext, count: count})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].count == items[j].count {
+			return items[i].ext < items[j].ext
+		}
+		return items[i].count > items[j].count
+	})
+	out := []map[string]any{}
+	for _, item := range items {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, map[string]any{"ext": item.ext, "count": item.count})
+	}
+	return out
+}
+
+func hashStringSlice(values []string, limit int) []string {
+	out := []string{}
+	for _, value := range limitStrings(uniqueStrings(values), limit) {
+		out = append(out, hashString(value))
+	}
+	return out
 }
 
 func manifestMetadataFromCandidates(candidates []codeCandidateFile) map[string]any {

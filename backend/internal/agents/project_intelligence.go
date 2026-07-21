@@ -1484,6 +1484,49 @@ func scriptReadinessFromState(state *ProjectUnderstandingState, scenarios []mode
 			Confidence:      0.92,
 		})
 	}
+	codeInvestigation := codeInvestigationReadinessFromSnapshots(state.CodeSnapshots)
+	if hasCode && !codeInvestigation.HasQuality {
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_code_investigation_quality_missing",
+			Kind:            "code_investigation_quality_missing",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "代码摘要缺少工具化调查质量记录，无法确认是否按需求小步读取代码。",
+			SuggestedAction: "重新运行 CodeReaderAgent，让它通过 grep/shell_run/read_window 等工具链按需求补证据。",
+			Confidence:      0.78,
+		})
+	}
+	if codeInvestigation.HasQuality && !codeInvestigation.ToolDriven {
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_code_investigation_not_tool_driven",
+			Kind:            "code_investigation_not_tool_driven",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         "代码调查没有体现工具化小步 drilldown，项目理解可能仍停留在宽泛摘要。",
+			SuggestedAction: "让 planner 使用 grep_text、shell_run、read_window、find_references 等工具围绕需求目标继续调查。",
+			Confidence:      0.82,
+		})
+	}
+	if codeInvestigation.OverreadRisk == "high" {
+		blockers = append(blockers, model.AgentFinding{
+			ID:              "readiness_code_investigation_overread",
+			Kind:            "code_investigation_overread",
+			Severity:        model.FindingSeverityBlocking,
+			Summary:         "代码调查读取范围过大，已阻止生成执行包，避免产生臃肿或低置信度脚本大纲。",
+			Rationale:       codeInvestigation.Summary,
+			SuggestedAction: "按需求关键词重新做小步工具调查，优先读取 route/component/API/style 相关文件，不要扫描全仓。",
+			Confidence:      0.9,
+		})
+	}
+	if codeInvestigation.OpenQuestionCount > 0 || len(codeInvestigation.Gaps) > 0 {
+		warnings = append(warnings, model.AgentFinding{
+			ID:              "readiness_code_investigation_open_questions",
+			Kind:            "code_investigation_open_questions",
+			Severity:        model.FindingSeverityWarning,
+			Summary:         fmt.Sprintf("代码调查仍有 %d 个未解问题，脚本大纲需要在这些位置保留不确定项。", codeInvestigation.OpenQuestionCount),
+			Rationale:       strings.Join(limitStrings(codeInvestigation.Gaps, 4), "；"),
+			SuggestedAction: "继续围绕未解问题做 read_window、follow_imports 或 find_api_handlers，而不是扩大扫描范围。",
+			Confidence:      0.78,
+		})
+	}
 	selectorStats := selectorReadinessStats(state.Pack)
 	selectorCoverage := selectorStats.Coverage
 	if selectorCoverage < 0.35 {
@@ -1546,30 +1589,96 @@ func scriptReadinessFromState(state *ProjectUnderstandingState, scenarios []mode
 		summary = "脚本生成存在阻塞，需要补充输入材料。"
 	}
 	return &model.ScriptReadinessReport{
-		ID:                         "script_readiness_" + state.Project.ID,
-		ProjectID:                  state.Project.ID,
-		SchemaVersion:              model.ScriptReadinessReportSchemaVersion,
-		CanProceed:                 canProceed,
-		Summary:                    summary,
-		Blockers:                   blockers,
-		Warnings:                   warnings,
-		MissingInputs:              uniqueStrings(missingInputs),
-		RepairSuggestions:          readinessRepairSuggestions(blockers, warnings),
-		RecommendedScenarioID:      recommended.ID,
-		RecommendedScenarioName:    recommended.Name,
-		SuggestedStageCount:        stageCount,
-		SuggestedTargetDurationSec: targetDuration,
-		SelectorCoverage:           selectorCoverage,
-		BusinessActionCount:        selectorStats.BusinessActionCount,
-		GenericSelectorCount:       selectorStats.GenericSelectorCount,
-		LoginActionCount:           selectorStats.LoginActionCount,
-		LoginDuplication:           selectorStats.LoginActionCount > 1,
-		MinStageDurationMS:         10000,
-		BlockingAssertionRiskCount: selectorStats.BlockingAssertionRiskCount,
-		CredentialCoverage:         credentialCoverage,
-		EvidenceRefs:               state.Pack.EvidenceRefs,
-		Confidence:                 0.78,
-		CreatedAt:                  time.Now().UTC(),
+		ID:                            "script_readiness_" + state.Project.ID,
+		ProjectID:                     state.Project.ID,
+		SchemaVersion:                 model.ScriptReadinessReportSchemaVersion,
+		CanProceed:                    canProceed,
+		Summary:                       summary,
+		Blockers:                      blockers,
+		Warnings:                      warnings,
+		MissingInputs:                 uniqueStrings(missingInputs),
+		RepairSuggestions:             readinessRepairSuggestions(blockers, warnings),
+		RecommendedScenarioID:         recommended.ID,
+		RecommendedScenarioName:       recommended.Name,
+		SuggestedStageCount:           stageCount,
+		SuggestedTargetDurationSec:    targetDuration,
+		SelectorCoverage:              selectorCoverage,
+		BusinessActionCount:           selectorStats.BusinessActionCount,
+		GenericSelectorCount:          selectorStats.GenericSelectorCount,
+		LoginActionCount:              selectorStats.LoginActionCount,
+		LoginDuplication:              selectorStats.LoginActionCount > 1,
+		MinStageDurationMS:            10000,
+		BlockingAssertionRiskCount:    selectorStats.BlockingAssertionRiskCount,
+		CodeInvestigationToolDriven:   codeInvestigation.ToolDriven,
+		CodeInvestigationOverreadRisk: codeInvestigation.OverreadRisk,
+		CodeInvestigationSpecializedToolCallCount: codeInvestigation.SpecializedToolCallCount,
+		CodeInvestigationOpenQuestionCount:        codeInvestigation.OpenQuestionCount,
+		CodeInvestigationSummary:                  codeInvestigation.Summary,
+		CodeInvestigationGaps:                     codeInvestigation.Gaps,
+		CredentialCoverage:                        credentialCoverage,
+		EvidenceRefs:                              state.Pack.EvidenceRefs,
+		Confidence:                                0.78,
+		CreatedAt:                                 time.Now().UTC(),
+	}
+}
+
+type codeInvestigationReadinessMetrics struct {
+	HasQuality               bool
+	ToolDriven               bool
+	OverreadRisk             string
+	SpecializedToolCallCount int
+	OpenQuestionCount        int
+	Gaps                     []string
+	Summary                  string
+}
+
+func codeInvestigationReadinessFromSnapshots(snapshots []model.CodeUnderstandingSnapshot) codeInvestigationReadinessMetrics {
+	metrics := codeInvestigationReadinessMetrics{}
+	risks := []string{}
+	summaries := []string{}
+	for _, snapshot := range snapshots {
+		quality := snapshot.InvestigationQuality
+		if quality == nil {
+			continue
+		}
+		metrics.HasQuality = true
+		metrics.ToolDriven = metrics.ToolDriven || quality.ToolDriven
+		metrics.SpecializedToolCallCount += quality.SpecializedToolCallCount
+		metrics.OpenQuestionCount += quality.OpenQuestionCount
+		metrics.Gaps = append(metrics.Gaps, quality.RemainingGaps...)
+		if strings.TrimSpace(quality.OverreadRisk) != "" {
+			risks = append(risks, quality.OverreadRisk)
+		}
+		if strings.TrimSpace(quality.Summary) != "" {
+			summaries = append(summaries, quality.Summary)
+		}
+	}
+	metrics.OverreadRisk = worstCodeInvestigationOverreadRisk(risks)
+	metrics.Gaps = limitStrings(uniqueStrings(metrics.Gaps), 8)
+	if len(summaries) > 0 {
+		metrics.Summary = strings.Join(limitStrings(uniqueStrings(summaries), 2), " ")
+	} else if metrics.HasQuality {
+		metrics.Summary = fmt.Sprintf("代码调查质量：专用工具 %d 次，未解问题 %d 个，过读风险=%s。", metrics.SpecializedToolCallCount, metrics.OpenQuestionCount, firstNonEmpty(metrics.OverreadRisk, "unknown"))
+	}
+	return metrics
+}
+
+func worstCodeInvestigationOverreadRisk(risks []string) string {
+	seen := map[string]bool{}
+	for _, risk := range risks {
+		seen[strings.ToLower(strings.TrimSpace(risk))] = true
+	}
+	switch {
+	case seen["high"]:
+		return "high"
+	case seen["medium"]:
+		return "medium"
+	case seen["low"]:
+		return "low"
+	case seen["unknown"]:
+		return "unknown"
+	default:
+		return ""
 	}
 }
 
