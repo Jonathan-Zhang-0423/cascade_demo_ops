@@ -12,6 +12,32 @@ type Service interface {
 	Render(ctx context.Context, request RenderRequest) (RenderResult, error)
 }
 
+type MediaProbeRequest struct {
+	Path string `json:"path"`
+}
+
+type MediaProbeResult struct {
+	Path             string  `json:"path"`
+	FileName         string  `json:"file_name"`
+	SizeBytes        int64   `json:"size_bytes"`
+	SHA256           string  `json:"sha256"`
+	MimeType         string  `json:"mime_type"`
+	Format           string  `json:"format,omitempty"`
+	DurationMS       int     `json:"duration_ms,omitempty"`
+	VideoCodec       string  `json:"video_codec,omitempty"`
+	AudioCodec       string  `json:"audio_codec,omitempty"`
+	Width            int     `json:"width,omitempty"`
+	Height           int     `json:"height,omitempty"`
+	FPS              float64 `json:"fps,omitempty"`
+	PixelFormat      string  `json:"pixel_format,omitempty"`
+	FFProbeAvailable bool    `json:"ffprobe_available"`
+}
+
+type EditPlanValidationRequest struct {
+	Catalog  model.AssetTimelineCatalog `json:"catalog"`
+	EditPlan model.DemoEditPlan         `json:"edit_plan"`
+}
+
 type RecordingMode string
 
 const (
@@ -58,7 +84,9 @@ type RenderRequest struct {
 	ArtifactManifestPath       string                        `json:"artifact_manifest_path,omitempty"`
 	RecordingResultPackage     *model.RecordingResultPackage `json:"recording_result_package,omitempty"`
 	RecordingResultPackagePath string                        `json:"recording_result_package_path,omitempty"`
+	AssetTimelineCatalog       *model.AssetTimelineCatalog   `json:"asset_timeline_catalog,omitempty"`
 	EditPlan                   *model.DemoEditPlan           `json:"edit_plan,omitempty"`
+	RenderProfile              *model.EditorRenderProfile    `json:"render_profile,omitempty"`
 }
 
 type RenderResult struct {

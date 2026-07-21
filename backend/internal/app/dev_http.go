@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -64,9 +65,140 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
+	mux.HandleFunc("GET /v1/editor/sessions", s.handleEditorSessions)
+	mux.HandleFunc("POST /v1/editor/sessions", s.handleEditorSessions)
+	mux.HandleFunc("POST /v1/editor/sessions/from-result-package", s.handleEditorSessionFromResultPackage)
+	mux.HandleFunc("/v1/editor/sessions/", s.handleEditorSessionRoute)
 	s.registerExchangeBootstrapRoutes(mux)
 	s.registerDevExchangeRoutes(mux)
 	return withDevLogging(withDevCORS(mux))
+}
+
+func (s *DevHTTPServer) handleEditorSessions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		sessions, err := s.service.ListEditorSessions(r.Context())
+		writeBridgeValue(w, sessions, err)
+	case http.MethodPost:
+		var request model.EditorCreateSessionRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := decodeJSON(r, &request); err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		session, err := s.service.CreateEditorSession(r.Context(), request)
+		writeBridgeValue(w, session, err)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *DevHTTPServer) handleEditorSessionFromResultPackage(w http.ResponseWriter, r *http.Request) {
+	var request model.EditorCreateFromResultPackageRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	session, err := s.service.CreateEditorSessionFromResultPackage(r.Context(), request)
+	writeBridgeValue(w, session, err)
+}
+
+func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.Request) {
+	sessionID, suffix, ok := splitEditorSessionRoute(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	switch {
+	case r.Method == http.MethodGet && suffix == "":
+		session, err := s.service.GetEditorSession(r.Context(), sessionID)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/assets":
+		var request model.EditorImportAssetRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.ImportEditorAsset(r.Context(), sessionID, request)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/uploads":
+		s.handleEditorUpload(w, r, sessionID)
+	case r.Method == http.MethodPost && suffix == "/plan":
+		var request model.EditorSavePlanRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.SaveEditorPlan(r.Context(), sessionID, request)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/validate":
+		report, err := s.service.ValidateEditorPlan(r.Context(), sessionID)
+		writeBridgeValue(w, report, err)
+	case r.Method == http.MethodPost && suffix == "/preview":
+		session, err := s.service.StartEditorRender(sessionID, true)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/render":
+		session, err := s.service.StartEditorRender(sessionID, false)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/preview/cancel":
+		session, err := s.service.CancelEditorRender(sessionID, "preview")
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/render/cancel":
+		session, err := s.service.CancelEditorRender(sessionID, "final")
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodGet && strings.HasPrefix(suffix, "/media/"):
+		handleEditorMedia(w, r, s.service, sessionID, strings.TrimPrefix(suffix, "/media/"))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *DevHTTPServer) handleEditorUpload(w http.ResponseWriter, r *http.Request, sessionID string) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxEditorUploadBytes+(1<<20))
+	reader, err := r.MultipartReader()
+	if err != nil {
+		writeBridgeValue(w, nil, errors.New("editor upload requires multipart/form-data"))
+		return
+	}
+	for {
+		part, nextErr := reader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			writeBridgeValue(w, nil, errors.New("editor upload file field is required"))
+			return
+		}
+		if nextErr != nil {
+			writeBridgeValue(w, nil, nextErr)
+			return
+		}
+		if part.FormName() != "file" || part.FileName() == "" {
+			_ = part.Close()
+			continue
+		}
+		session, importErr := s.service.ImportEditorUpload(r.Context(), sessionID, part.FileName(), part)
+		_ = part.Close()
+		writeBridgeValue(w, session, importErr)
+		return
+	}
+}
+
+func handleEditorMedia(w http.ResponseWriter, r *http.Request, service *Service, sessionID, mediaRef string) {
+	kind := mediaRef
+	assetID := ""
+	if strings.HasPrefix(mediaRef, "assets/") {
+		kind = "asset"
+		assetID = strings.TrimPrefix(mediaRef, "assets/")
+	}
+	filePath, mimeType, err := service.EditorMediaPath(sessionID, kind, assetID)
+	if err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	if mimeType != "" {
+		w.Header().Set("Content-Type", mimeType)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, filePath)
 }
 
 func (s *DevHTTPServer) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +546,26 @@ func splitProjectRoute(path string) (string, string, bool) {
 		return projectID, "", true
 	}
 	return projectID, "/" + strings.TrimRight(parts[1], "/"), true
+}
+
+func splitEditorSessionRoute(path string) (string, string, bool) {
+	const prefix = "/v1/editor/sessions/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	if rest == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(rest, "/", 2)
+	sessionID := strings.TrimSpace(parts[0])
+	if sessionID == "" {
+		return "", "", false
+	}
+	if len(parts) == 1 {
+		return sessionID, "", true
+	}
+	return sessionID, "/" + strings.TrimRight(parts[1], "/"), true
 }
 
 func withDevCORS(next http.Handler) http.Handler {

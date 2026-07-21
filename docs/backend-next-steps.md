@@ -1,5 +1,8 @@
 # Backend Implementation Next Steps
 
+> [!IMPORTANT]
+> **Historical implementation checklist.** This document records the initial backend skeleton phase and is not the active roadmap. New Server-side work must follow [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md).
+
 This file tracks the concrete next engineering steps after the initial project skeleton.
 
 ## Current State

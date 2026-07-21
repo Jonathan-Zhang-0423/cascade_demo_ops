@@ -10,5 +10,9 @@ describe("vite demo server config", () => {
       target: "http://127.0.0.1:4317",
       changeOrigin: true,
     });
+    expect(viteConfig.server?.proxy?.["/v1/editor"]).toMatchObject({
+      target: "http://127.0.0.1:4317",
+      changeOrigin: true,
+    });
   });
 });

@@ -1,5 +1,8 @@
 # Backend MVP Design
 
+> [!IMPORTANT]
+> **Historical MVP architecture.** Keep this document for code archaeology only. The active Server-side architecture is [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md).
+
 ## Scope
 
 The backend MVP must support full input access and long-term extensibility, while implementing only the core four-layer product flow.

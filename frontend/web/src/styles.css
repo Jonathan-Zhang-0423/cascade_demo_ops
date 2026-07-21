@@ -198,6 +198,10 @@ h2 {
   align-items: start;
 }
 
+.workspace-grid.editor-wide {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .main-panel,
 .inspector {
   min-width: 0;

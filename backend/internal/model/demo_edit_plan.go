@@ -22,6 +22,7 @@ type DemoEditSourceAuthority string
 
 const (
 	DemoEditSourceAuthorityCustomerSideAgent DemoEditSourceAuthority = "customer_side_agent"
+	DemoEditSourceAuthorityServerLocalEditor DemoEditSourceAuthority = "server_local_editor"
 )
 
 type DemoEditModelRole string
@@ -214,6 +215,46 @@ type DemoEditPlan struct {
 	TargetDurationMS     int                          `json:"target_duration_ms,omitempty"`
 	Shots                []DemoEditShot               `json:"shots"`
 	GlobalStyle          *DemoEditGlobalStyle         `json:"global_style,omitempty"`
+	Audio                *DemoEditAudioPolicy         `json:"audio,omitempty"`
+	Narrations           []DemoEditNarrationClip      `json:"narrations,omitempty"`
+	CaptionCues          []DemoEditCaptionCue         `json:"caption_cues,omitempty"`
+}
+
+type DemoEditAudioPolicy struct {
+	Mode            string                         `json:"mode"`
+	VolumePercent   int                            `json:"volume_percent"`
+	SplitPointsMS   []int                          `json:"split_points_ms,omitempty"`
+	SegmentSettings []DemoEditAudioSegmentSettings `json:"segment_settings,omitempty"`
+}
+
+type DemoEditAudioSegmentSettings struct {
+	StartMS       int    `json:"start_ms"`
+	EndMS         int    `json:"end_ms"`
+	Mode          string `json:"mode"`
+	VolumePercent int    `json:"volume_percent"`
+}
+
+// DemoEditNarrationClip is presentation-only narration placed on the final
+// output timeline. Its source must already be an imported audio asset; model
+// generated candidates require user confirmation before they are added here.
+type DemoEditNarrationClip struct {
+	ID                  string            `json:"id"`
+	SourceArtifactID    string            `json:"source_artifact_id"`
+	SourceTimeRangeMS   *MillisecondRange `json:"source_time_range_ms,omitempty"`
+	OutputTimeRangeMS   MillisecondRange  `json:"output_time_range_ms"`
+	VolumePercent       int               `json:"volume_percent"`
+	DuckSourceAudio     bool              `json:"duck_source_audio,omitempty"`
+	DuckSourceToPercent int               `json:"duck_source_to_percent,omitempty"`
+	Source              string            `json:"source"`
+}
+
+// DemoEditCaptionCue is an output-timeline caption. It complements shot
+// overlays and is intended for narration or user-configured explanatory text.
+type DemoEditCaptionCue struct {
+	ID            string           `json:"id"`
+	OutputRangeMS MillisecondRange `json:"output_range_ms"`
+	Text          string           `json:"text"`
+	Source        string           `json:"source"`
 }
 
 type DemoEditGlobalStyle struct {
@@ -227,9 +268,16 @@ type DemoEditShot struct {
 	SourceArtifactID  string            `json:"source_artifact_id"`
 	SourceStepID      string            `json:"source_step_id,omitempty"`
 	SourceTimeRangeMS *MillisecondRange `json:"source_time_range_ms,omitempty"`
-	Purpose           string            `json:"purpose"`
-	Operations        []EditOperation   `json:"operations,omitempty"`
-	Overlays          []EditOverlay     `json:"overlays,omitempty"`
+	// PresentationKind is "video" by default. "still" is reserved for a
+	// user-approved presentation reference such as a safe step screenshot.
+	// It never replaces the business-step video evidence.
+	PresentationKind string `json:"presentation_kind,omitempty"`
+	// OutputDurationMS is required for a still image because an image has no
+	// intrinsic timeline duration. Video shots continue to use source range.
+	OutputDurationMS int             `json:"output_duration_ms,omitempty"`
+	Purpose          string          `json:"purpose"`
+	Operations       []EditOperation `json:"operations,omitempty"`
+	Overlays         []EditOverlay   `json:"overlays,omitempty"`
 }
 
 type EditOperation struct {

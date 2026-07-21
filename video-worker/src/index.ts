@@ -3,11 +3,13 @@ import { record } from "./recorder.js";
 import { render } from "./renderer.js";
 import { executeScript, validateScript } from "./script-runner.js";
 import { verifyInteractions } from "./interaction-verifier.js";
+import { probeMediaFile } from "./media-probe.js";
+import { validateEditPlan } from "./renderer.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
   id: number | string;
-  method: "health" | "record" | "render" | "validate_script" | "execute_script" | "verify_interactions";
+  method: "health" | "record" | "render" | "probe_media" | "analyze_audio" | "validate_edit_plan" | "validate_script" | "execute_script" | "verify_interactions";
   params?: unknown;
 };
 
@@ -41,6 +43,12 @@ async function dispatch(request: JsonRpcRequest): Promise<unknown> {
   }
   if (request.method === "render") {
     return render(request.params as never);
+  }
+  if (request.method === "probe_media") {
+    return probeMediaFile(request.params as never);
+  }
+  if (request.method === "validate_edit_plan") {
+    return validateEditPlan(request.params as never);
   }
   if (request.method === "validate_script") {
     return validateScript(request.params as never);

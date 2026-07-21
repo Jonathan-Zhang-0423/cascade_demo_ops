@@ -58,6 +58,9 @@ func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
 	endMS := 1200
 	zoom := 1.18
 	sourceRange := MillisecondRange{0, 1200}
+	narrationSourceRange := MillisecondRange{0, 1000}
+	narrationOutputRange := MillisecondRange{200, 1200}
+	captionOutputRange := MillisecondRange{200, 1200}
 	plan := DemoEditPlan{
 		SchemaVersion:        DemoEditPlanSchemaVersion,
 		PlanID:               "edit_plan_run_1",
@@ -70,6 +73,17 @@ func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
 		LockedFields:         DemoEditRequiredLockedFields,
 		ModelEditableFields:  DemoEditAllowedModelEditableFields,
 		TargetDurationMS:     60000,
+		Audio: &DemoEditAudioPolicy{
+			Mode: "source", VolumePercent: 85, SplitPointsMS: []int{500},
+			SegmentSettings: []DemoEditAudioSegmentSettings{{StartMS: 500, EndMS: 1200, Mode: "mute", VolumePercent: 85}},
+		},
+		Narrations: []DemoEditNarrationClip{{
+			ID: "narration_001", SourceArtifactID: "artifact_narration", SourceTimeRangeMS: &narrationSourceRange,
+			OutputTimeRangeMS: narrationOutputRange, VolumePercent: 100, DuckSourceAudio: true, DuckSourceToPercent: 30, Source: "user_recorded",
+		}},
+		CaptionCues: []DemoEditCaptionCue{{
+			ID: "caption_001", OutputRangeMS: captionOutputRange, Text: "打开产品工作台。", Source: "user_configured",
+		}},
 		Shots: []DemoEditShot{{
 			ID:                "shot_001_open_dashboard",
 			SourceArtifactID:  "artifact_raw_recording",
@@ -137,6 +151,15 @@ func TestDemoEditPlanJSONRoundTripPreservesSourceOnlyContract(t *testing.T) {
 	}
 	if gotPlan.ModelRole != DemoEditModelRolePresentationOptimizerOnly {
 		t.Fatalf("plan model role = %q", gotPlan.ModelRole)
+	}
+	if gotPlan.Audio == nil || gotPlan.Audio.Mode != "source" || gotPlan.Audio.VolumePercent != 85 || len(gotPlan.Audio.SplitPointsMS) != 1 || gotPlan.Audio.SplitPointsMS[0] != 500 || len(gotPlan.Audio.SegmentSettings) != 1 || gotPlan.Audio.SegmentSettings[0].Mode != "mute" {
+		t.Fatalf("plan audio policy did not round-trip: %+v", gotPlan.Audio)
+	}
+	if len(gotPlan.Narrations) != 1 || gotPlan.Narrations[0].SourceArtifactID != "artifact_narration" || gotPlan.Narrations[0].OutputTimeRangeMS != narrationOutputRange || !gotPlan.Narrations[0].DuckSourceAudio {
+		t.Fatalf("plan narration did not round-trip: %+v", gotPlan.Narrations)
+	}
+	if len(gotPlan.CaptionCues) != 1 || gotPlan.CaptionCues[0].Text != "打开产品工作台。" || gotPlan.CaptionCues[0].OutputRangeMS != captionOutputRange {
+		t.Fatalf("plan caption cues did not round-trip: %+v", gotPlan.CaptionCues)
 	}
 	if !containsString(gotPlan.LockedFields, "source_artifact_id") || !containsString(gotPlan.LockedFields, "required_step_order") {
 		t.Fatalf("plan locked fields lost source facts: %+v", gotPlan.LockedFields)

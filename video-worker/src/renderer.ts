@@ -10,6 +10,7 @@ const DEMO_EDIT_PLAN_VALIDATION_SCHEMA_VERSION = "demoops.demo_edit_plan_validat
 const MEDIA_NORMALIZATION_REPORT_SCHEMA_VERSION = "demoops.media_normalization_report.v1";
 const REQUIREMENT_SATISFACTION_REPORT_SCHEMA_VERSION = "demoops.requirement_satisfaction_report.v1";
 const DEMO_EDIT_SOURCE_AUTHORITY = "customer_side_agent";
+const ALLOWED_SOURCE_AUTHORITIES = [DEMO_EDIT_SOURCE_AUTHORITY, "server_local_editor"] as const;
 const DEMO_EDIT_MODEL_ROLE = "presentation_optimizer_only";
 
 const ALLOWED_EDIT_OPERATIONS = [
@@ -73,6 +74,7 @@ const ALLOWED_MODEL_EDITABLE_FIELDS = [
 
 type EditOperationType = (typeof ALLOWED_EDIT_OPERATIONS)[number];
 type OverlayType = (typeof ALLOWED_OVERLAY_TYPES)[number];
+type DemoEditSourceAuthority = (typeof ALLOWED_SOURCE_AUTHORITIES)[number];
 
 export interface RenderRequest {
   graph?: DemoWorkflowGraph;
@@ -86,7 +88,19 @@ export interface RenderRequest {
   artifact_manifest_path?: string;
   recording_result_package?: RecordingResultPackage;
   recording_result_package_path?: string;
+  asset_timeline_catalog?: AssetTimelineCatalog;
   edit_plan?: DemoEditPlan;
+  render_profile?: RenderProfile;
+}
+
+export interface RenderProfile {
+  mode?: "preview" | "final";
+  width?: number;
+  height?: number;
+  fps?: number;
+  format?: "mp4" | "webm" | "mov";
+  preset?: string;
+  crf?: number;
 }
 
 export interface RenderResult {
@@ -251,7 +265,7 @@ interface LoadedRenderInputs {
   generatedAssets: ArtifactRef[];
 }
 
-interface AssetTimelineCatalog {
+export interface AssetTimelineCatalog {
   schema_version: string;
   catalog_id: string;
   workflow_graph_id: string;
@@ -314,12 +328,12 @@ interface TimelineArtifact {
   local_path?: string;
 }
 
-interface DemoEditPlan {
+export interface DemoEditPlan {
   schema_version?: string;
   plan_id: string;
   catalog_id?: string;
   objective?: string;
-  source_authority: typeof DEMO_EDIT_SOURCE_AUTHORITY;
+  source_authority: DemoEditSourceAuthority;
   model_role: typeof DEMO_EDIT_MODEL_ROLE;
   source_material_policy: "existing_assets_only";
   script_order_policy: "preserve_required_step_order";
@@ -332,6 +346,28 @@ interface DemoEditPlan {
     pacing?: string;
     transition_style?: string;
   };
+  audio?: {
+    mode: "source" | "mute";
+    volume_percent: number;
+    split_points_ms?: number[];
+    segment_settings?: Array<{ start_ms: number; end_ms: number; mode: "source" | "mute"; volume_percent: number }>;
+  };
+  narrations?: Array<{
+    id: string;
+    source_artifact_id: string;
+    source_time_range_ms?: [number, number];
+    output_time_range_ms: [number, number];
+    volume_percent: number;
+    duck_source_audio?: boolean;
+    duck_source_to_percent?: number;
+    source: "user_recorded" | "user_uploaded" | "tts_confirmed";
+  }>;
+  caption_cues?: Array<{
+    id: string;
+    output_range_ms: [number, number];
+    text: string;
+    source: "user_configured" | "asr_confirmed" | "model_confirmed";
+  }>;
 }
 
 interface DemoEditShot {
@@ -339,6 +375,8 @@ interface DemoEditShot {
   source_artifact_id: string;
   source_step_id?: string;
   source_time_range_ms?: [number, number];
+  presentation_kind?: "video" | "still";
+  output_duration_ms?: number;
   purpose: string;
   operations?: EditOperation[];
   overlays?: EditOverlay[];
@@ -366,7 +404,7 @@ interface EditOverlay {
   end_ms?: number;
 }
 
-interface DemoEditPlanValidationReport {
+export interface DemoEditPlanValidationReport {
   schema_version: string;
   valid: boolean;
   checked_at: string;
@@ -388,6 +426,8 @@ interface CompositorResult {
   ffmpeg_available?: boolean;
   quality_status?: "ok" | "degraded";
   video_codec?: string;
+  audio_codec?: string;
+  audio_mode?: "source" | "mute";
   source_artifact_id?: string;
   source_uri?: string;
   output_container?: string;
@@ -406,6 +446,7 @@ interface CompositorShot {
   source_uri?: string;
   source_path?: string;
   source_time_range_ms?: [number, number];
+  presentation_kind: "video" | "still";
   duration_ms: number;
   operations: string[];
   overlays: Array<{ type: string; text?: string; start_ms?: number; end_ms?: number }>;
@@ -422,10 +463,20 @@ interface CaptionCue {
   text: string;
 }
 
+interface NarrationRenderInput {
+  id: string;
+  source_path: string;
+  source_time_range_ms: [number, number];
+  output_time_range_ms: [number, number];
+  volume_percent: number;
+  duck_source_audio: boolean;
+  duck_source_to_percent: number;
+}
+
 interface MediaNormalizationTarget {
   container: "mp4";
   video_codec: "h264";
-  audio_codec: "aac_silent";
+  audio_codec: "aac";
   width: number;
   height: number;
   fps: number;
@@ -556,7 +607,7 @@ interface RequirementFinding {
 const MEDIA_NORMALIZATION_TARGET: MediaNormalizationTarget = {
   container: "mp4",
   video_codec: "h264",
-  audio_codec: "aac_silent",
+  audio_codec: "aac",
   width: 1920,
   height: 1080,
   fps: 30,
@@ -568,7 +619,7 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
   await mkdir(outputDir, { recursive: true });
 
   const loaded = await loadRenderInputs(request);
-  const catalog = await buildAssetTimelineCatalog(request, loaded);
+  const catalog = request.asset_timeline_catalog || (await buildAssetTimelineCatalog(request, loaded));
   const editPlan = request.edit_plan ? normalizeEditPlan(request.edit_plan, catalog) : defaultEditPlan(catalog, request.duration_sec);
   const validationReport = validateDemoEditPlan(editPlan, catalog);
 
@@ -578,9 +629,18 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
 
   const targetDurationSec = Math.max(1, Math.round((editPlan.target_duration_ms || (request.duration_sec || 60) * 1000) / 1000));
   const requestedFormats = requestedFinalVideoFormats(request.graph, request.recording_run_spec);
-  const targetContainer = preferredFinalVideoContainer(requestedFormats);
-  const compositor = await composeFinalVideo(outputDir, targetDurationSec, catalog, editPlan, targetContainer);
-  const mediaNormalization = await normalizeSourceReferenceVideo(outputDir, catalog, editPlan, compositor.video_path);
+  const targetContainer = request.render_profile?.format || preferredFinalVideoContainer(requestedFormats);
+  const compositor = await composeFinalVideo(outputDir, targetDurationSec, catalog, editPlan, targetContainer, request.render_profile);
+  if (request.render_profile && compositor.status !== "rendered") {
+    throw new Error(`editor compositor did not render the edit plan: ${compositor.fallback_reason || compositor.method}`);
+  }
+  if (request.render_profile && compositor.method !== "ffmpeg_trim_concat") {
+    throw new Error(`editor compositor refused degraded output: ${compositor.fallback_reason || compositor.method}`);
+  }
+  const mediaNormalization =
+    request.render_profile?.mode === "preview"
+      ? await skippedPreviewNormalization(outputDir, request.render_profile)
+      : await normalizeSourceReferenceVideo(outputDir, catalog, editPlan, compositor.video_path);
   const sourceReferenceVideoPath = mediaNormalization.report.status === "ok" ? mediaNormalization.report.reference_video_path : undefined;
   const videoPath = sourceReferenceVideoPath || compositor.video_path;
   const stepDocsPath = path.join(outputDir, "step_by_step.md");
@@ -775,6 +835,7 @@ function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): D
       pacing: "clear_and_direct",
       transition_style: "simple_cut",
     },
+    audio: { mode: "source", volume_percent: 100 },
   };
 }
 
@@ -827,6 +888,18 @@ function normalizeEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog): D
     script_order_policy: plan.script_order_policy || "preserve_required_step_order",
     locked_fields: plan.locked_fields || [...REQUIRED_LOCKED_FIELDS],
     model_editable_fields: plan.model_editable_fields || [...ALLOWED_MODEL_EDITABLE_FIELDS],
+    audio: plan.audio || { mode: "source", volume_percent: 100 },
+    ...(plan.narrations?.length ? { narrations: plan.narrations.map((narration) => ({ ...narration, ...(narration.source_time_range_ms ? { source_time_range_ms: [...narration.source_time_range_ms] as [number, number] } : {}), output_time_range_ms: [...narration.output_time_range_ms] as [number, number] })) } : {}),
+    ...(plan.caption_cues?.length ? { caption_cues: plan.caption_cues.map((cue) => ({ ...cue, output_range_ms: [...cue.output_range_ms] as [number, number] })) } : {}),
+  };
+}
+
+function normalizeAudioPolicy(audio: DemoEditPlan["audio"]): NonNullable<DemoEditPlan["audio"]> {
+  return {
+    mode: audio?.mode ?? "source",
+    volume_percent: audio?.volume_percent ?? 100,
+    ...(audio?.split_points_ms?.length ? { split_points_ms: [...audio.split_points_ms] } : {}),
+    ...(audio?.segment_settings?.length ? { segment_settings: audio.segment_settings.map((segment) => ({ ...segment })) } : {}),
   };
 }
 
@@ -846,12 +919,21 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   if (plan.script_order_policy !== "preserve_required_step_order") {
     errors.push(finding("invalid_script_order_policy", "script_order_policy must preserve required step order", "script_order_policy"));
   }
-  if (plan.source_authority !== DEMO_EDIT_SOURCE_AUTHORITY) {
-    errors.push(finding("invalid_source_authority", "source_authority must be customer_side_agent", "source_authority"));
+  if (!ALLOWED_SOURCE_AUTHORITIES.includes(plan.source_authority)) {
+    errors.push(finding("invalid_source_authority", `source_authority must be one of: ${ALLOWED_SOURCE_AUTHORITIES.join(", ")}`, "source_authority"));
   }
   if (plan.model_role !== DEMO_EDIT_MODEL_ROLE) {
     errors.push(finding("invalid_model_role", "model_role must be presentation_optimizer_only", "model_role"));
   }
+  if (plan.audio && plan.audio.mode !== "source" && plan.audio.mode !== "mute") {
+    errors.push(finding("invalid_audio_mode", "audio.mode must be source or mute", "audio.mode"));
+  }
+  if (plan.audio && (!Number.isFinite(plan.audio.volume_percent) || plan.audio.volume_percent < 0 || plan.audio.volume_percent > 200)) {
+    errors.push(finding("invalid_audio_volume", "audio.volume_percent must be between 0 and 200", "audio.volume_percent"));
+  }
+  validateAudioSplitPoints(plan, errors);
+  validateNarrations(plan, catalog, errors);
+  validateCaptionCues(plan, errors);
   validateCollaborationBoundary(plan, errors);
   if (!Array.isArray(plan.shots) || plan.shots.length === 0) {
     errors.push(finding("missing_shots", "DemoEditPlan must contain at least one shot", "shots"));
@@ -862,6 +944,7 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   plan.shots.forEach((shot, shotIndex) => {
     const shotPath = `shots[${shotIndex}]`;
     const artifact = artifactByID.get(shot.source_artifact_id);
+    const still = isStillShot(shot);
     if (!artifact) {
       errors.push(finding("unknown_source_artifact", `Shot references missing source artifact ${shot.source_artifact_id}`, `${shotPath}.source_artifact_id`));
     } else if (artifact.sensitive) {
@@ -875,7 +958,9 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
     if (shot.source_step_id && !stepByID.has(shot.source_step_id)) {
       errors.push(finding("unknown_source_step", `Shot references missing source step ${shot.source_step_id}`, `${shotPath}.source_step_id`));
     }
-    if (shot.source_step_id && requiredOrder.has(shot.source_step_id)) {
+    // A still can retain its capture step for traceability, but must not count
+    // as the business evidence or participate in its locked order.
+    if (!still && shot.source_step_id && requiredOrder.has(shot.source_step_id)) {
       const currentOrder = requiredOrder.get(shot.source_step_id) as number;
       if (currentOrder < lastRequiredStepOrder) {
         errors.push(finding("required_step_order_changed", "Required script steps cannot be reordered by the edit plan", `${shotPath}.source_step_id`));
@@ -883,12 +968,13 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
       lastRequiredStepOrder = Math.max(lastRequiredStepOrder, currentOrder);
     }
 
+    validateShotPresentation(shot, artifact, shotPath, errors);
     validateShotTimeRange(shot, artifact, catalog, `${shotPath}.source_time_range_ms`, errors);
     validateOperations(shot.operations || [], `${shotPath}.operations`, errors);
     validateOverlays(shot.overlays || [], stepByID, `${shotPath}.overlays`, errors);
   });
 
-  const representedSteps = new Set(plan.shots.map((shot) => shot.source_step_id).filter((stepID): stepID is string => Boolean(stepID)));
+  const representedSteps = new Set(plan.shots.filter((shot) => !isStillShot(shot)).map((shot) => shot.source_step_id).filter((stepID): stepID is string => Boolean(stepID)));
   for (const step of catalog.steps) {
     if (step.required && step.status !== "failed" && !representedSteps.has(step.step_id)) {
       warnings.push(finding("required_step_omitted", `Required script step ${step.step_id} is not represented in the edit plan`, "shots"));
@@ -904,6 +990,35 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   };
   if (plan.plan_id) report.plan_id = plan.plan_id;
   return report;
+}
+
+function isStillShot(shot: DemoEditShot): boolean {
+  return shot.presentation_kind === "still";
+}
+
+function validateShotPresentation(shot: DemoEditShot, artifact: TimelineArtifact | undefined, shotPath: string, errors: ValidationFinding[]): void {
+  if (shot.presentation_kind && shot.presentation_kind !== "video" && shot.presentation_kind !== "still") {
+    errors.push(finding("invalid_presentation_kind", "presentation_kind must be video or still", `${shotPath}.presentation_kind`));
+    return;
+  }
+  if (!isStillShot(shot)) {
+    if (shot.output_duration_ms !== undefined) {
+      errors.push(finding("video_output_duration_not_supported", "video shots derive duration from source_time_range_ms", `${shotPath}.output_duration_ms`));
+    }
+    return;
+  }
+  if (!artifact || artifact.kind !== "step_screenshot" || !artifact.mime_type?.startsWith("image/") || artifact.metadata?.presentation_only !== true) {
+    errors.push(finding("invalid_still_source", "still shots must reference a non-sensitive presentation_only step_screenshot image", `${shotPath}.source_artifact_id`));
+  }
+  if (shot.source_time_range_ms) {
+    errors.push(finding("still_source_time_range_not_allowed", "still shots use output_duration_ms instead of source_time_range_ms", `${shotPath}.source_time_range_ms`));
+  }
+  if (!Number.isInteger(shot.output_duration_ms) || (shot.output_duration_ms ?? 0) < 250 || (shot.output_duration_ms ?? 0) > 15000) {
+    errors.push(finding("invalid_still_output_duration", "still output_duration_ms must be an integer between 250 and 15000", `${shotPath}.output_duration_ms`));
+  }
+  if ((shot.operations?.length ?? 0) > 0) {
+    errors.push(finding("still_operations_not_supported", "still shots do not support edit operations in the first renderer version", `${shotPath}.operations`));
+  }
 }
 
 function validateCollaborationBoundary(plan: DemoEditPlan, errors: ValidationFinding[]): void {
@@ -939,6 +1054,7 @@ function validateShotTimeRange(
   pathValue: string,
   errors: ValidationFinding[],
 ): void {
+  if (isStillShot(shot)) return;
   if (!shot.source_time_range_ms) {
     if (artifact?.kind === "raw_recording") {
       errors.push(finding("missing_time_range", "Raw recording shots must declare source_time_range_ms", pathValue));
@@ -981,6 +1097,7 @@ async function composeFinalVideo(
   catalog: AssetTimelineCatalog,
   editPlan: DemoEditPlan,
   targetContainer?: "mp4" | "webm" | "mov" | "m4v",
+  renderProfile?: RenderProfile,
 ): Promise<CompositorResult> {
   const shotPlan = buildCompositorShotPlan(catalog, editPlan);
   const primaryShot = shotPlan.find((shot) => shot.source_path);
@@ -990,6 +1107,7 @@ async function composeFinalVideo(
       targetDurationSec,
       shotPlan,
       "No local raw recording artifact is available. The edit plan is valid, but final video rendering is waiting for a compositor input.",
+      editPlan,
     );
   }
 
@@ -1000,6 +1118,7 @@ async function composeFinalVideo(
       targetDurationSec,
       shotPlan,
       `Raw recording artifact ${primaryShot.source_artifact_id} is not available as a local file. The edit plan is valid, but final video rendering is pending.`,
+      editPlan,
     );
   }
 
@@ -1011,6 +1130,16 @@ async function composeFinalVideo(
   const extension = ffmpegAvailable ? targetExtension || sourceExtension : sourceExtension;
   const videoPath = path.join(outputDir, `demo_${targetDurationSec}s${extension}`);
   if (!ffmpegAvailable) {
+    if (hasPostProcessingWork(editPlan)) {
+      return plannedCompositorResult(
+        outputDir,
+        targetDurationSec,
+        shotPlan,
+        "The edit plan requires narration or global captions, but FFmpeg is unavailable. The source recording was not copied as a successful edited video.",
+        editPlan,
+        "ffmpeg_not_available_for_audio_caption_post_process",
+      );
+    }
     await copyFile(primaryShot.source_path as string, videoPath);
     const result: CompositorResult = {
       status: "rendered",
@@ -1021,9 +1150,9 @@ async function composeFinalVideo(
       source_artifact_id: primaryShot.source_artifact_id,
       output_container: sourceExtension.replace(/^\./, ""),
       shot_plan: shotPlan,
-      planned_operations: plannedOperations(shotPlan),
+      planned_operations: plannedOperations(shotPlan, editPlan),
       applied_operations: ["fallback_copy"],
-      skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, true),
+      skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, editPlan, true),
       fallback_reason: "ffmpeg_not_available",
       note: "Rendered a deterministic fallback demo video by copying the source browser recording. The edit plan is valid and recorded in the render manifest, but requested delivery formatting and trim/concat execution require ffmpeg.",
     };
@@ -1031,8 +1160,19 @@ async function composeFinalVideo(
     return result;
   }
 
-  const composed = await composeWithFFmpeg(ffmpegPath, outputDir, videoPath, shotPlan, extension);
+  const audio = normalizeAudioPolicy(editPlan.audio);
+  const composed = await composeWithFFmpeg(ffmpegPath, outputDir, videoPath, shotPlan, extension, renderProfile, audio, catalog, editPlan);
   if (!composed.rendered) {
+    if (hasPostProcessingWork(editPlan)) {
+      return plannedCompositorResult(
+        outputDir,
+        targetDurationSec,
+        shotPlan,
+        `The edit plan requires narration or global captions, but the deterministic FFmpeg post-process failed (${composed.error || "unknown error"}). The source recording was not copied as a successful edited video.`,
+        editPlan,
+        composed.error || "ffmpeg_post_process_failed",
+      );
+    }
     const fallbackVideoPath = path.join(outputDir, `demo_${targetDurationSec}s${sourceExtension}`);
     await copyFile(primaryShot.source_path as string, fallbackVideoPath);
     const result: CompositorResult = {
@@ -1044,9 +1184,9 @@ async function composeFinalVideo(
       source_artifact_id: primaryShot.source_artifact_id,
       output_container: sourceExtension.replace(/^\./, ""),
       shot_plan: shotPlan,
-      planned_operations: plannedOperations(shotPlan),
+      planned_operations: plannedOperations(shotPlan, editPlan),
       applied_operations: ["fallback_copy"],
-      skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, true),
+      skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, editPlan, true),
       fallback_reason: composed.error || "ffmpeg_render_failed",
       note: "Rendered a deterministic fallback demo video by copying the source browser recording after ffmpeg trim/concat failed. No image or video generation was used.",
     };
@@ -1063,17 +1203,19 @@ async function composeFinalVideo(
     source_artifact_id: primaryShot.source_artifact_id,
     output_container: extension.replace(/^\./, ""),
     shot_plan: shotPlan,
-    planned_operations: plannedOperations(shotPlan),
-    applied_operations: appliedOperationsForCurrentCompositor(shotPlan),
-    skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, false),
-    note: "Rendered a deterministic demo video by trimming and concatenating existing source browser recording segments. No image or video generation was used.",
+    planned_operations: plannedOperations(shotPlan, editPlan),
+    applied_operations: appliedOperationsForCurrentCompositor(shotPlan, editPlan),
+    skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, editPlan, false),
+    note: "Rendered a deterministic demo video by trimming and concatenating existing source browser recording segments, then applying only confirmed narration and global captions. No image or video generation was used.",
   };
   if (composed.video_codec) result.video_codec = composed.video_codec;
+  if (composed.audio_codec) result.audio_codec = composed.audio_codec;
+  result.audio_mode = audio.mode;
   if (primaryShot.source_uri) result.source_uri = primaryShot.source_uri;
   return result;
 }
 
-function plannedCompositorResult(outputDir: string, targetDurationSec: number, shotPlan: CompositorShot[], note: string): CompositorResult {
+function plannedCompositorResult(outputDir: string, targetDurationSec: number, shotPlan: CompositorShot[], note: string, editPlan?: DemoEditPlan, fallbackReason = "missing_local_source_video"): CompositorResult {
   return {
     status: "planned",
     video_path: path.join(outputDir, `demo_${targetDurationSec}s.mp4`),
@@ -1082,10 +1224,10 @@ function plannedCompositorResult(outputDir: string, targetDurationSec: number, s
     quality_status: "degraded",
     output_container: "mp4",
     shot_plan: shotPlan,
-    planned_operations: plannedOperations(shotPlan),
+    planned_operations: plannedOperations(shotPlan, editPlan),
     applied_operations: [],
-    skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, true),
-    fallback_reason: "missing_local_source_video",
+    skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, editPlan, true),
+    fallback_reason: fallbackReason,
     note,
   };
 }
@@ -1655,6 +1797,131 @@ function requestedFinalVideoFormats(graph: DemoWorkflowGraph | undefined, runSpe
   return [...new Set(formats)];
 }
 
+function validateAudioSplitPoints(plan: DemoEditPlan, errors: ValidationFinding[]): void {
+  const durationMS = outputDurationMS(plan);
+  if (!plan.audio) return;
+  let previous = 0;
+  (plan.audio.split_points_ms ?? []).forEach((point, index) => {
+    const pathValue = `audio.split_points_ms[${index}]`;
+    if (!Number.isFinite(point) || !Number.isInteger(point)) {
+      errors.push(finding("invalid_audio_split_point", "audio split points must be integer milliseconds", pathValue));
+    } else if (point <= 0 || point >= durationMS) {
+      errors.push(finding("audio_split_point_outside_timeline", `audio split point must be inside the ${durationMS}ms output timeline`, pathValue));
+    } else if (point <= previous) {
+      errors.push(finding("audio_split_points_not_ordered", "audio split points must be unique and strictly increasing", pathValue));
+    }
+    previous = point;
+  });
+  const boundaries = new Set([0, durationMS, ...(plan.audio.split_points_ms ?? [])]);
+  let previousEndMS = 0;
+  (plan.audio.segment_settings ?? []).forEach((segment, index) => {
+    const pathValue = `audio.segment_settings[${index}]`;
+    if (!Number.isInteger(segment.start_ms) || !Number.isInteger(segment.end_ms) || segment.start_ms < 0 || segment.end_ms <= segment.start_ms || segment.end_ms > durationMS) {
+      errors.push(finding("invalid_audio_segment_range", `audio segment must be an integer [start, end] range inside the ${durationMS}ms output timeline`, pathValue));
+    }
+    if (!boundaries.has(segment.start_ms) || !boundaries.has(segment.end_ms)) {
+      errors.push(finding("audio_segment_not_aligned", "audio segment settings must align with declared split points or timeline boundaries", pathValue));
+    }
+    if (index > 0 && segment.start_ms < previousEndMS) {
+      errors.push(finding("audio_segments_overlap", "audio segment settings must be ordered and non-overlapping", pathValue));
+    }
+    if (segment.mode !== "source" && segment.mode !== "mute") {
+      errors.push(finding("invalid_audio_segment_mode", "audio segment mode must be source or mute", `${pathValue}.mode`));
+    }
+    if (!Number.isFinite(segment.volume_percent) || segment.volume_percent < 0 || segment.volume_percent > 200) {
+      errors.push(finding("invalid_audio_segment_volume", "audio segment volume_percent must be between 0 and 200", `${pathValue}.volume_percent`));
+    }
+    previousEndMS = segment.end_ms;
+  });
+}
+
+function validateNarrations(plan: DemoEditPlan, catalog: AssetTimelineCatalog, errors: ValidationFinding[]): void {
+  const totalDurationMS = outputDurationMS(plan);
+  const seenIDs = new Set<string>();
+  const allowedSources = new Set(["user_recorded", "user_uploaded", "tts_confirmed"]);
+  (plan.narrations ?? []).forEach((narration, index) => {
+    const pathValue = `narrations[${index}]`;
+    if (!narration.id || seenIDs.has(narration.id)) {
+      errors.push(finding("invalid_narration_id", "narration id must be non-empty and unique", `${pathValue}.id`));
+    }
+    seenIDs.add(narration.id);
+    const artifact = catalog.artifacts.find((candidate) => candidate.id === narration.source_artifact_id);
+    if (!artifact) {
+      errors.push(finding("unknown_narration_artifact", `Narration references missing asset ${narration.source_artifact_id}`, `${pathValue}.source_artifact_id`));
+    } else if (!isDemoMaterial(artifact) || isGeneratedCandidateArtifact(artifact) || !isAudioArtifact(artifact)) {
+      errors.push(finding("invalid_narration_artifact", "Narration must reference a non-sensitive imported audio asset, not a generated candidate", `${pathValue}.source_artifact_id`));
+    }
+    validateOutputRange(narration.output_time_range_ms, totalDurationMS, `${pathValue}.output_time_range_ms`, "narration", errors);
+    const sourceRange = narration.source_time_range_ms ?? [0, artifact?.duration_ms ?? 0];
+    if (!sourceRange[1] || sourceRange[1] <= sourceRange[0]) {
+      errors.push(finding("invalid_narration_source_range", "Narration source range must be declared or its asset duration must be known", `${pathValue}.source_time_range_ms`));
+    } else {
+      if (!Number.isInteger(sourceRange[0]) || !Number.isInteger(sourceRange[1]) || sourceRange[0] < 0) {
+        errors.push(finding("invalid_narration_source_range", "Narration source range must be integer milliseconds", `${pathValue}.source_time_range_ms`));
+      }
+      if (artifact?.duration_ms && sourceRange[1] > artifact.duration_ms) {
+        errors.push(finding("narration_source_range_outside_asset", `Narration source range exceeds asset duration ${artifact.duration_ms}ms`, `${pathValue}.source_time_range_ms`));
+      }
+      const outputDuration = narration.output_time_range_ms[1] - narration.output_time_range_ms[0];
+      if (sourceRange[1] - sourceRange[0] < outputDuration) {
+        errors.push(finding("narration_source_too_short", "Narration source range must cover its output duration before any future speed processing is approved", `${pathValue}.source_time_range_ms`));
+      }
+    }
+    if (!Number.isFinite(narration.volume_percent) || narration.volume_percent < 0 || narration.volume_percent > 200) {
+      errors.push(finding("invalid_narration_volume", "Narration volume_percent must be between 0 and 200", `${pathValue}.volume_percent`));
+    }
+    if (narration.duck_source_to_percent !== undefined && (!Number.isFinite(narration.duck_source_to_percent) || narration.duck_source_to_percent < 0 || narration.duck_source_to_percent > 100)) {
+      errors.push(finding("invalid_narration_duck", "Narration duck_source_to_percent must be between 0 and 100", `${pathValue}.duck_source_to_percent`));
+    }
+    if (!allowedSources.has(narration.source)) {
+      errors.push(finding("invalid_narration_source", "Narration source must be user_recorded, user_uploaded, or tts_confirmed", `${pathValue}.source`));
+    }
+  });
+}
+
+function validateCaptionCues(plan: DemoEditPlan, errors: ValidationFinding[]): void {
+  const totalDurationMS = outputDurationMS(plan);
+  const seenIDs = new Set<string>();
+  const allowedSources = new Set(["user_configured", "asr_confirmed", "model_confirmed"]);
+  (plan.caption_cues ?? []).forEach((cue, index) => {
+    const pathValue = `caption_cues[${index}]`;
+    if (!cue.id || seenIDs.has(cue.id)) {
+      errors.push(finding("invalid_caption_cue_id", "caption cue id must be non-empty and unique", `${pathValue}.id`));
+    }
+    seenIDs.add(cue.id);
+    validateOutputRange(cue.output_range_ms, totalDurationMS, `${pathValue}.output_range_ms`, "caption cue", errors);
+    if (!cue.text.trim()) {
+      errors.push(finding("empty_caption_cue", "caption cue text must be non-empty", `${pathValue}.text`));
+    }
+    if (!allowedSources.has(cue.source)) {
+      errors.push(finding("invalid_caption_cue_source", "caption cue source must be user_configured, asr_confirmed, or model_confirmed", `${pathValue}.source`));
+    }
+  });
+}
+
+function validateOutputRange(range: [number, number], totalDurationMS: number, pathValue: string, label: string, errors: ValidationFinding[]): void {
+  const [startMS, endMS] = range;
+  if (!Number.isInteger(startMS) || !Number.isInteger(endMS) || startMS < 0 || endMS <= startMS || endMS > totalDurationMS) {
+    errors.push(finding(`invalid_${label.replace(/\s+/g, "_")}_range`, `${label} range must be an integer [start, end] inside the ${totalDurationMS}ms output timeline`, pathValue));
+  }
+}
+
+function outputDurationMS(plan: DemoEditPlan): number {
+  return plan.shots.reduce((total, shot) => total + shotOutputDurationMS(shot), 0);
+}
+
+function shotOutputDurationMS(shot: DemoEditShot): number {
+  if (isStillShot(shot)) return Math.max(0, shot.output_duration_ms ?? 0);
+  return shot.source_time_range_ms ? Math.max(0, shot.source_time_range_ms[1] - shot.source_time_range_ms[0]) : 0;
+}
+
+export function validateEditPlan(request: { catalog: AssetTimelineCatalog; edit_plan: DemoEditPlan }): DemoEditPlanValidationReport {
+  if (!request?.catalog || !request?.edit_plan) {
+    throw new Error("catalog and edit_plan are required");
+  }
+  return validateDemoEditPlan(normalizeEditPlan(request.edit_plan, request.catalog), request.catalog);
+}
+
 function preferredFinalVideoContainer(formats: string[]): "mp4" | "webm" | "mov" | "m4v" | undefined {
   if (formats.includes("mp4")) return "mp4";
   const first = formats.find((format): format is "mp4" | "webm" | "mov" | "m4v" => ["mp4", "webm", "mov", "m4v"].includes(format));
@@ -1802,18 +2069,20 @@ async function normalizeSourceReferenceVideo(
   }
 
   const referenceVideoPath = path.join(outputDir, "source_reference.mp4");
-  const transcodeResult = await runCommand(ffmpegPath, [
+  const sourceHasAudio = await hasAudioStream(ffmpegPath, sourcePath);
+  const transcodeArgs = [
     "-y",
     "-i",
     sourcePath,
-    "-f",
-    "lavfi",
-    "-i",
-    "anullsrc=channel_layout=stereo:sample_rate=48000",
+  ];
+  if (!sourceHasAudio) {
+    transcodeArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
+  }
+  transcodeArgs.push(
     "-map",
     "0:v:0",
     "-map",
-    "1:a:0",
+    sourceHasAudio ? "0:a:0" : "1:a:0",
     "-vf",
     `scale=${MEDIA_NORMALIZATION_TARGET.width}:${MEDIA_NORMALIZATION_TARGET.height}:force_original_aspect_ratio=decrease,pad=${MEDIA_NORMALIZATION_TARGET.width}:${MEDIA_NORMALIZATION_TARGET.height}:(ow-iw)/2:(oh-ih)/2,fps=${MEDIA_NORMALIZATION_TARGET.fps},format=${MEDIA_NORMALIZATION_TARGET.pixel_format}`,
     "-c:v",
@@ -1827,7 +2096,8 @@ async function normalizeSourceReferenceVideo(
     "-movflags",
     "+faststart",
     referenceVideoPath,
-  ]);
+  );
+  const transcodeResult = await runCommand(ffmpegPath, transcodeArgs);
   if (transcodeResult.code !== 0) {
     report.status = "failed";
     report.error = compactProcessError("media_normalization_failed", transcodeResult);
@@ -1850,6 +2120,28 @@ async function normalizeSourceReferenceVideo(
     report.note = "Reference MP4 was created, but ffprobe is unavailable so detailed media validation was skipped.";
   }
 
+  await writeJSON(reportPath, report);
+  return { report_path: reportPath, report };
+}
+
+async function skippedPreviewNormalization(
+  outputDir: string,
+  profile: RenderProfile,
+): Promise<{ report_path: string; report: MediaNormalizationReport }> {
+  const reportPath = path.join(outputDir, "media_normalization_report.json");
+  const report: MediaNormalizationReport = {
+    schema_version: MEDIA_NORMALIZATION_REPORT_SCHEMA_VERSION,
+    status: "skipped",
+    checked_at: new Date().toISOString(),
+    target: {
+      ...MEDIA_NORMALIZATION_TARGET,
+      width: boundedInteger(profile.width, 1280, 320, 3840),
+      height: boundedInteger(profile.height, 720, 180, 2160),
+      fps: boundedInteger(profile.fps, 30, 1, 60),
+    },
+    ffmpeg_available: true,
+    note: "Preview rendering uses the requested low-cost profile and skips final-delivery normalization.",
+  };
   await writeJSON(reportPath, report);
   return { report_path: reportPath, report };
 }
@@ -1981,10 +2273,12 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
   const fallbackArtifact = firstCompositableVideoArtifact(catalog, editPlan);
   return editPlan.shots
     .map((shot) => {
-      const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id) || fallbackArtifact;
+      const still = isStillShot(shot);
+      // Never fall back from a missing screenshot to an unrelated recording.
+      const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id) || (still ? undefined : fallbackArtifact);
       const sourcePath = artifact?.local_path || (artifact?.uri ? filePathFromURI(artifact.uri) : undefined);
-      const sourceRange = shot.source_time_range_ms || sourceRangeForStep(catalog, shot.source_step_id);
-      const durationMS = sourceRange ? Math.max(0, sourceRange[1] - sourceRange[0]) : 0;
+      const sourceRange = still ? undefined : shot.source_time_range_ms || sourceRangeForStep(catalog, shot.source_step_id);
+      const durationMS = still ? Math.max(0, shot.output_duration_ms ?? 0) : sourceRange ? Math.max(0, sourceRange[1] - sourceRange[0]) : 0;
       const operations = (shot.operations || []).map((operation) => operation.type);
       const overlays = (shot.overlays || []).map((overlay) => {
         const plannedOverlay: CompositorShot["overlays"][number] = { type: overlay.type };
@@ -1996,6 +2290,7 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
       const planned: CompositorShot = {
         id: shot.id,
         source_artifact_id: artifact?.id || shot.source_artifact_id,
+        presentation_kind: still ? "still" : "video",
         duration_ms: durationMS,
         operations,
         overlays,
@@ -2006,7 +2301,7 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
       if (sourceRange) planned.source_time_range_ms = sourceRange;
       return planned;
     })
-    .filter((shot) => shot.source_path && shot.source_time_range_ms && shot.duration_ms > 0);
+    .filter((shot) => shot.source_path && shot.duration_ms > 0 && (shot.presentation_kind === "still" || shot.source_time_range_ms));
 }
 
 function sourceRangeForStep(catalog: AssetTimelineCatalog, stepID?: string): [number, number] | undefined {
@@ -2016,26 +2311,32 @@ function sourceRangeForStep(catalog: AssetTimelineCatalog, stepID?: string): [nu
   return [step.start_ms, step.end_ms];
 }
 
-function plannedOperations(shots: CompositorShot[]): string[] {
+function plannedOperations(shots: CompositorShot[], editPlan?: DemoEditPlan): string[] {
   const values = new Set<string>();
   for (const shot of shots) {
     for (const operation of shot.operations) {
       values.add(operation);
     }
-    if (shot.source_time_range_ms) {
+    if (shot.presentation_kind === "video" && shot.source_time_range_ms) {
       values.add("trim");
     }
     for (const overlay of shot.overlays) {
       values.add(overlay.type);
     }
   }
+  if ((editPlan?.narrations?.length || 0) > 0) {
+    values.add("narration");
+  }
+  if ((editPlan?.caption_cues?.length || 0) > 0) {
+    values.add("caption");
+  }
   return [...values].sort();
 }
 
-function appliedOperationsForCurrentCompositor(shots: CompositorShot[]): string[] {
+function appliedOperationsForCurrentCompositor(shots: CompositorShot[], editPlan: DemoEditPlan): string[] {
   const values = new Set<string>();
   for (const shot of shots) {
-    if (shot.source_time_range_ms) {
+    if (shot.presentation_kind === "video" && shot.source_time_range_ms) {
       values.add("trim");
     }
     if (captionCuesForShot(shot).length > 0) {
@@ -2045,12 +2346,18 @@ function appliedOperationsForCurrentCompositor(shots: CompositorShot[]): string[
   if (shots.length > 1) {
     values.add("concat");
   }
+  if ((editPlan.narrations?.length || 0) > 0) {
+    values.add("narration");
+  }
+  if ((editPlan.caption_cues?.length || 0) > 0) {
+    values.add("caption");
+  }
   return [...values].sort();
 }
 
-function skippedOperationsForCurrentCompositor(shots: CompositorShot[], skipTrim: boolean): Array<{ type: string; reason: string }> {
+function skippedOperationsForCurrentCompositor(shots: CompositorShot[], editPlan: DemoEditPlan | undefined, skipTrim: boolean): Array<{ type: string; reason: string }> {
   const skipped = new Map<string, string>();
-  for (const operation of plannedOperations(shots)) {
+  for (const operation of plannedOperations(shots, editPlan)) {
     if (operation === "trim" && !skipTrim) {
       continue;
     }
@@ -2058,7 +2365,10 @@ function skippedOperationsForCurrentCompositor(shots: CompositorShot[], skipTrim
       skipped.set(operation, "ffmpeg trim/concat was not executed in fallback mode");
       continue;
     }
-    if (operation === "caption" && !skipTrim && shots.some((shot) => captionCuesForShot(shot).length > 0)) {
+    if (operation === "caption" && !skipTrim && (shots.some((shot) => captionCuesForShot(shot).length > 0) || (editPlan?.caption_cues?.length || 0) > 0)) {
+      continue;
+    }
+    if (operation === "narration" && !skipTrim && (editPlan?.narrations?.length || 0) > 0) {
       continue;
     }
     skipped.set(operation, "current deterministic compositor does not burn this operation into pixels yet");
@@ -2146,55 +2456,86 @@ function assTimestamp(valueMS: number): string {
   return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
 }
 
-async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPath: string, shots: CompositorShot[], extension: string): Promise<{ rendered: boolean; error?: string; video_codec?: string }> {
+async function composeWithFFmpeg(
+  ffmpegPath: string,
+  outputDir: string,
+  videoPath: string,
+  shots: CompositorShot[],
+  extension: string,
+  renderProfile?: RenderProfile,
+  audioPolicy: NonNullable<DemoEditPlan["audio"]> = { mode: "source", volume_percent: 100 },
+  catalog?: AssetTimelineCatalog,
+  editPlan?: DemoEditPlan,
+): Promise<{ rendered: boolean; error?: string; video_codec?: string; audio_codec?: string }> {
   const segmentsDir = path.join(outputDir, "segments");
   await mkdir(segmentsDir, { recursive: true });
   const segmentPaths: string[] = [];
-  const codec = await preferredVideoCodec(ffmpegPath, extension);
+  const codec = await preferredVideoCodec(ffmpegPath, extension, renderProfile);
+  const audioCodec = await preferredAudioCodec(ffmpegPath, extension);
+  const sourceAudio = new Map<string, boolean>();
+  let outputCursorMS = 0;
   for (const [index, shot] of shots.entries()) {
-    if (!shot.source_path || !shot.source_time_range_ms) {
+    if (!shot.source_path) {
       continue;
     }
-    const [startMS, endMS] = shot.source_time_range_ms;
-    const durationMS = endMS - startMS;
-    if (durationMS <= 0) {
-      continue;
-    }
-    const leadingOffsetMS = index === 0 && startMS === 0 ? Math.min(200, Math.max(0, durationMS - 100)) : 0;
-    const segmentStartMS = startMS + leadingOffsetMS;
-    const segmentDurationMS = durationMS - leadingOffsetMS;
+    const still = shot.presentation_kind === "still";
+    if (!still && !shot.source_time_range_ms) continue;
+    const [startMS, endMS] = shot.source_time_range_ms ?? [0, shot.duration_ms];
+    const segmentStartMS = still ? 0 : startMS;
+    const segmentDurationMS = still ? shot.duration_ms : endMS - startMS;
     if (segmentDurationMS <= 0) {
       continue;
     }
     const segmentPath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}${extension}`);
     const videoFilters: string[] = [];
+    if (renderProfile) {
+      const width = boundedInteger(renderProfile.width, renderProfile.mode === "preview" ? 1280 : 1920, 320, 3840);
+      const height = boundedInteger(renderProfile.height, renderProfile.mode === "preview" ? 720 : 1080, 180, 2160);
+      const fps = boundedInteger(renderProfile.fps, 30, 1, 60);
+      videoFilters.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p`);
+    }
     const captionCues = captionCuesForShot(shot);
     if (captionCues.length > 0) {
       const subtitlePath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}.ass`);
       await writeFile(subtitlePath, assSubtitleForCaptions(captionCues), "utf8");
       videoFilters.push(`subtitles='${ffmpegFilterPath(subtitlePath)}'`);
     }
-    const ffmpegArgs = [
-      "-y",
-      "-i",
-      shot.source_path,
-      "-ss",
-      secondsArg(segmentStartMS),
-      "-t",
-      secondsArg(segmentDurationMS),
-      "-map",
-      "0:v:0",
-    ];
+    const volumeExpression = audioVolumeExpression(audioPolicy, outputCursorMS, segmentDurationMS, segmentStartMS);
+    let useSourceAudio = false;
+    const ffmpegArgs = still
+      ? ["-y", "-loop", "1", "-i", shot.source_path, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+      : ["-y", "-i", shot.source_path];
+    if (!still) {
+      let sourceHasAudio = sourceAudio.get(shot.source_path);
+      if (sourceHasAudio === undefined) {
+        sourceHasAudio = await hasAudioStream(ffmpegPath, shot.source_path);
+        sourceAudio.set(shot.source_path, sourceHasAudio);
+      }
+      useSourceAudio = volumeExpression.usesSource && sourceHasAudio;
+      if (!useSourceAudio) ffmpegArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
+    }
+    if (!still) ffmpegArgs.push("-ss", secondsArg(segmentStartMS));
+    ffmpegArgs.push(
+      "-t", secondsArg(segmentDurationMS),
+      "-map", "0:v:0",
+      "-map", useSourceAudio ? "0:a:0" : "1:a:0",
+    );
     if (videoFilters.length > 0) {
       ffmpegArgs.push("-vf", videoFilters.join(","));
+    }
+    if (useSourceAudio) {
+      ffmpegArgs.push("-af", `asetpts=PTS-STARTPTS,volume='${volumeExpression.expression}':eval=frame,aresample=48000`);
     }
     ffmpegArgs.push(
       "-c:v",
       codec.name,
       ...codec.args,
-      "-an",
+      "-c:a",
+      audioCodec.name,
+      ...audioCodec.args,
       "-avoid_negative_ts",
       "make_zero",
+      "-shortest",
       segmentPath,
     );
     const result = await runCommand(ffmpegPath, ffmpegArgs);
@@ -2202,6 +2543,7 @@ async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPat
       return { rendered: false, error: compactProcessError("ffmpeg_segment_failed", result) };
     }
     segmentPaths.push(segmentPath);
+    outputCursorMS += segmentDurationMS;
   }
   if (segmentPaths.length === 0) {
     return { rendered: false, error: "no_segments_created" };
@@ -2212,24 +2554,162 @@ async function composeWithFFmpeg(ffmpegPath: string, outputDir: string, videoPat
       return { rendered: false, error: "missing_single_segment" };
     }
     await copyFile(onlySegmentPath, videoPath);
-    return { rendered: true, video_codec: codec.name };
+    return applyNarrationsAndGlobalCaptions(ffmpegPath, outputDir, videoPath, extension, codec, audioCodec, catalog, editPlan);
   }
   const concatListPath = path.join(segmentsDir, "concat.txt");
   await writeFile(concatListPath, segmentPaths.map((segmentPath) => `file '${ffmpegConcatPath(segmentPath)}'`).join("\n") + "\n", "utf8");
-  const concatResult = await runCommand(ffmpegPath, ["-y", "-f", "concat", "-safe", "0", "-i", concatListPath, "-c:v", codec.name, ...codec.args, "-an", videoPath]);
+  const concatResult = await runCommand(ffmpegPath, [
+    "-y", "-f", "concat", "-safe", "0", "-i", concatListPath,
+    "-map", "0:v:0", "-map", "0:a:0", "-c:v", codec.name, ...codec.args,
+    "-c:a", audioCodec.name, ...audioCodec.args, videoPath,
+  ]);
   if (concatResult.code !== 0) {
     return { rendered: false, error: compactProcessError("ffmpeg_concat_failed", concatResult) };
   }
-  return { rendered: true, video_codec: codec.name };
+  return applyNarrationsAndGlobalCaptions(ffmpegPath, outputDir, videoPath, extension, codec, audioCodec, catalog, editPlan);
 }
 
-async function preferredVideoCodec(ffmpegPath: string, extension: string): Promise<VideoCodecConfig> {
+function hasPostProcessingWork(editPlan: DemoEditPlan): boolean {
+  return (editPlan.narrations?.length || 0) > 0 || (editPlan.caption_cues?.length || 0) > 0;
+}
+
+async function buildNarrationRenderInputs(catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): Promise<{ inputs?: NarrationRenderInput[]; error?: string }> {
+  const inputs: NarrationRenderInput[] = [];
+  for (const narration of editPlan.narrations || []) {
+    const artifact = findDemoArtifactByID(catalog, narration.source_artifact_id);
+    const sourcePath = artifact?.local_path || (artifact?.uri ? filePathFromURI(artifact.uri) : undefined);
+    if (!artifact || !sourcePath || !(await stat(sourcePath).catch(() => undefined))?.isFile()) {
+      return { error: `narration_source_unavailable:${narration.source_artifact_id}` };
+    }
+    const sourceRange = narration.source_time_range_ms || [0, artifact.duration_ms || 0] as [number, number];
+    if (sourceRange[1] <= sourceRange[0]) {
+      return { error: `invalid_narration_source_range:${narration.id}` };
+    }
+    inputs.push({
+      id: narration.id,
+      source_path: sourcePath,
+      source_time_range_ms: sourceRange,
+      output_time_range_ms: narration.output_time_range_ms,
+      volume_percent: narration.volume_percent,
+      duck_source_audio: narration.duck_source_audio === true,
+      duck_source_to_percent: narration.duck_source_to_percent ?? 30,
+    });
+  }
+  return { inputs };
+}
+
+async function applyNarrationsAndGlobalCaptions(
+  ffmpegPath: string,
+  outputDir: string,
+  videoPath: string,
+  extension: string,
+  videoCodec: VideoCodecConfig,
+  audioCodec: VideoCodecConfig,
+  catalog?: AssetTimelineCatalog,
+  editPlan?: DemoEditPlan,
+): Promise<{ rendered: boolean; error?: string; video_codec?: string; audio_codec?: string }> {
+  if (!editPlan || !hasPostProcessingWork(editPlan)) {
+    return { rendered: true, video_codec: videoCodec.name, audio_codec: audioCodec.name };
+  }
+  if (!catalog) {
+    return { rendered: false, error: "missing_catalog_for_audio_post_process" };
+  }
+  const narrationPlan = await buildNarrationRenderInputs(catalog, editPlan);
+  if (!narrationPlan.inputs) {
+    return { rendered: false, error: narrationPlan.error || "invalid_narration_plan" };
+  }
+
+  const postProcessDir = path.join(outputDir, "postprocess");
+  await mkdir(postProcessDir, { recursive: true });
+  const postProcessPath = path.join(postProcessDir, `rendered_${safeName(editPlan.plan_id)}${extension}`);
+  const ffmpegArgs = ["-y", "-i", videoPath];
+  for (const narration of narrationPlan.inputs) {
+    ffmpegArgs.push("-i", narration.source_path);
+  }
+
+  const filters: string[] = [];
+  if (narrationPlan.inputs.length > 0) {
+    filters.push(`[0:a]volume='${duckedSourceVolumeExpression(narrationPlan.inputs)}':eval=frame,asetpts=PTS-STARTPTS[base_audio]`);
+    const narrationLabels: string[] = [];
+    narrationPlan.inputs.forEach((narration, index) => {
+      const label = `narration_${index}`;
+      narrationLabels.push(`[${label}]`);
+      filters.push(
+        `[${index + 1}:a]atrim=start=${secondsArg(narration.source_time_range_ms[0])}:end=${secondsArg(narration.source_time_range_ms[1])},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=${(narration.volume_percent / 100).toFixed(2)},adelay=${Math.round(narration.output_time_range_ms[0])}:all=1[${label}]`,
+      );
+    });
+    filters.push(`[base_audio]${narrationLabels.join("")}amix=inputs=${narrationPlan.inputs.length + 1}:duration=first:normalize=0[mixed_audio]`);
+  }
+
+  if (editPlan.caption_cues?.length) {
+    const globalCaptionsPath = path.join(postProcessDir, "global_captions.ass");
+    await writeFile(globalCaptionsPath, assSubtitleForCaptions(editPlan.caption_cues.map((cue) => ({ start_ms: cue.output_range_ms[0], end_ms: cue.output_range_ms[1], text: cue.text }))), "utf8");
+    ffmpegArgs.push("-vf", `subtitles='${ffmpegFilterPath(globalCaptionsPath)}'`);
+  }
+  if (filters.length > 0) {
+    ffmpegArgs.push("-filter_complex", filters.join(";"));
+  }
+  ffmpegArgs.push("-map", "0:v:0", "-map", narrationPlan.inputs.length > 0 ? "[mixed_audio]" : "0:a:0", "-c:v", videoCodec.name, ...videoCodec.args, "-c:a", audioCodec.name, ...audioCodec.args, "-movflags", "+faststart", postProcessPath);
+  const result = await runCommand(ffmpegPath, ffmpegArgs);
+  if (result.code !== 0) {
+    return { rendered: false, error: compactProcessError("ffmpeg_audio_caption_post_process_failed", result) };
+  }
+  await copyFile(postProcessPath, videoPath);
+  return { rendered: true, video_codec: videoCodec.name, audio_codec: audioCodec.name };
+}
+
+function duckedSourceVolumeExpression(narrations: NarrationRenderInput[]): string {
+  let expression = "1.00";
+  for (const narration of [...narrations].reverse()) {
+    if (!narration.duck_source_audio) continue;
+    const start = secondsArg(narration.output_time_range_ms[0]);
+    const end = secondsArg(narration.output_time_range_ms[1]);
+    const volume = (narration.duck_source_to_percent / 100).toFixed(2);
+    expression = `if(between(t,${start},${end}),min(${volume},${expression}),${expression})`;
+  }
+  return expression;
+}
+
+export function audioVolumeExpression(audioPolicy: NonNullable<DemoEditPlan["audio"]>, outputStartMS: number, durationMS: number, sourceTimestampOffsetMS = 0): { expression: string; usesSource: boolean } {
+  const outputEndMS = outputStartMS + durationMS;
+  const baseVolume = audioPolicy.mode === "mute" ? 0 : audioPolicy.volume_percent / 100;
+  const overlapping = (audioPolicy.segment_settings ?? []).filter((segment) => segment.end_ms > outputStartMS && segment.start_ms < outputEndMS);
+  let expression = baseVolume.toFixed(2);
+  let usesSource = baseVolume > 0;
+  for (const segment of [...overlapping].reverse()) {
+    const startSec = (sourceTimestampOffsetMS + Math.max(0, segment.start_ms - outputStartMS)) / 1000;
+    const endSec = (sourceTimestampOffsetMS + Math.min(durationMS, segment.end_ms - outputStartMS)) / 1000;
+    const volume = segment.mode === "mute" ? 0 : segment.volume_percent / 100;
+    if (volume > 0) usesSource = true;
+    expression = `if(between(t,${startSec.toFixed(3)},${endSec.toFixed(3)}),${volume.toFixed(2)},${expression})`;
+  }
+  return { expression, usesSource };
+}
+
+async function preferredAudioCodec(ffmpegPath: string, extension: string): Promise<VideoCodecConfig> {
+  if (extension.toLowerCase() === ".webm") {
+    const encoderList = await runCommand(ffmpegPath, ["-hide_banner", "-encoders"]);
+    const encoders = `${encoderList.stdout}\n${encoderList.stderr}`;
+    if (encoders.includes("libopus")) return { name: "libopus", args: ["-b:a", "128k", "-ar", "48000", "-ac", "2"] };
+    return { name: "libvorbis", args: ["-q:a", "4", "-ar", "48000", "-ac", "2"] };
+  }
+  return { name: "aac", args: ["-b:a", "128k", "-ar", "48000", "-ac", "2"] };
+}
+
+async function hasAudioStream(ffmpegPath: string, filePath: string): Promise<boolean> {
+  const result = await runCommand(ffmpegPath, ["-hide_banner", "-i", filePath]);
+  return /Stream\s+#\S+.*Audio:/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+async function preferredVideoCodec(ffmpegPath: string, extension: string, renderProfile?: RenderProfile): Promise<VideoCodecConfig> {
   const encoderList = await runCommand(ffmpegPath, ["-hide_banner", "-encoders"]);
   const encoders = `${encoderList.stdout}\n${encoderList.stderr}`;
   const normalizedExtension = extension.toLowerCase();
   if (normalizedExtension === ".mp4" || normalizedExtension === ".m4v" || normalizedExtension === ".mov") {
     if (encoders.includes("libx264")) {
-      return { name: "libx264", args: ["-preset", "veryfast", "-crf", "23", "-g", "12", "-keyint_min", "12", "-pix_fmt", "yuv420p"] };
+      const preset = allowedPreset(renderProfile?.preset, renderProfile?.mode === "preview" ? "ultrafast" : "medium");
+      const crf = boundedInteger(renderProfile?.crf, renderProfile?.mode === "preview" ? 28 : 21, 0, 51);
+      return { name: "libx264", args: ["-preset", preset, "-crf", String(crf), "-g", "30", "-keyint_min", "30", "-pix_fmt", "yuv420p"] };
     }
     return { name: "mpeg4", args: ["-q:v", "4", "-g", "12"] };
   }
@@ -2237,6 +2717,16 @@ async function preferredVideoCodec(ffmpegPath: string, extension: string): Promi
     return { name: "libvpx-vp9", args: ["-b:v", "1M", "-g", "12", "-keyint_min", "12", "-deadline", "realtime", "-cpu-used", "4"] };
   }
   return { name: "libvpx", args: ["-b:v", "1M", "-g", "12", "-keyint_min", "12", "-deadline", "realtime", "-cpu-used", "4"] };
+}
+
+function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.round(value as number)));
+}
+
+function allowedPreset(value: string | undefined, fallback: string): string {
+  const allowed = new Set(["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]);
+  return value && allowed.has(value) ? value : fallback;
 }
 
 async function isCommandAvailable(command: string): Promise<boolean> {
@@ -2363,6 +2853,10 @@ function isVideoArtifact(artifact: TimelineArtifact): boolean {
   return artifact.kind === "raw_recording" || artifact.mime_type?.startsWith("video/") === true;
 }
 
+function isAudioArtifact(artifact: TimelineArtifact): boolean {
+  return artifact.kind === "narration_audio" || artifact.asset_role === "narration_audio" || artifact.mime_type?.startsWith("audio/") === true;
+}
+
 function videoExtensionForArtifact(artifact: TimelineArtifact): ".mp4" | ".webm" | ".mov" {
   const uri = artifact.local_path || artifact.uri;
   if (artifact.mime_type === "video/mp4" || uri.toLowerCase().endsWith(".mp4")) return ".mp4";
@@ -2419,8 +2913,9 @@ async function timelineArtifactFromRef(artifact: ArtifactRef, durationMS?: numbe
     if (typeof artifact.metadata.asset_role === "string") result.asset_role = artifact.metadata.asset_role;
     if (typeof artifact.metadata.include_in_demo === "boolean") result.include_in_demo = artifact.metadata.include_in_demo;
     if (typeof artifact.metadata.capture_scope === "string") result.capture_scope = artifact.metadata.capture_scope;
+    if (typeof artifact.metadata.duration_ms === "number") result.duration_ms = artifact.metadata.duration_ms;
   }
-  if (durationMS !== undefined) result.duration_ms = durationMS;
+  if (durationMS !== undefined && result.duration_ms === undefined) result.duration_ms = durationMS;
   if (filePath) result.local_path = filePath;
   return result;
 }

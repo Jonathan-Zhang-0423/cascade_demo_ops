@@ -7,6 +7,7 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --dir tests",
     "smoke:render:requirements": "node scripts/smoke-render-requirements.mjs",
     "smoke:render:candidates": "node scripts/smoke-render-candidates.mjs",
     "smoke:render:format-fallback": "node scripts/smoke-render-format-fallback.mjs",
