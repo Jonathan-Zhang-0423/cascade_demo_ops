@@ -307,10 +307,10 @@ func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence 
 		plan.EvidenceRefs = append(plan.EvidenceRefs, action.EvidenceRefs...)
 	}
 	if containsAnyNormalized(intentText, "登录", "登陆", "登入", "login", "sign in", "signin") {
-		add(intentWaitAction(project, "intent_login_observe", "演示登录完成并进入工作台", "登录完成，进入可演示的产品工作台上下文。", 10000, false))
+		add(intentWaitAction(project, "intent_login_observe", "演示登录完成并进入工作台", "登录完成，进入可演示的产品工作台上下文。", durationMSForIntentKeywords(intentText, "登录", "登陆", "登入", "login", "sign in", "signin"), false))
 	}
 	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") {
-		add(intentSelectorAction(project, candidates, "intent_new_project", "新建项目", "click", "点击新建项目入口", "进入新建项目流程。", 10000, true, []string{"新建项目", "创建项目", "新增项目", "new project", "create project"}, []string{
+		add(intentSelectorAction(project, candidates, "intent_new_project", "新建项目", "click", "点击新建项目入口", "进入新建项目流程。", durationMSForIntentKeywords(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project"), true, []string{"新建项目", "创建项目", "新增项目", "new project", "create project"}, []string{
 			`[data-testid='new-project']`,
 			`[data-testid='create-project']`,
 			`button:has-text("新建项目")`,
@@ -323,7 +323,7 @@ func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence 
 	}
 	projectName := intentProjectName(intentText)
 	if projectName != "" {
-		add(intentSelectorAction(project, candidates, "intent_project_name", "输入项目名称："+projectName, "fill", "填写项目名称", "项目名称已填写为 "+projectName+"。", 10000, true, []string{"项目名称", "项目名", "project name", "name", projectName}, []string{
+		add(intentSelectorAction(project, candidates, "intent_project_name", "输入项目名称："+projectName, "fill", "填写项目名称", "项目名称已填写为 "+projectName+"。", durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", "name", projectName), true, []string{"项目名称", "项目名", "project name", "name", projectName}, []string{
 			`input[placeholder*='项目']`,
 			`input[placeholder*='名称']`,
 			`input[aria-label*='项目']`,
@@ -335,7 +335,7 @@ func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence 
 		}, withIntentActionValue(projectName)))
 	}
 	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") {
-		add(intentSelectorAction(project, candidates, "intent_build_mode", "选择构建模式", "click", "选择构建模式", "项目已切换到构建模式。", 10000, true, []string{"构建模式", "build mode", "builder mode", "构建"}, []string{
+		add(intentSelectorAction(project, candidates, "intent_build_mode", "选择构建模式", "click", "选择构建模式", "项目已切换到构建模式。", durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"), true, []string{"构建模式", "build mode", "builder mode", "构建"}, []string{
 			`[data-testid='build-mode']`,
 			`[data-testid='mode-build']`,
 			`button:has-text("构建模式")`,
@@ -348,7 +348,7 @@ func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence 
 	}
 	if containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "run build", "start build", "生成") ||
 		containsAnyNormalized(intentText, "构建") {
-		add(intentSelectorAction(project, candidates, "intent_start_agent_build", "启动 agent 实际构建", "click", "启动 agent 构建", "agent 已开始根据需求实际构建项目。", 10000, true, []string{"agent", "智能体", "开始构建", "实际构建", "生成", "build", "run", "start"}, []string{
+		add(intentSelectorAction(project, candidates, "intent_start_agent_build", "启动 agent 实际构建", "click", "启动 agent 构建", "agent 已开始根据需求实际构建项目。", durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "agent", "智能体", "构建", "build", "run", "start"), true, []string{"agent", "智能体", "开始构建", "实际构建", "生成", "build", "run", "start"}, []string{
 			`[data-testid='start-build']`,
 			`[data-testid='generate-app']`,
 			`button:has-text("开始构建")`,
@@ -361,7 +361,7 @@ func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence 
 			`button:has-text("Run")`,
 		}))
 	}
-	if waitMS := requiredLongWaitMS(intentText); waitMS > 0 {
+	if waitMS := requiredObservationDurationMS(intentText); waitMS > 0 {
 		add(intentWaitAction(project, "intent_agent_build_wait", fmt.Sprintf("等待 agent 实际构建 %d 秒", waitMS/1000), "持续观察 agent 构建过程，等待结果逐步出现。", waitMS, true))
 	}
 	plan.EvidenceRefs = uniqueEvidenceRefs(plan.EvidenceRefs)
@@ -432,7 +432,7 @@ func intentSelectorAction(
 		ExpectedOutcome:    expected,
 		SuccessState:       success,
 		WaitConditions:     []string{"domcontentloaded", "networkidle"},
-		DurationHintMS:     maxInt(durationMS, 10000),
+		DurationHintMS:     durationMS,
 		IsBusiness:         business,
 		VerificationStatus: "runtime_adaptive",
 		VerificationSource: "runtime_adaptive_intent_fallback",
@@ -456,7 +456,7 @@ func intentWaitAction(project *model.ProjectContext, id string, label string, su
 		ExpectedOutcome:    success,
 		SuccessState:       success,
 		WaitConditions:     []string{"domcontentloaded", "networkidle"},
-		DurationHintMS:     maxInt(durationMS, 10000),
+		DurationHintMS:     durationMS,
 		IsBusiness:         business,
 		VerificationStatus: "runtime_adaptive",
 		VerificationSource: "runtime_adaptive_intent_fallback",
@@ -787,10 +787,6 @@ func emptyVerifiedPlan(project *model.ProjectContext, intelligence *model.Projec
 }
 
 func verifiedActionFromProbe(probe model.InteractionProbe, source string, scanID string) model.VerifiedInteractionAction {
-	duration := 12000
-	if looksLikeLoginAction(probe.Label, probe.Selector) {
-		duration = 10000
-	}
 	return model.VerifiedInteractionAction{
 		ID:                 firstNonEmpty(probe.ID, "verified_"+shortHash(probe.Selector)),
 		IntentGoalID:       probe.IntentGoalID,
@@ -803,7 +799,7 @@ func verifiedActionFromProbe(probe model.InteractionProbe, source string, scanID
 		ExpectedOutcome:    firstNonEmpty(probe.Label, "目标业务动作已执行或可见"),
 		SuccessState:       "页面出现目标业务状态或后续步骤入口",
 		WaitConditions:     probe.WaitConditions,
-		DurationHintMS:     duration,
+		DurationHintMS:     0,
 		IsBusiness:         probe.IsBusiness && !probe.IsChrome && !looksLikeLoginAction(probe.Label, probe.Selector),
 		VerificationStatus: "verified",
 		VerificationSource: firstNonEmpty(source, probe.Source),

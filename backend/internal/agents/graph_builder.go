@@ -474,7 +474,9 @@ func (a *GraphBuilderAgent) generateGraphFromBusinessStagePlan(ctx context.Conte
 		EvidenceRefs: uniqueEvidenceRefs(append(reportEvidenceRefs(report), stagePlan.EvidenceRefs...)),
 	}}
 	graph.Assets = model.NewMVPAssetManifest()
-	graph.Assets.TargetDurationSec = maxInt(totalBusinessStageDurationMS(stagePlan)/1000, 60)
+	if totalMS := totalBusinessStageDurationMS(stagePlan); totalMS > 0 {
+		graph.Assets.TargetDurationSec = ceilDurationSeconds(totalMS)
+	}
 	graph.Maintenance = &model.MaintenancePolicy{
 		UpdateTriggers:   []string{"requirement_changed", "business_stage_changed", "route_changed", "browser_agent_diagnostic"},
 		StalenessDays:    14,
@@ -560,7 +562,7 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 			Value:     actionValue,
 			InputRef:  stage.Action.InputRef,
 			SecretRef: stage.Action.SecretRef,
-			TimeoutMS: maxInt(stage.DurationMS, 10000),
+			TimeoutMS: stage.DurationMS,
 			WaitUntil: businessStageWaitUntil(stage),
 		},
 		StateAfter: []model.StateAssertion{{
@@ -601,7 +603,7 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 				MaxAttempts:         2,
 			},
 		},
-		DurationHintMS: maxInt(stage.DurationMS, 10000),
+		DurationHintMS: stage.DurationMS,
 		Sensitive:      stage.Kind == model.BusinessStageKindSessionSetup,
 		Tags:           uniqueStrings([]string{"business_stage_plan", string(stage.Kind), string(stage.RouteState)}),
 		Metadata:       metadata,
@@ -789,9 +791,30 @@ func totalBusinessStageDurationMS(plan *model.BusinessStagePlan) int {
 		return total
 	}
 	for _, stage := range plan.Stages {
-		total += maxInt(stage.DurationMS, 10000)
+		total += stage.DurationMS
 	}
 	return total
+}
+
+func totalGraphNodeDurationMS(nodes []*model.GraphNode) int {
+	total := 0
+	for _, node := range nodes {
+		if node != nil && node.DurationHintMS > 0 {
+			total += node.DurationHintMS
+		}
+	}
+	return total
+}
+
+func totalGraphNodeDurationSeconds(nodes []*model.GraphNode) int {
+	return ceilDurationSeconds(totalGraphNodeDurationMS(nodes))
+}
+
+func ceilDurationSeconds(durationMS int) int {
+	if durationMS <= 0 {
+		return 0
+	}
+	return (durationMS + 999) / 1000
 }
 
 func demoIntentFromProjectContext(project *model.ProjectContext) *model.DemoIntentSpec {
@@ -894,7 +917,9 @@ func (a *GraphBuilderAgent) generateGraphFromVerifiedInteractions(ctx context.Co
 		EvidenceRefs: uniqueEvidenceRefs(append(reportEvidenceRefs(report), plan.EvidenceRefs...)),
 	}}
 	graph.Assets = model.NewMVPAssetManifest()
-	graph.Assets.TargetDurationSec = maxInt(len(graph.Nodes)*12, 60)
+	if totalMS := totalGraphNodeDurationMS(graph.Nodes); totalMS > 0 {
+		graph.Assets.TargetDurationSec = ceilDurationSeconds(totalMS)
+	}
 	graph.Maintenance = &model.MaintenancePolicy{
 		UpdateTriggers:   []string{"requirement_changed", "browser_scan_failed", "selector_validation_failed", "route_changed"},
 		StalenessDays:    14,
@@ -957,12 +982,11 @@ func verifiedStartNode(project *model.ProjectContext, entryPoint string, feature
 			Severity:  "blocking",
 			Required:  true,
 		}},
-		Narrative:      &model.NarrativeCue{Title: "从产品入口开始", Caption: "打开产品环境并等待页面稳定。", AudienceLens: project.TargetAudience},
-		Capture:        &model.CaptureSpec{Screenshot: true, Video: true, AssetRole: "opening_context", MaskSelectors: maskSelectorsFromProject(project)},
-		EvidenceRefs:   evidence,
-		FailurePolicy:  &model.NodeFailurePolicy{RetryAttempts: 2, RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2}},
-		DurationHintMS: 12000,
-		Metadata:       map[string]any{"verification_status": "entry_navigation"},
+		Narrative:     &model.NarrativeCue{Title: "从产品入口开始", Caption: "打开产品环境并等待页面稳定。", AudienceLens: project.TargetAudience},
+		Capture:       &model.CaptureSpec{Screenshot: true, Video: true, AssetRole: "opening_context", MaskSelectors: maskSelectorsFromProject(project)},
+		EvidenceRefs:  evidence,
+		FailurePolicy: &model.NodeFailurePolicy{RetryAttempts: 2, RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2}},
+		Metadata:      map[string]any{"verification_status": "entry_navigation"},
 	}
 }
 
@@ -1079,7 +1103,7 @@ func graphNodeFromVerifiedAction(project *model.ProjectContext, action model.Ver
 			RetryAttempts: 2,
 			RepairPolicy:  &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2},
 		},
-		DurationHintMS: maxInt(action.DurationHintMS, 12000),
+		DurationHintMS: action.DurationHintMS,
 		Tags:           uniqueStrings([]string{"verified_interaction", action.IntentGoalID, action.VerificationSource, action.VerificationStatus}),
 		Metadata: map[string]any{
 			"verified_interaction_id": action.ID,
@@ -1144,12 +1168,11 @@ func verifiedCloseNode(project *model.ProjectContext, featureID string, evidence
 			Severity:  "warning",
 			Required:  false,
 		}},
-		Narrative:      &model.NarrativeCue{Title: "展示最终状态", Caption: "保留最终页面状态，方便审阅结果。", AudienceLens: project.TargetAudience},
-		Capture:        &model.CaptureSpec{Screenshot: true, Video: true, AssetRole: "closing_state", MaskSelectors: maskSelectorsFromProject(project)},
-		EvidenceRefs:   evidence,
-		FailurePolicy:  &model.NodeFailurePolicy{RetryAttempts: 1},
-		DurationHintMS: 10000,
-		Metadata:       map[string]any{"verification_status": "non_blocking_observation"},
+		Narrative:     &model.NarrativeCue{Title: "展示最终状态", Caption: "保留最终页面状态，方便审阅结果。", AudienceLens: project.TargetAudience},
+		Capture:       &model.CaptureSpec{Screenshot: true, Video: true, AssetRole: "closing_state", MaskSelectors: maskSelectorsFromProject(project)},
+		EvidenceRefs:  evidence,
+		FailurePolicy: &model.NodeFailurePolicy{RetryAttempts: 1},
+		Metadata:      map[string]any{"verification_status": "non_blocking_observation"},
 	}
 }
 
@@ -1349,7 +1372,7 @@ func augmentGraphWithIntelligence(graph *model.DemoWorkflowGraph, project *model
 		graph.Assets.TargetDurationSec = maxInt(graph.Assets.TargetDurationSec, intelligence.ScriptReadinessReport.SuggestedTargetDurationSec)
 	}
 	if graph.Assets.TargetDurationSec <= 0 {
-		graph.Assets.TargetDurationSec = 60
+		graph.Assets.TargetDurationSec = totalGraphNodeDurationSeconds(graph.Nodes)
 	}
 
 	startNode := graph.Nodes[0]
@@ -1372,9 +1395,6 @@ func augmentGraphWithIntelligence(graph *model.DemoWorkflowGraph, project *model
 	graph.Edges = sequentialGraphEdges(nodes)
 	if len(graph.Narratives) > 0 {
 		graph.Narratives[0].NodeRefs = nodeIDs(nodes)
-	}
-	if graph.Assets.TargetDurationSec < 60 {
-		graph.Assets.TargetDurationSec = 60
 	}
 }
 
@@ -1428,7 +1448,6 @@ func stabilizationGraphNode(project *model.ProjectContext, intelligence *model.P
 		FailurePolicy: &model.NodeFailurePolicy{
 			RetryAttempts: 1,
 		},
-		DurationHintMS: 12000,
 	}
 	return node
 }
@@ -1487,7 +1506,6 @@ func supportingGraphNode(project *model.ProjectContext, productMap *model.Produc
 		FailurePolicy: &model.NodeFailurePolicy{
 			RetryAttempts: 2,
 		},
-		DurationHintMS: 12000,
 	}
 	return node
 }
@@ -1583,10 +1601,7 @@ func ensureNodeDuration(node *model.GraphNode, minMS int) {
 	if node == nil {
 		return
 	}
-	if node.DurationHintMS < minMS {
-		node.DurationHintMS = minMS
-	}
-	if node.ActionSpec != nil && node.ActionSpec.TimeoutMS < minMS {
+	if node.ActionSpec != nil && node.ActionSpec.TimeoutMS > 0 && node.ActionSpec.TimeoutMS < minMS {
 		node.ActionSpec.TimeoutMS = minMS
 	}
 }

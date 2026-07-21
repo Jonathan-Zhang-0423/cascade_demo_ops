@@ -32,9 +32,6 @@ func TestGraphBuilderPrefersExecutableBusinessSelector(t *testing.T) {
 	if got := node.ActionSpec.Target.Selector; got != "[data-testid='create-campaign']" {
 		t.Fatalf("expected data-testid selector, got %q", got)
 	}
-	if node.DurationHintMS < 10000 {
-		t.Fatalf("expected natural stage duration, got %d", node.DurationHintMS)
-	}
 }
 
 func TestGraphBuilderBlocksWhenOnlyGenericSelectorExists(t *testing.T) {
@@ -123,7 +120,7 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 				RouteState:               model.BusinessRouteStateUnauthenticated,
 				EntryRoute:               "/login",
 				ExpectedRouteAfterAction: "/app",
-				DurationMS:               10000,
+				DurationMS:               7000,
 				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "登录", SuccessState: "进入工作台"},
 			},
 			{
@@ -135,7 +132,7 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 				RouteState:               model.BusinessRouteStateCreationFlow,
 				EntryRoute:               "/app",
 				ExpectedRouteAfterAction: "/app",
-				DurationMS:               10000,
+				DurationMS:               13000,
 				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "项目名称", InputSemantic: "project_name", InputValue: "俄罗斯方块", SuccessState: "项目名称已填写"},
 				Targets:                  []model.BusinessTargetCandidate{{ID: "target_project_name", Label: "项目名称", Kind: "fill", Selector: "[data-testid='project-name']", SelectorScore: 100}},
 				EvidenceRefs:             []model.EvidenceRef{{ID: "ev_project_name", Kind: model.EvidenceKindSourceCode}},
@@ -144,12 +141,12 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 				ID:                       "business_stage_observe_agent_progress",
 				Order:                    3,
 				Kind:                     model.BusinessStageKindObserveProgress,
-				Title:                    "观察 agent 构建过程 60 秒",
+				Title:                    "观察 agent 构建过程 45 秒",
 				Objective:                "持续观察 agent 实际构建过程",
 				RouteState:               model.BusinessRouteStateBuildRunning,
 				EntryRoute:               "/project/:id",
 				ExpectedRouteAfterAction: "/project/:id",
-				DurationMS:               60000,
+				DurationMS:               45000,
 				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionWait), Label: "观察构建进度", SuccessState: "构建过程可见"},
 			},
 		},
@@ -172,8 +169,8 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 	if got := graph.Nodes[1].ActionSpec.Value; got != "俄罗斯方块" {
 		t.Fatalf("project name semantic value lost: %q", got)
 	}
-	if graph.Nodes[2].ActionSpec.Type != model.GraphActionWait || graph.Nodes[2].DurationHintMS < 60000 {
-		t.Fatalf("observe_progress must be wait-only and keep 60s duration: %+v", graph.Nodes[2])
+	if graph.Nodes[2].ActionSpec.Type != model.GraphActionWait || graph.Nodes[2].DurationHintMS != 45000 {
+		t.Fatalf("observe_progress must be wait-only and keep explicit duration: %+v", graph.Nodes[2])
 	}
 	if graphNodeBySelector(graph, "[data-testid='button-sidebar-toggle']") != nil {
 		t.Fatal("verified interaction selector pool should not override business stage spine")
@@ -188,7 +185,7 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 		t.Fatalf("stage approval did not preserve business stage metadata: %+v", stage)
 	}
 	outline := outlineStageByNodeID(pkg.ExecutableBundle, "business_stage_observe_agent_progress")
-	if outline == nil || outline.StageKind != model.BusinessStageKindObserveProgress || outline.DurationMS < 60000 {
+	if outline == nil || outline.StageKind != model.BusinessStageKindObserveProgress || outline.DurationMS != 45000 {
 		t.Fatalf("outline did not preserve observe_progress metadata: %+v", outline)
 	}
 }
@@ -216,7 +213,7 @@ func TestProjectIntelligenceTreatsDisplaySelectorsAsReadOnly(t *testing.T) {
 
 func TestIntentFallbackGeneratesTetrisBuildWorkflow(t *testing.T) {
 	project := graphQualityProject()
-	project.ProductDescription = "演示登录（10s），新建项目（10s，俄罗斯方块，构建模式），agent实际构建演示（60s等待）"
+	project.ProductDescription = "演示登录（7s），新建项目（13s，俄罗斯方块，构建模式），agent实际构建演示（45s等待）"
 	project.DemoAccount = &model.DemoAccount{UsernameSecretRef: "local-dev/demo_username", PasswordSecretRef: "local-dev/demo_password"}
 	intelligence := graphQualityIntelligence()
 	intelligence.RunIntentScope = runIntentScopeForProject(project)
@@ -247,7 +244,7 @@ func TestIntentFallbackGeneratesTetrisBuildWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	outlineText := outlineAuditText(pkg.ExecutableBundle.StageApprovalPlan, pkg.ExecutableBundle.ScriptOutline)
-	for _, want := range []string{"新建项目", "俄罗斯方块", "构建模式", "启动 agent 实际构建", "60000"} {
+	for _, want := range []string{"新建项目", "俄罗斯方块", "构建模式", "启动 agent 实际构建", "45000"} {
 		if !strings.Contains(outlineText, want) {
 			t.Fatalf("expected generated outline to contain %q:\n%s", want, outlineText)
 		}
@@ -267,7 +264,7 @@ func TestIntentFallbackGeneratesTetrisBuildWorkflow(t *testing.T) {
 
 func TestIntentFallbackRejectsMismatchedAndNegativeCodeCandidates(t *testing.T) {
 	project := graphQualityProject()
-	project.ProductDescription = "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒"
+	project.ProductDescription = "新建项目俄罗斯方块，构建模式，agent实际构建演示45秒"
 	intelligence := graphQualityIntelligence()
 	intelligence.RunIntentScope = runIntentScopeForProject(project)
 	intelligence.DemoIntent.Objective = project.ProductDescription
@@ -295,10 +292,10 @@ func TestIntentFallbackRejectsMismatchedAndNegativeCodeCandidates(t *testing.T) 
 
 func TestProductMapAndDossierFilterUnsafeIntentEvidence(t *testing.T) {
 	project := graphQualityProject()
-	project.ProductDescription = "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒"
+	project.ProductDescription = "新建项目俄罗斯方块，构建模式，agent实际构建演示45秒"
 	intelligence := &model.ProjectIntelligencePack{
 		DemoIntent: &model.DemoIntentSpec{
-			Objective: "新建项目俄罗斯方块，构建模式，agent实际构建演示60秒，并展示 graph can be approved",
+			Objective: "新建项目俄罗斯方块，构建模式，agent实际构建演示45秒，并展示 graph can be approved",
 		},
 		InteractionSurfaces: []model.InteractionSurface{{
 			ID:     "surface_dashboard",

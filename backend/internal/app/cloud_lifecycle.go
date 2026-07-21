@@ -1460,14 +1460,6 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 				"Add the domain to recording_run_spec.allowed_domains or remove the navigation.",
 			))
 		}
-		if step.Timing.DurationMS > 0 && step.Timing.DurationMS < 10000 && step.Action.Type != model.GraphActionNavigate {
-			findings = append(findings, packagePreflightFinding(
-				"stage_duration_short_"+shortID(step.NodeID),
-				model.FindingSeverityWarning,
-				"stage duration is shorter than the recommended 10 seconds: "+step.NodeID,
-				"Keep each business stage around 10 seconds with natural wait/capture pacing.",
-			))
-		}
 		if !outlineRuntime && len(step.EvidenceRefs) == 0 && actionRequiresSelector(step.Action.Type) {
 			findings = append(findings, packagePreflightFinding(
 				"evidence_missing_"+shortID(step.NodeID),
@@ -1589,9 +1581,9 @@ func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle)
 			if stageEvidenceRequired(stage) && !stageApprovalHasEvidence(stage) {
 				findings = append(findings, packagePreflightFinding(
 					"stage_evidence_missing_"+shortID(stage.NodeID),
-					model.FindingSeverityBlocking,
+					model.FindingSeverityWarning,
 					"stage approval item is missing route/component/API evidence: "+stage.NodeID,
-					"Continue local project drilldown until the stage has evidence refs or route/component/API/data model bindings.",
+					"Keep the stage objective and target_contract; the server browser agent may add runtime evidence inside the approved product scope.",
 				))
 			}
 			if stage.TargetContract == nil || strings.TrimSpace(stage.TargetContract.SemanticID) == "" {
@@ -1602,22 +1594,14 @@ func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle)
 					"Regenerate the stage plan from intent-traced route/component/action evidence.",
 				))
 			}
-			if stage.DurationMS > 0 && stage.DurationMS < 10000 {
-				findings = append(findings, packagePreflightFinding(
-					"stage_duration_short_"+shortID(stage.NodeID),
-					model.FindingSeverityWarning,
-					"stage approval duration is shorter than 10 seconds: "+stage.NodeID,
-					"Keep each stage around 10 seconds or more so the server recording has natural pacing.",
-				))
-			}
 		}
 		for _, uncertainty := range bundle.StageApprovalPlan.UncertaintyReport {
 			if uncertainty.Blocking {
 				findings = append(findings, packagePreflightFinding(
-					"stage_uncertainty_blocking_"+shortID(uncertainty.ID),
-					model.FindingSeverityBlocking,
-					"stage approval plan has blocking uncertainty: "+uncertainty.Summary,
-					firstNonEmptyString(uncertainty.SuggestedAction, "Continue reading the related code or ask the user for clarification before upload."),
+					"stage_uncertainty_"+shortID(uncertainty.ID),
+					model.FindingSeverityWarning,
+					"stage approval plan has runtime uncertainty: "+uncertainty.Summary,
+					firstNonEmptyString(uncertainty.SuggestedAction, "Let the server browser agent resolve this inside the approved product scope or return a repair request."),
 				))
 			}
 		}
@@ -1644,10 +1628,10 @@ func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle)
 		for _, uncertainty := range bundle.ScriptOutline.UncertaintyReport {
 			if uncertainty.Blocking {
 				findings = append(findings, packagePreflightFinding(
-					"outline_uncertainty_blocking_"+shortID(uncertainty.ID),
-					model.FindingSeverityBlocking,
-					"script outline has blocking uncertainty: "+uncertainty.Summary,
-					firstNonEmptyString(uncertainty.SuggestedAction, "Continue local evidence gathering before upload."),
+					"outline_uncertainty_"+shortID(uncertainty.ID),
+					model.FindingSeverityWarning,
+					"script outline has runtime uncertainty: "+uncertainty.Summary,
+					firstNonEmptyString(uncertainty.SuggestedAction, "Let the server browser agent resolve this inside the approved product scope or return a repair request."),
 				))
 			}
 		}
@@ -1686,7 +1670,6 @@ func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) 
 	coreBusinessCount := 0
 	hasSubmit := false
 	hasPostSubmitTransition := false
-	hasObserveProgress := false
 	for _, stage := range bundle.StageApprovalPlan.Stages {
 		switch stage.StageKind {
 		case model.BusinessStageKindSessionSetup:
@@ -1717,15 +1700,6 @@ func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) 
 			}
 		}
 		if stage.StageKind == model.BusinessStageKindObserveProgress {
-			hasObserveProgress = true
-			if stage.DurationMS < 60000 && stageRequiresSixtySecondObserve(stage) {
-				findings = append(findings, packagePreflightFinding(
-					"observe_progress_duration_short_"+shortID(stage.NodeID),
-					model.FindingSeverityBlocking,
-					"observe_progress stage lost the required 60 second wait: "+stage.NodeID,
-					"Preserve duration_ms >= 60000 for the agent build observation stage.",
-				))
-			}
 			if stage.Interaction.Kind == model.GraphActionClick || stage.Interaction.Kind == model.GraphActionFill || stage.Interaction.Kind == model.GraphActionSelect {
 				findings = append(findings, packagePreflightFinding(
 					"observe_progress_has_business_action_"+shortID(stage.NodeID),
@@ -1758,14 +1732,6 @@ func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) 
 			model.FindingSeverityBlocking,
 			"business_submit stage is missing route/state transition",
 			"Set expected_route_after_action to project_detail or build_running so the browser agent knows the post-submit state.",
-		))
-	}
-	if hasSubmit && !hasObserveProgress {
-		findings = append(findings, packagePreflightFinding(
-			"observe_progress_missing",
-			model.FindingSeverityWarning,
-			"business_submit has no follow-up observe_progress stage",
-			"Add an observe_progress stage to let the recording capture the agent build process.",
 		))
 	}
 	return findings
@@ -1815,16 +1781,6 @@ func stagePreservesBusinessInput(stage model.StageApprovalStage) bool {
 		}
 	}
 	return strings.TrimSpace(stage.Interaction.Value) != ""
-}
-
-func stageRequiresSixtySecondObserve(stage model.StageApprovalStage) bool {
-	text := strings.ToLower(strings.Join([]string{stage.Title, stage.Objective, stage.BusinessIntent, stage.SuccessState}, " "))
-	return strings.Contains(text, "60") ||
-		strings.Contains(text, "一分钟") ||
-		strings.Contains(text, "1分钟") ||
-		strings.Contains(text, "agent") ||
-		strings.Contains(text, "build") ||
-		strings.Contains(text, "构建")
 }
 
 func stageApprovalHasEvidence(stage model.StageApprovalStage) bool {
@@ -2146,13 +2102,54 @@ func demoGoalsForPackage(project *model.ProjectContext) []model.DemoGoal {
 		UseCase:          model.DemoUseCaseLaunch,
 		AudienceID:       "audience_primary",
 		ValueProposition: project.ProductDescription,
-		SuccessCriteria: []string{
-			"登录展示约 10 秒",
-			"新建项目：俄罗斯方块，并选择构建模式",
-			"进入项目后观察 agent 实际构建约 60 秒",
-		},
-		Priority: 1,
+		SuccessCriteria:  demoSuccessCriteriaFromProject(project),
+		Priority:         1,
 	}}
+}
+
+func demoSuccessCriteriaFromProject(project *model.ProjectContext) []string {
+	if project == nil {
+		return nil
+	}
+	values := []string{}
+	values = append(values, splitRequirementClauses(project.ProductDescription)...)
+	values = append(values, project.MustShow...)
+	if len(values) == 0 && strings.TrimSpace(project.ProductDescription) != "" {
+		values = append(values, strings.TrimSpace(project.ProductDescription))
+	}
+	return limitStringsForUpload(uniqueNonEmptyStrings(values), 8)
+}
+
+func splitRequirementClauses(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		switch r {
+		case '\n', '\r', '，', ',', '；', ';', '。':
+			return true
+		default:
+			return false
+		}
+	})
+	out := []string{}
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func packageProductMapSummary(intentText string, fallback string) string {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,7 +66,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			routeState:     model.BusinessRouteStateUnauthenticated,
 			entryRoute:     routeHints.login,
 			expectedRoute:  routeHints.workspace,
-			durationMS:     10000,
+			durationMS:     durationMSForIntentKeywords(intentText, "login", "signin", "sign in", "登录", "登陆", "登入"),
 			keywords:       []string{"login", "signin", "sign in", "email", "password", "登录", "邮箱", "密码"},
 			capture:        []string{"登录页表单", "登录后工作台"},
 			nonDestructive: true,
@@ -88,7 +90,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			routeState:    model.BusinessRouteStateWorkspace,
 			entryRoute:    routeHints.workspace,
 			expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
-			durationMS:    10000,
+			durationMS:    durationMSForIntentKeywords(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project"),
 			keywords:      []string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project"},
 			capture:       []string{"工作台项目入口", "新建项目流程"},
 		})
@@ -106,7 +108,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 				routeState:    model.BusinessRouteStateCreationFlow,
 				entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
 				expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
-				durationMS:    10000,
+				durationMS:    durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", projectName, "俄罗斯方块", "tetris"),
 				keywords:      []string{"项目名称", "项目名", "project name", "name", projectName, "tetris", "俄罗斯方块"},
 				capture:       []string{"项目名称输入框", "已填写的项目名称"},
 			})
@@ -126,7 +128,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			routeState:    model.BusinessRouteStateCreationFlow,
 			entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
 			expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
-			durationMS:    10000,
+			durationMS:    durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"),
 			keywords:      []string{"构建模式", "build mode", "builder mode", "构建", "mode"},
 			capture:       []string{"构建模式选项", "已选择构建模式"},
 		})
@@ -145,22 +147,20 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			routeState:    model.BusinessRouteStateProjectDetail,
 			entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
 			expectedRoute: firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail),
-			durationMS:    10000,
+			durationMS:    durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "启动构建", "开始构建", "run build", "start build", "submit", "run", "start"),
 			keywords:      []string{"agent", "智能体", "开始构建", "启动构建", "实际构建", "生成", "构建", "build", "run", "start", "generate"},
 			capture:       []string{"启动构建按钮", "构建开始状态"},
 		})
 	}
 
-	waitMS := requiredLongWaitMS(intentText)
-	if waitMS == 0 && wantsBuild {
-		waitMS = 60000
-	}
-	if waitMS > 0 {
+	waitMS := requiredObservationDurationMS(intentText)
+	wantsObservation := containsAnyNormalized(intentText, "等待", "观察", "看实际发生", "看发生了什么", "实际构建演示", "构建演示", "progress", "log", "observe")
+	if waitMS > 0 || wantsObservation {
 		builder.addStage(stageSpec{
 			id:             "observe_agent_progress",
 			kind:           model.BusinessStageKindObserveProgress,
-			title:          fmt.Sprintf("观察 agent 构建过程 %d 秒", waitMS/1000),
-			objective:      fmt.Sprintf("进入项目后持续观察 agent 实际构建过程，保留不少于 %d 秒的自然等待。", waitMS/1000),
+			title:          observationStageTitle(waitMS),
+			objective:      observationStageObjective(waitMS),
 			actionType:     string(model.GraphActionWait),
 			actionLabel:    "观察构建进度",
 			successState:   "构建进度、日志、预览或项目状态持续可见。",
@@ -186,7 +186,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			routeState:     model.BusinessRouteStateWorkspace,
 			entryRoute:     firstNonEmpty(routeHints.workspace, routePathFromCandidate(project.ProductURL), "/"),
 			expectedRoute:  firstNonEmpty(routeHints.workspace, routePathFromCandidate(project.ProductURL), "/"),
-			durationMS:     10000,
+			durationMS:     durationMSForIntentKeywords(intentText, "首页", "观察", "home", "homepage", "inspect"),
 			keywords:       []string{"首页", "观察", "home", "homepage", "inspect"},
 			capture:        []string{"首页截图"},
 			nonDestructive: true,
@@ -205,7 +205,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			routeState:    model.BusinessRouteStateWorkspace,
 			entryRoute:    firstNonEmpty(routeHints.workspace, "/"),
 			expectedRoute: firstNonEmpty(routeHints.workspace, "/"),
-			durationMS:    10000,
+			durationMS:    durationMSForIntentKeywords(intentText, intentKeywordsForText(intentText)...),
 			keywords:      intentKeywordsForText(intentText),
 			capture:       []string{"核心业务控件", "业务结果状态"},
 		})
@@ -222,7 +222,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		routeState:     builder.finalRouteState(),
 		entryRoute:     builder.finalEntryRoute(),
 		expectedRoute:  builder.finalEntryRoute(),
-		durationMS:     10000,
+		durationMS:     durationMSForIntentKeywords(intentText, "最终", "收束", "结果", "状态", "预览", "详情", "final", "result", "preview", "detail"),
 		keywords:       []string{"结果", "状态", "预览", "详情", "result", "preview", "detail"},
 		capture:        []string{"最终状态截图"},
 		nonDestructive: true,
@@ -248,6 +248,155 @@ type stageSpec struct {
 	keywords       []string
 	capture        []string
 	nonDestructive bool
+}
+
+type intentDurationHint struct {
+	ValueMS    int
+	Context    string
+	CenterRune int
+}
+
+var intentDurationPattern = regexp.MustCompile(`(?i)(\d+)\s*(毫秒|ms|秒|s|sec|secs|second|seconds|分钟|mins|minutes|min|m)`)
+
+const maxDurationKeywordDistanceRunes = 16
+
+func durationMSForIntentKeywords(intentText string, keywords ...string) int {
+	normalized := normalizeIntentText(intentText)
+	hints := durationHintsFromIntent(intentText)
+	if len(hints) == 0 {
+		return 0
+	}
+	if len(keywords) == 0 {
+		best := 0
+		for _, hint := range hints {
+			best = maxInt(best, hint.ValueMS)
+		}
+		return best
+	}
+	best := 0
+	bestDistance := 0
+	for _, hint := range hints {
+		distance, ok := nearestKeywordDistance(normalized, hint.CenterRune, keywords)
+		if !ok || distance > maxDurationKeywordDistanceRunes {
+			continue
+		}
+		if best == 0 || distance < bestDistance || (distance == bestDistance && hint.ValueMS > best) {
+			best = hint.ValueMS
+			bestDistance = distance
+		}
+	}
+	return best
+}
+
+func requiredObservationDurationMS(intentText string) int {
+	return durationMSForIntentKeywords(intentText, "等待", "观察", "看实际发生", "看发生了什么", "实际构建演示", "构建演示", "progress", "log", "observe", "wait")
+}
+
+func durationHintsFromIntent(intentText string) []intentDurationHint {
+	normalized := normalizeIntentText(intentText)
+	if normalized == "" {
+		return nil
+	}
+	matches := intentDurationPattern.FindAllStringSubmatchIndex(normalized, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	runes := []rune(normalized)
+	out := []intentDurationHint{}
+	for _, match := range matches {
+		if len(match) < 6 {
+			continue
+		}
+		value, err := strconv.Atoi(normalized[match[2]:match[3]])
+		if err != nil || value <= 0 {
+			continue
+		}
+		unit := normalized[match[4]:match[5]]
+		durationMS := durationValueToMS(value, unit)
+		if durationMS <= 0 {
+			continue
+		}
+		startRune := runeCount(normalized[:match[0]])
+		endRune := runeCount(normalized[:match[1]])
+		windowStart := maxInt(0, startRune-18)
+		windowEnd := minInt(len(runes), endRune+18)
+		out = append(out, intentDurationHint{
+			ValueMS:    durationMS,
+			Context:    string(runes[windowStart:windowEnd]),
+			CenterRune: (startRune + endRune) / 2,
+		})
+	}
+	return out
+}
+
+func nearestKeywordDistance(normalizedIntent string, centerRune int, keywords []string) (int, bool) {
+	best := 0
+	found := false
+	for _, keyword := range keywords {
+		keyword = normalizeIntentText(keyword)
+		if keyword == "" {
+			continue
+		}
+		offset := 0
+		remaining := normalizedIntent
+		for {
+			idx := strings.Index(remaining, keyword)
+			if idx < 0 {
+				break
+			}
+			startRune := runeCount(normalizedIntent[:offset+idx])
+			keywordCenter := startRune + maxInt(1, runeCount(keyword))/2
+			distance := absInt(centerRune - keywordCenter)
+			if !found || distance < best {
+				best = distance
+				found = true
+			}
+			next := idx + len(keyword)
+			offset += next
+			if next >= len(remaining) {
+				break
+			}
+			remaining = remaining[next:]
+		}
+	}
+	return best, found
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+func durationValueToMS(value int, unit string) int {
+	unit = strings.ToLower(strings.TrimSpace(unit))
+	switch unit {
+	case "毫秒", "ms":
+		return value
+	case "分钟", "min", "mins", "minute", "minutes", "m":
+		return value * 60 * 1000
+	default:
+		return value * 1000
+	}
+}
+
+func runeCount(value string) int {
+	return len([]rune(value))
+}
+
+func observationStageTitle(durationMS int) string {
+	if durationMS > 0 {
+		return fmt.Sprintf("观察业务执行过程 %d 秒", durationMS/1000)
+	}
+	return "观察业务执行过程"
+}
+
+func observationStageObjective(durationMS int) string {
+	if durationMS > 0 {
+		return fmt.Sprintf("进入目标页面后持续观察业务执行过程，保留不少于 %d 秒的自然等待。", durationMS/1000)
+	}
+	return "进入目标页面后观察业务执行过程，等待页面出现可解释的进度、日志、预览或结果状态。"
 }
 
 type businessStagePlanBuilder struct {
@@ -280,7 +429,7 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		RouteState:               spec.routeState,
 		EntryRoute:               firstNonEmpty(spec.entryRoute, "/"),
 		ExpectedRouteAfterAction: firstNonEmpty(spec.expectedRoute, spec.entryRoute, "/"),
-		DurationMS:               maxInt(spec.durationMS, 10000),
+		DurationMS:               spec.durationMS,
 		Action: model.BusinessActionSemantics{
 			Type:           spec.actionType,
 			Label:          spec.actionLabel,
@@ -561,13 +710,12 @@ func businessStageUncertainties(spec stageSpec, requirements []model.EvidenceReq
 		if req.Satisfied {
 			continue
 		}
-		blocking := req.Required && req.Kind == "route"
 		out = append(out, model.StageUncertainty{
 			ID:              "uncertainty_" + spec.id + "_" + req.Kind,
 			StageID:         "business_stage_" + spec.id,
 			Kind:            req.Kind,
 			Summary:         req.Summary,
-			Blocking:        blocking,
+			Blocking:        false,
 			SuggestedAction: "继续读取与该需求目标相关的 route/component/API 代码，或让 server browser agent 在受约束范围内运行时确认。",
 			EvidenceRefs:    evidence,
 		})

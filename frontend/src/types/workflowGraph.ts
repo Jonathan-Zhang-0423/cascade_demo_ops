@@ -2120,6 +2120,7 @@ export type StageApprovalStage = {
   success_state?: string;
   wait_conditions?: string[];
   capture_points?: string[];
+  capture_plan?: BrowserAgentCapturePlan;
   risk_notes?: string[];
   investigation_question_refs?: InvestigationQuestionRef[];
   evidence_refs?: EvidenceRef[];
@@ -2134,6 +2135,18 @@ export type StageInputContent = {
   secret_ref?: string;
   editable?: boolean;
   evidence_refs?: EvidenceRef[];
+};
+
+export type BrowserAgentCapturePlan = {
+  intent?: string;
+  shot_type?: string;
+  primary_artifact?: string;
+  required_assets?: string[];
+  min_duration_ms?: number;
+  pre_capture_wait_ms?: number;
+  hold_after_ms?: number;
+  clip_suggestion?: string;
+  notes?: string[];
 };
 
 export type BrowserAgentScriptOutline = {
@@ -2199,6 +2212,7 @@ export type BrowserAgentOutlineStage = {
   target_contract?: BrowserAgentTargetContract;
   wait_conditions?: string[];
   capture_points?: string[];
+  capture_plan?: BrowserAgentCapturePlan;
   success_state?: string;
   duration_ms?: number;
   can_modify?: string[];

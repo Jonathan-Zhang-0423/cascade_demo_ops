@@ -177,16 +177,16 @@ func TestScriptPackagerRouteAwarePlanUsesProductSubRoutes(t *testing.T) {
 			Type:            model.GraphNodeTypeAction,
 			Title:           "打开产品入口",
 			ExpectedOutcome: "产品入口页面加载完成",
-			ActionSpec:      &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://cascadeai.cn"}, TimeoutMS: 10000},
-			DurationHintMS:  10000,
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://cascadeai.cn"}, TimeoutMS: 7000},
+			DurationHintMS:  7000,
 		},
 		{
 			ID:              "login",
 			Type:            model.GraphNodeTypeAction,
 			Title:           "演示登录完成并进入工作台",
 			ExpectedOutcome: "登录完成，进入可演示的产品工作台上下文。",
-			ActionSpec:      &model.GraphAction{Type: model.GraphActionWait, TimeoutMS: 10000},
-			DurationHintMS:  10000,
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionWait, TimeoutMS: 7000},
+			DurationHintMS:  7000,
 		},
 		{
 			ID:              "new_project",
@@ -194,8 +194,8 @@ func TestScriptPackagerRouteAwarePlanUsesProductSubRoutes(t *testing.T) {
 			Title:           "新建项目",
 			Goal:            "点击新建项目入口。",
 			ExpectedOutcome: "点击新建项目入口",
-			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='new-project']", Label: "新建项目"}, TimeoutMS: 10000},
-			DurationHintMS:  10000,
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='new-project']", Label: "新建项目"}, TimeoutMS: 13000},
+			DurationHintMS:  13000,
 			Metadata:        map[string]any{"verification_status": "verified"},
 		},
 		{
@@ -204,8 +204,8 @@ func TestScriptPackagerRouteAwarePlanUsesProductSubRoutes(t *testing.T) {
 			Title:           "输入项目名称：俄罗斯方块",
 			Goal:            "填写项目名称。",
 			ExpectedOutcome: "填写项目名称",
-			ActionSpec:      &model.GraphAction{Type: model.GraphActionFill, Target: model.ActionTarget{Selector: "input[aria-label*='项目']", Label: "项目名称"}, Value: "俄罗斯方块", TimeoutMS: 10000},
-			DurationHintMS:  10000,
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionFill, Target: model.ActionTarget{Selector: "input[aria-label*='项目']", Label: "项目名称"}, Value: "俄罗斯方块", TimeoutMS: 13000},
+			DurationHintMS:  13000,
 			Metadata:        map[string]any{"verification_status": "verified"},
 		},
 		{
@@ -214,8 +214,8 @@ func TestScriptPackagerRouteAwarePlanUsesProductSubRoutes(t *testing.T) {
 			Title:           "选择构建模式",
 			Goal:            "选择构建模式。",
 			ExpectedOutcome: "选择构建模式",
-			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='build-mode']", Label: "构建模式"}, TimeoutMS: 10000},
-			DurationHintMS:  10000,
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='build-mode']", Label: "构建模式"}, TimeoutMS: 13000},
+			DurationHintMS:  13000,
 			Metadata:        map[string]any{"verification_status": "verified"},
 		},
 		{
@@ -224,18 +224,18 @@ func TestScriptPackagerRouteAwarePlanUsesProductSubRoutes(t *testing.T) {
 			Title:           "启动 agent 实际构建",
 			Goal:            "启动 agent 构建。",
 			ExpectedOutcome: "启动 agent 构建",
-			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='start-build']", Label: "启动构建"}, TimeoutMS: 10000},
-			DurationHintMS:  10000,
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{Selector: "[data-testid='start-build']", Label: "启动构建"}, TimeoutMS: 13000},
+			DurationHintMS:  13000,
 			Metadata:        map[string]any{"verification_status": "verified"},
 		},
 		{
 			ID:              "agent_build_wait",
 			Type:            model.GraphNodeTypeAction,
-			Title:           "等待 agent 实际构建 60 秒",
+			Title:           "等待 agent 实际构建 45 秒",
 			Goal:            "持续观察 agent 构建过程。",
 			ExpectedOutcome: "持续观察 agent 构建过程，等待结果逐步出现。",
-			ActionSpec:      &model.GraphAction{Type: model.GraphActionWait, TimeoutMS: 60000},
-			DurationHintMS:  60000,
+			ActionSpec:      &model.GraphAction{Type: model.GraphActionWait, TimeoutMS: 45000},
+			DurationHintMS:  45000,
 			Metadata:        map[string]any{"verification_status": "runtime_adaptive"},
 		},
 	}
@@ -269,8 +269,21 @@ func TestScriptPackagerRouteAwarePlanUsesProductSubRoutes(t *testing.T) {
 	if waitBuild == nil || waitBuild.EntryRoute != "/project/:id" || waitBuild.TargetRouteTemplate != "/project/:id" {
 		t.Fatalf("expected build wait to continue on dynamic project route, got %+v", waitBuild)
 	}
+	if login.CapturePlan == nil || login.CapturePlan.ShotType != "session_setup" || !strings.Contains(login.CapturePlan.ClipSuggestion, "不展示明文密码") {
+		t.Fatalf("login stage should carry safe login capture plan, got %+v", login.CapturePlan)
+	}
+	if waitBuild.CapturePlan == nil || waitBuild.CapturePlan.MinDurationMS != 45000 || !containsString(waitBuild.CapturePlan.RequiredAssets, "stage_video") || !strings.Contains(waitBuild.CapturePlan.ClipSuggestion, "连续录屏") {
+		t.Fatalf("build observation should carry explicit continuous capture plan, got %+v", waitBuild.CapturePlan)
+	}
+	outlineWait := outlineStageByNodeID(pkg.ExecutableBundle, "agent_build_wait")
+	if outlineWait == nil || outlineWait.CapturePlan == nil || outlineWait.CapturePlan.MinDurationMS != 45000 {
+		t.Fatalf("outline should carry explicit capture plan for browser agent, got %+v", outlineWait)
+	}
 	if !strings.Contains(pkg.Markdown, "页面路由：/project/:id") {
 		t.Fatalf("approval markdown should expose dynamic project route, got:\n%s", pkg.Markdown)
+	}
+	if !strings.Contains(pkg.Markdown, "素材意图：") || !strings.Contains(pkg.Markdown, "最低 45 秒") {
+		t.Fatalf("approval markdown should expose material capture intent and duration, got:\n%s", pkg.Markdown)
 	}
 	for _, stage := range pkg.ExecutableBundle.StageApprovalPlan.Stages {
 		for _, candidate := range stage.CandidateRoutes {
@@ -461,23 +474,31 @@ func TestScriptPackagerDowngradesGenericBusinessSelector(t *testing.T) {
 	}
 }
 
-func TestScriptPackagerEnforcesNaturalStageDuration(t *testing.T) {
+func TestScriptPackagerPreservesExplicitStageDurations(t *testing.T) {
 	project, report, productMap, graph := executableBundleFixtures()
 	pkg, err := NewScriptPackagerAgent().PackageScript(context.Background(), project, report, productMap, graph)
 	if err != nil {
 		t.Fatal(err)
 	}
+	expected := map[string]int{
+		"node_open":    2000,
+		"node_invite":  3000,
+		"node_success": 2000,
+	}
 	for _, step := range pkg.Document.Steps {
-		if step.Timing.DurationMS < 10000 {
-			t.Fatalf("expected every stage to be at least 10s, got %s=%d", step.NodeID, step.Timing.DurationMS)
+		if got := step.Timing.DurationMS; got != expected[step.NodeID] {
+			t.Fatalf("expected explicit stage duration to be preserved, got %s=%d", step.NodeID, got)
 		}
 	}
 	if pkg.ExecutableBundle.StageApprovalPlan == nil {
 		t.Fatal("expected stage approval plan")
 	}
 	for _, stage := range pkg.ExecutableBundle.StageApprovalPlan.Stages {
-		if stage.DurationMS < 10000 {
-			t.Fatalf("expected outline stage to be at least 10s, got %+v", stage)
+		if got := stage.DurationMS; got != expected[stage.NodeID] {
+			t.Fatalf("expected stage approval duration to preserve graph hint, got %+v", stage)
+		}
+		if stage.CapturePlan == nil || stage.CapturePlan.MinDurationMS != expected[stage.NodeID] {
+			t.Fatalf("expected capture plan to preserve explicit duration, got %+v", stage.CapturePlan)
 		}
 		if !containsString(stage.WaitConditions, "wait_after_entry_at_least_1000ms") {
 			t.Fatalf("expected render wait condition in stage: %+v", stage)
@@ -556,7 +577,7 @@ func TestScriptPackagerKeepsRuntimeAdaptiveBusinessAction(t *testing.T) {
 
 func TestScriptPackagerRejectsScriptThatMissesExplicitDemoIntent(t *testing.T) {
 	project, report, productMap, graph := executableBundleFixtures()
-	project.ProductDescription = "演示登录（10s），新建项目（10s，俄罗斯方块，构建模式），agent实际构建演示（60s等待）"
+	project.ProductDescription = "演示登录（7s），新建项目（13s，俄罗斯方块，构建模式），agent实际构建演示（45s等待）"
 	graph.Name = "错误的新建项目演示"
 	graph.Summary = "这份图错误地只包含账号展示和登录按钮。"
 	graph.Nodes[1].ID = "node_user_email_display"
@@ -586,7 +607,7 @@ func TestScriptPackagerRejectsScriptThatMissesExplicitDemoIntent(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected explicit intent mismatch to reject bad executable script")
 	}
-	for _, want := range []string{"script_intent_mismatch", "俄罗斯方块", "构建模式", "60 秒"} {
+	for _, want := range []string{"script_intent_mismatch", "俄罗斯方块", "构建模式", "45 秒"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("expected error to mention %q, got %v", want, err)
 		}

@@ -23,6 +23,7 @@ import type {
   SandboxPolicy,
   AgentGraphTrace,
   ScriptFailureDiagnostic,
+  ScriptStep,
   ProjectIntelligencePack,
   ScriptReadinessReport,
   ClientExecutionPackage,
@@ -354,6 +355,7 @@ export function createBridgeClient(): DesktopBridgeClient {
 export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL): DesktopBridgeClient {
   const projects = new Map<string, ProjectWorkspaceView>();
   const cloudBuilds = new Map<string, LocalClientExecutionPackageBuild>();
+  const orgID = import.meta.env.VITE_CASCADE_ORG_ID || "org_desktop";
   return {
     mode: "local",
     async runtimeHealth() {
@@ -438,7 +440,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         method: "POST",
         body: JSON.stringify({
           user_input: userInput,
-          org_id: "org_desktop",
+          org_id: orgID,
         }),
       });
       if (!prepared.ok || !prepared.data) {
@@ -502,7 +504,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     async initExecutionPackageUpload(workspace) {
       const result = await requestLocal<LocalCloudUploadInitResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/init`, {
         method: "POST",
-        body: JSON.stringify({ org_id: "org_desktop" }),
+        body: JSON.stringify({ org_id: orgID }),
       });
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "初始化服务器上传会话失败", result.errorInfo);
@@ -519,7 +521,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       const result = await requestLocal<LocalCloudUploadPackageResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/upload`, {
         method: "POST",
         body: JSON.stringify({
-          org_id: "org_desktop",
+          org_id: orgID,
           upload_id: workspace.cloudRun.uploadID,
           ...(build ? { build } : {}),
         }),
@@ -539,7 +541,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       if (!exchangePackageID) {
         return { ok: false, error: "缺少 exchange package id，无法轮询服务器状态" };
       }
-      const query = `?org_id=${encodeURIComponent("org_desktop")}&exchange_package_id=${encodeURIComponent(exchangePackageID)}`;
+      const query = `?org_id=${encodeURIComponent(orgID)}&exchange_package_id=${encodeURIComponent(exchangePackageID)}`;
       const result = await requestLocal<LocalExecutionPackageStatusResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/status${query}`);
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "轮询服务器执行状态失败", result.errorInfo);
@@ -562,7 +564,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       if (!resultPackageID) {
         return { ok: false, error: "缺少 result package id，无法读取服务器结果包" };
       }
-      const query = `?org_id=${encodeURIComponent("org_desktop")}&result_package_id=${encodeURIComponent(resultPackageID)}`;
+      const query = `?org_id=${encodeURIComponent(orgID)}&result_package_id=${encodeURIComponent(resultPackageID)}`;
       const result = await requestLocal<RecordingResultPackage>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/result${query}`);
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "读取服务器结果包失败", result.errorInfo);
@@ -606,7 +608,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       const result = await requestLocal<LocalResultPackageAckResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/ack`, {
         method: "POST",
         body: JSON.stringify({
-          org_id: "org_desktop",
+          org_id: orgID,
           result_package_id: resultPackageID,
           exchange_package_id: workspace.cloudRun.exchangePackageID,
           received_asset_ids: receivedAssetIDs,
@@ -2172,7 +2174,7 @@ function mockStageApprovalPlan(workspace: ProjectWorkspaceView, plan: ExecutionS
     runtime: "browser-agent-outline-v1",
     language: "zh-CN",
     stages: plan.steps.map((step) => {
-      const duration = Math.max(step.timing.duration_ms ?? 0, 10000);
+      const duration = explicitStepDurationMS(step);
       const route = routeFromStep(workspace, step);
       return {
         id: `stage_${step.node_id}`,
@@ -2181,7 +2183,7 @@ function mockStageApprovalPlan(workspace: ProjectWorkspaceView, plan: ExecutionS
         title: step.title ?? step.node_id,
         objective: step.expected_outcome,
         business_intent: step.business_value ?? step.narrative.voiceover ?? step.narrative.caption ?? step.expected_outcome,
-        duration_ms: duration,
+        ...(duration > 0 ? { duration_ms: duration } : {}),
         target_route: route,
         target_url: step.page_target.url ?? step.action.target.url ?? workspace.productURL,
         component_refs: [`component:${step.node_id}`],
@@ -2208,6 +2210,7 @@ function mockStageApprovalPlan(workspace: ProjectWorkspaceView, plan: ExecutionS
         success_state: step.expected_outcome,
         wait_conditions: ["wait_after_entry_at_least_1000ms", "wait_for_network_or_dom_stable", "wait_for_render_stable_before_capture"],
         capture_points: step.capture.screenshot ? ["stage_entry_after_render", "stage_success_state"] : ["stage_success_state"],
+        capture_plan: mockCapturePlanForStep(step, duration),
         risk_notes: ["不得改写用户意图、stage 顺序、填充语义或安全边界。"],
         evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
         confidence: 0.82,
@@ -2233,6 +2236,7 @@ function mockBrowserAgentOutline(workspace: ProjectWorkspaceView, plan: Executio
     stages: plan.steps.map((step) => {
       const selector = step.action.target.selector ?? step.page_target.selector ?? "";
       const route = routeFromStep(workspace, step);
+      const duration = explicitStepDurationMS(step);
       return {
         id: `outline_stage_${step.node_id}`,
         stage_id: `stage_${step.node_id}`,
@@ -2271,9 +2275,10 @@ function mockBrowserAgentOutline(workspace: ProjectWorkspaceView, plan: Executio
         wait_conditions: ["wait_after_entry_at_least_1000ms", "wait_for_render_stable_before_capture"],
         capture_points: ["after_entry_render_stable", "after_success_state"],
         success_state: step.expected_outcome,
-        duration_ms: Math.max(step.timing.duration_ms ?? 0, 10000),
-        can_modify: ["selector", "selector_alternatives", "wait_conditions", "capture_points", "non_destructive_exploration_path"],
-        must_preserve: ["objective", "business_intent", "input semantics", "stage order", "allowed domains", "forbidden pages"],
+        ...(duration > 0 ? { duration_ms: duration } : {}),
+        capture_plan: mockCapturePlanForStep(step, duration),
+        can_modify: ["selector", "selector_alternatives", "wait_conditions", "capture_points", "non_destructive_exploration_path", "capture_plan.pre_capture_wait_ms", "capture_plan.hold_after_ms"],
+        must_preserve: ["objective", "business_intent", "input semantics", "stage order", "explicit duration requirement", "allowed domains", "forbidden pages"],
         evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
         confidence: 0.8,
       };
@@ -2291,6 +2296,29 @@ function mockBrowserAgentOutline(workspace: ProjectWorkspaceView, plan: Executio
     immutable_fields: ["stage_approval_plan.stages[].objective", "stage_approval_plan.stages[].business_intent", "stage_approval_plan.stages[].input_content", "security_policy", "recording_run_spec.allowed_domains"],
     evidence_refs: workspace.understanding.evidenceRefs,
     confidence: 0.8,
+  };
+}
+
+function explicitStepDurationMS(step: ScriptStep): number {
+  const duration = step.timing?.duration_ms ?? 0;
+  return duration > 0 ? duration : 0;
+}
+
+function mockCapturePlanForStep(step: ScriptStep, durationMS: number) {
+  const requiredAssets = [
+    ...(step.capture.video ? ["stage_video"] : []),
+    ...(step.capture.screenshot ? ["viewport_screenshot"] : []),
+  ];
+  return {
+    intent: durationMS > 0
+      ? `按用户明确时长要求采集 ${Math.ceil(durationMS / 1000)} 秒素材。`
+      : "按 stage 结果采集素材，等待页面稳定后截图或录屏。",
+    primary_artifact: requiredAssets[0] ?? "redacted_trace_observation",
+    required_assets: requiredAssets.length > 0 ? requiredAssets : ["redacted_trace_observation"],
+    ...(durationMS > 0 ? { min_duration_ms: durationMS } : {}),
+    pre_capture_wait_ms: 1000,
+    clip_suggestion: durationMS > 0 ? "不得压缩低于用户明确时长。" : "由 server browser agent 按页面状态和审批目标控制节奏。",
+    notes: ["进入页面后至少等待 1 秒并确认渲染稳定再截图。"],
   };
 }
 
@@ -2494,7 +2522,7 @@ function mockFailedRecordingResultPackage(workspace: ProjectWorkspaceView): Reco
       {
         node_id: diagnostic.failed_node_id,
         status: "failed",
-        duration_ms: 10000,
+        duration_ms: workspace.planReview.graph.nodes.find((node) => node.id === diagnostic.failed_node_id)?.duration_hint_ms ?? 0,
         error: diagnostic.error,
         ...(diagnostic.screenshot_refs
           ? {

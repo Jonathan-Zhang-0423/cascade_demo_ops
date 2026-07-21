@@ -1582,7 +1582,10 @@ func scriptReadinessFromState(state *ProjectUnderstandingState, scenarios []mode
 	}
 	recommended := firstScenario(scenarios)
 	stageCount := maxInt(4, recommended.EstimatedSteps)
-	targetDuration := maxInt(recommended.EstimatedDurationSec, stageCount*12)
+	targetDuration := explicitTotalStageDurationSec(state.Pack.BusinessStagePlan)
+	if targetDuration == 0 && recommended.EstimatedDurationSec > 0 {
+		targetDuration = recommended.EstimatedDurationSec
+	}
 	canProceed := len(blockers) == 0
 	summary := "脚本生成可继续，需在审批页复核安全策略和凭据范围。"
 	if !canProceed {
@@ -1607,7 +1610,7 @@ func scriptReadinessFromState(state *ProjectUnderstandingState, scenarios []mode
 		GenericSelectorCount:          selectorStats.GenericSelectorCount,
 		LoginActionCount:              selectorStats.LoginActionCount,
 		LoginDuplication:              selectorStats.LoginActionCount > 1,
-		MinStageDurationMS:            10000,
+		MinStageDurationMS:            explicitMinimumStageDurationMS(state.Pack.BusinessStagePlan),
 		BlockingAssertionRiskCount:    selectorStats.BlockingAssertionRiskCount,
 		CodeInvestigationToolDriven:   codeInvestigation.ToolDriven,
 		CodeInvestigationOverreadRisk: codeInvestigation.OverreadRisk,
@@ -2340,6 +2343,38 @@ func readinessRepairSuggestions(blockers []model.AgentFinding, warnings []model.
 		suggestions = append(suggestions, "审批前复核 allowed domains、凭据范围和打码选择器。")
 	}
 	return uniqueStrings(suggestions)
+}
+
+func explicitMinimumStageDurationMS(plan *model.BusinessStagePlan) int {
+	if plan == nil {
+		return 0
+	}
+	minDuration := 0
+	for _, stage := range plan.Stages {
+		if stage.DurationMS <= 0 {
+			continue
+		}
+		if minDuration == 0 || stage.DurationMS < minDuration {
+			minDuration = stage.DurationMS
+		}
+	}
+	return minDuration
+}
+
+func explicitTotalStageDurationSec(plan *model.BusinessStagePlan) int {
+	if plan == nil {
+		return 0
+	}
+	totalMS := 0
+	for _, stage := range plan.Stages {
+		if stage.DurationMS > 0 {
+			totalMS += stage.DurationMS
+		}
+	}
+	if totalMS <= 0 {
+		return 0
+	}
+	return (totalMS + 999) / 1000
 }
 
 func criticOutputSummary(readiness *model.ScriptReadinessReport) string {

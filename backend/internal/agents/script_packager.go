@@ -288,16 +288,14 @@ func buildStageApprovalPlan(project *model.ProjectContext, report *model.Multimo
 		routeContract := routeContractForStep(step, node, intelligence, previousRoute)
 		questionRefs := investigationQuestionRefsForStage(report, intelligence, step, node)
 		durationMS := step.Timing.DurationMS
-		if durationMS <= 0 {
-			durationMS = 10000
-		}
-		durationMS = maxInt(durationMS, 10000)
+		stageKind := businessStageKindForNode(node)
+		capturePlan := capturePlanForStep(step, stageKind, durationMS)
 		stages = append(stages, model.StageApprovalStage{
 			ID:                               "stage_" + step.ID,
 			Order:                            step.Order,
 			NodeID:                           step.NodeID,
 			BusinessStageID:                  businessStageIDForNode(node),
-			StageKind:                        businessStageKindForNode(node),
+			StageKind:                        stageKind,
 			RouteState:                       businessRouteStateForNode(node),
 			Title:                            firstNonEmpty(step.Title, step.NodeID),
 			Objective:                        firstNonEmpty(step.BusinessValue, step.ExpectedOutcome, step.Narrative.Voiceover, step.Title),
@@ -320,6 +318,7 @@ func buildStageApprovalPlan(project *model.ProjectContext, report *model.Multimo
 			SuccessState:                     firstNonEmpty(step.ExpectedOutcome, validationSummary(step.Validations)),
 			WaitConditions:                   waitConditionsForStep(step),
 			CapturePoints:                    capturePointsForStep(step),
+			CapturePlan:                      capturePlan,
 			RiskNotes:                        stageRiskNotes(step, node),
 			InvestigationQuestionRefs:        questionRefs,
 			EvidenceRefs:                     evidence,
@@ -376,10 +375,11 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 			TargetContract:                   stage.TargetContract,
 			WaitConditions:                   stage.WaitConditions,
 			CapturePoints:                    stage.CapturePoints,
+			CapturePlan:                      stage.CapturePlan,
 			SuccessState:                     stage.SuccessState,
 			DurationMS:                       stage.DurationMS,
-			CanModify:                        []string{"selector", "selector_alternatives", "wait_conditions", "retry_strategy", "non_destructive_exploration_path", "capture_timing"},
-			MustPreserve:                     []string{"stage_id", "node_id", "objective", "business_intent", "input_semantics", "success_state", "duration_floor", "safety_policy"},
+			CanModify:                        []string{"selector", "selector_alternatives", "wait_conditions", "retry_strategy", "non_destructive_exploration_path", "capture_timing", "capture_plan.pre_capture_wait_ms", "capture_plan.hold_after_ms"},
+			MustPreserve:                     []string{"stage_id", "node_id", "objective", "business_intent", "input_semantics", "success_state", "explicit_duration_requirement", "capture_plan.intent", "capture_plan.min_duration_ms", "capture_plan.required_assets", "safety_policy"},
 			InvestigationQuestionRefs:        stage.InvestigationQuestionRefs,
 			EvidenceRefs:                     stage.EvidenceRefs,
 			Confidence:                       stage.Confidence,
@@ -422,8 +422,8 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 			AllowNonDestructive:   true,
 		},
 		ForbiddenActions:     []string{"delete", "remove", "payment", "billing_change", "api_key_read", "raw_secret_exfiltration", "full_source_upload"},
-		ServerEditableFields: []string{"script_outline.stages[].components[].selector", "script_outline.stages[].components[].selector_alternatives", "script_outline.stages[].wait_conditions", "script_outline.stages[].interactions[].target", "script_outline.stages[].interactions[].wait_conditions", "script_outline.stages[].capture_points"},
-		ImmutableFields:      []string{"stage_approval_plan.stages[].objective", "stage_approval_plan.stages[].business_intent", "stage_approval_plan.stages[].input_content", "stage_approval_plan.safety_policy", "security_policy", "recording_run_spec.allowed_domains", "recording_run_spec.forbidden_pages"},
+		ServerEditableFields: []string{"script_outline.stages[].components[].selector", "script_outline.stages[].components[].selector_alternatives", "script_outline.stages[].wait_conditions", "script_outline.stages[].interactions[].target", "script_outline.stages[].interactions[].wait_conditions", "script_outline.stages[].capture_points", "script_outline.stages[].capture_plan.pre_capture_wait_ms", "script_outline.stages[].capture_plan.hold_after_ms"},
+		ImmutableFields:      []string{"stage_approval_plan.stages[].objective", "stage_approval_plan.stages[].business_intent", "stage_approval_plan.stages[].input_content", "stage_approval_plan.stages[].capture_plan.intent", "stage_approval_plan.stages[].capture_plan.min_duration_ms", "stage_approval_plan.safety_policy", "security_policy", "recording_run_spec.allowed_domains", "recording_run_spec.forbidden_pages"},
 		UncertaintyReport:    uncertaintyReportForBundle(project, intelligence, graph),
 		EvidenceRefs:         evidenceForDocument(nil, intelligence, doc),
 		Confidence:           confidenceForDossier(nil, intelligence),
@@ -439,6 +439,7 @@ func buildBrowserAgentPromptPolicy(project *model.ProjectContext, graph *model.D
 		"你是 Cascade 云端 Browser Agent，负责把 App 端审批过的 StageApprovalPlan 和 BrowserAgentScriptOutline 转成可执行网页操作。",
 		"你可以在 allowed origins 内做非破坏性探索，修正 selector、等待条件、轻量导航路径和截图时机。",
 		"你不能修改用户需求意图、stage 顺序、stage 目标、填充内容语义、凭据 secret_ref、安全策略、禁止页面、打码规则和 allowed domains。",
+		"Stage 的 capture_plan 定义要采集的素材意图、必须产物和剪辑重点；仅当 min_duration_ms > 0 时才表示用户明确要求的最低时长，你可以微调截图/hold 时机，但不得缩短明确时长或改变素材意图。",
 		"Stage 中的 investigation_question_refs 是 App 端代码调查问题与证据缺口摘要；如果引用问题仍有 remaining_gaps，只能在当前产品域内通过页面观察和非破坏探索补证，不得编造代码证据。",
 		"investigation_question_refs.next_actions 是 App 端建议的后续补证工具方向；你可以据此加强页面观察和 selector 修正，但不得据此访问控制面路径、执行 shell 或假装已读代码。",
 		"如果代码/页面证据不足以确认某个业务动作，必须返回 failure diagnostic 和 repair_request，不得编造 route、组件、API 或成功状态。",
@@ -458,7 +459,7 @@ func buildBrowserAgentPromptPolicy(project *model.ProjectContext, graph *model.D
 		},
 		EditableFields: []string{
 			"selector", "selector_alternatives", "role_name_locator", "wait_conditions",
-			"non_destructive_exploration_path", "retry_strategy", "capture_timing",
+			"non_destructive_exploration_path", "retry_strategy", "capture_timing", "capture_plan.pre_capture_wait_ms", "capture_plan.hold_after_ms",
 			"diagnostic_detail", "repair_hints",
 		},
 		ForbiddenChanges: []string{
@@ -1547,6 +1548,155 @@ func capturePointsForStep(step model.ScriptStep) []string {
 	return uniqueStrings(points)
 }
 
+func capturePlanForStep(step model.ScriptStep, stageKind model.BusinessStageKind, durationMS int) *model.BrowserAgentCapturePlan {
+	if durationMS <= 0 {
+		durationMS = step.Timing.DurationMS
+	}
+	requiredAssets := []string{}
+	if step.Capture.Video {
+		requiredAssets = append(requiredAssets, "stage_video")
+	}
+	if step.Capture.Screenshot {
+		if step.Capture.Scope == model.CaptureScopeFullPage || step.Capture.FullPage {
+			requiredAssets = append(requiredAssets, "full_page_screenshot")
+		} else {
+			requiredAssets = append(requiredAssets, "viewport_screenshot")
+		}
+	}
+	if step.Capture.Callout {
+		requiredAssets = append(requiredAssets, "annotated_callout")
+	}
+	if step.Capture.Zoom {
+		requiredAssets = append(requiredAssets, "interaction_closeup")
+	}
+	if len(requiredAssets) == 0 {
+		requiredAssets = append(requiredAssets, "redacted_trace_observation")
+	}
+	primary := firstString(requiredAssets, "stage_video")
+	shotType := captureShotTypeForStage(step, stageKind)
+	holdAfterMS := stageHoldAfterMS(durationMS)
+	return &model.BrowserAgentCapturePlan{
+		Intent:           captureIntentForStage(step, stageKind, durationMS),
+		ShotType:         shotType,
+		PrimaryArtifact:  primary,
+		RequiredAssets:   uniqueStrings(requiredAssets),
+		MinDurationMS:    durationMS,
+		PreCaptureWaitMS: 1000,
+		HoldAfterMS:      holdAfterMS,
+		ClipSuggestion:   captureClipSuggestionForStage(step, stageKind, durationMS),
+		Notes:            captureNotesForStage(step, stageKind),
+	}
+}
+
+func captureShotTypeForStage(step model.ScriptStep, stageKind model.BusinessStageKind) string {
+	semantic := step.Title + " " + step.BusinessValue + " " + step.ExpectedOutcome + " " + step.Action.Value
+	switch stageKind {
+	case model.BusinessStageKindSessionSetup:
+		return "session_setup"
+	case model.BusinessStageKindBusinessInput:
+		return "form_input"
+	case model.BusinessStageKindModeSelection:
+		return "mode_selection"
+	case model.BusinessStageKindBusinessSubmit:
+		return "submit_and_transition"
+	case model.BusinessStageKindObserveProgress:
+		return "continuous_progress_observation"
+	case model.BusinessStageKindFinalObserve:
+		return "final_state_summary"
+	}
+	if routeIsUserLoginStage(semantic) {
+		return "session_setup"
+	}
+	if routeIsBuildModeSelectionStage(semantic) {
+		return "mode_selection"
+	}
+	if routeIsProjectBuildStage(semantic) && (step.Action.Type == model.GraphActionWait || step.Action.Type == model.GraphActionInspect) {
+		return "continuous_progress_observation"
+	}
+	switch step.Action.Type {
+	case model.GraphActionNavigate:
+		return "navigation_context"
+	case model.GraphActionFill:
+		return "form_input"
+	case model.GraphActionClick, model.GraphActionSelect, model.GraphActionUpload:
+		return "business_action"
+	case model.GraphActionWait, model.GraphActionInspect:
+		return "observation"
+	default:
+		return "stage_evidence"
+	}
+}
+
+func captureIntentForStage(step model.ScriptStep, stageKind model.BusinessStageKind, durationMS int) string {
+	target := firstNonEmpty(step.Action.Target.Label, step.Action.Target.Text, step.Action.Value, step.Title)
+	semantic := step.Title + " " + step.BusinessValue + " " + step.ExpectedOutcome + " " + step.Action.Value
+	switch stageKind {
+	case model.BusinessStageKindSessionSetup:
+		return "展示登录授权过程和进入工作台后的稳定页面状态。"
+	case model.BusinessStageKindBusinessInput:
+		if step.Action.Value != "" {
+			return "展示按用户需求填写内容：" + RedactSensitiveUserText(step.Action.Value)
+		}
+		return "展示业务表单输入：" + target
+	case model.BusinessStageKindModeSelection:
+		return "展示选择业务模式：" + firstNonEmpty(target, "构建模式")
+	case model.BusinessStageKindBusinessSubmit:
+		return "展示提交或启动业务动作，并捕获进入下一页面/状态的过渡。"
+	case model.BusinessStageKindObserveProgress:
+		return continuousCaptureIntent(durationMS)
+	case model.BusinessStageKindFinalObserve:
+		return "展示最终稳定结果和可交付状态。"
+	}
+	if routeIsUserLoginStage(semantic) {
+		return "展示登录授权过程和进入工作台后的稳定页面状态。"
+	}
+	if routeIsBuildModeSelectionStage(semantic) {
+		return "展示选择业务模式：" + firstNonEmpty(target, "构建模式")
+	}
+	if step.Action.Type == model.GraphActionWait || (step.Action.Type == model.GraphActionInspect && containsAnyNormalized(step.Title+" "+step.ExpectedOutcome, "观察", "等待", "progress", "log")) {
+		return continuousCaptureIntent(durationMS)
+	}
+	return "展示该阶段关键业务动作、页面反馈和稳定结果。"
+}
+
+func captureClipSuggestionForStage(step model.ScriptStep, stageKind model.BusinessStageKind, durationMS int) string {
+	semantic := step.Title + " " + step.BusinessValue + " " + step.ExpectedOutcome
+	if stageKind == model.BusinessStageKindSessionSetup || routeIsUserLoginStage(semantic) {
+		return "保留登录前表单、提交动作和进入工作台后三段，不展示明文密码。"
+	}
+	if stageKind == model.BusinessStageKindObserveProgress || step.Action.Type == model.GraphActionWait {
+		return "从进入目标状态后保留连续录屏，剪辑时突出页面进度、日志、预览或状态变化；如用户指定了时长，不得压缩低于该时长。"
+	}
+	if stageKind == model.BusinessStageKindBusinessInput {
+		return "保留输入前字段上下文、填充完成状态和下一步入口。"
+	}
+	if stageKind == model.BusinessStageKindBusinessSubmit {
+		return "保留点击/提交瞬间、页面跳转或状态变化以及首个稳定结果。"
+	}
+	return "保留行动前观察、动作瞬间和动作后稳定状态。"
+}
+
+func captureNotesForStage(step model.ScriptStep, stageKind model.BusinessStageKind) []string {
+	notes := []string{"进入页面后至少等待 1 秒并确认渲染稳定再截图。"}
+	if step.Action.SecretRef != "" || stageKind == model.BusinessStageKindSessionSetup || routeIsUserLoginStage(step.Title+" "+step.BusinessValue+" "+step.ExpectedOutcome) {
+		notes = append(notes, "凭据、密码框、token 和账号敏感信息必须按 redaction policy 打码。")
+	}
+	if step.Capture.FocusSelector != "" {
+		notes = append(notes, "优先围绕 focus_selector 取景，但不得裁掉业务结果区域。")
+	}
+	if stageKind == model.BusinessStageKindObserveProgress {
+		notes = append(notes, "观察阶段只允许等待、滚动、截图和非破坏性查看，不允许新增业务点击。")
+	}
+	return uniqueStrings(notes)
+}
+
+func continuousCaptureIntent(durationMS int) string {
+	if durationMS > 0 {
+		return fmt.Sprintf("连续展示业务执行过程，至少保留 %d 秒页面变化。", durationMS/1000)
+	}
+	return "连续展示业务执行过程，直到页面出现可解释的进度、日志、预览或结果状态。"
+}
+
 func stageRiskNotes(step model.ScriptStep, node *model.GraphNode) []string {
 	notes := []string{}
 	if step.Action.SecretRef != "" {
@@ -1781,7 +1931,7 @@ func missingEvidenceItemBlocks(report *model.MissingEvidenceReport, item model.M
 	if report == nil || !report.Blocking {
 		return false
 	}
-	return item.Severity == "" || item.Severity == "blocking"
+	return false
 }
 
 func confidenceForStage(node *model.GraphNode, intelligence *model.ProjectIntelligencePack) float64 {
@@ -1957,13 +2107,7 @@ func containsAnyNormalized(value string, needles ...string) bool {
 }
 
 func requiredLongWaitMS(intentText string) int {
-	intentText = normalizeIntentText(intentText)
-	for _, token := range []string{"60s", "60 s", "60秒", "60 秒", "一分钟", "1分钟", "1 分钟"} {
-		if strings.Contains(intentText, token) {
-			return 60000
-		}
-	}
-	return 0
+	return requiredObservationDurationMS(intentText)
 }
 
 func scriptHasWaitAtLeast(doc *model.ExecutionScriptDocument, sourceText string, waitMS int) bool {
@@ -2068,10 +2212,6 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 			continue
 		}
 		durationMS := node.DurationHintMS
-		if durationMS <= 0 {
-			durationMS = 3000
-		}
-		durationMS = maxInt(durationMS, 10000)
 		capture := captureSpecForNode(node)
 		narrative := narrativeForNode(node)
 		action := scriptActionForNode(node)
@@ -2300,6 +2440,9 @@ func nonEmptyStrings(values ...string) []string {
 }
 
 func stageHoldAfterMS(durationMS int) int {
+	if durationMS <= 0 {
+		return 0
+	}
 	if durationMS >= 10000 {
 		return minInt(durationMS/2, 6000)
 	}
@@ -2346,7 +2489,7 @@ func scriptSecretRefs(doc *model.ExecutionScriptDocument) []string {
 
 func recordingRunSpecFromGraph(project *model.ProjectContext, graph *model.DemoWorkflowGraph) model.RecordingRunSpec {
 	browser := model.BrowserRunSpec{Engine: "chromium", VersionPolicy: "stable-pinned", Headless: true}
-	targetDuration := 60
+	targetDuration := 0
 	if graph.Execution != nil {
 		browser.Engine = firstNonEmpty(graph.Execution.Browser, browser.Engine)
 		browser.Headless = graph.Execution.Headless
@@ -2376,12 +2519,8 @@ func recordingRunSpecFromGraph(project *model.ProjectContext, graph *model.DemoW
 			continue
 		}
 		durationMS := node.DurationHintMS
-		if durationMS <= 0 {
-			durationMS = 3000
-		}
-		durationMS = maxInt(durationMS, 10000)
 		timingHints = append(timingHints, model.NodeTimingHint{NodeID: node.ID, DurationMS: durationMS, HoldAfterMS: stageHoldAfterMS(durationMS)})
-		if node.Capture != nil && (node.Capture.Video || node.Capture.Screenshot) {
+		if node.Capture != nil && (node.Capture.Video || node.Capture.Screenshot) && durationMS > 0 {
 			captureWindows = append(captureWindows, model.CaptureWindow{
 				ID:         "capture_" + node.ID,
 				NodeID:     node.ID,
@@ -2391,6 +2530,13 @@ func recordingRunSpecFromGraph(project *model.ProjectContext, graph *model.DemoW
 			})
 		}
 		startMS += durationMS
+	}
+	if targetDuration <= 0 {
+		targetDuration = (startMS + 999) / 1000
+	}
+	maxDuration := 0
+	if targetDuration > 0 {
+		maxDuration = targetDuration + 30
 	}
 	return model.RecordingRunSpec{
 		RunID:          "run_" + graph.ID,
@@ -2402,7 +2548,7 @@ func recordingRunSpecFromGraph(project *model.ProjectContext, graph *model.DemoW
 		Browser:        browser,
 		Timeline: model.RecordingTimeline{
 			TargetDurationSec: targetDuration,
-			MaxDurationSec:    targetDuration + 30,
+			MaxDurationSec:    maxDuration,
 			CaptureWindows:    captureWindows,
 			NodeTimingHints:   timingHints,
 		},
@@ -2441,10 +2587,9 @@ func scriptActionForNode(node *model.GraphNode) model.ScriptActionInstruction {
 	}
 	actionType := graphActionTypeFromKind(node.Action, node.Selector)
 	return model.ScriptActionInstruction{
-		Type:      actionType,
-		Target:    model.ActionTarget{URL: urlIfHTTP(node.Selector), Selector: selectorIfNotURL(node.Selector)},
-		Value:     node.InputData,
-		TimeoutMS: 10000,
+		Type:   actionType,
+		Target: model.ActionTarget{URL: urlIfHTTP(node.Selector), Selector: selectorIfNotURL(node.Selector)},
+		Value:  node.InputData,
 	}
 }
 
@@ -2555,9 +2700,6 @@ func scriptQualityFromGraph(graph *model.DemoWorkflowGraph) scriptQualityReport 
 		if looksLikeLoginAction(node.Title, node.Action, selector) {
 			report.LoginActionCount++
 		}
-		if node.DurationHintMS > 0 && node.DurationHintMS < 10000 {
-			report.ShortStageCount++
-		}
 		if actionType == model.GraphActionAssert && !selectorUsableForBlockingAssertion(selector) {
 			report.BlockingAssertRisk++
 		}
@@ -2576,9 +2718,6 @@ func scriptQualityFromGraph(graph *model.DemoWorkflowGraph) scriptQualityReport 
 	}
 	if report.LoginActionCount > 1 {
 		report.Warnings = append(report.Warnings, "检测到重复登录动作，脚本应只登录一次并复用已登录会话。")
-	}
-	if report.ShortStageCount > 0 {
-		report.Warnings = append(report.Warnings, "检测到低于 10 秒的 stage，打包时会拉长为更自然的录制节奏。")
 	}
 	if report.BlockingAssertRisk > 0 {
 		report.Warnings = append(report.Warnings, "检测到泛 selector 上的 blocking assert 风险，打包时会降级为非阻塞观察。")
@@ -2774,7 +2913,7 @@ func renderScriptMarkdown(project *model.ProjectContext, doc *model.ExecutionScr
 	builder.WriteString("## 演示目标\n\n")
 	builder.WriteString("- 目标：" + summary + "\n")
 	builder.WriteString("- 受众：" + targetAudience + "\n")
-	builder.WriteString("- 价值主张：严格按用户需求展示登录、新建项目、构建模式和 agent 实际构建过程。\n\n")
+	builder.WriteString("- 价值主张：严格按用户需求展示已审批的业务阶段、输入内容、页面结果和素材采集目标。\n\n")
 	builder.WriteString("## 生成依据\n\n")
 	if productMap != nil && productMap.Summary != "" {
 		builder.WriteString("- 产品理解：已读取本地项目结构、需求相关 route/component/API/selector 摘要，并用于生成 stage 证据链。\n")
@@ -2791,7 +2930,11 @@ func renderScriptMarkdown(project *model.ProjectContext, doc *model.ExecutionScr
 	builder.WriteString("- 打码选择器：" + strings.Join(doc.SafetyPolicy.Redactions.MaskSelectors, ", ") + "\n\n")
 
 	builder.WriteString("## 录制策略\n\n")
-	builder.WriteString("- 目标时长：" + fmt.Sprintf("%d 秒\n", doc.RecordingRunSpec.Timeline.TargetDurationSec))
+	if doc.RecordingRunSpec.Timeline.TargetDurationSec > 0 {
+		builder.WriteString("- 目标时长：" + fmt.Sprintf("%d 秒\n", doc.RecordingRunSpec.Timeline.TargetDurationSec))
+	} else {
+		builder.WriteString("- 目标时长：未指定固定总时长，按用户明确 stage 要求、页面状态和 Browser Agent 运行时观察控制节奏。\n")
+	}
 	builder.WriteString("- 浏览器：" + firstNonEmpty(doc.RecordingRunSpec.Browser.Engine, "chromium") + " / " + firstNonEmpty(doc.RecordingRunSpec.Browser.VersionPolicy, "stable-pinned") + "\n")
 	builder.WriteString("- 语言与时区：" + firstNonEmpty(doc.RecordingRunSpec.Locale, "zh-CN") + " / " + firstNonEmpty(doc.RecordingRunSpec.Timezone, "Asia/Shanghai") + "\n")
 	builder.WriteString("- 输出资产：" + outputSummary(doc.RecordingRunSpec.Outputs) + "\n\n")
@@ -2818,6 +2961,7 @@ func renderScriptMarkdown(project *model.ProjectContext, doc *model.ExecutionScr
 		}
 		builder.WriteString("- 预期：" + step.ExpectedOutcome + "\n")
 		builder.WriteString("- 录制：" + captureSummary(step.Capture) + "\n")
+		builder.WriteString("- 素材意图：" + capturePlanSummary(capturePlanForStep(step, "", step.Timing.DurationMS)) + "\n")
 		builder.WriteString("- 旁白：" + firstNonEmpty(step.Narrative.Voiceover, step.Narrative.Caption, step.BusinessValue) + "\n\n")
 	}
 
@@ -2876,4 +3020,19 @@ func captureSummary(capture model.CaptureSpec) string {
 		return "仅执行验证"
 	}
 	return strings.Join(parts, " / ")
+}
+
+func capturePlanSummary(plan *model.BrowserAgentCapturePlan) string {
+	if plan == nil {
+		return "按 stage 结果采集素材。"
+	}
+	assets := strings.Join(plan.RequiredAssets, "/")
+	if assets == "" {
+		assets = plan.PrimaryArtifact
+	}
+	duration := ""
+	if plan.MinDurationMS > 0 {
+		duration = fmt.Sprintf("；最低 %d 秒", plan.MinDurationMS/1000)
+	}
+	return firstNonEmpty(plan.Intent, "按 stage 结果采集素材。") + duration + "；资产：" + firstNonEmpty(assets, "trace")
 }

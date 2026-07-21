@@ -9,7 +9,7 @@ import (
 
 func TestBusinessStagePlannerCreatesRequirementDrivenTetrisStages(t *testing.T) {
 	project := graphQualityProject()
-	project.ProductDescription = "演示登录 10 秒，新建项目 10 秒，项目名称俄罗斯方块，选择构建模式，启动 agent 实际构建，并等待 60 秒观察。"
+	project.ProductDescription = "演示登录 7 秒，新建项目 13 秒，项目名称俄罗斯方块，选择构建模式，启动 agent 实际构建，并等待 45 秒观察。"
 	project.DemoAccount = &model.DemoAccount{
 		UsernameSecretRef: "secret://demo/username",
 		PasswordSecretRef: "secret://demo/password",
@@ -65,9 +65,15 @@ func TestBusinessStagePlannerCreatesRequirementDrivenTetrisStages(t *testing.T) 
 	if inputStage.Action.InputValue != "俄罗斯方块" || inputStage.Kind != model.BusinessStageKindBusinessInput {
 		t.Fatalf("business input did not preserve project name semantics: %+v", inputStage)
 	}
+	if got := plan.Stages[0].DurationMS; got != 7000 {
+		t.Fatalf("login stage must preserve explicit user duration, got %d", got)
+	}
+	if got := plan.Stages[1].DurationMS; got != 13000 {
+		t.Fatalf("new project stage must preserve explicit user duration, got %d", got)
+	}
 	observeStage := plan.Stages[5]
-	if observeStage.DurationMS < 60000 || observeStage.Action.Type != string(model.GraphActionWait) {
-		t.Fatalf("observe stage must preserve 60s wait semantics, got %+v", observeStage)
+	if observeStage.DurationMS != 45000 || observeStage.Action.Type != string(model.GraphActionWait) {
+		t.Fatalf("observe stage must preserve explicit wait semantics, got %+v", observeStage)
 	}
 }
 
@@ -111,7 +117,7 @@ func TestBusinessStagePlannerDoesNotBindLoginToProjectNameStage(t *testing.T) {
 
 func TestBusinessStagePlannerUsesCodeDiscoveredStageRoutes(t *testing.T) {
 	project := graphQualityProject()
-	project.ProductDescription = "演示登录，新建项目，项目名称俄罗斯方块，选择构建模式，启动 agent 构建并观察 60 秒。"
+	project.ProductDescription = "演示登录，新建项目，项目名称俄罗斯方块，选择构建模式，启动 agent 构建并观察 45 秒。"
 	project.DemoAccount = &model.DemoAccount{UsernameSecretRef: "secret://demo/username", PasswordSecretRef: "secret://demo/password"}
 	intelligence := graphQualityIntelligence()
 	intelligence.DemoIntent.Objective = project.ProductDescription

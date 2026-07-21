@@ -101,16 +101,13 @@ func validateBrowserAgentOutlineContract(bundle *model.ExecutableRecordingScript
 			if strings.TrimSpace(stage.Objective) == "" {
 				findings = append(findings, scriptValidationFinding("stage_objective_missing_"+stage.NodeID, model.FindingSeverityBlocking, "stage 缺少业务目标："+stage.NodeID))
 			}
-			if stage.DurationMS > 0 && stage.DurationMS < 10000 {
-				findings = append(findings, scriptValidationFinding("stage_duration_short_"+stage.NodeID, model.FindingSeverityBlocking, "stage 时长低于 10 秒："+stage.NodeID))
-			}
 			if !outlineStageApprovalHasEvidence(stage) {
-				findings = append(findings, scriptValidationFinding("stage_evidence_missing_"+stage.NodeID, model.FindingSeverityBlocking, "stage 缺少 route/component/API/selector 证据链："+stage.NodeID))
+				findings = append(findings, scriptValidationFinding("stage_evidence_missing_"+stage.NodeID, model.FindingSeverityWarning, "stage 缺少 route/component/API/selector 证据链，server browser agent 需在运行时补证："+stage.NodeID))
 			}
 		}
 		for _, uncertainty := range bundle.StageApprovalPlan.UncertaintyReport {
 			if uncertainty.Blocking {
-				findings = append(findings, scriptValidationFinding("stage_uncertainty_blocking_"+uncertainty.ID, model.FindingSeverityBlocking, "stage plan 存在阻塞不确定项："+uncertainty.Summary))
+				findings = append(findings, scriptValidationFinding("stage_uncertainty_runtime_"+uncertainty.ID, model.FindingSeverityWarning, "stage plan 存在运行时不确定项："+uncertainty.Summary))
 			}
 		}
 	}
@@ -131,12 +128,12 @@ func validateBrowserAgentOutlineContract(bundle *model.ExecutableRecordingScript
 				findings = append(findings, scriptValidationFinding("outline_stage_interactions_missing_"+stage.NodeID, model.FindingSeverityBlocking, "script_outline stage 缺少交互大纲："+stage.NodeID))
 			}
 			if len(stage.EvidenceRefs) == 0 && len(stage.Components) == 0 {
-				findings = append(findings, scriptValidationFinding("outline_stage_evidence_missing_"+stage.NodeID, model.FindingSeverityBlocking, "script_outline stage 缺少证据："+stage.NodeID))
+				findings = append(findings, scriptValidationFinding("outline_stage_evidence_missing_"+stage.NodeID, model.FindingSeverityWarning, "script_outline stage 缺少证据，server browser agent 需在运行时补证："+stage.NodeID))
 			}
 		}
 		for _, uncertainty := range bundle.ScriptOutline.UncertaintyReport {
 			if uncertainty.Blocking {
-				findings = append(findings, scriptValidationFinding("outline_uncertainty_blocking_"+uncertainty.ID, model.FindingSeverityBlocking, "script_outline 存在阻塞不确定项："+uncertainty.Summary))
+				findings = append(findings, scriptValidationFinding("outline_uncertainty_runtime_"+uncertainty.ID, model.FindingSeverityWarning, "script_outline 存在运行时不确定项："+uncertainty.Summary))
 			}
 		}
 	}

@@ -151,8 +151,8 @@ func validateRecordingRunSpec(spec RecordingRunSpec) error {
 	if spec.Browser.Engine == "" {
 		return errors.New("recording_run_spec.browser.engine is required")
 	}
-	if spec.Timeline.TargetDurationSec <= 0 {
-		return errors.New("recording_run_spec.timeline.target_duration_sec must be positive")
+	if spec.Timeline.TargetDurationSec < 0 {
+		return errors.New("recording_run_spec.timeline.target_duration_sec must not be negative")
 	}
 	if !spec.Outputs.RawRecording || !spec.Outputs.Trace {
 		return errors.New("recording_run_spec.outputs must request raw_recording and trace")
@@ -339,12 +339,6 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 		if strings.TrimSpace(stage.Objective) == "" {
 			return fmt.Errorf("stage_approval_plan stage %q is missing objective", stage.NodeID)
 		}
-		if stage.DurationMS > 0 && stage.DurationMS < 10000 {
-			return fmt.Errorf("stage_approval_plan stage %q duration must be at least 10000ms", stage.NodeID)
-		}
-		if !stageHasEvidence(stage) {
-			return fmt.Errorf("stage_approval_plan stage %q is missing evidence chain", stage.NodeID)
-		}
 		if stage.TargetContract == nil || strings.TrimSpace(stage.TargetContract.SemanticID) == "" {
 			return fmt.Errorf("stage_approval_plan stage %q is missing target_contract", stage.NodeID)
 		}
@@ -360,9 +354,6 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 		}
 		if len(stage.Interactions) == 0 {
 			return fmt.Errorf("script_outline stage %q is missing interactions", stage.NodeID)
-		}
-		if len(stage.EvidenceRefs) == 0 && len(stage.Components) == 0 {
-			return fmt.Errorf("script_outline stage %q is missing evidence chain", stage.NodeID)
 		}
 		if stage.TargetContract == nil || strings.TrimSpace(stage.TargetContract.SemanticID) == "" {
 			return fmt.Errorf("script_outline stage %q is missing target_contract", stage.NodeID)
@@ -383,11 +374,6 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 		}
 		if !outlineNodeIDs[nodeID] {
 			return fmt.Errorf("script_outline missing plan node_id %q", nodeID)
-		}
-	}
-	for _, uncertainty := range append(append([]StageUncertainty{}, bundle.StageApprovalPlan.UncertaintyReport...), bundle.ScriptOutline.UncertaintyReport...) {
-		if uncertainty.Blocking {
-			return fmt.Errorf("browser-agent outline contains blocking uncertainty %q", uncertainty.ID)
 		}
 	}
 	stageHash, err := DigestCanonicalJSON(bundle.StageApprovalPlan)

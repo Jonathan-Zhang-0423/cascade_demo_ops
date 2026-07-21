@@ -182,6 +182,7 @@ type StageApprovalStage struct {
 	SuccessState                     string                       `json:"success_state,omitempty"`
 	WaitConditions                   []string                     `json:"wait_conditions,omitempty"`
 	CapturePoints                    []string                     `json:"capture_points,omitempty"`
+	CapturePlan                      *BrowserAgentCapturePlan     `json:"capture_plan,omitempty"`
 	RiskNotes                        []string                     `json:"risk_notes,omitempty"`
 	InvestigationQuestionRefs        []InvestigationQuestionRef   `json:"investigation_question_refs,omitempty"`
 	EvidenceRefs                     []EvidenceRef                `json:"evidence_refs,omitempty"`
@@ -196,6 +197,18 @@ type StageInputContent struct {
 	SecretRef    string        `json:"secret_ref,omitempty"`
 	Editable     bool          `json:"editable,omitempty"`
 	EvidenceRefs []EvidenceRef `json:"evidence_refs,omitempty"`
+}
+
+type BrowserAgentCapturePlan struct {
+	Intent           string   `json:"intent,omitempty"`
+	ShotType         string   `json:"shot_type,omitempty"`
+	PrimaryArtifact  string   `json:"primary_artifact,omitempty"`
+	RequiredAssets   []string `json:"required_assets,omitempty"`
+	MinDurationMS    int      `json:"min_duration_ms,omitempty"`
+	PreCaptureWaitMS int      `json:"pre_capture_wait_ms,omitempty"`
+	HoldAfterMS      int      `json:"hold_after_ms,omitempty"`
+	ClipSuggestion   string   `json:"clip_suggestion,omitempty"`
+	Notes            []string `json:"notes,omitempty"`
 }
 
 type BrowserAgentScriptOutline struct {
@@ -261,6 +274,7 @@ type BrowserAgentOutlineStage struct {
 	TargetContract                   *BrowserAgentTargetContract   `json:"target_contract,omitempty"`
 	WaitConditions                   []string                      `json:"wait_conditions,omitempty"`
 	CapturePoints                    []string                      `json:"capture_points,omitempty"`
+	CapturePlan                      *BrowserAgentCapturePlan      `json:"capture_plan,omitempty"`
 	SuccessState                     string                        `json:"success_state,omitempty"`
 	DurationMS                       int                           `json:"duration_ms,omitempty"`
 	CanModify                        []string                      `json:"can_modify,omitempty"`
