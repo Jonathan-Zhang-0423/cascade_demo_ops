@@ -231,6 +231,7 @@ pnpm --filter @cascade/web build
 pnpm --filter @cascade/video-worker build
 pnpm build:desktop:win
 pnpm package:desktop
+pnpm smoke:desktop-package
 cd backend
 go test ./...
 ```
@@ -239,7 +240,6 @@ go test ./...
 
 ```powershell
 pnpm package:desktop:installer
-pnpm smoke:desktop-package
 ```
 
 ## 下一步开发建议
