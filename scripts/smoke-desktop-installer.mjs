@@ -129,6 +129,8 @@ const host = spawn(entrypoint, ["--open=false", "--addr", "127.0.0.1:0"], {
     ...process.env,
     CASCADE_PROFILE: "desktop",
     CASCADE_DATA_ROOT: resolve(smokeRoot, "host-user-data"),
+    CASCADE_DEV_EXCHANGE_HTTP: "1",
+    CASCADE_DEV_EXCHANGE_TOKEN: "desktop-smoke-token",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -142,6 +144,7 @@ try {
   assert(health.data?.node_runtime_configured === true, "installed desktop did not load bundled node runtime");
   assert(health.data?.sidecars?.["video-worker"] === true, "installed desktop did not load packaged video-worker");
   assertRuntimeCapabilities(health.data, "installed desktop runtime-health");
+  assertDevExchangeRunUnavailable(hostPayload.url);
 } finally {
   await terminateChild(host);
 }
@@ -193,6 +196,14 @@ function assertRuntimeCapabilities(data, label) {
   assert(capabilities?.server_recording_required === true, `${label} must require server-side production recording`);
   assert(capabilities?.local_recording_execution === false, `${label} must not enable local production recording`);
   assert(capabilities?.video_worker_role === "editor_media_helper_and_dev_compatibility_runtime", `${label} must classify video-worker as non-production-recorder`);
+}
+
+function assertDevExchangeRunUnavailable(baseURL) {
+  const status = httpStatus(`${baseURL}/v1/dev/execution-packages/xpkg_smoke/run?org_id=org_smoke`, {
+    method: "POST",
+    authorization: "Bearer desktop-smoke-token",
+  });
+  assert(status === 404, `installed desktop host must not expose local dev recording run route, got HTTP ${status}`);
 }
 
 function assertRequiredAppSurfaces(manifest) {
@@ -375,6 +386,31 @@ function httpGet(url) {
     throw new Error(`HTTP GET failed: ${url}`);
   }
   return result.stdout;
+}
+
+function httpStatus(url, options = {}) {
+  const method = options.method || "GET";
+  const headers = options.authorization ? `-Headers @{Authorization='${escapePowerShell(options.authorization)}'}` : "";
+  const ps = [
+    "$ProgressPreference = 'SilentlyContinue';",
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;`,
+    "$ErrorActionPreference = 'Stop';",
+    "try {",
+    `$response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Method ${method} -Uri '${escapePowerShell(url)}' ${headers};`,
+    "[int]$response.StatusCode",
+    "} catch {",
+    "if ($_.Exception.Response -and $_.Exception.Response.StatusCode) { [int]$_.Exception.Response.StatusCode } else { throw }",
+    "}",
+  ].join(" ");
+  const result = spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    process.stderr.write(result.stderr || "");
+    throw new Error(`HTTP status check failed: ${url}`);
+  }
+  return Number.parseInt(result.stdout.trim(), 10);
 }
 
 function escapePowerShell(value) {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -52,7 +53,7 @@ func (s *DevHTTPServer) registerExchangeBootstrapRoutes(mux *http.ServeMux) {
 }
 
 func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
-	if !devExchangeHTTPEnabled() {
+	if !s.devExchangeHTTPEnabledForRuntime() {
 		return
 	}
 	mux.HandleFunc("POST /v1/execution-packages/init", s.requireDevExchangeAuth(s.handleExecutionPackageInit))
@@ -77,6 +78,13 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /aigc/v1/dev/execution-packages/{id}/cancel", s.requireDevExchangeAuth(s.handleDevExecutionPackageCancel))
 	mux.HandleFunc("GET /aigc/v1/dev/execution-packages/{id}/debug", s.requireDevExchangeAuth(s.handleDevExecutionPackageDebug))
 	mux.HandleFunc("GET /aigc/v1/dev/result-packages/{id}/deliverables/{artifact_id}", s.requireDevExchangeAuth(s.handleDevResultDeliverableDownload))
+}
+
+func (s *DevHTTPServer) devExchangeHTTPEnabledForRuntime() bool {
+	if !devExchangeHTTPEnabled() {
+		return false
+	}
+	return s.service == nil || s.service.runtime.Profile != config.ProfileDesktop
 }
 
 func (s *DevHTTPServer) handleExchangeBootstrap(w http.ResponseWriter, r *http.Request) {
