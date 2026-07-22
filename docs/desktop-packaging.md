@@ -168,3 +168,8 @@ elevation heuristics for this non-admin installer. It is suitable for internal
 download/install smoke testing, while production release still needs an embedded
 Windows application manifest, code signing, installer UI polish, bundled
 FFmpeg strategy, and auto-update policy.
+
+`pnpm smoke:desktop-installer` installs into an isolated smoke directory with a
+mock `%APPDATA%`, verifies the generated Start Menu launcher, starts the app,
+then runs `Uninstall-CascadeDemoOps.ps1`. The uninstall script removes the
+install directory and launcher, but intentionally leaves user data roots intact.

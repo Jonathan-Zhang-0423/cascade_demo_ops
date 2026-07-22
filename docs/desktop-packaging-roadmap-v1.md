@@ -116,7 +116,7 @@ dist/release/
 - `cmd/desktop-installer` 生成 Windows 自解压 setup exe，内嵌 portable zip payload。
 - setup 会校验 payload SHA-256，安装到 per-user 目录，写入 `install-manifest.json`，并生成卸载脚本。
 - `pnpm package:desktop:installer` 输出 `CascadeDemoOps-<version>-windows-x64-bootstrap.exe`、checksum 和 manifest。
-- `pnpm smoke:desktop-installer` 会真实静默安装到 smoke 目录，验证 installed exe 的 `--check`、bundled Node 执行 video-worker JSON-RPC `health`、本地 Desktop Host 首页和 runtime-health。
+- `pnpm smoke:desktop-installer` 会真实静默安装到 smoke 目录，验证 installed exe 的 `--check`、Start Menu launcher、bundled Node 执行 video-worker JSON-RPC `health`、本地 Desktop Host 首页、runtime-health、卸载脚本清理安装目录且保留用户数据。
 
 建议实现：
 
@@ -261,7 +261,7 @@ pnpm package:desktop:signed
 
 1. 增加 `backend/cmd/desktop` 的 smoke test，验证 desktop profile 能读取 `dist/package/resources/desktop-runtime.json`。
 2. 扩展 package smoke，覆盖 Desktop Host 首页和 runtime-health。
-3. 扩展 installer smoke，覆盖卸载脚本、Start Menu launcher 和更深的 sidecar/FFmpeg 降级诊断。
+3. 扩展 installer smoke，覆盖更深的 sidecar/FFmpeg 降级诊断。
 4. 扩展 `DesktopResourceManifest` 支持 `ffmpeg` / `ffprobe` runtime key。
 5. 增加前端 `wails` bridge adapter 的类型边界，但先用 mock binding 测。
 6. 引入 Wails app skeleton，绑定 `DesktopBridge.RuntimeConfig()` 作为第一条真实链路。

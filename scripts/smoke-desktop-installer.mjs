@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -53,7 +53,7 @@ assert(checkPayload.ready === true, "setup --check did not report ready=true");
 assert(checkPayload.payload_embedded === true, "setup payload is not embedded");
 assert(checkPayload.payload_sha256 === manifest.payload?.sha256, "setup payload hash does not match manifest");
 
-const install = spawnSync(setupPath, ["--quiet", "--launch=false", "--no-shortcut", "--install-dir", installDir], {
+const install = spawnSync(setupPath, ["--quiet", "--launch=false", "--install-dir", installDir], {
   cwd: root,
   env: { ...process.env, APPDATA: appDataRoot, LOCALAPPDATA: resolve(smokeRoot, "localappdata") },
   encoding: "utf8",
@@ -74,11 +74,16 @@ assertFile(bundledNode, "installed bundled node runtime");
 assertFile(bundledWorker, "installed video-worker entrypoint");
 await assertVideoWorkerHealth(bundledNode, bundledWorker);
 assertFile(resolve(installDir, "install-manifest.json"), "install manifest");
-assertFile(resolve(installDir, "Uninstall-CascadeDemoOps.ps1"), "uninstall script");
+const uninstallScript = resolve(installDir, "Uninstall-CascadeDemoOps.ps1");
+assertFile(uninstallScript, "uninstall script");
 
 const installedManifest = JSON.parse(readFileSync(resolve(installDir, "install-manifest.json"), "utf8"));
 assert(installedManifest.schema_version === "demoops.desktop_install_manifest.v1", "unexpected installed manifest schema");
 assert(installedManifest.server_connectivity?.required_for_local_generation === false, "installed app must keep local generation server-optional");
+assert(Array.isArray(installedManifest.shortcuts) && installedManifest.shortcuts.length === 1, "installer did not record Start Menu launcher");
+const launcherPath = installedManifest.shortcuts[0];
+assertFile(launcherPath, "Start Menu launcher");
+assert(readFileSync(launcherPath, "utf8").includes("cascade-demoops-desktop.exe"), "Start Menu launcher does not point at desktop entrypoint");
 
 const entrypoint = resolve(installDir, "cascade-demoops-desktop.exe");
 const desktopCheck = spawnSync(entrypoint, ["--check"], {
@@ -120,6 +125,22 @@ try {
 } finally {
   await terminateChild(host);
 }
+
+const userDataSentinel = resolve(smokeRoot, "user-data", "preserve-me.txt");
+mkdirSync(resolve(userDataSentinel, ".."), { recursive: true });
+writeFileSync(userDataSentinel, "user data must survive uninstall\n");
+const uninstall = spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", uninstallScript], {
+  cwd: root,
+  encoding: "utf8",
+});
+if (uninstall.status !== 0) {
+  process.stdout.write(uninstall.stdout || "");
+  process.stderr.write(uninstall.stderr || "");
+  throw new Error(`uninstall script exited with status ${uninstall.status}`);
+}
+assert(!existsSync(installDir), "uninstall script did not remove install dir");
+assert(!existsSync(launcherPath), "uninstall script did not remove Start Menu launcher");
+assertFile(userDataSentinel, "user data sentinel after uninstall");
 
 console.log(`Desktop installer smoke passed: ${setupPath}`);
 

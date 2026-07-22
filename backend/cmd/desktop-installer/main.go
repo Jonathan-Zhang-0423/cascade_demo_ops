@@ -183,16 +183,16 @@ func installPayload(payload []byte, trailer payloadTrailer, installDir string, c
 		return installManifest{}, fmt.Errorf("installed desktop entrypoint is missing: %w", err)
 	}
 	shortcuts := []string{}
-	uninstallScript, err := writeUninstallScript(absInstallDir)
-	if err != nil {
-		return installManifest{}, err
-	}
-	files = append(files, fileInfo(absInstallDir, uninstallScript))
 	if createShortcut {
 		if shortcut, err := writeStartMenuLauncher(entrypoint); err == nil && shortcut != "" {
 			shortcuts = append(shortcuts, shortcut)
 		}
 	}
+	uninstallScript, err := writeUninstallScript(absInstallDir, shortcuts)
+	if err != nil {
+		return installManifest{}, err
+	}
+	files = append(files, fileInfo(absInstallDir, uninstallScript))
 	manifest := installManifest{
 		SchemaVersion: "demoops.desktop_install_manifest.v1",
 		App:           "Cascade DemoOps",
@@ -325,10 +325,17 @@ func pathWithin(path string, root string) bool {
 	return rel == "." || rel != "" && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func writeUninstallScript(installDir string) (string, error) {
+func writeUninstallScript(installDir string, shortcuts []string) (string, error) {
 	path := filepath.Join(installDir, "Uninstall-CascadeDemoOps.ps1")
+	shortcutJSON, err := json.Marshal(shortcuts)
+	if err != nil {
+		return "", err
+	}
 	content := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 $InstallDir = %q
+$KnownShortcuts = ConvertFrom-Json @'
+%s
+'@
 $ManifestPath = Join-Path $InstallDir 'install-manifest.json'
 if (-not (Test-Path -LiteralPath $ManifestPath)) {
   throw "Cascade DemoOps install manifest is missing: $ManifestPath"
@@ -340,9 +347,21 @@ if ($Manifest.schema_version -ne 'demoops.desktop_install_manifest.v1') {
 if ($Manifest.app -ne 'Cascade DemoOps') {
   throw "Refusing to uninstall unknown app: $($Manifest.app)"
 }
+foreach ($Shortcut in @($KnownShortcuts)) {
+  if ($Shortcut -and (Test-Path -LiteralPath $Shortcut)) {
+    Remove-Item -LiteralPath $Shortcut -Force
+  }
+}
+if ($Manifest.shortcuts) {
+  foreach ($Shortcut in @($Manifest.shortcuts)) {
+    if ($Shortcut -and (Test-Path -LiteralPath $Shortcut)) {
+      Remove-Item -LiteralPath $Shortcut -Force
+    }
+  }
+}
 Remove-Item -LiteralPath $InstallDir -Recurse -Force
 Write-Host "Cascade DemoOps Desktop uninstalled from $InstallDir"
-`, installDir)
+`, installDir, string(shortcutJSON))
 	return path, os.WriteFile(path, []byte(content), 0o644)
 }
 
