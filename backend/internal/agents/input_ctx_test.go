@@ -44,3 +44,31 @@ func TestInputContextRedactsCredentialsEmbeddedInRequirements(t *testing.T) {
 		}
 	}
 }
+
+func TestInputContextKeepsGitHubAndLocalReposAsParallelSources(t *testing.T) {
+	input := orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		GitRepoURL:         "https://github.com/acme/demo-app",
+		LocalRepoPath:      "C:\\Users\\demo\\project",
+		ProductDescription: "演示新建项目",
+		TargetAudience:     "运营",
+	}
+
+	project, err := NewInputContextAgent().BuildProjectContext(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.GitRepoURL != input.GitRepoURL || project.LocalRepoPath != input.LocalRepoPath {
+		t.Fatalf("project context lost parallel repo inputs: %+v", project)
+	}
+	if len(project.Inputs.Repositories) != 2 || len(project.Inputs.Code) != 2 {
+		t.Fatalf("expected GitHub and local code sources, got repositories=%+v code=%+v", project.Inputs.Repositories, project.Inputs.Code)
+	}
+	if project.Inputs.Repositories[0].Provider != "github" || project.Inputs.Repositories[0].Primary {
+		t.Fatalf("expected GitHub source to be parallel non-primary when local path also exists: %+v", project.Inputs.Repositories[0])
+	}
+	if project.Inputs.Repositories[1].Provider != "local" || project.Inputs.Repositories[1].Primary {
+		t.Fatalf("expected local source to be parallel non-primary when GitHub URL also exists: %+v", project.Inputs.Repositories[1])
+	}
+}

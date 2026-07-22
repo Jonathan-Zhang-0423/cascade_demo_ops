@@ -54,6 +54,13 @@ export function createWorkspace(scenarioID: ScenarioID = "product_demo"): Projec
         detail: "已提取路由、组件、数据模型摘要，不上传完整源码。",
       },
       {
+        id: "source_github_repo",
+        kind: "github_repo",
+        label: "GitHub 仓库结构摘要",
+        status: "needs_attention",
+        detail: "可选填写 GitHub 仓库 URL；与本地项目目录并列，不互相替代。",
+      },
+      {
         id: "source_credentials",
         kind: "credential",
         label: "演示账号授权",

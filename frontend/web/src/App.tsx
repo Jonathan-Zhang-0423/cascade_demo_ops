@@ -615,7 +615,8 @@ function InputsPanel({
   onDemoCredentialsChange: (credentials: { username: string; password: string }) => void;
   onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
 }) {
-  const localRepoPath = workspace.inputBundle.repositories?.[0]?.local_path ?? "";
+  const localRepoPath = workspace.inputBundle.repositories?.find((repo) => repo.local_path)?.local_path ?? "";
+  const gitRepoURL = workspace.inputBundle.repositories?.find((repo) => repo.url)?.url ?? "";
   const forbiddenData = workspaceInputForbiddenData(workspace);
   function patchInputs(patch: Parameters<typeof updateWorkspaceInputs>[1]) {
     onWorkspaceChange(updateWorkspaceInputs(workspace, patch));
@@ -630,8 +631,12 @@ function InputsPanel({
             <input value={workspace.productURL} onChange={(event) => patchInputs({ productURL: event.currentTarget.value })} placeholder="https://app.example.com" />
           </label>
           <label className="field-row">
-            <span>项目根目录</span>
+            <span>本地项目根目录</span>
             <input value={localRepoPath} onChange={(event) => patchInputs({ localRepoPath: event.currentTarget.value })} placeholder="C:\\Users\\you\\Desktop\\your-project" />
+          </label>
+          <label className="field-row">
+            <span>GitHub 仓库 URL</span>
+            <input value={gitRepoURL} onChange={(event) => patchInputs({ gitRepoURL: event.currentTarget.value })} placeholder="https://github.com/org/repo" />
           </label>
           <label className="field-row">
             <span>目标受众</span>
@@ -669,7 +674,7 @@ function InputsPanel({
             <textarea value={forbiddenData.join("\n")} onChange={(event) => patchInputs({ forbiddenDataText: event.currentTarget.value })} rows={3} />
           </label>
         </div>
-        <div className="input-note">当前 Dev Bridge 使用文本路径输入；演示账号密码只作为本地登录预扫描的瞬时凭据，不进入执行包、审批文档或云端 payload。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
+        <div className="input-note">本地项目根目录和 GitHub 仓库 URL 都是可选代码来源，可以单独填写也可以同时填写；演示账号密码只作为本地登录预扫描的瞬时凭据，不进入执行包、审批文档或云端 payload。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
       </section>
       <InputsTable workspace={workspace} />
       <CodeSummaryPanel workspace={workspace} />
@@ -1763,6 +1768,7 @@ function sourceKindLabel(kind: string): string {
   const labels: Record<string, string> = {
     product_url: "产品地址",
     local_repo: "本地代码",
+    github_repo: "GitHub 代码",
     requirement_doc: "需求文档",
     screenshot: "页面截图",
     release_note: "发布说明",

@@ -206,6 +206,55 @@ func TestCodeReaderUsesIntentDrivenBudget(t *testing.T) {
 	}
 }
 
+func TestCodeReaderClonesGitRepositoryInputForIntentDrivenScan(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is required for repository snapshot test")
+	}
+	root := t.TempDir()
+	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
+	writeFixtureFile(t, root, "src/pages/projects/NewProject.tsx", `
+		export function NewProjectPage() {
+			const route = "/projects/new"
+			return <button data-testid="new-project">新建项目</button>
+		}
+	`)
+	gitInitFixtureRepo(t, root)
+	project := &model.ProjectContext{
+		ID:                 "project_git_repo",
+		ProductURL:         "https://cascadeai.cn",
+		ProductDescription: "演示新建项目",
+		Inputs: &model.ProjectInputBundle{Code: []model.CodeInput{{
+			ID:           "code_git",
+			Kind:         "git_repository",
+			URI:          "file://" + filepath.ToSlash(root),
+			RepositoryID: "repo_git",
+			ReadOnly:     true,
+		}}},
+	}
+	brief := &model.RequirementBrief{ProjectID: project.ID, Objective: project.ProductDescription, MustShow: []string{"新建项目"}}
+
+	snapshots, err := NewCodeReaderAgent().ReadCode(context.Background(), project, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("expected one snapshot, got %d", len(snapshots))
+	}
+	snapshot := snapshots[0]
+	if snapshot.FileCount == 0 || snapshot.CommitSHA == "" {
+		t.Fatalf("expected git snapshot to be cloned and scanned: %+v", snapshot)
+	}
+	if !routeInsightContains(snapshot.Routes, "/projects/new") {
+		t.Fatalf("git repository scan dropped route: %+v", snapshot.Routes)
+	}
+	if !selectorInsightContains(snapshot.Selectors, "[data-testid='new-project']") {
+		t.Fatalf("git repository scan dropped selector: %+v", snapshot.Selectors)
+	}
+	if snapshot.InvestigationTrace == nil || !strings.Contains(snapshot.InvestigationTrace.Summary, "GitHub 仓库只读快照") {
+		t.Fatalf("expected git repository investigation trace, got %+v", snapshot.InvestigationTrace)
+	}
+}
+
 func TestCodeReaderStopsAfterInvestigationQuestionsAreAnswered(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)
@@ -1854,6 +1903,26 @@ func writeFixtureFile(t *testing.T, root string, rel string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func gitInitFixtureRepo(t *testing.T, root string) {
+	t.Helper()
+	runGitForTest(t, root, "init")
+	runGitForTest(t, root, "config", "user.email", "cascade-test@example.com")
+	runGitForTest(t, root, "config", "user.name", "Cascade Test")
+	runGitForTest(t, root, "add", ".")
+	runGitForTest(t, root, "commit", "-m", "fixture")
+}
+
+func runGitForTest(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
 	}
 }
 

@@ -24,6 +24,22 @@ describe("agent pipeline helpers", () => {
     expect(next.sourceConnections.find((source) => source.kind === "local_repo")?.status).toBe("ready");
   });
 
+  it("keeps GitHub and local repositories as parallel optional code sources", () => {
+    const workspace = createWorkspace("product_demo");
+
+    const next = updateWorkspaceInputs(workspace, {
+      localRepoPath: "C:\\Users\\demo\\project",
+      gitRepoURL: "https://github.com/acme/demo-app",
+    });
+
+    expect(next.inputBundle.repositories).toEqual([
+      { url: "https://github.com/acme/demo-app", provider: "github", read_only: true, primary: false },
+      { local_path: "C:\\Users\\demo\\project", provider: "local", read_only: true, primary: false },
+    ]);
+    expect(next.sourceConnections.find((source) => source.kind === "local_repo")?.status).toBe("ready");
+    expect(next.sourceConnections.find((source) => source.kind === "github_repo")?.status).toBe("ready");
+  });
+
   it("summarizes code snapshots and marks CodeReader completed", () => {
     const workspace = {
       ...createWorkspace("product_demo"),
