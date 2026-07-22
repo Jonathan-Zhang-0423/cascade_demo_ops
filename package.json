@@ -22,7 +22,10 @@
     "smoke:validate-server-render": "node scripts/smoke-validate-server-render.mjs",
     "build:desktop:win": "node scripts/build-desktop.mjs windows",
     "build:desktop:mac": "node scripts/build-desktop.mjs darwin",
-    "package:desktop": "node scripts/package-desktop.mjs"
+    "package:desktop": "node scripts/package-desktop.mjs",
+    "smoke:desktop-package": "node scripts/smoke-desktop-package.mjs",
+    "package:desktop:installer": "node scripts/package-desktop-installer.mjs",
+    "smoke:desktop-installer": "node scripts/smoke-desktop-installer.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

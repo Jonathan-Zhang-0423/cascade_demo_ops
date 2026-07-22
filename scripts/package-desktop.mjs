@@ -1,15 +1,23 @@
-import { mkdirSync, cpSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { mkdirSync, cpSync, existsSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
+import { basename, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(".");
+const appPackage = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
 const packageRoot = resolve("dist", "package");
 const resourceRoot = resolve(packageRoot, "resources");
+const releaseRoot = resolve("dist", "release");
 const videoWorkerDist = resolve("video-worker", "dist");
 const webDist = resolve("frontend", "web", "dist");
 const targetGOOS = process.platform === "win32" ? "windows" : "darwin";
 const desktopExt = targetGOOS === "windows" ? ".exe" : "";
+const nodeBinaryName = targetGOOS === "windows" ? "node.exe" : "node";
+const bundledNodePath = resolve(resourceRoot, "runtimes", "node", nodeBinaryName);
 const desktopBinary = resolve("dist", "desktop", targetGOOS, `cascade-demoops-desktop${desktopExt}`);
+const releaseBaseName = `CascadeDemoOps-${appPackage.version || "0.0.0"}-${targetGOOS}-${process.arch}`;
+const releaseZip = resolve(releaseRoot, `${releaseBaseName}.zip`);
+const releaseChecksum = `${releaseZip}.sha256`;
 
 if (!fallbackWebBuild()) {
   runWithFallback("pnpm", ["--filter", "@cascade/web", "build"], fallbackWebBuild);
@@ -19,30 +27,97 @@ if (!fallbackWorkerBuild()) {
 }
 run("node", ["scripts/build-desktop.mjs", targetGOOS]);
 
+rmSync(packageRoot, { recursive: true, force: true });
 mkdirSync(resourceRoot, { recursive: true });
 copyIfExists(desktopBinary, resolve(packageRoot, basename(desktopBinary)));
 copyIfExists(videoWorkerDist, resolve(resourceRoot, "sidecars", "video-worker", "dist"));
 copyIfExists(webDist, resolve(resourceRoot, "web"));
-writeFileSync(
-  resolve(resourceRoot, "desktop-runtime.json"),
-  JSON.stringify(
-    {
-      app: "Cascade DemoOps",
-      resource_contract_version: 1,
-      sidecars: {
-        "video-worker": "sidecars/video-worker/dist/index.js",
-      },
-      web: "web",
-    },
-    null,
-    2,
-  ),
-);
+copyIfExists(process.execPath, bundledNodePath);
+const runtimeManifest = {
+  app: "Cascade DemoOps",
+  resource_contract_version: 1,
+  sidecars: {
+    "video-worker": "sidecars/video-worker/dist/index.js",
+  },
+  runtimes: existsSync(bundledNodePath)
+    ? {
+        node: `runtimes/node/${nodeBinaryName}`,
+      }
+    : {},
+  web: "web",
+};
+writeJSON(resolve(resourceRoot, "desktop-runtime.json"), runtimeManifest);
+
+const packageManifest = buildPackageManifest();
+writeJSON(resolve(packageRoot, "package-manifest.json"), packageManifest);
+
+mkdirSync(releaseRoot, { recursive: true });
+rmSync(releaseZip, { force: true });
+rmSync(releaseChecksum, { force: true });
+createZip(packageRoot, releaseZip);
+const zipSHA256 = sha256File(releaseZip);
+writeFileSync(releaseChecksum, `${zipSHA256}  ${basename(releaseZip)}\n`);
+
+writeJSON(resolve(releaseRoot, `${releaseBaseName}.manifest.json`), {
+  ...packageManifest,
+  artifact: {
+    file_name: basename(releaseZip),
+    sha256: zipSHA256,
+    size_bytes: statSync(releaseZip).size,
+  },
+});
 
 console.log(`Prepared desktop package resources under ${resourceRoot}`);
+console.log(`Created desktop release archive: ${releaseZip}`);
+console.log(`Created checksum: ${releaseChecksum}`);
 
-function run(command, args) {
-  const result = spawn(command, args);
+function buildPackageManifest() {
+  const files = listFiles(packageRoot)
+    .filter((file) => relative(packageRoot, file) !== "package-manifest.json")
+    .map((file) => ({
+      path: slash(relative(packageRoot, file)),
+      size_bytes: statSync(file).size,
+      sha256: sha256File(file),
+    }));
+  return {
+    schema_version: "demoops.desktop_package_manifest.v1",
+    app: "Cascade DemoOps",
+    package_name: "Cascade DemoOps Desktop",
+    version: appPackage.version || "0.0.0",
+    target_os: targetGOOS,
+    target_arch: process.arch,
+    package_kind: "portable_zip",
+    created_at: new Date().toISOString(),
+    entrypoint: slash(basename(desktopBinary)),
+    resource_manifest: "resources/desktop-runtime.json",
+    runtimes: {
+      node: existsSync(bundledNodePath)
+        ? {
+            path: slash(relative(packageRoot, bundledNodePath)),
+            source: "bundled",
+            required_for: ["video-worker"],
+          }
+        : {
+            path: "",
+            source: "system",
+            required_for: ["video-worker"],
+          },
+    },
+    server_connectivity: {
+      required_for_local_generation: false,
+      reserved_interfaces: [
+        "ExchangeCapabilityResolver",
+        "ExchangeIdentityStore",
+        "ExchangeSessionManager",
+        "CloudLifecycleClient",
+      ],
+    },
+    files,
+  };
+}
+
+function run(command, args, options = {}) {
+  const result = spawn(command, args, options);
   if (!result.ok) {
     process.exit(result.status);
   }
@@ -59,11 +134,16 @@ function runWithFallback(command, args, fallback) {
   process.exit(result.status);
 }
 
-function spawn(command, args) {
+function spawn(command, args, options = {}) {
   const executable = process.platform === "win32" && command === "pnpm" ? "cmd.exe" : command;
   const finalArgs = process.platform === "win32" && command === "pnpm" ? ["/d", "/s", "/c", command, ...args] : args;
   const result = spawnSync(executable, finalArgs, {
-    cwd: root,
+    cwd: options.cwd || root,
+    env: {
+      ...process.env,
+      VITE_CASCADE_BRIDGE: process.env.VITE_CASCADE_BRIDGE || "local",
+      VITE_CASCADE_BRIDGE_URL: process.env.VITE_CASCADE_BRIDGE_URL || "",
+    },
     stdio: "inherit",
   });
   if (result.error) {
@@ -109,4 +189,47 @@ function copyIfExists(from, to) {
   const stat = statSync(from);
   mkdirSync(stat.isDirectory() ? to : resolve(to, ".."), { recursive: true });
   cpSync(from, to, { recursive: true });
+}
+
+function createZip(fromDir, toFile) {
+  if (process.platform === "win32") {
+    run("powershell", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      `Compress-Archive -Path '${escapePowerShell(fromDir)}\\*' -DestinationPath '${escapePowerShell(toFile)}' -Force`,
+    ]);
+    return;
+  }
+  run("zip", ["-qr", toFile, "."], { cwd: fromDir });
+}
+
+function listFiles(dir) {
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...listFiles(fullPath));
+    } else if (entry.isFile()) {
+      out.push(fullPath);
+    }
+  }
+  return out;
+}
+
+function sha256File(file) {
+  return createHash("sha256").update(readFileSync(file)).digest("hex");
+}
+
+function writeJSON(path, value) {
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function slash(path) {
+  return path.replaceAll("\\", "/");
+}
+
+function escapePowerShell(value) {
+  return value.replaceAll("'", "''");
 }

@@ -34,6 +34,7 @@ v2 是目标架构，部分模块仍在迁移或尚未实现，不能仅凭文�
 - [Development Exchange HTTP Test Channel](./dev-exchange-http-test-channel.md)
 - [Desktop App Local Test](./desktop-app-local-test.md)
 - [Desktop Packaging](./desktop-packaging.md)
+- [App 端封装打包路线图 v1](./desktop-packaging-roadmap-v1.md)
 
 这些文档描述当前代码状态或具体运行方式。`Desktop App Local Test` 仍是 v1 联调方法；具体命令和已落地接口应结合当前代码验证。
 
