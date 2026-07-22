@@ -133,6 +133,11 @@ or error reports, and opens the local editor. The packaged `video-worker`
 sidecar is therefore an editor/media helper and compatibility runtime, not the
 primary demo-recording execution path.
 
+This boundary is also exposed by `/v1/desktop/runtime-health` as
+`app_capabilities.server_recording_required=true` and
+`app_capabilities.local_recording_execution=false`, and it is repeated in the
+portable, installer, and release-channel manifests.
+
 FFmpeg/ffprobe are still planned runtime assets. Until those are bundled, video
 rendering flows that require FFmpeg may need explicit `CASCADE_FFMPEG_PATH` and
 `CASCADE_FFPROBE_PATH` configuration or will use existing fallback behavior.

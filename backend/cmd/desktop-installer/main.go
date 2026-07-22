@@ -49,6 +49,10 @@ type installManifest struct {
 
 type serverConnectivity struct {
 	RequiredForLocalGeneration bool     `json:"required_for_local_generation"`
+	ServerRecordingRequired    bool     `json:"server_recording_required"`
+	LocalRecordingExecution    bool     `json:"local_recording_execution"`
+	ServerResponsibilities     []string `json:"server_responsibilities"`
+	AppResponsibilities        []string `json:"app_responsibilities"`
 	ReservedInterfaces         []string `json:"reserved_interfaces"`
 }
 
@@ -247,16 +251,34 @@ func readInstalledPackageManifest(installDir string) (packageManifest, error) {
 		return packageManifest{}, fmt.Errorf("installed package manifest is invalid: %w", err)
 	}
 	if len(manifest.Server.ReservedInterfaces) == 0 {
-		manifest.Server = serverConnectivity{
-			RequiredForLocalGeneration: false,
-			ReservedInterfaces: []string{
-				"ExchangeCapabilityResolver",
-				"ExchangeIdentityStore",
-				"ExchangeSessionManager",
-				"CloudLifecycleClient",
-			},
+		manifest.Server.ReservedInterfaces = []string{
+			"ExchangeCapabilityResolver",
+			"ExchangeIdentityStore",
+			"ExchangeSessionManager",
+			"CloudLifecycleClient",
 		}
 	}
+	if len(manifest.Server.ServerResponsibilities) == 0 {
+		manifest.Server.ServerResponsibilities = []string{
+			"browser_execution",
+			"adaptive_recording",
+			"failure_diagnosis",
+		}
+	}
+	if len(manifest.Server.AppResponsibilities) == 0 {
+		manifest.Server.AppResponsibilities = []string{
+			"input_collection",
+			"local_package_generation",
+			"stage_plan_review",
+			"approved_package_upload",
+			"result_video_download",
+			"error_report_download",
+			"video_editing",
+		}
+	}
+	manifest.Server.RequiredForLocalGeneration = false
+	manifest.Server.ServerRecordingRequired = true
+	manifest.Server.LocalRecordingExecution = false
 	return manifest, nil
 }
 

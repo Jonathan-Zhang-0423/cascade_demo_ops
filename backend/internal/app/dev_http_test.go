@@ -520,6 +520,45 @@ func TestDevHTTPBridgeRuntimeHealthIsRedacted(t *testing.T) {
 	if !strings.Contains(payload, "ark_media_mode") {
 		t.Fatalf("runtime health missing ark media mode: %s", payload)
 	}
+	if !strings.Contains(payload, "app_capabilities") {
+		t.Fatalf("runtime health missing app capabilities: %s", payload)
+	}
+	if !strings.Contains(payload, `"server_recording_required":true`) || !strings.Contains(payload, `"local_recording_execution":false`) {
+		t.Fatalf("runtime health must declare server-side recording boundary: %s", payload)
+	}
+}
+
+func TestDesktopProfileDoesNotExposeDevExchangeRunRoutes(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "desktop-test-token")
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile:         config.ProfileDesktop,
+		Environment:     "test",
+		Mode:            model.AppModeDesktop,
+		DatabaseDialect: config.DatabaseSQLite,
+		SQLitePath:      filepath.Join(root, "cascade_demoops.db"),
+		DataRoot:        root,
+		ArtifactRoot:    filepath.Join(root, "artifacts"),
+		CacheRoot:       filepath.Join(root, "cache"),
+		LogRoot:         filepath.Join(root, "logs"),
+		ResourceRoot:    root,
+		DevRepoRoot:     root,
+		SidecarPaths:    map[string]string{},
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewDevHTTPServer(service)
+	request := httptest.NewRequest(http.MethodPost, "/v1/dev/execution-packages/xpkg_local/run?org_id=org_test", nil)
+	request.Header.Set("Authorization", "Bearer desktop-test-token")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("desktop profile must not expose local dev recording run route, got status %d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func TestDevHTTPBridgeModelDiagnosticsAreRedacted(t *testing.T) {

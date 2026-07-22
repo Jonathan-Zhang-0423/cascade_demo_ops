@@ -217,6 +217,22 @@ export type RuntimeHealthView = {
   modelProviders: Record<string, ProviderCredentialStatus>;
   modelTaskRoutes: Record<string, ModelTaskRouteStatus>;
   cloudExchange?: CloudExchangeStatus;
+  appCapabilities?: AppCapabilitiesStatus;
+};
+
+export type AppCapabilitiesStatus = {
+  demoAssetGenerationConsole: boolean;
+  videoEditor: boolean;
+  localPackageGeneration: boolean;
+  stagePlanReview: boolean;
+  executionPackageApproval: boolean;
+  approvedPackageUpload: boolean;
+  resultVideoDownload: boolean;
+  errorReportDownload: boolean;
+  serverRecordingRequired: boolean;
+  localRecordingExecution: boolean;
+  localRecordingScope: string;
+  videoWorkerRole: string;
 };
 
 export type CloudExchangeStatus = {

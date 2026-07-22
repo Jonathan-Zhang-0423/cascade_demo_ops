@@ -132,6 +132,20 @@ type LocalRuntimeHealth = {
     environment?: string;
     dev_plaintext?: boolean;
   };
+  app_capabilities?: {
+    demo_asset_generation_console?: boolean;
+    video_editor?: boolean;
+    local_package_generation?: boolean;
+    stage_plan_review?: boolean;
+    execution_package_approval?: boolean;
+    approved_package_upload?: boolean;
+    result_video_download?: boolean;
+    error_report_download?: boolean;
+    server_recording_required?: boolean;
+    local_recording_execution?: boolean;
+    local_recording_scope?: string;
+    video_worker_role?: string;
+  };
 };
 
 type LocalModelDiagnostic = {
@@ -1997,6 +2011,22 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
       authMode: local.cloud_exchange.auth_mode ?? "unpaired",
       ...(local.cloud_exchange.environment ? { environment: local.cloud_exchange.environment } : {}),
       devPlaintext: Boolean(local.cloud_exchange.dev_plaintext),
+    };
+  }
+  if (local.app_capabilities) {
+    health.appCapabilities = {
+      demoAssetGenerationConsole: Boolean(local.app_capabilities.demo_asset_generation_console),
+      videoEditor: Boolean(local.app_capabilities.video_editor),
+      localPackageGeneration: Boolean(local.app_capabilities.local_package_generation),
+      stagePlanReview: Boolean(local.app_capabilities.stage_plan_review),
+      executionPackageApproval: Boolean(local.app_capabilities.execution_package_approval),
+      approvedPackageUpload: Boolean(local.app_capabilities.approved_package_upload),
+      resultVideoDownload: Boolean(local.app_capabilities.result_video_download),
+      errorReportDownload: Boolean(local.app_capabilities.error_report_download),
+      serverRecordingRequired: Boolean(local.app_capabilities.server_recording_required),
+      localRecordingExecution: Boolean(local.app_capabilities.local_recording_execution),
+      localRecordingScope: local.app_capabilities.local_recording_scope ?? "unknown",
+      videoWorkerRole: local.app_capabilities.video_worker_role ?? "unknown",
     };
   }
   return health;
