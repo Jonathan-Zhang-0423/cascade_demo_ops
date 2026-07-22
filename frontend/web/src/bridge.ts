@@ -132,6 +132,20 @@ type LocalRuntimeHealth = {
     environment?: string;
     dev_plaintext?: boolean;
   };
+  app_capabilities?: {
+    demo_asset_generation_console?: boolean;
+    video_editor?: boolean;
+    local_package_generation?: boolean;
+    stage_plan_review?: boolean;
+    execution_package_approval?: boolean;
+    approved_package_upload?: boolean;
+    result_video_download?: boolean;
+    error_report_download?: boolean;
+    server_recording_required?: boolean;
+    local_recording_execution?: boolean;
+    local_recording_scope?: string;
+    video_worker_role?: string;
+  };
 };
 
 type LocalModelDiagnostic = {
@@ -330,6 +344,7 @@ type LocalUserInput = {
   mode: "desktop";
   product_url: string;
   local_repo_path?: string;
+  git_repo_url?: string;
   product_description: string;
   requirement_documents?: ProjectInputBundle["requirement_documents"];
   webpage_screenshots?: ProjectInputBundle["webpage_screenshots"];
@@ -1051,7 +1066,8 @@ function runtimeLogFromLocalEvent(event: LocalExecutionEvent): RuntimeLogEntry {
 
 export function userInputFromWorkspace(workspace: ProjectWorkspaceView, options?: BridgeRunOptions): LocalUserInput {
   const template = getScenarioTemplate(workspace.scenarioID);
-  const repository = workspace.inputBundle.repositories?.find((repo) => repo.local_path);
+  const localRepository = workspace.inputBundle.repositories?.find((repo) => repo.local_path);
+  const gitRepository = workspace.inputBundle.repositories?.find((repo) => repo.url);
   const requirementDocuments = workspace.inputBundle.requirement_documents;
   const screenshots = workspace.inputBundle.webpage_screenshots;
   const forbiddenData = Array.isArray(workspace.inputBundle.metadata?.forbidden_data)
@@ -1062,7 +1078,8 @@ export function userInputFromWorkspace(workspace: ProjectWorkspaceView, options?
   return {
     mode: "desktop",
     product_url: workspace.productURL,
-    ...(repository?.local_path ? { local_repo_path: repository.local_path } : {}),
+    ...(localRepository?.local_path ? { local_repo_path: localRepository.local_path } : {}),
+    ...(gitRepository?.url ? { git_repo_url: gitRepository.url } : {}),
     product_description: workspace.inputBundle.raw_user_prompt || template.objective,
     ...(requirementDocuments?.length ? { requirement_documents: requirementDocuments } : {}),
     ...(screenshots?.length ? { webpage_screenshots: screenshots } : {}),
@@ -1569,7 +1586,9 @@ function modelProvenanceFromState(report: MultimodalUnderstandingReport | undefi
 
 function sourceConnectionsFromState(project: LocalProjectContext | undefined, report: MultimodalUnderstandingReport | undefined, fallback: ProjectWorkspaceView) {
   const sources = [...fallback.sourceConnections];
-  const hasRepo = Boolean(project?.local_repo_path || project?.inputs?.repositories?.some((repo) => repo.local_path || repo.url));
+  const hasLocalRepo = Boolean(project?.local_repo_path || project?.inputs?.repositories?.some((repo) => repo.local_path));
+  const hasGitRepo = Boolean(project?.git_repo_url || project?.inputs?.repositories?.some((repo) => repo.url));
+  const digestSourceKind: "github_repo" | "local_repo" = hasGitRepo && !hasLocalRepo ? "github_repo" : "local_repo";
   const hasRequirement = Boolean(project?.product_description || project?.inputs?.requirement_documents?.length || project?.inputs?.raw_user_prompt);
   const hasScreenshots = Boolean(project?.inputs?.webpage_screenshots?.length);
   return sources.map((source) => {
@@ -1577,7 +1596,10 @@ function sourceConnectionsFromState(project: LocalProjectContext | undefined, re
       return { ...source, status: project?.product_url ? "ready" as const : source.status, detail: project?.product_url ? "已进入本地理解链路并生成执行包。" : source.detail };
     }
     if (source.kind === "local_repo") {
-      return { ...source, status: hasRepo ? "ready" as const : "needs_attention" as const, detail: hasRepo ? "已生成代码结构摘要和 source digest，不上传完整源码。" : "未提供本地代码目录，使用需求和页面材料生成脚本。" };
+      return { ...source, status: hasLocalRepo ? "ready" as const : "needs_attention" as const, detail: hasLocalRepo ? "已生成本地代码结构摘要和 source digest，不上传完整源码。" : "未提供本地代码目录；可改用 GitHub 仓库或需求/页面材料。" };
+    }
+    if (source.kind === "github_repo") {
+      return { ...source, status: hasGitRepo ? "ready" as const : "needs_attention" as const, detail: hasGitRepo ? "已生成 GitHub 仓库结构摘要和 source digest，不上传完整源码。" : "未提供 GitHub 仓库 URL；可改用本地代码目录或需求/页面材料。" };
     }
     if (source.kind === "requirement_doc") {
       return { ...source, status: hasRequirement ? "ready" as const : "needs_attention" as const };
@@ -1588,8 +1610,8 @@ function sourceConnectionsFromState(project: LocalProjectContext | undefined, re
     return source;
   }).concat(report?.source_digest_sha256 ? [{
     id: "source_digest",
-    kind: "local_repo" as const,
-    label: "本地理解摘要",
+    kind: digestSourceKind,
+    label: hasGitRepo && !hasLocalRepo ? "GitHub 理解摘要" : "代码理解摘要",
     status: "ready" as const,
     detail: `source digest: ${report.source_digest_sha256}`,
   }] : []);
@@ -1997,6 +2019,22 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
       authMode: local.cloud_exchange.auth_mode ?? "unpaired",
       ...(local.cloud_exchange.environment ? { environment: local.cloud_exchange.environment } : {}),
       devPlaintext: Boolean(local.cloud_exchange.dev_plaintext),
+    };
+  }
+  if (local.app_capabilities) {
+    health.appCapabilities = {
+      demoAssetGenerationConsole: Boolean(local.app_capabilities.demo_asset_generation_console),
+      videoEditor: Boolean(local.app_capabilities.video_editor),
+      localPackageGeneration: Boolean(local.app_capabilities.local_package_generation),
+      stagePlanReview: Boolean(local.app_capabilities.stage_plan_review),
+      executionPackageApproval: Boolean(local.app_capabilities.execution_package_approval),
+      approvedPackageUpload: Boolean(local.app_capabilities.approved_package_upload),
+      resultVideoDownload: Boolean(local.app_capabilities.result_video_download),
+      errorReportDownload: Boolean(local.app_capabilities.error_report_download),
+      serverRecordingRequired: Boolean(local.app_capabilities.server_recording_required),
+      localRecordingExecution: Boolean(local.app_capabilities.local_recording_execution),
+      localRecordingScope: local.app_capabilities.local_recording_scope ?? "unknown",
+      videoWorkerRole: local.app_capabilities.video_worker_role ?? "unknown",
     };
   }
   return health;

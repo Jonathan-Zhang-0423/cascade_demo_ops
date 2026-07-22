@@ -24,6 +24,7 @@ type RuntimeConfigView struct {
 	ModelProviders         map[string]ProviderCredentialView `json:"model_providers"`
 	ModelTaskRoutes        map[string]ModelTaskRouteView     `json:"model_task_routes"`
 	CloudExchange          CloudExchangeRuntimeView          `json:"cloud_exchange"`
+	AppCapabilities        AppCapabilitiesRuntimeView        `json:"app_capabilities"`
 }
 
 type ProviderCredentialView struct {
@@ -56,6 +57,21 @@ type CloudExchangeRuntimeView struct {
 	DevPlaintext       bool   `json:"dev_plaintext,omitempty"`
 }
 
+type AppCapabilitiesRuntimeView struct {
+	DemoAssetGenerationConsole bool   `json:"demo_asset_generation_console"`
+	VideoEditor                bool   `json:"video_editor"`
+	LocalPackageGeneration     bool   `json:"local_package_generation"`
+	StagePlanReview            bool   `json:"stage_plan_review"`
+	ExecutionPackageApproval   bool   `json:"execution_package_approval"`
+	ApprovedPackageUpload      bool   `json:"approved_package_upload"`
+	ResultVideoDownload        bool   `json:"result_video_download"`
+	ErrorReportDownload        bool   `json:"error_report_download"`
+	ServerRecordingRequired    bool   `json:"server_recording_required"`
+	LocalRecordingExecution    bool   `json:"local_recording_execution"`
+	LocalRecordingScope        string `json:"local_recording_scope"`
+	VideoWorkerRole            string `json:"video_worker_role"`
+}
+
 func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus ExchangeIdentityStatus) RuntimeConfigView {
 	return RuntimeConfigView{
 		Profile:                runtime.Profile,
@@ -74,6 +90,24 @@ func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus Exchan
 		ModelProviders:         providerCredentialViews(runtime.ModelProviders),
 		ModelTaskRoutes:        modelTaskRouteViews(runtime.ModelTaskRoutes),
 		CloudExchange:          cloudExchangeRuntimeView(runtime, exchangeStatus),
+		AppCapabilities:        appCapabilitiesRuntimeView(),
+	}
+}
+
+func appCapabilitiesRuntimeView() AppCapabilitiesRuntimeView {
+	return AppCapabilitiesRuntimeView{
+		DemoAssetGenerationConsole: true,
+		VideoEditor:                true,
+		LocalPackageGeneration:     true,
+		StagePlanReview:            true,
+		ExecutionPackageApproval:   true,
+		ApprovedPackageUpload:      true,
+		ResultVideoDownload:        true,
+		ErrorReportDownload:        true,
+		ServerRecordingRequired:    true,
+		LocalRecordingExecution:    false,
+		LocalRecordingScope:        "dev_and_test_compatibility_only",
+		VideoWorkerRole:            "editor_media_helper_and_dev_compatibility_runtime",
 	}
 }
 

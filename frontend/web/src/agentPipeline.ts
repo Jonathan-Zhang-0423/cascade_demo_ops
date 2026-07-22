@@ -69,6 +69,7 @@ export function updateWorkspaceInputs(
   patch: {
     productURL?: string;
     localRepoPath?: string;
+    gitRepoURL?: string;
     rawUserPrompt?: string;
     targetAudience?: string;
     forbiddenPagesText?: string;
@@ -77,14 +78,16 @@ export function updateWorkspaceInputs(
 ): ProjectWorkspaceView {
   const productURL = patch.productURL ?? workspace.productURL;
   const targetAudience = patch.targetAudience ?? workspace.targetAudience;
-  const localRepoPath = patch.localRepoPath ?? workspace.inputBundle.repositories?.[0]?.local_path ?? "";
+  const localRepoPath = patch.localRepoPath ?? workspace.inputBundle.repositories?.find((repo) => repo.local_path)?.local_path ?? "";
+  const gitRepoURL = patch.gitRepoURL ?? workspace.inputBundle.repositories?.find((repo) => repo.url)?.url ?? "";
   const rawUserPrompt = patch.rawUserPrompt ?? workspace.inputBundle.raw_user_prompt ?? "";
   const forbiddenPages = patch.forbiddenPagesText !== undefined ? splitLines(patch.forbiddenPagesText) : workspace.planReview.forbiddenPages;
   const existingForbiddenData = Array.isArray(workspace.inputBundle.metadata?.forbidden_data) ? workspace.inputBundle.metadata.forbidden_data.filter(isString) : undefined;
   const forbiddenData = patch.forbiddenDataText !== undefined ? splitLines(patch.forbiddenDataText) : existingForbiddenData ?? workspace.scriptDocument?.safety_policy.forbidden_data ?? ["客户邮箱", "API Key", "访问令牌"];
-  const repositories = localRepoPath
-    ? [{ ...(workspace.inputBundle.repositories?.[0] ?? { provider: "local", read_only: true, primary: true }), local_path: localRepoPath, provider: "local", read_only: true, primary: true }]
-    : [];
+  const repositories = [
+    ...(gitRepoURL ? [{ url: gitRepoURL, provider: "github", read_only: true, primary: !localRepoPath }] : []),
+    ...(localRepoPath ? [{ local_path: localRepoPath, provider: "local", read_only: true, primary: !gitRepoURL }] : []),
+  ];
 
   const next: ProjectWorkspaceView = {
     ...workspace,
@@ -103,6 +106,9 @@ export function updateWorkspaceInputs(
       }
       if (source.kind === "local_repo") {
         return { ...source, status: localRepoPath ? "ready" : "needs_attention", detail: localRepoPath ? `本地项目目录：${localRepoPath}` : "未提供本地项目目录，可使用需求和页面材料降级生成。" };
+      }
+      if (source.kind === "github_repo") {
+        return { ...source, status: gitRepoURL ? "ready" : "needs_attention", detail: gitRepoURL ? `GitHub 只读仓库：${gitRepoURL}` : "可选填写 GitHub 仓库 URL；与本地项目目录并列，不互相替代。" };
       }
       return source;
     }),

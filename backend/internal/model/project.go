@@ -24,7 +24,8 @@ const (
 )
 
 // ProjectContext is the full MVP input contract consumed by the graph flow.
-// Web mode uses GitRepoURL + ProductURL. Desktop mode uses LocalRepoPath + ProductURL.
+// GitRepoURL and LocalRepoPath are parallel optional code sources; callers may
+// provide either one or both alongside ProductURL.
 type ProjectContext struct {
 	ID                  string                   `json:"id"`
 	SchemaVersion       string                   `json:"schema_version,omitempty"`

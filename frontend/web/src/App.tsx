@@ -615,7 +615,8 @@ function InputsPanel({
   onDemoCredentialsChange: (credentials: { username: string; password: string }) => void;
   onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
 }) {
-  const localRepoPath = workspace.inputBundle.repositories?.[0]?.local_path ?? "";
+  const localRepoPath = workspace.inputBundle.repositories?.find((repo) => repo.local_path)?.local_path ?? "";
+  const gitRepoURL = workspace.inputBundle.repositories?.find((repo) => repo.url)?.url ?? "";
   const forbiddenData = workspaceInputForbiddenData(workspace);
   function patchInputs(patch: Parameters<typeof updateWorkspaceInputs>[1]) {
     onWorkspaceChange(updateWorkspaceInputs(workspace, patch));
@@ -630,8 +631,12 @@ function InputsPanel({
             <input value={workspace.productURL} onChange={(event) => patchInputs({ productURL: event.currentTarget.value })} placeholder="https://app.example.com" />
           </label>
           <label className="field-row">
-            <span>项目根目录</span>
+            <span>本地项目根目录</span>
             <input value={localRepoPath} onChange={(event) => patchInputs({ localRepoPath: event.currentTarget.value })} placeholder="C:\\Users\\you\\Desktop\\your-project" />
+          </label>
+          <label className="field-row">
+            <span>GitHub 仓库 URL</span>
+            <input value={gitRepoURL} onChange={(event) => patchInputs({ gitRepoURL: event.currentTarget.value })} placeholder="https://github.com/org/repo" />
           </label>
           <label className="field-row">
             <span>目标受众</span>
@@ -669,7 +674,7 @@ function InputsPanel({
             <textarea value={forbiddenData.join("\n")} onChange={(event) => patchInputs({ forbiddenDataText: event.currentTarget.value })} rows={3} />
           </label>
         </div>
-        <div className="input-note">当前 Dev Bridge 使用文本路径输入；演示账号密码只作为本地登录预扫描的瞬时凭据，不进入执行包、审批文档或云端 payload。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
+        <div className="input-note">本地项目根目录和 GitHub 仓库 URL 都是可选代码来源，可以单独填写也可以同时填写；演示账号密码只作为本地登录预扫描的瞬时凭据，不进入执行包、审批文档或云端 payload。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
       </section>
       <InputsTable workspace={workspace} />
       <CodeSummaryPanel workspace={workspace} />
@@ -839,12 +844,16 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
 function CodeSummaryPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   const summary = codeSummaryFromWorkspace(workspace);
   const questions = codeInvestigationQuestionsFromWorkspace(workspace);
-  const repoPath = workspace.inputBundle.repositories?.[0]?.local_path;
+  const repositories = workspace.inputBundle.repositories ?? [];
+  const hasLocalRepo = repositories.some((repo) => Boolean(repo.local_path));
+  const hasGitRepo = repositories.some((repo) => Boolean(repo.url));
+  const hasCodeSource = hasLocalRepo || hasGitRepo;
+  const sourceMeta = hasLocalRepo && hasGitRepo ? "CodeReaderAgent · 本地 + GitHub" : hasGitRepo ? "CodeReaderAgent · GitHub" : hasLocalRepo ? "CodeReaderAgent · 本地" : "未提供代码来源";
   return (
     <section className="table-section">
-      <SectionTitle title="代码阅读摘要" meta={repoPath ? "CodeReaderAgent" : "未提供项目根目录"} />
+      <SectionTitle title="代码阅读摘要" meta={sourceMeta} />
       <div className="settings-grid">
-        <Fact label="扫描文件" value={summary.fileCount > 0 ? `${summary.fileCount} 个` : repoPath ? "路径不可读或无可扫描文件" : "未提供"} />
+        <Fact label="扫描文件" value={summary.fileCount > 0 ? `${summary.fileCount} 个` : hasCodeSource ? "代码来源不可读或无可扫描文件" : "未提供"} />
         <Fact label="框架线索" value={summary.frameworks.length > 0 ? summary.frameworks.join("、") : "待识别"} />
         <Fact label="路由/组件" value={`${summary.routes} 个路由 / ${summary.components} 个组件`} />
         <Fact label="Selector" value={`${summary.selectors} 个稳定选择器候选`} />
@@ -1543,6 +1552,12 @@ function SettingsPanel({
     route.model,
   ]);
   const exchangeLabel = cloudExchangeLabel(runtimeHealth);
+  const capabilities = runtimeHealth?.appCapabilities;
+  const recordingBoundaryLabel = capabilities?.serverRecordingRequired && !capabilities.localRecordingExecution
+    ? "Server Browser Agent 执行"
+    : capabilities?.localRecordingExecution
+      ? "本地录制启用"
+      : "未声明";
   return (
     <div className="section-stack">
       <SectionTitle title="设置" meta="运行时正常" />
@@ -1554,6 +1569,8 @@ function SettingsPanel({
         <Fact label="LLM 模式" value={runtimeHealth?.llmMode ?? "auto"} />
         <Fact label="模型适配版本" value={runtimeHealth?.modelAdapterVersion ?? "domestic-llm-adapter-v1"} />
         <Fact label="云端安全连接" value={exchangeLabel} />
+        <Fact label="录制执行边界" value={recordingBoundaryLabel} />
+        <Fact label="视频编辑器" value={capabilities?.videoEditor ? "已启用" : "待检查"} />
       </div>
       <section className="table-section">
         <SectionTitle title="模型供应商凭据" meta="仅显示占位状态" />
@@ -1755,6 +1772,7 @@ function sourceKindLabel(kind: string): string {
   const labels: Record<string, string> = {
     product_url: "产品地址",
     local_repo: "本地代码",
+    github_repo: "GitHub 代码",
     requirement_doc: "需求文档",
     screenshot: "页面截图",
     release_note: "发布说明",
