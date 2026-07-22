@@ -408,6 +408,47 @@ describe("desktop bridge contract", () => {
     expect(body.user_input.target_audience).toBe("中国运营团队");
   });
 
+  it("passes GitHub repository URL alongside local path to the local bridge", async () => {
+    const workspace = updateWorkspaceInputs(createWorkspace("product_demo"), {
+      productURL: "https://real.example.com",
+      localRepoPath: "C:\\Users\\demo\\project",
+      gitRepoURL: "https://github.com/acme/demo-app",
+      rawUserPrompt: "真实项目演示需求",
+      targetAudience: "中国运营团队",
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        data: {
+          project_id: "project_real",
+          current_node: "HumanApprove",
+          status: "awaiting_human_approval",
+          project_context: {
+            id: "project_real",
+            product_url: "https://real.example.com",
+            git_repo_url: "https://github.com/acme/demo-app",
+            local_repo_path: "C:\\Users\\demo\\project",
+            inputs: workspace.inputBundle,
+          },
+        },
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bridge = createLocalBridgeClient("http://127.0.0.1:4317");
+    const result = await bridge.buildExecutionPackagePreview(workspace);
+
+    expect(result.ok).toBe(true);
+    const firstCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(firstCall[1].body));
+    expect(body.user_input.local_repo_path).toBe("C:\\Users\\demo\\project");
+    expect(body.user_input.git_repo_url).toBe("https://github.com/acme/demo-app");
+    expect(result.data?.sourceConnections.find((source) => source.kind === "github_repo")?.status).toBe("ready");
+    expect(result.data?.sourceConnections.find((source) => source.kind === "local_repo")?.status).toBe("ready");
+  });
+
   it("runs local product lifecycle from workspace inputs to result assets", async () => {
     const workspace = updateWorkspaceInputs(createWorkspace("product_demo"), {
       productURL: "https://cascadeai.cn",

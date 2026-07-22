@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -27,6 +28,15 @@ type CodeReaderAgent struct {
 }
 
 const maxCodeReadTotalFileLimit = 80
+const gitSnapshotTimeout = 45 * time.Second
+
+type gitRepositorySnapshotMetadata struct {
+	URL          string
+	RepositoryID string
+	Branch       string
+	CommitSHA    string
+	SafeLabel    string
+}
 
 func NewCodeReaderAgent() *CodeReaderAgent {
 	budget := defaultCodeReadBudget()
@@ -80,6 +90,17 @@ func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectCo
 		if input.LocalPath != "" {
 			if err := a.scanLocalPath(ctx, input.LocalPath, &snapshot, project, brief); err != nil {
 				snapshot.Summary = "代码路径暂不可扫描，已保留输入摘要和 evidence ref。"
+			}
+		} else if strings.TrimSpace(input.URI) != "" && isGitRepositoryInput(input) {
+			if err := a.scanGitRepository(ctx, input, &snapshot, project, brief); err != nil {
+				snapshot.Summary = "GitHub 仓库暂不可读取，已保留仓库 URL 摘要和 evidence ref。"
+				snapshot.EvidenceRefs = append(snapshot.EvidenceRefs, model.EvidenceRef{
+					ID:         "ev_git_repo_degraded_" + shortHash(input.URI),
+					Kind:       model.EvidenceKindSourceCode,
+					Summary:    "GitHub 仓库读取降级：" + sanitizeGitFetchError(err),
+					FieldPath:  "inputs.code.uri",
+					Confidence: 0.35,
+				})
 			}
 		}
 		if snapshot.SourceDigestSHA256 == "" {
@@ -138,6 +159,200 @@ func (o *codeReaderLLMOutput) UnmarshalJSON(data []byte) error {
 	merged.normalize()
 	*o = merged
 	return nil
+}
+
+func (a *CodeReaderAgent) scanGitRepository(ctx context.Context, input model.CodeInput, snapshot *model.CodeUnderstandingSnapshot, project *model.ProjectContext, brief *model.RequirementBrief) error {
+	localPath, repoMeta, err := prepareReadOnlyGitRepositorySnapshot(ctx, input.URI, input.Branch, input.CommitSHA)
+	if err != nil {
+		return err
+	}
+	snapshot.URI = repoMeta.URL
+	snapshot.RepositoryID = firstNonEmpty(snapshot.RepositoryID, repoMeta.RepositoryID)
+	snapshot.Branch = firstNonEmpty(snapshot.Branch, repoMeta.Branch)
+	snapshot.CommitSHA = firstNonEmpty(snapshot.CommitSHA, repoMeta.CommitSHA)
+	snapshot.EvidenceRefs = append(snapshot.EvidenceRefs, model.EvidenceRef{
+		ID:         "ev_git_repo_snapshot_" + shortHash(repoMeta.URL+repoMeta.CommitSHA),
+		Kind:       model.EvidenceKindRepoSnapshot,
+		Summary:    "GitHub 仓库只读快照：" + repoMeta.SafeLabel,
+		FieldPath:  "inputs.code.uri",
+		Confidence: 0.72,
+	})
+	if err := a.scanLocalPath(ctx, localPath, snapshot, project, brief); err != nil {
+		return err
+	}
+	if snapshot.InvestigationTrace != nil {
+		snapshot.InvestigationTrace.Summary = "GitHub 仓库只读快照完成；" + snapshot.InvestigationTrace.Summary
+	}
+	return nil
+}
+
+func isGitRepositoryInput(input model.CodeInput) bool {
+	kind := strings.ToLower(strings.TrimSpace(input.Kind))
+	uri := strings.TrimSpace(input.URI)
+	if uri == "" {
+		return false
+	}
+	return strings.Contains(kind, "git") || strings.Contains(kind, "repository") || isSupportedGitRepositoryURL(uri)
+}
+
+func prepareReadOnlyGitRepositorySnapshot(ctx context.Context, rawURL string, branch string, commitSHA string) (string, gitRepositorySnapshotMetadata, error) {
+	normalizedURL, safeLabel, err := normalizeSupportedGitRepositoryURL(rawURL)
+	if err != nil {
+		return "", gitRepositorySnapshotMetadata{}, err
+	}
+	repoID := "github_" + shortHash(strings.Join([]string{
+		normalizedURL,
+		strings.TrimSpace(branch),
+		strings.TrimSpace(commitSHA),
+	}, "#"))
+	root := filepath.Join(os.TempDir(), "cascade-demoops-github-cache", repoID)
+	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
+		return "", gitRepositorySnapshotMetadata{}, err
+	}
+	_, statErr := os.Stat(filepath.Join(root, ".git"))
+	if statErr != nil {
+		if err := cloneGitRepositorySnapshot(ctx, normalizedURL, branch, root); err != nil {
+			_ = os.RemoveAll(root)
+			return "", gitRepositorySnapshotMetadata{}, err
+		}
+	} else if err := refreshGitRepositorySnapshot(ctx, root, branch); err != nil {
+		return "", gitRepositorySnapshotMetadata{}, err
+	}
+	if strings.TrimSpace(commitSHA) != "" {
+		if err := gitCommand(ctx, root, "checkout", "--detach", commitSHA); err != nil {
+			return "", gitRepositorySnapshotMetadata{}, err
+		}
+	} else if strings.TrimSpace(branch) != "" {
+		if err := gitCommand(ctx, root, "checkout", branch); err != nil {
+			_ = gitCommand(ctx, root, "checkout", "origin/"+branch)
+		}
+	}
+	resolvedCommit, _ := gitCommandOutput(ctx, root, "rev-parse", "HEAD")
+	resolvedBranch := strings.TrimSpace(branch)
+	if resolvedBranch == "" {
+		resolvedBranch, _ = gitCommandOutput(ctx, root, "branch", "--show-current")
+	}
+	return root, gitRepositorySnapshotMetadata{
+		URL:          normalizedURL,
+		RepositoryID: repoID,
+		Branch:       strings.TrimSpace(resolvedBranch),
+		CommitSHA:    strings.TrimSpace(resolvedCommit),
+		SafeLabel:    safeLabel,
+	}, nil
+}
+
+func cloneGitRepositorySnapshot(ctx context.Context, repoURL string, branch string, destination string) error {
+	args := []string{"clone", "--depth", "1", "--filter=blob:none"}
+	if strings.TrimSpace(branch) != "" {
+		args = append(args, "--branch", strings.TrimSpace(branch))
+	}
+	args = append(args, repoURL, destination)
+	return gitCommand(ctx, "", args...)
+}
+
+func refreshGitRepositorySnapshot(ctx context.Context, root string, branch string) error {
+	args := []string{"fetch", "--depth", "1", "origin"}
+	if strings.TrimSpace(branch) != "" {
+		args = append(args, strings.TrimSpace(branch))
+	}
+	return gitCommand(ctx, root, args...)
+}
+
+func isSupportedGitRepositoryURL(value string) bool {
+	_, _, err := normalizeSupportedGitRepositoryURL(value)
+	return err == nil
+}
+
+func normalizeSupportedGitRepositoryURL(value string) (string, string, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return "", "", fmt.Errorf("git repository URL is required")
+	}
+	if strings.HasPrefix(raw, "git@github.com:") {
+		path := strings.TrimSuffix(strings.TrimPrefix(raw, "git@github.com:"), ".git")
+		if !safeGitHubRepoPath(path) {
+			return "", "", fmt.Errorf("unsupported GitHub repository path")
+		}
+		return "https://github.com/" + path + ".git", "github.com/" + path, nil
+	}
+	if strings.HasPrefix(raw, "file://") {
+		return raw, "local git fixture", nil
+	}
+	if !strings.HasPrefix(strings.ToLower(raw), "https://github.com/") {
+		return "", "", fmt.Errorf("only HTTPS github.com repository URLs are supported")
+	}
+	path := strings.TrimPrefix(raw, "https://github.com/")
+	path = strings.TrimSuffix(path, ".git")
+	path = strings.Trim(path, "/")
+	if !safeGitHubRepoPath(path) {
+		return "", "", fmt.Errorf("unsupported GitHub repository path")
+	}
+	return "https://github.com/" + path + ".git", "github.com/" + path, nil
+}
+
+func safeGitHubRepoPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
+	allowed := regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	return allowed.MatchString(parts[0]) && allowed.MatchString(parts[1])
+}
+
+func gitCommand(ctx context.Context, dir string, args ...string) error {
+	_, err := gitCommandOutput(ctx, dir, args...)
+	return err
+}
+
+func gitCommandOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return "", fmt.Errorf("git executable unavailable")
+	}
+	runCtx, cancel := context.WithTimeout(ctx, gitSnapshotTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.CombinedOutput()
+	if runCtx.Err() != nil {
+		return "", runCtx.Err()
+	}
+	if err != nil {
+		return "", fmt.Errorf("git %s failed: %s", safeGitCommand(args), sanitizeGitFetchError(fmt.Errorf("%s", string(output))))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func safeGitCommand(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	safe := append([]string{}, args...)
+	for i, arg := range safe {
+		if strings.Contains(arg, "://") || strings.Contains(arg, "@github.com:") {
+			safe[i] = "<repo-url>"
+		}
+	}
+	if len(safe) > 4 {
+		safe = append(safe[:4], "...")
+	}
+	return strings.Join(safe, " ")
+}
+
+func sanitizeGitFetchError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	message = regexp.MustCompile(`https://[^@\s]+@github\.com/`).ReplaceAllString(message, "https://<redacted>@github.com/")
+	message = regexp.MustCompile(`(?i)(token|password|authorization)[=:]\S+`).ReplaceAllString(message, "$1=<redacted>")
+	if len([]rune(message)) > 180 {
+		runes := []rune(message)
+		message = string(runes[:179]) + "…"
+	}
+	return message
 }
 
 func (o *codeReaderLLMOutput) merge(item codeReaderLLMOutput) {

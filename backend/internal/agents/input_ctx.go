@@ -171,9 +171,9 @@ func repositoryInputs(input orchestrator.UserInput) []model.RepositoryInput {
 	if input.GitRepoURL != "" {
 		repositories = append(repositories, model.RepositoryInput{
 			URL:      input.GitRepoURL,
-			Provider: "git",
+			Provider: repositoryProviderForURL(input.GitRepoURL),
 			ReadOnly: true,
-			Primary:  true,
+			Primary:  input.LocalRepoPath == "",
 		})
 	}
 	if input.LocalRepoPath != "" {
@@ -185,6 +185,17 @@ func repositoryInputs(input orchestrator.UserInput) []model.RepositoryInput {
 		})
 	}
 	return repositories
+}
+
+func repositoryProviderForURL(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if strings.Contains(normalized, "github.com") {
+		return "github"
+	}
+	if strings.HasPrefix(normalized, "git@github.com:") {
+		return "github"
+	}
+	return "git"
 }
 
 func redactRequirementDocuments(documents []model.RequirementDocumentInput) []model.RequirementDocumentInput {

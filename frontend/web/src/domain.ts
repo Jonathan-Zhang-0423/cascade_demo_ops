@@ -43,7 +43,7 @@ export type ScenarioTemplate = {
 
 export type SourceConnectionView = {
   id: string;
-  kind: "product_url" | "local_repo" | "requirement_doc" | "screenshot" | "release_note" | "credential";
+  kind: "product_url" | "local_repo" | "github_repo" | "requirement_doc" | "screenshot" | "release_note" | "credential";
   label: string;
   status: "ready" | "needs_attention" | "processing" | "blocked";
   detail: string;
