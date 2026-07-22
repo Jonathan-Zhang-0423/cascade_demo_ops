@@ -1543,6 +1543,12 @@ function SettingsPanel({
     route.model,
   ]);
   const exchangeLabel = cloudExchangeLabel(runtimeHealth);
+  const capabilities = runtimeHealth?.appCapabilities;
+  const recordingBoundaryLabel = capabilities?.serverRecordingRequired && !capabilities.localRecordingExecution
+    ? "Server Browser Agent 执行"
+    : capabilities?.localRecordingExecution
+      ? "本地录制启用"
+      : "未声明";
   return (
     <div className="section-stack">
       <SectionTitle title="设置" meta="运行时正常" />
@@ -1554,6 +1560,8 @@ function SettingsPanel({
         <Fact label="LLM 模式" value={runtimeHealth?.llmMode ?? "auto"} />
         <Fact label="模型适配版本" value={runtimeHealth?.modelAdapterVersion ?? "domestic-llm-adapter-v1"} />
         <Fact label="云端安全连接" value={exchangeLabel} />
+        <Fact label="录制执行边界" value={recordingBoundaryLabel} />
+        <Fact label="视频编辑器" value={capabilities?.videoEditor ? "已启用" : "待检查"} />
       </div>
       <section className="table-section">
         <SectionTitle title="模型供应商凭据" meta="仅显示占位状态" />

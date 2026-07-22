@@ -770,6 +770,20 @@ describe("desktop bridge contract", () => {
               model_override: "CASCADE_PLANNING_MODEL",
             },
           },
+          app_capabilities: {
+            demo_asset_generation_console: true,
+            video_editor: true,
+            local_package_generation: true,
+            stage_plan_review: true,
+            execution_package_approval: true,
+            approved_package_upload: true,
+            result_video_download: true,
+            error_report_download: true,
+            server_recording_required: true,
+            local_recording_execution: false,
+            local_recording_scope: "dev_and_test_compatibility_only",
+            video_worker_role: "editor_media_helper_and_dev_compatibility_runtime",
+          },
         },
       }),
     })));
@@ -783,6 +797,11 @@ describe("desktop bridge contract", () => {
     expect(result.data?.modelAdapterVersion).toBe("domestic-llm-adapter-v1");
     expect(result.data?.modelProviders.kimi?.apiKeyEnv).toBe("KIMI_API_KEY");
     expect(result.data?.modelTaskRoutes.planning?.modelOverride).toBe("CASCADE_PLANNING_MODEL");
+    expect(result.data?.appCapabilities?.demoAssetGenerationConsole).toBe(true);
+    expect(result.data?.appCapabilities?.videoEditor).toBe(true);
+    expect(result.data?.appCapabilities?.serverRecordingRequired).toBe(true);
+    expect(result.data?.appCapabilities?.localRecordingExecution).toBe(false);
+    expect(result.data?.appCapabilities?.videoWorkerRole).toBe("editor_media_helper_and_dev_compatibility_runtime");
   });
 
   it("reports non-json local bridge responses with status and snippet", async () => {

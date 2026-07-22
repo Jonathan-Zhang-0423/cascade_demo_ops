@@ -520,6 +520,12 @@ func TestDevHTTPBridgeRuntimeHealthIsRedacted(t *testing.T) {
 	if !strings.Contains(payload, "ark_media_mode") {
 		t.Fatalf("runtime health missing ark media mode: %s", payload)
 	}
+	if !strings.Contains(payload, "app_capabilities") {
+		t.Fatalf("runtime health missing app capabilities: %s", payload)
+	}
+	if !strings.Contains(payload, `"server_recording_required":true`) || !strings.Contains(payload, `"local_recording_execution":false`) {
+		t.Fatalf("runtime health must declare server-side recording boundary: %s", payload)
+	}
 }
 
 func TestDevHTTPBridgeModelDiagnosticsAreRedacted(t *testing.T) {

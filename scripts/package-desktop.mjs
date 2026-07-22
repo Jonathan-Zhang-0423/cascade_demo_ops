@@ -105,6 +105,22 @@ function buildPackageManifest() {
     },
     server_connectivity: {
       required_for_local_generation: false,
+      server_recording_required: true,
+      local_recording_execution: false,
+      server_responsibilities: [
+        "browser_execution",
+        "adaptive_recording",
+        "failure_diagnosis",
+      ],
+      app_responsibilities: [
+        "input_collection",
+        "local_package_generation",
+        "stage_plan_review",
+        "approved_package_upload",
+        "result_video_download",
+        "error_report_download",
+        "video_editing",
+      ],
       reserved_interfaces: [
         "ExchangeCapabilityResolver",
         "ExchangeIdentityStore",

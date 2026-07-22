@@ -34,6 +34,7 @@ assert(manifest.schema_version === "demoops.desktop_installer_manifest.v1", "une
 assert(manifest.package_kind === "self_extracting_setup_exe", "installer must be self_extracting_setup_exe");
 assert(manifest.windows_manifest?.requested_execution_level === "asInvoker", "installer must declare asInvoker execution level");
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
+assertServerRecordingBoundary(manifest.server_connectivity, "installer manifest");
 assert(manifest.install_behavior?.supports_silent_install === true, "installer must support silent install");
 assertRequiredAppSurfaces(manifest);
 
@@ -96,6 +97,7 @@ assertFile(uninstallScript, "uninstall script");
 const installedManifest = JSON.parse(readFileSync(resolve(installDir, "install-manifest.json"), "utf8"));
 assert(installedManifest.schema_version === "demoops.desktop_install_manifest.v1", "unexpected installed manifest schema");
 assert(installedManifest.server_connectivity?.required_for_local_generation === false, "installed app must keep local generation server-optional");
+assertServerRecordingBoundary(installedManifest.server_connectivity, "installed manifest");
 assertRequiredAppSurfaces(installedManifest);
 assert(Array.isArray(installedManifest.shortcuts) && installedManifest.shortcuts.length === 1, "installer did not record Start Menu launcher");
 const launcherPath = installedManifest.shortcuts[0];
@@ -139,6 +141,7 @@ try {
   assert(health.ok === true, "installed desktop runtime-health failed");
   assert(health.data?.node_runtime_configured === true, "installed desktop did not load bundled node runtime");
   assert(health.data?.sidecars?.["video-worker"] === true, "installed desktop did not load packaged video-worker");
+  assertRuntimeCapabilities(health.data, "installed desktop runtime-health");
 } finally {
   await terminateChild(host);
 }
@@ -171,6 +174,27 @@ function assert(condition, message) {
   }
 }
 
+function assertServerRecordingBoundary(connectivity, label) {
+  assert(connectivity?.server_recording_required === true, `${label} must require server-side production recording`);
+  assert(connectivity?.local_recording_execution === false, `${label} must not advertise local production recording`);
+  assert(connectivity.server_responsibilities?.includes("browser_execution"), `${label} must assign browser execution to server`);
+  assert(connectivity.app_responsibilities?.includes("approved_package_upload"), `${label} must assign approved package upload to app`);
+  assert(connectivity.app_responsibilities?.includes("result_video_download"), `${label} must assign result video download to app`);
+}
+
+function assertRuntimeCapabilities(data, label) {
+  const capabilities = data?.app_capabilities;
+  assert(capabilities?.demo_asset_generation_console === true, `${label} must expose demo console capability`);
+  assert(capabilities?.video_editor === true, `${label} must expose video editor capability`);
+  assert(capabilities?.local_package_generation === true, `${label} must allow local package generation`);
+  assert(capabilities?.approved_package_upload === true, `${label} must allow approved package upload`);
+  assert(capabilities?.result_video_download === true, `${label} must allow result video download`);
+  assert(capabilities?.error_report_download === true, `${label} must allow error report download`);
+  assert(capabilities?.server_recording_required === true, `${label} must require server-side production recording`);
+  assert(capabilities?.local_recording_execution === false, `${label} must not enable local production recording`);
+  assert(capabilities?.video_worker_role === "editor_media_helper_and_dev_compatibility_runtime", `${label} must classify video-worker as non-production-recorder`);
+}
+
 function assertRequiredAppSurfaces(manifest) {
   const surfaces = manifest.app_surfaces ?? [];
   assert(Array.isArray(surfaces), "installer manifest must declare app surfaces");
@@ -196,6 +220,7 @@ function assertReleaseChannelManifest(channel, expected) {
   assert(channel.artifacts?.installer?.size_bytes === expected.installerSize, "release channel installer size mismatch");
   assert(channel.artifacts?.portable_zip?.file_name === expected.portableName, "release channel portable zip file mismatch");
   assert(channel.server_connectivity?.required_for_local_generation === false, "release channel must keep local generation server-optional");
+  assertServerRecordingBoundary(channel.server_connectivity, "release channel");
   assertRequiredAppSurfaces(channel);
 }
 
