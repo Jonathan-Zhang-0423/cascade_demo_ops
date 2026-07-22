@@ -23,6 +23,42 @@ const releaseInstaller = resolve(releaseRoot, `${releaseBaseName}-installer.exe`
 const releaseInstallerSidecarManifest = `${releaseInstaller}.manifest`;
 const releaseChecksum = `${releaseInstaller}.sha256`;
 const releaseManifest = resolve(releaseRoot, `${releaseBaseName}-installer.manifest.json`);
+const releaseChannelManifest = resolve(releaseRoot, "CascadeDemoOps-desktop-latest.json");
+const appSurfaces = [
+  {
+    id: "demo_asset_generation_console",
+    label: "演示资产生成控制台",
+    required: true,
+    entry_nav_label: "项目",
+    capabilities: [
+      "input_collection",
+      "local_package_generation",
+      "stage_plan_review",
+      "execution_package_approval",
+    ],
+  },
+  {
+    id: "video_editor",
+    label: "视频编辑器",
+    required: true,
+    entry_nav_label: "视频编辑",
+    capabilities: [
+      "result_package_import",
+      "timeline_editing",
+      "caption_and_callout_editing",
+      "preview_and_export",
+    ],
+  },
+];
+const serverConnectivity = {
+  required_for_local_generation: false,
+  reserved_interfaces: [
+    "ExchangeCapabilityResolver",
+    "ExchangeIdentityStore",
+    "ExchangeSessionManager",
+    "CloudLifecycleClient",
+  ],
+};
 
 run("node", ["scripts/package-desktop.mjs"]);
 assertFile(portableZip, "portable desktop zip");
@@ -63,6 +99,8 @@ copyFile(installerExe, releaseInstaller);
 writeFileSync(releaseInstallerSidecarManifest, windowsAsInvokerManifest());
 const installerSHA256 = sha256File(releaseInstaller);
 writeFileSync(releaseChecksum, `${installerSHA256}  ${basename(releaseInstaller)}\n`);
+const portableManifestPath = resolve(releaseRoot, `${releaseBaseName}.manifest.json`);
+const portableManifest = JSON.parse(readFileSync(portableManifestPath, "utf8"));
 writeJSON(releaseManifest, {
   schema_version: "demoops.desktop_installer_manifest.v1",
   app: "Cascade DemoOps",
@@ -105,44 +143,52 @@ writeJSON(releaseManifest, {
     supports_silent_install: true,
   },
   server_connectivity: {
-    required_for_local_generation: false,
-    reserved_interfaces: [
-      "ExchangeCapabilityResolver",
-      "ExchangeIdentityStore",
-      "ExchangeSessionManager",
-      "CloudLifecycleClient",
-    ],
+    ...serverConnectivity,
   },
-  app_surfaces: [
-    {
-      id: "demo_asset_generation_console",
-      label: "演示资产生成控制台",
-      required: true,
-      entry_nav_label: "项目",
-      capabilities: [
-        "input_collection",
-        "local_package_generation",
-        "stage_plan_review",
-        "execution_package_approval",
-      ],
+  app_surfaces: appSurfaces,
+});
+writeJSON(releaseChannelManifest, {
+  schema_version: "demoops.desktop_release_channel.v1",
+  channel: "latest",
+  app: "Cascade DemoOps",
+  package_name: "Cascade DemoOps Desktop",
+  version,
+  target_os: targetGOOS,
+  target_arch: targetArch,
+  generated_at: new Date().toISOString(),
+  recommended_artifact: "installer",
+  artifacts: {
+    installer: {
+      file_name: basename(releaseInstaller),
+      manifest_file_name: basename(releaseManifest),
+      sha256: installerSHA256,
+      size_bytes: statSync(releaseInstaller).size,
+      windows_manifest_file_name: basename(releaseInstallerSidecarManifest),
+      checksum_file_name: basename(releaseChecksum),
     },
-    {
-      id: "video_editor",
-      label: "视频编辑器",
-      required: true,
-      entry_nav_label: "视频编辑",
-      capabilities: [
-        "result_package_import",
-        "timeline_editing",
-        "caption_and_callout_editing",
-        "preview_and_export",
-      ],
+    portable_zip: {
+      file_name: basename(portableZip),
+      manifest_file_name: basename(portableManifestPath),
+      sha256: portableManifest.artifact?.sha256 ?? payloadSHA256,
+      size_bytes: statSync(portableZip).size,
+      checksum_file_name: `${basename(portableZip)}.sha256`,
     },
-  ],
+  },
+  install_behavior: {
+    default_scope: "per_user",
+    default_install_dir: "%LOCALAPPDATA%/Programs/CascadeDemoOps",
+    writes_user_data_dir: "%APPDATA%/CascadeDemoOps",
+    creates_start_menu_launcher: true,
+    supports_custom_install_dir: true,
+    supports_silent_install: true,
+  },
+  server_connectivity: serverConnectivity,
+  app_surfaces: appSurfaces,
 });
 
 console.log(`Created desktop installer: ${releaseInstaller}`);
 console.log(`Created checksum: ${releaseChecksum}`);
+console.log(`Created release channel manifest: ${releaseChannelManifest}`);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {

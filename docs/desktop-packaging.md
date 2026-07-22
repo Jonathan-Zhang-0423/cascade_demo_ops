@@ -165,11 +165,17 @@ bootstrap runs durable without changing the final repository boundary.
 
 ```text
 dist/release/
+  CascadeDemoOps-desktop-latest.json
   CascadeDemoOps-<version>-windows-x64-installer.exe
   CascadeDemoOps-<version>-windows-x64-installer.exe.manifest
   CascadeDemoOps-<version>-windows-x64-installer.exe.sha256
   CascadeDemoOps-<version>-windows-x64-installer.manifest.json
 ```
+
+`CascadeDemoOps-desktop-latest.json` is the stable release-channel manifest for
+download pages or server-side release feeds. It points to the recommended
+installer, the portable zip fallback, their manifests, SHA-256 checksums,
+server-connectivity reservation, install behavior, and required App surfaces.
 
 The setup executable supports:
 
