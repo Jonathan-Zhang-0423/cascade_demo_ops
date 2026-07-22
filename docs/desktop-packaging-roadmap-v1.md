@@ -111,9 +111,16 @@ dist/release/
 
 目标：生成可分发安装器。
 
+当前过渡实现：
+
+- `cmd/desktop-installer` 生成 Windows 自解压 setup exe，内嵌 portable zip payload。
+- setup 会校验 payload SHA-256，安装到 per-user 目录，写入 `install-manifest.json`，并生成卸载脚本。
+- `pnpm package:desktop:installer` 输出 `CascadeDemoOps-<version>-windows-x64-bootstrap.exe`、checksum 和 manifest。
+- `pnpm smoke:desktop-installer` 会真实静默安装到 smoke 目录，验证 installed exe 的 `--check`、本地 Desktop Host 首页和 runtime-health。
+
 建议实现：
 
-- 使用 Wails Windows build 输出。
+- 用 Wails/NSIS/Inno 替换当前 setup baseline 或在其基础上补安装 UI。
 - 产物包含 Go exe、web resources、video-worker、Node runtime、ffmpeg/ffprobe。
 - 生成 installer 或 portable zip 两种形态：
   - `CascadeDemoOps-Setup-x.y.z.exe`
@@ -122,7 +129,7 @@ dist/release/
 
 验收：
 
-- 新机器安装后不需要 Go、Node、pnpm。
+- 当前 baseline：安装和启动不需要 Go、pnpm；video-worker 运行仍需要 Node runtime 策略后续补齐。
 - 首次启动能创建 data/artifacts/cache/logs。
 - 卸载不误删用户项目数据，除非用户明确选择清理。
 
@@ -238,6 +245,8 @@ pnpm --filter @cascade/video-worker build
 pnpm build:desktop:win
 pnpm package:desktop
 pnpm smoke:desktop-package
+pnpm package:desktop:installer
+pnpm smoke:desktop-installer
 cd backend
 go test ./...
 ```
@@ -245,18 +254,19 @@ go test ./...
 后续新增：
 
 ```powershell
-pnpm package:desktop:installer
+pnpm package:desktop:signed
 ```
 
 ## 下一步开发建议
 
 1. 增加 `backend/cmd/desktop` 的 smoke test，验证 desktop profile 能读取 `dist/package/resources/desktop-runtime.json`。
 2. 扩展 package smoke，覆盖 Desktop Host 首页和 runtime-health。
-3. 扩展 `DesktopResourceManifest` 支持 `ffmpeg` / `ffprobe` runtime key。
-4. 增加前端 `wails` bridge adapter 的类型边界，但先用 mock binding 测。
-5. 引入 Wails app skeleton，绑定 `DesktopBridge.RuntimeConfig()` 作为第一条真实链路。
-6. 实现原生文件夹选择器和安全存储的接口占位。
-7. 增加 installer 输出、签名和自动更新前的 release smoke。
+3. 扩展 installer smoke，覆盖卸载脚本、Start Menu launcher 和未安装 Node 时的 sidecar 降级提示。
+4. 扩展 `DesktopResourceManifest` 支持 `ffmpeg` / `ffprobe` runtime key。
+5. 增加前端 `wails` bridge adapter 的类型边界，但先用 mock binding 测。
+6. 引入 Wails app skeleton，绑定 `DesktopBridge.RuntimeConfig()` 作为第一条真实链路。
+7. 实现原生文件夹选择器和安全存储的接口占位。
+8. 增加签名和自动更新前的 release smoke。
 
 ## 不做事项
 

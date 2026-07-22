@@ -75,12 +75,22 @@ pnpm build:worker
 pnpm build:desktop:win
 pnpm build:desktop:mac
 pnpm package:desktop
+pnpm smoke:desktop-package
+pnpm package:desktop:installer
+pnpm smoke:desktop-installer
 ```
 
 `backend/cmd/desktop` is the desktop runtime root. It currently initializes the
 shared desktop bridge and is intentionally Wails-ready without importing Wails
 yet. The next packaging step is to wire that bridge into a Wails app and embed
 the `frontend/web` build output.
+
+`backend/cmd/desktop-installer` is the current Windows setup baseline. It is a
+self-extracting installer that embeds the portable zip payload, validates the
+payload SHA-256, installs files into a per-user directory, writes
+`install-manifest.json`, creates an uninstall PowerShell script, and can create a
+Start Menu launcher. It keeps server connectivity optional and only reserves the
+exchange/cloud lifecycle interfaces for later production wiring.
 
 `desktop-runtime.json` is the resource manifest. In desktop profile, Go resolves
 resources in this order:
@@ -122,3 +132,29 @@ Desktop mode is local-first:
 Until the SQLite adapter is implemented, the desktop entry uses a file-backed
 orchestrator state store under the user data directory. This keeps desktop
 bootstrap runs durable without changing the final repository boundary.
+
+## Installer Layout
+
+`pnpm package:desktop:installer` emits:
+
+```text
+dist/release/
+  CascadeDemoOps-<version>-windows-x64-bootstrap.exe
+  CascadeDemoOps-<version>-windows-x64-bootstrap.exe.sha256
+  CascadeDemoOps-<version>-windows-x64-bootstrap.manifest.json
+```
+
+The setup executable supports:
+
+```text
+CascadeDemoOps-...-bootstrap.exe --check
+CascadeDemoOps-...-bootstrap.exe --quiet --launch=false
+CascadeDemoOps-...-bootstrap.exe --install-dir C:\Tools\CascadeDemoOps
+```
+
+The current installer is unsigned and per-user. The filename intentionally uses
+`bootstrap` rather than `setup` or `installer` so Windows does not trigger
+elevation heuristics for this non-admin installer. It is suitable for internal
+download/install smoke testing, while production release still needs an embedded
+Windows application manifest, code signing, installer UI polish, bundled
+Node/FFmpeg strategy, and auto-update policy.

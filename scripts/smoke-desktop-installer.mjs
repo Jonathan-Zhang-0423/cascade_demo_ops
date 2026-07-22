@@ -1,0 +1,234 @@
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { basename, resolve } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+
+const root = resolve(".");
+const appPackage = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
+const targetGOOS = process.platform === "win32" ? "windows" : "darwin";
+if (targetGOOS !== "windows") {
+  console.error("Desktop installer smoke currently supports Windows only.");
+  process.exit(1);
+}
+
+const releaseBaseName = `CascadeDemoOps-${appPackage.version || "0.0.0"}-${targetGOOS}-${process.arch}`;
+const releaseRoot = resolve("dist", "release");
+const setupPath = resolve(releaseRoot, `${releaseBaseName}-bootstrap.exe`);
+const checksumPath = `${setupPath}.sha256`;
+const manifestPath = resolve(releaseRoot, `${releaseBaseName}-bootstrap.manifest.json`);
+const smokeRoot = resolve("dist", "installer-smoke", releaseBaseName);
+const installDir = resolve(smokeRoot, "CascadeDemoOps");
+const appDataRoot = resolve(smokeRoot, "appdata");
+
+assertFile(setupPath, "desktop setup exe");
+assertFile(checksumPath, "desktop setup checksum");
+assertFile(manifestPath, "desktop setup manifest");
+
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+assert(manifest.schema_version === "demoops.desktop_installer_manifest.v1", "unexpected installer manifest schema");
+assert(manifest.package_kind === "self_extracting_setup_exe", "installer must be self_extracting_setup_exe");
+assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
+assert(manifest.install_behavior?.supports_silent_install === true, "installer must support silent install");
+
+const expectedHash = readFileHashLine(checksumPath, basename(setupPath));
+const actualHash = sha256File(setupPath);
+assert(actualHash === expectedHash, `setup checksum mismatch: ${actualHash} !== ${expectedHash}`);
+assert(manifest.artifact?.sha256 === actualHash, "installer manifest artifact hash mismatch");
+
+rmSync(smokeRoot, { recursive: true, force: true });
+mkdirSync(appDataRoot, { recursive: true });
+
+const check = spawnSync(setupPath, ["--check"], {
+  cwd: root,
+  env: { ...process.env, APPDATA: appDataRoot, LOCALAPPDATA: resolve(smokeRoot, "localappdata") },
+  encoding: "utf8",
+});
+if (check.status !== 0) {
+  process.stdout.write(check.stdout || "");
+  process.stderr.write(check.stderr || "");
+  throw new Error(`setup --check exited with status ${check.status}`);
+}
+const checkPayload = JSON.parse(check.stdout);
+assert(checkPayload.ready === true, "setup --check did not report ready=true");
+assert(checkPayload.payload_embedded === true, "setup payload is not embedded");
+assert(checkPayload.payload_sha256 === manifest.payload?.sha256, "setup payload hash does not match manifest");
+
+const install = spawnSync(setupPath, ["--quiet", "--launch=false", "--no-shortcut", "--install-dir", installDir], {
+  cwd: root,
+  env: { ...process.env, APPDATA: appDataRoot, LOCALAPPDATA: resolve(smokeRoot, "localappdata") },
+  encoding: "utf8",
+});
+if (install.status !== 0) {
+  process.stdout.write(install.stdout || "");
+  process.stderr.write(install.stderr || "");
+  throw new Error(`setup install exited with status ${install.status}`);
+}
+const installPayload = JSON.parse(install.stdout);
+assert(installPayload.installed === true, "setup did not report installed=true");
+assertFile(resolve(installDir, "cascade-demoops-desktop.exe"), "installed desktop entrypoint");
+assertFile(resolve(installDir, "resources", "web", "index.html"), "installed web index");
+assertFile(resolve(installDir, "resources", "desktop-runtime.json"), "installed runtime manifest");
+assertFile(resolve(installDir, "install-manifest.json"), "install manifest");
+assertFile(resolve(installDir, "Uninstall-CascadeDemoOps.ps1"), "uninstall script");
+
+const installedManifest = JSON.parse(readFileSync(resolve(installDir, "install-manifest.json"), "utf8"));
+assert(installedManifest.schema_version === "demoops.desktop_install_manifest.v1", "unexpected installed manifest schema");
+assert(installedManifest.server_connectivity?.required_for_local_generation === false, "installed app must keep local generation server-optional");
+
+const entrypoint = resolve(installDir, "cascade-demoops-desktop.exe");
+const desktopCheck = spawnSync(entrypoint, ["--check"], {
+  cwd: installDir,
+  env: {
+    ...process.env,
+    CASCADE_PROFILE: "desktop",
+    CASCADE_DATA_ROOT: resolve(smokeRoot, "user-data"),
+  },
+  encoding: "utf8",
+});
+if (desktopCheck.status !== 0) {
+  process.stdout.write(desktopCheck.stdout || "");
+  process.stderr.write(desktopCheck.stderr || "");
+  throw new Error(`installed desktop --check exited with status ${desktopCheck.status}`);
+}
+const desktopPayload = JSON.parse(desktopCheck.stdout);
+assert(desktopPayload.ready === true, "installed desktop did not report ready=true");
+assert(desktopPayload.profile === "desktop", "installed desktop did not use desktop profile");
+
+const host = spawn(entrypoint, ["--open=false", "--addr", "127.0.0.1:0"], {
+  cwd: installDir,
+  env: {
+    ...process.env,
+    CASCADE_PROFILE: "desktop",
+    CASCADE_DATA_ROOT: resolve(smokeRoot, "host-user-data"),
+  },
+  stdio: ["ignore", "pipe", "pipe"],
+});
+try {
+  const hostPayload = await waitForReadyPayload(host);
+  assert(hostPayload.ready === true, "installed desktop host did not report ready=true");
+  const index = httpGet(hostPayload.url);
+  assert(index.includes("<!doctype html>") || index.includes("<div id=\"root\"></div>"), "installed desktop host did not serve web index");
+  const health = JSON.parse(httpGet(`${hostPayload.url}/v1/desktop/runtime-health`));
+  assert(health.ok === true, "installed desktop runtime-health failed");
+} finally {
+  await terminateChild(host);
+}
+
+console.log(`Desktop installer smoke passed: ${setupPath}`);
+
+function assertFile(path, label) {
+  assert(existsSync(path), `missing ${label}: ${path}`);
+}
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+function sha256File(file) {
+  return createHash("sha256").update(readFileSync(file)).digest("hex");
+}
+
+function readFileHashLine(file, expectedName) {
+  const line = readFileSync(file, "utf8").trim();
+  const [hash, ...rest] = line.split(/\s+/);
+  assert(hash && /^[a-f0-9]{64}$/i.test(hash), `invalid checksum file: ${file}`);
+  assert(rest.join(" ").includes(expectedName), `checksum file does not reference ${expectedName}`);
+  return hash.toLowerCase();
+}
+
+function waitForReadyPayload(child) {
+  return new Promise((resolveReady, rejectReady) => {
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      rejectReady(new Error(`desktop host did not print ready payload before timeout. stderr=${stderr}`));
+    }, 10000);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      const parsed = tryParseFirstJSON(stdout);
+      if (parsed) {
+        clearTimeout(timer);
+        resolveReady(parsed);
+      }
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      rejectReady(err);
+    });
+    child.on("exit", (code) => {
+      const parsed = tryParseFirstJSON(stdout);
+      if (parsed) {
+        clearTimeout(timer);
+        resolveReady(parsed);
+        return;
+      }
+      clearTimeout(timer);
+      rejectReady(new Error(`desktop host exited before ready payload, code=${code}, stderr=${stderr}`));
+    });
+  });
+}
+
+function tryParseFirstJSON(value) {
+  const start = value.indexOf("{");
+  const end = value.lastIndexOf("}");
+  if (start < 0 || end <= start) {
+    return null;
+  }
+  try {
+    return JSON.parse(value.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+async function terminateChild(child) {
+  if (child.exitCode !== null) {
+    return;
+  }
+  child.kill();
+  const exited = await waitForExit(child, 3000);
+  if (!exited && process.platform === "win32" && child.pid) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    await waitForExit(child, 3000);
+  }
+}
+
+function waitForExit(child, timeoutMS) {
+  return new Promise((resolveExit) => {
+    if (child.exitCode !== null) {
+      resolveExit(true);
+      return;
+    }
+    const timer = setTimeout(() => resolveExit(false), timeoutMS);
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolveExit(true);
+    });
+  });
+}
+
+function httpGet(url) {
+  const ps = [
+    "$ProgressPreference = 'SilentlyContinue';",
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;`,
+    `(Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri '${escapePowerShell(url)}').Content`,
+  ].join(" ");
+  const result = spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    process.stderr.write(result.stderr || "");
+    throw new Error(`HTTP GET failed: ${url}`);
+  }
+  return result.stdout;
+}
+
+function escapePowerShell(value) {
+  return value.replaceAll("'", "''");
+}
