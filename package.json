@@ -24,6 +24,7 @@
     "build:desktop:mac": "node scripts/build-desktop.mjs darwin",
     "package:desktop": "node scripts/package-desktop.mjs",
     "smoke:desktop-package": "node scripts/smoke-desktop-package.mjs",
+    "smoke:desktop-ui": "node scripts/smoke-desktop-ui.mjs",
     "package:desktop:installer": "node scripts/package-desktop-installer.mjs",
     "smoke:desktop-installer": "node scripts/smoke-desktop-installer.mjs"
   },

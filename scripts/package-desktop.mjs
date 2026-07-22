@@ -123,6 +123,9 @@ function buildPackageManifest() {
           "local_package_generation",
           "stage_plan_review",
           "execution_package_approval",
+          "approved_package_upload",
+          "result_video_download",
+          "error_report_download",
         ],
       },
       {

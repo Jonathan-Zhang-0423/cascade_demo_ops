@@ -175,7 +175,11 @@ function assertRequiredAppSurfaces(manifest) {
   const surfaces = manifest.app_surfaces ?? [];
   assert(Array.isArray(surfaces), "installer manifest must declare app surfaces");
   const byID = new Map(surfaces.map((surface) => [surface.id, surface]));
-  assert(byID.get("demo_asset_generation_console")?.required === true, "installer manifest must require demo asset generation console");
+  const demoConsole = byID.get("demo_asset_generation_console");
+  assert(demoConsole?.required === true, "installer manifest must require demo asset generation console");
+  for (const capability of ["approved_package_upload", "result_video_download", "error_report_download"]) {
+    assert(demoConsole.capabilities?.includes(capability), `installer manifest demo console is missing capability ${capability}`);
+  }
   assert(byID.get("video_editor")?.required === true, "installer manifest must require video editor");
 }
 
