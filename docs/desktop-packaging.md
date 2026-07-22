@@ -149,25 +149,27 @@ bootstrap runs durable without changing the final repository boundary.
 
 ```text
 dist/release/
-  CascadeDemoOps-<version>-windows-x64-bootstrap.exe
-  CascadeDemoOps-<version>-windows-x64-bootstrap.exe.sha256
-  CascadeDemoOps-<version>-windows-x64-bootstrap.manifest.json
+  CascadeDemoOps-<version>-windows-x64-installer.exe
+  CascadeDemoOps-<version>-windows-x64-installer.exe.manifest
+  CascadeDemoOps-<version>-windows-x64-installer.exe.sha256
+  CascadeDemoOps-<version>-windows-x64-installer.manifest.json
 ```
 
 The setup executable supports:
 
 ```text
-CascadeDemoOps-...-bootstrap.exe --check
-CascadeDemoOps-...-bootstrap.exe --quiet --launch=false
-CascadeDemoOps-...-bootstrap.exe --install-dir C:\Tools\CascadeDemoOps
+CascadeDemoOps-...-installer.exe --check
+CascadeDemoOps-...-installer.exe --quiet --launch=false
+CascadeDemoOps-...-installer.exe --install-dir C:\Tools\CascadeDemoOps
 ```
 
-The current installer is unsigned and per-user. The filename intentionally uses
-`bootstrap` rather than `setup` or `installer` so Windows does not trigger
-elevation heuristics for this non-admin installer. It is suitable for internal
-download/install smoke testing, while production release still needs an embedded
-Windows application manifest, code signing, installer UI polish, bundled
-FFmpeg strategy, and auto-update policy.
+The current installer is unsigned and per-user. It ships with a sidecar Windows
+application manifest declaring `requestedExecutionLevel=asInvoker` so the
+non-admin installer can use a normal `installer.exe` filename without triggering
+UAC elevation heuristics. It is suitable for internal download/install smoke
+testing, while production release still needs an embedded Windows application
+manifest, code signing, installer UI polish, bundled FFmpeg strategy, and
+auto-update policy.
 
 `pnpm smoke:desktop-installer` installs into an isolated smoke directory with a
 mock `%APPDATA%`, verifies the generated Start Menu launcher, starts the app,

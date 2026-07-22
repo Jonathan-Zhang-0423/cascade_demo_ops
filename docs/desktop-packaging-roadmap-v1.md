@@ -115,7 +115,7 @@ dist/release/
 
 - `cmd/desktop-installer` 生成 Windows 自解压 setup exe，内嵌 portable zip payload。
 - setup 会校验 payload SHA-256，安装到 per-user 目录，写入 `install-manifest.json`，并生成卸载脚本。
-- `pnpm package:desktop:installer` 输出 `CascadeDemoOps-<version>-windows-x64-bootstrap.exe`、checksum 和 manifest。
+- `pnpm package:desktop:installer` 输出 `CascadeDemoOps-<version>-windows-x64-installer.exe`、sidecar Windows asInvoker manifest、checksum 和 package manifest。
 - `pnpm smoke:desktop-installer` 会真实静默安装到 smoke 目录，验证 installed exe 的 `--check`、Start Menu launcher、bundled Node 执行 video-worker JSON-RPC `health`、本地 Desktop Host 首页、runtime-health、卸载脚本清理安装目录且保留用户数据。
 
 建议实现：

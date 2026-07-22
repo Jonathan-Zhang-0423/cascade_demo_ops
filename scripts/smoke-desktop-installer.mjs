@@ -13,20 +13,23 @@ if (targetGOOS !== "windows") {
 
 const releaseBaseName = `CascadeDemoOps-${appPackage.version || "0.0.0"}-${targetGOOS}-${process.arch}`;
 const releaseRoot = resolve("dist", "release");
-const setupPath = resolve(releaseRoot, `${releaseBaseName}-bootstrap.exe`);
+const setupPath = resolve(releaseRoot, `${releaseBaseName}-installer.exe`);
+const setupSidecarManifestPath = `${setupPath}.manifest`;
 const checksumPath = `${setupPath}.sha256`;
-const manifestPath = resolve(releaseRoot, `${releaseBaseName}-bootstrap.manifest.json`);
+const manifestPath = resolve(releaseRoot, `${releaseBaseName}-installer.manifest.json`);
 const smokeRoot = resolve("dist", "installer-smoke", releaseBaseName);
 const installDir = resolve(smokeRoot, "CascadeDemoOps");
 const appDataRoot = resolve(smokeRoot, "appdata");
 
 assertFile(setupPath, "desktop setup exe");
+assertFile(setupSidecarManifestPath, "desktop setup Windows manifest");
 assertFile(checksumPath, "desktop setup checksum");
 assertFile(manifestPath, "desktop setup manifest");
 
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 assert(manifest.schema_version === "demoops.desktop_installer_manifest.v1", "unexpected installer manifest schema");
 assert(manifest.package_kind === "self_extracting_setup_exe", "installer must be self_extracting_setup_exe");
+assert(manifest.windows_manifest?.requested_execution_level === "asInvoker", "installer must declare asInvoker execution level");
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assert(manifest.install_behavior?.supports_silent_install === true, "installer must support silent install");
 

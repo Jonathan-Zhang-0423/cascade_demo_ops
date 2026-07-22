@@ -18,10 +18,11 @@ const releaseBaseName = `CascadeDemoOps-${version}-${targetGOOS}-${targetArch}`;
 const releaseRoot = resolve("dist", "release");
 const portableZip = resolve(releaseRoot, `${releaseBaseName}.zip`);
 const installerDir = resolve("dist", "installer", releaseBaseName);
-const installerExe = resolve(installerDir, "CascadeDemoOpsBootstrap.exe");
-const releaseInstaller = resolve(releaseRoot, `${releaseBaseName}-bootstrap.exe`);
+const installerExe = resolve(installerDir, "CascadeDemoOpsInstaller.exe");
+const releaseInstaller = resolve(releaseRoot, `${releaseBaseName}-installer.exe`);
+const releaseInstallerSidecarManifest = `${releaseInstaller}.manifest`;
 const releaseChecksum = `${releaseInstaller}.sha256`;
-const releaseManifest = resolve(releaseRoot, `${releaseBaseName}-bootstrap.manifest.json`);
+const releaseManifest = resolve(releaseRoot, `${releaseBaseName}-installer.manifest.json`);
 
 run("node", ["scripts/package-desktop.mjs"]);
 assertFile(portableZip, "portable desktop zip");
@@ -50,13 +51,16 @@ appendPayload(installerExe, payload, trailer);
 
 mkdirSync(releaseRoot, { recursive: true });
 rmSync(releaseInstaller, { force: true });
+rmSync(releaseInstallerSidecarManifest, { force: true });
 rmSync(releaseChecksum, { force: true });
-for (const suffix of ["setup", "installer"]) {
+for (const suffix of ["setup", "bootstrap"]) {
   rmSync(resolve(releaseRoot, `${releaseBaseName}-${suffix}.exe`), { force: true });
+  rmSync(resolve(releaseRoot, `${releaseBaseName}-${suffix}.exe.manifest`), { force: true });
   rmSync(resolve(releaseRoot, `${releaseBaseName}-${suffix}.exe.sha256`), { force: true });
   rmSync(resolve(releaseRoot, `${releaseBaseName}-${suffix}.manifest.json`), { force: true });
 }
 copyFile(installerExe, releaseInstaller);
+writeFileSync(releaseInstallerSidecarManifest, windowsAsInvokerManifest());
 const installerSHA256 = sha256File(releaseInstaller);
 writeFileSync(releaseChecksum, `${installerSHA256}  ${basename(releaseInstaller)}\n`);
 writeJSON(releaseManifest, {
@@ -69,6 +73,12 @@ writeJSON(releaseManifest, {
   package_kind: "self_extracting_setup_exe",
   created_at: new Date().toISOString(),
   entrypoint: basename(releaseInstaller),
+  windows_manifest: {
+    file_name: basename(releaseInstallerSidecarManifest),
+    requested_execution_level: "asInvoker",
+    ui_access: false,
+    embedded: false,
+  },
   artifact: {
     file_name: basename(releaseInstaller),
     sha256: installerSHA256,
@@ -152,4 +162,20 @@ function sha256File(path) {
 
 function writeJSON(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function windowsAsInvokerManifest() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity version="1.0.0.0" processorArchitecture="amd64" name="CascadeDemoOps.DesktopInstaller" type="win32"/>
+  <description>Cascade DemoOps Desktop Installer</description>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>
+`;
 }
