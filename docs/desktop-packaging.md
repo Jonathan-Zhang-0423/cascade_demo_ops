@@ -125,9 +125,40 @@ Both portable and installer smoke tests start that bundled Node executable
 against `resources/sidecars/video-worker/dist/index.js` and require a JSON-RPC
 `health` response before they pass.
 
+The packaged App does not perform production demo recording locally. Real demo
+browser execution, adaptive recording, and failure diagnosis belong to the
+server-side Browser Agent. Desktop packaging keeps only the workbench that
+collects inputs, produces/uploads the approved package, downloads final videos
+or error reports, and opens the local editor. The packaged `video-worker`
+sidecar is therefore an editor/media helper and compatibility runtime, not the
+primary demo-recording execution path.
+
 FFmpeg/ffprobe are still planned runtime assets. Until those are bundled, video
 rendering flows that require FFmpeg may need explicit `CASCADE_FFMPEG_PATH` and
 `CASCADE_FFPROBE_PATH` configuration or will use existing fallback behavior.
+
+## Packaged App Surfaces
+
+The desktop package manifest declares the user-facing surfaces that must remain
+available in packaged builds:
+
+- `demo_asset_generation_console`: product URL, local repo path, requirement and
+  transient credential input, local package generation, stage JSON review,
+  Browser Agent outline review, and execution package approval.
+- `video_editor`: result package or local media import, timeline editing,
+  caption/callout editing, preview, and MP4 export entry points.
+
+Both portable and installer smoke tests inspect the packaged `resources/web`
+bundle for these visible workspace labels. This catches release builds that
+start successfully but accidentally omit the demo asset generation console or
+the colleague-provided editor workspace.
+
+`pnpm smoke:desktop-ui` starts the packaged desktop host and drives a real
+Chromium-compatible browser against it. It verifies that the demo console loads,
+the execution package approval view is reachable, and the video editor route
+shows import, preview, export, and timeline controls. Set
+`CASCADE_DESKTOP_UI_SMOKE_BROWSER` when Chrome or Edge is not in a standard
+Windows location.
 
 ## Data Boundary
 
@@ -149,11 +180,17 @@ bootstrap runs durable without changing the final repository boundary.
 
 ```text
 dist/release/
+  CascadeDemoOps-desktop-latest.json
   CascadeDemoOps-<version>-windows-x64-installer.exe
   CascadeDemoOps-<version>-windows-x64-installer.exe.manifest
   CascadeDemoOps-<version>-windows-x64-installer.exe.sha256
   CascadeDemoOps-<version>-windows-x64-installer.manifest.json
 ```
+
+`CascadeDemoOps-desktop-latest.json` is the stable release-channel manifest for
+download pages or server-side release feeds. It points to the recommended
+installer, the portable zip fallback, their manifests, SHA-256 checksums,
+server-connectivity reservation, install behavior, and required App surfaces.
 
 The setup executable supports:
 

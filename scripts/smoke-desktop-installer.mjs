@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -17,6 +17,8 @@ const setupPath = resolve(releaseRoot, `${releaseBaseName}-installer.exe`);
 const setupSidecarManifestPath = `${setupPath}.manifest`;
 const checksumPath = `${setupPath}.sha256`;
 const manifestPath = resolve(releaseRoot, `${releaseBaseName}-installer.manifest.json`);
+const releaseChannelManifestPath = resolve(releaseRoot, "CascadeDemoOps-desktop-latest.json");
+const portableZipPath = resolve(releaseRoot, `${releaseBaseName}.zip`);
 const smokeRoot = resolve("dist", "installer-smoke", releaseBaseName);
 const installDir = resolve(smokeRoot, "CascadeDemoOps");
 const appDataRoot = resolve(smokeRoot, "appdata");
@@ -25,6 +27,7 @@ assertFile(setupPath, "desktop setup exe");
 assertFile(setupSidecarManifestPath, "desktop setup Windows manifest");
 assertFile(checksumPath, "desktop setup checksum");
 assertFile(manifestPath, "desktop setup manifest");
+assertFile(releaseChannelManifestPath, "desktop release channel manifest");
 
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 assert(manifest.schema_version === "demoops.desktop_installer_manifest.v1", "unexpected installer manifest schema");
@@ -32,11 +35,20 @@ assert(manifest.package_kind === "self_extracting_setup_exe", "installer must be
 assert(manifest.windows_manifest?.requested_execution_level === "asInvoker", "installer must declare asInvoker execution level");
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assert(manifest.install_behavior?.supports_silent_install === true, "installer must support silent install");
+assertRequiredAppSurfaces(manifest);
 
 const expectedHash = readFileHashLine(checksumPath, basename(setupPath));
 const actualHash = sha256File(setupPath);
 assert(actualHash === expectedHash, `setup checksum mismatch: ${actualHash} !== ${expectedHash}`);
 assert(manifest.artifact?.sha256 === actualHash, "installer manifest artifact hash mismatch");
+const releaseChannel = JSON.parse(readFileSync(releaseChannelManifestPath, "utf8"));
+assertReleaseChannelManifest(releaseChannel, {
+  installerName: basename(setupPath),
+  installerHash: actualHash,
+  installerSize: manifest.artifact?.size_bytes,
+  installerManifestName: basename(manifestPath),
+  portableName: basename(portableZipPath),
+});
 
 rmSync(smokeRoot, { recursive: true, force: true });
 mkdirSync(appDataRoot, { recursive: true });
@@ -70,6 +82,7 @@ const installPayload = JSON.parse(install.stdout);
 assert(installPayload.installed === true, "setup did not report installed=true");
 assertFile(resolve(installDir, "cascade-demoops-desktop.exe"), "installed desktop entrypoint");
 assertFile(resolve(installDir, "resources", "web", "index.html"), "installed web index");
+assertPackagedWebSurfaces(resolve(installDir, "resources", "web"));
 assertFile(resolve(installDir, "resources", "desktop-runtime.json"), "installed runtime manifest");
 const bundledNode = resolve(installDir, "resources", "runtimes", "node", "node.exe");
 const bundledWorker = resolve(installDir, "resources", "sidecars", "video-worker", "dist", "index.js");
@@ -83,6 +96,7 @@ assertFile(uninstallScript, "uninstall script");
 const installedManifest = JSON.parse(readFileSync(resolve(installDir, "install-manifest.json"), "utf8"));
 assert(installedManifest.schema_version === "demoops.desktop_install_manifest.v1", "unexpected installed manifest schema");
 assert(installedManifest.server_connectivity?.required_for_local_generation === false, "installed app must keep local generation server-optional");
+assertRequiredAppSurfaces(installedManifest);
 assert(Array.isArray(installedManifest.shortcuts) && installedManifest.shortcuts.length === 1, "installer did not record Start Menu launcher");
 const launcherPath = installedManifest.shortcuts[0];
 assertFile(launcherPath, "Start Menu launcher");
@@ -155,6 +169,84 @@ function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+function assertRequiredAppSurfaces(manifest) {
+  const surfaces = manifest.app_surfaces ?? [];
+  assert(Array.isArray(surfaces), "installer manifest must declare app surfaces");
+  const byID = new Map(surfaces.map((surface) => [surface.id, surface]));
+  const demoConsole = byID.get("demo_asset_generation_console");
+  assert(demoConsole?.required === true, "installer manifest must require demo asset generation console");
+  for (const capability of ["approved_package_upload", "result_video_download", "error_report_download"]) {
+    assert(demoConsole.capabilities?.includes(capability), `installer manifest demo console is missing capability ${capability}`);
+  }
+  assert(byID.get("video_editor")?.required === true, "installer manifest must require video editor");
+}
+
+function assertReleaseChannelManifest(channel, expected) {
+  assert(channel.schema_version === "demoops.desktop_release_channel.v1", "unexpected release channel manifest schema");
+  assert(channel.channel === "latest", "release channel must be latest");
+  assert(channel.recommended_artifact === "installer", "release channel must recommend installer");
+  assert(channel.version === appPackage.version, "release channel version mismatch");
+  assert(channel.target_os === targetGOOS, "release channel target_os mismatch");
+  assert(channel.target_arch === process.arch, "release channel target_arch mismatch");
+  assert(channel.artifacts?.installer?.file_name === expected.installerName, "release channel installer file mismatch");
+  assert(channel.artifacts?.installer?.manifest_file_name === expected.installerManifestName, "release channel installer manifest mismatch");
+  assert(channel.artifacts?.installer?.sha256 === expected.installerHash, "release channel installer hash mismatch");
+  assert(channel.artifacts?.installer?.size_bytes === expected.installerSize, "release channel installer size mismatch");
+  assert(channel.artifacts?.portable_zip?.file_name === expected.portableName, "release channel portable zip file mismatch");
+  assert(channel.server_connectivity?.required_for_local_generation === false, "release channel must keep local generation server-optional");
+  assertRequiredAppSurfaces(channel);
+}
+
+function assertPackagedWebSurfaces(webRoot) {
+  assertFile(resolve(webRoot, "index.html"), "installed packaged web index");
+  const bundleText = readPackagedText(webRoot);
+  assertSurfaceText(bundleText, "demo asset generation console", [
+    "开始实战流程",
+    "输入材料配置",
+    "演示账号",
+    "执行包审批",
+    "Stage JSON",
+    "Browser Agent 大纲",
+  ]);
+  assertSurfaceText(bundleText, "video editor", [
+    "视频编辑",
+    "导入素材",
+    "生成预览",
+    "导出 MP4",
+    "时间线",
+    "字幕",
+  ]);
+}
+
+function readPackagedText(webRoot) {
+  const files = listFiles(webRoot).filter((file) => /\.(html|js|css)$/i.test(file));
+  assert(files.length > 0, `installed web surface files are missing: ${webRoot}`);
+  return files.map((file) => readFileSync(file, "utf8")).join("\n");
+}
+
+function assertSurfaceText(text, label, requiredTexts) {
+  for (const required of requiredTexts) {
+    assert(text.includes(required), `installed web is missing ${label} text: ${required}`);
+  }
+}
+
+function listFiles(dir) {
+  const result = [];
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = resolve(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(path);
+      } else if (entry.isFile()) {
+        result.push(path);
+      }
+    }
+  }
+  return result;
 }
 
 function sha256File(file) {

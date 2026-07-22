@@ -43,12 +43,26 @@ type installManifest struct {
 	Payload       payloadTrailer      `json:"payload"`
 	Shortcuts     []string            `json:"shortcuts"`
 	Server        serverConnectivity  `json:"server_connectivity"`
+	AppSurfaces   []appSurface        `json:"app_surfaces"`
 	Files         []installedFileInfo `json:"files"`
 }
 
 type serverConnectivity struct {
 	RequiredForLocalGeneration bool     `json:"required_for_local_generation"`
 	ReservedInterfaces         []string `json:"reserved_interfaces"`
+}
+
+type packageManifest struct {
+	Server      serverConnectivity `json:"server_connectivity"`
+	AppSurfaces []appSurface       `json:"app_surfaces"`
+}
+
+type appSurface struct {
+	ID            string   `json:"id"`
+	Label         string   `json:"label"`
+	Required      bool     `json:"required"`
+	EntryNavLabel string   `json:"entry_nav_label"`
+	Capabilities  []string `json:"capabilities"`
 }
 
 type installedFileInfo struct {
@@ -182,6 +196,10 @@ func installPayload(payload []byte, trailer payloadTrailer, installDir string, c
 	if _, err := os.Stat(entrypoint); err != nil {
 		return installManifest{}, fmt.Errorf("installed desktop entrypoint is missing: %w", err)
 	}
+	packageMetadata, err := readInstalledPackageManifest(absInstallDir)
+	if err != nil {
+		return installManifest{}, err
+	}
 	shortcuts := []string{}
 	if createShortcut {
 		if shortcut, err := writeStartMenuLauncher(entrypoint); err == nil && shortcut != "" {
@@ -202,16 +220,9 @@ func installPayload(payload []byte, trailer payloadTrailer, installDir string, c
 		Entrypoint:    entrypoint,
 		Payload:       trailer,
 		Shortcuts:     shortcuts,
-		Server: serverConnectivity{
-			RequiredForLocalGeneration: false,
-			ReservedInterfaces: []string{
-				"ExchangeCapabilityResolver",
-				"ExchangeIdentityStore",
-				"ExchangeSessionManager",
-				"CloudLifecycleClient",
-			},
-		},
-		Files: files,
+		Server:        packageMetadata.Server,
+		AppSurfaces:   packageMetadata.AppSurfaces,
+		Files:         files,
 	}
 	manifestPath := filepath.Join(absInstallDir, "install-manifest.json")
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
@@ -222,6 +233,30 @@ func installPayload(payload []byte, trailer payloadTrailer, installDir string, c
 		return installManifest{}, err
 	}
 	manifest.Files = append(manifest.Files, fileInfo(absInstallDir, manifestPath))
+	return manifest, nil
+}
+
+func readInstalledPackageManifest(installDir string) (packageManifest, error) {
+	manifestPath := filepath.Join(installDir, "package-manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return packageManifest{}, fmt.Errorf("installed package manifest is missing: %w", err)
+	}
+	var manifest packageManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return packageManifest{}, fmt.Errorf("installed package manifest is invalid: %w", err)
+	}
+	if len(manifest.Server.ReservedInterfaces) == 0 {
+		manifest.Server = serverConnectivity{
+			RequiredForLocalGeneration: false,
+			ReservedInterfaces: []string{
+				"ExchangeCapabilityResolver",
+				"ExchangeIdentityStore",
+				"ExchangeSessionManager",
+				"CloudLifecycleClient",
+			},
+		}
+	}
 	return manifest, nil
 }
 
@@ -340,7 +375,7 @@ $ManifestPath = Join-Path $InstallDir 'install-manifest.json'
 if (-not (Test-Path -LiteralPath $ManifestPath)) {
   throw "Cascade DemoOps install manifest is missing: $ManifestPath"
 }
-$Manifest = Get-Content -Raw -LiteralPath $ManifestPath | ConvertFrom-Json
+$Manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $ManifestPath | ConvertFrom-Json
 if ($Manifest.schema_version -ne 'demoops.desktop_install_manifest.v1') {
   throw "Refusing to uninstall unknown install schema: $($Manifest.schema_version)"
 }
