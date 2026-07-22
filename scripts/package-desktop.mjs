@@ -119,6 +119,11 @@ function spawn(command, args, options = {}) {
   const finalArgs = process.platform === "win32" && command === "pnpm" ? ["/d", "/s", "/c", command, ...args] : args;
   const result = spawnSync(executable, finalArgs, {
     cwd: options.cwd || root,
+    env: {
+      ...process.env,
+      VITE_CASCADE_BRIDGE: process.env.VITE_CASCADE_BRIDGE || "local",
+      VITE_CASCADE_BRIDGE_URL: process.env.VITE_CASCADE_BRIDGE_URL || "",
+    },
     stdio: "inherit",
   });
   if (result.error) {

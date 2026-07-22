@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const root = resolve(".");
 const appPackage = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
@@ -50,7 +50,7 @@ const entrypoint = resolve(smokeRoot, manifest.entrypoint || "cascade-demoops-de
 assertFile(entrypoint, "desktop entrypoint");
 assertFile(resolve(smokeRoot, manifest.resource_manifest || "resources/desktop-runtime.json"), "desktop runtime manifest");
 
-const result = spawnSync(entrypoint, {
+const result = spawnSync(entrypoint, ["--check"], {
   cwd: smokeRoot,
   env: {
     ...process.env,
@@ -68,6 +68,27 @@ const payload = JSON.parse(result.stdout);
 assert(payload.ready === true, "desktop entrypoint did not report ready=true");
 assert(payload.profile === "desktop", "desktop entrypoint did not use desktop profile");
 assert(payload.mode === "desktop", "desktop entrypoint did not use desktop mode");
+
+const host = spawn(entrypoint, ["--open=false", "--addr", "127.0.0.1:0"], {
+  cwd: smokeRoot,
+  env: {
+    ...process.env,
+    CASCADE_PROFILE: "desktop",
+    CASCADE_DATA_ROOT: resolve(smokeRoot, "host-user-data"),
+  },
+  stdio: ["ignore", "pipe", "pipe"],
+});
+try {
+  const hostPayload = await waitForReadyPayload(host);
+  assert(hostPayload.ready === true, "desktop host did not report ready=true");
+  assert(typeof hostPayload.url === "string" && hostPayload.url.startsWith("http://127.0.0.1:"), "desktop host did not report a local URL");
+  const index = httpGet(hostPayload.url);
+  assert(index.includes("<!doctype html>") || index.includes("<div id=\"root\"></div>"), "desktop host did not serve packaged web index");
+  const health = JSON.parse(httpGet(`${hostPayload.url}/v1/desktop/runtime-health`));
+  assert(health.ok === true, "desktop host runtime-health failed");
+} finally {
+  await terminateChild(host);
+}
 
 console.log(`Desktop package smoke passed: ${zipPath}`);
 
@@ -145,4 +166,95 @@ function expandZip(file, destination) {
 
 function escapePowerShell(value) {
   return value.replaceAll("'", "''");
+}
+
+function waitForReadyPayload(child) {
+  return new Promise((resolveReady, rejectReady) => {
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      rejectReady(new Error(`desktop host did not print ready payload before timeout. stderr=${stderr}`));
+    }, 10000);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      const parsed = tryParseFirstJSON(stdout);
+      if (parsed) {
+        clearTimeout(timer);
+        resolveReady(parsed);
+      }
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      rejectReady(err);
+    });
+    child.on("exit", (code) => {
+      const parsed = tryParseFirstJSON(stdout);
+      if (parsed) {
+        clearTimeout(timer);
+        resolveReady(parsed);
+        return;
+      }
+      clearTimeout(timer);
+      rejectReady(new Error(`desktop host exited before ready payload, code=${code}, stderr=${stderr}`));
+    });
+  });
+}
+
+function tryParseFirstJSON(value) {
+  const start = value.indexOf("{");
+  const end = value.lastIndexOf("}");
+  if (start < 0 || end <= start) {
+    return null;
+  }
+  try {
+    return JSON.parse(value.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+async function terminateChild(child) {
+  if (child.exitCode !== null) {
+    return;
+  }
+  child.kill();
+  const exited = await waitForExit(child, 3000);
+  if (!exited && process.platform === "win32" && child.pid) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    await waitForExit(child, 3000);
+  }
+}
+
+function waitForExit(child, timeoutMS) {
+  return new Promise((resolveExit) => {
+    if (child.exitCode !== null) {
+      resolveExit(true);
+      return;
+    }
+    const timer = setTimeout(() => resolveExit(false), timeoutMS);
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolveExit(true);
+    });
+  });
+}
+
+function httpGet(url) {
+  const ps = [
+    "$ProgressPreference = 'SilentlyContinue';",
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;`,
+    `(Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri '${escapePowerShell(url)}').Content`,
+  ].join(" ");
+  const result = spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    process.stderr.write(result.stderr || "");
+    throw new Error(`HTTP GET failed: ${url}`);
+  }
+  return result.stdout;
 }

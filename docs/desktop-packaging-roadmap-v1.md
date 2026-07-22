@@ -86,6 +86,12 @@ dist/release/
 
 目标：用户双击启动一个桌面窗口，而不是打开命令行和 Vite。
 
+当前过渡实现：
+
+- `cmd/desktop` 默认启动本地 Desktop Host，服务 `resources/web` 和同源 `/v1/desktop` / `/v1/editor` bridge API。
+- `--check` 模式保留给 package smoke，初始化 bridge 后输出 JSON 并退出。
+- `pnpm package:desktop` 编译前端时默认使用 `VITE_CASCADE_BRIDGE=local`，packaged UI 不再落回 mock bridge。
+
 建议实现：
 
 - 新增 Wails app 入口。
@@ -245,11 +251,12 @@ pnpm package:desktop:installer
 ## 下一步开发建议
 
 1. 增加 `backend/cmd/desktop` 的 smoke test，验证 desktop profile 能读取 `dist/package/resources/desktop-runtime.json`。
-2. 扩展 `DesktopResourceManifest` 支持 `ffmpeg` / `ffprobe` runtime key。
-3. 增加前端 `wails` bridge adapter 的类型边界，但先用 mock binding 测。
-4. 引入 Wails app skeleton，绑定 `DesktopBridge.RuntimeConfig()` 作为第一条真实链路。
-5. 实现原生文件夹选择器和安全存储的接口占位。
-6. 增加 installer 输出、签名和自动更新前的 release smoke。
+2. 扩展 package smoke，覆盖 Desktop Host 首页和 runtime-health。
+3. 扩展 `DesktopResourceManifest` 支持 `ffmpeg` / `ffprobe` runtime key。
+4. 增加前端 `wails` bridge adapter 的类型边界，但先用 mock binding 测。
+5. 引入 Wails app skeleton，绑定 `DesktopBridge.RuntimeConfig()` 作为第一条真实链路。
+6. 实现原生文件夹选择器和安全存储的接口占位。
+7. 增加 installer 输出、签名和自动更新前的 release smoke。
 
 ## 不做事项
 
