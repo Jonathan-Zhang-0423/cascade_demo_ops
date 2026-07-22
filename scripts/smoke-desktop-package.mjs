@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -26,6 +26,7 @@ assert(Array.isArray(manifest.server_connectivity?.reserved_interfaces), "server
 for (const name of ["ExchangeCapabilityResolver", "ExchangeIdentityStore", "ExchangeSessionManager", "CloudLifecycleClient"]) {
   assert(manifest.server_connectivity.reserved_interfaces.includes(name), `missing reserved interface ${name}`);
 }
+assertRequiredAppSurfaces(manifest);
 
 const expectedZipHash = readFileHashLine(checksumPath, basename(zipPath));
 const actualZipHash = sha256File(zipPath);
@@ -51,6 +52,7 @@ expandZip(zipPath, smokeRoot);
 const entrypoint = resolve(smokeRoot, manifest.entrypoint || "cascade-demoops-desktop.exe");
 assertFile(entrypoint, "desktop entrypoint");
 assertFile(resolve(smokeRoot, manifest.resource_manifest || "resources/desktop-runtime.json"), "desktop runtime manifest");
+assertPackagedWebSurfaces(resolve(smokeRoot, "resources", "web"));
 const bundledNode = resolve(smokeRoot, "resources", "runtimes", "node", "node.exe");
 const bundledWorker = resolve(smokeRoot, "resources", "sidecars", "video-worker", "dist", "index.js");
 assertFile(bundledNode, "bundled node runtime");
@@ -111,6 +113,47 @@ function assert(condition, message) {
   }
 }
 
+function assertRequiredAppSurfaces(manifest) {
+  const surfaces = manifest.app_surfaces ?? [];
+  assert(Array.isArray(surfaces), "desktop manifest must declare app surfaces");
+  const byID = new Map(surfaces.map((surface) => [surface.id, surface]));
+  assert(byID.get("demo_asset_generation_console")?.required === true, "desktop manifest must require demo asset generation console");
+  assert(byID.get("video_editor")?.required === true, "desktop manifest must require video editor");
+}
+
+function assertPackagedWebSurfaces(webRoot) {
+  assertFile(resolve(webRoot, "index.html"), "packaged web index");
+  const bundleText = readPackagedText(webRoot);
+  assertSurfaceText(bundleText, "demo asset generation console", [
+    "开始实战流程",
+    "输入材料配置",
+    "演示账号",
+    "执行包审批",
+    "Stage JSON",
+    "Browser Agent 大纲",
+  ]);
+  assertSurfaceText(bundleText, "video editor", [
+    "视频编辑",
+    "导入素材",
+    "生成预览",
+    "导出 MP4",
+    "时间线",
+    "字幕",
+  ]);
+}
+
+function readPackagedText(webRoot) {
+  const files = listFiles(webRoot).filter((file) => /\.(html|js|css)$/i.test(file));
+  assert(files.length > 0, `packaged web surface files are missing: ${webRoot}`);
+  return files.map((file) => readFileSync(file, "utf8")).join("\n");
+}
+
+function assertSurfaceText(text, label, requiredTexts) {
+  for (const required of requiredTexts) {
+    assert(text.includes(required), `packaged web is missing ${label} text: ${required}`);
+  }
+}
+
 function sha256File(file) {
   return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
@@ -145,6 +188,23 @@ function listZipEntries(file) {
     throw new Error("failed to inspect release zip");
   }
   return new Set(result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+}
+
+function listFiles(dir) {
+  const result = [];
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = resolve(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(path);
+      } else if (entry.isFile()) {
+        result.push(path);
+      }
+    }
+  }
+  return result;
 }
 
 function expandZip(file, destination) {

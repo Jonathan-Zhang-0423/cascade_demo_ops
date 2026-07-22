@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -32,6 +32,7 @@ assert(manifest.package_kind === "self_extracting_setup_exe", "installer must be
 assert(manifest.windows_manifest?.requested_execution_level === "asInvoker", "installer must declare asInvoker execution level");
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assert(manifest.install_behavior?.supports_silent_install === true, "installer must support silent install");
+assertRequiredAppSurfaces(manifest);
 
 const expectedHash = readFileHashLine(checksumPath, basename(setupPath));
 const actualHash = sha256File(setupPath);
@@ -70,6 +71,7 @@ const installPayload = JSON.parse(install.stdout);
 assert(installPayload.installed === true, "setup did not report installed=true");
 assertFile(resolve(installDir, "cascade-demoops-desktop.exe"), "installed desktop entrypoint");
 assertFile(resolve(installDir, "resources", "web", "index.html"), "installed web index");
+assertPackagedWebSurfaces(resolve(installDir, "resources", "web"));
 assertFile(resolve(installDir, "resources", "desktop-runtime.json"), "installed runtime manifest");
 const bundledNode = resolve(installDir, "resources", "runtimes", "node", "node.exe");
 const bundledWorker = resolve(installDir, "resources", "sidecars", "video-worker", "dist", "index.js");
@@ -83,6 +85,7 @@ assertFile(uninstallScript, "uninstall script");
 const installedManifest = JSON.parse(readFileSync(resolve(installDir, "install-manifest.json"), "utf8"));
 assert(installedManifest.schema_version === "demoops.desktop_install_manifest.v1", "unexpected installed manifest schema");
 assert(installedManifest.server_connectivity?.required_for_local_generation === false, "installed app must keep local generation server-optional");
+assertRequiredAppSurfaces(installedManifest);
 assert(Array.isArray(installedManifest.shortcuts) && installedManifest.shortcuts.length === 1, "installer did not record Start Menu launcher");
 const launcherPath = installedManifest.shortcuts[0];
 assertFile(launcherPath, "Start Menu launcher");
@@ -155,6 +158,64 @@ function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+function assertRequiredAppSurfaces(manifest) {
+  const surfaces = manifest.app_surfaces ?? [];
+  assert(Array.isArray(surfaces), "installer manifest must declare app surfaces");
+  const byID = new Map(surfaces.map((surface) => [surface.id, surface]));
+  assert(byID.get("demo_asset_generation_console")?.required === true, "installer manifest must require demo asset generation console");
+  assert(byID.get("video_editor")?.required === true, "installer manifest must require video editor");
+}
+
+function assertPackagedWebSurfaces(webRoot) {
+  assertFile(resolve(webRoot, "index.html"), "installed packaged web index");
+  const bundleText = readPackagedText(webRoot);
+  assertSurfaceText(bundleText, "demo asset generation console", [
+    "开始实战流程",
+    "输入材料配置",
+    "演示账号",
+    "执行包审批",
+    "Stage JSON",
+    "Browser Agent 大纲",
+  ]);
+  assertSurfaceText(bundleText, "video editor", [
+    "视频编辑",
+    "导入素材",
+    "生成预览",
+    "导出 MP4",
+    "时间线",
+    "字幕",
+  ]);
+}
+
+function readPackagedText(webRoot) {
+  const files = listFiles(webRoot).filter((file) => /\.(html|js|css)$/i.test(file));
+  assert(files.length > 0, `installed web surface files are missing: ${webRoot}`);
+  return files.map((file) => readFileSync(file, "utf8")).join("\n");
+}
+
+function assertSurfaceText(text, label, requiredTexts) {
+  for (const required of requiredTexts) {
+    assert(text.includes(required), `installed web is missing ${label} text: ${required}`);
+  }
+}
+
+function listFiles(dir) {
+  const result = [];
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = resolve(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(path);
+      } else if (entry.isFile()) {
+        result.push(path);
+      }
+    }
+  }
+  return result;
 }
 
 function sha256File(file) {

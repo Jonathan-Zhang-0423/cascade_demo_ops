@@ -129,6 +129,22 @@ FFmpeg/ffprobe are still planned runtime assets. Until those are bundled, video
 rendering flows that require FFmpeg may need explicit `CASCADE_FFMPEG_PATH` and
 `CASCADE_FFPROBE_PATH` configuration or will use existing fallback behavior.
 
+## Packaged App Surfaces
+
+The desktop package manifest declares the user-facing surfaces that must remain
+available in packaged builds:
+
+- `demo_asset_generation_console`: product URL, local repo path, requirement and
+  transient credential input, local package generation, stage JSON review,
+  Browser Agent outline review, and execution package approval.
+- `video_editor`: result package or local media import, timeline editing,
+  caption/callout editing, preview, and MP4 export entry points.
+
+Both portable and installer smoke tests inspect the packaged `resources/web`
+bundle for these visible workspace labels. This catches release builds that
+start successfully but accidentally omit the demo asset generation console or
+the colleague-provided editor workspace.
+
 ## Data Boundary
 
 Desktop mode is local-first:

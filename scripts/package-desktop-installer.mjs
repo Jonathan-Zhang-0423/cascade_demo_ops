@@ -113,6 +113,32 @@ writeJSON(releaseManifest, {
       "CloudLifecycleClient",
     ],
   },
+  app_surfaces: [
+    {
+      id: "demo_asset_generation_console",
+      label: "演示资产生成控制台",
+      required: true,
+      entry_nav_label: "项目",
+      capabilities: [
+        "input_collection",
+        "local_package_generation",
+        "stage_plan_review",
+        "execution_package_approval",
+      ],
+    },
+    {
+      id: "video_editor",
+      label: "视频编辑器",
+      required: true,
+      entry_nav_label: "视频编辑",
+      capabilities: [
+        "result_package_import",
+        "timeline_editing",
+        "caption_and_callout_editing",
+        "preview_and_export",
+      ],
+    },
+  ],
 });
 
 console.log(`Created desktop installer: ${releaseInstaller}`);
