@@ -51,7 +51,11 @@ expandZip(zipPath, smokeRoot);
 const entrypoint = resolve(smokeRoot, manifest.entrypoint || "cascade-demoops-desktop.exe");
 assertFile(entrypoint, "desktop entrypoint");
 assertFile(resolve(smokeRoot, manifest.resource_manifest || "resources/desktop-runtime.json"), "desktop runtime manifest");
-assertFile(resolve(smokeRoot, "resources", "runtimes", "node", "node.exe"), "bundled node runtime");
+const bundledNode = resolve(smokeRoot, "resources", "runtimes", "node", "node.exe");
+const bundledWorker = resolve(smokeRoot, "resources", "sidecars", "video-worker", "dist", "index.js");
+assertFile(bundledNode, "bundled node runtime");
+assertFile(bundledWorker, "packaged video-worker entrypoint");
+await assertVideoWorkerHealth(bundledNode, bundledWorker);
 
 const result = spawnSync(entrypoint, ["--check"], {
   cwd: smokeRoot,
@@ -262,4 +266,58 @@ function httpGet(url) {
     throw new Error(`HTTP GET failed: ${url}`);
   }
   return result.stdout;
+}
+
+function assertVideoWorkerHealth(nodePath, workerPath) {
+  return new Promise((resolveHealth, rejectHealth) => {
+    const child = spawn(nodePath, [workerPath], {
+      cwd: resolve(workerPath, ".."),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectHealth(new Error(`video-worker health timed out. stderr=${stderr}`));
+    }, 5000);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      const line = stdout.split(/\r?\n/).find((item) => item.trim().startsWith("{"));
+      if (!line) {
+        return;
+      }
+      try {
+        const response = JSON.parse(line);
+        if (response.result?.ok === true && response.result?.service === "video-worker") {
+          clearTimeout(timer);
+          child.kill();
+          resolveHealth();
+          return;
+        }
+        clearTimeout(timer);
+        child.kill();
+        rejectHealth(new Error(`unexpected video-worker health response: ${line}`));
+      } catch {
+        // Wait for a complete JSON line.
+      }
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      rejectHealth(err);
+    });
+    child.on("exit", (code) => {
+      const response = tryParseFirstJSON(stdout);
+      if (response?.result?.ok === true && response.result?.service === "video-worker") {
+        clearTimeout(timer);
+        resolveHealth();
+        return;
+      }
+      clearTimeout(timer);
+      rejectHealth(new Error(`video-worker exited before healthy response, code=${code}, stderr=${stderr}`));
+    });
+    child.stdin?.end(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "health" })}\n`);
+  });
 }

@@ -68,7 +68,11 @@ assert(installPayload.installed === true, "setup did not report installed=true")
 assertFile(resolve(installDir, "cascade-demoops-desktop.exe"), "installed desktop entrypoint");
 assertFile(resolve(installDir, "resources", "web", "index.html"), "installed web index");
 assertFile(resolve(installDir, "resources", "desktop-runtime.json"), "installed runtime manifest");
-assertFile(resolve(installDir, "resources", "runtimes", "node", "node.exe"), "installed bundled node runtime");
+const bundledNode = resolve(installDir, "resources", "runtimes", "node", "node.exe");
+const bundledWorker = resolve(installDir, "resources", "sidecars", "video-worker", "dist", "index.js");
+assertFile(bundledNode, "installed bundled node runtime");
+assertFile(bundledWorker, "installed video-worker entrypoint");
+await assertVideoWorkerHealth(bundledNode, bundledWorker);
 assertFile(resolve(installDir, "install-manifest.json"), "install manifest");
 assertFile(resolve(installDir, "Uninstall-CascadeDemoOps.ps1"), "uninstall script");
 
@@ -234,4 +238,58 @@ function httpGet(url) {
 
 function escapePowerShell(value) {
   return value.replaceAll("'", "''");
+}
+
+function assertVideoWorkerHealth(nodePath, workerPath) {
+  return new Promise((resolveHealth, rejectHealth) => {
+    const child = spawn(nodePath, [workerPath], {
+      cwd: resolve(workerPath, ".."),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectHealth(new Error(`video-worker health timed out. stderr=${stderr}`));
+    }, 5000);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      const line = stdout.split(/\r?\n/).find((item) => item.trim().startsWith("{"));
+      if (!line) {
+        return;
+      }
+      try {
+        const response = JSON.parse(line);
+        if (response.result?.ok === true && response.result?.service === "video-worker") {
+          clearTimeout(timer);
+          child.kill();
+          resolveHealth();
+          return;
+        }
+        clearTimeout(timer);
+        child.kill();
+        rejectHealth(new Error(`unexpected video-worker health response: ${line}`));
+      } catch {
+        // Wait for a complete JSON line.
+      }
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      rejectHealth(err);
+    });
+    child.on("exit", (code) => {
+      const response = tryParseFirstJSON(stdout);
+      if (response?.result?.ok === true && response.result?.service === "video-worker") {
+        clearTimeout(timer);
+        resolveHealth();
+        return;
+      }
+      clearTimeout(timer);
+      rejectHealth(new Error(`video-worker exited before healthy response, code=${code}, stderr=${stderr}`));
+    });
+    child.stdin?.end(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "health" })}\n`);
+  });
 }

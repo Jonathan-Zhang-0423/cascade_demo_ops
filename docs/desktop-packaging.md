@@ -121,6 +121,9 @@ The current Windows package copies the build-time Node executable into
 `resources/runtimes/node/node.exe`, records it in `desktop-runtime.json`, and the
 Go runtime resolves it before falling back to system `node`. Users should not
 need to install Node manually for the packaged video-worker sidecar.
+Both portable and installer smoke tests start that bundled Node executable
+against `resources/sidecars/video-worker/dist/index.js` and require a JSON-RPC
+`health` response before they pass.
 
 FFmpeg/ffprobe are still planned runtime assets. Until those are bundled, video
 rendering flows that require FFmpeg may need explicit `CASCADE_FFMPEG_PATH` and
