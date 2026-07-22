@@ -60,19 +60,27 @@ v1 推荐继续走 Wails：
 ```text
 dist/package/
   cascade-demoops-desktop.exe
+  package-manifest.json
   resources/
     desktop-runtime.json
     web/
     sidecars/video-worker/dist/index.js
+
+dist/release/
+  CascadeDemoOps-<version>-windows-x64.zip
+  CascadeDemoOps-<version>-windows-x64.zip.sha256
+  CascadeDemoOps-<version>-windows-x64.manifest.json
 ```
 
 验收：
 
 - `pnpm package:desktop` 成功。
 - `CASCADE_PROFILE=desktop dist/package/cascade-demoops-desktop.exe` 能加载 `desktop-runtime.json` 并初始化 `DesktopBridge`。
+- release zip 可解压，checksum 可校验。
+- `package-manifest.json` 列出入口、资源 manifest、文件 SHA-256 和服务器联通预留接口。
 - `RuntimeConfig` 不泄露本地路径、API key 或 token。
 
-当前状态：部分具备。脚本已经存在，但需要补测试和 zip/checksum 输出。
+当前状态：资源目录、portable zip、checksum 和 package manifest 已作为基线能力推进；仍需要补自动 smoke。
 
 ### Phase 1：桌面壳 MVP
 
@@ -230,19 +238,18 @@ go test ./...
 后续新增：
 
 ```powershell
-pnpm package:desktop:zip
 pnpm package:desktop:installer
 pnpm smoke:desktop-package
 ```
 
 ## 下一步开发建议
 
-1. 给 `scripts/package-desktop.mjs` 增加 zip 输出、checksum 和 package manifest。
-2. 增加 `backend/cmd/desktop` 的 smoke test，验证 desktop profile 能读取 `dist/package/resources/desktop-runtime.json`。
-3. 扩展 `DesktopResourceManifest` 支持 `ffmpeg` / `ffprobe` runtime key。
-4. 增加前端 `wails` bridge adapter 的类型边界，但先用 mock binding 测。
-5. 引入 Wails app skeleton，绑定 `DesktopBridge.RuntimeConfig()` 作为第一条真实链路。
-6. 实现原生文件夹选择器和安全存储的接口占位。
+1. 增加 `backend/cmd/desktop` 的 smoke test，验证 desktop profile 能读取 `dist/package/resources/desktop-runtime.json`。
+2. 扩展 `DesktopResourceManifest` 支持 `ffmpeg` / `ffprobe` runtime key。
+3. 增加前端 `wails` bridge adapter 的类型边界，但先用 mock binding 测。
+4. 引入 Wails app skeleton，绑定 `DesktopBridge.RuntimeConfig()` 作为第一条真实链路。
+5. 实现原生文件夹选择器和安全存储的接口占位。
+6. 增加 installer 输出、签名和自动更新前的 release smoke。
 
 ## 不做事项
 
