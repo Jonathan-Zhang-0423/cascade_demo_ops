@@ -35,6 +35,7 @@ const workflowStages = Object.entries(workflowStageLabels).map(([id, label]) => 
 export function App() {
 	const bridge = useMemo(() => createBridgeClient(), []);
 	const [activeNav, setActiveNav] = useState<NavSection>("projects");
+	const [editorNavigationOpen, setEditorNavigationOpen] = useState(false);
 	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createWorkspace("product_demo"));
   const [demoCredentials, setDemoCredentials] = useState({ username: "", password: "" });
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthView | undefined>();
@@ -333,8 +334,10 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar" aria-label="主导航">
+    <div className={activeNav === "editor" ? "app-shell editor-route" : "app-shell"}>
+      {activeNav === "editor" ? <button type="button" className="editor-navigation-toggle" aria-label={editorNavigationOpen ? "收起工作台导航" : "展开工作台导航"} aria-expanded={editorNavigationOpen} onClick={() => setEditorNavigationOpen((current) => !current)}>☰</button> : null}
+      {activeNav === "editor" && editorNavigationOpen ? <button type="button" className="editor-navigation-scrim" aria-label="关闭导航菜单" onClick={() => setEditorNavigationOpen(false)} /> : null}
+      <aside className={activeNav === "editor" ? `sidebar editor-navigation-drawer ${editorNavigationOpen ? "open" : ""}` : "sidebar"} aria-label="主导航">
         <div className="brand-block">
           <div className="brand-mark">C</div>
           <div>
@@ -342,13 +345,17 @@ export function App() {
             <span>DemoOps</span>
           </div>
         </div>
+        {activeNav === "editor" ? <button type="button" className="editor-navigation-close" aria-label="关闭导航菜单" title="关闭导航菜单" onClick={() => setEditorNavigationOpen(false)}>×</button> : null}
         <nav className="nav-list">
           {navItems.map((item) => (
             <button
               key={item.id}
               type="button"
               className={activeNav === item.id ? "nav-item active" : "nav-item"}
-              onClick={() => setActiveNav(item.id)}
+              onClick={() => {
+                setActiveNav(item.id);
+                setEditorNavigationOpen(false);
+              }}
             >
               <span>{item.label}</span>
               {item.badge ? <small>{item.badge}</small> : null}

@@ -12,6 +12,8 @@ type MediaTab = "media" | "captions" | "callouts" | "generated";
 type PreviewMode = "source" | "rendered";
 type SelectedTrack = "video" | "audio";
 type TimelineTrack = "evidence" | "video" | "caption" | "audio";
+type EditorTool = "select" | "assets" | "text" | "shapes" | "captions" | "generated";
+type AssetFilter = "all" | "video" | "image" | "audio";
 
 type TimelineShot = {
   shot: EditorShot;
@@ -54,6 +56,10 @@ export function VideoEditor() {
   const [importOpen, setImportOpen] = useState(false);
   const [importMode, setImportMode] = useState<ImportMode>("upload");
   const [mediaTab, setMediaTab] = useState<MediaTab>("media");
+  const [activeTool, setActiveTool] = useState<EditorTool>("select");
+  const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
+  const [assetQuery, setAssetQuery] = useState("");
+  const [assetFilter, setAssetFilter] = useState<AssetFilter>("all");
   const [validationOpen, setValidationOpen] = useState(false);
   const [validationReport, setValidationReport] = useState<EditorValidationReport>();
   const [previewMode, setPreviewMode] = useState<PreviewMode>("source");
@@ -70,6 +76,7 @@ export function VideoEditor() {
   const [hiddenTracks, setHiddenTracks] = useState<Record<TimelineTrack, boolean>>({ evidence: false, video: false, caption: false, audio: false });
   const [timelineInteractionKind, setTimelineInteractionKind] = useState<TimelineInteraction["kind"]>();
   const [snapGuideMS, setSnapGuideMS] = useState<number>();
+  const [timelineHoverMS, setTimelineHoverMS] = useState<number>();
   const [pendingFile, setPendingFile] = useState<File>();
   const sessionRef = useRef<EditorSession>();
   const draftPlanRef = useRef<EditorPlan>();
@@ -528,6 +535,11 @@ export function VideoEditor() {
     return Math.max(0, Math.min(totalDurationMS, (clientX - bounds.left) / timelineScale * 1000));
   }
 
+  function updateTimelineHover(clientX: number) {
+    const next = outputMSFromClientX(clientX);
+    setTimelineHoverMS((current) => current !== undefined && Math.abs(current - next) < 15 ? current : next);
+  }
+
   function updatePlayheadFromClientX(clientX: number) {
     const outputMS = outputMSFromClientX(clientX);
     const snapped = snapMilliseconds(outputMS, session?.final_profile.fps ?? 30, [], 0, frameSnappingEnabled);
@@ -939,6 +951,17 @@ export function VideoEditor() {
     setPlayheadMS(0);
   }
 
+  function chooseEditorTool(tool: EditorTool) {
+    setActiveTool(tool);
+    setShapeMenuOpen(false);
+    if (tool === "assets" || tool === "select") setMediaTab("media");
+    if (tool === "text" || tool === "captions") setMediaTab("captions");
+    if (tool === "shapes") setMediaTab("callouts");
+    if (tool === "generated") setMediaTab("generated");
+  }
+
+  const panelTitle = activeTool === "captions" ? "字幕库" : activeTool === "text" ? "文本与字幕" : activeTool === "shapes" ? "标注" : activeTool === "generated" ? "生成候选" : "素材";
+
   return (
     <div className="studio-shell">
       <header className="studio-topbar">
@@ -982,16 +1005,45 @@ export function VideoEditor() {
       {session ? (
         <div className="studio-workspace">
           <div className="studio-upper-workspace">
+            <nav className="studio-tool-rail" aria-label="编辑工具">
+              <button type="button" className={activeTool === "select" ? "active" : ""} aria-label="选择工具" title="选择工具" onClick={() => chooseEditorTool("select")}><span aria-hidden="true">⌖</span></button>
+              <button type="button" className={activeTool === "assets" ? "active" : ""} aria-label="素材" title="素材" onClick={() => chooseEditorTool("assets")}><span aria-hidden="true">▣</span></button>
+              <button type="button" className={activeTool === "text" ? "active" : ""} aria-label="文本与字幕" title="文本与字幕" onClick={() => chooseEditorTool("text")}><span aria-hidden="true">T</span></button>
+              <div className="studio-shape-tool" onMouseEnter={() => setShapeMenuOpen(true)} onMouseLeave={() => setShapeMenuOpen(false)}>
+                <button type="button" className={activeTool === "shapes" ? "active" : ""} aria-label="标注形状" title="标注形状" onClick={() => chooseEditorTool("shapes")}><span aria-hidden="true">[]</span></button>
+                {shapeMenuOpen ? <div className="studio-shape-menu" role="menu" aria-label="标注形状">
+                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>矩形</span><kbd>R</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>圆形</span><kbd>O</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>多边形</span><kbd>P</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>星形</span><kbd>Shift S</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>直线</span><kbd>L</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>箭头</span><kbd>Shift A</kbd></button>
+                </div> : null}
+              </div>
+              <button type="button" className={activeTool === "captions" ? "active" : ""} aria-label="字幕样式" title="字幕样式" onClick={() => chooseEditorTool("captions")}><span aria-hidden="true">CC</span></button>
+              <button type="button" className={activeTool === "generated" ? "active" : ""} aria-label="生成候选素材" title="生成候选素材" onClick={() => chooseEditorTool("generated")}><span aria-hidden="true">AI</span></button>
+              <button type="button" aria-label="导入素材" title="导入素材" onClick={() => setImportOpen(true)}><span aria-hidden="true">⇧</span></button>
+              <button type="button" aria-label="导出校验" title="导出校验" onClick={() => setValidationOpen(true)}><span aria-hidden="true">✓</span></button>
+            </nav>
             <section className="studio-panel studio-media-panel">
-              <div className="studio-panel-heading"><strong>素材</strong><small>{session.asset_catalog.artifacts.length} 项</small></div>
+              <div className="studio-panel-heading"><strong>{panelTitle}</strong><small>{session.asset_catalog.artifacts.length} 项</small></div>
               <div className="studio-panel-tabs">
                 {(["media", "captions", "callouts", "generated"] as MediaTab[]).map((tab) => (
                   <button key={tab} className={mediaTab === tab ? "active" : ""} onClick={() => setMediaTab(tab)}>{mediaTabLabel(tab)}</button>
                 ))}
               </div>
               <div className="studio-media-content">
+                {mediaTab === "media" ? <div className="studio-asset-browser-controls">
+                  <input type="search" value={assetQuery} onChange={(event) => setAssetQuery(event.target.value)} placeholder="搜索本地视频、截图或音频" aria-label="搜索素材" />
+                  <select value={assetFilter} aria-label="素材类型" onChange={(event) => setAssetFilter(event.target.value as AssetFilter)}>
+                    <option value="all">全部类型</option>
+                    <option value="video">视频</option>
+                    <option value="image">图片</option>
+                    <option value="audio">音频</option>
+                  </select>
+                </div> : null}
                 <button className="studio-import-zone" onClick={() => setImportOpen(true)}>＋ 从本机选择，或导入结果包</button>
-                <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} selectedAssetID={selectedArtifact?.id} onSelectShot={(shot) => selectShot(shot)} onSelectAsset={selectAsset} onAddStill={addStillToTimeline} />
+                <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} selectedAssetID={selectedArtifact?.id} assetQuery={assetQuery} assetFilter={assetFilter} onSelectShot={(shot) => selectShot(shot)} onSelectAsset={selectAsset} onAddStill={addStillToTimeline} />
               </div>
             </section>
 
@@ -1038,7 +1090,11 @@ export function VideoEditor() {
             </section>
 
             <aside className="studio-panel studio-properties-panel">
-              <div className="studio-panel-heading"><strong>属性</strong><small>{selectedTrack === "audio" && selectedAudioSegment ? `音频 ${selectedAudioSegment.index + 1}/${audioSegments.length}` : selectedShot ? `视频 ${selectedIndex + 1}/${draftPlan?.shots.length ?? 0}` : "未选择"}</small></div>
+              <div className="studio-panel-heading"><strong>{selectedTrack === "audio" ? "音频" : "属性"}</strong><small>{selectedTrack === "audio" && selectedAudioSegment ? `音频 ${selectedAudioSegment.index + 1}/${audioSegments.length}` : selectedShot ? `视频 ${selectedIndex + 1}/${draftPlan?.shots.length ?? 0}` : "未选择"}</small></div>
+              <div className="studio-inspector-tabs" role="tablist" aria-label="属性面板">
+                <button type="button" role="tab" aria-selected={selectedTrack === "video"} className={selectedTrack === "video" ? "active" : ""} onClick={() => setSelectedTrack("video")}>属性</button>
+                <button type="button" role="tab" aria-selected={selectedTrack === "audio"} className={selectedTrack === "audio" ? "active" : ""} disabled={!selectedAudioSegment} onClick={() => setSelectedTrack("audio")}>音频</button>
+              </div>
               {selectedTrack === "audio" && selectedAudioSegment ? (
                 <div className="studio-properties-scroll">
                   <PropertySection title="音频片段" meta={selectedAudioSegment.id}>
@@ -1121,7 +1177,7 @@ export function VideoEditor() {
                 <TrackLabel track="caption" label="字幕 / 标注" hidden={hiddenTracks.caption} onToggle={toggleTimelineTrack} />
                 <TrackLabel track="audio" label="音频" hidden={hiddenTracks.audio} onToggle={toggleTimelineTrack} />
               </div>
-              <div ref={timelineContentRef} className={`studio-timeline-scroll ${timelineInteractionKind ? `interacting ${timelineInteractionKind}` : ""}`} style={{ width: timelineWidth, backgroundSize: `${timeRulerStep(totalDurationMS) * timelineScale}px 100%` }} onPointerDown={beginPlayheadDrag}>
+              <div ref={timelineContentRef} className={`studio-timeline-scroll ${timelineInteractionKind ? `interacting ${timelineInteractionKind}` : ""}`} style={{ width: timelineWidth, backgroundSize: `${timeRulerStep(totalDurationMS) * timelineScale}px 100%` }} onPointerDown={beginPlayheadDrag} onPointerMove={(event) => updateTimelineHover(event.clientX)} onPointerLeave={() => setTimelineHoverMS(undefined)}>
                 <TimeRuler totalDurationMS={totalDurationMS} scale={timelineScale} />
                 <div className={`studio-track-row studio-evidence-track ${hiddenTracks.evidence ? "track-hidden" : ""}`}>
                   {!hiddenTracks.evidence && timelineShots.map((item) => {
@@ -1158,6 +1214,7 @@ export function VideoEditor() {
                     return <button key={segment.id} className={`studio-audio-clip ${segment.mode === "mute" ? "muted" : ""} ${selectedTrack === "audio" && selectedAudioSegment?.id === segment.id ? "selected" : ""}`} style={{ left: segment.startMS / 1000 * timelineScale, width: clipWidth }} title={`${segment.mode === "mute" ? "静音" : `音量 ${segment.volumePercent}%`} · ${formatTimecode(segment.startMS)}—${formatTimecode(segment.endMS)}`} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); selectAudioSegment(segment); }}><strong>{segment.mode === "mute" ? "静音" : `源音频 ${segment.index + 1} · ${segment.volumePercent}%`}</strong><small>{formatDuration(segment.durationMS)}</small></button>;
                   })}
                 </div>
+                {timelineHoverMS !== undefined ? <div className="studio-timeline-hover-guide" style={{ left: timelineHoverMS / 1000 * timelineScale }}><span>{formatTimecode(timelineHoverMS)}</span></div> : null}
                 <div className="studio-playhead" style={{ left: playheadMS / 1000 * timelineScale }} />
                 {snapGuideMS !== undefined ? <div className="studio-snap-guide" style={{ left: snapGuideMS / 1000 * timelineScale }} /> : null}
               </div>
@@ -1180,7 +1237,7 @@ export function VideoEditor() {
   );
 }
 
-function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID, onSelectShot, onSelectAsset, onAddStill }: { tab: MediaTab; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; selectedAssetID: string | undefined; onSelectShot: (shot: EditorShot) => void; onSelectAsset: (asset: EditorArtifact) => void; onAddStill: (asset: EditorArtifact) => void }) {
+function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID, assetQuery, assetFilter, onSelectShot, onSelectAsset, onAddStill }: { tab: MediaTab; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; selectedAssetID: string | undefined; assetQuery: string; assetFilter: AssetFilter; onSelectShot: (shot: EditorShot) => void; onSelectAsset: (asset: EditorArtifact) => void; onAddStill: (asset: EditorArtifact) => void }) {
   if (tab === "captions") {
     const shots = plan?.shots.filter((shot) => captionText(shot)) ?? [];
     return <div className="studio-list-content">{shots.map((shot) => <button key={shot.id} className={selectedShotID === shot.id ? "selected" : ""} onClick={() => onSelectShot(shot)}><strong>{captionText(shot)}</strong><small>{shot.purpose}</small></button>)}{shots.length === 0 ? <PanelEmpty text="当前计划没有字幕。" /> : null}</div>;
@@ -1194,16 +1251,26 @@ function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID
     const capability = session.provider_capabilities.find((item) => item.provider === "seedance");
     return <div className="studio-generated-content"><div className="studio-provider-card"><div><strong>Seedance</strong><span>{capability?.configured ? capability.mode : "未配置"}</span></div><p>候选素材必须人工审查，不能自动加入时间线或代表真实业务步骤。</p><small>auto_include=false · presentation_only=true</small></div>{generated.map((artifact) => <AssetCard key={artifact.id} artifact={artifact} generated />)}{generated.length === 0 ? <PanelEmpty text="当前没有生成候选素材。" /> : null}</div>;
   }
+  const query = assetQuery.trim().toLocaleLowerCase("zh-CN");
+  const assets = session.asset_catalog.artifacts.filter((artifact) => {
+    if (isGeneratedArtifact(artifact)) return false;
+    const mime = artifact.mime_type ?? "";
+    const kind = artifact.kind.toLocaleLowerCase("en-US");
+    const matchesType = assetFilter === "all" || (assetFilter === "video" && (mime.startsWith("video/") || kind.includes("recording"))) || (assetFilter === "image" && mime.startsWith("image/")) || (assetFilter === "audio" && (mime.startsWith("audio/") || kind.includes("audio")));
+    const text = `${artifact.label ?? ""} ${artifact.id} ${artifact.kind}`.toLocaleLowerCase("zh-CN");
+    return matchesType && (!query || text.includes(query));
+  });
   return (
     <>
       <p className="studio-section-label">真实执行素材</p>
       <div className="studio-asset-grid">
-        {session.asset_catalog.artifacts.filter((artifact) => !isGeneratedArtifact(artifact)).map((artifact) => {
+        {assets.map((artifact) => {
           const shot = plan?.shots.find((candidate) => candidate.source_artifact_id === artifact.id);
           return <AssetCard key={artifact.id} artifact={artifact} selected={artifact.id === selectedAssetID || shot?.id === selectedShotID} onClick={() => onSelectAsset(artifact)} {...(isTimelineStillAsset(artifact) ? { actionLabel: "加入时间线", onAction: () => onAddStill(artifact) } : {})} />;
         })}
       </div>
       {session.asset_catalog.artifacts.length === 0 ? <PanelEmpty text="导入浏览器录屏或本地视频后，系统会创建第一个片段。" /> : null}
+      {session.asset_catalog.artifacts.length > 0 && assets.length === 0 ? <PanelEmpty text="没有符合当前搜索或类型筛选的素材。" /> : null}
     </>
   );
 }
