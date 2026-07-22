@@ -42,7 +42,10 @@ dist/package/
           index.js
     runtimes/
       node/
-        node(.exe)  # optional until production bundling is finalized
+        node(.exe)
+      ffmpeg/       # planned
+        ffmpeg(.exe)
+        ffprobe(.exe)
 ```
 
 Runtime data should live outside app resources:
@@ -114,10 +117,14 @@ Go resolves it from the resource manifest:
 resources/sidecars/video-worker/dist/index.js
 ```
 
-Production installers must provide the worker runtime or a bundled
-Node-compatible executable so users do not need to install Node manually.
-Go will prefer `NODE_BINARY_PATH`, then a bundled `resources/runtimes/node`
-binary, then system `node`.
+The current Windows package copies the build-time Node executable into
+`resources/runtimes/node/node.exe`, records it in `desktop-runtime.json`, and the
+Go runtime resolves it before falling back to system `node`. Users should not
+need to install Node manually for the packaged video-worker sidecar.
+
+FFmpeg/ffprobe are still planned runtime assets. Until those are bundled, video
+rendering flows that require FFmpeg may need explicit `CASCADE_FFMPEG_PATH` and
+`CASCADE_FFPROBE_PATH` configuration or will use existing fallback behavior.
 
 ## Data Boundary
 
@@ -157,4 +164,4 @@ The current installer is unsigned and per-user. The filename intentionally uses
 elevation heuristics for this non-admin installer. It is suitable for internal
 download/install smoke testing, while production release still needs an embedded
 Windows application manifest, code signing, installer UI polish, bundled
-Node/FFmpeg strategy, and auto-update policy.
+FFmpeg strategy, and auto-update policy.

@@ -79,6 +79,13 @@ writeJSON(releaseManifest, {
     sha256: payloadSHA256,
     size_bytes: payload.length,
   },
+  runtimes: {
+    node: {
+      path: "resources/runtimes/node/node.exe",
+      source: "bundled",
+      required_for: ["video-worker"],
+    },
+  },
   install_behavior: {
     default_scope: "per_user",
     default_install_dir: "%LOCALAPPDATA%/Programs/CascadeDemoOps",

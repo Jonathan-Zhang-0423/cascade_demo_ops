@@ -20,6 +20,7 @@ assertFile(releaseManifestPath, "release manifest");
 const manifest = JSON.parse(readFileSync(releaseManifestPath, "utf8"));
 assert(manifest.schema_version === "demoops.desktop_package_manifest.v1", "unexpected manifest schema");
 assert(manifest.package_kind === "portable_zip", "desktop package must be portable_zip");
+assert(manifest.runtimes?.node?.path === "resources/runtimes/node/node.exe", "desktop package manifest must include bundled node runtime");
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assert(Array.isArray(manifest.server_connectivity?.reserved_interfaces), "server reserved interfaces are required");
 for (const name of ["ExchangeCapabilityResolver", "ExchangeIdentityStore", "ExchangeSessionManager", "CloudLifecycleClient"]) {
@@ -36,6 +37,7 @@ for (const required of [
   "cascade-demoops-desktop.exe",
   "package-manifest.json",
   "resources/desktop-runtime.json",
+  "resources/runtimes/node/node.exe",
   "resources/web/index.html",
   "resources/sidecars/video-worker/dist/index.js",
 ]) {
@@ -49,6 +51,7 @@ expandZip(zipPath, smokeRoot);
 const entrypoint = resolve(smokeRoot, manifest.entrypoint || "cascade-demoops-desktop.exe");
 assertFile(entrypoint, "desktop entrypoint");
 assertFile(resolve(smokeRoot, manifest.resource_manifest || "resources/desktop-runtime.json"), "desktop runtime manifest");
+assertFile(resolve(smokeRoot, "resources", "runtimes", "node", "node.exe"), "bundled node runtime");
 
 const result = spawnSync(entrypoint, ["--check"], {
   cwd: smokeRoot,
@@ -86,6 +89,8 @@ try {
   assert(index.includes("<!doctype html>") || index.includes("<div id=\"root\"></div>"), "desktop host did not serve packaged web index");
   const health = JSON.parse(httpGet(`${hostPayload.url}/v1/desktop/runtime-health`));
   assert(health.ok === true, "desktop host runtime-health failed");
+  assert(health.data?.node_runtime_configured === true, "desktop host did not load bundled node runtime");
+  assert(health.data?.sidecars?.["video-worker"] === true, "desktop host did not load packaged video-worker");
 } finally {
   await terminateChild(host);
 }

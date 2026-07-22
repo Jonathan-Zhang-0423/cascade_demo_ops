@@ -68,6 +68,7 @@ assert(installPayload.installed === true, "setup did not report installed=true")
 assertFile(resolve(installDir, "cascade-demoops-desktop.exe"), "installed desktop entrypoint");
 assertFile(resolve(installDir, "resources", "web", "index.html"), "installed web index");
 assertFile(resolve(installDir, "resources", "desktop-runtime.json"), "installed runtime manifest");
+assertFile(resolve(installDir, "resources", "runtimes", "node", "node.exe"), "installed bundled node runtime");
 assertFile(resolve(installDir, "install-manifest.json"), "install manifest");
 assertFile(resolve(installDir, "Uninstall-CascadeDemoOps.ps1"), "uninstall script");
 
@@ -110,6 +111,8 @@ try {
   assert(index.includes("<!doctype html>") || index.includes("<div id=\"root\"></div>"), "installed desktop host did not serve web index");
   const health = JSON.parse(httpGet(`${hostPayload.url}/v1/desktop/runtime-health`));
   assert(health.ok === true, "installed desktop runtime-health failed");
+  assert(health.data?.node_runtime_configured === true, "installed desktop did not load bundled node runtime");
+  assert(health.data?.sidecars?.["video-worker"] === true, "installed desktop did not load packaged video-worker");
 } finally {
   await terminateChild(host);
 }

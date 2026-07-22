@@ -20,7 +20,7 @@
 - `backend/cmd/desktop`：可初始化 `DesktopBridge`，但目前只输出 JSON ready 信息，还不是窗口应用。
 - `backend/internal/app/DesktopBridge`：提供 UI 可调用的 JSON-safe 方法，覆盖项目创建、执行包、runtime config、exchange 等服务入口。
 - `frontend/web`：React UI，可通过 `VITE_CASCADE_BRIDGE=local` 调本地 dev bridge。
-- `video-worker`：Node sidecar，JSON-RPC stdio 协议，构建产物为 `video-worker/dist/index.js`。
+- `video-worker`：Node sidecar，JSON-RPC stdio 协议，构建产物为 `video-worker/dist/index.js`，Windows package baseline 会携带 build-time `node.exe`。
 - `scripts/package-desktop.mjs`：已能打出资源目录 `dist/package`，包含 Go desktop binary、web dist、video-worker dist 和 `desktop-runtime.json`。
 - `internal/config.AppRuntimeConfig`：已有 `dev / desktop / cloud` profile、用户数据目录、resource manifest 和 sidecar 路径解析。
 
@@ -28,7 +28,7 @@
 
 - 缺桌面壳：尚未接入 Wails/Tauri/Electron 这类窗口宿主。
 - 缺安装器：尚未生成 `.exe/.msi/.dmg` 等用户可安装包。
-- 缺 bundled Node/ffmpeg/ffprobe 策略：video-worker 生产运行依赖仍未完整随包分发。
+- Node runtime 已进入 Windows package baseline；ffmpeg/ffprobe 策略仍待补齐。
 - 缺原生文件夹选择器：当前仍偏文本路径输入。
 - 缺系统安全存储：模型 key、云端 session、installation private key 仍需要后续接 OS keychain。
 - 缺自动更新、签名、公证、崩溃日志和发布渠道。
@@ -129,7 +129,7 @@ dist/release/
 
 验收：
 
-- 当前 baseline：安装和启动不需要 Go、pnpm；video-worker 运行仍需要 Node runtime 策略后续补齐。
+- 当前 baseline：安装、启动和 video-worker Node runtime 不需要 Go、Node、pnpm；ffmpeg/ffprobe 仍需要后续随包分发。
 - 首次启动能创建 data/artifacts/cache/logs。
 - 卸载不误删用户项目数据，除非用户明确选择清理。
 
@@ -192,7 +192,7 @@ dist/release/
 }
 ```
 
-当前 manifest 只写了 `video-worker` 和 `web`。后续应扩展 `runtimes`，并让 Go runtime 优先读取 manifest，再回退环境变量。
+当前 Windows package manifest 已写入 `node` runtime，Go runtime 会优先读取 manifest，再回退环境变量或系统命令。后续应继续扩展 `ffmpeg` / `ffprobe` runtime key。
 
 ## 本地数据目录
 
@@ -261,7 +261,7 @@ pnpm package:desktop:signed
 
 1. 增加 `backend/cmd/desktop` 的 smoke test，验证 desktop profile 能读取 `dist/package/resources/desktop-runtime.json`。
 2. 扩展 package smoke，覆盖 Desktop Host 首页和 runtime-health。
-3. 扩展 installer smoke，覆盖卸载脚本、Start Menu launcher 和未安装 Node 时的 sidecar 降级提示。
+3. 扩展 installer smoke，覆盖卸载脚本、Start Menu launcher 和 bundled Node sidecar health check。
 4. 扩展 `DesktopResourceManifest` 支持 `ffmpeg` / `ffprobe` runtime key。
 5. 增加前端 `wails` bridge adapter 的类型边界，但先用 mock binding 测。
 6. 引入 Wails app skeleton，绑定 `DesktopBridge.RuntimeConfig()` 作为第一条真实链路。

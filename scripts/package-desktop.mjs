@@ -12,6 +12,8 @@ const videoWorkerDist = resolve("video-worker", "dist");
 const webDist = resolve("frontend", "web", "dist");
 const targetGOOS = process.platform === "win32" ? "windows" : "darwin";
 const desktopExt = targetGOOS === "windows" ? ".exe" : "";
+const nodeBinaryName = targetGOOS === "windows" ? "node.exe" : "node";
+const bundledNodePath = resolve(resourceRoot, "runtimes", "node", nodeBinaryName);
 const desktopBinary = resolve("dist", "desktop", targetGOOS, `cascade-demoops-desktop${desktopExt}`);
 const releaseBaseName = `CascadeDemoOps-${appPackage.version || "0.0.0"}-${targetGOOS}-${process.arch}`;
 const releaseZip = resolve(releaseRoot, `${releaseBaseName}.zip`);
@@ -30,13 +32,18 @@ mkdirSync(resourceRoot, { recursive: true });
 copyIfExists(desktopBinary, resolve(packageRoot, basename(desktopBinary)));
 copyIfExists(videoWorkerDist, resolve(resourceRoot, "sidecars", "video-worker", "dist"));
 copyIfExists(webDist, resolve(resourceRoot, "web"));
+copyIfExists(process.execPath, bundledNodePath);
 const runtimeManifest = {
   app: "Cascade DemoOps",
   resource_contract_version: 1,
   sidecars: {
     "video-worker": "sidecars/video-worker/dist/index.js",
   },
-  runtimes: {},
+  runtimes: existsSync(bundledNodePath)
+    ? {
+        node: `runtimes/node/${nodeBinaryName}`,
+      }
+    : {},
   web: "web",
 };
 writeJSON(resolve(resourceRoot, "desktop-runtime.json"), runtimeManifest);
@@ -83,6 +90,19 @@ function buildPackageManifest() {
     created_at: new Date().toISOString(),
     entrypoint: slash(basename(desktopBinary)),
     resource_manifest: "resources/desktop-runtime.json",
+    runtimes: {
+      node: existsSync(bundledNodePath)
+        ? {
+            path: slash(relative(packageRoot, bundledNodePath)),
+            source: "bundled",
+            required_for: ["video-worker"],
+          }
+        : {
+            path: "",
+            source: "system",
+            required_for: ["video-worker"],
+          },
+    },
     server_connectivity: {
       required_for_local_generation: false,
       reserved_interfaces: [
