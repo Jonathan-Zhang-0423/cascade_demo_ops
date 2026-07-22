@@ -85,6 +85,8 @@ revision 保存 + DemoEditPlan 校验
 
 FFmpeg 渲染时将图片循环为目标分辨率和 FPS 的视频帧，同时补入 48kHz 立体声静音音轨，再与录屏片段 concat。因此静态画面可安全插入有声或静音的成片时间线。
 
+Worker 还包含 `renderer-still-e2e.test.ts`：仅在系统可调用 `ffmpeg` 时运行，测试过程会临时生成无业务数据的 1 秒视频和 PNG，验证录屏与静态截图可 concat，最终输出同时含有视频流和音频流。未安装 FFmpeg 时测试必须显示为 `skipped`，不能被记录为真实渲染通过。配置 `CASCADE_FFMPEG_PATH` 后执行 `pnpm --dir video-worker test` 可启用该验收。
+
 ## API
 
 ```text
