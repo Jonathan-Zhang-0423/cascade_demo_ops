@@ -844,12 +844,16 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
 function CodeSummaryPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   const summary = codeSummaryFromWorkspace(workspace);
   const questions = codeInvestigationQuestionsFromWorkspace(workspace);
-  const repoPath = workspace.inputBundle.repositories?.[0]?.local_path;
+  const repositories = workspace.inputBundle.repositories ?? [];
+  const hasLocalRepo = repositories.some((repo) => Boolean(repo.local_path));
+  const hasGitRepo = repositories.some((repo) => Boolean(repo.url));
+  const hasCodeSource = hasLocalRepo || hasGitRepo;
+  const sourceMeta = hasLocalRepo && hasGitRepo ? "CodeReaderAgent · 本地 + GitHub" : hasGitRepo ? "CodeReaderAgent · GitHub" : hasLocalRepo ? "CodeReaderAgent · 本地" : "未提供代码来源";
   return (
     <section className="table-section">
-      <SectionTitle title="代码阅读摘要" meta={repoPath ? "CodeReaderAgent" : "未提供项目根目录"} />
+      <SectionTitle title="代码阅读摘要" meta={sourceMeta} />
       <div className="settings-grid">
-        <Fact label="扫描文件" value={summary.fileCount > 0 ? `${summary.fileCount} 个` : repoPath ? "路径不可读或无可扫描文件" : "未提供"} />
+        <Fact label="扫描文件" value={summary.fileCount > 0 ? `${summary.fileCount} 个` : hasCodeSource ? "代码来源不可读或无可扫描文件" : "未提供"} />
         <Fact label="框架线索" value={summary.frameworks.length > 0 ? summary.frameworks.join("、") : "待识别"} />
         <Fact label="路由/组件" value={`${summary.routes} 个路由 / ${summary.components} 个组件`} />
         <Fact label="Selector" value={`${summary.selectors} 个稳定选择器候选`} />
