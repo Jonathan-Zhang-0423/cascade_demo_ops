@@ -51,6 +51,12 @@ const (
 	idPreviewGroup   = 1024
 	idPreviewHint    = 1025
 	idArtifactStatus = 1026
+	idPreviewSummary = 1027
+	idPreviewContent = 1028
+	idViewMarkdown   = 1029
+	idViewStageJSON  = 1030
+	idViewOutline    = 1031
+	idViewBundle     = 1032
 
 	bnClicked = 0
 )
@@ -88,34 +94,40 @@ type nativeApp struct {
 	service       *app.Service
 	logger        *desktopLogger
 
-	hwnd           syscall.Handle
-	font           uintptr
-	headerTitle    syscall.Handle
-	headerMeta     syscall.Handle
-	engineStatus   syscall.Handle
-	workflowState  syscall.Handle
-	previewTitle   syscall.Handle
-	inputGroup     syscall.Handle
-	inputHint      syscall.Handle
-	sourceHint     syscall.Handle
-	credentialHint syscall.Handle
-	lifecycleGroup syscall.Handle
-	lifecycleHint  syscall.Handle
-	previewGroup   syscall.Handle
-	previewHint    syscall.Handle
-	artifactStatus syscall.Handle
-	productURL     nativeField
-	localRepoPath  nativeField
-	gitRepoURL     nativeField
-	demoUsername   nativeField
-	demoPassword   nativeField
-	requirement    nativeField
-	generateBtn    syscall.Handle
-	saveBtn        syscall.Handle
-	statusList     syscall.Handle
-	markdown       nativeField
-	stageJSON      nativeField
-	outlineJSON    nativeField
+	hwnd            syscall.Handle
+	font            uintptr
+	headerTitle     syscall.Handle
+	headerMeta      syscall.Handle
+	engineStatus    syscall.Handle
+	workflowState   syscall.Handle
+	previewTitle    syscall.Handle
+	inputGroup      syscall.Handle
+	inputHint       syscall.Handle
+	sourceHint      syscall.Handle
+	credentialHint  syscall.Handle
+	lifecycleGroup  syscall.Handle
+	lifecycleHint   syscall.Handle
+	previewGroup    syscall.Handle
+	previewHint     syscall.Handle
+	artifactStatus  syscall.Handle
+	previewSummary  syscall.Handle
+	previewContent  syscall.Handle
+	viewMarkdownBtn syscall.Handle
+	viewStageBtn    syscall.Handle
+	viewOutlineBtn  syscall.Handle
+	viewBundleBtn   syscall.Handle
+	productURL      nativeField
+	localRepoPath   nativeField
+	gitRepoURL      nativeField
+	demoUsername    nativeField
+	demoPassword    nativeField
+	requirement     nativeField
+	generateBtn     syscall.Handle
+	saveBtn         syscall.Handle
+	statusList      syscall.Handle
+	markdown        nativeField
+	stageJSON       nativeField
+	outlineJSON     nativeField
 
 	mu            sync.Mutex
 	generating    bool
@@ -130,12 +142,17 @@ type nativeField struct {
 }
 
 type nativeGenerateResult struct {
-	ProjectID       string `json:"project_id"`
-	Markdown        string `json:"markdown"`
-	StageJSON       string `json:"stage_json"`
-	OutlineJSON     string `json:"outline_json"`
-	BundleJSON      string `json:"bundle_json"`
-	OutputDirectory string `json:"output_directory"`
+	ProjectID         string `json:"project_id"`
+	Markdown          string `json:"markdown"`
+	StageJSON         string `json:"stage_json"`
+	OutlineJSON       string `json:"outline_json"`
+	BundleJSON        string `json:"bundle_json"`
+	OutputDirectory   string `json:"output_directory"`
+	Summary           string `json:"summary"`
+	Runtime           string `json:"runtime"`
+	StageCount        int    `json:"stage_count"`
+	OutlineStageCount int    `json:"outline_stage_count"`
+	BundleHashSuffix  string `json:"bundle_hash_suffix"`
 }
 
 type nativeInput struct {
@@ -235,6 +252,14 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 				app.startGenerate()
 			case idSaveButton:
 				app.saveLastResult()
+			case idViewMarkdown:
+				app.showPreview("markdown")
+			case idViewStageJSON:
+				app.showPreview("stage")
+			case idViewOutline:
+				app.showPreview("outline")
+			case idViewBundle:
+				app.showPreview("bundle")
 			}
 		}
 		return 0
@@ -272,6 +297,12 @@ func (a *nativeApp) createControls() {
 	a.previewTitle = createChild(a.hwnd, "STATIC", "审核三合一包；服务器 Agent 在边界内自适应执行。", wsChild|wsVisible, idPreviewTitle)
 	a.previewHint = createChild(a.hwnd, "STATIC", "Markdown 面向审批，JSON/Outline 面向执行。", wsChild|wsVisible, idPreviewHint)
 	a.artifactStatus = createChild(a.hwnd, "STATIC", "输出目录：尚未生成", wsChild|wsVisible, idArtifactStatus)
+	a.previewSummary = createChild(a.hwnd, "EDIT", "等待生成结果。", wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutoVScroll|esReadOnly, idPreviewSummary)
+	a.viewMarkdownBtn = createChild(a.hwnd, "BUTTON", "Markdown", wsChild|wsVisible|bsPushButton, idViewMarkdown)
+	a.viewStageBtn = createChild(a.hwnd, "BUTTON", "Stage JSON", wsChild|wsVisible|bsPushButton, idViewStageJSON)
+	a.viewOutlineBtn = createChild(a.hwnd, "BUTTON", "Outline", wsChild|wsVisible|bsPushButton, idViewOutline)
+	a.viewBundleBtn = createChild(a.hwnd, "BUTTON", "Full Bundle", wsChild|wsVisible|bsPushButton, idViewBundle)
+	a.previewContent = createChild(a.hwnd, "EDIT", "", wsChild|wsVisible|wsBorder|wsVScroll|wsHScroll|esMultiline|esAutoVScroll|esAutoHScroll|esReadOnly, idPreviewContent)
 	a.productURL = a.labelAndEdit("产品 URL", idProductURL, "https://cascadeai.cn", false, false)
 	a.localRepoPath = a.labelAndEdit("本地项目路径（可选）", idLocalRepoPath, "", false, false)
 	a.gitRepoURL = a.labelAndEdit("GitHub 仓库 URL（可选）", idGitRepoURL, "", false, false)
@@ -281,11 +312,9 @@ func (a *nativeApp) createControls() {
 	a.generateBtn = createChild(a.hwnd, "BUTTON", "生成三合一执行包", wsChild|wsVisible|bsPushButton, idGenerateButton)
 	a.saveBtn = createChild(a.hwnd, "BUTTON", "保存三合一包", wsChild|wsVisible|bsPushButton, idSaveButton)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
-	a.markdown = a.previewBox("1. 项目经理审批 Markdown", idMarkdown)
-	a.stageJSON = a.previewBox("2. Stage Approval Plan JSON", idStageJSON)
-	a.outlineJSON = a.previewBox("3. Browser Agent Script Outline", idOutlineJSON)
 	a.applyDefaultFont()
 	setEnabled(a.saveBtn, false)
+	a.setPreviewButtonsEnabled(false)
 }
 
 func (a *nativeApp) labelAndEdit(label string, id int, value string, password bool, multiline bool) nativeField {
@@ -299,12 +328,6 @@ func (a *nativeApp) labelAndEdit(label string, id int, value string, password bo
 	}
 	handle := createChild(a.hwnd, "EDIT", value, style, id)
 	return nativeField{Label: labelHandle, Edit: handle}
-}
-
-func (a *nativeApp) previewBox(label string, id int) nativeField {
-	labelHandle := createChild(a.hwnd, "STATIC", label, wsChild|wsVisible, 0)
-	editHandle := createChild(a.hwnd, "EDIT", "", wsChild|wsVisible|wsBorder|wsVScroll|wsHScroll|esMultiline|esAutoVScroll|esAutoHScroll|esReadOnly, id)
-	return nativeField{Label: labelHandle, Edit: editHandle}
 }
 
 func (a *nativeApp) layout() {
@@ -360,20 +383,20 @@ func (a *nativeApp) layout() {
 
 	rightX := margin + leftW + gap
 	rightW := maxInt(500, width-rightX-margin)
-	panelGap := 10
 	rightTop := leftTop
 	rightH := maxInt(300, height-rightTop-margin)
 	moveControl(a.previewGroup, rightX, rightTop, rightW, rightH)
 	moveControl(a.previewTitle, rightX+14, rightTop+28, rightW-28, 18)
 	moveControl(a.previewHint, rightX+14, rightTop+50, rightW-28, 18)
 	moveControl(a.artifactStatus, rightX+14, rightTop+72, rightW-28, 18)
-	panelH := maxInt(130, (rightH-122-panelGap*2-22*3)/3)
-	py := rightTop + 98
-	a.layoutPreview(a.markdown, rightX+14, py, rightW-28, panelH)
-	py += panelH + panelGap + 22
-	a.layoutPreview(a.stageJSON, rightX+14, py, rightW-28, panelH)
-	py += panelH + panelGap + 22
-	a.layoutPreview(a.outlineJSON, rightX+14, py, rightW-28, panelH)
+	moveControl(a.previewSummary, rightX+14, rightTop+96, rightW-28, 92)
+	tabTop := rightTop + 198
+	buttonW := 116
+	moveControl(a.viewMarkdownBtn, rightX+14, tabTop, buttonW, 30)
+	moveControl(a.viewStageBtn, rightX+14+buttonW+8, tabTop, buttonW, 30)
+	moveControl(a.viewOutlineBtn, rightX+14+(buttonW+8)*2, tabTop, buttonW, 30)
+	moveControl(a.viewBundleBtn, rightX+14+(buttonW+8)*3, tabTop, buttonW, 30)
+	moveControl(a.previewContent, rightX+14, tabTop+40, rightW-28, maxInt(160, rightH-(tabTop-rightTop)-54))
 }
 
 func (a *nativeApp) layoutField(field nativeField, x int, y int, w int, h int) {
@@ -381,11 +404,6 @@ func (a *nativeApp) layoutField(field nativeField, x int, y int, w int, h int) {
 }
 
 func (a *nativeApp) layoutFieldHeight(field nativeField, x int, y int, w int, h int) {
-	moveControl(field.Label, x, y, w, 18)
-	moveControl(field.Edit, x, y+20, w, h)
-}
-
-func (a *nativeApp) layoutPreview(field nativeField, x int, y int, w int, h int) {
 	moveControl(field.Label, x, y, w, 18)
 	moveControl(field.Edit, x, y+20, w, h)
 }
@@ -472,12 +490,17 @@ func (a *nativeApp) nativeResultFromState(state *orchestrator.CascadeState) (*na
 		markdown = bundle.ApprovalMarkdown.InlineMarkdown
 	}
 	return &nativeGenerateResult{
-		ProjectID:       state.ProjectID,
-		Markdown:        markdown,
-		StageJSON:       stageJSON,
-		OutlineJSON:     outlineJSON,
-		BundleJSON:      bundleJSON,
-		OutputDirectory: filepath.Join(a.runtimeConfig.ArtifactRoot, state.ProjectID),
+		ProjectID:         state.ProjectID,
+		Markdown:          markdown,
+		StageJSON:         stageJSON,
+		OutlineJSON:       outlineJSON,
+		BundleJSON:        bundleJSON,
+		OutputDirectory:   filepath.Join(a.runtimeConfig.ArtifactRoot, state.ProjectID),
+		Summary:           nativeResultSummary(state, bundle, markdown, stageJSON, outlineJSON, bundleJSON),
+		Runtime:           bundle.ScriptManifest.Runtime,
+		StageCount:        stageApprovalStageCount(bundle),
+		OutlineStageCount: outlineStageCount(bundle),
+		BundleHashSuffix:  shortHash(bundle.Reproducibility.BundleHashSHA256),
 	}, nil
 }
 
@@ -494,12 +517,12 @@ func (a *nativeApp) finishGenerate() {
 	}
 	setWindowText(a.generateBtn, "生成三合一执行包")
 	setWindowText(a.workflowState, "审批包已就绪")
-	setWindowText(a.markdown.Edit, result.Markdown)
-	setWindowText(a.stageJSON.Edit, result.StageJSON)
-	setWindowText(a.outlineJSON.Edit, result.OutlineJSON)
 	setWindowText(a.artifactStatus, "输出目录："+result.OutputDirectory)
+	setWindowText(a.previewSummary, result.Summary)
+	setWindowText(a.previewContent, result.Markdown)
 	setEnabled(a.generateBtn, true)
 	setEnabled(a.saveBtn, true)
+	a.setPreviewButtonsEnabled(true)
 	a.addStatus("三合一执行包已生成，可审核或保存。project_id=" + result.ProjectID)
 }
 
@@ -519,6 +542,7 @@ func (a *nativeApp) finishGenerateErrorMessage(message string) {
 	setWindowText(a.workflowState, "生成失败")
 	setEnabled(a.generateBtn, true)
 	setEnabled(a.saveBtn, a.lastResult != nil)
+	a.setPreviewButtonsEnabled(a.lastResult != nil)
 	a.addStatus("生成失败：" + message)
 	messageBox("Cascade DemoOps", message, true)
 }
@@ -557,12 +581,102 @@ func (a *nativeApp) saveLastResult() {
 	messageBox("Cascade DemoOps", "三合一执行包已保存到：\n"+dir, false)
 }
 
+func (a *nativeApp) showPreview(kind string) {
+	a.mu.Lock()
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		return
+	}
+	switch kind {
+	case "stage":
+		setWindowText(a.previewContent, result.StageJSON)
+		setWindowText(a.workflowState, "预览 Stage JSON")
+	case "outline":
+		setWindowText(a.previewContent, result.OutlineJSON)
+		setWindowText(a.workflowState, "预览 Script Outline")
+	case "bundle":
+		setWindowText(a.previewContent, result.BundleJSON)
+		setWindowText(a.workflowState, "预览 Full Bundle")
+	default:
+		setWindowText(a.previewContent, result.Markdown)
+		setWindowText(a.workflowState, "预览 Markdown")
+	}
+}
+
+func (a *nativeApp) setPreviewButtonsEnabled(enabled bool) {
+	setEnabled(a.viewMarkdownBtn, enabled)
+	setEnabled(a.viewStageBtn, enabled)
+	setEnabled(a.viewOutlineBtn, enabled)
+	setEnabled(a.viewBundleBtn, enabled)
+}
+
 func (a *nativeApp) engineStatusText() string {
 	sidecar := "sidecar 待检查"
 	if a.runtimeConfig.NodeBinaryPath != "" {
 		sidecar = "Node/sidecar 已配置"
 	}
 	return fmt.Sprintf("引擎：%s · %s", a.runtimeConfig.Profile, sidecar)
+}
+
+func nativeResultSummary(state *orchestrator.CascadeState, bundle *model.ExecutableRecordingScriptBundle, markdown string, stageJSON string, outlineJSON string, bundleJSON string) string {
+	if state == nil || bundle == nil {
+		return "生成结果不可用。"
+	}
+	lines := []string{
+		"Project ID: " + state.ProjectID,
+		"Runtime: " + firstNonEmptyNative(bundle.ScriptManifest.Runtime, "unknown"),
+		fmt.Sprintf("Stages: approval=%d outline=%d", stageApprovalStageCount(bundle), outlineStageCount(bundle)),
+		fmt.Sprintf("Payload size: markdown=%s stage=%s outline=%s bundle=%s", byteSizeLabel(len(markdown)), byteSizeLabel(len(stageJSON)), byteSizeLabel(len(outlineJSON)), byteSizeLabel(len(bundleJSON))),
+	}
+	if suffix := shortHash(bundle.Reproducibility.BundleHashSHA256); suffix != "" {
+		lines = append(lines, "Bundle hash: ..."+suffix)
+	}
+	if bundle.Validation != nil {
+		lines = append(lines, fmt.Sprintf("Validation: valid=%t findings=%d", bundle.Validation.Valid, len(bundle.Validation.Findings)))
+	}
+	return strings.Join(lines, "\r\n")
+}
+
+func stageApprovalStageCount(bundle *model.ExecutableRecordingScriptBundle) int {
+	if bundle == nil || bundle.StageApprovalPlan == nil {
+		return 0
+	}
+	return len(bundle.StageApprovalPlan.Stages)
+}
+
+func outlineStageCount(bundle *model.ExecutableRecordingScriptBundle) int {
+	if bundle == nil || bundle.ScriptOutline == nil {
+		return 0
+	}
+	return len(bundle.ScriptOutline.Stages)
+}
+
+func byteSizeLabel(size int) string {
+	if size < 1024 {
+		return fmt.Sprintf("%dB", size)
+	}
+	if size < 1024*1024 {
+		return fmt.Sprintf("%.1fKB", float64(size)/1024)
+	}
+	return fmt.Sprintf("%.1fMB", float64(size)/(1024*1024))
+}
+
+func shortHash(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 12 {
+		return value
+	}
+	return value[len(value)-12:]
+}
+
+func firstNonEmptyNative(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (a *nativeApp) addStatus(message string) {
@@ -638,6 +752,12 @@ func (a *nativeApp) applyDefaultFont() {
 		a.previewTitle,
 		a.previewHint,
 		a.artifactStatus,
+		a.previewSummary,
+		a.previewContent,
+		a.viewMarkdownBtn,
+		a.viewStageBtn,
+		a.viewOutlineBtn,
+		a.viewBundleBtn,
 		a.generateBtn,
 		a.saveBtn,
 		a.statusList,
@@ -649,9 +769,6 @@ func (a *nativeApp) applyDefaultFont() {
 		a.demoUsername,
 		a.demoPassword,
 		a.requirement,
-		a.markdown,
-		a.stageJSON,
-		a.outlineJSON,
 	} {
 		handles = append(handles, field.Label, field.Edit)
 	}
