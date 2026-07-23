@@ -73,6 +73,7 @@ const (
 	idPhaseReview       = 1045
 	idInputReadiness    = 1046
 	idCopyPreview       = 1047
+	idExportPackage     = 1048
 
 	bnClicked = 0
 	enChange  = 0x0300
@@ -190,6 +191,7 @@ type nativeApp struct {
 	browseRepoBtn    syscall.Handle
 	importReqBtn     syscall.Handle
 	openOutputBtn    syscall.Handle
+	exportBtn        syscall.Handle
 	openLogBtn       syscall.Handle
 	statusList       syscall.Handle
 	markdown         nativeField
@@ -405,6 +407,7 @@ func (a *nativeApp) createControls() {
 	a.browseRepoBtn = createChild(a.hwnd, "BUTTON", "选择文件夹", wsChild|wsVisible|bsPushButton, idBrowseRepo)
 	a.importReqBtn = createChild(a.hwnd, "BUTTON", "导入文档", wsChild|wsVisible|bsPushButton, idImportRequirement)
 	a.openOutputBtn = createChild(a.hwnd, "BUTTON", "打开输出目录", wsChild|wsVisible|bsPushButton, idOpenOutput)
+	a.exportBtn = createChild(a.hwnd, "BUTTON", "导出到文件夹", wsChild|wsVisible|bsPushButton, idExportPackage)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.applyDefaultFont()
@@ -419,6 +422,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.startGenerate()
 	case idSaveButton:
 		a.saveLastResult()
+	case idExportPackage:
+		a.exportLastResult()
 	case idBrowseRepo:
 		a.chooseLocalRepoPath()
 	case idImportRequirement:
@@ -452,6 +457,7 @@ func (a *nativeApp) createMenu() {
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idGenerateButton, "生成三合一执行包")
 	appendMenuItem(fileMenu, idSaveButton, "保存三合一包")
+	appendMenuItem(fileMenu, idExportPackage, "导出三合一包到文件夹...")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录")
 	appendMenuItem(fileMenu, idOpenLog, "打开诊断日志")
@@ -555,7 +561,8 @@ func (a *nativeApp) layout() {
 	y += 48
 	moveControl(a.generateBtn, x, y, 186, 34)
 	moveControl(a.saveBtn, x+202, y, 190, 34)
-	moveControl(a.openOutputBtn, x, y+42, leftInnerW, 32)
+	moveControl(a.exportBtn, x, y+42, 186, 32)
+	moveControl(a.openOutputBtn, x+202, y+42, 190, 32)
 
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
@@ -770,9 +777,55 @@ func (a *nativeApp) saveLastResult() {
 	if strings.TrimSpace(dir) == "" {
 		dir = filepath.Join(a.runtimeConfig.ArtifactRoot, result.ProjectID)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := writeResultFiles(dir, result); err != nil {
 		a.addStatus("保存失败：" + err.Error())
 		return
+	}
+	a.addStatus("已保存到 " + dir)
+	setWindowText(a.workflowState, "已保存三合一包")
+	setWindowText(a.artifactStatus, "已保存："+dir)
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已保存")
+	setEnabled(a.openOutputBtn, true)
+	messageBox("Cascade DemoOps", "三合一执行包已保存到：\n"+dir, false)
+}
+
+func (a *nativeApp) exportLastResult() {
+	a.mu.Lock()
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可导出的执行包。")
+		return
+	}
+	dir, err := browseForFolder(a.hwnd, "选择三合一包导出文件夹")
+	if err != nil {
+		a.addStatus("导出文件夹选择失败：" + err.Error())
+		return
+	}
+	if strings.TrimSpace(dir) == "" {
+		return
+	}
+	if err := writeResultFiles(dir, result); err != nil {
+		a.addStatus("导出失败：" + err.Error())
+		messageBox("Cascade DemoOps", "导出三合一包失败：\n"+err.Error(), true)
+		return
+	}
+	a.addStatus("已导出到 " + dir)
+	setWindowText(a.workflowState, "已导出三合一包")
+	setWindowText(a.artifactStatus, "已导出："+dir)
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已导出")
+	messageBox("Cascade DemoOps", "三合一执行包已导出到：\n"+dir, false)
+}
+
+func writeResultFiles(dir string, result *nativeGenerateResult) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("output directory is empty")
+	}
+	if result == nil {
+		return errors.New("result is empty")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
 	}
 	files := map[string]string{
 		"approval_markdown.md":         result.Markdown,
@@ -782,16 +835,10 @@ func (a *nativeApp) saveLastResult() {
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content+"\n"), 0o644); err != nil {
-			a.addStatus("保存失败：" + err.Error())
-			return
+			return err
 		}
 	}
-	a.addStatus("已保存到 " + dir)
-	setWindowText(a.workflowState, "已保存三合一包")
-	setWindowText(a.artifactStatus, "已保存："+dir)
-	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已保存")
-	setEnabled(a.openOutputBtn, true)
-	messageBox("Cascade DemoOps", "三合一执行包已保存到：\n"+dir, false)
+	return nil
 }
 
 func (a *nativeApp) chooseLocalRepoPath() {
@@ -1063,13 +1110,14 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	setEnabled(a.saveBtn, !generating && hasResult)
 	setEnabled(a.browseRepoBtn, !generating)
 	setEnabled(a.importReqBtn, !generating)
+	setEnabled(a.exportBtn, !generating && hasResult)
 	setEnabled(a.openOutputBtn, !generating && hasResult)
 	setEnabled(a.openLogBtn, true)
 	a.setPreviewButtonsEnabled(!generating && hasResult)
 	a.enableMenuItem(idGenerateButton, generateEnabled)
 	a.enableMenuItem(idBrowseRepo, !generating)
 	a.enableMenuItem(idImportRequirement, !generating)
-	for _, id := range []int{idSaveButton, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
+	for _, id := range []int{idSaveButton, idExportPackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
 		a.enableMenuItem(id, !generating && hasResult)
 	}
 	a.enableMenuItem(idCopyPreview, !generating && hasResult)
@@ -1310,6 +1358,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.saveBtn,
 		a.browseRepoBtn,
 		a.importReqBtn,
+		a.exportBtn,
 		a.openOutputBtn,
 		a.openLogBtn,
 		a.statusList,
