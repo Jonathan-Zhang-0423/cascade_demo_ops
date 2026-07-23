@@ -82,6 +82,7 @@ const (
 	idViewReview        = 1054
 	idApprovePackage    = 1055
 	idImportPackage     = 1056
+	idOpenPreviewFile   = 1057
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -193,6 +194,7 @@ type nativeApp struct {
 	viewBundleBtn    syscall.Handle
 	viewReviewBtn    syscall.Handle
 	copyPreviewBtn   syscall.Handle
+	openPreviewBtn   syscall.Handle
 	recentLabel      syscall.Handle
 	recentPackage    syscall.Handle
 	openRecentBtn    syscall.Handle
@@ -450,6 +452,7 @@ func (a *nativeApp) createControls() {
 	a.viewOutlineBtn = createChild(a.hwnd, "BUTTON", "Outline", wsChild|wsVisible|bsPushButton, idViewOutline)
 	a.viewBundleBtn = createChild(a.hwnd, "BUTTON", "Full Bundle", wsChild|wsVisible|bsPushButton, idViewBundle)
 	a.copyPreviewBtn = createChild(a.hwnd, "BUTTON", "复制", wsChild|wsVisible|bsPushButton, idCopyPreview)
+	a.openPreviewBtn = createChild(a.hwnd, "BUTTON", "打开文件", wsChild|wsVisible|bsPushButton, idOpenPreviewFile)
 	a.previewContent = createChild(a.hwnd, "EDIT", "", wsChild|wsVisible|wsBorder|wsVScroll|wsHScroll|esMultiline|esAutoVScroll|esAutoHScroll|esReadOnly, idPreviewContent)
 	a.productURL = a.labelAndEdit("产品 URL", idProductURL, "https://cascadeai.cn", false, false)
 	a.localRepoPath = a.labelAndEdit("本地项目路径（可选）", idLocalRepoPath, "", false, false)
@@ -519,6 +522,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.showPreview("bundle")
 	case idCopyPreview:
 		a.copyCurrentPreview()
+	case idOpenPreviewFile:
+		a.openCurrentPreviewFile()
 	case idMenuExit:
 		procPostMessageW.Call(uintptr(a.hwnd), wmClose, 0, 0)
 	}
@@ -537,7 +542,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return !generating && a.inputReady()
 	case idBrowseRepo, idImportRequirement, idImportPackage, idClearDraft:
 		return !generating
-	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview:
+	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile:
 		return !generating && hasResult
 	case idOpenRecentPackage:
 		return !generating && hasRecent
@@ -573,6 +578,7 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(viewMenu, idViewBundle, "预览 Full Bundle\tCtrl+5")
 	appendMenuSeparator(viewMenu)
 	appendMenuItem(viewMenu, idCopyPreview, "复制当前预览\tCtrl+Shift+C")
+	appendMenuItem(viewMenu, idOpenPreviewFile, "打开当前预览文件\tCtrl+Shift+F")
 	appendMenuItem(helpMenu, idOpenLog, "诊断日志")
 	appendSubMenu(mainMenu, fileMenu, "文件")
 	appendSubMenu(mainMenu, viewMenu, "视图")
@@ -601,6 +607,7 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fControl, Key: '4', Cmd: idViewOutline},
 		{FVirt: fVirtKey | fControl, Key: '5', Cmd: idViewBundle},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'C', Cmd: idCopyPreview},
+		{FVirt: fVirtKey | fControl | fShift, Key: 'F', Cmd: idOpenPreviewFile},
 	}
 	handle, _, _ := procCreateAcceleratorTbl.Call(uintptr(unsafe.Pointer(&accels[0])), uintptr(len(accels)))
 	a.accelTable = syscall.Handle(handle)
@@ -733,13 +740,15 @@ func (a *nativeApp) layout() {
 	moveControl(a.previewSummary, rightX+14, summaryTop, rightW-28, summaryH)
 	tabTop := summaryTop + summaryH + 12
 	copyW := 72
-	buttonW := maxInt(72, (rightW-28-copyW-healthGap*5)/5)
+	openPreviewW := 88
+	buttonW := maxInt(64, (rightW-28-copyW-openPreviewW-healthGap*6)/5)
 	moveControl(a.viewReviewBtn, rightX+14, tabTop, buttonW, 30)
 	moveControl(a.viewMarkdownBtn, rightX+14+buttonW+healthGap, tabTop, buttonW, 30)
 	moveControl(a.viewStageBtn, rightX+14+(buttonW+healthGap)*2, tabTop, buttonW, 30)
 	moveControl(a.viewOutlineBtn, rightX+14+(buttonW+healthGap)*3, tabTop, buttonW, 30)
 	moveControl(a.viewBundleBtn, rightX+14+(buttonW+healthGap)*4, tabTop, buttonW, 30)
-	moveControl(a.copyPreviewBtn, rightX+rightW-14-copyW, tabTop, copyW, 30)
+	moveControl(a.copyPreviewBtn, rightX+rightW-14-openPreviewW-healthGap-copyW, tabTop, copyW, 30)
+	moveControl(a.openPreviewBtn, rightX+rightW-14-openPreviewW, tabTop, openPreviewW, 30)
 	moveControl(a.previewContent, rightX+14, tabTop+40, rightW-28, maxInt(160, rightH-(tabTop-rightTop)-54))
 	moveControl(a.statusBar, margin, height-margin-statusBarH, maxInt(300, width-margin*2), statusBarH)
 }
@@ -1130,6 +1139,19 @@ func resultFilesExist(dir string) bool {
 	return false
 }
 
+func previewFileName(kind string) (string, string) {
+	switch kind {
+	case "stage":
+		return "stage_approval_plan.json", "Stage JSON"
+	case "outline":
+		return "script_outline.json", "Script Outline"
+	case "bundle":
+		return "client_execution_bundle.json", "Full Bundle"
+	default:
+		return "approval_markdown.md", "Markdown"
+	}
+}
+
 func (a *nativeApp) chooseLocalRepoPath() {
 	path, err := browseForFolder(a.hwnd, "选择本地项目文件夹")
 	if err != nil {
@@ -1307,12 +1329,44 @@ func (a *nativeApp) copyCurrentPreview() {
 	a.addStatus("已复制当前预览：" + label)
 }
 
+func (a *nativeApp) openCurrentPreviewFile() {
+	a.mu.Lock()
+	result := a.lastResult
+	kind := a.currentPreview
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可打开的审批文件。")
+		return
+	}
+	fileName, label := previewFileName(kind)
+	if fileName == "" {
+		fileName, label = previewFileName("markdown")
+	}
+	dir := strings.TrimSpace(result.OutputDirectory)
+	if dir == "" {
+		dir = filepath.Join(a.runtimeConfig.ArtifactRoot, result.ProjectID)
+	}
+	if err := writeResultFiles(dir, result); err != nil {
+		a.addStatus("打开当前文件前保存失败：" + err.Error())
+		messageBox("Cascade DemoOps", "打开当前预览文件失败：\n"+err.Error(), true)
+		return
+	}
+	path := filepath.Join(dir, fileName)
+	if err := openFile(path); err != nil {
+		a.addStatus("打开当前文件失败：" + err.Error())
+		messageBox("Cascade DemoOps", "打开当前预览文件失败：\n"+err.Error(), true)
+		return
+	}
+	a.addStatus("已打开当前预览文件：" + label)
+}
+
 func (a *nativeApp) setPreviewButtonsEnabled(enabled bool) {
 	setEnabled(a.viewMarkdownBtn, enabled)
 	setEnabled(a.viewStageBtn, enabled)
 	setEnabled(a.viewOutlineBtn, enabled)
 	setEnabled(a.viewBundleBtn, enabled)
 	setEnabled(a.copyPreviewBtn, enabled)
+	setEnabled(a.openPreviewBtn, enabled)
 }
 
 func (a *nativeApp) isInputField(id int) bool {
@@ -1697,7 +1751,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.enableMenuItem(idImportRequirement, !generating)
 	a.enableMenuItem(idImportPackage, !generating)
 	a.enableMenuItem(idClearDraft, !generating)
-	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
+	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
 		a.enableMenuItem(id, !generating && hasResult)
 	}
 	a.enableMenuItem(idCopyPreview, !generating && hasResult)
@@ -2185,6 +2239,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.viewOutlineBtn,
 		a.viewBundleBtn,
 		a.copyPreviewBtn,
+		a.openPreviewBtn,
 		a.generateBtn,
 		a.saveBtn,
 		a.browseRepoBtn,

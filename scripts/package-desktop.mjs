@@ -115,6 +115,7 @@ function buildPackageManifest() {
         "stage_plan_review",
         "script_outline_review",
         "native_approval_clipboard_copy",
+        "native_approval_file_open",
         "three_in_one_package_save",
         "native_package_folder_import",
         "native_package_folder_export",
