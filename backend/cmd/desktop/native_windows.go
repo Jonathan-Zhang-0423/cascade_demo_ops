@@ -90,6 +90,8 @@ const (
 	idFetchServerResult = 1060
 	idAckServerResult   = 1061
 	idDownloadArtifacts = 1062
+	idOpenDeliverables  = 1063
+	idOpenPrimaryAsset  = 1064
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -226,6 +228,8 @@ type nativeApp struct {
 	fetchResultBtn   syscall.Handle
 	ackResultBtn     syscall.Handle
 	downloadBtn      syscall.Handle
+	openAssetsBtn    syscall.Handle
+	openPrimaryBtn   syscall.Handle
 	clearDraftBtn    syscall.Handle
 	openLogBtn       syscall.Handle
 	statusList       syscall.Handle
@@ -653,6 +657,8 @@ func (a *nativeApp) createControls() {
 	a.fetchResultBtn = createChild(a.hwnd, "BUTTON", "获取结果包", wsChild|wsVisible|bsPushButton, idFetchServerResult)
 	a.ackResultBtn = createChild(a.hwnd, "BUTTON", "确认交付 ACK", wsChild|wsVisible|bsPushButton, idAckServerResult)
 	a.downloadBtn = createChild(a.hwnd, "BUTTON", "下载产物并校验", wsChild|wsVisible|bsPushButton, idDownloadArtifacts)
+	a.openAssetsBtn = createChild(a.hwnd, "BUTTON", "打开产物目录", wsChild|wsVisible|bsPushButton, idOpenDeliverables)
+	a.openPrimaryBtn = createChild(a.hwnd, "BUTTON", "打开主产物", wsChild|wsVisible|bsPushButton, idOpenPrimaryAsset)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.statusBar = createChild(a.hwnd, "STATIC", a.statusBarText(""), wsChild|wsVisible|wsBorder, idStatusBar)
@@ -687,6 +693,10 @@ func (a *nativeApp) handleCommand(id int) {
 		a.downloadServerArtifacts()
 	case idAckServerResult:
 		a.ackServerResult()
+	case idOpenDeliverables:
+		a.openDownloadedArtifactsFolder()
+	case idOpenPrimaryAsset:
+		a.openPrimaryDownloadedArtifact()
 	case idClearDraft:
 		a.clearInputDraft()
 	case idBrowseRepo:
@@ -739,7 +749,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return !busy && a.inputReady()
 	case idBrowseRepo, idImportRequirement, idImportPackage, idClearDraft:
 		return !busy
-	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved, idQueryServerStatus, idFetchServerResult, idDownloadArtifacts, idAckServerResult:
+	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved, idQueryServerStatus, idFetchServerResult, idDownloadArtifacts, idAckServerResult, idOpenDeliverables, idOpenPrimaryAsset:
 		return !busy && hasResult
 	case idOpenRecentPackage:
 		return !busy && hasRecent
@@ -767,6 +777,8 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(fileMenu, idFetchServerResult, "获取服务器结果包\tCtrl+Alt+R")
 	appendMenuItem(fileMenu, idDownloadArtifacts, "下载服务器产物并校验\tCtrl+Alt+D")
 	appendMenuItem(fileMenu, idAckServerResult, "确认服务器交付 ACK\tCtrl+Alt+A")
+	appendMenuItem(fileMenu, idOpenDeliverables, "打开服务器产物目录\tCtrl+Alt+O")
+	appendMenuItem(fileMenu, idOpenPrimaryAsset, "打开主产物\tCtrl+Alt+P")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录\tCtrl+Shift+O")
 	appendMenuItem(fileMenu, idOpenRecentPackage, "打开最近三合一包\tCtrl+Shift+R")
@@ -805,6 +817,8 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fAlt, Key: 'R', Cmd: idFetchServerResult},
 		{FVirt: fVirtKey | fAlt, Key: 'D', Cmd: idDownloadArtifacts},
 		{FVirt: fVirtKey | fAlt, Key: 'A', Cmd: idAckServerResult},
+		{FVirt: fVirtKey | fAlt, Key: 'O', Cmd: idOpenDeliverables},
+		{FVirt: fVirtKey | fAlt, Key: 'P', Cmd: idOpenPrimaryAsset},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'O', Cmd: idOpenOutput},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'R', Cmd: idOpenRecentPackage},
 		{FVirt: fVirtKey | fControl, Key: 'L', Cmd: idOpenLog},
@@ -871,7 +885,7 @@ func (a *nativeApp) layout() {
 	y := leftTop + 34
 	rowH := 30
 	leftInnerW := leftW - 28
-	inputH := 626
+	inputH := 666
 	statusTop := leftTop + inputH + 12
 	statusH := maxInt(150, contentBottom-statusTop)
 
@@ -914,7 +928,9 @@ func (a *nativeApp) layout() {
 	moveControl(a.queryStatusBtn, x+202, y+120, 190, 32)
 	moveControl(a.fetchResultBtn, x, y+158, 190, 32)
 	moveControl(a.downloadBtn, x+202, y+158, 190, 32)
-	moveControl(a.ackResultBtn, x, y+196, leftInnerW, 32)
+	moveControl(a.openAssetsBtn, x, y+196, 190, 32)
+	moveControl(a.openPrimaryBtn, x+202, y+196, 190, 32)
+	moveControl(a.ackResultBtn, x, y+234, leftInnerW, 32)
 
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
@@ -1772,6 +1788,58 @@ func (a *nativeApp) postArtifactDownloadError(message string) {
 	a.pendingError = message
 	a.mu.Unlock()
 	procPostMessageW.Call(uintptr(a.hwnd), wmAppArtifactsFailed, 0, 0)
+}
+
+func (a *nativeApp) openDownloadedArtifactsFolder() {
+	a.mu.Lock()
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可打开的服务器产物目录。")
+		return
+	}
+	dir := nativeResultOutputDir(result, a.runtimeConfig.ArtifactRoot)
+	if _, err := readArtifactDownloadManifest(dir); err != nil {
+		a.addStatus("打开服务器产物目录被阻止：" + err.Error())
+		messageBox("Cascade DemoOps", "请先执行“下载产物并校验”。\n\n详情："+err.Error(), true)
+		return
+	}
+	path := serverDeliverablesDir(dir)
+	if err := openFolder(path); err != nil {
+		a.addStatus("打开服务器产物目录失败：" + err.Error())
+		messageBox("Cascade DemoOps", "打开服务器产物目录失败：\n"+err.Error(), true)
+		return
+	}
+	a.addStatus("已打开服务器产物目录：" + path)
+}
+
+func (a *nativeApp) openPrimaryDownloadedArtifact() {
+	a.mu.Lock()
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可打开的主产物。")
+		return
+	}
+	dir := nativeResultOutputDir(result, a.runtimeConfig.ArtifactRoot)
+	manifest, err := readArtifactDownloadManifest(dir)
+	if err != nil {
+		a.addStatus("打开主产物被阻止：" + err.Error())
+		messageBox("Cascade DemoOps", "请先执行“下载产物并校验”。\n\n详情："+err.Error(), true)
+		return
+	}
+	artifact, ok := primaryDownloadedArtifact(manifest)
+	if !ok {
+		a.addStatus("没有找到可打开的主产物。")
+		messageBox("Cascade DemoOps", "下载清单中没有找到可打开的主产物。", true)
+		return
+	}
+	if err := openFile(artifact.LocalPath); err != nil {
+		a.addStatus("打开主产物失败：" + err.Error())
+		messageBox("Cascade DemoOps", "打开主产物失败：\n"+err.Error(), true)
+		return
+	}
+	a.addStatus("已打开主产物：" + artifact.LocalPath)
 }
 
 func (a *nativeApp) ackServerResult() {
@@ -2949,6 +3017,8 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	setEnabled(a.queryStatusBtn, !busy && hasResult)
 	setEnabled(a.fetchResultBtn, !busy && hasResult)
 	setEnabled(a.downloadBtn, !busy && hasResult)
+	setEnabled(a.openAssetsBtn, !busy && hasResult)
+	setEnabled(a.openPrimaryBtn, !busy && hasResult)
 	setEnabled(a.ackResultBtn, !busy && hasResult)
 	setEnabled(a.openOutputBtn, !busy && hasResult)
 	setEnabled(a.openRecentBtn, recentEnabled)
@@ -2959,7 +3029,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.enableMenuItem(idImportRequirement, !busy)
 	a.enableMenuItem(idImportPackage, !busy)
 	a.enableMenuItem(idClearDraft, !busy)
-	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idUploadApproved, idQueryServerStatus, idFetchServerResult, idDownloadArtifacts, idAckServerResult, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
+	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idUploadApproved, idQueryServerStatus, idFetchServerResult, idDownloadArtifacts, idOpenDeliverables, idOpenPrimaryAsset, idAckServerResult, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
 		a.enableMenuItem(id, !busy && hasResult)
 	}
 	a.enableMenuItem(idCopyPreview, !busy && hasResult)
@@ -3690,8 +3760,43 @@ func artifactDownloadSummary(manifest nativeArtifactDownloadManifest) string {
 			lines = append(lines, fmt.Sprintf("- %s [%s] %s %s", firstNonEmptyNative(artifact.ArtifactID, "artifact"), firstNonEmptyNative(artifact.Kind, artifact.Role, "deliverable"), byteSizeLabel(int(artifact.SizeBytes)), status))
 		}
 	}
+	if primary, ok := primaryDownloadedArtifact(manifest); ok {
+		lines = append(lines, "Primary artifact: "+primary.LocalPath)
+	}
 	lines = append(lines, "", "Manifest: "+serverDeliverablesManifestPath(manifest.OutputDirectory), "Next: checksum 全部通过后可执行“确认交付 ACK”。")
 	return strings.Join(lines, "\r\n")
+}
+
+func primaryDownloadedArtifact(manifest nativeArtifactDownloadManifest) (app.CloudDeliverableDownloadResult, bool) {
+	if len(manifest.Artifacts) == 0 {
+		return app.CloudDeliverableDownloadResult{}, false
+	}
+	pick := func(predicate func(app.CloudDeliverableDownloadResult) bool) (app.CloudDeliverableDownloadResult, bool) {
+		for _, artifact := range manifest.Artifacts {
+			if strings.TrimSpace(artifact.LocalPath) == "" {
+				continue
+			}
+			if predicate(artifact) {
+				return artifact, true
+			}
+		}
+		return app.CloudDeliverableDownloadResult{}, false
+	}
+	if artifact, ok := pick(func(artifact app.CloudDeliverableDownloadResult) bool {
+		return strings.EqualFold(artifact.Kind, "demo_video") || strings.EqualFold(artifact.Role, "demo_video")
+	}); ok {
+		return artifact, true
+	}
+	if artifact, ok := pick(func(artifact app.CloudDeliverableDownloadResult) bool {
+		mimeType := strings.ToLower(strings.TrimSpace(artifact.MimeType))
+		return strings.HasPrefix(mimeType, "video/")
+	}); ok {
+		return artifact, true
+	}
+	if artifact, ok := pick(func(app.CloudDeliverableDownloadResult) bool { return true }); ok {
+		return artifact, true
+	}
+	return app.CloudDeliverableDownloadResult{}, false
 }
 
 func resultDeliveryLabel(result model.RecordingResultPackage) string {
@@ -3915,6 +4020,8 @@ func (a *nativeApp) applyDefaultFont() {
 		a.fetchResultBtn,
 		a.ackResultBtn,
 		a.downloadBtn,
+		a.openAssetsBtn,
+		a.openPrimaryBtn,
 		a.openOutputBtn,
 		a.openLogBtn,
 		a.statusList,

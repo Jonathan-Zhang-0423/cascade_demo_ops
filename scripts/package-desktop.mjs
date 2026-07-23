@@ -121,6 +121,8 @@ function buildPackageManifest() {
         "native_server_result_ack",
         "native_server_artifact_download",
         "native_server_artifact_checksum_verify",
+        "native_server_artifact_open_folder",
+        "native_server_primary_artifact_open",
         "stage_plan_review",
         "script_outline_review",
         "native_approval_clipboard_copy",
