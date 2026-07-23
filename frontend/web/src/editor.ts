@@ -28,6 +28,70 @@ export type EditorArtifact = {
   metadata?: Record<string, unknown>;
 };
 
+export type VideoStyleOutput = {
+  aspect_ratio: string;
+  width: number;
+  height: number;
+  fps: number;
+  target_duration_ms: number;
+  min_duration_ms: number;
+  max_duration_ms: number;
+};
+
+export type VideoStylePresentation = {
+  pacing: string;
+  transition_style: string;
+  color_direction: string;
+  caption_mode: string;
+  max_caption_chars: number;
+  source_volume_percent: number;
+  narration_preferred: boolean;
+  allow_presentation_still: boolean;
+};
+
+export type VideoStyleTemplate = {
+  schema_version: string;
+  template_id: string;
+  name: string;
+  summary: string;
+  category: string;
+  output: VideoStyleOutput;
+  presentation: VideoStylePresentation;
+  constraints: { existing_assets_only: boolean; preserve_required_step_order: boolean; allowed_operations: string[]; unavailable_effects?: string[] };
+};
+
+export type EditorStyleDraftWarning = { code: string; message: string };
+
+export type EditorStyleDraft = {
+  schema_version: string;
+  draft_id: string;
+  session_id: string;
+  base_revision: number;
+  prompt?: string;
+  template: VideoStyleTemplate;
+  style_profile: {
+    source: string;
+    analysis_status: string;
+    confidence?: number;
+    reference?: { asset_id: string; user_declared_rights: boolean; content_copied: boolean };
+    unsupported_features?: Array<{ feature: string; status: string; reason: string }>;
+  };
+  proposed_edit_plan: EditorPlan;
+  proposed_preview_profile: EditorSession["preview_profile"];
+  proposed_final_profile: EditorSession["final_profile"];
+  validation?: EditorValidationReport;
+  requires_confirmation: boolean;
+  warnings?: EditorStyleDraftWarning[];
+};
+
+export type EditorStyleDraftRequest = {
+  expected_revision: number;
+  prompt?: string;
+  template_id?: string;
+  reference_asset_id?: string;
+  reference_rights_confirmed: boolean;
+};
+
 export type EditorTimelineStep = {
   step_id: string;
   order: number;
@@ -124,6 +188,19 @@ export type EditorProviderCapability = {
   can_represent_business_step: boolean;
 };
 
+export type EditorAutomationSummary = {
+	 source_package_id?: string;
+	 execution_runtime?: string;
+	 validation_state: "result_only" | "verified" | "blocked" | "repaired_or_review" | "legacy_result" | string;
+	 latest_decision?: "continue" | "repair_allowed" | "stop_and_report" | "reunderstanding_required";
+	 validation_report_count: number;
+	 evidence_backed_report_count: number;
+	 patch_count: number;
+	 applied_patch_count: number;
+	 rolled_back_patch_count: number;
+	 stage_event_audit_available: boolean;
+};
+
 export type EditorSession = {
   schema_version: string;
   session_id: string;
@@ -152,6 +229,7 @@ export type EditorSession = {
   preview: EditorRenderState;
   final_render: EditorRenderState;
   provider_capabilities: EditorProviderCapability[];
+	 automation?: EditorAutomationSummary;
 };
 
 export type EditorClientResult<T> = { ok: boolean; data?: T; error?: string };
@@ -164,6 +242,11 @@ export type EditorClient = {
   getSession(sessionID: string): Promise<EditorClientResult<EditorSession>>;
   importAsset(sessionID: string, sourcePath: string): Promise<EditorClientResult<EditorSession>>;
   uploadAsset(sessionID: string, file: File): Promise<EditorClientResult<EditorSession>>;
+  importStyleReference(sessionID: string, sourcePath: string): Promise<EditorClientResult<EditorSession>>;
+  uploadStyleReference(sessionID: string, file: File): Promise<EditorClientResult<EditorSession>>;
+  listStyleTemplates(): Promise<EditorClientResult<VideoStyleTemplate[]>>;
+  createStyleDraft(sessionID: string, request: EditorStyleDraftRequest): Promise<EditorClientResult<EditorStyleDraft>>;
+  applyStyleDraft(sessionID: string, draftID: string, expectedRevision: number): Promise<EditorClientResult<EditorSession>>;
   savePlan(sessionID: string, expectedRevision: number, plan: EditorPlan): Promise<EditorClientResult<EditorSession>>;
   validate(sessionID: string): Promise<EditorClientResult<EditorValidationReport>>;
   preview(sessionID: string): Promise<EditorClientResult<EditorSession>>;
@@ -204,6 +287,18 @@ export function createEditorClient(): EditorClient {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   };
+  const uploadStyleReference = async (sessionID: string, file: File): Promise<EditorClientResult<EditorSession>> => {
+    try {
+      const form = new FormData();
+      form.append("file", file, file.name);
+      const response = await fetch(`${baseURL}/v1/editor/sessions/${encodeURIComponent(sessionID)}/style-references/uploads`, { method: "POST", body: form });
+      const payload = (await response.json()) as BridgeEnvelope<EditorSession>;
+      if (!response.ok || !payload.ok || payload.data === undefined) return { ok: false, error: payload.error || `HTTP ${response.status}` };
+      return { ok: true, data: payload.data };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
   return {
     mode: "local",
     listSessions: () => request<EditorSession[]>("/v1/editor/sessions"),
@@ -228,6 +323,11 @@ export function createEditorClient(): EditorClient {
         body: JSON.stringify({ path: sourcePath }),
       }),
     uploadAsset: upload,
+    importStyleReference: (sessionID, sourcePath) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/style-references/assets`, { method: "POST", body: JSON.stringify({ path: sourcePath }) }),
+    uploadStyleReference,
+    listStyleTemplates: () => request<VideoStyleTemplate[]>("/v1/editor/style-templates"),
+    createStyleDraft: (sessionID, styleRequest) => request<EditorStyleDraft>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/style-drafts`, { method: "POST", body: JSON.stringify(styleRequest) }),
+    applyStyleDraft: (sessionID, draftID, expectedRevision) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/style-drafts/${encodeURIComponent(draftID)}/apply`, { method: "POST", body: JSON.stringify({ expected_revision: expectedRevision }) }),
     savePlan: (sessionID, expectedRevision, plan) =>
       request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/plan`, {
         method: "POST",
@@ -308,6 +408,37 @@ function createMockEditorClient(): EditorClient {
     async uploadAsset(sessionID, file) {
       return this.importAsset(sessionID, file.name);
     },
+    async importStyleReference(sessionID, sourcePath) {
+      const session = sessions.get(sessionID);
+      if (!session) return { ok: false, error: "未找到编辑项目" };
+      const fileName = sourcePath.split(/[\\/]/).pop();
+      const asset: EditorArtifact = { id: `style_reference_${Date.now()}`, kind: "style_reference_video", uri: sourcePath, mime_type: "video/mp4", ...(fileName ? { label: fileName } : {}), include_in_demo: false, metadata: { style_reference: true, presentation_only: true, rights_confirmation_required: true } };
+      const next = { ...session, revision: session.revision + 1, asset_catalog: { ...session.asset_catalog, artifacts: [...session.asset_catalog.artifacts, asset] } };
+      sessions.set(sessionID, next);
+      return result(next);
+    },
+    async uploadStyleReference(sessionID, file) {
+      return this.importStyleReference(sessionID, file.name);
+    },
+    async listStyleTemplates() {
+      return result(mockStyleTemplates());
+    },
+    async createStyleDraft(sessionID, styleRequest) {
+      const session = sessions.get(sessionID);
+      if (!session) return { ok: false, error: "未找到编辑项目" };
+      if (styleRequest.expected_revision !== session.revision) return { ok: false, error: "编辑版本冲突，请重新加载" };
+      const template = mockStyleTemplates().find((item) => item.template_id === styleRequest.template_id) ?? mockStyleTemplates()[0]!;
+      if (styleRequest.reference_asset_id && !styleRequest.reference_rights_confirmed) return { ok: false, error: "使用参考视频前需要确认拥有使用权" };
+      const hasReference = Boolean(styleRequest.reference_asset_id);
+      const draft: EditorStyleDraft = { schema_version: "demoops.video_style_draft.v1", draft_id: `style_${Date.now()}`, session_id: sessionID, base_revision: session.revision, ...(styleRequest.prompt ? { prompt: styleRequest.prompt } : {}), template, style_profile: { source: hasReference ? "reference_video_pending_analysis" : "platform_template", analysis_status: hasReference ? "pending_analysis" : "template_ready", confidence: hasReference ? 0 : 1, ...(hasReference ? { reference: { asset_id: styleRequest.reference_asset_id!, user_declared_rights: true, content_copied: false } } : {}) }, proposed_edit_plan: { ...session.edit_plan, plan_id: `plan_style_${Date.now()}`, objective: styleRequest.prompt || template.name, global_style: { color_grade: template.presentation.color_direction, pacing: template.presentation.pacing, transition_style: template.presentation.transition_style }, audio: { mode: "source", volume_percent: template.presentation.source_volume_percent } }, proposed_preview_profile: { ...session.preview_profile, width: template.output.width > template.output.height ? 1280 : 720, height: template.output.width > template.output.height ? 720 : 1280, fps: template.output.fps }, proposed_final_profile: { ...session.final_profile, width: template.output.width, height: template.output.height, fps: template.output.fps }, requires_confirmation: true, warnings: [{ code: "style_effects_partially_rendered", message: "当前仅实际应用画幅、裁剪、字幕和音频；复杂动画与运镜会记录在计划中，但尚未渲染为像素效果。" }, ...(hasReference ? [{ code: "reference_analysis_pending", message: "参考视频已登记；第一版先使用模板，后续才会提取节奏和字幕等可解释参数。" }] : [])] };
+      return result(draft);
+    },
+    async applyStyleDraft(sessionID, draftID, expectedRevision) {
+      const session = sessions.get(sessionID);
+      if (!session) return { ok: false, error: "未找到编辑项目" };
+      if (session.revision !== expectedRevision) return { ok: false, error: "编辑版本冲突，请重新加载" };
+      return { ok: false, error: `模拟模式不能应用草案 ${draftID}；请启动本地 Bridge 验证。` };
+    },
     async savePlan(sessionID, expectedRevision, plan) {
       const session = sessions.get(sessionID);
       if (!session) return { ok: false, error: "未找到编辑项目" };
@@ -341,6 +472,13 @@ function createMockEditorClient(): EditorClient {
     },
     mediaURL: () => "",
   };
+}
+
+function mockStyleTemplates(): VideoStyleTemplate[] {
+  return [
+    { schema_version: "demoops.video_style_template.v1", template_id: "concise_product_demo", name: "简洁产品演示", summary: "先讲清价值，再展示真实操作与结果。", category: "product_demo", output: { aspect_ratio: "16:9", width: 1920, height: 1080, fps: 30, target_duration_ms: 45000, min_duration_ms: 30000, max_duration_ms: 60000 }, presentation: { pacing: "clear_and_direct", transition_style: "simple_cut", color_direction: "neutral_product_ui", caption_mode: "sparse", max_caption_chars: 18, source_volume_percent: 55, narration_preferred: true, allow_presentation_still: true }, constraints: { existing_assets_only: true, preserve_required_step_order: true, allowed_operations: ["trim", "caption", "volume"] } },
+    { schema_version: "demoops.video_style_template.v1", template_id: "fast_feature_demo", name: "快节奏功能亮点", summary: "以更快节奏串联关键功能和结果。", category: "product_demo", output: { aspect_ratio: "16:9", width: 1920, height: 1080, fps: 30, target_duration_ms: 40000, min_duration_ms: 25000, max_duration_ms: 50000 }, presentation: { pacing: "fast_with_result_hold", transition_style: "short_fade", color_direction: "cool_low_saturation", caption_mode: "short", max_caption_chars: 16, source_volume_percent: 35, narration_preferred: true, allow_presentation_still: true }, constraints: { existing_assets_only: true, preserve_required_step_order: true, allowed_operations: ["trim", "caption", "volume"] } },
+  ];
 }
 
 function mockSession(name: string): EditorSession {

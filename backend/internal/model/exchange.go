@@ -516,21 +516,25 @@ type UserApprovalRecord struct {
 }
 
 type RecordingResultPackage struct {
-	ResultID              string                   `json:"result_id"`
-	SourcePackageID       string                   `json:"source_package_id"`
-	CloudJobID            string                   `json:"cloud_job_id"`
-	SchemaVersion         string                   `json:"schema_version"`
-	Status                RecordingResultStatus    `json:"status"`
-	ExecutionTrace        *ExecutionTrace          `json:"execution_trace,omitempty"`
-	StepResults           []StepResult             `json:"step_results,omitempty"`
-	GeneratedAssets       []ArtifactRef            `json:"generated_assets,omitempty"`
-	VerificationReport    VerificationReport       `json:"verification_report"`
-	FailureDiagnostic     *ScriptFailureDiagnostic `json:"failure_diagnostic,omitempty"`
-	RepairRequest         *ScriptRepairRequest     `json:"repair_request,omitempty"`
-	GraphPatchSuggestions []GraphPatch             `json:"graph_patch_suggestions,omitempty"`
-	AuditTrail            CloudExecutionAuditTrail `json:"audit_trail"`
-	Delivery              ResultDelivery           `json:"delivery"`
-	CreatedAt             time.Time                `json:"created_at"`
+	ResultID              string                    `json:"result_id"`
+	SourcePackageID       string                    `json:"source_package_id"`
+	CloudJobID            string                    `json:"cloud_job_id"`
+	SchemaVersion         string                    `json:"schema_version"`
+	Status                RecordingResultStatus     `json:"status"`
+	ExecutionTrace        *ExecutionTrace           `json:"execution_trace,omitempty"`
+	StepResults           []StepResult              `json:"step_results,omitempty"`
+	GeneratedAssets       []ArtifactRef             `json:"generated_assets,omitempty"`
+	VerificationReport    VerificationReport        `json:"verification_report"`
+	ExecutionRuntime      string                    `json:"execution_runtime,omitempty"`
+	ValidationReports     []ValidationReport        `json:"validation_reports,omitempty"`
+	PatchLedger           []RuntimePatchLedgerEntry `json:"patch_ledger,omitempty"`
+	StageEventLogRef      *ArtifactRef              `json:"stage_event_log_ref,omitempty"`
+	FailureDiagnostic     *ScriptFailureDiagnostic  `json:"failure_diagnostic,omitempty"`
+	RepairRequest         *ScriptRepairRequest      `json:"repair_request,omitempty"`
+	GraphPatchSuggestions []GraphPatch              `json:"graph_patch_suggestions,omitempty"`
+	AuditTrail            CloudExecutionAuditTrail  `json:"audit_trail"`
+	Delivery              ResultDelivery            `json:"delivery"`
+	CreatedAt             time.Time                 `json:"created_at"`
 }
 
 type ScriptFailureDiagnostic struct {
@@ -662,6 +666,19 @@ func (r *RecordingResultPackage) ValidateStatusContract() error {
 	}
 	if r.SchemaVersion != RecordingResultPackageSchemaVersion {
 		return errors.New("unsupported recording result package schema version")
+	}
+	for _, report := range r.ValidationReports {
+		if err := report.Validate(); err != nil {
+			return fmt.Errorf("invalid validation report: %w", err)
+		}
+		if report.SourcePackageID != r.SourcePackageID {
+			return errors.New("validation report source_package_id does not match recording result")
+		}
+	}
+	for _, entry := range r.PatchLedger {
+		if err := entry.Validate(); err != nil {
+			return fmt.Errorf("invalid patch ledger entry: %w", err)
+		}
 	}
 	if r.Status != RecordingResultStatusFailed {
 		return nil

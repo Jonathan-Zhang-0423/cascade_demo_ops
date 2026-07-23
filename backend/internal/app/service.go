@@ -21,18 +21,19 @@ import (
 )
 
 type Service struct {
-	runtime      config.AppRuntimeConfig
-	llm          *llm.Router
-	flow         *orchestrator.CascadeFlow
-	states       store.StateStore
-	layout       storage.LocalLayout
-	exchange     *ExchangeIntakeService
-	runningMu    sync.Mutex
-	runningTasks map[string]context.CancelFunc
-	editorMu     sync.Mutex
-	editorWorker editorWorker
-	editorJobsMu sync.Mutex
-	editorJobs   map[string]editorRenderTask
+	runtime       config.AppRuntimeConfig
+	llm           *llm.Router
+	flow          *orchestrator.CascadeFlow
+	states        store.StateStore
+	layout        storage.LocalLayout
+	exchange      *ExchangeIntakeService
+	runningMu     sync.Mutex
+	runningTasks  map[string]context.CancelFunc
+	editorMu      sync.Mutex
+	editorWorker  editorWorker
+	editorJobsMu  sync.Mutex
+	editorJobs    map[string]editorRenderTask
+	outlineRunner BrowserAgentOutlineRunner
 }
 
 type editorRenderTask struct {
@@ -77,16 +78,18 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		return nil, err
 	}
 	service := &Service{
-		runtime:      runtime,
-		llm:          llmRouter,
-		flow:         flow,
-		states:       states,
-		layout:       storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
-		exchange:     newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
-		runningTasks: map[string]context.CancelFunc{},
-		editorJobs:   map[string]editorRenderTask{},
+		runtime:       runtime,
+		llm:           llmRouter,
+		flow:          flow,
+		states:        states,
+		layout:        storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
+		exchange:      newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
+		runningTasks:  map[string]context.CancelFunc{},
+		editorJobs:    map[string]editorRenderTask{},
+		outlineRunner: nil,
 	}
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath())
+	service.outlineRunner = localBrowserAgentOutlineRunner{service: service}
 	return service, nil
 }
 

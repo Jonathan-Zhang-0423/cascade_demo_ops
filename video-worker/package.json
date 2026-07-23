@@ -11,7 +11,8 @@
     "smoke:render:requirements": "node scripts/smoke-render-requirements.mjs",
     "smoke:render:candidates": "node scripts/smoke-render-candidates.mjs",
     "smoke:render:format-fallback": "node scripts/smoke-render-format-fallback.mjs",
-    "smoke:record:playwright": "node scripts/smoke-record-playwright.mjs"
+    "smoke:record:playwright": "node scripts/smoke-record-playwright.mjs",
+    "smoke:browser-agent": "node scripts/smoke-browser-agent.mjs"
   },
   "dependencies": {
     "playwright": "^1.61.1"

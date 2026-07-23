@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EditorPlan, EditorSession, EditorShot, EditorTimelineStep, EditorValidationReport } from "./editor";
-import { buildExportChecks, buildTimelineShots, formatTimecode, preservesRequiredStepOrder } from "./VideoEditor";
+import { automationStatusLabel, buildExportChecks, buildTimelineShots, editorAutomationForDisplay, formatTimecode, preservesRequiredStepOrder } from "./VideoEditor";
 
 const steps: EditorTimelineStep[] = [
   { step_id: "open", order: 0, action: "navigate", status: "passed", required: true, start_ms: 0, end_ms: 2000, duration_ms: 2000 },
@@ -56,6 +56,18 @@ const validReport: EditorValidationReport = {
 };
 
 describe("editor workspace policy", () => {
+	it("uses plain Chinese for browser-agent automation states", () => {
+		expect(automationStatusLabel("verified")).toBe("智能执行已验证");
+		expect(automationStatusLabel("repaired_or_review")).toBe("已自动修复，建议复核");
+		expect(automationStatusLabel("blocked")).toBe("执行验证未通过");
+	});
+
+	it("does not pretend manual imports were browser-agent validated", () => {
+		const manual = session(plan([shot("one", "open", [0, 2000]), shot("two", "create", [2000, 5000])]));
+		expect(editorAutomationForDisplay(manual)).toBeUndefined();
+		manual.asset_catalog.source = { recording_result_package_id: "result_legacy" };
+		expect(editorAutomationForDisplay(manual)?.validation_state).toBe("legacy_result");
+	});
   it("maps output time without changing source ranges", () => {
     const timeline = buildTimelineShots(plan([shot("one", "open", [1000, 2500]), shot("two", "create", [3000, 5000])]));
     expect(timeline.map(({ startMS, endMS }) => [startMS, endMS])).toEqual([[0, 1500], [1500, 3500]]);

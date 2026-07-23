@@ -160,6 +160,140 @@ func TestEditorSessionImportsAudioAsReadOnlyNarrationMaterial(t *testing.T) {
 	}
 }
 
+func TestEditorStyleTemplatesAndDraftApplyPreserveSourceFacts(t *testing.T) {
+	service := newTestEditorService(t)
+	worker := &fakeEditorWorker{}
+	service.editorWorker = worker
+
+	templates, err := service.ListVideoStyleTemplates(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(templates) < 4 || templates[0].TemplateID != "concise_product_demo" || !templates[0].Constraints.ExistingAssetsOnly || !templates[0].Constraints.PreserveRequiredStepOrder {
+		t.Fatalf("unexpected built-in templates: %+v", templates)
+	}
+
+	sourcePath := filepath.Join(t.TempDir(), "recording.mp4")
+	if err := os.WriteFile(sourcePath, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	worker.probeResult = executor.MediaProbeResult{
+		Path: sourcePath, FileName: "recording.mp4", SizeBytes: 7, SHA256: "sha256:style-source", MimeType: "video/mp4",
+		DurationMS: 9000, Width: 1920, Height: 1080, FPS: 30,
+	}
+	session, err := service.CreateEditorSession(t.Context(), model.EditorCreateSessionRequest{Name: "风格草案"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err = service.ImportEditorAsset(t.Context(), session.SessionID, model.EditorImportAssetRequest{Path: sourcePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalShot := session.EditPlan.Shots[0]
+
+	draft, err := service.CreateEditorStyleDraft(t.Context(), session.SessionID, model.EditorStyleDraftRequest{
+		ExpectedRevision: session.Revision,
+		Prompt:           "做一支节奏快的功能亮点演示",
+		TemplateID:       "fast_feature_demo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !draft.RequiresConfirmation || draft.Validation == nil || !draft.Validation.Valid || draft.StyleProfile.Source != "platform_template" {
+		t.Fatalf("unexpected style draft: %+v", draft)
+	}
+	if draft.ProposedEditPlan.Shots[0].SourceArtifactID != originalShot.SourceArtifactID || !rangesEqualForEditorTest(draft.ProposedEditPlan.Shots[0].SourceTimeRangeMS, originalShot.SourceTimeRangeMS) {
+		t.Fatalf("style draft changed locked source fields: before=%+v after=%+v", originalShot, draft.ProposedEditPlan.Shots[0])
+	}
+	unchanged, err := service.GetEditorSession(t.Context(), session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Revision != session.Revision || unchanged.EditPlan.PlanID != session.EditPlan.PlanID {
+		t.Fatalf("draft creation must not mutate active session: %+v", unchanged)
+	}
+
+	applied, err := service.ApplyEditorStyleDraft(t.Context(), session.SessionID, draft.DraftID, model.EditorApplyStyleDraftRequest{ExpectedRevision: session.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Revision != session.Revision+1 || applied.EditPlan.PlanID != draft.ProposedEditPlan.PlanID || applied.EditPlan.GlobalStyle == nil || applied.EditPlan.GlobalStyle.Pacing != "fast_with_result_hold" {
+		t.Fatalf("style draft was not applied as expected: %+v", applied)
+	}
+	if applied.EditPlan.Shots[0].SourceArtifactID != originalShot.SourceArtifactID || !rangesEqualForEditorTest(applied.EditPlan.Shots[0].SourceTimeRangeMS, originalShot.SourceTimeRangeMS) {
+		t.Fatalf("style apply changed locked source fields: before=%+v after=%+v", originalShot, applied.EditPlan.Shots[0])
+	}
+	if applied.EditPlan.Audio == nil || applied.EditPlan.Audio.VolumePercent != 35 {
+		t.Fatalf("template audio policy was not applied: %+v", applied.EditPlan.Audio)
+	}
+	if _, err := service.ApplyEditorStyleDraft(t.Context(), session.SessionID, draft.DraftID, model.EditorApplyStyleDraftRequest{ExpectedRevision: session.Revision}); err == nil {
+		t.Fatal("expected stale revision to reject style draft apply")
+	}
+}
+
+func TestEditorStyleReferenceRequiresRightsAndStaysPendingAnalysis(t *testing.T) {
+	service := newTestEditorService(t)
+	worker := &fakeEditorWorker{}
+	service.editorWorker = worker
+
+	sourcePath := filepath.Join(t.TempDir(), "reference.mp4")
+	if err := os.WriteFile(sourcePath, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	worker.probeResult = executor.MediaProbeResult{
+		Path: sourcePath, FileName: "reference.mp4", SizeBytes: 7, SHA256: "sha256:style-reference", MimeType: "video/mp4",
+		DurationMS: 6000, Width: 1920, Height: 1080, FPS: 30,
+	}
+	session, err := service.CreateEditorSession(t.Context(), model.EditorCreateSessionRequest{Name: "参考视频"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err = service.ImportEditorStyleReference(t.Context(), session.SessionID, model.EditorImportAssetRequest{Path: sourcePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.EditPlan.Shots) != 0 || session.AssetCatalog.Timeline.DurationMS != 0 {
+		t.Fatalf("style reference must not enter the timeline: %+v", session)
+	}
+	if session.AssetCatalog.Artifacts[0].Kind != "style_reference_video" || session.AssetCatalog.Artifacts[0].IncludeInDemo {
+		t.Fatalf("style reference boundary missing: %+v", session.AssetCatalog.Artifacts[0])
+	}
+	assetID := session.AssetCatalog.Artifacts[0].ID
+	if _, err := service.CreateEditorStyleDraft(t.Context(), session.SessionID, model.EditorStyleDraftRequest{
+		ExpectedRevision: session.Revision, ReferenceAssetID: assetID,
+	}); err == nil || !strings.Contains(err.Error(), "usage rights") {
+		t.Fatalf("expected reference rights rejection, got %v", err)
+	}
+	draft, err := service.CreateEditorStyleDraft(t.Context(), session.SessionID, model.EditorStyleDraftRequest{
+		ExpectedRevision: session.Revision, ReferenceAssetID: assetID, ReferenceRightsConfirmed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.StyleProfile.AnalysisStatus != "pending_analysis" || draft.StyleProfile.Reference == nil || draft.StyleProfile.Reference.ContentCopied || draft.StyleProfile.Reference.AssetID != assetID {
+		t.Fatalf("unexpected pending reference profile: %+v", draft.StyleProfile)
+	}
+	if !hasStyleWarning(draft.Warnings, "reference_analysis_pending") || !hasStyleWarning(draft.Warnings, "reference_content_not_copied") {
+		t.Fatalf("expected reference boundaries in warnings: %+v", draft.Warnings)
+	}
+}
+
+func rangesEqualForEditorTest(left, right *model.MillisecondRange) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left[0] == right[0] && left[1] == right[1]
+}
+
+func hasStyleWarning(values []model.VideoStyleDraftWarning, code string) bool {
+	for _, value := range values {
+		if value.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestEditorSessionRejectsUnsupportedOrOversizedUpload(t *testing.T) {
 	service := newTestEditorService(t)
 	service.editorWorker = &fakeEditorWorker{}
@@ -202,7 +336,24 @@ func TestEditorSessionFromResultPackageBuildsStepTimeline(t *testing.T) {
 	result := model.RecordingResultPackage{
 		ResultID: "result_editor_1", SourcePackageID: "package_1", CloudJobID: "job_1",
 		SchemaVersion: "demoops.recording_result_package.v1", Status: model.RecordingResultStatusGenerated,
-		ExecutionTrace: &model.ExecutionTrace{ID: "trace_1", WorkflowGraphID: "graph_1", StartedAt: startedAt},
+		ExecutionRuntime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+		ValidationReports: []model.ValidationReport{{
+			SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "report_1", RunID: "run_1",
+			SourcePackageID: "package_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+			Phase: model.ValidationPhaseRuntimeStage, NodeID: "open_dashboard", StageID: "stage_open_dashboard",
+			Decision: model.ValidationDecisionContinue, PassRate: 1, OverallConfidence: .96,
+			EvidenceQuality: model.RuntimeObservationActualBrowser, EvidenceRefs: []model.EvidenceRef{{ID: "screenshot_open"}},
+			CreatedAt: startedAt.Add(2 * time.Second),
+		}},
+		PatchLedger: []model.RuntimePatchLedgerEntry{{
+			SchemaVersion: model.RuntimePatchLedgerEntrySchemaVersion, EntryID: "patch_1", ProposalID: "proposal_1",
+			RunID: "run_1", NodeID: "open_dashboard", StageID: "stage_open_dashboard", Attempt: 1,
+			SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+			Field: "script_outline.stages[0].interactions[0].selector", Before: "#old", After: "#new",
+			PolicyDecision: model.ValidationDecisionRepairAllowed, Applied: true, AppliedAt: startedAt.Add(time.Second),
+		}},
+		StageEventLogRef: &model.ArtifactRef{ID: "event_log_1", Kind: "stage_event_log", URI: "file:///events.jsonl"},
+		ExecutionTrace:   &model.ExecutionTrace{ID: "trace_1", WorkflowGraphID: "graph_1", StartedAt: startedAt},
 		StepResults: []model.StepResult{
 			{NodeID: "open_dashboard", Status: "passed", StartedAt: startedAt, DurationMS: 2000, ObservedState: "打开仪表盘", Artifacts: []model.ArtifactRef{{ID: "screenshot_open", Kind: "screenshot", URI: localFileURI(screenshotPath), MimeType: "image/png", SHA256: "sha256:screenshot", Metadata: map[string]any{"include_in_demo": true}}}},
 			{NodeID: "create_project", Status: "passed", StartedAt: startedAt.Add(2500 * time.Millisecond), DurationMS: 3000, ObservedState: "创建项目"},
@@ -234,6 +385,9 @@ func TestEditorSessionFromResultPackageBuildsStepTimeline(t *testing.T) {
 	}
 	if len(session.AssetCatalog.Artifacts) != 2 || session.AssetCatalog.Artifacts[1].Kind != "step_screenshot" || session.AssetCatalog.Artifacts[1].SourceStepID != "open_dashboard" {
 		t.Fatalf("step screenshot was not registered as a presentation material: %+v", session.AssetCatalog.Artifacts)
+	}
+	if session.Automation == nil || session.Automation.ExecutionRuntime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 || session.Automation.ValidationState != "verified" || session.Automation.EvidenceBackedReportCount != 1 || session.Automation.AppliedPatchCount != 1 || !session.Automation.StageEventAuditAvailable {
+		t.Fatalf("browser-agent automation provenance was not materialized: %+v", session.Automation)
 	}
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createEditorClient } from "./editor";
-import type { EditorArtifact, EditorPlan, EditorSession, EditorShot, EditorTimelineStep, EditorValidationReport } from "./editor";
+import type { EditorArtifact, EditorPlan, EditorSession, EditorShot, EditorStyleDraft, EditorTimelineStep, EditorValidationReport, VideoStyleTemplate } from "./editor";
 import { editorPlansEqual, emptyEditorHistory, recordEditorHistory, redoEditorHistory, undoEditorHistory } from "./editorHistory";
 import { compilePresentationComposition, finalRendererSupports } from "./presentationComposition";
 import { activeCaptionText, audioPreviewState, buildAudioSegments, deleteShotInPlan, mergeAudioSegmentInPlan, patchAudioSegmentInPlan, reorderShotInPlan, requiredStepCoverage, setStillDurationInPlan, snapMilliseconds, sourceSnapPoints, splitAudioAtOutputMS, splitShotAtOutputMS, targetIndexForOutputMS, trimShotInPlan } from "./timelineEditing";
@@ -8,11 +8,11 @@ import "./editorWorkspace.css";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
 type ImportMode = "upload" | "path" | "result" | "empty";
-type MediaTab = "media" | "captions" | "callouts" | "generated";
+type MediaTab = "media" | "captions" | "callouts" | "generated" | "style";
 type PreviewMode = "source" | "rendered";
 type SelectedTrack = "video" | "audio";
 type TimelineTrack = "evidence" | "video" | "caption" | "audio";
-type EditorTool = "select" | "assets" | "text" | "shapes" | "captions" | "generated";
+type EditorTool = "select" | "assets" | "text" | "shapes" | "captions" | "generated" | "style";
 type AssetFilter = "all" | "video" | "image" | "audio";
 
 type TimelineShot = {
@@ -61,6 +61,7 @@ export function VideoEditor() {
   const [assetQuery, setAssetQuery] = useState("");
   const [assetFilter, setAssetFilter] = useState<AssetFilter>("all");
   const [validationOpen, setValidationOpen] = useState(false);
+	const [automationOpen, setAutomationOpen] = useState(false);
   const [validationReport, setValidationReport] = useState<EditorValidationReport>();
   const [previewMode, setPreviewMode] = useState<PreviewMode>("source");
   const [playheadMS, setPlayheadMS] = useState(0);
@@ -78,6 +79,12 @@ export function VideoEditor() {
   const [snapGuideMS, setSnapGuideMS] = useState<number>();
   const [timelineHoverMS, setTimelineHoverMS] = useState<number>();
   const [pendingFile, setPendingFile] = useState<File>();
+  const [styleTemplates, setStyleTemplates] = useState<VideoStyleTemplate[]>([]);
+  const [styleTemplateID, setStyleTemplateID] = useState("");
+  const [stylePrompt, setStylePrompt] = useState("");
+  const [styleReferenceID, setStyleReferenceID] = useState("");
+  const [styleRightsConfirmed, setStyleRightsConfirmed] = useState(false);
+  const [styleDraft, setStyleDraft] = useState<EditorStyleDraft>();
   const sessionRef = useRef<EditorSession>();
   const draftPlanRef = useRef<EditorPlan>();
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -107,6 +114,10 @@ export function VideoEditor() {
 
   useEffect(() => {
     void refreshSessions();
+  }, []);
+
+  useEffect(() => {
+    void refreshStyleTemplates();
   }, []);
 
   useEffect(() => {
@@ -256,6 +267,16 @@ export function VideoEditor() {
     if (!sessionRef.current && result.data[0]) loadSession(result.data[0]);
   }
 
+  async function refreshStyleTemplates() {
+    const result = await client.listStyleTemplates();
+    if (!result.ok || !result.data) {
+      setMessage(result.error ?? "无法读取视频制作模板");
+      return;
+    }
+    setStyleTemplates(result.data);
+    setStyleTemplateID((current) => current || result.data?.[0]?.template_id || "");
+  }
+
   function loadSession(next: EditorSession) {
     setSession(next);
     setDraftPlan(structuredClone(next.edit_plan));
@@ -270,6 +291,9 @@ export function VideoEditor() {
     setSelectedTrack("video");
     setSelectedAudioSegmentID("");
     setHiddenTracks({ evidence: false, video: false, caption: false, audio: false });
+    setStyleDraft(undefined);
+    setStyleReferenceID("");
+    setStyleRightsConfirmed(false);
     setMessage("");
     if (next.preview.status === "ready") setPreviewMode("rendered");
     else setPreviewMode("source");
@@ -328,6 +352,58 @@ export function VideoEditor() {
     setImportOpen(false);
     const isAudio = file.type.startsWith("audio/") || /\.(wav|mp3|m4a|aac|ogg|flac)$/i.test(file.name);
     setMessage(isAudio ? "音频已上传到 Server 管理目录，可作为只读配音素材使用。" : "视频已上传到 Server 管理目录并加入时间线。");
+  }
+
+  async function importStyleReference(file?: File) {
+    if (!session) return;
+    setBusy("style-reference");
+    const result = file
+      ? await client.uploadStyleReference(session.session_id, file)
+      : sourcePath.trim() ? await client.importStyleReference(session.session_id, sourcePath.trim()) : undefined;
+    setBusy("");
+    if (!result?.ok || !result.data) {
+      setMessage(result?.error ?? "请选择一个参考视频");
+      return;
+    }
+    loadSession(result.data);
+    const reference = result.data.asset_catalog.artifacts.find(isStyleReferenceArtifact);
+    setStyleReferenceID(reference?.id ?? "");
+    setStyleRightsConfirmed(false);
+    setMessage("参考视频已隔离登记：不会加入时间线或成片，需确认使用权后才可进入风格分析。");
+  }
+
+  async function createStyleDraft() {
+    if (!session) return;
+    setBusy("style-draft");
+    const request = {
+      expected_revision: session.revision,
+      reference_rights_confirmed: styleRightsConfirmed,
+      ...(styleTemplateID ? { template_id: styleTemplateID } : {}),
+      ...(stylePrompt.trim() ? { prompt: stylePrompt.trim() } : {}),
+      ...(styleReferenceID ? { reference_asset_id: styleReferenceID } : {}),
+    };
+    const result = await client.createStyleDraft(session.session_id, request);
+    setBusy("");
+    if (!result.ok || !result.data) {
+      setMessage(result.error ?? "制作草案生成失败");
+      return;
+    }
+    setStyleDraft(result.data);
+    setMessage("已生成可审阅的制作草案；原始时间线尚未被修改。");
+  }
+
+  async function applyStyleDraft() {
+    if (!session || !styleDraft) return;
+    setBusy("style-apply");
+    const result = await client.applyStyleDraft(session.session_id, styleDraft.draft_id, session.revision);
+    setBusy("");
+    if (!result.ok || !result.data) {
+      setMessage(result.error ?? "应用制作草案失败");
+      return;
+    }
+    loadSession(result.data);
+    setStyleDraft(undefined);
+    setMessage("制作草案已应用。请生成预览确认画幅、剪辑、字幕与音频效果。");
   }
 
   async function createFromResultPackage() {
@@ -958,9 +1034,11 @@ export function VideoEditor() {
     if (tool === "text" || tool === "captions") setMediaTab("captions");
     if (tool === "shapes") setMediaTab("callouts");
     if (tool === "generated") setMediaTab("generated");
+    if (tool === "style") setMediaTab("style");
   }
 
-  const panelTitle = activeTool === "captions" ? "字幕库" : activeTool === "text" ? "文本与字幕" : activeTool === "shapes" ? "标注" : activeTool === "generated" ? "生成候选" : "素材";
+  const panelTitle = activeTool === "style" ? "智能制作" : activeTool === "captions" ? "字幕库" : activeTool === "text" ? "文本与字幕" : activeTool === "shapes" ? "标注" : activeTool === "generated" ? "生成候选" : "素材";
+	const automation = editorAutomationForDisplay(session);
 
   return (
     <div className="studio-shell">
@@ -984,6 +1062,9 @@ export function VideoEditor() {
         </div>
 
         <div className="studio-topbar-actions">
+		  {automation ? <button className={`studio-automation-button ${automationTone(automation.validation_state)}`} onClick={() => setAutomationOpen(true)} title="查看素材如何由 Server Browser Agent 执行、验证和修复">
+			<span aria-hidden="true">✦</span><span>{automationStatusLabel(automation.validation_state)}</span>
+		  </button> : null}
           <button className={`studio-validation-button ${failedChecks.length > 0 ? "blocked" : ""}`} disabled={!session || busy === "validate"} onClick={() => void validatePlan(true)}>
             <span>{failedChecks.length > 0 ? "!" : "✓"}</span>
             <span>{busy === "validate" ? "校验中" : `导出校验 ${passedChecks.length}/${exportChecks.length}`}</span>
@@ -1022,13 +1103,14 @@ export function VideoEditor() {
               </div>
               <button type="button" className={activeTool === "captions" ? "active" : ""} aria-label="字幕样式" title="字幕样式" onClick={() => chooseEditorTool("captions")}><span aria-hidden="true">CC</span></button>
               <button type="button" className={activeTool === "generated" ? "active" : ""} aria-label="生成候选素材" title="生成候选素材" onClick={() => chooseEditorTool("generated")}><span aria-hidden="true">AI</span></button>
+              <button type="button" className={activeTool === "style" ? "active" : ""} aria-label="智能制作" title="智能制作" onClick={() => chooseEditorTool("style")}><span aria-hidden="true">✦</span></button>
               <button type="button" aria-label="导入素材" title="导入素材" onClick={() => setImportOpen(true)}><span aria-hidden="true">⇧</span></button>
               <button type="button" aria-label="导出校验" title="导出校验" onClick={() => setValidationOpen(true)}><span aria-hidden="true">✓</span></button>
             </nav>
             <section className="studio-panel studio-media-panel">
               <div className="studio-panel-heading"><strong>{panelTitle}</strong><small>{session.asset_catalog.artifacts.length} 项</small></div>
               <div className="studio-panel-tabs">
-                {(["media", "captions", "callouts", "generated"] as MediaTab[]).map((tab) => (
+                {(["media", "captions", "callouts", "generated", "style"] as MediaTab[]).map((tab) => (
                   <button key={tab} className={mediaTab === tab ? "active" : ""} onClick={() => setMediaTab(tab)}>{mediaTabLabel(tab)}</button>
                 ))}
               </div>
@@ -1042,8 +1124,8 @@ export function VideoEditor() {
                     <option value="audio">音频</option>
                   </select>
                 </div> : null}
-                <button className="studio-import-zone" onClick={() => setImportOpen(true)}>＋ 从本机选择，或导入结果包</button>
-                <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} selectedAssetID={selectedArtifact?.id} assetQuery={assetQuery} assetFilter={assetFilter} onSelectShot={(shot) => selectShot(shot)} onSelectAsset={selectAsset} onAddStill={addStillToTimeline} />
+                {mediaTab !== "style" ? <button className="studio-import-zone" onClick={() => setImportOpen(true)}>＋ 从本机选择，或导入结果包</button> : null}
+                {mediaTab === "style" ? <StyleProductionPanel templates={styleTemplates} templateID={styleTemplateID} prompt={stylePrompt} referenceID={styleReferenceID} references={session.asset_catalog.artifacts.filter(isStyleReferenceArtifact)} rightsConfirmed={styleRightsConfirmed} {...(styleDraft ? { draft: styleDraft } : {})} busy={busy} onTemplateChange={setStyleTemplateID} onPromptChange={setStylePrompt} onReferenceChange={setStyleReferenceID} onRightsChange={setStyleRightsConfirmed} onReferenceUpload={(file) => void importStyleReference(file)} onCreateDraft={() => void createStyleDraft()} onApplyDraft={() => void applyStyleDraft()} /> : <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} selectedAssetID={selectedArtifact?.id} assetQuery={assetQuery} assetFilter={assetFilter} onSelectShot={(shot) => selectShot(shot)} onSelectAsset={selectAsset} onAddStill={addStillToTimeline} />}
               </div>
             </section>
 
@@ -1080,7 +1162,7 @@ export function VideoEditor() {
                   <div className="studio-video-placeholder"><strong>还没有可预览的素材</strong><span>导入本地录屏或 RecordingResultPackage 后开始编辑。</span><button className="studio-primary-button" onClick={() => setImportOpen(true)}>导入素材</button></div>
                 )}
               </div>
-              <div className="studio-transport">
+			  <div className="studio-transport" aria-label="预览播放控制">
                 <button className="studio-icon-button" disabled={!mediaURL || imagePreview} onClick={() => seekTimeline(playheadMS - 1000 / session.preview_profile.fps)}>│‹</button>
                 <button className="studio-play-button" disabled={!mediaURL || imagePreview} onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
                 <button className="studio-icon-button" disabled={!mediaURL || imagePreview} onClick={() => seekTimeline(playheadMS + 1000 / session.preview_profile.fps)}>›│</button>
@@ -1232,12 +1314,102 @@ export function VideoEditor() {
 
       {importOpen ? <ImportDialog mode={importMode} onModeChange={setImportMode} newName={newName} onNameChange={setNewName} sourcePath={sourcePath} onSourcePathChange={setSourcePath} resultPackagePath={resultPackagePath} onResultPackagePathChange={setResultPackagePath} resultRecordingPath={resultRecordingPath} onResultRecordingPathChange={setResultRecordingPath} pendingFile={pendingFile} onFileChange={setPendingFile} busy={busy} hasSession={Boolean(session)} onClose={() => setImportOpen(false)} onSubmit={() => void submitImport()} /> : null}
       {validationOpen ? <ValidationDrawer checks={exportChecks} report={currentValidation} onClose={() => setValidationOpen(false)} /> : null}
+	  {automationOpen && automation ? <AutomationDrawer automation={automation} onClose={() => setAutomationOpen(false)} /> : null}
       {message ? <div className="studio-toast"><span>{message}</span><button onClick={() => setMessage("")}>×</button></div> : null}
     </div>
   );
 }
 
-function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID, assetQuery, assetFilter, onSelectShot, onSelectAsset, onAddStill }: { tab: MediaTab; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; selectedAssetID: string | undefined; assetQuery: string; assetFilter: AssetFilter; onSelectShot: (shot: EditorShot) => void; onSelectAsset: (asset: EditorArtifact) => void; onAddStill: (asset: EditorArtifact) => void }) {
+export function editorAutomationForDisplay(session?: EditorSession): EditorSession["automation"] {
+	if (session?.automation) return session.automation;
+	if (!session?.asset_catalog.source?.recording_result_package_id) return undefined;
+	return {
+		execution_runtime: "",
+		validation_state: "legacy_result",
+		validation_report_count: 0,
+		evidence_backed_report_count: 0,
+		patch_count: 0,
+		applied_patch_count: 0,
+		rolled_back_patch_count: 0,
+		stage_event_audit_available: false,
+	};
+}
+
+function AutomationDrawer({ automation, onClose }: { automation: NonNullable<EditorSession["automation"]>; onClose: () => void }) {
+	const runtimeIsOutline = automation.execution_runtime === "browser-agent-outline-v1";
+	return (
+		<div className="studio-automation-scrim" role="presentation" onPointerDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+			<aside className="studio-automation-drawer" role="dialog" aria-modal="true" aria-label="智能执行记录">
+				<div className="studio-drawer-header"><div><strong>智能执行记录</strong><small>来自 Server 结果包，只显示可追溯事实</small></div><button className="studio-icon-button" onClick={onClose}>×</button></div>
+				<div className={`studio-automation-summary ${automationTone(automation.validation_state)}`}>
+					<span aria-hidden="true">{automation.validation_state === "blocked" ? "!" : "✓"}</span>
+					<div><strong>{automationStatusLabel(automation.validation_state)}</strong><p>{automationStatusDetail(automation)}</p></div>
+				</div>
+				<div className="studio-automation-metrics">
+					<AutomationMetric label="执行方式" value={runtimeIsOutline ? "浏览器智能执行" : automation.execution_runtime ? "兼容脚本执行" : "结果包未声明"} />
+					<AutomationMetric label="验证报告" value={`${automation.evidence_backed_report_count}/${automation.validation_report_count} 份有真实证据`} />
+					<AutomationMetric label="运行时修复" value={`${automation.applied_patch_count}/${automation.patch_count} 项已应用`} />
+					<AutomationMetric label="事件审计" value={automation.stage_event_audit_available ? "已保留" : "结果包未附带"} />
+				</div>
+				<div className="studio-automation-boundary">
+					<strong>系统可以做什么</strong><p>可以修正元素定位、等待策略和截图时机等机械问题，并在权限规则通过后继续执行。</p>
+					<strong>系统不会做什么</strong><p>不会修改 App 已审批的业务步骤、输入含义、执行顺序、允许域名或安全边界。</p>
+				</div>
+				{automation.rolled_back_patch_count > 0 ? <div className="studio-automation-warning">有 {automation.rolled_back_patch_count} 项修复已回滚，请在导出前复核对应素材。</div> : null}
+				<small className="studio-automation-source">来源包：{automation.source_package_id ?? "未声明"} · 最新决策：{automationDecisionLabel(automation.latest_decision)}</small>
+			</aside>
+		</div>
+	);
+}
+
+function AutomationMetric({ label, value }: { label: string; value: string }) {
+	return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+export function automationStatusLabel(state: string): string {
+	return ({
+		verified: "智能执行已验证",
+		repaired_or_review: "已自动修复，建议复核",
+		blocked: "执行验证未通过",
+		result_only: "执行结果已接收",
+		legacy_result: "兼容模式结果",
+	} as Record<string, string>)[state] ?? "智能执行状态未知";
+}
+
+function automationStatusDetail(automation: NonNullable<EditorSession["automation"]>): string {
+	if (automation.validation_state === "verified") return "业务步骤已有真实浏览器观察或产物证据，可以进入视频编排。";
+	if (automation.validation_state === "repaired_or_review") return "执行过程中发生了协议允许的小修复，修改记录已保留。";
+	if (automation.validation_state === "blocked") return "验证器要求停止或重新理解，当前素材不应被当作业务成功证据。";
+	if (automation.validation_state === "legacy_result") return "这是旧执行链产物，未携带新 Browser Agent 的阶段验证报告。";
+	return "结果包已进入编辑器，但尚未携带新架构的阶段验证报告。";
+}
+
+function automationTone(state: string): string {
+	if (state === "blocked") return "blocked";
+	if (state === "repaired_or_review") return "review";
+	if (state === "verified") return "verified";
+	return "neutral";
+}
+
+function automationDecisionLabel(value: NonNullable<EditorSession["automation"]>["latest_decision"]): string {
+	return ({ continue: "继续执行", repair_allowed: "允许受控修复", stop_and_report: "停止并报告", reunderstanding_required: "需要重新理解" } as Record<string, string>)[value ?? ""] ?? "未声明";
+}
+
+function StyleProductionPanel({ templates, templateID, prompt, referenceID, references, rightsConfirmed, draft, busy, onTemplateChange, onPromptChange, onReferenceChange, onRightsChange, onReferenceUpload, onCreateDraft, onApplyDraft }: { templates: VideoStyleTemplate[]; templateID: string; prompt: string; referenceID: string; references: EditorArtifact[]; rightsConfirmed: boolean; draft?: EditorStyleDraft; busy: string; onTemplateChange: (value: string) => void; onPromptChange: (value: string) => void; onReferenceChange: (value: string) => void; onRightsChange: (value: boolean) => void; onReferenceUpload: (file: File) => void; onCreateDraft: () => void; onApplyDraft: () => void }) {
+  const selectedTemplate = templates.find((item) => item.template_id === templateID);
+  return <div className="studio-style-production">
+    <div className="studio-style-intro"><strong>从素材直接制作成片</strong><p>选择模板，补充一句制作目标；系统先生成草案，再由你确认应用。真实业务步骤、原始素材和顺序不会被改写。</p></div>
+    <label className="studio-field"><span>成片模板</span><select value={templateID} onChange={(event) => onTemplateChange(event.target.value)}>{templates.map((item) => <option key={item.template_id} value={item.template_id}>{item.name}</option>)}</select></label>
+    {selectedTemplate ? <div className="studio-style-template-note"><strong>{selectedTemplate.summary}</strong><small>{selectedTemplate.output.aspect_ratio} · {Math.round(selectedTemplate.output.target_duration_ms / 1000)} 秒目标 · 源音量 {selectedTemplate.presentation.source_volume_percent}%</small></div> : null}
+    <label className="studio-field"><span>制作提示</span><textarea rows={4} value={prompt} onChange={(event) => onPromptChange(event.target.value)} placeholder="例如：用简洁、可信的语气介绍三项功能，保留最后的结果画面。" /></label>
+    <div className="studio-style-reference"><div><strong>参考视频（可选）</strong><small>只提取节奏、字幕、画幅等可解释参数；不会复制画面、人物、标识、音乐、文案或镜头。</small></div><label className="studio-style-upload"><span>上传参考视频</span><input type="file" accept="video/mp4,video/webm,video/quicktime,.m4v" disabled={busy !== ""} onChange={(event) => { const file = event.target.files?.[0]; if (file) onReferenceUpload(file); event.currentTarget.value = ""; }} /></label></div>
+    {references.length ? <><label className="studio-field"><span>已登记参考视频</span><select value={referenceID} onChange={(event) => onReferenceChange(event.target.value)}><option value="">不使用参考视频</option>{references.map((asset) => <option key={asset.id} value={asset.id}>{asset.label || asset.id}</option>)}</select></label>{referenceID ? <label className="studio-style-rights"><input type="checkbox" checked={rightsConfirmed} onChange={(event) => onRightsChange(event.currentTarget.checked)} />我确认拥有该参考视频的使用权，并同意仅提取可解释的风格参数。</label> : null}</> : null}
+    <button className="studio-primary-button" disabled={busy !== "" || (Boolean(referenceID) && !rightsConfirmed)} onClick={onCreateDraft}>{busy === "style-draft" ? "正在生成草案" : "生成制作草案"}</button>
+    {draft ? <div className="studio-style-draft"><div><strong>待确认制作草案</strong><span>{draft.template.name} · {draft.proposed_final_profile.width}×{draft.proposed_final_profile.height} · {draft.proposed_final_profile.fps} FPS</span></div><p>{draft.style_profile.analysis_status === "pending_analysis" ? "参考视频已登记，自动风格分析尚未接入；当前先按所选模板生成。" : "当前草案来自平台模板，可直接预览确认。"}</p>{draft.warnings?.map((warning) => <small key={warning.code}>{warning.message}</small>)}<button className="studio-outline-button" disabled={busy !== "" || !draft.requires_confirmation} onClick={onApplyDraft}>{busy === "style-apply" ? "正在应用" : "确认应用并生成预览"}</button></div> : null}
+  </div>;
+}
+
+function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID, assetQuery, assetFilter, onSelectShot, onSelectAsset, onAddStill }: { tab: Exclude<MediaTab, "style">; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; selectedAssetID: string | undefined; assetQuery: string; assetFilter: AssetFilter; onSelectShot: (shot: EditorShot) => void; onSelectAsset: (asset: EditorArtifact) => void; onAddStill: (asset: EditorArtifact) => void }) {
   if (tab === "captions") {
     const shots = plan?.shots.filter((shot) => captionText(shot)) ?? [];
     return <div className="studio-list-content">{shots.map((shot) => <button key={shot.id} className={selectedShotID === shot.id ? "selected" : ""} onClick={() => onSelectShot(shot)}><strong>{captionText(shot)}</strong><small>{shot.purpose}</small></button>)}{shots.length === 0 ? <PanelEmpty text="当前计划没有字幕。" /> : null}</div>;
@@ -1503,7 +1675,7 @@ function sessionSelectLabel(session: EditorSession): string {
 }
 
 function mediaTabLabel(tab: MediaTab): string {
-  return ({ media: "媒体", captions: "字幕", callouts: "标注", generated: "生成" } as const)[tab];
+  return ({ media: "媒体", captions: "字幕", callouts: "标注", generated: "生成", style: "制作" } as const)[tab];
 }
 
 function mediaResolution(artifact?: EditorArtifact): string {
@@ -1521,6 +1693,10 @@ function assetKindLabel(artifact: EditorArtifact): string {
 function isGeneratedArtifact(artifact?: EditorArtifact): boolean {
   if (!artifact) return false;
   return artifact.kind.includes("generated") || artifact.kind.includes("candidate") || artifact.metadata?.source_material_policy === "non_authoritative_generated_candidate";
+}
+
+function isStyleReferenceArtifact(artifact: EditorArtifact): boolean {
+  return artifact.kind === "style_reference_video" || artifact.metadata?.style_reference === true;
 }
 
 function isTimelineStillAsset(artifact?: EditorArtifact): boolean {

@@ -1894,6 +1894,10 @@ export type RecordingResultPackage = {
   step_results?: StepResult[];
   generated_assets?: ArtifactRef[];
   verification_report: VerificationReport;
+	 execution_runtime?: string;
+	 validation_reports?: RuntimeValidationReport[];
+	 patch_ledger?: RuntimePatchLedgerEntry[];
+	 stage_event_log_ref?: ArtifactRef;
   failure_diagnostic?: ScriptFailureDiagnostic;
   repair_request?: ScriptRepairRequest;
   graph_patch_suggestions?: unknown[];
@@ -1909,6 +1913,45 @@ export type RecordingResultPackage = {
     acked_at?: string;
   };
   created_at: string;
+};
+
+export type RuntimeValidationReport = {
+	 schema_version: "demoops.validation_report.v1";
+	 report_id: string;
+	 run_id: string;
+	 source_package_id: string;
+	 source_bundle_hash_sha256: string;
+	 policy_hash_sha256: string;
+	 phase: "pre_execution" | "runtime_stage" | "post_execution";
+	 node_id?: string;
+	 stage_id?: string;
+	 decision: "continue" | "repair_allowed" | "stop_and_report" | "reunderstanding_required";
+	 pass_rate: number;
+	 overall_confidence: number;
+	 evidence_quality: "actual_browser_observation" | "browser_assertion" | "artifact_observation" | "derived_from_plan" | "insufficient_evidence";
+	 evidence_refs?: EvidenceRef[];
+	 repair_proposal_refs?: string[];
+	 created_at: string;
+};
+
+export type RuntimePatchLedgerEntry = {
+	 schema_version: "demoops.patch_ledger_entry.v1";
+	 entry_id: string;
+	 proposal_id: string;
+	 run_id: string;
+	 node_id: string;
+	 stage_id: string;
+	 attempt: number;
+	 source_bundle_hash_sha256: string;
+	 policy_hash_sha256: string;
+	 field: string;
+	 before?: string;
+	 after: string;
+	 policy_decision: "repair_allowed" | "stop_and_report";
+	 applied: boolean;
+	 rolled_back?: boolean;
+	 evidence_refs?: EvidenceRef[];
+	 applied_at?: string;
 };
 
 export type ExecutionScriptDocument = {

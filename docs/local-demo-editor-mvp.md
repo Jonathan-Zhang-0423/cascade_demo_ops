@@ -25,6 +25,7 @@
 - 最终导出前同时执行前端业务约束检查和 Worker `DemoEditPlan` 校验；必需步骤遗漏/乱序、生成候选冒充业务步骤、未实现的像素操作均阻止导出。
 - 视频轨支持拖动两侧把手裁剪、拖动片段排序、拖动播放头定位、30 FPS 帧吸附和步骤/素材边界优先吸附；拖动期间不触发自动保存，松手只形成一个撤销快照；
 - `DemoEditPlan` 可编译为只读帧级 `PresentationComposition`，作为后续 Remotion Player 预览的唯一输入，当前不会反向替代业务协议或 FFmpeg 最终渲染器。
+- 风格模板、可审阅制作草案与专用参考视频登记：模板可调整画幅、节奏标签、字幕密度和音频策略；草案必须显式确认后才写入编辑计划；参考视频不会进入时间线或最终成片。
 
 ## 本地流程
 
@@ -96,6 +97,11 @@ POST /v1/editor/sessions/from-result-package
 GET  /v1/editor/sessions/{session_id}
 POST /v1/editor/sessions/{session_id}/assets
 POST /v1/editor/sessions/{session_id}/uploads
+POST /v1/editor/sessions/{session_id}/style-references/assets
+POST /v1/editor/sessions/{session_id}/style-references/uploads
+POST /v1/editor/sessions/{session_id}/style-drafts
+GET  /v1/editor/sessions/{session_id}/style-drafts/{draft_id}
+POST /v1/editor/sessions/{session_id}/style-drafts/{draft_id}/apply
 POST /v1/editor/sessions/{session_id}/plan
 POST /v1/editor/sessions/{session_id}/validate
 POST /v1/editor/sessions/{session_id}/preview

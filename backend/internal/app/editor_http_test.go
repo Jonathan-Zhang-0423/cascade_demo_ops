@@ -93,6 +93,41 @@ func TestEditorHTTPUploadVideo(t *testing.T) {
 	}
 }
 
+func TestEditorHTTPStyleReferenceStaysOutsideTimeline(t *testing.T) {
+	service := newTestEditorService(t)
+	worker := &fakeEditorWorker{}
+	service.editorWorker = worker
+	session, err := service.CreateEditorSession(t.Context(), model.EditorCreateSessionRequest{Name: "参考视频"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "reference.mp4")
+	if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	worker.probeResult = executor.MediaProbeResult{Path: path, FileName: "reference.mp4", SizeBytes: 7, SHA256: "sha256:reference", MimeType: "video/mp4", DurationMS: 2500}
+
+	updated := editorHTTPValue[model.EditorSession](t, NewDevHTTPServer(service), http.MethodPost, "/v1/editor/sessions/"+session.SessionID+"/style-references/assets", map[string]any{"path": path})
+	if len(updated.AssetCatalog.Artifacts) != 1 || len(updated.EditPlan.Shots) != 0 || updated.AssetCatalog.Timeline.DurationMS != 0 {
+		t.Fatalf("style reference unexpectedly entered timeline: %+v", updated)
+	}
+	asset := updated.AssetCatalog.Artifacts[0]
+	if asset.Kind != "style_reference_video" || asset.IncludeInDemo || asset.AssetRole != "style_reference_only" {
+		t.Fatalf("style reference metadata missing: %+v", asset)
+	}
+
+	templates := editorHTTPValue[[]model.VideoStyleTemplate](t, NewDevHTTPServer(service), http.MethodGet, "/v1/editor/style-templates", nil)
+	if len(templates) == 0 {
+		t.Fatal("expected style templates")
+	}
+	draft := editorHTTPValue[model.EditorStyleDraft](t, NewDevHTTPServer(service), http.MethodPost, "/v1/editor/sessions/"+session.SessionID+"/style-drafts", map[string]any{
+		"expected_revision": updated.Revision, "template_id": templates[0].TemplateID, "reference_asset_id": asset.ID, "reference_rights_confirmed": true,
+	})
+	if draft.StyleProfile.AnalysisStatus != "pending_analysis" || draft.ProposedEditPlan.PlanID == updated.EditPlan.PlanID {
+		t.Fatalf("unexpected style draft: %+v", draft)
+	}
+}
+
 func editorHTTPValue[T any](t *testing.T, server *DevHTTPServer, method, path string, body any) T {
 	t.Helper()
 	var payload []byte
