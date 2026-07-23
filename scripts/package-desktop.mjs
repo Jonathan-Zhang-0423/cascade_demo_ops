@@ -119,6 +119,8 @@ function buildPackageManifest() {
         "native_server_status_query",
         "native_server_result_package_fetch",
         "native_server_result_ack",
+        "native_server_artifact_download",
+        "native_server_artifact_checksum_verify",
         "stage_plan_review",
         "script_outline_review",
         "native_approval_clipboard_copy",

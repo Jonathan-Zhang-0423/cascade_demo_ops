@@ -3,12 +3,16 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -74,6 +78,27 @@ type CloudAckRequest struct {
 	AckedByInstallID  string   `json:"acked_by_install_id,omitempty"`
 	ExchangePackageID string   `json:"exchange_package_id,omitempty"`
 	UseResultSummary  bool     `json:"use_result_summary,omitempty"`
+}
+
+type CloudDeliverableDownloadRequest struct {
+	OrgID             string                     `json:"org_id,omitempty"`
+	ResultPackageID   string                     `json:"result_package_id"`
+	ExchangePackageID string                     `json:"exchange_package_id,omitempty"`
+	Deliverable       model.ExecutionDeliverable `json:"deliverable"`
+	OutputDirectory   string                     `json:"output_directory"`
+}
+
+type CloudDeliverableDownloadResult struct {
+	ArtifactID       string `json:"artifact_id"`
+	Kind             string `json:"kind,omitempty"`
+	Role             string `json:"role,omitempty"`
+	MimeType         string `json:"mime_type,omitempty"`
+	DownloadURL      string `json:"download_url,omitempty"`
+	LocalPath        string `json:"local_path"`
+	SizeBytes        int64  `json:"size_bytes,omitempty"`
+	SHA256           string `json:"sha256"`
+	ExpectedSHA256   string `json:"expected_sha256,omitempty"`
+	ChecksumVerified bool   `json:"checksum_verified"`
 }
 
 type CloudLifecycleRequest struct {
@@ -474,6 +499,79 @@ func (s *Service) GetCloudResultPackage(ctx context.Context, request CloudResult
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
 	return cloudGetJSON[model.RecordingResultPackage](ctx, client, session.BaseURL+"/v1/result-packages/"+url.PathEscape(request.ResultPackageID), session.SessionToken, firstNonEmptyString(request.OrgID, defaultDesktopOrgID))
+}
+
+func (s *Service) DownloadCloudResultDeliverable(ctx context.Context, request CloudDeliverableDownloadRequest) (CloudDeliverableDownloadResult, error) {
+	resultPackageID := strings.TrimSpace(request.ResultPackageID)
+	if resultPackageID == "" {
+		return CloudDeliverableDownloadResult{}, errors.New("result_package_id is required")
+	}
+	deliverable := request.Deliverable
+	if strings.TrimSpace(deliverable.ID) == "" {
+		return CloudDeliverableDownloadResult{}, errors.New("deliverable id is required")
+	}
+	outputDir := strings.TrimSpace(request.OutputDirectory)
+	if outputDir == "" {
+		return CloudDeliverableDownloadResult{}, errors.New("output_directory is required")
+	}
+	session, err := s.EnsureExchangeSession(ctx, "", request.OrgID, "")
+	if err != nil {
+		return CloudDeliverableDownloadResult{}, err
+	}
+	endpoint, err := resolveCloudDeliverableDownloadURL(session.BaseURL, resultPackageID, deliverable)
+	if err != nil {
+		return CloudDeliverableDownloadResult{}, err
+	}
+	client := &http.Client{Timeout: 5 * time.Minute}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return CloudDeliverableDownloadResult{}, err
+	}
+	setExchangeAuthHeader(req, session.SessionToken)
+	orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
+	if orgID != "" {
+		req.Header.Set(cascadeOrgIDHeader, orgID)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return CloudDeliverableDownloadResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return CloudDeliverableDownloadResult{}, fmt.Errorf("GET %s returned %d: %s", endpoint, resp.StatusCode, redactBridgeError(string(data)))
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return CloudDeliverableDownloadResult{}, err
+	}
+	localPath := filepath.Join(outputDir, cloudDeliverableFileName(deliverable))
+	file, err := os.Create(localPath)
+	if err != nil {
+		return CloudDeliverableDownloadResult{}, err
+	}
+	hasher := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(file, hasher), resp.Body)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return CloudDeliverableDownloadResult{}, copyErr
+	}
+	if closeErr != nil {
+		return CloudDeliverableDownloadResult{}, closeErr
+	}
+	sum := hex.EncodeToString(hasher.Sum(nil))
+	expected := strings.ToLower(strings.TrimSpace(deliverable.SHA256))
+	return CloudDeliverableDownloadResult{
+		ArtifactID:       deliverable.ID,
+		Kind:             deliverable.Kind,
+		Role:             deliverable.Role,
+		MimeType:         firstNonEmptyString(deliverable.MimeType, resp.Header.Get("Content-Type")),
+		DownloadURL:      endpoint,
+		LocalPath:        localPath,
+		SizeBytes:        size,
+		SHA256:           sum,
+		ExpectedSHA256:   expected,
+		ChecksumVerified: expected != "" && strings.EqualFold(sum, expected),
+	}, nil
 }
 
 func (s *Service) AckCloudResultPackage(ctx context.Context, request CloudAckRequest) (model.ResultPackageAckResponse, error) {
@@ -2272,6 +2370,60 @@ func receivedAssetIDs(deliverables []model.ExecutionDeliverable) []string {
 		}
 	}
 	return out
+}
+
+func resolveCloudDeliverableDownloadURL(baseURL string, resultPackageID string, deliverable model.ExecutionDeliverable) (string, error) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return "", errors.New("cloud base url is required")
+	}
+	downloadURL := strings.TrimSpace(deliverable.DownloadURL)
+	if downloadURL == "" {
+		downloadURL = fmt.Sprintf("/v1/dev/result-packages/%s/deliverables/%s", url.PathEscape(resultPackageID), url.PathEscape(deliverable.ID))
+	}
+	if parsed, err := url.Parse(downloadURL); err == nil && parsed.IsAbs() {
+		return downloadURL, nil
+	}
+	if !strings.HasPrefix(downloadURL, "/") {
+		downloadURL = "/" + downloadURL
+	}
+	return baseURL + downloadURL, nil
+}
+
+func cloudDeliverableFileName(deliverable model.ExecutionDeliverable) string {
+	parts := []string{deliverable.Kind, deliverable.Role, deliverable.ID}
+	name := strings.Trim(strings.Join(parts, "_"), "_")
+	if name == "" {
+		name = "deliverable"
+	}
+	extension := extensionFromMimeType(deliverable.MimeType)
+	if extension == "" {
+		extension = filepath.Ext(deliverable.URI)
+	}
+	if extension != "" && !strings.HasSuffix(strings.ToLower(name), strings.ToLower(extension)) {
+		name += extension
+	}
+	replacer := strings.NewReplacer(`\`, "_", `/`, "_", ":", "_", "*", "_", "?", "_", `"`, "_", "<", "_", ">", "_", "|", "_", "\r", "_", "\n", "_")
+	return replacer.Replace(name)
+}
+
+func extensionFromMimeType(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0])) {
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "image/png":
+		return ".png"
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "application/zip":
+		return ".zip"
+	case "application/json":
+		return ".json"
+	default:
+		return ""
+	}
 }
 
 func cloudPostJSON[T any](ctx context.Context, client *http.Client, endpoint string, token string, orgID string, body any) (T, error) {

@@ -89,6 +89,7 @@ const (
 	idQueryServerStatus = 1059
 	idFetchServerResult = 1060
 	idAckServerResult   = 1061
+	idDownloadArtifacts = 1062
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -224,6 +225,7 @@ type nativeApp struct {
 	queryStatusBtn   syscall.Handle
 	fetchResultBtn   syscall.Handle
 	ackResultBtn     syscall.Handle
+	downloadBtn      syscall.Handle
 	clearDraftBtn    syscall.Handle
 	openLogBtn       syscall.Handle
 	statusList       syscall.Handle
@@ -232,22 +234,24 @@ type nativeApp struct {
 	stageJSON        nativeField
 	outlineJSON      nativeField
 
-	mu                  sync.Mutex
-	generating          bool
-	uploading           bool
-	queryingStatus      bool
-	fetchingResult      bool
-	ackingResult        bool
-	lastResult          *nativeGenerateResult
-	pendingResult       *nativeGenerateResult
-	pendingError        string
-	pendingUpload       *nativeUploadResult
-	pendingServerStatus *nativeServerStatusResult
-	pendingServerResult *nativeServerResultFetchResult
-	pendingServerAck    *nativeServerAckResult
-	recentPackages      []nativeRecentPackage
-	currentPreview      string
-	suppressDraftSave   bool
+	mu                   sync.Mutex
+	generating           bool
+	uploading            bool
+	queryingStatus       bool
+	fetchingResult       bool
+	ackingResult         bool
+	downloadingArtifacts bool
+	lastResult           *nativeGenerateResult
+	pendingResult        *nativeGenerateResult
+	pendingError         string
+	pendingUpload        *nativeUploadResult
+	pendingServerStatus  *nativeServerStatusResult
+	pendingServerResult  *nativeServerResultFetchResult
+	pendingServerAck     *nativeServerAckResult
+	pendingDownloads     *nativeArtifactDownloadBatch
+	recentPackages       []nativeRecentPackage
+	currentPreview       string
+	suppressDraftSave    bool
 }
 
 type nativeField struct {
@@ -365,6 +369,27 @@ type nativeServerAckRecord struct {
 	AckedAt           time.Time `json:"acked_at,omitempty"`
 	AckedByInstallID  string    `json:"acked_by_install_id,omitempty"`
 	OutputDirectory   string    `json:"output_directory,omitempty"`
+}
+
+type nativeArtifactDownloadBatch struct {
+	Record    nativeServerHandoffRecord
+	Manifest  nativeArtifactDownloadManifest
+	Downloads []app.CloudDeliverableDownloadResult
+}
+
+type nativeArtifactDownloadManifest struct {
+	SchemaVersion       string                               `json:"schema_version"`
+	ProjectID           string                               `json:"project_id,omitempty"`
+	OrgID               string                               `json:"org_id,omitempty"`
+	ExchangePackageID   string                               `json:"exchange_package_id,omitempty"`
+	ResultPackageID     string                               `json:"result_package_id"`
+	OutputDirectory     string                               `json:"output_directory,omitempty"`
+	DownloadDirectory   string                               `json:"download_directory"`
+	DownloadedAt        time.Time                            `json:"downloaded_at"`
+	ArtifactCount       int                                  `json:"artifact_count"`
+	VerifiedCount       int                                  `json:"verified_count"`
+	ChecksumMismatchIDs []string                             `json:"checksum_mismatch_ids,omitempty"`
+	Artifacts           []app.CloudDeliverableDownloadResult `json:"artifacts"`
 }
 
 type nativeRecentPackage struct {
@@ -542,6 +567,16 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 			app.finishServerAckError()
 		}
 		return 0
+	case wmAppArtifactsDone:
+		if app != nil {
+			app.finishArtifactDownloads()
+		}
+		return 0
+	case wmAppArtifactsFailed:
+		if app != nil {
+			app.finishArtifactDownloadsError()
+		}
+		return 0
 	case wmDestroy:
 		if app != nil {
 			app.disposeUIResources()
@@ -617,6 +652,7 @@ func (a *nativeApp) createControls() {
 	a.queryStatusBtn = createChild(a.hwnd, "BUTTON", "查询服务器状态", wsChild|wsVisible|bsPushButton, idQueryServerStatus)
 	a.fetchResultBtn = createChild(a.hwnd, "BUTTON", "获取结果包", wsChild|wsVisible|bsPushButton, idFetchServerResult)
 	a.ackResultBtn = createChild(a.hwnd, "BUTTON", "确认交付 ACK", wsChild|wsVisible|bsPushButton, idAckServerResult)
+	a.downloadBtn = createChild(a.hwnd, "BUTTON", "下载产物并校验", wsChild|wsVisible|bsPushButton, idDownloadArtifacts)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.statusBar = createChild(a.hwnd, "STATIC", a.statusBarText(""), wsChild|wsVisible|wsBorder, idStatusBar)
@@ -647,6 +683,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.queryServerStatus()
 	case idFetchServerResult:
 		a.fetchServerResult()
+	case idDownloadArtifacts:
+		a.downloadServerArtifacts()
 	case idAckServerResult:
 		a.ackServerResult()
 	case idClearDraft:
@@ -689,10 +727,11 @@ func (a *nativeApp) commandAllowed(id int) bool {
 	queryingStatus := a.queryingStatus
 	fetchingResult := a.fetchingResult
 	ackingResult := a.ackingResult
+	downloadingArtifacts := a.downloadingArtifacts
 	hasResult := a.lastResult != nil
 	hasRecent := len(a.recentPackages) > 0
 	a.mu.Unlock()
-	busy := generating || uploading || queryingStatus || fetchingResult || ackingResult
+	busy := generating || uploading || queryingStatus || fetchingResult || ackingResult || downloadingArtifacts
 	switch id {
 	case idOpenLog, idMenuExit:
 		return true
@@ -700,7 +739,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return !busy && a.inputReady()
 	case idBrowseRepo, idImportRequirement, idImportPackage, idClearDraft:
 		return !busy
-	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved, idQueryServerStatus, idFetchServerResult, idAckServerResult:
+	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved, idQueryServerStatus, idFetchServerResult, idDownloadArtifacts, idAckServerResult:
 		return !busy && hasResult
 	case idOpenRecentPackage:
 		return !busy && hasRecent
@@ -726,6 +765,7 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(fileMenu, idUploadApproved, "上传已审批包到服务器\tCtrl+U")
 	appendMenuItem(fileMenu, idQueryServerStatus, "查询服务器状态\tCtrl+Shift+U")
 	appendMenuItem(fileMenu, idFetchServerResult, "获取服务器结果包\tCtrl+Alt+R")
+	appendMenuItem(fileMenu, idDownloadArtifacts, "下载服务器产物并校验\tCtrl+Alt+D")
 	appendMenuItem(fileMenu, idAckServerResult, "确认服务器交付 ACK\tCtrl+Alt+A")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录\tCtrl+Shift+O")
@@ -763,6 +803,7 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fControl, Key: 'U', Cmd: idUploadApproved},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'U', Cmd: idQueryServerStatus},
 		{FVirt: fVirtKey | fAlt, Key: 'R', Cmd: idFetchServerResult},
+		{FVirt: fVirtKey | fAlt, Key: 'D', Cmd: idDownloadArtifacts},
 		{FVirt: fVirtKey | fAlt, Key: 'A', Cmd: idAckServerResult},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'O', Cmd: idOpenOutput},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'R', Cmd: idOpenRecentPackage},
@@ -830,7 +871,7 @@ func (a *nativeApp) layout() {
 	y := leftTop + 34
 	rowH := 30
 	leftInnerW := leftW - 28
-	inputH := 590
+	inputH := 626
 	statusTop := leftTop + inputH + 12
 	statusH := maxInt(150, contentBottom-statusTop)
 
@@ -872,7 +913,8 @@ func (a *nativeApp) layout() {
 	moveControl(a.uploadBtn, x, y+120, 190, 32)
 	moveControl(a.queryStatusBtn, x+202, y+120, 190, 32)
 	moveControl(a.fetchResultBtn, x, y+158, 190, 32)
-	moveControl(a.ackResultBtn, x+202, y+158, 190, 32)
+	moveControl(a.downloadBtn, x+202, y+158, 190, 32)
+	moveControl(a.ackResultBtn, x, y+196, leftInnerW, 32)
 
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
@@ -1598,6 +1640,140 @@ func (a *nativeApp) postServerResultError(message string) {
 	procPostMessageW.Call(uintptr(a.hwnd), wmAppServerResultFailed, 0, 0)
 }
 
+func (a *nativeApp) downloadServerArtifacts() {
+	a.mu.Lock()
+	if a.serverBusyLocked() {
+		a.mu.Unlock()
+		return
+	}
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可下载产物的执行包。")
+		return
+	}
+	dir := nativeResultOutputDir(result, a.runtimeConfig.ArtifactRoot)
+	record, err := readServerHandoffRecord(dir)
+	if err != nil {
+		a.addStatus("下载服务器产物被阻止：" + err.Error())
+		messageBox("Cascade DemoOps", "当前三合一包还没有服务器交接记录。\n\n请先上传、查询状态并获取结果包。\n\n详情："+err.Error(), true)
+		return
+	}
+	resultPackage, err := readServerResultPackage(dir)
+	if err != nil {
+		a.addStatus("下载服务器产物被阻止：" + err.Error())
+		messageBox("Cascade DemoOps", "请先获取服务器结果包。\n\n详情："+err.Error(), true)
+		return
+	}
+	deliverables := deliverablesForDownload(record, resultPackage)
+	if len(deliverables) == 0 {
+		message := "结果包没有可下载的 deliverable。请确认服务器状态 result_summary.deliverables 或 result delivery asset_refs 是否已返回下载信息。"
+		a.addStatus("下载服务器产物被阻止：no deliverables")
+		messageBox("Cascade DemoOps", message, true)
+		return
+	}
+	if strings.TrimSpace(a.runtimeConfig.CloudExchangeBaseURL) == "" {
+		messageBox("Cascade DemoOps", "服务器地址未配置，无法下载产物。", true)
+		return
+	}
+	if !confirmBox(a.hwnd, "Cascade DemoOps", fmt.Sprintf("确认下载服务器产物并校验 checksum？\n\n将下载 %d 个 deliverable 到 server_deliverables 文件夹。", len(deliverables))) {
+		a.addStatus("已取消下载服务器产物。")
+		return
+	}
+	a.mu.Lock()
+	a.downloadingArtifacts = true
+	a.pendingDownloads = nil
+	a.pendingError = ""
+	a.mu.Unlock()
+	setWindowText(a.downloadBtn, "下载中...")
+	setWindowText(a.workflowState, "正在下载服务器产物")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 下载中")
+	a.updateActionStateFromCurrent()
+	a.addStatus(fmt.Sprintf("开始下载服务器产物：count=%d result_package_id=%s", len(deliverables), record.ResultPackageID))
+	go a.downloadServerArtifactsAsync(record, deliverables)
+}
+
+func (a *nativeApp) downloadServerArtifactsAsync(record nativeServerHandoffRecord, deliverables []model.ExecutionDeliverable) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	downloadDir := serverDeliverablesDir(record.OutputDirectory)
+	downloads := make([]app.CloudDeliverableDownloadResult, 0, len(deliverables))
+	for _, deliverable := range deliverables {
+		download, err := a.service.DownloadCloudResultDeliverable(ctx, app.CloudDeliverableDownloadRequest{
+			OrgID:             firstNonEmptyNative(record.OrgID, nativeDefaultOrgID),
+			ResultPackageID:   strings.TrimSpace(record.ResultPackageID),
+			ExchangePackageID: record.ExchangePackageID,
+			Deliverable:       deliverable,
+			OutputDirectory:   downloadDir,
+		})
+		if err != nil {
+			a.postArtifactDownloadError(err.Error())
+			return
+		}
+		downloads = append(downloads, download)
+	}
+	manifest := artifactDownloadManifest(record, downloadDir, downloads)
+	a.mu.Lock()
+	a.pendingDownloads = &nativeArtifactDownloadBatch{Record: record, Manifest: manifest, Downloads: downloads}
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppArtifactsDone, 0, 0)
+}
+
+func (a *nativeApp) finishArtifactDownloads() {
+	a.mu.Lock()
+	batch := a.pendingDownloads
+	a.pendingDownloads = nil
+	a.downloadingArtifacts = false
+	a.mu.Unlock()
+	setWindowText(a.downloadBtn, "下载产物并校验")
+	a.updateActionStateFromCurrent()
+	if batch == nil {
+		a.finishArtifactDownloadsErrorMessage("服务器产物下载完成但没有得到下载记录。")
+		return
+	}
+	if err := writeArtifactDownloadManifest(batch.Record.OutputDirectory, batch.Manifest); err != nil {
+		a.addStatus("服务器产物下载清单保存失败：" + err.Error())
+		messageBox("Cascade DemoOps", "服务器产物下载清单保存失败：\n"+err.Error(), true)
+		return
+	}
+	setWindowText(a.workflowState, "服务器产物已下载")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 产物已下载")
+	setWindowText(a.previewSummary, artifactDownloadSummary(batch.Manifest))
+	if strings.TrimSpace(batch.Record.OutputDirectory) != "" {
+		setWindowText(a.artifactStatus, "服务器产物已下载："+serverDeliverablesDir(batch.Record.OutputDirectory))
+		a.setStatusBarOutput(batch.Record.OutputDirectory)
+	}
+	a.addStatus(fmt.Sprintf("服务器产物已下载：verified=%d/%d", batch.Manifest.VerifiedCount, batch.Manifest.ArtifactCount))
+}
+
+func (a *nativeApp) finishArtifactDownloadsError() {
+	a.mu.Lock()
+	message := a.pendingError
+	a.pendingError = ""
+	a.downloadingArtifacts = false
+	a.mu.Unlock()
+	a.finishArtifactDownloadsErrorMessage(message)
+}
+
+func (a *nativeApp) finishArtifactDownloadsErrorMessage(message string) {
+	setWindowText(a.downloadBtn, "下载产物并校验")
+	setWindowText(a.workflowState, "产物下载失败")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 下载失败")
+	a.updateActionStateFromCurrent()
+	if strings.TrimSpace(message) == "" {
+		message = "服务器产物下载失败。"
+	}
+	a.addStatus("服务器产物下载失败：" + message)
+	messageBox("Cascade DemoOps", message, true)
+}
+
+func (a *nativeApp) postArtifactDownloadError(message string) {
+	a.mu.Lock()
+	a.pendingError = message
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppArtifactsFailed, 0, 0)
+}
+
 func (a *nativeApp) ackServerResult() {
 	a.mu.Lock()
 	if a.serverBusyLocked() {
@@ -1622,10 +1798,22 @@ func (a *nativeApp) ackServerResult() {
 		return
 	}
 	received := []string{}
-	if resultPackage, err := readServerResultPackage(dir); err == nil {
+	verifiedByDownload := false
+	if manifest, err := readArtifactDownloadManifest(dir); err == nil && len(manifest.Artifacts) > 0 && len(manifest.ChecksumMismatchIDs) == 0 {
+		for _, artifact := range manifest.Artifacts {
+			if artifact.ChecksumVerified {
+				received = append(received, artifact.ArtifactID)
+			}
+		}
+		verifiedByDownload = len(received) > 0
+	} else if resultPackage, err := readServerResultPackage(dir); err == nil {
 		received = resultReceivedAssetIDs(resultPackage)
 	}
-	message := "确认服务器结果交付 ACK？\n\n当前版本按服务器返回的结果包和 checksum 元数据确认交付；真实视频/截图二进制下载与本地 hash 校验会作为后续独立能力接入。\n\nResult Package ID:\n" + record.ResultPackageID
+	verificationMode := "当前将按服务器返回的结果包和 checksum 元数据确认交付。建议先执行“下载产物并校验”。"
+	if verifiedByDownload {
+		verificationMode = fmt.Sprintf("已基于本地下载文件完成 checksum 校验：%d 个 artifact。", len(received))
+	}
+	message := "确认服务器结果交付 ACK？\n\n" + verificationMode + "\n\nResult Package ID:\n" + record.ResultPackageID
 	if !confirmBox(a.hwnd, "Cascade DemoOps", message) {
 		a.addStatus("已取消服务器结果 ACK。")
 		return
@@ -1959,6 +2147,43 @@ func writeServerAckRecord(dir string, record nativeServerAckRecord) error {
 	return os.WriteFile(serverAckRecordPath(dir), append(data, '\n'), 0o644)
 }
 
+func writeArtifactDownloadManifest(dir string, manifest nativeArtifactDownloadManifest) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return errors.New("artifact download manifest directory is empty")
+	}
+	if strings.TrimSpace(manifest.SchemaVersion) == "" {
+		manifest.SchemaVersion = "demoops.native_artifact_download_manifest.v1"
+	}
+	manifest.OutputDirectory = dir
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(serverDeliverablesDir(dir), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(serverDeliverablesManifestPath(dir), append(data, '\n'), 0o644)
+}
+
+func readArtifactDownloadManifest(dir string) (nativeArtifactDownloadManifest, error) {
+	data, err := os.ReadFile(serverDeliverablesManifestPath(dir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nativeArtifactDownloadManifest{}, errors.New("server_deliverables/manifest.json is missing")
+	}
+	if err != nil {
+		return nativeArtifactDownloadManifest{}, err
+	}
+	if len(data) > maxPackageImportBytes {
+		return nativeArtifactDownloadManifest{}, errors.New("server_deliverables/manifest.json is unexpectedly large")
+	}
+	var manifest nativeArtifactDownloadManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nativeArtifactDownloadManifest{}, fmt.Errorf("server_deliverables/manifest.json is invalid: %w", err)
+	}
+	return manifest, nil
+}
+
 func serverResultPackagePath(dir string) string {
 	return filepath.Join(strings.TrimSpace(dir), "server_result_package.json")
 }
@@ -1969,6 +2194,14 @@ func serverResultRecordPath(dir string) string {
 
 func serverAckRecordPath(dir string) string {
 	return filepath.Join(strings.TrimSpace(dir), "server_result_ack.json")
+}
+
+func serverDeliverablesDir(dir string) string {
+	return filepath.Join(strings.TrimSpace(dir), "server_deliverables")
+}
+
+func serverDeliverablesManifestPath(dir string) string {
+	return filepath.Join(serverDeliverablesDir(dir), "manifest.json")
 }
 
 func resultFiles(result *nativeGenerateResult) map[string]string {
@@ -2698,9 +2931,10 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	queryingStatus := a.queryingStatus
 	fetchingResult := a.fetchingResult
 	ackingResult := a.ackingResult
+	downloadingArtifacts := a.downloadingArtifacts
 	hasRecent := len(a.recentPackages) > 0
 	a.mu.Unlock()
-	busy := generating || uploading || queryingStatus || fetchingResult || ackingResult
+	busy := generating || uploading || queryingStatus || fetchingResult || ackingResult || downloadingArtifacts
 	generateEnabled := !busy && a.inputReady()
 	recentEnabled := !busy && hasRecent
 	setEnabled(a.generateBtn, generateEnabled)
@@ -2714,6 +2948,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	setEnabled(a.uploadBtn, !busy && hasResult)
 	setEnabled(a.queryStatusBtn, !busy && hasResult)
 	setEnabled(a.fetchResultBtn, !busy && hasResult)
+	setEnabled(a.downloadBtn, !busy && hasResult)
 	setEnabled(a.ackResultBtn, !busy && hasResult)
 	setEnabled(a.openOutputBtn, !busy && hasResult)
 	setEnabled(a.openRecentBtn, recentEnabled)
@@ -2724,7 +2959,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.enableMenuItem(idImportRequirement, !busy)
 	a.enableMenuItem(idImportPackage, !busy)
 	a.enableMenuItem(idClearDraft, !busy)
-	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idUploadApproved, idQueryServerStatus, idFetchServerResult, idAckServerResult, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
+	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idUploadApproved, idQueryServerStatus, idFetchServerResult, idDownloadArtifacts, idAckServerResult, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
 		a.enableMenuItem(id, !busy && hasResult)
 	}
 	a.enableMenuItem(idCopyPreview, !busy && hasResult)
@@ -2741,7 +2976,7 @@ func (a *nativeApp) updateActionStateFromCurrent() {
 }
 
 func (a *nativeApp) serverBusyLocked() bool {
-	return a.generating || a.uploading || a.queryingStatus || a.fetchingResult || a.ackingResult
+	return a.generating || a.uploading || a.queryingStatus || a.fetchingResult || a.ackingResult || a.downloadingArtifacts
 }
 
 func nativeResultOutputDir(result *nativeGenerateResult, artifactRoot string) string {
@@ -3357,6 +3592,108 @@ func serverAckSummary(record nativeServerHandoffRecord, ack model.ResultPackageA
 	return strings.Join(lines, "\r\n")
 }
 
+func deliverablesForDownload(record nativeServerHandoffRecord, result model.RecordingResultPackage) []model.ExecutionDeliverable {
+	out := []model.ExecutionDeliverable{}
+	seen := map[string]bool{}
+	add := func(item model.ExecutionDeliverable) {
+		item.ID = strings.TrimSpace(item.ID)
+		if item.ID == "" || seen[item.ID] {
+			return
+		}
+		seen[item.ID] = true
+		out = append(out, item)
+	}
+	statusResultID := strings.TrimSpace(record.ResultPackageID)
+	if statusResultID != "" && strings.TrimSpace(record.ExchangePackageID) != "" {
+		// Download URLs from the server status response are not persisted in the compact handoff record,
+		// so result package asset refs below provide the resumable fallback.
+	}
+	for _, asset := range result.Delivery.AssetRefs {
+		add(model.ExecutionDeliverable{
+			ID:          asset.ID,
+			Kind:        asset.Kind,
+			Role:        asset.Role,
+			URI:         asset.URI,
+			MimeType:    asset.MimeType,
+			SHA256:      asset.SHA256,
+			SizeBytes:   asset.SizeBytes,
+			Sensitive:   asset.Sensitive,
+			DownloadURL: fmt.Sprintf("/v1/dev/result-packages/%s/deliverables/%s", url.PathEscape(record.ResultPackageID), url.PathEscape(asset.ID)),
+		})
+	}
+	for _, asset := range result.GeneratedAssets {
+		add(model.ExecutionDeliverable{
+			ID:        asset.ID,
+			Kind:      asset.Kind,
+			URI:       asset.URI,
+			MimeType:  asset.MimeType,
+			SHA256:    asset.SHA256,
+			SizeBytes: asset.SizeBytes,
+			Sensitive: asset.Sensitive,
+		})
+	}
+	return out
+}
+
+func artifactDownloadManifest(record nativeServerHandoffRecord, downloadDir string, downloads []app.CloudDeliverableDownloadResult) nativeArtifactDownloadManifest {
+	verified := 0
+	mismatches := []string{}
+	for _, download := range downloads {
+		if download.ChecksumVerified {
+			verified++
+			continue
+		}
+		if strings.TrimSpace(download.ExpectedSHA256) != "" {
+			mismatches = append(mismatches, download.ArtifactID)
+		}
+	}
+	return nativeArtifactDownloadManifest{
+		SchemaVersion:       "demoops.native_artifact_download_manifest.v1",
+		ProjectID:           record.ProjectID,
+		OrgID:               firstNonEmptyNative(record.OrgID, nativeDefaultOrgID),
+		ExchangePackageID:   record.ExchangePackageID,
+		ResultPackageID:     record.ResultPackageID,
+		OutputDirectory:     record.OutputDirectory,
+		DownloadDirectory:   downloadDir,
+		DownloadedAt:        time.Now().UTC(),
+		ArtifactCount:       len(downloads),
+		VerifiedCount:       verified,
+		ChecksumMismatchIDs: mismatches,
+		Artifacts:           downloads,
+	}
+}
+
+func artifactDownloadSummary(manifest nativeArtifactDownloadManifest) string {
+	lines := []string{
+		"服务器产物下载",
+		"Result Package ID: " + firstNonEmptyNative(manifest.ResultPackageID, "unknown"),
+		fmt.Sprintf("Artifacts: %d", manifest.ArtifactCount),
+		fmt.Sprintf("Checksum verified: %d/%d", manifest.VerifiedCount, manifest.ArtifactCount),
+		"Download directory: " + manifest.DownloadDirectory,
+	}
+	if len(manifest.ChecksumMismatchIDs) > 0 {
+		lines = append(lines, "Checksum mismatch: "+strings.Join(manifest.ChecksumMismatchIDs, ", "))
+	}
+	if len(manifest.Artifacts) > 0 {
+		lines = append(lines, "", "Downloaded Artifacts")
+		for i, artifact := range manifest.Artifacts {
+			if i >= 8 {
+				lines = append(lines, fmt.Sprintf("- ...and %d more artifacts", len(manifest.Artifacts)-i))
+				break
+			}
+			status := "unverified"
+			if artifact.ChecksumVerified {
+				status = "verified"
+			} else if strings.TrimSpace(artifact.ExpectedSHA256) == "" {
+				status = "no expected checksum"
+			}
+			lines = append(lines, fmt.Sprintf("- %s [%s] %s %s", firstNonEmptyNative(artifact.ArtifactID, "artifact"), firstNonEmptyNative(artifact.Kind, artifact.Role, "deliverable"), byteSizeLabel(int(artifact.SizeBytes)), status))
+		}
+	}
+	lines = append(lines, "", "Manifest: "+serverDeliverablesManifestPath(manifest.OutputDirectory), "Next: checksum 全部通过后可执行“确认交付 ACK”。")
+	return strings.Join(lines, "\r\n")
+}
+
 func resultDeliveryLabel(result model.RecordingResultPackage) string {
 	switch {
 	case !result.Delivery.AckedAt.IsZero() || result.Status == model.RecordingResultStatusAcked:
@@ -3577,6 +3914,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.queryStatusBtn,
 		a.fetchResultBtn,
 		a.ackResultBtn,
+		a.downloadBtn,
 		a.openOutputBtn,
 		a.openLogBtn,
 		a.statusList,
@@ -4067,6 +4405,8 @@ const (
 	wmAppServerResultFailed = 0x8008
 	wmAppServerAckDone      = 0x8009
 	wmAppServerAckFailed    = 0x800A
+	wmAppArtifactsDone      = 0x800B
+	wmAppArtifactsFailed    = 0x800C
 
 	lbAddString = 0x0180
 	lbSetCurSel = 0x0186
