@@ -586,6 +586,12 @@ func (a *nativeApp) startGenerate() {
 		a.mu.Unlock()
 		return
 	}
+	if !a.inputReady() {
+		a.mu.Unlock()
+		a.updateInputReadiness()
+		a.addStatus("产品 URL 和需求文本填写完整后才能生成。")
+		return
+	}
 	a.generating = true
 	a.mu.Unlock()
 	setWindowText(a.generateBtn, "生成中...")
@@ -897,23 +903,38 @@ func (a *nativeApp) updateInputReadiness() {
 		credentialState = "Credentials: incomplete"
 	}
 	setWindowText(a.inputReadiness, strings.Join([]string{urlState, requirementState, sourceState, credentialState}, "  |  "))
+	a.updateActionStateFromCurrent()
 }
 
 func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
-	setEnabled(a.generateBtn, !generating)
+	generateEnabled := !generating && a.inputReady()
+	setEnabled(a.generateBtn, generateEnabled)
 	setEnabled(a.saveBtn, !generating && hasResult)
 	setEnabled(a.browseRepoBtn, !generating)
 	setEnabled(a.importReqBtn, !generating)
 	setEnabled(a.openOutputBtn, !generating && hasResult)
 	setEnabled(a.openLogBtn, true)
 	a.setPreviewButtonsEnabled(!generating && hasResult)
-	for _, id := range []int{idGenerateButton, idBrowseRepo, idImportRequirement} {
-		a.enableMenuItem(id, !generating)
-	}
+	a.enableMenuItem(idGenerateButton, generateEnabled)
+	a.enableMenuItem(idBrowseRepo, !generating)
+	a.enableMenuItem(idImportRequirement, !generating)
 	for _, id := range []int{idSaveButton, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
 		a.enableMenuItem(id, !generating && hasResult)
 	}
 	a.enableMenuItem(idOpenLog, true)
+}
+
+func (a *nativeApp) updateActionStateFromCurrent() {
+	a.mu.Lock()
+	generating := a.generating
+	hasResult := a.lastResult != nil
+	a.mu.Unlock()
+	a.updateActionState(generating, hasResult)
+}
+
+func (a *nativeApp) inputReady() bool {
+	return strings.TrimSpace(getWindowText(a.productURL.Edit)) != "" &&
+		strings.TrimSpace(getWindowText(a.requirement.Edit)) != ""
 }
 
 func (a *nativeApp) setPhaseText(input string, understand string, pack string, review string) {

@@ -97,6 +97,7 @@ function buildPackageManifest() {
       native_capabilities: [
         "input_collection",
         "native_input_readiness_summary",
+        "native_generate_readiness_gate",
         "native_menu_bar",
         "native_folder_picker",
         "requirement_document_import",
