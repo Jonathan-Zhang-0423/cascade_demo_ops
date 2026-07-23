@@ -173,7 +173,7 @@ func repositoryInputs(input orchestrator.UserInput) []model.RepositoryInput {
 			URL:      input.GitRepoURL,
 			Provider: repositoryProviderForURL(input.GitRepoURL),
 			ReadOnly: true,
-			Primary:  input.LocalRepoPath == "",
+			Primary:  false,
 		})
 	}
 	if input.LocalRepoPath != "" {
@@ -181,8 +181,11 @@ func repositoryInputs(input orchestrator.UserInput) []model.RepositoryInput {
 			LocalPath: input.LocalRepoPath,
 			Provider:  "local",
 			ReadOnly:  true,
-			Primary:   input.GitRepoURL == "",
+			Primary:   false,
 		})
+	}
+	if len(repositories) == 1 {
+		repositories[0].Primary = true
 	}
 	return repositories
 }

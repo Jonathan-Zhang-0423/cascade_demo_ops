@@ -161,6 +161,11 @@ writeJSON(releaseManifest, {
     supports_custom_install_dir: true,
     supports_silent_install: true,
   },
+  desktop_ui: {
+    primary: "native_win32",
+    uses_browser_shell: false,
+    compatibility_web_host_flag: "--native=false",
+  },
   server_connectivity: {
     ...serverConnectivity,
   },
@@ -200,6 +205,11 @@ writeJSON(releaseChannelManifest, {
     creates_start_menu_launcher: true,
     supports_custom_install_dir: true,
     supports_silent_install: true,
+  },
+  desktop_ui: {
+    primary: "native_win32",
+    uses_browser_shell: false,
+    compatibility_web_host_flag: "--native=false",
   },
   server_connectivity: serverConnectivity,
   app_surfaces: appSurfaces,

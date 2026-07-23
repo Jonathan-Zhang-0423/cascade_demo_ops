@@ -20,6 +20,8 @@ assertFile(releaseManifestPath, "release manifest");
 const manifest = JSON.parse(readFileSync(releaseManifestPath, "utf8"));
 assert(manifest.schema_version === "demoops.desktop_package_manifest.v1", "unexpected manifest schema");
 assert(manifest.package_kind === "portable_zip", "desktop package must be portable_zip");
+assert(manifest.desktop_ui?.primary === "native_win32", "desktop package must declare native Win32 primary UI");
+assert(manifest.desktop_ui?.uses_browser_shell === false, "desktop package must not declare a browser shell as primary UI");
 assert(manifest.runtimes?.node?.path === "resources/runtimes/node/node.exe", "desktop package manifest must include bundled node runtime");
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assertServerRecordingBoundary(manifest.server_connectivity, "desktop package manifest");
@@ -78,9 +80,24 @@ const payload = JSON.parse(result.stdout);
 assert(payload.ready === true, "desktop entrypoint did not report ready=true");
 assert(payload.profile === "desktop", "desktop entrypoint did not use desktop profile");
 assert(payload.mode === "desktop", "desktop entrypoint did not use desktop mode");
+assert(payload.ui === "native", "desktop entrypoint must default to native UI");
 assertFile(resolve(smokeRoot, "user-data", "logs", "desktop-launcher.log"), "desktop launcher diagnostic log");
 
-const host = spawn(entrypoint, ["--open=false", "--addr", "127.0.0.1:0"], {
+const native = spawn(entrypoint, ["--addr", "127.0.0.1:0"], {
+  cwd: smokeRoot,
+  env: {
+    ...process.env,
+    CASCADE_DATA_ROOT: resolve(smokeRoot, "native-user-data"),
+  },
+  stdio: ["ignore", "pipe", "pipe"],
+});
+try {
+  await assertNativeWindowLaunch(native, resolve(smokeRoot, "native-user-data", "logs", "desktop-launcher.log"));
+} finally {
+  await terminateChild(native);
+}
+
+const host = spawn(entrypoint, ["--native=false", "--open=false", "--addr", "127.0.0.1:0"], {
   cwd: smokeRoot,
   env: {
     ...process.env,
@@ -319,6 +336,44 @@ function waitForReadyPayload(child) {
       }
       clearTimeout(timer);
       rejectReady(new Error(`desktop host exited before ready payload, code=${code}, stderr=${stderr}`));
+    });
+  });
+}
+
+function assertNativeWindowLaunch(child, logPath) {
+  return new Promise((resolveNative, rejectNative) => {
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      if (stdout.includes("Desktop host is serving packaged web assets") || stdout.includes("\"url\":\"http://")) {
+        rejectNative(new Error(`native launch unexpectedly started compatibility web host: ${stdout}`));
+        return;
+      }
+      if (child.exitCode !== null) {
+        rejectNative(new Error(`native desktop exited before smoke window interval. stdout=${stdout} stderr=${stderr}`));
+        return;
+      }
+      assertFile(logPath, "native desktop launcher log");
+      const log = readFileSync(logPath, "utf8");
+      assert(log.includes("starting native desktop ui"), "native desktop log must prove native UI startup");
+      assert(log.includes("本地原生应用已启动"), "native desktop log must prove native window initialization");
+      resolveNative();
+    }, 2500);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      rejectNative(err);
+    });
+    child.on("exit", (code) => {
+      if (code !== null && code !== 0) {
+        clearTimeout(timer);
+        rejectNative(new Error(`native desktop exited early, code=${code}, stdout=${stdout}, stderr=${stderr}`));
+      }
     });
   });
 }

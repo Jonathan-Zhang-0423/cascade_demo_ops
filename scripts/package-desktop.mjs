@@ -90,6 +90,18 @@ function buildPackageManifest() {
     created_at: new Date().toISOString(),
     entrypoint: slash(basename(desktopBinary)),
     resource_manifest: "resources/desktop-runtime.json",
+    desktop_ui: {
+      primary: "native_win32",
+      uses_browser_shell: false,
+      compatibility_web_host_flag: "--native=false",
+      native_capabilities: [
+        "input_collection",
+        "local_package_generation",
+        "stage_plan_review",
+        "script_outline_review",
+        "three_in_one_package_save",
+      ],
+    },
     runtimes: {
       node: existsSync(bundledNodePath)
         ? {

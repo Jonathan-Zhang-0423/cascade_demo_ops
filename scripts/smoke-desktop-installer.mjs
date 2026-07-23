@@ -35,6 +35,8 @@ assertFile(releaseChannelManifestPath, "desktop release channel manifest");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 assert(manifest.schema_version === "demoops.desktop_installer_manifest.v1", "unexpected installer manifest schema");
 assert(manifest.package_kind === "self_extracting_setup_exe", "installer must be self_extracting_setup_exe");
+assert(manifest.desktop_ui?.primary === "native_win32", "installer must declare native Win32 primary UI");
+assert(manifest.desktop_ui?.uses_browser_shell === false, "installer must not declare a browser shell as primary UI");
 assert(manifest.windows_manifest?.requested_execution_level === "asInvoker", "installer must declare asInvoker execution level");
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assertServerRecordingBoundary(manifest.server_connectivity, "installer manifest");
@@ -126,8 +128,23 @@ if (desktopCheck.status !== 0) {
 const desktopPayload = JSON.parse(desktopCheck.stdout);
 assert(desktopPayload.ready === true, "installed desktop did not report ready=true");
 assert(desktopPayload.profile === "desktop", "installed desktop did not use desktop profile");
+assert(desktopPayload.ui === "native", "installed desktop must default to native UI");
 
-const host = spawn(entrypoint, ["--open=false", "--addr", "127.0.0.1:0"], {
+const native = spawn(entrypoint, ["--addr", "127.0.0.1:0"], {
+  cwd: installDir,
+  env: {
+    ...process.env,
+    CASCADE_DATA_ROOT: resolve(smokeRoot, "native-user-data"),
+  },
+  stdio: ["ignore", "pipe", "pipe"],
+});
+try {
+  await assertNativeWindowLaunch(native, resolve(smokeRoot, "native-user-data", "logs", "desktop-launcher.log"));
+} finally {
+  await terminateChild(native);
+}
+
+const host = spawn(entrypoint, ["--native=false", "--open=false", "--addr", "127.0.0.1:0"], {
   cwd: installDir,
   env: {
     ...process.env,
@@ -246,6 +263,8 @@ function assertReleaseChannelManifest(channel, expected) {
   assert(channel.artifacts?.installer?.sha256 === expected.installerHash, "release channel installer hash mismatch");
   assert(channel.artifacts?.installer?.size_bytes === expected.installerSize, "release channel installer size mismatch");
   assert(channel.artifacts?.portable_zip?.file_name === expected.portableName, "release channel portable zip file mismatch");
+  assert(channel.desktop_ui?.primary === "native_win32", "release channel must declare native Win32 primary UI");
+  assert(channel.desktop_ui?.uses_browser_shell === false, "release channel must not declare a browser shell as primary UI");
   assert(channel.server_connectivity?.required_for_local_generation === false, "release channel must keep local generation server-optional");
   assertServerRecordingBoundary(channel.server_connectivity, "release channel");
   assertRequiredAppSurfaces(channel);
@@ -344,6 +363,44 @@ function waitForReadyPayload(child) {
       }
       clearTimeout(timer);
       rejectReady(new Error(`desktop host exited before ready payload, code=${code}, stderr=${stderr}`));
+    });
+  });
+}
+
+function assertNativeWindowLaunch(child, logPath) {
+  return new Promise((resolveNative, rejectNative) => {
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      if (stdout.includes("Desktop host is serving packaged web assets") || stdout.includes("\"url\":\"http://")) {
+        rejectNative(new Error(`native launch unexpectedly started compatibility web host: ${stdout}`));
+        return;
+      }
+      if (child.exitCode !== null) {
+        rejectNative(new Error(`native desktop exited before smoke window interval. stdout=${stdout} stderr=${stderr}`));
+        return;
+      }
+      assertFile(logPath, "native desktop launcher log");
+      const log = readFileSync(logPath, "utf8");
+      assert(log.includes("starting native desktop ui"), "native desktop log must prove native UI startup");
+      assert(log.includes("本地原生应用已启动"), "native desktop log must prove native window initialization");
+      resolveNative();
+    }, 2500);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      rejectNative(err);
+    });
+    child.on("exit", (code) => {
+      if (code !== null && code !== 0) {
+        clearTimeout(timer);
+        rejectNative(new Error(`native desktop exited early, code=${code}, stdout=${stdout}, stderr=${stderr}`));
+      }
     });
   });
 }

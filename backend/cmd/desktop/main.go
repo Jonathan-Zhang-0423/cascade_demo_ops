@@ -23,6 +23,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:0", "local desktop host address")
 	check := flag.Bool("check", false, "initialize the desktop bridge and exit")
 	openBrowser := flag.Bool("open", true, "open the desktop app window")
+	nativeUI := flag.Bool("native", true, "open the native desktop interface instead of the compatibility web host")
 	flag.Parse()
 
 	runtimeConfig, err := config.RuntimeConfigFromEnv()
@@ -36,7 +37,15 @@ func main() {
 
 	if *check {
 		logger.Printf("desktop check completed in %s", time.Since(startedAt))
-		writeReady(runtimeConfig, "", "Desktop bridge is initialized.")
+		writeReady(runtimeConfig, "", "Native desktop runtime is initialized.")
+		return
+	}
+	if *nativeUI && supportsNativeDesktopUI() {
+		logger.Printf("starting native desktop ui")
+		if err := runNativeDesktopUI(runtimeConfig, service, logger); err != nil {
+			must(err, runtimeConfig)
+		}
+		logger.Printf("native desktop ui stopped after %s", time.Since(startedAt))
 		return
 	}
 
@@ -83,6 +92,7 @@ func writeReady(runtimeConfig config.AppRuntimeConfig, url string, note string) 
 		"app":      "Cascade DemoOps Desktop",
 		"profile":  runtimeConfig.Profile,
 		"mode":     runtimeConfig.Mode,
+		"ui":       "native",
 		"database": runtimeConfig.DatabaseDialect,
 		"ready":    true,
 		"url":      url,
