@@ -169,14 +169,15 @@ func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 		Sandbox:         sandbox,
 	}
 	recordingResult := model.RecordingResultPackage{
-		ResultID:        resultPackageResultID(source.PackageID),
-		SourcePackageID: source.PackageID,
-		CloudJobID:      cloudJobID,
-		SchemaVersion:   model.RecordingResultPackageSchemaVersion,
-		Status:          model.RecordingResultStatusGenerated,
-		ExecutionTrace:  trace,
-		StepResults:     stepResults,
-		GeneratedAssets: artifacts,
+		ResultID:         resultPackageResultID(source.PackageID),
+		SourcePackageID:  source.PackageID,
+		CloudJobID:       cloudJobID,
+		SchemaVersion:    model.RecordingResultPackageSchemaVersion,
+		Status:           model.RecordingResultStatusGenerated,
+		ExecutionTrace:   trace,
+		StepResults:      stepResults,
+		GeneratedAssets:  artifacts,
+		ExecutionRuntime: source.ExecutableScriptBundle.ScriptManifest.Runtime,
 		VerificationReport: model.VerificationReport{
 			PassRate:             trace.PassRate,
 			FailedNodeIDs:        failedNodeIDs(stepResults),

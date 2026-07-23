@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -68,6 +69,7 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions/from-result-package", s.handleEditorSessionFromResultPackage)
+	mux.HandleFunc("GET /v1/editor/style-templates", s.handleEditorStyleTemplates)
 	mux.HandleFunc("/v1/editor/sessions/", s.handleEditorSessionRoute)
 	s.registerExchangeBootstrapRoutes(mux)
 	s.registerDevExchangeRoutes(mux)
@@ -104,6 +106,11 @@ func (s *DevHTTPServer) handleEditorSessionFromResultPackage(w http.ResponseWrit
 	writeBridgeValue(w, session, err)
 }
 
+func (s *DevHTTPServer) handleEditorStyleTemplates(w http.ResponseWriter, r *http.Request) {
+	templates, err := s.service.ListVideoStyleTemplates(r.Context())
+	writeBridgeValue(w, templates, err)
+}
+
 func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.Request) {
 	sessionID, suffix, ok := splitEditorSessionRoute(r.URL.Path)
 	if !ok {
@@ -124,6 +131,16 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && suffix == "/uploads":
 		s.handleEditorUpload(w, r, sessionID)
+	case r.Method == http.MethodPost && suffix == "/style-references/assets":
+		var request model.EditorImportAssetRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.ImportEditorStyleReference(r.Context(), sessionID, request)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/style-references/uploads":
+		s.handleEditorStyleReferenceUpload(w, r, sessionID)
 	case r.Method == http.MethodPost && suffix == "/plan":
 		var request model.EditorSavePlanRequest
 		if err := decodeJSON(r, &request); err != nil {
@@ -131,6 +148,35 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 			return
 		}
 		session, err := s.service.SaveEditorPlan(r.Context(), sessionID, request)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/style-drafts":
+		var request model.EditorStyleDraftRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		draft, err := s.service.CreateEditorStyleDraft(r.Context(), sessionID, request)
+		writeBridgeValue(w, draft, err)
+	case r.Method == http.MethodGet && strings.HasPrefix(suffix, "/style-drafts/"):
+		draftID := strings.TrimPrefix(suffix, "/style-drafts/")
+		if strings.TrimSpace(draftID) == "" || strings.Contains(draftID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		draft, err := s.service.GetEditorStyleDraft(r.Context(), sessionID, draftID)
+		writeBridgeValue(w, draft, err)
+	case r.Method == http.MethodPost && strings.HasSuffix(suffix, "/apply") && strings.HasPrefix(suffix, "/style-drafts/"):
+		draftID := strings.TrimSuffix(strings.TrimPrefix(suffix, "/style-drafts/"), "/apply")
+		if strings.TrimSpace(draftID) == "" || strings.Contains(draftID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		var request model.EditorApplyStyleDraftRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.ApplyEditorStyleDraft(r.Context(), sessionID, draftID, request)
 		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && suffix == "/validate":
 		report, err := s.service.ValidateEditorPlan(r.Context(), sessionID)
@@ -155,6 +201,14 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 }
 
 func (s *DevHTTPServer) handleEditorUpload(w http.ResponseWriter, r *http.Request, sessionID string) {
+	s.handleEditorMultipartUpload(w, r, sessionID, s.service.ImportEditorUpload)
+}
+
+func (s *DevHTTPServer) handleEditorStyleReferenceUpload(w http.ResponseWriter, r *http.Request, sessionID string) {
+	s.handleEditorMultipartUpload(w, r, sessionID, s.service.ImportEditorStyleReferenceUpload)
+}
+
+func (s *DevHTTPServer) handleEditorMultipartUpload(w http.ResponseWriter, r *http.Request, sessionID string, importer func(context.Context, string, string, io.Reader) (model.EditorSession, error)) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxEditorUploadBytes+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -175,7 +229,7 @@ func (s *DevHTTPServer) handleEditorUpload(w http.ResponseWriter, r *http.Reques
 			_ = part.Close()
 			continue
 		}
-		session, importErr := s.service.ImportEditorUpload(r.Context(), sessionID, part.FileName(), part)
+		session, importErr := importer(r.Context(), sessionID, part.FileName(), part)
 		_ = part.Close()
 		writeBridgeValue(w, session, importErr)
 		return

@@ -66,6 +66,19 @@ type EditorProviderCapability struct {
 	CanRepresentBusiness bool   `json:"can_represent_business_step"`
 }
 
+type EditorAutomationSummary struct {
+	SourcePackageID           string             `json:"source_package_id,omitempty"`
+	ExecutionRuntime          string             `json:"execution_runtime,omitempty"`
+	ValidationState           string             `json:"validation_state"`
+	LatestDecision            ValidationDecision `json:"latest_decision,omitempty"`
+	ValidationReportCount     int                `json:"validation_report_count"`
+	EvidenceBackedReportCount int                `json:"evidence_backed_report_count"`
+	PatchCount                int                `json:"patch_count"`
+	AppliedPatchCount         int                `json:"applied_patch_count"`
+	RolledBackPatchCount      int                `json:"rolled_back_patch_count"`
+	StageEventAuditAvailable  bool               `json:"stage_event_audit_available"`
+}
+
 type EditorSession struct {
 	SchemaVersion        string                        `json:"schema_version"`
 	SessionID            string                        `json:"session_id"`
@@ -83,6 +96,7 @@ type EditorSession struct {
 	Preview              EditorRenderState             `json:"preview"`
 	FinalRender          EditorRenderState             `json:"final_render"`
 	ProviderCapabilities []EditorProviderCapability    `json:"provider_capabilities"`
+	Automation           *EditorAutomationSummary      `json:"automation,omitempty"`
 }
 
 type EditorCreateSessionRequest struct {

@@ -17,18 +17,26 @@
       "source_tree": "sha256:tree"
     }
   },
+  "product_map_summary": {},
   "workflow_graph": {
     "id": "graph_contract",
     "project_id": "project_contract",
     "version": 1,
-    "name": "Team invite walkthrough",
     "status": "approved",
+    "name": "Team invite walkthrough",
+    "entry_point": "",
     "nodes": [
       {
         "id": "node_open_dashboard",
+        "action": "",
+        "selector": "",
+        "input_data": "",
+        "expected_outcome": "Dashboard loads",
+        "is_screenshot": false,
+        "has_zoom": false,
+        "retry_policy": 0,
         "type": "action",
         "title": "Open dashboard",
-        "expected_outcome": "Dashboard loads",
         "action_spec": {
           "type": "navigate",
           "target": {
@@ -38,9 +46,15 @@
       },
       {
         "id": "node_invite_member",
+        "action": "",
+        "selector": "",
+        "input_data": "",
+        "expected_outcome": "Invite flow starts",
+        "is_screenshot": false,
+        "has_zoom": false,
+        "retry_policy": 0,
         "type": "action",
         "title": "Invite teammate",
-        "expected_outcome": "Invite flow starts",
         "action_spec": {
           "type": "click",
           "target": {
@@ -55,7 +69,10 @@
         "from_node": "node_open_dashboard",
         "to_node": "node_invite_member"
       }
-    ]
+    ],
+    "assets": null,
+    "created_at": "0001-01-01T00:00:00Z",
+    "updated_at": "0001-01-01T00:00:00Z"
   },
   "recording_run_spec": {
     "run_id": "run_contract_outline",
@@ -103,7 +120,6 @@
       "entry_function": "runBrowserAgentOutline",
       "generator": "cascade_browser_agent_outline_packager",
       "generator_version": "0.1.0",
-      "dependency_allowlist": [],
       "context_apis": [
         "browser_agent.explore",
         "browser_agent.act",
@@ -166,8 +182,45 @@
               "url": "https://app.example.com/dashboard"
             }
           },
+          "target_contract": {
+            "semantic_id": "target_node_open_dashboard",
+            "purpose": "Dashboard loads",
+            "allowed_roles": [
+              "region"
+            ],
+            "allowed_names": [
+              "Dashboard"
+            ],
+            "component_ref": "component:dashboard",
+            "destructive": false,
+            "evidence_refs": [
+              {
+                "id": "ev_route_dashboard",
+                "kind": "source_code",
+                "summary": "Dashboard route summary"
+              }
+            ],
+            "confidence": 0.9
+          },
           "expected_outcome": "Dashboard loads",
-          "validations": [],
+          "validations": [
+            {
+              "id": "validation_node_open_dashboard",
+              "kind": "url_matches",
+              "target": {
+                "url": "https://app.example.com/dashboard"
+              },
+              "assertion": "https://app.example.com/dashboard",
+              "required": true,
+              "evidence_refs": [
+                {
+                  "id": "ev_route_dashboard",
+                  "kind": "source_code",
+                  "summary": "Dashboard route summary"
+                }
+              ]
+            }
+          ],
           "capture": {
             "screenshot": true,
             "video": true
@@ -202,8 +255,45 @@
               "test_id": "invite-member"
             }
           },
+          "target_contract": {
+            "semantic_id": "target_node_invite_member",
+            "purpose": "Invite flow starts",
+            "allowed_roles": [
+              "button"
+            ],
+            "allowed_names": [
+              "Invite teammate"
+            ],
+            "component_ref": "component:invite-button",
+            "destructive": false,
+            "evidence_refs": [
+              {
+                "id": "ev_selector_invite",
+                "kind": "source_code",
+                "summary": "Invite control summary"
+              }
+            ],
+            "confidence": 0.86
+          },
           "expected_outcome": "Invite flow starts",
-          "validations": [],
+          "validations": [
+            {
+              "id": "validation_node_invite_member",
+              "kind": "element_visible",
+              "target": {
+                "test_id": "invite-member"
+              },
+              "assertion": "Approved target is visible",
+              "required": true,
+              "evidence_refs": [
+                {
+                  "id": "ev_selector_invite",
+                  "kind": "source_code",
+                  "summary": "Invite control summary"
+                }
+              ]
+            }
+          ],
           "capture": {
             "screenshot": true,
             "video": true
@@ -242,7 +332,7 @@
         }
       },
       "reproducibility": {
-        "graph_hash_sha256": "sha256:graph"
+        "graph_hash_sha256": "3ee8c1762a68386a21e8fb598a98872bb014aa3b8d4886a831ab7cc650e0d79c"
       },
       "approval_checklist": {
         "human_approval_required": true,
@@ -250,13 +340,13 @@
         "credential_scope_review_required": true,
         "redactions_review_required": true,
         "ip_allowlist_acknowledgement_required": true
-      }
+      },
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
     },
     "playwright_script": {
       "mime_type": "application/x.browser-agent-outline+json",
-      "sha256": "",
-      "size_bytes": 0,
-      "encrypted": false
+      "sha256": ""
     },
     "stage_approval_plan": {
       "id": "stage_plan_contract_outline",
@@ -292,6 +382,26 @@
             ],
             "non_destructive": true,
             "selector_policy": "server_may_adapt_selector_within_evidence_chain"
+          },
+          "target_contract": {
+            "semantic_id": "target_node_open_dashboard",
+            "purpose": "Dashboard loads",
+            "allowed_roles": [
+              "region"
+            ],
+            "allowed_names": [
+              "Dashboard"
+            ],
+            "component_ref": "component:dashboard",
+            "destructive": false,
+            "evidence_refs": [
+              {
+                "id": "ev_route_dashboard",
+                "kind": "source_code",
+                "summary": "Dashboard route summary"
+              }
+            ],
+            "confidence": 0.9
           },
           "success_state": "Dashboard loads",
           "wait_conditions": [
@@ -334,6 +444,26 @@
             "non_destructive": true,
             "selector_policy": "server_may_adapt_selector_within_evidence_chain"
           },
+          "target_contract": {
+            "semantic_id": "target_node_invite_member",
+            "purpose": "Invite flow starts",
+            "allowed_roles": [
+              "button"
+            ],
+            "allowed_names": [
+              "Invite teammate"
+            ],
+            "component_ref": "component:invite-button",
+            "destructive": false,
+            "evidence_refs": [
+              {
+                "id": "ev_selector_invite",
+                "kind": "source_code",
+                "summary": "Invite control summary"
+              }
+            ],
+            "confidence": 0.86
+          },
           "success_state": "Invite flow starts",
           "wait_conditions": [
             "wait_after_entry_at_least_1000ms",
@@ -375,7 +505,9 @@
           "summary": "Dashboard route summary"
         }
       ],
-      "confidence": 0.88
+      "confidence": 0.88,
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
     },
     "script_outline": {
       "id": "outline_contract",
@@ -425,6 +557,26 @@
               "selector_policy": "prefer_role_name_testid_then_verified_css"
             }
           ],
+          "target_contract": {
+            "semantic_id": "target_node_open_dashboard",
+            "purpose": "Dashboard loads",
+            "allowed_roles": [
+              "region"
+            ],
+            "allowed_names": [
+              "Dashboard"
+            ],
+            "component_ref": "component:dashboard",
+            "destructive": false,
+            "evidence_refs": [
+              {
+                "id": "ev_route_dashboard",
+                "kind": "source_code",
+                "summary": "Dashboard route summary"
+              }
+            ],
+            "confidence": 0.9
+          },
           "wait_conditions": [
             "wait_after_entry_at_least_1000ms",
             "wait_for_render_stable_before_capture"
@@ -472,7 +624,8 @@
                   "value": "invite-member",
                   "confidence": 0.92,
                   "stability_score": 0.9,
-                  "source": "source_code"
+                  "source": "source_code",
+                  "last_validated_at": "0001-01-01T00:00:00Z"
                 }
               ],
               "evidence_refs": [
@@ -499,6 +652,26 @@
               "selector_policy": "prefer_role_name_testid_then_verified_css"
             }
           ],
+          "target_contract": {
+            "semantic_id": "target_node_invite_member",
+            "purpose": "Invite flow starts",
+            "allowed_roles": [
+              "button"
+            ],
+            "allowed_names": [
+              "Invite teammate"
+            ],
+            "component_ref": "component:invite-button",
+            "destructive": false,
+            "evidence_refs": [
+              {
+                "id": "ev_selector_invite",
+                "kind": "source_code",
+                "summary": "Invite control summary"
+              }
+            ],
+            "confidence": 0.86
+          },
           "wait_conditions": [
             "wait_after_entry_at_least_1000ms",
             "wait_for_render_stable_before_capture"
@@ -569,7 +742,9 @@
           "summary": "Invite control summary"
         }
       ],
-      "confidence": 0.86
+      "confidence": 0.86,
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
     },
     "agent_prompt_policy": {
       "id": "prompt_policy_contract",
@@ -610,7 +785,100 @@
         "allowed_domains=app.example.com",
         "forbidden_pages=/billing"
       ],
-      "human_review_required": true
+      "human_review_required": true,
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
+    },
+    "browser_agent_contract": {
+      "id": "browser_agent_contract_outline",
+      "project_id": "project_contract",
+      "workflow_graph_id": "graph_contract",
+      "schema_version": "demoops.browser_agent_contract.v1",
+      "mode": "bounded_runtime_repair",
+      "business_authority": {
+        "source": "app_approved_stage_plan",
+        "script_may_change_business_intent": false,
+        "runtime_page_may_change_business_intent": false,
+        "agent_may_change_business_intent": false
+      },
+      "repair_policy": {
+        "allowed_repair_kinds": [
+          "selector_alternative",
+          "wait_strategy",
+          "capture_timing",
+          "frame_resolution"
+        ],
+        "editable_fields": [
+          "script_outline.stages[].components[].selector",
+          "script_outline.stages[].wait_conditions",
+          "script_outline.stages[].capture_plan"
+        ],
+        "immutable_fields": [
+          "stage_order",
+          "objective",
+          "business_intent",
+          "action_type",
+          "input_semantics",
+          "secret_ref",
+          "allowed_domains",
+          "forbidden_pages",
+          "destructive"
+        ],
+        "max_repair_attempts": 2,
+        "max_patch_operations": 4,
+        "max_agent_runtime_ms": 180000,
+        "min_auto_apply_confidence": 0.9,
+        "same_node_only": true,
+        "same_action_type_only": true,
+        "same_domain_only": true,
+        "step_insert_allowed": false,
+        "step_delete_allowed": false,
+        "step_reorder_allowed": false,
+        "step_skip_allowed": false
+      },
+      "observation_policy": {
+        "allowed_fields": [
+          "url",
+          "title",
+          "role",
+          "name",
+          "text_summary",
+          "visibility",
+          "enabled",
+          "value_state",
+          "screenshot_ref"
+        ],
+        "full_html_allowed": false,
+        "cookies_allowed": false,
+        "authorization_headers_allowed": false,
+        "storage_content_allowed": false,
+        "input_values_allowed": false,
+        "source_code_allowed": false,
+        "max_interactive_elements": 200,
+        "max_text_length": 4096,
+        "mask_selectors": [
+          "[data-sensitive]"
+        ]
+      },
+      "model_policy": {
+        "provider_ref": "server_browser_agent_default",
+        "deployment_mode": "server_managed",
+        "customer_data_export_allowed": false,
+        "training_usage_allowed": false,
+        "retention_allowed": false,
+        "data_residency": "cn-beijing",
+        "request_timeout_ms": 30000
+      },
+      "conflict_policy": {
+        "on_graph_plan_conflict": "stop_and_report",
+        "on_target_contract_conflict": "stop_and_report",
+        "on_runtime_intent_conflict": "reunderstanding_required",
+        "on_ambiguous_target": "repair_allowed",
+        "on_outcome_verification_failure": "stop_and_report",
+        "on_repair_limit_exceeded": "stop_and_report"
+      },
+      "created_at": "2026-07-22T00:00:00Z",
+      "updated_at": "2026-07-22T00:00:00Z"
     },
     "understanding_dossier_ref": {
       "id": "artifact_contract_outline_dossier",
@@ -618,6 +886,7 @@
       "uri": "inline://project-understanding/script_doc_contract_outline",
       "mime_type": "application/json",
       "sha256": "sha256:dossier",
+      "created_at": "0001-01-01T00:00:00Z",
       "sensitive": true
     },
     "project_understanding_dossier": {
@@ -676,13 +945,15 @@
         "requirements": "sha256:req",
         "source_tree": "sha256:tree"
       },
-      "confidence": 0.86
+      "confidence": 0.86,
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
     },
     "approval_markdown": {
       "inline_markdown": "# Contract outline approval\n\nThis package uploads Stage JSON, Browser Agent outline, prompt policy, and evidence refs. It does not upload executable TypeScript.",
       "mime_type": "text/markdown",
-      "sha256": "sha256:markdown-outline",
-      "size_bytes": 145
+      "sha256": "1e3885486ca89f31a76fff9b4add940482985a6872a9ccb2c012c579982b4865",
+      "size_bytes": 160
     },
     "security_policy": {
       "allowed_domains": [
@@ -702,32 +973,34 @@
         "browser_agent.capture",
         "browser_agent.report"
       ],
-      "forbidden_imports": [],
-      "forbidden_identifiers": [],
       "network_policy": "allowed_domains_only_via_browser_agent",
       "file_system_policy": "no_direct_fs_access"
     },
     "reproducibility": {
-      "plan_hash_sha256": "sha256:plan-outline",
-      "stage_plan_hash_sha256": "sha256:stage-plan",
-      "outline_hash_sha256": "sha256:outline",
-      "prompt_policy_hash_sha256": "sha256:prompt-policy",
-      "understanding_dossier_hash_sha256": "sha256:dossier",
-      "markdown_hash_sha256": "sha256:markdown-outline",
-      "bundle_hash_sha256": "sha256:bundle-outline",
-      "graph_hash_sha256": "sha256:graph",
+      "plan_hash_sha256": "0a790bac139e29ea1601d7c8ff1ccd6f2125d1926f834f7d04660ce06a51ce04",
+      "stage_plan_hash_sha256": "16b362e3683ec429cea9dbf1009a8ef0fe87de102ca84eb28d2c8eb8be2e3ab2",
+      "outline_hash_sha256": "9631db1d5174258d2ec13052b0db49819abab55e60d111c8cb8c58116227f5ad",
+      "prompt_policy_hash_sha256": "d7e927013f7a6dac54f7323d9b0ab333cc4ea4e9c96b9b6de85e5fc211e55e2f",
+      "understanding_dossier_hash_sha256": "5ac443d96ff42a0ed607e71c4cae7d3bcaf780d32660ae23ce146aa154a5fe76",
+      "browser_agent_contract_hash_sha256": "a01e8dd9c9b5737fe1e3e6d61cff3446fec4b8885e4fc8311d8701c7adff4c4a",
+      "markdown_hash_sha256": "1e3885486ca89f31a76fff9b4add940482985a6872a9ccb2c012c579982b4865",
+      "bundle_hash_sha256": "df60b63dda61cb6a5b9b26fc51bcbd21aced9674d7fcc9e4f13316a924600093",
+      "graph_hash_sha256": "3ee8c1762a68386a21e8fb598a98872bb014aa3b8d4886a831ab7cc650e0d79c",
       "source_snapshot_digest": "sha256:tree"
     },
     "validation": {
       "valid": true,
-      "findings": []
-    }
+      "validated_at": "0001-01-01T00:00:00Z"
+    },
+    "created_at": "0001-01-01T00:00:00Z",
+    "updated_at": "0001-01-01T00:00:00Z"
   },
   "credential_grants": [
     {
       "grant_id": "grant_demo_login",
       "kind": "demo_account",
       "purpose": "cloud_recording_login",
+      "expires_at": "0001-01-01T00:00:00Z",
       "cloud_secret_ref": "vault://cloud/grants/grant_demo_login",
       "allowed_domains": [
         "app.example.com"
@@ -736,6 +1009,7 @@
         "login",
         "record_demo"
       ],
+      "rotation_required_after_run": false,
       "delete_after_run": true
     }
   ],
@@ -763,12 +1037,12 @@
     ]
   },
   "reproducibility": {
-    "graph_hash_sha256": "sha256:graph",
-    "source_snapshot_digest": "sha256:tree",
+    "graph_hash_sha256": "3ee8c1762a68386a21e8fb598a98872bb014aa3b8d4886a831ab7cc650e0d79c",
     "input_fingerprints": {
-      "source_tree": "sha256:tree",
-      "requirements": "sha256:req"
+      "requirements": "sha256:req",
+      "source_tree": "sha256:tree"
     },
+    "source_snapshot_digest": "sha256:tree",
     "created_with_app_version": "desktop-web-dev"
   },
   "safety_report": {
@@ -796,8 +1070,8 @@
     "pii_handling": "mask_in_artifacts"
   },
   "metadata": {
+    "dev_plaintext_upload_mode": true,
     "producer": "desktop_contract_fixture",
-    "runtime": "browser-agent-outline-v1",
-    "dev_plaintext_upload_mode": true
+    "runtime": "browser-agent-outline-v1"
   }
 }

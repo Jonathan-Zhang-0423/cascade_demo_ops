@@ -49,6 +49,9 @@ func TestExchangeContractFixturesLoadInGo(t *testing.T) {
 	if outlineBundle.PlaywrightScript.InlineSource != "" || outlineBundle.StageApprovalPlan == nil || outlineBundle.ScriptOutline == nil || outlineBundle.AgentPromptPolicy == nil {
 		t.Fatalf("outline fixture must carry outline contract without inline TS: %+v", outlineBundle)
 	}
+	if err := model.ValidateClientExecutionPackageForCloudExecution(&outlinePkg); err != nil {
+		t.Fatalf("browser-agent outline fixture must pass cloud execution validation: %v", err)
+	}
 
 	generatedFixture := readContractFixture(t, "recording_result.generated.json")
 	assertNoContractLeakage(t, generatedFixture)

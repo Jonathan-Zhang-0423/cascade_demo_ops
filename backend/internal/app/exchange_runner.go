@@ -9,8 +9,6 @@ import (
 	"runtime"
 	"time"
 
-	"cascade-demoops/backend/internal/driver"
-	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -46,36 +44,19 @@ func (s *Service) runUploadedExecutionPackage(ctx context.Context, orgID string,
 }
 
 func (s *Service) runUploadedExecutionPackageSync(ctx context.Context, orgID string, exchangePackageID string, pkg model.ClientExecutionPackage, cloudJobID string) (model.ExecutionPackageStatusResponse, error) {
-	_, _ = s.exchange.MarkExecutionStage(ctx, orgID, exchangePackageID, "preparing_worker", "Checking local video-worker, Node runtime, and artifact output directories.", 35)
-	workerPath := s.localVideoWorkerPath()
-	if workerPath == "" {
-		return s.failUploadedExecution(ctx, orgID, exchangePackageID, "video_worker_missing", errors.New("video worker path is not configured"))
-	}
-	if _, statErr := os.Stat(workerPath); statErr != nil {
-		return s.failUploadedExecution(ctx, orgID, exchangePackageID, "video_worker_missing", statErr)
-	}
-	if nodeErr := checkCommandReady(s.nodeBinaryForExecution()); nodeErr != nil {
-		return s.failUploadedExecution(ctx, orgID, exchangePackageID, "node_runtime_missing", nodeErr)
-	}
-
-	outputRoot := filepath.Join(s.runtime.ArtifactRoot, "exchange", safePathSegment(exchangePackageID))
-	recordingDir := filepath.Join(outputRoot, "recording")
-	renderDir := filepath.Join(outputRoot, "render")
-	localDriver := driver.NewLocalDriver(s.nodeBinaryForExecution(), workerPath)
-	result, err := executor.RunClientExecutionRecordingAndRender(ctx, localDriver, executor.RecordingRenderPipelineRequest{
-		SourcePackage:      &pkg,
-		CloudJobID:         cloudJobID,
-		RecordingOutputDir: recordingDir,
-		RenderOutputDir:    renderDir,
-		ResultCreatedAt:    time.Now().UTC(),
+	recordingDir, renderDir := executionRuntimeOutputDirs(s.runtime.ArtifactRoot, exchangePackageID)
+	router := newExecutionRuntimeRouter(localLegacyPlaywrightRunner{service: s}, s.outlineRunner)
+	result, err := router.Run(ctx, executionRuntimeRequest{
+		Package: &pkg, CloudJobID: cloudJobID,
+		RecordingOutputDir: recordingDir, RenderOutputDir: renderDir, ResultCreatedAt: time.Now().UTC(),
 		Progress: func(stage string, message string, progress int) {
 			_, _ = s.exchange.MarkExecutionStage(ctx, orgID, exchangePackageID, stage, message, progress)
 		},
 	})
 	if err != nil {
-		return s.failUploadedExecution(ctx, orgID, exchangePackageID, "recording_render_failed", err)
+		return s.failUploadedExecution(ctx, orgID, exchangePackageID, runtimeExecutionErrorCode(err), err)
 	}
-	return s.exchange.CompleteWithRecordingResult(ctx, orgID, exchangePackageID, result.RecordingResultPackage)
+	return s.exchange.CompleteWithRecordingResult(ctx, orgID, exchangePackageID, result)
 }
 
 func (s *Service) GetExecutionPackageDebug(ctx context.Context, orgID string, exchangePackageID string) (ExecutionPackageDebugView, error) {

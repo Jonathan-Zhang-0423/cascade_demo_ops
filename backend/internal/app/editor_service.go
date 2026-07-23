@@ -313,46 +313,8 @@ func (s *Service) ImportEditorUpload(ctx context.Context, sessionID, fileName st
 }
 
 func (s *Service) importEditorUpload(ctx context.Context, sessionID, fileName string, input io.Reader, maxBytes int64) (model.EditorSession, error) {
-	if input == nil {
-		return model.EditorSession{}, errors.New("editor upload file is required")
-	}
-	if _, err := s.loadEditorSession(sessionID); err != nil {
-		return model.EditorSession{}, err
-	}
-	label := filepath.Base(strings.TrimSpace(fileName))
-	extension := strings.ToLower(filepath.Ext(label))
-	if label == "." || label == "" || !editorUploadExtensions[extension] {
-		return model.EditorSession{}, errors.New("editor upload must be mp4, webm, mov, m4v, wav, mp3, m4a, aac, ogg, or flac")
-	}
-	uploadID, err := newEditorID("upload")
+	finalPath, label, err := s.saveEditorUpload(sessionID, fileName, input, maxBytes)
 	if err != nil {
-		return model.EditorSession{}, err
-	}
-	sessionPath, err := s.editorSessionPath(sessionID)
-	if err != nil {
-		return model.EditorSession{}, err
-	}
-	uploadRoot := filepath.Join(filepath.Dir(sessionPath), "uploads")
-	if err := os.MkdirAll(uploadRoot, 0o700); err != nil {
-		return model.EditorSession{}, err
-	}
-	finalPath := filepath.Join(uploadRoot, uploadID+extension)
-	tempPath := finalPath + ".tmp"
-	output, err := os.OpenFile(tempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return model.EditorSession{}, err
-	}
-	written, copyErr := io.Copy(output, io.LimitReader(input, maxBytes+1))
-	closeErr := output.Close()
-	if copyErr != nil || closeErr != nil || written > maxBytes {
-		_ = os.Remove(tempPath)
-		if written > maxBytes {
-			return model.EditorSession{}, fmt.Errorf("editor upload exceeds %d bytes", maxBytes)
-		}
-		return model.EditorSession{}, errors.Join(copyErr, closeErr)
-	}
-	if err := os.Rename(tempPath, finalPath); err != nil {
-		_ = os.Remove(tempPath)
 		return model.EditorSession{}, err
 	}
 	session, err := s.ImportEditorAsset(ctx, sessionID, model.EditorImportAssetRequest{Path: finalPath, Label: label})
@@ -361,6 +323,139 @@ func (s *Service) importEditorUpload(ctx context.Context, sessionID, fileName st
 		return model.EditorSession{}, err
 	}
 	return session, nil
+}
+
+// ImportEditorStyleReference registers a video used only to derive a future
+// style profile. It deliberately never adds a timeline shot or final-render
+// input, so a reference cannot accidentally become customer-facing footage.
+func (s *Service) ImportEditorStyleReference(ctx context.Context, sessionID string, request model.EditorImportAssetRequest) (model.EditorSession, error) {
+	s.editorMu.Lock()
+	defer s.editorMu.Unlock()
+	if s.editorWorker == nil {
+		return model.EditorSession{}, errors.New("editor worker is unavailable")
+	}
+	session, err := s.loadEditorSession(sessionID)
+	if err != nil {
+		return model.EditorSession{}, err
+	}
+	probe, err := s.editorWorker.ProbeMedia(ctx, executor.MediaProbeRequest{Path: request.Path})
+	if err != nil {
+		return model.EditorSession{}, err
+	}
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(probe.MimeType)), "video/") {
+		return model.EditorSession{}, errors.New("style reference must be a video asset")
+	}
+	for _, existing := range session.AssetCatalog.Artifacts {
+		if existing.SHA256 == probe.SHA256 {
+			return model.EditorSession{}, errors.New("the same media file is already imported")
+		}
+	}
+	assetID, err := newEditorID("style_reference")
+	if err != nil {
+		return model.EditorSession{}, err
+	}
+	label := strings.TrimSpace(request.Label)
+	if label == "" {
+		label = probe.FileName
+	}
+	session.AssetCatalog.Artifacts = append(session.AssetCatalog.Artifacts, model.TimelineArtifact{
+		ID:            assetID,
+		Kind:          "style_reference_video",
+		URI:           localFileURI(probe.Path),
+		MimeType:      probe.MimeType,
+		Label:         label,
+		SHA256:        probe.SHA256,
+		SizeBytes:     probe.SizeBytes,
+		IncludeInDemo: false,
+		AssetRole:     "style_reference_only",
+		DurationMS:    probe.DurationMS,
+		LocalPath:     probe.Path,
+		Metadata: map[string]any{
+			"source":                       "style_reference_import",
+			"style_reference":              true,
+			"presentation_only":            true,
+			"rights_confirmation_required": true,
+			"duration_ms":                  probe.DurationMS,
+			"width":                        probe.Width,
+			"height":                       probe.Height,
+			"fps":                          probe.FPS,
+			"video_codec":                  probe.VideoCodec,
+			"audio_codec":                  probe.AudioCodec,
+			"ffprobe_available":            probe.FFProbeAvailable,
+		},
+	})
+	session.Revision++
+	session.UpdatedAt = time.Now().UTC()
+	// Keep previews invalidated even though this asset is intentionally absent
+	// from the edit plan; it makes the session revision unambiguous to clients.
+	session.Preview = model.EditorRenderState{Status: model.EditorRenderStatusNotStarted}
+	session.FinalRender = model.EditorRenderState{Status: model.EditorRenderStatusNotStarted}
+	if validation, validateErr := s.editorWorker.ValidateEditPlan(ctx, executor.EditPlanValidationRequest{Catalog: session.AssetCatalog, EditPlan: session.EditPlan}); validateErr == nil {
+		session.Validation = &validation
+	}
+	if err := s.saveEditorSessionUnlocked(session); err != nil {
+		return model.EditorSession{}, err
+	}
+	return session, nil
+}
+
+func (s *Service) ImportEditorStyleReferenceUpload(ctx context.Context, sessionID, fileName string, input io.Reader) (model.EditorSession, error) {
+	finalPath, label, err := s.saveEditorUpload(sessionID, fileName, input, MaxEditorUploadBytes)
+	if err != nil {
+		return model.EditorSession{}, err
+	}
+	session, err := s.ImportEditorStyleReference(ctx, sessionID, model.EditorImportAssetRequest{Path: finalPath, Label: label})
+	if err != nil {
+		_ = os.Remove(finalPath)
+		return model.EditorSession{}, err
+	}
+	return session, nil
+}
+
+func (s *Service) saveEditorUpload(sessionID, fileName string, input io.Reader, maxBytes int64) (string, string, error) {
+	if input == nil {
+		return "", "", errors.New("editor upload file is required")
+	}
+	if _, err := s.loadEditorSession(sessionID); err != nil {
+		return "", "", err
+	}
+	label := filepath.Base(strings.TrimSpace(fileName))
+	extension := strings.ToLower(filepath.Ext(label))
+	if label == "." || label == "" || !editorUploadExtensions[extension] {
+		return "", "", errors.New("editor upload must be mp4, webm, mov, m4v, wav, mp3, m4a, aac, ogg, or flac")
+	}
+	uploadID, err := newEditorID("upload")
+	if err != nil {
+		return "", "", err
+	}
+	sessionPath, err := s.editorSessionPath(sessionID)
+	if err != nil {
+		return "", "", err
+	}
+	uploadRoot := filepath.Join(filepath.Dir(sessionPath), "uploads")
+	if err := os.MkdirAll(uploadRoot, 0o700); err != nil {
+		return "", "", err
+	}
+	finalPath := filepath.Join(uploadRoot, uploadID+extension)
+	tempPath := finalPath + ".tmp"
+	output, err := os.OpenFile(tempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", "", err
+	}
+	written, copyErr := io.Copy(output, io.LimitReader(input, maxBytes+1))
+	closeErr := output.Close()
+	if copyErr != nil || closeErr != nil || written > maxBytes {
+		_ = os.Remove(tempPath)
+		if written > maxBytes {
+			return "", "", fmt.Errorf("editor upload exceeds %d bytes", maxBytes)
+		}
+		return "", "", errors.Join(copyErr, closeErr)
+	}
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		_ = os.Remove(tempPath)
+		return "", "", err
+	}
+	return finalPath, label, nil
 }
 
 func (s *Service) SaveEditorPlan(ctx context.Context, sessionID string, request model.EditorSavePlanRequest) (model.EditorSession, error) {
@@ -914,6 +1009,7 @@ func applyResultPackageToEditorSession(session *model.EditorSession, result *mod
 	session.AssetCatalog.Source.ExecutionTraceID = traceID
 	session.AssetCatalog.WorkflowGraphID = workflowGraphID
 	session.AssetCatalog.RunID = firstNonEmptyString(traceID, result.CloudJobID, session.SessionID)
+	session.Automation = editorAutomationSummary(result)
 	asset := &session.AssetCatalog.Artifacts[0]
 	if asset.Metadata == nil {
 		asset.Metadata = map[string]any{}
@@ -959,6 +1055,61 @@ func applyResultPackageToEditorSession(session *model.EditorSession, result *mod
 		session.EditPlan.Shots = shots
 	}
 	session.EditPlan.TargetDurationMS = editorPlanDuration(session.EditPlan)
+}
+
+func editorAutomationSummary(result *model.RecordingResultPackage) *model.EditorAutomationSummary {
+	if result == nil {
+		return nil
+	}
+	summary := &model.EditorAutomationSummary{
+		SourcePackageID:          result.SourcePackageID,
+		ExecutionRuntime:         result.ExecutionRuntime,
+		ValidationState:          "result_only",
+		ValidationReportCount:    len(result.ValidationReports),
+		PatchCount:               len(result.PatchLedger),
+		StageEventAuditAvailable: result.StageEventLogRef != nil,
+	}
+	if len(result.ValidationReports) > 0 {
+		summary.ValidationState = "verified"
+	}
+	for _, report := range result.ValidationReports {
+		summary.LatestDecision = report.Decision
+		if realEditorValidationEvidence(report) {
+			summary.EvidenceBackedReportCount++
+		}
+		switch report.Decision {
+		case model.ValidationDecisionStopAndReport, model.ValidationDecisionReunderstandingRequired:
+			summary.ValidationState = "blocked"
+		case model.ValidationDecisionRepairAllowed:
+			if summary.ValidationState != "blocked" {
+				summary.ValidationState = "repaired_or_review"
+			}
+		}
+	}
+	for _, entry := range result.PatchLedger {
+		if entry.Applied {
+			summary.AppliedPatchCount++
+		}
+		if entry.RolledBack {
+			summary.RolledBackPatchCount++
+		}
+	}
+	if summary.ExecutionRuntime == "" && summary.ValidationReportCount == 0 && summary.PatchCount == 0 {
+		summary.ValidationState = "legacy_result"
+	}
+	return summary
+}
+
+func realEditorValidationEvidence(report model.ValidationReport) bool {
+	if len(report.EvidenceRefs) == 0 {
+		return false
+	}
+	switch report.EvidenceQuality {
+	case model.RuntimeObservationActualBrowser, model.RuntimeObservationAssertion, model.RuntimeObservationArtifact:
+		return true
+	default:
+		return false
+	}
 }
 
 func appendResultScreenshotAssets(session *model.EditorSession, result *model.RecordingResultPackage, request model.EditorCreateFromResultPackageRequest, recordingArtifactID string) {

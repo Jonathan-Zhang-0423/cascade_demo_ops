@@ -1386,7 +1386,7 @@ function workspaceWithResultPackage(workspace: ProjectWorkspaceView, resultPacka
     result_package_id: resultPackage.result_id,
     ...(workspace.cloudRun.cloudJobID ? { cloud_job_id: workspace.cloudRun.cloudJobID } : {}),
   };
-  return workspaceFromCloudLifecycleResult(workspace, {
+	const next = workspaceFromCloudLifecycleResult(workspace, {
     init: {
       upload_id: workspace.cloudRun.uploadID ?? "",
       server_public_key_id: "",
@@ -1400,6 +1400,15 @@ function workspaceWithResultPackage(workspace: ProjectWorkspaceView, resultPacka
     status,
     result: resultPackage,
   });
+	const previousStages = workspace.cloudRun.stageHistory;
+	if (!previousStages?.length) return next;
+	return {
+		...next,
+		cloudRun: {
+			...next.cloudRun,
+			stageHistory: (next.cloudRun.stageHistory ?? previousStages).map((stage) => stage.id === "result_returned" ? stage : previousStages.find((previous) => previous.id === stage.id) ?? stage),
+		},
+	};
 }
 
 function uploadInitFromLocal(init: LocalExecutionPackageInitResponse): ExecutionPackageUploadInitView {
@@ -1486,7 +1495,7 @@ function lifecycleStagesFromStatus(status: LocalExecutionPackageStatusResponse, 
     } else if (index === activeIndex) {
       stageStatus = terminal === "failed" ? "failed" : terminal === "succeeded" ? "completed" : "active";
     }
-    const event = status.stage_history?.find((item) => lifecycleStageIDFromCloudStage(item.stage, item.status) === id);
+	const event = status.stage_history?.filter((item) => lifecycleStageIDFromCloudStage(item.stage, item.status) === id).at(-1);
     const time = event?.updated_at
       ? new Date(event.updated_at).toLocaleTimeString("zh-CN", { hour12: false })
       : stageStatus === "pending"
@@ -1506,12 +1515,16 @@ function lifecycleStagesFromStatus(status: LocalExecutionPackageStatusResponse, 
 }
 
 function lifecycleStageIDFromCloudStage(stage: string | undefined, status?: string): ServerLifecycleStageID {
-  if (status === "completed" || stage === "completed") return "result_returned";
+	// Stage-history items commonly have status=completed; the explicit stage
+	// still determines their lifecycle card. Only a top-level status without a
+	// stage may fall back to the final result card.
+  if (stage === "completed" || (!stage && status === "completed")) return "result_returned";
   if (stage === "accepted") return "package_uploaded";
   if (stage === "validated" || stage === "validating") return "script_validation";
   if (stage === "preparing_worker") return "sandbox_preparing";
-  if (stage === "running_script") return "browser_execution";
-  if (stage === "packaging_recording" || stage === "rendering") return "video_rendering";
+  if (stage === "validating_pre_execution") return "script_validation";
+  if (stage === "running_script" || stage === "running_browser_agent" || stage === "validating_runtime_stage") return "browser_execution";
+	if (stage === "packaging_recording" || stage === "rendering" || stage === "validating_post_execution") return "video_rendering";
   if (stage === "failed") return "browser_execution";
   return "server_intake";
 }

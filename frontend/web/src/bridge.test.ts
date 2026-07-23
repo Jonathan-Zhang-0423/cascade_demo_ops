@@ -177,8 +177,10 @@ describe("desktop bridge contract", () => {
           result_package_id: "result_split_real",
           stage_history: [
             { stage: "accepted", status: "completed", message: "已接收", progress_percent: 20, updated_at: "2026-07-14T00:00:01Z" },
-            { stage: "validating", status: "completed", message: "脚本校验通过", progress_percent: 45, updated_at: "2026-07-14T00:00:03Z" },
-            { stage: "running_script", status: "completed", message: "浏览器执行完成", progress_percent: 80, updated_at: "2026-07-14T00:00:12Z" },
+			{ stage: "validating_pre_execution", status: "completed", message: "执行前校验通过", progress_percent: 36, updated_at: "2026-07-14T00:00:03Z" },
+			{ stage: "running_browser_agent", status: "completed", message: "浏览器智能执行完成", progress_percent: 68, updated_at: "2026-07-14T00:00:10Z" },
+			{ stage: "validating_runtime_stage", status: "completed", message: "步骤结果校验完成", progress_percent: 82, updated_at: "2026-07-14T00:00:12Z" },
+			{ stage: "validating_post_execution", status: "completed", message: "执行后复核完成", progress_percent: 95, updated_at: "2026-07-14T00:00:16Z" },
             { stage: "completed", status: "completed", message: "结果返回", progress_percent: 100, updated_at: "2026-07-14T00:00:20Z" },
           ],
         });
@@ -202,6 +204,8 @@ describe("desktop bridge contract", () => {
     expect(uploaded.data?.cloudRun.exchangePackageID).toBe("xpkg_split_real");
     expect(completed.data?.stage).toBe("result_review");
     expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "script_validation")?.status).toBe("completed");
+	expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "browser_execution")?.summary).toBe("步骤结果校验完成");
+	expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "video_rendering")?.summary).toBe("执行后复核完成");
     expect(completed.data?.assets[0]?.assetID).toBe("artifact_video_split");
     expect(acked.data?.assets[0]?.status).toBe("approved");
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
