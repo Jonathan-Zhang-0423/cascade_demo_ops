@@ -100,6 +100,7 @@ function buildPackageManifest() {
         "native_folder_picker",
         "requirement_document_import",
         "local_package_generation",
+        "native_lifecycle_phase_bar",
         "approval_health_summary",
         "stage_plan_review",
         "script_outline_review",

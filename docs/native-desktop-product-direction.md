@@ -32,6 +32,7 @@ The first native workflow is the three-in-one package workbench:
 - Use native desktop affordances for local paths and artifacts, including a folder picker for local repositories and an action to open the generated output directory.
 - Provide a deliberate native visual hierarchy with desktop fonts, readable preview surfaces, and direct access to diagnostic logs.
 - Expose primary workbench commands through a native menu bar, not only through in-window buttons.
+- Show the local generation lifecycle as native phase indicators so users can understand progress without reading raw logs.
 - Surface approval package health as native summary indicators for runtime, stage coverage, bundle size, and validation state before the user opens detailed JSON.
 
 ## Design Principles

@@ -67,6 +67,10 @@ const (
 	idHealthStages      = 1039
 	idHealthBundle      = 1040
 	idHealthValidation  = 1041
+	idPhaseInput        = 1042
+	idPhaseUnderstand   = 1043
+	idPhasePackage      = 1044
+	idPhaseReview       = 1045
 
 	bnClicked = 0
 )
@@ -145,6 +149,10 @@ type nativeApp struct {
 	credentialHint   syscall.Handle
 	lifecycleGroup   syscall.Handle
 	lifecycleHint    syscall.Handle
+	phaseInput       syscall.Handle
+	phaseUnderstand  syscall.Handle
+	phasePackage     syscall.Handle
+	phaseReview      syscall.Handle
 	previewGroup     syscall.Handle
 	previewHint      syscall.Handle
 	artifactStatus   syscall.Handle
@@ -338,6 +346,10 @@ func (a *nativeApp) createControls() {
 	a.credentialHint = createChild(a.hwnd, "STATIC", "账号密码仅本机临时使用。", wsChild|wsVisible, idCredentialHint)
 	a.lifecycleGroup = createGroupBox(a.hwnd, "本地生成生命周期", idLifecycleGroup)
 	a.lifecycleHint = createChild(a.hwnd, "STATIC", "审计本地理解、代码 drilldown、生成和保存。", wsChild|wsVisible, idLifecycleHint)
+	a.phaseInput = createChild(a.hwnd, "STATIC", "1 输入材料", wsChild|wsVisible|wsBorder, idPhaseInput)
+	a.phaseUnderstand = createChild(a.hwnd, "STATIC", "2 项目理解", wsChild|wsVisible|wsBorder, idPhaseUnderstand)
+	a.phasePackage = createChild(a.hwnd, "STATIC", "3 生成包", wsChild|wsVisible|wsBorder, idPhasePackage)
+	a.phaseReview = createChild(a.hwnd, "STATIC", "4 审核保存", wsChild|wsVisible|wsBorder, idPhaseReview)
 	a.previewGroup = createGroupBox(a.hwnd, "审批材料", idPreviewGroup)
 	a.previewTitle = createChild(a.hwnd, "STATIC", "审核三合一包；服务器 Agent 在边界内自适应执行。", wsChild|wsVisible, idPreviewTitle)
 	a.previewHint = createChild(a.hwnd, "STATIC", "Markdown 面向审批，JSON/Outline 面向执行。", wsChild|wsVisible, idPreviewHint)
@@ -366,6 +378,7 @@ func (a *nativeApp) createControls() {
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.applyDefaultFont()
+	a.setPhaseText("1 输入材料", "2 项目理解", "3 生成包", "4 审核保存")
 	a.updateActionState(false, false)
 }
 
@@ -510,7 +523,14 @@ func (a *nativeApp) layout() {
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
 	moveControl(a.openLogBtn, x+leftInnerW-128, statusTop+20, 128, 28)
-	moveControl(a.statusList, x, statusTop+56, leftInnerW, maxInt(86, statusH-70))
+	phaseTop := statusTop + 52
+	phaseGap := 6
+	phaseW := maxInt(86, (leftInnerW-phaseGap*3)/4)
+	moveControl(a.phaseInput, x, phaseTop, phaseW, 28)
+	moveControl(a.phaseUnderstand, x+phaseW+phaseGap, phaseTop, phaseW, 28)
+	moveControl(a.phasePackage, x+(phaseW+phaseGap)*2, phaseTop, phaseW, 28)
+	moveControl(a.phaseReview, x+(phaseW+phaseGap)*3, phaseTop, phaseW, 28)
+	moveControl(a.statusList, x, phaseTop+40, leftInnerW, maxInt(86, statusH-94))
 
 	rightX := margin + leftW + gap
 	rightW := maxInt(500, width-rightX-margin)
@@ -560,6 +580,7 @@ func (a *nativeApp) startGenerate() {
 	setWindowText(a.workflowState, "正在生成三合一包")
 	setWindowText(a.artifactStatus, "输出目录：生成完成后显示")
 	a.setHealthText("Runtime: generating", "Stages: --", "Bundle: --", "Validation: pending")
+	a.setPhaseText("1 输入完成", "2 理解中", "3 生成中", "4 待审核")
 	a.updateActionState(true, false)
 	a.addStatus("开始本地项目理解与三合一包生成。")
 	input := nativeInput{
@@ -665,6 +686,7 @@ func (a *nativeApp) finishGenerate() {
 	setWindowText(a.previewSummary, result.Summary)
 	setWindowText(a.previewContent, result.Markdown)
 	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 可审核")
 	a.updateActionState(false, true)
 	a.addStatus("三合一执行包已生成，可审核或保存。project_id=" + result.ProjectID)
 }
@@ -684,6 +706,7 @@ func (a *nativeApp) finishGenerateErrorMessage(message string) {
 	setWindowText(a.generateBtn, "生成三合一执行包")
 	setWindowText(a.workflowState, "生成失败")
 	a.setHealthText("Runtime: --", "Stages: --", "Bundle: --", "Validation: failed")
+	a.setPhaseText("1 输入完成", "2/3 失败", "3 未就绪", "4 不可审核")
 	a.updateActionState(false, a.lastResult != nil)
 	a.addStatus("生成失败：" + message)
 	messageBox("Cascade DemoOps", message, true)
@@ -720,6 +743,7 @@ func (a *nativeApp) saveLastResult() {
 	a.addStatus("已保存到 " + dir)
 	setWindowText(a.workflowState, "已保存三合一包")
 	setWindowText(a.artifactStatus, "已保存："+dir)
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已保存")
 	setEnabled(a.openOutputBtn, true)
 	messageBox("Cascade DemoOps", "三合一执行包已保存到：\n"+dir, false)
 }
@@ -831,6 +855,13 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 		a.enableMenuItem(id, !generating && hasResult)
 	}
 	a.enableMenuItem(idOpenLog, true)
+}
+
+func (a *nativeApp) setPhaseText(input string, understand string, pack string, review string) {
+	setWindowText(a.phaseInput, input)
+	setWindowText(a.phaseUnderstand, understand)
+	setWindowText(a.phasePackage, pack)
+	setWindowText(a.phaseReview, review)
 }
 
 func (a *nativeApp) setHealthText(runtime string, stages string, bundle string, validation string) {
@@ -1024,6 +1055,10 @@ func (a *nativeApp) applyDefaultFont() {
 		a.credentialHint,
 		a.lifecycleGroup,
 		a.lifecycleHint,
+		a.phaseInput,
+		a.phaseUnderstand,
+		a.phasePackage,
+		a.phaseReview,
 		a.previewGroup,
 		a.previewTitle,
 		a.previewHint,
@@ -1080,7 +1115,9 @@ func (a *nativeApp) controlColor(msgID uint32, wParam uintptr, lParam uintptr) u
 	switch {
 	case hwnd == a.previewSummary || hwnd == a.previewContent ||
 		hwnd == a.healthRuntime || hwnd == a.healthStages ||
-		hwnd == a.healthBundle || hwnd == a.healthValidation:
+		hwnd == a.healthBundle || hwnd == a.healthValidation ||
+		hwnd == a.phaseInput || hwnd == a.phaseUnderstand ||
+		hwnd == a.phasePackage || hwnd == a.phaseReview:
 		bgColor = colorRef(250, 251, 253)
 		brush = a.readonlyBrush
 	case hwnd == a.statusList:
