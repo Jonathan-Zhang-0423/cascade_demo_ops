@@ -77,8 +77,9 @@ const (
 	idClearDraft        = 1049
 	idStatusBar         = 1050
 
-	bnClicked = 0
-	enChange  = 0x0300
+	bnClicked    = 0
+	enChange     = 0x0300
+	accelCommand = 1
 )
 
 var (
@@ -110,6 +111,9 @@ var (
 	procDrawMenuBar          = user32.NewProc("DrawMenuBar")
 	procDestroyMenu          = user32.NewProc("DestroyMenu")
 	procEnableMenuItem       = user32.NewProc("EnableMenuItem")
+	procCreateAcceleratorTbl = user32.NewProc("CreateAcceleratorTableW")
+	procDestroyAccelerator   = user32.NewProc("DestroyAcceleratorTable")
+	procTranslateAccelerator = user32.NewProc("TranslateAcceleratorW")
 	procShowWindow           = user32.NewProc("ShowWindow")
 	procTranslateMessage     = user32.NewProc("TranslateMessage")
 	procUpdateWindow         = user32.NewProc("UpdateWindow")
@@ -152,6 +156,7 @@ type nativeApp struct {
 	readonlyBrush    uintptr
 	darkBrush        uintptr
 	mainMenu         syscall.Handle
+	accelTable       syscall.Handle
 	headerTitle      syscall.Handle
 	headerMeta       syscall.Handle
 	engineStatus     syscall.Handle
@@ -306,6 +311,12 @@ func (a *nativeApp) run() error {
 		if int32(ret) <= 0 {
 			break
 		}
+		if a.accelTable != 0 {
+			translated, _, _ := procTranslateAccelerator.Call(hwnd, uintptr(a.accelTable), uintptr(unsafe.Pointer(&msg)))
+			if translated != 0 {
+				continue
+			}
+		}
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
 	}
@@ -323,6 +334,7 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 			app.addStatus("本地原生应用已启动。不会打开浏览器或 WebView。")
 			app.addStatus("填写产品 URL、需求和可用代码来源后，点击生成三合一包。")
 			app.addStatus("本地项目路径与 GitHub 仓库 URL 都是可选代码来源，可以同时提供。")
+			app.addStatus("常用快捷键：Ctrl+G 生成，Ctrl+S 保存，Ctrl+1/2/3 切换审批预览。")
 		}
 		return 0
 	case wmSize:
@@ -337,7 +349,7 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 			switch {
 			case code == enChange && app.isInputField(id):
 				app.updateInputReadiness()
-			case code == bnClicked || code == 0:
+			case code == bnClicked || code == 0 || code == accelCommand:
 				app.handleCommand(id)
 			}
 		}
@@ -370,6 +382,7 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 func (a *nativeApp) createControls() {
 	a.createUIResources()
 	a.createMenu()
+	a.createAccelerators()
 	a.headerTitle = createChild(a.hwnd, "STATIC", "Cascade DemoOps Native Workbench", wsChild|wsVisible, idHeaderTitle)
 	a.headerMeta = createChild(a.hwnd, "STATIC", "需求驱动小步读代码 · 生成三合一审批包", wsChild|wsVisible, idHeaderMeta)
 	a.engineStatus = createChild(a.hwnd, "STATIC", a.engineStatusText(), wsChild|wsVisible|wsBorder, idEngineStatus)
@@ -424,6 +437,9 @@ func (a *nativeApp) createControls() {
 }
 
 func (a *nativeApp) handleCommand(id int) {
+	if !a.commandAllowed(id) {
+		return
+	}
 	switch id {
 	case idGenerateButton:
 		a.startGenerate()
@@ -456,29 +472,48 @@ func (a *nativeApp) handleCommand(id int) {
 	}
 }
 
+func (a *nativeApp) commandAllowed(id int) bool {
+	a.mu.Lock()
+	generating := a.generating
+	hasResult := a.lastResult != nil
+	a.mu.Unlock()
+	switch id {
+	case idOpenLog, idMenuExit:
+		return true
+	case idGenerateButton:
+		return !generating && a.inputReady()
+	case idBrowseRepo, idImportRequirement, idClearDraft:
+		return !generating
+	case idSaveButton, idExportPackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview:
+		return !generating && hasResult
+	default:
+		return true
+	}
+}
+
 func (a *nativeApp) createMenu() {
 	mainMenu := createMenu()
 	fileMenu := createPopupMenu()
 	viewMenu := createPopupMenu()
 	helpMenu := createPopupMenu()
-	appendMenuItem(fileMenu, idImportRequirement, "导入需求文档...")
-	appendMenuItem(fileMenu, idBrowseRepo, "选择本地项目文件夹...")
-	appendMenuItem(fileMenu, idClearDraft, "清除输入草稿")
+	appendMenuItem(fileMenu, idImportRequirement, "导入需求文档...\tCtrl+O")
+	appendMenuItem(fileMenu, idBrowseRepo, "选择本地项目文件夹...\tCtrl+B")
+	appendMenuItem(fileMenu, idClearDraft, "清除输入草稿\tCtrl+R")
 	appendMenuSeparator(fileMenu)
-	appendMenuItem(fileMenu, idGenerateButton, "生成三合一执行包")
-	appendMenuItem(fileMenu, idSaveButton, "保存三合一包")
-	appendMenuItem(fileMenu, idExportPackage, "导出三合一包到文件夹...")
+	appendMenuItem(fileMenu, idGenerateButton, "生成三合一执行包\tCtrl+G")
+	appendMenuItem(fileMenu, idSaveButton, "保存三合一包\tCtrl+S")
+	appendMenuItem(fileMenu, idExportPackage, "导出三合一包到文件夹...\tCtrl+E")
 	appendMenuSeparator(fileMenu)
-	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录")
-	appendMenuItem(fileMenu, idOpenLog, "打开诊断日志")
+	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录\tCtrl+Shift+O")
+	appendMenuItem(fileMenu, idOpenLog, "打开诊断日志\tCtrl+L")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idMenuExit, "退出")
-	appendMenuItem(viewMenu, idViewMarkdown, "预览 Markdown")
-	appendMenuItem(viewMenu, idViewStageJSON, "预览 Stage JSON")
-	appendMenuItem(viewMenu, idViewOutline, "预览 Script Outline")
-	appendMenuItem(viewMenu, idViewBundle, "预览 Full Bundle")
+	appendMenuItem(viewMenu, idViewMarkdown, "预览 Markdown\tCtrl+1")
+	appendMenuItem(viewMenu, idViewStageJSON, "预览 Stage JSON\tCtrl+2")
+	appendMenuItem(viewMenu, idViewOutline, "预览 Script Outline\tCtrl+3")
+	appendMenuItem(viewMenu, idViewBundle, "预览 Full Bundle\tCtrl+4")
 	appendMenuSeparator(viewMenu)
-	appendMenuItem(viewMenu, idCopyPreview, "复制当前预览")
+	appendMenuItem(viewMenu, idCopyPreview, "复制当前预览\tCtrl+Shift+C")
 	appendMenuItem(helpMenu, idOpenLog, "诊断日志")
 	appendSubMenu(mainMenu, fileMenu, "文件")
 	appendSubMenu(mainMenu, viewMenu, "视图")
@@ -486,6 +521,26 @@ func (a *nativeApp) createMenu() {
 	procSetMenu.Call(uintptr(a.hwnd), uintptr(mainMenu))
 	procDrawMenuBar.Call(uintptr(a.hwnd))
 	a.mainMenu = syscall.Handle(mainMenu)
+}
+
+func (a *nativeApp) createAccelerators() {
+	accels := []accel{
+		{FVirt: fVirtKey | fControl, Key: 'O', Cmd: idImportRequirement},
+		{FVirt: fVirtKey | fControl, Key: 'B', Cmd: idBrowseRepo},
+		{FVirt: fVirtKey | fControl, Key: 'R', Cmd: idClearDraft},
+		{FVirt: fVirtKey | fControl, Key: 'G', Cmd: idGenerateButton},
+		{FVirt: fVirtKey | fControl, Key: 'S', Cmd: idSaveButton},
+		{FVirt: fVirtKey | fControl, Key: 'E', Cmd: idExportPackage},
+		{FVirt: fVirtKey | fControl | fShift, Key: 'O', Cmd: idOpenOutput},
+		{FVirt: fVirtKey | fControl, Key: 'L', Cmd: idOpenLog},
+		{FVirt: fVirtKey | fControl, Key: '1', Cmd: idViewMarkdown},
+		{FVirt: fVirtKey | fControl, Key: '2', Cmd: idViewStageJSON},
+		{FVirt: fVirtKey | fControl, Key: '3', Cmd: idViewOutline},
+		{FVirt: fVirtKey | fControl, Key: '4', Cmd: idViewBundle},
+		{FVirt: fVirtKey | fControl | fShift, Key: 'C', Cmd: idCopyPreview},
+	}
+	handle, _, _ := procCreateAcceleratorTbl.Call(uintptr(unsafe.Pointer(&accels[0])), uintptr(len(accels)))
+	a.accelTable = syscall.Handle(handle)
 }
 
 func (a *nativeApp) createUIResources() {
@@ -821,6 +876,10 @@ func (a *nativeApp) exportLastResult() {
 	if strings.TrimSpace(dir) == "" {
 		return
 	}
+	if resultFilesExist(dir) && !confirmBox(a.hwnd, "Cascade DemoOps", "所选文件夹中已有三合一包文件。\n\n是否覆盖这些审批材料？") {
+		a.addStatus("已取消导出，未覆盖现有文件。")
+		return
+	}
 	if err := writeResultFiles(dir, result); err != nil {
 		a.addStatus("导出失败：" + err.Error())
 		messageBox("Cascade DemoOps", "导出三合一包失败：\n"+err.Error(), true)
@@ -844,18 +903,37 @@ func writeResultFiles(dir string, result *nativeGenerateResult) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	files := map[string]string{
-		"approval_markdown.md":         result.Markdown,
-		"stage_approval_plan.json":     result.StageJSON,
-		"script_outline.json":          result.OutlineJSON,
-		"client_execution_bundle.json": result.BundleJSON,
-	}
-	for name, content := range files {
+	for name, content := range resultFiles(result) {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content+"\n"), 0o644); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func resultFiles(result *nativeGenerateResult) map[string]string {
+	if result == nil {
+		return map[string]string{}
+	}
+	return map[string]string{
+		"approval_markdown.md":         result.Markdown,
+		"stage_approval_plan.json":     result.StageJSON,
+		"script_outline.json":          result.OutlineJSON,
+		"client_execution_bundle.json": result.BundleJSON,
+	}
+}
+
+func resultFilesExist(dir string) bool {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return false
+	}
+	for name := range resultFiles(&nativeGenerateResult{}) {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *nativeApp) chooseLocalRepoPath() {
@@ -1041,6 +1119,10 @@ func (a *nativeApp) updateInputReadiness() {
 }
 
 func (a *nativeApp) clearInputDraft() {
+	if !confirmBox(a.hwnd, "Cascade DemoOps", "清除当前输入草稿？\n\n会清空 URL、代码来源、需求文本和窗口中的临时账号密码；不会删除已生成的执行包。") {
+		a.addStatus("已取消清除输入草稿。")
+		return
+	}
 	a.suppressDraftSave = true
 	setWindowText(a.productURL.Edit, "https://cascadeai.cn")
 	setWindowText(a.localRepoPath.Edit, "")
@@ -1520,6 +1602,10 @@ func (a *nativeApp) disposeUIResources() {
 		procDestroyMenu.Call(uintptr(a.mainMenu))
 		a.mainMenu = 0
 	}
+	if a.accelTable != 0 {
+		procDestroyAccelerator.Call(uintptr(a.accelTable))
+		a.accelTable = 0
+	}
 }
 
 func moveControl(handle syscall.Handle, x int, y int, w int, h int) {
@@ -1573,6 +1659,16 @@ func messageBox(title string, message string, isError bool) {
 		flags = mbOK | mbIconError
 	}
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(utf16Ptr(message))), uintptr(unsafe.Pointer(utf16Ptr(title))), flags)
+}
+
+func confirmBox(owner syscall.Handle, title string, message string) bool {
+	result, _, _ := procMessageBoxW.Call(
+		uintptr(owner),
+		uintptr(unsafe.Pointer(utf16Ptr(message))),
+		uintptr(unsafe.Pointer(utf16Ptr(title))),
+		mbYesNo|mbIconQuestion,
+	)
+	return result == idYes
 }
 
 func browseForFolder(owner syscall.Handle, title string) (string, error) {
@@ -1810,6 +1906,13 @@ type msg struct {
 	Pt      point
 }
 
+type accel struct {
+	FVirt uint8
+	_     uint8
+	Key   uint16
+	Cmd   uint16
+}
+
 type point struct {
 	X int32
 	Y int32
@@ -1908,12 +2011,19 @@ const (
 	mfGrayed    = 0x00000001
 	mfEnabled   = 0x00000000
 
+	fVirtKey = 0x01
+	fShift   = 0x04
+	fControl = 0x08
+
 	whiteBrush     = 0
 	defaultGUIFont = 17
 
 	mbOK              = 0x00000000
+	mbYesNo           = 0x00000004
 	mbIconError       = 0x00000010
+	mbIconQuestion    = 0x00000020
 	mbIconInformation = 0x00000040
+	idYes             = 6
 
 	bifReturnOnlyFSDirs = 0x00000001
 	bifEditBox          = 0x00000010
