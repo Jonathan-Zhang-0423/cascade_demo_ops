@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	winClassName = "CascadeDemoOpsNativeWindow"
-	winTitle     = "Cascade DemoOps Desktop"
+	winClassName       = "CascadeDemoOpsNativeWindow"
+	winTitle           = "Cascade DemoOps Desktop"
+	nativeDefaultOrgID = "org_desktop"
 
 	idProductURL        = 1001
 	idLocalRepoPath     = 1002
@@ -84,6 +85,7 @@ const (
 	idApprovePackage    = 1055
 	idImportPackage     = 1056
 	idOpenPreviewFile   = 1057
+	idUploadApproved    = 1058
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -215,6 +217,7 @@ type nativeApp struct {
 	openOutputBtn    syscall.Handle
 	exportBtn        syscall.Handle
 	approveBtn       syscall.Handle
+	uploadBtn        syscall.Handle
 	clearDraftBtn    syscall.Handle
 	openLogBtn       syscall.Handle
 	statusList       syscall.Handle
@@ -225,9 +228,11 @@ type nativeApp struct {
 
 	mu                sync.Mutex
 	generating        bool
+	uploading         bool
 	lastResult        *nativeGenerateResult
 	pendingResult     *nativeGenerateResult
 	pendingError      string
+	pendingUpload     *nativeUploadResult
 	recentPackages    []nativeRecentPackage
 	currentPreview    string
 	suppressDraftSave bool
@@ -268,6 +273,14 @@ type nativeApprovalRecord struct {
 	BundleHash      string    `json:"bundle_hash_sha256_suffix,omitempty"`
 	OutputDirectory string    `json:"output_directory"`
 	ReviewSurface   string    `json:"review_surface"`
+}
+
+type nativeUploadResult struct {
+	UploadID          string
+	ExchangePackageID string
+	CloudJobID        string
+	Status            string
+	CloudBaseURL      string
 }
 
 type nativeRecentPackage struct {
@@ -405,6 +418,16 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 			app.finishGenerateError()
 		}
 		return 0
+	case wmAppUploadDone:
+		if app != nil {
+			app.finishUpload()
+		}
+		return 0
+	case wmAppUploadFailed:
+		if app != nil {
+			app.finishUploadError()
+		}
+		return 0
 	case wmDestroy:
 		if app != nil {
 			app.disposeUIResources()
@@ -476,6 +499,7 @@ func (a *nativeApp) createControls() {
 	a.openOutputBtn = createChild(a.hwnd, "BUTTON", "打开输出目录", wsChild|wsVisible|bsPushButton, idOpenOutput)
 	a.exportBtn = createChild(a.hwnd, "BUTTON", "导出到文件夹", wsChild|wsVisible|bsPushButton, idExportPackage)
 	a.approveBtn = createChild(a.hwnd, "BUTTON", "本地审批通过", wsChild|wsVisible|bsPushButton, idApprovePackage)
+	a.uploadBtn = createChild(a.hwnd, "BUTTON", "上传已审批包", wsChild|wsVisible|bsPushButton, idUploadApproved)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.statusBar = createChild(a.hwnd, "STATIC", a.statusBarText(""), wsChild|wsVisible|wsBorder, idStatusBar)
@@ -500,6 +524,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.exportLastResult()
 	case idApprovePackage:
 		a.approveLastResult()
+	case idUploadApproved:
+		a.uploadApprovedPackage()
 	case idClearDraft:
 		a.clearInputDraft()
 	case idBrowseRepo:
@@ -536,20 +562,22 @@ func (a *nativeApp) handleCommand(id int) {
 func (a *nativeApp) commandAllowed(id int) bool {
 	a.mu.Lock()
 	generating := a.generating
+	uploading := a.uploading
 	hasResult := a.lastResult != nil
 	hasRecent := len(a.recentPackages) > 0
 	a.mu.Unlock()
+	busy := generating || uploading
 	switch id {
 	case idOpenLog, idMenuExit:
 		return true
 	case idGenerateButton:
-		return !generating && a.inputReady()
+		return !busy && a.inputReady()
 	case idBrowseRepo, idImportRequirement, idImportPackage, idClearDraft:
-		return !generating
-	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile:
-		return !generating && hasResult
+		return !busy
+	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved:
+		return !busy && hasResult
 	case idOpenRecentPackage:
-		return !generating && hasRecent
+		return !busy && hasRecent
 	default:
 		return true
 	}
@@ -569,6 +597,7 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(fileMenu, idSaveButton, "保存三合一包\tCtrl+S")
 	appendMenuItem(fileMenu, idExportPackage, "导出三合一包到文件夹...\tCtrl+E")
 	appendMenuItem(fileMenu, idApprovePackage, "本地审批通过\tCtrl+Enter")
+	appendMenuItem(fileMenu, idUploadApproved, "上传已审批包到服务器\tCtrl+U")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录\tCtrl+Shift+O")
 	appendMenuItem(fileMenu, idOpenRecentPackage, "打开最近三合一包\tCtrl+Shift+R")
@@ -602,6 +631,7 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fControl, Key: 'S', Cmd: idSaveButton},
 		{FVirt: fVirtKey | fControl, Key: 'E', Cmd: idExportPackage},
 		{FVirt: fVirtKey | fControl, Key: vkReturn, Cmd: idApprovePackage},
+		{FVirt: fVirtKey | fControl, Key: 'U', Cmd: idUploadApproved},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'O', Cmd: idOpenOutput},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'R', Cmd: idOpenRecentPackage},
 		{FVirt: fVirtKey | fControl, Key: 'L', Cmd: idOpenLog},
@@ -668,7 +698,7 @@ func (a *nativeApp) layout() {
 	y := leftTop + 34
 	rowH := 30
 	leftInnerW := leftW - 28
-	inputH := 524
+	inputH := 562
 	statusTop := leftTop + inputH + 12
 	statusH := maxInt(150, contentBottom-statusTop)
 
@@ -707,6 +737,7 @@ func (a *nativeApp) layout() {
 	moveControl(a.exportBtn, x, y+42, 186, 32)
 	moveControl(a.openOutputBtn, x+202, y+42, 190, 32)
 	moveControl(a.approveBtn, x, y+82, leftInnerW, 32)
+	moveControl(a.uploadBtn, x, y+120, leftInnerW, 32)
 
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
@@ -1020,6 +1051,141 @@ func (a *nativeApp) approveLastResult() {
 	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已审批")
 	messageBox("Cascade DemoOps", "本地审批已记录：\n"+filepath.Join(dir, "approval_record.json"), false)
+}
+
+func (a *nativeApp) uploadApprovedPackage() {
+	a.mu.Lock()
+	if a.uploading {
+		a.mu.Unlock()
+		return
+	}
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可上传的执行包。")
+		return
+	}
+	dir := result.OutputDirectory
+	if strings.TrimSpace(dir) == "" {
+		dir = filepath.Join(a.runtimeConfig.ArtifactRoot, result.ProjectID)
+	}
+	if serverHandoffLabel(dir) != "ready for server Browser Agent" {
+		message := "上传前需要先保存三合一包并完成本地审批。\n\n当前状态：\n" +
+			"Files: " + recentPackageFilesLabel(dir) + "\n" +
+			"Approval: " + approvalRecordLabel(dir)
+		a.addStatus("上传被阻止：" + strings.ReplaceAll(message, "\n", " "))
+		messageBox("Cascade DemoOps", message, true)
+		return
+	}
+	if strings.TrimSpace(result.ProjectID) == "" {
+		messageBox("Cascade DemoOps", "当前执行包缺少 project_id，无法从本地状态构建上传包。请重新生成后再上传。", true)
+		return
+	}
+	if strings.TrimSpace(a.runtimeConfig.CloudExchangeBaseURL) == "" {
+		messageBox("Cascade DemoOps", "服务器地址未配置。\n\n本地包已经可审批，但上传/录制阶段需要 CASCADE_CLOUD_EXCHANGE_BASE_URL 或安装密钥发现能力。", true)
+		return
+	}
+	if !confirmBox(a.hwnd, "Cascade DemoOps", "确认上传已审批三合一包到服务器？\n\n本地会重新构建结构化 ClientExecutionPackage，并通过 exchange init/upload 提交；不会在此步骤等待完整录制完成。") {
+		a.addStatus("已取消上传已审批包。")
+		return
+	}
+	a.mu.Lock()
+	a.uploading = true
+	a.pendingUpload = nil
+	a.pendingError = ""
+	a.mu.Unlock()
+	setWindowText(a.uploadBtn, "上传中...")
+	setWindowText(a.workflowState, "正在上传已审批包")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 上传中")
+	a.updateActionStateFromCurrent()
+	a.addStatus("开始上传已审批包到服务器。project_id=" + result.ProjectID)
+	go a.uploadApprovedPackageAsync(result.ProjectID)
+}
+
+func (a *nativeApp) uploadApprovedPackageAsync(projectID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	build, err := a.service.BuildClientExecutionPackage(ctx, projectID, nativeDefaultOrgID)
+	if err != nil {
+		a.postUploadError(err.Error())
+		return
+	}
+	initResponse, err := a.service.InitCloudExecutionPackageUpload(ctx, build)
+	if err != nil {
+		a.postUploadError(err.Error())
+		return
+	}
+	uploadResponse, err := a.service.UploadBuiltCloudExecutionPackage(ctx, initResponse.UploadID, build)
+	if err != nil {
+		a.postUploadError(err.Error())
+		return
+	}
+	a.mu.Lock()
+	a.pendingUpload = &nativeUploadResult{
+		UploadID:          initResponse.UploadID,
+		ExchangePackageID: uploadResponse.ExchangePackageID,
+		CloudJobID:        uploadResponse.CloudJobID,
+		Status:            string(uploadResponse.Status),
+		CloudBaseURL:      strings.TrimSpace(a.runtimeConfig.CloudExchangeBaseURL),
+	}
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppUploadDone, 0, 0)
+}
+
+func (a *nativeApp) finishUpload() {
+	a.mu.Lock()
+	result := a.pendingUpload
+	a.pendingUpload = nil
+	a.uploading = false
+	a.mu.Unlock()
+	setWindowText(a.uploadBtn, "上传已审批包")
+	a.updateActionStateFromCurrent()
+	if result == nil {
+		a.finishUploadErrorMessage("上传完成但没有得到服务器响应。")
+		return
+	}
+	setWindowText(a.workflowState, "已上传到服务器")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 已上传")
+	lines := []string{
+		"服务器上传已完成",
+		"Upload ID: " + firstNonEmptyNative(result.UploadID, "unknown"),
+		"Exchange Package ID: " + firstNonEmptyNative(result.ExchangePackageID, "unknown"),
+		"Cloud Job ID: " + firstNonEmptyNative(result.CloudJobID, "unknown"),
+		"Status: " + firstNonEmptyNative(result.Status, "unknown"),
+		"Server: " + firstNonEmptyNative(result.CloudBaseURL, a.cloudConnectionLabel()),
+		"Next: 可由服务器开始 Browser Agent 录制；后续再接 native 状态轮询和结果下载。",
+	}
+	setWindowText(a.previewSummary, strings.Join(lines, "\r\n"))
+	a.addStatus("已上传到服务器：exchange_package_id=" + result.ExchangePackageID)
+	messageBox("Cascade DemoOps", "已上传到服务器。\n\nExchange Package ID:\n"+result.ExchangePackageID, false)
+}
+
+func (a *nativeApp) finishUploadError() {
+	a.mu.Lock()
+	message := a.pendingError
+	a.pendingError = ""
+	a.uploading = false
+	a.mu.Unlock()
+	a.finishUploadErrorMessage(message)
+}
+
+func (a *nativeApp) finishUploadErrorMessage(message string) {
+	setWindowText(a.uploadBtn, "上传已审批包")
+	setWindowText(a.workflowState, "上传失败")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 上传失败")
+	a.updateActionStateFromCurrent()
+	if strings.TrimSpace(message) == "" {
+		message = "上传已审批包失败。"
+	}
+	a.addStatus("上传失败：" + message)
+	messageBox("Cascade DemoOps", message, true)
+}
+
+func (a *nativeApp) postUploadError(message string) {
+	a.mu.Lock()
+	a.pendingError = message
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppUploadFailed, 0, 0)
 }
 
 func writeResultFiles(dir string, result *nativeGenerateResult) error {
@@ -1443,9 +1609,10 @@ func (a *nativeApp) showInputPreflightIfIdle() {
 	}
 	a.mu.Lock()
 	generating := a.generating
+	uploading := a.uploading
 	hasResult := a.lastResult != nil
 	a.mu.Unlock()
-	if generating || hasResult {
+	if generating || uploading || hasResult {
 		return
 	}
 	input := a.currentNativeInput()
@@ -1691,9 +1858,10 @@ func (a *nativeApp) showSelectedRecentPackageSummary() {
 	}
 	a.mu.Lock()
 	generating := a.generating
+	uploading := a.uploading
 	hasResult := a.lastResult != nil
 	a.mu.Unlock()
-	if generating {
+	if generating || uploading {
 		return
 	}
 	recent, ok := a.selectedRecentPackage()
@@ -1813,32 +1981,35 @@ func nativeTimeLabel(value time.Time) string {
 }
 
 func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
-	generateEnabled := !generating && a.inputReady()
 	a.mu.Lock()
+	uploading := a.uploading
 	hasRecent := len(a.recentPackages) > 0
 	a.mu.Unlock()
-	recentEnabled := !generating && hasRecent
+	busy := generating || uploading
+	generateEnabled := !busy && a.inputReady()
+	recentEnabled := !busy && hasRecent
 	setEnabled(a.generateBtn, generateEnabled)
-	setEnabled(a.saveBtn, !generating && hasResult)
-	setEnabled(a.browseRepoBtn, !generating)
-	setEnabled(a.importReqBtn, !generating)
-	setEnabled(a.importPackageBtn, !generating)
-	setEnabled(a.clearDraftBtn, !generating)
-	setEnabled(a.exportBtn, !generating && hasResult)
-	setEnabled(a.approveBtn, !generating && hasResult)
-	setEnabled(a.openOutputBtn, !generating && hasResult)
+	setEnabled(a.saveBtn, !busy && hasResult)
+	setEnabled(a.browseRepoBtn, !busy)
+	setEnabled(a.importReqBtn, !busy)
+	setEnabled(a.importPackageBtn, !busy)
+	setEnabled(a.clearDraftBtn, !busy)
+	setEnabled(a.exportBtn, !busy && hasResult)
+	setEnabled(a.approveBtn, !busy && hasResult)
+	setEnabled(a.uploadBtn, !busy && hasResult)
+	setEnabled(a.openOutputBtn, !busy && hasResult)
 	setEnabled(a.openRecentBtn, recentEnabled)
 	setEnabled(a.openLogBtn, true)
-	a.setPreviewButtonsEnabled(!generating && hasResult)
+	a.setPreviewButtonsEnabled(!busy && hasResult)
 	a.enableMenuItem(idGenerateButton, generateEnabled)
-	a.enableMenuItem(idBrowseRepo, !generating)
-	a.enableMenuItem(idImportRequirement, !generating)
-	a.enableMenuItem(idImportPackage, !generating)
-	a.enableMenuItem(idClearDraft, !generating)
-	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
-		a.enableMenuItem(id, !generating && hasResult)
+	a.enableMenuItem(idBrowseRepo, !busy)
+	a.enableMenuItem(idImportRequirement, !busy)
+	a.enableMenuItem(idImportPackage, !busy)
+	a.enableMenuItem(idClearDraft, !busy)
+	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idUploadApproved, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
+		a.enableMenuItem(id, !busy && hasResult)
 	}
-	a.enableMenuItem(idCopyPreview, !generating && hasResult)
+	a.enableMenuItem(idCopyPreview, !busy && hasResult)
 	a.enableMenuItem(idOpenRecentPackage, recentEnabled)
 	a.enableMenuItem(idOpenLog, true)
 }
@@ -2382,6 +2553,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.clearDraftBtn,
 		a.exportBtn,
 		a.approveBtn,
+		a.uploadBtn,
 		a.openOutputBtn,
 		a.openLogBtn,
 		a.statusList,
@@ -2864,6 +3036,8 @@ const (
 	wmCtlColorStatic      = 0x0138
 	wmAppGenerationDone   = 0x8001
 	wmAppGenerationFailed = 0x8002
+	wmAppUploadDone       = 0x8003
+	wmAppUploadFailed     = 0x8004
 
 	lbAddString = 0x0180
 	lbSetCurSel = 0x0186
