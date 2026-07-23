@@ -63,6 +63,10 @@ const (
 	idOpenLog           = 1035
 	idImportRequirement = 1036
 	idMenuExit          = 1037
+	idHealthRuntime     = 1038
+	idHealthStages      = 1039
+	idHealthBundle      = 1040
+	idHealthValidation  = 1041
 
 	bnClicked = 0
 )
@@ -120,52 +124,56 @@ type nativeApp struct {
 	service       *app.Service
 	logger        *desktopLogger
 
-	hwnd            syscall.Handle
-	font            uintptr
-	titleFont       uintptr
-	monoFont        uintptr
-	bgBrush         uintptr
-	panelBrush      uintptr
-	fieldBrush      uintptr
-	readonlyBrush   uintptr
-	darkBrush       uintptr
-	mainMenu        syscall.Handle
-	headerTitle     syscall.Handle
-	headerMeta      syscall.Handle
-	engineStatus    syscall.Handle
-	workflowState   syscall.Handle
-	previewTitle    syscall.Handle
-	inputGroup      syscall.Handle
-	inputHint       syscall.Handle
-	sourceHint      syscall.Handle
-	credentialHint  syscall.Handle
-	lifecycleGroup  syscall.Handle
-	lifecycleHint   syscall.Handle
-	previewGroup    syscall.Handle
-	previewHint     syscall.Handle
-	artifactStatus  syscall.Handle
-	previewSummary  syscall.Handle
-	previewContent  syscall.Handle
-	viewMarkdownBtn syscall.Handle
-	viewStageBtn    syscall.Handle
-	viewOutlineBtn  syscall.Handle
-	viewBundleBtn   syscall.Handle
-	productURL      nativeField
-	localRepoPath   nativeField
-	gitRepoURL      nativeField
-	demoUsername    nativeField
-	demoPassword    nativeField
-	requirement     nativeField
-	generateBtn     syscall.Handle
-	saveBtn         syscall.Handle
-	browseRepoBtn   syscall.Handle
-	importReqBtn    syscall.Handle
-	openOutputBtn   syscall.Handle
-	openLogBtn      syscall.Handle
-	statusList      syscall.Handle
-	markdown        nativeField
-	stageJSON       nativeField
-	outlineJSON     nativeField
+	hwnd             syscall.Handle
+	font             uintptr
+	titleFont        uintptr
+	monoFont         uintptr
+	bgBrush          uintptr
+	panelBrush       uintptr
+	fieldBrush       uintptr
+	readonlyBrush    uintptr
+	darkBrush        uintptr
+	mainMenu         syscall.Handle
+	headerTitle      syscall.Handle
+	headerMeta       syscall.Handle
+	engineStatus     syscall.Handle
+	workflowState    syscall.Handle
+	previewTitle     syscall.Handle
+	inputGroup       syscall.Handle
+	inputHint        syscall.Handle
+	sourceHint       syscall.Handle
+	credentialHint   syscall.Handle
+	lifecycleGroup   syscall.Handle
+	lifecycleHint    syscall.Handle
+	previewGroup     syscall.Handle
+	previewHint      syscall.Handle
+	artifactStatus   syscall.Handle
+	previewSummary   syscall.Handle
+	healthRuntime    syscall.Handle
+	healthStages     syscall.Handle
+	healthBundle     syscall.Handle
+	healthValidation syscall.Handle
+	previewContent   syscall.Handle
+	viewMarkdownBtn  syscall.Handle
+	viewStageBtn     syscall.Handle
+	viewOutlineBtn   syscall.Handle
+	viewBundleBtn    syscall.Handle
+	productURL       nativeField
+	localRepoPath    nativeField
+	gitRepoURL       nativeField
+	demoUsername     nativeField
+	demoPassword     nativeField
+	requirement      nativeField
+	generateBtn      syscall.Handle
+	saveBtn          syscall.Handle
+	browseRepoBtn    syscall.Handle
+	importReqBtn     syscall.Handle
+	openOutputBtn    syscall.Handle
+	openLogBtn       syscall.Handle
+	statusList       syscall.Handle
+	markdown         nativeField
+	stageJSON        nativeField
+	outlineJSON      nativeField
 
 	mu            sync.Mutex
 	generating    bool
@@ -191,6 +199,10 @@ type nativeGenerateResult struct {
 	StageCount        int    `json:"stage_count"`
 	OutlineStageCount int    `json:"outline_stage_count"`
 	BundleHashSuffix  string `json:"bundle_hash_suffix"`
+	HealthRuntime     string `json:"health_runtime"`
+	HealthStages      string `json:"health_stages"`
+	HealthBundle      string `json:"health_bundle"`
+	HealthValidation  string `json:"health_validation"`
 }
 
 type nativeInput struct {
@@ -330,6 +342,10 @@ func (a *nativeApp) createControls() {
 	a.previewTitle = createChild(a.hwnd, "STATIC", "审核三合一包；服务器 Agent 在边界内自适应执行。", wsChild|wsVisible, idPreviewTitle)
 	a.previewHint = createChild(a.hwnd, "STATIC", "Markdown 面向审批，JSON/Outline 面向执行。", wsChild|wsVisible, idPreviewHint)
 	a.artifactStatus = createChild(a.hwnd, "STATIC", "输出目录：尚未生成", wsChild|wsVisible, idArtifactStatus)
+	a.healthRuntime = createChild(a.hwnd, "STATIC", "Runtime: --", wsChild|wsVisible|wsBorder, idHealthRuntime)
+	a.healthStages = createChild(a.hwnd, "STATIC", "Stages: --", wsChild|wsVisible|wsBorder, idHealthStages)
+	a.healthBundle = createChild(a.hwnd, "STATIC", "Bundle: --", wsChild|wsVisible|wsBorder, idHealthBundle)
+	a.healthValidation = createChild(a.hwnd, "STATIC", "Validation: pending", wsChild|wsVisible|wsBorder, idHealthValidation)
 	a.previewSummary = createChild(a.hwnd, "EDIT", "等待生成结果。", wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutoVScroll|esReadOnly, idPreviewSummary)
 	a.viewMarkdownBtn = createChild(a.hwnd, "BUTTON", "Markdown", wsChild|wsVisible|bsPushButton, idViewMarkdown)
 	a.viewStageBtn = createChild(a.hwnd, "BUTTON", "Stage JSON", wsChild|wsVisible|bsPushButton, idViewStageJSON)
@@ -504,13 +520,22 @@ func (a *nativeApp) layout() {
 	moveControl(a.previewTitle, rightX+14, rightTop+28, rightW-28, 18)
 	moveControl(a.previewHint, rightX+14, rightTop+50, rightW-28, 18)
 	moveControl(a.artifactStatus, rightX+14, rightTop+72, rightW-28, 18)
-	moveControl(a.previewSummary, rightX+14, rightTop+96, rightW-28, 92)
-	tabTop := rightTop + 198
-	buttonW := 116
+	healthTop := rightTop + 96
+	healthGap := 8
+	healthW := maxInt(92, (rightW-28-healthGap*3)/4)
+	moveControl(a.healthRuntime, rightX+14, healthTop, healthW, 30)
+	moveControl(a.healthStages, rightX+14+(healthW+healthGap), healthTop, healthW, 30)
+	moveControl(a.healthBundle, rightX+14+(healthW+healthGap)*2, healthTop, healthW, 30)
+	moveControl(a.healthValidation, rightX+14+(healthW+healthGap)*3, healthTop, healthW, 30)
+	summaryTop := healthTop + 42
+	summaryH := 78
+	moveControl(a.previewSummary, rightX+14, summaryTop, rightW-28, summaryH)
+	tabTop := summaryTop + summaryH + 12
+	buttonW := maxInt(92, (rightW-28-healthGap*3)/4)
 	moveControl(a.viewMarkdownBtn, rightX+14, tabTop, buttonW, 30)
-	moveControl(a.viewStageBtn, rightX+14+buttonW+8, tabTop, buttonW, 30)
-	moveControl(a.viewOutlineBtn, rightX+14+(buttonW+8)*2, tabTop, buttonW, 30)
-	moveControl(a.viewBundleBtn, rightX+14+(buttonW+8)*3, tabTop, buttonW, 30)
+	moveControl(a.viewStageBtn, rightX+14+buttonW+healthGap, tabTop, buttonW, 30)
+	moveControl(a.viewOutlineBtn, rightX+14+(buttonW+healthGap)*2, tabTop, buttonW, 30)
+	moveControl(a.viewBundleBtn, rightX+14+(buttonW+healthGap)*3, tabTop, buttonW, 30)
 	moveControl(a.previewContent, rightX+14, tabTop+40, rightW-28, maxInt(160, rightH-(tabTop-rightTop)-54))
 }
 
@@ -534,6 +559,7 @@ func (a *nativeApp) startGenerate() {
 	setWindowText(a.generateBtn, "生成中...")
 	setWindowText(a.workflowState, "正在生成三合一包")
 	setWindowText(a.artifactStatus, "输出目录：生成完成后显示")
+	a.setHealthText("Runtime: generating", "Stages: --", "Bundle: --", "Validation: pending")
 	a.updateActionState(true, false)
 	a.addStatus("开始本地项目理解与三合一包生成。")
 	input := nativeInput{
@@ -615,6 +641,10 @@ func (a *nativeApp) nativeResultFromState(state *orchestrator.CascadeState) (*na
 		StageCount:        stageApprovalStageCount(bundle),
 		OutlineStageCount: outlineStageCount(bundle),
 		BundleHashSuffix:  shortHash(bundle.Reproducibility.BundleHashSHA256),
+		HealthRuntime:     "Runtime: " + firstNonEmptyNative(bundle.ScriptManifest.Runtime, "unknown"),
+		HealthStages:      fmt.Sprintf("Stages: %d / %d", stageApprovalStageCount(bundle), outlineStageCount(bundle)),
+		HealthBundle:      "Bundle: " + byteSizeLabel(len(bundleJSON)),
+		HealthValidation:  validationHealthLabel(bundle.Validation),
 	}, nil
 }
 
@@ -634,6 +664,7 @@ func (a *nativeApp) finishGenerate() {
 	setWindowText(a.artifactStatus, "输出目录："+result.OutputDirectory)
 	setWindowText(a.previewSummary, result.Summary)
 	setWindowText(a.previewContent, result.Markdown)
+	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
 	a.updateActionState(false, true)
 	a.addStatus("三合一执行包已生成，可审核或保存。project_id=" + result.ProjectID)
 }
@@ -652,6 +683,7 @@ func (a *nativeApp) finishGenerateErrorMessage(message string) {
 	a.mu.Unlock()
 	setWindowText(a.generateBtn, "生成三合一执行包")
 	setWindowText(a.workflowState, "生成失败")
+	a.setHealthText("Runtime: --", "Stages: --", "Bundle: --", "Validation: failed")
 	a.updateActionState(false, a.lastResult != nil)
 	a.addStatus("生成失败：" + message)
 	messageBox("Cascade DemoOps", message, true)
@@ -801,6 +833,13 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.enableMenuItem(idOpenLog, true)
 }
 
+func (a *nativeApp) setHealthText(runtime string, stages string, bundle string, validation string) {
+	setWindowText(a.healthRuntime, runtime)
+	setWindowText(a.healthStages, stages)
+	setWindowText(a.healthBundle, bundle)
+	setWindowText(a.healthValidation, validation)
+}
+
 func (a *nativeApp) enableMenuItem(id int, enabled bool) {
 	if a.mainMenu == 0 {
 		return
@@ -838,6 +877,19 @@ func nativeResultSummary(state *orchestrator.CascadeState, bundle *model.Executa
 		lines = append(lines, fmt.Sprintf("Validation: valid=%t findings=%d", bundle.Validation.Valid, len(bundle.Validation.Findings)))
 	}
 	return strings.Join(lines, "\r\n")
+}
+
+func validationHealthLabel(validation *model.ExecutableScriptValidation) string {
+	if validation == nil {
+		return "Validation: missing"
+	}
+	if validation.Valid {
+		if len(validation.Findings) == 0 {
+			return "Validation: passed"
+		}
+		return fmt.Sprintf("Validation: passed, %d findings", len(validation.Findings))
+	}
+	return fmt.Sprintf("Validation: blocked, %d findings", len(validation.Findings))
 }
 
 func stageApprovalStageCount(bundle *model.ExecutableRecordingScriptBundle) int {
@@ -976,6 +1028,10 @@ func (a *nativeApp) applyDefaultFont() {
 		a.previewTitle,
 		a.previewHint,
 		a.artifactStatus,
+		a.healthRuntime,
+		a.healthStages,
+		a.healthBundle,
+		a.healthValidation,
 		a.previewSummary,
 		a.previewContent,
 		a.viewMarkdownBtn,
@@ -1022,7 +1078,9 @@ func (a *nativeApp) controlColor(msgID uint32, wParam uintptr, lParam uintptr) u
 	bgColor := colorRef(255, 255, 255)
 	brush := a.panelBrush
 	switch {
-	case hwnd == a.previewSummary || hwnd == a.previewContent:
+	case hwnd == a.previewSummary || hwnd == a.previewContent ||
+		hwnd == a.healthRuntime || hwnd == a.healthStages ||
+		hwnd == a.healthBundle || hwnd == a.healthValidation:
 		bgColor = colorRef(250, 251, 253)
 		brush = a.readonlyBrush
 	case hwnd == a.statusList:
