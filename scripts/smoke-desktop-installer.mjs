@@ -213,7 +213,7 @@ function assert(condition, message) {
 
 function assertNativeCapabilities(desktopUI, label) {
   const capabilities = desktopUI?.native_capabilities || [];
-  for (const capability of ["native_folder_picker", "requirement_document_import", "artifact_folder_open", "diagnostic_log_open", "native_visual_hierarchy", "three_in_one_package_save"]) {
+  for (const capability of ["native_menu_bar", "native_folder_picker", "requirement_document_import", "artifact_folder_open", "diagnostic_log_open", "native_visual_hierarchy", "three_in_one_package_save"]) {
     assert(capabilities.includes(capability), `${label} missing native capability ${capability}`);
   }
 }
@@ -376,42 +376,41 @@ function waitForReadyPayload(child) {
   });
 }
 
-function assertNativeWindowLaunch(child, logPath) {
-  return new Promise((resolveNative, rejectNative) => {
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      if (stdout.includes("Desktop host is serving packaged web assets") || stdout.includes("\"url\":\"http://")) {
-        rejectNative(new Error(`native launch unexpectedly started compatibility web host: ${stdout}`));
-        return;
-      }
-      if (child.exitCode !== null) {
-        rejectNative(new Error(`native desktop exited before smoke window interval. stdout=${stdout} stderr=${stderr}`));
-        return;
-      }
-      assertFile(logPath, "native desktop launcher log");
-      const log = readFileSync(logPath, "utf8");
-      assert(log.includes("starting native desktop ui"), "native desktop log must prove native UI startup");
-      assert(log.includes("本地原生应用已启动"), "native desktop log must prove native window initialization");
-      resolveNative();
-    }, 2500);
-    child.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      rejectNative(err);
-    });
-    child.on("exit", (code) => {
-      if (code !== null && code !== 0) {
-        clearTimeout(timer);
-        rejectNative(new Error(`native desktop exited early, code=${code}, stdout=${stdout}, stderr=${stderr}`));
-      }
-    });
+async function assertNativeWindowLaunch(child, logPath) {
+  let stdout = "";
+  let stderr = "";
+  let launchError = null;
+  child.stdout?.on("data", (chunk) => {
+    stdout += chunk.toString("utf8");
   });
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+  child.on("error", (err) => {
+    launchError = err;
+  });
+
+  const deadline = Date.now() + 10000;
+  let lastLog = "";
+  while (Date.now() < deadline) {
+    if (launchError) {
+      throw launchError;
+    }
+    if (stdout.includes("Desktop host is serving packaged web assets") || stdout.includes("\"url\":\"http://")) {
+      throw new Error(`native launch unexpectedly started compatibility web host: ${stdout}`);
+    }
+    if (child.exitCode !== null) {
+      throw new Error(`native desktop exited before smoke window interval. stdout=${stdout} stderr=${stderr}`);
+    }
+    if (existsSync(logPath)) {
+      lastLog = readFileSync(logPath, "utf8");
+      if (lastLog.includes("starting native desktop ui") && lastLog.includes("本地原生应用已启动")) {
+        return;
+      }
+    }
+    await delay(250);
+  }
+  throw new Error(`native desktop log did not prove window initialization before timeout. log=${lastLog} stdout=${stdout} stderr=${stderr}`);
 }
 
 function tryParseFirstJSON(value) {
@@ -451,6 +450,10 @@ function waitForExit(child, timeoutMS) {
       resolveExit(true);
     });
   });
+}
+
+function delay(timeoutMS) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, timeoutMS));
 }
 
 function httpGet(url) {

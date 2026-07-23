@@ -62,6 +62,7 @@ const (
 	idOpenOutput        = 1034
 	idOpenLog           = 1035
 	idImportRequirement = 1036
+	idMenuExit          = 1037
 
 	bnClicked = 0
 )
@@ -88,6 +89,13 @@ var (
 	procPostQuitMessage      = user32.NewProc("PostQuitMessage")
 	procSendMessageW         = user32.NewProc("SendMessageW")
 	procSetWindowTextW       = user32.NewProc("SetWindowTextW")
+	procCreateMenu           = user32.NewProc("CreateMenu")
+	procCreatePopupMenu      = user32.NewProc("CreatePopupMenu")
+	procAppendMenuW          = user32.NewProc("AppendMenuW")
+	procSetMenu              = user32.NewProc("SetMenu")
+	procDrawMenuBar          = user32.NewProc("DrawMenuBar")
+	procDestroyMenu          = user32.NewProc("DestroyMenu")
+	procEnableMenuItem       = user32.NewProc("EnableMenuItem")
 	procShowWindow           = user32.NewProc("ShowWindow")
 	procTranslateMessage     = user32.NewProc("TranslateMessage")
 	procUpdateWindow         = user32.NewProc("UpdateWindow")
@@ -121,6 +129,7 @@ type nativeApp struct {
 	fieldBrush      uintptr
 	readonlyBrush   uintptr
 	darkBrush       uintptr
+	mainMenu        syscall.Handle
 	headerTitle     syscall.Handle
 	headerMeta      syscall.Handle
 	engineStatus    syscall.Handle
@@ -275,29 +284,8 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 	case wmCommand:
 		id := int(wParam & 0xffff)
 		code := int((wParam >> 16) & 0xffff)
-		if code == bnClicked && app != nil {
-			switch id {
-			case idGenerateButton:
-				app.startGenerate()
-			case idSaveButton:
-				app.saveLastResult()
-			case idBrowseRepo:
-				app.chooseLocalRepoPath()
-			case idImportRequirement:
-				app.importRequirementDocument()
-			case idOpenOutput:
-				app.openLastOutputDirectory()
-			case idOpenLog:
-				app.openDiagnosticLog()
-			case idViewMarkdown:
-				app.showPreview("markdown")
-			case idViewStageJSON:
-				app.showPreview("stage")
-			case idViewOutline:
-				app.showPreview("outline")
-			case idViewBundle:
-				app.showPreview("bundle")
-			}
+		if app != nil && (code == bnClicked || code == 0) {
+			app.handleCommand(id)
 		}
 		return 0
 	case wmAppGenerationDone:
@@ -327,6 +315,7 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 
 func (a *nativeApp) createControls() {
 	a.createUIResources()
+	a.createMenu()
 	a.headerTitle = createChild(a.hwnd, "STATIC", "Cascade DemoOps Native Workbench", wsChild|wsVisible, idHeaderTitle)
 	a.headerMeta = createChild(a.hwnd, "STATIC", "需求驱动小步读代码 · 生成三合一审批包", wsChild|wsVisible, idHeaderMeta)
 	a.engineStatus = createChild(a.hwnd, "STATIC", a.engineStatusText(), wsChild|wsVisible|wsBorder, idEngineStatus)
@@ -361,9 +350,62 @@ func (a *nativeApp) createControls() {
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.applyDefaultFont()
-	setEnabled(a.saveBtn, false)
-	setEnabled(a.openOutputBtn, false)
-	a.setPreviewButtonsEnabled(false)
+	a.updateActionState(false, false)
+}
+
+func (a *nativeApp) handleCommand(id int) {
+	switch id {
+	case idGenerateButton:
+		a.startGenerate()
+	case idSaveButton:
+		a.saveLastResult()
+	case idBrowseRepo:
+		a.chooseLocalRepoPath()
+	case idImportRequirement:
+		a.importRequirementDocument()
+	case idOpenOutput:
+		a.openLastOutputDirectory()
+	case idOpenLog:
+		a.openDiagnosticLog()
+	case idViewMarkdown:
+		a.showPreview("markdown")
+	case idViewStageJSON:
+		a.showPreview("stage")
+	case idViewOutline:
+		a.showPreview("outline")
+	case idViewBundle:
+		a.showPreview("bundle")
+	case idMenuExit:
+		procPostMessageW.Call(uintptr(a.hwnd), wmClose, 0, 0)
+	}
+}
+
+func (a *nativeApp) createMenu() {
+	mainMenu := createMenu()
+	fileMenu := createPopupMenu()
+	viewMenu := createPopupMenu()
+	helpMenu := createPopupMenu()
+	appendMenuItem(fileMenu, idImportRequirement, "导入需求文档...")
+	appendMenuItem(fileMenu, idBrowseRepo, "选择本地项目文件夹...")
+	appendMenuSeparator(fileMenu)
+	appendMenuItem(fileMenu, idGenerateButton, "生成三合一执行包")
+	appendMenuItem(fileMenu, idSaveButton, "保存三合一包")
+	appendMenuSeparator(fileMenu)
+	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录")
+	appendMenuItem(fileMenu, idOpenLog, "打开诊断日志")
+	appendMenuSeparator(fileMenu)
+	appendMenuItem(fileMenu, idMenuExit, "退出")
+	appendMenuItem(viewMenu, idViewMarkdown, "预览 Markdown")
+	appendMenuItem(viewMenu, idViewStageJSON, "预览 Stage JSON")
+	appendMenuItem(viewMenu, idViewOutline, "预览 Script Outline")
+	appendMenuItem(viewMenu, idViewBundle, "预览 Full Bundle")
+	appendMenuItem(helpMenu, idOpenLog, "诊断日志")
+	appendSubMenu(mainMenu, fileMenu, "文件")
+	appendSubMenu(mainMenu, viewMenu, "视图")
+	appendSubMenu(mainMenu, helpMenu, "帮助")
+	procSetMenu.Call(uintptr(a.hwnd), uintptr(mainMenu))
+	procDrawMenuBar.Call(uintptr(a.hwnd))
+	a.mainMenu = syscall.Handle(mainMenu)
 }
 
 func (a *nativeApp) createUIResources() {
@@ -492,11 +534,7 @@ func (a *nativeApp) startGenerate() {
 	setWindowText(a.generateBtn, "生成中...")
 	setWindowText(a.workflowState, "正在生成三合一包")
 	setWindowText(a.artifactStatus, "输出目录：生成完成后显示")
-	setEnabled(a.generateBtn, false)
-	setEnabled(a.saveBtn, false)
-	setEnabled(a.browseRepoBtn, false)
-	setEnabled(a.importReqBtn, false)
-	setEnabled(a.openOutputBtn, false)
+	a.updateActionState(true, false)
 	a.addStatus("开始本地项目理解与三合一包生成。")
 	input := nativeInput{
 		ProductURL:         getWindowText(a.productURL.Edit),
@@ -596,12 +634,7 @@ func (a *nativeApp) finishGenerate() {
 	setWindowText(a.artifactStatus, "输出目录："+result.OutputDirectory)
 	setWindowText(a.previewSummary, result.Summary)
 	setWindowText(a.previewContent, result.Markdown)
-	setEnabled(a.generateBtn, true)
-	setEnabled(a.saveBtn, true)
-	setEnabled(a.browseRepoBtn, true)
-	setEnabled(a.importReqBtn, true)
-	setEnabled(a.openOutputBtn, true)
-	a.setPreviewButtonsEnabled(true)
+	a.updateActionState(false, true)
 	a.addStatus("三合一执行包已生成，可审核或保存。project_id=" + result.ProjectID)
 }
 
@@ -619,12 +652,7 @@ func (a *nativeApp) finishGenerateErrorMessage(message string) {
 	a.mu.Unlock()
 	setWindowText(a.generateBtn, "生成三合一执行包")
 	setWindowText(a.workflowState, "生成失败")
-	setEnabled(a.generateBtn, true)
-	setEnabled(a.saveBtn, a.lastResult != nil)
-	setEnabled(a.browseRepoBtn, true)
-	setEnabled(a.importReqBtn, true)
-	setEnabled(a.openOutputBtn, a.lastResult != nil)
-	a.setPreviewButtonsEnabled(a.lastResult != nil)
+	a.updateActionState(false, a.lastResult != nil)
 	a.addStatus("生成失败：" + message)
 	messageBox("Cascade DemoOps", message, true)
 }
@@ -756,6 +784,35 @@ func (a *nativeApp) setPreviewButtonsEnabled(enabled bool) {
 	setEnabled(a.viewBundleBtn, enabled)
 }
 
+func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
+	setEnabled(a.generateBtn, !generating)
+	setEnabled(a.saveBtn, !generating && hasResult)
+	setEnabled(a.browseRepoBtn, !generating)
+	setEnabled(a.importReqBtn, !generating)
+	setEnabled(a.openOutputBtn, !generating && hasResult)
+	setEnabled(a.openLogBtn, true)
+	a.setPreviewButtonsEnabled(!generating && hasResult)
+	for _, id := range []int{idGenerateButton, idBrowseRepo, idImportRequirement} {
+		a.enableMenuItem(id, !generating)
+	}
+	for _, id := range []int{idSaveButton, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
+		a.enableMenuItem(id, !generating && hasResult)
+	}
+	a.enableMenuItem(idOpenLog, true)
+}
+
+func (a *nativeApp) enableMenuItem(id int, enabled bool) {
+	if a.mainMenu == 0 {
+		return
+	}
+	flag := mfByCommand | mfEnabled
+	if !enabled {
+		flag = mfByCommand | mfGrayed
+	}
+	procEnableMenuItem.Call(uintptr(a.mainMenu), uintptr(id), uintptr(flag))
+	procDrawMenuBar.Call(uintptr(a.hwnd))
+}
+
 func (a *nativeApp) engineStatusText() string {
 	sidecar := "sidecar 待检查"
 	if a.runtimeConfig.NodeBinaryPath != "" {
@@ -878,6 +935,28 @@ func createGroupBox(parent syscall.Handle, text string, id int) syscall.Handle {
 	return createChild(parent, "BUTTON", text, wsChild|wsVisible|bsGroupBox, id)
 }
 
+func createMenu() syscall.Handle {
+	menu, _, _ := procCreateMenu.Call()
+	return syscall.Handle(menu)
+}
+
+func createPopupMenu() syscall.Handle {
+	menu, _, _ := procCreatePopupMenu.Call()
+	return syscall.Handle(menu)
+}
+
+func appendMenuItem(menu syscall.Handle, id int, text string) {
+	procAppendMenuW.Call(uintptr(menu), mfString, uintptr(id), uintptr(unsafe.Pointer(utf16Ptr(text))))
+}
+
+func appendMenuSeparator(menu syscall.Handle) {
+	procAppendMenuW.Call(uintptr(menu), mfSeparator, 0, 0)
+}
+
+func appendSubMenu(menu syscall.Handle, subMenu syscall.Handle, text string) {
+	procAppendMenuW.Call(uintptr(menu), mfPopup, uintptr(subMenu), uintptr(unsafe.Pointer(utf16Ptr(text))))
+}
+
 func (a *nativeApp) applyDefaultFont() {
 	if a.font == 0 {
 		return
@@ -976,6 +1055,10 @@ func (a *nativeApp) disposeUIResources() {
 		}
 		seen[object] = true
 		procDeleteObject.Call(object)
+	}
+	if a.mainMenu != 0 {
+		procDestroyMenu.Call(uintptr(a.mainMenu))
+		a.mainMenu = 0
 	}
 }
 
@@ -1300,6 +1383,7 @@ const (
 
 	wmCreate              = 0x0001
 	wmDestroy             = 0x0002
+	wmClose               = 0x0010
 	wmSize                = 0x0005
 	wmSetFont             = 0x0030
 	wmCommand             = 0x0111
@@ -1312,6 +1396,13 @@ const (
 	lbAddString = 0x0180
 	lbSetCurSel = 0x0186
 	lbErr       = ^uintptr(0)
+
+	mfString    = 0x00000000
+	mfSeparator = 0x00000800
+	mfPopup     = 0x00000010
+	mfByCommand = 0x00000000
+	mfGrayed    = 0x00000001
+	mfEnabled   = 0x00000000
 
 	whiteBrush     = 0
 	defaultGUIFont = 17
