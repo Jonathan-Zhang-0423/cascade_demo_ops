@@ -107,6 +107,7 @@ function buildPackageManifest() {
         "approval_health_summary",
         "stage_plan_review",
         "script_outline_review",
+        "native_approval_clipboard_copy",
         "three_in_one_package_save",
         "artifact_folder_open",
         "diagnostic_log_open",

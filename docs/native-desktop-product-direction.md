@@ -31,6 +31,7 @@ The first native workflow is the three-in-one package workbench:
   - `approval_markdown.md`
   - `stage_approval_plan.json`
   - `script_outline.json`
+- Let users copy the currently previewed approval artifact through a native clipboard action for review handoff.
 - Save the three-in-one package and full bundle into the local artifact directory.
 - Use native desktop affordances for local paths and artifacts, including a folder picker for local repositories and an action to open the generated output directory.
 - Provide a deliberate native visual hierarchy with desktop fonts, readable preview surfaces, and direct access to diagnostic logs.

@@ -72,6 +72,7 @@ const (
 	idPhasePackage      = 1044
 	idPhaseReview       = 1045
 	idInputReadiness    = 1046
+	idCopyPreview       = 1047
 
 	bnClicked = 0
 	enChange  = 0x0300
@@ -111,7 +112,15 @@ var (
 	procUpdateWindow         = user32.NewProc("UpdateWindow")
 	procMessageBoxW          = user32.NewProc("MessageBoxW")
 	procEnableWindow         = user32.NewProc("EnableWindow")
+	procOpenClipboard        = user32.NewProc("OpenClipboard")
+	procEmptyClipboard       = user32.NewProc("EmptyClipboard")
+	procSetClipboardData     = user32.NewProc("SetClipboardData")
+	procCloseClipboard       = user32.NewProc("CloseClipboard")
 	procGetModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
+	procGlobalAlloc          = kernel32.NewProc("GlobalAlloc")
+	procGlobalLock           = kernel32.NewProc("GlobalLock")
+	procGlobalUnlock         = kernel32.NewProc("GlobalUnlock")
+	procGlobalFree           = kernel32.NewProc("GlobalFree")
 	procGetStockObject       = gdi32.NewProc("GetStockObject")
 	procCreateFontW          = gdi32.NewProc("CreateFontW")
 	procCreateSolidBrush     = gdi32.NewProc("CreateSolidBrush")
@@ -168,6 +177,7 @@ type nativeApp struct {
 	viewStageBtn     syscall.Handle
 	viewOutlineBtn   syscall.Handle
 	viewBundleBtn    syscall.Handle
+	copyPreviewBtn   syscall.Handle
 	productURL       nativeField
 	localRepoPath    nativeField
 	gitRepoURL       nativeField
@@ -186,11 +196,12 @@ type nativeApp struct {
 	stageJSON        nativeField
 	outlineJSON      nativeField
 
-	mu            sync.Mutex
-	generating    bool
-	lastResult    *nativeGenerateResult
-	pendingResult *nativeGenerateResult
-	pendingError  string
+	mu             sync.Mutex
+	generating     bool
+	lastResult     *nativeGenerateResult
+	pendingResult  *nativeGenerateResult
+	pendingError   string
+	currentPreview string
 }
 
 type nativeField struct {
@@ -379,6 +390,7 @@ func (a *nativeApp) createControls() {
 	a.viewStageBtn = createChild(a.hwnd, "BUTTON", "Stage JSON", wsChild|wsVisible|bsPushButton, idViewStageJSON)
 	a.viewOutlineBtn = createChild(a.hwnd, "BUTTON", "Outline", wsChild|wsVisible|bsPushButton, idViewOutline)
 	a.viewBundleBtn = createChild(a.hwnd, "BUTTON", "Full Bundle", wsChild|wsVisible|bsPushButton, idViewBundle)
+	a.copyPreviewBtn = createChild(a.hwnd, "BUTTON", "复制", wsChild|wsVisible|bsPushButton, idCopyPreview)
 	a.previewContent = createChild(a.hwnd, "EDIT", "", wsChild|wsVisible|wsBorder|wsVScroll|wsHScroll|esMultiline|esAutoVScroll|esAutoHScroll|esReadOnly, idPreviewContent)
 	a.productURL = a.labelAndEdit("产品 URL", idProductURL, "https://cascadeai.cn", false, false)
 	a.localRepoPath = a.labelAndEdit("本地项目路径（可选）", idLocalRepoPath, "", false, false)
@@ -423,6 +435,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.showPreview("outline")
 	case idViewBundle:
 		a.showPreview("bundle")
+	case idCopyPreview:
+		a.copyCurrentPreview()
 	case idMenuExit:
 		procPostMessageW.Call(uintptr(a.hwnd), wmClose, 0, 0)
 	}
@@ -447,6 +461,8 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(viewMenu, idViewStageJSON, "预览 Stage JSON")
 	appendMenuItem(viewMenu, idViewOutline, "预览 Script Outline")
 	appendMenuItem(viewMenu, idViewBundle, "预览 Full Bundle")
+	appendMenuSeparator(viewMenu)
+	appendMenuItem(viewMenu, idCopyPreview, "复制当前预览")
 	appendMenuItem(helpMenu, idOpenLog, "诊断日志")
 	appendSubMenu(mainMenu, fileMenu, "文件")
 	appendSubMenu(mainMenu, viewMenu, "视图")
@@ -572,11 +588,13 @@ func (a *nativeApp) layout() {
 	summaryH := 78
 	moveControl(a.previewSummary, rightX+14, summaryTop, rightW-28, summaryH)
 	tabTop := summaryTop + summaryH + 12
-	buttonW := maxInt(92, (rightW-28-healthGap*3)/4)
+	copyW := 72
+	buttonW := maxInt(82, (rightW-28-copyW-healthGap*4)/4)
 	moveControl(a.viewMarkdownBtn, rightX+14, tabTop, buttonW, 30)
 	moveControl(a.viewStageBtn, rightX+14+buttonW+healthGap, tabTop, buttonW, 30)
 	moveControl(a.viewOutlineBtn, rightX+14+(buttonW+healthGap)*2, tabTop, buttonW, 30)
 	moveControl(a.viewBundleBtn, rightX+14+(buttonW+healthGap)*3, tabTop, buttonW, 30)
+	moveControl(a.copyPreviewBtn, rightX+rightW-14-copyW, tabTop, copyW, 30)
 	moveControl(a.previewContent, rightX+14, tabTop+40, rightW-28, maxInt(160, rightH-(tabTop-rightTop)-54))
 }
 
@@ -712,6 +730,7 @@ func (a *nativeApp) finishGenerate() {
 	setWindowText(a.artifactStatus, "输出目录："+result.OutputDirectory)
 	setWindowText(a.previewSummary, result.Summary)
 	setWindowText(a.previewContent, result.Markdown)
+	a.currentPreview = "markdown"
 	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 可审核")
 	a.updateActionState(false, true)
@@ -849,16 +868,54 @@ func (a *nativeApp) showPreview(kind string) {
 	case "stage":
 		setWindowText(a.previewContent, result.StageJSON)
 		setWindowText(a.workflowState, "预览 Stage JSON")
+		a.currentPreview = "stage"
 	case "outline":
 		setWindowText(a.previewContent, result.OutlineJSON)
 		setWindowText(a.workflowState, "预览 Script Outline")
+		a.currentPreview = "outline"
 	case "bundle":
 		setWindowText(a.previewContent, result.BundleJSON)
 		setWindowText(a.workflowState, "预览 Full Bundle")
+		a.currentPreview = "bundle"
 	default:
 		setWindowText(a.previewContent, result.Markdown)
 		setWindowText(a.workflowState, "预览 Markdown")
+		a.currentPreview = "markdown"
 	}
+}
+
+func (a *nativeApp) copyCurrentPreview() {
+	a.mu.Lock()
+	result := a.lastResult
+	kind := a.currentPreview
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可复制的审批材料。")
+		return
+	}
+	content := result.Markdown
+	label := "Markdown"
+	switch kind {
+	case "stage":
+		content = result.StageJSON
+		label = "Stage JSON"
+	case "outline":
+		content = result.OutlineJSON
+		label = "Script Outline"
+	case "bundle":
+		content = result.BundleJSON
+		label = "Full Bundle"
+	}
+	if strings.TrimSpace(content) == "" {
+		a.addStatus("当前预览为空，未复制。")
+		return
+	}
+	if err := setClipboardText(a.hwnd, content); err != nil {
+		a.addStatus("复制失败：" + err.Error())
+		messageBox("Cascade DemoOps", "复制当前预览失败：\n"+err.Error(), true)
+		return
+	}
+	a.addStatus("已复制当前预览：" + label)
 }
 
 func (a *nativeApp) setPreviewButtonsEnabled(enabled bool) {
@@ -866,6 +923,7 @@ func (a *nativeApp) setPreviewButtonsEnabled(enabled bool) {
 	setEnabled(a.viewStageBtn, enabled)
 	setEnabled(a.viewOutlineBtn, enabled)
 	setEnabled(a.viewBundleBtn, enabled)
+	setEnabled(a.copyPreviewBtn, enabled)
 }
 
 func (a *nativeApp) isInputField(id int) bool {
@@ -1014,6 +1072,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	for _, id := range []int{idSaveButton, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
 		a.enableMenuItem(id, !generating && hasResult)
 	}
+	a.enableMenuItem(idCopyPreview, !generating && hasResult)
 	a.enableMenuItem(idOpenLog, true)
 }
 
@@ -1246,6 +1305,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.viewStageBtn,
 		a.viewOutlineBtn,
 		a.viewBundleBtn,
+		a.copyPreviewBtn,
 		a.generateBtn,
 		a.saveBtn,
 		a.browseRepoBtn,
@@ -1497,6 +1557,50 @@ func openFile(path string) error {
 	return nil
 }
 
+func setClipboardText(owner syscall.Handle, text string) error {
+	opened, _, err := procOpenClipboard.Call(uintptr(owner))
+	if opened == 0 {
+		if err != syscall.Errno(0) {
+			return err
+		}
+		return errors.New("OpenClipboard failed")
+	}
+	defer procCloseClipboard.Call()
+	if ok, _, err := procEmptyClipboard.Call(); ok == 0 {
+		if err != syscall.Errno(0) {
+			return err
+		}
+		return errors.New("EmptyClipboard failed")
+	}
+	encoded := syscall.StringToUTF16(text)
+	bytes := uintptr(len(encoded) * 2)
+	handle, _, err := procGlobalAlloc.Call(gmemMoveable|gmemZeroInit, bytes)
+	if handle == 0 {
+		if err != syscall.Errno(0) {
+			return err
+		}
+		return errors.New("GlobalAlloc failed")
+	}
+	ptr, _, err := procGlobalLock.Call(handle)
+	if ptr == 0 {
+		procGlobalFree.Call(handle)
+		if err != syscall.Errno(0) {
+			return err
+		}
+		return errors.New("GlobalLock failed")
+	}
+	copy(unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), len(encoded)), encoded)
+	procGlobalUnlock.Call(handle)
+	if out, _, err := procSetClipboardData.Call(cfUnicodeText, handle); out == 0 {
+		procGlobalFree.Call(handle)
+		if err != syscall.Errno(0) {
+			return err
+		}
+		return errors.New("SetClipboardData failed")
+	}
+	return nil
+}
+
 func utf16Ptr(value string) *uint16 {
 	ptr, err := syscall.UTF16PtrFromString(value)
 	if err != nil {
@@ -1691,6 +1795,10 @@ const (
 	ofnFileMustExist   = 0x00001000
 	ofnPathMustExist   = 0x00000800
 	ofnExplorer        = 0x00080000
+
+	cfUnicodeText = 13
+	gmemMoveable  = 0x0002
+	gmemZeroInit  = 0x0040
 
 	defaultCharset       = 1
 	outDefaultPrecision  = 0
