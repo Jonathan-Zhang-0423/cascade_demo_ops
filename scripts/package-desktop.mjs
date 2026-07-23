@@ -99,6 +99,7 @@ function buildPackageManifest() {
         "native_input_readiness_summary",
         "native_generate_readiness_gate",
         "non_sensitive_input_draft_persistence",
+        "non_sensitive_input_draft_clear",
         "native_menu_bar",
         "native_folder_picker",
         "requirement_document_import",

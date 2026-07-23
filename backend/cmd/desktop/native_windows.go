@@ -74,6 +74,7 @@ const (
 	idInputReadiness    = 1046
 	idCopyPreview       = 1047
 	idExportPackage     = 1048
+	idClearDraft        = 1049
 
 	bnClicked = 0
 	enChange  = 0x0300
@@ -192,18 +193,20 @@ type nativeApp struct {
 	importReqBtn     syscall.Handle
 	openOutputBtn    syscall.Handle
 	exportBtn        syscall.Handle
+	clearDraftBtn    syscall.Handle
 	openLogBtn       syscall.Handle
 	statusList       syscall.Handle
 	markdown         nativeField
 	stageJSON        nativeField
 	outlineJSON      nativeField
 
-	mu             sync.Mutex
-	generating     bool
-	lastResult     *nativeGenerateResult
-	pendingResult  *nativeGenerateResult
-	pendingError   string
-	currentPreview string
+	mu                sync.Mutex
+	generating        bool
+	lastResult        *nativeGenerateResult
+	pendingResult     *nativeGenerateResult
+	pendingError      string
+	currentPreview    string
+	suppressDraftSave bool
 }
 
 type nativeField struct {
@@ -406,6 +409,7 @@ func (a *nativeApp) createControls() {
 	a.saveBtn = createChild(a.hwnd, "BUTTON", "保存三合一包", wsChild|wsVisible|bsPushButton, idSaveButton)
 	a.browseRepoBtn = createChild(a.hwnd, "BUTTON", "选择文件夹", wsChild|wsVisible|bsPushButton, idBrowseRepo)
 	a.importReqBtn = createChild(a.hwnd, "BUTTON", "导入文档", wsChild|wsVisible|bsPushButton, idImportRequirement)
+	a.clearDraftBtn = createChild(a.hwnd, "BUTTON", "清除草稿", wsChild|wsVisible|bsPushButton, idClearDraft)
 	a.openOutputBtn = createChild(a.hwnd, "BUTTON", "打开输出目录", wsChild|wsVisible|bsPushButton, idOpenOutput)
 	a.exportBtn = createChild(a.hwnd, "BUTTON", "导出到文件夹", wsChild|wsVisible|bsPushButton, idExportPackage)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
@@ -424,6 +428,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.saveLastResult()
 	case idExportPackage:
 		a.exportLastResult()
+	case idClearDraft:
+		a.clearInputDraft()
 	case idBrowseRepo:
 		a.chooseLocalRepoPath()
 	case idImportRequirement:
@@ -454,6 +460,7 @@ func (a *nativeApp) createMenu() {
 	helpMenu := createPopupMenu()
 	appendMenuItem(fileMenu, idImportRequirement, "导入需求文档...")
 	appendMenuItem(fileMenu, idBrowseRepo, "选择本地项目文件夹...")
+	appendMenuItem(fileMenu, idClearDraft, "清除输入草稿")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idGenerateButton, "生成三合一执行包")
 	appendMenuItem(fileMenu, idSaveButton, "保存三合一包")
@@ -556,6 +563,7 @@ func (a *nativeApp) layout() {
 	y += 28
 	a.layoutFieldHeight(a.requirement, x, y, leftInnerW, 104)
 	moveControl(a.importReqBtn, x+leftInnerW-108, y, 108, 24)
+	moveControl(a.clearDraftBtn, x, y+108, 108, 24)
 	y += 128
 	moveControl(a.inputReadiness, x, y, leftInnerW, 34)
 	y += 48
@@ -1017,8 +1025,34 @@ func (a *nativeApp) updateInputReadiness() {
 		credentialState = "Credentials: incomplete"
 	}
 	setWindowText(a.inputReadiness, strings.Join([]string{urlState, requirementState, sourceState, credentialState}, "  |  "))
-	a.saveInputDraft()
+	if !a.suppressDraftSave {
+		a.saveInputDraft()
+	}
 	a.updateActionStateFromCurrent()
+}
+
+func (a *nativeApp) clearInputDraft() {
+	a.suppressDraftSave = true
+	setWindowText(a.productURL.Edit, "https://cascadeai.cn")
+	setWindowText(a.localRepoPath.Edit, "")
+	setWindowText(a.gitRepoURL.Edit, "")
+	setWindowText(a.demoUsername.Edit, "")
+	setWindowText(a.demoPassword.Edit, "")
+	setWindowText(a.requirement.Edit, "")
+	a.suppressDraftSave = false
+	path := a.inputDraftPath()
+	if strings.TrimSpace(path) != "" {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			a.addStatus("清除输入草稿失败：" + err.Error())
+			messageBox("Cascade DemoOps", "清除输入草稿失败：\n"+err.Error(), true)
+			a.updateInputReadiness()
+			return
+		}
+	}
+	a.suppressDraftSave = true
+	a.updateInputReadiness()
+	a.suppressDraftSave = false
+	a.addStatus("已清除输入草稿。")
 }
 
 func (a *nativeApp) restoreInputDraft() {
@@ -1110,6 +1144,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	setEnabled(a.saveBtn, !generating && hasResult)
 	setEnabled(a.browseRepoBtn, !generating)
 	setEnabled(a.importReqBtn, !generating)
+	setEnabled(a.clearDraftBtn, !generating)
 	setEnabled(a.exportBtn, !generating && hasResult)
 	setEnabled(a.openOutputBtn, !generating && hasResult)
 	setEnabled(a.openLogBtn, true)
@@ -1117,6 +1152,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.enableMenuItem(idGenerateButton, generateEnabled)
 	a.enableMenuItem(idBrowseRepo, !generating)
 	a.enableMenuItem(idImportRequirement, !generating)
+	a.enableMenuItem(idClearDraft, !generating)
 	for _, id := range []int{idSaveButton, idExportPackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
 		a.enableMenuItem(id, !generating && hasResult)
 	}
@@ -1358,6 +1394,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.saveBtn,
 		a.browseRepoBtn,
 		a.importReqBtn,
+		a.clearDraftBtn,
 		a.exportBtn,
 		a.openOutputBtn,
 		a.openLogBtn,
