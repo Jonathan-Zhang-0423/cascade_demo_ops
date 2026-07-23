@@ -197,6 +197,10 @@ type nativeApp struct {
 	healthStages     syscall.Handle
 	healthBundle     syscall.Handle
 	healthValidation syscall.Handle
+	healthServer     syscall.Handle
+	healthResult     syscall.Handle
+	healthArtifacts  syscall.Handle
+	healthAck        syscall.Handle
 	previewContent   syscall.Handle
 	viewMarkdownBtn  syscall.Handle
 	viewStageBtn     syscall.Handle
@@ -625,6 +629,10 @@ func (a *nativeApp) createControls() {
 	a.healthStages = createChild(a.hwnd, "STATIC", "Stages: --", wsChild|wsVisible|wsBorder, idHealthStages)
 	a.healthBundle = createChild(a.hwnd, "STATIC", "Bundle: --", wsChild|wsVisible|wsBorder, idHealthBundle)
 	a.healthValidation = createChild(a.hwnd, "STATIC", "Validation: pending", wsChild|wsVisible|wsBorder, idHealthValidation)
+	a.healthServer = createChild(a.hwnd, "STATIC", "Server: not uploaded", wsChild|wsVisible|wsBorder, 0)
+	a.healthResult = createChild(a.hwnd, "STATIC", "Result: not fetched", wsChild|wsVisible|wsBorder, 0)
+	a.healthArtifacts = createChild(a.hwnd, "STATIC", "Artifacts: not downloaded", wsChild|wsVisible|wsBorder, 0)
+	a.healthAck = createChild(a.hwnd, "STATIC", "Ack: pending", wsChild|wsVisible|wsBorder, 0)
 	a.previewSummary = createChild(a.hwnd, "EDIT", "等待生成结果。", wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutoVScroll|esReadOnly, idPreviewSummary)
 	a.viewReviewBtn = createChild(a.hwnd, "BUTTON", "审核摘要", wsChild|wsVisible|bsPushButton, idViewReview)
 	a.viewMarkdownBtn = createChild(a.hwnd, "BUTTON", "Markdown", wsChild|wsVisible|bsPushButton, idViewMarkdown)
@@ -963,8 +971,13 @@ func (a *nativeApp) layout() {
 	moveControl(a.healthStages, rightX+14+(healthW+healthGap), healthTop, healthW, 30)
 	moveControl(a.healthBundle, rightX+14+(healthW+healthGap)*2, healthTop, healthW, 30)
 	moveControl(a.healthValidation, rightX+14+(healthW+healthGap)*3, healthTop, healthW, 30)
-	summaryTop := healthTop + 42
-	summaryH := 78
+	serverHealthTop := healthTop + 38
+	moveControl(a.healthServer, rightX+14, serverHealthTop, healthW, 30)
+	moveControl(a.healthResult, rightX+14+(healthW+healthGap), serverHealthTop, healthW, 30)
+	moveControl(a.healthArtifacts, rightX+14+(healthW+healthGap)*2, serverHealthTop, healthW, 30)
+	moveControl(a.healthAck, rightX+14+(healthW+healthGap)*3, serverHealthTop, healthW, 30)
+	summaryTop := serverHealthTop + 42
+	summaryH := 74
 	moveControl(a.previewSummary, rightX+14, summaryTop, rightW-28, summaryH)
 	tabTop := summaryTop + summaryH + 12
 	copyW := 72
@@ -1008,6 +1021,7 @@ func (a *nativeApp) startGenerate() {
 	setWindowText(a.workflowState, "正在生成三合一包")
 	setWindowText(a.artifactStatus, "输出目录：生成完成后显示")
 	a.setHealthText("Runtime: generating", "Stages: --", "Bundle: --", "Validation: pending")
+	a.setServerHealthText("Server: --", "Result: --", "Artifacts: --", "Ack: --")
 	a.setPhaseText("1 输入完成", "2 理解中", "3 生成中", "4 待审核")
 	a.updateActionState(true, false)
 	a.addStatus("开始本地项目理解与三合一包生成。")
@@ -1111,6 +1125,7 @@ func (a *nativeApp) finishGenerate() {
 	a.setStatusBarOutput(result.OutputDirectory)
 	a.currentPreview = "review"
 	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
+	a.refreshServerHealth(result.OutputDirectory)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 可审核")
 	a.updateActionState(false, true)
 	a.rememberRecentPackage(result, result.OutputDirectory)
@@ -1132,6 +1147,7 @@ func (a *nativeApp) finishGenerateErrorMessage(message string) {
 	setWindowText(a.generateBtn, "生成三合一执行包")
 	setWindowText(a.workflowState, "生成失败")
 	a.setHealthText("Runtime: --", "Stages: --", "Bundle: --", "Validation: failed")
+	a.setServerHealthText("Server: --", "Result: --", "Artifacts: --", "Ack: --")
 	a.setPhaseText("1 输入完成", "2/3 失败", "3 未就绪", "4 不可审核")
 	a.updateActionState(false, a.lastResult != nil)
 	a.addStatus("生成失败：" + message)
@@ -1159,6 +1175,7 @@ func (a *nativeApp) saveLastResult() {
 	setWindowText(a.artifactStatus, "已保存："+dir)
 	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已保存")
+	a.refreshServerHealth(dir)
 	a.rememberRecentPackage(result, dir)
 	setEnabled(a.openOutputBtn, true)
 	messageBox("Cascade DemoOps", "三合一执行包已保存到：\n"+dir, false)
@@ -1194,6 +1211,7 @@ func (a *nativeApp) exportLastResult() {
 	setWindowText(a.artifactStatus, "已导出："+dir)
 	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已导出")
+	a.refreshServerHealth(dir)
 	a.rememberRecentPackage(result, dir)
 	messageBox("Cascade DemoOps", "三合一执行包已导出到：\n"+dir, false)
 }
@@ -1242,6 +1260,7 @@ func (a *nativeApp) approveLastResult() {
 	setWindowText(a.artifactStatus, "已审批："+dir)
 	setWindowText(a.previewSummary, nativeResultSummaryForDirectory(result, dir))
 	a.setStatusBarOutput(dir)
+	a.refreshServerHealth(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已审批")
 	messageBox("Cascade DemoOps", "本地审批已记录：\n"+filepath.Join(dir, "approval_record.json"), false)
 }
@@ -1387,6 +1406,9 @@ func (a *nativeApp) finishUpload() {
 		"Next: 使用“查询服务器状态”查看 Browser Agent 录制进度。",
 	}
 	setWindowText(a.previewSummary, strings.Join(lines, "\r\n"))
+	if strings.TrimSpace(outputDir) != "" {
+		a.refreshServerHealth(outputDir)
+	}
 	a.addStatus("已上传到服务器：exchange_package_id=" + result.ExchangePackageID)
 	messageBox("Cascade DemoOps", "已上传到服务器。\n\nExchange Package ID:\n"+result.ExchangePackageID, false)
 }
@@ -1501,6 +1523,7 @@ func (a *nativeApp) finishServerStatus() {
 	if strings.TrimSpace(record.OutputDirectory) != "" {
 		setWindowText(a.artifactStatus, "服务器状态已更新："+record.OutputDirectory)
 		a.setStatusBarOutput(record.OutputDirectory)
+		a.refreshServerHealth(record.OutputDirectory)
 	}
 	a.addStatus("服务器状态已更新：status=" + statusLabel + " stage=" + firstNonEmptyNative(result.Status.Stage, "unknown"))
 }
@@ -1624,6 +1647,7 @@ func (a *nativeApp) finishServerResult() {
 	if strings.TrimSpace(record.OutputDirectory) != "" {
 		setWindowText(a.artifactStatus, "服务器结果已保存："+record.OutputDirectory)
 		a.setStatusBarOutput(record.OutputDirectory)
+		a.refreshServerHealth(record.OutputDirectory)
 	}
 	a.addStatus("服务器结果包已获取：result_id=" + firstNonEmptyNative(result.Result.ResultID, "unknown"))
 }
@@ -1758,6 +1782,7 @@ func (a *nativeApp) finishArtifactDownloads() {
 	if strings.TrimSpace(batch.Record.OutputDirectory) != "" {
 		setWindowText(a.artifactStatus, "服务器产物已下载："+serverDeliverablesDir(batch.Record.OutputDirectory))
 		a.setStatusBarOutput(batch.Record.OutputDirectory)
+		a.refreshServerHealth(batch.Record.OutputDirectory)
 	}
 	a.addStatus(fmt.Sprintf("服务器产物已下载：verified=%d/%d", batch.Manifest.VerifiedCount, batch.Manifest.ArtifactCount))
 }
@@ -1944,6 +1969,9 @@ func (a *nativeApp) finishServerAck() {
 	setWindowText(a.workflowState, "服务器交付已确认")
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 已 ACK")
 	setWindowText(a.previewSummary, serverAckSummary(record, result.Ack))
+	if strings.TrimSpace(record.OutputDirectory) != "" {
+		a.refreshServerHealth(record.OutputDirectory)
+	}
 	a.addStatus("服务器交付 ACK 已完成：result_package_id=" + result.Ack.ResultPackageID)
 }
 
@@ -2371,6 +2399,7 @@ func (a *nativeApp) importPackageFolder() {
 	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
 	a.setPhaseText("1 可保留", "2 已载入", "3 包已就绪", "4 可审核")
 	a.setStatusBarOutput(dir)
+	a.refreshServerHealth(dir)
 	a.rememberRecentPackage(result, dir)
 	a.updateActionState(false, true)
 	a.addStatus("已导入三合一包：" + dir)
@@ -2865,6 +2894,7 @@ func (a *nativeApp) showSelectedRecentPackageSummary() {
 		"Files: " + recentPackageFilesLabel(recent.OutputDirectory),
 		"Approval: " + approvalRecordLabel(recent.OutputDirectory),
 		"Server handoff: " + serverHandoffLabel(recent.OutputDirectory),
+		"Delivery: " + deliveryHealthLine(recent.OutputDirectory),
 	}
 	setWindowText(a.previewSummary, strings.Join(lines, "\r\n"))
 	if !hasResult && a.previewContent != 0 {
@@ -2964,6 +2994,70 @@ func serverHandoffLabel(dir string) string {
 		return status
 	}
 	return serverUploadReadinessLabel(dir)
+}
+
+func serverHealthLabel(dir string) string {
+	record, err := readServerHandoffRecord(dir)
+	if err != nil {
+		return "Server: not uploaded"
+	}
+	status := firstNonEmptyNative(record.Status, "uploaded")
+	if strings.TrimSpace(record.Stage) != "" {
+		status += "/" + record.Stage
+	}
+	return "Server: " + compactPath(status, 34)
+}
+
+func resultHealthLabel(dir string) string {
+	result, err := readServerResultPackage(dir)
+	if err != nil {
+		if record, recordErr := readServerHandoffRecord(dir); recordErr == nil && strings.TrimSpace(record.ResultPackageID) != "" {
+			return "Result: ready"
+		}
+		return "Result: not fetched"
+	}
+	status := firstNonEmptyNative(string(result.Status), "fetched")
+	return "Result: " + compactPath(status, 34)
+}
+
+func artifactHealthLabel(dir string) string {
+	manifest, err := readArtifactDownloadManifest(dir)
+	if err != nil {
+		return "Artifacts: not downloaded"
+	}
+	label := fmt.Sprintf("%d/%d verified", manifest.VerifiedCount, manifest.ArtifactCount)
+	if len(manifest.ChecksumMismatchIDs) > 0 {
+		label = fmt.Sprintf("%d mismatch", len(manifest.ChecksumMismatchIDs))
+	}
+	return "Artifacts: " + label
+}
+
+func ackHealthLabel(dir string) string {
+	data, err := os.ReadFile(serverAckRecordPath(dir))
+	if err != nil {
+		if result, resultErr := readServerResultPackage(dir); resultErr == nil && !result.Delivery.AckedAt.IsZero() {
+			return "Ack: " + nativeTimeLabel(result.Delivery.AckedAt)
+		}
+		return "Ack: pending"
+	}
+	var record nativeServerAckRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return "Ack: invalid record"
+	}
+	status := firstNonEmptyNative(record.DeliveryStatus, record.Status, "acked")
+	if !record.AckedAt.IsZero() {
+		status += " " + record.AckedAt.Local().Format("15:04")
+	}
+	return "Ack: " + compactPath(status, 34)
+}
+
+func deliveryHealthLine(dir string) string {
+	return strings.Join([]string{
+		strings.TrimPrefix(serverHealthLabel(dir), "Server: "),
+		strings.TrimPrefix(resultHealthLabel(dir), "Result: "),
+		strings.TrimPrefix(artifactHealthLabel(dir), "Artifacts: "),
+		strings.TrimPrefix(ackHealthLabel(dir), "Ack: "),
+	}, " | ")
 }
 
 func serverUploadReadinessLabel(dir string) string {
@@ -3077,6 +3171,17 @@ func (a *nativeApp) setHealthText(runtime string, stages string, bundle string, 
 	setWindowText(a.healthStages, stages)
 	setWindowText(a.healthBundle, bundle)
 	setWindowText(a.healthValidation, validation)
+}
+
+func (a *nativeApp) setServerHealthText(server string, result string, artifacts string, ack string) {
+	setWindowText(a.healthServer, server)
+	setWindowText(a.healthResult, result)
+	setWindowText(a.healthArtifacts, artifacts)
+	setWindowText(a.healthAck, ack)
+}
+
+func (a *nativeApp) refreshServerHealth(dir string) {
+	a.setServerHealthText(serverHealthLabel(dir), resultHealthLabel(dir), artifactHealthLabel(dir), ackHealthLabel(dir))
 }
 
 func (a *nativeApp) setStatusBarOutput(outputDir string) {
@@ -3999,6 +4104,10 @@ func (a *nativeApp) applyDefaultFont() {
 		a.healthStages,
 		a.healthBundle,
 		a.healthValidation,
+		a.healthServer,
+		a.healthResult,
+		a.healthArtifacts,
+		a.healthAck,
 		a.previewSummary,
 		a.previewContent,
 		a.viewMarkdownBtn,
@@ -4063,6 +4172,8 @@ func (a *nativeApp) controlColor(msgID uint32, wParam uintptr, lParam uintptr) u
 	case hwnd == a.previewSummary || hwnd == a.previewContent ||
 		hwnd == a.healthRuntime || hwnd == a.healthStages ||
 		hwnd == a.healthBundle || hwnd == a.healthValidation ||
+		hwnd == a.healthServer || hwnd == a.healthResult ||
+		hwnd == a.healthArtifacts || hwnd == a.healthAck ||
 		hwnd == a.recentPackage ||
 		hwnd == a.phaseInput || hwnd == a.phaseUnderstand ||
 		hwnd == a.phasePackage || hwnd == a.phaseReview ||

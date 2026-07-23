@@ -123,6 +123,7 @@ function buildPackageManifest() {
         "native_server_artifact_checksum_verify",
         "native_server_artifact_open_folder",
         "native_server_primary_artifact_open",
+        "native_server_delivery_health_summary",
         "stage_plan_review",
         "script_outline_review",
         "native_approval_clipboard_copy",

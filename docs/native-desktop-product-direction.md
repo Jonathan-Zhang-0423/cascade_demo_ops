@@ -45,6 +45,7 @@ The first native workflow is the three-in-one package workbench:
 - Let users fetch the server `RecordingResultPackage` into `server_result_package.json` and a compact `server_result_record.json` once the server exposes a result package ID.
 - Let users download server deliverables into `server_deliverables/`, write a local `manifest.json`, and verify SHA-256 checksums before acknowledging delivery.
 - Let users open the downloaded deliverables folder and the primary downloaded artifact directly from the native workbench.
+- Surface server delivery health as native summary indicators for upload/status, result package, artifact checksum verification, and ACK state.
 - Let users explicitly acknowledge result delivery from the native workbench, writing `server_result_ack.json`; ACK prefers locally downloaded and checksum-verified artifact IDs, with metadata-only confirmation retained for compatibility.
 - Save the three-in-one package and full bundle into the local artifact directory.
 - Import an existing three-in-one package folder back into the native workbench so users can resume review, copy artifacts, open folders, and record approval after an app restart.
