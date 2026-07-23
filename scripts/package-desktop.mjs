@@ -97,6 +97,7 @@ function buildPackageManifest() {
       native_capabilities: [
         "input_collection",
         "native_input_readiness_summary",
+        "native_input_preflight_detail",
         "native_generate_readiness_gate",
         "non_sensitive_input_draft_persistence",
         "non_sensitive_input_draft_clear",
@@ -108,6 +109,7 @@ function buildPackageManifest() {
         "local_package_generation",
         "native_lifecycle_phase_bar",
         "approval_health_summary",
+        "native_package_gate_summary",
         "native_approval_review_summary",
         "native_local_approval_record",
         "stage_plan_review",

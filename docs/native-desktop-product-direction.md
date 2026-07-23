@@ -22,6 +22,7 @@ The first native workflow is the three-in-one package workbench:
 
 - Collect product URL, requirement text, transient demo credentials, and any available code source.
 - Show native input readiness before generation, covering URL, requirement text, optional code sources, and transient credential completeness.
+- Show a native input preflight detail pane before generation, making required inputs, optional parallel code sources, transient credential boundaries, and the current generate gate visible without reading logs.
 - Enable generation only after the required URL and requirement inputs are ready; optional source and credential inputs must not block local package generation.
 - Persist non-sensitive input drafts locally so URL, code sources, and requirement text survive app restarts; demo credentials must remain transient and must not be saved.
 - Provide a native reset action that clears non-sensitive input drafts and transient credential fields without touching generated artifacts.
@@ -46,6 +47,7 @@ The first native workflow is the three-in-one package workbench:
 - Use native confirmation dialogs for actions that clear drafts or overwrite exported approval artifacts.
 - Show the local generation lifecycle as native phase indicators so users can understand progress without reading raw logs.
 - Surface approval package health as native summary indicators for runtime, stage coverage, bundle size, and validation state before the user opens detailed JSON.
+- Surface a concise package gate summary after generation, including stage/outline alignment, bundle size class, local approval requirement, and secret boundary.
 
 ## Design Principles
 

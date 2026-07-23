@@ -475,6 +475,7 @@ func (a *nativeApp) createControls() {
 	a.applyDefaultFont()
 	a.refreshRecentPackageList()
 	a.updateInputReadiness()
+	a.showInputPreflightIfIdle()
 	a.setPhaseText("1 输入材料", "2 项目理解", "3 生成包", "4 审核保存")
 	a.updateActionState(false, false)
 }
@@ -773,14 +774,7 @@ func (a *nativeApp) startGenerate() {
 	a.setPhaseText("1 输入完成", "2 理解中", "3 生成中", "4 待审核")
 	a.updateActionState(true, false)
 	a.addStatus("开始本地项目理解与三合一包生成。")
-	input := nativeInput{
-		ProductURL:         getWindowText(a.productURL.Edit),
-		LocalRepoPath:      getWindowText(a.localRepoPath.Edit),
-		GitRepoURL:         getWindowText(a.gitRepoURL.Edit),
-		DemoUsername:       getWindowText(a.demoUsername.Edit),
-		DemoPassword:       getWindowText(a.demoPassword.Edit),
-		ProductDescription: getWindowText(a.requirement.Edit),
-	}
+	input := a.currentNativeInput()
 	go a.generate(input)
 }
 
@@ -1334,12 +1328,13 @@ func (a *nativeApp) updateInputReadiness() {
 	if a.inputReadiness == 0 {
 		return
 	}
-	productURL := strings.TrimSpace(getWindowText(a.productURL.Edit))
-	localRepo := strings.TrimSpace(getWindowText(a.localRepoPath.Edit))
-	gitRepo := strings.TrimSpace(getWindowText(a.gitRepoURL.Edit))
-	username := strings.TrimSpace(getWindowText(a.demoUsername.Edit))
-	password := getWindowText(a.demoPassword.Edit)
-	requirement := strings.TrimSpace(getWindowText(a.requirement.Edit))
+	input := a.currentNativeInput()
+	productURL := strings.TrimSpace(input.ProductURL)
+	localRepo := strings.TrimSpace(input.LocalRepoPath)
+	gitRepo := strings.TrimSpace(input.GitRepoURL)
+	username := strings.TrimSpace(input.DemoUsername)
+	password := input.DemoPassword
+	requirement := strings.TrimSpace(input.ProductDescription)
 	urlState := "URL: missing"
 	if productURL != "" {
 		urlState = "URL: ready"
@@ -1365,10 +1360,41 @@ func (a *nativeApp) updateInputReadiness() {
 		credentialState = "Credentials: incomplete"
 	}
 	setWindowText(a.inputReadiness, strings.Join([]string{urlState, requirementState, sourceState, credentialState}, "  |  "))
+	a.showInputPreflightIfIdle()
 	if !a.suppressDraftSave {
 		a.saveInputDraft()
 	}
 	a.updateActionStateFromCurrent()
+}
+
+func (a *nativeApp) currentNativeInput() nativeInput {
+	return nativeInput{
+		ProductURL:         getWindowText(a.productURL.Edit),
+		LocalRepoPath:      getWindowText(a.localRepoPath.Edit),
+		GitRepoURL:         getWindowText(a.gitRepoURL.Edit),
+		DemoUsername:       getWindowText(a.demoUsername.Edit),
+		DemoPassword:       getWindowText(a.demoPassword.Edit),
+		ProductDescription: getWindowText(a.requirement.Edit),
+	}
+}
+
+func (a *nativeApp) showInputPreflightIfIdle() {
+	if a.previewSummary == 0 {
+		return
+	}
+	a.mu.Lock()
+	generating := a.generating
+	hasResult := a.lastResult != nil
+	a.mu.Unlock()
+	if generating || hasResult {
+		return
+	}
+	input := a.currentNativeInput()
+	setWindowText(a.previewSummary, nativeInputPreflightSummary(input))
+	if a.previewContent != 0 {
+		setWindowText(a.previewContent, nativeInputPreflightDetail(input))
+		a.currentPreview = "input_preflight"
+	}
 }
 
 func (a *nativeApp) clearInputDraft() {
@@ -1748,17 +1774,69 @@ func nativeResultSummary(state *orchestrator.CascadeState, bundle *model.Executa
 	if state == nil || bundle == nil {
 		return "生成结果不可用。"
 	}
+	stageCount := stageApprovalStageCount(bundle)
+	outlineCount := outlineStageCount(bundle)
 	lines := []string{
 		"Project ID: " + state.ProjectID,
 		"Runtime: " + firstNonEmptyNative(bundle.ScriptManifest.Runtime, "unknown"),
-		fmt.Sprintf("Stages: approval=%d outline=%d", stageApprovalStageCount(bundle), outlineStageCount(bundle)),
+		fmt.Sprintf("Stages: approval=%d outline=%d (%s)", stageCount, outlineCount, stageCoverageLabel(stageCount, outlineCount)),
 		fmt.Sprintf("Payload size: markdown=%s stage=%s outline=%s bundle=%s", byteSizeLabel(len(markdown)), byteSizeLabel(len(stageJSON)), byteSizeLabel(len(outlineJSON)), byteSizeLabel(len(bundleJSON))),
+		"Package gate: " + packageSizeGateLabel(len(bundleJSON)),
+		"Upload boundary: local approval required; credentials stay as secret_ref only.",
 	}
 	if suffix := shortHash(bundle.Reproducibility.BundleHashSHA256); suffix != "" {
 		lines = append(lines, "Bundle hash: ..."+suffix)
 	}
 	if bundle.Validation != nil {
 		lines = append(lines, fmt.Sprintf("Validation: valid=%t findings=%d", bundle.Validation.Valid, len(bundle.Validation.Findings)))
+	}
+	return strings.Join(lines, "\r\n")
+}
+
+func nativeInputPreflightSummary(input nativeInput) string {
+	productURL := strings.TrimSpace(input.ProductURL)
+	requirement := strings.TrimSpace(input.ProductDescription)
+	localRepo := strings.TrimSpace(input.LocalRepoPath)
+	gitRepo := strings.TrimSpace(input.GitRepoURL)
+	username := strings.TrimSpace(input.DemoUsername)
+	password := input.DemoPassword
+	lines := []string{
+		"输入预检",
+		"Product URL: " + readyLabel(productURL != ""),
+		"Requirement: " + readySizeLabel(requirement),
+		"Code sources: " + codeSourceLabel(localRepo, gitRepo),
+		"Credentials: " + credentialInputLabel(username, password),
+		"Generate gate: " + generateGateLabel(productURL, requirement),
+	}
+	return strings.Join(lines, "\r\n")
+}
+
+func nativeInputPreflightDetail(input nativeInput) string {
+	productURL := strings.TrimSpace(input.ProductURL)
+	requirement := strings.TrimSpace(input.ProductDescription)
+	localRepo := strings.TrimSpace(input.LocalRepoPath)
+	gitRepo := strings.TrimSpace(input.GitRepoURL)
+	username := strings.TrimSpace(input.DemoUsername)
+	password := input.DemoPassword
+	lines := []string{
+		"本地生成预检",
+		"",
+		"必填材料",
+		"- 产品 URL: " + valueOrMissing(productURL),
+		"- 需求文本: " + readySizeLabel(requirement),
+		"",
+		"可选代码来源",
+		"- 本地项目路径: " + valueOrMissing(localRepo),
+		"- GitHub 仓库 URL: " + valueOrMissing(gitRepo),
+		"- 关系: 本地路径和 GitHub URL 是并列可选输入，可以同时提供；都不填写时会按需求和页面材料降级生成。",
+		"",
+		"临时凭据",
+		"- 状态: " + credentialInputLabel(username, password),
+		"- 边界: 密码不会保存到草稿、审批文档、三合一包或云端 payload。",
+		"",
+		"生成门禁",
+		"- " + generateGateLabel(productURL, requirement),
+		"- 生成后请先审核 Markdown、Stage JSON 和 Script Outline，再本地审批或交给服务器 Browser Agent。",
 	}
 	return strings.Join(lines, "\r\n")
 }
@@ -1870,6 +1948,85 @@ func outlineStageCount(bundle *model.ExecutableRecordingScriptBundle) int {
 		return 0
 	}
 	return len(bundle.ScriptOutline.Stages)
+}
+
+func stageCoverageLabel(stageCount int, outlineCount int) string {
+	switch {
+	case stageCount > 0 && stageCount == outlineCount:
+		return "aligned"
+	case stageCount == 0 && outlineCount == 0:
+		return "missing"
+	default:
+		return "mismatch"
+	}
+}
+
+func packageSizeGateLabel(size int) string {
+	switch {
+	case size <= 0:
+		return "missing bundle"
+	case size <= 200*1024:
+		return "compact (" + byteSizeLabel(size) + ")"
+	case size <= 512*1024:
+		return "review size (" + byteSizeLabel(size) + ")"
+	default:
+		return "too large for normal outline handoff (" + byteSizeLabel(size) + ")"
+	}
+}
+
+func readyLabel(ok bool) string {
+	if ok {
+		return "ready"
+	}
+	return "missing"
+}
+
+func readySizeLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "missing"
+	}
+	return byteSizeLabel(len(value))
+}
+
+func codeSourceLabel(localRepo string, gitRepo string) string {
+	switch {
+	case strings.TrimSpace(localRepo) != "" && strings.TrimSpace(gitRepo) != "":
+		return "local + GitHub"
+	case strings.TrimSpace(localRepo) != "":
+		return "local"
+	case strings.TrimSpace(gitRepo) != "":
+		return "GitHub"
+	default:
+		return "optional"
+	}
+}
+
+func credentialInputLabel(username string, password string) string {
+	username = strings.TrimSpace(username)
+	switch {
+	case username != "" && password != "":
+		return "provided locally"
+	case username != "" || password != "":
+		return "incomplete"
+	default:
+		return "optional"
+	}
+}
+
+func generateGateLabel(productURL string, requirement string) string {
+	if strings.TrimSpace(productURL) != "" && strings.TrimSpace(requirement) != "" {
+		return "ready to generate"
+	}
+	return "waiting for product URL and requirement"
+}
+
+func valueOrMissing(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "(missing)"
+	}
+	return value
 }
 
 func byteSizeLabel(size int) string {
