@@ -108,6 +108,7 @@ function buildPackageManifest() {
         "requirement_document_import",
         "local_package_generation",
         "native_lifecycle_phase_bar",
+        "native_server_connection_status",
         "approval_health_summary",
         "native_package_gate_summary",
         "native_approval_review_summary",

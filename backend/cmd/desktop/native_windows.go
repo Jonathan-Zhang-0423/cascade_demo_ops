@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1450,7 +1451,7 @@ func (a *nativeApp) showInputPreflightIfIdle() {
 	input := a.currentNativeInput()
 	setWindowText(a.previewSummary, nativeInputPreflightSummary(input))
 	if a.previewContent != 0 {
-		setWindowText(a.previewContent, nativeInputPreflightDetail(input))
+		setWindowText(a.previewContent, a.nativeInputPreflightDetail(input))
 		a.currentPreview = "input_preflight"
 	}
 }
@@ -1876,6 +1877,7 @@ func (a *nativeApp) setStatusBarOutput(outputDir string) {
 func (a *nativeApp) statusBarText(outputDir string) string {
 	parts := []string{
 		"Native Win32",
+		a.cloudConnectionLabel(),
 		"data: " + compactPath(a.runtimeConfig.DataRoot, 42),
 	}
 	if a.logger != nil && strings.TrimSpace(a.logger.Path()) != "" {
@@ -1904,7 +1906,32 @@ func (a *nativeApp) engineStatusText() string {
 	if a.runtimeConfig.NodeBinaryPath != "" {
 		sidecar = "Node/sidecar 已配置"
 	}
-	return fmt.Sprintf("引擎：%s · %s", a.runtimeConfig.Profile, sidecar)
+	return fmt.Sprintf("引擎：%s · %s · %s", a.runtimeConfig.Profile, sidecar, a.cloudConnectionLabel())
+}
+
+func (a *nativeApp) cloudConnectionLabel() string {
+	base := strings.TrimSpace(a.runtimeConfig.CloudExchangeBaseURL)
+	if base == "" {
+		return "Server: not configured"
+	}
+	host := base
+	path := ""
+	if parsed, err := url.Parse(base); err == nil {
+		if parsed.Host != "" {
+			host = parsed.Host
+		}
+		path = strings.TrimSpace(parsed.Path)
+	}
+	label := "Server: " + host
+	if path != "" && path != "/" {
+		label += path
+	}
+	if strings.TrimSpace(a.runtimeConfig.CloudExchangeToken) != "" {
+		label += " (legacy token compatible)"
+	} else {
+		label += " (installation session)"
+	}
+	return label
 }
 
 func nativeResultSummary(state *orchestrator.CascadeState, bundle *model.ExecutableRecordingScriptBundle, markdown string, stageJSON string, outlineJSON string, bundleJSON string) string {
@@ -1968,7 +1995,7 @@ func nativeInputPreflightSummary(input nativeInput) string {
 	return strings.Join(lines, "\r\n")
 }
 
-func nativeInputPreflightDetail(input nativeInput) string {
+func (a *nativeApp) nativeInputPreflightDetail(input nativeInput) string {
 	productURL := strings.TrimSpace(input.ProductURL)
 	requirement := strings.TrimSpace(input.ProductDescription)
 	localRepo := strings.TrimSpace(input.LocalRepoPath)
@@ -1994,6 +2021,10 @@ func nativeInputPreflightDetail(input nativeInput) string {
 		"生成门禁",
 		"- " + generateGateLabel(productURL, requirement),
 		"- 生成后请先审核 Markdown、Stage JSON 和 Script Outline，再本地审批或交给服务器 Browser Agent。",
+		"",
+		"服务器执行",
+		"- " + a.cloudConnectionLabel(),
+		"- 本地生成不依赖服务器；上传/录制阶段需要服务器连接和本地 approval_record.json。",
 	}
 	return strings.Join(lines, "\r\n")
 }
