@@ -92,10 +92,12 @@ const (
 	idDownloadArtifacts = 1062
 	idOpenDeliverables  = 1063
 	idOpenPrimaryAsset  = 1064
+	idStageExplorer     = 1065
 
 	bnClicked    = 0
 	enChange     = 0x0300
 	cbnSelChange = 1
+	lbnSelChange = 1
 	accelCommand = 1
 )
 
@@ -201,6 +203,8 @@ type nativeApp struct {
 	healthResult     syscall.Handle
 	healthArtifacts  syscall.Handle
 	healthAck        syscall.Handle
+	stageExplorerLbl syscall.Handle
+	stageExplorer    syscall.Handle
 	previewContent   syscall.Handle
 	viewMarkdownBtn  syscall.Handle
 	viewStageBtn     syscall.Handle
@@ -259,6 +263,7 @@ type nativeApp struct {
 	pendingDownloads     *nativeArtifactDownloadBatch
 	recentPackages       []nativeRecentPackage
 	currentPreview       string
+	selectedStageIndex   int
 	suppressDraftSave    bool
 }
 
@@ -284,6 +289,27 @@ type nativeGenerateResult struct {
 	HealthStages      string `json:"health_stages"`
 	HealthBundle      string `json:"health_bundle"`
 	HealthValidation  string `json:"health_validation"`
+	StageSummaries    []nativeStageSummary
+}
+
+type nativeStageSummary struct {
+	ID             string
+	Order          int
+	Title          string
+	Kind           string
+	RouteState     string
+	EntryRoute     string
+	TargetRoute    string
+	ExpectedRoute  string
+	Action         string
+	InputSummary   string
+	SuccessState   string
+	WaitSummary    string
+	CaptureSummary string
+	RiskSummary    string
+	EvidenceCount  int
+	Confidence     float64
+	Detail         string
 }
 
 type nativeApprovalRecord struct {
@@ -518,6 +544,8 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 			switch {
 			case id == idRecentPackage && code == cbnSelChange:
 				app.showSelectedRecentPackageSummary()
+			case id == idStageExplorer && code == lbnSelChange:
+				app.showSelectedStageSummary()
 			case code == enChange && app.isInputField(id):
 				app.updateInputReadiness()
 			case code == bnClicked || code == 0 || code == accelCommand:
@@ -633,6 +661,8 @@ func (a *nativeApp) createControls() {
 	a.healthResult = createChild(a.hwnd, "STATIC", "Result: not fetched", wsChild|wsVisible|wsBorder, 0)
 	a.healthArtifacts = createChild(a.hwnd, "STATIC", "Artifacts: not downloaded", wsChild|wsVisible|wsBorder, 0)
 	a.healthAck = createChild(a.hwnd, "STATIC", "Ack: pending", wsChild|wsVisible|wsBorder, 0)
+	a.stageExplorerLbl = createChild(a.hwnd, "STATIC", "业务阶段导航", wsChild|wsVisible, 0)
+	a.stageExplorer = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStageExplorer)
 	a.previewSummary = createChild(a.hwnd, "EDIT", "等待生成结果。", wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutoVScroll|esReadOnly, idPreviewSummary)
 	a.viewReviewBtn = createChild(a.hwnd, "BUTTON", "审核摘要", wsChild|wsVisible|bsPushButton, idViewReview)
 	a.viewMarkdownBtn = createChild(a.hwnd, "BUTTON", "Markdown", wsChild|wsVisible|bsPushButton, idViewMarkdown)
@@ -674,6 +704,7 @@ func (a *nativeApp) createControls() {
 	a.refreshRecentPackageList()
 	a.updateInputReadiness()
 	a.showInputPreflightIfIdle()
+	a.refreshStageExplorer(nil)
 	a.setPhaseText("1 输入材料", "2 项目理解", "3 生成包", "4 审核保存")
 	a.updateActionState(false, false)
 }
@@ -976,8 +1007,12 @@ func (a *nativeApp) layout() {
 	moveControl(a.healthResult, rightX+14+(healthW+healthGap), serverHealthTop, healthW, 30)
 	moveControl(a.healthArtifacts, rightX+14+(healthW+healthGap)*2, serverHealthTop, healthW, 30)
 	moveControl(a.healthAck, rightX+14+(healthW+healthGap)*3, serverHealthTop, healthW, 30)
-	summaryTop := serverHealthTop + 42
-	summaryH := 74
+	stageExplorerTop := serverHealthTop + 42
+	moveControl(a.stageExplorerLbl, rightX+14, stageExplorerTop, rightW-28, 18)
+	stageExplorerH := 96
+	moveControl(a.stageExplorer, rightX+14, stageExplorerTop+22, rightW-28, stageExplorerH)
+	summaryTop := stageExplorerTop + stageExplorerH + 34
+	summaryH := 70
 	moveControl(a.previewSummary, rightX+14, summaryTop, rightW-28, summaryH)
 	tabTop := summaryTop + summaryH + 12
 	copyW := 72
@@ -1022,6 +1057,7 @@ func (a *nativeApp) startGenerate() {
 	setWindowText(a.artifactStatus, "输出目录：生成完成后显示")
 	a.setHealthText("Runtime: generating", "Stages: --", "Bundle: --", "Validation: pending")
 	a.setServerHealthText("Server: --", "Result: --", "Artifacts: --", "Ack: --")
+	a.refreshStageExplorer(nil)
 	a.setPhaseText("1 输入完成", "2 理解中", "3 生成中", "4 待审核")
 	a.updateActionState(true, false)
 	a.addStatus("开始本地项目理解与三合一包生成。")
@@ -1103,6 +1139,7 @@ func (a *nativeApp) nativeResultFromState(state *orchestrator.CascadeState) (*na
 		HealthStages:      fmt.Sprintf("Stages: %d / %d", stageApprovalStageCount(bundle), outlineStageCount(bundle)),
 		HealthBundle:      "Bundle: " + byteSizeLabel(len(bundleJSON)),
 		HealthValidation:  validationHealthLabel(bundle.Validation),
+		StageSummaries:    nativeStageSummaries(bundle),
 	}, nil
 }
 
@@ -1124,6 +1161,7 @@ func (a *nativeApp) finishGenerate() {
 	setWindowText(a.previewContent, result.ReviewText)
 	a.setStatusBarOutput(result.OutputDirectory)
 	a.currentPreview = "review"
+	a.refreshStageExplorer(result)
 	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
 	a.refreshServerHealth(result.OutputDirectory)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 可审核")
@@ -1148,6 +1186,7 @@ func (a *nativeApp) finishGenerateErrorMessage(message string) {
 	setWindowText(a.workflowState, "生成失败")
 	a.setHealthText("Runtime: --", "Stages: --", "Bundle: --", "Validation: failed")
 	a.setServerHealthText("Server: --", "Result: --", "Artifacts: --", "Ack: --")
+	a.refreshStageExplorer(a.lastResult)
 	a.setPhaseText("1 输入完成", "2/3 失败", "3 未就绪", "4 不可审核")
 	a.updateActionState(false, a.lastResult != nil)
 	a.addStatus("生成失败：" + message)
@@ -1175,6 +1214,7 @@ func (a *nativeApp) saveLastResult() {
 	setWindowText(a.artifactStatus, "已保存："+dir)
 	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已保存")
+	a.refreshStageExplorer(result)
 	a.refreshServerHealth(dir)
 	a.rememberRecentPackage(result, dir)
 	setEnabled(a.openOutputBtn, true)
@@ -1211,6 +1251,7 @@ func (a *nativeApp) exportLastResult() {
 	setWindowText(a.artifactStatus, "已导出："+dir)
 	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已导出")
+	a.refreshStageExplorer(result)
 	a.refreshServerHealth(dir)
 	a.rememberRecentPackage(result, dir)
 	messageBox("Cascade DemoOps", "三合一执行包已导出到：\n"+dir, false)
@@ -1260,6 +1301,7 @@ func (a *nativeApp) approveLastResult() {
 	setWindowText(a.artifactStatus, "已审批："+dir)
 	setWindowText(a.previewSummary, nativeResultSummaryForDirectory(result, dir))
 	a.setStatusBarOutput(dir)
+	a.refreshStageExplorer(result)
 	a.refreshServerHealth(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已审批")
 	messageBox("Cascade DemoOps", "本地审批已记录：\n"+filepath.Join(dir, "approval_record.json"), false)
@@ -2065,6 +2107,7 @@ func readResultFiles(dir string) (*nativeGenerateResult, error) {
 		HealthStages:      fmt.Sprintf("Stages: %d / %d", stageApprovalStageCount(&bundle), outlineStageCount(&bundle)),
 		HealthBundle:      "Bundle: " + byteSizeLabel(len(bundleJSON)),
 		HealthValidation:  validationHealthLabel(bundle.Validation),
+		StageSummaries:    nativeStageSummaries(&bundle),
 	}
 	return result, nil
 }
@@ -2304,12 +2347,16 @@ func resultFiles(result *nativeGenerateResult) map[string]string {
 	if result == nil {
 		return map[string]string{}
 	}
-	return map[string]string{
+	files := map[string]string{
 		"approval_markdown.md":         result.Markdown,
 		"stage_approval_plan.json":     result.StageJSON,
 		"script_outline.json":          result.OutlineJSON,
 		"client_execution_bundle.json": result.BundleJSON,
 	}
+	if len(result.StageSummaries) > 0 {
+		files["stage_explorer_summary.txt"] = nativeStageExplorerText(result)
+	}
+	return files
 }
 
 func resultFilesExist(dir string) bool {
@@ -2333,6 +2380,8 @@ func previewFileName(kind string) (string, string) {
 		return "script_outline.json", "Script Outline"
 	case "bundle":
 		return "client_execution_bundle.json", "Full Bundle"
+	case "stage_explorer":
+		return "stage_explorer_summary.txt", "Stage Explorer"
 	default:
 		return "approval_markdown.md", "Markdown"
 	}
@@ -2396,6 +2445,7 @@ func (a *nativeApp) importPackageFolder() {
 	setWindowText(a.previewSummary, result.Summary)
 	setWindowText(a.previewContent, result.ReviewText)
 	a.currentPreview = "review"
+	a.refreshStageExplorer(result)
 	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
 	a.setPhaseText("1 可保留", "2 已载入", "3 包已就绪", "4 可审核")
 	a.setStatusBarOutput(dir)
@@ -2503,6 +2553,9 @@ func (a *nativeApp) copyCurrentPreview() {
 	case "bundle":
 		content = result.BundleJSON
 		label = "Full Bundle"
+	case "stage_explorer":
+		content = getWindowText(a.previewContent)
+		label = "Stage Explorer"
 	}
 	if strings.TrimSpace(content) == "" {
 		a.addStatus("当前预览为空，未复制。")
@@ -2539,6 +2592,17 @@ func (a *nativeApp) openCurrentPreviewFile() {
 		return
 	}
 	path := filepath.Join(dir, fileName)
+	if kind == "stage_explorer" {
+		content := strings.TrimSpace(getWindowText(a.previewContent))
+		if content == "" {
+			content = nativeStageExplorerText(result)
+		}
+		if err := os.WriteFile(path, []byte(content+"\n"), 0o644); err != nil {
+			a.addStatus("写入阶段导航摘要失败：" + err.Error())
+			messageBox("Cascade DemoOps", "打开阶段导航摘要失败：\n"+err.Error(), true)
+			return
+		}
+	}
 	if err := openFile(path); err != nil {
 		a.addStatus("打开当前文件失败：" + err.Error())
 		messageBox("Cascade DemoOps", "打开当前预览文件失败：\n"+err.Error(), true)
@@ -2901,6 +2965,257 @@ func (a *nativeApp) showSelectedRecentPackageSummary() {
 		setWindowText(a.previewContent, "选择“打开最近包”会加载该文件夹中的 Markdown、Stage JSON、Script Outline 和 Bundle；选择“打开输出目录”仅打开当前已生成或已导入包。")
 		a.currentPreview = "recent_summary"
 	}
+}
+
+func (a *nativeApp) refreshStageExplorer(result *nativeGenerateResult) {
+	if a.stageExplorer == 0 {
+		return
+	}
+	procSendMessageW.Call(uintptr(a.stageExplorer), lbResetContent, 0, 0)
+	a.selectedStageIndex = -1
+	if result == nil || len(result.StageSummaries) == 0 {
+		procSendMessageW.Call(uintptr(a.stageExplorer), lbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr("暂无业务阶段；生成或导入三合一包后显示。"))))
+		setEnabled(a.stageExplorer, false)
+		return
+	}
+	setEnabled(a.stageExplorer, true)
+	for _, stage := range result.StageSummaries {
+		procSendMessageW.Call(uintptr(a.stageExplorer), lbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr(nativeStageListLabel(stage)))))
+	}
+	procSendMessageW.Call(uintptr(a.stageExplorer), lbSetCurSel, 0, 0)
+	a.selectedStageIndex = 0
+}
+
+func (a *nativeApp) showSelectedStageSummary() {
+	a.mu.Lock()
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil || len(result.StageSummaries) == 0 || a.stageExplorer == 0 {
+		return
+	}
+	index, _, _ := procSendMessageW.Call(uintptr(a.stageExplorer), lbGetCurSel, 0, 0)
+	if index == lbErr || int(index) < 0 || int(index) >= len(result.StageSummaries) {
+		return
+	}
+	stage := result.StageSummaries[int(index)]
+	a.selectedStageIndex = int(index)
+	setWindowText(a.previewContent, stage.Detail)
+	setWindowText(a.workflowState, "预览业务阶段")
+	a.currentPreview = "stage_explorer"
+	a.addStatus(fmt.Sprintf("已选择业务阶段：%02d %s", stage.Order, firstNonEmptyNative(stage.Title, stage.ID)))
+}
+
+func nativeStageSummaries(bundle *model.ExecutableRecordingScriptBundle) []nativeStageSummary {
+	if bundle == nil || bundle.StageApprovalPlan == nil {
+		return nil
+	}
+	outlineByStageID := map[string]model.BrowserAgentOutlineStage{}
+	if bundle.ScriptOutline != nil {
+		for _, stage := range bundle.ScriptOutline.Stages {
+			if strings.TrimSpace(stage.StageID) != "" {
+				outlineByStageID[stage.StageID] = stage
+			}
+		}
+	}
+	summaries := make([]nativeStageSummary, 0, len(bundle.StageApprovalPlan.Stages))
+	for _, stage := range bundle.StageApprovalPlan.Stages {
+		outlineStage := outlineByStageID[stage.ID]
+		summary := nativeStageSummaryFromApproval(stage, outlineStage)
+		summary.Detail = nativeStageDetailText(summary, stage, outlineStage)
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+func nativeStageSummaryFromApproval(stage model.StageApprovalStage, outline model.BrowserAgentOutlineStage) nativeStageSummary {
+	route := firstNonEmptyNative(stage.TargetRoute, stage.EntryRoute, stage.ExpectedRouteAfterAction, stage.TargetURL, outline.Route, outline.EntryRoute, outline.ExpectedRouteAfterAction, outline.URL)
+	if route == "" && len(stage.CandidateRoutes) > 0 {
+		route = stage.CandidateRoutes[0].Route
+	}
+	action := string(stage.Interaction.Kind)
+	if action == "" && len(outline.Interactions) > 0 {
+		action = string(outline.Interactions[0].Kind)
+	}
+	waitConditions := append([]string{}, stage.WaitConditions...)
+	if len(waitConditions) == 0 {
+		waitConditions = append(waitConditions, outline.WaitConditions...)
+	}
+	capturePoints := append([]string{}, stage.CapturePoints...)
+	if len(capturePoints) == 0 {
+		capturePoints = append(capturePoints, outline.CapturePoints...)
+	}
+	evidenceCount := len(stage.EvidenceRefs)
+	evidenceCount += len(stage.ComponentRefs) + len(stage.APIRefs) + len(stage.StyleRefs) + len(stage.DataModelRefs)
+	if evidenceCount == 0 {
+		evidenceCount = len(outline.EvidenceRefs) + len(outline.Components)
+	}
+	confidence := stage.Confidence
+	if confidence == 0 {
+		confidence = outline.Confidence
+	}
+	return nativeStageSummary{
+		ID:             firstNonEmptyNative(stage.ID, outline.StageID, outline.ID),
+		Order:          firstNonZeroInt(stage.Order, outline.Order),
+		Title:          firstNonEmptyNative(stage.Title, stage.Objective, outline.Objective, stage.ID),
+		Kind:           firstNonEmptyNative(string(stage.StageKind), string(outline.StageKind)),
+		RouteState:     firstNonEmptyNative(string(stage.RouteState), string(outline.RouteState)),
+		EntryRoute:     firstNonEmptyNative(stage.EntryRoute, outline.EntryRoute),
+		TargetRoute:    route,
+		ExpectedRoute:  firstNonEmptyNative(stage.ExpectedRouteAfterAction, outline.ExpectedRouteAfterAction),
+		Action:         firstNonEmptyNative(action, "observe"),
+		InputSummary:   nativeStageInputSummary(stage),
+		SuccessState:   firstNonEmptyNative(stage.SuccessState, outline.SuccessState),
+		WaitSummary:    joinCompact(waitConditions, 110),
+		CaptureSummary: joinCompact(capturePoints, 110),
+		RiskSummary:    joinCompact(stage.RiskNotes, 110),
+		EvidenceCount:  evidenceCount,
+		Confidence:     confidence,
+	}
+}
+
+func nativeStageDetailText(summary nativeStageSummary, stage model.StageApprovalStage, outline model.BrowserAgentOutlineStage) string {
+	lines := []string{
+		fmt.Sprintf("业务阶段 %02d", summary.Order),
+		"",
+		"目标: " + firstNonEmptyNative(summary.Title, summary.ID),
+		"类型: " + valueOrMissing(summary.Kind),
+		"路由状态: " + valueOrMissing(summary.RouteState),
+		"入口路由: " + valueOrMissing(summary.EntryRoute),
+		"目标路由: " + valueOrMissing(summary.TargetRoute),
+		"动作: " + valueOrMissing(summary.Action),
+		"输入语义: " + valueOrMissing(summary.InputSummary),
+		"成功标准: " + valueOrMissing(summary.SuccessState),
+		"等待条件: " + valueOrMissing(summary.WaitSummary),
+		"截图点: " + valueOrMissing(summary.CaptureSummary),
+		"风险: " + valueOrMissing(summary.RiskSummary),
+		fmt.Sprintf("证据数量: %d", summary.EvidenceCount),
+		"置信度: " + confidenceLabel(summary.Confidence),
+	}
+	if stage.DurationMS > 0 || outline.DurationMS > 0 {
+		lines = append(lines, "建议时长: "+durationLabel(firstNonZeroInt(stage.DurationMS, outline.DurationMS)))
+	}
+	if len(stage.ComponentRefs) > 0 {
+		lines = append(lines, "", "组件证据", "- "+joinCompact(stage.ComponentRefs, 220))
+	}
+	if len(stage.APIRefs) > 0 {
+		lines = append(lines, "", "API / 后端证据", "- "+joinCompact(stage.APIRefs, 220))
+	}
+	if stage.TargetContract != nil || outline.TargetContract != nil {
+		lines = append(lines, "", "Target Contract")
+		lines = append(lines, nativeTargetContractLines(firstNonNilTargetContract(stage.TargetContract, outline.TargetContract))...)
+	}
+	if len(outline.Components) > 0 {
+		lines = append(lines, "", "Browser Agent 候选组件")
+		for i, component := range outline.Components {
+			if i >= 5 {
+				lines = append(lines, fmt.Sprintf("- ...and %d more components", len(outline.Components)-i))
+				break
+			}
+			lines = append(lines, "- "+nativeComponentTargetLabel(component))
+		}
+	}
+	if len(outline.CanModify) > 0 || len(outline.MustPreserve) > 0 {
+		lines = append(lines, "", "执行边界")
+		if len(outline.CanModify) > 0 {
+			lines = append(lines, "- 可自适应: "+joinCompact(outline.CanModify, 180))
+		}
+		if len(outline.MustPreserve) > 0 {
+			lines = append(lines, "- 不可修改: "+joinCompact(outline.MustPreserve, 180))
+		}
+	}
+	if len(stage.InvestigationQuestionRefs) > 0 {
+		lines = append(lines, "", "不确定项")
+		for i, item := range stage.InvestigationQuestionRefs {
+			if i >= 4 {
+				lines = append(lines, fmt.Sprintf("- ...and %d more investigation questions", len(stage.InvestigationQuestionRefs)-i))
+				break
+			}
+			lines = append(lines, "- "+firstNonEmptyNative(item.IntentLabel, item.EvidenceSummary, item.ID))
+		}
+	}
+	return strings.Join(lines, "\r\n")
+}
+
+func nativeStageListLabel(stage nativeStageSummary) string {
+	route := firstNonEmptyNative(stage.TargetRoute, stage.EntryRoute, stage.RouteState, "route pending")
+	label := fmt.Sprintf("%02d  %s", stage.Order, firstNonEmptyNative(stage.Title, stage.ID))
+	meta := strings.TrimSpace(strings.Join(nonEmpty([]string{stage.Kind, route, stage.Action}), " · "))
+	if meta != "" {
+		label += "  —  " + compactPath(meta, 96)
+	}
+	return label
+}
+
+func nativeStageInputSummary(stage model.StageApprovalStage) string {
+	parts := make([]string, 0, len(stage.InputContent)+2)
+	for _, input := range stage.InputContent {
+		item := firstNonEmptyNative(input.Label, input.Kind, input.InputRef, input.SecretRef)
+		if strings.TrimSpace(input.Value) != "" && input.SecretRef == "" {
+			item += "=" + compactPath(input.Value, 48)
+		}
+		if input.SecretRef != "" {
+			item += "=secret_ref"
+		}
+		if strings.TrimSpace(item) != "" {
+			parts = append(parts, item)
+		}
+	}
+	if stage.Interaction.Value != "" {
+		parts = append(parts, "value="+compactPath(stage.Interaction.Value, 48))
+	}
+	if stage.Interaction.SecretRef != "" {
+		parts = append(parts, "secret_ref")
+	}
+	return joinCompact(parts, 110)
+}
+
+func nativeTargetContractLines(contract *model.BrowserAgentTargetContract) []string {
+	if contract == nil {
+		return []string{"- (missing)"}
+	}
+	lines := []string{
+		"- semantic_id: " + valueOrMissing(contract.SemanticID),
+		"- purpose: " + valueOrMissing(contract.Purpose),
+		"- destructive: " + fmt.Sprintf("%t", contract.Destructive),
+	}
+	if len(contract.AllowedRoles) > 0 {
+		lines = append(lines, "- allowed_roles: "+joinCompact(contract.AllowedRoles, 120))
+	}
+	if len(contract.AllowedNames) > 0 {
+		lines = append(lines, "- allowed_names: "+joinCompact(contract.AllowedNames, 160))
+	}
+	if len(contract.ForbiddenNames) > 0 {
+		lines = append(lines, "- forbidden_names: "+joinCompact(contract.ForbiddenNames, 160))
+	}
+	if contract.ComponentRef != "" {
+		lines = append(lines, "- component_ref: "+contract.ComponentRef)
+	}
+	return lines
+}
+
+func nativeComponentTargetLabel(component model.BrowserAgentComponentTarget) string {
+	parts := []string{
+		firstNonEmptyNative(component.Label, component.Name, component.Text, component.ComponentRef),
+		firstNonEmptyNative(component.Role, component.TestID, component.Selector),
+	}
+	return firstNonEmptyNative(compactPath(strings.TrimSpace(strings.Join(nonEmpty(parts), " · ")), 180), "(unnamed component)")
+}
+
+func nativeStageExplorerText(result *nativeGenerateResult) string {
+	if result == nil || len(result.StageSummaries) == 0 {
+		return "暂无业务阶段。"
+	}
+	lines := []string{
+		"业务阶段导航",
+		"",
+		"Project ID: " + firstNonEmptyNative(result.ProjectID, "unknown"),
+		"Runtime: " + firstNonEmptyNative(result.Runtime, "unknown"),
+		fmt.Sprintf("Stages: %d", len(result.StageSummaries)),
+	}
+	for _, stage := range result.StageSummaries {
+		lines = append(lines, "", strings.Repeat("-", 48), stage.Detail)
+	}
+	return strings.Join(lines, "\r\n")
 }
 
 func (a *nativeApp) recentPackagesPath() string {
@@ -3982,6 +4297,69 @@ func firstNonEmptyNative(values ...string) string {
 	return ""
 }
 
+func firstNonZeroInt(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func firstNonNilTargetContract(values ...*model.BrowserAgentTargetContract) *model.BrowserAgentTargetContract {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func nonEmpty(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func joinCompact(values []string, limit int) string {
+	values = nonEmpty(values)
+	if len(values) == 0 {
+		return ""
+	}
+	return compactPath(strings.Join(values, "; "), limit)
+}
+
+func confidenceLabel(value float64) string {
+	if value <= 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%.0f%%", value*100)
+}
+
+func durationLabel(durationMS int) string {
+	if durationMS <= 0 {
+		return ""
+	}
+	if durationMS < 1000 {
+		return fmt.Sprintf("%dms", durationMS)
+	}
+	seconds := float64(durationMS) / 1000
+	if seconds < 60 {
+		return fmt.Sprintf("%.1fs", seconds)
+	}
+	minutes := int(seconds) / 60
+	remainingSeconds := int(seconds) % 60
+	if remainingSeconds == 0 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return fmt.Sprintf("%dm%02ds", minutes, remainingSeconds)
+}
+
 func compactPath(value string, limit int) string {
 	value = strings.TrimSpace(value)
 	if limit <= 0 || len(value) <= limit {
@@ -4108,6 +4486,8 @@ func (a *nativeApp) applyDefaultFont() {
 		a.healthResult,
 		a.healthArtifacts,
 		a.healthAck,
+		a.stageExplorerLbl,
+		a.stageExplorer,
 		a.previewSummary,
 		a.previewContent,
 		a.viewMarkdownBtn,
@@ -4174,7 +4554,7 @@ func (a *nativeApp) controlColor(msgID uint32, wParam uintptr, lParam uintptr) u
 		hwnd == a.healthBundle || hwnd == a.healthValidation ||
 		hwnd == a.healthServer || hwnd == a.healthResult ||
 		hwnd == a.healthArtifacts || hwnd == a.healthAck ||
-		hwnd == a.recentPackage ||
+		hwnd == a.recentPackage || hwnd == a.stageExplorer ||
 		hwnd == a.phaseInput || hwnd == a.phaseUnderstand ||
 		hwnd == a.phasePackage || hwnd == a.phaseReview ||
 		hwnd == a.inputReadiness || hwnd == a.statusBar:
@@ -4626,9 +5006,11 @@ const (
 	wmAppArtifactsDone      = 0x800B
 	wmAppArtifactsFailed    = 0x800C
 
-	lbAddString = 0x0180
-	lbSetCurSel = 0x0186
-	lbErr       = ^uintptr(0)
+	lbAddString    = 0x0180
+	lbResetContent = 0x0184
+	lbGetCurSel    = 0x0188
+	lbSetCurSel    = 0x0186
+	lbErr          = ^uintptr(0)
 
 	cbAddString    = 0x0143
 	cbResetContent = 0x014B
