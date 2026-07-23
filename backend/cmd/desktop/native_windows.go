@@ -79,6 +79,7 @@ const (
 	idRecentPackage     = 1051
 	idOpenRecentPackage = 1052
 	idRecentLabel       = 1053
+	idViewReview        = 1054
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -188,6 +189,7 @@ type nativeApp struct {
 	viewStageBtn     syscall.Handle
 	viewOutlineBtn   syscall.Handle
 	viewBundleBtn    syscall.Handle
+	viewReviewBtn    syscall.Handle
 	copyPreviewBtn   syscall.Handle
 	recentLabel      syscall.Handle
 	recentPackage    syscall.Handle
@@ -230,6 +232,7 @@ type nativeField struct {
 
 type nativeGenerateResult struct {
 	ProjectID         string `json:"project_id"`
+	ReviewText        string `json:"review_text"`
 	Markdown          string `json:"markdown"`
 	StageJSON         string `json:"stage_json"`
 	OutlineJSON       string `json:"outline_json"`
@@ -349,7 +352,7 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 			app.addStatus("本地原生应用已启动。不会打开浏览器或 WebView。")
 			app.addStatus("填写产品 URL、需求和可用代码来源后，点击生成三合一包。")
 			app.addStatus("本地项目路径与 GitHub 仓库 URL 都是可选代码来源，可以同时提供。")
-			app.addStatus("常用快捷键：Ctrl+G 生成，Ctrl+S 保存，Ctrl+1/2/3 切换审批预览。")
+			app.addStatus("常用快捷键：Ctrl+G 生成，Ctrl+S 保存，Ctrl+1 审核摘要，Ctrl+2/3/4 切换审批材料。")
 		}
 		return 0
 	case wmSize:
@@ -424,6 +427,7 @@ func (a *nativeApp) createControls() {
 	a.healthBundle = createChild(a.hwnd, "STATIC", "Bundle: --", wsChild|wsVisible|wsBorder, idHealthBundle)
 	a.healthValidation = createChild(a.hwnd, "STATIC", "Validation: pending", wsChild|wsVisible|wsBorder, idHealthValidation)
 	a.previewSummary = createChild(a.hwnd, "EDIT", "等待生成结果。", wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutoVScroll|esReadOnly, idPreviewSummary)
+	a.viewReviewBtn = createChild(a.hwnd, "BUTTON", "审核摘要", wsChild|wsVisible|bsPushButton, idViewReview)
 	a.viewMarkdownBtn = createChild(a.hwnd, "BUTTON", "Markdown", wsChild|wsVisible|bsPushButton, idViewMarkdown)
 	a.viewStageBtn = createChild(a.hwnd, "BUTTON", "Stage JSON", wsChild|wsVisible|bsPushButton, idViewStageJSON)
 	a.viewOutlineBtn = createChild(a.hwnd, "BUTTON", "Outline", wsChild|wsVisible|bsPushButton, idViewOutline)
@@ -481,6 +485,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.openDiagnosticLog()
 	case idViewMarkdown:
 		a.showPreview("markdown")
+	case idViewReview:
+		a.showPreview("review")
 	case idViewStageJSON:
 		a.showPreview("stage")
 	case idViewOutline:
@@ -507,7 +513,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return !generating && a.inputReady()
 	case idBrowseRepo, idImportRequirement, idClearDraft:
 		return !generating
-	case idSaveButton, idExportPackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview:
+	case idSaveButton, idExportPackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview:
 		return !generating && hasResult
 	case idOpenRecentPackage:
 		return !generating && hasRecent
@@ -534,10 +540,11 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(fileMenu, idOpenLog, "打开诊断日志\tCtrl+L")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idMenuExit, "退出")
-	appendMenuItem(viewMenu, idViewMarkdown, "预览 Markdown\tCtrl+1")
-	appendMenuItem(viewMenu, idViewStageJSON, "预览 Stage JSON\tCtrl+2")
-	appendMenuItem(viewMenu, idViewOutline, "预览 Script Outline\tCtrl+3")
-	appendMenuItem(viewMenu, idViewBundle, "预览 Full Bundle\tCtrl+4")
+	appendMenuItem(viewMenu, idViewReview, "预览审核摘要\tCtrl+1")
+	appendMenuItem(viewMenu, idViewMarkdown, "预览 Markdown\tCtrl+2")
+	appendMenuItem(viewMenu, idViewStageJSON, "预览 Stage JSON\tCtrl+3")
+	appendMenuItem(viewMenu, idViewOutline, "预览 Script Outline\tCtrl+4")
+	appendMenuItem(viewMenu, idViewBundle, "预览 Full Bundle\tCtrl+5")
 	appendMenuSeparator(viewMenu)
 	appendMenuItem(viewMenu, idCopyPreview, "复制当前预览\tCtrl+Shift+C")
 	appendMenuItem(helpMenu, idOpenLog, "诊断日志")
@@ -560,10 +567,11 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fControl | fShift, Key: 'O', Cmd: idOpenOutput},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'R', Cmd: idOpenRecentPackage},
 		{FVirt: fVirtKey | fControl, Key: 'L', Cmd: idOpenLog},
-		{FVirt: fVirtKey | fControl, Key: '1', Cmd: idViewMarkdown},
-		{FVirt: fVirtKey | fControl, Key: '2', Cmd: idViewStageJSON},
-		{FVirt: fVirtKey | fControl, Key: '3', Cmd: idViewOutline},
-		{FVirt: fVirtKey | fControl, Key: '4', Cmd: idViewBundle},
+		{FVirt: fVirtKey | fControl, Key: '1', Cmd: idViewReview},
+		{FVirt: fVirtKey | fControl, Key: '2', Cmd: idViewMarkdown},
+		{FVirt: fVirtKey | fControl, Key: '3', Cmd: idViewStageJSON},
+		{FVirt: fVirtKey | fControl, Key: '4', Cmd: idViewOutline},
+		{FVirt: fVirtKey | fControl, Key: '5', Cmd: idViewBundle},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'C', Cmd: idCopyPreview},
 	}
 	handle, _, _ := procCreateAcceleratorTbl.Call(uintptr(unsafe.Pointer(&accels[0])), uintptr(len(accels)))
@@ -695,11 +703,12 @@ func (a *nativeApp) layout() {
 	moveControl(a.previewSummary, rightX+14, summaryTop, rightW-28, summaryH)
 	tabTop := summaryTop + summaryH + 12
 	copyW := 72
-	buttonW := maxInt(82, (rightW-28-copyW-healthGap*4)/4)
-	moveControl(a.viewMarkdownBtn, rightX+14, tabTop, buttonW, 30)
-	moveControl(a.viewStageBtn, rightX+14+buttonW+healthGap, tabTop, buttonW, 30)
-	moveControl(a.viewOutlineBtn, rightX+14+(buttonW+healthGap)*2, tabTop, buttonW, 30)
-	moveControl(a.viewBundleBtn, rightX+14+(buttonW+healthGap)*3, tabTop, buttonW, 30)
+	buttonW := maxInt(72, (rightW-28-copyW-healthGap*5)/5)
+	moveControl(a.viewReviewBtn, rightX+14, tabTop, buttonW, 30)
+	moveControl(a.viewMarkdownBtn, rightX+14+buttonW+healthGap, tabTop, buttonW, 30)
+	moveControl(a.viewStageBtn, rightX+14+(buttonW+healthGap)*2, tabTop, buttonW, 30)
+	moveControl(a.viewOutlineBtn, rightX+14+(buttonW+healthGap)*3, tabTop, buttonW, 30)
+	moveControl(a.viewBundleBtn, rightX+14+(buttonW+healthGap)*4, tabTop, buttonW, 30)
 	moveControl(a.copyPreviewBtn, rightX+rightW-14-copyW, tabTop, copyW, 30)
 	moveControl(a.previewContent, rightX+14, tabTop+40, rightW-28, maxInt(160, rightH-(tabTop-rightTop)-54))
 	moveControl(a.statusBar, margin, height-margin-statusBarH, maxInt(300, width-margin*2), statusBarH)
@@ -802,8 +811,10 @@ func (a *nativeApp) nativeResultFromState(state *orchestrator.CascadeState) (*na
 	if markdown == "" {
 		markdown = bundle.ApprovalMarkdown.InlineMarkdown
 	}
+	reviewText := nativeReviewText(state, bundle)
 	return &nativeGenerateResult{
 		ProjectID:         state.ProjectID,
+		ReviewText:        reviewText,
 		Markdown:          markdown,
 		StageJSON:         stageJSON,
 		OutlineJSON:       outlineJSON,
@@ -836,9 +847,9 @@ func (a *nativeApp) finishGenerate() {
 	setWindowText(a.workflowState, "审批包已就绪")
 	setWindowText(a.artifactStatus, "输出目录："+result.OutputDirectory)
 	setWindowText(a.previewSummary, result.Summary)
-	setWindowText(a.previewContent, result.Markdown)
+	setWindowText(a.previewContent, result.ReviewText)
 	a.setStatusBarOutput(result.OutputDirectory)
-	a.currentPreview = "markdown"
+	a.currentPreview = "review"
 	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 可审核")
 	a.updateActionState(false, true)
@@ -1055,6 +1066,10 @@ func (a *nativeApp) showPreview(kind string) {
 		return
 	}
 	switch kind {
+	case "review":
+		setWindowText(a.previewContent, result.ReviewText)
+		setWindowText(a.workflowState, "预览审核摘要")
+		a.currentPreview = "review"
 	case "stage":
 		setWindowText(a.previewContent, result.StageJSON)
 		setWindowText(a.workflowState, "预览 Stage JSON")
@@ -1086,6 +1101,9 @@ func (a *nativeApp) copyCurrentPreview() {
 	content := result.Markdown
 	label := "Markdown"
 	switch kind {
+	case "review":
+		content = result.ReviewText
+		label = "审核摘要"
 	case "stage":
 		content = result.StageJSON
 		label = "Stage JSON"
@@ -1551,6 +1569,88 @@ func nativeResultSummary(state *orchestrator.CascadeState, bundle *model.Executa
 	}
 	if bundle.Validation != nil {
 		lines = append(lines, fmt.Sprintf("Validation: valid=%t findings=%d", bundle.Validation.Valid, len(bundle.Validation.Findings)))
+	}
+	return strings.Join(lines, "\r\n")
+}
+
+func nativeReviewText(state *orchestrator.CascadeState, bundle *model.ExecutableRecordingScriptBundle) string {
+	if state == nil || bundle == nil {
+		return "审核摘要不可用。"
+	}
+	lines := []string{
+		"审核摘要",
+		"",
+		"Project ID: " + state.ProjectID,
+		"Runtime: " + firstNonEmptyNative(bundle.ScriptManifest.Runtime, "unknown"),
+		fmt.Sprintf("Stage coverage: approval=%d outline=%d", stageApprovalStageCount(bundle), outlineStageCount(bundle)),
+		"Bundle hash: ..." + firstNonEmptyNative(shortHash(bundle.Reproducibility.BundleHashSHA256), "missing"),
+		"Validation: " + strings.TrimPrefix(validationHealthLabel(bundle.Validation), "Validation: "),
+	}
+	if bundle.StageApprovalPlan != nil {
+		lines = append(lines, "", "Stage Plan")
+		for i, stage := range bundle.StageApprovalPlan.Stages {
+			if i >= 12 {
+				lines = append(lines, fmt.Sprintf("- ...and %d more stages", len(bundle.StageApprovalPlan.Stages)-i))
+				break
+			}
+			title := firstNonEmptyNative(stage.Title, stage.Objective, stage.ID)
+			route := firstNonEmptyNative(stage.TargetRoute, stage.EntryRoute, stage.ExpectedRouteAfterAction, stage.TargetURL)
+			if route == "" && len(stage.CandidateRoutes) > 0 {
+				route = stage.CandidateRoutes[0].Route
+			}
+			action := string(stage.Interaction.Kind)
+			success := strings.TrimSpace(stage.SuccessState)
+			line := fmt.Sprintf("- %02d %s", stage.Order, title)
+			if stage.StageKind != "" {
+				line += " [" + string(stage.StageKind) + "]"
+			}
+			if route != "" {
+				line += " route=" + route
+			}
+			if action != "" {
+				line += " action=" + action
+			}
+			if success != "" {
+				line += " success=" + compactPath(success, 96)
+			}
+			lines = append(lines, line)
+		}
+		if len(bundle.StageApprovalPlan.UncertaintyReport) > 0 {
+			lines = append(lines, "", "Uncertainty")
+			for i, item := range bundle.StageApprovalPlan.UncertaintyReport {
+				if i >= 6 {
+					lines = append(lines, fmt.Sprintf("- ...and %d more uncertainty items", len(bundle.StageApprovalPlan.UncertaintyReport)-i))
+					break
+				}
+				lines = append(lines, "- "+firstNonEmptyNative(item.Summary, item.SuggestedAction, item.Kind, item.ID))
+			}
+		}
+	}
+	if bundle.ScriptOutline != nil {
+		lines = append(lines, "", "Browser Agent Boundary")
+		if len(bundle.ScriptOutline.AllowedExplorationScope.AllowedOrigins) > 0 {
+			lines = append(lines, "- allowed origins: "+strings.Join(bundle.ScriptOutline.AllowedExplorationScope.AllowedOrigins, ", "))
+		}
+		if len(bundle.ScriptOutline.AllowedExplorationScope.ForbiddenPathPrefixes) > 0 {
+			lines = append(lines, "- forbidden paths: "+strings.Join(bundle.ScriptOutline.AllowedExplorationScope.ForbiddenPathPrefixes, ", "))
+		}
+		if len(bundle.ScriptOutline.ImmutableFields) > 0 {
+			lines = append(lines, "- immutable: "+strings.Join(bundle.ScriptOutline.ImmutableFields, ", "))
+		}
+		if len(bundle.ScriptOutline.ServerEditableFields) > 0 {
+			lines = append(lines, "- server editable: "+strings.Join(bundle.ScriptOutline.ServerEditableFields, ", "))
+		}
+	}
+	if bundle.Validation != nil && len(bundle.Validation.Findings) > 0 {
+		lines = append(lines, "", "Validation Findings")
+		for i, finding := range bundle.Validation.Findings {
+			if i >= 8 {
+				lines = append(lines, fmt.Sprintf("- ...and %d more findings", len(bundle.Validation.Findings)-i))
+				break
+			}
+			summary := firstNonEmptyNative(finding.Summary, finding.Title, finding.ID)
+			lines = append(lines, fmt.Sprintf("- %s %s: %s", finding.Severity, firstNonEmptyNative(finding.Kind, finding.ID), compactPath(summary, 140)))
+		}
 	}
 	return strings.Join(lines, "\r\n")
 }

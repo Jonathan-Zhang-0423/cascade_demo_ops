@@ -32,6 +32,7 @@ The first native workflow is the three-in-one package workbench:
   - `approval_markdown.md`
   - `stage_approval_plan.json`
   - `script_outline.json`
+- Provide a native approval review summary that condenses stages, browser-agent boundaries, bundle hash, and validation findings before users inspect full Markdown or JSON.
 - Let users copy the currently previewed approval artifact through a native clipboard action for review handoff.
 - Save the three-in-one package and full bundle into the local artifact directory.
 - Export the generated three-in-one package to a user-selected folder through native folder selection.

@@ -108,6 +108,7 @@ function buildPackageManifest() {
         "local_package_generation",
         "native_lifecycle_phase_bar",
         "approval_health_summary",
+        "native_approval_review_summary",
         "stage_plan_review",
         "script_outline_review",
         "native_approval_clipboard_copy",
