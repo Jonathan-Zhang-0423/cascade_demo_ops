@@ -1015,6 +1015,7 @@ func (a *nativeApp) approveLastResult() {
 	a.addStatus("本地审批已记录：" + filepath.Join(dir, "approval_record.json"))
 	setWindowText(a.workflowState, "本地审批已通过")
 	setWindowText(a.artifactStatus, "已审批："+dir)
+	setWindowText(a.previewSummary, nativeResultSummaryForDirectory(result, dir))
 	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已审批")
 	messageBox("Cascade DemoOps", "本地审批已记录：\n"+filepath.Join(dir, "approval_record.json"), false)
@@ -1706,6 +1707,8 @@ func (a *nativeApp) showSelectedRecentPackageSummary() {
 		"Updated: " + nativeTimeLabel(recent.UpdatedAt),
 		"Path: " + compactPath(recent.OutputDirectory, 110),
 		"Files: " + recentPackageFilesLabel(recent.OutputDirectory),
+		"Approval: " + approvalRecordLabel(recent.OutputDirectory),
+		"Server handoff: " + serverHandoffLabel(recent.OutputDirectory),
 	}
 	setWindowText(a.previewSummary, strings.Join(lines, "\r\n"))
 	if !hasResult && a.previewContent != 0 {
@@ -1778,6 +1781,27 @@ func recentPackageFilesLabel(dir string) string {
 		return "ready"
 	}
 	return fmt.Sprintf("missing %d/%d", missing, len(required))
+}
+
+func approvalRecordLabel(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "missing path"
+	}
+	if _, err := os.Stat(filepath.Join(dir, "approval_record.json")); err == nil {
+		return "approved locally"
+	}
+	return "required before server upload"
+}
+
+func serverHandoffLabel(dir string) string {
+	if recentPackageFilesLabel(dir) != "ready" {
+		return "blocked until package files are complete"
+	}
+	if approvalRecordLabel(dir) != "approved locally" {
+		return "waiting for local approval"
+	}
+	return "ready for server Browser Agent"
 }
 
 func nativeTimeLabel(value time.Time) string {
@@ -1902,6 +1926,26 @@ func nativeResultSummary(state *orchestrator.CascadeState, bundle *model.Executa
 	}
 	if bundle.Validation != nil {
 		lines = append(lines, fmt.Sprintf("Validation: valid=%t findings=%d", bundle.Validation.Valid, len(bundle.Validation.Findings)))
+	}
+	return strings.Join(lines, "\r\n")
+}
+
+func nativeResultSummaryForDirectory(result *nativeGenerateResult, dir string) string {
+	if result == nil {
+		return "生成结果不可用。"
+	}
+	lines := []string{
+		"Project ID: " + firstNonEmptyNative(result.ProjectID, "unknown"),
+		"Runtime: " + firstNonEmptyNative(result.Runtime, "unknown"),
+		fmt.Sprintf("Stages: approval=%d outline=%d (%s)", result.StageCount, result.OutlineStageCount, stageCoverageLabel(result.StageCount, result.OutlineStageCount)),
+		fmt.Sprintf("Payload size: markdown=%s stage=%s outline=%s bundle=%s", byteSizeLabel(len(result.Markdown)), byteSizeLabel(len(result.StageJSON)), byteSizeLabel(len(result.OutlineJSON)), byteSizeLabel(len(result.BundleJSON))),
+		"Package gate: " + packageSizeGateLabel(len(result.BundleJSON)),
+		"Files: " + recentPackageFilesLabel(dir),
+		"Approval: " + approvalRecordLabel(dir),
+		"Server handoff: " + serverHandoffLabel(dir),
+	}
+	if suffix := strings.TrimSpace(result.BundleHashSuffix); suffix != "" {
+		lines = append(lines, "Bundle hash: ..."+suffix)
 	}
 	return strings.Join(lines, "\r\n")
 }

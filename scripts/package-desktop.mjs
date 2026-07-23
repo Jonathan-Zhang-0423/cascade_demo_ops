@@ -112,6 +112,7 @@ function buildPackageManifest() {
         "native_package_gate_summary",
         "native_approval_review_summary",
         "native_local_approval_record",
+        "native_server_handoff_summary",
         "stage_plan_review",
         "script_outline_review",
         "native_approval_clipboard_copy",
