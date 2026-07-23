@@ -102,6 +102,8 @@ function buildPackageManifest() {
         "script_outline_review",
         "three_in_one_package_save",
         "artifact_folder_open",
+        "diagnostic_log_open",
+        "native_visual_hierarchy",
       ],
     },
     runtimes: {

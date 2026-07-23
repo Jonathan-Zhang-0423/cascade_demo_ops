@@ -59,6 +59,7 @@ const (
 	idViewBundle     = 1032
 	idBrowseRepo     = 1033
 	idOpenOutput     = 1034
+	idOpenLog        = 1035
 
 	bnClicked = 0
 )
@@ -91,6 +92,11 @@ var (
 	procEnableWindow         = user32.NewProc("EnableWindow")
 	procGetModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
 	procGetStockObject       = gdi32.NewProc("GetStockObject")
+	procCreateFontW          = gdi32.NewProc("CreateFontW")
+	procCreateSolidBrush     = gdi32.NewProc("CreateSolidBrush")
+	procDeleteObject         = gdi32.NewProc("DeleteObject")
+	procSetBkColor           = gdi32.NewProc("SetBkColor")
+	procSetTextColor         = gdi32.NewProc("SetTextColor")
 	procSHBrowseForFolderW   = shell32.NewProc("SHBrowseForFolderW")
 	procSHGetPathFromIDListW = shell32.NewProc("SHGetPathFromIDListW")
 	procShellExecuteW        = shell32.NewProc("ShellExecuteW")
@@ -104,6 +110,13 @@ type nativeApp struct {
 
 	hwnd            syscall.Handle
 	font            uintptr
+	titleFont       uintptr
+	monoFont        uintptr
+	bgBrush         uintptr
+	panelBrush      uintptr
+	fieldBrush      uintptr
+	readonlyBrush   uintptr
+	darkBrush       uintptr
 	headerTitle     syscall.Handle
 	headerMeta      syscall.Handle
 	engineStatus    syscall.Handle
@@ -134,6 +147,7 @@ type nativeApp struct {
 	saveBtn         syscall.Handle
 	browseRepoBtn   syscall.Handle
 	openOutputBtn   syscall.Handle
+	openLogBtn      syscall.Handle
 	statusList      syscall.Handle
 	markdown        nativeField
 	stageJSON       nativeField
@@ -266,6 +280,8 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 				app.chooseLocalRepoPath()
 			case idOpenOutput:
 				app.openLastOutputDirectory()
+			case idOpenLog:
+				app.openDiagnosticLog()
 			case idViewMarkdown:
 				app.showPreview("markdown")
 			case idViewStageJSON:
@@ -288,15 +304,22 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 		}
 		return 0
 	case wmDestroy:
+		if app != nil {
+			app.disposeUIResources()
+		}
 		procPostQuitMessage.Call(0)
 		return 0
+	case wmCtlColorStatic, wmCtlColorEdit, wmCtlColorListBox:
+		if app != nil {
+			return app.controlColor(msgID, wParam, lParam)
+		}
 	}
 	ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msgID), wParam, lParam)
 	return ret
 }
 
 func (a *nativeApp) createControls() {
-	a.font = getStockObject(defaultGUIFont)
+	a.createUIResources()
 	a.headerTitle = createChild(a.hwnd, "STATIC", "Cascade DemoOps Native Workbench", wsChild|wsVisible, idHeaderTitle)
 	a.headerMeta = createChild(a.hwnd, "STATIC", "需求驱动小步读代码 · 生成三合一审批包", wsChild|wsVisible, idHeaderMeta)
 	a.engineStatus = createChild(a.hwnd, "STATIC", a.engineStatusText(), wsChild|wsVisible|wsBorder, idEngineStatus)
@@ -327,11 +350,32 @@ func (a *nativeApp) createControls() {
 	a.saveBtn = createChild(a.hwnd, "BUTTON", "保存三合一包", wsChild|wsVisible|bsPushButton, idSaveButton)
 	a.browseRepoBtn = createChild(a.hwnd, "BUTTON", "选择文件夹", wsChild|wsVisible|bsPushButton, idBrowseRepo)
 	a.openOutputBtn = createChild(a.hwnd, "BUTTON", "打开输出目录", wsChild|wsVisible|bsPushButton, idOpenOutput)
+	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.applyDefaultFont()
 	setEnabled(a.saveBtn, false)
 	setEnabled(a.openOutputBtn, false)
 	a.setPreviewButtonsEnabled(false)
+}
+
+func (a *nativeApp) createUIResources() {
+	a.font = createFont("Segoe UI", -15, 400)
+	a.titleFont = createFont("Segoe UI Semibold", -21, 600)
+	a.monoFont = createFont("Cascadia Mono", -14, 400)
+	if a.font == 0 {
+		a.font = getStockObject(defaultGUIFont)
+	}
+	if a.titleFont == 0 {
+		a.titleFont = a.font
+	}
+	if a.monoFont == 0 {
+		a.monoFont = a.font
+	}
+	a.bgBrush = createSolidBrush(colorRef(246, 247, 249))
+	a.panelBrush = createSolidBrush(colorRef(255, 255, 255))
+	a.fieldBrush = createSolidBrush(colorRef(255, 255, 255))
+	a.readonlyBrush = createSolidBrush(colorRef(250, 251, 253))
+	a.darkBrush = createSolidBrush(colorRef(22, 27, 34))
 }
 
 func (a *nativeApp) labelAndEdit(label string, id int, value string, password bool, multiline bool) nativeField {
@@ -398,7 +442,8 @@ func (a *nativeApp) layout() {
 
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
-	moveControl(a.statusList, x, statusTop+52, leftInnerW, maxInt(86, statusH-66))
+	moveControl(a.openLogBtn, x+leftInnerW-128, statusTop+20, 128, 28)
+	moveControl(a.statusList, x, statusTop+56, leftInnerW, maxInt(86, statusH-70))
 
 	rightX := margin + leftW + gap
 	rightW := maxInt(500, width-rightX-margin)
@@ -636,6 +681,19 @@ func (a *nativeApp) openLastOutputDirectory() {
 	a.addStatus("已打开输出目录：" + result.OutputDirectory)
 }
 
+func (a *nativeApp) openDiagnosticLog() {
+	if a.logger == nil || strings.TrimSpace(a.logger.Path()) == "" {
+		a.addStatus("诊断日志路径不可用。")
+		return
+	}
+	if err := openFile(a.logger.Path()); err != nil {
+		a.addStatus("打开诊断日志失败：" + err.Error())
+		messageBox("Cascade DemoOps", "打开诊断日志失败：\n"+err.Error(), true)
+		return
+	}
+	a.addStatus("已打开诊断日志：" + a.logger.Path())
+}
+
 func (a *nativeApp) showPreview(kind string) {
 	a.mu.Lock()
 	result := a.lastResult
@@ -817,6 +875,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.saveBtn,
 		a.browseRepoBtn,
 		a.openOutputBtn,
+		a.openLogBtn,
 		a.statusList,
 	}
 	for _, field := range []nativeField{
@@ -833,6 +892,57 @@ func (a *nativeApp) applyDefaultFont() {
 		if handle != 0 {
 			procSendMessageW.Call(uintptr(handle), wmSetFont, a.font, 1)
 		}
+	}
+	if a.titleFont != 0 {
+		procSendMessageW.Call(uintptr(a.headerTitle), wmSetFont, a.titleFont, 1)
+	}
+	if a.monoFont != 0 {
+		procSendMessageW.Call(uintptr(a.previewSummary), wmSetFont, a.monoFont, 1)
+		procSendMessageW.Call(uintptr(a.previewContent), wmSetFont, a.monoFont, 1)
+		procSendMessageW.Call(uintptr(a.statusList), wmSetFont, a.monoFont, 1)
+	}
+}
+
+func (a *nativeApp) controlColor(msgID uint32, wParam uintptr, lParam uintptr) uintptr {
+	hwnd := syscall.Handle(lParam)
+	hdc := wParam
+	textColor := colorRef(33, 37, 41)
+	bgColor := colorRef(255, 255, 255)
+	brush := a.panelBrush
+	switch {
+	case hwnd == a.previewSummary || hwnd == a.previewContent:
+		bgColor = colorRef(250, 251, 253)
+		brush = a.readonlyBrush
+	case hwnd == a.statusList:
+		bgColor = colorRef(22, 27, 34)
+		textColor = colorRef(222, 226, 230)
+		brush = a.darkBrush
+	case msgID == wmCtlColorEdit:
+		brush = a.fieldBrush
+	case hwnd == a.inputGroup || hwnd == a.lifecycleGroup || hwnd == a.previewGroup:
+		brush = a.bgBrush
+		bgColor = colorRef(246, 247, 249)
+	default:
+		bgColor = colorRef(246, 247, 249)
+		brush = a.bgBrush
+	}
+	if brush == 0 {
+		brush = getStockObject(whiteBrush)
+	}
+	procSetTextColor.Call(hdc, uintptr(textColor))
+	procSetBkColor.Call(hdc, uintptr(bgColor))
+	return brush
+}
+
+func (a *nativeApp) disposeUIResources() {
+	stockFont := getStockObject(defaultGUIFont)
+	seen := map[uintptr]bool{}
+	for _, object := range []uintptr{a.font, a.titleFont, a.monoFont, a.bgBrush, a.panelBrush, a.fieldBrush, a.readonlyBrush, a.darkBrush} {
+		if object == 0 || object == stockFont || seen[object] {
+			continue
+		}
+		seen[object] = true
+		procDeleteObject.Call(object)
 	}
 }
 
@@ -939,6 +1049,28 @@ func openFolder(path string) error {
 	return nil
 }
 
+func openFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("file path is empty")
+	}
+	ret, _, err := procShellExecuteW.Call(
+		0,
+		uintptr(unsafe.Pointer(utf16Ptr("open"))),
+		uintptr(unsafe.Pointer(utf16Ptr(path))),
+		0,
+		0,
+		swShow,
+	)
+	if ret <= 32 {
+		if err != syscall.Errno(0) {
+			return err
+		}
+		return fmt.Errorf("ShellExecuteW failed with code %d", ret)
+	}
+	return nil
+}
+
 func utf16Ptr(value string) *uint16 {
 	ptr, err := syscall.UTF16PtrFromString(value)
 	if err != nil {
@@ -952,6 +1084,35 @@ func maxInt(left int, right int) int {
 		return left
 	}
 	return right
+}
+
+func createFont(face string, height int32, weight int32) uintptr {
+	ret, _, _ := procCreateFontW.Call(
+		uintptr(height),
+		0,
+		0,
+		0,
+		uintptr(weight),
+		0,
+		0,
+		0,
+		defaultCharset,
+		outDefaultPrecision,
+		clipDefaultPrecision,
+		cleartypeQuality,
+		defaultPitch|ffDontCare,
+		uintptr(unsafe.Pointer(utf16Ptr(face))),
+	)
+	return ret
+}
+
+func createSolidBrush(color uint32) uintptr {
+	ret, _, _ := procCreateSolidBrush.Call(uintptr(color))
+	return ret
+}
+
+func colorRef(red byte, green byte, blue byte) uint32 {
+	return uint32(red) | uint32(green)<<8 | uint32(blue)<<16
 }
 
 type wndclassex struct {
@@ -1030,6 +1191,9 @@ const (
 	wmSize                = 0x0005
 	wmSetFont             = 0x0030
 	wmCommand             = 0x0111
+	wmCtlColorEdit        = 0x0133
+	wmCtlColorListBox     = 0x0134
+	wmCtlColorStatic      = 0x0138
 	wmAppGenerationDone   = 0x8001
 	wmAppGenerationFailed = 0x8002
 
@@ -1047,6 +1211,13 @@ const (
 	bifReturnOnlyFSDirs = 0x00000001
 	bifEditBox          = 0x00000010
 	bifNewDialogStyle   = 0x00000040
+
+	defaultCharset       = 1
+	outDefaultPrecision  = 0
+	clipDefaultPrecision = 0
+	cleartypeQuality     = 5
+	defaultPitch         = 0
+	ffDontCare           = 0
 )
 
 var errNativeUnavailable = errors.New("native desktop ui is unavailable")

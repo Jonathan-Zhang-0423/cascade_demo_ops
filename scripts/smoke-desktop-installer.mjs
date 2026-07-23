@@ -213,7 +213,7 @@ function assert(condition, message) {
 
 function assertNativeCapabilities(desktopUI, label) {
   const capabilities = desktopUI?.native_capabilities || [];
-  for (const capability of ["native_folder_picker", "artifact_folder_open", "three_in_one_package_save"]) {
+  for (const capability of ["native_folder_picker", "artifact_folder_open", "diagnostic_log_open", "native_visual_hierarchy", "three_in_one_package_save"]) {
     assert(capabilities.includes(capability), `${label} missing native capability ${capability}`);
   }
 }
