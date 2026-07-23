@@ -80,6 +80,7 @@ const (
 	idOpenRecentPackage = 1052
 	idRecentLabel       = 1053
 	idViewReview        = 1054
+	idApprovePackage    = 1055
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -207,6 +208,7 @@ type nativeApp struct {
 	importReqBtn     syscall.Handle
 	openOutputBtn    syscall.Handle
 	exportBtn        syscall.Handle
+	approveBtn       syscall.Handle
 	clearDraftBtn    syscall.Handle
 	openLogBtn       syscall.Handle
 	statusList       syscall.Handle
@@ -247,6 +249,19 @@ type nativeGenerateResult struct {
 	HealthStages      string `json:"health_stages"`
 	HealthBundle      string `json:"health_bundle"`
 	HealthValidation  string `json:"health_validation"`
+}
+
+type nativeApprovalRecord struct {
+	SchemaVersion   string    `json:"schema_version"`
+	Decision        string    `json:"decision"`
+	ApprovedAt      time.Time `json:"approved_at"`
+	ProjectID       string    `json:"project_id"`
+	Runtime         string    `json:"runtime,omitempty"`
+	StageCount      int       `json:"stage_count,omitempty"`
+	OutlineStages   int       `json:"outline_stage_count,omitempty"`
+	BundleHash      string    `json:"bundle_hash_sha256_suffix,omitempty"`
+	OutputDirectory string    `json:"output_directory"`
+	ReviewSurface   string    `json:"review_surface"`
 }
 
 type nativeRecentPackage struct {
@@ -352,7 +367,7 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 			app.addStatus("本地原生应用已启动。不会打开浏览器或 WebView。")
 			app.addStatus("填写产品 URL、需求和可用代码来源后，点击生成三合一包。")
 			app.addStatus("本地项目路径与 GitHub 仓库 URL 都是可选代码来源，可以同时提供。")
-			app.addStatus("常用快捷键：Ctrl+G 生成，Ctrl+S 保存，Ctrl+1 审核摘要，Ctrl+2/3/4 切换审批材料。")
+			app.addStatus("常用快捷键：Ctrl+G 生成，Ctrl+S 保存，Ctrl+Enter 本地审批，Ctrl+1 审核摘要。")
 		}
 		return 0
 	case wmSize:
@@ -450,6 +465,7 @@ func (a *nativeApp) createControls() {
 	a.clearDraftBtn = createChild(a.hwnd, "BUTTON", "清除草稿", wsChild|wsVisible|bsPushButton, idClearDraft)
 	a.openOutputBtn = createChild(a.hwnd, "BUTTON", "打开输出目录", wsChild|wsVisible|bsPushButton, idOpenOutput)
 	a.exportBtn = createChild(a.hwnd, "BUTTON", "导出到文件夹", wsChild|wsVisible|bsPushButton, idExportPackage)
+	a.approveBtn = createChild(a.hwnd, "BUTTON", "本地审批通过", wsChild|wsVisible|bsPushButton, idApprovePackage)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.statusBar = createChild(a.hwnd, "STATIC", a.statusBarText(""), wsChild|wsVisible|wsBorder, idStatusBar)
@@ -471,6 +487,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.saveLastResult()
 	case idExportPackage:
 		a.exportLastResult()
+	case idApprovePackage:
+		a.approveLastResult()
 	case idClearDraft:
 		a.clearInputDraft()
 	case idBrowseRepo:
@@ -513,7 +531,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return !generating && a.inputReady()
 	case idBrowseRepo, idImportRequirement, idClearDraft:
 		return !generating
-	case idSaveButton, idExportPackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview:
+	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview:
 		return !generating && hasResult
 	case idOpenRecentPackage:
 		return !generating && hasRecent
@@ -534,6 +552,7 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(fileMenu, idGenerateButton, "生成三合一执行包\tCtrl+G")
 	appendMenuItem(fileMenu, idSaveButton, "保存三合一包\tCtrl+S")
 	appendMenuItem(fileMenu, idExportPackage, "导出三合一包到文件夹...\tCtrl+E")
+	appendMenuItem(fileMenu, idApprovePackage, "本地审批通过\tCtrl+Enter")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录\tCtrl+Shift+O")
 	appendMenuItem(fileMenu, idOpenRecentPackage, "打开最近三合一包\tCtrl+Shift+R")
@@ -564,6 +583,7 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fControl, Key: 'G', Cmd: idGenerateButton},
 		{FVirt: fVirtKey | fControl, Key: 'S', Cmd: idSaveButton},
 		{FVirt: fVirtKey | fControl, Key: 'E', Cmd: idExportPackage},
+		{FVirt: fVirtKey | fControl, Key: vkReturn, Cmd: idApprovePackage},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'O', Cmd: idOpenOutput},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'R', Cmd: idOpenRecentPackage},
 		{FVirt: fVirtKey | fControl, Key: 'L', Cmd: idOpenLog},
@@ -666,6 +686,7 @@ func (a *nativeApp) layout() {
 	moveControl(a.saveBtn, x+202, y, 190, 34)
 	moveControl(a.exportBtn, x, y+42, 186, 32)
 	moveControl(a.openOutputBtn, x+202, y+42, 190, 32)
+	moveControl(a.approveBtn, x, y+82, leftInnerW, 32)
 
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
@@ -938,6 +959,53 @@ func (a *nativeApp) exportLastResult() {
 	messageBox("Cascade DemoOps", "三合一执行包已导出到：\n"+dir, false)
 }
 
+func (a *nativeApp) approveLastResult() {
+	a.mu.Lock()
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可审批的执行包。")
+		return
+	}
+	dir := result.OutputDirectory
+	if strings.TrimSpace(dir) == "" {
+		dir = filepath.Join(a.runtimeConfig.ArtifactRoot, result.ProjectID)
+	}
+	if !confirmBox(a.hwnd, "Cascade DemoOps", "确认本地审批通过当前三合一包？\n\n这会保存审批材料并写入 approval_record.json，表示可交给服务器 Browser Agent 执行。") {
+		a.addStatus("已取消本地审批。")
+		return
+	}
+	if err := writeResultFiles(dir, result); err != nil {
+		a.addStatus("审批前保存失败：" + err.Error())
+		messageBox("Cascade DemoOps", "审批前保存三合一包失败：\n"+err.Error(), true)
+		return
+	}
+	record := nativeApprovalRecord{
+		SchemaVersion:   "demoops.native_approval_record.v1",
+		Decision:        "approved_for_server_browser_agent",
+		ApprovedAt:      time.Now().UTC(),
+		ProjectID:       strings.TrimSpace(result.ProjectID),
+		Runtime:         strings.TrimSpace(result.Runtime),
+		StageCount:      result.StageCount,
+		OutlineStages:   result.OutlineStageCount,
+		BundleHash:      strings.TrimSpace(result.BundleHashSuffix),
+		OutputDirectory: strings.TrimSpace(dir),
+		ReviewSurface:   "native_win32",
+	}
+	if err := writeApprovalRecord(dir, record); err != nil {
+		a.addStatus("审批记录写入失败：" + err.Error())
+		messageBox("Cascade DemoOps", "审批记录写入失败：\n"+err.Error(), true)
+		return
+	}
+	a.rememberRecentPackage(result, dir)
+	a.addStatus("本地审批已记录：" + filepath.Join(dir, "approval_record.json"))
+	setWindowText(a.workflowState, "本地审批已通过")
+	setWindowText(a.artifactStatus, "已审批："+dir)
+	a.setStatusBarOutput(dir)
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已审批")
+	messageBox("Cascade DemoOps", "本地审批已记录：\n"+filepath.Join(dir, "approval_record.json"), false)
+}
+
 func writeResultFiles(dir string, result *nativeGenerateResult) error {
 	if strings.TrimSpace(dir) == "" {
 		return errors.New("output directory is empty")
@@ -954,6 +1022,20 @@ func writeResultFiles(dir string, result *nativeGenerateResult) error {
 		}
 	}
 	return nil
+}
+
+func writeApprovalRecord(dir string, record nativeApprovalRecord) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("approval output directory is empty")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "approval_record.json"), append(data, '\n'), 0o644)
 }
 
 func resultFiles(result *nativeGenerateResult) map[string]string {
@@ -1473,6 +1555,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	setEnabled(a.importReqBtn, !generating)
 	setEnabled(a.clearDraftBtn, !generating)
 	setEnabled(a.exportBtn, !generating && hasResult)
+	setEnabled(a.approveBtn, !generating && hasResult)
 	setEnabled(a.openOutputBtn, !generating && hasResult)
 	setEnabled(a.openRecentBtn, recentEnabled)
 	setEnabled(a.openLogBtn, true)
@@ -1481,7 +1564,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.enableMenuItem(idBrowseRepo, !generating)
 	a.enableMenuItem(idImportRequirement, !generating)
 	a.enableMenuItem(idClearDraft, !generating)
-	for _, id := range []int{idSaveButton, idExportPackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
+	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
 		a.enableMenuItem(id, !generating && hasResult)
 	}
 	a.enableMenuItem(idCopyPreview, !generating && hasResult)
@@ -1844,6 +1927,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.importReqBtn,
 		a.clearDraftBtn,
 		a.exportBtn,
+		a.approveBtn,
 		a.openOutputBtn,
 		a.openLogBtn,
 		a.statusList,
@@ -2378,6 +2462,7 @@ const (
 	cleartypeQuality     = 5
 	defaultPitch         = 0
 	ffDontCare           = 0
+	vkReturn             = 0x0D
 )
 
 var errNativeUnavailable = errors.New("native desktop ui is unavailable")
