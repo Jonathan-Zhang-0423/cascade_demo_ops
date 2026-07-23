@@ -96,6 +96,7 @@ function buildPackageManifest() {
       compatibility_web_host_flag: "--native=false",
       native_capabilities: [
         "input_collection",
+        "native_input_readiness_summary",
         "native_menu_bar",
         "native_folder_picker",
         "requirement_document_import",

@@ -71,8 +71,10 @@ const (
 	idPhaseUnderstand   = 1043
 	idPhasePackage      = 1044
 	idPhaseReview       = 1045
+	idInputReadiness    = 1046
 
 	bnClicked = 0
+	enChange  = 0x0300
 )
 
 var (
@@ -172,6 +174,7 @@ type nativeApp struct {
 	demoUsername     nativeField
 	demoPassword     nativeField
 	requirement      nativeField
+	inputReadiness   syscall.Handle
 	generateBtn      syscall.Handle
 	saveBtn          syscall.Handle
 	browseRepoBtn    syscall.Handle
@@ -304,8 +307,13 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 	case wmCommand:
 		id := int(wParam & 0xffff)
 		code := int((wParam >> 16) & 0xffff)
-		if app != nil && (code == bnClicked || code == 0) {
-			app.handleCommand(id)
+		if app != nil {
+			switch {
+			case code == enChange && app.isInputField(id):
+				app.updateInputReadiness()
+			case code == bnClicked || code == 0:
+				app.handleCommand(id)
+			}
 		}
 		return 0
 	case wmAppGenerationDone:
@@ -370,6 +378,7 @@ func (a *nativeApp) createControls() {
 	a.demoUsername = a.labelAndEdit("演示账号（可选）", idDemoUsername, "", false, false)
 	a.demoPassword = a.labelAndEdit("演示密码（可选）", idDemoPassword, "", true, false)
 	a.requirement = a.labelAndEdit("需求文档 / 需求文本", idRequirement, "", false, true)
+	a.inputReadiness = createChild(a.hwnd, "STATIC", "", wsChild|wsVisible|wsBorder, idInputReadiness)
 	a.generateBtn = createChild(a.hwnd, "BUTTON", "生成三合一执行包", wsChild|wsVisible|bsPushButton, idGenerateButton)
 	a.saveBtn = createChild(a.hwnd, "BUTTON", "保存三合一包", wsChild|wsVisible|bsPushButton, idSaveButton)
 	a.browseRepoBtn = createChild(a.hwnd, "BUTTON", "选择文件夹", wsChild|wsVisible|bsPushButton, idBrowseRepo)
@@ -378,6 +387,7 @@ func (a *nativeApp) createControls() {
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.applyDefaultFont()
+	a.updateInputReadiness()
 	a.setPhaseText("1 输入材料", "2 项目理解", "3 生成包", "4 审核保存")
 	a.updateActionState(false, false)
 }
@@ -515,7 +525,9 @@ func (a *nativeApp) layout() {
 	y += 28
 	a.layoutFieldHeight(a.requirement, x, y, leftInnerW, 104)
 	moveControl(a.importReqBtn, x+leftInnerW-108, y, 108, 24)
-	y += 140
+	y += 128
+	moveControl(a.inputReadiness, x, y, leftInnerW, 34)
+	y += 48
 	moveControl(a.generateBtn, x, y, 186, 34)
 	moveControl(a.saveBtn, x+202, y, 190, 34)
 	moveControl(a.openOutputBtn, x, y+42, leftInnerW, 32)
@@ -778,6 +790,7 @@ func (a *nativeApp) importRequirementDocument() {
 		return
 	}
 	setWindowText(a.requirement.Edit, content)
+	a.updateInputReadiness()
 	a.addStatus(fmt.Sprintf("已导入需求文档：%s（%s）", path, byteSizeLabel(len(content))))
 }
 
@@ -838,6 +851,52 @@ func (a *nativeApp) setPreviewButtonsEnabled(enabled bool) {
 	setEnabled(a.viewStageBtn, enabled)
 	setEnabled(a.viewOutlineBtn, enabled)
 	setEnabled(a.viewBundleBtn, enabled)
+}
+
+func (a *nativeApp) isInputField(id int) bool {
+	switch id {
+	case idProductURL, idLocalRepoPath, idGitRepoURL, idDemoUsername, idDemoPassword, idRequirement:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *nativeApp) updateInputReadiness() {
+	if a.inputReadiness == 0 {
+		return
+	}
+	productURL := strings.TrimSpace(getWindowText(a.productURL.Edit))
+	localRepo := strings.TrimSpace(getWindowText(a.localRepoPath.Edit))
+	gitRepo := strings.TrimSpace(getWindowText(a.gitRepoURL.Edit))
+	username := strings.TrimSpace(getWindowText(a.demoUsername.Edit))
+	password := getWindowText(a.demoPassword.Edit)
+	requirement := strings.TrimSpace(getWindowText(a.requirement.Edit))
+	urlState := "URL: missing"
+	if productURL != "" {
+		urlState = "URL: ready"
+	}
+	requirementState := "Requirement: missing"
+	if requirement != "" {
+		requirementState = "Requirement: " + byteSizeLabel(len(requirement))
+	}
+	sourceState := "Code: optional"
+	switch {
+	case localRepo != "" && gitRepo != "":
+		sourceState = "Code: local + GitHub"
+	case localRepo != "":
+		sourceState = "Code: local"
+	case gitRepo != "":
+		sourceState = "Code: GitHub"
+	}
+	credentialState := "Credentials: optional"
+	switch {
+	case username != "" && password != "":
+		credentialState = "Credentials: provided locally"
+	case username != "" || password != "":
+		credentialState = "Credentials: incomplete"
+	}
+	setWindowText(a.inputReadiness, strings.Join([]string{urlState, requirementState, sourceState, credentialState}, "  |  "))
 }
 
 func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
@@ -1091,6 +1150,7 @@ func (a *nativeApp) applyDefaultFont() {
 	} {
 		handles = append(handles, field.Label, field.Edit)
 	}
+	handles = append(handles, a.inputReadiness)
 	for _, handle := range handles {
 		if handle != 0 {
 			procSendMessageW.Call(uintptr(handle), wmSetFont, a.font, 1)
@@ -1117,7 +1177,8 @@ func (a *nativeApp) controlColor(msgID uint32, wParam uintptr, lParam uintptr) u
 		hwnd == a.healthRuntime || hwnd == a.healthStages ||
 		hwnd == a.healthBundle || hwnd == a.healthValidation ||
 		hwnd == a.phaseInput || hwnd == a.phaseUnderstand ||
-		hwnd == a.phasePackage || hwnd == a.phaseReview:
+		hwnd == a.phasePackage || hwnd == a.phaseReview ||
+		hwnd == a.inputReadiness:
 		bgColor = colorRef(250, 251, 253)
 		brush = a.readonlyBrush
 	case hwnd == a.statusList:
