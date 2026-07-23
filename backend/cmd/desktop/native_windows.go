@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,41 +26,42 @@ const (
 	winClassName = "CascadeDemoOpsNativeWindow"
 	winTitle     = "Cascade DemoOps Desktop"
 
-	idProductURL     = 1001
-	idLocalRepoPath  = 1002
-	idGitRepoURL     = 1003
-	idDemoUsername   = 1004
-	idDemoPassword   = 1005
-	idRequirement    = 1006
-	idGenerateButton = 1007
-	idSaveButton     = 1008
-	idStatusList     = 1009
-	idMarkdown       = 1010
-	idStageJSON      = 1011
-	idOutlineJSON    = 1012
-	idHeaderTitle    = 1013
-	idHeaderMeta     = 1014
-	idEngineStatus   = 1015
-	idWorkflowStatus = 1016
-	idPreviewTitle   = 1017
-	idInputGroup     = 1018
-	idInputHint      = 1019
-	idSourceHint     = 1020
-	idCredentialHint = 1021
-	idLifecycleGroup = 1022
-	idLifecycleHint  = 1023
-	idPreviewGroup   = 1024
-	idPreviewHint    = 1025
-	idArtifactStatus = 1026
-	idPreviewSummary = 1027
-	idPreviewContent = 1028
-	idViewMarkdown   = 1029
-	idViewStageJSON  = 1030
-	idViewOutline    = 1031
-	idViewBundle     = 1032
-	idBrowseRepo     = 1033
-	idOpenOutput     = 1034
-	idOpenLog        = 1035
+	idProductURL        = 1001
+	idLocalRepoPath     = 1002
+	idGitRepoURL        = 1003
+	idDemoUsername      = 1004
+	idDemoPassword      = 1005
+	idRequirement       = 1006
+	idGenerateButton    = 1007
+	idSaveButton        = 1008
+	idStatusList        = 1009
+	idMarkdown          = 1010
+	idStageJSON         = 1011
+	idOutlineJSON       = 1012
+	idHeaderTitle       = 1013
+	idHeaderMeta        = 1014
+	idEngineStatus      = 1015
+	idWorkflowStatus    = 1016
+	idPreviewTitle      = 1017
+	idInputGroup        = 1018
+	idInputHint         = 1019
+	idSourceHint        = 1020
+	idCredentialHint    = 1021
+	idLifecycleGroup    = 1022
+	idLifecycleHint     = 1023
+	idPreviewGroup      = 1024
+	idPreviewHint       = 1025
+	idArtifactStatus    = 1026
+	idPreviewSummary    = 1027
+	idPreviewContent    = 1028
+	idViewMarkdown      = 1029
+	idViewStageJSON     = 1030
+	idViewOutline       = 1031
+	idViewBundle        = 1032
+	idBrowseRepo        = 1033
+	idOpenOutput        = 1034
+	idOpenLog           = 1035
+	idImportRequirement = 1036
 
 	bnClicked = 0
 )
@@ -70,6 +72,7 @@ var (
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	shell32  = syscall.NewLazyDLL("shell32.dll")
 	ole32    = syscall.NewLazyDLL("ole32.dll")
+	comdlg32 = syscall.NewLazyDLL("comdlg32.dll")
 
 	procRegisterClassExW     = user32.NewProc("RegisterClassExW")
 	procCreateWindowExW      = user32.NewProc("CreateWindowExW")
@@ -101,6 +104,7 @@ var (
 	procSHGetPathFromIDListW = shell32.NewProc("SHGetPathFromIDListW")
 	procShellExecuteW        = shell32.NewProc("ShellExecuteW")
 	procCoTaskMemFree        = ole32.NewProc("CoTaskMemFree")
+	procGetOpenFileNameW     = comdlg32.NewProc("GetOpenFileNameW")
 )
 
 type nativeApp struct {
@@ -146,6 +150,7 @@ type nativeApp struct {
 	generateBtn     syscall.Handle
 	saveBtn         syscall.Handle
 	browseRepoBtn   syscall.Handle
+	importReqBtn    syscall.Handle
 	openOutputBtn   syscall.Handle
 	openLogBtn      syscall.Handle
 	statusList      syscall.Handle
@@ -278,6 +283,8 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 				app.saveLastResult()
 			case idBrowseRepo:
 				app.chooseLocalRepoPath()
+			case idImportRequirement:
+				app.importRequirementDocument()
 			case idOpenOutput:
 				app.openLastOutputDirectory()
 			case idOpenLog:
@@ -349,6 +356,7 @@ func (a *nativeApp) createControls() {
 	a.generateBtn = createChild(a.hwnd, "BUTTON", "生成三合一执行包", wsChild|wsVisible|bsPushButton, idGenerateButton)
 	a.saveBtn = createChild(a.hwnd, "BUTTON", "保存三合一包", wsChild|wsVisible|bsPushButton, idSaveButton)
 	a.browseRepoBtn = createChild(a.hwnd, "BUTTON", "选择文件夹", wsChild|wsVisible|bsPushButton, idBrowseRepo)
+	a.importReqBtn = createChild(a.hwnd, "BUTTON", "导入文档", wsChild|wsVisible|bsPushButton, idImportRequirement)
 	a.openOutputBtn = createChild(a.hwnd, "BUTTON", "打开输出目录", wsChild|wsVisible|bsPushButton, idOpenOutput)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
@@ -435,6 +443,7 @@ func (a *nativeApp) layout() {
 	moveControl(a.credentialHint, x, y, leftInnerW, 18)
 	y += 28
 	a.layoutFieldHeight(a.requirement, x, y, leftInnerW, 104)
+	moveControl(a.importReqBtn, x+leftInnerW-108, y, 108, 24)
 	y += 140
 	moveControl(a.generateBtn, x, y, 186, 34)
 	moveControl(a.saveBtn, x+202, y, 190, 34)
@@ -486,6 +495,7 @@ func (a *nativeApp) startGenerate() {
 	setEnabled(a.generateBtn, false)
 	setEnabled(a.saveBtn, false)
 	setEnabled(a.browseRepoBtn, false)
+	setEnabled(a.importReqBtn, false)
 	setEnabled(a.openOutputBtn, false)
 	a.addStatus("开始本地项目理解与三合一包生成。")
 	input := nativeInput{
@@ -589,6 +599,7 @@ func (a *nativeApp) finishGenerate() {
 	setEnabled(a.generateBtn, true)
 	setEnabled(a.saveBtn, true)
 	setEnabled(a.browseRepoBtn, true)
+	setEnabled(a.importReqBtn, true)
 	setEnabled(a.openOutputBtn, true)
 	a.setPreviewButtonsEnabled(true)
 	a.addStatus("三合一执行包已生成，可审核或保存。project_id=" + result.ProjectID)
@@ -611,6 +622,7 @@ func (a *nativeApp) finishGenerateErrorMessage(message string) {
 	setEnabled(a.generateBtn, true)
 	setEnabled(a.saveBtn, a.lastResult != nil)
 	setEnabled(a.browseRepoBtn, true)
+	setEnabled(a.importReqBtn, true)
 	setEnabled(a.openOutputBtn, a.lastResult != nil)
 	a.setPreviewButtonsEnabled(a.lastResult != nil)
 	a.addStatus("生成失败：" + message)
@@ -663,6 +675,26 @@ func (a *nativeApp) chooseLocalRepoPath() {
 	}
 	setWindowText(a.localRepoPath.Edit, path)
 	a.addStatus("已选择本地项目路径：" + path)
+}
+
+func (a *nativeApp) importRequirementDocument() {
+	path, err := openTextFileDialog(a.hwnd, "导入需求文档")
+	if err != nil {
+		a.addStatus("导入需求文档失败：" + err.Error())
+		messageBox("Cascade DemoOps", "导入需求文档失败：\n"+err.Error(), true)
+		return
+	}
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	content, err := readRequirementDocument(path)
+	if err != nil {
+		a.addStatus("读取需求文档失败：" + err.Error())
+		messageBox("Cascade DemoOps", "读取需求文档失败：\n"+err.Error(), true)
+		return
+	}
+	setWindowText(a.requirement.Edit, content)
+	a.addStatus(fmt.Sprintf("已导入需求文档：%s（%s）", path, byteSizeLabel(len(content))))
 }
 
 func (a *nativeApp) openLastOutputDirectory() {
@@ -874,6 +906,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.generateBtn,
 		a.saveBtn,
 		a.browseRepoBtn,
+		a.importReqBtn,
 		a.openOutputBtn,
 		a.openLogBtn,
 		a.statusList,
@@ -1024,6 +1057,46 @@ func browseForFolder(owner syscall.Handle, title string) (string, error) {
 	return syscall.UTF16ToString(path[:]), nil
 }
 
+func openTextFileDialog(owner syscall.Handle, title string) (string, error) {
+	var fileBuffer [maxLongPath]uint16
+	filter := utf16DoubleNull("需求文档 (*.md;*.txt)\x00*.md;*.txt\x00Markdown (*.md)\x00*.md\x00Text (*.txt)\x00*.txt\x00所有文件 (*.*)\x00*.*")
+	ofn := openFileName{
+		LStructSize: uint32(unsafe.Sizeof(openFileName{})),
+		HwndOwner:   uintptr(owner),
+		LpstrFilter: uintptr(unsafe.Pointer(&filter[0])),
+		LpstrFile:   uintptr(unsafe.Pointer(&fileBuffer[0])),
+		NMaxFile:    maxLongPath,
+		LpstrTitle:  uintptr(unsafe.Pointer(utf16Ptr(title))),
+		Flags:       ofnExplorer | ofnFileMustExist | ofnPathMustExist | ofnHideReadOnly,
+		LpstrDefExt: uintptr(unsafe.Pointer(utf16Ptr("md"))),
+	}
+	ok, _, err := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+	if ok == 0 {
+		if err != syscall.Errno(0) {
+			return "", err
+		}
+		return "", nil
+	}
+	return syscall.UTF16ToString(fileBuffer[:]), nil
+}
+
+func readRequirementDocument(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	limited := io.LimitReader(file, maxRequirementImportBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return "", err
+	}
+	if len(data) > maxRequirementImportBytes {
+		return "", fmt.Errorf("document is larger than %s", byteSizeLabel(maxRequirementImportBytes))
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
 func openFolder(path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -1077,6 +1150,17 @@ func utf16Ptr(value string) *uint16 {
 		panic(err)
 	}
 	return ptr
+}
+
+func utf16DoubleNull(value string) []uint16 {
+	encoded := syscall.StringToUTF16(value)
+	if len(encoded) == 0 || encoded[len(encoded)-1] != 0 {
+		encoded = append(encoded, 0)
+	}
+	if len(encoded) == 1 || encoded[len(encoded)-2] != 0 {
+		encoded = append(encoded, 0)
+	}
+	return encoded
 }
 
 func maxInt(left int, right int) int {
@@ -1162,9 +1246,37 @@ type browseInfo struct {
 	IImage         int32
 }
 
+type openFileName struct {
+	LStructSize       uint32
+	HwndOwner         uintptr
+	HInstance         uintptr
+	LpstrFilter       uintptr
+	LpstrCustomFilter uintptr
+	NMaxCustFilter    uint32
+	NFilterIndex      uint32
+	LpstrFile         uintptr
+	NMaxFile          uint32
+	LpstrFileTitle    uintptr
+	NMaxFileTitle     uint32
+	LpstrInitialDir   uintptr
+	LpstrTitle        uintptr
+	Flags             uint32
+	NFileOffset       uint16
+	NFileExtension    uint16
+	LpstrDefExt       uintptr
+	LCustData         uintptr
+	LpfnHook          uintptr
+	LpTemplateName    uintptr
+	PvReserved        uintptr
+	DwReserved        uint32
+	FlagsEx           uint32
+}
+
 const (
-	cwUseDefault = ^uintptr(0x7fffffff)
-	maxPath      = 260
+	cwUseDefault              = ^uintptr(0x7fffffff)
+	maxPath                   = 260
+	maxLongPath               = 32768
+	maxRequirementImportBytes = 256 * 1024
 
 	wsOverlappedWindow = 0x00cf0000
 	wsVisible          = 0x10000000
@@ -1211,6 +1323,13 @@ const (
 	bifReturnOnlyFSDirs = 0x00000001
 	bifEditBox          = 0x00000010
 	bifNewDialogStyle   = 0x00000040
+
+	ofnReadOnly        = 0x00000001
+	ofnOverwritePrompt = 0x00000002
+	ofnHideReadOnly    = 0x00000004
+	ofnFileMustExist   = 0x00001000
+	ofnPathMustExist   = 0x00000800
+	ofnExplorer        = 0x00080000
 
 	defaultCharset       = 1
 	outDefaultPrecision  = 0

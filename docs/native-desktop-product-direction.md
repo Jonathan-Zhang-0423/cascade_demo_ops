@@ -21,6 +21,7 @@ Compatibility UI:
 The first native workflow is the three-in-one package workbench:
 
 - Collect product URL, requirement text, transient demo credentials, and any available code source.
+- Import requirement Markdown/Text documents through the native file picker as a first-class input path.
 - Local repository path and GitHub repository URL are both optional parallel sources; providing one must not replace or disable the other.
 - Run local demand understanding and project intelligence through the Go `Service` layer directly.
 - Display the three approval artifacts in native preview panes:

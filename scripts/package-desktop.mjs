@@ -97,6 +97,7 @@ function buildPackageManifest() {
       native_capabilities: [
         "input_collection",
         "native_folder_picker",
+        "requirement_document_import",
         "local_package_generation",
         "stage_plan_review",
         "script_outline_review",
