@@ -42,6 +42,8 @@ The first native workflow is the three-in-one package workbench:
 - Let users start server handoff for an already approved package from the native workbench, covering exchange init and package upload.
 - Write a non-sensitive `server_handoff_record.json` beside the approved package after upload so users can resume server-stage tracking after app restart or package import.
 - Let users manually query server execution status from the native workbench, showing status, stage, progress, result package ID, recent stage history, and failure summary without exposing bearer tokens or credentials.
+- Let users fetch the server `RecordingResultPackage` into `server_result_package.json` and a compact `server_result_record.json` once the server exposes a result package ID.
+- Let users explicitly acknowledge result delivery from the native workbench, writing `server_result_ack.json`; this v1 ACK is based on server-returned result/checksum metadata, while binary artifact download and local hash verification remain a follow-up capability.
 - Save the three-in-one package and full bundle into the local artifact directory.
 - Import an existing three-in-one package folder back into the native workbench so users can resume review, copy artifacts, open folders, and record approval after an app restart.
 - Export the generated three-in-one package to a user-selected folder through native folder selection.

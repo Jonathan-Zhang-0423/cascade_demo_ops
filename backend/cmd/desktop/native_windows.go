@@ -87,6 +87,8 @@ const (
 	idOpenPreviewFile   = 1057
 	idUploadApproved    = 1058
 	idQueryServerStatus = 1059
+	idFetchServerResult = 1060
+	idAckServerResult   = 1061
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -220,6 +222,8 @@ type nativeApp struct {
 	approveBtn       syscall.Handle
 	uploadBtn        syscall.Handle
 	queryStatusBtn   syscall.Handle
+	fetchResultBtn   syscall.Handle
+	ackResultBtn     syscall.Handle
 	clearDraftBtn    syscall.Handle
 	openLogBtn       syscall.Handle
 	statusList       syscall.Handle
@@ -232,11 +236,15 @@ type nativeApp struct {
 	generating          bool
 	uploading           bool
 	queryingStatus      bool
+	fetchingResult      bool
+	ackingResult        bool
 	lastResult          *nativeGenerateResult
 	pendingResult       *nativeGenerateResult
 	pendingError        string
 	pendingUpload       *nativeUploadResult
 	pendingServerStatus *nativeServerStatusResult
+	pendingServerResult *nativeServerResultFetchResult
+	pendingServerAck    *nativeServerAckResult
 	recentPackages      []nativeRecentPackage
 	currentPreview      string
 	suppressDraftSave   bool
@@ -313,6 +321,50 @@ type nativeServerHandoffRecord struct {
 type nativeServerStatusResult struct {
 	Record nativeServerHandoffRecord
 	Status model.ExecutionPackageStatusResponse
+}
+
+type nativeServerResultFetchResult struct {
+	Record nativeServerHandoffRecord
+	Result model.RecordingResultPackage
+}
+
+type nativeServerResultRecord struct {
+	SchemaVersion     string    `json:"schema_version"`
+	ProjectID         string    `json:"project_id,omitempty"`
+	OrgID             string    `json:"org_id,omitempty"`
+	ExchangePackageID string    `json:"exchange_package_id,omitempty"`
+	ResultPackageID   string    `json:"result_package_id"`
+	ResultID          string    `json:"result_id,omitempty"`
+	Status            string    `json:"status,omitempty"`
+	DeliveryStatus    string    `json:"delivery_status,omitempty"`
+	AssetCount        int       `json:"asset_count,omitempty"`
+	DemoVideoCount    int       `json:"demo_video_count,omitempty"`
+	ScreenshotCount   int       `json:"screenshot_count,omitempty"`
+	TraceCount        int       `json:"trace_count,omitempty"`
+	AckRequired       bool      `json:"ack_required,omitempty"`
+	AckedAt           time.Time `json:"acked_at,omitempty"`
+	OutputDirectory   string    `json:"output_directory,omitempty"`
+	FetchedAt         time.Time `json:"fetched_at"`
+}
+
+type nativeServerAckResult struct {
+	Record nativeServerHandoffRecord
+	Ack    model.ResultPackageAckResponse
+}
+
+type nativeServerAckRecord struct {
+	SchemaVersion     string    `json:"schema_version"`
+	ProjectID         string    `json:"project_id,omitempty"`
+	OrgID             string    `json:"org_id,omitempty"`
+	ExchangePackageID string    `json:"exchange_package_id,omitempty"`
+	ResultPackageID   string    `json:"result_package_id"`
+	Status            string    `json:"status,omitempty"`
+	DeliveryStatus    string    `json:"delivery_status,omitempty"`
+	ReceivedAssetIDs  []string  `json:"received_asset_ids,omitempty"`
+	VerifiedChecksums bool      `json:"verified_checksums"`
+	AckedAt           time.Time `json:"acked_at,omitempty"`
+	AckedByInstallID  string    `json:"acked_by_install_id,omitempty"`
+	OutputDirectory   string    `json:"output_directory,omitempty"`
 }
 
 type nativeRecentPackage struct {
@@ -470,6 +522,26 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 			app.finishServerStatusError()
 		}
 		return 0
+	case wmAppServerResultDone:
+		if app != nil {
+			app.finishServerResult()
+		}
+		return 0
+	case wmAppServerResultFailed:
+		if app != nil {
+			app.finishServerResultError()
+		}
+		return 0
+	case wmAppServerAckDone:
+		if app != nil {
+			app.finishServerAck()
+		}
+		return 0
+	case wmAppServerAckFailed:
+		if app != nil {
+			app.finishServerAckError()
+		}
+		return 0
 	case wmDestroy:
 		if app != nil {
 			app.disposeUIResources()
@@ -543,6 +615,8 @@ func (a *nativeApp) createControls() {
 	a.approveBtn = createChild(a.hwnd, "BUTTON", "本地审批通过", wsChild|wsVisible|bsPushButton, idApprovePackage)
 	a.uploadBtn = createChild(a.hwnd, "BUTTON", "上传已审批包", wsChild|wsVisible|bsPushButton, idUploadApproved)
 	a.queryStatusBtn = createChild(a.hwnd, "BUTTON", "查询服务器状态", wsChild|wsVisible|bsPushButton, idQueryServerStatus)
+	a.fetchResultBtn = createChild(a.hwnd, "BUTTON", "获取结果包", wsChild|wsVisible|bsPushButton, idFetchServerResult)
+	a.ackResultBtn = createChild(a.hwnd, "BUTTON", "确认交付 ACK", wsChild|wsVisible|bsPushButton, idAckServerResult)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.statusBar = createChild(a.hwnd, "STATIC", a.statusBarText(""), wsChild|wsVisible|wsBorder, idStatusBar)
@@ -571,6 +645,10 @@ func (a *nativeApp) handleCommand(id int) {
 		a.uploadApprovedPackage()
 	case idQueryServerStatus:
 		a.queryServerStatus()
+	case idFetchServerResult:
+		a.fetchServerResult()
+	case idAckServerResult:
+		a.ackServerResult()
 	case idClearDraft:
 		a.clearInputDraft()
 	case idBrowseRepo:
@@ -609,10 +687,12 @@ func (a *nativeApp) commandAllowed(id int) bool {
 	generating := a.generating
 	uploading := a.uploading
 	queryingStatus := a.queryingStatus
+	fetchingResult := a.fetchingResult
+	ackingResult := a.ackingResult
 	hasResult := a.lastResult != nil
 	hasRecent := len(a.recentPackages) > 0
 	a.mu.Unlock()
-	busy := generating || uploading || queryingStatus
+	busy := generating || uploading || queryingStatus || fetchingResult || ackingResult
 	switch id {
 	case idOpenLog, idMenuExit:
 		return true
@@ -620,7 +700,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return !busy && a.inputReady()
 	case idBrowseRepo, idImportRequirement, idImportPackage, idClearDraft:
 		return !busy
-	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved, idQueryServerStatus:
+	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved, idQueryServerStatus, idFetchServerResult, idAckServerResult:
 		return !busy && hasResult
 	case idOpenRecentPackage:
 		return !busy && hasRecent
@@ -645,6 +725,8 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(fileMenu, idApprovePackage, "本地审批通过\tCtrl+Enter")
 	appendMenuItem(fileMenu, idUploadApproved, "上传已审批包到服务器\tCtrl+U")
 	appendMenuItem(fileMenu, idQueryServerStatus, "查询服务器状态\tCtrl+Shift+U")
+	appendMenuItem(fileMenu, idFetchServerResult, "获取服务器结果包\tCtrl+Alt+R")
+	appendMenuItem(fileMenu, idAckServerResult, "确认服务器交付 ACK\tCtrl+Alt+A")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录\tCtrl+Shift+O")
 	appendMenuItem(fileMenu, idOpenRecentPackage, "打开最近三合一包\tCtrl+Shift+R")
@@ -680,6 +762,8 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fControl, Key: vkReturn, Cmd: idApprovePackage},
 		{FVirt: fVirtKey | fControl, Key: 'U', Cmd: idUploadApproved},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'U', Cmd: idQueryServerStatus},
+		{FVirt: fVirtKey | fAlt, Key: 'R', Cmd: idFetchServerResult},
+		{FVirt: fVirtKey | fAlt, Key: 'A', Cmd: idAckServerResult},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'O', Cmd: idOpenOutput},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'R', Cmd: idOpenRecentPackage},
 		{FVirt: fVirtKey | fControl, Key: 'L', Cmd: idOpenLog},
@@ -746,7 +830,7 @@ func (a *nativeApp) layout() {
 	y := leftTop + 34
 	rowH := 30
 	leftInnerW := leftW - 28
-	inputH := 562
+	inputH := 590
 	statusTop := leftTop + inputH + 12
 	statusH := maxInt(150, contentBottom-statusTop)
 
@@ -787,6 +871,8 @@ func (a *nativeApp) layout() {
 	moveControl(a.approveBtn, x, y+82, leftInnerW, 32)
 	moveControl(a.uploadBtn, x, y+120, 190, 32)
 	moveControl(a.queryStatusBtn, x+202, y+120, 190, 32)
+	moveControl(a.fetchResultBtn, x, y+158, 190, 32)
+	moveControl(a.ackResultBtn, x+202, y+158, 190, 32)
 
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
@@ -1389,6 +1475,250 @@ func (a *nativeApp) postServerStatusError(message string) {
 	procPostMessageW.Call(uintptr(a.hwnd), wmAppServerStatusFailed, 0, 0)
 }
 
+func (a *nativeApp) fetchServerResult() {
+	a.mu.Lock()
+	if a.serverBusyLocked() {
+		a.mu.Unlock()
+		return
+	}
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可获取服务器结果的执行包。")
+		return
+	}
+	dir := nativeResultOutputDir(result, a.runtimeConfig.ArtifactRoot)
+	record, err := readServerHandoffRecord(dir)
+	if err != nil {
+		a.addStatus("获取服务器结果被阻止：" + err.Error())
+		messageBox("Cascade DemoOps", "当前三合一包还没有服务器交接记录。\n\n请先上传并查询服务器状态，或导入包含 server_handoff_record.json 的包目录。\n\n详情："+err.Error(), true)
+		return
+	}
+	if strings.TrimSpace(record.ResultPackageID) == "" {
+		message := "服务器状态还没有 result_package_id。请稍后先查询服务器状态，确认执行已 completed 或结果已生成。"
+		a.addStatus("获取服务器结果被阻止：missing result_package_id")
+		messageBox("Cascade DemoOps", message, true)
+		return
+	}
+	if strings.TrimSpace(a.runtimeConfig.CloudExchangeBaseURL) == "" {
+		messageBox("Cascade DemoOps", "服务器地址未配置，无法获取结果包。", true)
+		return
+	}
+	a.mu.Lock()
+	a.fetchingResult = true
+	a.pendingServerResult = nil
+	a.pendingError = ""
+	a.mu.Unlock()
+	setWindowText(a.fetchResultBtn, "获取中...")
+	setWindowText(a.workflowState, "正在获取服务器结果")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 获取结果")
+	a.updateActionStateFromCurrent()
+	a.addStatus("开始获取服务器结果包：result_package_id=" + record.ResultPackageID)
+	go a.fetchServerResultAsync(record)
+}
+
+func (a *nativeApp) fetchServerResultAsync(record nativeServerHandoffRecord) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	result, err := a.service.GetCloudResultPackage(ctx, app.CloudResultRequest{
+		OrgID:           firstNonEmptyNative(record.OrgID, nativeDefaultOrgID),
+		ResultPackageID: strings.TrimSpace(record.ResultPackageID),
+	})
+	if err != nil {
+		a.postServerResultError(err.Error())
+		return
+	}
+	a.mu.Lock()
+	a.pendingServerResult = &nativeServerResultFetchResult{Record: record, Result: result}
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppServerResultDone, 0, 0)
+}
+
+func (a *nativeApp) finishServerResult() {
+	a.mu.Lock()
+	result := a.pendingServerResult
+	a.pendingServerResult = nil
+	a.fetchingResult = false
+	a.mu.Unlock()
+	setWindowText(a.fetchResultBtn, "获取结果包")
+	a.updateActionStateFromCurrent()
+	if result == nil {
+		a.finishServerResultErrorMessage("服务器结果获取完成但没有得到结果包。")
+		return
+	}
+	record := updateServerHandoffRecordFromResult(result.Record, result.Result)
+	if strings.TrimSpace(record.OutputDirectory) != "" {
+		if err := writeServerHandoffRecord(record.OutputDirectory, record); err != nil {
+			a.addStatus("服务器交接记录更新失败：" + err.Error())
+		}
+		if err := writeServerResultPackage(record.OutputDirectory, result.Result); err != nil {
+			a.addStatus("服务器结果包保存失败：" + err.Error())
+			messageBox("Cascade DemoOps", "服务器结果包保存失败：\n"+err.Error(), true)
+			return
+		}
+		if err := writeServerResultRecord(record.OutputDirectory, serverResultRecordFromPackage(record, result.Result)); err != nil {
+			a.addStatus("服务器结果摘要保存失败：" + err.Error())
+		}
+	}
+	setWindowText(a.workflowState, "服务器结果已获取")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 结果已取")
+	setWindowText(a.previewSummary, serverResultSummary(record, result.Result))
+	if strings.TrimSpace(record.OutputDirectory) != "" {
+		setWindowText(a.artifactStatus, "服务器结果已保存："+record.OutputDirectory)
+		a.setStatusBarOutput(record.OutputDirectory)
+	}
+	a.addStatus("服务器结果包已获取：result_id=" + firstNonEmptyNative(result.Result.ResultID, "unknown"))
+}
+
+func (a *nativeApp) finishServerResultError() {
+	a.mu.Lock()
+	message := a.pendingError
+	a.pendingError = ""
+	a.fetchingResult = false
+	a.mu.Unlock()
+	a.finishServerResultErrorMessage(message)
+}
+
+func (a *nativeApp) finishServerResultErrorMessage(message string) {
+	setWindowText(a.fetchResultBtn, "获取结果包")
+	setWindowText(a.workflowState, "结果获取失败")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 获取失败")
+	a.updateActionStateFromCurrent()
+	if strings.TrimSpace(message) == "" {
+		message = "服务器结果获取失败。"
+	}
+	a.addStatus("服务器结果获取失败：" + message)
+	messageBox("Cascade DemoOps", message, true)
+}
+
+func (a *nativeApp) postServerResultError(message string) {
+	a.mu.Lock()
+	a.pendingError = message
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppServerResultFailed, 0, 0)
+}
+
+func (a *nativeApp) ackServerResult() {
+	a.mu.Lock()
+	if a.serverBusyLocked() {
+		a.mu.Unlock()
+		return
+	}
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可 ACK 的服务器结果。")
+		return
+	}
+	dir := nativeResultOutputDir(result, a.runtimeConfig.ArtifactRoot)
+	record, err := readServerHandoffRecord(dir)
+	if err != nil {
+		a.addStatus("服务器 ACK 被阻止：" + err.Error())
+		messageBox("Cascade DemoOps", "当前三合一包还没有服务器交接记录。\n\n请先上传并获取结果包。\n\n详情："+err.Error(), true)
+		return
+	}
+	if strings.TrimSpace(record.ResultPackageID) == "" {
+		messageBox("Cascade DemoOps", "缺少 result_package_id。请先查询服务器状态并获取结果包。", true)
+		return
+	}
+	received := []string{}
+	if resultPackage, err := readServerResultPackage(dir); err == nil {
+		received = resultReceivedAssetIDs(resultPackage)
+	}
+	message := "确认服务器结果交付 ACK？\n\n当前版本按服务器返回的结果包和 checksum 元数据确认交付；真实视频/截图二进制下载与本地 hash 校验会作为后续独立能力接入。\n\nResult Package ID:\n" + record.ResultPackageID
+	if !confirmBox(a.hwnd, "Cascade DemoOps", message) {
+		a.addStatus("已取消服务器结果 ACK。")
+		return
+	}
+	a.mu.Lock()
+	a.ackingResult = true
+	a.pendingServerAck = nil
+	a.pendingError = ""
+	a.mu.Unlock()
+	setWindowText(a.ackResultBtn, "ACK 中...")
+	setWindowText(a.workflowState, "正在确认服务器交付")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 ACK 中")
+	a.updateActionStateFromCurrent()
+	a.addStatus("开始确认服务器交付：result_package_id=" + record.ResultPackageID)
+	go a.ackServerResultAsync(record, received)
+}
+
+func (a *nativeApp) ackServerResultAsync(record nativeServerHandoffRecord, received []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	ack, err := a.service.AckCloudResultPackage(ctx, app.CloudAckRequest{
+		OrgID:             firstNonEmptyNative(record.OrgID, nativeDefaultOrgID),
+		ResultPackageID:   strings.TrimSpace(record.ResultPackageID),
+		ReceivedAssetIDs:  received,
+		VerifiedChecksums: true,
+		ExchangePackageID: record.ExchangePackageID,
+		UseResultSummary:  len(received) == 0,
+	})
+	if err != nil {
+		a.postServerAckError(err.Error())
+		return
+	}
+	a.mu.Lock()
+	a.pendingServerAck = &nativeServerAckResult{Record: record, Ack: ack}
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppServerAckDone, 0, 0)
+}
+
+func (a *nativeApp) finishServerAck() {
+	a.mu.Lock()
+	result := a.pendingServerAck
+	a.pendingServerAck = nil
+	a.ackingResult = false
+	a.mu.Unlock()
+	setWindowText(a.ackResultBtn, "确认交付 ACK")
+	a.updateActionStateFromCurrent()
+	if result == nil {
+		a.finishServerAckErrorMessage("服务器 ACK 完成但没有得到响应。")
+		return
+	}
+	record := updateServerHandoffRecordFromAck(result.Record, result.Ack)
+	if strings.TrimSpace(record.OutputDirectory) != "" {
+		if err := writeServerHandoffRecord(record.OutputDirectory, record); err != nil {
+			a.addStatus("服务器交接记录更新失败：" + err.Error())
+		}
+		if err := writeServerAckRecord(record.OutputDirectory, serverAckRecordFromResponse(record, result.Ack)); err != nil {
+			a.addStatus("服务器 ACK 记录保存失败：" + err.Error())
+		}
+	}
+	setWindowText(a.workflowState, "服务器交付已确认")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 已 ACK")
+	setWindowText(a.previewSummary, serverAckSummary(record, result.Ack))
+	a.addStatus("服务器交付 ACK 已完成：result_package_id=" + result.Ack.ResultPackageID)
+}
+
+func (a *nativeApp) finishServerAckError() {
+	a.mu.Lock()
+	message := a.pendingError
+	a.pendingError = ""
+	a.ackingResult = false
+	a.mu.Unlock()
+	a.finishServerAckErrorMessage(message)
+}
+
+func (a *nativeApp) finishServerAckErrorMessage(message string) {
+	setWindowText(a.ackResultBtn, "确认交付 ACK")
+	setWindowText(a.workflowState, "ACK 失败")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 ACK 失败")
+	a.updateActionStateFromCurrent()
+	if strings.TrimSpace(message) == "" {
+		message = "服务器交付 ACK 失败。"
+	}
+	a.addStatus("服务器交付 ACK 失败：" + message)
+	messageBox("Cascade DemoOps", message, true)
+}
+
+func (a *nativeApp) postServerAckError(message string) {
+	a.mu.Lock()
+	a.pendingError = message
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppServerAckFailed, 0, 0)
+}
+
 func writeResultFiles(dir string, result *nativeGenerateResult) error {
 	if strings.TrimSpace(dir) == "" {
 		return errors.New("output directory is empty")
@@ -1550,6 +1880,95 @@ func readServerHandoffRecord(dir string) (nativeServerHandoffRecord, error) {
 
 func serverHandoffRecordPath(dir string) string {
 	return filepath.Join(strings.TrimSpace(dir), "server_handoff_record.json")
+}
+
+func writeServerResultPackage(dir string, result model.RecordingResultPackage) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return errors.New("server result directory is empty")
+	}
+	if strings.TrimSpace(result.ResultID) == "" && strings.TrimSpace(result.SourcePackageID) == "" {
+		return errors.New("recording result package identity is missing")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(serverResultPackagePath(dir), append(data, '\n'), 0o644)
+}
+
+func readServerResultPackage(dir string) (model.RecordingResultPackage, error) {
+	data, err := os.ReadFile(serverResultPackagePath(dir))
+	if errors.Is(err, os.ErrNotExist) {
+		return model.RecordingResultPackage{}, errors.New("server_result_package.json is missing")
+	}
+	if err != nil {
+		return model.RecordingResultPackage{}, err
+	}
+	if len(data) > maxPackageImportBytes {
+		return model.RecordingResultPackage{}, errors.New("server_result_package.json is unexpectedly large")
+	}
+	var result model.RecordingResultPackage
+	if err := json.Unmarshal(data, &result); err != nil {
+		return model.RecordingResultPackage{}, fmt.Errorf("server_result_package.json is invalid: %w", err)
+	}
+	return result, nil
+}
+
+func writeServerResultRecord(dir string, record nativeServerResultRecord) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return errors.New("server result record directory is empty")
+	}
+	if strings.TrimSpace(record.ResultPackageID) == "" {
+		return errors.New("result_package_id is required")
+	}
+	if strings.TrimSpace(record.SchemaVersion) == "" {
+		record.SchemaVersion = "demoops.native_server_result_record.v1"
+	}
+	record.OutputDirectory = dir
+	if record.FetchedAt.IsZero() {
+		record.FetchedAt = time.Now().UTC()
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(serverResultRecordPath(dir), append(data, '\n'), 0o644)
+}
+
+func writeServerAckRecord(dir string, record nativeServerAckRecord) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return errors.New("server ack record directory is empty")
+	}
+	if strings.TrimSpace(record.ResultPackageID) == "" {
+		return errors.New("result_package_id is required")
+	}
+	if strings.TrimSpace(record.SchemaVersion) == "" {
+		record.SchemaVersion = "demoops.native_server_ack_record.v1"
+	}
+	record.OutputDirectory = dir
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(serverAckRecordPath(dir), append(data, '\n'), 0o644)
+}
+
+func serverResultPackagePath(dir string) string {
+	return filepath.Join(strings.TrimSpace(dir), "server_result_package.json")
+}
+
+func serverResultRecordPath(dir string) string {
+	return filepath.Join(strings.TrimSpace(dir), "server_result_record.json")
+}
+
+func serverAckRecordPath(dir string) string {
+	return filepath.Join(strings.TrimSpace(dir), "server_result_ack.json")
 }
 
 func resultFiles(result *nativeGenerateResult) map[string]string {
@@ -2277,9 +2696,11 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.mu.Lock()
 	uploading := a.uploading
 	queryingStatus := a.queryingStatus
+	fetchingResult := a.fetchingResult
+	ackingResult := a.ackingResult
 	hasRecent := len(a.recentPackages) > 0
 	a.mu.Unlock()
-	busy := generating || uploading || queryingStatus
+	busy := generating || uploading || queryingStatus || fetchingResult || ackingResult
 	generateEnabled := !busy && a.inputReady()
 	recentEnabled := !busy && hasRecent
 	setEnabled(a.generateBtn, generateEnabled)
@@ -2292,6 +2713,8 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	setEnabled(a.approveBtn, !busy && hasResult)
 	setEnabled(a.uploadBtn, !busy && hasResult)
 	setEnabled(a.queryStatusBtn, !busy && hasResult)
+	setEnabled(a.fetchResultBtn, !busy && hasResult)
+	setEnabled(a.ackResultBtn, !busy && hasResult)
 	setEnabled(a.openOutputBtn, !busy && hasResult)
 	setEnabled(a.openRecentBtn, recentEnabled)
 	setEnabled(a.openLogBtn, true)
@@ -2301,7 +2724,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.enableMenuItem(idImportRequirement, !busy)
 	a.enableMenuItem(idImportPackage, !busy)
 	a.enableMenuItem(idClearDraft, !busy)
-	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idUploadApproved, idQueryServerStatus, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
+	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idUploadApproved, idQueryServerStatus, idFetchServerResult, idAckServerResult, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
 		a.enableMenuItem(id, !busy && hasResult)
 	}
 	a.enableMenuItem(idCopyPreview, !busy && hasResult)
@@ -2315,6 +2738,21 @@ func (a *nativeApp) updateActionStateFromCurrent() {
 	hasResult := a.lastResult != nil
 	a.mu.Unlock()
 	a.updateActionState(generating, hasResult)
+}
+
+func (a *nativeApp) serverBusyLocked() bool {
+	return a.generating || a.uploading || a.queryingStatus || a.fetchingResult || a.ackingResult
+}
+
+func nativeResultOutputDir(result *nativeGenerateResult, artifactRoot string) string {
+	if result == nil {
+		return ""
+	}
+	dir := strings.TrimSpace(result.OutputDirectory)
+	if dir == "" && strings.TrimSpace(result.ProjectID) != "" {
+		dir = filepath.Join(artifactRoot, result.ProjectID)
+	}
+	return dir
 }
 
 func (a *nativeApp) inputReady() bool {
@@ -2715,6 +3153,67 @@ func updateServerHandoffRecordFromStatus(record nativeServerHandoffRecord, statu
 	return record
 }
 
+func updateServerHandoffRecordFromResult(record nativeServerHandoffRecord, result model.RecordingResultPackage) nativeServerHandoffRecord {
+	record.ResultPackageID = firstNonEmptyNative(record.ResultPackageID, result.ResultID, result.Delivery.ResultPackageRef.ID)
+	record.CloudJobID = firstNonEmptyNative(result.CloudJobID, record.CloudJobID)
+	record.Status = firstNonEmptyNative(string(result.Status), record.Status)
+	record.Stage = firstNonEmptyNative(record.Stage, "result_package_fetched")
+	record.Message = "RecordingResultPackage fetched by native desktop"
+	record.LastStatusAt = time.Now().UTC()
+	if strings.TrimSpace(record.ProjectID) == "" {
+		record.ProjectID = strings.TrimSpace(result.SourcePackageID)
+	}
+	return record
+}
+
+func updateServerHandoffRecordFromAck(record nativeServerHandoffRecord, ack model.ResultPackageAckResponse) nativeServerHandoffRecord {
+	record.ResultPackageID = firstNonEmptyNative(ack.ResultPackageID, record.ResultPackageID)
+	record.Status = firstNonEmptyNative(string(ack.Status), record.Status)
+	record.Stage = "result_acknowledged"
+	record.Message = "Recording result delivery acknowledged by native desktop"
+	record.LastStatusAt = time.Now().UTC()
+	return record
+}
+
+func serverResultRecordFromPackage(record nativeServerHandoffRecord, result model.RecordingResultPackage) nativeServerResultRecord {
+	demoVideos, screenshots, traces := resultAssetCounts(result)
+	return nativeServerResultRecord{
+		SchemaVersion:     "demoops.native_server_result_record.v1",
+		ProjectID:         record.ProjectID,
+		OrgID:             firstNonEmptyNative(record.OrgID, nativeDefaultOrgID),
+		ExchangePackageID: record.ExchangePackageID,
+		ResultPackageID:   firstNonEmptyNative(record.ResultPackageID, result.ResultID, result.Delivery.ResultPackageRef.ID),
+		ResultID:          result.ResultID,
+		Status:            string(result.Status),
+		DeliveryStatus:    resultDeliveryLabel(result),
+		AssetCount:        len(result.GeneratedAssets) + len(result.Delivery.AssetRefs),
+		DemoVideoCount:    demoVideos,
+		ScreenshotCount:   screenshots,
+		TraceCount:        traces,
+		AckRequired:       result.Delivery.AckRequired,
+		AckedAt:           result.Delivery.AckedAt,
+		OutputDirectory:   record.OutputDirectory,
+		FetchedAt:         time.Now().UTC(),
+	}
+}
+
+func serverAckRecordFromResponse(record nativeServerHandoffRecord, ack model.ResultPackageAckResponse) nativeServerAckRecord {
+	return nativeServerAckRecord{
+		SchemaVersion:     "demoops.native_server_ack_record.v1",
+		ProjectID:         record.ProjectID,
+		OrgID:             firstNonEmptyNative(record.OrgID, nativeDefaultOrgID),
+		ExchangePackageID: record.ExchangePackageID,
+		ResultPackageID:   ack.ResultPackageID,
+		Status:            string(ack.Status),
+		DeliveryStatus:    string(ack.DeliveryStatus),
+		ReceivedAssetIDs:  append([]string{}, ack.ReceivedAssetIDs...),
+		VerifiedChecksums: ack.VerifiedChecksums,
+		AckedAt:           ack.AckedAt,
+		AckedByInstallID:  ack.AckedByInstallID,
+		OutputDirectory:   record.OutputDirectory,
+	}
+}
+
 func serverStatusSummary(record nativeServerHandoffRecord, status model.ExecutionPackageStatusResponse) string {
 	lines := []string{
 		"服务器执行状态",
@@ -2798,6 +3297,125 @@ func serverStatusSummary(record nativeServerHandoffRecord, status model.Executio
 		"Handoff record: "+handoffRecordLabel(record.OutputDirectory),
 	)
 	return strings.Join(lines, "\r\n")
+}
+
+func serverResultSummary(record nativeServerHandoffRecord, result model.RecordingResultPackage) string {
+	demoVideos, screenshots, traces := resultAssetCounts(result)
+	lines := []string{
+		"服务器结果包",
+		"Result Package ID: " + firstNonEmptyNative(record.ResultPackageID, result.ResultID, result.Delivery.ResultPackageRef.ID, "unknown"),
+		"Result ID: " + firstNonEmptyNative(result.ResultID, "unknown"),
+		"Source Package ID: " + firstNonEmptyNative(result.SourcePackageID, "unknown"),
+		"Cloud Job ID: " + firstNonEmptyNative(result.CloudJobID, record.CloudJobID, "unknown"),
+		"Status: " + firstNonEmptyNative(string(result.Status), "unknown"),
+		"Delivery: " + resultDeliveryLabel(result),
+		fmt.Sprintf("Assets: generated=%d delivery_refs=%d demo_videos=%d screenshots=%d traces=%d", len(result.GeneratedAssets), len(result.Delivery.AssetRefs), demoVideos, screenshots, traces),
+		fmt.Sprintf("Verification: pass_rate=%.2f failed_nodes=%d checksums=%d", result.VerificationReport.PassRate, len(result.VerificationReport.FailedNodeIDs), len(result.VerificationReport.OutputChecksums)),
+	}
+	if result.Delivery.AckRequired {
+		lines = append(lines, "Ack: required")
+	}
+	if !result.Delivery.AckedAt.IsZero() {
+		lines = append(lines, "Acked at: "+nativeTimeLabel(result.Delivery.AckedAt))
+	}
+	if result.FailureDiagnostic != nil {
+		lines = append(lines, "Failure: "+firstNonEmptyNative(result.FailureDiagnostic.Error.Code, "unknown"))
+		if strings.TrimSpace(result.FailureDiagnostic.Error.Message) != "" {
+			lines = append(lines, "Failure message: "+compactPath(result.FailureDiagnostic.Error.Message, 180))
+		}
+		if strings.TrimSpace(result.FailureDiagnostic.CurrentURL) != "" {
+			lines = append(lines, "Current URL: "+compactPath(result.FailureDiagnostic.CurrentURL, 160))
+		}
+	}
+	if len(result.PatchLedger) > 0 {
+		lines = append(lines, fmt.Sprintf("Runtime patches: %d", len(result.PatchLedger)))
+	}
+	lines = append(lines,
+		"",
+		"Saved files:",
+		"- "+serverResultPackagePath(record.OutputDirectory),
+		"- "+serverResultRecordPath(record.OutputDirectory),
+		"Next: 如结果可接受，可执行“确认交付 ACK”。真实视频/截图二进制下载和本地 hash 校验是下一阶段能力。",
+	)
+	return strings.Join(lines, "\r\n")
+}
+
+func serverAckSummary(record nativeServerHandoffRecord, ack model.ResultPackageAckResponse) string {
+	lines := []string{
+		"服务器交付 ACK",
+		"Result Package ID: " + firstNonEmptyNative(ack.ResultPackageID, record.ResultPackageID, "unknown"),
+		"Status: " + firstNonEmptyNative(string(ack.Status), "unknown"),
+		"Delivery: " + firstNonEmptyNative(string(ack.DeliveryStatus), "unknown"),
+		fmt.Sprintf("Received assets: %d", len(ack.ReceivedAssetIDs)),
+		fmt.Sprintf("Verified checksums: %t", ack.VerifiedChecksums),
+		"Acked at: " + nativeTimeLabel(ack.AckedAt),
+		"Acked by: " + firstNonEmptyNative(ack.AckedByInstallID, "desktop_installation"),
+		"",
+		"Saved file:",
+		"- " + serverAckRecordPath(record.OutputDirectory),
+	}
+	return strings.Join(lines, "\r\n")
+}
+
+func resultDeliveryLabel(result model.RecordingResultPackage) string {
+	switch {
+	case !result.Delivery.AckedAt.IsZero() || result.Status == model.RecordingResultStatusAcked:
+		return string(model.ResultDeliveryStatusAcked)
+	case !result.Delivery.DeliveredAt.IsZero():
+		return string(model.ResultDeliveryStatusDelivered)
+	case result.Delivery.AckRequired || len(result.Delivery.AssetRefs) > 0:
+		return string(model.ResultDeliveryStatusReady)
+	default:
+		return "unknown"
+	}
+}
+
+func resultAssetCounts(result model.RecordingResultPackage) (int, int, int) {
+	demoVideos, screenshots, traces := 0, 0, 0
+	for _, asset := range result.GeneratedAssets {
+		kind := strings.ToLower(strings.TrimSpace(asset.Kind))
+		switch {
+		case kind == "demo_video":
+			demoVideos++
+		case kind == "screenshot":
+			screenshots++
+		case kind == "trace" || strings.Contains(kind, "trace"):
+			traces++
+		}
+	}
+	for _, asset := range result.Delivery.AssetRefs {
+		kind := strings.ToLower(strings.TrimSpace(asset.Kind))
+		role := strings.ToLower(strings.TrimSpace(asset.Role))
+		switch {
+		case kind == "demo_video" || role == "demo_video":
+			demoVideos++
+		case kind == "screenshot" || role == "screenshot":
+			screenshots++
+		case kind == "trace" || strings.Contains(kind, "trace") || strings.Contains(role, "trace"):
+			traces++
+		}
+	}
+	return demoVideos, screenshots, traces
+}
+
+func resultReceivedAssetIDs(result model.RecordingResultPackage) []string {
+	ids := []string{}
+	seen := map[string]bool{}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	for _, asset := range result.Delivery.AssetRefs {
+		add(asset.ID)
+	}
+	for _, asset := range result.GeneratedAssets {
+		add(asset.ID)
+	}
+	return ids
 }
 
 func shortHash(value string) string {
@@ -2957,6 +3575,8 @@ func (a *nativeApp) applyDefaultFont() {
 		a.approveBtn,
 		a.uploadBtn,
 		a.queryStatusBtn,
+		a.fetchResultBtn,
+		a.ackResultBtn,
 		a.openOutputBtn,
 		a.openLogBtn,
 		a.statusList,
@@ -3443,6 +4063,10 @@ const (
 	wmAppUploadFailed       = 0x8004
 	wmAppServerStatusDone   = 0x8005
 	wmAppServerStatusFailed = 0x8006
+	wmAppServerResultDone   = 0x8007
+	wmAppServerResultFailed = 0x8008
+	wmAppServerAckDone      = 0x8009
+	wmAppServerAckFailed    = 0x800A
 
 	lbAddString = 0x0180
 	lbSetCurSel = 0x0186
@@ -3462,6 +4086,7 @@ const (
 	mfEnabled   = 0x00000000
 
 	fVirtKey = 0x01
+	fAlt     = 0x10
 	fShift   = 0x04
 	fControl = 0x08
 
