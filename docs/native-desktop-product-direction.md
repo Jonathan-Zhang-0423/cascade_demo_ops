@@ -41,6 +41,7 @@ The first native workflow is the three-in-one package workbench:
 - Import an existing three-in-one package folder back into the native workbench so users can resume review, copy artifacts, open folders, and record approval after an app restart.
 - Export the generated three-in-one package to a user-selected folder through native folder selection.
 - Keep a native recent-package list that stores only non-sensitive package metadata and output paths, so users can reopen recent approval artifacts without searching logs or folders.
+- Show a native summary for the selected recent package, including runtime, stage count, update time, output path, and whether the expected approval files are present.
 - Use native desktop affordances for local paths and artifacts, including a folder picker for local repositories and an action to open the generated output directory.
 - Provide a deliberate native visual hierarchy with desktop fonts, readable preview surfaces, and direct access to diagnostic logs.
 - Expose primary workbench commands through a native menu bar, not only through in-window buttons.

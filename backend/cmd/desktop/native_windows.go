@@ -86,6 +86,7 @@ const (
 
 	bnClicked    = 0
 	enChange     = 0x0300
+	cbnSelChange = 1
 	accelCommand = 1
 )
 
@@ -384,6 +385,8 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 		code := int((wParam >> 16) & 0xffff)
 		if app != nil {
 			switch {
+			case id == idRecentPackage && code == cbnSelChange:
+				app.showSelectedRecentPackageSummary()
 			case code == enChange && app.isInputField(id):
 				app.updateInputReadiness()
 			case code == bnClicked || code == 0 || code == accelCommand:
@@ -1680,6 +1683,37 @@ func (a *nativeApp) selectedRecentPackage() (nativeRecentPackage, bool) {
 	return recent[int(index)], true
 }
 
+func (a *nativeApp) showSelectedRecentPackageSummary() {
+	if a.previewSummary == 0 {
+		return
+	}
+	a.mu.Lock()
+	generating := a.generating
+	hasResult := a.lastResult != nil
+	a.mu.Unlock()
+	if generating {
+		return
+	}
+	recent, ok := a.selectedRecentPackage()
+	if !ok {
+		return
+	}
+	lines := []string{
+		"最近三合一包",
+		"Project ID: " + firstNonEmptyNative(recent.ProjectID, "unknown"),
+		"Runtime: " + firstNonEmptyNative(recent.Runtime, "unknown"),
+		fmt.Sprintf("Stages: %d", recent.StageCount),
+		"Updated: " + nativeTimeLabel(recent.UpdatedAt),
+		"Path: " + compactPath(recent.OutputDirectory, 110),
+		"Files: " + recentPackageFilesLabel(recent.OutputDirectory),
+	}
+	setWindowText(a.previewSummary, strings.Join(lines, "\r\n"))
+	if !hasResult && a.previewContent != 0 {
+		setWindowText(a.previewContent, "选择“打开最近包”会加载该文件夹中的 Markdown、Stage JSON、Script Outline 和 Bundle；选择“打开输出目录”仅打开当前已生成或已导入包。")
+		a.currentPreview = "recent_summary"
+	}
+}
+
 func (a *nativeApp) recentPackagesPath() string {
 	if strings.TrimSpace(a.runtimeConfig.DataRoot) == "" {
 		return ""
@@ -1726,6 +1760,31 @@ func recentPackageLabel(item nativeRecentPackage) string {
 		return fmt.Sprintf("%s  -  %s", name, path)
 	}
 	return fmt.Sprintf("%s  -  %s  -  %s", name, meta, path)
+}
+
+func recentPackageFilesLabel(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "missing path"
+	}
+	required := []string{"approval_markdown.md", "stage_approval_plan.json", "script_outline.json", "client_execution_bundle.json"}
+	missing := 0
+	for _, name := range required {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			missing++
+		}
+	}
+	if missing == 0 {
+		return "ready"
+	}
+	return fmt.Sprintf("missing %d/%d", missing, len(required))
+}
+
+func nativeTimeLabel(value time.Time) string {
+	if value.IsZero() {
+		return "unknown"
+	}
+	return value.Local().Format("2006-01-02 15:04")
 }
 
 func (a *nativeApp) updateActionState(generating bool, hasResult bool) {

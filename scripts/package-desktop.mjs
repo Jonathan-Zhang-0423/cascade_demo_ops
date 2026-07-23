@@ -121,6 +121,7 @@ function buildPackageManifest() {
         "native_package_folder_export",
         "native_export_overwrite_protection",
         "native_recent_package_history",
+        "native_recent_package_summary",
         "native_recent_package_open",
         "artifact_folder_open",
         "diagnostic_log_open",
