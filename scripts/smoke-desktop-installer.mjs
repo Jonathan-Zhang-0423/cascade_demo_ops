@@ -37,6 +37,7 @@ assert(manifest.schema_version === "demoops.desktop_installer_manifest.v1", "une
 assert(manifest.package_kind === "self_extracting_setup_exe", "installer must be self_extracting_setup_exe");
 assert(manifest.desktop_ui?.primary === "native_win32", "installer must declare native Win32 primary UI");
 assert(manifest.desktop_ui?.uses_browser_shell === false, "installer must not declare a browser shell as primary UI");
+assertNativeCapabilities(manifest.desktop_ui, "installer manifest");
 assert(manifest.windows_manifest?.requested_execution_level === "asInvoker", "installer must declare asInvoker execution level");
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assertServerRecordingBoundary(manifest.server_connectivity, "installer manifest");
@@ -210,6 +211,13 @@ function assert(condition, message) {
   }
 }
 
+function assertNativeCapabilities(desktopUI, label) {
+  const capabilities = desktopUI?.native_capabilities || [];
+  for (const capability of ["native_folder_picker", "artifact_folder_open", "three_in_one_package_save"]) {
+    assert(capabilities.includes(capability), `${label} missing native capability ${capability}`);
+  }
+}
+
 function assertServerRecordingBoundary(connectivity, label) {
   assert(connectivity?.server_recording_required === true, `${label} must require server-side production recording`);
   assert(connectivity?.local_recording_execution === false, `${label} must not advertise local production recording`);
@@ -265,6 +273,7 @@ function assertReleaseChannelManifest(channel, expected) {
   assert(channel.artifacts?.portable_zip?.file_name === expected.portableName, "release channel portable zip file mismatch");
   assert(channel.desktop_ui?.primary === "native_win32", "release channel must declare native Win32 primary UI");
   assert(channel.desktop_ui?.uses_browser_shell === false, "release channel must not declare a browser shell as primary UI");
+  assertNativeCapabilities(channel.desktop_ui, "release channel");
   assert(channel.server_connectivity?.required_for_local_generation === false, "release channel must keep local generation server-optional");
   assertServerRecordingBoundary(channel.server_connectivity, "release channel");
   assertRequiredAppSurfaces(channel);

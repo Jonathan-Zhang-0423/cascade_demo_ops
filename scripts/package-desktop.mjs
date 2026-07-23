@@ -96,10 +96,12 @@ function buildPackageManifest() {
       compatibility_web_host_flag: "--native=false",
       native_capabilities: [
         "input_collection",
+        "native_folder_picker",
         "local_package_generation",
         "stage_plan_review",
         "script_outline_review",
         "three_in_one_package_save",
+        "artifact_folder_open",
       ],
     },
     runtimes: {

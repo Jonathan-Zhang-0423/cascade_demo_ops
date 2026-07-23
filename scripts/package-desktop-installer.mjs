@@ -165,6 +165,7 @@ writeJSON(releaseManifest, {
     primary: "native_win32",
     uses_browser_shell: false,
     compatibility_web_host_flag: "--native=false",
+    native_capabilities: portableManifest.desktop_ui?.native_capabilities ?? [],
   },
   server_connectivity: {
     ...serverConnectivity,
@@ -210,6 +211,7 @@ writeJSON(releaseChannelManifest, {
     primary: "native_win32",
     uses_browser_shell: false,
     compatibility_web_host_flag: "--native=false",
+    native_capabilities: portableManifest.desktop_ui?.native_capabilities ?? [],
   },
   server_connectivity: serverConnectivity,
   app_surfaces: appSurfaces,

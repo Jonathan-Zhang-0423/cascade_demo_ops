@@ -22,6 +22,7 @@ assert(manifest.schema_version === "demoops.desktop_package_manifest.v1", "unexp
 assert(manifest.package_kind === "portable_zip", "desktop package must be portable_zip");
 assert(manifest.desktop_ui?.primary === "native_win32", "desktop package must declare native Win32 primary UI");
 assert(manifest.desktop_ui?.uses_browser_shell === false, "desktop package must not declare a browser shell as primary UI");
+assertNativeCapabilities(manifest.desktop_ui, "desktop package manifest");
 assert(manifest.runtimes?.node?.path === "resources/runtimes/node/node.exe", "desktop package manifest must include bundled node runtime");
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assertServerRecordingBoundary(manifest.server_connectivity, "desktop package manifest");
@@ -145,6 +146,13 @@ function assertWindowsGuiSubsystem(exePath, label) {
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
+  }
+}
+
+function assertNativeCapabilities(desktopUI, label) {
+  const capabilities = desktopUI?.native_capabilities || [];
+  for (const capability of ["native_folder_picker", "artifact_folder_open", "three_in_one_package_save"]) {
+    assert(capabilities.includes(capability), `${label} missing native capability ${capability}`);
   }
 }
 

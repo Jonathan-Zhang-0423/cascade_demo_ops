@@ -28,6 +28,7 @@ The first native workflow is the three-in-one package workbench:
   - `stage_approval_plan.json`
   - `script_outline.json`
 - Save the three-in-one package and full bundle into the local artifact directory.
+- Use native desktop affordances for local paths and artifacts, including a folder picker for local repositories and an action to open the generated output directory.
 
 ## Design Principles
 

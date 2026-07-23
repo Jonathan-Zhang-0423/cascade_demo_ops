@@ -57,6 +57,8 @@ const (
 	idViewStageJSON  = 1030
 	idViewOutline    = 1031
 	idViewBundle     = 1032
+	idBrowseRepo     = 1033
+	idOpenOutput     = 1034
 
 	bnClicked = 0
 )
@@ -65,28 +67,34 @@ var (
 	user32   = syscall.NewLazyDLL("user32.dll")
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
+	shell32  = syscall.NewLazyDLL("shell32.dll")
+	ole32    = syscall.NewLazyDLL("ole32.dll")
 
-	procRegisterClassExW  = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW   = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW    = user32.NewProc("DefWindowProcW")
-	procDispatchMessageW  = user32.NewProc("DispatchMessageW")
-	procGetClientRect     = user32.NewProc("GetClientRect")
-	procGetMessageW       = user32.NewProc("GetMessageW")
-	procGetWindowTextW    = user32.NewProc("GetWindowTextW")
-	procGetWindowTextLenW = user32.NewProc("GetWindowTextLengthW")
-	procLoadCursorW       = user32.NewProc("LoadCursorW")
-	procMoveWindow        = user32.NewProc("MoveWindow")
-	procPostMessageW      = user32.NewProc("PostMessageW")
-	procPostQuitMessage   = user32.NewProc("PostQuitMessage")
-	procSendMessageW      = user32.NewProc("SendMessageW")
-	procSetWindowTextW    = user32.NewProc("SetWindowTextW")
-	procShowWindow        = user32.NewProc("ShowWindow")
-	procTranslateMessage  = user32.NewProc("TranslateMessage")
-	procUpdateWindow      = user32.NewProc("UpdateWindow")
-	procMessageBoxW       = user32.NewProc("MessageBoxW")
-	procEnableWindow      = user32.NewProc("EnableWindow")
-	procGetModuleHandleW  = kernel32.NewProc("GetModuleHandleW")
-	procGetStockObject    = gdi32.NewProc("GetStockObject")
+	procRegisterClassExW     = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW      = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW       = user32.NewProc("DefWindowProcW")
+	procDispatchMessageW     = user32.NewProc("DispatchMessageW")
+	procGetClientRect        = user32.NewProc("GetClientRect")
+	procGetMessageW          = user32.NewProc("GetMessageW")
+	procGetWindowTextW       = user32.NewProc("GetWindowTextW")
+	procGetWindowTextLenW    = user32.NewProc("GetWindowTextLengthW")
+	procLoadCursorW          = user32.NewProc("LoadCursorW")
+	procMoveWindow           = user32.NewProc("MoveWindow")
+	procPostMessageW         = user32.NewProc("PostMessageW")
+	procPostQuitMessage      = user32.NewProc("PostQuitMessage")
+	procSendMessageW         = user32.NewProc("SendMessageW")
+	procSetWindowTextW       = user32.NewProc("SetWindowTextW")
+	procShowWindow           = user32.NewProc("ShowWindow")
+	procTranslateMessage     = user32.NewProc("TranslateMessage")
+	procUpdateWindow         = user32.NewProc("UpdateWindow")
+	procMessageBoxW          = user32.NewProc("MessageBoxW")
+	procEnableWindow         = user32.NewProc("EnableWindow")
+	procGetModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
+	procGetStockObject       = gdi32.NewProc("GetStockObject")
+	procSHBrowseForFolderW   = shell32.NewProc("SHBrowseForFolderW")
+	procSHGetPathFromIDListW = shell32.NewProc("SHGetPathFromIDListW")
+	procShellExecuteW        = shell32.NewProc("ShellExecuteW")
+	procCoTaskMemFree        = ole32.NewProc("CoTaskMemFree")
 )
 
 type nativeApp struct {
@@ -124,6 +132,8 @@ type nativeApp struct {
 	requirement     nativeField
 	generateBtn     syscall.Handle
 	saveBtn         syscall.Handle
+	browseRepoBtn   syscall.Handle
+	openOutputBtn   syscall.Handle
 	statusList      syscall.Handle
 	markdown        nativeField
 	stageJSON       nativeField
@@ -252,6 +262,10 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 				app.startGenerate()
 			case idSaveButton:
 				app.saveLastResult()
+			case idBrowseRepo:
+				app.chooseLocalRepoPath()
+			case idOpenOutput:
+				app.openLastOutputDirectory()
 			case idViewMarkdown:
 				app.showPreview("markdown")
 			case idViewStageJSON:
@@ -311,9 +325,12 @@ func (a *nativeApp) createControls() {
 	a.requirement = a.labelAndEdit("需求文档 / 需求文本", idRequirement, "", false, true)
 	a.generateBtn = createChild(a.hwnd, "BUTTON", "生成三合一执行包", wsChild|wsVisible|bsPushButton, idGenerateButton)
 	a.saveBtn = createChild(a.hwnd, "BUTTON", "保存三合一包", wsChild|wsVisible|bsPushButton, idSaveButton)
+	a.browseRepoBtn = createChild(a.hwnd, "BUTTON", "选择文件夹", wsChild|wsVisible|bsPushButton, idBrowseRepo)
+	a.openOutputBtn = createChild(a.hwnd, "BUTTON", "打开输出目录", wsChild|wsVisible|bsPushButton, idOpenOutput)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.applyDefaultFont()
 	setEnabled(a.saveBtn, false)
+	setEnabled(a.openOutputBtn, false)
 	a.setPreviewButtonsEnabled(false)
 }
 
@@ -346,7 +363,7 @@ func (a *nativeApp) layout() {
 	y := leftTop + 34
 	rowH := 30
 	leftInnerW := leftW - 28
-	inputH := 484
+	inputH := 524
 	statusTop := leftTop + inputH + 12
 	statusH := maxInt(150, height-statusTop-margin)
 
@@ -360,7 +377,8 @@ func (a *nativeApp) layout() {
 	y += 26
 	a.layoutField(a.productURL, x, y, leftInnerW, rowH)
 	y += 54
-	a.layoutField(a.localRepoPath, x, y, leftInnerW, rowH)
+	a.layoutField(a.localRepoPath, x, y, leftInnerW-118, rowH)
+	moveControl(a.browseRepoBtn, x+leftInnerW-108, y+20, 108, rowH)
 	y += 54
 	a.layoutField(a.gitRepoURL, x, y, leftInnerW, rowH)
 	y += 54
@@ -376,6 +394,7 @@ func (a *nativeApp) layout() {
 	y += 140
 	moveControl(a.generateBtn, x, y, 186, 34)
 	moveControl(a.saveBtn, x+202, y, 190, 34)
+	moveControl(a.openOutputBtn, x, y+42, leftInnerW, 32)
 
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
@@ -421,6 +440,8 @@ func (a *nativeApp) startGenerate() {
 	setWindowText(a.artifactStatus, "输出目录：生成完成后显示")
 	setEnabled(a.generateBtn, false)
 	setEnabled(a.saveBtn, false)
+	setEnabled(a.browseRepoBtn, false)
+	setEnabled(a.openOutputBtn, false)
 	a.addStatus("开始本地项目理解与三合一包生成。")
 	input := nativeInput{
 		ProductURL:         getWindowText(a.productURL.Edit),
@@ -522,6 +543,8 @@ func (a *nativeApp) finishGenerate() {
 	setWindowText(a.previewContent, result.Markdown)
 	setEnabled(a.generateBtn, true)
 	setEnabled(a.saveBtn, true)
+	setEnabled(a.browseRepoBtn, true)
+	setEnabled(a.openOutputBtn, true)
 	a.setPreviewButtonsEnabled(true)
 	a.addStatus("三合一执行包已生成，可审核或保存。project_id=" + result.ProjectID)
 }
@@ -542,6 +565,8 @@ func (a *nativeApp) finishGenerateErrorMessage(message string) {
 	setWindowText(a.workflowState, "生成失败")
 	setEnabled(a.generateBtn, true)
 	setEnabled(a.saveBtn, a.lastResult != nil)
+	setEnabled(a.browseRepoBtn, true)
+	setEnabled(a.openOutputBtn, a.lastResult != nil)
 	a.setPreviewButtonsEnabled(a.lastResult != nil)
 	a.addStatus("生成失败：" + message)
 	messageBox("Cascade DemoOps", message, true)
@@ -578,7 +603,37 @@ func (a *nativeApp) saveLastResult() {
 	a.addStatus("已保存到 " + dir)
 	setWindowText(a.workflowState, "已保存三合一包")
 	setWindowText(a.artifactStatus, "已保存："+dir)
+	setEnabled(a.openOutputBtn, true)
 	messageBox("Cascade DemoOps", "三合一执行包已保存到：\n"+dir, false)
+}
+
+func (a *nativeApp) chooseLocalRepoPath() {
+	path, err := browseForFolder(a.hwnd, "选择本地项目文件夹")
+	if err != nil {
+		a.addStatus("选择文件夹失败：" + err.Error())
+		return
+	}
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	setWindowText(a.localRepoPath.Edit, path)
+	a.addStatus("已选择本地项目路径：" + path)
+}
+
+func (a *nativeApp) openLastOutputDirectory() {
+	a.mu.Lock()
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil || strings.TrimSpace(result.OutputDirectory) == "" {
+		a.addStatus("还没有可打开的输出目录。")
+		return
+	}
+	if err := openFolder(result.OutputDirectory); err != nil {
+		a.addStatus("打开输出目录失败：" + err.Error())
+		messageBox("Cascade DemoOps", "打开输出目录失败：\n"+err.Error(), true)
+		return
+	}
+	a.addStatus("已打开输出目录：" + result.OutputDirectory)
 }
 
 func (a *nativeApp) showPreview(kind string) {
@@ -760,6 +815,8 @@ func (a *nativeApp) applyDefaultFont() {
 		a.viewBundleBtn,
 		a.generateBtn,
 		a.saveBtn,
+		a.browseRepoBtn,
+		a.openOutputBtn,
 		a.statusList,
 	}
 	for _, field := range []nativeField{
@@ -832,6 +889,56 @@ func messageBox(title string, message string, isError bool) {
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(utf16Ptr(message))), uintptr(unsafe.Pointer(utf16Ptr(title))), flags)
 }
 
+func browseForFolder(owner syscall.Handle, title string) (string, error) {
+	var displayName [maxPath]uint16
+	info := browseInfo{
+		HwndOwner:      uintptr(owner),
+		PidlRoot:       0,
+		PszDisplayName: uintptr(unsafe.Pointer(&displayName[0])),
+		LpszTitle:      uintptr(unsafe.Pointer(utf16Ptr(title))),
+		UlFlags:        bifReturnOnlyFSDirs | bifNewDialogStyle | bifEditBox,
+	}
+	pidl, _, err := procSHBrowseForFolderW.Call(uintptr(unsafe.Pointer(&info)))
+	if pidl == 0 {
+		return "", nil
+	}
+	defer procCoTaskMemFree.Call(pidl)
+	var path [maxPath]uint16
+	ok, _, _ := procSHGetPathFromIDListW.Call(pidl, uintptr(unsafe.Pointer(&path[0])))
+	if ok == 0 {
+		if err != syscall.Errno(0) {
+			return "", err
+		}
+		return "", errors.New("folder path is unavailable")
+	}
+	return syscall.UTF16ToString(path[:]), nil
+}
+
+func openFolder(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("output directory is empty")
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return err
+	}
+	ret, _, err := procShellExecuteW.Call(
+		0,
+		uintptr(unsafe.Pointer(utf16Ptr("open"))),
+		uintptr(unsafe.Pointer(utf16Ptr(path))),
+		0,
+		0,
+		swShow,
+	)
+	if ret <= 32 {
+		if err != syscall.Errno(0) {
+			return err
+		}
+		return fmt.Errorf("ShellExecuteW failed with code %d", ret)
+	}
+	return nil
+}
+
 func utf16Ptr(value string) *uint16 {
 	ptr, err := syscall.UTF16PtrFromString(value)
 	if err != nil {
@@ -883,8 +990,20 @@ type rect struct {
 	Bottom int32
 }
 
+type browseInfo struct {
+	HwndOwner      uintptr
+	PidlRoot       uintptr
+	PszDisplayName uintptr
+	LpszTitle      uintptr
+	UlFlags        uint32
+	Lpfn           uintptr
+	LParam         uintptr
+	IImage         int32
+}
+
 const (
 	cwUseDefault = ^uintptr(0x7fffffff)
+	maxPath      = 260
 
 	wsOverlappedWindow = 0x00cf0000
 	wsVisible          = 0x10000000
@@ -924,6 +1043,10 @@ const (
 	mbOK              = 0x00000000
 	mbIconError       = 0x00000010
 	mbIconInformation = 0x00000040
+
+	bifReturnOnlyFSDirs = 0x00000001
+	bifEditBox          = 0x00000010
+	bifNewDialogStyle   = 0x00000040
 )
 
 var errNativeUnavailable = errors.New("native desktop ui is unavailable")
