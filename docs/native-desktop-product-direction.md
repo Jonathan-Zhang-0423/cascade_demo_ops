@@ -36,6 +36,7 @@ The first native workflow is the three-in-one package workbench:
 - Let users copy the currently previewed approval artifact through a native clipboard action for review handoff.
 - Let users record a native local approval decision after review; the app writes a non-sensitive `approval_record.json` beside the package so later upload flows can require an explicit approval artifact.
 - Save the three-in-one package and full bundle into the local artifact directory.
+- Import an existing three-in-one package folder back into the native workbench so users can resume review, copy artifacts, open folders, and record approval after an app restart.
 - Export the generated three-in-one package to a user-selected folder through native folder selection.
 - Keep a native recent-package list that stores only non-sensitive package metadata and output paths, so users can reopen recent approval artifacts without searching logs or folders.
 - Use native desktop affordances for local paths and artifacts, including a folder picker for local repositories and an action to open the generated output directory.

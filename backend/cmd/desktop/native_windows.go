@@ -81,6 +81,7 @@ const (
 	idRecentLabel       = 1053
 	idViewReview        = 1054
 	idApprovePackage    = 1055
+	idImportPackage     = 1056
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -206,6 +207,7 @@ type nativeApp struct {
 	saveBtn          syscall.Handle
 	browseRepoBtn    syscall.Handle
 	importReqBtn     syscall.Handle
+	importPackageBtn syscall.Handle
 	openOutputBtn    syscall.Handle
 	exportBtn        syscall.Handle
 	approveBtn       syscall.Handle
@@ -462,6 +464,7 @@ func (a *nativeApp) createControls() {
 	a.saveBtn = createChild(a.hwnd, "BUTTON", "保存三合一包", wsChild|wsVisible|bsPushButton, idSaveButton)
 	a.browseRepoBtn = createChild(a.hwnd, "BUTTON", "选择文件夹", wsChild|wsVisible|bsPushButton, idBrowseRepo)
 	a.importReqBtn = createChild(a.hwnd, "BUTTON", "导入文档", wsChild|wsVisible|bsPushButton, idImportRequirement)
+	a.importPackageBtn = createChild(a.hwnd, "BUTTON", "导入三合一包", wsChild|wsVisible|bsPushButton, idImportPackage)
 	a.clearDraftBtn = createChild(a.hwnd, "BUTTON", "清除草稿", wsChild|wsVisible|bsPushButton, idClearDraft)
 	a.openOutputBtn = createChild(a.hwnd, "BUTTON", "打开输出目录", wsChild|wsVisible|bsPushButton, idOpenOutput)
 	a.exportBtn = createChild(a.hwnd, "BUTTON", "导出到文件夹", wsChild|wsVisible|bsPushButton, idExportPackage)
@@ -495,6 +498,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.chooseLocalRepoPath()
 	case idImportRequirement:
 		a.importRequirementDocument()
+	case idImportPackage:
+		a.importPackageFolder()
 	case idOpenOutput:
 		a.openLastOutputDirectory()
 	case idOpenRecentPackage:
@@ -529,7 +534,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return true
 	case idGenerateButton:
 		return !generating && a.inputReady()
-	case idBrowseRepo, idImportRequirement, idClearDraft:
+	case idBrowseRepo, idImportRequirement, idImportPackage, idClearDraft:
 		return !generating
 	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview:
 		return !generating && hasResult
@@ -546,6 +551,7 @@ func (a *nativeApp) createMenu() {
 	viewMenu := createPopupMenu()
 	helpMenu := createPopupMenu()
 	appendMenuItem(fileMenu, idImportRequirement, "导入需求文档...\tCtrl+O")
+	appendMenuItem(fileMenu, idImportPackage, "导入三合一包文件夹...\tCtrl+I")
 	appendMenuItem(fileMenu, idBrowseRepo, "选择本地项目文件夹...\tCtrl+B")
 	appendMenuItem(fileMenu, idClearDraft, "清除输入草稿\tCtrl+R")
 	appendMenuSeparator(fileMenu)
@@ -578,6 +584,7 @@ func (a *nativeApp) createMenu() {
 func (a *nativeApp) createAccelerators() {
 	accels := []accel{
 		{FVirt: fVirtKey | fControl, Key: 'O', Cmd: idImportRequirement},
+		{FVirt: fVirtKey | fControl, Key: 'I', Cmd: idImportPackage},
 		{FVirt: fVirtKey | fControl, Key: 'B', Cmd: idBrowseRepo},
 		{FVirt: fVirtKey | fControl, Key: 'R', Cmd: idClearDraft},
 		{FVirt: fVirtKey | fControl, Key: 'G', Cmd: idGenerateButton},
@@ -678,7 +685,8 @@ func (a *nativeApp) layout() {
 	y += 28
 	a.layoutFieldHeight(a.requirement, x, y, leftInnerW, 104)
 	moveControl(a.importReqBtn, x+leftInnerW-108, y, 108, 24)
-	moveControl(a.clearDraftBtn, x, y+108, 108, 24)
+	moveControl(a.importPackageBtn, x, y+108, 132, 24)
+	moveControl(a.clearDraftBtn, x+144, y+108, 108, 24)
 	y += 128
 	moveControl(a.inputReadiness, x, y, leftInnerW, 34)
 	y += 48
@@ -1024,6 +1032,71 @@ func writeResultFiles(dir string, result *nativeGenerateResult) error {
 	return nil
 }
 
+func readResultFiles(dir string) (*nativeGenerateResult, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return nil, errors.New("package directory is empty")
+	}
+	markdown, err := readRequiredTextFile(filepath.Join(dir, "approval_markdown.md"))
+	if err != nil {
+		return nil, err
+	}
+	stageJSON, err := readRequiredTextFile(filepath.Join(dir, "stage_approval_plan.json"))
+	if err != nil {
+		return nil, err
+	}
+	outlineJSON, err := readRequiredTextFile(filepath.Join(dir, "script_outline.json"))
+	if err != nil {
+		return nil, err
+	}
+	bundleJSON, err := readRequiredTextFile(filepath.Join(dir, "client_execution_bundle.json"))
+	if err != nil {
+		return nil, err
+	}
+	var bundle model.ExecutableRecordingScriptBundle
+	if err := json.Unmarshal([]byte(bundleJSON), &bundle); err != nil {
+		return nil, fmt.Errorf("client_execution_bundle.json is invalid: %w", err)
+	}
+	state := &orchestrator.CascadeState{ProjectID: firstNonEmptyNative(bundle.ProjectID, "imported_package")}
+	reviewText := nativeReviewText(state, &bundle)
+	result := &nativeGenerateResult{
+		ProjectID:         state.ProjectID,
+		ReviewText:        reviewText,
+		Markdown:          strings.TrimSpace(markdown),
+		StageJSON:         strings.TrimSpace(stageJSON),
+		OutlineJSON:       strings.TrimSpace(outlineJSON),
+		BundleJSON:        strings.TrimSpace(bundleJSON),
+		OutputDirectory:   dir,
+		Summary:           nativeResultSummary(state, &bundle, markdown, stageJSON, outlineJSON, bundleJSON),
+		Runtime:           bundle.ScriptManifest.Runtime,
+		StageCount:        stageApprovalStageCount(&bundle),
+		OutlineStageCount: outlineStageCount(&bundle),
+		BundleHashSuffix:  shortHash(bundle.Reproducibility.BundleHashSHA256),
+		HealthRuntime:     "Runtime: " + firstNonEmptyNative(bundle.ScriptManifest.Runtime, "unknown"),
+		HealthStages:      fmt.Sprintf("Stages: %d / %d", stageApprovalStageCount(&bundle), outlineStageCount(&bundle)),
+		HealthBundle:      "Bundle: " + byteSizeLabel(len(bundleJSON)),
+		HealthValidation:  validationHealthLabel(bundle.Validation),
+	}
+	return result, nil
+}
+
+func readRequiredTextFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("missing package file: %s", filepath.Base(path))
+		}
+		return "", err
+	}
+	if len(data) > maxPackageImportBytes {
+		return "", fmt.Errorf("%s is larger than %s", filepath.Base(path), byteSizeLabel(maxPackageImportBytes))
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return "", fmt.Errorf("%s is empty", filepath.Base(path))
+	}
+	return string(data), nil
+}
+
 func writeApprovalRecord(dir string, record nativeApprovalRecord) error {
 	if strings.TrimSpace(dir) == "" {
 		return errors.New("approval output directory is empty")
@@ -1095,6 +1168,38 @@ func (a *nativeApp) importRequirementDocument() {
 	setWindowText(a.requirement.Edit, content)
 	a.updateInputReadiness()
 	a.addStatus(fmt.Sprintf("已导入需求文档：%s（%s）", path, byteSizeLabel(len(content))))
+}
+
+func (a *nativeApp) importPackageFolder() {
+	dir, err := browseForFolder(a.hwnd, "选择已有三合一包文件夹")
+	if err != nil {
+		a.addStatus("导入三合一包失败：" + err.Error())
+		messageBox("Cascade DemoOps", "导入三合一包失败：\n"+err.Error(), true)
+		return
+	}
+	if strings.TrimSpace(dir) == "" {
+		return
+	}
+	result, err := readResultFiles(dir)
+	if err != nil {
+		a.addStatus("导入三合一包失败：" + err.Error())
+		messageBox("Cascade DemoOps", "导入三合一包失败：\n"+err.Error(), true)
+		return
+	}
+	a.mu.Lock()
+	a.lastResult = result
+	a.mu.Unlock()
+	setWindowText(a.workflowState, "已导入三合一包")
+	setWindowText(a.artifactStatus, "已导入："+dir)
+	setWindowText(a.previewSummary, result.Summary)
+	setWindowText(a.previewContent, result.ReviewText)
+	a.currentPreview = "review"
+	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
+	a.setPhaseText("1 可保留", "2 已载入", "3 包已就绪", "4 可审核")
+	a.setStatusBarOutput(dir)
+	a.rememberRecentPackage(result, dir)
+	a.updateActionState(false, true)
+	a.addStatus("已导入三合一包：" + dir)
 }
 
 func (a *nativeApp) openLastOutputDirectory() {
@@ -1553,6 +1658,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	setEnabled(a.saveBtn, !generating && hasResult)
 	setEnabled(a.browseRepoBtn, !generating)
 	setEnabled(a.importReqBtn, !generating)
+	setEnabled(a.importPackageBtn, !generating)
 	setEnabled(a.clearDraftBtn, !generating)
 	setEnabled(a.exportBtn, !generating && hasResult)
 	setEnabled(a.approveBtn, !generating && hasResult)
@@ -1563,6 +1669,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.enableMenuItem(idGenerateButton, generateEnabled)
 	a.enableMenuItem(idBrowseRepo, !generating)
 	a.enableMenuItem(idImportRequirement, !generating)
+	a.enableMenuItem(idImportPackage, !generating)
 	a.enableMenuItem(idClearDraft, !generating)
 	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle} {
 		a.enableMenuItem(id, !generating && hasResult)
@@ -1925,6 +2032,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.saveBtn,
 		a.browseRepoBtn,
 		a.importReqBtn,
+		a.importPackageBtn,
 		a.clearDraftBtn,
 		a.exportBtn,
 		a.approveBtn,
@@ -2375,6 +2483,7 @@ const (
 	maxPath                   = 260
 	maxLongPath               = 32768
 	maxRequirementImportBytes = 256 * 1024
+	maxPackageImportBytes     = 2 * 1024 * 1024
 	maxRecentPackages         = 8
 
 	wsOverlappedWindow = 0x00cf0000

@@ -213,7 +213,7 @@ function assert(condition, message) {
 
 function assertNativeCapabilities(desktopUI, label) {
   const capabilities = desktopUI?.native_capabilities || [];
-  for (const capability of ["native_input_readiness_summary", "native_generate_readiness_gate", "non_sensitive_input_draft_persistence", "non_sensitive_input_draft_clear", "native_menu_bar", "native_keyboard_shortcuts", "native_confirmation_dialogs", "native_folder_picker", "requirement_document_import", "native_lifecycle_phase_bar", "approval_health_summary", "native_approval_review_summary", "native_local_approval_record", "native_approval_clipboard_copy", "native_package_folder_export", "native_export_overwrite_protection", "native_recent_package_history", "native_recent_package_open", "artifact_folder_open", "diagnostic_log_open", "native_environment_status_bar", "native_visual_hierarchy", "three_in_one_package_save"]) {
+  for (const capability of ["native_input_readiness_summary", "native_generate_readiness_gate", "non_sensitive_input_draft_persistence", "non_sensitive_input_draft_clear", "native_menu_bar", "native_keyboard_shortcuts", "native_confirmation_dialogs", "native_folder_picker", "requirement_document_import", "native_lifecycle_phase_bar", "approval_health_summary", "native_approval_review_summary", "native_local_approval_record", "native_approval_clipboard_copy", "native_package_folder_import", "native_package_folder_export", "native_export_overwrite_protection", "native_recent_package_history", "native_recent_package_open", "artifact_folder_open", "diagnostic_log_open", "native_environment_status_bar", "native_visual_hierarchy", "three_in_one_package_save"]) {
     assert(capabilities.includes(capability), `${label} missing native capability ${capability}`);
   }
 }

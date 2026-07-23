@@ -114,6 +114,7 @@ function buildPackageManifest() {
         "script_outline_review",
         "native_approval_clipboard_copy",
         "three_in_one_package_save",
+        "native_package_folder_import",
         "native_package_folder_export",
         "native_export_overwrite_protection",
         "native_recent_package_history",
