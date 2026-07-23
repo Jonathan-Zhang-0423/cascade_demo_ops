@@ -53,6 +53,7 @@ The first native workflow is the three-in-one package workbench:
 - The app must remain diagnosable without a terminal:
   - launcher log
   - visible status feed
+  - native environment status bar for data, log, and output locations
   - native error dialog for blocking failures
 
 ## Implementation Direction

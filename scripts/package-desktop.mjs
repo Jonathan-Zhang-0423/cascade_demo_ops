@@ -113,6 +113,7 @@ function buildPackageManifest() {
         "native_package_folder_export",
         "artifact_folder_open",
         "diagnostic_log_open",
+        "native_environment_status_bar",
         "native_visual_hierarchy",
       ],
     },

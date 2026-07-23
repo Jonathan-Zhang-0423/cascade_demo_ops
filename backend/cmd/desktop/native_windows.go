@@ -75,6 +75,7 @@ const (
 	idCopyPreview       = 1047
 	idExportPackage     = 1048
 	idClearDraft        = 1049
+	idStatusBar         = 1050
 
 	bnClicked = 0
 	enChange  = 0x0300
@@ -196,6 +197,7 @@ type nativeApp struct {
 	clearDraftBtn    syscall.Handle
 	openLogBtn       syscall.Handle
 	statusList       syscall.Handle
+	statusBar        syscall.Handle
 	markdown         nativeField
 	stageJSON        nativeField
 	outlineJSON      nativeField
@@ -414,6 +416,7 @@ func (a *nativeApp) createControls() {
 	a.exportBtn = createChild(a.hwnd, "BUTTON", "导出到文件夹", wsChild|wsVisible|bsPushButton, idExportPackage)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
+	a.statusBar = createChild(a.hwnd, "STATIC", a.statusBarText(""), wsChild|wsVisible|wsBorder, idStatusBar)
 	a.applyDefaultFont()
 	a.updateInputReadiness()
 	a.setPhaseText("1 输入材料", "2 项目理解", "3 生成包", "4 审核保存")
@@ -526,6 +529,8 @@ func (a *nativeApp) layout() {
 	width := int(rect.Right - rect.Left)
 	height := int(rect.Bottom - rect.Top)
 	margin := 18
+	statusBarH := 26
+	contentBottom := maxInt(220, height-margin-statusBarH-8)
 	headerH := 88
 	leftW := 440
 	gap := 18
@@ -536,7 +541,7 @@ func (a *nativeApp) layout() {
 	leftInnerW := leftW - 28
 	inputH := 524
 	statusTop := leftTop + inputH + 12
-	statusH := maxInt(150, height-statusTop-margin)
+	statusH := maxInt(150, contentBottom-statusTop)
 
 	moveControl(a.headerTitle, margin, margin, 460, 24)
 	moveControl(a.headerMeta, margin, margin+30, 760, 20)
@@ -587,7 +592,7 @@ func (a *nativeApp) layout() {
 	rightX := margin + leftW + gap
 	rightW := maxInt(500, width-rightX-margin)
 	rightTop := leftTop
-	rightH := maxInt(300, height-rightTop-margin)
+	rightH := maxInt(300, contentBottom-rightTop)
 	moveControl(a.previewGroup, rightX, rightTop, rightW, rightH)
 	moveControl(a.previewTitle, rightX+14, rightTop+28, rightW-28, 18)
 	moveControl(a.previewHint, rightX+14, rightTop+50, rightW-28, 18)
@@ -611,6 +616,7 @@ func (a *nativeApp) layout() {
 	moveControl(a.viewBundleBtn, rightX+14+(buttonW+healthGap)*3, tabTop, buttonW, 30)
 	moveControl(a.copyPreviewBtn, rightX+rightW-14-copyW, tabTop, copyW, 30)
 	moveControl(a.previewContent, rightX+14, tabTop+40, rightW-28, maxInt(160, rightH-(tabTop-rightTop)-54))
+	moveControl(a.statusBar, margin, height-margin-statusBarH, maxInt(300, width-margin*2), statusBarH)
 }
 
 func (a *nativeApp) layoutField(field nativeField, x int, y int, w int, h int) {
@@ -745,6 +751,7 @@ func (a *nativeApp) finishGenerate() {
 	setWindowText(a.artifactStatus, "输出目录："+result.OutputDirectory)
 	setWindowText(a.previewSummary, result.Summary)
 	setWindowText(a.previewContent, result.Markdown)
+	a.setStatusBarOutput(result.OutputDirectory)
 	a.currentPreview = "markdown"
 	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 可审核")
@@ -792,6 +799,7 @@ func (a *nativeApp) saveLastResult() {
 	a.addStatus("已保存到 " + dir)
 	setWindowText(a.workflowState, "已保存三合一包")
 	setWindowText(a.artifactStatus, "已保存："+dir)
+	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已保存")
 	setEnabled(a.openOutputBtn, true)
 	messageBox("Cascade DemoOps", "三合一执行包已保存到：\n"+dir, false)
@@ -821,6 +829,7 @@ func (a *nativeApp) exportLastResult() {
 	a.addStatus("已导出到 " + dir)
 	setWindowText(a.workflowState, "已导出三合一包")
 	setWindowText(a.artifactStatus, "已导出："+dir)
+	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已导出")
 	messageBox("Cascade DemoOps", "三合一执行包已导出到：\n"+dir, false)
 }
@@ -1187,6 +1196,24 @@ func (a *nativeApp) setHealthText(runtime string, stages string, bundle string, 
 	setWindowText(a.healthValidation, validation)
 }
 
+func (a *nativeApp) setStatusBarOutput(outputDir string) {
+	setWindowText(a.statusBar, a.statusBarText(outputDir))
+}
+
+func (a *nativeApp) statusBarText(outputDir string) string {
+	parts := []string{
+		"Native Win32",
+		"data: " + compactPath(a.runtimeConfig.DataRoot, 42),
+	}
+	if a.logger != nil && strings.TrimSpace(a.logger.Path()) != "" {
+		parts = append(parts, "log: "+compactPath(a.logger.Path(), 42))
+	}
+	if strings.TrimSpace(outputDir) != "" {
+		parts = append(parts, "output: "+compactPath(outputDir, 48))
+	}
+	return strings.Join(parts, "  |  ")
+}
+
 func (a *nativeApp) enableMenuItem(id int, enabled bool) {
 	if a.mainMenu == 0 {
 		return
@@ -1278,6 +1305,22 @@ func firstNonEmptyNative(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func compactPath(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	if limit <= 8 {
+		return value[len(value)-limit:]
+	}
+	head := maxInt(3, limit/3)
+	tail := maxInt(4, limit-head-3)
+	if head+tail+3 >= len(value) {
+		return value
+	}
+	return value[:head] + "..." + value[len(value)-tail:]
 }
 
 func (a *nativeApp) addStatus(message string) {
@@ -1399,6 +1442,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.openOutputBtn,
 		a.openLogBtn,
 		a.statusList,
+		a.statusBar,
 	}
 	for _, field := range []nativeField{
 		a.productURL,
@@ -1438,7 +1482,7 @@ func (a *nativeApp) controlColor(msgID uint32, wParam uintptr, lParam uintptr) u
 		hwnd == a.healthBundle || hwnd == a.healthValidation ||
 		hwnd == a.phaseInput || hwnd == a.phaseUnderstand ||
 		hwnd == a.phasePackage || hwnd == a.phaseReview ||
-		hwnd == a.inputReadiness:
+		hwnd == a.inputReadiness || hwnd == a.statusBar:
 		bgColor = colorRef(250, 251, 253)
 		brush = a.readonlyBrush
 	case hwnd == a.statusList:
