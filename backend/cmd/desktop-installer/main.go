@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -76,15 +75,17 @@ type installedFileInfo struct {
 }
 
 func main() {
+	logPath := installerLogPath()
 	installDir := flag.String("install-dir", defaultInstallDir(), "directory where Cascade DemoOps Desktop will be installed")
 	check := flag.Bool("check", false, "validate that this setup executable contains an installable payload and exit")
 	quiet := flag.Bool("quiet", false, "print machine-readable JSON and avoid interactive prompts")
 	launch := flag.Bool("launch", true, "launch Cascade DemoOps Desktop after installation")
 	noShortcut := flag.Bool("no-shortcut", false, "skip Start Menu launcher creation")
 	flag.Parse()
+	appendInstallerLog(logPath, fmt.Sprintf("starting setup pid=%d args=%q", os.Getpid(), os.Args))
 
 	payload, trailer, err := readEmbeddedPayload()
-	must(err)
+	must(err, logPath, *quiet)
 	if *check {
 		writeJSON(os.Stdout, map[string]any{
 			"installer":        "Cascade DemoOps Desktop Setup",
@@ -101,7 +102,8 @@ func main() {
 	}
 
 	result, err := installPayload(payload, trailer, *installDir, !*noShortcut)
-	must(err)
+	must(err, logPath, *quiet)
+	appendInstallerLog(logPath, "installed to "+result.InstallDir)
 	if *quiet {
 		writeJSON(os.Stdout, map[string]any{
 			"installed":   true,
@@ -114,12 +116,21 @@ func main() {
 		fmt.Printf("Entrypoint: %s\n", result.Entrypoint)
 	}
 	if *launch {
-		_ = openURL(result.Entrypoint)
+		if err := openURL(result.Entrypoint); err != nil {
+			appendInstallerLog(logPath, fmt.Sprintf("launch failed: %v", err))
+			if !*quiet {
+				showWindowsMessage("Cascade DemoOps 安装完成", fmt.Sprintf("应用已安装，但自动启动失败：\n\n%v\n\n安装目录：\n%s\n\n日志：\n%s", err, result.InstallDir, logPath), false)
+			}
+		}
 	}
 }
 
-func must(err error) {
+func must(err error, logPath string, quiet bool) {
 	if err != nil {
+		appendInstallerLog(logPath, "ERROR "+err.Error())
+		if !quiet {
+			showWindowsMessage("Cascade DemoOps 安装失败", fmt.Sprintf("安装器遇到错误：\n\n%v\n\n诊断日志：\n%s", err, logPath), true)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -128,7 +139,37 @@ func must(err error) {
 func writeJSON(w io.Writer, value any) {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
-	must(encoder.Encode(value))
+	if err := encoder.Encode(value); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func installerLogPath() string {
+	root := defaultInstallLogRoot()
+	_ = os.MkdirAll(root, 0o755)
+	return filepath.Join(root, "CascadeDemoOpsInstaller.log")
+}
+
+func defaultInstallLogRoot() string {
+	if runtime.GOOS == "windows" {
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			return filepath.Join(localAppData, "CascadeDemoOps", "logs")
+		}
+	}
+	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
+		return filepath.Join(configDir, "CascadeDemoOps", "logs")
+	}
+	return filepath.Join(".", "CascadeDemoOps", "logs")
+}
+
+func appendInstallerLog(path string, message string) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(file, "%s %s\n", time.Now().Format(time.RFC3339), message)
+	_ = file.Close()
 }
 
 func defaultInstallDir() string {
@@ -434,16 +475,30 @@ func writeStartMenuLauncher(entrypoint string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	launcher := filepath.Join(dir, "Cascade DemoOps.cmd")
-	content := fmt.Sprintf("@echo off\r\nstart \"\" %q\r\n", entrypoint)
-	return launcher, os.WriteFile(launcher, []byte(content), 0o644)
+	launcher := filepath.Join(dir, "Cascade DemoOps.lnk")
+	script := fmt.Sprintf(`$Shell = New-Object -ComObject WScript.Shell
+$Shortcut = $Shell.CreateShortcut(%q)
+$Shortcut.TargetPath = %q
+$Shortcut.WorkingDirectory = %q
+$Shortcut.WindowStyle = 1
+$Shortcut.Description = 'Cascade DemoOps Desktop'
+$Shortcut.Save()
+`, launcher, entrypoint, filepath.Dir(entrypoint))
+	if err := runInstallerProcess("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script); err != nil {
+		return "", err
+	}
+	return launcher, nil
 }
 
 func openURL(path string) error {
 	if runtime.GOOS == "windows" {
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", path).Start()
+		return runInstallerProcess("rundll32", "url.dll,FileProtocolHandler", path)
 	}
 	return errors.New("launch is only supported by the Windows installer")
+}
+
+func showWindowsMessage(title string, message string, isError bool) {
+	showInstallerMessage(title, message, isError)
 }
 
 func slash(path string) string {

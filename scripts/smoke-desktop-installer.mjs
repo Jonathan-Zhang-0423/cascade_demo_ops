@@ -22,8 +22,11 @@ const portableZipPath = resolve(releaseRoot, `${releaseBaseName}.zip`);
 const smokeRoot = resolve("dist", "installer-smoke", releaseBaseName);
 const installDir = resolve(smokeRoot, "CascadeDemoOps");
 const appDataRoot = resolve(smokeRoot, "appdata");
+const localAppDataRoot = resolve(smokeRoot, "localappdata");
+const installerLogPath = resolve(localAppDataRoot, "CascadeDemoOps", "logs", "CascadeDemoOpsInstaller.log");
 
 assertFile(setupPath, "desktop setup exe");
+assertWindowsGuiSubsystem(setupPath, "desktop setup exe");
 assertFile(setupSidecarManifestPath, "desktop setup Windows manifest");
 assertFile(checksumPath, "desktop setup checksum");
 assertFile(manifestPath, "desktop setup manifest");
@@ -56,7 +59,7 @@ mkdirSync(appDataRoot, { recursive: true });
 
 const check = spawnSync(setupPath, ["--check"], {
   cwd: root,
-  env: { ...process.env, APPDATA: appDataRoot, LOCALAPPDATA: resolve(smokeRoot, "localappdata") },
+  env: { ...process.env, APPDATA: appDataRoot, LOCALAPPDATA: localAppDataRoot },
   encoding: "utf8",
 });
 if (check.status !== 0) {
@@ -71,7 +74,7 @@ assert(checkPayload.payload_sha256 === manifest.payload?.sha256, "setup payload 
 
 const install = spawnSync(setupPath, ["--quiet", "--launch=false", "--install-dir", installDir], {
   cwd: root,
-  env: { ...process.env, APPDATA: appDataRoot, LOCALAPPDATA: resolve(smokeRoot, "localappdata") },
+  env: { ...process.env, APPDATA: appDataRoot, LOCALAPPDATA: localAppDataRoot },
   encoding: "utf8",
 });
 if (install.status !== 0) {
@@ -81,7 +84,9 @@ if (install.status !== 0) {
 }
 const installPayload = JSON.parse(install.stdout);
 assert(installPayload.installed === true, "setup did not report installed=true");
+assertFile(installerLogPath, "installer diagnostic log");
 assertFile(resolve(installDir, "cascade-demoops-desktop.exe"), "installed desktop entrypoint");
+assertWindowsGuiSubsystem(resolve(installDir, "cascade-demoops-desktop.exe"), "installed desktop entrypoint");
 assertFile(resolve(installDir, "resources", "web", "index.html"), "installed web index");
 assertPackagedWebSurfaces(resolve(installDir, "resources", "web"));
 assertFile(resolve(installDir, "resources", "desktop-runtime.json"), "installed runtime manifest");
@@ -102,14 +107,13 @@ assertRequiredAppSurfaces(installedManifest);
 assert(Array.isArray(installedManifest.shortcuts) && installedManifest.shortcuts.length === 1, "installer did not record Start Menu launcher");
 const launcherPath = installedManifest.shortcuts[0];
 assertFile(launcherPath, "Start Menu launcher");
-assert(readFileSync(launcherPath, "utf8").includes("cascade-demoops-desktop.exe"), "Start Menu launcher does not point at desktop entrypoint");
+assert(launcherPath.endsWith(".lnk"), "Start Menu launcher must be a Windows shortcut");
 
 const entrypoint = resolve(installDir, "cascade-demoops-desktop.exe");
 const desktopCheck = spawnSync(entrypoint, ["--check"], {
   cwd: installDir,
   env: {
     ...process.env,
-    CASCADE_PROFILE: "desktop",
     CASCADE_DATA_ROOT: resolve(smokeRoot, "user-data"),
   },
   encoding: "utf8",
@@ -127,7 +131,6 @@ const host = spawn(entrypoint, ["--open=false", "--addr", "127.0.0.1:0"], {
   cwd: installDir,
   env: {
     ...process.env,
-    CASCADE_PROFILE: "desktop",
     CASCADE_DATA_ROOT: resolve(smokeRoot, "host-user-data"),
     CASCADE_DEV_EXCHANGE_HTTP: "1",
     CASCADE_DEV_EXCHANGE_TOKEN: "desktop-smoke-token",
@@ -169,6 +172,19 @@ console.log(`Desktop installer smoke passed: ${setupPath}`);
 
 function assertFile(path, label) {
   assert(existsSync(path), `missing ${label}: ${path}`);
+}
+
+function assertWindowsGuiSubsystem(exePath, label) {
+  if (process.platform !== "win32") {
+    return;
+  }
+  const data = readFileSync(exePath);
+  assert(data.readUInt16LE(0) === 0x5a4d, `${label} is not a PE executable`);
+  const peOffset = data.readUInt32LE(0x3c);
+  const optionalHeaderOffset = peOffset + 24;
+  const subsystemOffset = optionalHeaderOffset + 68;
+  const subsystem = data.readUInt16LE(subsystemOffset);
+  assert(subsystem === 2, `${label} must use Windows GUI subsystem, got ${subsystem}`);
 }
 
 function assert(condition, message) {

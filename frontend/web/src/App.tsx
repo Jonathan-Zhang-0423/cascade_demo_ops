@@ -370,6 +370,7 @@ export function App() {
       </aside>
 
       <main className={activeNav === "editor" ? "workspace editor-workspace-mode" : "workspace"}>
+        {activeNav !== "editor" ? <DesktopStatusBar workspace={workspace} {...(runtimeHealth ? { runtimeHealth } : {})} /> : null}
         {activeNav !== "editor" ? <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage || isRunningProduct} onBuildPackage={runProductLifecycle} /> : null}
         <div className={activeNav === "editor" ? "workspace-grid editor-wide" : "workspace-grid"}>
           <section className={activeNav === "editor" ? "main-panel editor-main-panel" : "main-panel"} aria-label="项目工作台">
@@ -418,6 +419,40 @@ export function App() {
         </div>
       </main>
     </div>
+  );
+}
+
+function DesktopStatusBar({ runtimeHealth, workspace }: { runtimeHealth?: RuntimeHealthView; workspace: ProjectWorkspaceView }) {
+  const exchange = runtimeHealth?.cloudExchange;
+  const sidecarReady = runtimeHealth?.sidecars?.["video-worker"] === true;
+  const configuredProviders = Object.values(runtimeHealth?.modelProviders ?? {}).filter((provider) => provider.configured).length;
+  const sourceCount = workspace.sourceConnections.filter((source) => source.status === "ready").length;
+  return (
+    <section className="desktop-status-bar" aria-label="本地应用运行状态">
+      <div className="desktop-status-title">
+        <span className="window-dot red" />
+        <span className="window-dot yellow" />
+        <span className="window-dot green" />
+        <strong>Cascade DemoOps Desktop</strong>
+      </div>
+      <div className="desktop-status-items">
+        <StatusChip label="本地引擎" value={runtimeHealth?.profile === "desktop" ? "桌面模式" : runtimeHealth?.profile ?? "连接中"} tone={runtimeHealth ? "green" : "neutral"} />
+        <StatusChip label="数据目录" value={runtimeHealth?.localDataConfigured ? "就绪" : "待检查"} tone={runtimeHealth?.localDataConfigured ? "green" : "yellow"} />
+        <StatusChip label="Sidecar" value={sidecarReady ? "video-worker" : "待检查"} tone={sidecarReady ? "green" : "yellow"} />
+        <StatusChip label="模型" value={`${runtimeHealth?.llmMode ?? "auto"} · ${configuredProviders} 个凭据`} tone={configuredProviders > 0 ? "green" : "neutral"} />
+        <StatusChip label="云端" value={exchange ? cloudExchangeLabel(runtimeHealth) : "未连接"} tone={exchange?.sessionValid ? "green" : exchange?.authMode === "dev_token" ? "yellow" : "neutral"} />
+        <StatusChip label="输入源" value={`${sourceCount} 项就绪`} tone={sourceCount > 0 ? "green" : "neutral"} />
+      </div>
+    </section>
+  );
+}
+
+function StatusChip({ label, value, tone }: { label: string; value: string; tone: "green" | "yellow" | "neutral" }) {
+  return (
+    <span className={`desktop-status-chip ${tone}`}>
+      <em>{label}</em>
+      <strong>{value}</strong>
+    </span>
   );
 }
 

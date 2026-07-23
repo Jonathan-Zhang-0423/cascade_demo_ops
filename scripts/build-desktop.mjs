@@ -19,7 +19,13 @@ if (!spec) {
 const out = resolve("dist", "desktop", spec.goos, `cascade-demoops-desktop${spec.ext}`);
 mkdirSync(dirname(out), { recursive: true });
 
-const result = spawnSync("go", ["build", "-o", out, "./cmd/desktop"], {
+const buildArgs = ["build", "-o", out];
+if (spec.goos === "windows") {
+  buildArgs.push("-ldflags", "-H=windowsgui");
+}
+buildArgs.push("./cmd/desktop");
+
+const result = spawnSync("go", buildArgs, {
   cwd: resolve("backend"),
   env: { ...process.env, GOOS: spec.goos, GOARCH: process.env.GOARCH || "amd64" },
   stdio: "inherit",

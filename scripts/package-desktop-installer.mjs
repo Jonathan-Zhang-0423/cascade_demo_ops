@@ -84,7 +84,7 @@ assertFile(portableZip, "portable desktop zip");
 
 rmSync(installerDir, { recursive: true, force: true });
 mkdirSync(dirname(installerExe), { recursive: true });
-run("go", ["build", "-o", installerExe, "./cmd/desktop-installer"], {
+run("go", ["build", "-ldflags", "-H=windowsgui", "-o", installerExe, "./cmd/desktop-installer"], {
   cwd: resolve("backend"),
   env: { ...process.env, GOOS: "windows", GOARCH: process.env.GOARCH || "amd64" },
 });

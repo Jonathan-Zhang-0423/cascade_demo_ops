@@ -52,6 +52,7 @@ expandZip(zipPath, smokeRoot);
 
 const entrypoint = resolve(smokeRoot, manifest.entrypoint || "cascade-demoops-desktop.exe");
 assertFile(entrypoint, "desktop entrypoint");
+assertWindowsGuiSubsystem(entrypoint, "desktop entrypoint");
 assertFile(resolve(smokeRoot, manifest.resource_manifest || "resources/desktop-runtime.json"), "desktop runtime manifest");
 assertPackagedWebSurfaces(resolve(smokeRoot, "resources", "web"));
 const bundledNode = resolve(smokeRoot, "resources", "runtimes", "node", "node.exe");
@@ -64,7 +65,6 @@ const result = spawnSync(entrypoint, ["--check"], {
   cwd: smokeRoot,
   env: {
     ...process.env,
-    CASCADE_PROFILE: "desktop",
     CASCADE_DATA_ROOT: resolve(smokeRoot, "user-data"),
   },
   encoding: "utf8",
@@ -78,12 +78,12 @@ const payload = JSON.parse(result.stdout);
 assert(payload.ready === true, "desktop entrypoint did not report ready=true");
 assert(payload.profile === "desktop", "desktop entrypoint did not use desktop profile");
 assert(payload.mode === "desktop", "desktop entrypoint did not use desktop mode");
+assertFile(resolve(smokeRoot, "user-data", "logs", "desktop-launcher.log"), "desktop launcher diagnostic log");
 
 const host = spawn(entrypoint, ["--open=false", "--addr", "127.0.0.1:0"], {
   cwd: smokeRoot,
   env: {
     ...process.env,
-    CASCADE_PROFILE: "desktop",
     CASCADE_DATA_ROOT: resolve(smokeRoot, "host-user-data"),
     CASCADE_DEV_EXCHANGE_HTTP: "1",
     CASCADE_DEV_EXCHANGE_TOKEN: "desktop-smoke-token",
@@ -110,6 +110,19 @@ console.log(`Desktop package smoke passed: ${zipPath}`);
 
 function assertFile(path, label) {
   assert(existsSync(path), `missing ${label}: ${path}`);
+}
+
+function assertWindowsGuiSubsystem(exePath, label) {
+  if (process.platform !== "win32") {
+    return;
+  }
+  const data = readFileSync(exePath);
+  assert(data.readUInt16LE(0) === 0x5a4d, `${label} is not a PE executable`);
+  const peOffset = data.readUInt32LE(0x3c);
+  const optionalHeaderOffset = peOffset + 24;
+  const subsystemOffset = optionalHeaderOffset + 68;
+  const subsystem = data.readUInt16LE(subsystemOffset);
+  assert(subsystem === 2, `${label} must use Windows GUI subsystem, got ${subsystem}`);
 }
 
 function assert(condition, message) {
