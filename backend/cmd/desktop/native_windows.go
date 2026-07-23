@@ -225,6 +225,14 @@ type nativeInput struct {
 	ProductDescription string
 }
 
+type nativeInputDraft struct {
+	ProductURL         string    `json:"product_url,omitempty"`
+	LocalRepoPath      string    `json:"local_repo_path,omitempty"`
+	GitRepoURL         string    `json:"git_repo_url,omitempty"`
+	ProductDescription string    `json:"product_description,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
 var currentNativeApp *nativeApp
 
 func supportsNativeDesktopUI() bool {
@@ -378,6 +386,7 @@ func (a *nativeApp) createControls() {
 	a.demoUsername = a.labelAndEdit("演示账号（可选）", idDemoUsername, "", false, false)
 	a.demoPassword = a.labelAndEdit("演示密码（可选）", idDemoPassword, "", true, false)
 	a.requirement = a.labelAndEdit("需求文档 / 需求文本", idRequirement, "", false, true)
+	a.restoreInputDraft()
 	a.inputReadiness = createChild(a.hwnd, "STATIC", "", wsChild|wsVisible|wsBorder, idInputReadiness)
 	a.generateBtn = createChild(a.hwnd, "BUTTON", "生成三合一执行包", wsChild|wsVisible|bsPushButton, idGenerateButton)
 	a.saveBtn = createChild(a.hwnd, "BUTTON", "保存三合一包", wsChild|wsVisible|bsPushButton, idSaveButton)
@@ -903,7 +912,91 @@ func (a *nativeApp) updateInputReadiness() {
 		credentialState = "Credentials: incomplete"
 	}
 	setWindowText(a.inputReadiness, strings.Join([]string{urlState, requirementState, sourceState, credentialState}, "  |  "))
+	a.saveInputDraft()
 	a.updateActionStateFromCurrent()
+}
+
+func (a *nativeApp) restoreInputDraft() {
+	draft, err := a.readInputDraft()
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Printf("native: input draft restore skipped: %v", err)
+		}
+		return
+	}
+	if strings.TrimSpace(draft.ProductURL) != "" {
+		setWindowText(a.productURL.Edit, draft.ProductURL)
+	}
+	if strings.TrimSpace(draft.LocalRepoPath) != "" {
+		setWindowText(a.localRepoPath.Edit, draft.LocalRepoPath)
+	}
+	if strings.TrimSpace(draft.GitRepoURL) != "" {
+		setWindowText(a.gitRepoURL.Edit, draft.GitRepoURL)
+	}
+	if strings.TrimSpace(draft.ProductDescription) != "" {
+		setWindowText(a.requirement.Edit, draft.ProductDescription)
+	}
+}
+
+func (a *nativeApp) saveInputDraft() {
+	if strings.TrimSpace(a.runtimeConfig.DataRoot) == "" {
+		return
+	}
+	draft := nativeInputDraft{
+		ProductURL:         strings.TrimSpace(getWindowText(a.productURL.Edit)),
+		LocalRepoPath:      strings.TrimSpace(getWindowText(a.localRepoPath.Edit)),
+		GitRepoURL:         strings.TrimSpace(getWindowText(a.gitRepoURL.Edit)),
+		ProductDescription: strings.TrimSpace(getWindowText(a.requirement.Edit)),
+		UpdatedAt:          time.Now().UTC(),
+	}
+	if strings.TrimSpace(draft.ProductURL+draft.LocalRepoPath+draft.GitRepoURL+draft.ProductDescription) == "" {
+		return
+	}
+	data, err := json.MarshalIndent(draft, "", "  ")
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Printf("native: input draft marshal failed: %v", err)
+		}
+		return
+	}
+	path := a.inputDraftPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if a.logger != nil {
+			a.logger.Printf("native: input draft directory failed: %v", err)
+		}
+		return
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		if a.logger != nil {
+			a.logger.Printf("native: input draft save failed: %v", err)
+		}
+	}
+}
+
+func (a *nativeApp) readInputDraft() (nativeInputDraft, error) {
+	path := a.inputDraftPath()
+	if strings.TrimSpace(path) == "" {
+		return nativeInputDraft{}, errors.New("draft path is empty")
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nativeInputDraft{}, nil
+	}
+	if err != nil {
+		return nativeInputDraft{}, err
+	}
+	var draft nativeInputDraft
+	if err := json.Unmarshal(data, &draft); err != nil {
+		return nativeInputDraft{}, err
+	}
+	return draft, nil
+}
+
+func (a *nativeApp) inputDraftPath() string {
+	if strings.TrimSpace(a.runtimeConfig.DataRoot) == "" {
+		return ""
+	}
+	return filepath.Join(a.runtimeConfig.DataRoot, "desktop-input-draft.json")
 }
 
 func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
