@@ -114,6 +114,8 @@ function buildPackageManifest() {
         "three_in_one_package_save",
         "native_package_folder_export",
         "native_export_overwrite_protection",
+        "native_recent_package_history",
+        "native_recent_package_open",
         "artifact_folder_open",
         "diagnostic_log_open",
         "native_environment_status_bar",

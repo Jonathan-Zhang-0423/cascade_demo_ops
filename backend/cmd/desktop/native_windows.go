@@ -76,6 +76,9 @@ const (
 	idExportPackage     = 1048
 	idClearDraft        = 1049
 	idStatusBar         = 1050
+	idRecentPackage     = 1051
+	idOpenRecentPackage = 1052
+	idRecentLabel       = 1053
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -186,6 +189,9 @@ type nativeApp struct {
 	viewOutlineBtn   syscall.Handle
 	viewBundleBtn    syscall.Handle
 	copyPreviewBtn   syscall.Handle
+	recentLabel      syscall.Handle
+	recentPackage    syscall.Handle
+	openRecentBtn    syscall.Handle
 	productURL       nativeField
 	localRepoPath    nativeField
 	gitRepoURL       nativeField
@@ -212,6 +218,7 @@ type nativeApp struct {
 	lastResult        *nativeGenerateResult
 	pendingResult     *nativeGenerateResult
 	pendingError      string
+	recentPackages    []nativeRecentPackage
 	currentPreview    string
 	suppressDraftSave bool
 }
@@ -237,6 +244,14 @@ type nativeGenerateResult struct {
 	HealthStages      string `json:"health_stages"`
 	HealthBundle      string `json:"health_bundle"`
 	HealthValidation  string `json:"health_validation"`
+}
+
+type nativeRecentPackage struct {
+	ProjectID       string    `json:"project_id"`
+	OutputDirectory string    `json:"output_directory"`
+	Runtime         string    `json:"runtime,omitempty"`
+	StageCount      int       `json:"stage_count,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type nativeInput struct {
@@ -401,6 +416,9 @@ func (a *nativeApp) createControls() {
 	a.previewTitle = createChild(a.hwnd, "STATIC", "审核三合一包；服务器 Agent 在边界内自适应执行。", wsChild|wsVisible, idPreviewTitle)
 	a.previewHint = createChild(a.hwnd, "STATIC", "Markdown 面向审批，JSON/Outline 面向执行。", wsChild|wsVisible, idPreviewHint)
 	a.artifactStatus = createChild(a.hwnd, "STATIC", "输出目录：尚未生成", wsChild|wsVisible, idArtifactStatus)
+	a.recentLabel = createChild(a.hwnd, "STATIC", "最近三合一包", wsChild|wsVisible, idRecentLabel)
+	a.recentPackage = createChild(a.hwnd, "COMBOBOX", "", wsChild|wsVisible|wsBorder|cbsDropDownList|wsVScroll, idRecentPackage)
+	a.openRecentBtn = createChild(a.hwnd, "BUTTON", "打开最近包", wsChild|wsVisible|bsPushButton, idOpenRecentPackage)
 	a.healthRuntime = createChild(a.hwnd, "STATIC", "Runtime: --", wsChild|wsVisible|wsBorder, idHealthRuntime)
 	a.healthStages = createChild(a.hwnd, "STATIC", "Stages: --", wsChild|wsVisible|wsBorder, idHealthStages)
 	a.healthBundle = createChild(a.hwnd, "STATIC", "Bundle: --", wsChild|wsVisible|wsBorder, idHealthBundle)
@@ -419,6 +437,7 @@ func (a *nativeApp) createControls() {
 	a.demoPassword = a.labelAndEdit("演示密码（可选）", idDemoPassword, "", true, false)
 	a.requirement = a.labelAndEdit("需求文档 / 需求文本", idRequirement, "", false, true)
 	a.restoreInputDraft()
+	a.loadRecentPackages()
 	a.inputReadiness = createChild(a.hwnd, "STATIC", "", wsChild|wsVisible|wsBorder, idInputReadiness)
 	a.generateBtn = createChild(a.hwnd, "BUTTON", "生成三合一执行包", wsChild|wsVisible|bsPushButton, idGenerateButton)
 	a.saveBtn = createChild(a.hwnd, "BUTTON", "保存三合一包", wsChild|wsVisible|bsPushButton, idSaveButton)
@@ -431,6 +450,7 @@ func (a *nativeApp) createControls() {
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.statusBar = createChild(a.hwnd, "STATIC", a.statusBarText(""), wsChild|wsVisible|wsBorder, idStatusBar)
 	a.applyDefaultFont()
+	a.refreshRecentPackageList()
 	a.updateInputReadiness()
 	a.setPhaseText("1 输入材料", "2 项目理解", "3 生成包", "4 审核保存")
 	a.updateActionState(false, false)
@@ -455,6 +475,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.importRequirementDocument()
 	case idOpenOutput:
 		a.openLastOutputDirectory()
+	case idOpenRecentPackage:
+		a.openSelectedRecentPackage()
 	case idOpenLog:
 		a.openDiagnosticLog()
 	case idViewMarkdown:
@@ -476,6 +498,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 	a.mu.Lock()
 	generating := a.generating
 	hasResult := a.lastResult != nil
+	hasRecent := len(a.recentPackages) > 0
 	a.mu.Unlock()
 	switch id {
 	case idOpenLog, idMenuExit:
@@ -486,6 +509,8 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return !generating
 	case idSaveButton, idExportPackage, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview:
 		return !generating && hasResult
+	case idOpenRecentPackage:
+		return !generating && hasRecent
 	default:
 		return true
 	}
@@ -505,6 +530,7 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(fileMenu, idExportPackage, "导出三合一包到文件夹...\tCtrl+E")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录\tCtrl+Shift+O")
+	appendMenuItem(fileMenu, idOpenRecentPackage, "打开最近三合一包\tCtrl+Shift+R")
 	appendMenuItem(fileMenu, idOpenLog, "打开诊断日志\tCtrl+L")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idMenuExit, "退出")
@@ -532,6 +558,7 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fControl, Key: 'S', Cmd: idSaveButton},
 		{FVirt: fVirtKey | fControl, Key: 'E', Cmd: idExportPackage},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'O', Cmd: idOpenOutput},
+		{FVirt: fVirtKey | fControl | fShift, Key: 'R', Cmd: idOpenRecentPackage},
 		{FVirt: fVirtKey | fControl, Key: 'L', Cmd: idOpenLog},
 		{FVirt: fVirtKey | fControl, Key: '1', Cmd: idViewMarkdown},
 		{FVirt: fVirtKey | fControl, Key: '2', Cmd: idViewStageJSON},
@@ -652,7 +679,11 @@ func (a *nativeApp) layout() {
 	moveControl(a.previewTitle, rightX+14, rightTop+28, rightW-28, 18)
 	moveControl(a.previewHint, rightX+14, rightTop+50, rightW-28, 18)
 	moveControl(a.artifactStatus, rightX+14, rightTop+72, rightW-28, 18)
-	healthTop := rightTop + 96
+	recentTop := rightTop + 96
+	moveControl(a.recentLabel, rightX+14, recentTop+5, 94, 18)
+	moveControl(a.recentPackage, rightX+112, recentTop, maxInt(180, rightW-28-112-112), 220)
+	moveControl(a.openRecentBtn, rightX+rightW-14-104, recentTop, 104, 28)
+	healthTop := rightTop + 134
 	healthGap := 8
 	healthW := maxInt(92, (rightW-28-healthGap*3)/4)
 	moveControl(a.healthRuntime, rightX+14, healthTop, healthW, 30)
@@ -811,6 +842,7 @@ func (a *nativeApp) finishGenerate() {
 	a.setHealthText(result.HealthRuntime, result.HealthStages, result.HealthBundle, result.HealthValidation)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 可审核")
 	a.updateActionState(false, true)
+	a.rememberRecentPackage(result, result.OutputDirectory)
 	a.addStatus("三合一执行包已生成，可审核或保存。project_id=" + result.ProjectID)
 }
 
@@ -856,6 +888,7 @@ func (a *nativeApp) saveLastResult() {
 	setWindowText(a.artifactStatus, "已保存："+dir)
 	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已保存")
+	a.rememberRecentPackage(result, dir)
 	setEnabled(a.openOutputBtn, true)
 	messageBox("Cascade DemoOps", "三合一执行包已保存到：\n"+dir, false)
 }
@@ -890,6 +923,7 @@ func (a *nativeApp) exportLastResult() {
 	setWindowText(a.artifactStatus, "已导出："+dir)
 	a.setStatusBarOutput(dir)
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 生成完成", "4 已导出")
+	a.rememberRecentPackage(result, dir)
 	messageBox("Cascade DemoOps", "三合一执行包已导出到：\n"+dir, false)
 }
 
@@ -984,6 +1018,20 @@ func (a *nativeApp) openLastOutputDirectory() {
 		return
 	}
 	a.addStatus("已打开输出目录：" + result.OutputDirectory)
+}
+
+func (a *nativeApp) openSelectedRecentPackage() {
+	recent, ok := a.selectedRecentPackage()
+	if !ok {
+		a.addStatus("还没有可打开的最近三合一包。")
+		return
+	}
+	if err := openFolder(recent.OutputDirectory); err != nil {
+		a.addStatus("打开最近三合一包失败：" + err.Error())
+		messageBox("Cascade DemoOps", "打开最近三合一包失败：\n"+err.Error(), true)
+		return
+	}
+	a.addStatus("已打开最近三合一包：" + recent.OutputDirectory)
 }
 
 func (a *nativeApp) openDiagnosticLog() {
@@ -1229,8 +1277,178 @@ func (a *nativeApp) inputDraftPath() string {
 	return filepath.Join(a.runtimeConfig.DataRoot, "desktop-input-draft.json")
 }
 
+func (a *nativeApp) rememberRecentPackage(result *nativeGenerateResult, outputDir string) {
+	if result == nil || strings.TrimSpace(outputDir) == "" {
+		return
+	}
+	entry := nativeRecentPackage{
+		ProjectID:       strings.TrimSpace(result.ProjectID),
+		OutputDirectory: strings.TrimSpace(outputDir),
+		Runtime:         strings.TrimSpace(result.Runtime),
+		StageCount:      result.StageCount,
+		UpdatedAt:       time.Now().UTC(),
+	}
+	a.mu.Lock()
+	recent := make([]nativeRecentPackage, 0, len(a.recentPackages)+1)
+	recent = append(recent, entry)
+	seen := map[string]bool{strings.ToLower(entry.OutputDirectory): true}
+	for _, item := range a.recentPackages {
+		key := strings.ToLower(strings.TrimSpace(item.OutputDirectory))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		recent = append(recent, item)
+		if len(recent) >= maxRecentPackages {
+			break
+		}
+	}
+	a.recentPackages = recent
+	a.mu.Unlock()
+	a.refreshRecentPackageList()
+	a.saveRecentPackages()
+}
+
+func (a *nativeApp) loadRecentPackages() {
+	path := a.recentPackagesPath()
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Printf("native: recent package load failed: %v", err)
+		}
+		return
+	}
+	var recent []nativeRecentPackage
+	if err := json.Unmarshal(data, &recent); err != nil {
+		if a.logger != nil {
+			a.logger.Printf("native: recent package parse failed: %v", err)
+		}
+		return
+	}
+	a.mu.Lock()
+	a.recentPackages = compactRecentPackages(recent)
+	a.mu.Unlock()
+}
+
+func (a *nativeApp) saveRecentPackages() {
+	path := a.recentPackagesPath()
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	a.mu.Lock()
+	recent := append([]nativeRecentPackage(nil), a.recentPackages...)
+	a.mu.Unlock()
+	data, err := json.MarshalIndent(recent, "", "  ")
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Printf("native: recent package marshal failed: %v", err)
+		}
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if a.logger != nil {
+			a.logger.Printf("native: recent package directory failed: %v", err)
+		}
+		return
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil && a.logger != nil {
+		a.logger.Printf("native: recent package save failed: %v", err)
+	}
+}
+
+func (a *nativeApp) refreshRecentPackageList() {
+	if a.recentPackage == 0 {
+		return
+	}
+	a.mu.Lock()
+	recent := append([]nativeRecentPackage(nil), a.recentPackages...)
+	a.mu.Unlock()
+	procSendMessageW.Call(uintptr(a.recentPackage), cbResetContent, 0, 0)
+	for _, item := range recent {
+		label := recentPackageLabel(item)
+		procSendMessageW.Call(uintptr(a.recentPackage), cbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr(label))))
+	}
+	if len(recent) > 0 {
+		procSendMessageW.Call(uintptr(a.recentPackage), cbSetCurSel, 0, 0)
+	}
+	setEnabled(a.openRecentBtn, len(recent) > 0)
+	a.enableMenuItem(idOpenRecentPackage, len(recent) > 0)
+}
+
+func (a *nativeApp) selectedRecentPackage() (nativeRecentPackage, bool) {
+	a.mu.Lock()
+	recent := append([]nativeRecentPackage(nil), a.recentPackages...)
+	a.mu.Unlock()
+	if len(recent) == 0 {
+		return nativeRecentPackage{}, false
+	}
+	index, _, _ := procSendMessageW.Call(uintptr(a.recentPackage), cbGetCurSel, 0, 0)
+	if index == cbErr || int(index) < 0 || int(index) >= len(recent) {
+		return recent[0], true
+	}
+	return recent[int(index)], true
+}
+
+func (a *nativeApp) recentPackagesPath() string {
+	if strings.TrimSpace(a.runtimeConfig.DataRoot) == "" {
+		return ""
+	}
+	return filepath.Join(a.runtimeConfig.DataRoot, "desktop-recent-packages.json")
+}
+
+func compactRecentPackages(input []nativeRecentPackage) []nativeRecentPackage {
+	out := make([]nativeRecentPackage, 0, len(input))
+	seen := map[string]bool{}
+	for _, item := range input {
+		item.OutputDirectory = strings.TrimSpace(item.OutputDirectory)
+		if item.OutputDirectory == "" {
+			continue
+		}
+		key := strings.ToLower(item.OutputDirectory)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, item)
+		if len(out) >= maxRecentPackages {
+			break
+		}
+	}
+	return out
+}
+
+func recentPackageLabel(item nativeRecentPackage) string {
+	name := strings.TrimSpace(item.ProjectID)
+	if name == "" {
+		name = filepath.Base(item.OutputDirectory)
+	}
+	date := ""
+	if !item.UpdatedAt.IsZero() {
+		date = item.UpdatedAt.Local().Format("01-02 15:04")
+	}
+	meta := strings.TrimSpace(strings.Join([]string{date, strings.TrimSpace(item.Runtime)}, " "))
+	if item.StageCount > 0 {
+		meta = strings.TrimSpace(fmt.Sprintf("%s %d stages", meta, item.StageCount))
+	}
+	path := compactPath(item.OutputDirectory, 56)
+	if meta == "" {
+		return fmt.Sprintf("%s  -  %s", name, path)
+	}
+	return fmt.Sprintf("%s  -  %s  -  %s", name, meta, path)
+}
+
 func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	generateEnabled := !generating && a.inputReady()
+	a.mu.Lock()
+	hasRecent := len(a.recentPackages) > 0
+	a.mu.Unlock()
+	recentEnabled := !generating && hasRecent
 	setEnabled(a.generateBtn, generateEnabled)
 	setEnabled(a.saveBtn, !generating && hasResult)
 	setEnabled(a.browseRepoBtn, !generating)
@@ -1238,6 +1456,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	setEnabled(a.clearDraftBtn, !generating)
 	setEnabled(a.exportBtn, !generating && hasResult)
 	setEnabled(a.openOutputBtn, !generating && hasResult)
+	setEnabled(a.openRecentBtn, recentEnabled)
 	setEnabled(a.openLogBtn, true)
 	a.setPreviewButtonsEnabled(!generating && hasResult)
 	a.enableMenuItem(idGenerateButton, generateEnabled)
@@ -1248,6 +1467,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 		a.enableMenuItem(id, !generating && hasResult)
 	}
 	a.enableMenuItem(idCopyPreview, !generating && hasResult)
+	a.enableMenuItem(idOpenRecentPackage, recentEnabled)
 	a.enableMenuItem(idOpenLog, true)
 }
 
@@ -1504,6 +1724,9 @@ func (a *nativeApp) applyDefaultFont() {
 		a.previewTitle,
 		a.previewHint,
 		a.artifactStatus,
+		a.recentLabel,
+		a.recentPackage,
+		a.openRecentBtn,
 		a.healthRuntime,
 		a.healthStages,
 		a.healthBundle,
@@ -1562,6 +1785,7 @@ func (a *nativeApp) controlColor(msgID uint32, wParam uintptr, lParam uintptr) u
 	case hwnd == a.previewSummary || hwnd == a.previewContent ||
 		hwnd == a.healthRuntime || hwnd == a.healthStages ||
 		hwnd == a.healthBundle || hwnd == a.healthValidation ||
+		hwnd == a.recentPackage ||
 		hwnd == a.phaseInput || hwnd == a.phaseUnderstand ||
 		hwnd == a.phasePackage || hwnd == a.phaseReview ||
 		hwnd == a.inputReadiness || hwnd == a.statusBar:
@@ -1967,6 +2191,7 @@ const (
 	maxPath                   = 260
 	maxLongPath               = 32768
 	maxRequirementImportBytes = 256 * 1024
+	maxRecentPackages         = 8
 
 	wsOverlappedWindow = 0x00cf0000
 	wsVisible          = 0x10000000
@@ -1982,9 +2207,10 @@ const (
 	esReadOnly    = 0x0800
 	esWantReturn  = 0x1000
 
-	bsPushButton = 0x00000000
-	bsGroupBox   = 0x00000007
-	lbsNotify    = 0x0001
+	bsPushButton    = 0x00000000
+	bsGroupBox      = 0x00000007
+	cbsDropDownList = 0x0003
+	lbsNotify       = 0x0001
 
 	swShow = 5
 
@@ -2003,6 +2229,12 @@ const (
 	lbAddString = 0x0180
 	lbSetCurSel = 0x0186
 	lbErr       = ^uintptr(0)
+
+	cbAddString    = 0x0143
+	cbResetContent = 0x014B
+	cbGetCurSel    = 0x0147
+	cbSetCurSel    = 0x014E
+	cbErr          = ^uintptr(0)
 
 	mfString    = 0x00000000
 	mfSeparator = 0x00000800
