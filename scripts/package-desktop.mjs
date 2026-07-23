@@ -115,6 +115,8 @@ function buildPackageManifest() {
         "native_local_approval_record",
         "native_server_handoff_summary",
         "native_approved_package_upload_init",
+        "native_server_handoff_record",
+        "native_server_status_query",
         "stage_plan_review",
         "script_outline_review",
         "native_approval_clipboard_copy",

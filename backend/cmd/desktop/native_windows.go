@@ -86,6 +86,7 @@ const (
 	idImportPackage     = 1056
 	idOpenPreviewFile   = 1057
 	idUploadApproved    = 1058
+	idQueryServerStatus = 1059
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -218,6 +219,7 @@ type nativeApp struct {
 	exportBtn        syscall.Handle
 	approveBtn       syscall.Handle
 	uploadBtn        syscall.Handle
+	queryStatusBtn   syscall.Handle
 	clearDraftBtn    syscall.Handle
 	openLogBtn       syscall.Handle
 	statusList       syscall.Handle
@@ -226,16 +228,18 @@ type nativeApp struct {
 	stageJSON        nativeField
 	outlineJSON      nativeField
 
-	mu                sync.Mutex
-	generating        bool
-	uploading         bool
-	lastResult        *nativeGenerateResult
-	pendingResult     *nativeGenerateResult
-	pendingError      string
-	pendingUpload     *nativeUploadResult
-	recentPackages    []nativeRecentPackage
-	currentPreview    string
-	suppressDraftSave bool
+	mu                  sync.Mutex
+	generating          bool
+	uploading           bool
+	queryingStatus      bool
+	lastResult          *nativeGenerateResult
+	pendingResult       *nativeGenerateResult
+	pendingError        string
+	pendingUpload       *nativeUploadResult
+	pendingServerStatus *nativeServerStatusResult
+	recentPackages      []nativeRecentPackage
+	currentPreview      string
+	suppressDraftSave   bool
 }
 
 type nativeField struct {
@@ -281,6 +285,34 @@ type nativeUploadResult struct {
 	CloudJobID        string
 	Status            string
 	CloudBaseURL      string
+	ProjectID         string
+	OrgID             string
+	OutputDirectory   string
+	UploadedAt        time.Time
+}
+
+type nativeServerHandoffRecord struct {
+	SchemaVersion     string    `json:"schema_version"`
+	ProjectID         string    `json:"project_id,omitempty"`
+	OrgID             string    `json:"org_id,omitempty"`
+	UploadID          string    `json:"upload_id,omitempty"`
+	ExchangePackageID string    `json:"exchange_package_id"`
+	CloudJobID        string    `json:"cloud_job_id,omitempty"`
+	Status            string    `json:"status,omitempty"`
+	Stage             string    `json:"stage,omitempty"`
+	Message           string    `json:"message,omitempty"`
+	ProgressPercent   int       `json:"progress_percent,omitempty"`
+	ResultPackageID   string    `json:"result_package_id,omitempty"`
+	CloudBaseURL      string    `json:"cloud_base_url,omitempty"`
+	OutputDirectory   string    `json:"output_directory,omitempty"`
+	UploadedAt        time.Time `json:"uploaded_at"`
+	LastStatusAt      time.Time `json:"last_status_at,omitempty"`
+	ReviewSurface     string    `json:"review_surface"`
+}
+
+type nativeServerStatusResult struct {
+	Record nativeServerHandoffRecord
+	Status model.ExecutionPackageStatusResponse
 }
 
 type nativeRecentPackage struct {
@@ -428,6 +460,16 @@ func nativeWndProc(hwnd uintptr, msgID uint32, wParam uintptr, lParam uintptr) u
 			app.finishUploadError()
 		}
 		return 0
+	case wmAppServerStatusDone:
+		if app != nil {
+			app.finishServerStatus()
+		}
+		return 0
+	case wmAppServerStatusFailed:
+		if app != nil {
+			app.finishServerStatusError()
+		}
+		return 0
 	case wmDestroy:
 		if app != nil {
 			app.disposeUIResources()
@@ -500,6 +542,7 @@ func (a *nativeApp) createControls() {
 	a.exportBtn = createChild(a.hwnd, "BUTTON", "导出到文件夹", wsChild|wsVisible|bsPushButton, idExportPackage)
 	a.approveBtn = createChild(a.hwnd, "BUTTON", "本地审批通过", wsChild|wsVisible|bsPushButton, idApprovePackage)
 	a.uploadBtn = createChild(a.hwnd, "BUTTON", "上传已审批包", wsChild|wsVisible|bsPushButton, idUploadApproved)
+	a.queryStatusBtn = createChild(a.hwnd, "BUTTON", "查询服务器状态", wsChild|wsVisible|bsPushButton, idQueryServerStatus)
 	a.openLogBtn = createChild(a.hwnd, "BUTTON", "打开诊断日志", wsChild|wsVisible|bsPushButton, idOpenLog)
 	a.statusList = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStatusList)
 	a.statusBar = createChild(a.hwnd, "STATIC", a.statusBarText(""), wsChild|wsVisible|wsBorder, idStatusBar)
@@ -526,6 +569,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.approveLastResult()
 	case idUploadApproved:
 		a.uploadApprovedPackage()
+	case idQueryServerStatus:
+		a.queryServerStatus()
 	case idClearDraft:
 		a.clearInputDraft()
 	case idBrowseRepo:
@@ -563,10 +608,11 @@ func (a *nativeApp) commandAllowed(id int) bool {
 	a.mu.Lock()
 	generating := a.generating
 	uploading := a.uploading
+	queryingStatus := a.queryingStatus
 	hasResult := a.lastResult != nil
 	hasRecent := len(a.recentPackages) > 0
 	a.mu.Unlock()
-	busy := generating || uploading
+	busy := generating || uploading || queryingStatus
 	switch id {
 	case idOpenLog, idMenuExit:
 		return true
@@ -574,7 +620,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return !busy && a.inputReady()
 	case idBrowseRepo, idImportRequirement, idImportPackage, idClearDraft:
 		return !busy
-	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved:
+	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved, idQueryServerStatus:
 		return !busy && hasResult
 	case idOpenRecentPackage:
 		return !busy && hasRecent
@@ -598,6 +644,7 @@ func (a *nativeApp) createMenu() {
 	appendMenuItem(fileMenu, idExportPackage, "导出三合一包到文件夹...\tCtrl+E")
 	appendMenuItem(fileMenu, idApprovePackage, "本地审批通过\tCtrl+Enter")
 	appendMenuItem(fileMenu, idUploadApproved, "上传已审批包到服务器\tCtrl+U")
+	appendMenuItem(fileMenu, idQueryServerStatus, "查询服务器状态\tCtrl+Shift+U")
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idOpenOutput, "打开输出目录\tCtrl+Shift+O")
 	appendMenuItem(fileMenu, idOpenRecentPackage, "打开最近三合一包\tCtrl+Shift+R")
@@ -632,6 +679,7 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fControl, Key: 'E', Cmd: idExportPackage},
 		{FVirt: fVirtKey | fControl, Key: vkReturn, Cmd: idApprovePackage},
 		{FVirt: fVirtKey | fControl, Key: 'U', Cmd: idUploadApproved},
+		{FVirt: fVirtKey | fControl | fShift, Key: 'U', Cmd: idQueryServerStatus},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'O', Cmd: idOpenOutput},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'R', Cmd: idOpenRecentPackage},
 		{FVirt: fVirtKey | fControl, Key: 'L', Cmd: idOpenLog},
@@ -737,7 +785,8 @@ func (a *nativeApp) layout() {
 	moveControl(a.exportBtn, x, y+42, 186, 32)
 	moveControl(a.openOutputBtn, x+202, y+42, 190, 32)
 	moveControl(a.approveBtn, x, y+82, leftInnerW, 32)
-	moveControl(a.uploadBtn, x, y+120, leftInnerW, 32)
+	moveControl(a.uploadBtn, x, y+120, 190, 32)
+	moveControl(a.queryStatusBtn, x+202, y+120, 190, 32)
 
 	moveControl(a.lifecycleGroup, margin, statusTop, leftW, statusH)
 	moveControl(a.lifecycleHint, x, statusTop+26, leftInnerW, 18)
@@ -1055,7 +1104,7 @@ func (a *nativeApp) approveLastResult() {
 
 func (a *nativeApp) uploadApprovedPackage() {
 	a.mu.Lock()
-	if a.uploading {
+	if a.uploading || a.queryingStatus {
 		a.mu.Unlock()
 		return
 	}
@@ -1069,7 +1118,7 @@ func (a *nativeApp) uploadApprovedPackage() {
 	if strings.TrimSpace(dir) == "" {
 		dir = filepath.Join(a.runtimeConfig.ArtifactRoot, result.ProjectID)
 	}
-	if serverHandoffLabel(dir) != "ready for server Browser Agent" {
+	if serverUploadReadinessLabel(dir) != "ready for server Browser Agent" {
 		message := "上传前需要先保存三合一包并完成本地审批。\n\n当前状态：\n" +
 			"Files: " + recentPackageFilesLabel(dir) + "\n" +
 			"Approval: " + approvalRecordLabel(dir)
@@ -1127,6 +1176,9 @@ func (a *nativeApp) uploadApprovedPackageAsync(projectID string) {
 		CloudJobID:        uploadResponse.CloudJobID,
 		Status:            string(uploadResponse.Status),
 		CloudBaseURL:      strings.TrimSpace(a.runtimeConfig.CloudExchangeBaseURL),
+		ProjectID:         strings.TrimSpace(projectID),
+		OrgID:             nativeDefaultOrgID,
+		UploadedAt:        time.Now().UTC(),
 	}
 	a.mu.Unlock()
 	procPostMessageW.Call(uintptr(a.hwnd), wmAppUploadDone, 0, 0)
@@ -1144,6 +1196,40 @@ func (a *nativeApp) finishUpload() {
 		a.finishUploadErrorMessage("上传完成但没有得到服务器响应。")
 		return
 	}
+	outputDir := ""
+	a.mu.Lock()
+	if a.lastResult != nil {
+		outputDir = strings.TrimSpace(a.lastResult.OutputDirectory)
+		if outputDir == "" && strings.TrimSpace(a.lastResult.ProjectID) != "" {
+			outputDir = filepath.Join(a.runtimeConfig.ArtifactRoot, a.lastResult.ProjectID)
+		}
+	}
+	a.mu.Unlock()
+	result.OutputDirectory = outputDir
+	record := nativeServerHandoffRecord{
+		SchemaVersion:     "demoops.native_server_handoff_record.v1",
+		ProjectID:         strings.TrimSpace(result.ProjectID),
+		OrgID:             firstNonEmptyNative(result.OrgID, nativeDefaultOrgID),
+		UploadID:          strings.TrimSpace(result.UploadID),
+		ExchangePackageID: strings.TrimSpace(result.ExchangePackageID),
+		CloudJobID:        strings.TrimSpace(result.CloudJobID),
+		Status:            strings.TrimSpace(result.Status),
+		CloudBaseURL:      strings.TrimSpace(result.CloudBaseURL),
+		OutputDirectory:   strings.TrimSpace(outputDir),
+		UploadedAt:        result.UploadedAt,
+		LastStatusAt:      time.Now().UTC(),
+		ReviewSurface:     "native_win32",
+	}
+	if record.UploadedAt.IsZero() {
+		record.UploadedAt = time.Now().UTC()
+	}
+	if strings.TrimSpace(outputDir) != "" {
+		if err := writeServerHandoffRecord(outputDir, record); err != nil {
+			a.addStatus("服务器交接记录写入失败：" + err.Error())
+		} else {
+			a.addStatus("服务器交接记录已写入：" + serverHandoffRecordPath(outputDir))
+		}
+	}
 	setWindowText(a.workflowState, "已上传到服务器")
 	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 已上传")
 	lines := []string{
@@ -1153,7 +1239,8 @@ func (a *nativeApp) finishUpload() {
 		"Cloud Job ID: " + firstNonEmptyNative(result.CloudJobID, "unknown"),
 		"Status: " + firstNonEmptyNative(result.Status, "unknown"),
 		"Server: " + firstNonEmptyNative(result.CloudBaseURL, a.cloudConnectionLabel()),
-		"Next: 可由服务器开始 Browser Agent 录制；后续再接 native 状态轮询和结果下载。",
+		"Handoff record: " + handoffRecordLabel(outputDir),
+		"Next: 使用“查询服务器状态”查看 Browser Agent 录制进度。",
 	}
 	setWindowText(a.previewSummary, strings.Join(lines, "\r\n"))
 	a.addStatus("已上传到服务器：exchange_package_id=" + result.ExchangePackageID)
@@ -1186,6 +1273,120 @@ func (a *nativeApp) postUploadError(message string) {
 	a.pendingError = message
 	a.mu.Unlock()
 	procPostMessageW.Call(uintptr(a.hwnd), wmAppUploadFailed, 0, 0)
+}
+
+func (a *nativeApp) queryServerStatus() {
+	a.mu.Lock()
+	if a.uploading || a.queryingStatus {
+		a.mu.Unlock()
+		return
+	}
+	result := a.lastResult
+	a.mu.Unlock()
+	if result == nil {
+		a.addStatus("还没有可查询服务器状态的执行包。")
+		return
+	}
+	dir := strings.TrimSpace(result.OutputDirectory)
+	if dir == "" && strings.TrimSpace(result.ProjectID) != "" {
+		dir = filepath.Join(a.runtimeConfig.ArtifactRoot, result.ProjectID)
+	}
+	record, err := readServerHandoffRecord(dir)
+	if err != nil {
+		message := "当前三合一包还没有服务器交接记录。\n\n请先完成“本地审批通过”和“上传已审批包”，或导入包含 server_handoff_record.json 的包目录。\n\n详情：" + err.Error()
+		a.addStatus("服务器状态查询被阻止：" + err.Error())
+		messageBox("Cascade DemoOps", message, true)
+		return
+	}
+	if strings.TrimSpace(a.runtimeConfig.CloudExchangeBaseURL) == "" {
+		messageBox("Cascade DemoOps", "服务器地址未配置。\n\n已有本地交接记录，但状态查询需要 CASCADE_CLOUD_EXCHANGE_BASE_URL 或安装密钥发现能力。", true)
+		return
+	}
+	a.mu.Lock()
+	a.queryingStatus = true
+	a.pendingServerStatus = nil
+	a.pendingError = ""
+	a.mu.Unlock()
+	setWindowText(a.queryStatusBtn, "查询中...")
+	setWindowText(a.workflowState, "正在查询服务器状态")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 查询中")
+	a.updateActionStateFromCurrent()
+	a.addStatus("开始查询服务器状态：exchange_package_id=" + record.ExchangePackageID)
+	go a.queryServerStatusAsync(record)
+}
+
+func (a *nativeApp) queryServerStatusAsync(record nativeServerHandoffRecord) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	status, err := a.service.GetCloudExecutionPackageStatus(ctx, app.CloudStatusRequest{
+		OrgID:             firstNonEmptyNative(record.OrgID, nativeDefaultOrgID),
+		ExchangePackageID: strings.TrimSpace(record.ExchangePackageID),
+	})
+	if err != nil {
+		a.postServerStatusError(err.Error())
+		return
+	}
+	a.mu.Lock()
+	a.pendingServerStatus = &nativeServerStatusResult{Record: record, Status: status}
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppServerStatusDone, 0, 0)
+}
+
+func (a *nativeApp) finishServerStatus() {
+	a.mu.Lock()
+	result := a.pendingServerStatus
+	a.pendingServerStatus = nil
+	a.queryingStatus = false
+	a.mu.Unlock()
+	setWindowText(a.queryStatusBtn, "查询服务器状态")
+	a.updateActionStateFromCurrent()
+	if result == nil {
+		a.finishServerStatusErrorMessage("服务器状态查询完成但没有得到响应。")
+		return
+	}
+	record := updateServerHandoffRecordFromStatus(result.Record, result.Status)
+	if strings.TrimSpace(record.OutputDirectory) != "" {
+		if err := writeServerHandoffRecord(record.OutputDirectory, record); err != nil {
+			a.addStatus("服务器状态记录更新失败：" + err.Error())
+		}
+	}
+	statusLabel := firstNonEmptyNative(string(result.Status.Status), "unknown")
+	setWindowText(a.workflowState, "服务器状态："+statusLabel)
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 "+compactPath(statusLabel, 14))
+	setWindowText(a.previewSummary, serverStatusSummary(record, result.Status))
+	if strings.TrimSpace(record.OutputDirectory) != "" {
+		setWindowText(a.artifactStatus, "服务器状态已更新："+record.OutputDirectory)
+		a.setStatusBarOutput(record.OutputDirectory)
+	}
+	a.addStatus("服务器状态已更新：status=" + statusLabel + " stage=" + firstNonEmptyNative(result.Status.Stage, "unknown"))
+}
+
+func (a *nativeApp) finishServerStatusError() {
+	a.mu.Lock()
+	message := a.pendingError
+	a.pendingError = ""
+	a.queryingStatus = false
+	a.mu.Unlock()
+	a.finishServerStatusErrorMessage(message)
+}
+
+func (a *nativeApp) finishServerStatusErrorMessage(message string) {
+	setWindowText(a.queryStatusBtn, "查询服务器状态")
+	setWindowText(a.workflowState, "状态查询失败")
+	a.setPhaseText("1 输入完成", "2 理解完成", "3 已审批", "4 查询失败")
+	a.updateActionStateFromCurrent()
+	if strings.TrimSpace(message) == "" {
+		message = "服务器状态查询失败。"
+	}
+	a.addStatus("服务器状态查询失败：" + message)
+	messageBox("Cascade DemoOps", message, true)
+}
+
+func (a *nativeApp) postServerStatusError(message string) {
+	a.mu.Lock()
+	a.pendingError = message
+	a.mu.Unlock()
+	procPostMessageW.Call(uintptr(a.hwnd), wmAppServerStatusFailed, 0, 0)
 }
 
 func writeResultFiles(dir string, result *nativeGenerateResult) error {
@@ -1283,6 +1484,72 @@ func writeApprovalRecord(dir string, record nativeApprovalRecord) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "approval_record.json"), append(data, '\n'), 0o644)
+}
+
+func writeServerHandoffRecord(dir string, record nativeServerHandoffRecord) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return errors.New("server handoff directory is empty")
+	}
+	if strings.TrimSpace(record.ExchangePackageID) == "" {
+		return errors.New("exchange_package_id is required")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	record.OutputDirectory = dir
+	if strings.TrimSpace(record.SchemaVersion) == "" {
+		record.SchemaVersion = "demoops.native_server_handoff_record.v1"
+	}
+	if strings.TrimSpace(record.OrgID) == "" {
+		record.OrgID = nativeDefaultOrgID
+	}
+	if record.UploadedAt.IsZero() {
+		record.UploadedAt = time.Now().UTC()
+	}
+	if strings.TrimSpace(record.ReviewSurface) == "" {
+		record.ReviewSurface = "native_win32"
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(serverHandoffRecordPath(dir), append(data, '\n'), 0o644)
+}
+
+func readServerHandoffRecord(dir string) (nativeServerHandoffRecord, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return nativeServerHandoffRecord{}, errors.New("package directory is empty")
+	}
+	data, err := os.ReadFile(serverHandoffRecordPath(dir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nativeServerHandoffRecord{}, errors.New("server_handoff_record.json is missing")
+	}
+	if err != nil {
+		return nativeServerHandoffRecord{}, err
+	}
+	if len(data) > 128*1024 {
+		return nativeServerHandoffRecord{}, errors.New("server_handoff_record.json is unexpectedly large")
+	}
+	var record nativeServerHandoffRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nativeServerHandoffRecord{}, fmt.Errorf("server_handoff_record.json is invalid: %w", err)
+	}
+	if strings.TrimSpace(record.ExchangePackageID) == "" {
+		return nativeServerHandoffRecord{}, errors.New("server_handoff_record.json is missing exchange_package_id")
+	}
+	if strings.TrimSpace(record.OutputDirectory) == "" {
+		record.OutputDirectory = dir
+	}
+	if strings.TrimSpace(record.OrgID) == "" {
+		record.OrgID = nativeDefaultOrgID
+	}
+	return record, nil
+}
+
+func serverHandoffRecordPath(dir string) string {
+	return filepath.Join(strings.TrimSpace(dir), "server_handoff_record.json")
 }
 
 func resultFiles(result *nativeGenerateResult) map[string]string {
@@ -1964,6 +2231,22 @@ func approvalRecordLabel(dir string) string {
 }
 
 func serverHandoffLabel(dir string) string {
+	record, err := readServerHandoffRecord(dir)
+	if err == nil {
+		status := firstNonEmptyNative(record.Status, "uploaded")
+		stage := strings.TrimSpace(record.Stage)
+		if stage != "" {
+			status += "/" + stage
+		}
+		if strings.TrimSpace(record.ExchangePackageID) != "" {
+			status += " (" + compactPath(record.ExchangePackageID, 28) + ")"
+		}
+		return status
+	}
+	return serverUploadReadinessLabel(dir)
+}
+
+func serverUploadReadinessLabel(dir string) string {
 	if recentPackageFilesLabel(dir) != "ready" {
 		return "blocked until package files are complete"
 	}
@@ -1971,6 +2254,16 @@ func serverHandoffLabel(dir string) string {
 		return "waiting for local approval"
 	}
 	return "ready for server Browser Agent"
+}
+
+func handoffRecordLabel(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return "not recorded"
+	}
+	if _, err := os.Stat(serverHandoffRecordPath(dir)); err == nil {
+		return filepath.Base(serverHandoffRecordPath(dir))
+	}
+	return "not recorded"
 }
 
 func nativeTimeLabel(value time.Time) string {
@@ -1983,9 +2276,10 @@ func nativeTimeLabel(value time.Time) string {
 func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.mu.Lock()
 	uploading := a.uploading
+	queryingStatus := a.queryingStatus
 	hasRecent := len(a.recentPackages) > 0
 	a.mu.Unlock()
-	busy := generating || uploading
+	busy := generating || uploading || queryingStatus
 	generateEnabled := !busy && a.inputReady()
 	recentEnabled := !busy && hasRecent
 	setEnabled(a.generateBtn, generateEnabled)
@@ -1997,6 +2291,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	setEnabled(a.exportBtn, !busy && hasResult)
 	setEnabled(a.approveBtn, !busy && hasResult)
 	setEnabled(a.uploadBtn, !busy && hasResult)
+	setEnabled(a.queryStatusBtn, !busy && hasResult)
 	setEnabled(a.openOutputBtn, !busy && hasResult)
 	setEnabled(a.openRecentBtn, recentEnabled)
 	setEnabled(a.openLogBtn, true)
@@ -2006,7 +2301,7 @@ func (a *nativeApp) updateActionState(generating bool, hasResult bool) {
 	a.enableMenuItem(idImportRequirement, !busy)
 	a.enableMenuItem(idImportPackage, !busy)
 	a.enableMenuItem(idClearDraft, !busy)
-	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idUploadApproved, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
+	for _, id := range []int{idSaveButton, idExportPackage, idApprovePackage, idUploadApproved, idQueryServerStatus, idOpenOutput, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idOpenPreviewFile} {
 		a.enableMenuItem(id, !busy && hasResult)
 	}
 	a.enableMenuItem(idCopyPreview, !busy && hasResult)
@@ -2398,6 +2693,113 @@ func byteSizeLabel(size int) string {
 	return fmt.Sprintf("%.1fMB", float64(size)/(1024*1024))
 }
 
+func updateServerHandoffRecordFromStatus(record nativeServerHandoffRecord, status model.ExecutionPackageStatusResponse) nativeServerHandoffRecord {
+	record.SchemaVersion = firstNonEmptyNative(record.SchemaVersion, "demoops.native_server_handoff_record.v1")
+	record.ExchangePackageID = firstNonEmptyNative(status.ExchangePackageID, record.ExchangePackageID)
+	record.CloudJobID = firstNonEmptyNative(status.CloudJobID, record.CloudJobID)
+	record.Status = firstNonEmptyNative(string(status.Status), record.Status)
+	record.Stage = strings.TrimSpace(status.Stage)
+	record.Message = strings.TrimSpace(status.Message)
+	record.ProgressPercent = status.ProgressPercent
+	record.ResultPackageID = strings.TrimSpace(status.ResultPackageID)
+	record.LastStatusAt = time.Now().UTC()
+	if record.UploadedAt.IsZero() {
+		record.UploadedAt = record.LastStatusAt
+	}
+	if strings.TrimSpace(record.OrgID) == "" {
+		record.OrgID = nativeDefaultOrgID
+	}
+	if strings.TrimSpace(record.ReviewSurface) == "" {
+		record.ReviewSurface = "native_win32"
+	}
+	return record
+}
+
+func serverStatusSummary(record nativeServerHandoffRecord, status model.ExecutionPackageStatusResponse) string {
+	lines := []string{
+		"服务器执行状态",
+		"Exchange Package ID: " + firstNonEmptyNative(status.ExchangePackageID, record.ExchangePackageID, "unknown"),
+		"Cloud Job ID: " + firstNonEmptyNative(status.CloudJobID, record.CloudJobID, "unknown"),
+		"Status: " + firstNonEmptyNative(string(status.Status), record.Status, "unknown"),
+		"Stage: " + firstNonEmptyNative(status.Stage, record.Stage, "unknown"),
+	}
+	if status.ProgressPercent > 0 {
+		lines = append(lines, fmt.Sprintf("Progress: %d%%", status.ProgressPercent))
+	}
+	if strings.TrimSpace(status.Message) != "" {
+		lines = append(lines, "Message: "+compactPath(status.Message, 180))
+	}
+	if strings.TrimSpace(status.ResultPackageID) != "" {
+		lines = append(lines, "Result Package ID: "+status.ResultPackageID)
+	}
+	if status.ResultSummary != nil {
+		lines = append(lines, fmt.Sprintf("Result: status=%s delivery=%s pass_rate=%.2f assets=%d videos=%d screenshots=%d",
+			status.ResultSummary.ResultStatus,
+			status.ResultSummary.DeliveryStatus,
+			status.ResultSummary.PassRate,
+			status.ResultSummary.GeneratedAssetCount,
+			status.ResultSummary.DemoVideoCount,
+			status.ResultSummary.ScreenshotCount,
+		))
+		if strings.TrimSpace(status.ResultSummary.PrimaryDemoVideoURI) != "" {
+			lines = append(lines, "Primary video: "+compactPath(status.ResultSummary.PrimaryDemoVideoURI, 160))
+		}
+		if status.ResultSummary.AckRequired {
+			lines = append(lines, "Ack: required")
+		} else if !status.ResultSummary.AckedAt.IsZero() {
+			lines = append(lines, "Ack: "+nativeTimeLabel(status.ResultSummary.AckedAt))
+		}
+	}
+	if status.FailureSummary != nil {
+		lines = append(lines, "Failure: "+firstNonEmptyNative(status.FailureSummary.Code, "unknown"))
+		if strings.TrimSpace(status.FailureSummary.Message) != "" {
+			lines = append(lines, "Failure message: "+compactPath(status.FailureSummary.Message, 180))
+		}
+		if strings.TrimSpace(status.FailureSummary.FailedStage) != "" {
+			lines = append(lines, "Failed stage: "+status.FailureSummary.FailedStage)
+		}
+		if strings.TrimSpace(status.FailureSummary.CurrentURL) != "" {
+			lines = append(lines, "Current URL: "+compactPath(status.FailureSummary.CurrentURL, 160))
+		}
+		if strings.TrimSpace(status.FailureSummary.PageTitle) != "" {
+			lines = append(lines, "Page title: "+compactPath(status.FailureSummary.PageTitle, 120))
+		}
+		if status.FailureSummary.Retryable {
+			lines = append(lines, "Retryable: yes")
+		}
+	}
+	if status.Error != nil {
+		lines = append(lines, "Error code: "+firstNonEmptyNative(status.Error.Code, "unknown"))
+		if strings.TrimSpace(status.Error.Message) != "" {
+			lines = append(lines, "Error message: "+compactPath(status.Error.Message, 180))
+		}
+	}
+	if len(status.StageHistory) > 0 {
+		lines = append(lines, "", "Recent Stage History")
+		start := maxInt(0, len(status.StageHistory)-6)
+		for _, event := range status.StageHistory[start:] {
+			line := "- " + firstNonEmptyNative(event.Stage, "unknown")
+			if event.Status != "" {
+				line += " " + string(event.Status)
+			}
+			if event.ProgressPercent > 0 {
+				line += fmt.Sprintf(" %d%%", event.ProgressPercent)
+			}
+			if strings.TrimSpace(event.Message) != "" {
+				line += ": " + compactPath(event.Message, 120)
+			}
+			lines = append(lines, line)
+		}
+	}
+	lines = append(lines,
+		"",
+		"Server: "+firstNonEmptyNative(record.CloudBaseURL, "configured exchange"),
+		"Last checked: "+nativeTimeLabel(time.Now()),
+		"Handoff record: "+handoffRecordLabel(record.OutputDirectory),
+	)
+	return strings.Join(lines, "\r\n")
+}
+
 func shortHash(value string) string {
 	value = strings.TrimSpace(value)
 	if len(value) <= 12 {
@@ -2554,6 +2956,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.exportBtn,
 		a.approveBtn,
 		a.uploadBtn,
+		a.queryStatusBtn,
 		a.openOutputBtn,
 		a.openLogBtn,
 		a.statusList,
@@ -3025,19 +3428,21 @@ const (
 
 	swShow = 5
 
-	wmCreate              = 0x0001
-	wmDestroy             = 0x0002
-	wmClose               = 0x0010
-	wmSize                = 0x0005
-	wmSetFont             = 0x0030
-	wmCommand             = 0x0111
-	wmCtlColorEdit        = 0x0133
-	wmCtlColorListBox     = 0x0134
-	wmCtlColorStatic      = 0x0138
-	wmAppGenerationDone   = 0x8001
-	wmAppGenerationFailed = 0x8002
-	wmAppUploadDone       = 0x8003
-	wmAppUploadFailed     = 0x8004
+	wmCreate                = 0x0001
+	wmDestroy               = 0x0002
+	wmClose                 = 0x0010
+	wmSize                  = 0x0005
+	wmSetFont               = 0x0030
+	wmCommand               = 0x0111
+	wmCtlColorEdit          = 0x0133
+	wmCtlColorListBox       = 0x0134
+	wmCtlColorStatic        = 0x0138
+	wmAppGenerationDone     = 0x8001
+	wmAppGenerationFailed   = 0x8002
+	wmAppUploadDone         = 0x8003
+	wmAppUploadFailed       = 0x8004
+	wmAppServerStatusDone   = 0x8005
+	wmAppServerStatusFailed = 0x8006
 
 	lbAddString = 0x0180
 	lbSetCurSel = 0x0186
