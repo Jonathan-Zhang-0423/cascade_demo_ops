@@ -93,6 +93,7 @@ const (
 	idOpenDeliverables  = 1063
 	idOpenPrimaryAsset  = 1064
 	idStageExplorer     = 1065
+	idViewChecklist     = 1066
 
 	bnClicked    = 0
 	enChange     = 0x0300
@@ -211,6 +212,7 @@ type nativeApp struct {
 	viewOutlineBtn   syscall.Handle
 	viewBundleBtn    syscall.Handle
 	viewReviewBtn    syscall.Handle
+	viewChecklistBtn syscall.Handle
 	copyPreviewBtn   syscall.Handle
 	openPreviewBtn   syscall.Handle
 	recentLabel      syscall.Handle
@@ -290,6 +292,7 @@ type nativeGenerateResult struct {
 	HealthBundle      string `json:"health_bundle"`
 	HealthValidation  string `json:"health_validation"`
 	StageSummaries    []nativeStageSummary
+	ApprovalChecklist string `json:"approval_checklist,omitempty"`
 }
 
 type nativeStageSummary struct {
@@ -648,7 +651,7 @@ func (a *nativeApp) createControls() {
 	a.phaseReview = createChild(a.hwnd, "STATIC", "4 审核保存", wsChild|wsVisible|wsBorder, idPhaseReview)
 	a.previewGroup = createGroupBox(a.hwnd, "审批材料", idPreviewGroup)
 	a.previewTitle = createChild(a.hwnd, "STATIC", "审核三合一包；服务器 Agent 在边界内自适应执行。", wsChild|wsVisible, idPreviewTitle)
-	a.previewHint = createChild(a.hwnd, "STATIC", "Markdown 面向审批，JSON/Outline 面向执行。", wsChild|wsVisible, idPreviewHint)
+	a.previewHint = createChild(a.hwnd, "STATIC", "清单/Markdown 面向审批，JSON/Outline 面向执行。", wsChild|wsVisible, idPreviewHint)
 	a.artifactStatus = createChild(a.hwnd, "STATIC", "输出目录：尚未生成", wsChild|wsVisible, idArtifactStatus)
 	a.recentLabel = createChild(a.hwnd, "STATIC", "最近三合一包", wsChild|wsVisible, idRecentLabel)
 	a.recentPackage = createChild(a.hwnd, "COMBOBOX", "", wsChild|wsVisible|wsBorder|cbsDropDownList|wsVScroll, idRecentPackage)
@@ -665,6 +668,7 @@ func (a *nativeApp) createControls() {
 	a.stageExplorer = createChild(a.hwnd, "LISTBOX", "", wsChild|wsVisible|wsBorder|wsVScroll|lbsNotify, idStageExplorer)
 	a.previewSummary = createChild(a.hwnd, "EDIT", "等待生成结果。", wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutoVScroll|esReadOnly, idPreviewSummary)
 	a.viewReviewBtn = createChild(a.hwnd, "BUTTON", "审核摘要", wsChild|wsVisible|bsPushButton, idViewReview)
+	a.viewChecklistBtn = createChild(a.hwnd, "BUTTON", "审批清单", wsChild|wsVisible|bsPushButton, idViewChecklist)
 	a.viewMarkdownBtn = createChild(a.hwnd, "BUTTON", "Markdown", wsChild|wsVisible|bsPushButton, idViewMarkdown)
 	a.viewStageBtn = createChild(a.hwnd, "BUTTON", "Stage JSON", wsChild|wsVisible|bsPushButton, idViewStageJSON)
 	a.viewOutlineBtn = createChild(a.hwnd, "BUTTON", "Outline", wsChild|wsVisible|bsPushButton, idViewOutline)
@@ -754,6 +758,8 @@ func (a *nativeApp) handleCommand(id int) {
 		a.showPreview("markdown")
 	case idViewReview:
 		a.showPreview("review")
+	case idViewChecklist:
+		a.showPreview("checklist")
 	case idViewStageJSON:
 		a.showPreview("stage")
 	case idViewOutline:
@@ -788,7 +794,7 @@ func (a *nativeApp) commandAllowed(id int) bool {
 		return !busy && a.inputReady()
 	case idBrowseRepo, idImportRequirement, idImportPackage, idClearDraft:
 		return !busy
-	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved, idQueryServerStatus, idFetchServerResult, idDownloadArtifacts, idAckServerResult, idOpenDeliverables, idOpenPrimaryAsset:
+	case idSaveButton, idExportPackage, idApprovePackage, idOpenOutput, idViewReview, idViewChecklist, idViewMarkdown, idViewStageJSON, idViewOutline, idViewBundle, idCopyPreview, idOpenPreviewFile, idUploadApproved, idQueryServerStatus, idFetchServerResult, idDownloadArtifacts, idAckServerResult, idOpenDeliverables, idOpenPrimaryAsset:
 		return !busy && hasResult
 	case idOpenRecentPackage:
 		return !busy && hasRecent
@@ -825,10 +831,11 @@ func (a *nativeApp) createMenu() {
 	appendMenuSeparator(fileMenu)
 	appendMenuItem(fileMenu, idMenuExit, "退出")
 	appendMenuItem(viewMenu, idViewReview, "预览审核摘要\tCtrl+1")
-	appendMenuItem(viewMenu, idViewMarkdown, "预览 Markdown\tCtrl+2")
-	appendMenuItem(viewMenu, idViewStageJSON, "预览 Stage JSON\tCtrl+3")
-	appendMenuItem(viewMenu, idViewOutline, "预览 Script Outline\tCtrl+4")
-	appendMenuItem(viewMenu, idViewBundle, "预览 Full Bundle\tCtrl+5")
+	appendMenuItem(viewMenu, idViewChecklist, "预览审批清单\tCtrl+2")
+	appendMenuItem(viewMenu, idViewMarkdown, "预览 Markdown\tCtrl+3")
+	appendMenuItem(viewMenu, idViewStageJSON, "预览 Stage JSON\tCtrl+4")
+	appendMenuItem(viewMenu, idViewOutline, "预览 Script Outline\tCtrl+5")
+	appendMenuItem(viewMenu, idViewBundle, "预览 Full Bundle\tCtrl+6")
 	appendMenuSeparator(viewMenu)
 	appendMenuItem(viewMenu, idCopyPreview, "复制当前预览\tCtrl+Shift+C")
 	appendMenuItem(viewMenu, idOpenPreviewFile, "打开当前预览文件\tCtrl+Shift+F")
@@ -862,10 +869,11 @@ func (a *nativeApp) createAccelerators() {
 		{FVirt: fVirtKey | fControl | fShift, Key: 'R', Cmd: idOpenRecentPackage},
 		{FVirt: fVirtKey | fControl, Key: 'L', Cmd: idOpenLog},
 		{FVirt: fVirtKey | fControl, Key: '1', Cmd: idViewReview},
-		{FVirt: fVirtKey | fControl, Key: '2', Cmd: idViewMarkdown},
-		{FVirt: fVirtKey | fControl, Key: '3', Cmd: idViewStageJSON},
-		{FVirt: fVirtKey | fControl, Key: '4', Cmd: idViewOutline},
-		{FVirt: fVirtKey | fControl, Key: '5', Cmd: idViewBundle},
+		{FVirt: fVirtKey | fControl, Key: '2', Cmd: idViewChecklist},
+		{FVirt: fVirtKey | fControl, Key: '3', Cmd: idViewMarkdown},
+		{FVirt: fVirtKey | fControl, Key: '4', Cmd: idViewStageJSON},
+		{FVirt: fVirtKey | fControl, Key: '5', Cmd: idViewOutline},
+		{FVirt: fVirtKey | fControl, Key: '6', Cmd: idViewBundle},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'C', Cmd: idCopyPreview},
 		{FVirt: fVirtKey | fControl | fShift, Key: 'F', Cmd: idOpenPreviewFile},
 	}
@@ -1017,15 +1025,17 @@ func (a *nativeApp) layout() {
 	tabTop := summaryTop + summaryH + 12
 	copyW := 72
 	openPreviewW := 88
-	buttonW := maxInt(64, (rightW-28-copyW-openPreviewW-healthGap*6)/5)
+	buttonW := maxInt(72, (rightW-28-healthGap*5)/6)
 	moveControl(a.viewReviewBtn, rightX+14, tabTop, buttonW, 30)
-	moveControl(a.viewMarkdownBtn, rightX+14+buttonW+healthGap, tabTop, buttonW, 30)
-	moveControl(a.viewStageBtn, rightX+14+(buttonW+healthGap)*2, tabTop, buttonW, 30)
-	moveControl(a.viewOutlineBtn, rightX+14+(buttonW+healthGap)*3, tabTop, buttonW, 30)
-	moveControl(a.viewBundleBtn, rightX+14+(buttonW+healthGap)*4, tabTop, buttonW, 30)
-	moveControl(a.copyPreviewBtn, rightX+rightW-14-openPreviewW-healthGap-copyW, tabTop, copyW, 30)
-	moveControl(a.openPreviewBtn, rightX+rightW-14-openPreviewW, tabTop, openPreviewW, 30)
-	moveControl(a.previewContent, rightX+14, tabTop+40, rightW-28, maxInt(160, rightH-(tabTop-rightTop)-54))
+	moveControl(a.viewChecklistBtn, rightX+14+buttonW+healthGap, tabTop, buttonW, 30)
+	moveControl(a.viewMarkdownBtn, rightX+14+(buttonW+healthGap)*2, tabTop, buttonW, 30)
+	moveControl(a.viewStageBtn, rightX+14+(buttonW+healthGap)*3, tabTop, buttonW, 30)
+	moveControl(a.viewOutlineBtn, rightX+14+(buttonW+healthGap)*4, tabTop, buttonW, 30)
+	moveControl(a.viewBundleBtn, rightX+14+(buttonW+healthGap)*5, tabTop, buttonW, 30)
+	utilityTop := tabTop + 38
+	moveControl(a.copyPreviewBtn, rightX+rightW-14-openPreviewW-healthGap-copyW, utilityTop, copyW, 30)
+	moveControl(a.openPreviewBtn, rightX+rightW-14-openPreviewW, utilityTop, openPreviewW, 30)
+	moveControl(a.previewContent, rightX+14, utilityTop+40, rightW-28, maxInt(160, rightH-(utilityTop-rightTop)-54))
 	moveControl(a.statusBar, margin, height-margin-statusBarH, maxInt(300, width-margin*2), statusBarH)
 }
 
@@ -1122,6 +1132,7 @@ func (a *nativeApp) nativeResultFromState(state *orchestrator.CascadeState) (*na
 		markdown = bundle.ApprovalMarkdown.InlineMarkdown
 	}
 	reviewText := nativeReviewText(state, bundle)
+	checklist := nativeApprovalChecklistText(state, bundle)
 	return &nativeGenerateResult{
 		ProjectID:         state.ProjectID,
 		ReviewText:        reviewText,
@@ -1140,6 +1151,7 @@ func (a *nativeApp) nativeResultFromState(state *orchestrator.CascadeState) (*na
 		HealthBundle:      "Bundle: " + byteSizeLabel(len(bundleJSON)),
 		HealthValidation:  validationHealthLabel(bundle.Validation),
 		StageSummaries:    nativeStageSummaries(bundle),
+		ApprovalChecklist: checklist,
 	}, nil
 }
 
@@ -2090,6 +2102,7 @@ func readResultFiles(dir string) (*nativeGenerateResult, error) {
 	}
 	state := &orchestrator.CascadeState{ProjectID: firstNonEmptyNative(bundle.ProjectID, "imported_package")}
 	reviewText := nativeReviewText(state, &bundle)
+	checklist := nativeApprovalChecklistText(state, &bundle)
 	result := &nativeGenerateResult{
 		ProjectID:         state.ProjectID,
 		ReviewText:        reviewText,
@@ -2108,6 +2121,7 @@ func readResultFiles(dir string) (*nativeGenerateResult, error) {
 		HealthBundle:      "Bundle: " + byteSizeLabel(len(bundleJSON)),
 		HealthValidation:  validationHealthLabel(bundle.Validation),
 		StageSummaries:    nativeStageSummaries(&bundle),
+		ApprovalChecklist: checklist,
 	}
 	return result, nil
 }
@@ -2349,6 +2363,7 @@ func resultFiles(result *nativeGenerateResult) map[string]string {
 	}
 	files := map[string]string{
 		"approval_markdown.md":         result.Markdown,
+		"approval_checklist.txt":       result.ApprovalChecklist,
 		"stage_approval_plan.json":     result.StageJSON,
 		"script_outline.json":          result.OutlineJSON,
 		"client_execution_bundle.json": result.BundleJSON,
@@ -2374,6 +2389,8 @@ func resultFilesExist(dir string) bool {
 
 func previewFileName(kind string) (string, string) {
 	switch kind {
+	case "checklist":
+		return "approval_checklist.txt", "Approval Checklist"
 	case "stage":
 		return "stage_approval_plan.json", "Stage JSON"
 	case "outline":
@@ -2510,6 +2527,10 @@ func (a *nativeApp) showPreview(kind string) {
 		setWindowText(a.previewContent, result.ReviewText)
 		setWindowText(a.workflowState, "预览审核摘要")
 		a.currentPreview = "review"
+	case "checklist":
+		setWindowText(a.previewContent, result.ApprovalChecklist)
+		setWindowText(a.workflowState, "预览审批清单")
+		a.currentPreview = "checklist"
 	case "stage":
 		setWindowText(a.previewContent, result.StageJSON)
 		setWindowText(a.workflowState, "预览 Stage JSON")
@@ -2544,6 +2565,9 @@ func (a *nativeApp) copyCurrentPreview() {
 	case "review":
 		content = result.ReviewText
 		label = "审核摘要"
+	case "checklist":
+		content = result.ApprovalChecklist
+		label = "审批清单"
 	case "stage":
 		content = result.StageJSON
 		label = "Stage JSON"
@@ -2612,6 +2636,7 @@ func (a *nativeApp) openCurrentPreviewFile() {
 }
 
 func (a *nativeApp) setPreviewButtonsEnabled(enabled bool) {
+	setEnabled(a.viewChecklistBtn, enabled)
 	setEnabled(a.viewMarkdownBtn, enabled)
 	setEnabled(a.viewStageBtn, enabled)
 	setEnabled(a.viewOutlineBtn, enabled)
@@ -3575,6 +3600,7 @@ func nativeResultSummary(state *orchestrator.CascadeState, bundle *model.Executa
 		fmt.Sprintf("Stages: approval=%d outline=%d (%s)", stageCount, outlineCount, stageCoverageLabel(stageCount, outlineCount)),
 		fmt.Sprintf("Payload size: markdown=%s stage=%s outline=%s bundle=%s", byteSizeLabel(len(markdown)), byteSizeLabel(len(stageJSON)), byteSizeLabel(len(outlineJSON)), byteSizeLabel(len(bundleJSON))),
 		"Package gate: " + packageSizeGateLabel(len(bundleJSON)),
+		"Approval checklist: ready",
 		"Upload boundary: local approval required; credentials stay as secret_ref only.",
 	}
 	if suffix := shortHash(bundle.Reproducibility.BundleHashSHA256); suffix != "" {
@@ -3596,6 +3622,7 @@ func nativeResultSummaryForDirectory(result *nativeGenerateResult, dir string) s
 		fmt.Sprintf("Stages: approval=%d outline=%d (%s)", result.StageCount, result.OutlineStageCount, stageCoverageLabel(result.StageCount, result.OutlineStageCount)),
 		fmt.Sprintf("Payload size: markdown=%s stage=%s outline=%s bundle=%s", byteSizeLabel(len(result.Markdown)), byteSizeLabel(len(result.StageJSON)), byteSizeLabel(len(result.OutlineJSON)), byteSizeLabel(len(result.BundleJSON))),
 		"Package gate: " + packageSizeGateLabel(len(result.BundleJSON)),
+		"Approval checklist: " + readySizeLabel(result.ApprovalChecklist),
 		"Files: " + recentPackageFilesLabel(dir),
 		"Approval: " + approvalRecordLabel(dir),
 		"Server handoff: " + serverHandoffLabel(dir),
@@ -3738,6 +3765,95 @@ func nativeReviewText(state *orchestrator.CascadeState, bundle *model.Executable
 		}
 	}
 	return strings.Join(lines, "\r\n")
+}
+
+func nativeApprovalChecklistText(state *orchestrator.CascadeState, bundle *model.ExecutableRecordingScriptBundle) string {
+	if state == nil || bundle == nil {
+		return "审批清单不可用。"
+	}
+	stageCount := stageApprovalStageCount(bundle)
+	outlineCount := outlineStageCount(bundle)
+	lines := []string{
+		"审批清单",
+		"",
+		"Project ID: " + firstNonEmptyNative(state.ProjectID, bundle.ProjectID, "unknown"),
+		"Runtime: " + firstNonEmptyNative(bundle.ScriptManifest.Runtime, "unknown"),
+		"Bundle hash: ..." + firstNonEmptyNative(shortHash(bundle.Reproducibility.BundleHashSHA256), "missing"),
+		"",
+		"核心检查",
+		checklistLine(stageCount > 0, fmt.Sprintf("Stage plan 包含 %d 个阶段", stageCount), "缺少 stage_approval_plan.stages"),
+		checklistLine(outlineCount > 0, fmt.Sprintf("Script outline 包含 %d 个阶段", outlineCount), "缺少 script_outline.stages"),
+		checklistLine(stageCount > 0 && stageCount == outlineCount, "Stage JSON 与 Outline 阶段数量一致", fmt.Sprintf("阶段数量不一致：stage=%d outline=%d", stageCount, outlineCount)),
+		checklistLine(bundle.Validation != nil && bundle.Validation.Valid, "Bundle validation 通过", validationFailureSummary(bundle.Validation)),
+		checklistLine(bundle.ApprovalMarkdown.SHA256 != "", "Markdown hash 已绑定", "approval_markdown.sha256 缺失"),
+		checklistLine(bundle.Reproducibility.StagePlanHashSHA256 != "", "Stage plan hash 已绑定", "stage_plan_hash 缺失"),
+		checklistLine(bundle.Reproducibility.OutlineHashSHA256 != "", "Outline hash 已绑定", "outline_hash 缺失"),
+	}
+	if bundle.ScriptOutline != nil {
+		lines = append(lines,
+			checklistLine(len(bundle.ScriptOutline.AllowedExplorationScope.AllowedOrigins) > 0, "Browser Agent allowed origin 已声明", "allowed_origins 缺失"),
+			checklistLine(len(bundle.ScriptOutline.ForbiddenActions) > 0 || len(bundle.ScriptOutline.AllowedExplorationScope.ForbiddenPathPrefixes) > 0, "执行禁区/禁止动作已声明", "缺少 forbidden actions/path prefixes"),
+		)
+	}
+	lines = append(lines, "", "阶段检查")
+	if bundle.StageApprovalPlan != nil {
+		for _, stage := range bundle.StageApprovalPlan.Stages {
+			title := firstNonEmptyNative(stage.Title, stage.Objective, stage.ID)
+			route := firstNonEmptyNative(stage.TargetRoute, stage.EntryRoute, stage.ExpectedRouteAfterAction, stage.TargetURL)
+			if route == "" && len(stage.CandidateRoutes) > 0 {
+				route = stage.CandidateRoutes[0].Route
+			}
+			lines = append(lines,
+				fmt.Sprintf("- %02d %s", stage.Order, title),
+				"  "+checklistLine(strings.TrimSpace(route) != "", "路由/状态已声明: "+route, "缺少目标路由或运行时状态"),
+				"  "+checklistLine(stage.Interaction.Kind != "", "动作语义: "+string(stage.Interaction.Kind), "缺少 interaction.kind"),
+				"  "+checklistLine(strings.TrimSpace(stage.SuccessState) != "", "成功标准: "+compactPath(stage.SuccessState, 120), "缺少 success_state"),
+				"  "+checklistLine(len(stage.EvidenceRefs)+len(stage.ComponentRefs)+len(stage.APIRefs) > 0, "证据链已绑定", "缺少 evidence/component/API refs"),
+			)
+			if len(stage.RiskNotes) > 0 {
+				lines = append(lines, "  Risk: "+joinCompact(stage.RiskNotes, 140))
+			}
+		}
+	}
+	if bundle.StageApprovalPlan != nil && len(bundle.StageApprovalPlan.UncertaintyReport) > 0 {
+		lines = append(lines, "", "不确定项")
+		for i, item := range bundle.StageApprovalPlan.UncertaintyReport {
+			if i >= 8 {
+				lines = append(lines, fmt.Sprintf("- ...and %d more uncertainty items", len(bundle.StageApprovalPlan.UncertaintyReport)-i))
+				break
+			}
+			lines = append(lines, "- "+firstNonEmptyNative(item.Summary, item.SuggestedAction, item.Kind, item.ID))
+		}
+	}
+	if bundle.Validation != nil && len(bundle.Validation.Findings) > 0 {
+		lines = append(lines, "", "Validation Findings")
+		for i, finding := range bundle.Validation.Findings {
+			if i >= 8 {
+				lines = append(lines, fmt.Sprintf("- ...and %d more findings", len(bundle.Validation.Findings)-i))
+				break
+			}
+			lines = append(lines, "- "+firstNonEmptyNative(finding.Summary, finding.Title, finding.ID))
+		}
+	}
+	lines = append(lines, "", "审批动作建议", "- 审核 Markdown 是否符合需求意图。", "- 抽查 Stage JSON / Outline 的业务顺序和执行边界。", "- 确认没有 raw secret、token、cookie、完整源码后再执行本地审批。")
+	return strings.Join(lines, "\r\n")
+}
+
+func checklistLine(ok bool, pass string, fail string) string {
+	if ok {
+		return "[OK] " + pass
+	}
+	return "[REVIEW] " + fail
+}
+
+func validationFailureSummary(validation *model.ExecutableScriptValidation) string {
+	if validation == nil {
+		return "validation missing"
+	}
+	if validation.Valid {
+		return "validation passed"
+	}
+	return fmt.Sprintf("validation blocked, findings=%d", len(validation.Findings))
 }
 
 func validationHealthLabel(validation *model.ExecutableScriptValidation) string {
@@ -4491,6 +4607,7 @@ func (a *nativeApp) applyDefaultFont() {
 		a.previewSummary,
 		a.previewContent,
 		a.viewMarkdownBtn,
+		a.viewChecklistBtn,
 		a.viewStageBtn,
 		a.viewOutlineBtn,
 		a.viewBundleBtn,

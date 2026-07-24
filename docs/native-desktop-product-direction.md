@@ -34,6 +34,7 @@ The first native workflow is the three-in-one package workbench:
   - `stage_approval_plan.json`
   - `script_outline.json`
 - Provide a native approval review summary that condenses stages, browser-agent boundaries, bundle hash, and validation findings before users inspect full Markdown or JSON.
+- Provide a native approval checklist derived from the bundle so PM/ops reviewers can inspect stage coverage, hash binding, validation, route/action evidence, and secret boundaries before approving.
 - Provide a native stage explorer so reviewers can select each business stage and inspect its objective, route, action, success state, evidence count, and Browser Agent boundary without reading raw JSON first.
 - Let users copy the currently previewed approval artifact through a native clipboard action for review handoff.
 - Let users open the currently previewed approval artifact with the system default editor/viewer after ensuring the package files exist on disk.
