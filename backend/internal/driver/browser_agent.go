@@ -48,21 +48,23 @@ type BrowserAgentWorkerOpenResult struct {
 }
 
 type BrowserAgentWorkerStage struct {
-	ID             string                              `json:"id"`
-	Order          int                                 `json:"order"`
-	NodeID         string                              `json:"node_id"`
-	Objective      string                              `json:"objective,omitempty"`
-	EntryRoute     string                              `json:"entry_route,omitempty"`
-	Route          string                              `json:"route,omitempty"`
-	URL            string                              `json:"url,omitempty"`
-	TargetContract model.BrowserAgentTargetContract    `json:"target_contract"`
-	Components     []model.BrowserAgentComponentTarget `json:"components,omitempty"`
-	Interactions   []model.BrowserAgentInteraction     `json:"interactions"`
-	WaitConditions []string                            `json:"wait_conditions,omitempty"`
-	CapturePlan    *model.BrowserAgentCapturePlan      `json:"capture_plan,omitempty"`
-	SuccessState   string                              `json:"success_state,omitempty"`
-	DurationMS     int                                 `json:"duration_ms,omitempty"`
-	Validations    []model.ValidationSpec              `json:"validations,omitempty"`
+	ID                           string                              `json:"id"`
+	Order                        int                                 `json:"order"`
+	NodeID                       string                              `json:"node_id"`
+	Objective                    string                              `json:"objective,omitempty"`
+	EntryRoute                   string                              `json:"entry_route,omitempty"`
+	Route                        string                              `json:"route,omitempty"`
+	URL                          string                              `json:"url,omitempty"`
+	TargetContract               model.BrowserAgentTargetContract    `json:"target_contract"`
+	Components                   []model.BrowserAgentComponentTarget `json:"components,omitempty"`
+	Interactions                 []model.BrowserAgentInteraction     `json:"interactions"`
+	WaitConditions               []string                            `json:"wait_conditions,omitempty"`
+	CapturePlan                  *model.BrowserAgentCapturePlan      `json:"capture_plan,omitempty"`
+	SuccessState                 string                              `json:"success_state,omitempty"`
+	DurationMS                   int                                 `json:"duration_ms,omitempty"`
+	Validations                  []model.ValidationSpec              `json:"validations,omitempty"`
+	PreferredSelectorAlternative *model.SelectorCandidate            `json:"preferred_selector_alternative,omitempty"`
+	SuggestedWaitCondition       string                              `json:"suggested_wait_condition,omitempty"`
 }
 
 type BrowserAgentWorkerStageRequest struct {
@@ -71,10 +73,12 @@ type BrowserAgentWorkerStageRequest struct {
 }
 
 type BrowserAgentWorkerStageResult struct {
-	Observation    model.RuntimeObservation `json:"observation"`
-	EvidenceRefs   []model.EvidenceRef      `json:"evidence_refs"`
-	Artifacts      []model.ArtifactRef      `json:"artifacts,omitempty"`
-	TargetResolved bool                     `json:"target_resolved,omitempty"`
+	Observation                  model.RuntimeObservation `json:"observation"`
+	EvidenceRefs                 []model.EvidenceRef      `json:"evidence_refs"`
+	Artifacts                    []model.ArtifactRef      `json:"artifacts,omitempty"`
+	TargetResolved               bool                     `json:"target_resolved,omitempty"`
+	PreferredSelectorAlternative *model.SelectorCandidate `json:"preferred_selector_alternative,omitempty"`
+	SuggestedWaitCondition       string                   `json:"suggested_wait_condition,omitempty"`
 }
 
 type BrowserAgentWorkerCloseResult struct {

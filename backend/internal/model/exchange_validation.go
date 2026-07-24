@@ -336,6 +336,9 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 		if stage.NodeID == "" || !planNodeIDs[stage.NodeID] {
 			return fmt.Errorf("stage_approval_plan stage node_id %q is not in plan_json", stage.NodeID)
 		}
+		if err := validateStageApprovalStage(stage); err != nil {
+			return err
+		}
 		if strings.TrimSpace(stage.Objective) == "" {
 			return fmt.Errorf("stage_approval_plan stage %q is missing objective", stage.NodeID)
 		}
@@ -423,6 +426,64 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 		}
 	}
 	return nil
+}
+
+// validateStageApprovalStage keeps the business facts required by the outline
+// protocol in the App-approved plan. Server may adapt locators at runtime, but
+// it must not infer a missing business stage, route state, or success rule.
+func validateStageApprovalStage(stage StageApprovalStage) error {
+	if stage.ID == "" || stage.Order < 1 || stage.NodeID == "" {
+		return fmt.Errorf("stage_approval_plan stage %q is missing id, order, or node_id", stage.NodeID)
+	}
+	if !validBusinessStageKind(stage.StageKind) {
+		return fmt.Errorf("stage_approval_plan stage %q has unsupported or missing stage_kind", stage.NodeID)
+	}
+	if !validBusinessRouteState(stage.RouteState) {
+		return fmt.Errorf("stage_approval_plan stage %q has unsupported or missing route_state", stage.NodeID)
+	}
+	if strings.TrimSpace(stage.BusinessIntent) == "" {
+		return fmt.Errorf("stage_approval_plan stage %q is missing business_intent", stage.NodeID)
+	}
+	if strings.TrimSpace(stage.EntryRoute) == "" && strings.TrimSpace(stage.TargetRoute) == "" && len(stage.CandidateRoutes) == 0 {
+		return fmt.Errorf("stage_approval_plan stage %q requires entry_route, target_route, or candidate_routes", stage.NodeID)
+	}
+	if stage.Interaction.Kind == "" {
+		return fmt.Errorf("stage_approval_plan stage %q is missing interaction", stage.NodeID)
+	}
+	if strings.TrimSpace(stage.SuccessState) == "" {
+		return fmt.Errorf("stage_approval_plan stage %q is missing success_state", stage.NodeID)
+	}
+	if len(stage.WaitConditions) == 0 {
+		return fmt.Errorf("stage_approval_plan stage %q is missing wait_conditions", stage.NodeID)
+	}
+	if len(stage.CapturePoints) == 0 && stage.CapturePlan == nil {
+		return fmt.Errorf("stage_approval_plan stage %q requires capture_points or capture_plan", stage.NodeID)
+	}
+	if stage.Confidence < 0 || stage.Confidence > 1 {
+		return fmt.Errorf("stage_approval_plan stage %q confidence must be between 0 and 1", stage.NodeID)
+	}
+	return nil
+}
+
+func validBusinessStageKind(value BusinessStageKind) bool {
+	switch value {
+	case BusinessStageKindSessionSetup, BusinessStageKindBusinessAction, BusinessStageKindBusinessInput,
+		BusinessStageKindModeSelection, BusinessStageKindBusinessSubmit, BusinessStageKindObserveProgress,
+		BusinessStageKindFinalObserve:
+		return true
+	default:
+		return false
+	}
+}
+
+func validBusinessRouteState(value BusinessRouteState) bool {
+	switch value {
+	case BusinessRouteStateUnauthenticated, BusinessRouteStateWorkspace, BusinessRouteStateCreationFlow,
+		BusinessRouteStateProjectDetail, BusinessRouteStateBuildRunning:
+		return true
+	default:
+		return false
+	}
 }
 
 func stageHasEvidence(stage StageApprovalStage) bool {

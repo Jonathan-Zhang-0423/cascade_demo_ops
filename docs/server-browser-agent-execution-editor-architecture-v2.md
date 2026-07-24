@@ -1435,3 +1435,52 @@ Playwright点击未报错但Validation失败；步骤必须失败。
 ## 21. Server侧最终任务边界
 
 > Server侧接收版本化的业务动作证据和探索请求，使用Browser Agent在真实部署页面中建立组件实例和运行时行为证据，并在Server内部完成版本对齐、双证据融合、冲突分类、分项置信度计算和执行草案编译。Server只执行经过Hash授权的草案。正式执行中，Playwright负责确定性动作和录制，Outcome Verifier负责真实结果验证；selector、frame和有限wait等低风险漂移可在授权Repair Policy内由Server生成Runtime Patch、复验原Validation并继续执行，不默认退回上游。执行完成后，Server基于现有AssetTimelineCatalog和DemoEditPlan提供本地轻量视频编辑器，完成素材编排、预览、最终渲染和结果交付。Server不负责外部业务证据如何生成，也不修改业务含义、动作类型、输入数据、安全边界或成功标准。
+
+---
+
+## 22. 下一步开发计划：协议允许的运行时修复补全
+
+### 当前状态
+
+Server 已落地 Repair Policy 第一版：它校验提案的 run/bundle/policy hash、同节点边界、允许修复种类、可编辑字段、置信度阈值和次数上限；批准后只修改本次运行的内存 Stage，复验并写入 Patch Ledger，不改写 App 原包或审批 hash。
+
+当前仍存在“协议允许但尚未完整落地”的能力，必须进入后续开发计划。它们都只能修复页面实现漂移，不能修改业务意图、动作类型、输入语义、密钥、Stage 顺序、域名、禁止页面、破坏性标记或成功标准。
+
+### P0：真实修复提案生成与接入
+
+- 为 Validation Agent 接入 `RuntimeRepairProposal` 生产接口；Validation Agent 只能提出提案和证据，不能直接操作浏览器或应用补丁。
+- 在 Server 未接到外部 Validation Agent 前，实现受限的确定性提案生成器：仅从已审批的 selector alternatives、页面真实观察和已存在 wait/capture 字段中提出候选。
+- 提案必须包含同一 run/node/stage、bundle hash、policy hash、修复前后值、置信度与证据引用；缺一项即停止并打包失败诊断。
+
+验收：真实任务能在不改 App 上传字段的前提下产生可审计提案；无提案的 `repair_allowed` 不得伪造修复成功。
+
+### P1：语义定位器修复闭环
+
+- 扩展 selector alternative：按 role/name、test id、label、已验证 selector 的既定优先级重新观察和排序。
+- 对候选目标做唯一性、可见性、目标合同、同域和非破坏性检查；歧义候选必须停止，不得猜选。
+- 将修复前定位失败原因、候选摘要、采用原因和复验结果写入 Patch Ledger 与 Stage 事件。
+
+验收：selector/testid 漂移但语义合同一致时，可在同一 Stage 内重新解析、执行和验证；多个候选或目标合同不一致时返回失败诊断。
+
+### P2：等待和截图时机修复补全
+
+- 支持 Stage 级与 interaction 级 wait 条件的受控替换；只允许增补或替换已批准的等待语义，设置每次与总运行时上限。
+- 支持 Capture Plan 缺失时的受限补建，以及 `pre_capture_wait_ms`、`hold_after_ms` 的安全调整。
+- 以真实页面加载状态、元素可见性和截图证据为依据提出提案；不能因固定 sleep 成功就宣称业务结果通过。
+
+验收：异步渲染导致的截图过早或等待不足可修复并复验；超过时限、缺真实证据或改变业务验证条件时停止。
+
+### P3：frame resolution 修复
+
+- 实现协议中已允许的 `frame_resolution`：在相同页面、相同 Stage、相同动作和相同语义目标范围内重新定位 iframe/frame。
+- Worker 在重新定位 frame 后必须重新解析目标、执行原动作并复验原 Outcome；不允许跨域 frame、控制面 frame 或任意注入脚本。
+
+验收：同域 iframe 路径/层级漂移可修复；跨域、歧义、越过允许层级或改变目标合同的 frame 修复必须拒绝。
+
+### P4：修复结果与验收强化
+
+- 将修复后重新观察、重新解析、重试动作和重新验证分别记录为尝试序号递增的 Stage 事件。
+- Patch Ledger 增加拒绝原因、应用结果和复验结论的结构化展示；Editor Session 与桌面端 Stage Explorer 显示中文摘要。
+- 在允许执行测试二进制的 CI/隔离环境运行真实修复回归：selector、wait、capture timing、frame；同时验证所有越权修改被拒绝。
+
+验收：每次修复可回放、可定位、可解释；最终 Result Packager 只有一个失败诊断聚合出口，成功与失败都保留完整审计链。

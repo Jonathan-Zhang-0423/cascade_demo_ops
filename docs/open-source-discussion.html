@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>开源讨论</title>
+  <style>
+    :root { color-scheme: light; --ink: #172033; --muted: #5f6b7a; --line: #dce3ec; --blue: #1769aa; --blue-soft: #edf6ff; --green: #137a4b; --green-soft: #eaf8f0; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f7fa; color: var(--ink); font: 16px/1.7 "Microsoft YaHei", "PingFang SC", Arial, sans-serif; }
+    main { max-width: 1040px; margin: 36px auto; padding: 0 24px 48px; }
+    header { padding: 30px 34px; border-radius: 16px; background: linear-gradient(135deg, #173b63, #1769aa); color: #fff; }
+    h1 { margin: 0 0 8px; font-size: 32px; }
+    h2 { margin: 34px 0 14px; font-size: 22px; }
+    h3 { margin: 24px 0 8px; font-size: 18px; }
+    p { margin: 8px 0; }
+    .lead { margin: 0; opacity: .92; }
+    section { margin-top: 18px; padding: 24px 28px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+    .conclusion { border-color: #a8d9bf; background: var(--green-soft); }
+    .note { padding: 14px 16px; border-left: 4px solid var(--blue); background: var(--blue-soft); border-radius: 6px; }
+    ul { margin: 8px 0; padding-left: 24px; }
+    li { margin: 7px 0; }
+    code { padding: 1px 5px; border-radius: 4px; background: #edf1f5; font-family: Consolas, monospace; font-size: .92em; }
+    pre { overflow-x: auto; margin: 14px 0; padding: 18px; border-radius: 10px; background: #152238; color: #e9f2ff; font: 14px/1.7 Consolas, monospace; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    th, td { padding: 12px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: #f2f6fa; }
+    .tag { display: inline-block; padding: 3px 9px; border-radius: 999px; background: #dcedfa; color: #12558e; font-size: 13px; }
+    footer { margin-top: 18px; color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>开源讨论</h1>
+      <p class="lead">Cascade DemoOps：以可验证的本地开源能力获客，以安全、算力与生产交付能力商业化。</p>
+    </header>
+
+    <section class="conclusion">
+      <h2>结论</h2>
+      <p>面向小用户提供非商业化、低门槛的开源版本是可行的，但不应照搬 MongoDB 的全部模式。更适合本项目的是：<strong>开源本地协议与参考能力，收费提供云端受控执行、生产安全与高成本 AI/渲染服务。</strong></p>
+      <p>目标不是让用户手写 JSON，而是让他们能用自己的 App、代码理解 Agent 或产品知识库，按公开标准生成并审计执行包，再接入我们的 Server Browser Agent。</p>
+    </section>
+
+    <section>
+      <h2>为什么开源</h2>
+      <ul>
+        <li><strong>降低接入门槛：</strong>外部团队知道 Server 接受什么输入、为什么会拒绝、如何在提交前自测。</li>
+        <li><strong>建立信任：</strong>用户可本地查看执行包、策略和验证器，确认 Server 不会随意改变业务目标或输入。</li>
+        <li><strong>形成统一接口：</strong>第一方 App 与第三方 Agent 都生产同一种 <code>ClientExecutionPackage</code>，Server 不必为每一家重写适配层。</li>
+        <li><strong>形成生态基础：</strong>行业模板、垂直 Agent、企业内部研发工具可围绕同一协议生成执行包、视频模板或验证规则。</li>
+        <li><strong>获得开发者流量：</strong>一个可本地跑通的 Demo 比单纯宣传更容易被技术用户试用、转发和贡献。</li>
+      </ul>
+      <div class="note">开源降低的是接入与试用成本，不降低 Server 的安全门槛。第三方生成的包仍必须经过 Schema、Hash、审批、域名、动作、凭据引用和结果验证。</div>
+    </section>
+
+    <section>
+      <h2>开源什么</h2>
+      <table>
+        <thead><tr><th>开源内容</th><th>对第三方的作用</th><th>对我们的作用</th></tr></thead>
+        <tbody>
+          <tr><td>执行包协议</td><td>知道必填字段、不可变业务事实、可修复边界与结果包格式。</td><td>把 App 到 Server 的交接变成稳定标准。</td></tr>
+          <tr><td>Fixture（标准样例包）</td><td>复制样例并替换产品 URL、Stage、控件合同和验证条件。</td><td>提供联调基准与回归测试数据。</td></tr>
+          <tr><td>校验器</td><td>在上传前发现缺字段、Hash 不一致、Stage 未对齐或安全边界错误。</td><td>减少人工联调与无效请求。</td></tr>
+          <tr><td>本地参考运行时</td><td>在自有测试站观察包会执行什么、失败在哪一步、产生哪些证据。</td><td>展示受控执行能力，建立开发者信任。</td></tr>
+          <tr><td>基础本地视频编辑器与模板</td><td>本地导入结果素材、剪辑和预览。</td><td>让用户先体验结果价值，再转向云端生产能力。</td></tr>
+          <tr><td>后续 SDK/生成器</td><td>把其代码分析 Agent、知识库或流程工具转换为标准执行包。</td><td>降低第三方接入成本，推动生态扩展。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>第三方如何接入</h2>
+      <pre>第三方自己的 App / Agent 读取产品
+  -&gt; 生成 Graph + RunSpec + Stage Plan + Script Outline
+  -&gt; 打包为 ClientExecutionPackage
+  -&gt; 使用开源校验器本地校验
+  -&gt; 用户审阅并批准
+  -&gt; 上传到我们的 Server
+  -&gt; Server Browser Agent 受约束执行、验证、录制、交付</pre>
+      <p>其中，App 侧负责业务理解与审批事实；Server 侧负责受控执行、真实结果验证、局部机械修复、录制、渲染和结果交付。Server 不可改写用户意图、阶段顺序、动作类型、输入语义、<code>secret_ref</code>、允许域名、禁止页面或脱敏规则。</p>
+    </section>
+
+    <section>
+      <h2>哪些能力应收费</h2>
+      <table>
+        <thead><tr><th>免费/开源层</th><th>商业/云端层</th></tr></thead>
+        <tbody>
+          <tr><td>协议、fixture、校验器、本地 Runner、基础编辑器、基础模板。</td><td>隔离浏览器执行、加密包解密、Secret Broker、受控网络出口、真实凭据使用。</td></tr>
+          <tr><td>本机测试站与有限本地渲染。</td><td>云端录屏、批量渲染、长期素材存储、下载交付、团队协作与审计。</td></tr>
+          <tr><td>基础可解释模板。</td><td>自动成片 Agent、风格分析、LAS/TTS/Seedance 等按量 AI 能力。</td></tr>
+          <tr><td>个人非商业试用与社区支持。</td><td>企业网络、私有部署、SLA、合规审计与专业支持。</td></tr>
+        </tbody>
+      </table>
+      <p>免费层必须限制浏览器任务次数、时长、分辨率、并发与存储；不能免费承担不可控的云浏览器、视频渲染和模型调用成本。</p>
+    </section>
+
+    <section>
+      <h2>许可证建议</h2>
+      <p><span class="tag">早期建议</span> 协议、SDK、fixture、校验器和本地参考运行时优先采用 <code>Apache-2.0</code>，以降低企业与开发者使用顾虑。</p>
+      <p>不要一开始使用过强限制。若未来出现第三方直接托管整个开源产品、却不贡献改进的情况，再评估 <code>AGPLv3</code> 或商业双许可。MongoDB 当前 SSPL 并非标准开源许可，不能直接作为早期默认模板。</p>
+    </section>
+
+    <section>
+      <h2>关键前提与风险</h2>
+      <ul>
+        <li><strong>开源部分必须可用：</strong>至少能在本地测试站完成执行、生成截图/Trace/结果包和可编辑素材，不能只开协议或空壳。</li>
+        <li><strong>安全边界必须独立：</strong>生产隔离、凭据、加密解密和企业审计不随本地开源版本开放。</li>
+        <li><strong>明确产品定位：</strong>开源版是“可验证的本地参考实现”，不是免费云执行平台。</li>
+        <li><strong>避免过早全仓开源：</strong>云端安全、未成熟商业策略和内部运维代码不应随首批开源内容发布。</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>建议的第一步</h2>
+      <p>从主仓库拆出独立的 <code>demoops-open-core</code>：</p>
+      <ul>
+        <li>版本化执行包协议与 JSON Schema；</li>
+        <li>成功、失败、拒绝修复等 fixture；</li>
+        <li>本地校验器与命令行检查工具；</li>
+        <li>本地受控 Browser Agent 参考运行时；</li>
+        <li>本地测试产品站与端到端演示；</li>
+        <li>基础视频编辑器示例与模板格式。</li>
+      </ul>
+      <p>先用这一套获得开发者试用和第三方接入，再把云端执行、安全隔离、渲染和 AI 能力作为明确的商业服务。</p>
+    </section>
+    <footer>整理日期：2026-07-23。本文只记录开源策略讨论，不代表已发布的许可证或商业承诺。</footer>
+  </main>
+</body>
+</html>

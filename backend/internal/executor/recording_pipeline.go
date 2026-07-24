@@ -86,7 +86,7 @@ func RunClientExecutionRecordingAndRender(ctx context.Context, service Service, 
 	}
 	result.RenderRequest = renderRequest
 	result.RenderResult = renderResult
-	attachRenderResultArtifacts(request.SourcePackage, &result.RecordingResultPackage, renderResult, result.RecordingResultPackage.CreatedAt)
+	AttachRenderResultArtifacts(request.SourcePackage, &result.RecordingResultPackage, renderResult, result.RecordingResultPackage.CreatedAt)
 	return result, nil
 }
 
@@ -161,7 +161,10 @@ func reportPipelineProgress(request RecordingRenderPipelineRequest, stage string
 	}
 }
 
-func attachRenderResultArtifacts(source *model.ClientExecutionPackage, result *model.RecordingResultPackage, renderResult RenderResult, createdAt time.Time) {
+// AttachRenderResultArtifacts makes renderer output part of the same delivery
+// package as the recording evidence, regardless of which approved runtime
+// produced that recording.
+func AttachRenderResultArtifacts(source *model.ClientExecutionPackage, result *model.RecordingResultPackage, renderResult RenderResult, createdAt time.Time) {
 	if source == nil || result == nil {
 		return
 	}

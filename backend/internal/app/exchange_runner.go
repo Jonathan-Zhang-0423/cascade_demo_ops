@@ -56,7 +56,7 @@ func (s *Service) runUploadedExecutionPackageSync(ctx context.Context, orgID str
 	if err != nil {
 		return s.failUploadedExecution(ctx, orgID, exchangePackageID, runtimeExecutionErrorCode(err), err)
 	}
-	return s.exchange.CompleteWithRecordingResult(ctx, orgID, exchangePackageID, result)
+	return s.CompleteExecutionPackageWithResult(ctx, orgID, exchangePackageID, result)
 }
 
 func (s *Service) GetExecutionPackageDebug(ctx context.Context, orgID string, exchangePackageID string) (ExecutionPackageDebugView, error) {

@@ -31,19 +31,20 @@ const (
 var exchangeIDSequence uint64
 
 type ExchangeIntakeService struct {
-	mu              sync.Mutex
-	verifier        model.ExchangeSignatureVerifier
-	persistence     exchangeSnapshotStore
-	now             func() time.Time
-	uploads         map[string]exchangeUploadSession
-	packages        map[string]*exchangePackageState
-	packageByIdem   map[string]string
-	resultByID      map[string]*recordingResultState
-	resultByPackage map[string]string
-	seenNonces      map[string]bool
-	installations   map[string]*exchangeInstallationState
-	sessions        map[string]*exchangeInstallationSessionState
-	challenges      map[string]exchangePairingChallengeState
+	mu                 sync.Mutex
+	verifier           model.ExchangeSignatureVerifier
+	persistence        exchangeSnapshotStore
+	allowInlinePayload bool
+	now                func() time.Time
+	uploads            map[string]exchangeUploadSession
+	packages           map[string]*exchangePackageState
+	packageByIdem      map[string]string
+	resultByID         map[string]*recordingResultState
+	resultByPackage    map[string]string
+	seenNonces         map[string]bool
+	installations      map[string]*exchangeInstallationState
+	sessions           map[string]*exchangeInstallationSessionState
+	challenges         map[string]exchangePairingChallengeState
 }
 
 type exchangeUploadSession struct {
@@ -114,18 +115,19 @@ func NewExchangeIntakeService(verifier model.ExchangeSignatureVerifier) *Exchang
 
 func newExchangeIntakeService(verifier model.ExchangeSignatureVerifier, persistence exchangeSnapshotStore) *ExchangeIntakeService {
 	service := &ExchangeIntakeService{
-		verifier:        verifier,
-		persistence:     persistence,
-		now:             func() time.Time { return time.Now().UTC() },
-		uploads:         map[string]exchangeUploadSession{},
-		packages:        map[string]*exchangePackageState{},
-		packageByIdem:   map[string]string{},
-		resultByID:      map[string]*recordingResultState{},
-		resultByPackage: map[string]string{},
-		seenNonces:      map[string]bool{},
-		installations:   map[string]*exchangeInstallationState{},
-		sessions:        map[string]*exchangeInstallationSessionState{},
-		challenges:      map[string]exchangePairingChallengeState{},
+		verifier:           verifier,
+		persistence:        persistence,
+		allowInlinePayload: true,
+		now:                func() time.Time { return time.Now().UTC() },
+		uploads:            map[string]exchangeUploadSession{},
+		packages:           map[string]*exchangePackageState{},
+		packageByIdem:      map[string]string{},
+		resultByID:         map[string]*recordingResultState{},
+		resultByPackage:    map[string]string{},
+		seenNonces:         map[string]bool{},
+		installations:      map[string]*exchangeInstallationState{},
+		sessions:           map[string]*exchangeInstallationSessionState{},
+		challenges:         map[string]exchangePairingChallengeState{},
 	}
 	if verifier == nil {
 		service.verifier = service
@@ -134,6 +136,17 @@ func newExchangeIntakeService(verifier model.ExchangeSignatureVerifier, persiste
 		_ = service.LoadSnapshot(context.Background())
 	}
 	return service
+}
+
+// SetInlinePayloadAllowed is a transport boundary, not an App business-policy
+// switch. Cloud profiles must receive only encrypted payload references.
+func (s *ExchangeIntakeService) SetInlinePayloadAllowed(allowed bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allowInlinePayload = allowed
 }
 
 func (s *ExchangeIntakeService) Init(ctx context.Context, request model.ExecutionPackageInitRequest) (model.ExecutionPackageInitResponse, error) {
@@ -219,6 +232,9 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 	if !reflect.DeepEqual(request.PayloadRef, request.Envelope.PayloadRef) {
 		return model.ExecutionPackageUploadResponse{}, newExchangeProtocolError("upload_payload_ref_mismatch", "payload_ref", "mismatch", "upload request payload_ref does not match exchange envelope", "Send one payload_ref value and keep it identical to envelope.payload_ref.")
 	}
+	if !s.allowInlinePayload && payload.PackageID != "" {
+		return model.ExecutionPackageUploadResponse{}, newExchangeProtocolError("production_inline_payload_forbidden", "payload", "forbidden", "production Server only accepts an encrypted payload_ref; inline payload is not allowed", "Upload ciphertext as payload_ref and let the isolated worker decrypt it after Intake.")
+	}
 	if existingID := s.packageByIdem[idempotencyKey(request.Envelope.OrgID, request.Envelope.IdempotencyKey)]; existingID != "" {
 		existing := s.packages[existingID]
 		return model.ExecutionPackageUploadResponse{ExchangePackageID: existing.ExchangePackageID, CloudJobID: existing.CloudJobID, Status: existing.Status}, nil
@@ -253,6 +269,37 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 	}
 
 	return model.ExecutionPackageUploadResponse{ExchangePackageID: exchangePackageID, CloudJobID: cloudJobID, Status: state.Status}, nil
+}
+
+// ValidateUpload checks an App package with the same Intake rules as Upload,
+// without allocating an upload session, persisting a payload, or starting work.
+// A copied nonce set keeps this preflight side-effect free.
+func (s *ExchangeIntakeService) ValidateUpload(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if request.PayloadRef.Kind == "" {
+		request.PayloadRef = request.Envelope.PayloadRef
+	}
+	if !reflect.DeepEqual(request.PayloadRef, request.Envelope.PayloadRef) {
+		return newExchangeProtocolError("upload_payload_ref_mismatch", "payload_ref", "mismatch", "upload request payload_ref does not match exchange envelope", "Send one payload_ref value and keep it identical to envelope.payload_ref.")
+	}
+	s.mu.Lock()
+	allowInlinePayload := s.allowInlinePayload
+	seenNonces := make(map[string]bool, len(s.seenNonces))
+	for nonce, seen := range s.seenNonces {
+		seenNonces[nonce] = seen
+	}
+	now := s.now()
+	verifier := s.verifier
+	s.mu.Unlock()
+	if !allowInlinePayload && payload.PackageID != "" {
+		return newExchangeProtocolError("production_inline_payload_forbidden", "payload", "forbidden", "production Server only accepts an encrypted payload_ref; inline payload is not allowed", "Upload ciphertext as payload_ref and let the isolated worker decrypt it after Intake.")
+	}
+	if err := model.ValidateClientExecutionPackageIntake(&request.Envelope, &payload, now, seenNonces, verifier); err != nil {
+		return wrapExchangeValidationError("client_execution_package_invalid", err)
+	}
+	return nil
 }
 
 func (s *ExchangeIntakeService) acceptEnvelopeOnlyPackageLocked(envelope model.ExchangeEnvelope, now time.Time) (model.ExecutionPackageUploadResponse, error) {

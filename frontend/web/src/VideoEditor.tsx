@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createEditorClient } from "./editor";
-import type { EditorArtifact, EditorPlan, EditorSession, EditorShot, EditorStyleDraft, EditorTimelineStep, EditorValidationReport, VideoStyleTemplate } from "./editor";
+import type { EditorArtifact, EditorOverlay, EditorPlan, EditorSession, EditorShot, EditorStyleDraft, EditorTimelineStep, EditorValidationReport, VideoStyleTemplate } from "./editor";
 import { editorPlansEqual, emptyEditorHistory, recordEditorHistory, redoEditorHistory, undoEditorHistory } from "./editorHistory";
-import { compilePresentationComposition, finalRendererSupports } from "./presentationComposition";
+import { compilePresentationComposition, finalRendererSupports, finalRendererSupportsOverlay, overlayExportStatus } from "./presentationComposition";
 import { activeCaptionText, audioPreviewState, buildAudioSegments, deleteShotInPlan, mergeAudioSegmentInPlan, patchAudioSegmentInPlan, reorderShotInPlan, requiredStepCoverage, setStillDurationInPlan, snapMilliseconds, sourceSnapPoints, splitAudioAtOutputMS, splitShotAtOutputMS, targetIndexForOutputMS, trimShotInPlan } from "./timelineEditing";
 import "./editorWorkspace.css";
 
@@ -14,6 +14,8 @@ type SelectedTrack = "video" | "audio";
 type TimelineTrack = "evidence" | "video" | "caption" | "audio";
 type EditorTool = "select" | "assets" | "text" | "shapes" | "captions" | "generated" | "style";
 type AssetFilter = "all" | "video" | "image" | "audio";
+type AssetRatioFilter = "all" | "landscape" | "portrait" | "square";
+type ShapeKind = NonNullable<EditorOverlay["shape"]>;
 
 type TimelineShot = {
   shot: EditorShot;
@@ -29,11 +31,38 @@ type TimelineInteraction =
   | { kind: "move"; shotID: string; basePlan: EditorPlan }
   | { kind: "playhead" };
 
+type ShapeCanvasInteraction = {
+  mode: "move" | "resize" | "rotate";
+  overlayID: string;
+  startX: number;
+  startY: number;
+  startLeft: number;
+  startTop: number;
+  startWidth: number;
+  startHeight: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  centerClientX: number;
+  centerClientY: number;
+  startRotation: number;
+  startPointerAngle: number;
+  corner?: "nw" | "ne" | "sw" | "se";
+  basePlan: EditorPlan;
+};
+
 export type ExportCheck = {
   id: string;
   label: string;
   detail: string;
   tone: "pass" | "warning" | "error";
+};
+
+export type ExportIssue = {
+  id: string;
+  title: string;
+  detail: string;
+  shotID?: string;
+  overlayID?: string;
 };
 
 export function VideoEditor() {
@@ -60,6 +89,10 @@ export function VideoEditor() {
   const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
   const [assetQuery, setAssetQuery] = useState("");
   const [assetFilter, setAssetFilter] = useState<AssetFilter>("all");
+  const [assetRatioFilter, setAssetRatioFilter] = useState<AssetRatioFilter>("all");
+  const [selectedOverlayID, setSelectedOverlayID] = useState("");
+  const [captionImportOpen, setCaptionImportOpen] = useState(false);
+  const [captionImportText, setCaptionImportText] = useState("");
   const [validationOpen, setValidationOpen] = useState(false);
 	const [automationOpen, setAutomationOpen] = useState(false);
   const [validationReport, setValidationReport] = useState<EditorValidationReport>();
@@ -78,6 +111,9 @@ export function VideoEditor() {
   const [timelineInteractionKind, setTimelineInteractionKind] = useState<TimelineInteraction["kind"]>();
   const [snapGuideMS, setSnapGuideMS] = useState<number>();
   const [timelineHoverMS, setTimelineHoverMS] = useState<number>();
+  const [trackHeaderWidth, setTrackHeaderWidth] = useState(() => readTrackHeaderWidth());
+  const [isResizingTrackHeader, setIsResizingTrackHeader] = useState(false);
+  const [isTransformingShape, setIsTransformingShape] = useState(false);
   const [pendingFile, setPendingFile] = useState<File>();
   const [styleTemplates, setStyleTemplates] = useState<VideoStyleTemplate[]>([]);
   const [styleTemplateID, setStyleTemplateID] = useState("");
@@ -94,6 +130,9 @@ export function VideoEditor() {
   const editGroupRef = useRef<{ key: string; at: number }>();
   const pendingSeekRef = useRef<{ shotID: string; sourceSeconds: number; outputMS: number }>();
   const timelineInteractionRef = useRef<TimelineInteraction>();
+  const trackHeaderResizeRef = useRef<{ startX: number; startWidth: number }>();
+  const shapeCanvasInteractionRef = useRef<ShapeCanvasInteraction>();
+  const shapeToolRef = useRef<HTMLDivElement>(null);
   const continuePlaybackRef = useRef(false);
 
   useEffect(() => {
@@ -107,6 +146,97 @@ export function VideoEditor() {
       // Storage is a convenience only; editing remains available when it is disabled.
     }
   }, [frameSnappingEnabled]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("cascade.editor.track-header-width", String(trackHeaderWidth));
+    } catch {
+      // The timeline remains usable if the preferred visual width cannot persist.
+    }
+  }, [trackHeaderWidth]);
+
+  useEffect(() => {
+    if (!isResizingTrackHeader) return;
+    const onMove = (event: PointerEvent) => {
+      const interaction = trackHeaderResizeRef.current;
+      if (!interaction) return;
+      setTrackHeaderWidth(clampTrackHeaderWidth(interaction.startWidth + event.clientX - interaction.startX));
+    };
+    const onEnd = () => {
+      trackHeaderResizeRef.current = undefined;
+      setIsResizingTrackHeader(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+    };
+  }, [isResizingTrackHeader]);
+
+  useEffect(() => {
+    if (!isTransformingShape) return;
+    const onMove = (event: PointerEvent) => {
+      const interaction = shapeCanvasInteractionRef.current;
+      const plan = draftPlanRef.current;
+      if (!interaction || !plan || !selectedShotID) return;
+      const deltaX = (event.clientX - interaction.startX) / interaction.canvasWidth;
+      const deltaY = (event.clientY - interaction.startY) / interaction.canvasHeight;
+      let patch: Partial<EditorOverlay>;
+      if (interaction.mode === "move") {
+        patch = { x: clampNormalized(interaction.startLeft + deltaX, 1 - interaction.startWidth), y: clampNormalized(interaction.startTop + deltaY, 1 - interaction.startHeight) };
+      } else if (interaction.mode === "resize") {
+        const corner = interaction.corner ?? "se";
+        const right = interaction.startLeft + interaction.startWidth;
+        const bottom = interaction.startTop + interaction.startHeight;
+        let left = interaction.startLeft;
+        let top = interaction.startTop;
+        let nextRight = right;
+        let nextBottom = bottom;
+        if (corner.includes("w")) left = clampNormalized(interaction.startLeft + deltaX, Math.max(0, right - 0.05));
+        if (corner.includes("n")) top = clampNormalized(interaction.startTop + deltaY, Math.max(0, bottom - 0.05));
+        if (corner.includes("e")) nextRight = Math.max(interaction.startLeft + 0.05, Math.min(1, right + deltaX));
+        if (corner.includes("s")) nextBottom = Math.max(interaction.startTop + 0.05, Math.min(1, bottom + deltaY));
+        const x = Math.min(left, 0.95);
+        const y = Math.min(top, 0.95);
+        const width = Math.max(0.05, nextRight - x);
+        const height = Math.max(0.05, nextBottom - y);
+        patch = { x, y, width, height };
+      } else {
+        const currentAngle = Math.atan2(event.clientY - interaction.centerClientY, event.clientX - interaction.centerClientX);
+        patch = { rotation: Math.round(interaction.startRotation + normalizedAngleDelta(currentAngle - interaction.startPointerAngle) * 180 / Math.PI) };
+      }
+      const shots = plan.shots.map((shot) => shot.id !== selectedShotID ? shot : { ...shot, overlays: (shot.overlays ?? []).map((overlay) => overlay.id === interaction.overlayID ? { ...overlay, ...patch } : overlay) });
+      const nextPlan = { ...plan, shots };
+      // Keep fast pointer updates based on the latest drag result, not a stale render.
+      draftPlanRef.current = nextPlan;
+      setDraftPlan(nextPlan);
+      setSaveState("dirty");
+      setValidationReport(undefined);
+    };
+    const onEnd = () => {
+      const interaction = shapeCanvasInteractionRef.current;
+      shapeCanvasInteractionRef.current = undefined;
+      setIsTransformingShape(false);
+      if (interaction && draftPlanRef.current && !editorPlansEqual(interaction.basePlan, draftPlanRef.current)) {
+        setHistory((current) => recordEditorHistory(current, interaction.basePlan));
+        editGroupRef.current = undefined;
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    return () => { window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onEnd); };
+  }, [isTransformingShape, selectedShotID]);
+
+  useEffect(() => {
+    if (!shapeMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (shapeToolRef.current?.contains(event.target as Node)) return;
+      setShapeMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [shapeMenuOpen]);
 
   useEffect(() => {
     draftPlanRef.current = draftPlan;
@@ -162,6 +292,7 @@ export function VideoEditor() {
         cancelTimelineInteraction();
         setImportOpen(false);
         setValidationOpen(false);
+        setShapeMenuOpen(false);
       }
       if (event.code === "Space" && !editingText && session) {
         event.preventDefault();
@@ -186,6 +317,7 @@ export function VideoEditor() {
   });
 
   const selectedShot = draftPlan?.shots.find((shot) => shot.id === selectedShotID) ?? draftPlan?.shots[0];
+  const selectedShapeOverlay = selectedShot?.overlays?.find((overlay) => overlay.id === selectedOverlayID && overlay.shape);
   const selectedIndex = selectedShot ? draftPlan?.shots.findIndex((shot) => shot.id === selectedShot.id) ?? -1 : -1;
   const selectedStep = session?.asset_catalog.steps?.find((step) => step.step_id === selectedShot?.source_step_id);
   const selectedArtifact = session?.asset_catalog.artifacts.find((artifact) => artifact.id === selectedAssetID) ?? session?.asset_catalog.artifacts.find((artifact) => artifact.id === selectedShot?.source_artifact_id);
@@ -201,6 +333,7 @@ export function VideoEditor() {
   const imagePreview = effectivePreviewMode === "source" && Boolean(selectedArtifact?.mime_type?.startsWith("image/"));
   const currentValidation = saveState === "saved" ? validationReport ?? session?.validation : undefined;
   const exportChecks = useMemo(() => buildExportChecks(session, draftPlan, currentValidation), [session, draftPlan, currentValidation]);
+  const exportIssues = useMemo(() => buildExportIssues(draftPlan), [draftPlan]);
   const failedChecks = exportChecks.filter((check) => check.tone === "error");
   const passedChecks = exportChecks.filter((check) => check.tone === "pass");
   const timelineWidth = Math.max(840, Math.ceil(totalDurationMS / 1000) * timelineScale + 32);
@@ -719,6 +852,92 @@ export function VideoEditor() {
     patchShot({ overlays }, "caption");
   }
 
+  function addShapeOverlay(shape: ShapeKind) {
+    if (!selectedShot) {
+      setMessage("请先在时间线选择一个视频或图片片段，再添加标注。");
+      return;
+    }
+    const durationMS = shotDuration(selectedShot);
+    const overlay: EditorOverlay = {
+      id: `shape_${Date.now()}`,
+      type: "highlight_box",
+      shape,
+      start_ms: Math.max(0, playheadMS - (timelineShots.find((item) => item.shot.id === selectedShot.id)?.startMS ?? playheadMS)),
+      end_ms: durationMS,
+      x: 0.32,
+      y: 0.3,
+      width: 0.36,
+      height: 0.24,
+      color: "#dc58d5",
+      stroke_width: 4,
+    };
+    overlay.end_ms = Math.max((overlay.start_ms ?? 0) + 500, durationMS);
+    patchShot({ overlays: [...(selectedShot.overlays ?? []), overlay] }, `shape:${shape}`);
+    setSelectedOverlayID(overlay.id!);
+    setMediaTab("callouts");
+    setActiveTool("shapes");
+    setShapeMenuOpen(false);
+    setMessage(`${shapeLabel(shape)}已添加到当前${selectedShot.presentation_kind === "still" ? "图片" : "视频"}片段。它会随片段时间和画面一起移动。`);
+  }
+
+  function patchSelectedOverlay(patch: Partial<EditorOverlay>) {
+    if (!selectedShot || !selectedOverlayID) return;
+    patchShot({ overlays: (selectedShot.overlays ?? []).map((overlay) => overlay.id === selectedOverlayID ? { ...overlay, ...patch } : overlay) }, `overlay:${selectedOverlayID}`);
+  }
+
+  function beginShapeMove(event: React.PointerEvent<HTMLButtonElement>, overlay: EditorOverlay) {
+    beginShapeTransform(event, overlay, "move");
+  }
+
+  function beginShapeTransform(event: React.PointerEvent<HTMLButtonElement>, overlay: EditorOverlay, mode: ShapeCanvasInteraction["mode"], corner?: ShapeCanvasInteraction["corner"]) {
+    if (!draftPlan || !selectedShot || !overlay.id || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const canvas = event.currentTarget.closest(".studio-shape-overlay-layer");
+    const bounds = canvas?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+    const startLeft = overlay.x ?? 0.3;
+    const startTop = overlay.y ?? 0.3;
+    const startWidth = Math.max(0.05, overlay.width ?? 0.3);
+    const startHeight = Math.max(0.05, overlay.height ?? 0.2);
+    const centerClientX = bounds.left + bounds.width * (startLeft + startWidth / 2);
+    const centerClientY = bounds.top + bounds.height * (startTop + startHeight / 2);
+    setSelectedOverlayID(overlay.id);
+    setSelectedTrack("video");
+    shapeCanvasInteractionRef.current = { mode, overlayID: overlay.id, startX: event.clientX, startY: event.clientY, startLeft, startTop, startWidth, startHeight, canvasWidth: bounds.width, canvasHeight: bounds.height, centerClientX, centerClientY, startRotation: overlay.rotation ?? 0, startPointerAngle: Math.atan2(event.clientY - centerClientY, event.clientX - centerClientX), ...(corner ? { corner } : {}), basePlan: draftPlan };
+    setIsTransformingShape(true);
+  }
+
+  function removeSelectedOverlay() {
+    if (!selectedShot || !selectedOverlayID) return;
+    patchShot({ overlays: (selectedShot.overlays ?? []).filter((overlay) => overlay.id !== selectedOverlayID) }, `remove-overlay:${selectedOverlayID}`);
+    setSelectedOverlayID("");
+  }
+
+  function importCaptionsFromText(source: string) {
+    if (!draftPlan) return;
+    const lines = parseCaptionLines(source);
+    if (!lines.length) {
+      setMessage("没有读取到可用字幕。TXT 请每行一句；MD 会读取正文和列表项。");
+      return;
+    }
+    const duration = Math.max(1000, totalDurationMS || lines.length * 2000);
+    const slot = Math.max(700, Math.floor(duration / lines.length));
+    const cues = lines.map((text, index) => ({ id: `caption_import_${Date.now()}_${index}`, text, output_range_ms: [index * slot, Math.min(duration, (index + 1) * slot)] as [number, number], source: "user_configured" as const }));
+    commitPlan({ ...draftPlan, caption_cues: cues }, `caption-import:${Date.now()}`);
+    setCaptionImportOpen(false);
+    setCaptionImportText("");
+    setMediaTab("captions");
+    setMessage(`已导入 ${cues.length} 条字幕，并按当前成片时长均分；可继续在时间线上调整。`);
+  }
+
+  function beginTrackHeaderResize(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    trackHeaderResizeRef.current = { startX: event.clientX, startWidth: trackHeaderWidth };
+    setIsResizingTrackHeader(true);
+  }
+
   function patchAudio(patch: Partial<NonNullable<EditorPlan["audio"]>>) {
     if (!draftPlan) return;
     const audio = { mode: "source" as const, volume_percent: 100, ...(draftPlan.audio ?? {}), ...patch };
@@ -1090,15 +1309,15 @@ export function VideoEditor() {
               <button type="button" className={activeTool === "select" ? "active" : ""} aria-label="选择工具" title="选择工具" onClick={() => chooseEditorTool("select")}><span aria-hidden="true">⌖</span></button>
               <button type="button" className={activeTool === "assets" ? "active" : ""} aria-label="素材" title="素材" onClick={() => chooseEditorTool("assets")}><span aria-hidden="true">▣</span></button>
               <button type="button" className={activeTool === "text" ? "active" : ""} aria-label="文本与字幕" title="文本与字幕" onClick={() => chooseEditorTool("text")}><span aria-hidden="true">T</span></button>
-              <div className="studio-shape-tool" onMouseEnter={() => setShapeMenuOpen(true)} onMouseLeave={() => setShapeMenuOpen(false)}>
-                <button type="button" className={activeTool === "shapes" ? "active" : ""} aria-label="标注形状" title="标注形状" onClick={() => chooseEditorTool("shapes")}><span aria-hidden="true">[]</span></button>
+              <div ref={shapeToolRef} className="studio-shape-tool">
+                <button type="button" className={activeTool === "shapes" || shapeMenuOpen ? "active" : ""} aria-label="标注形状" title="标注形状" aria-expanded={shapeMenuOpen} aria-haspopup="menu" onClick={() => { chooseEditorTool("shapes"); setShapeMenuOpen((open) => !open); }}><span aria-hidden="true">[]</span></button>
                 {shapeMenuOpen ? <div className="studio-shape-menu" role="menu" aria-label="标注形状">
-                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>矩形</span><kbd>R</kbd></button>
-                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>圆形</span><kbd>O</kbd></button>
-                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>多边形</span><kbd>P</kbd></button>
-                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>星形</span><kbd>Shift S</kbd></button>
-                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>直线</span><kbd>L</kbd></button>
-                  <button type="button" role="menuitem" onClick={() => chooseEditorTool("shapes")}><span>箭头</span><kbd>Shift A</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => addShapeOverlay("rectangle")}><span>矩形</span><kbd>R</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => addShapeOverlay("circle")}><span>圆形</span><kbd>O</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => addShapeOverlay("polygon")}><span>多边形</span><kbd>P</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => addShapeOverlay("star")}><span>星形</span><kbd>Shift S</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => addShapeOverlay("line")}><span>直线</span><kbd>L</kbd></button>
+                  <button type="button" role="menuitem" onClick={() => addShapeOverlay("arrow")}><span>箭头</span><kbd>Shift A</kbd></button>
                 </div> : null}
               </div>
               <button type="button" className={activeTool === "captions" ? "active" : ""} aria-label="字幕样式" title="字幕样式" onClick={() => chooseEditorTool("captions")}><span aria-hidden="true">CC</span></button>
@@ -1123,9 +1342,15 @@ export function VideoEditor() {
                     <option value="image">图片</option>
                     <option value="audio">音频</option>
                   </select>
+                  <select value={assetRatioFilter} aria-label="图片与视频画面比例" onChange={(event) => setAssetRatioFilter(event.target.value as AssetRatioFilter)}>
+                    <option value="all">全部比例</option>
+                    <option value="landscape">横向</option>
+                    <option value="portrait">竖向</option>
+                    <option value="square">方形</option>
+                  </select>
                 </div> : null}
-                {mediaTab !== "style" ? <button className="studio-import-zone" onClick={() => setImportOpen(true)}>＋ 从本机选择，或导入结果包</button> : null}
-                {mediaTab === "style" ? <StyleProductionPanel templates={styleTemplates} templateID={styleTemplateID} prompt={stylePrompt} referenceID={styleReferenceID} references={session.asset_catalog.artifacts.filter(isStyleReferenceArtifact)} rightsConfirmed={styleRightsConfirmed} {...(styleDraft ? { draft: styleDraft } : {})} busy={busy} onTemplateChange={setStyleTemplateID} onPromptChange={setStylePrompt} onReferenceChange={setStyleReferenceID} onRightsChange={setStyleRightsConfirmed} onReferenceUpload={(file) => void importStyleReference(file)} onCreateDraft={() => void createStyleDraft()} onApplyDraft={() => void applyStyleDraft()} /> : <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} selectedAssetID={selectedArtifact?.id} assetQuery={assetQuery} assetFilter={assetFilter} onSelectShot={(shot) => selectShot(shot)} onSelectAsset={selectAsset} onAddStill={addStillToTimeline} />}
+                {mediaTab === "media" ? <button className="studio-import-zone" onClick={() => setImportOpen(true)}>＋ 从本机选择，或导入结果包</button> : null}
+                {mediaTab === "style" ? <StyleProductionPanel templates={styleTemplates} templateID={styleTemplateID} prompt={stylePrompt} referenceID={styleReferenceID} references={session.asset_catalog.artifacts.filter(isStyleReferenceArtifact)} rightsConfirmed={styleRightsConfirmed} {...(styleDraft ? { draft: styleDraft } : {})} busy={busy} onTemplateChange={setStyleTemplateID} onPromptChange={setStylePrompt} onReferenceChange={setStyleReferenceID} onRightsChange={setStyleRightsConfirmed} onReferenceUpload={(file) => void importStyleReference(file)} onCreateDraft={() => void createStyleDraft()} onApplyDraft={() => void applyStyleDraft()} /> : <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} selectedAssetID={selectedArtifact?.id} assetQuery={assetQuery} assetFilter={assetFilter} assetRatioFilter={assetRatioFilter} selectedOverlayID={selectedOverlayID} onSelectShot={(shot) => selectShot(shot)} onSelectAsset={selectAsset} onAddStill={addStillToTimeline} onAddCaption={() => setCaptionImportOpen(true)} onAddShape={addShapeOverlay} onSelectOverlay={(shot, overlay) => { selectShot(shot); setSelectedOverlayID(overlay.id ?? ""); }} />}
               </div>
             </section>
 
@@ -1156,6 +1381,7 @@ export function VideoEditor() {
                       }}
                     />}
                     {effectivePreviewMode === "source" && !imagePreview && sourcePreviewCaption ? <div className="studio-caption-preview">{sourcePreviewCaption}</div> : null}
+                    {effectivePreviewMode === "source" ? <ShapeOverlayPreview shot={selectedShot} playheadMS={playheadMS} timelineShots={timelineShots} selectedOverlayID={selectedOverlayID} onSelect={(id) => { setSelectedTrack("video"); setSelectedOverlayID(id); }} onMoveStart={beginShapeMove} onTransformStart={beginShapeTransform} /> : null}
                     {selectedStep && !imagePreview ? <div className={`studio-step-preview ${stepTone(selectedStep.status)}`}>步骤 {stepDisplayNumber(selectedStep, session.asset_catalog.steps ?? [])} · {stepTitle(selectedStep)}</div> : null}
                   </div>
                 ) : (
@@ -1172,9 +1398,9 @@ export function VideoEditor() {
             </section>
 
             <aside className="studio-panel studio-properties-panel">
-              <div className="studio-panel-heading"><strong>{selectedTrack === "audio" ? "音频" : "属性"}</strong><small>{selectedTrack === "audio" && selectedAudioSegment ? `音频 ${selectedAudioSegment.index + 1}/${audioSegments.length}` : selectedShot ? `视频 ${selectedIndex + 1}/${draftPlan?.shots.length ?? 0}` : "未选择"}</small></div>
+              <div className="studio-panel-heading"><strong>{selectedTrack === "audio" ? "音频" : selectedShapeOverlay ? shapeLabel(selectedShapeOverlay.shape!) : "属性"}</strong><small>{selectedTrack === "audio" && selectedAudioSegment ? `音频 ${selectedAudioSegment.index + 1}/${audioSegments.length}` : selectedShapeOverlay ? "标注图层" : selectedShot ? `视频 ${selectedIndex + 1}/${draftPlan?.shots.length ?? 0}` : "未选择"}</small></div>
               <div className="studio-inspector-tabs" role="tablist" aria-label="属性面板">
-                <button type="button" role="tab" aria-selected={selectedTrack === "video"} className={selectedTrack === "video" ? "active" : ""} onClick={() => setSelectedTrack("video")}>属性</button>
+                <button type="button" role="tab" aria-selected={selectedTrack === "video"} className={selectedTrack === "video" ? "active" : ""} onClick={() => setSelectedTrack("video")}>{selectedShapeOverlay ? "属性" : "片段"}</button>
                 <button type="button" role="tab" aria-selected={selectedTrack === "audio"} className={selectedTrack === "audio" ? "active" : ""} disabled={!selectedAudioSegment} onClick={() => setSelectedTrack("audio")}>音频</button>
               </div>
               {selectedTrack === "audio" && selectedAudioSegment ? (
@@ -1194,6 +1420,8 @@ export function VideoEditor() {
                     {selectedAudioSegment.volumePercent > 100 ? <small className="studio-property-note">浏览器源素材预览最高为 100%；导出时 FFmpeg 会应用 {selectedAudioSegment.volumePercent}% 的实际增益。</small> : null}
                   </PropertySection>
                 </div>
+              ) : selectedShapeOverlay ? (
+                <ShapePropertiesPanel overlay={selectedShapeOverlay} onPatch={patchSelectedOverlay} onRemove={removeSelectedOverlay} />
               ) : selectedShot ? (
                 <div className="studio-properties-scroll">
                   <PropertySection title="片段" meta={selectedShot.id}>
@@ -1213,6 +1441,12 @@ export function VideoEditor() {
                   <PropertySection title="字幕" meta="确定性烧录">
                     <label className="studio-field"><span>烧录文本</span><textarea rows={4} value={captionText(selectedShot)} onChange={(event) => patchCaption(event.target.value)} placeholder="输入需要烧录到画面的字幕" /></label>
                   </PropertySection>
+
+                  {(selectedShot.overlays ?? []).some((overlay) => overlay.shape) ? <PropertySection title="标注形状" meta="绑定当前片段">
+                    <div className="studio-overlay-list">{(selectedShot.overlays ?? []).filter((overlay) => overlay.shape).map((overlay) => <button key={overlay.id ?? overlay.shape} className={selectedOverlayID === overlay.id ? "selected" : ""} onClick={() => setSelectedOverlayID(overlay.id ?? "")}><span className={`studio-shape-swatch ${overlay.shape}`} /><strong>{shapeLabel(overlay.shape!)}</strong></button>)}</div>
+                    {selectedOverlayID ? <button className="studio-outline-button" onClick={() => setSelectedOverlayID(selectedOverlayID)}>在右侧编辑属性</button> : null}
+                    <small className="studio-property-note">当前标注会显示在编辑预览和时间线；最终 MP4 的形状像素渲染仍待 Renderer 接入，导出校验会明确阻止误导性导出。</small>
+                  </PropertySection> : null}
 
                   {selectedShot.presentation_kind !== "still" ? <PropertySection title="音频" meta={draftPlan?.audio?.mode === "mute" ? "静音" : "源音轨"}>
                     <div className="studio-radio-row">
@@ -1251,13 +1485,14 @@ export function VideoEditor() {
               </div>
               <div className="studio-timeline-tools"><span>{presentationComposition?.durationInFrames ?? 0} 帧 · 总时长 {formatTimecode(totalDurationMS)}</span><input type="range" min="28" max="100" value={timelineScale} onChange={(event) => setTimelineScale(Number(event.target.value))} /></div>
             </div>
-            <div className="studio-timeline-body" ref={timelineScrollRef}>
+            <div className={`studio-timeline-body ${isResizingTrackHeader ? "resizing-track-header" : ""}`} ref={timelineScrollRef} style={{ gridTemplateColumns: `${trackHeaderWidth}px minmax(0, 1fr)` }}>
               <div className="studio-track-labels">
                 <div />
                 <TrackLabel track="evidence" label="业务步骤" locked hidden={hiddenTracks.evidence} onToggle={toggleTimelineTrack} />
                 <TrackLabel track="video" label="视频" hidden={hiddenTracks.video} onToggle={toggleTimelineTrack} />
                 <TrackLabel track="caption" label="字幕 / 标注" hidden={hiddenTracks.caption} onToggle={toggleTimelineTrack} />
                 <TrackLabel track="audio" label="音频" hidden={hiddenTracks.audio} onToggle={toggleTimelineTrack} />
+                <div className="studio-track-header-resizer" role="separator" aria-label="调整轨道标题宽度" aria-orientation="vertical" onPointerDown={beginTrackHeaderResize} />
               </div>
               <div ref={timelineContentRef} className={`studio-timeline-scroll ${timelineInteractionKind ? `interacting ${timelineInteractionKind}` : ""}`} style={{ width: timelineWidth, backgroundSize: `${timeRulerStep(totalDurationMS) * timelineScale}px 100%` }} onPointerDown={beginPlayheadDrag} onPointerMove={(event) => updateTimelineHover(event.clientX)} onPointerLeave={() => setTimelineHoverMS(undefined)}>
                 <TimeRuler totalDurationMS={totalDurationMS} scale={timelineScale} />
@@ -1288,7 +1523,7 @@ export function VideoEditor() {
                   ))}
                 </div>
                 <div className={`studio-track-row studio-caption-track ${hiddenTracks.caption ? "track-hidden" : ""}`}>
-                  {!hiddenTracks.caption && timelineShots.map((item) => captionText(item.shot) ? <button key={item.shot.id} className="studio-timeline-clip caption" style={clipStyle(item, timelineScale)} onPointerDown={(event) => event.stopPropagation()} onClick={() => selectShot(item.shot)}><strong>{captionText(item.shot)}</strong></button> : null)}
+                  {!hiddenTracks.caption && timelineShots.map((item) => <>{captionText(item.shot) ? <button key={`${item.shot.id}-caption`} className="studio-timeline-clip caption" style={clipStyle(item, timelineScale)} onPointerDown={(event) => event.stopPropagation()} onClick={() => selectShot(item.shot)}><strong>{captionText(item.shot)}</strong></button> : null}{(item.shot.overlays ?? []).filter((overlay) => overlay.shape).map((overlay, index) => <button key={overlay.id ?? `${item.shot.id}-shape-${index}`} className={`studio-timeline-clip callout ${selectedOverlayID === overlay.id ? "selected" : ""}`} style={clipStyle(item, timelineScale)} onPointerDown={(event) => event.stopPropagation()} onClick={() => { selectShot(item.shot); setSelectedOverlayID(overlay.id ?? ""); }}><strong>{shapeLabel(overlay.shape!)}</strong></button>)}</>)}
                 </div>
                 <div className={`studio-track-row studio-audio-track ${hiddenTracks.audio ? "track-hidden" : ""}`}>
                   {!hiddenTracks.audio && audioSegments.map((segment) => {
@@ -1313,7 +1548,8 @@ export function VideoEditor() {
       )}
 
       {importOpen ? <ImportDialog mode={importMode} onModeChange={setImportMode} newName={newName} onNameChange={setNewName} sourcePath={sourcePath} onSourcePathChange={setSourcePath} resultPackagePath={resultPackagePath} onResultPackagePathChange={setResultPackagePath} resultRecordingPath={resultRecordingPath} onResultRecordingPathChange={setResultRecordingPath} pendingFile={pendingFile} onFileChange={setPendingFile} busy={busy} hasSession={Boolean(session)} onClose={() => setImportOpen(false)} onSubmit={() => void submitImport()} /> : null}
-      {validationOpen ? <ValidationDrawer checks={exportChecks} report={currentValidation} onClose={() => setValidationOpen(false)} /> : null}
+      {captionImportOpen ? <CaptionImportDialog value={captionImportText} onChange={setCaptionImportText} onClose={() => setCaptionImportOpen(false)} onImport={importCaptionsFromText} /> : null}
+      {validationOpen ? <ValidationDrawer checks={exportChecks} issues={exportIssues} report={currentValidation} onClose={() => setValidationOpen(false)} onFocusIssue={(issue) => { if (issue.shotID) setSelectedShotID(issue.shotID); if (issue.overlayID) setSelectedOverlayID(issue.overlayID); setSelectedTrack("video"); setValidationOpen(false); }} /> : null}
 	  {automationOpen && automation ? <AutomationDrawer automation={automation} onClose={() => setAutomationOpen(false)} /> : null}
       {message ? <div className="studio-toast"><span>{message}</span><button onClick={() => setMessage("")}>×</button></div> : null}
     </div>
@@ -1409,14 +1645,15 @@ function StyleProductionPanel({ templates, templateID, prompt, referenceID, refe
   </div>;
 }
 
-function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID, assetQuery, assetFilter, onSelectShot, onSelectAsset, onAddStill }: { tab: Exclude<MediaTab, "style">; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; selectedAssetID: string | undefined; assetQuery: string; assetFilter: AssetFilter; onSelectShot: (shot: EditorShot) => void; onSelectAsset: (asset: EditorArtifact) => void; onAddStill: (asset: EditorArtifact) => void }) {
+function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID, assetQuery, assetFilter, assetRatioFilter, selectedOverlayID, onSelectShot, onSelectAsset, onAddStill, onAddCaption, onAddShape, onSelectOverlay }: { tab: Exclude<MediaTab, "style">; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; selectedAssetID: string | undefined; assetQuery: string; assetFilter: AssetFilter; assetRatioFilter: AssetRatioFilter; selectedOverlayID: string; onSelectShot: (shot: EditorShot) => void; onSelectAsset: (asset: EditorArtifact) => void; onAddStill: (asset: EditorArtifact) => void; onAddCaption: () => void; onAddShape: (shape: ShapeKind) => void; onSelectOverlay: (shot: EditorShot, overlay: EditorOverlay) => void }) {
   if (tab === "captions") {
     const shots = plan?.shots.filter((shot) => captionText(shot)) ?? [];
-    return <div className="studio-list-content">{shots.map((shot) => <button key={shot.id} className={selectedShotID === shot.id ? "selected" : ""} onClick={() => onSelectShot(shot)}><strong>{captionText(shot)}</strong><small>{shot.purpose}</small></button>)}{shots.length === 0 ? <PanelEmpty text="当前计划没有字幕。" /> : null}</div>;
+    const cues = plan?.caption_cues ?? [];
+    return <div className="studio-list-content"><button className="studio-panel-create-button" onClick={onAddCaption}><strong>导入 TXT / MD 字幕</strong><small>每行一句，自动均分到当前成片时长</small></button>{shots.map((shot) => <button key={shot.id} className={selectedShotID === shot.id ? "selected" : ""} onClick={() => onSelectShot(shot)}><strong>{captionText(shot)}</strong><small>{shot.purpose}</small></button>)}{cues.map((cue) => <article key={cue.id} className="studio-caption-cue"><strong>{cue.text}</strong><small>{formatTimecode(cue.output_range_ms[0])} - {formatTimecode(cue.output_range_ms[1])}</small></article>)}{shots.length === 0 && cues.length === 0 ? <PanelEmpty text="尚未添加字幕。可导入 TXT 或 MD，也可在右侧为某个片段直接输入。" /> : null}</div>;
   }
   if (tab === "callouts") {
     const rows = plan?.shots.flatMap((shot) => (shot.overlays ?? []).filter((overlay) => overlay.type !== "caption").map((overlay) => ({ shot, overlay }))) ?? [];
-    return <div className="studio-list-content">{rows.map(({ shot, overlay }, index) => <button key={`${shot.id}-${index}`} onClick={() => onSelectShot(shot)}><strong>{overlayTypeLabel(overlay.type)}</strong><small>{shot.purpose}</small></button>)}{rows.length === 0 ? <PanelEmpty text="尚无标注。仅在 Renderer 支持后开放新的标注类型。" /> : null}</div>;
+    return <div className="studio-list-content"><div className="studio-shape-quick-actions">{(["rectangle", "circle", "line", "arrow"] as ShapeKind[]).map((shape) => <button key={shape} onClick={() => onAddShape(shape)}><span className={`studio-shape-swatch ${shape}`} /><strong>{shapeLabel(shape)}</strong></button>)}</div>{rows.map(({ shot, overlay }, index) => <button key={overlay.id ?? `${shot.id}-${index}`} className={selectedOverlayID === overlay.id ? "selected" : ""} onClick={() => onSelectOverlay(shot, overlay)}><strong>{overlay.shape ? shapeLabel(overlay.shape) : overlayTypeLabel(overlay.type)}</strong><small>{shot.purpose}</small></button>)}{rows.length === 0 ? <PanelEmpty text="先选择一个视频或图片片段，再添加高亮框、圆形、直线或箭头。" /> : null}</div>;
   }
   if (tab === "generated") {
     const generated = session.asset_catalog.artifacts.filter(isGeneratedArtifact);
@@ -1429,8 +1666,9 @@ function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID
     const mime = artifact.mime_type ?? "";
     const kind = artifact.kind.toLocaleLowerCase("en-US");
     const matchesType = assetFilter === "all" || (assetFilter === "video" && (mime.startsWith("video/") || kind.includes("recording"))) || (assetFilter === "image" && mime.startsWith("image/")) || (assetFilter === "audio" && (mime.startsWith("audio/") || kind.includes("audio")));
+    const matchesRatio = matchesAssetRatio(artifact, assetRatioFilter);
     const text = `${artifact.label ?? ""} ${artifact.id} ${artifact.kind}`.toLocaleLowerCase("zh-CN");
-    return matchesType && (!query || text.includes(query));
+    return matchesType && matchesRatio && (!query || text.includes(query));
   });
   return (
     <>
@@ -1500,17 +1738,18 @@ function ImportChoice({ active, title, detail, onClick }: { active: boolean; tit
   return <button className={active ? "active" : ""} onClick={onClick}><strong>{title}</strong><small>{detail}</small></button>;
 }
 
-function ValidationDrawer({ checks, report, onClose }: { checks: ExportCheck[]; report: EditorValidationReport | undefined; onClose: () => void }) {
+function ValidationDrawer({ checks, issues, report, onClose, onFocusIssue }: { checks: ExportCheck[]; issues: ExportIssue[]; report: EditorValidationReport | undefined; onClose: () => void; onFocusIssue: (issue: ExportIssue) => void }) {
   const errors = checks.filter((check) => check.tone === "error").length;
   return (
     <div className="studio-drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <aside className="studio-validation-drawer">
         <div className="studio-drawer-header"><div><strong>导出前校验</strong><small>{report ? `检查于 ${new Date(report.checked_at).toLocaleTimeString("zh-CN", { hour12: false })}` : "当前草稿规则检查"}</small></div><button className="studio-icon-button" onClick={onClose}>×</button></div>
         <div className={`studio-validation-summary ${errors ? "blocked" : ""}`}>{errors ? `${errors} 个阻断项尚未解决，当前不能导出。` : "所有阻断项均已通过，可以生成最终 MP4。"}</div>
+        {issues.length ? <section className="studio-export-issues"><div className="studio-export-issues-header"><strong>需要处理的位置</strong><small>点击可直接定位到对应片段或标注</small></div>{issues.map((issue) => <button key={issue.id} type="button" className="studio-export-issue" onClick={() => onFocusIssue(issue)}><span>!</span><div><strong>{issue.title}</strong><small>{issue.detail}</small></div><em>定位</em></button>)}</section> : null}
         <div className="studio-check-list">
           {checks.map((check) => <div key={check.id} className={`studio-check-item ${check.tone}`}><span>{check.tone === "pass" ? "✓" : check.tone === "warning" ? "△" : "!"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div><em>{check.tone === "pass" ? "通过" : check.tone === "warning" ? "提醒" : "阻断"}</em></div>)}
         </div>
-        {report?.warnings.length ? <div className="studio-report-findings"><strong>Worker 提醒</strong>{report.warnings.map((finding) => <p key={`${finding.code}-${finding.path ?? ""}`}>{finding.message}</p>)}</div> : null}
+        {report?.errors.length || report?.warnings.length ? <div className="studio-report-findings"><strong>Worker 校验结果</strong>{report.errors.map((finding) => <p className="error" key={`error-${finding.code}-${finding.path ?? ""}`}>{finding.message}</p>)}{report.warnings.map((finding) => <p key={`warning-${finding.code}-${finding.path ?? ""}`}>{finding.message}</p>)}</div> : null}
       </aside>
     </div>
   );
@@ -1526,6 +1765,149 @@ function EvidenceFact({ label, value }: { label: string; value: string }) {
 
 function PanelEmpty({ text }: { text: string }) {
   return <div className="studio-panel-empty">{text}</div>;
+}
+
+function CaptionImportDialog({ value, onChange, onClose, onImport }: { value: string; onChange: (value: string) => void; onClose: () => void; onImport: (value: string) => void }) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  return <div className="studio-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="studio-modal studio-caption-import-modal" role="dialog" aria-modal="true" aria-label="导入字幕"><div className="studio-modal-header"><strong>导入字幕文本</strong><button className="studio-icon-button" onClick={onClose}>×</button></div><div className="studio-modal-content"><p className="studio-dialog-note">支持 TXT 和 MD。每行将成为一条字幕；MD 会自动忽略标题、列表和强调符号。</p><input ref={fileRef} type="file" accept="text/plain,text/markdown,.txt,.md" hidden onChange={async (event) => { const file = event.currentTarget.files?.[0]; if (file) onChange(await file.text()); event.currentTarget.value = ""; }} /><button className="studio-outline-button" onClick={() => fileRef.current?.click()}>选择 TXT / MD 文件</button><label className="studio-field"><span>字幕内容</span><textarea rows={12} value={value} onChange={(event) => onChange(event.target.value)} placeholder={"第一句字幕\n第二句字幕\n第三句字幕"} /></label></div><div className="studio-modal-footer"><button className="studio-ghost-button" onClick={onClose}>取消</button><button className="studio-primary-button" disabled={!value.trim()} onClick={() => onImport(value)}>导入并排布</button></div></div></div>;
+}
+
+function ShapeOverlayPreview({ shot, playheadMS, timelineShots, selectedOverlayID, onSelect, onMoveStart, onTransformStart }: { shot: EditorShot | undefined; playheadMS: number; timelineShots: TimelineShot[]; selectedOverlayID: string; onSelect: (id: string) => void; onMoveStart: (event: React.PointerEvent<HTMLButtonElement>, overlay: EditorOverlay) => void; onTransformStart: (event: React.PointerEvent<HTMLButtonElement>, overlay: EditorOverlay, mode: ShapeCanvasInteraction["mode"], corner?: ShapeCanvasInteraction["corner"]) => void }) {
+  if (!shot) return null;
+  const item = timelineShots.find((candidate) => candidate.shot.id === shot.id);
+  const localTime = Math.max(0, playheadMS - (item?.startMS ?? playheadMS));
+  return <div className="studio-shape-overlay-layer">{(shot.overlays ?? []).filter((overlay) => overlay.shape && localTime >= (overlay.start_ms ?? 0) && localTime <= (overlay.end_ms ?? Infinity)).map((overlay, index) => <div key={overlay.id ?? `${overlay.shape}-${index}`} className={`studio-shape-overlay-frame ${selectedOverlayID === overlay.id ? "selected" : ""}`} style={shapeOverlayFrameStyle(overlay)}><button type="button" className={`studio-shape-overlay ${overlay.shape}`} style={shapeOverlayVisualStyle(overlay)} aria-label={`选择或移动${shapeLabel(overlay.shape!)}`} onPointerDown={(event) => onMoveStart(event, overlay)} onClick={() => onSelect(overlay.id ?? "")}><span /></button>{selectedOverlayID === overlay.id ? <><button type="button" className="studio-shape-rotate-handle" aria-label="旋转形状" onPointerDown={(event) => onTransformStart(event, overlay, "rotate")} /><button type="button" className="studio-shape-resize-handle nw" aria-label="调整左上角" onPointerDown={(event) => onTransformStart(event, overlay, "resize", "nw")} /><button type="button" className="studio-shape-resize-handle ne" aria-label="调整右上角" onPointerDown={(event) => onTransformStart(event, overlay, "resize", "ne")} /><button type="button" className="studio-shape-resize-handle sw" aria-label="调整左下角" onPointerDown={(event) => onTransformStart(event, overlay, "resize", "sw")} /><button type="button" className="studio-shape-resize-handle se" aria-label="调整右下角" onPointerDown={(event) => onTransformStart(event, overlay, "resize", "se")} /></> : null}</div>)}</div>;
+}
+
+function ShapePropertiesPanel({ overlay, onPatch, onRemove }: { overlay: EditorOverlay; onPatch: (patch: Partial<EditorOverlay>) => void; onRemove: () => void }) {
+  const patchNumber = (key: "x" | "y" | "width" | "height" | "rotation" | "opacity" | "fill_opacity" | "stroke_width" | "scale_x" | "scale_y" | "tilt_x" | "tilt_y", value: string) => { const next = Number(value); if (Number.isFinite(next)) onPatch({ [key]: key === "x" || key === "y" || key === "width" || key === "height" ? clampNormalized(next / 100, 1) : next }); };
+  const applyPosition = (x: number, y: number) => onPatch({ x, y });
+  const exportStatus = overlayExportStatus(overlay);
+  return <div className="studio-properties-scroll studio-shape-properties">
+    <div className={`studio-overlay-export-status ${exportStatus.exportable ? "exportable" : "preview-only"}`}><strong>{exportStatus.exportable ? "可导出" : "仅画布预览"}</strong><span>{exportStatus.exportable ? "位置、尺寸、旋转、缩放与外观会烧录到 MP4。" : `${exportStatus.reason} 当前不会写入最终 MP4；请恢复为平面基础形状后再导出。`}</span></div>
+    <PropertySection title="布局" meta="可在画布中直接拖动">
+      <div className="studio-layout-presets"><button onClick={() => applyPosition(0.08, 0.08)}>↖</button><button onClick={() => applyPosition(0.36, 0.08)}>↑</button><button onClick={() => applyPosition(0.64, 0.08)}>↗</button><button onClick={() => applyPosition(0.08, 0.4)}>←</button><button onClick={() => applyPosition(0.36, 0.4)}>◎</button><button onClick={() => applyPosition(0.64, 0.4)}>→</button></div>
+      <div className="studio-field-pair"><label className="studio-field"><span>X 位置 (%)</span><input type="number" min="0" max="100" step="1" value={Math.round((overlay.x ?? 0) * 100)} onChange={(event) => patchNumber("x", event.target.value)} /></label><label className="studio-field"><span>Y 位置 (%)</span><input type="number" min="0" max="100" step="1" value={Math.round((overlay.y ?? 0) * 100)} onChange={(event) => patchNumber("y", event.target.value)} /></label></div>
+      <div className="studio-field-pair"><label className="studio-field"><span>宽度 (%)</span><input type="number" min="5" max="100" step="1" value={Math.round((overlay.width ?? 0.3) * 100)} onChange={(event) => patchNumber("width", event.target.value)} /></label><label className="studio-field"><span>高度 (%)</span><input type="number" min="5" max="100" step="1" value={Math.round((overlay.height ?? 0.2) * 100)} onChange={(event) => patchNumber("height", event.target.value)} /></label></div>
+    </PropertySection>
+    <PropertySection title="方向与变换" meta="画布坐标">
+      <label className="studio-field"><span>旋转 {Math.round(overlay.rotation ?? 0)}°</span><input type="range" min="-180" max="180" step="1" value={overlay.rotation ?? 0} onChange={(event) => patchNumber("rotation", event.target.value)} /></label>
+    </PropertySection>
+    <PropertySection title="变换" meta="可手动微调">
+      <div className="studio-transform-subtitle">缩放</div>
+      <div className="studio-field-pair"><label className="studio-field"><span>X {Math.round(overlay.scale_x ?? 100)}%</span><input type="number" min="20" max="250" step="1" value={overlay.scale_x ?? 100} onChange={(event) => patchNumber("scale_x", event.target.value)} /></label><label className="studio-field"><span>Y {Math.round(overlay.scale_y ?? 100)}%</span><input type="number" min="20" max="250" step="1" value={overlay.scale_y ?? 100} onChange={(event) => patchNumber("scale_y", event.target.value)} /></label></div>
+      <div className="studio-transform-subtitle">3D 倾斜</div>
+      <div className="studio-field-pair"><label className="studio-field"><span>X {Math.round(overlay.tilt_x ?? 0)}°</span><input type="number" min="-60" max="60" step="1" value={overlay.tilt_x ?? 0} onChange={(event) => patchNumber("tilt_x", event.target.value)} /></label><label className="studio-field"><span>Y {Math.round(overlay.tilt_y ?? 0)}°</span><input type="number" min="-60" max="60" step="1" value={overlay.tilt_y ?? 0} onChange={(event) => patchNumber("tilt_y", event.target.value)} /></label></div>
+      <div className="studio-transform-subtitle">3D 倾斜预设</div>
+      <div className="studio-tilt-presets">{shapeTiltPresets.map((preset) => <button key={preset.id} className={overlay.tilt_preset === preset.id ? "selected" : ""} title={preset.label} aria-label={preset.label} onClick={() => onPatch({ tilt_preset: preset.id, tilt_x: preset.tiltX, tilt_y: preset.tiltY })}><span style={{ transform: preset.previewTransform }} /></button>)}</div>
+      <small className="studio-property-note">用于强调标注层的透视感；不改变底层视频或图片素材。3D 倾斜目前仅用于画布预览，导出前会明确阻止，避免成片与编辑效果不一致。</small>
+    </PropertySection>
+    <PropertySection title="外观" meta={shapeLabel(overlay.shape!)}>
+      <label className="studio-field"><span>图层不透明度 {Math.round(overlay.opacity ?? 100)}%</span><input type="range" min="10" max="100" step="1" value={overlay.opacity ?? 100} onChange={(event) => patchNumber("opacity", event.target.value)} /></label>
+      <div className="studio-field-pair"><label className="studio-field"><span>填充颜色</span><input type="color" value={overlay.fill_color ?? "#ffffff"} onChange={(event) => onPatch({ fill_color: event.target.value })} /></label><label className="studio-field"><span>填充透明度 {Math.round(overlay.fill_opacity ?? 10)}%</span><input type="number" min="0" max="100" value={overlay.fill_opacity ?? 10} onChange={(event) => patchNumber("fill_opacity", event.target.value)} /></label></div>
+      <div className="studio-field-pair"><label className="studio-field"><span>描边颜色</span><input type="color" value={overlay.color ?? "#dc58d5"} onChange={(event) => onPatch({ color: event.target.value })} /></label><label className="studio-field"><span>描边宽度</span><input type="number" min="1" max="24" value={overlay.stroke_width ?? 4} onChange={(event) => patchNumber("stroke_width", event.target.value)} /></label></div>
+    </PropertySection>
+    <PropertySection title="时间范围" meta="当前片段内"><div className="studio-field-pair"><label className="studio-field"><span>开始 (ms)</span><input type="number" min="0" value={overlay.start_ms ?? 0} onChange={(event) => onPatch({ start_ms: Number(event.target.value) })} /></label><label className="studio-field"><span>结束 (ms)</span><input type="number" min="0" value={overlay.end_ms ?? 0} onChange={(event) => onPatch({ end_ms: Number(event.target.value) })} /></label></div></PropertySection>
+    <button className="studio-ghost-button studio-remove-shape" onClick={onRemove}>删除此标注</button>
+  </div>;
+}
+
+function shapeOverlayFrameStyle(overlay: EditorOverlay): React.CSSProperties {
+  return { left: `${clampNormalized(overlay.x ?? 0.3, 0.95) * 100}%`, top: `${clampNormalized(overlay.y ?? 0.3, 0.95) * 100}%`, width: `${clampNormalized(overlay.width ?? 0.3, 1) * 100}%`, height: `${clampNormalized(overlay.height ?? 0.2, 1) * 100}%` };
+}
+
+function shapeOverlayVisualStyle(overlay: EditorOverlay): React.CSSProperties {
+  const opacity = Math.min(100, Math.max(0, overlay.opacity ?? 100)) / 100;
+  const fillOpacity = Math.min(100, Math.max(0, overlay.fill_opacity ?? 10)) / 100;
+  const tilt = shapeTiltPreset(overlay.tilt_preset);
+  const tiltX = overlay.tilt_x ?? tilt.tiltX;
+  const tiltY = overlay.tilt_y ?? tilt.tiltY;
+  return { color: overlay.color ?? "#dc58d5", borderWidth: overlay.stroke_width ?? 4, opacity, backgroundColor: colorWithAlpha(overlay.fill_color ?? overlay.color ?? "#dc58d5", fillOpacity), transform: `perspective(640px) rotateX(${tiltX}deg) rotateY(${tiltY}deg) rotate(${overlay.rotation ?? 0}deg) scale(${Math.max(0.2, Math.min(2.5, (overlay.scale_x ?? 100) / 100))}, ${Math.max(0.2, Math.min(2.5, (overlay.scale_y ?? 100) / 100))})`, transformOrigin: "center center" };
+}
+
+const shapeTiltPresets = [
+  { id: "flat", label: "平面", tiltX: 0, tiltY: 0, previewTransform: "rotateX(0deg) rotateY(0deg)" },
+  { id: "tilt_left", label: "向左倾斜", tiltX: 0, tiltY: -18, previewTransform: "rotateY(-35deg)" },
+  { id: "tilt_right", label: "向右倾斜", tiltX: 0, tiltY: 18, previewTransform: "rotateY(35deg)" },
+  { id: "tilt_up", label: "向上倾斜", tiltX: 18, tiltY: 0, previewTransform: "rotateX(35deg)" },
+  { id: "tilt_down", label: "向下倾斜", tiltX: -18, tiltY: 0, previewTransform: "rotateX(-35deg)" },
+  { id: "corner_left", label: "左上透视", tiltX: 13, tiltY: -16, previewTransform: "rotateX(28deg) rotateY(-32deg)" },
+  { id: "corner_right", label: "右上透视", tiltX: 13, tiltY: 16, previewTransform: "rotateX(28deg) rotateY(32deg)" },
+  { id: "corner_lower_left", label: "左下透视", tiltX: -13, tiltY: -16, previewTransform: "rotateX(-28deg) rotateY(-32deg)" },
+  { id: "corner_lower_right", label: "右下透视", tiltX: -13, tiltY: 16, previewTransform: "rotateX(-28deg) rotateY(32deg)" },
+  { id: "reset", label: "重置 3D 倾斜", tiltX: 0, tiltY: 0, previewTransform: "rotate(0deg)" },
+] as const;
+
+function shapeTiltPreset(value?: string) {
+  return shapeTiltPresets.find((preset) => preset.id === value) ?? shapeTiltPresets[0];
+}
+
+function shapeLabel(shape: ShapeKind): string {
+  return ({ rectangle: "矩形高亮", circle: "圆形高亮", polygon: "多边形", star: "星形", line: "直线", arrow: "箭头" } as const)[shape];
+}
+
+function parseCaptionLines(source: string): string[] {
+  return source.replace(/\r/g, "").split("\n").map((line) => line.replace(/^\s{0,3}(#{1,6}\s*|[-*+]\s+|\d+[.)]\s+)/, "").replace(/[*_`>#]/g, "").trim()).filter((line) => line.length > 0);
+}
+
+function matchesAssetRatio(artifact: EditorArtifact, filter: AssetRatioFilter): boolean {
+  if (filter === "all") return true;
+  const width = artifact.metadata?.width;
+  const height = artifact.metadata?.height;
+  if (typeof width !== "number" || typeof height !== "number" || width <= 0 || height <= 0) return false;
+  const ratio = width / height;
+  if (filter === "landscape") return ratio >= 1.2;
+  if (filter === "portrait") return ratio <= 0.8;
+  return ratio > 0.8 && ratio < 1.2;
+}
+
+function readTrackHeaderWidth(): number {
+  try {
+    return clampTrackHeaderWidth(Number(window.localStorage.getItem("cascade.editor.track-header-width")) || 148);
+  } catch {
+    return 148;
+  }
+}
+
+function clampTrackHeaderWidth(value: number): number {
+  return Math.max(120, Math.min(248, Math.round(value)));
+}
+
+function clampNormalized(value: number, max = 1): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(max, value));
+}
+
+function normalizedAngleDelta(value: number): number {
+  let normalized = value;
+  while (normalized > Math.PI) normalized -= Math.PI * 2;
+  while (normalized < -Math.PI) normalized += Math.PI * 2;
+  return normalized;
+}
+
+function normalizedOverlayWidth(interaction: ShapeCanvasInteraction): number {
+  const overlay = draftPlanForOverlay(interaction.basePlan, interaction.overlayID);
+  return Math.max(0.05, Math.min(1, overlay?.width ?? 0.3));
+}
+
+function normalizedOverlayHeight(interaction: ShapeCanvasInteraction): number {
+  const overlay = draftPlanForOverlay(interaction.basePlan, interaction.overlayID);
+  return Math.max(0.05, Math.min(1, overlay?.height ?? 0.2));
+}
+
+function draftPlanForOverlay(plan: EditorPlan, overlayID: string): EditorOverlay | undefined {
+  return plan.shots.flatMap((shot) => shot.overlays ?? []).find((overlay) => overlay.id === overlayID);
+}
+
+function colorWithAlpha(color: string, alpha: number): string {
+  const hex = color.trim().replace("#", "");
+  if (/^[0-9a-fA-F]{6}$/.test(hex)) {
+    const red = Number.parseInt(hex.slice(0, 2), 16);
+    const green = Number.parseInt(hex.slice(2, 4), 16);
+    const blue = Number.parseInt(hex.slice(4, 6), 16);
+    return `rgb(${red} ${green} ${blue} / ${alpha})`;
+  }
+  return color;
 }
 
 function ScissorsIcon() {
@@ -1579,7 +1961,7 @@ export function buildExportChecks(session?: EditorSession, plan?: EditorPlan, re
       if (!finalRendererSupports(operation.type)) unsupported.add(operation.type);
     }
     for (const overlay of shot.overlays ?? []) {
-      if (!finalRendererSupports(overlay.type)) unsupported.add(overlay.type);
+      if (!finalRendererSupportsOverlay(overlay)) unsupported.add(overlayExportStatus(overlay).reason ?? (overlay.shape ? `${overlay.type}:${overlay.shape}` : overlay.type));
     }
   }
   const assets = session?.asset_catalog.artifacts ?? [];
@@ -1596,6 +1978,25 @@ export function buildExportChecks(session?: EditorSession, plan?: EditorPlan, re
     { id: "operations", label: "渲染能力匹配", detail: unsupported.size ? `当前 Renderer 尚未烧录：${[...unsupported].join("、")}。` : "当前计划只使用已实现的裁剪、拼接、字幕和音频能力。", tone: unsupported.size ? "error" : "pass" },
     { id: "output", label: "输出参数", detail: session ? `${session.final_profile.width}×${session.final_profile.height} · ${session.final_profile.fps} FPS · ${session.final_profile.format.toUpperCase()}。` : "等待项目参数。", tone: session ? "pass" : "error" },
   ];
+}
+
+export function buildExportIssues(plan?: EditorPlan): ExportIssue[] {
+  const issues: ExportIssue[] = [];
+  for (const [shotIndex, shot] of (plan?.shots ?? []).entries()) {
+    for (const [overlayIndex, overlay] of (shot.overlays ?? []).entries()) {
+      const status = overlayExportStatus(overlay);
+      if (status.exportable) continue;
+      const shape = overlay.shape ? shapeLabel(overlay.shape) : overlay.type;
+      issues.push({
+        id: `${shot.id}:${overlay.id ?? overlayIndex}`,
+        title: `片段 ${shotIndex + 1}：${shape}`,
+        detail: status.reason === "3D 倾斜标注" ? "请在右侧属性中将 3D 倾斜恢复为“平面”，再导出 MP4。" : `${status.reason ?? "该标注"} 目前仅能在画布预览；请改为矩形、圆形、多边形、星形、直线或箭头。`,
+        shotID: shot.id,
+        ...(overlay.id ? { overlayID: overlay.id } : {}),
+      });
+    }
+  }
+  return issues;
 }
 
 export function preservesRequiredStepOrder(shots: EditorShot[], steps: EditorTimelineStep[]): boolean {

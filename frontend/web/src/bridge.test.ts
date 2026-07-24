@@ -18,6 +18,17 @@ describe("desktop bridge contract", () => {
     expect(result.data?.modelProviders.seedance?.apiKeyFallbackEnvs).toEqual(["DOUBAO_API_KEY", "ARK_API_KEY"]);
   });
 
+  it("exposes the Browser Agent fixed acceptance gate separately from App packages", async () => {
+    const bridge = createMockBridgeClient();
+    const result = await bridge.browserAgentAcceptance();
+
+    expect(result.ok).toBe(true);
+    expect(result.data?.report?.runtime).toBe("browser-agent-outline-v1");
+    expect(result.data?.report?.scenarios).toHaveLength(5);
+    expect(result.data?.report?.scenarios.find((item) => item.id === "required_validation_failure")?.action_executed).toBe(true);
+    expect(result.data?.report?.scenarios.find((item) => item.id === "locator_missing")?.action_executed).toBe(false);
+  });
+
   it("builds execution package preview without full source or raw secrets", async () => {
     const bridge = createMockBridgeClient();
     const workspace = createWorkspace("product_demo");

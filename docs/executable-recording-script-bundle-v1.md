@@ -6,7 +6,7 @@
 `ExecutableRecordingScriptBundle` 是 App 端生成、用户审批、云端校验执行的统一脚本包。v1 支持两个 runtime：
 
 - `browser-agent-outline-v1`：新产品主路径。App 端生成高置信 stage 审批 JSON、Browser Agent 脚本大纲、prompt policy 和项目理解证据包；云端 browser agent 在这些边界内自适应探索、生成/修正最终可执行脚本。
-- `playwright-restricted-sandbox`：兼容旧路径。App 端仍可上传确定性生成的受限 TypeScript Playwright 脚本。
+- `playwright-restricted-sandbox`：冻结的兼容旧路径。只保留历史包回放、回滚与回归测试；不得在此路径增加新能力、新验收包或新的 App 对接字段。详细冻结规则见 `legacy-playwright-runtime-freeze-v1.md`。
 
 ## Browser Agent Outline 主路径
 
