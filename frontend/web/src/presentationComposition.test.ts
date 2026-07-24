@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EditorPlan, EditorSession } from "./editor";
-import { compilePresentationComposition, editorCapabilities, frameToMilliseconds, millisecondsToFrame } from "./presentationComposition";
+import { compilePresentationComposition, editorCapabilities, finalRendererSupportsOverlay, frameToMilliseconds, millisecondsToFrame, overlayExportStatus } from "./presentationComposition";
 
 const plan: EditorPlan = {
   plan_id: "plan",
@@ -77,6 +77,14 @@ describe("presentation composition", () => {
       { mode: "source", volumePercent: 80 },
       { mode: "mute", volumePercent: 80 },
     ]);
+  });
+
+  it("allows flat supported shapes but blocks preview-only 3D transforms", () => {
+    expect(finalRendererSupportsOverlay({ type: "highlight_box", shape: "rectangle", scale_x: 135, scale_y: 80 })).toBe(true);
+    expect(finalRendererSupportsOverlay({ type: "highlight_box", shape: "polygon" })).toBe(true);
+    expect(overlayExportStatus({ type: "highlight_box", shape: "star" })).toEqual({ exportable: true });
+    expect(overlayExportStatus({ type: "highlight_box", shape: "circle", tilt_x: 12 })).toEqual({ exportable: false, reason: "3D 倾斜标注" });
+    expect(overlayExportStatus({ type: "highlight_box", shape: "diamond" })).toEqual({ exportable: false, reason: "highlight_box:diamond" });
   });
 
   it("keeps a step screenshot as a timed still without inventing source audio", () => {

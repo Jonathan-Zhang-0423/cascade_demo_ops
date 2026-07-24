@@ -154,6 +154,7 @@ type RuntimePatchLedgerEntry struct {
 	Before                 string             `json:"before,omitempty"`
 	After                  string             `json:"after"`
 	PolicyDecision         ValidationDecision `json:"policy_decision"`
+	Reason                 string             `json:"reason,omitempty"`
 	Applied                bool               `json:"applied"`
 	RolledBack             bool               `json:"rolled_back,omitempty"`
 	EvidenceRefs           []EvidenceRef      `json:"evidence_refs,omitempty"`
@@ -266,7 +267,7 @@ func (e RuntimePatchLedgerEntry) Validate() error {
 	if e.RolledBack && !e.Applied {
 		return errors.New("runtime patch cannot be rolled back before it was applied")
 	}
-	if err := validateRuntimeContractText(e.Field, e.Before, e.After); err != nil {
+	if err := validateRuntimeContractText(e.Field, e.Before, e.After, e.Reason); err != nil {
 		return err
 	}
 	return validateRuntimeEvidenceRefs(e.EvidenceRefs)

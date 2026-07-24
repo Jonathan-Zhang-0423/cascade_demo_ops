@@ -90,8 +90,9 @@ These fields are hash-bound through `plan_hash_sha256`,
 `markdown_hash_sha256`, and `bundle_hash_sha256`. The server validates these
 hashes before execution.
 
-The legacy `runtime=playwright-restricted-sandbox` remains supported for old
-servers and CI fixtures. In that mode, `playwright_script.inline_source` is a
+The legacy `runtime=playwright-restricted-sandbox` is frozen and remains supported only for historical
+packages, rollback, and regression fixtures. New capability and new integration
+development must use `browser-agent-outline-v1`. In legacy mode, `playwright_script.inline_source` is a
 deterministic restricted TypeScript artifact and must export
 `runCascadeRecording`. In outline mode, `playwright_script` may be empty and the
 manifest entry function is `runBrowserAgentOutline`; the cloud browser agent is

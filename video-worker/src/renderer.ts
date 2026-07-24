@@ -397,11 +397,28 @@ interface EditOperation {
 
 interface EditOverlay {
   type: OverlayType;
+  id?: string;
   text?: string;
   source_step_id?: string;
   target_selector?: string;
   start_ms?: number;
   end_ms?: number;
+  shape?: "rectangle" | "circle" | "polygon" | "star" | "line" | "arrow" | string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  color?: string;
+  stroke_width?: number;
+  rotation?: number;
+  opacity?: number;
+  fill_color?: string;
+  fill_opacity?: number;
+  tilt_preset?: string;
+  scale_x?: number;
+  scale_y?: number;
+  tilt_x?: number;
+  tilt_y?: number;
 }
 
 export interface DemoEditPlanValidationReport {
@@ -449,7 +466,7 @@ interface CompositorShot {
   presentation_kind: "video" | "still";
   duration_ms: number;
   operations: string[];
-  overlays: Array<{ type: string; text?: string; start_ms?: number; end_ms?: number }>;
+  overlays: Array<{ type: string; id?: string; text?: string; start_ms?: number; end_ms?: number; shape?: string; x?: number; y?: number; width?: number; height?: number; color?: string; stroke_width?: number; rotation?: number; opacity?: number; fill_color?: string; fill_opacity?: number; tilt_preset?: string; scale_x?: number; scale_y?: number; tilt_x?: number; tilt_y?: number }>;
 }
 
 interface VideoCodecConfig {
@@ -992,6 +1009,24 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   return report;
 }
 
+interface ShapeCue {
+  type: "rectangle" | "circle" | "polygon" | "star" | "line" | "arrow";
+  start_ms: number;
+  end_ms: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  stroke_width: number;
+  rotation: number;
+  opacity: number;
+  fill_color: string;
+  fill_opacity: number;
+  scale_x: number;
+  scale_y: number;
+}
+
 function isStillShot(shot: DemoEditShot): boolean {
   return shot.presentation_kind === "still";
 }
@@ -1082,11 +1117,20 @@ function validateOperations(operations: EditOperation[], pathValue: string, erro
 
 function validateOverlays(overlays: EditOverlay[], stepByID: Map<string, TimelineStep>, pathValue: string, errors: ValidationFinding[]): void {
   overlays.forEach((overlay, index) => {
+    const overlayPath = `${pathValue}[${index}]`;
     if (!ALLOWED_OVERLAY_TYPES.includes(overlay.type)) {
-      errors.push(finding("unsupported_overlay", `Unsupported overlay type ${overlay.type}`, `${pathValue}[${index}].type`));
+      errors.push(finding("unsupported_overlay", `Unsupported overlay type ${overlay.type}`, `${overlayPath}.type`));
     }
     if (overlay.source_step_id && !stepByID.has(overlay.source_step_id)) {
-      errors.push(finding("unknown_overlay_step", `Overlay references missing source step ${overlay.source_step_id}`, `${pathValue}[${index}].source_step_id`));
+      errors.push(finding("unknown_overlay_step", `Overlay references missing source step ${overlay.source_step_id}`, `${overlayPath}.source_step_id`));
+    }
+    if (overlay.type !== "highlight_box") return;
+    if (!overlay.shape || !["rectangle", "circle", "polygon", "star", "line", "arrow"].includes(overlay.shape)) {
+      errors.push(finding("unsupported_shape_renderer", `Final renderer does not support shape ${overlay.shape || "unknown"}`, `${overlayPath}.shape`));
+    }
+    const has3DTilt = (overlay.tilt_preset && overlay.tilt_preset !== "flat" && overlay.tilt_preset !== "reset") || (overlay.tilt_x ?? 0) !== 0 || (overlay.tilt_y ?? 0) !== 0;
+    if (has3DTilt) {
+      errors.push(finding("unsupported_shape_3d_tilt", "Final renderer does not support 3D shape tilt", overlayPath));
     }
   });
 }
@@ -2285,6 +2329,23 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
         if (overlay.text !== undefined) plannedOverlay.text = overlay.text;
         if (overlay.start_ms !== undefined) plannedOverlay.start_ms = overlay.start_ms;
         if (overlay.end_ms !== undefined) plannedOverlay.end_ms = overlay.end_ms;
+        if (overlay.id !== undefined) plannedOverlay.id = overlay.id;
+        if (overlay.shape !== undefined) plannedOverlay.shape = overlay.shape;
+        if (overlay.x !== undefined) plannedOverlay.x = overlay.x;
+        if (overlay.y !== undefined) plannedOverlay.y = overlay.y;
+        if (overlay.width !== undefined) plannedOverlay.width = overlay.width;
+        if (overlay.height !== undefined) plannedOverlay.height = overlay.height;
+        if (overlay.color !== undefined) plannedOverlay.color = overlay.color;
+        if (overlay.stroke_width !== undefined) plannedOverlay.stroke_width = overlay.stroke_width;
+        if (overlay.rotation !== undefined) plannedOverlay.rotation = overlay.rotation;
+        if (overlay.opacity !== undefined) plannedOverlay.opacity = overlay.opacity;
+        if (overlay.fill_color !== undefined) plannedOverlay.fill_color = overlay.fill_color;
+        if (overlay.fill_opacity !== undefined) plannedOverlay.fill_opacity = overlay.fill_opacity;
+        if (overlay.tilt_preset !== undefined) plannedOverlay.tilt_preset = overlay.tilt_preset;
+        if (overlay.scale_x !== undefined) plannedOverlay.scale_x = overlay.scale_x;
+        if (overlay.scale_y !== undefined) plannedOverlay.scale_y = overlay.scale_y;
+        if (overlay.tilt_x !== undefined) plannedOverlay.tilt_x = overlay.tilt_x;
+        if (overlay.tilt_y !== undefined) plannedOverlay.tilt_y = overlay.tilt_y;
         return plannedOverlay;
       });
       const planned: CompositorShot = {
@@ -2342,6 +2403,11 @@ function appliedOperationsForCurrentCompositor(shots: CompositorShot[], editPlan
     if (captionCuesForShot(shot).length > 0) {
       values.add("caption");
     }
+    if (shapeCuesForShot(shot).length > 0) {
+      for (const overlay of shot.overlays) {
+        if (overlay.shape && ["rectangle", "circle", "polygon", "star", "line", "arrow"].includes(overlay.shape)) values.add(overlay.type);
+      }
+    }
   }
   if (shots.length > 1) {
     values.add("concat");
@@ -2357,6 +2423,13 @@ function appliedOperationsForCurrentCompositor(shots: CompositorShot[], editPlan
 
 function skippedOperationsForCurrentCompositor(shots: CompositorShot[], editPlan: DemoEditPlan | undefined, skipTrim: boolean): Array<{ type: string; reason: string }> {
   const skipped = new Map<string, string>();
+  for (const shot of shots) {
+    for (const overlay of shot.overlays) {
+      if (overlay.shape && !["rectangle", "circle", "polygon", "star", "line", "arrow"].includes(overlay.shape)) {
+        skipped.set(`shape:${overlay.shape}`, "current deterministic compositor does not burn this shape type into pixels yet");
+      }
+    }
+  }
   for (const operation of plannedOperations(shots, editPlan)) {
     if (operation === "trim" && !skipTrim) {
       continue;
@@ -2396,6 +2469,34 @@ function captionCuesForShot(shot: CompositorShot): CaptionCue[] {
   return cues;
 }
 
+function shapeCuesForShot(shot: CompositorShot): ShapeCue[] {
+  const cues: ShapeCue[] = [];
+  for (const overlay of shot.overlays) {
+    if (!overlay.shape || !["rectangle", "circle", "polygon", "star", "line", "arrow"].includes(overlay.shape)) continue;
+    const startMS = Math.max(0, overlay.start_ms ?? 0);
+    const endMS = Math.min(shot.duration_ms, Math.max(startMS + 100, overlay.end_ms ?? shot.duration_ms));
+    if (endMS <= startMS) continue;
+    cues.push({
+      type: overlay.shape as ShapeCue["type"], start_ms: startMS, end_ms: endMS,
+      x: normalizedShapeNumber(overlay.x, 0.3), y: normalizedShapeNumber(overlay.y, 0.3),
+      width: normalizedShapeNumber(overlay.width, 0.3), height: normalizedShapeNumber(overlay.height, 0.2),
+      color: overlay.color || "#dc58d5", stroke_width: boundedInteger(overlay.stroke_width ?? 4, 4, 1, 24),
+      rotation: boundedNumber(overlay.rotation ?? 0, 0, -180, 180), opacity: boundedNumber(overlay.opacity ?? 100, 100, 0, 100),
+      fill_color: overlay.fill_color || overlay.color || "#dc58d5", fill_opacity: boundedNumber(overlay.fill_opacity ?? 10, 10, 0, 100),
+      scale_x: boundedNumber(overlay.scale_x ?? 100, 100, 20, 250), scale_y: boundedNumber(overlay.scale_y ?? 100, 100, 20, 250),
+    });
+  }
+  return cues;
+}
+
+function normalizedShapeNumber(value: number | undefined, fallback: number): number {
+  return boundedNumber(value ?? fallback, fallback, 0, 1);
+}
+
+function boundedNumber(value: number, fallback: number, min: number, max: number): number {
+  return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
+}
+
 function assSubtitleForCaptions(cues: CaptionCue[]): string {
   const lines = [
     "[Script Info]",
@@ -2417,6 +2518,75 @@ function assSubtitleForCaptions(cues: CaptionCue[]): string {
     lines.push(`Dialogue: 0,${assTimestamp(cue.start_ms)},${assTimestamp(cue.end_ms)},Default,,0,0,0,,${escapeAssText(wrapCaptionText(cue.text))}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+function assSubtitleForShotOverlays(captions: CaptionCue[], shapes: ShapeCue[]): string {
+  const lines = assHeader();
+  for (const cue of captions) lines.push(`Dialogue: 0,${assTimestamp(cue.start_ms)},${assTimestamp(cue.end_ms)},Default,,0,0,0,,${escapeAssText(wrapCaptionText(cue.text))}`);
+  for (const shape of shapes) lines.push(`Dialogue: 10,${assTimestamp(shape.start_ms)},${assTimestamp(shape.end_ms)},Shape,,0,0,0,,${assShapeDrawing(shape)}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function assHeader(): string[] {
+  return [
+    "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1920", "PlayResY: 1080", "WrapStyle: 2", "ScaledBorderAndShadow: yes", "YCbCr Matrix: TV.709", "",
+    "[V4+ Styles]", "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
+    "Style: Default,Arial,34,&H00FFFFFF,&H00FFFFFF,&HAA000000,&HAA000000,0,0,0,0,100,100,0,0,3,1.2,0,2,160,160,72,1",
+    "Style: Shape,Arial,20,&H00000000,&H00000000,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,7,0,0,0,1", "",
+    "[Events]", "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
+  ];
+}
+
+function assShapeDrawing(shape: ShapeCue): string {
+  const baseWidth = Math.max(12, Math.round(shape.width * 1920));
+  const baseHeight = Math.max(12, Math.round(shape.height * 1080));
+  const width = Math.max(12, Math.round(baseWidth * shape.scale_x / 100));
+  const height = Math.max(12, Math.round(baseHeight * shape.scale_y / 100));
+  // Match CSS transform-origin:center: keep the visual center fixed while scaling.
+  const x = Math.round(shape.x * 1920 + (baseWidth - width) / 2);
+  const y = Math.round(shape.y * 1080 + (baseHeight - height) / 2);
+  const centerX = x + Math.round(width / 2);
+  const centerY = y + Math.round(height / 2);
+  const stroke = Math.max(1, shape.stroke_width);
+  const outline = assColor(shape.color, shape.opacity);
+  const fill = assColor(shape.fill_color, shape.opacity * shape.fill_opacity / 100);
+  const drawing = shape.type === "circle" ? assEllipsePath(width, height) : shape.type === "polygon" ? assPolygonPath(width, height) : shape.type === "star" ? assStarPath(width, height) : shape.type === "line" ? `m 0 ${height / 2} l ${width} ${height / 2}` : shape.type === "arrow" ? assArrowPath(width, height) : `m 0 0 l ${width} 0 l ${width} ${height} l 0 ${height}`;
+  const rotation = shape.rotation ? `\\frz${Math.round(shape.rotation)}` : "";
+  return `{\\p1\\pos(${x},${y})\\org(${centerX},${centerY})\\bord${stroke}\\c${fill}\\3c${outline}${rotation}}${drawing}{\\p0}`;
+}
+
+function assEllipsePath(width: number, height: number): string {
+  const rx = width / 2;
+  const ry = height / 2;
+  const k = 0.55228475;
+  return `m ${rx} 0 b ${rx + k * rx} 0 ${width} ${ry - k * ry} ${width} ${ry} b ${width} ${ry + k * ry} ${rx + k * rx} ${height} ${rx} ${height} b ${rx - k * rx} ${height} 0 ${ry + k * ry} 0 ${ry} b 0 ${ry - k * ry} ${rx - k * rx} 0 ${rx} 0`;
+}
+
+function assArrowPath(width: number, height: number): string {
+  const mid = Math.round(height / 2);
+  const head = Math.max(14, Math.min(64, Math.round(width * 0.2)));
+  return `m 0 ${mid - 3} l ${width - head} ${mid - 3} l ${width - head} 0 l ${width} ${mid} l ${width - head} ${height} l ${width - head} ${mid + 3} l 0 ${mid + 3}`;
+}
+
+function assPolygonPath(width: number, height: number): string {
+  return `m ${width / 2} 0 l ${width} ${height * 0.25} l ${width * 0.82} ${height} l ${width * 0.18} ${height} l 0 ${height * 0.25}`;
+}
+
+function assStarPath(width: number, height: number): string {
+  const points: Array<[number, number]> = [
+    [0.5, 0], [0.61, 0.35], [0.98, 0.35], [0.68, 0.56], [0.79, 0.92],
+    [0.5, 0.7], [0.21, 0.92], [0.32, 0.56], [0.02, 0.35], [0.39, 0.35],
+  ];
+  return points.map(([x, y], index) => `${index === 0 ? "m" : "l"} ${Math.round(x * width)} ${Math.round(y * height)}`).join(" ");
+}
+
+function assColor(value: string, opacityPercent: number): string {
+  const hex = String(value || "#dc58d5").replace("#", "");
+  const red = /^[0-9a-f]{6}$/i.test(hex) ? Number.parseInt(hex.slice(0, 2), 16) : 220;
+  const green = /^[0-9a-f]{6}$/i.test(hex) ? Number.parseInt(hex.slice(2, 4), 16) : 88;
+  const blue = /^[0-9a-f]{6}$/i.test(hex) ? Number.parseInt(hex.slice(4, 6), 16) : 213;
+  const alpha = Math.round(255 * (1 - boundedNumber(opacityPercent, 100, 0, 100) / 100));
+  return `&H${alpha.toString(16).padStart(2, "0").toUpperCase()}${blue.toString(16).padStart(2, "0").toUpperCase()}${green.toString(16).padStart(2, "0").toUpperCase()}${red.toString(16).padStart(2, "0").toUpperCase()}&`;
 }
 
 function wrapCaptionText(text: string): string {
@@ -2495,9 +2665,10 @@ async function composeWithFFmpeg(
       videoFilters.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p`);
     }
     const captionCues = captionCuesForShot(shot);
-    if (captionCues.length > 0) {
+    const shapeCues = shapeCuesForShot(shot);
+    if (captionCues.length > 0 || shapeCues.length > 0) {
       const subtitlePath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}.ass`);
-      await writeFile(subtitlePath, assSubtitleForCaptions(captionCues), "utf8");
+      await writeFile(subtitlePath, assSubtitleForShotOverlays(captionCues, shapeCues), "utf8");
       videoFilters.push(`subtitles='${ffmpegFilterPath(subtitlePath)}'`);
     }
     const volumeExpression = audioVolumeExpression(audioPolicy, outputCursorMS, segmentDurationMS, segmentStartMS);

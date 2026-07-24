@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 
 func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
+	// Rendering is covered by the end-to-end protocol acceptance test. This
+	// focused runner test uses a stub browser session and verifies orchestration.
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
 	plan, err := compileBrowserAgentRuntimePlan(&pkg)
 	if err != nil {
 		t.Fatal(err)
@@ -98,10 +102,67 @@ func TestDeterministicBrowserAgentStageVerifierStopsWhenRequiredValidationIsMiss
 	}
 }
 
+func TestLocalBrowserAgentOutlineRunnerPackagesRedactedFailureResult(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := localBrowserAgentOutlineRunner{
+		service: &Service{},
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return &stubBrowserAgentWorkerSession{failNodeID: plan.Stages[1].NodeID}, driver.BrowserAgentWorkerOpenResult{SessionID: "session_failure", RuntimeVersions: map[string]string{"runner": "stub-browser-agent"}}, nil
+		},
+	}
+	result, err := runner.Run(context.Background(), BrowserAgentOutlineRunRequest{
+		Package: &pkg, RuntimePlan: plan, CloudJobID: "job_outline_failure", RecordingOutputDir: t.TempDir(),
+		ResultCreatedAt: time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC), EventSink: &memoryStageEventSink{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != model.RecordingResultStatusFailed || result.FailureDiagnostic == nil || result.RepairRequest == nil {
+		t.Fatalf("outline failure must be returned as a failed result package: %+v", result)
+	}
+	if result.FailureDiagnostic.FailedNodeID != plan.Stages[1].NodeID || !result.FailureDiagnostic.RedactionReport.Applied || result.FailureDiagnostic.RedactionReport.FullHTMLIncluded {
+		t.Fatalf("failure diagnostic did not preserve protocol safety requirements: %+v", result.FailureDiagnostic)
+	}
+	if result.RepairRequest.ApprovalRequired != true || len(result.ValidationReports) != 1 {
+		t.Fatalf("failure result lost repair approval or validation evidence: %+v", result)
+	}
+	if result.StepResults[0].Status != "passed" || result.StepResults[1].Status != "failed" {
+		t.Fatalf("failure result must retain only observed success and the stopped stage: %+v", result.StepResults)
+	}
+}
+
+func TestLocalBrowserAgentOutlineRunnerUsesInjectedVerifierForApprovedRepair(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &stubBrowserAgentWorkerSession{}
+	runner := localBrowserAgentOutlineRunner{
+		service: &Service{}, outcomeVerifier: &repairThenContinueVerifier{},
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return session, driver.BrowserAgentWorkerOpenResult{SessionID: "repair_session", RuntimeVersions: map[string]string{"runner": "stub-browser-agent"}}, nil
+		},
+	}
+	result, err := runner.Run(context.Background(), BrowserAgentOutlineRunRequest{Package: &pkg, RuntimePlan: plan, CloudJobID: "repair_job", RecordingOutputDir: t.TempDir(), ResultCreatedAt: timeNowUTC(), EventSink: &memoryStageEventSink{}})
+	if err != nil {
+		t.Fatalf("injected verifier repair should complete: %v", err)
+	}
+	if len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied || session.executeCalls != len(plan.Stages)+1 {
+		t.Fatalf("repair was not run through the normal outline pipeline: ledger=%+v executes=%d", result.PatchLedger, session.executeCalls)
+	}
+}
+
 type stubBrowserAgentWorkerSession struct {
 	observeCalls int
 	executeCalls int
 	closeCalls   int
+	failNodeID   string
 }
 
 func (s *stubBrowserAgentWorkerSession) Observe(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
@@ -116,6 +177,9 @@ func (s *stubBrowserAgentWorkerSession) Observe(_ context.Context, stage driver.
 
 func (s *stubBrowserAgentWorkerSession) Execute(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
 	s.executeCalls++
+	if stage.NodeID == s.failNodeID {
+		return driver.BrowserAgentWorkerStageResult{}, errors.New("synthetic target resolution failure")
+	}
 	artifact := stubBrowserAgentArtifact(stage.NodeID, "after")
 	assertions := []model.RuntimeAssertion{{Kind: "action_completed", Passed: true, Actual: stage.TargetContract.SemanticID}}
 	for _, validation := range stage.Validations {

@@ -158,6 +158,8 @@ export type CloudRunStatusView = {
   resultPackage?: RecordingResultPackage;
   failureDiagnostic?: ScriptFailureDiagnostic;
   repairRequest?: ScriptRepairRequest;
+  editorSessionID?: string;
+  editorMaterializationMessage?: string;
 };
 
 export type AssetReviewView = {

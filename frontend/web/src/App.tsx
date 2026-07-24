@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { GraphNode, SandboxPolicy } from "../../src/types/workflowGraph";
 import { agentPipelineItems, codeInvestigationQuestionsFromWorkspace, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
 import { createBridgeClient } from "./bridge";
+import type { BrowserAgentAcceptanceView, BrowserAgentBusinessAcceptanceView, CloudPackagePreflightView } from "./bridge";
 import type {
 	ApprovalChecklistState,
 	ModelDiagnosticResult,
@@ -46,6 +47,16 @@ export function App() {
   const [selectedNodeID, setSelectedNodeID] = useState(workspace.planReview.graph.nodes[0]?.id ?? "");
   const [isGeneratingPackage, setIsGeneratingPackage] = useState(false);
   const [isRunningProduct, setIsRunningProduct] = useState(false);
+  const [browserAgentAcceptance, setBrowserAgentAcceptance] = useState<BrowserAgentAcceptanceView | undefined>();
+  const [isRunningBrowserAgentAcceptance, setIsRunningBrowserAgentAcceptance] = useState(false);
+  const [browserAgentAcceptanceError, setBrowserAgentAcceptanceError] = useState("");
+  const [browserAgentBusinessAcceptance, setBrowserAgentBusinessAcceptance] = useState<BrowserAgentBusinessAcceptanceView | undefined>();
+  const [isRunningBrowserAgentBusinessAcceptance, setIsRunningBrowserAgentBusinessAcceptance] = useState(false);
+  const [browserAgentBusinessAcceptanceError, setBrowserAgentBusinessAcceptanceError] = useState("");
+  const [packagePreflight, setPackagePreflight] = useState<CloudPackagePreflightView | undefined>();
+  const [packagePreflightError, setPackagePreflightError] = useState("");
+  const [isRunningPackagePreflight, setIsRunningPackagePreflight] = useState(false);
+  const [isCheckingEditorMaterialization, setIsCheckingEditorMaterialization] = useState(false);
 
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
   const blockedReasons = packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections);
@@ -63,6 +74,77 @@ export function App() {
       mounted = false;
     };
   }, [bridge]);
+
+  useEffect(() => {
+    let mounted = true;
+    bridge.browserAgentBusinessAcceptance().then((result) => {
+      if (mounted && result.ok && result.data) setBrowserAgentBusinessAcceptance(result.data);
+    });
+    return () => { mounted = false; };
+  }, [bridge]);
+
+  useEffect(() => {
+    let mounted = true;
+    bridge.browserAgentAcceptance().then((result) => {
+      if (mounted && result.ok && result.data) setBrowserAgentAcceptance(result.data);
+    });
+    return () => { mounted = false; };
+  }, [bridge]);
+
+  async function runBrowserAgentAcceptance() {
+    setIsRunningBrowserAgentAcceptance(true);
+    setBrowserAgentAcceptanceError("");
+    const result = await bridge.runBrowserAgentAcceptance();
+    if (result.ok && result.data) setBrowserAgentAcceptance(result.data);
+    else setBrowserAgentAcceptanceError(result.error ?? "Browser Agent 固定验收运行失败");
+    setIsRunningBrowserAgentAcceptance(false);
+  }
+
+  async function runBrowserAgentBusinessAcceptance() {
+    setIsRunningBrowserAgentBusinessAcceptance(true);
+    setBrowserAgentBusinessAcceptanceError("");
+    const result = await bridge.runBrowserAgentBusinessAcceptance();
+    if (result.ok && result.data) setBrowserAgentBusinessAcceptance(result.data);
+    else setBrowserAgentBusinessAcceptanceError(result.error ?? "Browser Agent 受控业务验收运行失败");
+    setIsRunningBrowserAgentBusinessAcceptance(false);
+  }
+
+  async function runPackagePreflight() {
+    setIsRunningPackagePreflight(true);
+    setPackagePreflightError("");
+    const result = await bridge.preflightExecutionPackage(workspace);
+    if (result.ok && result.data) {
+      setPackagePreflight(result.data);
+    } else {
+      setPackagePreflight(undefined);
+      setPackagePreflightError(result.error ?? "Server Intake 预检失败");
+    }
+    setIsRunningPackagePreflight(false);
+  }
+
+  async function refreshEditorMaterialization() {
+    setIsCheckingEditorMaterialization(true);
+    const result = await bridge.editorMaterialization(workspace);
+    if (result.ok && result.data) {
+      const materialization = result.data;
+      setWorkspace((current) => ({
+        ...current,
+        cloudRun: {
+          ...current.cloudRun,
+          ...(materialization.session_id ? { editorSessionID: materialization.session_id } : {}),
+          editorMaterializationMessage: materialization.message,
+        },
+      }));
+    } else {
+      setWorkspace((current) => ({ ...current, cloudRun: { ...current.cloudRun, editorMaterializationMessage: result.error ?? "无法确认待编辑素材" } }));
+    }
+    setIsCheckingEditorMaterialization(false);
+  }
+
+  function openEditorForResult() {
+    setActiveNav("editor");
+    setEditorNavigationOpen(false);
+  }
 
   function patchWorkspace(patch: Partial<ProjectWorkspaceView>) {
     setWorkspace((current) => ({ ...current, ...patch }));
@@ -400,6 +482,21 @@ export function App() {
                 onCloudSuccess={simulateCloudSuccess}
                 onCloudFailure={simulateCloudFailure}
                 onRepairScript={repairFailedScript}
+                browserAgentAcceptance={browserAgentAcceptance}
+                isRunningBrowserAgentAcceptance={isRunningBrowserAgentAcceptance}
+                browserAgentAcceptanceError={browserAgentAcceptanceError}
+                onRunBrowserAgentAcceptance={runBrowserAgentAcceptance}
+                browserAgentBusinessAcceptance={browserAgentBusinessAcceptance}
+                isRunningBrowserAgentBusinessAcceptance={isRunningBrowserAgentBusinessAcceptance}
+                browserAgentBusinessAcceptanceError={browserAgentBusinessAcceptanceError}
+                onRunBrowserAgentBusinessAcceptance={runBrowserAgentBusinessAcceptance}
+                packagePreflight={packagePreflight}
+                packagePreflightError={packagePreflightError}
+                isRunningPackagePreflight={isRunningPackagePreflight}
+                onRunPackagePreflight={runPackagePreflight}
+                onRefreshEditorMaterialization={refreshEditorMaterialization}
+                isCheckingEditorMaterialization={isCheckingEditorMaterialization}
+                onOpenEditor={openEditorForResult}
               />
             ) : null}
             {activeNav === "assets" ? <AssetReview workspace={workspace} onApprove={approveAssets} /> : null}
@@ -1027,6 +1124,41 @@ function CloudRunPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   );
 }
 
+function EditorHandoffPanel({
+  workspace,
+  isChecking,
+  onRefresh,
+  onOpenEditor,
+}: {
+  workspace: ProjectWorkspaceView;
+  isChecking: boolean;
+  onRefresh: () => void;
+  onOpenEditor: () => void;
+}) {
+  const failed = workspace.cloudRun.status === "failed";
+  const sessionID = workspace.cloudRun.editorSessionID;
+  const message = workspace.cloudRun.editorMaterializationMessage ?? (failed
+    ? "失败任务不创建成片编辑会话；请在失败诊断中复盘。"
+    : "成功结果会自动登记录屏和可用截图，供本地编辑器继续编排。");
+  return (
+    <section className="table-section editor-handoff-panel">
+      <SectionTitle title="待编辑素材" meta={sessionID ? "已进入编辑器" : failed ? "失败复盘" : "等待登记"} />
+      <div className="acceptance-intro">
+        <div>
+          <StatusPill label={sessionID ? "可编辑" : failed ? "不创建" : "待确认"} tone={sessionID ? "green" : "yellow"} />
+          <strong>{sessionID ? "服务器录制产物已登记为本地编辑会话。" : "仅成功且位于 Server 受控素材目录的录屏会自动进入编辑器。"}</strong>
+          <p>{message}</p>
+        </div>
+        <div className="handoff-actions">
+          {!failed ? <button type="button" className="secondary-action" disabled={isChecking || !workspace.cloudRun.resultPackageID} onClick={onRefresh}>{isChecking ? "正在确认..." : "检查待编辑素材"}</button> : null}
+          {sessionID ? <button type="button" className="primary-action" onClick={onOpenEditor}>进入视频编辑</button> : null}
+        </div>
+      </div>
+      {sessionID ? <p className="acceptance-path">编辑会话：{sessionID}</p> : null}
+    </section>
+  );
+}
+
 function ScriptRepairPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   const diagnostic = workspace.cloudRun.failureDiagnostic;
   const lineage = workspace.executableScriptBundle?.repair_lineage;
@@ -1192,6 +1324,21 @@ function PackageApproval({
   onCloudSuccess,
   onCloudFailure,
   onRepairScript,
+  browserAgentAcceptance,
+  isRunningBrowserAgentAcceptance,
+  browserAgentAcceptanceError,
+  onRunBrowserAgentAcceptance,
+  browserAgentBusinessAcceptance,
+  isRunningBrowserAgentBusinessAcceptance,
+  browserAgentBusinessAcceptanceError,
+  onRunBrowserAgentBusinessAcceptance,
+  packagePreflight,
+  packagePreflightError,
+  isRunningPackagePreflight,
+  onRunPackagePreflight,
+  onRefreshEditorMaterialization,
+  isCheckingEditorMaterialization,
+  onOpenEditor,
 }: {
   workspace: ProjectWorkspaceView;
   checklist: ApprovalChecklistState;
@@ -1203,6 +1350,21 @@ function PackageApproval({
   onCloudSuccess: () => void;
   onCloudFailure: () => void;
   onRepairScript: () => void;
+  browserAgentAcceptance: BrowserAgentAcceptanceView | undefined;
+  isRunningBrowserAgentAcceptance: boolean;
+  browserAgentAcceptanceError: string;
+  onRunBrowserAgentAcceptance: () => void;
+  browserAgentBusinessAcceptance: BrowserAgentBusinessAcceptanceView | undefined;
+  isRunningBrowserAgentBusinessAcceptance: boolean;
+  browserAgentBusinessAcceptanceError: string;
+  onRunBrowserAgentBusinessAcceptance: () => void;
+  packagePreflight: CloudPackagePreflightView | undefined;
+  packagePreflightError: string;
+  isRunningPackagePreflight: boolean;
+  onRunPackagePreflight: () => void;
+  onRefreshEditorMaterialization: () => void;
+  isCheckingEditorMaterialization: boolean;
+  onOpenEditor: () => void;
 }) {
   function toggle(key: keyof ApprovalChecklistState) {
     onChecklistChange({ ...checklist, [key]: !checklist[key] });
@@ -1247,7 +1409,32 @@ function PackageApproval({
         </div>
       </div>
       <RuntimeLogPanel workspace={workspace} />
+      <RealPackagePreflightPanel
+        preflight={packagePreflight}
+        error={packagePreflightError}
+        isRunning={isRunningPackagePreflight}
+        canRun={Boolean(bundle)}
+        onRun={onRunPackagePreflight}
+      />
+      <BrowserAgentAcceptancePanel
+        acceptance={browserAgentAcceptance}
+        isRunning={isRunningBrowserAgentAcceptance}
+        error={browserAgentAcceptanceError}
+        onRun={onRunBrowserAgentAcceptance}
+      />
+      <BrowserAgentBusinessAcceptancePanel
+        acceptance={browserAgentBusinessAcceptance}
+        isRunning={isRunningBrowserAgentBusinessAcceptance}
+        error={browserAgentBusinessAcceptanceError}
+        onRun={onRunBrowserAgentBusinessAcceptance}
+      />
       <CloudRunPanel workspace={workspace} />
+      <EditorHandoffPanel
+        workspace={workspace}
+        isChecking={isCheckingEditorMaterialization}
+        onRefresh={onRefreshEditorMaterialization}
+        onOpenEditor={onOpenEditor}
+      />
       <SandboxPolicyPanel workspace={workspace} />
       <ScriptBundleReview workspace={workspace} />
       {workspace.cloudRun.failureDiagnostic ? (
@@ -1332,6 +1519,141 @@ function ServerLifecyclePanel({ workspace }: { workspace: ProjectWorkspaceView }
         ))}
       </div>
       {workspace.cloudRun.failureSummary ? <div className="error-banner">{workspace.cloudRun.failureSummary}</div> : null}
+    </section>
+  );
+}
+
+function BrowserAgentAcceptancePanel({
+  acceptance,
+  isRunning,
+  error,
+  onRun,
+}: {
+  acceptance: BrowserAgentAcceptanceView | undefined;
+  isRunning: boolean;
+  error: string;
+  onRun: () => void;
+}) {
+  const report = acceptance?.report;
+  const gatePassed = report?.strict_gate === "passed";
+  return (
+    <section className="table-section browser-agent-acceptance-panel">
+      <SectionTitle title="Browser Agent 严格验收" meta={report ? (gatePassed ? "门禁通过" : "门禁未通过") : "尚未运行"} />
+      <div className="acceptance-intro">
+        <div>
+          <StatusPill label={gatePassed ? "通过" : report ? "未通过" : "待运行"} tone={gatePassed ? "green" : "yellow"} />
+          <strong>固定验收包只访问服务器自己启动的受控页面，不使用 App 数据包、用户素材或生产凭据。</strong>
+          <p>{acceptance?.message ?? "正在读取本地验收状态。"}</p>
+        </div>
+        <button type="button" className="secondary-action" disabled={isRunning || acceptance?.can_run === false} onClick={onRun}>
+          {isRunning ? "正在运行验收..." : "运行固定验收包"}
+        </button>
+      </div>
+      {error ? <div className="error-banner">{error}</div> : null}
+      {report ? (
+        <div className="acceptance-list">
+          {report.scenarios.map((scenario) => (
+            <article key={scenario.id} className={`acceptance-case ${scenario.verdict === "passed" ? "passed" : "failed"}`}>
+              <div className="acceptance-case-head">
+                <div><strong>{scenario.description}</strong><small>{scenario.id}</small></div>
+                <StatusPill label={scenario.verdict === "passed" ? "预期一致" : "预期不一致"} tone={scenario.verdict === "passed" ? "green" : "yellow"} />
+              </div>
+              <div className="acceptance-expected"><span>预期：{scenario.expected}</span><span>实际：{scenario.actual === "pass" ? "符合预期" : "不符合预期"}</span><span>{scenario.action_executed ? "浏览器动作已执行" : "浏览器动作未执行"}</span></div>
+              {scenario.stop_reason ? <p className="acceptance-stop">停止原因：{scenario.stop_reason}</p> : null}
+              <div className="acceptance-checks">
+                {scenario.assertions.map((check, index) => <span key={`${check.kind}-${index}`} className={check.passed ? "ok" : "blocked"}>{check.kind}: {check.actual ?? (check.passed ? "passed" : "failed")}</span>)}
+              </div>
+              {scenario.evidence.length > 0 ? <div className="acceptance-evidence">证据：{scenario.evidence.map((item) => <a key={item.id} href={item.uri} target="_blank" rel="noreferrer">{item.kind}</a>)}</div> : null}
+            </article>
+          ))}
+        </div>
+      ) : null}
+      {acceptance?.report_path ? <p className="acceptance-path">报告：{acceptance.report_path}</p> : null}
+    </section>
+  );
+}
+
+function BrowserAgentBusinessAcceptancePanel({
+  acceptance,
+  isRunning,
+  error,
+  onRun,
+}: {
+  acceptance: BrowserAgentBusinessAcceptanceView | undefined;
+  isRunning: boolean;
+  error: string;
+  onRun: () => void;
+}) {
+  const report = acceptance?.report;
+  const passed = report?.strict_gate === "passed";
+  return (
+    <section className="table-section browser-agent-acceptance-panel">
+      <SectionTitle title="受控业务执行验收" meta={passed ? "业务链路已通过" : report ? "业务链路未通过" : "尚未运行"} />
+      <div className="acceptance-intro">
+        <div>
+          <StatusPill label={passed ? "通过" : report ? "未通过" : "待运行"} tone={passed ? "green" : "yellow"} />
+          <strong>使用 Server 自己启动的项目构建演示页，真实执行“输入名称、选择模式、提交、验证结果”；不使用当前 App 包、用户网站或生产凭据。</strong>
+          <p>{acceptance?.message ?? "这一步用于证明新路径能完成一段可理解的业务流程，而不只是安全地点击一个按钮。"}</p>
+        </div>
+        <button type="button" className="secondary-action" disabled={isRunning || acceptance?.can_run === false} onClick={onRun}>
+          {isRunning ? "正在运行受控业务验收..." : "运行受控业务验收"}
+        </button>
+      </div>
+      {error ? <div className="error-banner">{error}</div> : null}
+      {report ? (
+        <div className="acceptance-list">
+          <p className="acceptance-path">业务流程：{report.business_flow}</p>
+          {report.stages.map((stage) => (
+            <article key={stage.id} className={`acceptance-case ${stage.verdict === "passed" ? "passed" : "failed"}`}>
+              <div className="acceptance-case-head"><div><strong>{stage.description}</strong><small>{stage.id}</small></div><StatusPill label={stage.verdict === "passed" ? "已验证" : "失败"} tone={stage.verdict === "passed" ? "green" : "yellow"} /></div>
+              <div className="acceptance-checks">{stage.assertions.map((check, index) => <span key={`${check.kind}-${index}`} className={check.passed ? "ok" : "blocked"}>{check.kind}: {check.actual ?? (check.passed ? "passed" : "failed")}</span>)}</div>
+            </article>
+          ))}
+          <div className="acceptance-expected"><span>编辑器交接：{report.editor_materialization.ready ? "已登记待编辑素材" : "未就绪"}</span><span>{report.editor_materialization.message}</span>{report.editor_materialization.session_id ? <span>会话：{report.editor_materialization.session_id}</span> : null}</div>
+        </div>
+      ) : null}
+      {acceptance?.report_path ? <p className="acceptance-path">报告：{acceptance.report_path}</p> : null}
+    </section>
+  );
+}
+
+function RealPackagePreflightPanel({
+  preflight,
+  error,
+  isRunning,
+  canRun,
+  onRun,
+}: {
+  preflight: CloudPackagePreflightView | undefined;
+  error: string;
+  isRunning: boolean;
+  canRun: boolean;
+  onRun: () => void;
+}) {
+  const passed = preflight?.valid === true;
+  return (
+    <section className="table-section package-preflight-panel">
+      <SectionTitle title="真实执行包预检" meta={passed ? "Server Intake 已通过" : error ? "存在阻断项" : "上传前检查"} />
+      <div className="acceptance-intro">
+        <div>
+          <StatusPill label={passed ? "可上传" : error ? "需修复" : "未检查"} tone={passed ? "green" : error ? "yellow" : "neutral"} />
+          <strong>使用与真实上传相同的 Server Intake 校验规则，但不会上传数据包、不会启动浏览器、不会访问用户产品。</strong>
+          <p>{preflight?.message ?? "先验证当前 App 自动生成的执行包是否符合协议，再决定是否上传执行。"}</p>
+        </div>
+        <button type="button" className="secondary-action" disabled={!canRun || isRunning} onClick={onRun}>
+          {isRunning ? "正在校验..." : "只校验，不执行"}
+        </button>
+      </div>
+      {error ? <div className="error-banner">{error}</div> : null}
+      {preflight ? (
+        <div className="preflight-facts">
+          <Fact label="Runtime" value={preflight.runtime ?? "未声明"} />
+          <Fact label="已对齐 Stage" value={`${preflight.stage_count ?? 0} 个`} />
+          <Fact label="必填结果验证" value={`${preflight.required_checks ?? 0} 项`} />
+          <Fact label="允许访问域名" value={preflight.allowed_domains?.join("、") || "未声明"} />
+          <Fact label="包标识" value={preflight.package_id ?? "未返回"} />
+        </div>
+      ) : null}
     </section>
   );
 }

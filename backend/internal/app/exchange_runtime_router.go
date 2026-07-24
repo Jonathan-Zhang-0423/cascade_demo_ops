@@ -68,6 +68,8 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 	runtimeName := request.Package.ExecutableScriptBundle.ScriptManifest.Runtime
 	switch runtimeName {
 	case model.ExecutableScriptRuntimePlaywrightRestrictedSandbox:
+		// Frozen compatibility branch: only historical packages and regression checks use it.
+		// New Browser Agent work must stay on the Outline branch below.
 		if r.legacy == nil {
 			return model.RecordingResultPackage{}, newRuntimeExecutionError(runtimeErrorVideoWorkerMissing, errors.New("legacy Playwright runner is not configured"))
 		}

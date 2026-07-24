@@ -125,6 +125,45 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	}
 }
 
+func TestExchangeIntakePreflightDoesNotConsumeNonceOrPersistPackage(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	service.now = fixedClock(time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	envelope := sampleEnvelopeForAppTest(t, pkg, service.now())
+	request := model.ExecutionPackageUploadRequest{Envelope: envelope, PayloadRef: envelope.PayloadRef}
+
+	if err := service.ValidateUpload(ctx, request, pkg); err != nil {
+		t.Fatalf("preflight must accept a valid package: %v", err)
+	}
+	if len(service.packages) != 0 || len(service.seenNonces) != 0 {
+		t.Fatalf("preflight must not persist an execution package or consume the nonce: packages=%d nonces=%d", len(service.packages), len(service.seenNonces))
+	}
+	init, err := service.Init(ctx, model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: init.UploadID, Envelope: envelope, PayloadRef: envelope.PayloadRef}, pkg); err != nil {
+		t.Fatalf("the same package must remain uploadable after preflight: %v", err)
+	}
+}
+
+func TestExchangeIntakeRejectsInlinePayloadWhenCloudTransportIsRequired(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	service.SetInlinePayloadAllowed(false)
+	service.now = fixedClock(time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC))
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	init, err := service.Init(t.Context(), model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, service.now())
+	_, err = service.Upload(t.Context(), model.ExecutionPackageUploadRequest{UploadID: init.UploadID, Envelope: envelope, PayloadRef: envelope.PayloadRef}, pkg)
+	if exchangeErrorCode(err, "") != "production_inline_payload_forbidden" {
+		t.Fatalf("cloud transport must reject an inline package, got %v", err)
+	}
+}
+
 func TestExchangeIntakeAcceptsEncryptedPayloadRefWithoutPersistingPlainPayload(t *testing.T) {
 	service := NewExchangeIntakeService(nil)
 	service.now = fixedClock(time.Date(2026, 7, 9, 16, 5, 0, 0, time.UTC))

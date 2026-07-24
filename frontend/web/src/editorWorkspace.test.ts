@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EditorPlan, EditorSession, EditorShot, EditorTimelineStep, EditorValidationReport } from "./editor";
-import { automationStatusLabel, buildExportChecks, buildTimelineShots, editorAutomationForDisplay, formatTimecode, preservesRequiredStepOrder } from "./VideoEditor";
+import { automationStatusLabel, buildExportChecks, buildExportIssues, buildTimelineShots, editorAutomationForDisplay, formatTimecode, preservesRequiredStepOrder } from "./VideoEditor";
 
 const steps: EditorTimelineStep[] = [
   { step_id: "open", order: 0, action: "navigate", status: "passed", required: true, start_ms: 0, end_ms: 2000, duration_ms: 2000 },
@@ -95,5 +95,23 @@ describe("editor workspace policy", () => {
     const checks = buildExportChecks(unsafeSession, unsafePlan, validReport);
     expect(checks.find((check) => check.id === "generated")?.tone).toBe("error");
     expect(checks.find((check) => check.id === "operations")?.tone).toBe("error");
+  });
+
+  it("blocks a 3D annotation instead of silently exporting a different result", () => {
+    const withTilt = plan([shot("one", "open", [0, 2000]), shot("two", "create", [2000, 5000])]);
+    withTilt.shots[0]!.overlays = [{ type: "highlight_box", shape: "rectangle", tilt_y: 18 }];
+    const checks = buildExportChecks(session(withTilt), withTilt, validReport);
+    expect(checks.find((check) => check.id === "operations")).toMatchObject({ tone: "error" });
+    expect(checks.find((check) => check.id === "operations")?.detail).toContain("3D 倾斜标注");
+  });
+
+  it("names and locates each export-only-preview annotation", () => {
+    const withPreviewOnly = plan([shot("one", "open", [0, 2000]), shot("two", "create", [2000, 5000])]);
+    withPreviewOnly.shots[0]!.overlays = [{ id: "tilted", type: "highlight_box", shape: "rectangle", tilt_x: 20 }];
+    withPreviewOnly.shots[1]!.overlays = [{ id: "blur", type: "blur_region" }];
+    expect(buildExportIssues(withPreviewOnly)).toEqual([
+      expect.objectContaining({ shotID: "one", overlayID: "tilted", title: "片段 1：矩形高亮" }),
+      expect.objectContaining({ shotID: "two", overlayID: "blur", title: "片段 2：blur_region" }),
+    ]);
   });
 });
