@@ -1,8 +1,13 @@
 package app
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,6 +161,207 @@ func TestLocalBrowserAgentOutlineRunnerUsesInjectedVerifierForApprovedRepair(t *
 	if len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied || session.executeCalls != len(plan.Stages)+1 {
 		t.Fatalf("repair was not run through the normal outline pipeline: ledger=%+v executes=%d", result.PatchLedger, session.executeCalls)
 	}
+}
+
+func TestOutlineRuntimeFullPathRecordsSelectorRepairInResultAndAuditLog(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalBundleHash := pkg.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+	stage := plan.Stages[1]
+	if len(stage.Components) == 0 || len(stage.Components[0].SelectorAlternatives) == 0 {
+		t.Fatal("fixture must provide one App-approved selector alternative")
+	}
+	session := &repairAuditBrowserAgentWorkerSession{candidate: stage.Components[0].SelectorAlternatives[0]}
+	runner := localBrowserAgentOutlineRunner{
+		service: &Service{},
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return session, driver.BrowserAgentWorkerOpenResult{SessionID: "repair-audit", RuntimeVersions: map[string]string{"runner": "repair-audit"}}, nil
+		},
+	}
+	recordingDir := t.TempDir()
+	result, err := newExecutionRuntimeRouter(&stubLegacyRuntimeRunner{}, runner).Run(context.Background(), executionRuntimeRequest{
+		Package: &pkg, CloudJobID: "job_repair_audit", RecordingOutputDir: recordingDir, ResultCreatedAt: timeNowUTC(),
+	})
+	if err != nil {
+		t.Fatalf("full outline runtime should package an approved selector repair: %v", err)
+	}
+	if result.Status != model.RecordingResultStatusGenerated || len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied {
+		t.Fatalf("result package lost approved repair ledger: %+v", result)
+	}
+	entry := result.PatchLedger[0]
+	if entry.After != selectorCandidateEncoding(session.candidate) || entry.SourceBundleHashSHA256 != originalBundleHash || pkg.ExecutableScriptBundle.Reproducibility.BundleHashSHA256 != originalBundleHash {
+		t.Fatalf("runtime repair must preserve the approved source bundle and record its candidate: %+v", entry)
+	}
+	if session.executeCalls != len(plan.Stages) || session.observeCalls != len(plan.Stages)+1 || result.StageEventLogRef == nil {
+		t.Fatalf("expected repair re-observation and event audit: session=%+v log=%+v", session, result.StageEventLogRef)
+	}
+	events := readStageEventAudit(t, result.StageEventLogRef.URI)
+	if !hasStageEvent(events, model.StageExecutionEventRepairProposed, 1) || !hasStageEvent(events, model.StageExecutionEventRepairApplied, 2) || !hasStageEvent(events, model.StageExecutionEventTargetResolved, 2) {
+		t.Fatalf("repair events or second-attempt target resolution are missing: %+v", events)
+	}
+	if len(result.ValidationReports) != len(plan.Stages) || result.ValidationReports[1].Decision != model.ValidationDecisionContinue {
+		t.Fatalf("outcome verification did not pass after the selector repair: %+v", result.ValidationReports)
+	}
+}
+
+func TestOutlineRuntimeFullPathRejectsUnapprovedSelectorRepair(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	session := &repairAuditBrowserAgentWorkerSession{candidate: model.SelectorCandidate{Kind: "testid", Value: "server-invented-target"}}
+	runner := localBrowserAgentOutlineRunner{
+		service: &Service{},
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return session, driver.BrowserAgentWorkerOpenResult{SessionID: "repair-denied", RuntimeVersions: map[string]string{"runner": "repair-denied"}}, nil
+		},
+	}
+	result, err := newExecutionRuntimeRouter(&stubLegacyRuntimeRunner{}, runner).Run(context.Background(), executionRuntimeRequest{
+		Package: &pkg, CloudJobID: "job_repair_denied", RecordingOutputDir: t.TempDir(), ResultCreatedAt: timeNowUTC(),
+	})
+	if err != nil {
+		t.Fatalf("denied repair must be packaged as a failed result, not escape the runtime: %v", err)
+	}
+	if result.Status != model.RecordingResultStatusFailed || len(result.PatchLedger) != 1 || result.PatchLedger[0].Applied || result.PatchLedger[0].Reason == "" {
+		t.Fatalf("unapproved selector must stop with a denied ledger entry: %+v", result)
+	}
+	if session.executeCalls != 1 || result.FailureDiagnostic == nil || result.FailureDiagnostic.Error.Code != "browser_agent_repair_policy_denied" {
+		t.Fatalf("unapproved repair must not retry the action: session=%+v diagnostic=%+v", session, result.FailureDiagnostic)
+	}
+}
+
+func TestOutlineRuntimeFullPathRecordsBusyPageWaitRepair(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &busyWaitAuditBrowserAgentWorkerSession{}
+	runner := localBrowserAgentOutlineRunner{
+		service: &Service{},
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return session, driver.BrowserAgentWorkerOpenResult{SessionID: "wait-audit", RuntimeVersions: map[string]string{"runner": "wait-audit"}}, nil
+		},
+	}
+	result, err := newExecutionRuntimeRouter(&stubLegacyRuntimeRunner{}, runner).Run(context.Background(), executionRuntimeRequest{
+		Package: &pkg, CloudJobID: "job_wait_audit", RecordingOutputDir: t.TempDir(), ResultCreatedAt: timeNowUTC(),
+	})
+	if err != nil {
+		t.Fatalf("full outline runtime should package a bounded wait repair: %v", err)
+	}
+	if result.Status != model.RecordingResultStatusGenerated || len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied {
+		t.Fatalf("wait repair ledger missing from result package: %+v", result)
+	}
+	entry := result.PatchLedger[0]
+	if entry.Before != "wait_after_entry_at_least_1000ms" || entry.After != "wait_after_entry_at_least_2000ms" || entry.Attempt != 1 {
+		t.Fatalf("wait repair must be bounded and auditable: %+v", entry)
+	}
+	if session.observeCalls != len(plan.Stages)+1 || session.executeCalls != len(plan.Stages) || result.StageEventLogRef == nil {
+		t.Fatalf("wait repair did not re-observe before execution: session=%+v log=%+v", session, result.StageEventLogRef)
+	}
+	events := readStageEventAudit(t, result.StageEventLogRef.URI)
+	if !hasStageEvent(events, model.StageExecutionEventRepairProposed, 1) || !hasStageEvent(events, model.StageExecutionEventRepairApplied, 2) || !hasStageEvent(events, model.StageExecutionEventTargetResolved, 2) {
+		t.Fatalf("wait repair audit events are incomplete: %+v", events)
+	}
+}
+
+type repairAuditBrowserAgentWorkerSession struct {
+	candidate    model.SelectorCandidate
+	observeCalls int
+	executeCalls int
+}
+
+func (s *repairAuditBrowserAgentWorkerSession) Observe(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
+	s.observeCalls++
+	artifact := stubBrowserAgentArtifact(stage.NodeID, "repair-before")
+	if stage.NodeID == "node_invite_member" && stage.PreferredSelectorAlternative == nil {
+		return driver.BrowserAgentWorkerStageResult{Observation: model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: false, Actual: "approved primary locator missing"}}}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_" + artifact.ID, Kind: model.EvidenceKindWebScreenshot, ArtifactID: artifact.ID, Confidence: 1}}, Artifacts: []model.ArtifactRef{artifact}, PreferredSelectorAlternative: &s.candidate}, nil
+	}
+	return driver.BrowserAgentWorkerStageResult{Observation: model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: true, Actual: "approved live target"}}}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_" + artifact.ID, Kind: model.EvidenceKindWebScreenshot, ArtifactID: artifact.ID, Confidence: 1}}, Artifacts: []model.ArtifactRef{artifact}, TargetResolved: true}, nil
+}
+
+func (s *repairAuditBrowserAgentWorkerSession) Execute(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
+	s.executeCalls++
+	artifact := stubBrowserAgentArtifact(stage.NodeID, "repair-after")
+	assertions := []model.RuntimeAssertion{{Kind: "action_completed", Passed: true, Actual: stage.TargetContract.SemanticID}}
+	for _, validation := range stage.Validations {
+		if validation.Required {
+			assertions = append(assertions, model.RuntimeAssertion{Kind: "required_" + validation.Kind + ":" + validation.ID, Passed: true, Actual: "matched"})
+		}
+	}
+	return driver.BrowserAgentWorkerStageResult{Observation: model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: assertions}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_" + artifact.ID, Kind: model.EvidenceKindWebScreenshot, ArtifactID: artifact.ID, Confidence: 1}}, Artifacts: []model.ArtifactRef{artifact}, TargetResolved: true}, nil
+}
+
+func (s *repairAuditBrowserAgentWorkerSession) Close(context.Context) (driver.BrowserAgentWorkerCloseResult, error) {
+	return driver.BrowserAgentWorkerCloseResult{Artifacts: []model.ArtifactRef{{ID: "repair_trace", Kind: "browser_trace", URI: "file:///repair-trace.zip", SHA256: "repair_trace_hash", SizeBytes: 10, Sensitive: true}}}, nil
+}
+func (s *repairAuditBrowserAgentWorkerSession) Abort() error { return nil }
+
+type busyWaitAuditBrowserAgentWorkerSession struct {
+	observeCalls int
+	executeCalls int
+}
+
+func (s *busyWaitAuditBrowserAgentWorkerSession) Observe(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
+	s.observeCalls++
+	artifact := stubBrowserAgentArtifact(stage.NodeID, "wait-before")
+	if stage.NodeID == "node_invite_member" && !containsExact(stage.WaitConditions, "wait_after_entry_at_least_2000ms") {
+		return driver.BrowserAgentWorkerStageResult{Observation: model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: false, Actual: "live page busy"}}}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_" + artifact.ID, Kind: model.EvidenceKindWebScreenshot, ArtifactID: artifact.ID, Confidence: 1}}, Artifacts: []model.ArtifactRef{artifact}, SuggestedWaitCondition: "wait_after_entry_at_least_2000ms"}, nil
+	}
+	return driver.BrowserAgentWorkerStageResult{Observation: model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: true, Actual: "live target after bounded wait"}}}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_" + artifact.ID, Kind: model.EvidenceKindWebScreenshot, ArtifactID: artifact.ID, Confidence: 1}}, Artifacts: []model.ArtifactRef{artifact}, TargetResolved: true}, nil
+}
+
+func (s *busyWaitAuditBrowserAgentWorkerSession) Execute(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
+	s.executeCalls++
+	artifact := stubBrowserAgentArtifact(stage.NodeID, "wait-after")
+	assertions := []model.RuntimeAssertion{{Kind: "action_completed", Passed: true, Actual: stage.TargetContract.SemanticID}}
+	for _, validation := range stage.Validations {
+		if validation.Required {
+			assertions = append(assertions, model.RuntimeAssertion{Kind: "required_" + validation.Kind + ":" + validation.ID, Passed: true, Actual: "matched"})
+		}
+	}
+	return driver.BrowserAgentWorkerStageResult{Observation: model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: assertions}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_" + artifact.ID, Kind: model.EvidenceKindWebScreenshot, ArtifactID: artifact.ID, Confidence: 1}}, Artifacts: []model.ArtifactRef{artifact}, TargetResolved: true}, nil
+}
+
+func (s *busyWaitAuditBrowserAgentWorkerSession) Close(context.Context) (driver.BrowserAgentWorkerCloseResult, error) {
+	return driver.BrowserAgentWorkerCloseResult{Artifacts: []model.ArtifactRef{{ID: "wait_trace", Kind: "browser_trace", URI: "file:///wait-trace.zip", SHA256: "wait_trace_hash", SizeBytes: 10, Sensitive: true}}}, nil
+}
+func (s *busyWaitAuditBrowserAgentWorkerSession) Abort() error { return nil }
+
+func readStageEventAudit(t *testing.T, uri string) []model.StageExecutionEvent {
+	t.Helper()
+	path := strings.TrimPrefix(uri, "file://")
+	path = filepath.FromSlash(strings.ReplaceAll(path, "%5C", "\\"))
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	events := []model.StageExecutionEvent{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event model.StageExecutionEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+func hasStageEvent(events []model.StageExecutionEvent, eventType model.StageExecutionEventType, attempt int) bool {
+	for _, event := range events {
+		if event.EventType == eventType && event.Attempt == attempt {
+			return true
+		}
+	}
+	return false
 }
 
 type stubBrowserAgentWorkerSession struct {
