@@ -26,7 +26,7 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 		return nil, fmt.Errorf("unsupported app mode: %s", input.Mode)
 	}
 	hasProductURL := strings.TrimSpace(input.ProductURL) != ""
-	hasCode := strings.TrimSpace(input.GitRepoURL) != "" || strings.TrimSpace(input.LocalRepoPath) != "" || len(input.Code) > 0
+	hasCode := strings.TrimSpace(input.GitRepoURL) != "" || strings.TrimSpace(input.LocalRepoPath) != "" || strings.TrimSpace(input.SSHHost) != "" || len(input.Code) > 0
 	hasRequirements := strings.TrimSpace(input.ProductDescription) != "" || len(input.RequirementDocuments) > 0
 	hasScreenshots := len(input.WebpageScreenshots) > 0
 	if !hasProductURL && !hasCode && !hasRequirements && !hasScreenshots {
@@ -167,38 +167,42 @@ func defaultUseCaseForAudience(audience string) model.DemoUseCase {
 }
 
 func repositoryInputs(input orchestrator.UserInput) []model.RepositoryInput {
-	repositories := make([]model.RepositoryInput, 0, 2)
+	repositories := make([]model.RepositoryInput, 0, 3)
 	if input.GitRepoURL != "" {
 		repositories = append(repositories, model.RepositoryInput{
+			Kind:     "github",
 			URL:      input.GitRepoURL,
-			Provider: repositoryProviderForURL(input.GitRepoURL),
+			Provider: "github",
 			ReadOnly: true,
-			Primary:  false,
+			Primary:  true,
 		})
 	}
 	if input.LocalRepoPath != "" {
 		repositories = append(repositories, model.RepositoryInput{
+			Kind:      "local",
 			LocalPath: input.LocalRepoPath,
 			Provider:  "local",
 			ReadOnly:  true,
-			Primary:   false,
+			Primary:   input.GitRepoURL == "",
 		})
 	}
-	if len(repositories) == 1 {
-		repositories[0].Primary = true
+	if input.SSHHost != "" {
+		path := ""
+		if len(input.SSHAllowedPaths) > 0 {
+			path = input.SSHAllowedPaths[0]
+		}
+		repositories = append(repositories, model.RepositoryInput{
+			Kind:     "server",
+			Provider: "server",
+			Host:     input.SSHHost,
+			Port:     input.SSHPort,
+			Path:     path,
+			Username: input.SSHUsername,
+			ReadOnly: true,
+			Primary:  input.GitRepoURL == "" && input.LocalRepoPath == "",
+		})
 	}
 	return repositories
-}
-
-func repositoryProviderForURL(value string) string {
-	normalized := strings.ToLower(strings.TrimSpace(value))
-	if strings.Contains(normalized, "github.com") {
-		return "github"
-	}
-	if strings.HasPrefix(normalized, "git@github.com:") {
-		return "github"
-	}
-	return "git"
 }
 
 func redactRequirementDocuments(documents []model.RequirementDocumentInput) []model.RequirementDocumentInput {

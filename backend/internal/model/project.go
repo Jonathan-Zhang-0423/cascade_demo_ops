@@ -24,8 +24,7 @@ const (
 )
 
 // ProjectContext is the full MVP input contract consumed by the graph flow.
-// GitRepoURL and LocalRepoPath are parallel optional code sources; callers may
-// provide either one or both alongside ProductURL.
+// Web mode uses GitRepoURL + ProductURL. Desktop mode uses LocalRepoPath + ProductURL.
 type ProjectContext struct {
 	ID                  string                   `json:"id"`
 	SchemaVersion       string                   `json:"schema_version,omitempty"`
@@ -99,10 +98,15 @@ type ProductURLInput struct {
 }
 
 type RepositoryInput struct {
+	Kind           string `json:"kind,omitempty"`
 	URL            string `json:"url,omitempty"`
 	LocalPath      string `json:"local_path,omitempty"`
 	Provider       string `json:"provider,omitempty"`
 	Branch         string `json:"branch,omitempty"`
+	Host           string `json:"host,omitempty"`
+	Port           int    `json:"port,omitempty"`
+	Path           string `json:"path,omitempty"`
+	Username       string `json:"username,omitempty"`
 	ReadOnly       bool   `json:"read_only"`
 	SecretRef      string `json:"secret_ref,omitempty"`
 	Primary        bool   `json:"primary,omitempty"`

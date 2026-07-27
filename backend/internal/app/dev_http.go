@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -64,16 +63,14 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/desktop/runtime-health", s.handleRuntimeHealth)
 	mux.HandleFunc("GET /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
+	mux.HandleFunc("GET /v1/desktop/projects", s.handleListProjects)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
+	mux.HandleFunc("POST /v1/desktop/assistant/sessions", s.handleCreateAssistantSession)
+	mux.HandleFunc("/v1/desktop/assistant/sessions/", s.handleAssistantSessionRoute)
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
-	mux.HandleFunc("GET /v1/desktop/browser-agent-acceptance", s.handleBrowserAgentAcceptance)
-	mux.HandleFunc("POST /v1/desktop/browser-agent-acceptance/run", s.handleBrowserAgentAcceptance)
-	mux.HandleFunc("GET /v1/desktop/browser-agent-business-acceptance", s.handleBrowserAgentBusinessAcceptance)
-	mux.HandleFunc("POST /v1/desktop/browser-agent-business-acceptance/run", s.handleBrowserAgentBusinessAcceptance)
 	mux.HandleFunc("GET /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions/from-result-package", s.handleEditorSessionFromResultPackage)
-	mux.HandleFunc("GET /v1/editor/style-templates", s.handleEditorStyleTemplates)
 	mux.HandleFunc("/v1/editor/sessions/", s.handleEditorSessionRoute)
 	s.registerExchangeBootstrapRoutes(mux)
 	s.registerDevExchangeRoutes(mux)
@@ -110,11 +107,6 @@ func (s *DevHTTPServer) handleEditorSessionFromResultPackage(w http.ResponseWrit
 	writeBridgeValue(w, session, err)
 }
 
-func (s *DevHTTPServer) handleEditorStyleTemplates(w http.ResponseWriter, r *http.Request) {
-	templates, err := s.service.ListVideoStyleTemplates(r.Context())
-	writeBridgeValue(w, templates, err)
-}
-
 func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.Request) {
 	sessionID, suffix, ok := splitEditorSessionRoute(r.URL.Path)
 	if !ok {
@@ -135,16 +127,6 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && suffix == "/uploads":
 		s.handleEditorUpload(w, r, sessionID)
-	case r.Method == http.MethodPost && suffix == "/style-references/assets":
-		var request model.EditorImportAssetRequest
-		if err := decodeJSON(r, &request); err != nil {
-			writeBridgeValue(w, nil, err)
-			return
-		}
-		session, err := s.service.ImportEditorStyleReference(r.Context(), sessionID, request)
-		writeBridgeValue(w, session, err)
-	case r.Method == http.MethodPost && suffix == "/style-references/uploads":
-		s.handleEditorStyleReferenceUpload(w, r, sessionID)
 	case r.Method == http.MethodPost && suffix == "/plan":
 		var request model.EditorSavePlanRequest
 		if err := decodeJSON(r, &request); err != nil {
@@ -152,35 +134,6 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 			return
 		}
 		session, err := s.service.SaveEditorPlan(r.Context(), sessionID, request)
-		writeBridgeValue(w, session, err)
-	case r.Method == http.MethodPost && suffix == "/style-drafts":
-		var request model.EditorStyleDraftRequest
-		if err := decodeJSON(r, &request); err != nil {
-			writeBridgeValue(w, nil, err)
-			return
-		}
-		draft, err := s.service.CreateEditorStyleDraft(r.Context(), sessionID, request)
-		writeBridgeValue(w, draft, err)
-	case r.Method == http.MethodGet && strings.HasPrefix(suffix, "/style-drafts/"):
-		draftID := strings.TrimPrefix(suffix, "/style-drafts/")
-		if strings.TrimSpace(draftID) == "" || strings.Contains(draftID, "/") {
-			http.NotFound(w, r)
-			return
-		}
-		draft, err := s.service.GetEditorStyleDraft(r.Context(), sessionID, draftID)
-		writeBridgeValue(w, draft, err)
-	case r.Method == http.MethodPost && strings.HasSuffix(suffix, "/apply") && strings.HasPrefix(suffix, "/style-drafts/"):
-		draftID := strings.TrimSuffix(strings.TrimPrefix(suffix, "/style-drafts/"), "/apply")
-		if strings.TrimSpace(draftID) == "" || strings.Contains(draftID, "/") {
-			http.NotFound(w, r)
-			return
-		}
-		var request model.EditorApplyStyleDraftRequest
-		if err := decodeJSON(r, &request); err != nil {
-			writeBridgeValue(w, nil, err)
-			return
-		}
-		session, err := s.service.ApplyEditorStyleDraft(r.Context(), sessionID, draftID, request)
 		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && suffix == "/validate":
 		report, err := s.service.ValidateEditorPlan(r.Context(), sessionID)
@@ -205,14 +158,6 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 }
 
 func (s *DevHTTPServer) handleEditorUpload(w http.ResponseWriter, r *http.Request, sessionID string) {
-	s.handleEditorMultipartUpload(w, r, sessionID, s.service.ImportEditorUpload)
-}
-
-func (s *DevHTTPServer) handleEditorStyleReferenceUpload(w http.ResponseWriter, r *http.Request, sessionID string) {
-	s.handleEditorMultipartUpload(w, r, sessionID, s.service.ImportEditorStyleReferenceUpload)
-}
-
-func (s *DevHTTPServer) handleEditorMultipartUpload(w http.ResponseWriter, r *http.Request, sessionID string, importer func(context.Context, string, string, io.Reader) (model.EditorSession, error)) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxEditorUploadBytes+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -233,7 +178,7 @@ func (s *DevHTTPServer) handleEditorMultipartUpload(w http.ResponseWriter, r *ht
 			_ = part.Close()
 			continue
 		}
-		session, importErr := importer(r.Context(), sessionID, part.FileName(), part)
+		session, importErr := s.service.ImportEditorUpload(r.Context(), sessionID, part.FileName(), part)
 		_ = part.Close()
 		writeBridgeValue(w, session, importErr)
 		return
@@ -267,26 +212,6 @@ func (s *DevHTTPServer) handleModelDiagnostics(w http.ResponseWriter, r *http.Re
 	writeBridgeValue(w, s.service.DiagnoseModels(r.Context()), nil)
 }
 
-func (s *DevHTTPServer) handleBrowserAgentAcceptance(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		view, err := s.service.RunBrowserAgentAcceptance(r.Context())
-		writeBridgeValue(w, view, err)
-		return
-	}
-	view, err := s.service.GetBrowserAgentAcceptance(r.Context())
-	writeBridgeValue(w, view, err)
-}
-
-func (s *DevHTTPServer) handleBrowserAgentBusinessAcceptance(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		view, err := s.service.RunBrowserAgentBusinessAcceptance(r.Context())
-		writeBridgeValue(w, view, err)
-		return
-	}
-	view, err := s.service.GetBrowserAgentBusinessAcceptance(r.Context())
-	writeBridgeValue(w, view, err)
-}
-
 func (s *DevHTTPServer) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	var input orchestrator.UserInput
 	if err := decodeJSON(r, &input); err != nil {
@@ -295,6 +220,11 @@ func (s *DevHTTPServer) handleCreateProject(w http.ResponseWriter, r *http.Reque
 	}
 	state, err := s.service.CreateProject(r.Context(), input)
 	writeBridgeValue(w, state, err)
+}
+
+func (s *DevHTTPServer) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.service.ListProjects(r.Context())
+	writeBridgeValue(w, projects, err)
 }
 
 func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +237,12 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "":
 		state, err := s.service.LoadProject(r.Context(), projectID)
 		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodPost && suffix == "/archive":
+		err := s.service.ArchiveProject(r.Context(), projectID)
+		writeBridgeValue(w, map[string]bool{"archived": err == nil}, err)
+	case r.Method == http.MethodDelete && suffix == "":
+		err := s.service.DeleteProject(r.Context(), projectID)
+		writeBridgeValue(w, map[string]bool{"deleted": err == nil}, err)
 	case r.Method == http.MethodPost && suffix == "/inputs":
 		var inputs model.ProjectInputBundle
 		if err := decodeJSON(r, &inputs); err != nil {
@@ -400,23 +336,6 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		initResponse, err := s.service.InitCloudExecutionPackageUpload(r.Context(), build)
 		result := CloudUploadInitResult{Build: &build, Init: initResponse, CloudBase: session.BaseURL}
 		writeBridgeValue(w, result, err)
-	case r.Method == http.MethodPost && suffix == "/cloud/preflight":
-		var request CloudUploadInitRequest
-		if r.Body != nil && r.ContentLength != 0 {
-			if err := decodeJSON(r, &request); err != nil {
-				writeBridgeValue(w, nil, err)
-				return
-			}
-		}
-		orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
-		targetProjectID := firstNonEmptyString(request.ProjectID, projectID)
-		build, _, err := s.service.BuildCloudClientExecutionPackage(r.Context(), targetProjectID, orgID)
-		if err != nil {
-			writeBridgeValue(w, nil, err)
-			return
-		}
-		result, err := s.service.PreflightCloudExecutionPackage(r.Context(), build)
-		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/product-run/prepare":
 		startedAt := time.Now()
 		var request CloudLifecycleRequest
@@ -501,11 +420,6 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		result, err := s.service.GetCloudResultPackage(r.Context(), CloudResultRequest{
 			OrgID:           r.URL.Query().Get("org_id"),
 			ResultPackageID: r.URL.Query().Get("result_package_id"),
-		})
-		writeBridgeValue(w, result, err)
-	case r.Method == http.MethodGet && suffix == "/cloud/editor-materialization":
-		result, err := s.service.GetCloudEditorMaterialization(r.Context(), CloudEditorMaterializationRequest{
-			OrgID: r.URL.Query().Get("org_id"), ResultPackageID: r.URL.Query().Get("result_package_id"),
 		})
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/ack":

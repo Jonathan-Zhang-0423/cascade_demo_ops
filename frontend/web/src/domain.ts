@@ -28,7 +28,93 @@ export type WorkspaceStage =
   | "script_repair"
   | "result_review";
 
-export type NavSection = "projects" | "new_demo" | "execution_packages" | "assets" | "editor" | "settings";
+export type NavSection = "projects" | "project_library" | "repositories" | "new_demo" | "execution_packages" | "assets" | "editor" | "settings";
+
+export type ProjectWorkstationView =
+  | "overview"
+  | "evidence"
+  | "plan"
+  | "approval"
+  | "execution"
+  | "repair"
+  | "assets"
+  | "editor";
+
+export type AssistantSurface = "projects" | "repositories";
+export type AssistantMessageRole = "agent" | "user" | "system";
+export type AssistantMessageKind = "answer" | "evidence" | "proposal" | "status" | "error";
+
+export type AssistantContextView = {
+  surface: AssistantSurface;
+  scopeKey: string;
+  projectID?: string;
+  projectName?: string;
+  repositoryID?: string;
+  repositoryLabel?: string;
+};
+
+export type AssistantEvidenceView = {
+  id: string;
+  label: string;
+  source: string;
+  summary: string;
+  confidence?: number;
+};
+
+export type AssistantProposalView = {
+  id: string;
+  kind: "open_project" | "inspect_project" | "attach_repository" | "detach_repository" | "open_repository_form" | "prepare_understanding" | "prepare_execution";
+  title: string;
+  description: string;
+  targetID?: string;
+  targetWorkstation?: ProjectWorkstationView;
+  actionIntent?: "view_workstation" | "prepare_understanding" | "prepare_execution" | "open_editor";
+  requiresConfirmation: boolean;
+  status: "available" | "confirmed" | "dismissed";
+};
+
+export type AssistantMessageView = {
+  id: string;
+  role: AssistantMessageRole;
+  kind: AssistantMessageKind;
+  text: string;
+  createdAt: string;
+  targetWorkstation?: ProjectWorkstationView;
+  evidence?: AssistantEvidenceView[];
+  proposals?: AssistantProposalView[];
+};
+
+export type AssistantEventView = {
+  id: string;
+  sessionID: string;
+  type: "message" | "proposal" | "status" | "error";
+  text: string;
+  createdAt: string;
+};
+
+export type AssistantSessionView = {
+  id: string;
+  context: AssistantContextView;
+  status: "idle" | "thinking" | "waiting_for_user" | "awaiting_confirmation" | "error";
+  activeWorkstation?: ProjectWorkstationView;
+  workstationTitle?: string;
+  workstationStatus?: string;
+  messages: AssistantMessageView[];
+  lastEventID?: string;
+};
+
+
+export type ProjectSummaryView = {
+  id: string;
+  name: string;
+  productURL: string;
+  stage: WorkspaceStage;
+  status: ProjectWorkspaceView["status"];
+  assetCount: number;
+  generatedAssetCount: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
 
 export type ScenarioTemplate = {
   id: ScenarioID;
@@ -43,7 +129,7 @@ export type ScenarioTemplate = {
 
 export type SourceConnectionView = {
   id: string;
-  kind: "product_url" | "local_repo" | "github_repo" | "requirement_doc" | "screenshot" | "release_note" | "credential";
+  kind: "product_url" | "local_repo" | "requirement_doc" | "screenshot" | "release_note" | "credential";
   label: string;
   status: "ready" | "needs_attention" | "processing" | "blocked";
   detail: string;
@@ -158,8 +244,6 @@ export type CloudRunStatusView = {
   resultPackage?: RecordingResultPackage;
   failureDiagnostic?: ScriptFailureDiagnostic;
   repairRequest?: ScriptRepairRequest;
-  editorSessionID?: string;
-  editorMaterializationMessage?: string;
 };
 
 export type AssetReviewView = {
@@ -219,22 +303,6 @@ export type RuntimeHealthView = {
   modelProviders: Record<string, ProviderCredentialStatus>;
   modelTaskRoutes: Record<string, ModelTaskRouteStatus>;
   cloudExchange?: CloudExchangeStatus;
-  appCapabilities?: AppCapabilitiesStatus;
-};
-
-export type AppCapabilitiesStatus = {
-  demoAssetGenerationConsole: boolean;
-  videoEditor: boolean;
-  localPackageGeneration: boolean;
-  stagePlanReview: boolean;
-  executionPackageApproval: boolean;
-  approvedPackageUpload: boolean;
-  resultVideoDownload: boolean;
-  errorReportDownload: boolean;
-  serverRecordingRequired: boolean;
-  localRecordingExecution: boolean;
-  localRecordingScope: string;
-  videoWorkerRole: string;
 };
 
 export type CloudExchangeStatus = {

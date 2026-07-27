@@ -3,7 +3,14 @@ import type {
   ExecutionPackageUploadInitView,
   ExecutionPackageUploadView,
   ModelDiagnosticResult,
+  ProjectSummaryView,
   ProjectWorkspaceView,
+  AssistantContextView,
+  AssistantEventView,
+  AssistantMessageView,
+  AssistantProposalView,
+  AssistantSessionView,
+  ProjectWorkstationView,
   RuntimeHealthView,
   RuntimeLogEntry,
   ScenarioID,
@@ -23,7 +30,6 @@ import type {
   SandboxPolicy,
   AgentGraphTrace,
   ScriptFailureDiagnostic,
-  ScriptStep,
   ProjectIntelligencePack,
   ScriptReadinessReport,
   ClientExecutionPackage,
@@ -45,17 +51,21 @@ export type DesktopBridgeClient = {
   mode: "mock" | "local";
   runtimeHealth(): Promise<BridgeResult<RuntimeHealthView>>;
   modelDiagnostics(): Promise<BridgeResult<ModelDiagnosticResult[]>>;
-  preflightExecutionPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<CloudPackagePreflightView>>;
-  editorMaterialization(workspace: ProjectWorkspaceView): Promise<BridgeResult<EditorSessionMaterializationView>>;
-  browserAgentAcceptance(): Promise<BridgeResult<BrowserAgentAcceptanceView>>;
-  runBrowserAgentAcceptance(): Promise<BridgeResult<BrowserAgentAcceptanceView>>;
-  browserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
-  runBrowserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
   executionEvents(projectID: string, afterID?: string): Promise<BridgeResult<RuntimeLogEntry[]>>;
-  createProject(scenarioID: ScenarioID): Promise<BridgeResult<ProjectWorkspaceView>>;
-  listProjects(): Promise<BridgeResult<ProjectWorkspaceView[]>>;
+  createProject(input: ProjectCreationInput): Promise<BridgeResult<ProjectWorkspaceView>>;
+  listProjects(): Promise<BridgeResult<ProjectSummaryView[]>>;
   loadProject(projectID: string): Promise<BridgeResult<ProjectWorkspaceView>>;
+  archiveProject(projectID: string): Promise<BridgeResult<{ archived: boolean }>>;
+  deleteProject(projectID: string): Promise<BridgeResult<{ deleted: boolean }>>;
   saveWorkspace(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  saveProjectInputs(projectID: string, inputs: ProjectInputBundle): Promise<BridgeResult<ProjectWorkspaceView>>;
+  createAssistantSession(context: AssistantContextView): Promise<BridgeResult<AssistantSessionView>>;
+  getAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
+  submitAssistantTurn(sessionID: string, message: string): Promise<BridgeResult<AssistantSessionView>>;
+  listAssistantEvents(sessionID: string, afterID?: string): Promise<BridgeResult<AssistantEventView[]>>;
+  confirmAssistantProposal(sessionID: string, proposalID: string): Promise<BridgeResult<AssistantSessionView>>;
+  dismissAssistantProposal(sessionID: string, proposalID: string): Promise<BridgeResult<AssistantSessionView>>;
+  cancelAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
   getUnderstandingReport(projectID: string): Promise<BridgeResult<MultimodalUnderstandingReport>>;
   getExecutionScriptDocument(projectID: string): Promise<BridgeResult<ExecutionScriptDocument>>;
   getExecutionScriptMarkdown(projectID: string): Promise<BridgeResult<{ markdown: string }>>;
@@ -74,71 +84,16 @@ export type DesktopBridgeClient = {
   acknowledgeResult(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
 };
 
-export type BrowserAgentAcceptanceView = {
-  ready: boolean;
-  can_run: boolean;
-  message: string;
-  report_path?: string;
-  report?: {
-    schema_version: string;
-    generated_at: string;
-    runtime: string;
-    strict_gate: string;
-    scenarios: BrowserAgentAcceptanceScenarioView[];
-  };
-};
-
-export type BrowserAgentAcceptanceScenarioView = {
-  id: string;
-  description: string;
-  expected: string;
-  actual: string;
-  verdict: string;
-  action_executed: boolean;
-  evidence: Array<{ id: string; kind: string; uri: string; mime_type: string; sha256: string; size_bytes: number }>;
-  assertions: Array<{ kind: string; passed: boolean; actual?: string }>;
-  stop_reason?: string;
-};
-
-export type BrowserAgentBusinessAcceptanceView = {
-  ready: boolean;
-  can_run: boolean;
-  message: string;
-  report_path?: string;
-  report?: {
-    schema_version: string;
-    generated_at: string;
-    runtime: string;
-    strict_gate: string;
-    package_id: string;
-    business_flow: string;
-    stages: BrowserAgentAcceptanceScenarioView[];
-    editor_materialization: { ready: boolean; created: boolean; session_id?: string; message: string };
-  };
-};
-
-export type CloudPackagePreflightView = {
-  valid: boolean;
-  runtime?: string;
-  package_id?: string;
-  stage_count?: number;
-  required_checks?: number;
-  allowed_domains?: string[];
-  message: string;
-};
-
-export type EditorSessionMaterializationView = {
-  ready: boolean;
-  created: boolean;
-  session_id?: string;
-  message: string;
-};
-
 export type BridgeRunOptions = {
   demoCredentials?: {
     username?: string;
     password?: string;
   };
+};
+
+export type ProjectCreationInput = {
+  userInput: LocalUserInput;
+  scenarioID?: ScenarioID;
 };
 
 type LocalBridgeResponse<T> = {
@@ -198,20 +153,6 @@ type LocalRuntimeHealth = {
     environment?: string;
     dev_plaintext?: boolean;
   };
-  app_capabilities?: {
-    demo_asset_generation_console?: boolean;
-    video_editor?: boolean;
-    local_package_generation?: boolean;
-    stage_plan_review?: boolean;
-    execution_package_approval?: boolean;
-    approved_package_upload?: boolean;
-    result_video_download?: boolean;
-    error_report_download?: boolean;
-    server_recording_required?: boolean;
-    local_recording_execution?: boolean;
-    local_recording_scope?: string;
-    video_worker_role?: string;
-  };
 };
 
 type LocalModelDiagnostic = {
@@ -247,7 +188,25 @@ type LocalCascadeState = {
   script_document?: ExecutionScriptDocument;
   script_markdown?: string;
   executable_script_bundle?: ExecutableRecordingScriptBundle;
+  artifacts?: {
+    video_path?: string;
+    screenshot_paths?: string[];
+    step_by_step_docs_path?: string;
+  };
+  approved?: boolean;
   error_message?: string;
+};
+
+type LocalProjectSummary = {
+  id: string;
+  name: string;
+  product_url?: string;
+  stage?: string;
+  status?: string;
+  asset_count?: number;
+  generated_asset_count?: number;
+  created_at?: string;
+  updated_at?: string;
 };
 
 type LocalClientExecutionPackageBuild = {
@@ -409,8 +368,8 @@ type LocalProductMap = {
 type LocalUserInput = {
   mode: "desktop";
   product_url: string;
-  local_repo_path?: string;
   git_repo_url?: string;
+  local_repo_path?: string;
   product_description: string;
   requirement_documents?: ProjectInputBundle["requirement_documents"];
   webpage_screenshots?: ProjectInputBundle["webpage_screenshots"];
@@ -422,6 +381,12 @@ type LocalUserInput = {
   forbidden_data?: string[];
   demo_username?: string;
   demo_password?: string;
+  ssh_host?: string;
+  ssh_port?: number;
+  ssh_username?: string;
+  ssh_private_key_secret_ref?: string;
+  ssh_allowed_paths?: string[];
+  ssh_allowed_commands?: string[];
 };
 
 const defaultLocalBridgeURL = "";
@@ -436,7 +401,6 @@ export function createBridgeClient(): DesktopBridgeClient {
 export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL): DesktopBridgeClient {
   const projects = new Map<string, ProjectWorkspaceView>();
   const cloudBuilds = new Map<string, LocalClientExecutionPackageBuild>();
-  const orgID = import.meta.env.VITE_CASCADE_ORG_ID || "org_desktop";
   return {
     mode: "local",
     async runtimeHealth() {
@@ -453,30 +417,6 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       }
       return ok(result.data.map(modelDiagnosticFromLocal));
     },
-    async preflightExecutionPackage(workspace) {
-      return requestLocal<CloudPackagePreflightView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/preflight`, {
-        method: "POST",
-        body: JSON.stringify({ org_id: orgID }),
-      });
-    },
-    async editorMaterialization(workspace) {
-      const resultPackageID = workspace.cloudRun.resultPackageID ?? workspace.cloudRun.resultPackage?.result_id;
-      if (!resultPackageID) return { ok: false, error: "缺少结果包，无法确认待编辑素材" };
-      const query = `?org_id=${encodeURIComponent(orgID)}&result_package_id=${encodeURIComponent(resultPackageID)}`;
-      return requestLocal<EditorSessionMaterializationView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/editor-materialization${query}`);
-    },
-    async browserAgentAcceptance() {
-      return requestLocal<BrowserAgentAcceptanceView>(baseURL, "/v1/desktop/browser-agent-acceptance");
-    },
-    async runBrowserAgentAcceptance() {
-      return requestLocal<BrowserAgentAcceptanceView>(baseURL, "/v1/desktop/browser-agent-acceptance/run", { method: "POST" });
-    },
-    async browserAgentBusinessAcceptance() {
-      return requestLocal<BrowserAgentBusinessAcceptanceView>(baseURL, "/v1/desktop/browser-agent-business-acceptance");
-    },
-    async runBrowserAgentBusinessAcceptance() {
-      return requestLocal<BrowserAgentBusinessAcceptanceView>(baseURL, "/v1/desktop/browser-agent-business-acceptance/run", { method: "POST" });
-    },
     async executionEvents(projectID, afterID) {
       const query = afterID ? `?after=${encodeURIComponent(afterID)}` : "";
       const result = await requestLocal<LocalExecutionEvent[]>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/execution-events${query}`);
@@ -485,13 +425,24 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       }
       return ok(result.data.map(runtimeLogFromLocalEvent));
     },
-    async createProject(scenarioID) {
-      const workspace = createWorkspace(scenarioID);
+    async createProject(input) {
+      const result = await requestLocal<LocalCascadeState>(baseURL, "/v1/desktop/projects", {
+        method: "POST",
+        body: JSON.stringify(input.userInput),
+      });
+      if (!result.ok || !result.data) {
+        return { ok: false, error: result.error ?? "创建项目失败" };
+      }
+      const workspace = workspaceFromCascadeState(result.data, createWorkspace(input.scenarioID ?? "product_demo"));
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
     async listProjects() {
-      return ok([...projects.values()]);
+      const result = await requestLocal<LocalProjectSummary[]>(baseURL, "/v1/desktop/projects");
+      if (!result.ok || !result.data) {
+        return { ok: false, error: result.error ?? "项目列表不可用" };
+      }
+      return ok(result.data.map(projectSummaryFromLocal));
     },
     async loadProject(projectID) {
       const cached = projects.get(projectID);
@@ -506,9 +457,55 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
+    async archiveProject(projectID) {
+      const result = await requestLocal<{ archived: boolean }>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/archive`, { method: "POST" });
+      if (result.ok) {
+        projects.delete(projectID);
+      }
+      return result;
+    },
+    async deleteProject(projectID) {
+      const result = await requestLocal<{ deleted: boolean }>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}`, { method: "DELETE" });
+      if (result.ok) {
+        projects.delete(projectID);
+      }
+      return result;
+    },
     async saveWorkspace(workspace) {
       projects.set(workspace.id, workspace);
       return ok(workspace);
+    },
+    async saveProjectInputs(projectID, inputs) {
+      const result = await requestLocal<LocalProjectContext>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/inputs`, {
+        method: "POST",
+        body: JSON.stringify(inputs),
+      });
+      if (!result.ok) {
+        return { ok: false, error: result.error ?? "项目输入保存失败" };
+      }
+      return this.loadProject(projectID);
+    },
+    async createAssistantSession(context) {
+      return requestLocal<AssistantSessionView>(baseURL, "/v1/desktop/assistant/sessions", { method: "POST", body: JSON.stringify({ context }) });
+    },
+    async getAssistantSession(sessionID) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}`);
+    },
+    async submitAssistantTurn(sessionID, message) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/turns`, { method: "POST", body: JSON.stringify({ message }) });
+    },
+    async listAssistantEvents(sessionID, afterID) {
+      const query = afterID ? `?after=${encodeURIComponent(afterID)}` : "";
+      return requestLocal<AssistantEventView[]>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/events${query}`);
+    },
+    async confirmAssistantProposal(sessionID, proposalID) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/confirm`, { method: "POST" });
+    },
+    async dismissAssistantProposal(sessionID, proposalID) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/dismiss`, { method: "POST" });
+    },
+    async cancelAssistantSession(sessionID) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/cancel`, { method: "POST" });
     },
     async getUnderstandingReport(projectID) {
       const loaded = await this.loadProject(projectID);
@@ -545,7 +542,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         method: "POST",
         body: JSON.stringify({
           user_input: userInput,
-          org_id: orgID,
+          org_id: "org_desktop",
         }),
       });
       if (!prepared.ok || !prepared.data) {
@@ -609,7 +606,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     async initExecutionPackageUpload(workspace) {
       const result = await requestLocal<LocalCloudUploadInitResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/init`, {
         method: "POST",
-        body: JSON.stringify({ org_id: orgID }),
+        body: JSON.stringify({ org_id: "org_desktop" }),
       });
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "初始化服务器上传会话失败", result.errorInfo);
@@ -626,7 +623,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       const result = await requestLocal<LocalCloudUploadPackageResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/upload`, {
         method: "POST",
         body: JSON.stringify({
-          org_id: orgID,
+          org_id: "org_desktop",
           upload_id: workspace.cloudRun.uploadID,
           ...(build ? { build } : {}),
         }),
@@ -646,7 +643,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       if (!exchangePackageID) {
         return { ok: false, error: "缺少 exchange package id，无法轮询服务器状态" };
       }
-      const query = `?org_id=${encodeURIComponent(orgID)}&exchange_package_id=${encodeURIComponent(exchangePackageID)}`;
+      const query = `?org_id=${encodeURIComponent("org_desktop")}&exchange_package_id=${encodeURIComponent(exchangePackageID)}`;
       const result = await requestLocal<LocalExecutionPackageStatusResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/status${query}`);
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "轮询服务器执行状态失败", result.errorInfo);
@@ -669,7 +666,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       if (!resultPackageID) {
         return { ok: false, error: "缺少 result package id，无法读取服务器结果包" };
       }
-      const query = `?org_id=${encodeURIComponent(orgID)}&result_package_id=${encodeURIComponent(resultPackageID)}`;
+      const query = `?org_id=${encodeURIComponent("org_desktop")}&result_package_id=${encodeURIComponent(resultPackageID)}`;
       const result = await requestLocal<RecordingResultPackage>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/result${query}`);
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "读取服务器结果包失败", result.errorInfo);
@@ -713,7 +710,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       const result = await requestLocal<LocalResultPackageAckResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/ack`, {
         method: "POST",
         body: JSON.stringify({
-          org_id: orgID,
+          org_id: "org_desktop",
           result_package_id: resultPackageID,
           exchange_package_id: workspace.cloudRun.exchangePackageID,
           received_asset_ids: receivedAssetIDs,
@@ -735,6 +732,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 
 export function createMockBridgeClient(): DesktopBridgeClient {
   const projects = new Map<string, ProjectWorkspaceView>();
+  const assistantSessions = new Map<string, AssistantSessionView>();
   const initial = createWorkspace("product_demo");
   projects.set(initial.id, initial);
 
@@ -818,55 +816,102 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         mockDiagnostic("seedance", "video_operation", "seedance-2.0"),
       ]);
     },
-    async preflightExecutionPackage(workspace) {
-      const bundle = workspace.executableScriptBundle;
-      const plan = bundle?.plan_json;
-      return ok({
-        valid: Boolean(bundle && plan),
-        ...(bundle?.script_manifest.runtime ? { runtime: bundle.script_manifest.runtime } : {}),
-        package_id: workspace.packagePreview.packageID,
-        stage_count: plan?.steps.length ?? 0,
-        required_checks: plan?.steps.reduce((total, step) => total + step.validations.filter((validation) => validation.required).length, 0) ?? 0,
-        allowed_domains: workspace.planReview.allowedDomains,
-        message: "模拟预检通过：尚未上传、尚未启动浏览器。",
-      });
-    },
-    async editorMaterialization(workspace) {
-      const failed = workspace.cloudRun.status === "failed";
-      return ok(failed
-        ? { ready: false, created: false, message: "模拟失败结果不创建编辑会话。" }
-        : { ready: true, created: false, session_id: "edit_mock_result", message: "模拟待编辑素材已登记。" });
-    },
-    async browserAgentAcceptance() {
-      return ok(mockBrowserAgentAcceptance());
-    },
-    async runBrowserAgentAcceptance() {
-      return ok(mockBrowserAgentAcceptance());
-    },
-    async browserAgentBusinessAcceptance() {
-      return ok(mockBrowserAgentBusinessAcceptance());
-    },
-    async runBrowserAgentBusinessAcceptance() {
-      return ok(mockBrowserAgentBusinessAcceptance());
-    },
     async executionEvents() {
       return ok([]);
     },
-    async createProject(scenarioID) {
-      const project = createWorkspace(scenarioID);
-      projects.set(project.id, project);
-      return ok(project);
+    async createProject(input) {
+      const seed = createWorkspace(input.scenarioID ?? "product_demo");
+      const projectID = `${seed.id}_${projects.size + 1}`;
+      const project = {
+        ...seed,
+        id: projectID,
+        planReview: { ...seed.planReview, graph: { ...seed.planReview.graph, project_id: projectID } },
+      };
+      const prompt = input.userInput.product_description.trim();
+      const next = prompt ? { ...project, inputBundle: { ...project.inputBundle, raw_user_prompt: prompt } } : project;
+      projects.set(next.id, next);
+      return ok(next);
     },
     async listProjects() {
-      return ok([...projects.values()]);
+      return ok([...projects.values()].map(projectSummaryFromWorkspace));
     },
     async loadProject(projectID) {
       const project = projects.get(projectID);
       return project ? ok(project) : { ok: false, error: "未找到项目" };
     },
+    async archiveProject(projectID) {
+      if (!projects.has(projectID)) {
+        return { ok: false, error: "未找到项目" };
+      }
+      projects.delete(projectID);
+      return ok({ archived: true });
+    },
+    async deleteProject(projectID) {
+      if (!projects.has(projectID)) {
+        return { ok: false, error: "未找到项目" };
+      }
+      projects.delete(projectID);
+      return ok({ deleted: true });
+    },
     async saveWorkspace(workspace) {
       projects.set(workspace.id, workspace);
       return ok(workspace);
+    },
+    async saveProjectInputs(projectID, inputs) {
+      const project = projects.get(projectID);
+      if (!project) {
+        return { ok: false, error: "未找到项目" };
+      }
+      const next = {
+        ...project,
+        productURL: inputs.product_urls?.[0]?.url ?? project.productURL,
+        inputBundle: inputs,
+      };
+      projects.set(projectID, next);
+      return ok(next);
+    },
+    async createAssistantSession(context) {
+      const sessionID = `assistant_${context.scopeKey.replace(/[^a-z0-9]+/gi, "_")}`;
+      const existing = assistantSessions.get(sessionID);
+      if (existing) return ok(existing);
+      const session = mockAssistantSession(context);
+      assistantSessions.set(session.id, session);
+      return ok(session);
+    },
+    async getAssistantSession(sessionID) {
+      const session = assistantSessions.get(sessionID);
+      return session ? ok(session) : { ok: false, error: "Assistant session not found" };
+    },
+    async submitAssistantTurn(sessionID, message) {
+      const current = assistantSessions.get(sessionID);
+      if (!current) return { ok: false, error: "Assistant session not found" };
+      const next = mockAssistantTurn(current, message);
+      assistantSessions.set(sessionID, next);
+      return ok(next);
+    },
+    async listAssistantEvents() {
+      return ok([]);
+    },
+    async confirmAssistantProposal(sessionID, proposalID) {
+      const current = assistantSessions.get(sessionID);
+      if (!current) return { ok: false, error: "Assistant session not found" };
+      const next = updateAssistantProposal(current, proposalID, "confirmed");
+      assistantSessions.set(sessionID, next);
+      return ok(next);
+    },
+    async dismissAssistantProposal(sessionID, proposalID) {
+      const current = assistantSessions.get(sessionID);
+      if (!current) return { ok: false, error: "Assistant session not found" };
+      const next = updateAssistantProposal(current, proposalID, "dismissed");
+      assistantSessions.set(sessionID, next);
+      return ok(next);
+    },
+    async cancelAssistantSession(sessionID) {
+      const current = assistantSessions.get(sessionID);
+      if (!current) return { ok: false, error: "Assistant session not found" };
+      const next = { ...current, status: "idle" as const };
+      assistantSessions.set(sessionID, next);
+      return ok(next);
     },
     async getUnderstandingReport(projectID) {
       const project = projects.get(projectID);
@@ -1071,6 +1116,138 @@ function bridgeFailure<T>(error: string, errorInfo?: LocalBridgeErrorInfo): Brid
   };
 }
 
+function projectSummaryFromLocal(summary: LocalProjectSummary): ProjectSummaryView {
+  return {
+    id: summary.id,
+    name: summary.name || "未命名演示",
+    productURL: summary.product_url || "",
+    stage: isWorkspaceStage(summary.stage) ? summary.stage : "setup",
+    status: isProjectStatus(summary.status) ? summary.status : "draft",
+    assetCount: summary.asset_count ?? 0,
+    generatedAssetCount: summary.generated_asset_count ?? 0,
+    ...(summary.created_at ? { createdAt: summary.created_at } : {}),
+    ...(summary.updated_at ? { updatedAt: summary.updated_at } : {}),
+  };
+}
+
+function projectSummaryFromWorkspace(workspace: ProjectWorkspaceView): ProjectSummaryView {
+  const generatedAssetCount = workspace.assets.filter((asset) => asset.status === "generated" || asset.status === "approved").length;
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    productURL: workspace.productURL,
+    stage: workspace.stage,
+    status: workspace.status,
+    assetCount: workspace.assets.length,
+    generatedAssetCount,
+  };
+}
+
+function mockAssistantSession(context: AssistantContextView): AssistantSessionView {
+  const now = new Date().toISOString();
+  const label = context.surface === "projects" ? "Projects" : "Repositories";
+  const projectScoped = context.surface === "projects" && Boolean(context.projectID);
+  return {
+    id: `assistant_${context.scopeKey.replace(/[^a-z0-9]+/gi, "_")}`,
+    context,
+    status: "waiting_for_user",
+    activeWorkstation: projectScoped ? "editor" : "overview",
+    workstationTitle: projectScoped ? "Video editor" : "Project overview",
+    workstationStatus: "Ready for direction",
+    messages: [{ id: "assistant_welcome", role: "agent", kind: "answer", text: `I’m looking at ${label.toLowerCase()} context. Tell me what you want to understand or change, and I’ll suggest the next safe step.`, createdAt: now }],
+  };
+}
+
+function mockAssistantTurn(session: AssistantSessionView, message: string): AssistantSessionView {
+  const now = new Date().toISOString();
+  const normalized = message.toLowerCase();
+  const proposals: AssistantProposalView[] = [];
+  const workstation = workstationFromPrompt(normalized, session.context.surface);
+  if (session.context.surface === "projects" && !session.context.projectID && (normalized.includes("open") || normalized.includes("closest"))) {
+    proposals.push({ id: `proposal_${Date.now()}`, kind: "inspect_project", title: "Inspect the closest project", description: "Open the project workspace so Cascade can use its evidence and workflow context.", ...(session.context.projectID ? { targetID: session.context.projectID } : {}), targetWorkstation: "overview", actionIntent: "view_workstation", requiresConfirmation: true, status: "available" });
+  } else if (workstation === "approval" || workstation === "execution") {
+    proposals.push({ id: `proposal_${Date.now()}`, kind: "prepare_execution", title: "Prepare the approval view", description: "Bring the execution package and safety checklist into the workstation. Running remains separately approval-gated.", ...(session.context.projectID ? { targetID: session.context.projectID } : {}), targetWorkstation: "approval", actionIntent: "prepare_execution", requiresConfirmation: true, status: "available" });
+  } else if (session.context.surface === "repositories") {
+    proposals.push({ id: `proposal_${Date.now()}`, kind: "prepare_understanding", title: "Prepare a read-only repository summary", description: "Use the connected repository context to identify routes, components, and likely demo surfaces.", targetWorkstation: "evidence", actionIntent: "prepare_understanding", requiresConfirmation: true, status: "available" });
+  }
+  const agentMessage: AssistantMessageView = { id: `agent_${Date.now() + 1}`, role: "agent", kind: proposals.length > 0 ? "proposal" : "answer", text: `I can help with that. I’ve moved the workstation to ${workstationLabel(workstation)} so we can inspect the next useful layer.`, createdAt: now, targetWorkstation: workstation, ...(proposals.length > 0 ? { proposals } : {}) };
+  return {
+    ...session,
+    status: proposals.length > 0 ? "awaiting_confirmation" : "waiting_for_user",
+    activeWorkstation: workstation,
+    workstationTitle: workstationLabel(workstation),
+    workstationStatus: proposals.length > 0 ? "Awaiting confirmation" : "Ready for the next question",
+    messages: [
+      ...session.messages,
+      { id: `user_${Date.now()}`, role: "user", kind: "answer", text: message, createdAt: now },
+      agentMessage,
+    ],
+  };
+}
+
+function workstationFromPrompt(message: string, surface: AssistantContextView["surface"]): ProjectWorkstationView {
+  if (message.includes("evidence") || message.includes("found") || message.includes("understand") || message.includes("learn")) return "evidence";
+  if (message.includes("plan") || message.includes("journey") || message.includes("outline")) return "plan";
+  if (message.includes("approve") || message.includes("approval") || message.includes("package")) return "approval";
+  if (message.includes("run") || message.includes("execute") || message.includes("record")) return "execution";
+  if (message.includes("repair") || message.includes("failed") || message.includes("failure")) return "repair";
+  if (message.includes("asset") || message.includes("video") || message.includes("screenshot")) return "assets";
+  if (message.includes("edit") || message.includes("timeline")) return "editor";
+  return surface === "repositories" ? "evidence" : "overview";
+}
+
+function workstationLabel(view: ProjectWorkstationView): string {
+  const labels: Record<ProjectWorkstationView, string> = { overview: "Project overview", evidence: "Evidence", plan: "Demo plan", approval: "Approval", execution: "Execution", repair: "Repair", assets: "Generated assets", editor: "Editor" };
+  return labels[view];
+}
+
+function updateAssistantProposal(session: AssistantSessionView, proposalID: string, status: "confirmed" | "dismissed"): AssistantSessionView {
+  const target = session.messages.flatMap((message) => message.proposals ?? []).find((proposal) => proposal.id === proposalID)?.targetWorkstation;
+  return {
+    ...session,
+    status: "waiting_for_user",
+    ...(status === "confirmed" && target ? { activeWorkstation: target, workstationTitle: workstationLabel(target), workstationStatus: "Ready" } : {}),
+    messages: session.messages.map((message) => message.proposals ? { ...message, proposals: message.proposals.map((proposal) => proposal.id === proposalID ? { ...proposal, status } : proposal) } : message),
+  };
+}
+
+function isWorkspaceStage(value: string | undefined): value is ProjectWorkspaceView["stage"] {
+  return value === "setup" || value === "inputs" || value === "understanding" || value === "plan_review" || value === "package_approval" || value === "cloud_run" || value === "script_repair" || value === "result_review";
+}
+
+function isProjectStatus(value: string | undefined): value is ProjectWorkspaceView["status"] {
+  return value === "draft" || value === "understanding_ready" || value === "awaiting_approval" || value === "cloud_running" || value === "script_repair_required" || value === "asset_ready";
+}
+
+function workspaceStageFromLocalState(state: LocalCascadeState): ProjectWorkspaceView["stage"] {
+  switch (state.current_node) {
+    case "InputCtx": return "setup";
+    case "RequirementRead":
+    case "CodeRead":
+    case "PageRead":
+    case "ProjectIntelligence":
+    case "MultimodalUnderstand":
+    case "ProductExplore":
+    case "PageInteractionVerify": return "understanding";
+    case "GraphGenerate": return "plan_review";
+    case "ScriptPackage":
+    case "HumanApprove": return "package_approval";
+    case "ExecuteRehearse": return "cloud_run";
+    case "AssetGenerate": return "result_review";
+    default: return state.status === "completed" ? "result_review" : "inputs";
+  }
+}
+
+function workspaceStatusFromLocalState(state: LocalCascadeState): ProjectWorkspaceView["status"] {
+  switch (state.status) {
+    case "awaiting_human_approval": return "awaiting_approval";
+    case "running": return "cloud_running";
+    case "completed": return "asset_ready";
+    case "failed": return "script_repair_required";
+    default: return "draft";
+  }
+}
+
 async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit): Promise<BridgeResult<T>> {
   const startedAt = Date.now();
   console.info("[Cascade Dev Bridge] request", init?.method ?? "GET", path);
@@ -1187,8 +1364,10 @@ function runtimeLogFromLocalEvent(event: LocalExecutionEvent): RuntimeLogEntry {
 
 export function userInputFromWorkspace(workspace: ProjectWorkspaceView, options?: BridgeRunOptions): LocalUserInput {
   const template = getScenarioTemplate(workspace.scenarioID);
-  const localRepository = workspace.inputBundle.repositories?.find((repo) => repo.local_path);
-  const gitRepository = workspace.inputBundle.repositories?.find((repo) => repo.url);
+  const repositories = workspace.inputBundle.repositories ?? [];
+  const githubRepository = repositories.find((repo) => repo.kind === "github" || repo.provider === "github" || repo.provider === "git");
+  const localRepository = repositories.find((repo) => (repo.kind === "local" || repo.provider === "local" || !repo.provider) && repo.local_path);
+  const serverRepository = repositories.find((repo) => repo.kind === "server" || repo.provider === "server" || repo.host);
   const requirementDocuments = workspace.inputBundle.requirement_documents;
   const screenshots = workspace.inputBundle.webpage_screenshots;
   const forbiddenData = Array.isArray(workspace.inputBundle.metadata?.forbidden_data)
@@ -1199,8 +1378,8 @@ export function userInputFromWorkspace(workspace: ProjectWorkspaceView, options?
   return {
     mode: "desktop",
     product_url: workspace.productURL,
+    ...(githubRepository?.url ? { git_repo_url: githubRepository.url } : {}),
     ...(localRepository?.local_path ? { local_repo_path: localRepository.local_path } : {}),
-    ...(gitRepository?.url ? { git_repo_url: gitRepository.url } : {}),
     product_description: workspace.inputBundle.raw_user_prompt || template.objective,
     ...(requirementDocuments?.length ? { requirement_documents: requirementDocuments } : {}),
     ...(screenshots?.length ? { webpage_screenshots: screenshots } : {}),
@@ -1212,6 +1391,13 @@ export function userInputFromWorkspace(workspace: ProjectWorkspaceView, options?
     forbidden_data: forbiddenData,
     ...(username ? { demo_username: username } : {}),
     ...(password ? { demo_password: password } : {}),
+    ...(serverRepository?.host ? {
+      ssh_host: serverRepository.host,
+      ...(serverRepository.port ? { ssh_port: serverRepository.port } : {}),
+      ...(serverRepository.username ? { ssh_username: serverRepository.username } : {}),
+      ...(serverRepository.secret_ref ? { ssh_private_key_secret_ref: serverRepository.secret_ref } : {}),
+      ...(serverRepository.path ? { ssh_allowed_paths: [serverRepository.path] } : {}),
+    } : {}),
   };
 }
 
@@ -1254,10 +1440,10 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
     ...fallback,
     id: state.project_id || project?.id || fallback.id,
     name: graph.name || project?.name || fallback.name,
-    stage: "package_approval",
+    stage: workspaceStageFromLocalState(state),
     productURL,
     targetAudience: project?.target_audience || fallback.targetAudience,
-    status: "awaiting_approval",
+    status: workspaceStatusFromLocalState(state),
     inputBundle,
     sourceConnections: sourceConnectionsFromState(project, report, fallback),
     understanding: {
@@ -1507,7 +1693,7 @@ function workspaceWithResultPackage(workspace: ProjectWorkspaceView, resultPacka
     result_package_id: resultPackage.result_id,
     ...(workspace.cloudRun.cloudJobID ? { cloud_job_id: workspace.cloudRun.cloudJobID } : {}),
   };
-	const next = workspaceFromCloudLifecycleResult(workspace, {
+  return workspaceFromCloudLifecycleResult(workspace, {
     init: {
       upload_id: workspace.cloudRun.uploadID ?? "",
       server_public_key_id: "",
@@ -1521,37 +1707,6 @@ function workspaceWithResultPackage(workspace: ProjectWorkspaceView, resultPacka
     status,
     result: resultPackage,
   });
-	const previousStages = workspace.cloudRun.stageHistory;
-	if (!previousStages?.length) return next;
-	return {
-		...next,
-		cloudRun: {
-			...next.cloudRun,
-			stageHistory: (next.cloudRun.stageHistory ?? previousStages).map((stage) => stage.id === "result_returned" ? stage : previousStages.find((previous) => previous.id === stage.id) ?? stage),
-		},
-	};
-}
-
-function mockBrowserAgentAcceptance(): BrowserAgentAcceptanceView {
-  return {
-    ready: true,
-    can_run: true,
-    message: "演示数据：本地受控验收包已通过。真实模式会运行浏览器并生成截图、录屏与 trace。",
-    report_path: "artifacts/browser-agent-acceptance/latest/acceptance-report.json",
-    report: {
-      schema_version: "cascade.browser_agent_acceptance.v1",
-      generated_at: new Date().toISOString(),
-      runtime: "browser-agent-outline-v1",
-      strict_gate: "passed",
-      scenarios: [
-        { id: "success_navigation_click", description: "导航、识别经批准的按钮、点击并验证页面结果", expected: "通过；含截图证据", actual: "pass", verdict: "passed", action_executed: true, evidence: [], assertions: [{ kind: "required_validation", passed: true, actual: "matched" }] },
-        { id: "semantic_target_contract_conflict", description: "页面存在按钮但批准名称不同", expected: "点击前拦截", actual: "pass", verdict: "passed", action_executed: false, evidence: [], assertions: [{ kind: "target_contract", passed: true, actual: "blocked" }] },
-        { id: "locator_missing", description: "批准目标不在页面上", expected: "点击前拦截", actual: "pass", verdict: "passed", action_executed: false, evidence: [], assertions: [{ kind: "locator_resolution", passed: true, actual: "blocked" }] },
-        { id: "required_validation_failure", description: "动作已完成但要求的业务结果不存在", expected: "停止，不进入后续阶段", actual: "pass", verdict: "passed", action_executed: true, evidence: [], assertions: [{ kind: "required_validation", passed: false, actual: "not_matched" }], stop_reason: "required_validation_failed" },
-        { id: "recording_and_trace_delivery", description: "关闭会话后保留可回放证据", expected: "录屏和 trace 均存在", actual: "pass", verdict: "passed", action_executed: false, evidence: [], assertions: [{ kind: "recording_and_trace", passed: true, actual: "retained" }] },
-      ],
-    },
-  };
 }
 
 function uploadInitFromLocal(init: LocalExecutionPackageInitResponse): ExecutionPackageUploadInitView {
@@ -1638,7 +1793,7 @@ function lifecycleStagesFromStatus(status: LocalExecutionPackageStatusResponse, 
     } else if (index === activeIndex) {
       stageStatus = terminal === "failed" ? "failed" : terminal === "succeeded" ? "completed" : "active";
     }
-	const event = status.stage_history?.filter((item) => lifecycleStageIDFromCloudStage(item.stage, item.status) === id).at(-1);
+    const event = status.stage_history?.find((item) => lifecycleStageIDFromCloudStage(item.stage, item.status) === id);
     const time = event?.updated_at
       ? new Date(event.updated_at).toLocaleTimeString("zh-CN", { hour12: false })
       : stageStatus === "pending"
@@ -1658,16 +1813,12 @@ function lifecycleStagesFromStatus(status: LocalExecutionPackageStatusResponse, 
 }
 
 function lifecycleStageIDFromCloudStage(stage: string | undefined, status?: string): ServerLifecycleStageID {
-	// Stage-history items commonly have status=completed; the explicit stage
-	// still determines their lifecycle card. Only a top-level status without a
-	// stage may fall back to the final result card.
-  if (stage === "completed" || (!stage && status === "completed")) return "result_returned";
+  if (status === "completed" || stage === "completed") return "result_returned";
   if (stage === "accepted") return "package_uploaded";
   if (stage === "validated" || stage === "validating") return "script_validation";
   if (stage === "preparing_worker") return "sandbox_preparing";
-  if (stage === "validating_pre_execution") return "script_validation";
-  if (stage === "running_script" || stage === "running_browser_agent" || stage === "validating_runtime_stage") return "browser_execution";
-	if (stage === "packaging_recording" || stage === "rendering" || stage === "validating_post_execution") return "video_rendering";
+  if (stage === "running_script") return "browser_execution";
+  if (stage === "packaging_recording" || stage === "rendering") return "video_rendering";
   if (stage === "failed") return "browser_execution";
   return "server_intake";
 }
@@ -1742,9 +1893,7 @@ function modelProvenanceFromState(report: MultimodalUnderstandingReport | undefi
 
 function sourceConnectionsFromState(project: LocalProjectContext | undefined, report: MultimodalUnderstandingReport | undefined, fallback: ProjectWorkspaceView) {
   const sources = [...fallback.sourceConnections];
-  const hasLocalRepo = Boolean(project?.local_repo_path || project?.inputs?.repositories?.some((repo) => repo.local_path));
-  const hasGitRepo = Boolean(project?.git_repo_url || project?.inputs?.repositories?.some((repo) => repo.url));
-  const digestSourceKind: "github_repo" | "local_repo" = hasGitRepo && !hasLocalRepo ? "github_repo" : "local_repo";
+  const hasRepo = Boolean(project?.local_repo_path || project?.inputs?.repositories?.some((repo) => repo.local_path || repo.url));
   const hasRequirement = Boolean(project?.product_description || project?.inputs?.requirement_documents?.length || project?.inputs?.raw_user_prompt);
   const hasScreenshots = Boolean(project?.inputs?.webpage_screenshots?.length);
   return sources.map((source) => {
@@ -1752,10 +1901,7 @@ function sourceConnectionsFromState(project: LocalProjectContext | undefined, re
       return { ...source, status: project?.product_url ? "ready" as const : source.status, detail: project?.product_url ? "已进入本地理解链路并生成执行包。" : source.detail };
     }
     if (source.kind === "local_repo") {
-      return { ...source, status: hasLocalRepo ? "ready" as const : "needs_attention" as const, detail: hasLocalRepo ? "已生成本地代码结构摘要和 source digest，不上传完整源码。" : "未提供本地代码目录；可改用 GitHub 仓库或需求/页面材料。" };
-    }
-    if (source.kind === "github_repo") {
-      return { ...source, status: hasGitRepo ? "ready" as const : "needs_attention" as const, detail: hasGitRepo ? "已生成 GitHub 仓库结构摘要和 source digest，不上传完整源码。" : "未提供 GitHub 仓库 URL；可改用本地代码目录或需求/页面材料。" };
+      return { ...source, status: hasRepo ? "ready" as const : "needs_attention" as const, detail: hasRepo ? "已生成代码结构摘要和 source digest，不上传完整源码。" : "未提供本地代码目录，使用需求和页面材料生成脚本。" };
     }
     if (source.kind === "requirement_doc") {
       return { ...source, status: hasRequirement ? "ready" as const : "needs_attention" as const };
@@ -1766,8 +1912,8 @@ function sourceConnectionsFromState(project: LocalProjectContext | undefined, re
     return source;
   }).concat(report?.source_digest_sha256 ? [{
     id: "source_digest",
-    kind: digestSourceKind,
-    label: hasGitRepo && !hasLocalRepo ? "GitHub 理解摘要" : "代码理解摘要",
+    kind: "local_repo" as const,
+    label: "本地理解摘要",
     status: "ready" as const,
     detail: `source digest: ${report.source_digest_sha256}`,
   }] : []);
@@ -2177,22 +2323,6 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
       devPlaintext: Boolean(local.cloud_exchange.dev_plaintext),
     };
   }
-  if (local.app_capabilities) {
-    health.appCapabilities = {
-      demoAssetGenerationConsole: Boolean(local.app_capabilities.demo_asset_generation_console),
-      videoEditor: Boolean(local.app_capabilities.video_editor),
-      localPackageGeneration: Boolean(local.app_capabilities.local_package_generation),
-      stagePlanReview: Boolean(local.app_capabilities.stage_plan_review),
-      executionPackageApproval: Boolean(local.app_capabilities.execution_package_approval),
-      approvedPackageUpload: Boolean(local.app_capabilities.approved_package_upload),
-      resultVideoDownload: Boolean(local.app_capabilities.result_video_download),
-      errorReportDownload: Boolean(local.app_capabilities.error_report_download),
-      serverRecordingRequired: Boolean(local.app_capabilities.server_recording_required),
-      localRecordingExecution: Boolean(local.app_capabilities.local_recording_execution),
-      localRecordingScope: local.app_capabilities.local_recording_scope ?? "unknown",
-      videoWorkerRole: local.app_capabilities.video_worker_role ?? "unknown",
-    };
-  }
   return health;
 }
 
@@ -2368,18 +2498,16 @@ function mockStageApprovalPlan(workspace: ProjectWorkspaceView, plan: ExecutionS
     runtime: "browser-agent-outline-v1",
     language: "zh-CN",
     stages: plan.steps.map((step) => {
-      const duration = explicitStepDurationMS(step);
+      const duration = Math.max(step.timing.duration_ms ?? 0, 10000);
       const route = routeFromStep(workspace, step);
       return {
         id: `stage_${step.node_id}`,
         order: step.order,
         node_id: step.node_id,
-        stage_kind: stageKindFromAction(step.action.type),
-        route_state: routeStateFromStep(step, route),
         title: step.title ?? step.node_id,
         objective: step.expected_outcome,
         business_intent: step.business_value ?? step.narrative.voiceover ?? step.narrative.caption ?? step.expected_outcome,
-        ...(duration > 0 ? { duration_ms: duration } : {}),
+        duration_ms: duration,
         target_route: route,
         target_url: step.page_target.url ?? step.action.target.url ?? workspace.productURL,
         component_refs: [`component:${step.node_id}`],
@@ -2406,7 +2534,6 @@ function mockStageApprovalPlan(workspace: ProjectWorkspaceView, plan: ExecutionS
         success_state: step.expected_outcome,
         wait_conditions: ["wait_after_entry_at_least_1000ms", "wait_for_network_or_dom_stable", "wait_for_render_stable_before_capture"],
         capture_points: step.capture.screenshot ? ["stage_entry_after_render", "stage_success_state"] : ["stage_success_state"],
-        capture_plan: mockCapturePlanForStep(step, duration),
         risk_notes: ["不得改写用户意图、stage 顺序、填充语义或安全边界。"],
         evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
         confidence: 0.82,
@@ -2432,7 +2559,6 @@ function mockBrowserAgentOutline(workspace: ProjectWorkspaceView, plan: Executio
     stages: plan.steps.map((step) => {
       const selector = step.action.target.selector ?? step.page_target.selector ?? "";
       const route = routeFromStep(workspace, step);
-      const duration = explicitStepDurationMS(step);
       return {
         id: `outline_stage_${step.node_id}`,
         stage_id: `stage_${step.node_id}`,
@@ -2471,10 +2597,9 @@ function mockBrowserAgentOutline(workspace: ProjectWorkspaceView, plan: Executio
         wait_conditions: ["wait_after_entry_at_least_1000ms", "wait_for_render_stable_before_capture"],
         capture_points: ["after_entry_render_stable", "after_success_state"],
         success_state: step.expected_outcome,
-        ...(duration > 0 ? { duration_ms: duration } : {}),
-        capture_plan: mockCapturePlanForStep(step, duration),
-        can_modify: ["selector", "selector_alternatives", "wait_conditions", "capture_points", "non_destructive_exploration_path", "capture_plan.pre_capture_wait_ms", "capture_plan.hold_after_ms"],
-        must_preserve: ["objective", "business_intent", "input semantics", "stage order", "explicit duration requirement", "allowed domains", "forbidden pages"],
+        duration_ms: Math.max(step.timing.duration_ms ?? 0, 10000),
+        can_modify: ["selector", "selector_alternatives", "wait_conditions", "capture_points", "non_destructive_exploration_path"],
+        must_preserve: ["objective", "business_intent", "input semantics", "stage order", "allowed domains", "forbidden pages"],
         evidence_refs: step.evidence_refs ?? workspace.understanding.evidenceRefs,
         confidence: 0.8,
       };
@@ -2492,29 +2617,6 @@ function mockBrowserAgentOutline(workspace: ProjectWorkspaceView, plan: Executio
     immutable_fields: ["stage_approval_plan.stages[].objective", "stage_approval_plan.stages[].business_intent", "stage_approval_plan.stages[].input_content", "security_policy", "recording_run_spec.allowed_domains"],
     evidence_refs: workspace.understanding.evidenceRefs,
     confidence: 0.8,
-  };
-}
-
-function explicitStepDurationMS(step: ScriptStep): number {
-  const duration = step.timing?.duration_ms ?? 0;
-  return duration > 0 ? duration : 0;
-}
-
-function mockCapturePlanForStep(step: ScriptStep, durationMS: number) {
-  const requiredAssets = [
-    ...(step.capture.video ? ["stage_video"] : []),
-    ...(step.capture.screenshot ? ["viewport_screenshot"] : []),
-  ];
-  return {
-    intent: durationMS > 0
-      ? `按用户明确时长要求采集 ${Math.ceil(durationMS / 1000)} 秒素材。`
-      : "按 stage 结果采集素材，等待页面稳定后截图或录屏。",
-    primary_artifact: requiredAssets[0] ?? "redacted_trace_observation",
-    required_assets: requiredAssets.length > 0 ? requiredAssets : ["redacted_trace_observation"],
-    ...(durationMS > 0 ? { min_duration_ms: durationMS } : {}),
-    pre_capture_wait_ms: 1000,
-    clip_suggestion: durationMS > 0 ? "不得压缩低于用户明确时长。" : "由 server browser agent 按页面状态和审批目标控制节奏。",
-    notes: ["进入页面后至少等待 1 秒并确认渲染稳定再截图。"],
   };
 }
 
@@ -2718,7 +2820,7 @@ function mockFailedRecordingResultPackage(workspace: ProjectWorkspaceView): Reco
       {
         node_id: diagnostic.failed_node_id,
         status: "failed",
-        duration_ms: workspace.planReview.graph.nodes.find((node) => node.id === diagnostic.failed_node_id)?.duration_hint_ms ?? 0,
+        duration_ms: 10000,
         error: diagnostic.error,
         ...(diagnostic.screenshot_refs
           ? {
@@ -2918,50 +3020,6 @@ function roleFromAction(action: string): string {
     return "region";
   }
   return "button";
-}
-
-function mockBrowserAgentBusinessAcceptance(): BrowserAgentBusinessAcceptanceView {
-  const stageDefinitions: Array<[string, string, string]> = [
-    ["node_open_workspace", "打开项目工作台", "Create project page is visible"],
-    ["node_fill_project_name", "输入项目名称", "Project name equals Tetris Launch"],
-    ["node_select_build_mode", "选择构建模式", "Build mode selected"],
-    ["node_submit_build", "提交构建", "Build result route is visible"],
-    ["node_verify_build_result", "验证构建结果", "Build in progress is visible"],
-  ];
-  const stages: BrowserAgentAcceptanceScenarioView[] = stageDefinitions.map(([id, title, expected]) => ({ id, description: `${title}：${expected}`, expected, actual: "pass", verdict: "passed", action_executed: true, evidence: [], assertions: [{ kind: "required_outcome_validation", passed: true, actual: "pass" }] }));
-  return {
-    ready: true,
-    can_run: true,
-    message: "演示数据：受控业务验收已通过。真实模式会在 Server 临时业务页面上输入项目名、选择模式、提交并验证结果页。",
-    report_path: "artifacts/browser-agent-business-acceptance/latest/acceptance-report.json",
-    report: {
-      schema_version: "cascade.browser_agent_business_acceptance.v1",
-      generated_at: new Date().toISOString(),
-      runtime: "browser-agent-outline-v1",
-      strict_gate: "passed",
-      package_id: "pkg_controlled_business_outline",
-      business_flow: "进入工作台 → 输入项目名 → 选择构建模式 → 提交构建 → 验证构建结果",
-      stages,
-      editor_materialization: { ready: true, created: true, session_id: "editor_controlled_business", message: "待编辑素材已登记，可直接进入视频编辑器。" },
-    },
-  };
-}
-
-function stageKindFromAction(action: string): string {
-  if (action === "fill" || action === "upload") return "business_input";
-  if (action === "select") return "mode_selection";
-  if (action === "wait") return "observe_progress";
-  if (action === "assert" || action === "inspect") return "final_observe";
-  return "business_action";
-}
-
-function routeStateFromStep(step: ScriptStep, route: string): string {
-  const value = `${route} ${step.title ?? ""} ${step.expected_outcome ?? ""}`.toLowerCase();
-  if (value.includes("login") || value.includes("sign-in") || value.includes("登录")) return "unauthenticated";
-  if (value.includes("create") || value.includes("new") || value.includes("创建")) return "creation_flow";
-  if (value.includes("build") || value.includes("generating") || value.includes("生成中")) return "build_running";
-  if (value.includes("project") || value.includes("detail") || value.includes("项目")) return "project_detail";
-  return "workspace";
 }
 
 function mockHash(value: string): string {

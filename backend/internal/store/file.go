@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"cascade-demoops/backend/internal/orchestrator"
 )
@@ -82,6 +84,85 @@ func (s *FileStateStore) Load(ctx context.Context, projectID string) (*orchestra
 		return nil, err
 	}
 	return &state, nil
+}
+
+func (s *FileStateStore) List(ctx context.Context) ([]*orchestrator.CascadeState, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.root == "" || s.root == "." {
+		return nil, errors.New("state root is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := os.ReadDir(s.root)
+	if errors.Is(err, os.ErrNotExist) {
+		return []*orchestrator.CascadeState{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	states := make([]*orchestrator.CascadeState, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(s.root, entry.Name()))
+		if readErr != nil {
+			return nil, readErr
+		}
+		var state orchestrator.CascadeState
+		if unmarshalErr := json.Unmarshal(data, &state); unmarshalErr != nil {
+			log.Printf("state_store skipping malformed project state file=%s error=%v", entry.Name(), unmarshalErr)
+			continue
+		}
+		if state.ProjectID == "" {
+			log.Printf("state_store skipping project state without project ID file=%s", entry.Name())
+			continue
+		}
+		states = append(states, &state)
+	}
+	return states, nil
+}
+
+func (s *FileStateStore) Archive(ctx context.Context, projectID string, archivedAt time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	state, err := s.Load(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	state.ArchivedAt = &archivedAt
+	if state.ProjectContext != nil {
+		state.ProjectContext.UpdatedAt = archivedAt
+	}
+	return s.Save(ctx, state)
+}
+
+func (s *FileStateStore) Delete(ctx context.Context, projectID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.root == "" || s.root == "." {
+		return errors.New("state root is required")
+	}
+	if projectID == "" {
+		return errors.New("project ID is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := s.statePath(projectID)
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("state not found")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *FileStateStore) statePath(projectID string) string {

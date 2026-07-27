@@ -2,11 +2,11 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,50 +94,6 @@ func TestDevHTTPBridgeReadsLocalRepoSummary(t *testing.T) {
 	}
 	if strings.Contains(string(payload), "function submitPayment") {
 		t.Fatalf("response leaked full source: %s", payload)
-	}
-}
-
-func TestDevHTTPBridgeReadsGitHubRepoURLAsParallelCodeSource(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git executable is required for git repository bridge test")
-	}
-	server := newTestDevHTTPServer(t)
-	gitRepoPath := createDevBridgeFixtureRepo(t)
-	initGitFixtureRepo(t, gitRepoPath)
-	localRepoPath := createDevBridgeFixtureRepo(t)
-	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
-		Mode:               model.AppModeDesktop,
-		ProductURL:         "https://app.example.com",
-		GitRepoURL:         "file://" + filepath.ToSlash(gitRepoPath),
-		LocalRepoPath:      localRepoPath,
-		ProductDescription: "展示团队邀请流程",
-		TargetAudience:     "中国运营团队",
-		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	state := postExecutionPackage(t, server, body)
-
-	if len(state.CodeSnapshots) < 2 {
-		t.Fatalf("expected local and GitHub code snapshots, got %+v", state.CodeSnapshots)
-	}
-	if state.ProjectContext.GitRepoURL == "" || state.ProjectContext.LocalRepoPath == "" {
-		t.Fatalf("project context should preserve parallel repo inputs: %+v", state.ProjectContext)
-	}
-	var gitSnapshot *model.CodeUnderstandingSnapshot
-	for i := range state.CodeSnapshots {
-		if strings.HasPrefix(state.CodeSnapshots[i].URI, "file://") {
-			gitSnapshot = &state.CodeSnapshots[i]
-			break
-		}
-	}
-	if gitSnapshot == nil || gitSnapshot.FileCount == 0 || gitSnapshot.CommitSHA == "" {
-		t.Fatalf("expected GitHub-style repo URL snapshot to be cloned and scanned: %+v", state.CodeSnapshots)
-	}
-	if !containsString(gitSnapshot.Frameworks, "react") || len(gitSnapshot.Selectors) == 0 {
-		t.Fatalf("expected GitHub-style snapshot to include repo structure evidence: %+v", gitSnapshot)
 	}
 }
 
@@ -362,6 +318,76 @@ func TestDevHTTPBridgeInvalidLocalRepoPathDegradesWithoutFailing(t *testing.T) {
 	}
 }
 
+func TestDevHTTPBridgeArchivesAndDeletesProjects(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	if err := server.service.states.Save(context.Background(), &orchestrator.CascadeState{
+		ProjectID:   "project_archive",
+		CurrentNode: orchestrator.NodeInputCtx,
+		Status:      orchestrator.FlowStatusCreated,
+		ProjectContext: &model.ProjectContext{
+			ID:         "project_archive",
+			Name:       "Archive me",
+			ProductURL: "https://archive.example.com",
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.service.states.Save(context.Background(), &orchestrator.CascadeState{
+		ProjectID:   "project_delete",
+		CurrentNode: orchestrator.NodeInputCtx,
+		Status:      orchestrator.FlowStatusCreated,
+		ProjectContext: &model.ProjectContext{
+			ID:         "project_delete",
+			Name:       "Delete me",
+			ProductURL: "https://delete.example.com",
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	archiveRequest := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/project_archive/archive", nil)
+	archiveResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(archiveResponse, archiveRequest)
+	if archiveResponse.Code != http.StatusOK {
+		t.Fatalf("archive status %d: %s", archiveResponse.Code, archiveResponse.Body.String())
+	}
+
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/v1/desktop/projects/project_delete", nil)
+	deleteResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusOK {
+		t.Fatalf("delete status %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	if _, err := server.service.LoadProject(context.Background(), "project_delete"); err == nil {
+		t.Fatal("expected deleted project to be unavailable")
+	}
+
+	listRequest := httptest.NewRequest(http.MethodGet, "/v1/desktop/projects", nil)
+	listResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(listResponse, listRequest)
+	var bridge BridgeResponse
+	if err := json.Unmarshal(listResponse.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if !bridge.OK {
+		t.Fatalf("list failed: %s", bridge.Error)
+	}
+	var summaries []ProjectSummary
+	if err := json.Unmarshal(bridge.Data, &summaries); err != nil {
+		t.Fatal(err)
+	}
+	for _, summary := range summaries {
+		if summary.ID == "project_archive" || summary.ID == "project_delete" {
+			t.Fatalf("archived/deleted project should be hidden from list: %+v", summaries)
+		}
+	}
+}
+
 func TestPrepareProductRunDoesNotRequireCloudExchange(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(CloudLifecycleRequest{UserInput: &orchestrator.UserInput{
@@ -565,45 +591,6 @@ func TestDevHTTPBridgeRuntimeHealthIsRedacted(t *testing.T) {
 	if !strings.Contains(payload, "ark_media_mode") {
 		t.Fatalf("runtime health missing ark media mode: %s", payload)
 	}
-	if !strings.Contains(payload, "app_capabilities") {
-		t.Fatalf("runtime health missing app capabilities: %s", payload)
-	}
-	if !strings.Contains(payload, `"server_recording_required":true`) || !strings.Contains(payload, `"local_recording_execution":false`) {
-		t.Fatalf("runtime health must declare server-side recording boundary: %s", payload)
-	}
-}
-
-func TestDesktopProfileDoesNotExposeDevExchangeRunRoutes(t *testing.T) {
-	t.Setenv(devExchangeHTTPEnv, "1")
-	t.Setenv(devExchangeTokenEnv, "desktop-test-token")
-	root := t.TempDir()
-	service, err := NewService(config.AppRuntimeConfig{
-		Profile:         config.ProfileDesktop,
-		Environment:     "test",
-		Mode:            model.AppModeDesktop,
-		DatabaseDialect: config.DatabaseSQLite,
-		SQLitePath:      filepath.Join(root, "cascade_demoops.db"),
-		DataRoot:        root,
-		ArtifactRoot:    filepath.Join(root, "artifacts"),
-		CacheRoot:       filepath.Join(root, "cache"),
-		LogRoot:         filepath.Join(root, "logs"),
-		ResourceRoot:    root,
-		DevRepoRoot:     root,
-		SidecarPaths:    map[string]string{},
-	}, store.NewMemoryStateStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := NewDevHTTPServer(service)
-	request := httptest.NewRequest(http.MethodPost, "/v1/dev/execution-packages/xpkg_local/run?org_id=org_test", nil)
-	request.Header.Set("Authorization", "Bearer desktop-test-token")
-	response := httptest.NewRecorder()
-
-	server.Handler().ServeHTTP(response, request)
-
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("desktop profile must not expose local dev recording run route, got status %d body=%s", response.Code, response.Body.String())
-	}
 }
 
 func TestDevHTTPBridgeModelDiagnosticsAreRedacted(t *testing.T) {
@@ -768,26 +755,6 @@ export function InvitePanel() {
 		t.Fatal(err)
 	}
 	return root
-}
-
-func initGitFixtureRepo(t *testing.T, root string) {
-	t.Helper()
-	runGitFixtureCommand(t, root, "init")
-	runGitFixtureCommand(t, root, "config", "user.email", "cascade-test@example.com")
-	runGitFixtureCommand(t, root, "config", "user.name", "Cascade Test")
-	runGitFixtureCommand(t, root, "add", ".")
-	runGitFixtureCommand(t, root, "commit", "-m", "fixture")
-}
-
-func runGitFixtureCommand(t *testing.T, root string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
-	}
 }
 
 func containsString(values []string, target string) bool {
