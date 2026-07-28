@@ -85,7 +85,10 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/update/apply", s.handleDesktopUpdateApply)
 	mux.HandleFunc("GET /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
+	mux.HandleFunc("GET /v1/desktop/projects", s.handleListProjects)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
+	mux.HandleFunc("POST /v1/desktop/assistant/sessions", s.handleCreateAssistantSession)
+	mux.HandleFunc("/v1/desktop/assistant/sessions/", s.handleAssistantSessionRoute)
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
 	mux.HandleFunc("GET /v1/desktop/browser-agent-acceptance", s.handleBrowserAgentAcceptance)
 	mux.HandleFunc("POST /v1/desktop/browser-agent-acceptance/run", s.handleBrowserAgentAcceptance)
@@ -353,6 +356,11 @@ func (s *DevHTTPServer) handleCreateProject(w http.ResponseWriter, r *http.Reque
 	writeBridgeValue(w, state, err)
 }
 
+func (s *DevHTTPServer) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.service.ListProjects(r.Context())
+	writeBridgeValue(w, projects, err)
+}
+
 func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Request) {
 	projectID, suffix, ok := splitProjectRoute(r.URL.Path)
 	if !ok {
@@ -363,6 +371,12 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "":
 		state, err := s.service.LoadProject(r.Context(), projectID)
 		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodPost && suffix == "/archive":
+		err := s.service.ArchiveProject(r.Context(), projectID)
+		writeBridgeValue(w, map[string]bool{"archived": err == nil}, err)
+	case r.Method == http.MethodDelete && suffix == "":
+		err := s.service.DeleteProject(r.Context(), projectID)
+		writeBridgeValue(w, map[string]bool{"deleted": err == nil}, err)
 	case r.Method == http.MethodPost && suffix == "/inputs":
 		var inputs model.ProjectInputBundle
 		if err := decodeJSON(r, &inputs); err != nil {
