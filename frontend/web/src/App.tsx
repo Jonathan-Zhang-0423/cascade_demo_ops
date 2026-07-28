@@ -8,6 +8,9 @@ import type {
 	ModelDiagnosticResult,
 	NavSection,
 	ProjectWorkspaceView,
+	ProjectSummaryView,
+	ProjectWorkstationView,
+	AssistantSessionView,
 	RuntimeHealthView,
 	RuntimeLogEntry,
 	ScenarioID,
@@ -16,6 +19,7 @@ import type {
 import { createWorkspace, initialChecklist } from "./mockWorkspace";
 import { scenarioTemplates } from "./scenarios";
 import { VideoEditor } from "./VideoEditor";
+import { AssistantConversationPanel } from "./AssistantWidget";
 import {
   canUploadExecutionPackage,
   lifecycleStagesFromWorkspace,
@@ -64,6 +68,11 @@ export function App() {
   const [packagePreflightError, setPackagePreflightError] = useState("");
   const [isRunningPackagePreflight, setIsRunningPackagePreflight] = useState(false);
   const [isCheckingEditorMaterialization, setIsCheckingEditorMaterialization] = useState(false);
+  const [projectSummaries, setProjectSummaries] = useState<ProjectSummaryView[]>([]);
+  const [projectsError, setProjectsError] = useState("");
+  const [selectedProjectID, setSelectedProjectID] = useState<string>();
+  const [workstation, setWorkstation] = useState<ProjectWorkstationView>("overview");
+  const [assistantSession, setAssistantSession] = useState<AssistantSessionView>();
 
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
   const blockedReasons = packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections);
@@ -81,6 +90,29 @@ export function App() {
       mounted = false;
     };
   }, [bridge]);
+
+  useEffect(() => { void refreshProjects(); }, [bridge]);
+
+  async function refreshProjects() {
+    const result = await bridge.listProjectSummaries();
+    if (result.ok && result.data) { setProjectSummaries(result.data); setProjectsError(""); }
+    else setProjectsError(result.error ?? "项目列表不可用");
+  }
+
+  async function openProject(projectID: string) {
+    const result = await bridge.loadProject(projectID);
+    if (!result.ok || !result.data) { setProjectsError(result.error ?? "项目加载失败"); return; }
+    setWorkspace(result.data);
+    setSelectedProjectID(projectID);
+    setActiveNav("project_library");
+    setWorkstation("overview");
+  }
+
+  function applyAssistantSession(session: AssistantSessionView) {
+    setAssistantSession(session);
+    const projectID = session.configuration.analysisProjectID;
+    if (projectID && projectID !== selectedProjectID) { void openProject(projectID); void refreshProjects(); }
+  }
 
   useEffect(() => {
     let mounted = true;
@@ -530,11 +562,44 @@ export function App() {
 	}
   }
 
+  if (activeNav === "projects") {
+    return <AgentHome
+      bridge={bridge}
+      projects={projectSummaries}
+      error={projectsError}
+      onOpenProjects={() => setActiveNav("project_library")}
+      onOpenProject={(id) => void openProject(id)}
+      onSessionChange={applyAssistantSession}
+    />;
+  }
+
+  if (activeNav === "project_library" && !selectedProjectID) {
+    return <ProjectLibrary projects={projectSummaries} error={projectsError} onHome={() => setActiveNav("projects")} onOpen={(id) => void openProject(id)} onArchive={async (id) => { await bridge.archiveProject(id); await refreshProjects(); }} onDelete={async (id) => { await bridge.deleteProject(id); await refreshProjects(); }} />;
+  }
+
+  if (activeNav !== "settings") {
+    return <div className="project-agent-layout">
+      <aside className="project-agent-chat">
+        <header className="project-agent-chat-header"><button type="button" className="project-agent-back" onClick={() => { setSelectedProjectID(undefined); setActiveNav("project_library"); }}>← 返回项目库</button><div className="project-agent-identity"><span className="project-agent-mark"><img src="/Logo_simple_white.png" alt="" /></span><div><strong>{workspace.name}</strong><small>{assistantSession?.workstationStatus ?? "Cascade Agent 工作台"}</small></div></div></header>
+        <AssistantConversationPanel bridge={bridge} context={{ surface: "projects", scopeKey: selectedProjectID ?? workspace.id, projectID: selectedProjectID ?? workspace.id, projectName: workspace.name }} onSessionChange={applyAssistantSession} onWorkstationChange={setWorkstation} />
+      </aside>
+      <main className="project-agent-workstation">
+        <WorkstationNav active={workstation} onChange={setWorkstation} developerUI={runtimeHealth?.appCapabilities?.developerUI === true} onSettings={() => setActiveNav("settings")} />
+        <section className="project-agent-workstation-content">
+          {workstation === "overview" ? <ConfigurationSummary {...(assistantSession ? { session: assistantSession } : {})} workspace={workspace} /> : null}
+          {workstation === "evidence" ? <UnderstandingStagePanel workspace={workspace} /> : null}
+          {workstation === "plan" ? <PlanReviewPanel workspace={workspace} selectedNodeID={selectedNode?.id ?? ""} onSelectNode={setSelectedNodeID} onPatchNode={patchNode} /> : null}
+          {workstation === "approval" || workstation === "execution" || workstation === "repair" ? <PackageApproval workspace={workspace} checklist={checklist} blockedReasons={blockedReasons} canUpload={canUpload} isLocalMode={bridge.mode === "local"} onChecklistChange={setChecklist} onUpload={runProductLifecycle} onCloudSuccess={simulateCloudSuccess} onCloudFailure={simulateCloudFailure} onRepairScript={repairFailedScript} browserAgentAcceptance={browserAgentAcceptance} isRunningBrowserAgentAcceptance={isRunningBrowserAgentAcceptance} browserAgentAcceptanceError={browserAgentAcceptanceError} onRunBrowserAgentAcceptance={runBrowserAgentAcceptance} browserAgentBusinessAcceptance={browserAgentBusinessAcceptance} isRunningBrowserAgentBusinessAcceptance={isRunningBrowserAgentBusinessAcceptance} browserAgentBusinessAcceptanceError={browserAgentBusinessAcceptanceError} onRunBrowserAgentBusinessAcceptance={runBrowserAgentBusinessAcceptance} packagePreflight={packagePreflight} packagePreflightError={packagePreflightError} isRunningPackagePreflight={isRunningPackagePreflight} onRunPackagePreflight={runPackagePreflight} onRefreshEditorMaterialization={refreshEditorMaterialization} isCheckingEditorMaterialization={isCheckingEditorMaterialization} onOpenEditor={() => setWorkstation("editor")} developerUI={runtimeHealth?.appCapabilities?.developerUI === true} /> : null}
+          {workstation === "assets" ? <AssetReview workspace={workspace} onDownload={downloadAssets} onReview={reviewAssets} /> : null}
+          {workstation === "editor" ? <VideoEditor /> : null}
+        </section>
+      </main>
+    </div>;
+  }
+
   return (
-    <div className={activeNav === "editor" ? "app-shell editor-route" : "app-shell"}>
-      {activeNav === "editor" ? <button type="button" className="editor-navigation-toggle" aria-label={editorNavigationOpen ? "收起工作台导航" : "展开工作台导航"} aria-expanded={editorNavigationOpen} onClick={() => setEditorNavigationOpen((current) => !current)}>☰</button> : null}
-      {activeNav === "editor" && editorNavigationOpen ? <button type="button" className="editor-navigation-scrim" aria-label="关闭导航菜单" onClick={() => setEditorNavigationOpen(false)} /> : null}
-      <aside className={activeNav === "editor" ? `sidebar editor-navigation-drawer ${editorNavigationOpen ? "open" : ""}` : "sidebar"} aria-label="主导航">
+    <div className="app-shell">
+      <aside className="sidebar" aria-label="设置导航">
         <div className="brand-block">
           <div className="brand-mark">C</div>
           <div>
@@ -542,22 +607,9 @@ export function App() {
             <span>DemoOps</span>
           </div>
         </div>
-        {activeNav === "editor" ? <button type="button" className="editor-navigation-close" aria-label="关闭导航菜单" title="关闭导航菜单" onClick={() => setEditorNavigationOpen(false)}>×</button> : null}
         <nav className="nav-list">
-          {navItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={activeNav === item.id ? "nav-item active" : "nav-item"}
-              onClick={() => {
-                setActiveNav(item.id);
-                setEditorNavigationOpen(false);
-              }}
-            >
-              <span>{item.label}</span>
-              {item.badge ? <small>{item.badge}</small> : null}
-            </button>
-          ))}
+          <button type="button" className="nav-item" onClick={() => setActiveNav("project_library")}>返回项目</button>
+          <button type="button" className="nav-item active">设置</button>
         </nav>
         <div className="runtime-strip">
           <span className="status-dot ok" />
@@ -566,65 +618,9 @@ export function App() {
         </div>
       </aside>
 
-      <main className={activeNav === "editor" ? "workspace editor-workspace-mode" : "workspace"}>
-        {activeNav !== "editor" ? <DesktopStatusBar workspace={workspace} {...(runtimeHealth ? { runtimeHealth } : {})} /> : null}
-        {activeNav !== "editor" ? <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage || isRunningProduct} onBuildPackage={runProductLifecycle} /> : null}
-        <div className={activeNav === "editor" ? "workspace-grid editor-wide" : "workspace-grid"}>
-          <section className={activeNav === "editor" ? "main-panel editor-main-panel" : "main-panel"} aria-label="项目工作台">
-            {activeNav === "new_demo" ? <ScenarioPicker activeID={workspace.scenarioID} onCreate={createScenario} /> : null}
-            {activeNav === "projects" ? (
-              <ProjectFlow
-                workspace={workspace}
-                demoCredentials={demoCredentials}
-                githubToken={githubToken}
-                githubCredentialConfigured={githubCredentialConfigured}
-                githubCredentialBusy={githubCredentialBusy}
-                githubCredentialMessage={githubCredentialMessage}
-                selectedNodeID={selectedNode?.id ?? ""}
-                onSelectNode={setSelectedNodeID}
-                onPatchNode={patchNode}
-                onStageChange={(stage) => patchWorkspace({ stage })}
-                onDemoCredentialsChange={setDemoCredentials}
-                onGitHubTokenChange={setGitHubToken}
-                onStoreGitHubCredential={storeGitHubCredential}
-                onDeleteGitHubCredential={deleteGitHubCredential}
-                onWorkspaceChange={setWorkspace}
-				onDownloadAssets={downloadAssets}
-				onReviewAssets={reviewAssets}
-              />
-            ) : null}
-            {activeNav === "execution_packages" ? (
-              <PackageApproval
-                workspace={workspace}
-                checklist={checklist}
-                blockedReasons={blockedReasons}
-                canUpload={canUpload}
-                isLocalMode={bridge.mode === "local"}
-                onChecklistChange={setChecklist}
-                onUpload={runProductLifecycle}
-                onCloudSuccess={simulateCloudSuccess}
-                onCloudFailure={simulateCloudFailure}
-                onRepairScript={repairFailedScript}
-                browserAgentAcceptance={browserAgentAcceptance}
-                isRunningBrowserAgentAcceptance={isRunningBrowserAgentAcceptance}
-                browserAgentAcceptanceError={browserAgentAcceptanceError}
-                onRunBrowserAgentAcceptance={runBrowserAgentAcceptance}
-                browserAgentBusinessAcceptance={browserAgentBusinessAcceptance}
-                isRunningBrowserAgentBusinessAcceptance={isRunningBrowserAgentBusinessAcceptance}
-                browserAgentBusinessAcceptanceError={browserAgentBusinessAcceptanceError}
-                onRunBrowserAgentBusinessAcceptance={runBrowserAgentBusinessAcceptance}
-                packagePreflight={packagePreflight}
-                packagePreflightError={packagePreflightError}
-                isRunningPackagePreflight={isRunningPackagePreflight}
-                onRunPackagePreflight={runPackagePreflight}
-                onRefreshEditorMaterialization={refreshEditorMaterialization}
-                isCheckingEditorMaterialization={isCheckingEditorMaterialization}
-                onOpenEditor={openEditorForResult}
-              />
-            ) : null}
-			{activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={downloadAssets} onReview={reviewAssets} /> : null}
-            {activeNav === "editor" ? <VideoEditor /> : null}
-            {activeNav === "settings" ? (
+      <main className="workspace">
+        <DesktopStatusBar workspace={workspace} {...(runtimeHealth ? { runtimeHealth } : {})} />
+        <div className="workspace-grid editor-wide"><section className="main-panel" aria-label="设置">
               <SettingsPanel
                 workspace={workspace}
                 diagnostics={modelDiagnostics}
@@ -638,9 +634,7 @@ export function App() {
                 {...(desktopUpdate ? { desktopUpdate } : {})}
                 {...(runtimeHealth ? { runtimeHealth } : {})}
               />
-            ) : null}
           </section>
-          {activeNav !== "editor" ? <Inspector workspace={workspace} selectedNode={selectedNode} blockedReasons={blockedReasons} /> : null}
         </div>
       </main>
     </div>
@@ -679,6 +673,25 @@ function StatusChip({ label, value, tone }: { label: string; value: string; tone
       <strong>{value}</strong>
     </span>
   );
+}
+
+function AgentHome({ bridge, projects, error, onOpenProjects, onOpenProject, onSessionChange }: { bridge: ReturnType<typeof createBridgeClient>; projects: ProjectSummaryView[]; error: string; onOpenProjects: () => void; onOpenProject: (id: string) => void; onSessionChange: (session: AssistantSessionView) => void }) {
+  return <div className="jonathan-shell"><header className="jonathan-topbar"><img src="/Logo_simple_white.png" alt="Cascade" /><nav><button type="button" onClick={onOpenProjects}>项目</button><span>DemoOps</span></nav></header><main className="agent-home"><section className="agent-hero"><span className="agent-orb"><img src="/Cascade_launcher_mark.png" alt="" /></span><p>Cascade Agent</p><h1>让产品自己讲清楚。</h1><span>描述客户价值，其余 configuration 由 Agent 和你共同完成。</span></section><div className="agent-home-conversation"><AssistantConversationPanel bridge={bridge} context={{ surface: "projects", scopeKey: "agent-home" }} onSessionChange={onSessionChange} /></div><section className="recent-projects"><div><h2>最近项目</h2><button type="button" onClick={onOpenProjects}>查看全部</button></div>{error ? <p className="assistant-error">{error}</p> : null}<div className="recent-project-grid">{projects.slice(0, 3).map((project) => <button type="button" key={project.id} onClick={() => onOpenProject(project.id)}><strong>{project.name}</strong><span>{project.productURL || "待配置产品 URL"}</span><small>{projectStatusLabels[project.status]}</small></button>)}{projects.length === 0 ? <div className="empty-project-card">还没有项目。先从对话中说明你的演示目标。</div> : null}</div></section></main></div>;
+}
+
+function ProjectLibrary({ projects, error, onHome, onOpen, onArchive, onDelete }: { projects: ProjectSummaryView[]; error: string; onHome: () => void; onOpen: (id: string) => void; onArchive: (id: string) => void; onDelete: (id: string) => void }) {
+  return <div className="jonathan-shell"><header className="jonathan-topbar"><button type="button" onClick={onHome} className="logo-button"><img src="/Logo_simple_white.png" alt="Cascade" /></button><nav><strong>Projects</strong><button type="button" onClick={onHome}>新建演示</button></nav></header><main className="project-library-page"><div className="project-library-heading"><div><span>Demo workspace</span><h1>项目</h1><p>每个项目都由 Cascade Agent 持续维护 configuration、证据、执行和成品审核。</p></div><button type="button" className="primary-action" onClick={onHome}>+ 新建项目</button></div>{error ? <div className="assistant-error">{error}</div> : null}<div className="project-library-grid">{projects.map((project) => <article key={project.id} className="project-card"><button type="button" className="project-card-main" onClick={() => onOpen(project.id)}><span className="project-card-mark">C</span><strong>{project.name}</strong><small>{project.productURL || "产品 URL 待配置"}</small><div><span>{workflowStageLabels[project.stage]}</span><span>{project.generatedAssetCount} 个成品</span></div></button><footer><button type="button" onClick={() => onArchive(project.id)}>归档</button><button type="button" onClick={() => { if (window.confirm(`删除“${project.name}”？`)) onDelete(project.id); }}>删除</button></footer></article>)}</div></main></div>;
+}
+
+function WorkstationNav({ active, onChange, developerUI, onSettings }: { active: ProjectWorkstationView; onChange: (view: ProjectWorkstationView) => void; developerUI: boolean; onSettings: () => void }) {
+  const items: Array<[ProjectWorkstationView, string]> = [["overview", "Configuration"], ["evidence", "分析与证据"], ["plan", "演示方案"], ["approval", "上传审批"], ["execution", "执行进度"], ["repair", "修复"], ["assets", "成品审核"], ["editor", "编辑器"]];
+  return <header className="workstation-nav"><img src="/Logo_full_black.png" alt="Cascade" /><nav>{items.map(([id, label]) => <button type="button" key={id} className={active === id ? "active" : ""} onClick={() => onChange(id)}>{label}</button>)}</nav><button type="button" onClick={onSettings}>{developerUI ? "开发设置" : "设置"}</button></header>;
+}
+
+function ConfigurationSummary({ session, workspace }: { session?: AssistantSessionView; workspace: ProjectWorkspaceView }) {
+  const draft = session?.configuration;
+  const sources = draft?.sources ?? [];
+  return <div className="configuration-workstation"><section className="configuration-hero"><span>Project configuration</span><h1>{draft?.projectName || workspace.name}</h1><p>{draft?.objective || "继续与 Cascade Agent 对话，补全客户价值和录制目标。"}</p><div className={`readiness-badge ${draft?.readiness === "ready" ? "ready" : "incomplete"}`}>{draft?.confirmed ? "已确认并启动本地分析" : draft?.readiness === "ready" ? "可确认" : "信息待补全"}</div></section><div className="configuration-grid"><Fact label="产品 URL" value={draft?.productURL || "待补充"} /><Fact label="目标受众" value={draft?.targetAudience || "待补充"} /><Fact label="目标时长" value={`${draft?.targetDurationSec ?? 60} 秒`} /><Fact label="品牌语气" value={draft?.brandTone || "待补充"} /><Fact label="允许域名" value={draft?.allowedDomains?.join("、") || "根据产品 URL 生成"} /><Fact label="版本 / Hash" value={`v${draft?.version ?? 1} · ${draft?.hash?.slice(0, 22) ?? "待生成"}`} /></div><section className="configuration-sources"><SectionTitle title="安全来源引用" meta={`${sources.length} 项`} /><div>{sources.map((source) => <span key={source.ref}><strong>{source.label}</strong><small>{source.kind} · {source.ref}</small></span>)}{sources.length === 0 ? <p>通过 Agent action card 选择本地目录、连接 GitHub 或添加文档。路径和凭据不会进入聊天。</p> : null}</div></section>{draft?.missingFields?.length ? <section className="configuration-missing"><strong>仍需补全</strong><div>{draft.missingFields.map((field) => <span key={field}>{field}</span>)}</div></section> : null}<section className="configuration-gate"><strong>两道人审保持独立</strong><p>确认 configuration 只会启动本地分析；三合一执行包仍需在“上传审批”中再次确认后才能发送到执行服务器。</p></section></div>;
 }
 
 function appendRuntimeLog(workspace: ProjectWorkspaceView, entry: Omit<RuntimeLogEntry, "id" | "time">): ProjectWorkspaceView {
@@ -1534,6 +1547,7 @@ function PackageApproval({
   onRefreshEditorMaterialization,
   isCheckingEditorMaterialization,
   onOpenEditor,
+  developerUI = false,
 }: {
   workspace: ProjectWorkspaceView;
   checklist: ApprovalChecklistState;
@@ -1560,6 +1574,7 @@ function PackageApproval({
   onRefreshEditorMaterialization: () => void;
   isCheckingEditorMaterialization: boolean;
   onOpenEditor: () => void;
+  developerUI?: boolean;
 }) {
   function toggle(key: keyof ApprovalChecklistState) {
     onChecklistChange({ ...checklist, [key]: !checklist[key] });
@@ -1604,25 +1619,25 @@ function PackageApproval({
         </div>
       </div>
       <RuntimeLogPanel workspace={workspace} />
-      <RealPackagePreflightPanel
+      {developerUI ? <RealPackagePreflightPanel
         preflight={packagePreflight}
         error={packagePreflightError}
         isRunning={isRunningPackagePreflight}
         canRun={Boolean(bundle)}
         onRun={onRunPackagePreflight}
-      />
-      <BrowserAgentAcceptancePanel
+      /> : null}
+      {developerUI ? <BrowserAgentAcceptancePanel
         acceptance={browserAgentAcceptance}
         isRunning={isRunningBrowserAgentAcceptance}
         error={browserAgentAcceptanceError}
         onRun={onRunBrowserAgentAcceptance}
-      />
-      <BrowserAgentBusinessAcceptancePanel
+      /> : null}
+      {developerUI ? <BrowserAgentBusinessAcceptancePanel
         acceptance={browserAgentBusinessAcceptance}
         isRunning={isRunningBrowserAgentBusinessAcceptance}
         error={browserAgentBusinessAcceptanceError}
         onRun={onRunBrowserAgentBusinessAcceptance}
-      />
+      /> : null}
       <CloudRunPanel workspace={workspace} />
       <EditorHandoffPanel
         workspace={workspace}
@@ -1630,8 +1645,8 @@ function PackageApproval({
         onRefresh={onRefreshEditorMaterialization}
         onOpenEditor={onOpenEditor}
       />
-      <SandboxPolicyPanel workspace={workspace} />
-      <ScriptBundleReview workspace={workspace} />
+      {developerUI ? <SandboxPolicyPanel workspace={workspace} /> : null}
+      {developerUI ? <ScriptBundleReview workspace={workspace} /> : null}
       {workspace.cloudRun.failureDiagnostic ? (
         <FailureDiagnosticPanel workspace={workspace} onRepairScript={onRepairScript} />
       ) : null}
@@ -2181,7 +2196,7 @@ function SettingsPanel({
           <small>{desktopUpdateMessage || (desktopUpdate?.configured ? "清单签名、SHA-256 与 Authenticode 验证通过后才允许安装。" : "正式包需配置 DemoOps 专属 HTTPS 更新清单和 Ed25519 公钥。")}</small>
         </div>
       </section>
-      <section className="table-section">
+      {capabilities?.developerUI ? <section className="table-section">
         <SectionTitle title="模型供应商凭据" meta="仅显示占位状态" />
         <table>
           <thead>
@@ -2212,8 +2227,8 @@ function SettingsPanel({
             })}
           </tbody>
         </table>
-      </section>
-      <section className="table-section">
+      </section> : null}
+      {capabilities?.developerUI ? <section className="table-section">
         <SectionTitle title="默认模型路由" meta="可通过环境变量覆盖" />
         <table>
           <thead>
@@ -2233,8 +2248,8 @@ function SettingsPanel({
             ))}
           </tbody>
         </table>
-      </section>
-      <section className="table-section">
+      </section> : null}
+      {capabilities?.developerUI ? <section className="table-section">
         <SectionTitle title="真实模型诊断" meta="只返回脱敏状态" />
         <div className="action-row">
           <button type="button" className="secondary-action" onClick={onRunDiagnostics} disabled={isRunningDiagnostics}>
@@ -2277,7 +2292,7 @@ function SettingsPanel({
             ) : null}
           </tbody>
         </table>
-      </section>
+      </section> : null}
     </div>
   );
 }

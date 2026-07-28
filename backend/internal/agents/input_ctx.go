@@ -41,6 +41,10 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 	requirementDocuments := redactRequirementDocuments(input.RequirementDocuments)
 
 	now := time.Now().UTC()
+	targetDurationSec := input.TargetDurationSec
+	if targetDurationSec <= 0 {
+		targetDurationSec = 60
+	}
 	projectID := fmt.Sprintf("proj_%d", time.Now().UnixNano())
 	audience := model.AudienceProfile{
 		ID:            "audience_primary",
@@ -76,7 +80,7 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 					UseCase:         useCase,
 					AudienceID:      audience.ID,
 					Objective:       productDescription,
-					DurationSeconds: 60,
+					DurationSeconds: targetDurationSec,
 					Priority:        1,
 					MustShow:        mustShow,
 					MustAvoid:       append([]string{}, mustNotShow...),
@@ -103,6 +107,7 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 			SessionIsolation:        true,
 			AutoExpireCredentials:   true,
 			DefaultCredentialTTLSec: int((24 * time.Hour).Seconds()),
+			AllowedDomains:          append([]string{}, input.AllowedDomains...),
 			AllowedCommands:         input.SSHAllowedCommands,
 			AllowedPaths:            input.SSHAllowedPaths,
 			AuditLogRequired:        true,

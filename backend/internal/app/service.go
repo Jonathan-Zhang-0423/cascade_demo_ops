@@ -6,8 +6,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"cascade-demoops/backend/internal/agents"
 	"cascade-demoops/backend/internal/config"
@@ -21,19 +23,23 @@ import (
 )
 
 type Service struct {
-	runtime       config.AppRuntimeConfig
-	llm           *llm.Router
-	flow          *orchestrator.CascadeFlow
-	states        store.StateStore
-	layout        storage.LocalLayout
-	exchange      *ExchangeIntakeService
-	runningMu     sync.Mutex
-	runningTasks  map[string]context.CancelFunc
-	editorMu      sync.Mutex
-	editorWorker  editorWorker
-	editorJobsMu  sync.Mutex
-	editorJobs    map[string]editorRenderTask
-	outlineRunner BrowserAgentOutlineRunner
+	runtime        config.AppRuntimeConfig
+	llm            *llm.Router
+	flow           *orchestrator.CascadeFlow
+	states         store.StateStore
+	assistantStore store.AssistantStore
+	assistantMu    sync.Mutex
+	layout         storage.LocalLayout
+	exchange       *ExchangeIntakeService
+	runningMu      sync.Mutex
+	runningTasks   map[string]context.CancelFunc
+	editorMu       sync.Mutex
+	editorWorker   editorWorker
+	editorJobsMu   sync.Mutex
+	editorJobs     map[string]editorRenderTask
+	outlineRunner  BrowserAgentOutlineRunner
+	sourceRefsMu   sync.RWMutex
+	sourceRefs     map[string]LocalSourceRef
 }
 
 type editorRenderTask struct {
@@ -78,20 +84,30 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		return nil, err
 	}
 	service := &Service{
-		runtime:       runtime,
-		llm:           llmRouter,
-		flow:          flow,
-		states:        states,
-		layout:        storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
-		exchange:      newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
-		runningTasks:  map[string]context.CancelFunc{},
-		editorJobs:    map[string]editorRenderTask{},
-		outlineRunner: nil,
+		runtime:        runtime,
+		llm:            llmRouter,
+		flow:           flow,
+		states:         states,
+		assistantStore: assistantStoreForRuntime(runtime),
+		layout:         storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
+		exchange:       newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
+		runningTasks:   map[string]context.CancelFunc{},
+		editorJobs:     map[string]editorRenderTask{},
+		outlineRunner:  nil,
+		sourceRefs:     map[string]LocalSourceRef{},
 	}
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
 	service.exchange.SetInlinePayloadAllowed(runtime.Profile != config.ProfileCloud)
 	service.outlineRunner = localBrowserAgentOutlineRunner{service: service}
+	service.loadLocalSourceRefs()
 	return service, nil
+}
+
+func assistantStoreForRuntime(runtime config.AppRuntimeConfig) store.AssistantStore {
+	if strings.TrimSpace(runtime.DataRoot) == "" {
+		return store.NewMemoryAssistantStore()
+	}
+	return store.NewFileAssistantStore(filepath.Join(runtime.DataRoot, "assistant_sessions"))
 }
 
 func (s *Service) videoWorkerEnvironment() map[string]string {
@@ -133,6 +149,104 @@ func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInpu
 
 func (s *Service) LoadProject(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
 	return s.states.Load(ctx, projectID)
+}
+
+type ProjectSummary struct {
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	ProductURL          string    `json:"product_url,omitempty"`
+	Stage               string    `json:"stage"`
+	Status              string    `json:"status"`
+	AssetCount          int       `json:"asset_count"`
+	GeneratedAssetCount int       `json:"generated_asset_count"`
+	CreatedAt           time.Time `json:"created_at,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+}
+
+func (s *Service) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
+	states, err := s.states.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ProjectSummary, 0, len(states))
+	for _, state := range states {
+		if state == nil || state.ProjectID == "" || state.ArchivedAt != nil {
+			continue
+		}
+		result = append(result, projectSummaryFromState(state))
+	}
+	sort.SliceStable(result, func(i, j int) bool { return result[i].UpdatedAt.After(result[j].UpdatedAt) })
+	return result, nil
+}
+
+func (s *Service) ArchiveProject(ctx context.Context, projectID string) error {
+	return s.states.Archive(ctx, projectID, time.Now().UTC())
+}
+
+func (s *Service) DeleteProject(ctx context.Context, projectID string) error {
+	return s.states.Delete(ctx, projectID)
+}
+
+func projectSummaryFromState(state *orchestrator.CascadeState) ProjectSummary {
+	summary := ProjectSummary{ID: state.ProjectID, Name: "未命名演示", Stage: projectStageFromState(state), Status: projectStatusFromState(state)}
+	if state.ProjectContext != nil {
+		if state.ProjectContext.Name != "" {
+			summary.Name = state.ProjectContext.Name
+		}
+		summary.ProductURL = state.ProjectContext.ProductURL
+		summary.CreatedAt = state.ProjectContext.CreatedAt
+		summary.UpdatedAt = state.ProjectContext.UpdatedAt
+	}
+	if summary.UpdatedAt.IsZero() {
+		summary.UpdatedAt = summary.CreatedAt
+	}
+	if state.Artifacts != nil {
+		if state.Artifacts.VideoPath != "" {
+			summary.AssetCount++
+			summary.GeneratedAssetCount++
+		}
+		if state.Artifacts.StepByStepDocsPath != "" {
+			summary.AssetCount++
+			summary.GeneratedAssetCount++
+		}
+		summary.AssetCount += len(state.Artifacts.ScreenshotPaths)
+		summary.GeneratedAssetCount += len(state.Artifacts.ScreenshotPaths)
+	}
+	return summary
+}
+
+func projectStageFromState(state *orchestrator.CascadeState) string {
+	switch state.CurrentNode {
+	case orchestrator.NodeInputCtx:
+		return "setup"
+	case orchestrator.NodeRequirementRead, orchestrator.NodeCodeRead, orchestrator.NodePageRead, orchestrator.NodeProjectIntelligence, orchestrator.NodeMultimodalUnderstand, orchestrator.NodeProductExplore, orchestrator.NodePageInteractionVerify:
+		return "understanding"
+	case orchestrator.NodeGraphGenerate:
+		return "plan_review"
+	case orchestrator.NodeScriptPackage, orchestrator.NodeHumanApprove:
+		return "package_approval"
+	case orchestrator.NodeExecuteRehearse:
+		return "cloud_run"
+	case orchestrator.NodeAssetGenerate:
+		return "result_review"
+	default:
+		return "inputs"
+	}
+}
+
+func projectStatusFromState(state *orchestrator.CascadeState) string {
+	switch state.Status {
+	case orchestrator.FlowStatusAwaitingHuman:
+		return "awaiting_approval"
+	case orchestrator.FlowStatusRunning:
+		return "cloud_running"
+	case orchestrator.FlowStatusCompleted:
+		return "asset_ready"
+	case orchestrator.FlowStatusFailed:
+		return "script_repair_required"
+	default:
+		return "draft"
+	}
 }
 
 func (s *Service) GenerateExecutionPackage(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
@@ -271,12 +385,16 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 		GitRepoURL:         project.GitRepoURL,
 		LocalRepoPath:      project.LocalRepoPath,
 		ProductDescription: project.ProductDescription,
+		TargetDurationSec:  projectTargetDuration(project),
 		TargetAudience:     project.TargetAudience,
 		BrandTone:          project.BrandTone,
 		MustShow:           append([]string{}, project.MustShow...),
 		MustNotShow:        append([]string{}, project.MustNotShow...),
 		ForbiddenPages:     append([]string{}, project.ForbiddenPages...),
 		ForbiddenData:      append([]string{}, project.ForbiddenData...),
+	}
+	if project.AccessPolicy != nil {
+		input.AllowedDomains = append([]string{}, project.AccessPolicy.AllowedDomains...)
 	}
 	if project.Inputs != nil {
 		input.Code = append([]model.CodeInput{}, project.Inputs.Code...)
@@ -300,6 +418,13 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 		}
 	}
 	return input
+}
+
+func projectTargetDuration(project *model.ProjectContext) int {
+	if project != nil && project.Inputs != nil && len(project.Inputs.Scenarios) > 0 {
+		return project.Inputs.Scenarios[0].DurationSeconds
+	}
+	return 60
 }
 
 func (s *Service) InitExecutionPackage(ctx context.Context, request model.ExecutionPackageInitRequest) (model.ExecutionPackageInitResponse, error) {

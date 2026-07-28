@@ -66,6 +66,7 @@ type CascadeState struct {
 	RehearsePassRate         float64                                `json:"rehearse_pass_rate"`
 	Artifacts                *GeneratedArtifacts                    `json:"artifacts,omitempty"`
 	ErrorMessage             string                                 `json:"error_message,omitempty"`
+	ArchivedAt               *time.Time                             `json:"archived_at,omitempty"`
 }
 
 type GeneratedArtifacts struct {
@@ -80,6 +81,7 @@ type UserInput struct {
 	GitRepoURL             string                           `json:"git_repo_url,omitempty"`
 	LocalRepoPath          string                           `json:"local_repo_path,omitempty"`
 	ProductDescription     string                           `json:"product_description,omitempty"`
+	TargetDurationSec      int                              `json:"target_duration_sec,omitempty"`
 	Code                   []model.CodeInput                `json:"code,omitempty"`
 	RequirementDocuments   []model.RequirementDocumentInput `json:"requirement_documents,omitempty"`
 	WebpageScreenshots     []model.WebpageScreenshotInput   `json:"webpage_screenshots,omitempty"`
@@ -89,6 +91,7 @@ type UserInput struct {
 	MustNotShow            []string                         `json:"must_not_show,omitempty"`
 	ForbiddenPages         []string                         `json:"forbidden_pages,omitempty"`
 	ForbiddenData          []string                         `json:"forbidden_data,omitempty"`
+	AllowedDomains         []string                         `json:"allowed_domains,omitempty"`
 	DemoUsername           string                           `json:"demo_username,omitempty"`
 	DemoPassword           string                           `json:"demo_password,omitempty"`
 	SSHHost                string                           `json:"ssh_host,omitempty"`

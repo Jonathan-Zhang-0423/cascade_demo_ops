@@ -3,6 +3,11 @@ import type {
   ExecutionPackageUploadInitView,
   ExecutionPackageUploadView,
   ModelDiagnosticResult,
+  AssistantContextView,
+  AssistantEventView,
+  AssistantSessionView,
+  ConfigurationSourceRefView,
+  ProjectSummaryView,
   ProjectWorkspaceView,
   RuntimeHealthView,
   RuntimeLogEntry,
@@ -60,7 +65,22 @@ export type DesktopBridgeClient = {
   executionEvents(projectID: string, afterID?: string): Promise<BridgeResult<RuntimeLogEntry[]>>;
   createProject(scenarioID: ScenarioID): Promise<BridgeResult<ProjectWorkspaceView>>;
   listProjects(): Promise<BridgeResult<ProjectWorkspaceView[]>>;
+
+  listProjectSummaries(): Promise<BridgeResult<ProjectSummaryView[]>>;
   loadProject(projectID: string): Promise<BridgeResult<ProjectWorkspaceView>>;
+  archiveProject(projectID: string): Promise<BridgeResult<{ archived: boolean }>>;
+  deleteProject(projectID: string): Promise<BridgeResult<{ deleted: boolean }>>;
+  createAssistantSession(context: AssistantContextView): Promise<BridgeResult<AssistantSessionView>>;
+  getAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
+  submitAssistantTurn(sessionID: string, message: string, idempotencyKey?: string, safeSelections?: { selectedSources?: ConfigurationSourceRefView[]; credentialRefs?: string[] }): Promise<BridgeResult<AssistantSessionView>>;
+  listAssistantEvents(sessionID: string, afterID?: string): Promise<BridgeResult<AssistantEventView[]>>;
+  confirmAssistantProposal(sessionID: string, proposalID: string, baseVersion: number, idempotencyKey: string): Promise<BridgeResult<AssistantSessionView>>;
+  dismissAssistantProposal(sessionID: string, proposalID: string, baseVersion: number, idempotencyKey: string): Promise<BridgeResult<AssistantSessionView>>;
+  cancelAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
+  selectLocalProjectDirectory(): Promise<BridgeResult<ConfigurationSourceRefView>>;
+  selectRequirementDocuments(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
+  selectBrandAssets(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
+  storeDemoCredential(ref: string, username: string, password: string): Promise<BridgeResult<{ secretRef: string; configured: boolean }>>;
   saveWorkspace(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   getUnderstandingReport(projectID: string): Promise<BridgeResult<MultimodalUnderstandingReport>>;
   getExecutionScriptDocument(projectID: string): Promise<BridgeResult<ExecutionScriptDocument>>;
@@ -248,6 +268,7 @@ type LocalRuntimeHealth = {
     dev_plaintext?: boolean;
   };
   app_capabilities?: {
+    developer_ui?: boolean;
     demo_asset_generation_console?: boolean;
     video_editor?: boolean;
     local_package_generation?: boolean;
@@ -575,6 +596,52 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     },
     async listProjects() {
       return ok([...projects.values()]);
+    },
+    async listProjectSummaries() {
+      const result = await requestLocal<Array<{ id: string; name: string; product_url?: string; stage: ProjectSummaryView["stage"]; status: ProjectSummaryView["status"]; asset_count: number; generated_asset_count: number; created_at?: string; updated_at?: string }>>(baseURL, "/v1/desktop/projects");
+      if (!result.ok || !result.data) return { ok: false, error: result.error ?? "项目列表不可用" };
+      return ok(result.data.map((item) => ({ id: item.id, name: item.name, productURL: item.product_url ?? "", stage: item.stage, status: item.status, assetCount: item.asset_count, generatedAssetCount: item.generated_asset_count, ...(item.created_at ? { createdAt: item.created_at } : {}), ...(item.updated_at ? { updatedAt: item.updated_at } : {}) })));
+    },
+    async archiveProject(projectID) {
+      return requestLocal<{ archived: boolean }>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/archive`, { method: "POST" });
+    },
+    async deleteProject(projectID) {
+      projects.delete(projectID);
+      return requestLocal<{ deleted: boolean }>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}`, { method: "DELETE" });
+    },
+    async createAssistantSession(context) {
+      return requestLocal<AssistantSessionView>(baseURL, "/v1/desktop/assistant/sessions", { method: "POST", body: JSON.stringify({ context }) });
+    },
+    async getAssistantSession(sessionID) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}`);
+    },
+    async submitAssistantTurn(sessionID, message, idempotencyKey, safeSelections) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/turns`, { method: "POST", body: JSON.stringify({ message, idempotencyKey, ...safeSelections }) });
+    },
+    async listAssistantEvents(sessionID, afterID) {
+      const query = afterID ? `?after=${encodeURIComponent(afterID)}` : "";
+      return requestLocal<AssistantEventView[]>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/events${query}`);
+    },
+    async confirmAssistantProposal(sessionID, proposalID, baseVersion, idempotencyKey) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/confirm`, { method: "POST", body: JSON.stringify({ baseVersion, idempotencyKey }) });
+    },
+    async dismissAssistantProposal(sessionID, proposalID, baseVersion, idempotencyKey) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/dismiss`, { method: "POST", body: JSON.stringify({ baseVersion, idempotencyKey }) });
+    },
+    async cancelAssistantSession(sessionID) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/cancel`, { method: "POST" });
+    },
+    async selectLocalProjectDirectory() {
+      return callWailsBridge<ConfigurationSourceRefView>("SelectLocalProjectDirectory");
+    },
+    async selectRequirementDocuments() {
+      return callWailsBridge<ConfigurationSourceRefView[]>("SelectRequirementDocuments");
+    },
+    async selectBrandAssets() {
+      return callWailsBridge<ConfigurationSourceRefView[]>("SelectBrandAssets");
+    },
+    async storeDemoCredential(ref, username, password) {
+      return callWailsBridge<{ secretRef: string; configured: boolean }>("StoreDemoCredential", ref, username, password);
     },
     async loadProject(projectID) {
       const cached = projects.get(projectID);
@@ -1032,6 +1099,22 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async listProjects() {
       return ok([...projects.values()]);
     },
+    async listProjectSummaries() {
+      return ok([...projects.values()].map((project) => ({ id: project.id, name: project.name, productURL: project.productURL, stage: project.stage, status: project.status, assetCount: project.assets.length, generatedAssetCount: project.assets.length })));
+    },
+    async archiveProject(projectID) { projects.delete(projectID); return ok({ archived: true }); },
+    async deleteProject(projectID) { projects.delete(projectID); return ok({ deleted: true }); },
+    async createAssistantSession(context) { return ok(mockAssistantSession(context)); },
+    async getAssistantSession() { return { ok: false, error: "Mock Assistant session is not persisted" }; },
+    async submitAssistantTurn(_sessionID, message) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" }, message)); },
+    async listAssistantEvents() { return ok([]); },
+    async confirmAssistantProposal(_sessionID, _proposalID, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
+    async dismissAssistantProposal(_sessionID, _proposalID, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
+    async cancelAssistantSession() { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
+    async selectLocalProjectDirectory() { return ok({ ref: "source_mock_local", kind: "local_repository", label: "sample-project" }); },
+    async selectRequirementDocuments() { return ok([{ ref: "source_mock_requirement", kind: "requirement_document", label: "requirements.md" }]); },
+    async selectBrandAssets() { return ok([{ ref: "source_mock_brand", kind: "brand_asset", label: "brand.png" }]); },
+    async storeDemoCredential(ref) { return ok({ secretRef: `credential://demo/${ref}`, configured: true }); },
     async loadProject(projectID) {
       const project = projects.get(projectID);
       return project ? ok(project) : { ok: false, error: "未找到项目" };
@@ -1294,6 +1377,32 @@ async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit
     console.error("[Cascade Dev Bridge] unavailable", init?.method ?? "GET", path, error);
     return { ok: false, error: userFacingBridgeError(error instanceof Error ? error.message : "本地 Dev Bridge 不可用") };
   }
+}
+
+type WailsDesktopBridge = Record<string, (...args: unknown[]) => Promise<BridgeResult<unknown>> | BridgeResult<unknown>>;
+
+async function callWailsBridge<T>(method: string, ...args: unknown[]): Promise<BridgeResult<T>> {
+  const bridge = (window as unknown as { go?: { app?: { DesktopBridge?: WailsDesktopBridge } } }).go?.app?.DesktopBridge;
+  const fn = bridge?.[method];
+  if (!fn) return { ok: false, error: "此操作需要 Wails 桌面应用" };
+  try {
+    return await fn(...args) as BridgeResult<T>;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function mockAssistantSession(context: AssistantContextView, message = ""): AssistantSessionView {
+  const configuration = {
+    projectName: "示例项目", productURL: "https://example.com", objective: message || "展示核心产品价值",
+    targetAudience: "潜在客户", targetDurationSec: 60, sources: [{ ref: "source_mock_local", kind: "local_repository", label: "sample-project" }],
+    version: 1, hash: "sha256:mock", readiness: "ready" as const, confirmed: false,
+  };
+  return {
+    id: `assistant_${context.scopeKey}`, context, status: "waiting_for_user", activeWorkstation: "overview",
+    workstationTitle: "项目配置", workstationStatus: "等待确认", configuration,
+    messages: [{ id: "welcome", role: "agent", kind: "answer", text: message ? "我已整理为 configuration 提案。" : "描述你想制作的产品演示，我会先整理 configuration。", createdAt: new Date().toISOString() }],
+  };
 }
 
 function formatLocalBridgeError(errorInfo: LocalBridgeErrorInfo | undefined, fallback: string): string {
@@ -2558,6 +2667,7 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
   }
   if (local.app_capabilities) {
     health.appCapabilities = {
+      developerUI: Boolean(local.app_capabilities.developer_ui),
       demoAssetGenerationConsole: Boolean(local.app_capabilities.demo_asset_generation_console),
       videoEditor: Boolean(local.app_capabilities.video_editor),
       localPackageGeneration: Boolean(local.app_capabilities.local_package_generation),

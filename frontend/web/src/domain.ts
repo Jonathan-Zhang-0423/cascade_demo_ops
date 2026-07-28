@@ -28,7 +28,49 @@ export type WorkspaceStage =
   | "script_repair"
   | "result_review";
 
-export type NavSection = "projects" | "new_demo" | "execution_packages" | "assets" | "editor" | "settings";
+export type NavSection = "projects" | "project_library" | "repositories" | "new_demo" | "execution_packages" | "assets" | "editor" | "settings";
+
+export type ProjectWorkstationView = "overview" | "evidence" | "plan" | "approval" | "execution" | "repair" | "assets" | "editor";
+export type AssistantSurface = "projects" | "repositories";
+
+export type ConfigurationSourceRefView = {
+  ref: string;
+  kind: "local_repository" | "github_repository" | "requirement_document" | "brand_asset" | string;
+  label: string;
+  url?: string;
+};
+
+export type ProjectConfigurationDraftView = {
+  projectName?: string;
+  productURL?: string;
+  sources?: ConfigurationSourceRefView[];
+  objective?: string;
+  targetAudience?: string;
+  targetDurationSec?: number;
+  mustShow?: string[];
+  mustNotShow?: string[];
+  forbiddenPages?: string[];
+  forbiddenData?: string[];
+  brandTone?: string;
+  credentialRefs?: string[];
+  allowedDomains?: string[];
+  version: number;
+  hash: string;
+  readiness: "incomplete" | "ready";
+  missingFields?: string[];
+  confirmed: boolean;
+  confirmedAt?: string;
+  analysisProjectID?: string;
+};
+
+export type ProjectConfigurationPatchView = Partial<Omit<ProjectConfigurationDraftView, "version" | "hash" | "readiness" | "missingFields" | "confirmed" | "confirmedAt" | "analysisProjectID">>;
+export type AssistantContextView = { surface: AssistantSurface; scopeKey: string; projectID?: string; projectName?: string; repositoryID?: string; repositoryLabel?: string };
+export type AssistantProposalKind = "configuration_patch" | "select_local_project" | "connect_github" | "attach_requirement_document" | "attach_brand_asset" | "store_demo_credential" | "confirm_configuration" | "start_local_analysis" | "open_workstation";
+export type AssistantProposalView = { id: string; kind: AssistantProposalKind; title: string; description: string; targetWorkstation?: ProjectWorkstationView; patch?: ProjectConfigurationPatchView; baseVersion: number; idempotencyKey: string; requiresConfirmation: boolean; status: "available" | "confirmed" | "dismissed"; executionResult?: Record<string, unknown> };
+export type AssistantMessageView = { id: string; role: "agent" | "user" | "system"; kind: "answer" | "proposal" | "status" | "error"; text: string; createdAt: string; targetWorkstation?: ProjectWorkstationView; proposals?: AssistantProposalView[] };
+export type AssistantEventView = { id: string; sessionID: string; type: string; text: string; createdAt: string };
+export type AssistantSessionView = { id: string; context: AssistantContextView; status: "idle" | "thinking" | "waiting_for_user" | "awaiting_confirmation" | "error"; activeWorkstation?: ProjectWorkstationView; workstationTitle?: string; workstationStatus?: string; configuration: ProjectConfigurationDraftView; messages: AssistantMessageView[]; lastEventID?: string };
+export type ProjectSummaryView = { id: string; name: string; productURL: string; stage: WorkspaceStage; status: ProjectWorkspaceView["status"]; assetCount: number; generatedAssetCount: number; createdAt?: string; updatedAt?: string };
 
 export type ScenarioTemplate = {
   id: ScenarioID;
@@ -235,6 +277,7 @@ export type RuntimeHealthView = {
 };
 
 export type AppCapabilitiesStatus = {
+  developerUI: boolean;
   demoAssetGenerationConsole: boolean;
   videoEditor: boolean;
   localPackageGeneration: boolean;
