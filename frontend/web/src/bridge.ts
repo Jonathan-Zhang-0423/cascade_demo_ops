@@ -44,6 +44,12 @@ export type BridgeResult<T> = {
 export type DesktopBridgeClient = {
   mode: "mock" | "local";
   runtimeHealth(): Promise<BridgeResult<RuntimeHealthView>>;
+  githubCredentialStatus(): Promise<BridgeResult<GitHubCredentialStatus>>;
+  storeGitHubToken(token: string): Promise<BridgeResult<GitHubCredentialStatus>>;
+  deleteGitHubToken(): Promise<BridgeResult<GitHubCredentialStatus>>;
+  desktopUpdateStatus(): Promise<BridgeResult<DesktopUpdateStatus>>;
+  checkDesktopUpdate(): Promise<BridgeResult<DesktopUpdateStatus>>;
+  applyDesktopUpdate(): Promise<BridgeResult<{ started: boolean }>>;
   modelDiagnostics(): Promise<BridgeResult<ModelDiagnosticResult[]>>;
   executionEvents(projectID: string, afterID?: string): Promise<BridgeResult<RuntimeLogEntry[]>>;
   createProject(scenarioID: ScenarioID): Promise<BridgeResult<ProjectWorkspaceView>>;
@@ -65,7 +71,7 @@ export type DesktopBridgeClient = {
   simulateCloudFailure(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   repairFailedScript(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   ackResultPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
-  acknowledgeResult(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  reviewResult(workspace: ProjectWorkspaceView, decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string): Promise<BridgeResult<ProjectWorkspaceView>>;
 };
 
 export type BridgeRunOptions = {
@@ -73,6 +79,35 @@ export type BridgeRunOptions = {
     username?: string;
     password?: string;
   };
+  onCloudStatus?: (workspace: ProjectWorkspaceView) => void;
+};
+
+export type GitHubCredentialStatus = {
+  configured: boolean;
+};
+
+export type DesktopUpdateStatus = {
+  configured: boolean;
+  currentVersion?: string;
+  availableVersion?: string;
+  channel?: string;
+  releaseNotes?: string;
+  artifactFileName?: string;
+  sizeBytes?: number;
+  updateAvailable: boolean;
+  installReady: boolean;
+};
+
+type LocalDesktopUpdateStatus = {
+  configured: boolean;
+  current_version?: string;
+  available_version?: string;
+  channel?: string;
+  release_notes?: string;
+  artifact_file_name?: string;
+  size_bytes?: number;
+  update_available: boolean;
+  install_ready: boolean;
 };
 
 type LocalBridgeResponse<T> = {
@@ -95,6 +130,20 @@ type LocalBridgeErrorDetail = {
   reason?: string;
   message: string;
   hint?: string;
+};
+
+type LocalResultReviewRecord = {
+	review_id: string;
+	decision: "approved" | "reedit_requested" | "rerecord_requested";
+	summary?: string;
+	reviewed_at: string;
+};
+
+type LocalResultRevisionRecord = {
+	revision_id: string;
+	resolved_action: "reedit" | "rerecord";
+	status: string;
+	requested_at: string;
 };
 
 type LocalRuntimeHealth = {
@@ -251,6 +300,7 @@ type LocalExecutionPackageStatusResponse = {
 };
 
 type LocalExecutionStageEvent = {
+  event_id?: string;
   stage: string;
   status?: string;
   message?: string;
@@ -304,6 +354,15 @@ type LocalResultPackageAckResponse = {
   result_package_id: string;
   status: string;
   delivery_status?: string;
+};
+
+type LocalCloudDeliverableDownloadResult = {
+	artifact_id: string;
+	local_path: string;
+	size_bytes?: number;
+	sha256: string;
+	expected_sha256?: string;
+	checksum_verified: boolean;
 };
 
 type LocalExecutionEvent = {
@@ -379,6 +438,30 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         return { ok: false, error: result.error ?? "本地运行时状态不可用" };
       }
       return ok(runtimeHealthFromLocal(result.data));
+    },
+    async githubCredentialStatus() {
+      return requestLocal<GitHubCredentialStatus>(baseURL, "/v1/desktop/github-credential");
+    },
+    async storeGitHubToken(token) {
+      if (!token.trim()) {
+        return { ok: false, error: "请输入 GitHub fine-grained token" };
+      }
+      return requestLocal<GitHubCredentialStatus>(baseURL, "/v1/desktop/github-credential", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      });
+    },
+    async deleteGitHubToken() {
+      return requestLocal<GitHubCredentialStatus>(baseURL, "/v1/desktop/github-credential", { method: "DELETE" });
+    },
+    async desktopUpdateStatus() {
+      return mapDesktopUpdateResult(await requestLocal<LocalDesktopUpdateStatus>(baseURL, "/v1/desktop/update"));
+    },
+    async checkDesktopUpdate() {
+      return mapDesktopUpdateResult(await requestLocal<LocalDesktopUpdateStatus>(baseURL, "/v1/desktop/update/check", { method: "POST" }));
+    },
+    async applyDesktopUpdate() {
+      return requestLocal<{ started: boolean }>(baseURL, "/v1/desktop/update/apply", { method: "POST" });
     },
     async modelDiagnostics() {
       const result = await requestLocal<LocalModelDiagnostic[]>(baseURL, "/v1/desktop/model-diagnostics", { method: "POST" });
@@ -490,6 +573,21 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(current.id, current);
 
       const deadline = Date.now() + 900_000;
+      const streamed = await streamCloudExecutionStatus(baseURL, current, orgID, deadline, (next) => {
+        projects.set(next.id, next);
+        options?.onCloudStatus?.(next);
+      });
+      if (streamed) {
+        current = streamed;
+        projects.set(current.id, current);
+      }
+      if (isTerminalCloudRun(current.cloudRun.status)) {
+        const finalized = await this.pollExecutionPackageStatus(current);
+        if (finalized.ok && finalized.data) {
+          current = finalized.data;
+          options?.onCloudStatus?.(current);
+        }
+      }
       while (!isTerminalCloudRun(current.cloudRun.status) && Date.now() < deadline) {
         const polled = await this.pollExecutionPackageStatus(current);
         if (!polled.ok || !polled.data) {
@@ -498,6 +596,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
           return ok(failed);
         }
         current = polled.data;
+        options?.onCloudStatus?.(current);
         if (!isTerminalCloudRun(current.cloudRun.status)) {
           await delay(1000);
         }
@@ -506,12 +605,6 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", "服务器录制状态轮询超时", undefined);
         projects.set(failed.id, failed);
         return ok(failed);
-      }
-      if (current.cloudRun.status === "succeeded" && current.cloudRun.resultPackageID) {
-        const acked = await this.ackResultPackage(current);
-        if (acked.ok && acked.data) {
-          current = acked.data;
-        }
       }
       projects.set(current.id, current);
       return ok(current);
@@ -615,11 +708,33 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return ok(localFutureWorkspace(workspace, "脚本修复将在失败诊断接入后启用。"));
     },
     async ackResultPackage(workspace) {
-      const resultPackageID = workspace.cloudRun.resultPackageID ?? workspace.cloudRun.resultPackage?.result_id;
+	  const resultPackageID = workspace.cloudRun.resultPackageID;
       if (!resultPackageID) {
-        return { ok: false, error: "缺少 result package id，无法确认结果包" };
+		return { ok: false, error: "缺少 result package id，无法下载结果包" };
       }
-      const receivedAssetIDs = workspace.cloudRun.resultPackage?.delivery?.asset_refs?.map((artifact) => artifact.id).filter(Boolean) ?? [];
+	  const deliverables = workspace.cloudRun.resultPackage?.delivery?.asset_refs ?? [];
+	  if (deliverables.length === 0) {
+		return { ok: false, error: "结果包没有可下载的成品 artifact" };
+	  }
+	  const receivedAssetIDs: string[] = [];
+	  for (const deliverable of deliverables) {
+		const download = await requestLocal<LocalCloudDeliverableDownloadResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/deliverable/download`, {
+		  method: "POST",
+		  body: JSON.stringify({
+			org_id: orgID,
+			result_package_id: resultPackageID,
+			exchange_package_id: workspace.cloudRun.exchangePackageID,
+			deliverable,
+		  }),
+		});
+		if (!download.ok || !download.data) {
+		  return bridgeFailure(download.error ?? `下载成品 ${deliverable.id} 失败`, download.errorInfo);
+		}
+		if (!download.data.checksum_verified) {
+		  return { ok: false, error: `成品 ${deliverable.id} checksum 校验失败，未发送接收确认` };
+		}
+		receivedAssetIDs.push(deliverable.id);
+	  }
       const result = await requestLocal<LocalResultPackageAckResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/ack`, {
         method: "POST",
         body: JSON.stringify({
@@ -637,14 +752,52 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(next.id, next);
       return ok(next);
     },
-    async acknowledgeResult(workspace) {
-      return this.ackResultPackage(workspace);
-    },
+	async reviewResult(workspace, decision, summary) {
+	  const resultPackageID = workspace.cloudRun.resultPackageID;
+	  if (!resultPackageID) {
+		return { ok: false, error: "缺少 result package id，无法提交人工审核" };
+	  }
+	  const idempotencyKey = `${workspace.id}:${resultPackageID}:${decision}:${Date.now()}`;
+	  const reviewed = await requestLocal<LocalResultReviewRecord>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/review`, {
+		method: "POST",
+		body: JSON.stringify({
+		  org_id: orgID,
+		  result_package_id: resultPackageID,
+		  review: { idempotency_key: idempotencyKey, decision, summary: summary?.trim() || undefined },
+		}),
+	  });
+	  if (!reviewed.ok || !reviewed.data) {
+		return bridgeFailure(reviewed.error ?? "提交人工审核失败", reviewed.errorInfo);
+	  }
+	  let revision: LocalResultRevisionRecord | undefined;
+	  if (decision !== "approved") {
+		const revised = await requestLocal<LocalResultRevisionRecord>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/revision`, {
+		  method: "POST",
+		  body: JSON.stringify({
+			org_id: orgID,
+			result_package_id: resultPackageID,
+			revision: {
+			  idempotency_key: `${idempotencyKey}:revision`,
+			  requested_action: decision === "rerecord_requested" ? "rerecord" : "reedit",
+			  summary: summary?.trim() || undefined,
+			},
+		  }),
+		});
+		if (!revised.ok || !revised.data) {
+		  return bridgeFailure(revised.error ?? "提交返工请求失败", revised.errorInfo);
+		}
+		revision = revised.data;
+	  }
+	  const next = workspaceWithReview(workspace, reviewed.data, revision);
+	  projects.set(next.id, next);
+	  return ok(next);
+	},
   };
 }
 
 export function createMockBridgeClient(): DesktopBridgeClient {
   const projects = new Map<string, ProjectWorkspaceView>();
+  let githubCredentialConfigured = false;
   const initial = createWorkspace("product_demo");
   projects.set(initial.id, initial);
 
@@ -706,19 +859,38 @@ export function createMockBridgeClient(): DesktopBridgeClient {
           },
         },
         cloudExchange: {
-          configured: true,
-          exchangeDiscovered: true,
-          installationPaired: true,
-          sessionValid: true,
-          baseURLHost: "cascadeai.cn",
-          baseURLPath: "/aigc",
-          serverKeyID: "local-dev/server-public-key",
-          installIDSuffix: "mock0001",
-          authMode: "installation_session",
+          configured: false,
+          exchangeDiscovered: false,
+          installationPaired: false,
+          sessionValid: false,
+          authMode: "unpaired",
           environment: "development",
-          devPlaintext: true,
+          devPlaintext: false,
         },
       });
+    },
+    async githubCredentialStatus() {
+      return ok({ configured: githubCredentialConfigured });
+    },
+    async storeGitHubToken(token) {
+      if (!token.trim()) {
+        return { ok: false, error: "请输入 GitHub fine-grained token" };
+      }
+      githubCredentialConfigured = true;
+      return ok({ configured: true });
+    },
+    async deleteGitHubToken() {
+      githubCredentialConfigured = false;
+      return ok({ configured: false });
+    },
+    async desktopUpdateStatus() {
+      return ok(mockDesktopUpdateStatus());
+    },
+    async checkDesktopUpdate() {
+      return ok(mockDesktopUpdateStatus());
+    },
+    async applyDesktopUpdate() {
+      return { ok: false, error: "Mock 模式未配置签名更新源" };
     },
     async modelDiagnostics() {
       return ok([
@@ -932,9 +1104,19 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async ackResultPackage(workspace) {
       return ok(ackWorkspaceAssets(workspace));
     },
-    async acknowledgeResult(workspace) {
-      return ok(ackWorkspaceAssets(workspace));
-    },
+	async reviewResult(workspace, decision, summary) {
+	  return ok(workspaceWithReview(workspace, {
+		review_id: `review_mock_${Date.now()}`,
+		decision,
+		...(summary ? { summary } : {}),
+		reviewed_at: new Date().toISOString(),
+	  }, decision === "approved" ? undefined : {
+		revision_id: `revision_mock_${Date.now()}`,
+		resolved_action: decision === "rerecord_requested" ? "rerecord" : "reedit",
+		status: "queued",
+		requested_at: new Date().toISOString(),
+	  }));
+	},
   };
 }
 
@@ -1473,7 +1655,183 @@ function isTerminalCloudRun(status: ProjectWorkspaceView["cloudRun"]["status"]):
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+}
+
+function mapDesktopUpdateResult(result: BridgeResult<LocalDesktopUpdateStatus>): BridgeResult<DesktopUpdateStatus> {
+  if (!result.ok || !result.data) {
+    return { ok: false, error: result.error ?? "桌面更新状态不可用", ...(result.errorInfo ? { errorInfo: result.errorInfo } : {}) };
+  }
+  const data = result.data;
+  return ok({
+    configured: data.configured,
+    ...(data.current_version ? { currentVersion: data.current_version } : {}),
+    ...(data.available_version ? { availableVersion: data.available_version } : {}),
+    ...(data.channel ? { channel: data.channel } : {}),
+    ...(data.release_notes ? { releaseNotes: data.release_notes } : {}),
+    ...(data.artifact_file_name ? { artifactFileName: data.artifact_file_name } : {}),
+    ...(typeof data.size_bytes === "number" ? { sizeBytes: data.size_bytes } : {}),
+    updateAvailable: data.update_available,
+    installReady: data.install_ready,
+  });
+}
+
+function mockDesktopUpdateStatus(): DesktopUpdateStatus {
+  return { configured: false, channel: "internal", updateAvailable: false, installReady: false };
+}
+
+async function streamCloudExecutionStatus(
+  baseURL: string,
+  workspace: ProjectWorkspaceView,
+  orgID: string,
+  deadline: number,
+  onStatus: (workspace: ProjectWorkspaceView) => void,
+): Promise<ProjectWorkspaceView | undefined> {
+  const packageID = workspace.cloudRun.exchangePackageID;
+  if (!packageID || typeof ReadableStream === "undefined") return undefined;
+  let current = workspace;
+  let lastEventID = readCloudEventCursor(packageID);
+  let consecutiveFailures = 0;
+  let connected = false;
+  const stageHistory: LocalExecutionStageEvent[] = [];
+  while (!isTerminalCloudRun(current.cloudRun.status) && Date.now() < deadline && consecutiveFailures < 3) {
+    const controller = new AbortController();
+    const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(1, deadline - Date.now()));
+    try {
+      const query = `?org_id=${encodeURIComponent(orgID)}&exchange_package_id=${encodeURIComponent(packageID)}`;
+      const response = await fetch(`${baseURL}/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/events${query}`, {
+        signal: controller.signal,
+        headers: {
+          Accept: "text/event-stream",
+          ...(lastEventID ? { "Last-Event-ID": lastEventID } : {}),
+        },
+      });
+      if (!response.ok || !response.body || !String(response.headers?.get?.("Content-Type") ?? "").includes("text/event-stream")) {
+        return undefined;
+      }
+      connected = true;
+      let receivedEvent = false;
+      await consumeSSE(response.body, (event) => {
+        if (event.id) {
+          lastEventID = event.id;
+          writeCloudEventCursor(packageID, event.id);
+        }
+        if (event.type === "stage") {
+          const stage = parseSSEJSON<LocalExecutionStageEvent>(event.data);
+          if (!stage) return;
+          const normalizedStage = event.id && !stage.event_id ? { ...stage, event_id: event.id } : stage;
+          const existingIndex = normalizedStage.event_id ? stageHistory.findIndex((item) => item.event_id === normalizedStage.event_id) : -1;
+          if (existingIndex >= 0) stageHistory[existingIndex] = normalizedStage;
+          else stageHistory.push(normalizedStage);
+          current = workspaceWithCloudStatus(current, statusFromStageEvent(current, packageID, normalizedStage, stageHistory));
+        } else if (event.type === "complete") {
+          const status = parseSSEJSON<LocalExecutionPackageStatusResponse>(event.data);
+          if (!status) return;
+          current = workspaceWithCloudStatus(current, status);
+          clearCloudEventCursor(packageID);
+        } else {
+          return;
+        }
+        receivedEvent = true;
+        onStatus(current);
+      });
+      consecutiveFailures = receivedEvent ? 0 : consecutiveFailures + 1;
+    } catch {
+      if (!connected) return undefined;
+      consecutiveFailures += 1;
+    } finally {
+      globalThis.clearTimeout(timeout);
+    }
+    if (!isTerminalCloudRun(current.cloudRun.status) && consecutiveFailures < 3) await delay(500);
+  }
+  return current === workspace ? undefined : current;
+}
+
+type SSEMessage = { type: string; id: string; data: string };
+
+async function consumeSSE(stream: ReadableStream<Uint8Array>, onEvent: (event: SSEMessage) => void): Promise<void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done }).replaceAll("\r\n", "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const event = parseSSEBlock(block);
+        if (event) onEvent(event);
+        boundary = buffer.indexOf("\n\n");
+      }
+      if (done) break;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseSSEBlock(block: string): SSEMessage | undefined {
+  let type = "message";
+  let id = "";
+  const data: string[] = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) type = line.slice(6).trimStart();
+    else if (line.startsWith("id:")) id = line.slice(3).trimStart();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }
+  return data.length ? { type, id, data: data.join("\n") } : undefined;
+}
+
+function parseSSEJSON<T>(value: string): T | undefined {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function statusFromStageEvent(workspace: ProjectWorkspaceView, packageID: string, event: LocalExecutionStageEvent, history: LocalExecutionStageEvent[]): LocalExecutionPackageStatusResponse {
+  const terminalStatus = ["failed", "canceled", "expired"].includes(event.status ?? "") ? event.status : undefined;
+  return {
+    exchange_package_id: packageID,
+    ...(workspace.cloudRun.cloudJobID ? { cloud_job_id: workspace.cloudRun.cloudJobID } : {}),
+    status: terminalStatus ?? (event.stage === "accepted" ? "accepted" : "running"),
+    stage: event.stage,
+    ...(event.message ? { message: event.message } : {}),
+    ...(typeof event.progress_percent === "number" ? { progress_percent: event.progress_percent } : {}),
+    stage_history: [...history],
+    ...(event.updated_at ? { updated_at: event.updated_at } : {}),
+  };
+}
+
+function cloudEventCursorKey(packageID: string): string {
+  return `demoops.cloud-event-cursor.${packageID}`;
+}
+
+function readCloudEventCursor(packageID: string): string {
+  try {
+    return globalThis.sessionStorage?.getItem(cloudEventCursorKey(packageID)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeCloudEventCursor(packageID: string, eventID: string): void {
+  try {
+    globalThis.sessionStorage?.setItem(cloudEventCursorKey(packageID), eventID);
+  } catch {
+    // Streaming still works when WebView storage is unavailable.
+  }
+}
+
+function clearCloudEventCursor(packageID: string): void {
+  try {
+    globalThis.sessionStorage?.removeItem(cloudEventCursorKey(packageID));
+  } catch {
+    // Nothing else is required for an unavailable storage backend.
+  }
 }
 
 function mapCloudRunStatus(status: string | undefined): "not_uploaded" | "queued" | "running" | "succeeded" | "failed" {
@@ -1520,11 +1878,11 @@ function lifecycleStageIDFromCloudStage(stage: string | undefined, status?: stri
 	// stage may fall back to the final result card.
   if (stage === "completed" || (!stage && status === "completed")) return "result_returned";
   if (stage === "accepted") return "package_uploaded";
-  if (stage === "validated" || stage === "validating") return "script_validation";
+  if (stage === "validated" || stage === "validating" || stage === "browser_agent_planning" || stage === "script_ready") return "script_validation";
   if (stage === "preparing_worker") return "sandbox_preparing";
   if (stage === "validating_pre_execution") return "script_validation";
-  if (stage === "running_script" || stage === "running_browser_agent" || stage === "validating_runtime_stage") return "browser_execution";
-	if (stage === "packaging_recording" || stage === "rendering" || stage === "validating_post_execution") return "video_rendering";
+  if (stage === "running_script" || stage === "running_browser_agent" || stage === "validating_runtime_stage" || stage === "recording") return "browser_execution";
+	if (stage === "packaging_recording" || stage === "material_validation" || stage === "directing" || stage === "rendering" || stage === "quality_validation" || stage === "validating_post_execution") return "video_rendering";
   if (stage === "failed") return "browser_execution";
   return "server_intake";
 }
@@ -1815,7 +2173,7 @@ function mockSandboxPolicy(workspace: ProjectWorkspaceView): SandboxPolicy {
     network_policy: {
       mode: "allowed_domains_only",
       allowed_domains: workspace.planReview.allowedDomains,
-      allowed_cascade_endpoints: ["kms.cascadeai.cn", "artifact.cascadeai.cn", "vault.cascadeai.cn"],
+      allowed_cascade_endpoints: [],
       denied_cidrs: ["169.254.169.254/32", "127.0.0.0/8", "10.0.0.0/8"],
       proxy_required: true,
       dns_policy: "policy_proxy",
@@ -1975,12 +2333,33 @@ function mockSuccessfulRecordingResultPackage(workspace: ProjectWorkspaceView): 
 function ackWorkspaceAssets(workspace: ProjectWorkspaceView): ProjectWorkspaceView {
   return {
     ...workspace,
-    assets: workspace.assets.map((asset) => ({ ...asset, status: "approved" })),
+	assets: workspace.assets,
     cloudRun: {
       ...workspace.cloudRun,
-      message: "App 已校验 checksum 并确认接收结果包。",
+		message: "App 已下载全部成品、校验 checksum 并确认接收结果包。",
     },
   };
+}
+
+function workspaceWithReview(workspace: ProjectWorkspaceView, review: LocalResultReviewRecord, revision?: LocalResultRevisionRecord): ProjectWorkspaceView {
+	const approved = review.decision === "approved";
+	return {
+	  ...workspace,
+	  status: approved ? "asset_ready" : workspace.status,
+	  assets: workspace.assets.map((asset) => ({ ...asset, status: approved ? "approved" : "changes_requested" })),
+	  cloudRun: {
+		...workspace.cloudRun,
+		message: approved ? "用户已人工批准成品。" : revision?.resolved_action === "rerecord" ? "已提交重新录制请求。" : "已提交重新剪辑请求。",
+		resultReview: {
+		  decision: review.decision,
+		  reviewID: review.review_id,
+		  ...(revision?.revision_id ? { revisionID: revision.revision_id } : {}),
+		  ...(revision?.resolved_action ? { revisionAction: revision.resolved_action } : {}),
+		  ...(review.summary ? { summary: review.summary } : {}),
+		  updatedAt: review.reviewed_at,
+		},
+	  },
+	};
 }
 
 function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {

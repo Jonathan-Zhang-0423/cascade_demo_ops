@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 )
@@ -22,6 +23,7 @@ import (
 type CodeReaderAgent struct {
 	MaxFiles           int
 	MaxFileBytes       int64
+	CacheRoot          string
 	Budget             model.CodeReadBudget
 	InvestigationTools *ProjectInvestigationToolSuite
 	llm                llm.Client
@@ -43,9 +45,13 @@ func NewCodeReaderAgent() *CodeReaderAgent {
 	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, Budget: budget, InvestigationTools: NewProjectInvestigationToolSuite(nil)}
 }
 
-func NewCodeReaderAgentWithLLM(client llm.Client) *CodeReaderAgent {
+func NewCodeReaderAgentWithLLM(client llm.Client, cacheRoots ...string) *CodeReaderAgent {
 	budget := defaultCodeReadBudget()
-	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, Budget: budget, InvestigationTools: NewProjectInvestigationToolSuite(client), llm: client}
+	cacheRoot := ""
+	if len(cacheRoots) > 0 {
+		cacheRoot = strings.TrimSpace(cacheRoots[0])
+	}
+	return &CodeReaderAgent{MaxFiles: budget.TotalFileLimit, MaxFileBytes: budget.MaxFileBytes, CacheRoot: cacheRoot, Budget: budget, InvestigationTools: NewProjectInvestigationToolSuite(client), llm: client}
 }
 
 func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) ([]model.CodeUnderstandingSnapshot, error) {
@@ -162,7 +168,7 @@ func (o *codeReaderLLMOutput) UnmarshalJSON(data []byte) error {
 }
 
 func (a *CodeReaderAgent) scanGitRepository(ctx context.Context, input model.CodeInput, snapshot *model.CodeUnderstandingSnapshot, project *model.ProjectContext, brief *model.RequirementBrief) error {
-	localPath, repoMeta, err := prepareReadOnlyGitRepositorySnapshot(ctx, input.URI, input.Branch, input.CommitSHA)
+	localPath, repoMeta, err := prepareReadOnlyGitRepositorySnapshot(ctx, a.CacheRoot, input.URI, input.Branch, input.CommitSHA)
 	if err != nil {
 		return err
 	}
@@ -195,7 +201,7 @@ func isGitRepositoryInput(input model.CodeInput) bool {
 	return strings.Contains(kind, "git") || strings.Contains(kind, "repository") || isSupportedGitRepositoryURL(uri)
 }
 
-func prepareReadOnlyGitRepositorySnapshot(ctx context.Context, rawURL string, branch string, commitSHA string) (string, gitRepositorySnapshotMetadata, error) {
+func prepareReadOnlyGitRepositorySnapshot(ctx context.Context, cacheRoot string, rawURL string, branch string, commitSHA string) (string, gitRepositorySnapshotMetadata, error) {
 	normalizedURL, safeLabel, err := normalizeSupportedGitRepositoryURL(rawURL)
 	if err != nil {
 		return "", gitRepositorySnapshotMetadata{}, err
@@ -205,7 +211,10 @@ func prepareReadOnlyGitRepositorySnapshot(ctx context.Context, rawURL string, br
 		strings.TrimSpace(branch),
 		strings.TrimSpace(commitSHA),
 	}, "#"))
-	root := filepath.Join(os.TempDir(), "cascade-demoops-github-cache", repoID)
+	if strings.TrimSpace(cacheRoot) == "" {
+		cacheRoot = filepath.Join(os.TempDir(), "cascade-demoops-cache")
+	}
+	root := filepath.Join(cacheRoot, "github", repoID)
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return "", gitRepositorySnapshotMetadata{}, err
 	}
@@ -315,6 +324,9 @@ func gitCommandOutput(ctx context.Context, dir string, args ...string) (string, 
 		cmd.Dir = dir
 	}
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if token, tokenErr := credentialstore.ReadGitHubToken(); tokenErr == nil && token != "" {
+		cmd.Env = append(cmd.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=Authorization: Bearer "+token)
+	}
 	output, err := cmd.CombinedOutput()
 	if runCtx.Err() != nil {
 		return "", runCtx.Err()

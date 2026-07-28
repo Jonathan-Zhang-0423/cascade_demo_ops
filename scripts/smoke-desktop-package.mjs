@@ -20,10 +20,23 @@ assertFile(releaseManifestPath, "release manifest");
 const manifest = JSON.parse(readFileSync(releaseManifestPath, "utf8"));
 assert(manifest.schema_version === "demoops.desktop_package_manifest.v1", "unexpected manifest schema");
 assert(manifest.package_kind === "portable_zip", "desktop package must be portable_zip");
-assert(manifest.desktop_ui?.primary === "native_win32", "desktop package must declare native Win32 primary UI");
-assert(manifest.desktop_ui?.uses_browser_shell === false, "desktop package must not declare a browser shell as primary UI");
+assert(manifest.desktop_ui?.primary === "wails_webview2", "Windows desktop package must declare Wails/WebView2 primary UI");
+assert(manifest.desktop_ui?.uses_browser_shell === true, "Wails package must declare its embedded web shell");
+assert(manifest.updater?.path === "cascade-demoops-updater.exe", "desktop package must include the isolated updater");
+const runtimeManifest = JSON.parse(readFileSync(resolve("dist", "package", "resources", "desktop-runtime.json"), "utf8"));
+assert(runtimeManifest.version === manifest.version, "desktop runtime manifest version mismatch");
+assert(runtimeManifest.updates?.channel === manifest.release_channel, "desktop update channel mismatch");
+assert(runtimeManifest.updates?.updater === "../cascade-demoops-updater.exe", "desktop updater runtime path mismatch");
+assert(runtimeManifest.updates?.app_executable === "../cascade-demoops-desktop.exe", "desktop app health-check path mismatch");
+if (manifest.release_channel === "internal") {
+  assert(runtimeManifest.updates?.manifest_url === "", "internal package must not invent an update origin");
+}
 assertNativeCapabilities(manifest.desktop_ui, "desktop package manifest");
 assert(manifest.runtimes?.node?.path === "resources/runtimes/node/node.exe", "desktop package manifest must include bundled node runtime");
+if (manifest.release_channel !== "internal") {
+  assert(manifest.runtimes?.ffmpeg?.path === "resources/runtimes/ffmpeg/ffmpeg.exe", "beta/stable package must include FFmpeg");
+  assert(manifest.runtimes?.ffprobe?.path === "resources/runtimes/ffmpeg/ffprobe.exe", "beta/stable package must include ffprobe");
+}
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assertServerRecordingBoundary(manifest.server_connectivity, "desktop package manifest");
 assert(Array.isArray(manifest.server_connectivity?.reserved_interfaces), "server reserved interfaces are required");
@@ -40,6 +53,7 @@ assert(manifest.artifact?.sha256 === actualZipHash, "release manifest artifact h
 const entries = listZipEntries(zipPath);
 for (const required of [
   "cascade-demoops-desktop.exe",
+  "cascade-demoops-updater.exe",
   "package-manifest.json",
   "resources/desktop-runtime.json",
   "resources/runtimes/node/node.exe",
@@ -54,7 +68,9 @@ mkdirSync(smokeRoot, { recursive: true });
 expandZip(zipPath, smokeRoot);
 
 const entrypoint = resolve(smokeRoot, manifest.entrypoint || "cascade-demoops-desktop.exe");
+const updater = resolve(smokeRoot, manifest.updater.path);
 assertFile(entrypoint, "desktop entrypoint");
+assertFile(updater, "desktop updater");
 assertWindowsGuiSubsystem(entrypoint, "desktop entrypoint");
 assertFile(resolve(smokeRoot, manifest.resource_manifest || "resources/desktop-runtime.json"), "desktop runtime manifest");
 assertPackagedWebSurfaces(resolve(smokeRoot, "resources", "web"));
@@ -81,48 +97,11 @@ const payload = JSON.parse(result.stdout);
 assert(payload.ready === true, "desktop entrypoint did not report ready=true");
 assert(payload.profile === "desktop", "desktop entrypoint did not use desktop profile");
 assert(payload.mode === "desktop", "desktop entrypoint did not use desktop mode");
-assert(payload.ui === "native", "desktop entrypoint must default to native UI");
-assertFile(resolve(smokeRoot, "user-data", "logs", "desktop-launcher.log"), "desktop launcher diagnostic log");
-
-const native = spawn(entrypoint, ["--addr", "127.0.0.1:0"], {
-  cwd: smokeRoot,
-  env: {
-    ...process.env,
-    CASCADE_DATA_ROOT: resolve(smokeRoot, "native-user-data"),
-  },
-  stdio: ["ignore", "pipe", "pipe"],
-});
-try {
-  await assertNativeWindowLaunch(native, resolve(smokeRoot, "native-user-data", "logs", "desktop-launcher.log"));
-} finally {
-  await terminateChild(native);
-}
-
-const host = spawn(entrypoint, ["--native=false", "--open=false", "--addr", "127.0.0.1:0"], {
-  cwd: smokeRoot,
-  env: {
-    ...process.env,
-    CASCADE_DATA_ROOT: resolve(smokeRoot, "host-user-data"),
-    CASCADE_DEV_EXCHANGE_HTTP: "1",
-    CASCADE_DEV_EXCHANGE_TOKEN: "desktop-smoke-token",
-  },
-  stdio: ["ignore", "pipe", "pipe"],
-});
-try {
-  const hostPayload = await waitForReadyPayload(host);
-  assert(hostPayload.ready === true, "desktop host did not report ready=true");
-  assert(typeof hostPayload.url === "string" && hostPayload.url.startsWith("http://127.0.0.1:"), "desktop host did not report a local URL");
-  const index = httpGet(hostPayload.url);
-  assert(index.includes("<!doctype html>") || index.includes("<div id=\"root\"></div>"), "desktop host did not serve packaged web index");
-  const health = JSON.parse(httpGet(`${hostPayload.url}/v1/desktop/runtime-health`));
-  assert(health.ok === true, "desktop host runtime-health failed");
-  assert(health.data?.node_runtime_configured === true, "desktop host did not load bundled node runtime");
-  assert(health.data?.sidecars?.["video-worker"] === true, "desktop host did not load packaged video-worker");
-  assertRuntimeCapabilities(health.data, "desktop host runtime-health");
-  assertDevExchangeRunUnavailable(hostPayload.url);
-} finally {
-  await terminateChild(host);
-}
+assert(payload.ui === "wails_webview2", "desktop entrypoint must report Wails/WebView2 UI");
+const updaterCheck = spawnSync(updater, ["--check"], { cwd: smokeRoot, encoding: "utf8" });
+if (updaterCheck.status !== 0) throw new Error(`desktop updater check failed: ${updaterCheck.stderr || updaterCheck.stdout}`);
+const updaterPayload = JSON.parse(updaterCheck.stdout);
+assert(updaterPayload.ready === true && updaterPayload.rollback === true, "desktop updater did not report verified rollback readiness");
 
 console.log(`Desktop package smoke passed: ${zipPath}`);
 

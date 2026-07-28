@@ -7,19 +7,28 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 )
 
 type DevHTTPServer struct {
-	service *Service
-	events  *devEventStore
+	service               *Service
+	events                *devEventStore
+	storeGitHubToken      func(string) error
+	githubTokenConfigured func() bool
+	deleteGitHubToken     func() error
+}
+
+type githubCredentialRequest struct {
+	Token string `json:"token"`
 }
 
 type ExecutionPackageRequest struct {
@@ -56,12 +65,24 @@ type DevExecutionEvent struct {
 }
 
 func NewDevHTTPServer(service *Service) *DevHTTPServer {
-	return &DevHTTPServer{service: service, events: newDevEventStore()}
+	return &DevHTTPServer{
+		service:               service,
+		events:                newDevEventStore(),
+		storeGitHubToken:      credentialstore.StoreGitHubToken,
+		githubTokenConfigured: credentialstore.GitHubTokenConfigured,
+		deleteGitHubToken:     credentialstore.DeleteGitHubToken,
+	}
 }
 
 func (s *DevHTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/desktop/runtime-health", s.handleRuntimeHealth)
+	mux.HandleFunc("GET /v1/desktop/github-credential", s.handleGitHubCredentialStatus)
+	mux.HandleFunc("POST /v1/desktop/github-credential", s.handleStoreGitHubCredential)
+	mux.HandleFunc("DELETE /v1/desktop/github-credential", s.handleDeleteGitHubCredential)
+	mux.HandleFunc("GET /v1/desktop/update", s.handleDesktopUpdateStatus)
+	mux.HandleFunc("POST /v1/desktop/update/check", s.handleDesktopUpdateCheck)
+	mux.HandleFunc("POST /v1/desktop/update/apply", s.handleDesktopUpdateApply)
 	mux.HandleFunc("GET /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
@@ -259,6 +280,41 @@ func (s *DevHTTPServer) handleRuntimeHealth(w http.ResponseWriter, r *http.Reque
 	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), nil)
 }
 
+func (s *DevHTTPServer) handleGitHubCredentialStatus(w http.ResponseWriter, _ *http.Request) {
+	writeBridgeValue(w, map[string]bool{"configured": s.githubTokenConfigured()}, nil)
+}
+
+func (s *DevHTTPServer) handleStoreGitHubCredential(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var request githubCredentialRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	err := s.storeGitHubToken(request.Token)
+	writeBridgeValue(w, map[string]bool{"configured": err == nil}, err)
+}
+
+func (s *DevHTTPServer) handleDeleteGitHubCredential(w http.ResponseWriter, _ *http.Request) {
+	err := s.deleteGitHubToken()
+	writeBridgeValue(w, map[string]bool{"configured": false}, err)
+}
+
+func (s *DevHTTPServer) handleDesktopUpdateStatus(w http.ResponseWriter, _ *http.Request) {
+	status, err := desktopUpdateConfiguration(s.service.RuntimeConfig())
+	writeBridgeValue(w, status, err)
+}
+
+func (s *DevHTTPServer) handleDesktopUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	status, err := CheckDesktopUpdate(r.Context(), s.service.RuntimeConfig())
+	writeBridgeValue(w, status, err)
+}
+
+func (s *DevHTTPServer) handleDesktopUpdateApply(w http.ResponseWriter, r *http.Request) {
+	err := ApplyDesktopUpdate(r.Context(), s.service.RuntimeConfig())
+	writeBridgeValue(w, map[string]bool{"started": err == nil}, err)
+}
+
 func (s *DevHTTPServer) handleModelDiagnostics(w http.ResponseWriter, r *http.Request) {
 	writeBridgeValue(w, s.service.DiagnoseModels(r.Context()), nil)
 }
@@ -434,7 +490,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		var sessionErr error
 		if session.SessionToken == "" {
-			session, sessionErr = s.service.EnsureExchangeSession(r.Context(), build.Package.ProjectContextSummary.ProductURL, build.OrgID, build.ProjectID)
+			session, sessionErr = s.service.EnsureExchangeSession(r.Context(), build.OrgID, build.ProjectID)
 		}
 		if sessionErr == nil {
 			build, err = s.service.signBuildWithExchangeSession(build, session)
@@ -456,12 +512,31 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			ExchangePackageID: r.URL.Query().Get("exchange_package_id"),
 		})
 		writeBridgeValue(w, status, err)
+	case r.Method == http.MethodGet && suffix == "/cloud/events":
+		s.streamCloudExecutionPackageEvents(w, r)
 	case r.Method == http.MethodGet && suffix == "/cloud/result":
 		result, err := s.service.GetCloudResultPackage(r.Context(), CloudResultRequest{
 			OrgID:           r.URL.Query().Get("org_id"),
 			ResultPackageID: r.URL.Query().Get("result_package_id"),
 		})
 		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/deliverable/download":
+		var request CloudDeliverableDownloadRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		if strings.TrimSpace(request.OutputDirectory) == "" {
+			request.OutputDirectory = filepath.Join(
+				s.service.runtime.ArtifactRoot,
+				"desktop",
+				"downloads",
+				safePathSegment(projectID),
+				safePathSegment(request.ResultPackageID),
+			)
+		}
+		download, err := s.service.DownloadCloudResultDeliverable(r.Context(), request)
+		writeBridgeValue(w, download, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/ack":
 		var request CloudResultAckRequest
 		if err := decodeJSON(r, &request); err != nil {
@@ -478,6 +553,22 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			UseResultSummary:  len(request.ReceivedAssetIDs) == 0,
 		})
 		writeBridgeValue(w, ack, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/review":
+		var request CloudResultReviewRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		review, err := s.service.ReviewCloudResultPackage(r.Context(), request)
+		writeBridgeValue(w, review, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/revision":
+		var request CloudResultRevisionRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		revision, err := s.service.RequestCloudResultRevision(r.Context(), request)
+		writeBridgeValue(w, revision, err)
 	case r.Method == http.MethodPost && suffix == "/cloud-lifecycle":
 		startedAt := time.Now()
 		var request CloudLifecycleRequest
@@ -524,6 +615,39 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+func (s *DevHTTPServer) streamCloudExecutionPackageEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeBridgeValue(w, nil, errors.New("HTTP streaming is unavailable"))
+		return
+	}
+	response, err := s.service.OpenCloudExecutionPackageEventStream(r.Context(), CloudStatusRequest{
+		OrgID:             r.URL.Query().Get("org_id"),
+		ExchangePackageID: r.URL.Query().Get("exchange_package_id"),
+	}, r.Header.Get("Last-Event-ID"))
+	if err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	defer response.Body.Close()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(sseFlushWriter{writer: w, flusher: flusher}, response.Body)
+}
+
+type sseFlushWriter struct {
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (w sseFlushWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	w.flusher.Flush()
+	return written, err
+}
+
 func (s *DevHTTPServer) emitProjectEvent(projectID string, event orchestrator.ProgressEvent) {
 	if s.events == nil {
 		return
@@ -548,6 +672,12 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func decodeJSON(r *http.Request, target any) error {
@@ -625,11 +755,15 @@ func splitEditorSessionRoute(path string) (string, string, bool) {
 func withDevCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if isAllowedDevOrigin(origin) {
+		if !isAllowedDevOrigin(origin) {
+			http.Error(w, "dev bridge origin is not allowed", http.StatusForbidden)
+			return
+		}
+		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Cascade-Org-ID")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID, X-Cascade-Org-ID")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -643,7 +777,10 @@ func isAllowedDevOrigin(origin string) bool {
 	if origin == "" {
 		return true
 	}
-	return strings.HasPrefix(origin, "http://127.0.0.1:") || strings.HasPrefix(origin, "http://localhost:")
+	return strings.HasPrefix(origin, "http://127.0.0.1:") ||
+		strings.HasPrefix(origin, "http://localhost:") ||
+		origin == "http://wails.localhost" ||
+		origin == "https://wails.localhost"
 }
 
 func EnsureLocalDevAddress(addr string) error {

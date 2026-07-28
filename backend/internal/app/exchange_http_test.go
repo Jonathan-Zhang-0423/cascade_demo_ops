@@ -362,7 +362,7 @@ func TestDevExchangeHTTPRunEndpointMarksMissingWorkerAsFailed(t *testing.T) {
 	})
 
 	runStatus := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodPost, "/v1/dev/execution-packages/"+uploadPayload.ExchangePackageID+"/run", nil, cascadeOrgIDHeader, pkg.OrgID)
-	if runStatus.Status != model.ExchangePackageStatusRunning || runStatus.Stage != "validated" {
+	if runStatus.Status != model.ExchangePackageStatusRunning || runStatus.Stage != "preparing_worker" {
 		t.Fatalf("expected run endpoint to return started running status, got %+v", runStatus)
 	}
 
@@ -566,6 +566,76 @@ func TestDevExchangeHTTPRestoresStatusAndDownloadAfterRestart(t *testing.T) {
 	}
 	if got := response.Body.String(); got != "persisted-demo" {
 		t.Fatalf("unexpected restored download body %q", got)
+	}
+}
+
+func TestExecutionEventsSSESupportsLastEventID(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	upload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID: initPayload.UploadID, Envelope: sampleEnvelopeForAppTest(t, pkg, now), Payload: pkg,
+	})
+	if _, _, err := server.service.exchange.StartExecution(t.Context(), pkg.OrgID, upload.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.service.exchange.CompleteWithRecordingResult(t.Context(), pkg.OrgID, upload.ExchangePackageID, sampleRecordingResultForAppTest(pkg)); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/execution-packages/"+upload.ExchangePackageID+"/events?org_id="+pkg.OrgID, nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Last-Event-ID", upload.ExchangePackageID+":1")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("unexpected SSE response: status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "id: "+upload.ExchangePackageID+":1\n") || !strings.Contains(body, "id: "+upload.ExchangePackageID+":2\n") || !strings.Contains(body, "event: complete") {
+		t.Fatalf("SSE did not resume after event 1: %s", body)
+	}
+}
+
+func TestResultReviewAndRevisionHTTPAreSeparateFromAck(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	upload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{UploadID: initPayload.UploadID, Envelope: sampleEnvelopeForAppTest(t, pkg, now), Payload: pkg})
+	if _, _, err := server.service.exchange.StartExecution(t.Context(), pkg.OrgID, upload.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := server.service.exchange.CompleteWithRecordingResult(t.Context(), pkg.OrgID, upload.ExchangePackageID, sampleRecordingResultForAppTest(pkg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := exchangeHTTPDo[model.ResultReviewRecord](t, server, http.MethodPost, "/v1/result-packages/"+completed.ResultPackageID+"/reviews", model.ResultReviewRequest{
+		IdempotencyKey: "review-http-1", Decision: model.ResultReviewReeditRequested,
+	}, cascadeOrgIDHeader, pkg.OrgID)
+	if review.Decision != model.ResultReviewReeditRequested || review.ReviewID == "" {
+		t.Fatalf("unexpected review: %+v", review)
+	}
+	revision := exchangeHTTPDo[model.ResultRevisionRecord](t, server, http.MethodPost, "/v1/result-packages/"+completed.ResultPackageID+"/revisions", model.ResultRevisionRequest{
+		IdempotencyKey: "revision-http-1", RequestedAction: model.ResultRevisionAuto,
+		Issues: []model.ResultRevisionIssue{{Kind: "caption"}},
+	}, cascadeOrgIDHeader, pkg.OrgID)
+	if revision.ResolvedAction != model.ResultRevisionReedit || revision.Status != "queued" {
+		t.Fatalf("unexpected revision: %+v", revision)
+	}
+	result, err := server.service.GetResultPackage(t.Context(), pkg.OrgID, completed.ResultPackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status == model.RecordingResultStatusAcked || !result.Delivery.AckedAt.IsZero() {
+		t.Fatalf("review/revision must not acknowledge delivery: %+v", result.Delivery)
 	}
 }
 

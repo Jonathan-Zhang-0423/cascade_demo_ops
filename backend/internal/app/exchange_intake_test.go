@@ -125,6 +125,58 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	}
 }
 
+func TestResultReviewAndRevisionAreIdempotentAndRouteByIssue(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	service.now = fixedClock(now)
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: sampleEnvelopeForAppTest(t, pkg, now)}, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.StartExecution(ctx, pkg.OrgID, upload.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, upload.ExchangePackageID, sampleRecordingResultForAppTest(pkg))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRequest := model.ResultReviewRequest{IdempotencyKey: "review-1", Decision: model.ResultReviewReeditRequested, Summary: "字幕需要调整"}
+	firstReview, err := service.ReviewResultPackage(ctx, pkg.OrgID, completed.ResultPackageID, reviewRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondReview, err := service.ReviewResultPackage(ctx, pkg.OrgID, completed.ResultPackageID, reviewRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstReview.ReviewID == "" || firstReview.ReviewID != secondReview.ReviewID {
+		t.Fatalf("review idempotency failed: first=%+v second=%+v", firstReview, secondReview)
+	}
+
+	revisionRequest := model.ResultRevisionRequest{
+		IdempotencyKey: "revision-1", RequestedAction: model.ResultRevisionAuto,
+		Issues: []model.ResultRevisionIssue{{Kind: "missing_step", Comment: "缺少保存成功页面"}},
+	}
+	firstRevision, err := service.RequestResultRevision(ctx, pkg.OrgID, completed.ResultPackageID, revisionRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRevision, err := service.RequestResultRevision(ctx, pkg.OrgID, completed.ResultPackageID, revisionRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRevision.RevisionID == "" || firstRevision.RevisionID != secondRevision.RevisionID || firstRevision.ResolvedAction != model.ResultRevisionRerecord {
+		t.Fatalf("revision routing/idempotency failed: first=%+v second=%+v", firstRevision, secondRevision)
+	}
+}
+
 func TestExchangeIntakeAcceptsEncryptedPayloadRefWithoutPersistingPlainPayload(t *testing.T) {
 	service := NewExchangeIntakeService(nil)
 	service.now = fixedClock(time.Date(2026, 7, 9, 16, 5, 0, 0, time.UTC))

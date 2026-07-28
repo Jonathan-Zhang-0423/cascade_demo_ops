@@ -62,7 +62,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	flow, err := orchestrator.NewCascadeFlow(orchestrator.Dependencies{
 		InputContext:         agents.NewInputContextAgent(),
 		RequirementReader:    agents.NewRequirementReaderAgentWithLLM(llmRouter),
-		CodeReader:           agents.NewCodeReaderAgentWithLLM(llmRouter),
+		CodeReader:           agents.NewCodeReaderAgentWithLLM(llmRouter, runtime.CacheRoot),
 		PageReader:           agents.NewPageReaderAgent(),
 		ProjectIntelligence:  agents.NewProjectIntelligenceGraphWithLLM(llmRouter),
 		Understanding:        agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
@@ -88,9 +88,20 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		editorJobs:    map[string]editorRenderTask{},
 		outlineRunner: nil,
 	}
-	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath())
+	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
 	service.outlineRunner = localBrowserAgentOutlineRunner{service: service}
 	return service, nil
+}
+
+func (s *Service) videoWorkerEnvironment() map[string]string {
+	environment := map[string]string{}
+	if s != nil && s.runtime.FFmpegPath != "" {
+		environment["CASCADE_FFMPEG_PATH"] = s.runtime.FFmpegPath
+	}
+	if s != nil && s.runtime.FFprobePath != "" {
+		environment["CASCADE_FFPROBE_PATH"] = s.runtime.FFprobePath
+	}
+	return environment
 }
 
 func (s *Service) RuntimeConfig() config.AppRuntimeConfig {
@@ -362,6 +373,14 @@ func (s *Service) GetResultArtifactFile(ctx context.Context, orgID string, resul
 
 func (s *Service) AcknowledgeResultPackage(ctx context.Context, orgID string, request model.ResultPackageAckRequest) (model.ResultPackageAckResponse, error) {
 	return s.exchange.AckResultPackage(ctx, orgID, request)
+}
+
+func (s *Service) ReviewResultPackage(ctx context.Context, orgID string, resultPackageID string, request model.ResultReviewRequest) (model.ResultReviewRecord, error) {
+	return s.exchange.ReviewResultPackage(ctx, orgID, resultPackageID, request)
+}
+
+func (s *Service) RequestResultRevision(ctx context.Context, orgID string, resultPackageID string, request model.ResultRevisionRequest) (model.ResultRevisionRecord, error) {
+	return s.exchange.RequestResultRevision(ctx, orgID, resultPackageID, request)
 }
 
 func (s *Service) localArtifactPath(uri string) (string, error) {

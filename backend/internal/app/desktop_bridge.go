@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
@@ -15,6 +17,11 @@ type BridgeResponse struct {
 	Error     string           `json:"error,omitempty"`
 	ErrorInfo *BridgeErrorInfo `json:"error_info,omitempty"`
 	Data      json.RawMessage  `json:"data,omitempty"`
+}
+
+// HTTPHandler exposes the same bridge contract to the embedded Wails asset server.
+func (b *DesktopBridge) HTTPHandler() http.Handler {
+	return NewDevHTTPServer(b.service).Handler()
 }
 
 type DesktopBridge struct {
@@ -32,6 +39,35 @@ func NewDesktopBridge(runtime config.AppRuntimeConfig, states store.StateStore) 
 func (b *DesktopBridge) RuntimeConfig() BridgeResponse {
 	ctx := context.Background()
 	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig(), b.service.ExchangeIdentityStatus(ctx)), nil)
+}
+
+func (b *DesktopBridge) StoreGitHubToken(token string) BridgeResponse {
+	err := credentialstore.StoreGitHubToken(token)
+	return bridgeValue(map[string]bool{"configured": err == nil}, err)
+}
+
+func (b *DesktopBridge) GitHubTokenStatus() BridgeResponse {
+	return bridgeValue(map[string]bool{"configured": credentialstore.GitHubTokenConfigured()}, nil)
+}
+
+func (b *DesktopBridge) DeleteGitHubToken() BridgeResponse {
+	err := credentialstore.DeleteGitHubToken()
+	return bridgeValue(map[string]bool{"configured": false}, err)
+}
+
+func (b *DesktopBridge) DesktopUpdateStatus() BridgeResponse {
+	status, err := desktopUpdateConfiguration(b.service.RuntimeConfig())
+	return bridgeValue(status, err)
+}
+
+func (b *DesktopBridge) CheckDesktopUpdate() BridgeResponse {
+	status, err := CheckDesktopUpdate(context.Background(), b.service.RuntimeConfig())
+	return bridgeValue(status, err)
+}
+
+func (b *DesktopBridge) ApplyDesktopUpdate() BridgeResponse {
+	err := ApplyDesktopUpdate(context.Background(), b.service.RuntimeConfig())
+	return bridgeValue(map[string]bool{"started": err == nil}, err)
 }
 
 func (b *DesktopBridge) CreateProject(input orchestrator.UserInput) BridgeResponse {
@@ -110,6 +146,16 @@ func (b *DesktopBridge) GetResultPackage(orgID string, resultPackageID string) B
 
 func (b *DesktopBridge) AcknowledgeResultPackage(orgID string, request model.ResultPackageAckRequest) BridgeResponse {
 	response, err := b.service.AcknowledgeResultPackage(context.Background(), orgID, request)
+	return bridgeValue(response, err)
+}
+
+func (b *DesktopBridge) ReviewResultPackage(orgID string, resultPackageID string, request model.ResultReviewRequest) BridgeResponse {
+	response, err := b.service.ReviewResultPackage(context.Background(), orgID, resultPackageID, request)
+	return bridgeValue(response, err)
+}
+
+func (b *DesktopBridge) RequestResultRevision(orgID string, resultPackageID string, request model.ResultRevisionRequest) BridgeResponse {
+	response, err := b.service.RequestResultRevision(context.Background(), orgID, resultPackageID, request)
 	return bridgeValue(response, err)
 }
 

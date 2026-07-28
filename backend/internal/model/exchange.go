@@ -924,11 +924,81 @@ type ExecutionPackageListItem struct {
 }
 
 type ExecutionStageEvent struct {
+	EventID         string                `json:"event_id,omitempty"`
 	Stage           string                `json:"stage"`
 	Status          ExchangePackageStatus `json:"status,omitempty"`
 	Message         string                `json:"message,omitempty"`
 	ProgressPercent int                   `json:"progress_percent,omitempty"`
 	UpdatedAt       time.Time             `json:"updated_at"`
+}
+
+type ResultReviewDecision string
+
+const (
+	ResultReviewApproved          ResultReviewDecision = "approved"
+	ResultReviewReeditRequested   ResultReviewDecision = "reedit_requested"
+	ResultReviewRerecordRequested ResultReviewDecision = "rerecord_requested"
+)
+
+type ResultReviewAnnotation struct {
+	TimeMS  int64  `json:"time_ms"`
+	Comment string `json:"comment"`
+}
+
+type ResultReviewRequest struct {
+	IdempotencyKey    string                   `json:"idempotency_key"`
+	ReviewerInstallID string                   `json:"reviewer_install_id,omitempty"`
+	Decision          ResultReviewDecision     `json:"decision"`
+	Summary           string                   `json:"summary,omitempty"`
+	Annotations       []ResultReviewAnnotation `json:"annotations,omitempty"`
+	ReviewedAt        time.Time                `json:"reviewed_at,omitempty"`
+}
+
+type ResultReviewRecord struct {
+	ReviewID          string                   `json:"review_id"`
+	ResultPackageID   string                   `json:"result_package_id"`
+	IdempotencyKey    string                   `json:"idempotency_key"`
+	ReviewerInstallID string                   `json:"reviewer_install_id,omitempty"`
+	Decision          ResultReviewDecision     `json:"decision"`
+	Summary           string                   `json:"summary,omitempty"`
+	Annotations       []ResultReviewAnnotation `json:"annotations,omitempty"`
+	ReviewedAt        time.Time                `json:"reviewed_at"`
+}
+
+type ResultRevisionAction string
+
+const (
+	ResultRevisionAuto     ResultRevisionAction = "auto"
+	ResultRevisionReedit   ResultRevisionAction = "reedit"
+	ResultRevisionRerecord ResultRevisionAction = "rerecord"
+)
+
+type ResultRevisionIssue struct {
+	Kind    string `json:"kind"`
+	TimeMS  int64  `json:"time_ms,omitempty"`
+	Comment string `json:"comment"`
+}
+
+type ResultRevisionRequest struct {
+	IdempotencyKey       string                `json:"idempotency_key"`
+	RequestedByInstallID string                `json:"requested_by_install_id,omitempty"`
+	RequestedAction      ResultRevisionAction  `json:"requested_action,omitempty"`
+	Summary              string                `json:"summary,omitempty"`
+	Issues               []ResultRevisionIssue `json:"issues,omitempty"`
+	RequestedAt          time.Time             `json:"requested_at,omitempty"`
+}
+
+type ResultRevisionRecord struct {
+	RevisionID           string                `json:"revision_id"`
+	ResultPackageID      string                `json:"result_package_id"`
+	IdempotencyKey       string                `json:"idempotency_key"`
+	RequestedByInstallID string                `json:"requested_by_install_id,omitempty"`
+	RequestedAction      ResultRevisionAction  `json:"requested_action"`
+	ResolvedAction       ResultRevisionAction  `json:"resolved_action"`
+	Status               string                `json:"status"`
+	Summary              string                `json:"summary,omitempty"`
+	Issues               []ResultRevisionIssue `json:"issues,omitempty"`
+	RequestedAt          time.Time             `json:"requested_at"`
 }
 
 type ExecutionFailureSummary struct {

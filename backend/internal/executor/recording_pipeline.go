@@ -67,30 +67,43 @@ func RunClientExecutionRecordingAndRender(ctx context.Context, service Service, 
 	if recordingResultPackage.Status == model.RecordingResultStatusFailed {
 		return result, nil
 	}
-	renderRequest, err := NewRenderRequestFromRecordingResult(request.SourcePackage, &result.RecordingResultPackage, request.RenderOutputDir)
-	if err != nil {
-		return RecordingRenderPipelineResult{}, err
-	}
-	reportPipelineProgress(request, "rendering", "Rendering the final demo video from existing captured assets.", 85)
-	renderResult, err := service.Render(ctx, renderRequest)
-	if err != nil {
-		return RecordingRenderPipelineResult{}, err
-	}
-	reportPipelineProgress(request, "preparing_director_input", "Preparing source-only director input and Ark media dry-run plan.", 92)
-	if err := enrichRenderResultForDirector(ctx, request.SourcePackage, &result.RecordingResultPackage, &renderResult, request.RenderOutputDir, result.RecordingResultPackage.CreatedAt); err != nil {
-		return RecordingRenderPipelineResult{}, err
-	}
-	renderResult, err = applyDirectorPatchAndRerender(ctx, service, request, renderRequest, renderResult)
+	renderRequest, renderResult, err := RenderClientExecutionRecordingResult(ctx, service, request.SourcePackage, &result.RecordingResultPackage, request.RenderOutputDir, request.Progress)
 	if err != nil {
 		return RecordingRenderPipelineResult{}, err
 	}
 	result.RenderRequest = renderRequest
 	result.RenderResult = renderResult
-	attachRenderResultArtifacts(request.SourcePackage, &result.RecordingResultPackage, renderResult, result.RecordingResultPackage.CreatedAt)
 	return result, nil
 }
 
-func applyDirectorPatchAndRerender(ctx context.Context, service Service, request RecordingRenderPipelineRequest, renderRequest RenderRequest, renderResult RenderResult) (RenderResult, error) {
+func RenderClientExecutionRecordingResult(ctx context.Context, service RenderService, source *model.ClientExecutionPackage, recording *model.RecordingResultPackage, outputDir string, progress func(string, string, int)) (RenderRequest, RenderResult, error) {
+	if service == nil || source == nil || recording == nil {
+		return RenderRequest{}, RenderResult{}, errors.New("render service, source package, and recording result are required")
+	}
+	request := RecordingRenderPipelineRequest{SourcePackage: source, RenderOutputDir: outputDir, Progress: progress}
+	renderRequest, err := NewRenderRequestFromRecordingResult(source, recording, outputDir)
+	if err != nil {
+		return RenderRequest{}, RenderResult{}, err
+	}
+	reportPipelineProgress(request, "directing", "Preparing a source-bound edit plan from validated recording materials.", 78)
+	reportPipelineProgress(request, "rendering", "Rendering the final demo video from existing captured assets.", 85)
+	renderResult, err := service.Render(ctx, renderRequest)
+	if err != nil {
+		return RenderRequest{}, RenderResult{}, err
+	}
+	if err := enrichRenderResultForDirector(ctx, source, recording, &renderResult, outputDir, recording.CreatedAt); err != nil {
+		return RenderRequest{}, RenderResult{}, err
+	}
+	renderResult, err = applyDirectorPatchAndRerender(ctx, service, request, renderRequest, renderResult)
+	if err != nil {
+		return RenderRequest{}, RenderResult{}, err
+	}
+	attachRenderResultArtifacts(source, recording, renderResult, recording.CreatedAt)
+	reportPipelineProgress(request, "quality_validation", "Validating required-step coverage, media decodability, redaction, and output checksums.", 98)
+	return renderRequest, renderResult, nil
+}
+
+func applyDirectorPatchAndRerender(ctx context.Context, service RenderService, request RecordingRenderPipelineRequest, renderRequest RenderRequest, renderResult RenderResult) (RenderResult, error) {
 	createdAt := time.Now().UTC()
 	if renderRequest.RecordingResultPackage != nil && !renderRequest.RecordingResultPackage.CreatedAt.IsZero() {
 		createdAt = renderRequest.RecordingResultPackage.CreatedAt

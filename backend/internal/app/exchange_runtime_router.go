@@ -129,7 +129,7 @@ func (r localLegacyPlaywrightRunner) Run(ctx context.Context, request executionR
 		return model.RecordingResultPackage{}, newRuntimeExecutionError(runtimeErrorNodeMissing, err)
 	}
 
-	localDriver := driver.NewLocalDriver(r.service.nodeBinaryForExecution(), workerPath)
+	localDriver := driver.NewLocalDriver(r.service.nodeBinaryForExecution(), workerPath, r.service.videoWorkerEnvironment())
 	result, err := executor.RunClientExecutionRecordingAndRender(ctx, localDriver, executor.RecordingRenderPipelineRequest{
 		SourcePackage: request.Package, CloudJobID: request.CloudJobID,
 		RecordingOutputDir: request.RecordingOutputDir, RenderOutputDir: request.RenderOutputDir,

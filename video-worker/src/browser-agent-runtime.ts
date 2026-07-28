@@ -165,6 +165,7 @@ type BrowserAgentSession = {
 type ResolvedTarget = { locator: any; strategy: string };
 
 const sessions = new Map<string, BrowserAgentSession>();
+const targetProbeTimeoutMS = 2_000;
 const defaultViewport = { width: 1440, height: 900 };
 const actionTimeoutMS = 10_000;
 const screenshotTimeoutMS = 8_000;
@@ -361,11 +362,15 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
   for (const candidate of candidates) {
     if (seen.has(candidate.strategy)) continue;
     seen.add(candidate.strategy);
-    const count = await candidate.locator.count().catch(() => 0);
+    const count = await withTimeout(candidate.locator.count(), targetProbeTimeoutMS, 0);
     if (count !== 1) continue;
     const locator = candidate.locator.first();
-    if (!await locator.isVisible({ timeout: 750 }).catch(() => false)) continue;
-    const semantics = await compactElementSemantics(locator);
+    if (!await withTimeout(locator.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
+    const semantics = await withTimeout(
+      compactElementSemantics(locator),
+      targetProbeTimeoutMS,
+      { role: "", name: "" },
+    );
     if (!semanticsAllowed(semantics, contract)) continue;
     if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
       throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
@@ -373,6 +378,22 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
     return { locator, strategy: candidate.strategy };
   }
   throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=${[...seen].join(",") || "none"}`);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMS: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMS);
+      }),
+    ]);
+  } catch {
+    return fallback;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerStage): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {

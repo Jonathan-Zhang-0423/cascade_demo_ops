@@ -20,4 +20,6 @@ replay-bundle.tar.gz
 backend/.cache/
 .gocache/
 .gotmp/
+backend/cmd/wails-desktop/build/bin/
+backend/cmd/wails-desktop/frontend/wailsjs/
 .DS_Store

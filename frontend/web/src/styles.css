@@ -278,6 +278,14 @@ h2 {
   align-items: center;
 }
 
+.result-review-actions {
+  flex-wrap: wrap;
+}
+
+.result-review-actions button {
+  flex: 1 1 180px;
+}
+
 .header-meta {
   margin-top: 9px;
   color: #60717e;
@@ -433,6 +441,33 @@ h2 {
 .field-row textarea:focus {
   border-color: #2d8ac8;
   box-shadow: 0 0 0 3px #dff0fb;
+}
+
+.credential-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.credential-input-row .row-action {
+  min-height: 36px;
+  margin: 0;
+  padding: 0 12px;
+}
+
+.credential-input-row .row-action.danger {
+  color: #a33c36;
+}
+
+.credential-status {
+  color: #3f7652;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.credential-status.warning {
+  color: #9a5b25;
 }
 
 .input-note {

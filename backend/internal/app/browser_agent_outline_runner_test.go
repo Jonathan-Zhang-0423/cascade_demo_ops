@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"cascade-demoops/backend/internal/driver"
+	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -15,10 +18,15 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := &stubBrowserAgentWorkerSession{}
+	recordingPath := filepath.Join(t.TempDir(), "recording.webm")
+	if err := os.WriteFile(recordingPath, []byte("recording"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &stubBrowserAgentWorkerSession{recordingPath: recordingPath}
 	var openRequest driver.BrowserAgentWorkerOpenRequest
 	runner := localBrowserAgentOutlineRunner{
-		service: &Service{},
+		service:       &Service{},
+		renderService: stubBrowserAgentRenderService{},
 		sessionFactory: func(_ context.Context, request driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
 			openRequest = request
 			return session, driver.BrowserAgentWorkerOpenResult{SessionID: request.SessionID, RuntimeVersions: map[string]string{"runner": "stub-browser-agent"}}, nil
@@ -27,7 +35,7 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 	var progressStages []string
 	result, err := runner.Run(context.Background(), BrowserAgentOutlineRunRequest{
 		Package: &pkg, RuntimePlan: plan, CloudJobID: "job_outline_result",
-		RecordingOutputDir: t.TempDir(), ResultCreatedAt: time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC),
+		RecordingOutputDir: t.TempDir(), RenderOutputDir: t.TempDir(), ResultCreatedAt: time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC),
 		Progress:  func(stage, _ string, _ int) { progressStages = append(progressStages, stage) },
 		EventSink: &memoryStageEventSink{},
 	})
@@ -49,7 +57,7 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 	if result.ExecutionTrace == nil || result.ExecutionTrace.PassRate != 1 || len(result.GeneratedAssets) < len(plan.Stages)*2 {
 		t.Fatalf("result package lost browser evidence: %+v", result.ExecutionTrace)
 	}
-	for _, required := range []string{"validating_pre_execution", "running_browser_agent", "validating_runtime_stage", "validating_post_execution", "packaging_recording"} {
+	for _, required := range []string{"validating_pre_execution", "running_browser_agent", "validating_runtime_stage", "validating_post_execution", "packaging_recording", "directing", "rendering", "quality_validation"} {
 		if !containsProgressStage(progressStages, required) {
 			t.Fatalf("missing progress stage %q in %v", required, progressStages)
 		}
@@ -99,9 +107,10 @@ func TestDeterministicBrowserAgentStageVerifierStopsWhenRequiredValidationIsMiss
 }
 
 type stubBrowserAgentWorkerSession struct {
-	observeCalls int
-	executeCalls int
-	closeCalls   int
+	observeCalls  int
+	executeCalls  int
+	closeCalls    int
+	recordingPath string
 }
 
 func (s *stubBrowserAgentWorkerSession) Observe(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
@@ -133,9 +142,27 @@ func (s *stubBrowserAgentWorkerSession) Execute(_ context.Context, stage driver.
 func (s *stubBrowserAgentWorkerSession) Close(context.Context) (driver.BrowserAgentWorkerCloseResult, error) {
 	s.closeCalls++
 	return driver.BrowserAgentWorkerCloseResult{
+		RecordingPath:   s.recordingPath,
 		Artifacts:       []model.ArtifactRef{{ID: "artifact_trace", Kind: "browser_trace", URI: "file:///trace.zip", SHA256: "trace_hash", SizeBytes: 10, Sensitive: true}},
 		RuntimeVersions: map[string]string{"browser": "chromium"},
 	}, nil
+}
+
+type stubBrowserAgentRenderService struct{}
+
+func (stubBrowserAgentRenderService) Render(_ context.Context, request executor.RenderRequest) (executor.RenderResult, error) {
+	if err := os.MkdirAll(request.OutputDir, 0o700); err != nil {
+		return executor.RenderResult{}, err
+	}
+	videoPath := filepath.Join(request.OutputDir, "demo.mp4")
+	manifestPath := filepath.Join(request.OutputDir, "render_manifest.json")
+	planPath := filepath.Join(request.OutputDir, "demo_edit_plan.json")
+	for path, contents := range map[string]string{videoPath: "demo-video", manifestPath: "{}", planPath: "{}"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			return executor.RenderResult{}, err
+		}
+	}
+	return executor.RenderResult{VideoPath: videoPath, RenderManifestPath: manifestPath, DemoEditPlanPath: planPath}, nil
 }
 
 func (s *stubBrowserAgentWorkerSession) Abort() error { return nil }

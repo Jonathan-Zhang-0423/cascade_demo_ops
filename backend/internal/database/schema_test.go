@@ -177,6 +177,31 @@ func TestExchangeMigrationHasIdempotencyStatusAndJSONBIndexes(t *testing.T) {
 	}
 }
 
+func TestExecutionDeliveryMigrationContainsWorkflowTablesAndIdempotency(t *testing.T) {
+	sql := strings.ToLower(readMigration(t, "003_create_execution_delivery_workflow.sql"))
+	for _, table := range []string{"execution_stage_events", "generated_scripts", "render_jobs", "result_reviews", "revision_requests"} {
+		if !strings.Contains(sql, "create table "+table+" ") {
+			t.Fatalf("execution delivery migration is missing table %s", table)
+		}
+	}
+	for _, token := range []string{
+		"unique (exchange_package_id, sequence_no)",
+		"unique (result_package_id, idempotency_key)",
+		"execution_stage_events_package_sequence_idx",
+		"generated_scripts_sha256_idx",
+		"revision_requests_status_idx",
+	} {
+		if !strings.Contains(sql, token) {
+			t.Fatalf("execution delivery migration is missing %s", token)
+		}
+	}
+	for _, forbidden := range []string{"video bytea", "recording bytea", "source_archive", "raw_secret", "password text"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("execution delivery migration must not persist %q", forbidden)
+		}
+	}
+}
+
 func readCoreMigration(t *testing.T) string {
 	return readMigration(t, "001_create_core_tables.sql")
 }

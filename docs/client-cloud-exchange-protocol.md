@@ -128,7 +128,7 @@ or log that field.
 Status polling is the stable App UI driver. The server should use these stages:
 
 ```text
-accepted -> validating -> preparing_worker -> running_script -> packaging_recording -> rendering -> completed
+accepted -> validating -> preparing_worker -> browser_agent_planning -> script_ready -> recording -> material_validation -> directing -> rendering -> quality_validation -> completed
 ```
 
 Failed jobs use `status=failed` and return a `failure_summary` on the status

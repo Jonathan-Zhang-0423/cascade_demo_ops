@@ -3,11 +3,13 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +140,71 @@ func TestDevHTTPBridgeReadsGitHubRepoURLAsParallelCodeSource(t *testing.T) {
 	}
 	if !containsString(gitSnapshot.Frameworks, "react") || len(gitSnapshot.Selectors) == 0 {
 		t.Fatalf("expected GitHub-style snapshot to include repo structure evidence: %+v", gitSnapshot)
+	}
+}
+
+func TestDevHTTPBridgeGitHubCredentialOnlyReturnsConfigurationState(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	const token = "github_pat_test_value_that_must_never_be_returned"
+	storedToken := ""
+	configured := false
+	server.storeGitHubToken = func(value string) error {
+		storedToken = value
+		configured = true
+		return nil
+	}
+	server.githubTokenConfigured = func() bool { return configured }
+	server.deleteGitHubToken = func() error {
+		storedToken = ""
+		configured = false
+		return nil
+	}
+
+	assertResponse := func(method, path, body string, wantConfigured bool) {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+		}
+		payload := response.Body.String()
+		if strings.Contains(payload, token) || strings.Contains(payload, "token\"") {
+			t.Fatalf("credential response exposed token material: %s", payload)
+		}
+		if !strings.Contains(payload, `"configured":`+strconv.FormatBool(wantConfigured)) {
+			t.Fatalf("unexpected credential status response: %s", payload)
+		}
+	}
+
+	assertResponse(http.MethodGet, "/v1/desktop/github-credential", "", false)
+	assertResponse(http.MethodPost, "/v1/desktop/github-credential", `{"token":"`+token+`"}`, true)
+	if storedToken != token {
+		t.Fatal("credential store did not receive the submitted token")
+	}
+	assertResponse(http.MethodDelete, "/v1/desktop/github-credential", "", false)
+	if storedToken != "" {
+		t.Fatal("credential delete did not clear the stored token")
+	}
+}
+
+func TestDevHTTPBridgeRejectsForeignOriginBeforeCredentialMutation(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	called := false
+	server.storeGitHubToken = func(string) error {
+		called = true
+		return nil
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/github-credential", strings.NewReader(`{"token":"github_pat_csrf"}`))
+	request.Header.Set("Origin", "https://attacker.example")
+	request.Header.Set("Content-Type", "text/plain")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden || called {
+		t.Fatalf("foreign origin must be rejected before credential mutation: status=%d called=%v", response.Code, called)
 	}
 }
 
@@ -603,6 +670,54 @@ func TestDesktopProfileDoesNotExposeDevExchangeRunRoutes(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("desktop profile must not expose local dev recording run route, got status %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestDesktopCloudEventProxyForwardsSessionAndResumeCursor(t *testing.T) {
+	var authorization, orgID, lastEventID string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		orgID = r.Header.Get(cascadeOrgIDHeader)
+		lastEventID = r.Header.Get("Last-Event-ID")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "id: xpkg_stream:3\nevent: stage\ndata: {\"event_id\":\"xpkg_stream:3\",\"stage\":\"recording\",\"status\":\"running\"}\n\n")
+	}))
+	defer upstream.Close()
+
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile:              config.ProfileDesktop,
+		Environment:          "test",
+		Mode:                 model.AppModeDesktop,
+		DatabaseDialect:      config.DatabaseSQLite,
+		SQLitePath:           filepath.Join(root, "cascade_demoops.db"),
+		DataRoot:             root,
+		ArtifactRoot:         filepath.Join(root, "artifacts"),
+		CacheRoot:            filepath.Join(root, "cache"),
+		LogRoot:              filepath.Join(root, "logs"),
+		ResourceRoot:         root,
+		DevRepoRoot:          root,
+		SidecarPaths:         map[string]string{},
+		CloudExchangeBaseURL: upstream.URL,
+		CloudExchangeToken:   "stream-token",
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/projects/project_stream/cloud/events?org_id=org_stream&exchange_package_id=xpkg_stream", nil)
+	request.Header.Set("Last-Event-ID", "xpkg_stream:2")
+	response := httptest.NewRecorder()
+
+	NewDevHTTPServer(service).Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("unexpected proxy response status=%d content-type=%q body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	if authorization != "Bearer stream-token" || orgID != "org_stream" || lastEventID != "xpkg_stream:2" {
+		t.Fatalf("proxy headers authorization=%q org=%q last-event-id=%q", authorization, orgID, lastEventID)
+	}
+	if !strings.Contains(response.Body.String(), "id: xpkg_stream:3") || strings.Contains(response.Body.String(), "stream-token") {
+		t.Fatalf("unexpected proxied stream: %s", response.Body.String())
 	}
 }
 

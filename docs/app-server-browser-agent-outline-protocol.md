@@ -14,13 +14,13 @@ App 端输出三份用户/机器共同审批材料：
 
 ## 当前联调入口
 
-公网 nginx 前缀：
+DemoOps 控制面必须通过独立配置提供，不能从客户产品 URL 推导：
 
 ```text
-https://cascadeai.cn/aigc
+<DEMOOPS_CONTROL_PLANE_BASE_URL>
 ```
 
-直连本地/内网 dev server：
+开发阶段服务可只监听服务器环回地址，并由开发机通过 SSH 端口转发访问：
 
 ```text
 http://127.0.0.1:4317
@@ -63,12 +63,12 @@ Content-Type: application/json
 
 ## HTTP API
 
-所有路径在公网部署下都加 `/aigc` 前缀；语义与无前缀路径一致。
+以下文档使用规范的无前缀路径。`/aigc` 仅是旧联调兼容前缀，不是产品域名或录制目标路径。
 
 ### 1. Init
 
 ```http
-POST /aigc/v1/execution-packages/init
+POST /v1/execution-packages/init
 ```
 
 请求：
@@ -103,7 +103,7 @@ POST /aigc/v1/execution-packages/init
 ### 2. Upload
 
 ```http
-POST /aigc/v1/execution-packages
+POST /v1/execution-packages
 ```
 
 dev 明文联调请求：
@@ -162,14 +162,14 @@ dev 明文联调请求：
 ### 3. Status
 
 ```http
-GET /aigc/v1/execution-packages/{exchange_package_id}/status
+GET /v1/execution-packages/{exchange_package_id}/status
 X-Cascade-Org-ID: org_devsmoke
 ```
 
 建议状态流：
 
 ```text
-accepted -> validating -> preparing_worker -> running_browser_agent -> recording -> rendering -> completed
+accepted -> validating -> preparing_worker -> browser_agent_planning -> script_ready -> recording -> material_validation -> directing -> rendering -> quality_validation -> completed
 ```
 
 失败状态：
@@ -192,7 +192,7 @@ accepted -> validating -> preparing_worker -> running_browser_agent -> recording
 ### 4. Result
 
 ```http
-GET /aigc/v1/result-packages/{result_package_id}
+GET /v1/result-packages/{result_package_id}
 X-Cascade-Org-ID: org_devsmoke
 ```
 
@@ -217,7 +217,7 @@ X-Cascade-Org-ID: org_devsmoke
 ### 5. Ack
 
 ```http
-POST /aigc/v1/result-packages/{result_package_id}/ack
+POST /v1/result-packages/{result_package_id}/ack
 X-Cascade-Org-ID: org_devsmoke
 ```
 
@@ -495,7 +495,9 @@ Server Browser Agent 收到 outline 包后应：
 8. 成功后生成 final video、raw recording、screenshots、trace 和 checksum。
 9. 失败时返回 redacted diagnostic + repair_request。
 
-Browser Agent 不应访问 exchange/control-plane 接口来“寻找产品页面”。`/aigc` 只属于上传通道，不属于产品脚本规划或录制探索范围。
+Browser Agent 不应访问 exchange/control-plane 接口来“寻找产品页面”。控制面路径只属于上传通道，不属于产品脚本规划或录制探索范围。
+
+`cascadeai.cn` 仅可在明确标注的 smoke fixture 中作为测试目标网站出现；它不是 DemoOps 控制面、更新源、遥测入口或产品域名。
 
 ## 服务端验收清单
 

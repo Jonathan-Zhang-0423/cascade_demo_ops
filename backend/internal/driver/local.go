@@ -6,22 +6,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 
 	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/model"
 )
 
 type LocalDriver struct {
-	NodeBinary string
-	WorkerPath string
+	NodeBinary  string
+	WorkerPath  string
+	Environment map[string]string
 }
 
-func NewLocalDriver(nodeBinary string, workerPath string) *LocalDriver {
+func NewLocalDriver(nodeBinary string, workerPath string, environment ...map[string]string) *LocalDriver {
 	if nodeBinary == "" {
 		nodeBinary = "node"
 	}
-	return &LocalDriver{NodeBinary: nodeBinary, WorkerPath: workerPath}
+	return &LocalDriver{NodeBinary: nodeBinary, WorkerPath: workerPath, Environment: firstEnvironment(environment)}
 }
 
 func (d *LocalDriver) Record(ctx context.Context, request executor.RecordRequest) (executor.RecordResult, error) {
@@ -53,6 +56,7 @@ func (d *LocalDriver) call(ctx context.Context, method string, params any, resul
 		return errors.New("node worker path is required")
 	}
 	cmd := exec.Command(d.NodeBinary, d.WorkerPath)
+	cmd.Env = childProcessEnvironment(d.Environment)
 	configureProcessTree(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -97,6 +101,35 @@ func (d *LocalDriver) call(ctx context.Context, method string, params any, resul
 		return errors.New(response.Error.Message)
 	}
 	return json.Unmarshal(response.Result, result)
+}
+
+func firstEnvironment(values []map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	return values[0]
+}
+
+func childProcessEnvironment(overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return nil
+	}
+	environment := os.Environ()
+	for name, value := range overrides {
+		if strings.TrimSpace(name) == "" || value == "" {
+			continue
+		}
+		prefix := name + "="
+		filtered := environment[:0]
+		for _, existing := range environment {
+			key, _, found := strings.Cut(existing, "=")
+			if !found || !strings.EqualFold(key, name) {
+				filtered = append(filtered, existing)
+			}
+		}
+		environment = append(filtered, prefix+value)
+	}
+	return environment
 }
 
 type rpcRequest struct {
