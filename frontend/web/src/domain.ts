@@ -159,6 +159,8 @@ export type CloudRunStatusView = {
   failureDiagnostic?: ScriptFailureDiagnostic;
   repairRequest?: ScriptRepairRequest;
 	resultReview?: ResultReviewState;
+	editorSessionID?: string;
+	editorMaterializationMessage?: string;
 };
 
 export type ResultReviewDecision = "approved" | "reedit_requested" | "rerecord_requested";

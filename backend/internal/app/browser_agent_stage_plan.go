@@ -25,6 +25,7 @@ type BrowserAgentRuntimePlan struct {
 	ForbiddenPages         []string
 	ExplorationScope       model.BrowserAgentExplorationScope
 	ForbiddenActions       []string
+	RepairPolicy           model.BrowserAgentRepairPolicy
 	Stages                 []BrowserAgentRuntimeStage
 }
 
@@ -46,6 +47,9 @@ type BrowserAgentRuntimeStage struct {
 	SuccessState   string
 	DurationMS     int
 	Validations    []model.ValidationSpec
+	// PreferredSelectorAlternative exists only for this in-memory run. It is
+	// set after the Worker has verified one App-approved fallback candidate.
+	PreferredSelectorAlternative *model.SelectorCandidate
 }
 
 type BrowserAgentActionIntent struct {
@@ -73,9 +77,11 @@ type BrowserAgentStageActionExecutor interface {
 }
 
 type BrowserAgentStageObservation struct {
-	Observation    model.RuntimeObservation
-	EvidenceRefs   []model.EvidenceRef
-	TargetResolved bool
+	Observation                  model.RuntimeObservation
+	EvidenceRefs                 []model.EvidenceRef
+	TargetResolved               bool
+	PreferredSelectorAlternative *model.SelectorCandidate
+	SuggestedWaitCondition       string
 }
 
 type BrowserAgentStageActionResult struct {
@@ -87,9 +93,16 @@ type BrowserAgentStageEventVerifier interface {
 	ValidateStageEvents(context.Context, BrowserAgentValidationContext, []model.StageExecutionEvent) (model.ValidationReport, error)
 }
 
+// BrowserAgentStageRepairProposer is deliberately separate from the verifier.
+// A verifier may describe a safe mechanical repair, but it never applies one.
+type BrowserAgentStageRepairProposer interface {
+	ProposeRuntimeRepair(context.Context, BrowserAgentValidationContext, BrowserAgentRuntimeStage, []model.StageExecutionEvent, model.ValidationReport) (model.RuntimeRepairProposal, error)
+}
+
 type BrowserAgentStageRunResult struct {
 	Events            []model.StageExecutionEvent
 	ValidationReports []model.ValidationReport
+	PatchLedger       []model.RuntimePatchLedgerEntry
 }
 
 type BrowserAgentPolicyGuard interface {
@@ -147,8 +160,13 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	result := BrowserAgentStageRunResult{
 		Events:            make([]model.StageExecutionEvent, 0, len(plan.Stages)*7),
 		ValidationReports: make([]model.ValidationReport, 0, len(plan.Stages)),
+		PatchLedger:       make([]model.RuntimePatchLedgerEntry, 0),
 	}
 	sequence := int64(0)
+	attemptByStage := make(map[string]int, len(plan.Stages))
+	for _, stage := range plan.Stages {
+		attemptByStage[stage.ID] = 1
+	}
 	appendEvent := func(stage BrowserAgentRuntimeStage, eventType model.StageExecutionEventType, observation *model.RuntimeObservation, evidenceRefs []model.EvidenceRef) error {
 		sequence++
 		event := model.StageExecutionEvent{
@@ -156,7 +174,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			EventID:       fmt.Sprintf("event_%s_%04d", safePathSegment(plan.RunID), sequence),
 			RunID:         plan.RunID, SourcePackageID: plan.SourcePackageID,
 			SourceBundleHashSHA256: plan.SourceBundleHashSHA256, PolicyHashSHA256: plan.PolicyHashSHA256,
-			NodeID: stage.NodeID, StageID: stage.ID, Attempt: 1, Sequence: sequence,
+			NodeID: stage.NodeID, StageID: stage.ID, Attempt: attemptByStage[stage.ID], Sequence: sequence,
 			EventType: eventType, OccurredAt: timeNowUTC(),
 		}
 		event.Observation = observation
@@ -192,6 +210,44 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		if err := appendEvent(stage, model.StageExecutionEventObservationCollected, &observed.Observation, observed.EvidenceRefs); err != nil {
 			return result, err
 		}
+		activeStage := stage
+		if observed.PreferredSelectorAlternative != nil || observed.SuggestedWaitCondition != "" {
+			proposal, proposalOK := browserAgentInitialObservationRepairProposal(plan, stage, observed)
+			if !proposalOK {
+				_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
+				return result, newRuntimeExecutionError("browser_agent_repair_proposal_invalid", errors.New("worker returned an invalid bounded observation repair"))
+			}
+			if err := appendEvent(stage, model.StageExecutionEventRepairProposed, &observed.Observation, proposal.EvidenceRefs); err != nil {
+				return result, err
+			}
+			patchedStage, ledgerEntry := evaluateBrowserAgentRepair(plan, stage, proposal, result.PatchLedger)
+			result.PatchLedger = append(result.PatchLedger, ledgerEntry)
+			if !ledgerEntry.Applied {
+				_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, proposal.EvidenceRefs)
+				return result, newRuntimeExecutionError("browser_agent_repair_policy_denied", fmt.Errorf("selector repair proposal %s was denied by policy", proposal.ProposalID))
+			}
+			attemptByStage[stage.ID]++
+			if err := appendEvent(stage, model.StageExecutionEventRepairApplied, &observed.Observation, proposal.EvidenceRefs); err != nil {
+				return result, err
+			}
+			repairedObservation, repairObserveErr := observer.ObserveStage(ctx, plan, patchedStage)
+			if repairObserveErr != nil || !repairedObservation.TargetResolved || !runtimeObservationIsRealEvidence(repairedObservation.Observation.Source) || len(repairedObservation.EvidenceRefs) == 0 {
+				_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, proposal.EvidenceRefs)
+				if repairObserveErr != nil {
+					return result, newRuntimeExecutionError("browser_agent_repair_observation_failed", repairObserveErr)
+				}
+				return result, newRuntimeExecutionError("browser_agent_repair_observation_failed", errors.New("approved selector repair did not resolve the target"))
+			}
+			if err := appendEvent(stage, model.StageExecutionEventObservationCollected, &repairedObservation.Observation, repairedObservation.EvidenceRefs); err != nil {
+				return result, err
+			}
+			observed = repairedObservation
+			activeStage = patchedStage
+		}
+		if !observed.TargetResolved {
+			_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
+			return result, newRuntimeExecutionError("browser_agent_target_not_resolved", errors.New("no approved selector candidate resolved the target"))
+		}
 		if observed.TargetResolved {
 			if err := appendEvent(stage, model.StageExecutionEventTargetResolved, &observed.Observation, observed.EvidenceRefs); err != nil {
 				return result, err
@@ -200,7 +256,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		if err := appendEvent(stage, model.StageExecutionEventActionStarted, &observed.Observation, observed.EvidenceRefs); err != nil {
 			return result, err
 		}
-		actionResult, err := executor.ExecuteStage(ctx, plan, stage)
+		actionResult, err := executor.ExecuteStage(ctx, plan, activeStage)
 		if err != nil {
 			_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
 			return result, newRuntimeExecutionError("browser_agent_action_failed", err)
@@ -229,8 +285,68 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			}
 			result.ValidationReports = append(result.ValidationReports, report)
 			if report.Decision == model.ValidationDecisionRepairAllowed {
-				_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, actionResult.EvidenceRefs)
-				return result, newRuntimeExecutionError("browser_agent_repair_policy_unavailable", fmt.Errorf("outcome verifier requested repair for stage %s, but no Repair Policy is configured", stage.ID))
+				proposer, ok := o.verifier.(BrowserAgentStageRepairProposer)
+				if !ok {
+					_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, actionResult.EvidenceRefs)
+					return result, newRuntimeExecutionError("browser_agent_repair_proposal_missing", fmt.Errorf("outcome verifier requested repair for stage %s without a proposal", stage.ID))
+				}
+				proposal, proposalErr := proposer.ProposeRuntimeRepair(ctx, BrowserAgentValidationContext{
+					SourcePackageID: plan.SourcePackageID, SourceBundleHashSHA256: plan.SourceBundleHashSHA256,
+					EffectivePolicyHashSHA256: plan.PolicyHashSHA256,
+				}, stage, stageEvents, report)
+				if proposalErr != nil {
+					_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, actionResult.EvidenceRefs)
+					return result, newRuntimeExecutionError("browser_agent_repair_proposal_invalid", proposalErr)
+				}
+				if err := proposal.Validate(); err != nil {
+					_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, actionResult.EvidenceRefs)
+					return result, newRuntimeExecutionError("browser_agent_repair_proposal_invalid", err)
+				}
+				report.RepairProposalRefs = append(report.RepairProposalRefs, proposal.ProposalID)
+				result.ValidationReports[len(result.ValidationReports)-1] = report
+				if err := appendEvent(stage, model.StageExecutionEventRepairProposed, actionResult.Observation, proposal.EvidenceRefs); err != nil {
+					return result, err
+				}
+				patchedStage, ledgerEntry := evaluateBrowserAgentRepair(plan, stage, proposal, result.PatchLedger)
+				result.PatchLedger = append(result.PatchLedger, ledgerEntry)
+				if !ledgerEntry.Applied {
+					_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, proposal.EvidenceRefs)
+					return result, newRuntimeExecutionError("browser_agent_repair_policy_denied", fmt.Errorf("repair proposal %s was denied by policy", proposal.ProposalID))
+				}
+				attemptByStage[stage.ID]++
+				if err := appendEvent(stage, model.StageExecutionEventRepairApplied, actionResult.Observation, proposal.EvidenceRefs); err != nil {
+					return result, err
+				}
+				repairEventStart := len(result.Events)
+				if err := appendEvent(stage, model.StageExecutionEventActionStarted, actionResult.Observation, proposal.EvidenceRefs); err != nil {
+					return result, err
+				}
+				repairActionResult, repairErr := executor.ExecuteStage(ctx, plan, patchedStage)
+				if repairErr != nil || repairActionResult.Observation == nil || !runtimeObservationIsRealEvidence(repairActionResult.Observation.Source) || len(repairActionResult.EvidenceRefs) == 0 {
+					_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, proposal.EvidenceRefs)
+					if repairErr != nil {
+						return result, newRuntimeExecutionError("browser_agent_repair_action_failed", repairErr)
+					}
+					return result, newRuntimeExecutionError("browser_agent_repair_action_failed", errors.New("repaired stage did not provide real completion evidence"))
+				}
+				if err := appendEvent(stage, model.StageExecutionEventActionCompleted, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
+					return result, err
+				}
+				if err := appendEvent(stage, model.StageExecutionEventOutcomeObserved, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
+					return result, err
+				}
+				repairEvents := result.Events[repairEventStart:]
+				repairReport, repairVerifyErr := o.verifier.ValidateStageEvents(ctx, BrowserAgentValidationContext{SourcePackageID: plan.SourcePackageID, SourceBundleHashSHA256: plan.SourceBundleHashSHA256, EffectivePolicyHashSHA256: plan.PolicyHashSHA256}, repairEvents)
+				if repairVerifyErr != nil || repairReport.Validate() != nil || repairReport.Decision != model.ValidationDecisionContinue {
+					_ = appendEvent(stage, model.StageExecutionEventStageFailed, repairActionResult.Observation, repairActionResult.EvidenceRefs)
+					if repairVerifyErr != nil {
+						return result, newRuntimeExecutionError("outcome_verification_failed", repairVerifyErr)
+					}
+					return result, newRuntimeExecutionError("outcome_verification_failed", fmt.Errorf("repaired stage %s did not pass outcome verification", stage.ID))
+				}
+				result.ValidationReports = append(result.ValidationReports, repairReport)
+				actionResult = repairActionResult
+				report = repairReport
 			}
 			if report.Decision != model.ValidationDecisionContinue {
 				_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, actionResult.EvidenceRefs)
@@ -250,6 +366,77 @@ func runtimeActionForStage(stage BrowserAgentRuntimeStage) *model.RuntimeAction 
 		action.Kind = string(stage.Interactions[0].Kind)
 	}
 	return &action
+}
+
+// browserAgentSelectorAlternativeProposal accepts only a candidate the Worker
+// already proved unique, visible, and contract-compatible on the live page.
+// It never constructs a selector from page content.
+func browserAgentSelectorAlternativeProposal(plan BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage, observed BrowserAgentStageObservation) model.RuntimeRepairProposal {
+	candidate := *observed.PreferredSelectorAlternative
+	return model.RuntimeRepairProposal{
+		SchemaVersion: model.RuntimeRepairProposalSchemaVersion,
+		ProposalID:    fmt.Sprintf("selector_%s_%s_%s", safePathSegment(plan.RunID), safePathSegment(stage.ID), safePathSegment(candidate.Kind+"_"+candidate.Value)),
+		RunID:         plan.RunID, NodeID: stage.NodeID, StageID: stage.ID,
+		BaseBundleHashSHA256: plan.SourceBundleHashSHA256, PolicyHashSHA256: plan.PolicyHashSHA256,
+		RepairKind: "selector_alternative", Field: "script_outline.stages[].components[].selector",
+		Before: currentStageSelector(stage), After: selectorCandidateEncoding(candidate),
+		Confidence: 1, EvidenceRefs: append([]model.EvidenceRef{}, observed.EvidenceRefs...), CreatedAt: timeNowUTC(),
+	}
+}
+
+func browserAgentInitialObservationRepairProposal(plan BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage, observed BrowserAgentStageObservation) (model.RuntimeRepairProposal, bool) {
+	if observed.PreferredSelectorAlternative != nil {
+		return browserAgentSelectorAlternativeProposal(plan, stage, observed), true
+	}
+	before := stageEntryWaitCondition(stage)
+	if before == "" || !strictlyLongerWaitCondition(before, observed.SuggestedWaitCondition) {
+		return model.RuntimeRepairProposal{}, false
+	}
+	return model.RuntimeRepairProposal{
+		SchemaVersion: model.RuntimeRepairProposalSchemaVersion,
+		ProposalID:    fmt.Sprintf("wait_%s_%s", safePathSegment(plan.RunID), safePathSegment(stage.ID)),
+		RunID:         plan.RunID, NodeID: stage.NodeID, StageID: stage.ID,
+		BaseBundleHashSHA256: plan.SourceBundleHashSHA256, PolicyHashSHA256: plan.PolicyHashSHA256,
+		RepairKind: "wait_strategy", Field: "script_outline.stages[].wait_conditions",
+		Before: before, After: observed.SuggestedWaitCondition,
+		Confidence: 1, EvidenceRefs: append([]model.EvidenceRef{}, observed.EvidenceRefs...), CreatedAt: timeNowUTC(),
+	}, true
+}
+
+func stageEntryWaitCondition(stage BrowserAgentRuntimeStage) string {
+	for _, condition := range stage.WaitConditions {
+		if _, ok := boundedEntryWaitMilliseconds(condition); ok {
+			return condition
+		}
+	}
+	return ""
+}
+
+func strictlyLongerWaitCondition(before, after string) bool {
+	beforeMS, beforeOK := boundedEntryWaitMilliseconds(before)
+	afterMS, afterOK := boundedEntryWaitMilliseconds(after)
+	return beforeOK && afterOK && afterMS > beforeMS
+}
+
+func boundedEntryWaitMilliseconds(condition string) (int, bool) {
+	var milliseconds int
+	if _, err := fmt.Sscanf(strings.TrimSpace(condition), "wait_after_entry_at_least_%dms", &milliseconds); err != nil || milliseconds < 0 || milliseconds > 15_000 {
+		return 0, false
+	}
+	return milliseconds, true
+}
+
+func currentStageSelector(stage BrowserAgentRuntimeStage) string {
+	for _, component := range stage.Components {
+		if stage.TargetContract.ComponentRef == "" || component.ComponentRef == stage.TargetContract.ComponentRef {
+			return component.Selector
+		}
+	}
+	return ""
+}
+
+func selectorCandidateEncoding(candidate model.SelectorCandidate) string {
+	return strings.TrimSpace(candidate.Kind) + ":" + strings.TrimSpace(candidate.Value)
 }
 
 func runtimeObservationIsRealEvidence(source model.RuntimeObservationSource) bool {
@@ -302,6 +489,7 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		ForbiddenPages:         append([]string{}, bundle.SecurityPolicy.ForbiddenPages...),
 		ExplorationScope:       bundle.ScriptOutline.AllowedExplorationScope,
 		ForbiddenActions:       append([]string{}, bundle.ScriptOutline.ForbiddenActions...),
+		RepairPolicy:           bundle.BrowserAgentContract.RepairPolicy,
 		Stages:                 make([]BrowserAgentRuntimeStage, 0, len(approvedStages)),
 	}
 	for index, approved := range approvedStages {
@@ -337,6 +525,7 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		if approvedTarget == nil || outlineTarget == nil || approvedTarget.SemanticID != outlineTarget.SemanticID || approvedTarget.Destructive != outlineTarget.Destructive {
 			return BrowserAgentRuntimePlan{}, newRuntimeExecutionError(runtimeErrorBrowserAgentContractViolation, fmt.Errorf("browser-agent target contract conflict for node_id %q", approved.NodeID))
 		}
+		capturePlan := mergeApprovedCapturePlan(approved.CapturePlan, outline.CapturePlan)
 		plan.Stages = append(plan.Stages, BrowserAgentRuntimeStage{
 			ID: approved.ID, Order: approved.Order, NodeID: approved.NodeID, Objective: approved.Objective,
 			BusinessIntent: approved.BusinessIntent, EntryRoute: firstNonEmptyString(outline.EntryRoute, approved.EntryRoute),
@@ -344,7 +533,7 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 			TargetContract: *approvedTarget, Components: append([]model.BrowserAgentComponentTarget{}, outline.Components...),
 			Interactions:   append([]model.BrowserAgentInteraction{}, outline.Interactions...),
 			WaitConditions: append([]string{}, outline.WaitConditions...), CapturePoints: append([]string{}, outline.CapturePoints...),
-			CapturePlan: outline.CapturePlan, SuccessState: approved.SuccessState, DurationMS: approved.DurationMS,
+			CapturePlan: capturePlan, SuccessState: approved.SuccessState, DurationMS: approved.DurationMS,
 			Validations: append([]model.ValidationSpec{}, planStep.Validations...),
 		})
 	}
@@ -352,6 +541,23 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		return BrowserAgentRuntimePlan{}, newRuntimeExecutionError(runtimeErrorBrowserAgentContractViolation, errors.New("script outline contains stages that were not approved"))
 	}
 	return plan, nil
+}
+
+// Explicit capture duration is an App-approved business requirement. The
+// outline may add wait/capture detail, but can never shorten that minimum.
+func mergeApprovedCapturePlan(approved, outline *model.BrowserAgentCapturePlan) *model.BrowserAgentCapturePlan {
+	if approved == nil && outline == nil {
+		return nil
+	}
+	if outline == nil {
+		copy := *approved
+		return &copy
+	}
+	copy := *outline
+	if approved != nil && approved.MinDurationMS > copy.MinDurationMS {
+		copy.MinDurationMS = approved.MinDurationMS
+	}
+	return &copy
 }
 
 func (contractBrowserAgentPolicyGuard) Authorize(plan BrowserAgentRuntimePlan, intent BrowserAgentActionIntent) BrowserAgentPolicyDecision {

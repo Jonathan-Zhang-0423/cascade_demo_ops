@@ -107,10 +107,29 @@ export type EditorTimelineStep = {
 };
 
 export type EditorOverlay = {
+  id?: string;
   type: string;
   text?: string;
   start_ms?: number;
   end_ms?: number;
+  // Presentation-only geometry is normalized to the source frame so a shape
+  // stays attached to its video or still-image shot at every output size.
+  shape?: "rectangle" | "circle" | "polygon" | "star" | "line" | "arrow";
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  color?: string;
+  stroke_width?: number;
+  rotation?: number;
+  opacity?: number;
+  fill_color?: string;
+  fill_opacity?: number;
+  tilt_preset?: string;
+  scale_x?: number;
+  scale_y?: number;
+  tilt_x?: number;
+  tilt_y?: number;
 };
 
 export type EditorShot = {

@@ -61,6 +61,18 @@ type CloudUploadPackageResult struct {
 	CloudBase string                               `json:"cloud_base_url,omitempty"`
 }
 
+// CloudPackagePreflightResult is a no-side-effect Server Intake report for
+// the App-generated package. It must pass before upload or Browser execution.
+type CloudPackagePreflightResult struct {
+	Valid          bool     `json:"valid"`
+	Runtime        string   `json:"runtime,omitempty"`
+	PackageID      string   `json:"package_id,omitempty"`
+	StageCount     int      `json:"stage_count,omitempty"`
+	RequiredChecks int      `json:"required_checks,omitempty"`
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	Message        string   `json:"message"`
+}
+
 type CloudStatusRequest struct {
 	OrgID             string `json:"org_id,omitempty"`
 	ExchangePackageID string `json:"exchange_package_id"`
@@ -102,6 +114,11 @@ func (s *Service) OpenCloudExecutionPackageEventStream(ctx context.Context, requ
 		return nil, fmt.Errorf("GET execution event stream returned %d: %s", response.StatusCode, redactBridgeError(string(body)))
 	}
 	return response, nil
+}
+
+type CloudEditorMaterializationRequest struct {
+	OrgID           string `json:"org_id,omitempty"`
+	ResultPackageID string `json:"result_package_id"`
 }
 
 type CloudResultRequest struct {
@@ -529,6 +546,40 @@ func (s *Service) UploadBuiltCloudExecutionPackage(ctx context.Context, uploadID
 	})
 }
 
+// PreflightCloudExecutionPackage validates the exact signed payload with the
+// Server Intake contract but never uploads, persists, or runs it.
+func (s *Service) PreflightCloudExecutionPackage(ctx context.Context, build ClientExecutionPackageBuild) (CloudPackagePreflightResult, error) {
+	if err := normalizeClientExecutionPackageForUpload(&build.Package); err != nil {
+		return CloudPackagePreflightResult{}, err
+	}
+	if build.Envelope.EnvelopeID == "" {
+		return CloudPackagePreflightResult{}, errors.New("exchange envelope is required for preflight")
+	}
+	if err := s.exchange.ValidateUpload(ctx, model.ExecutionPackageUploadRequest{
+		Envelope: build.Envelope, PayloadRef: build.PayloadRef,
+	}, build.Package); err != nil {
+		return CloudPackagePreflightResult{}, err
+	}
+	result := CloudPackagePreflightResult{
+		Valid: true, PackageID: build.Package.PackageID, AllowedDomains: append([]string{}, build.Package.RecordingRunSpec.AllowedDomains...),
+		Message: "Server Intake 校验通过：尚未上传、尚未启动浏览器、尚未读取任何客户页面。",
+	}
+	if bundle := build.Package.ExecutableScriptBundle; bundle != nil {
+		result.Runtime = bundle.ScriptManifest.Runtime
+		if bundle.PlanJSON != nil {
+			result.StageCount = len(bundle.PlanJSON.Steps)
+			for _, step := range bundle.PlanJSON.Steps {
+				for _, validation := range step.Validations {
+					if validation.Required {
+						result.RequiredChecks++
+					}
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
 func (s *Service) GetCloudExecutionPackageStatus(ctx context.Context, request CloudStatusRequest) (model.ExecutionPackageStatusResponse, error) {
 	if strings.TrimSpace(request.ExchangePackageID) == "" {
 		return model.ExecutionPackageStatusResponse{}, errors.New("exchange_package_id is required")
@@ -705,6 +756,17 @@ func cloudDownloadResult(deliverable model.ExecutionDeliverable, endpoint, local
 		ChecksumVerified: expected != "" && strings.EqualFold(sum, expected),
 		Resumed:          resumed,
 	}
+}
+
+func (s *Service) GetCloudEditorMaterialization(ctx context.Context, request CloudEditorMaterializationRequest) (EditorSessionMaterialization, error) {
+	if strings.TrimSpace(request.ResultPackageID) == "" {
+		return EditorSessionMaterialization{}, errors.New("result_package_id is required")
+	}
+	result, err := s.GetCloudResultPackage(ctx, CloudResultRequest{OrgID: request.OrgID, ResultPackageID: request.ResultPackageID})
+	if err != nil {
+		return EditorSessionMaterialization{}, err
+	}
+	return s.GetEditorSessionMaterialization(ctx, result)
 }
 
 func (s *Service) AckCloudResultPackage(ctx context.Context, request CloudAckRequest) (model.ResultPackageAckResponse, error) {

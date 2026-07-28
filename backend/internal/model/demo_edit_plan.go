@@ -295,11 +295,30 @@ type EditOperation struct {
 
 type EditOverlay struct {
 	Type           EditOverlayType `json:"type"`
+	ID             string          `json:"id,omitempty"`
 	Text           string          `json:"text,omitempty"`
 	SourceStepID   string          `json:"source_step_id,omitempty"`
 	TargetSelector string          `json:"target_selector,omitempty"`
 	StartMS        *int            `json:"start_ms,omitempty"`
 	EndMS          *int            `json:"end_ms,omitempty"`
+	// Shape geometry is normalized (0..1) to its parent shot. It remains
+	// presentation-only and cannot change the approved business action.
+	Shape       string   `json:"shape,omitempty"`
+	X           *float64 `json:"x,omitempty"`
+	Y           *float64 `json:"y,omitempty"`
+	Width       *float64 `json:"width,omitempty"`
+	Height      *float64 `json:"height,omitempty"`
+	Color       string   `json:"color,omitempty"`
+	StrokeWidth *int     `json:"stroke_width,omitempty"`
+	Rotation    *float64 `json:"rotation,omitempty"`
+	Opacity     *float64 `json:"opacity,omitempty"`
+	FillColor   string   `json:"fill_color,omitempty"`
+	FillOpacity *float64 `json:"fill_opacity,omitempty"`
+	TiltPreset  string   `json:"tilt_preset,omitempty"`
+	ScaleX      *float64 `json:"scale_x,omitempty"`
+	ScaleY      *float64 `json:"scale_y,omitempty"`
+	TiltX       *float64 `json:"tilt_x,omitempty"`
+	TiltY       *float64 `json:"tilt_y,omitempty"`
 }
 
 type DemoEditPlanValidationReport struct {

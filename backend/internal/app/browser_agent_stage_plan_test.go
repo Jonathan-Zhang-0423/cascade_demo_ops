@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -147,6 +148,100 @@ func TestBrowserAgentStageOrchestratorStopsWhenOutcomeVerifierBlocks(t *testing.
 	}
 }
 
+func TestBrowserAgentStageOrchestratorReexecutesOnlyApprovedRepairAndRecordsLedger(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := &repairThenContinueVerifier{}
+	executor := &countingStageExecutor{}
+	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier)
+	result, err := orchestrator.Run(context.Background(), plan, stubStageObserver{}, executor, &memoryStageEventSink{})
+	if err != nil {
+		t.Fatalf("approved repair must re-execute its stage: %v", err)
+	}
+	if verifier.calls != len(plan.Stages)+1 || executor.calls != len(plan.Stages)+1 {
+		t.Fatalf("expected exactly one re-execution after repair: verifier=%d executor=%d", verifier.calls, executor.calls)
+	}
+	if len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied {
+		t.Fatalf("approved repair was not written to the patch ledger: %+v", result.PatchLedger)
+	}
+	if len(result.ValidationReports) < 2 || len(result.ValidationReports[0].RepairProposalRefs) != 1 {
+		t.Fatalf("repair proposal must remain linked to the verifier report: %+v", result.ValidationReports)
+	}
+	seenProposed, seenApplied, seenRetry := false, false, false
+	for _, event := range result.Events {
+		seenProposed = seenProposed || event.EventType == model.StageExecutionEventRepairProposed
+		seenApplied = seenApplied || event.EventType == model.StageExecutionEventRepairApplied
+		seenRetry = seenRetry || (event.EventType == model.StageExecutionEventActionStarted && event.Attempt == 2)
+	}
+	if !seenProposed || !seenApplied {
+		t.Fatalf("repair audit events are missing: %+v", result.Events)
+	}
+	if !seenRetry {
+		t.Fatalf("repaired action must be marked as the second attempt: %+v", result.Events)
+	}
+}
+
+func TestBrowserAgentStageOrchestratorAppliesOnlyWorkerVerifiedSelectorAlternative(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := plan.Stages[1]
+	if len(stage.Components) == 0 || len(stage.Components[0].SelectorAlternatives) == 0 {
+		t.Fatal("fixture must declare an App-approved selector alternative")
+	}
+	observer := &selectorAlternativeObserver{candidate: stage.Components[0].SelectorAlternatives[0]}
+	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, &stubStageVerifier{decision: model.ValidationDecisionContinue})
+	result, err := orchestrator.Run(context.Background(), plan, observer, &stubStageExecutor{}, &memoryStageEventSink{})
+	if err != nil {
+		t.Fatalf("worker-verified approved alternative should be applied: %v", err)
+	}
+	if observer.calls != len(plan.Stages)+1 || len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied {
+		t.Fatalf("expected exactly one selector patch and re-observation: calls=%d ledger=%+v", observer.calls, result.PatchLedger)
+	}
+	entry := result.PatchLedger[0]
+	if entry.After != selectorCandidateEncoding(stage.Components[0].SelectorAlternatives[0]) || entry.Field != "script_outline.stages[].components[].selector" {
+		t.Fatalf("selector patch must retain the approved candidate identity: %+v", entry)
+	}
+}
+
+func TestBrowserAgentStageOrchestratorStopsWithoutWorkerVerifiedAlternative(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := unresolvedStageObserver{}
+	result, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Run(context.Background(), plan, observer, &stubStageExecutor{}, &memoryStageEventSink{})
+	if runtimeExecutionErrorCode(err) != "browser_agent_target_not_resolved" || len(result.PatchLedger) != 0 {
+		t.Fatalf("unverified alternatives must never be guessed or patched: code=%q ledger=%+v err=%v", runtimeExecutionErrorCode(err), result.PatchLedger, err)
+	}
+}
+
+func TestBrowserAgentStageOrchestratorAppliesBusyPageWaitRepairOnce(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := &busyPageWaitObserver{}
+	result, err := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, &stubStageVerifier{decision: model.ValidationDecisionContinue}).Run(context.Background(), plan, observer, &stubStageExecutor{}, &memoryStageEventSink{})
+	if err != nil {
+		t.Fatalf("busy-page wait repair should remain in the approved stage: %v", err)
+	}
+	if observer.calls != len(plan.Stages)+1 || len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied {
+		t.Fatalf("expected one wait repair and one re-observation: calls=%d ledger=%+v", observer.calls, result.PatchLedger)
+	}
+	entry := result.PatchLedger[0]
+	if entry.Reason != "approved bounded runtime repair" || entry.Before != "wait_after_entry_at_least_1000ms" || entry.After != "wait_after_entry_at_least_2000ms" {
+		t.Fatalf("wait repair must be a bounded increase of the declared entry wait: %+v", entry)
+	}
+}
+
 type stubStageObserver struct{}
 
 func (stubStageObserver) ObserveStage(context.Context, BrowserAgentRuntimePlan, BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
@@ -155,6 +250,42 @@ func (stubStageObserver) ObserveStage(context.Context, BrowserAgentRuntimePlan, 
 		EvidenceRefs:   []model.EvidenceRef{{ID: "observation_1", Kind: model.EvidenceKindBrowserTrace}},
 		TargetResolved: true,
 	}, nil
+}
+
+type selectorAlternativeObserver struct {
+	calls     int
+	candidate model.SelectorCandidate
+}
+
+func (o *selectorAlternativeObserver) ObserveStage(_ context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
+	o.calls++
+	resolved := stage.PreferredSelectorAlternative != nil || stage.NodeID != "node_invite_member"
+	observation := model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, Title: "Dashboard"}
+	if !resolved {
+		observation.Assertions = []model.RuntimeAssertion{{Kind: "target_resolved", Passed: false, Actual: "browser_agent_target_not_resolved: node_invite_member; strategies=primary"}}
+		return BrowserAgentStageObservation{Observation: observation, EvidenceRefs: []model.EvidenceRef{{ID: "selector_before", Kind: model.EvidenceKindBrowserTrace}}, TargetResolved: false, PreferredSelectorAlternative: &o.candidate}, nil
+	}
+	observation.Assertions = []model.RuntimeAssertion{{Kind: "target_resolved", Passed: true, Actual: "approved_testid"}}
+	return BrowserAgentStageObservation{Observation: observation, EvidenceRefs: []model.EvidenceRef{{ID: "selector_after", Kind: model.EvidenceKindBrowserTrace}}, TargetResolved: true}, nil
+}
+
+type unresolvedStageObserver struct{}
+
+func (unresolvedStageObserver) ObserveStage(_ context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
+	return BrowserAgentStageObservation{Observation: model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: false, Actual: "browser_agent_target_not_resolved"}}}, EvidenceRefs: []model.EvidenceRef{{ID: "unresolved", Kind: model.EvidenceKindBrowserTrace}}, TargetResolved: stage.NodeID != "node_invite_member"}, nil
+}
+
+type busyPageWaitObserver struct{ calls int }
+
+func (o *busyPageWaitObserver) ObserveStage(_ context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
+	o.calls++
+	resolved := stage.NodeID != "node_invite_member" || containsExact(stage.WaitConditions, "wait_after_entry_at_least_2000ms")
+	observation := model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: resolved, Actual: "live_page"}}}
+	result := BrowserAgentStageObservation{Observation: observation, EvidenceRefs: []model.EvidenceRef{{ID: fmt.Sprintf("busy_%d", o.calls), Kind: model.EvidenceKindBrowserTrace}}, TargetResolved: resolved}
+	if !resolved {
+		result.SuggestedWaitCondition = "wait_after_entry_at_least_2000ms"
+	}
+	return result, nil
 }
 
 type stubStageExecutor struct{ failNodeID string }
@@ -179,6 +310,29 @@ func (s *memoryStageEventSink) Append(_ context.Context, event model.StageExecut
 type stubStageVerifier struct {
 	decision model.ValidationDecision
 	calls    int
+}
+
+type countingStageExecutor struct{ calls int }
+
+func (e *countingStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	e.calls++
+	return BrowserAgentStageActionResult{Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "element_visible", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: fmt.Sprintf("action_%d", e.calls), Kind: model.EvidenceKindBrowserTrace}}}, nil
+}
+
+type repairThenContinueVerifier struct{ calls int }
+
+func (v *repairThenContinueVerifier) ValidateStageEvents(_ context.Context, context BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
+	v.calls++
+	last := events[len(events)-1]
+	decision := model.ValidationDecisionContinue
+	if v.calls == 1 {
+		decision = model.ValidationDecisionRepairAllowed
+	}
+	return model.ValidationReport{SchemaVersion: model.ValidationReportSchemaVersion, ReportID: fmt.Sprintf("repair_report_%d", v.calls), RunID: last.RunID, SourcePackageID: context.SourcePackageID, SourceBundleHashSHA256: context.SourceBundleHashSHA256, PolicyHashSHA256: context.EffectivePolicyHashSHA256, Phase: model.ValidationPhaseRuntimeStage, NodeID: last.NodeID, StageID: last.StageID, Decision: decision, PassRate: 1, OverallConfidence: .95, EvidenceQuality: model.RuntimeObservationActualBrowser, EvidenceRefs: []model.EvidenceRef{{ID: "verification_repair", Kind: model.EvidenceKindBrowserTrace}}, CreatedAt: timeNowUTC()}, nil
+}
+
+func (v *repairThenContinueVerifier) ProposeRuntimeRepair(_ context.Context, context BrowserAgentValidationContext, stage BrowserAgentRuntimeStage, events []model.StageExecutionEvent, _ model.ValidationReport) (model.RuntimeRepairProposal, error) {
+	return model.RuntimeRepairProposal{SchemaVersion: model.RuntimeRepairProposalSchemaVersion, ProposalID: "repair_wait_1", RunID: events[len(events)-1].RunID, NodeID: stage.NodeID, StageID: stage.ID, BaseBundleHashSHA256: context.SourceBundleHashSHA256, PolicyHashSHA256: context.EffectivePolicyHashSHA256, RepairKind: "wait_strategy", Field: "script_outline.stages[].wait_conditions", Before: stage.WaitConditions[0], After: "wait_after_entry_at_least_1500ms", Confidence: .95, EvidenceRefs: []model.EvidenceRef{{ID: "proposal_evidence", Kind: model.EvidenceKindBrowserTrace}}, CreatedAt: timeNowUTC()}, nil
 }
 
 func (v *stubStageVerifier) ValidateStageEvents(_ context.Context, context BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {

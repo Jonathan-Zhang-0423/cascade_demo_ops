@@ -415,6 +415,43 @@ func TestEnsureEditorSessionFromResultPackageReusesResultHandoff(t *testing.T) {
 	}
 }
 
+func TestMaterializeEditorSessionFromResultPackageUsesOnlyArtifactRoot(t *testing.T) {
+	service := newTestEditorService(t)
+	recordingPath := filepath.Join(service.runtime.ArtifactRoot, "exchange", "job_1", "recording.webm")
+	if err := os.MkdirAll(filepath.Dir(recordingPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordingPath, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service.editorWorker = &fakeEditorWorker{probeResult: executor.MediaProbeResult{
+		Path: recordingPath, FileName: "recording.webm", SizeBytes: 7, SHA256: "sha256:fixture", MimeType: "video/webm", DurationMS: 3000,
+	}}
+	result := model.RecordingResultPackage{
+		ResultID: "result_auto_editor", SourcePackageID: "package_auto_editor", CloudJobID: "job_auto_editor",
+		SchemaVersion: model.RecordingResultPackageSchemaVersion, Status: model.RecordingResultStatusGenerated,
+		GeneratedAssets: []model.ArtifactRef{{ID: "raw_auto_editor", Kind: "raw_recording", URI: localFileURI(recordingPath), SHA256: "sha256:fixture"}},
+	}
+	materialized, err := service.MaterializeEditorSessionFromResultPackage(t.Context(), result)
+	if err != nil || !materialized.Ready || !materialized.Created || materialized.SessionID == "" {
+		t.Fatalf("expected a Server-owned recording to enter editor: %+v err=%v", materialized, err)
+	}
+	failed := result
+	failed.Status = model.RecordingResultStatusFailed
+	failed.ResultID = "result_auto_editor_failed"
+	blocked, err := service.MaterializeEditorSessionFromResultPackage(t.Context(), failed)
+	if err != nil || blocked.Ready || blocked.SessionID != "" {
+		t.Fatalf("failed results must not create editor sessions: %+v err=%v", blocked, err)
+	}
+	outside := result
+	outside.ResultID = "result_outside_editor"
+	outside.GeneratedAssets[0].URI = localFileURI(filepath.Join(t.TempDir(), "outside.webm"))
+	notReady, err := service.MaterializeEditorSessionFromResultPackage(t.Context(), outside)
+	if err != nil || notReady.Ready {
+		t.Fatalf("paths outside artifact root must not be auto-imported: %+v err=%v", notReady, err)
+	}
+}
+
 func TestEditorSessionFromEncryptedResultRequiresLocalRecording(t *testing.T) {
 	service := newTestEditorService(t)
 	worker := &fakeEditorWorker{}

@@ -26,6 +26,9 @@ type localBrowserAgentOutlineRunner struct {
 	service        *Service
 	sessionFactory browserAgentWorkerSessionFactory
 	renderService  executor.RenderService
+	// outcomeVerifier is an optional Server-owned injection point for the
+	// Validation Agent adapter. It may propose repairs but cannot apply them.
+	outcomeVerifier BrowserAgentStageEventVerifier
 }
 
 type localBrowserAgentStageRuntime struct {
@@ -78,17 +81,21 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	stageRuntime := &localBrowserAgentStageRuntime{
 		session: session, progress: request.Progress, stageCount: len(request.RuntimePlan.Stages), artifacts: map[string]model.ArtifactRef{},
 	}
-	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, newDeterministicBrowserAgentStageVerifier(request.Package))
+	verifier := r.outcomeVerifier
+	if verifier == nil {
+		verifier = newDeterministicBrowserAgentStageVerifier(request.Package)
+	}
+	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier)
 	startedAt := timeNowUTC()
 	runResult, runErr := orchestrator.Run(ctx, request.RuntimePlan, stageRuntime, stageRuntime, request.EventSink)
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 15*time.Second)
 	closeResult, closeErr := session.Close(cleanupCtx)
 	cancelCleanup()
 	closed = true
-	if runErr != nil {
-		return model.RecordingResultPackage{}, runErr
-	}
 	if closeErr != nil {
+		if runErr != nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_session_close_failed", fmt.Errorf("browser-agent execution failed and the session could not close: %w", closeErr))
+		}
 		return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_session_close_failed", closeErr)
 	}
 	for _, artifact := range closeResult.Artifacts {
@@ -104,19 +111,26 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		SandboxMetadata: browserAgentSandboxMetadata(request.Package, mergeRuntimeVersions(openResult.RuntimeVersions, closeResult.RuntimeVersions)),
 		StartedAt:       startedAt, CompletedAt: completedAt,
 	}
+	if runErr != nil {
+		recordResult.StepResults = browserAgentFailedStepResults(request.RuntimePlan, runResult.Events, stageRuntime.artifacts, runErr)
+		recordResult.FailureDiagnostic = browserAgentFailureDiagnostic(request, runResult.Events, stageRuntime.artifacts, runErr, completedAt)
+	}
 	progressBrowserAgent(request.Progress, "packaging_recording", "正在整理录屏、截图、验证报告和阶段审计记录。", 94)
 	result, err := executor.NewRecordingResultPackageFromRecordResult(request.Package, recordResult, request.CloudJobID, request.ResultCreatedAt)
 	if err != nil {
 		return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_result_packaging_failed", err)
 	}
 	result.ValidationReports = append([]model.ValidationReport{}, runResult.ValidationReports...)
-	progressBrowserAgent(request.Progress, "material_validation", "录屏、截图、trace 和阶段证据已通过素材校验。", 74)
-	renderService := r.renderService
-	if renderService == nil {
-		renderService = r.service.editorWorker
-	}
-	if _, _, err := executor.RenderClientExecutionRecordingResult(ctx, renderService, request.Package, &result, request.RenderOutputDir, request.Progress); err != nil {
-		return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_render_failed", err)
+	result.PatchLedger = append([]model.RuntimePatchLedgerEntry{}, runResult.PatchLedger...)
+	if result.Status == model.RecordingResultStatusGenerated && request.Package.RecordingRunSpec.Outputs.FinalVideo {
+		progressBrowserAgent(request.Progress, "material_validation", "录屏、截图、trace 和阶段证据已通过素材校验。", 74)
+		renderService := r.renderService
+		if renderService == nil {
+			renderService = r.service.editorWorker
+		}
+		if _, _, err := executor.RenderClientExecutionRecordingResult(ctx, renderService, request.Package, &result, request.RenderOutputDir, request.Progress); err != nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_render_failed", err)
+		}
 	}
 	return result, nil
 }
@@ -129,7 +143,7 @@ func (r *localBrowserAgentStageRuntime) ObserveStage(ctx context.Context, _ Brow
 		return BrowserAgentStageObservation{}, err
 	}
 	r.collect(result.Artifacts)
-	return BrowserAgentStageObservation{Observation: result.Observation, EvidenceRefs: result.EvidenceRefs, TargetResolved: result.TargetResolved}, nil
+	return BrowserAgentStageObservation{Observation: result.Observation, EvidenceRefs: result.EvidenceRefs, TargetResolved: result.TargetResolved, PreferredSelectorAlternative: result.PreferredSelectorAlternative, SuggestedWaitCondition: result.SuggestedWaitCondition}, nil
 }
 
 func (r *localBrowserAgentStageRuntime) ExecuteStage(ctx context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
@@ -267,7 +281,8 @@ func workerStageFromRuntime(stage BrowserAgentRuntimeStage) driver.BrowserAgentW
 		Interactions:   append([]model.BrowserAgentInteraction{}, stage.Interactions...),
 		WaitConditions: append([]string{}, stage.WaitConditions...), CapturePlan: stage.CapturePlan,
 		SuccessState: stage.SuccessState, DurationMS: stage.DurationMS,
-		Validations: append([]model.ValidationSpec{}, stage.Validations...),
+		Validations:                  append([]model.ValidationSpec{}, stage.Validations...),
+		PreferredSelectorAlternative: stage.PreferredSelectorAlternative,
 	}
 }
 
@@ -298,6 +313,102 @@ func browserAgentStepResults(plan BrowserAgentRuntimePlan, events []model.StageE
 		results = append(results, result)
 	}
 	return results
+}
+
+// Keep completed stages intact and mark only the stopped stage as failed.
+// This prevents a runtime error from becoming plan-derived success evidence.
+func browserAgentFailedStepResults(plan BrowserAgentRuntimePlan, events []model.StageExecutionEvent, artifacts map[string]model.ArtifactRef, runErr error) []model.StepResult {
+	results := browserAgentStepResults(plan, events, artifacts)
+	completed := map[string]bool{}
+	for _, event := range events {
+		if event.EventType == model.StageExecutionEventStageCompleted {
+			completed[event.NodeID] = true
+		}
+	}
+	for index := range results {
+		if !completed[results[index].NodeID] {
+			results[index].Status = "not_started"
+			results[index].ObservedState = "Not executed because Browser Agent stopped earlier."
+			results[index].Error = nil
+		}
+	}
+	failedNodeID := ""
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].EventType == model.StageExecutionEventStageFailed && events[index].NodeID != "" {
+			failedNodeID = events[index].NodeID
+			break
+		}
+	}
+	if failedNodeID == "" && len(plan.Stages) > 0 {
+		failedNodeID = plan.Stages[0].NodeID
+	}
+	for index := range results {
+		if results[index].NodeID == failedNodeID {
+			results[index].Status = "failed"
+			results[index].ObservedState = "Browser Agent stopped before this approved stage completed."
+			results[index].Error = &model.AgentError{Code: runtimeExecutionErrorCode(runErr), Message: "Browser Agent execution stopped; see the redacted failure diagnostic."}
+			break
+		}
+	}
+	return results
+}
+
+func browserAgentFailureDiagnostic(request BrowserAgentOutlineRunRequest, events []model.StageExecutionEvent, artifacts map[string]model.ArtifactRef, runErr error, capturedAt time.Time) *model.ScriptFailureDiagnostic {
+	failedNodeID, failedStageID, currentURL, pageTitle := "unknown", "", "", ""
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		if event.NodeID != "" && (event.EventType == model.StageExecutionEventStageFailed || failedNodeID == "unknown") {
+			failedNodeID, failedStageID = event.NodeID, event.StageID
+		}
+		if event.Observation != nil {
+			if currentURL == "" {
+				currentURL = event.Observation.URL
+			}
+			if pageTitle == "" {
+				pageTitle = event.Observation.Title
+			}
+		}
+	}
+	failedOrder := 0
+	for _, stage := range request.RuntimePlan.Stages {
+		if stage.NodeID == failedNodeID {
+			failedOrder = stage.Order
+			break
+		}
+	}
+	code := runtimeExecutionErrorCode(runErr)
+	if code == "execution_failed" {
+		code = "browser_agent_execution_failed"
+	}
+	maskedSelectors := append([]string{}, request.Package.RecordingRunSpec.Redactions.MaskSelectors...)
+	maskedSelectors = append(maskedSelectors, request.Package.SafetyReport.RedactionSelectors...)
+	diagnostic := &model.ScriptFailureDiagnostic{
+		ID: "diag_" + safePathSegment(firstNonEmptyString(failedStageID, failedNodeID)), SchemaVersion: model.ScriptFailureDiagnosticSchemaVersion,
+		SourcePackageID: request.Package.PackageID, CloudJobID: request.CloudJobID, FailedNodeID: failedNodeID,
+		FailedStepOrder: failedOrder, Attempt: 1,
+		Error:      model.AgentError{Code: code, Message: "Browser Agent stopped before the approved stage could be completed.", Retryable: false},
+		CurrentURL: currentURL, PageTitle: pageTitle,
+		RedactionReport: model.DiagnosticRedactionReport{Applied: true, PolicyRef: request.Package.PackageID + ".redactions", MaskedSelectors: uniqueStrings(maskedSelectors), FullHTMLIncluded: false},
+		CapturedAt:      capturedAt,
+	}
+	for _, artifact := range mapBrowserAgentArtifacts(artifacts) {
+		if artifact.Kind == "browser_trace" {
+			diagnostic.TraceRefs = append(diagnostic.TraceRefs, browserAgentDiagnosticArtifact(artifact, "failure_trace"))
+			continue
+		}
+		if artifact.SourceNodeID == failedNodeID && (artifact.Kind == "screenshot" || artifact.Kind == "failure_screenshot") {
+			diagnostic.ScreenshotRefs = append(diagnostic.ScreenshotRefs, browserAgentDiagnosticArtifact(artifact, "failure_screenshot"))
+		}
+	}
+	return diagnostic
+}
+
+func browserAgentDiagnosticArtifact(artifact model.ArtifactRef, role string) model.PackageArtifactDescriptor {
+	metadata := map[string]any{"dev_local_artifact": true}
+	for key, value := range artifact.Metadata {
+		metadata[key] = value
+	}
+	return model.PackageArtifactDescriptor{ID: artifact.ID, Role: role, Kind: artifact.Kind, URI: artifact.URI, MimeType: artifact.MimeType, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes, Encrypted: true, Sensitive: true, RecipientKeyID: "local-dev/result-key", Metadata: metadata}
 }
 
 func mapBrowserAgentArtifacts(values map[string]model.ArtifactRef) []model.ArtifactRef {

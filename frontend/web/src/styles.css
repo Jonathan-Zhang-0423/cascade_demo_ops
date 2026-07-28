@@ -924,6 +924,116 @@ tbody tr:hover,
   background: rgb(255 255 255 / 70%);
 }
 
+.browser-agent-acceptance-panel {
+  display: grid;
+}
+
+.package-preflight-panel {
+  border-color: rgba(83, 182, 136, 0.35);
+}
+
+.editor-handoff-panel {
+  border-color: rgba(87, 126, 208, 0.3);
+}
+
+.handoff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.preflight-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+@media (max-width: 900px) {
+  .preflight-facts {
+    grid-template-columns: 1fr;
+  }
+}
+
+.acceptance-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  padding: 14px;
+  border-bottom: 1px solid #e1e6ea;
+  background: #fbfcfd;
+}
+
+.acceptance-intro div {
+  display: grid;
+  gap: 8px;
+}
+
+.acceptance-intro p,
+.acceptance-path,
+.acceptance-stop {
+  margin: 0;
+  color: #60717e;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.acceptance-list {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.acceptance-case {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid #d6dde3;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.acceptance-case.passed { border-color: #b6dfc2; background: #f7fcf8; }
+.acceptance-case.failed { border-color: #f2b8b5; background: #fff6f5; }
+
+.acceptance-case-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.acceptance-case-head div { display: grid; gap: 3px; }
+.acceptance-case-head small { color: #60717e; font-size: 11px; }
+
+.acceptance-expected,
+.acceptance-checks,
+.acceptance-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+  color: #40515c;
+  font-size: 12px;
+}
+
+.acceptance-expected span,
+.acceptance-checks span,
+.acceptance-evidence a {
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: #edf2f5;
+}
+
+.acceptance-checks span.ok { color: #176d3a; background: #e5f6e9; }
+.acceptance-checks span.blocked { color: #7a5400; background: #fff1c7; }
+.acceptance-evidence a { color: #146a9e; text-decoration: none; }
+.acceptance-evidence a:hover { text-decoration: underline; }
+.acceptance-path { padding: 0 14px 14px; }
+
 .sandbox-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;

@@ -76,6 +76,22 @@ function plan(): DemoEditPlan {
   };
 }
 
+function planWithShape(): DemoEditPlan {
+  const result = plan();
+  result.shots[0]!.overlays = [{
+    type: "highlight_box", shape: "rectangle", x: 0.2, y: 0.2, width: 0.4, height: 0.3,
+    color: "#dc58d5", stroke_width: 5, fill_color: "#dc58d5", fill_opacity: 10, rotation: 24, scale_x: 125, scale_y: 75,
+    start_ms: 100, end_ms: 900,
+  }, {
+    type: "highlight_box", shape: "polygon", x: 0.08, y: 0.08, width: 0.18, height: 0.16,
+    color: "#1da7ff", stroke_width: 3, fill_color: "#1da7ff", fill_opacity: 20, start_ms: 150, end_ms: 850,
+  }, {
+    type: "highlight_box", shape: "star", x: 0.7, y: 0.55, width: 0.16, height: 0.22,
+    color: "#f0b429", stroke_width: 3, fill_color: "#f0b429", fill_opacity: 25, start_ms: 200, end_ms: 800,
+  }];
+  return result;
+}
+
 describe("static screenshot compositor e2e", () => {
   renderWithFFmpeg("renders a still image with a silent compatible audio stream and concatenates it to recording video", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cascade-still-render-"));
@@ -103,6 +119,24 @@ describe("static screenshot compositor e2e", () => {
       expect(mediaInfo).toContain("320x180");
       expect(mediaInfo).toMatch(/Video:/);
       expect(mediaInfo).toMatch(/Audio:/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  renderWithFFmpeg("burns a supported rectangle annotation into the rendered video", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-shape-render-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const screenshotPath = path.join(root, "step.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "mpeg4", "-c:a", "aac", recordingPath]);
+      await writeFile(screenshotPath, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlIP9sAAAAASUVORK5CYII=", "base64"));
+      const result = await render({ output_dir: path.join(root, "render"), asset_timeline_catalog: catalog(recordingPath, screenshotPath), edit_plan: planWithShape(), render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" } });
+      const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
+      expect(manifest.compositor.applied_operations).toContain("highlight_box");
+      expect(manifest.compositor.skipped_operations).not.toEqual(expect.arrayContaining([expect.objectContaining({ type: "highlight_box" })]));
+      const savedPlan = JSON.parse(await readFile(result.edit_plan_path, "utf8"));
+      expect(savedPlan.shots[0].overlays[0]).toMatchObject({ rotation: 24, scale_x: 125, scale_y: 75 });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

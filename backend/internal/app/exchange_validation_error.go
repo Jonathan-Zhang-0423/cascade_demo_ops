@@ -108,6 +108,16 @@ func inferValidationField(message string) string {
 		return "payload.project_context_summary"
 	case strings.Contains(lower, "recording_run_spec."):
 		return "payload." + fieldAfter(lower, "recording_run_spec.")
+	case strings.Contains(lower, "stage_approval_plan"):
+		return "payload.executable_script_bundle.stage_approval_plan"
+	case strings.Contains(lower, "script_outline"):
+		return "payload.executable_script_bundle.script_outline"
+	case strings.Contains(lower, "agent_prompt_policy"):
+		return "payload.executable_script_bundle.agent_prompt_policy"
+	case strings.Contains(lower, "browser_agent_contract"):
+		return "payload.executable_script_bundle.browser_agent_contract"
+	case strings.Contains(lower, "node_id"):
+		return "payload.executable_script_bundle.plan_json.steps[].node_id"
 	case strings.Contains(lower, "executable script bundle") || strings.Contains(lower, "playwright_script") || strings.Contains(lower, "approval_markdown"):
 		return "payload.executable_script_bundle"
 	case strings.Contains(lower, "sandbox"):

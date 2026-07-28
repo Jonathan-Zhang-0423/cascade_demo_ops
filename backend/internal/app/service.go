@@ -89,6 +89,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		outlineRunner: nil,
 	}
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
+	service.exchange.SetInlinePayloadAllowed(runtime.Profile != config.ProfileCloud)
 	service.outlineRunner = localBrowserAgentOutlineRunner{service: service}
 	return service, nil
 }
@@ -331,14 +332,104 @@ func (s *Service) CompleteExecutionPackageWithResult(ctx context.Context, orgID 
 	if err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
 	}
-	// A completed local recording should immediately become an editable session.
-	// Failure to materialize a local source must not roll back the completed
-	// recording result; remote/encrypted artifacts are handled only after they
-	// have been downloaded and decrypted into Server-managed storage.
-	if result.Status != model.RecordingResultStatusFailed {
-		_, _, _ = s.EnsureEditorSessionFromResultPackage(ctx, model.EditorCreateFromResultPackageRequest{ResultPackage: &result})
-	}
+	// A completed Server-owned recording should immediately enter the editor
+	// inbox. A handoff failure must not roll back the already valid result.
+	_, _ = s.MaterializeEditorSessionFromResultPackage(ctx, result)
 	return status, nil
+}
+
+// EditorSessionMaterialization reports whether a successful result is ready
+// for the local editor. Remote encrypted artifacts require a future download
+// and decryption handoff, so they are deliberately not imported directly.
+type EditorSessionMaterialization struct {
+	Ready     bool   `json:"ready"`
+	Created   bool   `json:"created"`
+	SessionID string `json:"session_id,omitempty"`
+	Message   string `json:"message"`
+}
+
+func (s *Service) MaterializeEditorSessionFromResultPackage(ctx context.Context, result model.RecordingResultPackage) (EditorSessionMaterialization, error) {
+	if result.Status == model.RecordingResultStatusFailed {
+		return EditorSessionMaterialization{Message: "任务失败，素材保留在失败复盘中，不创建编辑会话。"}, nil
+	}
+	request, err := s.localEditorHandoffRequest(result)
+	if err != nil {
+		return EditorSessionMaterialization{Message: "结果已交付，但待编辑素材尚不可用：" + err.Error()}, nil
+	}
+	session, created, err := s.EnsureEditorSessionFromResultPackage(ctx, request)
+	if err != nil {
+		return EditorSessionMaterialization{Message: "结果已交付，但创建编辑会话失败：" + err.Error()}, nil
+	}
+	message := "待编辑素材已登记，可直接进入视频编辑器。"
+	if !created {
+		message = "待编辑素材已存在，已复用原编辑会话。"
+	}
+	return EditorSessionMaterialization{Ready: true, Created: created, SessionID: session.SessionID, Message: message}, nil
+}
+
+func (s *Service) GetEditorSessionMaterialization(ctx context.Context, result model.RecordingResultPackage) (EditorSessionMaterialization, error) {
+	if result.Status == model.RecordingResultStatusFailed {
+		return EditorSessionMaterialization{Message: "任务失败，素材保留在失败复盘中，不创建编辑会话。"}, nil
+	}
+	if strings.TrimSpace(result.ResultID) == "" {
+		return EditorSessionMaterialization{Message: "结果包缺少标识，暂不能创建编辑会话。"}, nil
+	}
+	sessions, err := s.ListEditorSessions(ctx)
+	if err != nil {
+		return EditorSessionMaterialization{}, err
+	}
+	for _, session := range sessions {
+		if session.AssetCatalog.Source.RecordingResultPackageID == result.ResultID {
+			return EditorSessionMaterialization{Ready: true, SessionID: session.SessionID, Message: "待编辑素材已登记，可直接进入视频编辑器。"}, nil
+		}
+	}
+	_, err = s.localEditorHandoffRequest(result)
+	if err != nil {
+		return EditorSessionMaterialization{Message: "结果已交付，但待编辑素材尚不可用：" + err.Error()}, nil
+	}
+	return EditorSessionMaterialization{Message: "待编辑素材正在登记。"}, nil
+}
+
+func (s *Service) localEditorHandoffRequest(result model.RecordingResultPackage) (model.EditorCreateFromResultPackageRequest, error) {
+	request := model.EditorCreateFromResultPackageRequest{ResultPackage: &result, ArtifactPaths: map[string]string{}}
+	artifacts := append([]model.ArtifactRef{}, result.GeneratedAssets...)
+	if result.ExecutionTrace != nil {
+		artifacts = append(artifacts, result.ExecutionTrace.Artifacts...)
+	}
+	for _, artifact := range artifacts {
+		if artifact.ID == "" {
+			continue
+		}
+		path, ok := s.localResultArtifactPath(artifact)
+		if !ok {
+			continue
+		}
+		request.ArtifactPaths[artifact.ID] = path
+		if isRawRecordingArtifact(artifact) && request.RecordingPath == "" {
+			request.RecordingPath = path
+			request.RecordingArtifactID = artifact.ID
+		}
+	}
+	if request.RecordingPath == "" {
+		return model.EditorCreateFromResultPackageRequest{}, errors.New("未找到位于 Server 素材目录的录屏；远程加密产物需先下载并解密")
+	}
+	return request, nil
+}
+
+func (s *Service) localResultArtifactPath(artifact model.ArtifactRef) (string, bool) {
+	value := artifact.URI
+	if path, ok := artifact.Metadata["local_path"].(string); ok && strings.TrimSpace(path) != "" {
+		value = path
+	}
+	path, err := localPathFromURI(value)
+	if err != nil || !fileExists(path) {
+		return "", false
+	}
+	root, err := filepath.Abs(filepath.Clean(s.runtime.ArtifactRoot))
+	if err != nil || !pathWithinRoot(path, root) {
+		return "", false
+	}
+	return path, true
 }
 
 func (s *Service) GetResultPackage(ctx context.Context, orgID string, resultPackageID string) (model.RecordingResultPackage, error) {

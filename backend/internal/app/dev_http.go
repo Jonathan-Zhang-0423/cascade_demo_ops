@@ -87,6 +87,10 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
+	mux.HandleFunc("GET /v1/desktop/browser-agent-acceptance", s.handleBrowserAgentAcceptance)
+	mux.HandleFunc("POST /v1/desktop/browser-agent-acceptance/run", s.handleBrowserAgentAcceptance)
+	mux.HandleFunc("GET /v1/desktop/browser-agent-business-acceptance", s.handleBrowserAgentBusinessAcceptance)
+	mux.HandleFunc("POST /v1/desktop/browser-agent-business-acceptance/run", s.handleBrowserAgentBusinessAcceptance)
 	mux.HandleFunc("GET /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions/from-result-package", s.handleEditorSessionFromResultPackage)
@@ -319,6 +323,26 @@ func (s *DevHTTPServer) handleModelDiagnostics(w http.ResponseWriter, r *http.Re
 	writeBridgeValue(w, s.service.DiagnoseModels(r.Context()), nil)
 }
 
+func (s *DevHTTPServer) handleBrowserAgentAcceptance(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		view, err := s.service.RunBrowserAgentAcceptance(r.Context())
+		writeBridgeValue(w, view, err)
+		return
+	}
+	view, err := s.service.GetBrowserAgentAcceptance(r.Context())
+	writeBridgeValue(w, view, err)
+}
+
+func (s *DevHTTPServer) handleBrowserAgentBusinessAcceptance(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		view, err := s.service.RunBrowserAgentBusinessAcceptance(r.Context())
+		writeBridgeValue(w, view, err)
+		return
+	}
+	view, err := s.service.GetBrowserAgentBusinessAcceptance(r.Context())
+	writeBridgeValue(w, view, err)
+}
+
 func (s *DevHTTPServer) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	var input orchestrator.UserInput
 	if err := decodeJSON(r, &input); err != nil {
@@ -432,6 +456,23 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		initResponse, err := s.service.InitCloudExecutionPackageUpload(r.Context(), build)
 		result := CloudUploadInitResult{Build: &build, Init: initResponse, CloudBase: session.BaseURL}
 		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/preflight":
+		var request CloudUploadInitRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := decodeJSON(r, &request); err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
+		targetProjectID := firstNonEmptyString(request.ProjectID, projectID)
+		build, _, err := s.service.BuildCloudClientExecutionPackage(r.Context(), targetProjectID, orgID)
+		if err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		result, err := s.service.PreflightCloudExecutionPackage(r.Context(), build)
+		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/product-run/prepare":
 		startedAt := time.Now()
 		var request CloudLifecycleRequest
@@ -537,6 +578,11 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		download, err := s.service.DownloadCloudResultDeliverable(r.Context(), request)
 		writeBridgeValue(w, download, err)
+	case r.Method == http.MethodGet && suffix == "/cloud/editor-materialization":
+		result, err := s.service.GetCloudEditorMaterialization(r.Context(), CloudEditorMaterializationRequest{
+			OrgID: r.URL.Query().Get("org_id"), ResultPackageID: r.URL.Query().Get("result_package_id"),
+		})
+		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/ack":
 		var request CloudResultAckRequest
 		if err := decodeJSON(r, &request); err != nil {

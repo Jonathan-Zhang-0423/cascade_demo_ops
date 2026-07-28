@@ -14,7 +14,7 @@ export const editorCapabilities = {
   caption: { preview: "composition", finalRenderer: true, enabled: true },
   sourceAudio: { preview: "source", finalRenderer: true, enabled: true },
   zoomPan: { preview: "none", finalRenderer: false, enabled: false },
-  highlightBox: { preview: "none", finalRenderer: false, enabled: false },
+  highlightBox: { preview: "composition", finalRenderer: true, enabled: true },
   cursorHighlight: { preview: "none", finalRenderer: false, enabled: false },
   blurRegion: { preview: "none", finalRenderer: false, enabled: false },
   transition: { preview: "none", finalRenderer: false, enabled: false },
@@ -32,6 +32,22 @@ export function finalRendererSupports(type: string): boolean {
     transition: "transition",
   } as Record<string, keyof typeof editorCapabilities>)[type];
   return capabilityKey ? editorCapabilities[capabilityKey].finalRenderer : false;
+}
+
+export function finalRendererSupportsOverlay(overlay: { type: string; shape?: string; scale_x?: number; scale_y?: number; tilt_preset?: string; tilt_x?: number; tilt_y?: number }): boolean {
+  return overlayExportStatus(overlay).exportable;
+}
+
+export function overlayExportStatus(overlay: { type: string; shape?: string; scale_x?: number; scale_y?: number; tilt_preset?: string; tilt_x?: number; tilt_y?: number }): { exportable: boolean; reason?: string } {
+  if (overlay.type !== "highlight_box") {
+    return finalRendererSupports(overlay.type) ? { exportable: true } : { exportable: false, reason: overlay.type };
+  }
+  if (!["rectangle", "circle", "polygon", "star", "line", "arrow"].includes(overlay.shape ?? "")) {
+    return { exportable: false, reason: `${overlay.type}:${overlay.shape ?? "unknown"}` };
+  }
+  const tilted = (overlay.tilt_preset && overlay.tilt_preset !== "flat" && overlay.tilt_preset !== "reset") || (overlay.tilt_x ?? 0) !== 0 || (overlay.tilt_y ?? 0) !== 0;
+  if (tilted) return { exportable: false, reason: "3D 倾斜标注" };
+  return { exportable: true };
 }
 
 export type PresentationSequenceKind = "video" | "still" | "audio" | "narration" | "caption" | "callout";

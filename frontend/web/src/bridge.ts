@@ -51,6 +51,12 @@ export type DesktopBridgeClient = {
   checkDesktopUpdate(): Promise<BridgeResult<DesktopUpdateStatus>>;
   applyDesktopUpdate(): Promise<BridgeResult<{ started: boolean }>>;
   modelDiagnostics(): Promise<BridgeResult<ModelDiagnosticResult[]>>;
+  preflightExecutionPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<CloudPackagePreflightView>>;
+  editorMaterialization(workspace: ProjectWorkspaceView): Promise<BridgeResult<EditorSessionMaterializationView>>;
+  browserAgentAcceptance(): Promise<BridgeResult<BrowserAgentAcceptanceView>>;
+  runBrowserAgentAcceptance(): Promise<BridgeResult<BrowserAgentAcceptanceView>>;
+  browserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
+  runBrowserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
   executionEvents(projectID: string, afterID?: string): Promise<BridgeResult<RuntimeLogEntry[]>>;
   createProject(scenarioID: ScenarioID): Promise<BridgeResult<ProjectWorkspaceView>>;
   listProjects(): Promise<BridgeResult<ProjectWorkspaceView[]>>;
@@ -72,6 +78,66 @@ export type DesktopBridgeClient = {
   repairFailedScript(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   ackResultPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   reviewResult(workspace: ProjectWorkspaceView, decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string): Promise<BridgeResult<ProjectWorkspaceView>>;
+};
+
+export type BrowserAgentAcceptanceView = {
+  ready: boolean;
+  can_run: boolean;
+  message: string;
+  report_path?: string;
+  report?: {
+    schema_version: string;
+    generated_at: string;
+    runtime: string;
+    strict_gate: string;
+    scenarios: BrowserAgentAcceptanceScenarioView[];
+  };
+};
+
+export type BrowserAgentAcceptanceScenarioView = {
+  id: string;
+  description: string;
+  expected: string;
+  actual: string;
+  verdict: string;
+  action_executed: boolean;
+  evidence: Array<{ id: string; kind: string; uri: string; mime_type: string; sha256: string; size_bytes: number }>;
+  assertions: Array<{ kind: string; passed: boolean; actual?: string }>;
+  stop_reason?: string;
+};
+
+export type BrowserAgentBusinessAcceptanceView = {
+  ready: boolean;
+  can_run: boolean;
+  message: string;
+  report_path?: string;
+  report?: {
+    schema_version: string;
+    generated_at: string;
+    runtime: string;
+    strict_gate: string;
+    package_id: string;
+    business_flow: string;
+    stages: BrowserAgentAcceptanceScenarioView[];
+    editor_materialization: { ready: boolean; created: boolean; session_id?: string; message: string };
+  };
+};
+
+export type CloudPackagePreflightView = {
+  valid: boolean;
+  runtime?: string;
+  package_id?: string;
+  stage_count?: number;
+  required_checks?: number;
+  allowed_domains?: string[];
+  message: string;
+};
+
+export type EditorSessionMaterializationView = {
+  ready: boolean;
+  created: boolean;
+  session_id?: string;
+  message: string;
 };
 
 export type BridgeRunOptions = {
@@ -469,6 +535,30 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         return { ok: false, error: result.error ?? "模型诊断不可用" };
       }
       return ok(result.data.map(modelDiagnosticFromLocal));
+    },
+    async preflightExecutionPackage(workspace) {
+      return requestLocal<CloudPackagePreflightView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/preflight`, {
+        method: "POST",
+        body: JSON.stringify({ org_id: orgID }),
+      });
+    },
+    async editorMaterialization(workspace) {
+      const resultPackageID = workspace.cloudRun.resultPackageID ?? workspace.cloudRun.resultPackage?.result_id;
+      if (!resultPackageID) return { ok: false, error: "缺少结果包，无法确认待编辑素材" };
+      const query = `?org_id=${encodeURIComponent(orgID)}&result_package_id=${encodeURIComponent(resultPackageID)}`;
+      return requestLocal<EditorSessionMaterializationView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/editor-materialization${query}`);
+    },
+    async browserAgentAcceptance() {
+      return requestLocal<BrowserAgentAcceptanceView>(baseURL, "/v1/desktop/browser-agent-acceptance");
+    },
+    async runBrowserAgentAcceptance() {
+      return requestLocal<BrowserAgentAcceptanceView>(baseURL, "/v1/desktop/browser-agent-acceptance/run", { method: "POST" });
+    },
+    async browserAgentBusinessAcceptance() {
+      return requestLocal<BrowserAgentBusinessAcceptanceView>(baseURL, "/v1/desktop/browser-agent-business-acceptance");
+    },
+    async runBrowserAgentBusinessAcceptance() {
+      return requestLocal<BrowserAgentBusinessAcceptanceView>(baseURL, "/v1/desktop/browser-agent-business-acceptance/run", { method: "POST" });
     },
     async executionEvents(projectID, afterID) {
       const query = afterID ? `?after=${encodeURIComponent(afterID)}` : "";
@@ -899,6 +989,37 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         mockDiagnostic("minimax", "multimodal_understanding", "minimax-m3"),
         mockDiagnostic("seedance", "video_operation", "seedance-2.0"),
       ]);
+    },
+    async preflightExecutionPackage(workspace) {
+      const bundle = workspace.executableScriptBundle;
+      const plan = bundle?.plan_json;
+      return ok({
+        valid: Boolean(bundle && plan),
+        ...(bundle?.script_manifest.runtime ? { runtime: bundle.script_manifest.runtime } : {}),
+        package_id: workspace.packagePreview.packageID,
+        stage_count: plan?.steps.length ?? 0,
+        required_checks: plan?.steps.reduce((total, step) => total + step.validations.filter((validation) => validation.required).length, 0) ?? 0,
+        allowed_domains: workspace.planReview.allowedDomains,
+        message: "模拟预检通过：尚未上传、尚未启动浏览器。",
+      });
+    },
+    async editorMaterialization(workspace) {
+      const failed = workspace.cloudRun.status === "failed";
+      return ok(failed
+        ? { ready: false, created: false, message: "模拟失败结果不创建编辑会话。" }
+        : { ready: true, created: false, session_id: "edit_mock_result", message: "模拟待编辑素材已登记。" });
+    },
+    async browserAgentAcceptance() {
+      return ok(mockBrowserAgentAcceptance());
+    },
+    async runBrowserAgentAcceptance() {
+      return ok(mockBrowserAgentAcceptance());
+    },
+    async browserAgentBusinessAcceptance() {
+      return ok(mockBrowserAgentBusinessAcceptance());
+    },
+    async runBrowserAgentBusinessAcceptance() {
+      return ok(mockBrowserAgentBusinessAcceptance());
     },
     async executionEvents() {
       return ok([]);
@@ -1591,6 +1712,28 @@ function workspaceWithResultPackage(workspace: ProjectWorkspaceView, resultPacka
 			stageHistory: (next.cloudRun.stageHistory ?? previousStages).map((stage) => stage.id === "result_returned" ? stage : previousStages.find((previous) => previous.id === stage.id) ?? stage),
 		},
 	};
+}
+
+function mockBrowserAgentAcceptance(): BrowserAgentAcceptanceView {
+  return {
+    ready: true,
+    can_run: true,
+    message: "演示数据：本地受控验收包已通过。真实模式会运行浏览器并生成截图、录屏与 trace。",
+    report_path: "artifacts/browser-agent-acceptance/latest/acceptance-report.json",
+    report: {
+      schema_version: "cascade.browser_agent_acceptance.v1",
+      generated_at: new Date().toISOString(),
+      runtime: "browser-agent-outline-v1",
+      strict_gate: "passed",
+      scenarios: [
+        { id: "success_navigation_click", description: "导航、识别经批准的按钮、点击并验证页面结果", expected: "通过；含截图证据", actual: "pass", verdict: "passed", action_executed: true, evidence: [], assertions: [{ kind: "required_validation", passed: true, actual: "matched" }] },
+        { id: "semantic_target_contract_conflict", description: "页面存在按钮但批准名称不同", expected: "点击前拦截", actual: "pass", verdict: "passed", action_executed: false, evidence: [], assertions: [{ kind: "target_contract", passed: true, actual: "blocked" }] },
+        { id: "locator_missing", description: "批准目标不在页面上", expected: "点击前拦截", actual: "pass", verdict: "passed", action_executed: false, evidence: [], assertions: [{ kind: "locator_resolution", passed: true, actual: "blocked" }] },
+        { id: "required_validation_failure", description: "动作已完成但要求的业务结果不存在", expected: "停止，不进入后续阶段", actual: "pass", verdict: "passed", action_executed: true, evidence: [], assertions: [{ kind: "required_validation", passed: false, actual: "not_matched" }], stop_reason: "required_validation_failed" },
+        { id: "recording_and_trace_delivery", description: "关闭会话后保留可回放证据", expected: "录屏和 trace 均存在", actual: "pass", verdict: "passed", action_executed: false, evidence: [], assertions: [{ kind: "recording_and_trace", passed: true, actual: "retained" }] },
+      ],
+    },
+  };
 }
 
 function uploadInitFromLocal(init: LocalExecutionPackageInitResponse): ExecutionPackageUploadInitView {
@@ -2610,6 +2753,8 @@ function mockStageApprovalPlan(workspace: ProjectWorkspaceView, plan: ExecutionS
         id: `stage_${step.node_id}`,
         order: step.order,
         node_id: step.node_id,
+        stage_kind: stageKindFromAction(step.action.type),
+        route_state: routeStateFromStep(step, route),
         title: step.title ?? step.node_id,
         objective: step.expected_outcome,
         business_intent: step.business_value ?? step.narrative.voiceover ?? step.narrative.caption ?? step.expected_outcome,
@@ -3152,6 +3297,50 @@ function roleFromAction(action: string): string {
     return "region";
   }
   return "button";
+}
+
+function mockBrowserAgentBusinessAcceptance(): BrowserAgentBusinessAcceptanceView {
+  const stageDefinitions: Array<[string, string, string]> = [
+    ["node_open_workspace", "打开项目工作台", "Create project page is visible"],
+    ["node_fill_project_name", "输入项目名称", "Project name equals Tetris Launch"],
+    ["node_select_build_mode", "选择构建模式", "Build mode selected"],
+    ["node_submit_build", "提交构建", "Build result route is visible"],
+    ["node_verify_build_result", "验证构建结果", "Build in progress is visible"],
+  ];
+  const stages: BrowserAgentAcceptanceScenarioView[] = stageDefinitions.map(([id, title, expected]) => ({ id, description: `${title}：${expected}`, expected, actual: "pass", verdict: "passed", action_executed: true, evidence: [], assertions: [{ kind: "required_outcome_validation", passed: true, actual: "pass" }] }));
+  return {
+    ready: true,
+    can_run: true,
+    message: "演示数据：受控业务验收已通过。真实模式会在 Server 临时业务页面上输入项目名、选择模式、提交并验证结果页。",
+    report_path: "artifacts/browser-agent-business-acceptance/latest/acceptance-report.json",
+    report: {
+      schema_version: "cascade.browser_agent_business_acceptance.v1",
+      generated_at: new Date().toISOString(),
+      runtime: "browser-agent-outline-v1",
+      strict_gate: "passed",
+      package_id: "pkg_controlled_business_outline",
+      business_flow: "进入工作台 → 输入项目名 → 选择构建模式 → 提交构建 → 验证构建结果",
+      stages,
+      editor_materialization: { ready: true, created: true, session_id: "editor_controlled_business", message: "待编辑素材已登记，可直接进入视频编辑器。" },
+    },
+  };
+}
+
+function stageKindFromAction(action: string): string {
+  if (action === "fill" || action === "upload") return "business_input";
+  if (action === "select") return "mode_selection";
+  if (action === "wait") return "observe_progress";
+  if (action === "assert" || action === "inspect") return "final_observe";
+  return "business_action";
+}
+
+function routeStateFromStep(step: ScriptStep, route: string): string {
+  const value = `${route} ${step.title ?? ""} ${step.expected_outcome ?? ""}`.toLowerCase();
+  if (value.includes("login") || value.includes("sign-in") || value.includes("登录")) return "unauthenticated";
+  if (value.includes("create") || value.includes("new") || value.includes("创建")) return "creation_flow";
+  if (value.includes("build") || value.includes("generating") || value.includes("生成中")) return "build_running";
+  if (value.includes("project") || value.includes("detail") || value.includes("项目")) return "project_detail";
+  return "workspace";
 }
 
 function mockHash(value: string): string {

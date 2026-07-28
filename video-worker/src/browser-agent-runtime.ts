@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { launchOptionsWithProxy } from "./playwright-proxy.js";
@@ -75,12 +75,14 @@ export type BrowserAgentWorkerStage = {
   interactions: BrowserAgentInteraction[];
   wait_conditions?: string[];
   capture_plan?: {
+    min_duration_ms?: number;
     pre_capture_wait_ms?: number;
     hold_after_ms?: number;
   };
   success_state?: string;
   duration_ms?: number;
   validations?: BrowserAgentValidation[];
+  preferred_selector_alternative?: { kind: string; value: string };
 };
 
 export type BrowserAgentOpenRequest = {
@@ -137,6 +139,8 @@ export type BrowserAgentStageResult = {
   evidence_refs: EvidenceRef[];
   artifacts: ArtifactRef[];
   target_resolved?: boolean;
+  preferred_selector_alternative?: { kind: string; value: string };
+  suggested_wait_condition?: string;
 };
 
 export type BrowserAgentCloseResult = {
@@ -162,7 +166,7 @@ type BrowserAgentSession = {
   maskSelectors: string[];
 };
 
-type ResolvedTarget = { locator: any; strategy: string };
+type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
 
 const sessions = new Map<string, BrowserAgentSession>();
 const targetProbeTimeoutMS = 2_000;
@@ -195,6 +199,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
     contextOptions.recordVideo = { dir: outputDir, size: request.browser?.viewport || defaultViewport };
   }
   const context = await browser.newContext(contextOptions);
+  await installRecordingMasks(context, request.mask_selectors || []);
   const tracePath = path.join(outputDir, "browser-agent-trace.zip");
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   const page = await context.newPage();
@@ -230,21 +235,51 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   const session = requiredSession(request.session_id);
   validateStage(request.stage);
   const action = request.stage.interactions[0];
-  let resolved: ResolvedTarget | undefined;
-  if (action && !["navigate", "wait"].includes(action.kind)) {
-    resolved = await resolveTarget(session.page, request.stage, action);
-  }
+  await waitForObservationWindow(session.page, request.stage);
+  // Preserve redacted evidence even when semantic target resolution fails.
   const artifact = await captureScreenshot(session, request.stage, "before");
+  let resolved: ResolvedTarget | undefined;
+  let approvedAlternative: { kind: string; value: string } | undefined;
+	let suggestedWaitCondition: string | undefined;
+  let resolutionFailure = "";
+  if (action && !["navigate", "wait"].includes(action.kind)) {
+    try {
+      resolved = await resolveTarget(session.page, request.stage, action, false);
+    } catch (error) {
+      if (!isTargetResolutionFailure(error)) throw error;
+      resolutionFailure = safeResolutionFailure(error);
+      approvedAlternative = await resolveSingleApprovedAlternative(session.page, request.stage);
+		if (!approvedAlternative && await pageStillBusy(session.page)) {
+			suggestedWaitCondition = suggestedEntryWaitCondition(request.stage);
+		}
+    }
+  }
   const evidence = screenshotEvidence(artifact, request.stage, "执行前页面观察");
-  const assertions = resolved
-    ? [{ kind: "target_resolved", passed: true, actual: resolved.strategy }]
-    : [{ kind: "page_observed", passed: true, actual: safeURL(session.page.url()) }];
+  const assertions = resolutionAssertions(resolved?.strategy, resolutionFailure, safeURL(session.page.url()));
   return {
     observation: await observation(session.page, "actual_browser_observation", assertions),
     evidence_refs: [evidence],
     artifacts: [artifact],
     target_resolved: Boolean(resolved) || action?.kind === "navigate",
+    ...(approvedAlternative ? { preferred_selector_alternative: approvedAlternative } : {}),
+		...(suggestedWaitCondition ? { suggested_wait_condition: suggestedWaitCondition } : {}),
   };
+}
+
+function isTargetResolutionFailure(error: unknown): boolean {
+  return String(error instanceof Error ? error.message : error).startsWith("browser_agent_target_not_resolved:");
+}
+
+function safeResolutionFailure(error: unknown): string {
+  const message = String(error instanceof Error ? error.message : error);
+  // The resolver emits only stage id and attempted strategy names; do not leak page text or DOM.
+  return message.replace(/[\r\n]+/g, " ").slice(0, 500);
+}
+
+export function resolutionAssertions(strategy: string | undefined, failure: string, currentURL: string): Array<{ kind: string; passed: boolean; actual?: string }> {
+  if (strategy) return [{ kind: "target_resolved", passed: true, actual: strategy }];
+  if (failure) return [{ kind: "target_resolved", passed: false, actual: failure }];
+  return [{ kind: "page_observed", passed: true, actual: currentURL }];
 }
 
 export async function executeBrowserAgentStage(request: BrowserAgentStageRequest): Promise<BrowserAgentStageResult> {
@@ -283,7 +318,32 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   }
   recordingPath = await session.video?.path().catch(() => undefined);
   if (recordingPath && await fileExists(recordingPath)) {
-    artifacts.unshift(await artifactRef(`artifact_${session.id}_recording`, "raw_recording", recordingPath, "video/webm", undefined, { include_in_demo: true }));
+    artifacts.unshift(await artifactRef(
+      `artifact_${session.id}_recording`,
+      "raw_recording",
+      recordingPath,
+      "video/webm",
+      undefined,
+      { include_in_demo: true, redaction_applied: true, mask_selector_count: session.maskSelectors.length },
+      false,
+    ));
+  }
+  // Failed observations may throw after their before-capture. Recover every
+  // stage screenshot here so the Server can build a protocol failure package.
+  for (const entry of await readdir(session.outputDir).catch(() => [] as string[])) {
+    const match = /^stage-\d+-(.+)-(before|after)\.png$/i.exec(entry);
+    if (!match) continue;
+    const nodeID = match[1] || "unknown";
+    const phase = (match[2] || "before").toLowerCase();
+    artifacts.push(await artifactRef(
+      `artifact_${safeName(session.id)}_${safeName(nodeID)}_${phase}`,
+      "screenshot",
+      path.join(session.outputDir, entry),
+      "image/png",
+      nodeID,
+      { include_in_demo: phase === "after", capture_phase: phase, recovered_at_session_close: true },
+      false,
+    ));
   }
   return {
     ...(recordingPath ? { recording_path: recordingPath } : {}),
@@ -310,7 +370,7 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
     await session.page.waitForTimeout(numericParameter(interaction.parameters, "duration_ms", 1_000, 0, 5_000));
     return;
   }
-  const resolved = await resolveTarget(session.page, stage, interaction);
+  const resolved = await resolveTarget(session.page, stage, interaction, true);
   if (interaction.kind === "click") {
     await resolved.locator.click({ timeout });
   } else if (interaction.kind === "fill") {
@@ -331,9 +391,17 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
   await waitForPageSettled(session.page, Math.min(timeout, 5_000));
 }
 
-async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction): Promise<ResolvedTarget> {
-  const candidates: Array<{ strategy: string; locator: any }> = [];
-  const contract = stage.target_contract;
+async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, allowSelectorAlternatives: boolean): Promise<ResolvedTarget> {
+	const candidates: Array<{ strategy: string; locator: any }> = [];
+	const contract = stage.target_contract;
+	const preferred = stage.preferred_selector_alternative;
+	if (preferred) {
+		const locator = locatorFromAlternative(page, preferred.kind, preferred.value);
+		if (!locator) throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=preferred_${preferred.kind}`);
+		const resolved = await resolveUniqueVisibleContractTarget(locator, `approved_${preferred.kind}`, contract);
+		if (!resolved) throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=preferred_${preferred.kind}`);
+		return { ...resolved, approvedAlternative: { kind: preferred.kind, value: preferred.value } };
+	}
   for (const role of contract.allowed_roles || []) {
     for (const name of contract.allowed_names || []) {
       candidates.push({ strategy: `role:${role}+approved_name`, locator: page.getByRole(role, { name, exact: true }) });
@@ -350,7 +418,7 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
   if (interaction.target?.label) candidates.push({ strategy: "interaction_label", locator: page.getByLabel(interaction.target.label, { exact: true }) });
   if (interaction.target?.text) candidates.push({ strategy: "interaction_text", locator: page.getByText(interaction.target.text, { exact: true }) });
   for (const component of components) {
-    for (const alternative of component.selector_alternatives || []) {
+    if (allowSelectorAlternatives) for (const alternative of component.selector_alternatives || []) {
       const locator = locatorFromAlternative(page, alternative.kind, alternative.value);
       if (locator) candidates.push({ strategy: `verified_${alternative.kind}`, locator });
     }
@@ -362,22 +430,40 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
   for (const candidate of candidates) {
     if (seen.has(candidate.strategy)) continue;
     seen.add(candidate.strategy);
-    const count = await withTimeout(candidate.locator.count(), targetProbeTimeoutMS, 0);
-    if (count !== 1) continue;
-    const locator = candidate.locator.first();
-    if (!await withTimeout(locator.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
-    const semantics = await withTimeout(
-      compactElementSemantics(locator),
-      targetProbeTimeoutMS,
-      { role: "", name: "" },
-    );
-    if (!semanticsAllowed(semantics, contract)) continue;
-    if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
-      throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
-    }
-    return { locator, strategy: candidate.strategy };
+    const resolved = await resolveUniqueVisibleContractTarget(candidate.locator, candidate.strategy, contract);
+    if (resolved) return resolved;
   }
   throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=${[...seen].join(",") || "none"}`);
+}
+
+// This is the only discovery step allowed after the primary locator fails.
+// It checks App-approved alternatives one by one and returns nothing unless
+// exactly one live target is unique, visible, and contract-compatible.
+async function resolveSingleApprovedAlternative(page: any, stage: BrowserAgentWorkerStage): Promise<{ kind: string; value: string } | undefined> {
+  const matched: Array<{ kind: string; value: string }> = [];
+  const components = (stage.components || []).filter((component) => !stage.target_contract.component_ref || component.component_ref === stage.target_contract.component_ref);
+  for (const component of components) {
+    for (const alternative of component.selector_alternatives || []) {
+      const locator = locatorFromAlternative(page, alternative.kind, alternative.value);
+      if (!locator) continue;
+      const resolved = await resolveUniqueVisibleContractTarget(locator, `approved_${alternative.kind}`, stage.target_contract);
+      if (resolved) matched.push({ kind: alternative.kind, value: alternative.value });
+    }
+  }
+  return matched.length === 1 ? matched[0] : undefined;
+}
+
+async function resolveUniqueVisibleContractTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract): Promise<ResolvedTarget | undefined> {
+  const count = await withTimeout(locator.count(), targetProbeTimeoutMS, 0);
+  if (count !== 1) return undefined;
+  const unique = locator.first();
+  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) return undefined;
+  const semantics = await withTimeout(compactElementSemantics(unique), targetProbeTimeoutMS, { role: "", name: "" });
+  if (!semanticsAllowed(semantics, contract)) return undefined;
+  if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
+    throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
+  }
+  return { locator: unique, strategy };
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMS: number, fallback: T): Promise<T> {
@@ -503,7 +589,8 @@ async function captureScreenshot(session: BrowserAgentSession, stage: BrowserAge
     filePath,
     "image/png",
     stage.node_id,
-    { include_in_demo: phase === "after", capture_phase: phase, target_semantic_id: stage.target_contract.semantic_id },
+    { include_in_demo: phase === "after", capture_phase: phase, target_semantic_id: stage.target_contract.semantic_id, current_url: safeURL(session.page.url()), page_title: redactText(await session.page.title().catch(() => "")) },
+    false,
   );
 }
 
@@ -613,13 +700,45 @@ async function waitForPageSettled(page: any, timeoutMS = 5_000): Promise<void> {
 
 async function waitForCaptureWindow(page: any, stage: BrowserAgentWorkerStage): Promise<void> {
   const declared = [...(stage.wait_conditions || []), ...stage.interactions.flatMap((interaction) => interaction.wait_conditions || [])];
-  let waitMS = Math.max(0, stage.capture_plan?.pre_capture_wait_ms || 0, stage.capture_plan?.hold_after_ms || 0);
+  // An approved duration is a lower bound, not a suggestion or a global cap.
+  let waitMS = Math.max(0, stage.duration_ms || 0, stage.capture_plan?.min_duration_ms || 0, stage.capture_plan?.pre_capture_wait_ms || 0, stage.capture_plan?.hold_after_ms || 0);
   for (const condition of declared) {
     const match = condition.match(/at_least_(\d+)ms/i);
     if (match) waitMS = Math.max(waitMS, Number(match[1]));
   }
-  if (waitMS > 0) await page.waitForTimeout(Math.min(waitMS, 5_000));
+  if (waitMS > 0) await page.waitForTimeout(waitMS);
   await waitForPageSettled(page);
+}
+
+async function waitForObservationWindow(page: any, stage: BrowserAgentWorkerStage): Promise<void> {
+  const waitMS = entryWaitMilliseconds(stage);
+  if (waitMS > 0) await page.waitForTimeout(waitMS);
+  await page.waitForLoadState("domcontentloaded", { timeout: Math.min(waitMS + 1_000, 5_000) }).catch(() => undefined);
+}
+
+function entryWaitMilliseconds(stage: BrowserAgentWorkerStage): number {
+  const declared = [...(stage.wait_conditions || []), ...stage.interactions.flatMap((interaction) => interaction.wait_conditions || [])];
+  let waitMS = 0;
+  for (const condition of declared) {
+    const match = String(condition || "").match(/^wait_after_entry_at_least_(\d+)ms$/i);
+    if (match) waitMS = Math.max(waitMS, Math.min(15_000, Number(match[1])));
+  }
+  return waitMS;
+}
+
+function suggestedEntryWaitCondition(stage: BrowserAgentWorkerStage): string | undefined {
+  const current = entryWaitMilliseconds(stage);
+  if (current <= 0 || current >= 15_000) return undefined;
+  return `wait_after_entry_at_least_${Math.min(15_000, current + 1_000)}ms`;
+}
+
+async function pageStillBusy(page: any): Promise<boolean> {
+  return page.evaluate(() => {
+    const pageDocument = (globalThis as unknown as { document: { readyState?: string; querySelector?: (selector: string) => unknown } }).document;
+    const documentBusy = pageDocument.readyState !== "complete";
+    const ariaBusy = Boolean(pageDocument.querySelector?.('[aria-busy="true"]'));
+    return documentBusy || ariaBusy;
+  }).catch(() => false);
 }
 
 function numericParameter(parameters: Record<string, unknown> | undefined, key: string, fallback: number, min: number, max: number): number {
@@ -695,7 +814,7 @@ function configuredBrowserExecutable(): string | undefined {
   return candidates.find((candidate) => existsSync(candidate));
 }
 
-async function artifactRef(id: string, kind: string, filePath: string, mimeType: string, sourceNodeID?: string, metadata: Record<string, unknown> = {}): Promise<ArtifactRef> {
+async function artifactRef(id: string, kind: string, filePath: string, mimeType: string, sourceNodeID?: string, metadata: Record<string, unknown> = {}, sensitive = true): Promise<ArtifactRef> {
   const data = await readFile(filePath);
   return {
     id,
@@ -705,10 +824,61 @@ async function artifactRef(id: string, kind: string, filePath: string, mimeType:
     sha256: createHash("sha256").update(data).digest("hex"),
     size_bytes: data.length,
     created_at: new Date().toISOString(),
-    sensitive: true,
+    sensitive,
     ...(sourceNodeID ? { source_node_id: sourceNodeID } : {}),
     metadata: { ...metadata, source: "browser_agent_runtime" },
   };
+}
+
+async function installRecordingMasks(context: any, selectors: string[]): Promise<void> {
+  await context.addInitScript((approvedSelectors: string[]) => {
+    if (!Array.isArray(approvedSelectors) || approvedSelectors.length === 0) return;
+    const browserGlobal = globalThis as any;
+    const document = browserGlobal.document as any;
+    const requestAnimationFrame = browserGlobal.requestAnimationFrame.bind(browserGlobal) as (callback: () => void) => number;
+    const overlays = new Map<any, any>();
+    const update = () => {
+      const matched = new Set<any>();
+      for (const selector of approvedSelectors) {
+        try {
+          document.querySelectorAll(selector).forEach((element: any) => matched.add(element));
+        } catch {
+          // An invalid approved selector must not disable the other masks.
+        }
+      }
+      for (const [element, overlay] of overlays) {
+        if (!element.isConnected || !matched.has(element)) {
+          overlay.remove();
+          overlays.delete(element);
+        }
+      }
+      for (const element of matched) {
+        let overlay = overlays.get(element);
+        if (!overlay || !overlay.isConnected) {
+          overlay = document.createElement("div");
+          overlay.setAttribute("data-cascade-recording-mask", "true");
+          Object.assign(overlay.style, {
+            position: "fixed",
+            zIndex: "2147483647",
+            pointerEvents: "none",
+            background: "#111",
+          });
+          document.documentElement.appendChild(overlay);
+          overlays.set(element, overlay);
+        }
+        const bounds = element.getBoundingClientRect();
+        Object.assign(overlay.style, {
+          display: bounds.width > 0 && bounds.height > 0 ? "block" : "none",
+          left: `${bounds.left}px`,
+          top: `${bounds.top}px`,
+          width: `${bounds.width}px`,
+          height: `${bounds.height}px`,
+        });
+      }
+      requestAnimationFrame(update);
+    };
+    requestAnimationFrame(update);
+  }, selectors);
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

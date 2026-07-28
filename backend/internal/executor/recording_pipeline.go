@@ -98,7 +98,7 @@ func RenderClientExecutionRecordingResult(ctx context.Context, service RenderSer
 	if err != nil {
 		return RenderRequest{}, RenderResult{}, err
 	}
-	attachRenderResultArtifacts(source, recording, renderResult, recording.CreatedAt)
+	AttachRenderResultArtifacts(source, recording, renderResult, recording.CreatedAt)
 	reportPipelineProgress(request, "quality_validation", "Validating required-step coverage, media decodability, redaction, and output checksums.", 98)
 	return renderRequest, renderResult, nil
 }
@@ -174,7 +174,10 @@ func reportPipelineProgress(request RecordingRenderPipelineRequest, stage string
 	}
 }
 
-func attachRenderResultArtifacts(source *model.ClientExecutionPackage, result *model.RecordingResultPackage, renderResult RenderResult, createdAt time.Time) {
+// AttachRenderResultArtifacts makes renderer output part of the same delivery
+// package as the recording evidence, regardless of which approved runtime
+// produced that recording.
+func AttachRenderResultArtifacts(source *model.ClientExecutionPackage, result *model.RecordingResultPackage, renderResult RenderResult, createdAt time.Time) {
 	if source == nil || result == nil {
 		return
 	}
