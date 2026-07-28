@@ -46,6 +46,11 @@ export type BridgeResult<T> = {
   errorInfo?: LocalBridgeErrorInfo | undefined;
 };
 
+export type ProjectCreationInput = {
+  userInput: LocalUserInput;
+  scenarioID?: ScenarioID;
+};
+
 export type DesktopBridgeClient = {
   mode: "mock" | "local";
   runtimeHealth(): Promise<BridgeResult<RuntimeHealthView>>;
@@ -63,8 +68,8 @@ export type DesktopBridgeClient = {
   browserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
   runBrowserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
   executionEvents(projectID: string, afterID?: string): Promise<BridgeResult<RuntimeLogEntry[]>>;
-  createProject(scenarioID: ScenarioID): Promise<BridgeResult<ProjectWorkspaceView>>;
-  listProjects(): Promise<BridgeResult<ProjectWorkspaceView[]>>;
+  createProject(input: ScenarioID | ProjectCreationInput): Promise<BridgeResult<ProjectWorkspaceView>>;
+  listProjects(): Promise<BridgeResult<ProjectSummaryView[]>>;
 
   listProjectSummaries(): Promise<BridgeResult<ProjectSummaryView[]>>;
   loadProject(projectID: string): Promise<BridgeResult<ProjectWorkspaceView>>;
@@ -74,14 +79,15 @@ export type DesktopBridgeClient = {
   getAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
   submitAssistantTurn(sessionID: string, message: string, idempotencyKey?: string, safeSelections?: { selectedSources?: ConfigurationSourceRefView[]; credentialRefs?: string[] }): Promise<BridgeResult<AssistantSessionView>>;
   listAssistantEvents(sessionID: string, afterID?: string): Promise<BridgeResult<AssistantEventView[]>>;
-  confirmAssistantProposal(sessionID: string, proposalID: string, baseVersion: number, idempotencyKey: string): Promise<BridgeResult<AssistantSessionView>>;
-  dismissAssistantProposal(sessionID: string, proposalID: string, baseVersion: number, idempotencyKey: string): Promise<BridgeResult<AssistantSessionView>>;
+  confirmAssistantProposal(sessionID: string, proposalID: string, baseVersion?: number, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
+  dismissAssistantProposal(sessionID: string, proposalID: string, baseVersion?: number, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
   cancelAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
   selectLocalProjectDirectory(): Promise<BridgeResult<ConfigurationSourceRefView>>;
   selectRequirementDocuments(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
   selectBrandAssets(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
   storeDemoCredential(ref: string, username: string, password: string): Promise<BridgeResult<{ secretRef: string; configured: boolean }>>;
   saveWorkspace(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  saveProjectInputs(projectID: string, inputs: ProjectInputBundle): Promise<BridgeResult<ProjectWorkspaceView>>;
   getUnderstandingReport(projectID: string): Promise<BridgeResult<MultimodalUnderstandingReport>>;
   getExecutionScriptDocument(projectID: string): Promise<BridgeResult<ExecutionScriptDocument>>;
   getExecutionScriptMarkdown(projectID: string): Promise<BridgeResult<{ markdown: string }>>;
@@ -97,6 +103,7 @@ export type DesktopBridgeClient = {
   simulateCloudFailure(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   repairFailedScript(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   ackResultPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  acknowledgeResult(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   reviewResult(workspace: ProjectWorkspaceView, decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string): Promise<BridgeResult<ProjectWorkspaceView>>;
 };
 
@@ -486,7 +493,7 @@ type LocalProductMap = {
   data_models?: Array<unknown>;
 };
 
-type LocalUserInput = {
+export type LocalUserInput = {
   mode: "desktop";
   product_url: string;
   local_repo_path?: string;
@@ -589,13 +596,24 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       }
       return ok(result.data.map(runtimeLogFromLocalEvent));
     },
-    async createProject(scenarioID) {
-      const workspace = createWorkspace(scenarioID);
+    async createProject(input) {
+      const scenarioID = typeof input === "string" ? input : input.scenarioID ?? "product_demo";
+      if (typeof input === "string") {
+        const workspace = createWorkspace(scenarioID);
+        projects.set(workspace.id, workspace);
+        return ok(workspace);
+      }
+      const result = await requestLocal<LocalCascadeState>(baseURL, "/v1/desktop/projects", {
+        method: "POST",
+        body: JSON.stringify(input.userInput),
+      });
+      if (!result.ok || !result.data) return { ok: false, error: result.error ?? "创建项目失败" };
+      const workspace = workspaceFromCascadeState(result.data, createWorkspace(scenarioID));
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
     async listProjects() {
-      return ok([...projects.values()]);
+      return this.listProjectSummaries();
     },
     async listProjectSummaries() {
       const result = await requestLocal<Array<{ id: string; name: string; product_url?: string; stage: ProjectSummaryView["stage"]; status: ProjectSummaryView["status"]; asset_count: number; generated_asset_count: number; created_at?: string; updated_at?: string }>>(baseURL, "/v1/desktop/projects");
@@ -642,6 +660,15 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     },
     async storeDemoCredential(ref, username, password) {
       return callWailsBridge<{ secretRef: string; configured: boolean }>("StoreDemoCredential", ref, username, password);
+    },
+    async saveProjectInputs(projectID, inputs) {
+      const result = await requestLocal<LocalProjectContext>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/inputs`, {
+        method: "POST",
+        body: JSON.stringify(inputs),
+      });
+      if (!result.ok) return { ok: false, error: result.error ?? "项目输入保存失败" };
+      projects.delete(projectID);
+      return this.loadProject(projectID);
     },
     async loadProject(projectID) {
       const cached = projects.get(projectID);
@@ -909,6 +936,9 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(next.id, next);
       return ok(next);
     },
+	async acknowledgeResult(workspace) {
+	  return this.ackResultPackage(workspace);
+	},
 	async reviewResult(workspace, decision, summary) {
 	  const resultPackageID = workspace.cloudRun.resultPackageID;
 	  if (!resultPackageID) {
@@ -1091,13 +1121,21 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async executionEvents() {
       return ok([]);
     },
-    async createProject(scenarioID) {
+    async createProject(input) {
+      const scenarioID = typeof input === "string" ? input : input.scenarioID ?? "product_demo";
       const project = createWorkspace(scenarioID);
-      projects.set(project.id, project);
-      return ok(project);
+      const userInput = typeof input === "string" ? undefined : input.userInput;
+      const seeded = userInput ? {
+        ...project,
+        productURL: userInput.product_url,
+        targetAudience: userInput.target_audience,
+        inputBundle: { ...project.inputBundle, raw_user_prompt: userInput.product_description },
+      } : project;
+      projects.set(seeded.id, seeded);
+      return ok(seeded);
     },
     async listProjects() {
-      return ok([...projects.values()]);
+      return this.listProjectSummaries();
     },
     async listProjectSummaries() {
       return ok([...projects.values()].map((project) => ({ id: project.id, name: project.name, productURL: project.productURL, stage: project.stage, status: project.status, assetCount: project.assets.length, generatedAssetCount: project.assets.length })));
@@ -1122,6 +1160,13 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async saveWorkspace(workspace) {
       projects.set(workspace.id, workspace);
       return ok(workspace);
+    },
+    async saveProjectInputs(projectID, inputs) {
+      const project = projects.get(projectID);
+      if (!project) return { ok: false, error: "未找到项目" };
+      const next = { ...project, productURL: inputs.product_urls?.[0]?.url ?? project.productURL, inputBundle: inputs };
+      projects.set(projectID, next);
+      return ok(next);
     },
     async getUnderstandingReport(projectID) {
       const project = projects.get(projectID);
@@ -1308,6 +1353,9 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async ackResultPackage(workspace) {
       return ok(ackWorkspaceAssets(workspace));
     },
+	async acknowledgeResult(workspace) {
+	  return this.ackResultPackage(workspace);
+	},
 	async reviewResult(workspace, decision, summary) {
 	  return ok(workspaceWithReview(workspace, {
 		review_id: `review_mock_${Date.now()}`,

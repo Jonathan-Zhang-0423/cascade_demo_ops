@@ -107,12 +107,18 @@ export type CodeInput = {
 };
 
 export type RepositoryInput = {
+	// Compatibility fields used by Jonathan's repository connection workspace.
+	kind?: "github" | "local" | "server";
   url?: string;
   local_path?: string;
   provider?: string;
   branch?: string;
   read_only: boolean;
   secret_ref?: string;
+	host?: string;
+	port?: number;
+	path?: string;
+	username?: string;
   primary?: boolean;
   last_snapshot_id?: string;
 };
