@@ -70,6 +70,22 @@ func TestPreExecutionValidationAllowsOnlyApprovedPackageEvidence(t *testing.T) {
 	}
 }
 
+func TestValidationCheckCarriesVersionedFailureCodeAndSeverity(t *testing.T) {
+	report := validRuntimeValidationReport()
+	report.Checks = []ValidationCheck{{
+		ID: "check_1", Kind: "runtime_identity", Code: "runtime_event_identity_mismatch",
+		Severity: FindingSeverityBlocking, Passed: false, Required: true,
+		Summary: "Runtime event identity did not match the approved package.",
+	}}
+	if err := report.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	report.Checks[0].Severity = FindingSeverity("critical")
+	if err := report.Validate(); err == nil {
+		t.Fatal("validation check severity must be versioned to the shared finding severity enum")
+	}
+}
+
 func TestRuntimeContractsRejectSensitiveText(t *testing.T) {
 	event := validStageExecutionEvent()
 	event.Observation.Title = "Authorization: Bearer secret-value"

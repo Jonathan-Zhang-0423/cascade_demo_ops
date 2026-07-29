@@ -118,6 +118,68 @@ func TestDeterministicBrowserAgentStageVerifierStopsWhenRequiredValidationIsMiss
 	}
 }
 
+func TestDeterministicBrowserAgentVerifierPreExecutionReportsMissingHashes(t *testing.T) {
+	report, err := newDeterministicBrowserAgentStageVerifier(nil).ValidateBeforeExecution(context.Background(), BrowserAgentValidationContext{
+		RunID: "run_1", SourcePackageID: "pkg_1",
+		StageApprovalPlan:    &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{NodeID: "node_1"}}},
+		ScriptOutline:        &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{NodeID: "node_1"}}},
+		BrowserAgentContract: &model.BrowserAgentContract{ID: "contract_1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := report.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport || !validationReportHasCheckCode(report, "approved_hash_missing", false) {
+		t.Fatalf("pre-execution verifier must stop when approved hashes are missing: %+v", report)
+	}
+}
+
+func TestDeterministicBrowserAgentStageVerifierStopsOnRuntimeIdentityMismatch(t *testing.T) {
+	verifier := deterministicBrowserAgentStageVerifier{}
+	report, err := verifier.ValidateStageEvents(context.Background(), BrowserAgentValidationContext{
+		RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
+	}, []model.StageExecutionEvent{{
+		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1",
+		SourcePackageID: "pkg_1", SourceBundleHashSHA256: "tampered_bundle_hash", PolicyHashSHA256: "policy_hash",
+		NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 1,
+		EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: timeNowUTC(),
+		Observation:  &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "action_completed", Passed: true}}},
+		EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport || !validationReportHasCheckCode(report, "runtime_event_identity_mismatch", false) {
+		t.Fatalf("runtime verifier must stop on event/package identity mismatch: %+v", report)
+	}
+}
+
+func TestDeterministicBrowserAgentPostVerifierRequiresRuntimeReportsAndObservedState(t *testing.T) {
+	verifier := deterministicBrowserAgentStageVerifier{}
+	now := timeNowUTC()
+	vctx := BrowserAgentValidationContext{RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash"}
+	events := []model.StageExecutionEvent{
+		{SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash", NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 1, EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: now, Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "action_completed", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}}},
+		{SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_2", RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash", NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 2, EventType: model.StageExecutionEventStageCompleted, OccurredAt: now.Add(time.Second), Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}}},
+	}
+	result := model.RecordingResultPackage{
+		SourcePackageID:   "pkg_1",
+		StepResults:       []model.StepResult{{NodeID: "node_1", Status: "passed", ObservedState: "planned success state", Artifacts: []model.ArtifactRef{{ID: "artifact_1", SourceNodeID: "node_1"}}}},
+		ValidationReports: []model.ValidationReport{{SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "validation_pre", RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash", Phase: model.ValidationPhasePreExecution, Decision: model.ValidationDecisionContinue, PassRate: 1, OverallConfidence: 1, EvidenceQuality: model.RuntimeObservationDerivedPlan, EvidenceRefs: []model.EvidenceRef{{ID: "approved_package_contract", Kind: model.EvidenceKindDocs}}, CreatedAt: now}},
+	}
+	report, err := verifier.ValidatePostExecution(context.Background(), vctx, result, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport ||
+		!validationReportHasCheckCode(report, "runtime_stage_report_missing", false) ||
+		!validationReportHasCheckCode(report, "observed_state_not_runtime_derived", false) {
+		t.Fatalf("post verifier must reject missing runtime reports and plan-derived observed state: %+v", report)
+	}
+}
+
 func TestBrowserAgentStepResultsNeverUsePlannedSuccessStateAsEvidence(t *testing.T) {
 	plan := BrowserAgentRuntimePlan{Stages: []BrowserAgentRuntimeStage{{NodeID: "node_1", SuccessState: "planned business success"}}}
 	now := timeNowUTC()
@@ -129,6 +191,15 @@ func TestBrowserAgentStepResultsNeverUsePlannedSuccessStateAsEvidence(t *testing
 	if len(results) != 1 || results[0].Status != "passed" || results[0].ObservedState == "planned business success" || !strings.Contains(results[0].ObservedState, "assertion:business_saved=passed") {
 		t.Fatalf("step result must derive its state from runtime observations: %+v", results)
 	}
+}
+
+func validationReportHasCheckCode(report model.ValidationReport, code string, passed bool) bool {
+	for _, check := range report.Checks {
+		if check.Code == code && check.Passed == passed {
+			return true
+		}
+	}
+	return false
 }
 
 func TestLocalBrowserAgentOutlineRunnerPostValidationStopsDelivery(t *testing.T) {
@@ -180,7 +251,9 @@ func TestLocalBrowserAgentOutlineRunnerUsesServerOutcomeVerifierSnapshot(t *test
 	}
 }
 
-type postStoppingBrowserAgentVerifier struct{ deterministicBrowserAgentStageVerifier }
+type postStoppingBrowserAgentVerifier struct {
+	deterministicBrowserAgentStageVerifier
+}
 
 func (v postStoppingBrowserAgentVerifier) ValidateBeforeExecution(ctx context.Context, validationContext BrowserAgentValidationContext) (model.ValidationReport, error) {
 	return v.deterministicBrowserAgentStageVerifier.ValidateBeforeExecution(ctx, validationContext)
