@@ -180,6 +180,61 @@ func TestDevExchangeHTTPLifecycleAcceptsProtocolPackage(t *testing.T) {
 	}
 }
 
+func TestDevExchangeHTTPValidateAcceptsPackageWithoutPersistingState(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := readBrowserAgentOutlineFixture(t)
+	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+
+	result := exchangeHTTPDo[CloudPackagePreflightResult](t, server, http.MethodPost, "/aigc/v1/execution-packages/validate", exchangeUploadHTTPBody{
+		Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg,
+	})
+	if !result.Valid || result.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 || result.StageCount == 0 || result.RequiredChecks == 0 || result.PackageID != pkg.PackageID {
+		t.Fatalf("unexpected preflight response: %+v", result)
+	}
+	if result.Warnings == nil || len(server.service.exchange.packages) != 0 || len(server.service.exchange.uploads) != 0 || len(server.service.exchange.seenNonces) != 0 {
+		t.Fatalf("preflight must not persist package, upload session, or replay nonce: result=%+v packages=%d uploads=%d nonces=%d", result, len(server.service.exchange.packages), len(server.service.exchange.uploads), len(server.service.exchange.seenNonces))
+	}
+}
+
+func TestDevExchangeHTTPValidateReturnsSameSafeErrorAsUpload(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 27, 12, 5, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	pkg.RecordingRunSpec.AllowedDomains = nil
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/execution-packages/validate", bytes.NewReader(mustMarshalJSON(t, exchangeUploadHTTPBody{
+		Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg,
+	})))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected validation failure, got %d: %s", response.Code, response.Body.String())
+	}
+	var errorBody exchangeHTTPError
+	if err := json.Unmarshal(response.Body.Bytes(), &errorBody); err != nil {
+		t.Fatal(err)
+	}
+	if errorBody.Error.Code != "client_execution_package_invalid" || len(errorBody.Error.Details) != 1 || errorBody.Error.Details[0].Field != "payload.recording_run_spec.allowed_domains" {
+		t.Fatalf("preflight must return the upload-compatible safe protocol error: %+v", errorBody.Error)
+	}
+	if len(server.service.exchange.packages) != 0 || len(server.service.exchange.uploads) != 0 || len(server.service.exchange.seenNonces) != 0 {
+		t.Fatalf("failed preflight must not mutate exchange state")
+	}
+}
+
 func TestDevExchangeHTTPUploadValidationReturnsSafeDetails(t *testing.T) {
 	t.Setenv(devExchangeHTTPEnv, "1")
 	t.Setenv(devExchangeTokenEnv, "test-token")
@@ -383,6 +438,56 @@ func TestDevExchangeHTTPRunEndpointMarksMissingWorkerAsFailed(t *testing.T) {
 	}
 	if len(failed.StageHistory) < 3 {
 		t.Fatalf("failed dev run should include stage history, got %+v", failed.StageHistory)
+	}
+}
+
+func TestDevExchangeHTTPRunEndpointBlocksUnreadyBrowserAgentBeforeStartingWorker(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := readBrowserAgentOutlineFixture(t)
+
+	// This remains structurally valid, but the App declares a business-input
+	// stage without approving any value, input reference, or secret grant.
+	stage := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1]
+	stage.StageKind = model.BusinessStageKindBusinessInput
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[1].StageKind = stage.StageKind
+	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
+		t.Fatal(err)
+	}
+
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution,
+	})
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Crypto.Nonce = "nonce_browser_agent_readiness_blocked"
+	uploadPayload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID: initPayload.UploadID, Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg,
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/dev/execution-packages/"+uploadPayload.ExchangePackageID+"/run?org_id="+pkg.OrgID, nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unready browser-agent package must be rejected before run, got %d: %s", response.Code, response.Body.String())
+	}
+	var errorBody exchangeHTTPError
+	if err := json.Unmarshal(response.Body.Bytes(), &errorBody); err != nil {
+		t.Fatal(err)
+	}
+	if errorBody.Error.Code != "browser_agent_readiness_blocked" || !strings.Contains(errorBody.Error.Message, "business_input_missing") {
+		t.Fatalf("unexpected readiness rejection: %+v", errorBody.Error)
+	}
+
+	status := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodGet, "/v1/execution-packages/"+uploadPayload.ExchangePackageID+"/status?org_id="+pkg.OrgID, nil)
+	if status.Status != model.ExchangePackageStatusAccepted || status.Stage != "accepted" || len(status.StageHistory) != 1 {
+		t.Fatalf("readiness rejection must leave the package unstarted: %+v", status)
+	}
+	if _, err := os.Stat(filepath.Join(server.service.runtime.ArtifactRoot, "exchange", uploadPayload.ExchangePackageID)); !os.IsNotExist(err) {
+		t.Fatalf("readiness rejection must not create runtime artifacts, err=%v", err)
 	}
 }
 

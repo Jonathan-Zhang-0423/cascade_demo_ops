@@ -38,6 +38,9 @@ type ScriptStep struct {
 	ID              string                      `json:"id"`
 	Order           int                         `json:"order"`
 	NodeID          string                      `json:"node_id"`
+	StageKind       BusinessStageKind           `json:"stage_kind,omitempty"`
+	RouteState      BusinessRouteState          `json:"route_state,omitempty"`
+	NonDestructive  bool                        `json:"non_destructive,omitempty"`
 	Title           string                      `json:"title,omitempty"`
 	BusinessValue   string                      `json:"business_value,omitempty"`
 	PageTarget      ScriptPageTarget            `json:"page_target"`

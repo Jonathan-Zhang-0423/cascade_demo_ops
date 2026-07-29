@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,9 +36,21 @@ func ValidateClientExecutionPackageIntake(envelope *ExchangeEnvelope, pkg *Clien
 	if err := validateClientExecutionPackageContents(pkg); err != nil {
 		return err
 	}
+	if err := ValidatePackageConfidenceSummary(pkg); err != nil {
+		return err
+	}
 	if envelope.Policy.HumanApprovalRequired {
 		if pkg.ApprovedAt.IsZero() || pkg.SafetyReport.HumanApproval.ApprovalID == "" || pkg.SafetyReport.HumanApproval.PlanDigestSHA256 == "" {
 			return errors.New("human approval metadata is required by exchange policy")
+		}
+		if pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 != "" {
+			digest, err := ComputePackageApprovalSubjectDigest(*pkg)
+			if err != nil {
+				return err
+			}
+			if digest != pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 {
+				return errors.New("human approval subject digest does not match execution package")
+			}
 		}
 	}
 	return nil
@@ -53,7 +66,15 @@ func ValidateClientExecutionPackageForCloudExecution(pkg *ClientExecutionPackage
 	if pkg.SchemaVersion != ClientExecutionPackageSchemaVersion {
 		return fmt.Errorf("client execution package schema_version must be %q", ClientExecutionPackageSchemaVersion)
 	}
-	return validateClientExecutionPackageContents(pkg)
+	if data, err := json.Marshal(pkg); err != nil {
+		return err
+	} else if len(data) > 256*1024 {
+		return errors.New("package_size_exceeded: client execution package exceeds 256 KiB")
+	}
+	if err := validateClientExecutionPackageContents(pkg); err != nil {
+		return err
+	}
+	return ValidatePackageConfidenceSummary(pkg)
 }
 
 func ValidateRecordingResultPackageForRender(result *RecordingResultPackage, source *ClientExecutionPackage) error {
@@ -108,6 +129,9 @@ func validateClientExecutionPackageContents(pkg *ClientExecutionPackage) error {
 	if pkg.ProjectContextSummary.ProductURL == "" || pkg.ProjectContextSummary.TargetAudience == "" {
 		return errors.New("client execution package project_context_summary missing product_url or target_audience")
 	}
+	if err := validateSourceBindingSummary(pkg); err != nil {
+		return err
+	}
 	if err := validateRecordingRunSpec(pkg.RecordingRunSpec); err != nil {
 		return err
 	}
@@ -137,6 +161,29 @@ func validateClientExecutionPackageContents(pkg *ClientExecutionPackage) error {
 	}
 	if graphDigest != pkg.Reproducibility.GraphHashSHA256 {
 		return errors.New("client execution package graph hash mismatch")
+	}
+	return nil
+}
+
+func validateSourceBindingSummary(pkg *ClientExecutionPackage) error {
+	if pkg == nil {
+		return nil
+	}
+	if pkg.SourceBindingSummary == nil {
+		if ClientPackageContainsSourceDerivedExecutionEvidence(pkg) {
+			return errors.New("source_binding_summary is required for source-derived execution evidence")
+		}
+		return nil
+	}
+	summary := pkg.SourceBindingSummary
+	if summary.SchemaVersion != ProductSourceBindingAssessmentSchemaVersion || summary.AssessmentHash == "" {
+		return errors.New("source_binding_summary is invalid")
+	}
+	if summary.EffectiveMode == ProductSourceModeBlocked || summary.EffectiveMode == ProductSourceModeMixed && summary.Status != ProductSourceBindingMatched {
+		return errors.New("product_source_mismatch: source binding does not allow mixed execution evidence")
+	}
+	if summary.EffectiveMode == ProductSourceModePageOnly && ClientPackageContainsSourceDerivedExecutionEvidence(pkg) {
+		return &SourceEvidenceLeakageError{}
 	}
 	return nil
 }
@@ -379,6 +426,9 @@ func validateBrowserAgentOutlineBundle(bundle *ExecutableRecordingScriptBundle) 
 			return fmt.Errorf("script_outline missing plan node_id %q", nodeID)
 		}
 	}
+	if err := ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
+		return err
+	}
 	stageHash, err := DigestCanonicalJSON(bundle.StageApprovalPlan)
 	if err != nil {
 		return err
@@ -500,6 +550,8 @@ func stepRequiresBrowserAgentValidation(step ScriptStep) bool {
 	switch step.Action.Type {
 	case GraphActionNavigate, GraphActionClick, GraphActionFill, GraphActionSelect, GraphActionUpload, GraphActionAPICall:
 		return true
+	case GraphActionWait, GraphActionInspect:
+		return step.StageKind == BusinessStageKindSessionSetup || step.StageKind == BusinessStageKindObserveProgress || step.StageKind == BusinessStageKindFinalObserve
 	default:
 		return false
 	}

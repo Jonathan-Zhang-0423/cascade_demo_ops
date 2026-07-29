@@ -9,6 +9,7 @@ import (
 // BrowserAgentValidationContext is an immutable view of the App-approved
 // package. Outcome verifiers may read it but cannot rewrite it or its hashes.
 type BrowserAgentValidationContext struct {
+	RunID                     string
 	SourcePackageID           string
 	SourceBundleHashSHA256    string
 	EffectivePolicyHashSHA256 string

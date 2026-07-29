@@ -36,15 +36,16 @@ func IsAssistantWorkstation(value AssistantWorkstation) bool {
 type AssistantProposalKind string
 
 const (
-	AssistantProposalConfigurationPatch        AssistantProposalKind = "configuration_patch"
-	AssistantProposalSelectLocalProject        AssistantProposalKind = "select_local_project"
-	AssistantProposalConnectGitHub             AssistantProposalKind = "connect_github"
-	AssistantProposalAttachRequirementDocument AssistantProposalKind = "attach_requirement_document"
-	AssistantProposalAttachBrandAsset          AssistantProposalKind = "attach_brand_asset"
-	AssistantProposalStoreDemoCredential       AssistantProposalKind = "store_demo_credential"
-	AssistantProposalConfirmConfiguration      AssistantProposalKind = "confirm_configuration"
-	AssistantProposalStartLocalAnalysis        AssistantProposalKind = "start_local_analysis"
-	AssistantProposalOpenWorkstation           AssistantProposalKind = "open_workstation"
+	AssistantProposalConfigurationPatch          AssistantProposalKind = "configuration_patch"
+	AssistantProposalSelectLocalProject          AssistantProposalKind = "select_local_project"
+	AssistantProposalConnectGitHub               AssistantProposalKind = "connect_github"
+	AssistantProposalAttachRequirementDocument   AssistantProposalKind = "attach_requirement_document"
+	AssistantProposalAttachBrandAsset            AssistantProposalKind = "attach_brand_asset"
+	AssistantProposalStoreDemoCredential         AssistantProposalKind = "store_demo_credential"
+	AssistantProposalConfirmConfiguration        AssistantProposalKind = "confirm_configuration"
+	AssistantProposalStartLocalAnalysis          AssistantProposalKind = "start_local_analysis"
+	AssistantProposalOpenWorkstation             AssistantProposalKind = "open_workstation"
+	AssistantProposalContinueWithWebpageEvidence AssistantProposalKind = "continue_with_webpage_evidence"
 )
 
 func IsAssistantProposalKind(value AssistantProposalKind) bool {
@@ -53,7 +54,7 @@ func IsAssistantProposalKind(value AssistantProposalKind) bool {
 		AssistantProposalConnectGitHub, AssistantProposalAttachRequirementDocument,
 		AssistantProposalAttachBrandAsset, AssistantProposalStoreDemoCredential,
 		AssistantProposalConfirmConfiguration, AssistantProposalStartLocalAnalysis,
-		AssistantProposalOpenWorkstation:
+		AssistantProposalOpenWorkstation, AssistantProposalContinueWithWebpageEvidence:
 		return true
 	default:
 		return false

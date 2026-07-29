@@ -9,6 +9,7 @@ import type {
   ConfigurationSourceRefView,
   ProjectSummaryView,
   ProjectWorkspaceView,
+  ProductSourceBindingView,
   RuntimeHealthView,
   RuntimeLogEntry,
   ScenarioID,
@@ -46,6 +47,11 @@ export type BridgeResult<T> = {
   errorInfo?: LocalBridgeErrorInfo | undefined;
 };
 
+export type ProjectCreationInput = {
+  userInput: LocalUserInput;
+  scenarioID?: ScenarioID;
+};
+
 export type DesktopBridgeClient = {
   mode: "mock" | "local";
   runtimeHealth(): Promise<BridgeResult<RuntimeHealthView>>;
@@ -63,25 +69,28 @@ export type DesktopBridgeClient = {
   browserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
   runBrowserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
   executionEvents(projectID: string, afterID?: string): Promise<BridgeResult<RuntimeLogEntry[]>>;
-  createProject(scenarioID: ScenarioID): Promise<BridgeResult<ProjectWorkspaceView>>;
-  listProjects(): Promise<BridgeResult<ProjectWorkspaceView[]>>;
+  createProject(input: ScenarioID | ProjectCreationInput): Promise<BridgeResult<ProjectWorkspaceView>>;
+  listProjects(): Promise<BridgeResult<ProjectSummaryView[]>>;
 
   listProjectSummaries(): Promise<BridgeResult<ProjectSummaryView[]>>;
   loadProject(projectID: string): Promise<BridgeResult<ProjectWorkspaceView>>;
+  getSourceBinding(projectID: string): Promise<BridgeResult<ProductSourceBindingView>>;
+  continueWithWebpageEvidence(projectID: string, assessmentHash: string, idempotencyKey: string): Promise<BridgeResult<ProjectWorkspaceView>>;
   archiveProject(projectID: string): Promise<BridgeResult<{ archived: boolean }>>;
   deleteProject(projectID: string): Promise<BridgeResult<{ deleted: boolean }>>;
   createAssistantSession(context: AssistantContextView): Promise<BridgeResult<AssistantSessionView>>;
   getAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
   submitAssistantTurn(sessionID: string, message: string, idempotencyKey?: string, safeSelections?: { selectedSources?: ConfigurationSourceRefView[]; credentialRefs?: string[] }): Promise<BridgeResult<AssistantSessionView>>;
   listAssistantEvents(sessionID: string, afterID?: string): Promise<BridgeResult<AssistantEventView[]>>;
-  confirmAssistantProposal(sessionID: string, proposalID: string, baseVersion: number, idempotencyKey: string): Promise<BridgeResult<AssistantSessionView>>;
-  dismissAssistantProposal(sessionID: string, proposalID: string, baseVersion: number, idempotencyKey: string): Promise<BridgeResult<AssistantSessionView>>;
+  confirmAssistantProposal(sessionID: string, proposalID: string, baseVersion?: number, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
+  dismissAssistantProposal(sessionID: string, proposalID: string, baseVersion?: number, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
   cancelAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
   selectLocalProjectDirectory(): Promise<BridgeResult<ConfigurationSourceRefView>>;
   selectRequirementDocuments(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
   selectBrandAssets(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
   storeDemoCredential(ref: string, username: string, password: string): Promise<BridgeResult<{ secretRef: string; configured: boolean }>>;
   saveWorkspace(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  saveProjectInputs(projectID: string, inputs: ProjectInputBundle): Promise<BridgeResult<ProjectWorkspaceView>>;
   getUnderstandingReport(projectID: string): Promise<BridgeResult<MultimodalUnderstandingReport>>;
   getExecutionScriptDocument(projectID: string): Promise<BridgeResult<ExecutionScriptDocument>>;
   getExecutionScriptMarkdown(projectID: string): Promise<BridgeResult<{ markdown: string }>>;
@@ -97,6 +106,7 @@ export type DesktopBridgeClient = {
   simulateCloudFailure(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   repairFailedScript(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   ackResultPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  acknowledgeResult(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   reviewResult(workspace: ProjectWorkspaceView, decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string): Promise<BridgeResult<ProjectWorkspaceView>>;
 };
 
@@ -318,14 +328,26 @@ type LocalCascadeState = {
   script_markdown?: string;
   executable_script_bundle?: ExecutableRecordingScriptBundle;
   error_message?: string;
+  source_binding?: ProductSourceBindingView;
 };
 
 type LocalClientExecutionPackageBuild = {
   org_id: string;
   project_id: string;
   package: ClientExecutionPackage;
-  envelope: ExchangeEnvelope;
-  payload_ref: EncryptedPayloadRef;
+  envelope?: ExchangeEnvelope;
+  payload_ref?: EncryptedPayloadRef;
+  build_status: "draft" | "approved";
+  approval_subject_digest_sha256: string;
+  package_digest_sha256: string;
+  size_report: {
+    algorithm_version: string;
+    total_bytes: number;
+    section_bytes: Record<string, number>;
+    stage_count: number;
+    evidence_count: number;
+    selector_count: number;
+  };
 };
 
 type LocalCloudLifecycleResult = {
@@ -475,6 +497,7 @@ type LocalProjectContext = {
   forbidden_pages?: string[];
   forbidden_data?: string[];
   inputs?: ProjectInputBundle;
+  source_binding?: ProductSourceBindingView;
 };
 
 type LocalProductMap = {
@@ -486,7 +509,7 @@ type LocalProductMap = {
   data_models?: Array<unknown>;
 };
 
-type LocalUserInput = {
+export type LocalUserInput = {
   mode: "desktop";
   product_url: string;
   local_repo_path?: string;
@@ -558,9 +581,10 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return ok(result.data.map(modelDiagnosticFromLocal));
     },
     async preflightExecutionPackage(workspace) {
+	  const preview = workspace.packagePreview;
       return requestLocal<CloudPackagePreflightView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/preflight`, {
         method: "POST",
-        body: JSON.stringify({ org_id: orgID }),
+		body: JSON.stringify({ org_id: orgID, approval_subject_digest_sha256: preview.approvalSubjectDigest ?? preview.packageDigest, confidence_assessment_hash: preview.confidenceAssessmentHash ?? preview.packageDigest, risk_confirmed: true, idempotency_key: `preflight-${workspace.id}-${preview.approvalSubjectDigest ?? preview.packageDigest}` }),
       });
     },
     async editorMaterialization(workspace) {
@@ -589,13 +613,24 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       }
       return ok(result.data.map(runtimeLogFromLocalEvent));
     },
-    async createProject(scenarioID) {
-      const workspace = createWorkspace(scenarioID);
+    async createProject(input) {
+      const scenarioID = typeof input === "string" ? input : input.scenarioID ?? "product_demo";
+      if (typeof input === "string") {
+        const workspace = createWorkspace(scenarioID);
+        projects.set(workspace.id, workspace);
+        return ok(workspace);
+      }
+      const result = await requestLocal<LocalCascadeState>(baseURL, "/v1/desktop/projects", {
+        method: "POST",
+        body: JSON.stringify(input.userInput),
+      });
+      if (!result.ok || !result.data) return { ok: false, error: result.error ?? "创建项目失败" };
+      const workspace = workspaceFromCascadeState(result.data, createWorkspace(scenarioID));
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
     async listProjects() {
-      return ok([...projects.values()]);
+      return this.listProjectSummaries();
     },
     async listProjectSummaries() {
       const result = await requestLocal<Array<{ id: string; name: string; product_url?: string; stage: ProjectSummaryView["stage"]; status: ProjectSummaryView["status"]; asset_count: number; generated_asset_count: number; created_at?: string; updated_at?: string }>>(baseURL, "/v1/desktop/projects");
@@ -643,6 +678,15 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     async storeDemoCredential(ref, username, password) {
       return callWailsBridge<{ secretRef: string; configured: boolean }>("StoreDemoCredential", ref, username, password);
     },
+    async saveProjectInputs(projectID, inputs) {
+      const result = await requestLocal<LocalProjectContext>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/inputs`, {
+        method: "POST",
+        body: JSON.stringify(inputs),
+      });
+      if (!result.ok) return { ok: false, error: result.error ?? "项目输入保存失败" };
+      projects.delete(projectID);
+      return this.loadProject(projectID);
+    },
     async loadProject(projectID) {
       const cached = projects.get(projectID);
       if (cached) {
@@ -654,6 +698,18 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       }
       const workspace = workspaceFromCascadeState(result.data, createWorkspace("product_demo"));
       projects.set(workspace.id, workspace);
+      return ok(workspace);
+    },
+    async getSourceBinding(projectID) {
+      return requestLocal<ProductSourceBindingView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/source-binding`);
+    },
+    async continueWithWebpageEvidence(projectID, assessmentHash, idempotencyKey) {
+      const result = await requestLocal<LocalCascadeState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/source-binding/decisions`, {
+        method: "POST", body: JSON.stringify({ decision: "continue_page_only", assessment_hash: assessmentHash, idempotency_key: idempotencyKey }),
+      });
+      if (!result.ok || !result.data) return bridgeFailure(result.error ?? "无法切换到仅网页证据模式", result.errorInfo);
+      const workspace = workspaceFromCascadeState(result.data, projects.get(projectID) ?? createWorkspace("product_demo"));
+      projects.set(projectID, workspace);
       return ok(workspace);
     },
     async saveWorkspace(workspace) {
@@ -707,69 +763,19 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         current = workspaceWithPreparedBuild(current, prepared.data.build);
       }
       projects.set(current.id, current);
-
-      const init = await this.initExecutionPackageUpload(current);
-      if (!init.ok || !init.data) {
-        const failed = workspaceWithCloudPhaseFailure(current, "cloud_auth_unavailable", init.error ?? "服务器连接/上传初始化失败", init.errorInfo);
-        projects.set(failed.id, failed);
-        return ok(failed);
-      }
-      current = workspaceWithCloudInit(current, {
-        build: cloudBuilds.get(current.id),
-        init: localInitResponseFromView(init.data),
-      });
-      projects.set(current.id, current);
-
-      const upload = await this.uploadExecutionPackage(current);
-      if (!upload.ok || !upload.data) {
-        const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", upload.error ?? "上传执行包失败", upload.errorInfo);
-        projects.set(failed.id, failed);
-        return ok(failed);
-      }
-      current = workspaceWithCloudUpload(current, localUploadPackageResultFromView(upload.data, cloudBuilds.get(current.id)));
-      projects.set(current.id, current);
-
-      const deadline = Date.now() + 900_000;
-      const streamed = await streamCloudExecutionStatus(baseURL, current, orgID, deadline, (next) => {
-        projects.set(next.id, next);
-        options?.onCloudStatus?.(next);
-      });
-      if (streamed) {
-        current = streamed;
-        projects.set(current.id, current);
-      }
-      if (isTerminalCloudRun(current.cloudRun.status)) {
-        const finalized = await this.pollExecutionPackageStatus(current);
-        if (finalized.ok && finalized.data) {
-          current = finalized.data;
-          options?.onCloudStatus?.(current);
-        }
-      }
-      while (!isTerminalCloudRun(current.cloudRun.status) && Date.now() < deadline) {
-        const polled = await this.pollExecutionPackageStatus(current);
-        if (!polled.ok || !polled.data) {
-          const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", polled.error ?? "轮询服务器执行状态失败", polled.errorInfo);
-          projects.set(failed.id, failed);
-          return ok(failed);
-        }
-        current = polled.data;
-        options?.onCloudStatus?.(current);
-        if (!isTerminalCloudRun(current.cloudRun.status)) {
-          await delay(1000);
-        }
-      }
-      if (!isTerminalCloudRun(current.cloudRun.status)) {
-        const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", "服务器录制状态轮询超时", undefined);
-        projects.set(failed.id, failed);
-        return ok(failed);
-      }
-      projects.set(current.id, current);
-      return ok(current);
+	  return ok(current);
     },
     async initExecutionPackageUpload(workspace) {
+	  const preview = workspace.packagePreview;
       const result = await requestLocal<LocalCloudUploadInitResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/init`, {
         method: "POST",
-        body: JSON.stringify({ org_id: orgID }),
+		body: JSON.stringify({
+		  org_id: orgID,
+		  approval_subject_digest_sha256: preview.approvalSubjectDigest ?? preview.packageDigest,
+		  confidence_assessment_hash: preview.confidenceAssessmentHash ?? preview.packageDigest,
+		  risk_confirmed: true,
+		  idempotency_key: `approve-${workspace.id}-${preview.approvalSubjectDigest ?? preview.packageDigest}`,
+		}),
       });
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "初始化服务器上传会话失败", result.errorInfo);
@@ -909,6 +915,9 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(next.id, next);
       return ok(next);
     },
+	async acknowledgeResult(workspace) {
+	  return this.ackResultPackage(workspace);
+	},
 	async reviewResult(workspace, decision, summary) {
 	  const resultPackageID = workspace.cloudRun.resultPackageID;
 	  if (!resultPackageID) {
@@ -1091,13 +1100,21 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async executionEvents() {
       return ok([]);
     },
-    async createProject(scenarioID) {
+    async createProject(input) {
+      const scenarioID = typeof input === "string" ? input : input.scenarioID ?? "product_demo";
       const project = createWorkspace(scenarioID);
-      projects.set(project.id, project);
-      return ok(project);
+      const userInput = typeof input === "string" ? undefined : input.userInput;
+      const seeded = userInput ? {
+        ...project,
+        productURL: userInput.product_url,
+        targetAudience: userInput.target_audience,
+        inputBundle: { ...project.inputBundle, raw_user_prompt: userInput.product_description },
+      } : project;
+      projects.set(seeded.id, seeded);
+      return ok(seeded);
     },
     async listProjects() {
-      return ok([...projects.values()]);
+      return this.listProjectSummaries();
     },
     async listProjectSummaries() {
       return ok([...projects.values()].map((project) => ({ id: project.id, name: project.name, productURL: project.productURL, stage: project.stage, status: project.status, assetCount: project.assets.length, generatedAssetCount: project.assets.length })));
@@ -1119,9 +1136,27 @@ export function createMockBridgeClient(): DesktopBridgeClient {
       const project = projects.get(projectID);
       return project ? ok(project) : { ok: false, error: "未找到项目" };
     },
+    async getSourceBinding(projectID) {
+      const project = projects.get(projectID);
+      return project?.sourceBinding ? ok(project.sourceBinding) : { ok: false, error: "source binding assessment is missing" };
+    },
+    async continueWithWebpageEvidence(projectID, assessmentHash) {
+      const project = projects.get(projectID);
+      if (!project || project.sourceBinding?.assessment_hash !== assessmentHash) return { ok: false, error: "source_binding_stale" };
+      const next: ProjectWorkspaceView = { ...project, sourceBinding: { ...project.sourceBinding, effective_mode: "page_only", decision: "continue_page_only" } };
+      projects.set(projectID, next);
+      return ok(next);
+    },
     async saveWorkspace(workspace) {
       projects.set(workspace.id, workspace);
       return ok(workspace);
+    },
+    async saveProjectInputs(projectID, inputs) {
+      const project = projects.get(projectID);
+      if (!project) return { ok: false, error: "未找到项目" };
+      const next = { ...project, productURL: inputs.product_urls?.[0]?.url ?? project.productURL, inputBundle: inputs };
+      projects.set(projectID, next);
+      return ok(next);
     },
     async getUnderstandingReport(projectID) {
       const project = projects.get(projectID);
@@ -1308,6 +1343,9 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async ackResultPackage(workspace) {
       return ok(ackWorkspaceAssets(workspace));
     },
+	async acknowledgeResult(workspace) {
+	  return this.ackResultPackage(workspace);
+	},
 	async reviewResult(workspace, decision, summary) {
 	  return ok(workspaceWithReview(workspace, {
 		review_id: `review_mock_${Date.now()}`,
@@ -1541,6 +1579,7 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
   const graphDigest = bundle?.reproducibility.graph_hash_sha256 || scriptDocument?.reproducibility.graph_hash_sha256 || fallback.packagePreview.graphDigest;
   const packageDigest = bundle?.reproducibility.bundle_hash_sha256 || bundle?.reproducibility.plan_hash_sha256 || scriptDocument?.reproducibility.script_hash_sha256 || fallback.packagePreview.packageDigest;
 
+  const sourceBinding = state.source_binding ?? project?.source_binding ?? fallback.sourceBinding;
   const workspace: ProjectWorkspaceView = {
     ...fallback,
     id: state.project_id || project?.id || fallback.id,
@@ -1551,6 +1590,7 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
     status: "awaiting_approval",
     inputBundle,
     sourceConnections: sourceConnectionsFromState(project, report, fallback),
+    ...(sourceBinding ? { sourceBinding } : {}),
     understanding: {
       productMapID: state.product_map?.id || fallback.understanding.productMapID,
       routesDetected: intelligence?.architecture?.route_tree?.length ?? report?.code_snapshots?.reduce((count, snapshot) => count + (snapshot.routes?.length ?? 0), 0) ?? fallback.understanding.routesDetected,
@@ -1636,7 +1676,7 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
       ...workspace.packagePreview,
       ipAllowlistAcknowledged: true,
       packageID: lifecycle.build?.package.package_id ?? workspace.packagePreview.packageID,
-      packageDigest: lifecycle.build?.envelope.crypto.payload_digest_sha256 ?? workspace.packagePreview.packageDigest,
+      packageDigest: lifecycle.build?.package_digest_sha256 ?? workspace.packagePreview.packageDigest,
     },
     cloudRun: {
       ...workspace.cloudRun,
@@ -1671,7 +1711,16 @@ function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: Loca
       ...workspace.packagePreview,
       ipAllowlistAcknowledged: true,
       packageID: build.package.package_id ?? workspace.packagePreview.packageID,
-      packageDigest: build.envelope.crypto.payload_digest_sha256 ?? workspace.packagePreview.packageDigest,
+	  packageDigest: build.package_digest_sha256 || workspace.packagePreview.packageDigest,
+	  buildStatus: build.build_status,
+	  approvalSubjectDigest: build.approval_subject_digest_sha256,
+	  ...(build.package.confidence_summary?.assessment_hash ? { confidenceAssessmentHash: build.package.confidence_summary.assessment_hash } : {}),
+	  ...(build.package.confidence_summary?.readiness ? { readiness: build.package.confidence_summary.readiness } : {}),
+	  ...(build.package.confidence_summary?.overall_score != null ? { confidenceScore: build.package.confidence_summary.overall_score } : {}),
+	  ...(build.package.confidence_summary?.warnings ? { confidenceWarnings: build.package.confidence_summary.warnings } : {}),
+	  ...(build.size_report?.total_bytes != null ? { totalBytes: build.size_report.total_bytes } : {}),
+	  ...(build.size_report?.section_bytes ? { sectionBytes: build.size_report.section_bytes } : {}),
+	  blockedReasons: build.package.confidence_summary?.blocking_reasons ?? workspace.packagePreview.blockedReasons,
     },
     cloudRun: {
       ...workspace.cloudRun,
@@ -1733,7 +1782,8 @@ function workspaceWithCloudInit(workspace: ProjectWorkspaceView, result: LocalCl
       ...workspace.packagePreview,
       ipAllowlistAcknowledged: true,
       packageID: build?.package.package_id ?? workspace.packagePreview.packageID,
-      packageDigest: build?.envelope.crypto.payload_digest_sha256 ?? workspace.packagePreview.packageDigest,
+	  packageDigest: build?.package_digest_sha256 ?? workspace.packagePreview.packageDigest,
+	  ...(build?.build_status ? { buildStatus: build.build_status } : {}),
     },
     cloudRun: {
       ...workspace.cloudRun,

@@ -55,6 +55,10 @@ func exchangeErrorCode(err error, fallback string) string {
 	if errors.As(err, &protocolErr) && protocolErr.code != "" {
 		return protocolErr.code
 	}
+	var runtimeErr *runtimeExecutionError
+	if errors.As(err, &runtimeErr) && runtimeErr.code != "" {
+		return runtimeErr.code
+	}
 	return fallback
 }
 

@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,27 @@ import (
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 )
+
+func TestMultimodalFlowBlocksProductSourceMismatchBeforeFusion(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "package.json"), []byte(`{"name":"beta","homepage":"https://beta.example"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := newTestFlow(t).Start(context.Background(), orchestrator.UserInput{
+		Mode: model.AppModeDesktop, ProductURL: "https://alpha.example", LocalRepoPath: repo,
+		ProductDescription: "展示 alpha 产品", TargetAudience: "测试人员",
+	})
+	var mismatch *model.ProductSourceMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("expected product source mismatch, got %T: %v", err, err)
+	}
+	if state == nil || state.SourceBinding == nil || state.SourceBinding.Status != model.ProductSourceBindingMismatched {
+		t.Fatalf("mismatch assessment must be retained in failed state: %+v", state)
+	}
+	if state.ProjectIntelligence != nil || state.WorkflowGraph != nil || state.ExecutableScriptBundle != nil {
+		t.Fatalf("mismatched source must stop before fusion/package creation: %+v", state)
+	}
+}
 
 func TestMultimodalFlowPackagesReviewableScriptDocument(t *testing.T) {
 	repo := createFixtureRepo(t)
@@ -198,6 +220,7 @@ func newTestFlow(t *testing.T) *orchestrator.CascadeFlow {
 		RequirementReader:   NewRequirementReaderAgent(),
 		CodeReader:          NewCodeReaderAgent(),
 		PageReader:          NewPageReaderAgent(),
+		SourceBinding:       NewProductSourceBindingAgent(),
 		ProjectIntelligence: NewProjectIntelligenceGraph(),
 		Understanding:       NewMultimodalUnderstandingAgent(),
 		ProductMap:          NewProductMapAgent(),

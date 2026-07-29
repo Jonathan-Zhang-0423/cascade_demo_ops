@@ -40,6 +40,12 @@ type Service struct {
 	outlineRunner  BrowserAgentOutlineRunner
 	sourceRefsMu   sync.RWMutex
 	sourceRefs     map[string]LocalSourceRef
+	approvalMu     sync.Mutex
+	approvedBuilds map[string]ClientExecutionPackageBuild
+	verifierMu     sync.RWMutex
+	// outcomeVerifier is Server-owned. It never receives a browser/page object
+	// and is snapshotted when an Outline run begins.
+	outcomeVerifier OutcomeVerifier
 }
 
 type editorRenderTask struct {
@@ -70,6 +76,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		RequirementReader:    agents.NewRequirementReaderAgentWithLLM(llmRouter),
 		CodeReader:           agents.NewCodeReaderAgentWithLLM(llmRouter, runtime.CacheRoot),
 		PageReader:           agents.NewPageReaderAgent(),
+		SourceBinding:        agents.NewProductSourceBindingAgent(),
 		ProjectIntelligence:  agents.NewProjectIntelligenceGraphWithLLM(llmRouter),
 		Understanding:        agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
 		ProductMap:           agents.NewProductMapAgentWithLLM(llmRouter),
@@ -95,9 +102,13 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		editorJobs:     map[string]editorRenderTask{},
 		outlineRunner:  nil,
 		sourceRefs:     map[string]LocalSourceRef{},
+		approvedBuilds: map[string]ClientExecutionPackageBuild{},
 	}
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
-	service.exchange.SetInlinePayloadAllowed(runtime.Profile != config.ProfileCloud)
+	// Production cloud intake receives only encrypted payload references. Local
+	// and test runtimes retain inline payloads solely for deterministic fixtures
+	// and never relax the production transport rule.
+	service.exchange.SetInlinePayloadAllowed(runtime.Profile != config.ProfileCloud || runtime.Environment != "production")
 	service.outlineRunner = localBrowserAgentOutlineRunner{service: service}
 	service.loadLocalSourceRefs()
 	return service, nil
@@ -108,6 +119,26 @@ func assistantStoreForRuntime(runtime config.AppRuntimeConfig) store.AssistantSt
 		return store.NewMemoryAssistantStore()
 	}
 	return store.NewFileAssistantStore(filepath.Join(runtime.DataRoot, "assistant_sessions"))
+}
+
+// SetBrowserAgentOutcomeVerifier installs the Server-side Validation Agent
+// adapter for future Outline runs. The App upload contract remains unchanged.
+func (s *Service) SetBrowserAgentOutcomeVerifier(verifier OutcomeVerifier) {
+	if s == nil {
+		return
+	}
+	s.verifierMu.Lock()
+	defer s.verifierMu.Unlock()
+	s.outcomeVerifier = verifier
+}
+
+func (s *Service) browserAgentOutcomeVerifierSnapshot() OutcomeVerifier {
+	if s == nil {
+		return nil
+	}
+	s.verifierMu.RLock()
+	defer s.verifierMu.RUnlock()
+	return s.outcomeVerifier
 }
 
 func (s *Service) videoWorkerEnvironment() map[string]string {
@@ -139,6 +170,9 @@ func (s *Service) DiagnoseModels(ctx context.Context) []llm.DiagnosticResult {
 func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
 	state, err := s.flow.Start(ctx, input)
 	if err != nil {
+		if state != nil && state.ProjectID != "" {
+			_ = s.states.Save(ctx, state)
+		}
 		return state, err
 	}
 	if err := s.states.Save(ctx, state); err != nil {
@@ -150,6 +184,57 @@ func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInpu
 func (s *Service) LoadProject(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
 	return s.states.Load(ctx, projectID)
 }
+
+type SourceBindingDecisionRequest struct {
+	Decision       string `json:"decision"`
+	AssessmentHash string `json:"assessment_hash"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+func (s *Service) GetSourceBinding(ctx context.Context, projectID string) (*model.ProductSourceBindingAssessment, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.SourceBinding == nil {
+		return nil, errors.New("source binding assessment is missing")
+	}
+	return state.SourceBinding, nil
+}
+
+func (s *Service) DecideSourceBinding(ctx context.Context, projectID string, request SourceBindingDecisionRequest) (*orchestrator.CascadeState, error) {
+	if request.Decision != "continue_page_only" {
+		return nil, errors.New("unsupported source binding decision")
+	}
+	if strings.TrimSpace(request.IdempotencyKey) == "" {
+		return nil, errors.New("idempotency_key is required")
+	}
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.SourceBinding == nil || state.SourceBinding.AssessmentHash == "" {
+		return nil, errors.New("source binding assessment is missing")
+	}
+	if request.AssessmentHash == "" || request.AssessmentHash != state.SourceBinding.AssessmentHash {
+		return nil, &SourceBindingStaleError{}
+	}
+	if state.SourceBinding.Decision == request.Decision && state.SourceBinding.EffectiveMode == model.ProductSourceModePageOnly {
+		return state, nil
+	}
+	if state.ProjectContext == nil {
+		return nil, errors.New("project context is missing")
+	}
+	input := userInputFromProjectContext(state.ProjectContext)
+	input.ProjectID = projectID
+	input.SourceBindingDecision = request.Decision
+	input.SourceBindingHash = request.AssessmentHash
+	return s.CreateProject(ctx, input)
+}
+
+type SourceBindingStaleError struct{}
+
+func (e *SourceBindingStaleError) Error() string { return "source binding assessment is stale" }
 
 type ProjectSummary struct {
 	ID                  string    `json:"id"`
@@ -380,6 +465,7 @@ func (s *Service) ArtifactURI(projectID string, fileName string) string {
 
 func userInputFromProjectContext(project *model.ProjectContext) orchestrator.UserInput {
 	input := orchestrator.UserInput{
+		ProjectID:          project.ID,
 		Mode:               project.Mode,
 		ProductURL:         project.ProductURL,
 		GitRepoURL:         project.GitRepoURL,
@@ -393,11 +479,15 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 		ForbiddenPages:     append([]string{}, project.ForbiddenPages...),
 		ForbiddenData:      append([]string{}, project.ForbiddenData...),
 	}
+	if project.SourceBinding != nil {
+		input.SourceBindingDecision = project.SourceBinding.Decision
+		input.SourceBindingHash = project.SourceBinding.AssessmentHash
+	}
 	if project.AccessPolicy != nil {
 		input.AllowedDomains = append([]string{}, project.AccessPolicy.AllowedDomains...)
 	}
 	if project.Inputs != nil {
-		input.Code = append([]model.CodeInput{}, project.Inputs.Code...)
+		input.Code = codeInputsForProjectRerun(project)
 		input.RequirementDocuments = append([]model.RequirementDocumentInput{}, project.Inputs.RequirementDocuments...)
 		input.WebpageScreenshots = append([]model.WebpageScreenshotInput{}, project.Inputs.WebpageScreenshots...)
 		if input.ProductURL == "" && len(project.Inputs.ProductURLs) > 0 {
@@ -420,6 +510,23 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 	return input
 }
 
+func codeInputsForProjectRerun(project *model.ProjectContext) []model.CodeInput {
+	if project == nil || project.Inputs == nil {
+		return nil
+	}
+	out := make([]model.CodeInput, 0, len(project.Inputs.Code))
+	for _, code := range project.Inputs.Code {
+		if project.LocalRepoPath != "" && code.ID == "code_local_repo" {
+			continue
+		}
+		if project.GitRepoURL != "" && code.ID == "code_git_repo" {
+			continue
+		}
+		out = append(out, code)
+	}
+	return out
+}
+
 func projectTargetDuration(project *model.ProjectContext) int {
 	if project != nil && project.Inputs != nil && len(project.Inputs.Scenarios) > 0 {
 		return project.Inputs.Scenarios[0].DurationSeconds
@@ -433,6 +540,44 @@ func (s *Service) InitExecutionPackage(ctx context.Context, request model.Execut
 
 func (s *Service) UploadExecutionPackage(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage) (model.ExecutionPackageUploadResponse, error) {
 	return s.exchange.Upload(ctx, request, payload)
+}
+
+// ValidateExecutionPackage applies the same Intake rules as Upload without
+// creating an upload session, persisting the payload, or starting a browser.
+func (s *Service) ValidateExecutionPackage(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage) (CloudPackagePreflightResult, error) {
+	if err := s.exchange.ValidateUpload(ctx, request, payload); err != nil {
+		return CloudPackagePreflightResult{}, err
+	}
+	return executionPackagePreflightResult(payload), nil
+}
+
+func executionPackagePreflightResult(pkg model.ClientExecutionPackage) CloudPackagePreflightResult {
+	result := CloudPackagePreflightResult{
+		Valid: true, PackageID: pkg.PackageID, AllowedDomains: append([]string{}, pkg.RecordingRunSpec.AllowedDomains...),
+		Warnings: []string{},
+		Message:  "Server Intake 校验通过：尚未上传、尚未启动浏览器、尚未读取任何客户页面。",
+	}
+	if bundle := pkg.ExecutableScriptBundle; bundle != nil {
+		result.Runtime = bundle.ScriptManifest.Runtime
+		if bundle.PlanJSON != nil {
+			result.StageCount = len(bundle.PlanJSON.Steps)
+			for _, step := range bundle.PlanJSON.Steps {
+				for _, validation := range step.Validations {
+					if validation.Required {
+						result.RequiredChecks++
+					}
+				}
+			}
+		}
+		if bundle.ScriptManifest.Runtime == model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+			readiness := browserAgentReadiness(&pkg)
+			result.Readiness = &readiness
+			if !readiness.CanRun {
+				result.Message = "Server Intake structural validation passed, but Browser Agent readiness is blocked before any browser session can start."
+			}
+		}
+	}
+	return result
 }
 
 func (s *Service) GetExecutionPackageStatus(ctx context.Context, orgID string, exchangePackageID string) (model.ExecutionPackageStatusResponse, error) {

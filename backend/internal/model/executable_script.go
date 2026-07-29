@@ -298,6 +298,7 @@ type InvestigationQuestionRef struct {
 type BrowserAgentComponentTarget struct {
 	ComponentRef         string              `json:"component_ref,omitempty"`
 	RouteRef             string              `json:"route_ref,omitempty"`
+	Source               string              `json:"source,omitempty"`
 	Role                 string              `json:"role,omitempty"`
 	Name                 string              `json:"name,omitempty"`
 	Text                 string              `json:"text,omitempty"`

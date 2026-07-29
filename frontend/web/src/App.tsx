@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
-import type { GraphNode, SandboxPolicy } from "../../src/types/workflowGraph";
-import { agentPipelineItems, codeInvestigationQuestionsFromWorkspace, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
-import { createBridgeClient } from "./bridge";
-import type { BrowserAgentAcceptanceView, BrowserAgentBusinessAcceptanceView, CloudPackagePreflightView, DesktopUpdateStatus } from "./bridge";
+import { useEffect, useMemo, useState, type FormEvent, type MouseEvent } from "react";
+import type { GraphNode, RepositoryInput, SandboxPolicy } from "../../src/types/workflowGraph";
+import { agentPipelineItems, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
+import { createBridgeClient, userInputFromWorkspace, type ProjectCreationInput } from "./bridge";
 import type {
 	ApprovalChecklistState,
 	ModelDiagnosticResult,
@@ -10,7 +9,6 @@ import type {
 	ProjectWorkspaceView,
 	ProjectSummaryView,
 	ProjectWorkstationView,
-	AssistantSessionView,
 	RuntimeHealthView,
 	RuntimeLogEntry,
 	ScenarioID,
@@ -19,7 +17,7 @@ import type {
 import { createWorkspace, initialChecklist } from "./mockWorkspace";
 import { scenarioTemplates } from "./scenarios";
 import { VideoEditor } from "./VideoEditor";
-import { AssistantConversationPanel } from "./AssistantWidget";
+import { AssistantConversationPanel, AssistantWidget } from "./AssistantWidget";
 import {
   canUploadExecutionPackage,
   lifecycleStagesFromWorkspace,
@@ -37,47 +35,71 @@ import {
 
 const workflowStages = Object.entries(workflowStageLabels).map(([id, label]) => ({ id: id as WorkspaceStage, label }));
 
+const dailyAgentHeadlines = [
+  "Let’s make the product explain itself.",
+  "Turn the happy path into a good story.",
+  "Your product has a point. Let’s make it visible.",
+  "A useful demo starts with one honest sentence.",
+  "Let’s give your best workflow a proper entrance.",
+  "Less screen tour, more point made.",
+  "Find the shortest path to the “aha.”",
+  "Make the clicks earn their screen time.",
+  "Today’s agenda: one clear story, zero wandering.",
+  "Let’s turn product behavior into customer proof.",
+  "The product is ready. Let’s make the story catch up.",
+  "Give us the outcome; we’ll choreograph the clicks.",
+  "Good demos don’t tour. They reveal.",
+  "Let’s make the useful parts impossible to miss.",
+  "A clean demo is product truth with good timing.",
+  "Show the work, skip the wandering.",
+  "Let’s put the “why” between the clicks.",
+  "Start with the customer win; the route comes next.",
+  "Your workflow, edited for attention.",
+  "Make every click move the story.",
+  "Let’s turn the product path into a proof path.",
+] as const;
+
+function getDailyAgentHeadline(date = new Date()) {
+  const localDay = Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86_400_000);
+  return dailyAgentHeadlines[localDay % dailyAgentHeadlines.length] ?? dailyAgentHeadlines[0];
+}
+
+type ProjectActionPrompt = {
+  kind: "archive" | "delete";
+  project: ProjectSummaryView;
+};
+
 export function App() {
 	const bridge = useMemo(() => createBridgeClient(), []);
 	const [activeNav, setActiveNav] = useState<NavSection>("projects");
-	const [editorNavigationOpen, setEditorNavigationOpen] = useState(false);
 	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createWorkspace("product_demo"));
+  const [projectSummaries, setProjectSummaries] = useState<ProjectSummaryView[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsError, setProjectsError] = useState("");
+  const [projectsActionMessage, setProjectsActionMessage] = useState("");
+  const [projectsActionProjectID, setProjectsActionProjectID] = useState<string>();
+  const [projectActionPrompt, setProjectActionPrompt] = useState<ProjectActionPrompt>();
+  const [repositoryMessage, setRepositoryMessage] = useState("");
+  const [repositoryError, setRepositoryError] = useState("");
+  const [selectedProjectID, setSelectedProjectID] = useState<string>();
   const [demoCredentials, setDemoCredentials] = useState({ username: "", password: "" });
-  const [githubToken, setGitHubToken] = useState("");
-  const [githubCredentialConfigured, setGitHubCredentialConfigured] = useState(false);
-  const [githubCredentialBusy, setGitHubCredentialBusy] = useState(false);
-  const [githubCredentialMessage, setGitHubCredentialMessage] = useState("");
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthView | undefined>();
   const [modelDiagnostics, setModelDiagnostics] = useState<ModelDiagnosticResult[]>([]);
   const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
-  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateStatus>();
-  const [desktopUpdateBusy, setDesktopUpdateBusy] = useState(false);
-  const [desktopUpdateMessage, setDesktopUpdateMessage] = useState("");
   const [diagnosticsError, setDiagnosticsError] = useState("");
   const [checklist, setChecklist] = useState<ApprovalChecklistState>(initialChecklist);
   const [selectedNodeID, setSelectedNodeID] = useState(workspace.planReview.graph.nodes[0]?.id ?? "");
   const [isGeneratingPackage, setIsGeneratingPackage] = useState(false);
   const [isRunningProduct, setIsRunningProduct] = useState(false);
-  const [browserAgentAcceptance, setBrowserAgentAcceptance] = useState<BrowserAgentAcceptanceView | undefined>();
-  const [isRunningBrowserAgentAcceptance, setIsRunningBrowserAgentAcceptance] = useState(false);
-  const [browserAgentAcceptanceError, setBrowserAgentAcceptanceError] = useState("");
-  const [browserAgentBusinessAcceptance, setBrowserAgentBusinessAcceptance] = useState<BrowserAgentBusinessAcceptanceView | undefined>();
-  const [isRunningBrowserAgentBusinessAcceptance, setIsRunningBrowserAgentBusinessAcceptance] = useState(false);
-  const [browserAgentBusinessAcceptanceError, setBrowserAgentBusinessAcceptanceError] = useState("");
-  const [packagePreflight, setPackagePreflight] = useState<CloudPackagePreflightView | undefined>();
-  const [packagePreflightError, setPackagePreflightError] = useState("");
-  const [isRunningPackagePreflight, setIsRunningPackagePreflight] = useState(false);
-  const [isCheckingEditorMaterialization, setIsCheckingEditorMaterialization] = useState(false);
-  const [projectSummaries, setProjectSummaries] = useState<ProjectSummaryView[]>([]);
-  const [projectsError, setProjectsError] = useState("");
-  const [selectedProjectID, setSelectedProjectID] = useState<string>();
-  const [workstation, setWorkstation] = useState<ProjectWorkstationView>("overview");
-  const [assistantSession, setAssistantSession] = useState<AssistantSessionView>();
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [agentPrompt, setAgentPrompt] = useState("");
+  const [isPromptConfirmationPending, setIsPromptConfirmationPending] = useState(false);
 
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
   const blockedReasons = packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections);
   const canUpload = canUploadExecutionPackage(workspace.packagePreview, checklist, workspace.sourceConnections);
   const navItems = useMemo(() => buildNavItems(workspace), [workspace]);
+  const isProjectAgentWorkspace = activeNav === "project_library" && selectedProjectID !== undefined;
 
   useEffect(() => {
     let mounted = true;
@@ -91,194 +113,38 @@ export function App() {
     };
   }, [bridge]);
 
-  useEffect(() => { void refreshProjects(); }, [bridge]);
+  useEffect(() => {
+    void refreshProjects();
+  }, [bridge]);
+
 
   async function refreshProjects() {
-    const result = await bridge.listProjectSummaries();
-    if (result.ok && result.data) { setProjectSummaries(result.data); setProjectsError(""); }
-    else setProjectsError(result.error ?? "项目列表不可用");
+    setProjectsLoading(true);
+    const result = await bridge.listProjects();
+    if (result.ok && result.data) {
+      setProjectSummaries(result.data);
+      setProjectsError("");
+    } else {
+      setProjectsError(result.error ?? "项目列表不可用");
+    }
+    setProjectsLoading(false);
   }
+
 
   async function openProject(projectID: string) {
     const result = await bridge.loadProject(projectID);
-    if (!result.ok || !result.data) { setProjectsError(result.error ?? "项目加载失败"); return; }
+    if (!result.ok || !result.data) {
+      setProjectsError(result.error ?? "项目加载失败");
+      return;
+    }
     setWorkspace(result.data);
-    setSelectedProjectID(projectID);
-    setActiveNav("project_library");
-    setWorkstation("overview");
-  }
-
-  function applyAssistantSession(session: AssistantSessionView) {
-    setAssistantSession(session);
-    const projectID = session.configuration.analysisProjectID;
-    if (projectID && projectID !== selectedProjectID) { void openProject(projectID); void refreshProjects(); }
-  }
-
-  useEffect(() => {
-    let mounted = true;
-    bridge.desktopUpdateStatus().then((result) => {
-      if (!mounted) return;
-      if (result.ok && result.data) {
-        setDesktopUpdate(result.data);
-      } else {
-        setDesktopUpdateMessage(result.error ?? "无法读取更新配置");
-      }
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [bridge]);
-
-  async function checkDesktopUpdate() {
-    setDesktopUpdateBusy(true);
-    setDesktopUpdateMessage("");
-    try {
-      const result = await bridge.checkDesktopUpdate();
-      if (result.ok && result.data) {
-        setDesktopUpdate(result.data);
-        setDesktopUpdateMessage(result.data.updateAvailable ? "已验证可用更新，请确认后安装" : "当前已是最新版本");
-      } else {
-        setDesktopUpdateMessage(result.error ?? "更新检查失败");
-      }
-    } finally {
-      setDesktopUpdateBusy(false);
-    }
-  }
-
-  async function applyDesktopUpdate() {
-    if (!desktopUpdate?.updateAvailable || !desktopUpdate.installReady) return;
-    const confirmed = window.confirm(`安装 Cascade DemoOps ${desktopUpdate.availableVersion ?? "更新"}？安装器会验证签名，并在失败时回滚。`);
-    if (!confirmed) return;
-    setDesktopUpdateBusy(true);
-    setDesktopUpdateMessage("正在安装已验证更新，请勿关闭应用…");
-    try {
-      const result = await bridge.applyDesktopUpdate();
-      setDesktopUpdateMessage(result.ok ? "更新已安装，请重新启动应用" : result.error ?? "更新安装失败，已尝试回滚");
-    } finally {
-      setDesktopUpdateBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    let mounted = true;
-    bridge.githubCredentialStatus().then((result) => {
-      if (!mounted) {
-        return;
-      }
-      if (result.ok && result.data) {
-        setGitHubCredentialConfigured(result.data.configured);
-      } else {
-        setGitHubCredentialMessage(result.error ?? "无法读取 GitHub 凭据状态");
-      }
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [bridge]);
-
-  async function storeGitHubCredential() {
-    setGitHubCredentialBusy(true);
-    setGitHubCredentialMessage("");
-    try {
-      const result = await bridge.storeGitHubToken(githubToken);
-      if (result.ok && result.data) {
-        setGitHubCredentialConfigured(result.data.configured);
-        setGitHubToken("");
-        setGitHubCredentialMessage("已保存到 Windows 凭据管理器");
-      } else {
-        setGitHubCredentialMessage(result.error ?? "GitHub 凭据保存失败");
-      }
-    } finally {
-      setGitHubCredentialBusy(false);
-    }
-  }
-
-  async function deleteGitHubCredential() {
-    setGitHubCredentialBusy(true);
-    setGitHubCredentialMessage("");
-    try {
-      const result = await bridge.deleteGitHubToken();
-      if (result.ok && result.data) {
-        setGitHubCredentialConfigured(result.data.configured);
-        setGitHubToken("");
-        setGitHubCredentialMessage("已删除 GitHub 凭据");
-      } else {
-        setGitHubCredentialMessage(result.error ?? "GitHub 凭据删除失败");
-      }
-    } finally {
-      setGitHubCredentialBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    let mounted = true;
-    bridge.browserAgentBusinessAcceptance().then((result) => {
-      if (mounted && result.ok && result.data) setBrowserAgentBusinessAcceptance(result.data);
-    });
-    return () => { mounted = false; };
-  }, [bridge]);
-
-  useEffect(() => {
-    let mounted = true;
-    bridge.browserAgentAcceptance().then((result) => {
-      if (mounted && result.ok && result.data) setBrowserAgentAcceptance(result.data);
-    });
-    return () => { mounted = false; };
-  }, [bridge]);
-
-  async function runBrowserAgentAcceptance() {
-    setIsRunningBrowserAgentAcceptance(true);
-    setBrowserAgentAcceptanceError("");
-    const result = await bridge.runBrowserAgentAcceptance();
-    if (result.ok && result.data) setBrowserAgentAcceptance(result.data);
-    else setBrowserAgentAcceptanceError(result.error ?? "Browser Agent 固定验收运行失败");
-    setIsRunningBrowserAgentAcceptance(false);
-  }
-
-  async function runBrowserAgentBusinessAcceptance() {
-    setIsRunningBrowserAgentBusinessAcceptance(true);
-    setBrowserAgentBusinessAcceptanceError("");
-    const result = await bridge.runBrowserAgentBusinessAcceptance();
-    if (result.ok && result.data) setBrowserAgentBusinessAcceptance(result.data);
-    else setBrowserAgentBusinessAcceptanceError(result.error ?? "Browser Agent 受控业务验收运行失败");
-    setIsRunningBrowserAgentBusinessAcceptance(false);
-  }
-
-  async function runPackagePreflight() {
-    setIsRunningPackagePreflight(true);
-    setPackagePreflightError("");
-    const result = await bridge.preflightExecutionPackage(workspace);
-    if (result.ok && result.data) {
-      setPackagePreflight(result.data);
-    } else {
-      setPackagePreflight(undefined);
-      setPackagePreflightError(result.error ?? "Server Intake 预检失败");
-    }
-    setIsRunningPackagePreflight(false);
-  }
-
-  async function refreshEditorMaterialization() {
-    setIsCheckingEditorMaterialization(true);
-    const result = await bridge.editorMaterialization(workspace);
-    if (result.ok && result.data) {
-      const materialization = result.data;
-      setWorkspace((current) => ({
-        ...current,
-        cloudRun: {
-          ...current.cloudRun,
-          ...(materialization.session_id ? { editorSessionID: materialization.session_id } : {}),
-          editorMaterializationMessage: materialization.message,
-        },
-      }));
-    } else {
-      setWorkspace((current) => ({ ...current, cloudRun: { ...current.cloudRun, editorMaterializationMessage: result.error ?? "无法确认待编辑素材" } }));
-    }
-    setIsCheckingEditorMaterialization(false);
-  }
-
-  function openEditorForResult() {
-    setActiveNav("editor");
-    setEditorNavigationOpen(false);
+    setSelectedProjectID(result.data.id);
+    setSelectedNodeID(result.data.planReview.graph.nodes[0]?.id ?? "");
+    setChecklist(initialChecklist);
+    setDemoCredentials({ username: "", password: "" });
+    setProjectsError("");
+    setRepositoryMessage("");
+    setRepositoryError("");
   }
 
   function patchWorkspace(patch: Partial<ProjectWorkspaceView>) {
@@ -310,14 +176,54 @@ export function App() {
   }
 
   async function createScenario(scenarioID: ScenarioID) {
-    const result = await bridge.createProject(scenarioID);
+    const seed = createWorkspace(scenarioID);
+    const result = await bridge.createProject({ userInput: userInputFromWorkspace(seed), scenarioID });
     if (result.ok && result.data) {
       setWorkspace(result.data);
+      setSelectedProjectID(result.data.id);
       setSelectedNodeID(result.data.planReview.graph.nodes[0]?.id ?? "");
       setChecklist(initialChecklist);
       setDemoCredentials({ username: "", password: "" });
-      setActiveNav("projects");
+      void refreshProjects();
+      setActiveNav("project_library");
     }
+  }
+
+  function requestArchiveProject(project: ProjectSummaryView) {
+    setProjectActionPrompt({ kind: "archive", project });
+    setProjectsActionMessage("");
+  }
+
+  function requestDeleteProject(project: ProjectSummaryView) {
+    setProjectActionPrompt({ kind: "delete", project });
+    setProjectsActionMessage("");
+  }
+
+  function cancelProjectAction() {
+    setProjectActionPrompt(undefined);
+  }
+
+  async function confirmProjectAction() {
+    if (!projectActionPrompt) {
+      return;
+    }
+    const { kind, project } = projectActionPrompt;
+    setProjectsActionProjectID(project.id);
+    setProjectsActionMessage("");
+    const result = kind === "archive" ? await bridge.archiveProject(project.id) : await bridge.deleteProject(project.id);
+    if (result.ok) {
+      if (selectedProjectID === project.id) {
+        setSelectedProjectID(undefined);
+      }
+      setProjectSummaries((current) => current.filter((item) => item.id !== project.id));
+      setProjectsError("");
+      setProjectsActionMessage(`${kind === "archive" ? "Archived" : "Deleted"} "${project.name}".`);
+      setProjectActionPrompt(undefined);
+      void refreshProjects();
+    } else {
+      setProjectsError(result.error ?? (kind === "archive" ? "项目归档失败" : "项目删除失败"));
+    }
+    setProjectsActionProjectID(undefined);
   }
 
   async function buildPackagePreview() {
@@ -399,9 +305,9 @@ export function App() {
     }
   }
 
-  async function runProductLifecycle() {
+  async function runProductLifecycle(keepAgentWorkspace = false) {
     setIsRunningProduct(true);
-    setActiveNav("execution_packages");
+    if (!keepAgentWorkspace) setActiveNav("execution_packages");
     const startedAt = new Date();
     let lastEventID = "0";
     let pollErrorShown = false;
@@ -457,12 +363,7 @@ export function App() {
       const result = await bridge.runProductLifecycle({
         ...workspace,
         packagePreview: { ...workspace.packagePreview, ipAllowlistAcknowledged: true },
-      }, {
-        ...bridgeRunOptions(),
-        onCloudStatus: (nextWorkspace) => {
-          setWorkspace((current) => mergeWorkspaceRuntimeLogs(nextWorkspace, current));
-        },
-      });
+      }, bridgeRunOptions());
       window.clearInterval(poller);
       await pollRuntimeEvents();
       if (result.ok && result.data) {
@@ -472,7 +373,9 @@ export function App() {
           message: nextWorkspace.cloudRun.status === "failed" ? "本地脚本已就绪，服务器阶段失败" : "产品实战流程完成",
           detail: `耗时 ${Math.round((Date.now() - startedAt.getTime()) / 1000)} 秒；当前阶段：${nextWorkspace.cloudRun.stage ?? nextWorkspace.cloudRun.status}。`,
         }));
-        setActiveNav(nextWorkspace.cloudRun.status === "succeeded" ? "assets" : "execution_packages");
+        setSelectedProjectID(nextWorkspace.id);
+        void refreshProjects();
+        setActiveNav(keepAgentWorkspace || nextWorkspace.cloudRun.status === "succeeded" ? "project_library" : "execution_packages");
       } else {
         const message = result.error ?? "产品实战自动流程失败";
         setWorkspace((current) => appendRuntimeLog({
@@ -523,93 +426,196 @@ export function App() {
     }
   }
 
-  async function simulateCloudSuccess() {
+  async function simulateCloudSuccess(keepAgentWorkspace = false) {
     const result = await bridge.pollCloudRun(workspace);
     if (result.ok && result.data) {
       setWorkspace(result.data);
-      setActiveNav("assets");
+      setSelectedProjectID(result.data.id);
+      void refreshProjects();
+      setActiveNav("project_library");
     }
   }
 
-  async function simulateCloudFailure() {
+  async function simulateCloudFailure(keepAgentWorkspace = false) {
     const result = await bridge.simulateCloudFailure(workspace);
     if (result.ok && result.data) {
       setWorkspace(result.data);
-      setActiveNav("execution_packages");
+      if (!keepAgentWorkspace) setActiveNav("execution_packages");
     }
   }
 
-  async function repairFailedScript() {
+  async function repairFailedScript(keepAgentWorkspace = false) {
     const result = await bridge.repairFailedScript(workspace);
     if (result.ok && result.data) {
       setWorkspace(result.data);
       setChecklist((current) => resetApprovalChecklistForRepair(current));
-      setActiveNav("execution_packages");
+      if (!keepAgentWorkspace) setActiveNav("execution_packages");
     }
   }
 
-  async function downloadAssets() {
-	const result = await bridge.ackResultPackage(workspace);
-	if (result.ok && result.data) {
-	  setWorkspace(result.data);
-	}
+  async function approveAssets() {
+    const result = await bridge.acknowledgeResult(workspace);
+    if (result.ok && result.data) {
+      setWorkspace(result.data);
+      void refreshProjects();
+    }
   }
 
-  async function reviewAssets(decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) {
-	const result = await bridge.reviewResult(workspace, decision, summary);
-	if (result.ok && result.data) {
-	  setWorkspace(result.data);
-	}
+  function submitAgentPrompt(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const prompt = agentPrompt.trim();
+    if (!prompt) {
+      return;
+    }
+    setIsPromptConfirmationPending(true);
   }
 
-  if (activeNav === "projects") {
-    return <AgentHome
-      bridge={bridge}
-      projects={projectSummaries}
-      error={projectsError}
-      onOpenProjects={() => setActiveNav("project_library")}
-      onOpenProject={(id) => void openProject(id)}
-      onSessionChange={applyAssistantSession}
-    />;
+  async function createProjectFromPrompt() {
+    const prompt = agentPrompt.trim();
+    if (!prompt) return;
+    setIsCreatingProject(true);
+    const seed = updateWorkspaceInputs(createWorkspace(workspace.scenarioID), {
+      productURL: workspace.productURL,
+      targetAudience: workspace.targetAudience,
+      rawUserPrompt: prompt,
+    });
+    const seededWorkspace = {
+      ...seed,
+      inputBundle: { ...seed.inputBundle, repositories: workspace.inputBundle.repositories ?? [] },
+    };
+    const input: ProjectCreationInput = {
+      userInput: userInputFromWorkspace(seededWorkspace, bridgeRunOptions()),
+      scenarioID: workspace.scenarioID,
+    };
+    const result = await bridge.createProject(input);
+    if (result.ok && result.data) {
+      setWorkspace(result.data);
+      setSelectedProjectID(result.data.id);
+      setSelectedNodeID(result.data.planReview.graph.nodes[0]?.id ?? "");
+      setChecklist(initialChecklist);
+      setDemoCredentials({ username: "", password: "" });
+      setAgentPrompt("");
+      setIsPromptConfirmationPending(false);
+      void refreshProjects();
+      setActiveNav("project_library");
+    }
+    setIsCreatingProject(false);
   }
 
-  if (activeNav === "project_library" && !selectedProjectID) {
-    return <ProjectLibrary projects={projectSummaries} error={projectsError} onHome={() => setActiveNav("projects")} onOpen={(id) => void openProject(id)} onArchive={async (id) => { await bridge.archiveProject(id); await refreshProjects(); }} onDelete={async (id) => { await bridge.deleteProject(id); await refreshProjects(); }} />;
+  async function continueCurrentProject() {
+    const prompt = agentPrompt.trim();
+    if (!prompt) return;
+    setIsCreatingProject(true);
+    const next = updateWorkspaceInputs(workspace, { rawUserPrompt: prompt });
+    const result = await bridge.saveProjectInputs(workspace.id, next.inputBundle);
+    if (result.ok && result.data) {
+      setWorkspace(result.data);
+      setSelectedProjectID(result.data.id);
+      setAgentPrompt("");
+      setIsPromptConfirmationPending(false);
+      void refreshProjects();
+      setActiveNav("project_library");
+    }
+    setIsCreatingProject(false);
   }
 
-  if (activeNav !== "settings") {
-    return <div className="project-agent-layout">
-      <aside className="project-agent-chat">
-        <header className="project-agent-chat-header"><button type="button" className="project-agent-back" onClick={() => { setSelectedProjectID(undefined); setActiveNav("project_library"); }}>← 返回项目库</button><div className="project-agent-identity"><span className="project-agent-mark"><img src="/Logo_simple_white.png" alt="" /></span><div><strong>{workspace.name}</strong><small>{assistantSession?.workstationStatus ?? "Cascade Agent 工作台"}</small></div></div></header>
-        <AssistantConversationPanel bridge={bridge} context={{ surface: "projects", scopeKey: selectedProjectID ?? workspace.id, projectID: selectedProjectID ?? workspace.id, projectName: workspace.name }} onSessionChange={applyAssistantSession} onWorkstationChange={setWorkstation} />
-      </aside>
-      <main className="project-agent-workstation">
-        <WorkstationNav active={workstation} onChange={setWorkstation} developerUI={runtimeHealth?.appCapabilities?.developerUI === true} onSettings={() => setActiveNav("settings")} />
-        <section className="project-agent-workstation-content">
-          {workstation === "overview" ? <ConfigurationSummary {...(assistantSession ? { session: assistantSession } : {})} workspace={workspace} /> : null}
-          {workstation === "evidence" ? <UnderstandingStagePanel workspace={workspace} /> : null}
-          {workstation === "plan" ? <PlanReviewPanel workspace={workspace} selectedNodeID={selectedNode?.id ?? ""} onSelectNode={setSelectedNodeID} onPatchNode={patchNode} /> : null}
-          {workstation === "approval" || workstation === "execution" || workstation === "repair" ? <PackageApproval workspace={workspace} checklist={checklist} blockedReasons={blockedReasons} canUpload={canUpload} isLocalMode={bridge.mode === "local"} onChecklistChange={setChecklist} onUpload={runProductLifecycle} onCloudSuccess={simulateCloudSuccess} onCloudFailure={simulateCloudFailure} onRepairScript={repairFailedScript} browserAgentAcceptance={browserAgentAcceptance} isRunningBrowserAgentAcceptance={isRunningBrowserAgentAcceptance} browserAgentAcceptanceError={browserAgentAcceptanceError} onRunBrowserAgentAcceptance={runBrowserAgentAcceptance} browserAgentBusinessAcceptance={browserAgentBusinessAcceptance} isRunningBrowserAgentBusinessAcceptance={isRunningBrowserAgentBusinessAcceptance} browserAgentBusinessAcceptanceError={browserAgentBusinessAcceptanceError} onRunBrowserAgentBusinessAcceptance={runBrowserAgentBusinessAcceptance} packagePreflight={packagePreflight} packagePreflightError={packagePreflightError} isRunningPackagePreflight={isRunningPackagePreflight} onRunPackagePreflight={runPackagePreflight} onRefreshEditorMaterialization={refreshEditorMaterialization} isCheckingEditorMaterialization={isCheckingEditorMaterialization} onOpenEditor={() => setWorkstation("editor")} developerUI={runtimeHealth?.appCapabilities?.developerUI === true} /> : null}
-          {workstation === "assets" ? <AssetReview workspace={workspace} onDownload={downloadAssets} onReview={reviewAssets} /> : null}
-          {workstation === "editor" ? <VideoEditor /> : null}
-        </section>
-      </main>
-    </div>;
+  function cancelPromptConfirmation() {
+    setIsPromptConfirmationPending(false);
+  }
+
+  async function saveRepositoryConnections(repositories: RepositoryInput[]) {
+    const nextWorkspace = {
+      ...workspace,
+      inputBundle: { ...workspace.inputBundle, repositories },
+      sourceConnections: workspace.sourceConnections.map((source) => source.kind === "local_repo"
+        ? { ...source, status: repositories.length > 0 ? ("ready" as const) : ("needs_attention" as const), detail: repositories.length > 0 ? `${repositories.length} 个代码仓库已连接。` : "尚未连接代码仓库。" }
+        : source),
+    };
+    setWorkspace(nextWorkspace);
+    setRepositoryError("");
+    const result = await bridge.saveProjectInputs(workspace.id, nextWorkspace.inputBundle);
+    if (result.ok && result.data) {
+      setWorkspace(result.data);
+      setRepositoryMessage("Repository connection saved.");
+      void refreshProjects();
+      return;
+    }
+    if (bridge.mode === "local") {
+      setRepositoryMessage("Saved to this draft. Create the project to persist it to the local workspace.");
+    } else {
+      setRepositoryError(result.error ?? "Repository connection could not be saved.");
+    }
+  }
+
+  function connectRepository(repository: RepositoryInput) {
+    const repositories = [...(workspace.inputBundle.repositories ?? [])];
+    const existingIndex = repositories.findIndex((item) => repository.url && item.url === repository.url || repository.local_path && item.local_path === repository.local_path || repository.host && item.host === repository.host && item.path === repository.path);
+    if (existingIndex >= 0) {
+      repositories[existingIndex] = { ...repositories[existingIndex], ...repository };
+    } else {
+      repositories.push({ ...repository, primary: repositories.length === 0 });
+    }
+    void saveRepositoryConnections(repositories);
+  }
+
+  function disconnectRepository(index: number) {
+    const repositories = (workspace.inputBundle.repositories ?? []).filter((_, itemIndex) => itemIndex !== index);
+    void saveRepositoryConnections(repositories);
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar" aria-label="设置导航">
+    <div className={`app-shell ${isProjectAgentWorkspace ? "project-agent-shell" : ""}`}>
+      {isProjectAgentWorkspace ? (
+        <ProjectAgentWorkspace
+          bridge={bridge}
+          workspace={workspace}
+          {...(runtimeHealth ? { runtimeHealth } : {})}
+          blockedReasons={blockedReasons}
+          checklist={checklist}
+          canUpload={canUpload}
+          isGeneratingPackage={isGeneratingPackage || isRunningProduct}
+          selectedNodeID={selectedNodeID}
+          onBack={() => { setSelectedProjectID(undefined); void refreshProjects(); }}
+          onChecklistChange={setChecklist}
+          onSelectNode={setSelectedNodeID}
+          onPatchNode={patchNode}
+          onUpload={() => runProductLifecycle(true)}
+          onCloudSuccess={() => simulateCloudSuccess(true)}
+          onCloudFailure={() => simulateCloudFailure(true)}
+          onRepairScript={() => repairFailedScript(true)}
+          onApproveAssets={approveAssets}
+          onReplaceWebpage={() => document.querySelector<HTMLTextAreaElement>(".project-agent-conversation textarea")?.focus()}
+          onReplaceSource={() => { setSelectedProjectID(undefined); setActiveNav("repositories"); }}
+          onContinuePageOnly={async () => {
+            const binding = workspace.sourceBinding;
+            if (!binding) return;
+            const result = await bridge.continueWithWebpageEvidence(workspace.id, binding.assessment_hash, `page-only-${binding.assessment_hash}`);
+            if (result.ok && result.data) setWorkspace(result.data);
+          }}
+        />
+      ) : <>
+      <aside className="sidebar" aria-label="主导航">
         <div className="brand-block">
-          <div className="brand-mark">C</div>
-          <div>
-            <strong>Cascade</strong>
-            <span>DemoOps</span>
-          </div>
+          <img className="brand-logo" src="/Logo_full_black.png" alt="Cascade" />
         </div>
         <nav className="nav-list">
-          <button type="button" className="nav-item" onClick={() => setActiveNav("project_library")}>返回项目</button>
-          <button type="button" className="nav-item active">设置</button>
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={activeNav === item.id ? "nav-item active" : "nav-item"}
+              onClick={() => {
+                setActiveNav(item.id);
+                if (item.id === "project_library") {
+                  setSelectedProjectID(undefined);
+                  void refreshProjects();
+                }
+              }}
+            >
+              <span>{item.label}</span>
+              {item.badge ? <small>{item.badge}</small> : null}
+            </button>
+          ))}
         </nav>
         <div className="runtime-strip">
           <span className="status-dot ok" />
@@ -618,80 +624,207 @@ export function App() {
         </div>
       </aside>
 
-      <main className="workspace">
-        <DesktopStatusBar workspace={workspace} {...(runtimeHealth ? { runtimeHealth } : {})} />
-        <div className="workspace-grid editor-wide"><section className="main-panel" aria-label="设置">
-              <SettingsPanel
-                workspace={workspace}
-                diagnostics={modelDiagnostics}
-                diagnosticsError={diagnosticsError}
-                isRunningDiagnostics={isRunningDiagnostics}
-                onRunDiagnostics={runModelDiagnostics}
-                desktopUpdateBusy={desktopUpdateBusy}
-                desktopUpdateMessage={desktopUpdateMessage}
-                onCheckDesktopUpdate={checkDesktopUpdate}
-                onApplyDesktopUpdate={applyDesktopUpdate}
-                {...(desktopUpdate ? { desktopUpdate } : {})}
-                {...(runtimeHealth ? { runtimeHealth } : {})}
-              />
-          </section>
-        </div>
+      <main
+        className={`workspace ${activeNav === "editor" ? "editor-workspace-mode" : ""} ${
+          activeNav === "project_library" || activeNav === "repositories" || activeNav === "assets" ? "surface-library" : activeNav === "settings" ? "surface-settings" : ""
+        }`}
+      >
+        {activeNav === "projects" ? (
+          <AgentHome
+            prompt={agentPrompt}
+            isGeneratingPackage={isGeneratingPackage || isRunningProduct || isCreatingProject}
+            isPromptConfirmationPending={isPromptConfirmationPending}
+            canContinueCurrentProject={bridge.mode === "mock" || projectSummaries.some((project) => project.id === workspace.id)}
+            onPromptChange={setAgentPrompt}
+            onSubmitPrompt={submitAgentPrompt}
+            onConfirmCreate={createProjectFromPrompt}
+            onConfirmContinue={continueCurrentProject}
+            onCancelConfirmation={cancelPromptConfirmation}
+          />
+        ) : activeNav === "project_library" && !selectedProjectID ? (
+          <ProjectsPanel
+            projects={projectSummaries}
+            isLoading={projectsLoading}
+            error={projectsError}
+            message={projectsActionMessage}
+            activeActionProjectID={projectsActionProjectID}
+            actionPrompt={projectActionPrompt}
+            onOpen={openProject}
+            onArchive={requestArchiveProject}
+            onDelete={requestDeleteProject}
+            onCancelAction={cancelProjectAction}
+            onConfirmAction={confirmProjectAction}
+            onRetry={refreshProjects}
+            onGoHome={() => setActiveNav("projects")}
+          />
+        ) : activeNav === "repositories" ? (
+          <RepositoriesPanel
+            workspace={workspace}
+            message={repositoryMessage}
+            error={repositoryError}
+            onConnect={connectRepository}
+            onDisconnect={disconnectRepository}
+          />
+        ) : (
+          <>
+            {activeNav !== "editor" ? <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage || isRunningProduct} onBuildPackage={runProductLifecycle} /> : null}
+            <div className={activeNav === "editor" ? "workspace-grid editor-wide" : "workspace-grid"}>
+              <section className={activeNav === "editor" ? "main-panel editor-main-panel" : "main-panel"} aria-label="项目工作台">
+                {activeNav === "new_demo" ? <ScenarioPicker activeID={workspace.scenarioID} onCreate={createScenario} /> : null}
+                {activeNav === "execution_packages" ? (
+                  <PackageApproval
+                    workspace={workspace}
+                    checklist={checklist}
+                    blockedReasons={blockedReasons}
+                    canUpload={canUpload}
+                    isLocalMode={bridge.mode === "local"}
+                    onChecklistChange={setChecklist}
+                    onUpload={runProductLifecycle}
+                    onCloudSuccess={simulateCloudSuccess}
+                    onCloudFailure={simulateCloudFailure}
+                    onRepairScript={repairFailedScript}
+                  />
+                ) : null}
+                {activeNav === "project_library" || activeNav === "assets" ? <AssetReview workspace={workspace} onApprove={approveAssets} /> : null}
+                {activeNav === "editor" ? <VideoEditor /> : null}
+                {activeNav === "settings" ? (
+                  <SettingsPanel
+                    workspace={workspace}
+                    diagnostics={modelDiagnostics}
+                    diagnosticsError={diagnosticsError}
+                    isRunningDiagnostics={isRunningDiagnostics}
+                    onRunDiagnostics={runModelDiagnostics}
+                    {...(runtimeHealth ? { runtimeHealth } : {})}
+                  />
+                ) : null}
+              </section>
+              {activeNav !== "editor" ? <Inspector workspace={workspace} selectedNode={selectedNode} blockedReasons={blockedReasons} /> : null}
+            </div>
+          </>
+        )}
+        {activeNav === "project_library" ? <AssistantWidget bridge={bridge} context={{ surface: "projects", scopeKey: selectedProjectID ? `project_${selectedProjectID}` : "index", ...(selectedProjectID ? { projectID: selectedProjectID, projectName: workspace.name } : {}) }} onOpenProject={openProject} /> : null}
+        {activeNav === "repositories" ? <AssistantWidget bridge={bridge} context={{ surface: "repositories", scopeKey: `workspace_${workspace.id}`, projectID: workspace.id, projectName: workspace.name, repositoryLabel: "Connected repositories" }} /> : null}
+      </main>
+      </>}
+    </div>
+  );
+}
+
+type ProjectAgentWorkspaceProps = {
+  bridge: ReturnType<typeof createBridgeClient>;
+  workspace: ProjectWorkspaceView;
+  runtimeHealth?: RuntimeHealthView;
+  blockedReasons: string[];
+  checklist: ApprovalChecklistState;
+  canUpload: boolean;
+  isGeneratingPackage: boolean;
+  selectedNodeID: string;
+  onBack: () => void;
+  onChecklistChange: (state: ApprovalChecklistState) => void;
+  onSelectNode: (id: string) => void;
+  onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
+  onUpload: () => void;
+  onCloudSuccess: () => void;
+  onCloudFailure: () => void;
+  onRepairScript: () => void;
+  onApproveAssets: () => void;
+  onReplaceWebpage: () => void;
+  onReplaceSource: () => void;
+  onContinuePageOnly: () => void;
+};
+
+function ProjectAgentWorkspace({
+  bridge,
+  workspace,
+  runtimeHealth,
+  blockedReasons,
+  checklist,
+  canUpload,
+  isGeneratingPackage,
+  selectedNodeID,
+  onBack,
+  onChecklistChange,
+  onSelectNode,
+  onPatchNode,
+  onUpload,
+  onCloudSuccess,
+  onCloudFailure,
+  onRepairScript,
+  onApproveAssets,
+  onReplaceWebpage,
+  onReplaceSource,
+  onContinuePageOnly,
+}: ProjectAgentWorkspaceProps) {
+  const [workstationView, setWorkstationView] = useState<ProjectWorkstationView>("editor");
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
+  const statusLabel = projectStatusLabels[workspace.status];
+  const runtimeLabel = runtimeHealth?.localDataConfigured ? "Runtime ready" : runtimeHealth ? "Runtime attention" : "Runtime checking";
+
+  useEffect(() => {
+    if (workspace.status === "script_repair_required") setWorkstationView("repair");
+    if (workspace.status === "asset_ready") setWorkstationView("assets");
+  }, [workspace.status]);
+
+  return (
+    <div className="project-agent-layout">
+      <aside className={`project-agent-chat ${mobileChatOpen ? "mobile-open" : ""}`} aria-label="Project Cascade Agent">
+        <header className="project-agent-chat-header">
+          <button type="button" className="project-agent-back" onClick={onBack}>← Projects</button>
+          <div className="project-agent-identity">
+            <span className="project-agent-mark"><img src="/Cascade_launcher_mark.png" alt="" /></span>
+            <div><strong>Cascade Agent</strong><small>{workspace.name}</small></div>
+          </div>
+          <div className="project-agent-status-row"><span className="status-dot ok" />{runtimeLabel}<span className="project-agent-status-divider" />{statusLabel}</div>
+          <button type="button" className="project-agent-mobile-close" onClick={() => setMobileChatOpen(false)}>Close chat</button>
+        </header>
+        <AssistantConversationPanel bridge={bridge} context={{ surface: "projects", scopeKey: `project_${workspace.id}`, projectID: workspace.id, projectName: workspace.name }} embedded showHeader={false} onWorkstationChange={setWorkstationView} />
+      </aside>
+      <main className="project-workstation" aria-label="Project workstation">
+        <header className="project-workstation-header">
+          <div><p className="eyebrow">Live workstation</p><h1>{workstationTitle(workstationView)}</h1><p>{workstationDescription(workstationView)}</p></div>
+          <div className="project-workstation-meta"><span>{workspace.productURL || "Product context pending"}</span><StatusPill label={statusLabel} tone={workspace.status === "asset_ready" ? "green" : workspace.status === "script_repair_required" ? "yellow" : "blue"} /></div>
+          <button type="button" className="project-agent-chat-toggle" onClick={() => setMobileChatOpen(true)}>Open Cascade chat</button>
+        </header>
+        <section className={`project-workstation-canvas ${workstationView === "editor" ? "project-workstation-editor-canvas" : ""}`}>
+          {workstationView === "overview" ? <ProjectOverviewWorkstation workspace={workspace} /> : null}
+          {workstationView === "evidence" ? <UnderstandingStagePanel workspace={workspace} onReplaceWebpage={onReplaceWebpage} onReplaceSource={onReplaceSource} onContinuePageOnly={onContinuePageOnly} /> : null}
+          {workstationView === "plan" ? <PlanReviewPanel workspace={workspace} selectedNodeID={selectedNodeID} onSelectNode={onSelectNode} onPatchNode={onPatchNode} /> : null}
+          {workstationView === "approval" ? <PackageApproval workspace={workspace} checklist={checklist} blockedReasons={blockedReasons} canUpload={canUpload} isLocalMode={bridge.mode === "local"} onChecklistChange={onChecklistChange} onUpload={onUpload} onCloudSuccess={onCloudSuccess} onCloudFailure={onCloudFailure} onRepairScript={onRepairScript} /> : null}
+          {workstationView === "execution" ? <div className="section-stack"><CloudRunPanel workspace={workspace} /><RuntimeLogPanel workspace={workspace} /></div> : null}
+          {workstationView === "repair" ? <div className="section-stack"><FailureDiagnosticPanel workspace={workspace} onRepairScript={onRepairScript} /><ScriptRepairPanel workspace={workspace} /></div> : null}
+          {workstationView === "assets" ? <AssetReview workspace={workspace} onApprove={onApproveAssets} /> : null}
+          {workstationView === "editor" ? <div className="project-editor-workstation"><VideoEditor /></div> : null}
+          {isGeneratingPackage ? <div className="project-workstation-progress"><span className="status-dot ok" />Cascade is updating the workstation…</div> : null}
+        </section>
+        {selectedNode && workstationView === "plan" ? <aside className="project-workstation-drawer" aria-label="Selected plan detail"><strong>{selectedNode.title ?? selectedNode.action}</strong><span>{selectedNode.selector || "Page transition"}</span><small>{selectedNode.expected_outcome}</small></aside> : null}
       </main>
     </div>
   );
 }
 
-function DesktopStatusBar({ runtimeHealth, workspace }: { runtimeHealth?: RuntimeHealthView; workspace: ProjectWorkspaceView }) {
-  const exchange = runtimeHealth?.cloudExchange;
-  const sidecarReady = runtimeHealth?.sidecars?.["video-worker"] === true;
-  const configuredProviders = Object.values(runtimeHealth?.modelProviders ?? {}).filter((provider) => provider.configured).length;
-  const sourceCount = workspace.sourceConnections.filter((source) => source.status === "ready").length;
+function ProjectOverviewWorkstation({ workspace }: { workspace: ProjectWorkspaceView }) {
   return (
-    <section className="desktop-status-bar" aria-label="本地应用运行状态">
-      <div className="desktop-status-title">
-        <span className="window-dot red" />
-        <span className="window-dot yellow" />
-        <span className="window-dot green" />
-        <strong>Cascade DemoOps Desktop</strong>
+    <div className="project-overview-workstation">
+      <section className="project-overview-hero"><span className="project-overview-kicker">Current objective</span><h2>{workspace.inputBundle.raw_user_prompt || "Shape a clear customer story from this product."}</h2><p>{workspace.targetAudience ? `For ${workspace.targetAudience}.` : "Cascade is ready to turn intent into evidence, a plan, and a reviewable demo."}</p></section>
+      <div className="project-overview-grid">
+        <section className="project-overview-card"><span>Evidence coverage</span><strong>{workspace.understanding.evidenceRefs.length ? `${Math.round(bestEvidenceConfidence(workspace) * 100)}% confidence` : "Not explored yet"}</strong><small>{workspace.understanding.evidenceRefs.length} evidence references available</small></section>
+        <section className="project-overview-card"><span>Workflow</span><strong>{workflowStageLabels[workspace.stage]}</strong><small>{workspace.planReview.graph.nodes.length} planned interaction nodes</small></section>
+        <section className="project-overview-card"><span>Outputs</span><strong>{workspace.assets.length ? `${workspace.assets.length} assets` : "No assets yet"}</strong><small>{workspace.cloudRun.currentStep}</small></section>
       </div>
-      <div className="desktop-status-items">
-        <StatusChip label="本地引擎" value={runtimeHealth?.profile === "desktop" ? "桌面模式" : runtimeHealth?.profile ?? "连接中"} tone={runtimeHealth ? "green" : "neutral"} />
-        <StatusChip label="数据目录" value={runtimeHealth?.localDataConfigured ? "就绪" : "待检查"} tone={runtimeHealth?.localDataConfigured ? "green" : "yellow"} />
-        <StatusChip label="Sidecar" value={sidecarReady ? "video-worker" : "待检查"} tone={sidecarReady ? "green" : "yellow"} />
-        <StatusChip label="模型" value={`${runtimeHealth?.llmMode ?? "auto"} · ${configuredProviders} 个凭据`} tone={configuredProviders > 0 ? "green" : "neutral"} />
-        <StatusChip label="云端" value={exchange ? cloudExchangeLabel(runtimeHealth) : "未连接"} tone={exchange?.sessionValid ? "green" : exchange?.authMode === "dev_token" ? "yellow" : "neutral"} />
-        <StatusChip label="输入源" value={`${sourceCount} 项就绪`} tone={sourceCount > 0 ? "green" : "neutral"} />
-      </div>
-    </section>
+      <section className="project-overview-next"><span>Try asking</span><p>“Show me what Cascade found” · “Turn this into a demo plan” · “What should we do next?”</p></section>
+    </div>
   );
 }
 
-function StatusChip({ label, value, tone }: { label: string; value: string; tone: "green" | "yellow" | "neutral" }) {
-  return (
-    <span className={`desktop-status-chip ${tone}`}>
-      <em>{label}</em>
-      <strong>{value}</strong>
-    </span>
-  );
+function workstationTitle(view: ProjectWorkstationView): string {
+  const labels: Record<ProjectWorkstationView, string> = { overview: "Project overview", evidence: "Evidence and understanding", plan: "Demo plan", approval: "Execution approval", execution: "Live execution", repair: "Repair workspace", assets: "Generated assets", editor: "Video editor" };
+  return labels[view];
 }
 
-function AgentHome({ bridge, projects, error, onOpenProjects, onOpenProject, onSessionChange }: { bridge: ReturnType<typeof createBridgeClient>; projects: ProjectSummaryView[]; error: string; onOpenProjects: () => void; onOpenProject: (id: string) => void; onSessionChange: (session: AssistantSessionView) => void }) {
-  return <div className="jonathan-shell"><header className="jonathan-topbar"><img src="/Logo_simple_white.png" alt="Cascade" /><nav><button type="button" onClick={onOpenProjects}>项目</button><span>DemoOps</span></nav></header><main className="agent-home"><section className="agent-hero"><span className="agent-orb"><img src="/Cascade_launcher_mark.png" alt="" /></span><p>Cascade Agent</p><h1>让产品自己讲清楚。</h1><span>描述客户价值，其余 configuration 由 Agent 和你共同完成。</span></section><div className="agent-home-conversation"><AssistantConversationPanel bridge={bridge} context={{ surface: "projects", scopeKey: "agent-home" }} onSessionChange={onSessionChange} /></div><section className="recent-projects"><div><h2>最近项目</h2><button type="button" onClick={onOpenProjects}>查看全部</button></div>{error ? <p className="assistant-error">{error}</p> : null}<div className="recent-project-grid">{projects.slice(0, 3).map((project) => <button type="button" key={project.id} onClick={() => onOpenProject(project.id)}><strong>{project.name}</strong><span>{project.productURL || "待配置产品 URL"}</span><small>{projectStatusLabels[project.status]}</small></button>)}{projects.length === 0 ? <div className="empty-project-card">还没有项目。先从对话中说明你的演示目标。</div> : null}</div></section></main></div>;
-}
-
-function ProjectLibrary({ projects, error, onHome, onOpen, onArchive, onDelete }: { projects: ProjectSummaryView[]; error: string; onHome: () => void; onOpen: (id: string) => void; onArchive: (id: string) => void; onDelete: (id: string) => void }) {
-  return <div className="jonathan-shell"><header className="jonathan-topbar"><button type="button" onClick={onHome} className="logo-button"><img src="/Logo_simple_white.png" alt="Cascade" /></button><nav><strong>Projects</strong><button type="button" onClick={onHome}>新建演示</button></nav></header><main className="project-library-page"><div className="project-library-heading"><div><span>Demo workspace</span><h1>项目</h1><p>每个项目都由 Cascade Agent 持续维护 configuration、证据、执行和成品审核。</p></div><button type="button" className="primary-action" onClick={onHome}>+ 新建项目</button></div>{error ? <div className="assistant-error">{error}</div> : null}<div className="project-library-grid">{projects.map((project) => <article key={project.id} className="project-card"><button type="button" className="project-card-main" onClick={() => onOpen(project.id)}><span className="project-card-mark">C</span><strong>{project.name}</strong><small>{project.productURL || "产品 URL 待配置"}</small><div><span>{workflowStageLabels[project.stage]}</span><span>{project.generatedAssetCount} 个成品</span></div></button><footer><button type="button" onClick={() => onArchive(project.id)}>归档</button><button type="button" onClick={() => { if (window.confirm(`删除“${project.name}”？`)) onDelete(project.id); }}>删除</button></footer></article>)}</div></main></div>;
-}
-
-function WorkstationNav({ active, onChange, developerUI, onSettings }: { active: ProjectWorkstationView; onChange: (view: ProjectWorkstationView) => void; developerUI: boolean; onSettings: () => void }) {
-  const items: Array<[ProjectWorkstationView, string]> = [["overview", "Configuration"], ["evidence", "分析与证据"], ["plan", "演示方案"], ["approval", "上传审批"], ["execution", "执行进度"], ["repair", "修复"], ["assets", "成品审核"], ["editor", "编辑器"]];
-  return <header className="workstation-nav"><img src="/Logo_full_black.png" alt="Cascade" /><nav>{items.map(([id, label]) => <button type="button" key={id} className={active === id ? "active" : ""} onClick={() => onChange(id)}>{label}</button>)}</nav><button type="button" onClick={onSettings}>{developerUI ? "开发设置" : "设置"}</button></header>;
-}
-
-function ConfigurationSummary({ session, workspace }: { session?: AssistantSessionView; workspace: ProjectWorkspaceView }) {
-  const draft = session?.configuration;
-  const sources = draft?.sources ?? [];
-  return <div className="configuration-workstation"><section className="configuration-hero"><span>Project configuration</span><h1>{draft?.projectName || workspace.name}</h1><p>{draft?.objective || "继续与 Cascade Agent 对话，补全客户价值和录制目标。"}</p><div className={`readiness-badge ${draft?.readiness === "ready" ? "ready" : "incomplete"}`}>{draft?.confirmed ? "已确认并启动本地分析" : draft?.readiness === "ready" ? "可确认" : "信息待补全"}</div></section><div className="configuration-grid"><Fact label="产品 URL" value={draft?.productURL || "待补充"} /><Fact label="目标受众" value={draft?.targetAudience || "待补充"} /><Fact label="目标时长" value={`${draft?.targetDurationSec ?? 60} 秒`} /><Fact label="品牌语气" value={draft?.brandTone || "待补充"} /><Fact label="允许域名" value={draft?.allowedDomains?.join("、") || "根据产品 URL 生成"} /><Fact label="版本 / Hash" value={`v${draft?.version ?? 1} · ${draft?.hash?.slice(0, 22) ?? "待生成"}`} /></div><section className="configuration-sources"><SectionTitle title="安全来源引用" meta={`${sources.length} 项`} /><div>{sources.map((source) => <span key={source.ref}><strong>{source.label}</strong><small>{source.kind} · {source.ref}</small></span>)}{sources.length === 0 ? <p>通过 Agent action card 选择本地目录、连接 GitHub 或添加文档。路径和凭据不会进入聊天。</p> : null}</div></section>{draft?.missingFields?.length ? <section className="configuration-missing"><strong>仍需补全</strong><div>{draft.missingFields.map((field) => <span key={field}>{field}</span>)}</div></section> : null}<section className="configuration-gate"><strong>两道人审保持独立</strong><p>确认 configuration 只会启动本地分析；三合一执行包仍需在“上传审批”中再次确认后才能发送到执行服务器。</p></section></div>;
+function workstationDescription(view: ProjectWorkstationView): string {
+  const descriptions: Record<ProjectWorkstationView, string> = { overview: "The current state of the demo session.", evidence: "What Cascade knows, where it came from, and what remains uncertain.", plan: "A readable route through the product, ready for review.", approval: "A human checkpoint before sensitive execution.", execution: "Observed progress, runtime events, and remaining work.", repair: "A focused view of the failure and the proposed recovery.", assets: "Review the proof Cascade generated from the approved journey.", editor: "Make precise changes to the generated video." };
+  return descriptions[view];
 }
 
 function appendRuntimeLog(workspace: ProjectWorkspaceView, entry: Omit<RuntimeLogEntry, "id" | "time">): ProjectWorkspaceView {
@@ -759,6 +892,349 @@ function ProjectHeader({
   );
 }
 
+function AgentHome({
+  prompt,
+  isGeneratingPackage,
+  isPromptConfirmationPending,
+  canContinueCurrentProject,
+  onPromptChange,
+  onSubmitPrompt,
+  onConfirmCreate,
+  onConfirmContinue,
+  onCancelConfirmation,
+}: {
+  prompt: string;
+  isGeneratingPackage: boolean;
+  isPromptConfirmationPending: boolean;
+  canContinueCurrentProject: boolean;
+  onPromptChange: (value: string) => void;
+  onSubmitPrompt: (event: FormEvent<HTMLFormElement>) => void;
+  onConfirmCreate: () => void;
+  onConfirmContinue: () => void;
+  onCancelConfirmation: () => void;
+}) {
+  const dailyHeadline = getDailyAgentHeadline();
+  return (
+    <div className="agent-home">
+      <section className="agent-hero" aria-label="Cascade Agent">
+        <h1>{dailyHeadline}</h1>
+        <form className="agent-composer" onSubmit={onSubmitPrompt}>
+          <textarea
+            value={prompt}
+            onChange={(event) => onPromptChange(event.currentTarget.value)}
+            rows={4}
+            placeholder="Tell Cascade what you want your customer to understand..."
+            aria-label="Describe your demo"
+          />
+          <div className="agent-composer-footer">
+            <span>Agent will inspect context, propose the path, and keep you in control.</span>
+            <button type="submit" className="agent-submit" disabled={isGeneratingPackage || !prompt.trim()}>
+              {isGeneratingPackage ? "Working" : "Continue"}
+              <span aria-hidden="true">↗</span>
+            </button>
+          </div>
+          {isPromptConfirmationPending ? (
+            <div className="agent-confirmation" role="group" aria-label="Choose project destination">
+              <div>
+                <strong>Where should this go?</strong>
+                <span>Keep the chat as the starting point, then choose the session to update.</span>
+              </div>
+              <div className="agent-confirmation-actions">
+                <button type="button" className="agent-submit" disabled={isGeneratingPackage} onClick={onConfirmCreate}>
+                  Create new project
+                </button>
+                <button type="button" className="text-action" disabled={isGeneratingPackage || !canContinueCurrentProject} onClick={onConfirmContinue}>
+                  Continue current project
+                </button>
+                <button type="button" className="text-action muted" disabled={isGeneratingPackage} onClick={onCancelConfirmation}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function ProjectsPanel({
+  projects,
+  isLoading,
+  error,
+  message,
+  activeActionProjectID,
+  actionPrompt,
+  onOpen,
+  onArchive,
+  onDelete,
+  onCancelAction,
+  onConfirmAction,
+  onRetry,
+  onGoHome,
+}: {
+  projects: ProjectSummaryView[];
+  isLoading: boolean;
+  error: string;
+  message: string;
+  activeActionProjectID: string | undefined;
+  actionPrompt: ProjectActionPrompt | undefined;
+  onOpen: (projectID: string) => void;
+  onArchive: (project: ProjectSummaryView) => void;
+  onDelete: (project: ProjectSummaryView) => void;
+  onCancelAction: () => void;
+  onConfirmAction: () => void;
+  onRetry: () => void;
+  onGoHome: () => void;
+}) {
+  function stopRowClick(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+  }
+
+  return (
+    <section className="projects-panel" aria-label="Projects">
+      <div className="projects-panel-header">
+        <div>
+          <p className="eyebrow">Demo workspace</p>
+          <h1>Projects</h1>
+          <p className="projects-panel-intro">Every demo session, its evidence, and the assets Cascade made from it.</p>
+        </div>
+        <span className="project-count">{projects.length} {projects.length === 1 ? "project" : "projects"}</span>
+      </div>
+      {message ? <div className="projects-action-message" role="status">{message}</div> : null}
+      {actionPrompt ? (
+        <div className={actionPrompt.kind === "delete" ? "project-action-confirm danger" : "project-action-confirm"} role="dialog" aria-modal="false" aria-label={`${actionPrompt.kind === "delete" ? "Delete" : "Archive"} project`}>
+          <div>
+            <strong>{actionPrompt.kind === "delete" ? `Would you like to delete "${actionPrompt.project.name}"?` : `Would you like to archive "${actionPrompt.project.name}"?`}</strong>
+            <span>
+              {actionPrompt.kind === "delete"
+                ? "This removes the local project record from Cascade."
+                : "This hides the project from the default Projects list while keeping its local record."}
+            </span>
+          </div>
+          <div className="project-action-confirm-actions">
+            <button type="button" className="row-action muted" disabled={activeActionProjectID === actionPrompt.project.id} onClick={onCancelAction}>No</button>
+            <button
+              type="button"
+              className={actionPrompt.kind === "delete" ? "row-action danger" : "row-action"}
+              disabled={activeActionProjectID === actionPrompt.project.id}
+              onClick={onConfirmAction}
+            >
+              {activeActionProjectID === actionPrompt.project.id ? "Working..." : "Yes"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {error ? (
+        <div className="projects-state error-banner">
+          <strong>Projects are unavailable.</strong>
+          <span>{error}</span>
+          <button type="button" className="row-action" onClick={onRetry}>Retry</button>
+        </div>
+      ) : isLoading ? (
+        <div className="projects-state">Loading projects…</div>
+      ) : projects.length === 0 ? (
+        <div className="projects-state projects-empty">
+          <strong>No demo projects yet.</strong>
+          <span>Describe the customer story on Home and Cascade will create the first workspace.</span>
+          <button type="button" className="row-action" onClick={onGoHome}>Go to Home</button>
+        </div>
+      ) : (
+        <div className="projects-table-wrap">
+          <table className="projects-table">
+            <thead>
+              <tr>
+                <th>Project</th>
+                <th>Product</th>
+                <th>Stage</th>
+                <th>Status</th>
+                <th>Assets</th>
+                <th aria-label="Actions" />
+              </tr>
+            </thead>
+            <tbody>
+              {projects.map((project) => (
+                <tr key={project.id} onClick={() => onOpen(project.id)}>
+                  <td>
+                    <button
+                      type="button"
+                      className="project-name-link"
+                      onClick={(event) => {
+                        stopRowClick(event);
+                        onOpen(project.id);
+                      }}
+                    >
+                      {project.name}
+                    </button>
+                    <small>{project.id}</small>
+                  </td>
+                  <td className="project-url">{project.productURL || "Product URL pending"}</td>
+                  <td>{workflowStageLabels[project.stage]}</td>
+                  <td><StatusPill label={projectStatusLabels[project.status]} tone={project.status === "asset_ready" ? "green" : project.status === "script_repair_required" ? "yellow" : "blue"} /></td>
+                  <td>{project.generatedAssetCount}/{project.assetCount || "—"}</td>
+                  <td>
+                    <div className="project-row-actions">
+                      <button
+                        type="button"
+                        className="row-action"
+                        disabled={activeActionProjectID === project.id}
+                        onClick={(event) => {
+                          stopRowClick(event);
+                          onOpen(project.id);
+                        }}
+                      >
+                        Open
+                      </button>
+                      <button
+                        type="button"
+                        className="row-action muted"
+                        disabled={activeActionProjectID === project.id}
+                        onClick={(event) => {
+                          stopRowClick(event);
+                          onArchive(project);
+                        }}
+                      >
+                        Archive
+                      </button>
+                      <button
+                        type="button"
+                        className="row-action danger"
+                        disabled={activeActionProjectID === project.id}
+                        onClick={(event) => {
+                          stopRowClick(event);
+                          onDelete(project);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+type RepositoryKind = "github" | "local" | "server";
+
+function safeLocalPathLabel(path?: string) {
+  const normalized = (path ?? "").replaceAll("\\", "/").replace(/\/+$/, "");
+  return normalized.split("/").filter(Boolean).at(-1) ?? "本地项目目录";
+}
+
+function RepositoriesPanel({
+  workspace,
+  message,
+  error,
+  onConnect,
+  onDisconnect,
+}: {
+  workspace: ProjectWorkspaceView;
+  message: string;
+  error: string;
+  onConnect: (repository: RepositoryInput) => void;
+  onDisconnect: (index: number) => void;
+}) {
+  const [kind, setKind] = useState<RepositoryKind>("github");
+  const [form, setForm] = useState({ url: "", branch: "main", localPath: "", host: "", port: "22", path: "", username: "", secretRef: "" });
+  const repositories = workspace.inputBundle.repositories ?? [];
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const base: RepositoryInput = { kind, provider: kind, read_only: true };
+    if (kind === "github") {
+      if (!form.url.trim()) return;
+      onConnect({ ...base, url: form.url.trim(), branch: form.branch.trim() || "main" });
+    } else if (kind === "local") {
+      if (!form.localPath.trim()) return;
+      onConnect({ ...base, local_path: form.localPath.trim() });
+    } else {
+      if (!form.host.trim() || !form.path.trim()) return;
+      onConnect({
+        ...base,
+        host: form.host.trim(),
+        port: Number(form.port) || 22,
+        path: form.path.trim(),
+        ...(form.username.trim() ? { username: form.username.trim() } : {}),
+        ...(form.secretRef.trim() ? { secret_ref: form.secretRef.trim() } : {}),
+      });
+    }
+    setForm((current) => ({ ...current, url: "", localPath: "", host: "", path: "", username: "", secretRef: "" }));
+  }
+
+  return (
+    <section className="repositories-panel" aria-label="Repositories">
+      <header className="repositories-header">
+        <div>
+          <p className="eyebrow">Source connections</p>
+          <h1>Repositories</h1>
+          <p>Connect read-only source material for Cascade to understand and use in your demo workspace.</p>
+        </div>
+        <StatusPill label={`${repositories.length} connected`} tone={repositories.length > 0 ? "green" : "neutral"} />
+      </header>
+
+      <section className="repository-section">
+        <SectionTitle title="Connected repositories" meta="Read-only by default" />
+        {repositories.length > 0 ? (
+          <div className="repository-list">
+            {repositories.map((repository, index) => (
+              <div className="repository-row" key={`${repository.kind ?? repository.provider ?? "repository"}-${repository.url ?? repository.local_path ?? repository.host ?? index}`}>
+                <div className="repository-icon">{repository.kind === "github" || repository.provider === "github" ? "GH" : repository.kind === "server" || repository.provider === "server" ? "SV" : "LO"}</div>
+                <div className="repository-details">
+                  <strong>{repository.kind === "github" || repository.provider === "github" ? repository.url : repository.kind === "server" || repository.provider === "server" ? `${repository.username ? `${repository.username}@` : ""}${repository.host}:${repository.path}` : safeLocalPathLabel(repository.local_path)}</strong>
+                  <span>{repository.branch ? `Branch ${repository.branch} · ` : ""}{repository.read_only ? "Read-only source" : "Writable source"}</span>
+                </div>
+                <button type="button" className="text-action muted" onClick={() => onDisconnect(index)}>Disconnect</button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="repository-empty">No repositories connected to this workspace yet.</div>
+        )}
+      </section>
+
+      <section className="repository-section">
+        <SectionTitle title="Connect a repository" meta="Choose one source" />
+        <div className="repository-kind-tabs" role="tablist" aria-label="Repository source type">
+          {(["github", "local", "server"] as RepositoryKind[]).map((item) => (
+            <button key={item} type="button" className={kind === item ? "repository-kind active" : "repository-kind"} onClick={() => setKind(item)}>
+              {item === "github" ? "GitHub" : item === "local" ? "Local repository" : "Server repository"}
+            </button>
+          ))}
+        </div>
+        <form className="repository-form" onSubmit={submit}>
+          {kind === "github" ? (
+            <>
+              <label className="field-row wide"><span>GitHub repository URL</span><input value={form.url} onChange={(event) => setForm({ ...form, url: event.currentTarget.value })} placeholder="https://github.com/org/repository" /></label>
+              <label className="field-row"><span>Branch</span><input value={form.branch} onChange={(event) => setForm({ ...form, branch: event.currentTarget.value })} placeholder="main" /></label>
+            </>
+          ) : kind === "local" ? (
+            <label className="field-row wide"><span>Local repository path</span><input value={form.localPath} onChange={(event) => setForm({ ...form, localPath: event.currentTarget.value })} placeholder="/Users/you/Projects/product" /></label>
+          ) : (
+            <>
+              <label className="field-row"><span>Server host</span><input value={form.host} onChange={(event) => setForm({ ...form, host: event.currentTarget.value })} placeholder="staging.example.com" /></label>
+              <label className="field-row"><span>SSH port</span><input value={form.port} onChange={(event) => setForm({ ...form, port: event.currentTarget.value })} inputMode="numeric" placeholder="22" /></label>
+              <label className="field-row"><span>Username</span><input value={form.username} onChange={(event) => setForm({ ...form, username: event.currentTarget.value })} placeholder="deploy" /></label>
+              <label className="field-row"><span>Repository path</span><input value={form.path} onChange={(event) => setForm({ ...form, path: event.currentTarget.value })} placeholder="/srv/product" /></label>
+              <label className="field-row wide"><span>Credential reference</span><input value={form.secretRef} onChange={(event) => setForm({ ...form, secretRef: event.currentTarget.value })} placeholder="vault://server-key (optional)" /></label>
+            </>
+          )}
+          <div className="repository-form-footer">
+            <span>Connections are stored as read-only references. Secrets are never entered here.</span>
+            <button type="submit" className="primary-action">Connect repository</button>
+          </div>
+        </form>
+      </section>
+      {message ? <div className="repository-feedback success">{message}</div> : null}
+      {error ? <div className="repository-feedback error">{error}</div> : null}
+    </section>
+  );
+}
+
 function ScenarioPicker({ activeID, onCreate }: { activeID: ScenarioID; onCreate: (id: ScenarioID) => void }) {
   return (
     <div className="section-stack">
@@ -791,39 +1267,23 @@ function ScenarioPicker({ activeID, onCreate }: { activeID: ScenarioID; onCreate
 function ProjectFlow({
   workspace,
   demoCredentials,
-  githubToken,
-  githubCredentialConfigured,
-  githubCredentialBusy,
-  githubCredentialMessage,
   selectedNodeID,
   onSelectNode,
   onPatchNode,
   onStageChange,
   onDemoCredentialsChange,
-  onGitHubTokenChange,
-  onStoreGitHubCredential,
-  onDeleteGitHubCredential,
   onWorkspaceChange,
-  onDownloadAssets,
-  onReviewAssets,
+  onApproveAssets,
 }: {
   workspace: ProjectWorkspaceView;
   demoCredentials: { username: string; password: string };
-  githubToken: string;
-  githubCredentialConfigured: boolean;
-  githubCredentialBusy: boolean;
-  githubCredentialMessage: string;
   selectedNodeID: string;
   onSelectNode: (id: string) => void;
   onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
   onStageChange: (stage: WorkspaceStage) => void;
   onDemoCredentialsChange: (credentials: { username: string; password: string }) => void;
-  onGitHubTokenChange: (token: string) => void;
-  onStoreGitHubCredential: () => void;
-  onDeleteGitHubCredential: () => void;
   onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
-  onDownloadAssets: () => void;
-  onReviewAssets: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
+  onApproveAssets: () => void;
 }) {
   return (
     <div className="section-stack">
@@ -844,14 +1304,7 @@ function ProjectFlow({
         <InputsPanel
           workspace={workspace}
           demoCredentials={demoCredentials}
-          githubToken={githubToken}
-          githubCredentialConfigured={githubCredentialConfigured}
-          githubCredentialBusy={githubCredentialBusy}
-          githubCredentialMessage={githubCredentialMessage}
           onDemoCredentialsChange={onDemoCredentialsChange}
-          onGitHubTokenChange={onGitHubTokenChange}
-          onStoreGitHubCredential={onStoreGitHubCredential}
-          onDeleteGitHubCredential={onDeleteGitHubCredential}
           onWorkspaceChange={onWorkspaceChange}
         />
       ) : null}
@@ -867,7 +1320,7 @@ function ProjectFlow({
       {workspace.stage === "package_approval" ? <PackageStageSummary workspace={workspace} /> : null}
       {workspace.stage === "cloud_run" ? <CloudRunPanel workspace={workspace} /> : null}
       {workspace.stage === "script_repair" ? <ScriptRepairPanel workspace={workspace} /> : null}
-      {workspace.stage === "result_review" ? <ResultReviewPanel workspace={workspace} onDownload={onDownloadAssets} onReview={onReviewAssets} /> : null}
+      {workspace.stage === "result_review" ? <ResultReviewPanel workspace={workspace} onApprove={onApproveAssets} /> : null}
     </div>
   );
 }
@@ -903,30 +1356,15 @@ function SetupPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
 function InputsPanel({
   workspace,
   demoCredentials,
-  githubToken,
-  githubCredentialConfigured,
-  githubCredentialBusy,
-  githubCredentialMessage,
   onDemoCredentialsChange,
-  onGitHubTokenChange,
-  onStoreGitHubCredential,
-  onDeleteGitHubCredential,
   onWorkspaceChange,
 }: {
   workspace: ProjectWorkspaceView;
   demoCredentials: { username: string; password: string };
-  githubToken: string;
-  githubCredentialConfigured: boolean;
-  githubCredentialBusy: boolean;
-  githubCredentialMessage: string;
   onDemoCredentialsChange: (credentials: { username: string; password: string }) => void;
-  onGitHubTokenChange: (token: string) => void;
-  onStoreGitHubCredential: () => void;
-  onDeleteGitHubCredential: () => void;
   onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
 }) {
-  const localRepoPath = workspace.inputBundle.repositories?.find((repo) => repo.local_path)?.local_path ?? "";
-  const gitRepoURL = workspace.inputBundle.repositories?.find((repo) => repo.url)?.url ?? "";
+  const localRepoPath = workspace.inputBundle.repositories?.[0]?.local_path ?? "";
   const forbiddenData = workspaceInputForbiddenData(workspace);
   function patchInputs(patch: Parameters<typeof updateWorkspaceInputs>[1]) {
     onWorkspaceChange(updateWorkspaceInputs(workspace, patch));
@@ -941,35 +1379,9 @@ function InputsPanel({
             <input value={workspace.productURL} onChange={(event) => patchInputs({ productURL: event.currentTarget.value })} placeholder="https://app.example.com" />
           </label>
           <label className="field-row">
-            <span>本地项目根目录</span>
+            <span>项目根目录</span>
             <input value={localRepoPath} onChange={(event) => patchInputs({ localRepoPath: event.currentTarget.value })} placeholder="C:\\Users\\you\\Desktop\\your-project" />
           </label>
-          <label className="field-row">
-            <span>GitHub 仓库 URL</span>
-            <input value={gitRepoURL} onChange={(event) => patchInputs({ gitRepoURL: event.currentTarget.value })} placeholder="https://github.com/org/repo" />
-          </label>
-          <div className="field-row github-credential-field">
-            <span>私有 GitHub 仓库凭据</span>
-            <div className="credential-input-row">
-              <input
-                type="password"
-                value={githubToken}
-                onChange={(event) => onGitHubTokenChange(event.currentTarget.value)}
-                autoComplete="new-password"
-                placeholder={githubCredentialConfigured ? "已配置，可输入新 token 替换" : "Fine-grained token"}
-                aria-label="GitHub fine-grained token"
-              />
-              <button type="button" className="row-action" disabled={githubCredentialBusy || !githubToken.trim()} onClick={onStoreGitHubCredential}>
-                {githubCredentialBusy ? "处理中" : "保存"}
-              </button>
-              <button type="button" className="row-action danger" disabled={githubCredentialBusy || !githubCredentialConfigured} onClick={onDeleteGitHubCredential}>
-                删除
-              </button>
-            </div>
-            <small className={githubCredentialMessage && !githubCredentialConfigured ? "credential-status warning" : "credential-status"}>
-              {githubCredentialMessage || (githubCredentialConfigured ? "已安全存入 Windows 凭据管理器" : "未配置；公开仓库无需凭据")}
-            </small>
-          </div>
           <label className="field-row">
             <span>目标受众</span>
             <input value={workspace.targetAudience} onChange={(event) => patchInputs({ targetAudience: event.currentTarget.value })} placeholder="中国客户的产品和运营团队" />
@@ -1006,7 +1418,7 @@ function InputsPanel({
             <textarea value={forbiddenData.join("\n")} onChange={(event) => patchInputs({ forbiddenDataText: event.currentTarget.value })} rows={3} />
           </label>
         </div>
-        <div className="input-note">本地项目根目录和 GitHub 仓库 URL 都是可选代码来源，可以单独填写也可以同时填写。私有仓库 token 仅保存在 Windows 凭据管理器，读取代码时通过 Git 进程环境注入，不进入项目状态、执行包或日志；Device OAuth 将在 DemoOps 配置自有 GitHub OAuth Client ID 后启用。演示账号密码只作为本地登录预扫描的瞬时凭据。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
+        <div className="input-note">当前 Dev Bridge 使用文本路径输入；演示账号密码只作为本地登录预扫描的瞬时凭据，不进入执行包、审批文档或云端 payload。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
       </section>
       <InputsTable workspace={workspace} />
       <CodeSummaryPanel workspace={workspace} />
@@ -1024,10 +1436,11 @@ function InputsPanel({
   );
 }
 
-function UnderstandingStagePanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+function UnderstandingStagePanel({ workspace, onReplaceWebpage, onReplaceSource, onContinuePageOnly }: { workspace: ProjectWorkspaceView; onReplaceWebpage?: () => void; onReplaceSource?: () => void; onContinuePageOnly?: () => void }) {
   return (
     <div className="section-stack">
       <MetricsRow workspace={workspace} />
+      <SourceBindingCard workspace={workspace} {...(onReplaceWebpage ? { onReplaceWebpage } : {})} {...(onReplaceSource ? { onReplaceSource } : {})} {...(onContinuePageOnly ? { onContinuePageOnly } : {})} />
       <UnderstandingPanel workspace={workspace} />
       <ProjectIntelligencePanel workspace={workspace} />
       <CodeSummaryPanel workspace={workspace} />
@@ -1042,6 +1455,35 @@ function UnderstandingStagePanel({ workspace }: { workspace: ProjectWorkspaceVie
         </div>
       </section>
     </div>
+  );
+}
+
+function SourceBindingCard({ workspace, onReplaceWebpage, onReplaceSource, onContinuePageOnly }: { workspace: ProjectWorkspaceView; onReplaceWebpage?: () => void; onReplaceSource?: () => void; onContinuePageOnly?: () => void }) {
+  const binding = workspace.sourceBinding;
+  if (!binding || binding.status === "not_applicable") return null;
+  const mismatched = binding.status === "mismatched" && binding.effective_mode === "blocked";
+  const message = binding.status === "matched"
+    ? "网页与源码身份信号一致，本次允许使用源码路由、组件和 selector 候选。"
+    : binding.status === "unverified"
+      ? "无法可靠证明网页与源码同源，已自动使用仅网页证据模式。"
+      : binding.effective_mode === "page_only"
+        ? "源码与网页不匹配；已按用户确认移除全部源码执行证据。"
+        : "网页与源码来源不匹配，已在生成 Browser Agent 大纲前停止。";
+  return (
+    <section className="table-section">
+      <SectionTitle title="来源一致性" meta={binding.status} />
+      <div className="settings-grid">
+        <Fact label="执行证据模式" value={binding.effective_mode === "mixed" ? "网页 + 已匹配源码" : binding.effective_mode === "page_only" ? "仅网页证据" : "已阻断"} />
+        <Fact label="来源数量" value={`${binding.sources?.length ?? 0} 个`} />
+        <Fact label="评估摘要" value={binding.assessment_hash.slice(0, 16)} />
+      </div>
+      <div className={mismatched ? "error-banner" : "input-note"}>{message}</div>
+      {mismatched ? <div className="section-actions">
+        {onReplaceWebpage ? <button type="button" className="secondary-action" onClick={onReplaceWebpage}>更换网页</button> : null}
+        {onReplaceSource ? <button type="button" className="secondary-action" onClick={onReplaceSource}>更换源码</button> : null}
+        {onContinuePageOnly ? <button type="button" className="secondary-action" onClick={onContinuePageOnly}>仅使用网页证据重新分析</button> : null}
+      </div> : null}
+    </section>
   );
 }
 
@@ -1062,7 +1504,6 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
   const architecture = intelligence.architecture;
   const traceSteps = workspace.agentGraphTrace?.steps ?? [];
   const intentGoals = intelligence.demo_intent?.goals ?? [];
-  const businessStages = intelligence.business_stage_plan?.stages ?? [];
   const verifiedPlan = intelligence.verified_interaction_plan;
   const missingEvidence = intelligence.missing_evidence_report;
   return (
@@ -1078,49 +1519,11 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
         <Fact label="推荐路径" value={readiness?.recommended_scenario_name ?? intelligence.demo_scenario_plans?.[0]?.name ?? "待选择"} />
         <Fact label="脚本可行性" value={readiness?.can_proceed ? "可继续生成脚本" : "需复核输入材料"} />
         <Fact label="Selector 覆盖" value={typeof readiness?.selector_coverage === "number" ? `${Math.round(readiness.selector_coverage * 100)}%` : "待计算"} />
-        <Fact
-          label="代码调查"
-          value={
-            readiness?.code_investigation_summary ||
-            (readiness?.code_investigation_tool_driven
-              ? `${formatOverreadRisk(readiness.code_investigation_overread_risk)} · 专用工具 ${readiness.code_investigation_specialized_tool_call_count ?? 0} 次`
-              : "待评估")
-          }
-        />
-        <Fact
-          label="调查缺口"
-          value={
-            readiness?.code_investigation_gaps?.length
-              ? readiness.code_investigation_gaps.slice(0, 3).join("、")
-              : readiness?.code_investigation_open_question_count
-                ? `${readiness.code_investigation_open_question_count} 个未解问题`
-                : "无阻塞缺口"
-          }
-        />
         <Fact label="需求目标" value={`${intentGoals.length} 个`} />
         <Fact label="页面验证" value={verifiedPlan ? `${verifiedPlan.business_action_count ?? 0} 个业务动作 · ${verifiedPlan.verification_mode ?? "待识别"}` : "未完成"} />
         <Fact label="缺失证据" value={missingEvidence?.blocking ? "阻塞脚本生成" : missingEvidence ? "有提示" : "无阻塞"} />
         <Fact label="Source Digest" value={intelligence.source_digest_sha256 ?? "待生成"} />
       </div>
-      {businessStages.length > 0 ? (
-        <div className="runtime-log-list">
-          {businessStages.slice(0, 8).map((stage) => (
-            <div key={stage.id} className={`runtime-log-row ${stage.uncertainties?.some((item) => item.blocking) ? "warning" : "info"}`}>
-              <span>{stage.kind}</span>
-              <strong>{stage.title || stage.objective || stage.id}</strong>
-              <small>
-                {[
-                  stage.route_state,
-                  stage.entry_route,
-                  stage.expected_route_after_action,
-                  `${stage.duration_ms ?? 0}ms`,
-                  `${stage.targets?.length ?? 0} targets`,
-                ].filter(Boolean).join(" · ")}
-              </small>
-            </div>
-          ))}
-        </div>
-      ) : null}
       {intentGoals.length > 0 ? (
         <div className="runtime-log-list">
           {intentGoals.slice(0, 5).map((goal) => {
@@ -1175,62 +1578,18 @@ function ProjectIntelligencePanel({ workspace }: { workspace: ProjectWorkspaceVi
 
 function CodeSummaryPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   const summary = codeSummaryFromWorkspace(workspace);
-  const questions = codeInvestigationQuestionsFromWorkspace(workspace);
-  const repositories = workspace.inputBundle.repositories ?? [];
-  const hasLocalRepo = repositories.some((repo) => Boolean(repo.local_path));
-  const hasGitRepo = repositories.some((repo) => Boolean(repo.url));
-  const hasCodeSource = hasLocalRepo || hasGitRepo;
-  const sourceMeta = hasLocalRepo && hasGitRepo ? "CodeReaderAgent · 本地 + GitHub" : hasGitRepo ? "CodeReaderAgent · GitHub" : hasLocalRepo ? "CodeReaderAgent · 本地" : "未提供代码来源";
+  const repoPath = workspace.inputBundle.repositories?.[0]?.local_path;
   return (
     <section className="table-section">
-      <SectionTitle title="代码阅读摘要" meta={sourceMeta} />
+      <SectionTitle title="代码阅读摘要" meta={repoPath ? "CodeReaderAgent" : "未提供项目根目录"} />
       <div className="settings-grid">
-        <Fact label="扫描文件" value={summary.fileCount > 0 ? `${summary.fileCount} 个` : hasCodeSource ? "代码来源不可读或无可扫描文件" : "未提供"} />
+        <Fact label="扫描文件" value={summary.fileCount > 0 ? `${summary.fileCount} 个` : repoPath ? "路径不可读或无可扫描文件" : "未提供"} />
         <Fact label="框架线索" value={summary.frameworks.length > 0 ? summary.frameworks.join("、") : "待识别"} />
         <Fact label="路由/组件" value={`${summary.routes} 个路由 / ${summary.components} 个组件`} />
         <Fact label="Selector" value={`${summary.selectors} 个稳定选择器候选`} />
-        <Fact
-          label="调查工具"
-          value={summary.toolCalls > 0 ? `${summary.toolCalls} 次调用 / 专用 ${summary.specializedToolCalls} 次 / shell ${summary.shellRunToolCalls} 次` : "待生成"}
-        />
-        <Fact
-          label="检索范围"
-          value={
-            summary.searchedFiles > 0 || summary.selectedFiles > 0
-              ? `grep ${summary.searchedFiles} 文件 / 读取 ${summary.selectedFiles} 文件 / 选中率 ${formatPercent(summary.selectedFileRatio)}`
-              : "待生成"
-          }
-        />
-        <Fact label="调查问题" value={summary.investigationQuestions > 0 ? `${summary.investigationQuestions} 个问题 / ${summary.openInvestigationQuestions} 个待补证据` : "待生成"} />
-        <Fact label="结构化读取" value={summary.selectedFiles > 0 ? `${summary.selectedFiles} 个文件 · ${summary.investigationMode || "intent drilldown"}` : "待生成"} />
-        <Fact label="工具链" value={formatToolBreakdown(summary.toolBreakdown)} />
-        <Fact
-          label="调查质量"
-          value={
-            summary.investigationQualitySummary ||
-            (summary.toolCalls > 0 ? `${formatOverreadRisk(summary.investigationOverreadRisk)} · 置信度 ${formatQualityConfidence(summary.investigationQualityConfidence)}` : "待生成")
-          }
-        />
-        <Fact label="未解缺口" value={summary.remainingInvestigationGaps.length ? summary.remainingInvestigationGaps.slice(0, 3).join("、") : "无阻塞缺口"} />
         <Fact label="Source Digest" value={summary.sourceDigest || "待生成"} />
-        <Fact label="读取策略" value={summary.degraded ? "已降级使用需求/页面材料" : summary.investigationSourceTextPolicy || "只读扫描结构摘要，不保存完整源码"} />
+        <Fact label="读取策略" value={summary.degraded ? "已降级使用需求/页面材料" : "只读扫描结构摘要，不保存完整源码"} />
       </div>
-      {questions.length > 0 ? (
-        <div className="runtime-log-list">
-          {questions.map((question) => (
-            <div key={question.id} className={`runtime-log-row ${question.status === "answered" ? "success" : question.remainingGaps.length ? "warning" : "info"}`}>
-              <span>{question.status}</span>
-              <strong>{question.label}</strong>
-              <small>
-                {[question.evidenceSummary, question.remainingGaps.length ? `缺口：${question.remainingGaps.slice(0, 2).join("、")}` : "", formatQuestionTools(question.toolCalls)]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </small>
-              {question.nextActions.length > 0 ? <em>{formatQuestionNextActions(question.nextActions)}</em> : null}
-            </div>
-          ))}
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -1324,41 +1683,6 @@ function CloudRunPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   );
 }
 
-function EditorHandoffPanel({
-  workspace,
-  isChecking,
-  onRefresh,
-  onOpenEditor,
-}: {
-  workspace: ProjectWorkspaceView;
-  isChecking: boolean;
-  onRefresh: () => void;
-  onOpenEditor: () => void;
-}) {
-  const failed = workspace.cloudRun.status === "failed";
-  const sessionID = workspace.cloudRun.editorSessionID;
-  const message = workspace.cloudRun.editorMaterializationMessage ?? (failed
-    ? "失败任务不创建成片编辑会话；请在失败诊断中复盘。"
-    : "成功结果会自动登记录屏和可用截图，供本地编辑器继续编排。");
-  return (
-    <section className="table-section editor-handoff-panel">
-      <SectionTitle title="待编辑素材" meta={sessionID ? "已进入编辑器" : failed ? "失败复盘" : "等待登记"} />
-      <div className="acceptance-intro">
-        <div>
-          <StatusPill label={sessionID ? "可编辑" : failed ? "不创建" : "待确认"} tone={sessionID ? "green" : "yellow"} />
-          <strong>{sessionID ? "服务器录制产物已登记为本地编辑会话。" : "仅成功且位于 Server 受控素材目录的录屏会自动进入编辑器。"}</strong>
-          <p>{message}</p>
-        </div>
-        <div className="handoff-actions">
-          {!failed ? <button type="button" className="secondary-action" disabled={isChecking || !workspace.cloudRun.resultPackageID} onClick={onRefresh}>{isChecking ? "正在确认..." : "检查待编辑素材"}</button> : null}
-          {sessionID ? <button type="button" className="primary-action" onClick={onOpenEditor}>进入视频编辑</button> : null}
-        </div>
-      </div>
-      {sessionID ? <p className="acceptance-path">编辑会话：{sessionID}</p> : null}
-    </section>
-  );
-}
-
 function ScriptRepairPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   const diagnostic = workspace.cloudRun.failureDiagnostic;
   const lineage = workspace.executableScriptBundle?.repair_lineage;
@@ -1380,16 +1704,8 @@ function ScriptRepairPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   );
 }
 
-function ResultReviewPanel({
-  workspace,
-  onDownload,
-  onReview,
-}: {
-  workspace: ProjectWorkspaceView;
-  onDownload: () => void;
-  onReview: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
-}) {
-  return <AssetReview workspace={workspace} onDownload={onDownload} onReview={onReview} />;
+function ResultReviewPanel({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {
+  return <AssetReview workspace={workspace} onApprove={onApprove} />;
 }
 
 function MetricsRow({ workspace }: { workspace: ProjectWorkspaceView }) {
@@ -1532,22 +1848,6 @@ function PackageApproval({
   onCloudSuccess,
   onCloudFailure,
   onRepairScript,
-  browserAgentAcceptance,
-  isRunningBrowserAgentAcceptance,
-  browserAgentAcceptanceError,
-  onRunBrowserAgentAcceptance,
-  browserAgentBusinessAcceptance,
-  isRunningBrowserAgentBusinessAcceptance,
-  browserAgentBusinessAcceptanceError,
-  onRunBrowserAgentBusinessAcceptance,
-  packagePreflight,
-  packagePreflightError,
-  isRunningPackagePreflight,
-  onRunPackagePreflight,
-  onRefreshEditorMaterialization,
-  isCheckingEditorMaterialization,
-  onOpenEditor,
-  developerUI = false,
 }: {
   workspace: ProjectWorkspaceView;
   checklist: ApprovalChecklistState;
@@ -1559,22 +1859,6 @@ function PackageApproval({
   onCloudSuccess: () => void;
   onCloudFailure: () => void;
   onRepairScript: () => void;
-  browserAgentAcceptance: BrowserAgentAcceptanceView | undefined;
-  isRunningBrowserAgentAcceptance: boolean;
-  browserAgentAcceptanceError: string;
-  onRunBrowserAgentAcceptance: () => void;
-  browserAgentBusinessAcceptance: BrowserAgentBusinessAcceptanceView | undefined;
-  isRunningBrowserAgentBusinessAcceptance: boolean;
-  browserAgentBusinessAcceptanceError: string;
-  onRunBrowserAgentBusinessAcceptance: () => void;
-  packagePreflight: CloudPackagePreflightView | undefined;
-  packagePreflightError: string;
-  isRunningPackagePreflight: boolean;
-  onRunPackagePreflight: () => void;
-  onRefreshEditorMaterialization: () => void;
-  isCheckingEditorMaterialization: boolean;
-  onOpenEditor: () => void;
-  developerUI?: boolean;
 }) {
   function toggle(key: keyof ApprovalChecklistState) {
     onChecklistChange({ ...checklist, [key]: !checklist[key] });
@@ -1586,6 +1870,9 @@ function PackageApproval({
       <SectionTitle title="执行包审批" meta={workspace.packagePreview.packageID} />
       <div className="approval-grid">
         <div className="package-facts">
+          <Fact label="包状态" value={workspace.packagePreview.buildStatus === "approved" ? "已审批" : "待人工审批"} />
+          <Fact label="确信度" value={workspace.packagePreview.confidenceScore == null ? "待评估" : `${Math.round(workspace.packagePreview.confidenceScore * 100)}% · ${workspace.packagePreview.readiness === "ready" ? "可审批" : workspace.packagePreview.readiness === "review_required" ? "需重点复核" : "已阻断"}`} />
+          <Fact label="精简后大小" value={workspace.packagePreview.totalBytes == null ? "待统计" : `${(workspace.packagePreview.totalBytes / 1024).toFixed(1)} KiB`} />
           <Fact label="执行包摘要" value={workspace.packagePreview.packageDigest} />
           <Fact label="流程图摘要" value={workspace.packagePreview.graphDigest} />
           <Fact label="Runtime" value={bundle?.script_manifest.runtime ?? "待生成"} />
@@ -1601,6 +1888,7 @@ function PackageApproval({
           <Fact label="模型来源" value={workspace.modelProvenance?.join("；") ?? "待生成"} />
           {bundle?.repair_lineage ? <Fact label="修复来源" value={`${bundle.repair_lineage.source_result_id} / 第 ${bundle.repair_lineage.repair_attempt} 次`} /> : null}
         </div>
+        {workspace.packagePreview.confidenceWarnings?.length ? <div className="notice-card warning"><strong>确信度复核</strong><p>{workspace.packagePreview.confidenceWarnings.slice(0, 3).join("；")}</p></div> : null}
         <div className="checklist-panel">
           {(
             [
@@ -1619,34 +1907,9 @@ function PackageApproval({
         </div>
       </div>
       <RuntimeLogPanel workspace={workspace} />
-      {developerUI ? <RealPackagePreflightPanel
-        preflight={packagePreflight}
-        error={packagePreflightError}
-        isRunning={isRunningPackagePreflight}
-        canRun={Boolean(bundle)}
-        onRun={onRunPackagePreflight}
-      /> : null}
-      {developerUI ? <BrowserAgentAcceptancePanel
-        acceptance={browserAgentAcceptance}
-        isRunning={isRunningBrowserAgentAcceptance}
-        error={browserAgentAcceptanceError}
-        onRun={onRunBrowserAgentAcceptance}
-      /> : null}
-      {developerUI ? <BrowserAgentBusinessAcceptancePanel
-        acceptance={browserAgentBusinessAcceptance}
-        isRunning={isRunningBrowserAgentBusinessAcceptance}
-        error={browserAgentBusinessAcceptanceError}
-        onRun={onRunBrowserAgentBusinessAcceptance}
-      /> : null}
       <CloudRunPanel workspace={workspace} />
-      <EditorHandoffPanel
-        workspace={workspace}
-        isChecking={isCheckingEditorMaterialization}
-        onRefresh={onRefreshEditorMaterialization}
-        onOpenEditor={onOpenEditor}
-      />
-      {developerUI ? <SandboxPolicyPanel workspace={workspace} /> : null}
-      {developerUI ? <ScriptBundleReview workspace={workspace} /> : null}
+      <SandboxPolicyPanel workspace={workspace} />
+      <ScriptBundleReview workspace={workspace} />
       {workspace.cloudRun.failureDiagnostic ? (
         <FailureDiagnosticPanel workspace={workspace} onRepairScript={onRepairScript} />
       ) : null}
@@ -1729,141 +1992,6 @@ function ServerLifecyclePanel({ workspace }: { workspace: ProjectWorkspaceView }
         ))}
       </div>
       {workspace.cloudRun.failureSummary ? <div className="error-banner">{workspace.cloudRun.failureSummary}</div> : null}
-    </section>
-  );
-}
-
-function BrowserAgentAcceptancePanel({
-  acceptance,
-  isRunning,
-  error,
-  onRun,
-}: {
-  acceptance: BrowserAgentAcceptanceView | undefined;
-  isRunning: boolean;
-  error: string;
-  onRun: () => void;
-}) {
-  const report = acceptance?.report;
-  const gatePassed = report?.strict_gate === "passed";
-  return (
-    <section className="table-section browser-agent-acceptance-panel">
-      <SectionTitle title="Browser Agent 严格验收" meta={report ? (gatePassed ? "门禁通过" : "门禁未通过") : "尚未运行"} />
-      <div className="acceptance-intro">
-        <div>
-          <StatusPill label={gatePassed ? "通过" : report ? "未通过" : "待运行"} tone={gatePassed ? "green" : "yellow"} />
-          <strong>固定验收包只访问服务器自己启动的受控页面，不使用 App 数据包、用户素材或生产凭据。</strong>
-          <p>{acceptance?.message ?? "正在读取本地验收状态。"}</p>
-        </div>
-        <button type="button" className="secondary-action" disabled={isRunning || acceptance?.can_run === false} onClick={onRun}>
-          {isRunning ? "正在运行验收..." : "运行固定验收包"}
-        </button>
-      </div>
-      {error ? <div className="error-banner">{error}</div> : null}
-      {report ? (
-        <div className="acceptance-list">
-          {report.scenarios.map((scenario) => (
-            <article key={scenario.id} className={`acceptance-case ${scenario.verdict === "passed" ? "passed" : "failed"}`}>
-              <div className="acceptance-case-head">
-                <div><strong>{scenario.description}</strong><small>{scenario.id}</small></div>
-                <StatusPill label={scenario.verdict === "passed" ? "预期一致" : "预期不一致"} tone={scenario.verdict === "passed" ? "green" : "yellow"} />
-              </div>
-              <div className="acceptance-expected"><span>预期：{scenario.expected}</span><span>实际：{scenario.actual === "pass" ? "符合预期" : "不符合预期"}</span><span>{scenario.action_executed ? "浏览器动作已执行" : "浏览器动作未执行"}</span></div>
-              {scenario.stop_reason ? <p className="acceptance-stop">停止原因：{scenario.stop_reason}</p> : null}
-              <div className="acceptance-checks">
-                {scenario.assertions.map((check, index) => <span key={`${check.kind}-${index}`} className={check.passed ? "ok" : "blocked"}>{check.kind}: {check.actual ?? (check.passed ? "passed" : "failed")}</span>)}
-              </div>
-              {scenario.evidence.length > 0 ? <div className="acceptance-evidence">证据：{scenario.evidence.map((item) => <a key={item.id} href={item.uri} target="_blank" rel="noreferrer">{item.kind}</a>)}</div> : null}
-            </article>
-          ))}
-        </div>
-      ) : null}
-      {acceptance?.report_path ? <p className="acceptance-path">报告：{acceptance.report_path}</p> : null}
-    </section>
-  );
-}
-
-function BrowserAgentBusinessAcceptancePanel({
-  acceptance,
-  isRunning,
-  error,
-  onRun,
-}: {
-  acceptance: BrowserAgentBusinessAcceptanceView | undefined;
-  isRunning: boolean;
-  error: string;
-  onRun: () => void;
-}) {
-  const report = acceptance?.report;
-  const passed = report?.strict_gate === "passed";
-  return (
-    <section className="table-section browser-agent-acceptance-panel">
-      <SectionTitle title="受控业务执行验收" meta={passed ? "业务链路已通过" : report ? "业务链路未通过" : "尚未运行"} />
-      <div className="acceptance-intro">
-        <div>
-          <StatusPill label={passed ? "通过" : report ? "未通过" : "待运行"} tone={passed ? "green" : "yellow"} />
-          <strong>使用 Server 自己启动的项目构建演示页，真实执行“输入名称、选择模式、提交、验证结果”；不使用当前 App 包、用户网站或生产凭据。</strong>
-          <p>{acceptance?.message ?? "这一步用于证明新路径能完成一段可理解的业务流程，而不只是安全地点击一个按钮。"}</p>
-        </div>
-        <button type="button" className="secondary-action" disabled={isRunning || acceptance?.can_run === false} onClick={onRun}>
-          {isRunning ? "正在运行受控业务验收..." : "运行受控业务验收"}
-        </button>
-      </div>
-      {error ? <div className="error-banner">{error}</div> : null}
-      {report ? (
-        <div className="acceptance-list">
-          <p className="acceptance-path">业务流程：{report.business_flow}</p>
-          {report.stages.map((stage) => (
-            <article key={stage.id} className={`acceptance-case ${stage.verdict === "passed" ? "passed" : "failed"}`}>
-              <div className="acceptance-case-head"><div><strong>{stage.description}</strong><small>{stage.id}</small></div><StatusPill label={stage.verdict === "passed" ? "已验证" : "失败"} tone={stage.verdict === "passed" ? "green" : "yellow"} /></div>
-              <div className="acceptance-checks">{stage.assertions.map((check, index) => <span key={`${check.kind}-${index}`} className={check.passed ? "ok" : "blocked"}>{check.kind}: {check.actual ?? (check.passed ? "passed" : "failed")}</span>)}</div>
-            </article>
-          ))}
-          <div className="acceptance-expected"><span>编辑器交接：{report.editor_materialization.ready ? "已登记待编辑素材" : "未就绪"}</span><span>{report.editor_materialization.message}</span>{report.editor_materialization.session_id ? <span>会话：{report.editor_materialization.session_id}</span> : null}</div>
-        </div>
-      ) : null}
-      {acceptance?.report_path ? <p className="acceptance-path">报告：{acceptance.report_path}</p> : null}
-    </section>
-  );
-}
-
-function RealPackagePreflightPanel({
-  preflight,
-  error,
-  isRunning,
-  canRun,
-  onRun,
-}: {
-  preflight: CloudPackagePreflightView | undefined;
-  error: string;
-  isRunning: boolean;
-  canRun: boolean;
-  onRun: () => void;
-}) {
-  const passed = preflight?.valid === true;
-  return (
-    <section className="table-section package-preflight-panel">
-      <SectionTitle title="真实执行包预检" meta={passed ? "Server Intake 已通过" : error ? "存在阻断项" : "上传前检查"} />
-      <div className="acceptance-intro">
-        <div>
-          <StatusPill label={passed ? "可上传" : error ? "需修复" : "未检查"} tone={passed ? "green" : error ? "yellow" : "neutral"} />
-          <strong>使用与真实上传相同的 Server Intake 校验规则，但不会上传数据包、不会启动浏览器、不会访问用户产品。</strong>
-          <p>{preflight?.message ?? "先验证当前 App 自动生成的执行包是否符合协议，再决定是否上传执行。"}</p>
-        </div>
-        <button type="button" className="secondary-action" disabled={!canRun || isRunning} onClick={onRun}>
-          {isRunning ? "正在校验..." : "只校验，不执行"}
-        </button>
-      </div>
-      {error ? <div className="error-banner">{error}</div> : null}
-      {preflight ? (
-        <div className="preflight-facts">
-          <Fact label="Runtime" value={preflight.runtime ?? "未声明"} />
-          <Fact label="已对齐 Stage" value={`${preflight.stage_count ?? 0} 个`} />
-          <Fact label="必填结果验证" value={`${preflight.required_checks ?? 0} 项`} />
-          <Fact label="允许访问域名" value={preflight.allowed_domains?.join("、") || "未声明"} />
-          <Fact label="包标识" value={preflight.package_id ?? "未返回"} />
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -2055,18 +2183,7 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
-function AssetReview({
-  workspace,
-  onDownload,
-  onReview,
-}: {
-  workspace: ProjectWorkspaceView;
-  onDownload: () => void;
-  onReview: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
-}) {
-  const [reviewSummary, setReviewSummary] = useState("");
-  const deliveryAcked = Boolean(workspace.cloudRun.resultPackage?.delivery?.acked_at) || workspace.cloudRun.message?.includes("校验 checksum");
-  const review = workspace.cloudRun.resultReview;
+function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {
   return (
     <div className="asset-layout">
       <section className="video-panel">
@@ -2078,33 +2195,18 @@ function AssetReview({
       </section>
       <section className="docs-panel">
         <SectionTitle title="步骤文档" meta={workspace.assets[1]?.checksum ?? "待生成"} />
-		<ol className="docs-preview">
+        <ol className="docs-preview">
           {workspace.planReview.graph.nodes.map((node) => (
             <li key={node.id}>
               <strong>{node.title ?? node.action}</strong>
               <span>{node.expected_outcome}</span>
             </li>
           ))}
-		</ol>
-		<label className="field-label" htmlFor="result-review-summary">审核意见</label>
-		<textarea id="result-review-summary" rows={4} value={reviewSummary} onChange={(event) => setReviewSummary(event.target.value)} placeholder="可填写时间点、字幕、节奏或缺失步骤。返工时建议必填。" />
-		<div className="action-row result-review-actions">
-		  <button type="button" className="secondary-action" onClick={onDownload}>
-			<span className="button-icon">下</span>
-			{deliveryAcked ? "已下载并校验" : "下载并校验成品"}
-		  </button>
-		  <button type="button" className="primary-action" disabled={!deliveryAcked} onClick={() => onReview("approved", reviewSummary)}>
-			<span className="button-icon">准</span>
-			批准成品
-		  </button>
-		  <button type="button" className="secondary-action" disabled={!reviewSummary.trim()} onClick={() => onReview("reedit_requested", reviewSummary)}>
-			要求重新剪辑
-		  </button>
-		  <button type="button" className="secondary-action" disabled={!reviewSummary.trim()} onClick={() => onReview("rerecord_requested", reviewSummary)}>
-			要求重新录制
-		  </button>
-		</div>
-		{review ? <div className="warning-band"><span>审核状态：{review.decision} · {review.revisionAction ?? "无需返工"}</span>{review.summary ? <span>{review.summary}</span> : null}</div> : null}
+        </ol>
+        <button type="button" className="primary-action" onClick={onApprove}>
+          <span className="button-icon">准</span>
+          批准成品
+        </button>
       </section>
     </div>
   );
@@ -2117,11 +2219,6 @@ function SettingsPanel({
   diagnosticsError,
   isRunningDiagnostics,
   onRunDiagnostics,
-  desktopUpdate,
-  desktopUpdateBusy,
-  desktopUpdateMessage,
-  onCheckDesktopUpdate,
-  onApplyDesktopUpdate,
 }: {
   workspace: ProjectWorkspaceView;
   runtimeHealth?: RuntimeHealthView;
@@ -2129,11 +2226,6 @@ function SettingsPanel({
   diagnosticsError: string;
   isRunningDiagnostics: boolean;
   onRunDiagnostics: () => void;
-  desktopUpdate?: DesktopUpdateStatus;
-  desktopUpdateBusy: boolean;
-  desktopUpdateMessage: string;
-  onCheckDesktopUpdate: () => void;
-  onApplyDesktopUpdate: () => void;
 }) {
   const providerRows = [
     ["GLM", "glm"],
@@ -2155,12 +2247,6 @@ function SettingsPanel({
     route.model,
   ]);
   const exchangeLabel = cloudExchangeLabel(runtimeHealth);
-  const capabilities = runtimeHealth?.appCapabilities;
-  const recordingBoundaryLabel = capabilities?.serverRecordingRequired && !capabilities.localRecordingExecution
-    ? "Server Browser Agent 执行"
-    : capabilities?.localRecordingExecution
-      ? "本地录制启用"
-      : "未声明";
   return (
     <div className="section-stack">
       <SectionTitle title="设置" meta="运行时正常" />
@@ -2172,31 +2258,8 @@ function SettingsPanel({
         <Fact label="LLM 模式" value={runtimeHealth?.llmMode ?? "auto"} />
         <Fact label="模型适配版本" value={runtimeHealth?.modelAdapterVersion ?? "domestic-llm-adapter-v1"} />
         <Fact label="云端安全连接" value={exchangeLabel} />
-        <Fact label="录制执行边界" value={recordingBoundaryLabel} />
-        <Fact label="视频编辑器" value={capabilities?.videoEditor ? "已启用" : "待检查"} />
       </div>
       <section className="table-section">
-        <SectionTitle title="应用更新" meta={desktopUpdate?.channel ?? "未配置"} />
-        <div className="settings-grid">
-          <Fact label="当前版本" value={desktopUpdate?.currentVersion ?? "开发版本"} />
-          <Fact label="可用版本" value={desktopUpdate?.availableVersion ?? "尚未检查"} />
-          <Fact label="更新源" value={desktopUpdate?.configured ? "DemoOps HTTPS 签名源" : "未配置"} />
-          <Fact label="回滚保护" value={desktopUpdate?.installReady ? "已就绪" : "尚未就绪"} />
-        </div>
-        {desktopUpdate?.releaseNotes ? <div className="input-note">{desktopUpdate.releaseNotes}</div> : null}
-        <div className="action-row">
-          <button type="button" className="secondary-action" onClick={onCheckDesktopUpdate} disabled={desktopUpdateBusy || !desktopUpdate?.configured}>
-            <span className="button-icon">更</span>
-            {desktopUpdateBusy ? "处理中" : "检查更新"}
-          </button>
-          <button type="button" className="primary-action" onClick={onApplyDesktopUpdate} disabled={desktopUpdateBusy || !desktopUpdate?.updateAvailable || !desktopUpdate.installReady}>
-            <span className="button-icon">装</span>
-            确认并安装
-          </button>
-          <small>{desktopUpdateMessage || (desktopUpdate?.configured ? "清单签名、SHA-256 与 Authenticode 验证通过后才允许安装。" : "正式包需配置 DemoOps 专属 HTTPS 更新清单和 Ed25519 公钥。")}</small>
-        </div>
-      </section>
-      {capabilities?.developerUI ? <section className="table-section">
         <SectionTitle title="模型供应商凭据" meta="仅显示占位状态" />
         <table>
           <thead>
@@ -2227,8 +2290,8 @@ function SettingsPanel({
             })}
           </tbody>
         </table>
-      </section> : null}
-      {capabilities?.developerUI ? <section className="table-section">
+      </section>
+      <section className="table-section">
         <SectionTitle title="默认模型路由" meta="可通过环境变量覆盖" />
         <table>
           <thead>
@@ -2248,8 +2311,8 @@ function SettingsPanel({
             ))}
           </tbody>
         </table>
-      </section> : null}
-      {capabilities?.developerUI ? <section className="table-section">
+      </section>
+      <section className="table-section">
         <SectionTitle title="真实模型诊断" meta="只返回脱敏状态" />
         <div className="action-row">
           <button type="button" className="secondary-action" onClick={onRunDiagnostics} disabled={isRunningDiagnostics}>
@@ -2292,7 +2355,7 @@ function SettingsPanel({
             ) : null}
           </tbody>
         </table>
-      </section> : null}
+      </section>
     </div>
   );
 }
@@ -2368,20 +2431,12 @@ function scenarioLabel(id: ScenarioID): string {
 }
 
 function buildNavItems(workspace: ProjectWorkspaceView): Array<{ id: NavSection; label: string; badge?: string }> {
-  const pendingAssets = workspace.assets.filter((asset) => asset.status === "generated").length;
-  const executionBadge =
-    workspace.cloudRun.status === "failed"
-      ? "诊断"
-      : workspace.executableScriptBundle
-        ? "待审"
-        : undefined;
   return [
-    { id: "projects", label: "项目", badge: workflowStageLabels[workspace.stage] },
-    { id: "new_demo", label: "新建演示" },
-    { id: "execution_packages", label: "执行包", ...(executionBadge ? { badge: executionBadge } : {}) },
-    { id: "assets", label: "成品资产", ...(pendingAssets > 0 ? { badge: `${pendingAssets}` } : {}) },
-    { id: "editor", label: "视频编辑" },
-    { id: "settings", label: "设置" },
+    { id: "projects", label: "Home" },
+    { id: "project_library", label: "Projects" },
+    { id: "repositories", label: "Repositories" },
+    { id: "editor", label: "Editor" },
+    { id: "settings", label: "Settings" },
   ];
 }
 
@@ -2396,7 +2451,6 @@ function sourceKindLabel(kind: string): string {
   const labels: Record<string, string> = {
     product_url: "产品地址",
     local_repo: "本地代码",
-    github_repo: "GitHub 代码",
     requirement_doc: "需求文档",
     screenshot: "页面截图",
     release_note: "发布说明",
@@ -2427,79 +2481,6 @@ function evidenceKindLabel(kind: string | undefined): string {
     release_note: "发布说明",
   };
   return labels[kind] ?? kind;
-}
-
-function formatToolBreakdown(counts: Record<string, number>): string {
-  const items = Object.entries(counts).filter(([, count]) => count > 0);
-  if (items.length === 0) {
-    return "待生成";
-  }
-  return items
-    .sort((left, right) => {
-      if (right[1] === left[1]) {
-        return left[0].localeCompare(right[0]);
-      }
-      return right[1] - left[1];
-    })
-    .slice(0, 5)
-    .map(([tool, count]) => `${tool}×${count}`)
-    .join(" / ");
-}
-
-function formatPercent(value: number | undefined): string {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return "0%";
-  }
-  return `${Math.round(value * 100)}%`;
-}
-
-function formatQualityConfidence(value: number | undefined): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return "待评估";
-  }
-  return formatPercent(value);
-}
-
-function formatOverreadRisk(risk: string | undefined): string {
-  const labels: Record<string, string> = {
-    high: "过读风险高",
-    medium: "过读风险中",
-    low: "过读风险低",
-    unknown: "过读风险待评估",
-  };
-  return labels[risk ?? ""] ?? "过读风险待评估";
-}
-
-function formatQuestionTools(
-  tools: Array<{ tool: string; selectedFiles: number; snippetWindows: number; pathHashCount: number; readPolicy?: string; sourceTextPolicy?: string }>,
-): string {
-  if (tools.length === 0) {
-    return "";
-  }
-  return tools
-    .slice(0, 5)
-    .map((tool) => {
-      const details = [
-        tool.selectedFiles > 0 ? `${tool.selectedFiles} 文件` : "",
-        tool.snippetWindows > 0 ? `${tool.snippetWindows} 窗口` : "",
-        tool.pathHashCount > 0 ? `${tool.pathHashCount} hash` : "",
-        tool.readPolicy ? tool.readPolicy : "",
-        tool.sourceTextPolicy ? tool.sourceTextPolicy : "",
-      ].filter(Boolean);
-      return details.length > 0 ? `${tool.tool}(${details.join("/")})` : tool.tool;
-    })
-    .join(" -> ");
-}
-
-function formatQuestionNextActions(actions: Array<{ tool: string; reason?: string; query_terms?: string[]; expected_evidence?: string[] }>): string {
-  return actions
-    .slice(0, 3)
-    .map((action) => {
-      const terms = (action.query_terms ?? []).slice(0, 4).join("、");
-      const evidence = (action.expected_evidence ?? []).slice(0, 3).join("、");
-      return [action.tool, terms ? `检索：${terms}` : "", evidence ? `补证：${evidence}` : "", action.reason ?? ""].filter(Boolean).join(" · ");
-    })
-    .join(" -> ");
 }
 
 function cloudStatusLabel(status: string): string {

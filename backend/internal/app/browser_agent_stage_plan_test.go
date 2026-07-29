@@ -33,6 +33,53 @@ func TestCompileBrowserAgentRuntimePlanKeepsApprovedStageOrderAndSemantics(t *te
 	}
 }
 
+func TestBrowserAgentReadinessAcceptsCompleteFixture(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	report := browserAgentReadiness(&pkg)
+	if !report.CanRun || len(report.Blockers) != 0 {
+		t.Fatalf("complete outline fixture should be runnable: %+v", report)
+	}
+}
+
+func TestBrowserAgentReadinessRejectsWorkspaceWaitWithoutTransitionOrValidation(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	stage := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[0]
+	stage.StageKind = model.BusinessStageKindSessionSetup
+	stage.RouteState = model.BusinessRouteStateWorkspace
+	stage.Interaction = model.BrowserAgentInteraction{Kind: model.GraphActionWait, NonDestructive: true}
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[0].StageKind = stage.StageKind
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[0].RouteState = stage.RouteState
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[0].Interactions = []model.BrowserAgentInteraction{{Kind: model.GraphActionWait, NonDestructive: true}}
+	pkg.ExecutableScriptBundle.PlanJSON.Steps[0].Validations = nil
+
+	report := browserAgentReadiness(&pkg)
+	if report.CanRun || !browserAgentReadinessHasBlocker(report, "workspace_login_path_missing") || !browserAgentReadinessHasBlocker(report, "stage_success_condition_missing") {
+		t.Fatalf("workspace wait must be rejected before opening a browser: %+v", report)
+	}
+}
+
+func TestBrowserAgentReadinessRequiresCredentialGrantForSecretReference(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1].Interaction.SecretRef = "vault://demo/login-password"
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[1].Interactions[0].SecretRef = "vault://demo/login-password"
+	pkg.ExecutableScriptBundle.PlanJSON.Steps[1].Action.SecretRef = "vault://demo/login-password"
+	pkg.CredentialGrants = nil
+
+	report := browserAgentReadiness(&pkg)
+	if report.CanRun || !browserAgentReadinessHasBlocker(report, "credential_grant_missing") {
+		t.Fatalf("secret reference without a scoped grant must be rejected: %+v", report)
+	}
+}
+
+func browserAgentReadinessHasBlocker(report BrowserAgentReadinessReport, code string) bool {
+	for _, blocker := range report.Blockers {
+		if blocker.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCompileBrowserAgentRuntimePlanRejectsImmutableConflicts(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	pkg.ExecutableScriptBundle.ScriptOutline.Stages[1].Objective = "Delete the workspace"
@@ -77,6 +124,21 @@ func TestBrowserAgentPolicyGuardBlocksDomainControlPlaneAndDestructiveActions(t 
 	outside.URL = "https://evil.example.net/dashboard"
 	if decision := guard.Authorize(plan, outside); decision.Allowed || decision.Code != "domain_not_allowed" {
 		t.Fatalf("outside domain was not blocked: %+v", decision)
+	}
+	outsideOrigin := base
+	outsideOrigin.URL = "http://app.example.com/dashboard"
+	if decision := guard.Authorize(plan, outsideOrigin); decision.Allowed || decision.Code != "origin_not_allowed" {
+		t.Fatalf("origin scheme downgrade was not blocked: %+v", decision)
+	}
+	outsideRoute := base
+	outsideRoute.URL = "https://app.example.com/settings"
+	if decision := guard.Authorize(plan, outsideRoute); decision.Allowed || decision.Code != "route_not_allowed" {
+		t.Fatalf("unapproved same-origin route was not blocked: %+v", decision)
+	}
+	childRoute := base
+	childRoute.URL = "https://app.example.com/dashboard/projects/42"
+	if decision := guard.Authorize(plan, childRoute); !decision.Allowed {
+		t.Fatalf("approved route must cover its child paths: %+v", decision)
 	}
 	controlPlane := base
 	controlPlane.URL = "https://app.example.com/v1/execution-packages"

@@ -179,6 +179,7 @@ type GraphAction struct {
 type ActionTarget struct {
 	URL                  string              `json:"url,omitempty"`
 	Selector             string              `json:"selector,omitempty"`
+	Source               string              `json:"source,omitempty"`
 	SelectorAlternatives []SelectorCandidate `json:"selector_alternatives,omitempty"`
 	Role                 string              `json:"role,omitempty"`
 	Text                 string              `json:"text,omitempty"`
