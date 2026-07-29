@@ -212,7 +212,10 @@ func (r ValidationReport) Validate() error {
 	if !unitInterval(r.PassRate) || !unitInterval(r.OverallConfidence) {
 		return errors.New("validation report pass_rate and overall_confidence must be between 0 and 1")
 	}
-	if r.Decision == ValidationDecisionContinue && !realSuccessEvidence(r.EvidenceQuality) {
+	// Pre-execution validation can only rely on the approved, hash-bound
+	// package. Runtime and post-execution success still require browser or
+	// artifact evidence.
+	if r.Decision == ValidationDecisionContinue && r.Phase != ValidationPhasePreExecution && !realSuccessEvidence(r.EvidenceQuality) {
 		return errors.New("continue decision requires real observed evidence")
 	}
 	if r.Decision == ValidationDecisionContinue && len(r.EvidenceRefs) == 0 {

@@ -65,7 +65,7 @@ export type ExportIssue = {
   overlayID?: string;
 };
 
-export function VideoEditor() {
+export function VideoEditor({ initialSessionID }: { initialSessionID?: string }) {
   const client = useMemo(() => createEditorClient(), []);
   const [sessions, setSessions] = useState<EditorSession[]>([]);
   const [session, setSession] = useState<EditorSession>();
@@ -327,6 +327,9 @@ export function VideoEditor() {
   const selectedAudioSegment = audioSegments.find((segment) => segment.id === selectedAudioSegmentID) ?? audioSegments[0];
   const presentationComposition = useMemo(() => session && draftPlan ? compilePresentationComposition(session, draftPlan) : undefined, [session, draftPlan]);
   const previewURL = session?.preview.status === "ready" && client.mode === "local" ? `${client.mediaURL(session.session_id, "preview")}?r=${session.preview.revision ?? session.revision}` : "";
+  // Final media stays behind the local Bridge route; never expose the artifact path itself to the browser.
+  const finalMediaURL = session?.final_render.status === "ready" && client.mode === "local" ? `${client.mediaURL(session.session_id, "final")}?r=${session.final_render.revision ?? session.revision}` : "";
+  const finalDownloadURL = finalMediaURL ? `${finalMediaURL}&download=1` : "";
   const sourceURL = session && selectedArtifact && client.mode === "local" ? client.mediaURL(session.session_id, "asset", selectedArtifact.id) : "";
   const mediaURL = previewMode === "rendered" && previewURL ? previewURL : sourceURL;
   const effectivePreviewMode: PreviewMode = previewMode === "rendered" && previewURL ? "rendered" : "source";
@@ -397,8 +400,24 @@ export function VideoEditor() {
       return;
     }
     setSessions(result.data);
-    if (!sessionRef.current && result.data[0]) loadSession(result.data[0]);
+    // A completed Server run owns a specific editor session. Do not silently
+    // open another project's most recent session while that handoff is pending.
+    if (!sessionRef.current && !initialSessionID && result.data[0]) loadSession(result.data[0]);
   }
+
+  useEffect(() => {
+    if (!initialSessionID) return;
+    let active = true;
+    void client.getSession(initialSessionID).then((result) => {
+      if (!active || !result.ok || !result.data) return;
+      setSessions((current) => {
+        const withoutCurrent = current.filter((item) => item.session_id !== result.data!.session_id);
+        return [result.data!, ...withoutCurrent];
+      });
+      loadSession(result.data);
+    });
+    return () => { active = false; };
+  }, [client, initialSessionID]);
 
   async function refreshStyleTemplates() {
     const result = await client.listStyleTemplates();
@@ -1155,6 +1174,11 @@ export function VideoEditor() {
     setMessage("正在停止渲染进程...");
   }
 
+  function showFinalRenderDiagnostic() {
+    if (!session) return;
+    setMessage(renderFailureDetail(session.final_render));
+  }
+
   function selectShot(shot: EditorShot, outputMS?: number, activateTrack = true) {
     setSelectedShotID(shot.id);
     setSelectedAssetID(shot.source_artifact_id);
@@ -1297,8 +1321,9 @@ export function VideoEditor() {
           {session?.final_render.status === "running" ? (
             <button className="studio-primary-button" disabled={busy !== ""} onClick={() => void cancelRender("final")}>{busy === "cancel-final" ? "停止中" : "取消导出"}</button>
           ) : (
-            <button className="studio-primary-button" disabled={!session || busy !== "" || saveState === "saving" || session?.preview.status === "running"} onClick={() => void render("final")}>{busy === "final" ? "启动中" : "导出 MP4"}</button>
+            <button className="studio-primary-button" disabled={!session || busy !== "" || saveState === "saving" || session?.preview.status === "running"} onClick={() => void render("final")}>{busy === "final" ? "启动中" : session?.final_render.status === "ready" ? "重新导出 MP4" : "导出 MP4"}</button>
           )}
+          {finalDownloadURL && session ? <a className="studio-render-download" href={finalDownloadURL} download={`${sessionDisplayName(session)}.mp4`}>下载成片</a> : null}
         </div>
       </header>
 
@@ -1394,6 +1419,8 @@ export function VideoEditor() {
                 <button className="studio-icon-button" disabled={!mediaURL || imagePreview} onClick={() => seekTimeline(playheadMS + 1000 / session.preview_profile.fps)}>›│</button>
                 <span>{formatTimecode(playheadMS)} / {formatTimecode(totalDurationMS)}</span>
                 <span className="studio-render-status">预览：{renderStateLabel(session.preview)} · 成片：{renderStateLabel(session.final_render)}</span>
+                {session.final_render.status === "ready" && finalMediaURL ? <a className="studio-render-link" href={finalMediaURL} target="_blank" rel="noreferrer">查看成片</a> : null}
+                {session.final_render.status === "failed" ? <button className="studio-render-diagnostic" onClick={showFinalRenderDiagnostic}>查看导出原因</button> : null}
               </div>
             </section>
 
@@ -1713,7 +1740,7 @@ function ImportDialog(props: {
   const canSubmit = props.mode === "empty" || (props.mode === "upload" ? Boolean(props.pendingFile && props.hasSession) : props.mode === "path" ? Boolean(props.sourcePath.trim()) : Boolean(props.resultPackagePath.trim()));
   return (
     <div className="studio-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) props.onClose(); }}>
-      <div className="studio-modal" role="dialog" aria-modal="true" aria-label="导入素材或结果包">
+      <div className="studio-modal studio-import-modal" role="dialog" aria-modal="true" aria-label="导入素材或结果包">
         <div className="studio-modal-header"><strong>导入素材或结果包</strong><button className="studio-icon-button" onClick={props.onClose}>×</button></div>
         <div className="studio-modal-content">
           <div className="studio-import-choices">
@@ -2058,6 +2085,15 @@ function renderStatusLabel(status: string): string {
 function renderStateLabel(state: EditorSession["preview"]): string {
   const phase = ({ queued: "排队", validating: "校验", rendering: "FFmpeg 渲染", cancelling: "停止中" } as Record<string, string>)[state.phase ?? ""];
   return phase ? `${phase}${state.progress ? ` ${state.progress}%` : ""}` : renderStatusLabel(state.status);
+}
+
+export function renderFailureDetail(state: EditorSession["final_render"]): string {
+  const raw = state.error?.trim();
+  if (!raw) return "成片导出失败，但 Server 没有返回可展示的原因。请检查本地渲染服务日志。";
+  if (/ffmpeg|ffprobe/i.test(raw)) return "成片导出失败：本机没有可用的 FFmpeg/FFprobe，或 Server 未配置其路径。安装后重试；详细信息：" + raw;
+  if (/validation|edit plan/i.test(raw)) return "成片导出被编辑计划校验阻止。请打开“导出校验”处理阻断项；详细信息：" + raw;
+  if (/cancel/i.test(raw)) return "成片导出已被取消：" + raw;
+  return "成片导出失败：" + raw;
 }
 
 function saveStateLabel(state: SaveState): string {

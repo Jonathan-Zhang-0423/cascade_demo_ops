@@ -37,6 +37,7 @@ export function App() {
 	const bridge = useMemo(() => createBridgeClient(), []);
 	const [activeNav, setActiveNav] = useState<NavSection>("projects");
 	const [editorNavigationOpen, setEditorNavigationOpen] = useState(false);
+	const [editorSessionToOpen, setEditorSessionToOpen] = useState("");
 	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createWorkspace("product_demo"));
   const [demoCredentials, setDemoCredentials] = useState({ username: "", password: "" });
   const [githubToken, setGitHubToken] = useState("");
@@ -244,7 +245,8 @@ export function App() {
     setIsCheckingEditorMaterialization(false);
   }
 
-  function openEditorForResult() {
+  function openEditorForSession(sessionID = workspace.cloudRun.editorSessionID ?? "") {
+		setEditorSessionToOpen(sessionID);
     setActiveNav("editor");
     setEditorNavigationOpen(false);
   }
@@ -619,11 +621,11 @@ export function App() {
                 onRunPackagePreflight={runPackagePreflight}
                 onRefreshEditorMaterialization={refreshEditorMaterialization}
                 isCheckingEditorMaterialization={isCheckingEditorMaterialization}
-                onOpenEditor={openEditorForResult}
+                onOpenEditor={openEditorForSession}
               />
             ) : null}
-			{activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={downloadAssets} onReview={reviewAssets} /> : null}
-            {activeNav === "editor" ? <VideoEditor /> : null}
+            {activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={downloadAssets} onReview={reviewAssets} /> : null}
+            {activeNav === "editor" ? <VideoEditor {...(editorSessionToOpen ? { initialSessionID: editorSessionToOpen } : {})} /> : null}
             {activeNav === "settings" ? (
               <SettingsPanel
                 workspace={workspace}
@@ -1559,7 +1561,7 @@ function PackageApproval({
   onRunPackagePreflight: () => void;
   onRefreshEditorMaterialization: () => void;
   isCheckingEditorMaterialization: boolean;
-  onOpenEditor: () => void;
+  onOpenEditor: (sessionID?: string) => void;
 }) {
   function toggle(key: keyof ApprovalChecklistState) {
     onChecklistChange({ ...checklist, [key]: !checklist[key] });
@@ -1622,6 +1624,7 @@ function PackageApproval({
         isRunning={isRunningBrowserAgentBusinessAcceptance}
         error={browserAgentBusinessAcceptanceError}
         onRun={onRunBrowserAgentBusinessAcceptance}
+        onOpenEditor={onOpenEditor}
       />
       <CloudRunPanel workspace={workspace} />
       <EditorHandoffPanel
@@ -1773,11 +1776,13 @@ function BrowserAgentBusinessAcceptancePanel({
   isRunning,
   error,
   onRun,
+	 onOpenEditor,
 }: {
   acceptance: BrowserAgentBusinessAcceptanceView | undefined;
   isRunning: boolean;
   error: string;
   onRun: () => void;
+	 onOpenEditor: (sessionID?: string) => void;
 }) {
   const report = acceptance?.report;
   const passed = report?.strict_gate === "passed";
@@ -1805,6 +1810,7 @@ function BrowserAgentBusinessAcceptancePanel({
             </article>
           ))}
           <div className="acceptance-expected"><span>编辑器交接：{report.editor_materialization.ready ? "已登记待编辑素材" : "未就绪"}</span><span>{report.editor_materialization.message}</span>{report.editor_materialization.session_id ? <span>会话：{report.editor_materialization.session_id}</span> : null}</div>
+          {report.editor_materialization.ready && report.editor_materialization.session_id ? <div className="action-row"><button type="button" className="primary-action" onClick={() => onOpenEditor(report.editor_materialization.session_id)}>打开该次验收素材</button></div> : null}
         </div>
       ) : null}
       {acceptance?.report_path ? <p className="acceptance-path">报告：{acceptance.report_path}</p> : null}

@@ -55,8 +55,16 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 	if result.Status != model.RecordingResultStatusGenerated || result.ExecutionRuntime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
 		t.Fatalf("unexpected browser-agent result package: %+v", result)
 	}
-	if len(result.StepResults) != len(plan.Stages) || len(result.ValidationReports) != len(plan.Stages) {
+	if len(result.StepResults) != len(plan.Stages) || len(result.ValidationReports) != len(plan.Stages)+2 {
 		t.Fatalf("result package lost stage results or validations: steps=%d reports=%d", len(result.StepResults), len(result.ValidationReports))
+	}
+	if result.ValidationReports[0].Phase != model.ValidationPhasePreExecution || result.ValidationReports[len(result.ValidationReports)-1].Phase != model.ValidationPhasePostExecution {
+		t.Fatalf("result package must include strict pre/post validation reports: %+v", result.ValidationReports)
+	}
+	for _, step := range result.StepResults {
+		if step.ObservedState == "" || step.ObservedState == plan.Stages[0].SuccessState {
+			t.Fatalf("step result must contain real observation summary, not planned success text: %+v", step)
+		}
 	}
 	if result.ExecutionTrace == nil || result.ExecutionTrace.PassRate != 1 || len(result.GeneratedAssets) < len(plan.Stages)*2 {
 		t.Fatalf("result package lost browser evidence: %+v", result.ExecutionTrace)
@@ -110,6 +118,84 @@ func TestDeterministicBrowserAgentStageVerifierStopsWhenRequiredValidationIsMiss
 	}
 }
 
+func TestBrowserAgentStepResultsNeverUsePlannedSuccessStateAsEvidence(t *testing.T) {
+	plan := BrowserAgentRuntimePlan{Stages: []BrowserAgentRuntimeStage{{NodeID: "node_1", SuccessState: "planned business success"}}}
+	now := timeNowUTC()
+	results := browserAgentStepResults(plan, []model.StageExecutionEvent{
+		{NodeID: "node_1", EventType: model.StageExecutionEventStageStarted, OccurredAt: now},
+		{NodeID: "node_1", EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: now, Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "business_saved", Passed: true}}}},
+		{NodeID: "node_1", EventType: model.StageExecutionEventStageCompleted, OccurredAt: now.Add(time.Second)},
+	}, nil)
+	if len(results) != 1 || results[0].Status != "passed" || results[0].ObservedState == "planned business success" || !strings.Contains(results[0].ObservedState, "assertion:business_saved=passed") {
+		t.Fatalf("step result must derive its state from runtime observations: %+v", results)
+	}
+}
+
+func TestLocalBrowserAgentOutlineRunnerPostValidationStopsDelivery(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := localBrowserAgentOutlineRunner{
+		service: &Service{}, outcomeVerifier: postStoppingBrowserAgentVerifier{deterministicBrowserAgentStageVerifier: newDeterministicBrowserAgentStageVerifier(&pkg)},
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return &stubBrowserAgentWorkerSession{}, driver.BrowserAgentWorkerOpenResult{SessionID: "post-stop", RuntimeVersions: map[string]string{"runner": "stub-browser-agent"}}, nil
+		},
+	}
+	result, err := runner.Run(context.Background(), BrowserAgentOutlineRunRequest{Package: &pkg, RuntimePlan: plan, CloudJobID: "post_stop", RecordingOutputDir: t.TempDir(), ResultCreatedAt: timeNowUTC(), EventSink: &memoryStageEventSink{}})
+	if err != nil {
+		t.Fatalf("a post-validation business failure must become a failed result package: %v", err)
+	}
+	if result.Status != model.RecordingResultStatusFailed || result.FailureDiagnostic == nil || result.StepResults[0].Status != "failed" {
+		t.Fatalf("post-validation stop must prevent a successful delivery: %+v", result)
+	}
+	if result.ValidationReports[len(result.ValidationReports)-1].Phase != model.ValidationPhasePostExecution || result.ValidationReports[len(result.ValidationReports)-1].Decision != model.ValidationDecisionStopAndReport {
+		t.Fatalf("post-validation decision was not retained in the result: %+v", result.ValidationReports)
+	}
+}
+
+func TestLocalBrowserAgentOutlineRunnerUsesServerOutcomeVerifierSnapshot(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{}
+	service.SetBrowserAgentOutcomeVerifier(postStoppingBrowserAgentVerifier{deterministicBrowserAgentStageVerifier: newDeterministicBrowserAgentStageVerifier(&pkg)})
+	runner := localBrowserAgentOutlineRunner{
+		service: service,
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return &stubBrowserAgentWorkerSession{}, driver.BrowserAgentWorkerOpenResult{SessionID: "service-verifier", RuntimeVersions: map[string]string{"runner": "stub-browser-agent"}}, nil
+		},
+	}
+	result, err := runner.Run(context.Background(), BrowserAgentOutlineRunRequest{Package: &pkg, RuntimePlan: plan, CloudJobID: "service_verifier", RecordingOutputDir: t.TempDir(), ResultCreatedAt: timeNowUTC(), EventSink: &memoryStageEventSink{}})
+	if err != nil {
+		t.Fatalf("Server-injected verifier should package a controlled failed result: %v", err)
+	}
+	if result.Status != model.RecordingResultStatusFailed || len(result.ValidationReports) != len(plan.Stages)+2 || result.ValidationReports[len(result.ValidationReports)-1].Decision != model.ValidationDecisionStopAndReport {
+		t.Fatalf("runner did not use the Server verifier snapshot: %+v", result)
+	}
+}
+
+type postStoppingBrowserAgentVerifier struct{ deterministicBrowserAgentStageVerifier }
+
+func (v postStoppingBrowserAgentVerifier) ValidateBeforeExecution(ctx context.Context, validationContext BrowserAgentValidationContext) (model.ValidationReport, error) {
+	return v.deterministicBrowserAgentStageVerifier.ValidateBeforeExecution(ctx, validationContext)
+}
+
+func (v postStoppingBrowserAgentVerifier) ValidatePostExecution(_ context.Context, validationContext BrowserAgentValidationContext, _ model.RecordingResultPackage, _ []model.StageExecutionEvent) (model.ValidationReport, error) {
+	return model.ValidationReport{
+		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "post_stop", RunID: validationContext.SourcePackageID,
+		SourcePackageID: validationContext.SourcePackageID, SourceBundleHashSHA256: validationContext.SourceBundleHashSHA256,
+		PolicyHashSHA256: validationContext.EffectivePolicyHashSHA256, Phase: model.ValidationPhasePostExecution,
+		NodeID: "node_open_dashboard", Decision: model.ValidationDecisionStopAndReport, PassRate: 0, OverallConfidence: 0,
+		EvidenceQuality: model.RuntimeObservationAssertion, EvidenceRefs: []model.EvidenceRef{{ID: "post_stop_evidence", Kind: model.EvidenceKindWebScreenshot}}, CreatedAt: timeNowUTC(),
+	}, nil
+}
+
 func TestLocalBrowserAgentOutlineRunnerPackagesRedactedFailureResult(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	plan, err := compileBrowserAgentRuntimePlan(&pkg)
@@ -135,7 +221,7 @@ func TestLocalBrowserAgentOutlineRunnerPackagesRedactedFailureResult(t *testing.
 	if result.FailureDiagnostic.FailedNodeID != plan.Stages[1].NodeID || !result.FailureDiagnostic.RedactionReport.Applied || result.FailureDiagnostic.RedactionReport.FullHTMLIncluded {
 		t.Fatalf("failure diagnostic did not preserve protocol safety requirements: %+v", result.FailureDiagnostic)
 	}
-	if result.RepairRequest.ApprovalRequired != true || len(result.ValidationReports) != 1 {
+	if result.RepairRequest.ApprovalRequired != true || len(result.ValidationReports) != 3 {
 		t.Fatalf("failure result lost repair approval or validation evidence: %+v", result)
 	}
 	if result.StepResults[0].Status != "passed" || result.StepResults[1].Status != "failed" {
@@ -206,7 +292,7 @@ func TestOutlineRuntimeFullPathRecordsSelectorRepairInResultAndAuditLog(t *testi
 	if !hasStageEvent(events, model.StageExecutionEventRepairProposed, 1) || !hasStageEvent(events, model.StageExecutionEventRepairApplied, 2) || !hasStageEvent(events, model.StageExecutionEventTargetResolved, 2) {
 		t.Fatalf("repair events or second-attempt target resolution are missing: %+v", events)
 	}
-	if len(result.ValidationReports) != len(plan.Stages) || result.ValidationReports[1].Decision != model.ValidationDecisionContinue {
+	if len(result.ValidationReports) != len(plan.Stages)+2 || result.ValidationReports[2].Decision != model.ValidationDecisionContinue {
 		t.Fatalf("outcome verification did not pass after the selector repair: %+v", result.ValidationReports)
 	}
 }
