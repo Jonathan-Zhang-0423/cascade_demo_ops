@@ -158,8 +158,20 @@ export type CloudRunStatusView = {
   resultPackage?: RecordingResultPackage;
   failureDiagnostic?: ScriptFailureDiagnostic;
   repairRequest?: ScriptRepairRequest;
-  editorSessionID?: string;
-  editorMaterializationMessage?: string;
+	resultReview?: ResultReviewState;
+	editorSessionID?: string;
+	editorMaterializationMessage?: string;
+};
+
+export type ResultReviewDecision = "approved" | "reedit_requested" | "rerecord_requested";
+
+export type ResultReviewState = {
+	decision: ResultReviewDecision;
+	reviewID?: string;
+	revisionID?: string;
+	revisionAction?: "reedit" | "rerecord";
+	summary?: string;
+	updatedAt: string;
 };
 
 export type AssetReviewView = {

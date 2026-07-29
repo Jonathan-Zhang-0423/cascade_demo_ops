@@ -80,7 +80,7 @@ describe("desktop bridge contract", () => {
     expect(repaired.data?.scriptMarkdown).toContain("本次修复说明");
   });
 
-  it("runs the mock upload lifecycle through result ack", async () => {
+  it("keeps checksum ack separate from the mock human review", async () => {
     const bridge = createMockBridgeClient();
     const workspace = createWorkspace("product_demo");
     const packageResult = await bridge.buildExecutionPackagePreview(workspace);
@@ -104,7 +104,8 @@ describe("desktop bridge contract", () => {
     });
     const completed = await bridge.pollCloudRun(running.data ?? packageResult.data);
     const resultPackage = await bridge.getResultPackage(completed.data ?? packageResult.data);
-    const acked = await bridge.ackResultPackage(completed.data ?? packageResult.data);
+	const acked = await bridge.ackResultPackage(completed.data ?? packageResult.data);
+	const reviewed = await bridge.reviewResult(acked.data ?? completed.data ?? packageResult.data, "approved", "成品通过");
 
     expect(init.data?.supportedCryptoSuites).toContain("aes-256-gcm");
     expect(upload.data?.status).toBe("queued");
@@ -113,7 +114,8 @@ describe("desktop bridge contract", () => {
     expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "result_returned")?.status).toBe("completed");
     expect(resultPackage.data?.delivery?.asset_refs?.[0]?.role).toBe("final_demo_video");
     expect(resultPackage.data?.delivery?.asset_refs?.every((artifact) => artifact.encrypted && artifact.sensitive)).toBe(true);
-    expect(acked.data?.assets.every((asset) => asset.status === "approved")).toBe(true);
+	expect(acked.data?.assets.every((asset) => asset.status !== "approved")).toBe(true);
+	expect(reviewed.data?.assets.every((asset) => asset.status === "approved")).toBe(true);
   });
 
   it("runs local split cloud lifecycle through real bridge methods", async () => {
@@ -196,12 +198,18 @@ describe("desktop bridge contract", () => {
           ],
         });
       }
-      if (url.includes("/cloud/result")) {
-        return bridgeJSON(resultPackage);
-      }
-      if (url.includes("/cloud/ack")) {
-        return bridgeJSON({ result_package_id: "result_split_real", status: "acked", delivery_status: "acked" });
-      }
+	  if (url.includes("/cloud/result")) {
+		return bridgeJSON(resultPackage);
+	  }
+	  if (url.includes("/cloud/deliverable/download")) {
+		return bridgeJSON({ artifact_id: "artifact_video_split", local_path: "C:\\DemoOps\\video.webm", sha256: "sha256:video", expected_sha256: "sha256:video", checksum_verified: true });
+	  }
+	  if (url.includes("/cloud/ack")) {
+		return bridgeJSON({ result_package_id: "result_split_real", status: "acked", delivery_status: "acked" });
+	  }
+	  if (url.includes("/cloud/review")) {
+		return bridgeJSON({ review_id: "review_split_real", decision: "approved", summary: "成品通过", reviewed_at: "2026-07-14T00:01:00Z" });
+	  }
       throw new Error(`unexpected URL ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -209,7 +217,8 @@ describe("desktop bridge contract", () => {
     const bridge = createLocalBridgeClient("http://127.0.0.1:4317");
     const uploaded = await bridge.approveAndUploadPackage(workspace);
     const completed = await bridge.pollCloudRun(uploaded.data ?? workspace);
-    const acked = await bridge.ackResultPackage(completed.data ?? workspace);
+	const acked = await bridge.ackResultPackage(completed.data ?? workspace);
+	const reviewed = await bridge.reviewResult(acked.data ?? completed.data ?? workspace, "approved", "成品通过");
 
     expect(uploaded.ok).toBe(true);
     expect(uploaded.data?.cloudRun.exchangePackageID).toBe("xpkg_split_real");
@@ -218,14 +227,17 @@ describe("desktop bridge contract", () => {
 	expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "browser_execution")?.summary).toBe("步骤结果校验完成");
 	expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "video_rendering")?.summary).toBe("执行后复核完成");
     expect(completed.data?.assets[0]?.assetID).toBe("artifact_video_split");
-    expect(acked.data?.assets[0]?.status).toBe("approved");
+	expect(acked.data?.assets[0]?.status).not.toBe("approved");
+	expect(reviewed.data?.assets[0]?.status).toBe("approved");
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
       "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/init",
       "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/upload",
       "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/status?org_id=org_desktop&exchange_package_id=xpkg_split_real",
-      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/result?org_id=org_desktop&result_package_id=result_split_real",
-      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/ack",
-    ]);
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/result?org_id=org_desktop&result_package_id=result_split_real",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/deliverable/download",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/ack",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/review",
+	]);
   });
 
   it("maps local dev bridge execution packages into the workspace approval view", async () => {
@@ -625,6 +637,132 @@ describe("desktop bridge contract", () => {
       target_audience: "中国产品运营团队",
     });
     expect(JSON.stringify(body)).not.toMatch(/0{6}|Authorization|sk-/i);
+  });
+
+  it("keeps the private GitHub token inside the local credential route", async () => {
+    const token = "github_pat_transient_test_value";
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      expect(url).toBe("http://127.0.0.1:4317/v1/desktop/github-credential");
+      if (method === "POST") {
+        expect(init?.body).toBe(JSON.stringify({ token }));
+      } else {
+        expect(String(init?.body ?? "")).not.toContain(token);
+      }
+      return bridgeJSON({ configured: method !== "DELETE" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bridge = createLocalBridgeClient("http://127.0.0.1:4317");
+    const stored = await bridge.storeGitHubToken(token);
+    const status = await bridge.githubCredentialStatus();
+    const deleted = await bridge.deleteGitHubToken();
+
+    expect(stored.data).toEqual({ configured: true });
+    expect(status.data).toEqual({ configured: true });
+    expect(deleted.data).toEqual({ configured: false });
+    expect(JSON.stringify([stored, status, deleted])).not.toContain(token);
+    expect(fetchMock.mock.calls.map((call) => (call[1] as RequestInit | undefined)?.method ?? "GET")).toEqual(["POST", "GET", "DELETE"]);
+  });
+
+  it("never includes a stored GitHub token in workspace or package JSON", async () => {
+    const token = "github_pat_workspace_leak_test";
+    const bridge = createMockBridgeClient();
+    await bridge.storeGitHubToken(token);
+    const workspace = createWorkspace("product_demo");
+    const result = await bridge.buildExecutionPackagePreview(workspace);
+
+    expect(result.ok).toBe(true);
+    expect(JSON.stringify(result.data)).not.toContain(token);
+    expect(await bridge.githubCredentialStatus()).toEqual({ ok: true, data: { configured: true } });
+    expect(await bridge.deleteGitHubToken()).toEqual({ ok: true, data: { configured: false } });
+  });
+
+  it("maps verified desktop update status without exposing local paths", async () => {
+    const fetchMock = vi.fn(async () => bridgeJSON({
+      configured: true,
+      current_version: "1.0.0",
+      available_version: "1.1.0",
+      channel: "stable",
+      release_notes: "安全与录制稳定性更新",
+      artifact_file_name: "CascadeDemoOps-1.1.0-setup.exe",
+      size_bytes: 123456,
+      update_available: true,
+      install_ready: true,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient().checkDesktopUpdate();
+
+    expect(result.data).toMatchObject({ currentVersion: "1.0.0", availableVersion: "1.1.0", updateAvailable: true, installReady: true });
+    expect(JSON.stringify(result.data)).not.toMatch(/manifest_url|public_key|C:\\/i);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/desktop/update/check",
+      expect.objectContaining({ method: "POST", headers: expect.objectContaining({ "Content-Type": "application/json" }) }),
+    );
+  });
+
+  it("consumes resumable cloud SSE progress before final status polling", async () => {
+    const workspace = createWorkspace("product_demo");
+    const build = {
+      org_id: "org_desktop",
+      project_id: workspace.id,
+      package: { package_id: "pkg_stream" },
+      envelope: { crypto: { payload_digest_sha256: "sha256:stream" } },
+      payload_ref: { kind: "inline", sha256: "sha256:stream", encrypted: true, sensitive: true },
+    };
+    const completeStatus = {
+      exchange_package_id: "xpkg_stream",
+      cloud_job_id: "job_stream",
+      status: "completed",
+      stage: "completed",
+      progress_percent: 100,
+      result_package_id: "result_stream",
+      stage_history: [
+        { event_id: "xpkg_stream:1", stage: "recording", status: "running", message: "录制中", progress_percent: 65 },
+        { event_id: "xpkg_stream:2", stage: "completed", status: "completed", message: "完成", progress_percent: 100 },
+      ],
+    };
+    const resultPackage = {
+      result_id: "result_stream",
+      source_package_id: "pkg_stream",
+      cloud_job_id: "job_stream",
+      schema_version: "demoops.recording_result_package.v1",
+      status: "generated",
+      verification_report: { reproducibility_match: true, pass_rate: 1 },
+      delivery: { result_package_ref: { id: "result_manifest", kind: "result_package", uri: "artifact://result.json", sha256: "sha256:result", encrypted: true, sensitive: true }, asset_refs: [] },
+      created_at: "2026-07-27T00:00:00Z",
+    };
+    const progress: string[] = [];
+    let streamAttempt = 0;
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/product-run/prepare")) return bridgeJSON({ state: { project_id: workspace.id }, build });
+      if (url.includes("/cloud/init")) return bridgeJSON({ build, init: { upload_id: "upload_stream", server_public_key_id: "server-key", cascade_execution_ips: [] } });
+      if (url.includes("/cloud/upload")) return bridgeJSON({ build, upload: { exchange_package_id: "xpkg_stream", cloud_job_id: "job_stream", status: "running" } });
+      if (url.includes("/cloud/events")) {
+        streamAttempt += 1;
+        if (streamAttempt === 2) expect(new Headers(init?.headers).get("Last-Event-ID")).toBe("xpkg_stream:1");
+        const body = streamAttempt === 1
+          ? 'id: xpkg_stream:1\nevent: stage\ndata: {"event_id":"xpkg_stream:1","stage":"recording","status":"running","message":"录制中","progress_percent":65}\n\n'
+          : `event: complete\ndata: ${JSON.stringify(completeStatus)}\n\n`;
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (url.includes("/cloud/status")) return bridgeJSON(completeStatus);
+      if (url.includes("/cloud/result")) return bridgeJSON(resultPackage);
+      throw new Error(`unexpected URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").runProductLifecycle(workspace, {
+      onCloudStatus: (next) => progress.push(next.cloudRun.stage ?? ""),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(progress).toContain("recording");
+    expect(result.data?.cloudRun.resultPackageID).toBe("result_stream");
+    expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/cloud/events"))).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/cloud/status"))).toHaveLength(1);
   });
 
   it("keeps prepared script package when cloud auth capability is unavailable", async () => {

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { GraphNode, SandboxPolicy } from "../../src/types/workflowGraph";
 import { agentPipelineItems, codeInvestigationQuestionsFromWorkspace, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
 import { createBridgeClient } from "./bridge";
-import type { BrowserAgentAcceptanceView, BrowserAgentBusinessAcceptanceView, CloudPackagePreflightView } from "./bridge";
+import type { BrowserAgentAcceptanceView, BrowserAgentBusinessAcceptanceView, CloudPackagePreflightView, DesktopUpdateStatus } from "./bridge";
 import type {
 	ApprovalChecklistState,
 	ModelDiagnosticResult,
@@ -40,9 +40,16 @@ export function App() {
 	const [editorSessionToOpen, setEditorSessionToOpen] = useState("");
 	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createWorkspace("product_demo"));
   const [demoCredentials, setDemoCredentials] = useState({ username: "", password: "" });
+  const [githubToken, setGitHubToken] = useState("");
+  const [githubCredentialConfigured, setGitHubCredentialConfigured] = useState(false);
+  const [githubCredentialBusy, setGitHubCredentialBusy] = useState(false);
+  const [githubCredentialMessage, setGitHubCredentialMessage] = useState("");
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthView | undefined>();
   const [modelDiagnostics, setModelDiagnostics] = useState<ModelDiagnosticResult[]>([]);
   const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateStatus>();
+  const [desktopUpdateBusy, setDesktopUpdateBusy] = useState(false);
+  const [desktopUpdateMessage, setDesktopUpdateMessage] = useState("");
   const [diagnosticsError, setDiagnosticsError] = useState("");
   const [checklist, setChecklist] = useState<ApprovalChecklistState>(initialChecklist);
   const [selectedNodeID, setSelectedNodeID] = useState(workspace.planReview.graph.nodes[0]?.id ?? "");
@@ -75,6 +82,102 @@ export function App() {
       mounted = false;
     };
   }, [bridge]);
+
+  useEffect(() => {
+    let mounted = true;
+    bridge.desktopUpdateStatus().then((result) => {
+      if (!mounted) return;
+      if (result.ok && result.data) {
+        setDesktopUpdate(result.data);
+      } else {
+        setDesktopUpdateMessage(result.error ?? "无法读取更新配置");
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [bridge]);
+
+  async function checkDesktopUpdate() {
+    setDesktopUpdateBusy(true);
+    setDesktopUpdateMessage("");
+    try {
+      const result = await bridge.checkDesktopUpdate();
+      if (result.ok && result.data) {
+        setDesktopUpdate(result.data);
+        setDesktopUpdateMessage(result.data.updateAvailable ? "已验证可用更新，请确认后安装" : "当前已是最新版本");
+      } else {
+        setDesktopUpdateMessage(result.error ?? "更新检查失败");
+      }
+    } finally {
+      setDesktopUpdateBusy(false);
+    }
+  }
+
+  async function applyDesktopUpdate() {
+    if (!desktopUpdate?.updateAvailable || !desktopUpdate.installReady) return;
+    const confirmed = window.confirm(`安装 Cascade DemoOps ${desktopUpdate.availableVersion ?? "更新"}？安装器会验证签名，并在失败时回滚。`);
+    if (!confirmed) return;
+    setDesktopUpdateBusy(true);
+    setDesktopUpdateMessage("正在安装已验证更新，请勿关闭应用…");
+    try {
+      const result = await bridge.applyDesktopUpdate();
+      setDesktopUpdateMessage(result.ok ? "更新已安装，请重新启动应用" : result.error ?? "更新安装失败，已尝试回滚");
+    } finally {
+      setDesktopUpdateBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    let mounted = true;
+    bridge.githubCredentialStatus().then((result) => {
+      if (!mounted) {
+        return;
+      }
+      if (result.ok && result.data) {
+        setGitHubCredentialConfigured(result.data.configured);
+      } else {
+        setGitHubCredentialMessage(result.error ?? "无法读取 GitHub 凭据状态");
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [bridge]);
+
+  async function storeGitHubCredential() {
+    setGitHubCredentialBusy(true);
+    setGitHubCredentialMessage("");
+    try {
+      const result = await bridge.storeGitHubToken(githubToken);
+      if (result.ok && result.data) {
+        setGitHubCredentialConfigured(result.data.configured);
+        setGitHubToken("");
+        setGitHubCredentialMessage("已保存到 Windows 凭据管理器");
+      } else {
+        setGitHubCredentialMessage(result.error ?? "GitHub 凭据保存失败");
+      }
+    } finally {
+      setGitHubCredentialBusy(false);
+    }
+  }
+
+  async function deleteGitHubCredential() {
+    setGitHubCredentialBusy(true);
+    setGitHubCredentialMessage("");
+    try {
+      const result = await bridge.deleteGitHubToken();
+      if (result.ok && result.data) {
+        setGitHubCredentialConfigured(result.data.configured);
+        setGitHubToken("");
+        setGitHubCredentialMessage("已删除 GitHub 凭据");
+      } else {
+        setGitHubCredentialMessage(result.error ?? "GitHub 凭据删除失败");
+      }
+    } finally {
+      setGitHubCredentialBusy(false);
+    }
+  }
 
   useEffect(() => {
     let mounted = true;
@@ -324,7 +427,12 @@ export function App() {
       const result = await bridge.runProductLifecycle({
         ...workspace,
         packagePreview: { ...workspace.packagePreview, ipAllowlistAcknowledged: true },
-      }, bridgeRunOptions());
+      }, {
+        ...bridgeRunOptions(),
+        onCloudStatus: (nextWorkspace) => {
+          setWorkspace((current) => mergeWorkspaceRuntimeLogs(nextWorkspace, current));
+        },
+      });
       window.clearInterval(poller);
       await pollRuntimeEvents();
       if (result.ok && result.data) {
@@ -410,11 +518,18 @@ export function App() {
     }
   }
 
-  async function approveAssets() {
-    const result = await bridge.acknowledgeResult(workspace);
-    if (result.ok && result.data) {
-      setWorkspace(result.data);
-    }
+  async function downloadAssets() {
+	const result = await bridge.ackResultPackage(workspace);
+	if (result.ok && result.data) {
+	  setWorkspace(result.data);
+	}
+  }
+
+  async function reviewAssets(decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) {
+	const result = await bridge.reviewResult(workspace, decision, summary);
+	if (result.ok && result.data) {
+	  setWorkspace(result.data);
+	}
   }
 
   return (
@@ -463,13 +578,21 @@ export function App() {
               <ProjectFlow
                 workspace={workspace}
                 demoCredentials={demoCredentials}
+                githubToken={githubToken}
+                githubCredentialConfigured={githubCredentialConfigured}
+                githubCredentialBusy={githubCredentialBusy}
+                githubCredentialMessage={githubCredentialMessage}
                 selectedNodeID={selectedNode?.id ?? ""}
                 onSelectNode={setSelectedNodeID}
                 onPatchNode={patchNode}
                 onStageChange={(stage) => patchWorkspace({ stage })}
                 onDemoCredentialsChange={setDemoCredentials}
+                onGitHubTokenChange={setGitHubToken}
+                onStoreGitHubCredential={storeGitHubCredential}
+                onDeleteGitHubCredential={deleteGitHubCredential}
                 onWorkspaceChange={setWorkspace}
-                onApproveAssets={approveAssets}
+				onDownloadAssets={downloadAssets}
+				onReviewAssets={reviewAssets}
               />
             ) : null}
             {activeNav === "execution_packages" ? (
@@ -501,7 +624,7 @@ export function App() {
                 onOpenEditor={openEditorForSession}
               />
             ) : null}
-            {activeNav === "assets" ? <AssetReview workspace={workspace} onApprove={approveAssets} /> : null}
+            {activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={downloadAssets} onReview={reviewAssets} /> : null}
             {activeNav === "editor" ? <VideoEditor {...(editorSessionToOpen ? { initialSessionID: editorSessionToOpen } : {})} /> : null}
             {activeNav === "settings" ? (
               <SettingsPanel
@@ -510,6 +633,11 @@ export function App() {
                 diagnosticsError={diagnosticsError}
                 isRunningDiagnostics={isRunningDiagnostics}
                 onRunDiagnostics={runModelDiagnostics}
+                desktopUpdateBusy={desktopUpdateBusy}
+                desktopUpdateMessage={desktopUpdateMessage}
+                onCheckDesktopUpdate={checkDesktopUpdate}
+                onApplyDesktopUpdate={applyDesktopUpdate}
+                {...(desktopUpdate ? { desktopUpdate } : {})}
                 {...(runtimeHealth ? { runtimeHealth } : {})}
               />
             ) : null}
@@ -652,23 +780,39 @@ function ScenarioPicker({ activeID, onCreate }: { activeID: ScenarioID; onCreate
 function ProjectFlow({
   workspace,
   demoCredentials,
+  githubToken,
+  githubCredentialConfigured,
+  githubCredentialBusy,
+  githubCredentialMessage,
   selectedNodeID,
   onSelectNode,
   onPatchNode,
   onStageChange,
   onDemoCredentialsChange,
+  onGitHubTokenChange,
+  onStoreGitHubCredential,
+  onDeleteGitHubCredential,
   onWorkspaceChange,
-  onApproveAssets,
+  onDownloadAssets,
+  onReviewAssets,
 }: {
   workspace: ProjectWorkspaceView;
   demoCredentials: { username: string; password: string };
+  githubToken: string;
+  githubCredentialConfigured: boolean;
+  githubCredentialBusy: boolean;
+  githubCredentialMessage: string;
   selectedNodeID: string;
   onSelectNode: (id: string) => void;
   onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
   onStageChange: (stage: WorkspaceStage) => void;
   onDemoCredentialsChange: (credentials: { username: string; password: string }) => void;
+  onGitHubTokenChange: (token: string) => void;
+  onStoreGitHubCredential: () => void;
+  onDeleteGitHubCredential: () => void;
   onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
-  onApproveAssets: () => void;
+  onDownloadAssets: () => void;
+  onReviewAssets: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
 }) {
   return (
     <div className="section-stack">
@@ -689,7 +833,14 @@ function ProjectFlow({
         <InputsPanel
           workspace={workspace}
           demoCredentials={demoCredentials}
+          githubToken={githubToken}
+          githubCredentialConfigured={githubCredentialConfigured}
+          githubCredentialBusy={githubCredentialBusy}
+          githubCredentialMessage={githubCredentialMessage}
           onDemoCredentialsChange={onDemoCredentialsChange}
+          onGitHubTokenChange={onGitHubTokenChange}
+          onStoreGitHubCredential={onStoreGitHubCredential}
+          onDeleteGitHubCredential={onDeleteGitHubCredential}
           onWorkspaceChange={onWorkspaceChange}
         />
       ) : null}
@@ -705,7 +856,7 @@ function ProjectFlow({
       {workspace.stage === "package_approval" ? <PackageStageSummary workspace={workspace} /> : null}
       {workspace.stage === "cloud_run" ? <CloudRunPanel workspace={workspace} /> : null}
       {workspace.stage === "script_repair" ? <ScriptRepairPanel workspace={workspace} /> : null}
-      {workspace.stage === "result_review" ? <ResultReviewPanel workspace={workspace} onApprove={onApproveAssets} /> : null}
+      {workspace.stage === "result_review" ? <ResultReviewPanel workspace={workspace} onDownload={onDownloadAssets} onReview={onReviewAssets} /> : null}
     </div>
   );
 }
@@ -741,12 +892,26 @@ function SetupPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
 function InputsPanel({
   workspace,
   demoCredentials,
+  githubToken,
+  githubCredentialConfigured,
+  githubCredentialBusy,
+  githubCredentialMessage,
   onDemoCredentialsChange,
+  onGitHubTokenChange,
+  onStoreGitHubCredential,
+  onDeleteGitHubCredential,
   onWorkspaceChange,
 }: {
   workspace: ProjectWorkspaceView;
   demoCredentials: { username: string; password: string };
+  githubToken: string;
+  githubCredentialConfigured: boolean;
+  githubCredentialBusy: boolean;
+  githubCredentialMessage: string;
   onDemoCredentialsChange: (credentials: { username: string; password: string }) => void;
+  onGitHubTokenChange: (token: string) => void;
+  onStoreGitHubCredential: () => void;
+  onDeleteGitHubCredential: () => void;
   onWorkspaceChange: (workspace: ProjectWorkspaceView) => void;
 }) {
   const localRepoPath = workspace.inputBundle.repositories?.find((repo) => repo.local_path)?.local_path ?? "";
@@ -772,6 +937,28 @@ function InputsPanel({
             <span>GitHub 仓库 URL</span>
             <input value={gitRepoURL} onChange={(event) => patchInputs({ gitRepoURL: event.currentTarget.value })} placeholder="https://github.com/org/repo" />
           </label>
+          <div className="field-row github-credential-field">
+            <span>私有 GitHub 仓库凭据</span>
+            <div className="credential-input-row">
+              <input
+                type="password"
+                value={githubToken}
+                onChange={(event) => onGitHubTokenChange(event.currentTarget.value)}
+                autoComplete="new-password"
+                placeholder={githubCredentialConfigured ? "已配置，可输入新 token 替换" : "Fine-grained token"}
+                aria-label="GitHub fine-grained token"
+              />
+              <button type="button" className="row-action" disabled={githubCredentialBusy || !githubToken.trim()} onClick={onStoreGitHubCredential}>
+                {githubCredentialBusy ? "处理中" : "保存"}
+              </button>
+              <button type="button" className="row-action danger" disabled={githubCredentialBusy || !githubCredentialConfigured} onClick={onDeleteGitHubCredential}>
+                删除
+              </button>
+            </div>
+            <small className={githubCredentialMessage && !githubCredentialConfigured ? "credential-status warning" : "credential-status"}>
+              {githubCredentialMessage || (githubCredentialConfigured ? "已安全存入 Windows 凭据管理器" : "未配置；公开仓库无需凭据")}
+            </small>
+          </div>
           <label className="field-row">
             <span>目标受众</span>
             <input value={workspace.targetAudience} onChange={(event) => patchInputs({ targetAudience: event.currentTarget.value })} placeholder="中国客户的产品和运营团队" />
@@ -808,7 +995,7 @@ function InputsPanel({
             <textarea value={forbiddenData.join("\n")} onChange={(event) => patchInputs({ forbiddenDataText: event.currentTarget.value })} rows={3} />
           </label>
         </div>
-        <div className="input-note">本地项目根目录和 GitHub 仓库 URL 都是可选代码来源，可以单独填写也可以同时填写；演示账号密码只作为本地登录预扫描的瞬时凭据，不进入执行包、审批文档或云端 payload。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
+        <div className="input-note">本地项目根目录和 GitHub 仓库 URL 都是可选代码来源，可以单独填写也可以同时填写。私有仓库 token 仅保存在 Windows 凭据管理器，读取代码时通过 Git 进程环境注入，不进入项目状态、执行包或日志；Device OAuth 将在 DemoOps 配置自有 GitHub OAuth Client ID 后启用。演示账号密码只作为本地登录预扫描的瞬时凭据。代码读取只生成结构摘要和 hash，不上传完整源码。</div>
       </section>
       <InputsTable workspace={workspace} />
       <CodeSummaryPanel workspace={workspace} />
@@ -1182,8 +1369,16 @@ function ScriptRepairPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
   );
 }
 
-function ResultReviewPanel({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {
-  return <AssetReview workspace={workspace} onApprove={onApprove} />;
+function ResultReviewPanel({
+  workspace,
+  onDownload,
+  onReview,
+}: {
+  workspace: ProjectWorkspaceView;
+  onDownload: () => void;
+  onReview: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
+}) {
+  return <AssetReview workspace={workspace} onDownload={onDownload} onReview={onReview} />;
 }
 
 function MetricsRow({ workspace }: { workspace: ProjectWorkspaceView }) {
@@ -1851,7 +2046,18 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
-function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {
+function AssetReview({
+  workspace,
+  onDownload,
+  onReview,
+}: {
+  workspace: ProjectWorkspaceView;
+  onDownload: () => void;
+  onReview: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
+}) {
+  const [reviewSummary, setReviewSummary] = useState("");
+  const deliveryAcked = Boolean(workspace.cloudRun.resultPackage?.delivery?.acked_at) || workspace.cloudRun.message?.includes("校验 checksum");
+  const review = workspace.cloudRun.resultReview;
   return (
     <div className="asset-layout">
       <section className="video-panel">
@@ -1863,18 +2069,33 @@ function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView
       </section>
       <section className="docs-panel">
         <SectionTitle title="步骤文档" meta={workspace.assets[1]?.checksum ?? "待生成"} />
-        <ol className="docs-preview">
+		<ol className="docs-preview">
           {workspace.planReview.graph.nodes.map((node) => (
             <li key={node.id}>
               <strong>{node.title ?? node.action}</strong>
               <span>{node.expected_outcome}</span>
             </li>
           ))}
-        </ol>
-        <button type="button" className="primary-action" onClick={onApprove}>
-          <span className="button-icon">准</span>
-          批准成品
-        </button>
+		</ol>
+		<label className="field-label" htmlFor="result-review-summary">审核意见</label>
+		<textarea id="result-review-summary" rows={4} value={reviewSummary} onChange={(event) => setReviewSummary(event.target.value)} placeholder="可填写时间点、字幕、节奏或缺失步骤。返工时建议必填。" />
+		<div className="action-row result-review-actions">
+		  <button type="button" className="secondary-action" onClick={onDownload}>
+			<span className="button-icon">下</span>
+			{deliveryAcked ? "已下载并校验" : "下载并校验成品"}
+		  </button>
+		  <button type="button" className="primary-action" disabled={!deliveryAcked} onClick={() => onReview("approved", reviewSummary)}>
+			<span className="button-icon">准</span>
+			批准成品
+		  </button>
+		  <button type="button" className="secondary-action" disabled={!reviewSummary.trim()} onClick={() => onReview("reedit_requested", reviewSummary)}>
+			要求重新剪辑
+		  </button>
+		  <button type="button" className="secondary-action" disabled={!reviewSummary.trim()} onClick={() => onReview("rerecord_requested", reviewSummary)}>
+			要求重新录制
+		  </button>
+		</div>
+		{review ? <div className="warning-band"><span>审核状态：{review.decision} · {review.revisionAction ?? "无需返工"}</span>{review.summary ? <span>{review.summary}</span> : null}</div> : null}
       </section>
     </div>
   );
@@ -1887,6 +2108,11 @@ function SettingsPanel({
   diagnosticsError,
   isRunningDiagnostics,
   onRunDiagnostics,
+  desktopUpdate,
+  desktopUpdateBusy,
+  desktopUpdateMessage,
+  onCheckDesktopUpdate,
+  onApplyDesktopUpdate,
 }: {
   workspace: ProjectWorkspaceView;
   runtimeHealth?: RuntimeHealthView;
@@ -1894,6 +2120,11 @@ function SettingsPanel({
   diagnosticsError: string;
   isRunningDiagnostics: boolean;
   onRunDiagnostics: () => void;
+  desktopUpdate?: DesktopUpdateStatus;
+  desktopUpdateBusy: boolean;
+  desktopUpdateMessage: string;
+  onCheckDesktopUpdate: () => void;
+  onApplyDesktopUpdate: () => void;
 }) {
   const providerRows = [
     ["GLM", "glm"],
@@ -1935,6 +2166,27 @@ function SettingsPanel({
         <Fact label="录制执行边界" value={recordingBoundaryLabel} />
         <Fact label="视频编辑器" value={capabilities?.videoEditor ? "已启用" : "待检查"} />
       </div>
+      <section className="table-section">
+        <SectionTitle title="应用更新" meta={desktopUpdate?.channel ?? "未配置"} />
+        <div className="settings-grid">
+          <Fact label="当前版本" value={desktopUpdate?.currentVersion ?? "开发版本"} />
+          <Fact label="可用版本" value={desktopUpdate?.availableVersion ?? "尚未检查"} />
+          <Fact label="更新源" value={desktopUpdate?.configured ? "DemoOps HTTPS 签名源" : "未配置"} />
+          <Fact label="回滚保护" value={desktopUpdate?.installReady ? "已就绪" : "尚未就绪"} />
+        </div>
+        {desktopUpdate?.releaseNotes ? <div className="input-note">{desktopUpdate.releaseNotes}</div> : null}
+        <div className="action-row">
+          <button type="button" className="secondary-action" onClick={onCheckDesktopUpdate} disabled={desktopUpdateBusy || !desktopUpdate?.configured}>
+            <span className="button-icon">更</span>
+            {desktopUpdateBusy ? "处理中" : "检查更新"}
+          </button>
+          <button type="button" className="primary-action" onClick={onApplyDesktopUpdate} disabled={desktopUpdateBusy || !desktopUpdate?.updateAvailable || !desktopUpdate.installReady}>
+            <span className="button-icon">装</span>
+            确认并安装
+          </button>
+          <small>{desktopUpdateMessage || (desktopUpdate?.configured ? "清单签名、SHA-256 与 Authenticode 验证通过后才允许安装。" : "正式包需配置 DemoOps 专属 HTTPS 更新清单和 Ed25519 公钥。")}</small>
+        </div>
+      </section>
       <section className="table-section">
         <SectionTitle title="模型供应商凭据" meta="仅显示占位状态" />
         <table>

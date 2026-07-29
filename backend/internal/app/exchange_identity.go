@@ -105,8 +105,8 @@ func (s *Service) ExchangeIdentityStatus(ctx context.Context) ExchangeIdentitySt
 	return session.status()
 }
 
-func (s *Service) EnsureExchangeSession(ctx context.Context, productURL string, orgID string, projectID string) (ExchangeSession, error) {
-	baseURL, err := s.discoverExchangeBaseURL(productURL)
+func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, projectID string) (ExchangeSession, error) {
+	baseURL, err := s.discoverExchangeBaseURL()
 	if err != nil {
 		return ExchangeSession{}, err
 	}
@@ -198,7 +198,7 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, productURL string, 
 }
 
 func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, error) {
-	baseURL, err := s.discoverExchangeBaseURL("")
+	baseURL, err := s.discoverExchangeBaseURL()
 	if err != nil {
 		return ExchangeSession{}, err
 	}
@@ -212,24 +212,14 @@ func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, 
 	return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
 }
 
-func (s *Service) discoverExchangeBaseURL(productURL string) (string, error) {
+func (s *Service) discoverExchangeBaseURL() (string, error) {
 	if strings.TrimSpace(s.runtime.CloudExchangeBaseURL) != "" {
 		return strings.TrimRight(s.runtime.CloudExchangeBaseURL, "/"), nil
 	}
 	if record, err := s.exchangeIdentityStore().load(); err == nil && strings.TrimSpace(record.ExchangeBaseURL) != "" {
 		return strings.TrimRight(record.ExchangeBaseURL, "/"), nil
 	}
-	if strings.TrimSpace(productURL) == "" {
-		return "", errors.New("cloud exchange base URL discovery requires product_url or CASCADE_CLOUD_EXCHANGE_BASE_URL")
-	}
-	parsed, err := url.Parse(productURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", errors.New("product_url must be an absolute URL for exchange discovery")
-	}
-	if parsed.Scheme != "https" && parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1" {
-		return "", errors.New("exchange discovery requires HTTPS outside localhost")
-	}
-	return parsed.Scheme + "://" + parsed.Host + "/aigc", nil
+	return "", errors.New("DemoOps execution server is not configured; set CASCADE_CLOUD_EXCHANGE_BASE_URL or pair this installation")
 }
 
 func useConfiguredExchangeBootstrap(baseURL string, configuredBaseURL string, environment string) bool {

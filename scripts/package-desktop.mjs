@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey } from "node:crypto";
 import { mkdirSync, cpSync, existsSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -14,10 +14,35 @@ const targetGOOS = process.platform === "win32" ? "windows" : "darwin";
 const desktopExt = targetGOOS === "windows" ? ".exe" : "";
 const nodeBinaryName = targetGOOS === "windows" ? "node.exe" : "node";
 const bundledNodePath = resolve(resourceRoot, "runtimes", "node", nodeBinaryName);
+const bundledFFmpegPath = resolve(resourceRoot, "runtimes", "ffmpeg", targetGOOS === "windows" ? "ffmpeg.exe" : "ffmpeg");
+const bundledFFprobePath = resolve(resourceRoot, "runtimes", "ffmpeg", targetGOOS === "windows" ? "ffprobe.exe" : "ffprobe");
+const sourceFFmpegPath = String(process.env.CASCADE_PACKAGE_FFMPEG_PATH || "").trim();
+const sourceFFprobePath = String(process.env.CASCADE_PACKAGE_FFPROBE_PATH || "").trim();
+const sourceUpdatePublicKeyPath = String(process.env.DEMOOPS_UPDATE_PUBLIC_KEY_PATH || "").trim();
+const updateManifestURL = String(process.env.DEMOOPS_UPDATE_MANIFEST_URL || "").trim();
+const releaseChannel = String(process.env.CASCADE_RELEASE_CHANNEL || "internal").trim();
 const desktopBinary = resolve("dist", "desktop", targetGOOS, `cascade-demoops-desktop${desktopExt}`);
+const updaterBinary = resolve("dist", "desktop", targetGOOS, `cascade-demoops-updater${desktopExt}`);
 const releaseBaseName = `CascadeDemoOps-${appPackage.version || "0.0.0"}-${targetGOOS}-${process.arch}`;
 const releaseZip = resolve(releaseRoot, `${releaseBaseName}.zip`);
 const releaseChecksum = `${releaseZip}.sha256`;
+
+if (!new Set(["internal", "beta", "stable"]).has(releaseChannel)) {
+  throw new Error(`Unsupported CASCADE_RELEASE_CHANNEL: ${releaseChannel}`);
+}
+validateMediaBuildInput(sourceFFmpegPath, "ffmpeg");
+validateMediaBuildInput(sourceFFprobePath, "ffprobe");
+validateFileBuildInput(sourceUpdatePublicKeyPath, "update public key");
+validateUpdatePublicKey(sourceUpdatePublicKeyPath);
+if (releaseChannel !== "internal" && (!sourceFFmpegPath || !sourceFFprobePath)) {
+  throw new Error("beta/stable packages require CASCADE_PACKAGE_FFMPEG_PATH and CASCADE_PACKAGE_FFPROBE_PATH");
+}
+if (releaseChannel !== "internal" && !sourceUpdatePublicKeyPath) {
+  throw new Error("beta/stable packages require DEMOOPS_UPDATE_PUBLIC_KEY_PATH");
+}
+if (releaseChannel !== "internal" && !updateManifestURL.startsWith("https://")) {
+  throw new Error("beta/stable packages require DEMOOPS_UPDATE_MANIFEST_URL on a DemoOps HTTPS release origin");
+}
 
 if (!fallbackWebBuild()) {
   runWithFallback("pnpm", ["--filter", "@cascade/web", "build"], fallbackWebBuild);
@@ -25,26 +50,50 @@ if (!fallbackWebBuild()) {
 if (!fallbackWorkerBuild()) {
   runWithFallback("pnpm", ["--filter", "@cascade/video-worker", "build"], fallbackWorkerBuild);
 }
-run("node", ["scripts/build-desktop.mjs", targetGOOS]);
+if (targetGOOS === "windows") {
+  run("node", ["scripts/build-wails-desktop.mjs"], { env: { CASCADE_SKIP_WEB_BUILD: "1" } });
+  run("go", ["build", "-trimpath", "-ldflags", "-s -w", "-o", updaterBinary, "./cmd/desktop-updater"], { cwd: resolve(root, "backend") });
+} else {
+  run("node", ["scripts/build-desktop.mjs", targetGOOS]);
+}
 
 rmSync(packageRoot, { recursive: true, force: true });
 mkdirSync(resourceRoot, { recursive: true });
 copyIfExists(desktopBinary, resolve(packageRoot, basename(desktopBinary)));
+copyIfExists(updaterBinary, resolve(packageRoot, basename(updaterBinary)));
 copyIfExists(videoWorkerDist, resolve(resourceRoot, "sidecars", "video-worker", "dist"));
 copyIfExists(webDist, resolve(resourceRoot, "web"));
 copyIfExists(process.execPath, bundledNodePath);
+copyMediaRuntime(sourceFFmpegPath, bundledFFmpegPath, "ffmpeg");
+copyMediaRuntime(sourceFFprobePath, bundledFFprobePath, "ffprobe");
+if (sourceUpdatePublicKeyPath) copyIfExists(sourceUpdatePublicKeyPath, resolve(resourceRoot, "updates", "release-public-key.pem"));
+if (releaseChannel !== "internal" && (!existsSync(bundledFFmpegPath) || !existsSync(bundledFFprobePath))) {
+  throw new Error("beta/stable packages require CASCADE_PACKAGE_FFMPEG_PATH and CASCADE_PACKAGE_FFPROBE_PATH");
+}
+if (releaseChannel !== "internal") {
+  run("node", ["scripts/sign-windows.mjs", resolve(packageRoot, basename(desktopBinary)), resolve(packageRoot, basename(updaterBinary))]);
+}
+const runtimes = {};
+if (existsSync(bundledNodePath)) runtimes.node = `runtimes/node/${nodeBinaryName}`;
+if (existsSync(bundledFFmpegPath)) runtimes.ffmpeg = `runtimes/ffmpeg/${basename(bundledFFmpegPath)}`;
+if (existsSync(bundledFFprobePath)) runtimes.ffprobe = `runtimes/ffmpeg/${basename(bundledFFprobePath)}`;
 const runtimeManifest = {
   app: "Cascade DemoOps",
+  version: appPackage.version || "0.0.0",
   resource_contract_version: 1,
   sidecars: {
     "video-worker": "sidecars/video-worker/dist/index.js",
   },
-  runtimes: existsSync(bundledNodePath)
-    ? {
-        node: `runtimes/node/${nodeBinaryName}`,
-      }
-    : {},
+  runtimes,
   web: "web",
+  updates: {
+    channel: releaseChannel,
+    manifest_url: updateManifestURL,
+    public_key: sourceUpdatePublicKeyPath ? "updates/release-public-key.pem" : "",
+    updater: `../${basename(updaterBinary)}`,
+    previous_installer: "../previous-installer.exe",
+    app_executable: `../${basename(desktopBinary)}`,
+  },
 };
 writeJSON(resolve(resourceRoot, "desktop-runtime.json"), runtimeManifest);
 
@@ -87,13 +136,23 @@ function buildPackageManifest() {
     target_os: targetGOOS,
     target_arch: process.arch,
     package_kind: "portable_zip",
+    release_channel: releaseChannel,
     created_at: new Date().toISOString(),
     entrypoint: slash(basename(desktopBinary)),
     resource_manifest: "resources/desktop-runtime.json",
+    updater: existsSync(updaterBinary)
+      ? {
+          path: slash(basename(updaterBinary)),
+          public_key: sourceUpdatePublicKeyPath ? "resources/updates/release-public-key.pem" : "",
+          channels: ["internal", "beta", "stable"],
+          verifies: ["https", "ed25519", "sha256", "authenticode"],
+          rollback_requires_previous_installer: true,
+        }
+      : undefined,
     desktop_ui: {
-      primary: "native_win32",
-      uses_browser_shell: false,
-      compatibility_web_host_flag: "--native=false",
+      primary: targetGOOS === "windows" ? "wails_webview2" : "legacy_native",
+      uses_browser_shell: targetGOOS === "windows",
+      legacy_fallback_entry: "backend/cmd/desktop",
       native_capabilities: [
         "input_collection",
         "native_input_readiness_summary",
@@ -155,6 +214,8 @@ function buildPackageManifest() {
             source: "system",
             required_for: ["video-worker"],
           },
+      ffmpeg: runtimeEntry(bundledFFmpegPath, "video-worker rendering and media validation"),
+      ffprobe: runtimeEntry(bundledFFprobePath, "video-worker media inspection"),
     },
     server_connectivity: {
       required_for_local_generation: false,
@@ -214,6 +275,55 @@ function buildPackageManifest() {
   };
 }
 
+function runtimeEntry(path, requiredFor) {
+  if (!existsSync(path)) return { path: "", source: "not_bundled", required_for: [requiredFor] };
+  return {
+    path: slash(relative(packageRoot, path)),
+    source: "build_input",
+    required_for: [requiredFor],
+    sha256: sha256File(path),
+    size_bytes: statSync(path).size,
+  };
+}
+
+function copyMediaRuntime(source, destination, label) {
+  if (!source) {
+    console.warn(`Skipping ${label}: set CASCADE_PACKAGE_${label.toUpperCase()}_PATH to bundle it.`);
+    return;
+  }
+  if (!existsSync(source) || statSync(source).isDirectory()) {
+    throw new Error(`Invalid ${label} build input: ${source}`);
+  }
+  copyIfExists(source, destination);
+}
+
+function validateMediaBuildInput(source, label) {
+  if (!source) return;
+  if (!existsSync(source) || statSync(source).isDirectory()) {
+    throw new Error(`Invalid ${label} build input: ${source}`);
+  }
+}
+
+function validateFileBuildInput(source, label) {
+  if (!source) return;
+  if (!existsSync(source) || statSync(source).isDirectory()) {
+    throw new Error(`Invalid ${label} build input: ${source}`);
+  }
+}
+
+function validateUpdatePublicKey(source) {
+  if (!source) return;
+  let key;
+  try {
+    key = createPublicKey(readFileSync(source));
+  } catch (error) {
+    throw new Error(`Invalid update public key PEM: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (key.asymmetricKeyType !== "ed25519") {
+    throw new Error("DEMOOPS_UPDATE_PUBLIC_KEY_PATH must contain an Ed25519 public key");
+  }
+}
+
 function run(command, args, options = {}) {
   const result = spawn(command, args, options);
   if (!result.ok) {
@@ -239,6 +349,7 @@ function spawn(command, args, options = {}) {
     cwd: options.cwd || root,
     env: {
       ...process.env,
+      ...(options.env ?? {}),
       VITE_CASCADE_BRIDGE: process.env.VITE_CASCADE_BRIDGE || "local",
       VITE_CASCADE_BRIDGE_URL: process.env.VITE_CASCADE_BRIDGE_URL || "",
     },

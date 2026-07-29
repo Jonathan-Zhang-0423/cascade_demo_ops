@@ -16,6 +16,7 @@ func TestRuntimeConfigDefaultsToDevDesktopSQLite(t *testing.T) {
 	t.Setenv("SQLITE_PATH", "")
 	t.Setenv("NODE_WORKER_PATH", "")
 	t.Setenv("CASCADE_ARK_MEDIA_MODE", "")
+	t.Setenv("CASCADE_CLOUD_EXCHANGE_BASE_URL", "")
 
 	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
 	if err != nil {
@@ -35,6 +36,9 @@ func TestRuntimeConfigDefaultsToDevDesktopSQLite(t *testing.T) {
 	}
 	if cfg.LLMMode != LLMModeAuto || cfg.ArkMediaMode != ArkMediaModeDryRun || cfg.ModelAdapterVersion != ModelAdapterVersion {
 		t.Fatalf("unexpected model config: llm_mode=%s ark_media_mode=%s adapter=%s", cfg.LLMMode, cfg.ArkMediaMode, cfg.ModelAdapterVersion)
+	}
+	if cfg.CloudExchangeBaseURL != "" {
+		t.Fatalf("cloud exchange base url = %q", cfg.CloudExchangeBaseURL)
 	}
 }
 
@@ -57,6 +61,7 @@ func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
 	t.Setenv("DEEPSEEK_MODEL", "deepseek-chat")
 	t.Setenv("CASCADE_ARK_MEDIA_MODE", "real")
+	t.Setenv("CASCADE_CLOUD_EXCHANGE_BASE_URL", "https://exchange.example.test/aigc/")
 
 	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
 	if err != nil {
@@ -82,6 +87,9 @@ func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
 	}
 	if cfg.ArkMediaMode != ArkMediaModeReal {
 		t.Fatalf("ark media mode = %s", cfg.ArkMediaMode)
+	}
+	if cfg.CloudExchangeBaseURL != "https://exchange.example.test/aigc" {
+		t.Fatalf("cloud exchange base url override = %q", cfg.CloudExchangeBaseURL)
 	}
 	if cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel != "deepseek-chat" {
 		t.Fatalf("deepseek model = %q", cfg.ModelProviders[ModelProviderDeepSeek].DefaultModel)
@@ -293,7 +301,9 @@ func TestRuntimeConfigLoadsDesktopResourceManifest(t *testing.T) {
 			"video-worker": "sidecars/video-worker/dist/index.js"
 		},
 		"runtimes": {
-			"node": "runtimes/node/node.exe"
+			"node": "runtimes/node/node.exe",
+			"ffmpeg": "runtimes/ffmpeg/ffmpeg.exe",
+			"ffprobe": "runtimes/ffmpeg/ffprobe.exe"
 		},
 		"web": "web"
 	}`
@@ -317,8 +327,60 @@ func TestRuntimeConfigLoadsDesktopResourceManifest(t *testing.T) {
 	if cfg.NodeBinaryPath != wantNode {
 		t.Fatalf("node path = %q, want %q", cfg.NodeBinaryPath, wantNode)
 	}
+	if want := filepath.Join(resourceRoot, "runtimes", "ffmpeg", "ffmpeg.exe"); cfg.FFmpegPath != want {
+		t.Fatalf("ffmpeg path = %q, want %q", cfg.FFmpegPath, want)
+	}
+	if want := filepath.Join(resourceRoot, "runtimes", "ffmpeg", "ffprobe.exe"); cfg.FFprobePath != want {
+		t.Fatalf("ffprobe path = %q, want %q", cfg.FFprobePath, want)
+	}
 	if cfg.ResourceManifestPath == "" {
 		t.Fatal("expected manifest path")
+	}
+}
+
+func TestRuntimeConfigLoadsExplicitDesktopUpdateResources(t *testing.T) {
+	root := t.TempDir()
+	resources := filepath.Join(root, "resources")
+	if err := os.MkdirAll(resources, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"app":"Cascade DemoOps","resource_contract_version":1,"version":"1.2.3","updates":{"channel":"stable","manifest_url":"https://updates.demoops.example/stable.json","public_key":"updates/release.pem","updater":"../updater.exe","previous_installer":"../previous-installer.exe","app_executable":"../app.exe"}}`
+	if err := os.WriteFile(filepath.Join(resources, "desktop-runtime.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CASCADE_PROFILE", "desktop")
+	t.Setenv("CASCADE_RESOURCE_ROOT", resources)
+	t.Setenv("DATABASE_DIALECT", "sqlite")
+	cfg, err := RuntimeConfigFromEnvWithRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppVersion != "1.2.3" || cfg.UpdateChannel != "stable" || cfg.UpdateManifestURL != "https://updates.demoops.example/stable.json" {
+		t.Fatalf("unexpected update config: %+v", cfg)
+	}
+	if cfg.UpdateExecutablePath != filepath.Join(root, "updater.exe") || cfg.PreviousInstallerPath != filepath.Join(root, "previous-installer.exe") || cfg.DesktopExecutablePath != filepath.Join(root, "app.exe") {
+		t.Fatalf("desktop update paths were not resolved relative to resources: %+v", cfg)
+	}
+}
+
+func TestRuntimeConfigKeepsMediaRuntimeEnvOverridesAheadOfManifest(t *testing.T) {
+	resourceRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(resourceRoot, "desktop-runtime.json"), []byte(`{"runtimes":{"ffmpeg":"bundled/ffmpeg.exe","ffprobe":"bundled/ffprobe.exe"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ffmpegOverride := filepath.Join("custom", "ffmpeg.exe")
+	ffprobeOverride := filepath.Join("custom", "ffprobe.exe")
+	t.Setenv("CASCADE_PROFILE", "desktop")
+	t.Setenv("CASCADE_RESOURCE_ROOT", resourceRoot)
+	t.Setenv("CASCADE_FFMPEG_PATH", ffmpegOverride)
+	t.Setenv("CASCADE_FFPROBE_PATH", ffprobeOverride)
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FFmpegPath != ffmpegOverride || cfg.FFprobePath != ffprobeOverride {
+		t.Fatalf("media runtime overrides not preserved: ffmpeg=%q ffprobe=%q", cfg.FFmpegPath, cfg.FFprobePath)
 	}
 }
 

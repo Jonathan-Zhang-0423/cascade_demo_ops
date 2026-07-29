@@ -174,6 +174,7 @@ type BrowserAgentSession = {
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
 
 const sessions = new Map<string, BrowserAgentSession>();
+const targetProbeTimeoutMS = 2_000;
 const defaultViewport = { width: 1440, height: 900 };
 const actionTimeoutMS = 10_000;
 const screenshotTimeoutMS = 8_000;
@@ -203,6 +204,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
     contextOptions.recordVideo = { dir: outputDir, size: request.browser?.viewport || defaultViewport };
   }
   const context = await browser.newContext(contextOptions);
+  await installRecordingMasks(context, request.mask_selectors || []);
   const tracePath = path.join(outputDir, "browser-agent-trace.zip");
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   const page = await context.newPage();
@@ -325,7 +327,15 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   }
   recordingPath = await session.video?.path().catch(() => undefined);
   if (recordingPath && await fileExists(recordingPath)) {
-		artifacts.unshift(await artifactRef(`artifact_${session.id}_recording`, "raw_recording", recordingPath, "video/webm", undefined, { include_in_demo: true }, session.recordingSensitive));
+    artifacts.unshift(await artifactRef(
+      `artifact_${session.id}_recording`,
+      "raw_recording",
+      recordingPath,
+      "video/webm",
+      undefined,
+      { include_in_demo: true, redaction_applied: true, mask_selector_count: session.maskSelectors.length },
+      session.recordingSensitive,
+    ));
   }
   // Failed observations may throw after their before-capture. Recover every
   // stage screenshot here so the Server can build a protocol failure package.
@@ -429,9 +439,9 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
   for (const candidate of candidates) {
     if (seen.has(candidate.strategy)) continue;
     seen.add(candidate.strategy);
-		const resolved = await resolveUniqueVisibleContractTarget(candidate.locator, candidate.strategy, contract);
-		if (resolved) return resolved;
-	}
+    const resolved = await resolveUniqueVisibleContractTarget(candidate.locator, candidate.strategy, contract);
+    if (resolved) return resolved;
+  }
   throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=${[...seen].join(",") || "none"}`);
 }
 
@@ -453,16 +463,32 @@ async function resolveSingleApprovedAlternative(page: any, stage: BrowserAgentWo
 }
 
 async function resolveUniqueVisibleContractTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract): Promise<ResolvedTarget | undefined> {
-	const count = await locator.count().catch(() => 0);
-	if (count !== 1) return undefined;
-	const unique = locator.first();
-	if (!await unique.isVisible({ timeout: 750 }).catch(() => false)) return undefined;
-	const semantics = await compactElementSemantics(unique);
-	if (!semanticsAllowed(semantics, contract)) return undefined;
-	if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
-		throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
-	}
-	return { locator: unique, strategy };
+  const count = await withTimeout(locator.count(), targetProbeTimeoutMS, 0);
+  if (count !== 1) return undefined;
+  const unique = locator.first();
+  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) return undefined;
+  const semantics = await withTimeout(compactElementSemantics(unique), targetProbeTimeoutMS, { role: "", name: "" });
+  if (!semanticsAllowed(semantics, contract)) return undefined;
+  if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
+    throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
+  }
+  return { locator: unique, strategy };
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMS: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMS);
+      }),
+    ]);
+  } catch {
+    return fallback;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerStage): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
@@ -845,6 +871,57 @@ async function artifactRef(id: string, kind: string, filePath: string, mimeType:
     ...(sourceNodeID ? { source_node_id: sourceNodeID } : {}),
     metadata: { ...metadata, source: "browser_agent_runtime" },
   };
+}
+
+async function installRecordingMasks(context: any, selectors: string[]): Promise<void> {
+  await context.addInitScript((approvedSelectors: string[]) => {
+    if (!Array.isArray(approvedSelectors) || approvedSelectors.length === 0) return;
+    const browserGlobal = globalThis as any;
+    const document = browserGlobal.document as any;
+    const requestAnimationFrame = browserGlobal.requestAnimationFrame.bind(browserGlobal) as (callback: () => void) => number;
+    const overlays = new Map<any, any>();
+    const update = () => {
+      const matched = new Set<any>();
+      for (const selector of approvedSelectors) {
+        try {
+          document.querySelectorAll(selector).forEach((element: any) => matched.add(element));
+        } catch {
+          // An invalid approved selector must not disable the other masks.
+        }
+      }
+      for (const [element, overlay] of overlays) {
+        if (!element.isConnected || !matched.has(element)) {
+          overlay.remove();
+          overlays.delete(element);
+        }
+      }
+      for (const element of matched) {
+        let overlay = overlays.get(element);
+        if (!overlay || !overlay.isConnected) {
+          overlay = document.createElement("div");
+          overlay.setAttribute("data-cascade-recording-mask", "true");
+          Object.assign(overlay.style, {
+            position: "fixed",
+            zIndex: "2147483647",
+            pointerEvents: "none",
+            background: "#111",
+          });
+          document.documentElement.appendChild(overlay);
+          overlays.set(element, overlay);
+        }
+        const bounds = element.getBoundingClientRect();
+        Object.assign(overlay.style, {
+          display: bounds.width > 0 && bounds.height > 0 ? "block" : "none",
+          left: `${bounds.left}px`,
+          top: `${bounds.top}px`,
+          width: `${bounds.width}px`,
+          height: `${bounds.height}px`,
+        });
+      }
+      requestAnimationFrame(update);
+    };
+    requestAnimationFrame(update);
+  }, selectors);
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

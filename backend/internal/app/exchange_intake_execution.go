@@ -51,7 +51,9 @@ func (s *ExchangeIntakeService) TryStartExecution(ctx context.Context, orgID str
 	if state.Payload.PackageID == "" {
 		return executionStartResult{}, errors.New("exchange package payload is not available")
 	}
-	setPackageStageLocked(state, model.ExchangePackageStatusRunning, "validated", "Execution package passed cloud-side validation and is ready to prepare the worker.", 25, s.now())
+	now := s.now()
+	setPackageStageLocked(state, model.ExchangePackageStatusRunning, "validating", "Validating schema, approval, hashes, allowed domains, and safety policy.", 18, now)
+	setPackageStageLocked(state, model.ExchangePackageStatusRunning, "preparing_worker", "Execution package passed validation; preparing an isolated worker.", 25, now)
 	if err := s.saveLocked(ctx); err != nil {
 		return executionStartResult{}, err
 	}

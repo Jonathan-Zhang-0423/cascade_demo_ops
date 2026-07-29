@@ -62,13 +62,33 @@ func (s *Service) runUploadedExecutionPackageSync(ctx context.Context, orgID str
 		Package: &pkg, CloudJobID: cloudJobID,
 		RecordingOutputDir: recordingDir, RenderOutputDir: renderDir, ResultCreatedAt: time.Now().UTC(),
 		Progress: func(stage string, message string, progress int) {
-			_, _ = s.exchange.MarkExecutionStage(ctx, orgID, exchangePackageID, stage, message, progress)
+			canonicalStage, canonicalProgress := canonicalExecutionStage(stage, progress)
+			_, _ = s.exchange.MarkExecutionStage(ctx, orgID, exchangePackageID, canonicalStage, message, canonicalProgress)
 		},
 	})
 	if err != nil {
 		return s.failUploadedExecution(ctx, orgID, exchangePackageID, runtimeExecutionErrorCode(err), err)
 	}
 	return s.CompleteExecutionPackageWithResult(ctx, orgID, exchangePackageID, result)
+}
+
+func canonicalExecutionStage(stage string, progress int) (string, int) {
+	switch stage {
+	case "validating_pre_execution":
+		return "browser_agent_planning", maxInt(progress, 30)
+	case "running_browser_agent", "running_script":
+		return "recording", maxInt(progress, 45)
+	case "validating_runtime_stage", "validating_post_execution", "packaging_recording":
+		return "material_validation", maxInt(progress, 70)
+	case "preparing_director_input", "applying_director_patch":
+		return "directing", maxInt(progress, 78)
+	case "rendering":
+		return "rendering", maxInt(progress, 85)
+	case "quality_validation":
+		return "quality_validation", maxInt(progress, 95)
+	default:
+		return stage, progress
+	}
 }
 
 func (s *Service) GetExecutionPackageDebug(ctx context.Context, orgID string, exchangePackageID string) (ExecutionPackageDebugView, error) {

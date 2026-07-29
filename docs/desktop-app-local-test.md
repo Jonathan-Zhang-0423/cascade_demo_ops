@@ -3,7 +3,7 @@
 > [!IMPORTANT]
 > **Legacy v1 / 当前联调方法。** 本文件只用于运行尚未迁移的桌面端 v1 闭环，不代表 Server 侧 v2 产品流程或后续职责边界。v2 架构见 [server-browser-agent-execution-editor-architecture-v2.md](./server-browser-agent-execution-editor-architecture-v2.md)。
 
-这套流程用于在没有 Wails 正式壳的情况下，稳定体验桌面端 v1 的核心闭环：
+这套流程用于调试与 Wails 正式壳共用的本地 HTTP bridge：
 
 ```text
 输入材料 -> 本地理解 -> 方案审批 -> 执行包审批 -> 上传服务器 -> 服务器录制 -> 结果/诊断返回 -> 成品验收
@@ -59,7 +59,7 @@ http://127.0.0.1:3000/
 终端 1 启动 Go Dev Bridge：
 
 ```powershell
-$env:CASCADE_CLOUD_EXCHANGE_BASE_URL="https://cascadeai.cn/aigc"
+$env:CASCADE_CLOUD_EXCHANGE_BASE_URL="<DEMOOPS_CONTROL_PLANE_BASE_URL>"
 $env:CASCADE_CLOUD_EXCHANGE_TOKEN="<联调 token>"
 pnpm dev:bridge
 ```
@@ -89,7 +89,7 @@ http://127.0.0.1:3000/
 - 本地项目根目录
 - 产品 URL
 
-点击顶部 `开始实战流程` 后，App 会自动完成：本地 Agent 理解、三合一执行包生成、明文 dev payload 上传服务器、状态轮询、结果包读取，以及有最终视频时的 checksum ack。云端 token 只在 Go Dev Bridge 环境变量中读取，不会返回给前端。
+点击顶部 `开始实战流程` 后，App 会完成本地 Agent 理解和三合一执行包生成。用户审批后才上传；成品下载并通过 SHA-256 校验后才发送 ack，人工通过/驳回使用独立 review 接口。控制面 token 只在 Go Dev Bridge 环境变量中读取，不会返回给前端。
 
 如需绕过 proxy 调试，也可以显式设置：
 
@@ -178,4 +178,6 @@ DEEPSEEK_API_KEY=...
 - mock bridge 不会真实访问客户产品页。
 - local bridge 会真实调用本机 Go agents；`CASCADE_LLM_MODE=real` 时会调用已配置的 Kimi/GLM/MiniMax。
 - local bridge 已支持真实联调服务器上传和状态轮询；生产加密 payload_ref 路径仍按交换协议继续推进。
-- Wails 壳接入后，应复用同一套 DTO 和页面流程。
+- `backend/cmd/wails-desktop` 已复用同一套 DTO、React 页面与同源 HTTP bridge。
+
+如需用 `cascadeai.cn` 做 smoke，它只能填写在产品 URL 输入中，并只进入该测试任务的录制域名白名单；不要把它配置为控制面地址。

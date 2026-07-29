@@ -142,7 +142,13 @@ func readBrowserAgentAcceptanceReport(path string) (BrowserAgentAcceptanceReport
 		return BrowserAgentAcceptanceReport{}, fmt.Errorf("decode browser-agent acceptance report: %w", err)
 	}
 	if report.SchemaVersion != "cascade.browser_agent_acceptance.v1" || report.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 || report.StrictGate != "passed" {
-		return BrowserAgentAcceptanceReport{}, errors.New("browser-agent acceptance report is incomplete")
+		failed := []string{}
+		for _, scenario := range report.Scenarios {
+			if scenario.Verdict != "passed" {
+				failed = append(failed, scenario.ID+":"+scenario.Actual)
+			}
+		}
+		return BrowserAgentAcceptanceReport{}, fmt.Errorf("browser-agent acceptance report is incomplete: schema=%q runtime=%q gate=%q failed=%v", report.SchemaVersion, report.Runtime, report.StrictGate, failed)
 	}
 	baseRequired := map[string]bool{"success_navigation_click": false, "semantic_target_contract_conflict": false, "locator_missing": false, "required_validation_failure": false, "recording_and_trace_delivery": false}
 	repairRequired := map[string]bool{"approved_selector_alternative_repair": false, "busy_page_wait_repair": false}
@@ -362,12 +368,14 @@ func hasStrictBrowserAgentValidationReports(result model.RecordingResultPackage,
 
 func protocolAcceptanceFailureScenario(id, description, expected string, run protocolAcceptanceRun, actionExecuted bool, expectedCode string) BrowserAgentAcceptanceScenario {
 	hasScreenshot, hasTrace := false, false
+	actualCode := "missing_failure_diagnostic"
 	if run.Result.FailureDiagnostic != nil {
 		hasScreenshot = len(run.Result.FailureDiagnostic.ScreenshotRefs) > 0
 		hasTrace = len(run.Result.FailureDiagnostic.TraceRefs) > 0
+		actualCode = run.Result.FailureDiagnostic.Error.Code
 	}
 	passed := run.Status.Status == model.ExchangePackageStatusFailed && run.Result.Status == model.RecordingResultStatusFailed && run.Result.FailureDiagnostic != nil && run.Result.RepairRequest != nil && run.Result.RepairRequest.ApprovalRequired && run.Result.FailureDiagnostic.RedactionReport.Applied && !run.Result.FailureDiagnostic.RedactionReport.FullHTMLIncluded && run.Result.FailureDiagnostic.Error.Code == expectedCode && hasScreenshot && hasTrace
-	return BrowserAgentAcceptanceScenario{ID: id, Description: description, Expected: expected, Actual: acceptanceActual(passed), Verdict: acceptanceVerdict(passed), ActionExecuted: actionExecuted, Evidence: protocolAcceptanceArtifacts(run.Result), StopReason: expectedCode, Assertions: []BrowserAgentAcceptanceCheck{{Kind: "exchange_status", Passed: run.Status.Status == model.ExchangePackageStatusFailed, Actual: string(run.Status.Status)}, {Kind: "failure_result", Passed: run.Result.Status == model.RecordingResultStatusFailed, Actual: string(run.Result.Status)}, {Kind: "redacted_diagnostic", Passed: run.Result.FailureDiagnostic != nil && run.Result.FailureDiagnostic.RedactionReport.Applied && !run.Result.FailureDiagnostic.RedactionReport.FullHTMLIncluded, Actual: "redacted"}, {Kind: "failure_screenshot", Passed: hasScreenshot, Actual: "captured"}, {Kind: "failure_trace", Passed: hasTrace, Actual: "captured"}, {Kind: "repair_request", Passed: run.Result.RepairRequest != nil && run.Result.RepairRequest.ApprovalRequired, Actual: "approval_required"}}}
+	return BrowserAgentAcceptanceScenario{ID: id, Description: description, Expected: expected, Actual: actualCode, Verdict: acceptanceVerdict(passed), ActionExecuted: actionExecuted, Evidence: protocolAcceptanceArtifacts(run.Result), StopReason: actualCode, Assertions: []BrowserAgentAcceptanceCheck{{Kind: "exchange_status", Passed: run.Status.Status == model.ExchangePackageStatusFailed, Actual: string(run.Status.Status)}, {Kind: "failure_result", Passed: run.Result.Status == model.RecordingResultStatusFailed, Actual: string(run.Result.Status)}, {Kind: "failure_code", Passed: actualCode == expectedCode, Actual: actualCode}, {Kind: "redacted_diagnostic", Passed: run.Result.FailureDiagnostic != nil && run.Result.FailureDiagnostic.RedactionReport.Applied && !run.Result.FailureDiagnostic.RedactionReport.FullHTMLIncluded, Actual: "redacted"}, {Kind: "failure_screenshot", Passed: hasScreenshot, Actual: "captured"}, {Kind: "failure_trace", Passed: hasTrace, Actual: "captured"}, {Kind: "repair_request", Passed: run.Result.RepairRequest != nil && run.Result.RepairRequest.ApprovalRequired, Actual: "approval_required"}}}
 }
 
 func protocolAcceptanceArtifactScenario(run protocolAcceptanceRun) BrowserAgentAcceptanceScenario {

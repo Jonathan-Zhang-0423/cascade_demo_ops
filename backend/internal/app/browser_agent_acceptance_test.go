@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"cascade-demoops/backend/internal/driver"
 )
 
 func TestReadBrowserAgentAcceptanceReportRequiresUsableScenarios(t *testing.T) {
@@ -76,6 +78,7 @@ func TestReadBrowserAgentAcceptanceReportAcceptsBaseProtocolGate(t *testing.T) {
 func TestProtocolBrowserAgentAcceptanceRunsCompleteServerPath(t *testing.T) {
 	service := newTestDevHTTPServer(t).service
 	service.runtime.DevRepoRoot = filepath.Join("..", "..", "..")
+	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
 	if _, err := service.RunBrowserAgentAcceptance(t.Context()); err != nil {
 		t.Fatal(err)
 	}

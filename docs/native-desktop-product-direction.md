@@ -28,6 +28,8 @@ The first native workflow is the three-in-one package workbench:
 - Provide a native reset action that clears non-sensitive input drafts and transient credential fields without touching generated artifacts.
 - Import requirement Markdown/Text documents through the native file picker as a first-class input path.
 - Local repository path and GitHub repository URL are both optional parallel sources; providing one must not replace or disable the other.
+- Public GitHub repositories need no credential. Private repositories support a fine-grained token stored only in Windows Credential Manager and injected into the Git child process through environment-based Git config; the token is never written to project state, repository config, packages, or logs.
+- GitHub Device OAuth remains disabled until DemoOps owns and configures a dedicated GitHub OAuth Client ID. It must not reuse a test site's OAuth identity.
 - Run local demand understanding and project intelligence through the Go `Service` layer directly.
 - Display the three approval artifacts in native preview panes:
   - `approval_markdown.md`

@@ -280,7 +280,7 @@ Typical response after upload:
 Run stages are:
 
 ```text
-accepted -> validated -> preparing_worker -> running_script -> packaging_recording -> rendering -> completed
+accepted -> validating -> preparing_worker -> browser_agent_planning -> script_ready -> recording -> material_validation -> directing -> rendering -> quality_validation -> completed
 ```
 
 On failure the status becomes `failed`, and `failure_summary.failed_stage`

@@ -72,7 +72,7 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T
 		t.Fatal(err)
 	}
 
-	session, err := service.EnsureExchangeSession(context.Background(), "https://cascadeai.cn", "org_1", "project_1")
+	session, err := service.EnsureExchangeSession(context.Background(), "org_1", "project_1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T
 func TestEnsureExchangeSessionReportsCloudAuthUnavailableWhenRegisterMissing(t *testing.T) {
 	oldTransport := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.URL.String() != "https://cascadeai.cn/aigc/v1/app-installations/register" {
+		if r.URL.String() != "https://control.demoops.test/v1/app-installations/register" {
 			t.Errorf("unexpected exchange request URL: %s", r.URL.String())
 		}
 		return &http.Response{
@@ -116,19 +116,45 @@ func TestEnsureExchangeSessionReportsCloudAuthUnavailableWhenRegisterMissing(t *
 		LogRoot:              filepath.Join(root, "logs"),
 		ResourceRoot:         root,
 		DevRepoRoot:          root,
-		CloudExchangeBaseURL: "https://cascadeai.cn/aigc",
+		CloudExchangeBaseURL: "https://control.demoops.test",
 		LLMMode:              config.LLMModeDeterministic,
 	}, store.NewMemoryStateStore())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = service.EnsureExchangeSession(context.Background(), "https://cascadeai.cn", "org_1", "project_1")
+	_, err = service.EnsureExchangeSession(context.Background(), "org_1", "project_1")
 	if err == nil {
 		t.Fatal("expected cloud auth unavailable error")
 	}
 	if code := bridgeErrorCode(err); code != "cloud_auth_unavailable" {
 		t.Fatalf("expected cloud_auth_unavailable, got %q: %v", code, err)
+	}
+}
+
+func TestEnsureExchangeSessionRequiresIndependentControlPlaneConfiguration(t *testing.T) {
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile:         config.ProfileDev,
+		Environment:     "development",
+		Mode:            model.AppModeDesktop,
+		DatabaseDialect: config.DatabaseSQLite,
+		SQLitePath:      filepath.Join(root, "cascade_demoops.db"),
+		DataRoot:        root,
+		ArtifactRoot:    filepath.Join(root, "artifacts"),
+		CacheRoot:       filepath.Join(root, "cache"),
+		LogRoot:         filepath.Join(root, "logs"),
+		ResourceRoot:    root,
+		DevRepoRoot:     root,
+		LLMMode:         config.LLMModeDeterministic,
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.EnsureExchangeSession(context.Background(), "org_1", "project_1")
+	if err == nil || !strings.Contains(err.Error(), "execution server is not configured") {
+		t.Fatalf("expected an explicit unconfigured control plane error, got %v", err)
 	}
 }
 

@@ -77,6 +77,8 @@ type recordingResultState struct {
 	ExchangePackageID string
 	Result            model.RecordingResultPackage
 	Retention         model.RetentionSpec
+	Reviews           []model.ResultReviewRecord
+	Revisions         []model.ResultRevisionRecord
 }
 
 type exchangeInstallationState struct {
@@ -429,7 +431,7 @@ func (s *ExchangeIntakeService) CompleteWithRecordingResult(ctx context.Context,
 			state.Error = &result.FailureDiagnostic.Error
 		}
 	} else {
-		setPackageStageLocked(state, model.ExchangePackageStatusCompleted, "completed", "Recording and rendering completed. Result package is ready.", 100, now)
+		setPackageStageLocked(state, model.ExchangePackageStatusCompleted, "completed", "Recording, directing, deterministic rendering, and quality validation completed. Result package is ready.", 100, now)
 	}
 	if err := s.saveLocked(ctx); err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
@@ -605,6 +607,111 @@ func (s *ExchangeIntakeService) AckResultPackage(ctx context.Context, orgID stri
 		ReceivedAssetIDs:  append([]string{}, resultState.Result.Delivery.ReceivedAssetIDs...),
 		VerifiedChecksums: request.VerifiedChecksums,
 	}, nil
+}
+
+func (s *ExchangeIntakeService) ReviewResultPackage(ctx context.Context, orgID string, resultPackageID string, request model.ResultReviewRequest) (model.ResultReviewRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return model.ResultReviewRecord{}, err
+	}
+	if strings.TrimSpace(request.IdempotencyKey) == "" {
+		return model.ResultReviewRecord{}, errors.New("result review idempotency_key is required")
+	}
+	switch request.Decision {
+	case model.ResultReviewApproved, model.ResultReviewReeditRequested, model.ResultReviewRerecordRequested:
+	default:
+		return model.ResultReviewRecord{}, errors.New("unsupported result review decision")
+	}
+	if request.ReviewedAt.IsZero() {
+		request.ReviewedAt = s.now()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resultState, err := s.resultStateLocked(orgID, resultPackageID)
+	if err != nil {
+		return model.ResultReviewRecord{}, err
+	}
+	for _, review := range resultState.Reviews {
+		if review.IdempotencyKey == request.IdempotencyKey {
+			return review, nil
+		}
+	}
+	record := model.ResultReviewRecord{
+		ReviewID: newExchangeID("review", request.ReviewedAt), ResultPackageID: resultPackageID,
+		IdempotencyKey: request.IdempotencyKey, ReviewerInstallID: request.ReviewerInstallID,
+		Decision: request.Decision, Summary: strings.TrimSpace(request.Summary),
+		Annotations: append([]model.ResultReviewAnnotation{}, request.Annotations...), ReviewedAt: request.ReviewedAt,
+	}
+	resultState.Reviews = append(resultState.Reviews, record)
+	if err := s.saveLocked(ctx); err != nil {
+		return model.ResultReviewRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *ExchangeIntakeService) RequestResultRevision(ctx context.Context, orgID string, resultPackageID string, request model.ResultRevisionRequest) (model.ResultRevisionRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return model.ResultRevisionRecord{}, err
+	}
+	if strings.TrimSpace(request.IdempotencyKey) == "" {
+		return model.ResultRevisionRecord{}, errors.New("result revision idempotency_key is required")
+	}
+	if request.RequestedAt.IsZero() {
+		request.RequestedAt = s.now()
+	}
+	resolved, err := resolveRevisionAction(request)
+	if err != nil {
+		return model.ResultRevisionRecord{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resultState, err := s.resultStateLocked(orgID, resultPackageID)
+	if err != nil {
+		return model.ResultRevisionRecord{}, err
+	}
+	for _, revision := range resultState.Revisions {
+		if revision.IdempotencyKey == request.IdempotencyKey {
+			return revision, nil
+		}
+	}
+	record := model.ResultRevisionRecord{
+		RevisionID: newExchangeID("revision", request.RequestedAt), ResultPackageID: resultPackageID,
+		IdempotencyKey: request.IdempotencyKey, RequestedByInstallID: request.RequestedByInstallID,
+		RequestedAction: request.RequestedAction, ResolvedAction: resolved, Status: "queued",
+		Summary: strings.TrimSpace(request.Summary), Issues: append([]model.ResultRevisionIssue{}, request.Issues...), RequestedAt: request.RequestedAt,
+	}
+	resultState.Revisions = append(resultState.Revisions, record)
+	if err := s.saveLocked(ctx); err != nil {
+		return model.ResultRevisionRecord{}, err
+	}
+	return record, nil
+}
+
+func resolveRevisionAction(request model.ResultRevisionRequest) (model.ResultRevisionAction, error) {
+	switch request.RequestedAction {
+	case model.ResultRevisionReedit, model.ResultRevisionRerecord:
+		return request.RequestedAction, nil
+	case "", model.ResultRevisionAuto:
+		for _, issue := range request.Issues {
+			switch strings.ToLower(strings.TrimSpace(issue.Kind)) {
+			case "missing_material", "missing_step", "recording_failure", "wrong_page", "interaction_failure":
+				return model.ResultRevisionRerecord, nil
+			}
+		}
+		return model.ResultRevisionReedit, nil
+	default:
+		return "", errors.New("unsupported result revision action")
+	}
+}
+
+func (s *ExchangeIntakeService) resultStateLocked(orgID string, resultPackageID string) (*recordingResultState, error) {
+	resultState, ok := s.resultByID[resultPackageID]
+	if !ok {
+		return nil, errors.New("result package not found")
+	}
+	if _, err := s.packageStateLocked(orgID, resultState.ExchangePackageID); err != nil {
+		return nil, err
+	}
+	return resultState, nil
 }
 
 func validateReceivedAssets(result model.RecordingResultPackage, receivedAssetIDs []string) error {
@@ -814,6 +921,7 @@ func setPackageStageLocked(state *exchangePackageState, status model.ExchangePac
 	state.ProgressPercent = progress
 	state.UpdatedAt = updatedAt
 	state.StageHistory = append(state.StageHistory, model.ExecutionStageEvent{
+		EventID:         fmt.Sprintf("%s:%d", state.ExchangePackageID, len(state.StageHistory)+1),
 		Stage:           stage,
 		Status:          status,
 		Message:         message,
@@ -1065,6 +1173,8 @@ func cloneRecordingResultStates(values map[string]*recordingResultState) map[str
 			continue
 		}
 		copyValue := *value
+		copyValue.Reviews = append([]model.ResultReviewRecord{}, value.Reviews...)
+		copyValue.Revisions = append([]model.ResultRevisionRecord{}, value.Revisions...)
 		out[key] = &copyValue
 	}
 	return out

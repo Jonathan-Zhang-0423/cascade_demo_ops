@@ -27,6 +27,7 @@ type browserAgentWorkerSessionFactory func(context.Context, driver.BrowserAgentW
 type localBrowserAgentOutlineRunner struct {
 	service        *Service
 	sessionFactory browserAgentWorkerSessionFactory
+	renderService  executor.RenderService
 	// outcomeVerifier is a focused test override. Production runs snapshot the
 	// Server-owned verifier from service at the beginning of each execution.
 	outcomeVerifier BrowserAgentStageEventVerifier
@@ -73,6 +74,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		}
 	}
 	progressBrowserAgent(request.Progress, "validating_pre_execution", "正在核对 App 已审批阶段、业务目标和安全边界。", 36)
+	progressBrowserAgent(request.Progress, "script_ready", "Browser Agent 可审计脚本已生成并通过安全预演。", 38)
 
 	openRequest := browserAgentWorkerOpenRequest(request)
 	// Only the Server-created local fixture contains no customer material. Real
@@ -96,7 +98,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		if err := checkCommandReady(r.service.nodeBinaryForExecution()); err != nil {
 			return model.RecordingResultPackage{}, newRuntimeExecutionError(runtimeErrorNodeMissing, err)
 		}
-		worker := driver.NewBrowserAgentWorker(r.service.nodeBinaryForExecution(), workerPath)
+		worker := driver.NewBrowserAgentWorker(r.service.nodeBinaryForExecution(), workerPath, r.service.videoWorkerEnvironment())
 		factory = func(ctx context.Context, open driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
 			return worker.Open(ctx, open)
 		}
@@ -181,17 +183,14 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		}
 	}
 	if result.Status == model.RecordingResultStatusGenerated && request.Package.RecordingRunSpec.Outputs.FinalVideo {
-		progressBrowserAgent(request.Progress, "rendering", "正在基于已录制素材生成最终演示视频。", 96)
-		worker := driver.NewLocalDriver(r.service.nodeBinaryForExecution(), r.service.localVideoWorkerPath())
-		renderRequest, err := executor.NewRenderRequestFromRecordingResult(request.Package, &result, request.RenderOutputDir)
-		if err != nil {
-			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_render_request_failed", err)
+		progressBrowserAgent(request.Progress, "material_validation", "录屏、截图、trace 和阶段证据已通过素材校验。", 74)
+		renderService := r.renderService
+		if renderService == nil {
+			renderService = r.service.editorWorker
 		}
-		renderResult, err := worker.Render(ctx, renderRequest)
-		if err != nil {
-			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_final_video_render_failed", err)
+		if _, _, err := executor.RenderClientExecutionRecordingResult(ctx, renderService, request.Package, &result, request.RenderOutputDir, request.Progress); err != nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_render_failed", err)
 		}
-		executor.AttachRenderResultArtifacts(request.Package, &result, renderResult, result.CreatedAt)
 	}
 	return result, nil
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -79,6 +80,44 @@ type CloudStatusRequest struct {
 	ExchangePackageID string `json:"exchange_package_id"`
 }
 
+// OpenCloudExecutionPackageEventStream keeps control-plane credentials in the
+// Go process while the desktop UI consumes the resumable SSE stream locally.
+func (s *Service) OpenCloudExecutionPackageEventStream(ctx context.Context, request CloudStatusRequest, lastEventID string) (*http.Response, error) {
+	packageID := strings.TrimSpace(request.ExchangePackageID)
+	if packageID == "" {
+		return nil, errors.New("exchange_package_id is required")
+	}
+	lastEventID = strings.TrimSpace(lastEventID)
+	if len(lastEventID) > 256 || (lastEventID != "" && !strings.HasPrefix(lastEventID, packageID+":")) {
+		return nil, errors.New("last event id does not belong to the execution package")
+	}
+	session, err := s.EnsureExchangeSession(ctx, request.OrgID, "")
+	if err != nil {
+		return nil, err
+	}
+	endpoint := session.BaseURL + "/v1/execution-packages/" + url.PathEscape(packageID) + "/events?org_id=" + url.QueryEscape(firstNonEmptyString(request.OrgID, defaultDesktopOrgID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	setExchangeAuthHeader(req, session.SessionToken)
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set(cascadeOrgIDHeader, firstNonEmptyString(request.OrgID, defaultDesktopOrgID))
+	if lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
+	response, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		defer response.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+		return nil, fmt.Errorf("GET execution event stream returned %d: %s", response.StatusCode, redactBridgeError(string(body)))
+	}
+	return response, nil
+}
+
 type CloudEditorMaterializationRequest struct {
 	OrgID           string `json:"org_id,omitempty"`
 	ResultPackageID string `json:"result_package_id"`
@@ -97,6 +136,18 @@ type CloudAckRequest struct {
 	AckedByInstallID  string   `json:"acked_by_install_id,omitempty"`
 	ExchangePackageID string   `json:"exchange_package_id,omitempty"`
 	UseResultSummary  bool     `json:"use_result_summary,omitempty"`
+}
+
+type CloudResultReviewRequest struct {
+	OrgID           string                    `json:"org_id,omitempty"`
+	ResultPackageID string                    `json:"result_package_id"`
+	Review          model.ResultReviewRequest `json:"review"`
+}
+
+type CloudResultRevisionRequest struct {
+	OrgID           string                      `json:"org_id,omitempty"`
+	ResultPackageID string                      `json:"result_package_id"`
+	Revision        model.ResultRevisionRequest `json:"revision"`
 }
 
 type CloudDeliverableDownloadRequest struct {
@@ -118,6 +169,7 @@ type CloudDeliverableDownloadResult struct {
 	SHA256           string `json:"sha256"`
 	ExpectedSHA256   string `json:"expected_sha256,omitempty"`
 	ChecksumVerified bool   `json:"checksum_verified"`
+	Resumed          bool   `json:"resumed,omitempty"`
 }
 
 type CloudLifecycleRequest struct {
@@ -158,7 +210,7 @@ func (s *Service) BuildCloudClientExecutionPackage(ctx context.Context, projectI
 	if err != nil {
 		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
 	}
-	session, err := s.EnsureExchangeSession(ctx, build.Package.ProjectContextSummary.ProductURL, build.OrgID, build.ProjectID)
+	session, err := s.EnsureExchangeSession(ctx, build.OrgID, build.ProjectID)
 	if err != nil {
 		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
 	}
@@ -457,7 +509,7 @@ func (s *Service) signBuildWithExchangeSession(build ClientExecutionPackageBuild
 }
 
 func (s *Service) InitCloudExecutionPackageUpload(ctx context.Context, build ClientExecutionPackageBuild) (model.ExecutionPackageInitResponse, error) {
-	session, err := s.EnsureExchangeSession(ctx, build.Package.ProjectContextSummary.ProductURL, build.OrgID, build.ProjectID)
+	session, err := s.EnsureExchangeSession(ctx, build.OrgID, build.ProjectID)
 	if err != nil {
 		return model.ExecutionPackageInitResponse{}, err
 	}
@@ -479,7 +531,7 @@ func (s *Service) UploadBuiltCloudExecutionPackage(ctx context.Context, uploadID
 	if strings.TrimSpace(uploadID) == "" {
 		return model.ExecutionPackageUploadResponse{}, errors.New("upload_id is required")
 	}
-	session, err := s.EnsureExchangeSession(ctx, build.Package.ProjectContextSummary.ProductURL, build.OrgID, build.ProjectID)
+	session, err := s.EnsureExchangeSession(ctx, build.OrgID, build.ProjectID)
 	if err != nil {
 		return model.ExecutionPackageUploadResponse{}, err
 	}
@@ -517,7 +569,7 @@ func (s *Service) GetCloudExecutionPackageStatus(ctx context.Context, request Cl
 	if strings.TrimSpace(request.ExchangePackageID) == "" {
 		return model.ExecutionPackageStatusResponse{}, errors.New("exchange_package_id is required")
 	}
-	session, err := s.EnsureExchangeSession(ctx, "", request.OrgID, "")
+	session, err := s.EnsureExchangeSession(ctx, request.OrgID, "")
 	if err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
 	}
@@ -529,7 +581,7 @@ func (s *Service) GetCloudResultPackage(ctx context.Context, request CloudResult
 	if strings.TrimSpace(request.ResultPackageID) == "" {
 		return model.RecordingResultPackage{}, errors.New("result_package_id is required")
 	}
-	session, err := s.EnsureExchangeSession(ctx, "", request.OrgID, "")
+	session, err := s.EnsureExchangeSession(ctx, request.OrgID, "")
 	if err != nil {
 		return model.RecordingResultPackage{}, err
 	}
@@ -550,7 +602,7 @@ func (s *Service) DownloadCloudResultDeliverable(ctx context.Context, request Cl
 	if outputDir == "" {
 		return CloudDeliverableDownloadResult{}, errors.New("output_directory is required")
 	}
-	session, err := s.EnsureExchangeSession(ctx, "", request.OrgID, "")
+	session, err := s.EnsureExchangeSession(ctx, request.OrgID, "")
 	if err != nil {
 		return CloudDeliverableDownloadResult{}, err
 	}
@@ -558,56 +610,137 @@ func (s *Service) DownloadCloudResultDeliverable(ctx context.Context, request Cl
 	if err != nil {
 		return CloudDeliverableDownloadResult{}, err
 	}
-	client := &http.Client{Timeout: 5 * time.Minute}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return CloudDeliverableDownloadResult{}, err
-	}
-	setExchangeAuthHeader(req, session.SessionToken)
 	orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
-	if orgID != "" {
-		req.Header.Set(cascadeOrgIDHeader, orgID)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return CloudDeliverableDownloadResult{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return CloudDeliverableDownloadResult{}, fmt.Errorf("GET %s returned %d: %s", endpoint, resp.StatusCode, redactBridgeError(string(data)))
-	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return CloudDeliverableDownloadResult{}, err
 	}
 	localPath := filepath.Join(outputDir, cloudDeliverableFileName(deliverable))
-	file, err := os.Create(localPath)
+	expected := strings.ToLower(strings.TrimSpace(deliverable.SHA256))
+	if existing, ok := verifiedDownload(localPath, expected, deliverable.SizeBytes); ok {
+		return cloudDownloadResult(deliverable, endpoint, localPath, existing, expected, firstNonEmptyString(deliverable.MimeType, ""), false), nil
+	}
+	partialPath := localPath + ".part"
+	client := &http.Client{Timeout: 5 * time.Minute}
+	size, sum, mimeType, resumed, err := downloadCloudDeliverableToPartial(ctx, client, endpoint, session.SessionToken, orgID, partialPath)
 	if err != nil {
 		return CloudDeliverableDownloadResult{}, err
 	}
-	hasher := sha256.New()
-	size, copyErr := io.Copy(io.MultiWriter(file, hasher), resp.Body)
+	verified := expected != "" && strings.EqualFold(sum, expected)
+	if !verified {
+		return cloudDownloadResult(deliverable, endpoint, partialPath, size, expected, mimeType, resumed), nil
+	}
+	if err := os.Rename(partialPath, localPath); err != nil {
+		return CloudDeliverableDownloadResult{}, fmt.Errorf("finalize verified deliverable: %w", err)
+	}
+	return cloudDownloadResult(deliverable, endpoint, localPath, size, expected, mimeType, resumed), nil
+}
+
+func downloadCloudDeliverableToPartial(ctx context.Context, client *http.Client, endpoint, token, orgID, partialPath string) (int64, string, string, bool, error) {
+	offset, hasher, err := partialDownloadState(partialPath)
+	if err != nil {
+		return 0, "", "", false, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, "", "", false, err
+	}
+	setExchangeAuthHeader(request, token)
+	if orgID != "" {
+		request.Header.Set(cascadeOrgIDHeader, orgID)
+	}
+	if offset > 0 {
+		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, "", "", false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusPartialContent {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return 0, "", "", false, fmt.Errorf("GET %s returned %d: %s", endpoint, response.StatusCode, redactBridgeError(string(data)))
+	}
+	resumed := offset > 0 && response.StatusCode == http.StatusPartialContent
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if !resumed {
+		offset = 0
+		hasher = sha256.New()
+		flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	}
+	file, err := os.OpenFile(partialPath, flags, 0o600)
+	if err != nil {
+		return 0, "", "", false, err
+	}
+	written, copyErr := io.Copy(io.MultiWriter(file, hasher), response.Body)
 	closeErr := file.Close()
 	if copyErr != nil {
-		return CloudDeliverableDownloadResult{}, copyErr
+		return 0, "", "", resumed, copyErr
 	}
 	if closeErr != nil {
-		return CloudDeliverableDownloadResult{}, closeErr
+		return 0, "", "", resumed, closeErr
 	}
-	sum := hex.EncodeToString(hasher.Sum(nil))
-	expected := strings.ToLower(strings.TrimSpace(deliverable.SHA256))
+	return offset + written, hex.EncodeToString(hasher.Sum(nil)), response.Header.Get("Content-Type"), resumed, nil
+}
+
+func partialDownloadState(path string) (int64, hash.Hash, error) {
+	hasher := sha256.New()
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, hasher, nil
+	}
+	if err != nil {
+		return 0, nil, err
+	}
+	size, copyErr := io.Copy(hasher, file)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return 0, nil, copyErr
+	}
+	if closeErr != nil {
+		return 0, nil, closeErr
+	}
+	return size, hasher, nil
+}
+
+func verifiedDownload(path, expected string, expectedSize int64) (int64, bool) {
+	if expected == "" {
+		return 0, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	hasher := sha256.New()
+	size, copyErr := io.Copy(hasher, file)
+	_ = file.Close()
+	if copyErr != nil || expectedSize > 0 && size != expectedSize {
+		return 0, false
+	}
+	return size, strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), expected)
+}
+
+func cloudDownloadResult(deliverable model.ExecutionDeliverable, endpoint, localPath string, size int64, expected, mimeType string, resumed bool) CloudDeliverableDownloadResult {
+	sum := ""
+	if file, err := os.Open(localPath); err == nil {
+		hasher := sha256.New()
+		if _, hashErr := io.Copy(hasher, file); hashErr == nil {
+			sum = hex.EncodeToString(hasher.Sum(nil))
+		}
+		_ = file.Close()
+	}
 	return CloudDeliverableDownloadResult{
 		ArtifactID:       deliverable.ID,
 		Kind:             deliverable.Kind,
 		Role:             deliverable.Role,
-		MimeType:         firstNonEmptyString(deliverable.MimeType, resp.Header.Get("Content-Type")),
+		MimeType:         firstNonEmptyString(deliverable.MimeType, mimeType),
 		DownloadURL:      endpoint,
 		LocalPath:        localPath,
 		SizeBytes:        size,
 		SHA256:           sum,
 		ExpectedSHA256:   expected,
 		ChecksumVerified: expected != "" && strings.EqualFold(sum, expected),
-	}, nil
+		Resumed:          resumed,
+	}
 }
 
 func (s *Service) GetCloudEditorMaterialization(ctx context.Context, request CloudEditorMaterializationRequest) (EditorSessionMaterialization, error) {
@@ -625,7 +758,7 @@ func (s *Service) AckCloudResultPackage(ctx context.Context, request CloudAckReq
 	if strings.TrimSpace(request.ResultPackageID) == "" {
 		return model.ResultPackageAckResponse{}, errors.New("result_package_id is required")
 	}
-	session, err := s.EnsureExchangeSession(ctx, "", request.OrgID, "")
+	session, err := s.EnsureExchangeSession(ctx, request.OrgID, "")
 	if err != nil {
 		return model.ResultPackageAckResponse{}, err
 	}
@@ -644,6 +777,30 @@ func (s *Service) AckCloudResultPackage(ctx context.Context, request CloudAckReq
 		VerifiedChecksums: request.VerifiedChecksums,
 		AckedAt:           time.Now().UTC(),
 	})
+}
+
+func (s *Service) ReviewCloudResultPackage(ctx context.Context, request CloudResultReviewRequest) (model.ResultReviewRecord, error) {
+	if strings.TrimSpace(request.ResultPackageID) == "" {
+		return model.ResultReviewRecord{}, errors.New("result_package_id is required")
+	}
+	session, err := s.EnsureExchangeSession(ctx, request.OrgID, "")
+	if err != nil {
+		return model.ResultReviewRecord{}, err
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	return cloudPostJSON[model.ResultReviewRecord](ctx, client, session.BaseURL+"/v1/result-packages/"+url.PathEscape(request.ResultPackageID)+"/reviews", session.SessionToken, firstNonEmptyString(request.OrgID, defaultDesktopOrgID), request.Review)
+}
+
+func (s *Service) RequestCloudResultRevision(ctx context.Context, request CloudResultRevisionRequest) (model.ResultRevisionRecord, error) {
+	if strings.TrimSpace(request.ResultPackageID) == "" {
+		return model.ResultRevisionRecord{}, errors.New("result_package_id is required")
+	}
+	session, err := s.EnsureExchangeSession(ctx, request.OrgID, "")
+	if err != nil {
+		return model.ResultRevisionRecord{}, err
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	return cloudPostJSON[model.ResultRevisionRecord](ctx, client, session.BaseURL+"/v1/result-packages/"+url.PathEscape(request.ResultPackageID)+"/revisions", session.SessionToken, firstNonEmptyString(request.OrgID, defaultDesktopOrgID), request.Revision)
 }
 
 func (s *Service) RunCloudLifecycle(ctx context.Context, request CloudLifecycleRequest) (CloudLifecycleResult, error) {
@@ -671,7 +828,7 @@ func (s *Service) RunCloudLifecycle(ctx context.Context, request CloudLifecycleR
 	if err != nil {
 		return CloudLifecycleResult{}, err
 	}
-	session, err := s.EnsureExchangeSession(ctx, state.ProjectContext.ProductURL, build.OrgID, build.ProjectID)
+	session, err := s.EnsureExchangeSession(ctx, build.OrgID, build.ProjectID)
 	if err != nil {
 		return CloudLifecycleResult{}, err
 	}
@@ -700,26 +857,6 @@ func (s *Service) RunCloudLifecycle(ctx context.Context, request CloudLifecycleR
 		}
 		resultPackage = &result
 	}
-	var ack *model.ResultPackageAckResponse
-	autoAck := true
-	if request.AutoAck != nil {
-		autoAck = *request.AutoAck
-	}
-	if autoAck && resultPackage != nil && status.ResultSummary != nil && status.ResultSummary.DemoVideoCount > 0 {
-		received := receivedAssetIDs(status.ResultSummary.Deliverables)
-		ackResponse, err := s.AckCloudResultPackage(ctx, CloudAckRequest{
-			OrgID:             build.OrgID,
-			ResultPackageID:   status.ResultPackageID,
-			AckedByInstallID:  defaultDesktopInstallID,
-			ReceivedAssetIDs:  received,
-			VerifiedChecksums: true,
-		})
-		if err != nil {
-			return CloudLifecycleResult{}, err
-		}
-		ack = &ackResponse
-		status, _ = cloudGetJSON[model.ExecutionPackageStatusResponse](ctx, client, session.BaseURL+"/v1/execution-packages/"+url.PathEscape(uploadResponse.ExchangePackageID)+"/status", session.SessionToken, build.OrgID)
-	}
 	return CloudLifecycleResult{
 		State:     state,
 		Build:     &build,
@@ -727,7 +864,6 @@ func (s *Service) RunCloudLifecycle(ctx context.Context, request CloudLifecycleR
 		Upload:    uploadResponse,
 		Status:    status,
 		Result:    resultPackage,
-		Ack:       ack,
 		CloudBase: session.BaseURL,
 	}, nil
 }
@@ -763,7 +899,7 @@ func (s *Service) pollCloudStatus(ctx context.Context, client *http.Client, base
 
 func (s *Service) cloudExchangeConfig() (string, string, error) {
 	if strings.TrimSpace(s.runtime.CloudExchangeBaseURL) == "" {
-		return "", "", errors.New("cloud exchange base URL discovery requires product_url or CASCADE_CLOUD_EXCHANGE_BASE_URL")
+		return "", "", errors.New("DemoOps execution server is not configured; set CASCADE_CLOUD_EXCHANGE_BASE_URL")
 	}
 	return strings.TrimRight(s.runtime.CloudExchangeBaseURL, "/"), strings.TrimSpace(s.runtime.CloudExchangeToken), nil
 }

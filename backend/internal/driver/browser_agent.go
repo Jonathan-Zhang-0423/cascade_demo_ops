@@ -15,8 +15,9 @@ import (
 )
 
 type BrowserAgentWorker struct {
-	NodeBinary string
-	WorkerPath string
+	NodeBinary  string
+	WorkerPath  string
+	Environment map[string]string
 }
 
 type BrowserAgentWorkerBrowser struct {
@@ -103,11 +104,11 @@ type BrowserAgentWorkerSession struct {
 	sessionID string
 }
 
-func NewBrowserAgentWorker(nodeBinary string, workerPath string) *BrowserAgentWorker {
+func NewBrowserAgentWorker(nodeBinary string, workerPath string, environment ...map[string]string) *BrowserAgentWorker {
 	if nodeBinary == "" {
 		nodeBinary = "node"
 	}
-	return &BrowserAgentWorker{NodeBinary: nodeBinary, WorkerPath: workerPath}
+	return &BrowserAgentWorker{NodeBinary: nodeBinary, WorkerPath: workerPath, Environment: firstEnvironment(environment)}
 }
 
 func (w *BrowserAgentWorker) Open(ctx context.Context, request BrowserAgentWorkerOpenRequest) (*BrowserAgentWorkerSession, BrowserAgentWorkerOpenResult, error) {
@@ -115,6 +116,7 @@ func (w *BrowserAgentWorker) Open(ctx context.Context, request BrowserAgentWorke
 		return nil, BrowserAgentWorkerOpenResult{}, errors.New("node worker path is required")
 	}
 	cmd := exec.Command(w.NodeBinary, w.WorkerPath)
+	cmd.Env = childProcessEnvironment(w.Environment)
 	configureProcessTree(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

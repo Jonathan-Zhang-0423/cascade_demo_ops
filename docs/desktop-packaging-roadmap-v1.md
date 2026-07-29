@@ -26,12 +26,11 @@
 
 主要缺口：
 
-- 缺桌面壳：尚未接入 Wails/Tauri/Electron 这类窗口宿主。
-- 缺安装器：尚未生成 `.exe/.msi/.dmg` 等用户可安装包。
-- Node runtime 已进入 Windows package baseline；ffmpeg/ffprobe 策略仍待补齐。
+- Wails v2/WebView2 主入口、Inno Setup 和签名脚本已落地，仍需完成正式证书与发布 CI 验收。
+- Node runtime 已进入 Windows package；ffmpeg/ffprobe 由构建机显式提供，beta/stable 缺失即失败。
 - 缺原生文件夹选择器：当前仍偏文本路径输入。
 - 缺系统安全存储：模型 key、云端 session、installation private key 仍需要后续接 OS keychain。
-- 缺自动更新、签名、公证、崩溃日志和发布渠道。
+- 已有独立 updater、签名脚本、internal/beta/stable 清单以及 App 内更新检查和用户确认 UI；仍缺正式证书/发布 CI、崩溃诊断同意流和完整发布 smoke。
 
 ## 推荐技术路线
 
@@ -47,7 +46,7 @@ v1 推荐继续走 Wails：
 - Tauri：Rust 生态，不贴合当前 Go 后端。
 - Electron：最快接壳，但会引入 Node/Chromium 大包，和 Go bridge 双 runtime 更重。
 
-因此本分支按 Wails-first 规划，但先不把 Wails 作为硬依赖引入，避免打断当前可测试链路。
+Wails v2.10.2 已锁定为 Windows 主桌面依赖；旧入口保留到完整升级与回滚验收结束。
 
 ## 分阶段计划
 
@@ -86,19 +85,14 @@ dist/release/
 
 目标：用户双击启动一个桌面窗口，而不是打开命令行和 Vite。
 
-当前过渡实现：
+当前实现：
 
-- `cmd/desktop` 默认启动本地 Desktop Host，服务 `resources/web` 和同源 `/v1/desktop` / `/v1/editor` bridge API。
+- `cmd/wails-desktop` 使用 WebView2 加载 `resources/web`，Wails AssetServer 同源处理 `/v1/desktop` / `/v1/editor`。
+- `cmd/desktop` 仅作为旧 Win32/self-host fallback 保留。
 - `--check` 模式保留给 package smoke，初始化 bridge 后输出 JSON 并退出。
 - `pnpm package:desktop` 编译前端时默认使用 `VITE_CASCADE_BRIDGE=local`，packaged UI 不再落回 mock bridge。
 
-建议实现：
-
-- 新增 Wails app 入口。
-- 前端构建产物嵌入或放在 resources/web。
-- Wails 绑定 `DesktopBridge` 方法。
-- 前端 bridge 增加 `wails` backend adapter，和现有 `mock/local` 并存。
-- 桌面 profile 默认 `APP_MODE=desktop`、`DATABASE_DIALECT=sqlite`。
+桌面 profile 默认 `APP_MODE=desktop`、`DATABASE_DIALECT=sqlite`。前端复用同源 HTTP bridge，避免维护第二套 DTO adapter。
 
 验收：
 
@@ -111,9 +105,10 @@ dist/release/
 
 目标：生成可分发安装器。
 
-当前过渡实现：
+当前实现：
 
-- `cmd/desktop-installer` 生成 Windows 自解压 setup exe，内嵌 portable zip payload。
+- `packaging/windows/CascadeDemoOps.iss` 生成 per-user Inno Setup 安装器并检查 WebView2 Evergreen。
+- `cmd/desktop-installer` 自解压 setup 只通过 legacy 命令保留。
 - setup 会校验 payload SHA-256，安装到 per-user 目录，写入 `install-manifest.json`，并生成卸载脚本。
 - `pnpm package:desktop:installer` 输出 `CascadeDemoOps-<version>-windows-x64-installer.exe`、sidecar Windows asInvoker manifest、checksum 和 package manifest。
 - `pnpm smoke:desktop-installer` 会真实静默安装到 smoke 目录，验证 installed exe 的 `--check`、Start Menu launcher、bundled Node 执行 video-worker JSON-RPC `health`、本地 Desktop Host 首页、runtime-health、卸载脚本清理安装目录且保留用户数据。
@@ -129,7 +124,7 @@ dist/release/
 
 验收：
 
-- 当前 baseline：安装、启动和 video-worker Node runtime 不需要 Go、Node、pnpm；ffmpeg/ffprobe 仍需要后续随包分发。
+- 安装、启动、Node、FFmpeg 和 ffprobe 都由正式包提供；用户不需要 Go、Node、pnpm 或媒体工具。
 - 首次启动能创建 data/artifacts/cache/logs。
 - 卸载不误删用户项目数据，除非用户明确选择清理。
 
@@ -259,14 +254,14 @@ pnpm package:desktop:signed
 
 ## 下一步开发建议
 
-1. 增加 `backend/cmd/desktop` 的 smoke test，验证 desktop profile 能读取 `dist/package/resources/desktop-runtime.json`。
-2. 扩展 package smoke，覆盖 Desktop Host 首页和 runtime-health。
-3. 扩展 installer smoke，覆盖更深的 sidecar/FFmpeg 降级诊断。
-4. 扩展 `DesktopResourceManifest` 支持 `ffmpeg` / `ffprobe` runtime key。
-5. 增加前端 `wails` bridge adapter 的类型边界，但先用 mock binding 测。
-6. 引入 Wails app skeleton，绑定 `DesktopBridge.RuntimeConfig()` 作为第一条真实链路。
+1. 为 Wails 壳增加 UI 自动化 smoke，覆盖 runtime-health 和主工作台。
+2. 扩展 installer smoke，覆盖安装、覆盖升级、失败回滚与卸载保留/彻底清理。
+3. 扩展 sidecar/FFmpeg 真实媒体降级诊断。
+4. 在 CI 提供 FFmpeg/ffprobe 已审计二进制和 license 元数据。
+5. 在正式发布源验收已接入 App 的 updater UI（HTTPS、Ed25519、SHA-256、Authenticode、断点续传和失败回滚）。
+6. 完成安装、覆盖升级、失败回滚和卸载选择彻底清理数据的自动化 smoke。
 7. 实现原生文件夹选择器和安全存储的接口占位。
-8. 增加签名和自动更新前的 release smoke。
+8. 在持有正式证书的 CI 中运行 Authenticode、更新器和安装/卸载 release smoke。
 
 ## 不做事项
 
@@ -274,8 +269,8 @@ pnpm package:desktop:signed
 
 - 完整云端自动配对。
 - 生产 KMS/result encryption。
-- 自动更新。
-- 代码签名。
+- 无用户确认的静默自动升级；App 只允许用户明确确认已验证更新。
+- 真实证书签名发布（脚本与 fail-closed 门槛已实现）。
 - 多平台安装器全量矩阵。
 - 把 server browser agent 打进本地 App。
 
