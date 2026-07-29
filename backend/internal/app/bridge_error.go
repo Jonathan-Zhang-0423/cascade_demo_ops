@@ -60,6 +60,18 @@ func bridgeErrorCode(err error) string {
 	if errors.As(err, &protocolErr) && protocolErr.code != "" {
 		return protocolErr.code
 	}
+	var mismatchErr *model.ProductSourceMismatchError
+	if errors.As(err, &mismatchErr) {
+		return "product_source_mismatch"
+	}
+	var leakageErr *model.SourceEvidenceLeakageError
+	if errors.As(err, &leakageErr) {
+		return "source_evidence_leakage"
+	}
+	var staleErr *SourceBindingStaleError
+	if errors.As(err, &staleErr) {
+		return "source_binding_stale"
+	}
 	var preflightErr *packagePreflightError
 	if errors.As(err, &preflightErr) {
 		return "preflight_failed"
@@ -87,6 +99,13 @@ func bridgeErrorDetails(err error) []exchangeHTTPErrorDetail {
 	}
 	if details := exchangeErrorDetails(err); len(details) > 0 {
 		return details
+	}
+	var mismatchErr *model.ProductSourceMismatchError
+	if errors.As(err, &mismatchErr) {
+		return []exchangeHTTPErrorDetail{
+			{Field: "project.product_url", Reason: "conflicts_with_source_identity", Message: "网页与源码来源不匹配", Hint: "更换产品网页或选择与网页对应的源码。"},
+			{Field: "project.sources", Reason: "conflicts_with_source_identity", Message: "源码身份信号与网页身份信号冲突", Hint: "可以显式选择仅使用网页证据重新分析。"},
+		}
 	}
 	lower := strings.ToLower(err.Error())
 	if isMissingEvidenceError(lower) {

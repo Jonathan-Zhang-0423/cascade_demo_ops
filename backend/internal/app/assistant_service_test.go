@@ -2,11 +2,15 @@ package app
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
+	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
 )
 
@@ -19,6 +23,55 @@ func newAssistantTestService(t *testing.T) *Service {
 	}
 	service.assistantStore = store.NewMemoryAssistantStore()
 	return service
+}
+
+func TestAssistantContinueWithWebpageEvidenceRequiresConfirmation(t *testing.T) {
+	service := newAssistantTestService(t)
+	ctx := context.Background()
+	projectID := "assistant-source-binding"
+	repoPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoPath, "package.json"), []byte(`{"name":"beta","homepage":"https://beta.example"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, createErr := service.CreateProject(ctx, orchestrator.UserInput{
+		ProjectID: projectID, Mode: model.AppModeDesktop,
+		ProductURL: "https://alpha.example", LocalRepoPath: repoPath,
+		ProductDescription: "展示工作台", TargetAudience: "产品团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://alpha.example")},
+	})
+	var mismatch *model.ProductSourceMismatchError
+	if !errors.As(createErr, &mismatch) || state == nil || state.SourceBinding == nil {
+		t.Fatalf("expected a persisted mismatch fixture, state=%+v err=%v", state, createErr)
+	}
+	session, err := service.CreateAssistantSession(ctx, model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: projectID, ProjectID: projectID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := model.AssistantProposal{
+		ID: "proposal-page-only", Kind: model.AssistantProposalContinueWithWebpageEvidence,
+		Title: "仅使用网页证据继续", BaseVersion: session.Configuration.Version,
+		IdempotencyKey: "assistant-page-only", RequiresConfirmation: true, Status: "available",
+	}
+	session.Messages = append(session.Messages, model.AssistantMessage{ID: "message-page-only", Role: "agent", Kind: "proposal", Proposals: []model.AssistantProposal{proposal}})
+	if err := service.assistantStore.Save(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	before, err := service.GetSourceBinding(ctx, projectID)
+	if err != nil || before.EffectiveMode != model.ProductSourceModeBlocked {
+		t.Fatalf("proposal creation must not execute page-only decision: %+v err=%v", before, err)
+	}
+	confirmed, err := service.ConfirmAssistantProposal(ctx, session.ID, proposal.ID, model.AssistantProposalDecisionRequest{BaseVersion: proposal.BaseVersion, IdempotencyKey: "confirm-page-only"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.GetSourceBinding(ctx, projectID)
+	if err != nil || updated.EffectiveMode != model.ProductSourceModePageOnly || updated.Decision != "continue_page_only" {
+		t.Fatalf("confirmed proposal did not execute restricted action: %+v err=%v", updated, err)
+	}
+	got := findAssistantProposal(confirmed, proposal.ID)
+	if got == nil || got.Status != "confirmed" || got.ExecutionResult["sourceMode"] != "page_only" {
+		t.Fatalf("assistant proposal audit result missing: %+v", got)
+	}
 }
 
 func TestAssistantConfigurationPatchRequiresConfirmation(t *testing.T) {

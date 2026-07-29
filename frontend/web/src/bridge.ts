@@ -9,6 +9,7 @@ import type {
   ConfigurationSourceRefView,
   ProjectSummaryView,
   ProjectWorkspaceView,
+  ProductSourceBindingView,
   RuntimeHealthView,
   RuntimeLogEntry,
   ScenarioID,
@@ -73,6 +74,8 @@ export type DesktopBridgeClient = {
 
   listProjectSummaries(): Promise<BridgeResult<ProjectSummaryView[]>>;
   loadProject(projectID: string): Promise<BridgeResult<ProjectWorkspaceView>>;
+  getSourceBinding(projectID: string): Promise<BridgeResult<ProductSourceBindingView>>;
+  continueWithWebpageEvidence(projectID: string, assessmentHash: string, idempotencyKey: string): Promise<BridgeResult<ProjectWorkspaceView>>;
   archiveProject(projectID: string): Promise<BridgeResult<{ archived: boolean }>>;
   deleteProject(projectID: string): Promise<BridgeResult<{ deleted: boolean }>>;
   createAssistantSession(context: AssistantContextView): Promise<BridgeResult<AssistantSessionView>>;
@@ -325,6 +328,7 @@ type LocalCascadeState = {
   script_markdown?: string;
   executable_script_bundle?: ExecutableRecordingScriptBundle;
   error_message?: string;
+  source_binding?: ProductSourceBindingView;
 };
 
 type LocalClientExecutionPackageBuild = {
@@ -482,6 +486,7 @@ type LocalProjectContext = {
   forbidden_pages?: string[];
   forbidden_data?: string[];
   inputs?: ProjectInputBundle;
+  source_binding?: ProductSourceBindingView;
 };
 
 type LocalProductMap = {
@@ -681,6 +686,18 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       }
       const workspace = workspaceFromCascadeState(result.data, createWorkspace("product_demo"));
       projects.set(workspace.id, workspace);
+      return ok(workspace);
+    },
+    async getSourceBinding(projectID) {
+      return requestLocal<ProductSourceBindingView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/source-binding`);
+    },
+    async continueWithWebpageEvidence(projectID, assessmentHash, idempotencyKey) {
+      const result = await requestLocal<LocalCascadeState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/source-binding/decisions`, {
+        method: "POST", body: JSON.stringify({ decision: "continue_page_only", assessment_hash: assessmentHash, idempotency_key: idempotencyKey }),
+      });
+      if (!result.ok || !result.data) return bridgeFailure(result.error ?? "无法切换到仅网页证据模式", result.errorInfo);
+      const workspace = workspaceFromCascadeState(result.data, projects.get(projectID) ?? createWorkspace("product_demo"));
+      projects.set(projectID, workspace);
       return ok(workspace);
     },
     async saveWorkspace(workspace) {
@@ -1157,6 +1174,17 @@ export function createMockBridgeClient(): DesktopBridgeClient {
       const project = projects.get(projectID);
       return project ? ok(project) : { ok: false, error: "未找到项目" };
     },
+    async getSourceBinding(projectID) {
+      const project = projects.get(projectID);
+      return project?.sourceBinding ? ok(project.sourceBinding) : { ok: false, error: "source binding assessment is missing" };
+    },
+    async continueWithWebpageEvidence(projectID, assessmentHash) {
+      const project = projects.get(projectID);
+      if (!project || project.sourceBinding?.assessment_hash !== assessmentHash) return { ok: false, error: "source_binding_stale" };
+      const next: ProjectWorkspaceView = { ...project, sourceBinding: { ...project.sourceBinding, effective_mode: "page_only", decision: "continue_page_only" } };
+      projects.set(projectID, next);
+      return ok(next);
+    },
     async saveWorkspace(workspace) {
       projects.set(workspace.id, workspace);
       return ok(workspace);
@@ -1589,6 +1617,7 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
   const graphDigest = bundle?.reproducibility.graph_hash_sha256 || scriptDocument?.reproducibility.graph_hash_sha256 || fallback.packagePreview.graphDigest;
   const packageDigest = bundle?.reproducibility.bundle_hash_sha256 || bundle?.reproducibility.plan_hash_sha256 || scriptDocument?.reproducibility.script_hash_sha256 || fallback.packagePreview.packageDigest;
 
+  const sourceBinding = state.source_binding ?? project?.source_binding ?? fallback.sourceBinding;
   const workspace: ProjectWorkspaceView = {
     ...fallback,
     id: state.project_id || project?.id || fallback.id,
@@ -1599,6 +1628,7 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
     status: "awaiting_approval",
     inputBundle,
     sourceConnections: sourceConnectionsFromState(project, report, fallback),
+    ...(sourceBinding ? { sourceBinding } : {}),
     understanding: {
       productMapID: state.product_map?.id || fallback.understanding.productMapID,
       routesDetected: intelligence?.architecture?.route_tree?.length ?? report?.code_snapshots?.reduce((count, snapshot) => count + (snapshot.routes?.length ?? 0), 0) ?? fallback.understanding.routesDetected,

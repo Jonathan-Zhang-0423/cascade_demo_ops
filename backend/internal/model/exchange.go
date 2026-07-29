@@ -199,6 +199,7 @@ type ClientExecutionPackage struct {
 	EvidenceBundle         EvidenceBundle                   `json:"evidence_bundle"`
 	Reproducibility        ReproducibilitySpec              `json:"reproducibility"`
 	SafetyReport           PackageSafetyReport              `json:"safety_report"`
+	SourceBindingSummary   *SourceBindingSummary            `json:"source_binding_summary,omitempty"`
 	RepairContext          *ScriptRepairContext             `json:"repair_context,omitempty"`
 	Metadata               map[string]any                   `json:"metadata,omitempty"`
 }

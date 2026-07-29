@@ -10,28 +10,29 @@ const AgentGraphTraceSchemaVersion = "demoops.agent_graph_trace.v1"
 // produced by the local AgentGraph. It intentionally stores hashes, evidence
 // refs, selectors, and compact schema signals instead of full source files.
 type ProjectIntelligencePack struct {
-	ID                    string                    `json:"id"`
-	ProjectID             string                    `json:"project_id"`
-	SchemaVersion         string                    `json:"schema_version"`
-	DemoIntent            *DemoIntentSpec           `json:"demo_intent,omitempty"`
-	RunIntentScope        *RunIntentScope           `json:"run_intent_scope,omitempty"`
-	Architecture          *ProjectArchitectureMap   `json:"architecture,omitempty"`
-	FeatureCapabilities   []FeatureCapability       `json:"feature_capabilities,omitempty"`
-	FeatureTrace          *FeatureTraceResult       `json:"feature_trace,omitempty"`
-	InteractionSurfaces   []InteractionSurface      `json:"interaction_surfaces,omitempty"`
-	BusinessStagePlan     *BusinessStagePlan        `json:"business_stage_plan,omitempty"`
-	VerifiedInteraction   *VerifiedInteractionPlan  `json:"verified_interaction_plan,omitempty"`
-	MissingEvidenceReport *MissingEvidenceReport    `json:"missing_evidence_report,omitempty"`
-	APIContracts          []APIContractSummary      `json:"api_contracts,omitempty"`
-	DataModels            []ProjectDataModelSummary `json:"data_models,omitempty"`
-	DemoScenarioPlans     []DemoScenarioPlan        `json:"demo_scenario_plans,omitempty"`
-	ScriptReadinessReport *ScriptReadinessReport    `json:"script_readiness_report,omitempty"`
-	SafetyReport          *SafetyReport             `json:"safety_report,omitempty"`
-	InputFingerprints     map[string]string         `json:"input_fingerprints,omitempty"`
-	SourceDigestSHA256    string                    `json:"source_digest_sha256,omitempty"`
-	EvidenceRefs          []EvidenceRef             `json:"evidence_refs,omitempty"`
-	Confidence            float64                   `json:"confidence,omitempty"`
-	CreatedAt             time.Time                 `json:"created_at,omitempty"`
+	ID                    string                          `json:"id"`
+	ProjectID             string                          `json:"project_id"`
+	SchemaVersion         string                          `json:"schema_version"`
+	DemoIntent            *DemoIntentSpec                 `json:"demo_intent,omitempty"`
+	RunIntentScope        *RunIntentScope                 `json:"run_intent_scope,omitempty"`
+	Architecture          *ProjectArchitectureMap         `json:"architecture,omitempty"`
+	FeatureCapabilities   []FeatureCapability             `json:"feature_capabilities,omitempty"`
+	FeatureTrace          *FeatureTraceResult             `json:"feature_trace,omitempty"`
+	InteractionSurfaces   []InteractionSurface            `json:"interaction_surfaces,omitempty"`
+	BusinessStagePlan     *BusinessStagePlan              `json:"business_stage_plan,omitempty"`
+	VerifiedInteraction   *VerifiedInteractionPlan        `json:"verified_interaction_plan,omitempty"`
+	MissingEvidenceReport *MissingEvidenceReport          `json:"missing_evidence_report,omitempty"`
+	APIContracts          []APIContractSummary            `json:"api_contracts,omitempty"`
+	DataModels            []ProjectDataModelSummary       `json:"data_models,omitempty"`
+	DemoScenarioPlans     []DemoScenarioPlan              `json:"demo_scenario_plans,omitempty"`
+	ScriptReadinessReport *ScriptReadinessReport          `json:"script_readiness_report,omitempty"`
+	SafetyReport          *SafetyReport                   `json:"safety_report,omitempty"`
+	InputFingerprints     map[string]string               `json:"input_fingerprints,omitempty"`
+	SourceDigestSHA256    string                          `json:"source_digest_sha256,omitempty"`
+	SourceBinding         *ProductSourceBindingAssessment `json:"source_binding,omitempty"`
+	EvidenceRefs          []EvidenceRef                   `json:"evidence_refs,omitempty"`
+	Confidence            float64                         `json:"confidence,omitempty"`
+	CreatedAt             time.Time                       `json:"created_at,omitempty"`
 }
 
 type RunIntentScope struct {

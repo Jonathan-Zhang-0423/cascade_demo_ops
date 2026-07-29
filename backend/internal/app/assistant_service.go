@@ -207,7 +207,7 @@ func (s *Service) generateAssistantResponse(ctx context.Context, draft model.Pro
 		System:     "你是 DemoOps 项目配置 Agent。只提取用户明确提供的信息，不猜测凭据、路径或业务事实。你只能返回 configuration patch 和受限建议动作，不能执行命令、访问 URL、启动分析或上传。不要在 reply 中复述密码、token、完整本地路径或源码。",
 		User:       fmt.Sprintf("当前 configuration：%s\n用户消息：%s", configurationJSON, message),
 		SchemaName: "demoops_assistant_configuration_proposal_v1", MaxTokens: 1800, Temperature: 0.1,
-		ResponseHint: "reply:string, hasPatch:boolean, patch:ProjectConfigurationPatch, missingFields:string[], suggestedActions:{kind,title,description,targetWorkstation}[]。kind 只能是 configuration_patch/select_local_project/connect_github/attach_requirement_document/attach_brand_asset/store_demo_credential/confirm_configuration/start_local_analysis/open_workstation。Sources 不能包含本地绝对路径或 secret。",
+		ResponseHint: "reply:string, hasPatch:boolean, patch:ProjectConfigurationPatch, missingFields:string[], suggestedActions:{kind,title,description,targetWorkstation}[]。kind 只能是 configuration_patch/select_local_project/connect_github/attach_requirement_document/attach_brand_asset/store_demo_credential/confirm_configuration/start_local_analysis/open_workstation/continue_with_webpage_evidence。Sources 不能包含本地绝对路径或 secret。",
 	}, &generated)
 	if err != nil {
 		return response
@@ -410,6 +410,20 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 			session.ActiveWorkstation = proposal.TargetWorkstation
 			session.WorkstationTitle = assistantWorkstationTitle(proposal.TargetWorkstation)
 		}
+	case model.AssistantProposalContinueWithWebpageEvidence:
+		projectID := firstNonEmptyString(session.Context.ProjectID, session.Configuration.AnalysisProjectID)
+		if projectID == "" {
+			return nil, errors.New("analysis project is missing")
+		}
+		assessment, err := s.GetSourceBinding(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		state, err := s.DecideSourceBinding(ctx, projectID, SourceBindingDecisionRequest{Decision: "continue_page_only", AssessmentHash: assessment.AssessmentHash, IdempotencyKey: proposal.IdempotencyKey})
+		if err != nil {
+			return nil, err
+		}
+		proposal.ExecutionResult = map[string]any{"projectID": state.ProjectID, "sourceMode": "page_only", "uploadApproved": false}
 	case model.AssistantProposalSelectLocalProject, model.AssistantProposalConnectGitHub,
 		model.AssistantProposalAttachRequirementDocument, model.AssistantProposalAttachBrandAsset,
 		model.AssistantProposalStoreDemoCredential:

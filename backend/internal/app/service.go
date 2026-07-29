@@ -70,6 +70,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		RequirementReader:    agents.NewRequirementReaderAgentWithLLM(llmRouter),
 		CodeReader:           agents.NewCodeReaderAgentWithLLM(llmRouter, runtime.CacheRoot),
 		PageReader:           agents.NewPageReaderAgent(),
+		SourceBinding:        agents.NewProductSourceBindingAgent(),
 		ProjectIntelligence:  agents.NewProjectIntelligenceGraphWithLLM(llmRouter),
 		Understanding:        agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
 		ProductMap:           agents.NewProductMapAgentWithLLM(llmRouter),
@@ -139,6 +140,9 @@ func (s *Service) DiagnoseModels(ctx context.Context) []llm.DiagnosticResult {
 func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
 	state, err := s.flow.Start(ctx, input)
 	if err != nil {
+		if state != nil && state.ProjectID != "" {
+			_ = s.states.Save(ctx, state)
+		}
 		return state, err
 	}
 	if err := s.states.Save(ctx, state); err != nil {
@@ -150,6 +154,57 @@ func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInpu
 func (s *Service) LoadProject(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
 	return s.states.Load(ctx, projectID)
 }
+
+type SourceBindingDecisionRequest struct {
+	Decision       string `json:"decision"`
+	AssessmentHash string `json:"assessment_hash"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+func (s *Service) GetSourceBinding(ctx context.Context, projectID string) (*model.ProductSourceBindingAssessment, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.SourceBinding == nil {
+		return nil, errors.New("source binding assessment is missing")
+	}
+	return state.SourceBinding, nil
+}
+
+func (s *Service) DecideSourceBinding(ctx context.Context, projectID string, request SourceBindingDecisionRequest) (*orchestrator.CascadeState, error) {
+	if request.Decision != "continue_page_only" {
+		return nil, errors.New("unsupported source binding decision")
+	}
+	if strings.TrimSpace(request.IdempotencyKey) == "" {
+		return nil, errors.New("idempotency_key is required")
+	}
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.SourceBinding == nil || state.SourceBinding.AssessmentHash == "" {
+		return nil, errors.New("source binding assessment is missing")
+	}
+	if request.AssessmentHash == "" || request.AssessmentHash != state.SourceBinding.AssessmentHash {
+		return nil, &SourceBindingStaleError{}
+	}
+	if state.SourceBinding.Decision == request.Decision && state.SourceBinding.EffectiveMode == model.ProductSourceModePageOnly {
+		return state, nil
+	}
+	if state.ProjectContext == nil {
+		return nil, errors.New("project context is missing")
+	}
+	input := userInputFromProjectContext(state.ProjectContext)
+	input.ProjectID = projectID
+	input.SourceBindingDecision = request.Decision
+	input.SourceBindingHash = request.AssessmentHash
+	return s.CreateProject(ctx, input)
+}
+
+type SourceBindingStaleError struct{}
+
+func (e *SourceBindingStaleError) Error() string { return "source binding assessment is stale" }
 
 type ProjectSummary struct {
 	ID                  string    `json:"id"`
@@ -380,6 +435,7 @@ func (s *Service) ArtifactURI(projectID string, fileName string) string {
 
 func userInputFromProjectContext(project *model.ProjectContext) orchestrator.UserInput {
 	input := orchestrator.UserInput{
+		ProjectID:          project.ID,
 		Mode:               project.Mode,
 		ProductURL:         project.ProductURL,
 		GitRepoURL:         project.GitRepoURL,
@@ -393,11 +449,15 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 		ForbiddenPages:     append([]string{}, project.ForbiddenPages...),
 		ForbiddenData:      append([]string{}, project.ForbiddenData...),
 	}
+	if project.SourceBinding != nil {
+		input.SourceBindingDecision = project.SourceBinding.Decision
+		input.SourceBindingHash = project.SourceBinding.AssessmentHash
+	}
 	if project.AccessPolicy != nil {
 		input.AllowedDomains = append([]string{}, project.AccessPolicy.AllowedDomains...)
 	}
 	if project.Inputs != nil {
-		input.Code = append([]model.CodeInput{}, project.Inputs.Code...)
+		input.Code = codeInputsForProjectRerun(project)
 		input.RequirementDocuments = append([]model.RequirementDocumentInput{}, project.Inputs.RequirementDocuments...)
 		input.WebpageScreenshots = append([]model.WebpageScreenshotInput{}, project.Inputs.WebpageScreenshots...)
 		if input.ProductURL == "" && len(project.Inputs.ProductURLs) > 0 {
@@ -418,6 +478,23 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 		}
 	}
 	return input
+}
+
+func codeInputsForProjectRerun(project *model.ProjectContext) []model.CodeInput {
+	if project == nil || project.Inputs == nil {
+		return nil
+	}
+	out := make([]model.CodeInput, 0, len(project.Inputs.Code))
+	for _, code := range project.Inputs.Code {
+		if project.LocalRepoPath != "" && code.ID == "code_local_repo" {
+			continue
+		}
+		if project.GitRepoURL != "" && code.ID == "code_git_repo" {
+			continue
+		}
+		out = append(out, code)
+	}
+	return out
 }
 
 func projectTargetDuration(project *model.ProjectContext) int {

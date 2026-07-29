@@ -584,6 +584,14 @@ export function App() {
           onCloudFailure={() => simulateCloudFailure(true)}
           onRepairScript={() => repairFailedScript(true)}
           onApproveAssets={approveAssets}
+          onReplaceWebpage={() => document.querySelector<HTMLTextAreaElement>(".project-agent-conversation textarea")?.focus()}
+          onReplaceSource={() => { setSelectedProjectID(undefined); setActiveNav("repositories"); }}
+          onContinuePageOnly={async () => {
+            const binding = workspace.sourceBinding;
+            if (!binding) return;
+            const result = await bridge.continueWithWebpageEvidence(workspace.id, binding.assessment_hash, `page-only-${binding.assessment_hash}`);
+            if (result.ok && result.data) setWorkspace(result.data);
+          }}
         />
       ) : <>
       <aside className="sidebar" aria-label="主导航">
@@ -720,6 +728,9 @@ type ProjectAgentWorkspaceProps = {
   onCloudFailure: () => void;
   onRepairScript: () => void;
   onApproveAssets: () => void;
+  onReplaceWebpage: () => void;
+  onReplaceSource: () => void;
+  onContinuePageOnly: () => void;
 };
 
 function ProjectAgentWorkspace({
@@ -740,6 +751,9 @@ function ProjectAgentWorkspace({
   onCloudFailure,
   onRepairScript,
   onApproveAssets,
+  onReplaceWebpage,
+  onReplaceSource,
+  onContinuePageOnly,
 }: ProjectAgentWorkspaceProps) {
   const [workstationView, setWorkstationView] = useState<ProjectWorkstationView>("editor");
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
@@ -774,7 +788,7 @@ function ProjectAgentWorkspace({
         </header>
         <section className={`project-workstation-canvas ${workstationView === "editor" ? "project-workstation-editor-canvas" : ""}`}>
           {workstationView === "overview" ? <ProjectOverviewWorkstation workspace={workspace} /> : null}
-          {workstationView === "evidence" ? <UnderstandingStagePanel workspace={workspace} /> : null}
+          {workstationView === "evidence" ? <UnderstandingStagePanel workspace={workspace} onReplaceWebpage={onReplaceWebpage} onReplaceSource={onReplaceSource} onContinuePageOnly={onContinuePageOnly} /> : null}
           {workstationView === "plan" ? <PlanReviewPanel workspace={workspace} selectedNodeID={selectedNodeID} onSelectNode={onSelectNode} onPatchNode={onPatchNode} /> : null}
           {workstationView === "approval" ? <PackageApproval workspace={workspace} checklist={checklist} blockedReasons={blockedReasons} canUpload={canUpload} isLocalMode={bridge.mode === "local"} onChecklistChange={onChecklistChange} onUpload={onUpload} onCloudSuccess={onCloudSuccess} onCloudFailure={onCloudFailure} onRepairScript={onRepairScript} /> : null}
           {workstationView === "execution" ? <div className="section-stack"><CloudRunPanel workspace={workspace} /><RuntimeLogPanel workspace={workspace} /></div> : null}
@@ -1107,6 +1121,11 @@ function ProjectsPanel({
 
 type RepositoryKind = "github" | "local" | "server";
 
+function safeLocalPathLabel(path?: string) {
+  const normalized = (path ?? "").replaceAll("\\", "/").replace(/\/+$/, "");
+  return normalized.split("/").filter(Boolean).at(-1) ?? "本地项目目录";
+}
+
 function RepositoriesPanel({
   workspace,
   message,
@@ -1166,7 +1185,7 @@ function RepositoriesPanel({
               <div className="repository-row" key={`${repository.kind ?? repository.provider ?? "repository"}-${repository.url ?? repository.local_path ?? repository.host ?? index}`}>
                 <div className="repository-icon">{repository.kind === "github" || repository.provider === "github" ? "GH" : repository.kind === "server" || repository.provider === "server" ? "SV" : "LO"}</div>
                 <div className="repository-details">
-                  <strong>{repository.kind === "github" || repository.provider === "github" ? repository.url : repository.kind === "server" || repository.provider === "server" ? `${repository.username ? `${repository.username}@` : ""}${repository.host}:${repository.path}` : repository.local_path}</strong>
+                  <strong>{repository.kind === "github" || repository.provider === "github" ? repository.url : repository.kind === "server" || repository.provider === "server" ? `${repository.username ? `${repository.username}@` : ""}${repository.host}:${repository.path}` : safeLocalPathLabel(repository.local_path)}</strong>
                   <span>{repository.branch ? `Branch ${repository.branch} · ` : ""}{repository.read_only ? "Read-only source" : "Writable source"}</span>
                 </div>
                 <button type="button" className="text-action muted" onClick={() => onDisconnect(index)}>Disconnect</button>
@@ -1417,10 +1436,11 @@ function InputsPanel({
   );
 }
 
-function UnderstandingStagePanel({ workspace }: { workspace: ProjectWorkspaceView }) {
+function UnderstandingStagePanel({ workspace, onReplaceWebpage, onReplaceSource, onContinuePageOnly }: { workspace: ProjectWorkspaceView; onReplaceWebpage?: () => void; onReplaceSource?: () => void; onContinuePageOnly?: () => void }) {
   return (
     <div className="section-stack">
       <MetricsRow workspace={workspace} />
+      <SourceBindingCard workspace={workspace} {...(onReplaceWebpage ? { onReplaceWebpage } : {})} {...(onReplaceSource ? { onReplaceSource } : {})} {...(onContinuePageOnly ? { onContinuePageOnly } : {})} />
       <UnderstandingPanel workspace={workspace} />
       <ProjectIntelligencePanel workspace={workspace} />
       <CodeSummaryPanel workspace={workspace} />
@@ -1435,6 +1455,35 @@ function UnderstandingStagePanel({ workspace }: { workspace: ProjectWorkspaceVie
         </div>
       </section>
     </div>
+  );
+}
+
+function SourceBindingCard({ workspace, onReplaceWebpage, onReplaceSource, onContinuePageOnly }: { workspace: ProjectWorkspaceView; onReplaceWebpage?: () => void; onReplaceSource?: () => void; onContinuePageOnly?: () => void }) {
+  const binding = workspace.sourceBinding;
+  if (!binding || binding.status === "not_applicable") return null;
+  const mismatched = binding.status === "mismatched" && binding.effective_mode === "blocked";
+  const message = binding.status === "matched"
+    ? "网页与源码身份信号一致，本次允许使用源码路由、组件和 selector 候选。"
+    : binding.status === "unverified"
+      ? "无法可靠证明网页与源码同源，已自动使用仅网页证据模式。"
+      : binding.effective_mode === "page_only"
+        ? "源码与网页不匹配；已按用户确认移除全部源码执行证据。"
+        : "网页与源码来源不匹配，已在生成 Browser Agent 大纲前停止。";
+  return (
+    <section className="table-section">
+      <SectionTitle title="来源一致性" meta={binding.status} />
+      <div className="settings-grid">
+        <Fact label="执行证据模式" value={binding.effective_mode === "mixed" ? "网页 + 已匹配源码" : binding.effective_mode === "page_only" ? "仅网页证据" : "已阻断"} />
+        <Fact label="来源数量" value={`${binding.sources?.length ?? 0} 个`} />
+        <Fact label="评估摘要" value={binding.assessment_hash.slice(0, 16)} />
+      </div>
+      <div className={mismatched ? "error-banner" : "input-note"}>{message}</div>
+      {mismatched ? <div className="section-actions">
+        {onReplaceWebpage ? <button type="button" className="secondary-action" onClick={onReplaceWebpage}>更换网页</button> : null}
+        {onReplaceSource ? <button type="button" className="secondary-action" onClick={onReplaceSource}>更换源码</button> : null}
+        {onContinuePageOnly ? <button type="button" className="secondary-action" onClick={onContinuePageOnly}>仅使用网页证据重新分析</button> : null}
+      </div> : null}
+    </section>
   );
 }
 

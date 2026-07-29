@@ -25,31 +25,33 @@ type RequirementBrief struct {
 }
 
 type CodeUnderstandingSnapshot struct {
-	ID                   string                           `json:"id"`
-	ProjectID            string                           `json:"project_id,omitempty"`
-	SchemaVersion        string                           `json:"schema_version,omitempty"`
-	RepositoryID         string                           `json:"repository_id,omitempty"`
-	URI                  string                           `json:"uri,omitempty"`
-	Branch               string                           `json:"branch,omitempty"`
-	CommitSHA            string                           `json:"commit_sha,omitempty"`
-	Languages            []string                         `json:"languages,omitempty"`
-	Frameworks           []string                         `json:"frameworks,omitempty"`
-	EntrypointHashes     []string                         `json:"entrypoint_hashes,omitempty"`
-	Routes               []RouteInsight                   `json:"routes,omitempty"`
-	Components           []ComponentInsight               `json:"components,omitempty"`
-	Selectors            []SelectorInsight                `json:"selectors,omitempty"`
-	APIEndpoints         []APIEndpointInsight             `json:"api_endpoints,omitempty"`
-	DataModels           []DataModelInsight               `json:"data_models,omitempty"`
-	SensitiveFields      []SensitiveFieldFinding          `json:"sensitive_fields,omitempty"`
-	SourceDigestSHA256   string                           `json:"source_digest_sha256,omitempty"`
-	FileCount            int                              `json:"file_count,omitempty"`
-	ReadBudget           *CodeReadBudget                  `json:"read_budget,omitempty"`
-	InvestigationTrace   *CodeInvestigationTrace          `json:"investigation_trace,omitempty"`
-	InvestigationQuality *CodeInvestigationQualitySummary `json:"investigation_quality,omitempty"`
-	PathDigests          []PathDigest                     `json:"path_digests,omitempty"`
-	EvidenceRefs         []EvidenceRef                    `json:"evidence_refs,omitempty"`
-	Summary              string                           `json:"summary,omitempty"`
-	CreatedAt            time.Time                        `json:"created_at,omitempty"`
+	ID                     string                           `json:"id"`
+	ProjectID              string                           `json:"project_id,omitempty"`
+	SchemaVersion          string                           `json:"schema_version,omitempty"`
+	RepositoryID           string                           `json:"repository_id,omitempty"`
+	URI                    string                           `json:"uri,omitempty"`
+	Branch                 string                           `json:"branch,omitempty"`
+	CommitSHA              string                           `json:"commit_sha,omitempty"`
+	Languages              []string                         `json:"languages,omitempty"`
+	Frameworks             []string                         `json:"frameworks,omitempty"`
+	EntrypointHashes       []string                         `json:"entrypoint_hashes,omitempty"`
+	Routes                 []RouteInsight                   `json:"routes,omitempty"`
+	Components             []ComponentInsight               `json:"components,omitempty"`
+	Selectors              []SelectorInsight                `json:"selectors,omitempty"`
+	APIEndpoints           []APIEndpointInsight             `json:"api_endpoints,omitempty"`
+	DataModels             []DataModelInsight               `json:"data_models,omitempty"`
+	SensitiveFields        []SensitiveFieldFinding          `json:"sensitive_fields,omitempty"`
+	SourceDigestSHA256     string                           `json:"source_digest_sha256,omitempty"`
+	SourceRefHashSHA256    string                           `json:"source_ref_hash_sha256,omitempty"`
+	FileCount              int                              `json:"file_count,omitempty"`
+	ReadBudget             *CodeReadBudget                  `json:"read_budget,omitempty"`
+	InvestigationTrace     *CodeInvestigationTrace          `json:"investigation_trace,omitempty"`
+	InvestigationQuality   *CodeInvestigationQualitySummary `json:"investigation_quality,omitempty"`
+	PathDigests            []PathDigest                     `json:"path_digests,omitempty"`
+	ProductIdentitySignals []ProductIdentitySignal          `json:"product_identity_signals,omitempty"`
+	EvidenceRefs           []EvidenceRef                    `json:"evidence_refs,omitempty"`
+	Summary                string                           `json:"summary,omitempty"`
+	CreatedAt              time.Time                        `json:"created_at,omitempty"`
 }
 
 type CodeReadBudget struct {
@@ -212,23 +214,24 @@ type SensitiveFieldFinding struct {
 }
 
 type PageUnderstandingSnapshot struct {
-	ID              string              `json:"id"`
-	ProjectID       string              `json:"project_id,omitempty"`
-	SchemaVersion   string              `json:"schema_version,omitempty"`
-	URL             string              `json:"url,omitempty"`
-	Title           string              `json:"title,omitempty"`
-	PageRole        string              `json:"page_role,omitempty"`
-	ScreenshotRef   *ArtifactRef        `json:"screenshot_ref,omitempty"`
-	OCRText         string              `json:"ocr_text,omitempty"`
-	VisionSummary   string              `json:"vision_summary,omitempty"`
-	Actions         []PageActionInsight `json:"actions,omitempty"`
-	StableSelectors []SelectorCandidate `json:"stable_selectors,omitempty"`
-	States          []string            `json:"states,omitempty"`
-	RiskFindings    []AgentFinding      `json:"risk_findings,omitempty"`
-	EvidenceRefs    []EvidenceRef       `json:"evidence_refs,omitempty"`
-	Confidence      float64             `json:"confidence,omitempty"`
-	CapturedAt      time.Time           `json:"captured_at,omitempty"`
-	CreatedAt       time.Time           `json:"created_at,omitempty"`
+	ID                     string                  `json:"id"`
+	ProjectID              string                  `json:"project_id,omitempty"`
+	SchemaVersion          string                  `json:"schema_version,omitempty"`
+	URL                    string                  `json:"url,omitempty"`
+	Title                  string                  `json:"title,omitempty"`
+	PageRole               string                  `json:"page_role,omitempty"`
+	ScreenshotRef          *ArtifactRef            `json:"screenshot_ref,omitempty"`
+	OCRText                string                  `json:"ocr_text,omitempty"`
+	VisionSummary          string                  `json:"vision_summary,omitempty"`
+	Actions                []PageActionInsight     `json:"actions,omitempty"`
+	StableSelectors        []SelectorCandidate     `json:"stable_selectors,omitempty"`
+	States                 []string                `json:"states,omitempty"`
+	RiskFindings           []AgentFinding          `json:"risk_findings,omitempty"`
+	ProductIdentitySignals []ProductIdentitySignal `json:"product_identity_signals,omitempty"`
+	EvidenceRefs           []EvidenceRef           `json:"evidence_refs,omitempty"`
+	Confidence             float64                 `json:"confidence,omitempty"`
+	CapturedAt             time.Time               `json:"captured_at,omitempty"`
+	CreatedAt              time.Time               `json:"created_at,omitempty"`
 }
 
 type PageActionInsight struct {

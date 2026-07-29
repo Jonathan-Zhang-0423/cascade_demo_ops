@@ -426,6 +426,13 @@
       }
     ]
   },
+  "source_binding_summary": {
+    "schema_version": "demoops.product_source_binding_assessment.v1",
+    "status": "matched",
+    "effective_mode": "mixed",
+    "assessment_hash": "sha256:source-binding-matched",
+    "source_count": 1
+  },
   "reproducibility": {
     "graph_hash_sha256": "sha256:graph",
     "script_hash_sha256": "sha256:plan",

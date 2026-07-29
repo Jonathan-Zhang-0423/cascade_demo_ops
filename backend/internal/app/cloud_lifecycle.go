@@ -307,7 +307,7 @@ func compactProjectContextForPrepareResponse(project *model.ProjectContext) *mod
 		ProductURL:         project.ProductURL,
 		DemoAccount:        project.DemoAccount,
 		GitRepoURL:         project.GitRepoURL,
-		LocalRepoPath:      project.LocalRepoPath,
+		LocalRepoPath:      safeLocalPathLabelForResponse(project.LocalRepoPath),
 		ProductDescription: truncateForUpload(project.ProductDescription, 1000),
 		TargetAudience:     project.TargetAudience,
 		BrandTone:          project.BrandTone,
@@ -324,7 +324,7 @@ func compactProjectContextForPrepareResponse(project *model.ProjectContext) *mod
 	if project.Inputs != nil {
 		out.Inputs = &model.ProjectInputBundle{
 			ProductURLs:          project.Inputs.ProductURLs,
-			Repositories:         project.Inputs.Repositories,
+			Repositories:         compactRepositoriesForPrepareResponse(project.Inputs.Repositories),
 			Credentials:          project.Inputs.Credentials,
 			Requirements:         project.Inputs.Requirements,
 			RawUserPrompt:        truncateForUpload(project.Inputs.RawUserPrompt, 1000),
@@ -332,6 +332,26 @@ func compactProjectContextForPrepareResponse(project *model.ProjectContext) *mod
 		}
 	}
 	return out
+}
+
+func compactRepositoriesForPrepareResponse(repositories []model.RepositoryInput) []model.RepositoryInput {
+	if len(repositories) == 0 {
+		return nil
+	}
+	out := make([]model.RepositoryInput, len(repositories))
+	copy(out, repositories)
+	for i := range out {
+		out[i].LocalPath = safeLocalPathLabelForResponse(out[i].LocalPath)
+	}
+	return out
+}
+
+func safeLocalPathLabelForResponse(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.Base(filepath.Clean(path))
 }
 
 func compactRequirementDocumentsForPrepareResponse(docs []model.RequirementDocumentInput) []model.RequirementDocumentInput {
@@ -343,6 +363,7 @@ func compactRequirementDocumentsForPrepareResponse(docs []model.RequirementDocum
 	}
 	out := make([]model.RequirementDocumentInput, len(docs))
 	for i, doc := range docs {
+		doc.LocalPath = ""
 		doc.Body = truncateForUpload(doc.Body, 1000)
 		doc.EvidenceRefs = compactEvidenceRefsForUpload(doc.EvidenceRefs, 2)
 		doc.Metadata = nil
@@ -985,6 +1006,13 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 			"auto_flow":                 true,
 			"dev_plaintext_upload_mode": true,
 		},
+	}
+	if state.SourceBinding != nil {
+		pkg.SourceBindingSummary = &model.SourceBindingSummary{
+			SchemaVersion: model.ProductSourceBindingAssessmentSchemaVersion,
+			Status:        state.SourceBinding.Status, EffectiveMode: state.SourceBinding.EffectiveMode,
+			AssessmentHash: state.SourceBinding.AssessmentHash, SourceCount: len(state.SourceBinding.Sources),
+		}
 	}
 	applyBrowserAgentOutlineUploadView(&pkg)
 	if err := redactClientExecutionPackageText(&pkg); err != nil {
@@ -1690,6 +1718,9 @@ func scriptDocumentHasBusinessAction(doc *model.ExecutionScriptDocument) bool {
 
 func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *model.ClientExecutionPackage) []model.AgentFinding {
 	findings := []model.AgentFinding{}
+	if finding := preflightSourceBinding(state, pkg); finding != nil {
+		findings = append(findings, *finding)
+	}
 	if pkg == nil || pkg.ExecutableScriptBundle == nil || pkg.ExecutableScriptBundle.PlanJSON == nil {
 		return append(findings, packagePreflightFinding(
 			"script_bundle_missing",
@@ -1795,6 +1826,76 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 		}
 	}
 	return findings
+}
+
+func preflightSourceBinding(state *orchestrator.CascadeState, pkg *model.ClientExecutionPackage) *model.AgentFinding {
+	if state == nil || state.ProjectContext == nil {
+		return nil
+	}
+	hasCode := len(state.CodeSnapshots) > 0
+	hasPages := len(state.PageSnapshots) > 0
+	if !hasCode || !hasPages {
+		return nil
+	}
+	assessment := state.SourceBinding
+	if assessment == nil || assessment.AssessmentHash == "" {
+		finding := packagePreflightFinding("source_binding_missing", model.FindingSeverityBlocking, "网页与源码的来源绑定评估缺失", "重新运行本地分析，再生成执行包。")
+		return &finding
+	}
+	if assessment.EffectiveMode == model.ProductSourceModeMixed && assessment.Status != model.ProductSourceBindingMatched {
+		finding := packagePreflightFinding("product_source_mismatch", model.FindingSeverityBlocking, "网页与源码来源不匹配", "更换网页或源码；也可以显式选择仅使用网页证据。")
+		return &finding
+	}
+	if assessment.EffectiveMode == model.ProductSourceModeBlocked {
+		finding := packagePreflightFinding("product_source_mismatch", model.FindingSeverityBlocking, "网页与源码来源不匹配", "更换网页或源码；也可以显式选择仅使用网页证据。")
+		return &finding
+	}
+	if assessment.EffectiveMode == model.ProductSourceModePageOnly && model.ClientPackageContainsSourceDerivedExecutionEvidence(pkg) {
+		finding := packagePreflightFinding("source_evidence_leakage", model.FindingSeverityBlocking, "仅网页模式的执行包包含源码派生证据: "+strings.Join(packageSourceEvidenceLocations(pkg), ","), "重新运行仅网页分析，禁止复用旧的源码 selector、路由、组件和 API 摘要。")
+		return &finding
+	}
+	return nil
+}
+
+func packageSourceEvidenceLocations(pkg *model.ClientExecutionPackage) []string {
+	locations := []string{}
+	if pkg == nil {
+		return locations
+	}
+	if refsContainSourceEvidence(pkg.EvidenceBundle.EvidenceRefs) {
+		locations = append(locations, "evidence_bundle")
+	}
+	if refsContainSourceEvidence(pkg.ProductMapSummary.EvidenceRefs) {
+		locations = append(locations, "product_map")
+	}
+	if pkg.WorkflowGraph != nil && refsContainSourceEvidence(pkg.WorkflowGraph.EvidenceRefs) {
+		locations = append(locations, "workflow_graph")
+	}
+	if pkg.ExecutableScriptBundle != nil {
+		bundle := pkg.ExecutableScriptBundle
+		if bundle.StageApprovalPlan != nil && refsContainSourceEvidence(bundle.StageApprovalPlan.EvidenceRefs) {
+			locations = append(locations, "stage_plan")
+		}
+		if bundle.ScriptOutline != nil && refsContainSourceEvidence(bundle.ScriptOutline.EvidenceRefs) {
+			locations = append(locations, "outline")
+		}
+		if bundle.UnderstandingDossier != nil && refsContainSourceEvidence(bundle.UnderstandingDossier.EvidenceRefs) {
+			locations = append(locations, "dossier")
+		}
+	}
+	if len(locations) == 0 {
+		locations = append(locations, "nested_execution_evidence")
+	}
+	return locations
+}
+
+func refsContainSourceEvidence(refs []model.EvidenceRef) bool {
+	for _, ref := range refs {
+		if model.IsSourceEvidenceKind(ref.Kind) {
+			return true
+		}
+	}
+	return false
 }
 
 func blockingFindings(findings []model.AgentFinding) []model.AgentFinding {
@@ -1941,6 +2042,19 @@ func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle)
 				"Declare system prompt, immutable fields, and editable fields for the server browser agent.",
 			))
 		}
+	}
+	if err := model.ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
+		code := "outline_consistency"
+		var consistencyErr *model.OutlineConsistencyError
+		if errors.As(err, &consistencyErr) {
+			code = consistencyErr.Code + "_" + shortID(consistencyErr.NodeID)
+		}
+		findings = append(findings, packagePreflightFinding(
+			code,
+			model.FindingSeverityBlocking,
+			err.Error(),
+			"Regenerate plan_json, stage_approval_plan, and script_outline from deterministic page evidence.",
+		))
 	}
 	return findings
 }
@@ -2105,6 +2219,8 @@ func browserAgentStepNeedsValidation(step model.ScriptStep) bool {
 	switch step.Action.Type {
 	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
 		return true
+	case model.GraphActionWait, model.GraphActionInspect:
+		return step.StageKind == model.BusinessStageKindSessionSetup || step.StageKind == model.BusinessStageKindObserveProgress || step.StageKind == model.BusinessStageKindFinalObserve
 	default:
 		return false
 	}
@@ -2538,6 +2654,16 @@ func evidenceBundleForPackage(state *orchestrator.CascadeState) model.EvidenceBu
 	}
 	if state.ScriptDocument != nil {
 		refs = append(refs, state.ScriptDocument.EvidenceRefs...)
+	}
+	if state.SourceBinding != nil && state.SourceBinding.EffectiveMode == model.ProductSourceModePageOnly {
+		filtered := make([]model.EvidenceRef, 0, len(refs))
+		for _, ref := range refs {
+			if ref.Kind == model.EvidenceKindSourceCode || ref.Kind == model.EvidenceKindCodeSnapshot || ref.Kind == model.EvidenceKindRepoSnapshot {
+				continue
+			}
+			filtered = append(filtered, ref)
+		}
+		refs = filtered
 	}
 	return model.EvidenceBundle{EvidenceRefs: refs}
 }

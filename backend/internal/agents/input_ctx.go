@@ -45,7 +45,10 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 	if targetDurationSec <= 0 {
 		targetDurationSec = 60
 	}
-	projectID := fmt.Sprintf("proj_%d", time.Now().UnixNano())
+	projectID := strings.TrimSpace(input.ProjectID)
+	if projectID == "" {
+		projectID = fmt.Sprintf("proj_%d", time.Now().UnixNano())
+	}
 	audience := model.AudienceProfile{
 		ID:            "audience_primary",
 		Name:          input.TargetAudience,
@@ -120,6 +123,11 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 		},
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	if input.SourceBindingDecision != "" || input.SourceBindingHash != "" {
+		project.SourceBinding = &model.ProductSourceBindingAssessment{
+			Decision: input.SourceBindingDecision, AssessmentHash: input.SourceBindingHash,
+		}
 	}
 	if input.DemoUsername != "" || input.DemoPassword != "" {
 		project.DemoAccount = &model.DemoAccount{

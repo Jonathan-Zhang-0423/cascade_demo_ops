@@ -791,7 +791,7 @@ func browserAgentInteractionFromStep(step model.ScriptStep, evidence []model.Evi
 		Parameters:     step.Action.Parameters,
 		WaitUntil:      step.Action.WaitUntil,
 		WaitConditions: waitConditionsForStep(step),
-		NonDestructive: !isBusinessAction(step.Action.Type),
+		NonDestructive: step.NonDestructive,
 		SelectorPolicy: "server_may_repair_within_stage_evidence",
 		EvidenceRefs:   evidence,
 	}
@@ -1478,6 +1478,7 @@ func componentTargetsForStep(step model.ScriptStep, stage model.StageApprovalSta
 	components := []model.BrowserAgentComponentTarget{{
 		ComponentRef:         firstNonEmpty(target.ComponentRef, firstString(stage.ComponentRefs, "")),
 		RouteRef:             stage.TargetRoute,
+		Source:               target.Source,
 		Role:                 target.Role,
 		Name:                 firstNonEmpty(target.Label, target.Text),
 		Text:                 target.Text,
@@ -1499,6 +1500,7 @@ func componentTargetsForStep(step model.ScriptStep, stage model.StageApprovalSta
 			components = append(components, model.BrowserAgentComponentTarget{
 				ComponentRef:         action.ComponentRef,
 				RouteRef:             action.RouteRef,
+				Source:               action.VerificationSource,
 				Label:                action.Label,
 				Selector:             action.Selector,
 				SelectorAlternatives: action.Alternatives,
@@ -1924,6 +1926,21 @@ func uncertaintyReportForBundle(project *model.ProjectContext, intelligence *mod
 	if graph == nil || len(graph.Nodes) == 0 {
 		items = append(items, model.StageUncertainty{ID: "uncertain_graph_empty_" + shortHash(project.ID), Kind: "workflow_graph", Summary: "执行图为空，无法生成 stage 大纲。", Blocking: true})
 	}
+	if project != nil && project.DemoAccount == nil && graph != nil {
+		for _, node := range graph.Nodes {
+			if businessStageKindForNode(node) != model.BusinessStageKindSessionSetup {
+				continue
+			}
+			items = append(items, model.StageUncertainty{
+				ID:              "human_checkpoint_session_" + shortHash(node.ID),
+				NodeID:          node.ID,
+				Kind:            "human_checkpoint",
+				Summary:         "登录阶段没有可执行的 credential secret_ref，不能自动声称已进入工作台。",
+				Blocking:        true,
+				SuggestedAction: "由用户人工完成登录并确认工作台页面，或通过安全卡片保存演示凭据后重新生成。",
+			})
+		}
+	}
 	return items
 }
 
@@ -2246,10 +2263,19 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 		}
 		validations = ensureRequiredValidationsForStep(node, action, target, validations)
 		targetContract := targetContractForNode(node, action, target, validations)
+		nonDestructive := targetContract != nil && !targetContract.Destructive
+		if node.Metadata != nil {
+			if approved, ok := node.Metadata["non_destructive"].(bool); ok {
+				nonDestructive = approved
+			}
+		}
 		steps = append(steps, model.ScriptStep{
 			ID:              fmt.Sprintf("step_%02d_%s", i+1, node.ID),
 			Order:           i + 1,
 			NodeID:          node.ID,
+			StageKind:       businessStageKindForNode(node),
+			RouteState:      businessRouteStateForNode(node),
+			NonDestructive:  nonDestructive,
 			Title:           firstNonEmpty(node.Title, "执行步骤"),
 			BusinessValue:   firstNonEmpty(node.Goal, node.Description),
 			PageTarget:      target,
@@ -2342,6 +2368,30 @@ func ensureRequiredValidationsForStep(node *model.GraphNode, action model.Script
 			Kind:      kind,
 			Target:    validationTarget,
 			Assertion: firstNonEmpty(node.ExpectedOutcome, "关键业务控件可见并完成操作"),
+			Expected:  expected,
+			Severity:  "blocking",
+			Required:  true,
+		})
+	case model.GraphActionWait, model.GraphActionInspect:
+		stageKind := businessStageKindForNode(node)
+		if stageKind != model.BusinessStageKindSessionSetup && stageKind != model.BusinessStageKindObserveProgress && stageKind != model.BusinessStageKindFinalObserve {
+			break
+		}
+		validationTarget := action.Target
+		if validationTarget.URL == "" {
+			validationTarget.URL = target.URL
+		}
+		kind := "url_matches"
+		expected := any(validationTarget.URL)
+		if validationTarget.URL == "" {
+			kind = "text_contains"
+			expected = firstNonEmpty(node.ExpectedOutcome, node.Title, node.Goal)
+		}
+		out = append(out, model.ValidationSpec{
+			ID:        "validate_observation_" + node.ID,
+			Kind:      kind,
+			Target:    validationTarget,
+			Assertion: firstNonEmpty(node.ExpectedOutcome, "观察阶段必须验证页面状态"),
 			Expected:  expected,
 			Severity:  "blocking",
 			Required:  true,

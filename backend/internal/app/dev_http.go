@@ -371,6 +371,17 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "":
 		state, err := s.service.LoadProject(r.Context(), projectID)
 		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodGet && suffix == "/source-binding":
+		assessment, err := s.service.GetSourceBinding(r.Context(), projectID)
+		writeBridgeValue(w, assessment, err)
+	case r.Method == http.MethodPost && suffix == "/source-binding/decisions":
+		var request SourceBindingDecisionRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		state, err := s.service.DecideSourceBinding(r.Context(), projectID, request)
+		writeBridgeValue(w, state, err)
 	case r.Method == http.MethodPost && suffix == "/archive":
 		err := s.service.ArchiveProject(r.Context(), projectID)
 		writeBridgeValue(w, map[string]bool{"archived": err == nil}, err)
