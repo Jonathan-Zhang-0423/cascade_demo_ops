@@ -88,6 +88,8 @@ type CloudPackagePreflightResult struct {
 	StageCount     int      `json:"stage_count,omitempty"`
 	RequiredChecks int      `json:"required_checks,omitempty"`
 	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	Warnings       []string `json:"warnings"`
+	Readiness      *BrowserAgentReadinessReport `json:"browser_agent_readiness,omitempty"`
 	Message        string   `json:"message"`
 }
 
@@ -656,24 +658,7 @@ func (s *Service) PreflightCloudExecutionPackage(ctx context.Context, build Clie
 	}, build.Package); err != nil {
 		return CloudPackagePreflightResult{}, err
 	}
-	result := CloudPackagePreflightResult{
-		Valid: true, PackageID: build.Package.PackageID, AllowedDomains: append([]string{}, build.Package.RecordingRunSpec.AllowedDomains...),
-		Message: "Server Intake 校验通过：尚未上传、尚未启动浏览器、尚未读取任何客户页面。",
-	}
-	if bundle := build.Package.ExecutableScriptBundle; bundle != nil {
-		result.Runtime = bundle.ScriptManifest.Runtime
-		if bundle.PlanJSON != nil {
-			result.StageCount = len(bundle.PlanJSON.Steps)
-			for _, step := range bundle.PlanJSON.Steps {
-				for _, validation := range step.Validations {
-					if validation.Required {
-						result.RequiredChecks++
-					}
-				}
-			}
-		}
-	}
-	return result, nil
+	return executionPackagePreflightResult(build.Package), nil
 }
 
 func (s *Service) GetCloudExecutionPackageStatus(ctx context.Context, request CloudStatusRequest) (model.ExecutionPackageStatusResponse, error) {

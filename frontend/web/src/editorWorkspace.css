@@ -757,6 +757,46 @@ button.studio-asset-card:hover,
   font-size: 8px;
 }
 
+.studio-render-download,
+.studio-render-link,
+.studio-render-diagnostic {
+  border: 1px solid #3d685b;
+  border-radius: 5px;
+  color: #9aecd0;
+  background: #14251f;
+  font-size: 9px;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.studio-render-download {
+  padding: 8px 10px;
+  font-weight: 750;
+}
+
+.studio-render-link,
+.studio-render-diagnostic {
+  margin-left: 8px;
+  padding: 4px 6px;
+}
+
+.studio-render-diagnostic {
+  border-color: #815351;
+  color: #ffb3b8;
+  background: #2c191c;
+}
+
+.studio-render-download:hover,
+.studio-render-link:hover {
+  border-color: var(--studio-mint);
+  background: #193329;
+}
+
+.studio-render-diagnostic:hover {
+  border-color: var(--studio-red);
+  background: #402124;
+}
+
 .studio-properties-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -1486,6 +1526,34 @@ button.studio-asset-card:hover,
   color: var(--studio-muted);
   font-size: 8px;
   line-height: 1.45;
+}
+
+/* The import flow is a form-heavy first step, so use a larger local type scale. */
+.studio-import-modal .studio-modal-header strong {
+  font-size: 14px;
+}
+
+.studio-import-modal .studio-import-choices strong {
+  font-size: 12px;
+}
+
+.studio-import-modal .studio-import-choices small,
+.studio-import-modal .studio-dialog-note {
+  font-size: 10px;
+}
+
+.studio-import-modal .studio-field {
+  font-size: 10px;
+}
+
+.studio-import-modal .studio-field input {
+  min-height: 36px;
+  font-size: 13px;
+}
+
+.studio-import-modal .studio-modal-footer button {
+  min-height: 34px;
+  font-size: 11px;
 }
 
 .studio-dialog-note {

@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -95,10 +94,13 @@ export type BrowserAgentOpenRequest = {
     record_video?: boolean;
   };
   allowed_domains: string[];
+  allowed_origins?: string[];
+  allowed_routes?: string[];
   forbidden_pages?: string[];
   forbidden_path_prefixes?: string[];
   forbidden_keywords?: string[];
   mask_selectors?: string[];
+	recording_sensitive?: boolean;
 };
 
 export type BrowserAgentStageRequest = {
@@ -160,10 +162,13 @@ type BrowserAgentSession = {
   tracePath: string;
   engine: string;
   allowedDomains: string[];
+  allowedOrigins: string[];
+  allowedRoutes: string[];
   forbiddenPages: string[];
   forbiddenPathPrefixes: string[];
   forbiddenKeywords: string[];
   maskSelectors: string[];
+	recordingSensitive: boolean;
 };
 
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
@@ -214,13 +219,17 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
     tracePath,
     engine: engineName,
     allowedDomains: request.allowed_domains,
+    allowedOrigins: request.allowed_origins || [],
+    allowedRoutes: request.allowed_routes || [],
     forbiddenPages: request.forbidden_pages || [],
     forbiddenPathPrefixes: request.forbidden_path_prefixes || [],
     forbiddenKeywords: request.forbidden_keywords || [],
     maskSelectors: request.mask_selectors || [],
+		recordingSensitive: request.recording_sensitive ?? true,
   };
   await page.route("**/*", async (route: any) => {
-    const error = urlPolicyError(route.request().url(), session, true);
+    // Route allowlists apply to document navigation, not the page's JS/CSS/media.
+    const error = urlPolicyError(route.request().url(), session, !route.request().isNavigationRequest());
     if (error) {
       await route.abort("blockedbyclient");
       return;
@@ -325,7 +334,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
       "video/webm",
       undefined,
       { include_in_demo: true, redaction_applied: true, mask_selector_count: session.maskSelectors.length },
-      false,
+      session.recordingSensitive,
     ));
   }
   // Failed observations may throw after their before-capture. Recover every
@@ -482,7 +491,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMS: number, fallback: 
   }
 }
 
-async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerStage): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
+export async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerStage): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   for (const validation of (stage.validations || []).filter((item) => item.required)) {
     const timeout = Math.max(250, Math.min(30_000, validation.timeout_ms || actionTimeoutMS));
@@ -493,6 +502,12 @@ async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerS
         const expected = validation.target?.url || scalarExpected(validation) || stage.url || stage.route;
         actual = safeURL(page.url());
         passed = Boolean(expected) && urlMatches(page.url(), String(expected));
+      } else if (validation.kind === "page_loaded") {
+        // App exports this for navigation stages. A loaded document is a
+        // deterministic browser fact, not an inferred business outcome.
+        const readyState = await page.evaluate(() => (globalThis as any).document?.readyState || "unavailable").catch(() => "unavailable");
+        passed = readyState === "interactive" || readyState === "complete";
+        actual = String(readyState);
       } else if (validation.kind === "element_visible") {
         const locator = locatorForValidation(page, validation);
         passed = await locator.first().isVisible({ timeout }).catch(() => false);
@@ -625,7 +640,7 @@ function requiredSession(id: string): BrowserAgentSession {
   return session;
 }
 
-function urlPolicyError(value: string, session: BrowserAgentSession, allowSubresource: boolean): string | undefined {
+export function urlPolicyError(value: string, session: BrowserAgentSession, allowSubresource: boolean): string | undefined {
   if (allowSubresource && /^(about:|data:|blob:)/i.test(value)) return undefined;
   let parsed: URL;
   try {
@@ -635,7 +650,9 @@ function urlPolicyError(value: string, session: BrowserAgentSession, allowSubres
   }
   if (!allowSubresource && parsed.protocol !== "http:" && parsed.protocol !== "https:") return `browser_agent_domain_not_allowed: ${parsed.protocol}`;
   if (!hostAllowed(parsed.hostname, session.allowedDomains)) return `browser_agent_domain_not_allowed: ${parsed.hostname}`;
+  if (!allowSubresource && !originAllowed(parsed, session.allowedOrigins)) return `browser_agent_origin_not_allowed: ${parsed.origin}`;
   const normalizedPath = `/${parsed.pathname.replace(/^\/+/, "")}`.toLowerCase();
+  if (!allowSubresource && !routeAllowed(normalizedPath, session.allowedRoutes)) return `browser_agent_route_not_allowed: ${normalizedPath}`;
   for (const forbidden of [...session.forbiddenPages, ...session.forbiddenPathPrefixes]) {
     const prefix = `/${String(forbidden).replace(/^\/+/, "")}`.toLowerCase();
     if (prefix !== "/" && (normalizedPath === prefix || normalizedPath.startsWith(`${prefix.replace(/\/$/, "")}/`))) {
@@ -710,6 +727,37 @@ async function waitForCaptureWindow(page: any, stage: BrowserAgentWorkerStage): 
   await waitForPageSettled(page);
 }
 
+function originAllowed(parsed: URL, allowedOrigins: string[]): boolean {
+  return allowedOrigins.some((value) => {
+    try {
+      const approved = new URL(value);
+      return approved.protocol === parsed.protocol && approved.host.toLowerCase() === parsed.host.toLowerCase();
+    } catch {
+      return false;
+    }
+  });
+}
+
+function routeAllowed(pathname: string, allowedRoutes: string[]): boolean {
+  const path = normalizeRoute(pathname);
+  return allowedRoutes.some((route) => {
+    const approved = normalizeRoute(route);
+    return approved === "/" || path === approved || path.startsWith(`${approved}/`);
+  });
+}
+
+function normalizeRoute(value: string): string {
+  let pathname = value.trim();
+  try {
+    const parsed = new URL(pathname);
+    pathname = parsed.pathname;
+  } catch {
+    // Routes in the contract are relative paths.
+  }
+  const normalized = `/${pathname.replace(/^\/+/, "").replace(/\/+$/, "")}`.toLowerCase();
+  return normalized === "" ? "/" : normalized;
+}
+
 async function waitForObservationWindow(page: any, stage: BrowserAgentWorkerStage): Promise<void> {
   const waitMS = entryWaitMilliseconds(stage);
   if (waitMS > 0) await page.waitForTimeout(waitMS);
@@ -760,6 +808,7 @@ async function compactElementSemantics(locator: any): Promise<{ role: string; na
     const implicitRoles: Record<string, string> = {
       button: "button", select: "combobox", textarea: "textbox", main: "main", nav: "navigation",
       form: "form", table: "table", img: "img", ul: "list", ol: "list", li: "listitem",
+      h1: "heading", h2: "heading", h3: "heading", h4: "heading", h5: "heading", h6: "heading",
     };
     let role = explicitRole || implicitRoles[tag] || "";
     if (tag === "a" && element.hasAttribute?.("href")) role = "link";
@@ -803,15 +852,9 @@ function normalizeEngine(value?: string): "chromium" | "firefox" | "webkit" {
 
 function configuredBrowserExecutable(): string | undefined {
   const configured = process.env.CASCADE_BROWSER_EXECUTABLE_PATH?.trim();
-  if (configured) return configured;
-  if (process.platform !== "win32") return undefined;
-  const candidates = [
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  ];
-  return candidates.find((candidate) => existsSync(candidate));
+  // Playwright's pinned Chromium is the reproducible default. An operator may
+  // still explicitly select a managed browser for a special environment.
+  return configured || undefined;
 }
 
 async function artifactRef(id: string, kind: string, filePath: string, mimeType: string, sourceNodeID?: string, metadata: Record<string, unknown> = {}, sensitive = true): Promise<ArtifactRef> {

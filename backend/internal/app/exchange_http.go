@@ -59,6 +59,7 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("POST /v1/execution-packages/init", s.requireDevExchangeAuth(s.handleExecutionPackageInit))
+	mux.HandleFunc("POST /v1/execution-packages/validate", s.requireDevExchangeAuth(s.handleExecutionPackageValidate))
 	mux.HandleFunc("POST /v1/execution-packages", s.requireDevExchangeAuth(s.handleExecutionPackageUpload))
 	mux.HandleFunc("GET /v1/execution-packages/{id}/status", s.requireDevExchangeAuth(s.handleExecutionPackageStatus))
 	mux.HandleFunc("GET /v1/execution-packages/{id}/events", s.requireDevExchangeAuth(s.handleExecutionPackageEvents))
@@ -73,6 +74,7 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/dev/execution-packages/{id}/debug", s.requireDevExchangeAuth(s.handleDevExecutionPackageDebug))
 	mux.HandleFunc("GET /v1/dev/result-packages/{id}/deliverables/{artifact_id}", s.requireDevExchangeAuth(s.handleDevResultDeliverableDownload))
 	mux.HandleFunc("POST /aigc/v1/execution-packages/init", s.requireDevExchangeAuth(s.handleExecutionPackageInit))
+	mux.HandleFunc("POST /aigc/v1/execution-packages/validate", s.requireDevExchangeAuth(s.handleExecutionPackageValidate))
 	mux.HandleFunc("POST /aigc/v1/execution-packages", s.requireDevExchangeAuth(s.handleExecutionPackageUpload))
 	mux.HandleFunc("GET /aigc/v1/execution-packages/{id}/status", s.requireDevExchangeAuth(s.handleExecutionPackageStatus))
 	mux.HandleFunc("GET /aigc/v1/execution-packages/{id}/events", s.requireDevExchangeAuth(s.handleExecutionPackageEvents))
@@ -165,6 +167,23 @@ func (s *DevHTTPServer) handleExecutionPackageUpload(w http.ResponseWriter, r *h
 			response.Status = runStatus.Status
 		}
 	}
+	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleExecutionPackageValidate(w http.ResponseWriter, r *http.Request) {
+	var body exchangeUploadHTTPBody
+	if err := decodeJSON(r, &body); err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "bad_request", err)
+		return
+	}
+	request := model.ExecutionPackageUploadRequest{UploadID: body.UploadID, Envelope: body.Envelope, PayloadRef: body.PayloadRef}
+	if body.Request != nil {
+		request = *body.Request
+	}
+	if request.PayloadRef.Kind == "" {
+		request.PayloadRef = request.Envelope.PayloadRef
+	}
+	response, err := s.service.ValidateExecutionPackage(r.Context(), request, body.Payload)
 	writeExchangeValue(w, response, err)
 }
 
