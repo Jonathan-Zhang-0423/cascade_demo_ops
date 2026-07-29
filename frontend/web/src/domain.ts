@@ -131,6 +131,14 @@ export type ExecutionPackagePreview = {
   ipAllowlistAcknowledged: boolean;
   credentialGrants: CredentialGrantPreview[];
   blockedReasons: string[];
+  buildStatus?: "draft" | "approved";
+  approvalSubjectDigest?: string;
+  confidenceAssessmentHash?: string;
+  readiness?: "blocked" | "review_required" | "ready";
+  confidenceScore?: number;
+  confidenceWarnings?: string[];
+  totalBytes?: number;
+  sectionBytes?: Record<string, number>;
 };
 
 export type CredentialGrantPreview = {

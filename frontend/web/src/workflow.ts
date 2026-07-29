@@ -177,6 +177,9 @@ export function packageApprovalBlockedReasons(
   sources: SourceConnectionView[],
 ): string[] {
   const blocked = new Set<string>(preview.blockedReasons);
+  if (preview.readiness === "blocked") {
+    blocked.add("执行包确信度门禁未通过，请先修复阻断项。");
+  }
   if (!checklist.userApprovedPlan) {
     blocked.add("上传前必须完成人工审批。");
   }

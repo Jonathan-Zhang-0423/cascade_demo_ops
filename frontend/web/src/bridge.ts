@@ -335,8 +335,19 @@ type LocalClientExecutionPackageBuild = {
   org_id: string;
   project_id: string;
   package: ClientExecutionPackage;
-  envelope: ExchangeEnvelope;
-  payload_ref: EncryptedPayloadRef;
+  envelope?: ExchangeEnvelope;
+  payload_ref?: EncryptedPayloadRef;
+  build_status: "draft" | "approved";
+  approval_subject_digest_sha256: string;
+  package_digest_sha256: string;
+  size_report: {
+    algorithm_version: string;
+    total_bytes: number;
+    section_bytes: Record<string, number>;
+    stage_count: number;
+    evidence_count: number;
+    selector_count: number;
+  };
 };
 
 type LocalCloudLifecycleResult = {
@@ -570,9 +581,10 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return ok(result.data.map(modelDiagnosticFromLocal));
     },
     async preflightExecutionPackage(workspace) {
+	  const preview = workspace.packagePreview;
       return requestLocal<CloudPackagePreflightView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/preflight`, {
         method: "POST",
-        body: JSON.stringify({ org_id: orgID }),
+		body: JSON.stringify({ org_id: orgID, approval_subject_digest_sha256: preview.approvalSubjectDigest ?? preview.packageDigest, confidence_assessment_hash: preview.confidenceAssessmentHash ?? preview.packageDigest, risk_confirmed: true, idempotency_key: `preflight-${workspace.id}-${preview.approvalSubjectDigest ?? preview.packageDigest}` }),
       });
     },
     async editorMaterialization(workspace) {
@@ -751,69 +763,19 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         current = workspaceWithPreparedBuild(current, prepared.data.build);
       }
       projects.set(current.id, current);
-
-      const init = await this.initExecutionPackageUpload(current);
-      if (!init.ok || !init.data) {
-        const failed = workspaceWithCloudPhaseFailure(current, "cloud_auth_unavailable", init.error ?? "服务器连接/上传初始化失败", init.errorInfo);
-        projects.set(failed.id, failed);
-        return ok(failed);
-      }
-      current = workspaceWithCloudInit(current, {
-        build: cloudBuilds.get(current.id),
-        init: localInitResponseFromView(init.data),
-      });
-      projects.set(current.id, current);
-
-      const upload = await this.uploadExecutionPackage(current);
-      if (!upload.ok || !upload.data) {
-        const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", upload.error ?? "上传执行包失败", upload.errorInfo);
-        projects.set(failed.id, failed);
-        return ok(failed);
-      }
-      current = workspaceWithCloudUpload(current, localUploadPackageResultFromView(upload.data, cloudBuilds.get(current.id)));
-      projects.set(current.id, current);
-
-      const deadline = Date.now() + 900_000;
-      const streamed = await streamCloudExecutionStatus(baseURL, current, orgID, deadline, (next) => {
-        projects.set(next.id, next);
-        options?.onCloudStatus?.(next);
-      });
-      if (streamed) {
-        current = streamed;
-        projects.set(current.id, current);
-      }
-      if (isTerminalCloudRun(current.cloudRun.status)) {
-        const finalized = await this.pollExecutionPackageStatus(current);
-        if (finalized.ok && finalized.data) {
-          current = finalized.data;
-          options?.onCloudStatus?.(current);
-        }
-      }
-      while (!isTerminalCloudRun(current.cloudRun.status) && Date.now() < deadline) {
-        const polled = await this.pollExecutionPackageStatus(current);
-        if (!polled.ok || !polled.data) {
-          const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", polled.error ?? "轮询服务器执行状态失败", polled.errorInfo);
-          projects.set(failed.id, failed);
-          return ok(failed);
-        }
-        current = polled.data;
-        options?.onCloudStatus?.(current);
-        if (!isTerminalCloudRun(current.cloudRun.status)) {
-          await delay(1000);
-        }
-      }
-      if (!isTerminalCloudRun(current.cloudRun.status)) {
-        const failed = workspaceWithCloudPhaseFailure(current, "cloud_upload_failed", "服务器录制状态轮询超时", undefined);
-        projects.set(failed.id, failed);
-        return ok(failed);
-      }
-      projects.set(current.id, current);
-      return ok(current);
+	  return ok(current);
     },
     async initExecutionPackageUpload(workspace) {
+	  const preview = workspace.packagePreview;
       const result = await requestLocal<LocalCloudUploadInitResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/init`, {
         method: "POST",
-        body: JSON.stringify({ org_id: orgID }),
+		body: JSON.stringify({
+		  org_id: orgID,
+		  approval_subject_digest_sha256: preview.approvalSubjectDigest ?? preview.packageDigest,
+		  confidence_assessment_hash: preview.confidenceAssessmentHash ?? preview.packageDigest,
+		  risk_confirmed: true,
+		  idempotency_key: `approve-${workspace.id}-${preview.approvalSubjectDigest ?? preview.packageDigest}`,
+		}),
       });
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "初始化服务器上传会话失败", result.errorInfo);
@@ -1714,7 +1676,7 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
       ...workspace.packagePreview,
       ipAllowlistAcknowledged: true,
       packageID: lifecycle.build?.package.package_id ?? workspace.packagePreview.packageID,
-      packageDigest: lifecycle.build?.envelope.crypto.payload_digest_sha256 ?? workspace.packagePreview.packageDigest,
+      packageDigest: lifecycle.build?.package_digest_sha256 ?? workspace.packagePreview.packageDigest,
     },
     cloudRun: {
       ...workspace.cloudRun,
@@ -1749,7 +1711,16 @@ function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: Loca
       ...workspace.packagePreview,
       ipAllowlistAcknowledged: true,
       packageID: build.package.package_id ?? workspace.packagePreview.packageID,
-      packageDigest: build.envelope.crypto.payload_digest_sha256 ?? workspace.packagePreview.packageDigest,
+	  packageDigest: build.package_digest_sha256 || workspace.packagePreview.packageDigest,
+	  buildStatus: build.build_status,
+	  approvalSubjectDigest: build.approval_subject_digest_sha256,
+	  ...(build.package.confidence_summary?.assessment_hash ? { confidenceAssessmentHash: build.package.confidence_summary.assessment_hash } : {}),
+	  ...(build.package.confidence_summary?.readiness ? { readiness: build.package.confidence_summary.readiness } : {}),
+	  ...(build.package.confidence_summary?.overall_score != null ? { confidenceScore: build.package.confidence_summary.overall_score } : {}),
+	  ...(build.package.confidence_summary?.warnings ? { confidenceWarnings: build.package.confidence_summary.warnings } : {}),
+	  ...(build.size_report?.total_bytes != null ? { totalBytes: build.size_report.total_bytes } : {}),
+	  ...(build.size_report?.section_bytes ? { sectionBytes: build.size_report.section_bytes } : {}),
+	  blockedReasons: build.package.confidence_summary?.blocking_reasons ?? workspace.packagePreview.blockedReasons,
     },
     cloudRun: {
       ...workspace.cloudRun,
@@ -1811,7 +1782,8 @@ function workspaceWithCloudInit(workspace: ProjectWorkspaceView, result: LocalCl
       ...workspace.packagePreview,
       ipAllowlistAcknowledged: true,
       packageID: build?.package.package_id ?? workspace.packagePreview.packageID,
-      packageDigest: build?.envelope.crypto.payload_digest_sha256 ?? workspace.packagePreview.packageDigest,
+	  packageDigest: build?.package_digest_sha256 ?? workspace.packagePreview.packageDigest,
+	  ...(build?.build_status ? { buildStatus: build.build_status } : {}),
     },
     cloudRun: {
       ...workspace.cloudRun,

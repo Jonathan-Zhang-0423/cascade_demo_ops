@@ -57,6 +57,15 @@ describe("workflow helpers", () => {
     expect(canUploadExecutionPackage(preview, checklist, readySources)).toBe(true);
   });
 
+  it("blocks confidence-gated package even when approval checklist is complete", () => {
+	const workspace = createWorkspace("product_demo");
+	const checklist: ApprovalChecklistState = { userApprovedPlan: true, ipAllowlistAcknowledged: true, sourceSummaryOnlyAcknowledged: true, credentialGrantAcknowledged: true, redactionsReviewed: true };
+	const preview = { ...workspace.packagePreview, readiness: "blocked" as const, blockedReasons: ["node_checkout: 缺少必填确定性结果验证"] };
+	const sources = workspace.sourceConnections.map((source) => ({ ...source, status: "ready" as const }));
+	expect(canUploadExecutionPackage(preview, checklist, sources)).toBe(false);
+	expect(packageApprovalBlockedReasons(preview, checklist, sources)).toContain("执行包确信度门禁未通过，请先修复阻断项。");
+  });
+
   it("treats the UI allowlist acknowledgement as enough for mock package upload", () => {
     const workspace = createWorkspace("product_demo");
     const checklist: ApprovalChecklistState = {

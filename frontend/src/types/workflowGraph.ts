@@ -1727,8 +1727,40 @@ export type ClientExecutionPackage = {
   evidence_bundle?: Record<string, unknown>;
   reproducibility: ReproducibilitySpec;
   safety_report?: Record<string, unknown>;
+  confidence_summary?: PackageConfidenceSummary;
   repair_context?: ScriptRepairContext;
   metadata?: Record<string, unknown>;
+};
+
+export type PackageReadiness = "blocked" | "review_required" | "ready";
+
+export type PackageStageConfidenceAssessment = {
+  node_id: string;
+  stage_kind?: BusinessStageKind;
+  overall_score: number;
+  business_intent_score: number;
+  result_validation_score: number;
+  evidence_quality_score: number;
+  target_selector_score: number;
+  safety_source_score: number;
+  blocking_reasons?: string[];
+  warnings?: string[];
+};
+
+export type PackageConfidenceSummary = {
+  overall_score: number;
+  readiness: PackageReadiness;
+  stages: PackageStageConfidenceAssessment[];
+  requirement_coverage: number;
+  deterministic_validation_coverage: number;
+  runtime_page_evidence_coverage: number;
+  selector_quality: number;
+  source_binding_status?: string;
+  source_binding_mode?: string;
+  blocking_reasons?: string[];
+  warnings?: string[];
+  algorithm_version: string;
+  assessment_hash: string;
 };
 
 export type AgentError = {
@@ -1842,6 +1874,7 @@ export type UserApprovalRecord = {
   approved_by_user_id?: string;
   approved_at: string;
   plan_digest_sha256: string;
+  approval_subject_digest_sha256?: string;
   reviewed_node_ids?: string[];
   notes?: string[];
 };

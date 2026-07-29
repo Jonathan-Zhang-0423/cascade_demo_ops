@@ -200,6 +200,7 @@ type ClientExecutionPackage struct {
 	Reproducibility        ReproducibilitySpec              `json:"reproducibility"`
 	SafetyReport           PackageSafetyReport              `json:"safety_report"`
 	SourceBindingSummary   *SourceBindingSummary            `json:"source_binding_summary,omitempty"`
+	ConfidenceSummary      *PackageConfidenceSummary        `json:"confidence_summary,omitempty"`
 	RepairContext          *ScriptRepairContext             `json:"repair_context,omitempty"`
 	Metadata               map[string]any                   `json:"metadata,omitempty"`
 }
@@ -508,12 +509,13 @@ type PackageSafetyReport struct {
 }
 
 type UserApprovalRecord struct {
-	ApprovalID       string    `json:"approval_id"`
-	ApprovedByUserID string    `json:"approved_by_user_id,omitempty"`
-	ApprovedAt       time.Time `json:"approved_at"`
-	PlanDigestSHA256 string    `json:"plan_digest_sha256"`
-	ReviewedNodeIDs  []string  `json:"reviewed_node_ids,omitempty"`
-	Notes            []string  `json:"notes,omitempty"`
+	ApprovalID                  string    `json:"approval_id"`
+	ApprovedByUserID            string    `json:"approved_by_user_id,omitempty"`
+	ApprovedAt                  time.Time `json:"approved_at"`
+	PlanDigestSHA256            string    `json:"plan_digest_sha256"`
+	ApprovalSubjectDigestSHA256 string    `json:"approval_subject_digest_sha256,omitempty"`
+	ReviewedNodeIDs             []string  `json:"reviewed_node_ids,omitempty"`
+	Notes                       []string  `json:"notes,omitempty"`
 }
 
 type RecordingResultPackage struct {

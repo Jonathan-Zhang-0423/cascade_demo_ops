@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,16 +32,33 @@ const (
 )
 
 type ClientExecutionPackageBuild struct {
-	OrgID      string                       `json:"org_id"`
-	ProjectID  string                       `json:"project_id"`
-	Package    model.ClientExecutionPackage `json:"package"`
-	Envelope   model.ExchangeEnvelope       `json:"envelope"`
-	PayloadRef model.EncryptedPayloadRef    `json:"payload_ref"`
+	OrgID                       string                       `json:"org_id"`
+	ProjectID                   string                       `json:"project_id"`
+	Package                     model.ClientExecutionPackage `json:"package"`
+	Envelope                    model.ExchangeEnvelope       `json:"envelope,omitempty"`
+	PayloadRef                  model.EncryptedPayloadRef    `json:"payload_ref,omitempty"`
+	BuildStatus                 string                       `json:"build_status"`
+	ApprovalSubjectDigestSHA256 string                       `json:"approval_subject_digest_sha256"`
+	PackageDigestSHA256         string                       `json:"package_digest_sha256"`
+	SizeReport                  PackageSizeReport            `json:"size_report"`
+}
+
+type PackageSizeReport struct {
+	AlgorithmVersion string         `json:"algorithm_version"`
+	TotalBytes       int            `json:"total_bytes"`
+	SectionBytes     map[string]int `json:"section_bytes"`
+	StageCount       int            `json:"stage_count"`
+	EvidenceCount    int            `json:"evidence_count"`
+	SelectorCount    int            `json:"selector_count"`
 }
 
 type CloudUploadInitRequest struct {
-	OrgID     string `json:"org_id,omitempty"`
-	ProjectID string `json:"project_id,omitempty"`
+	OrgID                       string `json:"org_id,omitempty"`
+	ProjectID                   string `json:"project_id,omitempty"`
+	ApprovalSubjectDigestSHA256 string `json:"approval_subject_digest_sha256"`
+	ConfidenceAssessmentHash    string `json:"confidence_assessment_hash"`
+	RiskConfirmed               bool   `json:"risk_confirmed"`
+	IdempotencyKey              string `json:"idempotency_key"`
 }
 
 type CloudUploadInitResult struct {
@@ -203,11 +221,58 @@ func (s *Service) BuildClientExecutionPackage(ctx context.Context, projectID str
 	return buildClientExecutionPackageFromState(state, orgID, time.Now().UTC())
 }
 
-func (s *Service) BuildCloudClientExecutionPackage(ctx context.Context, projectID string, orgID string) (ClientExecutionPackageBuild, ExchangeSession, error) {
+func (s *Service) ApproveCloudClientExecutionPackage(ctx context.Context, projectID string, orgID string, request CloudUploadInitRequest) (ClientExecutionPackageBuild, ExchangeSession, error) {
+	if strings.TrimSpace(request.ApprovalSubjectDigestSHA256) == "" || strings.TrimSpace(request.ConfidenceAssessmentHash) == "" || strings.TrimSpace(request.IdempotencyKey) == "" || !request.RiskConfirmed {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, errors.New("execution package requires preview digest, confidence hash, idempotency key, and explicit risk confirmation")
+	}
+	idempotencyCacheKey := strings.TrimSpace(projectID) + "|" + strings.TrimSpace(request.IdempotencyKey)
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
+	if cached, ok := s.approvedBuilds[idempotencyCacheKey]; ok {
+		if cached.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || cached.Package.ConfidenceSummary == nil || cached.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
+			return ClientExecutionPackageBuild{}, ExchangeSession{}, &packagePreviewStaleError{}
+		}
+		session, err := s.EnsureExchangeSession(ctx, cached.OrgID, cached.ProjectID)
+		return cached, session, err
+	}
 	build, err := s.BuildClientExecutionPackage(ctx, projectID, orgID)
 	if err != nil {
 		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
 	}
+	if build.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, &packagePreviewStaleError{}
+	}
+	if build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, errors.New("blocked execution package cannot be approved")
+	}
+	now := time.Now().UTC()
+	build.Package.ApprovedAt = now
+	build.Package.SafetyReport.AllowedToUpload = true
+	build.Package.SafetyReport.HumanApproval = model.UserApprovalRecord{
+		ApprovalID: "approval_" + shortID(request.IdempotencyKey), ApprovedByUserID: "desktop_user", ApprovedAt: now,
+		PlanDigestSHA256:            build.Package.ExecutableScriptBundle.Reproducibility.PlanHashSHA256,
+		ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256,
+		ReviewedNodeIDs:             scriptStepNodeIDsForPackage(build.Package.ExecutableScriptBundle.PlanJSON),
+		Notes:                       []string{"用户已复核执行范围、来源、凭据授权、打码与确信度风险。"},
+	}
+	build.BuildStatus = "approved"
+	if err := normalizeClientExecutionPackageForUpload(&build.Package); err != nil {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+	}
+	if err := model.ValidateClientExecutionPackageForCloudExecution(&build.Package); err != nil {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+	}
+	packageDigest, err := model.DigestCanonicalJSON(build.Package)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+	}
+	build.PackageDigestSHA256 = packageDigest
+	envelope, err := envelopeForClientExecutionPackage(build.Package, now)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+	}
+	envelope.IdempotencyKey = request.IdempotencyKey
+	build.Envelope, build.PayloadRef = envelope, envelope.PayloadRef
 	session, err := s.EnsureExchangeSession(ctx, build.OrgID, build.ProjectID)
 	if err != nil {
 		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
@@ -216,7 +281,17 @@ func (s *Service) BuildCloudClientExecutionPackage(ctx context.Context, projectI
 	if err != nil {
 		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
 	}
+	if s.approvedBuilds == nil {
+		s.approvedBuilds = map[string]ClientExecutionPackageBuild{}
+	}
+	s.approvedBuilds[idempotencyCacheKey] = build
 	return build, session, nil
+}
+
+type packagePreviewStaleError struct{}
+
+func (*packagePreviewStaleError) Error() string {
+	return "package_preview_stale: execution package changed after preview"
 }
 
 func (s *Service) PrepareProductRun(ctx context.Context, request CloudLifecycleRequest) (ProductRunPrepareResult, error) {
@@ -973,7 +1048,7 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 		ProjectID:              state.ProjectID,
 		SchemaVersion:          model.ClientExecutionPackageSchemaVersion,
 		CreatedAt:              now,
-		ApprovedAt:             now,
+		ApprovedAt:             time.Time{},
 		ProjectContextSummary:  projectContextSummaryForPackage(project, state, graphDigest),
 		ProductMapSummary:      productMapSummaryForPackage(project, state.ProductMap),
 		WorkflowGraph:          graphForPackage,
@@ -989,17 +1064,10 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 			CreatedWithAppVersion: defaultDesktopAppVersion,
 		},
 		SafetyReport: model.PackageSafetyReport{
-			AllowedToUpload: true,
+			AllowedToUpload: false,
 			UploadMode:      "structure_summary_only",
-			HumanApproval: model.UserApprovalRecord{
-				ApprovalID:       "approval_" + state.ProjectID,
-				ApprovedByUserID: "desktop_user",
-				ApprovedAt:       now,
-				PlanDigestSHA256: state.ExecutableScriptBundle.Reproducibility.PlanHashSHA256,
-				ReviewedNodeIDs:  scriptStepNodeIDsForPackage(state.ScriptDocument),
-				Notes:            []string{"产品实战模式自动确认：不上传完整源码，仅上传结构摘要和受限执行脚本。"},
-			},
-			PIIHandling: "redaction_policy_required",
+			HumanApproval:   model.UserApprovalRecord{},
+			PIIHandling:     "redaction_policy_required",
 		},
 		Metadata: map[string]any{
 			"producer":                  "desktop_product_run",
@@ -1027,20 +1095,52 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
-	if err := model.ValidateClientExecutionPackageForCloudExecution(&pkg); err != nil {
-		return ClientExecutionPackageBuild{}, err
-	}
-	envelope, err := envelopeForClientExecutionPackage(pkg, now)
+	confidence, err := model.AssessClientExecutionPackage(&pkg)
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
+	pkg.ConfidenceSummary = confidence
+	if confidence.Readiness == model.PackageReadinessBlocked {
+		pkg.SafetyReport.AllowedToUpload = false
+	}
+	approvalDigest, err := model.ComputePackageApprovalSubjectDigest(pkg)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	packageDigest, err := model.DigestCanonicalJSON(pkg)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	sizeReport := packageSizeReportForPackage(pkg)
 	return ClientExecutionPackageBuild{
-		OrgID:      orgID,
-		ProjectID:  state.ProjectID,
-		Package:    pkg,
-		Envelope:   envelope,
-		PayloadRef: envelope.PayloadRef,
+		OrgID:                       orgID,
+		ProjectID:                   state.ProjectID,
+		Package:                     pkg,
+		BuildStatus:                 "draft",
+		ApprovalSubjectDigestSHA256: approvalDigest,
+		PackageDigestSHA256:         packageDigest,
+		SizeReport:                  sizeReport,
 	}, nil
+}
+
+func packageSizeReportForPackage(pkg model.ClientExecutionPackage) PackageSizeReport {
+	sections := map[string]any{"project_context_summary": pkg.ProjectContextSummary, "product_map_summary": pkg.ProductMapSummary, "workflow_graph": pkg.WorkflowGraph, "recording_run_spec": pkg.RecordingRunSpec, "executable_script_bundle": pkg.ExecutableScriptBundle, "evidence_bundle": pkg.EvidenceBundle, "safety_report": pkg.SafetyReport, "confidence_summary": pkg.ConfidenceSummary}
+	report := PackageSizeReport{AlgorithmVersion: "demoops.package_size.v1", SectionBytes: map[string]int{}}
+	data, _ := json.Marshal(pkg)
+	report.TotalBytes = len(data)
+	for name, value := range sections {
+		encoded, _ := json.Marshal(value)
+		report.SectionBytes[name] = len(encoded)
+	}
+	if pkg.ExecutableScriptBundle != nil && pkg.ExecutableScriptBundle.PlanJSON != nil {
+		report.StageCount = len(pkg.ExecutableScriptBundle.PlanJSON.Steps)
+		for _, step := range pkg.ExecutableScriptBundle.PlanJSON.Steps {
+			report.EvidenceCount += len(step.EvidenceRefs)
+			report.SelectorCount += len(step.Action.Target.SelectorAlternatives) + len(step.PageTarget.SelectorAlternatives)
+		}
+	}
+	report.EvidenceCount += len(pkg.EvidenceBundle.EvidenceRefs)
+	return report
 }
 
 func normalizeClientExecutionPackageForUpload(pkg *model.ClientExecutionPackage) error {
@@ -1224,6 +1324,9 @@ func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model
 		Name:          graph.Name,
 		Summary:       truncateForUpload(graph.Summary, 240),
 		EntryPoint:    graph.EntryPoint,
+		Intent:        compactWorkflowIntentForUpload(graph.Intent),
+		Requirements:  compactGraphRequirementsForUpload(graph.Requirements),
+		Assets:        compactAssetManifestForUpload(graph.Assets),
 		Nodes:         []*model.GraphNode{},
 		Edges:         []*model.GraphEdge{},
 		EvidenceRefs:  compactEvidenceRefsForUpload(graph.EvidenceRefs, 4),
@@ -1256,6 +1359,50 @@ func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model
 			})
 		}
 		previous = nodeID
+	}
+	return out
+}
+
+func compactWorkflowIntentForUpload(intent *model.WorkflowIntent) *model.WorkflowIntent {
+	if intent == nil {
+		return nil
+	}
+	out := *intent
+	out.Objective = truncateForUpload(out.Objective, 240)
+	out.ValueProposition = truncateForUpload(out.ValueProposition, 240)
+	out.SuccessCriteria = limitStringsForUpload(out.SuccessCriteria, 6)
+	out.PrimaryFeatureRefs = limitStringsForUpload(out.PrimaryFeatureRefs, 8)
+	out.DesiredEmotion = truncateForUpload(out.DesiredEmotion, 80)
+	out.CTA = truncateForUpload(out.CTA, 120)
+	return &out
+}
+
+func compactGraphRequirementsForUpload(values []model.GraphRequirement) []model.GraphRequirement {
+	out := make([]model.GraphRequirement, 0, minInt(len(values), 16))
+	for _, value := range values {
+		if len(out) >= 16 {
+			break
+		}
+		value.Description = truncateForUpload(value.Description, 240)
+		value.NodeRefs = limitStringsForUpload(value.NodeRefs, 8)
+		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 3)
+		out = append(out, value)
+	}
+	return out
+}
+
+func compactAssetManifestForUpload(value *model.AssetManifest) *model.AssetManifest {
+	if value == nil {
+		return nil
+	}
+	out := &model.AssetManifest{DemoVideo60s: value.DemoVideo60s, ScreenshotPack: value.ScreenshotPack, StepByStepDocs: value.StepByStepDocs, InteractiveDemo: value.InteractiveDemo, SupportSnippet: value.SupportSnippet, SalesMaterial: value.SalesMaterial, TargetDurationSec: value.TargetDurationSec, Localization: limitStringsForUpload(value.Localization, 4)}
+	for _, request := range value.RequestedAssets {
+		if len(out.RequestedAssets) >= 12 {
+			break
+		}
+		request.SourceNodeIDs = limitStringsForUpload(request.SourceNodeIDs, 8)
+		request.EvidenceRefs = compactEvidenceRefsForUpload(request.EvidenceRefs, 2)
+		out.RequestedAssets = append(out.RequestedAssets, request)
 	}
 	return out
 }
@@ -1310,12 +1457,42 @@ func evidenceRefsForUpload(pkg *model.ClientExecutionPackage) []model.EvidenceRe
 		refs = append(refs, bundle.StageApprovalPlan.EvidenceRefs...)
 		for _, stage := range bundle.StageApprovalPlan.Stages {
 			refs = append(refs, stage.EvidenceRefs...)
+			refs = append(refs, stage.Interaction.EvidenceRefs...)
+			refs = append(refs, stage.Interaction.Target.EvidenceRefs...)
+			if stage.TargetContract != nil {
+				refs = append(refs, stage.TargetContract.EvidenceRefs...)
+			}
 		}
 	}
 	if bundle.ScriptOutline != nil {
 		refs = append(refs, bundle.ScriptOutline.EvidenceRefs...)
 		for _, stage := range bundle.ScriptOutline.Stages {
 			refs = append(refs, stage.EvidenceRefs...)
+			if stage.TargetContract != nil {
+				refs = append(refs, stage.TargetContract.EvidenceRefs...)
+			}
+			for _, component := range stage.Components {
+				refs = append(refs, component.EvidenceRefs...)
+			}
+			for _, interaction := range stage.Interactions {
+				refs = append(refs, interaction.EvidenceRefs...)
+				refs = append(refs, interaction.Target.EvidenceRefs...)
+			}
+		}
+	}
+	if bundle.PlanJSON != nil {
+		for _, step := range bundle.PlanJSON.Steps {
+			refs = append(refs, step.EvidenceRefs...)
+			refs = append(refs, step.Action.Target.EvidenceRefs...)
+			if step.TargetContract != nil {
+				refs = append(refs, step.TargetContract.EvidenceRefs...)
+			}
+			for _, validation := range step.Validations {
+				if validation.Required {
+					refs = append(refs, validation.EvidenceRefs...)
+					refs = append(refs, validation.Target.EvidenceRefs...)
+				}
+			}
 		}
 	}
 	return refs
@@ -1325,6 +1502,8 @@ func limitEvidenceRefs(refs []model.EvidenceRef, limit int) []model.EvidenceRef 
 	if limit <= 0 || len(refs) == 0 {
 		return nil
 	}
+	refs = append([]model.EvidenceRef{}, refs...)
+	sort.SliceStable(refs, func(i, j int) bool { return evidenceUploadPriority(refs[i]) > evidenceUploadPriority(refs[j]) })
 	out := []model.EvidenceRef{}
 	seen := map[string]bool{}
 	for _, ref := range refs {
@@ -1342,6 +1521,31 @@ func limitEvidenceRefs(refs []model.EvidenceRef, limit int) []model.EvidenceRef 
 		}
 	}
 	return out
+}
+
+func evidenceUploadPriority(ref model.EvidenceRef) float64 {
+	base := 0.0
+	switch ref.Kind {
+	case model.EvidenceKindBrowserTrace:
+		base = 100
+	case model.EvidenceKindBrowserScan:
+		if !strings.Contains(strings.ToLower(ref.ID+" "+ref.Summary), "url input") && !strings.Contains(ref.Summary, "产品 URL 输入") {
+			base = 95
+		} else {
+			base = 25
+		}
+	case model.EvidenceKindWebScreenshot, model.EvidenceKindScreenshotOCR, model.EvidenceKindVisionFinding:
+		base = 80
+	case model.EvidenceKindSourceCode, model.EvidenceKindCodeSnapshot, model.EvidenceKindRepoSnapshot:
+		base = 65
+	case model.EvidenceKindRequirementDoc:
+		base = 55
+	case model.EvidenceKindUserInput:
+		base = 40
+	default:
+		base = 30
+	}
+	return base + ref.Confidence
 }
 
 func compactScriptStepForUpload(step *model.ScriptStep) {
@@ -1489,6 +1693,10 @@ func compactSelectorCandidatesForUpload(candidates []model.SelectorCandidate, li
 	if limit <= 0 || len(candidates) == 0 {
 		return nil
 	}
+	candidates = append([]model.SelectorCandidate{}, candidates...)
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return selectorUploadPriority(candidates[i]) > selectorUploadPriority(candidates[j])
+	})
 	out := make([]model.SelectorCandidate, 0, limit)
 	seen := map[string]bool{}
 	for _, candidate := range candidates {
@@ -1505,6 +1713,28 @@ func compactSelectorCandidatesForUpload(candidates []model.SelectorCandidate, li
 		}
 	}
 	return out
+}
+
+func selectorUploadPriority(candidate model.SelectorCandidate) float64 {
+	base := modelSelectorPriority(candidate.Kind, candidate.Value)
+	return base + candidate.StabilityScore*10 + candidate.Confidence*5
+}
+func modelSelectorPriority(kind, value string) float64 {
+	text := strings.ToLower(kind + " " + value)
+	switch {
+	case strings.Contains(text, "testid") || strings.Contains(text, "data-testid"):
+		return 100
+	case strings.Contains(text, "role"):
+		return 90
+	case strings.Contains(text, "label"):
+		return 85
+	case strings.Contains(text, "aria-"):
+		return 80
+	case strings.Contains(text, "text"):
+		return 70
+	default:
+		return 55
+	}
 }
 
 func compactEvidenceRefsForUpload(refs []model.EvidenceRef, limit int) []model.EvidenceRef {
@@ -1816,9 +2046,9 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 		))
 	}
 	if outlineRuntime {
-		if data, err := json.Marshal(pkg); err == nil && len(data) > 512*1024 {
+		if data, err := json.Marshal(pkg); err == nil && len(data) > 256*1024 {
 			findings = append(findings, packagePreflightFinding(
-				"payload_too_large",
+				"package_size_exceeded",
 				model.FindingSeverityBlocking,
 				fmt.Sprintf("browser-agent outline package is too large: %d bytes", len(data)),
 				"Upload only markdown, stage JSON, browser-agent outline, contract, hashes, and compact evidence refs.",
@@ -1996,7 +2226,7 @@ func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle)
 			if uncertainty.Blocking {
 				findings = append(findings, packagePreflightFinding(
 					"stage_uncertainty_"+shortID(uncertainty.ID),
-					model.FindingSeverityWarning,
+					uncertaintyPreflightSeverity(uncertainty),
 					"stage approval plan has runtime uncertainty: "+uncertainty.Summary,
 					firstNonEmptyString(uncertainty.SuggestedAction, "Let the server browser agent resolve this inside the approved product scope or return a repair request."),
 				))
@@ -2026,7 +2256,7 @@ func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle)
 			if uncertainty.Blocking {
 				findings = append(findings, packagePreflightFinding(
 					"outline_uncertainty_"+shortID(uncertainty.ID),
-					model.FindingSeverityWarning,
+					uncertaintyPreflightSeverity(uncertainty),
 					"script outline has runtime uncertainty: "+uncertainty.Summary,
 					firstNonEmptyString(uncertainty.SuggestedAction, "Let the server browser agent resolve this inside the approved product scope or return a repair request."),
 				))
@@ -2057,6 +2287,14 @@ func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle)
 		))
 	}
 	return findings
+}
+
+func uncertaintyPreflightSeverity(item model.StageUncertainty) model.FindingSeverity {
+	kind := strings.ToLower(item.Kind)
+	if strings.Contains(kind, "selector") || strings.Contains(kind, "wait") || strings.Contains(kind, "capture") || strings.Contains(kind, "human_checkpoint") {
+		return model.FindingSeverityWarning
+	}
+	return model.FindingSeverityBlocking
 }
 
 func bundleHasBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) bool {

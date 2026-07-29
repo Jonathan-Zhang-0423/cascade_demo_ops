@@ -242,6 +242,9 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 	if !strings.Contains(text, "secret_ref:local-dev/demo_password") {
 		t.Fatalf("expected package to preserve password secret_ref placeholder: %s", text)
 	}
+	if build.BuildStatus != "draft" || !build.Package.ApprovedAt.IsZero() || build.Package.SafetyReport.AllowedToUpload || build.Package.SafetyReport.HumanApproval.ApprovalID != "" || build.Envelope.EnvelopeID != "" {
+		t.Fatalf("preview must remain an unapproved draft: %+v", build)
+	}
 }
 
 func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *testing.T) {
@@ -289,9 +292,30 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payload) > 512*1024 {
+	if len(payload) > 256*1024 {
 		t.Fatalf("outline upload package too large: %d bytes", len(payload))
 	}
+	if build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash == "" || build.ApprovalSubjectDigestSHA256 == "" || build.SizeReport.TotalBytes == 0 {
+		t.Fatalf("draft must expose confidence, approval digest, and size report: %+v", build)
+	}
+	if build.Package.WorkflowGraph.Intent == nil || build.Package.WorkflowGraph.Assets == nil {
+		t.Fatalf("compact workflow graph lost director intent or assets: %+v", build.Package.WorkflowGraph)
+	}
+}
+
+func TestBlockingMissingEvidenceCannotBeDowngradedToWarning(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.ExecutableScriptBundle.StageApprovalPlan.UncertaintyReport = []model.StageUncertainty{{ID: "missing_business", Kind: "missing_evidence", Summary: "关键业务证据缺失", Blocking: true}}
+	findings := preflightBrowserAgentOutline(pkg.ExecutableScriptBundle)
+	for _, finding := range findings {
+		if finding.ID == "stage_uncertainty_missing_business" {
+			if finding.Severity != model.FindingSeverityBlocking {
+				t.Fatalf("blocking evidence uncertainty was downgraded: %+v", finding)
+			}
+			return
+		}
+	}
+	t.Fatal("expected blocking uncertainty finding")
 }
 
 func TestBuildClientExecutionPackageRejectsInjectedCodeSelectorInPageOnlyMode(t *testing.T) {

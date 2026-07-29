@@ -1912,15 +1912,25 @@ func limitInvestigationNextActions(values []model.CodeInvestigationNextAction, l
 func uncertaintyReportForBundle(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, graph *model.DemoWorkflowGraph) []model.StageUncertainty {
 	items := []model.StageUncertainty{}
 	if intelligence != nil && intelligence.MissingEvidenceReport != nil {
+		blockingItemFound := false
 		for _, item := range intelligence.MissingEvidenceReport.Items {
+			blocks := missingEvidenceItemBlocks(intelligence.MissingEvidenceReport, item)
+			blockingItemFound = blockingItemFound || blocks
 			items = append(items, model.StageUncertainty{
 				ID:              item.ID,
 				Kind:            item.MissingKind,
 				Summary:         item.Message,
-				Blocking:        missingEvidenceItemBlocks(intelligence.MissingEvidenceReport, item),
+				Blocking:        blocks,
 				SuggestedAction: item.SuggestedAction,
 				EvidenceRefs:    item.EvidenceRefs,
 			})
+		}
+		if intelligence.MissingEvidenceReport.Blocking && !blockingItemFound {
+			summary := strings.TrimSpace(intelligence.MissingEvidenceReport.Summary)
+			if summary == "" {
+				summary = "关键执行证据缺失。"
+			}
+			items = append(items, model.StageUncertainty{ID: "uncertain_missing_evidence_" + shortHash(project.ID), Kind: "missing_evidence", Summary: summary, Blocking: true, SuggestedAction: "补充关键业务动作和结果证据后重新生成执行包。", EvidenceRefs: intelligence.MissingEvidenceReport.EvidenceRefs})
 		}
 	}
 	if graph == nil || len(graph.Nodes) == 0 {
@@ -1948,7 +1958,8 @@ func missingEvidenceItemBlocks(report *model.MissingEvidenceReport, item model.M
 	if report == nil || !report.Blocking {
 		return false
 	}
-	return false
+	severity := strings.ToLower(strings.TrimSpace(item.Severity))
+	return severity == "blocking" || severity == "error" || severity == "critical"
 }
 
 func confidenceForStage(node *model.GraphNode, intelligence *model.ProjectIntelligencePack) float64 {

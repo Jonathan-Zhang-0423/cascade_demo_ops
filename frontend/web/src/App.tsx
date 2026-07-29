@@ -1870,6 +1870,9 @@ function PackageApproval({
       <SectionTitle title="执行包审批" meta={workspace.packagePreview.packageID} />
       <div className="approval-grid">
         <div className="package-facts">
+          <Fact label="包状态" value={workspace.packagePreview.buildStatus === "approved" ? "已审批" : "待人工审批"} />
+          <Fact label="确信度" value={workspace.packagePreview.confidenceScore == null ? "待评估" : `${Math.round(workspace.packagePreview.confidenceScore * 100)}% · ${workspace.packagePreview.readiness === "ready" ? "可审批" : workspace.packagePreview.readiness === "review_required" ? "需重点复核" : "已阻断"}`} />
+          <Fact label="精简后大小" value={workspace.packagePreview.totalBytes == null ? "待统计" : `${(workspace.packagePreview.totalBytes / 1024).toFixed(1)} KiB`} />
           <Fact label="执行包摘要" value={workspace.packagePreview.packageDigest} />
           <Fact label="流程图摘要" value={workspace.packagePreview.graphDigest} />
           <Fact label="Runtime" value={bundle?.script_manifest.runtime ?? "待生成"} />
@@ -1885,6 +1888,7 @@ function PackageApproval({
           <Fact label="模型来源" value={workspace.modelProvenance?.join("；") ?? "待生成"} />
           {bundle?.repair_lineage ? <Fact label="修复来源" value={`${bundle.repair_lineage.source_result_id} / 第 ${bundle.repair_lineage.repair_attempt} 次`} /> : null}
         </div>
+        {workspace.packagePreview.confidenceWarnings?.length ? <div className="notice-card warning"><strong>确信度复核</strong><p>{workspace.packagePreview.confidenceWarnings.slice(0, 3).join("；")}</p></div> : null}
         <div className="checklist-panel">
           {(
             [

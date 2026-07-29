@@ -40,6 +40,8 @@ type Service struct {
 	outlineRunner  BrowserAgentOutlineRunner
 	sourceRefsMu   sync.RWMutex
 	sourceRefs     map[string]LocalSourceRef
+	approvalMu     sync.Mutex
+	approvedBuilds map[string]ClientExecutionPackageBuild
 }
 
 type editorRenderTask struct {
@@ -96,6 +98,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		editorJobs:     map[string]editorRenderTask{},
 		outlineRunner:  nil,
 		sourceRefs:     map[string]LocalSourceRef{},
+		approvedBuilds: map[string]ClientExecutionPackageBuild{},
 	}
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
 	service.exchange.SetInlinePayloadAllowed(runtime.Profile != config.ProfileCloud)

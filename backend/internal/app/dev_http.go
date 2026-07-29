@@ -473,7 +473,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
 		targetProjectID := firstNonEmptyString(request.ProjectID, projectID)
-		build, session, err := s.service.BuildCloudClientExecutionPackage(r.Context(), targetProjectID, orgID)
+		build, session, err := s.service.ApproveCloudClientExecutionPackage(r.Context(), targetProjectID, orgID, request)
 		if err != nil {
 			writeBridgeValue(w, nil, err)
 			return
@@ -491,7 +491,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
 		targetProjectID := firstNonEmptyString(request.ProjectID, projectID)
-		build, _, err := s.service.BuildCloudClientExecutionPackage(r.Context(), targetProjectID, orgID)
+		build, _, err := s.service.ApproveCloudClientExecutionPackage(r.Context(), targetProjectID, orgID, request)
 		if err != nil {
 			writeBridgeValue(w, nil, err)
 			return
@@ -545,10 +545,14 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		var build ClientExecutionPackageBuild
 		var err error
 		var session ExchangeSession
-		build, session, err = s.service.BuildCloudClientExecutionPackage(r.Context(), projectID, request.OrgID)
-		if err != nil && request.Build != nil {
-			build = *request.Build
-			err = normalizeClientExecutionPackageForUpload(&build.Package)
+		if request.Build == nil {
+			writeBridgeValue(w, nil, errors.New("approved execution package build is required"))
+			return
+		}
+		build = *request.Build
+		err = normalizeClientExecutionPackageForUpload(&build.Package)
+		if err == nil && (build.BuildStatus != "approved" || build.Package.ApprovedAt.IsZero() || build.Package.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 == "") {
+			err = errors.New("draft execution package cannot be uploaded")
 		}
 		if err != nil {
 			writeBridgeValue(w, nil, err)

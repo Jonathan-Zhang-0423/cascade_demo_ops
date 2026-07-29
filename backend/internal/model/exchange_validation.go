@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,9 +36,21 @@ func ValidateClientExecutionPackageIntake(envelope *ExchangeEnvelope, pkg *Clien
 	if err := validateClientExecutionPackageContents(pkg); err != nil {
 		return err
 	}
+	if err := ValidatePackageConfidenceSummary(pkg); err != nil {
+		return err
+	}
 	if envelope.Policy.HumanApprovalRequired {
 		if pkg.ApprovedAt.IsZero() || pkg.SafetyReport.HumanApproval.ApprovalID == "" || pkg.SafetyReport.HumanApproval.PlanDigestSHA256 == "" {
 			return errors.New("human approval metadata is required by exchange policy")
+		}
+		if pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 != "" {
+			digest, err := ComputePackageApprovalSubjectDigest(*pkg)
+			if err != nil {
+				return err
+			}
+			if digest != pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 {
+				return errors.New("human approval subject digest does not match execution package")
+			}
 		}
 	}
 	return nil
@@ -53,7 +66,15 @@ func ValidateClientExecutionPackageForCloudExecution(pkg *ClientExecutionPackage
 	if pkg.SchemaVersion != ClientExecutionPackageSchemaVersion {
 		return fmt.Errorf("client execution package schema_version must be %q", ClientExecutionPackageSchemaVersion)
 	}
-	return validateClientExecutionPackageContents(pkg)
+	if data, err := json.Marshal(pkg); err != nil {
+		return err
+	} else if len(data) > 256*1024 {
+		return errors.New("package_size_exceeded: client execution package exceeds 256 KiB")
+	}
+	if err := validateClientExecutionPackageContents(pkg); err != nil {
+		return err
+	}
+	return ValidatePackageConfidenceSummary(pkg)
 }
 
 func ValidateRecordingResultPackageForRender(result *RecordingResultPackage, source *ClientExecutionPackage) error {
