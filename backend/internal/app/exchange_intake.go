@@ -1007,6 +1007,7 @@ func summarizeRecordingResult(result model.RecordingResultPackage) *model.Execut
 		DeliveredAt:         result.Delivery.DeliveredAt,
 		AckedAt:             result.Delivery.AckedAt,
 		ExpiresAt:           result.Delivery.ExpiresAt,
+		Validation:          summarizeExecutionValidation(result),
 	}
 	if summary.PassRate == 0 && result.ExecutionTrace != nil {
 		summary.PassRate = result.ExecutionTrace.PassRate
@@ -1039,6 +1040,48 @@ func summarizeRecordingResult(result model.RecordingResultPackage) *model.Execut
 		case "browser_trace", "execution_trace":
 			summary.TraceCount++
 		}
+	}
+	return summary
+}
+
+func summarizeExecutionValidation(result model.RecordingResultPackage) *model.ExecutionValidationSummary {
+	if result.ExecutionRuntime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 &&
+		len(result.ValidationReports) == 0 && result.StageEventLogRef == nil {
+		return nil
+	}
+
+	summary := &model.ExecutionValidationSummary{
+		Runtime:                result.ExecutionRuntime,
+		Status:                 "incomplete",
+		ValidationReportCount:  len(result.ValidationReports),
+		StageEventLogAvailable: result.StageEventLogRef != nil,
+	}
+	for _, report := range result.ValidationReports {
+		switch report.Phase {
+		case model.ValidationPhasePreExecution:
+			summary.PreExecutionReportCount++
+		case model.ValidationPhaseRuntimeStage:
+			summary.RuntimeStageReportCount++
+		case model.ValidationPhasePostExecution:
+			summary.PostExecutionReportCount++
+		}
+		summary.LatestDecision = report.Decision
+	}
+	for _, step := range result.StepResults {
+		if strings.TrimSpace(step.ObservedState) != "" &&
+			!strings.Contains(strings.ToLower(step.ObservedState), string(model.RuntimeObservationDerivedPlan)) {
+			summary.RealObservedStepCount++
+		}
+	}
+	if result.Status == model.RecordingResultStatusFailed {
+		summary.Status = "failed"
+		return summary
+	}
+	if summary.PreExecutionReportCount == 1 && summary.PostExecutionReportCount == 1 &&
+		summary.RuntimeStageReportCount == len(result.StepResults) &&
+		summary.RealObservedStepCount == len(result.StepResults) &&
+		summary.StageEventLogAvailable && summary.LatestDecision == model.ValidationDecisionContinue {
+		summary.Status = "complete"
 	}
 	return summary
 }

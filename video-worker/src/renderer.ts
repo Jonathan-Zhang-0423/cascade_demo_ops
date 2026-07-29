@@ -833,6 +833,36 @@ function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): D
   const eligibleSteps = catalog.steps.filter((step) => step.status !== "failed");
   const steps = eligibleSteps.length > 0 ? eligibleSteps : catalog.steps;
   const targetDurationMS = (durationSec || Math.max(1, Math.ceil(catalog.timeline.duration_ms / 1000))) * 1000;
+  const stillArtifacts = demoArtifacts.filter((artifact) => artifact.kind === "step_screenshot" && artifact.metadata?.presentation_only === true);
+  // The visible local-test handoff intentionally starts without a recording
+  // context so manual credentials can never enter a video artifact. Its final
+  // MP4 is composed only from post-action, redacted screenshots.
+  if (!recordingArtifactID && stillArtifacts.length > 0) {
+    const stillDurationMS = Math.max(1_000, Math.min(5_000, Math.floor(targetDurationMS / stillArtifacts.length)));
+    return {
+      schema_version: DEMO_EDIT_PLAN_SCHEMA_VERSION,
+      plan_id: `edit_plan_${safeName(catalog.run_id)}`,
+      catalog_id: catalog.catalog_id,
+      objective: "Create a concise demo from verified post-action screenshots. Do not create new images or video.",
+      source_authority: DEMO_EDIT_SOURCE_AUTHORITY,
+      model_role: DEMO_EDIT_MODEL_ROLE,
+      source_material_policy: "existing_assets_only",
+      script_order_policy: "preserve_required_step_order",
+      locked_fields: [...REQUIRED_LOCKED_FIELDS],
+      model_editable_fields: [...ALLOWED_MODEL_EDITABLE_FIELDS],
+      target_duration_ms: stillDurationMS * stillArtifacts.length,
+      shots: stillArtifacts.map((artifact, index) => ({
+        id: `shot_${String(index + 1).padStart(3, "0")}_${safeName(artifact.id)}`,
+        source_artifact_id: artifact.id,
+        presentation_kind: "still" as const,
+        output_duration_ms: stillDurationMS,
+        purpose: `Show verified step ${index + 1}`,
+        overlays: [],
+      })),
+      global_style: { color_grade: "neutral_product_ui", pacing: "clear_and_direct", transition_style: "simple_cut" },
+      audio: { mode: "mute", volume_percent: 0 },
+    };
+  }
   const shots = capDefaultShotsToTargetDuration(
     steps.map((step, index) => defaultShotForStep(step, index, recordingArtifactID || step.artifacts[0] || fallbackArtifactID)),
     targetDurationMS,

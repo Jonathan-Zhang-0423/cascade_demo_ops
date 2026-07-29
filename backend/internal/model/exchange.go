@@ -1036,6 +1036,25 @@ type ExecutionResultSummary struct {
 	AckedAt             time.Time              `json:"acked_at,omitempty"`
 	ExpiresAt           time.Time              `json:"expires_at,omitempty"`
 	Deliverables        []ExecutionDeliverable `json:"deliverables,omitempty"`
+	// Validation is a redacted, App-consumable summary of Server-side Browser
+	// Agent verification. Full evidence remains in the result package.
+	Validation *ExecutionValidationSummary `json:"validation,omitempty"`
+}
+
+// ExecutionValidationSummary lets the App distinguish a rendered file from a
+// result that also has complete, runtime-derived Browser Agent verification.
+// It deliberately contains counts and decisions only, never page data or
+// credential-bearing diagnostic details.
+type ExecutionValidationSummary struct {
+	Runtime                  string             `json:"runtime,omitempty"`
+	Status                   string             `json:"status"`
+	ValidationReportCount    int                `json:"validation_report_count"`
+	PreExecutionReportCount  int                `json:"pre_execution_report_count"`
+	RuntimeStageReportCount  int                `json:"runtime_stage_report_count"`
+	PostExecutionReportCount int                `json:"post_execution_report_count"`
+	LatestDecision           ValidationDecision `json:"latest_decision,omitempty"`
+	RealObservedStepCount    int                `json:"real_observed_step_count"`
+	StageEventLogAvailable   bool               `json:"stage_event_log_available"`
 }
 
 type ExecutionDeliverable struct {

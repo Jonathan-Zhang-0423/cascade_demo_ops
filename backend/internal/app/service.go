@@ -46,6 +46,9 @@ type Service struct {
 	// outcomeVerifier is Server-owned. It never receives a browser/page object
 	// and is snapshotted when an Outline run begins.
 	outcomeVerifier OutcomeVerifier
+	// devVisibleBrowserAgent is intentionally separate from the normal runtime.
+	// It exists only for a human-assisted local acceptance login handoff.
+	devVisibleBrowserAgent *devVisibleBrowserAgentManager
 }
 
 type editorRenderTask struct {
@@ -104,6 +107,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		sourceRefs:     map[string]LocalSourceRef{},
 		approvedBuilds: map[string]ClientExecutionPackageBuild{},
 	}
+	service.devVisibleBrowserAgent = newDevVisibleBrowserAgentManager(service)
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
 	// Production cloud intake receives only encrypted payload references. Local
 	// and test runtimes retain inline payloads solely for deterministic fixtures
