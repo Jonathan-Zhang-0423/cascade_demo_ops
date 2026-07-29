@@ -190,6 +190,46 @@ func TestDevHTTPBridgeGitHubCredentialOnlyReturnsConfigurationState(t *testing.T
 	}
 }
 
+func TestDevHTTPBridgeDemoCredentialReturnsOnlyOpaqueRef(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	stored := []string{}
+	server.storeDemoCredential = func(ref, username, password string) error {
+		stored = []string{ref, username, password}
+		return nil
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/demo-credential", strings.NewReader(`{"ref":"assistant-demo","username":"demo-user","password":"private-password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	payload := response.Body.String()
+	if strings.Contains(payload, "demo-user") || strings.Contains(payload, "private-password") {
+		t.Fatalf("credential response exposed secret material: %s", payload)
+	}
+	if !strings.Contains(payload, `"secretRef":"credential://demo/assistant-demo"`) || len(stored) != 3 || stored[2] != "private-password" {
+		t.Fatalf("credential was not stored through the local vault adapter: payload=%s stored=%v", payload, stored)
+	}
+}
+
+func TestDevHTTPBridgeDemoCredentialRejectsUnsafeRef(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	called := false
+	server.storeDemoCredential = func(string, string, string) error { called = true; return nil }
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/demo-credential", strings.NewReader(`{"ref":"../unsafe","username":"demo","password":"secret"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code == http.StatusOK || called {
+		t.Fatalf("unsafe credential ref must be rejected: status=%d called=%v body=%s", response.Code, called, response.Body.String())
+	}
+}
+
 func TestDevHTTPBridgeRejectsForeignOriginBeforeCredentialMutation(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	called := false

@@ -105,6 +105,32 @@ func TestAssistantConfigurationPatchRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestAssistantExtractsExplicitChineseConfigurationWithoutSideEffects(t *testing.T) {
+	service := newAssistantTestService(t)
+	ctx := context.Background()
+	session, err := service.CreateAssistantSession(ctx, model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "chinese-config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{Message: "为 https://example.com 制作一个面向产品团队的 60 秒演示，项目名叫 Example Demo，重点展示审批流程"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Configuration.ProductURL != "" || turn.Configuration.AnalysisProjectID != "" {
+		t.Fatalf("pending proposal mutated or analyzed configuration: %+v", turn.Configuration)
+	}
+	proposal := &turn.Messages[len(turn.Messages)-1].Proposals[0]
+	if proposal.Patch == nil || proposal.Patch.ProjectName == nil || *proposal.Patch.ProjectName != "Example Demo" {
+		t.Fatalf("project name was not extracted: %+v", proposal.Patch)
+	}
+	if proposal.Patch.ProductURL == nil || *proposal.Patch.ProductURL != "https://example.com" || proposal.Patch.TargetAudience == nil || *proposal.Patch.TargetAudience != "产品团队" {
+		t.Fatalf("URL or audience was not extracted: %+v", proposal.Patch)
+	}
+	if proposal.Patch.TargetDurationSec == nil || *proposal.Patch.TargetDurationSec != 60 || proposal.Patch.MustShow == nil || len(*proposal.Patch.MustShow) != 1 {
+		t.Fatalf("duration or must-show was not extracted: %+v", proposal.Patch)
+	}
+}
+
 func TestAssistantProposalRejectsStaleVersion(t *testing.T) {
 	service := newAssistantTestService(t)
 	ctx := context.Background()

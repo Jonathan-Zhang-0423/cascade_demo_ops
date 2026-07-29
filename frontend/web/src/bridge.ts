@@ -36,7 +36,7 @@ import type {
   ExchangeEnvelope,
   EncryptedPayloadRef,
 } from "../../src/types/workflowGraph";
-import { createWorkspace } from "./mockWorkspace";
+import { createProjectDraftWorkspace, createWorkspace } from "./mockWorkspace";
 import { getScenarioTemplate } from "./scenarios";
 import { serverLifecycleStageLabels, serverLifecycleStageOrder } from "./workflow";
 
@@ -625,7 +625,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         body: JSON.stringify(input.userInput),
       });
       if (!result.ok || !result.data) return { ok: false, error: result.error ?? "创建项目失败" };
-      const workspace = workspaceFromCascadeState(result.data, createWorkspace(scenarioID));
+      const workspace = workspaceFromCascadeState(result.data, createProjectDraftWorkspace(scenarioID));
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
@@ -676,7 +676,12 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return callWailsBridge<ConfigurationSourceRefView[]>("SelectBrandAssets");
     },
     async storeDemoCredential(ref, username, password) {
-      return callWailsBridge<{ secretRef: string; configured: boolean }>("StoreDemoCredential", ref, username, password);
+      const native = await callWailsBridge<{ secretRef: string; configured: boolean }>("StoreDemoCredential", ref, username, password);
+      if (native.ok) return native;
+      return requestLocal<{ secretRef: string; configured: boolean }>(baseURL, "/v1/desktop/demo-credential", {
+        method: "POST",
+        body: JSON.stringify({ ref, username, password }),
+      });
     },
     async saveProjectInputs(projectID, inputs) {
       const result = await requestLocal<LocalProjectContext>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/inputs`, {
@@ -696,7 +701,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       if (!result.ok || !result.data) {
         return { ok: false, error: result.error ?? "未找到项目" };
       }
-      const workspace = workspaceFromCascadeState(result.data, createWorkspace("product_demo"));
+      const workspace = workspaceFromCascadeState(result.data, createProjectDraftWorkspace("product_demo"));
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
@@ -708,7 +713,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         method: "POST", body: JSON.stringify({ decision: "continue_page_only", assessment_hash: assessmentHash, idempotency_key: idempotencyKey }),
       });
       if (!result.ok || !result.data) return bridgeFailure(result.error ?? "无法切换到仅网页证据模式", result.errorInfo);
-      const workspace = workspaceFromCascadeState(result.data, projects.get(projectID) ?? createWorkspace("product_demo"));
+      const workspace = workspaceFromCascadeState(result.data, projects.get(projectID) ?? createProjectDraftWorkspace("product_demo"));
       projects.set(projectID, workspace);
       return ok(workspace);
     },
@@ -1580,14 +1585,16 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
   const packageDigest = bundle?.reproducibility.bundle_hash_sha256 || bundle?.reproducibility.plan_hash_sha256 || scriptDocument?.reproducibility.script_hash_sha256 || fallback.packagePreview.packageDigest;
 
   const sourceBinding = state.source_binding ?? project?.source_binding ?? fallback.sourceBinding;
+  const hasPackage = Boolean(bundle || scriptDocument);
+  const hasUnderstanding = Boolean(intelligence || report || state.product_map);
   const workspace: ProjectWorkspaceView = {
     ...fallback,
     id: state.project_id || project?.id || fallback.id,
-    name: graph.name || project?.name || fallback.name,
-    stage: "package_approval",
+    name: project?.name || graph.name || fallback.name,
+    stage: hasPackage ? "package_approval" : hasUnderstanding ? "plan_review" : "inputs",
     productURL,
     targetAudience: project?.target_audience || fallback.targetAudience,
-    status: "awaiting_approval",
+    status: hasPackage ? "awaiting_approval" : hasUnderstanding ? "understanding_ready" : "draft",
     inputBundle,
     sourceConnections: sourceConnectionsFromState(project, report, fallback),
     ...(sourceBinding ? { sourceBinding } : {}),
@@ -1613,7 +1620,7 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
       packageDigest,
       graphDigest,
       sourceSummaryOnly: scriptDocument?.approval_checklist.source_summary_only ?? true,
-      encrypted: true,
+      encrypted: hasPackage,
       humanApprovalRequired: scriptDocument?.approval_checklist.human_approval_required ?? true,
       ipAllowlistAcknowledged: false,
       credentialGrants: credentialGrantsFromInput(inputBundle, allowedDomains),
@@ -1622,7 +1629,7 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
     cloudRun: {
       packageID,
       status: "not_uploaded",
-      currentStep: "执行包已在本地生成，等待人工审批",
+      currentStep: hasPackage ? "执行包已在本地生成，等待人工审批" : hasUnderstanding ? "本地理解已完成，等待生成执行方案" : "等待补全项目配置",
       progress: 0,
       retryCount: 0,
     },
@@ -2639,6 +2646,7 @@ function ackWorkspaceAssets(workspace: ProjectWorkspaceView): ProjectWorkspaceVi
     cloudRun: {
       ...workspace.cloudRun,
 		message: "App 已下载全部成品、校验 checksum 并确认接收结果包。",
+		resultDownloaded: true,
     },
   };
 }

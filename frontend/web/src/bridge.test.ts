@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { afterEach, vi } from "vitest";
 import { userInputFromWorkspace, createLocalBridgeClient, createMockBridgeClient, workspaceFromCascadeStateForTest } from "./bridge";
 import { updateWorkspaceInputs } from "./agentPipeline";
-import { createWorkspace } from "./mockWorkspace";
+import { createProjectDraftWorkspace, createWorkspace } from "./mockWorkspace";
 
 describe("desktop bridge contract", () => {
   afterEach(() => {
@@ -16,6 +16,27 @@ describe("desktop bridge contract", () => {
     expect(result.ok).toBe(true);
     expect(JSON.stringify(result.data)).not.toMatch(/sk-|secret-|C:\\\\|postgres:\/\//i);
     expect(result.data?.modelProviders.seedance?.apiKeyFallbackEnvs).toEqual(["DOUBAO_API_KEY", "ARK_API_KEY"]);
+  });
+
+  it("maps real project responses onto an empty draft instead of mock fixture content", async () => {
+    const state = {
+      project_id: "project_empty_fallback",
+      project_context: {
+        id: "project_empty_fallback",
+        name: "真实客户项目",
+        product_url: "https://customer.example",
+        target_audience: "产品团队",
+        inputs: { raw_user_prompt: "展示审批流程", product_urls: [{ url: "https://customer.example" }], repositories: [], credentials: [] },
+      },
+    } as never;
+
+    const mapped = workspaceFromCascadeStateForTest(state, createProjectDraftWorkspace("product_demo"));
+
+    expect(mapped.productURL).toBe("https://customer.example");
+    expect(mapped.assets).toEqual([]);
+    expect(mapped.inputBundle.repositories).toEqual([]);
+    expect(mapped.packagePreview.packageID).toBe("pkg_project_empty_fallback");
+    expect(JSON.stringify(mapped)).not.toContain("app.example.com");
   });
 
   it("exposes the Browser Agent fixed acceptance gate separately from App packages", async () => {
@@ -115,6 +136,7 @@ describe("desktop bridge contract", () => {
     expect(resultPackage.data?.delivery?.asset_refs?.[0]?.role).toBe("final_demo_video");
     expect(resultPackage.data?.delivery?.asset_refs?.every((artifact) => artifact.encrypted && artifact.sensitive)).toBe(true);
 	expect(acked.data?.assets.every((asset) => asset.status !== "approved")).toBe(true);
+	expect(acked.data?.cloudRun.resultDownloaded).toBe(true);
 	expect(reviewed.data?.assets.every((asset) => asset.status === "approved")).toBe(true);
   });
 

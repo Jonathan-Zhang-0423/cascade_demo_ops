@@ -23,12 +23,19 @@ type DevHTTPServer struct {
 	service               *Service
 	events                *devEventStore
 	storeGitHubToken      func(string) error
+	storeDemoCredential   func(string, string, string) error
 	githubTokenConfigured func() bool
 	deleteGitHubToken     func() error
 }
 
 type githubCredentialRequest struct {
 	Token string `json:"token"`
+}
+
+type demoCredentialRequest struct {
+	Ref      string `json:"ref"`
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type ExecutionPackageRequest struct {
@@ -69,6 +76,7 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 		service:               service,
 		events:                newDevEventStore(),
 		storeGitHubToken:      credentialstore.StoreGitHubToken,
+		storeDemoCredential:   credentialstore.StoreDemoCredential,
 		githubTokenConfigured: credentialstore.GitHubTokenConfigured,
 		deleteGitHubToken:     credentialstore.DeleteGitHubToken,
 	}
@@ -80,6 +88,7 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/desktop/github-credential", s.handleGitHubCredentialStatus)
 	mux.HandleFunc("POST /v1/desktop/github-credential", s.handleStoreGitHubCredential)
 	mux.HandleFunc("DELETE /v1/desktop/github-credential", s.handleDeleteGitHubCredential)
+	mux.HandleFunc("POST /v1/desktop/demo-credential", s.handleStoreDemoCredential)
 	mux.HandleFunc("GET /v1/desktop/update", s.handleDesktopUpdateStatus)
 	mux.HandleFunc("POST /v1/desktop/update/check", s.handleDesktopUpdateCheck)
 	mux.HandleFunc("POST /v1/desktop/update/apply", s.handleDesktopUpdateApply)
@@ -308,6 +317,22 @@ func (s *DevHTTPServer) handleStoreGitHubCredential(w http.ResponseWriter, r *ht
 func (s *DevHTTPServer) handleDeleteGitHubCredential(w http.ResponseWriter, _ *http.Request) {
 	err := s.deleteGitHubToken()
 	writeBridgeValue(w, map[string]bool{"configured": false}, err)
+}
+
+func (s *DevHTTPServer) handleStoreDemoCredential(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+	var request demoCredentialRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	request.Ref = strings.TrimSpace(request.Ref)
+	if request.Ref == "" || len(request.Ref) > 128 || strings.ContainsAny(request.Ref, `/\\`) {
+		writeBridgeValue(w, nil, errors.New("invalid demo credential ref"))
+		return
+	}
+	err := s.storeDemoCredential(request.Ref, request.Username, request.Password)
+	writeBridgeValue(w, map[string]any{"secretRef": "credential://demo/" + request.Ref, "configured": err == nil}, err)
 }
 
 func (s *DevHTTPServer) handleDesktopUpdateStatus(w http.ResponseWriter, _ *http.Request) {

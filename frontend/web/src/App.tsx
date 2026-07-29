@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type MouseEvent } from "react";
 import type { GraphNode, RepositoryInput, SandboxPolicy } from "../../src/types/workflowGraph";
 import { agentPipelineItems, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
-import { createBridgeClient, userInputFromWorkspace, type ProjectCreationInput } from "./bridge";
+import { createBridgeClient, userInputFromWorkspace } from "./bridge";
 import type {
 	ApprovalChecklistState,
 	ModelDiagnosticResult,
@@ -14,7 +14,7 @@ import type {
 	ScenarioID,
 	WorkspaceStage,
 } from "./domain";
-import { createWorkspace, initialChecklist } from "./mockWorkspace";
+import { createProjectDraftWorkspace, createWorkspace, initialChecklist } from "./mockWorkspace";
 import { scenarioTemplates } from "./scenarios";
 import { VideoEditor } from "./VideoEditor";
 import { AssistantConversationPanel, AssistantWidget } from "./AssistantWidget";
@@ -24,7 +24,10 @@ import {
   lifecycleStatusLabel,
   lifecycleStatusTone,
   packageApprovalBlockedReasons,
+  projectJourney,
+  projectNextAction,
   projectStatusLabels,
+  recommendedWorkstation,
   resetApprovalChecklistForRepair,
   sandboxProfileLabel,
   sandboxRiskLevel,
@@ -72,7 +75,7 @@ type ProjectActionPrompt = {
 export function App() {
 	const bridge = useMemo(() => createBridgeClient(), []);
 	const [activeNav, setActiveNav] = useState<NavSection>("projects");
-	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createWorkspace("product_demo"));
+	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createProjectDraftWorkspace("product_demo"));
   const [projectSummaries, setProjectSummaries] = useState<ProjectSummaryView[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [projectsError, setProjectsError] = useState("");
@@ -89,11 +92,11 @@ export function App() {
   const [diagnosticsError, setDiagnosticsError] = useState("");
   const [checklist, setChecklist] = useState<ApprovalChecklistState>(initialChecklist);
   const [selectedNodeID, setSelectedNodeID] = useState(workspace.planReview.graph.nodes[0]?.id ?? "");
-  const [isGeneratingPackage, setIsGeneratingPackage] = useState(false);
   const [isRunningProduct, setIsRunningProduct] = useState(false);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [agentPrompt, setAgentPrompt] = useState("");
   const [isPromptConfirmationPending, setIsPromptConfirmationPending] = useState(false);
+  const [configurationSession, setConfigurationSession] = useState<{ scopeKey: string; initialMessage: string }>();
 
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
   const blockedReasons = packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections);
@@ -116,6 +119,27 @@ export function App() {
   useEffect(() => {
     void refreshProjects();
   }, [bridge]);
+
+  useEffect(() => {
+    if (!selectedProjectID || (workspace.cloudRun.status !== "queued" && workspace.cloudRun.status !== "running") || !workspace.cloudRun.exchangePackageID) return;
+    let cancelled = false;
+    let refreshing = false;
+    const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      const result = await bridge.pollCloudRun(workspace);
+      refreshing = false;
+      if (cancelled || !result.ok || !result.data) return;
+      setWorkspace((current) => current.id === result.data!.id ? mergeWorkspaceRuntimeLogs(result.data!, current) : current);
+      if (result.data.cloudRun.status === "succeeded" || result.data.cloudRun.status === "failed") void refreshProjects();
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [bridge, selectedProjectID, workspace.id, workspace.cloudRun.exchangePackageID, workspace.cloudRun.status]);
 
 
   async function refreshProjects() {
@@ -226,86 +250,7 @@ export function App() {
     setProjectsActionProjectID(undefined);
   }
 
-  async function buildPackagePreview() {
-    setIsGeneratingPackage(true);
-    setActiveNav("execution_packages");
-    const startedAt = new Date();
-    let lastEventID = "0";
-    let pollErrorShown = false;
-    const pollProjectID = workspace.id;
-    const pollRuntimeEvents = async () => {
-      const events = await bridge.executionEvents(pollProjectID, lastEventID);
-      if (events.ok && events.data) {
-        const numericIDs = events.data.map((entry) => Number(entry.id)).filter((id) => Number.isFinite(id));
-        if (numericIDs.length > 0) {
-          lastEventID = String(Math.max(Number(lastEventID) || 0, ...numericIDs));
-        }
-        if (events.data.length > 0) {
-          setWorkspace((current) => appendRuntimeLogs(current, events.data ?? []));
-        }
-      } else if (!pollErrorShown) {
-        pollErrorShown = true;
-        setWorkspace((current) => appendRuntimeLog(current, {
-          level: "warning",
-          message: "运行日志轮询不可用",
-          detail: events.error ?? "无法读取本地 Dev Bridge 运行事件。",
-        }));
-      }
-    };
-    setWorkspace((current) => appendRuntimeLog(current, {
-      level: "info",
-      message: "开始生成执行包",
-      detail: "正在调用本地 Dev Bridge：需求读取 -> 代码 drilldown -> 项目理解 -> Stage JSON -> Browser Agent 大纲。",
-    }));
-    setWorkspace((current) => {
-      const { lastError: _lastError, ...cloudRun } = current.cloudRun;
-      return {
-        ...current,
-        stage: "package_approval",
-        cloudRun: {
-          ...cloudRun,
-          currentStep: "本地 Agent 正在生成执行包",
-        },
-      };
-    });
-    await pollRuntimeEvents();
-    const poller = window.setInterval(() => {
-      void pollRuntimeEvents();
-    }, 1500);
-    try {
-      const result = await bridge.buildExecutionPackagePreview(workspace, bridgeRunOptions());
-      window.clearInterval(poller);
-      await pollRuntimeEvents();
-      if (result.ok && result.data) {
-        setWorkspace((current) => appendRuntimeLog(mergeWorkspaceRuntimeLogs(result.data!, current), {
-          level: "success",
-          message: "执行包生成完成",
-          detail: `耗时 ${Math.round((Date.now() - startedAt.getTime()) / 1000)} 秒，已进入执行包审批。`,
-        }));
-        setActiveNav("execution_packages");
-      } else {
-        const message = result.error ?? "执行包生成失败";
-        setWorkspace((current) => appendRuntimeLog({
-          ...current,
-          cloudRun: {
-            ...current.cloudRun,
-            lastError: message,
-            currentStep: message,
-          },
-        }, {
-          level: "error",
-          message: "执行包生成失败",
-          detail: message,
-        }));
-        setActiveNav("execution_packages");
-      }
-    } finally {
-      window.clearInterval(poller);
-      setIsGeneratingPackage(false);
-    }
-  }
-
-  async function runProductLifecycle(keepAgentWorkspace = false) {
+  async function prepareProductLifecycle(keepAgentWorkspace = false) {
     setIsRunningProduct(true);
     if (!keepAgentWorkspace) setActiveNav("execution_packages");
     const startedAt = new Date();
@@ -331,20 +276,10 @@ export function App() {
         }));
       }
     };
-    setChecklist({
-      userApprovedPlan: true,
-      ipAllowlistAcknowledged: true,
-      sourceSummaryOnlyAcknowledged: true,
-      credentialGrantAcknowledged: true,
-      redactionsReviewed: true,
-    });
     setWorkspace((current) => appendRuntimeLog({
       ...current,
-      stage: "cloud_run",
-      status: "cloud_running",
       cloudRun: {
         ...current.cloudRun,
-        status: "running",
         stage: "local_generated",
         message: "本地理解与脚本生成已启动。",
         currentStep: "本地 Agent 正在读取需求、项目目录和产品地址",
@@ -352,8 +287,8 @@ export function App() {
       },
     }, {
       level: "info",
-      message: "开始产品实战自动流程",
-      detail: "先完成本地理解和三合一执行包生成；脚本就绪后再单独连接服务器上传和轮询。",
+      message: "开始本地分析",
+      detail: "完成本地理解和三合一执行包生成；不会上传服务器，生成后等待独立人工审批。",
     }));
     await pollRuntimeEvents();
     const poller = window.setInterval(() => {
@@ -375,7 +310,7 @@ export function App() {
         }));
         setSelectedProjectID(nextWorkspace.id);
         void refreshProjects();
-        setActiveNav(keepAgentWorkspace || nextWorkspace.cloudRun.status === "succeeded" ? "project_library" : "execution_packages");
+        setActiveNav(keepAgentWorkspace ? "project_library" : "execution_packages");
       } else {
         const message = result.error ?? "产品实战自动流程失败";
         setWorkspace((current) => appendRuntimeLog({
@@ -412,18 +347,50 @@ export function App() {
     setIsRunningDiagnostics(false);
   }
 
-  async function uploadPackage() {
+  async function uploadPackage(keepAgentWorkspace = false) {
     if (!canUpload) {
       return;
     }
+    setIsRunningProduct(true);
+    setWorkspace((current) => appendRuntimeLog(current, {
+      level: "info",
+      message: "审批已确认，开始上传",
+      detail: `当前审批绑定执行包摘要 ${current.packagePreview.approvalSubjectDigest ?? current.packagePreview.packageDigest}。`,
+    }));
     const result = await bridge.approveAndUploadPackage({
       ...workspace,
       packagePreview: { ...workspace.packagePreview, ipAllowlistAcknowledged: true },
     });
     if (result.ok && result.data) {
-      setWorkspace(result.data);
-      setActiveNav("execution_packages");
+      setWorkspace((current) => appendRuntimeLog(mergeWorkspaceRuntimeLogs(result.data!, current), {
+        level: "success",
+        message: "执行包已上传",
+        detail: "服务器已接收审批后的执行包，正在进入 BrowserAgent 执行队列。",
+      }));
+      setSelectedProjectID(result.data.id);
+      setActiveNav(keepAgentWorkspace ? "project_library" : "execution_packages");
+      void refreshProjects();
+    } else {
+      const message = result.error ?? "执行包上传失败";
+      setWorkspace((current) => appendRuntimeLog({
+        ...current,
+        cloudRun: { ...current.cloudRun, lastError: message, currentStep: message },
+      }, { level: "error", message: "上传未完成", detail: message }));
     }
+    setIsRunningProduct(false);
+  }
+
+  async function refreshCloudRun() {
+    setIsRunningProduct(true);
+    const result = await bridge.pollCloudRun(workspace);
+    if (result.ok && result.data) {
+      setWorkspace(result.data);
+      void refreshProjects();
+    } else {
+      const message = result.error ?? "无法刷新服务器状态";
+      setWorkspace((current) => appendRuntimeLog(current, { level: "warning", message: "状态刷新失败", detail: message }));
+    }
+    setIsRunningProduct(false);
   }
 
   async function simulateCloudSuccess(keepAgentWorkspace = false) {
@@ -461,6 +428,14 @@ export function App() {
     }
   }
 
+  async function reviewAssets(decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) {
+    const result = await bridge.reviewResult(workspace, decision, summary);
+    if (result.ok && result.data) {
+      setWorkspace(result.data);
+      void refreshProjects();
+    }
+  }
+
   function submitAgentPrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = agentPrompt.trim();
@@ -473,33 +448,14 @@ export function App() {
   async function createProjectFromPrompt() {
     const prompt = agentPrompt.trim();
     if (!prompt) return;
-    setIsCreatingProject(true);
-    const seed = updateWorkspaceInputs(createWorkspace(workspace.scenarioID), {
-      productURL: workspace.productURL,
-      targetAudience: workspace.targetAudience,
-      rawUserPrompt: prompt,
-    });
-    const seededWorkspace = {
-      ...seed,
-      inputBundle: { ...seed.inputBundle, repositories: workspace.inputBundle.repositories ?? [] },
-    };
-    const input: ProjectCreationInput = {
-      userInput: userInputFromWorkspace(seededWorkspace, bridgeRunOptions()),
-      scenarioID: workspace.scenarioID,
-    };
-    const result = await bridge.createProject(input);
-    if (result.ok && result.data) {
-      setWorkspace(result.data);
-      setSelectedProjectID(result.data.id);
-      setSelectedNodeID(result.data.planReview.graph.nodes[0]?.id ?? "");
-      setChecklist(initialChecklist);
-      setDemoCredentials({ username: "", password: "" });
-      setAgentPrompt("");
-      setIsPromptConfirmationPending(false);
-      void refreshProjects();
-      setActiveNav("project_library");
-    }
-    setIsCreatingProject(false);
+    const draft = updateWorkspaceInputs(createProjectDraftWorkspace(workspace.scenarioID), { rawUserPrompt: prompt });
+    setWorkspace(draft);
+    setSelectedProjectID("draft");
+    setChecklist(initialChecklist);
+    setConfigurationSession({ scopeKey: `new_${Date.now()}`, initialMessage: prompt });
+    setAgentPrompt("");
+    setIsPromptConfirmationPending(false);
+    setActiveNav("project_library");
   }
 
   async function continueCurrentProject() {
@@ -573,17 +529,21 @@ export function App() {
           blockedReasons={blockedReasons}
           checklist={checklist}
           canUpload={canUpload}
-          isGeneratingPackage={isGeneratingPackage || isRunningProduct}
+          isGeneratingPackage={isRunningProduct}
           selectedNodeID={selectedNodeID}
           onBack={() => { setSelectedProjectID(undefined); void refreshProjects(); }}
+          onOpenProjectFromAssistant={(projectID) => { setConfigurationSession(undefined); void openProject(projectID); }}
           onChecklistChange={setChecklist}
           onSelectNode={setSelectedNodeID}
           onPatchNode={patchNode}
-          onUpload={() => runProductLifecycle(true)}
+          onAnalyze={() => prepareProductLifecycle(true)}
+          onUpload={() => uploadPackage(true)}
+          onRefreshExecution={refreshCloudRun}
           onCloudSuccess={() => simulateCloudSuccess(true)}
           onCloudFailure={() => simulateCloudFailure(true)}
           onRepairScript={() => repairFailedScript(true)}
           onApproveAssets={approveAssets}
+          onReviewAssets={reviewAssets}
           onReplaceWebpage={() => document.querySelector<HTMLTextAreaElement>(".project-agent-conversation textarea")?.focus()}
           onReplaceSource={() => { setSelectedProjectID(undefined); setActiveNav("repositories"); }}
           onContinuePageOnly={async () => {
@@ -592,6 +552,7 @@ export function App() {
             const result = await bridge.continueWithWebpageEvidence(workspace.id, binding.assessment_hash, `page-only-${binding.assessment_hash}`);
             if (result.ok && result.data) setWorkspace(result.data);
           }}
+          {...(configurationSession && workspace.id.startsWith("draft_") ? { assistantScopeKey: configurationSession.scopeKey, assistantInitialMessage: configurationSession.initialMessage } : {})}
         />
       ) : <>
       <aside className="sidebar" aria-label="主导航">
@@ -632,7 +593,7 @@ export function App() {
         {activeNav === "projects" ? (
           <AgentHome
             prompt={agentPrompt}
-            isGeneratingPackage={isGeneratingPackage || isRunningProduct || isCreatingProject}
+            isGeneratingPackage={isRunningProduct || isCreatingProject}
             isPromptConfirmationPending={isPromptConfirmationPending}
             canContinueCurrentProject={bridge.mode === "mock" || projectSummaries.some((project) => project.id === workspace.id)}
             onPromptChange={setAgentPrompt}
@@ -667,7 +628,7 @@ export function App() {
           />
         ) : (
           <>
-            {activeNav !== "editor" ? <ProjectHeader workspace={workspace} isGeneratingPackage={isGeneratingPackage || isRunningProduct} onBuildPackage={runProductLifecycle} /> : null}
+            {activeNav !== "editor" ? <ProjectHeader workspace={workspace} isGeneratingPackage={isRunningProduct} onBuildPackage={prepareProductLifecycle} /> : null}
             <div className={activeNav === "editor" ? "workspace-grid editor-wide" : "workspace-grid"}>
               <section className={activeNav === "editor" ? "main-panel editor-main-panel" : "main-panel"} aria-label="项目工作台">
                 {activeNav === "new_demo" ? <ScenarioPicker activeID={workspace.scenarioID} onCreate={createScenario} /> : null}
@@ -679,13 +640,13 @@ export function App() {
                     canUpload={canUpload}
                     isLocalMode={bridge.mode === "local"}
                     onChecklistChange={setChecklist}
-                    onUpload={runProductLifecycle}
+                    onUpload={uploadPackage}
                     onCloudSuccess={simulateCloudSuccess}
                     onCloudFailure={simulateCloudFailure}
                     onRepairScript={repairFailedScript}
                   />
                 ) : null}
-                {activeNav === "project_library" || activeNav === "assets" ? <AssetReview workspace={workspace} onApprove={approveAssets} /> : null}
+                {activeNav === "project_library" || activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={approveAssets} onReview={reviewAssets} /> : null}
                 {activeNav === "editor" ? <VideoEditor /> : null}
                 {activeNav === "settings" ? (
                   <SettingsPanel
@@ -720,17 +681,23 @@ type ProjectAgentWorkspaceProps = {
   isGeneratingPackage: boolean;
   selectedNodeID: string;
   onBack: () => void;
+  onOpenProjectFromAssistant: (projectID: string) => void;
   onChecklistChange: (state: ApprovalChecklistState) => void;
   onSelectNode: (id: string) => void;
   onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
+  onAnalyze: () => void;
   onUpload: () => void;
+  onRefreshExecution: () => void;
   onCloudSuccess: () => void;
   onCloudFailure: () => void;
   onRepairScript: () => void;
   onApproveAssets: () => void;
+  onReviewAssets: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
   onReplaceWebpage: () => void;
   onReplaceSource: () => void;
   onContinuePageOnly: () => void;
+  assistantScopeKey?: string;
+  assistantInitialMessage?: string;
 };
 
 function ProjectAgentWorkspace({
@@ -743,28 +710,36 @@ function ProjectAgentWorkspace({
   isGeneratingPackage,
   selectedNodeID,
   onBack,
+  onOpenProjectFromAssistant,
   onChecklistChange,
   onSelectNode,
   onPatchNode,
+  onAnalyze,
   onUpload,
+  onRefreshExecution,
   onCloudSuccess,
   onCloudFailure,
   onRepairScript,
   onApproveAssets,
+  onReviewAssets,
   onReplaceWebpage,
   onReplaceSource,
   onContinuePageOnly,
+  assistantScopeKey,
+  assistantInitialMessage,
 }: ProjectAgentWorkspaceProps) {
-  const [workstationView, setWorkstationView] = useState<ProjectWorkstationView>("editor");
+  const [workstationView, setWorkstationView] = useState<ProjectWorkstationView>(() => recommendedWorkstation(workspace));
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
   const statusLabel = projectStatusLabels[workspace.status];
   const runtimeLabel = runtimeHealth?.localDataConfigured ? "Runtime ready" : runtimeHealth ? "Runtime attention" : "Runtime checking";
 
   useEffect(() => {
-    if (workspace.status === "script_repair_required") setWorkstationView("repair");
-    if (workspace.status === "asset_ready") setWorkstationView("assets");
-  }, [workspace.status]);
+    setWorkstationView(recommendedWorkstation(workspace));
+  }, [workspace.id, workspace.status, workspace.stage, workspace.cloudRun.status, workspace.cloudRun.exchangePackageID, workspace.cloudRun.resultPackageID, workspace.packagePreview.buildStatus]);
+
+  const nextAction = projectNextAction(workspace);
+  const journey = projectJourney(workspace);
 
   return (
     <div className="project-agent-layout">
@@ -778,7 +753,20 @@ function ProjectAgentWorkspace({
           <div className="project-agent-status-row"><span className="status-dot ok" />{runtimeLabel}<span className="project-agent-status-divider" />{statusLabel}</div>
           <button type="button" className="project-agent-mobile-close" onClick={() => setMobileChatOpen(false)}>Close chat</button>
         </header>
-        <AssistantConversationPanel bridge={bridge} context={{ surface: "projects", scopeKey: `project_${workspace.id}`, projectID: workspace.id, projectName: workspace.name }} embedded showHeader={false} onWorkstationChange={setWorkstationView} />
+        <AssistantConversationPanel
+          bridge={bridge}
+          context={{
+            surface: "projects",
+            scopeKey: assistantScopeKey ?? `project_${workspace.id}`,
+            ...(workspace.id.startsWith("draft_") ? {} : { projectID: workspace.id }),
+            projectName: workspace.name,
+          }}
+          {...(assistantInitialMessage ? { initialMessage: assistantInitialMessage } : {})}
+          embedded
+          showHeader={false}
+          onOpenProject={onOpenProjectFromAssistant}
+          onWorkstationChange={setWorkstationView}
+        />
       </aside>
       <main className="project-workstation" aria-label="Project workstation">
         <header className="project-workstation-header">
@@ -786,14 +774,33 @@ function ProjectAgentWorkspace({
           <div className="project-workstation-meta"><span>{workspace.productURL || "Product context pending"}</span><StatusPill label={statusLabel} tone={workspace.status === "asset_ready" ? "green" : workspace.status === "script_repair_required" ? "yellow" : "blue"} /></div>
           <button type="button" className="project-agent-chat-toggle" onClick={() => setMobileChatOpen(true)}>Open Cascade chat</button>
         </header>
+        <nav className="project-journey" aria-label="Demo production progress">
+          {journey.map((step, index) => (
+            <button key={step.id} type="button" className={`project-journey-step ${step.status}`} onClick={() => setWorkstationView(step.workstation)}>
+              <span>{step.status === "completed" ? "✓" : index + 1}</span>
+              <strong>{step.label}</strong>
+            </button>
+          ))}
+        </nav>
         <section className={`project-workstation-canvas ${workstationView === "editor" ? "project-workstation-editor-canvas" : ""}`}>
+          {workstationView !== "editor" ? (
+            <section className="project-next-action" aria-label="Recommended next action">
+              <div><span>下一步</span><strong>{nextAction.title}</strong><p>{nextAction.description}</p></div>
+              {nextAction.kind === "configure" ? <button type="button" className="primary-action" onClick={() => setMobileChatOpen(true)}>继续配置</button> : null}
+              {nextAction.kind === "analyze" ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onAnalyze}>{isGeneratingPackage ? "分析中…" : "开始本地分析"}</button> : null}
+              {nextAction.kind === "review_plan" ? <button type="button" className="primary-action" onClick={() => setWorkstationView("approval")}>进入上传审批</button> : null}
+              {nextAction.kind === "monitor" ? <button type="button" className="secondary-action" disabled={isGeneratingPackage} onClick={onRefreshExecution}>{isGeneratingPackage ? "刷新中…" : "刷新执行状态"}</button> : null}
+              {nextAction.kind === "repair" ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onRepairScript}>生成修复包</button> : null}
+              {nextAction.kind === "complete" ? <button type="button" className="secondary-action" onClick={() => setWorkstationView("editor")}>在 Editor 中打开</button> : null}
+            </section>
+          ) : null}
           {workstationView === "overview" ? <ProjectOverviewWorkstation workspace={workspace} /> : null}
           {workstationView === "evidence" ? <UnderstandingStagePanel workspace={workspace} onReplaceWebpage={onReplaceWebpage} onReplaceSource={onReplaceSource} onContinuePageOnly={onContinuePageOnly} /> : null}
           {workstationView === "plan" ? <PlanReviewPanel workspace={workspace} selectedNodeID={selectedNodeID} onSelectNode={onSelectNode} onPatchNode={onPatchNode} /> : null}
           {workstationView === "approval" ? <PackageApproval workspace={workspace} checklist={checklist} blockedReasons={blockedReasons} canUpload={canUpload} isLocalMode={bridge.mode === "local"} onChecklistChange={onChecklistChange} onUpload={onUpload} onCloudSuccess={onCloudSuccess} onCloudFailure={onCloudFailure} onRepairScript={onRepairScript} /> : null}
           {workstationView === "execution" ? <div className="section-stack"><CloudRunPanel workspace={workspace} /><RuntimeLogPanel workspace={workspace} /></div> : null}
           {workstationView === "repair" ? <div className="section-stack"><FailureDiagnosticPanel workspace={workspace} onRepairScript={onRepairScript} /><ScriptRepairPanel workspace={workspace} /></div> : null}
-          {workstationView === "assets" ? <AssetReview workspace={workspace} onApprove={onApproveAssets} /> : null}
+          {workstationView === "assets" ? <AssetReview workspace={workspace} onDownload={onApproveAssets} onReview={onReviewAssets} /> : null}
           {workstationView === "editor" ? <div className="project-editor-workstation"><VideoEditor /></div> : null}
           {isGeneratingPackage ? <div className="project-workstation-progress"><span className="status-dot ok" />Cascade is updating the workstation…</div> : null}
         </section>
@@ -1705,7 +1712,7 @@ function ScriptRepairPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
 }
 
 function ResultReviewPanel({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {
-  return <AssetReview workspace={workspace} onApprove={onApprove} />;
+  return <AssetReview workspace={workspace} onDownload={onApprove} onReview={() => undefined} />;
 }
 
 function MetricsRow({ workspace }: { workspace: ProjectWorkspaceView }) {
@@ -2183,7 +2190,19 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
-function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {
+function AssetReview({
+  workspace,
+  onDownload,
+  onReview,
+}: {
+  workspace: ProjectWorkspaceView;
+  onDownload: () => void;
+  onReview: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
+}) {
+  const [reviewSummary, setReviewSummary] = useState("");
+  const review = workspace.cloudRun.resultReview;
+  const hasResult = Boolean(workspace.cloudRun.resultPackageID || workspace.cloudRun.resultPackage);
+  const canReview = hasResult && workspace.cloudRun.resultDownloaded === true;
   return (
     <div className="asset-layout">
       <section className="video-panel">
@@ -2203,10 +2222,19 @@ function AssetReview({ workspace, onApprove }: { workspace: ProjectWorkspaceView
             </li>
           ))}
         </ol>
-        <button type="button" className="primary-action" onClick={onApprove}>
-          <span className="button-icon">准</span>
-          批准成品
-        </button>
+        <div className="result-review-actions">
+          <button type="button" className="secondary-action" disabled={!hasResult || workspace.cloudRun.resultDownloaded} onClick={onDownload}>{workspace.cloudRun.resultDownloaded ? "成品已下载并通过 SHA-256 校验" : "下载并校验成品"}</button>
+          <label className="field-row">
+            <span>审核意见</span>
+            <textarea rows={3} value={reviewSummary} onChange={(event) => setReviewSummary(event.currentTarget.value)} placeholder="可对时间点、字幕、节奏或缺失素材进行说明" />
+          </label>
+          <div className="action-row">
+            <button type="button" className="primary-action" disabled={!canReview} onClick={() => onReview("approved", reviewSummary)}>通过</button>
+            <button type="button" className="secondary-action" disabled={!canReview} onClick={() => onReview("reedit_requested", reviewSummary)}>需要重新剪辑</button>
+            <button type="button" className="secondary-action" disabled={!canReview} onClick={() => onReview("rerecord_requested", reviewSummary)}>缺少素材，重新录制</button>
+          </div>
+          {review ? <div className="input-note">已提交：{review.decision === "approved" ? "通过" : review.decision === "reedit_requested" ? "重新剪辑" : "重新录制"}{review.summary ? ` · ${review.summary}` : ""}</div> : null}
+        </div>
       </section>
     </div>
   );

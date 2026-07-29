@@ -21,8 +21,12 @@ import (
 )
 
 var (
-	assistantSecretPattern     = regexp.MustCompile(`(?i)(password|token|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+`)
-	windowsAbsolutePathPattern = regexp.MustCompile(`(?i)\b[A-Z]:\\(?:[^\s<>:"|?*]+\\)*[^\s<>:"|?*]*`)
+	assistantSecretPattern      = regexp.MustCompile(`(?i)(password|token|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+`)
+	windowsAbsolutePathPattern  = regexp.MustCompile(`(?i)\b[A-Z]:\\(?:[^\s<>:"|?*]+\\)*[^\s<>:"|?*]*`)
+	assistantProjectNamePattern = regexp.MustCompile(`(?:项目名(?:叫|为|是)|项目名称(?:为|是)|命名为)\s*[“"']?([^，,。；;\n”"']{1,80})`)
+	assistantAudiencePattern    = regexp.MustCompile(`面向\s*([^，,。；;\n]{1,80}?)(?:的?\s*\d{1,3}\s*秒|制作|打造|，|,|。|；|;|$)`)
+	assistantDurationPattern    = regexp.MustCompile(`(\d{1,3})\s*秒`)
+	assistantMustShowPattern    = regexp.MustCompile(`(?:重点展示|必须展示|需要展示)\s*([^。；;\n]{1,200})`)
 )
 
 type assistantModelResponse struct {
@@ -212,7 +216,7 @@ func (s *Service) generateAssistantResponse(ctx context.Context, draft model.Pro
 	if err != nil {
 		return response
 	}
-	generated.Patch = sanitizeConfigurationPatch(generated.Patch)
+	generated.Patch = mergeExplicitAssistantPatch(sanitizeConfigurationPatch(generated.Patch), assistantFallbackResponse(message).Patch)
 	// Source and credential refs are created only by trusted picker/credential paths.
 	generated.Patch.Sources = nil
 	generated.Patch.CredentialRefs = nil
@@ -227,15 +231,59 @@ func assistantFallbackResponse(message string) assistantModelResponse {
 		patch.ProductURL = &candidate
 		hasPatch = true
 	}
-	objective := strings.TrimSpace(message)
-	if objective != "" && firstHTTPURL(message) == "" && len([]rune(objective)) <= 500 {
+	objective := strings.TrimSpace(redactAssistantText(message))
+	if objective != "" && len([]rune(objective)) <= 500 {
 		patch.Objective = &objective
+		hasPatch = true
+	}
+	if match := assistantProjectNamePattern.FindStringSubmatch(message); len(match) > 1 {
+		value := strings.TrimSpace(match[1])
+		patch.ProjectName = &value
+		hasPatch = true
+	}
+	if match := assistantAudiencePattern.FindStringSubmatch(message); len(match) > 1 {
+		value := strings.TrimSpace(match[1])
+		patch.TargetAudience = &value
+		hasPatch = true
+	}
+	if match := assistantDurationPattern.FindStringSubmatch(message); len(match) > 1 {
+		var value int
+		if _, err := fmt.Sscanf(match[1], "%d", &value); err == nil && value >= 5 && value <= 600 {
+			patch.TargetDurationSec = &value
+			hasPatch = true
+		}
+	}
+	if match := assistantMustShowPattern.FindStringSubmatch(message); len(match) > 1 {
+		value := []string{strings.TrimSpace(match[1])}
+		patch.MustShow = &value
 		hasPatch = true
 	}
 	return assistantModelResponse{
 		Reply: "我会把这轮信息整理为 configuration 变更。确认前不会保存，也不会启动分析。",
 		Patch: patch, HasPatch: hasPatch,
 	}
+}
+
+func mergeExplicitAssistantPatch(primary, explicit model.ProjectConfigurationPatch) model.ProjectConfigurationPatch {
+	if primary.ProjectName == nil {
+		primary.ProjectName = explicit.ProjectName
+	}
+	if primary.ProductURL == nil {
+		primary.ProductURL = explicit.ProductURL
+	}
+	if primary.Objective == nil {
+		primary.Objective = explicit.Objective
+	}
+	if primary.TargetAudience == nil {
+		primary.TargetAudience = explicit.TargetAudience
+	}
+	if primary.TargetDurationSec == nil {
+		primary.TargetDurationSec = explicit.TargetDurationSec
+	}
+	if primary.MustShow == nil {
+		primary.MustShow = explicit.MustShow
+	}
+	return primary
 }
 
 func (s *Service) proposalsFromModelResponse(session *model.AssistantSession, response assistantModelResponse, now time.Time) []model.AssistantProposal {

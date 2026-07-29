@@ -4,6 +4,7 @@ import type {
   AssistantMessageView,
   AssistantProposalView,
   AssistantSessionView,
+  ConfigurationSourceRefView,
   ProjectWorkstationView,
 } from "./domain";
 import type { DesktopBridgeClient } from "./bridge";
@@ -14,6 +15,7 @@ type AssistantWidgetProps = {
   onOpenProject?: (projectID: string) => void;
   onOpenRepositoryForm?: () => void;
   onWorkstationChange?: (view: ProjectWorkstationView) => void;
+  initialMessage?: string;
 };
 
 type AssistantConversationPanelProps = AssistantWidgetProps & {
@@ -50,13 +52,16 @@ export function AssistantWidget({ bridge, context, onOpenProject, onOpenReposito
   );
 }
 
-export function AssistantConversationPanel({ bridge, context, onOpenProject, onOpenRepositoryForm, onWorkstationChange, embedded = false, showHeader = true, onClose }: AssistantConversationPanelProps & { onClose?: () => void }) {
+export function AssistantConversationPanel({ bridge, context, onOpenProject, onOpenRepositoryForm, onWorkstationChange, initialMessage, embedded = false, showHeader = true, onClose }: AssistantConversationPanelProps & { onClose?: () => void }) {
   const [session, setSession] = useState<AssistantSessionView>();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [credentialEntry, setCredentialEntry] = useState<{ ref: string; username: string; password: string }>();
+  const [githubEntry, setGithubEntry] = useState<string>();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const submittedInitialMessageRef = useRef("");
   const active = embedded || Boolean(onClose);
 
   function applySession(next: AssistantSessionView) {
@@ -81,6 +86,22 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
     });
     return () => { mounted = false; };
   }, [active, bridge, context.projectID, context.projectName, context.repositoryID, context.repositoryLabel, context.scopeKey, context.surface]);
+
+  useEffect(() => {
+    const message = initialMessage?.trim();
+    if (!active || !session || !message || loading || submittedInitialMessageRef.current === message) return;
+    submittedInitialMessageRef.current = message;
+    setLoading(true);
+    setError("");
+    void bridge.submitAssistantTurn(session.id, message, `initial-${context.scopeKey}`).then((result) => {
+      if (result.ok && result.data) applySession(result.data);
+      else {
+        submittedInitialMessageRef.current = "";
+        setError(result.error ?? "Cascade could not start the configuration conversation.");
+      }
+      setLoading(false);
+    });
+  }, [active, bridge, context.scopeKey, initialMessage, loading, session?.id]);
 
   useEffect(() => {
     if (!active || !session) return;
@@ -132,12 +153,78 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
       : await bridge.dismissAssistantProposal(session.id, proposal.id);
     if (result.ok && result.data) {
       applySession(result.data);
+      const analysisProjectID = result.data.configuration.analysisProjectID;
+      if (action === "confirm" && analysisProjectID && (proposal.kind === "confirm_configuration" || proposal.kind === "start_local_analysis")) onOpenProject?.(analysisProjectID);
       if (action === "confirm" && proposal.targetID && (proposal.kind === "open_project" || proposal.kind === "inspect_project")) onOpenProject?.(proposal.targetID);
       if (action === "confirm" && proposal.kind === "open_repository_form") onOpenRepositoryForm?.();
       if (action === "confirm" && proposal.targetWorkstation) onWorkstationChange?.(proposal.targetWorkstation);
+      if (action === "confirm") await executeClientProposal(proposal);
     } else {
       setError(result.error ?? "That action could not be updated.");
     }
+  }
+
+  async function submitSafeSelections(selectedSources: ConfigurationSourceRefView[] = [], credentialRefs: string[] = []) {
+    if (!session) return;
+    setLoading(true);
+    const result = await bridge.submitAssistantTurn(session.id, "安全选择已完成，请将引用加入 configuration。", `selection-${Date.now()}`, { selectedSources, credentialRefs });
+    if (result.ok && result.data) applySession(result.data);
+    else setError(result.error ?? "安全选择无法写入 configuration。");
+    setLoading(false);
+  }
+
+  async function executeClientProposal(proposal: AssistantProposalView) {
+    if (proposal.kind === "select_local_project") {
+      const selected = await bridge.selectLocalProjectDirectory();
+      if (selected.ok && selected.data) await submitSafeSelections([selected.data]);
+      else setError(selected.error ?? "未选择本地项目。");
+      return;
+    }
+    if (proposal.kind === "attach_requirement_document") {
+      const selected = await bridge.selectRequirementDocuments();
+      if (selected.ok && selected.data) await submitSafeSelections(selected.data);
+      else setError(selected.error ?? "未选择需求文档。");
+      return;
+    }
+    if (proposal.kind === "attach_brand_asset") {
+      const selected = await bridge.selectBrandAssets();
+      if (selected.ok && selected.data) await submitSafeSelections(selected.data);
+      else setError(selected.error ?? "未选择品牌素材。");
+      return;
+    }
+    if (proposal.kind === "store_demo_credential") {
+      setCredentialEntry({ ref: `assistant-${proposal.id}`, username: "", password: "" });
+      return;
+    }
+    if (proposal.kind === "connect_github") {
+      setGithubEntry("");
+      onOpenRepositoryForm?.();
+    }
+  }
+
+  async function saveCredential(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!credentialEntry || !credentialEntry.username.trim() || !credentialEntry.password || !session) return;
+    setLoading(true);
+    const stored = await bridge.storeDemoCredential(credentialEntry.ref, credentialEntry.username, credentialEntry.password);
+    if (stored.ok && stored.data?.configured) {
+      setCredentialEntry(undefined);
+      await submitSafeSelections([], [stored.data.secretRef]);
+    } else {
+      setError(stored.error ?? "演示凭据无法保存到本地凭据库。");
+      setLoading(false);
+    }
+  }
+
+  async function saveGitHubSource(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const url = githubEntry?.trim() ?? "";
+    if (!/^https:\/\/github\.com\/[^/]+\/[^/]+\/?$/i.test(url)) {
+      setError("请输入 https://github.com/owner/repository 格式的仓库地址。");
+      return;
+    }
+    setGithubEntry(undefined);
+    await submitSafeSelections([{ ref: "", kind: "github_repository", label: url.split("/").filter(Boolean).at(-1) ?? "GitHub repository", url }]);
   }
 
   return (
@@ -157,6 +244,23 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
         <textarea ref={inputRef} value={input} onChange={(event) => setInput(event.currentTarget.value)} rows={2} placeholder={context.surface === "projects" ? "Ask Cascade what to do next…" : "Ask about connected repositories…"} aria-label="Message Cascade Agent" />
         <div className="assistant-composer-footer"><span>Suggestions require confirmation.</span><button type="submit" disabled={loading || !input.trim()}>Send <span aria-hidden="true">↗</span></button></div>
       </form>
+      {credentialEntry ? (
+        <form className="assistant-secure-entry" onSubmit={saveCredential}>
+          <strong>安全保存演示账号</strong>
+          <span>内容只进入本机凭据库；聊天和 configuration 仅保存 opaque ref。</span>
+          <input value={credentialEntry.username} onChange={(event) => setCredentialEntry({ ...credentialEntry, username: event.currentTarget.value })} placeholder="账号" autoComplete="username" />
+          <input type="password" value={credentialEntry.password} onChange={(event) => setCredentialEntry({ ...credentialEntry, password: event.currentTarget.value })} placeholder="密码" autoComplete="current-password" />
+          <div><button type="button" className="assistant-dismiss" onClick={() => setCredentialEntry(undefined)}>取消</button><button type="submit" className="assistant-confirm" disabled={loading || !credentialEntry.username.trim() || !credentialEntry.password}>保存引用</button></div>
+        </form>
+      ) : null}
+      {githubEntry !== undefined ? (
+        <form className="assistant-secure-entry" onSubmit={saveGitHubSource}>
+          <strong>连接 GitHub 仓库</strong>
+          <span>公开仓库只保存 HTTPS URL；私有仓库凭据请通过本地 GitHub 授权单独配置。</span>
+          <input value={githubEntry} onChange={(event) => setGithubEntry(event.currentTarget.value)} placeholder="https://github.com/owner/repository" autoComplete="off" />
+          <div><button type="button" className="assistant-dismiss" onClick={() => setGithubEntry(undefined)}>取消</button><button type="submit" className="assistant-confirm" disabled={loading || !githubEntry.trim()}>连接</button></div>
+        </form>
+      ) : null}
     </section>
   );
 }
