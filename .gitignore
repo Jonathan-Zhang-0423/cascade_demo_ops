@@ -18,6 +18,11 @@ replay-bundle.tar.gz
 /colleague-bundle-*/
 /colleague-bundle-*.tar.gz
 backend/.cache/
+/.tmp-go-cache/
+/.tooling/
+backend/.tmp-go-cache/
+backend/.tmp-go-tmp/
+backend/bin/
 .gocache/
 .gotmp/
 backend/cmd/wails-desktop/build/bin/

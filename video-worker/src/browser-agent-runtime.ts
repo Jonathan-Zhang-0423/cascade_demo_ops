@@ -101,6 +101,7 @@ export type BrowserAgentOpenRequest = {
   forbidden_keywords?: string[];
   mask_selectors?: string[];
 	recording_sensitive?: boolean;
+	record_trace?: boolean;
 };
 
 export type BrowserAgentStageRequest = {
@@ -168,7 +169,8 @@ type BrowserAgentSession = {
   forbiddenPathPrefixes: string[];
   forbiddenKeywords: string[];
   maskSelectors: string[];
-	recordingSensitive: boolean;
+  recordingSensitive: boolean;
+	recordTrace: boolean;
 };
 
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
@@ -205,8 +207,11 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
   }
   const context = await browser.newContext(contextOptions);
   await installRecordingMasks(context, request.mask_selectors || []);
+  const recordTrace = request.record_trace ?? true;
   const tracePath = path.join(outputDir, "browser-agent-trace.zip");
-  await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
+  // The visible local-login bridge must never persist a trace while a person
+  // types credentials into its isolated browser profile.
+	if (recordTrace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   const page = await context.newPage();
   const video = page.video?.();
   const session: BrowserAgentSession = {
@@ -224,8 +229,9 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
     forbiddenPages: request.forbidden_pages || [],
     forbiddenPathPrefixes: request.forbidden_path_prefixes || [],
     forbiddenKeywords: request.forbidden_keywords || [],
-    maskSelectors: request.mask_selectors || [],
-		recordingSensitive: request.recording_sensitive ?? true,
+	maskSelectors: request.mask_selectors || [],
+	recordingSensitive: request.recording_sensitive ?? true,
+	recordTrace,
   };
   await page.route("**/*", async (route: any) => {
     // Route allowlists apply to document navigation, not the page's JS/CSS/media.
@@ -239,6 +245,62 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
   sessions.set(sessionID, session);
   return { session_id: sessionID, runtime_versions: { runner: "playwright-browser-agent", browser: engineName } };
 }
+
+export async function browserAgentSessionStatus(request: { session_id: string }): Promise<{ url: string; title: string }> {
+  const session = requiredSession(request.session_id);
+  // Keep this endpoint intentionally metadata-only: it is used to hand a
+  // manually authenticated, isolated browser back to the local test harness.
+  return { url: safeURL(session.page.url()), title: redactText(await session.page.title().catch(() => "")) };
+}
+
+// This intentionally narrow RPC is used only to open the local dev/test
+// visible-login window. Unlike a stage, it takes no screenshot and records no
+// execution evidence, so user-entered credentials cannot enter artifacts.
+export async function browserAgentDevVisibleNavigate(request: { session_id: string; target_url: string }): Promise<{ url: string; title: string }> {
+  const session = requiredSession(request.session_id);
+  const targetURL = absoluteTargetURL(request.target_url, session.page.url());
+  const policyError = urlPolicyError(targetURL, session, false);
+  if (policyError) throw new Error(policyError);
+  await session.page.goto(targetURL, { waitUntil: "domcontentloaded", timeout: actionTimeoutMS });
+  await waitForPageSettled(session.page);
+  return browserAgentSessionStatus(request);
+}
+
+type BrowserAgentExecutionPolicyRequest = {
+  session_id: string;
+  policy: {
+    allowed_origins: string[];
+    allowed_routes: string[];
+    forbidden_pages?: string[];
+    forbidden_path_prefixes?: string[];
+    forbidden_keywords?: string[];
+    mask_selectors?: string[];
+  };
+};
+
+// Policy is narrowed only after a Server-validated App package is bound to a
+// manually authenticated local-test session. It cannot change allowed hosts.
+export async function browserAgentApplyExecutionPolicy(request: BrowserAgentExecutionPolicyRequest): Promise<Record<string, never>> {
+  const session = requiredSession(request.session_id);
+  const policy = request.policy || {} as BrowserAgentExecutionPolicyRequest["policy"];
+  if (!Array.isArray(policy.allowed_origins) || policy.allowed_origins.length === 0 || !Array.isArray(policy.allowed_routes) || policy.allowed_routes.length === 0) {
+    throw new Error("browser_agent_execution_policy_scope_required");
+  }
+  for (const origin of policy.allowed_origins) {
+    const error = urlPolicyError(origin, session, false);
+    if (error) throw new Error(error);
+  }
+  session.allowedOrigins = [...new Set(policy.allowed_origins)];
+  session.allowedRoutes = [...new Set(policy.allowed_routes)];
+  session.forbiddenPages = [...new Set(policy.forbidden_pages || [])];
+  session.forbiddenPathPrefixes = [...new Set(policy.forbidden_path_prefixes || [])];
+  session.forbiddenKeywords = [...new Set(policy.forbidden_keywords || [])];
+  session.maskSelectors = [...new Set([...session.maskSelectors, ...(policy.mask_selectors || [])])];
+  const currentError = urlPolicyError(session.page.url(), session, false);
+  if (currentError) throw new Error(currentError);
+  return {};
+}
+
 
 export async function observeBrowserAgentStage(request: BrowserAgentStageRequest): Promise<BrowserAgentStageResult> {
   const session = requiredSession(request.session_id);
@@ -317,7 +379,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   const artifacts: ArtifactRef[] = [];
   let recordingPath: string | undefined;
   try {
-    await session.context.tracing.stop({ path: session.tracePath });
+    if (session.recordTrace) await session.context.tracing.stop({ path: session.tracePath });
   } finally {
     await session.context.close().catch(() => undefined);
     await session.browser.close().catch(() => undefined);
@@ -600,11 +662,19 @@ async function captureScreenshot(session: BrowserAgentSession, stage: BrowserAge
   await session.page.screenshot({ path: filePath, fullPage: false, mask: masks, timeout: screenshotTimeoutMS });
   return artifactRef(
     `artifact_${safeName(session.id)}_${safeName(stage.node_id)}_${phase}`,
-    "screenshot",
+    phase === "after" ? "step_screenshot" : "screenshot",
     filePath,
     "image/png",
     stage.node_id,
-    { include_in_demo: phase === "after", capture_phase: phase, target_semantic_id: stage.target_contract.semantic_id, current_url: safeURL(session.page.url()), page_title: redactText(await session.page.title().catch(() => "")) },
+    {
+      include_in_demo: phase === "after",
+      // Only post-action screenshots can be used to compose a local test video.
+      presentation_only: phase === "after",
+      capture_phase: phase,
+      target_semantic_id: stage.target_contract.semantic_id,
+      current_url: safeURL(session.page.url()),
+      page_title: redactText(await session.page.title().catch(() => "")),
+    },
     false,
   );
 }

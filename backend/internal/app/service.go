@@ -21,23 +21,26 @@ import (
 )
 
 type Service struct {
-	runtime       config.AppRuntimeConfig
-	llm           *llm.Router
-	flow          *orchestrator.CascadeFlow
-	states        store.StateStore
-	layout        storage.LocalLayout
-	exchange      *ExchangeIntakeService
-	runningMu     sync.Mutex
-	runningTasks  map[string]context.CancelFunc
-	editorMu      sync.Mutex
-	editorWorker  editorWorker
-	editorJobsMu  sync.Mutex
-	editorJobs    map[string]editorRenderTask
-	verifierMu    sync.RWMutex
+	runtime      config.AppRuntimeConfig
+	llm          *llm.Router
+	flow         *orchestrator.CascadeFlow
+	states       store.StateStore
+	layout       storage.LocalLayout
+	exchange     *ExchangeIntakeService
+	runningMu    sync.Mutex
+	runningTasks map[string]context.CancelFunc
+	editorMu     sync.Mutex
+	editorWorker editorWorker
+	editorJobsMu sync.Mutex
+	editorJobs   map[string]editorRenderTask
+	verifierMu   sync.RWMutex
 	// outcomeVerifier is Server-owned. It never receives a browser/page object
 	// and is snapshotted when an Outline run begins.
 	outcomeVerifier OutcomeVerifier
-	outlineRunner BrowserAgentOutlineRunner
+	outlineRunner   BrowserAgentOutlineRunner
+	// devVisibleBrowserAgent is intentionally separate from the normal runtime.
+	// It exists only for a human-assisted local acceptance login handoff.
+	devVisibleBrowserAgent *devVisibleBrowserAgentManager
 }
 
 type editorRenderTask struct {
@@ -92,6 +95,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		editorJobs:    map[string]editorRenderTask{},
 		outlineRunner: nil,
 	}
+	service.devVisibleBrowserAgent = newDevVisibleBrowserAgentManager(service)
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
 	// Production cloud intake receives only encrypted payload references. Local
 	// and test runtimes retain inline payloads solely for deterministic fixtures
@@ -350,7 +354,7 @@ func executionPackagePreflightResult(pkg model.ClientExecutionPackage) CloudPack
 	result := CloudPackagePreflightResult{
 		Valid: true, PackageID: pkg.PackageID, AllowedDomains: append([]string{}, pkg.RecordingRunSpec.AllowedDomains...),
 		Warnings: []string{},
-		Message: "Server Intake 校验通过：尚未上传、尚未启动浏览器、尚未读取任何客户页面。",
+		Message:  "Server Intake 校验通过：尚未上传、尚未启动浏览器、尚未读取任何客户页面。",
 	}
 	if bundle := pkg.ExecutableScriptBundle; bundle != nil {
 		result.Runtime = bundle.ScriptManifest.Runtime

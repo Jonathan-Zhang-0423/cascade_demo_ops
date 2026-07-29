@@ -91,6 +91,9 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/browser-agent-acceptance/run", s.handleBrowserAgentAcceptance)
 	mux.HandleFunc("GET /v1/desktop/browser-agent-business-acceptance", s.handleBrowserAgentBusinessAcceptance)
 	mux.HandleFunc("POST /v1/desktop/browser-agent-business-acceptance/run", s.handleBrowserAgentBusinessAcceptance)
+	// Local dev/test only. This is not an App, Exchange, or production runtime API.
+	mux.HandleFunc("POST /v1/desktop/dev-visible-browser-agent/prepare", s.handleDevVisibleBrowserAgent)
+	mux.HandleFunc("/v1/desktop/dev-visible-browser-agent/", s.handleDevVisibleBrowserAgent)
 	mux.HandleFunc("GET /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions/from-result-package", s.handleEditorSessionFromResultPackage)
