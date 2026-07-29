@@ -6,8 +6,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"cascade-demoops/backend/internal/agents"
 	"cascade-demoops/backend/internal/config"
@@ -21,23 +23,29 @@ import (
 )
 
 type Service struct {
-	runtime      config.AppRuntimeConfig
-	llm          *llm.Router
-	flow         *orchestrator.CascadeFlow
-	states       store.StateStore
-	layout       storage.LocalLayout
-	exchange     *ExchangeIntakeService
-	runningMu    sync.Mutex
-	runningTasks map[string]context.CancelFunc
-	editorMu     sync.Mutex
-	editorWorker editorWorker
-	editorJobsMu sync.Mutex
-	editorJobs   map[string]editorRenderTask
-	verifierMu   sync.RWMutex
+	runtime        config.AppRuntimeConfig
+	llm            *llm.Router
+	flow           *orchestrator.CascadeFlow
+	states         store.StateStore
+	assistantStore store.AssistantStore
+	assistantMu    sync.Mutex
+	layout         storage.LocalLayout
+	exchange       *ExchangeIntakeService
+	runningMu      sync.Mutex
+	runningTasks   map[string]context.CancelFunc
+	editorMu       sync.Mutex
+	editorWorker   editorWorker
+	editorJobsMu   sync.Mutex
+	editorJobs     map[string]editorRenderTask
+	outlineRunner  BrowserAgentOutlineRunner
+	sourceRefsMu   sync.RWMutex
+	sourceRefs     map[string]LocalSourceRef
+	approvalMu     sync.Mutex
+	approvedBuilds map[string]ClientExecutionPackageBuild
+	verifierMu     sync.RWMutex
 	// outcomeVerifier is Server-owned. It never receives a browser/page object
 	// and is snapshotted when an Outline run begins.
 	outcomeVerifier OutcomeVerifier
-	outlineRunner   BrowserAgentOutlineRunner
 	// devVisibleBrowserAgent is intentionally separate from the normal runtime.
 	// It exists only for a human-assisted local acceptance login handoff.
 	devVisibleBrowserAgent *devVisibleBrowserAgentManager
@@ -71,6 +79,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		RequirementReader:    agents.NewRequirementReaderAgentWithLLM(llmRouter),
 		CodeReader:           agents.NewCodeReaderAgentWithLLM(llmRouter, runtime.CacheRoot),
 		PageReader:           agents.NewPageReaderAgent(),
+		SourceBinding:        agents.NewProductSourceBindingAgent(),
 		ProjectIntelligence:  agents.NewProjectIntelligenceGraphWithLLM(llmRouter),
 		Understanding:        agents.NewMultimodalUnderstandingAgentWithLLM(llmRouter),
 		ProductMap:           agents.NewProductMapAgentWithLLM(llmRouter),
@@ -85,15 +94,18 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		return nil, err
 	}
 	service := &Service{
-		runtime:       runtime,
-		llm:           llmRouter,
-		flow:          flow,
-		states:        states,
-		layout:        storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
-		exchange:      newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
-		runningTasks:  map[string]context.CancelFunc{},
-		editorJobs:    map[string]editorRenderTask{},
-		outlineRunner: nil,
+		runtime:        runtime,
+		llm:            llmRouter,
+		flow:           flow,
+		states:         states,
+		assistantStore: assistantStoreForRuntime(runtime),
+		layout:         storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
+		exchange:       newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
+		runningTasks:   map[string]context.CancelFunc{},
+		editorJobs:     map[string]editorRenderTask{},
+		outlineRunner:  nil,
+		sourceRefs:     map[string]LocalSourceRef{},
+		approvedBuilds: map[string]ClientExecutionPackageBuild{},
 	}
 	service.devVisibleBrowserAgent = newDevVisibleBrowserAgentManager(service)
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
@@ -102,7 +114,15 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	// and never relax the production transport rule.
 	service.exchange.SetInlinePayloadAllowed(runtime.Profile != config.ProfileCloud || runtime.Environment != "production")
 	service.outlineRunner = localBrowserAgentOutlineRunner{service: service}
+	service.loadLocalSourceRefs()
 	return service, nil
+}
+
+func assistantStoreForRuntime(runtime config.AppRuntimeConfig) store.AssistantStore {
+	if strings.TrimSpace(runtime.DataRoot) == "" {
+		return store.NewMemoryAssistantStore()
+	}
+	return store.NewFileAssistantStore(filepath.Join(runtime.DataRoot, "assistant_sessions"))
 }
 
 // SetBrowserAgentOutcomeVerifier installs the Server-side Validation Agent
@@ -154,6 +174,9 @@ func (s *Service) DiagnoseModels(ctx context.Context) []llm.DiagnosticResult {
 func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
 	state, err := s.flow.Start(ctx, input)
 	if err != nil {
+		if state != nil && state.ProjectID != "" {
+			_ = s.states.Save(ctx, state)
+		}
 		return state, err
 	}
 	if err := s.states.Save(ctx, state); err != nil {
@@ -164,6 +187,155 @@ func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInpu
 
 func (s *Service) LoadProject(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
 	return s.states.Load(ctx, projectID)
+}
+
+type SourceBindingDecisionRequest struct {
+	Decision       string `json:"decision"`
+	AssessmentHash string `json:"assessment_hash"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+func (s *Service) GetSourceBinding(ctx context.Context, projectID string) (*model.ProductSourceBindingAssessment, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.SourceBinding == nil {
+		return nil, errors.New("source binding assessment is missing")
+	}
+	return state.SourceBinding, nil
+}
+
+func (s *Service) DecideSourceBinding(ctx context.Context, projectID string, request SourceBindingDecisionRequest) (*orchestrator.CascadeState, error) {
+	if request.Decision != "continue_page_only" {
+		return nil, errors.New("unsupported source binding decision")
+	}
+	if strings.TrimSpace(request.IdempotencyKey) == "" {
+		return nil, errors.New("idempotency_key is required")
+	}
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.SourceBinding == nil || state.SourceBinding.AssessmentHash == "" {
+		return nil, errors.New("source binding assessment is missing")
+	}
+	if request.AssessmentHash == "" || request.AssessmentHash != state.SourceBinding.AssessmentHash {
+		return nil, &SourceBindingStaleError{}
+	}
+	if state.SourceBinding.Decision == request.Decision && state.SourceBinding.EffectiveMode == model.ProductSourceModePageOnly {
+		return state, nil
+	}
+	if state.ProjectContext == nil {
+		return nil, errors.New("project context is missing")
+	}
+	input := userInputFromProjectContext(state.ProjectContext)
+	input.ProjectID = projectID
+	input.SourceBindingDecision = request.Decision
+	input.SourceBindingHash = request.AssessmentHash
+	return s.CreateProject(ctx, input)
+}
+
+type SourceBindingStaleError struct{}
+
+func (e *SourceBindingStaleError) Error() string { return "source binding assessment is stale" }
+
+type ProjectSummary struct {
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	ProductURL          string    `json:"product_url,omitempty"`
+	Stage               string    `json:"stage"`
+	Status              string    `json:"status"`
+	AssetCount          int       `json:"asset_count"`
+	GeneratedAssetCount int       `json:"generated_asset_count"`
+	CreatedAt           time.Time `json:"created_at,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+}
+
+func (s *Service) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
+	states, err := s.states.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ProjectSummary, 0, len(states))
+	for _, state := range states {
+		if state == nil || state.ProjectID == "" || state.ArchivedAt != nil {
+			continue
+		}
+		result = append(result, projectSummaryFromState(state))
+	}
+	sort.SliceStable(result, func(i, j int) bool { return result[i].UpdatedAt.After(result[j].UpdatedAt) })
+	return result, nil
+}
+
+func (s *Service) ArchiveProject(ctx context.Context, projectID string) error {
+	return s.states.Archive(ctx, projectID, time.Now().UTC())
+}
+
+func (s *Service) DeleteProject(ctx context.Context, projectID string) error {
+	return s.states.Delete(ctx, projectID)
+}
+
+func projectSummaryFromState(state *orchestrator.CascadeState) ProjectSummary {
+	summary := ProjectSummary{ID: state.ProjectID, Name: "未命名演示", Stage: projectStageFromState(state), Status: projectStatusFromState(state)}
+	if state.ProjectContext != nil {
+		if state.ProjectContext.Name != "" {
+			summary.Name = state.ProjectContext.Name
+		}
+		summary.ProductURL = state.ProjectContext.ProductURL
+		summary.CreatedAt = state.ProjectContext.CreatedAt
+		summary.UpdatedAt = state.ProjectContext.UpdatedAt
+	}
+	if summary.UpdatedAt.IsZero() {
+		summary.UpdatedAt = summary.CreatedAt
+	}
+	if state.Artifacts != nil {
+		if state.Artifacts.VideoPath != "" {
+			summary.AssetCount++
+			summary.GeneratedAssetCount++
+		}
+		if state.Artifacts.StepByStepDocsPath != "" {
+			summary.AssetCount++
+			summary.GeneratedAssetCount++
+		}
+		summary.AssetCount += len(state.Artifacts.ScreenshotPaths)
+		summary.GeneratedAssetCount += len(state.Artifacts.ScreenshotPaths)
+	}
+	return summary
+}
+
+func projectStageFromState(state *orchestrator.CascadeState) string {
+	switch state.CurrentNode {
+	case orchestrator.NodeInputCtx:
+		return "setup"
+	case orchestrator.NodeRequirementRead, orchestrator.NodeCodeRead, orchestrator.NodePageRead, orchestrator.NodeProjectIntelligence, orchestrator.NodeMultimodalUnderstand, orchestrator.NodeProductExplore, orchestrator.NodePageInteractionVerify:
+		return "understanding"
+	case orchestrator.NodeGraphGenerate:
+		return "plan_review"
+	case orchestrator.NodeScriptPackage, orchestrator.NodeHumanApprove:
+		return "package_approval"
+	case orchestrator.NodeExecuteRehearse:
+		return "cloud_run"
+	case orchestrator.NodeAssetGenerate:
+		return "result_review"
+	default:
+		return "inputs"
+	}
+}
+
+func projectStatusFromState(state *orchestrator.CascadeState) string {
+	switch state.Status {
+	case orchestrator.FlowStatusAwaitingHuman:
+		return "awaiting_approval"
+	case orchestrator.FlowStatusRunning:
+		return "cloud_running"
+	case orchestrator.FlowStatusCompleted:
+		return "asset_ready"
+	case orchestrator.FlowStatusFailed:
+		return "script_repair_required"
+	default:
+		return "draft"
+	}
 }
 
 func (s *Service) GenerateExecutionPackage(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
@@ -297,11 +469,13 @@ func (s *Service) ArtifactURI(projectID string, fileName string) string {
 
 func userInputFromProjectContext(project *model.ProjectContext) orchestrator.UserInput {
 	input := orchestrator.UserInput{
+		ProjectID:          project.ID,
 		Mode:               project.Mode,
 		ProductURL:         project.ProductURL,
 		GitRepoURL:         project.GitRepoURL,
 		LocalRepoPath:      project.LocalRepoPath,
 		ProductDescription: project.ProductDescription,
+		TargetDurationSec:  projectTargetDuration(project),
 		TargetAudience:     project.TargetAudience,
 		BrandTone:          project.BrandTone,
 		MustShow:           append([]string{}, project.MustShow...),
@@ -309,8 +483,15 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 		ForbiddenPages:     append([]string{}, project.ForbiddenPages...),
 		ForbiddenData:      append([]string{}, project.ForbiddenData...),
 	}
+	if project.SourceBinding != nil {
+		input.SourceBindingDecision = project.SourceBinding.Decision
+		input.SourceBindingHash = project.SourceBinding.AssessmentHash
+	}
+	if project.AccessPolicy != nil {
+		input.AllowedDomains = append([]string{}, project.AccessPolicy.AllowedDomains...)
+	}
 	if project.Inputs != nil {
-		input.Code = append([]model.CodeInput{}, project.Inputs.Code...)
+		input.Code = codeInputsForProjectRerun(project)
 		input.RequirementDocuments = append([]model.RequirementDocumentInput{}, project.Inputs.RequirementDocuments...)
 		input.WebpageScreenshots = append([]model.WebpageScreenshotInput{}, project.Inputs.WebpageScreenshots...)
 		if input.ProductURL == "" && len(project.Inputs.ProductURLs) > 0 {
@@ -331,6 +512,30 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 		}
 	}
 	return input
+}
+
+func codeInputsForProjectRerun(project *model.ProjectContext) []model.CodeInput {
+	if project == nil || project.Inputs == nil {
+		return nil
+	}
+	out := make([]model.CodeInput, 0, len(project.Inputs.Code))
+	for _, code := range project.Inputs.Code {
+		if project.LocalRepoPath != "" && code.ID == "code_local_repo" {
+			continue
+		}
+		if project.GitRepoURL != "" && code.ID == "code_git_repo" {
+			continue
+		}
+		out = append(out, code)
+	}
+	return out
+}
+
+func projectTargetDuration(project *model.ProjectContext) int {
+	if project != nil && project.Inputs != nil && len(project.Inputs.Scenarios) > 0 {
+		return project.Inputs.Scenarios[0].DurationSeconds
+	}
+	return 60
 }
 
 func (s *Service) InitExecutionPackage(ctx context.Context, request model.ExecutionPackageInitRequest) (model.ExecutionPackageInitResponse, error) {

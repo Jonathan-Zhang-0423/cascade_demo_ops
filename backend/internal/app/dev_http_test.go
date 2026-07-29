@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -189,6 +190,46 @@ func TestDevHTTPBridgeGitHubCredentialOnlyReturnsConfigurationState(t *testing.T
 	}
 }
 
+func TestDevHTTPBridgeDemoCredentialReturnsOnlyOpaqueRef(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	stored := []string{}
+	server.storeDemoCredential = func(ref, username, password string) error {
+		stored = []string{ref, username, password}
+		return nil
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/demo-credential", strings.NewReader(`{"ref":"assistant-demo","username":"demo-user","password":"private-password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	payload := response.Body.String()
+	if strings.Contains(payload, "demo-user") || strings.Contains(payload, "private-password") {
+		t.Fatalf("credential response exposed secret material: %s", payload)
+	}
+	if !strings.Contains(payload, `"secretRef":"credential://demo/assistant-demo"`) || len(stored) != 3 || stored[2] != "private-password" {
+		t.Fatalf("credential was not stored through the local vault adapter: payload=%s stored=%v", payload, stored)
+	}
+}
+
+func TestDevHTTPBridgeDemoCredentialRejectsUnsafeRef(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	called := false
+	server.storeDemoCredential = func(string, string, string) error { called = true; return nil }
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/demo-credential", strings.NewReader(`{"ref":"../unsafe","username":"demo","password":"secret"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code == http.StatusOK || called {
+		t.Fatalf("unsafe credential ref must be rejected: status=%d called=%v body=%s", response.Code, called, response.Body.String())
+	}
+}
+
 func TestDevHTTPBridgeRejectsForeignOriginBeforeCredentialMutation(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	called := false
@@ -241,6 +282,9 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 	if !strings.Contains(text, "secret_ref:local-dev/demo_password") {
 		t.Fatalf("expected package to preserve password secret_ref placeholder: %s", text)
 	}
+	if build.BuildStatus != "draft" || !build.Package.ApprovedAt.IsZero() || build.Package.SafetyReport.AllowedToUpload || build.Package.SafetyReport.HumanApproval.ApprovalID != "" || build.Envelope.EnvelopeID != "" {
+		t.Fatalf("preview must remain an unapproved draft: %+v", build)
+	}
 }
 
 func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *testing.T) {
@@ -288,8 +332,114 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payload) > 512*1024 {
+	if len(payload) > 256*1024 {
 		t.Fatalf("outline upload package too large: %d bytes", len(payload))
+	}
+	if build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash == "" || build.ApprovalSubjectDigestSHA256 == "" || build.SizeReport.TotalBytes == 0 {
+		t.Fatalf("draft must expose confidence, approval digest, and size report: %+v", build)
+	}
+	if build.Package.WorkflowGraph.Intent == nil || build.Package.WorkflowGraph.Assets == nil {
+		t.Fatalf("compact workflow graph lost director intent or assets: %+v", build.Package.WorkflowGraph)
+	}
+}
+
+func TestBlockingMissingEvidenceCannotBeDowngradedToWarning(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.ExecutableScriptBundle.StageApprovalPlan.UncertaintyReport = []model.StageUncertainty{{ID: "missing_business", Kind: "missing_evidence", Summary: "关键业务证据缺失", Blocking: true}}
+	findings := preflightBrowserAgentOutline(pkg.ExecutableScriptBundle)
+	for _, finding := range findings {
+		if finding.ID == "stage_uncertainty_missing_business" {
+			if finding.Severity != model.FindingSeverityBlocking {
+				t.Fatalf("blocking evidence uncertainty was downgraded: %+v", finding)
+			}
+			return
+		}
+	}
+	t.Fatal("expected blocking uncertainty finding")
+}
+
+func TestBuildClientExecutionPackageRejectsInjectedCodeSelectorInPageOnlyMode(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode: model.AppModeDesktop, ProductURL: "https://app.example.com", LocalRepoPath: repoPath,
+		ProductDescription: "生成团队协作产品演示执行包。", TargetAudience: "产品团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://app.example.com")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	if state.SourceBinding == nil || state.SourceBinding.EffectiveMode != model.ProductSourceModePageOnly {
+		t.Fatalf("fixture must enter page-only mode: %+v", state.SourceBinding)
+	}
+	state.ExecutableScriptBundle.PlanJSON.Steps[0].Action.Target.Source = "code_reader"
+	state.ExecutableScriptBundle.PlanJSON.Steps[0].Action.Target.Selector = "[data-testid='foreign-product']"
+	build, err := buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC())
+	if build.Envelope.EnvelopeID != "" || build.Package.PackageID != "" {
+		t.Fatalf("blocked preflight must not return a package or envelope: %+v", build)
+	}
+	var preflight *packagePreflightError
+	if !errors.As(err, &preflight) || len(preflight.Findings) == 0 || preflight.Findings[0].ID != "source_evidence_leakage" {
+		t.Fatalf("expected source_evidence_leakage preflight, got %T: %v", err, err)
+	}
+}
+
+func TestCompactPrepareResponseRedactsLocalSourcePaths(t *testing.T) {
+	root := filepath.Join(`C:\Users\Alice\private`, "customer-project")
+	documentPath := filepath.Join(`C:\Users\Alice\private`, "requirements.md")
+	state := &orchestrator.CascadeState{ProjectContext: &model.ProjectContext{
+		ID: "project-path-redaction", Mode: model.AppModeDesktop, ProductURL: "https://product.example",
+		LocalRepoPath: root,
+		Inputs: &model.ProjectInputBundle{
+			Repositories:         []model.RepositoryInput{{LocalPath: root, Provider: "local", ReadOnly: true}},
+			RequirementDocuments: []model.RequirementDocumentInput{{ID: "requirements", Kind: "local_file", LocalPath: documentPath}},
+		},
+	}}
+
+	compact := compactStateForPrepareResponse(state, nil)
+	payload, err := json.Marshal(compact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(payload)
+	if strings.Contains(serialized, `C:\Users\Alice`) || strings.Contains(serialized, "private") {
+		t.Fatalf("prepare response leaked an absolute local path: %s", serialized)
+	}
+	if compact.ProjectContext.LocalRepoPath != "customer-project" || compact.ProjectContext.Inputs.Repositories[0].LocalPath != "customer-project" {
+		t.Fatalf("prepare response should retain only safe basenames: %+v", compact.ProjectContext)
+	}
+	if compact.ProjectContext.Inputs.RequirementDocuments[0].LocalPath != "" {
+		t.Fatalf("requirement document path must be omitted: %+v", compact.ProjectContext.Inputs.RequirementDocuments[0])
+	}
+}
+
+func TestSourceBindingHTTPGetAndStaleDecision(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		ProjectID: "project-source-http", Mode: model.AppModeDesktop, ProductURL: "https://app.example.com", LocalRepoPath: repoPath,
+		ProductDescription: "生成团队协作产品演示执行包。", TargetAudience: "产品团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://app.example.com")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/projects/"+state.ProjectID+"/source-binding", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), state.SourceBinding.AssessmentHash) {
+		t.Fatalf("GET source-binding did not return current assessment: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/"+state.ProjectID+"/source-binding/decisions", strings.NewReader(`{"decision":"continue_page_only","assessment_hash":"stale","idempotency_key":"decision-http-1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"source_binding_stale"`) {
+		t.Fatalf("stale source-binding decision did not return structured error: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

@@ -23,12 +23,19 @@ type DevHTTPServer struct {
 	service               *Service
 	events                *devEventStore
 	storeGitHubToken      func(string) error
+	storeDemoCredential   func(string, string, string) error
 	githubTokenConfigured func() bool
 	deleteGitHubToken     func() error
 }
 
 type githubCredentialRequest struct {
 	Token string `json:"token"`
+}
+
+type demoCredentialRequest struct {
+	Ref      string `json:"ref"`
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type ExecutionPackageRequest struct {
@@ -69,6 +76,7 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 		service:               service,
 		events:                newDevEventStore(),
 		storeGitHubToken:      credentialstore.StoreGitHubToken,
+		storeDemoCredential:   credentialstore.StoreDemoCredential,
 		githubTokenConfigured: credentialstore.GitHubTokenConfigured,
 		deleteGitHubToken:     credentialstore.DeleteGitHubToken,
 	}
@@ -80,12 +88,16 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/desktop/github-credential", s.handleGitHubCredentialStatus)
 	mux.HandleFunc("POST /v1/desktop/github-credential", s.handleStoreGitHubCredential)
 	mux.HandleFunc("DELETE /v1/desktop/github-credential", s.handleDeleteGitHubCredential)
+	mux.HandleFunc("POST /v1/desktop/demo-credential", s.handleStoreDemoCredential)
 	mux.HandleFunc("GET /v1/desktop/update", s.handleDesktopUpdateStatus)
 	mux.HandleFunc("POST /v1/desktop/update/check", s.handleDesktopUpdateCheck)
 	mux.HandleFunc("POST /v1/desktop/update/apply", s.handleDesktopUpdateApply)
 	mux.HandleFunc("GET /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
+	mux.HandleFunc("GET /v1/desktop/projects", s.handleListProjects)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
+	mux.HandleFunc("POST /v1/desktop/assistant/sessions", s.handleCreateAssistantSession)
+	mux.HandleFunc("/v1/desktop/assistant/sessions/", s.handleAssistantSessionRoute)
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
 	mux.HandleFunc("GET /v1/desktop/browser-agent-acceptance", s.handleBrowserAgentAcceptance)
 	mux.HandleFunc("POST /v1/desktop/browser-agent-acceptance/run", s.handleBrowserAgentAcceptance)
@@ -310,6 +322,22 @@ func (s *DevHTTPServer) handleDeleteGitHubCredential(w http.ResponseWriter, _ *h
 	writeBridgeValue(w, map[string]bool{"configured": false}, err)
 }
 
+func (s *DevHTTPServer) handleStoreDemoCredential(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+	var request demoCredentialRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	request.Ref = strings.TrimSpace(request.Ref)
+	if request.Ref == "" || len(request.Ref) > 128 || strings.ContainsAny(request.Ref, `/\\`) {
+		writeBridgeValue(w, nil, errors.New("invalid demo credential ref"))
+		return
+	}
+	err := s.storeDemoCredential(request.Ref, request.Username, request.Password)
+	writeBridgeValue(w, map[string]any{"secretRef": "credential://demo/" + request.Ref, "configured": err == nil}, err)
+}
+
 func (s *DevHTTPServer) handleDesktopUpdateStatus(w http.ResponseWriter, _ *http.Request) {
 	status, err := desktopUpdateConfiguration(s.service.RuntimeConfig())
 	writeBridgeValue(w, status, err)
@@ -359,6 +387,11 @@ func (s *DevHTTPServer) handleCreateProject(w http.ResponseWriter, r *http.Reque
 	writeBridgeValue(w, state, err)
 }
 
+func (s *DevHTTPServer) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.service.ListProjects(r.Context())
+	writeBridgeValue(w, projects, err)
+}
+
 func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Request) {
 	projectID, suffix, ok := splitProjectRoute(r.URL.Path)
 	if !ok {
@@ -369,6 +402,23 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "":
 		state, err := s.service.LoadProject(r.Context(), projectID)
 		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodGet && suffix == "/source-binding":
+		assessment, err := s.service.GetSourceBinding(r.Context(), projectID)
+		writeBridgeValue(w, assessment, err)
+	case r.Method == http.MethodPost && suffix == "/source-binding/decisions":
+		var request SourceBindingDecisionRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		state, err := s.service.DecideSourceBinding(r.Context(), projectID, request)
+		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodPost && suffix == "/archive":
+		err := s.service.ArchiveProject(r.Context(), projectID)
+		writeBridgeValue(w, map[string]bool{"archived": err == nil}, err)
+	case r.Method == http.MethodDelete && suffix == "":
+		err := s.service.DeleteProject(r.Context(), projectID)
+		writeBridgeValue(w, map[string]bool{"deleted": err == nil}, err)
 	case r.Method == http.MethodPost && suffix == "/inputs":
 		var inputs model.ProjectInputBundle
 		if err := decodeJSON(r, &inputs); err != nil {
@@ -454,7 +504,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
 		targetProjectID := firstNonEmptyString(request.ProjectID, projectID)
-		build, session, err := s.service.BuildCloudClientExecutionPackage(r.Context(), targetProjectID, orgID)
+		build, session, err := s.service.ApproveCloudClientExecutionPackage(r.Context(), targetProjectID, orgID, request)
 		if err != nil {
 			writeBridgeValue(w, nil, err)
 			return
@@ -472,7 +522,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
 		targetProjectID := firstNonEmptyString(request.ProjectID, projectID)
-		build, _, err := s.service.BuildCloudClientExecutionPackage(r.Context(), targetProjectID, orgID)
+		build, _, err := s.service.ApproveCloudClientExecutionPackage(r.Context(), targetProjectID, orgID, request)
 		if err != nil {
 			writeBridgeValue(w, nil, err)
 			return
@@ -526,10 +576,14 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		var build ClientExecutionPackageBuild
 		var err error
 		var session ExchangeSession
-		build, session, err = s.service.BuildCloudClientExecutionPackage(r.Context(), projectID, request.OrgID)
-		if err != nil && request.Build != nil {
-			build = *request.Build
-			err = normalizeClientExecutionPackageForUpload(&build.Package)
+		if request.Build == nil {
+			writeBridgeValue(w, nil, errors.New("approved execution package build is required"))
+			return
+		}
+		build = *request.Build
+		err = normalizeClientExecutionPackageForUpload(&build.Package)
+		if err == nil && (build.BuildStatus != "approved" || build.Package.ApprovedAt.IsZero() || build.Package.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 == "") {
+			err = errors.New("draft execution package cannot be uploaded")
 		}
 		if err != nil {
 			writeBridgeValue(w, nil, err)

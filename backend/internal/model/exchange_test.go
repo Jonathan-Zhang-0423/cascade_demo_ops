@@ -712,6 +712,11 @@ func sampleClientExecutionPackage(t *testing.T) ClientExecutionPackage {
 				ReviewedNodeIDs:  []string{"node_open_dashboard", "node_invite_member"},
 			},
 		},
+		SourceBindingSummary: &SourceBindingSummary{
+			SchemaVersion: ProductSourceBindingAssessmentSchemaVersion,
+			Status:        ProductSourceBindingMatched, EffectiveMode: ProductSourceModeMixed,
+			AssessmentHash: "sha_source_binding_matched", SourceCount: 1,
+		},
 	}
 }
 

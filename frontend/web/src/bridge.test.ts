@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { afterEach, vi } from "vitest";
 import { userInputFromWorkspace, createLocalBridgeClient, createMockBridgeClient, workspaceFromCascadeStateForTest } from "./bridge";
 import { updateWorkspaceInputs } from "./agentPipeline";
-import { createWorkspace } from "./mockWorkspace";
+import { createProjectDraftWorkspace, createWorkspace } from "./mockWorkspace";
 
 describe("desktop bridge contract", () => {
   afterEach(() => {
@@ -16,6 +16,27 @@ describe("desktop bridge contract", () => {
     expect(result.ok).toBe(true);
     expect(JSON.stringify(result.data)).not.toMatch(/sk-|secret-|C:\\\\|postgres:\/\//i);
     expect(result.data?.modelProviders.seedance?.apiKeyFallbackEnvs).toEqual(["DOUBAO_API_KEY", "ARK_API_KEY"]);
+  });
+
+  it("maps real project responses onto an empty draft instead of mock fixture content", async () => {
+    const state = {
+      project_id: "project_empty_fallback",
+      project_context: {
+        id: "project_empty_fallback",
+        name: "真实客户项目",
+        product_url: "https://customer.example",
+        target_audience: "产品团队",
+        inputs: { raw_user_prompt: "展示审批流程", product_urls: [{ url: "https://customer.example" }], repositories: [], credentials: [] },
+      },
+    } as never;
+
+    const mapped = workspaceFromCascadeStateForTest(state, createProjectDraftWorkspace("product_demo"));
+
+    expect(mapped.productURL).toBe("https://customer.example");
+    expect(mapped.assets).toEqual([]);
+    expect(mapped.inputBundle.repositories).toEqual([]);
+    expect(mapped.packagePreview.packageID).toBe("pkg_project_empty_fallback");
+    expect(JSON.stringify(mapped)).not.toContain("app.example.com");
   });
 
   it("exposes the Browser Agent fixed acceptance gate separately from App packages", async () => {
@@ -115,6 +136,7 @@ describe("desktop bridge contract", () => {
     expect(resultPackage.data?.delivery?.asset_refs?.[0]?.role).toBe("final_demo_video");
     expect(resultPackage.data?.delivery?.asset_refs?.every((artifact) => artifact.encrypted && artifact.sensitive)).toBe(true);
 	expect(acked.data?.assets.every((asset) => asset.status !== "approved")).toBe(true);
+	expect(acked.data?.cloudRun.resultDownloaded).toBe(true);
 	expect(reviewed.data?.assets.every((asset) => asset.status === "approved")).toBe(true);
   });
 
@@ -476,7 +498,7 @@ describe("desktop bridge contract", () => {
     expect(result.data?.sourceConnections.find((source) => source.kind === "local_repo")?.status).toBe("ready");
   });
 
-  it("runs local product lifecycle from workspace inputs to result assets", async () => {
+  it("runs local product preparation and stops for independent human approval", async () => {
     const workspace = updateWorkspaceInputs(createWorkspace("product_demo"), {
       productURL: "https://cascadeai.cn",
       localRepoPath: "C:\\Users\\CascadeAI\\Desktop\\CascadeAI\\Cascade",
@@ -606,24 +628,14 @@ describe("desktop bridge contract", () => {
     const result = await bridge.runProductLifecycle(workspace);
 
     expect(result.ok).toBe(true);
-    expect(result.data?.stage).toBe("result_review");
-    expect(result.data?.status).toBe("asset_ready");
-    expect(result.data?.cloudRun.exchangePackageID).toBe("xpkg_cloud_real");
-    expect(result.data?.cloudRun.resultPackageID).toBe("result_cloud_real");
-    expect(result.data?.cloudRun.stageHistory?.find((stage) => stage.id === "script_validation")?.status).toBe("completed");
-    expect(result.data?.assets[0]).toMatchObject({
-      assetID: "artifact_video_real",
-      title: "最终演示视频",
-      checksum: "sha256:video",
-    });
+	  expect(result.data?.stage).toBe("package_approval");
+	  expect(result.data?.status).toBe("awaiting_approval");
+	  expect(result.data?.cloudRun.status).toBe("not_uploaded");
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/product-run/prepare",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:4317/v1/desktop/projects/project_cloud_real/cloud/init",
-      expect.objectContaining({ method: "POST" }),
-    );
+	  expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/cloud/init"))).toBe(false);
     expect(fetchMock.mock.calls.map((call) => String(call[0])).some((url) => url.includes("/cloud-lifecycle"))).toBe(false);
     const firstCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     const body = JSON.parse(String(firstCall[1].body));
@@ -702,7 +714,7 @@ describe("desktop bridge contract", () => {
     );
   });
 
-  it("consumes resumable cloud SSE progress before final status polling", async () => {
+  it("does not start resumable cloud SSE before approval", async () => {
     const workspace = createWorkspace("product_demo");
     const build = {
       org_id: "org_desktop",
@@ -759,13 +771,13 @@ describe("desktop bridge contract", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(progress).toContain("recording");
-    expect(result.data?.cloudRun.resultPackageID).toBe("result_stream");
-    expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/cloud/events"))).toHaveLength(2);
-    expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/cloud/status"))).toHaveLength(1);
+	  expect(progress).toEqual([]);
+	  expect(result.data?.stage).toBe("package_approval");
+	  expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/cloud/events"))).toHaveLength(0);
+	  expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/cloud/status"))).toHaveLength(0);
   });
 
-  it("keeps prepared script package when cloud auth capability is unavailable", async () => {
+  it("keeps prepared script package without contacting cloud auth before approval", async () => {
     const workspace = updateWorkspaceInputs(createWorkspace("product_demo"), {
       productURL: "https://cascadeai.cn",
       localRepoPath: "C:\\Users\\CascadeAI\\Desktop\\CascadeAI\\Cascade",
@@ -830,11 +842,12 @@ describe("desktop bridge contract", () => {
 
     expect(result.ok).toBe(true);
     expect(result.data?.stage).toBe("package_approval");
-    expect(result.data?.cloudRun.status).toBe("failed");
-    expect(result.data?.cloudRun.stage).toBe("cloud_auth_unavailable");
+	  expect(result.data?.cloudRun.status).toBe("not_uploaded");
+	  expect(result.data?.cloudRun.stage).toBe("local_generated");
     expect(result.data?.packagePreview.packageID).toBe("pkg_ready_local");
     const calledURLs = fetchMock.mock.calls.map((call) => String(call[0]));
-    expect(calledURLs.some((url) => url.includes("/product-run/prepare"))).toBe(true);
+	  expect(calledURLs.some((url) => url.includes("/product-run/prepare"))).toBe(true);
+	  expect(calledURLs.some((url) => url.includes("/cloud/init"))).toBe(false);
     expect(calledURLs.some((url) => url.includes("/cloud/upload"))).toBe(false);
     expect(calledURLs.some((url) => url.includes("/cloud-lifecycle"))).toBe(false);
   });

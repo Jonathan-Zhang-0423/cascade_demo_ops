@@ -170,6 +170,9 @@ func validateBrowserAgentOutlineContract(bundle *model.ExecutableRecordingScript
 			}
 		}
 	}
+	if err := model.ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
+		findings = append(findings, scriptValidationFinding("outline_consistency", model.FindingSeverityBlocking, err.Error()))
+	}
 	if bundle.StageApprovalPlan != nil {
 		if hash, err := model.DigestCanonicalJSON(bundle.StageApprovalPlan); err != nil {
 			findings = append(findings, scriptValidationFinding("stage_plan_hash_error", model.FindingSeverityBlocking, err.Error()))
@@ -222,6 +225,8 @@ func stepRequiresBrowserAgentValidation(step model.ScriptStep) bool {
 	switch step.Action.Type {
 	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
 		return true
+	case model.GraphActionWait, model.GraphActionInspect:
+		return step.StageKind == model.BusinessStageKindSessionSetup || step.StageKind == model.BusinessStageKindObserveProgress || step.StageKind == model.BusinessStageKindFinalObserve
 	default:
 		return false
 	}

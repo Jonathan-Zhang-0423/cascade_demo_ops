@@ -47,6 +47,7 @@ type CascadeState struct {
 	RequirementBrief         *model.RequirementBrief                `json:"requirement_brief,omitempty"`
 	CodeSnapshots            []model.CodeUnderstandingSnapshot      `json:"code_snapshots,omitempty"`
 	PageSnapshots            []model.PageUnderstandingSnapshot      `json:"page_snapshots,omitempty"`
+	SourceBinding            *model.ProductSourceBindingAssessment  `json:"source_binding,omitempty"`
 	ProjectIntelligence      *model.ProjectIntelligencePack         `json:"project_intelligence,omitempty"`
 	ScriptReadinessReport    *model.ScriptReadinessReport           `json:"script_readiness_report,omitempty"`
 	AgentGraphTrace          *model.AgentGraphTrace                 `json:"agent_graph_trace,omitempty"`
@@ -66,6 +67,7 @@ type CascadeState struct {
 	RehearsePassRate         float64                                `json:"rehearse_pass_rate"`
 	Artifacts                *GeneratedArtifacts                    `json:"artifacts,omitempty"`
 	ErrorMessage             string                                 `json:"error_message,omitempty"`
+	ArchivedAt               *time.Time                             `json:"archived_at,omitempty"`
 }
 
 type GeneratedArtifacts struct {
@@ -75,11 +77,13 @@ type GeneratedArtifacts struct {
 }
 
 type UserInput struct {
+	ProjectID              string                           `json:"project_id,omitempty"`
 	Mode                   model.AppMode                    `json:"mode"`
 	ProductURL             string                           `json:"product_url"`
 	GitRepoURL             string                           `json:"git_repo_url,omitempty"`
 	LocalRepoPath          string                           `json:"local_repo_path,omitempty"`
 	ProductDescription     string                           `json:"product_description,omitempty"`
+	TargetDurationSec      int                              `json:"target_duration_sec,omitempty"`
 	Code                   []model.CodeInput                `json:"code,omitempty"`
 	RequirementDocuments   []model.RequirementDocumentInput `json:"requirement_documents,omitempty"`
 	WebpageScreenshots     []model.WebpageScreenshotInput   `json:"webpage_screenshots,omitempty"`
@@ -89,6 +93,7 @@ type UserInput struct {
 	MustNotShow            []string                         `json:"must_not_show,omitempty"`
 	ForbiddenPages         []string                         `json:"forbidden_pages,omitempty"`
 	ForbiddenData          []string                         `json:"forbidden_data,omitempty"`
+	AllowedDomains         []string                         `json:"allowed_domains,omitempty"`
 	DemoUsername           string                           `json:"demo_username,omitempty"`
 	DemoPassword           string                           `json:"demo_password,omitempty"`
 	SSHHost                string                           `json:"ssh_host,omitempty"`
@@ -98,6 +103,8 @@ type UserInput struct {
 	SSHPasswordSecretRef   string                           `json:"ssh_password_secret_ref,omitempty"`
 	SSHAllowedPaths        []string                         `json:"ssh_allowed_paths,omitempty"`
 	SSHAllowedCommands     []string                         `json:"ssh_allowed_commands,omitempty"`
+	SourceBindingDecision  string                           `json:"source_binding_decision,omitempty"`
+	SourceBindingHash      string                           `json:"source_binding_hash,omitempty"`
 }
 
 type PageVerificationCredentials struct {
@@ -126,6 +133,10 @@ type CodeReaderAgent interface {
 
 type PageReaderAgent interface {
 	ReadPages(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) ([]model.PageUnderstandingSnapshot, error)
+}
+
+type SourceBindingAgent interface {
+	Assess(project *model.ProjectContext, codeSnapshots []model.CodeUnderstandingSnapshot, pageSnapshots []model.PageUnderstandingSnapshot, now time.Time) (*model.ProductSourceBindingAssessment, []model.CodeUnderstandingSnapshot, error)
 }
 
 type ProjectIntelligenceAgent interface {
@@ -169,6 +180,7 @@ type Dependencies struct {
 	RequirementReader    RequirementReaderAgent
 	CodeReader           CodeReaderAgent
 	PageReader           PageReaderAgent
+	SourceBinding        SourceBindingAgent
 	ProjectIntelligence  ProjectIntelligenceAgent
 	Understanding        MultimodalUnderstandingAgent
 	ProductMap           ProductMapAgent
@@ -224,6 +236,9 @@ func NewCascadeFlow(deps Dependencies) (*CascadeFlow, error) {
 	}
 	if deps.PageReader == nil {
 		return nil, errors.New("missing PageReader agent")
+	}
+	if deps.SourceBinding == nil {
+		return nil, errors.New("missing SourceBinding agent")
 	}
 	if deps.ProjectIntelligence == nil {
 		return nil, errors.New("missing ProjectIntelligence agent")
@@ -306,9 +321,17 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 	state.PageSnapshots = pageSnapshots
 	logNodeDone(ctx, state.CurrentNode, nodeStart, "PageReaderAgent 完成页面材料读取", fmt.Sprintf("pages=%d", len(pageSnapshots)))
 
+	assessment, effectiveCodeSnapshots, err := f.deps.SourceBinding.Assess(project, codeSnapshots, pageSnapshots, time.Now().UTC())
+	state.SourceBinding = assessment
+	project.SourceBinding = assessment
+	if err != nil {
+		logNodeError(ctx, NodeProjectIntelligence, nodeStart, err)
+		return fail(state, err), err
+	}
+
 	state.CurrentNode = NodeProjectIntelligence
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
-	intelligence, readiness, trace, err := f.deps.ProjectIntelligence.RunProjectIntelligence(ctx, project, brief, codeSnapshots, pageSnapshots)
+	intelligence, readiness, trace, err := f.deps.ProjectIntelligence.RunProjectIntelligence(ctx, project, brief, effectiveCodeSnapshots, pageSnapshots)
 	if err != nil {
 		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
@@ -330,7 +353,7 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 
 	state.CurrentNode = NodeMultimodalUnderstand
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
-	report, err := f.deps.Understanding.BuildUnderstanding(ctx, project, brief, codeSnapshots, pageSnapshots, intelligence)
+	report, err := f.deps.Understanding.BuildUnderstanding(ctx, project, brief, effectiveCodeSnapshots, pageSnapshots, intelligence)
 	if err != nil {
 		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err

@@ -48,6 +48,7 @@ func (a *PageReaderAgent) ReadPages(ctx context.Context, project *model.ProjectC
 			Confidence:   0.7,
 			CreatedAt:    now,
 		}
+		page.ProductIdentitySignals = productIdentitySignalsForPage(page.URL, page.Title, page.EvidenceRefs)
 		pages = append(pages, page)
 	}
 	if project.Inputs != nil {
@@ -77,6 +78,7 @@ func (a *PageReaderAgent) ReadPages(ctx context.Context, project *model.ProjectC
 				ArtifactID: screenshot.Artifact.ID,
 				Confidence: 0.82,
 			})
+			page.ProductIdentitySignals = productIdentitySignalsForPageInput(screenshot, page.EvidenceRefs)
 			for _, annotation := range screenshot.Annotations {
 				if annotation.SelectorHint != "" {
 					page.StableSelectors = append(page.StableSelectors, model.SelectorCandidate{

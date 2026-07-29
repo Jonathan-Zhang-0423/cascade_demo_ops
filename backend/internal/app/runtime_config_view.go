@@ -2,6 +2,8 @@ package app
 
 import (
 	"net/url"
+	"os"
+	"strings"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
@@ -58,6 +60,7 @@ type CloudExchangeRuntimeView struct {
 }
 
 type AppCapabilitiesRuntimeView struct {
+	DeveloperUI                bool   `json:"developer_ui"`
 	DemoAssetGenerationConsole bool   `json:"demo_asset_generation_console"`
 	VideoEditor                bool   `json:"video_editor"`
 	LocalPackageGeneration     bool   `json:"local_package_generation"`
@@ -90,12 +93,13 @@ func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus Exchan
 		ModelProviders:         providerCredentialViews(runtime.ModelProviders),
 		ModelTaskRoutes:        modelTaskRouteViews(runtime.ModelTaskRoutes),
 		CloudExchange:          cloudExchangeRuntimeView(runtime, exchangeStatus),
-		AppCapabilities:        appCapabilitiesRuntimeView(),
+		AppCapabilities:        appCapabilitiesRuntimeView(runtime.Profile),
 	}
 }
 
-func appCapabilitiesRuntimeView() AppCapabilitiesRuntimeView {
+func appCapabilitiesRuntimeView(profile config.RuntimeProfile) AppCapabilitiesRuntimeView {
 	return AppCapabilitiesRuntimeView{
+		DeveloperUI:                developerUIEnabled(profile),
 		DemoAssetGenerationConsole: true,
 		VideoEditor:                true,
 		LocalPackageGeneration:     true,
@@ -109,6 +113,14 @@ func appCapabilitiesRuntimeView() AppCapabilitiesRuntimeView {
 		LocalRecordingScope:        "dev_and_test_compatibility_only",
 		VideoWorkerRole:            "editor_media_helper_and_dev_compatibility_runtime",
 	}
+}
+
+func developerUIEnabled(profile config.RuntimeProfile) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("CASCADE_ENABLE_DEVELOPER_UI")))
+	if value == "" {
+		return profile == config.ProfileDev
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 func cloudExchangeRuntimeView(runtime config.AppRuntimeConfig, exchangeStatus ExchangeIdentityStatus) CloudExchangeRuntimeView {

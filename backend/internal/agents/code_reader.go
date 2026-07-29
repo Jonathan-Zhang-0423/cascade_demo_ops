@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,15 +68,16 @@ func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectCo
 			return nil, err
 		}
 		snapshot := model.CodeUnderstandingSnapshot{
-			ID:            firstNonEmpty(input.ID, fmt.Sprintf("code_snapshot_%d", i+1)),
-			ProjectID:     project.ID,
-			SchemaVersion: model.MultimodalUnderstandingReportSchemaVersion,
-			RepositoryID:  input.RepositoryID,
-			URI:           input.URI,
-			Branch:        input.Branch,
-			CommitSHA:     input.CommitSHA,
-			Summary:       "代码结构摘要已生成；仅保存 hash、路由、组件、选择器和数据模型摘要。",
-			CreatedAt:     time.Now().UTC(),
+			ID:                  firstNonEmpty(input.ID, fmt.Sprintf("code_snapshot_%d", i+1)),
+			ProjectID:           project.ID,
+			SchemaVersion:       model.MultimodalUnderstandingReportSchemaVersion,
+			RepositoryID:        input.RepositoryID,
+			URI:                 input.URI,
+			Branch:              input.Branch,
+			CommitSHA:           input.CommitSHA,
+			Summary:             "代码结构摘要已生成；仅保存 hash、路由、组件、选择器和数据模型摘要。",
+			CreatedAt:           time.Now().UTC(),
+			SourceRefHashSHA256: digestCodeSourceReference(input),
 			EvidenceRefs: []model.EvidenceRef{{
 				ID:         "ev_code_" + firstNonEmpty(input.ID, fmt.Sprintf("%d", i+1)),
 				Kind:       model.EvidenceKindSourceCode,
@@ -112,6 +114,7 @@ func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectCo
 		if snapshot.SourceDigestSHA256 == "" {
 			snapshot.SourceDigestSHA256 = digestSnapshotIdentity(input)
 		}
+		snapshot.ProductIdentitySignals = uniqueIdentitySignals(append(snapshot.ProductIdentitySignals, productIdentitySignalsFromCodeInput(input)...))
 		snapshot.Languages = uniqueStrings(snapshot.Languages)
 		snapshot.Frameworks = uniqueStrings(snapshot.Frameworks)
 		snapshot.EntrypointHashes = uniqueStrings(snapshot.EntrypointHashes)
@@ -131,6 +134,20 @@ func (a *CodeReaderAgent) ReadCode(ctx context.Context, project *model.ProjectCo
 		snapshots = append(snapshots, snapshot)
 	}
 	return snapshots, nil
+}
+
+func productIdentitySignalsFromCodeInput(input model.CodeInput) []model.ProductIdentitySignal {
+	signals := []model.ProductIdentitySignal{}
+	if repository := normalizeRepositoryIdentity(input.URI); repository != "" {
+		signals = appendIdentitySignal(signals, "repository", "strong", repository, input.EvidenceRefs)
+		if parsed, err := url.Parse(strings.TrimSuffix(input.URI, ".git")); err == nil {
+			signals = appendIdentitySignal(signals, "product_name", "medium", normalizeProductName(filepath.Base(parsed.Path)), input.EvidenceRefs)
+		}
+	}
+	if input.LocalPath != "" {
+		signals = appendIdentitySignal(signals, "product_name", "medium", normalizeProductName(filepath.Base(filepath.Clean(input.LocalPath))), input.EvidenceRefs)
+	}
+	return uniqueIdentitySignals(signals)
 }
 
 type codeReaderLLMOutput struct {
@@ -469,6 +486,7 @@ func (a *CodeReaderAgent) scanLocalPath(ctx context.Context, root string, snapsh
 	if err := readStructuredCodeSnapshotFromCandidates(ctx, snapshot, investigationResult.SelectedCandidates, budget); err != nil {
 		return err
 	}
+	snapshot.ProductIdentitySignals = productIdentitySignalsFromCodeCandidates(investigationResult.SelectedCandidates)
 	normalizeCodeSnapshotForIntent(snapshot, project, brief)
 	return nil
 }
@@ -4507,7 +4525,9 @@ func selectCodeCandidatesForIntent(candidates []codeCandidateFile, budget model.
 
 func isRepoIndexCandidate(rel string, name string) bool {
 	lower := strings.ToLower(filepath.ToSlash(rel))
-	if strings.EqualFold(name, "package.json") || strings.EqualFold(name, "go.mod") {
+	if strings.EqualFold(name, "package.json") || strings.EqualFold(name, "go.mod") ||
+		strings.EqualFold(name, "manifest.json") || strings.EqualFold(name, "site.webmanifest") ||
+		strings.EqualFold(name, "manifest.webmanifest") || strings.EqualFold(name, "CNAME") {
 		return true
 	}
 	if isEntrypointFile(name, rel) {
@@ -5108,6 +5128,10 @@ func selectorValues(selectors []model.SelectorInsight, pathHash string) []string
 
 func digestSnapshotIdentity(input model.CodeInput) string {
 	return hashString(strings.Join([]string{input.ID, input.Kind, input.URI, input.LocalPath, input.CommitSHA}, "|"))
+}
+
+func digestCodeSourceReference(input model.CodeInput) string {
+	return hashString(strings.Join([]string{input.Kind, input.URI, input.LocalPath, input.RepositoryID, input.Branch, input.CommitSHA}, "|"))
 }
 
 func limitRoutes(values []model.RouteInsight, limit int) []model.RouteInsight {

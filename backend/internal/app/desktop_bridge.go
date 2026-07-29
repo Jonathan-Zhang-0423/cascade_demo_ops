@@ -3,13 +3,17 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"path/filepath"
+	"strings"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type BridgeResponse struct {
@@ -26,6 +30,61 @@ func (b *DesktopBridge) HTTPHandler() http.Handler {
 
 type DesktopBridge struct {
 	service *Service
+	ctx     context.Context
+}
+
+func (b *DesktopBridge) Startup(ctx context.Context) {
+	b.ctx = ctx
+}
+
+func (b *DesktopBridge) SelectLocalProjectDirectory() BridgeResponse {
+	if b.ctx == nil {
+		return bridgeValue(nil, errors.New("native directory picker is unavailable"))
+	}
+	path, err := runtime.OpenDirectoryDialog(b.ctx, runtime.OpenDialogOptions{Title: "选择本地项目目录"})
+	if err != nil || strings.TrimSpace(path) == "" {
+		return bridgeValue(nil, firstDialogError(err))
+	}
+	return bridgeValue(b.service.RegisterLocalSource("local_repository", path))
+}
+
+func (b *DesktopBridge) SelectRequirementDocuments() BridgeResponse {
+	return b.selectLocalFiles("requirement_document", "选择需求文档", []runtime.FileFilter{{DisplayName: "需求文档", Pattern: "*.md;*.txt;*.pdf;*.doc;*.docx"}})
+}
+
+func (b *DesktopBridge) SelectBrandAssets() BridgeResponse {
+	return b.selectLocalFiles("brand_asset", "选择品牌素材", []runtime.FileFilter{{DisplayName: "品牌素材", Pattern: "*.png;*.jpg;*.jpeg;*.webp;*.svg;*.pdf"}})
+}
+
+func (b *DesktopBridge) selectLocalFiles(kind, title string, filters []runtime.FileFilter) BridgeResponse {
+	if b.ctx == nil {
+		return bridgeValue(nil, errors.New("native file picker is unavailable"))
+	}
+	paths, err := runtime.OpenMultipleFilesDialog(b.ctx, runtime.OpenDialogOptions{Title: title, Filters: filters})
+	if err != nil || len(paths) == 0 {
+		return bridgeValue(nil, firstDialogError(err))
+	}
+	refs := make([]LocalSourceRef, 0, len(paths))
+	for _, path := range paths {
+		ref, registerErr := b.service.RegisterLocalSource(kind, filepath.Clean(path))
+		if registerErr != nil {
+			return bridgeValue(nil, registerErr)
+		}
+		refs = append(refs, ref)
+	}
+	return bridgeValue(refs, nil)
+}
+
+func (b *DesktopBridge) StoreDemoCredential(ref, username, password string) BridgeResponse {
+	err := credentialstore.StoreDemoCredential(ref, username, password)
+	return bridgeValue(map[string]any{"secretRef": "credential://demo/" + strings.TrimSpace(ref), "configured": err == nil}, err)
+}
+
+func firstDialogError(err error) error {
+	if err != nil {
+		return err
+	}
+	return errors.New("selection canceled")
 }
 
 func NewDesktopBridge(runtime config.AppRuntimeConfig, states store.StateStore) (*DesktopBridge, error) {

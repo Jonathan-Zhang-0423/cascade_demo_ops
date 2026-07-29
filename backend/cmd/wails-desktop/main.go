@@ -50,6 +50,7 @@ func main() {
 		MinWidth:    1180,
 		MinHeight:   720,
 		AssetServer: &assetserver.Options{Assets: frontend, Handler: bridge.HTTPHandler()},
+		OnStartup:   bridge.Startup,
 		Bind:        []interface{}{bridge},
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,

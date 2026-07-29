@@ -530,6 +530,7 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 		"business_stage_kind":         string(stage.Kind),
 		"business_route_state":        string(stage.RouteState),
 		"business_stage_order":        stage.Order,
+		"non_destructive":             stage.Action.NonDestructive,
 		"business_stage_entry_route":  stage.EntryRoute,
 		"verification_status":         "business_stage_plan",
 		"runtime_adaptive":            true,
@@ -647,6 +648,7 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 	target.Role = best.Role
 	target.TestID = best.TestID
 	target.ComponentRef = best.ComponentRef
+	target.Source = best.VerificationSource
 	target.EvidenceRefs = best.EvidenceRefs
 	target.SelectorAlternatives = append(target.SelectorAlternatives, best.Alternatives...)
 	for _, candidate := range stage.Targets {
@@ -674,7 +676,6 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 	} else if action == model.GraphActionWait || action == model.GraphActionInspect {
 		kind = "text_contains"
 		expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)
-		required = false
 	}
 	return model.ValidationSpec{
 		ID:           "validate_" + stage.ID,
@@ -1036,6 +1037,7 @@ func graphNodeFromVerifiedAction(project *model.ProjectContext, action model.Ver
 	target := model.ActionTarget{
 		URL:                  action.URL,
 		Selector:             selector,
+		Source:               action.VerificationSource,
 		Label:                action.Label,
 		ComponentRef:         action.ComponentRef,
 		SelectorAlternatives: action.Alternatives,
