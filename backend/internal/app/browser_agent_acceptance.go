@@ -202,7 +202,7 @@ func (s *Service) runProtocolBrowserAgentAcceptance(ctx context.Context, fixture
 	if err != nil {
 		return BrowserAgentAcceptanceReport{}, err
 	}
-	report.Scenarios = append(report.Scenarios, protocolAcceptanceFailureScenario("semantic_target_contract_conflict", "页面存在按钮但批准目标合同不匹配", "点击前拦截，并返回失败结果包", semanticResult, false, "browser_agent_observation_failed"))
+	report.Scenarios = append(report.Scenarios, protocolAcceptanceFailureScenario("semantic_target_contract_conflict", "页面存在按钮但批准目标合同不匹配", "点击前拦截，并返回失败结果包", semanticResult, false, "browser_agent_target_not_resolved"))
 
 	missing := cloneProtocolAcceptancePackage(base)
 	setAcceptanceTargetName(&missing, "Missing action")
@@ -210,7 +210,7 @@ func (s *Service) runProtocolBrowserAgentAcceptance(ctx context.Context, fixture
 	if err != nil {
 		return BrowserAgentAcceptanceReport{}, err
 	}
-	report.Scenarios = append(report.Scenarios, protocolAcceptanceFailureScenario("locator_missing", "批准目标不存在", "点击前拦截，并返回失败结果包", missingResult, false, "browser_agent_observation_failed"))
+	report.Scenarios = append(report.Scenarios, protocolAcceptanceFailureScenario("locator_missing", "批准目标不存在", "点击前拦截，并返回失败结果包", missingResult, false, "browser_agent_target_not_resolved"))
 
 	validation := cloneProtocolAcceptancePackage(base)
 	setAcceptanceRequiredValidation(&validation, "This text is intentionally absent")
@@ -224,6 +224,15 @@ func (s *Service) runProtocolBrowserAgentAcceptance(ctx context.Context, fixture
 		if scenario.Verdict != "passed" {
 			report.StrictGate = "failed"
 		}
+	}
+	if report.StrictGate != "passed" {
+		failed := make([]string, 0, len(report.Scenarios))
+		for _, scenario := range report.Scenarios {
+			if scenario.Verdict != "passed" {
+				failed = append(failed, scenario.ID)
+			}
+		}
+		return BrowserAgentAcceptanceReport{}, fmt.Errorf("protocol browser-agent acceptance failed: %s", strings.Join(failed, ", "))
 	}
 	return report, nil
 }
@@ -338,8 +347,17 @@ func setAcceptanceRequiredValidation(pkg *model.ClientExecutionPackage, expected
 
 func protocolAcceptanceSuccessScenario(run protocolAcceptanceRun) BrowserAgentAcceptanceScenario {
 	hasFinalVideo := protocolAcceptanceHasArtifact(run.Result, "demo_video")
-	passed := run.Status.Status == model.ExchangePackageStatusCompleted && run.Result.Status == model.RecordingResultStatusGenerated && len(run.Result.ValidationReports) == 2 && hasFinalVideo && run.Acknowledged && run.DeliveryAcknowledged
-	return BrowserAgentAcceptanceScenario{ID: "success_navigation_click", Description: "完整协议链：Intake 校验、导航、语义点击、结果包和交付确认", Expected: "任务完成，两个 Stage 均有真实验证、最终视频、结果包和 ack", Actual: acceptanceActual(passed), Verdict: acceptanceVerdict(passed), ActionExecuted: true, Evidence: protocolAcceptanceArtifacts(run.Result), Assertions: []BrowserAgentAcceptanceCheck{{Kind: "exchange_status", Passed: run.Status.Status == model.ExchangePackageStatusCompleted, Actual: string(run.Status.Status)}, {Kind: "validation_reports", Passed: len(run.Result.ValidationReports) == 2, Actual: fmt.Sprintf("%d", len(run.Result.ValidationReports))}, {Kind: "final_video", Passed: hasFinalVideo, Actual: "demo_video"}, {Kind: "result_package", Passed: run.Result.Status == model.RecordingResultStatusGenerated, Actual: string(run.Result.Status)}, {Kind: "delivery_ack", Passed: run.Acknowledged && run.DeliveryAcknowledged, Actual: "acknowledged"}}}
+	strictReports := hasStrictBrowserAgentValidationReports(run.Result, 2)
+	passed := run.Status.Status == model.ExchangePackageStatusCompleted && run.Result.Status == model.RecordingResultStatusGenerated && strictReports && hasFinalVideo && run.Acknowledged && run.DeliveryAcknowledged
+	return BrowserAgentAcceptanceScenario{ID: "success_navigation_click", Description: "完整协议链：Intake 校验、导航、语义点击、结果包和交付确认", Expected: "任务完成，两个 Stage 均有真实验证、最终视频、结果包和 ack", Actual: acceptanceActual(passed), Verdict: acceptanceVerdict(passed), ActionExecuted: true, Evidence: protocolAcceptanceArtifacts(run.Result), Assertions: []BrowserAgentAcceptanceCheck{{Kind: "exchange_status", Passed: run.Status.Status == model.ExchangePackageStatusCompleted, Actual: string(run.Status.Status)}, {Kind: "strict_validation_reports", Passed: strictReports, Actual: fmt.Sprintf("%d", len(run.Result.ValidationReports))}, {Kind: "final_video", Passed: hasFinalVideo, Actual: "demo_video"}, {Kind: "result_package", Passed: run.Result.Status == model.RecordingResultStatusGenerated, Actual: string(run.Result.Status)}, {Kind: "delivery_ack", Passed: run.Acknowledged && run.DeliveryAcknowledged, Actual: "acknowledged"}}}
+}
+
+func hasStrictBrowserAgentValidationReports(result model.RecordingResultPackage, stageCount int) bool {
+	if len(result.ValidationReports) != stageCount+2 || len(result.ValidationReports) < 2 {
+		return false
+	}
+	return result.ValidationReports[0].Phase == model.ValidationPhasePreExecution &&
+		result.ValidationReports[len(result.ValidationReports)-1].Phase == model.ValidationPhasePostExecution
 }
 
 func protocolAcceptanceFailureScenario(id, description, expected string, run protocolAcceptanceRun, actionExecuted bool, expectedCode string) BrowserAgentAcceptanceScenario {

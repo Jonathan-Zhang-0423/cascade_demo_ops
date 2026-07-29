@@ -33,6 +33,10 @@ type Service struct {
 	editorWorker  editorWorker
 	editorJobsMu  sync.Mutex
 	editorJobs    map[string]editorRenderTask
+	verifierMu    sync.RWMutex
+	// outcomeVerifier is Server-owned. It never receives a browser/page object
+	// and is snapshotted when an Outline run begins.
+	outcomeVerifier OutcomeVerifier
 	outlineRunner BrowserAgentOutlineRunner
 }
 
@@ -89,9 +93,32 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		outlineRunner: nil,
 	}
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath())
-	service.exchange.SetInlinePayloadAllowed(runtime.Profile != config.ProfileCloud)
+	// Production cloud intake receives only encrypted payload references. Local
+	// and test runtimes retain inline payloads solely for deterministic fixtures
+	// and never relax the production transport rule.
+	service.exchange.SetInlinePayloadAllowed(runtime.Profile != config.ProfileCloud || runtime.Environment != "production")
 	service.outlineRunner = localBrowserAgentOutlineRunner{service: service}
 	return service, nil
+}
+
+// SetBrowserAgentOutcomeVerifier installs the Server-side Validation Agent
+// adapter for future Outline runs. The App upload contract remains unchanged.
+func (s *Service) SetBrowserAgentOutcomeVerifier(verifier OutcomeVerifier) {
+	if s == nil {
+		return
+	}
+	s.verifierMu.Lock()
+	defer s.verifierMu.Unlock()
+	s.outcomeVerifier = verifier
+}
+
+func (s *Service) browserAgentOutcomeVerifierSnapshot() OutcomeVerifier {
+	if s == nil {
+		return nil
+	}
+	s.verifierMu.RLock()
+	defer s.verifierMu.RUnlock()
+	return s.outcomeVerifier
 }
 
 func (s *Service) RuntimeConfig() config.AppRuntimeConfig {
@@ -297,6 +324,44 @@ func (s *Service) InitExecutionPackage(ctx context.Context, request model.Execut
 
 func (s *Service) UploadExecutionPackage(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage) (model.ExecutionPackageUploadResponse, error) {
 	return s.exchange.Upload(ctx, request, payload)
+}
+
+// ValidateExecutionPackage applies the same Intake rules as Upload without
+// creating an upload session, persisting the payload, or starting a browser.
+func (s *Service) ValidateExecutionPackage(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage) (CloudPackagePreflightResult, error) {
+	if err := s.exchange.ValidateUpload(ctx, request, payload); err != nil {
+		return CloudPackagePreflightResult{}, err
+	}
+	return executionPackagePreflightResult(payload), nil
+}
+
+func executionPackagePreflightResult(pkg model.ClientExecutionPackage) CloudPackagePreflightResult {
+	result := CloudPackagePreflightResult{
+		Valid: true, PackageID: pkg.PackageID, AllowedDomains: append([]string{}, pkg.RecordingRunSpec.AllowedDomains...),
+		Warnings: []string{},
+		Message: "Server Intake 校验通过：尚未上传、尚未启动浏览器、尚未读取任何客户页面。",
+	}
+	if bundle := pkg.ExecutableScriptBundle; bundle != nil {
+		result.Runtime = bundle.ScriptManifest.Runtime
+		if bundle.PlanJSON != nil {
+			result.StageCount = len(bundle.PlanJSON.Steps)
+			for _, step := range bundle.PlanJSON.Steps {
+				for _, validation := range step.Validations {
+					if validation.Required {
+						result.RequiredChecks++
+					}
+				}
+			}
+		}
+		if bundle.ScriptManifest.Runtime == model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+			readiness := browserAgentReadiness(&pkg)
+			result.Readiness = &readiness
+			if !readiness.CanRun {
+				result.Message = "Server Intake structural validation passed, but Browser Agent readiness is blocked before any browser session can start."
+			}
+		}
+	}
+	return result
 }
 
 func (s *Service) GetExecutionPackageStatus(ctx context.Context, orgID string, exchangePackageID string) (model.ExecutionPackageStatusResponse, error) {

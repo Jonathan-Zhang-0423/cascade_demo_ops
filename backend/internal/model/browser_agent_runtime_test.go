@@ -53,6 +53,23 @@ func TestValidationReportRequiresActualEvidenceToContinue(t *testing.T) {
 	}
 }
 
+func TestPreExecutionValidationAllowsOnlyApprovedPackageEvidence(t *testing.T) {
+	report := validRuntimeValidationReport()
+	report.Phase = ValidationPhasePreExecution
+	report.NodeID = ""
+	report.StageID = ""
+	report.EvidenceQuality = RuntimeObservationDerivedPlan
+	if err := report.Validate(); err != nil {
+		t.Fatalf("pre-execution validation may use the approved package as evidence: %v", err)
+	}
+	report.Phase = ValidationPhaseRuntimeStage
+	report.NodeID = "node_1"
+	report.StageID = "stage_1"
+	if err := report.Validate(); err == nil {
+		t.Fatal("runtime validation must still require real browser evidence")
+	}
+}
+
 func TestRuntimeContractsRejectSensitiveText(t *testing.T) {
 	event := validStageExecutionEvent()
 	event.Observation.Title = "Authorization: Bearer secret-value"

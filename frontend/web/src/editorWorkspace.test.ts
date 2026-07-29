@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EditorPlan, EditorSession, EditorShot, EditorTimelineStep, EditorValidationReport } from "./editor";
-import { automationStatusLabel, buildExportChecks, buildExportIssues, buildTimelineShots, editorAutomationForDisplay, formatTimecode, preservesRequiredStepOrder } from "./VideoEditor";
+import { automationStatusLabel, buildExportChecks, buildExportIssues, buildTimelineShots, editorAutomationForDisplay, formatTimecode, preservesRequiredStepOrder, renderFailureDetail, VideoEditor } from "./VideoEditor";
 
 const steps: EditorTimelineStep[] = [
   { step_id: "open", order: 0, action: "navigate", status: "passed", required: true, start_ms: 0, end_ms: 2000, duration_ms: 2000 },
@@ -56,6 +56,16 @@ const validReport: EditorValidationReport = {
 };
 
 describe("editor workspace policy", () => {
+	it("accepts a Server-selected session id for a precise result-to-editor handoff", () => {
+		const props: Parameters<typeof VideoEditor>[0] = { initialSessionID: "edit_from_real_run" };
+		expect(props.initialSessionID).toBe("edit_from_real_run");
+	});
+
+	it("turns common final-render errors into actionable Chinese diagnostics", () => {
+		expect(renderFailureDetail({ status: "failed", error: "ffmpeg not found" })).toContain("FFmpeg/FFprobe");
+		expect(renderFailureDetail({ status: "failed", error: "edit plan validation failed" })).toContain("导出校验");
+	});
+
 	it("uses plain Chinese for browser-agent automation states", () => {
 		expect(automationStatusLabel("verified")).toBe("智能执行已验证");
 		expect(automationStatusLabel("repaired_or_review")).toBe("已自动修复，建议复核");

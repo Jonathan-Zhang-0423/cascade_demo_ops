@@ -36,10 +36,13 @@ type BrowserAgentWorkerOpenRequest struct {
 	OutputDir             string                    `json:"output_dir"`
 	Browser               BrowserAgentWorkerBrowser `json:"browser"`
 	AllowedDomains        []string                  `json:"allowed_domains"`
+	AllowedOrigins        []string                  `json:"allowed_origins,omitempty"`
+	AllowedRoutes         []string                  `json:"allowed_routes,omitempty"`
 	ForbiddenPages        []string                  `json:"forbidden_pages,omitempty"`
 	ForbiddenPathPrefixes []string                  `json:"forbidden_path_prefixes,omitempty"`
 	ForbiddenKeywords     []string                  `json:"forbidden_keywords,omitempty"`
 	MaskSelectors         []string                  `json:"mask_selectors,omitempty"`
+	RecordingSensitive    *bool                     `json:"recording_sensitive,omitempty"`
 }
 
 type BrowserAgentWorkerOpenResult struct {

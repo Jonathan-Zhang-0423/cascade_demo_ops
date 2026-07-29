@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,17 @@ import (
 )
 
 func (s *Service) RunUploadedExecutionPackage(ctx context.Context, orgID string, exchangePackageID string) (model.ExecutionPackageStatusResponse, error) {
+	pkg, snapshotErr := s.exchange.PayloadSnapshot(ctx, orgID, exchangePackageID)
+	if snapshotErr != nil {
+		return model.ExecutionPackageStatusResponse{}, snapshotErr
+	}
+	if readinessErr := browserAgentReadinessError(browserAgentReadiness(&pkg)); readinessErr != nil {
+		status, statusErr := s.exchange.Status(ctx, orgID, exchangePackageID)
+		if statusErr != nil {
+			return model.ExecutionPackageStatusResponse{}, readinessErr
+		}
+		return status, readinessErr
+	}
 	started, err := s.exchange.TryStartExecution(ctx, orgID, exchangePackageID)
 	if err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
@@ -277,6 +289,13 @@ func debugExecutionReadiness(status model.ExecutionPackageStatusResponse, pkg mo
 	}
 	if !nodeReady {
 		blockers = append(blockers, ExecutionDebugBlocker{Code: "node_runtime_missing", Message: "Node runtime is not available for the video-worker."})
+	}
+	for _, finding := range browserAgentReadiness(&pkg).Blockers {
+		message := finding.Message
+		if finding.NodeID != "" {
+			message = fmt.Sprintf("stage %s: %s", finding.NodeID, message)
+		}
+		blockers = append(blockers, ExecutionDebugBlocker{Code: finding.Code, Message: message})
 	}
 	return ExecutionDebugReadiness{CanRun: len(blockers) == 0, Blockers: blockers}
 }

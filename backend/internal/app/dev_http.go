@@ -255,6 +255,9 @@ func handleEditorMedia(w http.ResponseWriter, r *http.Request, service *Service,
 	if mimeType != "" {
 		w.Header().Set("Content-Type", mimeType)
 	}
+	if kind == "final" && r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition", `attachment; filename="cascade-demo.mp4"`)
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	http.ServeFile(w, r, filePath)
 }

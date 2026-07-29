@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/driver"
 	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/model"
@@ -25,8 +27,8 @@ type browserAgentWorkerSessionFactory func(context.Context, driver.BrowserAgentW
 type localBrowserAgentOutlineRunner struct {
 	service        *Service
 	sessionFactory browserAgentWorkerSessionFactory
-	// outcomeVerifier is an optional Server-owned injection point for the
-	// Validation Agent adapter. It may propose repairs but cannot apply them.
+	// outcomeVerifier is a focused test override. Production runs snapshot the
+	// Server-owned verifier from service at the beginning of each execution.
 	outcomeVerifier BrowserAgentStageEventVerifier
 }
 
@@ -44,9 +46,44 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	if request.Package == nil || len(request.RuntimePlan.Stages) == 0 || request.EventSink == nil {
 		return model.RecordingResultPackage{}, newRuntimeExecutionError(runtimeErrorBrowserAgentContractViolation, errors.New("browser-agent runtime plan, package, and event sink are required"))
 	}
+	verifier := r.outcomeVerifier
+	if verifier == nil {
+		verifier = r.service.browserAgentOutcomeVerifierSnapshot()
+	}
+	if verifier == nil {
+		verifier = newDeterministicBrowserAgentStageVerifier(request.Package)
+	}
+	// A full verifier is optional so existing focused verifier tests can inject
+	// only the stage decision. The production verifier implements all phases.
+	validationContext := validationContextFromPackage(request.Package)
+	validationContext.RunID = request.RuntimePlan.RunID
+	fullVerifier, _ := verifier.(OutcomeVerifier)
+	preReports := []model.ValidationReport{}
+	if fullVerifier != nil {
+		preReport, verifyErr := fullVerifier.ValidateBeforeExecution(ctx, validationContext)
+		if verifyErr != nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("outcome_pre_verification_failed", verifyErr)
+		}
+		if err := preReport.Validate(); err != nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("outcome_pre_verification_failed", err)
+		}
+		preReports = append(preReports, preReport)
+		if preReport.Decision != model.ValidationDecisionContinue {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("outcome_pre_verification_failed", errors.New("approved Browser Agent package did not pass pre-execution verification"))
+		}
+	}
 	progressBrowserAgent(request.Progress, "validating_pre_execution", "正在核对 App 已审批阶段、业务目标和安全边界。", 36)
 
 	openRequest := browserAgentWorkerOpenRequest(request)
+	// Only the Server-created local fixture contains no customer material. Real
+	// App packages keep their raw recording sensitive by default.
+	if request.Package.Metadata["producer"] == "server_controlled_business_acceptance" &&
+		request.Package.Metadata["dev_plaintext_upload_mode"] == true &&
+		request.Package.Metadata["runtime"] == model.ExecutableScriptRuntimeBrowserAgentOutlineV1 &&
+		r.service.runtime.Profile != config.ProfileCloud {
+		recordingSensitive := false
+		openRequest.RecordingSensitive = &recordingSensitive
+	}
 	factory := r.sessionFactory
 	if factory == nil {
 		workerPath := r.service.localVideoWorkerPath()
@@ -79,10 +116,6 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	stageRuntime := &localBrowserAgentStageRuntime{
 		session: session, progress: request.Progress, stageCount: len(request.RuntimePlan.Stages), artifacts: map[string]model.ArtifactRef{},
 	}
-	verifier := r.outcomeVerifier
-	if verifier == nil {
-		verifier = newDeterministicBrowserAgentStageVerifier(request.Package)
-	}
 	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier)
 	startedAt := timeNowUTC()
 	runResult, runErr := orchestrator.Run(ctx, request.RuntimePlan, stageRuntime, stageRuntime, request.EventSink)
@@ -98,6 +131,9 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	}
 	for _, artifact := range closeResult.Artifacts {
 		stageRuntime.artifacts[artifact.ID] = artifact
+	}
+	if runResult.AuditError != nil {
+		return model.RecordingResultPackage{}, newRuntimeExecutionError("stage_event_audit_unavailable", runResult.AuditError)
 	}
 	completedAt := timeNowUTC()
 	progressBrowserAgent(request.Progress, "validating_post_execution", "正在复核全部阶段证据和执行结果。", 88)
@@ -118,8 +154,32 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	if err != nil {
 		return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_result_packaging_failed", err)
 	}
-	result.ValidationReports = append([]model.ValidationReport{}, runResult.ValidationReports...)
+	result.ValidationReports = append([]model.ValidationReport{}, preReports...)
+	result.ValidationReports = append(result.ValidationReports, runResult.ValidationReports...)
 	result.PatchLedger = append([]model.RuntimePatchLedgerEntry{}, runResult.PatchLedger...)
+	if fullVerifier != nil {
+		postReport, verifyErr := fullVerifier.ValidatePostExecution(ctx, validationContext, result, runResult.Events)
+		if verifyErr != nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("outcome_post_verification_failed", verifyErr)
+		}
+		if err := postReport.Validate(); err != nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("outcome_post_verification_failed", err)
+		}
+		result.ValidationReports = append(result.ValidationReports, postReport)
+		if postReport.Decision != model.ValidationDecisionContinue && result.Status != model.RecordingResultStatusFailed {
+			validationErr := newRuntimeExecutionError("outcome_post_verification_failed", fmt.Errorf("post-execution verifier stopped package with decision %s", postReport.Decision))
+			recordResult.StepResults = browserAgentPostValidationFailedStepResults(recordResult.StepResults, postReport, validationErr)
+			recordResult.FailureDiagnostic = browserAgentFailureDiagnostic(request, runResult.Events, stageRuntime.artifacts, validationErr, completedAt)
+			result, err = executor.NewRecordingResultPackageFromRecordResult(request.Package, recordResult, request.CloudJobID, request.ResultCreatedAt)
+			if err != nil {
+				return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_result_packaging_failed", err)
+			}
+			result.ValidationReports = append([]model.ValidationReport{}, preReports...)
+			result.ValidationReports = append(result.ValidationReports, runResult.ValidationReports...)
+			result.ValidationReports = append(result.ValidationReports, postReport)
+			result.PatchLedger = append([]model.RuntimePatchLedgerEntry{}, runResult.PatchLedger...)
+		}
+	}
 	if result.Status == model.RecordingResultStatusGenerated && request.Package.RecordingRunSpec.Outputs.FinalVideo {
 		progressBrowserAgent(request.Progress, "rendering", "正在基于已录制素材生成最终演示视频。", 96)
 		worker := driver.NewLocalDriver(r.service.nodeBinaryForExecution(), r.service.localVideoWorkerPath())
@@ -184,6 +244,120 @@ func newDeterministicBrowserAgentStageVerifier(pkg *model.ClientExecutionPackage
 		}
 	}
 	return verifier
+}
+
+// ValidateBeforeExecution is deliberately structural: before the browser has
+// opened, the only permissible evidence is the approved, hash-bound package.
+// It checks that the compiled plan did not lose the required validation rules.
+func (v deterministicBrowserAgentStageVerifier) ValidateBeforeExecution(_ context.Context, validationContext BrowserAgentValidationContext) (model.ValidationReport, error) {
+	checks := []model.ValidationCheck{}
+	passed := validationContext.StageApprovalPlan != nil && validationContext.ScriptOutline != nil && validationContext.BrowserAgentContract != nil
+	checks = append(checks, model.ValidationCheck{
+		ID: "check_approved_outline_contract", Kind: "approved_outline_contract", Passed: passed, Required: true,
+		Summary: "Server verified the approved stage plan, outline, and Browser Agent contract are present.",
+		EvidenceRefs: []model.EvidenceRef{{ID: "approved_package_contract", Kind: model.EvidenceKindDocs, Summary: "hash-bound approved package"}},
+	})
+	decision := model.ValidationDecisionContinue
+	if !passed {
+		decision = model.ValidationDecisionStopAndReport
+	}
+	return model.ValidationReport{
+		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "validation_pre_" + safePathSegment(validationContext.SourcePackageID),
+		RunID: firstNonEmptyString(validationContext.RunID, validationContext.SourcePackageID, "preflight"), SourcePackageID: validationContext.SourcePackageID,
+		SourceBundleHashSHA256: validationContext.SourceBundleHashSHA256, PolicyHashSHA256: validationContext.EffectivePolicyHashSHA256,
+		Phase: model.ValidationPhasePreExecution, Decision: decision, PassRate: boolPassRate(passed), OverallConfidence: boolPassRate(passed),
+		EvidenceQuality: model.RuntimeObservationDerivedPlan, Checks: checks,
+		EvidenceRefs: []model.EvidenceRef{{ID: "approved_package_contract", Kind: model.EvidenceKindDocs, Summary: "hash-bound approved package"}}, CreatedAt: timeNowUTC(),
+	}, nil
+}
+
+// ValidatePostExecution makes the aggregate decision only from observed stage
+// events and packaged StepResults; it never treats an expected success state as
+// proof that the browser reached it.
+func (v deterministicBrowserAgentStageVerifier) ValidatePostExecution(_ context.Context, validationContext BrowserAgentValidationContext, result model.RecordingResultPackage, events []model.StageExecutionEvent) (model.ValidationReport, error) {
+	checks := []model.ValidationCheck{}
+	evidenceRefs := []model.EvidenceRef{}
+	completed := map[string]bool{}
+	outcomes := map[string]*model.RuntimeObservation{}
+	for index := range events {
+		event := events[index]
+		if event.EventType == model.StageExecutionEventStageCompleted {
+			completed[event.NodeID] = true
+		}
+		if event.EventType == model.StageExecutionEventOutcomeObserved && event.Observation != nil {
+			outcome := *event.Observation
+			outcomes[event.NodeID] = &outcome
+			evidenceRefs = append(evidenceRefs, event.EvidenceRefs...)
+		}
+	}
+	decision := model.ValidationDecisionContinue
+	failedNodeID := ""
+	passed := 0
+	for _, step := range result.StepResults {
+		hasObservation := outcomes[step.NodeID] != nil && runtimeObservationIsRealEvidence(outcomes[step.NodeID].Source)
+		ok := step.Status == "passed" && completed[step.NodeID] && hasObservation
+		checks = append(checks, model.ValidationCheck{
+			ID: "check_post_" + safePathSegment(step.NodeID), Kind: "observed_stage_completion", Passed: ok, Required: true,
+			Summary: "Stage completion is accepted only when a real browser outcome observation was recorded.",
+			EvidenceRefs: evidenceRefsForNode(events, step.NodeID),
+		})
+		if ok {
+			passed++
+		} else {
+			decision = model.ValidationDecisionStopAndReport
+			if failedNodeID == "" {
+				failedNodeID = step.NodeID
+			}
+		}
+	}
+	if len(result.StepResults) == 0 || len(evidenceRefs) == 0 {
+		decision = model.ValidationDecisionStopAndReport
+	}
+	passRate := 0.0
+	if len(result.StepResults) > 0 {
+		passRate = float64(passed) / float64(len(result.StepResults))
+	}
+	evidenceQuality := model.RuntimeObservationInsufficient
+	if len(evidenceRefs) > 0 {
+		evidenceQuality = model.RuntimeObservationAssertion
+	}
+	return model.ValidationReport{
+		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "validation_post_" + safePathSegment(validationContext.SourcePackageID),
+		RunID: firstNonEmptyString(validationContext.RunID, validationContext.SourcePackageID, "postflight"), SourcePackageID: validationContext.SourcePackageID,
+		SourceBundleHashSHA256: validationContext.SourceBundleHashSHA256, PolicyHashSHA256: validationContext.EffectivePolicyHashSHA256,
+		Phase: model.ValidationPhasePostExecution, NodeID: failedNodeID, Decision: decision, PassRate: passRate, OverallConfidence: passRate,
+		EvidenceQuality: evidenceQuality, Checks: checks, EvidenceRefs: uniqueEvidenceRefs(evidenceRefs), CreatedAt: timeNowUTC(),
+	}, nil
+}
+
+func boolPassRate(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func evidenceRefsForNode(events []model.StageExecutionEvent, nodeID string) []model.EvidenceRef {
+	refs := []model.EvidenceRef{}
+	for _, event := range events {
+		if event.NodeID == nodeID && event.EventType == model.StageExecutionEventOutcomeObserved {
+			refs = append(refs, event.EvidenceRefs...)
+		}
+	}
+	return uniqueEvidenceRefs(refs)
+}
+
+func uniqueEvidenceRefs(refs []model.EvidenceRef) []model.EvidenceRef {
+	seen := map[string]bool{}
+	result := make([]model.EvidenceRef, 0, len(refs))
+	for _, ref := range refs {
+		if ref.ID == "" || seen[ref.ID] {
+			continue
+		}
+		seen[ref.ID] = true
+		result = append(result, ref)
+	}
+	return result
 }
 
 func (v deterministicBrowserAgentStageVerifier) ValidateStageEvents(_ context.Context, validationContext BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
@@ -260,6 +434,7 @@ func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver
 	}
 	maskSelectors := append([]string{}, request.Package.RecordingRunSpec.Redactions.MaskSelectors...)
 	maskSelectors = append(maskSelectors, request.Package.SafetyReport.RedactionSelectors...)
+	recordingSensitive := true
 	return driver.BrowserAgentWorkerOpenRequest{
 		SessionID: safePathSegment(request.CloudJobID), OutputDir: request.RecordingOutputDir,
 		Browser: driver.BrowserAgentWorkerBrowser{
@@ -267,10 +442,13 @@ func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver
 			Viewport: viewport, RecordVideo: request.Package.RecordingRunSpec.Outputs.RawRecording,
 		},
 		AllowedDomains:        append([]string{}, request.RuntimePlan.AllowedDomains...),
+		AllowedOrigins:        append([]string{}, request.RuntimePlan.ExplorationScope.AllowedOrigins...),
+		AllowedRoutes:         append([]string{}, request.RuntimePlan.ExplorationScope.AllowedRoutes...),
 		ForbiddenPages:        append([]string{}, request.RuntimePlan.ForbiddenPages...),
 		ForbiddenPathPrefixes: append([]string{}, request.RuntimePlan.ExplorationScope.ForbiddenPathPrefixes...),
 		ForbiddenKeywords:     append([]string{}, request.RuntimePlan.ExplorationScope.ForbiddenKeywords...),
 		MaskSelectors:         uniqueStrings(maskSelectors),
+		RecordingSensitive:    &recordingSensitive,
 	}
 }
 
@@ -291,7 +469,8 @@ func browserAgentStepResults(plan BrowserAgentRuntimePlan, events []model.StageE
 	results := make([]model.StepResult, 0, len(plan.Stages))
 	orderedArtifacts := mapBrowserAgentArtifacts(artifacts)
 	for _, stage := range plan.Stages {
-		result := model.StepResult{NodeID: stage.NodeID, Status: "passed", ObservedState: stage.SuccessState}
+		result := model.StepResult{NodeID: stage.NodeID, Status: "passed"}
+		var outcome *model.RuntimeObservation
 		for _, event := range events {
 			if event.NodeID != stage.NodeID {
 				continue
@@ -302,6 +481,15 @@ func browserAgentStepResults(plan BrowserAgentRuntimePlan, events []model.StageE
 			if event.EventType == model.StageExecutionEventStageCompleted {
 				result.CompletedAt = event.OccurredAt
 			}
+			if event.EventType == model.StageExecutionEventOutcomeObserved && event.Observation != nil {
+				copy := *event.Observation
+				outcome = &copy
+			}
+		}
+		result.ObservedState = browserAgentObservedState(outcome)
+		if outcome == nil || !runtimeObservationIsRealEvidence(outcome.Source) {
+			result.Status = "failed"
+			result.Error = &model.AgentError{Code: "missing_runtime_observation", Message: "Approved stage completed without a real browser outcome observation."}
 		}
 		if !result.StartedAt.IsZero() && !result.CompletedAt.IsZero() {
 			result.DurationMS = int(result.CompletedAt.Sub(result.StartedAt).Milliseconds())
@@ -314,6 +502,49 @@ func browserAgentStepResults(plan BrowserAgentRuntimePlan, events []model.StageE
 		results = append(results, result)
 	}
 	return results
+}
+
+// browserAgentObservedState intentionally records only a redacted, factual
+// summary of runtime evidence. It must never fall back to stage.SuccessState,
+// which is an App expectation rather than execution evidence.
+func browserAgentObservedState(observation *model.RuntimeObservation) string {
+	if observation == nil {
+		return ""
+	}
+	parts := []string{fmt.Sprintf("source=%s", observation.Source)}
+	if observation.URL != "" {
+		parts = append(parts, "url_observed")
+	}
+	if observation.Title != "" {
+		parts = append(parts, "title_observed")
+	}
+	for _, assertion := range observation.Assertions {
+		if assertion.Kind == "" {
+			continue
+		}
+		state := "failed"
+		if assertion.Passed {
+			state = "passed"
+		}
+		parts = append(parts, fmt.Sprintf("assertion:%s=%s", assertion.Kind, state))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func browserAgentPostValidationFailedStepResults(results []model.StepResult, report model.ValidationReport, verifyErr error) []model.StepResult {
+	updated := append([]model.StepResult{}, results...)
+	for index := range updated {
+		if report.NodeID != "" && updated[index].NodeID != report.NodeID {
+			continue
+		}
+		updated[index].Status = "failed"
+		updated[index].Error = &model.AgentError{Code: runtimeExecutionErrorCode(verifyErr), Message: "Post-execution validation did not confirm the approved outcome."}
+		if updated[index].ObservedState == "" {
+			updated[index].ObservedState = "Post-execution validation did not receive sufficient real browser evidence."
+		}
+		return updated
+	}
+	return updated
 }
 
 // Keep completed stages intact and mark only the stopped stage as failed.

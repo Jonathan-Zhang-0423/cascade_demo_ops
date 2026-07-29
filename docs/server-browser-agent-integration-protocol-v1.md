@@ -33,10 +33,10 @@
 | 修复记录 | 所有自动修复只作用于单次内存运行计划，必须写入 `patch_ledger` 与 JSONL 阶段审计日志，原包及 hash 不改写 |
 | 失败处理 | 合同冲突、目标歧义、必填验证失败、越权修复或证据不足一律 `stop_and_report`，返回脱敏结果，不猜测业务 |
 | 对外结果 | 返回状态、结果包、资产 checksum、验证报告、Patch Ledger、阶段审计和 Ack 所需字段；失败包包含脱敏诊断与 `repair_request` |
-| 开发预检 | Server 将把现有同规则的 `ValidateUpload` 能力开放为受认证 HTTP 预检；预检无副作用，不分配任务、不写入包、不启动浏览器 |
+| 开发预检 | Server 已开放同规则的 `ValidateUpload` HTTP 预检；预检无副作用，不分配任务、不写入包、不消耗 nonce、不启动浏览器 |
 | 验收 | 每项新增 Browser Agent 功能须同时通过 fixture/校验器测试、Server 受控全链路测试和真实浏览器固定场景 Gate 后才可标记为可用 |
 
-其中“逐路由白名单”和“正式 HTTP 预检”是下一批可直接开发的 Server 能力；它们不改变 App 的执行包字段，也不要求 App 选定云基础设施。
+其中“逐路由白名单”和“正式 HTTP 预检”均已落地；它们不改变 App 的执行包字段，也不要求 App 选定云基础设施。
 
 ## 2. 唯一事实源与职责边界
 
@@ -187,7 +187,7 @@ App 用户审批包
 | 凭据 | 不发送真实凭据 | Vault broker 按 `secret_ref` 注入 |
 | 隔离 | 本地受控 Playwright sidecar | Container/MicroVM + 受限代理 + 临时凭据 |
 
-### 5.2 预检接口的固定约定（待 Server 实现后开放）
+### 5.2 预检接口的固定约定（已开放）
 
 为避免 App 必须上传后才能发现格式或 hash 错误，Server 将开放受认证、无副作用的预检接口：
 
@@ -205,7 +205,7 @@ POST /aigc/v1/execution-packages/validate
 }
 ```
 
-失败响应沿用第 9 节的结构化错误。此接口上线前，App 仍可用固定 fixture 和上传错误做联调；不得假设该 URL 已经可调用。
+失败响应沿用第 9 节的结构化错误。该接口已用仓库内 `browser-agent-outline-v1` fixture 验收：成功预检不创建 `exchange_package_id`、不创建上传会话、不消耗 replay nonce；失败预检同样不落任何状态。开发环境需携带与 Upload 相同的 Bearer 或 installation session 鉴权。
 
 ### 5.3 状态、结果和确认
 
@@ -243,7 +243,7 @@ Ack 时 App 必须先下载资产、验证 SHA-256，再提交：
 
 ```text
 1. App 根据 fixture 生成等价结构的 outline 包
-2. Server 本地 ValidateUpload 预检（当前是 Server 内部/桌面桥能力，尚未作为独立 HTTP endpoint 开放）
+2. Server `POST /aigc/v1/execution-packages/validate` 预检（无副作用；校验成功后再 Init -> Upload）
 3. Init -> Upload
 4. 开发环境 Run 或受控 auto-run
 5. 轮询 Status 至 completed / failed / canceled
@@ -310,11 +310,11 @@ Server 不得通过私有字段、提示词文字或隐式默认值绕过协议�
 | 结果包、checksum、资产交付、Ack | 已实现 | 可立即对接 |
 | 本地编辑器接收录屏和素材 | 已实现 | 仅消费执行结果，不改变 App 执行包协议 |
 | `allowed_domains`、禁止页面、控制面路径与非破坏性限制 | 已实现 | App 必须完整给出安全边界 |
-| `allowed_origins` / `allowed_routes` 的逐路由强制白名单 | 已确定、待开发 | App 字段已固定；上线前暂不应依赖其作为唯一隔离手段 |
+| `allowed_origins` / `allowed_routes` 的逐路由强制白名单 | 已实现 | App 字段已固定；仍需与浏览器隔离、禁止页面和非破坏性策略共同使用 |
 | `secret_ref` 的真实 Vault / 输入 broker 注入 | 未开放 | 不发送真实登录凭据或依赖 `secret_ref` 的动作 |
 | 生产密文包在隔离 Worker 中解密并执行 | 未开放 | 加密 `payload_ref` 当前仅可登记，不可完成真实执行 |
 | Container/MicroVM 的生产隔离、受限代理和临时凭据回收 | 待基础设施落地 | 不可将本地 sidecar 等同生产隔离 |
-| 正式 HTTP 预检接口 | 已确定、待开发 | 上线前使用 fixture 和 Upload 错误联调 |
+| 正式 HTTP 预检接口 | 已实现并通过 outline fixture 验收 | 先调用 `/aigc/v1/execution-packages/validate`，通过后再 Init -> Upload |
 | 上传后生产调度和正式取消 API | 待共同决策后实现 | 当前仅使用开发 `/dev` 路径联调 |
 | 真实浏览器固定七场景 Gate | 已确定、环境待恢复后重跑 | 当前结果不作为生产放行结论 |
 
@@ -364,11 +364,9 @@ Server 对请求错误返回稳定结构：
 
 ### 10.1 不依赖外部决策的 Server 开发顺序
 
-1. 强制 `allowed_origins` / `allowed_routes` 的逐路由白名单，并补充越权路径测试；
-2. 开放受认证、无副作用的 `/execution-packages/validate` 预检接口，并以 fixture 验收请求/响应；
-3. 修复本机真实浏览器 Gate 环境，重跑七场景；
-4. 在无敏感测试站点完成 App 发包 -> Server 执行 -> 结果 -> Ack 的联调验收；
-5. 再根据本节未决项的共同决定，开发 Vault、密文解密 Worker、生产隔离和调度。
+1. 在无敏感测试站点完成 App 发包 -> Server 预检 -> Init -> Upload -> 执行 -> 结果 -> Ack 的联调验收；
+2. 将真实 `OutcomeVerifier` 实现按既定 DTO 注入运行时，并对齐阶段报告与结果包；
+3. 再根据本节未决项的共同决定，开发 Vault、密文解密 Worker、生产隔离和调度。
 
 ## 11. 参考
 

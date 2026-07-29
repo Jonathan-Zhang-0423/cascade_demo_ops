@@ -146,7 +146,7 @@ func (s *Service) runBrowserAgentBusinessAcceptance(ctx context.Context, fixture
 		BusinessFlow: "进入工作台 → 输入项目名 → 选择构建模式 → 提交构建 → 验证构建结果",
 		Stages:       controlledBusinessAcceptanceStages(pkg, run), EditorMaterialization: materialization,
 	}
-	if run.Status.Status != model.ExchangePackageStatusCompleted || run.Result.Status != model.RecordingResultStatusGenerated || len(run.Result.ValidationReports) != 5 || !protocolAcceptanceHasArtifact(run.Result, "raw_recording") || !protocolAcceptanceHasArtifact(run.Result, "browser_trace") || !protocolAcceptanceHasArtifact(run.Result, "demo_video") || !materialization.Ready {
+	if run.Status.Status != model.ExchangePackageStatusCompleted || run.Result.Status != model.RecordingResultStatusGenerated || !hasStrictBrowserAgentValidationReports(run.Result, len(report.Stages)) || !protocolAcceptanceHasArtifact(run.Result, "raw_recording") || !protocolAcceptanceHasArtifact(run.Result, "browser_trace") || !protocolAcceptanceHasArtifact(run.Result, "demo_video") || !materialization.Ready {
 		report.StrictGate = "failed"
 	}
 	for _, stage := range report.Stages {
@@ -195,6 +195,9 @@ func controlledBusinessAcceptancePackage(fixturePath, baseURL string) (model.Cli
 	base.ProjectContextSummary.ProductURL = baseURL
 	base.RecordingRunSpec.RunID, base.RecordingRunSpec.BaseURL, base.RecordingRunSpec.AllowedDomains = "run_controlled_business", baseURL, []string{domain}
 	base.RecordingRunSpec.Timeline.TargetDurationSec = 8
+	// This fixture exercises the production delivery contract: an MP4 final
+	// output that can later become a normalized source-reference for Doubao.
+	base.RecordingRunSpec.Outputs.OutputFormats = []string{"mp4"}
 	base.CredentialGrants = nil
 	base.Metadata = map[string]any{"dev_plaintext_upload_mode": true, "producer": "server_controlled_business_acceptance", "runtime": model.ExecutableScriptRuntimeBrowserAgentOutlineV1}
 
@@ -227,7 +230,7 @@ func applyControlledBusinessStages(pkg *model.ClientExecutionPackage, specs []co
 	bundle.ApprovalMarkdown.InlineMarkdown = "# Controlled business outline approval\n\nServer-owned fixture: project input, mode selection, build submission and result verification."
 	bundle.SecurityPolicy.AllowedDomains = []string{domain}
 	bundle.SecurityPolicy.ForbiddenPages = []string{"/billing", "/admin"}
-	pkg.WorkflowGraph = &model.DemoWorkflowGraph{ID: bundle.WorkflowGraphID, ProjectID: pkg.ProjectID, SchemaVersion: model.DemoWorkflowGraphSchemaVersion, Version: 1, Status: model.GraphStatusApproved, Name: "Controlled project build", EntryPoint: specs[0].NodeID, Assets: &model.AssetManifest{DemoVideo60s: true, ScreenshotPack: true, StepByStepDocs: true, TargetDurationSec: 8}, EvidenceRefs: []model.EvidenceRef{evidence}}
+	pkg.WorkflowGraph = &model.DemoWorkflowGraph{ID: bundle.WorkflowGraphID, ProjectID: pkg.ProjectID, SchemaVersion: model.DemoWorkflowGraphSchemaVersion, Version: 1, Status: model.GraphStatusApproved, Name: "Controlled project build", EntryPoint: specs[0].NodeID, Assets: &model.AssetManifest{DemoVideo60s: true, ScreenshotPack: true, StepByStepDocs: true, TargetDurationSec: 8, RequestedAssets: []model.AssetRequest{{ID: "final_demo_mp4", Kind: "demo_video", Format: "mp4", DurationSec: 8, Required: true}}}, EvidenceRefs: []model.EvidenceRef{evidence}}
 	bundle.PlanJSON.ID, bundle.PlanJSON.ProjectID, bundle.PlanJSON.WorkflowGraphID, bundle.PlanJSON.GraphVersion = "script_doc_controlled_business", pkg.ProjectID, bundle.WorkflowGraphID, 1
 	bundle.PlanJSON.Title, bundle.PlanJSON.Summary = "Controlled project build", "Formal browser-agent outline for a Server-owned business fixture."
 	bundle.PlanJSON.RecordingRunSpec = pkg.RecordingRunSpec
