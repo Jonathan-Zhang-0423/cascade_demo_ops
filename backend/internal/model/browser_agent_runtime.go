@@ -114,12 +114,14 @@ type ValidationReport struct {
 }
 
 type ValidationCheck struct {
-	ID           string        `json:"id"`
-	Kind         string        `json:"kind"`
-	Passed       bool          `json:"passed"`
-	Required     bool          `json:"required"`
-	Summary      string        `json:"summary,omitempty"`
-	EvidenceRefs []EvidenceRef `json:"evidence_refs,omitempty"`
+	ID           string          `json:"id"`
+	Kind         string          `json:"kind"`
+	Code         string          `json:"code,omitempty"`
+	Severity     FindingSeverity `json:"severity,omitempty"`
+	Passed       bool            `json:"passed"`
+	Required     bool            `json:"required"`
+	Summary      string          `json:"summary,omitempty"`
+	EvidenceRefs []EvidenceRef   `json:"evidence_refs,omitempty"`
 }
 
 type RuntimeRepairProposal struct {
@@ -224,6 +226,9 @@ func (r ValidationReport) Validate() error {
 	for _, check := range r.Checks {
 		if anyBlank(check.ID, check.Kind) {
 			return errors.New("validation check requires id and kind")
+		}
+		if check.Severity != "" && check.Severity != FindingSeverityInfo && check.Severity != FindingSeverityWarning && check.Severity != FindingSeverityBlocking {
+			return errors.New("validation check severity must be info, warning, or blocking")
 		}
 		if err := validateRuntimeContractText(check.Summary); err != nil {
 			return err

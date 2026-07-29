@@ -250,23 +250,27 @@ func newDeterministicBrowserAgentStageVerifier(pkg *model.ClientExecutionPackage
 // It checks that the compiled plan did not lose the required validation rules.
 func (v deterministicBrowserAgentStageVerifier) ValidateBeforeExecution(_ context.Context, validationContext BrowserAgentValidationContext) (model.ValidationReport, error) {
 	checks := []model.ValidationCheck{}
-	passed := validationContext.StageApprovalPlan != nil && validationContext.ScriptOutline != nil && validationContext.BrowserAgentContract != nil
-	checks = append(checks, model.ValidationCheck{
-		ID: "check_approved_outline_contract", Kind: "approved_outline_contract", Passed: passed, Required: true,
-		Summary: "Server verified the approved stage plan, outline, and Browser Agent contract are present.",
-		EvidenceRefs: []model.EvidenceRef{{ID: "approved_package_contract", Kind: model.EvidenceKindDocs, Summary: "hash-bound approved package"}},
-	})
+	evidence := []model.EvidenceRef{{ID: "approved_package_contract", Kind: model.EvidenceKindDocs, Summary: "hash-bound approved package"}}
+	structurePassed := validationContext.StageApprovalPlan != nil && validationContext.ScriptOutline != nil && validationContext.BrowserAgentContract != nil
+	checks = append(checks, runtimeValidationCheck("check_approved_outline_contract", "approved_outline_contract", "approved_contract_missing", structurePassed, "Server verified the approved stage plan, outline, and Browser Agent contract are present.", evidence))
+	hashPassed := strings.TrimSpace(validationContext.SourceBundleHashSHA256) != "" && strings.TrimSpace(validationContext.EffectivePolicyHashSHA256) != ""
+	checks = append(checks, runtimeValidationCheck("check_approved_hashes", "approved_hash_binding", "approved_hash_missing", hashPassed, "Server verified the approved package and Browser Agent policy hashes are present.", evidence))
+	stagePlanPassed := validationContext.StageApprovalPlan != nil && len(validationContext.StageApprovalPlan.Stages) > 0 && validationContext.ScriptOutline != nil && len(validationContext.ScriptOutline.Stages) > 0
+	checks = append(checks, runtimeValidationCheck("check_approved_stage_count", "approved_stage_count", "approved_stage_plan_empty", stagePlanPassed, "Server verified the approved stage plan and script outline contain executable stages.", evidence))
 	decision := model.ValidationDecisionContinue
-	if !passed {
+	if !structurePassed || !hashPassed || !stagePlanPassed {
 		decision = model.ValidationDecisionStopAndReport
 	}
+	passRate := validationPassRate(checks)
+	reportBundleHash := firstNonEmptyString(validationContext.SourceBundleHashSHA256, "missing_source_bundle_hash")
+	reportPolicyHash := firstNonEmptyString(validationContext.EffectivePolicyHashSHA256, "missing_policy_hash")
 	return model.ValidationReport{
 		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "validation_pre_" + safePathSegment(validationContext.SourcePackageID),
 		RunID: firstNonEmptyString(validationContext.RunID, validationContext.SourcePackageID, "preflight"), SourcePackageID: validationContext.SourcePackageID,
-		SourceBundleHashSHA256: validationContext.SourceBundleHashSHA256, PolicyHashSHA256: validationContext.EffectivePolicyHashSHA256,
-		Phase: model.ValidationPhasePreExecution, Decision: decision, PassRate: boolPassRate(passed), OverallConfidence: boolPassRate(passed),
+		SourceBundleHashSHA256: reportBundleHash, PolicyHashSHA256: reportPolicyHash,
+		Phase: model.ValidationPhasePreExecution, Decision: decision, PassRate: passRate, OverallConfidence: passRate,
 		EvidenceQuality: model.RuntimeObservationDerivedPlan, Checks: checks,
-		EvidenceRefs: []model.EvidenceRef{{ID: "approved_package_contract", Kind: model.EvidenceKindDocs, Summary: "hash-bound approved package"}}, CreatedAt: timeNowUTC(),
+		EvidenceRefs: evidence, CreatedAt: timeNowUTC(),
 	}, nil
 }
 
@@ -289,20 +293,27 @@ func (v deterministicBrowserAgentStageVerifier) ValidatePostExecution(_ context.
 			evidenceRefs = append(evidenceRefs, event.EvidenceRefs...)
 		}
 	}
+	runtimeReports := map[string]model.ValidationReport{}
+	for _, report := range result.ValidationReports {
+		if report.Phase == model.ValidationPhaseRuntimeStage && report.NodeID != "" {
+			runtimeReports[report.NodeID] = report
+		}
+	}
 	decision := model.ValidationDecisionContinue
 	failedNodeID := ""
-	passed := 0
 	for _, step := range result.StepResults {
 		hasObservation := outcomes[step.NodeID] != nil && runtimeObservationIsRealEvidence(outcomes[step.NodeID].Source)
-		ok := step.Status == "passed" && completed[step.NodeID] && hasObservation
-		checks = append(checks, model.ValidationCheck{
-			ID: "check_post_" + safePathSegment(step.NodeID), Kind: "observed_stage_completion", Passed: ok, Required: true,
-			Summary: "Stage completion is accepted only when a real browser outcome observation was recorded.",
-			EvidenceRefs: evidenceRefsForNode(events, step.NodeID),
-		})
-		if ok {
-			passed++
-		} else {
+		nodeEvidence := evidenceRefsForNode(events, step.NodeID)
+		completionPassed := step.Status == "passed" && completed[step.NodeID] && hasObservation
+		checks = append(checks, runtimeValidationCheck("check_post_"+safePathSegment(step.NodeID), "observed_stage_completion", "observed_stage_completion_missing", completionPassed, "Stage completion is accepted only when a real browser outcome observation was recorded.", nodeEvidence))
+		runtimeReport, hasRuntimeReport := runtimeReports[step.NodeID]
+		reportPassed := hasRuntimeReport && runtimeReport.Decision == model.ValidationDecisionContinue && runtimeReport.EvidenceQuality != model.RuntimeObservationDerivedPlan
+		checks = append(checks, runtimeValidationCheck("check_runtime_report_"+safePathSegment(step.NodeID), "runtime_stage_report", "runtime_stage_report_missing", reportPassed, "Post-execution validation requires a successful runtime-stage report for each delivered step.", runtimeReport.EvidenceRefs))
+		statePassed := strings.Contains(step.ObservedState, "source=") && step.ObservedState != ""
+		checks = append(checks, runtimeValidationCheck("check_observed_state_"+safePathSegment(step.NodeID), "runtime_observed_state", "observed_state_not_runtime_derived", statePassed, "Step observed_state must be derived from runtime observations, not planned success text.", nodeEvidence))
+		evidencePassed := len(nodeEvidence) > 0 || len(step.Artifacts) > 0
+		checks = append(checks, runtimeValidationCheck("check_evidence_refs_"+safePathSegment(step.NodeID), "traceable_evidence_refs", "evidence_refs_missing", evidencePassed, "Delivered step evidence must be traceable to runtime events or artifacts.", nodeEvidence))
+		if !completionPassed || !reportPassed || !statePassed || !evidencePassed {
 			decision = model.ValidationDecisionStopAndReport
 			if failedNodeID == "" {
 				failedNodeID = step.NodeID
@@ -312,10 +323,7 @@ func (v deterministicBrowserAgentStageVerifier) ValidatePostExecution(_ context.
 	if len(result.StepResults) == 0 || len(evidenceRefs) == 0 {
 		decision = model.ValidationDecisionStopAndReport
 	}
-	passRate := 0.0
-	if len(result.StepResults) > 0 {
-		passRate = float64(passed) / float64(len(result.StepResults))
-	}
+	passRate := validationPassRate(checks)
 	evidenceQuality := model.RuntimeObservationInsufficient
 	if len(evidenceRefs) > 0 {
 		evidenceQuality = model.RuntimeObservationAssertion
@@ -334,6 +342,30 @@ func boolPassRate(value bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+func runtimeValidationCheck(id, kind, code string, passed bool, summary string, evidenceRefs []model.EvidenceRef) model.ValidationCheck {
+	severity := model.FindingSeverityInfo
+	if !passed {
+		severity = model.FindingSeverityBlocking
+	}
+	return model.ValidationCheck{
+		ID: id, Kind: kind, Code: code, Severity: severity, Passed: passed, Required: true,
+		Summary: summary, EvidenceRefs: append([]model.EvidenceRef{}, evidenceRefs...),
+	}
+}
+
+func validationPassRate(checks []model.ValidationCheck) float64 {
+	if len(checks) == 0 {
+		return 0
+	}
+	passed := 0
+	for _, check := range checks {
+		if check.Passed {
+			passed++
+		}
+	}
+	return float64(passed) / float64(len(checks))
 }
 
 func evidenceRefsForNode(events []model.StageExecutionEvent, nodeID string) []model.EvidenceRef {
@@ -368,6 +400,22 @@ func (v deterministicBrowserAgentStageVerifier) ValidateStageEvents(_ context.Co
 	checks := make([]model.ValidationCheck, 0)
 	passed, total := 0, 0
 	observedChecks := map[string]bool{}
+	identityPassed := true
+	for _, event := range events {
+		if event.RunID != "" && validationContext.RunID != "" && event.RunID != validationContext.RunID {
+			identityPassed = false
+		}
+		if event.SourcePackageID != validationContext.SourcePackageID || event.SourceBundleHashSHA256 != validationContext.SourceBundleHashSHA256 || event.PolicyHashSHA256 != validationContext.EffectivePolicyHashSHA256 {
+			identityPassed = false
+		}
+	}
+	if identityPassed {
+		checks = append(checks, runtimeValidationCheck("check_"+safePathSegment(last.StageID)+"_identity", "runtime_event_identity", "runtime_event_identity_mismatch", identityPassed, "Runtime event identity must match the approved package and policy hashes.", last.EvidenceRefs))
+	} else {
+		total++
+		decision = model.ValidationDecisionStopAndReport
+		checks = append(checks, runtimeValidationCheck("check_"+safePathSegment(last.StageID)+"_identity", "runtime_event_identity", "runtime_event_identity_mismatch", identityPassed, "Runtime event identity must match the approved package and policy hashes.", last.EvidenceRefs))
+	}
 	for _, event := range events {
 		if event.EventType != model.StageExecutionEventOutcomeObserved || event.Observation == nil {
 			continue
