@@ -962,6 +962,39 @@ func sampleRecordingResultForAppTest(pkg model.ClientExecutionPackage) model.Rec
 	}
 }
 
+func TestSummarizeRecordingResultExposesOutlineValidationEvidenceCompleteness(t *testing.T) {
+	result := model.RecordingResultPackage{
+		ResultID:         "result_outline_summary",
+		Status:           model.RecordingResultStatusGenerated,
+		ExecutionRuntime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+		StepResults: []model.StepResult{
+			{NodeID: "node_1", Status: "passed", ObservedState: "source=browser_assertion; assertion:project_ready=passed"},
+			{NodeID: "node_2", Status: "passed", ObservedState: "source=actual_browser_observation; assertion:build_complete=passed"},
+		},
+		StageEventLogRef: &model.ArtifactRef{ID: "artifact_stage_events", Kind: "stage_event_log", URI: "file:///tmp/events.jsonl"},
+		ValidationReports: []model.ValidationReport{
+			{Phase: model.ValidationPhasePreExecution, Decision: model.ValidationDecisionContinue},
+			{Phase: model.ValidationPhaseRuntimeStage, Decision: model.ValidationDecisionContinue, NodeID: "node_1"},
+			{Phase: model.ValidationPhaseRuntimeStage, Decision: model.ValidationDecisionContinue, NodeID: "node_2"},
+			{Phase: model.ValidationPhasePostExecution, Decision: model.ValidationDecisionContinue},
+		},
+	}
+
+	summary := summarizeRecordingResult(result)
+	if summary.Validation == nil {
+		t.Fatal("outline result must expose a validation summary")
+	}
+	validation := summary.Validation
+	if validation.Status != "complete" || validation.ValidationReportCount != 4 || validation.PreExecutionReportCount != 1 || validation.RuntimeStageReportCount != 2 || validation.PostExecutionReportCount != 1 || validation.RealObservedStepCount != 2 || !validation.StageEventLogAvailable || validation.LatestDecision != model.ValidationDecisionContinue {
+		t.Fatalf("unexpected outline validation summary: %+v", validation)
+	}
+
+	result.StepResults[1].ObservedState = "source=derived_from_plan; assertion:build_complete=passed"
+	if got := summarizeRecordingResult(result).Validation; got.Status != "incomplete" || got.RealObservedStepCount != 1 {
+		t.Fatalf("plan-derived state must not be counted as real evidence: %+v", got)
+	}
+}
+
 func fixedClock(now time.Time) func() time.Time {
 	return func() time.Time { return now }
 }

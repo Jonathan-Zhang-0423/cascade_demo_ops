@@ -1,7 +1,7 @@
 # Validation Agent 与 Browser Agent Runtime 对接说明（Server 侧）
 
-日期：2026-07-27  
-状态：Server 新主路径、三段验证和 `OutcomeVerifier` 注入点均已实现；定向与全量后端回归已通过。
+日期：2026-07-29
+状态：Server 新主路径、三段验证和 `OutcomeVerifier` 注入点均已实现；本地真实浏览器执行、阶段审计、结果包与 MP4 渲染已验证。**但尚未完成“真实 App 产出包 -> Exchange -> Server -> 结果回传”的端到端验收；未拿到真实 App 包前，不得把 Server 内部固定包或 mock 报告当作联调通过证明。**
 
 ## 1. 对接结论
 
@@ -112,3 +112,113 @@ Server 负责对提案进行权限判断、实际执行、`patch_ledger` 审计�
 明达首版交付应包括：`OutcomeVerifier` 实现、规则/失败码说明、固定 fixture 的预期结果、自动化测试及对异常输入的处理。Server 已提供 `Service.SetBrowserAgentOutcomeVerifier(verifier)` 注入点：每个 Outline 任务开始时获取一份固定快照，避免任务中途替换验证器。Server 随后负责注入实现、运行端到端固定验收、审计事件与结果包字段核对。
 
 建议顺序为：先对齐 fixture 和预期结果，再实现 `pre_execution`，然后接入 `runtime_stage`，最后完成 `post_execution` 与端到端验收。任何旧 `legacy_validation_reports` 输出都只能保留为诊断对照，不能成为新主路径的放行依据。
+
+## 8. 2026-07-29 对接更新：真实包与真实结果的硬门槛
+
+本节覆盖此前仅靠固定 fixture、单元测试或演示报告无法证明的部分。它不改变 `docs/app-server-browser-agent-outline-protocol.md` 的 App -> Server 包格式，也不向 App 增加字段；它只规定何时可以声称 Validation Agent 已完成新主路径对接。
+
+### 8.1 唯一有效的联调输入
+
+有效联调只能使用 App 正式任务入口生成、并由 App 按正式 Exchange 流程投递的 `browser-agent-outline-v1` `ClientExecutionPackage`。测试自动化可以代替用户点击“提交”，但必须调用与页面完全相同的请求 DTO、校验、默认值、任务状态机、审批记录、包生成和投递逻辑。
+
+以下数据不得作为联调输入或成功证据：
+
+- Server 内部固定测试包；
+- 手工编辑后再上传的 JSON 包；
+- `LegacyValidationReports`、mock `ValidationReport` 或由计划推导的全通过 `StepResult`；
+- 只包含单元测试日志、Claude/其他模型对日志的分析文本、或缺少 `workflow_graph` 的测试对象。
+
+Server 的 `dev-visible-browser-agent` 固定包入口仅用于本地开发回归：它可验证登录后的真实网页操作、脱敏截图与 MP4 编码，但不经过 App 包生成和 Exchange 投递，永远不得写入生产结果、不得作为 App/Server 联调验收结论。
+
+### 8.2 一次真实联调必须具备的证据链
+
+同一个 `source_package_id`、`source_bundle_hash_sha256` 和 `policy_hash_sha256` 必须贯穿下列对象，且相互一致：
+
+1. App 投递回执：`package_id`、运行时为 `browser-agent-outline-v1`、包哈希、投递时间；
+2. Server Intake/Runtime Router 记录：通过协议校验、编译出的只读 Stage Plan、拒绝或接受原因；
+3. `browser-agent-stage-events.jsonl`：每个 Stage 的单调 `sequence`、真实 `outcome_observed`、脱敏证据引用；
+4. `RecordingResultPackage.step_results`：`observed_state` 必须来自真实运行时 observation，而不是 `expected_outcome`/`success_state`；
+5. `RecordingResultPackage.validation_reports`：固定顺序为 1 份 `pre_execution`、每个已执行 Stage 1 份 `runtime_stage`、1 份 `post_execution`；
+6. 产物与交付：raw recording、trace、截图、最终 MP4、checksum/引用，以及最终 `completed` 或 `failed` 裁决。
+
+任何一项缺失时，结果只能标记为“联调证据不完整”，不能标记为通过。对手动登录的本地可见测试，登录阶段可不采集录屏/trace，但结果包必须明确该豁免；它不能替代正式包的录屏与 trace 要求。
+
+### 8.3 Validation Agent 当前接入职责
+
+明达的 Validation Agent 应以现有 `OutcomeVerifier` 接口接入，而不是再向 Server 提供独立 REST API 或向 App 要求新上传字段：
+
+```go
+type OutcomeVerifier interface {
+    ValidateBeforeExecution(context.Context, BrowserAgentValidationContext) (model.ValidationReport, error)
+    ValidateStageEvents(context.Context, BrowserAgentValidationContext, []model.StageExecutionEvent) (model.ValidationReport, error)
+    ValidatePostExecution(context.Context, BrowserAgentValidationContext, model.RecordingResultPackage, []model.StageExecutionEvent) (model.ValidationReport, error)
+}
+```
+
+Server 现有注入点为 `Service.SetBrowserAgentOutcomeVerifier(verifier)`。每个任务开始时 Server 会获取 verifier 快照；Validation Agent 只接收不可变、脱敏的 `BrowserAgentValidationContext`、`StageExecutionEvent` 和 `RecordingResultPackage`，绝不接触 Playwright `page`、Cookie、密码、Token、完整 DOM/HTML 或源码。
+
+### 8.4 判定与权限边界（本次必须确认）
+
+| Validation Agent 决策 | Server 行为 | 明达不得做的事 |
+| --- | --- | --- |
+| `continue` | 仅当 runtime/post 阶段具有真实浏览器或产物证据时继续。 | 用计划文案、mock 数据或 `derived_from_plan` 伪造成功。 |
+| `repair_allowed` | Server 继续交给 Repair Policy 审批；仅批准后由 Action Executor 执行并写入 `patch_ledger`。 | 直接修改脚本、selector、浏览器会话或原始包。 |
+| `stop_and_report` / `reunderstanding_required` | Stage Orchestrator 停止后续阶段；Result Packager 生成失败结果与 `repair_request`。 | 把失败报告当成“仅提示、不影响交付”，或继续执行后续业务动作。 |
+
+允许提议的修复仅限已批准策略中的 selector alternative、等待策略、capture timing、同域且非破坏性的探索路径或 frame resolution。不得改变业务输入、路由目标、成功定义、Stage 顺序、权限边界、`secret_ref` 或任何破坏性标记。
+
+### 8.5 `LegacyValidationReports` 的最终定位
+
+明达当前 `feat/validation-agent` 中的 pre/post 诊断、阈值计算、风险分级、selector/wait/timing 建议和测试可以复用为规则实现素材；但其 `LegacyValidationReports` 输出只保留为兼容诊断/历史查看：
+
+- 不参与新主路径的通过、停止或修复授权；
+- 不得替代 `RecordingResultPackage.validation_reports`；
+- 不得写入或覆盖真实 `StepResults`、Stage JSONL、Worker 证据、`failure_diagnostic`；
+- 不能以“测试 4/4 通过”或 mock 演示报告宣称真实 App/Server 联调完成。
+
+### 8.6 请明达下一步交付的内容（按优先级）
+
+**P0：把现有 Validation Agent 适配为 `OutcomeVerifier`。**
+
+1. 用 `BrowserAgentValidationContext` 替代旧 pipeline 的可变包对象；输入缺少 `StageApprovalPlan`、`ScriptOutline`、`BrowserAgentContract` 或 hash 时，返回结构化 `stop_and_report`，不可静默 no-op。
+2. `ValidateStageEvents` 只消费 Server 事件流；要求 `outcome_observed`、真实 observation source、required validation 的断言和证据引用都存在。事件乱序、重复、缺失、无证据或 `derived_from_plan` 必须不能形成 `continue`。
+3. `ValidatePostExecution` 对 `StepResults`、事件、产物和报告做交叉核验：必需 Stage 完成、观察来自 runtime、证据可追溯、raw recording/trace/截图/最终视频满足包中要求。返回报告必须通过 `model.ValidationReport.Validate()`。
+4. 给每个检查项补齐稳定的 `code`、`severity`、`required`、`evidence_refs` 和中文可读 `summary`；不得只输出自然语言建议。
+
+**P1：输出受限修复提案，不负责应用。**
+
+1. 将旧的 selector/wait/timing 建议映射为 `RuntimeRepairProposal`；每个提案带 `run_id`、`node_id`、`stage_id`、两类 hash、前后值、置信度和证据引用。
+2. 仅在当前 `BrowserAgentContract.repair_policy` 明确允许时返回 `repair_allowed`；否则返回 `stop_and_report` 或 `reunderstanding_required`。
+3. 对任何试图跨域、改业务输入、改路由、改顺序、接触凭据或进行破坏性操作的提案，显式拒绝并输出阻塞错误码。
+
+**P2：与 Server 共同建立真实包验收。**
+
+1. 由 App 正式任务入口产生 1 个成功包、至少 3 个失败包（locator 缺失、required 验证失败、等待超时/构建未完成）；每个包通过 Exchange 进入 Server。
+2. 明达为每个包给出预期 `ValidationReport` 断言；Server 负责执行、保存 JSONL/产物并比对结果包。
+3. 只有成功包具备第 8.2 节完整证据链，且失败包被正确停止并保留诊断，双方才可宣布新路径 Validation Agent 联调通过。
+
+### 8.7 Server 侧承诺与待办
+
+Server 侧负责维持 `OutcomeVerifier` 注入点、提供脱敏 DTO、执行 Policy Guard/Repair Policy、写入事件审计与 Patch Ledger、生成最终 `failure_diagnostic` 和结果包，并为 P2 的真实 App 包运行端到端验收。
+
+Server 当前待办是接收并运行真实 App 的 `browser-agent-outline-v1` 包；在此之前，Server 不会再用固定内部包替代 App 包，也不会把固定包的 MP4 当作完整项目链路的验收结论。
+
+### 8.8 App 查询结果时的验证摘要
+
+Server 会在现有 `ExecutionPackageStatusResponse.result_summary.validation` 中返回脱敏验证摘要，供 App 的状态页或验收页展示。该字段不增加 App 上传字段，也不包含页面正文、完整 DOM、Cookie、Token 或凭据：
+
+```json
+{
+  "runtime": "browser-agent-outline-v1",
+  "status": "complete",
+  "validation_report_count": 5,
+  "pre_execution_report_count": 1,
+  "runtime_stage_report_count": 3,
+  "post_execution_report_count": 1,
+  "latest_decision": "continue",
+  "real_observed_step_count": 3,
+  "stage_event_log_available": true
+}
+```
+
+`status=complete` 仅表示验证报告、真实观察步骤和阶段审计日志齐全；最终是否可以交付仍须结合既有 `result_status`、raw recording/trace/截图/MP4 的 `deliverables` 与 checksum 判断。任何 `derived_from_plan` 的 `observed_state` 都不计入 `real_observed_step_count`。

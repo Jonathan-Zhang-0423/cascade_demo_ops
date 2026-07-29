@@ -96,6 +96,20 @@ $approvedPackage = (Invoke-RestMethod -Method Post `
 Use the returned object only with the visible-session `bind-approved-package`
 and `execute-approved-package` endpoints in this document.
 
+If a shell/client JSON serializer changes hash-bound optional fields, use the
+even narrower in-process path below. It constructs the same fixed package in
+Server and accepts no package or action fields from the caller:
+
+```powershell
+$body = @{ dev_test_ack = $true } | ConvertTo-Json
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:4317/v1/desktop/dev-visible-browser-agent/<session_id>/execute-fixed-approved-package" `
+  -ContentType "application/json" -Body $body
+```
+
+This endpoint is local dev/test-only and is limited permanently to the three
+fixed real-product acceptance actions documented above.
+
 ## Execute and render
 
 Only after the preflight passes, execute the same approved package in the same

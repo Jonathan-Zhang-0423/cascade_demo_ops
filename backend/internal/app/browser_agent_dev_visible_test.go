@@ -4,11 +4,59 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"cascade-demoops/backend/internal/model"
 )
+
+func TestDevVisibleRealProductTestPackageStaysProtocolValidAndBounded(t *testing.T) {
+	fixture := filepath.Join("..", "..", "..", "contracts", "exchange", "v1", "client_execution_package.browser_agent_outline.json")
+	pkg, err := devVisibleRealProductTestPackage(fixture, "http://127.0.0.1:5000/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.ValidateClientExecutionPackageForCloudExecution(&pkg); err != nil {
+		t.Fatalf("fixed local test package must keep the protocol contract: %v", err)
+	}
+	encoded, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped model.ClientExecutionPackage
+	if err := json.Unmarshal(encoded, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	if err := model.ValidateClientExecutionPackageForCloudExecution(&roundTripped); err != nil {
+		t.Fatalf("fixed local test package must survive the HTTP JSON boundary: %v", err)
+	}
+	if pkg.Metadata["dev_test_only"] != true || pkg.Metadata["not_for_exchange_upload"] != true {
+		t.Fatalf("package must remain explicitly local test-only: %+v", pkg.Metadata)
+	}
+	if pkg.ExecutableScriptBundle == nil || pkg.ExecutableScriptBundle.ScriptOutline == nil {
+		t.Fatal("package outline is missing")
+	}
+	outline := pkg.ExecutableScriptBundle.ScriptOutline
+	if len(outline.Stages) != 3 || len(outline.AllowedExplorationScope.AllowedOrigins) != 1 || outline.AllowedExplorationScope.AllowedOrigins[0] != "http://127.0.0.1:5000" {
+		t.Fatalf("unexpected fixed package scope: %+v", outline)
+	}
+	want := []string{"button-new-project", "input-project-idea", "button-create-project"}
+	for index, stage := range outline.Stages {
+		if len(stage.Interactions) != 1 || stage.Interactions[0].Target.TestID != want[index] {
+			t.Fatalf("unexpected action at stage %d: %+v", index, stage)
+		}
+	}
+}
+
+func TestDevVisibleFixedExecuteRequestCannotCarryActions(t *testing.T) {
+	var request DevVisibleBrowserAgentFixedExecuteRequest
+	decoder := json.NewDecoder(strings.NewReader(`{"dev_test_ack":true,"actions":["delete"]}`))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err == nil {
+		t.Fatal("fixed execute request must reject caller-supplied actions")
+	}
+}
 
 func TestDevVisibleTargetURLAcceptsExplicitLoopbackURL(t *testing.T) {
 	target, err := devVisibleTargetURL("http://127.0.0.1:5000/app")

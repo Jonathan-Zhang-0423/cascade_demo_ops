@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -43,6 +44,13 @@ type DevVisibleBrowserAgentView struct {
 type DevVisibleBrowserAgentExecuteRequest struct {
 	Package    model.ClientExecutionPackage `json:"package"`
 	DevTestAck bool                         `json:"dev_test_ack"`
+}
+
+// DevVisibleBrowserAgentFixedExecuteRequest cannot carry a package or action.
+// It exists only to execute the fixed dev/test acceptance package in-process,
+// avoiding client-side JSON reserialization of protocol hash fields.
+type DevVisibleBrowserAgentFixedExecuteRequest struct {
+	DevTestAck bool `json:"dev_test_ack"`
 }
 
 // DevVisibleBrowserAgentResult contains only post-login local test artifacts.
@@ -226,6 +234,31 @@ func (m *devVisibleBrowserAgentManager) BuildApprovedLocalTestPackage(ctx contex
 	}, nil
 }
 
+// ExecuteFixedApprovedLocalTestPackage is intentionally narrower than the
+// regular execute endpoint: its three actions are compiled in Server and never
+// supplied by a client. It remains local dev/test-only and cannot upload to
+// Exchange.
+func (m *devVisibleBrowserAgentManager) ExecuteFixedApprovedLocalTestPackage(ctx context.Context, sessionID string, request DevVisibleBrowserAgentFixedExecuteRequest) (DevVisibleBrowserAgentView, error) {
+	if err := m.localOnlyGuard(request.DevTestAck); err != nil {
+		return DevVisibleBrowserAgentView{}, err
+	}
+	fixturePath := m.service.browserAgentAcceptanceFixturePath()
+	if fixturePath == "" || !fileExists(fixturePath) {
+		return DevVisibleBrowserAgentView{}, errors.New("dev visible browser-agent package fixture is not available")
+	}
+	m.mu.Lock()
+	session, ok := m.sessions[strings.TrimSpace(sessionID)]
+	m.mu.Unlock()
+	if !ok {
+		return DevVisibleBrowserAgentView{}, errors.New("dev visible browser-agent session was not found")
+	}
+	pkg, err := devVisibleRealProductTestPackage(fixturePath, session.targetOrigin+"/app")
+	if err != nil {
+		return DevVisibleBrowserAgentView{}, err
+	}
+	return m.ExecuteApprovedPackage(ctx, sessionID, DevVisibleBrowserAgentExecuteRequest{Package: pkg, DevTestAck: true})
+}
+
 func devVisibleRealProductTestPackage(fixturePath string, targetURL string) (model.ClientExecutionPackage, error) {
 	target, err := devVisibleTargetURL(targetURL)
 	if err != nil {
@@ -242,23 +275,23 @@ func devVisibleRealProductTestPackage(fixturePath string, targetURL string) (mod
 	specs := []controlledBusinessStageSpec{
 		{
 			NodeID: "node_open_new_project", StageID: "stage_open_new_project", Title: "打开新建项目", Objective: "新建项目对话框可见", Intent: "仅打开真实工作台中的新建项目对话框。", Route: "/app", Success: "新建项目对话框可见", Kind: model.BusinessStageKindBusinessAction, RouteState: model.BusinessRouteStateWorkspace,
-			Action: model.BrowserAgentInteraction{Kind: model.GraphActionClick, Target: model.ActionTarget{TestID: "button-new-project"}, NonDestructive: true, WaitConditions: []string{"wait_after_entry_at_least_250ms"}, SelectorPolicy: "prefer_testid"},
-			Target: model.BrowserAgentTargetContract{SemanticID: "target_new_project", Purpose: "新建项目按钮", AllowedRoles: []string{"button"}, ComponentRef: "component:new-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
-			Component: model.BrowserAgentComponentTarget{ComponentRef: "component:new-project", Role: "button", TestID: "button-new-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
+			Action:     model.BrowserAgentInteraction{Kind: model.GraphActionClick, Target: model.ActionTarget{TestID: "button-new-project"}, NonDestructive: true, WaitConditions: []string{"wait_after_entry_at_least_250ms"}, SelectorPolicy: "prefer_testid"},
+			Target:     model.BrowserAgentTargetContract{SemanticID: "target_new_project", Purpose: "新建项目按钮", AllowedRoles: []string{"button"}, ComponentRef: "component:new-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
+			Component:  model.BrowserAgentComponentTarget{ComponentRef: "component:new-project", Role: "button", TestID: "button-new-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
 			Validation: model.ValidationSpec{ID: "validation_new_project_dialog", Kind: "element_visible", Target: model.ActionTarget{TestID: "dialog-new-project"}, Required: true, EvidenceRefs: []model.EvidenceRef{evidence}},
 		},
 		{
 			NodeID: "node_fill_project_idea", StageID: "stage_fill_project_idea", Title: "输入项目需求", Objective: "项目需求已填入批准内容", Intent: "只在新建项目对话框中填入已批准内容，不读取或修改任何敏感字段。", Route: "/app", Success: "需求内容为贪吃蛇游戏", Kind: model.BusinessStageKindBusinessInput, RouteState: model.BusinessRouteStateCreationFlow,
-			Action: model.BrowserAgentInteraction{Kind: model.GraphActionFill, Target: model.ActionTarget{TestID: "input-project-idea"}, Value: idea, NonDestructive: true, WaitConditions: []string{"wait_after_entry_at_least_250ms"}, SelectorPolicy: "prefer_testid"},
-			Target: model.BrowserAgentTargetContract{SemanticID: "target_project_idea", Purpose: "项目需求输入框", AllowedRoles: []string{"textbox"}, ComponentRef: "component:project-idea", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
-			Component: model.BrowserAgentComponentTarget{ComponentRef: "component:project-idea", Role: "textbox", TestID: "input-project-idea", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
+			Action:     model.BrowserAgentInteraction{Kind: model.GraphActionFill, Target: model.ActionTarget{TestID: "input-project-idea"}, Value: idea, NonDestructive: true, WaitConditions: []string{"wait_after_entry_at_least_250ms"}, SelectorPolicy: "prefer_testid"},
+			Target:     model.BrowserAgentTargetContract{SemanticID: "target_project_idea", Purpose: "项目需求输入框", AllowedRoles: []string{"textbox"}, ComponentRef: "component:project-idea", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
+			Component:  model.BrowserAgentComponentTarget{ComponentRef: "component:project-idea", Role: "textbox", TestID: "input-project-idea", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
 			Validation: model.ValidationSpec{ID: "validation_project_idea", Kind: "value_equals", Target: model.ActionTarget{TestID: "input-project-idea"}, Expected: idea, Required: true, EvidenceRefs: []model.EvidenceRef{evidence}},
 		},
 		{
 			NodeID: "node_submit_project", StageID: "stage_submit_project", Title: "提交构建", Objective: "已提交批准的新建项目请求", Intent: "只点击已批准的新建项目提交按钮；不执行删除、支付、权限或导出操作。", Route: "/project", Success: "项目编辑页面可见", Kind: model.BusinessStageKindBusinessSubmit, RouteState: model.BusinessRouteStateProjectDetail,
-			Action: model.BrowserAgentInteraction{Kind: model.GraphActionClick, Target: model.ActionTarget{TestID: "button-create-project"}, NonDestructive: true, WaitConditions: []string{"wait_after_entry_at_least_250ms"}, SelectorPolicy: "prefer_testid"},
-			Target: model.BrowserAgentTargetContract{SemanticID: "target_create_project", Purpose: "新建项目提交按钮", AllowedRoles: []string{"button"}, ComponentRef: "component:create-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
-			Component: model.BrowserAgentComponentTarget{ComponentRef: "component:create-project", Role: "button", TestID: "button-create-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
+			Action:     model.BrowserAgentInteraction{Kind: model.GraphActionClick, Target: model.ActionTarget{TestID: "button-create-project"}, NonDestructive: true, WaitConditions: []string{"wait_after_entry_at_least_250ms"}, SelectorPolicy: "prefer_testid"},
+			Target:     model.BrowserAgentTargetContract{SemanticID: "target_create_project", Purpose: "新建项目提交按钮", AllowedRoles: []string{"button"}, ComponentRef: "component:create-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
+			Component:  model.BrowserAgentComponentTarget{ComponentRef: "component:create-project", Role: "button", TestID: "button-create-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
 			Validation: model.ValidationSpec{ID: "validation_project_editor", Kind: "element_visible", Target: model.ActionTarget{TestID: "text-project-name"}, Required: true, EvidenceRefs: []model.EvidenceRef{evidence}},
 		},
 	}
@@ -282,6 +315,7 @@ func devVisibleRealProductTestPackage(fixturePath string, targetURL string) (mod
 		return model.ClientExecutionPackage{}, errors.New("dev visible package bundle is incomplete")
 	}
 	bundle.ID, bundle.ProjectID, bundle.WorkflowGraphID = "bundle_dev_visible_real_local_product", pkg.ProjectID, "graph_dev_visible_real_local_product"
+	bundle.ScriptOutline.ProjectID, bundle.ScriptOutline.WorkflowGraphID = pkg.ProjectID, bundle.WorkflowGraphID
 	bundle.ScriptOutline.BaseURL, bundle.ScriptOutline.ProductOrigin = target.String(), origin
 	bundle.ScriptOutline.AllowedExplorationScope.AllowedOrigins = []string{origin}
 	bundle.ScriptOutline.AllowedExplorationScope.AllowedRoutes = []string{"/app", "/project"}
@@ -296,6 +330,16 @@ func devVisibleRealProductTestPackage(fixturePath string, targetURL string) (mod
 	bundle.AgentPromptPolicy.ProjectID, bundle.AgentPromptPolicy.WorkflowGraphID = pkg.ProjectID, bundle.WorkflowGraphID
 	bundle.BrowserAgentContract.ProjectID, bundle.BrowserAgentContract.WorkflowGraphID = pkg.ProjectID, bundle.WorkflowGraphID
 	pkg.WorkflowGraph.ID, pkg.WorkflowGraph.ProjectID = bundle.WorkflowGraphID, pkg.ProjectID
+	// The package crosses HTTP before it reaches the visible-session endpoint.
+	// Rehydrate it once before hashing so the local test package has the same
+	// canonical JSON shape that the normal App-to-Server handoff uses.
+	encoded, err := json.Marshal(pkg)
+	if err != nil {
+		return model.ClientExecutionPackage{}, fmt.Errorf("encode dev visible real-product package: %w", err)
+	}
+	if err := json.Unmarshal(encoded, &pkg); err != nil {
+		return model.ClientExecutionPackage{}, fmt.Errorf("decode dev visible real-product package: %w", err)
+	}
 	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
 		return model.ClientExecutionPackage{}, err
 	}
@@ -626,7 +670,7 @@ func (s *DevHTTPServer) handleDevVisibleBrowserAgent(w http.ResponseWriter, r *h
 		writeBridgeValue(w, value, err)
 		return
 	}
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || (parts[1] != "continue" && parts[1] != "abort" && parts[1] != "bind-approved-package" && parts[1] != "execute-approved-package") || r.Method != http.MethodPost {
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || (parts[1] != "continue" && parts[1] != "abort" && parts[1] != "bind-approved-package" && parts[1] != "execute-approved-package" && parts[1] != "execute-fixed-approved-package") || r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return
 	}
@@ -643,6 +687,13 @@ func (s *DevHTTPServer) handleDevVisibleBrowserAgent(w http.ResponseWriter, r *h
 			return
 		}
 		view, err = manager.BindApprovedPackage(r.Context(), parts[0], request)
+	} else if parts[1] == "execute-fixed-approved-package" {
+		var request DevVisibleBrowserAgentFixedExecuteRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		view, err = manager.ExecuteFixedApprovedLocalTestPackage(r.Context(), parts[0], request)
 	} else {
 		var request DevVisibleBrowserAgentExecuteRequest
 		if err := decodeJSON(r, &request); err != nil {
