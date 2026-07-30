@@ -59,7 +59,7 @@ func TestValidateBeforeExecution(t *testing.T) {
 	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
 
 	// Minimal validation context
-	vctx := BrowserAgentValidationContext{
+	vctx := model.BrowserAgentValidationContext{
 		RunID:                     "test-run-001",
 		SourcePackageID:           "pkg-001",
 		SourceBundleHashSHA256:    "abc123",
@@ -108,7 +108,7 @@ func TestValidateStageEvents(t *testing.T) {
 
 	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
 
-	vctx := BrowserAgentValidationContext{
+	vctx := model.BrowserAgentValidationContext{
 		RunID:             "test-run-001",
 		SourcePackageID:   "pkg-001",
 		WorkflowGraph:     &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
@@ -151,7 +151,7 @@ func TestValidatePostExecution(t *testing.T) {
 
 	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
 
-	vctx := BrowserAgentValidationContext{
+	vctx := model.BrowserAgentValidationContext{
 		RunID:           "test-run-001",
 		SourcePackageID: "pkg-001",
 	}
@@ -169,7 +169,7 @@ func TestValidatePostExecution(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	report, err := adapter.ValidatePostExecution(ctx, vctx, result, events)
+	report, err := adapter.ValidatePostExecution(ctx, vctx, *result, events)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)

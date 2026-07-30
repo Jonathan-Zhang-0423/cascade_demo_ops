@@ -114,6 +114,27 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	// and never relax the production transport rule.
 	service.exchange.SetInlinePayloadAllowed(runtime.Profile != config.ProfileCloud || runtime.Environment != "production")
 	service.outlineRunner = localBrowserAgentOutlineRunner{service: service}
+
+	// Initialize and inject the BrowserAgentOutcomeVerifierAdapter
+	// This provides business-rule validation (domain checks, selector analysis, repair proposals)
+	// on top of the lightweight default verifier's protocol compliance checks.
+	validationConfig := &model.ValidationConfig{
+		PreExecutionEnabled:       true,
+		RealTimeBatchEnabled:      true,
+		PostExecutionBatchEnabled: true,
+		PlaybackValidationEnabled: true,
+		PassRateThreshold:         0.8,
+		ConfidenceThreshold:       0.7,
+		CriticalIssueThreshold:    1,
+		EnableRuntimeRepair:       true,
+		AutoApplyMinorRepairs:     false,
+		MaxRepairAttemptsPerStage: 2,
+		ParallelValidationEnabled: false,
+		ValidationTimeoutSeconds:  30,
+	}
+	adapter := orchestrator.NewBrowserAgentOutcomeVerifierAdapter(validationConfig)
+	service.SetBrowserAgentOutcomeVerifier(adapter)
+
 	service.loadLocalSourceRefs()
 	return service, nil
 }

@@ -383,7 +383,7 @@ func (e *countingStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRu
 
 type repairThenContinueVerifier struct{ calls int }
 
-func (v *repairThenContinueVerifier) ValidateStageEvents(_ context.Context, context BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
+func (v *repairThenContinueVerifier) ValidateStageEvents(_ context.Context, context model.BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
 	v.calls++
 	last := events[len(events)-1]
 	decision := model.ValidationDecisionContinue
@@ -393,11 +393,11 @@ func (v *repairThenContinueVerifier) ValidateStageEvents(_ context.Context, cont
 	return model.ValidationReport{SchemaVersion: model.ValidationReportSchemaVersion, ReportID: fmt.Sprintf("repair_report_%d", v.calls), RunID: last.RunID, SourcePackageID: context.SourcePackageID, SourceBundleHashSHA256: context.SourceBundleHashSHA256, PolicyHashSHA256: context.EffectivePolicyHashSHA256, Phase: model.ValidationPhaseRuntimeStage, NodeID: last.NodeID, StageID: last.StageID, Decision: decision, PassRate: 1, OverallConfidence: .95, EvidenceQuality: model.RuntimeObservationActualBrowser, EvidenceRefs: []model.EvidenceRef{{ID: "verification_repair", Kind: model.EvidenceKindBrowserTrace}}, CreatedAt: timeNowUTC()}, nil
 }
 
-func (v *repairThenContinueVerifier) ProposeRuntimeRepair(_ context.Context, context BrowserAgentValidationContext, stage BrowserAgentRuntimeStage, events []model.StageExecutionEvent, _ model.ValidationReport) (model.RuntimeRepairProposal, error) {
+func (v *repairThenContinueVerifier) ProposeRuntimeRepair(_ context.Context, context model.BrowserAgentValidationContext, stage BrowserAgentRuntimeStage, events []model.StageExecutionEvent, _ model.ValidationReport) (model.RuntimeRepairProposal, error) {
 	return model.RuntimeRepairProposal{SchemaVersion: model.RuntimeRepairProposalSchemaVersion, ProposalID: "repair_wait_1", RunID: events[len(events)-1].RunID, NodeID: stage.NodeID, StageID: stage.ID, BaseBundleHashSHA256: context.SourceBundleHashSHA256, PolicyHashSHA256: context.EffectivePolicyHashSHA256, RepairKind: "wait_strategy", Field: "script_outline.stages[].wait_conditions", Before: stage.WaitConditions[0], After: "wait_after_entry_at_least_1500ms", Confidence: .95, EvidenceRefs: []model.EvidenceRef{{ID: "proposal_evidence", Kind: model.EvidenceKindBrowserTrace}}, CreatedAt: timeNowUTC()}, nil
 }
 
-func (v *stubStageVerifier) ValidateStageEvents(_ context.Context, context BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
+func (v *stubStageVerifier) ValidateStageEvents(_ context.Context, context model.BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
 	v.calls++
 	last := events[len(events)-1]
 	return model.ValidationReport{
