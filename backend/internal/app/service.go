@@ -569,6 +569,15 @@ func (s *Service) UploadExecutionPackage(ctx context.Context, request model.Exec
 	return s.exchange.Upload(ctx, request, payload)
 }
 
+// UploadExecutionPackageFromHTTP carries only the transport-authenticated
+// installation identity. The package body remains the source of business data.
+func (s *Service) UploadExecutionPackageFromHTTP(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage, installID string) (model.ExecutionPackageUploadResponse, error) {
+	if strings.TrimSpace(installID) == "" {
+		return s.exchange.Upload(ctx, request, payload)
+	}
+	return s.exchange.UploadFromInstallation(ctx, request, payload, installID)
+}
+
 // ValidateExecutionPackage applies the same Intake rules as Upload without
 // creating an upload session, persisting the payload, or starting a browser.
 func (s *Service) ValidateExecutionPackage(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage) (CloudPackagePreflightResult, error) {
@@ -608,7 +617,19 @@ func executionPackagePreflightResult(pkg model.ClientExecutionPackage) CloudPack
 }
 
 func (s *Service) GetExecutionPackageStatus(ctx context.Context, orgID string, exchangePackageID string) (model.ExecutionPackageStatusResponse, error) {
-	return s.exchange.Status(ctx, orgID, exchangePackageID)
+	status, err := s.exchange.Status(ctx, orgID, exchangePackageID)
+	if err != nil || status.ResultSummary == nil || status.ResultSummary.Acceptance == nil || status.ResultPackageID == "" {
+		return status, err
+	}
+	result, snapshotErr := s.exchange.ResultSnapshot(ctx, orgID, status.ResultPackageID)
+	if snapshotErr != nil {
+		return status, nil
+	}
+	materialization, materializationErr := s.GetEditorSessionMaterialization(ctx, result)
+	if materializationErr == nil {
+		status.ResultSummary.Acceptance.EditorMaterialized = materialization.Ready
+	}
+	return status, nil
 }
 
 func (s *Service) ListExecutionPackages(ctx context.Context, orgID string) (model.ExecutionPackageListResponse, error) {
@@ -631,7 +652,10 @@ func (s *Service) CompleteExecutionPackageWithResult(ctx context.Context, orgID 
 	}
 	// A completed Server-owned recording should immediately enter the editor
 	// inbox. A handoff failure must not roll back the already valid result.
-	_, _ = s.MaterializeEditorSessionFromResultPackage(ctx, result)
+	materialization, _ := s.MaterializeEditorSessionFromResultPackage(ctx, result)
+	if status.ResultSummary != nil && status.ResultSummary.Acceptance != nil {
+		status.ResultSummary.Acceptance.EditorMaterialized = materialization.Ready
+	}
 	return status, nil
 }
 

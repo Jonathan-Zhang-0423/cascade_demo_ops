@@ -115,9 +115,17 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	if err != nil {
 		return ExchangeSession{}, err
 	}
-	token := strings.TrimSpace(s.runtime.CloudExchangeToken)
-	if isSessionUsable(record, baseURL, token) {
-		return sessionFromRecord(record, baseURL, token), nil
+	// A configured dev bearer token is only a fallback. Prefer an installation
+	// session whenever one can be created, otherwise local App-to-Server runs
+	// would be incorrectly classified as unverified uploads.
+	if isInstallationSessionUsable(record, baseURL) {
+		return sessionFromRecord(record, baseURL, ""), nil
+	}
+	// Keep legacy remote control planes on their existing bearer-token path.
+	// Local bridges deliberately continue to register an installation so the
+	// receiving Server can bind the upload to a verified installation identity.
+	if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" && !isLocalExchangeBaseURL(baseURL) {
+		return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -172,14 +180,20 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	}
 	response, err := cloudPostPublicJSON[model.AppInstallationSessionResponse](ctx, client, discovery.ExchangeBaseURL+"/v1/app-installations/register", register)
 	if err != nil {
-		if isOptionalExchangeDiscoveryError(err) {
-			return ExchangeSession{}, newExchangeProtocolError(
-				"cloud_auth_unavailable",
-				"cloud_exchange.auth",
-				"installation_endpoint_missing",
-				"服务器尚未部署 App installation 自动配对接口，无法在无手动 token 的情况下上传执行包。",
-				"请让云端启用 /v1/app-installations/register，或由 Dev Bridge/服务端预置 legacy exchange 凭据；不要要求最终用户手动填写 token。",
-			)
+		if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" {
+			return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+		}
+		if !isLocalExchangeBaseURL(baseURL) {
+			if isOptionalExchangeDiscoveryError(err) {
+				return ExchangeSession{}, newExchangeProtocolError(
+					"cloud_auth_unavailable",
+					"cloud_exchange.auth",
+					"installation_endpoint_missing",
+					"服务器尚未部署 App installation 自动配对接口，无法在无手动 token 的情况下上传执行包。",
+					"请让云端启用 /v1/app-installations/register，或由 Dev Bridge/服务端预置 legacy exchange 凭据；不要要求最终用户手动填写 token。",
+				)
+			}
+			return ExchangeSession{}, err
 		}
 		return ExchangeSession{}, err
 	}
@@ -192,7 +206,7 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	if err := store.save(record); err != nil {
 		return ExchangeSession{}, err
 	}
-	return sessionFromRecord(record, baseURL, token), nil
+	return sessionFromRecord(record, baseURL, ""), nil
 }
 
 func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, error) {
@@ -204,10 +218,13 @@ func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, 
 	if err != nil {
 		return ExchangeSession{}, err
 	}
-	if !isSessionUsable(record, baseURL, s.runtime.CloudExchangeToken) {
-		return ExchangeSession{}, errors.New("exchange installation session is not paired or has expired")
+	if isInstallationSessionUsable(record, baseURL) {
+		return sessionFromRecord(record, baseURL, ""), nil
 	}
-	return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" {
+		return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	}
+	return ExchangeSession{}, errors.New("exchange installation session is not paired or has expired")
 }
 
 func (s *Service) discoverExchangeBaseURL() (string, error) {
@@ -396,9 +413,10 @@ func challengeSigningPayload(installID string, challenge model.ExchangePairingCh
 }
 
 func isSessionUsable(record exchangeIdentityRecord, baseURL string, fallbackToken string) bool {
-	if strings.TrimSpace(fallbackToken) != "" {
-		return true
-	}
+	return isInstallationSessionUsable(record, baseURL) || strings.TrimSpace(fallbackToken) != ""
+}
+
+func isInstallationSessionUsable(record exchangeIdentityRecord, baseURL string) bool {
 	return record.InstallID != "" &&
 		record.SessionToken != "" &&
 		record.ExchangeBaseURL == strings.TrimRight(baseURL, "/") &&

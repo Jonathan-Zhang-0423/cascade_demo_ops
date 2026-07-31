@@ -213,6 +213,7 @@ export type CloudRunStatusView = {
   failureSummary?: string;
   sandboxMetadata?: SandboxExecutionMetadata;
   artifactSummary?: CloudArtifactSummary;
+	serverAcceptance?: ServerExecutionAcceptanceView;
   currentStep: string;
   progress: number;
   retryCount: number;
@@ -224,6 +225,16 @@ export type CloudRunStatusView = {
 	resultDownloaded?: boolean;
 	editorSessionID?: string;
 	editorMaterializationMessage?: string;
+};
+
+export type ServerExecutionAcceptanceView = {
+	origin?: string;
+	appGenerated?: boolean;
+	formalExchange?: boolean;
+	strictEvidenceComplete?: boolean;
+	finalMP4Available?: boolean;
+	editorMaterialized?: boolean;
+	status?: string;
 };
 
 export type ResultReviewDecision = "approved" | "reedit_requested" | "rerecord_requested";

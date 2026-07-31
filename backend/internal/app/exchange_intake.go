@@ -59,17 +59,20 @@ type exchangeUploadSession struct {
 type exchangePackageState struct {
 	ExchangePackageID string
 	CloudJobID        string
-	Status            model.ExchangePackageStatus
-	Stage             string
-	FailedStage       string
-	Message           string
-	ProgressPercent   int
-	StageHistory      []model.ExecutionStageEvent
-	Envelope          model.ExchangeEnvelope
-	Payload           model.ClientExecutionPackage
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	Error             *model.AgentError
+	// AuthenticatedInstallID is populated only by the installation-session
+	// transport path. A package cannot self-assert this provenance in JSON.
+	AuthenticatedInstallID string
+	Status                 model.ExchangePackageStatus
+	Stage                  string
+	FailedStage            string
+	Message                string
+	ProgressPercent        int
+	StageHistory           []model.ExecutionStageEvent
+	Envelope               model.ExchangeEnvelope
+	Payload                model.ClientExecutionPackage
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	Error                  *model.AgentError
 }
 
 type recordingResultState struct {
@@ -207,6 +210,17 @@ func (s *ExchangeIntakeService) Init(ctx context.Context, request model.Executio
 }
 
 func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage) (model.ExecutionPackageUploadResponse, error) {
+	return s.upload(ctx, request, payload, "")
+}
+
+// UploadFromInstallation binds an upload to the App installation already
+// authenticated by the HTTP transport. It is the production path for an App
+// package that may later be counted as end-to-end acceptance evidence.
+func (s *ExchangeIntakeService) UploadFromInstallation(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage, installID string) (model.ExecutionPackageUploadResponse, error) {
+	return s.upload(ctx, request, payload, strings.TrimSpace(installID))
+}
+
+func (s *ExchangeIntakeService) upload(ctx context.Context, request model.ExecutionPackageUploadRequest, payload model.ClientExecutionPackage, authenticatedInstallID string) (model.ExecutionPackageUploadResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return model.ExecutionPackageUploadResponse{}, err
 	}
@@ -227,6 +241,9 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 	}
 	if request.Envelope.OrgID != session.OrgID || request.Envelope.ProjectID != session.ProjectID || request.Envelope.PackageKind != session.PackageKind {
 		return model.ExecutionPackageUploadResponse{}, newExchangeProtocolError("upload_session_mismatch", "envelope.identity", "mismatch", "upload request envelope does not match initialized session", "Use the same org_id, project_id, and package_kind that were used during init.")
+	}
+	if authenticatedInstallID != "" && (session.Producer.InstallID != authenticatedInstallID || request.Envelope.Producer.InstallID != authenticatedInstallID) {
+		return model.ExecutionPackageUploadResponse{}, newExchangeProtocolError("installation_identity_mismatch", "envelope.producer.install_id", "mismatch", "authenticated App installation does not match the initialized upload or envelope", "Create a new upload session with the same paired App installation and sign the matching envelope.")
 	}
 	if request.PayloadRef.Kind == "" {
 		request.PayloadRef = request.Envelope.PayloadRef
@@ -254,13 +271,14 @@ func (s *ExchangeIntakeService) Upload(ctx context.Context, request model.Execut
 	exchangePackageID := newExchangeID(defaultExchangeIDPrefix, now)
 	cloudJobID := newExchangeID(defaultCloudJobIDPrefix, now)
 	state := &exchangePackageState{
-		ExchangePackageID: exchangePackageID,
-		CloudJobID:        cloudJobID,
-		Status:            model.ExchangePackageStatusAccepted,
-		Envelope:          request.Envelope,
-		Payload:           payload,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ExchangePackageID:      exchangePackageID,
+		CloudJobID:             cloudJobID,
+		AuthenticatedInstallID: authenticatedInstallID,
+		Status:                 model.ExchangePackageStatusAccepted,
+		Envelope:               request.Envelope,
+		Payload:                payload,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 	setPackageStageLocked(state, model.ExchangePackageStatusAccepted, "accepted", "Execution package accepted. Call the dev run endpoint to start recording and rendering.", 10, now)
 	s.packages[exchangePackageID] = state
@@ -459,6 +477,24 @@ func (s *ExchangeIntakeService) GetResultPackage(ctx context.Context, orgID stri
 	}
 	markResultDeliveredLocked(resultState, "", s.now())
 	if err := s.saveLocked(ctx); err != nil {
+		return model.RecordingResultPackage{}, err
+	}
+	return resultState.Result, nil
+}
+
+// ResultSnapshot reads a result without advancing delivery state. It is used
+// for status decoration, where a polling request must never imply delivery.
+func (s *ExchangeIntakeService) ResultSnapshot(ctx context.Context, orgID string, resultPackageID string) (model.RecordingResultPackage, error) {
+	if err := ctx.Err(); err != nil {
+		return model.RecordingResultPackage{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resultState, ok := s.resultByID[resultPackageID]
+	if !ok {
+		return model.RecordingResultPackage{}, errors.New("result package not found")
+	}
+	if _, err := s.packageStateLocked(orgID, resultState.ExchangePackageID); err != nil {
 		return model.RecordingResultPackage{}, err
 	}
 	return resultState.Result, nil
@@ -900,6 +936,9 @@ func (s *ExchangeIntakeService) statusResponseLocked(state *exchangePackageState
 		response.ResultPackageID = resultID
 		if resultState := s.resultByID[resultID]; resultState != nil {
 			response.ResultSummary = summarizeRecordingResult(resultState.Result)
+			if response.ResultSummary != nil {
+				response.ResultSummary.Acceptance = summarizeExecutionAcceptance(state, resultState.Result)
+			}
 			if resultState.Result.FailureDiagnostic != nil {
 				response.FailureSummary = failureSummary(state, resultState.Result.FailureDiagnostic)
 			}
@@ -1084,6 +1123,45 @@ func summarizeExecutionValidation(result model.RecordingResultPackage) *model.Ex
 		summary.Status = "complete"
 	}
 	return summary
+}
+
+func summarizeExecutionAcceptance(state *exchangePackageState, result model.RecordingResultPackage) *model.ExecutionAcceptanceSummary {
+	if state == nil || result.ExecutionRuntime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		return nil
+	}
+	producer := strings.TrimSpace(state.Envelope.Producer.RuntimeProfile)
+	origin := "unverified_client_upload"
+	appGenerated := false
+	if strings.HasPrefix(producer, "server_") || strings.HasPrefix(producer, "server-") ||
+		strings.HasPrefix(strings.TrimSpace(stringMetadata(state.Payload.Metadata, "producer")), "server_") {
+		origin = "server_controlled_fixture"
+	} else if state.AuthenticatedInstallID != "" && state.AuthenticatedInstallID == state.Envelope.Producer.InstallID {
+		origin = "app_formal_exchange"
+		appGenerated = true
+	}
+	validation := summarizeExecutionValidation(result)
+	strictEvidence := validation != nil && validation.Status == "complete"
+	finalMP4 := false
+	for _, asset := range result.GeneratedAssets {
+		if asset.Kind == "demo_video" && strings.EqualFold(asset.MimeType, "video/mp4") {
+			finalMP4 = true
+			break
+		}
+	}
+	status := "incomplete"
+	if result.Status == model.RecordingResultStatusFailed {
+		status = "failed"
+	} else if appGenerated && strictEvidence && finalMP4 {
+		status = "ready_for_app_e2e_acceptance"
+	} else if origin == "server_controlled_fixture" && strictEvidence && finalMP4 {
+		status = "server_fixture_only"
+	} else if strictEvidence && finalMP4 {
+		status = "unverified_origin"
+	}
+	return &model.ExecutionAcceptanceSummary{
+		Origin: origin, AppGenerated: appGenerated, FormalExchange: true,
+		StrictEvidenceComplete: strictEvidence, FinalMP4Available: finalMP4, Status: status,
+	}
 }
 
 func executionDeliverableFromArtifact(asset model.ArtifactRef) model.ExecutionDeliverable {

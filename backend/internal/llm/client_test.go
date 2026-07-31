@@ -275,6 +275,25 @@ func TestRouterAutoFallbacksOnJSONParseFailure(t *testing.T) {
 	}
 }
 
+func TestRouterAutoFallbacksOnProviderResponseParseFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"unexpected":"provider response shape"}`))
+	}))
+	defer server.Close()
+
+	router := NewRouter(testRuntime(config.ModelProviderKimi, server.URL))
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	trace, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &out)
+	if !IsDeterministicFallback(err) {
+		t.Fatalf("expected provider response parse fallback, got trace=%+v err=%v", trace, err)
+	}
+	if trace == nil || trace.FallbackReason != errorClassResponseParse {
+		t.Fatalf("expected response_parse fallback trace, got %+v", trace)
+	}
+}
+
 func TestParseChatResponseCanReadReasoningFields(t *testing.T) {
 	content, _, err := parseChatResponse([]byte(`{"choices":[{"message":{"content":"","reasoning_content":"OK"}}]}`))
 	if err != nil || content != "OK" {

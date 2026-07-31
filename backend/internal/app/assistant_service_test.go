@@ -840,6 +840,36 @@ func TestAssistantConfigurationCarriesAllowedDomainsIntoLocalAnalysis(t *testing
 	}
 }
 
+func TestAssistantFallbackExtractsStructuredChineseAcceptanceRequest(t *testing.T) {
+	message := "项目名称：Cascade 贪吃蛇真实验收\n目标 URL：http://127.0.0.1:5000/app，本地源码目录是 [local-path]\n目标受众：产品经理、开发者和潜在客户。\n第一步：点击新建项目\n第二步：输入贪吃蛇游戏\n第三步：点击构建"
+	response := assistantFallbackResponse(model.ProjectConfigurationDraft{}, message)
+	if response.Patch.ProjectName == nil || *response.Patch.ProjectName != "Cascade 贪吃蛇真实验收" {
+		t.Fatalf("project name not extracted: %+v", response.Patch.ProjectName)
+	}
+	if response.Patch.ProductURL == nil || *response.Patch.ProductURL != "http://127.0.0.1:5000/app" {
+		t.Fatalf("product URL included adjacent prose: %+v", response.Patch.ProductURL)
+	}
+	if response.Patch.TargetAudience == nil || *response.Patch.TargetAudience != "产品经理、开发者和潜在客户" {
+		t.Fatalf("target audience not extracted: %+v", response.Patch.TargetAudience)
+	}
+	if response.Patch.MustShow == nil || len(*response.Patch.MustShow) != 3 {
+		t.Fatalf("numbered steps not extracted: %+v", response.Patch.MustShow)
+	}
+}
+
+func TestAssistantBlocksCorruptedConfigurationBeforeAnalysis(t *testing.T) {
+	service := newAssistantTestService(t)
+	draft := newConfigurationDraft()
+	draft.ProjectName = "Cascade 验收"
+	draft.ProductURL = "http://127.0.0.1:5000/app"
+	draft.Objective = "展示真实构建流程"
+	draft.TargetAudience = "??????????"
+	draft.Sources = []model.ConfigurationSourceRef{{Ref: "source-local", Kind: "local_repository", Label: "Cascade-main"}}
+	if _, err := service.userInputFromConfiguration(draft); err == nil || !strings.Contains(err.Error(), "targetAudience") {
+		t.Fatalf("expected corrupted audience to be rejected, got %v", err)
+	}
+}
+
 func TestSafeSelectionsRejectUnknownLocalSourceRef(t *testing.T) {
 	service := newAssistantTestService(t)
 	_, err := service.patchForSafeSelections(newConfigurationDraft(), []model.ConfigurationSourceRef{{Ref: "source_forged", Kind: "local_repository", Label: "forged"}}, nil)

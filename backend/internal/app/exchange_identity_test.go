@@ -66,6 +66,7 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T
 		ResourceRoot:         root,
 		DevRepoRoot:          root,
 		CloudExchangeBaseURL: server.URL + "/aigc",
+		CloudExchangeToken:   "local-fallback-token",
 		LLMMode:              config.LLMModeDeterministic,
 	}, store.NewMemoryStateStore())
 	if err != nil {
@@ -84,6 +85,40 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T
 	}
 	if session.BaseURL != server.URL+"/aigc" || session.SessionToken != "cassess_test" {
 		t.Fatalf("unexpected exchange session: %+v", session)
+	}
+	if session.AuthMode != exchangeAuthModeInstallation {
+		t.Fatalf("local exchange must prefer an installation session, got auth mode %q", session.AuthMode)
+	}
+}
+
+func TestEnsureExchangeSessionKeepsBearerTokenForExternalLegacyExchange(t *testing.T) {
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile:              config.ProfileDev,
+		Environment:          "development",
+		Mode:                 model.AppModeDesktop,
+		DatabaseDialect:      config.DatabaseSQLite,
+		SQLitePath:           filepath.Join(root, "cascade_demoops.db"),
+		DataRoot:             root,
+		ArtifactRoot:         filepath.Join(root, "artifacts"),
+		CacheRoot:            filepath.Join(root, "cache"),
+		LogRoot:              filepath.Join(root, "logs"),
+		ResourceRoot:         root,
+		DevRepoRoot:          root,
+		CloudExchangeBaseURL: "https://control.demoops.test",
+		CloudExchangeToken:   "legacy-bearer-token",
+		LLMMode:              config.LLMModeDeterministic,
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := service.EnsureExchangeSession(context.Background(), "org_1", "project_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.AuthMode != exchangeAuthModeDevToken || session.SessionToken != "legacy-bearer-token" {
+		t.Fatalf("external legacy exchange must retain bearer token mode: %+v", session)
 	}
 }
 

@@ -1897,6 +1897,15 @@ func arkMediaAPIKeyConfiguredFromEnv() bool {
 }
 
 func arkAssetPublisherFromEnv(now func() time.Time) media.AssetPublisher {
+	if tosConfig, configured := media.TOSAssetPublisherConfigFromEnv(os.Getenv); configured {
+		publisher, err := media.NewTOSAssetPublisher(tosConfig, now)
+		if err != nil {
+			// Keep the provider gate closed when TOS settings are invalid instead
+			// of falling back to a simulated public URL.
+			return media.NewDryRunAssetPublisher(now)
+		}
+		return publisher
+	}
 	publicDir := strings.TrimSpace(os.Getenv("CASCADE_ARK_ASSET_PUBLIC_DIR"))
 	publicBaseURL := strings.TrimSpace(os.Getenv("CASCADE_ARK_ASSET_PUBLIC_BASE_URL"))
 	if publicDir != "" || publicBaseURL != "" {

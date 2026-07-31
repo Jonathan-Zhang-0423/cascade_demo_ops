@@ -77,6 +77,7 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
   const [githubEntry, setGithubEntry] = useState<{ proposal: AssistantProposalView; url: string }>();
   const [sourceEntry, setSourceEntry] = useState<AssistantProposalView>();
   const [manualEntry, setManualEntry] = useState<ManualConfigurationForm>();
+  const [localProjectEntry, setLocalProjectEntry] = useState<{ proposal: AssistantProposalView; path: string }>();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const submittedInitialMessageRef = useRef("");
@@ -277,7 +278,11 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
   async function selectLocalSource(proposal: AssistantProposalView) {
     const selected = await bridge.selectLocalProjectDirectory();
     if (selected.ok && selected.data) await completeClientAction(proposal, [selected.data]);
-    else setError(desktopPickerError(selected.error, "本地项目目录"));
+    else if (bridge.mode === "local") {
+      setLocalProjectEntry({ proposal, path: "" });
+      setSourceEntry(undefined);
+      setError("");
+    } else setError(desktopPickerError(selected.error, "本地项目目录"));
   }
 
   async function executeClientProposal(proposal: AssistantProposalView) {
@@ -340,6 +345,23 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
     await completeClientAction(proposal, [{ ref: "", kind: "github_repository", label: url.split("/").filter(Boolean).at(-1) ?? "GitHub repository", url }]);
   }
 
+  async function saveDevLocalProject(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const path = localProjectEntry?.path.trim() ?? "";
+    if (!path || !session) return;
+    setLoading(true);
+    setError("");
+    const registered = await bridge.registerDevLocalProjectDirectory(path);
+    if (registered.ok && registered.data && localProjectEntry) {
+      const proposal = localProjectEntry.proposal;
+      setLocalProjectEntry(undefined);
+      await completeClientAction(proposal, [registered.data]);
+    } else {
+      setError(registered.error ?? "本地项目目录登记失败。");
+      setLoading(false);
+    }
+  }
+
   const activeProposal = session?.messages.flatMap((message) => message.proposals ?? []).find((proposal) => proposal.status === "available" && proposal.id === session.nextAction.proposalID);
 
   return (
@@ -399,6 +421,14 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
           <input value={credentialEntry.username} onChange={(event) => setCredentialEntry({ ...credentialEntry, username: event.currentTarget.value })} placeholder="账号" autoComplete="username" />
           <input type="password" value={credentialEntry.password} onChange={(event) => setCredentialEntry({ ...credentialEntry, password: event.currentTarget.value })} placeholder="密码" autoComplete="current-password" />
           <div><button type="button" className="assistant-dismiss" onClick={() => setCredentialEntry(undefined)}>取消</button><button type="submit" className="assistant-confirm" disabled={loading || !credentialEntry.username.trim() || !credentialEntry.password}>保存引用</button></div>
+        </form>
+      ) : null}
+      {localProjectEntry !== undefined && bridge.mode === "local" ? (
+        <form className="assistant-secure-entry" onSubmit={saveDevLocalProject}>
+          <strong>登记本地项目目录（仅本地测试）</strong>
+          <span>路径只保存在 127.0.0.1 Dev Bridge，本次执行包仅包含引用、结构摘要和哈希。</span>
+          <input value={localProjectEntry.path} onChange={(event) => setLocalProjectEntry({ ...localProjectEntry, path: event.currentTarget.value })} placeholder="D:\\path\\to\\project" autoComplete="off" />
+          <div><button type="button" className="assistant-dismiss" onClick={() => setLocalProjectEntry(undefined)}>取消</button><button type="submit" className="assistant-confirm" disabled={loading || !localProjectEntry.path.trim()}>登记目录</button></div>
         </form>
       ) : null}
       {githubEntry !== undefined ? (

@@ -210,7 +210,9 @@ func DefaultCallPolicy() CallPolicy {
 }
 
 func (p CallPolicy) AllowsFallback(class string, err error) bool {
-	if class == errorClassJSONParse {
+	// A malformed provider response cannot safely enrich an execution plan. In
+	// auto mode, retain the locally generated deterministic plan instead.
+	if class == errorClassJSONParse || class == errorClassResponseParse {
 		return true
 	}
 	if class == errorClassTimeout || class == "http_429" || class == "http_503" {

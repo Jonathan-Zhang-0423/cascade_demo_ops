@@ -166,6 +166,26 @@ describe("desktop bridge contract", () => {
 		expect((await bridge.runtimeHealth()).data?.cloudExchange?.configured).toBe(true);
   });
 
+  it("registers browser local projects only through the acknowledged dev route", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { ref: "source_local_safe", kind: "local_repository", label: "Cascade-main" },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const bridge = createLocalBridgeClient("http://127.0.0.1:4317");
+
+    const result = await bridge.registerDevLocalProjectDirectory("D:\\project\\Cascade-main");
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ ref: "source_local_safe", kind: "local_repository", label: "Cascade-main" });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:4317/v1/desktop/dev/local-sources");
+    expect(JSON.parse(String(init.body))).toEqual({
+      kind: "local_repository",
+      path: "D:\\project\\Cascade-main",
+      dev_test_ack: true,
+    });
+  });
+
   it("maps real project responses onto an empty draft instead of mock fixture content", async () => {
     const state = {
       project_id: "project_empty_fallback",
@@ -358,6 +378,16 @@ describe("desktop bridge contract", () => {
           message: "录制完成",
           progress_percent: 100,
           result_package_id: "result_split_real",
+		  result_summary: {
+			acceptance: {
+			  origin: "server_controlled_fixture",
+			  app_generated: false,
+			  formal_exchange: true,
+			  strict_evidence_complete: true,
+			  final_mp4_available: true,
+			  status: "server_fixture_only",
+			},
+		  },
           stage_history: [
             { stage: "accepted", status: "completed", message: "已接收", progress_percent: 20, updated_at: "2026-07-14T00:00:01Z" },
 			{ stage: "validating_pre_execution", status: "completed", message: "执行前校验通过", progress_percent: 36, updated_at: "2026-07-14T00:00:03Z" },
@@ -396,7 +426,8 @@ describe("desktop bridge contract", () => {
     expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "script_validation")?.status).toBe("completed");
 	expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "browser_execution")?.summary).toBe("步骤结果校验完成");
 	expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "video_rendering")?.summary).toBe("执行后复核完成");
-    expect(completed.data?.assets[0]?.assetID).toBe("artifact_video_split");
+	expect(completed.data?.assets[0]?.assetID).toBe("artifact_video_split");
+	expect(completed.data?.cloudRun.currentStep).toBe("这是 Server 受控验收素材，不能作为 App 到 Server 联调通过依据。");
 	expect(acked.data?.assets[0]?.status).not.toBe("approved");
 	expect(acked.data?.assets[0]?.mediaURL).toContain("/cloud/deliverable/media?");
 	expect(JSON.stringify(acked.data)).not.toContain("C:\\DemoOps");
@@ -717,6 +748,14 @@ describe("desktop bridge contract", () => {
       result_summary: {
         result_id: "result_cloud_real",
         demo_video_count: 1,
+        acceptance: {
+          origin: "server_controlled_fixture",
+          app_generated: false,
+          formal_exchange: true,
+          strict_evidence_complete: true,
+          final_mp4_available: true,
+          status: "server_fixture_only",
+        },
         deliverables: [{ id: "artifact_video_real", kind: "video", role: "final_demo_video", uri: "artifact://video.webm", sensitive: true }],
       },
     };
