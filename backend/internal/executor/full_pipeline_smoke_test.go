@@ -83,6 +83,12 @@ func TestFullRecordingRenderPipelineSmoke(t *testing.T) {
 	}
 
 	renderResult := result.RenderResult
+	if !strings.EqualFold(filepath.Ext(renderResult.VideoPath), ".mp4") {
+		t.Fatalf("final delivery must be MP4, got %s", renderResult.VideoPath)
+	}
+	if renderResult.SourceReferenceVideoPath == "" || renderResult.VideoPath != renderResult.SourceReferenceVideoPath {
+		t.Fatalf("final delivery must use the normalized, probed MP4 reference: %+v", renderResult)
+	}
 	if renderResult.ValidationReport == nil || !renderResult.ValidationReport.Valid {
 		t.Fatalf("demo edit plan validation failed: %+v", renderResult.ValidationReport)
 	}
@@ -127,8 +133,8 @@ func TestFullRecordingRenderPipelineSmoke(t *testing.T) {
 		t.Fatalf("render manifest missing compositor result: %+v", renderManifest)
 	}
 	method, _ := compositor["method"].(string)
-	if method != "ffmpeg_trim_concat" && method != "copy_source_recording" {
-		t.Fatalf("unexpected compositor method %q in manifest: %+v", method, compositor)
+	if method != "ffmpeg_trim_concat" {
+		t.Fatalf("final smoke must use deterministic FFmpeg composition, got %q: %+v", method, compositor)
 	}
 	shotPlan, ok := compositor["shot_plan"].([]any)
 	if !ok || len(shotPlan) != len(renderResult.DemoEditPlan.Shots) {

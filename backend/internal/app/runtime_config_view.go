@@ -3,6 +3,7 @@ package app
 import (
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"cascade-demoops/backend/internal/config"
@@ -75,6 +76,7 @@ type AppCapabilitiesRuntimeView struct {
 	LocalRecordingExecution    bool   `json:"local_recording_execution"`
 	LocalRecordingScope        string `json:"local_recording_scope"`
 	VideoWorkerRole            string `json:"video_worker_role"`
+	AgentActionsV2             bool   `json:"agent_actions_v2"`
 }
 
 func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus ExchangeIdentityStatus) RuntimeConfigView {
@@ -97,7 +99,7 @@ func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus Exchan
 		LLMProxyHost:           proxyHost,
 		ArkMediaMode:           runtime.ArkMediaMode,
 		ModelAdapterVersion:    runtime.ModelAdapterVersion,
-		Sidecars:               sidecarConfigured(runtime.SidecarPaths),
+		Sidecars:               sidecarConfiguredForRuntime(runtime),
 		ModelProviders:         providerCredentialViews(runtime.ModelProviders),
 		ModelTaskRoutes:        modelTaskRouteViews(runtime.ModelTaskRoutes),
 		CloudExchange:          cloudExchangeRuntimeView(runtime, exchangeStatus),
@@ -120,6 +122,7 @@ func appCapabilitiesRuntimeView(profile config.RuntimeProfile) AppCapabilitiesRu
 		LocalRecordingExecution:    false,
 		LocalRecordingScope:        "dev_and_test_compatibility_only",
 		VideoWorkerRole:            "editor_media_helper_and_dev_compatibility_runtime",
+		AgentActionsV2:             agentActionsV2Enabled(),
 	}
 }
 
@@ -178,6 +181,23 @@ func sidecarConfigured(sidecars map[string]string) map[string]bool {
 	for name, path := range sidecars {
 		result[name] = path != ""
 	}
+	return result
+}
+
+func sidecarConfiguredForRuntime(runtime config.AppRuntimeConfig) map[string]bool {
+	result := sidecarConfigured(runtime.SidecarPaths)
+	workerPath := ""
+	if runtime.SidecarPaths != nil {
+		workerPath = runtime.SidecarPaths["video-worker"]
+	}
+	if workerPath == "" && runtime.DevRepoRoot != "" {
+		workerPath = filepath.Join(runtime.DevRepoRoot, "video-worker", "dist", "index.js")
+	}
+	nodePath := runtime.NodeBinaryPath
+	if nodePath == "" {
+		nodePath = "node"
+	}
+	result["video-worker"] = fileExists(workerPath) && commandReady(nodePath)
 	return result
 }
 

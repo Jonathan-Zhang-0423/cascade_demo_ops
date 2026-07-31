@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -14,6 +14,17 @@ const renderWithFFmpeg = ffmpegAvailable ? it : it.skip;
 function runFFmpeg(args: string[]): void {
   const result = spawnSync(ffmpegPath, args, { encoding: "utf8", windowsHide: true });
   if (result.status !== 0) throw new Error(`ffmpeg fixture failed: ${result.stderr || result.stdout || result.error?.message || "unknown error"}`);
+}
+
+function generateScreenshot(screenshotPath: string): void {
+  runFFmpeg([
+    "-y",
+    "-f", "lavfi",
+    "-i", "color=c=white:s=320x180",
+    "-frames:v", "1",
+    "-update", "1",
+    screenshotPath,
+  ]);
 }
 
 function catalog(recordingPath: string, screenshotPath: string): AssetTimelineCatalog {
@@ -100,7 +111,7 @@ describe("static screenshot compositor e2e", () => {
       const screenshotPath = path.join(root, "step.png");
       // Generate test-only media at runtime. No product material is stored in the repository.
       runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "mpeg4", "-c:a", "aac", recordingPath]);
-      await writeFile(screenshotPath, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlIP9sAAAAASUVORK5CYII=", "base64"));
+      generateScreenshot(screenshotPath);
 
       const result = await render({
         output_dir: path.join(root, "render"),
@@ -122,7 +133,7 @@ describe("static screenshot compositor e2e", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   renderWithFFmpeg("burns a supported rectangle annotation into the rendered video", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cascade-shape-render-"));
@@ -130,15 +141,15 @@ describe("static screenshot compositor e2e", () => {
       const recordingPath = path.join(root, "recording.mp4");
       const screenshotPath = path.join(root, "step.png");
       runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "mpeg4", "-c:a", "aac", recordingPath]);
-      await writeFile(screenshotPath, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlIP9sAAAAASUVORK5CYII=", "base64"));
+      generateScreenshot(screenshotPath);
       const result = await render({ output_dir: path.join(root, "render"), asset_timeline_catalog: catalog(recordingPath, screenshotPath), edit_plan: planWithShape(), render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" } });
       const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
       expect(manifest.compositor.applied_operations).toContain("highlight_box");
       expect(manifest.compositor.skipped_operations).not.toEqual(expect.arrayContaining([expect.objectContaining({ type: "highlight_box" })]));
-      const savedPlan = JSON.parse(await readFile(result.edit_plan_path, "utf8"));
+      const savedPlan = JSON.parse(await readFile(result.demo_edit_plan_path, "utf8"));
       expect(savedPlan.shots[0].overlays[0]).toMatchObject({ rotation: 24, scale_x: 125, scale_y: 75 });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

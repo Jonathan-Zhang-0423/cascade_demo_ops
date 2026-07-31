@@ -78,6 +78,15 @@ func TestReadBrowserAgentAcceptanceReportAcceptsBaseProtocolGate(t *testing.T) {
 func TestProtocolBrowserAgentAcceptanceRunsCompleteServerPath(t *testing.T) {
 	service := newTestDevHTTPServer(t).service
 	service.runtime.DevRepoRoot = filepath.Join("..", "..", "..")
+	if path := os.Getenv("CASCADE_FFMPEG_PATH"); path != "" {
+		service.runtime.FFmpegPath = path
+	}
+	if path := os.Getenv("CASCADE_FFPROBE_PATH"); path != "" {
+		service.runtime.FFprobePath = path
+	}
+	if !commandReady(service.runtime.FFmpegPath) || checkCommandReady(firstNonEmptyString(service.runtime.FFprobePath, "ffprobe")) != nil {
+		t.Skip("complete BrowserAgent delivery acceptance requires FFmpeg and ffprobe; missing runtimes are covered by the final MP4 rejection tests")
+	}
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
 	if _, err := service.RunBrowserAgentAcceptance(t.Context()); err != nil {
 		t.Fatal(err)

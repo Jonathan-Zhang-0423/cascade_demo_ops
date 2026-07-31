@@ -589,6 +589,10 @@ func (stubBrowserAgentRenderService) Render(_ context.Context, request executor.
 	return executor.RenderResult{VideoPath: videoPath, RenderManifestPath: manifestPath, DemoEditPlanPath: planPath}, nil
 }
 
+func (stubBrowserAgentRenderService) ProbeMedia(_ context.Context, request executor.MediaProbeRequest) (executor.MediaProbeResult, error) {
+	return executor.MediaProbeResult{Path: request.Path, Format: "mov,mp4", DurationMS: 1000, VideoCodec: "h264", Width: 1280, Height: 720, FPS: 30, FFProbeAvailable: true}, nil
+}
+
 func (s *stubBrowserAgentWorkerSession) Abort() error { return nil }
 
 func stubBrowserAgentArtifact(nodeID, phase string) model.ArtifactRef {

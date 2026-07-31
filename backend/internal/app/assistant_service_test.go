@@ -29,6 +29,110 @@ func newAssistantTestService(t *testing.T) *Service {
 	return service
 }
 
+func TestAgentActionsV2ExtractsReferenceTaskWithoutPersistingSecretsOrPaths(t *testing.T) {
+	t.Setenv("CASCADE_AGENT_ACTIONS_V2", "true")
+	service := newAssistantTestService(t)
+	repoPath := t.TempDir()
+	detectableLocalPath := filepath.VolumeName(repoPath) != ""
+	if !detectableLocalPath {
+		repoPath = `C:\sensitive\customer\Cascade`
+	}
+	session, err := service.CreateAssistantSession(context.Background(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "agent-actions-v2-reference"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := `项目地址cascadeai.cn，本地地址` + repoPath + `，任务目标登陆网页进入工作台，新建项目俄罗斯方块并且等待agent演示输出，测试用账号demo@example.test，密码FixtureOnly987`
+	turn, err := service.SubmitAssistantTurn(context.Background(), session.ID, model.AssistantTurnRequest{Message: message, IdempotencyKey: "reference-turn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.ActionMode != assistantActionModeV2 || turn.IntentPlan == nil {
+		t.Fatalf("v2 action projection is missing: %+v", turn)
+	}
+	if turn.Configuration.ProductURL != "https://cascadeai.cn" || turn.Configuration.ProjectName != "俄罗斯方块" {
+		t.Fatalf("reference fields were not extracted: %+v", turn.Configuration)
+	}
+	if len(turn.Configuration.MustShow) < 3 {
+		t.Fatalf("ordered must-show steps collapsed: %+v", turn.Configuration.MustShow)
+	}
+	if turn.Configuration.Readiness != "incomplete" || !containsString(turn.Configuration.MissingFields, "sources") || !containsString(turn.Configuration.MissingFields, "credentialRefs_or_manualLoginCheckpoint") {
+		t.Fatalf("dynamic login readiness is incorrect: %+v", turn.Configuration)
+	}
+	sourceProposal := findAssistantProposalByKind(turn, model.AssistantProposalSelectLocalProject)
+	if sourceProposal == nil || findAssistantProposalByKind(turn, model.AssistantProposalStoreDemoCredential) == nil {
+		t.Fatalf("source and credential actions must coexist: %+v", turn.Actions)
+	}
+	if detectableLocalPath {
+		detected, ok := sourceProposal.ExecutionResult["detectedSources"].([]model.ConfigurationSourceRef)
+		if !ok || len(detected) != 1 || detected[0].Ref == "" || detected[0].Label != filepath.Base(repoPath) {
+			t.Fatalf("detected local directory was not converted into a pending opaque ref: %+v", sourceProposal.ExecutionResult)
+		}
+		sourceAction := findAssistantActionBySpec(t, *turn, "source.select_local")
+		completed, completeErr := service.CompleteAssistantAction(context.Background(), turn.ID, sourceAction.ID, model.AgentActionCompleteRequest{
+			DependencyDigest: sourceAction.DependencyDigest,
+			IdempotencyKey:   "confirm-detected-source",
+			SelectedSources:  detected,
+		})
+		if completeErr != nil {
+			t.Fatal(completeErr)
+		}
+		if len(completed.Configuration.Sources) != 1 || completed.Configuration.Sources[0].Ref != detected[0].Ref || completed.Configuration.AnalysisProjectID != "" {
+			t.Fatalf("detected source confirmation did not stay local and pending credentials: %+v", completed.Configuration)
+		}
+		if credentialAction := findAssistantActionBySpec(t, *completed, "credential.store_demo"); credentialAction.Status != "available" {
+			t.Fatalf("confirming detected source invalidated the sibling credential action: %+v", credentialAction)
+		}
+	}
+	serialized, _ := json.Marshal(turn)
+	for _, forbidden := range []string{repoPath, "FixtureOnly987"} {
+		if strings.Contains(string(serialized), forbidden) {
+			t.Fatalf("assistant session leaked protected input %q", forbidden)
+		}
+	}
+}
+
+func TestAssistantRedactionCoversAdjacentChineseSecrets(t *testing.T) {
+	for _, input := range []string{"密码fixture-direct", "密码是fixture-secret", "令牌：fixture-token", "password=fixture-password"} {
+		redacted := redactAssistantText(input)
+		if strings.Contains(redacted, "fixture-") {
+			t.Fatalf("secret was not redacted: input=%q output=%q", input, redacted)
+		}
+	}
+}
+
+func TestAgentActionRegistryPublishesSchemasAndStageScopedCatalog(t *testing.T) {
+	t.Setenv("CASCADE_AGENT_ACTIONS_V2", "true")
+	service := newAssistantTestService(t)
+	session, err := service.CreateAssistantSession(context.Background(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "action-catalog"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := service.assistantWorkflowProjection(context.Background(), *session)
+	if len(workflow.AvailableActions) == 0 {
+		t.Fatal("configuration-stage action catalog is empty")
+	}
+	for _, action := range workflow.AvailableActions {
+		if len(action.InputSchema) == 0 {
+			t.Fatalf("action %s has no fixed input schema", action.ID)
+		}
+		if action.ID == "execution.approve_upload" || action.ID == "result.review" {
+			t.Fatalf("write action %s was exposed during configuration", action.ID)
+		}
+	}
+}
+
+func TestAssistantSafeSiblingActionsRebaseAcrossConfigurationVersions(t *testing.T) {
+	session := &model.AssistantSession{Messages: []model.AssistantMessage{{Proposals: []model.AssistantProposal{
+		{ID: "source", Kind: model.AssistantProposalSelectLocalProject, BaseVersion: 1, Status: "available"},
+		{ID: "credential", Kind: model.AssistantProposalStoreDemoCredential, BaseVersion: 1, Status: "available"},
+	}}}}
+	dismissStaleAssistantProposals(session, "source", 2)
+	credential := findAssistantProposal(session, "credential")
+	if credential == nil || credential.Status != "available" || credential.BaseVersion != 2 {
+		t.Fatalf("independent credential action was invalidated: %+v", credential)
+	}
+}
+
 func TestAssistantBuildsLocalDraftFromRealSourceAndBrowserScan(t *testing.T) {
 	testPage := httptest.NewServer(http.HandlerFunc(controlledBusinessFixtureHandler))
 	defer testPage.Close()
@@ -169,6 +273,146 @@ func TestAssistantBuildsLocalDraftFromRealSourceAndBrowserScan(t *testing.T) {
 			t.Fatalf("%s leaked a local path or source content", label)
 		}
 	}
+}
+
+func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
+	testPage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Path == "/workspace" {
+			_, _ = w.Write([]byte(`<!doctype html><title>Workspace</title><main data-testid="workspace"><button data-testid="new-project">新建项目</button></main>`))
+			return
+		}
+		_, _ = w.Write([]byte(`<!doctype html><title>Login</title>
+<button id="email-login" type="button" onclick="document.querySelector('#form').hidden=false">邮箱登录</button>
+<form id="form" hidden onsubmit="event.preventDefault(); location.href='/workspace'">
+  <input type="email" autocomplete="username" />
+  <input type="password" autocomplete="current-password" />
+  <button type="submit">登录</button>
+</form>`))
+	}))
+	defer testPage.Close()
+
+	dataRoot := t.TempDir()
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: dataRoot, CacheRoot: filepath.Join(dataRoot, "cache"), LLMMode: config.LLMModeDeterministic, DevRepoRoot: repoRoot}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fileExists(service.localVideoWorkerPath()) || !commandReady(service.nodeBinaryForExecution()) {
+		t.Skip("real local video-worker runtime is unavailable")
+	}
+
+	state, err := service.CreateProject(context.Background(), orchestrator.UserInput{
+		ProjectID:          "two-step-login-runtime-evidence",
+		Mode:               model.AppModeDesktop,
+		ProductURL:         testPage.URL + "/login",
+		ProductDescription: "登录进入工作台，然后点击新建项目并确认工作台状态",
+		TargetAudience:     "产品团队",
+		MustShow:           []string{"登录进入工作台", "点击新建项目"},
+		AllowedDomains:     []string{"127.0.0.1"},
+		DemoUsername:       "demo@example.test",
+		DemoPassword:       "fixture-only-password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.VerifiedInteractionPlan == nil || state.VerifiedInteractionPlan.BrowserScanID == "" {
+		t.Fatalf("two-step login scan did not create runtime evidence: plan=%+v missing=%+v", state.VerifiedInteractionPlan, state.MissingEvidenceReport)
+	}
+	if state.ScriptReadinessReport == nil || !state.ScriptReadinessReport.CanProceed {
+		t.Fatalf("successful login scan left conflicting readiness: %+v", state.ScriptReadinessReport)
+	}
+	build, err := service.BuildClientExecutionPackage(context.Background(), state.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, finding := range append(append([]model.AgentFinding{}, build.Package.SafetyReport.PolicyFindings...), build.Package.ExecutableScriptBundle.Validation.Findings...) {
+		if strings.Contains(finding.ID, "runtime_page_evidence_missing") || strings.Contains(finding.ID, "bundle_hash_mismatch") {
+			t.Fatalf("successful login evidence produced a secondary blocker: %+v", finding)
+		}
+	}
+	serialized, err := json.Marshal(struct {
+		State *orchestrator.CascadeState
+		Build ClientExecutionPackageBuild
+	}{state, build})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(serialized), "fixture-only-password") {
+		t.Fatal("ephemeral login password leaked into state or execution package")
+	}
+}
+
+func TestAgentActionsV2AutoAnalyzesAfterSourceAction(t *testing.T) {
+	t.Setenv("CASCADE_AGENT_ACTIONS_V2", "true")
+	testPage := httptest.NewServer(http.HandlerFunc(controlledBusinessFixtureHandler))
+	defer testPage.Close()
+	repoPath := t.TempDir()
+	packageJSON, _ := json.Marshal(map[string]any{"name": "v2-auto-analysis", "homepage": testPage.URL})
+	if err := os.WriteFile(filepath.Join(repoPath, "package.json"), packageJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoPath, "App.tsx"), []byte(`export function App(){return <button data-testid="start-build">Start build</button>}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := t.TempDir()
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: dataRoot, CacheRoot: filepath.Join(dataRoot, "cache"), LLMMode: config.LLMModeDeterministic, DevRepoRoot: repoRoot}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.assistantStore = store.NewMemoryAssistantStore()
+	if !fileExists(service.localVideoWorkerPath()) || !commandReady(service.nodeBinaryForExecution()) {
+		t.Skip("real local video-worker runtime is unavailable")
+	}
+	ref, err := service.RegisterLocalSource("local_repository", repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := service.CreateAssistantSession(context.Background(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "v2-auto-analysis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := service.SubmitAssistantTurn(context.Background(), session.ID, model.AssistantTurnRequest{Message: "为 " + testPage.URL + " 制作 60 秒演示，项目名叫 V2 Auto，目标是创建项目并启动构建，请读取本地项目目录", IdempotencyKey: "v2-auto-turn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := findAssistantActionBySpecForServiceTest(t, turn, "source.select_local")
+	completed, err := service.CompleteAssistantAction(context.Background(), turn.ID, action.ID, model.AgentActionCompleteRequest{
+		DependencyDigest: action.DependencyDigest, IdempotencyKey: "v2-auto-source",
+		SelectedSources: []model.ConfigurationSourceRef{{Ref: ref.Ref, Kind: ref.Kind, Label: ref.Label}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Configuration.AnalysisProjectID == "" || completed.ActiveWorkstation != model.AssistantWorkstationApproval {
+		t.Fatalf("V2 source completion did not auto-run analysis: config=%+v workstation=%s next=%+v", completed.Configuration, completed.ActiveWorkstation, completed.NextAction)
+	}
+	for _, message := range completed.Messages {
+		for _, proposal := range message.Proposals {
+			if proposal.Status == "available" && (proposal.Kind == model.AssistantProposalConfirmConfiguration || proposal.Kind == model.AssistantProposalStartLocalAnalysis) {
+				t.Fatalf("V2 auto analysis retained an obsolete configuration confirmation: %+v", proposal)
+			}
+		}
+	}
+}
+
+func findAssistantActionBySpecForServiceTest(t *testing.T, session *model.AssistantSession, specID string) model.AgentAction {
+	t.Helper()
+	for _, action := range session.Actions {
+		if action.SpecID == specID && action.Status == "available" {
+			return action
+		}
+	}
+	t.Fatalf("available action %s not found: %+v", specID, session.Actions)
+	return model.AgentAction{}
 }
 
 func findAssistantProposalByKind(session *model.AssistantSession, kind model.AssistantProposalKind) *model.AssistantProposal {

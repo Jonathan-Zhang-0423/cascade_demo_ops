@@ -78,8 +78,8 @@ func TestRunClientExecutionRecordingAndRenderCallsExecutorInProtocolOrder(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(service.calls) != 3 || service.calls[0] != "record" || service.calls[1] != "render" || service.calls[2] != "render" {
-		t.Fatalf("expected record, initial render, then patched render calls, got %+v", service.calls)
+	if len(service.calls) != 4 || service.calls[0] != "record" || service.calls[1] != "render" || service.calls[2] != "render" || service.calls[3] != "probe_media" {
+		t.Fatalf("expected record, initial render, patched render, then media probe calls, got %+v", service.calls)
 	}
 	if service.recordRequest.SourcePackageID != pkg.PackageID || service.recordRequest.ExecutableScriptBundle == nil {
 		t.Fatalf("record request did not use protocol package: %+v", service.recordRequest)
@@ -249,6 +249,9 @@ func TestRunClientExecutionRecordingAndRenderCallsExecutorInProtocolOrder(t *tes
 func TestRunClientExecutionRecordingAndRenderAllowsRecordingModeOverride(t *testing.T) {
 	pkg := sampleClientExecutionPackageForExecutorTest(t)
 	now := time.Date(2026, 7, 9, 20, 15, 0, 0, time.UTC)
+	renderDir := t.TempDir()
+	videoPath := filepath.Join(renderDir, "final.mp4")
+	writeTestFile(t, videoPath, "final")
 	service := &fakeRecordingRenderService{
 		recordResult: RecordResult{
 			TracePath:       "artifacts/recording/job_1/script_execution_trace.json",
@@ -258,8 +261,8 @@ func TestRunClientExecutionRecordingAndRenderAllowsRecordingModeOverride(t *test
 			CompletedAt:     now,
 		},
 		renderResult: RenderResult{
-			VideoPath:          "artifacts/render/job_1/final.mp4",
-			StepByStepDocsPath: "artifacts/render/job_1/steps.md",
+			VideoPath:          videoPath,
+			StepByStepDocsPath: filepath.Join(renderDir, "steps.md"),
 		},
 	}
 
@@ -267,7 +270,7 @@ func TestRunClientExecutionRecordingAndRenderAllowsRecordingModeOverride(t *test
 		SourcePackage:      &pkg,
 		CloudJobID:         "job_1",
 		RecordingOutputDir: "artifacts/recording/job_1",
-		RenderOutputDir:    "artifacts/render/job_1",
+		RenderOutputDir:    renderDir,
 		RecordingMode:      RecordingModeDryRun,
 		ResultCreatedAt:    now,
 	})
@@ -458,6 +461,20 @@ func TestRunClientExecutionRecordingAndRenderRejectsMissingRenderOutput(t *testi
 	}
 }
 
+func TestValidateFinalMP4DeliveryRejectsWebMAndUnavailableProbe(t *testing.T) {
+	service := &fakeRecordingRenderService{}
+	if err := validateFinalMP4Delivery(t.Context(), service, RenderResult{VideoPath: filepath.Join(t.TempDir(), "final.webm")}); err == nil || !strings.Contains(err.Error(), "final_video_not_mp4") {
+		t.Fatalf("expected WebM delivery rejection, got %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "final.mp4")
+	writeTestFile(t, path, "mp4 fixture")
+	service.probeResult = MediaProbeResult{Path: path, Format: "mov,mp4", VideoCodec: "h264", DurationMS: 1000, Width: 1280, Height: 720, FFProbeAvailable: false}
+	if err := validateFinalMP4Delivery(t.Context(), service, RenderResult{VideoPath: path}); err == nil || !strings.Contains(err.Error(), "final_video_probe_unavailable") {
+		t.Fatalf("expected ffprobe availability rejection, got %v", err)
+	}
+}
+
 type fakeRecordingRenderService struct {
 	calls          []string
 	recordRequest  RecordRequest
@@ -467,6 +484,19 @@ type fakeRecordingRenderService struct {
 	renderResult   RenderResult
 	recordErr      error
 	renderErr      error
+	probeResult    MediaProbeResult
+	probeErr       error
+}
+
+func (s *fakeRecordingRenderService) ProbeMedia(ctx context.Context, request MediaProbeRequest) (MediaProbeResult, error) {
+	s.calls = append(s.calls, "probe_media")
+	if s.probeErr != nil {
+		return MediaProbeResult{}, s.probeErr
+	}
+	if s.probeResult.VideoCodec != "" || s.probeResult.FFProbeAvailable {
+		return s.probeResult, nil
+	}
+	return MediaProbeResult{Path: request.Path, Format: "mov,mp4,m4a,3gp,3g2,mj2", DurationMS: 1200, VideoCodec: "h264", Width: 1920, Height: 1080, FPS: 30, FFProbeAvailable: true}, nil
 }
 
 func (s *fakeRecordingRenderService) Record(ctx context.Context, request RecordRequest) (RecordResult, error) {

@@ -8,6 +8,7 @@ const BrowserAgentScriptOutlineSchemaVersion = "demoops.browser_agent_script_out
 const BrowserAgentPromptPolicySchemaVersion = "demoops.browser_agent_prompt_policy.v1"
 const ProjectUnderstandingDossierSchemaVersion = "demoops.project_understanding_dossier.v1"
 const BrowserAgentContractSchemaVersion = "demoops.browser_agent_contract.v1"
+const ExecutableBundleHashAlgorithmSemanticV2 = "v2-semantic"
 
 const (
 	ExecutableScriptRuntimePlaywrightRestrictedSandbox = "playwright-restricted-sandbox"
@@ -112,6 +113,7 @@ type ExecutableScriptReproducibility struct {
 	BrowserAgentContractHashSHA256 string            `json:"browser_agent_contract_hash_sha256,omitempty"`
 	MarkdownHashSHA256             string            `json:"markdown_hash_sha256"`
 	BundleHashSHA256               string            `json:"bundle_hash_sha256,omitempty"`
+	BundleHashAlgorithm            string            `json:"bundle_hash_algorithm,omitempty"`
 	GraphHashSHA256                string            `json:"graph_hash_sha256,omitempty"`
 	SourceSnapshotDigest           string            `json:"source_snapshot_digest,omitempty"`
 	GeneratorVersion               string            `json:"generator_version,omitempty"`
@@ -133,6 +135,11 @@ func (b *ExecutableRecordingScriptBundle) ComputeBundleHash() (string, error) {
 	copy.Reproducibility.BundleHashSHA256 = ""
 	copy.Validation = nil
 	copy.RepairLineage = nil
+	if copy.Reproducibility.BundleHashAlgorithm == ExecutableBundleHashAlgorithmSemanticV2 {
+		copy.Status = ""
+		copy.CreatedAt = time.Time{}
+		copy.UpdatedAt = time.Time{}
+	}
 	return DigestCanonicalJSON(copy)
 }
 

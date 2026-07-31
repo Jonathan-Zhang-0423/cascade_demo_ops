@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -90,6 +91,17 @@ func TestDesktopBridgeArtifactURIResponseIsJSONSafe(t *testing.T) {
 
 func TestDesktopBridgeRuntimeConfigIsRedacted(t *testing.T) {
 	root := t.TempDir()
+	workerPath := filepath.Join(root, "worker", "index.js")
+	nodePath := filepath.Join(root, "node")
+	if err := os.MkdirAll(filepath.Dir(workerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workerPath, []byte("// fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nodePath, []byte("fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	bridge, err := NewDesktopBridge(config.AppRuntimeConfig{
 		Profile:         config.ProfileCloud,
 		Environment:     "test",
@@ -103,8 +115,8 @@ func TestDesktopBridgeRuntimeConfigIsRedacted(t *testing.T) {
 		LogRoot:         filepath.Join(root, "logs"),
 		ResourceRoot:    filepath.Join(root, "resources"),
 		DevRepoRoot:     root,
-		SidecarPaths:    map[string]string{"video-worker": filepath.Join(root, "worker", "index.js")},
-		NodeBinaryPath:  filepath.Join(root, "node"),
+		SidecarPaths:    map[string]string{"video-worker": workerPath},
+		NodeBinaryPath:  nodePath,
 		ArkMediaMode:    config.ArkMediaModeDryRun,
 		ModelProviders: map[config.ModelProvider]config.ModelProviderCredential{
 			config.ModelProviderGLM: {
@@ -154,6 +166,27 @@ func TestDesktopBridgeRuntimeConfigIsRedacted(t *testing.T) {
 	}
 	if view.ModelTaskRoutes["code_reading"].Provider != "glm" || view.ModelTaskRoutes["code_reading"].Model != "glm-5.2" {
 		t.Fatalf("expected code reading model route in runtime view: %+v", view.ModelTaskRoutes)
+	}
+}
+
+func TestRuntimeConfigViewUsesExecutionReadinessForVideoWorker(t *testing.T) {
+	root := t.TempDir()
+	workerPath := filepath.Join(root, "video-worker", "dist", "index.js")
+	if err := os.MkdirAll(filepath.Dir(workerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workerPath, []byte("// fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := config.AppRuntimeConfig{DevRepoRoot: root, NodeBinaryPath: filepath.Join(root, "missing-node")}
+	if NewRuntimeConfigView(runtime, ExchangeIdentityStatus{}).Sidecars["video-worker"] {
+		t.Fatal("runtime health reported video-worker ready without the executable Node runtime")
+	}
+	if err := os.WriteFile(runtime.NodeBinaryPath, []byte("fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !NewRuntimeConfigView(runtime, ExchangeIdentityStatus{}).Sidecars["video-worker"] {
+		t.Fatal("runtime health did not use the same worker and Node paths as execution")
 	}
 }
 

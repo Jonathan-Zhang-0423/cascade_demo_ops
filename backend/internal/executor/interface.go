@@ -11,8 +11,13 @@ type RenderService interface {
 	Render(ctx context.Context, request RenderRequest) (RenderResult, error)
 }
 
-type Service interface {
+type DeliveryRenderService interface {
 	RenderService
+	ProbeMedia(ctx context.Context, request MediaProbeRequest) (MediaProbeResult, error)
+}
+
+type Service interface {
+	DeliveryRenderService
 	Record(ctx context.Context, request RecordRequest) (RecordResult, error)
 }
 

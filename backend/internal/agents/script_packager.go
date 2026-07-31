@@ -115,12 +115,53 @@ func (a *ScriptPackagerAgent) PackageScript(
 	if err != nil {
 		return nil, err
 	}
+	synchronizeReadinessWithBundleValidation(intelligencePack, NewScriptBundleValidator().ValidateBundle(bundle))
 	return &model.ScriptDocumentPackage{
 		Document:         doc,
 		Markdown:         markdown,
 		MarkdownArtifact: doc.MarkdownArtifact,
 		ExecutableBundle: bundle,
 	}, nil
+}
+
+func synchronizeReadinessWithBundleValidation(intelligence *model.ProjectIntelligencePack, validation model.ExecutableScriptValidation) {
+	if intelligence == nil || intelligence.ScriptReadinessReport == nil {
+		return
+	}
+	readiness := intelligence.ScriptReadinessReport
+	for _, finding := range validation.Findings {
+		if finding.Severity != model.FindingSeverityBlocking {
+			continue
+		}
+		if !agentFindingIDExists(readiness.Blockers, finding.ID) {
+			readiness.Blockers = append(readiness.Blockers, finding)
+		}
+		if strings.TrimSpace(finding.SuggestedAction) != "" && !stringValueExists(readiness.RepairSuggestions, finding.SuggestedAction) {
+			readiness.RepairSuggestions = append(readiness.RepairSuggestions, finding.SuggestedAction)
+		}
+		readiness.CanProceed = false
+	}
+	if !readiness.CanProceed {
+		readiness.Summary = "最终执行大纲存在阻断项，请按修复动作补齐后重新生成。"
+	}
+}
+
+func agentFindingIDExists(findings []model.AgentFinding, id string) bool {
+	for _, finding := range findings {
+		if finding.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func stringValueExists(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func buildExecutableScriptBundle(
@@ -240,6 +281,7 @@ func buildExecutableScriptBundle(
 			GeneratorVersion:               browserAgentOutlineGeneratorVersion,
 			DeterministicSeed:              doc.Reproducibility.DeterministicSeed,
 			InputFingerprints:              reportInputFingerprints(report),
+			BundleHashAlgorithm:            model.ExecutableBundleHashAlgorithmSemanticV2,
 		},
 		CreatedAt: now,
 		UpdatedAt: now,

@@ -49,6 +49,7 @@ type InteractionVerifierDiagnostics = {
   candidate_count?: number;
   verified_candidate_count?: number;
   discovered_business_control_count?: number;
+  login_transitions?: string[];
 };
 
 type VerifiedInteractionCandidate = InteractionCandidate & {
@@ -106,6 +107,7 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
       ...(request.demo_username ? { username: request.demo_username } : {}),
       ...(request.demo_password ? { password: request.demo_password } : {}),
       timeout,
+      transitions: diagnostics.login_transitions = [],
     });
     diagnostics.login_attempted = Boolean(request.demo_username && request.demo_password);
     diagnostics.login_status = loginStatus;
@@ -516,7 +518,7 @@ function uniqueWords(values: string[]): string[] {
 
 async function attemptLoginIfCredentialsProvided(
   page: any,
-  credentials: { username?: string; password?: string; timeout: number },
+  credentials: { username?: string; password?: string; timeout: number; transitions?: string[] },
 ): Promise<string> {
   const username = credentials.username?.trim();
   const password = credentials.password;
@@ -524,43 +526,60 @@ async function attemptLoginIfCredentialsProvided(
     return "credentials_missing";
   }
 
-  let passwordInput = await firstVisibleLocator(page, passwordInputSelectors(), 1200);
-  if (!passwordInput) {
-    const trigger = await firstVisibleLoginTrigger(page);
-    if (trigger) {
-      await trigger.click({ timeout: 2500 }).catch(() => undefined);
-      await waitForPageEvidenceReady(page, Math.min(credentials.timeout, 6000));
+  const transitions = credentials.transitions || [];
+  transitions.push("credentials_available");
+  let passwordInput = await firstVisibleLocatorAcrossFrames(page, passwordInputSelectors(), 1800);
+  for (let attempt = 1; !passwordInput && attempt <= 3; attempt += 1) {
+    const trigger = await firstVisibleLoginTrigger(page, Math.min(2200 + attempt * 600, 4000));
+    if (!trigger) {
+      transitions.push(`login_trigger_not_found:${attempt}`);
+      break;
     }
+    transitions.push(`login_trigger_found:${attempt}`);
+    const clicked = await trigger.click({ timeout: 4000 }).then(() => true).catch(() => false);
+    transitions.push(clicked ? `login_trigger_clicked:${attempt}` : `login_trigger_click_failed:${attempt}`);
+    if (!clicked) continue;
+    await waitForPageEvidenceReady(page, Math.min(credentials.timeout, 8000));
+    passwordInput = await firstVisibleLocatorAcrossFrames(page, passwordInputSelectors(), 3500);
   }
 
-  passwordInput = await firstVisibleLocator(page, passwordInputSelectors(), 2500);
+  passwordInput ||= await firstVisibleLocatorAcrossFrames(page, passwordInputSelectors(), 3000);
   if (!passwordInput) {
+    transitions.push("trying_known_login_paths");
     passwordInput = await navigateToLikelyLoginPath(page, credentials.timeout);
   }
   if (!passwordInput) {
+    transitions.push("login_form_not_found");
     return "login_form_not_found";
   }
-  const usernameInput = await firstVisibleLocator(page, usernameInputSelectors(), 2500);
+  transitions.push("password_input_visible");
+  const usernameInput = await firstVisibleLocatorAcrossFrames(page, usernameInputSelectors(), 3000);
   if (!usernameInput) {
+    transitions.push("username_input_not_found");
     return "username_input_not_found";
   }
 
-  await usernameInput.fill(username, { timeout: 2500 }).catch(() => undefined);
-  await passwordInput.fill(password, { timeout: 2500 }).catch(() => undefined);
+  transitions.push("login_form_ready");
+  await usernameInput.fill(username, { timeout: 3500 }).catch(() => undefined);
+  await passwordInput.fill(password, { timeout: 3500 }).catch(() => undefined);
   const submit = await firstVisibleLoginSubmit(page);
   if (submit) {
     await submit.click({ timeout: 3000 }).catch(() => undefined);
   } else {
     await passwordInput.press("Enter", { timeout: 2000 }).catch(() => undefined);
   }
+  transitions.push("login_submitted");
   await waitForPageEvidenceReady(page, Math.min(credentials.timeout, 8000));
-  const passwordStillVisible = await firstVisibleLocator(page, passwordInputSelectors(), 900);
+  const passwordStillVisible = await firstVisibleLocatorAcrossFrames(page, passwordInputSelectors(), 1200);
   if (passwordStillVisible) {
+    transitions.push("submitted_login_form_still_visible");
     return "submitted_login_form_still_visible";
   }
   if (looksLikeLoginURL(page.url())) {
+    transitions.push("submitted_still_on_login_url");
     return "submitted_still_on_login_url";
   }
+  transitions.push("authenticated_navigation_observed");
   return "submitted_navigation_observed";
 }
 
@@ -571,7 +590,7 @@ async function navigateToLikelyLoginPath(page: any, timeout: number): Promise<an
     const target = new URL(path, current.origin).toString();
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: Math.min(timeout, 6000) }).catch(() => undefined);
     await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
-    const passwordInput = await firstVisibleLocator(page, passwordInputSelectors(), 1500);
+    const passwordInput = await firstVisibleLocatorAcrossFrames(page, passwordInputSelectors(), 2200);
     if (passwordInput) {
       return passwordInput;
     }
@@ -614,44 +633,51 @@ async function waitForPageEvidenceReady(page: any, timeoutMS = 8000): Promise<vo
   ).catch(() => undefined);
 }
 
-async function firstVisibleLoginTrigger(page: any): Promise<any | undefined> {
-  const loginName = /登录|登陆|登入|sign\s*in|log\s*in|login|控制台|console|dashboard|进入/i;
+async function firstVisibleLoginTrigger(page: any, timeout = 1800): Promise<any | undefined> {
+  const loginName = /邮箱登录|邮件登录|账号登录|密码登录|登录|登陆|登入|sign\s*in|log\s*in|login|控制台|console|dashboard|进入/i;
   const roleCandidates = [
     page.getByRole("link", { name: loginName }).first(),
     page.getByRole("button", { name: loginName }).first(),
     page.getByText(loginName).first(),
   ];
   for (const locator of roleCandidates) {
-    if (await locator.isVisible({ timeout: 900 }).catch(() => false)) {
+    if (await locator.isVisible({ timeout }).catch(() => false)) {
       return locator;
     }
   }
-  return firstVisibleLocator(page, [
+  return firstVisibleLocatorAcrossFrames(page, [
     "a[href*='login']",
     "a[href*='signin']",
     "a[href*='sign-in']",
     "button[data-testid*='login' i]",
     "[data-testid*='login' i]",
-  ], 900);
+    "button:has-text('邮箱登录')",
+    "button:has-text('账号登录')",
+  ], timeout);
 }
 
 async function firstVisibleLoginSubmit(page: any): Promise<any | undefined> {
-  const loginName = /登录|登陆|登入|sign\s*in|log\s*in|login|继续|continue|提交|submit/i;
-  const roleCandidates = [
-    page.getByRole("button", { name: loginName }).first(),
-    page.getByRole("link", { name: loginName }).first(),
-  ];
-  for (const locator of roleCandidates) {
-    if (await locator.isVisible({ timeout: 900 }).catch(() => false)) {
-      return locator;
-    }
-  }
-  return firstVisibleLocator(page, [
+  const semanticSubmit = await firstVisibleLocatorAcrossFrames(page, [
     "button[type='submit']",
     "input[type='submit']",
     "[data-testid*='submit' i]",
-    "[data-testid*='login' i]",
-  ], 900);
+    "[data-testid*='login-submit' i]",
+  ], 1800);
+  if (semanticSubmit) return semanticSubmit;
+  const loginName = /登录|登陆|登入|sign\s*in|log\s*in|login|继续|continue|提交|submit/i;
+  const frames = typeof page.frames === "function" ? page.frames() : [page];
+  for (const frame of frames) {
+    const roleCandidates = [
+      frame.getByRole("button", { name: loginName }).first(),
+      frame.getByRole("link", { name: loginName }).first(),
+    ];
+    for (const locator of roleCandidates) {
+      if (await locator.isVisible({ timeout: 1200 }).catch(() => false)) {
+        return locator;
+      }
+    }
+  }
+  return undefined;
 }
 
 async function firstVisibleLocator(page: any, selectors: string[], timeout: number): Promise<any | undefined> {
@@ -660,6 +686,15 @@ async function firstVisibleLocator(page: any, selectors: string[], timeout: numb
     if (await locator.isVisible({ timeout }).catch(() => false)) {
       return locator;
     }
+  }
+  return undefined;
+}
+
+async function firstVisibleLocatorAcrossFrames(page: any, selectors: string[], timeout: number): Promise<any | undefined> {
+  const frames = typeof page.frames === "function" ? page.frames() : [page];
+  for (const frame of frames) {
+    const found = await firstVisibleLocator(frame, selectors, timeout);
+    if (found) return found;
   }
   return undefined;
 }

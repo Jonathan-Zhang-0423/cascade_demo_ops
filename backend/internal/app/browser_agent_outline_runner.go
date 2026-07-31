@@ -27,7 +27,7 @@ type browserAgentWorkerSessionFactory func(context.Context, driver.BrowserAgentW
 type localBrowserAgentOutlineRunner struct {
 	service        *Service
 	sessionFactory browserAgentWorkerSessionFactory
-	renderService  executor.RenderService
+	renderService  executor.DeliveryRenderService
 	// outcomeVerifier is a focused test override. Production runs snapshot the
 	// Server-owned verifier from service at the beginning of each execution.
 	outcomeVerifier BrowserAgentStageEventVerifier

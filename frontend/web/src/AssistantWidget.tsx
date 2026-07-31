@@ -187,8 +187,12 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
     if (!session) return false;
     setLoading(true);
     setError("");
-    const result = action === "confirm"
-      ? await bridge.confirmAssistantProposal(session.id, proposal.id, proposal.baseVersion, proposal.idempotencyKey)
+    const agentAction = session.actions?.find((candidate) => candidate.proposalID === proposal.id);
+    const actionBatch = agentAction?.batchID ? session.actionBatches?.find((candidate) => candidate.id === agentAction.batchID) : undefined;
+    const result = action === "confirm" && actionBatch && session.intentPlan
+      ? await bridge.confirmAssistantActionBatch(session.id, actionBatch.id, session.intentPlan.digest, `${actionBatch.id}:confirm`, actionBatch.approvalSubjectDigest)
+      : action === "confirm"
+        ? await bridge.confirmAssistantProposal(session.id, proposal.id, proposal.baseVersion, proposal.idempotencyKey)
       : await bridge.dismissAssistantProposal(session.id, proposal.id, proposal.baseVersion, proposal.idempotencyKey);
     if (result.ok && result.data) {
       applySession(result.data);
@@ -210,10 +214,14 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
     if (!session) return false;
     setLoading(true);
     setError("");
-    const result = await bridge.completeAssistantClientAction(session.id, proposal.id, proposal.baseVersion, { selectedSources, credentialRefs }, `${proposal.idempotencyKey}:client-result`);
+    const agentAction = session.actions?.find((candidate) => candidate.proposalID === proposal.id);
+    const result = agentAction
+      ? await bridge.completeAssistantAction(session.id, agentAction.id, agentAction.dependencyDigest, { selectedSources, credentialRefs }, `${agentAction.idempotencyKey}:client-result`)
+      : await bridge.completeAssistantClientAction(session.id, proposal.id, proposal.baseVersion, { selectedSources, credentialRefs }, `${proposal.idempotencyKey}:client-result`);
     if (result.ok && result.data) {
       applySession(result.data);
       setSourceEntry(undefined);
+      if (result.data.configuration.analysisProjectID) onOpenProject?.(result.data.configuration.analysisProjectID);
     } else setError(result.error ?? "安全选择无法写入 configuration。");
     setLoading(false);
     return Boolean(result.ok && result.data);
@@ -291,7 +299,9 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
       return;
     }
     if (proposal.kind === "select_local_project") {
-      await selectLocalSource(proposal);
+      const detected = detectedLocalSourceForProposal(session, proposal);
+      if (detected) await completeClientAction(proposal, [detected]);
+      else await selectLocalSource(proposal);
       return;
     }
     if (proposal.kind === "attach_requirement_document") {
@@ -498,6 +508,17 @@ function isClientActionProposal(kind: AssistantProposalView["kind"]): boolean {
   return ["select_project_source", "select_local_project", "connect_github", "attach_requirement_document", "attach_brand_asset", "store_demo_credential"].includes(kind);
 }
 
+function detectedLocalSourceForProposal(session: AssistantSessionView | undefined, proposal: AssistantProposalView): ConfigurationSourceRefView | undefined {
+  const action = session?.actions?.find((candidate) => candidate.proposalID === proposal.id);
+  const detected = action?.executionResult?.detectedSources;
+  if (!Array.isArray(detected) || detected.length === 0) return undefined;
+  const source = detected[0];
+  if (!source || typeof source !== "object") return undefined;
+  const value = source as Record<string, unknown>;
+  if (typeof value.ref !== "string" || !value.ref.startsWith("source_") || value.kind !== "local_repository" || typeof value.label !== "string") return undefined;
+  return { ref: value.ref, kind: "local_repository", label: value.label };
+}
+
 function proposalConfirmLabel(kind: AssistantProposalView["kind"]): string {
   if (kind === "configuration_patch") return "应用字段变更";
   if (kind === "confirm_configuration" || kind === "start_local_analysis") return "确认配置并启动本地理解";
@@ -506,6 +527,8 @@ function proposalConfirmLabel(kind: AssistantProposalView["kind"]): string {
   if (kind === "attach_requirement_document") return "选择需求文档";
   if (kind === "attach_brand_asset") return "选择品牌素材";
   if (kind === "store_demo_credential") return "安全保存账号";
+  if (kind === "retry_page_scan") return "重新扫描";
+  if (kind === "regenerate_execution_package") return "重新生成";
   return "确认";
 }
 

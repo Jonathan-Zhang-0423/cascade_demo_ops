@@ -139,13 +139,14 @@ type interactionVerifierResponse struct {
 }
 
 type interactionVerifierDiagnostics struct {
-	LoginAttempted                 bool   `json:"login_attempted,omitempty"`
-	LoginStatus                    string `json:"login_status,omitempty"`
-	FinalURL                       string `json:"final_url,omitempty"`
-	PageTitle                      string `json:"page_title,omitempty"`
-	CandidateCount                 int    `json:"candidate_count,omitempty"`
-	VerifiedCandidateCount         int    `json:"verified_candidate_count,omitempty"`
-	DiscoveredBusinessControlCount int    `json:"discovered_business_control_count,omitempty"`
+	LoginAttempted                 bool     `json:"login_attempted,omitempty"`
+	LoginStatus                    string   `json:"login_status,omitempty"`
+	FinalURL                       string   `json:"final_url,omitempty"`
+	PageTitle                      string   `json:"page_title,omitempty"`
+	CandidateCount                 int      `json:"candidate_count,omitempty"`
+	VerifiedCandidateCount         int      `json:"verified_candidate_count,omitempty"`
+	DiscoveredBusinessControlCount int      `json:"discovered_business_control_count,omitempty"`
+	LoginTransitions               []string `json:"login_transitions,omitempty"`
 }
 
 type interactionVerifierResult struct {
@@ -643,6 +644,25 @@ func downgradeMissingEvidenceItems(items []model.MissingEvidenceItem) {
 
 func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, response interactionVerifierResponse, byID map[string]model.InteractionProbe) *model.VerifiedInteractionPlan {
 	plan := emptyVerifiedPlan(project, intelligence, firstNonEmpty(response.VerificationMode, "playwright_readonly_scan"), response.BrowserScanID, firstNonEmpty(response.SourceURL, project.ProductURL))
+	if response.Diagnostics != nil && response.Diagnostics.LoginAttempted && response.Diagnostics.LoginStatus == "submitted_navigation_observed" {
+		evidence := model.EvidenceRef{
+			ID:         "ev_browser_scan_login_" + shortHash(response.BrowserScanID+response.SourceURL),
+			Kind:       model.EvidenceKindBrowserScan,
+			Summary:    "本地浏览器预扫描确认登录提交后已离开登录页并进入产品上下文。",
+			FieldPath:  "verified_interaction_plan.actions.intent_login_observe",
+			Confidence: 0.92,
+		}
+		plan.Actions = append(plan.Actions, model.VerifiedInteractionAction{
+			ID: "intent_login_observe", IntentGoalID: "intent_login_observe", Label: "演示登录完成并进入工作台",
+			Kind: "wait", URL: firstNonEmpty(response.Diagnostics.FinalURL, response.SourceURL, project.ProductURL),
+			RouteRef:        safeID("route", firstNonEmpty(response.Diagnostics.FinalURL, response.SourceURL, project.ProductURL)),
+			ExpectedOutcome: "登录完成并进入工作台", SuccessState: "浏览器已离开登录页并进入经扫描的产品页面。",
+			WaitConditions: []string{"domcontentloaded", "networkidle"}, VerificationStatus: "verified",
+			VerificationSource: firstNonEmpty(response.VerificationMode, "playwright_readonly_scan"), VerifiedAt: time.Now().UTC(),
+			EvidenceRefs: []model.EvidenceRef{evidence},
+		})
+		plan.EvidenceRefs = append(plan.EvidenceRefs, evidence)
+	}
 	for _, result := range response.Results {
 		if result.Status != "verified" {
 			continue

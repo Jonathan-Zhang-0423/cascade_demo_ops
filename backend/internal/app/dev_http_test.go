@@ -259,6 +259,129 @@ func TestDevHTTPAssistantAcceptsManualConfigurationProposal(t *testing.T) {
 	}
 }
 
+func TestDevHTTPAssistantV2CompletesIndependentActionsAndRejectsStaleDigest(t *testing.T) {
+	t.Setenv("CASCADE_AGENT_ACTIONS_V2", "true")
+	server := newTestDevHTTPServer(t)
+	handler := server.Handler()
+
+	create := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions", strings.NewReader(`{"context":{"surface":"projects","scopeKey":"actions-v2-http"}}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(create, request)
+	session := decodeBridgeAssistantSession(t, create)
+
+	turn := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions/"+session.ID+"/turns", strings.NewReader(`{"message":"选择本地项目目录，并存储演示账号","idempotencyKey":"turn-actions-v2"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(turn, request)
+	session = decodeBridgeAssistantSession(t, turn)
+	sourceAction := findAssistantActionBySpec(t, session, "source.select_local")
+	registered, err := server.service.RegisterLocalSource("local_repository", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	completeBody, err := json.Marshal(model.AgentActionCompleteRequest{
+		DependencyDigest: sourceAction.DependencyDigest,
+		IdempotencyKey:   "complete-source-v2",
+		SelectedSources:  []model.ConfigurationSourceRef{{Ref: registered.Ref, Kind: "local_repository", Label: registered.Label}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions/"+session.ID+"/actions/"+sourceAction.ID+"/complete", bytes.NewReader(completeBody))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(complete, request)
+	session = decodeBridgeAssistantSession(t, complete)
+	credentialAction := findAssistantActionBySpec(t, session, "credential.store_demo")
+	if credentialAction.Status != "available" {
+		t.Fatalf("independent credential action became stale after source completion: %+v", credentialAction)
+	}
+
+	missingDigest := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions/"+session.ID+"/actions/"+credentialAction.ID+"/complete", strings.NewReader(`{"idempotencyKey":"complete-credential-without-digest","credentialRefs":["credential://demo/fixture"]}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(missingDigest, request)
+	if missingDigest.Code != http.StatusBadRequest || !strings.Contains(missingDigest.Body.String(), "dependency digest is required") {
+		t.Fatalf("missing dependency digest was not rejected: status=%d body=%s", missingDigest.Code, missingDigest.Body.String())
+	}
+
+	staleBody, err := json.Marshal(model.AgentActionCompleteRequest{DependencyDigest: "sha256:stale", IdempotencyKey: "complete-credential-stale", CredentialRefs: []string{"credential://demo/fixture"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions/"+session.ID+"/actions/"+credentialAction.ID+"/complete", bytes.NewReader(staleBody))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(stale, request)
+	if stale.Code != http.StatusBadRequest || !strings.Contains(stale.Body.String(), "dependency is stale") {
+		t.Fatalf("stale dependency digest was not rejected: status=%d body=%s", stale.Code, stale.Body.String())
+	}
+}
+
+func TestDevHTTPAssistantV2ConfirmsSafeActionBatch(t *testing.T) {
+	t.Setenv("CASCADE_AGENT_ACTIONS_V2", "true")
+	server := newTestDevHTTPServer(t)
+	handler := server.Handler()
+
+	create := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions", strings.NewReader(`{"context":{"surface":"projects","scopeKey":"batch-v2-http"}}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(create, request)
+	session := decodeBridgeAssistantSession(t, create)
+
+	proposalBody := []byte(`{"baseVersion":1,"idempotencyKey":"batch-proposal","patch":{"projectName":"Batch Fixture","productURL":"https://example.com","objective":"展示安全批次","mustShow":["打开工作台"]}}`)
+	proposal := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions/"+session.ID+"/configuration-proposals", bytes.NewReader(proposalBody))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(proposal, request)
+	session = decodeBridgeAssistantSession(t, proposal)
+	if len(session.ActionBatches) == 0 || session.IntentPlan == nil {
+		t.Fatalf("V2 session did not project proposal into an action batch: %+v", session)
+	}
+	batch := session.ActionBatches[len(session.ActionBatches)-1]
+	confirmBody, err := json.Marshal(model.AgentActionBatchConfirmRequest{BaseIntentDigest: session.IntentPlan.Digest, IdempotencyKey: "confirm-batch-v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions/"+session.ID+"/batches/"+batch.ID+"/confirm", bytes.NewReader(confirmBody))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(confirmed, request)
+	session = decodeBridgeAssistantSession(t, confirmed)
+	if session.Configuration.ProjectName != "Batch Fixture" {
+		t.Fatalf("safe configuration batch was not applied: %+v", session.Configuration)
+	}
+}
+
+func decodeBridgeAssistantSession(t *testing.T, response *httptest.ResponseRecorder) model.AssistantSession {
+	t.Helper()
+	if response.Code != http.StatusOK {
+		t.Fatalf("assistant request status=%d body=%s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	var session model.AssistantSession
+	if err := json.Unmarshal(bridge.Data, &session); err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+
+func findAssistantActionBySpec(t *testing.T, session model.AssistantSession, specID string) model.AgentAction {
+	t.Helper()
+	for _, action := range session.Actions {
+		if action.SpecID == specID {
+			return action
+		}
+	}
+	t.Fatalf("assistant action %s not found: %+v", specID, session.Actions)
+	return model.AgentAction{}
+}
+
 func TestDevHTTPPlanningModelSettingsNeverEchoAPIKey(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	keys := map[string]string{}
@@ -336,7 +459,7 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 		Mode:               model.AppModeDesktop,
 		ProductURL:         "https://cascadeai.cn",
 		LocalRepoPath:      repoPath,
-		ProductDescription: "演示登录（10s，账号yikai.xu@cascadeai.co密码000000），然后新建项目。",
+		ProductDescription: "演示登录（10s，账号demo.user@example.test密码FixtureOnly987），然后新建项目。",
 		TargetAudience:     "运营",
 		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://cascadeai.cn")},
 	}})
@@ -354,7 +477,7 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 		t.Fatal(err)
 	}
 	text := string(payload)
-	for _, forbidden := range []string{"000000", "yikai.xu@cascadeai.co"} {
+	for _, forbidden := range []string{"FixtureOnly987", "demo.user@example.test"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("client execution package leaked credential %q: %s", forbidden, text)
 		}
@@ -552,7 +675,7 @@ func TestPackageLeakageDetectionAllowsSafetyPolicyAPIKeyWords(t *testing.T) {
 	if leakage := detectPackageLeakage(pkg); leakage != ".env" {
 		t.Fatalf("expected .env path to be blocked, got %q", leakage)
 	}
-	pkg.Metadata = map[string]any{"bad_password": "密码：000000"}
+	pkg.Metadata = map[string]any{"bad_password": "密码：FixtureOnly987"}
 	if leakage := detectPackageLeakage(pkg); leakage != "raw password literal" {
 		t.Fatalf("expected raw password literal to be blocked, got %q", leakage)
 	}

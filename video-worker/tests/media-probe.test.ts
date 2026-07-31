@@ -56,11 +56,19 @@ describe("FFmpeg media probe fallback", () => {
 
   it("accepts an imported audio extension before optional FFprobe metadata is available", async () => {
     const inputPath = path.join(tmpdir(), `cascade-media-probe-${Date.now()}.wav`);
+    const previousFFprobe = process.env.CASCADE_FFPROBE_PATH;
+    const previousFFmpeg = process.env.CASCADE_FFMPEG_PATH;
     try {
+      process.env.CASCADE_FFPROBE_PATH = "definitely-not-installed-ffprobe-for-import-test";
+      process.env.CASCADE_FFMPEG_PATH = "definitely-not-installed-ffmpeg-for-import-test";
       await writeFile(inputPath, "fixture");
       const result = await probeMediaFile({ path: inputPath });
       expect(result).toMatchObject({ file_name: path.basename(inputPath), mime_type: "audio/wav" });
     } finally {
+      if (previousFFprobe === undefined) delete process.env.CASCADE_FFPROBE_PATH;
+      else process.env.CASCADE_FFPROBE_PATH = previousFFprobe;
+      if (previousFFmpeg === undefined) delete process.env.CASCADE_FFMPEG_PATH;
+      else process.env.CASCADE_FFMPEG_PATH = previousFFmpeg;
       await import("node:fs/promises").then(({ rm }) => rm(inputPath, { force: true }));
     }
   });
