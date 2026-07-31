@@ -97,13 +97,13 @@ type BrowserAgentStageActionResult struct {
 }
 
 type BrowserAgentStageEventVerifier interface {
-	ValidateStageEvents(context.Context, BrowserAgentValidationContext, []model.StageExecutionEvent) (model.ValidationReport, error)
+	ValidateStageEvents(context.Context, model.BrowserAgentValidationContext, []model.StageExecutionEvent) (model.ValidationReport, error)
 }
 
 // BrowserAgentStageRepairProposer is deliberately separate from the verifier.
 // A verifier may describe a safe mechanical repair, but it never applies one.
 type BrowserAgentStageRepairProposer interface {
-	ProposeRuntimeRepair(context.Context, BrowserAgentValidationContext, BrowserAgentRuntimeStage, []model.StageExecutionEvent, model.ValidationReport) (model.RuntimeRepairProposal, error)
+	ProposeRuntimeRepair(context.Context, model.BrowserAgentValidationContext, BrowserAgentRuntimeStage, []model.StageExecutionEvent, model.ValidationReport) (model.RuntimeRepairProposal, error)
 }
 
 type BrowserAgentStageRunResult struct {
@@ -140,8 +140,8 @@ func newBrowserAgentStageOrchestratorWithVerifier(guard BrowserAgentPolicyGuard,
 	return orchestrator
 }
 
-func (p BrowserAgentRuntimePlan) validationContext() BrowserAgentValidationContext {
-	return BrowserAgentValidationContext{
+func (p BrowserAgentRuntimePlan) validationContext() model.BrowserAgentValidationContext {
+	return model.BrowserAgentValidationContext{
 		RunID: p.RunID, SourcePackageID: p.SourcePackageID, SourceBundleHashSHA256: p.SourceBundleHashSHA256,
 		EffectivePolicyHashSHA256: p.PolicyHashSHA256, WorkflowGraph: p.WorkflowGraph, Plan: p.Plan,
 		StageApprovalPlan: p.StageApprovalPlan, ScriptOutline: p.ScriptOutline, BrowserAgentContract: p.BrowserAgentContract,

@@ -78,7 +78,7 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 
 func TestDeterministicBrowserAgentStageVerifierStopsOnFailedAssertion(t *testing.T) {
 	verifier := deterministicBrowserAgentStageVerifier{}
-	report, err := verifier.ValidateStageEvents(context.Background(), BrowserAgentValidationContext{
+	report, err := verifier.ValidateStageEvents(context.Background(), model.BrowserAgentValidationContext{
 		SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
 	}, []model.StageExecutionEvent{{
 		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1",
@@ -100,7 +100,7 @@ func TestDeterministicBrowserAgentStageVerifierStopsWhenRequiredValidationIsMiss
 	verifier := deterministicBrowserAgentStageVerifier{requiredValidations: map[string][]model.ValidationSpec{
 		"node_1": {{ID: "validation_1", Kind: "element_visible", Required: true}},
 	}}
-	report, err := verifier.ValidateStageEvents(context.Background(), BrowserAgentValidationContext{
+	report, err := verifier.ValidateStageEvents(context.Background(), model.BrowserAgentValidationContext{
 		SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
 	}, []model.StageExecutionEvent{{
 		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1",
@@ -119,7 +119,7 @@ func TestDeterministicBrowserAgentStageVerifierStopsWhenRequiredValidationIsMiss
 }
 
 func TestDeterministicBrowserAgentVerifierPreExecutionReportsMissingHashes(t *testing.T) {
-	report, err := newDeterministicBrowserAgentStageVerifier(nil).ValidateBeforeExecution(context.Background(), BrowserAgentValidationContext{
+	report, err := newDeterministicBrowserAgentStageVerifier(nil).ValidateBeforeExecution(context.Background(), model.BrowserAgentValidationContext{
 		RunID: "run_1", SourcePackageID: "pkg_1",
 		StageApprovalPlan:    &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{NodeID: "node_1"}}},
 		ScriptOutline:        &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{NodeID: "node_1"}}},
@@ -138,7 +138,7 @@ func TestDeterministicBrowserAgentVerifierPreExecutionReportsMissingHashes(t *te
 
 func TestDeterministicBrowserAgentStageVerifierStopsOnRuntimeIdentityMismatch(t *testing.T) {
 	verifier := deterministicBrowserAgentStageVerifier{}
-	report, err := verifier.ValidateStageEvents(context.Background(), BrowserAgentValidationContext{
+	report, err := verifier.ValidateStageEvents(context.Background(), model.BrowserAgentValidationContext{
 		RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
 	}, []model.StageExecutionEvent{{
 		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1",
@@ -159,7 +159,7 @@ func TestDeterministicBrowserAgentStageVerifierStopsOnRuntimeIdentityMismatch(t 
 func TestDeterministicBrowserAgentPostVerifierRequiresRuntimeReportsAndObservedState(t *testing.T) {
 	verifier := deterministicBrowserAgentStageVerifier{}
 	now := timeNowUTC()
-	vctx := BrowserAgentValidationContext{RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash"}
+	vctx := model.BrowserAgentValidationContext{RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash"}
 	events := []model.StageExecutionEvent{
 		{SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash", NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 1, EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: now, Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "action_completed", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}}},
 		{SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_2", RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash", NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 2, EventType: model.StageExecutionEventStageCompleted, OccurredAt: now.Add(time.Second), Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}}},
@@ -255,11 +255,11 @@ type postStoppingBrowserAgentVerifier struct {
 	deterministicBrowserAgentStageVerifier
 }
 
-func (v postStoppingBrowserAgentVerifier) ValidateBeforeExecution(ctx context.Context, validationContext BrowserAgentValidationContext) (model.ValidationReport, error) {
+func (v postStoppingBrowserAgentVerifier) ValidateBeforeExecution(ctx context.Context, validationContext model.BrowserAgentValidationContext) (model.ValidationReport, error) {
 	return v.deterministicBrowserAgentStageVerifier.ValidateBeforeExecution(ctx, validationContext)
 }
 
-func (v postStoppingBrowserAgentVerifier) ValidatePostExecution(_ context.Context, validationContext BrowserAgentValidationContext, _ model.RecordingResultPackage, _ []model.StageExecutionEvent) (model.ValidationReport, error) {
+func (v postStoppingBrowserAgentVerifier) ValidatePostExecution(_ context.Context, validationContext model.BrowserAgentValidationContext, _ model.RecordingResultPackage, _ []model.StageExecutionEvent) (model.ValidationReport, error) {
 	return model.ValidationReport{
 		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "post_stop", RunID: validationContext.SourcePackageID,
 		SourcePackageID: validationContext.SourcePackageID, SourceBundleHashSHA256: validationContext.SourceBundleHashSHA256,

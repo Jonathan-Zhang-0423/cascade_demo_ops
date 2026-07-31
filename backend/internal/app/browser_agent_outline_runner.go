@@ -248,7 +248,7 @@ func newDeterministicBrowserAgentStageVerifier(pkg *model.ClientExecutionPackage
 // ValidateBeforeExecution is deliberately structural: before the browser has
 // opened, the only permissible evidence is the approved, hash-bound package.
 // It checks that the compiled plan did not lose the required validation rules.
-func (v deterministicBrowserAgentStageVerifier) ValidateBeforeExecution(_ context.Context, validationContext BrowserAgentValidationContext) (model.ValidationReport, error) {
+func (v deterministicBrowserAgentStageVerifier) ValidateBeforeExecution(_ context.Context, validationContext model.BrowserAgentValidationContext) (model.ValidationReport, error) {
 	checks := []model.ValidationCheck{}
 	evidence := []model.EvidenceRef{{ID: "approved_package_contract", Kind: model.EvidenceKindDocs, Summary: "hash-bound approved package"}}
 	structurePassed := validationContext.StageApprovalPlan != nil && validationContext.ScriptOutline != nil && validationContext.BrowserAgentContract != nil
@@ -277,7 +277,7 @@ func (v deterministicBrowserAgentStageVerifier) ValidateBeforeExecution(_ contex
 // ValidatePostExecution makes the aggregate decision only from observed stage
 // events and packaged StepResults; it never treats an expected success state as
 // proof that the browser reached it.
-func (v deterministicBrowserAgentStageVerifier) ValidatePostExecution(_ context.Context, validationContext BrowserAgentValidationContext, result model.RecordingResultPackage, events []model.StageExecutionEvent) (model.ValidationReport, error) {
+func (v deterministicBrowserAgentStageVerifier) ValidatePostExecution(_ context.Context, validationContext model.BrowserAgentValidationContext, result model.RecordingResultPackage, events []model.StageExecutionEvent) (model.ValidationReport, error) {
 	checks := []model.ValidationCheck{}
 	evidenceRefs := []model.EvidenceRef{}
 	completed := map[string]bool{}
@@ -391,7 +391,7 @@ func uniqueEvidenceRefs(refs []model.EvidenceRef) []model.EvidenceRef {
 	return result
 }
 
-func (v deterministicBrowserAgentStageVerifier) ValidateStageEvents(_ context.Context, validationContext BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
+func (v deterministicBrowserAgentStageVerifier) ValidateStageEvents(_ context.Context, validationContext model.BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
 	if len(events) == 0 {
 		return model.ValidationReport{}, errors.New("stage outcome verifier received no events")
 	}
@@ -670,14 +670,22 @@ func browserAgentFailureDiagnostic(request BrowserAgentOutlineRunRequest, events
 		RedactionReport: model.DiagnosticRedactionReport{Applied: true, PolicyRef: request.Package.PackageID + ".redactions", MaskedSelectors: uniqueStrings(maskedSelectors), FullHTMLIncluded: false},
 		CapturedAt:      capturedAt,
 	}
+	var fallbackScreenshots []model.PackageArtifactDescriptor
 	for _, artifact := range mapBrowserAgentArtifacts(artifacts) {
 		if artifact.Kind == "browser_trace" {
 			diagnostic.TraceRefs = append(diagnostic.TraceRefs, browserAgentDiagnosticArtifact(artifact, "failure_trace"))
 			continue
 		}
-		if artifact.SourceNodeID == failedNodeID && (artifact.Kind == "screenshot" || artifact.Kind == "failure_screenshot") {
-			diagnostic.ScreenshotRefs = append(diagnostic.ScreenshotRefs, browserAgentDiagnosticArtifact(artifact, "failure_screenshot"))
+		if artifact.Kind == "screenshot" || artifact.Kind == "failure_screenshot" {
+			if artifact.SourceNodeID == failedNodeID {
+				diagnostic.ScreenshotRefs = append(diagnostic.ScreenshotRefs, browserAgentDiagnosticArtifact(artifact, "failure_screenshot"))
+			} else {
+				fallbackScreenshots = append(fallbackScreenshots, browserAgentDiagnosticArtifact(artifact, "failure_screenshot"))
+			}
 		}
+	}
+	if len(diagnostic.ScreenshotRefs) == 0 {
+		diagnostic.ScreenshotRefs = append(diagnostic.ScreenshotRefs, fallbackScreenshots...)
 	}
 	return diagnostic
 }
