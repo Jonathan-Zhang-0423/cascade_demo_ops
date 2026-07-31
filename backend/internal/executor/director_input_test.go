@@ -88,6 +88,55 @@ func TestNewDirectorInputPreservesSourceOnlyBoundary(t *testing.T) {
 	}
 }
 
+func TestServerDirectorRuntimeAllowsOnlyDoubaoFamilyProviders(t *testing.T) {
+	t.Setenv("GLM_API_KEY", "must-not-enter-server-runtime")
+	t.Setenv("KIMI_API_KEY", "must-not-enter-server-runtime")
+	t.Setenv("MINIMAX_API_KEY", "must-not-enter-server-runtime")
+	t.Setenv("DEEPSEEK_API_KEY", "must-not-enter-server-runtime")
+	t.Setenv("DOUBAO_API_KEY", "doubao-test-key")
+
+	runtime := arkMediaRuntimeFromEnv(config.ArkMediaModeReal)
+	if len(runtime.ModelProviders) != 3 {
+		t.Fatalf("server director providers = %v, want exactly doubao/seedance/seedream", runtime.ModelProviders)
+	}
+	for _, provider := range []config.ModelProvider{
+		config.ModelProviderDoubao,
+		config.ModelProviderSeedance,
+		config.ModelProviderSeedream,
+	} {
+		if _, ok := runtime.ModelProviders[provider]; !ok {
+			t.Fatalf("server director runtime is missing allowed provider %s", provider)
+		}
+	}
+	for _, provider := range []config.ModelProvider{
+		config.ModelProviderGLM,
+		config.ModelProviderKimi,
+		config.ModelProviderMinimax,
+		config.ModelProviderDeepSeek,
+	} {
+		if _, ok := runtime.ModelProviders[provider]; ok {
+			t.Fatalf("forbidden provider %s entered the server director runtime", provider)
+		}
+	}
+}
+
+func TestServerDirectorRuntimeRejectsNonDoubaoModelOverrides(t *testing.T) {
+	t.Setenv("SEEDANCE_MODEL", "glm-5")
+	t.Setenv("SEEDREAM_MODEL", "deepseek-image")
+	t.Setenv("DOUBAO_MODEL", "kimi-k2.7-code")
+
+	runtime := arkMediaRuntimeFromEnv(config.ArkMediaModeReal)
+	if got := runtime.ModelProviders[config.ModelProviderSeedance].DefaultModel; got != defaultSeedanceModel {
+		t.Fatalf("seedance model = %q, want safe default %q", got, defaultSeedanceModel)
+	}
+	if got := runtime.ModelProviders[config.ModelProviderSeedream].DefaultModel; got != defaultSeedreamModel {
+		t.Fatalf("seedream model = %q, want safe default %q", got, defaultSeedreamModel)
+	}
+	if got := runtime.ModelProviders[config.ModelProviderDoubao].DefaultModel; got != "" {
+		t.Fatalf("doubao model = %q, want empty safe default", got)
+	}
+}
+
 func TestNewDirectorInputCapturesVerifiedInteractionAndRuntimeAdaptiveContext(t *testing.T) {
 	source := sampleClientExecutionPackageForExecutorTest(t)
 	source.WorkflowGraph.Nodes[0].ID = "node_verified"

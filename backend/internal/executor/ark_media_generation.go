@@ -28,7 +28,7 @@ const (
 
 type ArkMediaGenerationOptions struct {
 	OutputDir        string
-	Client           media.ArkMediaClient
+	Client           media.VideoGenerationClient
 	PollAttempts     int
 	PollInterval     time.Duration
 	Downloader       arkMediaCandidateDownloader
@@ -84,7 +84,7 @@ func NewArkMediaGenerationResultWithOptions(ctx context.Context, source *model.C
 func arkMediaGenerationOptionsFromEnv(outputDir string, now func() time.Time) ArkMediaGenerationOptions {
 	mode := configuredArkMediaModeFromEnv()
 	pollAttempts := 0
-	client := media.ArkMediaClient(nil)
+	client := media.VideoGenerationClient(nil)
 	if mode == config.ArkMediaModeReal {
 		pollAttempts = defaultArkMediaPollAttempts
 		client = arkMediaClientFromEnv(mode)
