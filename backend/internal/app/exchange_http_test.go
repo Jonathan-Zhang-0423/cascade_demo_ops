@@ -114,6 +114,58 @@ func TestExchangeHTTPRejectsBadInstallationEnvelopeSignature(t *testing.T) {
 	}
 }
 
+func TestExchangeHTTPBindsFormalAppUploadToAuthenticatedInstallation(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 30, 9, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	discovery := exchangeHTTPDo[model.ExchangeBootstrapDiscoveryResponse](t, server, http.MethodGet, "/.well-known/cascade-exchange", nil)
+	privateKey, session := registerTestInstallation(t, server, discovery, "install_http_formal")
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	init := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution,
+		Producer: model.ExchangeProducer{InstallID: session.InstallID, RuntimeProfile: "desktop-product-run"},
+	}, "Authorization", "Cascade-Session "+session.SessionToken)
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Producer.InstallID = session.InstallID
+	envelope.Producer.RuntimeProfile = "desktop-product-run"
+	signEnvelopeForInstallation(t, &envelope, pkg, privateKey)
+
+	upload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID: init.UploadID, Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg,
+	}, "Authorization", "Cascade-Session "+session.SessionToken)
+	state, err := server.service.exchange.packageState(pkg.OrgID, upload.ExchangePackageID)
+	if err != nil || state.AuthenticatedInstallID != session.InstallID {
+		t.Fatalf("formal HTTP upload must retain only transport-authenticated installation identity: state=%+v err=%v", state, err)
+	}
+}
+
+func TestExchangeHTTPRejectsInstallationMismatchBeforePackageAcceptance(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 30, 9, 5, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	discovery := exchangeHTTPDo[model.ExchangeBootstrapDiscoveryResponse](t, server, http.MethodGet, "/.well-known/cascade-exchange", nil)
+	_, session := registerTestInstallation(t, server, discovery, "install_http_mismatch")
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	init := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution,
+		Producer: model.ExchangeProducer{InstallID: session.InstallID, RuntimeProfile: "desktop-product-run"},
+	}, "Authorization", "Cascade-Session "+session.SessionToken)
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Producer.InstallID = "install_unrelated"
+	envelope.Producer.RuntimeProfile = "desktop-product-run"
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/execution-packages", bytes.NewReader(mustMarshalJSON(t, exchangeUploadHTTPBody{UploadID: init.UploadID, Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg})))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Cascade-Session "+session.SessionToken)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "installation_identity_mismatch") {
+		t.Fatalf("mismatched authenticated installation must be rejected: code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestExchangeInstallationSessionPersistsAcrossSnapshotReload(t *testing.T) {
 	t.Setenv(devExchangeHTTPEnv, "1")
 	server := newTestDevHTTPServer(t)
@@ -902,6 +954,18 @@ func registerTestInstallation(t *testing.T, server *DevHTTPServer, discovery mod
 		t.Fatalf("unexpected installation session: %+v", session)
 	}
 	return privateKey, session
+}
+
+func signEnvelopeForInstallation(t *testing.T, envelope *model.ExchangeEnvelope, payload model.ClientExecutionPackage, privateKey ed25519.PrivateKey) {
+	t.Helper()
+	canonical, err := model.CanonicalJSON(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingBytes := []byte(envelope.EnvelopeID + "\n" + envelope.OrgID + "\n" + envelope.ProjectID + "\n" + model.SHA256Hex(canonical))
+	envelope.Crypto.SignatureAlg = exchangeInstallationKeyAlg
+	envelope.Crypto.SignatureKeyID = installationSigningKeyID(envelope.Producer.InstallID)
+	envelope.Crypto.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, signingBytes))
 }
 
 func waitForExchangeHTTPStatus(t *testing.T, server *DevHTTPServer, exchangePackageID string, orgID string, want model.ExchangePackageStatus) model.ExecutionPackageStatusResponse {

@@ -1,0 +1,76 @@
+package media
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/volcengine/ve-tos-golang-sdk/v2/tos"
+
+	"cascade-demoops/backend/internal/model"
+)
+
+type fakeTOSObjectClient struct {
+	putInput     *tos.PutObjectV2Input
+	presignInput *tos.PreSignedURLInput
+	putErr       error
+	presignErr   error
+}
+
+func (f *fakeTOSObjectClient) PutObjectV2(_ context.Context, input *tos.PutObjectV2Input) (*tos.PutObjectV2Output, error) {
+	f.putInput = input
+	return &tos.PutObjectV2Output{}, f.putErr
+}
+
+func (f *fakeTOSObjectClient) PreSignedURL(input *tos.PreSignedURLInput) (*tos.PreSignedURLOutput, error) {
+	f.presignInput = input
+	return &tos.PreSignedURLOutput{SignedUrl: "https://tos-cn-beijing.ivolces.com/signed"}, f.presignErr
+}
+
+func TestTOSAssetPublisherUploadsSelectedAssetAndReturnsSignedURL(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "source.mp4")
+	if err := os.WriteFile(path, []byte("mp4-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
+	fake := &fakeTOSObjectClient{}
+	publisher := newTOSAssetPublisherForClient(TOSAssetPublisherConfig{
+		Bucket: "cascade-ark-media-test", Prefix: "ark-media/", SignedURLTTL: time.Hour,
+	}, fake, func() time.Time { return now })
+	plan := model.ArkAssetPublicationPlan{SourcePackageID: "pkg_01", Items: []model.ArkAssetPublicationItem{{
+		Ref:     model.DirectorMaterialRef{ID: "source", URI: path, MimeType: "video/mp4"},
+		TaskIDs: []string{"seedance_reference_director_preview"}, Required: true,
+		RecommendedFileName: "source_reference.mp4", Status: "ready_after_publication",
+	}}}
+
+	result, err := publisher.PublishArkAssets(t.Context(), plan, model.DirectorMaterialRef{ID: "plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.CanUseForRealCall || result.Mode != "private_tos_presigned_url" || len(result.Items) != 1 {
+		t.Fatalf("unexpected publication result: %+v", result)
+	}
+	if fake.putInput == nil || fake.putInput.Bucket != "cascade-ark-media-test" || fake.putInput.ContentLength != int64(len("mp4-bytes")) {
+		t.Fatalf("unexpected upload input: %+v", fake.putInput)
+	}
+	if fake.putInput.Key != "ark-media/pkg_01/001_source_reference.mp4" || fake.presignInput == nil || fake.presignInput.Key != fake.putInput.Key {
+		t.Fatalf("unexpected TOS object key: put=%+v presign=%+v", fake.putInput, fake.presignInput)
+	}
+	if result.Items[0].ProposedPublicRef == nil || result.Items[0].ProposedPublicRef.URI != "https://tos-cn-beijing.ivolces.com/signed" {
+		t.Fatalf("expected signed URL only in the local publication result: %+v", result.Items[0])
+	}
+}
+
+func TestTOSAssetPublisherConfigFromEnvDoesNotRequireStaticPublicURL(t *testing.T) {
+	values := map[string]string{
+		"VOLC_TOS_ACCESS_KEY": "ak", "VOLC_TOS_SECRET_KEY": "sk", "VOLC_TOS_ENDPOINT": "tos-cn-beijing.volces.com",
+		"VOLC_TOS_REGION": "cn-beijing", "VOLC_TOS_BUCKET": "cascade-ark-media-test", "VOLC_TOS_PREFIX": "ark-media/",
+	}
+	config, configured := TOSAssetPublisherConfigFromEnv(func(key string) string { return values[key] })
+	if !configured || config.Prefix != "ark-media" || config.SignedURLTTL != time.Hour {
+		t.Fatalf("unexpected TOS config: %+v configured=%t", config, configured)
+	}
+}

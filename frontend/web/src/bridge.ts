@@ -16,6 +16,7 @@ import type {
   ServerLifecycleStageID,
   ServerLifecycleStageStatus,
   ServerLifecycleStageView,
+	ServerExecutionAcceptanceView,
 } from "./domain";
 import type {
   AssetKind,
@@ -86,6 +87,7 @@ export type DesktopBridgeClient = {
   dismissAssistantProposal(sessionID: string, proposalID: string, baseVersion?: number, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
   cancelAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
   selectLocalProjectDirectory(): Promise<BridgeResult<ConfigurationSourceRefView>>;
+  registerDevLocalProjectDirectory(path: string): Promise<BridgeResult<ConfigurationSourceRefView>>;
   selectRequirementDocuments(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
   selectBrandAssets(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
   storeDemoCredential(ref: string, username: string, password: string): Promise<BridgeResult<{ secretRef: string; configured: boolean }>>;
@@ -445,6 +447,30 @@ type LocalExecutionResultSummary = {
   raw_recording_uri?: string;
   deliverables?: LocalExecutionDeliverable[];
   acked_at?: string;
+  validation?: LocalExecutionValidationSummary;
+  acceptance?: LocalExecutionAcceptanceSummary;
+};
+
+type LocalExecutionValidationSummary = {
+  runtime?: string;
+  status?: string;
+  validation_report_count?: number;
+  pre_execution_report_count?: number;
+  runtime_stage_report_count?: number;
+  post_execution_report_count?: number;
+  latest_decision?: string;
+  real_observed_step_count?: number;
+  stage_event_log_available?: boolean;
+};
+
+type LocalExecutionAcceptanceSummary = {
+  origin?: string;
+  app_generated?: boolean;
+  formal_exchange?: boolean;
+  strict_evidence_complete?: boolean;
+  final_mp4_available?: boolean;
+  editor_materialized?: boolean;
+  status?: string;
 };
 
 type LocalExecutionFailureSummary = {
@@ -668,6 +694,12 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     },
     async selectLocalProjectDirectory() {
       return callWailsBridge<ConfigurationSourceRefView>("SelectLocalProjectDirectory");
+    },
+    async registerDevLocalProjectDirectory(path) {
+      return requestLocal<ConfigurationSourceRefView>(baseURL, "/v1/desktop/dev/local-sources", {
+        method: "POST",
+        body: JSON.stringify({ kind: "local_repository", path, dev_test_ack: true }),
+      });
     },
     async selectRequirementDocuments() {
       return callWailsBridge<ConfigurationSourceRefView[]>("SelectRequirementDocuments");
@@ -1134,6 +1166,7 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async dismissAssistantProposal(_sessionID, _proposalID, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async cancelAssistantSession() { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async selectLocalProjectDirectory() { return ok({ ref: "source_mock_local", kind: "local_repository", label: "sample-project" }); },
+    async registerDevLocalProjectDirectory() { return ok({ ref: "source_mock_local", kind: "local_repository", label: "sample-project" }); },
     async selectRequirementDocuments() { return ok([{ ref: "source_mock_requirement", kind: "requirement_document", label: "requirements.md" }]); },
     async selectBrandAssets() { return ok([{ ref: "source_mock_brand", kind: "brand_asset", label: "brand.png" }]); },
     async storeDemoCredential(ref) { return ok({ secretRef: `credential://demo/${ref}`, configured: true }); },
@@ -1674,6 +1707,7 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
   const cloudJobID = lifecycle.upload.cloud_job_id || status.cloud_job_id;
   const failureSummary = failureSummaryText(status.failure_summary, status.error);
   const sandboxMetadata = resultPackage?.execution_trace?.sandbox ?? resultPackage?.audit_trail?.sandbox ?? workspace.cloudRun.sandboxMetadata;
+	const serverAcceptance = acceptanceViewFromStatus(status) ?? workspace.cloudRun.serverAcceptance;
   return {
     ...workspace,
     stage: mappedStatus === "failed" ? "script_repair" : mappedStatus === "succeeded" ? "result_review" : "cloud_run",
@@ -1693,7 +1727,8 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
       status: mappedStatus,
       stageHistory: lifecycleStagesFromStatus(status, resultPackage),
       artifactSummary,
-      currentStep: status.message || cloudRunCurrentStep(status),
+		...(serverAcceptance ? { serverAcceptance } : {}),
+      currentStep: cloudRunAcceptanceMessage(status) || status.message || cloudRunCurrentStep(status),
       progress: status.progress_percent ?? (mappedStatus === "succeeded" || mappedStatus === "failed" ? 100 : workspace.cloudRun.progress),
       retryCount: workspace.cloudRun.retryCount,
       ...(cloudJobID ? { cloudJobID } : {}),
@@ -1868,7 +1903,12 @@ function workspaceWithResultPackage(workspace: ProjectWorkspaceView, resultPacka
     },
     status,
     result: resultPackage,
-  });
+	});
+	if (workspace.cloudRun.serverAcceptance) {
+		next.cloudRun.serverAcceptance = workspace.cloudRun.serverAcceptance;
+		const acceptanceMessage = cloudRunAcceptanceMessageFromView(workspace.cloudRun.serverAcceptance);
+		if (acceptanceMessage) next.cloudRun.currentStep = acceptanceMessage;
+	}
 	const previousStages = workspace.cloudRun.stageHistory;
 	if (!previousStages?.length) return next;
 	return {
@@ -2214,6 +2254,45 @@ function cloudRunCurrentStep(status: LocalExecutionPackageStatusResponse): strin
   if (status.message) return status.message;
   if (status.stage) return `服务器阶段：${status.stage}`;
   return "等待服务器状态";
+}
+
+function cloudRunAcceptanceMessage(status: LocalExecutionPackageStatusResponse): string | undefined {
+  const acceptance = status.result_summary?.acceptance;
+  if (acceptance?.status === "ready_for_app_e2e_acceptance") {
+    return "真实 App 执行包已形成完整证据链、MP4 和待编辑素材。";
+  }
+  if (acceptance?.status === "server_fixture_only") {
+    return "这是 Server 受控验收素材，不能作为 App 到 Server 联调通过依据。";
+  }
+  if (acceptance?.status === "incomplete") {
+    return "结果已返回，但真实步骤证据、MP4 或编辑器素材尚未齐全。";
+  }
+	if (acceptance?.status === "unverified_origin") {
+		return "结果证据完整，但上传未绑定已验证的 App Installation 会话，不能作为正式联调依据。";
+	}
+  return undefined;
+}
+
+function cloudRunAcceptanceMessageFromView(acceptance?: ServerExecutionAcceptanceView): string | undefined {
+  if (acceptance?.status === "ready_for_app_e2e_acceptance") return "真实 App 执行包已形成完整证据链、MP4 和待编辑素材。";
+  if (acceptance?.status === "server_fixture_only") return "这是 Server 受控验收素材，不能作为 App 到 Server 联调通过依据。";
+  if (acceptance?.status === "incomplete") return "结果已返回，但真实步骤证据、MP4 或编辑器素材尚未齐全。";
+	if (acceptance?.status === "unverified_origin") return "结果证据完整，但上传未绑定已验证的 App Installation 会话，不能作为正式联调依据。";
+  return undefined;
+}
+
+function acceptanceViewFromStatus(status: LocalExecutionPackageStatusResponse): ServerExecutionAcceptanceView | undefined {
+  const value = status.result_summary?.acceptance;
+  if (!value) return undefined;
+  const result: ServerExecutionAcceptanceView = {};
+  if (value.origin !== undefined) result.origin = value.origin;
+  if (value.app_generated !== undefined) result.appGenerated = value.app_generated;
+  if (value.formal_exchange !== undefined) result.formalExchange = value.formal_exchange;
+  if (value.strict_evidence_complete !== undefined) result.strictEvidenceComplete = value.strict_evidence_complete;
+  if (value.final_mp4_available !== undefined) result.finalMP4Available = value.final_mp4_available;
+  if (value.editor_materialized !== undefined) result.editorMaterialized = value.editor_materialized;
+  if (value.status !== undefined) result.status = value.status;
+  return result;
 }
 
 function failureSummaryText(failure?: LocalExecutionFailureSummary, error?: { code: string; message: string }): string | undefined {
