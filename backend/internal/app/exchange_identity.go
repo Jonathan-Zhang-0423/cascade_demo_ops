@@ -115,13 +115,14 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	if err != nil {
 		return ExchangeSession{}, err
 	}
-	if isSessionUsable(record, baseURL, s.runtime.CloudExchangeToken) {
-		return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	token := strings.TrimSpace(s.runtime.CloudExchangeToken)
+	if isSessionUsable(record, baseURL, token) {
+		return sessionFromRecord(record, baseURL, token), nil
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	var discovery model.ExchangeBootstrapDiscoveryResponse
-	if useConfiguredExchangeBootstrap(baseURL, s.runtime.CloudExchangeBaseURL, s.runtime.Environment) {
+	if useConfiguredExchangeBootstrap(baseURL, s.effectiveControlPlaneBaseURL(), s.runtime.Environment) {
 		discovery = localBootstrapDiscovery(baseURL, s.runtime.Environment, time.Now().UTC())
 	} else {
 		discovery, err = cloudGetPublicJSON[model.ExchangeBootstrapDiscoveryResponse](ctx, client, baseURL+"/.well-known/cascade-exchange")
@@ -171,19 +172,16 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	}
 	response, err := cloudPostPublicJSON[model.AppInstallationSessionResponse](ctx, client, discovery.ExchangeBaseURL+"/v1/app-installations/register", register)
 	if err != nil {
-		if !isLocalExchangeBaseURL(baseURL) {
-			if isOptionalExchangeDiscoveryError(err) {
-				return ExchangeSession{}, newExchangeProtocolError(
-					"cloud_auth_unavailable",
-					"cloud_exchange.auth",
-					"installation_endpoint_missing",
-					"服务器尚未部署 App installation 自动配对接口，无法在无手动 token 的情况下上传执行包。",
-					"请让云端启用 /v1/app-installations/register，或由 Dev Bridge/服务端预置 legacy exchange 凭据；不要要求最终用户手动填写 token。",
-				)
-			}
-			return ExchangeSession{}, err
+		if isOptionalExchangeDiscoveryError(err) {
+			return ExchangeSession{}, newExchangeProtocolError(
+				"cloud_auth_unavailable",
+				"cloud_exchange.auth",
+				"installation_endpoint_missing",
+				"服务器尚未部署 App installation 自动配对接口，无法在无手动 token 的情况下上传执行包。",
+				"请让云端启用 /v1/app-installations/register，或由 Dev Bridge/服务端预置 legacy exchange 凭据；不要要求最终用户手动填写 token。",
+			)
 		}
-		response = localInstallationSession(record, register, discovery, time.Now().UTC())
+		return ExchangeSession{}, err
 	}
 	record.SessionID = response.SessionID
 	record.SessionToken = response.SessionToken
@@ -194,7 +192,7 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	if err := store.save(record); err != nil {
 		return ExchangeSession{}, err
 	}
-	return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	return sessionFromRecord(record, baseURL, token), nil
 }
 
 func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, error) {
@@ -213,13 +211,13 @@ func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, 
 }
 
 func (s *Service) discoverExchangeBaseURL() (string, error) {
-	if strings.TrimSpace(s.runtime.CloudExchangeBaseURL) != "" {
-		return strings.TrimRight(s.runtime.CloudExchangeBaseURL, "/"), nil
+	if configured := s.effectiveControlPlaneBaseURL(); configured != "" {
+		return configured, nil
 	}
 	if record, err := s.exchangeIdentityStore().load(); err == nil && strings.TrimSpace(record.ExchangeBaseURL) != "" {
 		return strings.TrimRight(record.ExchangeBaseURL, "/"), nil
 	}
-	return "", errors.New("DemoOps execution server is not configured; set CASCADE_CLOUD_EXCHANGE_BASE_URL or pair this installation")
+	return "", errors.New("DemoOps execution server is not configured; open App settings and enter the control plane base URL")
 }
 
 func useConfiguredExchangeBootstrap(baseURL string, configuredBaseURL string, environment string) bool {

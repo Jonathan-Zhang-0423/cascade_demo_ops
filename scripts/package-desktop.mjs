@@ -1,5 +1,5 @@
 import { createHash, createPublicKey } from "node:crypto";
-import { mkdirSync, cpSync, existsSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdirSync, cpSync, existsSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -62,6 +62,7 @@ mkdirSync(resourceRoot, { recursive: true });
 copyIfExists(desktopBinary, resolve(packageRoot, basename(desktopBinary)));
 copyIfExists(updaterBinary, resolve(packageRoot, basename(updaterBinary)));
 copyIfExists(videoWorkerDist, resolve(resourceRoot, "sidecars", "video-worker", "dist"));
+copyVideoWorkerRuntimeDependencies(resolve(resourceRoot, "sidecars", "video-worker", "node_modules"));
 copyIfExists(webDist, resolve(resourceRoot, "web"));
 copyIfExists(process.execPath, bundledNodePath);
 copyMediaRuntime(sourceFFmpegPath, bundledFFmpegPath, "ffmpeg");
@@ -398,6 +399,20 @@ function copyIfExists(from, to) {
   const stat = statSync(from);
   mkdirSync(stat.isDirectory() ? to : resolve(to, ".."), { recursive: true });
   cpSync(from, to, { recursive: true });
+}
+
+function copyVideoWorkerRuntimeDependencies(destination) {
+  const linkedPlaywright = resolve("video-worker", "node_modules", "playwright");
+  if (!existsSync(linkedPlaywright)) {
+    throw new Error("Missing required video-worker runtime dependency: playwright");
+  }
+  const playwright = realpathSync(linkedPlaywright);
+  const linkedCore = resolve(playwright, "..", "playwright-core");
+  if (!existsSync(linkedCore)) {
+    throw new Error("Missing required video-worker runtime dependency: playwright-core");
+  }
+  copyIfExists(playwright, resolve(destination, "playwright"));
+  copyIfExists(realpathSync(linkedCore), resolve(destination, "playwright-core"));
 }
 
 function createZip(fromDir, toFile) {

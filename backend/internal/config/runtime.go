@@ -107,6 +107,7 @@ type AppRuntimeConfig struct {
 	FFmpegPath            string
 	FFprobePath           string
 	LLMMode               LLMMode
+	LLMProxyURL           string
 	ArkMediaMode          ArkMediaMode
 	ModelAdapterVersion   string
 	ModelProviders        map[ModelProvider]ModelProviderCredential
@@ -199,6 +200,7 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 		FFmpegPath:            os.Getenv("CASCADE_FFMPEG_PATH"),
 		FFprobePath:           os.Getenv("CASCADE_FFPROBE_PATH"),
 		LLMMode:               llmMode,
+		LLMProxyURL:           strings.TrimSpace(os.Getenv("CASCADE_LLM_PROXY_URL")),
 		ArkMediaMode:          arkMediaMode,
 		ModelAdapterVersion:   ModelAdapterVersion,
 		ModelProviders:        modelProviderCredentialsFromEnv(),
@@ -416,11 +418,11 @@ func applyDesktopResourceManifest(cfg *AppRuntimeConfig) {
 		cfg.SidecarPaths = map[string]string{}
 	}
 	for name, relativePath := range manifest.Sidecars {
-		if cfg.SidecarPaths[name] == "" {
+		if !validDesktopRuntimeOverride(cfg.SidecarPaths[name]) {
 			cfg.SidecarPaths[name] = resourcePath(cfg.ResourceRoot, relativePath)
 		}
 	}
-	if cfg.NodeBinaryPath == "" && manifest.Runtimes["node"] != "" {
+	if !validDesktopRuntimeOverride(cfg.NodeBinaryPath) && manifest.Runtimes["node"] != "" {
 		cfg.NodeBinaryPath = resourcePath(cfg.ResourceRoot, manifest.Runtimes["node"])
 	}
 	if cfg.FFmpegPath == "" && manifest.Runtimes["ffmpeg"] != "" {
@@ -450,6 +452,14 @@ func applyDesktopResourceManifest(cfg *AppRuntimeConfig) {
 	if cfg.DesktopExecutablePath == "" {
 		cfg.DesktopExecutablePath = resourcePath(cfg.ResourceRoot, manifest.Updates.AppExecutable)
 	}
+}
+
+func validDesktopRuntimeOverride(path string) bool {
+	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func resourcePath(resourceRoot string, value string) string {

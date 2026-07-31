@@ -37,6 +37,7 @@ type AssistantProposalKind string
 
 const (
 	AssistantProposalConfigurationPatch          AssistantProposalKind = "configuration_patch"
+	AssistantProposalSelectProjectSource         AssistantProposalKind = "select_project_source"
 	AssistantProposalSelectLocalProject          AssistantProposalKind = "select_local_project"
 	AssistantProposalConnectGitHub               AssistantProposalKind = "connect_github"
 	AssistantProposalAttachRequirementDocument   AssistantProposalKind = "attach_requirement_document"
@@ -50,7 +51,7 @@ const (
 
 func IsAssistantProposalKind(value AssistantProposalKind) bool {
 	switch value {
-	case AssistantProposalConfigurationPatch, AssistantProposalSelectLocalProject,
+	case AssistantProposalConfigurationPatch, AssistantProposalSelectProjectSource, AssistantProposalSelectLocalProject,
 		AssistantProposalConnectGitHub, AssistantProposalAttachRequirementDocument,
 		AssistantProposalAttachBrandAsset, AssistantProposalStoreDemoCredential,
 		AssistantProposalConfirmConfiguration, AssistantProposalStartLocalAnalysis,
@@ -144,6 +145,10 @@ type AssistantMessage struct {
 	Role              string               `json:"role"`
 	Kind              string               `json:"kind"`
 	Text              string               `json:"text"`
+	GenerationSource  string               `json:"generationSource,omitempty"`
+	ModelProvider     string               `json:"modelProvider,omitempty"`
+	ModelName         string               `json:"modelName,omitempty"`
+	FallbackReason    string               `json:"fallbackReason,omitempty"`
 	CreatedAt         time.Time            `json:"createdAt"`
 	TargetWorkstation AssistantWorkstation `json:"targetWorkstation,omitempty"`
 	Evidence          []AssistantEvidence  `json:"evidence,omitempty"`
@@ -158,6 +163,18 @@ type AssistantEvent struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+type AssistantNextAction struct {
+	Kind               string               `json:"kind"`
+	Title              string               `json:"title"`
+	Description        string               `json:"description"`
+	PrimaryLabel       string               `json:"primaryLabel,omitempty"`
+	ProposalID         string               `json:"proposalID,omitempty"`
+	TargetWorkstation  AssistantWorkstation `json:"targetWorkstation,omitempty"`
+	RequiresUserAction bool                 `json:"requiresUserAction"`
+	Blocked            bool                 `json:"blocked"`
+	MissingFields      []string             `json:"missingFields,omitempty"`
+}
+
 type AssistantSession struct {
 	ID                   string                    `json:"id"`
 	Context              AssistantContext          `json:"context"`
@@ -165,6 +182,7 @@ type AssistantSession struct {
 	ActiveWorkstation    AssistantWorkstation      `json:"activeWorkstation,omitempty"`
 	WorkstationTitle     string                    `json:"workstationTitle,omitempty"`
 	WorkstationStatus    string                    `json:"workstationStatus,omitempty"`
+	NextAction           AssistantNextAction       `json:"nextAction"`
 	Configuration        ProjectConfigurationDraft `json:"configuration"`
 	Messages             []AssistantMessage        `json:"messages"`
 	Events               []AssistantEvent          `json:"events,omitempty"`
@@ -179,7 +197,20 @@ type AssistantTurnRequest struct {
 	CredentialRefs  []string                 `json:"credentialRefs,omitempty"`
 }
 
+type AssistantConfigurationProposalRequest struct {
+	Patch          ProjectConfigurationPatch `json:"patch"`
+	BaseVersion    int64                     `json:"baseVersion"`
+	IdempotencyKey string                    `json:"idempotencyKey"`
+}
+
 type AssistantProposalDecisionRequest struct {
 	BaseVersion    int64  `json:"baseVersion,omitempty"`
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+}
+
+type AssistantClientActionResultRequest struct {
+	BaseVersion     int64                    `json:"baseVersion,omitempty"`
+	IdempotencyKey  string                   `json:"idempotencyKey,omitempty"`
+	SelectedSources []ConfigurationSourceRef `json:"selectedSources,omitempty"`
+	CredentialRefs  []string                 `json:"credentialRefs,omitempty"`
 }

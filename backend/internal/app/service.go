@@ -13,6 +13,7 @@ import (
 
 	"cascade-demoops/backend/internal/agents"
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/driver"
 	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/llm"
@@ -23,26 +24,32 @@ import (
 )
 
 type Service struct {
-	runtime        config.AppRuntimeConfig
-	llm            *llm.Router
-	flow           *orchestrator.CascadeFlow
-	states         store.StateStore
-	assistantStore store.AssistantStore
-	assistantMu    sync.Mutex
-	layout         storage.LocalLayout
-	exchange       *ExchangeIntakeService
-	runningMu      sync.Mutex
-	runningTasks   map[string]context.CancelFunc
-	editorMu       sync.Mutex
-	editorWorker   editorWorker
-	editorJobsMu   sync.Mutex
-	editorJobs     map[string]editorRenderTask
-	outlineRunner  BrowserAgentOutlineRunner
-	sourceRefsMu   sync.RWMutex
-	sourceRefs     map[string]LocalSourceRef
-	approvalMu     sync.Mutex
-	approvedBuilds map[string]ClientExecutionPackageBuild
-	verifierMu     sync.RWMutex
+	runtime         config.AppRuntimeConfig
+	llm             *llm.Router
+	flow            *orchestrator.CascadeFlow
+	states          store.StateStore
+	assistantStore  store.AssistantStore
+	assistantMu     sync.Mutex
+	controlPlaneMu  sync.RWMutex
+	controlPlaneURL string
+	layout          storage.LocalLayout
+	exchange        *ExchangeIntakeService
+	runningMu       sync.Mutex
+	runningTasks    map[string]context.CancelFunc
+	editorMu        sync.Mutex
+	editorWorker    editorWorker
+	editorJobsMu    sync.Mutex
+	editorJobs      map[string]editorRenderTask
+	outlineRunner   BrowserAgentOutlineRunner
+	sourceRefsMu    sync.RWMutex
+	sourceRefs      map[string]LocalSourceRef
+	approvalMu      sync.Mutex
+	approvedBuilds  map[string]ClientExecutionPackageBuild
+	cloudStateMu    sync.Mutex
+	storeModelKey   func(string, string) error
+	readModelKey    func(string) (string, error)
+	deleteModelKey  func(string) error
+	verifierMu      sync.RWMutex
 	// outcomeVerifier is Server-owned. It never receives a browser/page object
 	// and is snapshotted when an Outline run begins.
 	outcomeVerifier OutcomeVerifier
@@ -73,6 +80,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	if states == nil {
 		states = store.NewMemoryStateStore()
 	}
+	runtime = hydrateRuntimeWithPlanningModelSettings(runtime)
 	llmRouter := llm.NewRouter(runtime)
 	flow, err := orchestrator.NewCascadeFlow(orchestrator.Dependencies{
 		InputContext:         agents.NewInputContextAgent(),
@@ -106,7 +114,11 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		outlineRunner:  nil,
 		sourceRefs:     map[string]LocalSourceRef{},
 		approvedBuilds: map[string]ClientExecutionPackageBuild{},
+		storeModelKey:  credentialstore.StoreModelAPIKey,
+		readModelKey:   credentialstore.ReadModelAPIKey,
+		deleteModelKey: credentialstore.DeleteModelAPIKey,
 	}
+	service.controlPlaneURL = loadPersistedControlPlaneURL(runtime.DataRoot)
 	service.devVisibleBrowserAgent = newDevVisibleBrowserAgentManager(service)
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
 	// Production cloud intake receives only encrypted payload references. Local
@@ -157,7 +169,11 @@ func (s *Service) videoWorkerEnvironment() map[string]string {
 }
 
 func (s *Service) RuntimeConfig() config.AppRuntimeConfig {
-	return s.runtime
+	s.controlPlaneMu.RLock()
+	defer s.controlPlaneMu.RUnlock()
+	runtime := cloneModelRuntime(s.runtime)
+	runtime.CloudExchangeBaseURL = firstNonEmptyString(s.controlPlaneURL, runtime.CloudExchangeBaseURL)
+	return runtime
 }
 
 func (s *Service) LocalLayout() storage.LocalLayout {
@@ -169,6 +185,13 @@ func (s *Service) DiagnoseModels(ctx context.Context) []llm.DiagnosticResult {
 		return nil
 	}
 	return s.llm.DiagnoseProviders(ctx)
+}
+
+func (s *Service) DiagnosePlanningModel(ctx context.Context) llm.DiagnosticResult {
+	if s.llm == nil {
+		return llm.DiagnosticResult{Task: config.ModelTaskPlanning, Mode: config.LLMModeAuto, ErrorClass: "router_missing", Error: "LLM router is not configured", CheckedAt: time.Now().UTC()}
+	}
+	return s.llm.DiagnoseTask(ctx, config.ModelTaskPlanning)
 }
 
 func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {

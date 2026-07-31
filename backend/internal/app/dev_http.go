@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -85,10 +87,14 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 func (s *DevHTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/desktop/runtime-health", s.handleRuntimeHealth)
+	mux.HandleFunc("PUT /v1/desktop/control-plane", s.handleControlPlaneSettings)
 	mux.HandleFunc("GET /v1/desktop/github-credential", s.handleGitHubCredentialStatus)
 	mux.HandleFunc("POST /v1/desktop/github-credential", s.handleStoreGitHubCredential)
 	mux.HandleFunc("DELETE /v1/desktop/github-credential", s.handleDeleteGitHubCredential)
 	mux.HandleFunc("POST /v1/desktop/demo-credential", s.handleStoreDemoCredential)
+	mux.HandleFunc("PUT /v1/desktop/planning-model", s.handlePlanningModelSettings)
+	mux.HandleFunc("DELETE /v1/desktop/planning-model/{provider}", s.handleDeletePlanningModelSettings)
+	mux.HandleFunc("POST /v1/desktop/planning-model/verify", s.handleVerifyPlanningModel)
 	mux.HandleFunc("GET /v1/desktop/update", s.handleDesktopUpdateStatus)
 	mux.HandleFunc("POST /v1/desktop/update/check", s.handleDesktopUpdateCheck)
 	mux.HandleFunc("POST /v1/desktop/update/apply", s.handleDesktopUpdateApply)
@@ -302,6 +308,20 @@ func (s *DevHTTPServer) handleRuntimeHealth(w http.ResponseWriter, r *http.Reque
 	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), nil)
 }
 
+func (s *DevHTTPServer) handleControlPlaneSettings(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var request ControlPlaneSettingsRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	err := s.service.SaveControlPlaneBaseURL(request.BaseURL)
+	if err == nil {
+		_, err = s.service.EnsureExchangeSession(r.Context(), defaultDesktopOrgID, "")
+	}
+	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), err)
+}
+
 func (s *DevHTTPServer) handleGitHubCredentialStatus(w http.ResponseWriter, _ *http.Request) {
 	writeBridgeValue(w, map[string]bool{"configured": s.githubTokenConfigured()}, nil)
 }
@@ -336,6 +356,26 @@ func (s *DevHTTPServer) handleStoreDemoCredential(w http.ResponseWriter, r *http
 	}
 	err := s.storeDemoCredential(request.Ref, request.Username, request.Password)
 	writeBridgeValue(w, map[string]any{"secretRef": "credential://demo/" + request.Ref, "configured": err == nil}, err)
+}
+
+func (s *DevHTTPServer) handlePlanningModelSettings(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+	var request ModelSettingsRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	err := s.service.SavePlanningModelSettings(request)
+	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), err)
+}
+
+func (s *DevHTTPServer) handleDeletePlanningModelSettings(w http.ResponseWriter, r *http.Request) {
+	err := s.service.DeletePlanningModelSettings(r.PathValue("provider"))
+	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), err)
+}
+
+func (s *DevHTTPServer) handleVerifyPlanningModel(w http.ResponseWriter, r *http.Request) {
+	writeBridgeValue(w, s.service.DiagnosePlanningModel(r.Context()), nil)
 }
 
 func (s *DevHTTPServer) handleDesktopUpdateStatus(w http.ResponseWriter, _ *http.Request) {
@@ -510,6 +550,9 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		initResponse, err := s.service.InitCloudExecutionPackageUpload(r.Context(), build)
+		if err == nil {
+			err = s.service.persistCloudInit(r.Context(), targetProjectID, orgID, initResponse)
+		}
 		result := CloudUploadInitResult{Build: &build, Init: initResponse, CloudBase: session.BaseURL}
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/preflight":
@@ -601,25 +644,36 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		upload, err := s.service.UploadBuiltCloudExecutionPackage(r.Context(), request.UploadID, build)
-		cloudBase := strings.TrimRight(s.service.runtime.CloudExchangeBaseURL, "/")
+		if err == nil {
+			err = s.service.persistCloudUpload(r.Context(), projectID, build.OrgID, request.UploadID, upload)
+		}
+		cloudBase := s.service.effectiveControlPlaneBaseURL()
 		if sessionErr == nil {
 			cloudBase = session.BaseURL
 		}
 		result := CloudUploadPackageResult{Build: &build, Upload: upload, CloudBase: cloudBase}
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodGet && suffix == "/cloud/status":
+		orgID := r.URL.Query().Get("org_id")
 		status, err := s.service.GetCloudExecutionPackageStatus(r.Context(), CloudStatusRequest{
-			OrgID:             r.URL.Query().Get("org_id"),
+			OrgID:             orgID,
 			ExchangePackageID: r.URL.Query().Get("exchange_package_id"),
 		})
+		if err == nil {
+			err = s.service.persistCloudStatus(r.Context(), projectID, orgID, status)
+		}
 		writeBridgeValue(w, status, err)
 	case r.Method == http.MethodGet && suffix == "/cloud/events":
-		s.streamCloudExecutionPackageEvents(w, r)
+		s.streamCloudExecutionPackageEvents(w, r, projectID)
 	case r.Method == http.MethodGet && suffix == "/cloud/result":
+		orgID := r.URL.Query().Get("org_id")
 		result, err := s.service.GetCloudResultPackage(r.Context(), CloudResultRequest{
-			OrgID:           r.URL.Query().Get("org_id"),
+			OrgID:           orgID,
 			ResultPackageID: r.URL.Query().Get("result_package_id"),
 		})
+		if err == nil {
+			err = s.service.persistCloudResult(r.Context(), projectID, orgID, result)
+		}
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/deliverable/download":
 		var request CloudDeliverableDownloadRequest
@@ -637,7 +691,13 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			)
 		}
 		download, err := s.service.DownloadCloudResultDeliverable(r.Context(), request)
+		if err == nil && download.ChecksumVerified {
+			download.MediaURL = "/v1/desktop/projects/" + url.PathEscape(projectID) + "/cloud/deliverable/media?result_package_id=" + url.QueryEscape(request.ResultPackageID) + "&file=" + url.QueryEscape(filepath.Base(download.LocalPath))
+			err = s.service.persistCloudDownload(r.Context(), projectID, request.ResultPackageID, download)
+		}
 		writeBridgeValue(w, download, err)
+	case r.Method == http.MethodGet && suffix == "/cloud/deliverable/media":
+		s.serveVerifiedCloudDeliverable(w, r, projectID)
 	case r.Method == http.MethodGet && suffix == "/cloud/editor-materialization":
 		result, err := s.service.GetCloudEditorMaterialization(r.Context(), CloudEditorMaterializationRequest{
 			OrgID: r.URL.Query().Get("org_id"), ResultPackageID: r.URL.Query().Get("result_package_id"),
@@ -658,6 +718,9 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			AckedByInstallID:  defaultDesktopInstallID,
 			UseResultSummary:  len(request.ReceivedAssetIDs) == 0,
 		})
+		if err == nil {
+			err = s.service.persistCloudAck(r.Context(), projectID, ack)
+		}
 		writeBridgeValue(w, ack, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/review":
 		var request CloudResultReviewRequest
@@ -666,6 +729,9 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		review, err := s.service.ReviewCloudResultPackage(r.Context(), request)
+		if err == nil {
+			err = s.service.persistCloudReview(r.Context(), projectID, review)
+		}
 		writeBridgeValue(w, review, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/revision":
 		var request CloudResultRevisionRequest
@@ -674,6 +740,9 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		revision, err := s.service.RequestCloudResultRevision(r.Context(), request)
+		if err == nil {
+			err = s.service.persistCloudRevision(r.Context(), projectID, revision)
+		}
 		writeBridgeValue(w, revision, err)
 	case r.Method == http.MethodPost && suffix == "/cloud-lifecycle":
 		startedAt := time.Now()
@@ -721,16 +790,52 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-func (s *DevHTTPServer) streamCloudExecutionPackageEvents(w http.ResponseWriter, r *http.Request) {
+func (s *DevHTTPServer) serveVerifiedCloudDeliverable(w http.ResponseWriter, r *http.Request, projectID string) {
+	resultPackageID := strings.TrimSpace(r.URL.Query().Get("result_package_id"))
+	fileName := strings.TrimSpace(r.URL.Query().Get("file"))
+	if resultPackageID == "" || fileName == "" || filepath.Base(fileName) != fileName || strings.HasSuffix(strings.ToLower(fileName), ".part") {
+		writeBridgeValue(w, nil, errors.New("verified deliverable media reference is invalid"))
+		return
+	}
+	filePath := filepath.Join(
+		s.service.runtime.ArtifactRoot,
+		"desktop",
+		"downloads",
+		safePathSegment(projectID),
+		safePathSegment(resultPackageID),
+		fileName,
+	)
+	info, err := os.Stat(filePath)
+	if err != nil || !info.Mode().IsRegular() {
+		writeBridgeValue(w, nil, errors.New("verified deliverable media was not found"))
+		return
+	}
+	extension := strings.ToLower(filepath.Ext(fileName))
+	if extension != ".mp4" && extension != ".webm" {
+		writeBridgeValue(w, nil, errors.New("deliverable is not a supported review video"))
+		return
+	}
+	if !verifyDownloadedDeliverableMedia(filePath) {
+		writeBridgeValue(w, nil, errors.New("deliverable checksum is not verified"))
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeFile(w, r, filePath)
+}
+
+func (s *DevHTTPServer) streamCloudExecutionPackageEvents(w http.ResponseWriter, r *http.Request, projectID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeBridgeValue(w, nil, errors.New("HTTP streaming is unavailable"))
 		return
 	}
+	packageID := r.URL.Query().Get("exchange_package_id")
+	lastEventID := firstNonEmptyString(r.Header.Get("Last-Event-ID"), s.service.cloudEventCursor(r.Context(), projectID, packageID))
 	response, err := s.service.OpenCloudExecutionPackageEventStream(r.Context(), CloudStatusRequest{
 		OrgID:             r.URL.Query().Get("org_id"),
-		ExchangePackageID: r.URL.Query().Get("exchange_package_id"),
-	}, r.Header.Get("Last-Event-ID"))
+		ExchangePackageID: packageID,
+	}, lastEventID)
 	if err != nil {
 		writeBridgeValue(w, nil, err)
 		return
@@ -740,17 +845,36 @@ func (s *DevHTTPServer) streamCloudExecutionPackageEvents(w http.ResponseWriter,
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(sseFlushWriter{writer: w, flusher: flusher}, response.Body)
+	_, _ = io.Copy(&sseFlushWriter{
+		writer: w, flusher: flusher, service: s.service, ctx: r.Context(), projectID: projectID, packageID: packageID,
+	}, response.Body)
 }
 
 type sseFlushWriter struct {
-	writer  io.Writer
-	flusher http.Flusher
+	writer    io.Writer
+	flusher   http.Flusher
+	service   *Service
+	ctx       context.Context
+	projectID string
+	packageID string
+	partial   string
 }
 
-func (w sseFlushWriter) Write(data []byte) (int, error) {
+func (w *sseFlushWriter) Write(data []byte) (int, error) {
 	written, err := w.writer.Write(data)
 	w.flusher.Flush()
+	w.partial += strings.ReplaceAll(string(data), "\r\n", "\n")
+	for {
+		lineEnd := strings.IndexByte(w.partial, '\n')
+		if lineEnd < 0 {
+			break
+		}
+		line := strings.TrimSpace(w.partial[:lineEnd])
+		w.partial = w.partial[lineEnd+1:]
+		if strings.HasPrefix(line, "id:") {
+			_ = w.service.persistCloudEventCursor(w.ctx, w.projectID, w.packageID, strings.TrimSpace(strings.TrimPrefix(line, "id:")))
+		}
+	}
 	return written, err
 }
 

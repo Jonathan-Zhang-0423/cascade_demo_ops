@@ -66,8 +66,55 @@ type CascadeState struct {
 	Approved                 bool                                   `json:"approved"`
 	RehearsePassRate         float64                                `json:"rehearse_pass_rate"`
 	Artifacts                *GeneratedArtifacts                    `json:"artifacts,omitempty"`
+	DesktopCloudRun          *DesktopCloudRunState                  `json:"desktop_cloud_run,omitempty"`
 	ErrorMessage             string                                 `json:"error_message,omitempty"`
 	ArchivedAt               *time.Time                             `json:"archived_at,omitempty"`
+}
+
+// DesktopCloudRunState is the restart-safe App view of the remote execution.
+// It stores only protocol metadata and safe managed-file names, never local paths.
+type DesktopCloudRunState struct {
+	SchemaVersion     string                         `json:"schema_version"`
+	OrgID             string                         `json:"org_id,omitempty"`
+	UploadID          string                         `json:"upload_id,omitempty"`
+	ExchangePackageID string                         `json:"exchange_package_id,omitempty"`
+	CloudJobID        string                         `json:"cloud_job_id,omitempty"`
+	Status            string                         `json:"status,omitempty"`
+	Stage             string                         `json:"stage,omitempty"`
+	Message           string                         `json:"message,omitempty"`
+	ProgressPercent   int                            `json:"progress_percent,omitempty"`
+	LastEventID       string                         `json:"last_event_id,omitempty"`
+	StageHistory      []model.ExecutionStageEvent    `json:"stage_history,omitempty"`
+	FailureSummary    *model.ExecutionFailureSummary `json:"failure_summary,omitempty"`
+	Error             *model.AgentError              `json:"error,omitempty"`
+	ResultPackageID   string                         `json:"result_package_id,omitempty"`
+	ResultPackage     *model.RecordingResultPackage  `json:"result_package,omitempty"`
+	ResultDownloaded  bool                           `json:"result_downloaded,omitempty"`
+	AckedAt           *time.Time                     `json:"acked_at,omitempty"`
+	DownloadedAssets  []DesktopDownloadedAssetState  `json:"downloaded_assets,omitempty"`
+	ResultReview      *DesktopResultReviewState      `json:"result_review,omitempty"`
+	UpdatedAt         time.Time                      `json:"updated_at"`
+}
+
+type DesktopDownloadedAssetState struct {
+	ArtifactID string `json:"artifact_id"`
+	Kind       string `json:"kind,omitempty"`
+	Role       string `json:"role,omitempty"`
+	FileName   string `json:"file_name"`
+	SHA256     string `json:"sha256"`
+	MimeType   string `json:"mime_type,omitempty"`
+	SizeBytes  int64  `json:"size_bytes,omitempty"`
+	Verified   bool   `json:"verified"`
+}
+
+type DesktopResultReviewState struct {
+	Decision       string    `json:"decision"`
+	ReviewID       string    `json:"review_id,omitempty"`
+	RevisionID     string    `json:"revision_id,omitempty"`
+	RevisionAction string    `json:"revision_action,omitempty"`
+	RevisionStatus string    `json:"revision_status,omitempty"`
+	Summary        string    `json:"summary,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type GeneratedArtifacts struct {

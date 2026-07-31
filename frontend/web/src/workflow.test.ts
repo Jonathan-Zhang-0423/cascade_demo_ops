@@ -3,6 +3,7 @@ import type { ApprovalChecklistState } from "./domain";
 import { createProjectDraftWorkspace, createWorkspace } from "./mockWorkspace";
 import {
   canUploadExecutionPackage,
+	executionServerBlockedReason,
   lifecycleStagesFromWorkspace,
   mapCloudStatus,
   packageApprovalBlockedReasons,
@@ -13,6 +14,7 @@ import {
   resetApprovalChecklistForRepair,
   sandboxRiskLevel,
   sandboxRiskMessage,
+  shouldResumeCloudRun,
   updateGraphNode,
   workflowStageLabels,
 } from "./workflow";
@@ -40,7 +42,7 @@ describe("workflow helpers", () => {
 
     const reasons = packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections);
     expect(reasons).toContain("上传前必须完成人工审批。");
-    expect(reasons).toContain("需要确认 Cascade 云端执行 IP 已加入白名单。");
+    expect(reasons).toContain("需要确认 DemoOps 执行服务器出口 IP 已加入客户环境白名单。");
     expect(canUploadExecutionPackage(workspace.packagePreview, checklist, workspace.sourceConnections)).toBe(false);
   });
 
@@ -174,12 +176,20 @@ describe("workflow helpers", () => {
     const running = { ...packaged, cloudRun: { ...packaged.cloudRun, exchangePackageID: "xpkg_1", status: "running" as const } };
     expect(recommendedWorkstation(running)).toBe("execution");
     expect(projectNextAction(running).kind).toBe("monitor");
+	expect(shouldResumeCloudRun(running, running.id)).toBe(true);
+	expect(shouldResumeCloudRun(running, "another-project")).toBe(false);
 
     const completed = { ...running, stage: "result_review" as const, status: "asset_ready" as const, cloudRun: { ...running.cloudRun, status: "succeeded" as const, resultPackageID: "result_1" } };
     expect(recommendedWorkstation(completed)).toBe("assets");
     expect(projectNextAction(completed).kind).toBe("review_result");
     expect(projectJourney(completed).map((step) => step.status)).toEqual(["completed", "completed", "completed", "completed", "current"]);
   });
+
+	it("keeps upload blocked until execution-server health is resolved and configured", () => {
+		expect(executionServerBlockedReason(false, undefined)).toBe("正在检查执行服务器连接。");
+		expect(executionServerBlockedReason(true, false)).toBe("执行服务器尚未完成连接与安装身份验证。");
+		expect(executionServerBlockedReason(true, true)).toBeUndefined();
+	});
 
   it("recognizes production and dev sandbox policy risk levels", () => {
     const workspace = createWorkspace("product_demo");

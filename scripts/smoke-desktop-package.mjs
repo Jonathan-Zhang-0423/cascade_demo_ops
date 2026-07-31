@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, resolve } from "node:path";
+import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 
 const root = resolve(".");
@@ -59,6 +60,8 @@ for (const required of [
   "resources/runtimes/node/node.exe",
   "resources/web/index.html",
   "resources/sidecars/video-worker/dist/index.js",
+  "resources/sidecars/video-worker/node_modules/playwright/package.json",
+  "resources/sidecars/video-worker/node_modules/playwright-core/package.json",
 ]) {
   assert(entries.has(required) || entries.has(required.replaceAll("/", "\\")), `zip is missing ${required}`);
 }
@@ -79,6 +82,7 @@ const bundledWorker = resolve(smokeRoot, "resources", "sidecars", "video-worker"
 assertFile(bundledNode, "bundled node runtime");
 assertFile(bundledWorker, "packaged video-worker entrypoint");
 await assertVideoWorkerHealth(bundledNode, bundledWorker);
+await assertVideoWorkerInteractionScan(bundledNode, bundledWorker);
 
 const result = spawnSync(entrypoint, ["--check"], {
   cwd: smokeRoot,
@@ -98,6 +102,9 @@ assert(payload.ready === true, "desktop entrypoint did not report ready=true");
 assert(payload.profile === "desktop", "desktop entrypoint did not use desktop profile");
 assert(payload.mode === "desktop", "desktop entrypoint did not use desktop mode");
 assert(payload.ui === "wails_webview2", "desktop entrypoint must report Wails/WebView2 UI");
+assert(payload.resource_manifest_loaded === true, "desktop entrypoint did not load packaged resource manifest");
+assert(payload.node_runtime_ready === true, "desktop entrypoint did not resolve bundled Node runtime");
+assert(payload.video_worker_ready === true, "desktop entrypoint did not resolve packaged video-worker");
 const updaterCheck = spawnSync(updater, ["--check"], { cwd: smokeRoot, encoding: "utf8" });
 if (updaterCheck.status !== 0) throw new Error(`desktop updater check failed: ${updaterCheck.stderr || updaterCheck.stdout}`);
 const updaterPayload = JSON.parse(updaterCheck.stdout);
@@ -179,16 +186,24 @@ function assertRequiredAppSurfaces(manifest) {
 function assertPackagedWebSurfaces(webRoot) {
   assertFile(resolve(webRoot, "index.html"), "packaged web index");
   const bundleText = readPackagedText(webRoot);
-  assertSurfaceText(bundleText, "demo asset generation console", [
-    "开始实战流程",
-    "输入材料配置",
-    "演示账号",
+  assertSurfaceText(bundleText, "Jonathan agent-first workspace", [
+    "Cascade Agent",
+    "Projects",
+    "Configuration",
+    "发送后直接创建一段新的项目对话",
+    "实时工作台",
     "执行包审批",
-    "Stage JSON",
-    "Browser Agent 大纲",
+    "来源一致性",
+	"确认服务器将看到和录制的内容",
+	"连接 DemoOps 执行服务器",
+	"录制范围与阶段顺序符合我的意图",
+	"开发者技术详情",
   ]);
+  for (const removedText of ["Where should this go?", "Create new project", "Continue current project", "开始本地分析"]) {
+    assert(!bundleText.includes(removedText), `packaged agent-first flow still exposes obsolete action: ${removedText}`);
+  }
   assertSurfaceText(bundleText, "video editor", [
-    "视频编辑",
+    "Editor",
     "导入素材",
     "生成预览",
     "导出 MP4",
@@ -500,5 +515,77 @@ function assertVideoWorkerHealth(nodePath, workerPath) {
       rejectHealth(new Error(`video-worker exited before healthy response, code=${code}, stderr=${stderr}`));
     });
     child.stdin?.end(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "health" })}\n`);
+  });
+}
+
+async function assertVideoWorkerInteractionScan(nodePath, workerPath) {
+  const server = createServer((_request, response) => {
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.end("<!doctype html><title>DemoOps package smoke</title><main><button data-testid=\"create-project\">创建项目</button></main>");
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object", "interaction smoke server did not bind");
+    const productURL = `http://127.0.0.1:${address.port}/`;
+    const response = await callVideoWorker(nodePath, workerPath, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "verify_interactions",
+      params: {
+        product_url: productURL,
+        timeout_ms: 10000,
+        headless: true,
+        allowed_domains: ["127.0.0.1"],
+        candidates: [{ id: "create", label: "创建项目", kind: "click", selector: "[data-testid='create-project']", url: productURL }],
+        intent_goals: [{ id: "goal_create", label: "创建项目", keywords: ["创建", "项目"], required: true, business: true }],
+      },
+    }, 20000);
+    assert(response.result?.ok === true, `packaged interaction scan failed: ${JSON.stringify(response)}`);
+    assert(response.result?.results?.some((item) => item.id === "create" && item.status === "verified"), "packaged interaction scan did not verify the business control");
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+  }
+}
+
+function callVideoWorker(nodePath, workerPath, request, timeoutMS) {
+  return new Promise((resolveCall, rejectCall) => {
+    const child = spawn(nodePath, [workerPath], {
+      cwd: resolve(workerPath, ".."),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectCall(new Error(`video-worker RPC timed out. stderr=${stderr}`));
+    }, timeoutMS);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      const line = stdout.split(/\r?\n/).find((item) => item.trim().startsWith("{"));
+      if (!line) return;
+      try {
+        const response = JSON.parse(line);
+        clearTimeout(timer);
+        child.kill();
+        resolveCall(response);
+      } catch {
+        // Wait for a complete JSON line.
+      }
+    });
+    child.stderr?.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      rejectCall(error);
+    });
+    child.on("exit", (code) => {
+      if (stdout.trim()) return;
+      clearTimeout(timer);
+      rejectCall(new Error(`video-worker exited before RPC response, code=${code}, stderr=${stderr}`));
+    });
+    child.stdin?.end(`${JSON.stringify(request)}\n`);
   });
 }

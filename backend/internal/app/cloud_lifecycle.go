@@ -82,15 +82,15 @@ type CloudUploadPackageResult struct {
 // CloudPackagePreflightResult is a no-side-effect Server Intake report for
 // the App-generated package. It must pass before upload or Browser execution.
 type CloudPackagePreflightResult struct {
-	Valid          bool     `json:"valid"`
-	Runtime        string   `json:"runtime,omitempty"`
-	PackageID      string   `json:"package_id,omitempty"`
-	StageCount     int      `json:"stage_count,omitempty"`
-	RequiredChecks int      `json:"required_checks,omitempty"`
-	AllowedDomains []string `json:"allowed_domains,omitempty"`
-	Warnings       []string `json:"warnings"`
+	Valid          bool                         `json:"valid"`
+	Runtime        string                       `json:"runtime,omitempty"`
+	PackageID      string                       `json:"package_id,omitempty"`
+	StageCount     int                          `json:"stage_count,omitempty"`
+	RequiredChecks int                          `json:"required_checks,omitempty"`
+	AllowedDomains []string                     `json:"allowed_domains,omitempty"`
+	Warnings       []string                     `json:"warnings"`
 	Readiness      *BrowserAgentReadinessReport `json:"browser_agent_readiness,omitempty"`
-	Message        string   `json:"message"`
+	Message        string                       `json:"message"`
 }
 
 type CloudStatusRequest struct {
@@ -182,7 +182,8 @@ type CloudDeliverableDownloadResult struct {
 	Role             string `json:"role,omitempty"`
 	MimeType         string `json:"mime_type,omitempty"`
 	DownloadURL      string `json:"download_url,omitempty"`
-	LocalPath        string `json:"local_path"`
+	LocalPath        string `json:"-"`
+	MediaURL         string `json:"media_url,omitempty"`
 	SizeBytes        int64  `json:"size_bytes,omitempty"`
 	SHA256           string `json:"sha256"`
 	ExpectedSHA256   string `json:"expected_sha256,omitempty"`
@@ -334,6 +335,7 @@ func compactStateForPrepareResponse(state *orchestrator.CascadeState, build *Cli
 		Status:                  state.Status,
 		ProjectContext:          compactProjectContextForPrepareResponse(state.ProjectContext),
 		RequirementBrief:        state.RequirementBrief,
+		SourceBinding:           state.SourceBinding,
 		ScriptReadinessReport:   state.ScriptReadinessReport,
 		VerifiedInteractionPlan: compactVerifiedInteractionPlanForPrepareResponse(state.VerifiedInteractionPlan),
 		MissingEvidenceReport:   compactMissingEvidenceReportForPrepareResponse(state.MissingEvidenceReport),
@@ -395,6 +397,7 @@ func compactProjectContextForPrepareResponse(project *model.ProjectContext) *mod
 		Goals:              project.Goals,
 		AccessPolicy:       project.AccessPolicy,
 		SecurityPolicy:     project.SecurityPolicy,
+		SourceBinding:      project.SourceBinding,
 		CreatedAt:          project.CreatedAt,
 		UpdatedAt:          project.UpdatedAt,
 	}
@@ -713,6 +716,9 @@ func (s *Service) DownloadCloudResultDeliverable(ctx context.Context, request Cl
 	localPath := filepath.Join(outputDir, cloudDeliverableFileName(deliverable))
 	expected := strings.ToLower(strings.TrimSpace(deliverable.SHA256))
 	if existing, ok := verifiedDownload(localPath, expected, deliverable.SizeBytes); ok {
+		if err := writeVerifiedDownloadMarker(localPath, expected); err != nil {
+			return CloudDeliverableDownloadResult{}, err
+		}
 		return cloudDownloadResult(deliverable, endpoint, localPath, existing, expected, firstNonEmptyString(deliverable.MimeType, ""), false), nil
 	}
 	partialPath := localPath + ".part"
@@ -728,7 +734,27 @@ func (s *Service) DownloadCloudResultDeliverable(ctx context.Context, request Cl
 	if err := os.Rename(partialPath, localPath); err != nil {
 		return CloudDeliverableDownloadResult{}, fmt.Errorf("finalize verified deliverable: %w", err)
 	}
+	if err := writeVerifiedDownloadMarker(localPath, expected); err != nil {
+		return CloudDeliverableDownloadResult{}, err
+	}
 	return cloudDownloadResult(deliverable, endpoint, localPath, size, expected, mimeType, resumed), nil
+}
+
+func writeVerifiedDownloadMarker(path, expected string) error {
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	if expected == "" {
+		return errors.New("verified deliverable checksum is required")
+	}
+	return os.WriteFile(path+".verified.sha256", []byte(expected+"\n"), 0o600)
+}
+
+func verifyDownloadedDeliverableMedia(path string) bool {
+	marker, err := os.ReadFile(path + ".verified.sha256")
+	if err != nil {
+		return false
+	}
+	_, verified := verifiedDownload(path, strings.TrimSpace(string(marker)), 0)
+	return verified
 }
 
 func downloadCloudDeliverableToPartial(ctx context.Context, client *http.Client, endpoint, token, orgID, partialPath string) (int64, string, string, bool, error) {
@@ -994,10 +1020,11 @@ func (s *Service) pollCloudStatus(ctx context.Context, client *http.Client, base
 }
 
 func (s *Service) cloudExchangeConfig() (string, string, error) {
-	if strings.TrimSpace(s.runtime.CloudExchangeBaseURL) == "" {
+	baseURL := s.effectiveControlPlaneBaseURL()
+	if baseURL == "" {
 		return "", "", errors.New("DemoOps execution server is not configured; set CASCADE_CLOUD_EXCHANGE_BASE_URL")
 	}
-	return strings.TrimRight(s.runtime.CloudExchangeBaseURL, "/"), strings.TrimSpace(s.runtime.CloudExchangeToken), nil
+	return baseURL, strings.TrimSpace(s.runtime.CloudExchangeToken), nil
 }
 
 func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgID string, now time.Time) (ClientExecutionPackageBuild, error) {

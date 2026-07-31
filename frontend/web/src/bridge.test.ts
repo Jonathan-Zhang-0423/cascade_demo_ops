@@ -5,6 +5,48 @@ import { updateWorkspaceInputs } from "./agentPipeline";
 import { createProjectDraftWorkspace, createWorkspace } from "./mockWorkspace";
 
 describe("desktop bridge contract", () => {
+	it("restores a persisted cloud run, verified review video, ACK, and review decision", () => {
+		const fallback = createProjectDraftWorkspace("product_demo");
+		const result = {
+			result_id: "result_restart",
+			source_package_id: "pkg_restart",
+			cloud_job_id: "job_restart",
+			schema_version: "demoops.recording_result_package.v1",
+			status: "generated",
+			verification_report: { reproducibility_match: true, pass_rate: 1 },
+			delivery: {
+				result_package_ref: { id: "manifest_restart", kind: "result_package", uri: "artifact://result.json", sha256: "a".repeat(64), encrypted: true, sensitive: true },
+				asset_refs: [{ id: "video_restart", role: "final_demo_video", kind: "video", uri: "artifact://video.mp4", mime_type: "video/mp4", sha256: "a".repeat(64), encrypted: true, sensitive: true }],
+				ack_required: true,
+			},
+			created_at: new Date().toISOString(),
+		} as never;
+		const mapped = workspaceFromCascadeStateForTest({
+			project_id: fallback.id,
+			desktop_cloud_run: {
+				schema_version: "demoops.desktop_cloud_run.v1",
+				upload_id: "upload_restart",
+				exchange_package_id: "xpkg_restart",
+				cloud_job_id: "job_restart",
+				status: "completed",
+				stage: "completed",
+				progress_percent: 100,
+				last_event_id: "xpkg_restart:9",
+				result_package_id: "result_restart",
+				result_package: result,
+				result_downloaded: true,
+				downloaded_assets: [{ artifact_id: "video_restart", file_name: "demo_video.mp4", sha256: "a".repeat(64), mime_type: "video/mp4", verified: true }],
+				result_review: { decision: "approved", review_id: "review_restart", updated_at: new Date().toISOString() },
+				updated_at: new Date().toISOString(),
+			},
+		}, fallback);
+		expect(mapped.cloudRun.exchangePackageID).toBe("xpkg_restart");
+		expect(mapped.cloudRun.lastEventID).toBe("xpkg_restart:9");
+		expect(mapped.cloudRun.resultDownloaded).toBe(true);
+		expect(mapped.cloudRun.resultReview?.decision).toBe("approved");
+		expect(mapped.assets.find((asset) => asset.kind === "video")?.mediaURL).toContain("/cloud/deliverable/media?");
+		expect(JSON.stringify(mapped)).not.toMatch(/[A-Za-z]:\\/);
+	});
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -16,6 +58,112 @@ describe("desktop bridge contract", () => {
     expect(result.ok).toBe(true);
     expect(JSON.stringify(result.data)).not.toMatch(/sk-|secret-|C:\\\\|postgres:\/\//i);
     expect(result.data?.modelProviders.seedance?.apiKeyFallbackEnvs).toEqual(["DOUBAO_API_KEY", "ARK_API_KEY"]);
+  });
+
+  it("configures the control plane through the local bridge without credentials", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.body).toBe(JSON.stringify({ base_url: "http://127.0.0.1:4317" }));
+      expect(String(init?.body)).not.toMatch(/password|token|Authorization/i);
+      return bridgeJSON({
+        profile: "desktop",
+        database_configured: true,
+        local_data_configured: true,
+        resource_manifest_loaded: true,
+        llm_mode: "auto",
+        model_adapter_version: "domestic-llm-adapter-v1",
+        sidecars: {},
+        model_providers: {},
+        model_task_routes: {},
+        cloud_exchange: {
+          configured: true,
+          exchange_discovered: true,
+		  installation_paired: true,
+		  session_valid: true,
+          base_url_host: "127.0.0.1:4317",
+		  auth_mode: "installation_session",
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://wails.localhost").configureControlPlane("http://127.0.0.1:4317");
+
+    expect(result.ok).toBe(true);
+	expect(result.data?.cloudExchange).toMatchObject({ configured: true, sessionValid: true, authMode: "installation_session", baseURLHost: "127.0.0.1:4317" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://wails.localhost/v1/desktop/control-plane",
+      expect.objectContaining({ method: "PUT", headers: expect.objectContaining({ "Content-Type": "application/json" }) }),
+    );
+  });
+
+  it("submits manual configuration through the pending-proposal endpoint", async () => {
+    const session = {
+      id: "assistant_manual",
+      context: { surface: "projects", scopeKey: "manual" },
+      status: "awaiting_confirmation",
+      activeWorkstation: "overview",
+      workstationTitle: "项目配置",
+      workstationStatus: "等待确认手动字段变更",
+      nextAction: { kind: "configuration_patch", title: "确认手动 configuration 变更", description: "确认后写入", proposalID: "proposal_manual", requiresUserAction: true, blocked: false },
+      configuration: { targetDurationSec: 60, version: 1, hash: "hash", readiness: "incomplete", confirmed: false },
+      messages: [],
+    } as never;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("http://127.0.0.1:4317/v1/desktop/assistant/sessions/assistant_manual/configuration-proposals");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        patch: { projectName: "Manual", productURL: "https://manual.example" },
+        baseVersion: 1,
+        idempotencyKey: "manual-1",
+      });
+      return bridgeJSON(session);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const bridge = createLocalBridgeClient("http://127.0.0.1:4317");
+    const result = await bridge.proposeAssistantConfigurationPatch("assistant_manual", { projectName: "Manual", productURL: "https://manual.example" }, 1, "manual-1");
+    expect(result.ok).toBe(true);
+    expect(result.data?.nextAction.kind).toBe("configuration_patch");
+  });
+
+  it("configures the planning model without retaining the API key in returned state", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("http://127.0.0.1:4317/v1/desktop/planning-model");
+      expect(JSON.parse(String(init?.body))).toEqual({ provider: "kimi", model: "kimi-test", api_key: "temporary-secret", proxy_url: "http://127.0.0.1:7892" });
+      return bridgeJSON({
+        profile: "desktop", database_configured: true, local_data_configured: true, resource_manifest_loaded: true,
+        llm_mode: "auto", llm_proxy_configured: true, llm_proxy_host: "127.0.0.1:7892", model_adapter_version: "domestic-llm-adapter-v1", sidecars: {},
+        model_providers: { kimi: { api_key_env: "KIMI_API_KEY", api_key_source_env: "windows_credential_manager", configured: true, base_url_configured: true, default_model_configured: true } },
+        model_task_routes: { planning: { provider: "kimi", model: "kimi-test", provider_override: "", model_override: "" } },
+        cloud_exchange: { configured: false, exchange_discovered: false, installation_paired: false, session_valid: false, auth_mode: "unpaired" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const bridge = createLocalBridgeClient("http://127.0.0.1:4317");
+    const result = await bridge.configurePlanningModel("kimi", "kimi-test", "temporary-secret", "http://127.0.0.1:7892");
+    expect(result.ok).toBe(true);
+    expect(result.data?.modelProviders.kimi?.configured).toBe(true);
+    expect(result.data?.modelTaskRoutes.planning?.model).toBe("kimi-test");
+    expect(result.data?.llmProxyHost).toBe("127.0.0.1:7892");
+    expect(JSON.stringify(result.data)).not.toContain("temporary-secret");
+  });
+
+  it("verifies only the configured planning route through the safe diagnostic endpoint", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("http://127.0.0.1:4317/v1/desktop/planning-model/verify");
+      expect(init?.method).toBe("POST");
+      return bridgeJSON({ provider: "glm", task: "planning", model: "glm-5.2", adapter_version: "domestic-llm-adapter-v1", mode: "auto", base_url_host: "open.bigmodel.cn", base_url_path: "/api/paas/v4", configured: true, ok: true, latency_ms: 321, checked_at: "2026-07-30T09:00:00Z" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").verifyPlanningModel();
+    expect(result.data).toMatchObject({ provider: "glm", task: "planning", ok: true, latencyMS: 321 });
+  });
+
+  it("keeps mock control-plane settings stateful for browser UI smoke", async () => {
+    const bridge = createMockBridgeClient();
+		expect((await bridge.runtimeHealth()).data?.cloudExchange?.configured).toBe(false);
+    expect((await bridge.configureControlPlane("http://public.example:4317")).ok).toBe(false);
+	expect((await bridge.configureControlPlane("http://localhost:4317")).data?.cloudExchange).toMatchObject({ configured: true, sessionValid: true, baseURLHost: "localhost:4317" });
+		expect((await bridge.runtimeHealth()).data?.cloudExchange?.configured).toBe(true);
   });
 
   it("maps real project responses onto an empty draft instead of mock fixture content", async () => {
@@ -224,7 +372,7 @@ describe("desktop bridge contract", () => {
 		return bridgeJSON(resultPackage);
 	  }
 	  if (url.includes("/cloud/deliverable/download")) {
-		return bridgeJSON({ artifact_id: "artifact_video_split", local_path: "C:\\DemoOps\\video.webm", sha256: "sha256:video", expected_sha256: "sha256:video", checksum_verified: true });
+		return bridgeJSON({ artifact_id: "artifact_video_split", media_url: "/v1/desktop/projects/project_product_demo/cloud/deliverable/media?result_package_id=result_split_real&file=video.webm", sha256: "sha256:video", expected_sha256: "sha256:video", checksum_verified: true });
 	  }
 	  if (url.includes("/cloud/ack")) {
 		return bridgeJSON({ result_package_id: "result_split_real", status: "acked", delivery_status: "acked" });
@@ -250,6 +398,8 @@ describe("desktop bridge contract", () => {
 	expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "video_rendering")?.summary).toBe("执行后复核完成");
     expect(completed.data?.assets[0]?.assetID).toBe("artifact_video_split");
 	expect(acked.data?.assets[0]?.status).not.toBe("approved");
+	expect(acked.data?.assets[0]?.mediaURL).toContain("/cloud/deliverable/media?");
+	expect(JSON.stringify(acked.data)).not.toContain("C:\\DemoOps");
 	expect(reviewed.data?.assets[0]?.status).toBe("approved");
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
       "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/init",

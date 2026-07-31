@@ -81,6 +81,12 @@ export function recommendedWorkstation(workspace: ProjectWorkspaceView): Project
   return workspace.productURL && workspace.inputBundle.raw_user_prompt ? "evidence" : "overview";
 }
 
+export function shouldResumeCloudRun(workspace: ProjectWorkspaceView, selectedProjectID?: string): boolean {
+  return selectedProjectID === workspace.id
+    && (workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running")
+    && Boolean(workspace.cloudRun.exchangePackageID);
+}
+
 export function projectNextAction(workspace: ProjectWorkspaceView): ProjectNextAction {
   const workstation = recommendedWorkstation(workspace);
   if (workstation === "overview") {
@@ -96,7 +102,7 @@ export function projectNextAction(workspace: ProjectWorkspaceView): ProjectNextA
     return { kind: "approve_upload", workstation, title: "审批并上传执行包", description: "逐项确认数据范围与风险后，才会把当前 digest 对应的执行包上传服务器。" };
   }
   if (workstation === "execution") {
-    return { kind: "monitor", workstation, title: "等待服务器生成成片", description: "BrowserAgent 规划、录制、导演和渲染状态会自动恢复并更新。" };
+    return { kind: "monitor", workstation, title: "服务器正在生成成片", description: "状态会自动恢复并更新；你可以离开当前页面，无需手动刷新。" };
   }
   if (workstation === "repair") {
     return { kind: "repair", workstation, title: "修复失败步骤", description: "根据脱敏诊断重新生成脚本；修复后的执行包仍需再次人工审批。" };
@@ -104,7 +110,16 @@ export function projectNextAction(workspace: ProjectWorkspaceView): ProjectNextA
   if (workspace.cloudRun.resultReview?.decision === "approved") {
     return { kind: "complete", workstation: "assets", title: "成品已通过", description: "最终审核已记录，可以在 Editor 中继续处理或导出成品。" };
   }
-  return { kind: "review_result", workstation: "assets", title: "下载并人工审核", description: "先下载并校验成品，再选择通过、重新剪辑或缺少素材需要重新录制。" };
+  if (!workspace.cloudRun.resultDownloaded) {
+    return { kind: "review_result", workstation: "assets", title: "下载并校验成品", description: "完整下载结果包并校验 SHA-256 后，才开放人工审核。" };
+  }
+  return { kind: "review_result", workstation: "assets", title: "人工审核成品", description: "播放成品并选择通过、重新剪辑或缺少素材需要重新录制。" };
+}
+
+export function executionServerBlockedReason(resolved: boolean, sessionValid: boolean | undefined): string | undefined {
+	if (!resolved) return "正在检查执行服务器连接。";
+	if (sessionValid !== true) return "执行服务器尚未完成连接与安装身份验证。";
+	return undefined;
 }
 
 export function projectJourney(workspace: ProjectWorkspaceView): ProjectJourneyStep[] {
@@ -269,7 +284,7 @@ export function packageApprovalBlockedReasons(
     blocked.add("上传前必须完成人工审批。");
   }
   if (!checklist.ipAllowlistAcknowledged && !preview.ipAllowlistAcknowledged) {
-    blocked.add("需要确认 Cascade 云端执行 IP 已加入白名单。");
+    blocked.add("需要确认 DemoOps 执行服务器出口 IP 已加入客户环境白名单。");
   }
   if (!checklist.sourceSummaryOnlyAcknowledged || !preview.sourceSummaryOnly) {
     blocked.add("需要确认仅上传代码结构摘要，不上传完整源码。");

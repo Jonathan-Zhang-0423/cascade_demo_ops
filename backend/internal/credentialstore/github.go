@@ -9,6 +9,48 @@ import (
 
 const githubCredentialTarget = "CascadeDemoOps/GitHub"
 
+func modelCredentialTarget(provider string) (string, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "glm", "kimi", "minimax", "deepseek":
+		return "CascadeDemoOps/Model/" + provider, nil
+	default:
+		return "", errors.New("unsupported model provider")
+	}
+}
+
+func StoreModelAPIKey(provider, apiKey string) error {
+	target, err := modelCredentialTarget(provider)
+	if err != nil {
+		return err
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" || len(apiKey) > 4096 || strings.ContainsAny(apiKey, "\r\n\x00") {
+		return errors.New("model API key has an invalid format")
+	}
+	return storeSecret(target, provider, []byte(apiKey))
+}
+
+func ReadModelAPIKey(provider string) (string, error) {
+	target, err := modelCredentialTarget(provider)
+	if err != nil {
+		return "", err
+	}
+	secret, err := readSecret(target)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(secret)), nil
+}
+
+func DeleteModelAPIKey(provider string) error {
+	target, err := modelCredentialTarget(provider)
+	if err != nil {
+		return err
+	}
+	return deleteSecret(target)
+}
+
 func StoreGitHubToken(token string) error {
 	token = strings.TrimSpace(token)
 	if token == "" {
