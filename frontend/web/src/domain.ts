@@ -65,7 +65,7 @@ export type ProjectConfigurationDraftView = {
 
 export type ProjectConfigurationPatchView = Partial<Omit<ProjectConfigurationDraftView, "version" | "hash" | "readiness" | "missingFields" | "confirmed" | "confirmedAt" | "analysisProjectID">>;
 export type AssistantContextView = { surface: AssistantSurface; scopeKey: string; projectID?: string; projectName?: string; repositoryID?: string; repositoryLabel?: string };
-export type AssistantProposalKind = "configuration_patch" | "select_local_project" | "connect_github" | "attach_requirement_document" | "attach_brand_asset" | "store_demo_credential" | "confirm_configuration" | "start_local_analysis" | "open_workstation" | "continue_with_webpage_evidence" | "open_project" | "inspect_project" | "attach_repository" | "detach_repository" | "open_repository_form" | "prepare_understanding" | "prepare_execution";
+export type AssistantProposalKind = "configuration_patch" | "select_project_source" | "select_local_project" | "connect_github" | "attach_requirement_document" | "attach_brand_asset" | "store_demo_credential" | "confirm_configuration" | "start_local_analysis" | "open_workstation" | "continue_with_webpage_evidence" | "open_project" | "inspect_project" | "attach_repository" | "detach_repository" | "open_repository_form" | "prepare_understanding" | "prepare_execution";
 
 export type ProductSourceBindingView = {
   schema_version: string;
@@ -77,9 +77,10 @@ export type ProductSourceBindingView = {
 };
 export type AssistantEvidenceView = { id: string; label: string; source: string; summary: string; confidence?: number };
 export type AssistantProposalView = { id: string; kind: AssistantProposalKind; title: string; description: string; targetID?: string; targetWorkstation?: ProjectWorkstationView; patch?: ProjectConfigurationPatchView; baseVersion: number; idempotencyKey: string; requiresConfirmation: boolean; status: "available" | "confirmed" | "dismissed"; executionResult?: Record<string, unknown> };
-export type AssistantMessageView = { id: string; role: "agent" | "user" | "system"; kind: "answer" | "evidence" | "proposal" | "status" | "error"; text: string; createdAt: string; targetWorkstation?: ProjectWorkstationView; evidence?: AssistantEvidenceView[]; proposals?: AssistantProposalView[] };
+export type AssistantMessageView = { id: string; role: "agent" | "user" | "system"; kind: "answer" | "evidence" | "proposal" | "status" | "error"; text: string; generationSource?: "llm" | "deterministic_fallback" | "manual"; modelProvider?: string; modelName?: string; fallbackReason?: string; createdAt: string; targetWorkstation?: ProjectWorkstationView; evidence?: AssistantEvidenceView[]; proposals?: AssistantProposalView[] };
 export type AssistantEventView = { id: string; sessionID: string; type: string; text: string; createdAt: string };
-export type AssistantSessionView = { id: string; context: AssistantContextView; status: "idle" | "thinking" | "waiting_for_user" | "awaiting_confirmation" | "error"; activeWorkstation?: ProjectWorkstationView; workstationTitle?: string; workstationStatus?: string; configuration: ProjectConfigurationDraftView; messages: AssistantMessageView[]; lastEventID?: string };
+export type AssistantNextActionView = { kind: string; title: string; description: string; primaryLabel?: string; proposalID?: string; targetWorkstation?: ProjectWorkstationView; requiresUserAction: boolean; blocked: boolean; missingFields?: string[] };
+export type AssistantSessionView = { id: string; context: AssistantContextView; status: "idle" | "thinking" | "waiting_for_user" | "awaiting_confirmation" | "error"; activeWorkstation?: ProjectWorkstationView; workstationTitle?: string; workstationStatus?: string; nextAction: AssistantNextActionView; configuration: ProjectConfigurationDraftView; messages: AssistantMessageView[]; lastEventID?: string };
 export type ProjectSummaryView = { id: string; name: string; productURL: string; stage: WorkspaceStage; status: ProjectWorkspaceView["status"]; assetCount: number; generatedAssetCount: number; createdAt?: string; updatedAt?: string };
 
 export type ScenarioTemplate = {
@@ -204,6 +205,7 @@ export type CloudRunStatusView = {
   exchangePackageID?: string;
   cloudJobID?: string;
   resultPackageID?: string;
+	lastEventID?: string;
   status: CloudRunStatus;
   stage?: string;
   message?: string;
@@ -211,6 +213,7 @@ export type CloudRunStatusView = {
   failureSummary?: string;
   sandboxMetadata?: SandboxExecutionMetadata;
   artifactSummary?: CloudArtifactSummary;
+	serverAcceptance?: ServerExecutionAcceptanceView;
   currentStep: string;
   progress: number;
   retryCount: number;
@@ -222,6 +225,16 @@ export type CloudRunStatusView = {
 	resultDownloaded?: boolean;
 	editorSessionID?: string;
 	editorMaterializationMessage?: string;
+};
+
+export type ServerExecutionAcceptanceView = {
+	origin?: string;
+	appGenerated?: boolean;
+	formalExchange?: boolean;
+	strictEvidenceComplete?: boolean;
+	finalMP4Available?: boolean;
+	editorMaterialized?: boolean;
+	status?: string;
 };
 
 export type ResultReviewDecision = "approved" | "reedit_requested" | "rerecord_requested";
@@ -241,6 +254,7 @@ export type AssetReviewView = {
   title: string;
   status: "generated" | "approved" | "changes_requested";
   uri: string;
+  mediaURL?: string;
   checksum: string;
   provenance: string;
 };
@@ -288,6 +302,8 @@ export type RuntimeHealthView = {
   localDataConfigured: boolean;
   resourceManifestLoaded: boolean;
   llmMode?: string;
+  llmProxyConfigured?: boolean;
+  llmProxyHost?: string;
   modelAdapterVersion?: string;
   sidecars: Record<string, boolean>;
   modelProviders: Record<string, ProviderCredentialStatus>;

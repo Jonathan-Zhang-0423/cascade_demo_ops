@@ -7,6 +7,7 @@ import type {
   AssistantEventView,
   AssistantSessionView,
   ConfigurationSourceRefView,
+  ProjectConfigurationPatchView,
   ProjectSummaryView,
   ProjectWorkspaceView,
   ProductSourceBindingView,
@@ -16,6 +17,7 @@ import type {
   ServerLifecycleStageID,
   ServerLifecycleStageStatus,
   ServerLifecycleStageView,
+	ServerExecutionAcceptanceView,
 } from "./domain";
 import type {
   AssetKind,
@@ -55,6 +57,10 @@ export type ProjectCreationInput = {
 export type DesktopBridgeClient = {
   mode: "mock" | "local";
   runtimeHealth(): Promise<BridgeResult<RuntimeHealthView>>;
+  configureControlPlane(baseURL: string): Promise<BridgeResult<RuntimeHealthView>>;
+  configurePlanningModel(provider: string, model: string, apiKey: string, proxyURL?: string): Promise<BridgeResult<RuntimeHealthView>>;
+  deletePlanningModel(provider: string): Promise<BridgeResult<RuntimeHealthView>>;
+  verifyPlanningModel(): Promise<BridgeResult<ModelDiagnosticResult>>;
   githubCredentialStatus(): Promise<BridgeResult<GitHubCredentialStatus>>;
   storeGitHubToken(token: string): Promise<BridgeResult<GitHubCredentialStatus>>;
   deleteGitHubToken(): Promise<BridgeResult<GitHubCredentialStatus>>;
@@ -81,11 +87,14 @@ export type DesktopBridgeClient = {
   createAssistantSession(context: AssistantContextView): Promise<BridgeResult<AssistantSessionView>>;
   getAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
   submitAssistantTurn(sessionID: string, message: string, idempotencyKey?: string, safeSelections?: { selectedSources?: ConfigurationSourceRefView[]; credentialRefs?: string[] }): Promise<BridgeResult<AssistantSessionView>>;
+  proposeAssistantConfigurationPatch(sessionID: string, patch: ProjectConfigurationPatchView, baseVersion: number, idempotencyKey: string): Promise<BridgeResult<AssistantSessionView>>;
   listAssistantEvents(sessionID: string, afterID?: string): Promise<BridgeResult<AssistantEventView[]>>;
   confirmAssistantProposal(sessionID: string, proposalID: string, baseVersion?: number, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
+  completeAssistantClientAction(sessionID: string, proposalID: string, baseVersion: number, result: { selectedSources?: ConfigurationSourceRefView[]; credentialRefs?: string[] }, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
   dismissAssistantProposal(sessionID: string, proposalID: string, baseVersion?: number, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
   cancelAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
   selectLocalProjectDirectory(): Promise<BridgeResult<ConfigurationSourceRefView>>;
+  registerDevLocalProjectDirectory(path: string): Promise<BridgeResult<ConfigurationSourceRefView>>;
   selectRequirementDocuments(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
   selectBrandAssets(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
   storeDemoCredential(ref: string, username: string, password: string): Promise<BridgeResult<{ secretRef: string; configured: boolean }>>;
@@ -249,6 +258,8 @@ type LocalRuntimeHealth = {
   resource_manifest_loaded?: boolean;
   sidecars?: Record<string, boolean>;
   llm_mode?: string;
+  llm_proxy_configured?: boolean;
+  llm_proxy_host?: string;
   model_adapter_version?: string;
   model_providers?: Record<string, {
     api_key_env: string;
@@ -329,6 +340,46 @@ type LocalCascadeState = {
   executable_script_bundle?: ExecutableRecordingScriptBundle;
   error_message?: string;
   source_binding?: ProductSourceBindingView;
+	desktop_cloud_run?: LocalDesktopCloudRunState;
+};
+
+type LocalDesktopCloudRunState = {
+	schema_version: string;
+	org_id?: string;
+	upload_id?: string;
+	exchange_package_id?: string;
+	cloud_job_id?: string;
+	status?: string;
+	stage?: string;
+	message?: string;
+	progress_percent?: number;
+	last_event_id?: string;
+	stage_history?: LocalExecutionStageEvent[];
+	failure_summary?: LocalExecutionFailureSummary;
+	error?: { code: string; message: string; retryable?: boolean };
+	result_package_id?: string;
+	result_package?: RecordingResultPackage;
+	result_downloaded?: boolean;
+	downloaded_assets?: Array<{
+		artifact_id: string;
+		kind?: string;
+		role?: string;
+		file_name: string;
+		sha256: string;
+		mime_type?: string;
+		size_bytes?: number;
+		verified: boolean;
+	}>;
+	result_review?: {
+		decision: "approved" | "reedit_requested" | "rerecord_requested";
+		review_id?: string;
+		revision_id?: string;
+		revision_action?: "reedit" | "rerecord";
+		revision_status?: string;
+		summary?: string;
+		updated_at: string;
+	};
+	updated_at: string;
 };
 
 type LocalClientExecutionPackageBuild = {
@@ -445,6 +496,30 @@ type LocalExecutionResultSummary = {
   raw_recording_uri?: string;
   deliverables?: LocalExecutionDeliverable[];
   acked_at?: string;
+  validation?: LocalExecutionValidationSummary;
+  acceptance?: LocalExecutionAcceptanceSummary;
+};
+
+type LocalExecutionValidationSummary = {
+  runtime?: string;
+  status?: string;
+  validation_report_count?: number;
+  pre_execution_report_count?: number;
+  runtime_stage_report_count?: number;
+  post_execution_report_count?: number;
+  latest_decision?: string;
+  real_observed_step_count?: number;
+  stage_event_log_available?: boolean;
+};
+
+type LocalExecutionAcceptanceSummary = {
+  origin?: string;
+  app_generated?: boolean;
+  formal_exchange?: boolean;
+  strict_evidence_complete?: boolean;
+  final_mp4_available?: boolean;
+  editor_materialized?: boolean;
+  status?: string;
 };
 
 type LocalExecutionFailureSummary = {
@@ -468,6 +543,7 @@ type LocalResultPackageAckResponse = {
 type LocalCloudDeliverableDownloadResult = {
 	artifact_id: string;
 	local_path: string;
+	media_url?: string;
 	size_bytes?: number;
 	sha256: string;
 	expected_sha256?: string;
@@ -653,12 +729,44 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     async submitAssistantTurn(sessionID, message, idempotencyKey, safeSelections) {
       return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/turns`, { method: "POST", body: JSON.stringify({ message, idempotencyKey, ...safeSelections }) });
     },
+    async proposeAssistantConfigurationPatch(sessionID, patch, baseVersion, idempotencyKey) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/configuration-proposals`, { method: "POST", body: JSON.stringify({ patch, baseVersion, idempotencyKey }) });
+    },
     async listAssistantEvents(sessionID, afterID) {
       const query = afterID ? `?after=${encodeURIComponent(afterID)}` : "";
       return requestLocal<AssistantEventView[]>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/events${query}`);
     },
     async confirmAssistantProposal(sessionID, proposalID, baseVersion, idempotencyKey) {
       return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/confirm`, { method: "POST", body: JSON.stringify({ baseVersion, idempotencyKey }) });
+    },
+    async configureControlPlane(controlPlaneBaseURL) {
+      const result = await requestLocal<LocalRuntimeHealth>(baseURL, "/v1/desktop/control-plane", { method: "PUT", body: JSON.stringify({ base_url: controlPlaneBaseURL }) });
+      if (!result.ok || !result.data) return bridgeFailure(result.error ?? "执行服务器配置失败", result.errorInfo);
+      return ok(runtimeHealthFromLocal(result.data));
+    },
+    async configurePlanningModel(provider, model, apiKey, proxyURL = "") {
+      const native = await callWailsBridge<LocalRuntimeHealth>("StorePlanningModelCredential", provider, model, apiKey, proxyURL);
+      if (native.ok && native.data) return ok(runtimeHealthFromLocal(native.data));
+      const result = await requestLocal<LocalRuntimeHealth>(baseURL, "/v1/desktop/planning-model", { method: "PUT", body: JSON.stringify({ provider, model, api_key: apiKey, ...(proxyURL.trim() ? { proxy_url: proxyURL.trim() } : {}) }) });
+      if (!result.ok || !result.data) return bridgeFailure(result.error ?? "模型连接失败", result.errorInfo);
+      return ok(runtimeHealthFromLocal(result.data));
+    },
+    async deletePlanningModel(provider) {
+      const native = await callWailsBridge<LocalRuntimeHealth>("DeletePlanningModelCredential", provider);
+      if (native.ok && native.data) return ok(runtimeHealthFromLocal(native.data));
+      const result = await requestLocal<LocalRuntimeHealth>(baseURL, `/v1/desktop/planning-model/${encodeURIComponent(provider)}`, { method: "DELETE" });
+      if (!result.ok || !result.data) return bridgeFailure(result.error ?? "模型凭据删除失败", result.errorInfo);
+      return ok(runtimeHealthFromLocal(result.data));
+    },
+    async verifyPlanningModel() {
+      const native = await callWailsBridge<LocalModelDiagnostic>("VerifyPlanningModel");
+      if (native.ok && native.data) return ok(modelDiagnosticFromLocal(native.data));
+      const result = await requestLocal<LocalModelDiagnostic>(baseURL, "/v1/desktop/planning-model/verify", { method: "POST" });
+      if (!result.ok || !result.data) return bridgeFailure(result.error ?? "模型实际调用验证失败", result.errorInfo);
+      return ok(modelDiagnosticFromLocal(result.data));
+    },
+    async completeAssistantClientAction(sessionID, proposalID, baseVersion, result, idempotencyKey) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/complete`, { method: "POST", body: JSON.stringify({ baseVersion, idempotencyKey, ...result }) });
     },
     async dismissAssistantProposal(sessionID, proposalID, baseVersion, idempotencyKey) {
       return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/dismiss`, { method: "POST", body: JSON.stringify({ baseVersion, idempotencyKey }) });
@@ -668,6 +776,12 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     },
     async selectLocalProjectDirectory() {
       return callWailsBridge<ConfigurationSourceRefView>("SelectLocalProjectDirectory");
+    },
+    async registerDevLocalProjectDirectory(path) {
+      return requestLocal<ConfigurationSourceRefView>(baseURL, "/v1/desktop/dev/local-sources", {
+        method: "POST",
+        body: JSON.stringify({ kind: "local_repository", path, dev_test_ack: true }),
+      });
     },
     async selectRequirementDocuments() {
       return callWailsBridge<ConfigurationSourceRefView[]>("SelectRequirementDocuments");
@@ -885,6 +999,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 		return { ok: false, error: "结果包没有可下载的成品 artifact" };
 	  }
 	  const receivedAssetIDs: string[] = [];
+	  const mediaURLs = new Map<string, string>();
 	  for (const deliverable of deliverables) {
 		const download = await requestLocal<LocalCloudDeliverableDownloadResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/deliverable/download`, {
 		  method: "POST",
@@ -902,6 +1017,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 		  return { ok: false, error: `成品 ${deliverable.id} checksum 校验失败，未发送接收确认` };
 		}
 		receivedAssetIDs.push(deliverable.id);
+		if (download.data.media_url) mediaURLs.set(deliverable.id, download.data.media_url);
 	  }
       const result = await requestLocal<LocalResultPackageAckResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/ack`, {
         method: "POST",
@@ -916,7 +1032,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "确认结果包失败", result.errorInfo);
       }
-      const next = ackWorkspaceAssets(workspace);
+      const next = ackWorkspaceAssets(workspace, mediaURLs);
       projects.set(next.id, next);
       return ok(next);
     },
@@ -969,76 +1085,74 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 export function createMockBridgeClient(): DesktopBridgeClient {
   const projects = new Map<string, ProjectWorkspaceView>();
   let githubCredentialConfigured = false;
+	let mockControlPlaneURL = "";
+	let mockControlPlaneConnected = false;
   const initial = createWorkspace("product_demo");
   projects.set(initial.id, initial);
+
+  const runtimeHealth = (): BridgeResult<RuntimeHealthView> => ok({
+    profile: "desktop",
+    databaseConfigured: true,
+    localDataConfigured: true,
+    resourceManifestLoaded: true,
+    llmMode: "auto",
+    modelAdapterVersion: "domestic-llm-adapter-v1",
+    sidecars: { "video-worker": true },
+    modelProviders: {
+      glm: { apiKeyEnv: "GLM_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: true },
+      kimi: { apiKeyEnv: "KIMI_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: true },
+      minimax: { apiKeyEnv: "MINIMAX_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: true },
+      seedance: { apiKeyEnv: "SEEDANCE_API_KEY", apiKeyFallbackEnvs: ["DOUBAO_API_KEY", "ARK_API_KEY"], configured: false, baseURLConfigured: true, defaultModelConfigured: true },
+      doubao: { apiKeyEnv: "DOUBAO_API_KEY", apiKeyFallbackEnvs: ["ARK_API_KEY"], configured: false, baseURLConfigured: true, defaultModelConfigured: false },
+      deepseek: { apiKeyEnv: "DEEPSEEK_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: false },
+    },
+    modelTaskRoutes: {
+      planning: { provider: "kimi", model: "kimi-k2.7-code", providerOverride: "CASCADE_PLANNING_PROVIDER", modelOverride: "CASCADE_PLANNING_MODEL" },
+      code_reading: { provider: "glm", model: "glm-5.2", providerOverride: "CASCADE_CODE_READING_PROVIDER", modelOverride: "CASCADE_CODE_READING_MODEL" },
+      multimodal_understanding: { provider: "minimax", model: "minimax-m3", providerOverride: "CASCADE_MULTIMODAL_PROVIDER", modelOverride: "CASCADE_MULTIMODAL_MODEL" },
+      video_operation: { provider: "seedance", model: "seedance-2.0", providerOverride: "CASCADE_VIDEO_PROVIDER", modelOverride: "CASCADE_VIDEO_MODEL" },
+    },
+    cloudExchange: {
+      configured: mockControlPlaneURL !== "",
+      exchangeDiscovered: mockControlPlaneURL !== "",
+	  installationPaired: mockControlPlaneConnected,
+	  sessionValid: mockControlPlaneConnected,
+      ...(mockControlPlaneURL ? { baseURLHost: new URL(mockControlPlaneURL).host } : {}),
+	  authMode: mockControlPlaneConnected ? "installation_session" : "unpaired",
+      environment: "development",
+      devPlaintext: mockControlPlaneURL.startsWith("http://"),
+    },
+  });
 
   return {
     mode: "mock",
     async runtimeHealth() {
-      return ok({
-        profile: "desktop",
-        databaseConfigured: true,
-        localDataConfigured: true,
-        resourceManifestLoaded: true,
-        llmMode: "auto",
-        modelAdapterVersion: "domestic-llm-adapter-v1",
-        sidecars: { "video-worker": true },
-        modelProviders: {
-          glm: { apiKeyEnv: "GLM_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: true },
-          kimi: { apiKeyEnv: "KIMI_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: true },
-          minimax: { apiKeyEnv: "MINIMAX_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: true },
-          seedance: {
-            apiKeyEnv: "SEEDANCE_API_KEY",
-            apiKeyFallbackEnvs: ["DOUBAO_API_KEY", "ARK_API_KEY"],
-            configured: false,
-            baseURLConfigured: true,
-            defaultModelConfigured: true,
-          },
-          doubao: {
-            apiKeyEnv: "DOUBAO_API_KEY",
-            apiKeyFallbackEnvs: ["ARK_API_KEY"],
-            configured: false,
-            baseURLConfigured: true,
-            defaultModelConfigured: false,
-          },
-          deepseek: { apiKeyEnv: "DEEPSEEK_API_KEY", configured: false, baseURLConfigured: true, defaultModelConfigured: false },
-        },
-        modelTaskRoutes: {
-          planning: {
-            provider: "kimi",
-            model: "kimi-k2.7-code",
-            providerOverride: "CASCADE_PLANNING_PROVIDER",
-            modelOverride: "CASCADE_PLANNING_MODEL",
-          },
-          code_reading: {
-            provider: "glm",
-            model: "glm-5.2",
-            providerOverride: "CASCADE_CODE_READING_PROVIDER",
-            modelOverride: "CASCADE_CODE_READING_MODEL",
-          },
-          multimodal_understanding: {
-            provider: "minimax",
-            model: "minimax-m3",
-            providerOverride: "CASCADE_MULTIMODAL_PROVIDER",
-            modelOverride: "CASCADE_MULTIMODAL_MODEL",
-          },
-          video_operation: {
-            provider: "seedance",
-            model: "seedance-2.0",
-            providerOverride: "CASCADE_VIDEO_PROVIDER",
-            modelOverride: "CASCADE_VIDEO_MODEL",
-          },
-        },
-        cloudExchange: {
-          configured: false,
-          exchangeDiscovered: false,
-          installationPaired: false,
-          sessionValid: false,
-          authMode: "unpaired",
-          environment: "development",
-          devPlaintext: false,
-        },
-      });
+	  return runtimeHealth();
+    },
+    async configureControlPlane(baseURL) {
+      const normalized = baseURL.trim().replace(/\/+$/, "");
+      let parsed: URL;
+      try {
+        parsed = new URL(normalized);
+      } catch {
+        return { ok: false, error: "请输入有效的 DemoOps 控制面地址" };
+      }
+      const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+      if (parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.protocol !== "https:" && !(loopback && parsed.protocol === "http:"))) {
+        return { ok: false, error: "控制面必须使用 HTTPS；SSH 转发仅允许 loopback HTTP" };
+      }
+      mockControlPlaneURL = normalized;
+	  mockControlPlaneConnected = true;
+      return runtimeHealth();
+    },
+    async configurePlanningModel() {
+      return runtimeHealth();
+    },
+    async deletePlanningModel() {
+      return runtimeHealth();
+    },
+    async verifyPlanningModel() {
+      return ok(mockDiagnostic("kimi", "planning", "kimi-k2.7-code"));
     },
     async githubCredentialStatus() {
       return ok({ configured: githubCredentialConfigured });
@@ -1129,11 +1243,14 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async createAssistantSession(context) { return ok(mockAssistantSession(context)); },
     async getAssistantSession() { return { ok: false, error: "Mock Assistant session is not persisted" }; },
     async submitAssistantTurn(_sessionID, message) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" }, message)); },
+    async proposeAssistantConfigurationPatch(_sessionID, _patch, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" }, "已生成手动 configuration 提案")); },
     async listAssistantEvents() { return ok([]); },
     async confirmAssistantProposal(_sessionID, _proposalID, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
+    async completeAssistantClientAction(_sessionID, _proposalID, _baseVersion, _result, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async dismissAssistantProposal(_sessionID, _proposalID, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async cancelAssistantSession() { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async selectLocalProjectDirectory() { return ok({ ref: "source_mock_local", kind: "local_repository", label: "sample-project" }); },
+    async registerDevLocalProjectDirectory() { return ok({ ref: "source_mock_local", kind: "local_repository", label: "sample-project" }); },
     async selectRequirementDocuments() { return ok([{ ref: "source_mock_requirement", kind: "requirement_document", label: "requirements.md" }]); },
     async selectBrandAssets() { return ok([{ ref: "source_mock_brand", kind: "brand_asset", label: "brand.png" }]); },
     async storeDemoCredential(ref) { return ok({ secretRef: `credential://demo/${ref}`, configured: true }); },
@@ -1425,7 +1542,9 @@ async function requestLocal<T>(baseURL: string, path: string, init?: RequestInit
 type WailsDesktopBridge = Record<string, (...args: unknown[]) => Promise<BridgeResult<unknown>> | BridgeResult<unknown>>;
 
 async function callWailsBridge<T>(method: string, ...args: unknown[]): Promise<BridgeResult<T>> {
-  const bridge = (window as unknown as { go?: { app?: { DesktopBridge?: WailsDesktopBridge } } }).go?.app?.DesktopBridge;
+  const bridge = typeof window === "undefined"
+    ? undefined
+    : (window as unknown as { go?: { app?: { DesktopBridge?: WailsDesktopBridge } } }).go?.app?.DesktopBridge;
   const fn = bridge?.[method];
   if (!fn) return { ok: false, error: "此操作需要 Wails 桌面应用" };
   try {
@@ -1444,6 +1563,7 @@ function mockAssistantSession(context: AssistantContextView, message = ""): Assi
   return {
     id: `assistant_${context.scopeKey}`, context, status: "waiting_for_user", activeWorkstation: "overview",
     workstationTitle: "项目配置", workstationStatus: "等待确认", configuration,
+    nextAction: { kind: "confirm_configuration", title: "确认配置并生成方案", description: "在本机分析项目并生成三合一草稿，不会上传。", primaryLabel: "确认并生成方案", targetWorkstation: "overview", requiresUserAction: true, blocked: false },
     messages: [{ id: "welcome", role: "agent", kind: "answer", text: message ? "我已整理为 configuration 提案。" : "描述你想制作的产品演示，我会先整理 configuration。", createdAt: new Date().toISOString() }],
   };
 }
@@ -1587,16 +1707,18 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
   const sourceBinding = state.source_binding ?? project?.source_binding ?? fallback.sourceBinding;
   const hasPackage = Boolean(bundle || scriptDocument);
   const hasUnderstanding = Boolean(intelligence || report || state.product_map);
+  const sourceBlocked = sourceBinding?.effective_mode === "blocked";
+  const analysisError = state.error_message?.trim();
   const workspace: ProjectWorkspaceView = {
     ...fallback,
     id: state.project_id || project?.id || fallback.id,
     name: project?.name || graph.name || fallback.name,
-    stage: hasPackage ? "package_approval" : hasUnderstanding ? "plan_review" : "inputs",
+    stage: hasPackage ? "package_approval" : sourceBlocked || analysisError ? "understanding" : hasUnderstanding ? "plan_review" : "inputs",
     productURL,
     targetAudience: project?.target_audience || fallback.targetAudience,
-    status: hasPackage ? "awaiting_approval" : hasUnderstanding ? "understanding_ready" : "draft",
+    status: hasPackage ? "awaiting_approval" : sourceBlocked || analysisError ? "draft" : hasUnderstanding ? "understanding_ready" : "draft",
     inputBundle,
-    sourceConnections: sourceConnectionsFromState(project, report, fallback),
+    sourceConnections: sourceConnectionsFromState(project, report, sourceBinding, fallback),
     ...(sourceBinding ? { sourceBinding } : {}),
     understanding: {
       productMapID: state.product_map?.id || fallback.understanding.productMapID,
@@ -1629,9 +1751,14 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
     cloudRun: {
       packageID,
       status: "not_uploaded",
-      currentStep: hasPackage ? "执行包已在本地生成，等待人工审批" : hasUnderstanding ? "本地理解已完成，等待生成执行方案" : "等待补全项目配置",
+      currentStep: hasPackage
+        ? "执行包已在本地生成，等待人工审批"
+        : sourceBlocked
+          ? "网页与源码来源不匹配，等待用户处理"
+          : analysisError || (hasUnderstanding ? "本地理解已完成，等待生成执行方案" : "等待补全项目配置"),
       progress: 0,
       retryCount: 0,
+      ...(analysisError ? { lastError: analysisError } : {}),
     },
   };
   if (report) {
@@ -1660,7 +1787,66 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
   if (provenance.length > 0) {
     workspace.modelProvenance = provenance;
   }
-  return workspace;
+	return restoreDesktopCloudRun(workspace, state.desktop_cloud_run);
+}
+
+function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: LocalDesktopCloudRunState): ProjectWorkspaceView {
+	if (!persisted || (!persisted.upload_id && !persisted.exchange_package_id && !persisted.result_package_id)) return workspace;
+	const status: LocalExecutionPackageStatusResponse = {
+		exchange_package_id: persisted.exchange_package_id ?? "",
+		status: persisted.status ?? "queued",
+		...(persisted.cloud_job_id ? { cloud_job_id: persisted.cloud_job_id } : {}),
+		...(persisted.stage ? { stage: persisted.stage } : {}),
+		...(persisted.message ? { message: persisted.message } : {}),
+		...(typeof persisted.progress_percent === "number" ? { progress_percent: persisted.progress_percent } : {}),
+		...(persisted.stage_history ? { stage_history: persisted.stage_history } : {}),
+		...(persisted.failure_summary ? { failure_summary: persisted.failure_summary } : {}),
+		...(persisted.error ? { error: persisted.error } : {}),
+		...(persisted.result_package_id ? { result_package_id: persisted.result_package_id } : {}),
+	};
+	let restored = workspaceWithCloudStatus({
+		...workspace,
+		cloudRun: {
+			...workspace.cloudRun,
+			...(persisted.upload_id ? { uploadID: persisted.upload_id } : {}),
+			...(persisted.last_event_id ? { lastEventID: persisted.last_event_id } : {}),
+		},
+	}, status);
+	if (persisted.result_package) restored = workspaceWithResultPackage(restored, persisted.result_package);
+	const mediaURLs = new Map<string, string>();
+	for (const asset of persisted.downloaded_assets ?? []) {
+		if (!asset.verified || !asset.artifact_id || !asset.file_name || !persisted.result_package_id) continue;
+		mediaURLs.set(asset.artifact_id, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/deliverable/media?result_package_id=${encodeURIComponent(persisted.result_package_id)}&file=${encodeURIComponent(asset.file_name)}`);
+	}
+	if (persisted.result_downloaded) restored = ackWorkspaceAssets(restored, mediaURLs);
+	else if (mediaURLs.size) restored = {
+		...restored,
+		assets: restored.assets.map((asset) => {
+			const mediaURL = mediaURLs.get(asset.assetID);
+			return mediaURL ? { ...asset, mediaURL } : asset;
+		}),
+	};
+	if (persisted.result_review) {
+		restored = workspaceWithReview(restored, {
+			review_id: persisted.result_review.review_id ?? "",
+			decision: persisted.result_review.decision,
+			...(persisted.result_review.summary ? { summary: persisted.result_review.summary } : {}),
+			reviewed_at: persisted.result_review.updated_at,
+		}, persisted.result_review.revision_id ? {
+			revision_id: persisted.result_review.revision_id,
+			resolved_action: persisted.result_review.revision_action ?? "reedit",
+			status: persisted.result_review.revision_status ?? "queued",
+			requested_at: persisted.result_review.updated_at,
+		} : undefined);
+	}
+	return {
+		...restored,
+		cloudRun: {
+			...restored.cloudRun,
+			...(persisted.result_package_id ? { resultPackageID: persisted.result_package_id } : {}),
+			...(persisted.last_event_id ? { lastEventID: persisted.last_event_id } : {}),
+		},
+	};
 }
 
 function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, lifecycle: LocalCloudLifecycleResult): ProjectWorkspaceView {
@@ -1674,6 +1860,7 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
   const cloudJobID = lifecycle.upload.cloud_job_id || status.cloud_job_id;
   const failureSummary = failureSummaryText(status.failure_summary, status.error);
   const sandboxMetadata = resultPackage?.execution_trace?.sandbox ?? resultPackage?.audit_trail?.sandbox ?? workspace.cloudRun.sandboxMetadata;
+	const serverAcceptance = acceptanceViewFromStatus(status) ?? workspace.cloudRun.serverAcceptance;
   return {
     ...workspace,
     stage: mappedStatus === "failed" ? "script_repair" : mappedStatus === "succeeded" ? "result_review" : "cloud_run",
@@ -1693,7 +1880,8 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
       status: mappedStatus,
       stageHistory: lifecycleStagesFromStatus(status, resultPackage),
       artifactSummary,
-      currentStep: status.message || cloudRunCurrentStep(status),
+		...(serverAcceptance ? { serverAcceptance } : {}),
+      currentStep: cloudRunAcceptanceMessage(status) || status.message || cloudRunCurrentStep(status),
       progress: status.progress_percent ?? (mappedStatus === "succeeded" || mappedStatus === "failed" ? 100 : workspace.cloudRun.progress),
       retryCount: workspace.cloudRun.retryCount,
       ...(cloudJobID ? { cloudJobID } : {}),
@@ -1868,7 +2056,12 @@ function workspaceWithResultPackage(workspace: ProjectWorkspaceView, resultPacka
     },
     status,
     result: resultPackage,
-  });
+	});
+	if (workspace.cloudRun.serverAcceptance) {
+		next.cloudRun.serverAcceptance = workspace.cloudRun.serverAcceptance;
+		const acceptanceMessage = cloudRunAcceptanceMessageFromView(workspace.cloudRun.serverAcceptance);
+		if (acceptanceMessage) next.cloudRun.currentStep = acceptanceMessage;
+	}
 	const previousStages = workspace.cloudRun.stageHistory;
 	if (!previousStages?.length) return next;
 	return {
@@ -1999,7 +2192,7 @@ async function streamCloudExecutionStatus(
   const packageID = workspace.cloudRun.exchangePackageID;
   if (!packageID || typeof ReadableStream === "undefined") return undefined;
   let current = workspace;
-  let lastEventID = readCloudEventCursor(packageID);
+  let lastEventID = workspace.cloudRun.lastEventID ?? readCloudEventCursor(packageID);
   let consecutiveFailures = 0;
   let connected = false;
   const stageHistory: LocalExecutionStageEvent[] = [];
@@ -2024,6 +2217,7 @@ async function streamCloudExecutionStatus(
         if (event.id) {
           lastEventID = event.id;
           writeCloudEventCursor(packageID, event.id);
+		  current = { ...current, cloudRun: { ...current.cloudRun, lastEventID: event.id } };
         }
         if (event.type === "stage") {
           const stage = parseSSEJSON<LocalExecutionStageEvent>(event.data);
@@ -2216,6 +2410,45 @@ function cloudRunCurrentStep(status: LocalExecutionPackageStatusResponse): strin
   return "等待服务器状态";
 }
 
+function cloudRunAcceptanceMessage(status: LocalExecutionPackageStatusResponse): string | undefined {
+  const acceptance = status.result_summary?.acceptance;
+  if (acceptance?.status === "ready_for_app_e2e_acceptance") {
+    return "真实 App 执行包已形成完整证据链、MP4 和待编辑素材。";
+  }
+  if (acceptance?.status === "server_fixture_only") {
+    return "这是 Server 受控验收素材，不能作为 App 到 Server 联调通过依据。";
+  }
+  if (acceptance?.status === "incomplete") {
+    return "结果已返回，但真实步骤证据、MP4 或编辑器素材尚未齐全。";
+  }
+	if (acceptance?.status === "unverified_origin") {
+		return "结果证据完整，但上传未绑定已验证的 App Installation 会话，不能作为正式联调依据。";
+	}
+  return undefined;
+}
+
+function cloudRunAcceptanceMessageFromView(acceptance?: ServerExecutionAcceptanceView): string | undefined {
+  if (acceptance?.status === "ready_for_app_e2e_acceptance") return "真实 App 执行包已形成完整证据链、MP4 和待编辑素材。";
+  if (acceptance?.status === "server_fixture_only") return "这是 Server 受控验收素材，不能作为 App 到 Server 联调通过依据。";
+  if (acceptance?.status === "incomplete") return "结果已返回，但真实步骤证据、MP4 或编辑器素材尚未齐全。";
+	if (acceptance?.status === "unverified_origin") return "结果证据完整，但上传未绑定已验证的 App Installation 会话，不能作为正式联调依据。";
+  return undefined;
+}
+
+function acceptanceViewFromStatus(status: LocalExecutionPackageStatusResponse): ServerExecutionAcceptanceView | undefined {
+  const value = status.result_summary?.acceptance;
+  if (!value) return undefined;
+  const result: ServerExecutionAcceptanceView = {};
+  if (value.origin !== undefined) result.origin = value.origin;
+  if (value.app_generated !== undefined) result.appGenerated = value.app_generated;
+  if (value.formal_exchange !== undefined) result.formalExchange = value.formal_exchange;
+  if (value.strict_evidence_complete !== undefined) result.strictEvidenceComplete = value.strict_evidence_complete;
+  if (value.final_mp4_available !== undefined) result.finalMP4Available = value.final_mp4_available;
+  if (value.editor_materialized !== undefined) result.editorMaterialized = value.editor_materialized;
+  if (value.status !== undefined) result.status = value.status;
+  return result;
+}
+
 function failureSummaryText(failure?: LocalExecutionFailureSummary, error?: { code: string; message: string }): string | undefined {
   if (!failure && !error) return undefined;
   const code = failure?.code ?? error?.code ?? "recording_failed";
@@ -2264,22 +2497,31 @@ function modelProvenanceFromState(report: MultimodalUnderstandingReport | undefi
   return [...new Set(values)];
 }
 
-function sourceConnectionsFromState(project: LocalProjectContext | undefined, report: MultimodalUnderstandingReport | undefined, fallback: ProjectWorkspaceView) {
+function sourceConnectionsFromState(project: LocalProjectContext | undefined, report: MultimodalUnderstandingReport | undefined, sourceBinding: ProductSourceBindingView | undefined, fallback: ProjectWorkspaceView) {
   const sources = [...fallback.sourceConnections];
   const hasLocalRepo = Boolean(project?.local_repo_path || project?.inputs?.repositories?.some((repo) => repo.local_path));
   const hasGitRepo = Boolean(project?.git_repo_url || project?.inputs?.repositories?.some((repo) => repo.url));
   const digestSourceKind: "github_repo" | "local_repo" = hasGitRepo && !hasLocalRepo ? "github_repo" : "local_repo";
   const hasRequirement = Boolean(project?.product_description || project?.inputs?.requirement_documents?.length || project?.inputs?.raw_user_prompt);
   const hasScreenshots = Boolean(project?.inputs?.webpage_screenshots?.length);
+	const codeFileCount = report?.code_snapshots?.reduce((count, snapshot) => count + (snapshot.file_count ?? 0), 0) ?? 0;
+	const codeReadDetail = codeFileCount > 0 ? `已只读分析 ${codeFileCount} 个高价值文件并生成结构摘要。` : "已生成本地代码结构摘要。";
+	const bindingDetail = sourceBinding?.status === "matched"
+		? "网页与源码身份已匹配，规划可使用源码线索。"
+		: sourceBinding?.status === "unverified"
+			? "但无法证明它与当前网页属于同一产品，执行规划已自动排除源码 selector。"
+			: sourceBinding?.effective_mode === "page_only"
+				? "执行规划当前仅使用网页证据。"
+				: "";
   return sources.map((source) => {
     if (source.kind === "product_url") {
       return { ...source, status: project?.product_url ? "ready" as const : source.status, detail: project?.product_url ? "已进入本地理解链路并生成执行包。" : source.detail };
     }
     if (source.kind === "local_repo") {
-      return { ...source, status: hasLocalRepo ? "ready" as const : "needs_attention" as const, detail: hasLocalRepo ? "已生成本地代码结构摘要和 source digest，不上传完整源码。" : "未提供本地代码目录；可改用 GitHub 仓库或需求/页面材料。" };
+      return { ...source, status: hasLocalRepo ? "ready" as const : "needs_attention" as const, detail: hasLocalRepo ? `${codeReadDetail}${bindingDetail}不上传完整源码。` : "未提供本地代码目录；可改用 GitHub 仓库或需求/页面材料。" };
     }
     if (source.kind === "github_repo") {
-      return { ...source, status: hasGitRepo ? "ready" as const : "needs_attention" as const, detail: hasGitRepo ? "已生成 GitHub 仓库结构摘要和 source digest，不上传完整源码。" : "未提供 GitHub 仓库 URL；可改用本地代码目录或需求/页面材料。" };
+      return { ...source, status: hasGitRepo ? "ready" as const : "needs_attention" as const, detail: hasGitRepo ? `${codeReadDetail}${bindingDetail}不上传完整源码。` : "未提供 GitHub 仓库 URL；可改用本地代码目录或需求/页面材料。" };
     }
     if (source.kind === "requirement_doc") {
       return { ...source, status: hasRequirement ? "ready" as const : "needs_attention" as const };
@@ -2639,12 +2881,16 @@ function mockSuccessfulRecordingResultPackage(workspace: ProjectWorkspaceView): 
   };
 }
 
-function ackWorkspaceAssets(workspace: ProjectWorkspaceView): ProjectWorkspaceView {
+function ackWorkspaceAssets(workspace: ProjectWorkspaceView, mediaURLs = new Map<string, string>()): ProjectWorkspaceView {
+  const { lastError: _lastError, ...cloudRun } = workspace.cloudRun;
   return {
     ...workspace,
-	assets: workspace.assets,
+	assets: workspace.assets.map((asset) => {
+	  const mediaURL = mediaURLs.get(asset.assetID);
+	  return mediaURL ? { ...asset, mediaURL } : asset;
+	}),
     cloudRun: {
-      ...workspace.cloudRun,
+      ...cloudRun,
 		message: "App 已下载全部成品、校验 checksum 并确认接收结果包。",
 		resultDownloaded: true,
     },
@@ -2653,12 +2899,13 @@ function ackWorkspaceAssets(workspace: ProjectWorkspaceView): ProjectWorkspaceVi
 
 function workspaceWithReview(workspace: ProjectWorkspaceView, review: LocalResultReviewRecord, revision?: LocalResultRevisionRecord): ProjectWorkspaceView {
 	const approved = review.decision === "approved";
+	const { lastError: _lastError, ...cloudRun } = workspace.cloudRun;
 	return {
 	  ...workspace,
 	  status: approved ? "asset_ready" : workspace.status,
 	  assets: workspace.assets.map((asset) => ({ ...asset, status: approved ? "approved" : "changes_requested" })),
 	  cloudRun: {
-		...workspace.cloudRun,
+		...cloudRun,
 		message: approved ? "用户已人工批准成品。" : revision?.resolved_action === "rerecord" ? "已提交重新录制请求。" : "已提交重新剪辑请求。",
 		resultReview: {
 		  decision: review.decision,
@@ -2705,6 +2952,8 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
   if (local.llm_mode !== undefined) {
     health.llmMode = local.llm_mode;
   }
+  health.llmProxyConfigured = Boolean(local.llm_proxy_configured);
+  if (local.llm_proxy_host) health.llmProxyHost = local.llm_proxy_host;
   if (local.model_adapter_version !== undefined) {
     health.modelAdapterVersion = local.model_adapter_version;
   }

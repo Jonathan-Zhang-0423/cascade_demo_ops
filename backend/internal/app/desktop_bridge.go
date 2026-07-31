@@ -80,6 +80,20 @@ func (b *DesktopBridge) StoreDemoCredential(ref, username, password string) Brid
 	return bridgeValue(map[string]any{"secretRef": "credential://demo/" + strings.TrimSpace(ref), "configured": err == nil}, err)
 }
 
+func (b *DesktopBridge) StorePlanningModelCredential(provider, modelName, apiKey, proxyURL string) BridgeResponse {
+	err := b.service.SavePlanningModelSettings(ModelSettingsRequest{Provider: provider, Model: modelName, APIKey: apiKey, ProxyURL: proxyURL})
+	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig(), b.service.ExchangeIdentityStatus(context.Background())), err)
+}
+
+func (b *DesktopBridge) DeletePlanningModelCredential(provider string) BridgeResponse {
+	err := b.service.DeletePlanningModelSettings(provider)
+	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig(), b.service.ExchangeIdentityStatus(context.Background())), err)
+}
+
+func (b *DesktopBridge) VerifyPlanningModel() BridgeResponse {
+	return bridgeValue(b.service.DiagnosePlanningModel(context.Background()), nil)
+}
+
 func firstDialogError(err error) error {
 	if err != nil {
 		return err

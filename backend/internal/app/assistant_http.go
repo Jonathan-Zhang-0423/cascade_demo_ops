@@ -39,6 +39,14 @@ func (s *DevHTTPServer) handleAssistantSessionRoute(w http.ResponseWriter, r *ht
 		}
 		session, err := s.service.SubmitAssistantTurn(r.Context(), sessionID, request)
 		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/configuration-proposals":
+		var request model.AssistantConfigurationProposalRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.ProposeAssistantConfigurationPatch(r.Context(), sessionID, request)
+		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodGet && suffix == "/events":
 		after := r.URL.Query().Get("after")
 		if after == "" {
@@ -72,6 +80,15 @@ func (s *DevHTTPServer) handleAssistantSessionRoute(w http.ResponseWriter, r *ht
 			}
 		}
 		session, err := s.service.ConfirmAssistantProposal(r.Context(), sessionID, proposalID, request)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && strings.HasPrefix(suffix, "/proposals/") && strings.HasSuffix(suffix, "/complete"):
+		proposalID := strings.TrimSuffix(strings.TrimPrefix(suffix, "/proposals/"), "/complete")
+		var request model.AssistantClientActionResultRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.CompleteAssistantClientAction(r.Context(), sessionID, proposalID, request)
 		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && strings.HasPrefix(suffix, "/proposals/") && strings.HasSuffix(suffix, "/dismiss"):
 		proposalID := strings.TrimSuffix(strings.TrimPrefix(suffix, "/proposals/"), "/dismiss")

@@ -1039,6 +1039,9 @@ type ExecutionResultSummary struct {
 	// Validation is a redacted, App-consumable summary of Server-side Browser
 	// Agent verification. Full evidence remains in the result package.
 	Validation *ExecutionValidationSummary `json:"validation,omitempty"`
+	// Acceptance makes the package's origin explicit so a Server-owned fixture
+	// can never be presented as an App-to-Server end-to-end acceptance result.
+	Acceptance *ExecutionAcceptanceSummary `json:"acceptance,omitempty"`
 }
 
 // ExecutionValidationSummary lets the App distinguish a rendered file from a
@@ -1055,6 +1058,19 @@ type ExecutionValidationSummary struct {
 	LatestDecision           ValidationDecision `json:"latest_decision,omitempty"`
 	RealObservedStepCount    int                `json:"real_observed_step_count"`
 	StageEventLogAvailable   bool               `json:"stage_event_log_available"`
+}
+
+// ExecutionAcceptanceSummary is the redacted acceptance decision consumed by
+// the App. It intentionally contains no installation ID, page data, or raw
+// browser evidence; those remain inside the protected result package.
+type ExecutionAcceptanceSummary struct {
+	Origin                 string `json:"origin"`
+	AppGenerated           bool   `json:"app_generated"`
+	FormalExchange         bool   `json:"formal_exchange"`
+	StrictEvidenceComplete bool   `json:"strict_evidence_complete"`
+	FinalMP4Available      bool   `json:"final_mp4_available"`
+	EditorMaterialized     bool   `json:"editor_materialized"`
+	Status                 string `json:"status"`
 }
 
 type ExecutionDeliverable struct {

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"cascade-demoops/backend/internal/config"
@@ -145,9 +146,38 @@ func (t *CallTrace) Metadata() map[string]any {
 }
 
 type Router struct {
+	mu      sync.RWMutex
 	runtime config.AppRuntimeConfig
 	http    *http.Client
 	policy  CallPolicy
+}
+
+func (r *Router) UpdateRuntime(runtime config.AppRuntimeConfig) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.runtime = runtime
+	r.http = httpClientForRuntime(runtime, r.policy.Timeout)
+	r.mu.Unlock()
+}
+
+func (r *Router) httpClientSnapshot() *http.Client {
+	if r == nil {
+		return http.DefaultClient
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.http
+}
+
+func (r *Router) runtimeSnapshot() config.AppRuntimeConfig {
+	if r == nil {
+		return config.AppRuntimeConfig{}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.runtime
 }
 
 type CallPolicy struct {
@@ -180,7 +210,9 @@ func DefaultCallPolicy() CallPolicy {
 }
 
 func (p CallPolicy) AllowsFallback(class string, err error) bool {
-	if class == errorClassJSONParse {
+	// A malformed provider response cannot safely enrich an execution plan. In
+	// auto mode, retain the locally generated deterministic plan instead.
+	if class == errorClassJSONParse || class == errorClassResponseParse {
 		return true
 	}
 	if class == errorClassTimeout || class == "http_429" || class == "http_503" {
@@ -317,22 +349,36 @@ func (a minimaxAdapter) BuildMultimodalPayload(route config.ModelTaskRoute, req 
 
 func NewRouter(runtime config.AppRuntimeConfig) *Router {
 	policy := DefaultCallPolicy()
-	return &Router{runtime: runtime, http: &http.Client{Timeout: policy.Timeout}, policy: policy}
+	return &Router{runtime: runtime, http: httpClientForRuntime(runtime, policy.Timeout), policy: policy}
+}
+
+func httpClientForRuntime(runtime config.AppRuntimeConfig, timeout time.Duration) *http.Client {
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	}
+	if proxyURL := strings.TrimSpace(runtime.LLMProxyURL); proxyURL != "" {
+		if parsed, err := url.Parse(proxyURL); err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https" || parsed.Scheme == "socks5") && parsed.Host != "" {
+			transport.Proxy = http.ProxyURL(parsed)
+		}
+	}
+	return &http.Client{Timeout: timeout, Transport: transport}
 }
 
 func (r *Router) DiagnoseProviders(ctx context.Context) []DiagnosticResult {
 	if r == nil {
 		return nil
 	}
-	tasks := make([]config.ModelTask, 0, len(r.runtime.ModelTaskRoutes))
-	for task := range r.runtime.ModelTaskRoutes {
+	runtime := r.runtimeSnapshot()
+	tasks := make([]config.ModelTask, 0, len(runtime.ModelTaskRoutes))
+	for task := range runtime.ModelTaskRoutes {
 		tasks = append(tasks, task)
 	}
 	sort.Slice(tasks, func(i, j int) bool { return tasks[i] < tasks[j] })
 	results := make([]DiagnosticResult, 0, len(tasks))
 	seen := map[string]bool{}
 	for _, task := range tasks {
-		route := r.runtime.ModelTaskRoutes[task]
+		route := runtime.ModelTaskRoutes[task]
 		key := string(route.Provider) + "|" + route.Model
 		if seen[key] {
 			continue
@@ -357,7 +403,7 @@ func (r *Router) DiagnoseTask(ctx context.Context, task config.ModelTask) Diagno
 		}
 	}
 	route, provider, trace, err := r.resolve(task)
-	result := diagnosticResultForRoute(r.runtime, route, provider, task, trace, now)
+	result := diagnosticResultForRoute(r.runtimeSnapshot(), route, provider, task, trace, now)
 	if err != nil {
 		result.ErrorClass = fallbackReason(trace, "route_error")
 		result.Error = redactSensitive(err.Error())
@@ -388,10 +434,11 @@ func (r *Router) DiagnoseTask(ctx context.Context, task config.ModelTask) Diagno
 }
 
 func (r *Router) Mode() config.LLMMode {
-	if r == nil || r.runtime.LLMMode == "" {
+	runtime := r.runtimeSnapshot()
+	if runtime.LLMMode == "" {
 		return config.LLMModeAuto
 	}
-	return r.runtime.LLMMode
+	return runtime.LLMMode
 }
 
 func (r *Router) GenerateJSON(ctx context.Context, task config.ModelTask, req JSONRequest, target any) (*CallTrace, error) {
@@ -477,15 +524,19 @@ func (r *Router) GenerateMultimodal(ctx context.Context, task config.ModelTask, 
 }
 
 func (r *Router) resolve(task config.ModelTask) (config.ModelTaskRoute, config.ModelProviderCredential, *CallTrace, error) {
-	mode := r.Mode()
-	route := r.runtime.ModelTaskRoutes[task]
-	provider := r.runtime.ModelProviders[route.Provider]
+	runtime := r.runtimeSnapshot()
+	mode := runtime.LLMMode
+	if mode == "" {
+		mode = config.LLMModeAuto
+	}
+	route := runtime.ModelTaskRoutes[task]
+	provider := runtime.ModelProviders[route.Provider]
 	modelName := firstNonEmpty(route.Model, provider.DefaultModel)
 	trace := &CallTrace{
 		Provider:       route.Provider,
 		Model:          modelName,
 		Task:           task,
-		AdapterVersion: firstNonEmpty(r.runtime.ModelAdapterVersion, config.ModelAdapterVersion),
+		AdapterVersion: firstNonEmpty(runtime.ModelAdapterVersion, config.ModelAdapterVersion),
 		Mode:           mode,
 	}
 	if mode == config.LLMModeDeterministic {
@@ -540,6 +591,11 @@ func (r *Router) callMultimodal(ctx context.Context, route config.ModelTaskRoute
 
 func (r *Router) doChat(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, adapter ProviderAdapter, payload any) (string, *CallTrace, error) {
 	start := time.Now()
+	runtime := r.runtimeSnapshot()
+	mode := runtime.LLMMode
+	if mode == "" {
+		mode = config.LLMModeAuto
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", nil, err
@@ -552,14 +608,14 @@ func (r *Router) doChat(ctx context.Context, route config.ModelTaskRoute, provid
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
 
-	resp, err := r.http.Do(httpReq)
+	resp, err := r.httpClientSnapshot().Do(httpReq)
 	trace := &CallTrace{
 		Provider:       route.Provider,
 		Model:          route.Model,
 		Task:           route.Task,
-		AdapterVersion: firstNonEmpty(r.runtime.ModelAdapterVersion, config.ModelAdapterVersion),
+		AdapterVersion: firstNonEmpty(runtime.ModelAdapterVersion, config.ModelAdapterVersion),
 		Adapter:        adapter.Name(),
-		Mode:           r.Mode(),
+		Mode:           mode,
 		LatencyMS:      int(time.Since(start).Milliseconds()),
 	}
 	if err != nil {

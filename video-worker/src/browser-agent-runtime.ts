@@ -3,6 +3,7 @@ import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { launchOptionsWithProxy } from "./playwright-proxy.js";
+import { configuredBrowserExecutable } from "./browser-executable.js";
 
 type BrowserAgentTargetContract = {
   semantic_id: string;
@@ -918,13 +919,6 @@ function safeName(value: string): string {
 function normalizeEngine(value?: string): "chromium" | "firefox" | "webkit" {
   if (value === "firefox" || value === "webkit") return value;
   return "chromium";
-}
-
-function configuredBrowserExecutable(): string | undefined {
-  const configured = process.env.CASCADE_BROWSER_EXECUTABLE_PATH?.trim();
-  // Playwright's pinned Chromium is the reproducible default. An operator may
-  // still explicitly select a managed browser for a special environment.
-  return configured || undefined;
 }
 
 async function artifactRef(id: string, kind: string, filePath: string, mimeType: string, sourceNodeID?: string, metadata: Record<string, unknown> = {}, sensitive = true): Promise<ArtifactRef> {

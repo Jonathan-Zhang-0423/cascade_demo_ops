@@ -20,6 +20,8 @@ type RuntimeConfigView struct {
 	ResourceManifestLoaded bool                              `json:"resource_manifest_loaded"`
 	NodeRuntimeConfigured  bool                              `json:"node_runtime_configured"`
 	LLMMode                config.LLMMode                    `json:"llm_mode"`
+	LLMProxyConfigured     bool                              `json:"llm_proxy_configured"`
+	LLMProxyHost           string                            `json:"llm_proxy_host,omitempty"`
 	ArkMediaMode           config.ArkMediaMode               `json:"ark_media_mode"`
 	ModelAdapterVersion    string                            `json:"model_adapter_version"`
 	Sidecars               map[string]bool                   `json:"sidecars"`
@@ -76,6 +78,10 @@ type AppCapabilitiesRuntimeView struct {
 }
 
 func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus ExchangeIdentityStatus) RuntimeConfigView {
+	proxyHost := ""
+	if parsed, err := url.Parse(runtime.LLMProxyURL); err == nil {
+		proxyHost = parsed.Host
+	}
 	return RuntimeConfigView{
 		Profile:                runtime.Profile,
 		Environment:            runtime.Environment,
@@ -87,6 +93,8 @@ func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus Exchan
 		ResourceManifestLoaded: runtime.ResourceManifestPath != "",
 		NodeRuntimeConfigured:  runtime.NodeBinaryPath != "",
 		LLMMode:                runtime.LLMMode,
+		LLMProxyConfigured:     strings.TrimSpace(runtime.LLMProxyURL) != "",
+		LLMProxyHost:           proxyHost,
 		ArkMediaMode:           runtime.ArkMediaMode,
 		ModelAdapterVersion:    runtime.ModelAdapterVersion,
 		Sidecars:               sidecarConfigured(runtime.SidecarPaths),

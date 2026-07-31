@@ -389,7 +389,13 @@ func TestRuntimeConfigKeepsEnvSidecarOverrideAheadOfManifest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(resourceRoot, "desktop-runtime.json"), []byte(`{"sidecars":{"video-worker":"sidecars/video-worker/dist/index.js"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	override := filepath.Join("custom", "worker", "index.js")
+	override := filepath.Join(t.TempDir(), "custom", "worker", "index.js")
+	if err := os.MkdirAll(filepath.Dir(override), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(override, []byte("worker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CASCADE_PROFILE", "desktop")
 	t.Setenv("CASCADE_RESOURCE_ROOT", resourceRoot)
 	t.Setenv("NODE_WORKER_PATH", override)
@@ -400,6 +406,24 @@ func TestRuntimeConfigKeepsEnvSidecarOverrideAheadOfManifest(t *testing.T) {
 	}
 	if cfg.SidecarPaths["video-worker"] != override {
 		t.Fatalf("worker override = %q, want %q", cfg.SidecarPaths["video-worker"], override)
+	}
+}
+
+func TestRuntimeConfigRejectsRelativeDesktopSidecarOverrideInFavorOfManifest(t *testing.T) {
+	resourceRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(resourceRoot, "desktop-runtime.json"), []byte(`{"sidecars":{"video-worker":"sidecars/video-worker/dist/index.js"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CASCADE_PROFILE", "desktop")
+	t.Setenv("CASCADE_RESOURCE_ROOT", resourceRoot)
+	t.Setenv("NODE_WORKER_PATH", "../video-worker/dist/index.js")
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(resourceRoot, "sidecars", "video-worker", "dist", "index.js")
+	if cfg.SidecarPaths["video-worker"] != want {
+		t.Fatalf("relative desktop override escaped manifest: got %q want %q", cfg.SidecarPaths["video-worker"], want)
 	}
 }
 

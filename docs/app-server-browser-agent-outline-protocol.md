@@ -214,6 +214,25 @@ X-Cascade-Org-ID: org_devsmoke
 - redaction report
 - `repair_request`
 
+### 4.1 端到端验收标记
+
+`GET /v1/execution-packages/{exchange_package_id}/status` 的
+`result_summary.acceptance` 是 App 可安全展示的验收摘要。它不携带页面、凭据或原始证据，完整证据仍只存在结果包中。
+
+```json
+{
+  "origin": "app_formal_exchange",
+  "app_generated": true,
+  "formal_exchange": true,
+  "strict_evidence_complete": true,
+  "final_mp4_available": true,
+  "editor_materialized": true,
+  "status": "ready_for_app_e2e_acceptance"
+}
+```
+
+只有 `origin=app_formal_exchange`、真实观察证据完整、阶段事件审计存在且已产出 MP4 时，Server 才能返回 `ready_for_app_e2e_acceptance`。`origin=app_formal_exchange` 的前提是：上传请求携带已验证的 `Cascade-Session`，该会话的 Installation ID 必须同时匹配 init 会话和 envelope 的 `producer.install_id`；Server 不接受包内的自报字段作为来源证明。来源未绑定时返回 `unverified_origin`，不能作为正式联调依据。Server 固定包或受控验收包必须返回 `origin=server_controlled_fixture` 和 `status=server_fixture_only`；它们只能证明 Server 回归能力，绝不能作为 App -> Exchange -> Server 联调通过证据。
+
 ### 5. Ack
 
 ```http

@@ -39,6 +39,9 @@ func main() {
 		must(json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"app": "Cascade DemoOps Desktop", "profile": runtimeConfig.Profile, "mode": runtimeConfig.Mode,
 			"ui": "wails_webview2", "ready": true,
+			"resource_manifest_loaded": runtimeConfig.ResourceManifestPath != "",
+			"node_runtime_ready":       regularFile(runtimeConfig.NodeBinaryPath),
+			"video_worker_ready":       regularFile(runtimeConfig.SidecarPaths["video-worker"]),
 		}))
 		return
 	}
@@ -58,6 +61,11 @@ func main() {
 			DisableWindowIcon:    false,
 		},
 	}))
+}
+
+func regularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func defaultDesktopRuntimeEnv() {

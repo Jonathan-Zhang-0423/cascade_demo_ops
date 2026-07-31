@@ -115,13 +115,22 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	if err != nil {
 		return ExchangeSession{}, err
 	}
-	if isSessionUsable(record, baseURL, s.runtime.CloudExchangeToken) {
+	// A configured dev bearer token is only a fallback. Prefer an installation
+	// session whenever one can be created, otherwise local App-to-Server runs
+	// would be incorrectly classified as unverified uploads.
+	if isInstallationSessionUsable(record, baseURL) {
+		return sessionFromRecord(record, baseURL, ""), nil
+	}
+	// Keep legacy remote control planes on their existing bearer-token path.
+	// Local bridges deliberately continue to register an installation so the
+	// receiving Server can bind the upload to a verified installation identity.
+	if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" && !isLocalExchangeBaseURL(baseURL) {
 		return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	var discovery model.ExchangeBootstrapDiscoveryResponse
-	if useConfiguredExchangeBootstrap(baseURL, s.runtime.CloudExchangeBaseURL, s.runtime.Environment) {
+	if useConfiguredExchangeBootstrap(baseURL, s.effectiveControlPlaneBaseURL(), s.runtime.Environment) {
 		discovery = localBootstrapDiscovery(baseURL, s.runtime.Environment, time.Now().UTC())
 	} else {
 		discovery, err = cloudGetPublicJSON[model.ExchangeBootstrapDiscoveryResponse](ctx, client, baseURL+"/.well-known/cascade-exchange")
@@ -171,6 +180,9 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	}
 	response, err := cloudPostPublicJSON[model.AppInstallationSessionResponse](ctx, client, discovery.ExchangeBaseURL+"/v1/app-installations/register", register)
 	if err != nil {
+		if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" {
+			return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+		}
 		if !isLocalExchangeBaseURL(baseURL) {
 			if isOptionalExchangeDiscoveryError(err) {
 				return ExchangeSession{}, newExchangeProtocolError(
@@ -183,7 +195,7 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 			}
 			return ExchangeSession{}, err
 		}
-		response = localInstallationSession(record, register, discovery, time.Now().UTC())
+		return ExchangeSession{}, err
 	}
 	record.SessionID = response.SessionID
 	record.SessionToken = response.SessionToken
@@ -194,7 +206,7 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	if err := store.save(record); err != nil {
 		return ExchangeSession{}, err
 	}
-	return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	return sessionFromRecord(record, baseURL, ""), nil
 }
 
 func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, error) {
@@ -206,20 +218,23 @@ func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, 
 	if err != nil {
 		return ExchangeSession{}, err
 	}
-	if !isSessionUsable(record, baseURL, s.runtime.CloudExchangeToken) {
-		return ExchangeSession{}, errors.New("exchange installation session is not paired or has expired")
+	if isInstallationSessionUsable(record, baseURL) {
+		return sessionFromRecord(record, baseURL, ""), nil
 	}
-	return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" {
+		return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	}
+	return ExchangeSession{}, errors.New("exchange installation session is not paired or has expired")
 }
 
 func (s *Service) discoverExchangeBaseURL() (string, error) {
-	if strings.TrimSpace(s.runtime.CloudExchangeBaseURL) != "" {
-		return strings.TrimRight(s.runtime.CloudExchangeBaseURL, "/"), nil
+	if configured := s.effectiveControlPlaneBaseURL(); configured != "" {
+		return configured, nil
 	}
 	if record, err := s.exchangeIdentityStore().load(); err == nil && strings.TrimSpace(record.ExchangeBaseURL) != "" {
 		return strings.TrimRight(record.ExchangeBaseURL, "/"), nil
 	}
-	return "", errors.New("DemoOps execution server is not configured; set CASCADE_CLOUD_EXCHANGE_BASE_URL or pair this installation")
+	return "", errors.New("DemoOps execution server is not configured; open App settings and enter the control plane base URL")
 }
 
 func useConfiguredExchangeBootstrap(baseURL string, configuredBaseURL string, environment string) bool {
@@ -398,9 +413,10 @@ func challengeSigningPayload(installID string, challenge model.ExchangePairingCh
 }
 
 func isSessionUsable(record exchangeIdentityRecord, baseURL string, fallbackToken string) bool {
-	if strings.TrimSpace(fallbackToken) != "" {
-		return true
-	}
+	return isInstallationSessionUsable(record, baseURL) || strings.TrimSpace(fallbackToken) != ""
+}
+
+func isInstallationSessionUsable(record exchangeIdentityRecord, baseURL string) bool {
 	return record.InstallID != "" &&
 		record.SessionToken != "" &&
 		record.ExchangeBaseURL == strings.TrimRight(baseURL, "/") &&

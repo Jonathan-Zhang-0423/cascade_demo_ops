@@ -2,6 +2,8 @@ package app
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -212,6 +214,84 @@ func TestDevHTTPBridgeDemoCredentialReturnsOnlyOpaqueRef(t *testing.T) {
 	}
 	if !strings.Contains(payload, `"secretRef":"credential://demo/assistant-demo"`) || len(stored) != 3 || stored[2] != "private-password" {
 		t.Fatalf("credential was not stored through the local vault adapter: payload=%s stored=%v", payload, stored)
+	}
+}
+
+func TestDevHTTPAssistantAcceptsManualConfigurationProposal(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	create := httptest.NewRecorder()
+	createRequest := httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions", bytes.NewReader([]byte(`{"context":{"surface":"projects","scopeKey":"manual-http"}}`)))
+	createRequest.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(create, createRequest)
+	if create.Code != http.StatusOK {
+		t.Fatalf("create assistant session status=%d body=%s", create.Code, create.Body.String())
+	}
+	var created BridgeResponse
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	var session model.AssistantSession
+	if err := json.Unmarshal(created.Data, &session); err != nil {
+		t.Fatal(err)
+	}
+
+	proposalBody := []byte(`{"baseVersion":1,"idempotencyKey":"manual-http-1","patch":{"projectName":"HTTP Manual","productURL":"https://manual.example","objective":"展示手动兜底","targetAudience":"产品团队","targetDurationSec":45,"mustShow":["审批流程"]}}`)
+	proposal := httptest.NewRecorder()
+	proposalRequest := httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions/"+session.ID+"/configuration-proposals", bytes.NewReader(proposalBody))
+	proposalRequest.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(proposal, proposalRequest)
+	if proposal.Code != http.StatusOK {
+		t.Fatalf("manual proposal status=%d body=%s", proposal.Code, proposal.Body.String())
+	}
+	var proposed BridgeResponse
+	if err := json.Unmarshal(proposal.Body.Bytes(), &proposed); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(proposed.Data, &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Configuration.ProjectName != "" || session.NextAction.Kind != string(model.AssistantProposalConfigurationPatch) || session.NextAction.ProposalID == "" {
+		t.Fatalf("manual HTTP route bypassed or failed to create pending proposal: %+v", session)
+	}
+	last := session.Messages[len(session.Messages)-1]
+	if last.GenerationSource != "manual" || len(last.Proposals) != 1 || last.Proposals[0].Patch == nil {
+		t.Fatalf("manual HTTP proposal metadata missing: %+v", last)
+	}
+}
+
+func TestDevHTTPPlanningModelSettingsNeverEchoAPIKey(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	keys := map[string]string{}
+	server.service.storeModelKey = func(provider, key string) error { keys[provider] = key; return nil }
+	server.service.readModelKey = func(provider string) (string, error) { return keys[provider], nil }
+	server.service.deleteModelKey = func(provider string) error { delete(keys, provider); return nil }
+	const secret = "http-model-secret"
+	request := httptest.NewRequest(http.MethodPut, "/v1/desktop/planning-model", strings.NewReader(`{"provider":"kimi","model":"kimi-test","api_key":"`+secret+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("planning model settings status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), secret) || !strings.Contains(response.Body.String(), `"configured":true`) {
+		t.Fatalf("planning model settings leaked key or omitted status: %s", response.Body.String())
+	}
+	if keys["kimi"] != secret {
+		t.Fatal("planning model key did not reach secure store adapter")
+	}
+}
+
+func TestDevHTTPPlanningModelVerifyUsesDedicatedSafeRoute(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/planning-model/verify", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("planning model verify status=%d body=%s", response.Code, response.Body.String())
+	}
+	payload := response.Body.String()
+	if !strings.Contains(payload, `"task":"planning"`) || strings.Contains(strings.ToLower(payload), "api_key") {
+		t.Fatalf("planning verification response is unsafe or incomplete: %s", payload)
 	}
 }
 
@@ -614,6 +694,63 @@ func TestPrepareProductRunDoesNotRequireCloudExchange(t *testing.T) {
 	}
 }
 
+func TestPrepareProductRunReadsMatchedLocalProjectAndStopsAtDraftApproval(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	repoPath := createDevBridgeFixtureRepo(t)
+	if err := os.WriteFile(filepath.Join(repoPath, "package.json"), []byte(`{"name":"app-example","homepage":"https://app.example.com","dependencies":{"react":"latest","vite":"latest"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(CloudLifecycleRequest{UserInput: &orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		LocalRepoPath:      repoPath,
+		ProductDescription: "展示团队邀请流程。",
+		TargetAudience:     "中国运营团队",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/local/product-run/prepare", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if !bridge.OK {
+		t.Fatalf("local prepare failed: %s", bridge.Error)
+	}
+	var prepared ProductRunPrepareResult
+	if err := json.Unmarshal(bridge.Data, &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.State == nil || prepared.State.SourceBinding == nil || prepared.Build == nil {
+		t.Fatalf("local prepare did not return source binding and package draft: %+v", prepared)
+	}
+	if prepared.State.SourceBinding.Status != model.ProductSourceBindingMatched || prepared.State.SourceBinding.EffectiveMode != model.ProductSourceModeMixed {
+		t.Fatalf("expected matched local source evidence, got %+v", prepared.State.SourceBinding)
+	}
+	build := prepared.Build
+	if build.BuildStatus != "draft" || build.ApprovalSubjectDigestSHA256 == "" || build.Package.ConfidenceSummary == nil {
+		t.Fatalf("expected confidence-scored local draft: %+v", build)
+	}
+	if !build.Package.ApprovedAt.IsZero() || build.Package.SafetyReport.AllowedToUpload || build.Package.SafetyReport.HumanApproval.ApprovalID != "" || build.Envelope.EnvelopeID != "" {
+		t.Fatalf("local configuration must stop before independent upload approval: %+v", build)
+	}
+	bundle := build.Package.ExecutableScriptBundle
+	if bundle == nil || bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil || bundle.ApprovalMarkdown.InlineMarkdown == "" {
+		t.Fatalf("local prepare did not generate the three-in-one package: %+v", bundle)
+	}
+	payload := response.Body.String()
+	if strings.Contains(payload, repoPath) || strings.Contains(payload, "function submitPayment") {
+		t.Fatalf("local prepare response leaked an absolute path or complete source: %s", payload)
+	}
+}
+
 func TestDevHTTPBridgeExposesExecutionEvents(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
@@ -952,12 +1089,116 @@ func TestEnsureLocalDevAddressRejectsNonLocalBinds(t *testing.T) {
 	}
 }
 
+func TestDevHTTPServesOnlyVerifiedDownloadedReviewVideo(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	root := filepath.Join(server.service.runtime.ArtifactRoot, "desktop", "downloads", "project_media", "result_media")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	videoPath := filepath.Join(root, "demo.mp4")
+	if err := os.WriteFile(videoPath, []byte("verified-video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	videoHash := sha256.Sum256([]byte("verified-video"))
+	if err := writeVerifiedDownloadMarker(videoPath, hex.EncodeToString(videoHash[:])); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/projects/project_media/cloud/deliverable/media?result_package_id=result_media&file=demo.mp4", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "verified-video" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("verified media was not served safely: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+
+	for _, rawURL := range []string{
+		"/v1/desktop/projects/project_media/cloud/deliverable/media?result_package_id=result_media&file=..%2Fsecret.mp4",
+		"/v1/desktop/projects/project_media/cloud/deliverable/media?result_package_id=result_media&file=demo.mp4.part",
+		"/v1/desktop/projects/project_media/cloud/deliverable/media?result_package_id=result_media&file=notes.json",
+	} {
+		blocked := httptest.NewRecorder()
+		server.Handler().ServeHTTP(blocked, httptest.NewRequest(http.MethodGet, rawURL, nil))
+		if blocked.Code == http.StatusOK {
+			t.Fatalf("unsafe media reference was served: %s", rawURL)
+		}
+	}
+}
+
+func TestDevHTTPBrowserLocalSourceRegistrationIsLoopbackDevOnly(t *testing.T) {
+	server := newTestDevHTTPServerWithEnvironment(t, "development")
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(devLocalSourceRequest{Kind: "local_repository", Path: repoPath, DevTestAck: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/dev/local-sources", bytes.NewReader(body))
+	request.RemoteAddr = "127.0.0.1:54321"
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	var ref LocalSourceRef
+	if err := json.Unmarshal(bridge.Data, &ref); err != nil {
+		t.Fatal(err)
+	}
+	if ref.Ref == "" || ref.Kind != "local_repository" || ref.Label == "" || ref.Path != "" {
+		t.Fatalf("unexpected public local-source ref: %+v", ref)
+	}
+	resolved, ok := server.service.ResolveLocalSourceRef(ref.Ref)
+	if !ok || resolved.Path != repoPath {
+		t.Fatalf("expected private path to remain server-side: %+v ok=%t", resolved, ok)
+	}
+	if strings.Contains(response.Body.String(), repoPath) {
+		t.Fatalf("response leaked absolute local path: %s", response.Body.String())
+	}
+}
+
+func TestDevHTTPBrowserLocalSourceRegistrationRejectsUnsafeContexts(t *testing.T) {
+	repoPath := createDevBridgeFixtureRepo(t)
+	tests := []struct {
+		name       string
+		server     *DevHTTPServer
+		remoteAddr string
+		ack        bool
+	}{
+		{name: "non loopback", server: newTestDevHTTPServerWithEnvironment(t, "development"), remoteAddr: "192.0.2.10:54321", ack: true},
+		{name: "missing acknowledgement", server: newTestDevHTTPServerWithEnvironment(t, "development"), remoteAddr: "127.0.0.1:54321", ack: false},
+		{name: "non development environment", server: newTestDevHTTPServerWithEnvironment(t, "test"), remoteAddr: "127.0.0.1:54321", ack: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(devLocalSourceRequest{Kind: "local_repository", Path: repoPath, DevTestAck: test.ack})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/desktop/dev/local-sources", bytes.NewReader(body))
+			request.RemoteAddr = test.remoteAddr
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			test.server.Handler().ServeHTTP(response, request)
+			if response.Code == http.StatusOK {
+				t.Fatalf("expected rejection: %s", response.Body.String())
+			}
+		})
+	}
+}
+
 func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
+	return newTestDevHTTPServerWithEnvironment(t, "test")
+}
+
+func newTestDevHTTPServerWithEnvironment(t *testing.T, environment string) *DevHTTPServer {
 	t.Helper()
 	root := t.TempDir()
 	service, err := NewService(config.AppRuntimeConfig{
 		Profile:         config.ProfileDev,
-		Environment:     "test",
+		Environment:     environment,
 		Mode:            model.AppModeDesktop,
 		DatabaseDialect: config.DatabaseSQLite,
 		SQLitePath:      filepath.Join(root, "cascade_demoops.db"),
@@ -970,6 +1211,14 @@ func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
 		SidecarPaths:    map[string]string{},
 		DatabaseURL:     "postgres://user:secret@example/db",
 		LLMMode:         config.LLMModeDeterministic,
+		ModelProviders: map[config.ModelProvider]config.ModelProviderCredential{
+			config.ModelProviderKimi: {
+				Provider:     config.ModelProviderKimi,
+				BaseURL:      "https://api.moonshot.cn/v1",
+				DefaultModel: "kimi-k2.7-code",
+				Enabled:      true,
+			},
+		},
 		ModelTaskRoutes: map[config.ModelTask]config.ModelTaskRoute{
 			config.ModelTaskPlanning: {
 				Task:     config.ModelTaskPlanning,

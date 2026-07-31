@@ -1,4 +1,5 @@
 import { launchOptionsWithProxy } from "./playwright-proxy.js";
+import { configuredBrowserExecutable } from "./browser-executable.js";
 
 type VerifyInteractionRequest = {
   product_url?: string;
@@ -88,7 +89,10 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
   }
 
   const playwright = await import("playwright");
-  const browser = await playwright.chromium.launch(launchOptionsWithProxy({ headless: request.headless ?? true }));
+  const launchOptions: Record<string, unknown> = { headless: request.headless ?? true };
+  const executablePath = configuredBrowserExecutable();
+  if (executablePath) launchOptions.executablePath = executablePath;
+  const browser = await playwright.chromium.launch(launchOptionsWithProxy(launchOptions));
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
   const page = await context.newPage();
   const timeout = request.timeout_ms || 20000;
@@ -447,12 +451,12 @@ function isURLForbiddenByScope(value: string | undefined, request: VerifyInterac
   } catch {
     return looksLikeControlPlaneSignal(value);
   }
-  const host = parsed.host.toLowerCase();
+  const hostname = parsed.hostname.toLowerCase();
   const allowed = request.allowed_domains || [];
   if (allowed.length > 0) {
     const matched = allowed.some((domain) => {
-      const normalized = domain.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").toLowerCase();
-      return normalized === host || host.endsWith(`.${normalized}`);
+      const normalized = normalizedAllowedHostname(domain);
+      return normalized === hostname || (!isIPAddress(hostname) && !isIPAddress(normalized) && hostname.endsWith(`.${normalized}`));
     });
     if (!matched) return true;
   }
@@ -464,6 +468,20 @@ function isURLForbiddenByScope(value: string | undefined, request: VerifyInterac
     }
   }
   return looksLikeControlPlaneSignal(parsed.toString());
+}
+
+function normalizedAllowedHostname(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`).hostname.toLowerCase();
+  } catch {
+    return trimmed.replace(/^\[|\]$/g, "").replace(/:\d+$/, "").toLowerCase();
+  }
+}
+
+function isIPAddress(value: string): boolean {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
 }
 
 function looksLikeLoginURL(value: string): boolean {

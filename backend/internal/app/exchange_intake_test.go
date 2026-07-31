@@ -995,6 +995,38 @@ func TestSummarizeRecordingResultExposesOutlineValidationEvidenceCompleteness(t 
 	}
 }
 
+func TestSummarizeExecutionAcceptanceSeparatesAppPackagesFromServerFixtures(t *testing.T) {
+	result := model.RecordingResultPackage{
+		Status:           model.RecordingResultStatusGenerated,
+		ExecutionRuntime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+		StepResults:      []model.StepResult{{NodeID: "node_1", Status: "passed", ObservedState: "source=browser_assertion; assertion:ready=passed"}},
+		StageEventLogRef: &model.ArtifactRef{ID: "events", Kind: "stage_event_log", URI: "file:///tmp/events.jsonl"},
+		ValidationReports: []model.ValidationReport{
+			{Phase: model.ValidationPhasePreExecution, Decision: model.ValidationDecisionContinue},
+			{Phase: model.ValidationPhaseRuntimeStage, Decision: model.ValidationDecisionContinue, NodeID: "node_1"},
+			{Phase: model.ValidationPhasePostExecution, Decision: model.ValidationDecisionContinue},
+		},
+		GeneratedAssets: []model.ArtifactRef{{ID: "video", Kind: "demo_video", MimeType: "video/mp4", URI: "file:///tmp/demo.mp4"}},
+	}
+	appState := &exchangePackageState{AuthenticatedInstallID: "install_real_app", Envelope: model.ExchangeEnvelope{Producer: model.ExchangeProducer{InstallID: "install_real_app", RuntimeProfile: "desktop-product-run"}}}
+	appSummary := summarizeExecutionAcceptance(appState, result)
+	if appSummary == nil || !appSummary.AppGenerated || appSummary.Origin != "app_formal_exchange" || appSummary.Status != "ready_for_app_e2e_acceptance" || !appSummary.StrictEvidenceComplete || !appSummary.FinalMP4Available {
+		t.Fatalf("formal App package acceptance was not recognized: %+v", appSummary)
+	}
+
+	fixtureState := &exchangePackageState{Envelope: model.ExchangeEnvelope{Producer: model.ExchangeProducer{RuntimeProfile: "server_controlled_acceptance"}}, Payload: model.ClientExecutionPackage{Metadata: map[string]any{"producer": "server_controlled_business_acceptance"}}}
+	fixtureSummary := summarizeExecutionAcceptance(fixtureState, result)
+	if fixtureSummary == nil || fixtureSummary.AppGenerated || fixtureSummary.Origin != "server_controlled_fixture" || fixtureSummary.Status != "server_fixture_only" {
+		t.Fatalf("Server fixture must not be presented as App end-to-end acceptance: %+v", fixtureSummary)
+	}
+
+	unverifiedState := &exchangePackageState{Envelope: model.ExchangeEnvelope{Producer: model.ExchangeProducer{InstallID: "self_asserted", RuntimeProfile: "desktop-product-run"}}}
+	unverifiedSummary := summarizeExecutionAcceptance(unverifiedState, result)
+	if unverifiedSummary == nil || unverifiedSummary.AppGenerated || unverifiedSummary.Origin != "unverified_client_upload" || unverifiedSummary.Status != "unverified_origin" {
+		t.Fatalf("self-asserted package must not become formal App acceptance: %+v", unverifiedSummary)
+	}
+}
+
 func fixedClock(now time.Time) func() time.Time {
 	return func() time.Time { return now }
 }
