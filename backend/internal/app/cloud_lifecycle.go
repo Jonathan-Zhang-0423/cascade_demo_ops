@@ -1099,6 +1099,7 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 		return ClientExecutionPackageBuild{}, err
 	}
 	findings := preflightClientExecutionPackage(state, &pkg)
+	synchronizeReadinessWithPackageFindings(state, findings)
 	pkg.SafetyReport.PolicyFindings = append(pkg.SafetyReport.PolicyFindings, findings...)
 	if blockers := blockingFindings(findings); len(blockers) > 0 {
 		pkg.SafetyReport.AllowedToUpload = false
@@ -1133,6 +1134,44 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 		PackageDigestSHA256:         packageDigest,
 		SizeReport:                  sizeReport,
 	}, nil
+}
+
+func synchronizeReadinessWithPackageFindings(state *orchestrator.CascadeState, findings []model.AgentFinding) {
+	if state == nil || state.ScriptReadinessReport == nil {
+		return
+	}
+	readiness := state.ScriptReadinessReport
+	for _, finding := range findings {
+		if finding.Severity != model.FindingSeverityBlocking {
+			continue
+		}
+		duplicate := false
+		for _, existing := range readiness.Blockers {
+			if existing.ID == finding.ID {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			readiness.Blockers = append(readiness.Blockers, finding)
+		}
+		if repair := strings.TrimSpace(finding.SuggestedAction); repair != "" {
+			seen := false
+			for _, existing := range readiness.RepairSuggestions {
+				if existing == repair {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				readiness.RepairSuggestions = append(readiness.RepairSuggestions, repair)
+			}
+		}
+		readiness.CanProceed = false
+	}
+	if !readiness.CanProceed {
+		readiness.Summary = "执行包最终校验存在阻断项，请完成建议修复后重新生成。"
+	}
 }
 
 func packageSizeReportForPackage(pkg model.ClientExecutionPackage) PackageSizeReport {

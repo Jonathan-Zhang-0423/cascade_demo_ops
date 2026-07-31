@@ -21,15 +21,16 @@ import (
 )
 
 var (
-	assistantSecretPattern      = regexp.MustCompile(`(?i)(password|token|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+`)
-	windowsAbsolutePathPattern  = regexp.MustCompile(`(?i)\b[A-Z]:\\(?:[^\s<>:"|?*]+\\)*[^\s<>:"|?*]*`)
-	assistantProjectNamePattern = regexp.MustCompile(`(?:项目名(?:称)?\s*[：:]\s*|项目名(?:叫|为|是)|项目名称(?:为|是)|命名为)\s*[“"']?([^，,。；;\n”"']{1,80})`)
+	assistantSecretPattern      = regexp.MustCompile(`(?i)(password|passwd|密码|口令|token|令牌|secret|密钥|api[_-]?key)(?:\s*[:=：]\s*|\s*(?:是|为)\s*|\s*)[^\s,，;；。]+`)
+	windowsAbsolutePathPattern  = regexp.MustCompile(`(?i)\b[A-Z]:\\[^\r\n，,。；;、<>:"|?*]+`)
+	assistantProjectNamePattern = regexp.MustCompile(`(?:项目名(?:称)?\s*[：:]\s*|项目名(?:叫|为|是)|项目名称(?:为|是)|命名为|新建项目\s*)\s*[“"']?([^，,。；;\n”"']{1,80})`)
 	assistantAudiencePattern    = regexp.MustCompile(`(?:目标受众|受众)\s*[：:]\s*([^。；;\n]{1,160})|面向\s*([^，,。；;\n]{1,80}?)(?:的?\s*\d{1,3}\s*秒|制作|打造|，|,|。|；|;|$)`)
 	assistantDurationPattern    = regexp.MustCompile(`(\d{1,3})\s*秒`)
 	assistantMustShowPattern    = regexp.MustCompile(`(?:重点展示|必须展示|需要展示)\s*([^。；;\n]{1,200})`)
 	assistantObjectivePattern   = regexp.MustCompile(`(?:演示目标|目标|需求)(?:改为|修改为|是|为)\s*[“"']?([^。；;\n”"']{1,500})`)
 	assistantStepPattern        = regexp.MustCompile(`(?m)^\s*(?:第?[一二三四五六七八九十\d]+步[：:、.]?|\d+[.、)])\s*(.+?)\s*$`)
 	assistantHTTPURLPattern     = regexp.MustCompile(`https?://[^\s，。；;、<>"']+`)
+	assistantBareDomainPattern  = regexp.MustCompile(`(?i)(?:项目地址|产品地址|网址|url|^|[\s，,；;：:])\s*([a-z0-9](?:[a-z0-9-]{0,62}\.)+[a-z]{2,}(?:/[^\s，。；;、<>"']*)?)`)
 	assistantCorruptionPattern  = regexp.MustCompile(`\?{3,}`)
 )
 
@@ -77,13 +78,14 @@ type assistantLLMConfiguration struct {
 }
 
 type assistantLLMWorkflow struct {
-	ProjectAttached        bool                         `json:"projectAttached"`
-	Stage                  string                       `json:"stage"`
-	Status                 string                       `json:"status"`
-	AvailableWorkstations  []model.AssistantWorkstation `json:"availableWorkstations"`
-	RecommendedWorkstation model.AssistantWorkstation   `json:"recommendedWorkstation"`
-	UploadApprovalRequired bool                         `json:"uploadApprovalRequired"`
-	ResultReviewRequired   bool                         `json:"resultReviewRequired"`
+	ProjectAttached        bool                             `json:"projectAttached"`
+	Stage                  string                           `json:"stage"`
+	Status                 string                           `json:"status"`
+	AvailableWorkstations  []model.AssistantWorkstation     `json:"availableWorkstations"`
+	AvailableActions       []model.AgentActionSpecification `json:"availableActions,omitempty"`
+	RecommendedWorkstation model.AssistantWorkstation       `json:"recommendedWorkstation"`
+	UploadApprovalRequired bool                             `json:"uploadApprovalRequired"`
+	ResultReviewRequired   bool                             `json:"resultReviewRequired"`
 }
 
 func (s *Service) CreateAssistantSession(ctx context.Context, request model.AssistantContext) (*model.AssistantSession, error) {
@@ -133,7 +135,11 @@ func (s *Service) CreateAssistantSession(ctx context.Context, request model.Assi
 		}},
 		ProcessedIdempotency: map[string]string{},
 	}
+	if agentActionsV2Enabled() {
+		session.ActionMode = assistantActionModeV2
+	}
 	refreshAssistantNextAction(session)
+	refreshAssistantActionState(session)
 	return session, s.assistantStore.Save(ctx, session)
 }
 
@@ -148,13 +154,14 @@ func (s *Service) GetAssistantSession(ctx context.Context, sessionID string) (*m
 func (s *Service) SubmitAssistantTurn(ctx context.Context, sessionID string, request model.AssistantTurnRequest) (*model.AssistantSession, error) {
 	s.assistantMu.Lock()
 	defer s.assistantMu.Unlock()
-	message := redactAssistantText(strings.TrimSpace(request.Message))
-	if message == "" {
+	rawMessage := strings.TrimSpace(request.Message)
+	if rawMessage == "" {
 		return nil, errors.New("assistant message is required")
 	}
-	if len(message) > 6000 {
+	if len(rawMessage) > 6000 {
 		return nil, errors.New("assistant message is too long")
 	}
+	message := redactAssistantText(rawMessage)
 	session, err := s.GetAssistantSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -164,6 +171,7 @@ func (s *Service) SubmitAssistantTurn(ctx context.Context, sessionID string, req
 			return session, nil
 		}
 	}
+	detectedLocalSources := s.detectAssistantLocalSources(rawMessage)
 	now := time.Now().UTC()
 	session.Status = "thinking"
 	session.Messages = append(session.Messages, model.AssistantMessage{
@@ -178,7 +186,19 @@ func (s *Service) SubmitAssistantTurn(ctx context.Context, sessionID string, req
 		}
 		response = assistantModelResponse{Reply: "安全选择已完成。请确认将 opaque refs 写入 configuration；文件内容和凭据不会进入聊天。", Patch: patch, HasPatch: true}
 	}
+	if session.ActionMode == assistantActionModeV2 && response.HasPatch && !configurationPatchEmpty(response.Patch) {
+		next, patchErr := applyConfigurationPatch(session.Configuration, response.Patch)
+		if patchErr != nil {
+			return nil, patchErr
+		}
+		session.Configuration = next
+		invalidateAssistantAnalysisContext(session)
+		response.HasPatch = false
+		response.Patch = model.ProjectConfigurationPatch{}
+		response.Reply = "已自动整理低风险配置字段。仍需通过安全卡片确认本地来源和演示凭据。"
+	}
 	proposals := s.proposalsFromModelResponse(session, workflow, response, now)
+	attachDetectedAssistantLocalSources(proposals, detectedLocalSources)
 	text := strings.TrimSpace(redactAssistantText(response.Reply))
 	if text == "" {
 		text = "我已整理这轮信息。请检查字段变更；确认后才会写入项目 configuration。"
@@ -198,7 +218,13 @@ func (s *Service) SubmitAssistantTurn(ctx context.Context, sessionID string, req
 		ModelName: response.ModelName, FallbackReason: response.FallbackReason,
 		CreatedAt: now, TargetWorkstation: model.AssistantWorkstationOverview, Proposals: proposals,
 	})
+	if followUp, autoErr := s.autoStartAssistantAnalysisIfReady(ctx, session, now.Add(time.Nanosecond)); autoErr != nil {
+		return nil, autoErr
+	} else if followUp != nil {
+		session.Messages = append(session.Messages, *followUp)
+	}
 	refreshAssistantNextAction(session)
+	refreshAssistantActionState(session)
 	event := model.AssistantEvent{ID: fmt.Sprintf("%020d", now.UnixNano()), SessionID: session.ID, Type: "message", Text: text, CreatedAt: now}
 	session.Events = append(session.Events, event)
 	session.LastEventID = event.ID
@@ -254,6 +280,7 @@ func (s *Service) ProposeAssistantConfigurationPatch(ctx context.Context, sessio
 	session.LastEventID = event.ID
 	session.ProcessedIdempotency[request.IdempotencyKey] = event.ID
 	refreshAssistantNextAction(session)
+	refreshAssistantActionState(session)
 	if err := s.assistantStore.Save(ctx, session); err != nil {
 		return nil, err
 	}
@@ -331,10 +358,10 @@ func (s *Service) generateAssistantResponse(ctx context.Context, draft model.Pro
 	workflowJSON, _ := json.Marshal(workflow)
 	var generated assistantModelResponse
 	trace, err := s.llm.GenerateJSON(ctx, config.ModelTaskPlanning, llm.JSONRequest{
-		System:     "你是 DemoOps 项目配置与流程引导 Agent。只提取用户明确提供的信息，不猜测凭据、路径或业务事实。你只能返回 configuration patch 和受限建议动作，不能执行命令、访问 URL、审批上传、下载成品或提交审核。open_workstation 只能指向 availableWorkstations 中的值。不要在 reply 中复述密码、token、完整本地路径、源码、执行包内容或错误日志。sources[].connected=true 表示该来源已通过安全选择器连接；其真实 ref 和路径被有意隐藏，不得因此要求用户再次选择来源或补充 ref。",
+		System:     "你是 DemoOps 项目配置与流程引导 Agent。只提取用户明确提供的信息，不猜测凭据、路径或业务事实。你只能组合当前 workflow.availableActions 中声明的动作，并返回 configuration patch 和受限建议动作；不能执行命令、访问 URL、审批上传、下载成品或提交审核。open_workstation 只能指向 availableWorkstations 中的值。不要在 reply 中复述密码、token、完整本地路径、源码、执行包内容或错误日志。sources[].connected=true 表示该来源已通过安全选择器连接；其真实 ref 和路径被有意隐藏，不得因此要求用户再次选择来源或补充 ref。",
 		User:       fmt.Sprintf("当前 configuration：%s\n当前 workflow：%s\n用户消息：%s", configurationJSON, workflowJSON, message),
 		SchemaName: "demoops_assistant_configuration_proposal_v1", MaxTokens: 1800, Temperature: 0.1,
-		ResponseHint: "reply:string, hasPatch:boolean, patch:ProjectConfigurationPatch, missingFields:string[], suggestedActions:{kind,title,description,targetWorkstation}[]。kind 只能是 configuration_patch/select_local_project/connect_github/attach_requirement_document/attach_brand_asset/store_demo_credential/confirm_configuration/start_local_analysis/open_workstation/continue_with_webpage_evidence。Sources 不能包含本地绝对路径或 secret。",
+		ResponseHint: "reply:string, hasPatch:boolean, patch:ProjectConfigurationPatch, missingFields:string[], suggestedActions:{kind,title,description,targetWorkstation}[]。kind 只能是 configuration_patch/select_local_project/connect_github/attach_requirement_document/attach_brand_asset/store_demo_credential/confirm_configuration/start_local_analysis/open_workstation/continue_with_webpage_evidence/retry_page_scan/regenerate_execution_package，且必须对应 workflow.availableActions。Sources 不能包含本地绝对路径或 secret。",
 	}, &generated)
 	if err != nil {
 		if trace != nil {
@@ -389,13 +416,18 @@ func assistantLLMConfigurationProjection(draft model.ProjectConfigurationDraft) 
 	return projected
 }
 
-func (s *Service) assistantWorkflowProjection(ctx context.Context, session model.AssistantSession) assistantLLMWorkflow {
-	workflow := assistantLLMWorkflow{
+func (s *Service) assistantWorkflowProjection(ctx context.Context, session model.AssistantSession) (workflow assistantLLMWorkflow) {
+	workflow = assistantLLMWorkflow{
 		Stage: "configuration", Status: "waiting_for_configuration",
 		AvailableWorkstations:  []model.AssistantWorkstation{model.AssistantWorkstationOverview},
 		RecommendedWorkstation: model.AssistantWorkstationOverview,
 		UploadApprovalRequired: true, ResultReviewRequired: true,
 	}
+	defer func() {
+		if session.ActionMode == assistantActionModeV2 {
+			workflow.AvailableActions = assistantActionsAvailableForStage(workflow.Stage)
+		}
+	}()
 	projectID := firstNonEmptyString(session.Context.ProjectID, session.Configuration.AnalysisProjectID)
 	if projectID == "" {
 		if session.Configuration.Readiness == "ready" {
@@ -498,7 +530,7 @@ func assistantFallbackResponse(draft model.ProjectConfigurationDraft, message st
 	objective := ""
 	if match := assistantObjectivePattern.FindStringSubmatch(message); len(match) > 1 {
 		objective = strings.TrimSpace(match[1])
-	} else if strings.TrimSpace(draft.Objective) == "" && len(deterministicAssistantActions(message)) == 0 {
+	} else if strings.TrimSpace(draft.Objective) == "" && assistantMessageContainsTaskIntent(message) && assistantObjectiveFallbackAllowed(message) {
 		objective = strings.TrimSpace(redactAssistantText(message))
 	}
 	if objective != "" && len([]rune(objective)) <= 500 {
@@ -506,7 +538,7 @@ func assistantFallbackResponse(draft model.ProjectConfigurationDraft, message st
 		hasPatch = true
 	}
 	if match := assistantProjectNamePattern.FindStringSubmatch(message); len(match) > 1 {
-		value := strings.TrimSpace(match[1])
+		value := normalizeAssistantProjectName(match[1])
 		patch.ProjectName = &value
 		hasPatch = true
 	}
@@ -523,7 +555,7 @@ func assistantFallbackResponse(draft model.ProjectConfigurationDraft, message st
 		}
 	}
 	if match := assistantMustShowPattern.FindStringSubmatch(message); len(match) > 1 {
-		value := []string{strings.TrimSpace(match[1])}
+		value := splitAssistantIntentSteps(match[1])
 		patch.MustShow = &value
 		hasPatch = true
 	} else if matches := assistantStepPattern.FindAllStringSubmatch(message, -1); len(matches) > 0 {
@@ -537,11 +569,26 @@ func assistantFallbackResponse(draft model.ProjectConfigurationDraft, message st
 			patch.MustShow = &steps
 			hasPatch = true
 		}
+	} else if steps := inferAssistantIntentSteps(message); len(steps) > 0 {
+		patch.MustShow = &steps
+		hasPatch = true
 	}
 	return assistantModelResponse{
 		Reply: "我会把这轮信息整理为 configuration 变更。确认前不会保存，也不会启动分析。",
 		Patch: patch, HasPatch: hasPatch, SuggestedActions: deterministicAssistantActions(message),
 	}
+}
+
+// Generic attachment language (for example "需求文档") must not become a
+// project objective. Keep the fallback broad for complete task descriptions,
+// but require an explicit task signal when the same turn also contains safe
+// picker/credential actions.
+func assistantObjectiveFallbackAllowed(message string) bool {
+	if len(deterministicAssistantActions(message)) == 0 {
+		return true
+	}
+	normalized := strings.ToLower(message)
+	return containsAnyAssistantText(normalized, "任务目标", "演示目标", "新建项目", "创建项目", "登录", "登陆", "演示输出", "等待agent", "等待 agent")
 }
 
 func deterministicAssistantActions(message string) []assistantSuggestedAction {
@@ -567,7 +614,7 @@ func deterministicAssistantActions(message string) []assistantSuggestedAction {
 	if strings.Contains(normalized, "品牌素材") || strings.Contains(normalized, "brand asset") || strings.Contains(normalized, "logo") {
 		add(model.AssistantProposalAttachBrandAsset, "添加品牌素材", "使用桌面原生文件选择器添加品牌素材的安全引用。")
 	}
-	if strings.Contains(normalized, "测试账号") || strings.Contains(normalized, "演示账号") || strings.Contains(normalized, "demo credential") {
+	if strings.Contains(normalized, "测试账号") || strings.Contains(normalized, "测试用账号") || strings.Contains(normalized, "演示账号") || strings.Contains(normalized, "demo credential") || strings.Contains(normalized, "密码") {
 		add(model.AssistantProposalStoreDemoCredential, "安全保存演示账号", "账号内容只进入本机凭据库，configuration 仅保存 opaque secret ref。")
 	}
 	return actions
@@ -676,7 +723,7 @@ func (s *Service) proposalsFromModelResponse(session *model.AssistantSession, wo
 		}
 		proposals = append(proposals, newAssistantProposal(action.Kind, redactAssistantText(action.Title), redactAssistantText(action.Description), session.Configuration.Version, now, nil, action.TargetWorkstation))
 	}
-	if len(proposals) == 0 && session.Configuration.Readiness == "ready" && !session.Configuration.Confirmed && !assistantProposalAlreadyAvailable(session, model.AssistantProposalConfirmConfiguration, "") {
+	if len(proposals) == 0 && session.ActionMode != assistantActionModeV2 && session.Configuration.Readiness == "ready" && !session.Configuration.Confirmed && !assistantProposalAlreadyAvailable(session, model.AssistantProposalConfirmConfiguration, "") {
 		proposals = append(proposals, newAssistantProposal(model.AssistantProposalConfirmConfiguration, "确认 configuration 并启动本地理解", "锁定当前摘要并启动本地代码与需求分析；执行包上传仍需单独审批。", session.Configuration.Version, now, nil, model.AssistantWorkstationEvidence))
 	}
 	return proposals
@@ -788,7 +835,14 @@ func (s *Service) CompleteAssistantClientAction(ctx context.Context, sessionID, 
 	proposal.ExecutionResult = map[string]any{"configurationVersion": next.Version, "configurationHash": next.Hash, "clientActionCompleted": true}
 	dismissStaleAssistantProposals(session, proposal.ID, next.Version)
 	now := time.Now().UTC()
-	if followUp := configurationFollowUpMessage(next, now); followUp != nil {
+	if session.ActionMode != assistantActionModeV2 {
+		if followUp := configurationFollowUpMessage(next, now); followUp != nil {
+			session.Messages = append(session.Messages, *followUp)
+		}
+	}
+	if followUp, autoErr := s.autoStartAssistantAnalysisIfReady(ctx, session, now); autoErr != nil {
+		return nil, autoErr
+	} else if followUp != nil {
 		session.Messages = append(session.Messages, *followUp)
 	}
 	refreshAssistantPendingStatus(session)
@@ -801,6 +855,7 @@ func (s *Service) CompleteAssistantClientAction(ctx context.Context, sessionID, 
 	}
 	session.ProcessedIdempotency[key] = event.ID
 	refreshAssistantNextAction(session)
+	refreshAssistantActionState(session)
 	if err := s.assistantStore.Save(ctx, session); err != nil {
 		return nil, err
 	}
@@ -921,7 +976,15 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 		if err != nil {
 			return nil, err
 		}
-		state, err := s.CreateProject(ctx, input)
+		if session.ActionMode == assistantActionModeV2 && input.ProjectID == "" {
+			input.ProjectID = "proj_" + shortAssistantDigest(session.ID+"|"+session.Configuration.Hash)
+		}
+		analysisStarted := time.Now()
+		s.emitAssistantProgress(input.ProjectID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelInfo, Message: "开始本地项目分析", Detail: "正在读取安全引用、网页证据和用户目标。"})
+		analysisCtx := orchestrator.WithProgressSink(ctx, func(event orchestrator.ProgressEvent) {
+			s.emitAssistantProgress(input.ProjectID, event)
+		})
+		state, err := s.CreateProject(analysisCtx, input)
 		if err != nil {
 			if state == nil || state.ProjectID == "" {
 				return nil, err
@@ -944,13 +1007,19 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 			session.WorkstationTitle = "本地分析需要处理"
 			dismissAssistantProposalsOfKinds(session, proposal.ID, model.AssistantProposalConfirmConfiguration, model.AssistantProposalStartLocalAnalysis)
 			info := bridgeErrorInfo(err)
+			s.emitAssistantProgress(input.ProjectID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelError, Message: "本地分析被阻断", Detail: info.Message, ElapsedMS: time.Since(analysisStarted).Milliseconds()})
 			proposal.ExecutionResult = map[string]any{"projectID": state.ProjectID, "analysisStarted": true, "analysisBlocked": true, "errorCode": info.Code, "uploadApproved": false}
+			repairProposals := []model.AssistantProposal{
+				newAssistantProposal(model.AssistantProposalRetryPageScan, "重新扫描登录页", "重新运行登录页状态机并收集 Browser Scan 证据。", session.Configuration.Version, now, nil, model.AssistantWorkstationEvidence),
+				newAssistantProposal(model.AssistantProposalRegenerateExecutionPackage, "重新生成执行包", "保留当前安全引用并重新执行本地分析与产包门禁。", session.Configuration.Version, now, nil, model.AssistantWorkstationRepair),
+			}
 			return &model.AssistantMessage{
 				ID: fmt.Sprintf("agent_analysis_blocked_%d", now.UnixNano()), Role: "agent", Kind: "error",
-				Text: info.Message + "。项目已保存在本机，请在右侧证据工作台处理后重新分析。", CreatedAt: now,
-				TargetWorkstation: model.AssistantWorkstationEvidence,
+				Text: info.Message + "。项目已保存在本机，可直接执行下方修复动作。", CreatedAt: now,
+				TargetWorkstation: model.AssistantWorkstationEvidence, Proposals: repairProposals,
 			}, nil
 		}
+		s.emitAssistantProgress(input.ProjectID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelSuccess, Message: "本地执行包草稿已生成", Detail: "等待独立上传审批。", ElapsedMS: time.Since(analysisStarted).Milliseconds()})
 		if state.ProjectContext != nil {
 			state.ProjectContext.Name = session.Configuration.ProjectName
 			if err := s.states.Save(ctx, state); err != nil {
@@ -997,6 +1066,21 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 			return nil, err
 		}
 		proposal.ExecutionResult = map[string]any{"projectID": state.ProjectID, "sourceMode": "page_only", "uploadApproved": false}
+	case model.AssistantProposalRetryPageScan, model.AssistantProposalRegenerateExecutionPackage:
+		projectID := firstNonEmptyString(session.Context.ProjectID, session.Configuration.AnalysisProjectID)
+		if projectID == "" {
+			return nil, errors.New("analysis project is missing")
+		}
+		state, regenerateErr := s.RegenerateExecutionPackage(ctx, projectID)
+		if regenerateErr != nil {
+			return nil, regenerateErr
+		}
+		session.Configuration.AnalysisProjectID = state.ProjectID
+		session.Context.ProjectID = state.ProjectID
+		session.ActiveWorkstation = model.AssistantWorkstationApproval
+		session.WorkstationTitle = "执行包审批"
+		proposal.ExecutionResult = map[string]any{"projectID": state.ProjectID, "regenerated": true, "uploadApproved": false}
+		return &model.AssistantMessage{ID: fmt.Sprintf("agent_repaired_%d", time.Now().UnixNano()), Role: "agent", Kind: "status", Text: "页面证据和执行包已重新生成，请检查审批摘要。", CreatedAt: time.Now().UTC(), TargetWorkstation: model.AssistantWorkstationApproval}, nil
 	case model.AssistantProposalSelectProjectSource, model.AssistantProposalSelectLocalProject, model.AssistantProposalConnectGitHub,
 		model.AssistantProposalAttachRequirementDocument, model.AssistantProposalAttachBrandAsset,
 		model.AssistantProposalStoreDemoCredential:
@@ -1064,7 +1148,7 @@ func refreshAssistantNextAction(session *model.AssistantSession) {
 			}
 			session.NextAction = model.AssistantNextAction{
 				Kind: string(proposal.Kind), Title: proposal.Title, Description: proposal.Description,
-				PrimaryLabel: assistantProposalPrimaryLabel(proposal.Kind), ProposalID: proposal.ID,
+				PrimaryLabel: assistantProposalPrimaryLabel(*proposal), ProposalID: proposal.ID,
 				TargetWorkstation: proposal.TargetWorkstation, RequiresUserAction: true,
 				MissingFields: append([]string(nil), session.Configuration.MissingFields...),
 			}
@@ -1086,8 +1170,11 @@ func refreshAssistantNextAction(session *model.AssistantSession) {
 	session.NextAction = model.AssistantNextAction{Kind: "provide_configuration", Title: "补全演示目标", Description: "告诉 Cascade 产品地址、目标受众和必须展示的业务流程。", PrimaryLabel: "继续对话", TargetWorkstation: model.AssistantWorkstationOverview, RequiresUserAction: true, MissingFields: append([]string(nil), session.Configuration.MissingFields...)}
 }
 
-func assistantProposalPrimaryLabel(kind model.AssistantProposalKind) string {
-	switch kind {
+func assistantProposalPrimaryLabel(proposal model.AssistantProposal) string {
+	if proposal.Kind == model.AssistantProposalSelectLocalProject && proposal.ExecutionResult != nil && proposal.ExecutionResult["detectedSources"] != nil {
+		return "确认该目录"
+	}
+	switch proposal.Kind {
 	case model.AssistantProposalConfigurationPatch:
 		return "应用字段变更"
 	case model.AssistantProposalSelectProjectSource:
@@ -1116,6 +1203,11 @@ func dismissStaleAssistantProposals(session *model.AssistantSession, currentProp
 		for proposalIndex := range session.Messages[messageIndex].Proposals {
 			proposal := &session.Messages[messageIndex].Proposals[proposalIndex]
 			if proposal.ID != currentProposalID && proposal.Status == "available" && proposal.BaseVersion != currentVersion {
+				if assistantProposalCanRebase(proposal.Kind) {
+					proposal.BaseVersion = currentVersion
+					proposal.ExecutionResult = map[string]any{"rebased": true, "currentConfigurationVersion": currentVersion}
+					continue
+				}
 				proposal.Status = "dismissed"
 				proposal.ExecutionResult = map[string]any{"stale": true, "currentConfigurationVersion": currentVersion}
 			}
@@ -1228,7 +1320,7 @@ func applyConfigurationPatch(current model.ProjectConfigurationDraft, patch mode
 		current.TargetDurationSec = *patch.TargetDurationSec
 	}
 	if patch.MustShow != nil {
-		current.MustShow = cleanStrings(*patch.MustShow)
+		current.MustShow = cleanStringsPreserveOrder(*patch.MustShow)
 	}
 	if patch.MustNotShow != nil {
 		current.MustNotShow = cleanStrings(*patch.MustNotShow)
@@ -1411,11 +1503,11 @@ func configurationMissingFields(draft model.ProjectConfigurationDraft) []string 
 	if strings.TrimSpace(draft.Objective) == "" {
 		missing = append(missing, "objective")
 	}
-	if strings.TrimSpace(draft.TargetAudience) == "" {
-		missing = append(missing, "targetAudience")
-	}
 	if len(draft.Sources) == 0 {
 		missing = append(missing, "sources")
+	}
+	if assistantIntentRequiresLogin(draft) && len(draft.CredentialRefs) == 0 && !assistantIntentHasManualLoginCheckpoint(draft) {
+		missing = append(missing, "credentialRefs_or_manualLoginCheckpoint")
 	}
 	return missing
 }
@@ -1436,7 +1528,28 @@ func normalizeAssistantSession(session *model.AssistantSession) *model.Assistant
 	dismissDuplicateAssistantProposals(session)
 	refreshConfigurationMetadata(&session.Configuration)
 	refreshAssistantNextAction(session)
+	refreshAssistantActionState(session)
 	return session
+}
+
+func (s *Service) autoStartAssistantAnalysisIfReady(ctx context.Context, session *model.AssistantSession, now time.Time) (*model.AssistantMessage, error) {
+	if session == nil || session.ActionMode != assistantActionModeV2 || session.Configuration.Readiness != "ready" || session.Configuration.Confirmed || session.Configuration.AnalysisProjectID != "" {
+		return nil, nil
+	}
+	proposal := newAssistantProposal(model.AssistantProposalStartLocalAnalysis, "自动运行本地分析", "依赖已满足，开始读取本地证据并生成执行包草稿；不会上传。", session.Configuration.Version, now, nil, model.AssistantWorkstationEvidence)
+	proposal.RequiresConfirmation = false
+	session.Messages = append(session.Messages, model.AssistantMessage{
+		ID: fmt.Sprintf("agent_auto_analysis_%d", now.UnixNano()), Role: "agent", Kind: "status",
+		Text: "本地来源和登录要求已满足，正在自动生成执行方案。", CreatedAt: now,
+		TargetWorkstation: model.AssistantWorkstationEvidence, Proposals: []model.AssistantProposal{proposal},
+	})
+	stored := &session.Messages[len(session.Messages)-1].Proposals[0]
+	followUp, err := s.executeAssistantProposal(ctx, session, stored)
+	if err != nil {
+		return nil, err
+	}
+	stored.Status = "confirmed"
+	return followUp, nil
 }
 
 func dismissDuplicateAssistantProposals(session *model.AssistantSession) {
@@ -1481,13 +1594,124 @@ func redactAssistantText(value string) string {
 	return windowsAbsolutePathPattern.ReplaceAllString(value, "[local-path]")
 }
 
+func (s *Service) detectAssistantLocalSources(value string) []model.ConfigurationSourceRef {
+	if s == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	result := []model.ConfigurationSourceRef{}
+	for _, candidate := range windowsAbsolutePathPattern.FindAllString(value, -1) {
+		candidate = strings.TrimRight(strings.TrimSpace(candidate), "'”’)]}）")
+		registered, err := s.RegisterLocalSource("local_repository", candidate)
+		if err != nil || seen[registered.Ref] {
+			continue
+		}
+		seen[registered.Ref] = true
+		result = append(result, model.ConfigurationSourceRef{Ref: registered.Ref, Kind: registered.Kind, Label: redactAssistantText(registered.Label)})
+	}
+	return result
+}
+
+func attachDetectedAssistantLocalSources(proposals []model.AssistantProposal, sources []model.ConfigurationSourceRef) {
+	if len(sources) == 0 {
+		return
+	}
+	for index := range proposals {
+		if proposals[index].Kind != model.AssistantProposalSelectLocalProject {
+			continue
+		}
+		if proposals[index].ExecutionResult == nil {
+			proposals[index].ExecutionResult = map[string]any{}
+		}
+		proposals[index].ExecutionResult["detectedSources"] = append([]model.ConfigurationSourceRef(nil), sources...)
+		proposals[index].Title = "确认本地项目：" + sources[0].Label
+		proposals[index].Description = "已在本机识别该目录。确认后只把 opaque source ref 写入 configuration；也可稍后改用原生目录选择器。"
+		return
+	}
+}
+
 func firstHTTPURL(value string) string {
 	candidate := strings.TrimRight(assistantHTTPURLPattern.FindString(value), ").!?！？]}")
 	parsed, err := url.Parse(candidate)
 	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != "" {
 		return candidate
 	}
+	if match := assistantBareDomainPattern.FindStringSubmatch(value); len(match) > 1 {
+		candidate = "https://" + strings.TrimRight(match[1], ").!?！？]}")
+		if parsed, parseErr := url.Parse(candidate); parseErr == nil && parsed.Hostname() != "" {
+			return candidate
+		}
+	}
 	return ""
+}
+
+func assistantProposalCanRebase(kind model.AssistantProposalKind) bool {
+	switch kind {
+	case model.AssistantProposalSelectProjectSource, model.AssistantProposalSelectLocalProject,
+		model.AssistantProposalConnectGitHub, model.AssistantProposalAttachRequirementDocument,
+		model.AssistantProposalAttachBrandAsset, model.AssistantProposalStoreDemoCredential:
+		return true
+	default:
+		return false
+	}
+}
+
+func splitAssistantIntentSteps(value string) []string {
+	replacer := strings.NewReplacer("->", "\n", "→", "\n", "，然后", "\n", "然后", "\n", "并且", "\n", "最后", "\n", "，", "\n", ";", "\n", "；", "\n")
+	parts := strings.FieldsFunc(replacer.Replace(value), func(r rune) bool { return r == '\n' })
+	steps := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.Trim(strings.TrimSpace(part), "：:、.-")
+		if part != "" {
+			steps = append(steps, part)
+		}
+	}
+	return cleanStringsPreserveOrder(steps)
+}
+
+func inferAssistantIntentSteps(message string) []string {
+	marker := regexp.MustCompile(`(?:任务目标|演示目标|目标|需求)\s*[：:]?\s*`)
+	location := marker.FindStringIndex(message)
+	if location == nil {
+		return nil
+	}
+	value := message[location[1]:]
+	if index := strings.Index(value, "测试用账号"); index >= 0 {
+		value = value[:index]
+	}
+	steps := splitAssistantIntentSteps(value)
+	if len(steps) > 1 {
+		return steps
+	}
+	return nil
+}
+
+func assistantMessageContainsTaskIntent(message string) bool {
+	normalized := strings.ToLower(message)
+	return firstHTTPURL(message) != "" || containsAnyAssistantText(normalized, "任务目标", "演示目标", "目标", "需求", "登录", "登陆", "新建项目", "创建项目")
+}
+
+func normalizeAssistantProjectName(value string) string {
+	for _, delimiter := range []string{"并且", "然后", "随后", "等待", "，", ","} {
+		if index := strings.Index(value, delimiter); index >= 0 {
+			value = value[:index]
+		}
+	}
+	return strings.Trim(strings.TrimSpace(value), "：:、.。\"'“”")
+}
+
+func cleanStringsPreserveOrder(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(redactAssistantText(value))
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
 }
 
 func corruptedConfigurationField(draft model.ProjectConfigurationDraft) string {

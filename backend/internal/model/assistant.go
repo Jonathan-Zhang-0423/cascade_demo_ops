@@ -47,6 +47,8 @@ const (
 	AssistantProposalStartLocalAnalysis          AssistantProposalKind = "start_local_analysis"
 	AssistantProposalOpenWorkstation             AssistantProposalKind = "open_workstation"
 	AssistantProposalContinueWithWebpageEvidence AssistantProposalKind = "continue_with_webpage_evidence"
+	AssistantProposalRetryPageScan               AssistantProposalKind = "retry_page_scan"
+	AssistantProposalRegenerateExecutionPackage  AssistantProposalKind = "regenerate_execution_package"
 )
 
 func IsAssistantProposalKind(value AssistantProposalKind) bool {
@@ -56,6 +58,8 @@ func IsAssistantProposalKind(value AssistantProposalKind) bool {
 		AssistantProposalAttachBrandAsset, AssistantProposalStoreDemoCredential,
 		AssistantProposalConfirmConfiguration, AssistantProposalStartLocalAnalysis,
 		AssistantProposalOpenWorkstation, AssistantProposalContinueWithWebpageEvidence:
+		return true
+	case AssistantProposalRetryPageScan, AssistantProposalRegenerateExecutionPackage:
 		return true
 	default:
 		return false
@@ -99,6 +103,80 @@ type ProjectConfigurationDraft struct {
 	Confirmed         bool                     `json:"confirmed"`
 	ConfirmedAt       *time.Time               `json:"confirmedAt,omitempty"`
 	AnalysisProjectID string                   `json:"analysisProjectID,omitempty"`
+}
+
+const AgentIntentPlanSchemaVersion = "demoops.agent_intent_plan.v1"
+
+type AgentActionRisk string
+
+const (
+	AgentActionRiskReadOnly      AgentActionRisk = "read_only"
+	AgentActionRiskSessionWrite  AgentActionRisk = "session_write"
+	AgentActionRiskExternalWrite AgentActionRisk = "external_write"
+	AgentActionRiskDestructive   AgentActionRisk = "destructive"
+)
+
+type AgentIntentStep struct {
+	ID                  string          `json:"id"`
+	Order               int             `json:"order"`
+	Action              string          `json:"action"`
+	Target              string          `json:"target,omitempty"`
+	Risk                AgentActionRisk `json:"risk"`
+	ExpectedOutcome     string          `json:"expectedOutcome,omitempty"`
+	EvidenceRequirement string          `json:"evidenceRequirement,omitempty"`
+}
+
+type AgentIntentPlan struct {
+	SchemaVersion        string            `json:"schemaVersion"`
+	Objective            string            `json:"objective,omitempty"`
+	Entities             map[string]string `json:"entities,omitempty"`
+	Steps                []AgentIntentStep `json:"steps,omitempty"`
+	Constraints          []string          `json:"constraints,omitempty"`
+	RequiredCapabilities []string          `json:"requiredCapabilities,omitempty"`
+	Readiness            string            `json:"readiness"`
+	MissingRequirements  []string          `json:"missingRequirements,omitempty"`
+	Version              int64             `json:"version"`
+	Digest               string            `json:"digest"`
+}
+
+type AgentActionSpecification struct {
+	ID                  string          `json:"id"`
+	Title               string          `json:"title"`
+	InputSchema         map[string]any  `json:"inputSchema,omitempty"`
+	OutputKinds         []string        `json:"outputKinds,omitempty"`
+	AllowedPhases       []string        `json:"allowedPhases"`
+	Risk                AgentActionRisk `json:"risk"`
+	AutoPolicy          string          `json:"autoPolicy"`
+	Idempotent          bool            `json:"idempotent"`
+	RequiresUserGesture bool            `json:"requiresUserGesture"`
+}
+
+type AgentAction struct {
+	ID                  string               `json:"id"`
+	SpecID              string               `json:"specID"`
+	Title               string               `json:"title"`
+	Description         string               `json:"description,omitempty"`
+	Risk                AgentActionRisk      `json:"risk"`
+	Status              string               `json:"status"`
+	AutoExecutable      bool                 `json:"autoExecutable"`
+	RequiresUserGesture bool                 `json:"requiresUserGesture"`
+	DependsOn           []string             `json:"dependsOn,omitempty"`
+	DependencyDigest    string               `json:"dependencyDigest"`
+	IdempotencyKey      string               `json:"idempotencyKey"`
+	ProposalID          string               `json:"proposalID,omitempty"`
+	BatchID             string               `json:"batchID,omitempty"`
+	TargetWorkstation   AssistantWorkstation `json:"targetWorkstation,omitempty"`
+	ExecutionResult     map[string]any       `json:"executionResult,omitempty"`
+}
+
+type AgentActionBatch struct {
+	ID                    string   `json:"id"`
+	ActionIDs             []string `json:"actionIDs"`
+	BaseIntentDigest      string   `json:"baseIntentDigest"`
+	ApprovalSubjectDigest string   `json:"approvalSubjectDigest,omitempty"`
+	Status                string   `json:"status"`
+	RequiresConfirmation  bool     `json:"requiresConfirmation"`
+	IdempotencyKey        string   `json:"idempotencyKey"`
 }
 
 // ProjectConfigurationPatch uses pointers so omission and clearing remain distinct.
@@ -176,18 +254,36 @@ type AssistantNextAction struct {
 }
 
 type AssistantSession struct {
-	ID                   string                    `json:"id"`
-	Context              AssistantContext          `json:"context"`
-	Status               string                    `json:"status"`
-	ActiveWorkstation    AssistantWorkstation      `json:"activeWorkstation,omitempty"`
-	WorkstationTitle     string                    `json:"workstationTitle,omitempty"`
-	WorkstationStatus    string                    `json:"workstationStatus,omitempty"`
-	NextAction           AssistantNextAction       `json:"nextAction"`
-	Configuration        ProjectConfigurationDraft `json:"configuration"`
-	Messages             []AssistantMessage        `json:"messages"`
-	Events               []AssistantEvent          `json:"events,omitempty"`
-	LastEventID          string                    `json:"lastEventID,omitempty"`
-	ProcessedIdempotency map[string]string         `json:"processedIdempotency,omitempty"`
+	ID                   string                     `json:"id"`
+	Context              AssistantContext           `json:"context"`
+	Status               string                     `json:"status"`
+	ActiveWorkstation    AssistantWorkstation       `json:"activeWorkstation,omitempty"`
+	WorkstationTitle     string                     `json:"workstationTitle,omitempty"`
+	WorkstationStatus    string                     `json:"workstationStatus,omitempty"`
+	NextAction           AssistantNextAction        `json:"nextAction"`
+	Configuration        ProjectConfigurationDraft  `json:"configuration"`
+	Messages             []AssistantMessage         `json:"messages"`
+	Events               []AssistantEvent           `json:"events,omitempty"`
+	LastEventID          string                     `json:"lastEventID,omitempty"`
+	ProcessedIdempotency map[string]string          `json:"processedIdempotency,omitempty"`
+	ActionMode           string                     `json:"actionMode,omitempty"`
+	IntentPlan           *AgentIntentPlan           `json:"intentPlan,omitempty"`
+	ActionCatalog        []AgentActionSpecification `json:"actionCatalog,omitempty"`
+	Actions              []AgentAction              `json:"actions,omitempty"`
+	ActionBatches        []AgentActionBatch         `json:"actionBatches,omitempty"`
+}
+
+type AgentActionCompleteRequest struct {
+	DependencyDigest string                   `json:"dependencyDigest,omitempty"`
+	IdempotencyKey   string                   `json:"idempotencyKey"`
+	SelectedSources  []ConfigurationSourceRef `json:"selectedSources,omitempty"`
+	CredentialRefs   []string                 `json:"credentialRefs,omitempty"`
+}
+
+type AgentActionBatchConfirmRequest struct {
+	BaseIntentDigest      string `json:"baseIntentDigest"`
+	ApprovalSubjectDigest string `json:"approvalSubjectDigest,omitempty"`
+	IdempotencyKey        string `json:"idempotencyKey"`
 }
 
 type AssistantTurnRequest struct {

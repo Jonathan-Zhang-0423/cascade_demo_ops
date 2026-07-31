@@ -24,38 +24,61 @@ import (
 )
 
 type Service struct {
-	runtime         config.AppRuntimeConfig
-	llm             *llm.Router
-	flow            *orchestrator.CascadeFlow
-	states          store.StateStore
-	assistantStore  store.AssistantStore
-	assistantMu     sync.Mutex
-	controlPlaneMu  sync.RWMutex
-	controlPlaneURL string
-	layout          storage.LocalLayout
-	exchange        *ExchangeIntakeService
-	runningMu       sync.Mutex
-	runningTasks    map[string]context.CancelFunc
-	editorMu        sync.Mutex
-	editorWorker    editorWorker
-	editorJobsMu    sync.Mutex
-	editorJobs      map[string]editorRenderTask
-	outlineRunner   BrowserAgentOutlineRunner
-	sourceRefsMu    sync.RWMutex
-	sourceRefs      map[string]LocalSourceRef
-	approvalMu      sync.Mutex
-	approvedBuilds  map[string]ClientExecutionPackageBuild
-	cloudStateMu    sync.Mutex
-	storeModelKey   func(string, string) error
-	readModelKey    func(string) (string, error)
-	deleteModelKey  func(string) error
-	verifierMu      sync.RWMutex
+	runtime               config.AppRuntimeConfig
+	llm                   *llm.Router
+	flow                  *orchestrator.CascadeFlow
+	states                store.StateStore
+	assistantStore        store.AssistantStore
+	assistantMu           sync.Mutex
+	assistantProgressMu   sync.RWMutex
+	assistantProgressSink func(string, orchestrator.ProgressEvent)
+	controlPlaneMu        sync.RWMutex
+	controlPlaneURL       string
+	layout                storage.LocalLayout
+	exchange              *ExchangeIntakeService
+	runningMu             sync.Mutex
+	runningTasks          map[string]context.CancelFunc
+	editorMu              sync.Mutex
+	editorWorker          editorWorker
+	editorJobsMu          sync.Mutex
+	editorJobs            map[string]editorRenderTask
+	outlineRunner         BrowserAgentOutlineRunner
+	sourceRefsMu          sync.RWMutex
+	sourceRefs            map[string]LocalSourceRef
+	approvalMu            sync.Mutex
+	approvedBuilds        map[string]ClientExecutionPackageBuild
+	cloudStateMu          sync.Mutex
+	storeModelKey         func(string, string) error
+	readModelKey          func(string) (string, error)
+	deleteModelKey        func(string) error
+	verifierMu            sync.RWMutex
 	// outcomeVerifier is Server-owned. It never receives a browser/page object
 	// and is snapshotted when an Outline run begins.
 	outcomeVerifier OutcomeVerifier
 	// devVisibleBrowserAgent is intentionally separate from the normal runtime.
 	// It exists only for a human-assisted local acceptance login handoff.
 	devVisibleBrowserAgent *devVisibleBrowserAgentManager
+}
+
+func (s *Service) SetAssistantProgressSink(sink func(string, orchestrator.ProgressEvent)) {
+	if s == nil {
+		return
+	}
+	s.assistantProgressMu.Lock()
+	defer s.assistantProgressMu.Unlock()
+	s.assistantProgressSink = sink
+}
+
+func (s *Service) emitAssistantProgress(projectID string, event orchestrator.ProgressEvent) {
+	if s == nil {
+		return
+	}
+	s.assistantProgressMu.RLock()
+	sink := s.assistantProgressSink
+	s.assistantProgressMu.RUnlock()
+	if sink != nil {
+		sink(projectID, event)
+	}
 }
 
 type editorRenderTask struct {

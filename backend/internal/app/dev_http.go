@@ -82,7 +82,7 @@ type DevExecutionEvent struct {
 }
 
 func NewDevHTTPServer(service *Service) *DevHTTPServer {
-	return &DevHTTPServer{
+	server := &DevHTTPServer{
 		service:               service,
 		events:                newDevEventStore(),
 		storeGitHubToken:      credentialstore.StoreGitHubToken,
@@ -90,6 +90,10 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 		githubTokenConfigured: credentialstore.GitHubTokenConfigured,
 		deleteGitHubToken:     credentialstore.DeleteGitHubToken,
 	}
+	if service != nil {
+		service.SetAssistantProgressSink(server.emitProjectEvent)
+	}
+	return server
 }
 
 func (s *DevHTTPServer) Handler() http.Handler {

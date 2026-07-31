@@ -1235,7 +1235,7 @@ async function composeFinalVideo(
   const sourceArtifact = findDemoArtifactByID(catalog, primaryShot.source_artifact_id);
   const sourceExtension = sourceArtifact ? videoExtensionForArtifact(sourceArtifact) : ".webm";
   const targetExtension = extensionForContainer(targetContainer);
-  const extension = ffmpegAvailable ? targetExtension || sourceExtension : sourceExtension;
+  const extension = ffmpegAvailable ? targetExtension || ".mp4" : sourceExtension;
   const videoPath = path.join(outputDir, `demo_${targetDurationSec}s${extension}`);
   if (!ffmpegAvailable) {
     if (hasPostProcessingWork(editPlan)) {
@@ -1281,23 +1281,43 @@ async function composeFinalVideo(
         composed.error || "ffmpeg_post_process_failed",
       );
     }
-    const fallbackVideoPath = path.join(outputDir, `demo_${targetDurationSec}s${sourceExtension}`);
-    await copyFile(primaryShot.source_path as string, fallbackVideoPath);
+    const fallbackVideoPath = path.join(outputDir, `demo_${targetDurationSec}s.mp4`);
+    const fallbackVideoCodec = await preferredVideoCodec(ffmpegPath, ".mp4", renderProfile);
+    const fallbackAudioCodec = await preferredAudioCodec(ffmpegPath, ".mp4");
+    const transcodeResult = await runCommand(ffmpegPath, [
+      "-y", "-i", primaryShot.source_path as string,
+      "-map", "0:v:0", "-map", "0:a?",
+      "-c:v", fallbackVideoCodec.name, ...fallbackVideoCodec.args,
+      "-c:a", fallbackAudioCodec.name, ...fallbackAudioCodec.args,
+      "-movflags", "+faststart", fallbackVideoPath,
+    ]);
+    if (transcodeResult.code !== 0) {
+      return plannedCompositorResult(
+        outputDir,
+        targetDurationSec,
+        shotPlan,
+        `FFmpeg edit and MP4 fallback transcode both failed (${compactProcessError("mp4 fallback", transcodeResult)}).`,
+        editPlan,
+        "mp4_delivery_failed",
+      );
+    }
     const result: CompositorResult = {
       status: "rendered",
       video_path: fallbackVideoPath,
-      method: "copy_source_recording",
+      method: "ffmpeg_trim_concat",
       ffmpeg_available: true,
       quality_status: "degraded",
       source_artifact_id: primaryShot.source_artifact_id,
-      output_container: sourceExtension.replace(/^\./, ""),
+      output_container: "mp4",
       shot_plan: shotPlan,
       planned_operations: plannedOperations(shotPlan, editPlan),
-      applied_operations: ["fallback_copy"],
+      applied_operations: ["fallback_mp4_transcode"],
       skipped_operations: skippedOperationsForCurrentCompositor(shotPlan, editPlan, true),
       fallback_reason: composed.error || "ffmpeg_render_failed",
-      note: "Rendered a deterministic fallback demo video by copying the source browser recording after ffmpeg trim/concat failed. No image or video generation was used.",
+      note: "Rendered a deterministic MP4 fallback by transcoding the source browser recording after the requested edit composition failed. No image or video generation was used.",
     };
+    result.video_codec = fallbackVideoCodec.name;
+    result.audio_codec = fallbackAudioCodec.name;
     if (primaryShot.source_uri) result.source_uri = primaryShot.source_uri;
     return result;
   }
@@ -2494,6 +2514,9 @@ function appliedOperationsForCurrentCompositor(shots: CompositorShot[], editPlan
 
 function skippedOperationsForCurrentCompositor(shots: CompositorShot[], editPlan: DemoEditPlan | undefined, skipTrim: boolean): Array<{ type: string; reason: string }> {
   const skipped = new Map<string, string>();
+  const applied = skipTrim || !editPlan
+    ? new Set<string>()
+    : new Set(appliedOperationsForCurrentCompositor(shots, editPlan));
   for (const shot of shots) {
     for (const overlay of shot.overlays) {
       if (overlay.shape && !["rectangle", "circle", "polygon", "star", "line", "arrow"].includes(overlay.shape)) {
@@ -2509,10 +2532,7 @@ function skippedOperationsForCurrentCompositor(shots: CompositorShot[], editPlan
       skipped.set(operation, "ffmpeg trim/concat was not executed in fallback mode");
       continue;
     }
-    if (operation === "caption" && !skipTrim && (shots.some((shot) => captionCuesForShot(shot).length > 0) || (editPlan?.caption_cues?.length || 0) > 0)) {
-      continue;
-    }
-    if (operation === "narration" && !skipTrim && (editPlan?.narrations?.length || 0) > 0) {
+    if (applied.has(operation)) {
       continue;
     }
     skipped.set(operation, "current deterministic compositor does not burn this operation into pixels yet");
@@ -2729,10 +2749,12 @@ async function composeWithFFmpeg(
     }
     const segmentPath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}${extension}`);
     const videoFilters: string[] = [];
+    let outputFPS = 30;
     if (renderProfile) {
       const width = boundedInteger(renderProfile.width, renderProfile.mode === "preview" ? 1280 : 1920, 320, 3840);
       const height = boundedInteger(renderProfile.height, renderProfile.mode === "preview" ? 720 : 1080, 180, 2160);
       const fps = boundedInteger(renderProfile.fps, 30, 1, 60);
+      outputFPS = fps;
       videoFilters.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p`);
     }
     const captionCues = captionCuesForShot(shot);
@@ -2745,7 +2767,10 @@ async function composeWithFFmpeg(
     const volumeExpression = audioVolumeExpression(audioPolicy, outputCursorMS, segmentDurationMS, segmentStartMS);
     let useSourceAudio = false;
     const ffmpegArgs = still
-      ? ["-y", "-loop", "1", "-i", shot.source_path, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+      ? [
+          "-y", "-loop", "1", "-framerate", String(outputFPS), "-t", secondsArg(segmentDurationMS), "-i", shot.source_path,
+          "-f", "lavfi", "-t", secondsArg(segmentDurationMS), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+        ]
       : ["-y", "-i", shot.source_path];
     if (!still) {
       let sourceHasAudio = sourceAudio.get(shot.source_path);
@@ -2767,6 +2792,12 @@ async function composeWithFFmpeg(
     }
     if (useSourceAudio) {
       ffmpegArgs.push("-af", `asetpts=PTS-STARTPTS,volume='${volumeExpression.expression}':eval=frame,aresample=48000`);
+    }
+    if (still) {
+      // Some Windows FFmpeg builds do not reliably stop a looped image input
+      // at output -t. A deterministic frame cap gives both video and the
+      // synthetic audio stream a finite endpoint.
+      ffmpegArgs.push("-frames:v", String(Math.max(1, Math.ceil(segmentDurationMS * outputFPS / 1000))));
     }
     ffmpegArgs.push(
       "-c:v",

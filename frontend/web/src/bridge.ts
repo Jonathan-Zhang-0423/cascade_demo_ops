@@ -91,6 +91,8 @@ export type DesktopBridgeClient = {
   listAssistantEvents(sessionID: string, afterID?: string): Promise<BridgeResult<AssistantEventView[]>>;
   confirmAssistantProposal(sessionID: string, proposalID: string, baseVersion?: number, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
   completeAssistantClientAction(sessionID: string, proposalID: string, baseVersion: number, result: { selectedSources?: ConfigurationSourceRefView[]; credentialRefs?: string[] }, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
+  completeAssistantAction(sessionID: string, actionID: string, dependencyDigest: string, result: { selectedSources?: ConfigurationSourceRefView[]; credentialRefs?: string[] }, idempotencyKey: string): Promise<BridgeResult<AssistantSessionView>>;
+  confirmAssistantActionBatch(sessionID: string, batchID: string, baseIntentDigest: string, idempotencyKey: string, approvalSubjectDigest?: string): Promise<BridgeResult<AssistantSessionView>>;
   dismissAssistantProposal(sessionID: string, proposalID: string, baseVersion?: number, idempotencyKey?: string): Promise<BridgeResult<AssistantSessionView>>;
   cancelAssistantSession(sessionID: string): Promise<BridgeResult<AssistantSessionView>>;
   selectLocalProjectDirectory(): Promise<BridgeResult<ConfigurationSourceRefView>>;
@@ -302,6 +304,7 @@ type LocalRuntimeHealth = {
     local_recording_execution?: boolean;
     local_recording_scope?: string;
     video_worker_role?: string;
+    agent_actions_v2?: boolean;
   };
 };
 
@@ -767,6 +770,12 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     },
     async completeAssistantClientAction(sessionID, proposalID, baseVersion, result, idempotencyKey) {
       return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/complete`, { method: "POST", body: JSON.stringify({ baseVersion, idempotencyKey, ...result }) });
+    },
+    async completeAssistantAction(sessionID, actionID, dependencyDigest, result, idempotencyKey) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/actions/${encodeURIComponent(actionID)}/complete`, { method: "POST", body: JSON.stringify({ dependencyDigest, idempotencyKey, ...result }) });
+    },
+    async confirmAssistantActionBatch(sessionID, batchID, baseIntentDigest, idempotencyKey, approvalSubjectDigest) {
+      return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/batches/${encodeURIComponent(batchID)}/confirm`, { method: "POST", body: JSON.stringify({ baseIntentDigest, idempotencyKey, approvalSubjectDigest }) });
     },
     async dismissAssistantProposal(sessionID, proposalID, baseVersion, idempotencyKey) {
       return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/dismiss`, { method: "POST", body: JSON.stringify({ baseVersion, idempotencyKey }) });
@@ -1247,6 +1256,8 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async listAssistantEvents() { return ok([]); },
     async confirmAssistantProposal(_sessionID, _proposalID, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async completeAssistantClientAction(_sessionID, _proposalID, _baseVersion, _result, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
+    async completeAssistantAction(_sessionID, _actionID, _dependencyDigest, _result, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
+    async confirmAssistantActionBatch(_sessionID, _batchID, _baseIntentDigest, _idempotencyKey, _approvalSubjectDigest) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async dismissAssistantProposal(_sessionID, _proposalID, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async cancelAssistantSession() { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async selectLocalProjectDirectory() { return ok({ ref: "source_mock_local", kind: "local_repository", label: "sample-project" }); },
@@ -2987,6 +2998,7 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
       localRecordingExecution: Boolean(local.app_capabilities.local_recording_execution),
       localRecordingScope: local.app_capabilities.local_recording_scope ?? "unknown",
       videoWorkerRole: local.app_capabilities.video_worker_role ?? "unknown",
+      agentActionsV2: Boolean(local.app_capabilities.agent_actions_v2),
     };
   }
   return health;

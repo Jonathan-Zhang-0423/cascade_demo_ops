@@ -70,6 +70,24 @@ func (s *DevHTTPServer) handleAssistantSessionRoute(w http.ResponseWriter, r *ht
 	case r.Method == http.MethodPost && suffix == "/cancel":
 		session, err := s.service.CancelAssistantSession(r.Context(), sessionID)
 		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && strings.HasPrefix(suffix, "/actions/") && strings.HasSuffix(suffix, "/complete"):
+		actionID := strings.TrimSuffix(strings.TrimPrefix(suffix, "/actions/"), "/complete")
+		var request model.AgentActionCompleteRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.CompleteAssistantAction(r.Context(), sessionID, actionID, request)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && strings.HasPrefix(suffix, "/batches/") && strings.HasSuffix(suffix, "/confirm"):
+		batchID := strings.TrimSuffix(strings.TrimPrefix(suffix, "/batches/"), "/confirm")
+		var request model.AgentActionBatchConfirmRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.ConfirmAssistantActionBatch(r.Context(), sessionID, batchID, request)
+		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && strings.HasPrefix(suffix, "/proposals/") && strings.HasSuffix(suffix, "/confirm"):
 		proposalID := strings.TrimSuffix(strings.TrimPrefix(suffix, "/proposals/"), "/confirm")
 		var request model.AssistantProposalDecisionRequest

@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -76,7 +78,7 @@ func RunClientExecutionRecordingAndRender(ctx context.Context, service Service, 
 	return result, nil
 }
 
-func RenderClientExecutionRecordingResult(ctx context.Context, service RenderService, source *model.ClientExecutionPackage, recording *model.RecordingResultPackage, outputDir string, progress func(string, string, int)) (RenderRequest, RenderResult, error) {
+func RenderClientExecutionRecordingResult(ctx context.Context, service DeliveryRenderService, source *model.ClientExecutionPackage, recording *model.RecordingResultPackage, outputDir string, progress func(string, string, int)) (RenderRequest, RenderResult, error) {
 	if service == nil || source == nil || recording == nil {
 		return RenderRequest{}, RenderResult{}, errors.New("render service, source package, and recording result are required")
 	}
@@ -98,9 +100,41 @@ func RenderClientExecutionRecordingResult(ctx context.Context, service RenderSer
 	if err != nil {
 		return RenderRequest{}, RenderResult{}, err
 	}
+	if err := validateFinalMP4Delivery(ctx, service, renderResult); err != nil {
+		return RenderRequest{}, RenderResult{}, err
+	}
 	AttachRenderResultArtifacts(source, recording, renderResult, recording.CreatedAt)
 	reportPipelineProgress(request, "quality_validation", "Validating required-step coverage, media decodability, redaction, and output checksums.", 98)
 	return renderRequest, renderResult, nil
+}
+
+func validateFinalMP4Delivery(ctx context.Context, service DeliveryRenderService, result RenderResult) error {
+	videoPath := strings.TrimSpace(result.VideoPath)
+	if !strings.EqualFold(filepath.Ext(videoPath), ".mp4") {
+		return fmt.Errorf("final_video_not_mp4: renderer returned %q", filepath.Ext(videoPath))
+	}
+	info, err := os.Stat(videoPath)
+	if err != nil {
+		return fmt.Errorf("final_video_missing: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return errors.New("final_video_invalid: rendered MP4 is empty or not a regular file")
+	}
+	probe, err := service.ProbeMedia(ctx, MediaProbeRequest{Path: videoPath})
+	if err != nil {
+		return fmt.Errorf("final_video_probe_failed: %w", err)
+	}
+	if !probe.FFProbeAvailable {
+		return errors.New("final_video_probe_unavailable: ffprobe is required before delivery")
+	}
+	if probe.VideoCodec == "" || probe.DurationMS <= 0 || probe.Width <= 0 || probe.Height <= 0 {
+		return fmt.Errorf("final_video_not_decodable: format=%q codec=%q duration_ms=%d dimensions=%dx%d", probe.Format, probe.VideoCodec, probe.DurationMS, probe.Width, probe.Height)
+	}
+	format := strings.ToLower(probe.Format)
+	if format != "" && !strings.Contains(format, "mp4") && !strings.Contains(format, "mov") {
+		return fmt.Errorf("final_video_container_mismatch: ffprobe format=%q", probe.Format)
+	}
+	return nil
 }
 
 func applyDirectorPatchAndRerender(ctx context.Context, service RenderService, request RecordingRenderPipelineRequest, renderRequest RenderRequest, renderResult RenderResult) (RenderResult, error) {

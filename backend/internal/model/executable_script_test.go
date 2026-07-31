@@ -104,6 +104,29 @@ func TestExecutableRecordingScriptBundleHashIgnoresStoredBundleHashAndValidation
 	}
 }
 
+func TestSemanticBundleHashIgnoresLifecycleStatusAndTimestamps(t *testing.T) {
+	bundle := &ExecutableRecordingScriptBundle{
+		ID: "bundle_semantic", ProjectID: "project_semantic", WorkflowGraphID: "graph_semantic",
+		SchemaVersion: ExecutableRecordingScriptBundleSchemaVersion, Status: ExecutableScriptBundleStatusReviewReady,
+		Reproducibility: ExecutableScriptReproducibility{BundleHashAlgorithm: ExecutableBundleHashAlgorithmSemanticV2},
+		CreatedAt:       time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	first, err := bundle.ComputeBundleHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.Status = ExecutableScriptBundleStatusRejected
+	bundle.CreatedAt = bundle.CreatedAt.Add(time.Hour)
+	bundle.UpdatedAt = bundle.UpdatedAt.Add(2 * time.Hour)
+	second, err := bundle.ComputeBundleHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("semantic hash changed on lifecycle-only fields: %s != %s", first, second)
+	}
+}
+
 func TestExecutableRecordingScriptBundleRepairLineageRoundTripAndHash(t *testing.T) {
 	bundle := &ExecutableRecordingScriptBundle{
 		ID:              "bundle_repair_1",
