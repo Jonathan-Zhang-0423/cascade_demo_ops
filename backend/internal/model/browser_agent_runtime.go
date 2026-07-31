@@ -350,3 +350,19 @@ func validateRuntimeContractText(values ...string) error {
 	}
 	return nil
 }
+
+// BrowserAgentValidationContext is an immutable view of the App-approved
+// package passed to OutcomeVerifier methods. Lives in model to avoid circular
+// imports between app and orchestrator.
+type BrowserAgentValidationContext struct {
+	RunID                     string
+	SourcePackageID           string
+	SourceBundleHashSHA256    string
+	EffectivePolicyHashSHA256 string
+	AllowedDomains            []string
+	WorkflowGraph             *DemoWorkflowGraph
+	Plan                      *ExecutionScriptDocument
+	StageApprovalPlan         *StageApprovalPlan
+	ScriptOutline             *BrowserAgentScriptOutline
+	BrowserAgentContract      *BrowserAgentContract
+}
