@@ -24,6 +24,8 @@ func TestRepairProposalGenerator_AllowedKinds(t *testing.T) {
 			ID:       "check-1",
 			Kind:     "selector_validity",
 			Code:     "SELECTOR_NOT_FOUND",
+			NodeID:   "node-1",
+			StageID:  "stage-1",
 			Severity: model.FindingSeverityBlocking,
 			Passed:   false,
 			Required: true,
@@ -117,6 +119,8 @@ func TestRepairProposalGenerator_RequiresApproval(t *testing.T) {
 			ID:       "check-1",
 			Kind:     "wait_strategy",
 			Code:     "WAIT_TIMEOUT",
+			NodeID:   "node-1",
+			StageID:  "stage-1",
 			Severity: model.FindingSeverityWarning,
 			Passed:   false,
 			Required: false,
@@ -297,6 +301,8 @@ func TestRepairProposalGenerator_ProposalFields(t *testing.T) {
 			ID:       "check-1",
 			Kind:     "wait_strategy",
 			Code:     "WAIT_TIMEOUT",
+			NodeID:   "node-1",
+			StageID:  "stage-1",
 			Severity: model.FindingSeverityWarning,
 			Passed:   false,
 			Required: false,
@@ -348,7 +354,53 @@ func TestRepairProposalGenerator_ProposalFields(t *testing.T) {
 	if p.ProposalID == "" {
 		t.Errorf("Proposal ProposalID is empty")
 	}
-	if p.SchemaVersion == "" {
-		t.Errorf("Proposal SchemaVersion is empty")
+	if p.SchemaVersion != model.RuntimeRepairProposalSchemaVersion {
+		t.Errorf("Proposal SchemaVersion: expected '%s', got '%s'", model.RuntimeRepairProposalSchemaVersion, p.SchemaVersion)
+	}
+	if p.NodeID != checks[0].NodeID {
+		t.Errorf("Proposal NodeID: expected '%s', got '%s'", checks[0].NodeID, p.NodeID)
+	}
+	if p.StageID != checks[0].StageID {
+		t.Errorf("Proposal StageID: expected '%s', got '%s'", checks[0].StageID, p.StageID)
+	}
+}
+
+func TestRepairProposalGenerator_ValidateCompliance(t *testing.T) {
+	config := &model.ValidationConfig{EnableRuntimeRepair: true}
+	gen := NewRepairProposalGenerator(config)
+
+	vctx := &model.BrowserAgentValidationContext{
+		RunID:                     "run-validate-001",
+		SourcePackageID:           "pkg-validate-001",
+		SourceBundleHashSHA256:    "bundlehash-abc",
+		EffectivePolicyHashSHA256: "policyhash-def",
+	}
+
+	checks := []model.ValidationCheck{
+		{
+			ID:       "check-1",
+			Kind:     "wait_strategy",
+			Code:     "WAIT_TIMEOUT",
+			NodeID:   "node-1",
+			StageID:  "stage-1",
+			Severity: model.FindingSeverityWarning,
+			Passed:   false,
+			Required: false,
+			Summary:  "Wait timeout after 5000ms",
+		},
+	}
+
+	policy := &model.BrowserAgentRepairPolicy{
+		AllowedRepairKinds: []string{"wait_strategy"},
+		EditableFields:     []string{"wait_timeout"},
+	}
+
+	proposals := gen.GenerateRepairProposals(vctx, checks, policy)
+	if len(proposals) != 1 {
+		t.Fatalf("Expected 1 proposal, got %d", len(proposals))
+	}
+
+	if err := proposals[0].Validate(); err != nil {
+		t.Errorf("Generated proposal failed Validate(): %v", err)
 	}
 }

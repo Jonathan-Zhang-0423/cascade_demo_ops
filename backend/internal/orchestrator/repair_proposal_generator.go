@@ -85,6 +85,10 @@ func (g *RepairProposalGenerator) generateProposalForCheck(
 	allowedKinds map[string]bool,
 	repairPolicy *model.BrowserAgentRepairPolicy,
 ) *model.RuntimeRepairProposal {
+	if check.NodeID == "" || check.StageID == "" {
+		return nil
+	}
+
 	// Map validation check kind to repair kind
 	var repairKind string
 	var field string
@@ -212,18 +216,21 @@ func (g *RepairProposalGenerator) generateProposalForCheck(
 		}
 	}
 
-	// P1 requirement: All proposals must include run/stage identity, two hashes, repair kind, field before/after, confidence, evidence, requires_approval
+	if allowed, _ := IsRepairAllowed(repairKind, field, repairPolicy); !allowed {
+		return nil
+	}
+
 	proposal := &model.RuntimeRepairProposal{
-		SchemaVersion:        "1.0",
+		SchemaVersion:        model.RuntimeRepairProposalSchemaVersion,
 		ProposalID:           fmt.Sprintf("repair_%d_%d", time.Now().UnixNano(), rand.Intn(10000)),
 		RunID:                vctx.RunID,
-		NodeID:               check.ID, // Use check ID as node reference
-		StageID:              "",       // Will be set by caller if stage-specific
+		NodeID:               check.NodeID,
+		StageID:              check.StageID,
 		BaseBundleHashSHA256: vctx.SourceBundleHashSHA256,
 		PolicyHashSHA256:     vctx.EffectivePolicyHashSHA256,
 		RepairKind:           repairKind,
 		Field:                field,
-		Before:               "", // Would need actual runtime value
+		Before:               "",
 		After:                after,
 		Confidence:           confidence,
 		EvidenceRefs:         check.EvidenceRefs,
