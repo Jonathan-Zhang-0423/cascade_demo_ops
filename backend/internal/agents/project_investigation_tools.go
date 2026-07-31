@@ -161,9 +161,16 @@ func rgDiscoveredRelativeFiles(ctx context.Context, root string) ([]string, bool
 	if _, err := exec.LookPath("rg"); err != nil {
 		return nil, false
 	}
+	// Exclude generated dependencies before enumeration. A local product may
+	// contain tens of thousands of node_modules files, which must not consume
+	// the bounded source-summary discovery window.
 	cmdCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "rg", "--files", "-0")
+	args := []string{"--files", "-0"}
+	for _, glob := range codeDiscoveryExcludeGlobs() {
+		args = append(args, "--glob", glob)
+	}
+	cmd := exec.CommandContext(cmdCtx, "rg", args...)
 	cmd.Dir = root
 	output, err := cmd.Output()
 	if cmdCtx.Err() != nil || err != nil {
@@ -182,6 +189,14 @@ func rgDiscoveredRelativeFiles(ctx context.Context, root string) ([]string, bool
 		return nil, false
 	}
 	return values, true
+}
+
+func codeDiscoveryExcludeGlobs() []string {
+	return []string{
+		"!**/.git/**", "!**/node_modules/**", "!**/dist/**", "!**/build/**",
+		"!**/out/**", "!**/.next/**", "!**/coverage/**", "!**/vendor/**",
+		"!**/tmp/**", "!**/.turbo/**", "!**/.cache/**",
+	}
 }
 
 func codeCandidatesFromRelativePaths(root string, rels []string, maxFileBytes int64, project *model.ProjectContext, brief *model.RequirementBrief) []codeCandidateFile {

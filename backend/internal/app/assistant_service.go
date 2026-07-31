@@ -23,10 +23,13 @@ import (
 var (
 	assistantSecretPattern      = regexp.MustCompile(`(?i)(password|token|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+`)
 	windowsAbsolutePathPattern  = regexp.MustCompile(`(?i)\b[A-Z]:\\(?:[^\s<>:"|?*]+\\)*[^\s<>:"|?*]*`)
-	assistantProjectNamePattern = regexp.MustCompile(`(?:项目名(?:叫|为|是)|项目名称(?:为|是)|命名为)\s*[“"']?([^，,。；;\n”"']{1,80})`)
-	assistantAudiencePattern    = regexp.MustCompile(`面向\s*([^，,。；;\n]{1,80}?)(?:的?\s*\d{1,3}\s*秒|制作|打造|，|,|。|；|;|$)`)
+	assistantProjectNamePattern = regexp.MustCompile(`(?:项目名(?:称)?\s*[：:]\s*|项目名(?:叫|为|是)|项目名称(?:为|是)|命名为)\s*[“"']?([^，,。；;\n”"']{1,80})`)
+	assistantAudiencePattern    = regexp.MustCompile(`(?:目标受众|受众)\s*[：:]\s*([^。；;\n]{1,160})|面向\s*([^，,。；;\n]{1,80}?)(?:的?\s*\d{1,3}\s*秒|制作|打造|，|,|。|；|;|$)`)
 	assistantDurationPattern    = regexp.MustCompile(`(\d{1,3})\s*秒`)
 	assistantMustShowPattern    = regexp.MustCompile(`(?:重点展示|必须展示|需要展示)\s*([^。；;\n]{1,200})`)
+	assistantStepPattern        = regexp.MustCompile(`(?m)^\s*(?:第?[一二三四五六七八九十\d]+步[：:、.]?|\d+[.、)])\s*(.+?)\s*$`)
+	assistantHTTPURLPattern     = regexp.MustCompile(`https?://[^\s，。；;、<>"']+`)
+	assistantCorruptionPattern  = regexp.MustCompile(`\?{3,}`)
 )
 
 type assistantModelResponse struct {
@@ -242,7 +245,7 @@ func assistantFallbackResponse(message string) assistantModelResponse {
 		hasPatch = true
 	}
 	if match := assistantAudiencePattern.FindStringSubmatch(message); len(match) > 1 {
-		value := strings.TrimSpace(match[1])
+		value := strings.TrimSpace(firstNonEmptyString(match[1], match[2]))
 		patch.TargetAudience = &value
 		hasPatch = true
 	}
@@ -257,6 +260,17 @@ func assistantFallbackResponse(message string) assistantModelResponse {
 		value := []string{strings.TrimSpace(match[1])}
 		patch.MustShow = &value
 		hasPatch = true
+	} else if matches := assistantStepPattern.FindAllStringSubmatch(message, -1); len(matches) > 0 {
+		steps := make([]string, 0, len(matches))
+		for _, match := range matches {
+			if len(match) > 1 && strings.TrimSpace(match[1]) != "" {
+				steps = append(steps, strings.TrimSpace(match[1]))
+			}
+		}
+		if len(steps) > 0 {
+			patch.MustShow = &steps
+			hasPatch = true
+		}
 	}
 	return assistantModelResponse{
 		Reply: "我会把这轮信息整理为 configuration 变更。确认前不会保存，也不会启动分析。",
@@ -483,6 +497,9 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 }
 
 func (s *Service) userInputFromConfiguration(draft model.ProjectConfigurationDraft) (orchestrator.UserInput, error) {
+	if field := corruptedConfigurationField(draft); field != "" {
+		return orchestrator.UserInput{}, fmt.Errorf("configuration contains corrupted text in %s; re-enter this field before analysis", field)
+	}
 	input := orchestrator.UserInput{
 		Mode: model.AppModeDesktop, ProductURL: draft.ProductURL, ProductDescription: draft.Objective,
 		TargetAudience: draft.TargetAudience, TargetDurationSec: draft.TargetDurationSec, BrandTone: draft.BrandTone,
@@ -735,11 +752,31 @@ func redactAssistantText(value string) string {
 }
 
 func firstHTTPURL(value string) string {
-	for _, field := range strings.Fields(value) {
-		candidate := strings.Trim(field, "，。,.!?！？()[]{}<>\"'")
-		parsed, err := url.Parse(candidate)
-		if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != "" {
-			return candidate
+	candidate := strings.TrimRight(assistantHTTPURLPattern.FindString(value), ").!?！？]}")
+	parsed, err := url.Parse(candidate)
+	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != "" {
+		return candidate
+	}
+	return ""
+}
+
+func corruptedConfigurationField(draft model.ProjectConfigurationDraft) string {
+	fields := []struct {
+		name   string
+		values []string
+	}{
+		{name: "projectName", values: []string{draft.ProjectName}},
+		{name: "objective", values: []string{draft.Objective}},
+		{name: "targetAudience", values: []string{draft.TargetAudience}},
+		{name: "mustShow", values: draft.MustShow},
+		{name: "mustNotShow", values: draft.MustNotShow},
+		{name: "forbiddenData", values: draft.ForbiddenData},
+	}
+	for _, field := range fields {
+		for _, value := range field.values {
+			if assistantCorruptionPattern.MatchString(value) {
+				return field.name
+			}
 		}
 	}
 	return ""

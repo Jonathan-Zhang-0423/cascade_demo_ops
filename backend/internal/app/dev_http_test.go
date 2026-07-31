@@ -952,12 +952,81 @@ func TestEnsureLocalDevAddressRejectsNonLocalBinds(t *testing.T) {
 	}
 }
 
+func TestDevHTTPBrowserLocalSourceRegistrationIsLoopbackDevOnly(t *testing.T) {
+	server := newTestDevHTTPServerWithEnvironment(t, "development")
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(devLocalSourceRequest{Kind: "local_repository", Path: repoPath, DevTestAck: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/dev/local-sources", bytes.NewReader(body))
+	request.RemoteAddr = "127.0.0.1:54321"
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	var ref LocalSourceRef
+	if err := json.Unmarshal(bridge.Data, &ref); err != nil {
+		t.Fatal(err)
+	}
+	if ref.Ref == "" || ref.Kind != "local_repository" || ref.Label == "" || ref.Path != "" {
+		t.Fatalf("unexpected public local-source ref: %+v", ref)
+	}
+	resolved, ok := server.service.ResolveLocalSourceRef(ref.Ref)
+	if !ok || resolved.Path != repoPath {
+		t.Fatalf("expected private path to remain server-side: %+v ok=%t", resolved, ok)
+	}
+	if strings.Contains(response.Body.String(), repoPath) {
+		t.Fatalf("response leaked absolute local path: %s", response.Body.String())
+	}
+}
+
+func TestDevHTTPBrowserLocalSourceRegistrationRejectsUnsafeContexts(t *testing.T) {
+	repoPath := createDevBridgeFixtureRepo(t)
+	tests := []struct {
+		name       string
+		server     *DevHTTPServer
+		remoteAddr string
+		ack        bool
+	}{
+		{name: "non loopback", server: newTestDevHTTPServerWithEnvironment(t, "development"), remoteAddr: "192.0.2.10:54321", ack: true},
+		{name: "missing acknowledgement", server: newTestDevHTTPServerWithEnvironment(t, "development"), remoteAddr: "127.0.0.1:54321", ack: false},
+		{name: "non development environment", server: newTestDevHTTPServerWithEnvironment(t, "test"), remoteAddr: "127.0.0.1:54321", ack: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(devLocalSourceRequest{Kind: "local_repository", Path: repoPath, DevTestAck: test.ack})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/desktop/dev/local-sources", bytes.NewReader(body))
+			request.RemoteAddr = test.remoteAddr
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			test.server.Handler().ServeHTTP(response, request)
+			if response.Code == http.StatusOK {
+				t.Fatalf("expected rejection: %s", response.Body.String())
+			}
+		})
+	}
+}
+
 func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
+	return newTestDevHTTPServerWithEnvironment(t, "test")
+}
+
+func newTestDevHTTPServerWithEnvironment(t *testing.T, environment string) *DevHTTPServer {
 	t.Helper()
 	root := t.TempDir()
 	service, err := NewService(config.AppRuntimeConfig{
 		Profile:         config.ProfileDev,
-		Environment:     "test",
+		Environment:     environment,
 		Mode:            model.AppModeDesktop,
 		DatabaseDialect: config.DatabaseSQLite,
 		SQLitePath:      filepath.Join(root, "cascade_demoops.db"),

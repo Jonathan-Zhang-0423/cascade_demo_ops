@@ -115,7 +115,16 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	if err != nil {
 		return ExchangeSession{}, err
 	}
-	if isSessionUsable(record, baseURL, s.runtime.CloudExchangeToken) {
+	// A configured dev bearer token is only a fallback. Prefer an installation
+	// session whenever one can be created, otherwise local App-to-Server runs
+	// would be incorrectly classified as unverified uploads.
+	if isInstallationSessionUsable(record, baseURL) {
+		return sessionFromRecord(record, baseURL, ""), nil
+	}
+	// Keep legacy remote control planes on their existing bearer-token path.
+	// Local bridges deliberately continue to register an installation so the
+	// receiving Server can bind the upload to a verified installation identity.
+	if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" && !isLocalExchangeBaseURL(baseURL) {
 		return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
 	}
 
@@ -171,6 +180,9 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	}
 	response, err := cloudPostPublicJSON[model.AppInstallationSessionResponse](ctx, client, discovery.ExchangeBaseURL+"/v1/app-installations/register", register)
 	if err != nil {
+		if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" {
+			return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+		}
 		if !isLocalExchangeBaseURL(baseURL) {
 			if isOptionalExchangeDiscoveryError(err) {
 				return ExchangeSession{}, newExchangeProtocolError(
@@ -194,7 +206,7 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	if err := store.save(record); err != nil {
 		return ExchangeSession{}, err
 	}
-	return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	return sessionFromRecord(record, baseURL, ""), nil
 }
 
 func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, error) {
@@ -206,10 +218,13 @@ func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, 
 	if err != nil {
 		return ExchangeSession{}, err
 	}
-	if !isSessionUsable(record, baseURL, s.runtime.CloudExchangeToken) {
-		return ExchangeSession{}, errors.New("exchange installation session is not paired or has expired")
+	if isInstallationSessionUsable(record, baseURL) {
+		return sessionFromRecord(record, baseURL, ""), nil
 	}
-	return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" {
+		return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+	}
+	return ExchangeSession{}, errors.New("exchange installation session is not paired or has expired")
 }
 
 func (s *Service) discoverExchangeBaseURL() (string, error) {
@@ -398,9 +413,10 @@ func challengeSigningPayload(installID string, challenge model.ExchangePairingCh
 }
 
 func isSessionUsable(record exchangeIdentityRecord, baseURL string, fallbackToken string) bool {
-	if strings.TrimSpace(fallbackToken) != "" {
-		return true
-	}
+	return isInstallationSessionUsable(record, baseURL) || strings.TrimSpace(fallbackToken) != ""
+}
+
+func isInstallationSessionUsable(record exchangeIdentityRecord, baseURL string) bool {
 	return record.InstallID != "" &&
 		record.SessionToken != "" &&
 		record.ExchangeBaseURL == strings.TrimRight(baseURL, "/") &&

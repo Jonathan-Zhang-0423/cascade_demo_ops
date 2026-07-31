@@ -160,7 +160,7 @@ func (s *DevHTTPServer) handleExecutionPackageUpload(w http.ResponseWriter, r *h
 	if request.PayloadRef.Kind == "" {
 		request.PayloadRef = request.Envelope.PayloadRef
 	}
-	response, err := s.service.UploadExecutionPackage(r.Context(), request, body.Payload)
+	response, err := s.service.UploadExecutionPackageFromHTTP(r.Context(), request, body.Payload, installationIDFromRequest(s.service.exchange, r))
 	if err == nil && devExchangeAutoRunEnabled() && body.Payload.PackageID != "" && response.Status == model.ExchangePackageStatusAccepted {
 		runStatus, runErr := s.service.RunUploadedExecutionPackage(r.Context(), responseOrgID(request.Envelope, body.Payload), response.ExchangePackageID)
 		if runErr == nil && runStatus.ExchangePackageID != "" {
@@ -410,6 +410,17 @@ func (s *DevHTTPServer) requireDevExchangeAuth(next http.HandlerFunc) http.Handl
 		}
 		next(w, r)
 	}
+}
+
+func installationIDFromRequest(exchange *ExchangeIntakeService, r *http.Request) string {
+	if exchange == nil {
+		return ""
+	}
+	installation, ok := exchange.AuthenticateInstallationSession(sessionTokenFromRequest(r))
+	if !ok || installation == nil {
+		return ""
+	}
+	return installation.InstallID
 }
 
 func orgIDFromRequest(r *http.Request) (string, error) {

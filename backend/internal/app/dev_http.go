@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
@@ -36,6 +38,12 @@ type demoCredentialRequest struct {
 	Ref      string `json:"ref"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type devLocalSourceRequest struct {
+	Kind       string `json:"kind"`
+	Path       string `json:"path"`
+	DevTestAck bool   `json:"dev_test_ack"`
 }
 
 type ExecutionPackageRequest struct {
@@ -89,6 +97,9 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/github-credential", s.handleStoreGitHubCredential)
 	mux.HandleFunc("DELETE /v1/desktop/github-credential", s.handleDeleteGitHubCredential)
 	mux.HandleFunc("POST /v1/desktop/demo-credential", s.handleStoreDemoCredential)
+	// Local browser-development fallback for the native Wails directory picker.
+	// The registered path never leaves the loopback Dev Bridge response.
+	mux.HandleFunc("POST /v1/desktop/dev/local-sources", s.handleDevRegisterLocalSource)
 	mux.HandleFunc("GET /v1/desktop/update", s.handleDesktopUpdateStatus)
 	mux.HandleFunc("POST /v1/desktop/update/check", s.handleDesktopUpdateCheck)
 	mux.HandleFunc("POST /v1/desktop/update/apply", s.handleDesktopUpdateApply)
@@ -114,6 +125,44 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	s.registerExchangeBootstrapRoutes(mux)
 	s.registerDevExchangeRoutes(mux)
 	return withDevLogging(withDevCORS(mux))
+}
+
+func (s *DevHTTPServer) handleDevRegisterLocalSource(w http.ResponseWriter, r *http.Request) {
+	if s == nil || s.service == nil || s.service.runtime.Profile != config.ProfileDev || s.service.runtime.Environment != "development" {
+		writeBridgeValue(w, nil, errors.New("browser local-source registration is available only in a local development runtime"))
+		return
+	}
+	if !requestFromLoopback(r) {
+		writeBridgeValue(w, nil, errors.New("browser local-source registration requires a loopback client"))
+		return
+	}
+	var request devLocalSourceRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	if !request.DevTestAck {
+		writeBridgeValue(w, nil, errors.New("dev_test_ack=true is required for browser local-source registration"))
+		return
+	}
+	if request.Kind != "local_repository" {
+		writeBridgeValue(w, nil, errors.New("browser local-source registration supports only local_repository"))
+		return
+	}
+	ref, err := s.service.RegisterLocalSource(request.Kind, request.Path)
+	writeBridgeValue(w, ref, err)
+}
+
+func requestFromLoopback(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *DevHTTPServer) handleEditorSessions(w http.ResponseWriter, r *http.Request) {
