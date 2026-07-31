@@ -33,7 +33,7 @@ type DryRunDirectorAdapter struct {
 	arkMediaMode     config.ArkMediaMode
 	apiKeyConfigured bool
 	modeSource       string
-	arkClient        media.ArkMediaClient
+	arkClient        media.VideoGenerationClient
 }
 
 type DirectorAdapterOptions struct {
@@ -41,7 +41,7 @@ type DirectorAdapterOptions struct {
 	APIKeyConfigured bool
 	ModeSource       string
 	Now              func() time.Time
-	ArkClient        media.ArkMediaClient
+	ArkClient        media.VideoGenerationClient
 }
 
 func NewDryRunDirectorAdapter(now func() time.Time) *DryRunDirectorAdapter {

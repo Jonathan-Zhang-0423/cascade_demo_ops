@@ -284,7 +284,7 @@ func (a openAICompatibleAdapter) BuildTextPayload(route config.ModelTaskRoute, r
 	if req.JSONMode {
 		payload.ResponseFormat = &openAIResponseFormat{Type: "json_object"}
 	}
-	applyProviderRequestOptions(a.provider, &payload)
+	applyProviderRequestOptions(a.provider, route.Model, &payload)
 	return payload
 }
 
@@ -304,7 +304,7 @@ func (a openAICompatibleAdapter) BuildMultimodalPayload(route config.ModelTaskRo
 		MaxTokens:      req.MaxTokens,
 		ResponseFormat: &openAIResponseFormat{Type: "json_object"},
 	}
-	applyProviderRequestOptions(a.provider, &payload)
+	applyProviderRequestOptions(a.provider, route.Model, &payload)
 	return payload
 }
 
@@ -409,6 +409,9 @@ func (r *Router) DiagnoseTask(ctx context.Context, task config.ModelTask) Diagno
 		result.Error = redactSensitive(err.Error())
 		return result
 	}
+	if route.Provider == config.ModelProviderSeedance {
+		return r.diagnoseSeedance(ctx, route, provider, result)
+	}
 	text, callTrace, err := r.callText(ctx, route, provider, TextRequest{
 		System:      "You are a provider diagnostic probe. Return only OK.",
 		User:        "Return OK. Do not include secrets or explanations.",
@@ -430,6 +433,42 @@ func (r *Router) DiagnoseTask(ctx context.Context, task config.ModelTask) Diagno
 		return result
 	}
 	result.OK = true
+	return result
+}
+
+// Seedance is an asynchronous media API, not a chat-completions model. A
+// missing-task lookup verifies authentication without creating a paid task.
+func (r *Router) diagnoseSeedance(ctx context.Context, route config.ModelTaskRoute, provider config.ModelProviderCredential, result DiagnosticResult) DiagnosticResult {
+	endpoint := strings.TrimRight(provider.BaseURL, "/") + "/contents/generations/tasks/cascade-diagnostic-probe-nonexistent"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		result.ErrorClass = errorClassHTTPError
+		result.Error = redactSensitive(err.Error())
+		return result
+	}
+	request.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	started := time.Now()
+	response, err := r.http.Do(request)
+	result.LatencyMS = int(time.Since(started).Milliseconds())
+	if err != nil {
+		result.ErrorClass = errorClassHTTPError
+		result.Error = redactSensitive(err.Error())
+		return result
+	}
+	defer response.Body.Close()
+	data, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	if readErr != nil {
+		result.ErrorClass = "read_error"
+		result.Error = redactSensitive(readErr.Error())
+		return result
+	}
+	result.HTTPStatus = response.StatusCode
+	if response.StatusCode == http.StatusOK || response.StatusCode == http.StatusNotFound {
+		result.OK = true
+		return result
+	}
+	result.ErrorClass = fmt.Sprintf("http_%d", response.StatusCode)
+	result.Error = redactProviderHTTPError(response.StatusCode, data).Error()
 	return result
 }
 
@@ -917,12 +956,15 @@ type openAIResponseFormat struct {
 	Type string `json:"type"`
 }
 
-func applyProviderRequestOptions(provider config.ModelProvider, payload *openAIChatRequest) {
+func applyProviderRequestOptions(provider config.ModelProvider, modelName string, payload *openAIChatRequest) {
 	if payload == nil {
 		return
 	}
 	if provider == config.ModelProviderGLM {
 		payload.Thinking = &openAIThinking{Type: "disabled"}
+	}
+	if provider == config.ModelProviderKimi && strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "kimi-k2.7-code") {
+		payload.Temperature = 1
 	}
 }
 

@@ -61,6 +61,7 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 	var gotPath string
 	var gotAuth string
 	var gotModel string
+	var gotTemperature float64
 	var gotResponseFormat map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -70,6 +71,7 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 			t.Fatal(err)
 		}
 		gotModel, _ = payload["model"].(string)
+		gotTemperature, _ = payload["temperature"].(float64)
 		gotResponseFormat, _ = payload["response_format"].(map[string]any)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"真实模型摘要\"}"}}],"usage":{"prompt_tokens":12,"completion_tokens":6}}`))
 	}))
@@ -93,6 +95,9 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 	}
 	if gotResponseFormat["type"] != "json_object" {
 		t.Fatalf("expected json_object response_format, got %+v", gotResponseFormat)
+	}
+	if gotTemperature != 1 {
+		t.Fatalf("Kimi code model temperature = %v, want 1", gotTemperature)
 	}
 	if out.Summary != "真实模型摘要" {
 		t.Fatalf("summary = %q", out.Summary)
@@ -395,6 +400,34 @@ func TestRouterDiagnoseTaskReturnsRedactedProviderStatus(t *testing.T) {
 	}
 	if strings.Contains(result.Error, "sk-secret-value") || strings.Contains(result.Error, "bearer-secret") {
 		t.Fatalf("diagnostic leaked secret: %+v", result)
+	}
+}
+
+func TestRouterDiagnoseSeedanceUsesReadOnlyTaskLookup(t *testing.T) {
+	var gotMethod string
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		if r.Header.Get("Authorization") != "Bearer test-api-key" {
+			t.Fatalf("unexpected authorization header")
+		}
+		http.Error(w, `{"error":{"code":"ResourceNotFound"}}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	runtime := testRuntime(config.ModelProviderSeedance, server.URL+"/api/v3")
+	runtime.ModelTaskRoutes[config.ModelTaskVideoOperation] = config.ModelTaskRoute{
+		Task: config.ModelTaskVideoOperation, Provider: config.ModelProviderSeedance, Model: "doubao-seedance-2-0-260128",
+	}
+	router := NewRouter(runtime)
+	result := router.DiagnoseTask(context.Background(), config.ModelTaskVideoOperation)
+
+	if !result.OK || result.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("unexpected Seedance diagnostic: %+v", result)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/api/v3/contents/generations/tasks/cascade-diagnostic-probe-nonexistent" {
+		t.Fatalf("unexpected Seedance probe: %s %s", gotMethod, gotPath)
 	}
 }
 
