@@ -69,9 +69,6 @@ func (s *MemoryStateStore) Archive(ctx context.Context, projectID string, archiv
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if projectID == "" {
-		return errors.New("project ID is required")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state, ok := s.states[projectID]
@@ -88,9 +85,6 @@ func (s *MemoryStateStore) Archive(ctx context.Context, projectID string, archiv
 func (s *MemoryStateStore) Delete(ctx context.Context, projectID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if projectID == "" {
-		return errors.New("project ID is required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

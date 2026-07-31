@@ -4,12 +4,29 @@ import type {
   CloudRunStatus,
   ExecutionPackagePreview,
   ProjectWorkspaceView,
+  ProjectWorkstationView,
   ServerLifecycleStageID,
   ServerLifecycleStageStatus,
   ServerLifecycleStageView,
   SourceConnectionView,
   WorkspaceStage,
 } from "./domain";
+
+export type ProjectJourneyStepID = "evidence" | "plan" | "approval" | "execution" | "assets";
+
+export type ProjectJourneyStep = {
+  id: ProjectJourneyStepID;
+  label: string;
+  status: "completed" | "current" | "upcoming" | "blocked";
+  workstation: ProjectWorkstationView;
+};
+
+export type ProjectNextAction = {
+  kind: "configure" | "analyze" | "review_plan" | "approve_upload" | "monitor" | "repair" | "review_result" | "complete";
+  workstation: ProjectWorkstationView;
+  title: string;
+  description: string;
+};
 
 export const workflowStageLabels: Record<WorkspaceStage, string> = {
   setup: "基础设置",
@@ -45,6 +62,89 @@ export const serverLifecycleStageLabels: Record<ServerLifecycleStageID, string> 
 };
 
 export const serverLifecycleStageOrder = Object.keys(serverLifecycleStageLabels) as ServerLifecycleStageID[];
+
+const journeyOrder: ProjectJourneyStepID[] = ["evidence", "plan", "approval", "execution", "assets"];
+const journeyLabels: Record<ProjectJourneyStepID, string> = {
+  evidence: "理解产品",
+  plan: "确认方案",
+  approval: "审批上传",
+  execution: "生成成片",
+  assets: "人工审核",
+};
+
+export function recommendedWorkstation(workspace: ProjectWorkspaceView): ProjectWorkstationView {
+  if (workspace.status === "script_repair_required" || workspace.cloudRun.status === "failed") return "repair";
+  if (workspace.cloudRun.resultPackage || workspace.cloudRun.status === "succeeded" || workspace.stage === "result_review") return "assets";
+  if (workspace.cloudRun.exchangePackageID || workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running") return "execution";
+  if (workspace.executableScriptBundle || workspace.packagePreview.buildStatus === "draft" || workspace.stage === "package_approval") return "approval";
+  if (workspace.projectIntelligence || workspace.understandingReport) return "plan";
+  return workspace.productURL && workspace.inputBundle.raw_user_prompt ? "evidence" : "overview";
+}
+
+export function shouldResumeCloudRun(workspace: ProjectWorkspaceView, selectedProjectID?: string): boolean {
+  return selectedProjectID === workspace.id
+    && (workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running")
+    && Boolean(workspace.cloudRun.exchangePackageID);
+}
+
+export function projectNextAction(workspace: ProjectWorkspaceView): ProjectNextAction {
+  const workstation = recommendedWorkstation(workspace);
+  if (workstation === "overview") {
+    return { kind: "configure", workstation, title: "补全项目配置", description: "在左侧告诉 Cascade 产品地址、演示目标和源码来源。配置确认只会启动本地分析。" };
+  }
+  if (workstation === "evidence") {
+    return { kind: "analyze", workstation, title: "分析并生成执行方案", description: "读取已批准的本地材料，生成证据、阶段计划和 BrowserAgent 大纲；不会上传服务器。" };
+  }
+  if (workstation === "plan") {
+    return { kind: "review_plan", workstation, title: "检查录制方案", description: "确认业务阶段、必须展示内容和安全边界，再进入独立上传审批。" };
+  }
+  if (workstation === "approval") {
+    return { kind: "approve_upload", workstation, title: "审批并上传执行包", description: "逐项确认数据范围与风险后，才会把当前 digest 对应的执行包上传服务器。" };
+  }
+  if (workstation === "execution") {
+    return { kind: "monitor", workstation, title: "服务器正在生成成片", description: "状态会自动恢复并更新；你可以离开当前页面，无需手动刷新。" };
+  }
+  if (workstation === "repair") {
+    return { kind: "repair", workstation, title: "修复失败步骤", description: "根据脱敏诊断重新生成脚本；修复后的执行包仍需再次人工审批。" };
+  }
+  if (workspace.cloudRun.resultReview?.decision === "approved") {
+    return { kind: "complete", workstation: "assets", title: "成品已通过", description: "最终审核已记录，可以在 Editor 中继续处理或导出成品。" };
+  }
+  if (!workspace.cloudRun.resultDownloaded) {
+    return { kind: "review_result", workstation: "assets", title: "下载并校验成品", description: "完整下载结果包并校验 SHA-256 后，才开放人工审核。" };
+  }
+  return { kind: "review_result", workstation: "assets", title: "人工审核成品", description: "播放成品并选择通过、重新剪辑或缺少素材需要重新录制。" };
+}
+
+export function executionServerBlockedReason(resolved: boolean, sessionValid: boolean | undefined): string | undefined {
+	if (!resolved) return "正在检查执行服务器连接。";
+	if (sessionValid !== true) return "执行服务器尚未完成连接与安装身份验证。";
+	return undefined;
+}
+
+export function projectJourney(workspace: ProjectWorkspaceView): ProjectJourneyStep[] {
+  const currentWorkstation = recommendedWorkstation(workspace);
+  const currentID: ProjectJourneyStepID = currentWorkstation === "overview" || currentWorkstation === "evidence"
+    ? "evidence"
+    : currentWorkstation === "plan"
+      ? "plan"
+      : currentWorkstation === "approval" || currentWorkstation === "repair"
+        ? "approval"
+        : currentWorkstation === "execution"
+          ? "execution"
+          : "assets";
+  const currentIndex = journeyOrder.indexOf(currentID);
+  return journeyOrder.map((id, index) => ({
+    id,
+    label: journeyLabels[id],
+    workstation: id,
+    status: id === currentID
+      ? (currentWorkstation === "repair" ? "blocked" : "current")
+      : index < currentIndex
+        ? "completed"
+        : "upcoming",
+  }));
+}
 
 export function updateGraphNode(graph: DemoWorkflowGraph, nodeID: string, patch: Partial<GraphNode>): DemoWorkflowGraph {
   return {
@@ -104,8 +204,8 @@ export function lifecycleStagesFromWorkspace(workspace: ProjectWorkspaceView): S
   }
   const completedUntil = workspace.stage === "result_review"
     ? "result_returned"
-    : workspace.stage === "cloud_run"
-      ? "browser_execution"
+    : workspace.cloudRun.exchangePackageID
+      ? "package_uploaded"
       : workspace.stage === "script_repair"
         ? "browser_execution"
         : workspace.stage === "package_approval" && workspace.executableScriptBundle
@@ -177,11 +277,14 @@ export function packageApprovalBlockedReasons(
   sources: SourceConnectionView[],
 ): string[] {
   const blocked = new Set<string>(preview.blockedReasons);
+  if (preview.readiness === "blocked") {
+    blocked.add("执行包确信度门禁未通过，请先修复阻断项。");
+  }
   if (!checklist.userApprovedPlan) {
     blocked.add("上传前必须完成人工审批。");
   }
   if (!checklist.ipAllowlistAcknowledged && !preview.ipAllowlistAcknowledged) {
-    blocked.add("需要确认 Cascade 云端执行 IP 已加入白名单。");
+    blocked.add("需要确认 DemoOps 执行服务器出口 IP 已加入客户环境白名单。");
   }
   if (!checklist.sourceSummaryOnlyAcknowledged || !preview.sourceSummaryOnly) {
     blocked.add("需要确认仅上传代码结构摘要，不上传完整源码。");

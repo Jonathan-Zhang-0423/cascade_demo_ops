@@ -105,6 +105,8 @@ func TestGraphBuilderBlocksWhenOnlyChromeToggleExists(t *testing.T) {
 
 func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 	project := graphQualityProject()
+	project.DemoAccount = &model.DemoAccount{UsernameSecretRef: "credential://demo/test", PasswordSecretRef: "credential://demo/test"}
+	runtimePageEvidence := []model.EvidenceRef{{ID: "ev_runtime_dashboard", Kind: model.EvidenceKindBrowserScan, Summary: "Browser Scan confirmed the current dashboard state"}}
 	stagePlan := &model.BusinessStagePlan{
 		ID:                     "business_stage_plan_test",
 		ProjectID:              project.ID,
@@ -122,6 +124,7 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 				ExpectedRouteAfterAction: "/app",
 				DurationMS:               7000,
 				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "登录", SuccessState: "进入工作台"},
+				EvidenceRefs:             runtimePageEvidence,
 			},
 			{
 				ID:                       "business_stage_project_name_input",
@@ -148,6 +151,7 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 				ExpectedRouteAfterAction: "/project/:id",
 				DurationMS:               45000,
 				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionWait), Label: "观察构建进度", SuccessState: "构建过程可见"},
+				EvidenceRefs:             runtimePageEvidence,
 			},
 		},
 	}

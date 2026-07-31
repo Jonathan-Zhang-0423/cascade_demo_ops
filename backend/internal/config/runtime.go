@@ -89,36 +89,57 @@ type ModelTaskRoute struct {
 }
 
 type AppRuntimeConfig struct {
-	Profile              RuntimeProfile
-	Environment          string
-	Mode                 model.AppMode
-	DatabaseDialect      DatabaseDialect
-	DatabaseURL          string
-	SQLitePath           string
-	DataRoot             string
-	ArtifactRoot         string
-	CacheRoot            string
-	LogRoot              string
-	ResourceRoot         string
-	ResourceManifestPath string
-	DevRepoRoot          string
-	SidecarPaths         map[string]string
-	NodeBinaryPath       string
-	LLMMode              LLMMode
-	ArkMediaMode         ArkMediaMode
-	ModelAdapterVersion  string
-	ModelProviders       map[ModelProvider]ModelProviderCredential
-	ModelTaskRoutes      map[ModelTask]ModelTaskRoute
-	CloudExchangeBaseURL string
-	CloudExchangeToken   string
+	Profile               RuntimeProfile
+	Environment           string
+	Mode                  model.AppMode
+	DatabaseDialect       DatabaseDialect
+	DatabaseURL           string
+	SQLitePath            string
+	DataRoot              string
+	ArtifactRoot          string
+	CacheRoot             string
+	LogRoot               string
+	ResourceRoot          string
+	ResourceManifestPath  string
+	DevRepoRoot           string
+	SidecarPaths          map[string]string
+	NodeBinaryPath        string
+	FFmpegPath            string
+	FFprobePath           string
+	LLMMode               LLMMode
+	LLMProxyURL           string
+	ArkMediaMode          ArkMediaMode
+	ModelAdapterVersion   string
+	ModelProviders        map[ModelProvider]ModelProviderCredential
+	ModelTaskRoutes       map[ModelTask]ModelTaskRoute
+	CloudExchangeBaseURL  string
+	CloudExchangeToken    string
+	AppVersion            string
+	UpdateChannel         string
+	UpdateManifestURL     string
+	UpdatePublicKeyPath   string
+	UpdateExecutablePath  string
+	PreviousInstallerPath string
+	DesktopExecutablePath string
 }
 
 type DesktopResourceManifest struct {
-	App                     string            `json:"app"`
-	ResourceContractVersion int               `json:"resource_contract_version"`
-	Sidecars                map[string]string `json:"sidecars,omitempty"`
-	Runtimes                map[string]string `json:"runtimes,omitempty"`
-	Web                     string            `json:"web,omitempty"`
+	App                     string                 `json:"app"`
+	ResourceContractVersion int                    `json:"resource_contract_version"`
+	Sidecars                map[string]string      `json:"sidecars,omitempty"`
+	Runtimes                map[string]string      `json:"runtimes,omitempty"`
+	Web                     string                 `json:"web,omitempty"`
+	Version                 string                 `json:"version,omitempty"`
+	Updates                 DesktopUpdateResources `json:"updates,omitempty"`
+}
+
+type DesktopUpdateResources struct {
+	Channel           string `json:"channel,omitempty"`
+	ManifestURL       string `json:"manifest_url,omitempty"`
+	PublicKey         string `json:"public_key,omitempty"`
+	Updater           string `json:"updater,omitempty"`
+	PreviousInstaller string `json:"previous_installer,omitempty"`
+	AppExecutable     string `json:"app_executable,omitempty"`
 }
 
 func RuntimeConfigFromEnv() (AppRuntimeConfig, error) {
@@ -175,14 +196,24 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 		SidecarPaths: map[string]string{
 			"video-worker": os.Getenv("NODE_WORKER_PATH"),
 		},
-		NodeBinaryPath:       os.Getenv("NODE_BINARY_PATH"),
-		LLMMode:              llmMode,
-		ArkMediaMode:         arkMediaMode,
-		ModelAdapterVersion:  ModelAdapterVersion,
-		ModelProviders:       modelProviderCredentialsFromEnv(),
-		ModelTaskRoutes:      modelTaskRoutesFromEnv(),
-		CloudExchangeBaseURL: strings.TrimRight(strings.TrimSpace(envOrDefault("CASCADE_CLOUD_EXCHANGE_BASE_URL", os.Getenv("CASCADE_SERVER_BASE_URL"))), "/"),
-		CloudExchangeToken:   strings.TrimSpace(envOrDefault("CASCADE_CLOUD_EXCHANGE_TOKEN", os.Getenv("CASCADE_SERVER_TOKEN"))),
+		NodeBinaryPath:        os.Getenv("NODE_BINARY_PATH"),
+		FFmpegPath:            os.Getenv("CASCADE_FFMPEG_PATH"),
+		FFprobePath:           os.Getenv("CASCADE_FFPROBE_PATH"),
+		LLMMode:               llmMode,
+		LLMProxyURL:           strings.TrimSpace(os.Getenv("CASCADE_LLM_PROXY_URL")),
+		ArkMediaMode:          arkMediaMode,
+		ModelAdapterVersion:   ModelAdapterVersion,
+		ModelProviders:        modelProviderCredentialsFromEnv(),
+		ModelTaskRoutes:       modelTaskRoutesFromEnv(),
+		CloudExchangeBaseURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("CASCADE_CLOUD_EXCHANGE_BASE_URL")), "/"),
+		CloudExchangeToken:    strings.TrimSpace(os.Getenv("CASCADE_CLOUD_EXCHANGE_TOKEN")),
+		AppVersion:            strings.TrimSpace(os.Getenv("CASCADE_APP_VERSION")),
+		UpdateChannel:         strings.TrimSpace(os.Getenv("CASCADE_RELEASE_CHANNEL")),
+		UpdateManifestURL:     strings.TrimSpace(os.Getenv("DEMOOPS_UPDATE_MANIFEST_URL")),
+		UpdatePublicKeyPath:   strings.TrimSpace(os.Getenv("DEMOOPS_UPDATE_PUBLIC_KEY_PATH")),
+		UpdateExecutablePath:  strings.TrimSpace(os.Getenv("DEMOOPS_UPDATER_PATH")),
+		PreviousInstallerPath: strings.TrimSpace(os.Getenv("DEMOOPS_PREVIOUS_INSTALLER_PATH")),
+		DesktopExecutablePath: strings.TrimSpace(os.Getenv("DEMOOPS_DESKTOP_EXECUTABLE_PATH")),
 	}
 	applyDesktopResourceManifest(&cfg)
 	return cfg, nil
@@ -387,13 +418,48 @@ func applyDesktopResourceManifest(cfg *AppRuntimeConfig) {
 		cfg.SidecarPaths = map[string]string{}
 	}
 	for name, relativePath := range manifest.Sidecars {
-		if cfg.SidecarPaths[name] == "" {
+		if !validDesktopRuntimeOverride(cfg.SidecarPaths[name]) {
 			cfg.SidecarPaths[name] = resourcePath(cfg.ResourceRoot, relativePath)
 		}
 	}
-	if cfg.NodeBinaryPath == "" && manifest.Runtimes["node"] != "" {
+	if !validDesktopRuntimeOverride(cfg.NodeBinaryPath) && manifest.Runtimes["node"] != "" {
 		cfg.NodeBinaryPath = resourcePath(cfg.ResourceRoot, manifest.Runtimes["node"])
 	}
+	if cfg.FFmpegPath == "" && manifest.Runtimes["ffmpeg"] != "" {
+		cfg.FFmpegPath = resourcePath(cfg.ResourceRoot, manifest.Runtimes["ffmpeg"])
+	}
+	if cfg.FFprobePath == "" && manifest.Runtimes["ffprobe"] != "" {
+		cfg.FFprobePath = resourcePath(cfg.ResourceRoot, manifest.Runtimes["ffprobe"])
+	}
+	if cfg.AppVersion == "" {
+		cfg.AppVersion = strings.TrimSpace(manifest.Version)
+	}
+	if cfg.UpdateChannel == "" {
+		cfg.UpdateChannel = strings.TrimSpace(manifest.Updates.Channel)
+	}
+	if cfg.UpdateManifestURL == "" {
+		cfg.UpdateManifestURL = strings.TrimSpace(manifest.Updates.ManifestURL)
+	}
+	if cfg.UpdatePublicKeyPath == "" {
+		cfg.UpdatePublicKeyPath = resourcePath(cfg.ResourceRoot, manifest.Updates.PublicKey)
+	}
+	if cfg.UpdateExecutablePath == "" {
+		cfg.UpdateExecutablePath = resourcePath(cfg.ResourceRoot, manifest.Updates.Updater)
+	}
+	if cfg.PreviousInstallerPath == "" {
+		cfg.PreviousInstallerPath = resourcePath(cfg.ResourceRoot, manifest.Updates.PreviousInstaller)
+	}
+	if cfg.DesktopExecutablePath == "" {
+		cfg.DesktopExecutablePath = resourcePath(cfg.ResourceRoot, manifest.Updates.AppExecutable)
+	}
+}
+
+func validDesktopRuntimeOverride(path string) bool {
+	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func resourcePath(resourceRoot string, value string) string {

@@ -114,6 +114,58 @@ func TestExchangeHTTPRejectsBadInstallationEnvelopeSignature(t *testing.T) {
 	}
 }
 
+func TestExchangeHTTPBindsFormalAppUploadToAuthenticatedInstallation(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 30, 9, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	discovery := exchangeHTTPDo[model.ExchangeBootstrapDiscoveryResponse](t, server, http.MethodGet, "/.well-known/cascade-exchange", nil)
+	privateKey, session := registerTestInstallation(t, server, discovery, "install_http_formal")
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	init := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution,
+		Producer: model.ExchangeProducer{InstallID: session.InstallID, RuntimeProfile: "desktop-product-run"},
+	}, "Authorization", "Cascade-Session "+session.SessionToken)
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Producer.InstallID = session.InstallID
+	envelope.Producer.RuntimeProfile = "desktop-product-run"
+	signEnvelopeForInstallation(t, &envelope, pkg, privateKey)
+
+	upload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID: init.UploadID, Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg,
+	}, "Authorization", "Cascade-Session "+session.SessionToken)
+	state, err := server.service.exchange.packageState(pkg.OrgID, upload.ExchangePackageID)
+	if err != nil || state.AuthenticatedInstallID != session.InstallID {
+		t.Fatalf("formal HTTP upload must retain only transport-authenticated installation identity: state=%+v err=%v", state, err)
+	}
+}
+
+func TestExchangeHTTPRejectsInstallationMismatchBeforePackageAcceptance(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 30, 9, 5, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	discovery := exchangeHTTPDo[model.ExchangeBootstrapDiscoveryResponse](t, server, http.MethodGet, "/.well-known/cascade-exchange", nil)
+	_, session := registerTestInstallation(t, server, discovery, "install_http_mismatch")
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	init := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution,
+		Producer: model.ExchangeProducer{InstallID: session.InstallID, RuntimeProfile: "desktop-product-run"},
+	}, "Authorization", "Cascade-Session "+session.SessionToken)
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Producer.InstallID = "install_unrelated"
+	envelope.Producer.RuntimeProfile = "desktop-product-run"
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/execution-packages", bytes.NewReader(mustMarshalJSON(t, exchangeUploadHTTPBody{UploadID: init.UploadID, Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg})))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Cascade-Session "+session.SessionToken)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "installation_identity_mismatch") {
+		t.Fatalf("mismatched authenticated installation must be rejected: code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestExchangeInstallationSessionPersistsAcrossSnapshotReload(t *testing.T) {
 	t.Setenv(devExchangeHTTPEnv, "1")
 	server := newTestDevHTTPServer(t)
@@ -177,6 +229,61 @@ func TestDevExchangeHTTPLifecycleAcceptsProtocolPackage(t *testing.T) {
 	}
 	if strings.Contains(mustJSON(t, debug), "runCascadeRecording") {
 		t.Fatalf("debug view leaked script source: %s", mustJSON(t, debug))
+	}
+}
+
+func TestDevExchangeHTTPValidateAcceptsPackageWithoutPersistingState(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := readBrowserAgentOutlineFixture(t)
+	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
+		t.Fatal(err)
+	}
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+
+	result := exchangeHTTPDo[CloudPackagePreflightResult](t, server, http.MethodPost, "/aigc/v1/execution-packages/validate", exchangeUploadHTTPBody{
+		Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg,
+	})
+	if !result.Valid || result.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 || result.StageCount == 0 || result.RequiredChecks == 0 || result.PackageID != pkg.PackageID {
+		t.Fatalf("unexpected preflight response: %+v", result)
+	}
+	if result.Warnings == nil || len(server.service.exchange.packages) != 0 || len(server.service.exchange.uploads) != 0 || len(server.service.exchange.seenNonces) != 0 {
+		t.Fatalf("preflight must not persist package, upload session, or replay nonce: result=%+v packages=%d uploads=%d nonces=%d", result, len(server.service.exchange.packages), len(server.service.exchange.uploads), len(server.service.exchange.seenNonces))
+	}
+}
+
+func TestDevExchangeHTTPValidateReturnsSameSafeErrorAsUpload(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 27, 12, 5, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	pkg.RecordingRunSpec.AllowedDomains = nil
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/execution-packages/validate", bytes.NewReader(mustMarshalJSON(t, exchangeUploadHTTPBody{
+		Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg,
+	})))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected validation failure, got %d: %s", response.Code, response.Body.String())
+	}
+	var errorBody exchangeHTTPError
+	if err := json.Unmarshal(response.Body.Bytes(), &errorBody); err != nil {
+		t.Fatal(err)
+	}
+	if errorBody.Error.Code != "client_execution_package_invalid" || len(errorBody.Error.Details) != 1 || errorBody.Error.Details[0].Field != "payload.recording_run_spec.allowed_domains" {
+		t.Fatalf("preflight must return the upload-compatible safe protocol error: %+v", errorBody.Error)
+	}
+	if len(server.service.exchange.packages) != 0 || len(server.service.exchange.uploads) != 0 || len(server.service.exchange.seenNonces) != 0 {
+		t.Fatalf("failed preflight must not mutate exchange state")
 	}
 }
 
@@ -362,7 +469,7 @@ func TestDevExchangeHTTPRunEndpointMarksMissingWorkerAsFailed(t *testing.T) {
 	})
 
 	runStatus := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodPost, "/v1/dev/execution-packages/"+uploadPayload.ExchangePackageID+"/run", nil, cascadeOrgIDHeader, pkg.OrgID)
-	if runStatus.Status != model.ExchangePackageStatusRunning || runStatus.Stage != "validated" {
+	if runStatus.Status != model.ExchangePackageStatusRunning || runStatus.Stage != "preparing_worker" {
 		t.Fatalf("expected run endpoint to return started running status, got %+v", runStatus)
 	}
 
@@ -383,6 +490,56 @@ func TestDevExchangeHTTPRunEndpointMarksMissingWorkerAsFailed(t *testing.T) {
 	}
 	if len(failed.StageHistory) < 3 {
 		t.Fatalf("failed dev run should include stage history, got %+v", failed.StageHistory)
+	}
+}
+
+func TestDevExchangeHTTPRunEndpointBlocksUnreadyBrowserAgentBeforeStartingWorker(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := readBrowserAgentOutlineFixture(t)
+
+	// This remains structurally valid, but the App declares a business-input
+	// stage without approving any value, input reference, or secret grant.
+	stage := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1]
+	stage.StageKind = model.BusinessStageKindBusinessInput
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[1].StageKind = stage.StageKind
+	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
+		t.Fatal(err)
+	}
+
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
+		OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution,
+	})
+	envelope := sampleEnvelopeForAppTest(t, pkg, now)
+	envelope.Crypto.Nonce = "nonce_browser_agent_readiness_blocked"
+	uploadPayload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID: initPayload.UploadID, Envelope: envelope, PayloadRef: envelope.PayloadRef, Payload: pkg,
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/dev/execution-packages/"+uploadPayload.ExchangePackageID+"/run?org_id="+pkg.OrgID, nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unready browser-agent package must be rejected before run, got %d: %s", response.Code, response.Body.String())
+	}
+	var errorBody exchangeHTTPError
+	if err := json.Unmarshal(response.Body.Bytes(), &errorBody); err != nil {
+		t.Fatal(err)
+	}
+	if errorBody.Error.Code != "browser_agent_readiness_blocked" || !strings.Contains(errorBody.Error.Message, "business_input_missing") {
+		t.Fatalf("unexpected readiness rejection: %+v", errorBody.Error)
+	}
+
+	status := exchangeHTTPDo[model.ExecutionPackageStatusResponse](t, server, http.MethodGet, "/v1/execution-packages/"+uploadPayload.ExchangePackageID+"/status?org_id="+pkg.OrgID, nil)
+	if status.Status != model.ExchangePackageStatusAccepted || status.Stage != "accepted" || len(status.StageHistory) != 1 {
+		t.Fatalf("readiness rejection must leave the package unstarted: %+v", status)
+	}
+	if _, err := os.Stat(filepath.Join(server.service.runtime.ArtifactRoot, "exchange", uploadPayload.ExchangePackageID)); !os.IsNotExist(err) {
+		t.Fatalf("readiness rejection must not create runtime artifacts, err=%v", err)
 	}
 }
 
@@ -569,6 +726,76 @@ func TestDevExchangeHTTPRestoresStatusAndDownloadAfterRestart(t *testing.T) {
 	}
 }
 
+func TestExecutionEventsSSESupportsLastEventID(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	upload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{
+		UploadID: initPayload.UploadID, Envelope: sampleEnvelopeForAppTest(t, pkg, now), Payload: pkg,
+	})
+	if _, _, err := server.service.exchange.StartExecution(t.Context(), pkg.OrgID, upload.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.service.exchange.CompleteWithRecordingResult(t.Context(), pkg.OrgID, upload.ExchangePackageID, sampleRecordingResultForAppTest(pkg)); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/execution-packages/"+upload.ExchangePackageID+"/events?org_id="+pkg.OrgID, nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Last-Event-ID", upload.ExchangePackageID+":1")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("unexpected SSE response: status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "id: "+upload.ExchangePackageID+":1\n") || !strings.Contains(body, "id: "+upload.ExchangePackageID+":2\n") || !strings.Contains(body, "event: complete") {
+		t.Fatalf("SSE did not resume after event 1: %s", body)
+	}
+}
+
+func TestResultReviewAndRevisionHTTPAreSeparateFromAck(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "test-token")
+	server := newTestDevHTTPServer(t)
+	now := time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC)
+	server.service.exchange.now = fixedClock(now)
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	upload := exchangeHTTPDo[model.ExecutionPackageUploadResponse](t, server, http.MethodPost, "/v1/execution-packages", exchangeUploadHTTPBody{UploadID: initPayload.UploadID, Envelope: sampleEnvelopeForAppTest(t, pkg, now), Payload: pkg})
+	if _, _, err := server.service.exchange.StartExecution(t.Context(), pkg.OrgID, upload.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := server.service.exchange.CompleteWithRecordingResult(t.Context(), pkg.OrgID, upload.ExchangePackageID, sampleRecordingResultForAppTest(pkg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := exchangeHTTPDo[model.ResultReviewRecord](t, server, http.MethodPost, "/v1/result-packages/"+completed.ResultPackageID+"/reviews", model.ResultReviewRequest{
+		IdempotencyKey: "review-http-1", Decision: model.ResultReviewReeditRequested,
+	}, cascadeOrgIDHeader, pkg.OrgID)
+	if review.Decision != model.ResultReviewReeditRequested || review.ReviewID == "" {
+		t.Fatalf("unexpected review: %+v", review)
+	}
+	revision := exchangeHTTPDo[model.ResultRevisionRecord](t, server, http.MethodPost, "/v1/result-packages/"+completed.ResultPackageID+"/revisions", model.ResultRevisionRequest{
+		IdempotencyKey: "revision-http-1", RequestedAction: model.ResultRevisionAuto,
+		Issues: []model.ResultRevisionIssue{{Kind: "caption"}},
+	}, cascadeOrgIDHeader, pkg.OrgID)
+	if revision.ResolvedAction != model.ResultRevisionReedit || revision.Status != "queued" {
+		t.Fatalf("unexpected revision: %+v", revision)
+	}
+	result, err := server.service.GetResultPackage(t.Context(), pkg.OrgID, completed.ResultPackageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status == model.RecordingResultStatusAcked || !result.Delivery.AckedAt.IsZero() {
+		t.Fatalf("review/revision must not acknowledge delivery: %+v", result.Delivery)
+	}
+}
+
 func TestDevExchangeHTTPListsPersistedPackagesAfterRestart(t *testing.T) {
 	t.Setenv(devExchangeHTTPEnv, "1")
 	t.Setenv(devExchangeTokenEnv, "test-token")
@@ -727,6 +954,18 @@ func registerTestInstallation(t *testing.T, server *DevHTTPServer, discovery mod
 		t.Fatalf("unexpected installation session: %+v", session)
 	}
 	return privateKey, session
+}
+
+func signEnvelopeForInstallation(t *testing.T, envelope *model.ExchangeEnvelope, payload model.ClientExecutionPackage, privateKey ed25519.PrivateKey) {
+	t.Helper()
+	canonical, err := model.CanonicalJSON(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingBytes := []byte(envelope.EnvelopeID + "\n" + envelope.OrgID + "\n" + envelope.ProjectID + "\n" + model.SHA256Hex(canonical))
+	envelope.Crypto.SignatureAlg = exchangeInstallationKeyAlg
+	envelope.Crypto.SignatureKeyID = installationSigningKeyID(envelope.Producer.InstallID)
+	envelope.Crypto.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, signingBytes))
 }
 
 func waitForExchangeHTTPStatus(t *testing.T, server *DevHTTPServer, exchangePackageID string, orgID string, want model.ExchangePackageStatus) model.ExecutionPackageStatusResponse {

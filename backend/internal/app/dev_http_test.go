@@ -2,12 +2,17 @@ package app
 
 import (
 	"bytes"
-	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +102,233 @@ func TestDevHTTPBridgeReadsLocalRepoSummary(t *testing.T) {
 	}
 }
 
+func TestDevHTTPBridgeReadsGitHubRepoURLAsParallelCodeSource(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is required for git repository bridge test")
+	}
+	server := newTestDevHTTPServer(t)
+	gitRepoPath := createDevBridgeFixtureRepo(t)
+	initGitFixtureRepo(t, gitRepoPath)
+	localRepoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		GitRepoURL:         "file://" + filepath.ToSlash(gitRepoPath),
+		LocalRepoPath:      localRepoPath,
+		ProductDescription: "展示团队邀请流程",
+		TargetAudience:     "中国运营团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := postExecutionPackage(t, server, body)
+
+	if len(state.CodeSnapshots) < 2 {
+		t.Fatalf("expected local and GitHub code snapshots, got %+v", state.CodeSnapshots)
+	}
+	if state.ProjectContext.GitRepoURL == "" || state.ProjectContext.LocalRepoPath == "" {
+		t.Fatalf("project context should preserve parallel repo inputs: %+v", state.ProjectContext)
+	}
+	var gitSnapshot *model.CodeUnderstandingSnapshot
+	for i := range state.CodeSnapshots {
+		if strings.HasPrefix(state.CodeSnapshots[i].URI, "file://") {
+			gitSnapshot = &state.CodeSnapshots[i]
+			break
+		}
+	}
+	if gitSnapshot == nil || gitSnapshot.FileCount == 0 || gitSnapshot.CommitSHA == "" {
+		t.Fatalf("expected GitHub-style repo URL snapshot to be cloned and scanned: %+v", state.CodeSnapshots)
+	}
+	if !containsString(gitSnapshot.Frameworks, "react") || len(gitSnapshot.Selectors) == 0 {
+		t.Fatalf("expected GitHub-style snapshot to include repo structure evidence: %+v", gitSnapshot)
+	}
+}
+
+func TestDevHTTPBridgeGitHubCredentialOnlyReturnsConfigurationState(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	const token = "github_pat_test_value_that_must_never_be_returned"
+	storedToken := ""
+	configured := false
+	server.storeGitHubToken = func(value string) error {
+		storedToken = value
+		configured = true
+		return nil
+	}
+	server.githubTokenConfigured = func() bool { return configured }
+	server.deleteGitHubToken = func() error {
+		storedToken = ""
+		configured = false
+		return nil
+	}
+
+	assertResponse := func(method, path, body string, wantConfigured bool) {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+		}
+		payload := response.Body.String()
+		if strings.Contains(payload, token) || strings.Contains(payload, "token\"") {
+			t.Fatalf("credential response exposed token material: %s", payload)
+		}
+		if !strings.Contains(payload, `"configured":`+strconv.FormatBool(wantConfigured)) {
+			t.Fatalf("unexpected credential status response: %s", payload)
+		}
+	}
+
+	assertResponse(http.MethodGet, "/v1/desktop/github-credential", "", false)
+	assertResponse(http.MethodPost, "/v1/desktop/github-credential", `{"token":"`+token+`"}`, true)
+	if storedToken != token {
+		t.Fatal("credential store did not receive the submitted token")
+	}
+	assertResponse(http.MethodDelete, "/v1/desktop/github-credential", "", false)
+	if storedToken != "" {
+		t.Fatal("credential delete did not clear the stored token")
+	}
+}
+
+func TestDevHTTPBridgeDemoCredentialReturnsOnlyOpaqueRef(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	stored := []string{}
+	server.storeDemoCredential = func(ref, username, password string) error {
+		stored = []string{ref, username, password}
+		return nil
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/demo-credential", strings.NewReader(`{"ref":"assistant-demo","username":"demo-user","password":"private-password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	payload := response.Body.String()
+	if strings.Contains(payload, "demo-user") || strings.Contains(payload, "private-password") {
+		t.Fatalf("credential response exposed secret material: %s", payload)
+	}
+	if !strings.Contains(payload, `"secretRef":"credential://demo/assistant-demo"`) || len(stored) != 3 || stored[2] != "private-password" {
+		t.Fatalf("credential was not stored through the local vault adapter: payload=%s stored=%v", payload, stored)
+	}
+}
+
+func TestDevHTTPAssistantAcceptsManualConfigurationProposal(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	create := httptest.NewRecorder()
+	createRequest := httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions", bytes.NewReader([]byte(`{"context":{"surface":"projects","scopeKey":"manual-http"}}`)))
+	createRequest.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(create, createRequest)
+	if create.Code != http.StatusOK {
+		t.Fatalf("create assistant session status=%d body=%s", create.Code, create.Body.String())
+	}
+	var created BridgeResponse
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	var session model.AssistantSession
+	if err := json.Unmarshal(created.Data, &session); err != nil {
+		t.Fatal(err)
+	}
+
+	proposalBody := []byte(`{"baseVersion":1,"idempotencyKey":"manual-http-1","patch":{"projectName":"HTTP Manual","productURL":"https://manual.example","objective":"展示手动兜底","targetAudience":"产品团队","targetDurationSec":45,"mustShow":["审批流程"]}}`)
+	proposal := httptest.NewRecorder()
+	proposalRequest := httptest.NewRequest(http.MethodPost, "/v1/desktop/assistant/sessions/"+session.ID+"/configuration-proposals", bytes.NewReader(proposalBody))
+	proposalRequest.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(proposal, proposalRequest)
+	if proposal.Code != http.StatusOK {
+		t.Fatalf("manual proposal status=%d body=%s", proposal.Code, proposal.Body.String())
+	}
+	var proposed BridgeResponse
+	if err := json.Unmarshal(proposal.Body.Bytes(), &proposed); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(proposed.Data, &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Configuration.ProjectName != "" || session.NextAction.Kind != string(model.AssistantProposalConfigurationPatch) || session.NextAction.ProposalID == "" {
+		t.Fatalf("manual HTTP route bypassed or failed to create pending proposal: %+v", session)
+	}
+	last := session.Messages[len(session.Messages)-1]
+	if last.GenerationSource != "manual" || len(last.Proposals) != 1 || last.Proposals[0].Patch == nil {
+		t.Fatalf("manual HTTP proposal metadata missing: %+v", last)
+	}
+}
+
+func TestDevHTTPPlanningModelSettingsNeverEchoAPIKey(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	keys := map[string]string{}
+	server.service.storeModelKey = func(provider, key string) error { keys[provider] = key; return nil }
+	server.service.readModelKey = func(provider string) (string, error) { return keys[provider], nil }
+	server.service.deleteModelKey = func(provider string) error { delete(keys, provider); return nil }
+	const secret = "http-model-secret"
+	request := httptest.NewRequest(http.MethodPut, "/v1/desktop/planning-model", strings.NewReader(`{"provider":"kimi","model":"kimi-test","api_key":"`+secret+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("planning model settings status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), secret) || !strings.Contains(response.Body.String(), `"configured":true`) {
+		t.Fatalf("planning model settings leaked key or omitted status: %s", response.Body.String())
+	}
+	if keys["kimi"] != secret {
+		t.Fatal("planning model key did not reach secure store adapter")
+	}
+}
+
+func TestDevHTTPPlanningModelVerifyUsesDedicatedSafeRoute(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/planning-model/verify", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("planning model verify status=%d body=%s", response.Code, response.Body.String())
+	}
+	payload := response.Body.String()
+	if !strings.Contains(payload, `"task":"planning"`) || strings.Contains(strings.ToLower(payload), "api_key") {
+		t.Fatalf("planning verification response is unsafe or incomplete: %s", payload)
+	}
+}
+
+func TestDevHTTPBridgeDemoCredentialRejectsUnsafeRef(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	called := false
+	server.storeDemoCredential = func(string, string, string) error { called = true; return nil }
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/demo-credential", strings.NewReader(`{"ref":"../unsafe","username":"demo","password":"secret"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code == http.StatusOK || called {
+		t.Fatalf("unsafe credential ref must be rejected: status=%d called=%v body=%s", response.Code, called, response.Body.String())
+	}
+}
+
+func TestDevHTTPBridgeRejectsForeignOriginBeforeCredentialMutation(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	called := false
+	server.storeGitHubToken = func(string) error {
+		called = true
+		return nil
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/github-credential", strings.NewReader(`{"token":"github_pat_csrf"}`))
+	request.Header.Set("Origin", "https://attacker.example")
+	request.Header.Set("Content-Type", "text/plain")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden || called {
+		t.Fatalf("foreign origin must be rejected before credential mutation: status=%d called=%v", response.Code, called)
+	}
+}
+
 func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	repoPath := createDevBridgeFixtureRepo(t)
@@ -129,6 +361,9 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 	}
 	if !strings.Contains(text, "secret_ref:local-dev/demo_password") {
 		t.Fatalf("expected package to preserve password secret_ref placeholder: %s", text)
+	}
+	if build.BuildStatus != "draft" || !build.Package.ApprovedAt.IsZero() || build.Package.SafetyReport.AllowedToUpload || build.Package.SafetyReport.HumanApproval.ApprovalID != "" || build.Envelope.EnvelopeID != "" {
+		t.Fatalf("preview must remain an unapproved draft: %+v", build)
 	}
 }
 
@@ -177,8 +412,114 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payload) > 512*1024 {
+	if len(payload) > 256*1024 {
 		t.Fatalf("outline upload package too large: %d bytes", len(payload))
+	}
+	if build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash == "" || build.ApprovalSubjectDigestSHA256 == "" || build.SizeReport.TotalBytes == 0 {
+		t.Fatalf("draft must expose confidence, approval digest, and size report: %+v", build)
+	}
+	if build.Package.WorkflowGraph.Intent == nil || build.Package.WorkflowGraph.Assets == nil {
+		t.Fatalf("compact workflow graph lost director intent or assets: %+v", build.Package.WorkflowGraph)
+	}
+}
+
+func TestBlockingMissingEvidenceCannotBeDowngradedToWarning(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.ExecutableScriptBundle.StageApprovalPlan.UncertaintyReport = []model.StageUncertainty{{ID: "missing_business", Kind: "missing_evidence", Summary: "关键业务证据缺失", Blocking: true}}
+	findings := preflightBrowserAgentOutline(pkg.ExecutableScriptBundle)
+	for _, finding := range findings {
+		if finding.ID == "stage_uncertainty_missing_business" {
+			if finding.Severity != model.FindingSeverityBlocking {
+				t.Fatalf("blocking evidence uncertainty was downgraded: %+v", finding)
+			}
+			return
+		}
+	}
+	t.Fatal("expected blocking uncertainty finding")
+}
+
+func TestBuildClientExecutionPackageRejectsInjectedCodeSelectorInPageOnlyMode(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode: model.AppModeDesktop, ProductURL: "https://app.example.com", LocalRepoPath: repoPath,
+		ProductDescription: "生成团队协作产品演示执行包。", TargetAudience: "产品团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://app.example.com")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	if state.SourceBinding == nil || state.SourceBinding.EffectiveMode != model.ProductSourceModePageOnly {
+		t.Fatalf("fixture must enter page-only mode: %+v", state.SourceBinding)
+	}
+	state.ExecutableScriptBundle.PlanJSON.Steps[0].Action.Target.Source = "code_reader"
+	state.ExecutableScriptBundle.PlanJSON.Steps[0].Action.Target.Selector = "[data-testid='foreign-product']"
+	build, err := buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC())
+	if build.Envelope.EnvelopeID != "" || build.Package.PackageID != "" {
+		t.Fatalf("blocked preflight must not return a package or envelope: %+v", build)
+	}
+	var preflight *packagePreflightError
+	if !errors.As(err, &preflight) || len(preflight.Findings) == 0 || preflight.Findings[0].ID != "source_evidence_leakage" {
+		t.Fatalf("expected source_evidence_leakage preflight, got %T: %v", err, err)
+	}
+}
+
+func TestCompactPrepareResponseRedactsLocalSourcePaths(t *testing.T) {
+	root := filepath.Join(`C:\Users\Alice\private`, "customer-project")
+	documentPath := filepath.Join(`C:\Users\Alice\private`, "requirements.md")
+	state := &orchestrator.CascadeState{ProjectContext: &model.ProjectContext{
+		ID: "project-path-redaction", Mode: model.AppModeDesktop, ProductURL: "https://product.example",
+		LocalRepoPath: root,
+		Inputs: &model.ProjectInputBundle{
+			Repositories:         []model.RepositoryInput{{LocalPath: root, Provider: "local", ReadOnly: true}},
+			RequirementDocuments: []model.RequirementDocumentInput{{ID: "requirements", Kind: "local_file", LocalPath: documentPath}},
+		},
+	}}
+
+	compact := compactStateForPrepareResponse(state, nil)
+	payload, err := json.Marshal(compact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(payload)
+	if strings.Contains(serialized, `C:\Users\Alice`) || strings.Contains(serialized, "private") {
+		t.Fatalf("prepare response leaked an absolute local path: %s", serialized)
+	}
+	if compact.ProjectContext.LocalRepoPath != "customer-project" || compact.ProjectContext.Inputs.Repositories[0].LocalPath != "customer-project" {
+		t.Fatalf("prepare response should retain only safe basenames: %+v", compact.ProjectContext)
+	}
+	if compact.ProjectContext.Inputs.RequirementDocuments[0].LocalPath != "" {
+		t.Fatalf("requirement document path must be omitted: %+v", compact.ProjectContext.Inputs.RequirementDocuments[0])
+	}
+}
+
+func TestSourceBindingHTTPGetAndStaleDecision(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		ProjectID: "project-source-http", Mode: model.AppModeDesktop, ProductURL: "https://app.example.com", LocalRepoPath: repoPath,
+		ProductDescription: "生成团队协作产品演示执行包。", TargetAudience: "产品团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://app.example.com")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/projects/"+state.ProjectID+"/source-binding", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), state.SourceBinding.AssessmentHash) {
+		t.Fatalf("GET source-binding did not return current assessment: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/"+state.ProjectID+"/source-binding/decisions", strings.NewReader(`{"decision":"continue_page_only","assessment_hash":"stale","idempotency_key":"decision-http-1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"source_binding_stale"`) {
+		t.Fatalf("stale source-binding decision did not return structured error: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -318,76 +659,6 @@ func TestDevHTTPBridgeInvalidLocalRepoPathDegradesWithoutFailing(t *testing.T) {
 	}
 }
 
-func TestDevHTTPBridgeArchivesAndDeletesProjects(t *testing.T) {
-	server := newTestDevHTTPServer(t)
-	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-	if err := server.service.states.Save(context.Background(), &orchestrator.CascadeState{
-		ProjectID:   "project_archive",
-		CurrentNode: orchestrator.NodeInputCtx,
-		Status:      orchestrator.FlowStatusCreated,
-		ProjectContext: &model.ProjectContext{
-			ID:         "project_archive",
-			Name:       "Archive me",
-			ProductURL: "https://archive.example.com",
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := server.service.states.Save(context.Background(), &orchestrator.CascadeState{
-		ProjectID:   "project_delete",
-		CurrentNode: orchestrator.NodeInputCtx,
-		Status:      orchestrator.FlowStatusCreated,
-		ProjectContext: &model.ProjectContext{
-			ID:         "project_delete",
-			Name:       "Delete me",
-			ProductURL: "https://delete.example.com",
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	archiveRequest := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/project_archive/archive", nil)
-	archiveResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(archiveResponse, archiveRequest)
-	if archiveResponse.Code != http.StatusOK {
-		t.Fatalf("archive status %d: %s", archiveResponse.Code, archiveResponse.Body.String())
-	}
-
-	deleteRequest := httptest.NewRequest(http.MethodDelete, "/v1/desktop/projects/project_delete", nil)
-	deleteResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(deleteResponse, deleteRequest)
-	if deleteResponse.Code != http.StatusOK {
-		t.Fatalf("delete status %d: %s", deleteResponse.Code, deleteResponse.Body.String())
-	}
-	if _, err := server.service.LoadProject(context.Background(), "project_delete"); err == nil {
-		t.Fatal("expected deleted project to be unavailable")
-	}
-
-	listRequest := httptest.NewRequest(http.MethodGet, "/v1/desktop/projects", nil)
-	listResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(listResponse, listRequest)
-	var bridge BridgeResponse
-	if err := json.Unmarshal(listResponse.Body.Bytes(), &bridge); err != nil {
-		t.Fatal(err)
-	}
-	if !bridge.OK {
-		t.Fatalf("list failed: %s", bridge.Error)
-	}
-	var summaries []ProjectSummary
-	if err := json.Unmarshal(bridge.Data, &summaries); err != nil {
-		t.Fatal(err)
-	}
-	for _, summary := range summaries {
-		if summary.ID == "project_archive" || summary.ID == "project_delete" {
-			t.Fatalf("archived/deleted project should be hidden from list: %+v", summaries)
-		}
-	}
-}
-
 func TestPrepareProductRunDoesNotRequireCloudExchange(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(CloudLifecycleRequest{UserInput: &orchestrator.UserInput{
@@ -420,6 +691,63 @@ func TestPrepareProductRunDoesNotRequireCloudExchange(t *testing.T) {
 	}
 	if prepared.State == nil || prepared.Build == nil || prepared.Build.Package.PackageID == "" {
 		t.Fatalf("prepare should return local state and build, got %+v", prepared)
+	}
+}
+
+func TestPrepareProductRunReadsMatchedLocalProjectAndStopsAtDraftApproval(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	repoPath := createDevBridgeFixtureRepo(t)
+	if err := os.WriteFile(filepath.Join(repoPath, "package.json"), []byte(`{"name":"app-example","homepage":"https://app.example.com","dependencies":{"react":"latest","vite":"latest"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(CloudLifecycleRequest{UserInput: &orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		LocalRepoPath:      repoPath,
+		ProductDescription: "展示团队邀请流程。",
+		TargetAudience:     "中国运营团队",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/local/product-run/prepare", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if !bridge.OK {
+		t.Fatalf("local prepare failed: %s", bridge.Error)
+	}
+	var prepared ProductRunPrepareResult
+	if err := json.Unmarshal(bridge.Data, &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.State == nil || prepared.State.SourceBinding == nil || prepared.Build == nil {
+		t.Fatalf("local prepare did not return source binding and package draft: %+v", prepared)
+	}
+	if prepared.State.SourceBinding.Status != model.ProductSourceBindingMatched || prepared.State.SourceBinding.EffectiveMode != model.ProductSourceModeMixed {
+		t.Fatalf("expected matched local source evidence, got %+v", prepared.State.SourceBinding)
+	}
+	build := prepared.Build
+	if build.BuildStatus != "draft" || build.ApprovalSubjectDigestSHA256 == "" || build.Package.ConfidenceSummary == nil {
+		t.Fatalf("expected confidence-scored local draft: %+v", build)
+	}
+	if !build.Package.ApprovedAt.IsZero() || build.Package.SafetyReport.AllowedToUpload || build.Package.SafetyReport.HumanApproval.ApprovalID != "" || build.Envelope.EnvelopeID != "" {
+		t.Fatalf("local configuration must stop before independent upload approval: %+v", build)
+	}
+	bundle := build.Package.ExecutableScriptBundle
+	if bundle == nil || bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil || bundle.ApprovalMarkdown.InlineMarkdown == "" {
+		t.Fatalf("local prepare did not generate the three-in-one package: %+v", bundle)
+	}
+	payload := response.Body.String()
+	if strings.Contains(payload, repoPath) || strings.Contains(payload, "function submitPayment") {
+		t.Fatalf("local prepare response leaked an absolute path or complete source: %s", payload)
 	}
 }
 
@@ -591,6 +919,93 @@ func TestDevHTTPBridgeRuntimeHealthIsRedacted(t *testing.T) {
 	if !strings.Contains(payload, "ark_media_mode") {
 		t.Fatalf("runtime health missing ark media mode: %s", payload)
 	}
+	if !strings.Contains(payload, "app_capabilities") {
+		t.Fatalf("runtime health missing app capabilities: %s", payload)
+	}
+	if !strings.Contains(payload, `"server_recording_required":true`) || !strings.Contains(payload, `"local_recording_execution":false`) {
+		t.Fatalf("runtime health must declare server-side recording boundary: %s", payload)
+	}
+}
+
+func TestDesktopProfileDoesNotExposeDevExchangeRunRoutes(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "1")
+	t.Setenv(devExchangeTokenEnv, "desktop-test-token")
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile:         config.ProfileDesktop,
+		Environment:     "test",
+		Mode:            model.AppModeDesktop,
+		DatabaseDialect: config.DatabaseSQLite,
+		SQLitePath:      filepath.Join(root, "cascade_demoops.db"),
+		DataRoot:        root,
+		ArtifactRoot:    filepath.Join(root, "artifacts"),
+		CacheRoot:       filepath.Join(root, "cache"),
+		LogRoot:         filepath.Join(root, "logs"),
+		ResourceRoot:    root,
+		DevRepoRoot:     root,
+		SidecarPaths:    map[string]string{},
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewDevHTTPServer(service)
+	request := httptest.NewRequest(http.MethodPost, "/v1/dev/execution-packages/xpkg_local/run?org_id=org_test", nil)
+	request.Header.Set("Authorization", "Bearer desktop-test-token")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("desktop profile must not expose local dev recording run route, got status %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestDesktopCloudEventProxyForwardsSessionAndResumeCursor(t *testing.T) {
+	var authorization, orgID, lastEventID string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		orgID = r.Header.Get(cascadeOrgIDHeader)
+		lastEventID = r.Header.Get("Last-Event-ID")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "id: xpkg_stream:3\nevent: stage\ndata: {\"event_id\":\"xpkg_stream:3\",\"stage\":\"recording\",\"status\":\"running\"}\n\n")
+	}))
+	defer upstream.Close()
+
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile:              config.ProfileDesktop,
+		Environment:          "test",
+		Mode:                 model.AppModeDesktop,
+		DatabaseDialect:      config.DatabaseSQLite,
+		SQLitePath:           filepath.Join(root, "cascade_demoops.db"),
+		DataRoot:             root,
+		ArtifactRoot:         filepath.Join(root, "artifacts"),
+		CacheRoot:            filepath.Join(root, "cache"),
+		LogRoot:              filepath.Join(root, "logs"),
+		ResourceRoot:         root,
+		DevRepoRoot:          root,
+		SidecarPaths:         map[string]string{},
+		CloudExchangeBaseURL: upstream.URL,
+		CloudExchangeToken:   "stream-token",
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/projects/project_stream/cloud/events?org_id=org_stream&exchange_package_id=xpkg_stream", nil)
+	request.Header.Set("Last-Event-ID", "xpkg_stream:2")
+	response := httptest.NewRecorder()
+
+	NewDevHTTPServer(service).Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("unexpected proxy response status=%d content-type=%q body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	if authorization != "Bearer stream-token" || orgID != "org_stream" || lastEventID != "xpkg_stream:2" {
+		t.Fatalf("proxy headers authorization=%q org=%q last-event-id=%q", authorization, orgID, lastEventID)
+	}
+	if !strings.Contains(response.Body.String(), "id: xpkg_stream:3") || strings.Contains(response.Body.String(), "stream-token") {
+		t.Fatalf("unexpected proxied stream: %s", response.Body.String())
+	}
 }
 
 func TestDevHTTPBridgeModelDiagnosticsAreRedacted(t *testing.T) {
@@ -674,12 +1089,116 @@ func TestEnsureLocalDevAddressRejectsNonLocalBinds(t *testing.T) {
 	}
 }
 
+func TestDevHTTPServesOnlyVerifiedDownloadedReviewVideo(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	root := filepath.Join(server.service.runtime.ArtifactRoot, "desktop", "downloads", "project_media", "result_media")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	videoPath := filepath.Join(root, "demo.mp4")
+	if err := os.WriteFile(videoPath, []byte("verified-video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	videoHash := sha256.Sum256([]byte("verified-video"))
+	if err := writeVerifiedDownloadMarker(videoPath, hex.EncodeToString(videoHash[:])); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/projects/project_media/cloud/deliverable/media?result_package_id=result_media&file=demo.mp4", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "verified-video" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("verified media was not served safely: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+
+	for _, rawURL := range []string{
+		"/v1/desktop/projects/project_media/cloud/deliverable/media?result_package_id=result_media&file=..%2Fsecret.mp4",
+		"/v1/desktop/projects/project_media/cloud/deliverable/media?result_package_id=result_media&file=demo.mp4.part",
+		"/v1/desktop/projects/project_media/cloud/deliverable/media?result_package_id=result_media&file=notes.json",
+	} {
+		blocked := httptest.NewRecorder()
+		server.Handler().ServeHTTP(blocked, httptest.NewRequest(http.MethodGet, rawURL, nil))
+		if blocked.Code == http.StatusOK {
+			t.Fatalf("unsafe media reference was served: %s", rawURL)
+		}
+	}
+}
+
+func TestDevHTTPBrowserLocalSourceRegistrationIsLoopbackDevOnly(t *testing.T) {
+	server := newTestDevHTTPServerWithEnvironment(t, "development")
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(devLocalSourceRequest{Kind: "local_repository", Path: repoPath, DevTestAck: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/dev/local-sources", bytes.NewReader(body))
+	request.RemoteAddr = "127.0.0.1:54321"
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	var ref LocalSourceRef
+	if err := json.Unmarshal(bridge.Data, &ref); err != nil {
+		t.Fatal(err)
+	}
+	if ref.Ref == "" || ref.Kind != "local_repository" || ref.Label == "" || ref.Path != "" {
+		t.Fatalf("unexpected public local-source ref: %+v", ref)
+	}
+	resolved, ok := server.service.ResolveLocalSourceRef(ref.Ref)
+	if !ok || resolved.Path != repoPath {
+		t.Fatalf("expected private path to remain server-side: %+v ok=%t", resolved, ok)
+	}
+	if strings.Contains(response.Body.String(), repoPath) {
+		t.Fatalf("response leaked absolute local path: %s", response.Body.String())
+	}
+}
+
+func TestDevHTTPBrowserLocalSourceRegistrationRejectsUnsafeContexts(t *testing.T) {
+	repoPath := createDevBridgeFixtureRepo(t)
+	tests := []struct {
+		name       string
+		server     *DevHTTPServer
+		remoteAddr string
+		ack        bool
+	}{
+		{name: "non loopback", server: newTestDevHTTPServerWithEnvironment(t, "development"), remoteAddr: "192.0.2.10:54321", ack: true},
+		{name: "missing acknowledgement", server: newTestDevHTTPServerWithEnvironment(t, "development"), remoteAddr: "127.0.0.1:54321", ack: false},
+		{name: "non development environment", server: newTestDevHTTPServerWithEnvironment(t, "test"), remoteAddr: "127.0.0.1:54321", ack: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(devLocalSourceRequest{Kind: "local_repository", Path: repoPath, DevTestAck: test.ack})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/desktop/dev/local-sources", bytes.NewReader(body))
+			request.RemoteAddr = test.remoteAddr
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			test.server.Handler().ServeHTTP(response, request)
+			if response.Code == http.StatusOK {
+				t.Fatalf("expected rejection: %s", response.Body.String())
+			}
+		})
+	}
+}
+
 func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
+	return newTestDevHTTPServerWithEnvironment(t, "test")
+}
+
+func newTestDevHTTPServerWithEnvironment(t *testing.T, environment string) *DevHTTPServer {
 	t.Helper()
 	root := t.TempDir()
 	service, err := NewService(config.AppRuntimeConfig{
 		Profile:         config.ProfileDev,
-		Environment:     "test",
+		Environment:     environment,
 		Mode:            model.AppModeDesktop,
 		DatabaseDialect: config.DatabaseSQLite,
 		SQLitePath:      filepath.Join(root, "cascade_demoops.db"),
@@ -692,6 +1211,14 @@ func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
 		SidecarPaths:    map[string]string{},
 		DatabaseURL:     "postgres://user:secret@example/db",
 		LLMMode:         config.LLMModeDeterministic,
+		ModelProviders: map[config.ModelProvider]config.ModelProviderCredential{
+			config.ModelProviderKimi: {
+				Provider:     config.ModelProviderKimi,
+				BaseURL:      "https://api.moonshot.cn/v1",
+				DefaultModel: "kimi-k2.7-code",
+				Enabled:      true,
+			},
+		},
 		ModelTaskRoutes: map[config.ModelTask]config.ModelTaskRoute{
 			config.ModelTaskPlanning: {
 				Task:     config.ModelTaskPlanning,
@@ -755,6 +1282,26 @@ export function InvitePanel() {
 		t.Fatal(err)
 	}
 	return root
+}
+
+func initGitFixtureRepo(t *testing.T, root string) {
+	t.Helper()
+	runGitFixtureCommand(t, root, "init")
+	runGitFixtureCommand(t, root, "config", "user.email", "cascade-test@example.com")
+	runGitFixtureCommand(t, root, "config", "user.name", "Cascade Test")
+	runGitFixtureCommand(t, root, "add", ".")
+	runGitFixtureCommand(t, root, "commit", "-m", "fixture")
+}
+
+func runGitFixtureCommand(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
+	}
 }
 
 func containsString(values []string, target string) bool {

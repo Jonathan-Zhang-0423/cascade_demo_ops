@@ -5,12 +5,12 @@ import { executeScript, validateScript } from "./script-runner.js";
 import { verifyInteractions } from "./interaction-verifier.js";
 import { probeMediaFile } from "./media-probe.js";
 import { validateEditPlan } from "./renderer.js";
-import { closeBrowserAgentSession, executeBrowserAgentStage, observeBrowserAgentStage, openBrowserAgentSession } from "./browser-agent-runtime.js";
+import { browserAgentApplyExecutionPolicy, browserAgentDevVisibleNavigate, browserAgentSessionStatus, closeBrowserAgentSession, executeBrowserAgentStage, observeBrowserAgentStage, openBrowserAgentSession } from "./browser-agent-runtime.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
   id: number | string;
-  method: "health" | "record" | "render" | "probe_media" | "analyze_audio" | "validate_edit_plan" | "validate_script" | "execute_script" | "verify_interactions" | "browser_agent_open" | "browser_agent_observe" | "browser_agent_execute" | "browser_agent_close";
+  method: "health" | "record" | "render" | "probe_media" | "validate_edit_plan" | "validate_script" | "execute_script" | "verify_interactions" | "browser_agent_open" | "browser_agent_observe" | "browser_agent_execute" | "browser_agent_status" | "browser_agent_dev_visible_navigate" | "browser_agent_apply_execution_policy" | "browser_agent_close";
   params?: unknown;
 };
 
@@ -68,6 +68,15 @@ async function dispatch(request: JsonRpcRequest): Promise<unknown> {
   }
   if (request.method === "browser_agent_execute") {
     return executeBrowserAgentStage(request.params as never);
+  }
+  if (request.method === "browser_agent_status") {
+    return browserAgentSessionStatus(request.params as never);
+  }
+  if (request.method === "browser_agent_dev_visible_navigate") {
+    return browserAgentDevVisibleNavigate(request.params as never);
+  }
+  if (request.method === "browser_agent_apply_execution_policy") {
+    return browserAgentApplyExecutionPolicy(request.params as never);
   }
   if (request.method === "browser_agent_close") {
     return closeBrowserAgentSession(request.params as never);

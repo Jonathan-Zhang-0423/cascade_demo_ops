@@ -1,24 +1,51 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 )
 
 type DevHTTPServer struct {
-	service *Service
-	events  *devEventStore
+	service               *Service
+	events                *devEventStore
+	storeGitHubToken      func(string) error
+	storeDemoCredential   func(string, string, string) error
+	githubTokenConfigured func() bool
+	deleteGitHubToken     func() error
+}
+
+type githubCredentialRequest struct {
+	Token string `json:"token"`
+}
+
+type demoCredentialRequest struct {
+	Ref      string `json:"ref"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type devLocalSourceRequest struct {
+	Kind       string `json:"kind"`
+	Path       string `json:"path"`
+	DevTestAck bool   `json:"dev_test_ack"`
 }
 
 type ExecutionPackageRequest struct {
@@ -55,12 +82,33 @@ type DevExecutionEvent struct {
 }
 
 func NewDevHTTPServer(service *Service) *DevHTTPServer {
-	return &DevHTTPServer{service: service, events: newDevEventStore()}
+	return &DevHTTPServer{
+		service:               service,
+		events:                newDevEventStore(),
+		storeGitHubToken:      credentialstore.StoreGitHubToken,
+		storeDemoCredential:   credentialstore.StoreDemoCredential,
+		githubTokenConfigured: credentialstore.GitHubTokenConfigured,
+		deleteGitHubToken:     credentialstore.DeleteGitHubToken,
+	}
 }
 
 func (s *DevHTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/desktop/runtime-health", s.handleRuntimeHealth)
+	mux.HandleFunc("PUT /v1/desktop/control-plane", s.handleControlPlaneSettings)
+	mux.HandleFunc("GET /v1/desktop/github-credential", s.handleGitHubCredentialStatus)
+	mux.HandleFunc("POST /v1/desktop/github-credential", s.handleStoreGitHubCredential)
+	mux.HandleFunc("DELETE /v1/desktop/github-credential", s.handleDeleteGitHubCredential)
+	mux.HandleFunc("POST /v1/desktop/demo-credential", s.handleStoreDemoCredential)
+	mux.HandleFunc("PUT /v1/desktop/planning-model", s.handlePlanningModelSettings)
+	mux.HandleFunc("DELETE /v1/desktop/planning-model/{provider}", s.handleDeletePlanningModelSettings)
+	mux.HandleFunc("POST /v1/desktop/planning-model/verify", s.handleVerifyPlanningModel)
+	// Local browser-development fallback for the native Wails directory picker.
+	// The registered path never leaves the loopback Dev Bridge response.
+	mux.HandleFunc("POST /v1/desktop/dev/local-sources", s.handleDevRegisterLocalSource)
+	mux.HandleFunc("GET /v1/desktop/update", s.handleDesktopUpdateStatus)
+	mux.HandleFunc("POST /v1/desktop/update/check", s.handleDesktopUpdateCheck)
+	mux.HandleFunc("POST /v1/desktop/update/apply", s.handleDesktopUpdateApply)
 	mux.HandleFunc("GET /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("GET /v1/desktop/projects", s.handleListProjects)
@@ -68,13 +116,59 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/assistant/sessions", s.handleCreateAssistantSession)
 	mux.HandleFunc("/v1/desktop/assistant/sessions/", s.handleAssistantSessionRoute)
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
+	mux.HandleFunc("GET /v1/desktop/browser-agent-acceptance", s.handleBrowserAgentAcceptance)
+	mux.HandleFunc("POST /v1/desktop/browser-agent-acceptance/run", s.handleBrowserAgentAcceptance)
+	mux.HandleFunc("GET /v1/desktop/browser-agent-business-acceptance", s.handleBrowserAgentBusinessAcceptance)
+	mux.HandleFunc("POST /v1/desktop/browser-agent-business-acceptance/run", s.handleBrowserAgentBusinessAcceptance)
+	// Local dev/test only. This is not an App, Exchange, or production runtime API.
+	mux.HandleFunc("POST /v1/desktop/dev-visible-browser-agent/prepare", s.handleDevVisibleBrowserAgent)
+	mux.HandleFunc("/v1/desktop/dev-visible-browser-agent/", s.handleDevVisibleBrowserAgent)
 	mux.HandleFunc("GET /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions/from-result-package", s.handleEditorSessionFromResultPackage)
+	mux.HandleFunc("GET /v1/editor/style-templates", s.handleEditorStyleTemplates)
 	mux.HandleFunc("/v1/editor/sessions/", s.handleEditorSessionRoute)
 	s.registerExchangeBootstrapRoutes(mux)
 	s.registerDevExchangeRoutes(mux)
 	return withDevLogging(withDevCORS(mux))
+}
+
+func (s *DevHTTPServer) handleDevRegisterLocalSource(w http.ResponseWriter, r *http.Request) {
+	if s == nil || s.service == nil || s.service.runtime.Profile != config.ProfileDev || s.service.runtime.Environment != "development" {
+		writeBridgeValue(w, nil, errors.New("browser local-source registration is available only in a local development runtime"))
+		return
+	}
+	if !requestFromLoopback(r) {
+		writeBridgeValue(w, nil, errors.New("browser local-source registration requires a loopback client"))
+		return
+	}
+	var request devLocalSourceRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	if !request.DevTestAck {
+		writeBridgeValue(w, nil, errors.New("dev_test_ack=true is required for browser local-source registration"))
+		return
+	}
+	if request.Kind != "local_repository" {
+		writeBridgeValue(w, nil, errors.New("browser local-source registration supports only local_repository"))
+		return
+	}
+	ref, err := s.service.RegisterLocalSource(request.Kind, request.Path)
+	writeBridgeValue(w, ref, err)
+}
+
+func requestFromLoopback(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *DevHTTPServer) handleEditorSessions(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +201,11 @@ func (s *DevHTTPServer) handleEditorSessionFromResultPackage(w http.ResponseWrit
 	writeBridgeValue(w, session, err)
 }
 
+func (s *DevHTTPServer) handleEditorStyleTemplates(w http.ResponseWriter, r *http.Request) {
+	templates, err := s.service.ListVideoStyleTemplates(r.Context())
+	writeBridgeValue(w, templates, err)
+}
+
 func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.Request) {
 	sessionID, suffix, ok := splitEditorSessionRoute(r.URL.Path)
 	if !ok {
@@ -127,6 +226,16 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && suffix == "/uploads":
 		s.handleEditorUpload(w, r, sessionID)
+	case r.Method == http.MethodPost && suffix == "/style-references/assets":
+		var request model.EditorImportAssetRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.ImportEditorStyleReference(r.Context(), sessionID, request)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/style-references/uploads":
+		s.handleEditorStyleReferenceUpload(w, r, sessionID)
 	case r.Method == http.MethodPost && suffix == "/plan":
 		var request model.EditorSavePlanRequest
 		if err := decodeJSON(r, &request); err != nil {
@@ -134,6 +243,35 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 			return
 		}
 		session, err := s.service.SaveEditorPlan(r.Context(), sessionID, request)
+		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/style-drafts":
+		var request model.EditorStyleDraftRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		draft, err := s.service.CreateEditorStyleDraft(r.Context(), sessionID, request)
+		writeBridgeValue(w, draft, err)
+	case r.Method == http.MethodGet && strings.HasPrefix(suffix, "/style-drafts/"):
+		draftID := strings.TrimPrefix(suffix, "/style-drafts/")
+		if strings.TrimSpace(draftID) == "" || strings.Contains(draftID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		draft, err := s.service.GetEditorStyleDraft(r.Context(), sessionID, draftID)
+		writeBridgeValue(w, draft, err)
+	case r.Method == http.MethodPost && strings.HasSuffix(suffix, "/apply") && strings.HasPrefix(suffix, "/style-drafts/"):
+		draftID := strings.TrimSuffix(strings.TrimPrefix(suffix, "/style-drafts/"), "/apply")
+		if strings.TrimSpace(draftID) == "" || strings.Contains(draftID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		var request model.EditorApplyStyleDraftRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.ApplyEditorStyleDraft(r.Context(), sessionID, draftID, request)
 		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && suffix == "/validate":
 		report, err := s.service.ValidateEditorPlan(r.Context(), sessionID)
@@ -158,6 +296,14 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 }
 
 func (s *DevHTTPServer) handleEditorUpload(w http.ResponseWriter, r *http.Request, sessionID string) {
+	s.handleEditorMultipartUpload(w, r, sessionID, s.service.ImportEditorUpload)
+}
+
+func (s *DevHTTPServer) handleEditorStyleReferenceUpload(w http.ResponseWriter, r *http.Request, sessionID string) {
+	s.handleEditorMultipartUpload(w, r, sessionID, s.service.ImportEditorStyleReferenceUpload)
+}
+
+func (s *DevHTTPServer) handleEditorMultipartUpload(w http.ResponseWriter, r *http.Request, sessionID string, importer func(context.Context, string, string, io.Reader) (model.EditorSession, error)) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxEditorUploadBytes+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -178,7 +324,7 @@ func (s *DevHTTPServer) handleEditorUpload(w http.ResponseWriter, r *http.Reques
 			_ = part.Close()
 			continue
 		}
-		session, importErr := s.service.ImportEditorUpload(r.Context(), sessionID, part.FileName(), part)
+		session, importErr := importer(r.Context(), sessionID, part.FileName(), part)
 		_ = part.Close()
 		writeBridgeValue(w, session, importErr)
 		return
@@ -200,6 +346,9 @@ func handleEditorMedia(w http.ResponseWriter, r *http.Request, service *Service,
 	if mimeType != "" {
 		w.Header().Set("Content-Type", mimeType)
 	}
+	if kind == "final" && r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition", `attachment; filename="cascade-demo.mp4"`)
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	http.ServeFile(w, r, filePath)
 }
@@ -208,8 +357,113 @@ func (s *DevHTTPServer) handleRuntimeHealth(w http.ResponseWriter, r *http.Reque
 	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), nil)
 }
 
+func (s *DevHTTPServer) handleControlPlaneSettings(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var request ControlPlaneSettingsRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	err := s.service.SaveControlPlaneBaseURL(request.BaseURL)
+	if err == nil {
+		_, err = s.service.EnsureExchangeSession(r.Context(), defaultDesktopOrgID, "")
+	}
+	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), err)
+}
+
+func (s *DevHTTPServer) handleGitHubCredentialStatus(w http.ResponseWriter, _ *http.Request) {
+	writeBridgeValue(w, map[string]bool{"configured": s.githubTokenConfigured()}, nil)
+}
+
+func (s *DevHTTPServer) handleStoreGitHubCredential(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var request githubCredentialRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	err := s.storeGitHubToken(request.Token)
+	writeBridgeValue(w, map[string]bool{"configured": err == nil}, err)
+}
+
+func (s *DevHTTPServer) handleDeleteGitHubCredential(w http.ResponseWriter, _ *http.Request) {
+	err := s.deleteGitHubToken()
+	writeBridgeValue(w, map[string]bool{"configured": false}, err)
+}
+
+func (s *DevHTTPServer) handleStoreDemoCredential(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+	var request demoCredentialRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	request.Ref = strings.TrimSpace(request.Ref)
+	if request.Ref == "" || len(request.Ref) > 128 || strings.ContainsAny(request.Ref, `/\\`) {
+		writeBridgeValue(w, nil, errors.New("invalid demo credential ref"))
+		return
+	}
+	err := s.storeDemoCredential(request.Ref, request.Username, request.Password)
+	writeBridgeValue(w, map[string]any{"secretRef": "credential://demo/" + request.Ref, "configured": err == nil}, err)
+}
+
+func (s *DevHTTPServer) handlePlanningModelSettings(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+	var request ModelSettingsRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	err := s.service.SavePlanningModelSettings(request)
+	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), err)
+}
+
+func (s *DevHTTPServer) handleDeletePlanningModelSettings(w http.ResponseWriter, r *http.Request) {
+	err := s.service.DeletePlanningModelSettings(r.PathValue("provider"))
+	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), err)
+}
+
+func (s *DevHTTPServer) handleVerifyPlanningModel(w http.ResponseWriter, r *http.Request) {
+	writeBridgeValue(w, s.service.DiagnosePlanningModel(r.Context()), nil)
+}
+
+func (s *DevHTTPServer) handleDesktopUpdateStatus(w http.ResponseWriter, _ *http.Request) {
+	status, err := desktopUpdateConfiguration(s.service.RuntimeConfig())
+	writeBridgeValue(w, status, err)
+}
+
+func (s *DevHTTPServer) handleDesktopUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	status, err := CheckDesktopUpdate(r.Context(), s.service.RuntimeConfig())
+	writeBridgeValue(w, status, err)
+}
+
+func (s *DevHTTPServer) handleDesktopUpdateApply(w http.ResponseWriter, r *http.Request) {
+	err := ApplyDesktopUpdate(r.Context(), s.service.RuntimeConfig())
+	writeBridgeValue(w, map[string]bool{"started": err == nil}, err)
+}
+
 func (s *DevHTTPServer) handleModelDiagnostics(w http.ResponseWriter, r *http.Request) {
 	writeBridgeValue(w, s.service.DiagnoseModels(r.Context()), nil)
+}
+
+func (s *DevHTTPServer) handleBrowserAgentAcceptance(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		view, err := s.service.RunBrowserAgentAcceptance(r.Context())
+		writeBridgeValue(w, view, err)
+		return
+	}
+	view, err := s.service.GetBrowserAgentAcceptance(r.Context())
+	writeBridgeValue(w, view, err)
+}
+
+func (s *DevHTTPServer) handleBrowserAgentBusinessAcceptance(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		view, err := s.service.RunBrowserAgentBusinessAcceptance(r.Context())
+		writeBridgeValue(w, view, err)
+		return
+	}
+	view, err := s.service.GetBrowserAgentBusinessAcceptance(r.Context())
+	writeBridgeValue(w, view, err)
 }
 
 func (s *DevHTTPServer) handleCreateProject(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +490,17 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	switch {
 	case r.Method == http.MethodGet && suffix == "":
 		state, err := s.service.LoadProject(r.Context(), projectID)
+		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodGet && suffix == "/source-binding":
+		assessment, err := s.service.GetSourceBinding(r.Context(), projectID)
+		writeBridgeValue(w, assessment, err)
+	case r.Method == http.MethodPost && suffix == "/source-binding/decisions":
+		var request SourceBindingDecisionRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		state, err := s.service.DecideSourceBinding(r.Context(), projectID, request)
 		writeBridgeValue(w, state, err)
 	case r.Method == http.MethodPost && suffix == "/archive":
 		err := s.service.ArchiveProject(r.Context(), projectID)
@@ -328,13 +593,33 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
 		targetProjectID := firstNonEmptyString(request.ProjectID, projectID)
-		build, session, err := s.service.BuildCloudClientExecutionPackage(r.Context(), targetProjectID, orgID)
+		build, session, err := s.service.ApproveCloudClientExecutionPackage(r.Context(), targetProjectID, orgID, request)
 		if err != nil {
 			writeBridgeValue(w, nil, err)
 			return
 		}
 		initResponse, err := s.service.InitCloudExecutionPackageUpload(r.Context(), build)
+		if err == nil {
+			err = s.service.persistCloudInit(r.Context(), targetProjectID, orgID, initResponse)
+		}
 		result := CloudUploadInitResult{Build: &build, Init: initResponse, CloudBase: session.BaseURL}
+		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/preflight":
+		var request CloudUploadInitRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := decodeJSON(r, &request); err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		orgID := firstNonEmptyString(request.OrgID, defaultDesktopOrgID)
+		targetProjectID := firstNonEmptyString(request.ProjectID, projectID)
+		build, _, err := s.service.ApproveCloudClientExecutionPackage(r.Context(), targetProjectID, orgID, request)
+		if err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		result, err := s.service.PreflightCloudExecutionPackage(r.Context(), build)
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/product-run/prepare":
 		startedAt := time.Now()
@@ -383,10 +668,14 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		var build ClientExecutionPackageBuild
 		var err error
 		var session ExchangeSession
-		build, session, err = s.service.BuildCloudClientExecutionPackage(r.Context(), projectID, request.OrgID)
-		if err != nil && request.Build != nil {
-			build = *request.Build
-			err = normalizeClientExecutionPackageForUpload(&build.Package)
+		if request.Build == nil {
+			writeBridgeValue(w, nil, errors.New("approved execution package build is required"))
+			return
+		}
+		build = *request.Build
+		err = normalizeClientExecutionPackageForUpload(&build.Package)
+		if err == nil && (build.BuildStatus != "approved" || build.Package.ApprovedAt.IsZero() || build.Package.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 == "") {
+			err = errors.New("draft execution package cannot be uploaded")
 		}
 		if err != nil {
 			writeBridgeValue(w, nil, err)
@@ -394,7 +683,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		var sessionErr error
 		if session.SessionToken == "" {
-			session, sessionErr = s.service.EnsureExchangeSession(r.Context(), build.Package.ProjectContextSummary.ProductURL, build.OrgID, build.ProjectID)
+			session, sessionErr = s.service.EnsureExchangeSession(r.Context(), build.OrgID, build.ProjectID)
 		}
 		if sessionErr == nil {
 			build, err = s.service.signBuildWithExchangeSession(build, session)
@@ -404,22 +693,63 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		upload, err := s.service.UploadBuiltCloudExecutionPackage(r.Context(), request.UploadID, build)
-		cloudBase := strings.TrimRight(s.service.runtime.CloudExchangeBaseURL, "/")
+		if err == nil {
+			err = s.service.persistCloudUpload(r.Context(), projectID, build.OrgID, request.UploadID, upload)
+		}
+		cloudBase := s.service.effectiveControlPlaneBaseURL()
 		if sessionErr == nil {
 			cloudBase = session.BaseURL
 		}
 		result := CloudUploadPackageResult{Build: &build, Upload: upload, CloudBase: cloudBase}
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodGet && suffix == "/cloud/status":
+		orgID := r.URL.Query().Get("org_id")
 		status, err := s.service.GetCloudExecutionPackageStatus(r.Context(), CloudStatusRequest{
-			OrgID:             r.URL.Query().Get("org_id"),
+			OrgID:             orgID,
 			ExchangePackageID: r.URL.Query().Get("exchange_package_id"),
 		})
+		if err == nil {
+			err = s.service.persistCloudStatus(r.Context(), projectID, orgID, status)
+		}
 		writeBridgeValue(w, status, err)
+	case r.Method == http.MethodGet && suffix == "/cloud/events":
+		s.streamCloudExecutionPackageEvents(w, r, projectID)
 	case r.Method == http.MethodGet && suffix == "/cloud/result":
+		orgID := r.URL.Query().Get("org_id")
 		result, err := s.service.GetCloudResultPackage(r.Context(), CloudResultRequest{
-			OrgID:           r.URL.Query().Get("org_id"),
+			OrgID:           orgID,
 			ResultPackageID: r.URL.Query().Get("result_package_id"),
+		})
+		if err == nil {
+			err = s.service.persistCloudResult(r.Context(), projectID, orgID, result)
+		}
+		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/deliverable/download":
+		var request CloudDeliverableDownloadRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		if strings.TrimSpace(request.OutputDirectory) == "" {
+			request.OutputDirectory = filepath.Join(
+				s.service.runtime.ArtifactRoot,
+				"desktop",
+				"downloads",
+				safePathSegment(projectID),
+				safePathSegment(request.ResultPackageID),
+			)
+		}
+		download, err := s.service.DownloadCloudResultDeliverable(r.Context(), request)
+		if err == nil && download.ChecksumVerified {
+			download.MediaURL = "/v1/desktop/projects/" + url.PathEscape(projectID) + "/cloud/deliverable/media?result_package_id=" + url.QueryEscape(request.ResultPackageID) + "&file=" + url.QueryEscape(filepath.Base(download.LocalPath))
+			err = s.service.persistCloudDownload(r.Context(), projectID, request.ResultPackageID, download)
+		}
+		writeBridgeValue(w, download, err)
+	case r.Method == http.MethodGet && suffix == "/cloud/deliverable/media":
+		s.serveVerifiedCloudDeliverable(w, r, projectID)
+	case r.Method == http.MethodGet && suffix == "/cloud/editor-materialization":
+		result, err := s.service.GetCloudEditorMaterialization(r.Context(), CloudEditorMaterializationRequest{
+			OrgID: r.URL.Query().Get("org_id"), ResultPackageID: r.URL.Query().Get("result_package_id"),
 		})
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/ack":
@@ -437,7 +767,32 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			AckedByInstallID:  defaultDesktopInstallID,
 			UseResultSummary:  len(request.ReceivedAssetIDs) == 0,
 		})
+		if err == nil {
+			err = s.service.persistCloudAck(r.Context(), projectID, ack)
+		}
 		writeBridgeValue(w, ack, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/review":
+		var request CloudResultReviewRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		review, err := s.service.ReviewCloudResultPackage(r.Context(), request)
+		if err == nil {
+			err = s.service.persistCloudReview(r.Context(), projectID, review)
+		}
+		writeBridgeValue(w, review, err)
+	case r.Method == http.MethodPost && suffix == "/cloud/revision":
+		var request CloudResultRevisionRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		revision, err := s.service.RequestCloudResultRevision(r.Context(), request)
+		if err == nil {
+			err = s.service.persistCloudRevision(r.Context(), projectID, revision)
+		}
+		writeBridgeValue(w, revision, err)
 	case r.Method == http.MethodPost && suffix == "/cloud-lifecycle":
 		startedAt := time.Now()
 		var request CloudLifecycleRequest
@@ -484,6 +839,94 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+func (s *DevHTTPServer) serveVerifiedCloudDeliverable(w http.ResponseWriter, r *http.Request, projectID string) {
+	resultPackageID := strings.TrimSpace(r.URL.Query().Get("result_package_id"))
+	fileName := strings.TrimSpace(r.URL.Query().Get("file"))
+	if resultPackageID == "" || fileName == "" || filepath.Base(fileName) != fileName || strings.HasSuffix(strings.ToLower(fileName), ".part") {
+		writeBridgeValue(w, nil, errors.New("verified deliverable media reference is invalid"))
+		return
+	}
+	filePath := filepath.Join(
+		s.service.runtime.ArtifactRoot,
+		"desktop",
+		"downloads",
+		safePathSegment(projectID),
+		safePathSegment(resultPackageID),
+		fileName,
+	)
+	info, err := os.Stat(filePath)
+	if err != nil || !info.Mode().IsRegular() {
+		writeBridgeValue(w, nil, errors.New("verified deliverable media was not found"))
+		return
+	}
+	extension := strings.ToLower(filepath.Ext(fileName))
+	if extension != ".mp4" && extension != ".webm" {
+		writeBridgeValue(w, nil, errors.New("deliverable is not a supported review video"))
+		return
+	}
+	if !verifyDownloadedDeliverableMedia(filePath) {
+		writeBridgeValue(w, nil, errors.New("deliverable checksum is not verified"))
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeFile(w, r, filePath)
+}
+
+func (s *DevHTTPServer) streamCloudExecutionPackageEvents(w http.ResponseWriter, r *http.Request, projectID string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeBridgeValue(w, nil, errors.New("HTTP streaming is unavailable"))
+		return
+	}
+	packageID := r.URL.Query().Get("exchange_package_id")
+	lastEventID := firstNonEmptyString(r.Header.Get("Last-Event-ID"), s.service.cloudEventCursor(r.Context(), projectID, packageID))
+	response, err := s.service.OpenCloudExecutionPackageEventStream(r.Context(), CloudStatusRequest{
+		OrgID:             r.URL.Query().Get("org_id"),
+		ExchangePackageID: packageID,
+	}, lastEventID)
+	if err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	defer response.Body.Close()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(&sseFlushWriter{
+		writer: w, flusher: flusher, service: s.service, ctx: r.Context(), projectID: projectID, packageID: packageID,
+	}, response.Body)
+}
+
+type sseFlushWriter struct {
+	writer    io.Writer
+	flusher   http.Flusher
+	service   *Service
+	ctx       context.Context
+	projectID string
+	packageID string
+	partial   string
+}
+
+func (w *sseFlushWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	w.flusher.Flush()
+	w.partial += strings.ReplaceAll(string(data), "\r\n", "\n")
+	for {
+		lineEnd := strings.IndexByte(w.partial, '\n')
+		if lineEnd < 0 {
+			break
+		}
+		line := strings.TrimSpace(w.partial[:lineEnd])
+		w.partial = w.partial[lineEnd+1:]
+		if strings.HasPrefix(line, "id:") {
+			_ = w.service.persistCloudEventCursor(w.ctx, w.projectID, w.packageID, strings.TrimSpace(strings.TrimPrefix(line, "id:")))
+		}
+	}
+	return written, err
+}
+
 func (s *DevHTTPServer) emitProjectEvent(projectID string, event orchestrator.ProgressEvent) {
 	if s.events == nil {
 		return
@@ -508,6 +951,12 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func decodeJSON(r *http.Request, target any) error {
@@ -585,11 +1034,15 @@ func splitEditorSessionRoute(path string) (string, string, bool) {
 func withDevCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if isAllowedDevOrigin(origin) {
+		if !isAllowedDevOrigin(origin) {
+			http.Error(w, "dev bridge origin is not allowed", http.StatusForbidden)
+			return
+		}
+		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Cascade-Org-ID")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID, X-Cascade-Org-ID")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -603,7 +1056,10 @@ func isAllowedDevOrigin(origin string) bool {
 	if origin == "" {
 		return true
 	}
-	return strings.HasPrefix(origin, "http://127.0.0.1:") || strings.HasPrefix(origin, "http://localhost:")
+	return strings.HasPrefix(origin, "http://127.0.0.1:") ||
+		strings.HasPrefix(origin, "http://localhost:") ||
+		origin == "http://wails.localhost" ||
+		origin == "https://wails.localhost"
 }
 
 func EnsureLocalDevAddress(addr string) error {

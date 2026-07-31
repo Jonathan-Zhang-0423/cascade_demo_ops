@@ -107,17 +107,18 @@ export type CodeInput = {
 };
 
 export type RepositoryInput = {
-  kind?: "github" | "local" | "server";
+	// Compatibility fields used by Jonathan's repository connection workspace.
+	kind?: "github" | "local" | "server";
   url?: string;
   local_path?: string;
   provider?: string;
   branch?: string;
-  host?: string;
-  port?: number;
-  path?: string;
-  username?: string;
   read_only: boolean;
   secret_ref?: string;
+	host?: string;
+	port?: number;
+	path?: string;
+	username?: string;
   primary?: boolean;
   last_snapshot_id?: string;
 };
@@ -720,6 +721,8 @@ export type CodeUnderstandingSnapshot = {
   source_digest_sha256?: string;
   file_count?: number;
   read_budget?: CodeReadBudget;
+  investigation_trace?: CodeInvestigationTrace;
+  investigation_quality?: CodeInvestigationQualitySummary;
   path_digests?: PathDigest[];
   evidence_refs?: EvidenceRef[];
   summary?: string;
@@ -733,6 +736,90 @@ export type CodeReadBudget = {
   files_per_round?: number;
   total_file_limit?: number;
   max_file_bytes?: number;
+  tool_search_file_limit?: number;
+  tool_search_bytes_per_file?: number;
+  tool_search_result_limit?: number;
+};
+
+export type CodeInvestigationQualitySummary = {
+  mode?: string;
+  tool_driven?: boolean;
+  tool_call_count?: number;
+  specialized_tool_call_count?: number;
+  shell_run_tool_call_count?: number;
+  total_files_discovered?: number;
+  total_files_searched?: number;
+  total_files_selected?: number;
+  structured_file_count?: number;
+  selected_file_ratio?: number;
+  search_file_ratio?: number;
+  answered_question_count?: number;
+  open_question_count?: number;
+  remaining_gaps?: string[];
+  source_text_policy?: string;
+  overread_risk?: string;
+  summary?: string;
+  confidence?: number;
+};
+
+export type CodeInvestigationTrace = {
+  id: string;
+  mode?: string;
+  summary?: string;
+  questions?: CodeInvestigationQuestion[];
+  tool_calls?: CodeInvestigationToolCall[];
+  total_files_discovered?: number;
+  total_files_searched?: number;
+  total_files_selected?: number;
+  total_bytes_read?: number;
+  created_at?: string;
+  completed_at?: string;
+};
+
+export type CodeInvestigationQuestion = {
+  id: string;
+  question: string;
+  intent_label?: string;
+  expected_evidence?: string[];
+  query_terms?: string[];
+  status?: string;
+  evidence_summary?: string;
+  remaining_gaps?: string[];
+  next_actions?: CodeInvestigationNextAction[];
+  tool_call_ids?: string[];
+  confidence?: number;
+};
+
+export type CodeInvestigationToolCall = {
+  id: string;
+  tool: string;
+  purpose?: string;
+  query?: string;
+  input_summary?: string;
+  output_summary?: string;
+  selection_reason?: string;
+  read_policy?: string;
+  source_text_policy?: string;
+  matched_file_count?: number;
+  selected_file_count?: number;
+  path_hashes?: string[];
+  snippet_refs?: CodeSnippetRef[];
+  evidence_refs?: EvidenceRef[];
+  metadata?: Record<string, unknown>;
+  confidence?: number;
+  elapsed_ms?: number;
+  fallback_reason?: string;
+};
+
+export type CodeSnippetRef = {
+  id: string;
+  path_hash_sha256: string;
+  content_sha256?: string;
+  line_start?: number;
+  line_end?: number;
+  matched_terms?: string[];
+  signal_kinds?: string[];
+  redacted_preview_sha256?: string;
 };
 
 export type RouteInsight = {
@@ -851,6 +938,7 @@ export type ProjectIntelligencePack = {
   feature_capabilities?: FeatureCapability[];
   feature_trace?: FeatureTraceResult;
   interaction_surfaces?: InteractionSurface[];
+  business_stage_plan?: BusinessStagePlan;
   verified_interaction_plan?: VerifiedInteractionPlan;
   missing_evidence_report?: MissingEvidenceReport;
   api_contracts?: APIContractSummary[];
@@ -927,6 +1015,102 @@ export type FeatureGoalTrace = {
   evidence_refs?: EvidenceRef[];
   confidence?: number;
   missing_evidence?: string[];
+};
+
+export type BusinessStageKind =
+  | "session_setup"
+  | "business_action"
+  | "business_input"
+  | "mode_selection"
+  | "business_submit"
+  | "observe_progress"
+  | "final_observe"
+  | string;
+
+export type BusinessRouteState =
+  | "unauthenticated"
+  | "workspace"
+  | "creation_flow"
+  | "project_detail"
+  | "build_running"
+  | string;
+
+export type BusinessStagePlan = {
+  id: string;
+  project_id: string;
+  intent_id?: string;
+  schema_version?: string;
+  stages: BusinessStage[];
+  core_business_stage_count?: number;
+  blocking_uncertainties?: StageUncertainty[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+  created_at?: string;
+};
+
+export type BusinessStage = {
+  id: string;
+  order: number;
+  kind: BusinessStageKind;
+  title?: string;
+  objective?: string;
+  user_intent?: string;
+  route_state?: BusinessRouteState;
+  entry_route?: string;
+  expected_route_after_action?: string;
+  duration_ms?: number;
+  action: BusinessActionSemantics;
+  targets?: BusinessTargetCandidate[];
+  evidence_requirements?: EvidenceRequirement[];
+  uncertainties?: StageUncertainty[];
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
+};
+
+export type BusinessActionSemantics = {
+  type?: string;
+  label?: string;
+  input_semantic?: string;
+  input_value?: string;
+  input_ref?: string;
+  secret_ref?: string;
+  success_state?: string;
+  wait_conditions?: string[];
+  capture_points?: string[];
+  parameters?: Record<string, string>;
+  non_destructive?: boolean;
+};
+
+export type BusinessTargetCandidate = {
+  id: string;
+  intent_goal_id?: string;
+  label?: string;
+  kind?: string;
+  selector?: string;
+  url?: string;
+  route_ref?: string;
+  route?: string;
+  component_ref?: string;
+  role?: string;
+  text?: string;
+  test_id?: string;
+  selector_score?: number;
+  confidence?: number;
+  is_verified?: boolean;
+  verification_status?: string;
+  verification_source?: string;
+  evidence_refs?: EvidenceRef[];
+  alternatives?: SelectorCandidate[];
+};
+
+export type EvidenceRequirement = {
+  kind: string;
+  required: boolean;
+  satisfied: boolean;
+  summary?: string;
+  field_path?: string;
+  evidence_refs?: EvidenceRef[];
+  confidence?: number;
 };
 
 export type InteractionProbe = {
@@ -1161,6 +1345,18 @@ export type ScriptReadinessReport = {
   suggested_stage_count?: number;
   suggested_target_duration_sec?: number;
   selector_coverage?: number;
+  business_action_count?: number;
+  generic_selector_count?: number;
+  login_action_count?: number;
+  login_duplication?: boolean;
+  min_stage_duration_ms?: number;
+  blocking_assertion_risk_count?: number;
+  code_investigation_tool_driven?: boolean;
+  code_investigation_overread_risk?: string;
+  code_investigation_specialized_tool_call_count?: number;
+  code_investigation_open_question_count?: number;
+  code_investigation_summary?: string;
+  code_investigation_gaps?: string[];
   credential_coverage?: boolean;
   evidence_refs?: EvidenceRef[];
   confidence?: number;
@@ -1531,8 +1727,40 @@ export type ClientExecutionPackage = {
   evidence_bundle?: Record<string, unknown>;
   reproducibility: ReproducibilitySpec;
   safety_report?: Record<string, unknown>;
+  confidence_summary?: PackageConfidenceSummary;
   repair_context?: ScriptRepairContext;
   metadata?: Record<string, unknown>;
+};
+
+export type PackageReadiness = "blocked" | "review_required" | "ready";
+
+export type PackageStageConfidenceAssessment = {
+  node_id: string;
+  stage_kind?: BusinessStageKind;
+  overall_score: number;
+  business_intent_score: number;
+  result_validation_score: number;
+  evidence_quality_score: number;
+  target_selector_score: number;
+  safety_source_score: number;
+  blocking_reasons?: string[];
+  warnings?: string[];
+};
+
+export type PackageConfidenceSummary = {
+  overall_score: number;
+  readiness: PackageReadiness;
+  stages: PackageStageConfidenceAssessment[];
+  requirement_coverage: number;
+  deterministic_validation_coverage: number;
+  runtime_page_evidence_coverage: number;
+  selector_quality: number;
+  source_binding_status?: string;
+  source_binding_mode?: string;
+  blocking_reasons?: string[];
+  warnings?: string[];
+  algorithm_version: string;
+  assessment_hash: string;
 };
 
 export type AgentError = {
@@ -1646,6 +1874,7 @@ export type UserApprovalRecord = {
   approved_by_user_id?: string;
   approved_at: string;
   plan_digest_sha256: string;
+  approval_subject_digest_sha256?: string;
   reviewed_node_ids?: string[];
   notes?: string[];
 };
@@ -1704,6 +1933,10 @@ export type RecordingResultPackage = {
   step_results?: StepResult[];
   generated_assets?: ArtifactRef[];
   verification_report: VerificationReport;
+	 execution_runtime?: string;
+	 validation_reports?: RuntimeValidationReport[];
+	 patch_ledger?: RuntimePatchLedgerEntry[];
+	 stage_event_log_ref?: ArtifactRef;
   failure_diagnostic?: ScriptFailureDiagnostic;
   repair_request?: ScriptRepairRequest;
   graph_patch_suggestions?: unknown[];
@@ -1719,6 +1952,45 @@ export type RecordingResultPackage = {
     acked_at?: string;
   };
   created_at: string;
+};
+
+export type RuntimeValidationReport = {
+	 schema_version: "demoops.validation_report.v1";
+	 report_id: string;
+	 run_id: string;
+	 source_package_id: string;
+	 source_bundle_hash_sha256: string;
+	 policy_hash_sha256: string;
+	 phase: "pre_execution" | "runtime_stage" | "post_execution";
+	 node_id?: string;
+	 stage_id?: string;
+	 decision: "continue" | "repair_allowed" | "stop_and_report" | "reunderstanding_required";
+	 pass_rate: number;
+	 overall_confidence: number;
+	 evidence_quality: "actual_browser_observation" | "browser_assertion" | "artifact_observation" | "derived_from_plan" | "insufficient_evidence";
+	 evidence_refs?: EvidenceRef[];
+	 repair_proposal_refs?: string[];
+	 created_at: string;
+};
+
+export type RuntimePatchLedgerEntry = {
+	 schema_version: "demoops.patch_ledger_entry.v1";
+	 entry_id: string;
+	 proposal_id: string;
+	 run_id: string;
+	 node_id: string;
+	 stage_id: string;
+	 attempt: number;
+	 source_bundle_hash_sha256: string;
+	 policy_hash_sha256: string;
+	 field: string;
+	 before?: string;
+	 after: string;
+	 policy_decision: "repair_allowed" | "stop_and_report";
+	 applied: boolean;
+	 rolled_back?: boolean;
+	 evidence_refs?: EvidenceRef[];
+	 applied_at?: string;
 };
 
 export type ExecutionScriptDocument = {
@@ -1906,6 +2178,9 @@ export type StageApprovalStage = {
   id: string;
   order: number;
   node_id: string;
+  business_stage_id?: string;
+  stage_kind?: BusinessStageKind;
+  route_state?: BusinessRouteState;
   title?: string;
   objective?: string;
   business_intent?: string;
@@ -1927,7 +2202,9 @@ export type StageApprovalStage = {
   success_state?: string;
   wait_conditions?: string[];
   capture_points?: string[];
+  capture_plan?: BrowserAgentCapturePlan;
   risk_notes?: string[];
+  investigation_question_refs?: InvestigationQuestionRef[];
   evidence_refs?: EvidenceRef[];
   confidence?: number;
 };
@@ -1940,6 +2217,18 @@ export type StageInputContent = {
   secret_ref?: string;
   editable?: boolean;
   evidence_refs?: EvidenceRef[];
+};
+
+export type BrowserAgentCapturePlan = {
+  intent?: string;
+  shot_type?: string;
+  primary_artifact?: string;
+  required_assets?: string[];
+  min_duration_ms?: number;
+  pre_capture_wait_ms?: number;
+  hold_after_ms?: number;
+  clip_suggestion?: string;
+  notes?: string[];
 };
 
 export type BrowserAgentScriptOutline = {
@@ -1989,6 +2278,9 @@ export type BrowserAgentOutlineStage = {
   stage_id: string;
   order: number;
   node_id: string;
+  business_stage_id?: string;
+  stage_kind?: BusinessStageKind;
+  route_state?: BusinessRouteState;
   objective?: string;
   entry_route?: string;
   route?: string;
@@ -2002,12 +2294,34 @@ export type BrowserAgentOutlineStage = {
   target_contract?: BrowserAgentTargetContract;
   wait_conditions?: string[];
   capture_points?: string[];
+  capture_plan?: BrowserAgentCapturePlan;
   success_state?: string;
   duration_ms?: number;
   can_modify?: string[];
   must_preserve?: string[];
+  investigation_question_refs?: InvestigationQuestionRef[];
   evidence_refs?: EvidenceRef[];
   confidence?: number;
+};
+
+export type InvestigationQuestionRef = {
+  id: string;
+  intent_label?: string;
+  status?: string;
+  evidence_summary?: string;
+  remaining_gaps?: string[];
+  next_actions?: CodeInvestigationNextAction[];
+  tool_call_ids?: string[];
+  confidence?: number;
+};
+
+export type CodeInvestigationNextAction = {
+  tool: string;
+  reason?: string;
+  query_terms?: string[];
+  command_kind?: string;
+  expected_evidence?: string[];
+  depends_on_tool_call_id?: string;
 };
 
 export type BrowserAgentTargetContract = {

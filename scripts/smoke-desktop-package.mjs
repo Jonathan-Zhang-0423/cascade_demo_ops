@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, resolve } from "node:path";
+import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 
 const root = resolve(".");
@@ -20,10 +21,23 @@ assertFile(releaseManifestPath, "release manifest");
 const manifest = JSON.parse(readFileSync(releaseManifestPath, "utf8"));
 assert(manifest.schema_version === "demoops.desktop_package_manifest.v1", "unexpected manifest schema");
 assert(manifest.package_kind === "portable_zip", "desktop package must be portable_zip");
-assert(manifest.desktop_ui?.primary === "native_win32", "desktop package must declare native Win32 primary UI");
-assert(manifest.desktop_ui?.uses_browser_shell === false, "desktop package must not declare a browser shell as primary UI");
+assert(manifest.desktop_ui?.primary === "wails_webview2", "Windows desktop package must declare Wails/WebView2 primary UI");
+assert(manifest.desktop_ui?.uses_browser_shell === true, "Wails package must declare its embedded web shell");
+assert(manifest.updater?.path === "cascade-demoops-updater.exe", "desktop package must include the isolated updater");
+const runtimeManifest = JSON.parse(readFileSync(resolve("dist", "package", "resources", "desktop-runtime.json"), "utf8"));
+assert(runtimeManifest.version === manifest.version, "desktop runtime manifest version mismatch");
+assert(runtimeManifest.updates?.channel === manifest.release_channel, "desktop update channel mismatch");
+assert(runtimeManifest.updates?.updater === "../cascade-demoops-updater.exe", "desktop updater runtime path mismatch");
+assert(runtimeManifest.updates?.app_executable === "../cascade-demoops-desktop.exe", "desktop app health-check path mismatch");
+if (manifest.release_channel === "internal") {
+  assert(runtimeManifest.updates?.manifest_url === "", "internal package must not invent an update origin");
+}
 assertNativeCapabilities(manifest.desktop_ui, "desktop package manifest");
 assert(manifest.runtimes?.node?.path === "resources/runtimes/node/node.exe", "desktop package manifest must include bundled node runtime");
+if (manifest.release_channel !== "internal") {
+  assert(manifest.runtimes?.ffmpeg?.path === "resources/runtimes/ffmpeg/ffmpeg.exe", "beta/stable package must include FFmpeg");
+  assert(manifest.runtimes?.ffprobe?.path === "resources/runtimes/ffmpeg/ffprobe.exe", "beta/stable package must include ffprobe");
+}
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assertServerRecordingBoundary(manifest.server_connectivity, "desktop package manifest");
 assert(Array.isArray(manifest.server_connectivity?.reserved_interfaces), "server reserved interfaces are required");
@@ -40,11 +54,14 @@ assert(manifest.artifact?.sha256 === actualZipHash, "release manifest artifact h
 const entries = listZipEntries(zipPath);
 for (const required of [
   "cascade-demoops-desktop.exe",
+  "cascade-demoops-updater.exe",
   "package-manifest.json",
   "resources/desktop-runtime.json",
   "resources/runtimes/node/node.exe",
   "resources/web/index.html",
   "resources/sidecars/video-worker/dist/index.js",
+  "resources/sidecars/video-worker/node_modules/playwright/package.json",
+  "resources/sidecars/video-worker/node_modules/playwright-core/package.json",
 ]) {
   assert(entries.has(required) || entries.has(required.replaceAll("/", "\\")), `zip is missing ${required}`);
 }
@@ -54,7 +71,9 @@ mkdirSync(smokeRoot, { recursive: true });
 expandZip(zipPath, smokeRoot);
 
 const entrypoint = resolve(smokeRoot, manifest.entrypoint || "cascade-demoops-desktop.exe");
+const updater = resolve(smokeRoot, manifest.updater.path);
 assertFile(entrypoint, "desktop entrypoint");
+assertFile(updater, "desktop updater");
 assertWindowsGuiSubsystem(entrypoint, "desktop entrypoint");
 assertFile(resolve(smokeRoot, manifest.resource_manifest || "resources/desktop-runtime.json"), "desktop runtime manifest");
 assertPackagedWebSurfaces(resolve(smokeRoot, "resources", "web"));
@@ -63,6 +82,7 @@ const bundledWorker = resolve(smokeRoot, "resources", "sidecars", "video-worker"
 assertFile(bundledNode, "bundled node runtime");
 assertFile(bundledWorker, "packaged video-worker entrypoint");
 await assertVideoWorkerHealth(bundledNode, bundledWorker);
+await assertVideoWorkerInteractionScan(bundledNode, bundledWorker);
 
 const result = spawnSync(entrypoint, ["--check"], {
   cwd: smokeRoot,
@@ -81,48 +101,14 @@ const payload = JSON.parse(result.stdout);
 assert(payload.ready === true, "desktop entrypoint did not report ready=true");
 assert(payload.profile === "desktop", "desktop entrypoint did not use desktop profile");
 assert(payload.mode === "desktop", "desktop entrypoint did not use desktop mode");
-assert(payload.ui === "native", "desktop entrypoint must default to native UI");
-assertFile(resolve(smokeRoot, "user-data", "logs", "desktop-launcher.log"), "desktop launcher diagnostic log");
-
-const native = spawn(entrypoint, ["--addr", "127.0.0.1:0"], {
-  cwd: smokeRoot,
-  env: {
-    ...process.env,
-    CASCADE_DATA_ROOT: resolve(smokeRoot, "native-user-data"),
-  },
-  stdio: ["ignore", "pipe", "pipe"],
-});
-try {
-  await assertNativeWindowLaunch(native, resolve(smokeRoot, "native-user-data", "logs", "desktop-launcher.log"));
-} finally {
-  await terminateChild(native);
-}
-
-const host = spawn(entrypoint, ["--native=false", "--open=false", "--addr", "127.0.0.1:0"], {
-  cwd: smokeRoot,
-  env: {
-    ...process.env,
-    CASCADE_DATA_ROOT: resolve(smokeRoot, "host-user-data"),
-    CASCADE_DEV_EXCHANGE_HTTP: "1",
-    CASCADE_DEV_EXCHANGE_TOKEN: "desktop-smoke-token",
-  },
-  stdio: ["ignore", "pipe", "pipe"],
-});
-try {
-  const hostPayload = await waitForReadyPayload(host);
-  assert(hostPayload.ready === true, "desktop host did not report ready=true");
-  assert(typeof hostPayload.url === "string" && hostPayload.url.startsWith("http://127.0.0.1:"), "desktop host did not report a local URL");
-  const index = httpGet(hostPayload.url);
-  assert(index.includes("<!doctype html>") || index.includes("<div id=\"root\"></div>"), "desktop host did not serve packaged web index");
-  const health = JSON.parse(httpGet(`${hostPayload.url}/v1/desktop/runtime-health`));
-  assert(health.ok === true, "desktop host runtime-health failed");
-  assert(health.data?.node_runtime_configured === true, "desktop host did not load bundled node runtime");
-  assert(health.data?.sidecars?.["video-worker"] === true, "desktop host did not load packaged video-worker");
-  assertRuntimeCapabilities(health.data, "desktop host runtime-health");
-  assertDevExchangeRunUnavailable(hostPayload.url);
-} finally {
-  await terminateChild(host);
-}
+assert(payload.ui === "wails_webview2", "desktop entrypoint must report Wails/WebView2 UI");
+assert(payload.resource_manifest_loaded === true, "desktop entrypoint did not load packaged resource manifest");
+assert(payload.node_runtime_ready === true, "desktop entrypoint did not resolve bundled Node runtime");
+assert(payload.video_worker_ready === true, "desktop entrypoint did not resolve packaged video-worker");
+const updaterCheck = spawnSync(updater, ["--check"], { cwd: smokeRoot, encoding: "utf8" });
+if (updaterCheck.status !== 0) throw new Error(`desktop updater check failed: ${updaterCheck.stderr || updaterCheck.stdout}`);
+const updaterPayload = JSON.parse(updaterCheck.stdout);
+assert(updaterPayload.ready === true && updaterPayload.rollback === true, "desktop updater did not report verified rollback readiness");
 
 console.log(`Desktop package smoke passed: ${zipPath}`);
 
@@ -200,16 +186,24 @@ function assertRequiredAppSurfaces(manifest) {
 function assertPackagedWebSurfaces(webRoot) {
   assertFile(resolve(webRoot, "index.html"), "packaged web index");
   const bundleText = readPackagedText(webRoot);
-  assertSurfaceText(bundleText, "demo asset generation console", [
-    "开始实战流程",
-    "输入材料配置",
-    "演示账号",
+  assertSurfaceText(bundleText, "Jonathan agent-first workspace", [
+    "Cascade Agent",
+    "Projects",
+    "Configuration",
+    "发送后直接创建一段新的项目对话",
+    "实时工作台",
     "执行包审批",
-    "Stage JSON",
-    "Browser Agent 大纲",
+    "来源一致性",
+	"确认服务器将看到和录制的内容",
+	"连接 DemoOps 执行服务器",
+	"录制范围与阶段顺序符合我的意图",
+	"开发者技术详情",
   ]);
+  for (const removedText of ["Where should this go?", "Create new project", "Continue current project", "开始本地分析"]) {
+    assert(!bundleText.includes(removedText), `packaged agent-first flow still exposes obsolete action: ${removedText}`);
+  }
   assertSurfaceText(bundleText, "video editor", [
-    "视频编辑",
+    "Editor",
     "导入素材",
     "生成预览",
     "导出 MP4",
@@ -521,5 +515,77 @@ function assertVideoWorkerHealth(nodePath, workerPath) {
       rejectHealth(new Error(`video-worker exited before healthy response, code=${code}, stderr=${stderr}`));
     });
     child.stdin?.end(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "health" })}\n`);
+  });
+}
+
+async function assertVideoWorkerInteractionScan(nodePath, workerPath) {
+  const server = createServer((_request, response) => {
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.end("<!doctype html><title>DemoOps package smoke</title><main><button data-testid=\"create-project\">创建项目</button></main>");
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object", "interaction smoke server did not bind");
+    const productURL = `http://127.0.0.1:${address.port}/`;
+    const response = await callVideoWorker(nodePath, workerPath, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "verify_interactions",
+      params: {
+        product_url: productURL,
+        timeout_ms: 10000,
+        headless: true,
+        allowed_domains: ["127.0.0.1"],
+        candidates: [{ id: "create", label: "创建项目", kind: "click", selector: "[data-testid='create-project']", url: productURL }],
+        intent_goals: [{ id: "goal_create", label: "创建项目", keywords: ["创建", "项目"], required: true, business: true }],
+      },
+    }, 20000);
+    assert(response.result?.ok === true, `packaged interaction scan failed: ${JSON.stringify(response)}`);
+    assert(response.result?.results?.some((item) => item.id === "create" && item.status === "verified"), "packaged interaction scan did not verify the business control");
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+  }
+}
+
+function callVideoWorker(nodePath, workerPath, request, timeoutMS) {
+  return new Promise((resolveCall, rejectCall) => {
+    const child = spawn(nodePath, [workerPath], {
+      cwd: resolve(workerPath, ".."),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectCall(new Error(`video-worker RPC timed out. stderr=${stderr}`));
+    }, timeoutMS);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      const line = stdout.split(/\r?\n/).find((item) => item.trim().startsWith("{"));
+      if (!line) return;
+      try {
+        const response = JSON.parse(line);
+        clearTimeout(timer);
+        child.kill();
+        resolveCall(response);
+      } catch {
+        // Wait for a complete JSON line.
+      }
+    });
+    child.stderr?.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      rejectCall(error);
+    });
+    child.on("exit", (code) => {
+      if (stdout.trim()) return;
+      clearTimeout(timer);
+      rejectCall(new Error(`video-worker exited before RPC response, code=${code}, stderr=${stderr}`));
+    });
+    child.stdin?.end(`${JSON.stringify(request)}\n`);
   });
 }

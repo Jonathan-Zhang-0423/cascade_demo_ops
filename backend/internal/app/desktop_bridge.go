@@ -3,11 +3,17 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"path/filepath"
+	"strings"
 
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type BridgeResponse struct {
@@ -17,8 +23,82 @@ type BridgeResponse struct {
 	Data      json.RawMessage  `json:"data,omitempty"`
 }
 
+// HTTPHandler exposes the same bridge contract to the embedded Wails asset server.
+func (b *DesktopBridge) HTTPHandler() http.Handler {
+	return NewDevHTTPServer(b.service).Handler()
+}
+
 type DesktopBridge struct {
 	service *Service
+	ctx     context.Context
+}
+
+func (b *DesktopBridge) Startup(ctx context.Context) {
+	b.ctx = ctx
+}
+
+func (b *DesktopBridge) SelectLocalProjectDirectory() BridgeResponse {
+	if b.ctx == nil {
+		return bridgeValue(nil, errors.New("native directory picker is unavailable"))
+	}
+	path, err := runtime.OpenDirectoryDialog(b.ctx, runtime.OpenDialogOptions{Title: "选择本地项目目录"})
+	if err != nil || strings.TrimSpace(path) == "" {
+		return bridgeValue(nil, firstDialogError(err))
+	}
+	return bridgeValue(b.service.RegisterLocalSource("local_repository", path))
+}
+
+func (b *DesktopBridge) SelectRequirementDocuments() BridgeResponse {
+	return b.selectLocalFiles("requirement_document", "选择需求文档", []runtime.FileFilter{{DisplayName: "需求文档", Pattern: "*.md;*.txt;*.pdf;*.doc;*.docx"}})
+}
+
+func (b *DesktopBridge) SelectBrandAssets() BridgeResponse {
+	return b.selectLocalFiles("brand_asset", "选择品牌素材", []runtime.FileFilter{{DisplayName: "品牌素材", Pattern: "*.png;*.jpg;*.jpeg;*.webp;*.svg;*.pdf"}})
+}
+
+func (b *DesktopBridge) selectLocalFiles(kind, title string, filters []runtime.FileFilter) BridgeResponse {
+	if b.ctx == nil {
+		return bridgeValue(nil, errors.New("native file picker is unavailable"))
+	}
+	paths, err := runtime.OpenMultipleFilesDialog(b.ctx, runtime.OpenDialogOptions{Title: title, Filters: filters})
+	if err != nil || len(paths) == 0 {
+		return bridgeValue(nil, firstDialogError(err))
+	}
+	refs := make([]LocalSourceRef, 0, len(paths))
+	for _, path := range paths {
+		ref, registerErr := b.service.RegisterLocalSource(kind, filepath.Clean(path))
+		if registerErr != nil {
+			return bridgeValue(nil, registerErr)
+		}
+		refs = append(refs, ref)
+	}
+	return bridgeValue(refs, nil)
+}
+
+func (b *DesktopBridge) StoreDemoCredential(ref, username, password string) BridgeResponse {
+	err := credentialstore.StoreDemoCredential(ref, username, password)
+	return bridgeValue(map[string]any{"secretRef": "credential://demo/" + strings.TrimSpace(ref), "configured": err == nil}, err)
+}
+
+func (b *DesktopBridge) StorePlanningModelCredential(provider, modelName, apiKey, proxyURL string) BridgeResponse {
+	err := b.service.SavePlanningModelSettings(ModelSettingsRequest{Provider: provider, Model: modelName, APIKey: apiKey, ProxyURL: proxyURL})
+	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig(), b.service.ExchangeIdentityStatus(context.Background())), err)
+}
+
+func (b *DesktopBridge) DeletePlanningModelCredential(provider string) BridgeResponse {
+	err := b.service.DeletePlanningModelSettings(provider)
+	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig(), b.service.ExchangeIdentityStatus(context.Background())), err)
+}
+
+func (b *DesktopBridge) VerifyPlanningModel() BridgeResponse {
+	return bridgeValue(b.service.DiagnosePlanningModel(context.Background()), nil)
+}
+
+func firstDialogError(err error) error {
+	if err != nil {
+		return err
+	}
+	return errors.New("selection canceled")
 }
 
 func NewDesktopBridge(runtime config.AppRuntimeConfig, states store.StateStore) (*DesktopBridge, error) {
@@ -32,6 +112,35 @@ func NewDesktopBridge(runtime config.AppRuntimeConfig, states store.StateStore) 
 func (b *DesktopBridge) RuntimeConfig() BridgeResponse {
 	ctx := context.Background()
 	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig(), b.service.ExchangeIdentityStatus(ctx)), nil)
+}
+
+func (b *DesktopBridge) StoreGitHubToken(token string) BridgeResponse {
+	err := credentialstore.StoreGitHubToken(token)
+	return bridgeValue(map[string]bool{"configured": err == nil}, err)
+}
+
+func (b *DesktopBridge) GitHubTokenStatus() BridgeResponse {
+	return bridgeValue(map[string]bool{"configured": credentialstore.GitHubTokenConfigured()}, nil)
+}
+
+func (b *DesktopBridge) DeleteGitHubToken() BridgeResponse {
+	err := credentialstore.DeleteGitHubToken()
+	return bridgeValue(map[string]bool{"configured": false}, err)
+}
+
+func (b *DesktopBridge) DesktopUpdateStatus() BridgeResponse {
+	status, err := desktopUpdateConfiguration(b.service.RuntimeConfig())
+	return bridgeValue(status, err)
+}
+
+func (b *DesktopBridge) CheckDesktopUpdate() BridgeResponse {
+	status, err := CheckDesktopUpdate(context.Background(), b.service.RuntimeConfig())
+	return bridgeValue(status, err)
+}
+
+func (b *DesktopBridge) ApplyDesktopUpdate() BridgeResponse {
+	err := ApplyDesktopUpdate(context.Background(), b.service.RuntimeConfig())
+	return bridgeValue(map[string]bool{"started": err == nil}, err)
 }
 
 func (b *DesktopBridge) CreateProject(input orchestrator.UserInput) BridgeResponse {
@@ -110,6 +219,16 @@ func (b *DesktopBridge) GetResultPackage(orgID string, resultPackageID string) B
 
 func (b *DesktopBridge) AcknowledgeResultPackage(orgID string, request model.ResultPackageAckRequest) BridgeResponse {
 	response, err := b.service.AcknowledgeResultPackage(context.Background(), orgID, request)
+	return bridgeValue(response, err)
+}
+
+func (b *DesktopBridge) ReviewResultPackage(orgID string, resultPackageID string, request model.ResultReviewRequest) BridgeResponse {
+	response, err := b.service.ReviewResultPackage(context.Background(), orgID, resultPackageID, request)
+	return bridgeValue(response, err)
+}
+
+func (b *DesktopBridge) RequestResultRevision(orgID string, resultPackageID string, request model.ResultRevisionRequest) BridgeResponse {
+	response, err := b.service.RequestResultRevision(context.Background(), orgID, resultPackageID, request)
 	return bridgeValue(response, err)
 }
 

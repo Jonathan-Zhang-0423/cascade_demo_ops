@@ -125,6 +125,58 @@ func TestExchangeIntakeServiceLifecycle(t *testing.T) {
 	}
 }
 
+func TestResultReviewAndRevisionAreIdempotentAndRouteByIssue(t *testing.T) {
+	service := NewExchangeIntakeService(nil)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	service.now = fixedClock(now)
+	ctx := context.Background()
+	pkg := sampleClientExecutionPackageForAppTest(t)
+	initResp, err := service.Init(ctx, model.ExecutionPackageInitRequest{OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload, err := service.Upload(ctx, model.ExecutionPackageUploadRequest{UploadID: initResp.UploadID, Envelope: sampleEnvelopeForAppTest(t, pkg, now)}, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.StartExecution(ctx, pkg.OrgID, upload.ExchangePackageID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := service.CompleteWithRecordingResult(ctx, pkg.OrgID, upload.ExchangePackageID, sampleRecordingResultForAppTest(pkg))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRequest := model.ResultReviewRequest{IdempotencyKey: "review-1", Decision: model.ResultReviewReeditRequested, Summary: "字幕需要调整"}
+	firstReview, err := service.ReviewResultPackage(ctx, pkg.OrgID, completed.ResultPackageID, reviewRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondReview, err := service.ReviewResultPackage(ctx, pkg.OrgID, completed.ResultPackageID, reviewRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstReview.ReviewID == "" || firstReview.ReviewID != secondReview.ReviewID {
+		t.Fatalf("review idempotency failed: first=%+v second=%+v", firstReview, secondReview)
+	}
+
+	revisionRequest := model.ResultRevisionRequest{
+		IdempotencyKey: "revision-1", RequestedAction: model.ResultRevisionAuto,
+		Issues: []model.ResultRevisionIssue{{Kind: "missing_step", Comment: "缺少保存成功页面"}},
+	}
+	firstRevision, err := service.RequestResultRevision(ctx, pkg.OrgID, completed.ResultPackageID, revisionRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRevision, err := service.RequestResultRevision(ctx, pkg.OrgID, completed.ResultPackageID, revisionRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRevision.RevisionID == "" || firstRevision.RevisionID != secondRevision.RevisionID || firstRevision.ResolvedAction != model.ResultRevisionRerecord {
+		t.Fatalf("revision routing/idempotency failed: first=%+v second=%+v", firstRevision, secondRevision)
+	}
+}
+
 func TestExchangeIntakePreflightDoesNotConsumeNonceOrPersistPackage(t *testing.T) {
 	service := NewExchangeIntakeService(nil)
 	service.now = fixedClock(time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC))
@@ -234,7 +286,7 @@ func TestExchangeAckRequiresChecksumVerification(t *testing.T) {
 
 func TestDesktopBridgeExchangePackageResponsesAreJSONSafe(t *testing.T) {
 	bridge, err := NewDesktopBridge(config.AppRuntimeConfig{
-		Profile:         config.ProfileCloud,
+		Profile:         config.ProfileDev,
 		Environment:     "test",
 		Mode:            model.AppModeWeb,
 		DatabaseDialect: config.DatabaseSQLite,
@@ -907,6 +959,71 @@ func sampleRecordingResultForAppTest(pkg model.ClientExecutionPackage) model.Rec
 			ExpiresAt:      now.Add(24 * time.Hour),
 		},
 		CreatedAt: now,
+	}
+}
+
+func TestSummarizeRecordingResultExposesOutlineValidationEvidenceCompleteness(t *testing.T) {
+	result := model.RecordingResultPackage{
+		ResultID:         "result_outline_summary",
+		Status:           model.RecordingResultStatusGenerated,
+		ExecutionRuntime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+		StepResults: []model.StepResult{
+			{NodeID: "node_1", Status: "passed", ObservedState: "source=browser_assertion; assertion:project_ready=passed"},
+			{NodeID: "node_2", Status: "passed", ObservedState: "source=actual_browser_observation; assertion:build_complete=passed"},
+		},
+		StageEventLogRef: &model.ArtifactRef{ID: "artifact_stage_events", Kind: "stage_event_log", URI: "file:///tmp/events.jsonl"},
+		ValidationReports: []model.ValidationReport{
+			{Phase: model.ValidationPhasePreExecution, Decision: model.ValidationDecisionContinue},
+			{Phase: model.ValidationPhaseRuntimeStage, Decision: model.ValidationDecisionContinue, NodeID: "node_1"},
+			{Phase: model.ValidationPhaseRuntimeStage, Decision: model.ValidationDecisionContinue, NodeID: "node_2"},
+			{Phase: model.ValidationPhasePostExecution, Decision: model.ValidationDecisionContinue},
+		},
+	}
+
+	summary := summarizeRecordingResult(result)
+	if summary.Validation == nil {
+		t.Fatal("outline result must expose a validation summary")
+	}
+	validation := summary.Validation
+	if validation.Status != "complete" || validation.ValidationReportCount != 4 || validation.PreExecutionReportCount != 1 || validation.RuntimeStageReportCount != 2 || validation.PostExecutionReportCount != 1 || validation.RealObservedStepCount != 2 || !validation.StageEventLogAvailable || validation.LatestDecision != model.ValidationDecisionContinue {
+		t.Fatalf("unexpected outline validation summary: %+v", validation)
+	}
+
+	result.StepResults[1].ObservedState = "source=derived_from_plan; assertion:build_complete=passed"
+	if got := summarizeRecordingResult(result).Validation; got.Status != "incomplete" || got.RealObservedStepCount != 1 {
+		t.Fatalf("plan-derived state must not be counted as real evidence: %+v", got)
+	}
+}
+
+func TestSummarizeExecutionAcceptanceSeparatesAppPackagesFromServerFixtures(t *testing.T) {
+	result := model.RecordingResultPackage{
+		Status:           model.RecordingResultStatusGenerated,
+		ExecutionRuntime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+		StepResults:      []model.StepResult{{NodeID: "node_1", Status: "passed", ObservedState: "source=browser_assertion; assertion:ready=passed"}},
+		StageEventLogRef: &model.ArtifactRef{ID: "events", Kind: "stage_event_log", URI: "file:///tmp/events.jsonl"},
+		ValidationReports: []model.ValidationReport{
+			{Phase: model.ValidationPhasePreExecution, Decision: model.ValidationDecisionContinue},
+			{Phase: model.ValidationPhaseRuntimeStage, Decision: model.ValidationDecisionContinue, NodeID: "node_1"},
+			{Phase: model.ValidationPhasePostExecution, Decision: model.ValidationDecisionContinue},
+		},
+		GeneratedAssets: []model.ArtifactRef{{ID: "video", Kind: "demo_video", MimeType: "video/mp4", URI: "file:///tmp/demo.mp4"}},
+	}
+	appState := &exchangePackageState{AuthenticatedInstallID: "install_real_app", Envelope: model.ExchangeEnvelope{Producer: model.ExchangeProducer{InstallID: "install_real_app", RuntimeProfile: "desktop-product-run"}}}
+	appSummary := summarizeExecutionAcceptance(appState, result)
+	if appSummary == nil || !appSummary.AppGenerated || appSummary.Origin != "app_formal_exchange" || appSummary.Status != "ready_for_app_e2e_acceptance" || !appSummary.StrictEvidenceComplete || !appSummary.FinalMP4Available {
+		t.Fatalf("formal App package acceptance was not recognized: %+v", appSummary)
+	}
+
+	fixtureState := &exchangePackageState{Envelope: model.ExchangeEnvelope{Producer: model.ExchangeProducer{RuntimeProfile: "server_controlled_acceptance"}}, Payload: model.ClientExecutionPackage{Metadata: map[string]any{"producer": "server_controlled_business_acceptance"}}}
+	fixtureSummary := summarizeExecutionAcceptance(fixtureState, result)
+	if fixtureSummary == nil || fixtureSummary.AppGenerated || fixtureSummary.Origin != "server_controlled_fixture" || fixtureSummary.Status != "server_fixture_only" {
+		t.Fatalf("Server fixture must not be presented as App end-to-end acceptance: %+v", fixtureSummary)
+	}
+
+	unverifiedState := &exchangePackageState{Envelope: model.ExchangeEnvelope{Producer: model.ExchangeProducer{InstallID: "self_asserted", RuntimeProfile: "desktop-product-run"}}}
+	unverifiedSummary := summarizeExecutionAcceptance(unverifiedState, result)
+	if unverifiedSummary == nil || unverifiedSummary.AppGenerated || unverifiedSummary.Origin != "unverified_client_upload" || unverifiedSummary.Status != "unverified_origin" {
+		t.Fatalf("self-asserted package must not become formal App acceptance: %+v", unverifiedSummary)
 	}
 }
 

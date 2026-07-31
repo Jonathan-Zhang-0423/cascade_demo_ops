@@ -21,12 +21,18 @@
     "validate:server-render": "node scripts/validate-server-render.mjs",
     "smoke:validate-server-render": "node scripts/smoke-validate-server-render.mjs",
     "build:desktop:win": "node scripts/build-desktop.mjs windows",
+	"build:desktop:wails": "node scripts/build-wails-desktop.mjs",
     "build:desktop:mac": "node scripts/build-desktop.mjs darwin",
     "package:desktop": "node scripts/package-desktop.mjs",
     "smoke:desktop-package": "node scripts/smoke-desktop-package.mjs",
     "smoke:desktop-ui": "node scripts/smoke-desktop-ui.mjs",
-    "package:desktop:installer": "node scripts/package-desktop-installer.mjs",
-    "smoke:desktop-installer": "node scripts/smoke-desktop-installer.mjs"
+	"package:desktop:installer": "node scripts/build-inno-installer.mjs",
+	"package:desktop:installer:legacy": "node scripts/package-desktop-installer.mjs",
+	"package:desktop:inno": "node scripts/build-inno-installer.mjs",
+	"sign:windows": "node scripts/sign-windows.mjs",
+	"manifest:update": "node scripts/generate-update-manifest.mjs",
+	"smoke:desktop-installer": "node scripts/smoke-desktop-release.mjs",
+	"smoke:desktop-installer:legacy": "node scripts/smoke-desktop-installer.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

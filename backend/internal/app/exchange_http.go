@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
@@ -57,10 +59,14 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("POST /v1/execution-packages/init", s.requireDevExchangeAuth(s.handleExecutionPackageInit))
+	mux.HandleFunc("POST /v1/execution-packages/validate", s.requireDevExchangeAuth(s.handleExecutionPackageValidate))
 	mux.HandleFunc("POST /v1/execution-packages", s.requireDevExchangeAuth(s.handleExecutionPackageUpload))
 	mux.HandleFunc("GET /v1/execution-packages/{id}/status", s.requireDevExchangeAuth(s.handleExecutionPackageStatus))
+	mux.HandleFunc("GET /v1/execution-packages/{id}/events", s.requireDevExchangeAuth(s.handleExecutionPackageEvents))
 	mux.HandleFunc("GET /v1/result-packages/{id}", s.requireDevExchangeAuth(s.handleResultPackageGet))
 	mux.HandleFunc("POST /v1/result-packages/{id}/ack", s.requireDevExchangeAuth(s.handleResultPackageAck))
+	mux.HandleFunc("POST /v1/result-packages/{id}/reviews", s.requireDevExchangeAuth(s.handleResultPackageReview))
+	mux.HandleFunc("POST /v1/result-packages/{id}/revisions", s.requireDevExchangeAuth(s.handleResultPackageRevision))
 	mux.HandleFunc("GET /v1/dev/execution-packages", s.requireDevExchangeAuth(s.handleDevExecutionPackageList))
 	mux.HandleFunc("GET /v1/dev/result-packages", s.requireDevExchangeAuth(s.handleDevResultPackageList))
 	mux.HandleFunc("POST /v1/dev/execution-packages/{id}/run", s.requireDevExchangeAuth(s.handleDevExecutionPackageRun))
@@ -68,10 +74,14 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/dev/execution-packages/{id}/debug", s.requireDevExchangeAuth(s.handleDevExecutionPackageDebug))
 	mux.HandleFunc("GET /v1/dev/result-packages/{id}/deliverables/{artifact_id}", s.requireDevExchangeAuth(s.handleDevResultDeliverableDownload))
 	mux.HandleFunc("POST /aigc/v1/execution-packages/init", s.requireDevExchangeAuth(s.handleExecutionPackageInit))
+	mux.HandleFunc("POST /aigc/v1/execution-packages/validate", s.requireDevExchangeAuth(s.handleExecutionPackageValidate))
 	mux.HandleFunc("POST /aigc/v1/execution-packages", s.requireDevExchangeAuth(s.handleExecutionPackageUpload))
 	mux.HandleFunc("GET /aigc/v1/execution-packages/{id}/status", s.requireDevExchangeAuth(s.handleExecutionPackageStatus))
+	mux.HandleFunc("GET /aigc/v1/execution-packages/{id}/events", s.requireDevExchangeAuth(s.handleExecutionPackageEvents))
 	mux.HandleFunc("GET /aigc/v1/result-packages/{id}", s.requireDevExchangeAuth(s.handleResultPackageGet))
 	mux.HandleFunc("POST /aigc/v1/result-packages/{id}/ack", s.requireDevExchangeAuth(s.handleResultPackageAck))
+	mux.HandleFunc("POST /aigc/v1/result-packages/{id}/reviews", s.requireDevExchangeAuth(s.handleResultPackageReview))
+	mux.HandleFunc("POST /aigc/v1/result-packages/{id}/revisions", s.requireDevExchangeAuth(s.handleResultPackageRevision))
 	mux.HandleFunc("GET /aigc/v1/dev/execution-packages", s.requireDevExchangeAuth(s.handleDevExecutionPackageList))
 	mux.HandleFunc("GET /aigc/v1/dev/result-packages", s.requireDevExchangeAuth(s.handleDevResultPackageList))
 	mux.HandleFunc("POST /aigc/v1/dev/execution-packages/{id}/run", s.requireDevExchangeAuth(s.handleDevExecutionPackageRun))
@@ -150,13 +160,30 @@ func (s *DevHTTPServer) handleExecutionPackageUpload(w http.ResponseWriter, r *h
 	if request.PayloadRef.Kind == "" {
 		request.PayloadRef = request.Envelope.PayloadRef
 	}
-	response, err := s.service.UploadExecutionPackage(r.Context(), request, body.Payload)
+	response, err := s.service.UploadExecutionPackageFromHTTP(r.Context(), request, body.Payload, installationIDFromRequest(s.service.exchange, r))
 	if err == nil && devExchangeAutoRunEnabled() && body.Payload.PackageID != "" && response.Status == model.ExchangePackageStatusAccepted {
 		runStatus, runErr := s.service.RunUploadedExecutionPackage(r.Context(), responseOrgID(request.Envelope, body.Payload), response.ExchangePackageID)
 		if runErr == nil && runStatus.ExchangePackageID != "" {
 			response.Status = runStatus.Status
 		}
 	}
+	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleExecutionPackageValidate(w http.ResponseWriter, r *http.Request) {
+	var body exchangeUploadHTTPBody
+	if err := decodeJSON(r, &body); err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "bad_request", err)
+		return
+	}
+	request := model.ExecutionPackageUploadRequest{UploadID: body.UploadID, Envelope: body.Envelope, PayloadRef: body.PayloadRef}
+	if body.Request != nil {
+		request = *body.Request
+	}
+	if request.PayloadRef.Kind == "" {
+		request.PayloadRef = request.Envelope.PayloadRef
+	}
+	response, err := s.service.ValidateExecutionPackage(r.Context(), request, body.Payload)
 	writeExchangeValue(w, response, err)
 }
 
@@ -168,6 +195,72 @@ func (s *DevHTTPServer) handleExecutionPackageStatus(w http.ResponseWriter, r *h
 	}
 	response, err := s.service.GetExecutionPackageStatus(r.Context(), orgID, r.PathValue("id"))
 	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleExecutionPackageEvents(w http.ResponseWriter, r *http.Request) {
+	orgID, err := orgIDFromRequest(r)
+	if err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "missing_org_id", err)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeExchangeError(w, http.StatusInternalServerError, "streaming_unsupported", errors.New("HTTP streaming is unavailable"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	nextIndex := eventIndexAfter(r.Header.Get("Last-Event-ID"), r.PathValue("id"))
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		status, statusErr := s.service.GetExecutionPackageStatus(r.Context(), orgID, r.PathValue("id"))
+		if statusErr != nil {
+			writeSSE(w, "error", "", map[string]string{"message": redactBridgeError(statusErr.Error())})
+			flusher.Flush()
+			return
+		}
+		for nextIndex < len(status.StageHistory) {
+			event := status.StageHistory[nextIndex]
+			if event.EventID == "" {
+				event.EventID = fmt.Sprintf("%s:%d", status.ExchangePackageID, nextIndex+1)
+			}
+			writeSSE(w, "stage", event.EventID, event)
+			nextIndex++
+		}
+		flusher.Flush()
+		if status.Status == model.ExchangePackageStatusCompleted || status.Status == model.ExchangePackageStatusFailed || status.Status == model.ExchangePackageStatusCanceled || status.Status == model.ExchangePackageStatusExpired {
+			writeSSE(w, "complete", "", status)
+			flusher.Flush()
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func eventIndexAfter(lastEventID string, packageID string) int {
+	prefix := strings.TrimSpace(packageID) + ":"
+	if !strings.HasPrefix(strings.TrimSpace(lastEventID), prefix) {
+		return 0
+	}
+	index, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(lastEventID), prefix))
+	if err != nil || index < 0 {
+		return 0
+	}
+	return index
+}
+
+func writeSSE(w http.ResponseWriter, eventType string, eventID string, value any) {
+	data, _ := json.Marshal(value)
+	if eventID != "" {
+		_, _ = fmt.Fprintf(w, "id: %s\n", eventID)
+	}
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, data)
 }
 
 func (s *DevHTTPServer) handleDevExecutionPackageList(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +365,36 @@ func (s *DevHTTPServer) handleResultPackageAck(w http.ResponseWriter, r *http.Re
 	writeExchangeValue(w, response, err)
 }
 
+func (s *DevHTTPServer) handleResultPackageReview(w http.ResponseWriter, r *http.Request) {
+	orgID, err := orgIDFromRequest(r)
+	if err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "missing_org_id", err)
+		return
+	}
+	var request model.ResultReviewRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "bad_request", err)
+		return
+	}
+	response, err := s.service.ReviewResultPackage(r.Context(), orgID, r.PathValue("id"), request)
+	writeExchangeValue(w, response, err)
+}
+
+func (s *DevHTTPServer) handleResultPackageRevision(w http.ResponseWriter, r *http.Request) {
+	orgID, err := orgIDFromRequest(r)
+	if err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "missing_org_id", err)
+		return
+	}
+	var request model.ResultRevisionRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeExchangeError(w, http.StatusBadRequest, "bad_request", err)
+		return
+	}
+	response, err := s.service.RequestResultRevision(r.Context(), orgID, r.PathValue("id"), request)
+	writeExchangeValue(w, response, err)
+}
+
 func (s *DevHTTPServer) requireDevExchangeAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token := sessionTokenFromRequest(r); token != "" {
@@ -287,6 +410,17 @@ func (s *DevHTTPServer) requireDevExchangeAuth(next http.HandlerFunc) http.Handl
 		}
 		next(w, r)
 	}
+}
+
+func installationIDFromRequest(exchange *ExchangeIntakeService, r *http.Request) string {
+	if exchange == nil {
+		return ""
+	}
+	installation, ok := exchange.AuthenticateInstallationSession(sessionTokenFromRequest(r))
+	if !ok || installation == nil {
+		return ""
+	}
+	return installation.InstallID
 }
 
 func orgIDFromRequest(r *http.Request) (string, error) {

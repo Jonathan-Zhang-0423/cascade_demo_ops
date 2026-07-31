@@ -199,6 +199,8 @@ type ClientExecutionPackage struct {
 	EvidenceBundle         EvidenceBundle                   `json:"evidence_bundle"`
 	Reproducibility        ReproducibilitySpec              `json:"reproducibility"`
 	SafetyReport           PackageSafetyReport              `json:"safety_report"`
+	SourceBindingSummary   *SourceBindingSummary            `json:"source_binding_summary,omitempty"`
+	ConfidenceSummary      *PackageConfidenceSummary        `json:"confidence_summary,omitempty"`
 	RepairContext          *ScriptRepairContext             `json:"repair_context,omitempty"`
 	Metadata               map[string]any                   `json:"metadata,omitempty"`
 }
@@ -507,12 +509,13 @@ type PackageSafetyReport struct {
 }
 
 type UserApprovalRecord struct {
-	ApprovalID       string    `json:"approval_id"`
-	ApprovedByUserID string    `json:"approved_by_user_id,omitempty"`
-	ApprovedAt       time.Time `json:"approved_at"`
-	PlanDigestSHA256 string    `json:"plan_digest_sha256"`
-	ReviewedNodeIDs  []string  `json:"reviewed_node_ids,omitempty"`
-	Notes            []string  `json:"notes,omitempty"`
+	ApprovalID                  string    `json:"approval_id"`
+	ApprovedByUserID            string    `json:"approved_by_user_id,omitempty"`
+	ApprovedAt                  time.Time `json:"approved_at"`
+	PlanDigestSHA256            string    `json:"plan_digest_sha256"`
+	ApprovalSubjectDigestSHA256 string    `json:"approval_subject_digest_sha256,omitempty"`
+	ReviewedNodeIDs             []string  `json:"reviewed_node_ids,omitempty"`
+	Notes                       []string  `json:"notes,omitempty"`
 }
 
 type RecordingResultPackage struct {
@@ -924,11 +927,81 @@ type ExecutionPackageListItem struct {
 }
 
 type ExecutionStageEvent struct {
+	EventID         string                `json:"event_id,omitempty"`
 	Stage           string                `json:"stage"`
 	Status          ExchangePackageStatus `json:"status,omitempty"`
 	Message         string                `json:"message,omitempty"`
 	ProgressPercent int                   `json:"progress_percent,omitempty"`
 	UpdatedAt       time.Time             `json:"updated_at"`
+}
+
+type ResultReviewDecision string
+
+const (
+	ResultReviewApproved          ResultReviewDecision = "approved"
+	ResultReviewReeditRequested   ResultReviewDecision = "reedit_requested"
+	ResultReviewRerecordRequested ResultReviewDecision = "rerecord_requested"
+)
+
+type ResultReviewAnnotation struct {
+	TimeMS  int64  `json:"time_ms"`
+	Comment string `json:"comment"`
+}
+
+type ResultReviewRequest struct {
+	IdempotencyKey    string                   `json:"idempotency_key"`
+	ReviewerInstallID string                   `json:"reviewer_install_id,omitempty"`
+	Decision          ResultReviewDecision     `json:"decision"`
+	Summary           string                   `json:"summary,omitempty"`
+	Annotations       []ResultReviewAnnotation `json:"annotations,omitempty"`
+	ReviewedAt        time.Time                `json:"reviewed_at,omitempty"`
+}
+
+type ResultReviewRecord struct {
+	ReviewID          string                   `json:"review_id"`
+	ResultPackageID   string                   `json:"result_package_id"`
+	IdempotencyKey    string                   `json:"idempotency_key"`
+	ReviewerInstallID string                   `json:"reviewer_install_id,omitempty"`
+	Decision          ResultReviewDecision     `json:"decision"`
+	Summary           string                   `json:"summary,omitempty"`
+	Annotations       []ResultReviewAnnotation `json:"annotations,omitempty"`
+	ReviewedAt        time.Time                `json:"reviewed_at"`
+}
+
+type ResultRevisionAction string
+
+const (
+	ResultRevisionAuto     ResultRevisionAction = "auto"
+	ResultRevisionReedit   ResultRevisionAction = "reedit"
+	ResultRevisionRerecord ResultRevisionAction = "rerecord"
+)
+
+type ResultRevisionIssue struct {
+	Kind    string `json:"kind"`
+	TimeMS  int64  `json:"time_ms,omitempty"`
+	Comment string `json:"comment"`
+}
+
+type ResultRevisionRequest struct {
+	IdempotencyKey       string                `json:"idempotency_key"`
+	RequestedByInstallID string                `json:"requested_by_install_id,omitempty"`
+	RequestedAction      ResultRevisionAction  `json:"requested_action,omitempty"`
+	Summary              string                `json:"summary,omitempty"`
+	Issues               []ResultRevisionIssue `json:"issues,omitempty"`
+	RequestedAt          time.Time             `json:"requested_at,omitempty"`
+}
+
+type ResultRevisionRecord struct {
+	RevisionID           string                `json:"revision_id"`
+	ResultPackageID      string                `json:"result_package_id"`
+	IdempotencyKey       string                `json:"idempotency_key"`
+	RequestedByInstallID string                `json:"requested_by_install_id,omitempty"`
+	RequestedAction      ResultRevisionAction  `json:"requested_action"`
+	ResolvedAction       ResultRevisionAction  `json:"resolved_action"`
+	Status               string                `json:"status"`
+	Summary              string                `json:"summary,omitempty"`
+	Issues               []ResultRevisionIssue `json:"issues,omitempty"`
+	RequestedAt          time.Time             `json:"requested_at"`
 }
 
 type ExecutionFailureSummary struct {
@@ -963,6 +1036,41 @@ type ExecutionResultSummary struct {
 	AckedAt             time.Time              `json:"acked_at,omitempty"`
 	ExpiresAt           time.Time              `json:"expires_at,omitempty"`
 	Deliverables        []ExecutionDeliverable `json:"deliverables,omitempty"`
+	// Validation is a redacted, App-consumable summary of Server-side Browser
+	// Agent verification. Full evidence remains in the result package.
+	Validation *ExecutionValidationSummary `json:"validation,omitempty"`
+	// Acceptance makes the package's origin explicit so a Server-owned fixture
+	// can never be presented as an App-to-Server end-to-end acceptance result.
+	Acceptance *ExecutionAcceptanceSummary `json:"acceptance,omitempty"`
+}
+
+// ExecutionValidationSummary lets the App distinguish a rendered file from a
+// result that also has complete, runtime-derived Browser Agent verification.
+// It deliberately contains counts and decisions only, never page data or
+// credential-bearing diagnostic details.
+type ExecutionValidationSummary struct {
+	Runtime                  string             `json:"runtime,omitempty"`
+	Status                   string             `json:"status"`
+	ValidationReportCount    int                `json:"validation_report_count"`
+	PreExecutionReportCount  int                `json:"pre_execution_report_count"`
+	RuntimeStageReportCount  int                `json:"runtime_stage_report_count"`
+	PostExecutionReportCount int                `json:"post_execution_report_count"`
+	LatestDecision           ValidationDecision `json:"latest_decision,omitempty"`
+	RealObservedStepCount    int                `json:"real_observed_step_count"`
+	StageEventLogAvailable   bool               `json:"stage_event_log_available"`
+}
+
+// ExecutionAcceptanceSummary is the redacted acceptance decision consumed by
+// the App. It intentionally contains no installation ID, page data, or raw
+// browser evidence; those remain inside the protected result package.
+type ExecutionAcceptanceSummary struct {
+	Origin                 string `json:"origin"`
+	AppGenerated           bool   `json:"app_generated"`
+	FormalExchange         bool   `json:"formal_exchange"`
+	StrictEvidenceComplete bool   `json:"strict_evidence_complete"`
+	FinalMP4Available      bool   `json:"final_mp4_available"`
+	EditorMaterialized     bool   `json:"editor_materialized"`
+	Status                 string `json:"status"`
 }
 
 type ExecutionDeliverable struct {

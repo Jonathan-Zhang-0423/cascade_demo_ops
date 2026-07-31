@@ -2,6 +2,8 @@ package app
 
 import (
 	"net/url"
+	"os"
+	"strings"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
@@ -18,6 +20,8 @@ type RuntimeConfigView struct {
 	ResourceManifestLoaded bool                              `json:"resource_manifest_loaded"`
 	NodeRuntimeConfigured  bool                              `json:"node_runtime_configured"`
 	LLMMode                config.LLMMode                    `json:"llm_mode"`
+	LLMProxyConfigured     bool                              `json:"llm_proxy_configured"`
+	LLMProxyHost           string                            `json:"llm_proxy_host,omitempty"`
 	ArkMediaMode           config.ArkMediaMode               `json:"ark_media_mode"`
 	ModelAdapterVersion    string                            `json:"model_adapter_version"`
 	Sidecars               map[string]bool                   `json:"sidecars"`
@@ -58,6 +62,7 @@ type CloudExchangeRuntimeView struct {
 }
 
 type AppCapabilitiesRuntimeView struct {
+	DeveloperUI                bool   `json:"developer_ui"`
 	DemoAssetGenerationConsole bool   `json:"demo_asset_generation_console"`
 	VideoEditor                bool   `json:"video_editor"`
 	LocalPackageGeneration     bool   `json:"local_package_generation"`
@@ -73,6 +78,10 @@ type AppCapabilitiesRuntimeView struct {
 }
 
 func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus ExchangeIdentityStatus) RuntimeConfigView {
+	proxyHost := ""
+	if parsed, err := url.Parse(runtime.LLMProxyURL); err == nil {
+		proxyHost = parsed.Host
+	}
 	return RuntimeConfigView{
 		Profile:                runtime.Profile,
 		Environment:            runtime.Environment,
@@ -84,18 +93,21 @@ func NewRuntimeConfigView(runtime config.AppRuntimeConfig, exchangeStatus Exchan
 		ResourceManifestLoaded: runtime.ResourceManifestPath != "",
 		NodeRuntimeConfigured:  runtime.NodeBinaryPath != "",
 		LLMMode:                runtime.LLMMode,
+		LLMProxyConfigured:     strings.TrimSpace(runtime.LLMProxyURL) != "",
+		LLMProxyHost:           proxyHost,
 		ArkMediaMode:           runtime.ArkMediaMode,
 		ModelAdapterVersion:    runtime.ModelAdapterVersion,
 		Sidecars:               sidecarConfigured(runtime.SidecarPaths),
 		ModelProviders:         providerCredentialViews(runtime.ModelProviders),
 		ModelTaskRoutes:        modelTaskRouteViews(runtime.ModelTaskRoutes),
 		CloudExchange:          cloudExchangeRuntimeView(runtime, exchangeStatus),
-		AppCapabilities:        appCapabilitiesRuntimeView(),
+		AppCapabilities:        appCapabilitiesRuntimeView(runtime.Profile),
 	}
 }
 
-func appCapabilitiesRuntimeView() AppCapabilitiesRuntimeView {
+func appCapabilitiesRuntimeView(profile config.RuntimeProfile) AppCapabilitiesRuntimeView {
 	return AppCapabilitiesRuntimeView{
+		DeveloperUI:                developerUIEnabled(profile),
 		DemoAssetGenerationConsole: true,
 		VideoEditor:                true,
 		LocalPackageGeneration:     true,
@@ -109,6 +121,14 @@ func appCapabilitiesRuntimeView() AppCapabilitiesRuntimeView {
 		LocalRecordingScope:        "dev_and_test_compatibility_only",
 		VideoWorkerRole:            "editor_media_helper_and_dev_compatibility_runtime",
 	}
+}
+
+func developerUIEnabled(profile config.RuntimeProfile) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("CASCADE_ENABLE_DEVELOPER_UI")))
+	if value == "" {
+		return profile == config.ProfileDev
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 func cloudExchangeRuntimeView(runtime config.AppRuntimeConfig, exchangeStatus ExchangeIdentityStatus) CloudExchangeRuntimeView {

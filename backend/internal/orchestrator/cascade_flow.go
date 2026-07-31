@@ -47,6 +47,7 @@ type CascadeState struct {
 	RequirementBrief         *model.RequirementBrief                `json:"requirement_brief,omitempty"`
 	CodeSnapshots            []model.CodeUnderstandingSnapshot      `json:"code_snapshots,omitempty"`
 	PageSnapshots            []model.PageUnderstandingSnapshot      `json:"page_snapshots,omitempty"`
+	SourceBinding            *model.ProductSourceBindingAssessment  `json:"source_binding,omitempty"`
 	ProjectIntelligence      *model.ProjectIntelligencePack         `json:"project_intelligence,omitempty"`
 	ScriptReadinessReport    *model.ScriptReadinessReport           `json:"script_readiness_report,omitempty"`
 	AgentGraphTrace          *model.AgentGraphTrace                 `json:"agent_graph_trace,omitempty"`
@@ -65,8 +66,55 @@ type CascadeState struct {
 	Approved                 bool                                   `json:"approved"`
 	RehearsePassRate         float64                                `json:"rehearse_pass_rate"`
 	Artifacts                *GeneratedArtifacts                    `json:"artifacts,omitempty"`
+	DesktopCloudRun          *DesktopCloudRunState                  `json:"desktop_cloud_run,omitempty"`
 	ErrorMessage             string                                 `json:"error_message,omitempty"`
 	ArchivedAt               *time.Time                             `json:"archived_at,omitempty"`
+}
+
+// DesktopCloudRunState is the restart-safe App view of the remote execution.
+// It stores only protocol metadata and safe managed-file names, never local paths.
+type DesktopCloudRunState struct {
+	SchemaVersion     string                         `json:"schema_version"`
+	OrgID             string                         `json:"org_id,omitempty"`
+	UploadID          string                         `json:"upload_id,omitempty"`
+	ExchangePackageID string                         `json:"exchange_package_id,omitempty"`
+	CloudJobID        string                         `json:"cloud_job_id,omitempty"`
+	Status            string                         `json:"status,omitempty"`
+	Stage             string                         `json:"stage,omitempty"`
+	Message           string                         `json:"message,omitempty"`
+	ProgressPercent   int                            `json:"progress_percent,omitempty"`
+	LastEventID       string                         `json:"last_event_id,omitempty"`
+	StageHistory      []model.ExecutionStageEvent    `json:"stage_history,omitempty"`
+	FailureSummary    *model.ExecutionFailureSummary `json:"failure_summary,omitempty"`
+	Error             *model.AgentError              `json:"error,omitempty"`
+	ResultPackageID   string                         `json:"result_package_id,omitempty"`
+	ResultPackage     *model.RecordingResultPackage  `json:"result_package,omitempty"`
+	ResultDownloaded  bool                           `json:"result_downloaded,omitempty"`
+	AckedAt           *time.Time                     `json:"acked_at,omitempty"`
+	DownloadedAssets  []DesktopDownloadedAssetState  `json:"downloaded_assets,omitempty"`
+	ResultReview      *DesktopResultReviewState      `json:"result_review,omitempty"`
+	UpdatedAt         time.Time                      `json:"updated_at"`
+}
+
+type DesktopDownloadedAssetState struct {
+	ArtifactID string `json:"artifact_id"`
+	Kind       string `json:"kind,omitempty"`
+	Role       string `json:"role,omitempty"`
+	FileName   string `json:"file_name"`
+	SHA256     string `json:"sha256"`
+	MimeType   string `json:"mime_type,omitempty"`
+	SizeBytes  int64  `json:"size_bytes,omitempty"`
+	Verified   bool   `json:"verified"`
+}
+
+type DesktopResultReviewState struct {
+	Decision       string    `json:"decision"`
+	ReviewID       string    `json:"review_id,omitempty"`
+	RevisionID     string    `json:"revision_id,omitempty"`
+	RevisionAction string    `json:"revision_action,omitempty"`
+	RevisionStatus string    `json:"revision_status,omitempty"`
+	Summary        string    `json:"summary,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type GeneratedArtifacts struct {
@@ -76,11 +124,13 @@ type GeneratedArtifacts struct {
 }
 
 type UserInput struct {
+	ProjectID              string                           `json:"project_id,omitempty"`
 	Mode                   model.AppMode                    `json:"mode"`
 	ProductURL             string                           `json:"product_url"`
 	GitRepoURL             string                           `json:"git_repo_url,omitempty"`
 	LocalRepoPath          string                           `json:"local_repo_path,omitempty"`
 	ProductDescription     string                           `json:"product_description,omitempty"`
+	TargetDurationSec      int                              `json:"target_duration_sec,omitempty"`
 	Code                   []model.CodeInput                `json:"code,omitempty"`
 	RequirementDocuments   []model.RequirementDocumentInput `json:"requirement_documents,omitempty"`
 	WebpageScreenshots     []model.WebpageScreenshotInput   `json:"webpage_screenshots,omitempty"`
@@ -90,6 +140,7 @@ type UserInput struct {
 	MustNotShow            []string                         `json:"must_not_show,omitempty"`
 	ForbiddenPages         []string                         `json:"forbidden_pages,omitempty"`
 	ForbiddenData          []string                         `json:"forbidden_data,omitempty"`
+	AllowedDomains         []string                         `json:"allowed_domains,omitempty"`
 	DemoUsername           string                           `json:"demo_username,omitempty"`
 	DemoPassword           string                           `json:"demo_password,omitempty"`
 	SSHHost                string                           `json:"ssh_host,omitempty"`
@@ -99,6 +150,8 @@ type UserInput struct {
 	SSHPasswordSecretRef   string                           `json:"ssh_password_secret_ref,omitempty"`
 	SSHAllowedPaths        []string                         `json:"ssh_allowed_paths,omitempty"`
 	SSHAllowedCommands     []string                         `json:"ssh_allowed_commands,omitempty"`
+	SourceBindingDecision  string                           `json:"source_binding_decision,omitempty"`
+	SourceBindingHash      string                           `json:"source_binding_hash,omitempty"`
 }
 
 type PageVerificationCredentials struct {
@@ -129,6 +182,10 @@ type PageReaderAgent interface {
 	ReadPages(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief) ([]model.PageUnderstandingSnapshot, error)
 }
 
+type SourceBindingAgent interface {
+	Assess(project *model.ProjectContext, codeSnapshots []model.CodeUnderstandingSnapshot, pageSnapshots []model.PageUnderstandingSnapshot, now time.Time) (*model.ProductSourceBindingAssessment, []model.CodeUnderstandingSnapshot, error)
+}
+
 type ProjectIntelligenceAgent interface {
 	RunProjectIntelligence(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, codeSnapshots []model.CodeUnderstandingSnapshot, pageSnapshots []model.PageUnderstandingSnapshot) (*model.ProjectIntelligencePack, *model.ScriptReadinessReport, *model.AgentGraphTrace, error)
 }
@@ -143,6 +200,10 @@ type ProductMapAgent interface {
 
 type PageInteractionVerifierAgent interface {
 	VerifyInteractions(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, intelligence *model.ProjectIntelligencePack, credentials PageVerificationCredentials) (*model.VerifiedInteractionPlan, *model.MissingEvidenceReport, error)
+}
+
+type BusinessStagePlannerAgent interface {
+	PlanBusinessStages(ctx context.Context, project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport, productMap *model.ProductMap, intelligence *model.ProjectIntelligencePack, verifiedPlan *model.VerifiedInteractionPlan) (*model.BusinessStagePlan, error)
 }
 
 type GraphBuilderAgent interface {
@@ -162,18 +223,20 @@ type AssetGeneratorAgent interface {
 }
 
 type Dependencies struct {
-	InputContext        InputContextAgent
-	RequirementReader   RequirementReaderAgent
-	CodeReader          CodeReaderAgent
-	PageReader          PageReaderAgent
-	ProjectIntelligence ProjectIntelligenceAgent
-	Understanding       MultimodalUnderstandingAgent
-	ProductMap          ProductMapAgent
-	PageVerifier        PageInteractionVerifierAgent
-	GraphBuilder        GraphBuilderAgent
-	ScriptPackager      ScriptPackagerAgent
-	QAExecutor          QAExecutorAgent
-	AssetGenerator      AssetGeneratorAgent
+	InputContext         InputContextAgent
+	RequirementReader    RequirementReaderAgent
+	CodeReader           CodeReaderAgent
+	PageReader           PageReaderAgent
+	SourceBinding        SourceBindingAgent
+	ProjectIntelligence  ProjectIntelligenceAgent
+	Understanding        MultimodalUnderstandingAgent
+	ProductMap           ProductMapAgent
+	PageVerifier         PageInteractionVerifierAgent
+	BusinessStagePlanner BusinessStagePlannerAgent
+	GraphBuilder         GraphBuilderAgent
+	ScriptPackager       ScriptPackagerAgent
+	QAExecutor           QAExecutorAgent
+	AssetGenerator       AssetGeneratorAgent
 }
 
 type ProgressLevel string
@@ -220,6 +283,9 @@ func NewCascadeFlow(deps Dependencies) (*CascadeFlow, error) {
 	}
 	if deps.PageReader == nil {
 		return nil, errors.New("missing PageReader agent")
+	}
+	if deps.SourceBinding == nil {
+		return nil, errors.New("missing SourceBinding agent")
 	}
 	if deps.ProjectIntelligence == nil {
 		return nil, errors.New("missing ProjectIntelligence agent")
@@ -302,9 +368,17 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 	state.PageSnapshots = pageSnapshots
 	logNodeDone(ctx, state.CurrentNode, nodeStart, "PageReaderAgent 完成页面材料读取", fmt.Sprintf("pages=%d", len(pageSnapshots)))
 
+	assessment, effectiveCodeSnapshots, err := f.deps.SourceBinding.Assess(project, codeSnapshots, pageSnapshots, time.Now().UTC())
+	state.SourceBinding = assessment
+	project.SourceBinding = assessment
+	if err != nil {
+		logNodeError(ctx, NodeProjectIntelligence, nodeStart, err)
+		return fail(state, err), err
+	}
+
 	state.CurrentNode = NodeProjectIntelligence
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
-	intelligence, readiness, trace, err := f.deps.ProjectIntelligence.RunProjectIntelligence(ctx, project, brief, codeSnapshots, pageSnapshots)
+	intelligence, readiness, trace, err := f.deps.ProjectIntelligence.RunProjectIntelligence(ctx, project, brief, effectiveCodeSnapshots, pageSnapshots)
 	if err != nil {
 		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
@@ -326,7 +400,7 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 
 	state.CurrentNode = NodeMultimodalUnderstand
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
-	report, err := f.deps.Understanding.BuildUnderstanding(ctx, project, brief, codeSnapshots, pageSnapshots, intelligence)
+	report, err := f.deps.Understanding.BuildUnderstanding(ctx, project, brief, effectiveCodeSnapshots, pageSnapshots, intelligence)
 	if err != nil {
 		logNodeError(ctx, state.CurrentNode, nodeStart, err)
 		return fail(state, err), err
@@ -360,7 +434,18 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 		intelligence.VerifiedInteraction = verifiedPlan
 		intelligence.MissingEvidenceReport = missingReport
 	}
-	if missingReport != nil && missingReport.Blocking {
+	var businessStagePlan *model.BusinessStagePlan
+	if f.deps.BusinessStagePlanner != nil {
+		businessStagePlan, err = f.deps.BusinessStagePlanner.PlanBusinessStages(ctx, project, brief, report, productMap, intelligence, verifiedPlan)
+		if err != nil {
+			logNodeError(ctx, state.CurrentNode, nodeStart, err)
+			return fail(state, err), err
+		}
+		if intelligence != nil {
+			intelligence.BusinessStagePlan = businessStagePlan
+		}
+	}
+	if missingReport != nil && missingReport.Blocking && !businessStagePlanUsable(businessStagePlan) {
 		markReadinessBlockedByMissingEvidence(readiness, missingReport)
 		summary := missingReport.Summary
 		if summary == "" {
@@ -417,6 +502,22 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 		ElapsedMS: time.Since(startedAt).Milliseconds(),
 	})
 	return state, nil
+}
+
+func businessStagePlanUsable(plan *model.BusinessStagePlan) bool {
+	if plan == nil || len(plan.Stages) == 0 {
+		return false
+	}
+	if plan.CoreBusinessStageCount > 0 {
+		return true
+	}
+	for _, stage := range plan.Stages {
+		switch stage.Kind {
+		case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
+			return true
+		}
+	}
+	return false
 }
 
 // ApproveAndContinue resumes the flow after a human has reviewed and possibly

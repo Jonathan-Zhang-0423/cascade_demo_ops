@@ -21,6 +21,13 @@ type BrowserAgentRuntimePlan struct {
 	SourcePackageID        string
 	SourceBundleHashSHA256 string
 	PolicyHashSHA256       string
+	// The verifier receives the approved contracts, never a browser/page
+	// object. This keeps Validation Agent decisions traceable to the package.
+	WorkflowGraph       *model.DemoWorkflowGraph
+	Plan                *model.ExecutionScriptDocument
+	StageApprovalPlan   *model.StageApprovalPlan
+	ScriptOutline       *model.BrowserAgentScriptOutline
+	BrowserAgentContract *model.BrowserAgentContract
 	AllowedDomains         []string
 	ForbiddenPages         []string
 	ExplorationScope       model.BrowserAgentExplorationScope
@@ -90,19 +97,23 @@ type BrowserAgentStageActionResult struct {
 }
 
 type BrowserAgentStageEventVerifier interface {
-	ValidateStageEvents(context.Context, BrowserAgentValidationContext, []model.StageExecutionEvent) (model.ValidationReport, error)
+	ValidateStageEvents(context.Context, model.BrowserAgentValidationContext, []model.StageExecutionEvent) (model.ValidationReport, error)
 }
 
 // BrowserAgentStageRepairProposer is deliberately separate from the verifier.
 // A verifier may describe a safe mechanical repair, but it never applies one.
 type BrowserAgentStageRepairProposer interface {
-	ProposeRuntimeRepair(context.Context, BrowserAgentValidationContext, BrowserAgentRuntimeStage, []model.StageExecutionEvent, model.ValidationReport) (model.RuntimeRepairProposal, error)
+	ProposeRuntimeRepair(context.Context, model.BrowserAgentValidationContext, BrowserAgentRuntimeStage, []model.StageExecutionEvent, model.ValidationReport) (model.RuntimeRepairProposal, error)
 }
 
 type BrowserAgentStageRunResult struct {
 	Events            []model.StageExecutionEvent
 	ValidationReports []model.ValidationReport
 	PatchLedger       []model.RuntimePatchLedgerEntry
+	// AuditError is retained even when an error occurs while recording a
+	// terminal failure event. The caller must treat it as a platform failure,
+	// rather than silently delivering a result with an incomplete audit trail.
+	AuditError error
 }
 
 type BrowserAgentPolicyGuard interface {
@@ -127,6 +138,14 @@ func newBrowserAgentStageOrchestratorWithVerifier(guard BrowserAgentPolicyGuard,
 	orchestrator := newBrowserAgentStageOrchestrator(guard)
 	orchestrator.verifier = verifier
 	return orchestrator
+}
+
+func (p BrowserAgentRuntimePlan) validationContext() model.BrowserAgentValidationContext {
+	return model.BrowserAgentValidationContext{
+		RunID: p.RunID, SourcePackageID: p.SourcePackageID, SourceBundleHashSHA256: p.SourceBundleHashSHA256,
+		EffectivePolicyHashSHA256: p.PolicyHashSHA256, WorkflowGraph: p.WorkflowGraph, Plan: p.Plan,
+		StageApprovalPlan: p.StageApprovalPlan, ScriptOutline: p.ScriptOutline, BrowserAgentContract: p.BrowserAgentContract,
+	}
 }
 
 func (o browserAgentStageOrchestrator) Prepare(pkg *model.ClientExecutionPackage) (BrowserAgentRuntimePlan, error) {
@@ -183,6 +202,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			event.Action = runtimeActionForStage(stage)
 		}
 		if err := sink.Append(ctx, event); err != nil {
+			result.AuditError = err
 			return err
 		}
 		result.Events = append(result.Events, event)
@@ -273,10 +293,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		}
 		if o.verifier != nil {
 			stageEvents := result.Events[stageEventStart:]
-			report, err := o.verifier.ValidateStageEvents(ctx, BrowserAgentValidationContext{
-				SourcePackageID: plan.SourcePackageID, SourceBundleHashSHA256: plan.SourceBundleHashSHA256,
-				EffectivePolicyHashSHA256: plan.PolicyHashSHA256,
-			}, stageEvents)
+			report, err := o.verifier.ValidateStageEvents(ctx, plan.validationContext(), stageEvents)
 			if err != nil {
 				return result, newRuntimeExecutionError("outcome_verification_failed", err)
 			}
@@ -290,10 +307,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 					_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, actionResult.EvidenceRefs)
 					return result, newRuntimeExecutionError("browser_agent_repair_proposal_missing", fmt.Errorf("outcome verifier requested repair for stage %s without a proposal", stage.ID))
 				}
-				proposal, proposalErr := proposer.ProposeRuntimeRepair(ctx, BrowserAgentValidationContext{
-					SourcePackageID: plan.SourcePackageID, SourceBundleHashSHA256: plan.SourceBundleHashSHA256,
-					EffectivePolicyHashSHA256: plan.PolicyHashSHA256,
-				}, stage, stageEvents, report)
+				proposal, proposalErr := proposer.ProposeRuntimeRepair(ctx, plan.validationContext(), stage, stageEvents, report)
 				if proposalErr != nil {
 					_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, actionResult.EvidenceRefs)
 					return result, newRuntimeExecutionError("browser_agent_repair_proposal_invalid", proposalErr)
@@ -336,7 +350,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 					return result, err
 				}
 				repairEvents := result.Events[repairEventStart:]
-				repairReport, repairVerifyErr := o.verifier.ValidateStageEvents(ctx, BrowserAgentValidationContext{SourcePackageID: plan.SourcePackageID, SourceBundleHashSHA256: plan.SourceBundleHashSHA256, EffectivePolicyHashSHA256: plan.PolicyHashSHA256}, repairEvents)
+				repairReport, repairVerifyErr := o.verifier.ValidateStageEvents(ctx, plan.validationContext(), repairEvents)
 				if repairVerifyErr != nil || repairReport.Validate() != nil || repairReport.Decision != model.ValidationDecisionContinue {
 					_ = appendEvent(stage, model.StageExecutionEventStageFailed, repairActionResult.Observation, repairActionResult.EvidenceRefs)
 					if repairVerifyErr != nil {
@@ -485,6 +499,11 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		RunID: pkg.RecordingRunSpec.RunID, SourcePackageID: pkg.PackageID,
 		SourceBundleHashSHA256: bundle.Reproducibility.BundleHashSHA256,
 		PolicyHashSHA256:       bundle.Reproducibility.BrowserAgentContractHashSHA256,
+		WorkflowGraph:           pkg.WorkflowGraph,
+		Plan:                    bundle.PlanJSON,
+		StageApprovalPlan:       bundle.StageApprovalPlan,
+		ScriptOutline:           bundle.ScriptOutline,
+		BrowserAgentContract:    bundle.BrowserAgentContract,
 		AllowedDomains:         append([]string{}, bundle.SecurityPolicy.AllowedDomains...),
 		ForbiddenPages:         append([]string{}, bundle.SecurityPolicy.ForbiddenPages...),
 		ExplorationScope:       bundle.ScriptOutline.AllowedExplorationScope,
@@ -593,8 +612,16 @@ func (contractBrowserAgentPolicyGuard) Authorize(plan BrowserAgentRuntimePlan, i
 		if !browserAgentURLAllowed(target, plan.AllowedDomains) {
 			return deniedBrowserAgentPolicy("domain_not_allowed", "target is outside allowed domains")
 		}
+		if !browserAgentOriginAllowed(target, plan.ExplorationScope.AllowedOrigins) {
+			return deniedBrowserAgentPolicy("origin_not_allowed", "target is outside approved origins")
+		}
+		// A control-plane or explicitly forbidden page must retain its precise
+		// rejection reason even when it also falls outside the approved routes.
 		if browserAgentPathForbidden(target, plan.ForbiddenPages, plan.ExplorationScope.ForbiddenPathPrefixes) {
 			return deniedBrowserAgentPolicy("forbidden_page", "target matches a forbidden page or control-plane prefix")
+		}
+		if !browserAgentRouteAllowed(target, plan.ExplorationScope.AllowedRoutes) {
+			return deniedBrowserAgentPolicy("route_not_allowed", "target is outside approved routes")
 		}
 		lowerTarget := strings.ToLower(target)
 		for _, keyword := range plan.ExplorationScope.ForbiddenKeywords {
@@ -605,6 +632,50 @@ func (contractBrowserAgentPolicyGuard) Authorize(plan BrowserAgentRuntimePlan, i
 		}
 	}
 	return BrowserAgentPolicyDecision{Allowed: true, Code: "allowed", Reason: "action remains inside the approved non-destructive contract"}
+}
+
+func browserAgentOriginAllowed(value string, allowedOrigins []string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") || strings.HasPrefix(value, "#") {
+		return true
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	for _, origin := range allowedOrigins {
+		approved, err := url.Parse(strings.TrimSpace(origin))
+		if err == nil && approved.Scheme == parsed.Scheme && strings.EqualFold(approved.Host, parsed.Host) {
+			return true
+		}
+	}
+	return false
+}
+
+func browserAgentRouteAllowed(value string, allowedRoutes []string) bool {
+	if len(allowedRoutes) == 0 {
+		return false
+	}
+	path := normalizeBrowserAgentRoute(value)
+	for _, route := range allowedRoutes {
+		approved := normalizeBrowserAgentRoute(route)
+		if approved == "/" || path == approved || strings.HasPrefix(path, strings.TrimRight(approved, "/")+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeBrowserAgentRoute(value string) string {
+	value = strings.TrimSpace(value)
+	if parsed, err := url.Parse(value); err == nil && parsed.Path != "" {
+		value = parsed.Path
+	}
+	path := "/" + strings.Trim(strings.ToLower(value), "/")
+	if path == "" {
+		return "/"
+	}
+	return path
 }
 
 func deniedBrowserAgentPolicy(code string, reason string) BrowserAgentPolicyDecision {

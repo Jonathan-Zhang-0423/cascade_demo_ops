@@ -12,22 +12,25 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/driver"
+	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/model"
 )
 
 func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
-	// Rendering is covered by the end-to-end protocol acceptance test. This
-	// focused runner test uses a stub browser session and verifies orchestration.
-	pkg.RecordingRunSpec.Outputs.FinalVideo = false
 	plan, err := compileBrowserAgentRuntimePlan(&pkg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := &stubBrowserAgentWorkerSession{}
+	recordingPath := filepath.Join(t.TempDir(), "recording.webm")
+	if err := os.WriteFile(recordingPath, []byte("recording"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &stubBrowserAgentWorkerSession{recordingPath: recordingPath}
 	var openRequest driver.BrowserAgentWorkerOpenRequest
 	runner := localBrowserAgentOutlineRunner{
-		service: &Service{},
+		service:       &Service{},
+		renderService: stubBrowserAgentRenderService{},
 		sessionFactory: func(_ context.Context, request driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
 			openRequest = request
 			return session, driver.BrowserAgentWorkerOpenResult{SessionID: request.SessionID, RuntimeVersions: map[string]string{"runner": "stub-browser-agent"}}, nil
@@ -36,7 +39,7 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 	var progressStages []string
 	result, err := runner.Run(context.Background(), BrowserAgentOutlineRunRequest{
 		Package: &pkg, RuntimePlan: plan, CloudJobID: "job_outline_result",
-		RecordingOutputDir: t.TempDir(), ResultCreatedAt: time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC),
+		RecordingOutputDir: t.TempDir(), RenderOutputDir: t.TempDir(), ResultCreatedAt: time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC),
 		Progress:  func(stage, _ string, _ int) { progressStages = append(progressStages, stage) },
 		EventSink: &memoryStageEventSink{},
 	})
@@ -52,13 +55,21 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 	if result.Status != model.RecordingResultStatusGenerated || result.ExecutionRuntime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
 		t.Fatalf("unexpected browser-agent result package: %+v", result)
 	}
-	if len(result.StepResults) != len(plan.Stages) || len(result.ValidationReports) != len(plan.Stages) {
+	if len(result.StepResults) != len(plan.Stages) || len(result.ValidationReports) != len(plan.Stages)+2 {
 		t.Fatalf("result package lost stage results or validations: steps=%d reports=%d", len(result.StepResults), len(result.ValidationReports))
+	}
+	if result.ValidationReports[0].Phase != model.ValidationPhasePreExecution || result.ValidationReports[len(result.ValidationReports)-1].Phase != model.ValidationPhasePostExecution {
+		t.Fatalf("result package must include strict pre/post validation reports: %+v", result.ValidationReports)
+	}
+	for _, step := range result.StepResults {
+		if step.ObservedState == "" || step.ObservedState == plan.Stages[0].SuccessState {
+			t.Fatalf("step result must contain real observation summary, not planned success text: %+v", step)
+		}
 	}
 	if result.ExecutionTrace == nil || result.ExecutionTrace.PassRate != 1 || len(result.GeneratedAssets) < len(plan.Stages)*2 {
 		t.Fatalf("result package lost browser evidence: %+v", result.ExecutionTrace)
 	}
-	for _, required := range []string{"validating_pre_execution", "running_browser_agent", "validating_runtime_stage", "validating_post_execution", "packaging_recording"} {
+	for _, required := range []string{"validating_pre_execution", "running_browser_agent", "validating_runtime_stage", "validating_post_execution", "packaging_recording", "directing", "rendering", "quality_validation"} {
 		if !containsProgressStage(progressStages, required) {
 			t.Fatalf("missing progress stage %q in %v", required, progressStages)
 		}
@@ -67,7 +78,7 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 
 func TestDeterministicBrowserAgentStageVerifierStopsOnFailedAssertion(t *testing.T) {
 	verifier := deterministicBrowserAgentStageVerifier{}
-	report, err := verifier.ValidateStageEvents(context.Background(), BrowserAgentValidationContext{
+	report, err := verifier.ValidateStageEvents(context.Background(), model.BrowserAgentValidationContext{
 		SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
 	}, []model.StageExecutionEvent{{
 		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1",
@@ -89,7 +100,7 @@ func TestDeterministicBrowserAgentStageVerifierStopsWhenRequiredValidationIsMiss
 	verifier := deterministicBrowserAgentStageVerifier{requiredValidations: map[string][]model.ValidationSpec{
 		"node_1": {{ID: "validation_1", Kind: "element_visible", Required: true}},
 	}}
-	report, err := verifier.ValidateStageEvents(context.Background(), BrowserAgentValidationContext{
+	report, err := verifier.ValidateStageEvents(context.Background(), model.BrowserAgentValidationContext{
 		SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
 	}, []model.StageExecutionEvent{{
 		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1",
@@ -105,6 +116,157 @@ func TestDeterministicBrowserAgentStageVerifierStopsWhenRequiredValidationIsMiss
 	if report.Decision != model.ValidationDecisionStopAndReport {
 		t.Fatalf("missing required validation must stop the next stage: %+v", report)
 	}
+}
+
+func TestDeterministicBrowserAgentVerifierPreExecutionReportsMissingHashes(t *testing.T) {
+	report, err := newDeterministicBrowserAgentStageVerifier(nil).ValidateBeforeExecution(context.Background(), model.BrowserAgentValidationContext{
+		RunID: "run_1", SourcePackageID: "pkg_1",
+		StageApprovalPlan:    &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{NodeID: "node_1"}}},
+		ScriptOutline:        &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{NodeID: "node_1"}}},
+		BrowserAgentContract: &model.BrowserAgentContract{ID: "contract_1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := report.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport || !validationReportHasCheckCode(report, "approved_hash_missing", false) {
+		t.Fatalf("pre-execution verifier must stop when approved hashes are missing: %+v", report)
+	}
+}
+
+func TestDeterministicBrowserAgentStageVerifierStopsOnRuntimeIdentityMismatch(t *testing.T) {
+	verifier := deterministicBrowserAgentStageVerifier{}
+	report, err := verifier.ValidateStageEvents(context.Background(), model.BrowserAgentValidationContext{
+		RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
+	}, []model.StageExecutionEvent{{
+		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1",
+		SourcePackageID: "pkg_1", SourceBundleHashSHA256: "tampered_bundle_hash", PolicyHashSHA256: "policy_hash",
+		NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 1,
+		EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: timeNowUTC(),
+		Observation:  &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "action_completed", Passed: true}}},
+		EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport || !validationReportHasCheckCode(report, "runtime_event_identity_mismatch", false) {
+		t.Fatalf("runtime verifier must stop on event/package identity mismatch: %+v", report)
+	}
+}
+
+func TestDeterministicBrowserAgentPostVerifierRequiresRuntimeReportsAndObservedState(t *testing.T) {
+	verifier := deterministicBrowserAgentStageVerifier{}
+	now := timeNowUTC()
+	vctx := model.BrowserAgentValidationContext{RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash"}
+	events := []model.StageExecutionEvent{
+		{SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash", NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 1, EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: now, Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "action_completed", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}}},
+		{SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_2", RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash", NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 2, EventType: model.StageExecutionEventStageCompleted, OccurredAt: now.Add(time.Second), Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}}},
+	}
+	result := model.RecordingResultPackage{
+		SourcePackageID:   "pkg_1",
+		StepResults:       []model.StepResult{{NodeID: "node_1", Status: "passed", ObservedState: "planned success state", Artifacts: []model.ArtifactRef{{ID: "artifact_1", SourceNodeID: "node_1"}}}},
+		ValidationReports: []model.ValidationReport{{SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "validation_pre", RunID: "run_1", SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash", Phase: model.ValidationPhasePreExecution, Decision: model.ValidationDecisionContinue, PassRate: 1, OverallConfidence: 1, EvidenceQuality: model.RuntimeObservationDerivedPlan, EvidenceRefs: []model.EvidenceRef{{ID: "approved_package_contract", Kind: model.EvidenceKindDocs}}, CreatedAt: now}},
+	}
+	report, err := verifier.ValidatePostExecution(context.Background(), vctx, result, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport ||
+		!validationReportHasCheckCode(report, "runtime_stage_report_missing", false) ||
+		!validationReportHasCheckCode(report, "observed_state_not_runtime_derived", false) {
+		t.Fatalf("post verifier must reject missing runtime reports and plan-derived observed state: %+v", report)
+	}
+}
+
+func TestBrowserAgentStepResultsNeverUsePlannedSuccessStateAsEvidence(t *testing.T) {
+	plan := BrowserAgentRuntimePlan{Stages: []BrowserAgentRuntimeStage{{NodeID: "node_1", SuccessState: "planned business success"}}}
+	now := timeNowUTC()
+	results := browserAgentStepResults(plan, []model.StageExecutionEvent{
+		{NodeID: "node_1", EventType: model.StageExecutionEventStageStarted, OccurredAt: now},
+		{NodeID: "node_1", EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: now, Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "business_saved", Passed: true}}}},
+		{NodeID: "node_1", EventType: model.StageExecutionEventStageCompleted, OccurredAt: now.Add(time.Second)},
+	}, nil)
+	if len(results) != 1 || results[0].Status != "passed" || results[0].ObservedState == "planned business success" || !strings.Contains(results[0].ObservedState, "assertion:business_saved=passed") {
+		t.Fatalf("step result must derive its state from runtime observations: %+v", results)
+	}
+}
+
+func validationReportHasCheckCode(report model.ValidationReport, code string, passed bool) bool {
+	for _, check := range report.Checks {
+		if check.Code == code && check.Passed == passed {
+			return true
+		}
+	}
+	return false
+}
+
+func TestLocalBrowserAgentOutlineRunnerPostValidationStopsDelivery(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := localBrowserAgentOutlineRunner{
+		service: &Service{}, outcomeVerifier: postStoppingBrowserAgentVerifier{deterministicBrowserAgentStageVerifier: newDeterministicBrowserAgentStageVerifier(&pkg)},
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return &stubBrowserAgentWorkerSession{}, driver.BrowserAgentWorkerOpenResult{SessionID: "post-stop", RuntimeVersions: map[string]string{"runner": "stub-browser-agent"}}, nil
+		},
+	}
+	result, err := runner.Run(context.Background(), BrowserAgentOutlineRunRequest{Package: &pkg, RuntimePlan: plan, CloudJobID: "post_stop", RecordingOutputDir: t.TempDir(), ResultCreatedAt: timeNowUTC(), EventSink: &memoryStageEventSink{}})
+	if err != nil {
+		t.Fatalf("a post-validation business failure must become a failed result package: %v", err)
+	}
+	if result.Status != model.RecordingResultStatusFailed || result.FailureDiagnostic == nil || result.StepResults[0].Status != "failed" {
+		t.Fatalf("post-validation stop must prevent a successful delivery: %+v", result)
+	}
+	if result.ValidationReports[len(result.ValidationReports)-1].Phase != model.ValidationPhasePostExecution || result.ValidationReports[len(result.ValidationReports)-1].Decision != model.ValidationDecisionStopAndReport {
+		t.Fatalf("post-validation decision was not retained in the result: %+v", result.ValidationReports)
+	}
+}
+
+func TestLocalBrowserAgentOutlineRunnerUsesServerOutcomeVerifierSnapshot(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{}
+	service.SetBrowserAgentOutcomeVerifier(postStoppingBrowserAgentVerifier{deterministicBrowserAgentStageVerifier: newDeterministicBrowserAgentStageVerifier(&pkg)})
+	runner := localBrowserAgentOutlineRunner{
+		service: service,
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return &stubBrowserAgentWorkerSession{}, driver.BrowserAgentWorkerOpenResult{SessionID: "service-verifier", RuntimeVersions: map[string]string{"runner": "stub-browser-agent"}}, nil
+		},
+	}
+	result, err := runner.Run(context.Background(), BrowserAgentOutlineRunRequest{Package: &pkg, RuntimePlan: plan, CloudJobID: "service_verifier", RecordingOutputDir: t.TempDir(), ResultCreatedAt: timeNowUTC(), EventSink: &memoryStageEventSink{}})
+	if err != nil {
+		t.Fatalf("Server-injected verifier should package a controlled failed result: %v", err)
+	}
+	if result.Status != model.RecordingResultStatusFailed || len(result.ValidationReports) != len(plan.Stages)+2 || result.ValidationReports[len(result.ValidationReports)-1].Decision != model.ValidationDecisionStopAndReport {
+		t.Fatalf("runner did not use the Server verifier snapshot: %+v", result)
+	}
+}
+
+type postStoppingBrowserAgentVerifier struct {
+	deterministicBrowserAgentStageVerifier
+}
+
+func (v postStoppingBrowserAgentVerifier) ValidateBeforeExecution(ctx context.Context, validationContext model.BrowserAgentValidationContext) (model.ValidationReport, error) {
+	return v.deterministicBrowserAgentStageVerifier.ValidateBeforeExecution(ctx, validationContext)
+}
+
+func (v postStoppingBrowserAgentVerifier) ValidatePostExecution(_ context.Context, validationContext model.BrowserAgentValidationContext, _ model.RecordingResultPackage, _ []model.StageExecutionEvent) (model.ValidationReport, error) {
+	return model.ValidationReport{
+		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "post_stop", RunID: validationContext.SourcePackageID,
+		SourcePackageID: validationContext.SourcePackageID, SourceBundleHashSHA256: validationContext.SourceBundleHashSHA256,
+		PolicyHashSHA256: validationContext.EffectivePolicyHashSHA256, Phase: model.ValidationPhasePostExecution,
+		NodeID: "node_open_dashboard", Decision: model.ValidationDecisionStopAndReport, PassRate: 0, OverallConfidence: 0,
+		EvidenceQuality: model.RuntimeObservationAssertion, EvidenceRefs: []model.EvidenceRef{{ID: "post_stop_evidence", Kind: model.EvidenceKindWebScreenshot}}, CreatedAt: timeNowUTC(),
+	}, nil
 }
 
 func TestLocalBrowserAgentOutlineRunnerPackagesRedactedFailureResult(t *testing.T) {
@@ -132,7 +294,7 @@ func TestLocalBrowserAgentOutlineRunnerPackagesRedactedFailureResult(t *testing.
 	if result.FailureDiagnostic.FailedNodeID != plan.Stages[1].NodeID || !result.FailureDiagnostic.RedactionReport.Applied || result.FailureDiagnostic.RedactionReport.FullHTMLIncluded {
 		t.Fatalf("failure diagnostic did not preserve protocol safety requirements: %+v", result.FailureDiagnostic)
 	}
-	if result.RepairRequest.ApprovalRequired != true || len(result.ValidationReports) != 1 {
+	if result.RepairRequest.ApprovalRequired != true || len(result.ValidationReports) != 3 {
 		t.Fatalf("failure result lost repair approval or validation evidence: %+v", result)
 	}
 	if result.StepResults[0].Status != "passed" || result.StepResults[1].Status != "failed" {
@@ -203,7 +365,7 @@ func TestOutlineRuntimeFullPathRecordsSelectorRepairInResultAndAuditLog(t *testi
 	if !hasStageEvent(events, model.StageExecutionEventRepairProposed, 1) || !hasStageEvent(events, model.StageExecutionEventRepairApplied, 2) || !hasStageEvent(events, model.StageExecutionEventTargetResolved, 2) {
 		t.Fatalf("repair events or second-attempt target resolution are missing: %+v", events)
 	}
-	if len(result.ValidationReports) != len(plan.Stages) || result.ValidationReports[1].Decision != model.ValidationDecisionContinue {
+	if len(result.ValidationReports) != len(plan.Stages)+2 || result.ValidationReports[2].Decision != model.ValidationDecisionContinue {
 		t.Fatalf("outcome verification did not pass after the selector repair: %+v", result.ValidationReports)
 	}
 }
@@ -365,10 +527,11 @@ func hasStageEvent(events []model.StageExecutionEvent, eventType model.StageExec
 }
 
 type stubBrowserAgentWorkerSession struct {
-	observeCalls int
-	executeCalls int
-	closeCalls   int
-	failNodeID   string
+	observeCalls  int
+	executeCalls  int
+	closeCalls    int
+	recordingPath string
+	failNodeID    string
 }
 
 func (s *stubBrowserAgentWorkerSession) Observe(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
@@ -403,9 +566,27 @@ func (s *stubBrowserAgentWorkerSession) Execute(_ context.Context, stage driver.
 func (s *stubBrowserAgentWorkerSession) Close(context.Context) (driver.BrowserAgentWorkerCloseResult, error) {
 	s.closeCalls++
 	return driver.BrowserAgentWorkerCloseResult{
+		RecordingPath:   s.recordingPath,
 		Artifacts:       []model.ArtifactRef{{ID: "artifact_trace", Kind: "browser_trace", URI: "file:///trace.zip", SHA256: "trace_hash", SizeBytes: 10, Sensitive: true}},
 		RuntimeVersions: map[string]string{"browser": "chromium"},
 	}, nil
+}
+
+type stubBrowserAgentRenderService struct{}
+
+func (stubBrowserAgentRenderService) Render(_ context.Context, request executor.RenderRequest) (executor.RenderResult, error) {
+	if err := os.MkdirAll(request.OutputDir, 0o700); err != nil {
+		return executor.RenderResult{}, err
+	}
+	videoPath := filepath.Join(request.OutputDir, "demo.mp4")
+	manifestPath := filepath.Join(request.OutputDir, "render_manifest.json")
+	planPath := filepath.Join(request.OutputDir, "demo_edit_plan.json")
+	for path, contents := range map[string]string{videoPath: "demo-video", manifestPath: "{}", planPath: "{}"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			return executor.RenderResult{}, err
+		}
+	}
+	return executor.RenderResult{VideoPath: videoPath, RenderManifestPath: manifestPath, DemoEditPlanPath: planPath}, nil
 }
 
 func (s *stubBrowserAgentWorkerSession) Abort() error { return nil }

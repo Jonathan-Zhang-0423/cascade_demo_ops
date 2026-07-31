@@ -37,7 +37,8 @@ func TestBrowserAgentWorkerRealSessionSmoke(t *testing.T) {
 	session, opened, err := worker.Open(ctx, BrowserAgentWorkerOpenRequest{
 		SessionID: "go_driver_smoke", OutputDir: t.TempDir(),
 		Browser:        BrowserAgentWorkerBrowser{Engine: "chromium", Headless: true, Viewport: BrowserAgentWorkerViewport{Width: 960, Height: 640}},
-		AllowedDomains: []string{"127.0.0.1"}, ForbiddenPathPrefixes: []string{"/v1"},
+		AllowedDomains: []string{"127.0.0.1"}, AllowedOrigins: []string{server.URL}, AllowedRoutes: []string{"/"},
+		ForbiddenPathPrefixes: []string{"/v1"},
 	})
 	if err != nil {
 		t.Fatal(err)

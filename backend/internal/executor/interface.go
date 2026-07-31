@@ -7,9 +7,13 @@ import (
 	"cascade-demoops/backend/internal/model"
 )
 
-type Service interface {
-	Record(ctx context.Context, request RecordRequest) (RecordResult, error)
+type RenderService interface {
 	Render(ctx context.Context, request RenderRequest) (RenderResult, error)
+}
+
+type Service interface {
+	RenderService
+	Record(ctx context.Context, request RecordRequest) (RecordResult, error)
 }
 
 type MediaProbeRequest struct {

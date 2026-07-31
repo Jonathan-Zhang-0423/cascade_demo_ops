@@ -676,7 +676,7 @@ func (a *nativeApp) createControls() {
 	a.copyPreviewBtn = createChild(a.hwnd, "BUTTON", "复制", wsChild|wsVisible|bsPushButton, idCopyPreview)
 	a.openPreviewBtn = createChild(a.hwnd, "BUTTON", "打开文件", wsChild|wsVisible|bsPushButton, idOpenPreviewFile)
 	a.previewContent = createChild(a.hwnd, "EDIT", "", wsChild|wsVisible|wsBorder|wsVScroll|wsHScroll|esMultiline|esAutoVScroll|esAutoHScroll|esReadOnly, idPreviewContent)
-	a.productURL = a.labelAndEdit("产品 URL", idProductURL, "https://cascadeai.cn", false, false)
+	a.productURL = a.labelAndEdit("产品 URL", idProductURL, "", false, false)
 	a.localRepoPath = a.labelAndEdit("本地项目路径（可选）", idLocalRepoPath, "", false, false)
 	a.gitRepoURL = a.labelAndEdit("GitHub 仓库 URL（可选）", idGitRepoURL, "", false, false)
 	a.demoUsername = a.labelAndEdit("演示账号（可选）", idDemoUsername, "", false, false)
@@ -2734,7 +2734,7 @@ func (a *nativeApp) clearInputDraft() {
 		return
 	}
 	a.suppressDraftSave = true
-	setWindowText(a.productURL.Edit, "https://cascadeai.cn")
+	setWindowText(a.productURL.Edit, "")
 	setWindowText(a.localRepoPath.Edit, "")
 	setWindowText(a.gitRepoURL.Edit, "")
 	setWindowText(a.demoUsername.Edit, "")

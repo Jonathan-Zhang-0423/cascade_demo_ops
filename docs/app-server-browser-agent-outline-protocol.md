@@ -14,13 +14,13 @@ App 端输出三份用户/机器共同审批材料：
 
 ## 当前联调入口
 
-公网 nginx 前缀：
+DemoOps 控制面必须通过独立配置提供，不能从客户产品 URL 推导：
 
 ```text
-https://cascadeai.cn/aigc
+<DEMOOPS_CONTROL_PLANE_BASE_URL>
 ```
 
-直连本地/内网 dev server：
+开发阶段服务可只监听服务器环回地址，并由开发机通过 SSH 端口转发访问：
 
 ```text
 http://127.0.0.1:4317
@@ -63,12 +63,12 @@ Content-Type: application/json
 
 ## HTTP API
 
-所有路径在公网部署下都加 `/aigc` 前缀；语义与无前缀路径一致。
+以下文档使用规范的无前缀路径。`/aigc` 仅是旧联调兼容前缀，不是产品域名或录制目标路径。
 
 ### 1. Init
 
 ```http
-POST /aigc/v1/execution-packages/init
+POST /v1/execution-packages/init
 ```
 
 请求：
@@ -103,7 +103,7 @@ POST /aigc/v1/execution-packages/init
 ### 2. Upload
 
 ```http
-POST /aigc/v1/execution-packages
+POST /v1/execution-packages
 ```
 
 dev 明文联调请求：
@@ -162,14 +162,14 @@ dev 明文联调请求：
 ### 3. Status
 
 ```http
-GET /aigc/v1/execution-packages/{exchange_package_id}/status
+GET /v1/execution-packages/{exchange_package_id}/status
 X-Cascade-Org-ID: org_devsmoke
 ```
 
 建议状态流：
 
 ```text
-accepted -> validating -> preparing_worker -> running_browser_agent -> recording -> rendering -> completed
+accepted -> validating -> preparing_worker -> browser_agent_planning -> script_ready -> recording -> material_validation -> directing -> rendering -> quality_validation -> completed
 ```
 
 失败状态：
@@ -192,7 +192,7 @@ accepted -> validating -> preparing_worker -> running_browser_agent -> recording
 ### 4. Result
 
 ```http
-GET /aigc/v1/result-packages/{result_package_id}
+GET /v1/result-packages/{result_package_id}
 X-Cascade-Org-ID: org_devsmoke
 ```
 
@@ -214,10 +214,29 @@ X-Cascade-Org-ID: org_devsmoke
 - redaction report
 - `repair_request`
 
+### 4.1 端到端验收标记
+
+`GET /v1/execution-packages/{exchange_package_id}/status` 的
+`result_summary.acceptance` 是 App 可安全展示的验收摘要。它不携带页面、凭据或原始证据，完整证据仍只存在结果包中。
+
+```json
+{
+  "origin": "app_formal_exchange",
+  "app_generated": true,
+  "formal_exchange": true,
+  "strict_evidence_complete": true,
+  "final_mp4_available": true,
+  "editor_materialized": true,
+  "status": "ready_for_app_e2e_acceptance"
+}
+```
+
+只有 `origin=app_formal_exchange`、真实观察证据完整、阶段事件审计存在且已产出 MP4 时，Server 才能返回 `ready_for_app_e2e_acceptance`。`origin=app_formal_exchange` 的前提是：上传请求携带已验证的 `Cascade-Session`，该会话的 Installation ID 必须同时匹配 init 会话和 envelope 的 `producer.install_id`；Server 不接受包内的自报字段作为来源证明。来源未绑定时返回 `unverified_origin`，不能作为正式联调依据。Server 固定包或受控验收包必须返回 `origin=server_controlled_fixture` 和 `status=server_fixture_only`；它们只能证明 Server 回归能力，绝不能作为 App -> Exchange -> Server 联调通过证据。
+
 ### 5. Ack
 
 ```http
-POST /aigc/v1/result-packages/{result_package_id}/ack
+POST /v1/result-packages/{result_package_id}/ack
 X-Cascade-Org-ID: org_devsmoke
 ```
 
@@ -495,7 +514,9 @@ Server Browser Agent 收到 outline 包后应：
 8. 成功后生成 final video、raw recording、screenshots、trace 和 checksum。
 9. 失败时返回 redacted diagnostic + repair_request。
 
-Browser Agent 不应访问 exchange/control-plane 接口来“寻找产品页面”。`/aigc` 只属于上传通道，不属于产品脚本规划或录制探索范围。
+Browser Agent 不应访问 exchange/control-plane 接口来“寻找产品页面”。控制面路径只属于上传通道，不属于产品脚本规划或录制探索范围。
+
+`cascadeai.cn` 仅可在明确标注的 smoke fixture 中作为测试目标网站出现；它不是 DemoOps 控制面、更新源、遥测入口或产品域名。
 
 ## 服务端验收清单
 

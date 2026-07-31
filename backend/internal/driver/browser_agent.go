@@ -15,8 +15,9 @@ import (
 )
 
 type BrowserAgentWorker struct {
-	NodeBinary string
-	WorkerPath string
+	NodeBinary  string
+	WorkerPath  string
+	Environment map[string]string
 }
 
 type BrowserAgentWorkerBrowser struct {
@@ -36,10 +37,17 @@ type BrowserAgentWorkerOpenRequest struct {
 	OutputDir             string                    `json:"output_dir"`
 	Browser               BrowserAgentWorkerBrowser `json:"browser"`
 	AllowedDomains        []string                  `json:"allowed_domains"`
+	AllowedOrigins        []string                  `json:"allowed_origins,omitempty"`
+	AllowedRoutes         []string                  `json:"allowed_routes,omitempty"`
 	ForbiddenPages        []string                  `json:"forbidden_pages,omitempty"`
 	ForbiddenPathPrefixes []string                  `json:"forbidden_path_prefixes,omitempty"`
 	ForbiddenKeywords     []string                  `json:"forbidden_keywords,omitempty"`
 	MaskSelectors         []string                  `json:"mask_selectors,omitempty"`
+	RecordingSensitive    *bool                     `json:"recording_sensitive,omitempty"`
+	// RecordTrace may be disabled only by the local dev-visible login handoff.
+	// It prevents credentials entered manually in that isolated window from
+	// being persisted in a Playwright trace.
+	RecordTrace *bool `json:"record_trace,omitempty"`
 }
 
 type BrowserAgentWorkerOpenResult struct {
@@ -81,6 +89,24 @@ type BrowserAgentWorkerStageResult struct {
 	SuggestedWaitCondition       string                   `json:"suggested_wait_condition,omitempty"`
 }
 
+// BrowserAgentWorkerStatus is deliberately limited to redacted page metadata.
+// It never returns storage state, cookies, page HTML, or form values.
+type BrowserAgentWorkerStatus struct {
+	URL   string `json:"url,omitempty"`
+	Title string `json:"title,omitempty"`
+}
+
+// BrowserAgentWorkerExecutionPolicy narrows the initial local login scope to
+// the App-approved execution scope before any Browser Agent stage can run.
+type BrowserAgentWorkerExecutionPolicy struct {
+	AllowedOrigins        []string `json:"allowed_origins"`
+	AllowedRoutes         []string `json:"allowed_routes"`
+	ForbiddenPages        []string `json:"forbidden_pages,omitempty"`
+	ForbiddenPathPrefixes []string `json:"forbidden_path_prefixes,omitempty"`
+	ForbiddenKeywords     []string `json:"forbidden_keywords,omitempty"`
+	MaskSelectors         []string `json:"mask_selectors,omitempty"`
+}
+
 type BrowserAgentWorkerCloseResult struct {
 	RecordingPath   string              `json:"recording_path,omitempty"`
 	TracePath       string              `json:"trace_path,omitempty"`
@@ -100,11 +126,11 @@ type BrowserAgentWorkerSession struct {
 	sessionID string
 }
 
-func NewBrowserAgentWorker(nodeBinary string, workerPath string) *BrowserAgentWorker {
+func NewBrowserAgentWorker(nodeBinary string, workerPath string, environment ...map[string]string) *BrowserAgentWorker {
 	if nodeBinary == "" {
 		nodeBinary = "node"
 	}
-	return &BrowserAgentWorker{NodeBinary: nodeBinary, WorkerPath: workerPath}
+	return &BrowserAgentWorker{NodeBinary: nodeBinary, WorkerPath: workerPath, Environment: firstEnvironment(environment)}
 }
 
 func (w *BrowserAgentWorker) Open(ctx context.Context, request BrowserAgentWorkerOpenRequest) (*BrowserAgentWorkerSession, BrowserAgentWorkerOpenResult, error) {
@@ -112,6 +138,7 @@ func (w *BrowserAgentWorker) Open(ctx context.Context, request BrowserAgentWorke
 		return nil, BrowserAgentWorkerOpenResult{}, errors.New("node worker path is required")
 	}
 	cmd := exec.Command(w.NodeBinary, w.WorkerPath)
+	cmd.Env = childProcessEnvironment(w.Environment)
 	configureProcessTree(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -148,6 +175,25 @@ func (s *BrowserAgentWorkerSession) Observe(ctx context.Context, stage BrowserAg
 func (s *BrowserAgentWorkerSession) Execute(ctx context.Context, stage BrowserAgentWorkerStage) (BrowserAgentWorkerStageResult, error) {
 	var result BrowserAgentWorkerStageResult
 	err := s.call(ctx, "browser_agent_execute", BrowserAgentWorkerStageRequest{SessionID: s.sessionID, Stage: stage}, &result)
+	return result, err
+}
+
+func (s *BrowserAgentWorkerSession) Status(ctx context.Context) (BrowserAgentWorkerStatus, error) {
+	var result BrowserAgentWorkerStatus
+	err := s.call(ctx, "browser_agent_status", map[string]string{"session_id": s.sessionID}, &result)
+	return result, err
+}
+
+func (s *BrowserAgentWorkerSession) ApplyExecutionPolicy(ctx context.Context, policy BrowserAgentWorkerExecutionPolicy) error {
+	var result struct{}
+	return s.call(ctx, "browser_agent_apply_execution_policy", map[string]any{"session_id": s.sessionID, "policy": policy}, &result)
+}
+
+// NavigateDevVisible is restricted to the local dev-visible login handoff. It
+// navigates without capturing an action screenshot or reading page data.
+func (s *BrowserAgentWorkerSession) NavigateDevVisible(ctx context.Context, targetURL string) (BrowserAgentWorkerStatus, error) {
+	var result BrowserAgentWorkerStatus
+	err := s.call(ctx, "browser_agent_dev_visible_navigate", map[string]string{"session_id": s.sessionID, "target_url": targetURL}, &result)
 	return result, err
 }
 

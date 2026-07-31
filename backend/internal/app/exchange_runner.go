@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,17 @@ import (
 )
 
 func (s *Service) RunUploadedExecutionPackage(ctx context.Context, orgID string, exchangePackageID string) (model.ExecutionPackageStatusResponse, error) {
+	pkg, snapshotErr := s.exchange.PayloadSnapshot(ctx, orgID, exchangePackageID)
+	if snapshotErr != nil {
+		return model.ExecutionPackageStatusResponse{}, snapshotErr
+	}
+	if readinessErr := browserAgentReadinessError(browserAgentReadiness(&pkg)); readinessErr != nil {
+		status, statusErr := s.exchange.Status(ctx, orgID, exchangePackageID)
+		if statusErr != nil {
+			return model.ExecutionPackageStatusResponse{}, readinessErr
+		}
+		return status, readinessErr
+	}
 	started, err := s.exchange.TryStartExecution(ctx, orgID, exchangePackageID)
 	if err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
@@ -50,13 +62,33 @@ func (s *Service) runUploadedExecutionPackageSync(ctx context.Context, orgID str
 		Package: &pkg, CloudJobID: cloudJobID,
 		RecordingOutputDir: recordingDir, RenderOutputDir: renderDir, ResultCreatedAt: time.Now().UTC(),
 		Progress: func(stage string, message string, progress int) {
-			_, _ = s.exchange.MarkExecutionStage(ctx, orgID, exchangePackageID, stage, message, progress)
+			canonicalStage, canonicalProgress := canonicalExecutionStage(stage, progress)
+			_, _ = s.exchange.MarkExecutionStage(ctx, orgID, exchangePackageID, canonicalStage, message, canonicalProgress)
 		},
 	})
 	if err != nil {
 		return s.failUploadedExecution(ctx, orgID, exchangePackageID, runtimeExecutionErrorCode(err), err)
 	}
 	return s.CompleteExecutionPackageWithResult(ctx, orgID, exchangePackageID, result)
+}
+
+func canonicalExecutionStage(stage string, progress int) (string, int) {
+	switch stage {
+	case "validating_pre_execution":
+		return "browser_agent_planning", maxInt(progress, 30)
+	case "running_browser_agent", "running_script":
+		return "recording", maxInt(progress, 45)
+	case "validating_runtime_stage", "validating_post_execution", "packaging_recording":
+		return "material_validation", maxInt(progress, 70)
+	case "preparing_director_input", "applying_director_patch":
+		return "directing", maxInt(progress, 78)
+	case "rendering":
+		return "rendering", maxInt(progress, 85)
+	case "quality_validation":
+		return "quality_validation", maxInt(progress, 95)
+	default:
+		return stage, progress
+	}
 }
 
 func (s *Service) GetExecutionPackageDebug(ctx context.Context, orgID string, exchangePackageID string) (ExecutionPackageDebugView, error) {
@@ -277,6 +309,13 @@ func debugExecutionReadiness(status model.ExecutionPackageStatusResponse, pkg mo
 	}
 	if !nodeReady {
 		blockers = append(blockers, ExecutionDebugBlocker{Code: "node_runtime_missing", Message: "Node runtime is not available for the video-worker."})
+	}
+	for _, finding := range browserAgentReadiness(&pkg).Blockers {
+		message := finding.Message
+		if finding.NodeID != "" {
+			message = fmt.Sprintf("stage %s: %s", finding.NodeID, message)
+		}
+		blockers = append(blockers, ExecutionDebugBlocker{Code: finding.Code, Message: message})
 	}
 	return ExecutionDebugReadiness{CanRun: len(blockers) == 0, Blockers: blockers}
 }

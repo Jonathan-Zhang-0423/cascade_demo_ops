@@ -33,6 +33,53 @@ func TestCompileBrowserAgentRuntimePlanKeepsApprovedStageOrderAndSemantics(t *te
 	}
 }
 
+func TestBrowserAgentReadinessAcceptsCompleteFixture(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	report := browserAgentReadiness(&pkg)
+	if !report.CanRun || len(report.Blockers) != 0 {
+		t.Fatalf("complete outline fixture should be runnable: %+v", report)
+	}
+}
+
+func TestBrowserAgentReadinessRejectsWorkspaceWaitWithoutTransitionOrValidation(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	stage := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[0]
+	stage.StageKind = model.BusinessStageKindSessionSetup
+	stage.RouteState = model.BusinessRouteStateWorkspace
+	stage.Interaction = model.BrowserAgentInteraction{Kind: model.GraphActionWait, NonDestructive: true}
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[0].StageKind = stage.StageKind
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[0].RouteState = stage.RouteState
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[0].Interactions = []model.BrowserAgentInteraction{{Kind: model.GraphActionWait, NonDestructive: true}}
+	pkg.ExecutableScriptBundle.PlanJSON.Steps[0].Validations = nil
+
+	report := browserAgentReadiness(&pkg)
+	if report.CanRun || !browserAgentReadinessHasBlocker(report, "workspace_login_path_missing") || !browserAgentReadinessHasBlocker(report, "stage_success_condition_missing") {
+		t.Fatalf("workspace wait must be rejected before opening a browser: %+v", report)
+	}
+}
+
+func TestBrowserAgentReadinessRequiresCredentialGrantForSecretReference(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1].Interaction.SecretRef = "vault://demo/login-password"
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[1].Interactions[0].SecretRef = "vault://demo/login-password"
+	pkg.ExecutableScriptBundle.PlanJSON.Steps[1].Action.SecretRef = "vault://demo/login-password"
+	pkg.CredentialGrants = nil
+
+	report := browserAgentReadiness(&pkg)
+	if report.CanRun || !browserAgentReadinessHasBlocker(report, "credential_grant_missing") {
+		t.Fatalf("secret reference without a scoped grant must be rejected: %+v", report)
+	}
+}
+
+func browserAgentReadinessHasBlocker(report BrowserAgentReadinessReport, code string) bool {
+	for _, blocker := range report.Blockers {
+		if blocker.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCompileBrowserAgentRuntimePlanRejectsImmutableConflicts(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	pkg.ExecutableScriptBundle.ScriptOutline.Stages[1].Objective = "Delete the workspace"
@@ -77,6 +124,21 @@ func TestBrowserAgentPolicyGuardBlocksDomainControlPlaneAndDestructiveActions(t 
 	outside.URL = "https://evil.example.net/dashboard"
 	if decision := guard.Authorize(plan, outside); decision.Allowed || decision.Code != "domain_not_allowed" {
 		t.Fatalf("outside domain was not blocked: %+v", decision)
+	}
+	outsideOrigin := base
+	outsideOrigin.URL = "http://app.example.com/dashboard"
+	if decision := guard.Authorize(plan, outsideOrigin); decision.Allowed || decision.Code != "origin_not_allowed" {
+		t.Fatalf("origin scheme downgrade was not blocked: %+v", decision)
+	}
+	outsideRoute := base
+	outsideRoute.URL = "https://app.example.com/settings"
+	if decision := guard.Authorize(plan, outsideRoute); decision.Allowed || decision.Code != "route_not_allowed" {
+		t.Fatalf("unapproved same-origin route was not blocked: %+v", decision)
+	}
+	childRoute := base
+	childRoute.URL = "https://app.example.com/dashboard/projects/42"
+	if decision := guard.Authorize(plan, childRoute); !decision.Allowed {
+		t.Fatalf("approved route must cover its child paths: %+v", decision)
 	}
 	controlPlane := base
 	controlPlane.URL = "https://app.example.com/v1/execution-packages"
@@ -321,7 +383,7 @@ func (e *countingStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRu
 
 type repairThenContinueVerifier struct{ calls int }
 
-func (v *repairThenContinueVerifier) ValidateStageEvents(_ context.Context, context BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
+func (v *repairThenContinueVerifier) ValidateStageEvents(_ context.Context, context model.BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
 	v.calls++
 	last := events[len(events)-1]
 	decision := model.ValidationDecisionContinue
@@ -331,11 +393,11 @@ func (v *repairThenContinueVerifier) ValidateStageEvents(_ context.Context, cont
 	return model.ValidationReport{SchemaVersion: model.ValidationReportSchemaVersion, ReportID: fmt.Sprintf("repair_report_%d", v.calls), RunID: last.RunID, SourcePackageID: context.SourcePackageID, SourceBundleHashSHA256: context.SourceBundleHashSHA256, PolicyHashSHA256: context.EffectivePolicyHashSHA256, Phase: model.ValidationPhaseRuntimeStage, NodeID: last.NodeID, StageID: last.StageID, Decision: decision, PassRate: 1, OverallConfidence: .95, EvidenceQuality: model.RuntimeObservationActualBrowser, EvidenceRefs: []model.EvidenceRef{{ID: "verification_repair", Kind: model.EvidenceKindBrowserTrace}}, CreatedAt: timeNowUTC()}, nil
 }
 
-func (v *repairThenContinueVerifier) ProposeRuntimeRepair(_ context.Context, context BrowserAgentValidationContext, stage BrowserAgentRuntimeStage, events []model.StageExecutionEvent, _ model.ValidationReport) (model.RuntimeRepairProposal, error) {
+func (v *repairThenContinueVerifier) ProposeRuntimeRepair(_ context.Context, context model.BrowserAgentValidationContext, stage BrowserAgentRuntimeStage, events []model.StageExecutionEvent, _ model.ValidationReport) (model.RuntimeRepairProposal, error) {
 	return model.RuntimeRepairProposal{SchemaVersion: model.RuntimeRepairProposalSchemaVersion, ProposalID: "repair_wait_1", RunID: events[len(events)-1].RunID, NodeID: stage.NodeID, StageID: stage.ID, BaseBundleHashSHA256: context.SourceBundleHashSHA256, PolicyHashSHA256: context.EffectivePolicyHashSHA256, RepairKind: "wait_strategy", Field: "script_outline.stages[].wait_conditions", Before: stage.WaitConditions[0], After: "wait_after_entry_at_least_1500ms", Confidence: .95, EvidenceRefs: []model.EvidenceRef{{ID: "proposal_evidence", Kind: model.EvidenceKindBrowserTrace}}, CreatedAt: timeNowUTC()}, nil
 }
 
-func (v *stubStageVerifier) ValidateStageEvents(_ context.Context, context BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
+func (v *stubStageVerifier) ValidateStageEvents(_ context.Context, context model.BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
 	v.calls++
 	last := events[len(events)-1]
 	return model.ValidationReport{

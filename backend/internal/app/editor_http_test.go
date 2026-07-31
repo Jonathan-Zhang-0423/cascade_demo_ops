@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -90,6 +91,33 @@ func TestEditorHTTPUploadVideo(t *testing.T) {
 	var bridge BridgeResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil || !bridge.OK {
 		t.Fatalf("unexpected bridge response: %+v err=%v", bridge, err)
+	}
+}
+
+func TestEditorHTTPFinalMediaDownloadUsesAttachment(t *testing.T) {
+	service := newTestEditorService(t)
+	outputPath := filepath.Join(service.runtime.ArtifactRoot, "editor", "demo.mp4")
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, []byte("video fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service.editorWorker = &fakeEditorWorker{}
+	session, err := service.CreateEditorSession(t.Context(), model.EditorCreateSessionRequest{Name: "download"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.FinalRender = model.EditorRenderState{Status: model.EditorRenderStatusReady, VideoPath: outputPath}
+	if err := service.saveEditorSession(session); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/editor/sessions/"+url.PathEscape(session.SessionID)+"/media/final?download=1", nil)
+	response := httptest.NewRecorder()
+	NewDevHTTPServer(service).Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Disposition") == "" {
+		t.Fatalf("expected download attachment, got status=%d headers=%v", response.Code, response.Header())
 	}
 }
 

@@ -26,7 +26,8 @@ const report = { schema_version: "cascade.browser_agent_acceptance.v1", generate
 try {
   const baseURL = await listen(server);
   worker = startWorker();
-  const open = await worker.call("browser_agent_open", { session_id: "browser_agent_acceptance", output_dir: outputDir, browser: { engine: "chromium", headless: true, viewport: { width: 960, height: 640 }, record_video: true }, allowed_domains: ["127.0.0.1"], forbidden_pages: ["/billing"], forbidden_path_prefixes: ["/v1"], forbidden_keywords: ["delete"], mask_selectors: [] });
+  const allowedOrigin = new URL(baseURL).origin;
+  const open = await worker.call("browser_agent_open", { session_id: "browser_agent_acceptance", output_dir: outputDir, browser: { engine: "chromium", headless: true, viewport: { width: 960, height: 640 }, record_video: true }, allowed_domains: ["127.0.0.1"], allowed_origins: [allowedOrigin], allowed_routes: ["/"], forbidden_pages: ["/billing"], forbidden_path_prefixes: ["/v1"], forbidden_keywords: ["delete"], mask_selectors: [] });
   const navigate = stageNavigate(baseURL);
   const navBefore = await worker.call("browser_agent_observe", { session_id: open.session_id, stage: navigate });
   const navAfter = await worker.call("browser_agent_execute", { session_id: open.session_id, stage: navigate });

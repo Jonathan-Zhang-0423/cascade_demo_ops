@@ -71,6 +71,7 @@ func (g *ProjectIntelligenceGraph) RunProjectIntelligence(
 		RunIntentScope:     runIntentScopeForProject(project),
 		InputFingerprints:  inputFingerprints(project, codeSnapshots, pageSnapshots),
 		SourceDigestSHA256: combinedSourceDigest(codeSnapshots),
+		SourceBinding:      project.SourceBinding,
 		Confidence:         0.74,
 		CreatedAt:          now,
 	}
@@ -337,6 +338,9 @@ func runScriptFeasibilityTool(_ context.Context, state *ProjectUnderstandingStat
 
 func runProjectUnderstandingFocusedInvestigation(ctx context.Context, state *ProjectUnderstandingState, purpose string, terms []string) ([]model.EvidenceRef, int, error) {
 	if state == nil || state.Project == nil || state.InvestigationTools == nil {
+		return nil, 0, nil
+	}
+	if state.Project.SourceBinding != nil && state.Project.SourceBinding.EffectiveMode == model.ProductSourceModePageOnly {
 		return nil, 0, nil
 	}
 	roots := localProjectCodeRoots(state.Project)

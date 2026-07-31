@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { launchOptionsWithProxy } from "./playwright-proxy.js";
+import { configuredBrowserExecutable } from "./browser-executable.js";
 
 type BrowserAgentTargetContract = {
   semantic_id: string;
@@ -95,10 +95,14 @@ export type BrowserAgentOpenRequest = {
     record_video?: boolean;
   };
   allowed_domains: string[];
+  allowed_origins?: string[];
+  allowed_routes?: string[];
   forbidden_pages?: string[];
   forbidden_path_prefixes?: string[];
   forbidden_keywords?: string[];
   mask_selectors?: string[];
+	recording_sensitive?: boolean;
+	record_trace?: boolean;
 };
 
 export type BrowserAgentStageRequest = {
@@ -160,15 +164,20 @@ type BrowserAgentSession = {
   tracePath: string;
   engine: string;
   allowedDomains: string[];
+  allowedOrigins: string[];
+  allowedRoutes: string[];
   forbiddenPages: string[];
   forbiddenPathPrefixes: string[];
   forbiddenKeywords: string[];
   maskSelectors: string[];
+  recordingSensitive: boolean;
+	recordTrace: boolean;
 };
 
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
 
 const sessions = new Map<string, BrowserAgentSession>();
+const targetProbeTimeoutMS = 2_000;
 const defaultViewport = { width: 1440, height: 900 };
 const actionTimeoutMS = 10_000;
 const screenshotTimeoutMS = 8_000;
@@ -198,8 +207,12 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
     contextOptions.recordVideo = { dir: outputDir, size: request.browser?.viewport || defaultViewport };
   }
   const context = await browser.newContext(contextOptions);
+  await installRecordingMasks(context, request.mask_selectors || []);
+  const recordTrace = request.record_trace ?? true;
   const tracePath = path.join(outputDir, "browser-agent-trace.zip");
-  await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
+  // The visible local-login bridge must never persist a trace while a person
+  // types credentials into its isolated browser profile.
+	if (recordTrace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   const page = await context.newPage();
   const video = page.video?.();
   const session: BrowserAgentSession = {
@@ -212,13 +225,18 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
     tracePath,
     engine: engineName,
     allowedDomains: request.allowed_domains,
+    allowedOrigins: request.allowed_origins || [],
+    allowedRoutes: request.allowed_routes || [],
     forbiddenPages: request.forbidden_pages || [],
     forbiddenPathPrefixes: request.forbidden_path_prefixes || [],
     forbiddenKeywords: request.forbidden_keywords || [],
-    maskSelectors: request.mask_selectors || [],
+	maskSelectors: request.mask_selectors || [],
+	recordingSensitive: request.recording_sensitive ?? true,
+	recordTrace,
   };
   await page.route("**/*", async (route: any) => {
-    const error = urlPolicyError(route.request().url(), session, true);
+    // Route allowlists apply to document navigation, not the page's JS/CSS/media.
+    const error = urlPolicyError(route.request().url(), session, !route.request().isNavigationRequest());
     if (error) {
       await route.abort("blockedbyclient");
       return;
@@ -228,6 +246,62 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
   sessions.set(sessionID, session);
   return { session_id: sessionID, runtime_versions: { runner: "playwright-browser-agent", browser: engineName } };
 }
+
+export async function browserAgentSessionStatus(request: { session_id: string }): Promise<{ url: string; title: string }> {
+  const session = requiredSession(request.session_id);
+  // Keep this endpoint intentionally metadata-only: it is used to hand a
+  // manually authenticated, isolated browser back to the local test harness.
+  return { url: safeURL(session.page.url()), title: redactText(await session.page.title().catch(() => "")) };
+}
+
+// This intentionally narrow RPC is used only to open the local dev/test
+// visible-login window. Unlike a stage, it takes no screenshot and records no
+// execution evidence, so user-entered credentials cannot enter artifacts.
+export async function browserAgentDevVisibleNavigate(request: { session_id: string; target_url: string }): Promise<{ url: string; title: string }> {
+  const session = requiredSession(request.session_id);
+  const targetURL = absoluteTargetURL(request.target_url, session.page.url());
+  const policyError = urlPolicyError(targetURL, session, false);
+  if (policyError) throw new Error(policyError);
+  await session.page.goto(targetURL, { waitUntil: "domcontentloaded", timeout: actionTimeoutMS });
+  await waitForPageSettled(session.page);
+  return browserAgentSessionStatus(request);
+}
+
+type BrowserAgentExecutionPolicyRequest = {
+  session_id: string;
+  policy: {
+    allowed_origins: string[];
+    allowed_routes: string[];
+    forbidden_pages?: string[];
+    forbidden_path_prefixes?: string[];
+    forbidden_keywords?: string[];
+    mask_selectors?: string[];
+  };
+};
+
+// Policy is narrowed only after a Server-validated App package is bound to a
+// manually authenticated local-test session. It cannot change allowed hosts.
+export async function browserAgentApplyExecutionPolicy(request: BrowserAgentExecutionPolicyRequest): Promise<Record<string, never>> {
+  const session = requiredSession(request.session_id);
+  const policy = request.policy || {} as BrowserAgentExecutionPolicyRequest["policy"];
+  if (!Array.isArray(policy.allowed_origins) || policy.allowed_origins.length === 0 || !Array.isArray(policy.allowed_routes) || policy.allowed_routes.length === 0) {
+    throw new Error("browser_agent_execution_policy_scope_required");
+  }
+  for (const origin of policy.allowed_origins) {
+    const error = urlPolicyError(origin, session, false);
+    if (error) throw new Error(error);
+  }
+  session.allowedOrigins = [...new Set(policy.allowed_origins)];
+  session.allowedRoutes = [...new Set(policy.allowed_routes)];
+  session.forbiddenPages = [...new Set(policy.forbidden_pages || [])];
+  session.forbiddenPathPrefixes = [...new Set(policy.forbidden_path_prefixes || [])];
+  session.forbiddenKeywords = [...new Set(policy.forbidden_keywords || [])];
+  session.maskSelectors = [...new Set([...session.maskSelectors, ...(policy.mask_selectors || [])])];
+  const currentError = urlPolicyError(session.page.url(), session, false);
+  if (currentError) throw new Error(currentError);
+  return {};
+}
+
 
 export async function observeBrowserAgentStage(request: BrowserAgentStageRequest): Promise<BrowserAgentStageResult> {
   const session = requiredSession(request.session_id);
@@ -306,7 +380,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   const artifacts: ArtifactRef[] = [];
   let recordingPath: string | undefined;
   try {
-    await session.context.tracing.stop({ path: session.tracePath });
+    if (session.recordTrace) await session.context.tracing.stop({ path: session.tracePath });
   } finally {
     await session.context.close().catch(() => undefined);
     await session.browser.close().catch(() => undefined);
@@ -316,7 +390,15 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   }
   recordingPath = await session.video?.path().catch(() => undefined);
   if (recordingPath && await fileExists(recordingPath)) {
-    artifacts.unshift(await artifactRef(`artifact_${session.id}_recording`, "raw_recording", recordingPath, "video/webm", undefined, { include_in_demo: true }));
+    artifacts.unshift(await artifactRef(
+      `artifact_${session.id}_recording`,
+      "raw_recording",
+      recordingPath,
+      "video/webm",
+      undefined,
+      { include_in_demo: true, redaction_applied: true, mask_selector_count: session.maskSelectors.length },
+      session.recordingSensitive,
+    ));
   }
   // Failed observations may throw after their before-capture. Recover every
   // stage screenshot here so the Server can build a protocol failure package.
@@ -420,9 +502,9 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
   for (const candidate of candidates) {
     if (seen.has(candidate.strategy)) continue;
     seen.add(candidate.strategy);
-		const resolved = await resolveUniqueVisibleContractTarget(candidate.locator, candidate.strategy, contract);
-		if (resolved) return resolved;
-	}
+    const resolved = await resolveUniqueVisibleContractTarget(candidate.locator, candidate.strategy, contract);
+    if (resolved) return resolved;
+  }
   throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=${[...seen].join(",") || "none"}`);
 }
 
@@ -444,19 +526,35 @@ async function resolveSingleApprovedAlternative(page: any, stage: BrowserAgentWo
 }
 
 async function resolveUniqueVisibleContractTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract): Promise<ResolvedTarget | undefined> {
-	const count = await locator.count().catch(() => 0);
-	if (count !== 1) return undefined;
-	const unique = locator.first();
-	if (!await unique.isVisible({ timeout: 750 }).catch(() => false)) return undefined;
-	const semantics = await compactElementSemantics(unique);
-	if (!semanticsAllowed(semantics, contract)) return undefined;
-	if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
-		throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
-	}
-	return { locator: unique, strategy };
+  const count = await withTimeout(locator.count(), targetProbeTimeoutMS, 0);
+  if (count !== 1) return undefined;
+  const unique = locator.first();
+  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) return undefined;
+  const semantics = await withTimeout(compactElementSemantics(unique), targetProbeTimeoutMS, { role: "", name: "" });
+  if (!semanticsAllowed(semantics, contract)) return undefined;
+  if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
+    throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
+  }
+  return { locator: unique, strategy };
 }
 
-async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerStage): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
+async function withTimeout<T>(promise: Promise<T>, timeoutMS: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMS);
+      }),
+    ]);
+  } catch {
+    return fallback;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerStage): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   for (const validation of (stage.validations || []).filter((item) => item.required)) {
     const timeout = Math.max(250, Math.min(30_000, validation.timeout_ms || actionTimeoutMS));
@@ -467,6 +565,12 @@ async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerS
         const expected = validation.target?.url || scalarExpected(validation) || stage.url || stage.route;
         actual = safeURL(page.url());
         passed = Boolean(expected) && urlMatches(page.url(), String(expected));
+      } else if (validation.kind === "page_loaded") {
+        // App exports this for navigation stages. A loaded document is a
+        // deterministic browser fact, not an inferred business outcome.
+        const readyState = await page.evaluate(() => (globalThis as any).document?.readyState || "unavailable").catch(() => "unavailable");
+        passed = readyState === "interactive" || readyState === "complete";
+        actual = String(readyState);
       } else if (validation.kind === "element_visible") {
         const locator = locatorForValidation(page, validation);
         passed = await locator.first().isVisible({ timeout }).catch(() => false);
@@ -559,11 +663,19 @@ async function captureScreenshot(session: BrowserAgentSession, stage: BrowserAge
   await session.page.screenshot({ path: filePath, fullPage: false, mask: masks, timeout: screenshotTimeoutMS });
   return artifactRef(
     `artifact_${safeName(session.id)}_${safeName(stage.node_id)}_${phase}`,
-    "screenshot",
+    phase === "after" ? "step_screenshot" : "screenshot",
     filePath,
     "image/png",
     stage.node_id,
-    { include_in_demo: phase === "after", capture_phase: phase, target_semantic_id: stage.target_contract.semantic_id, current_url: safeURL(session.page.url()), page_title: redactText(await session.page.title().catch(() => "")) },
+    {
+      include_in_demo: phase === "after",
+      // Only post-action screenshots can be used to compose a local test video.
+      presentation_only: phase === "after",
+      capture_phase: phase,
+      target_semantic_id: stage.target_contract.semantic_id,
+      current_url: safeURL(session.page.url()),
+      page_title: redactText(await session.page.title().catch(() => "")),
+    },
     false,
   );
 }
@@ -599,7 +711,7 @@ function requiredSession(id: string): BrowserAgentSession {
   return session;
 }
 
-function urlPolicyError(value: string, session: BrowserAgentSession, allowSubresource: boolean): string | undefined {
+export function urlPolicyError(value: string, session: BrowserAgentSession, allowSubresource: boolean): string | undefined {
   if (allowSubresource && /^(about:|data:|blob:)/i.test(value)) return undefined;
   let parsed: URL;
   try {
@@ -609,7 +721,9 @@ function urlPolicyError(value: string, session: BrowserAgentSession, allowSubres
   }
   if (!allowSubresource && parsed.protocol !== "http:" && parsed.protocol !== "https:") return `browser_agent_domain_not_allowed: ${parsed.protocol}`;
   if (!hostAllowed(parsed.hostname, session.allowedDomains)) return `browser_agent_domain_not_allowed: ${parsed.hostname}`;
+  if (!allowSubresource && !originAllowed(parsed, session.allowedOrigins)) return `browser_agent_origin_not_allowed: ${parsed.origin}`;
   const normalizedPath = `/${parsed.pathname.replace(/^\/+/, "")}`.toLowerCase();
+  if (!allowSubresource && !routeAllowed(normalizedPath, session.allowedRoutes)) return `browser_agent_route_not_allowed: ${normalizedPath}`;
   for (const forbidden of [...session.forbiddenPages, ...session.forbiddenPathPrefixes]) {
     const prefix = `/${String(forbidden).replace(/^\/+/, "")}`.toLowerCase();
     if (prefix !== "/" && (normalizedPath === prefix || normalizedPath.startsWith(`${prefix.replace(/\/$/, "")}/`))) {
@@ -684,6 +798,37 @@ async function waitForCaptureWindow(page: any, stage: BrowserAgentWorkerStage): 
   await waitForPageSettled(page);
 }
 
+function originAllowed(parsed: URL, allowedOrigins: string[]): boolean {
+  return allowedOrigins.some((value) => {
+    try {
+      const approved = new URL(value);
+      return approved.protocol === parsed.protocol && approved.host.toLowerCase() === parsed.host.toLowerCase();
+    } catch {
+      return false;
+    }
+  });
+}
+
+function routeAllowed(pathname: string, allowedRoutes: string[]): boolean {
+  const path = normalizeRoute(pathname);
+  return allowedRoutes.some((route) => {
+    const approved = normalizeRoute(route);
+    return approved === "/" || path === approved || path.startsWith(`${approved}/`);
+  });
+}
+
+function normalizeRoute(value: string): string {
+  let pathname = value.trim();
+  try {
+    const parsed = new URL(pathname);
+    pathname = parsed.pathname;
+  } catch {
+    // Routes in the contract are relative paths.
+  }
+  const normalized = `/${pathname.replace(/^\/+/, "").replace(/\/+$/, "")}`.toLowerCase();
+  return normalized === "" ? "/" : normalized;
+}
+
 async function waitForObservationWindow(page: any, stage: BrowserAgentWorkerStage): Promise<void> {
   const waitMS = entryWaitMilliseconds(stage);
   if (waitMS > 0) await page.waitForTimeout(waitMS);
@@ -734,6 +879,7 @@ async function compactElementSemantics(locator: any): Promise<{ role: string; na
     const implicitRoles: Record<string, string> = {
       button: "button", select: "combobox", textarea: "textbox", main: "main", nav: "navigation",
       form: "form", table: "table", img: "img", ul: "list", ol: "list", li: "listitem",
+      h1: "heading", h2: "heading", h3: "heading", h4: "heading", h5: "heading", h6: "heading",
     };
     let role = explicitRole || implicitRoles[tag] || "";
     if (tag === "a" && element.hasAttribute?.("href")) role = "link";
@@ -775,19 +921,6 @@ function normalizeEngine(value?: string): "chromium" | "firefox" | "webkit" {
   return "chromium";
 }
 
-function configuredBrowserExecutable(): string | undefined {
-  const configured = process.env.CASCADE_BROWSER_EXECUTABLE_PATH?.trim();
-  if (configured) return configured;
-  if (process.platform !== "win32") return undefined;
-  const candidates = [
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  ];
-  return candidates.find((candidate) => existsSync(candidate));
-}
-
 async function artifactRef(id: string, kind: string, filePath: string, mimeType: string, sourceNodeID?: string, metadata: Record<string, unknown> = {}, sensitive = true): Promise<ArtifactRef> {
   const data = await readFile(filePath);
   return {
@@ -802,6 +935,57 @@ async function artifactRef(id: string, kind: string, filePath: string, mimeType:
     ...(sourceNodeID ? { source_node_id: sourceNodeID } : {}),
     metadata: { ...metadata, source: "browser_agent_runtime" },
   };
+}
+
+async function installRecordingMasks(context: any, selectors: string[]): Promise<void> {
+  await context.addInitScript((approvedSelectors: string[]) => {
+    if (!Array.isArray(approvedSelectors) || approvedSelectors.length === 0) return;
+    const browserGlobal = globalThis as any;
+    const document = browserGlobal.document as any;
+    const requestAnimationFrame = browserGlobal.requestAnimationFrame.bind(browserGlobal) as (callback: () => void) => number;
+    const overlays = new Map<any, any>();
+    const update = () => {
+      const matched = new Set<any>();
+      for (const selector of approvedSelectors) {
+        try {
+          document.querySelectorAll(selector).forEach((element: any) => matched.add(element));
+        } catch {
+          // An invalid approved selector must not disable the other masks.
+        }
+      }
+      for (const [element, overlay] of overlays) {
+        if (!element.isConnected || !matched.has(element)) {
+          overlay.remove();
+          overlays.delete(element);
+        }
+      }
+      for (const element of matched) {
+        let overlay = overlays.get(element);
+        if (!overlay || !overlay.isConnected) {
+          overlay = document.createElement("div");
+          overlay.setAttribute("data-cascade-recording-mask", "true");
+          Object.assign(overlay.style, {
+            position: "fixed",
+            zIndex: "2147483647",
+            pointerEvents: "none",
+            background: "#111",
+          });
+          document.documentElement.appendChild(overlay);
+          overlays.set(element, overlay);
+        }
+        const bounds = element.getBoundingClientRect();
+        Object.assign(overlay.style, {
+          display: bounds.width > 0 && bounds.height > 0 ? "block" : "none",
+          left: `${bounds.left}px`,
+          top: `${bounds.top}px`,
+          width: `${bounds.width}px`,
+          height: `${bounds.height}px`,
+        });
+      }
+      requestAnimationFrame(update);
+    };
+    requestAnimationFrame(update);
+  }, selectors);
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

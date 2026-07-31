@@ -24,6 +24,8 @@ SQLITE_PATH=/path/to/cascade_demoops.db
 CASCADE_DATA_ROOT=/path/to/user-data
 CASCADE_RESOURCE_ROOT=/path/to/packaged/resources
 NODE_WORKER_PATH=/path/to/video-worker/dist/index.js
+CASCADE_FFMPEG_PATH=/path/to/ffmpeg
+CASCADE_FFPROBE_PATH=/path/to/ffprobe
 ```
 
 ## Desktop Resource Layout
@@ -43,7 +45,7 @@ dist/package/
     runtimes/
       node/
         node(.exe)
-      ffmpeg/       # planned
+      ffmpeg/
         ffmpeg(.exe)
         ffprobe(.exe)
 ```
@@ -76,6 +78,7 @@ On macOS the default root is:
 pnpm build:web
 pnpm build:worker
 pnpm build:desktop:win
+pnpm build:desktop:wails
 pnpm build:desktop:mac
 pnpm package:desktop
 pnpm smoke:desktop-package
@@ -83,10 +86,10 @@ pnpm package:desktop:installer
 pnpm smoke:desktop-installer
 ```
 
-`backend/cmd/desktop` is the desktop runtime root. It currently initializes the
-shared desktop bridge and is intentionally Wails-ready without importing Wails
-yet. The next packaging step is to wire that bridge into a Wails app and embed
-the `frontend/web` build output.
+`backend/cmd/wails-desktop` is the Windows-first Wails v2/WebView2 entry. It
+serves packaged React assets and the existing Go HTTP bridge in-process, without
+a dev server or listening port. `backend/cmd/desktop` remains the legacy fallback
+until install, upgrade, rollback, and uninstall smoke are complete.
 
 `backend/cmd/desktop-installer` is the current Windows setup baseline. It is a
 self-extracting installer that embeds the portable zip payload, validates the
@@ -138,9 +141,10 @@ This boundary is also exposed by `/v1/desktop/runtime-health` as
 `app_capabilities.local_recording_execution=false`, and it is repeated in the
 portable, installer, and release-channel manifests.
 
-FFmpeg/ffprobe are still planned runtime assets. Until those are bundled, video
-rendering flows that require FFmpeg may need explicit `CASCADE_FFMPEG_PATH` and
-`CASCADE_FFPROBE_PATH` configuration or will use existing fallback behavior.
+`CASCADE_PACKAGE_FFMPEG_PATH` and `CASCADE_PACKAGE_FFPROBE_PATH` supply licensed
+build inputs. Their paths and hashes enter the resource/package manifests.
+`beta` and `stable` builds fail closed when either runtime is absent; `internal`
+builds may omit them for UI-only testing.
 
 ## Packaged App Surfaces
 
@@ -181,7 +185,9 @@ bootstrap runs durable without changing the final repository boundary.
 
 ## Installer Layout
 
-`pnpm package:desktop:installer` emits:
+`pnpm package:desktop:installer` invokes Inno Setup and emits a per-user x64
+installer. `pnpm package:desktop:installer:legacy` keeps the previous Go
+self-extracting installer available only as a migration fallback.
 
 ```text
 dist/release/
@@ -205,13 +211,21 @@ CascadeDemoOps-...-installer.exe --quiet --launch=false
 CascadeDemoOps-...-installer.exe --install-dir C:\Tools\CascadeDemoOps
 ```
 
-The current installer is unsigned and per-user. It ships with a sidecar Windows
-application manifest declaring `requestedExecutionLevel=asInvoker` so the
-non-admin installer can use a normal `installer.exe` filename without triggering
-UAC elevation heuristics. It is suitable for internal download/install smoke
-testing, while production release still needs an embedded Windows application
-manifest, code signing, installer UI polish, bundled FFmpeg strategy, and
-auto-update policy.
+`beta` and `stable` release jobs must set the Authenticode certificate thumbprint
+and RFC3161 timestamp URL. App and installer signatures are verified immediately
+after signing. Signed Ed25519 update manifests use `internal`, `beta`, or
+`stable`; private keys and certificates stay outside the repository. Release
+packages also include the isolated `cascade-demoops-updater.exe` and an Ed25519
+public key supplied through `DEMOOPS_UPDATE_PUBLIC_KEY_PATH`. The updater rejects
+non-HTTPS feeds, verifies the detached manifest signature, resumes downloads,
+checks artifact SHA-256 and Authenticode, and requires a trusted previous
+installer before `--apply` so failed install or health-check paths can roll back.
+The App settings page exposes the same fail-closed workflow: it only shows
+version/channel/release notes, asks for explicit user confirmation, and enables
+installation after the signed manifest and artifact are verified. `beta` and
+`stable` builds must also set `DEMOOPS_UPDATE_MANIFEST_URL` to a DemoOps-owned
+HTTPS release origin; the package never derives an update endpoint from a
+customer `product_url`.
 
 `pnpm smoke:desktop-installer` installs into an isolated smoke directory with a
 mock `%APPDATA%`, verifies the generated Start Menu launcher, starts the app,

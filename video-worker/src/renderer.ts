@@ -832,7 +832,41 @@ function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): D
   const fallbackArtifactID = recordingArtifactID || demoArtifacts[0]?.id || "missing_source_artifact";
   const eligibleSteps = catalog.steps.filter((step) => step.status !== "failed");
   const steps = eligibleSteps.length > 0 ? eligibleSteps : catalog.steps;
-  const shots = steps.map((step, index) => defaultShotForStep(step, index, recordingArtifactID || step.artifacts[0] || fallbackArtifactID));
+  const targetDurationMS = (durationSec || Math.max(1, Math.ceil(catalog.timeline.duration_ms / 1000))) * 1000;
+  const stillArtifacts = demoArtifacts.filter((artifact) => artifact.kind === "step_screenshot" && artifact.metadata?.presentation_only === true);
+  // The visible local-test handoff intentionally starts without a recording
+  // context so manual credentials can never enter a video artifact. Its final
+  // MP4 is composed only from post-action, redacted screenshots.
+  if (!recordingArtifactID && stillArtifacts.length > 0) {
+    const stillDurationMS = Math.max(1_000, Math.min(5_000, Math.floor(targetDurationMS / stillArtifacts.length)));
+    return {
+      schema_version: DEMO_EDIT_PLAN_SCHEMA_VERSION,
+      plan_id: `edit_plan_${safeName(catalog.run_id)}`,
+      catalog_id: catalog.catalog_id,
+      objective: "Create a concise demo from verified post-action screenshots. Do not create new images or video.",
+      source_authority: DEMO_EDIT_SOURCE_AUTHORITY,
+      model_role: DEMO_EDIT_MODEL_ROLE,
+      source_material_policy: "existing_assets_only",
+      script_order_policy: "preserve_required_step_order",
+      locked_fields: [...REQUIRED_LOCKED_FIELDS],
+      model_editable_fields: [...ALLOWED_MODEL_EDITABLE_FIELDS],
+      target_duration_ms: stillDurationMS * stillArtifacts.length,
+      shots: stillArtifacts.map((artifact, index) => ({
+        id: `shot_${String(index + 1).padStart(3, "0")}_${safeName(artifact.id)}`,
+        source_artifact_id: artifact.id,
+        presentation_kind: "still" as const,
+        output_duration_ms: stillDurationMS,
+        purpose: `Show verified step ${index + 1}`,
+        overlays: [],
+      })),
+      global_style: { color_grade: "neutral_product_ui", pacing: "clear_and_direct", transition_style: "simple_cut" },
+      audio: { mode: "mute", volume_percent: 0 },
+    };
+  }
+  const shots = capDefaultShotsToTargetDuration(
+    steps.map((step, index) => defaultShotForStep(step, index, recordingArtifactID || step.artifacts[0] || fallbackArtifactID)),
+    targetDurationMS,
+  );
 
   return {
     schema_version: DEMO_EDIT_PLAN_SCHEMA_VERSION,
@@ -845,7 +879,7 @@ function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): D
     script_order_policy: "preserve_required_step_order",
     locked_fields: [...REQUIRED_LOCKED_FIELDS],
     model_editable_fields: [...ALLOWED_MODEL_EDITABLE_FIELDS],
-    target_duration_ms: (durationSec || Math.max(1, Math.ceil(catalog.timeline.duration_ms / 1000))) * 1000,
+    target_duration_ms: targetDurationMS,
     shots,
     global_style: {
       color_grade: "neutral_product_ui",
@@ -1007,6 +1041,36 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
   };
   if (plan.plan_id) report.plan_id = plan.plan_id;
   return report;
+}
+
+// A requested delivery duration is an output contract. Keep the ordered source
+// steps, but trim only the final selected range when the capture has a little
+// extra settling time after the business outcome.
+function capDefaultShotsToTargetDuration(shots: DemoEditShot[], targetDurationMS: number): DemoEditShot[] {
+  let remainingMS = Math.max(0, targetDurationMS);
+  const selected: DemoEditShot[] = [];
+  for (const shot of shots) {
+    const range = shot.source_time_range_ms;
+    if (!range || remainingMS <= 0) break;
+    const sourceDurationMS = Math.max(0, range[1] - range[0]);
+    if (sourceDurationMS <= remainingMS) {
+      remainingMS -= sourceDurationMS;
+      selected.push(shot);
+      continue;
+    }
+    const endMS = range[0] + remainingMS;
+    remainingMS = 0;
+    const trimmed: DemoEditShot = { ...shot, source_time_range_ms: [range[0], endMS] };
+    if (shot.operations) {
+      trimmed.operations = shot.operations.map((operation) => operation.type === "trim" ? { ...operation, end_ms: endMS } : operation);
+    }
+    if (shot.overlays) {
+      trimmed.overlays = shot.overlays.map((overlay) => overlay.type === "caption" ? { ...overlay, end_ms: Math.min(overlay.end_ms ?? sourceDurationMS, endMS - range[0]) } : overlay);
+    }
+    selected.push(trimmed);
+    break;
+  }
+  return selected;
 }
 
 interface ShapeCue {
@@ -2057,17 +2121,22 @@ async function normalizeSourceReferenceVideo(
     ffmpeg_available: false,
   };
 
-  const sourceArtifact = firstCompositableVideoArtifact(catalog, editPlan);
-  if (!sourceArtifact) {
+  // Prefer the compositor output. It is the Server-rendered delivery asset;
+  // source artifacts can remain sensitive and must not be made demo-visible
+  // merely to create a normalized local reference.
+  const sourceArtifact = firstCompositableVideoArtifact(catalog, editPlan)
+    || catalog.artifacts.find((artifact) => artifact.id === catalog.timeline.recording_artifact_id && isVideoArtifact(artifact));
+  const sourcePath = preferredSourcePath || sourceArtifact?.local_path || (sourceArtifact?.uri ? filePathFromURI(sourceArtifact.uri) : undefined);
+  if (!sourcePath) {
     report.note = "No source video artifact is available for media normalization.";
     await writeJSON(reportPath, report);
     return { report_path: reportPath, report };
   }
-
-  const sourcePath = preferredSourcePath || sourceArtifact.local_path || filePathFromURI(sourceArtifact.uri);
-  report.source_artifact_id = sourceArtifact.id;
-  report.source_uri = sourceArtifact.uri;
-  if (sourcePath) report.source_path = sourcePath;
+  if (sourceArtifact) {
+    report.source_artifact_id = sourceArtifact.id;
+    report.source_uri = sourceArtifact.uri;
+  }
+  report.source_path = sourcePath;
   if (preferredSourcePath) {
     report.note = "Normalized the rendered compositor output into the MP4/H.264 reference video used as the preferred final demo deliverable.";
   }
@@ -2304,13 +2373,15 @@ function parseFrameRate(value: string | undefined): number | undefined {
 }
 
 function firstCompositableVideoArtifact(catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): TimelineArtifact | undefined {
-  for (const shot of editPlan.shots) {
-    const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id);
-    if (artifact && isVideoArtifact(artifact)) return artifact;
-  }
-  const timelineRecording = findDemoArtifactByID(catalog, catalog.timeline.recording_artifact_id);
-  if (timelineRecording && isVideoArtifact(timelineRecording)) return timelineRecording;
-  return catalog.artifacts.find((artifact) => isDemoMaterial(artifact) && isVideoArtifact(artifact));
+	// A step screenshot can represent a still in the edit plan, but it must
+	// never replace the captured recording as the source for MP4 normalization.
+	const timelineRecording = findDemoArtifactByID(catalog, catalog.timeline.recording_artifact_id);
+	if (timelineRecording && isVideoArtifact(timelineRecording)) return timelineRecording;
+	for (const shot of editPlan.shots) {
+		const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id);
+		if (artifact && isVideoArtifact(artifact)) return artifact;
+	}
+	return catalog.artifacts.find((artifact) => isDemoMaterial(artifact) && isVideoArtifact(artifact));
 }
 
 function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): CompositorShot[] {

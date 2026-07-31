@@ -148,6 +148,30 @@ func TestProjectInvestigationCollectCodeCandidatesUsesGitDiscoveryFirst(t *testi
 	}
 }
 
+func TestProjectInvestigationCollectCodeCandidatesSkipsNodeModulesForNonGitRepository(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("rg unavailable")
+	}
+	root := t.TempDir()
+	writeFixtureFile(t, root, "frontend/web/src/pages/dashboard.tsx", `
+		export function Dashboard() {
+			return <button data-testid="button-new-project">New project</button>
+		}
+	`)
+	writeFixtureFile(t, root, "node_modules/large-dependency/index.js", strings.Repeat("export const x = 1;\n", 20000))
+
+	candidates, err := collectCodeCandidates(context.Background(), root, 80*1024, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !candidateRelContains(candidates, "frontend/web/src/pages/dashboard.tsx") {
+		t.Fatalf("expected application source in candidates, got %+v", candidates)
+	}
+	if candidateRelContains(candidates, "node_modules/large-dependency/index.js") {
+		t.Fatalf("node_modules must not be included in source summary candidates, got %+v", candidates)
+	}
+}
+
 func TestCodeReaderUsesIntentDrivenBudget(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{"dependencies":{"react":"latest","vite":"latest"}}`)

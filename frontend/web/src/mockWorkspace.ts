@@ -140,6 +140,78 @@ export function createWorkspace(scenarioID: ScenarioID = "product_demo"): Projec
   };
 }
 
+export function createProjectDraftWorkspace(scenarioID: ScenarioID = "product_demo"): ProjectWorkspaceView {
+  const workspace = createWorkspace(scenarioID);
+  return {
+    ...workspace,
+    id: `draft_${scenarioID}`,
+    name: "新演示项目",
+    stage: "setup",
+    status: "draft",
+    productURL: "",
+    targetAudience: "",
+    inputBundle: {
+      raw_user_prompt: "",
+      product_urls: [],
+      repositories: [],
+      credentials: [],
+    },
+    sourceConnections: workspace.sourceConnections.map((source) => ({
+      ...source,
+      status: "needs_attention",
+      detail: source.kind === "product_url"
+        ? "请通过对话提供客户待录制产品地址。"
+        : source.kind === "credential"
+          ? "需要登录时再通过安全卡片保存演示账号。"
+          : "尚未连接。",
+      ...(source.kind === "credential" ? { secretStored: false } : {}),
+    })),
+    understanding: {
+      productMapID: "",
+      routesDetected: 0,
+      featuresDetected: 0,
+      componentsSummarized: 0,
+      dataModelsSummarized: 0,
+      evidenceRefs: [],
+      sensitiveWarnings: [],
+    },
+    planReview: {
+      ...workspace.planReview,
+      graph: {
+        ...workspace.planReview.graph,
+        id: `draft_graph_${scenarioID}`,
+        project_id: `draft_${scenarioID}`,
+        status: "draft",
+        entry_point: "",
+        nodes: [],
+        edges: [],
+      },
+      allowedDomains: [],
+      forbiddenPages: [],
+      redactionSelectors: [],
+    },
+    packagePreview: {
+      packageID: "",
+      packageDigest: "",
+      graphDigest: "",
+      sourceSummaryOnly: true,
+      encrypted: false,
+      humanApprovalRequired: true,
+      ipAllowlistAcknowledged: false,
+      credentialGrants: [],
+      blockedReasons: [],
+    },
+    cloudRun: {
+      packageID: "",
+      status: "not_uploaded",
+      currentStep: "等待补全项目配置",
+      progress: 0,
+      retryCount: 0,
+    },
+    assets: [],
+  };
+}
+
 function createDemoGraph(scenarioID: ScenarioID): DemoWorkflowGraph {
   const isSupport = scenarioID === "ai_customer_service_demo";
   const isOnboarding = scenarioID === "internal_onboarding_tutorial";

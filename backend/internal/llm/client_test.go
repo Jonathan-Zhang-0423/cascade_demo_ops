@@ -3,14 +3,59 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
 )
+
+func TestRouterUsesConfiguredLLMProxy(t *testing.T) {
+	providerReached := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerReached = true
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"proxied\"}"}}]}`))
+	}))
+	defer provider.Close()
+	proxyReached := false
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyReached = true
+		target, err := url.Parse(r.RequestURI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.URL = target
+		r.RequestURI = ""
+		response, err := http.DefaultTransport.RoundTrip(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		for key, values := range response.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(response.StatusCode)
+		_, _ = io.Copy(w, response.Body)
+	}))
+	defer proxy.Close()
+	runtime := testRuntime(config.ModelProviderKimi, provider.URL)
+	runtime.LLMProxyURL = proxy.URL
+	var output struct {
+		Summary string `json:"summary"`
+	}
+	if _, err := NewRouter(runtime).GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !proxyReached || !providerReached || output.Summary != "proxied" {
+		t.Fatalf("configured model proxy was not used: proxy=%v provider=%v output=%+v", proxyReached, providerReached, output)
+	}
+}
 
 func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 	var gotPath string
@@ -227,6 +272,25 @@ func TestRouterAutoFallbacksOnJSONParseFailure(t *testing.T) {
 	}
 	if trace == nil || trace.FallbackReason != errorClassJSONParse {
 		t.Fatalf("expected json_parse fallback trace, got %+v", trace)
+	}
+}
+
+func TestRouterAutoFallbacksOnProviderResponseParseFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"unexpected":"provider response shape"}`))
+	}))
+	defer server.Close()
+
+	router := NewRouter(testRuntime(config.ModelProviderKimi, server.URL))
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	trace, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &out)
+	if !IsDeterministicFallback(err) {
+		t.Fatalf("expected provider response parse fallback, got trace=%+v err=%v", trace, err)
+	}
+	if trace == nil || trace.FallbackReason != errorClassResponseParse {
+		t.Fatalf("expected response_parse fallback trace, got %+v", trace)
 	}
 }
 
