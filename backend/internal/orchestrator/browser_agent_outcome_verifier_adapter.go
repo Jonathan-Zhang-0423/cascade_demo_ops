@@ -175,8 +175,12 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 
 	// Track event sequence for ordering validation
 	stageStates := make(map[string][]model.StageExecutionEventType)
+	stageNodeIDs := make(map[string]string)
 	for _, event := range events {
 		stageStates[event.StageID] = append(stageStates[event.StageID], event.EventType)
+		if event.NodeID != "" {
+			stageNodeIDs[event.StageID] = event.NodeID
+		}
 	}
 
 	// P0.1: Check for out-of-order events (completed before started)
@@ -189,6 +193,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 						ID:       fmt.Sprintf("runtime_order_%s", stageID),
 						Kind:     "event_ordering",
 						Code:     "OUT_OF_ORDER_EVENTS",
+						NodeID:   stageNodeIDs[stageID],
+						StageID:  stageID,
 						Severity: model.FindingSeverityBlocking,
 						Passed:   false,
 						Required: true,
@@ -215,6 +221,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 				ID:       fmt.Sprintf("runtime_duplicate_%s", stageID),
 				Kind:     "event_duplicate",
 				Code:     "DUPLICATE_STAGE_STARTED",
+				NodeID:   stageNodeIDs[stageID],
+				StageID:  stageID,
 				Severity: model.FindingSeverityWarning,
 				Passed:   false,
 				Required: false,
@@ -240,6 +248,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 				ID:       fmt.Sprintf("runtime_no_outcome_%s", stageID),
 				Kind:     "missing_outcome",
 				Code:     "MISSING_OUTCOME_OBSERVED",
+				NodeID:   stageNodeIDs[stageID],
+				StageID:  stageID,
 				Severity: model.FindingSeverityBlocking,
 				Passed:   false,
 				Required: true,
@@ -256,6 +266,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 					ID:       fmt.Sprintf("runtime_derived_evidence_%s_%d", event.StageID, i),
 					Kind:     "evidence_quality",
 					Code:     "DERIVED_FROM_PLAN_EVIDENCE",
+					NodeID:   event.NodeID,
+					StageID:  event.StageID,
 					Severity: model.FindingSeverityBlocking,
 					Passed:   false,
 					Required: true,
@@ -275,6 +287,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 					ID:       fmt.Sprintf("runtime_no_observation_%s_%d", event.StageID, i),
 					Kind:     "missing_evidence",
 					Code:     "NO_OBSERVATION_EVIDENCE",
+					NodeID:   event.NodeID,
+					StageID:  event.StageID,
 					Severity: model.FindingSeverityBlocking,
 					Passed:   false,
 					Required: true,
@@ -291,6 +305,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 						ID:       fmt.Sprintf("runtime_assertion_fail_%s_%d_%d", event.StageID, i, j),
 						Kind:     "assertion_failure",
 						Code:     "REQUIRED_ASSERTION_FAILED",
+						NodeID:   event.NodeID,
+						StageID:  event.StageID,
 						Severity: model.FindingSeverityBlocking,
 						Passed:   false,
 						Required: true,
@@ -315,6 +331,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 				ID:       fmt.Sprintf("runtime_stage_failed_%s_%d", event.StageID, i),
 				Kind:     "stage_failure",
 				Code:     "STAGE_FAILED",
+				NodeID:   event.NodeID,
+				StageID:  event.StageID,
 				Severity: model.FindingSeverityBlocking,
 				Passed:   false,
 				Required: true,

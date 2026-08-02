@@ -211,11 +211,13 @@ func TestIntegration_LocatorMissingPackage(t *testing.T) {
 	events := []model.StageExecutionEvent{
 		{
 			StageID:    "stage-click",
+			NodeID:     "node-1",
 			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
 			StageID:    "stage-click",
+			NodeID:     "node-1",
 			EventType:  model.StageExecutionEventStageFailed,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
@@ -453,11 +455,13 @@ func TestIntegration_TimeoutPackage(t *testing.T) {
 	events := []model.StageExecutionEvent{
 		{
 			StageID:    "stage-load",
+			NodeID:     "node-1",
 			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
 			StageID:    "stage-load",
+			NodeID:     "node-1",
 			EventType:  model.StageExecutionEventStageFailed,
 			OccurredAt: time.Now().Add(5 * time.Second),
 			Observation: &model.RuntimeObservation{

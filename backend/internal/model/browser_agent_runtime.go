@@ -117,6 +117,8 @@ type ValidationCheck struct {
 	ID           string          `json:"id"`
 	Kind         string          `json:"kind"`
 	Code         string          `json:"code,omitempty"`
+	NodeID       string          `json:"node_id,omitempty"`
+	StageID      string          `json:"stage_id,omitempty"`
 	Severity     FindingSeverity `json:"severity,omitempty"`
 	Passed       bool            `json:"passed"`
 	Required     bool            `json:"required"`
