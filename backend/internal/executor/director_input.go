@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1996,6 +1997,7 @@ func serverDoubaoModelFromEnv(key string, fallback string, allowedPrefix string)
 	if modelName == "" || strings.HasPrefix(strings.ToLower(modelName), allowedPrefix) {
 		return modelName
 	}
+	log.Printf("server_director model_config_rejected env=%s reason=non_doubao_model allowed_prefix=%s fallback=%q", key, allowedPrefix, fallback)
 	return fallback
 }
 

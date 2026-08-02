@@ -419,13 +419,34 @@ func (r *Router) diagnoseSeedance(ctx context.Context, route config.ModelTaskRou
 		return result
 	}
 	result.HTTPStatus = response.StatusCode
-	if response.StatusCode == http.StatusOK || response.StatusCode == http.StatusNotFound {
+	if response.StatusCode == http.StatusOK {
+		result.OK = true
+		return result
+	}
+	if response.StatusCode == http.StatusNotFound && seedanceDiagnosticTaskNotFound(data) {
 		result.OK = true
 		return result
 	}
 	result.ErrorClass = fmt.Sprintf("http_%d", response.StatusCode)
 	result.Error = redactProviderHTTPError(response.StatusCode, data).Error()
 	return result
+}
+
+func seedanceDiagnosticTaskNotFound(data []byte) bool {
+	var body struct {
+		Code  string `json:"code"`
+		Error *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return false
+	}
+	code := strings.TrimSpace(body.Code)
+	if body.Error != nil && strings.TrimSpace(body.Error.Code) != "" {
+		code = strings.TrimSpace(body.Error.Code)
+	}
+	return strings.EqualFold(code, "ResourceNotFound")
 }
 
 func (r *Router) Mode() config.LLMMode {
