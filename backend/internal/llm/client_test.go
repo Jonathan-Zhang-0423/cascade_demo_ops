@@ -431,6 +431,23 @@ func TestRouterDiagnoseSeedanceUsesReadOnlyTaskLookup(t *testing.T) {
 	}
 }
 
+func TestRouterDiagnoseSeedanceRejectsUnstructuredNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "route not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	runtime := testRuntime(config.ModelProviderSeedance, server.URL+"/api/v3")
+	runtime.ModelTaskRoutes[config.ModelTaskVideoOperation] = config.ModelTaskRoute{
+		Task: config.ModelTaskVideoOperation, Provider: config.ModelProviderSeedance, Model: "doubao-seedance-2-0-260128",
+	}
+	result := NewRouter(runtime).DiagnoseTask(context.Background(), config.ModelTaskVideoOperation)
+
+	if result.OK || result.HTTPStatus != http.StatusNotFound || result.ErrorClass != "http_404" {
+		t.Fatalf("unstructured 404 must not pass Seedance diagnostics: %+v", result)
+	}
+}
+
 func testRuntime(provider config.ModelProvider, baseURL string) config.AppRuntimeConfig {
 	return config.AppRuntimeConfig{
 		Profile:             config.ProfileDev,

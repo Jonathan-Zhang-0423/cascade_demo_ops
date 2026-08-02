@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"bytes"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -121,6 +123,11 @@ func TestServerDirectorRuntimeAllowsOnlyDoubaoFamilyProviders(t *testing.T) {
 }
 
 func TestServerDirectorRuntimeRejectsNonDoubaoModelOverrides(t *testing.T) {
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousWriter) })
+
 	t.Setenv("SEEDANCE_MODEL", "glm-5")
 	t.Setenv("SEEDREAM_MODEL", "deepseek-image")
 	t.Setenv("DOUBAO_MODEL", "kimi-k2.7-code")
@@ -134,6 +141,11 @@ func TestServerDirectorRuntimeRejectsNonDoubaoModelOverrides(t *testing.T) {
 	}
 	if got := runtime.ModelProviders[config.ModelProviderDoubao].DefaultModel; got != "" {
 		t.Fatalf("doubao model = %q, want empty safe default", got)
+	}
+	for _, envName := range []string{"SEEDANCE_MODEL", "SEEDREAM_MODEL", "DOUBAO_MODEL"} {
+		if !strings.Contains(logs.String(), "model_config_rejected env="+envName) {
+			t.Fatalf("missing explicit configuration warning for %s: %s", envName, logs.String())
+		}
 	}
 }
 
