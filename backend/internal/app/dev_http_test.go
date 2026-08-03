@@ -1312,6 +1312,72 @@ func TestDevHTTPBrowserLocalSourceRegistrationRejectsUnsafeContexts(t *testing.T
 	}
 }
 
+func TestServerAcceptancePageIsVisibleOnlyToLocalDevClients(t *testing.T) {
+	tests := []struct {
+		name        string
+		environment string
+		remoteAddr  string
+		wantStatus  int
+	}{
+		{name: "local development", environment: "development", remoteAddr: "127.0.0.1:54321", wantStatus: http.StatusOK},
+		{name: "local test", environment: "test", remoteAddr: "[::1]:54321", wantStatus: http.StatusOK},
+		{name: "production", environment: "production", remoteAddr: "127.0.0.1:54321", wantStatus: http.StatusForbidden},
+		{name: "non loopback", environment: "development", remoteAddr: "192.0.2.10:54321", wantStatus: http.StatusForbidden},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/dev/server-acceptance", nil)
+			request.RemoteAddr = test.remoteAddr
+			response := httptest.NewRecorder()
+			newTestDevHTTPServerWithEnvironment(t, test.environment).Handler().ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("unexpected status %d, want %d: %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if test.wantStatus == http.StatusOK {
+				body := response.Body.String()
+				if !strings.Contains(body, "Server 执行验收") || !strings.Contains(body, "不能作为真实 App → Server 联调通过依据") || !strings.Contains(body, "真实 App 包验收") {
+					t.Fatalf("acceptance page is missing its title or controlled-test warning: %s", body)
+				}
+				if response.Header().Get("Cache-Control") != "no-store" {
+					t.Fatalf("acceptance page must not be cached: %v", response.Header())
+				}
+				if !strings.Contains(response.Header().Get("Content-Security-Policy"), "default-src 'self'") {
+					t.Fatalf("acceptance page is missing its content security policy: %v", response.Header())
+				}
+			}
+		})
+	}
+}
+
+func TestServerAcceptanceAPIRejectsNonLocalClients(t *testing.T) {
+	tests := []struct {
+		name        string
+		environment string
+		remoteAddr  string
+	}{
+		{name: "production", environment: "production", remoteAddr: "127.0.0.1:54321"},
+		{name: "non loopback", environment: "development", remoteAddr: "192.0.2.10:54321"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/v1/desktop/browser-agent-acceptance", nil)
+			request.RemoteAddr = test.remoteAddr
+			response := httptest.NewRecorder()
+			newTestDevHTTPServerWithEnvironment(t, test.environment).Handler().ServeHTTP(response, request)
+			if response.Code == http.StatusOK {
+				t.Fatalf("unsafe client reached acceptance API: %s", response.Body.String())
+			}
+			var bridge BridgeResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+				t.Fatal(err)
+			}
+			if bridge.OK || !strings.Contains(bridge.Error, "server acceptance") {
+				t.Fatalf("unexpected rejection response: %+v", bridge)
+			}
+		})
+	}
+}
+
 func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
 	return newTestDevHTTPServerWithEnvironment(t, "test")
 }
