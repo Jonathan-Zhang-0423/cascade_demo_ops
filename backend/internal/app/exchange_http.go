@@ -54,6 +54,14 @@ func (s *DevHTTPServer) registerExchangeBootstrapRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /aigc/v1/app-installations/revoke", s.requireDevExchangeAuth(s.handleAppInstallationRevoke))
 }
 
+func (s *DevHTTPServer) registerControlPlaneBootstrapRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /.well-known/cascade-exchange", s.handleExchangeBootstrap)
+	mux.HandleFunc("POST /v1/app-installations/register", s.handleAppInstallationRegister)
+	mux.HandleFunc("POST /v1/app-installations/session", s.handleAppInstallationSession)
+	mux.HandleFunc("POST /v1/app-installations/refresh", s.handleAppInstallationRefresh)
+	mux.HandleFunc("POST /v1/app-installations/revoke", s.requireInstallationSession(s.handleAppInstallationRevoke))
+}
+
 func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	if !s.devExchangeHTTPEnabledForRuntime() {
 		return
@@ -64,6 +72,7 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/execution-packages/{id}/status", s.requireDevExchangeAuth(s.handleExecutionPackageStatus))
 	mux.HandleFunc("GET /v1/execution-packages/{id}/events", s.requireDevExchangeAuth(s.handleExecutionPackageEvents))
 	mux.HandleFunc("GET /v1/result-packages/{id}", s.requireDevExchangeAuth(s.handleResultPackageGet))
+	mux.HandleFunc("GET /v1/result-packages/{id}/deliverables/{artifact_id}", s.requireDevExchangeAuth(s.handleDevResultDeliverableDownload))
 	mux.HandleFunc("POST /v1/result-packages/{id}/ack", s.requireDevExchangeAuth(s.handleResultPackageAck))
 	mux.HandleFunc("POST /v1/result-packages/{id}/reviews", s.requireDevExchangeAuth(s.handleResultPackageReview))
 	mux.HandleFunc("POST /v1/result-packages/{id}/revisions", s.requireDevExchangeAuth(s.handleResultPackageRevision))
@@ -79,6 +88,7 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /aigc/v1/execution-packages/{id}/status", s.requireDevExchangeAuth(s.handleExecutionPackageStatus))
 	mux.HandleFunc("GET /aigc/v1/execution-packages/{id}/events", s.requireDevExchangeAuth(s.handleExecutionPackageEvents))
 	mux.HandleFunc("GET /aigc/v1/result-packages/{id}", s.requireDevExchangeAuth(s.handleResultPackageGet))
+	mux.HandleFunc("GET /aigc/v1/result-packages/{id}/deliverables/{artifact_id}", s.requireDevExchangeAuth(s.handleDevResultDeliverableDownload))
 	mux.HandleFunc("POST /aigc/v1/result-packages/{id}/ack", s.requireDevExchangeAuth(s.handleResultPackageAck))
 	mux.HandleFunc("POST /aigc/v1/result-packages/{id}/reviews", s.requireDevExchangeAuth(s.handleResultPackageReview))
 	mux.HandleFunc("POST /aigc/v1/result-packages/{id}/revisions", s.requireDevExchangeAuth(s.handleResultPackageRevision))
@@ -88,6 +98,25 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /aigc/v1/dev/execution-packages/{id}/cancel", s.requireDevExchangeAuth(s.handleDevExecutionPackageCancel))
 	mux.HandleFunc("GET /aigc/v1/dev/execution-packages/{id}/debug", s.requireDevExchangeAuth(s.handleDevExecutionPackageDebug))
 	mux.HandleFunc("GET /aigc/v1/dev/result-packages/{id}/deliverables/{artifact_id}", s.requireDevExchangeAuth(s.handleDevResultDeliverableDownload))
+}
+
+// ControlPlaneHandler exposes only the public App-to-Server exchange surface.
+// Desktop bridge, editor, model settings, and dev diagnostics remain loopback-only.
+func (s *DevHTTPServer) ControlPlaneHandler() http.Handler {
+	mux := http.NewServeMux()
+	s.registerControlPlaneBootstrapRoutes(mux)
+	auth := s.requireInstallationSession
+	mux.HandleFunc("POST /v1/execution-packages/init", auth(s.handleExecutionPackageInit))
+	mux.HandleFunc("POST /v1/execution-packages/validate", auth(s.handleExecutionPackageValidate))
+	mux.HandleFunc("POST /v1/execution-packages", auth(s.handleExecutionPackageUpload))
+	mux.HandleFunc("GET /v1/execution-packages/{id}/status", auth(s.handleExecutionPackageStatus))
+	mux.HandleFunc("GET /v1/execution-packages/{id}/events", auth(s.handleExecutionPackageEvents))
+	mux.HandleFunc("GET /v1/result-packages/{id}", auth(s.handleResultPackageGet))
+	mux.HandleFunc("GET /v1/result-packages/{id}/deliverables/{artifact_id}", auth(s.handleDevResultDeliverableDownload))
+	mux.HandleFunc("POST /v1/result-packages/{id}/ack", auth(s.handleResultPackageAck))
+	mux.HandleFunc("POST /v1/result-packages/{id}/reviews", auth(s.handleResultPackageReview))
+	mux.HandleFunc("POST /v1/result-packages/{id}/revisions", auth(s.handleResultPackageRevision))
+	return withControlPlaneHeaders(mux)
 }
 
 func (s *DevHTTPServer) devExchangeHTTPEnabledForRuntime() bool {
@@ -161,7 +190,7 @@ func (s *DevHTTPServer) handleExecutionPackageUpload(w http.ResponseWriter, r *h
 		request.PayloadRef = request.Envelope.PayloadRef
 	}
 	response, err := s.service.UploadExecutionPackageFromHTTP(r.Context(), request, body.Payload, installationIDFromRequest(s.service.exchange, r))
-	if err == nil && devExchangeAutoRunEnabled() && body.Payload.PackageID != "" && response.Status == model.ExchangePackageStatusAccepted {
+	if err == nil && (s.autoRunExchange || devExchangeAutoRunEnabled()) && body.Payload.PackageID != "" && response.Status == model.ExchangePackageStatusAccepted {
 		runStatus, runErr := s.service.RunUploadedExecutionPackage(r.Context(), responseOrgID(request.Envelope, body.Payload), response.ExchangePackageID)
 		if runErr == nil && runStatus.ExchangePackageID != "" {
 			response.Status = runStatus.Status
@@ -412,6 +441,27 @@ func (s *DevHTTPServer) requireDevExchangeAuth(next http.HandlerFunc) http.Handl
 	}
 }
 
+func (s *DevHTTPServer) requireInstallationSession(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if token := sessionTokenFromRequest(r); token != "" {
+			if _, ok := s.service.exchange.AuthenticateInstallationSession(token); ok {
+				next(w, r)
+				return
+			}
+		}
+		writeExchangeError(w, http.StatusUnauthorized, "installation_session_required", errors.New("a valid Cascade installation session is required"))
+	}
+}
+
+func withControlPlaneHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func installationIDFromRequest(exchange *ExchangeIntakeService, r *http.Request) string {
 	if exchange == nil {
 		return ""
@@ -507,7 +557,7 @@ func addDeliverableDownloadURLs(summary *model.ExecutionResultSummary, resultPac
 			continue
 		}
 		summary.Deliverables[index].DownloadURL = fmt.Sprintf(
-			"/v1/dev/result-packages/%s/deliverables/%s",
+			"/v1/result-packages/%s/deliverables/%s",
 			urlPathEscape(resultPackageID),
 			urlPathEscape(summary.Deliverables[index].ID),
 		)

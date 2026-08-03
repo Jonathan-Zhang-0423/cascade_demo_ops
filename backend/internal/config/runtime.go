@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -124,13 +125,18 @@ type AppRuntimeConfig struct {
 }
 
 type DesktopResourceManifest struct {
-	App                     string                 `json:"app"`
-	ResourceContractVersion int                    `json:"resource_contract_version"`
-	Sidecars                map[string]string      `json:"sidecars,omitempty"`
-	Runtimes                map[string]string      `json:"runtimes,omitempty"`
-	Web                     string                 `json:"web,omitempty"`
-	Version                 string                 `json:"version,omitempty"`
-	Updates                 DesktopUpdateResources `json:"updates,omitempty"`
+	App                     string                       `json:"app"`
+	ResourceContractVersion int                          `json:"resource_contract_version"`
+	ControlPlane            DesktopControlPlaneResources `json:"control_plane,omitempty"`
+	Sidecars                map[string]string            `json:"sidecars,omitempty"`
+	Runtimes                map[string]string            `json:"runtimes,omitempty"`
+	Web                     string                       `json:"web,omitempty"`
+	Version                 string                       `json:"version,omitempty"`
+	Updates                 DesktopUpdateResources       `json:"updates,omitempty"`
+}
+
+type DesktopControlPlaneResources struct {
+	BaseURL string `json:"base_url,omitempty"`
 }
 
 type DesktopUpdateResources struct {
@@ -434,6 +440,9 @@ func applyDesktopResourceManifest(cfg *AppRuntimeConfig) {
 	if cfg.AppVersion == "" {
 		cfg.AppVersion = strings.TrimSpace(manifest.Version)
 	}
+	if cfg.CloudExchangeBaseURL == "" {
+		cfg.CloudExchangeBaseURL = controlPlaneBaseURLFromManifest(manifest.ControlPlane.BaseURL)
+	}
 	if cfg.UpdateChannel == "" {
 		cfg.UpdateChannel = strings.TrimSpace(manifest.Updates.Channel)
 	}
@@ -452,6 +461,19 @@ func applyDesktopResourceManifest(cfg *AppRuntimeConfig) {
 	if cfg.DesktopExecutablePath == "" {
 		cfg.DesktopExecutablePath = resourcePath(cfg.ResourceRoot, manifest.Updates.AppExecutable)
 	}
+}
+
+func controlPlaneBaseURLFromManifest(raw string) string {
+	value := strings.TrimRight(strings.TrimSpace(raw), "/")
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return ""
+	}
+	local := parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "localhost"
+	if parsed.Scheme != "https" && !(local && parsed.Scheme == "http") {
+		return ""
+	}
+	return value
 }
 
 func validDesktopRuntimeOverride(path string) bool {

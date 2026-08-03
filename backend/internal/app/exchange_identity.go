@@ -237,14 +237,11 @@ func (s *Service) discoverExchangeBaseURL() (string, error) {
 	return "", errors.New("DemoOps execution server is not configured; open App settings and enter the control plane base URL")
 }
 
-func useConfiguredExchangeBootstrap(baseURL string, configuredBaseURL string, environment string) bool {
+func useConfiguredExchangeBootstrap(baseURL string, configuredBaseURL string, _ string) bool {
 	if strings.TrimSpace(configuredBaseURL) == "" {
 		return false
 	}
-	if isLocalExchangeBaseURL(baseURL) {
-		return true
-	}
-	return environment != "production"
+	return isLocalExchangeBaseURL(baseURL)
 }
 
 func isOptionalExchangeDiscoveryError(err error) bool {

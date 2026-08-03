@@ -2,6 +2,7 @@ import { createHash, createPublicKey } from "node:crypto";
 import { mkdirSync, cpSync, existsSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { isIP } from "node:net";
 
 const root = resolve(".");
 const appPackage = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
@@ -20,6 +21,7 @@ const sourceFFmpegPath = String(process.env.CASCADE_PACKAGE_FFMPEG_PATH || "").t
 const sourceFFprobePath = String(process.env.CASCADE_PACKAGE_FFPROBE_PATH || "").trim();
 const sourceUpdatePublicKeyPath = String(process.env.DEMOOPS_UPDATE_PUBLIC_KEY_PATH || "").trim();
 const updateManifestURL = String(process.env.DEMOOPS_UPDATE_MANIFEST_URL || "").trim();
+const controlPlaneBaseURL = normalizeControlPlaneBaseURL(process.env.DEMOOPS_CONTROL_PLANE_BASE_URL || "");
 const releaseChannel = String(process.env.CASCADE_RELEASE_CHANNEL || "internal").trim();
 const desktopBinary = resolve("dist", "desktop", targetGOOS, `cascade-demoops-desktop${desktopExt}`);
 const updaterBinary = resolve("dist", "desktop", targetGOOS, `cascade-demoops-updater${desktopExt}`);
@@ -42,6 +44,18 @@ if (releaseChannel !== "internal" && !sourceUpdatePublicKeyPath) {
 }
 if (releaseChannel !== "internal" && !updateManifestURL.startsWith("https://")) {
   throw new Error("beta/stable packages require DEMOOPS_UPDATE_MANIFEST_URL on a DemoOps HTTPS release origin");
+}
+if (releaseChannel !== "internal" && !controlPlaneBaseURL) {
+  throw new Error("beta/stable packages require DEMOOPS_CONTROL_PLANE_BASE_URL");
+}
+if (releaseChannel !== "internal" && new URL(controlPlaneBaseURL).protocol !== "https:") {
+  throw new Error("beta/stable packages require an HTTPS DemoOps control plane");
+}
+if (releaseChannel !== "internal" && new URL(controlPlaneBaseURL).pathname !== "/") {
+  throw new Error("beta/stable packages require a DemoOps control-plane origin without a path");
+}
+if (releaseChannel !== "internal" && isIP(new URL(controlPlaneBaseURL).hostname)) {
+  throw new Error("beta/stable packages require a dedicated DemoOps control-plane hostname, not a server IP");
 }
 
 if (!fallbackWebBuild()) {
@@ -82,6 +96,9 @@ const runtimeManifest = {
   app: "Cascade DemoOps",
   version: appPackage.version || "0.0.0",
   resource_contract_version: 1,
+  control_plane: {
+    base_url: controlPlaneBaseURL,
+  },
   sidecars: {
     "video-worker": "sidecars/video-worker/dist/index.js",
   },
@@ -323,6 +340,25 @@ function validateUpdatePublicKey(source) {
   if (key.asymmetricKeyType !== "ed25519") {
     throw new Error("DEMOOPS_UPDATE_PUBLIC_KEY_PATH must contain an Ed25519 public key");
   }
+}
+
+function normalizeControlPlaneBaseURL(raw) {
+  const value = String(raw || "").trim().replace(/\/+$/, "");
+  if (!value) return "";
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("DEMOOPS_CONTROL_PLANE_BASE_URL must be an absolute server URL");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("DEMOOPS_CONTROL_PLANE_BASE_URL must not contain credentials, query, or fragment");
+  }
+  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+  if (parsed.protocol !== "https:" && !(loopback && parsed.protocol === "http:")) {
+    throw new Error("DEMOOPS_CONTROL_PLANE_BASE_URL requires HTTPS; loopback HTTP is allowed only for SSH forwarding");
+  }
+  return value;
 }
 
 function run(command, args, options = {}) {

@@ -305,7 +305,8 @@ func TestRuntimeConfigLoadsDesktopResourceManifest(t *testing.T) {
 			"ffmpeg": "runtimes/ffmpeg/ffmpeg.exe",
 			"ffprobe": "runtimes/ffmpeg/ffprobe.exe"
 		},
-		"web": "web"
+		"web": "web",
+		"control_plane": {"base_url": "https://control.demoops.example/"}
 	}`
 	if err := os.WriteFile(filepath.Join(resourceRoot, "desktop-runtime.json"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
@@ -335,6 +336,43 @@ func TestRuntimeConfigLoadsDesktopResourceManifest(t *testing.T) {
 	}
 	if cfg.ResourceManifestPath == "" {
 		t.Fatal("expected manifest path")
+	}
+	if cfg.CloudExchangeBaseURL != "https://control.demoops.example" {
+		t.Fatalf("control plane from manifest = %q", cfg.CloudExchangeBaseURL)
+	}
+}
+
+func TestRuntimeConfigKeepsControlPlaneEnvOverrideAheadOfManifest(t *testing.T) {
+	resourceRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(resourceRoot, "desktop-runtime.json"), []byte(`{"control_plane":{"base_url":"https://packaged.demoops.example"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CASCADE_PROFILE", "desktop")
+	t.Setenv("CASCADE_RESOURCE_ROOT", resourceRoot)
+	t.Setenv("CASCADE_CLOUD_EXCHANGE_BASE_URL", "https://managed.demoops.example/")
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudExchangeBaseURL != "https://managed.demoops.example" {
+		t.Fatalf("control plane override = %q", cfg.CloudExchangeBaseURL)
+	}
+}
+
+func TestRuntimeConfigIgnoresUnsafeControlPlaneManifestURL(t *testing.T) {
+	resourceRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(resourceRoot, "desktop-runtime.json"), []byte(`{"control_plane":{"base_url":"http://public.example:4317?token=unsafe"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CASCADE_PROFILE", "desktop")
+	t.Setenv("CASCADE_RESOURCE_ROOT", resourceRoot)
+	t.Setenv("CASCADE_CLOUD_EXCHANGE_BASE_URL", "")
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudExchangeBaseURL != "" {
+		t.Fatalf("unsafe manifest control plane should be ignored, got %q", cfg.CloudExchangeBaseURL)
 	}
 }
 
