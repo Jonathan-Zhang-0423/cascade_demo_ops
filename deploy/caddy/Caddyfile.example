@@ -1,0 +1,25 @@
+<DEMOOPS_API_HOST> {
+	encode zstd gzip
+
+	request_body {
+		max_size 2MB
+	}
+
+	reverse_proxy 127.0.0.1:4317 {
+		flush_interval -1
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto https
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/demoops-control-plane.json
+		format json
+	}
+}

@@ -31,6 +31,54 @@ func TestDevExchangeHTTPRoutesAreDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestControlPlaneHandlerExposesOnlyInstallationAuthenticatedExchangeRoutes(t *testing.T) {
+	t.Setenv(devExchangeHTTPEnv, "")
+	t.Setenv(devExchangeTokenEnv, "shared-token-must-not-work")
+	server := newTestDevHTTPServer(t)
+	handler := NewControlPlaneHTTPServer(server.service).ControlPlaneHandler()
+
+	for _, path := range []string{"/v1/desktop/runtime-health", "/v1/dev/execution-packages"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("control plane exposed private route %s with status %d", path, response.Code)
+		}
+	}
+
+	unauthorized := httptest.NewRequest(http.MethodPost, "/v1/execution-packages/init", bytes.NewReader([]byte(`{"org_id":"org_1","project_id":"project_1","package_kind":"client_execution"}`)))
+	unauthorized.Header.Set("Authorization", "Bearer shared-token-must-not-work")
+	unauthorizedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusUnauthorized || !strings.Contains(unauthorizedResponse.Body.String(), "installation_session_required") {
+		t.Fatalf("control plane should reject shared bearer auth, got %d: %s", unauthorizedResponse.Code, unauthorizedResponse.Body.String())
+	}
+
+	discovery := exchangeHTTPDo[model.ExchangeBootstrapDiscoveryResponse](t, server, http.MethodGet, "/.well-known/cascade-exchange", nil)
+	_, session := registerTestInstallation(t, server, discovery, "install_control_plane")
+	authorized := httptest.NewRequest(http.MethodPost, "/v1/execution-packages/init", bytes.NewReader([]byte(`{"org_id":"org_1","project_id":"project_1","package_kind":"client_execution","producer":{"install_id":"install_control_plane","runtime_profile":"desktop-product-run"}}`)))
+	authorized.Header.Set("Content-Type", "application/json")
+	authorized.Header.Set("Authorization", "Cascade-Session "+session.SessionToken)
+	authorizedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(authorizedResponse, authorized)
+	if authorizedResponse.Code != http.StatusOK {
+		t.Fatalf("control plane should accept paired installation, got %d: %s", authorizedResponse.Code, authorizedResponse.Body.String())
+	}
+}
+
+func TestEnsureControlPlaneAddressRequiresLoopback(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:4317", "localhost:4317", "[::1]:4317"} {
+		if err := EnsureControlPlaneAddress(addr); err != nil {
+			t.Fatalf("expected loopback address %s to pass: %v", addr, err)
+		}
+	}
+	for _, addr := range []string{"0.0.0.0:4317", ":4317", "203.0.113.10:4317", "localhost"} {
+		if err := EnsureControlPlaneAddress(addr); err == nil {
+			t.Fatalf("expected non-loopback or incomplete address %s to fail", addr)
+		}
+	}
+}
+
 func TestDevExchangeHTTPRequiresBearerToken(t *testing.T) {
 	t.Setenv(devExchangeHTTPEnv, "1")
 	t.Setenv(devExchangeTokenEnv, "test-token")

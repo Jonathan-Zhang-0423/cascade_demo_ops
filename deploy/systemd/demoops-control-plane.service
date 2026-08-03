@@ -1,0 +1,25 @@
+[Unit]
+Description=Cascade DemoOps Control Plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=demoops
+Group=demoops
+WorkingDirectory=/opt/demoops/current
+EnvironmentFile=/etc/demoops/control-plane.env
+ExecStart=/opt/demoops/current/bin/demoops-control-plane --addr 127.0.0.1:4317
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/demoops /var/log/demoops
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -19,6 +19,7 @@ if (channel !== "internal") {
   const version = packageManifest.version;
   const installer = resolve(root, "dist", "release", `CascadeDemoOps-${version}-windows-x64-setup.exe`);
   assertFile(installer, "Inno Setup installer");
+  assert(runtimeManifest.control_plane?.base_url?.startsWith("https://"), `${channel} package must embed its DemoOps HTTPS control plane`);
 }
 console.log(`Desktop release smoke passed for ${channel} channel.`);
 

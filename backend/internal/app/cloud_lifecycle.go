@@ -2992,7 +2992,7 @@ func resolveCloudDeliverableDownloadURL(baseURL string, resultPackageID string, 
 	}
 	downloadURL := strings.TrimSpace(deliverable.DownloadURL)
 	if downloadURL == "" {
-		downloadURL = fmt.Sprintf("/v1/dev/result-packages/%s/deliverables/%s", url.PathEscape(resultPackageID), url.PathEscape(deliverable.ID))
+		downloadURL = fmt.Sprintf("/v1/result-packages/%s/deliverables/%s", url.PathEscape(resultPackageID), url.PathEscape(deliverable.ID))
 	}
 	if parsed, err := url.Parse(downloadURL); err == nil && parsed.IsAbs() {
 		return downloadURL, nil

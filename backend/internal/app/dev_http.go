@@ -26,6 +26,7 @@ import (
 type DevHTTPServer struct {
 	service               *Service
 	events                *devEventStore
+	autoRunExchange       bool
 	storeGitHubToken      func(string) error
 	storeDemoCredential   func(string, string, string) error
 	githubTokenConfigured func() bool
@@ -93,6 +94,12 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 	if service != nil {
 		service.SetAssistantProgressSink(server.emitProjectEvent)
 	}
+	return server
+}
+
+func NewControlPlaneHTTPServer(service *Service) *DevHTTPServer {
+	server := NewDevHTTPServer(service)
+	server.autoRunExchange = true
 	return server
 }
 
@@ -1124,6 +1131,22 @@ func EnsureLocalDevAddress(addr string) error {
 		return nil
 	}
 	return errors.New("dev bridge refuses non-local bind address")
+}
+
+func EnsureControlPlaneAddress(addr string) error {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return errors.New("control plane address must include an explicit loopback host and port")
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return errors.New("control plane must bind to loopback behind the HTTPS reverse proxy")
+	}
+	return nil
 }
 
 var (

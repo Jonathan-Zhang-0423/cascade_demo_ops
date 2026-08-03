@@ -32,6 +32,9 @@ assert(runtimeManifest.updates?.app_executable === "../cascade-demoops-desktop.e
 if (manifest.release_channel === "internal") {
   assert(runtimeManifest.updates?.manifest_url === "", "internal package must not invent an update origin");
 }
+if (manifest.release_channel !== "internal") {
+  assert(runtimeManifest.control_plane?.base_url?.startsWith("https://"), "beta/stable package must embed its DemoOps HTTPS control plane");
+}
 assertNativeCapabilities(manifest.desktop_ui, "desktop package manifest");
 assert(manifest.runtimes?.node?.path === "resources/runtimes/node/node.exe", "desktop package manifest must include bundled node runtime");
 if (manifest.release_channel !== "internal") {
