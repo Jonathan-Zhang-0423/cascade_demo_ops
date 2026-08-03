@@ -175,3 +175,54 @@ func controlledOutlineWaitTimeoutPackage(fixturePath, baseURL string) (model.Cli
 	return finalizeControlledOutline(&base, specs, baseURL, domain, evidence)
 }
 
+// controlledOutlineSelectorRepairHandler simulates a harmless locator drift:
+// the approved semantic target is unchanged, but only the App-approved
+// selector alternative still resolves on the live page.
+func controlledOutlineSelectorRepairHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(`<!doctype html><html><head><meta charset="utf-8"><title>Outline Selector Repair</title></head><body><main aria-label="Outline workspace"><h1>Workspace</h1><button data-testid="current-confirm-action" onclick="document.querySelector('[data-testid=repair-status]').textContent='Confirmed'">Confirm action</button><p data-testid="repair-status">Waiting</p></main></body></html>`))
+}
+
+// controlledOutlineSelectorRepairPackage starts with a stale primary selector
+// and declares the current selector as an App-approved alternative. Server may
+// use that alternative for this run only; the signed source bundle is immutable.
+func controlledOutlineSelectorRepairPackage(fixturePath, baseURL string) (model.ClientExecutionPackage, error) {
+	evidence := model.EvidenceRef{ID: "ev_outline_selector_repair_fixture", Kind: "fixture_source", Summary: "Server-owned controlled selector-repair page", Confidence: 1}
+	base, domain, err := controlledOutlineBase(fixturePath, baseURL, "pkg_controlled_outline_selector_repair", "project_controlled_outline_selector_repair", "ctx_controlled_outline_selector_repair", "run_controlled_outline_selector_repair", "Controlled outline selector-repair flow")
+	if err != nil {
+		return model.ClientExecutionPackage{}, err
+	}
+	component := model.BrowserAgentComponentTarget{
+		ComponentRef: "component:confirm-action", TestID: "stale-confirm-action",
+		SelectorAlternatives: []model.SelectorCandidate{{Kind: "testid", Value: "current-confirm-action", Confidence: 1, StabilityScore: 1, Source: "app_approved_fixture"}},
+		EvidenceRefs:         []model.EvidenceRef{evidence}, Confidence: 1,
+	}
+	specs := []controlledBusinessStageSpec{
+		outlineNavigateStage(baseURL, evidence),
+		{NodeID: "node_confirm_action", StageID: "stage_confirm_action", Title: "Confirm approved action", Objective: "Approved confirmation is completed", Intent: "Use only the App-approved live selector alternative and verify the confirmation result.", Route: "/app", Success: "Confirmed is visible", Kind: model.BusinessStageKindBusinessSubmit, RouteState: model.BusinessRouteStateWorkspace, Action: model.BrowserAgentInteraction{Kind: model.GraphActionClick, Target: model.ActionTarget{TestID: "stale-confirm-action"}, NonDestructive: true, WaitConditions: []string{"wait_after_entry_at_least_250ms"}, SelectorPolicy: "app_approved_alternatives_only"}, Target: model.BrowserAgentTargetContract{SemanticID: "target_confirm_action", Purpose: "Approved confirmation action", ComponentRef: "component:confirm-action", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1}, Component: component, Validation: model.ValidationSpec{ID: "validation_confirmed", Kind: "text_contains", Target: model.ActionTarget{TestID: "repair-status"}, Assertion: "Confirmed", Expected: "Confirmed", Required: true, EvidenceRefs: []model.EvidenceRef{evidence}}},
+	}
+	return finalizeControlledOutline(&base, specs, baseURL, domain, evidence)
+}
+
+// controlledOutlineBusyWaitRepairHandler keeps the approved target visible but
+// marks the page busy until the initial 250 ms observation window has elapsed.
+// The Worker may then propose one bounded wait extension before re-observing.
+func controlledOutlineBusyWaitRepairHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(`<!doctype html><html><head><meta charset="utf-8"><title>Outline Busy Wait Repair</title></head><body aria-busy="true"><main aria-label="Outline workspace"><h1>Workspace</h1><button data-testid="delayed-action" style="display:none" onclick="document.querySelector('[data-testid=wait-status]').textContent='Ready after wait'">Delayed action</button><p data-testid="wait-status">Loading</p></main><script>const originalQuerySelector=Document.prototype.querySelector;Document.prototype.querySelector=function(selector){if(selector==='[aria-busy="true"]'){setTimeout(()=>{document.body.setAttribute('aria-busy','false');originalQuerySelector.call(document,'[data-testid=delayed-action]').style.display='inline-block'},0);return document.body}return originalQuerySelector.call(this,selector)}</script></body></html>`))
+}
+
+// controlledOutlineBusyWaitRepairPackage authorizes only a bounded wait change;
+// it does not authorize a selector, action, intent, route, or validation change.
+func controlledOutlineBusyWaitRepairPackage(fixturePath, baseURL string) (model.ClientExecutionPackage, error) {
+	evidence := model.EvidenceRef{ID: "ev_outline_busy_wait_repair_fixture", Kind: "fixture_source", Summary: "Server-owned controlled busy-page repair", Confidence: 1}
+	base, domain, err := controlledOutlineBase(fixturePath, baseURL, "pkg_controlled_outline_busy_wait_repair", "project_controlled_outline_busy_wait_repair", "ctx_controlled_outline_busy_wait_repair", "run_controlled_outline_busy_wait_repair", "Controlled outline busy-wait repair flow")
+	if err != nil {
+		return model.ClientExecutionPackage{}, err
+	}
+	specs := []controlledBusinessStageSpec{
+		outlineNavigateStage(baseURL, evidence),
+		{NodeID: "node_delayed_action", StageID: "stage_delayed_action", Title: "Run delayed action", Objective: "Approved delayed action is completed", Intent: "Wait only within the App-approved bound, then run the approved action.", Route: "/app", Success: "Ready after wait is visible", Kind: model.BusinessStageKindBusinessSubmit, RouteState: model.BusinessRouteStateWorkspace, Action: model.BrowserAgentInteraction{Kind: model.GraphActionClick, Target: model.ActionTarget{TestID: "delayed-action"}, NonDestructive: true, WaitConditions: []string{"wait_after_entry_at_least_250ms"}, SelectorPolicy: "prefer_testid"}, Target: model.BrowserAgentTargetContract{SemanticID: "target_delayed_action", Purpose: "Approved delayed action", AllowedRoles: []string{"button"}, AllowedNames: []string{"Delayed action"}, ComponentRef: "component:delayed-action", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1}, Component: model.BrowserAgentComponentTarget{ComponentRef: "component:delayed-action", Role: "button", Name: "Delayed action", TestID: "delayed-action", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1}, Validation: model.ValidationSpec{ID: "validation_ready_after_wait", Kind: "text_contains", Target: model.ActionTarget{TestID: "wait-status"}, Assertion: "Ready after wait", Expected: "Ready after wait", Required: true, EvidenceRefs: []model.EvidenceRef{evidence}}},
+	}
+	return finalizeControlledOutline(&base, specs, baseURL, domain, evidence)
+}

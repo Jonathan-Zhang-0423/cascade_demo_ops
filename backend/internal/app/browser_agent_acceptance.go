@@ -36,6 +36,18 @@ type BrowserAgentAcceptanceScenario struct {
 	Evidence       []BrowserAgentAcceptanceArtifact `json:"evidence"`
 	Assertions     []BrowserAgentAcceptanceCheck    `json:"assertions"`
 	StopReason     string                           `json:"stop_reason,omitempty"`
+	RepairAudit    *BrowserAgentRepairAudit         `json:"repair_audit,omitempty"`
+}
+
+type BrowserAgentRepairAudit struct {
+	Applied                  bool   `json:"applied"`
+	Field                    string `json:"field"`
+	Before                   string `json:"before,omitempty"`
+	After                    string `json:"after"`
+	Attempt                  int    `json:"attempt"`
+	PolicyDecision           string `json:"policy_decision"`
+	SourceBundleHashSHA256   string `json:"source_bundle_hash_sha256"`
+	ApprovedBundleHashIntact bool   `json:"approved_bundle_hash_intact"`
 }
 
 type BrowserAgentAcceptanceArtifact struct {
@@ -226,6 +238,32 @@ func (s *Service) runProtocolBrowserAgentAcceptance(ctx context.Context, fixture
 	}
 	report.Scenarios = append(report.Scenarios, protocolAcceptanceFailureScenario("required_validation_failure", "动作完成但必填业务结果不成立", "停止后续 Stage，并返回失败结果包", validationResult, true, "outcome_verification_failed"))
 	report.Scenarios = append(report.Scenarios, protocolAcceptanceArtifactScenario(success))
+
+	selectorServer := httptest.NewServer(http.HandlerFunc(controlledOutlineSelectorRepairHandler))
+	defer selectorServer.Close()
+	selectorRepairPackage, err := controlledOutlineSelectorRepairPackage(fixturePath, selectorServer.URL)
+	if err != nil {
+		return BrowserAgentAcceptanceReport{}, err
+	}
+	selectorSourceHash := selectorRepairPackage.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+	selectorRepair, err := s.runProtocolAcceptanceScenario(ctx, selectorRepairPackage)
+	if err != nil {
+		return BrowserAgentAcceptanceReport{}, err
+	}
+	report.Scenarios = append(report.Scenarios, protocolAcceptanceRepairScenario("approved_selector_alternative_repair", "主定位器失效时，仅使用 App 已批准的候选定位器", "自动恢复、记录补丁账本且不修改原执行包", selectorRepair, selectorSourceHash))
+
+	waitServer := httptest.NewServer(http.HandlerFunc(controlledOutlineBusyWaitRepairHandler))
+	defer waitServer.Close()
+	waitRepairPackage, err := controlledOutlineBusyWaitRepairPackage(fixturePath, waitServer.URL)
+	if err != nil {
+		return BrowserAgentAcceptanceReport{}, err
+	}
+	waitSourceHash := waitRepairPackage.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+	waitRepair, err := s.runProtocolAcceptanceScenario(ctx, waitRepairPackage)
+	if err != nil {
+		return BrowserAgentAcceptanceReport{}, err
+	}
+	report.Scenarios = append(report.Scenarios, protocolAcceptanceRepairScenario("busy_page_wait_repair", "页面仍忙时，仅延长协议允许的有限等待", "自动恢复、记录等待前后值且不修改原执行包", waitRepair, waitSourceHash))
 	for _, scenario := range report.Scenarios {
 		if scenario.Verdict != "passed" {
 			report.StrictGate = "failed"
@@ -386,6 +424,18 @@ func protocolAcceptanceArtifactScenario(run protocolAcceptanceRun) BrowserAgentA
 	}
 	passed := hasRecording && hasTrace && run.Result.StageEventLogRef != nil
 	return BrowserAgentAcceptanceScenario{ID: "recording_and_trace_delivery", Description: "完整协议链保留录屏、Trace 与 Stage 事件审计", Expected: "录屏、Trace 和事件审计均进入结果", Actual: acceptanceActual(passed), Verdict: acceptanceVerdict(passed), Evidence: protocolAcceptanceArtifacts(run.Result), Assertions: []BrowserAgentAcceptanceCheck{{Kind: "recording", Passed: hasRecording, Actual: "raw_recording"}, {Kind: "trace", Passed: hasTrace, Actual: "browser_trace"}, {Kind: "stage_event_log", Passed: run.Result.StageEventLogRef != nil, Actual: "jsonl"}}}
+}
+
+func protocolAcceptanceRepairScenario(id, description, expected string, run protocolAcceptanceRun, sourceHash string) BrowserAgentAcceptanceScenario {
+	passed := run.Status.Status == model.ExchangePackageStatusCompleted && run.Result.Status == model.RecordingResultStatusGenerated && len(run.Result.PatchLedger) == 1 && run.Acknowledged && run.DeliveryAcknowledged
+	var audit *BrowserAgentRepairAudit
+	if len(run.Result.PatchLedger) == 1 {
+		entry := run.Result.PatchLedger[0]
+		intact := entry.SourceBundleHashSHA256 == sourceHash
+		audit = &BrowserAgentRepairAudit{Applied: entry.Applied, Field: entry.Field, Before: entry.Before, After: entry.After, Attempt: entry.Attempt, PolicyDecision: string(entry.PolicyDecision), SourceBundleHashSHA256: entry.SourceBundleHashSHA256, ApprovedBundleHashIntact: intact}
+		passed = passed && entry.Applied && entry.PolicyDecision == model.ValidationDecisionRepairAllowed && intact
+	}
+	return BrowserAgentAcceptanceScenario{ID: id, Description: description, Expected: expected, Actual: acceptanceActual(passed), Verdict: acceptanceVerdict(passed), ActionExecuted: true, Evidence: protocolAcceptanceArtifacts(run.Result), Assertions: []BrowserAgentAcceptanceCheck{{Kind: "patch_ledger", Passed: audit != nil && audit.Applied, Actual: acceptanceActual(audit != nil && audit.Applied)}, {Kind: "approved_bundle_hash_intact", Passed: audit != nil && audit.ApprovedBundleHashIntact, Actual: acceptanceActual(audit != nil && audit.ApprovedBundleHashIntact)}, {Kind: "delivery_ack", Passed: run.Acknowledged && run.DeliveryAcknowledged, Actual: acceptanceActual(run.Acknowledged && run.DeliveryAcknowledged)}}, RepairAudit: audit}
 }
 
 func protocolAcceptanceHasArtifact(result model.RecordingResultPackage, kind string) bool {
