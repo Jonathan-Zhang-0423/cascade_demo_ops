@@ -374,6 +374,23 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   };
 }
 
+// Capture-timing repair must never replay the approved business action. It
+// only waits, validates the resulting page state, and captures fresh evidence.
+export async function revalidateBrowserAgentStage(request: BrowserAgentStageRequest): Promise<BrowserAgentStageResult> {
+  const session = requiredSession(request.session_id);
+  validateStage(request.stage);
+  await waitForCaptureWindow(session.page, request.stage);
+  const assertions = await evaluateRequiredValidations(session.page, request.stage);
+  const artifact = await captureScreenshot(session, request.stage, "revalidate");
+  const evidence = screenshotEvidence(artifact, request.stage, "修复截图时机后的结果证据");
+  return {
+    observation: await observation(session.page, "browser_assertion", assertions),
+    evidence_refs: [evidence],
+    artifacts: [artifact],
+    target_resolved: true,
+  };
+}
+
 export async function closeBrowserAgentSession(request: { session_id: string }): Promise<BrowserAgentCloseResult> {
   const session = requiredSession(request.session_id);
   sessions.delete(session.id);
@@ -403,7 +420,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   // Failed observations may throw after their before-capture. Recover every
   // stage screenshot here so the Server can build a protocol failure package.
   for (const entry of await readdir(session.outputDir).catch(() => [] as string[])) {
-    const match = /^stage-\d+-(.+)-(before|after)\.png$/i.exec(entry);
+    const match = /^stage-\d+-(.+)-(before|after|revalidate)\.png$/i.exec(entry);
     if (!match) continue;
     const nodeID = match[1] || "unknown";
     const phase = (match[2] || "before").toLowerCase();
@@ -413,7 +430,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
       path.join(session.outputDir, entry),
       "image/png",
       nodeID,
-      { include_in_demo: phase === "after", capture_phase: phase, recovered_at_session_close: true },
+      { include_in_demo: phase === "after" || phase === "revalidate", capture_phase: phase, recovered_at_session_close: true },
       false,
     ));
   }
@@ -656,21 +673,21 @@ function locatorFromAlternative(page: any, kind: string, value: string): any | u
   return undefined;
 }
 
-async function captureScreenshot(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, phase: "before" | "after"): Promise<ArtifactRef> {
+async function captureScreenshot(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, phase: "before" | "after" | "revalidate"): Promise<ArtifactRef> {
   const fileName = `stage-${String(stage.order).padStart(3, "0")}-${safeName(stage.node_id)}-${phase}.png`;
   const filePath = path.join(session.outputDir, fileName);
   const masks = session.maskSelectors.filter(Boolean).map((selector) => session.page.locator(selector));
   await session.page.screenshot({ path: filePath, fullPage: false, mask: masks, timeout: screenshotTimeoutMS });
   return artifactRef(
     `artifact_${safeName(session.id)}_${safeName(stage.node_id)}_${phase}`,
-    phase === "after" ? "step_screenshot" : "screenshot",
+    phase === "after" || phase === "revalidate" ? "step_screenshot" : "screenshot",
     filePath,
     "image/png",
     stage.node_id,
     {
-      include_in_demo: phase === "after",
-      // Only post-action screenshots can be used to compose a local test video.
-      presentation_only: phase === "after",
+      include_in_demo: phase === "after" || phase === "revalidate",
+      // Post-action and non-action revalidation screenshots are safe inputs.
+      presentation_only: phase === "after" || phase === "revalidate",
       capture_phase: phase,
       target_semantic_id: stage.target_contract.semantic_id,
       current_url: safeURL(session.page.url()),

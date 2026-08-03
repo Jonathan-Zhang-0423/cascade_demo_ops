@@ -130,12 +130,17 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	var discovery model.ExchangeBootstrapDiscoveryResponse
-	if useConfiguredExchangeBootstrap(baseURL, s.effectiveControlPlaneBaseURL(), s.runtime.Environment) {
+	if useConfiguredLegacyBootstrap(baseURL, s.effectiveControlPlaneBaseURL(), s.runtime.Environment) {
 		discovery = localBootstrapDiscovery(baseURL, s.runtime.Environment, time.Now().UTC())
 	} else {
 		discovery, err = cloudGetPublicJSON[model.ExchangeBootstrapDiscoveryResponse](ctx, client, baseURL+"/.well-known/cascade-exchange")
 		if err != nil {
 			if !isLocalExchangeBaseURL(baseURL) && !isOptionalExchangeDiscoveryError(err) {
+				return ExchangeSession{}, err
+			}
+			// A local installation endpoint validates challenges issued by that same
+			// process, so fabricating a client-side challenge can never pair safely.
+			if isLocalExchangeBaseURL(baseURL) && strings.TrimSpace(s.runtime.CloudExchangeToken) == "" {
 				return ExchangeSession{}, err
 			}
 			discovery = localBootstrapDiscovery(baseURL, s.runtime.Environment, time.Now().UTC())
@@ -237,14 +242,10 @@ func (s *Service) discoverExchangeBaseURL() (string, error) {
 	return "", errors.New("DemoOps execution server is not configured; open App settings and enter the control plane base URL")
 }
 
-func useConfiguredExchangeBootstrap(baseURL string, configuredBaseURL string, environment string) bool {
-	if strings.TrimSpace(configuredBaseURL) == "" {
-		return false
-	}
-	if isLocalExchangeBaseURL(baseURL) {
-		return true
-	}
-	return environment != "production"
+func useConfiguredLegacyBootstrap(baseURL string, configuredBaseURL string, environment string) bool {
+	return strings.TrimSpace(configuredBaseURL) != "" &&
+		!isLocalExchangeBaseURL(baseURL) &&
+		environment != "production"
 }
 
 func isOptionalExchangeDiscoveryError(err error) bool {

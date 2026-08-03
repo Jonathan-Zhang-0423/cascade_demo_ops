@@ -246,6 +246,46 @@ func TestBrowserAgentStageOrchestratorReexecutesOnlyApprovedRepairAndRecordsLedg
 	}
 }
 
+func TestBrowserAgentStageOrchestratorCaptureTimingRepairDoesNotReplayAction(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := &captureTimingThenContinueVerifier{}
+	executor := &captureTimingStageExecutor{}
+	result, err := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier).Run(context.Background(), plan, stubStageObserver{}, executor, &memoryStageEventSink{})
+	if err != nil {
+		t.Fatalf("approved capture timing repair must revalidate without replaying the action: %v", err)
+	}
+	if executor.executeCalls != len(plan.Stages) || executor.revalidateCalls != 1 {
+		t.Fatalf("capture timing repair replayed an action or skipped revalidation: execute=%d revalidate=%d", executor.executeCalls, executor.revalidateCalls)
+	}
+	if len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied || result.PatchLedger[0].Field != "script_outline.stages[].capture_plan.pre_capture_wait_ms" {
+		t.Fatalf("capture timing patch ledger is incomplete: %+v", result.PatchLedger)
+	}
+	seenSecondAttemptAction, seenSecondAttemptObservation := false, false
+	for _, event := range result.Events {
+		seenSecondAttemptAction = seenSecondAttemptAction || (event.Attempt == 2 && (event.EventType == model.StageExecutionEventActionStarted || event.EventType == model.StageExecutionEventActionCompleted))
+		seenSecondAttemptObservation = seenSecondAttemptObservation || (event.Attempt == 2 && event.EventType == model.StageExecutionEventObservationCollected)
+	}
+	if seenSecondAttemptAction || !seenSecondAttemptObservation {
+		t.Fatalf("capture timing audit must show recapture, not action replay: %+v", result.Events)
+	}
+}
+
+func TestBrowserAgentStageOrchestratorCaptureTimingRepairFailsClosedWithoutRevalidator(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, &captureTimingThenContinueVerifier{}).Run(context.Background(), plan, stubStageObserver{}, &countingStageExecutor{}, &memoryStageEventSink{})
+	if runtimeExecutionErrorCode(err) != "browser_agent_revalidation_unavailable" || len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied {
+		t.Fatalf("missing non-action revalidator must stop after recording the approved patch: code=%q ledger=%+v err=%v", runtimeExecutionErrorCode(err), result.PatchLedger, err)
+	}
+}
+
 func TestBrowserAgentStageOrchestratorAppliesOnlyWorkerVerifiedSelectorAlternative(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	plan, err := compileBrowserAgentRuntimePlan(&pkg)
@@ -381,7 +421,41 @@ func (e *countingStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRu
 	return BrowserAgentStageActionResult{Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "element_visible", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: fmt.Sprintf("action_%d", e.calls), Kind: model.EvidenceKindBrowserTrace}}}, nil
 }
 
+type captureTimingStageExecutor struct {
+	executeCalls    int
+	revalidateCalls int
+}
+
+func (e *captureTimingStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	e.executeCalls++
+	return BrowserAgentStageActionResult{Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "capture_ready", Passed: e.executeCalls > 1}}}, EvidenceRefs: []model.EvidenceRef{{ID: fmt.Sprintf("capture_action_%d", e.executeCalls), Kind: model.EvidenceKindWebScreenshot}}}, nil
+}
+
+func (e *captureTimingStageExecutor) RevalidateStage(_ context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	e.revalidateCalls++
+	if stage.CapturePlan == nil || stage.CapturePlan.PreCaptureWaitMS != 1200 {
+		return BrowserAgentStageActionResult{}, errors.New("patched capture timing was not passed to the revalidator")
+	}
+	return BrowserAgentStageActionResult{Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "capture_ready", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: "capture_revalidated", Kind: model.EvidenceKindWebScreenshot}}}, nil
+}
+
 type repairThenContinueVerifier struct{ calls int }
+
+type captureTimingThenContinueVerifier struct{ calls int }
+
+func (v *captureTimingThenContinueVerifier) ValidateStageEvents(_ context.Context, validationContext model.BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
+	v.calls++
+	last := events[len(events)-1]
+	decision := model.ValidationDecisionContinue
+	if v.calls == 1 {
+		decision = model.ValidationDecisionRepairAllowed
+	}
+	return model.ValidationReport{SchemaVersion: model.ValidationReportSchemaVersion, ReportID: fmt.Sprintf("capture_report_%d", v.calls), RunID: last.RunID, SourcePackageID: validationContext.SourcePackageID, SourceBundleHashSHA256: validationContext.SourceBundleHashSHA256, PolicyHashSHA256: validationContext.EffectivePolicyHashSHA256, Phase: model.ValidationPhaseRuntimeStage, NodeID: last.NodeID, StageID: last.StageID, Decision: decision, PassRate: 1, OverallConfidence: .95, EvidenceQuality: model.RuntimeObservationAssertion, EvidenceRefs: []model.EvidenceRef{{ID: "capture_verification", Kind: model.EvidenceKindWebScreenshot}}, CreatedAt: timeNowUTC()}, nil
+}
+
+func (v *captureTimingThenContinueVerifier) ProposeRuntimeRepair(_ context.Context, validationContext model.BrowserAgentValidationContext, stage BrowserAgentRuntimeStage, events []model.StageExecutionEvent, _ model.ValidationReport) (model.RuntimeRepairProposal, error) {
+	return model.RuntimeRepairProposal{SchemaVersion: model.RuntimeRepairProposalSchemaVersion, ProposalID: "repair_capture_1", RunID: events[len(events)-1].RunID, NodeID: stage.NodeID, StageID: stage.ID, BaseBundleHashSHA256: validationContext.SourceBundleHashSHA256, PolicyHashSHA256: validationContext.EffectivePolicyHashSHA256, RepairKind: "capture_timing", Field: "script_outline.stages[].capture_plan.pre_capture_wait_ms", Before: "", After: "1200", Confidence: .95, EvidenceRefs: []model.EvidenceRef{{ID: "capture_proposal", Kind: model.EvidenceKindWebScreenshot}}, CreatedAt: timeNowUTC()}, nil
+}
 
 func (v *repairThenContinueVerifier) ValidateStageEvents(_ context.Context, context model.BrowserAgentValidationContext, events []model.StageExecutionEvent) (model.ValidationReport, error) {
 	v.calls++
