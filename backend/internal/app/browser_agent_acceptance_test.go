@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/driver"
+	"cascade-demoops/backend/internal/model"
 )
 
 func TestReadBrowserAgentAcceptanceReportRequiresUsableScenarios(t *testing.T) {
@@ -51,6 +52,45 @@ func TestControlledBusinessAcceptancePackageAlignsWithOutlineProtocol(t *testing
 	}
 	if pkg.ExecutableScriptBundle == nil || len(pkg.ExecutableScriptBundle.PlanJSON.Steps) != 5 || len(pkg.ExecutableScriptBundle.StageApprovalPlan.Stages) != 5 || len(pkg.ExecutableScriptBundle.ScriptOutline.Stages) != 5 {
 		t.Fatalf("controlled business package is not a five-stage outline: %+v", pkg.ExecutableScriptBundle)
+	}
+}
+
+func TestControlledOutlineScenarioPackagesAreStructurallyValid(t *testing.T) {
+	service := newTestDevHTTPServer(t).service
+	service.runtime.DevRepoRoot = filepath.Join("..", "..", "..")
+	fixturePath := service.browserAgentAcceptanceFixturePath()
+
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		build   func(string, string) (model.ClientExecutionPackage, error)
+		stages  int
+	}{
+		{"success", controlledOutlineSuccessHandler, controlledOutlineSuccessPackage, 2},
+		{"locator_missing", controlledOutlineLocatorMissingHandler, controlledOutlineLocatorMissingPackage, 2},
+		{"required_validation_failure", controlledOutlineRequiredValidationFailureHandler, controlledOutlineRequiredValidationFailurePackage, 2},
+		{"wait_timeout", controlledOutlineWaitTimeoutHandler, controlledOutlineWaitTimeoutPackage, 2},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(tc.handler))
+			defer server.Close()
+			pkg, err := tc.build(fixturePath, server.URL)
+			if err != nil {
+				t.Fatalf("%s package must be structurally valid: %v", tc.name, err)
+			}
+			if pkg.ExecutableScriptBundle == nil {
+				t.Fatalf("%s package is missing its executable script bundle", tc.name)
+			}
+			bundle := pkg.ExecutableScriptBundle
+			if len(bundle.PlanJSON.Steps) != tc.stages || len(bundle.StageApprovalPlan.Stages) != tc.stages || len(bundle.ScriptOutline.Stages) != tc.stages {
+				t.Fatalf("%s package stage counts diverge: plan=%d stages=%d outline=%d want=%d", tc.name, len(bundle.PlanJSON.Steps), len(bundle.StageApprovalPlan.Stages), len(bundle.ScriptOutline.Stages), tc.stages)
+			}
+			if pkg.Metadata["runtime"] != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+				t.Fatalf("%s package is not a browser-agent outline runtime: %v", tc.name, pkg.Metadata["runtime"])
+			}
+		})
 	}
 }
 

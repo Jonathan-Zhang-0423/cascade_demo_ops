@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1925,7 +1926,7 @@ func directorAdapterFromEnv(now func() time.Time) DirectorAdapter {
 	})
 }
 
-func arkMediaClientFromEnv(mode config.ArkMediaMode) media.ArkMediaClient {
+func arkMediaClientFromEnv(mode config.ArkMediaMode) media.VideoGenerationClient {
 	if mode != config.ArkMediaModeReal {
 		return nil
 	}
@@ -1936,7 +1937,7 @@ func arkMediaRuntimeFromEnv(mode config.ArkMediaMode) config.AppRuntimeConfig {
 	seedanceKey, seedanceSource := envWithFallbackTrimmed("SEEDANCE_API_KEY", "DOUBAO_API_KEY", "ARK_API_KEY")
 	seedreamKey, seedreamSource := envWithFallbackTrimmed("SEEDREAM_API_KEY", "DOUBAO_API_KEY", "ARK_API_KEY")
 	doubaoKey, doubaoSource := envWithFallbackTrimmed("DOUBAO_API_KEY", "ARK_API_KEY")
-	return config.AppRuntimeConfig{
+	runtime := config.AppRuntimeConfig{
 		ArkMediaMode: mode,
 		ModelProviders: map[config.ModelProvider]config.ModelProviderCredential{
 			config.ModelProviderSeedance: {
@@ -1947,7 +1948,7 @@ func arkMediaRuntimeFromEnv(mode config.ArkMediaMode) config.AppRuntimeConfig {
 				APIKeyFallbackEnvs: []string{"DOUBAO_API_KEY", "ARK_API_KEY"},
 				BaseURL:            envOrDefaultTrimmed("SEEDANCE_BASE_URL", defaultArkBaseURL),
 				BaseURLEnv:         "SEEDANCE_BASE_URL",
-				DefaultModel:       envOrDefaultTrimmed("SEEDANCE_MODEL", defaultSeedanceModel),
+				DefaultModel:       serverDoubaoModelFromEnv("SEEDANCE_MODEL", defaultSeedanceModel, "doubao-seedance-"),
 				DefaultModelEnv:    "SEEDANCE_MODEL",
 				Enabled:            seedanceKey != "",
 			},
@@ -1959,7 +1960,7 @@ func arkMediaRuntimeFromEnv(mode config.ArkMediaMode) config.AppRuntimeConfig {
 				APIKeyFallbackEnvs: []string{"DOUBAO_API_KEY", "ARK_API_KEY"},
 				BaseURL:            envOrDefaultTrimmed("SEEDREAM_BASE_URL", defaultArkBaseURL),
 				BaseURLEnv:         "SEEDREAM_BASE_URL",
-				DefaultModel:       envOrDefaultTrimmed("SEEDREAM_MODEL", defaultSeedreamModel),
+				DefaultModel:       serverDoubaoModelFromEnv("SEEDREAM_MODEL", defaultSeedreamModel, "doubao-seedream-"),
 				DefaultModelEnv:    "SEEDREAM_MODEL",
 				Enabled:            seedreamKey != "",
 			},
@@ -1971,12 +1972,33 @@ func arkMediaRuntimeFromEnv(mode config.ArkMediaMode) config.AppRuntimeConfig {
 				APIKeyFallbackEnvs: []string{"ARK_API_KEY"},
 				BaseURL:            envOrDefaultTrimmed("DOUBAO_BASE_URL", defaultArkBaseURL),
 				BaseURLEnv:         "DOUBAO_BASE_URL",
-				DefaultModel:       envOrDefaultTrimmed("DOUBAO_MODEL", ""),
+				DefaultModel:       serverDoubaoModelFromEnv("DOUBAO_MODEL", "", "doubao-"),
 				DefaultModelEnv:    "DOUBAO_MODEL",
 				Enabled:            doubaoKey != "",
 			},
 		},
 	}
+	return enforceServerDoubaoProviderAllowlist(runtime)
+}
+
+func enforceServerDoubaoProviderAllowlist(runtime config.AppRuntimeConfig) config.AppRuntimeConfig {
+	for provider := range runtime.ModelProviders {
+		switch provider {
+		case config.ModelProviderDoubao, config.ModelProviderSeedance, config.ModelProviderSeedream:
+		default:
+			delete(runtime.ModelProviders, provider)
+		}
+	}
+	return runtime
+}
+
+func serverDoubaoModelFromEnv(key string, fallback string, allowedPrefix string) string {
+	modelName := envOrDefaultTrimmed(key, fallback)
+	if modelName == "" || strings.HasPrefix(strings.ToLower(modelName), allowedPrefix) {
+		return modelName
+	}
+	log.Printf("server_director model_config_rejected env=%s reason=non_doubao_model allowed_prefix=%s fallback=%q", key, allowedPrefix, fallback)
+	return fallback
 }
 
 func envWithFallbackTrimmed(primary string, fallbacks ...string) (string, string) {
