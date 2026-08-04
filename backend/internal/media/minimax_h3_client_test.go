@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"cascade-demoops/backend/internal/config"
@@ -72,11 +73,57 @@ func TestMiniMaxH3ClientValidatesReferenceModes(t *testing.T) {
 	}
 }
 
-func TestMiniMaxH3ClientBlocksUnverifiedQueryContract(t *testing.T) {
-	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeReal, APIKey: "minimax-secret"})
+func TestMiniMaxH3ClientQueriesAndNormalizesVideoOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != miniMaxH3QueryEndpoint+"/task_h3_1" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer minimax-secret" {
+			t.Fatalf("authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"task": {
+				"id": "task_h3_1",
+				"model": "MiniMax-H3",
+				"status": "succeeded",
+				"content": {"url": "https://cdn.example.test/generated/output.mp4"},
+				"resolution": "2K",
+				"duration": 5,
+				"ratio": "16:9"
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeReal, APIKey: "minimax-secret", BaseURL: server.URL, HTTPClient: server.Client()})
 	result, err := client.GetContentGenerationTask(t.Context(), "task_h3_1")
-	if !errors.Is(err, ErrMiniMaxH3QueryContractMissing) || result.Trace.ErrorClass != "query_contract_missing" {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response == nil || result.Response.ID != "task_h3_1" || result.Response.Status != "succeeded" || result.Response.Model != MiniMaxH3Model {
+		t.Fatalf("normalized response = %+v", result.Response)
+	}
+	if result.Response.Output["video_url"] != "https://cdn.example.test/generated/output.mp4" {
+		t.Fatalf("normalized output = %+v", result.Response.Output)
+	}
+}
+
+func TestMiniMaxH3ClientQueryDryRunMakesNoProviderCall(t *testing.T) {
+	var providerCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeDryRun, BaseURL: server.URL, HTTPClient: server.Client()})
+	result, err := client.GetContentGenerationTask(t.Context(), "task_h3_dry_run")
+	if err != nil || result.Response == nil || result.Response.Status != "dry_run" {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if got := providerCalls.Load(); got != 0 {
+		t.Fatalf("provider HTTP calls = %d, want 0", got)
 	}
 }
 
@@ -107,5 +154,50 @@ func TestMiniMaxH3ClientRejectsUnsupportedOrQualityRiskingOptions(t *testing.T) 
 	})
 	if _, err := client.CreateContentGenerationTask(t.Context(), lastFrameOnly); err == nil {
 		t.Fatal("expected last_frame without first_frame to be rejected")
+	}
+
+	wrongModel := base
+	wrongModel.Model = "another-video-model"
+	if _, err := client.CreateContentGenerationTask(t.Context(), wrongModel); err == nil {
+		t.Fatal("expected non-H3 model to be rejected before request normalization")
+	}
+}
+
+func TestMiniMaxH3ClientRejectsLastFrameOnlyBeforeProviderCall(t *testing.T) {
+	var providerCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task_id":"must_not_be_created"}`))
+	}))
+	defer server.Close()
+
+	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{
+		Mode:       config.ArkMediaModeReal,
+		APIKey:     "minimax-secret",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+	})
+	result, err := client.CreateContentGenerationTask(t.Context(), ContentGenerationTaskRequest{
+		Content: []ContentPart{
+			{Type: "text", Text: "End at this frame."},
+			{Type: "image_url", ImageURL: &MediaURL{URL: "https://example.test/last.png"}, Role: "last_frame"},
+		},
+		Resolution: "2K",
+		Duration:   5,
+		Ratio:      "adaptive",
+	})
+
+	if !errors.Is(err, ErrMiniMaxH3LastFrameOnlyNotEnabled) {
+		t.Fatalf("expected capability error, got result=%+v err=%v", result, err)
+	}
+	if result.Trace.ErrorClass != "provider_capability_not_enabled" {
+		t.Fatalf("error class = %q", result.Trace.ErrorClass)
+	}
+	if result.Response != nil {
+		t.Fatalf("provider response must remain nil for a blocked request: %+v", result.Response)
+	}
+	if got := providerCalls.Load(); got != 0 {
+		t.Fatalf("provider HTTP calls = %d, want 0", got)
 	}
 }

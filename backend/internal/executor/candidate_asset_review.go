@@ -125,6 +125,10 @@ func reviewCandidateAsset(artifact model.ArtifactRef) (model.CandidateAssetRevie
 		approved = false
 		findings = append(findings, candidateReviewFinding("candidate_integrity_missing", "candidate must include sha256 and size_bytes after download", artifact.ID))
 	}
+	if !candidateArtifactHasEditorMediaProfile(artifact) {
+		approved = false
+		findings = append(findings, candidateReviewFinding("candidate_media_not_normalized", "candidate must be a probed normalized derivative using the editor MP4/H.264/yuv420p/1920x1080/CFR30 profile", artifact.ID))
+	}
 
 	if approved {
 		reasons = append(reasons,
@@ -166,6 +170,13 @@ func reviewCandidateAsset(artifact model.ArtifactRef) (model.CandidateAssetRevie
 		item.Status = "approved"
 	}
 	return item, reviewed
+}
+
+func candidateArtifactHasEditorMediaProfile(artifact model.ArtifactRef) bool {
+	return artifactStringMetadata(artifact.Metadata, "artifact_variant") == "normalized" &&
+		artifactStringMetadata(artifact.Metadata, "normalization_status") == "ok" &&
+		artifactStringMetadata(artifact.Metadata, "media_probe_status") == "ok" &&
+		artifactStringMetadata(artifact.Metadata, "normalization_profile") == "editor_mp4_h264_yuv420p_1920x1080_cfr30_v1"
 }
 
 func candidateReviewFinding(code string, message string, refID string) model.ArkMediaReadinessFinding {
