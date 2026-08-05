@@ -61,7 +61,10 @@ func TestControlledOutlineScenarioPackagesRunCompleteServerPath(t *testing.T) {
 				t.Logf("success failure code=%q msg=%q", run.Result.FailureDiagnostic.Error.Code, run.Result.FailureDiagnostic.Error.Message)
 			}
 			for _, rep := range run.Result.ValidationReports {
-				t.Logf("report phase=%s decision=%s checks=%d", rep.Phase, rep.Decision, len(rep.Checks))
+				t.Logf("report phase=%s decision=%s checks=%d nodeid=%q stageid=%q evidence_quality=%q evidence_refs=%d", rep.Phase, rep.Decision, len(rep.Checks), rep.NodeID, rep.StageID, rep.EvidenceQuality, len(rep.EvidenceRefs))
+				for _, chk := range rep.Checks {
+					t.Logf("  check id=%s kind=%s code=%s severity=%s passed=%v required=%v summary=%q", chk.ID, chk.Kind, chk.Code, chk.Severity, chk.Passed, chk.Required, chk.Summary)
+				}
 			}
 			t.Fatalf("success package did not complete: status=%s result=%s", run.Status.Status, run.Result.Status)
 		}
