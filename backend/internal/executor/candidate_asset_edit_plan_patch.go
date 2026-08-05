@@ -104,6 +104,9 @@ func candidateArtifactCanBecomePatchShot(artifact model.ArtifactRef) bool {
 	if artifactStringMetadata(artifact.Metadata, "source_material_policy") != "non_authoritative_generated_candidate" {
 		return false
 	}
+	if !candidateArtifactHasEditorMediaProfile(artifact) {
+		return false
+	}
 	return artifact.SourceNodeID == ""
 }
 

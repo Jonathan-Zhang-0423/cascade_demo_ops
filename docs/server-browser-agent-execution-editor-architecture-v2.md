@@ -1374,6 +1374,122 @@ render-manifest.ts
 - 预览和最终视频绑定同一EditPlan revision；
 - 最终视频可追溯到执行结果和素材Hash。
 
+### 阶段四：受约束分镜设计与多 Provider 分镜头实现
+
+目标：在不让生成模型取得业务事实、最终分镜或编辑器控制权的前提下，提高分镜质量，并把 Seedance 2.0 与 MiniMax-H3 纳入同一套非权威展示镜头实现层。
+
+固定流程：
+
+```text
+App 业务要求和视频要求
+    -> Server 校验并编译为 StoryboardConstraintSet
+    -> Browser Agent 真实执行、录屏、截图和结果验证
+    -> video-worker 基于真实素材生成确定性分镜草稿
+    -> 可选规划模型生成 DirectorEditSuggestion
+    -> Server 将建议转换为字段受限的 DirectorEditPlanPatch
+    -> 重新校验 App 约束、事实素材、步骤覆盖和媒体能力边界
+    -> Server/Renderer 产出最终可执行 DemoEditPlan
+    -> Seedance 2.0 / MiniMax-H3 实现被批准的非事实展示镜头
+    -> Provider 输出规范化、内容审核、A/B 选择或 fallback
+    -> Renderer 校验并合成最终视频
+```
+
+App 约束不是末尾补做的验收项，而是从分镜草稿开始贯穿整个流程的 Server 硬约束。至少包括：
+
+- Stage 和 required 业务步骤顺序；
+- 必须展示、禁止展示和重点展示的内容；
+- 目标总时长、阶段时长和输出画布；
+- 真实 `source_artifact_id`、`source_step_id` 和录屏时间范围；
+- 字幕、特写、截图、标注和验证结果要求；
+- 事实轨与展示轨边界；
+- 生成参考素材数量、类型、时长和帧模式限制；
+- 任何超出当前 Server Capability Profile 的生成请求必须在 Provider 调用前拒绝。
+
+分镜文件的所有权保持如下：
+
+| 文件 | 生产者 | 权限 |
+| --- | --- | --- |
+| `storyboard_constraint_set.json` | Server 根据 App 包和当前 Capability Profile 编译 | 分镜全流程硬约束，不允许模型修改 |
+| `demo_edit_plan_draft.json` | Server/video-worker 确定性代码 | 受约束的基础分镜草稿 |
+| `director_edit_suggestion.json` | 可选规划模型；无模型时由确定性 Adapter 生成 | 仅为建议，不可直接渲染 |
+| `director_edit_plan_patch.json` | Server Patch Builder | 只包含白名单展示字段，必须校验 |
+| `demo_edit_plan.json` | Server/Renderer 受控合并和裁决 | 唯一可执行分镜，必须通过 Renderer 校验 |
+| `candidate_asset_edit_plan_patch.json` | Server 根据已审核生成候选构造 | 默认不自动应用，不得绑定业务步骤 |
+
+规划模型只允许建议：
+
+- 节奏、字幕、特写、转场和展示重点；
+- 非事实展示镜头的用途、位置和候选 Prompt；
+- 从 App 已授权素材集合中选择参考素材的建议；
+- intro、outro、section divider、abstract B-roll 和 brand atmosphere。
+
+规划模型不得修改：
+
+- App 业务意图、Stage 顺序、动作类型和成功标准；
+- required 步骤及其真实素材绑定；
+- 事实镜头的来源、时间范围和验证结论；
+- 敏感信息、安全策略和允许域名；
+- Server Capability Profile 和 Provider 调用边界；
+- 最终 `DemoEditPlan` revision。
+
+分镜头实现层同时考虑 Seedance 2.0 和 MiniMax-H3：
+
+| 模式 | 编排方式 | 使用条件 |
+| --- | --- | --- |
+| `normal` | Seedance 2.0 实现已批准的展示镜头 | 默认主路由 |
+| `comparison` | Seedance 2.0 和 MiniMax-H3 使用同一展示意图及各自合法参数并行产出 A/B 候选 | 用户显式选择或评测任务 |
+| `fallback` | Seedance 失败后，MiniMax-H3 使用原始受控素材独立实现相同展示意图 | H3 路由、能力校验和质量门禁全部就绪后 |
+
+禁止把 Seedance 输出送入 H3 二次生成，或把 H3 输出送入 Seedance 二次生成。两路 Provider 的请求/响应保持隔离，只在 Server 内部候选协议层汇合。
+
+所有生成候选在进入编辑器前必须完成：
+
+```text
+Provider Adapter 归一化任务状态和输出 URL
+    -> 下载并保存 original artifact + SHA-256
+    -> ffprobe 原始媒体
+    -> FFmpeg 转换为编辑器媒体 Profile
+    -> ffprobe normalized artifact + 新 SHA-256
+    -> 结构审核和内容审核
+    -> 显式选择或批准
+    -> Renderer 再校验
+```
+
+编辑器媒体 Profile 初始固定为：
+
+```text
+MP4 / H.264 / yuv420p / 1920x1080 / CFR 30fps
+```
+
+生成素材必须保持 `non_authoritative=true`、`presentation_only=true`，不得设置业务 `source_step_id`，不得替换真实 UI、按钮、数字、表格、状态或业务结果。生成失败、格式不兼容、审核失败或用户拒绝候选时，流水线必须继续使用只包含真实素材的确定性分镜交付。
+
+交付拆分：
+
+1. `StoryboardConstraintSet` Schema、App 要求编译器和字段级错误报告；
+2. 将当前基础 `demo_edit_plan.json` 拆分为可审计草稿与最终受控 revision；
+3. 规划模型 Adapter、结构化建议 Schema、超时/失败回退和零直接生效机制；
+4. Patch 白名单、App 约束复验、事实素材锁定和 required-step 覆盖验证；
+5. Provider-neutral `GeneratedShotIntent`、Seedance 2.0 Adapter 和独立 H3 Adapter；
+6. H3 查询、下载、取消、独立 feature flag、配额、幂等和错误分类；
+7. 候选 `ffprobe -> FFmpeg -> ffprobe` MediaNormalizer；
+8. `normal`、`comparison`、`fallback` 路由及 A/B 候选关系记录；
+9. 内容审核、显式选择、EditorSession 候选入口和最终 Renderer 门禁；
+10. 端到端回归：没有显式启用时零 Provider 调用，超能力边界时零 Provider 调用，模型失败不阻塞真实素材交付。
+
+验收：
+
+- 每个最终镜头都能追溯到 App 约束、真实素材或已批准的非权威展示意图；
+- required 步骤、顺序、事实素材和真实时间范围不会被规划模型或视频生成模型修改；
+- 规划模型输出非法、超时或缺失时，确定性分镜仍可独立完成交付；
+- Seedance 2.0 与 H3 原始格式不同也只能通过统一 normalized artifact 进入编辑器；
+- `comparison` 能产生可追溯 A/B 候选，但不会自动选择或加入时间线；
+- `fallback` 不使用前一模型产物作为后一模型输入；
+- H3 未正式接入路由前，任何普通 E2E、真实媒体模式或 MiniMax 通用密钥配置都不会触发 H3；
+- 仅尾帧等未开放模式在网络调用前拒绝，Provider HTTP 调用次数为 0；
+- 所有生成素材失败时，最终交付仍由真实录屏、截图和确定性编辑计划完成。
+
+当前状态说明：基础 `DemoEditPlan`、确定性 DirectorSuggestion、受限 Director Patch、Seedance 候选登记和生成候选 Renderer 门禁已有部分实现；H3 已具备独立创建/查询 Client 和默认关闭的 Sidecar 配置工厂，但尚未注册到 Server 执行路由。`StoryboardConstraintSet`、真正的规划模型、H3 正式路由、候选 MediaNormalizer、A/B 选择和 fallback 编排尚未完成，不能把本阶段目标当作当前运行能力。
+
 ---
 
 ## 19. Server侧测试用例

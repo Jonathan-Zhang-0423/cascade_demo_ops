@@ -16,13 +16,16 @@ import (
 )
 
 const (
-	MiniMaxH3Model               = "MiniMax-H3"
-	miniMaxH3GenerationEndpoint  = "/v2/video_generation"
-	defaultMiniMaxH3BaseURL      = "https://api.minimaxi.com"
-	miniMaxH3QueryContractNeeded = "MiniMax-H3 task query contract is not configured; production polling is blocked until the official query method, path, and response schema are verified"
+	MiniMaxH3Model              = "MiniMax-H3"
+	miniMaxH3GenerationEndpoint = "/v2/video_generation"
+	miniMaxH3QueryEndpoint      = "/v2/query/video_generation"
+	defaultMiniMaxH3BaseURL     = "https://api.minimaxi.com"
 )
 
-var ErrMiniMaxH3QueryContractMissing = errors.New(miniMaxH3QueryContractNeeded)
+// ErrMiniMaxH3LastFrameOnlyNotEnabled marks a request that the upstream H3 V2
+// contract can express, but the current Server capability profile has not
+// enabled or verified. It must be returned before any provider HTTP call.
+var ErrMiniMaxH3LastFrameOnlyNotEnabled = errors.New("h3_last_frame_only_not_supported: MiniMax-H3 last_frame requires a first_frame in the current Server capability profile")
 
 type MiniMaxH3ClientOptions struct {
 	Mode       config.ArkMediaMode
@@ -53,6 +56,30 @@ type miniMaxH3SubmitResponse struct {
 	Error  *ProviderError `json:"error,omitempty"`
 }
 
+type miniMaxH3QueryResponse struct {
+	Task miniMaxH3Task `json:"task"`
+}
+
+type miniMaxH3Task struct {
+	ID         string               `json:"id,omitempty"`
+	Model      string               `json:"model,omitempty"`
+	Status     string               `json:"status,omitempty"`
+	Error      *ProviderError       `json:"error,omitempty"`
+	CreatedAt  int64                `json:"created_at,omitempty"`
+	UpdatedAt  int64                `json:"updated_at,omitempty"`
+	Content    miniMaxH3TaskContent `json:"content,omitempty"`
+	Resolution string               `json:"resolution,omitempty"`
+	Duration   int                  `json:"duration,omitempty"`
+	Usage      map[string]any       `json:"usage,omitempty"`
+	Ratio      string               `json:"ratio,omitempty"`
+	TaskType   string               `json:"task_type,omitempty"`
+	Modality   string               `json:"modality,omitempty"`
+}
+
+type miniMaxH3TaskContent struct {
+	URL string `json:"url,omitempty"`
+}
+
 func NewMiniMaxH3Client(options MiniMaxH3ClientOptions) *MiniMaxH3Client {
 	mode := options.Mode
 	if mode == "" {
@@ -70,15 +97,19 @@ func NewMiniMaxH3Client(options MiniMaxH3ClientOptions) *MiniMaxH3Client {
 }
 
 func (c *MiniMaxH3Client) CreateContentGenerationTask(ctx context.Context, request ContentGenerationTaskRequest) (ContentGenerationTaskResult, error) {
-	request.Model = MiniMaxH3Model
 	provider := config.ModelProvider("minimax-h3")
 	endpoint := miniMaxH3Endpoint(c.baseURL, miniMaxH3GenerationEndpoint)
-	trace := newTrace(c.mode, provider, request.Model, http.MethodPost, endpoint)
-	result := ContentGenerationTaskResult{Mode: c.mode, Provider: provider, Model: request.Model, Trace: trace}
+	trace := newTrace(c.mode, provider, MiniMaxH3Model, http.MethodPost, endpoint)
+	result := ContentGenerationTaskResult{Mode: c.mode, Provider: provider, Model: MiniMaxH3Model, Trace: trace}
 	if err := validateMiniMaxH3Request(request); err != nil {
-		result.Trace.ErrorClass = "invalid_request"
+		if errors.Is(err, ErrMiniMaxH3LastFrameOnlyNotEnabled) {
+			result.Trace.ErrorClass = "provider_capability_not_enabled"
+		} else {
+			result.Trace.ErrorClass = "invalid_request"
+		}
 		return result, err
 	}
+	request.Model = MiniMaxH3Model
 
 	submit := miniMaxH3SubmitRequest{
 		Model:         MiniMaxH3Model,
@@ -104,7 +135,7 @@ func (c *MiniMaxH3Client) CreateContentGenerationTask(ctx context.Context, reque
 	}
 
 	var response miniMaxH3SubmitResponse
-	trace, err := c.doJSON(ctx, endpoint, submit, &response, trace)
+	trace, err := c.doJSON(ctx, http.MethodPost, endpoint, submit, &response, trace)
 	result.Trace = trace
 	if err != nil {
 		return result, err
@@ -124,16 +155,51 @@ func (c *MiniMaxH3Client) CreateContentGenerationTask(ctx context.Context, reque
 	return result, nil
 }
 
-func (c *MiniMaxH3Client) GetContentGenerationTask(_ context.Context, taskID string) (ContentGenerationTaskResult, error) {
+func (c *MiniMaxH3Client) GetContentGenerationTask(ctx context.Context, taskID string) (ContentGenerationTaskResult, error) {
 	provider := config.ModelProvider("minimax-h3")
-	trace := newTrace(c.mode, provider, MiniMaxH3Model, http.MethodGet, c.baseURL)
+	taskID = strings.TrimSpace(taskID)
+	endpoint := miniMaxH3Endpoint(c.baseURL, miniMaxH3QueryEndpoint+"/"+url.PathEscape(taskID))
+	trace := newTrace(c.mode, provider, MiniMaxH3Model, http.MethodGet, endpoint)
 	result := ContentGenerationTaskResult{Mode: c.mode, Provider: provider, Model: MiniMaxH3Model, Trace: trace}
-	if strings.TrimSpace(taskID) == "" {
+	if taskID == "" {
 		result.Trace.ErrorClass = "task_id_missing"
 		return result, errors.New("task_id is required")
 	}
-	result.Trace.ErrorClass = "query_contract_missing"
-	return result, ErrMiniMaxH3QueryContractMissing
+	switch c.mode {
+	case config.ArkMediaModeDisabled:
+		result.Trace.ErrorClass = "disabled"
+		return result, ErrArkMediaDisabled
+	case config.ArkMediaModeDryRun, "":
+		result.Response = &ContentGenerationTaskResponse{ID: taskID, Status: "dry_run", Model: MiniMaxH3Model}
+		return result, nil
+	}
+	if c.apiKey == "" {
+		result.Trace.ErrorClass = "api_key_missing"
+		return result, errors.New("MiniMax-H3 API key is missing")
+	}
+
+	var response miniMaxH3QueryResponse
+	trace, err := c.doJSON(ctx, http.MethodGet, endpoint, nil, &response, trace)
+	result.Trace = trace
+	if err != nil {
+		return result, err
+	}
+	if strings.TrimSpace(response.Task.ID) == "" {
+		result.Trace.ErrorClass = "task_id_missing"
+		return result, errors.New("MiniMax-H3 query response is missing task.id")
+	}
+	output := map[string]any{}
+	if videoURL := strings.TrimSpace(response.Task.Content.URL); videoURL != "" {
+		output["video_url"] = videoURL
+	}
+	result.Response = &ContentGenerationTaskResponse{
+		ID:     response.Task.ID,
+		Status: strings.ToLower(strings.TrimSpace(response.Task.Status)),
+		Model:  firstNonEmpty(response.Task.Model, MiniMaxH3Model),
+		Output: output,
+		Error:  response.Task.Error,
+	}
+	return result, nil
 }
 
 func validateMiniMaxH3Request(request ContentGenerationTaskRequest) error {
@@ -219,7 +285,7 @@ func validateMiniMaxH3Request(request ContentGenerationTaskRequest) error {
 		return errors.New("MiniMax-H3 accepts at most one first frame and one last frame")
 	}
 	if lastFrameCount > 0 && firstFrameCount == 0 {
-		return errors.New("MiniMax-H3 last_frame requires a first_frame")
+		return ErrMiniMaxH3LastFrameOnlyNotEnabled
 	}
 	if referenceImageCount > 9 || referenceVideoCount > 3 || referenceAudioCount > 3 {
 		return errors.New("MiniMax-H3 reference media count exceeds the documented limit")
@@ -242,20 +308,26 @@ func miniMaxH3RatioAllowed(ratio string) bool {
 	}
 }
 
-func (c *MiniMaxH3Client) doJSON(ctx context.Context, endpoint string, payload any, target any, trace ArkMediaCallTrace) (ArkMediaCallTrace, error) {
+func (c *MiniMaxH3Client) doJSON(ctx context.Context, method string, endpoint string, payload any, target any, trace ArkMediaCallTrace) (ArkMediaCallTrace, error) {
 	started := time.Now()
-	data, err := json.Marshal(payload)
-	if err != nil {
-		trace.ErrorClass = "request_marshal_failed"
-		return trace, err
+	var requestBody io.Reader
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			trace.ErrorClass = "request_marshal_failed"
+			return trace, err
+		}
+		requestBody = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, requestBody)
 	if err != nil {
 		trace.ErrorClass = "request_build_failed"
 		return trace, redactMiniMaxH3Secret(err, c.apiKey)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.http.Do(req)
 	trace.LatencyMS = int(time.Since(started).Milliseconds())
 	if err != nil {
@@ -264,16 +336,16 @@ func (c *MiniMaxH3Client) doJSON(ctx context.Context, endpoint string, payload a
 	}
 	defer resp.Body.Close()
 	trace.HTTPStatus = resp.StatusCode
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		trace.ErrorClass = "response_read_failed"
 		return trace, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		trace.ErrorClass = fmt.Sprintf("http_%d", resp.StatusCode)
-		return trace, redactMiniMaxH3Secret(fmt.Errorf("MiniMax-H3 HTTP %d: %s", resp.StatusCode, responseSnippet(body)), c.apiKey)
+		return trace, redactMiniMaxH3Secret(fmt.Errorf("MiniMax-H3 HTTP %d: %s", resp.StatusCode, responseSnippet(responseBody)), c.apiKey)
 	}
-	if err := json.Unmarshal(body, target); err != nil {
+	if err := json.Unmarshal(responseBody, target); err != nil {
 		trace.ErrorClass = "response_parse_failed"
 		return trace, err
 	}
