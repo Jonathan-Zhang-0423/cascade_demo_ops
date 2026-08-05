@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -341,6 +342,59 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 					{ID: fmt.Sprintf("event_%d", i), Kind: "stage_event"},
 				},
 			})
+		}
+	}
+
+	// P0.8: Detect cross-domain access and forbidden-page access (scenario 6)
+	for _, event := range events {
+		if event.Observation == nil || event.Observation.URL == "" {
+			continue
+		}
+		observedURL, parseErr := url.Parse(event.Observation.URL)
+		if parseErr != nil {
+			continue
+		}
+
+		if len(vctx.AllowedDomains) > 0 {
+			allowed := false
+			for _, domain := range vctx.AllowedDomains {
+				if observedURL.Hostname() == domain {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				runtimeChecks = append(runtimeChecks, model.ValidationCheck{
+					ID:       fmt.Sprintf("runtime_cross_domain_%s", event.StageID),
+					Kind:     "cross_domain_access",
+					Code:     "CROSS_DOMAIN_ACCESS",
+					NodeID:   event.NodeID,
+					StageID:  event.StageID,
+					Severity: model.FindingSeverityBlocking,
+					Passed:   false,
+					Required: true,
+					Summary:  fmt.Sprintf("阶段 %s 观察到的 URL host %q 超出批准的允许域范围", event.StageID, observedURL.Hostname()),
+				})
+			}
+		}
+
+		if vctx.ScriptOutline != nil {
+			for _, prefix := range vctx.ScriptOutline.AllowedExplorationScope.ForbiddenPathPrefixes {
+				if prefix != "" && strings.HasPrefix(observedURL.Path, prefix) {
+					runtimeChecks = append(runtimeChecks, model.ValidationCheck{
+						ID:       fmt.Sprintf("runtime_forbidden_page_%s", event.StageID),
+						Kind:     "forbidden_page_access",
+						Code:     "FORBIDDEN_PAGE_ACCESS",
+						NodeID:   event.NodeID,
+						StageID:  event.StageID,
+						Severity: model.FindingSeverityBlocking,
+						Passed:   false,
+						Required: true,
+						Summary:  fmt.Sprintf("阶段 %s 观察到的 URL 命中禁止路径前缀 %q", event.StageID, prefix),
+					})
+					break
+				}
+			}
 		}
 	}
 

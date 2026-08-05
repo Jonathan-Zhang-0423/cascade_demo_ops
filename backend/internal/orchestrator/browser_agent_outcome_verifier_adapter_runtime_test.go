@@ -407,3 +407,144 @@ func TestValidateStageEvents_ValidFlow(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateStageEvents_CrossDomainAccess tests scenario 6: the agent
+// observed a page outside the approved allowed_domains list.
+func TestValidateStageEvents_CrossDomainAccess(t *testing.T) {
+	config := &model.ValidationConfig{
+		PreExecutionEnabled:       true,
+		RealTimeBatchEnabled:      true,
+		PostExecutionBatchEnabled: true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+
+	vctx := model.BrowserAgentValidationContext{
+		RunID:                     "test-run-domain-001",
+		SourcePackageID:           "pkg-domain-001",
+		SourceBundleHashSHA256:    "abc123",
+		EffectivePolicyHashSHA256: "def456",
+		AllowedDomains:            []string{"127.0.0.1"},
+		WorkflowGraph:             &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan:         &model.StageApprovalPlan{Stages: []model.StageApprovalStage{}},
+		ScriptOutline:             &model.BrowserAgentScriptOutline{},
+		BrowserAgentContract:      &model.BrowserAgentContract{},
+	}
+
+	events := []model.StageExecutionEvent{
+		{
+			StageID:   "stage-1",
+			NodeID:    "node-1",
+			EventType: model.StageExecutionEventOutcomeObserved,
+			OccurredAt: time.Now(),
+			Observation: &model.RuntimeObservation{
+				Source: model.RuntimeObservationActualBrowser,
+				URL:    "https://evil.example.com/dashboard",
+			},
+			EvidenceRefs: []model.EvidenceRef{{ID: "ev-1", Kind: "screenshot"}},
+		},
+	}
+
+	ctx := context.Background()
+	report, err := adapter.ValidateStageEvents(ctx, vctx, events)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if report.Decision != model.ValidationDecisionStopAndReport {
+		t.Errorf("Expected Decision 'stop_and_report' for cross-domain access, got '%s'", report.Decision)
+	}
+
+	foundCheck := false
+	for _, check := range report.Checks {
+		if check.Code == "CROSS_DOMAIN_ACCESS" {
+			foundCheck = true
+			if check.Passed {
+				t.Errorf("Cross-domain check should not pass")
+			}
+			if check.Severity != model.FindingSeverityBlocking {
+				t.Errorf("Cross-domain check should be blocking, got %s", check.Severity)
+			}
+			if check.NodeID != "node-1" || check.StageID != "stage-1" {
+				t.Errorf("Expected check to carry NodeID/StageID, got NodeID=%q StageID=%q", check.NodeID, check.StageID)
+			}
+		}
+	}
+
+	if !foundCheck {
+		t.Errorf("Expected CROSS_DOMAIN_ACCESS check")
+	}
+}
+
+// TestValidateStageEvents_ForbiddenPageAccess tests scenario 6: the agent
+// observed a page whose path matches a forbidden path prefix from the
+// approved ScriptOutline.AllowedExplorationScope.
+func TestValidateStageEvents_ForbiddenPageAccess(t *testing.T) {
+	config := &model.ValidationConfig{
+		PreExecutionEnabled:       true,
+		RealTimeBatchEnabled:      true,
+		PostExecutionBatchEnabled: true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+
+	vctx := model.BrowserAgentValidationContext{
+		RunID:                     "test-run-forbidden-001",
+		SourcePackageID:           "pkg-forbidden-001",
+		SourceBundleHashSHA256:    "abc123",
+		EffectivePolicyHashSHA256: "def456",
+		AllowedDomains:            []string{"127.0.0.1"},
+		WorkflowGraph:             &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan:         &model.StageApprovalPlan{Stages: []model.StageApprovalStage{}},
+		ScriptOutline: &model.BrowserAgentScriptOutline{
+			AllowedExplorationScope: model.BrowserAgentExplorationScope{
+				AllowedOrigins:        []string{"http://127.0.0.1:5100"},
+				ForbiddenPathPrefixes: []string{"/billing", "/admin"},
+			},
+		},
+		BrowserAgentContract: &model.BrowserAgentContract{},
+	}
+
+	events := []model.StageExecutionEvent{
+		{
+			StageID:   "stage-1",
+			NodeID:    "node-1",
+			EventType: model.StageExecutionEventOutcomeObserved,
+			OccurredAt: time.Now(),
+			Observation: &model.RuntimeObservation{
+				Source: model.RuntimeObservationActualBrowser,
+				URL:    "http://127.0.0.1:5100/billing/invoices",
+			},
+			EvidenceRefs: []model.EvidenceRef{{ID: "ev-1", Kind: "screenshot"}},
+		},
+	}
+
+	ctx := context.Background()
+	report, err := adapter.ValidateStageEvents(ctx, vctx, events)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if report.Decision != model.ValidationDecisionStopAndReport {
+		t.Errorf("Expected Decision 'stop_and_report' for forbidden-page access, got '%s'", report.Decision)
+	}
+
+	foundCheck := false
+	for _, check := range report.Checks {
+		if check.Code == "FORBIDDEN_PAGE_ACCESS" {
+			foundCheck = true
+			if check.Passed {
+				t.Errorf("Forbidden-page check should not pass")
+			}
+			if check.Severity != model.FindingSeverityBlocking {
+				t.Errorf("Forbidden-page check should be blocking, got %s", check.Severity)
+			}
+		}
+	}
+
+	if !foundCheck {
+		t.Errorf("Expected FORBIDDEN_PAGE_ACCESS check")
+	}
+}
