@@ -96,7 +96,13 @@ func TestControlPlaneSettingsPersistReplaceAndClearServerSession(t *testing.T) {
 
 func TestDevHTTPControlPlaneSettingsUpdatesRuntimeHealth(t *testing.T) {
 	var registerHits int
+	discovery := localBootstrapDiscovery("", "test", time.Now().UTC())
 	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/cascade-exchange" {
+			discovery.ExchangeBaseURL = "http://" + r.Host
+			_ = json.NewEncoder(w).Encode(discovery)
+			return
+		}
 		if r.URL.Path != "/v1/app-installations/register" {
 			http.NotFound(w, r)
 			return
@@ -105,6 +111,9 @@ func TestDevHTTPControlPlaneSettingsUpdatesRuntimeHealth(t *testing.T) {
 		var request model.AppInstallationRegisterRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
+		}
+		if request.ChallengeID != discovery.Challenge.ChallengeID {
+			t.Fatalf("registration challenge = %q, want %q", request.ChallengeID, discovery.Challenge.ChallengeID)
 		}
 		_ = json.NewEncoder(w).Encode(model.AppInstallationSessionResponse{
 			InstallID: request.InstallID, SessionID: "session_control_plane", SessionToken: "cassess_control_plane",

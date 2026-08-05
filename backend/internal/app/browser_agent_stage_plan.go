@@ -23,17 +23,17 @@ type BrowserAgentRuntimePlan struct {
 	PolicyHashSHA256       string
 	// The verifier receives the approved contracts, never a browser/page
 	// object. This keeps Validation Agent decisions traceable to the package.
-	WorkflowGraph       *model.DemoWorkflowGraph
-	Plan                *model.ExecutionScriptDocument
-	StageApprovalPlan   *model.StageApprovalPlan
-	ScriptOutline       *model.BrowserAgentScriptOutline
+	WorkflowGraph        *model.DemoWorkflowGraph
+	Plan                 *model.ExecutionScriptDocument
+	StageApprovalPlan    *model.StageApprovalPlan
+	ScriptOutline        *model.BrowserAgentScriptOutline
 	BrowserAgentContract *model.BrowserAgentContract
-	AllowedDomains         []string
-	ForbiddenPages         []string
-	ExplorationScope       model.BrowserAgentExplorationScope
-	ForbiddenActions       []string
-	RepairPolicy           model.BrowserAgentRepairPolicy
-	Stages                 []BrowserAgentRuntimeStage
+	AllowedDomains       []string
+	ForbiddenPages       []string
+	ExplorationScope     model.BrowserAgentExplorationScope
+	ForbiddenActions     []string
+	RepairPolicy         model.BrowserAgentRepairPolicy
+	Stages               []BrowserAgentRuntimeStage
 }
 
 type BrowserAgentRuntimeStage struct {
@@ -81,6 +81,13 @@ type BrowserAgentStageObserver interface {
 
 type BrowserAgentStageActionExecutor interface {
 	ExecuteStage(context.Context, BrowserAgentRuntimePlan, BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error)
+}
+
+// BrowserAgentStageOutcomeRevalidator is intentionally separate from action
+// execution. Capture-timing repairs may wait and recapture evidence, but must
+// not replay an already completed business action.
+type BrowserAgentStageOutcomeRevalidator interface {
+	RevalidateStage(context.Context, BrowserAgentRuntimePlan, BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error)
 }
 
 type BrowserAgentStageObservation struct {
@@ -332,10 +339,23 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 					return result, err
 				}
 				repairEventStart := len(result.Events)
-				if err := appendEvent(stage, model.StageExecutionEventActionStarted, actionResult.Observation, proposal.EvidenceRefs); err != nil {
-					return result, err
+				if proposal.RepairKind != "capture_timing" {
+					if err := appendEvent(stage, model.StageExecutionEventActionStarted, actionResult.Observation, proposal.EvidenceRefs); err != nil {
+						return result, err
+					}
 				}
-				repairActionResult, repairErr := executor.ExecuteStage(ctx, plan, patchedStage)
+				var repairActionResult BrowserAgentStageActionResult
+				var repairErr error
+				if proposal.RepairKind == "capture_timing" {
+					revalidator, ok := executor.(BrowserAgentStageOutcomeRevalidator)
+					if !ok {
+						_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, proposal.EvidenceRefs)
+						return result, newRuntimeExecutionError("browser_agent_revalidation_unavailable", errors.New("capture timing repair requires a non-action outcome revalidator"))
+					}
+					repairActionResult, repairErr = revalidator.RevalidateStage(ctx, plan, patchedStage)
+				} else {
+					repairActionResult, repairErr = executor.ExecuteStage(ctx, plan, patchedStage)
+				}
 				if repairErr != nil || repairActionResult.Observation == nil || !runtimeObservationIsRealEvidence(repairActionResult.Observation.Source) || len(repairActionResult.EvidenceRefs) == 0 {
 					_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, proposal.EvidenceRefs)
 					if repairErr != nil {
@@ -343,8 +363,14 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 					}
 					return result, newRuntimeExecutionError("browser_agent_repair_action_failed", errors.New("repaired stage did not provide real completion evidence"))
 				}
-				if err := appendEvent(stage, model.StageExecutionEventActionCompleted, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
-					return result, err
+				if proposal.RepairKind == "capture_timing" {
+					if err := appendEvent(stage, model.StageExecutionEventObservationCollected, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
+						return result, err
+					}
+				} else {
+					if err := appendEvent(stage, model.StageExecutionEventActionCompleted, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
+						return result, err
+					}
 				}
 				if err := appendEvent(stage, model.StageExecutionEventOutcomeObserved, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
 					return result, err
@@ -499,11 +525,11 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		RunID: pkg.RecordingRunSpec.RunID, SourcePackageID: pkg.PackageID,
 		SourceBundleHashSHA256: bundle.Reproducibility.BundleHashSHA256,
 		PolicyHashSHA256:       bundle.Reproducibility.BrowserAgentContractHashSHA256,
-		WorkflowGraph:           pkg.WorkflowGraph,
-		Plan:                    bundle.PlanJSON,
-		StageApprovalPlan:       bundle.StageApprovalPlan,
-		ScriptOutline:           bundle.ScriptOutline,
-		BrowserAgentContract:    bundle.BrowserAgentContract,
+		WorkflowGraph:          pkg.WorkflowGraph,
+		Plan:                   bundle.PlanJSON,
+		StageApprovalPlan:      bundle.StageApprovalPlan,
+		ScriptOutline:          bundle.ScriptOutline,
+		BrowserAgentContract:   bundle.BrowserAgentContract,
 		AllowedDomains:         append([]string{}, bundle.SecurityPolicy.AllowedDomains...),
 		ForbiddenPages:         append([]string{}, bundle.SecurityPolicy.ForbiddenPages...),
 		ExplorationScope:       bundle.ScriptOutline.AllowedExplorationScope,

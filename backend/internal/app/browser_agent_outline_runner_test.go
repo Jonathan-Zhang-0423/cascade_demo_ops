@@ -430,6 +430,43 @@ func TestOutlineRuntimeFullPathRecordsBusyPageWaitRepair(t *testing.T) {
 	}
 }
 
+func TestOutlineRuntimeCaptureTimingRepairRevalidatesWithoutReplayingAction(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &stubBrowserAgentWorkerSession{}
+	runner := localBrowserAgentOutlineRunner{
+		service: &Service{}, outcomeVerifier: &captureTimingThenContinueVerifier{},
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return session, driver.BrowserAgentWorkerOpenResult{SessionID: "capture-revalidate", RuntimeVersions: map[string]string{"runner": "capture-revalidate"}}, nil
+		},
+	}
+	result, err := newExecutionRuntimeRouter(&stubLegacyRuntimeRunner{}, runner).Run(context.Background(), executionRuntimeRequest{
+		Package: &pkg, CloudJobID: "job_capture_revalidate", RecordingOutputDir: t.TempDir(), ResultCreatedAt: timeNowUTC(),
+	})
+	if err != nil {
+		t.Fatalf("capture timing repair should complete through non-action revalidation: %v", err)
+	}
+	if result.Status != model.RecordingResultStatusGenerated || len(result.PatchLedger) != 1 || !result.PatchLedger[0].Applied {
+		t.Fatalf("capture timing repair was not packaged: %+v", result)
+	}
+	if session.executeCalls != len(plan.Stages) || session.revalidateCalls != 1 {
+		t.Fatalf("capture timing repair replayed an action: execute=%d revalidate=%d", session.executeCalls, session.revalidateCalls)
+	}
+	events := readStageEventAudit(t, result.StageEventLogRef.URI)
+	for _, event := range events {
+		if event.Attempt == 2 && (event.EventType == model.StageExecutionEventActionStarted || event.EventType == model.StageExecutionEventActionCompleted) {
+			t.Fatalf("capture timing repair must not emit a replayed action event: %+v", event)
+		}
+	}
+	if !hasStageEvent(events, model.StageExecutionEventObservationCollected, 2) || !hasStageEvent(events, model.StageExecutionEventOutcomeObserved, 2) {
+		t.Fatalf("capture timing revalidation evidence is missing: %+v", events)
+	}
+}
+
 type repairAuditBrowserAgentWorkerSession struct {
 	candidate    model.SelectorCandidate
 	observeCalls int
@@ -527,11 +564,12 @@ func hasStageEvent(events []model.StageExecutionEvent, eventType model.StageExec
 }
 
 type stubBrowserAgentWorkerSession struct {
-	observeCalls  int
-	executeCalls  int
-	closeCalls    int
-	recordingPath string
-	failNodeID    string
+	observeCalls    int
+	executeCalls    int
+	revalidateCalls int
+	closeCalls      int
+	recordingPath   string
+	failNodeID      string
 }
 
 func (s *stubBrowserAgentWorkerSession) Observe(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
@@ -551,6 +589,22 @@ func (s *stubBrowserAgentWorkerSession) Execute(_ context.Context, stage driver.
 	}
 	artifact := stubBrowserAgentArtifact(stage.NodeID, "after")
 	assertions := []model.RuntimeAssertion{{Kind: "action_completed", Passed: true, Actual: stage.TargetContract.SemanticID}}
+	for _, validation := range stage.Validations {
+		if validation.Required {
+			assertions = append(assertions, model.RuntimeAssertion{Kind: "required_" + validation.Kind + ":" + validation.ID, Passed: true, Actual: "matched"})
+		}
+	}
+	return driver.BrowserAgentWorkerStageResult{
+		Observation:  model.RuntimeObservation{Source: model.RuntimeObservationAssertion, URL: "https://app.example.com/dashboard", Title: "Dashboard", Assertions: assertions},
+		EvidenceRefs: []model.EvidenceRef{{ID: "evidence_" + artifact.ID, Kind: model.EvidenceKindWebScreenshot, ArtifactID: artifact.ID, Confidence: 1}},
+		Artifacts:    []model.ArtifactRef{artifact}, TargetResolved: true,
+	}, nil
+}
+
+func (s *stubBrowserAgentWorkerSession) Revalidate(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
+	s.revalidateCalls++
+	artifact := stubBrowserAgentArtifact(stage.NodeID, "revalidate")
+	assertions := []model.RuntimeAssertion{{Kind: "capture_ready", Passed: true, Actual: stage.TargetContract.SemanticID}}
 	for _, validation := range stage.Validations {
 		if validation.Required {
 			assertions = append(assertions, model.RuntimeAssertion{Kind: "required_" + validation.Kind + ":" + validation.ID, Passed: true, Actual: "matched"})
@@ -599,7 +653,7 @@ func stubBrowserAgentArtifact(nodeID, phase string) model.ArtifactRef {
 	return model.ArtifactRef{
 		ID: "artifact_" + nodeID + "_" + phase, Kind: "screenshot", URI: "file:///" + nodeID + "-" + phase + ".png",
 		MimeType: "image/png", SHA256: "sha256_" + nodeID + "_" + phase, SizeBytes: 10, Sensitive: true,
-		SourceNodeID: nodeID, Metadata: map[string]any{"include_in_demo": phase == "after"},
+		SourceNodeID: nodeID, Metadata: map[string]any{"include_in_demo": phase == "after" || phase == "revalidate"},
 	}
 }
 

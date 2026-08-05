@@ -27,6 +27,10 @@ func TestReviewArkMediaCandidateAssetsApprovesSafeDownloadedVideoCandidate(t *te
 				"include_in_demo":        false,
 				"source_material_policy": "non_authoritative_generated_candidate",
 				"non_authoritative":      true,
+				"artifact_variant":       "normalized",
+				"normalization_status":   "ok",
+				"media_probe_status":     "ok",
+				"normalization_profile":  "editor_mp4_h264_yuv420p_1920x1080_cfr30_v1",
 			},
 		}},
 	}
@@ -42,6 +46,34 @@ func TestReviewArkMediaCandidateAssetsApprovesSafeDownloadedVideoCandidate(t *te
 	}
 	if review.Items[0].ApprovedForDemo != true || review.Items[0].PresentationOnly != true {
 		t.Fatalf("review item did not capture approval boundary: %+v", review.Items[0])
+	}
+}
+
+func TestReviewArkMediaCandidateAssetsRejectsDownloadedButUnnormalizedVideo(t *testing.T) {
+	generationResult := model.ArkMediaGenerationResult{
+		ResultID:        "ark_media_generation_result_pkg",
+		SourcePackageID: "pkg_1",
+		DownloadedArtifacts: []model.ArtifactRef{{
+			ID:        "artifact_raw_provider_video",
+			Kind:      "generated_video_candidate",
+			URI:       filepath.Join(t.TempDir(), "provider-original.mp4"),
+			MimeType:  "video/mp4",
+			SHA256:    "sha_raw_provider_video",
+			SizeBytes: 128,
+			Metadata: map[string]any{
+				"source_material_policy": "non_authoritative_generated_candidate",
+				"non_authoritative":      true,
+			},
+		}},
+	}
+
+	review := ReviewArkMediaCandidateAssets(nil, &generationResult, time.Date(2026, 7, 15, 21, 3, 0, 0, time.UTC))
+
+	if review.Status != "rejected" || len(review.ApprovedArtifacts) != 0 || len(review.RejectedArtifacts) != 1 {
+		t.Fatalf("raw provider candidate must be rejected: %+v", review)
+	}
+	if len(review.Items[0].Findings) != 1 || review.Items[0].Findings[0].Code != "candidate_media_not_normalized" {
+		t.Fatalf("expected normalization finding: %+v", review.Items[0].Findings)
 	}
 }
 

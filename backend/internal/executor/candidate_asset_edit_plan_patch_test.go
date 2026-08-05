@@ -24,6 +24,10 @@ func TestNewCandidateAssetEditPlanPatchProposesPresentationOnlyShots(t *testing.
 			"include_in_demo":        false,
 			"source_material_policy": "non_authoritative_generated_candidate",
 			"non_authoritative":      true,
+			"artifact_variant":       "normalized",
+			"normalization_status":   "ok",
+			"media_probe_status":     "ok",
+			"normalization_profile":  "editor_mp4_h264_yuv420p_1920x1080_cfr30_v1",
 			"duration_ms":            1500,
 		},
 	}

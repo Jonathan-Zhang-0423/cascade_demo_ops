@@ -26,9 +26,16 @@ var (
 	ErrArkMediaDisabled = errors.New("ark media client is disabled")
 )
 
-type ArkMediaClient interface {
+// VideoGenerationClient is the provider-neutral boundary used by the Server
+// director pipeline. Provider adapters normalize task IDs, statuses, outputs,
+// and traces into ContentGenerationTaskResult.
+type VideoGenerationClient interface {
 	CreateContentGenerationTask(ctx context.Context, request ContentGenerationTaskRequest) (ContentGenerationTaskResult, error)
 	GetContentGenerationTask(ctx context.Context, taskID string) (ContentGenerationTaskResult, error)
+}
+
+type ArkMediaClient interface {
+	VideoGenerationClient
 	GenerateImages(ctx context.Context, request ImageGenerationRequest) (ImageGenerationResult, error)
 }
 
@@ -55,6 +62,8 @@ type ContentPart struct {
 	Text     string    `json:"text,omitempty"`
 	ImageURL *MediaURL `json:"image_url,omitempty"`
 	VideoURL *MediaURL `json:"video_url,omitempty"`
+	AudioURL *MediaURL `json:"audio_url,omitempty"`
+	Role     string    `json:"role,omitempty"`
 }
 
 type MediaURL struct {

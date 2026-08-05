@@ -26,6 +26,7 @@ import (
 type DevHTTPServer struct {
 	service               *Service
 	events                *devEventStore
+	autoRunExchange       bool
 	storeGitHubToken      func(string) error
 	storeDemoCredential   func(string, string, string) error
 	githubTokenConfigured func() bool
@@ -96,6 +97,12 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 	return server
 }
 
+func NewControlPlaneHTTPServer(service *Service) *DevHTTPServer {
+	server := NewDevHTTPServer(service)
+	server.autoRunExchange = true
+	return server
+}
+
 func (s *DevHTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/desktop/runtime-health", s.handleRuntimeHealth)
@@ -122,6 +129,13 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("/v1/desktop/projects/", s.handleProjectRoute)
 	mux.HandleFunc("GET /v1/desktop/browser-agent-acceptance", s.handleBrowserAgentAcceptance)
 	mux.HandleFunc("POST /v1/desktop/browser-agent-acceptance/run", s.handleBrowserAgentAcceptance)
+	// Server-owned local acceptance UI. It is intentionally absent from cloud
+	// and production runtimes and never consumes customer/App execution data.
+	mux.HandleFunc("GET /dev/server-acceptance", s.handleServerAcceptancePage)
+	mux.HandleFunc("GET /v1/desktop/app-execution-acceptance", s.handleRealAppExecutionAcceptance)
+	mux.HandleFunc("GET /v1/desktop/app-execution-acceptance/{id}", s.handleRealAppExecutionAcceptanceItem)
+	mux.HandleFunc("POST /v1/desktop/app-execution-acceptance/{id}/run", s.handleRealAppExecutionAcceptanceRun)
+	mux.HandleFunc("GET /v1/desktop/app-execution-acceptance/{id}/artifacts/{artifact_id}", s.handleRealAppExecutionAcceptanceArtifact)
 	mux.HandleFunc("GET /v1/desktop/browser-agent-business-acceptance", s.handleBrowserAgentBusinessAcceptance)
 	mux.HandleFunc("POST /v1/desktop/browser-agent-business-acceptance/run", s.handleBrowserAgentBusinessAcceptance)
 	// Local dev/test only. This is not an App, Exchange, or production runtime API.
@@ -451,6 +465,10 @@ func (s *DevHTTPServer) handleModelDiagnostics(w http.ResponseWriter, r *http.Re
 }
 
 func (s *DevHTTPServer) handleBrowserAgentAcceptance(w http.ResponseWriter, r *http.Request) {
+	if err := s.requireLocalServerAcceptance(r); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
 	if r.Method == http.MethodPost {
 		view, err := s.service.RunBrowserAgentAcceptance(r.Context())
 		writeBridgeValue(w, view, err)
@@ -458,6 +476,39 @@ func (s *DevHTTPServer) handleBrowserAgentAcceptance(w http.ResponseWriter, r *h
 	}
 	view, err := s.service.GetBrowserAgentAcceptance(r.Context())
 	writeBridgeValue(w, view, err)
+}
+
+func (s *DevHTTPServer) requireLocalServerAcceptance(r *http.Request) error {
+	if s == nil || s.service == nil || s.service.runtime.Profile != config.ProfileDev || strings.EqualFold(s.service.runtime.Environment, "production") {
+		return errors.New("server acceptance is available only in a local dev/test runtime")
+	}
+	if !requestFromLoopback(r) {
+		return errors.New("server acceptance requires a loopback client")
+	}
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		parsed, err := url.Parse(origin)
+		if err != nil || !sameLoopbackOrigin(parsed, r.Host) {
+			return errors.New("server acceptance rejects cross-origin browser requests")
+		}
+	}
+	return nil
+}
+
+func sameLoopbackOrigin(origin *url.URL, requestHost string) bool {
+	if origin == nil || origin.Scheme != "http" {
+		return false
+	}
+	originHost := strings.TrimSpace(origin.Host)
+	requestHost = strings.TrimSpace(requestHost)
+	if !strings.EqualFold(originHost, requestHost) {
+		return false
+	}
+	hostname := strings.Trim(origin.Hostname(), "[]")
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *DevHTTPServer) handleBrowserAgentBusinessAcceptance(w http.ResponseWriter, r *http.Request) {
@@ -1080,6 +1131,22 @@ func EnsureLocalDevAddress(addr string) error {
 		return nil
 	}
 	return errors.New("dev bridge refuses non-local bind address")
+}
+
+func EnsureControlPlaneAddress(addr string) error {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return errors.New("control plane address must include an explicit loopback host and port")
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return errors.New("control plane must bind to loopback behind the HTTPS reverse proxy")
+	}
+	return nil
 }
 
 var (

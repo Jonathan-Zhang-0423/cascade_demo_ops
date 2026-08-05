@@ -3078,7 +3078,11 @@ function isApprovedGeneratedCandidateArtifact(artifact: TimelineArtifact | undef
     artifact.sensitive !== true &&
     metadata.approved_for_demo === true &&
     metadata.non_authoritative === true &&
-    metadata.source_material_policy === "non_authoritative_generated_candidate"
+    metadata.source_material_policy === "non_authoritative_generated_candidate" &&
+    metadata.artifact_variant === "normalized" &&
+    metadata.normalization_status === "ok" &&
+    metadata.media_probe_status === "ok" &&
+    metadata.normalization_profile === "editor_mp4_h264_yuv420p_1920x1080_cfr30_v1"
   );
 }
 
@@ -3087,7 +3091,7 @@ function validateGeneratedCandidateShot(shot: DemoEditShot, artifact: TimelineAr
     errors.push(
       finding(
         "generated_candidate_not_approved",
-        "Generated candidate artifacts require metadata.approved_for_demo=true, metadata.non_authoritative=true, and non_authoritative_generated_candidate policy before use.",
+        "Generated candidate artifacts require approval, non-authoritative policy, and a probed normalized editor MP4/H.264/yuv420p/1920x1080/CFR30 derivative before use.",
         `${shotPath}.source_artifact_id`,
       ),
     );

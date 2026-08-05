@@ -7,6 +7,7 @@
 | GLM | `GLM_API_KEY` | `GLM_BASE_URL` | `GLM_MODEL` |
 | Kimi | `KIMI_API_KEY` | `KIMI_BASE_URL` | `KIMI_MODEL` |
 | MiniMax | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL` | `MINIMAX_MODEL` |
+| MiniMax-H3 视频 Sidecar | `MINIMAX_H3_API_KEY` | `MINIMAX_H3_BASE_URL` | Server 固定 `MiniMax-H3` |
 | Seedance | `SEEDANCE_API_KEY` | `SEEDANCE_BASE_URL` | `SEEDANCE_MODEL` |
 | 豆包 / Ark | `DOUBAO_API_KEY`, `ARK_API_KEY` | `DOUBAO_BASE_URL` | `DOUBAO_MODEL` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `DEEPSEEK_BASE_URL` | `DEEPSEEK_MODEL` |
@@ -20,11 +21,20 @@ Runtime 会预设公开官方端点，仍可通过对应 `*_BASE_URL` 覆盖：
 | GLM | `https://open.bigmodel.cn/api/paas/v4` | 智谱 BigModel OpenAI 兼容端点 |
 | Kimi | `https://api.moonshot.cn/v1` | Moonshot/Kimi OpenAI 兼容端点 |
 | MiniMax | `https://api.minimaxi.com/v1` | MiniMax OpenAI SDK 文档端点 |
+| MiniMax-H3 视频 Sidecar | `https://api.minimaxi.com` | H3 V2 视频生成端点；当前未注册到正式路由 |
 | Seedance | `https://ark.cn-beijing.volces.com/api/v3` | 火山方舟 Ark 端点，默认用于 Seedance 2.0 视频能力 |
 | 豆包 / Ark | `https://ark.cn-beijing.volces.com/api/v3` | 与 Seedance 共用 Ark 网关 |
 | DeepSeek | `https://api.deepseek.com` | DeepSeek OpenAI 兼容端点 |
 
 Seedance 的 key 读取顺序是：`SEEDANCE_API_KEY` -> `DOUBAO_API_KEY` -> `ARK_API_KEY`。也就是说，如果视频操作阶段使用豆包/火山方舟账号，填 `DOUBAO_API_KEY` 或 `ARK_API_KEY` 即可，不需要额外复制一份到 `SEEDANCE_API_KEY`。
+
+MiniMax-H3 视频 Sidecar 使用独立模式开关：
+
+```text
+CASCADE_MINIMAX_H3_MODE=disabled|dry_run|real
+```
+
+默认值为 `disabled`。Sidecar 不读取 `MINIMAX_API_KEY`、`CASCADE_ARK_MEDIA_MODE`、Seedance 或豆包密钥；只认专用 `MINIMAX_H3_API_KEY`。当前 Sidecar 尚未接入执行、Director、comparison 或 fallback 路由，因此设置这些变量也不会影响现有 Server 验收，除非后续代码显式构造并调用 Sidecar。
 
 官方参考：
 

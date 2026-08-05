@@ -178,6 +178,14 @@ func (s *BrowserAgentWorkerSession) Execute(ctx context.Context, stage BrowserAg
 	return result, err
 }
 
+// Revalidate waits for the approved capture window and observes the outcome
+// again without repeating click/fill/select or any other business action.
+func (s *BrowserAgentWorkerSession) Revalidate(ctx context.Context, stage BrowserAgentWorkerStage) (BrowserAgentWorkerStageResult, error) {
+	var result BrowserAgentWorkerStageResult
+	err := s.call(ctx, "browser_agent_revalidate", BrowserAgentWorkerStageRequest{SessionID: s.sessionID, Stage: stage}, &result)
+	return result, err
+}
+
 func (s *BrowserAgentWorkerSession) Status(ctx context.Context) (BrowserAgentWorkerStatus, error) {
 	var result BrowserAgentWorkerStatus
 	err := s.call(ctx, "browser_agent_status", map[string]string{"session_id": s.sessionID}, &result)

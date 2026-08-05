@@ -16,14 +16,17 @@ import (
 	"cascade-demoops/backend/internal/store"
 )
 
-func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T) {
+func TestEnsureExchangeSessionUsesServerIssuedChallengeForConfiguredDevBaseURL(t *testing.T) {
 	wellKnownHits := 0
 	registerHits := 0
+	discovery := localBootstrapDiscovery("", "development", time.Now().UTC())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/aigc/.well-known/cascade-exchange":
 			wellKnownHits++
-			http.Error(w, "404 page not found", http.StatusNotFound)
+			discovery.ExchangeBaseURL = "http://" + r.Host + "/aigc"
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(discovery)
 		case "/aigc/v1/app-installations/register":
 			registerHits++
 			var request model.AppInstallationRegisterRequest
@@ -31,6 +34,9 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T
 				t.Errorf("decode register request: %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
+			}
+			if request.ChallengeID != discovery.Challenge.ChallengeID {
+				t.Errorf("registration challenge = %q, want server challenge %q", request.ChallengeID, discovery.Challenge.ChallengeID)
 			}
 			response := model.AppInstallationSessionResponse{
 				InstallID:            request.InstallID,
@@ -77,8 +83,8 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wellKnownHits != 0 {
-		t.Fatalf("configured dev exchange base URL should not probe well-known endpoint, hits=%d", wellKnownHits)
+	if wellKnownHits != 1 {
+		t.Fatalf("configured dev exchange must fetch one server-issued challenge, hits=%d", wellKnownHits)
 	}
 	if registerHits != 1 {
 		t.Fatalf("expected one installation register request, got %d", registerHits)
@@ -88,6 +94,62 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredDevBaseURL(t *testing.T
 	}
 	if session.AuthMode != exchangeAuthModeInstallation {
 		t.Fatalf("local exchange must prefer an installation session, got auth mode %q", session.AuthMode)
+	}
+}
+
+func TestEnsureExchangeSessionUsesRemoteDiscoveryChallengeForConfiguredHTTPS(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	wellKnownHits := 0
+	registerHits := 0
+	now := time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
+	discovery := localBootstrapDiscovery("https://control.demoops.test", "staging", now)
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		response := func(status int, value any) *http.Response {
+			data, _ := json.Marshal(value)
+			return &http.Response{StatusCode: status, Status: http.StatusText(status), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(data))), Request: r}
+		}
+		switch r.URL.String() {
+		case "https://control.demoops.test/.well-known/cascade-exchange":
+			wellKnownHits++
+			return response(http.StatusOK, discovery), nil
+		case "https://control.demoops.test/v1/app-installations/register":
+			registerHits++
+			var request model.AppInstallationRegisterRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.ChallengeID != discovery.Challenge.ChallengeID {
+				t.Fatalf("register challenge = %q, want remote %q", request.ChallengeID, discovery.Challenge.ChallengeID)
+			}
+			return response(http.StatusOK, model.AppInstallationSessionResponse{
+				InstallID: request.InstallID, SessionID: "sess_remote", SessionToken: "cassess_remote",
+				ExpiresAt: now.Add(time.Hour), OrgID: request.OrgID, ProjectID: request.ProjectID,
+				ServerKeyID: defaultServerPublicKeyID, ResultRecipientKeyID: installationResultKeyID(request.InstallID), AuthMode: exchangeAuthModeInstallation,
+			}), nil
+		default:
+			t.Fatalf("unexpected exchange request URL: %s", r.URL.String())
+			return nil, nil
+		}
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile: config.ProfileDev, Environment: "development", Mode: model.AppModeDesktop,
+		DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "cascade_demoops.db"),
+		DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"),
+		LogRoot: filepath.Join(root, "logs"), ResourceRoot: root, DevRepoRoot: root,
+		CloudExchangeBaseURL: "https://control.demoops.test", LLMMode: config.LLMModeDeterministic,
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.EnsureExchangeSession(context.Background(), "org_1", "project_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wellKnownHits != 1 || registerHits != 1 || session.SessionToken != "cassess_remote" {
+		t.Fatalf("unexpected remote pairing: well_known=%d register=%d session=%+v", wellKnownHits, registerHits, session)
 	}
 }
 
@@ -124,9 +186,17 @@ func TestEnsureExchangeSessionKeepsBearerTokenForExternalLegacyExchange(t *testi
 
 func TestEnsureExchangeSessionReportsCloudAuthUnavailableWhenRegisterMissing(t *testing.T) {
 	oldTransport := http.DefaultTransport
+	discovery := localBootstrapDiscovery("https://control.demoops.test", "staging", time.Now().UTC())
 	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() == "https://control.demoops.test/.well-known/cascade-exchange" {
+			data, _ := json.Marshal(discovery)
+			return &http.Response{
+				StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader(string(data))), Request: r,
+			}, nil
+		}
 		if r.URL.String() != "https://control.demoops.test/v1/app-installations/register" {
-			t.Errorf("unexpected exchange request URL: %s", r.URL.String())
+			t.Fatalf("unexpected exchange request URL: %s", r.URL.String())
 		}
 		return &http.Response{
 			StatusCode: http.StatusNotFound,

@@ -1,10 +1,12 @@
 package app
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cascade-demoops/backend/internal/driver"
@@ -126,4 +128,73 @@ func TestControlledOutlineScenarioPackagesRunCompleteServerPath(t *testing.T) {
 			}
 		})
 	}
+
+	repairCases := []struct {
+		name           string
+		handler        http.HandlerFunc
+		build          func(string, string) (model.ClientExecutionPackage, error)
+		expectedField  string
+		expectedBefore string
+		expectedAfter  string
+		stageCount     int
+	}{
+		{"selector_alternative_repair", controlledOutlineSelectorRepairHandler, controlledOutlineSelectorRepairPackage, "script_outline.stages[].components[].selector", "", "testid:current-confirm-action", 2},
+		{"busy_page_wait_repair", controlledOutlineBusyWaitRepairHandler, controlledOutlineBusyWaitRepairPackage, "script_outline.stages[].wait_conditions", "wait_after_entry_at_least_250ms", "wait_after_entry_at_least_1250ms", 2},
+	}
+	for _, tc := range repairCases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(tc.handler))
+			defer server.Close()
+			pkg, err := tc.build(fixturePath, server.URL)
+			if err != nil {
+				t.Fatalf("build %s package: %v", tc.name, err)
+			}
+			sourceHash := pkg.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+			run, err := service.runProtocolAcceptanceScenario(t.Context(), pkg)
+			if err != nil {
+				t.Fatalf("run %s package: %v", tc.name, err)
+			}
+			if run.Status.Status != model.ExchangePackageStatusCompleted || run.Result.Status != model.RecordingResultStatusGenerated {
+				t.Fatalf("%s did not recover and complete: status=%s result=%s diagnostic=%+v", tc.name, run.Status.Status, run.Result.Status, run.Result.FailureDiagnostic)
+			}
+			if len(run.Result.PatchLedger) != 1 {
+				t.Fatalf("%s must record exactly one bounded patch: %+v", tc.name, run.Result.PatchLedger)
+			}
+			entry := run.Result.PatchLedger[0]
+			if !entry.Applied || entry.PolicyDecision != model.ValidationDecisionRepairAllowed || entry.Field != tc.expectedField || entry.Before != tc.expectedBefore || entry.After != tc.expectedAfter || entry.SourceBundleHashSHA256 != sourceHash {
+				t.Fatalf("%s patch ledger violates the approved contract: %+v", tc.name, entry)
+			}
+			if !hasRepairAuditEvents(run.Result, entry.StageID) {
+				t.Fatalf("%s result is missing proposed/applied/re-observed audit events", tc.name)
+			}
+			if !hasStrictBrowserAgentValidationReports(run.Result, tc.stageCount) || !run.Acknowledged || !run.DeliveryAcknowledged {
+				t.Fatalf("%s did not preserve strict validation and delivery acknowledgement", tc.name)
+			}
+		})
+	}
+}
+
+func hasRepairAuditEvents(result model.RecordingResultPackage, stageID string) bool {
+	if result.StageEventLogRef == nil {
+		return false
+	}
+	path := filepath.FromSlash(strings.TrimPrefix(result.StageEventLogRef.URI, "file://"))
+	if len(path) > 2 && (path[0] == '/' || path[0] == '\\') && path[2] == ':' {
+		path = path[1:]
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	proposed, applied, resolvedAgain := false, false, false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var event model.StageExecutionEvent
+		if json.Unmarshal([]byte(line), &event) != nil || event.StageID != stageID {
+			continue
+		}
+		proposed = proposed || event.EventType == model.StageExecutionEventRepairProposed
+		applied = applied || event.EventType == model.StageExecutionEventRepairApplied
+		resolvedAgain = resolvedAgain || (event.EventType == model.StageExecutionEventTargetResolved && event.Attempt >= 2)
+	}
+	return proposed && applied && resolvedAgain
 }
