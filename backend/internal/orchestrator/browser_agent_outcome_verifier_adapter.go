@@ -668,6 +668,30 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 		}, nil
 	}
 
+	// P0.0b: Verify the result package actually belongs to this approved run (scenario 11)
+	if result.SourcePackageID != "" && vctx.SourcePackageID != "" && result.SourcePackageID != vctx.SourcePackageID {
+		postChecks = append(postChecks, model.ValidationCheck{
+			ID:       "post_result_package_mismatch",
+			Kind:     "result_identity_mismatch",
+			Code:     "RESULT_PACKAGE_MISMATCH",
+			Severity: model.FindingSeverityBlocking,
+			Passed:   false,
+			Required: true,
+			Summary:  fmt.Sprintf("结果包 source_package_id (%s) 与本次运行批准包 (%s) 不一致", result.SourcePackageID, vctx.SourcePackageID),
+		})
+	}
+	if result.AuditTrail.SourcePackageDigest != "" && vctx.SourceBundleHashSHA256 != "" && result.AuditTrail.SourcePackageDigest != vctx.SourceBundleHashSHA256 {
+		postChecks = append(postChecks, model.ValidationCheck{
+			ID:       "post_result_hash_mismatch",
+			Kind:     "result_hash_mismatch",
+			Code:     "RESULT_HASH_MISMATCH",
+			Severity: model.FindingSeverityBlocking,
+			Passed:   false,
+			Required: true,
+			Summary:  "结果包审计哈希与批准包源哈希不一致，证据链不可信",
+		})
+	}
+
 	// P0.1: Verify RecordingResultPackage has required artifacts
 	{
 		// Check for trace artifact
