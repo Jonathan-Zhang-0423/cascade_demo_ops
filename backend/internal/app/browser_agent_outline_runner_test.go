@@ -572,6 +572,37 @@ type stubBrowserAgentWorkerSession struct {
 	failNodeID      string
 }
 
+func TestManualSessionCheckpointRevalidatesWithoutExecutingCredentialAction(t *testing.T) {
+	session := &stubBrowserAgentWorkerSession{}
+	runtime := &localBrowserAgentStageRuntime{session: session, stageCount: 1, artifacts: map[string]model.ArtifactRef{}}
+	stage := BrowserAgentRuntimeStage{
+		ID: "stage_session", Order: 1, NodeID: "node_session", StageKind: model.BusinessStageKindSessionSetup,
+		ManualSessionCheckpoint: true, TargetContract: model.BrowserAgentTargetContract{SemanticID: "session_target"},
+		Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionFill, SecretRef: "secret://password"}},
+		Validations: []model.ValidationSpec{{ID: "validate_app", Kind: "url_matches", Required: true}},
+	}
+	observed, err := runtime.ObserveStage(context.Background(), BrowserAgentRuntimePlan{}, stage)
+	if err != nil || !observed.TargetResolved {
+		t.Fatalf("manual checkpoint observation failed: %+v, %v", observed, err)
+	}
+	result, err := runtime.ExecuteStage(context.Background(), BrowserAgentRuntimePlan{}, stage)
+	if err != nil || result.Observation == nil {
+		t.Fatalf("manual checkpoint execution failed: %+v, %v", result, err)
+	}
+	if session.executeCalls != 0 || session.observeCalls != 0 || session.revalidateCalls != 2 {
+		t.Fatalf("manual checkpoint must only perform non-action revalidation: %+v", session)
+	}
+	found := false
+	for _, assertion := range result.Observation.Assertions {
+		if assertion.Kind == "manual_session_checkpoint_verified" && assertion.Passed {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("manual checkpoint evidence marker is missing: %+v", result.Observation.Assertions)
+	}
+}
+
 func (s *stubBrowserAgentWorkerSession) Observe(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
 	s.observeCalls++
 	artifact := stubBrowserAgentArtifact(stage.NodeID, "before")

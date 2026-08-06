@@ -1488,7 +1488,7 @@ MP4 / H.264 / yuv420p / 1920x1080 / CFR 30fps
 - 仅尾帧等未开放模式在网络调用前拒绝，Provider HTTP 调用次数为 0；
 - 所有生成素材失败时，最终交付仍由真实录屏、截图和确定性编辑计划完成。
 
-当前状态说明：基础 `DemoEditPlan`、确定性 DirectorSuggestion、受限 Director Patch、Seedance 候选登记和生成候选 Renderer 门禁已有部分实现；H3 已具备独立创建/查询 Client 和默认关闭的 Sidecar 配置工厂，但尚未注册到 Server 执行路由。`StoryboardConstraintSet`、真正的规划模型、H3 正式路由、候选 MediaNormalizer、A/B 选择和 fallback 编排尚未完成，不能把本阶段目标当作当前运行能力。
+当前状态说明：基础 `DemoEditPlan`、确定性 DirectorSuggestion、受限 Director Patch、Seedance 候选登记和生成候选 Renderer 门禁已有部分实现；H3 已具备独立创建/查询/取消删除 Client、默认关闭的 Sidecar 配置工厂、有界轮询、时效 URL 下载、隔离的 `ffprobe -> FFmpeg -> ffprobe` MediaNormalizer，以及未注册路由的单进程 Admission 治理层。MediaNormalizer 已锁定 MP4/H.264/yuv420p/1920×1080/CFR 30fps，并区分 original/normalized artifact 和 SHA-256；Admission 已覆盖显式成本估算、周期配额、并发、超时与 Server 内部幂等，但尚未实现跨进程持久化和实际 usage 对账。H3 仍未注册到 Server 执行路由、尚未连接 EditorSession、尚未经过真实 H3 素材调用验收。`StoryboardConstraintSet`、真正的规划模型、H3 正式路由、A/B 选择和 fallback 编排仍未完成，不能把本阶段目标当作当前运行能力。
 
 ---
 

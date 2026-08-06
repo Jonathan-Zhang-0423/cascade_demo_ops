@@ -33,6 +33,7 @@ const PayloadRefKindInline = "inline"
 const PayloadRefKindArtifact = "artifact"
 const ResultRecipientAppInstallation = "app_installation"
 const ResultRecipientOrganization = "organization"
+
 const ArtifactRoleFinalDemoVideo = "final_demo_video"
 const ArtifactRoleRecordingOutput = "recording_output"
 const ArtifactKindVideo = "video"

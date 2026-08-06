@@ -77,7 +77,85 @@ func ValidateClientExecutionPackageForCloudExecution(pkg *ClientExecutionPackage
 	return ValidatePackageConfidenceSummary(pkg)
 }
 
+// ValidateClientExecutionPackageForLocalTestWaiver validates the complete App
+// draft structure without weakening the cloud upload contract. It accepts only
+// a browser-agent-outline-v1 draft that remains explicitly non-uploadable.
+func ValidateClientExecutionPackageForLocalTestWaiver(pkg *ClientExecutionPackage) error {
+	if pkg == nil {
+		return errors.New("client execution package is nil")
+	}
+	if pkg.PackageID == "" || pkg.OrgID == "" || pkg.ProjectID == "" {
+		return errors.New("client execution package missing required identity fields")
+	}
+	if pkg.SchemaVersion != ClientExecutionPackageSchemaVersion {
+		return fmt.Errorf("client execution package schema_version must be %q", ClientExecutionPackageSchemaVersion)
+	}
+	if data, err := json.Marshal(pkg); err != nil {
+		return err
+	} else if len(data) > 256*1024 {
+		return errors.New("package_size_exceeded: client execution package exceeds 256 KiB")
+	}
+	if pkg.SafetyReport.AllowedToUpload {
+		return errors.New("local test waiver requires safety_report.allowed_to_upload=false")
+	}
+	if err := validateClientExecutionPackageStructure(pkg); err != nil {
+		return err
+	}
+	if pkg.ExecutableScriptBundle.ScriptManifest.Runtime != ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		return errors.New("local test waiver requires browser-agent-outline-v1 runtime")
+	}
+	return nil
+}
+
 func ValidateRecordingResultPackageForRender(result *RecordingResultPackage, source *ClientExecutionPackage) error {
+	if err := validateRecordingResultPackageCore(result, source); err != nil {
+		return err
+	}
+	if err := result.ValidateDeliverySecurity(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateLocalTestRecordingResultPackageForRender is deliberately separate
+// from the formal validator. Exchange Intake continues to call only the formal
+// validator and therefore rejects these local, unencrypted artifacts.
+func ValidateLocalTestRecordingResultPackageForRender(result *RecordingResultPackage, source *ClientExecutionPackage) error {
+	if err := ValidateClientExecutionPackageForLocalTestWaiver(source); err != nil {
+		return err
+	}
+	if err := validateRecordingResultPackageCore(result, source); err != nil {
+		return err
+	}
+	metadata := result.Delivery.ResultPackageRef.Metadata
+	if metadata == nil || metadata["dev_test_only"] != true || metadata["not_for_exchange_upload"] != true || metadata["test_only_waiver"] != true || metadata["formal_exchange"] != false || metadata["app_generated"] != true || metadata["transport_authenticated"] != false {
+		return errors.New("local test result package markers are invalid")
+	}
+	waiverID, _ := metadata["waiver_id"].(string)
+	bundleHash, _ := metadata["source_bundle_hash_sha256"].(string)
+	planHash, _ := metadata["source_plan_hash_sha256"].(string)
+	if strings.TrimSpace(waiverID) == "" || strings.TrimSpace(bundleHash) == "" || strings.TrimSpace(planHash) == "" {
+		return errors.New("local test result package waiver and source hashes are required")
+	}
+	bundle := source.ExecutableScriptBundle
+	if bundle == nil || bundleHash != bundle.Reproducibility.BundleHashSHA256 || planHash != bundle.Reproducibility.PlanHashSHA256 {
+		return errors.New("local test result package source hashes do not match the App draft")
+	}
+	if result.Delivery.RecipientKind != "local_test_only" || result.Delivery.RecipientKeyID != "" || result.Delivery.EncryptionAlg != "" || result.Delivery.AckRequired {
+		return errors.New("local test result package delivery must remain local, unencrypted, and acknowledgement-free")
+	}
+	if result.Delivery.ResultPackageRef.Encrypted || result.Delivery.ResultPackageRef.RecipientKeyID != "" {
+		return errors.New("local test result package ref must not claim Exchange encryption")
+	}
+	for _, asset := range result.Delivery.AssetRefs {
+		if asset.Encrypted || asset.RecipientKeyID != "" {
+			return errors.New("local test result assets must not claim Exchange encryption")
+		}
+	}
+	return nil
+}
+
+func validateRecordingResultPackageCore(result *RecordingResultPackage, source *ClientExecutionPackage) error {
 	if result == nil {
 		return errors.New("recording result package is nil")
 	}
@@ -110,9 +188,6 @@ func ValidateRecordingResultPackageForRender(result *RecordingResultPackage, sou
 			return errors.New("recording result package contains artifact without id or uri")
 		}
 	}
-	if err := result.ValidateDeliverySecurity(); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -120,6 +195,10 @@ func validateClientExecutionPackageContents(pkg *ClientExecutionPackage) error {
 	if !pkg.SafetyReport.AllowedToUpload {
 		return errors.New("client execution package safety_report.allowed_to_upload must be true")
 	}
+	return validateClientExecutionPackageStructure(pkg)
+}
+
+func validateClientExecutionPackageStructure(pkg *ClientExecutionPackage) error {
 	if pkg.WorkflowGraph == nil {
 		return errors.New("client execution package workflow_graph is required")
 	}
