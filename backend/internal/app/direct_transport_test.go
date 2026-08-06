@@ -6,11 +6,13 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -168,6 +170,97 @@ func TestAppDirectTransportRejectsStaleApprovalBeforeLeaseAllocation(t *testing.
 	if called {
 		t.Fatal("transport token was read before authoritative package approval")
 	}
+}
+
+func TestAppDirectTransportReleasesLeaseWhenPackageUploadFails(t *testing.T) {
+	root := t.TempDir()
+	port := reserveDirectAppTestPort(t)
+	unreachablePort := reserveDirectAppTestPort(t)
+	gateway, err := directtransport.NewGateway(directtransport.Config{
+		ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1",
+		DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true,
+		BootstrapToken: directAppBootstrapToken, WorkerToken: directAppWorkerToken,
+		SpoolRoot: filepath.Join(root, "gateway"), LeaseTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var releaseCount int
+	var releaseMu sync.Mutex
+	controlHandler := gateway.ControlHandler()
+	control := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1/direct/leases" {
+			proxied := httptest.NewRecorder()
+			controlHandler.ServeHTTP(proxied, request)
+			if proxied.Code == http.StatusCreated {
+				var lease model.DirectPortLease
+				if err := json.Unmarshal(proxied.Body.Bytes(), &lease); err != nil {
+					t.Fatalf("decode lease response: %v", err)
+				}
+				lease.DataPort = unreachablePort
+				lease.DataURL = "http://127.0.0.1:" + strconv.Itoa(unreachablePort)
+				response.Header().Set("Content-Type", "application/json")
+				response.WriteHeader(http.StatusCreated)
+				_, _ = response.Write(mustMarshalDirectTest(t, lease))
+				return
+			}
+		}
+		if request.URL.Path == "/v1/direct/leases/release" {
+			releaseMu.Lock()
+			releaseCount++
+			releaseMu.Unlock()
+		}
+		controlHandler.ServeHTTP(response, request)
+	}))
+	t.Cleanup(func() { control.Close(); gateway.Close(context.Background()) })
+
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{Profile: config.ProfileDev, Environment: "test", Mode: model.AppModeDesktop, DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "app.db"), DataRoot: filepath.Join(root, "app"), ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"), LogRoot: filepath.Join(root, "logs"), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vault := newDirectMemoryVault()
+	service.storeDirectToken = vault.storeToken
+	service.readDirectToken = vault.readToken
+	service.deleteDirectToken = vault.deleteToken
+	service.storeDirectIdentity = vault.storeIdentity
+	service.readDirectIdentity = vault.readIdentity
+	service.storeDirectLease = vault.storeLease
+	service.readDirectLease = vault.readLease
+	service.deleteDirectLease = vault.deleteLease
+	if _, err := service.SaveDirectTransportSettings(t.Context(), DirectTransportSettingsRequest{ControlURL: control.URL, AccessToken: directAppBootstrapToken}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{ProjectID: "direct-upload-failure", Mode: model.AppModeDesktop, ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目，填写项目名俄罗斯方块，启动 Agent 构建并观察实际进度。", TargetAudience: "普通用户", MustShow: []string{"进入新建项目", "填写俄罗斯方块", "启动 Agent 构建", "观察构建进度"}, MustNotShow: []string{"密码", "令牌"}, ForbiddenPages: []string{"/billing"}, ForbiddenData: []string{"密码", "令牌"}, AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: formalAppScreenshotInputs("https://cascadeai.cn")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build, err := service.BuildClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.UploadDirectExecutionPackage(t.Context(), state.ProjectID, DirectTransportUploadRequest{OrgID: defaultDesktopOrgID, ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: build.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true, IdempotencyKey: "direct-upload-failure"})
+	if err == nil {
+		t.Fatal("package upload unexpectedly reached the unavailable advertised data host")
+	}
+	releaseMu.Lock()
+	releases := releaseCount
+	releaseMu.Unlock()
+	if releases != 1 {
+		t.Fatalf("failed upload released the remote lease %d times, want 1", releases)
+	}
+	if _, err := vault.readLease(state.ProjectID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed upload left a local lease in the vault: %v", err)
+	}
+}
+
+func mustMarshalDirectTest(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 const directAppBootstrapToken = "app-bootstrap-token-with-at-least-thirty-two-characters"
