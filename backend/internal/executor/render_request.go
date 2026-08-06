@@ -10,8 +10,14 @@ func NewRenderRequestFromRecordingResult(source *model.ClientExecutionPackage, r
 	if source == nil {
 		return RenderRequest{}, errors.New("client execution package is required")
 	}
-	if err := model.ValidateRecordingResultPackageForRender(result, source); err != nil {
-		return RenderRequest{}, err
+	var validationErr error
+	if result != nil && result.Delivery.RecipientKind == "local_test_only" {
+		validationErr = model.ValidateLocalTestRecordingResultPackageForRender(result, source)
+	} else {
+		validationErr = model.ValidateRecordingResultPackageForRender(result, source)
+	}
+	if validationErr != nil {
+		return RenderRequest{}, validationErr
 	}
 	durationSec := source.RecordingRunSpec.Timeline.TargetDurationSec
 	request := RenderRequest{

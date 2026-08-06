@@ -22,6 +22,10 @@ type browserAgentWorkerSession interface {
 	Abort() error
 }
 
+type browserAgentWorkerRevalidationSession interface {
+	Revalidate(context.Context, driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error)
+}
+
 type browserAgentWorkerSessionFactory func(context.Context, driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error)
 
 type localBrowserAgentOutlineRunner struct {
@@ -199,6 +203,13 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 func (r *localBrowserAgentStageRuntime) ObserveStage(ctx context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
 	progress := browserAgentStageProgress(stage.Order, r.stageCount, false)
 	progressBrowserAgent(r.progress, "running_browser_agent", fmt.Sprintf("正在观察第 %d 个阶段：%s", stage.Order, browserAgentStageDisplayName(stage)), progress)
+	if stage.ManualSessionCheckpoint {
+		result, err := r.revalidateManualSessionCheckpoint(ctx, stage)
+		if err != nil {
+			return BrowserAgentStageObservation{}, err
+		}
+		return BrowserAgentStageObservation{Observation: result.Observation, EvidenceRefs: result.EvidenceRefs, TargetResolved: true}, nil
+	}
 	result, err := r.session.Observe(ctx, workerStageFromRuntime(stage))
 	if err != nil {
 		return BrowserAgentStageObservation{}, err
@@ -210,12 +221,51 @@ func (r *localBrowserAgentStageRuntime) ObserveStage(ctx context.Context, _ Brow
 func (r *localBrowserAgentStageRuntime) ExecuteStage(ctx context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
 	progress := browserAgentStageProgress(stage.Order, r.stageCount, true)
 	progressBrowserAgent(r.progress, "running_browser_agent", fmt.Sprintf("正在执行第 %d 个阶段：%s", stage.Order, browserAgentStageDisplayName(stage)), progress)
+	if stage.ManualSessionCheckpoint {
+		result, err := r.revalidateManualSessionCheckpoint(ctx, stage)
+		if err != nil {
+			return BrowserAgentStageActionResult{}, err
+		}
+		progressBrowserAgent(r.progress, "validating_runtime_stage", fmt.Sprintf("Verifying manual login checkpoint for stage %d.", stage.Order), minInt(progress+4, 84))
+		return BrowserAgentStageActionResult{Observation: &result.Observation, EvidenceRefs: result.EvidenceRefs}, nil
+	}
 	result, err := r.session.Execute(ctx, workerStageFromRuntime(stage))
 	if err != nil {
 		return BrowserAgentStageActionResult{}, err
 	}
 	r.collect(result.Artifacts)
 	progressBrowserAgent(r.progress, "validating_runtime_stage", fmt.Sprintf("正在验证第 %d 个阶段的真实页面结果。", stage.Order), minInt(progress+4, 84))
+	return BrowserAgentStageActionResult{Observation: &result.Observation, EvidenceRefs: result.EvidenceRefs}, nil
+}
+
+func (r *localBrowserAgentStageRuntime) revalidateManualSessionCheckpoint(ctx context.Context, stage BrowserAgentRuntimeStage) (driver.BrowserAgentWorkerStageResult, error) {
+	session, ok := r.session.(browserAgentWorkerRevalidationSession)
+	if !ok {
+		return driver.BrowserAgentWorkerStageResult{}, errors.New("manual session checkpoint requires non-action browser revalidation")
+	}
+	result, err := session.Revalidate(ctx, workerStageFromRuntime(stage))
+	if err != nil {
+		return driver.BrowserAgentWorkerStageResult{}, err
+	}
+	result.TargetResolved = true
+	result.Observation.Assertions = append(result.Observation.Assertions, model.RuntimeAssertion{
+		Kind: "manual_session_checkpoint_verified", Passed: true, Actual: result.Observation.URL,
+	})
+	r.collect(result.Artifacts)
+	return result, nil
+}
+
+func (r *localBrowserAgentStageRuntime) RevalidateStage(ctx context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	session, ok := r.session.(browserAgentWorkerRevalidationSession)
+	if !ok {
+		return BrowserAgentStageActionResult{}, errors.New("browser-agent worker does not support non-action outcome revalidation")
+	}
+	progressBrowserAgent(r.progress, "validating_runtime_stage", fmt.Sprintf("正在重新截取并验证第 %d 个阶段的页面结果。", stage.Order), browserAgentStageProgress(stage.Order, r.stageCount, true))
+	result, err := session.Revalidate(ctx, workerStageFromRuntime(stage))
+	if err != nil {
+		return BrowserAgentStageActionResult{}, err
+	}
+	r.collect(result.Artifacts)
 	return BrowserAgentStageActionResult{Observation: &result.Observation, EvidenceRefs: result.EvidenceRefs}, nil
 }
 
@@ -509,8 +559,9 @@ func workerStageFromRuntime(stage BrowserAgentRuntimeStage) driver.BrowserAgentW
 		Interactions:   append([]model.BrowserAgentInteraction{}, stage.Interactions...),
 		WaitConditions: append([]string{}, stage.WaitConditions...), CapturePlan: stage.CapturePlan,
 		SuccessState: stage.SuccessState, DurationMS: stage.DurationMS,
-		Validations:                  append([]model.ValidationSpec{}, stage.Validations...),
-		PreferredSelectorAlternative: stage.PreferredSelectorAlternative,
+		Validations:                       append([]model.ValidationSpec{}, stage.Validations...),
+		PreferredSelectorAlternative:      stage.PreferredSelectorAlternative,
+		EvidenceBoundSelectorAlternatives: append([]model.SelectorCandidate{}, stage.EvidenceBoundSelectorAlternatives...),
 	}
 }
 

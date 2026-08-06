@@ -75,6 +75,17 @@ type exchangePackageState struct {
 	Error                  *model.AgentError
 }
 
+// ExecutionPackageSourceSummary exposes only the transport-attested package
+// origin needed by local acceptance tooling. Installation identities remain
+// private to Exchange Intake.
+type ExecutionPackageSourceSummary struct {
+	Origin                 string `json:"origin"`
+	AppGenerated           bool   `json:"app_generated"`
+	FormalExchange         bool   `json:"formal_exchange"`
+	TransportAuthenticated bool   `json:"transport_authenticated"`
+	RuntimeProfile         string `json:"runtime_profile,omitempty"`
+}
+
 type recordingResultState struct {
 	ResultPackageID   string
 	ExchangePackageID string
@@ -402,6 +413,26 @@ func (s *ExchangeIntakeService) PayloadSnapshot(ctx context.Context, orgID strin
 		return model.ClientExecutionPackage{}, err
 	}
 	return state.Payload, nil
+}
+
+func (s *ExchangeIntakeService) ExecutionPackageSource(ctx context.Context, orgID string, exchangePackageID string) (ExecutionPackageSourceSummary, error) {
+	if err := ctx.Err(); err != nil {
+		return ExecutionPackageSourceSummary{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.packageStateLocked(orgID, exchangePackageID)
+	if err != nil {
+		return ExecutionPackageSourceSummary{}, err
+	}
+	origin, appGenerated := executionPackageOrigin(state)
+	return ExecutionPackageSourceSummary{
+		Origin:                 origin,
+		AppGenerated:           appGenerated,
+		FormalExchange:         true,
+		TransportAuthenticated: state.AuthenticatedInstallID != "" && state.AuthenticatedInstallID == state.Envelope.Producer.InstallID,
+		RuntimeProfile:         strings.TrimSpace(state.Envelope.Producer.RuntimeProfile),
+	}, nil
 }
 
 func (s *ExchangeIntakeService) CompleteWithRecordingResult(ctx context.Context, orgID string, exchangePackageID string, result model.RecordingResultPackage) (model.ExecutionPackageStatusResponse, error) {
@@ -1129,16 +1160,7 @@ func summarizeExecutionAcceptance(state *exchangePackageState, result model.Reco
 	if state == nil || result.ExecutionRuntime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
 		return nil
 	}
-	producer := strings.TrimSpace(state.Envelope.Producer.RuntimeProfile)
-	origin := "unverified_client_upload"
-	appGenerated := false
-	if strings.HasPrefix(producer, "server_") || strings.HasPrefix(producer, "server-") ||
-		strings.HasPrefix(strings.TrimSpace(stringMetadata(state.Payload.Metadata, "producer")), "server_") {
-		origin = "server_controlled_fixture"
-	} else if state.AuthenticatedInstallID != "" && state.AuthenticatedInstallID == state.Envelope.Producer.InstallID {
-		origin = "app_formal_exchange"
-		appGenerated = true
-	}
+	origin, appGenerated := executionPackageOrigin(state)
 	validation := summarizeExecutionValidation(result)
 	strictEvidence := validation != nil && validation.Status == "complete"
 	finalMP4 := false
@@ -1162,6 +1184,21 @@ func summarizeExecutionAcceptance(state *exchangePackageState, result model.Reco
 		Origin: origin, AppGenerated: appGenerated, FormalExchange: true,
 		StrictEvidenceComplete: strictEvidence, FinalMP4Available: finalMP4, Status: status,
 	}
+}
+
+func executionPackageOrigin(state *exchangePackageState) (string, bool) {
+	if state == nil {
+		return "unverified_client_upload", false
+	}
+	producer := strings.TrimSpace(state.Envelope.Producer.RuntimeProfile)
+	if strings.HasPrefix(producer, "server_") || strings.HasPrefix(producer, "server-") ||
+		strings.HasPrefix(strings.TrimSpace(stringMetadata(state.Payload.Metadata, "producer")), "server_") {
+		return "server_controlled_fixture", false
+	}
+	if state.AuthenticatedInstallID != "" && state.AuthenticatedInstallID == state.Envelope.Producer.InstallID {
+		return "app_formal_exchange", true
+	}
+	return "unverified_client_upload", false
 }
 
 func executionDeliverableFromArtifact(asset model.ArtifactRef) model.ExecutionDeliverable {

@@ -223,7 +223,21 @@ func AttachRenderResultArtifacts(source *model.ClientExecutionPackage, result *m
 		return
 	}
 	result.GeneratedAssets = uniqueArtifactRefs(append(result.GeneratedAssets, artifacts...))
-	result.Delivery.AssetRefs = appendUniqueArtifactDescriptors(result.Delivery.AssetRefs, assetDescriptorsFromArtifacts(source, artifacts, createdAt)...)
+	descriptors := assetDescriptorsFromArtifacts(source, artifacts, createdAt)
+	if result.Delivery.RecipientKind == "local_test_only" {
+		waiverID, _ := result.Delivery.ResultPackageRef.Metadata["waiver_id"].(string)
+		for index := range descriptors {
+			descriptors[index].Encrypted = false
+			descriptors[index].RecipientKeyID = ""
+			if descriptors[index].Metadata == nil {
+				descriptors[index].Metadata = map[string]any{}
+			}
+			descriptors[index].Metadata["dev_test_only"] = true
+			descriptors[index].Metadata["not_for_exchange_upload"] = true
+			descriptors[index].Metadata["waiver_id"] = waiverID
+		}
+	}
+	result.Delivery.AssetRefs = appendUniqueArtifactDescriptors(result.Delivery.AssetRefs, descriptors...)
 }
 
 func renderArtifactsFromResult(source *model.ClientExecutionPackage, renderResult RenderResult, createdAt time.Time) []model.ArtifactRef {

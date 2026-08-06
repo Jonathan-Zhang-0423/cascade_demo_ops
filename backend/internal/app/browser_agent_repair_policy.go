@@ -115,6 +115,11 @@ func applyBrowserAgentRepair(stage BrowserAgentRuntimeStage, proposal model.Runt
 }
 
 func approvedSelectorCandidate(stage BrowserAgentRuntimeStage, encoded string) (model.SelectorCandidate, bool) {
+	for _, candidate := range stage.EvidenceBoundSelectorAlternatives {
+		if selectorCandidateEncoding(candidate) == encoded {
+			return candidate, true
+		}
+	}
 	for _, component := range stage.Components {
 		if stage.TargetContract.ComponentRef != "" && component.ComponentRef != stage.TargetContract.ComponentRef {
 			continue
@@ -135,6 +140,7 @@ func cloneBrowserAgentRuntimeStage(stage BrowserAgentRuntimeStage) BrowserAgentR
 	copy.WaitConditions = append([]string{}, stage.WaitConditions...)
 	copy.CapturePoints = append([]string{}, stage.CapturePoints...)
 	copy.Validations = append([]model.ValidationSpec{}, stage.Validations...)
+	copy.EvidenceBoundSelectorAlternatives = append([]model.SelectorCandidate{}, stage.EvidenceBoundSelectorAlternatives...)
 	if stage.PreferredSelectorAlternative != nil {
 		candidate := *stage.PreferredSelectorAlternative
 		copy.PreferredSelectorAlternative = &candidate
@@ -161,7 +167,7 @@ func repairAttemptForStage(prior []model.RuntimePatchLedgerEntry, stage BrowserA
 func repairKindMatchesField(kind, field string) bool {
 	switch kind {
 	case "selector_alternative":
-		return strings.Contains(field, ".components[].selector")
+		return strings.Contains(field, ".components[].selector") || strings.HasSuffix(field, "action.target.selector")
 	case "wait_strategy":
 		return strings.HasSuffix(field, ".wait_conditions")
 	case "capture_timing":

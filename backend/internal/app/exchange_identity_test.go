@@ -16,14 +16,17 @@ import (
 	"cascade-demoops/backend/internal/store"
 )
 
-func TestEnsureExchangeSessionSkipsWellKnownForConfiguredLoopbackBaseURL(t *testing.T) {
+func TestEnsureExchangeSessionUsesServerIssuedChallengeForConfiguredDevBaseURL(t *testing.T) {
 	wellKnownHits := 0
 	registerHits := 0
+	discovery := localBootstrapDiscovery("", "development", time.Now().UTC())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/aigc/.well-known/cascade-exchange":
 			wellKnownHits++
-			http.Error(w, "404 page not found", http.StatusNotFound)
+			discovery.ExchangeBaseURL = "http://" + r.Host + "/aigc"
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(discovery)
 		case "/aigc/v1/app-installations/register":
 			registerHits++
 			var request model.AppInstallationRegisterRequest
@@ -31,6 +34,9 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredLoopbackBaseURL(t *test
 				t.Errorf("decode register request: %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
+			}
+			if request.ChallengeID != discovery.Challenge.ChallengeID {
+				t.Errorf("registration challenge = %q, want server challenge %q", request.ChallengeID, discovery.Challenge.ChallengeID)
 			}
 			response := model.AppInstallationSessionResponse{
 				InstallID:            request.InstallID,
@@ -77,8 +83,8 @@ func TestEnsureExchangeSessionSkipsWellKnownForConfiguredLoopbackBaseURL(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wellKnownHits != 0 {
-		t.Fatalf("configured dev exchange base URL should not probe well-known endpoint, hits=%d", wellKnownHits)
+	if wellKnownHits != 1 {
+		t.Fatalf("configured dev exchange must fetch one server-issued challenge, hits=%d", wellKnownHits)
 	}
 	if registerHits != 1 {
 		t.Fatalf("expected one installation register request, got %d", registerHits)
@@ -154,6 +160,9 @@ func TestEnsureExchangeSessionRefreshesNearExpiryWithoutRegisteringAgain(t *test
 	installID := ""
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/aigc/.well-known/cascade-exchange":
+			discovery := localBootstrapDiscovery("http://"+r.Host+"/aigc", "development", time.Now().UTC())
+			_ = json.NewEncoder(w).Encode(discovery)
 		case "/aigc/v1/app-installations/register":
 			registerHits++
 			var request model.AppInstallationRegisterRequest
@@ -205,6 +214,9 @@ func TestEnsureExchangeSessionRePairsOnceAfterRefreshUnauthorized(t *testing.T) 
 	refreshHits := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/aigc/.well-known/cascade-exchange":
+			discovery := localBootstrapDiscovery("http://"+r.Host+"/aigc", "development", time.Now().UTC())
+			_ = json.NewEncoder(w).Encode(discovery)
 		case "/aigc/v1/app-installations/register":
 			registerHits++
 			var request model.AppInstallationRegisterRequest
@@ -257,6 +269,9 @@ func TestCloudStatusRePairsOnceWhenServerRevokesUsableSession(t *testing.T) {
 	newToken := "cassess_server_repaired_fixture"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/aigc/.well-known/cascade-exchange":
+			discovery := localBootstrapDiscovery("http://"+r.Host+"/aigc", "development", time.Now().UTC())
+			_ = json.NewEncoder(w).Encode(discovery)
 		case "/aigc/v1/app-installations/register":
 			registerHits++
 			var request model.AppInstallationRegisterRequest

@@ -51,11 +51,17 @@ v2 是目标架构，部分模块仍在迁移或尚未实现，不能仅凭文�
 
 ## 视频、素材与模型接入
 
+- [App ↔ Server 生成展示视频能力协议](./app-server-generated-video-capability-protocol.md)
+- [Seedance 2.0 视频生成内部协议](./seedance-2-0-video-generation.md)
+- [Server 生成视频统一候选产物内部协议](./generated-video-candidate-internal-protocol.md)
 - [Server Local Demo Editor MVP](./local-demo-editor-mvp.md)
 - [Demo Edit Plan v1](./demo-edit-plan-v1.md)
 - [Ark Media Integration](./ark-media-integration.md)
 - [Ark Model Parameters](./ark-model-parameters.md)
+- [MiniMax-H3 视频生成接入说明](./minimax-h3-video-generation.md)
 - [Model Provider Credentials](./model-provider-credentials.md)
 - [Legacy AIGC Integration Plan](./legacy-aigc-integration-plan.md)
 
 其中 `DemoEditPlan` 等现有数据模型可作为 v2 本地轻量视频编辑器的迁移基础；标为 Legacy 的方案不应直接恢复为核心架构。
+
+后续的受约束分镜设计、规划模型辅助，以及 Seedance 2.0/MiniMax-H3 分镜头实现计划，统一收录在权威架构文档的[阶段四：受约束分镜设计与多 Provider 分镜头实现](./server-browser-agent-execution-editor-architecture-v2.md#阶段四受约束分镜设计与多-provider-分镜头实现)。该阶段为后续开发目标，不代表 MiniMax-H3 已进入当前端到端路由。

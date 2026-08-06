@@ -20,6 +20,7 @@ type BrowserAgentRuntimePlan struct {
 	RunID                  string
 	SourcePackageID        string
 	SourceBundleHashSHA256 string
+	SourcePlanHashSHA256   string
 	PolicyHashSHA256       string
 	// The verifier receives the approved contracts, never a browser/page
 	// object. This keeps Validation Agent decisions traceable to the package.
@@ -58,16 +59,26 @@ type BrowserAgentRuntimeStage struct {
 	// PreferredSelectorAlternative exists only for this in-memory run. It is
 	// set after the Worker has verified one App-approved fallback candidate.
 	PreferredSelectorAlternative *model.SelectorCandidate
+	// EvidenceBoundSelectorAlternatives are selectors already declared by the
+	// App in this stage whose evidence IDs also appear on the approved
+	// interaction target. They are runtime-only discovery candidates: the
+	// Worker must still prove that exactly one is visible and satisfies the
+	// immutable target contract before the existing repair policy may apply it.
+	EvidenceBoundSelectorAlternatives []model.SelectorCandidate
+	// ManualSessionCheckpoint exists only in a dev-visible post-login runtime
+	// copy. It never changes the App package or the formal runtime plan.
+	ManualSessionCheckpoint bool
 }
 
 type BrowserAgentActionIntent struct {
-	NodeID         string
-	StageID        string
-	ActionType     model.GraphActionType
-	URL            string
-	Route          string
-	TargetContract model.BrowserAgentTargetContract
-	NonDestructive bool
+	NodeID           string
+	StageID          string
+	InteractionIndex int
+	ActionType       model.GraphActionType
+	URL              string
+	Route            string
+	TargetContract   model.BrowserAgentTargetContract
+	NonDestructive   bool
 }
 
 type BrowserAgentPolicyDecision struct {
@@ -82,6 +93,13 @@ type BrowserAgentStageObserver interface {
 
 type BrowserAgentStageActionExecutor interface {
 	ExecuteStage(context.Context, BrowserAgentRuntimePlan, BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error)
+}
+
+// BrowserAgentStageOutcomeRevalidator is intentionally separate from action
+// execution. Capture-timing repairs may wait and recapture evidence, but must
+// not replay an already completed business action.
+type BrowserAgentStageOutcomeRevalidator interface {
+	RevalidateStage(context.Context, BrowserAgentRuntimePlan, BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error)
 }
 
 type BrowserAgentStageObservation struct {
@@ -155,9 +173,9 @@ func (o browserAgentStageOrchestrator) Prepare(pkg *model.ClientExecutionPackage
 		return BrowserAgentRuntimePlan{}, err
 	}
 	for _, stage := range plan.Stages {
-		for _, interaction := range stage.Interactions {
+		for interactionIndex, interaction := range stage.Interactions {
 			intent := BrowserAgentActionIntent{
-				NodeID: stage.NodeID, StageID: stage.ID, ActionType: interaction.Kind,
+				NodeID: stage.NodeID, StageID: stage.ID, InteractionIndex: interactionIndex, ActionType: interaction.Kind,
 				URL: interaction.Target.URL, Route: stage.Route,
 				TargetContract: stage.TargetContract, NonDestructive: interaction.NonDestructive,
 			}
@@ -333,10 +351,23 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 					return result, err
 				}
 				repairEventStart := len(result.Events)
-				if err := appendEvent(stage, model.StageExecutionEventActionStarted, actionResult.Observation, proposal.EvidenceRefs); err != nil {
-					return result, err
+				if proposal.RepairKind != "capture_timing" {
+					if err := appendEvent(stage, model.StageExecutionEventActionStarted, actionResult.Observation, proposal.EvidenceRefs); err != nil {
+						return result, err
+					}
 				}
-				repairActionResult, repairErr := executor.ExecuteStage(ctx, plan, patchedStage)
+				var repairActionResult BrowserAgentStageActionResult
+				var repairErr error
+				if proposal.RepairKind == "capture_timing" {
+					revalidator, ok := executor.(BrowserAgentStageOutcomeRevalidator)
+					if !ok {
+						_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, proposal.EvidenceRefs)
+						return result, newRuntimeExecutionError("browser_agent_revalidation_unavailable", errors.New("capture timing repair requires a non-action outcome revalidator"))
+					}
+					repairActionResult, repairErr = revalidator.RevalidateStage(ctx, plan, patchedStage)
+				} else {
+					repairActionResult, repairErr = executor.ExecuteStage(ctx, plan, patchedStage)
+				}
 				if repairErr != nil || repairActionResult.Observation == nil || !runtimeObservationIsRealEvidence(repairActionResult.Observation.Source) || len(repairActionResult.EvidenceRefs) == 0 {
 					_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, proposal.EvidenceRefs)
 					if repairErr != nil {
@@ -344,8 +375,14 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 					}
 					return result, newRuntimeExecutionError("browser_agent_repair_action_failed", errors.New("repaired stage did not provide real completion evidence"))
 				}
-				if err := appendEvent(stage, model.StageExecutionEventActionCompleted, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
-					return result, err
+				if proposal.RepairKind == "capture_timing" {
+					if err := appendEvent(stage, model.StageExecutionEventObservationCollected, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
+						return result, err
+					}
+				} else {
+					if err := appendEvent(stage, model.StageExecutionEventActionCompleted, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
+						return result, err
+					}
 				}
 				if err := appendEvent(stage, model.StageExecutionEventOutcomeObserved, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
 					return result, err
@@ -377,6 +414,10 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 
 func runtimeActionForStage(stage BrowserAgentRuntimeStage) *model.RuntimeAction {
 	action := model.RuntimeAction{TargetSemanticID: stage.TargetContract.SemanticID}
+	if stage.ManualSessionCheckpoint {
+		action.Kind = "manual_session_checkpoint"
+		return &action
+	}
 	if len(stage.Interactions) > 0 {
 		action.Kind = string(stage.Interactions[0].Kind)
 	}
@@ -393,10 +434,21 @@ func browserAgentSelectorAlternativeProposal(plan BrowserAgentRuntimePlan, stage
 		ProposalID:    fmt.Sprintf("selector_%s_%s_%s", safePathSegment(plan.RunID), safePathSegment(stage.ID), safePathSegment(candidate.Kind+"_"+candidate.Value)),
 		RunID:         plan.RunID, NodeID: stage.NodeID, StageID: stage.ID,
 		BaseBundleHashSHA256: plan.SourceBundleHashSHA256, PolicyHashSHA256: plan.PolicyHashSHA256,
-		RepairKind: "selector_alternative", Field: "script_outline.stages[].components[].selector",
+		RepairKind: "selector_alternative", Field: browserAgentSelectorRepairField(plan.RepairPolicy),
 		Before: currentStageSelector(stage), After: selectorCandidateEncoding(candidate),
 		Confidence: 1, EvidenceRefs: append([]model.EvidenceRef{}, observed.EvidenceRefs...), CreatedAt: timeNowUTC(),
 	}
+}
+
+func browserAgentSelectorRepairField(policy model.BrowserAgentRepairPolicy) string {
+	// Current App packages authorize selector repair on the action target. Keep
+	// the older outline field only for already-issued compatible contracts that
+	// explicitly list it. The Server never widens the package repair policy.
+	const actionTargetSelector = "action.target.selector"
+	if fieldIsEditable(policy.EditableFields, actionTargetSelector) && !fieldIsImmutable(policy.ImmutableFields, actionTargetSelector) {
+		return actionTargetSelector
+	}
+	return "script_outline.stages[].components[].selector"
 }
 
 func browserAgentInitialObservationRepairProposal(plan BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage, observed BrowserAgentStageObservation) (model.RuntimeRepairProposal, bool) {
@@ -499,6 +551,7 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 	plan := BrowserAgentRuntimePlan{
 		RunID: pkg.RecordingRunSpec.RunID, SourcePackageID: pkg.PackageID,
 		SourceBundleHashSHA256: bundle.Reproducibility.BundleHashSHA256,
+		SourcePlanHashSHA256:   bundle.Reproducibility.PlanHashSHA256,
 		PolicyHashSHA256:       bundle.Reproducibility.BrowserAgentContractHashSHA256,
 		WorkflowGraph:          pkg.WorkflowGraph,
 		Plan:                   bundle.PlanJSON,
@@ -554,13 +607,88 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 			Interactions:   append([]model.BrowserAgentInteraction{}, outline.Interactions...),
 			WaitConditions: append([]string{}, outline.WaitConditions...), CapturePoints: append([]string{}, outline.CapturePoints...),
 			CapturePlan: capturePlan, SuccessState: approved.SuccessState, DurationMS: approved.DurationMS,
-			Validations: append([]model.ValidationSpec{}, planStep.Validations...),
+			Validations:                       append([]model.ValidationSpec{}, planStep.Validations...),
+			EvidenceBoundSelectorAlternatives: evidenceBoundSelectorCandidates(outline.Components, outline.Interactions),
 		})
 	}
 	if len(plan.Stages) != len(outlineByNode) {
 		return BrowserAgentRuntimePlan{}, newRuntimeExecutionError(runtimeErrorBrowserAgentContractViolation, errors.New("script outline contains stages that were not approved"))
 	}
 	return plan, nil
+}
+
+func evidenceBoundSelectorCandidates(components []model.BrowserAgentComponentTarget, interactions []model.BrowserAgentInteraction) []model.SelectorCandidate {
+	if len(interactions) == 0 || len(interactions[0].Target.EvidenceRefs) == 0 {
+		return nil
+	}
+	targetEvidence := evidenceIDSet(interactions[0].Target.EvidenceRefs)
+	if len(targetEvidence) == 0 {
+		return nil
+	}
+	result := []model.SelectorCandidate{}
+	seen := map[string]struct{}{}
+	appendCandidate := func(candidate model.SelectorCandidate) {
+		encoded := selectorCandidateEncoding(candidate)
+		if strings.TrimSpace(candidate.Value) == "" || encoded == ":" {
+			return
+		}
+		if _, exists := seen[encoded]; exists {
+			return
+		}
+		seen[encoded] = struct{}{}
+		result = append(result, candidate)
+	}
+	for _, component := range components {
+		sharedEvidence := sharedEvidenceRefs(component.EvidenceRefs, targetEvidence)
+		if len(sharedEvidence) == 0 {
+			continue
+		}
+		if strings.TrimSpace(component.Selector) != "" {
+			appendCandidate(model.SelectorCandidate{
+				Kind: "css", Value: component.Selector, Source: "app_stage_evidence_binding",
+				Confidence: component.Confidence, EvidenceRefs: sharedEvidence,
+			})
+		}
+		for _, candidate := range component.SelectorAlternatives {
+			candidateEvidence := sharedEvidenceRefs(candidate.EvidenceRefs, targetEvidence)
+			if len(candidateEvidence) == 0 {
+				candidateEvidence = sharedEvidence
+			}
+			candidate.EvidenceRefs = candidateEvidence
+			appendCandidate(candidate)
+		}
+	}
+	return result
+}
+
+func evidenceIDSet(refs []model.EvidenceRef) map[string]struct{} {
+	result := map[string]struct{}{}
+	for _, ref := range refs {
+		if id := strings.TrimSpace(ref.ID); id != "" {
+			result[id] = struct{}{}
+		}
+	}
+	return result
+}
+
+func sharedEvidenceRefs(refs []model.EvidenceRef, allowed map[string]struct{}) []model.EvidenceRef {
+	result := []model.EvidenceRef{}
+	seen := map[string]struct{}{}
+	for _, ref := range refs {
+		id := strings.TrimSpace(ref.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := allowed[id]; !ok {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, ref)
+	}
+	return result
 }
 
 // Explicit capture duration is an App-approved business requirement. The
