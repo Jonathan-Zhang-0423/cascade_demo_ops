@@ -1521,10 +1521,13 @@ func componentTargetsForStep(step model.ScriptStep, stage model.StageApprovalSta
 		target.Selector = step.PageTarget.Selector
 	}
 	components := []model.BrowserAgentComponentTarget{{
-		ComponentRef:         firstNonEmpty(target.ComponentRef, firstString(stage.ComponentRefs, "")),
-		RouteRef:             stage.TargetRoute,
-		Source:               target.Source,
-		Role:                 target.Role,
+		ComponentRef: firstNonEmpty(target.ComponentRef, firstString(stage.ComponentRefs, "")),
+		RouteRef:     stage.TargetRoute,
+		Source:       target.Source,
+		Role:         target.Role,
+		// Accessible/name fields must contain user-facing semantics only. A
+		// data-testid is emitted separately as TestID/Selector and must never be
+		// concatenated into the accessible name contract.
 		Name:                 firstNonEmpty(target.Label, target.Text),
 		Text:                 target.Text,
 		Label:                target.Label,
@@ -2498,7 +2501,6 @@ func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstr
 	allowedNames := uniqueStrings(nonEmptyStrings(
 		target.Label,
 		target.Text,
-		target.TestID,
 		node.Title,
 		node.Goal,
 		node.ExpectedOutcome,
@@ -2512,7 +2514,7 @@ func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstr
 		allowedRoles = append(allowedRoles, "textbox", "combobox", "radio", "checkbox")
 	}
 	for _, validation := range validations {
-		allowedNames = append(allowedNames, validation.Target.Label, validation.Target.Text, validation.Target.TestID)
+		allowedNames = append(allowedNames, validation.Target.Label, validation.Target.Text)
 		if validation.Target.Role != "" {
 			allowedRoles = append(allowedRoles, validation.Target.Role)
 		}

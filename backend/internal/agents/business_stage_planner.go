@@ -533,11 +533,30 @@ func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTa
 	targets := []model.BusinessTargetCandidate{}
 	targets = append(targets, s.targetsFromVerifiedPlan(spec)...)
 	targets = append(targets, s.targetsFromFeatureTrace(spec)...)
+	targets = append(targets, s.resultTargetsForStage(spec)...)
 	targets = uniqueBusinessTargetCandidates(targets)
 	if len(targets) > 5 {
 		targets = targets[:5]
 	}
 	return targets
+}
+
+func (s businessTargetSource) resultTargetsForStage(spec stageSpec) []model.BusinessTargetCandidate {
+	if spec.id != "new_project_entry" || s.verifiedPlan == nil {
+		return nil
+	}
+	out := []model.BusinessTargetCandidate{}
+	for _, action := range s.verifiedPlan.Actions {
+		text := strings.Join([]string{action.ID, action.Label, action.Selector, action.ComponentRef, action.ExpectedOutcome, action.SuccessState}, " ")
+		if action.VerificationStatus != "verified" || !containsAnyNormalized(text,
+			"dialog-new-project", "new-project-dialog", "create-project-dialog", "input-project-idea", "project-idea", "项目弹窗", "项目表单", "项目名称") {
+			continue
+		}
+		candidate := businessTargetFromVerifiedAction(action)
+		candidate.ID = "result_" + candidate.ID
+		out = append(out, candidate)
+	}
+	return out
 }
 
 func (s businessTargetSource) targetsFromVerifiedPlan(spec stageSpec) []model.BusinessTargetCandidate {
@@ -656,12 +675,14 @@ func (s businessTargetSource) evidenceRequirementsForStage(spec stageSpec, targe
 }
 
 func businessTargetFromVerifiedAction(action model.VerifiedInteractionAction) model.BusinessTargetCandidate {
+	testID := testIDFromSelector(action.Selector)
 	return model.BusinessTargetCandidate{
 		ID:                 firstNonEmpty(action.ID, "target_verified_"+shortHash(action.Label+action.Selector)),
 		IntentGoalID:       action.IntentGoalID,
 		Label:              action.Label,
 		Kind:               action.Kind,
 		Selector:           action.Selector,
+		TestID:             testID,
 		URL:                action.URL,
 		RouteRef:           action.RouteRef,
 		Route:              routePathFromCandidate(action.URL),
@@ -677,12 +698,14 @@ func businessTargetFromVerifiedAction(action model.VerifiedInteractionAction) mo
 }
 
 func businessTargetFromProbe(probe model.InteractionProbe) model.BusinessTargetCandidate {
+	testID := testIDFromSelector(probe.Selector)
 	return model.BusinessTargetCandidate{
 		ID:                 firstNonEmpty(probe.ID, "target_probe_"+shortHash(probe.Label+probe.Selector)),
 		IntentGoalID:       probe.IntentGoalID,
 		Label:              probe.Label,
 		Kind:               probe.Kind,
 		Selector:           probe.Selector,
+		TestID:             testID,
 		URL:                probe.URL,
 		RouteRef:           probe.RouteRef,
 		Route:              routePathFromCandidate(probe.URL),
@@ -695,6 +718,19 @@ func businessTargetFromProbe(probe model.InteractionProbe) model.BusinessTargetC
 		EvidenceRefs:       probe.EvidenceRefs,
 		Alternatives:       probe.Alternatives,
 	}
+}
+
+func testIDFromSelector(selector string) string {
+	selector = strings.TrimSpace(selector)
+	for _, marker := range []string{"data-testid=\"", "data-testid='"} {
+		if index := strings.Index(selector, marker); index >= 0 {
+			value := selector[index+len(marker):]
+			if end := strings.IndexAny(value, "\"'"); end >= 0 {
+				return strings.TrimSpace(value[:end])
+			}
+		}
+	}
+	return ""
 }
 
 func businessProbeAllowedForStage(spec stageSpec, probe model.InteractionProbe) bool {

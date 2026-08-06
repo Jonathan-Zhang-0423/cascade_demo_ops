@@ -407,6 +407,21 @@ func TestProductMapAndDossierFilterUnsafeIntentEvidence(t *testing.T) {
 	}
 }
 
+func TestForbiddenRequirementsDoNotCountAsPositiveCoverage(t *testing.T) {
+	project := graphQualityProject()
+	project.MustShow = []string{"新建项目"}
+	project.ForbiddenPages = []string{"/billing"}
+	project.ForbiddenData = []string{"api_key"}
+	requirements := requirementsFromProject(project)
+	for _, requirement := range requirements {
+		if requirement.Kind == "forbidden_page" || requirement.Kind == "forbidden_data" {
+			if requirement.Required {
+				t.Fatalf("safety requirement must not count toward positive coverage: %+v", requirement)
+			}
+		}
+	}
+}
+
 func graphQualityProject() *model.ProjectContext {
 	return &model.ProjectContext{
 		ID:             "project_graph_quality",
