@@ -144,6 +144,11 @@ func (b *DesktopBridge) ReviewDirectBrowserAgentResult(projectID string, request
 	return bridgeValue(result, err)
 }
 
+func (b *DesktopBridge) ReleaseDirectBrowserAgentLease(projectID string) BridgeResponse {
+	result, err := b.service.ReleaseDirectTransportLease(context.Background(), projectID)
+	return bridgeValue(result, err)
+}
+
 func (b *DesktopBridge) StoreGitHubToken(token string) BridgeResponse {
 	err := credentialstore.StoreGitHubToken(token)
 	return bridgeValue(map[string]bool{"configured": err == nil}, err)

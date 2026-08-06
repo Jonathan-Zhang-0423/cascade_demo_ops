@@ -82,8 +82,13 @@ bootstrap token 只由服务器管理员从 root-only 配置转移到 App 的操
 预检输出单行 JSON，只包含布尔状态、端口范围和占用数量，不输出 DNS 地址、token、证书正文或本地路径：
 
 ```bash
-sudo bash ./deploy/preflight-browser-agent-direct.sh
+sudo /usr/local/libexec/cascade-browser-agent-direct-preflight
 ```
+
+The installer places this exact redacted preflight command on the server. It
+does not print token contents or certificate paths. If the installer has not
+yet been run, execute the repository copy once from the trusted deployment
+checkout; a missing installed preflight is itself a deployment blocker.
 
 它检查：配置隔离和权限、两个 systemd 服务、控制口监听、Worker 口仅 loopback、DNS、证书 SAN/七天有效期、服务账户下的 Node/FFmpeg/Worker health RPC、真实 headless Chromium 启动，以及经过认证的 TLS health。任何字段为 false 都是发布阻断项。
 

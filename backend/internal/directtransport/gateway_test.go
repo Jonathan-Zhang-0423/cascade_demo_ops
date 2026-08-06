@@ -269,6 +269,26 @@ func TestGatewayRetiresExpiredListenerBeforeReallocatingDedicatedPort(t *testing
 	}
 }
 
+func TestGatewayReleasesDedicatedLeaseWithInstallationSignature(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	port := reserveTestPort(t)
+	gateway, err := NewGateway(Config{ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1", DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true, BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close(context.Background()) })
+	lease := requestTestLeaseForInstallation(t, gateway, now, "install_release", "release_nonce_1")
+	request := signedTestLeaseReleaseRequest(t, now, lease, "release_request_1", "install_release")
+	body, _ := json.Marshal(request)
+	httpRequest := httptest.NewRequest(http.MethodPost, "/v1/direct/leases/release", bytes.NewReader(body))
+	httpRequest.Header.Set("Authorization", "Bearer "+testBootstrapToken)
+	response := httptest.NewRecorder()
+	gateway.ControlHandler().ServeHTTP(response, httpRequest)
+	if response.Code != http.StatusOK || len(gateway.leases) != 0 {
+		t.Fatalf("dedicated lease was not released: status=%d body=%s leases=%d", response.Code, response.Body.String(), len(gateway.leases))
+	}
+}
+
 func TestGatewayRejectsWorkerStatusThatBypassesValidatedResult(t *testing.T) {
 	port := reserveTestPort(t)
 	gateway, err := NewGateway(Config{ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1", DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true, BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour})
@@ -458,6 +478,16 @@ func signedTestLeaseRequest(t *testing.T, now time.Time, nonce, keySeed string) 
 	payload := model.DirectLeaseRequest{ProtocolVersion: model.DirectTransportProtocolVersion, InstallationID: model.DirectInstallationID(publicKey), ClientVersion: "test", TimestampUnixMS: now.UnixMilli(), RequestNonce: nonce, SigningPublicKeyBase64: base64.StdEncoding.EncodeToString(publicKey)}
 	payload.SignatureBase64 = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, model.DirectLeaseRequestSigningPayload(payload)))
 	return payload
+}
+
+func signedTestLeaseReleaseRequest(t *testing.T, now time.Time, lease model.DirectPortLease, nonce, keySeed string) model.DirectLeaseReleaseRequest {
+	t.Helper()
+	seed := sha256.Sum256([]byte("direct-test-installation-key|" + keySeed))
+	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	request := model.DirectLeaseReleaseRequest{ProtocolVersion: model.DirectTransportProtocolVersion, InstallationID: model.DirectInstallationID(publicKey), LeaseID: lease.LeaseID, TimestampUnixMS: now.UnixMilli(), RequestNonce: nonce, SigningPublicKeyBase64: base64.StdEncoding.EncodeToString(publicKey)}
+	request.SignatureBase64 = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, model.DirectLeaseReleaseRequestSigningPayload(request)))
+	return request
 }
 
 func testDirectInstallationID(keySeed string) string {
