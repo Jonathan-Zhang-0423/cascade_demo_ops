@@ -331,6 +331,7 @@ func buildStageApprovalPlan(project *model.ProjectContext, report *model.Multimo
 		questionRefs := investigationQuestionRefsForStage(report, intelligence, step, node)
 		durationMS := step.Timing.DurationMS
 		stageKind := businessStageKindForNode(node)
+		runtimeAdaptive := nodeAllowsRuntimeAdaptiveTarget(node)
 		capturePlan := capturePlanForStep(step, stageKind, durationMS)
 		stages = append(stages, model.StageApprovalStage{
 			ID:                               "stage_" + step.ID,
@@ -348,6 +349,7 @@ func buildStageApprovalPlan(project *model.ProjectContext, report *model.Multimo
 			TargetRouteTemplate:              routeContract.TargetRouteTemplate,
 			ExpectedRouteAfterAction:         routeContract.ExpectedRouteAfterAction,
 			RuntimeRouteVerificationRequired: routeContract.RuntimeRouteVerificationRequired,
+			RuntimeAdaptive:                  runtimeAdaptive,
 			CandidateRoutes:                  routeContract.CandidateRoutes,
 			TargetURL:                        routeContract.TargetURL,
 			ComponentRefs:                    uniqueStrings(componentRefsForStage(step, node, intelligence)),
@@ -410,6 +412,7 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 			TargetRouteTemplate:              stage.TargetRouteTemplate,
 			ExpectedRouteAfterAction:         stage.ExpectedRouteAfterAction,
 			RuntimeRouteVerificationRequired: stage.RuntimeRouteVerificationRequired,
+			RuntimeAdaptive:                  stage.RuntimeAdaptive,
 			CandidateRoutes:                  stage.CandidateRoutes,
 			URL:                              stage.TargetURL,
 			Components:                       components,
@@ -2329,6 +2332,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 			StageKind:       businessStageKindForNode(node),
 			RouteState:      businessRouteStateForNode(node),
 			NonDestructive:  nonDestructive,
+			RuntimeAdaptive: nodeAllowsRuntimeAdaptiveTarget(node),
 			Title:           firstNonEmpty(node.Title, "执行步骤"),
 			BusinessValue:   firstNonEmpty(node.Goal, node.Description),
 			PageTarget:      target,
@@ -2379,11 +2383,11 @@ func nodeAllowsRuntimeAdaptiveTarget(node *model.GraphNode) bool {
 	if node == nil || node.Metadata == nil {
 		return false
 	}
-	if _, ok := node.Metadata["business_stage_id"].(string); ok {
-		return true
+	if nonDestructive, ok := node.Metadata["non_destructive"].(bool); !ok || !nonDestructive {
+		return false
 	}
 	if status, _ := node.Metadata["verification_status"].(string); status == "runtime_adaptive" || status == "business_stage_plan" {
-		return true
+		return node.Metadata["runtime_adaptive"] == true
 	}
 	return node.Metadata["runtime_adaptive"] == true
 }

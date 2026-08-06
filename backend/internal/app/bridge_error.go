@@ -76,6 +76,10 @@ func bridgeErrorCode(err error) string {
 	if errors.As(err, &preflightErr) {
 		return "preflight_failed"
 	}
+	var previewStaleErr *packagePreviewStaleError
+	if errors.As(err, &previewStaleErr) {
+		return "package_preview_stale"
+	}
 	lower := strings.ToLower(err.Error())
 	switch {
 	case isLLMJSONError(lower):

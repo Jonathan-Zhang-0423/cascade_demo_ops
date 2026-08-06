@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"time"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -35,6 +36,7 @@ type BrowserAgentWorkerViewport struct {
 type BrowserAgentWorkerOpenRequest struct {
 	SessionID             string                    `json:"session_id,omitempty"`
 	OutputDir             string                    `json:"output_dir"`
+	InitialURL            string                    `json:"initial_url,omitempty"`
 	Browser               BrowserAgentWorkerBrowser `json:"browser"`
 	AllowedDomains        []string                  `json:"allowed_domains"`
 	AllowedOrigins        []string                  `json:"allowed_origins,omitempty"`
@@ -47,7 +49,16 @@ type BrowserAgentWorkerOpenRequest struct {
 	// RecordTrace may be disabled only by the local dev-visible login handoff.
 	// It prevents credentials entered manually in that isolated window from
 	// being persisted in a Playwright trace.
-	RecordTrace *bool `json:"record_trace,omitempty"`
+	RecordTrace *bool                             `json:"record_trace,omitempty"`
+	TaskSecrets map[string]BrowserAgentTaskSecret `json:"task_secrets,omitempty"`
+}
+
+type BrowserAgentTaskSecret struct {
+	Username          string    `json:"username"`
+	Password          string    `json:"password"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	AllowedDomains    []string  `json:"allowed_domains"`
+	AllowedOperations []string  `json:"allowed_operations"`
 }
 
 type BrowserAgentWorkerOpenResult struct {
@@ -59,6 +70,7 @@ type BrowserAgentWorkerStage struct {
 	ID                           string                              `json:"id"`
 	Order                        int                                 `json:"order"`
 	NodeID                       string                              `json:"node_id"`
+	StageKind                    model.BusinessStageKind             `json:"stage_kind,omitempty"`
 	Objective                    string                              `json:"objective,omitempty"`
 	EntryRoute                   string                              `json:"entry_route,omitempty"`
 	Route                        string                              `json:"route,omitempty"`

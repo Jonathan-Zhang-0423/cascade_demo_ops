@@ -28,6 +28,7 @@ type executionRuntimeRequest struct {
 	RenderOutputDir    string
 	ResultCreatedAt    time.Time
 	Progress           func(stage string, message string, progress int)
+	TaskSecrets        map[string]driver.BrowserAgentTaskSecret
 }
 
 // BrowserAgentOutlineRunRequest is the Server-internal handoff to the new
@@ -42,6 +43,7 @@ type BrowserAgentOutlineRunRequest struct {
 	ResultCreatedAt    time.Time
 	Progress           func(stage string, message string, progress int)
 	EventSink          StageExecutionEventSink
+	TaskSecrets        map[string]driver.BrowserAgentTaskSecret
 }
 
 type BrowserAgentOutlineRunner interface {
@@ -90,7 +92,7 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 		result, err := r.outline.Run(ctx, BrowserAgentOutlineRunRequest{
 			Package: request.Package, RuntimePlan: runtimePlan, CloudJobID: request.CloudJobID,
 			RecordingOutputDir: request.RecordingOutputDir, RenderOutputDir: request.RenderOutputDir,
-			ResultCreatedAt: request.ResultCreatedAt, Progress: request.Progress, EventSink: eventSink,
+			ResultCreatedAt: request.ResultCreatedAt, Progress: request.Progress, EventSink: eventSink, TaskSecrets: request.TaskSecrets,
 		})
 		if err != nil {
 			return model.RecordingResultPackage{}, err

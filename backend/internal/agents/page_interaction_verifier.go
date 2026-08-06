@@ -99,15 +99,16 @@ func (a *PageInteractionVerifierAgent) VerifyInteractions(
 }
 
 type interactionVerifierRequest struct {
-	ProductURL     string                    `json:"product_url,omitempty"`
-	TimeoutMS      int                       `json:"timeout_ms,omitempty"`
-	Headless       bool                      `json:"headless"`
-	AllowedDomains []string                  `json:"allowed_domains,omitempty"`
-	ForbiddenPaths []string                  `json:"forbidden_path_prefixes,omitempty"`
-	Candidates     []interactionVerifierItem `json:"candidates,omitempty"`
-	IntentGoals    []interactionVerifierGoal `json:"intent_goals,omitempty"`
-	DemoUsername   string                    `json:"demo_username,omitempty"`
-	DemoPassword   string                    `json:"demo_password,omitempty"`
+	ProductURL           string                    `json:"product_url,omitempty"`
+	TimeoutMS            int                       `json:"timeout_ms,omitempty"`
+	Headless             bool                      `json:"headless"`
+	AllowedDomains       []string                  `json:"allowed_domains,omitempty"`
+	ForbiddenPaths       []string                  `json:"forbidden_path_prefixes,omitempty"`
+	Candidates           []interactionVerifierItem `json:"candidates,omitempty"`
+	IntentGoals          []interactionVerifierGoal `json:"intent_goals,omitempty"`
+	SafeStateTransitions []interactionVerifierItem `json:"safe_state_transitions,omitempty"`
+	DemoUsername         string                    `json:"demo_username,omitempty"`
+	DemoPassword         string                    `json:"demo_password,omitempty"`
 }
 
 type interactionVerifierGoal struct {
@@ -192,15 +193,16 @@ func (a *PageInteractionVerifierAgent) verifyWithSidecar(ctx context.Context, pr
 	}
 	var response interactionVerifierResponse
 	err := a.manager.CallJSONRPC(ctx, spec, "verify_interactions", interactionVerifierRequest{
-		ProductURL:     project.ProductURL,
-		TimeoutMS:      20000,
-		Headless:       true,
-		AllowedDomains: allowedDomainsFromScope(project, intelligence.RunIntentScope),
-		ForbiddenPaths: intelligence.RunIntentScope.ForbiddenPathPrefixes,
-		Candidates:     items,
-		IntentGoals:    verifierGoals(intelligence),
-		DemoUsername:   credentials.DemoUsername,
-		DemoPassword:   credentials.DemoPassword,
+		ProductURL:           project.ProductURL,
+		TimeoutMS:            20000,
+		Headless:             true,
+		AllowedDomains:       allowedDomainsFromScope(project, intelligence.RunIntentScope),
+		ForbiddenPaths:       intelligence.RunIntentScope.ForbiddenPathPrefixes,
+		Candidates:           items,
+		IntentGoals:          verifierGoals(intelligence),
+		SafeStateTransitions: verifierSafeStateTransitions(project, intelligence),
+		DemoUsername:         credentials.DemoUsername,
+		DemoPassword:         credentials.DemoPassword,
 	}, &response)
 	if err != nil {
 		return nil, nil, err
@@ -210,6 +212,32 @@ func (a *PageInteractionVerifierAgent) verifyWithSidecar(ctx context.Context, pr
 		return emptyVerifiedPlan(project, intelligence, response.VerificationMode, response.BrowserScanID, response.SourceURL), report, nil
 	}
 	return verifiedPlanFromScanResults(project, intelligence, response, byID), missingEvidenceFromScanResults(project, intelligence, response, byID), nil
+}
+
+func verifierSafeStateTransitions(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) []interactionVerifierItem {
+	if project == nil || intelligence == nil || intelligence.BusinessStagePlan == nil {
+		return nil
+	}
+	for _, stage := range intelligence.BusinessStagePlan.Stages {
+		stageID := strings.TrimPrefix(stage.ID, "business_stage_")
+		semanticText := strings.Join([]string{stage.Title, stage.Objective, stage.Action.Label, stage.Action.SuccessState}, " ")
+		if stageID != "new_project_entry" || stage.Kind != model.BusinessStageKindBusinessAction ||
+			model.GraphActionType(stage.Action.Type) != model.GraphActionClick || !stage.Action.NonDestructive ||
+			containsAnyNormalized(semanticText, "delete", "remove", "destroy", "payment", "pay", "billing", "purchase", "refund", "permission", "role", "api key", "secret", "token", "删除", "移除", "销毁", "支付", "购买", "退款", "账单", "权限", "角色", "密钥", "令牌") {
+			continue
+		}
+		for _, target := range stage.Targets {
+			if strings.TrimSpace(target.Selector) == "" || !isURLAllowedByRunScope(intelligence.RunIntentScope, target.URL) ||
+				isControlPlaneSignal(intelligence.RunIntentScope, target.URL, target.Label, target.Selector) {
+				continue
+			}
+			return []interactionVerifierItem{{
+				ID: stage.ID, IntentGoalID: target.IntentGoalID, Label: firstNonEmpty(target.Label, stage.Action.Label),
+				Kind: string(model.GraphActionClick), Selector: target.Selector, URL: firstNonEmpty(target.URL, stage.EntryRoute, project.ProductURL),
+			}}
+		}
+	}
+	return nil
 }
 
 func verifierCandidates(intelligence *model.ProjectIntelligencePack) []model.InteractionProbe {
@@ -668,7 +696,7 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 			continue
 		}
 		probe := probeFromVerifierResult(result, byID)
-		if !probe.IsBusiness || probe.IsChrome || !selectorUsableForBusinessAction(probe.Selector) ||
+		if !verifiedProbeSemanticallyValid(result, probe, intelligence) || !probe.IsBusiness || probe.IsChrome || !selectorUsableForBusinessAction(probe.Selector) ||
 			!isURLAllowedByRunScope(intelligence.RunIntentScope, probe.URL) ||
 			isControlPlaneSignal(intelligence.RunIntentScope, probe.URL, probe.Label, probe.Selector) {
 			continue
@@ -699,6 +727,31 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 	return plan
 }
 
+func verifiedProbeSemanticallyValid(result interactionVerifierResult, probe model.InteractionProbe, intelligence *model.ProjectIntelligencePack) bool {
+	kind := strings.ToLower(strings.TrimSpace(firstNonEmpty(result.Kind, probe.Kind)))
+	selectorText := normalizeIntentText(strings.Join([]string{result.Label, result.Selector, probe.Label, probe.Selector}, " "))
+	if kind == "fill" && (!result.Editable || containsAnyNormalized(selectorText, "button", "role button", "has text", "a href")) {
+		return false
+	}
+	if containsAnyNormalized(selectorText, "忘记密码", "找回密码", "重置密码", "forgot password", "reset password", "返回登录", "back to login", "注册", "sign up", "register", "create account") {
+		return false
+	}
+	if probe.IntentGoalID == "" || intelligence == nil || intelligence.DemoIntent == nil {
+		return true
+	}
+	for _, goal := range intelligence.DemoIntent.Goals {
+		if goal.ID != probe.IntentGoalID {
+			continue
+		}
+		want := strings.ToLower(strings.TrimSpace(firstNonEmpty(goal.PreferredAction, goal.Kind)))
+		if want == "business_action" || want == "auth" || want == "" {
+			return true
+		}
+		return graphActionTypeFromKind(kind, probe.Selector) == model.GraphActionType(want)
+	}
+	return false
+}
+
 func missingEvidenceFromScanResults(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, response interactionVerifierResponse, byID map[string]model.InteractionProbe) *model.MissingEvidenceReport {
 	report := &model.MissingEvidenceReport{
 		ID:            "missing_evidence_" + project.ID,
@@ -721,6 +774,15 @@ func missingEvidenceFromScanResults(project *model.ProjectContext, intelligence 
 	if response.Error != nil {
 		report.Items = append(report.Items, missingEvidenceItem(project, "", firstNonEmpty(response.Error.Code, "page_scan_failed"), response.Error.Message, "确认产品 URL 可访问后重试页面预扫描。"))
 	}
+	if response.Diagnostics != nil && response.Diagnostics.LoginAttempted && response.Diagnostics.LoginStatus != "submitted_navigation_observed" {
+		report.Items = append(report.Items, missingEvidenceItem(
+			project,
+			"intent_login_observe",
+			firstNonEmpty(response.Diagnostics.LoginStatus, "login_not_verified"),
+			scanDiagnosticSummary(response.Diagnostics),
+			"确认公开产品入口是否能进入登录页，以及测试账号是否可完成登录；不得把登录页营销控件作为登录成功证据。",
+		))
+	}
 	verified := 0
 	for _, result := range response.Results {
 		if result.Status == "verified" {
@@ -735,7 +797,8 @@ func missingEvidenceFromScanResults(project *model.ProjectContext, intelligence 
 			report.Items = append(report.Items, missingEvidenceItem(project, "", "page_scan_diagnostic", summary, "确认登录后是否进入工作台、目标业务控件是否在当前页面可见；必要时补充截图标注或稳定 data-testid/role/name。"))
 		}
 	}
-	report.Blocking = verified == 0 && len(report.Items) > 0
+	loginFailed := response.Diagnostics != nil && response.Diagnostics.LoginAttempted && response.Diagnostics.LoginStatus != "submitted_navigation_observed"
+	report.Blocking = loginFailed || verified == 0 && len(report.Items) > 0
 	if report.Blocking {
 		report.Summary = "no verified business action: 页面预扫描没有确认任何业务动作，已阻止生成录制脚本。"
 		if summary := scanDiagnosticSummary(response.Diagnostics); summary != "" {
@@ -762,7 +825,7 @@ func verifierGoals(intelligence *model.ProjectIntelligencePack) []interactionVer
 		goals = append(goals, interactionVerifierGoal{
 			ID:       goal.ID,
 			Label:    goal.Label,
-			Kind:     goal.Kind,
+			Kind:     firstNonEmpty(goal.PreferredAction, goal.Kind),
 			Keywords: goal.TargetKeywords,
 			Required: goal.Required,
 			Business: goal.BusinessCritical,

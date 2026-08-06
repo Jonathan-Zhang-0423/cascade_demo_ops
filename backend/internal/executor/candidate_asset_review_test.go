@@ -8,7 +8,7 @@ import (
 	"cascade-demoops/backend/internal/model"
 )
 
-func TestReviewArkMediaCandidateAssetsApprovesSafeDownloadedVideoCandidate(t *testing.T) {
+func TestReviewArkMediaCandidateAssetsKeepsSafeDownloadedVideoCandidatePendingExplicitReview(t *testing.T) {
 	source := sampleClientExecutionPackageForExecutorTest(t)
 	candidatePath := filepath.Join(t.TempDir(), "candidate.mp4")
 	generationResult := model.ArkMediaGenerationResult{
@@ -33,15 +33,15 @@ func TestReviewArkMediaCandidateAssetsApprovesSafeDownloadedVideoCandidate(t *te
 
 	review := ReviewArkMediaCandidateAssets(&source, &generationResult, time.Date(2026, 7, 15, 21, 0, 0, 0, time.UTC))
 
-	if review.SchemaVersion != model.CandidateAssetReviewSchemaVersion || review.Status != "approved" || len(review.ApprovedArtifacts) != 1 {
-		t.Fatalf("expected approved candidate review, got %+v", review)
+	if review.SchemaVersion != model.CandidateAssetReviewSchemaVersion || review.Status != "media_eligible_awaiting_user_review" || len(review.ApprovedArtifacts) != 0 || len(review.PendingReviewArtifacts) != 1 {
+		t.Fatalf("expected media-eligible candidate awaiting user review, got %+v", review)
 	}
-	approved := generationResult.DownloadedArtifacts[0]
-	if approved.Metadata["approved_for_demo"] != true || approved.Metadata["presentation_only"] != true || approved.Metadata["include_in_demo"] != false {
-		t.Fatalf("approved candidate metadata mismatch: %+v", approved.Metadata)
+	pending := generationResult.DownloadedArtifacts[0]
+	if pending.Metadata["approved_for_demo"] != false || pending.Metadata["media_eligible"] != true || pending.Metadata["explicit_review_required"] != true || pending.Metadata["presentation_only"] != true || pending.Metadata["include_in_demo"] != false {
+		t.Fatalf("pending candidate metadata mismatch: %+v", pending.Metadata)
 	}
-	if review.Items[0].ApprovedForDemo != true || review.Items[0].PresentationOnly != true {
-		t.Fatalf("review item did not capture approval boundary: %+v", review.Items[0])
+	if review.Items[0].ApprovedForDemo || !review.Items[0].MediaEligible || !review.Items[0].ExplicitReviewRequired || !review.Items[0].PresentationOnly {
+		t.Fatalf("review item did not capture explicit-review boundary: %+v", review.Items[0])
 	}
 }
 

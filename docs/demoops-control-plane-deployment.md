@@ -1,5 +1,8 @@
 # DemoOps 控制面部署边界
 
+> [!WARNING]
+> 本文仅保留旧环境兼容参考。App 的正式执行上传不再连接 DemoOps 控制面。新环境请部署 [Ubuntu Browser Agent 直连网关](browser-agent-direct-deployment.md)。
+
 DemoOps App 的 `product_url` 只表示客户待录制网站。执行服务地址必须由
 `CASCADE_CLOUD_EXCHANGE_BASE_URL=<DEMOOPS_CONTROL_PLANE_BASE_URL>` 独立配置，
 绝不从产品 URL、源码仓库 URL 或页面内容推导。

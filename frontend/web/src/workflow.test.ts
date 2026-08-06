@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ApprovalChecklistState } from "./domain";
 import { createProjectDraftWorkspace, createWorkspace } from "./mockWorkspace";
 import {
+	beginGraphRevision,
   canUploadExecutionPackage,
 	executionServerBlockedReason,
   lifecycleStagesFromWorkspace,
@@ -30,6 +31,32 @@ describe("workflow helpers", () => {
     expect(next.nodes.find((node) => node.id === "node_primary_action")?.is_screenshot).toBe(false);
   });
 
+  it("marks graph revisions dirty and immediately clears stale upload approval", () => {
+    const workspace = createWorkspace("product_demo");
+    const approved: ApprovalChecklistState = {
+      userApprovedPlan: true,
+      ipAllowlistAcknowledged: true,
+      sourceSummaryOnlyAcknowledged: true,
+      credentialGrantAcknowledged: true,
+      redactionsReviewed: true,
+    };
+    const initial: ApprovalChecklistState = {
+      userApprovedPlan: false,
+      ipAllowlistAcknowledged: false,
+      sourceSummaryOnlyAcknowledged: true,
+      credentialGrantAcknowledged: false,
+      redactionsReviewed: false,
+    };
+
+    const revision = beginGraphRevision(workspace.planReview.graph, "node_primary_action", { has_zoom: false }, initial);
+
+    expect(revision.graphDirty).toBe(true);
+    expect(revision.checklist).toEqual(initial);
+    expect(revision.checklist).not.toBe(initial);
+    expect(revision.checklist).not.toEqual(approved);
+    expect(canUploadExecutionPackage(workspace.packagePreview, revision.checklist, workspace.sourceConnections)).toBe(false);
+  });
+
   it("blocks package upload until approval, allowlist, grants, and redactions are reviewed", () => {
     const workspace = createWorkspace("product_demo");
     const checklist: ApprovalChecklistState = {
@@ -42,7 +69,7 @@ describe("workflow helpers", () => {
 
     const reasons = packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections);
     expect(reasons).toContain("上传前必须完成人工审批。");
-    expect(reasons).toContain("需要确认 DemoOps 执行服务器出口 IP 已加入客户环境白名单。");
+    expect(reasons).toContain("需要确认目标环境允许 Ubuntu Browser Agent 服务器访问。");
     expect(canUploadExecutionPackage(workspace.packagePreview, checklist, workspace.sourceConnections)).toBe(false);
   });
 
@@ -187,8 +214,10 @@ describe("workflow helpers", () => {
 
 	it("keeps upload blocked until execution-server health is resolved and configured", () => {
 		expect(executionServerBlockedReason(false, undefined)).toBe("正在检查执行服务器连接。");
-		expect(executionServerBlockedReason(true, false)).toBe("执行服务器尚未完成连接与安装身份验证。");
-		expect(executionServerBlockedReason(true, true)).toBeUndefined();
+		expect(executionServerBlockedReason(true, undefined)).toBe("尚未配置 Ubuntu Browser Agent 服务器地址。");
+		expect(executionServerBlockedReason(true, { configured: true, tokenConfigured: false, reachable: false, transport: "browser_agent_direct_v1" })).toBe("尚未在系统凭据库保存 Browser Agent 访问令牌。");
+		expect(executionServerBlockedReason(true, { configured: true, tokenConfigured: true, reachable: false, transport: "browser_agent_direct_v1" })).toBe("Browser Agent 直连协议健康检查尚未通过。");
+		expect(executionServerBlockedReason(true, { configured: true, tokenConfigured: true, reachable: true, transport: "browser_agent_direct_v1" })).toBeUndefined();
 	});
 
   it("recognizes production and dev sandbox policy risk levels", () => {

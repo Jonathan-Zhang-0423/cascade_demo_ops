@@ -8,6 +8,8 @@ import (
 )
 
 const githubCredentialTarget = "CascadeDemoOps/GitHub"
+const directBrowserAgentCredentialTarget = "CascadeDemoOps/BrowserAgentDirect/AccessToken"
+const directBrowserAgentIdentityTarget = "CascadeDemoOps/BrowserAgentDirect/InstallationKey"
 
 func modelCredentialTarget(provider string) (string, error) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -105,6 +107,64 @@ func ReadGitHubToken() (string, error) {
 
 func DeleteGitHubToken() error {
 	return deleteSecret(githubCredentialTarget)
+}
+
+func StoreDirectBrowserAgentToken(token string) error {
+	token = strings.TrimSpace(token)
+	if len(token) < 32 || len(token) > 4096 || strings.ContainsAny(token, "\r\n\x00") {
+		return errors.New("Browser Agent access token has an invalid format")
+	}
+	return storeSecret(directBrowserAgentCredentialTarget, "browser-agent-direct", []byte(token))
+}
+
+func ReadDirectBrowserAgentToken() (string, error) {
+	secret, err := readSecret(directBrowserAgentCredentialTarget)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(secret)), nil
+}
+
+func DeleteDirectBrowserAgentToken() error {
+	return deleteSecret(directBrowserAgentCredentialTarget)
+}
+
+func StoreDirectBrowserAgentIdentity(identityJSON []byte) error {
+	if len(identityJSON) == 0 || len(identityJSON) > 8192 {
+		return errors.New("Browser Agent installation identity has an invalid format")
+	}
+	return storeSecret(directBrowserAgentIdentityTarget, "browser-agent-direct-installation", identityJSON)
+}
+
+func ReadDirectBrowserAgentIdentity() ([]byte, error) {
+	return readSecret(directBrowserAgentIdentityTarget)
+}
+
+func StoreDirectBrowserAgentLease(projectID string, leaseJSON []byte) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" || len(projectID) > 256 || strings.ContainsAny(projectID, "\\/:\x00\r\n") {
+		return errors.New("project id has an invalid format")
+	}
+	if len(leaseJSON) == 0 || len(leaseJSON) > 65536 {
+		return errors.New("Browser Agent lease has an invalid format")
+	}
+	return storeSecret("CascadeDemoOps/BrowserAgentDirect/Lease/"+projectID, projectID, leaseJSON)
+}
+
+func ReadDirectBrowserAgentLease(projectID string) ([]byte, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, errors.New("project id is required")
+	}
+	return readSecret("CascadeDemoOps/BrowserAgentDirect/Lease/" + projectID)
+}
+
+func DeleteDirectBrowserAgentLease(projectID string) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return errors.New("project id is required")
+	}
+	return deleteSecret("CascadeDemoOps/BrowserAgentDirect/Lease/" + projectID)
 }
 
 func GitHubTokenConfigured() bool {

@@ -34,6 +34,23 @@ func TestValidateBrowserAgentOutlineConsistencyRejectsWorkspaceWithoutCredential
 	assertOutlineConsistencyCode(t, bundle, "session_auth_evidence_missing")
 }
 
+func TestValidateBrowserAgentOutlineConsistencyAcceptsCompleteRuntimeAdaptiveContractWithoutPageEvidence(t *testing.T) {
+	bundle := runtimeAdaptiveOutlineBundleForTest()
+	if err := ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
+		t.Fatalf("complete runtime-adaptive contract should defer page evidence to Browser Agent: %v", err)
+	}
+}
+
+func TestValidateBrowserAgentOutlineConsistencyRejectsIncompleteRuntimeAdaptiveContract(t *testing.T) {
+	bundle := runtimeAdaptiveOutlineBundleForTest()
+	bundle.ScriptOutline.Stages[0].TargetContract = nil
+	assertOutlineConsistencyCode(t, bundle, "runtime_adaptive_contract_incomplete")
+
+	bundle = runtimeAdaptiveOutlineBundleForTest()
+	bundle.ScriptOutline.Stages[0].RuntimeAdaptive = false
+	assertOutlineConsistencyCode(t, bundle, "runtime_adaptive_mismatch")
+}
+
 func assertOutlineConsistencyCode(t *testing.T, bundle *ExecutableRecordingScriptBundle, want string) {
 	t.Helper()
 	err := ValidateBrowserAgentOutlineConsistency(bundle)
@@ -57,4 +74,33 @@ func consistentOutlineBundleForTest() *ExecutableRecordingScriptBundle {
 		StageApprovalPlan: &StageApprovalPlan{Stages: []StageApprovalStage{{NodeID: step.NodeID, StageKind: step.StageKind, RouteState: step.RouteState, Interaction: interaction, EvidenceRefs: evidence}}},
 		ScriptOutline:     &BrowserAgentScriptOutline{Stages: []BrowserAgentOutlineStage{{NodeID: step.NodeID, StageKind: step.StageKind, RouteState: step.RouteState, Interactions: []BrowserAgentInteraction{interaction}, EvidenceRefs: evidence}}},
 	}
+}
+
+func runtimeAdaptiveOutlineBundleForTest() *ExecutableRecordingScriptBundle {
+	bundle := consistentOutlineBundleForTest()
+	planEvidence := []EvidenceRef{{ID: "ev_user_requirement", Kind: EvidenceKindUserInput, Summary: "approved user requirement"}}
+	target := &BrowserAgentTargetContract{SemanticID: "semantic_login", Purpose: "登录并进入工作台", AllowedRoles: []string{"form"}, AllowedNames: []string{"登录"}, ComponentRef: "login-form", EvidenceRefs: planEvidence}
+	bundle.PlanJSON.SafetyPolicy.AllowedDomains = []string{"app.example"}
+	bundle.PlanJSON.Steps[0].RuntimeAdaptive = true
+	bundle.PlanJSON.Steps[0].TargetContract = target
+	bundle.PlanJSON.Steps[0].ExpectedOutcome = "进入工作台"
+	bundle.PlanJSON.Steps[0].EvidenceRefs = planEvidence
+	bundle.StageApprovalPlan.Stages[0].RuntimeAdaptive = true
+	bundle.StageApprovalPlan.Stages[0].EntryRoute = "/login"
+	bundle.StageApprovalPlan.Stages[0].TargetContract = target
+	bundle.StageApprovalPlan.Stages[0].SuccessState = "进入工作台"
+	bundle.StageApprovalPlan.Stages[0].CapturePlan = &BrowserAgentCapturePlan{Intent: "记录登录成功状态", PrimaryArtifact: "screenshot", RequiredAssets: []string{"viewport_screenshot"}}
+	bundle.StageApprovalPlan.Stages[0].EvidenceRefs = planEvidence
+	bundle.StageApprovalPlan.Stages[0].Interaction.EvidenceRefs = planEvidence
+	bundle.ScriptOutline.AllowedExplorationScope.AllowedOrigins = []string{"https://app.example"}
+	bundle.ScriptOutline.Stages[0].RuntimeAdaptive = true
+	bundle.ScriptOutline.Stages[0].EntryRoute = "/login"
+	bundle.ScriptOutline.Stages[0].TargetContract = target
+	bundle.ScriptOutline.Stages[0].SuccessState = "进入工作台"
+	bundle.ScriptOutline.Stages[0].CapturePlan = &BrowserAgentCapturePlan{Intent: "记录登录成功状态", PrimaryArtifact: "screenshot", RequiredAssets: []string{"viewport_screenshot"}}
+	bundle.ScriptOutline.Stages[0].CanModify = []string{"selector", "wait_conditions"}
+	bundle.ScriptOutline.Stages[0].MustPreserve = []string{"success_state", "safety_policy"}
+	bundle.ScriptOutline.Stages[0].EvidenceRefs = planEvidence
+	bundle.ScriptOutline.Stages[0].Interactions[0].EvidenceRefs = planEvidence
+	return bundle
 }

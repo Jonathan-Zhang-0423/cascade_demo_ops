@@ -1,5 +1,8 @@
 # DemoOps control plane deployment runbook
 
+> [!WARNING]
+> Legacy compatibility runbook. Do not use this control plane for the App's primary Browser Agent execution path. Use [Browser Agent direct deployment](browser-agent-direct-deployment.md).
+
 This runbook deploys the App execution upload path on a dedicated DemoOps API
 hostname. A customer `product_url` is never used to discover or configure this
 service.

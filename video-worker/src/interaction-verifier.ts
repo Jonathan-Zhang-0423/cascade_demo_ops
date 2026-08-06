@@ -9,6 +9,7 @@ type VerifyInteractionRequest = {
   forbidden_path_prefixes?: string[];
   candidates?: InteractionCandidate[];
   intent_goals?: InteractionGoal[];
+  safe_state_transitions?: InteractionCandidate[];
   demo_username?: string;
   demo_password?: string;
 };
@@ -31,9 +32,11 @@ type InteractionCandidate = {
   url?: string;
 };
 
+type VerificationMode = "playwright_readonly_scan" | "playwright_safe_state_scan";
+
 type VerifyInteractionResult = {
   ok: boolean;
-  verification_mode: "playwright_readonly_scan";
+  verification_mode: VerificationMode;
   browser_scan_id: string;
   source_url?: string;
   results: VerifiedInteractionCandidate[];
@@ -50,6 +53,7 @@ type InteractionVerifierDiagnostics = {
   verified_candidate_count?: number;
   discovered_business_control_count?: number;
   login_transitions?: string[];
+  safe_state_transitions?: string[];
 };
 
 type VerifiedInteractionCandidate = InteractionCandidate & {
@@ -111,8 +115,8 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
     });
     diagnostics.login_attempted = Boolean(request.demo_username && request.demo_password);
     diagnostics.login_status = loginStatus;
-    const pageTitle = await page.title().catch(() => "");
-    const currentURL = page.url();
+    let pageTitle = await page.title().catch(() => "");
+    let currentURL = page.url();
     diagnostics.final_url = currentURL;
     diagnostics.page_title = pageTitle;
     for (const candidate of request.candidates || []) {
@@ -159,6 +163,20 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
         });
       }
     }
+    const safeTransitions = await applySafeStateTransitions(page, request, timeout);
+    diagnostics.safe_state_transitions = safeTransitions;
+    if (safeTransitions.some((value) => value.startsWith("applied:"))) {
+      currentURL = page.url();
+      pageTitle = await page.title().catch(() => "");
+      diagnostics.final_url = currentURL;
+      diagnostics.page_title = pageTitle;
+      for (let index = 0; index < results.length; index += 1) {
+		const current = results[index];
+		if (!current || current.status === "verified") continue;
+		const rescanned = await verifyCandidateOnPage(page, current, currentURL, pageTitle);
+        if (rescanned.status === "verified") results[index] = rescanned;
+      }
+    }
     const discovered = await discoverBusinessActionsAcrossSafePages(page, request.intent_goals || [], request, currentURL, pageTitle);
     diagnostics.discovered_business_control_count = discovered.length;
     const seenSelectors = new Set(results.map((result) => normalizeSelectorText(result.selector)));
@@ -170,7 +188,8 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
       results.push(item);
     }
     diagnostics.verified_candidate_count = results.filter((result) => result.status === "verified").length;
-    return { ok: true, verification_mode: "playwright_readonly_scan", browser_scan_id: scanID, source_url: currentURL, results, diagnostics };
+    const verificationMode: VerificationMode = safeTransitions.some((value) => value.startsWith("applied:")) ? "playwright_safe_state_scan" : "playwright_readonly_scan";
+    return { ok: true, verification_mode: verificationMode, browser_scan_id: scanID, source_url: currentURL, results, diagnostics };
   } catch (error) {
     return {
       ok: false,
@@ -185,6 +204,66 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
     await context.close().catch(() => undefined);
     await browser.close().catch(() => undefined);
   }
+}
+
+async function verifyCandidateOnPage(page: any, candidate: InteractionCandidate, pageURL: string, pageTitle: string): Promise<VerifiedInteractionCandidate> {
+  const selector = candidate.selector?.trim();
+  if (!selector) return { ...candidate, status: "selector_missing", page_url: pageURL, page_title: pageTitle, message: "selector is empty" };
+  try {
+    const locator = page.locator(selector).first();
+    const visible = await locator.isVisible({ timeout: 2500 }).catch(() => false);
+    if (!visible) return { ...candidate, status: "not_visible", visible, page_url: pageURL, page_title: pageTitle };
+    const enabled = await locator.isEnabled({ timeout: 1000 }).catch(() => false);
+    const editable = await locator.isEditable({ timeout: 1000 }).catch(() => false);
+    const action = normalizeAction(candidate.kind);
+    if ((action === "click" || action === "select" || action === "upload") && !enabled) {
+      return { ...candidate, status: "not_enabled", visible, enabled, editable, page_url: pageURL, page_title: pageTitle };
+    }
+    if (action === "fill" && !editable) {
+      return { ...candidate, status: "not_editable", visible, enabled, editable, page_url: pageURL, page_title: pageTitle };
+    }
+    return { ...candidate, status: "verified", visible, enabled, editable, page_url: pageURL, page_title: pageTitle, verified_at: new Date().toISOString() };
+  } catch (error) {
+    return { ...candidate, status: "error", page_url: pageURL, page_title: pageTitle, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function applySafeStateTransitions(page: any, request: VerifyInteractionRequest, timeout: number): Promise<string[]> {
+  const transitions: string[] = [];
+  for (const transition of (request.safe_state_transitions || []).slice(0, 1)) {
+    const action = normalizeAction(transition.kind);
+    const semantic = `${transition.id || ""} ${transition.label || ""} ${transition.selector || ""}`;
+    if (action !== "click" || !transition.selector || looksLikeDestructiveControl(semantic) || looksLikeControlPlaneSignal(semantic)) {
+      transitions.push(`rejected:${transition.id || "unknown"}`);
+      continue;
+    }
+    const currentURL = page.url();
+    if (isURLForbiddenByScope(currentURL, request) || isURLForbiddenByScope(transition.url, request)) {
+      transitions.push(`scope_rejected:${transition.id || "unknown"}`);
+      continue;
+    }
+    const locator = page.locator(transition.selector).first();
+    const visible = await locator.isVisible({ timeout: 2500 }).catch(() => false);
+    const enabled = visible && await locator.isEnabled({ timeout: 1000 }).catch(() => false);
+    if (!visible || !enabled) {
+      transitions.push(`unavailable:${transition.id || "unknown"}`);
+      continue;
+    }
+    const clicked = await locator.click({ timeout: Math.min(timeout, 4000) }).then(() => true).catch(() => false);
+    if (!clicked) {
+      transitions.push(`failed:${transition.id || "unknown"}`);
+      continue;
+    }
+    await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
+    if (isURLForbiddenByScope(page.url(), request)) {
+      transitions.push(`result_scope_rejected:${transition.id || "unknown"}`);
+      await page.goto(currentURL, { waitUntil: "domcontentloaded", timeout: Math.min(timeout, 6000) }).catch(() => undefined);
+      await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
+      continue;
+    }
+    transitions.push(`applied:${transition.id || "unknown"}`);
+  }
+  return transitions;
 }
 
 async function discoverBusinessActions(
@@ -232,10 +311,10 @@ async function discoverBusinessActions(
       const selector = selectorForControl(control, label);
       const kind = actionKindForControl(control);
       const score = businessControlScore(label, selector, goals, kind);
-      const goal = bestGoalForControl(label, selector, goals);
+      const goal = bestGoalForControl(label, selector, goals, kind);
       return { control, label, selector, kind, score, goal };
     })
-    .filter((item: any) => item.selector && item.score >= 35 && !looksLikeChromeControl(`${item.label} ${item.selector}`) && !looksLikeControlPlaneSignal(`${item.label} ${item.selector}`))
+    .filter((item: any) => item.selector && item.goal && item.score >= 35 && !looksLikeChromeControl(`${item.label} ${item.selector}`) && !looksLikeControlPlaneSignal(`${item.label} ${item.selector}`))
     .sort((a: any, b: any) => b.score - a.score)
     .slice(0, 8);
 
@@ -354,6 +433,7 @@ function selectorForControl(control: any, label: string): string {
 function actionKindForControl(control: any): string {
   const tag = control.tag;
   const type = String(control.attrs?.type || "").toLowerCase();
+  if (tag === "input" && type === "file") return "upload";
   if (tag === "input" && !["button", "submit", "checkbox", "radio"].includes(type)) return "fill";
   if (tag === "textarea") return "fill";
   if (tag === "select") return "select";
@@ -362,7 +442,7 @@ function actionKindForControl(control: any): string {
 
 function businessControlScore(label: string, selector: string, goals: InteractionGoal[], kind: string): number {
   const normalized = normalizeSelectorText(`${label} ${selector}`);
-  if (!normalized || looksLikeChromeControl(normalized) || looksLikeLoginControl(normalized) || looksLikeControlPlaneSignal(normalized)) return 0;
+  if (!normalized || looksLikeChromeControl(normalized) || looksLikeLoginControl(normalized) || looksLikeNegativeAuthControl(normalized) || looksLikeControlPlaneSignal(normalized)) return 0;
   let score = 10;
   let hasBusinessSignal = false;
   if (selector.includes("data-testid") || selector.includes("data-test") || selector.includes("data-cy")) score += 35;
@@ -376,6 +456,7 @@ function businessControlScore(label: string, selector: string, goals: Interactio
     }
   }
   for (const goal of goals) {
+    if (!goalActionCompatible(goal, kind)) continue;
     const keywords = goalKeywords(goal);
     const matched = keywords.filter((keyword) => keyword && normalized.includes(keyword)).length;
     if (matched > 0) {
@@ -401,16 +482,27 @@ function safeLinkScore(label: string, href: string, goals: InteractionGoal[]): n
   return score;
 }
 
-function bestGoalForControl(label: string, selector: string, goals: InteractionGoal[]): InteractionGoal | undefined {
+function bestGoalForControl(label: string, selector: string, goals: InteractionGoal[], kind: string): InteractionGoal | undefined {
   const normalized = normalizeSelectorText(`${label} ${selector}`);
+  if (looksLikeNegativeAuthControl(normalized)) return undefined;
   let best: { goal: InteractionGoal; score: number } | undefined;
   for (const goal of goals) {
+    if (!goalActionCompatible(goal, kind)) continue;
     const score = goalKeywords(goal).filter((keyword) => keyword && normalized.includes(keyword)).length;
     if (!best || score > best.score) {
       best = { goal, score };
     }
   }
-  return best && best.score > 0 ? best.goal : goals.find((goal) => goal.business) || goals[0];
+  return best && best.score > 0 ? best.goal : undefined;
+}
+
+function goalActionCompatible(goal: InteractionGoal, actionKind: string): boolean {
+  const goalKind = normalizeAction(goal.kind);
+  const action = normalizeAction(actionKind);
+  if (!goalKind || goalKind === "business_action") return ["click", "fill", "select", "upload"].includes(action);
+  if (goalKind === "auth") return action === "fill" || action === "click";
+  if (goalKind === "inspect" || goalKind === "observe" || goalKind === "wait") return false;
+  return goalKind === action;
 }
 
 function goalKeywords(goal: InteractionGoal): string[] {
@@ -427,7 +519,7 @@ function businessKeywords(): string[] {
 
 function looksLikeChromeControl(value: string): boolean {
   const normalized = normalizeSelectorText(value);
-  if (!/(sidebar|side-bar|toggle|collapse|expand|hamburger|theme|avatar|profile|account-menu|breadcrumb|drawer|layout|shell|chrome|侧边栏|折叠|展开|主题|头像|个人资料|导航|菜单|通知)/i.test(normalized)) {
+  if (!/(sidebar|side-bar|toggle|collapse|expand|hamburger|theme|avatar|profile|account-menu|breadcrumb|drawer|layout|shell|chrome|close|cancel|dismiss|侧边栏|折叠|展开|主题|头像|个人资料|导航|菜单|通知|关闭|取消)/i.test(normalized)) {
     return false;
   }
   return !/(create|new|project|generate|run|start|submit|save|confirm|创建|新建|项目|生成|开始|运行|提交|保存|确认)/i.test(normalized);
@@ -435,6 +527,10 @@ function looksLikeChromeControl(value: string): boolean {
 
 function looksLikeLoginControl(value: string): boolean {
   return /(登录|登陆|登入|sign\s*in|log\s*in|login|logout|退出|注册|创建账户|create\s*account|sign\s*up|register)/i.test(value);
+}
+
+function looksLikeNegativeAuthControl(value: string): boolean {
+  return /(忘记密码|找回密码|重置密码|forgot\s*(your\s*)?password|reset\s*password|返回|返回登录|back\s*(to\s*)?(login|sign\s*in)?|注册|创建账户|create\s*account|sign\s*up|register)/i.test(value);
 }
 
 function looksLikeControlPlaneSignal(value: string): boolean {
@@ -528,7 +624,25 @@ async function attemptLoginIfCredentialsProvided(
 
   const transitions = credentials.transitions || [];
   transitions.push("credentials_available");
+  let usernameFilled = false;
   let passwordInput = await firstVisibleLocatorAcrossFrames(page, passwordInputSelectors(), 1800);
+  if (!passwordInput && await isLikelyLoginContext(page)) {
+    const usernameInput = await firstVisibleLocatorAcrossFrames(page, usernameInputSelectors(), 2200);
+    if (usernameInput) {
+      await usernameInput.fill(username, { timeout: 3500 }).catch(() => undefined);
+      usernameFilled = true;
+      transitions.push("username_step_filled");
+      const next = await firstVisibleLoginSubmit(page);
+      const advanced = next
+        ? await next.click({ timeout: 3000 }).then(() => true).catch(() => false)
+        : await usernameInput.press("Enter", { timeout: 2000 }).then(() => true).catch(() => false);
+      transitions.push(advanced ? "username_step_submitted" : "username_step_submit_failed");
+      if (advanced) {
+        await waitForPageEvidenceReady(page, Math.min(credentials.timeout, 8000));
+        passwordInput = await firstVisibleLocatorAcrossFrames(page, passwordInputSelectors(), 3500);
+      }
+    }
+  }
   for (let attempt = 1; !passwordInput && attempt <= 3; attempt += 1) {
     const trigger = await firstVisibleLoginTrigger(page, Math.min(2200 + attempt * 600, 4000));
     if (!trigger) {
@@ -553,15 +667,19 @@ async function attemptLoginIfCredentialsProvided(
     return "login_form_not_found";
   }
   transitions.push("password_input_visible");
-  const usernameInput = await firstVisibleLocatorAcrossFrames(page, usernameInputSelectors(), 3000);
-  if (!usernameInput) {
-    transitions.push("username_input_not_found");
-    return "username_input_not_found";
+  if (!usernameFilled) {
+    const usernameInput = await firstVisibleLocatorAcrossFrames(page, usernameInputSelectors(), 3000);
+    if (!usernameInput) {
+      transitions.push("username_input_not_found");
+      return "username_input_not_found";
+    }
+    await usernameInput.fill(username, { timeout: 3500 }).catch(() => undefined);
+    usernameFilled = true;
   }
 
   transitions.push("login_form_ready");
-  await usernameInput.fill(username, { timeout: 3500 }).catch(() => undefined);
   await passwordInput.fill(password, { timeout: 3500 }).catch(() => undefined);
+  const preSubmitURL = page.url();
   const submit = await firstVisibleLoginSubmit(page);
   if (submit) {
     await submit.click({ timeout: 3000 }).catch(() => undefined);
@@ -572,15 +690,47 @@ async function attemptLoginIfCredentialsProvided(
   await waitForPageEvidenceReady(page, Math.min(credentials.timeout, 8000));
   const passwordStillVisible = await firstVisibleLocatorAcrossFrames(page, passwordInputSelectors(), 1200);
   if (passwordStillVisible) {
+    const failure = await classifyVisibleLoginFailure(page);
+    if (failure) {
+      transitions.push(`login_failure:${failure}`);
+      return `submitted_${failure}`;
+    }
     transitions.push("submitted_login_form_still_visible");
     return "submitted_login_form_still_visible";
   }
-  if (looksLikeLoginURL(page.url())) {
+  const finalURL = page.url();
+  const authenticatedContextVisible = await hasAuthenticatedContextMarker(page);
+  if (looksLikeLoginURL(finalURL) || (finalURL === preSubmitURL && !authenticatedContextVisible)) {
     transitions.push("submitted_still_on_login_url");
     return "submitted_still_on_login_url";
   }
   transitions.push("authenticated_navigation_observed");
   return "submitted_navigation_observed";
+}
+
+async function classifyVisibleLoginFailure(page: any): Promise<string> {
+  const text = await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+  if (/(invalid credentials|incorrect username|incorrect password|用户名或密码错误|账号或密码错误|邮箱或密码错误)/i.test(text)) return "invalid_credentials";
+  if (/(temporarily locked|too many failed attempts|账户.*锁定|账号.*锁定|尝试次数过多)/i.test(text)) return "account_locked";
+  if (/(captcha|human verification|人机验证|安全验证)/i.test(text)) return "captcha_required";
+  if (/(network error|request failed|网络错误|请求失败|服务不可用)/i.test(text)) return "network_error";
+  return "";
+}
+
+async function hasAuthenticatedContextMarker(page: any): Promise<boolean> {
+  const selectors = [
+    "[data-testid*='new-project' i]", "[data-testid*='create-project' i]", "[data-testid*='workspace' i]",
+    "[data-testid*='user-menu' i]", "[data-testid*='avatar' i]", "a[href*='/projects']", "a[href*='/workspace']",
+  ];
+  if (await firstVisibleLocatorAcrossFrames(page, selectors, 1200)) return true;
+  const authenticatedName = /新建项目|创建项目|项目工作台|退出登录|工作台|new\s*project|create\s*project|workspace|log\s*out|sign\s*out/i;
+  const frames = typeof page.frames === "function" ? page.frames() : [page];
+  for (const frame of frames) {
+    for (const locator of [frame.getByRole("button", { name: authenticatedName }).first(), frame.getByRole("link", { name: authenticatedName }).first()]) {
+      if (await locator.isVisible({ timeout: 800 }).catch(() => false)) return true;
+    }
+  }
+  return false;
 }
 
 async function navigateToLikelyLoginPath(page: any, timeout: number): Promise<any | undefined> {
@@ -594,10 +744,27 @@ async function navigateToLikelyLoginPath(page: any, timeout: number): Promise<an
     if (passwordInput) {
       return passwordInput;
     }
+    const trigger = await firstVisibleLoginTrigger(page, 2500);
+    if (trigger && await trigger.click({ timeout: 3000 }).then(() => true).catch(() => false)) {
+      await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
+      const revealedPassword = await firstVisibleLocatorAcrossFrames(page, passwordInputSelectors(), 3000);
+      if (revealedPassword) return revealedPassword;
+    }
   }
   await page.goto(current.toString(), { waitUntil: "domcontentloaded", timeout: Math.min(timeout, 6000) }).catch(() => undefined);
   await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
   return undefined;
+}
+
+async function isLikelyLoginContext(page: any): Promise<boolean> {
+  if (looksLikeLoginURL(page.url())) return true;
+  const title = await page.title().catch(() => "");
+  if (/(login|log\s*in|sign\s*in|登录|登入|登陆)/i.test(title)) return true;
+  const authMethod = /邮箱登录|账号登录|密码登录|手机号登录|email\s*(login|sign\s*in)|password\s*(login|sign\s*in)/i;
+  for (const locator of [page.getByRole("button", { name: authMethod }).first(), page.getByRole("link", { name: authMethod }).first()]) {
+    if (await locator.isVisible({ timeout: 800 }).catch(() => false)) return true;
+  }
+  return false;
 }
 
 async function waitForPageEvidenceReady(page: any, timeoutMS = 8000): Promise<void> {

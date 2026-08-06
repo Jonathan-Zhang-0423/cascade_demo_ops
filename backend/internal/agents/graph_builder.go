@@ -365,6 +365,7 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 		graph.Assets.Brand = project.BrandKit
 		graph.Assets.Provenance = &model.AssetProvenance{WorkflowGraphID: graph.ID, GraphVersion: graph.Version, GeneratedBy: "GraphBuilderAgent"}
 	}
+	bindGraphRequirements(project, graph)
 	return graph, nil
 }
 
@@ -493,6 +494,7 @@ func (a *GraphBuilderAgent) generateGraphFromBusinessStagePlan(ctx context.Conte
 		graph.Assets.Brand = project.BrandKit
 		graph.Assets.Provenance = &model.AssetProvenance{WorkflowGraphID: graph.ID, GraphVersion: graph.Version, GeneratedBy: "GraphBuilderAgent"}
 	}
+	bindGraphRequirements(project, graph)
 	return graph, nil
 }
 
@@ -523,7 +525,7 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	if stage.Kind == model.BusinessStageKindSessionSetup {
 		actionValue = ""
 	}
-	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup
+	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup || stage.Kind == model.BusinessStageKindFinalObserve
 	validations := []model.ValidationSpec{businessStageValidation(stage, actionType, target, required)}
 	metadata := map[string]any{
 		"business_stage_id":           stage.ID,
@@ -533,7 +535,7 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 		"non_destructive":             stage.Action.NonDestructive,
 		"business_stage_entry_route":  stage.EntryRoute,
 		"verification_status":         "business_stage_plan",
-		"runtime_adaptive":            true,
+		"runtime_adaptive":            stage.Action.NonDestructive,
 		"expected_route_after_action": stage.ExpectedRouteAfterAction,
 	}
 	if len(stage.Uncertainties) > 0 {
@@ -673,9 +675,26 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 	if action == model.GraphActionNavigate {
 		kind = "url_matches"
 		expected = firstNonEmpty(target.URL, stage.EntryRoute)
-	} else if action == model.GraphActionWait || action == model.GraphActionInspect {
+	} else if stage.Kind == model.BusinessStageKindBusinessAction && strings.TrimPrefix(stage.ID, "business_stage_") == "new_project_entry" {
 		kind = "text_contains"
-		expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)
+		target = model.ActionTarget{}
+		expected = "新建项目"
+	} else if stage.Kind == model.BusinessStageKindBusinessInput && strings.TrimSpace(stage.Action.InputValue) != "" {
+		kind = "value_equals"
+		expected = stage.Action.InputValue
+	} else if stage.Kind == model.BusinessStageKindBusinessSubmit && strings.TrimSpace(stage.ExpectedRouteAfterAction) != "" {
+		kind = "url_matches"
+		target = model.ActionTarget{URL: stage.ExpectedRouteAfterAction}
+		expected = stage.ExpectedRouteAfterAction
+	} else if action == model.GraphActionWait || action == model.GraphActionInspect {
+		if route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute); route != "" {
+			kind = "url_matches"
+			target = model.ActionTarget{URL: route}
+			expected = route
+		} else {
+			kind = "text_contains"
+			expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)
+		}
 	}
 	return model.ValidationSpec{
 		ID:           "validate_" + stage.ID,
@@ -728,7 +747,7 @@ func urlForBusinessStage(stage model.BusinessStage, entryPoint string) string {
 
 func businessStageKindIsCoreForGraph(kind model.BusinessStageKind) bool {
 	switch kind {
-	case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
+	case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit, model.BusinessStageKindObserveProgress:
 		return true
 	default:
 		return false
@@ -937,6 +956,7 @@ func (a *GraphBuilderAgent) generateGraphFromVerifiedInteractions(ctx context.Co
 		graph.Assets.Brand = project.BrandKit
 		graph.Assets.Provenance = &model.AssetProvenance{WorkflowGraphID: graph.ID, GraphVersion: graph.Version, GeneratedBy: "GraphBuilderAgent"}
 	}
+	bindGraphRequirements(project, graph)
 	return graph, nil
 }
 
@@ -2067,13 +2087,28 @@ func maskSelectorsFromProject(project *model.ProjectContext) []string {
 }
 
 func requirementsFromProject(project *model.ProjectContext) []model.GraphRequirement {
+	if project == nil {
+		return nil
+	}
+	if project.Inputs != nil && len(project.Inputs.Requirements) > 0 {
+		out := make([]model.GraphRequirement, 0, len(project.Inputs.Requirements))
+		for _, item := range project.Inputs.Requirements {
+			evidence := append([]model.EvidenceRef{}, item.EvidenceRefs...)
+			if len(evidence) == 0 {
+				evidence = []model.EvidenceRef{requirementInputEvidence(item.ID)}
+			}
+			out = append(out, model.GraphRequirement{ID: item.ID, Kind: item.Kind, Description: item.Description, Required: item.Kind == "must_show" && item.Required, EvidenceRefs: evidence})
+		}
+		return out
+	}
 	requirements := make([]model.GraphRequirement, 0, len(project.MustShow)+len(project.MustNotShow)+len(project.ForbiddenPages)+len(project.ForbiddenData))
 	for i, item := range project.MustShow {
 		requirements = append(requirements, model.GraphRequirement{
-			ID:          fmt.Sprintf("must_show_%d", i+1),
-			Kind:        "must_show",
-			Description: item,
-			Required:    true,
+			ID:           stableLegacyRequirementID("must_show", item, i),
+			Kind:         "must_show",
+			Description:  item,
+			Required:     true,
+			EvidenceRefs: []model.EvidenceRef{requirementInputEvidence(stableLegacyRequirementID("must_show", item, i))},
 		})
 	}
 	for i, item := range project.MustNotShow {
@@ -2081,7 +2116,7 @@ func requirementsFromProject(project *model.ProjectContext) []model.GraphRequire
 			ID:          fmt.Sprintf("must_not_show_%d", i+1),
 			Kind:        "must_not_show",
 			Description: item,
-			Required:    true,
+			Required:    false,
 		})
 	}
 	for i, item := range project.ForbiddenPages {
@@ -2089,7 +2124,7 @@ func requirementsFromProject(project *model.ProjectContext) []model.GraphRequire
 			ID:          fmt.Sprintf("forbidden_page_%d", i+1),
 			Kind:        "forbidden_page",
 			Description: item,
-			Required:    true,
+			Required:    false,
 		})
 	}
 	for i, item := range project.ForbiddenData {
@@ -2101,4 +2136,172 @@ func requirementsFromProject(project *model.ProjectContext) []model.GraphRequire
 		})
 	}
 	return requirements
+}
+
+func stableLegacyRequirementID(kind, description string, index int) string {
+	digest := strings.TrimPrefix(model.SHA256Hex([]byte(kind+"\x00"+strings.TrimSpace(description))), "sha256:")
+	if len(digest) >= 12 {
+		return "requirement_" + kind + "_" + digest[:12]
+	}
+	return fmt.Sprintf("%s_%d", kind, index+1)
+}
+
+func requirementInputEvidence(requirementID string) model.EvidenceRef {
+	return model.EvidenceRef{ID: "ev_" + requirementID, Kind: model.EvidenceKindUserInput, Summary: "用户明确提交的结构化演示要求", FieldPath: "project_input_bundle.requirements." + requirementID, Confidence: 1}
+}
+
+// RebindGraphRequirementsForPackage upgrades legacy projects on an in-memory
+// package clone without mutating the authoritative saved graph.
+func RebindGraphRequirementsForPackage(project *model.ProjectContext, graph *model.DemoWorkflowGraph) {
+	bindGraphRequirements(project, graph)
+}
+
+func bindGraphRequirements(project *model.ProjectContext, graph *model.DemoWorkflowGraph) {
+	if graph == nil {
+		return
+	}
+	graph.Requirements = requirementsFromProject(project)
+	for index := range graph.Requirements {
+		requirement := &graph.Requirements[index]
+		requirement.NodeRefs = cleanGraphNodeRefs(requirement.NodeRefs, graph)
+		if !requirement.Required || requirement.Kind != "must_show" {
+			requirement.NodeRefs = nil
+			continue
+		}
+		keywords := intentKeywordsForText(requirement.Description)
+		preferredKinds := requirementStageKinds(requirement.Description)
+		bestScore := 0
+		var best *model.GraphNode
+		for _, node := range graph.Nodes {
+			if node == nil || !graphNodeHasRequiredValidation(node) {
+				continue
+			}
+			stageKind, hasStageKind := graphNodeBusinessStageKind(node)
+			stageKindScore := preferredKinds[stageKind]
+			if len(preferredKinds) > 0 && (!hasStageKind || stageKindScore == 0) {
+				continue
+			}
+			refs := graphNodeEvidenceRefs(node)
+			if len(refs) == 0 && !graphNodeHasPlanBackedRuntimeContract(node) {
+				continue
+			}
+			text := strings.Join([]string{node.ID, node.Title, node.Goal, node.Description, node.Action, node.InputData, node.ExpectedOutcome, narrativeCaption(node), narrativeCallout(node)}, " ")
+			score := keywordMatchScore(keywords, text)
+			score += stageKindScore
+			if score > bestScore {
+				bestScore, best = score, node
+			}
+		}
+		if best != nil && bestScore > 0 {
+			requirement.NodeRefs = []string{best.ID}
+			requirement.EvidenceRefs = uniqueEvidenceRefs(append(requirement.EvidenceRefs, graphNodeEvidenceRefs(best)...))
+		}
+	}
+}
+
+func graphNodeHasPlanBackedRuntimeContract(node *model.GraphNode) bool {
+	if node == nil || node.Metadata == nil || node.Metadata["runtime_adaptive"] != true || node.ActionSpec == nil || node.Capture == nil {
+		return false
+	}
+	nonDestructive, ok := node.Metadata["non_destructive"].(bool)
+	if !ok || !nonDestructive || strings.TrimSpace(node.ExpectedOutcome) == "" || (!node.Capture.Screenshot && !node.Capture.Video) {
+		return false
+	}
+	hasRoute := strings.TrimSpace(node.PageRef) != "" || strings.TrimSpace(node.ActionSpec.Target.URL) != ""
+	hasSemanticTarget := strings.TrimSpace(node.ActionSpec.Target.Selector) != "" || strings.TrimSpace(node.ActionSpec.Target.TestID) != "" || strings.TrimSpace(node.ActionSpec.Target.Role) != "" || strings.TrimSpace(node.ActionSpec.Target.Label) != "" || strings.TrimSpace(node.ActionSpec.Target.Text) != "" || strings.TrimSpace(node.Title) != "" || strings.TrimSpace(node.Goal) != ""
+	return hasRoute && hasSemanticTarget && graphNodeHasRequiredValidation(node)
+}
+
+func cleanGraphNodeRefs(values []string, graph *model.DemoWorkflowGraph) []string {
+	valid := map[string]bool{}
+	if graph != nil {
+		for _, node := range graph.Nodes {
+			if node != nil && strings.TrimSpace(node.ID) != "" {
+				valid[node.ID] = true
+			}
+		}
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] || !valid[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func graphNodeBusinessStageKind(node *model.GraphNode) (model.BusinessStageKind, bool) {
+	if node == nil || node.Metadata == nil {
+		return "", false
+	}
+	value, ok := node.Metadata["business_stage_kind"].(string)
+	if !ok || strings.TrimSpace(value) == "" {
+		return "", false
+	}
+	return model.BusinessStageKind(value), true
+}
+
+func requirementStageKinds(description string) map[model.BusinessStageKind]int {
+	match := func(values ...string) bool { return containsAnyNormalized(description, values...) }
+	kinds := map[model.BusinessStageKind]int{}
+	switch {
+	case match("登录", "登入", "sign in", "signin", "login", "authenticated", "authentication"):
+		kinds[model.BusinessStageKindSessionSetup] = 120
+	case match("最终实际", "实际效果", "运行效果", "最终效果", "最终结果", "成品", "actual result", "final result", "final output", "working result"):
+		kinds[model.BusinessStageKindFinalObserve] = 120
+		kinds[model.BusinessStageKindObserveProgress] = 100
+	case match("进度", "编程过程", "构建过程", "执行过程", "等待 agent", "progress", "building", "running"):
+		kinds[model.BusinessStageKindObserveProgress] = 120
+	case match("agent 已启动", "agent已启动", "启动 agent", "启动agent", "开始 agent", "开始agent", "开始编程", "启动编程", "start agent", "agent started", "start build", "build started"):
+		kinds[model.BusinessStageKindBusinessSubmit] = 120
+	case match("新建项目", "创建项目", "新增项目", "new project", "create project"):
+		kinds[model.BusinessStageKindBusinessAction] = 120
+		kinds[model.BusinessStageKindBusinessInput] = 100
+	case match("项目名", "项目名称", "填写", "输入", "project name", "enter name", "fill"):
+		kinds[model.BusinessStageKindBusinessInput] = 120
+	case match("模式", "mode", "选择"):
+		kinds[model.BusinessStageKindModeSelection] = 120
+	}
+	return kinds
+}
+
+func narrativeCaption(node *model.GraphNode) string {
+	if node == nil || node.Narrative == nil {
+		return ""
+	}
+	return node.Narrative.Caption
+}
+
+func narrativeCallout(node *model.GraphNode) string {
+	if node == nil || node.Narrative == nil {
+		return ""
+	}
+	return node.Narrative.Callout
+}
+
+func graphNodeHasRequiredValidation(node *model.GraphNode) bool {
+	for _, validation := range node.Validations {
+		if validation.Required {
+			return true
+		}
+	}
+	return false
+}
+
+func graphNodeEvidenceRefs(node *model.GraphNode) []model.EvidenceRef {
+	if node == nil {
+		return nil
+	}
+	refs := append([]model.EvidenceRef{}, node.EvidenceRefs...)
+	if node.ActionSpec != nil {
+		refs = append(refs, node.ActionSpec.Target.EvidenceRefs...)
+	}
+	for _, validation := range node.Validations {
+		refs = append(refs, validation.EvidenceRefs...)
+	}
+	return uniqueEvidenceRefs(refs)
 }

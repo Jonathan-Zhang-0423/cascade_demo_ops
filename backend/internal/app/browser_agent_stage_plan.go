@@ -23,23 +23,24 @@ type BrowserAgentRuntimePlan struct {
 	PolicyHashSHA256       string
 	// The verifier receives the approved contracts, never a browser/page
 	// object. This keeps Validation Agent decisions traceable to the package.
-	WorkflowGraph       *model.DemoWorkflowGraph
-	Plan                *model.ExecutionScriptDocument
-	StageApprovalPlan   *model.StageApprovalPlan
-	ScriptOutline       *model.BrowserAgentScriptOutline
+	WorkflowGraph        *model.DemoWorkflowGraph
+	Plan                 *model.ExecutionScriptDocument
+	StageApprovalPlan    *model.StageApprovalPlan
+	ScriptOutline        *model.BrowserAgentScriptOutline
 	BrowserAgentContract *model.BrowserAgentContract
-	AllowedDomains         []string
-	ForbiddenPages         []string
-	ExplorationScope       model.BrowserAgentExplorationScope
-	ForbiddenActions       []string
-	RepairPolicy           model.BrowserAgentRepairPolicy
-	Stages                 []BrowserAgentRuntimeStage
+	AllowedDomains       []string
+	ForbiddenPages       []string
+	ExplorationScope     model.BrowserAgentExplorationScope
+	ForbiddenActions     []string
+	RepairPolicy         model.BrowserAgentRepairPolicy
+	Stages               []BrowserAgentRuntimeStage
 }
 
 type BrowserAgentRuntimeStage struct {
 	ID             string
 	Order          int
 	NodeID         string
+	StageKind      model.BusinessStageKind
 	Objective      string
 	BusinessIntent string
 	EntryRoute     string
@@ -499,11 +500,11 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		RunID: pkg.RecordingRunSpec.RunID, SourcePackageID: pkg.PackageID,
 		SourceBundleHashSHA256: bundle.Reproducibility.BundleHashSHA256,
 		PolicyHashSHA256:       bundle.Reproducibility.BrowserAgentContractHashSHA256,
-		WorkflowGraph:           pkg.WorkflowGraph,
-		Plan:                    bundle.PlanJSON,
-		StageApprovalPlan:       bundle.StageApprovalPlan,
-		ScriptOutline:           bundle.ScriptOutline,
-		BrowserAgentContract:    bundle.BrowserAgentContract,
+		WorkflowGraph:          pkg.WorkflowGraph,
+		Plan:                   bundle.PlanJSON,
+		StageApprovalPlan:      bundle.StageApprovalPlan,
+		ScriptOutline:          bundle.ScriptOutline,
+		BrowserAgentContract:   bundle.BrowserAgentContract,
 		AllowedDomains:         append([]string{}, bundle.SecurityPolicy.AllowedDomains...),
 		ForbiddenPages:         append([]string{}, bundle.SecurityPolicy.ForbiddenPages...),
 		ExplorationScope:       bundle.ScriptOutline.AllowedExplorationScope,
@@ -546,7 +547,7 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		}
 		capturePlan := mergeApprovedCapturePlan(approved.CapturePlan, outline.CapturePlan)
 		plan.Stages = append(plan.Stages, BrowserAgentRuntimeStage{
-			ID: approved.ID, Order: approved.Order, NodeID: approved.NodeID, Objective: approved.Objective,
+			ID: approved.ID, Order: approved.Order, NodeID: approved.NodeID, StageKind: approved.StageKind, Objective: approved.Objective,
 			BusinessIntent: approved.BusinessIntent, EntryRoute: firstNonEmptyString(outline.EntryRoute, approved.EntryRoute),
 			Route: firstNonEmptyString(outline.Route, approved.TargetRoute), URL: firstNonEmptyString(outline.URL, approved.TargetURL),
 			TargetContract: *approvedTarget, Components: append([]model.BrowserAgentComponentTarget{}, outline.Components...),

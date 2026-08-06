@@ -329,6 +329,41 @@ func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked || build.Package.ConfidenceSummary.RequirementCoverage != 1 {
+		t.Fatalf("real login package must be coverage-ready: summary=%+v requirements=%+v", build.Package.ConfidenceSummary, build.Package.WorkflowGraph.Requirements)
+	}
+	assertSessionStageEvidence := func(layer string, kind model.BusinessStageKind, refs []model.EvidenceRef, hasRequiredValidation bool) {
+		t.Helper()
+		if kind != model.BusinessStageKindSessionSetup {
+			return
+		}
+		hasRuntime := false
+		for _, ref := range refs {
+			if ref.Kind == model.EvidenceKindBrowserScan || ref.Kind == model.EvidenceKindBrowserTrace {
+				hasRuntime = true
+			}
+		}
+		if !hasRuntime || !hasRequiredValidation {
+			t.Fatalf("%s session stage lacks runtime evidence or deterministic success contract: refs=%+v", layer, refs)
+		}
+	}
+	for _, step := range build.Package.ExecutableScriptBundle.PlanJSON.Steps {
+		hasValidation := false
+		for _, validation := range step.Validations {
+			hasValidation = hasValidation || validation.Required
+		}
+		assertSessionStageEvidence("plan", step.StageKind, step.EvidenceRefs, hasValidation)
+	}
+	for _, stage := range build.Package.ExecutableScriptBundle.StageApprovalPlan.Stages {
+		assertSessionStageEvidence("stage approval", stage.StageKind, append(stage.EvidenceRefs, stage.Interaction.EvidenceRefs...), stage.SuccessState != "" && stage.TargetContract != nil)
+	}
+	for _, stage := range build.Package.ExecutableScriptBundle.ScriptOutline.Stages {
+		refs := append([]model.EvidenceRef{}, stage.EvidenceRefs...)
+		for _, interaction := range stage.Interactions {
+			refs = append(refs, interaction.EvidenceRefs...)
+		}
+		assertSessionStageEvidence("outline", stage.StageKind, refs, stage.SuccessState != "" && stage.TargetContract != nil)
+	}
 	for _, finding := range append(append([]model.AgentFinding{}, build.Package.SafetyReport.PolicyFindings...), build.Package.ExecutableScriptBundle.Validation.Findings...) {
 		if strings.Contains(finding.ID, "runtime_page_evidence_missing") || strings.Contains(finding.ID, "bundle_hash_mismatch") {
 			t.Fatalf("successful login evidence produced a secondary blocker: %+v", finding)

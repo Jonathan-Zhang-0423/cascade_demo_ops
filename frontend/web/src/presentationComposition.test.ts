@@ -43,7 +43,7 @@ const session: EditorSession = {
   final_profile: { width: 1920, height: 1080, fps: 30, format: "mp4" },
   preview: { status: "not_started" },
   final_render: { status: "not_started" },
-  provider_capabilities: [],
+  presentation_capabilities: [],
 };
 
 describe("presentation composition", () => {

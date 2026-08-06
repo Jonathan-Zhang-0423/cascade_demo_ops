@@ -77,6 +77,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	progressBrowserAgent(request.Progress, "script_ready", "Browser Agent 可审计脚本已生成并通过安全预演。", 38)
 
 	openRequest := browserAgentWorkerOpenRequest(request)
+	openRequest.TaskSecrets = request.TaskSecrets
 	// Only the Server-created local fixture contains no customer material. Real
 	// App packages keep their raw recording sensitive by default.
 	if request.Package.Metadata["producer"] == "server_controlled_business_acceptance" &&
@@ -484,6 +485,7 @@ func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver
 	recordingSensitive := true
 	return driver.BrowserAgentWorkerOpenRequest{
 		SessionID: safePathSegment(request.CloudJobID), OutputDir: request.RecordingOutputDir,
+		InitialURL: firstNonEmptyString(request.Package.ProjectContextSummary.ProductURL, request.Package.RecordingRunSpec.BaseURL),
 		Browser: driver.BrowserAgentWorkerBrowser{
 			Engine: request.Package.RecordingRunSpec.Browser.Engine, Headless: request.Package.RecordingRunSpec.Browser.Headless,
 			Viewport: viewport, RecordVideo: request.Package.RecordingRunSpec.Outputs.RawRecording,
@@ -501,7 +503,7 @@ func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver
 
 func workerStageFromRuntime(stage BrowserAgentRuntimeStage) driver.BrowserAgentWorkerStage {
 	return driver.BrowserAgentWorkerStage{
-		ID: stage.ID, Order: stage.Order, NodeID: stage.NodeID, Objective: stage.Objective,
+		ID: stage.ID, Order: stage.Order, NodeID: stage.NodeID, StageKind: stage.StageKind, Objective: stage.Objective,
 		EntryRoute: stage.EntryRoute, Route: stage.Route, URL: stage.URL, TargetContract: stage.TargetContract,
 		Components:     append([]model.BrowserAgentComponentTarget{}, stage.Components...),
 		Interactions:   append([]model.BrowserAgentInteraction{}, stage.Interactions...),

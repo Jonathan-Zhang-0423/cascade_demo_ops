@@ -67,7 +67,7 @@ func TestDevHTTPBridgeReadsLocalRepoSummary(t *testing.T) {
 		Mode:               model.AppModeDesktop,
 		ProductURL:         "https://app.example.com",
 		LocalRepoPath:      repoPath,
-		ProductDescription: "展示团队邀请流程",
+		ProductDescription: "展示新建项目流程",
 		TargetAudience:     "中国运营团队",
 		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
 	}})
@@ -546,6 +546,30 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	}
 }
 
+func TestBuildClientExecutionPackagePreviewDigestIsStable(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode: model.AppModeDesktop, ProductURL: "https://app.example.com",
+		ProductDescription: "创建项目并启动构建。", TargetAudience: "普通用户",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://app.example.com")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	first, err := buildClientExecutionPackageFromState(&state, "org_test", time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := buildClientExecutionPackageFromState(&state, "org_test", time.Unix(200, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PackageDigestSHA256 != second.PackageDigestSHA256 || first.ApprovalSubjectDigestSHA256 != second.ApprovalSubjectDigestSHA256 {
+		t.Fatalf("unchanged preview digests must be stable: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestBlockingMissingEvidenceCannotBeDowngradedToWarning(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	pkg.ExecutableScriptBundle.StageApprovalPlan.UncertaintyReport = []model.StageUncertainty{{ID: "missing_business", Kind: "missing_evidence", Summary: "关键业务证据缺失", Blocking: true}}
@@ -585,6 +609,43 @@ func TestBuildClientExecutionPackageRejectsInjectedCodeSelectorInPageOnlyMode(t 
 	var preflight *packagePreflightError
 	if !errors.As(err, &preflight) || len(preflight.Findings) == 0 || preflight.Findings[0].ID != "source_evidence_leakage" {
 		t.Fatalf("expected source_evidence_leakage preflight, got %T: %v", err, err)
+	}
+}
+
+func TestPageOnlyPackageRetainsRequirementsAndStripsSourceExecutionEvidence(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode: model.AppModeDesktop, ProductURL: "https://app.example.com", LocalRepoPath: repoPath,
+		ProductDescription: "展示新建项目并进入工作台。", TargetAudience: "普通用户",
+		MustShow: []string{"新建项目", "工作台状态"}, MustNotShow: []string{"API Key"},
+		ForbiddenPages: []string{"/billing"}, ForbiddenData: []string{"客户邮箱"},
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://app.example.com")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	if state.SourceBinding == nil || state.SourceBinding.EffectiveMode != model.ProductSourceModePageOnly {
+		t.Fatalf("fixture must enter page-only mode: %+v", state.SourceBinding)
+	}
+	if state.ProjectContext == nil || state.ProjectContext.Inputs == nil || len(state.ProjectContext.Inputs.Requirements) != 5 {
+		t.Fatalf("structured requirements were not retained in page-only state: %+v", state.ProjectContext)
+	}
+	build, err := buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if build.Package.WorkflowGraph == nil || len(build.Package.WorkflowGraph.Requirements) != 5 {
+		t.Fatalf("page-only package lost structured requirements: %+v", build.Package.WorkflowGraph)
+	}
+	if model.ClientPackageContainsSourceDerivedExecutionEvidence(&build.Package) {
+		t.Fatalf("page-only package retained source-derived execution evidence at %v", packageSourceEvidenceLocations(&build.Package))
+	}
+	for _, requirement := range build.Package.WorkflowGraph.Requirements {
+		if requirement.Kind != "must_show" && requirement.Required {
+			t.Fatalf("negative safety constraint was counted as positive coverage: %+v", requirement)
+		}
 	}
 }
 
@@ -827,7 +888,7 @@ func TestPrepareProductRunReadsMatchedLocalProjectAndStopsAtDraftApproval(t *tes
 		Mode:               model.AppModeDesktop,
 		ProductURL:         "https://app.example.com",
 		LocalRepoPath:      repoPath,
-		ProductDescription: "展示团队邀请流程。",
+		ProductDescription: "展示新建项目流程。",
 		TargetAudience:     "中国运营团队",
 	}})
 	if err != nil {

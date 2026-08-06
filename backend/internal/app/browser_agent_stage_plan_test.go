@@ -414,6 +414,23 @@ func ptrBrowserAgentPackage(pkg model.ClientExecutionPackage) *model.ClientExecu
 	return &pkg
 }
 
+func TestCompactGraphRequirementsForUploadDropsBlankNodeRefs(t *testing.T) {
+	got := compactGraphRequirementsForUpload([]model.GraphRequirement{{
+		ID: "requirement", Kind: "must_show", Required: true,
+		NodeRefs: []string{"", "  ", "node_a", "node_a", "node_b"},
+	}})
+	if len(got) != 1 || len(got[0].NodeRefs) != 2 || got[0].NodeRefs[0] != "node_a" || got[0].NodeRefs[1] != "node_b" {
+		t.Fatalf("blank or duplicate node refs survived upload compaction: %+v", got)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) == "" || string(encoded) == "null" {
+		t.Fatalf("requirements were not serialized: %s", encoded)
+	}
+}
+
 func readBrowserAgentOutlineFixture(t *testing.T) model.ClientExecutionPackage {
 	t.Helper()
 	_, current, _, ok := runtime.Caller(0)

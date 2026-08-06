@@ -2,7 +2,6 @@ import { createHash, createPublicKey } from "node:crypto";
 import { mkdirSync, cpSync, existsSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { isIP } from "node:net";
 
 const root = resolve(".");
 const appPackage = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
@@ -21,10 +20,11 @@ const sourceFFmpegPath = String(process.env.CASCADE_PACKAGE_FFMPEG_PATH || "").t
 const sourceFFprobePath = String(process.env.CASCADE_PACKAGE_FFPROBE_PATH || "").trim();
 const sourceUpdatePublicKeyPath = String(process.env.DEMOOPS_UPDATE_PUBLIC_KEY_PATH || "").trim();
 const updateManifestURL = String(process.env.DEMOOPS_UPDATE_MANIFEST_URL || "").trim();
-const controlPlaneBaseURL = normalizeControlPlaneBaseURL(process.env.DEMOOPS_CONTROL_PLANE_BASE_URL || "");
 const releaseChannel = String(process.env.CASCADE_RELEASE_CHANNEL || "internal").trim();
 const desktopBinary = resolve("dist", "desktop", targetGOOS, `cascade-demoops-desktop${desktopExt}`);
 const updaterBinary = resolve("dist", "desktop", targetGOOS, `cascade-demoops-updater${desktopExt}`);
+const directConfigurerBinary = resolve("dist", "desktop", targetGOOS, `browser-agent-direct-configure${desktopExt}`);
+const packagedDirectConfigurer = resolve(packageRoot, "tools", basename(directConfigurerBinary));
 const releaseBaseName = `CascadeDemoOps-${appPackage.version || "0.0.0"}-${targetGOOS}-${process.arch}`;
 const releaseZip = resolve(releaseRoot, `${releaseBaseName}.zip`);
 const releaseChecksum = `${releaseZip}.sha256`;
@@ -45,19 +45,6 @@ if (releaseChannel !== "internal" && !sourceUpdatePublicKeyPath) {
 if (releaseChannel !== "internal" && !updateManifestURL.startsWith("https://")) {
   throw new Error("beta/stable packages require DEMOOPS_UPDATE_MANIFEST_URL on a DemoOps HTTPS release origin");
 }
-if (releaseChannel !== "internal" && !controlPlaneBaseURL) {
-  throw new Error("beta/stable packages require DEMOOPS_CONTROL_PLANE_BASE_URL");
-}
-if (releaseChannel !== "internal" && new URL(controlPlaneBaseURL).protocol !== "https:") {
-  throw new Error("beta/stable packages require an HTTPS DemoOps control plane");
-}
-if (releaseChannel !== "internal" && new URL(controlPlaneBaseURL).pathname !== "/") {
-  throw new Error("beta/stable packages require a DemoOps control-plane origin without a path");
-}
-if (releaseChannel !== "internal" && isIP(new URL(controlPlaneBaseURL).hostname)) {
-  throw new Error("beta/stable packages require a dedicated DemoOps control-plane hostname, not a server IP");
-}
-
 if (!fallbackWebBuild()) {
   runWithFallback("pnpm", ["--filter", "@cascade/web", "build"], fallbackWebBuild);
 }
@@ -67,6 +54,7 @@ if (!fallbackWorkerBuild()) {
 if (targetGOOS === "windows") {
   run("node", ["scripts/build-wails-desktop.mjs"], { env: { CASCADE_SKIP_WEB_BUILD: "1" } });
   run("go", ["build", "-trimpath", "-ldflags", "-s -w", "-o", updaterBinary, "./cmd/desktop-updater"], { cwd: resolve(root, "backend") });
+  run("go", ["build", "-trimpath", "-ldflags", "-s -w", "-o", directConfigurerBinary, "./cmd/browser-agent-direct-configure"], { cwd: resolve(root, "backend") });
 } else {
   run("node", ["scripts/build-desktop.mjs", targetGOOS]);
 }
@@ -75,6 +63,7 @@ rmSync(packageRoot, { recursive: true, force: true });
 mkdirSync(resourceRoot, { recursive: true });
 copyIfExists(desktopBinary, resolve(packageRoot, basename(desktopBinary)));
 copyIfExists(updaterBinary, resolve(packageRoot, basename(updaterBinary)));
+if (targetGOOS === "windows") copyIfExists(directConfigurerBinary, packagedDirectConfigurer);
 copyIfExists(videoWorkerDist, resolve(resourceRoot, "sidecars", "video-worker", "dist"));
 copyVideoWorkerRuntimeDependencies(resolve(resourceRoot, "sidecars", "video-worker", "node_modules"));
 copyIfExists(webDist, resolve(resourceRoot, "web"));
@@ -86,7 +75,7 @@ if (releaseChannel !== "internal" && (!existsSync(bundledFFmpegPath) || !existsS
   throw new Error("beta/stable packages require CASCADE_PACKAGE_FFMPEG_PATH and CASCADE_PACKAGE_FFPROBE_PATH");
 }
 if (releaseChannel !== "internal") {
-  run("node", ["scripts/sign-windows.mjs", resolve(packageRoot, basename(desktopBinary)), resolve(packageRoot, basename(updaterBinary))]);
+  run("node", ["scripts/sign-windows.mjs", resolve(packageRoot, basename(desktopBinary)), resolve(packageRoot, basename(updaterBinary)), packagedDirectConfigurer]);
 }
 const runtimes = {};
 if (existsSync(bundledNodePath)) runtimes.node = `runtimes/node/${nodeBinaryName}`;
@@ -96,8 +85,16 @@ const runtimeManifest = {
   app: "Cascade DemoOps",
   version: appPackage.version || "0.0.0",
   resource_contract_version: 1,
-  control_plane: {
-    base_url: controlPlaneBaseURL,
+    browser_agent_direct: {
+    protocol_version: "browser-agent-direct-v1",
+    crypto_suite: "AES-256-GCM+HKDF-SHA256",
+    control_url_embedded: false,
+    access_token_embedded: false,
+    configuration: "user_managed_windows_credential_manager",
+    provisioning_tool: targetGOOS === "windows" ? `../tools/${basename(directConfigurerBinary)}` : "",
+    provisioning_tool_token_argument_supported: false,
+    provisioning_tool_strict_known_hosts: true,
+    provisioning_tool_ssh_host_key_algorithm: "ssh-ed25519",
   },
   sidecars: {
     "video-worker": "sidecars/video-worker/dist/index.js",
@@ -236,6 +233,11 @@ function buildPackageManifest() {
       ffprobe: runtimeEntry(bundledFFprobePath, "video-worker media inspection"),
     },
     server_connectivity: {
+      primary_transport: "browser_agent_direct_v1",
+      demoops_exchange_primary: false,
+      fixed_tls_control_port: true,
+      dedicated_data_port_per_lease: true,
+      timestamp_token_authenticated_encryption: true,
       required_for_local_generation: false,
       server_recording_required: true,
       local_recording_execution: false,
@@ -254,11 +256,22 @@ function buildPackageManifest() {
         "video_editing",
       ],
       reserved_interfaces: [
-        "ExchangeCapabilityResolver",
-        "ExchangeIdentityStore",
-        "ExchangeSessionManager",
-        "CloudLifecycleClient",
+        "BrowserAgentDirectClient",
+        "DirectInstallationIdentityStore",
+        "DirectLeaseManager",
+        "DirectArtifactVerifier",
       ],
+      provisioning_tool: targetGOOS === "windows"
+        ? {
+            path: slash(relative(packageRoot, packagedDirectConfigurer)),
+            token_argument_supported: false,
+            token_stdout_supported: false,
+            strict_known_hosts: true,
+            ssh_authentication: "ed25519_public_key_only",
+            ssh_host_key_algorithm: "ssh-ed25519",
+            credential_store: "windows_credential_manager",
+          }
+        : undefined,
     },
     app_surfaces: [
       {
@@ -340,25 +353,6 @@ function validateUpdatePublicKey(source) {
   if (key.asymmetricKeyType !== "ed25519") {
     throw new Error("DEMOOPS_UPDATE_PUBLIC_KEY_PATH must contain an Ed25519 public key");
   }
-}
-
-function normalizeControlPlaneBaseURL(raw) {
-  const value = String(raw || "").trim().replace(/\/+$/, "");
-  if (!value) return "";
-  let parsed;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error("DEMOOPS_CONTROL_PLANE_BASE_URL must be an absolute server URL");
-  }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error("DEMOOPS_CONTROL_PLANE_BASE_URL must not contain credentials, query, or fragment");
-  }
-  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
-  if (parsed.protocol !== "https:" && !(loopback && parsed.protocol === "http:")) {
-    throw new Error("DEMOOPS_CONTROL_PLANE_BASE_URL requires HTTPS; loopback HTTP is allowed only for SSH forwarding");
-  }
-  return value;
 }
 
 function run(command, args, options = {}) {

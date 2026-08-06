@@ -1,0 +1,38 @@
+[Unit]
+Description=Cascade Browser Agent Direct Worker
+After=network-online.target cascade-browser-agent-gateway.service
+Requires=cascade-browser-agent-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cascade-browser-worker
+Group=cascade-browser-worker
+EnvironmentFile=/etc/cascade-browser-agent/worker.env
+ExecStartPre=/usr/local/libexec/cascade-browser-agent-worker-preflight
+ExecStart=/usr/local/bin/cascade-browser-agent-direct-worker
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+# V8 and Chromium require executable JIT mappings. Do not enable
+# MemoryDenyWriteExecute for this unit; the dedicated service account,
+# NoNewPrivileges and filesystem isolation remain enforced.
+TasksMax=4096
+LimitNOFILE=65536
+ReadWritePaths=/var/lib/cascade-browser-agent/worker
+ReadOnlyPaths=/opt/cascade-browser-agent
+
+[Install]
+WantedBy=multi-user.target

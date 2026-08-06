@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -371,7 +372,30 @@ func rtRouteMatches(observed, expected string) bool {
 	if strings.EqualFold(observed, expected) {
 		return true
 	}
-	return strings.Contains(strings.ToLower(observed), strings.ToLower(expected))
+	if strings.Contains(strings.ToLower(observed), strings.ToLower(expected)) {
+		return true
+	}
+
+	segments := strings.Split(expected, "/")
+	hasDynamicSegment := false
+	for i, segment := range segments {
+		trimmed := strings.TrimSpace(segment)
+		if strings.HasPrefix(trimmed, ":") ||
+			(strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
+			(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")) {
+			segments[i] = `[^/?#\s]+`
+			hasDynamicSegment = true
+			continue
+		}
+		segments[i] = regexp.QuoteMeta(segment)
+	}
+	if !hasDynamicSegment {
+		return false
+	}
+
+	pattern := `(?i)` + strings.Join(segments, `/`) + `(?:[/?#\s]|$)`
+	matched, err := regexp.MatchString(pattern, observed)
+	return err == nil && matched
 }
 
 // rtArtifactEvidenceRefs converts a step's ArtifactRefs into lightweight

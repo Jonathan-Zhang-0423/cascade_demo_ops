@@ -680,8 +680,8 @@ func TestNewArkMediaGenerationResultWithOptionsPollsAndDownloadsCandidateArtifac
 	}
 
 	review := ReviewArkMediaCandidateAssets(&source, &result, time.Date(2026, 7, 15, 20, 0, 2, 0, time.UTC))
-	if review.Status != "approved" || len(review.ApprovedArtifacts) != 1 || result.DownloadedArtifacts[0].Metadata["approved_for_demo"] != true {
-		t.Fatalf("downloaded video candidate should pass conservative review: review=%+v artifact=%+v", review, result.DownloadedArtifacts[0])
+	if review.Status != "media_eligible_awaiting_user_review" || len(review.PendingReviewArtifacts) != 1 || len(review.ApprovedArtifacts) != 0 || result.DownloadedArtifacts[0].Metadata["approved_for_demo"] != false || result.DownloadedArtifacts[0].Metadata["media_eligible"] != true {
+		t.Fatalf("downloaded video candidate should await explicit user review: review=%+v artifact=%+v", review, result.DownloadedArtifacts[0])
 	}
 }
 

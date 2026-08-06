@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const PackageConfidenceAlgorithmVersion = "demoops.package_confidence.v1"
+const PackageConfidenceAlgorithmVersion = "demoops.package_confidence.v2"
 
 type PackageReadiness string
 
@@ -39,6 +39,7 @@ type PackageConfidenceSummary struct {
 	RequirementCoverage             float64                            `json:"requirement_coverage"`
 	DeterministicValidationCoverage float64                            `json:"deterministic_validation_coverage"`
 	RuntimePageEvidenceCoverage     float64                            `json:"runtime_page_evidence_coverage"`
+	ExecutionContractCoverage       float64                            `json:"execution_contract_coverage"`
 	SelectorQuality                 float64                            `json:"selector_quality"`
 	SourceBindingStatus             ProductSourceBindingStatus         `json:"source_binding_status,omitempty"`
 	SourceBindingMode               ProductSourceEffectiveMode         `json:"source_binding_mode,omitempty"`
@@ -79,7 +80,7 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 				continue
 			}
 			requiredRequirements++
-			if len(requirement.NodeRefs) > 0 {
+			if packageRequirementCovered(pkg, requirement) {
 				coveredRequirements++
 			}
 		}
@@ -90,6 +91,7 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 		summary.RequirementCoverage = ratio(coveredRequirements, requiredRequirements)
 	}
 	validationNeeded, validationCovered, runtimeNeeded, runtimeCovered := 0, 0, 0, 0
+	contractNeeded, contractCovered := 0, 0
 	selectorTotal := 0.0
 	for _, step := range bundle.PlanJSON.Steps {
 		stage := approved[step.NodeID]
@@ -114,10 +116,20 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 		}
 		refs := stageConfidenceEvidenceRefs(step, stage, outline)
 		a.EvidenceQualityScore = bestEvidenceQuality(refs, pkg.SourceBindingSummary)
+		if step.RuntimeAdaptive {
+			contractNeeded++
+			if err := validateRuntimeAdaptiveExecutionContract(bundle, step, stage, outline); err != nil {
+				a.BlockingReasons = append(a.BlockingReasons, "运行时自适应执行合同不完整："+err.Error())
+			} else {
+				contractCovered++
+			}
+		}
 		if runtimeEvidenceStage(step.StageKind) {
 			runtimeNeeded++
 			if confidenceRefsHaveRuntimePageEvidence(refs) {
 				runtimeCovered++
+			} else if step.RuntimeAdaptive {
+				a.Warnings = append(a.Warnings, "真实页面证据由 Browser Agent 在运行时采集并验证")
 			} else {
 				a.BlockingReasons = append(a.BlockingReasons, "运行时页面状态缺少真实页面证据")
 			}
@@ -170,6 +182,14 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 	} else {
 		summary.RuntimePageEvidenceCoverage = ratio(runtimeCovered, runtimeNeeded)
 	}
+	if contractNeeded == 0 {
+		summary.ExecutionContractCoverage = 1
+	} else {
+		summary.ExecutionContractCoverage = ratio(contractCovered, contractNeeded)
+	}
+	if summary.ExecutionContractCoverage < 1 {
+		summary.BlockingReasons = append(summary.BlockingReasons, "运行时自适应 stage 的执行合同不完整")
+	}
 	if len(summary.Stages) > 0 {
 		summary.SelectorQuality = roundConfidence(selectorTotal / float64(len(summary.Stages)))
 	}
@@ -193,6 +213,69 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 	}
 	summary.AssessmentHash = hash
 	return summary, nil
+}
+
+func packageRequirementCovered(pkg *ClientExecutionPackage, requirement GraphRequirement) bool {
+	if pkg == nil || pkg.WorkflowGraph == nil || len(requirement.NodeRefs) == 0 || len(requirement.EvidenceRefs) == 0 {
+		return false
+	}
+	graph := pkg.WorkflowGraph
+	nodes := map[string]*GraphNode{}
+	for _, node := range graph.Nodes {
+		if node != nil {
+			nodes[node.ID] = node
+		}
+	}
+	for _, ref := range requirement.NodeRefs {
+		node := nodes[ref]
+		if node == nil {
+			return false
+		}
+		step, stage, outline, hasExecutionLayers := packageExecutionLayersForNode(pkg, ref)
+		hasRequiredValidation := false
+		for _, validation := range node.Validations {
+			if validation.Required && (len(validation.EvidenceRefs) > 0 || len(node.EvidenceRefs) > 0 || (node.ActionSpec != nil && len(node.ActionSpec.Target.EvidenceRefs) > 0) || (hasExecutionLayers && step.RuntimeAdaptive && stepHasDeterministicBrowserAgentValidation(step))) {
+				hasRequiredValidation = true
+				break
+			}
+		}
+		if !hasRequiredValidation {
+			return false
+		}
+		if hasExecutionLayers && step.RuntimeAdaptive && validateRuntimeAdaptiveExecutionContract(pkg.ExecutableScriptBundle, step, stage, outline) != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func packageExecutionLayersForNode(pkg *ClientExecutionPackage, nodeID string) (ScriptStep, StageApprovalStage, BrowserAgentOutlineStage, bool) {
+	if pkg == nil || pkg.ExecutableScriptBundle == nil || pkg.ExecutableScriptBundle.PlanJSON == nil || pkg.ExecutableScriptBundle.StageApprovalPlan == nil || pkg.ExecutableScriptBundle.ScriptOutline == nil {
+		return ScriptStep{}, StageApprovalStage{}, BrowserAgentOutlineStage{}, false
+	}
+	var step ScriptStep
+	var stage StageApprovalStage
+	var outline BrowserAgentOutlineStage
+	stepOK, stageOK, outlineOK := false, false, false
+	for _, item := range pkg.ExecutableScriptBundle.PlanJSON.Steps {
+		if item.NodeID == nodeID {
+			step, stepOK = item, true
+			break
+		}
+	}
+	for _, item := range pkg.ExecutableScriptBundle.StageApprovalPlan.Stages {
+		if item.NodeID == nodeID {
+			stage, stageOK = item, true
+			break
+		}
+	}
+	for _, item := range pkg.ExecutableScriptBundle.ScriptOutline.Stages {
+		if item.NodeID == nodeID {
+			outline, outlineOK = item, true
+			break
+		}
+	}
+	return step, stage, outline, stepOK && stageOK && outlineOK
 }
 
 func ValidatePackageConfidenceSummary(pkg *ClientExecutionPackage) error {
@@ -381,6 +464,7 @@ func roundConfidence(v float64) float64 { return math.Round(math.Max(0, math.Min
 func confidencePayloadSize(pkg *ClientExecutionPackage) int {
 	copy := *pkg
 	copy.ConfidenceSummary = nil
+	copy.CreatedAt = time.Time{}
 	copy.ApprovedAt = time.Time{}
 	copy.SafetyReport.AllowedToUpload = false
 	copy.SafetyReport.HumanApproval = UserApprovalRecord{}

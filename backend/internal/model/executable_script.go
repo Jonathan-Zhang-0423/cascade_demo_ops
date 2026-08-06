@@ -177,6 +177,7 @@ type StageApprovalStage struct {
 	TargetRouteTemplate              string                       `json:"target_route_template,omitempty"`
 	ExpectedRouteAfterAction         string                       `json:"expected_route_after_action,omitempty"`
 	RuntimeRouteVerificationRequired bool                         `json:"runtime_route_verification_required,omitempty"`
+	RuntimeAdaptive                  bool                         `json:"runtime_adaptive,omitempty"`
 	CandidateRoutes                  []BrowserAgentRouteCandidate `json:"candidate_routes,omitempty"`
 	TargetURL                        string                       `json:"target_url,omitempty"`
 	ComponentRefs                    []string                     `json:"component_refs,omitempty"`
@@ -274,6 +275,7 @@ type BrowserAgentOutlineStage struct {
 	TargetRouteTemplate              string                        `json:"target_route_template,omitempty"`
 	ExpectedRouteAfterAction         string                        `json:"expected_route_after_action,omitempty"`
 	RuntimeRouteVerificationRequired bool                          `json:"runtime_route_verification_required,omitempty"`
+	RuntimeAdaptive                  bool                          `json:"runtime_adaptive,omitempty"`
 	CandidateRoutes                  []BrowserAgentRouteCandidate  `json:"candidate_routes,omitempty"`
 	URL                              string                        `json:"url,omitempty"`
 	Components                       []BrowserAgentComponentTarget `json:"components,omitempty"`

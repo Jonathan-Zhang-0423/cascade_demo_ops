@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,7 +30,15 @@ type RuntimeConfigView struct {
 	ModelProviders         map[string]ProviderCredentialView `json:"model_providers"`
 	ModelTaskRoutes        map[string]ModelTaskRouteView     `json:"model_task_routes"`
 	CloudExchange          CloudExchangeRuntimeView          `json:"cloud_exchange"`
+	BrowserAgentDirect     DirectTransportRuntimeView        `json:"browser_agent_direct"`
 	AppCapabilities        AppCapabilitiesRuntimeView        `json:"app_capabilities"`
+}
+
+func (s *Service) RuntimeConfigView(ctx context.Context) RuntimeConfigView {
+	view := NewRuntimeConfigView(s.RuntimeConfig(), s.ExchangeIdentityStatus(ctx))
+	direct, _ := s.DirectTransportStatus(ctx)
+	view.BrowserAgentDirect = direct
+	return view
 }
 
 type ProviderCredentialView struct {

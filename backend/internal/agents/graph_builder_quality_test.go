@@ -107,6 +107,10 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 	project := graphQualityProject()
 	project.DemoAccount = &model.DemoAccount{UsernameSecretRef: "credential://demo/test", PasswordSecretRef: "credential://demo/test"}
 	runtimePageEvidence := []model.EvidenceRef{{ID: "ev_runtime_dashboard", Kind: model.EvidenceKindBrowserScan, Summary: "Browser Scan confirmed the current dashboard state"}}
+	project.Inputs = &model.ProjectInputBundle{Requirements: []model.DemoRequirement{
+		{ID: "requirement_project_name", Kind: "must_show", Description: "填写俄罗斯方块", Required: true},
+		{ID: "requirement_observe_progress", Kind: "must_show", Description: "观察构建进度", Required: true},
+	}}
 	stagePlan := &model.BusinessStagePlan{
 		ID:                     "business_stage_plan_test",
 		ProjectID:              project.ID,
@@ -123,7 +127,7 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 				EntryRoute:               "/login",
 				ExpectedRouteAfterAction: "/app",
 				DurationMS:               7000,
-				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "登录", SuccessState: "进入工作台"},
+				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "登录", SuccessState: "进入工作台", NonDestructive: true},
 				EvidenceRefs:             runtimePageEvidence,
 			},
 			{
@@ -136,7 +140,7 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 				EntryRoute:               "/app",
 				ExpectedRouteAfterAction: "/app",
 				DurationMS:               13000,
-				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "项目名称", InputSemantic: "project_name", InputValue: "俄罗斯方块", SuccessState: "项目名称已填写"},
+				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "项目名称", InputSemantic: "project_name", InputValue: "俄罗斯方块", SuccessState: "项目名称已填写", NonDestructive: true},
 				Targets:                  []model.BusinessTargetCandidate{{ID: "target_project_name", Label: "项目名称", Kind: "fill", Selector: "[data-testid='project-name']", SelectorScore: 100}},
 				EvidenceRefs:             []model.EvidenceRef{{ID: "ev_project_name", Kind: model.EvidenceKindSourceCode}},
 			},
@@ -150,7 +154,7 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 				EntryRoute:               "/project/:id",
 				ExpectedRouteAfterAction: "/project/:id",
 				DurationMS:               45000,
-				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionWait), Label: "观察构建进度", SuccessState: "构建过程可见"},
+				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionWait), Label: "观察构建进度", SuccessState: "构建过程可见", NonDestructive: true},
 				EvidenceRefs:             runtimePageEvidence,
 			},
 		},
@@ -173,8 +177,20 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 	if got := graph.Nodes[1].ActionSpec.Value; got != "俄罗斯方块" {
 		t.Fatalf("project name semantic value lost: %q", got)
 	}
+	if got := graph.Nodes[1].Validations[0]; got.Kind != "value_equals" || got.Expected != "俄罗斯方块" {
+		t.Fatalf("project input must verify the entered value, not only input visibility: %+v", got)
+	}
 	if graph.Nodes[2].ActionSpec.Type != model.GraphActionWait || graph.Nodes[2].DurationHintMS != 45000 {
 		t.Fatalf("observe_progress must be wait-only and keep explicit duration: %+v", graph.Nodes[2])
+	}
+	if !graphNodeHasRequiredValidation(graph.Nodes[2]) {
+		t.Fatal("an explicit observe_progress stage must retain a required result validation")
+	}
+	if len(graph.Requirements) != 2 || len(graph.Requirements[0].NodeRefs) != 1 || graph.Requirements[0].NodeRefs[0] != graph.Nodes[1].ID || len(graph.Requirements[0].EvidenceRefs) == 0 {
+		t.Fatalf("project-name requirement was not bound to its validated input stage and evidence: %+v", graph.Requirements)
+	}
+	if len(graph.Requirements[1].NodeRefs) != 1 || graph.Requirements[1].NodeRefs[0] != graph.Nodes[2].ID || len(graph.Requirements[1].EvidenceRefs) == 0 {
+		t.Fatalf("observe-progress requirement was not bound to its validated stage and evidence: %+v", graph.Requirements)
 	}
 	if graphNodeBySelector(graph, "[data-testid='button-sidebar-toggle']") != nil {
 		t.Fatal("verified interaction selector pool should not override business stage spine")
@@ -191,6 +207,68 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 	outline := outlineStageByNodeID(pkg.ExecutableBundle, "business_stage_observe_agent_progress")
 	if outline == nil || outline.StageKind != model.BusinessStageKindObserveProgress || outline.DurationMS != 45000 {
 		t.Fatalf("outline did not preserve observe_progress metadata: %+v", outline)
+	}
+}
+
+func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *testing.T) {
+	evidence := []model.EvidenceRef{{ID: "ev_runtime", Kind: model.EvidenceKindBrowserScan}}
+	validatedNode := func(id string, kind model.BusinessStageKind) *model.GraphNode {
+		return &model.GraphNode{
+			ID: id, Title: string(kind), Metadata: map[string]any{"business_stage_kind": string(kind)},
+			EvidenceRefs: evidence,
+			Validations:  []model.ValidationSpec{{ID: "validate_" + id, Required: true, EvidenceRefs: evidence}},
+		}
+	}
+	graph := &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{
+		validatedNode("business_stage_session_setup", model.BusinessStageKindSessionSetup),
+		validatedNode("business_stage_new_project_entry", model.BusinessStageKindBusinessAction),
+		validatedNode("business_stage_project_name_input", model.BusinessStageKindBusinessInput),
+		validatedNode("business_stage_start_build", model.BusinessStageKindBusinessSubmit),
+		validatedNode("business_stage_observe_progress", model.BusinessStageKindObserveProgress),
+		validatedNode("business_stage_final_observe", model.BusinessStageKindFinalObserve),
+		{ID: "business_stage_unverified_submit", Metadata: map[string]any{"business_stage_kind": string(model.BusinessStageKindBusinessSubmit)}, EvidenceRefs: evidence},
+	}}
+	project := &model.ProjectContext{Inputs: &model.ProjectInputBundle{Requirements: []model.DemoRequirement{
+		{ID: "login", Kind: "must_show", Description: "登录成功", Required: true},
+		{ID: "create", Kind: "must_show", Description: "新建项目并填写项目名称", Required: true},
+		{ID: "start", Kind: "must_show", Description: "Agent 已启动", Required: true},
+		{ID: "result", Kind: "must_show", Description: "最终实际运行效果", Required: true},
+		{ID: "secret", Kind: "must_not_show", Description: "不得显示密码", Required: true},
+	}}}
+
+	bindGraphRequirements(project, graph)
+
+	want := map[string]string{
+		"login": "business_stage_session_setup", "create": "business_stage_new_project_entry",
+		"start": "business_stage_start_build", "result": "business_stage_final_observe",
+	}
+	for _, requirement := range graph.Requirements {
+		if requirement.Kind != "must_show" {
+			if len(requirement.NodeRefs) != 0 || requirement.Required {
+				t.Fatalf("negative requirement must remain a safety constraint: %+v", requirement)
+			}
+			continue
+		}
+		if len(requirement.NodeRefs) != 1 || requirement.NodeRefs[0] != want[requirement.ID] || len(requirement.EvidenceRefs) == 0 {
+			t.Fatalf("requirement %q mapped incorrectly: %+v", requirement.ID, requirement)
+		}
+	}
+}
+
+func TestBindGraphRequirementsDropsEmptyStaleRefsAndKeepsMissingEvidenceBlocked(t *testing.T) {
+	graph := &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{{
+		ID: "business_stage_start_build", Metadata: map[string]any{"business_stage_kind": string(model.BusinessStageKindBusinessSubmit)},
+		Validations: []model.ValidationSpec{{ID: "validate_start", Required: true}},
+	}}}
+	project := &model.ProjectContext{Inputs: &model.ProjectInputBundle{Requirements: []model.DemoRequirement{{
+		ID: "start", Kind: "must_show", Description: "Agent 已启动", Required: true,
+	}}}}
+	graph.Requirements = []model.GraphRequirement{{ID: "stale", NodeRefs: []string{"", "missing", "business_stage_start_build"}}}
+
+	bindGraphRequirements(project, graph)
+
+	if len(graph.Requirements) != 1 || len(graph.Requirements[0].NodeRefs) != 0 || len(graph.Requirements[0].EvidenceRefs) != 1 || graph.Requirements[0].EvidenceRefs[0].Kind != model.EvidenceKindUserInput {
+		t.Fatalf("an unmapped node must stay blocked while retaining requirement provenance: %+v", graph.Requirements)
 	}
 }
 

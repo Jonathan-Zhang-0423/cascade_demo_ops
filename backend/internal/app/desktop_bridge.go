@@ -111,7 +111,37 @@ func NewDesktopBridge(runtime config.AppRuntimeConfig, states store.StateStore) 
 
 func (b *DesktopBridge) RuntimeConfig() BridgeResponse {
 	ctx := context.Background()
-	return bridgeValue(NewRuntimeConfigView(b.service.RuntimeConfig(), b.service.ExchangeIdentityStatus(ctx)), nil)
+	return bridgeValue(b.service.RuntimeConfigView(ctx), nil)
+}
+
+func (b *DesktopBridge) ConfigureDirectBrowserAgent(controlURL, accessToken string) BridgeResponse {
+	view, err := b.service.SaveDirectTransportSettings(context.Background(), DirectTransportSettingsRequest{ControlURL: controlURL, AccessToken: accessToken})
+	return bridgeValue(view, err)
+}
+
+func (b *DesktopBridge) UploadDirectBrowserAgentPackage(projectID string, request DirectTransportUploadRequest) BridgeResponse {
+	result, err := b.service.UploadDirectExecutionPackage(context.Background(), projectID, request)
+	return bridgeValue(result, err)
+}
+
+func (b *DesktopBridge) DirectBrowserAgentStatus(projectID, jobID string) BridgeResponse {
+	result, err := b.service.GetDirectExecutionStatus(context.Background(), projectID, jobID)
+	return bridgeValue(result, err)
+}
+
+func (b *DesktopBridge) DirectBrowserAgentResult(projectID, jobID string) BridgeResponse {
+	result, err := b.service.GetDirectResult(context.Background(), projectID, jobID)
+	return bridgeValue(result, err)
+}
+
+func (b *DesktopBridge) DownloadDirectBrowserAgentArtifact(projectID string, request DirectArtifactDownloadRequest) BridgeResponse {
+	result, err := b.service.DownloadDirectArtifact(context.Background(), projectID, request)
+	return bridgeValue(result, err)
+}
+
+func (b *DesktopBridge) ReviewDirectBrowserAgentResult(projectID string, request DirectResultReviewRequest) BridgeResponse {
+	result, err := b.service.ReviewDirectResult(context.Background(), projectID, request)
+	return bridgeValue(result, err)
 }
 
 func (b *DesktopBridge) StoreGitHubToken(token string) BridgeResponse {
@@ -153,6 +183,11 @@ func (b *DesktopBridge) SaveProjectInput(projectID string, inputs model.ProjectI
 	return bridgeValue(projectContext, err)
 }
 
+func (b *DesktopBridge) ReviewEditorPresentationCandidate(sessionID string, request model.EditorReviewPresentationCandidateRequest) BridgeResponse {
+	session, err := b.service.ReviewEditorPresentationCandidate(context.Background(), sessionID, request)
+	return bridgeValue(session, err)
+}
+
 func (b *DesktopBridge) GetWorkflowGraph(projectID string) BridgeResponse {
 	graph, err := b.service.GetWorkflowGraph(context.Background(), projectID)
 	return bridgeValue(graph, err)
@@ -181,6 +216,11 @@ func (b *DesktopBridge) GetExecutableScriptBundle(projectID string) BridgeRespon
 func (b *DesktopBridge) ApproveWorkflowGraph(projectID string, graph *model.DemoWorkflowGraph) BridgeResponse {
 	state, err := b.service.ApproveWorkflowGraph(context.Background(), projectID, graph)
 	return bridgeValue(state, err)
+}
+
+func (b *DesktopBridge) ReviseWorkflowGraph(projectID string, request GraphRevisionRequest) BridgeResponse {
+	result, err := b.service.ReviseWorkflowGraph(context.Background(), projectID, request)
+	return bridgeValue(result, err)
 }
 
 func (b *DesktopBridge) RunRehearsal(projectID string) BridgeResponse {

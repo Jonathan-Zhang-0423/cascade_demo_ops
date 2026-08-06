@@ -194,17 +194,19 @@ export type EditorRenderState = {
   error?: string;
 };
 
-export type EditorProviderCapability = {
-  provider: string;
-  task: string;
-  mode: string;
-  configured: boolean;
-  model?: string;
-  output_kind: string;
-  auto_include: boolean;
-  requires_review: boolean;
-  presentation_only: boolean;
-  can_represent_business_step: boolean;
+export type EditorPresentationCapabilityProfile = {
+  capability: "presentation_video_candidate" | string;
+  profile_version: string;
+  available: boolean;
+  limits: {
+    max_reference_assets: number; max_reference_images: number; max_reference_videos: number; max_reference_audios: number;
+    reference_video_min_sec: number; reference_video_max_sec: number; reference_video_total_max_sec: number;
+    candidate_duration_min_sec: number; candidate_duration_max_sec: number; recommended_candidate_duration_sec: number;
+    accepted_image_formats: string[]; accepted_video_formats: string[]; max_request_body_bytes: number; generated_audio_enabled: boolean;
+  };
+  policies: {
+    presentation_only: boolean; requires_explicit_review: boolean; may_replace_captured_ui: boolean; failure_blocks_recording_delivery: boolean;
+  };
 };
 
 export type EditorAutomationSummary = {
@@ -247,7 +249,7 @@ export type EditorSession = {
   final_profile: { width: number; height: number; fps: number; format: string; crf?: number };
   preview: EditorRenderState;
   final_render: EditorRenderState;
-  provider_capabilities: EditorProviderCapability[];
+  presentation_capabilities: EditorPresentationCapabilityProfile[];
 	 automation?: EditorAutomationSummary;
 };
 
@@ -267,6 +269,7 @@ export type EditorClient = {
   createStyleDraft(sessionID: string, request: EditorStyleDraftRequest): Promise<EditorClientResult<EditorStyleDraft>>;
   applyStyleDraft(sessionID: string, draftID: string, expectedRevision: number): Promise<EditorClientResult<EditorSession>>;
   savePlan(sessionID: string, expectedRevision: number, plan: EditorPlan): Promise<EditorClientResult<EditorSession>>;
+  reviewPresentationCandidate(sessionID: string, expectedRevision: number, artifactID: string, approved: boolean): Promise<EditorClientResult<EditorSession>>;
   validate(sessionID: string): Promise<EditorClientResult<EditorValidationReport>>;
   preview(sessionID: string): Promise<EditorClientResult<EditorSession>>;
   render(sessionID: string): Promise<EditorClientResult<EditorSession>>;
@@ -352,6 +355,7 @@ export function createEditorClient(): EditorClient {
         method: "POST",
         body: JSON.stringify({ expected_revision: expectedRevision, edit_plan: plan }),
       }),
+    reviewPresentationCandidate: (sessionID, expectedRevision, artifactID, approved) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/presentation-candidates/review`, { method: "POST", body: JSON.stringify({ expected_revision: expectedRevision, artifact_id: artifactID, approved }) }),
     validate: (sessionID) => request<EditorValidationReport>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/validate`, { method: "POST" }),
     preview: (sessionID) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/preview`, { method: "POST" }),
     render: (sessionID) => request<EditorSession>(`/v1/editor/sessions/${encodeURIComponent(sessionID)}/render`, { method: "POST" }),
@@ -466,6 +470,17 @@ function createMockEditorClient(): EditorClient {
       sessions.set(sessionID, next);
       return result(next);
     },
+    async reviewPresentationCandidate(sessionID, expectedRevision, artifactID, approved) {
+      const session = sessions.get(sessionID);
+      if (!session) return { ok: false, error: "未找到编辑项目" };
+      if (session.revision !== expectedRevision) return { ok: false, error: "编辑版本冲突，请重新加载" };
+      const artifact = session.asset_catalog.artifacts.find((item) => item.id === artifactID);
+      if (!artifact || artifact.kind !== "generated_video_candidate" || artifact.metadata?.media_eligible !== true) return { ok: false, error: "候选素材尚未通过媒体检查" };
+      const nextArtifact = { ...artifact, include_in_demo: false, metadata: { ...artifact.metadata, approved_for_demo: approved, approval_mode: "explicit_user_review", explicit_review_required: true, include_in_demo: false } };
+      const next = { ...session, revision: session.revision + 1, asset_catalog: { ...session.asset_catalog, artifacts: session.asset_catalog.artifacts.map((item) => item.id === artifactID ? nextArtifact : item) } };
+      sessions.set(sessionID, next);
+      return result(next);
+    },
     async validate(sessionID) {
       const session = sessions.get(sessionID);
       if (!session) return { ok: false, error: "未找到编辑项目" };
@@ -527,6 +542,6 @@ function mockSession(name: string): EditorSession {
     final_profile: { width: 1920, height: 1080, fps: 30, format: "mp4", crf: 21 },
     preview: { status: "not_started" },
     final_render: { status: "not_started" },
-    provider_capabilities: [{ provider: "seedance", task: "generated_video_candidate", mode: "dry_run", configured: false, output_kind: "generated_video_candidate", auto_include: false, requires_review: true, presentation_only: true, can_represent_business_step: false }],
+    presentation_capabilities: [{ capability: "presentation_video_candidate", profile_version: "server-presentation-video-v1", available: false, limits: { max_reference_assets: 4, max_reference_images: 4, max_reference_videos: 3, max_reference_audios: 0, reference_video_min_sec: 2, reference_video_max_sec: 15, reference_video_total_max_sec: 15, candidate_duration_min_sec: 4, candidate_duration_max_sec: 15, recommended_candidate_duration_sec: 5, accepted_image_formats: ["png", "jpeg"], accepted_video_formats: ["mp4", "mov"], max_request_body_bytes: 67108864, generated_audio_enabled: false }, policies: { presentation_only: true, requires_explicit_review: true, may_replace_captured_ui: false, failure_blocks_recording_delivery: false } }],
   };
 }

@@ -66,6 +66,7 @@ export type BrowserAgentWorkerStage = {
   id: string;
   order: number;
   node_id: string;
+  stage_kind?: string;
   objective?: string;
   entry_route?: string;
   route?: string;
@@ -88,6 +89,7 @@ export type BrowserAgentWorkerStage = {
 export type BrowserAgentOpenRequest = {
   session_id?: string;
   output_dir: string;
+  initial_url?: string;
   browser?: {
     engine?: string;
     headless?: boolean;
@@ -103,6 +105,15 @@ export type BrowserAgentOpenRequest = {
   mask_selectors?: string[];
 	recording_sensitive?: boolean;
 	record_trace?: boolean;
+	task_secrets?: Record<string, BrowserAgentTaskSecret>;
+};
+
+type BrowserAgentTaskSecret = {
+	username: string;
+	password: string;
+	expires_at: string;
+	allowed_domains: string[];
+	allowed_operations: string[];
 };
 
 export type BrowserAgentStageRequest = {
@@ -172,6 +183,8 @@ type BrowserAgentSession = {
   maskSelectors: string[];
   recordingSensitive: boolean;
 	recordTrace: boolean;
+	taskSecrets: Map<string, BrowserAgentTaskSecret>;
+	traceActive: boolean;
 };
 
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
@@ -233,6 +246,8 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	maskSelectors: request.mask_selectors || [],
 	recordingSensitive: request.recording_sensitive ?? true,
 	recordTrace,
+	taskSecrets: new Map(Object.entries(request.task_secrets || {})),
+	traceActive: recordTrace,
   };
   await page.route("**/*", async (route: any) => {
     // Route allowlists apply to document navigation, not the page's JS/CSS/media.
@@ -243,6 +258,19 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
     }
     await route.continue();
   });
+  if (request.initial_url?.trim()) {
+    try {
+      const initialURL = absoluteTargetURL(request.initial_url, request.initial_url);
+      const policyError = urlPolicyError(initialURL, session, false);
+      if (policyError) throw new Error(policyError);
+      await page.goto(initialURL, { waitUntil: "domcontentloaded", timeout: actionTimeoutMS });
+      await waitForPageSettled(page);
+    } catch (error) {
+      await context.close().catch(() => undefined);
+      await browser.close().catch(() => undefined);
+      throw error;
+    }
+  }
   sessions.set(sessionID, session);
   return { session_id: sessionID, runtime_versions: { runner: "playwright-browser-agent", browser: engineName } };
 }
@@ -314,7 +342,8 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   let approvedAlternative: { kind: string; value: string } | undefined;
 	let suggestedWaitCondition: string | undefined;
   let resolutionFailure = "";
-  if (action && !["navigate", "wait"].includes(action.kind)) {
+  let passiveRouteStrategy: string | undefined;
+  if (action && !["navigate", "wait"].includes(action.kind) && !usesPassiveRouteResolution(request.stage, action)) {
     try {
       resolved = await resolveTarget(session.page, request.stage, action, false);
     } catch (error) {
@@ -323,16 +352,20 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
       approvedAlternative = await resolveSingleApprovedAlternative(session.page, request.stage);
 		if (!approvedAlternative && await pageStillBusy(session.page)) {
 			suggestedWaitCondition = suggestedEntryWaitCondition(request.stage);
-		}
+      }
     }
+  } else if (action && usesPassiveRouteResolution(request.stage, action)) {
+    const routeResolution = waitObservationRouteResolution(session.page.url(), request.stage, action);
+    passiveRouteStrategy = routeResolution.strategy;
+    resolutionFailure = routeResolution.failure;
   }
   const evidence = screenshotEvidence(artifact, request.stage, "执行前页面观察");
-  const assertions = resolutionAssertions(resolved?.strategy, resolutionFailure, safeURL(session.page.url()));
+  const assertions = resolutionAssertions(resolved?.strategy || passiveRouteStrategy, resolutionFailure, safeURL(session.page.url()));
   return {
     observation: await observation(session.page, "actual_browser_observation", assertions),
     evidence_refs: [evidence],
     artifacts: [artifact],
-    target_resolved: Boolean(resolved) || action?.kind === "navigate",
+    target_resolved: Boolean(resolved) || Boolean(passiveRouteStrategy) || action?.kind === "navigate",
     ...(approvedAlternative ? { preferred_selector_alternative: approvedAlternative } : {}),
 		...(suggestedWaitCondition ? { suggested_wait_condition: suggestedWaitCondition } : {}),
   };
@@ -364,6 +397,14 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   }
   await waitForCaptureWindow(session.page, request.stage);
   assertions.push(...await evaluateRequiredValidations(session.page, request.stage));
+	if (session.recordTrace && !session.traceActive) {
+		const required = assertions.filter((assertion) => assertion.kind.startsWith("required_"));
+		if (required.length === 0 || required.some((assertion) => !assertion.passed)) throw new Error("browser_agent_login_success_not_verified");
+		await clearLoginFormValues(session.page);
+		session.tracePath = path.join(session.outputDir, "browser-agent-trace-after-login.zip");
+		await session.context.tracing.start({ screenshots: true, snapshots: false, sources: false });
+		session.traceActive = true;
+	}
   const artifact = await captureScreenshot(session, request.stage, "after");
   const evidence = screenshotEvidence(artifact, request.stage, "执行后结果证据");
   return {
@@ -380,7 +421,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   const artifacts: ArtifactRef[] = [];
   let recordingPath: string | undefined;
   try {
-    if (session.recordTrace) await session.context.tracing.stop({ path: session.tracePath });
+    if (session.recordTrace && session.traceActive) await session.context.tracing.stop({ path: session.tracePath });
   } finally {
     await session.context.close().catch(() => undefined);
     await session.browser.close().catch(() => undefined);
@@ -442,11 +483,20 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
     await session.page.waitForTimeout(numericParameter(interaction.parameters, "duration_ms", 1_000, 0, 5_000));
     return;
   }
+  if (usesPassiveRouteResolution(stage, interaction)) {
+    const routeResolution = waitObservationRouteResolution(session.page.url(), stage, interaction);
+    if (!routeResolution.strategy) throw new Error(routeResolution.failure);
+    await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+    return;
+  }
   const resolved = await resolveTarget(session.page, stage, interaction, true);
   if (interaction.kind === "click") {
     await resolved.locator.click({ timeout });
   } else if (interaction.kind === "fill") {
-    if (interaction.secret_ref) throw new Error("browser_agent_secret_ref_requires_broker");
+	if (interaction.secret_ref) {
+		await executeApprovedLogin(session, stage, interaction, timeout);
+		return;
+	}
     if (interaction.input_ref && interaction.value === undefined) throw new Error("browser_agent_input_ref_requires_resolver");
     await resolved.locator.fill(interaction.value || "", { timeout });
   } else if (interaction.kind === "select") {
@@ -621,11 +671,130 @@ export async function evaluateRequiredValidations(page: any, stage: BrowserAgent
 function locatorForValidation(page: any, validation: BrowserAgentValidation): any {
   const target = validation.target || {};
   if (target.test_id) return page.getByTestId(target.test_id);
+  if (target.selector) return page.locator(target.selector);
   if (target.role && target.text) return page.getByRole(target.role, { name: target.text, exact: true });
   if (target.label) return page.getByLabel(target.label, { exact: true });
   if (target.text) return page.getByText(target.text, { exact: true });
-  if (target.selector) return page.locator(target.selector);
   return page.locator("body");
+}
+
+async function executeApprovedLogin(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, timeout: number): Promise<void> {
+	const passwordRef = String(interaction.secret_ref || "").trim();
+	const usernameRef = String(interaction.input_ref || "").trim();
+	if (!passwordRef || passwordRef !== usernameRef) throw new Error("browser_agent_login_secret_binding_invalid");
+	if (stage.stage_kind !== "session_setup") throw new Error("browser_agent_secret_outside_session_setup");
+	const secret = session.taskSecrets.get(passwordRef);
+	if (!secret) throw new Error("browser_agent_secret_ref_unavailable");
+	if (Date.parse(secret.expires_at) <= Date.now()) throw new Error("browser_agent_secret_ref_expired");
+	for (const operation of ["fill_username", "fill_password", "submit_login"]) {
+		if (!secret.allowed_operations.includes(operation)) throw new Error("browser_agent_login_operation_not_allowed");
+	}
+	const currentHost = new URL(session.page.url()).hostname;
+	if (!hostAllowed(currentHost, secret.allowed_domains) || !hostAllowed(currentHost, session.allowedDomains)) throw new Error("browser_agent_login_domain_not_allowed");
+	const username = session.page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
+	let password = session.page.locator('input[type="password"], input[autocomplete="current-password"]').first();
+	if (!await username.isVisible({ timeout }).catch(() => false)) throw new Error("browser_agent_login_form_not_resolved");
+	await installImmediateMasks(session.page, [username]);
+	if (session.recordTrace && session.traceActive) {
+		await session.context.tracing.stop({ path: session.tracePath });
+		session.traceActive = false;
+	}
+	try {
+		await username.fill(secret.username, { timeout });
+		if (!await password.isVisible({ timeout: Math.min(timeout, 1_000) }).catch(() => false)) {
+			const continueButton = session.page.locator('button[type="submit"], input[type="submit"]').first();
+			if (!await continueButton.isVisible({ timeout }).catch(() => false)) throw new Error("browser_agent_login_continue_not_resolved");
+			await continueButton.click({ timeout });
+			password = session.page.locator('input[type="password"], input[autocomplete="current-password"]').first();
+			if (!await password.isVisible({ timeout }).catch(() => false)) throw new Error("browser_agent_login_password_not_resolved");
+		}
+		await installImmediateMasks(session.page, [password]);
+		await password.fill(secret.password, { timeout });
+		const submit = session.page.locator('button[type="submit"], input[type="submit"]').first();
+		if (!await submit.isVisible({ timeout }).catch(() => false)) throw new Error("browser_agent_login_submit_not_resolved");
+		await submit.click({ timeout });
+		await waitForPageSettled(session.page, Math.min(timeout, 10_000));
+		await session.page.waitForFunction(() => {
+			const pageDocument = (globalThis as any).document;
+			const passwordField = pageDocument.querySelector('input[type="password"]');
+			return !passwordField || !passwordField.offsetParent;
+		}, undefined, { timeout });
+		await installExactTextMasks(session.page, [secret.username]);
+	} finally {
+		secret.username = "";
+		secret.password = "";
+		session.taskSecrets.delete(passwordRef);
+	}
+	await waitForPageSettled(session.page);
+}
+
+async function clearLoginFormValues(page: any): Promise<void> {
+	await page.evaluate(() => {
+		const pageDocument = (globalThis as any).document;
+		for (const input of pageDocument.querySelectorAll('input[type="email"], input[type="password"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"], input[autocomplete="current-password"]')) {
+			if (!input.offsetParent || input.type === "hidden") input.value = "";
+		}
+	});
+}
+
+async function installExactTextMasks(page: any, values: string[]): Promise<void> {
+	const approved = values.filter((value) => value.length > 2);
+	if (approved.length === 0) return;
+	await page.evaluate((secrets: string[]) => {
+		const browserGlobal = globalThis as any;
+		const pageDocument = browserGlobal.document;
+		const overlays = new Map<any, any>();
+		const update = () => {
+			const matched = new Set<any>();
+			for (const element of pageDocument.querySelectorAll("body *")) {
+				if (element.children.length === 0 && secrets.some((secret) => String(element.textContent || "").includes(secret))) matched.add(element);
+			}
+			for (const [element, overlay] of overlays) if (!element.isConnected || !matched.has(element)) { overlay.remove(); overlays.delete(element); }
+			for (const element of matched) {
+				let overlay = overlays.get(element);
+				if (!overlay) { overlay = pageDocument.createElement("div"); overlay.setAttribute("data-cascade-secret-text-mask", "true"); pageDocument.documentElement.appendChild(overlay); overlays.set(element, overlay); }
+				const bounds = element.getBoundingClientRect();
+				Object.assign(overlay.style, { position: "fixed", zIndex: "2147483647", pointerEvents: "none", background: "#111", display: bounds.width > 0 && bounds.height > 0 ? "block" : "none", left: `${bounds.left}px`, top: `${bounds.top}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });
+			}
+			browserGlobal.requestAnimationFrame(update);
+		};
+		browserGlobal.requestAnimationFrame(update);
+	}, approved);
+}
+
+async function installImmediateMasks(page: any, locators: any[]): Promise<void> {
+	for (const locator of locators) {
+		await locator.evaluate((element: any) => {
+			const pageDocument = (globalThis as any).document;
+			element.setAttribute("data-cascade-secret-input", "true");
+			const overlay = pageDocument.createElement("div");
+			const bounds = element.getBoundingClientRect();
+			overlay.setAttribute("data-cascade-secret-overlay", "true");
+			Object.assign(overlay.style, { position: "fixed", zIndex: "2147483647", pointerEvents: "none", background: "#111", left: `${bounds.left}px`, top: `${bounds.top}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });
+			pageDocument.documentElement.appendChild(overlay);
+		});
+	}
+}
+
+export function waitObservationRouteResolution(
+  currentURL: string,
+  stage: BrowserAgentWorkerStage,
+  interaction: BrowserAgentInteraction,
+): { strategy?: string; failure: string } {
+  const expected = interaction.target?.url || stage.url || stage.route || stage.entry_route;
+  if (expected && urlMatches(currentURL, expected)) {
+    return { strategy: "approved_route", failure: "" };
+  }
+  return {
+    failure: `browser_agent_target_not_resolved: ${stage.node_id}; strategies=approved_route`,
+  };
+}
+
+export function usesPassiveRouteResolution(stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction): boolean {
+  if (interaction.kind === "wait") return true;
+  if (interaction.kind !== "inspect" || stage.stage_kind !== "final_observe") return false;
+  const required = (stage.validations || []).filter((validation) => validation.required);
+  return required.length > 0 && required.every((validation) => validation.kind === "url_matches");
 }
 
 function scalarExpected(validation: BrowserAgentValidation): string | number | boolean | undefined {
@@ -641,7 +810,11 @@ function urlMatches(actualValue: string, expectedValue: string): boolean {
   try {
     const actual = new URL(actualValue);
     const expected = new URL(expectedValue, actualValue);
-    return actual.origin === expected.origin && actual.pathname === expected.pathname;
+    if (actual.origin !== expected.origin) return false;
+    const expectedParts = expected.pathname.split("/").filter(Boolean);
+    const actualParts = actual.pathname.split("/").filter(Boolean);
+    if (expectedParts.length !== actualParts.length) return false;
+    return expectedParts.every((part, index) => part.startsWith(":") || part === actualParts[index]);
   } catch {
     return safeURL(actualValue).includes(expectedValue);
   }

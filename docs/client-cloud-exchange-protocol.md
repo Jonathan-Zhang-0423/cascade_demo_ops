@@ -1,5 +1,8 @@
 # Client to Cloud Exchange Protocol
 
+> [!WARNING]
+> Legacy compatibility only. App 正式 Browser Agent 执行已经迁移到 [Browser Agent 直连协议](browser-agent-direct-deployment.md)；不得用本文 Exchange 路径作为新部署、上传或发布验收依据。
+
 > [!IMPORTANT]
 > **当前交换协议。** `browser-agent-outline-v1` 是最新执行包主路径，受限 TypeScript 是 Legacy 兼容子路径。Server 本地视频编辑器不改变本协议，只消费执行后形成的录屏、素材目录和编辑计划。
 

@@ -41,6 +41,7 @@ type ScriptStep struct {
 	StageKind       BusinessStageKind           `json:"stage_kind,omitempty"`
 	RouteState      BusinessRouteState          `json:"route_state,omitempty"`
 	NonDestructive  bool                        `json:"non_destructive,omitempty"`
+	RuntimeAdaptive bool                        `json:"runtime_adaptive,omitempty"`
 	Title           string                      `json:"title,omitempty"`
 	BusinessValue   string                      `json:"business_value,omitempty"`
 	PageTarget      ScriptPageTarget            `json:"page_target"`

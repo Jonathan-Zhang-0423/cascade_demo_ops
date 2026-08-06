@@ -25,7 +25,7 @@ func TestEditorSessionImportSaveAndRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.Revision != 1 || len(session.ProviderCapabilities) != 1 || session.ProviderCapabilities[0].Provider != "seedance" {
+	if session.Revision != 1 || len(session.PresentationCapabilities) != 1 || session.PresentationCapabilities[0].Capability != model.PresentationVideoCandidateCapability || len(session.ProviderCapabilities) != 0 {
 		t.Fatalf("unexpected initial editor session: %+v", session)
 	}
 	if session.EditPlan.Audio == nil || session.EditPlan.Audio.Mode != "source" || session.EditPlan.Audio.VolumePercent != 100 {
@@ -84,6 +84,63 @@ func TestEditorSessionImportSaveAndRender(t *testing.T) {
 	loaded, err := service.GetEditorSession(context.Background(), session.SessionID)
 	if err != nil || loaded.Preview.VideoPath == "" {
 		t.Fatalf("persisted preview missing: session=%+v err=%v", loaded, err)
+	}
+}
+
+func TestEditorPresentationCandidateRequiresMediaEligibilityAndExplicitUserReview(t *testing.T) {
+	service := newTestEditorService(t)
+	worker := &fakeEditorWorker{}
+	service.editorWorker = worker
+	session, err := service.CreateEditorSession(t.Context(), model.EditorCreateSessionRequest{Name: "候选审核"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := model.TimelineArtifact{
+		ID: "candidate_1", Kind: "generated_video_candidate", URI: "file:///candidate.mp4", MimeType: "video/mp4", SHA256: "sha", SizeBytes: 10,
+		Metadata: map[string]any{"media_eligible": true, "approved_for_demo": false, "presentation_only": true, "non_authoritative": true, "source_material_policy": "non_authoritative_generated_candidate"},
+	}
+	service.editorMu.Lock()
+	stored, err := service.loadEditorSession(session.SessionID)
+	if err == nil {
+		stored.AssetCatalog.Artifacts = append(stored.AssetCatalog.Artifacts, candidate)
+		err = service.saveEditorSessionUnlocked(stored)
+	}
+	service.editorMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan := stored.EditPlan
+	plan.Shots = append(plan.Shots, model.DemoEditShot{ID: "candidate_shot", SourceArtifactID: candidate.ID, SourceTimeRangeMS: &model.MillisecondRange{0, 5000}, Operations: []model.EditOperation{{Type: model.EditOperationTrim}}})
+	if _, err := service.SaveEditorPlan(t.Context(), session.SessionID, model.EditorSavePlanRequest{ExpectedRevision: stored.Revision, EditPlan: plan}); !errors.Is(err, model.ErrPresentationCandidateExplicitReviewRequired) {
+		t.Fatalf("unreviewed candidate should be rejected by plan save, got %v", err)
+	}
+
+	reviewed, err := service.ReviewEditorPresentationCandidate(t.Context(), session.SessionID, model.EditorReviewPresentationCandidateRequest{ExpectedRevision: stored.Revision, ArtifactID: candidate.ID, Approved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := reviewed.AssetCatalog.Artifacts[len(reviewed.AssetCatalog.Artifacts)-1].Metadata
+	if metadata["approved_for_demo"] != true || metadata["approval_mode"] != "explicit_user_review" {
+		t.Fatalf("explicit review was not persisted: %+v", metadata)
+	}
+	if _, err := service.SaveEditorPlan(t.Context(), session.SessionID, model.EditorSavePlanRequest{ExpectedRevision: reviewed.Revision, EditPlan: plan}); err != nil {
+		t.Fatalf("explicitly reviewed candidate should be eligible for a manual plan save: %v", err)
+	}
+}
+
+func TestPresentationCandidateMetadataForEditorRedactsProviderDetails(t *testing.T) {
+	metadata := presentationCandidateMetadataForEditor(map[string]any{
+		"provider": "private-provider", "model": "private-model", "provider_output_url": "https://private.invalid/out.mp4",
+		"endpoint": "https://private.invalid/api", "media_eligible": true, "duration_ms": 5000,
+	})
+	for _, prohibited := range []string{"provider", "model", "provider_output_url", "endpoint"} {
+		if _, ok := metadata[prohibited]; ok {
+			t.Fatalf("App-facing candidate metadata leaked %s: %+v", prohibited, metadata)
+		}
+	}
+	if metadata["media_eligible"] != true || metadata["approved_for_demo"] != false || metadata["explicit_review_required"] != true {
+		t.Fatalf("safe review metadata missing: %+v", metadata)
 	}
 }
 

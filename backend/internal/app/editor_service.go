@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/model"
 )
@@ -78,11 +77,11 @@ func (s *Service) CreateEditorSession(ctx context.Context, request model.EditorC
 			Shots:                []model.DemoEditShot{},
 			Audio:                &model.DemoEditAudioPolicy{Mode: "source", VolumePercent: 100},
 		},
-		PreviewProfile:       model.EditorRenderProfile{Mode: "preview", Width: 1280, Height: 720, FPS: 30, Format: "mp4", Preset: "ultrafast", CRF: 28},
-		FinalProfile:         model.EditorRenderProfile{Mode: "final", Width: 1920, Height: 1080, FPS: 30, Format: "mp4", Preset: "medium", CRF: 21},
-		Preview:              model.EditorRenderState{Status: model.EditorRenderStatusNotStarted},
-		FinalRender:          model.EditorRenderState{Status: model.EditorRenderStatusNotStarted},
-		ProviderCapabilities: s.editorProviderCapabilities(),
+		PreviewProfile:           model.EditorRenderProfile{Mode: "preview", Width: 1280, Height: 720, FPS: 30, Format: "mp4", Preset: "ultrafast", CRF: 28},
+		FinalProfile:             model.EditorRenderProfile{Mode: "final", Width: 1920, Height: 1080, FPS: 30, Format: "mp4", Preset: "medium", CRF: 21},
+		Preview:                  model.EditorRenderState{Status: model.EditorRenderStatusNotStarted},
+		FinalRender:              model.EditorRenderState{Status: model.EditorRenderStatusNotStarted},
+		PresentationCapabilities: s.editorPresentationCapabilities(),
 	}
 	if err := s.saveEditorSession(session); err != nil {
 		return model.EditorSession{}, err
@@ -480,6 +479,9 @@ func (s *Service) SaveEditorPlan(ctx context.Context, sessionID string, request 
 		request.EditPlan.Audio = &model.DemoEditAudioPolicy{Mode: "source", VolumePercent: 100}
 	}
 	request.EditPlan.TargetDurationMS = editorPlanDuration(request.EditPlan)
+	if err := validateEditorCandidateReferences(session.AssetCatalog, request.EditPlan); err != nil {
+		return model.EditorSession{}, err
+	}
 	validation, err := s.editorWorker.ValidateEditPlan(ctx, executor.EditPlanValidationRequest{Catalog: session.AssetCatalog, EditPlan: request.EditPlan})
 	if err != nil {
 		return model.EditorSession{}, err
@@ -793,12 +795,22 @@ func (s *Service) EditorMediaPath(sessionID, kind, assetID string) (string, stri
 	return "", "", errors.New("editor asset not found")
 }
 
-func (s *Service) editorProviderCapabilities() []model.EditorProviderCapability {
-	credential := s.runtime.ModelProviders[config.ModelProviderSeedance]
-	return []model.EditorProviderCapability{{
-		Provider: "seedance", Task: "generated_video_candidate", Mode: string(s.runtime.ArkMediaMode), Configured: credential.Enabled,
-		Model: credential.DefaultModel, OutputKind: "generated_video_candidate", AutoInclude: false, RequiresReview: true,
-		PresentationOnly: true, CanRepresentBusiness: false,
+func (s *Service) editorPresentationCapabilities() []model.EditorPresentationCapabilityProfile {
+	return []model.EditorPresentationCapabilityProfile{{
+		Capability:     model.PresentationVideoCandidateCapability,
+		ProfileVersion: "server-presentation-video-v1",
+		Available:      s.runtime.ArkMediaMode != "disabled",
+		Limits: model.EditorPresentationCapabilityLimits{
+			MaxReferenceAssets: 4, MaxReferenceImages: 4, MaxReferenceVideos: 3, MaxReferenceAudios: 0,
+			ReferenceVideoMinSec: 2, ReferenceVideoMaxSec: 15, ReferenceVideoTotalMaxSec: 15,
+			CandidateDurationMinSec: 4, CandidateDurationMaxSec: 15, RecommendedCandidateDurationSec: 5,
+			AcceptedImageFormats: []string{"png", "jpeg"}, AcceptedVideoFormats: []string{"mp4", "mov"},
+			MaxRequestBodyBytes: 64 << 20, GeneratedAudioEnabled: false,
+		},
+		Policies: model.EditorPresentationCapabilityPolicies{
+			PresentationOnly: true, RequiresExplicitReview: true, MayReplaceCapturedUI: false,
+			FailureBlocksRecordingDelivery: false,
+		},
 	}}
 }
 
@@ -827,7 +839,81 @@ func (s *Service) loadEditorSession(sessionID string) (model.EditorSession, erro
 	if err := json.Unmarshal(payload, &session); err != nil {
 		return model.EditorSession{}, err
 	}
+	// Migrate legacy provider-specific session metadata in memory. Saving the
+	// session removes the obsolete App-facing provider/model fields.
+	if len(session.PresentationCapabilities) == 0 {
+		session.PresentationCapabilities = s.editorPresentationCapabilities()
+	}
+	session.ProviderCapabilities = nil
 	return session, nil
+}
+
+func (s *Service) ReviewEditorPresentationCandidate(ctx context.Context, sessionID string, request model.EditorReviewPresentationCandidateRequest) (model.EditorSession, error) {
+	if err := ctx.Err(); err != nil {
+		return model.EditorSession{}, err
+	}
+	s.editorMu.Lock()
+	defer s.editorMu.Unlock()
+	session, err := s.loadEditorSession(sessionID)
+	if err != nil {
+		return model.EditorSession{}, err
+	}
+	if request.ExpectedRevision != session.Revision {
+		return model.EditorSession{}, fmt.Errorf("editor revision conflict: expected %d, current %d", request.ExpectedRevision, session.Revision)
+	}
+	artifactID := strings.TrimSpace(request.ArtifactID)
+	for index := range session.AssetCatalog.Artifacts {
+		artifact := &session.AssetCatalog.Artifacts[index]
+		if artifact.ID != artifactID {
+			continue
+		}
+		if artifact.Kind != "generated_video_candidate" || artifact.SourceStepID != "" || !editorMetadataBool(artifact.Metadata, "non_authoritative") || !editorMetadataBool(artifact.Metadata, "presentation_only") || artifact.Metadata["source_material_policy"] != "non_authoritative_generated_candidate" {
+			return model.EditorSession{}, errors.New("presentation candidate violates the non-authoritative safety boundary")
+		}
+		if request.Approved && !editorMetadataBool(artifact.Metadata, "media_eligible") {
+			return model.EditorSession{}, errors.New("presentation candidate has not passed media validation")
+		}
+		if artifact.Metadata == nil {
+			artifact.Metadata = map[string]any{}
+		}
+		artifact.Metadata["approved_for_demo"] = request.Approved
+		artifact.Metadata["approval_mode"] = "explicit_user_review"
+		artifact.Metadata["explicit_review_required"] = true
+		artifact.Metadata["include_in_demo"] = false
+		artifact.IncludeInDemo = false
+		session.Revision++
+		session.Status = model.EditorSessionStatusEditing
+		session.UpdatedAt = time.Now().UTC()
+		session.Preview = model.EditorRenderState{Status: model.EditorRenderStatusNotStarted}
+		session.FinalRender = model.EditorRenderState{Status: model.EditorRenderStatusNotStarted}
+		if err := s.saveEditorSessionUnlocked(session); err != nil {
+			return model.EditorSession{}, err
+		}
+		return session, nil
+	}
+	return model.EditorSession{}, errors.New("presentation candidate not found")
+}
+
+func validateEditorCandidateReferences(catalog model.AssetTimelineCatalog, plan model.DemoEditPlan) error {
+	artifacts := map[string]model.TimelineArtifact{}
+	for _, artifact := range catalog.Artifacts {
+		artifacts[artifact.ID] = artifact
+	}
+	for _, shot := range plan.Shots {
+		artifact, ok := artifacts[shot.SourceArtifactID]
+		if !ok || artifact.Kind != "generated_video_candidate" {
+			continue
+		}
+		if shot.SourceStepID != "" || !editorMetadataBool(artifact.Metadata, "approved_for_demo") || artifact.Metadata["approval_mode"] != "explicit_user_review" || !editorMetadataBool(artifact.Metadata, "presentation_only") || !editorMetadataBool(artifact.Metadata, "non_authoritative") {
+			return model.ErrPresentationCandidateExplicitReviewRequired
+		}
+	}
+	return nil
+}
+
+func editorMetadataBool(metadata map[string]any, key string) bool {
+	value, _ := metadata[key].(bool)
+	return value
 }
 
 func (s *Service) saveEditorSession(session model.EditorSession) error {
@@ -1020,6 +1106,7 @@ func applyResultPackageToEditorSession(session *model.EditorSession, result *mod
 	asset.Metadata["source_artifact_uri"] = source.URI
 	asset.Metadata["declared_sha256"] = source.SHA256
 	appendResultScreenshotAssets(session, result, request, source.ID)
+	appendResultPresentationCandidateAssets(session, result, request, source.ID)
 
 	timelineSteps := make([]model.TimelineStep, 0, len(steps))
 	shots := make([]model.DemoEditShot, 0, len(steps))
@@ -1164,6 +1251,69 @@ func appendResultScreenshotAssets(session *model.EditorSession, result *model.Re
 			Metadata: metadata, LocalPath: path,
 		})
 	}
+}
+
+func appendResultPresentationCandidateAssets(session *model.EditorSession, result *model.RecordingResultPackage, request model.EditorCreateFromResultPackageRequest, recordingArtifactID string) {
+	seen := map[string]bool{}
+	add := func(artifact model.ArtifactRef) {
+		if artifact.ID == "" || artifact.ID == recordingArtifactID || seen[artifact.ID] || artifact.Kind != "generated_video_candidate" || artifact.Sensitive || artifact.SourceNodeID != "" {
+			return
+		}
+		seen[artifact.ID] = true
+		path, err := resolveResultReferenceArtifact(result, request, artifact)
+		if err != nil {
+			return
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return
+		}
+		metadata := presentationCandidateMetadataForEditor(artifact.Metadata)
+		session.AssetCatalog.Artifacts = append(session.AssetCatalog.Artifacts, model.TimelineArtifact{
+			ID: artifact.ID, Kind: artifact.Kind, URI: localFileURI(path), MimeType: artifact.MimeType,
+			Label: firstNonEmptyString(artifact.Label, artifact.ID), SHA256: artifact.SHA256, SizeBytes: info.Size(),
+			AssetRole: "presentation_candidate", IncludeInDemo: false, Metadata: metadata,
+			DurationMS: editorMetadataPositiveInt(metadata, "duration_ms", "target_duration_ms"), LocalPath: path,
+		})
+	}
+	for _, artifact := range result.GeneratedAssets {
+		add(artifact)
+	}
+	if result.ExecutionTrace != nil {
+		for _, artifact := range result.ExecutionTrace.Artifacts {
+			add(artifact)
+		}
+	}
+}
+
+func presentationCandidateMetadataForEditor(source map[string]any) map[string]any {
+	metadata := map[string]any{
+		"approved_for_demo": false, "include_in_demo": false, "non_authoritative": true,
+		"presentation_only": true, "source_material_policy": "non_authoritative_generated_candidate",
+		"explicit_review_required": true,
+	}
+	for _, key := range []string{"media_eligible", "duration_ms", "target_duration_ms", "width", "height", "fps", "video_codec", "audio_codec", "download_status"} {
+		if value, ok := source[key]; ok {
+			metadata[key] = value
+		}
+	}
+	return metadata
+}
+
+func editorMetadataPositiveInt(metadata map[string]any, keys ...string) int {
+	for _, key := range keys {
+		switch value := metadata[key].(type) {
+		case int:
+			if value > 0 {
+				return value
+			}
+		case float64:
+			if value > 0 {
+				return int(value)
+			}
+		}
+	}
+	return 0
 }
 
 func resolveResultReferenceArtifact(result *model.RecordingResultPackage, request model.EditorCreateFromResultPackageRequest, artifact model.ArtifactRef) (string, error) {

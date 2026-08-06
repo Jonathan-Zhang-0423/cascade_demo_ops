@@ -46,8 +46,11 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(openRequest.AllowedDomains) == 0 || len(openRequest.ForbiddenPathPrefixes) == 0 {
+	if openRequest.InitialURL == "" || len(openRequest.AllowedDomains) == 0 || len(openRequest.ForbiddenPathPrefixes) == 0 {
 		t.Fatalf("worker session did not receive runtime network policy: %+v", openRequest)
+	}
+	if openRequest.InitialURL != pkg.ProjectContextSummary.ProductURL {
+		t.Fatalf("worker must start from the approved product URL, not a broader base origin: %q", openRequest.InitialURL)
 	}
 	if session.observeCalls != len(plan.Stages) || session.executeCalls != len(plan.Stages) || session.closeCalls != 1 {
 		t.Fatalf("runner did not preserve one browser session across stages: %+v", session)
@@ -73,6 +76,25 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 		if !containsProgressStage(progressStages, required) {
 			t.Fatalf("missing progress stage %q in %v", required, progressStages)
 		}
+	}
+}
+
+func TestWorkerStageFromRuntimePreservesStageKind(t *testing.T) {
+	stage := workerStageFromRuntime(BrowserAgentRuntimeStage{
+		ID:        "stage_final",
+		Order:     6,
+		NodeID:    "final_observe",
+		StageKind: model.BusinessStageKindFinalObserve,
+	})
+	if stage.StageKind != model.BusinessStageKindFinalObserve {
+		t.Fatalf("worker stage kind = %q, want final_observe", stage.StageKind)
+	}
+	encoded, err := json.Marshal(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"stage_kind":"final_observe"`) {
+		t.Fatalf("worker RPC lost stage_kind: %s", encoded)
 	}
 }
 

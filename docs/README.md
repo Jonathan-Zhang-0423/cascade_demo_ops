@@ -1,5 +1,7 @@
 # Cascade DemoOps 文档索引
 
+- [Browser Agent 直连部署手册](browser-agent-direct-deployment.md)：App 正式执行主链路、Ubuntu 网关、专属端口、Worker 对接与真实验收门禁。
+
 ## Server 侧权威架构
 
 - [Server 侧 Browser Agent、执行与本地视频编辑系统架构 v2](./server-browser-agent-execution-editor-architecture-v2.md)

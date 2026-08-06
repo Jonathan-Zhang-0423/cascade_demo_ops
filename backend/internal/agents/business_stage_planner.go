@@ -438,7 +438,7 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 			SuccessState:   spec.successState,
 			WaitConditions: businessStageWaitConditions(spec),
 			CapturePoints:  spec.capture,
-			NonDestructive: spec.nonDestructive || spec.kind == model.BusinessStageKindObserveProgress || spec.kind == model.BusinessStageKindFinalObserve || spec.kind == model.BusinessStageKindSessionSetup,
+			NonDestructive: businessStageIsApprovedNonDestructive(spec),
 		},
 		Targets:              targets,
 		EvidenceRequirements: requirements,
@@ -447,6 +447,31 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		Confidence:           businessStageConfidence(spec, targets, requirements),
 	}
 	b.stages = append(b.stages, stage)
+}
+
+func businessStageIsApprovedNonDestructive(spec stageSpec) bool {
+	if spec.nonDestructive || spec.kind == model.BusinessStageKindObserveProgress || spec.kind == model.BusinessStageKindFinalObserve || spec.kind == model.BusinessStageKindSessionSetup {
+		return true
+	}
+	allowedAction := map[string]model.GraphActionType{
+		"new_project_entry":  model.GraphActionClick,
+		"project_name_input": model.GraphActionFill,
+		"select_build_mode":  model.GraphActionClick,
+		"start_agent_build":  model.GraphActionClick,
+	}
+	want, ok := allowedAction[spec.id]
+	if !ok || model.GraphActionType(spec.actionType) != want {
+		return false
+	}
+	semanticText := strings.Join(append([]string{
+		spec.title, spec.objective, spec.actionLabel, spec.inputSemantic,
+		spec.inputValue, spec.successState,
+	}, spec.keywords...), " ")
+	return !containsAnyNormalized(semanticText,
+		"delete", "remove", "destroy", "payment", "pay", "billing", "purchase", "refund",
+		"permission", "role", "api key", "secret", "token", "删除", "移除", "销毁", "支付",
+		"购买", "退款", "账单", "权限", "角色", "密钥", "令牌",
+	)
 }
 
 func (b *businessStagePlanBuilder) finalRouteState() model.BusinessRouteState {
@@ -521,6 +546,10 @@ func (s businessTargetSource) targetsFromVerifiedPlan(spec stageSpec) []model.Bu
 	}
 	out := []model.BusinessTargetCandidate{}
 	for _, action := range s.verifiedPlan.Actions {
+		if spec.kind == model.BusinessStageKindSessionSetup && verifiedLoginOutcomeAction(action) {
+			out = append(out, businessTargetFromVerifiedAction(action))
+			continue
+		}
 		if !businessActionMatchesStage(spec, action.Label, action.Kind, action.Selector, action.InputValue, action.ComponentRef) {
 			continue
 		}
@@ -530,6 +559,18 @@ func (s businessTargetSource) targetsFromVerifiedPlan(spec stageSpec) []model.Bu
 		out = append(out, businessTargetFromVerifiedAction(action))
 	}
 	return out
+}
+
+func verifiedLoginOutcomeAction(action model.VerifiedInteractionAction) bool {
+	if action.ID != "intent_login_observe" || action.VerificationStatus != "verified" || strings.TrimSpace(action.URL) == "" {
+		return false
+	}
+	for _, ref := range action.EvidenceRefs {
+		if ref.Kind == model.EvidenceKindBrowserScan || ref.Kind == model.EvidenceKindBrowserTrace {
+			return true
+		}
+	}
+	return false
 }
 
 func (s businessTargetSource) targetsFromFeatureTrace(spec stageSpec) []model.BusinessTargetCandidate {
@@ -671,6 +712,21 @@ func businessProbeAllowedForStage(spec stageSpec, probe model.InteractionProbe) 
 
 func businessActionMatchesStage(spec stageSpec, label string, kind string, selector string, value string, componentRef string) bool {
 	text := strings.Join([]string{label, kind, selector, value, componentRef}, " ")
+	wantAction := model.GraphActionType(spec.actionType)
+	gotAction := graphActionTypeFromKind(kind, selector)
+	if wantAction != "" && gotAction != wantAction {
+		return false
+	}
+	switch spec.id {
+	case "new_project_entry":
+		return containsAnyNormalized(text, "new project", "create project", "new-project", "create-project", "新建项目", "创建项目", "新增项目")
+	case "project_name_input":
+		return containsAnyNormalized(text, "project name", "project-name", "项目名称", "项目名", spec.inputValue)
+	case "select_build_mode":
+		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "构建模式")
+	case "start_agent_build":
+		return containsAnyNormalized(text, "start build", "start-build", "run build", "generate app", "启动 agent", "启动agent", "启动构建", "开始构建", "开始生成")
+	}
 	if containsAnyNormalized(text, spec.keywords...) {
 		return true
 	}

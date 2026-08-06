@@ -49,6 +49,9 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		if step.NonDestructive != stage.Interaction.NonDestructive {
 			return &OutlineConsistencyError{Code: "non_destructive_mismatch", NodeID: step.NodeID, Reason: "changes the App-approved non_destructive policy"}
 		}
+		if step.RuntimeAdaptive != stage.RuntimeAdaptive || step.RuntimeAdaptive != outline.RuntimeAdaptive {
+			return &OutlineConsistencyError{Code: "runtime_adaptive_mismatch", NodeID: step.NodeID, Reason: "has inconsistent runtime_adaptive authority across plan_json, stage_approval_plan, and script_outline"}
+		}
 		for _, interaction := range outline.Interactions {
 			if interaction.NonDestructive != step.NonDestructive {
 				return &OutlineConsistencyError{Code: "non_destructive_mismatch", NodeID: step.NodeID, Reason: "changes the App-approved non_destructive policy in script_outline"}
@@ -57,7 +60,12 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		if stepRequiresBrowserAgentValidation(step) && !stepHasDeterministicBrowserAgentValidation(step) {
 			return &OutlineConsistencyError{Code: "deterministic_validation_missing", NodeID: step.NodeID, Reason: "requires a concrete URL, element, text, attribute, value, count, or title assertion"}
 		}
-		if (step.StageKind == BusinessStageKindSessionSetup || step.StageKind == BusinessStageKindObserveProgress || step.StageKind == BusinessStageKindFinalObserve) && !stepHasRuntimePageEvidence(step, stage, outline) {
+		if step.RuntimeAdaptive {
+			if err := validateRuntimeAdaptiveExecutionContract(bundle, step, stage, outline); err != nil {
+				return &OutlineConsistencyError{Code: "runtime_adaptive_contract_incomplete", NodeID: step.NodeID, Reason: err.Error()}
+			}
+		}
+		if (step.StageKind == BusinessStageKindSessionSetup || step.StageKind == BusinessStageKindObserveProgress || step.StageKind == BusinessStageKindFinalObserve) && !stepHasRuntimePageEvidence(step, stage, outline) && !step.RuntimeAdaptive {
 			return &OutlineConsistencyError{Code: "runtime_page_evidence_missing", NodeID: step.NodeID, Reason: "cannot rely on source or generic wait conditions to prove a runtime page state"}
 		}
 		if step.StageKind == BusinessStageKindSessionSetup && stageLooksAuthenticated(stage, outline) && !stageHasSecretRef(step, stage) && !stageHasHumanCheckpoint(bundle, step.NodeID) {
@@ -65,6 +73,61 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		}
 	}
 	return nil
+}
+
+func validateRuntimeAdaptiveExecutionContract(bundle *ExecutableRecordingScriptBundle, step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) error {
+	if !step.NonDestructive || stage.TargetContract == nil || outline.TargetContract == nil || step.TargetContract == nil {
+		return fmt.Errorf("requires a non-destructive semantic target contract in every execution layer")
+	}
+	semanticID := strings.TrimSpace(step.TargetContract.SemanticID)
+	if semanticID == "" || semanticID != strings.TrimSpace(stage.TargetContract.SemanticID) || semanticID != strings.TrimSpace(outline.TargetContract.SemanticID) {
+		return fmt.Errorf("requires one consistent semantic target id")
+	}
+	if stage.TargetContract.Destructive || outline.TargetContract.Destructive || step.TargetContract.Destructive || strings.TrimSpace(stage.TargetContract.Purpose) == "" {
+		return fmt.Errorf("requires a non-destructive target purpose")
+	}
+	if !runtimeAdaptiveTargetDiscoverable(step, stage) {
+		return fmt.Errorf("requires route and role, name, component, or approved locator discovery hints")
+	}
+	if strings.TrimSpace(stage.SuccessState) == "" || strings.TrimSpace(outline.SuccessState) == "" || strings.TrimSpace(step.ExpectedOutcome) == "" {
+		return fmt.Errorf("requires an immutable success state in every execution layer")
+	}
+	if !validRuntimeAdaptiveCapturePlan(stage.CapturePlan) {
+		return fmt.Errorf("requires an observable capture plan")
+	}
+	if !validRuntimeAdaptiveCapturePlan(outline.CapturePlan) {
+		return fmt.Errorf("requires an observable outline capture plan")
+	}
+	if bundle == nil || bundle.PlanJSON == nil || len(bundle.PlanJSON.SafetyPolicy.AllowedDomains) == 0 || bundle.ScriptOutline == nil || len(bundle.ScriptOutline.AllowedExplorationScope.AllowedOrigins) == 0 {
+		return fmt.Errorf("requires allowed domains and exploration origins")
+	}
+	if !containsContractField(outline.CanModify, "selector") || !containsContractField(outline.MustPreserve, "success_state") || !containsContractField(outline.MustPreserve, "safety_policy") {
+		return fmt.Errorf("requires bounded locator repair and immutable success/safety fields")
+	}
+	return nil
+}
+
+func runtimeAdaptiveTargetDiscoverable(step ScriptStep, stage StageApprovalStage) bool {
+	target := step.Action.Target
+	hasLocator := target.Selector != "" || target.TestID != "" || target.Role != "" || target.Label != "" || target.Text != "" || len(target.SelectorAlternatives) > 0
+	contract := stage.TargetContract
+	hasSemanticHints := contract != nil && (len(contract.AllowedRoles) > 0 || len(contract.AllowedNames) > 0 || strings.TrimSpace(contract.ComponentRef) != "")
+	hasRoute := step.Action.Type == GraphActionNavigate && (target.URL != "" || step.PageTarget.URL != "")
+	hasRoute = hasRoute || stage.EntryRoute != "" || stage.TargetRoute != "" || stage.TargetRouteTemplate != "" || len(stage.CandidateRoutes) > 0
+	return hasRoute && (hasLocator || hasSemanticHints || step.Action.Type == GraphActionNavigate)
+}
+
+func validRuntimeAdaptiveCapturePlan(plan *BrowserAgentCapturePlan) bool {
+	return plan != nil && strings.TrimSpace(plan.Intent) != "" && (strings.TrimSpace(plan.PrimaryArtifact) != "" || len(plan.RequiredAssets) > 0)
+}
+
+func containsContractField(values []string, field string) bool {
+	for _, value := range values {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(value)), field) {
+			return true
+		}
+	}
+	return false
 }
 
 func stepHasDeterministicBrowserAgentValidation(step ScriptStep) bool {

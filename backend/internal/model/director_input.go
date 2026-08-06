@@ -556,43 +556,47 @@ type ArkMediaProviderPollAttempt struct {
 }
 
 type CandidateAssetReview struct {
-	SchemaVersion      string                     `json:"schema_version"`
-	ReviewID           string                     `json:"review_id"`
-	CreatedAt          time.Time                  `json:"created_at"`
-	SourcePackageID    string                     `json:"source_package_id,omitempty"`
-	GenerationResultID string                     `json:"generation_result_id,omitempty"`
-	Status             string                     `json:"status"`
-	Policy             CandidateAssetReviewPolicy `json:"policy"`
-	Items              []CandidateAssetReviewItem `json:"items,omitempty"`
-	ApprovedArtifacts  []ArtifactRef              `json:"approved_artifacts,omitempty"`
-	RejectedArtifacts  []ArtifactRef              `json:"rejected_artifacts,omitempty"`
-	Warnings           []ArkMediaReadinessFinding `json:"warnings,omitempty"`
-	Notes              []string                   `json:"notes,omitempty"`
+	SchemaVersion          string                     `json:"schema_version"`
+	ReviewID               string                     `json:"review_id"`
+	CreatedAt              time.Time                  `json:"created_at"`
+	SourcePackageID        string                     `json:"source_package_id,omitempty"`
+	GenerationResultID     string                     `json:"generation_result_id,omitempty"`
+	Status                 string                     `json:"status"`
+	Policy                 CandidateAssetReviewPolicy `json:"policy"`
+	Items                  []CandidateAssetReviewItem `json:"items,omitempty"`
+	ApprovedArtifacts      []ArtifactRef              `json:"approved_artifacts,omitempty"`
+	PendingReviewArtifacts []ArtifactRef              `json:"pending_review_artifacts,omitempty"`
+	RejectedArtifacts      []ArtifactRef              `json:"rejected_artifacts,omitempty"`
+	Warnings               []ArkMediaReadinessFinding `json:"warnings,omitempty"`
+	Notes                  []string                   `json:"notes,omitempty"`
 }
 
 type CandidateAssetReviewPolicy struct {
-	DecisionMode             string   `json:"decision_mode"`
-	SourceMaterialPolicy     string   `json:"source_material_policy"`
-	AllowedKinds             []string `json:"allowed_kinds"`
-	RequiresLocalFile        bool     `json:"requires_local_file"`
-	RequiresNonAuthoritative bool     `json:"requires_non_authoritative"`
-	RequiresPresentationOnly bool     `json:"requires_presentation_only"`
-	AutoIncludeInDemo        bool     `json:"auto_include_in_demo"`
+	DecisionMode               string   `json:"decision_mode"`
+	SourceMaterialPolicy       string   `json:"source_material_policy"`
+	AllowedKinds               []string `json:"allowed_kinds"`
+	RequiresLocalFile          bool     `json:"requires_local_file"`
+	RequiresNonAuthoritative   bool     `json:"requires_non_authoritative"`
+	RequiresPresentationOnly   bool     `json:"requires_presentation_only"`
+	AutoIncludeInDemo          bool     `json:"auto_include_in_demo"`
+	RequiresExplicitUserReview bool     `json:"requires_explicit_user_review"`
 }
 
 type CandidateAssetReviewItem struct {
-	ArtifactID       string                     `json:"artifact_id"`
-	Kind             string                     `json:"kind"`
-	URI              string                     `json:"uri"`
-	MimeType         string                     `json:"mime_type,omitempty"`
-	Status           string                     `json:"status"`
-	ApprovedForDemo  bool                       `json:"approved_for_demo"`
-	IncludeInDemo    bool                       `json:"include_in_demo"`
-	PresentationOnly bool                       `json:"presentation_only"`
-	Reasons          []string                   `json:"reasons,omitempty"`
-	Risks            []string                   `json:"risks,omitempty"`
-	Findings         []ArkMediaReadinessFinding `json:"findings,omitempty"`
-	ApprovedMetadata map[string]any             `json:"approved_metadata,omitempty"`
+	ArtifactID             string                     `json:"artifact_id"`
+	Kind                   string                     `json:"kind"`
+	URI                    string                     `json:"uri"`
+	MimeType               string                     `json:"mime_type,omitempty"`
+	Status                 string                     `json:"status"`
+	ApprovedForDemo        bool                       `json:"approved_for_demo"`
+	MediaEligible          bool                       `json:"media_eligible"`
+	ExplicitReviewRequired bool                       `json:"explicit_review_required"`
+	IncludeInDemo          bool                       `json:"include_in_demo"`
+	PresentationOnly       bool                       `json:"presentation_only"`
+	Reasons                []string                   `json:"reasons,omitempty"`
+	Risks                  []string                   `json:"risks,omitempty"`
+	Findings               []ArkMediaReadinessFinding `json:"findings,omitempty"`
+	ApprovedMetadata       map[string]any             `json:"approved_metadata,omitempty"`
 }
 
 type CandidateAssetEditPlanPatch struct {

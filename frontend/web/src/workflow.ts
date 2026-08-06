@@ -1,6 +1,7 @@
 import type { DemoWorkflowGraph, GraphNode, SandboxPolicy } from "../../src/types/workflowGraph";
 import type {
   ApprovalChecklistState,
+  BrowserAgentDirectStatus,
   CloudRunStatus,
   ExecutionPackagePreview,
   ProjectWorkspaceView,
@@ -116,9 +117,11 @@ export function projectNextAction(workspace: ProjectWorkspaceView): ProjectNextA
   return { kind: "review_result", workstation: "assets", title: "人工审核成品", description: "播放成品并选择通过、重新剪辑或缺少素材需要重新录制。" };
 }
 
-export function executionServerBlockedReason(resolved: boolean, sessionValid: boolean | undefined): string | undefined {
+export function executionServerBlockedReason(resolved: boolean, direct: BrowserAgentDirectStatus | undefined): string | undefined {
 	if (!resolved) return "正在检查执行服务器连接。";
-	if (sessionValid !== true) return "执行服务器尚未完成连接与安装身份验证。";
+	if (!direct?.configured) return "尚未配置 Ubuntu Browser Agent 服务器地址。";
+	if (!direct.tokenConfigured) return "尚未在系统凭据库保存 Browser Agent 访问令牌。";
+	if (!direct.reachable) return "Browser Agent 直连协议健康检查尚未通过。";
 	return undefined;
 }
 
@@ -150,6 +153,19 @@ export function updateGraphNode(graph: DemoWorkflowGraph, nodeID: string, patch:
   return {
     ...graph,
     nodes: graph.nodes.map((node) => (node.id === nodeID ? { ...node, ...patch } : node)),
+  };
+}
+
+export function beginGraphRevision(
+  graph: DemoWorkflowGraph,
+  nodeID: string,
+  patch: Partial<GraphNode>,
+  initialChecklist: ApprovalChecklistState,
+): { graph: DemoWorkflowGraph; graphDirty: true; checklist: ApprovalChecklistState } {
+  return {
+    graph: updateGraphNode(graph, nodeID, patch),
+    graphDirty: true,
+    checklist: { ...initialChecklist },
   };
 }
 
@@ -284,7 +300,7 @@ export function packageApprovalBlockedReasons(
     blocked.add("上传前必须完成人工审批。");
   }
   if (!checklist.ipAllowlistAcknowledged && !preview.ipAllowlistAcknowledged) {
-    blocked.add("需要确认 DemoOps 执行服务器出口 IP 已加入客户环境白名单。");
+    blocked.add("需要确认目标环境允许 Ubuntu Browser Agent 服务器访问。");
   }
   if (!checklist.sourceSummaryOnlyAcknowledged || !preview.sourceSummaryOnly) {
     blocked.add("需要确认仅上传代码结构摘要，不上传完整源码。");

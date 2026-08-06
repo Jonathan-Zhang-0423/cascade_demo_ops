@@ -1174,6 +1174,20 @@ export function VideoEditor({ initialSessionID }: { initialSessionID?: string })
     setMessage("正在停止渲染进程...");
   }
 
+  async function reviewPresentationCandidate(artifact: EditorArtifact, approved: boolean) {
+    if (!session || busy) return;
+    setBusy(`review-${artifact.id}`);
+    const result = await client.reviewPresentationCandidate(session.session_id, session.revision, artifact.id, approved);
+    setBusy("");
+    if (!result.ok || !result.data) {
+      setMessage(result.error || "候选审核失败");
+      return;
+    }
+    setSession(result.data);
+    setSessions((items) => items.map((item) => item.session_id === result.data!.session_id ? result.data! : item));
+    setMessage(approved ? "候选已由用户明确批准，可手动加入展示轨。" : "候选已拒绝，不会进入成片。");
+  }
+
   function showFinalRenderDiagnostic() {
     if (!session) return;
     setMessage(renderFailureDetail(session.final_render));
@@ -1375,7 +1389,7 @@ export function VideoEditor({ initialSessionID }: { initialSessionID?: string })
                   </select>
                 </div> : null}
                 {mediaTab === "media" ? <button className="studio-import-zone" onClick={() => setImportOpen(true)}>＋ 从本机选择，或导入结果包</button> : null}
-                {mediaTab === "style" ? <StyleProductionPanel templates={styleTemplates} templateID={styleTemplateID} prompt={stylePrompt} referenceID={styleReferenceID} references={session.asset_catalog.artifacts.filter(isStyleReferenceArtifact)} rightsConfirmed={styleRightsConfirmed} {...(styleDraft ? { draft: styleDraft } : {})} busy={busy} onTemplateChange={setStyleTemplateID} onPromptChange={setStylePrompt} onReferenceChange={setStyleReferenceID} onRightsChange={setStyleRightsConfirmed} onReferenceUpload={(file) => void importStyleReference(file)} onCreateDraft={() => void createStyleDraft()} onApplyDraft={() => void applyStyleDraft()} /> : <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} selectedAssetID={selectedArtifact?.id} assetQuery={assetQuery} assetFilter={assetFilter} assetRatioFilter={assetRatioFilter} selectedOverlayID={selectedOverlayID} onSelectShot={(shot) => selectShot(shot)} onSelectAsset={selectAsset} onAddStill={addStillToTimeline} onAddCaption={() => setCaptionImportOpen(true)} onAddShape={addShapeOverlay} onSelectOverlay={(shot, overlay) => { selectShot(shot); setSelectedOverlayID(overlay.id ?? ""); }} />}
+                {mediaTab === "style" ? <StyleProductionPanel templates={styleTemplates} templateID={styleTemplateID} prompt={stylePrompt} referenceID={styleReferenceID} references={session.asset_catalog.artifacts.filter(isStyleReferenceArtifact)} rightsConfirmed={styleRightsConfirmed} {...(styleDraft ? { draft: styleDraft } : {})} busy={busy} onTemplateChange={setStyleTemplateID} onPromptChange={setStylePrompt} onReferenceChange={setStyleReferenceID} onRightsChange={setStyleRightsConfirmed} onReferenceUpload={(file) => void importStyleReference(file)} onCreateDraft={() => void createStyleDraft()} onApplyDraft={() => void applyStyleDraft()} /> : <MediaPanelContent tab={mediaTab} session={session} plan={draftPlan} selectedShotID={selectedShot?.id} selectedAssetID={selectedArtifact?.id} assetQuery={assetQuery} assetFilter={assetFilter} assetRatioFilter={assetRatioFilter} selectedOverlayID={selectedOverlayID} busy={busy} onReviewCandidate={(artifact, approved) => void reviewPresentationCandidate(artifact, approved)} onSelectShot={(shot) => selectShot(shot)} onSelectAsset={selectAsset} onAddStill={addStillToTimeline} onAddCaption={() => setCaptionImportOpen(true)} onAddShape={addShapeOverlay} onSelectOverlay={(shot, overlay) => { selectShot(shot); setSelectedOverlayID(overlay.id ?? ""); }} />}
               </div>
             </section>
 
@@ -1672,7 +1686,7 @@ function StyleProductionPanel({ templates, templateID, prompt, referenceID, refe
   </div>;
 }
 
-function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID, assetQuery, assetFilter, assetRatioFilter, selectedOverlayID, onSelectShot, onSelectAsset, onAddStill, onAddCaption, onAddShape, onSelectOverlay }: { tab: Exclude<MediaTab, "style">; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; selectedAssetID: string | undefined; assetQuery: string; assetFilter: AssetFilter; assetRatioFilter: AssetRatioFilter; selectedOverlayID: string; onSelectShot: (shot: EditorShot) => void; onSelectAsset: (asset: EditorArtifact) => void; onAddStill: (asset: EditorArtifact) => void; onAddCaption: () => void; onAddShape: (shape: ShapeKind) => void; onSelectOverlay: (shot: EditorShot, overlay: EditorOverlay) => void }) {
+function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID, assetQuery, assetFilter, assetRatioFilter, selectedOverlayID, busy, onReviewCandidate, onSelectShot, onSelectAsset, onAddStill, onAddCaption, onAddShape, onSelectOverlay }: { tab: Exclude<MediaTab, "style">; session: EditorSession; plan: EditorPlan | undefined; selectedShotID: string | undefined; selectedAssetID: string | undefined; assetQuery: string; assetFilter: AssetFilter; assetRatioFilter: AssetRatioFilter; selectedOverlayID: string; busy: string; onReviewCandidate: (artifact: EditorArtifact, approved: boolean) => void; onSelectShot: (shot: EditorShot) => void; onSelectAsset: (asset: EditorArtifact) => void; onAddStill: (asset: EditorArtifact) => void; onAddCaption: () => void; onAddShape: (shape: ShapeKind) => void; onSelectOverlay: (shot: EditorShot, overlay: EditorOverlay) => void }) {
   if (tab === "captions") {
     const shots = plan?.shots.filter((shot) => captionText(shot)) ?? [];
     const cues = plan?.caption_cues ?? [];
@@ -1684,8 +1698,8 @@ function MediaPanelContent({ tab, session, plan, selectedShotID, selectedAssetID
   }
   if (tab === "generated") {
     const generated = session.asset_catalog.artifacts.filter(isGeneratedArtifact);
-    const capability = session.provider_capabilities.find((item) => item.provider === "seedance");
-    return <div className="studio-generated-content"><div className="studio-provider-card"><div><strong>Seedance</strong><span>{capability?.configured ? capability.mode : "未配置"}</span></div><p>候选素材必须人工审查，不能自动加入时间线或代表真实业务步骤。</p><small>auto_include=false · presentation_only=true</small></div>{generated.map((artifact) => <AssetCard key={artifact.id} artifact={artifact} generated />)}{generated.length === 0 ? <PanelEmpty text="当前没有生成候选素材。" /> : null}</div>;
+    const capability = session.presentation_capabilities.find((item) => item.capability === "presentation_video_candidate");
+    return <div className="studio-generated-content"><div className="studio-provider-card"><div><strong>展示视频候选</strong><span>{capability?.available ? "能力可用" : "当前不可用"}</span></div><p>候选素材必须经媒体检查和用户明确审核，不能自动加入时间线或代表真实业务步骤。</p><small>仅展示 · 不替代真实 UI · 失败不阻塞录制交付</small></div>{generated.map((artifact) => { const eligible = artifact.metadata?.media_eligible === true; const approved = artifact.metadata?.approved_for_demo === true && artifact.metadata?.approval_mode === "explicit_user_review"; return <div key={artifact.id}><AssetCard artifact={artifact} generated /><div><span>{approved ? "用户已批准" : eligible ? "媒体检查通过，待用户审核" : "媒体检查未通过"}</span><button disabled={!eligible || busy !== ""} onClick={() => onReviewCandidate(artifact, true)}>批准</button><button disabled={busy !== ""} onClick={() => onReviewCandidate(artifact, false)}>拒绝</button></div></div>; })}{generated.length === 0 ? <PanelEmpty text="当前没有生成候选素材。" /> : null}</div>;
   }
   const query = assetQuery.trim().toLocaleLowerCase("zh-CN");
   const assets = session.asset_catalog.artifacts.filter((artifact) => {

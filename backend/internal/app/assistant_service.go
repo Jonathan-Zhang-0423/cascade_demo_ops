@@ -1019,7 +1019,6 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 				TargetWorkstation: model.AssistantWorkstationEvidence, Proposals: repairProposals,
 			}, nil
 		}
-		s.emitAssistantProgress(input.ProjectID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelSuccess, Message: "本地执行包草稿已生成", Detail: "等待独立上传审批。", ElapsedMS: time.Since(analysisStarted).Milliseconds()})
 		if state.ProjectContext != nil {
 			state.ProjectContext.Name = session.Configuration.ProjectName
 			if err := s.states.Save(ctx, state); err != nil {
@@ -1031,13 +1030,36 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 		session.Configuration.ConfirmedAt = &now
 		session.Configuration.AnalysisProjectID = state.ProjectID
 		session.Context.ProjectID = state.ProjectID
+		build, buildErr := s.BuildClientExecutionPackage(ctx, state.ProjectID, defaultDesktopOrgID)
+		if buildErr != nil || build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked {
+			reason := assistantPackageBlockReason(build, buildErr)
+			session.ActiveWorkstation = model.AssistantWorkstationEvidence
+			session.WorkstationTitle = "执行包门禁需要处理"
+			dismissAssistantProposalsOfKinds(session, proposal.ID, model.AssistantProposalConfirmConfiguration, model.AssistantProposalStartLocalAnalysis)
+			s.emitAssistantProgress(input.ProjectID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelError, Message: "正式执行包门禁未通过", Detail: reason, ElapsedMS: time.Since(analysisStarted).Milliseconds()})
+			proposal.ExecutionResult = map[string]any{"projectID": state.ProjectID, "analysisStarted": true, "analysisBlocked": true, "uploadApproved": false}
+			return &model.AssistantMessage{
+				ID: fmt.Sprintf("agent_package_blocked_%d", now.UnixNano()), Role: "agent", Kind: "error",
+				Text: reason + "。本地分析结果已保留，但尚不能进入上传审批。", CreatedAt: now,
+				TargetWorkstation: model.AssistantWorkstationEvidence,
+				Proposals: []model.AssistantProposal{
+					newAssistantProposal(model.AssistantProposalRetryPageScan, "重新扫描页面", "重新运行登录和业务页面预扫描，收集真实 Browser Scan 证据。", session.Configuration.Version, now, nil, model.AssistantWorkstationEvidence),
+					newAssistantProposal(model.AssistantProposalRegenerateExecutionPackage, "重新生成执行包", "从权威状态重新生成全部执行层并再次运行正式包门禁。", session.Configuration.Version, now, nil, model.AssistantWorkstationRepair),
+				},
+			}, nil
+		}
+		s.emitAssistantProgress(input.ProjectID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelSuccess, Message: "本地执行包草稿已生成", Detail: "正式包门禁已通过，等待独立上传审批。", ElapsedMS: time.Since(analysisStarted).Milliseconds()})
 		session.ActiveWorkstation = model.AssistantWorkstationApproval
 		session.WorkstationTitle = "执行包审批"
 		dismissAssistantProposalsOfKinds(session, proposal.ID, model.AssistantProposalConfirmConfiguration, model.AssistantProposalStartLocalAnalysis)
 		proposal.ExecutionResult = map[string]any{"projectID": state.ProjectID, "analysisStarted": true, "uploadApproved": false}
+		readyText := "本地代码、网页证据和用户需求已完成分析，三合一执行包草稿已生成。请在右侧检查方案与风险；上传仍需独立人工审批。"
+		if assistantRuntimeEvidencePending(build.Package.ConfidenceSummary) {
+			readyText = "本地代码和用户需求已生成受限 Browser Agent 正式包；登录后页面、selector 与实际结果将在云端运行时采集并逐项验证。当前只表示执行合同可审批，不表示业务已执行成功。"
+		}
 		return &model.AssistantMessage{
 			ID: fmt.Sprintf("agent_analysis_ready_%d", now.UnixNano()), Role: "agent", Kind: "status",
-			Text:      "本地代码、网页证据和用户需求已完成分析，三合一执行包草稿已生成。请在右侧检查方案与风险；上传仍需独立人工审批。",
+			Text:      readyText,
 			CreatedAt: now, TargetWorkstation: model.AssistantWorkstationApproval,
 		}, nil
 	case model.AssistantProposalOpenWorkstation:
@@ -1071,16 +1093,37 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 		if projectID == "" {
 			return nil, errors.New("analysis project is missing")
 		}
-		state, regenerateErr := s.RegenerateExecutionPackage(ctx, projectID)
+		rerunInput, regenerateErr := s.userInputFromConfiguration(session.Configuration)
+		if regenerateErr == nil {
+			rerunInput.ProjectID = projectID
+		}
+		var state *orchestrator.CascadeState
+		if regenerateErr == nil {
+			state, regenerateErr = s.GenerateExecutionPackage(ctx, rerunInput)
+		}
 		if regenerateErr != nil {
 			return nil, regenerateErr
 		}
 		session.Configuration.AnalysisProjectID = state.ProjectID
 		session.Context.ProjectID = state.ProjectID
+		build, buildErr := s.BuildClientExecutionPackage(ctx, state.ProjectID, defaultDesktopOrgID)
+		if buildErr != nil || build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked {
+			reason := assistantPackageBlockReason(build, buildErr)
+			session.ActiveWorkstation = model.AssistantWorkstationEvidence
+			session.WorkstationTitle = "执行包门禁需要处理"
+			proposal.ExecutionResult = map[string]any{"projectID": state.ProjectID, "regenerated": true, "analysisBlocked": true, "uploadApproved": false}
+			return &model.AssistantMessage{ID: fmt.Sprintf("agent_repair_blocked_%d", time.Now().UnixNano()), Role: "agent", Kind: "error", Text: reason + "。重新生成已完成，但正式包仍被阻断。", CreatedAt: time.Now().UTC(), TargetWorkstation: model.AssistantWorkstationEvidence, Proposals: []model.AssistantProposal{
+				newAssistantProposal(model.AssistantProposalRetryPageScan, "重新扫描页面", "重新运行登录和业务页面预扫描，收集真实 Browser Scan 证据。", session.Configuration.Version, time.Now().UTC(), nil, model.AssistantWorkstationEvidence),
+			}}, nil
+		}
 		session.ActiveWorkstation = model.AssistantWorkstationApproval
 		session.WorkstationTitle = "执行包审批"
 		proposal.ExecutionResult = map[string]any{"projectID": state.ProjectID, "regenerated": true, "uploadApproved": false}
-		return &model.AssistantMessage{ID: fmt.Sprintf("agent_repaired_%d", time.Now().UnixNano()), Role: "agent", Kind: "status", Text: "页面证据和执行包已重新生成，请检查审批摘要。", CreatedAt: time.Now().UTC(), TargetWorkstation: model.AssistantWorkstationApproval}, nil
+		readyText := "页面证据和执行包已重新生成，请检查审批摘要。"
+		if assistantRuntimeEvidencePending(build.Package.ConfidenceSummary) {
+			readyText = "受限 Browser Agent 执行合同已重新生成；登录后页面、selector 与实际结果仍由运行时采集验证，请检查审批摘要。"
+		}
+		return &model.AssistantMessage{ID: fmt.Sprintf("agent_repaired_%d", time.Now().UnixNano()), Role: "agent", Kind: "status", Text: readyText, CreatedAt: time.Now().UTC(), TargetWorkstation: model.AssistantWorkstationApproval}, nil
 	case model.AssistantProposalSelectProjectSource, model.AssistantProposalSelectLocalProject, model.AssistantProposalConnectGitHub,
 		model.AssistantProposalAttachRequirementDocument, model.AssistantProposalAttachBrandAsset,
 		model.AssistantProposalStoreDemoCredential:
@@ -1089,6 +1132,20 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 		return nil, errors.New("unsupported assistant proposal kind")
 	}
 	return nil, nil
+}
+
+func assistantPackageBlockReason(build ClientExecutionPackageBuild, err error) string {
+	if err != nil {
+		return "正式执行包预检未通过：" + bridgeErrorInfo(err).Message
+	}
+	if build.Package.ConfidenceSummary != nil && len(build.Package.ConfidenceSummary.BlockingReasons) > 0 {
+		return "正式执行包确信度被阻断：" + strings.Join(build.Package.ConfidenceSummary.BlockingReasons, "；")
+	}
+	return "正式执行包缺少可验证的确信度结果"
+}
+
+func assistantRuntimeEvidencePending(summary *model.PackageConfidenceSummary) bool {
+	return summary != nil && summary.Readiness != model.PackageReadinessBlocked && summary.ExecutionContractCoverage == 1 && summary.RuntimePageEvidenceCoverage < 1
 }
 
 func invalidateAssistantAnalysisContext(session *model.AssistantSession) {
@@ -1282,6 +1339,7 @@ func (s *Service) userInputFromConfiguration(draft model.ProjectConfigurationDra
 		}
 		input.DemoUsername = credential.Username
 		input.DemoPassword = credential.Password
+		input.DemoCredentialRef = ref
 		break
 	}
 	return input, nil

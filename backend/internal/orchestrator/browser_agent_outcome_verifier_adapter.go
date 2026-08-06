@@ -281,7 +281,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 
 		// P0.5: Check for missing observation evidence in critical events
 		if event.EventType == model.StageExecutionEventOutcomeObserved ||
-		   event.EventType == model.StageExecutionEventObservationCollected {
+			event.EventType == model.StageExecutionEventObservationCollected {
 			if event.Observation == nil {
 				runtimeChecks = append(runtimeChecks, model.ValidationCheck{
 					ID:       fmt.Sprintf("runtime_no_observation_%s_%d", event.StageID, i),
@@ -498,6 +498,19 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 			// We only generate and reference them here
 		}
 	}
+	// repair_allowed is a promise that the stage runner can consume a concrete
+	// proposal. Non-blocking legacy warnings without an allowed patch remain
+	// auditable, but must not send the runner into a proposal-less repair path.
+	if newReport.Decision == model.ValidationDecisionRepairAllowed && len(newReport.RepairProposalRefs) == 0 {
+		newReport.Decision = model.ValidationDecisionContinue
+		if len(newReport.EvidenceRefs) == 0 {
+			newReport.EvidenceRefs = append(newReport.EvidenceRefs, model.EvidenceRef{
+				ID:      firstNonEmpty(vctx.SourceBundleHashSHA256, "unknown_bundle"),
+				Kind:    model.EvidenceKindSourceCode,
+				Summary: "runtime validation found no applicable repair proposal",
+			})
+		}
+	}
 
 	return newReport, nil
 }
@@ -658,8 +671,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 		if event.EventType == model.StageExecutionEventOutcomeObserved && event.Observation != nil {
 			// Check evidence quality
 			if event.Observation.Source == model.RuntimeObservationActualBrowser ||
-			   event.Observation.Source == model.RuntimeObservationAssertion ||
-			   event.Observation.Source == model.RuntimeObservationArtifact {
+				event.Observation.Source == model.RuntimeObservationAssertion ||
+				event.Observation.Source == model.RuntimeObservationArtifact {
 				stageOutcomes[event.StageID] = true
 			}
 		}
@@ -709,7 +722,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 	// P0.4: Verify stage events have traceable evidence_refs
 	for i, event := range events {
 		if event.EventType == model.StageExecutionEventOutcomeObserved ||
-		   event.EventType == model.StageExecutionEventObservationCollected {
+			event.EventType == model.StageExecutionEventObservationCollected {
 			if len(event.EvidenceRefs) == 0 {
 				postChecks = append(postChecks, model.ValidationCheck{
 					ID:       fmt.Sprintf("post_no_evidence_refs_%s_%d", event.StageID, i),
@@ -806,8 +819,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 
 	// P1: Generate repair proposals for failed checks (if repair allowed and not recommending reunderstanding)
 	if a.config.EnableRuntimeRepair &&
-	   vctx.BrowserAgentContract != nil &&
-	   newReport.Decision != model.ValidationDecisionReunderstandingRequired {
+		vctx.BrowserAgentContract != nil &&
+		newReport.Decision != model.ValidationDecisionReunderstandingRequired {
 		proposals := a.repairGen.GenerateRepairProposals(&vctx, newReport.Checks, &vctx.BrowserAgentContract.RepairPolicy)
 		if len(proposals) > 0 {
 			// Store proposal IDs in report
@@ -954,14 +967,14 @@ func (a *BrowserAgentOutcomeVerifierAdapter) buildLegacyReportFromResults(
 	}
 
 	return model.LegacyValidationReport{
-		ID:                 fmt.Sprintf("%s_%d", phase, time.Now().UnixNano()),
+		ID:                  fmt.Sprintf("%s_%d", phase, time.Now().UnixNano()),
 		ValidationContextID: packageID,
-		Phase:              model.LegacyValidationPhase(phase),
-		GlobalFeedbackType: feedbackType,
-		PassedStages:       passed,
-		FailedStages:       failed,
-		TotalStages:        len(results),
-		StageFeedbacks:     []model.StageFeedback{},
+		Phase:               model.LegacyValidationPhase(phase),
+		GlobalFeedbackType:  feedbackType,
+		PassedStages:        passed,
+		FailedStages:        failed,
+		TotalStages:         len(results),
+		StageFeedbacks:      []model.StageFeedback{},
 	}
 }
 

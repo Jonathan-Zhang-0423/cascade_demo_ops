@@ -31,13 +31,13 @@ func TestValidateStageEvents_OutOfOrderEvents(t *testing.T) {
 	// Out-of-order: completed before started
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageCompleted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageCompleted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now().Add(1 * time.Second),
 		},
 	}
@@ -95,13 +95,13 @@ func TestValidateStageEvents_DerivedFromPlanEvidence(t *testing.T) {
 	// Event with derived_from_plan evidence (should be rejected)
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationDerivedPlan, // Invalid!
@@ -160,13 +160,13 @@ func TestValidateStageEvents_MissingOutcomeObserved(t *testing.T) {
 	// Completed without outcome_observed
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageCompleted, // No outcome_observed!
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageCompleted, // No outcome_observed!
 			OccurredAt: time.Now().Add(1 * time.Second),
 		},
 	}
@@ -221,8 +221,8 @@ func TestValidateStageEvents_MissingObservation(t *testing.T) {
 	// outcome_observed without observation field
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
@@ -280,13 +280,13 @@ func TestValidateStageEvents_RequiredAssertionFailed(t *testing.T) {
 	// Event with failed assertion
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,
@@ -352,13 +352,13 @@ func TestValidateStageEvents_ValidFlow(t *testing.T) {
 	// Valid event flow
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,
@@ -373,8 +373,8 @@ func TestValidateStageEvents_ValidFlow(t *testing.T) {
 			},
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageCompleted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageCompleted,
 			OccurredAt: time.Now().Add(2 * time.Second),
 		},
 	}
@@ -399,11 +399,104 @@ func TestValidateStageEvents_ValidFlow(t *testing.T) {
 	// Should not have critical P0 violations
 	for _, check := range report.Checks {
 		if check.Code == "OUT_OF_ORDER_EVENTS" ||
-		   check.Code == "DERIVED_FROM_PLAN_EVIDENCE" ||
-		   check.Code == "MISSING_OUTCOME_OBSERVED" ||
-		   check.Code == "NO_OBSERVATION_EVIDENCE" ||
-		   check.Code == "REQUIRED_ASSERTION_FAILED" {
+			check.Code == "DERIVED_FROM_PLAN_EVIDENCE" ||
+			check.Code == "MISSING_OUTCOME_OBSERVED" ||
+			check.Code == "NO_OBSERVATION_EVIDENCE" ||
+			check.Code == "REQUIRED_ASSERTION_FAILED" {
 			t.Errorf("Valid flow should not trigger P0 check: %s", check.Code)
 		}
+	}
+}
+
+func TestValidateStageEvents_DynamicRouteAssertionsContinueWithoutRepair(t *testing.T) {
+	config := &model.ValidationConfig{
+		RealTimeBatchEnabled: true,
+		EnableRuntimeRepair:  true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+	now := time.Now()
+	vctx := model.BrowserAgentValidationContext{
+		RunID:                     "test-run-dynamic-route",
+		SourcePackageID:           "pkg-dynamic-route",
+		SourceBundleHashSHA256:    "bundle-dynamic-route",
+		EffectivePolicyHashSHA256: "policy-dynamic-route",
+		WorkflowGraph:             &model.DemoWorkflowGraph{},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+			ID:                               "stage-start-build",
+			NodeID:                           "node-start-build",
+			ExpectedRouteAfterAction:         "/project/:id",
+			RuntimeRouteVerificationRequired: true,
+			SuccessState:                     "passed",
+		}}},
+		ScriptOutline:        &model.BrowserAgentScriptOutline{},
+		BrowserAgentContract: &model.BrowserAgentContract{},
+	}
+	events := []model.StageExecutionEvent{
+		{NodeID: "node-start-build", StageID: "stage-start-build", EventType: model.StageExecutionEventStageStarted, OccurredAt: now},
+		{
+			NodeID: "node-start-build", StageID: "stage-start-build", EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: now.Add(time.Second),
+			Observation: &model.RuntimeObservation{
+				Source: model.RuntimeObservationActualBrowser,
+				URL:    "https://cascadeai.cn/project/demo-tetris",
+				Assertions: []model.RuntimeAssertion{
+					{Kind: "action_click_completed", Passed: true, Actual: "true"},
+					{Kind: "required_url_matches", Passed: true, Actual: "https://cascadeai.cn/project/demo-tetris"},
+				},
+			},
+		},
+		{NodeID: "node-start-build", StageID: "stage-start-build", EventType: model.StageExecutionEventStageCompleted, OccurredAt: now.Add(2 * time.Second)},
+	}
+
+	report, err := adapter.ValidateStageEvents(context.Background(), vctx, events)
+	if err != nil {
+		t.Fatalf("ValidateStageEvents() error = %v", err)
+	}
+	if report.Decision != model.ValidationDecisionContinue {
+		t.Fatalf("decision = %q, want continue; report=%+v", report.Decision, report)
+	}
+	if report.PassRate != 1 {
+		t.Fatalf("pass rate = %v, want 1", report.PassRate)
+	}
+	if len(report.RepairProposalRefs) != 0 {
+		t.Fatalf("successful dynamic route must not request repair: %v", report.RepairProposalRefs)
+	}
+}
+
+func TestValidateStageEvents_RepairDecisionRequiresConcreteProposal(t *testing.T) {
+	config := &model.ValidationConfig{
+		RealTimeBatchEnabled: true,
+		EnableRuntimeRepair:  true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+	now := time.Now()
+	vctx := model.BrowserAgentValidationContext{
+		RunID:                     "test-run-warning",
+		SourcePackageID:           "pkg-warning",
+		SourceBundleHashSHA256:    "bundle-warning",
+		EffectivePolicyHashSHA256: "policy-warning",
+		WorkflowGraph:             &model.DemoWorkflowGraph{},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+			ID: "stage-warning", NodeID: "node-warning", DurationMS: 100,
+		}}},
+		ScriptOutline:        &model.BrowserAgentScriptOutline{},
+		BrowserAgentContract: &model.BrowserAgentContract{},
+	}
+	events := []model.StageExecutionEvent{
+		{NodeID: "node-warning", StageID: "stage-warning", EventType: model.StageExecutionEventStageStarted, OccurredAt: now},
+		{NodeID: "node-warning", StageID: "stage-warning", EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: now.Add(time.Second), Observation: &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, URL: "https://cascadeai.cn/app"}},
+		{NodeID: "node-warning", StageID: "stage-warning", EventType: model.StageExecutionEventStageCompleted, OccurredAt: now.Add(time.Second)},
+	}
+
+	report, err := adapter.ValidateStageEvents(context.Background(), vctx, events)
+	if err != nil {
+		t.Fatalf("ValidateStageEvents() error = %v", err)
+	}
+	if report.Decision != model.ValidationDecisionContinue {
+		t.Fatalf("proposal-less warning decision = %q, want continue", report.Decision)
+	}
+	if len(report.RepairProposalRefs) != 0 {
+		t.Fatalf("unexpected repair proposal refs: %v", report.RepairProposalRefs)
 	}
 }

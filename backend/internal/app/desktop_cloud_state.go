@@ -110,13 +110,31 @@ func (s *Service) persistCloudDownload(ctx context.Context, projectID, resultPac
 			SizeBytes:  download.SizeBytes,
 			Verified:   true,
 		}
+		replaced := false
 		for index := range run.DownloadedAssets {
 			if run.DownloadedAssets[index].ArtifactID == asset.ArtifactID {
 				run.DownloadedAssets[index] = asset
-				return
+				replaced = true
+				break
 			}
 		}
-		run.DownloadedAssets = append(run.DownloadedAssets, asset)
+		if !replaced {
+			run.DownloadedAssets = append(run.DownloadedAssets, asset)
+		}
+		if run.Transport == directTransportStateName && len(run.DirectArtifacts) > 0 {
+			verified := make(map[string]bool, len(run.DownloadedAssets))
+			for _, downloaded := range run.DownloadedAssets {
+				verified[downloaded.ArtifactID] = downloaded.Verified
+			}
+			allVerified := true
+			for _, expected := range run.DirectArtifacts {
+				if !verified[expected.ArtifactID] {
+					allVerified = false
+					break
+				}
+			}
+			run.ResultDownloaded = allVerified
+		}
 	})
 }
 
@@ -138,10 +156,9 @@ func (s *Service) persistCloudReview(ctx context.Context, projectID string, revi
 	return s.updateDesktopCloudRun(ctx, projectID, func(run *orchestrator.DesktopCloudRunState) {
 		run.ResultPackageID = firstNonEmptyString(review.ResultPackageID, run.ResultPackageID)
 		run.ResultReview = &orchestrator.DesktopResultReviewState{
-			Decision:  string(review.Decision),
-			ReviewID:  review.ReviewID,
-			Summary:   review.Summary,
-			UpdatedAt: review.ReviewedAt,
+			Decision: string(review.Decision), ReviewID: review.ReviewID,
+			IdempotencyKey: review.IdempotencyKey, ReviewerInstallID: review.ReviewerInstallID,
+			Summary: review.Summary, UpdatedAt: review.ReviewedAt,
 		}
 	})
 }

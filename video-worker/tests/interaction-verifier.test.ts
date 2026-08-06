@@ -49,4 +49,159 @@ describe("interaction verifier login state machine", () => {
     expect(result.diagnostics?.login_transitions).toContain("login_form_ready");
     expect(result.diagnostics?.login_transitions).toContain("authenticated_navigation_observed");
   }, 30_000);
+
+  it("handles an email-first login before the password step", async () => {
+    server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/workspace") {
+        response.end("<!doctype html><title>Workspace</title><button data-testid='new-project'>New Project</button>");
+        return;
+      }
+      response.end(`<!doctype html><title>Login</title>
+        <form id="email-step" onsubmit="event.preventDefault(); this.hidden=true; document.querySelector('#password-step').hidden=false">
+          <input data-testid="input-email" type="email" placeholder="Enter your email address" />
+          <button type="submit">Continue</button>
+        </form>
+        <form id="password-step" hidden onsubmit="event.preventDefault(); location.href='/workspace'">
+          <input data-testid="input-password" type="password" autocomplete="current-password" />
+          <button type="submit">Sign in</button>
+        </form>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+
+    const result = await verifyInteractions({
+      product_url: `http://127.0.0.1:${address.port}/`, allowed_domains: ["127.0.0.1"], timeout_ms: 15_000,
+      demo_username: "demo@example.test", demo_password: "fixture-only",
+      intent_goals: [{ id: "new-project", label: "New Project", kind: "click", keywords: ["new", "project"], required: true, business: true }],
+    });
+
+    expect(result.diagnostics?.login_status).toBe("submitted_navigation_observed");
+    expect(result.diagnostics?.login_transitions).toContain("username_step_submitted");
+    expect(result.diagnostics?.final_url).toContain("/workspace");
+    expect(result.results.some((item) => item.intent_goal_id === "new-project" && item.status === "verified")).toBe(true);
+  }, 30_000);
+
+  it("does not report success when the password form disappears without authenticated evidence", async () => {
+    server = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Login</title>
+        <form onsubmit="event.preventDefault(); this.hidden=true; document.querySelector('#error').hidden=false">
+          <input type="email" /><input type="password" /><button type="submit">Sign in</button>
+        </form><p id="error" hidden>Invalid credentials</p>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+
+    const result = await verifyInteractions({
+      product_url: `http://127.0.0.1:${address.port}/`, allowed_domains: ["127.0.0.1"], timeout_ms: 15_000,
+      demo_username: "demo@example.test", demo_password: "fixture-only",
+    });
+
+    expect(result.diagnostics?.login_status).toBe("submitted_still_on_login_url");
+    expect(result.diagnostics?.login_transitions).not.toContain("authenticated_navigation_observed");
+  }, 30_000);
+
+  it("returns a redacted category for invalid credentials", async () => {
+    server = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Login</title>
+        <form onsubmit="event.preventDefault(); document.querySelector('#error').hidden=false">
+          <input type="email" /><input type="password" /><button type="submit">Sign in</button>
+        </form><p id="error" hidden>Invalid credentials</p>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+
+    const result = await verifyInteractions({
+      product_url: `http://127.0.0.1:${address.port}/login`, allowed_domains: ["127.0.0.1"], timeout_ms: 15_000,
+      demo_username: "demo@example.test", demo_password: "fixture-only",
+    });
+
+    expect(result.diagnostics?.login_status).toBe("submitted_invalid_credentials");
+    expect(result.diagnostics?.login_transitions).toContain("login_failure:invalid_credentials");
+  }, 30_000);
+
+  it("never binds credential goals to forgot-password or back controls", async () => {
+    server = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Login</title>
+        <input name="email" placeholder="邮箱" />
+        <input name="password" type="password" placeholder="密码" />
+        <button type="button">忘记密码？</button>
+        <a href="/">返回</a>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+
+    const result = await verifyInteractions({
+      product_url: `http://127.0.0.1:${address.port}/login`,
+      allowed_domains: ["127.0.0.1"],
+      intent_goals: [{ id: "login-credentials", label: "邮箱密码登录", kind: "fill", keywords: ["邮箱", "密码"], required: true }],
+    });
+
+    const discovered = result.results.filter((item) => item.id?.startsWith("browser_discovered_"));
+    expect(discovered.every((item) => item.kind !== "fill" || item.editable === true)).toBe(true);
+    expect(discovered.some((item) => /忘记密码|返回/.test(`${item.label} ${item.selector}`))).toBe(false);
+    expect(discovered.some((item) => item.intent_goal_id === "login-credentials" && item.kind === "fill")).toBe(true);
+  }, 30_000);
+});
+
+describe("interaction verifier safe state exploration", () => {
+  it("applies only an explicitly authorized project-entry click before rescanning", async () => {
+    server = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Workspace</title>
+        <button data-testid="new-project" onclick="document.querySelector('#form').hidden=false">New Project</button>
+        <section id="form" hidden><label>Project name<input data-testid="project-name"></label></section>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+    const productURL = `http://127.0.0.1:${address.port}/workspace`;
+
+    const result = await verifyInteractions({
+      product_url: productURL,
+      allowed_domains: ["127.0.0.1"],
+      timeout_ms: 15_000,
+      candidates: [{ id: "project-name", kind: "fill", selector: "[data-testid='project-name']", url: productURL }],
+      safe_state_transitions: [{ id: "business_stage_new_project_entry", label: "New Project", kind: "click", selector: "[data-testid='new-project']", url: productURL }],
+      intent_goals: [{ id: "project-name", label: "Project name", kind: "fill", keywords: ["project", "name"], required: true, business: true }],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.verification_mode).toBe("playwright_safe_state_scan");
+    expect(result.diagnostics?.safe_state_transitions).toContain("applied:business_stage_new_project_entry");
+    expect(result.results.find((item) => item.id === "project-name")?.status).toBe("verified");
+  }, 30_000);
+
+  it("rejects destructive transition semantics", async () => {
+    server = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end('<!doctype html><title>Workspace</title><button data-testid="delete-project">Delete project</button>');
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+    const productURL = `http://127.0.0.1:${address.port}/workspace`;
+
+    const result = await verifyInteractions({
+      product_url: productURL,
+      allowed_domains: ["127.0.0.1"],
+      safe_state_transitions: [{ id: "delete-project", label: "Delete project", kind: "click", selector: "[data-testid='delete-project']", url: productURL }],
+    });
+
+    expect(result.verification_mode).toBe("playwright_readonly_scan");
+    expect(result.diagnostics?.safe_state_transitions).toContain("rejected:delete-project");
+  }, 30_000);
 });

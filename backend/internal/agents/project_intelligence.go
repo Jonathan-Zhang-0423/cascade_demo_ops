@@ -2482,6 +2482,7 @@ func intentKeywordsForText(text string) []string {
 	keywords := []string{}
 	dictionary := []string{
 		"新建", "创建", "项目", "工程", "create", "new", "project",
+		"填写", "输入", "选择", "启动", "开始", "观察", "fill", "enter", "select", "start", "observe",
 		"邀请", "成员", "团队", "invite", "member", "team",
 		"生成", "构建", "执行", "运行", "generate", "build", "run", "agent",
 		"上传", "导入", "upload", "import",

@@ -1,5 +1,8 @@
 # App ↔ Server Browser Agent Outline 对接协议 v1
 
+> [!WARNING]
+> 本文的执行包内容合同仍有效，但“DemoOps 控制面/Exchange”传输入口已废弃，不是 App 正式主链路。新部署必须使用 [Browser Agent 直连部署手册](browser-agent-direct-deployment.md) 中的固定 TLS 控制端口、每 App 专属数据端口和本地 Worker API。
+
 本文档给服务端同事对接 App 端“三合一执行包”使用。当前产品主路径不再要求 App 生成最终 Playwright TS；App 端负责生成可审批、可追责、低体积的执行路线图，Server Browser Agent 负责运行时自适应探索、脚本补全、录制和失败诊断。
 
 ## 目标边界

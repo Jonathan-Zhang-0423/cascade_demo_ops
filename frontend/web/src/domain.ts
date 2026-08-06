@@ -205,6 +205,19 @@ export type ExecutionPackageUploadView = {
 
 export type CloudRunStatusView = {
   packageID: string;
+  transport?: "browser_agent_direct_v1" | "legacy_exchange";
+  leaseID?: string;
+  dataPort?: number;
+  leaseExpiresAt?: string;
+  directArtifacts?: Array<{
+    artifactID: string;
+    role?: string;
+    kind?: string;
+    fileName: string;
+    mimeType?: string;
+    sha256: string;
+    sizeBytes: number;
+  }>;
   uploadID?: string;
   exchangePackageID?: string;
   cloudJobID?: string;
@@ -313,7 +326,21 @@ export type RuntimeHealthView = {
   modelProviders: Record<string, ProviderCredentialStatus>;
   modelTaskRoutes: Record<string, ModelTaskRouteStatus>;
   cloudExchange?: CloudExchangeStatus;
+  browserAgentDirect?: BrowserAgentDirectStatus;
   appCapabilities?: AppCapabilitiesStatus;
+};
+
+export type BrowserAgentDirectStatus = {
+  configured: boolean;
+  reachable: boolean;
+  tokenConfigured: boolean;
+  protocolVersion?: string;
+  cryptoSuite?: string;
+  controlURLHost?: string;
+  controlURLPath?: string;
+  installationIDSuffix?: string;
+  transport: string;
+  errorClass?: string;
 };
 
 export type AppCapabilitiesStatus = {
