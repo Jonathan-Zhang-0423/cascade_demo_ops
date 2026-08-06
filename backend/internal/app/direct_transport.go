@@ -192,6 +192,13 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 	if err != nil {
 		return DirectTransportUploadResult{}, err
 	}
+	cleanLease := true
+	defer func() {
+		if cleanLease {
+			_ = s.releaseDirectLeaseRemote(context.Background(), lease)
+			_ = s.deleteDirectLease(projectID)
+		}
+	}()
 	messageID := "package_" + shortID(build.PackageDigestSHA256+request.IdempotencyKey)
 	message, err := model.EncryptDirectTransportJSON(build.Package, lease, messageID, "client_execution_package", model.DirectTransportDirectionUpload, time.Now().UTC())
 	if err != nil {
@@ -217,6 +224,7 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 	if err := s.persistDirectUpload(ctx, projectID, build.OrgID, lease, receipt); err != nil {
 		return DirectTransportUploadResult{}, err
 	}
+	cleanLease = false
 	return DirectTransportUploadResult{Build: build, Lease: directLeaseView(lease), Receipt: receipt, CredentialReceipt: credentialReceipt}, nil
 }
 
@@ -239,66 +247,8 @@ func (s *Service) ReleaseDirectTransportLease(ctx context.Context, projectID str
 	if run.Status != "completed" && run.Status != "failed" {
 		return DirectTransportReleaseResult{}, errors.New("direct Browser Agent lease cannot be released while the job is active")
 	}
-	identity, err := s.readExistingDirectInstallationIdentity()
-	if err != nil {
+	if err := s.releaseDirectLeaseRemote(ctx, lease); err != nil {
 		return DirectTransportReleaseResult{}, err
-	}
-	nonce, err := model.NewDirectTransportNonce()
-	if err != nil {
-		return DirectTransportReleaseResult{}, err
-	}
-	publicKey, err := base64.StdEncoding.DecodeString(identity.PublicKeyBase64)
-	if err != nil || len(publicKey) != ed25519.PublicKeySize {
-		return DirectTransportReleaseResult{}, errors.New("direct Browser Agent installation public key is invalid")
-	}
-	privateKey, err := base64.StdEncoding.DecodeString(identity.PrivateKeyBase64)
-	if err != nil || len(privateKey) != ed25519.PrivateKeySize {
-		return DirectTransportReleaseResult{}, errors.New("direct Browser Agent installation signing key is invalid")
-	}
-	now := time.Now().UTC()
-	request := model.DirectLeaseReleaseRequest{ProtocolVersion: model.DirectTransportProtocolVersion, InstallationID: model.DirectInstallationID(ed25519.PublicKey(publicKey)), LeaseID: lease.LeaseID, TimestampUnixMS: now.UnixMilli(), RequestNonce: nonce, SigningPublicKeyBase64: identity.PublicKeyBase64}
-	request.SignatureBase64 = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(privateKey), model.DirectLeaseReleaseRequestSigningPayload(request)))
-	body, _ := json.Marshal(request)
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.effectiveDirectTransportURL(), "/")+"/v1/direct/leases/release", bytes.NewReader(body))
-	if err != nil {
-		return DirectTransportReleaseResult{}, err
-	}
-	token, err := s.readDirectToken()
-	if err != nil {
-		return DirectTransportReleaseResult{}, errors.New("direct Browser Agent access token is unavailable")
-	}
-	httpRequest.Header.Set("Authorization", "Bearer "+token)
-	httpRequest.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(httpRequest)
-	if err != nil {
-		return DirectTransportReleaseResult{}, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotFound {
-		releaseErr := readDirectHTTPError(response)
-		var transportErr *directTransportHTTPError
-		if !errors.As(releaseErr, &transportErr) || transportErr.Code != "lease_not_found" {
-			return DirectTransportReleaseResult{}, errors.New("direct Browser Agent lease release endpoint is unavailable")
-		}
-		if err := s.persistDirectLeaseRelease(ctx, projectID); err != nil {
-			return DirectTransportReleaseResult{}, err
-		}
-		if err := s.deleteDirectLease(projectID); err != nil {
-			return DirectTransportReleaseResult{}, err
-		}
-		return DirectTransportReleaseResult{Released: true, Lease: directLeaseView(lease)}, nil
-	}
-	if response.StatusCode != http.StatusOK {
-		return DirectTransportReleaseResult{}, readDirectHTTPError(response)
-	}
-	var result struct {
-		Released bool `json:"released"`
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
-		return DirectTransportReleaseResult{}, err
-	}
-	if !result.Released {
-		return DirectTransportReleaseResult{}, errors.New("direct Browser Agent lease release was not acknowledged")
 	}
 	if err := s.persistDirectLeaseRelease(ctx, projectID); err != nil {
 		return DirectTransportReleaseResult{}, err
@@ -307,6 +257,65 @@ func (s *Service) ReleaseDirectTransportLease(ctx context.Context, projectID str
 		return DirectTransportReleaseResult{}, err
 	}
 	return DirectTransportReleaseResult{Released: true, Lease: directLeaseView(lease)}, nil
+}
+
+func (s *Service) releaseDirectLeaseRemote(ctx context.Context, lease model.DirectPortLease) error {
+	identity, err := s.readExistingDirectInstallationIdentity()
+	if err != nil {
+		return err
+	}
+	nonce, err := model.NewDirectTransportNonce()
+	if err != nil {
+		return err
+	}
+	publicKey, err := base64.StdEncoding.DecodeString(identity.PublicKeyBase64)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return errors.New("direct Browser Agent installation public key is invalid")
+	}
+	privateKey, err := base64.StdEncoding.DecodeString(identity.PrivateKeyBase64)
+	if err != nil || len(privateKey) != ed25519.PrivateKeySize {
+		return errors.New("direct Browser Agent installation signing key is invalid")
+	}
+	now := time.Now().UTC()
+	request := model.DirectLeaseReleaseRequest{ProtocolVersion: model.DirectTransportProtocolVersion, InstallationID: model.DirectInstallationID(ed25519.PublicKey(publicKey)), LeaseID: lease.LeaseID, TimestampUnixMS: now.UnixMilli(), RequestNonce: nonce, SigningPublicKeyBase64: identity.PublicKeyBase64}
+	request.SignatureBase64 = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(privateKey), model.DirectLeaseReleaseRequestSigningPayload(request)))
+	body, _ := json.Marshal(request)
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.effectiveDirectTransportURL(), "/")+"/v1/direct/leases/release", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	token, err := s.readDirectToken()
+	if err != nil {
+		return errors.New("direct Browser Agent access token is unavailable")
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+token)
+	httpRequest.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(httpRequest)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		releaseErr := readDirectHTTPError(response)
+		var transportErr *directTransportHTTPError
+		if errors.As(releaseErr, &transportErr) && transportErr.Code == "lease_not_found" {
+			return nil
+		}
+		return errors.New("direct Browser Agent lease release endpoint is unavailable")
+	}
+	if response.StatusCode != http.StatusOK {
+		return readDirectHTTPError(response)
+	}
+	var result struct {
+		Released bool `json:"released"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		return err
+	}
+	if !result.Released {
+		return errors.New("direct Browser Agent lease release was not acknowledged")
+	}
+	return nil
 }
 
 func (s *Service) uploadDirectCredential(ctx context.Context, lease model.DirectPortLease, receipt model.DirectPackageReceipt, build ClientExecutionPackageBuild) (model.DirectCredentialReceipt, error) {
