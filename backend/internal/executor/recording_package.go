@@ -134,6 +134,35 @@ func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 	if err := model.ValidateClientExecutionPackageForCloudExecution(source); err != nil {
 		return model.RecordingResultPackage{}, err
 	}
+	return newRecordingResultPackageFromRecordResult(source, result, cloudJobID, createdAt, nil)
+}
+
+// LocalTestRecordingResultPackageOptions can only describe a Server-issued,
+// non-Exchange waiver. The caller must bind it to the unchanged App bundle and
+// plan hashes.
+type LocalTestRecordingResultPackageOptions struct {
+	WaiverID               string
+	SourceBundleHashSHA256 string
+	SourcePlanHashSHA256   string
+}
+
+// NewLocalTestRecordingResultPackageFromRecordResult packages browser evidence
+// from an unchanged App draft without pretending that the draft was approved
+// for Exchange upload. Formal execution must continue to use
+// NewRecordingResultPackageFromRecordResult.
+func NewLocalTestRecordingResultPackageFromRecordResult(source *model.ClientExecutionPackage, result RecordResult, runID string, createdAt time.Time, options LocalTestRecordingResultPackageOptions) (model.RecordingResultPackage, error) {
+	if err := model.ValidateClientExecutionPackageForLocalTestWaiver(source); err != nil {
+		return model.RecordingResultPackage{}, err
+	}
+	if source.ExecutableScriptBundle == nil || strings.TrimSpace(options.WaiverID) == "" ||
+		options.SourceBundleHashSHA256 != source.ExecutableScriptBundle.Reproducibility.BundleHashSHA256 ||
+		options.SourcePlanHashSHA256 != source.ExecutableScriptBundle.Reproducibility.PlanHashSHA256 {
+		return model.RecordingResultPackage{}, errors.New("local test result package waiver and source hashes do not match the unchanged App draft")
+	}
+	return newRecordingResultPackageFromRecordResult(source, result, runID, createdAt, &options)
+}
+
+func newRecordingResultPackageFromRecordResult(source *model.ClientExecutionPackage, result RecordResult, cloudJobID string, createdAt time.Time, local *LocalTestRecordingResultPackageOptions) (model.RecordingResultPackage, error) {
 	if strings.TrimSpace(cloudJobID) == "" {
 		return model.RecordingResultPackage{}, errors.New("cloud_job_id is required")
 	}
@@ -213,14 +242,56 @@ func NewRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 		},
 		CreatedAt: createdAt,
 	}
+	if local != nil {
+		applyLocalTestResultPackageDelivery(&recordingResult, source, *local)
+	}
 	if result.FailureDiagnostic != nil || hasFailedStep(stepResults) {
 		applyFailureRecordingResult(source, &recordingResult, result.FailureDiagnostic, stepResults, artifacts, createdAt)
 		return recordingResult, nil
 	}
-	if err := model.ValidateRecordingResultPackageForRender(&recordingResult, source); err != nil {
-		return model.RecordingResultPackage{}, err
+	var validationErr error
+	if local == nil {
+		validationErr = model.ValidateRecordingResultPackageForRender(&recordingResult, source)
+	} else {
+		validationErr = model.ValidateLocalTestRecordingResultPackageForRender(&recordingResult, source)
+	}
+	if validationErr != nil {
+		return model.RecordingResultPackage{}, validationErr
 	}
 	return recordingResult, nil
+}
+
+func applyLocalTestResultPackageDelivery(result *model.RecordingResultPackage, _ *model.ClientExecutionPackage, options LocalTestRecordingResultPackageOptions) {
+	result.Delivery.RecipientKind = "local_test_only"
+	result.Delivery.RecipientKeyID = ""
+	result.Delivery.EncryptionAlg = ""
+	result.Delivery.AckRequired = false
+	result.Delivery.ExpiresAt = time.Time{}
+	result.Delivery.ResultPackageRef.URI = fmt.Sprintf("cascade-local-test://recording-results/%s", result.ResultID)
+	result.Delivery.ResultPackageRef.Encrypted = false
+	result.Delivery.ResultPackageRef.RecipientKeyID = ""
+	if result.Delivery.ResultPackageRef.Metadata == nil {
+		result.Delivery.ResultPackageRef.Metadata = map[string]any{}
+	}
+	result.Delivery.ResultPackageRef.Metadata["dev_test_only"] = true
+	result.Delivery.ResultPackageRef.Metadata["not_for_exchange_upload"] = true
+	result.Delivery.ResultPackageRef.Metadata["test_only_waiver"] = true
+	result.Delivery.ResultPackageRef.Metadata["formal_exchange"] = false
+	result.Delivery.ResultPackageRef.Metadata["app_generated"] = true
+	result.Delivery.ResultPackageRef.Metadata["transport_authenticated"] = false
+	result.Delivery.ResultPackageRef.Metadata["waiver_id"] = options.WaiverID
+	result.Delivery.ResultPackageRef.Metadata["source_bundle_hash_sha256"] = options.SourceBundleHashSHA256
+	result.Delivery.ResultPackageRef.Metadata["source_plan_hash_sha256"] = options.SourcePlanHashSHA256
+	for index := range result.Delivery.AssetRefs {
+		result.Delivery.AssetRefs[index].Encrypted = false
+		result.Delivery.AssetRefs[index].RecipientKeyID = ""
+		if result.Delivery.AssetRefs[index].Metadata == nil {
+			result.Delivery.AssetRefs[index].Metadata = map[string]any{}
+		}
+		result.Delivery.AssetRefs[index].Metadata["dev_test_only"] = true
+		result.Delivery.AssetRefs[index].Metadata["not_for_exchange_upload"] = true
+		result.Delivery.AssetRefs[index].Metadata["waiver_id"] = options.WaiverID
+	}
 }
 
 func sandboxMetadataForResult(source *model.ClientExecutionPackage, result RecordResult) *model.SandboxExecutionMetadata {

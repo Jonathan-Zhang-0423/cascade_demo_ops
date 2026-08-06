@@ -87,6 +87,106 @@ func TestBrowserAgentRepairPolicyRejectsSelectorNotDeclaredByApp(t *testing.T) {
 	}
 }
 
+func TestEvidenceBoundSelectorCandidatesRequireSameAppEvidence(t *testing.T) {
+	shared := model.EvidenceRef{ID: "ev_verified_new_project", Kind: model.EvidenceKindBrowserScan, Confidence: 1}
+	other := model.EvidenceRef{ID: "ev_project_list", Kind: model.EvidenceKindBrowserScan, Confidence: 1}
+	components := []model.BrowserAgentComponentTarget{
+		{ComponentRef: "component:wrong-primary", Selector: `[data-testid="project-list"]`, EvidenceRefs: []model.EvidenceRef{other}},
+		{ComponentRef: "component:new-project", Selector: `[data-testid="button-new-project"]`, Confidence: .9, EvidenceRefs: []model.EvidenceRef{shared}},
+		{ComponentRef: "component:unrelated", Selector: `[data-testid="delete-project"]`, EvidenceRefs: []model.EvidenceRef{other}},
+	}
+	interactions := []model.BrowserAgentInteraction{{
+		Kind:   model.GraphActionClick,
+		Target: model.ActionTarget{Selector: `[data-testid="project-list"]`, EvidenceRefs: []model.EvidenceRef{shared}},
+	}}
+
+	candidates := evidenceBoundSelectorCandidates(components, interactions)
+	if len(candidates) != 1 || candidates[0].Kind != "css" || candidates[0].Value != `[data-testid="button-new-project"]` {
+		t.Fatalf("only the selector bound to the interaction evidence may be recovered: %+v", candidates)
+	}
+	if len(candidates[0].EvidenceRefs) != 1 || candidates[0].EvidenceRefs[0].ID != shared.ID {
+		t.Fatalf("candidate must retain the App evidence binding: %+v", candidates[0].EvidenceRefs)
+	}
+}
+
+func TestEvidenceBoundSelectorCandidatesRejectMissingAndAmbiguousBindings(t *testing.T) {
+	shared := model.EvidenceRef{ID: "ev_shared", Kind: model.EvidenceKindBrowserScan, Confidence: 1}
+	withoutBinding := evidenceBoundSelectorCandidates(
+		[]model.BrowserAgentComponentTarget{{Selector: `[data-testid="server-guess"]`, EvidenceRefs: []model.EvidenceRef{{ID: "ev_other"}}}},
+		[]model.BrowserAgentInteraction{{Kind: model.GraphActionClick, Target: model.ActionTarget{EvidenceRefs: []model.EvidenceRef{shared}}}},
+	)
+	if len(withoutBinding) != 0 {
+		t.Fatalf("Server must not invent a selector without the same App evidence: %+v", withoutBinding)
+	}
+
+	ambiguous := evidenceBoundSelectorCandidates(
+		[]model.BrowserAgentComponentTarget{
+			{Selector: `[data-testid="candidate-a"]`, EvidenceRefs: []model.EvidenceRef{shared}},
+			{Selector: `[data-testid="candidate-b"]`, EvidenceRefs: []model.EvidenceRef{shared}},
+		},
+		[]model.BrowserAgentInteraction{{Kind: model.GraphActionClick, Target: model.ActionTarget{EvidenceRefs: []model.EvidenceRef{shared}}}},
+	)
+	if len(ambiguous) != 2 {
+		t.Fatalf("all App-declared evidence matches must remain visible to Worker ambiguity checks: %+v", ambiguous)
+	}
+}
+
+func TestBrowserAgentRepairPolicyAppliesEvidenceBoundSelectorWithoutMutatingStage(t *testing.T) {
+	plan, stage := repairPolicyFixture(t)
+	primary := currentStageSelector(stage)
+	candidate := model.SelectorCandidate{
+		Kind: "css", Value: `[data-testid="button-new-project"]`, Source: "app_stage_evidence_binding",
+		EvidenceRefs: []model.EvidenceRef{{ID: "ev_verified_new_project", Kind: model.EvidenceKindBrowserScan}},
+	}
+	stage.EvidenceBoundSelectorAlternatives = []model.SelectorCandidate{candidate}
+	proposal := repairProposalFor(plan, stage, "selector_alternative", "script_outline.stages[].components[].selector", primary, selectorCandidateEncoding(candidate))
+
+	patched, entry := evaluateBrowserAgentRepair(plan, stage, proposal, nil)
+	if !entry.Applied || entry.PolicyDecision != model.ValidationDecisionRepairAllowed {
+		t.Fatalf("Worker-verified App evidence-bound selector should use the existing repair policy: %+v", entry)
+	}
+	if patched.PreferredSelectorAlternative == nil || selectorCandidateEncoding(*patched.PreferredSelectorAlternative) != selectorCandidateEncoding(candidate) {
+		t.Fatalf("runtime copy did not receive the approved selector: %+v", patched.PreferredSelectorAlternative)
+	}
+	if stage.PreferredSelectorAlternative != nil || currentStageSelector(stage) != primary {
+		t.Fatalf("repair must not mutate the App-derived runtime stage: %+v", stage)
+	}
+}
+
+func TestBrowserAgentSelectorRepairUsesAppAuthorizedField(t *testing.T) {
+	plan, stage := repairPolicyFixture(t)
+	plan.RepairPolicy.EditableFields = []string{"action.target.selector"}
+	plan.RepairPolicy.ImmutableFields = []string{"action.value", "node_id"}
+	candidate := model.SelectorCandidate{Kind: "css", Value: `[data-testid="button-new-project"]`}
+	stage.EvidenceBoundSelectorAlternatives = []model.SelectorCandidate{candidate}
+	observed := BrowserAgentStageObservation{
+		PreferredSelectorAlternative: &candidate,
+		EvidenceRefs:                 []model.EvidenceRef{{ID: "live_page", Kind: model.EvidenceKindWebScreenshot}},
+	}
+
+	proposal := browserAgentSelectorAlternativeProposal(plan, stage, observed)
+	if proposal.Field != "action.target.selector" {
+		t.Fatalf("selector proposal must use the field authorized by the App contract: %+v", proposal)
+	}
+	_, entry := evaluateBrowserAgentRepair(plan, stage, proposal, nil)
+	if !entry.Applied {
+		t.Fatalf("App-authorized action target selector repair was rejected: %+v", entry)
+	}
+}
+
+func TestBrowserAgentSelectorRepairDoesNotWidenAppPolicy(t *testing.T) {
+	plan, stage := repairPolicyFixture(t)
+	plan.RepairPolicy.EditableFields = []string{"action.wait_until"}
+	candidate := model.SelectorCandidate{Kind: "css", Value: `[data-testid="button-new-project"]`}
+	stage.EvidenceBoundSelectorAlternatives = []model.SelectorCandidate{candidate}
+	proposal := browserAgentSelectorAlternativeProposal(plan, stage, BrowserAgentStageObservation{PreferredSelectorAlternative: &candidate})
+
+	_, entry := evaluateBrowserAgentRepair(plan, stage, proposal, nil)
+	if entry.Applied || entry.Reason != "repair field is not editable by the approved contract" {
+		t.Fatalf("Server must not authorize a selector field absent from the App policy: %+v", entry)
+	}
+}
+
 func TestBrowserAgentRepairPolicyRejectsWaitShorteningAndOutOfRangeWaits(t *testing.T) {
 	plan, stage := repairPolicyFixture(t)
 	shorter := repairProposalFor(plan, stage, "wait_strategy", "script_outline.stages[].wait_conditions", "wait_after_entry_at_least_1000ms", "wait_after_entry_at_least_500ms")

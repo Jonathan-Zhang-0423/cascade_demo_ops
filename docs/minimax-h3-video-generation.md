@@ -464,6 +464,8 @@ Server 不得向供应商传递本地文件路径。输入只能使用：
 
 ## 13. 与 APP 的能力边界
 
+App 公共字段、稳定错误和兼容策略以 [App ↔ Server 生成展示视频能力协议](app-server-generated-video-capability-protocol.md) 为准。本节只保留 H3 内部 Profile 的映射说明；H3 专属 role、2K、仅尾帧和参考音频限制不得写成 Seedance 2.0 或所有 Provider 的共同协议。
+
 APP 不传模型 ID、供应商、API Endpoint 或厂商参数，只提交逻辑能力和展示意图：
 
 ```json
@@ -507,6 +509,8 @@ APP 必须遵循 Server 返回的能力 Profile。Server 收到请求后仍需�
 这是 Server 当前可验证能力，不等于 H3 厂商理论最大能力。
 
 ## 14. 与 Seedance 2.0 的编排关系
+
+Seedance 2.0 的独立项目 Profile 见 [Seedance 2.0 视频生成内部协议](seedance-2-0-video-generation.md)。两份 Provider 协议分别维护请求格式和能力边界，只在公共 `GeneratedShotIntent` 与 [Server 生成视频统一候选产物内部协议](generated-video-candidate-internal-protocol.md) 层汇合。
 
 推荐三种模式：
 
@@ -578,7 +582,7 @@ Provider 原始响应
 
 原始文件和规范化副本必须使用不同 artifact ID 与 SHA-256。A/B 只表示同一展示意图下的候选关系，不得依赖相同文件名、URL 字段或厂商响应结构。
 
-当前代码已经完成厂商输出 URL 到 `generated_video_candidate` 的初步归一化、下载、完整性记录、候选审核和 Renderer 元数据门禁，但尚未完成候选视频的 `ffprobe -> FFmpeg -> ffprobe` 规范化闭环。因此在 MediaNormalizer 落地前，不得把 H3 原始产物直接交给编辑器，也不得宣称 A/B 原始产物可无条件互换。
+当前代码已经完成厂商输出 URL 归一化、时效 URL 下载、original/normalized SHA-256 记录，以及隔离的 `ffprobe -> FFmpeg -> ffprobe` 规范化闭环；现有候选审核和 Renderer 也具备规范化元数据门禁。但该 H3 闭环尚未注册正式路由、尚未连接 EditorSession、尚未用真实 H3 产物验收，因此仍不得把 H3 原始产物直接交给编辑器，也不得宣称 A/B 候选已具备正式运行能力。只有 normalized artifact 能作为后续内容审核的输入，且不能自动加入时间线。
 
 ### 14.5 分镜 JSON 的所有权
 
@@ -607,30 +611,50 @@ Seedance 2.0 和 H3 都不负责产出 Renderer 可执行的最终分镜 JSON；
 - Bearer 鉴权；
 - `dry_run`、`real`、`disabled` 模式；
 - 2K、4～15 秒和宽高比校验；
-- text、图片、视频、音频 content 类型；
+- text、图片、视频 content 类型；识别音频 content 但按当前 Capability Profile 在调用前拒绝；
 - 帧模式与参考模式互斥校验；
 - 参考图片、视频、音频数量上限校验；
 - API Key 错误信息脱敏；
 - 创建任务和请求校验单元测试；
 - `GET /v2/query/video_generation/{task_id}` 单任务查询和 `task.content.url` 归一化；
+- `queued`、`running`、`succeeded`、`failed`、`cancelled`、`expired` 六态归一化，兼容供应商 `canceled` 拼写但统一输出 `cancelled`；
+- `DELETE /v2/video_generation/{task_id}` 取消/删除接口，并校验返回的 `action` 与状态；
+- 400、401、402、422、429、500、529 稳定错误分类；
 - 独立 H3 Sidecar 配置工厂，默认 `disabled`；
 - 专用 `CASCADE_MINIMAX_H3_MODE`、`MINIMAX_H3_API_KEY`、`MINIMAX_H3_BASE_URL`；
-- `disabled`、`dry_run`、通用 MiniMax 密钥隔离和越界请求零 HTTP 调用测试。
+- `disabled`、`dry_run`、通用 MiniMax 密钥隔离和越界请求零 HTTP 调用测试；
+- 独立有界轮询和错误可重试判断，不复用或注册当前 Seedance 执行路由；
+- H3 成功 URL 立即下载、大小上限、original artifact SHA-256 与本地持久化；
+- `ffprobe -> FFmpeg -> ffprobe` MediaNormalizer，实现 MP4/H.264/yuv420p/1920×1080/CFR 30fps 硬门禁；
+- original 与 normalized 使用不同路径、不同角色和不同 SHA-256，二者都固定 `presentation_only=true`、`authoritative=false`；
+- 缺少 Normalizer、探测失败、规范化失败或任务失败时固定 `continue_without_generated_candidate`，不会把原始产物标为可进编辑器；
+- 项目保守参考素材总数最多 4、参考图最多 4、参考视频最多 3；参考音频和仅尾帧均在 HTTP 调用前拒绝。
+- 独立 Admission 治理层：显式并发上限、周期请求数、周期输出秒数、周期估算成本、Provider 调用超时和 Server 内部幂等键；全部在 Provider 调用前校验和预留；
+- 成本以整数微单位估算，代码不内置厂商单价。没有当前已核验的每输出秒成本和周期成本上限时，治理提交器拒绝初始化；
+- 同 scope、同幂等键、同请求只重放首次结果，不产生第二次 Provider 调用或预算扣减；同键不同请求冲突拒绝；首次已尝试 Provider 的预算即使调用失败也不返还，避免失败重试绕过配额。
+- Provider-neutral 预检报告：Seedance 2.0 与 H3 独立判断能力兼容性，Provider 未经 Server 内部策略显式启用时默认不可选，报告固定 `executable=false`；
+- Provider-neutral 规范化候选协议和 H3 转换器：只接受审计 task ID 一致、非权威、展示专用且通过锁定媒体 Profile 的 original/normalized 产物，转换后仍固定 `approved_for_demo=false`、`include_in_demo=false`。
+- Provider-neutral 确定性结构审核：校验 intent/candidate 绑定、规范化状态、时长边界和规范化时长漂移，只能放行到内容审核；
+- 人工内容审核决定记录契约：禁止模型自我批准，要求审核证据及 UI/业务事实/文字数字/参考事实五项安全确认；批准后仍处于 `content_approved_pending_selection`，不能进入时间线。
+- Provider-neutral 候选集合与显式选择契约：`normal` 只接受一个已审核候选，`comparison` 强制 Seedance 2.0/H3 各一个同 intent 候选；人工选择后仍为 `selected_pending_editor_approval`，不自动批准或应用时间线补丁；
+- 序列化候选集合选择前重校验：拒绝篡改后的 schema、安全标志、Provider 组合、任务身份、审核身份或 normalized SHA-256。
+- Editor approval 前置契约：绑定 intent/candidate/set/selection、目标计划 revision、人工证据与 purpose-placement，只允许后续创建补丁，不允许应用补丁或 Renderer；
+- 不可执行 Provider-neutral 编排审计状态机：typed artifact 驱动前向转换、revision/时间单调校验和安全停止，永久禁止 Provider 调用、Editor 写入、Renderer 与 auto-apply。
 
 当前 Sidecar 尚未注册到 Server 的执行、Director、Seedance fallback 或 A/B comparison 路由。仅设置 `CASCADE_ARK_MEDIA_MODE=real`、`MINIMAX_API_KEY`、`SEEDANCE_API_KEY` 或 `DOUBAO_API_KEY` 都不会创建 H3 Client，也不会触发 H3 视频生成。这是验收期间必须保持的隔离边界。
 
 ### 15.2 尚未实现或尚未接入
 
 - 任务列表查询；
-- `DELETE /v2/video_generation/{task_id}`；
 - callback_url 公共请求字段和回调处理；
-- 完整任务状态归一化；
-- 输出 URL 下载和持久化；
-- 下载后媒体探测与统一转码；
 - H3 Provider 正式路由；
 - 与 EditorSession 候选素材入口的连接；
-- 内容级人工审核；
-- 配额、成本、并发、重试和幂等控制。
+- 内容审核 UI、审核证据采集与持久化（人工决定的数据契约已实现，但尚未接运行入口）；
+- 生产级持久化/分布式配额、实际用量对账、运营成本配置和跨进程幂等控制。
+
+上述“配额、成本、并发、重试和幂等控制”中，单进程内存版 Admission 治理已经实现；正式接入前仍需完成持久化/分布式一致性、运营配置来源、跨进程配额、真实单价核验和任务成功后的实际 `usage.total_seconds` 对账。因此当前不能把内存版治理视为生产配额系统。
+
+当前下载与 MediaNormalizer 已作为隔离组件落地，但尚未注册执行路由，也尚未在真实 H3 返回素材上做调用验收。代码产出的 `normalized_candidate_ready_for_review` 只表示媒体格式门禁通过，不表示内容审核通过，更不表示可以自动加入时间线。
 
 ### 15.3 仅尾帧模式的项目决策
 
@@ -655,20 +679,26 @@ text + image_url(role=last_frame)
 ## 16. 正式启用前检查清单
 
 - [x] 实现并测试单任务查询；
-- [ ] 实现并测试取消/删除；
+- [x] 实现并测试取消/删除；
 - [x] 明确仅尾帧模式的项目策略：当前禁止，调用前硬拒绝；
-- [ ] 支持下载并立即转存时效 URL；
-- [ ] 下载后校验真实 MIME、大小、编码、时长、尺寸和 FPS；
-- [ ] 保存原始产物 SHA-256；
-- [ ] 生成规范化副本并保存新 SHA-256；
-- [ ] 区分 original 与 normalized artifact；
+- [x] 支持下载并立即转存时效 URL（隔离组件，尚未接正式路由）；
+- [x] 下载后校验真实编码、时长、尺寸和 FPS，并锁定规范化媒体 Profile；
+- [x] 保存原始产物 SHA-256；
+- [x] 生成规范化副本并保存新 SHA-256；
+- [x] 区分 original 与 normalized artifact；
 - [x] 使用独立 H3 开关，默认 disabled；
-- [ ] 不复用 Seedance 的启用开关触发 H3；
-- [ ] 接入 Provider-neutral 任务编排；
-- [ ] 接入结构审核和内容审核；
-- [ ] 保证候选生成失败不影响正式录屏交付；
-- [ ] 增加 400、401、402、422、429、500/529 错误测试；
-- [ ] 增加真实调用前的配额、超时和成本上限；
+- [x] 不复用 Seedance 的启用开关触发 H3；
+- [x] 增加不执行 Provider 的能力预检矩阵，并保持 H3 默认不可选；
+- [x] 定义 Provider-neutral 规范化候选产物协议和 H3 隔离转换器；
+- [x] 实现未注册路由、不可执行的 Provider-neutral 编排审计状态机；
+- [ ] 接入正式 Provider-neutral 任务编排执行器；
+- [x] 实现未注册路由的确定性结构审核和人工内容决定记录契约；
+- [x] 定义未注册路由的 `normal`/`comparison` 候选集合及人工显式选择契约；
+- [x] 定义 Editor approval 前置契约，只授权未来补丁构造；
+- [ ] 接入内容审核 UI、证据采集、持久化和显式选择流程；
+- [x] 保证隔离候选闭环失败时返回 `continue_without_generated_candidate`；正式路由接入后仍需端到端复验；
+- [x] 增加 400、401、402、422、429、500/529 错误测试；
+- [x] 增加真实调用前的单进程 Admission 配额、并发、超时、成本估算和幂等门禁；正式路由前仍需持久化/分布式治理与 usage 对账；
 - [ ] 更新 APP 能力 Profile，但不向 APP 暴露具体模型 ID。
 
 ## 17. 资料来源与维护规则

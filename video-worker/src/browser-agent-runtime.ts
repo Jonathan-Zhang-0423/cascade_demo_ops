@@ -83,6 +83,7 @@ export type BrowserAgentWorkerStage = {
   duration_ms?: number;
   validations?: BrowserAgentValidation[];
   preferred_selector_alternative?: { kind: string; value: string };
+  evidence_bound_selector_alternatives?: Array<{ kind: string; value: string }>;
 };
 
 export type BrowserAgentOpenRequest = {
@@ -487,7 +488,12 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
 	if (preferred) {
 		const locator = locatorFromAlternative(page, preferred.kind, preferred.value);
 		if (!locator) throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=preferred_${preferred.kind}`);
-		const resolved = await resolveUniqueVisibleContractTarget(locator, `approved_${preferred.kind}`, contract);
+		// A selector recovered through an App evidence binding must be rechecked
+		// with the same bounded semantics used during discovery. Ordinary App
+		// alternatives keep the original exact target-contract validation.
+		const resolved = isEvidenceBoundSelectorAlternative(stage, preferred)
+			? await resolveUniqueVisibleEvidenceBoundTarget(locator, `approved_evidence_${preferred.kind}`, contract, preferred)
+			: await resolveUniqueVisibleContractTarget(locator, `approved_${preferred.kind}`, contract);
 		if (!resolved) throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=preferred_${preferred.kind}`);
 		return { ...resolved, approvedAlternative: { kind: preferred.kind, value: preferred.value } };
 	}
@@ -530,16 +536,77 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
 // exactly one live target is unique, visible, and contract-compatible.
 async function resolveSingleApprovedAlternative(page: any, stage: BrowserAgentWorkerStage): Promise<{ kind: string; value: string } | undefined> {
   const matched: Array<{ kind: string; value: string }> = [];
+  const seen = new Set<string>();
+  const probe = async (alternative: { kind: string; value: string }, evidenceBound: boolean) => {
+    const key = `${alternative.kind}:${alternative.value}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const locator = locatorFromAlternative(page, alternative.kind, alternative.value);
+    if (!locator) return;
+    const resolved = evidenceBound
+      ? await resolveUniqueVisibleEvidenceBoundTarget(locator, `approved_evidence_${alternative.kind}`, stage.target_contract, alternative)
+      : await resolveUniqueVisibleContractTarget(locator, `approved_${alternative.kind}`, stage.target_contract);
+    if (resolved) matched.push({ kind: alternative.kind, value: alternative.value });
+  };
+  for (const alternative of stage.evidence_bound_selector_alternatives || []) {
+    await probe(alternative, true);
+  }
   const components = (stage.components || []).filter((component) => !stage.target_contract.component_ref || component.component_ref === stage.target_contract.component_ref);
   for (const component of components) {
     for (const alternative of component.selector_alternatives || []) {
-      const locator = locatorFromAlternative(page, alternative.kind, alternative.value);
-      if (!locator) continue;
-      const resolved = await resolveUniqueVisibleContractTarget(locator, `approved_${alternative.kind}`, stage.target_contract);
-      if (resolved) matched.push({ kind: alternative.kind, value: alternative.value });
+      await probe(alternative, false);
     }
   }
   return matched.length === 1 ? matched[0] : undefined;
+}
+
+export function isEvidenceBoundSelectorAlternative(stage: Pick<BrowserAgentWorkerStage, "evidence_bound_selector_alternatives">, alternative: { kind: string; value: string }): boolean {
+  return (stage.evidence_bound_selector_alternatives || []).some((candidate) =>
+    candidate.kind === alternative.kind && candidate.value === alternative.value,
+  );
+}
+
+async function resolveUniqueVisibleEvidenceBoundTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract, alternative: { kind: string; value: string }): Promise<ResolvedTarget | undefined> {
+  const count = await withTimeout(locator.count(), targetProbeTimeoutMS, 0);
+  if (count !== 1) return undefined;
+  const unique = locator.first();
+  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) return undefined;
+  const semantics = await withTimeout(compactElementSemantics(unique), targetProbeTimeoutMS, { role: "", name: "" });
+  if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
+    throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
+  }
+  const allowedRoles = (contract.allowed_roles || []).map((value) => value.trim().toLowerCase()).filter(Boolean);
+  if (allowedRoles.length > 0 && !allowedRoles.includes(semantics.role)) return undefined;
+  if (!evidenceBoundNameAllowed(semantics.name, contract.allowed_names || [], alternative)) return undefined;
+  return { locator: unique, strategy };
+}
+
+export function evidenceBoundNameAllowed(actualName: string, allowedNames: string[], alternative: { kind: string; value: string }): boolean {
+  if (allowedNames.length === 0) return true;
+  const actual = normalizeEvidenceBoundElementName(actualName);
+  if (!actual) return false;
+  const identity = selectorIdentity(alternative);
+  return allowedNames.some((allowedName) => {
+    if (normalizeEvidenceBoundElementName(allowedName) === actual) return true;
+    if (!identity) return false;
+    const withoutIdentity = removeExactIdentity(normalizeElementName(allowedName), identity);
+    return normalizeEvidenceBoundElementName(withoutIdentity) === actual;
+  });
+}
+
+function selectorIdentity(alternative: { kind: string; value: string }): string {
+  if (alternative.kind === "testid") return normalizeElementName(alternative.value);
+  if (alternative.kind !== "css" && alternative.kind !== "selector") return "";
+  const match = alternative.value.match(/data-testid\s*=\s*["']([^"']+)["']/i);
+  return normalizeElementName(match?.[1] || "");
+}
+
+function removeExactIdentity(value: string, identity: string): string {
+  return value.split(/\s+/).filter((part) => part !== identity).join(" ");
+}
+
+function normalizeEvidenceBoundElementName(value: string): string {
+  return normalizeElementName(value).replace(/^[^\p{L}\p{N}]+/gu, "").trim();
 }
 
 async function resolveUniqueVisibleContractTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract): Promise<ResolvedTarget | undefined> {
