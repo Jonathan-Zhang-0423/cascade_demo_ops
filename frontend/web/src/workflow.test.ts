@@ -3,6 +3,7 @@ import type { ApprovalChecklistState } from "./domain";
 import { createProjectDraftWorkspace, createWorkspace } from "./mockWorkspace";
 import {
   canUploadExecutionPackage,
+	displayedProjectWorkstation,
 	executionServerBlockedReason,
   lifecycleStagesFromWorkspace,
   mapCloudStatus,
@@ -11,6 +12,7 @@ import {
   projectNextAction,
   projectStatusLabels,
   recommendedWorkstation,
+	resolveProjectTaskWorkstation,
   resetApprovalChecklistForRepair,
   sandboxRiskLevel,
   sandboxRiskMessage,
@@ -183,6 +185,40 @@ describe("workflow helpers", () => {
     expect(recommendedWorkstation(completed)).toBe("assets");
     expect(projectNextAction(completed).kind).toBe("review_result");
     expect(projectJourney(completed).map((step) => step.status)).toEqual(["completed", "completed", "completed", "completed", "current"]);
+  });
+
+  it("uses assistant state for planning but lifecycle state for sensitive workstations", () => {
+    const draft = createProjectDraftWorkspace("product_demo");
+    const configured = { ...draft, productURL: "https://product.example", inputBundle: { ...draft.inputBundle, raw_user_prompt: "展示核心流程" } };
+    const baseSession = {
+      id: "assistant_project",
+      context: { surface: "projects" as const, scopeKey: "project" },
+      status: "waiting_for_user" as const,
+      nextAction: { kind: "continue", title: "Continue", description: "Continue", requiresUserAction: false, blocked: false },
+      configuration: { version: 1, hash: "hash", readiness: "ready" as const, confirmed: false },
+      messages: [],
+    };
+
+    expect(resolveProjectTaskWorkstation(configured, { ...baseSession, activeWorkstation: "overview" })).toBe("overview");
+    expect(resolveProjectTaskWorkstation(configured, { ...baseSession, activeWorkstation: "evidence", configuration: { ...baseSession.configuration, confirmed: true } })).toBe("evidence");
+
+    const planned = { ...configured, projectIntelligence: {} as never };
+    expect(resolveProjectTaskWorkstation(planned, { ...baseSession, activeWorkstation: "plan", configuration: { ...baseSession.configuration, confirmed: true } })).toBe("plan");
+    expect(resolveProjectTaskWorkstation(planned, { ...baseSession, activeWorkstation: "overview", configuration: { ...baseSession.configuration, confirmed: true } })).toBe("plan");
+
+    const packaged = { ...planned, executableScriptBundle: {} as never, packagePreview: { ...planned.packagePreview, buildStatus: "draft" as const } };
+    expect(resolveProjectTaskWorkstation(packaged, { ...baseSession, activeWorkstation: "overview" })).toBe("approval");
+    const running = { ...packaged, cloudRun: { ...packaged.cloudRun, exchangePackageID: "xpkg_1", status: "running" as const } };
+    expect(resolveProjectTaskWorkstation(running, { ...baseSession, activeWorkstation: "plan" })).toBe("execution");
+    const failed = { ...running, status: "script_repair_required" as const, cloudRun: { ...running.cloudRun, status: "failed" as const } };
+    expect(resolveProjectTaskWorkstation(failed, { ...baseSession, activeWorkstation: "plan" })).toBe("repair");
+    const completed = { ...running, stage: "result_review" as const, status: "asset_ready" as const, cloudRun: { ...running.cloudRun, status: "succeeded" as const, resultPackageID: "result_1" } };
+    expect(resolveProjectTaskWorkstation(completed, { ...baseSession, activeWorkstation: "plan" })).toBe("assets");
+  });
+
+  it("keeps inspection temporary and falls back to the current task", () => {
+    expect(displayedProjectWorkstation("execution", "evidence")).toBe("evidence");
+    expect(displayedProjectWorkstation("execution")).toBe("execution");
   });
 
 	it("keeps upload blocked until execution-server health is resolved and configured", () => {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -35,6 +36,9 @@ type localBrowserAgentOutlineRunner struct {
 
 type localBrowserAgentStageRuntime struct {
 	session    browserAgentWorkerSession
+	service    *Service
+	projectID  string
+	runID      string
 	progress   func(stage string, message string, progress int)
 	stageCount int
 	artifacts  map[string]model.ArtifactRef
@@ -104,6 +108,11 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		}
 	}
 	progressBrowserAgent(request.Progress, "running_browser_agent", "正在启动受限浏览器会话。", 40)
+	_, _ = r.service.AppendProjectActivity(ctx, model.ProjectActivityEvent{
+		ProjectID: request.Package.ProjectID, RunID: request.CloudJobID, Mode: model.ProjectCanvasModeBrowser,
+		Kind: "recording", Status: model.ProjectActivityRunning, Title: "正在启动安全浏览器探索",
+		Capture: &model.ProjectCaptureActivity{Kind: "recording", Phase: "starting"},
+	})
 	session, openResult, err := factory(ctx, openRequest)
 	if err != nil {
 		return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_session_start_failed", err)
@@ -116,8 +125,10 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	}()
 
 	stageRuntime := &localBrowserAgentStageRuntime{
-		session: session, progress: request.Progress, stageCount: len(request.RuntimePlan.Stages), artifacts: map[string]model.ArtifactRef{},
+		session: session, service: r.service, projectID: request.Package.ProjectID, runID: request.CloudJobID,
+		progress: request.Progress, stageCount: len(request.RuntimePlan.Stages), artifacts: map[string]model.ArtifactRef{},
 	}
+	stageRuntime.activity(ctx, "recording", model.ProjectActivityRunning, "正在记录已审批的产品路径", "", 40, nil, &model.ProjectCaptureActivity{Kind: "recording", Phase: "active"})
 	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier)
 	startedAt := timeNowUTC()
 	runResult, runErr := orchestrator.Run(ctx, request.RuntimePlan, stageRuntime, stageRuntime, request.EventSink)
@@ -134,6 +145,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	for _, artifact := range closeResult.Artifacts {
 		stageRuntime.artifacts[artifact.ID] = artifact
 	}
+	stageRuntime.activity(context.Background(), "recording", model.ProjectActivityCompleted, "浏览器录制已安全结束", "正在验证采集素材。", 72, nil, &model.ProjectCaptureActivity{Kind: "recording", Phase: "completed"})
 	if runResult.AuditError != nil {
 		return model.RecordingResultPackage{}, newRuntimeExecutionError("stage_event_audit_unavailable", runResult.AuditError)
 	}
@@ -184,6 +196,14 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	}
 	if result.Status == model.RecordingResultStatusGenerated && request.Package.RecordingRunSpec.Outputs.FinalVideo {
 		progressBrowserAgent(request.Progress, "material_validation", "录屏、截图、trace 和阶段证据已通过素材校验。", 74)
+		materialization, materializationErr := r.service.MaterializeEditorSessionFromResultPackage(ctx, result)
+		if materializationErr == nil && materialization.Ready {
+			_, _ = r.service.AppendProjectActivity(ctx, model.ProjectActivityEvent{
+				ProjectID: request.Package.ProjectID, RunID: request.CloudJobID, Mode: model.ProjectCanvasModeEditor,
+				Kind: "editor_ingestion", Status: model.ProjectActivityRunning, Title: "正在把采集素材装入编辑器",
+				Detail: "Cascade 将在现有编辑器中生成并验证一个版本化剪辑。", Progress: 76, EditorSessionID: materialization.SessionID,
+			})
+		}
 		renderService := r.renderService
 		if renderService == nil {
 			renderService = r.service.editorWorker
@@ -198,17 +218,34 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 func (r *localBrowserAgentStageRuntime) ObserveStage(ctx context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
 	progress := browserAgentStageProgress(stage.Order, r.stageCount, false)
 	progressBrowserAgent(r.progress, "running_browser_agent", fmt.Sprintf("正在观察第 %d 个阶段：%s", stage.Order, browserAgentStageDisplayName(stage)), progress)
+	r.activity(ctx, "browser_observation", model.ProjectActivityRunning, fmt.Sprintf("正在观察：%s", browserAgentStageDisplayName(stage)), "仅显示经过脱敏的浏览器状态。", progress, nil, nil)
 	result, err := r.session.Observe(ctx, workerStageFromRuntime(stage))
 	if err != nil {
 		return BrowserAgentStageObservation{}, err
 	}
 	r.collect(result.Artifacts)
-	return BrowserAgentStageObservation{Observation: result.Observation, EvidenceRefs: result.EvidenceRefs, TargetResolved: result.TargetResolved, PreferredSelectorAlternative: result.PreferredSelectorAlternative, SuggestedWaitCondition: result.SuggestedWaitCondition}, nil
+	browser := &model.ProjectBrowserActivity{URL: result.Observation.URL, Title: result.Observation.Title, Redacted: true}
+	r.activity(ctx, "browser_observation", model.ProjectActivityRunning, fmt.Sprintf("已理解第 %d 个页面状态", stage.Order), "正在决定下一项已审批动作。", progress, browser, nil)
+	for _, artifact := range result.Artifacts {
+		if strings.Contains(strings.ToLower(artifact.Kind), "screenshot") {
+			if frameRef, frameErr := r.publishRedactedFrame(artifact); frameErr == nil && frameRef != "" {
+				browser.FrameRef = frameRef
+			}
+			r.activity(ctx, "screenshot", model.ProjectActivityCompleted, "安全截图已保存", "截图引用经过脱敏，不包含页面凭据。", progress, browser, &model.ProjectCaptureActivity{Kind: "screenshot", Phase: "completed"})
+		}
+	}
+	observation := BrowserAgentStageObservation{Observation: result.Observation, EvidenceRefs: result.EvidenceRefs, TargetResolved: result.TargetResolved, PreferredSelectorAlternative: result.PreferredSelectorAlternative, SuggestedWaitCondition: result.SuggestedWaitCondition}
+	return observation, nil
 }
 
 func (r *localBrowserAgentStageRuntime) ExecuteStage(ctx context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
 	progress := browserAgentStageProgress(stage.Order, r.stageCount, true)
 	progressBrowserAgent(r.progress, "running_browser_agent", fmt.Sprintf("正在执行第 %d 个阶段：%s", stage.Order, browserAgentStageDisplayName(stage)), progress)
+	if browserStageNeedsScreenshot(stage) {
+		r.activity(ctx, "screenshot", model.ProjectActivityRunning, "正在拍摄安全截图", browserAgentStageDisplayName(stage), progress, nil, &model.ProjectCaptureActivity{Kind: "screenshot", Phase: "starting"})
+	} else {
+		r.activity(ctx, "browser_action", model.ProjectActivityRunning, fmt.Sprintf("正在执行：%s", browserAgentStageDisplayName(stage)), "", progress, nil, nil)
+	}
 	result, err := r.session.Execute(ctx, workerStageFromRuntime(stage))
 	if err != nil {
 		return BrowserAgentStageActionResult{}, err
@@ -216,6 +253,70 @@ func (r *localBrowserAgentStageRuntime) ExecuteStage(ctx context.Context, _ Brow
 	r.collect(result.Artifacts)
 	progressBrowserAgent(r.progress, "validating_runtime_stage", fmt.Sprintf("正在验证第 %d 个阶段的真实页面结果。", stage.Order), minInt(progress+4, 84))
 	return BrowserAgentStageActionResult{Observation: &result.Observation, EvidenceRefs: result.EvidenceRefs}, nil
+}
+
+func (r *localBrowserAgentStageRuntime) activity(ctx context.Context, kind string, status model.ProjectActivityStatus, title, detail string, progress int, browser *model.ProjectBrowserActivity, capture *model.ProjectCaptureActivity) {
+	if r.service == nil || r.projectID == "" {
+		return
+	}
+	_, _ = r.service.AppendProjectActivity(ctx, model.ProjectActivityEvent{
+		ProjectID: r.projectID, RunID: r.runID, Mode: model.ProjectCanvasModeBrowser, Kind: kind,
+		Status: status, Title: title, Detail: detail, Progress: progress, Browser: browser, Capture: capture,
+	})
+}
+
+func (r *localBrowserAgentStageRuntime) publishRedactedFrame(artifact model.ArtifactRef) (string, error) {
+	if r.service == nil || r.projectID == "" || artifact.Sensitive || !strings.HasPrefix(strings.ToLower(artifact.MimeType), "image/") {
+		return "", nil
+	}
+	if source, _ := artifact.Metadata["source"].(string); source != "browser_agent_runtime" {
+		return "", nil
+	}
+	sourcePath, err := localPathFromURI(artifact.URI)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return "", err
+	}
+	if len(data) == 0 || len(data) > 20*1024*1024 {
+		return "", errors.New("redacted browser frame has an invalid size")
+	}
+	extension := strings.ToLower(filepath.Ext(sourcePath))
+	if extension != ".png" && extension != ".jpg" && extension != ".jpeg" {
+		return "", errors.New("redacted browser frame has an unsupported format")
+	}
+	dir := filepath.Join(r.service.runtime.ArtifactRoot, "project_activity_frames", safePathSegment(r.projectID))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
+	frameRef := safePathSegment(artifact.ID) + extension
+	if err := os.WriteFile(filepath.Join(dir, frameRef), data, 0o600); err != nil {
+		return "", err
+	}
+	return frameRef, nil
+}
+
+func browserStageNeedsScreenshot(stage BrowserAgentRuntimeStage) bool {
+	if stage.CapturePlan == nil {
+		return false
+	}
+	if strings.Contains(strings.ToLower(stage.CapturePlan.PrimaryArtifact), "screenshot") {
+		return true
+	}
+	for _, asset := range stage.CapturePlan.RequiredAssets {
+		if strings.Contains(strings.ToLower(asset), "screenshot") {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *localBrowserAgentStageRuntime) collect(artifacts []model.ArtifactRef) {

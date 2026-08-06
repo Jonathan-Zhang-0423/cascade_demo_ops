@@ -28,9 +28,105 @@ export type WorkspaceStage =
   | "script_repair"
   | "result_review";
 
-export type NavSection = "projects" | "project_library" | "repositories" | "new_demo" | "execution_packages" | "assets" | "editor" | "settings";
+export type NavSection = "projects" | "project_library" | "repositories" | "new_demo" | "execution_packages" | "assets" | "editor" | "profile" | "settings" | "plan";
+
+export type AccountVerificationStatus = "unverified" | "pending" | "verified";
+export type GitHubIdentityView = {
+  id: number;
+  login: string;
+  name?: string;
+  avatarURL?: string;
+  profileURL?: string;
+  connectedAt: string;
+};
+export type AccountProfileView = {
+  id: string;
+  displayName: string;
+  email?: string;
+  avatarURL?: string;
+  initials: string;
+  emailVerification: AccountVerificationStatus;
+  hasPassword: boolean;
+  github?: GitHubIdentityView;
+  updatedAt: string;
+};
+export type AccountSessionView = {
+  authenticated: boolean;
+  user?: AccountProfileView;
+  devLoginAvailable: boolean;
+  passwordSetupRequired: boolean;
+};
+export type AccountVerificationChannel = "email";
+export type AccountVerificationStartView = {
+  channel: AccountVerificationChannel;
+  maskedDestination: string;
+  status: "pending";
+  expiresAt: string;
+  resendAt: string;
+  developmentCode?: string;
+};
+export type AccountVerificationStateView = {
+  channel: AccountVerificationChannel;
+  status: AccountVerificationStatus;
+  maskedDestination?: string;
+  expiresAt?: string;
+  resendAt?: string;
+};
+export type AccountUsageCategoryView = { category: "research" | "browser" | "video"; credits: number };
+export type AccountPlanView = {
+  id: string;
+  name: string;
+  status: "active" | "trialing" | "past_due" | "canceled";
+  creditsIncluded: number;
+  creditsUsed: number;
+  creditsRemaining: number;
+  cycleStart: string;
+  cycleEnd: string;
+  usage: AccountUsageCategoryView[];
+};
+export type GitHubDeviceFlowView = {
+  id: string;
+  status: "pending" | "authorized" | "denied" | "expired" | "failed";
+  userCode: string;
+  verificationURI: string;
+  expiresAt: string;
+  intervalSeconds: number;
+  github?: GitHubIdentityView;
+  error?: string;
+};
 
 export type ProjectWorkstationView = "overview" | "evidence" | "plan" | "approval" | "execution" | "repair" | "assets" | "editor";
+export type ProjectCanvasMode = "empty" | "act" | "browser" | "editor";
+export type ProjectActivityStatus = "queued" | "running" | "waiting_for_approval" | "completed" | "failed" | "canceled";
+export type ProjectBrowserActivityView = { url?: string; title?: string; frameRef?: string; redacted: true };
+export type ProjectCaptureActivityView = { kind: "screenshot" | "recording"; phase: "starting" | "active" | "completed" | "failed" };
+export type ProjectActivityEventView = {
+  id: string;
+  projectID: string;
+  runID: string;
+  mode: ProjectCanvasMode;
+  kind: string;
+  status: ProjectActivityStatus;
+  title: string;
+  detail?: string;
+  progress?: number;
+  occurredAt: string;
+  browser?: ProjectBrowserActivityView;
+  capture?: ProjectCaptureActivityView;
+  editorSessionID?: string;
+  editorRevision?: number;
+};
+export type ProjectActivityStateView = {
+  projectID: string;
+  mode: ProjectCanvasMode;
+  runID?: string;
+  status?: ProjectActivityStatus;
+  current?: ProjectActivityEventView;
+  recent: ProjectActivityEventView[];
+  lastEventID?: string;
+  editorSessionID?: string;
+  updatedAt?: string;
+};
 export type AssistantSurface = "projects" | "repositories";
 
 export type ConfigurationSourceRefView = {
@@ -64,7 +160,7 @@ export type ProjectConfigurationDraftView = {
 };
 
 export type ProjectConfigurationPatchView = Partial<Omit<ProjectConfigurationDraftView, "version" | "hash" | "readiness" | "missingFields" | "confirmed" | "confirmedAt" | "analysisProjectID">>;
-export type AssistantContextView = { surface: AssistantSurface; scopeKey: string; projectID?: string; projectName?: string; repositoryID?: string; repositoryLabel?: string };
+export type AssistantContextView = { surface: AssistantSurface; scopeKey: string; projectID?: string; projectName?: string; createProjectOnFirstTurn?: boolean; repositoryID?: string; repositoryLabel?: string };
 export type AssistantProposalKind = "configuration_patch" | "select_project_source" | "select_local_project" | "connect_github" | "attach_requirement_document" | "attach_brand_asset" | "store_demo_credential" | "confirm_configuration" | "start_local_analysis" | "open_workstation" | "continue_with_webpage_evidence" | "open_project" | "inspect_project" | "attach_repository" | "detach_repository" | "open_repository_form" | "prepare_understanding" | "prepare_execution";
 
 export type ProductSourceBindingView = {
@@ -76,11 +172,12 @@ export type ProductSourceBindingView = {
   sources?: Array<{ source_ref_id: string; status: string; matched_kinds?: string[]; conflicting_kinds?: string[] }>;
 };
 export type AssistantEvidenceView = { id: string; label: string; source: string; summary: string; confidence?: number };
+export type AssistantQuestionView = { field: string; prompt: string; suggestions?: string[] };
 export type AssistantProposalView = { id: string; kind: AssistantProposalKind; title: string; description: string; targetID?: string; targetWorkstation?: ProjectWorkstationView; patch?: ProjectConfigurationPatchView; baseVersion: number; idempotencyKey: string; requiresConfirmation: boolean; status: "available" | "confirmed" | "dismissed"; executionResult?: Record<string, unknown> };
-export type AssistantMessageView = { id: string; role: "agent" | "user" | "system"; kind: "answer" | "evidence" | "proposal" | "status" | "error"; text: string; generationSource?: "llm" | "deterministic_fallback" | "manual"; modelProvider?: string; modelName?: string; fallbackReason?: string; createdAt: string; targetWorkstation?: ProjectWorkstationView; evidence?: AssistantEvidenceView[]; proposals?: AssistantProposalView[] };
+export type AssistantMessageView = { id: string; role: "agent" | "user" | "system"; kind: "answer" | "evidence" | "proposal" | "status" | "error"; text: string; generationSource?: "llm" | "deterministic_fallback" | "manual"; modelProvider?: string; modelName?: string; fallbackReason?: string; createdAt: string; targetWorkstation?: ProjectWorkstationView; question?: AssistantQuestionView; evidence?: AssistantEvidenceView[]; proposals?: AssistantProposalView[] };
 export type AssistantEventView = { id: string; sessionID: string; type: string; text: string; createdAt: string };
 export type AssistantNextActionView = { kind: string; title: string; description: string; primaryLabel?: string; proposalID?: string; targetWorkstation?: ProjectWorkstationView; requiresUserAction: boolean; blocked: boolean; missingFields?: string[] };
-export type AssistantSessionView = { id: string; context: AssistantContextView; status: "idle" | "thinking" | "waiting_for_user" | "awaiting_confirmation" | "error"; activeWorkstation?: ProjectWorkstationView; workstationTitle?: string; workstationStatus?: string; nextAction: AssistantNextActionView; configuration: ProjectConfigurationDraftView; messages: AssistantMessageView[]; lastEventID?: string };
+export type AssistantSessionView = { id: string; context: AssistantContextView; status: "idle" | "thinking" | "waiting_for_user" | "awaiting_confirmation" | "error"; activeWorkstation?: ProjectWorkstationView; workstationTitle?: string; workstationStatus?: string; nextAction: AssistantNextActionView; configuration: ProjectConfigurationDraftView; pendingQuestion?: AssistantQuestionView; messages: AssistantMessageView[]; lastEventID?: string };
 export type ProjectSummaryView = { id: string; name: string; productURL: string; stage: WorkspaceStage; status: ProjectWorkspaceView["status"]; assetCount: number; generatedAssetCount: number; createdAt?: string; updatedAt?: string };
 
 export type ScenarioTemplate = {

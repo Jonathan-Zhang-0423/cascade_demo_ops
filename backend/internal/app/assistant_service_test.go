@@ -29,6 +29,117 @@ func newAssistantTestService(t *testing.T) *Service {
 	return service
 }
 
+func TestAssistantStartsWithOneNaturalQuestion(t *testing.T) {
+	service := newAssistantTestService(t)
+	session, err := service.CreateAssistantSession(t.Context(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "natural-question"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.PendingQuestion == nil || session.PendingQuestion.Field != "productURL" {
+		t.Fatalf("expected one product URL question, got %+v", session.PendingQuestion)
+	}
+	if len(session.Messages) != 1 || session.Messages[0].Question == nil || session.Messages[0].Question.Field != "productURL" {
+		t.Fatalf("question was not attached to the assistant turn: %+v", session.Messages)
+	}
+}
+
+func TestAssistantFirstTurnCreatesAndAutosavesConversationProject(t *testing.T) {
+	service := newAssistantTestService(t)
+	ctx := t.Context()
+	projectID := "proj_conversation_first"
+	context := model.AssistantContext{
+		Surface: model.AssistantSurfaceProjects, ScopeKey: "project_" + projectID,
+		ProjectID: projectID, CreateProjectOnFirstTurn: true,
+	}
+	session, err := service.CreateAssistantSession(ctx, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projects, err := service.ListProjects(ctx); err != nil || len(projects) != 0 {
+		t.Fatalf("empty conversation created a project: projects=%+v err=%v", projects, err)
+	}
+
+	message := "为 https://example.com 制作面向产品团队的 60 秒演示，项目名叫 Example Approval Demo，演示目标为展示审批流程，重点展示创建和批准请求"
+	turn, err := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{Message: message, IdempotencyKey: "first-project-turn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Context.ProjectID != projectID || turn.Configuration.ProjectName != "Example Approval Demo" || turn.Configuration.ProductURL != "https://example.com" || turn.Configuration.TargetAudience != "产品团队" {
+		t.Fatalf("first turn was not autosaved into the bound project: context=%+v config=%+v", turn.Context, turn.Configuration)
+	}
+	if findAssistantProposalByKind(turn, model.AssistantProposalConfigurationPatch) != nil {
+		t.Fatalf("draft background fields still required per-turn confirmation: %+v", turn.Messages)
+	}
+	projects, err := service.ListProjects(ctx)
+	if err != nil || len(projects) != 1 || projects[0].ID != projectID || projects[0].Name != "Example Approval Demo" || projects[0].Status != "draft" {
+		t.Fatalf("conversation project was not listed as a named draft: projects=%+v err=%v", projects, err)
+	}
+	state, err := service.LoadProject(ctx, projectID)
+	if err != nil || !assistantConversationDraft(state) || state.ProjectContext == nil || state.ProjectContext.ProductDescription == "" {
+		t.Fatalf("conversation project state was not persisted: state=%+v err=%v", state, err)
+	}
+
+	retried, err := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{Message: message, IdempotencyKey: "first-project-turn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _ = service.ListProjects(ctx)
+	if len(projects) != 1 || len(retried.Messages) != len(turn.Messages) {
+		t.Fatalf("idempotent retry duplicated project or messages: projects=%d messages=%d/%d", len(projects), len(retried.Messages), len(turn.Messages))
+	}
+	reopened, err := service.CreateAssistantSession(ctx, context)
+	if err != nil || len(reopened.Messages) != len(turn.Messages) {
+		t.Fatalf("project conversation did not reopen with its history: messages=%d err=%v", len(reopened.Messages), err)
+	}
+}
+
+func TestAssistantNaturalConfirmationAppliesVisiblePatch(t *testing.T) {
+	service := newAssistantTestService(t)
+	session, err := service.CreateAssistantSession(t.Context(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "natural-confirmation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := service.SubmitAssistantTurn(t.Context(), session.ID, model.AssistantTurnRequest{Message: "https://example.com", IdempotencyKey: "answer-url"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := findAssistantProposalByKind(turn, model.AssistantProposalConfigurationPatch)
+	if proposal == nil || proposal.Status != "available" {
+		t.Fatalf("expected a visible configuration proposal, got %+v", turn.Messages)
+	}
+	confirmed, err := service.SubmitAssistantTurn(t.Context(), turn.ID, model.AssistantTurnRequest{Message: "yes", IdempotencyKey: "confirm-url"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.Configuration.ProductURL != "https://example.com" || findAssistantProposalByKind(confirmed, model.AssistantProposalConfigurationPatch) != nil {
+		t.Fatalf("natural confirmation did not apply the visible patch: config=%+v", confirmed.Configuration)
+	}
+	if confirmed.PendingQuestion == nil || confirmed.PendingQuestion.Field != "objective" {
+		t.Fatalf("assistant did not continue with the next missing question: %+v", confirmed.PendingQuestion)
+	}
+}
+
+func TestAssistantNaturalConfirmationDoesNotBypassSecurePicker(t *testing.T) {
+	service := newAssistantTestService(t)
+	session, err := service.CreateAssistantSession(t.Context(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "natural-secure-gate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := newAssistantProposal(model.AssistantProposalSelectProjectSource, "Choose source", "Choose a trusted source.", session.Configuration.Version, time.Now().UTC(), nil, model.AssistantWorkstationOverview)
+	session.Messages = append(session.Messages, model.AssistantMessage{ID: "secure-proposal", Role: "agent", Kind: "proposal", Text: "Choose a trusted source.", Proposals: []model.AssistantProposal{proposal}, CreatedAt: time.Now().UTC()})
+	if err := service.assistantStore.Save(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.SubmitAssistantTurn(t.Context(), session.ID, model.AssistantTurnRequest{Message: "yes", IdempotencyKey: "unsafe-shortcut"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secureProposal := findAssistantProposalByKind(result, model.AssistantProposalSelectProjectSource)
+	if secureProposal == nil || secureProposal.Status != "available" {
+		t.Fatalf("a natural-language shortcut bypassed a trusted picker: %+v", secureProposal)
+	}
+}
+
 func TestAssistantBuildsLocalDraftFromRealSourceAndBrowserScan(t *testing.T) {
 	testPage := httptest.NewServer(http.HandlerFunc(controlledBusinessFixtureHandler))
 	defer testPage.Close()
@@ -482,7 +593,10 @@ func TestAssistantConfigurationChangeInvalidatesPriorAnalysisContext(t *testing.
 	if err := service.states.Save(ctx, state); err != nil {
 		t.Fatal(err)
 	}
-	session, err := service.CreateAssistantSession(ctx, model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "stale-analysis-context", ProjectID: projectID})
+	session, err := service.CreateAssistantSession(ctx, model.AssistantContext{
+		Surface: model.AssistantSurfaceProjects, ScopeKey: "project_" + projectID,
+		ProjectID: projectID, CreateProjectOnFirstTurn: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,12 +610,12 @@ func TestAssistantConfigurationChangeInvalidatesPriorAnalysisContext(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Context.ProjectID != "" || updated.Configuration.AnalysisProjectID != "" || updated.Configuration.Confirmed || updated.ActiveWorkstation != model.AssistantWorkstationOverview {
+	if updated.Context.ProjectID != projectID || updated.Configuration.AnalysisProjectID != "" || updated.Configuration.Confirmed || updated.ActiveWorkstation != model.AssistantWorkstationOverview {
 		t.Fatalf("configuration change retained stale analysis authority: context=%+v config=%+v workstation=%s", updated.Context, updated.Configuration, updated.ActiveWorkstation)
 	}
 	workflow := service.assistantWorkflowProjection(ctx, *updated)
-	if workflow.ProjectAttached || workflow.Stage != "configuration" || assistantWorkstationAvailable(workflow, model.AssistantWorkstationApproval) {
-		t.Fatalf("stale project remained visible to assistant workflow: %+v", workflow)
+	if !workflow.ProjectAttached || workflow.Stage != "configuration" || assistantWorkstationAvailable(workflow, model.AssistantWorkstationApproval) {
+		t.Fatalf("stale analysis authority remained visible to assistant workflow: %+v", workflow)
 	}
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type {
   AssistantContextView,
   AssistantMessageView,
@@ -16,15 +16,20 @@ type AssistantWidgetProps = {
   context: AssistantContextView;
   onOpenProject?: (projectID: string) => void;
   onOpenRepositoryForm?: () => void;
-  onWorkstationChange?: (view: ProjectWorkstationView) => void;
+  onInspectWorkstation?: (view: ProjectWorkstationView) => void;
   initialMessage?: string;
   suggestedMessage?: { id: string; text: string };
   onSessionChange?: (session: AssistantSessionView) => void;
+  onThreadStart?: () => void;
+  onProjectCreated?: (projectID: string, initialMessage?: string) => void;
+  focusComposer?: boolean;
 };
 
 type AssistantConversationPanelProps = AssistantWidgetProps & {
   embedded?: boolean;
   showHeader?: boolean;
+  contextualContent?: ReactNode;
+  presentation?: "default" | "home";
 };
 
 type ManualConfigurationForm = {
@@ -39,7 +44,7 @@ type ManualConfigurationForm = {
   brandTone: string;
 };
 
-export function AssistantWidget({ bridge, context, onOpenProject, onOpenRepositoryForm, onWorkstationChange }: AssistantWidgetProps) {
+export function AssistantWidget({ bridge, context, onOpenProject, onOpenRepositoryForm, onInspectWorkstation, onProjectCreated }: AssistantWidgetProps) {
   const [open, setOpen] = useState(false);
   const launcherRef = useRef<HTMLButtonElement>(null);
 
@@ -51,8 +56,9 @@ export function AssistantWidget({ bridge, context, onOpenProject, onOpenReposito
   return (
     <div className="assistant-widget">
       {!open ? (
-        <button ref={launcherRef} type="button" className="assistant-launcher" aria-label="Ask Cascade" title="Ask Cascade" onClick={() => setOpen(true)}>
-          <span className="assistant-logo-mark" aria-hidden="true"><img src="/Cascade_launcher_mark.png" alt="" /></span>
+        <button ref={launcherRef} type="button" className="assistant-launcher" aria-label="Open Cascade assistant" title="Open Cascade assistant" onClick={() => setOpen(true)}>
+          <span className="assistant-logo-mark" aria-hidden="true"><img src="/Logo_simple_white.png" alt="" /></span>
+          <span className="assistant-launcher-label">Assistant</span>
         </button>
       ) : (
         <AssistantConversationPanel
@@ -60,7 +66,8 @@ export function AssistantWidget({ bridge, context, onOpenProject, onOpenReposito
           context={context}
           {...(onOpenProject ? { onOpenProject } : {})}
           {...(onOpenRepositoryForm ? { onOpenRepositoryForm } : {})}
-          {...(onWorkstationChange ? { onWorkstationChange } : {})}
+          {...(onInspectWorkstation ? { onInspectWorkstation } : {})}
+          {...(onProjectCreated ? { onProjectCreated } : {})}
           onClose={close}
         />
       )}
@@ -68,11 +75,13 @@ export function AssistantWidget({ bridge, context, onOpenProject, onOpenReposito
   );
 }
 
-export function AssistantConversationPanel({ bridge, context, onOpenProject, onOpenRepositoryForm, onWorkstationChange, onSessionChange, initialMessage, suggestedMessage, embedded = false, showHeader = true, onClose }: AssistantConversationPanelProps & { onClose?: () => void }) {
+export function AssistantConversationPanel({ bridge, context, onOpenProject, onOpenRepositoryForm, onInspectWorkstation, onSessionChange, onThreadStart, onProjectCreated, initialMessage, suggestedMessage, focusComposer = false, embedded = false, showHeader = true, contextualContent, presentation = "default", onClose }: AssistantConversationPanelProps & { onClose?: () => void }) {
   const [session, setSession] = useState<AssistantSessionView>();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [lastFailedMessage, setLastFailedMessage] = useState("");
+  const [pendingMessage, setPendingMessage] = useState("");
   const [credentialEntry, setCredentialEntry] = useState<{ proposal: AssistantProposalView; ref: string; username: string; password: string }>();
   const [githubEntry, setGithubEntry] = useState<{ proposal: AssistantProposalView; url: string }>();
   const [sourceEntry, setSourceEntry] = useState<AssistantProposalView>();
@@ -82,12 +91,13 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
   const messageListRef = useRef<HTMLDivElement>(null);
   const submittedInitialMessageRef = useRef("");
   const appliedSuggestionRef = useRef("");
+  const requestEpochRef = useRef(0);
+  const projectHandoffRef = useRef(false);
   const active = embedded || Boolean(onClose);
 
   function applySession(next: AssistantSessionView) {
     setSession(next);
     onSessionChange?.(next);
-    if (next.activeWorkstation) onWorkstationChange?.(next.activeWorkstation);
   }
 
   useEffect(() => {
@@ -106,19 +116,24 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
       setLoading(false);
     });
     return () => { mounted = false; };
-  }, [active, bridge, context.projectID, context.projectName, context.repositoryID, context.repositoryLabel, context.scopeKey, context.surface]);
+  }, [active, bridge, context.createProjectOnFirstTurn, context.projectID, context.projectName, context.repositoryID, context.repositoryLabel, context.scopeKey, context.surface]);
 
   useEffect(() => {
     const message = initialMessage?.trim();
     if (!active || !session || !message || loading || submittedInitialMessageRef.current === message) return;
     submittedInitialMessageRef.current = message;
+    setPendingMessage(message);
     setLoading(true);
     setError("");
     void bridge.submitAssistantTurn(session.id, message, `initial-${context.scopeKey}`).then((result) => {
-      if (result.ok && result.data) applySession(result.data);
+      if (result.ok && result.data) {
+        applySession(result.data);
+        setPendingMessage("");
+        setLastFailedMessage("");
+      }
       else {
-        submittedInitialMessageRef.current = "";
         setError(result.error ?? "Cascade could not start the configuration conversation.");
+        setLastFailedMessage(message);
       }
       setLoading(false);
     });
@@ -130,6 +145,11 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
     setInput(suggestedMessage.text);
     window.requestAnimationFrame(() => inputRef.current?.focus());
   }, [active, suggestedMessage]);
+
+  useEffect(() => {
+    if (!active || !focusComposer) return;
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  }, [active, focusComposer]);
 
   useEffect(() => {
     if (!active || !session) return;
@@ -150,28 +170,74 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
   }, [session?.messages.length, loading]);
 
   useEffect(() => {
-    if (!active || embedded) return;
-    function onKeyDown(event: KeyboardEvent) {
+    const composer = inputRef.current;
+    if (!composer) return;
+    composer.style.height = "auto";
+    composer.style.height = `${Math.min(composer.scrollHeight, 180)}px`;
+  }, [input]);
+
+  useEffect(() => {
+    if (!active || !onClose) return;
+    function onKeyDown(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") onClose?.();
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [active, embedded, onClose]);
+  }, [active, onClose]);
 
-  async function send(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const message = input.trim();
+  async function submitMessage(message: string) {
     if (!message || !session || loading) return;
+    setInput("");
+    if (context.createProjectOnFirstTurn && context.projectID && onProjectCreated && !projectHandoffRef.current) {
+      projectHandoffRef.current = true;
+      onThreadStart?.();
+      onProjectCreated(context.projectID, message);
+      return;
+    }
+    const requestEpoch = ++requestEpochRef.current;
+    setPendingMessage(message);
+    if (presentation === "home") {
+      onThreadStart?.();
+    }
     setLoading(true);
     setError("");
     const result = await bridge.submitAssistantTurn(session.id, message);
+    if (requestEpoch !== requestEpochRef.current) return;
     if (result.ok && result.data) {
       applySession(result.data);
-      setInput("");
+      setLastFailedMessage("");
+      setPendingMessage("");
+      const createdProjectID = result.data.context.createProjectOnFirstTurn ? result.data.context.projectID : undefined;
+      if (createdProjectID && onProjectCreated && !projectHandoffRef.current) {
+        projectHandoffRef.current = true;
+        onProjectCreated(createdProjectID);
+      }
     } else {
       setError(result.error ?? "Cascade could not respond.");
+      setLastFailedMessage(message);
     }
     setLoading(false);
+  }
+
+  async function send(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await submitMessage(input.trim());
+  }
+
+  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (!isComposerSubmitKey(event)) return;
+    event.preventDefault();
+    void submitMessage(input.trim());
+  }
+
+  async function stopResponse() {
+    if (!session) return;
+    requestEpochRef.current += 1;
+    setLoading(false);
+    setPendingMessage("");
+    const result = await bridge.cancelAssistantSession(session.id);
+    if (result.ok && result.data) applySession(result.data);
+    else if (!result.ok) setError(result.error ?? "Cascade could not stop the current response.");
   }
 
   async function updateProposal(proposal: AssistantProposalView, action: "confirm" | "dismiss") {
@@ -196,7 +262,7 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
       if (action === "confirm" && analysisProjectID && (proposal.kind === "confirm_configuration" || proposal.kind === "start_local_analysis")) onOpenProject?.(analysisProjectID);
       if (action === "confirm" && proposal.targetID && (proposal.kind === "open_project" || proposal.kind === "inspect_project")) onOpenProject?.(proposal.targetID);
       if (action === "confirm" && proposal.kind === "open_repository_form") onOpenRepositoryForm?.();
-      if (action === "confirm" && result.data.activeWorkstation) onWorkstationChange?.(result.data.activeWorkstation);
+      if (action === "confirm" && proposal.kind === "open_workstation" && proposal.targetWorkstation) onInspectWorkstation?.(proposal.targetWorkstation);
       setLoading(false);
       return true;
     } else {
@@ -262,16 +328,6 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
       applySession(result.data);
       setManualEntry(undefined);
     } else setError(result.error ?? "手动 configuration 提案无法保存。");
-    setLoading(false);
-  }
-
-  async function requestSafeConfigurationAction(message: string) {
-    if (!session || loading) return;
-    setLoading(true);
-    setError("");
-    const result = await bridge.submitAssistantTurn(session.id, message, `manual-action-${session.configuration.version}-${message}`);
-    if (result.ok && result.data) applySession(result.data);
-    else setError(result.error ?? "无法创建安全配置动作。");
     setLoading(false);
   }
 
@@ -362,32 +418,40 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
     }
   }
 
-  const activeProposal = session?.messages.flatMap((message) => message.proposals ?? []).find((proposal) => proposal.status === "available" && proposal.id === session.nextAction.proposalID);
+  const visibleMessages = visibleAssistantMessages(session?.messages ?? [], presentation);
+  const homeHasThread = presentation === "home" && (visibleMessages.length > 0 || Boolean(pendingMessage) || Boolean(error));
+  const panelClassName = presentation === "home"
+    ? `assistant-home-panel ${homeHasThread ? "has-thread" : "is-empty"}`
+    : embedded ? "project-agent-conversation" : "assistant-dialogue";
 
   return (
-    <section className={embedded ? "project-agent-conversation" : "assistant-dialogue"} aria-label={`${context.surface === "projects" ? "Projects" : "Repositories"} Cascade Agent`}>
+    <section className={panelClassName} aria-label={`${context.surface === "projects" ? "Projects" : "Repositories"} Cascade Agent`}>
       {showHeader ? (
         <header className="assistant-dialogue-header">
-          <div><span className="assistant-dialogue-kicker">Cascade Agent</span><strong>{context.surface === "projects" ? "Projects" : "Repositories"}</strong><small>{context.projectName ?? context.repositoryLabel ?? "Current workspace context"}</small></div>
+          <div><span className="assistant-dialogue-kicker">Cascade Agent</span><strong>{context.surface === "projects" ? "Projects" : "Repositories"}</strong></div>
           {onClose ? <button type="button" className="assistant-close" aria-label="Close Cascade Agent" onClick={onClose}>×</button> : null}
         </header>
       ) : null}
       <div ref={messageListRef} className="assistant-message-list" aria-live="polite">
-        {session?.messages.map((message) => <AssistantMessage key={message.id} message={message} />)}
-        {loading ? <div className="assistant-typing"><span /><span /><span />Cascade 正在整理</div> : null}
-        {error ? <div className="assistant-error" role="alert">{error}<button type="button" className="assistant-retry" onClick={() => { setError(""); inputRef.current?.focus(); }}>重试</button></div> : null}
+        {visibleMessages.map((message) => (
+          <AssistantMessage
+            key={message.id}
+            message={message}
+            loading={loading}
+            onConfirm={(proposal) => void updateProposal(proposal, "confirm")}
+            onDismiss={(proposal) => void updateProposal(proposal, "dismiss")}
+            onSuggestion={(suggestion) => { setInput(suggestion); window.requestAnimationFrame(() => inputRef.current?.focus()); }}
+          />
+        ))}
+        {pendingMessage ? <article className="assistant-message assistant-message-user assistant-pending-user-message"><p>{pendingMessage}</p></article> : null}
+        {contextualContent}
+        {loading ? <div className="assistant-typing"><span /><span /><span /><span className="assistant-typing-label">Cascade is working</span></div> : null}
+        {error ? <div className="assistant-error" role="alert"><span>{error}</span><div className="assistant-error-actions">{lastFailedMessage ? <button type="button" className="assistant-retry" onClick={() => void submitMessage(lastFailedMessage)}>Retry</button> : <button type="button" className="assistant-retry" onClick={() => { setError(""); inputRef.current?.focus(); }}>Try again</button>}{context.surface === "projects" && session ? <button type="button" className="assistant-manual-recovery" onClick={openManualConfiguration}>Advanced recovery</button> : null}</div></div> : null}
       </div>
-      {session?.nextAction.requiresUserAction ? <AssistantNextAction action={session.nextAction} {...(activeProposal ? { proposal: activeProposal } : {})} loading={loading} onConfirm={() => { if (activeProposal) void updateProposal(activeProposal, "confirm"); }} onDismiss={() => { if (activeProposal) void updateProposal(activeProposal, "dismiss"); }} onFocusComposer={() => { inputRef.current?.focus(); }} /> : null}
       <form className="assistant-composer" onSubmit={send}>
-        <textarea ref={inputRef} value={input} onChange={(event) => setInput(event.currentTarget.value)} rows={2} placeholder={context.surface === "projects" ? "告诉 Cascade 需要补充或调整什么…" : "询问已连接的代码仓库…"} aria-label="发送消息给 Cascade Agent" />
-        <div className="assistant-composer-footer"><span>字段变更和敏感动作都需要你确认。</span><button type="submit" disabled={loading || !input.trim()}>发送 <span aria-hidden="true">↗</span></button></div>
+        <textarea ref={inputRef} value={input} onChange={(event) => setInput(event.currentTarget.value)} onKeyDown={handleComposerKeyDown} rows={1} placeholder={presentation === "home" ? "What would you like to show today?" : "Message Cascade…"} aria-label="Message Cascade" />
+        <div className="assistant-composer-footer">{loading ? <button type="button" className="assistant-stop" aria-label="Stop Cascade" onClick={() => void stopResponse()}><span aria-hidden="true">■</span></button> : <button type="submit" aria-label="Send message" disabled={!input.trim()}><span aria-hidden="true">↑</span></button>}</div>
       </form>
-      <div className="assistant-manual-toolbar">
-        <span>对话不方便？</span>
-        <button type="button" disabled={loading || !session || session.nextAction.proposalID !== undefined} onClick={openManualConfiguration}>手动填写配置</button>
-        <button type="button" disabled={loading || !session || session.nextAction.proposalID !== undefined} onClick={() => void requestSafeConfigurationAction("选择本地项目目录")}>选择本地项目</button>
-        <button type="button" disabled={loading || !session || session.nextAction.proposalID !== undefined} onClick={() => void requestSafeConfigurationAction("连接 GitHub 仓库")}>连接 GitHub</button>
-      </div>
       {manualEntry ? (
         <form className="assistant-manual-configuration" onSubmit={proposeManualConfiguration}>
           <header><div><span>Manual fallback</span><strong>手动填写 Configuration</strong></div><button type="button" className="assistant-dismiss" onClick={() => setManualEntry(undefined)}>关闭</button></header>
@@ -443,35 +507,44 @@ export function AssistantConversationPanel({ bridge, context, onOpenProject, onO
   );
 }
 
-function AssistantMessage({ message }: { message: AssistantMessageView }) {
+export function visibleAssistantMessages(messages: AssistantMessageView[], presentation: "default" | "home"): AssistantMessageView[] {
+  if (presentation !== "home") return messages.filter((message) => message.id !== "welcome");
+  const firstUserMessage = messages.findIndex((message) => message.role === "user");
+  return firstUserMessage === -1 ? [] : messages.slice(firstUserMessage);
+}
+
+export function isComposerSubmitKey(event: Pick<ReactKeyboardEvent<HTMLTextAreaElement>, "key" | "shiftKey" | "nativeEvent">): boolean {
+  return event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing;
+}
+
+function AssistantMessage({ message, loading, onConfirm, onDismiss, onSuggestion }: {
+  message: AssistantMessageView;
+  loading: boolean;
+  onConfirm: (proposal: AssistantProposalView) => void;
+  onDismiss: (proposal: AssistantProposalView) => void;
+  onSuggestion: (suggestion: string) => void;
+}) {
+  const available = message.proposals?.filter((proposal) => proposal.status === "available") ?? [];
+  const resolved = message.proposals?.filter((proposal) => proposal.status !== "available") ?? [];
   return <article className={`assistant-message assistant-message-${message.role}`}>
-    <div className="assistant-message-meta"><span>{message.role === "agent" ? "Cascade" : message.role === "user" ? "你" : "系统"}</span><span>{assistantGenerationLabel(message)}</span></div>
+    {message.role !== "user" ? <div className="assistant-message-author">Cascade</div> : null}
     <p>{message.text}</p>
-    {message.generationSource === "deterministic_fallback" ? <small className="assistant-generation-note">真实模型本轮不可用，已使用本地规则整理；字段仍需你确认。</small> : null}
-    {message.targetWorkstation ? <div className="assistant-workstation-target">工作台 · {workstationLabel(message.targetWorkstation)}</div> : null}
-    {message.evidence?.length ? <div className="assistant-evidence-list">{message.evidence.map((item) => <div className="assistant-evidence" key={item.id}><strong>{item.label}</strong><small>{item.source} · {item.confidence ? `${Math.round(item.confidence * 100)}% confidence` : "Evidence"}</small><span>{item.summary}</span></div>)}</div> : null}
-    {message.proposals?.some((proposal) => proposal.status !== "available") ? <div className="assistant-action-history">{message.proposals.filter((proposal) => proposal.status !== "available").map((proposal) => <span key={proposal.id}>{proposal.status === "confirmed" ? "✓" : "—"} {proposal.title}</span>)}</div> : null}
+    {message.question?.suggestions?.length ? <div className="assistant-suggestions">{message.question.suggestions.map((suggestion) => <button key={suggestion} type="button" onClick={() => onSuggestion(suggestion)}>{suggestion}</button>)}</div> : null}
+    {message.evidence?.length ? <details className="assistant-evidence-disclosure"><summary>View sources <span>{message.evidence.length}</span></summary><div className="assistant-evidence-list">{message.evidence.map((item) => <div className="assistant-evidence" key={item.id}><strong>{item.label}</strong><small>{item.source} · {item.confidence ? `${Math.round(item.confidence * 100)}% confidence` : "Evidence"}</small><span>{item.summary}</span></div>)}</div></details> : null}
+    {available.map((proposal) => <InlineConfirmation key={proposal.id} proposal={proposal} loading={loading} onConfirm={() => onConfirm(proposal)} onDismiss={() => onDismiss(proposal)} />)}
+    {resolved.length ? <div className="assistant-action-history">{resolved.map((proposal) => <span key={proposal.id}>{proposal.status === "confirmed" ? "✓ Approved by you" : "Declined by you"} · {proposal.title}</span>)}</div> : null}
+    {message.generationSource === "deterministic_fallback" ? <details className="assistant-response-details"><summary>Response details</summary><small>Cascade used its local fallback because the configured model was unavailable. Any change still requires your confirmation.</small></details> : null}
   </article>;
 }
 
-function assistantGenerationLabel(message: AssistantMessageView): string {
-  if (message.generationSource === "llm") return message.modelName ? `LLM · ${message.modelName}` : "LLM 理解";
-  if (message.generationSource === "deterministic_fallback") return "规则兜底";
-  if (message.generationSource === "manual") return "手动提案";
-  return assistantMessageKindLabel(message.kind);
-}
-
-function AssistantNextAction({ action, proposal, loading, onConfirm, onDismiss, onFocusComposer }: { action: AssistantSessionView["nextAction"]; proposal?: AssistantProposalView; loading: boolean; onConfirm: () => void; onDismiss: () => void; onFocusComposer: () => void }) {
-  const needsProposal = Boolean(action.proposalID);
-  return <section className="assistant-next-action" aria-label="当前下一步">
-    <span>当前只需完成这一步</span>
-    <strong>{action.title}</strong>
-    <p>{action.description}</p>
+function InlineConfirmation({ proposal, loading, onConfirm, onDismiss }: { proposal: AssistantProposalView; loading: boolean; onConfirm: () => void; onDismiss: () => void }) {
+  return <section className="assistant-inline-confirmation" aria-label={proposal.title}>
+    <strong>{proposal.title}</strong>
+    <p>{proposal.description}</p>
     {proposal?.patch ? <ConfigurationPatchPreview patch={proposal.patch} /> : null}
-    {action.missingFields?.length ? <small>待补充：{action.missingFields.map(configurationFieldLabel).join("、")}</small> : null}
     <div>
-      <button type="button" className="assistant-confirm" disabled={loading || (needsProposal && !proposal)} onClick={needsProposal ? onConfirm : onFocusComposer}>{action.primaryLabel || "继续"}</button>
-      {proposal ? <button type="button" className="assistant-dismiss" disabled={loading} onClick={onDismiss}>稍后</button> : null}
+      <button type="button" className="assistant-confirm" disabled={loading} onClick={onConfirm}>{proposalConfirmLabel(proposal.kind)}</button>
+      <button type="button" className="assistant-dismiss" disabled={loading} onClick={onDismiss}>Not now</button>
     </div>
   </section>;
 }
@@ -499,41 +572,18 @@ function isClientActionProposal(kind: AssistantProposalView["kind"]): boolean {
 }
 
 function proposalConfirmLabel(kind: AssistantProposalView["kind"]): string {
-  if (kind === "configuration_patch") return "应用字段变更";
-  if (kind === "confirm_configuration" || kind === "start_local_analysis") return "确认配置并启动本地理解";
-  if (kind === "select_local_project") return "选择目录";
-  if (kind === "connect_github") return "连接 GitHub";
-  if (kind === "attach_requirement_document") return "选择需求文档";
-  if (kind === "attach_brand_asset") return "选择品牌素材";
-  if (kind === "store_demo_credential") return "安全保存账号";
-  return "确认";
-}
-
-function configurationFieldLabel(field: string): string {
-  const labels: Record<string, string> = { projectName: "项目名称", productURL: "产品地址", objective: "演示目标", targetAudience: "目标受众", sources: "项目来源" };
-  return labels[field] ?? field;
+  if (kind === "configuration_patch") return "Use this";
+  if (kind === "confirm_configuration" || kind === "start_local_analysis") return "Continue";
+  if (kind === "select_project_source") return "Choose source";
+  if (kind === "select_local_project") return "Choose folder";
+  if (kind === "connect_github") return "Connect GitHub";
+  if (kind === "attach_requirement_document") return "Choose document";
+  if (kind === "attach_brand_asset") return "Choose assets";
+  if (kind === "store_demo_credential") return "Save securely";
+  return "Confirm";
 }
 
 function desktopPickerError(error: string | undefined, label: string): string {
   if (error?.includes("Wails")) return `请在 DemoOps 桌面应用中选择${label}；浏览器测试模式不会接收本地绝对路径。`;
   return error ?? `未选择${label}。`;
-}
-
-function workstationLabel(view: ProjectWorkstationView): string {
-  const labels: Record<ProjectWorkstationView, string> = {
-    overview: "项目配置",
-    evidence: "证据与理解",
-    plan: "演示方案",
-    approval: "执行审批",
-    execution: "执行进度",
-    repair: "修复",
-    assets: "成品审核",
-    editor: "视频编辑",
-  };
-  return labels[view];
-}
-
-function assistantMessageKindLabel(kind: AssistantMessageView["kind"]): string {
-  const labels: Record<AssistantMessageView["kind"], string> = { answer: "回复", evidence: "证据", proposal: "待确认", status: "状态", error: "需要处理" };
-  return labels[kind];
 }

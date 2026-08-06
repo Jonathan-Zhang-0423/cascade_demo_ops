@@ -63,12 +63,13 @@ func IsAssistantProposalKind(value AssistantProposalKind) bool {
 }
 
 type AssistantContext struct {
-	Surface         AssistantSurface `json:"surface"`
-	ScopeKey        string           `json:"scopeKey"`
-	ProjectID       string           `json:"projectID,omitempty"`
-	ProjectName     string           `json:"projectName,omitempty"`
-	RepositoryID    string           `json:"repositoryID,omitempty"`
-	RepositoryLabel string           `json:"repositoryLabel,omitempty"`
+	Surface                  AssistantSurface `json:"surface"`
+	ScopeKey                 string           `json:"scopeKey"`
+	ProjectID                string           `json:"projectID,omitempty"`
+	ProjectName              string           `json:"projectName,omitempty"`
+	CreateProjectOnFirstTurn bool             `json:"createProjectOnFirstTurn,omitempty"`
+	RepositoryID             string           `json:"repositoryID,omitempty"`
+	RepositoryLabel          string           `json:"repositoryLabel,omitempty"`
 }
 
 type ConfigurationSourceRef struct {
@@ -126,6 +127,12 @@ type AssistantEvidence struct {
 	Confidence float64 `json:"confidence,omitempty"`
 }
 
+type AssistantQuestion struct {
+	Field       string   `json:"field"`
+	Prompt      string   `json:"prompt"`
+	Suggestions []string `json:"suggestions,omitempty"`
+}
+
 type AssistantProposal struct {
 	ID                   string                     `json:"id"`
 	Kind                 AssistantProposalKind      `json:"kind"`
@@ -153,6 +160,7 @@ type AssistantMessage struct {
 	TargetWorkstation AssistantWorkstation `json:"targetWorkstation,omitempty"`
 	Evidence          []AssistantEvidence  `json:"evidence,omitempty"`
 	Proposals         []AssistantProposal  `json:"proposals,omitempty"`
+	Question          *AssistantQuestion   `json:"question,omitempty"`
 }
 
 type AssistantEvent struct {
@@ -185,6 +193,7 @@ type AssistantSession struct {
 	NextAction           AssistantNextAction       `json:"nextAction"`
 	Configuration        ProjectConfigurationDraft `json:"configuration"`
 	Messages             []AssistantMessage        `json:"messages"`
+	PendingQuestion      *AssistantQuestion        `json:"pendingQuestion,omitempty"`
 	Events               []AssistantEvent          `json:"events,omitempty"`
 	LastEventID          string                    `json:"lastEventID,omitempty"`
 	ProcessedIdempotency map[string]string         `json:"processedIdempotency,omitempty"`

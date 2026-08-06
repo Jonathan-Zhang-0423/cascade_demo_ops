@@ -89,38 +89,42 @@ type ModelTaskRoute struct {
 }
 
 type AppRuntimeConfig struct {
-	Profile               RuntimeProfile
-	Environment           string
-	Mode                  model.AppMode
-	DatabaseDialect       DatabaseDialect
-	DatabaseURL           string
-	SQLitePath            string
-	DataRoot              string
-	ArtifactRoot          string
-	CacheRoot             string
-	LogRoot               string
-	ResourceRoot          string
-	ResourceManifestPath  string
-	DevRepoRoot           string
-	SidecarPaths          map[string]string
-	NodeBinaryPath        string
-	FFmpegPath            string
-	FFprobePath           string
-	LLMMode               LLMMode
-	LLMProxyURL           string
-	ArkMediaMode          ArkMediaMode
-	ModelAdapterVersion   string
-	ModelProviders        map[ModelProvider]ModelProviderCredential
-	ModelTaskRoutes       map[ModelTask]ModelTaskRoute
-	CloudExchangeBaseURL  string
-	CloudExchangeToken    string
-	AppVersion            string
-	UpdateChannel         string
-	UpdateManifestURL     string
-	UpdatePublicKeyPath   string
-	UpdateExecutablePath  string
-	PreviousInstallerPath string
-	DesktopExecutablePath string
+	Profile                   RuntimeProfile
+	Environment               string
+	Mode                      model.AppMode
+	DatabaseDialect           DatabaseDialect
+	DatabaseURL               string
+	SQLitePath                string
+	DataRoot                  string
+	ArtifactRoot              string
+	CacheRoot                 string
+	LogRoot                   string
+	ResourceRoot              string
+	ResourceManifestPath      string
+	DevRepoRoot               string
+	SidecarPaths              map[string]string
+	NodeBinaryPath            string
+	FFmpegPath                string
+	FFprobePath               string
+	LLMMode                   LLMMode
+	LLMProxyURL               string
+	ArkMediaMode              ArkMediaMode
+	ModelAdapterVersion       string
+	ModelProviders            map[ModelProvider]ModelProviderCredential
+	ModelTaskRoutes           map[ModelTask]ModelTaskRoute
+	CloudExchangeBaseURL      string
+	CloudExchangeToken        string
+	GitHubOAuthClientID       string
+	ResendAPIKey              string
+	VerificationEmailFrom     string
+	AccountVerificationSecret string
+	AppVersion                string
+	UpdateChannel             string
+	UpdateManifestURL         string
+	UpdatePublicKeyPath       string
+	UpdateExecutablePath      string
+	PreviousInstallerPath     string
+	DesktopExecutablePath     string
 }
 
 type DesktopResourceManifest struct {
@@ -180,6 +184,8 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 	}
 
 	sqlitePath := envOrDefault("SQLITE_PATH", filepath.Join(dataRoot, "cascade_demoops.db"))
+	resendAPIKey, _ := envWithFallback("CASCADE_RESEND_API_KEY", "RESEND_API_KEY")
+	verificationEmailFrom, _ := envWithFallback("CASCADE_VERIFICATION_EMAIL_FROM", "FROM_EMAIL")
 	cfg := AppRuntimeConfig{
 		Profile:         profile,
 		Environment:     envOrDefault("APP_ENV", defaultEnvironment(profile)),
@@ -196,24 +202,28 @@ func RuntimeConfigFromEnvWithRoot(devRepoRoot string) (AppRuntimeConfig, error) 
 		SidecarPaths: map[string]string{
 			"video-worker": os.Getenv("NODE_WORKER_PATH"),
 		},
-		NodeBinaryPath:        os.Getenv("NODE_BINARY_PATH"),
-		FFmpegPath:            os.Getenv("CASCADE_FFMPEG_PATH"),
-		FFprobePath:           os.Getenv("CASCADE_FFPROBE_PATH"),
-		LLMMode:               llmMode,
-		LLMProxyURL:           strings.TrimSpace(os.Getenv("CASCADE_LLM_PROXY_URL")),
-		ArkMediaMode:          arkMediaMode,
-		ModelAdapterVersion:   ModelAdapterVersion,
-		ModelProviders:        modelProviderCredentialsFromEnv(),
-		ModelTaskRoutes:       modelTaskRoutesFromEnv(),
-		CloudExchangeBaseURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("CASCADE_CLOUD_EXCHANGE_BASE_URL")), "/"),
-		CloudExchangeToken:    strings.TrimSpace(os.Getenv("CASCADE_CLOUD_EXCHANGE_TOKEN")),
-		AppVersion:            strings.TrimSpace(os.Getenv("CASCADE_APP_VERSION")),
-		UpdateChannel:         strings.TrimSpace(os.Getenv("CASCADE_RELEASE_CHANNEL")),
-		UpdateManifestURL:     strings.TrimSpace(os.Getenv("DEMOOPS_UPDATE_MANIFEST_URL")),
-		UpdatePublicKeyPath:   strings.TrimSpace(os.Getenv("DEMOOPS_UPDATE_PUBLIC_KEY_PATH")),
-		UpdateExecutablePath:  strings.TrimSpace(os.Getenv("DEMOOPS_UPDATER_PATH")),
-		PreviousInstallerPath: strings.TrimSpace(os.Getenv("DEMOOPS_PREVIOUS_INSTALLER_PATH")),
-		DesktopExecutablePath: strings.TrimSpace(os.Getenv("DEMOOPS_DESKTOP_EXECUTABLE_PATH")),
+		NodeBinaryPath:            os.Getenv("NODE_BINARY_PATH"),
+		GitHubOAuthClientID:       strings.TrimSpace(os.Getenv("CASCADE_GITHUB_CLIENT_ID")),
+		ResendAPIKey:              strings.TrimSpace(resendAPIKey),
+		VerificationEmailFrom:     strings.TrimSpace(verificationEmailFrom),
+		AccountVerificationSecret: strings.TrimSpace(os.Getenv("CASCADE_ACCOUNT_VERIFICATION_SECRET")),
+		FFmpegPath:                os.Getenv("CASCADE_FFMPEG_PATH"),
+		FFprobePath:               os.Getenv("CASCADE_FFPROBE_PATH"),
+		LLMMode:                   llmMode,
+		LLMProxyURL:               strings.TrimSpace(os.Getenv("CASCADE_LLM_PROXY_URL")),
+		ArkMediaMode:              arkMediaMode,
+		ModelAdapterVersion:       ModelAdapterVersion,
+		ModelProviders:            modelProviderCredentialsFromEnv(),
+		ModelTaskRoutes:           modelTaskRoutesFromEnv(),
+		CloudExchangeBaseURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("CASCADE_CLOUD_EXCHANGE_BASE_URL")), "/"),
+		CloudExchangeToken:        strings.TrimSpace(os.Getenv("CASCADE_CLOUD_EXCHANGE_TOKEN")),
+		AppVersion:                strings.TrimSpace(os.Getenv("CASCADE_APP_VERSION")),
+		UpdateChannel:             strings.TrimSpace(os.Getenv("CASCADE_RELEASE_CHANNEL")),
+		UpdateManifestURL:         strings.TrimSpace(os.Getenv("DEMOOPS_UPDATE_MANIFEST_URL")),
+		UpdatePublicKeyPath:       strings.TrimSpace(os.Getenv("DEMOOPS_UPDATE_PUBLIC_KEY_PATH")),
+		UpdateExecutablePath:      strings.TrimSpace(os.Getenv("DEMOOPS_UPDATER_PATH")),
+		PreviousInstallerPath:     strings.TrimSpace(os.Getenv("DEMOOPS_PREVIOUS_INSTALLER_PATH")),
+		DesktopExecutablePath:     strings.TrimSpace(os.Getenv("DEMOOPS_DESKTOP_EXECUTABLE_PATH")),
 	}
 	applyDesktopResourceManifest(&cfg)
 	return cfg, nil

@@ -1,4 +1,4 @@
-import type { CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
+import type { CodeInvestigationNextAction, CodeInvestigationToolCall, CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
 import type { ProjectWorkspaceView } from "./domain";
 
 export type AgentPipelineStatus = "pending" | "completed" | "attention";
@@ -20,6 +20,33 @@ export type CodeSummaryView = {
   selectors: number;
   sourceDigest: string;
   degraded: boolean;
+  toolBreakdown: Record<string, number>;
+  specializedToolCalls: number;
+  shellRunToolCalls: number;
+  selectedFileRatio: number;
+  searchFileRatio: number;
+  investigationQualitySummary: string;
+  investigationOverreadRisk: string;
+  investigationSourceTextPolicy: string;
+  remainingInvestigationGaps: string[];
+  investigationQualityConfidence: number;
+};
+
+export type CodeInvestigationToolCallView = {
+  tool: string;
+  summary: string;
+  readPolicy?: string;
+  sourceTextPolicy?: string;
+  selectionReason?: string;
+};
+
+export type CodeInvestigationQuestionView = {
+  id: string;
+  question: string;
+  status?: string;
+  summary?: string;
+  toolCalls: CodeInvestigationToolCallView[];
+  nextActions?: CodeInvestigationNextAction[];
 };
 
 export function updateWorkspaceInputs(
@@ -31,24 +58,33 @@ export function updateWorkspaceInputs(
     targetAudience?: string;
     forbiddenPagesText?: string;
     forbiddenDataText?: string;
+    gitRepoURL?: string;
   },
 ): ProjectWorkspaceView {
   const productURL = patch.productURL ?? workspace.productURL;
   const targetAudience = patch.targetAudience ?? workspace.targetAudience;
   const existingRepositories = workspace.inputBundle.repositories ?? [];
   const existingLocalRepository = existingRepositories.find((repo) => repo.kind === "local" || repo.provider === "local" || !repo.provider);
+  const existingGitHubRepository = existingRepositories.find((repo) => repo.kind === "github" || repo.provider === "github");
   const localRepoPath = patch.localRepoPath ?? existingLocalRepository?.local_path ?? "";
+  const gitRepoURL = patch.gitRepoURL ?? existingGitHubRepository?.url ?? "";
   const rawUserPrompt = patch.rawUserPrompt ?? workspace.inputBundle.raw_user_prompt ?? "";
   const forbiddenPages = patch.forbiddenPagesText !== undefined ? splitLines(patch.forbiddenPagesText) : workspace.planReview.forbiddenPages;
   const existingForbiddenData = Array.isArray(workspace.inputBundle.metadata?.forbidden_data) ? workspace.inputBundle.metadata.forbidden_data.filter(isString) : undefined;
   const forbiddenData = patch.forbiddenDataText !== undefined ? splitLines(patch.forbiddenDataText) : existingForbiddenData ?? workspace.scriptDocument?.safety_policy.forbidden_data ?? ["客户邮箱", "API Key", "访问令牌"];
   let repositories = existingRepositories;
+  if (patch.gitRepoURL !== undefined) {
+    repositories = existingRepositories.filter((repo) => !(repo.kind === "github" || repo.provider === "github"));
+    if (gitRepoURL) {
+      repositories = [...repositories, { url: gitRepoURL, provider: "github", read_only: true, primary: false }];
+    }
+  }
   if (patch.localRepoPath !== undefined) {
-    repositories = existingRepositories.filter((repo) => !(repo.kind === "local" || repo.provider === "local" || (!repo.provider && repo.local_path)));
+    repositories = repositories.filter((repo) => !(repo.kind === "local" || repo.provider === "local" || (!repo.provider && repo.local_path)));
     if (localRepoPath) {
       repositories = [
         ...repositories,
-        { ...(existingLocalRepository ?? { kind: "local", provider: "local", read_only: true, primary: repositories.length === 0 }), local_path: localRepoPath, kind: "local", provider: "local", read_only: true, primary: repositories.length === 0 },
+        { ...(existingLocalRepository ?? { provider: "local", read_only: true, primary: repositories.length === 0 }), local_path: localRepoPath, provider: "local", read_only: true, primary: repositories.length === 0 },
       ];
     }
   }
@@ -71,6 +107,9 @@ export function updateWorkspaceInputs(
       if (source.kind === "local_repo") {
         return { ...source, status: localRepoPath ? "ready" : "needs_attention", detail: localRepoPath ? `本地项目目录：${localRepoPath}` : "未提供本地项目目录，可使用需求和页面材料降级生成。" };
       }
+      if (source.kind === "github_repo") {
+        return { ...source, status: gitRepoURL ? "ready" : "needs_attention", detail: gitRepoURL ? `GitHub 仓库已配置：${redactRepositoryURL(gitRepoURL)}` : "未提供 GitHub 仓库 URL，可继续使用本地目录或其他材料。" };
+      }
       return source;
     }),
     planReview: {
@@ -92,6 +131,12 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
   const snapshots = workspace.understandingReport?.code_snapshots ?? [];
   const architecture = workspace.projectIntelligence?.architecture;
   const fileCount = snapshots.reduce((total, snapshot) => total + (snapshot.file_count ?? 0), 0);
+  const quality = snapshots.find((snapshot) => snapshot.investigation_quality)?.investigation_quality;
+  const trace = snapshots.find((snapshot) => snapshot.investigation_trace)?.investigation_trace;
+  const toolBreakdown = (trace?.tool_calls ?? []).reduce<Record<string, number>>((counts, call) => {
+    counts[call.tool] = (counts[call.tool] ?? 0) + 1;
+    return counts;
+  }, {});
   return {
     fileCount,
     frameworks: unique([...(architecture?.frameworks ?? []), ...snapshots.flatMap((snapshot) => snapshot.frameworks ?? [])]),
@@ -100,7 +145,32 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
     selectors: snapshots.reduce((total, snapshot) => total + (snapshot.selectors?.length ?? 0), 0),
     sourceDigest: workspace.projectIntelligence?.source_digest_sha256 ?? firstSourceDigest(snapshots, workspace.understandingReport?.source_digest_sha256),
     degraded: hasRepoInput(workspace) && snapshots.length > 0 && fileCount === 0,
+    toolBreakdown,
+    specializedToolCalls: quality?.specialized_tool_call_count ?? 0,
+    shellRunToolCalls: quality?.shell_run_tool_call_count ?? 0,
+    selectedFileRatio: quality?.selected_file_ratio ?? 0,
+    searchFileRatio: quality?.search_file_ratio ?? 0,
+    investigationQualitySummary: quality?.summary ?? trace?.summary ?? "",
+    investigationOverreadRisk: quality?.overread_risk ?? "",
+    investigationSourceTextPolicy: quality?.source_text_policy ?? "",
+    remainingInvestigationGaps: quality?.remaining_gaps ?? [],
+    investigationQualityConfidence: quality?.confidence ?? 0,
   };
+}
+
+export function codeInvestigationQuestionsFromWorkspace(workspace: ProjectWorkspaceView): CodeInvestigationQuestionView[] {
+  const snapshot = (workspace.understandingReport?.code_snapshots ?? []).find((item) => item.investigation_trace);
+  const trace = snapshot?.investigation_trace;
+  if (!trace?.questions?.length) return [];
+  const calls = new Map((trace.tool_calls ?? []).map((call) => [call.id, call]));
+  return trace.questions.map((question) => ({
+    id: question.id,
+    question: question.question,
+    ...(question.status ? { status: question.status } : {}),
+    ...(question.evidence_summary ? { summary: question.evidence_summary } : {}),
+    toolCalls: (question.tool_call_ids ?? []).map((id) => calls.get(id)).filter((call): call is CodeInvestigationToolCall => Boolean(call)).map(investigationToolCallView),
+    ...(question.next_actions?.length ? { nextActions: question.next_actions } : {}),
+  }));
 }
 
 export function agentPipelineItems(workspace: ProjectWorkspaceView): AgentPipelineItem[] {
@@ -204,6 +274,9 @@ function codeReaderStatus(workspace: ProjectWorkspaceView, summary: CodeSummaryV
   if (summary.degraded) {
     return "attention";
   }
+  if (summary.investigationOverreadRisk === "high") {
+    return "attention";
+  }
   return summary.fileCount > 0 || workspace.understandingReport?.code_snapshots?.length ? "completed" : "pending";
 }
 
@@ -228,6 +301,25 @@ function domainsFromURL(productURL: string, fallback: string[]): string[] {
     return unique(host ? [host, ...fallback] : fallback);
   } catch {
     return fallback;
+  }
+}
+
+function investigationToolCallView(call: CodeInvestigationToolCall): CodeInvestigationToolCallView {
+  return {
+    tool: call.tool,
+    summary: call.output_summary ?? call.purpose ?? "bounded tool call completed",
+    ...(call.read_policy ? { readPolicy: call.read_policy } : {}),
+    ...(call.source_text_policy ? { sourceTextPolicy: call.source_text_policy } : {}),
+    ...(call.selection_reason ? { selectionReason: call.selection_reason } : {}),
+  };
+}
+
+function redactRepositoryURL(value: string): string {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.host}${parsed.pathname}`;
+  } catch {
+    return "已配置";
   }
 }
 

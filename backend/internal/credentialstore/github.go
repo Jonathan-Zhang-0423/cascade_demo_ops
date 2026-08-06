@@ -8,6 +8,7 @@ import (
 )
 
 const githubCredentialTarget = "CascadeDemoOps/GitHub"
+const githubOAuthCredentialTarget = "CascadeDemoOps/GitHubOAuth"
 
 func modelCredentialTarget(provider string) (string, error) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -110,4 +111,16 @@ func DeleteGitHubToken() error {
 func GitHubTokenConfigured() bool {
 	token, err := ReadGitHubToken()
 	return err == nil && token != ""
+}
+
+func StoreGitHubOAuthToken(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" || len(token) > 4096 || strings.ContainsAny(token, "\r\n\x00") {
+		return errors.New("GitHub OAuth token has an invalid format")
+	}
+	return storeSecret(githubOAuthCredentialTarget, "oauth", []byte(token))
+}
+
+func DeleteGitHubOAuthToken() error {
+	return deleteSecret(githubOAuthCredentialTarget)
 }

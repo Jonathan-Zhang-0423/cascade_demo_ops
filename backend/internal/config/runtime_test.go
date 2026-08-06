@@ -96,6 +96,20 @@ func TestRuntimeConfigHonorsEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigAcceptsConventionalResendEnvAliases(t *testing.T) {
+	t.Setenv("CASCADE_RESEND_API_KEY", "")
+	t.Setenv("CASCADE_VERIFICATION_EMAIL_FROM", "")
+	t.Setenv("RESEND_API_KEY", "resend-alias-key")
+	t.Setenv("FROM_EMAIL", "Cascade AI <noreply@cascadeai.co>")
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ResendAPIKey != "resend-alias-key" || cfg.VerificationEmailFrom != "Cascade AI <noreply@cascadeai.co>" {
+		t.Fatalf("Resend aliases were not loaded: key=%t from=%q", cfg.ResendAPIKey != "", cfg.VerificationEmailFrom)
+	}
+}
+
 func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
 	clearModelProviderEnv(t)
 	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))

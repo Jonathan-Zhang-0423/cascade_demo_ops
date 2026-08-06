@@ -29,6 +29,8 @@ type Service struct {
 	flow            *orchestrator.CascadeFlow
 	states          store.StateStore
 	assistantStore  store.AssistantStore
+	accounts        *accountService
+	activity        *projectActivityStore
 	assistantMu     sync.Mutex
 	controlPlaneMu  sync.RWMutex
 	controlPlaneURL string
@@ -107,6 +109,8 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		flow:           flow,
 		states:         states,
 		assistantStore: assistantStoreForRuntime(runtime),
+		accounts:       newAccountService(runtime, accountStoreForRuntime(runtime)),
+		activity:       newProjectActivityStore(filepath.Join(runtime.DataRoot, "project_activity")),
 		layout:         storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
 		exchange:       newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
 		runningTasks:   map[string]context.CancelFunc{},
@@ -156,6 +160,13 @@ func assistantStoreForRuntime(runtime config.AppRuntimeConfig) store.AssistantSt
 		return store.NewMemoryAssistantStore()
 	}
 	return store.NewFileAssistantStore(filepath.Join(runtime.DataRoot, "assistant_sessions"))
+}
+
+func accountStoreForRuntime(runtime config.AppRuntimeConfig) store.AccountStore {
+	if strings.TrimSpace(runtime.DataRoot) == "" {
+		return store.NewMemoryAccountStore()
+	}
+	return store.NewFileAccountStore(filepath.Join(runtime.DataRoot, "account", "account.json"))
 }
 
 // SetBrowserAgentOutcomeVerifier installs the Server-side Validation Agent
@@ -667,6 +678,7 @@ func (s *Service) GetExecutionPackageDebugView(ctx context.Context, orgID string
 }
 
 func (s *Service) CompleteExecutionPackageWithResult(ctx context.Context, orgID string, exchangePackageID string, result model.RecordingResultPackage) (model.ExecutionPackageStatusResponse, error) {
+	pkg, _ := s.exchange.PayloadSnapshot(ctx, orgID, exchangePackageID)
 	status, err := s.exchange.CompleteWithRecordingResult(ctx, orgID, exchangePackageID, result)
 	if err != nil {
 		return model.ExecutionPackageStatusResponse{}, err
@@ -676,6 +688,19 @@ func (s *Service) CompleteExecutionPackageWithResult(ctx context.Context, orgID 
 	materialization, _ := s.MaterializeEditorSessionFromResultPackage(ctx, result)
 	if status.ResultSummary != nil && status.ResultSummary.Acceptance != nil {
 		status.ResultSummary.Acceptance.EditorMaterialized = materialization.Ready
+	}
+	if pkg.ProjectID != "" {
+		activityStatus := model.ProjectActivityCompleted
+		activityTitle := "视频已准备好，可以开始审核"
+		if !materialization.Ready {
+			activityStatus = model.ProjectActivityFailed
+			activityTitle = "编辑素材尚未准备完成"
+		}
+		_, _ = s.AppendProjectActivity(ctx, model.ProjectActivityEvent{
+			ProjectID: pkg.ProjectID, RunID: status.CloudJobID, Mode: model.ProjectCanvasModeEditor,
+			Kind: "editor_materialization", Status: activityStatus, Title: activityTitle,
+			Detail: materialization.Message, EditorSessionID: materialization.SessionID,
+		})
 	}
 	return status, nil
 }

@@ -61,6 +61,7 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 	var gotPath string
 	var gotAuth string
 	var gotModel string
+	var gotTemperature float64
 	var gotResponseFormat map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -70,6 +71,7 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 			t.Fatal(err)
 		}
 		gotModel, _ = payload["model"].(string)
+		gotTemperature, _ = payload["temperature"].(float64)
 		gotResponseFormat, _ = payload["response_format"].(map[string]any)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"真实模型摘要\"}"}}],"usage":{"prompt_tokens":12,"completion_tokens":6}}`))
 	}))
@@ -80,10 +82,11 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 		Summary string `json:"summary"`
 	}
 	trace, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{
-		System:     "system",
-		User:       "user",
-		SchemaName: "TestSchema",
-		MaxTokens:  100,
+		System:      "system",
+		User:        "user",
+		SchemaName:  "TestSchema",
+		MaxTokens:   100,
+		Temperature: 0.1,
 	}, &out)
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +96,9 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 	}
 	if gotResponseFormat["type"] != "json_object" {
 		t.Fatalf("expected json_object response_format, got %+v", gotResponseFormat)
+	}
+	if gotTemperature != 1 {
+		t.Fatalf("expected Kimi K2.7 compatibility temperature 1, got %v", gotTemperature)
 	}
 	if out.Summary != "真实模型摘要" {
 		t.Fatalf("summary = %q", out.Summary)
@@ -142,12 +148,14 @@ func TestRouterMiniMaxUsesIndependentAdapterShape(t *testing.T) {
 
 func TestRouterGLMDisablesThinkingForStructuredOutput(t *testing.T) {
 	var gotThinking map[string]any
+	var gotTemperature float64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
 		gotThinking, _ = payload["thinking"].(map[string]any)
+		gotTemperature, _ = payload["temperature"].(float64)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"GLM 摘要\"}"}}]}`))
 	}))
 	defer server.Close()
@@ -162,12 +170,15 @@ func TestRouterGLMDisablesThinkingForStructuredOutput(t *testing.T) {
 	var out struct {
 		Summary string `json:"summary"`
 	}
-	_, err := router.GenerateJSON(context.Background(), config.ModelTaskCodeReading, JSONRequest{System: "s", User: "u"}, &out)
+	_, err := router.GenerateJSON(context.Background(), config.ModelTaskCodeReading, JSONRequest{System: "s", User: "u", Temperature: 0.1}, &out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gotThinking["type"] != "disabled" {
 		t.Fatalf("expected GLM thinking disabled, got %+v", gotThinking)
+	}
+	if gotTemperature != 0.1 {
+		t.Fatalf("expected GLM temperature to remain 0.1, got %v", gotTemperature)
 	}
 }
 

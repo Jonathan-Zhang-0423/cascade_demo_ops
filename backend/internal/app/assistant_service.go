@@ -18,6 +18,7 @@ import (
 	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
+	"cascade-demoops/backend/internal/store"
 )
 
 var (
@@ -93,9 +94,22 @@ func (s *Service) CreateAssistantSession(ctx context.Context, request model.Assi
 	if strings.TrimSpace(request.ScopeKey) == "" {
 		return nil, errors.New("assistant scope key is required")
 	}
+	if request.CreateProjectOnFirstTurn {
+		if request.Surface != model.AssistantSurfaceProjects || strings.TrimSpace(request.ProjectID) == "" {
+			return nil, errors.New("new project conversations require a projects surface and project ID")
+		}
+		if request.ScopeKey != "project_"+request.ProjectID {
+			return nil, errors.New("new project conversations require a canonical project scope")
+		}
+	}
 	id := assistantID(request.Surface, request.ScopeKey)
 	if existing, err := s.assistantStore.Load(ctx, id); err == nil {
-		return normalizeAssistantSession(existing), nil
+		messageCount := len(existing.Messages)
+		normalized := normalizeAssistantSession(existing)
+		if len(normalized.Messages) != messageCount {
+			_ = s.assistantStore.Save(ctx, normalized)
+		}
+		return normalized, nil
 	}
 	now := time.Now().UTC()
 	draft := newConfigurationDraft()
@@ -125,13 +139,15 @@ func (s *Service) CreateAssistantSession(ctx context.Context, request model.Assi
 		ID: id, Context: request, Status: "waiting_for_user",
 		ActiveWorkstation: activeWorkstation,
 		WorkstationTitle:  workstationTitle, WorkstationStatus: workstationStatus,
-		Configuration: draft,
-		Messages: []model.AssistantMessage{{
-			ID: "welcome", Role: "agent", Kind: "answer",
-			Text:      "告诉我你想为哪个产品制作演示、面向谁，以及必须展示什么。我会先整理成可审阅的 configuration，不会自动上传或执行。",
-			CreatedAt: now,
-		}},
+		Configuration:        draft,
+		Messages:             []model.AssistantMessage{},
 		ProcessedIdempotency: map[string]string{},
+	}
+	if question := nextAssistantQuestion(draft); question != nil {
+		session.PendingQuestion = question
+		session.Messages = append(session.Messages, model.AssistantMessage{ID: "welcome", Role: "agent", Kind: "answer", Text: question.Prompt, Question: question, CreatedAt: now})
+	} else {
+		session.Messages = append(session.Messages, model.AssistantMessage{ID: "welcome", Role: "agent", Kind: "answer", Text: "项目上下文已恢复。告诉我你想检查、调整或继续哪一步。", CreatedAt: now})
 	}
 	refreshAssistantNextAction(session)
 	return session, s.assistantStore.Save(ctx, session)
@@ -142,7 +158,136 @@ func (s *Service) GetAssistantSession(ctx context.Context, sessionID string) (*m
 	if err != nil {
 		return nil, err
 	}
-	return normalizeAssistantSession(session), nil
+	messageCount := len(session.Messages)
+	normalized := normalizeAssistantSession(session)
+	if len(normalized.Messages) != messageCount {
+		_ = s.assistantStore.Save(ctx, normalized)
+	}
+	return normalized, nil
+}
+
+func (s *Service) ensureAssistantDraftProject(ctx context.Context, session *model.AssistantSession, message string, now time.Time) error {
+	if session == nil || !session.Context.CreateProjectOnFirstTurn {
+		return nil
+	}
+	projectID := strings.TrimSpace(session.Context.ProjectID)
+	if projectID == "" {
+		return errors.New("new project conversations require a project ID")
+	}
+	if state, err := s.LoadProject(ctx, projectID); err == nil {
+		if state == nil || state.ProjectContext == nil {
+			return errors.New("conversation project state is incomplete")
+		}
+		if session.Configuration.ProjectName == "" {
+			session.Configuration.ProjectName = state.ProjectContext.Name
+			refreshConfigurationMetadata(&session.Configuration)
+		}
+		return nil
+	} else if !errors.Is(err, store.ErrStateNotFound) {
+		return err
+	}
+
+	name := assistantDraftProjectName(message)
+	session.Configuration.ProjectName = name
+	refreshConfigurationMetadata(&session.Configuration)
+	session.Context.ProjectName = name
+	project := &model.ProjectContext{
+		ID:                 projectID,
+		SchemaVersion:      model.ProjectContextSchemaVersion,
+		Mode:               model.AppModeDesktop,
+		Name:               name,
+		ProductDescription: message,
+		Inputs:             &model.ProjectInputBundle{RawUserPrompt: message},
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	return s.states.Save(ctx, &orchestrator.CascadeState{
+		ProjectID:      projectID,
+		CurrentNode:    orchestrator.NodeInputCtx,
+		Status:         orchestrator.FlowStatusCreated,
+		ProjectContext: project,
+	})
+}
+
+func assistantDraftProjectName(message string) string {
+	if rawURL := firstHTTPURL(message); rawURL != "" {
+		if parsed, err := url.Parse(rawURL); err == nil && parsed.Hostname() != "" {
+			host := strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
+			parts := strings.Split(host, ".")
+			if len(parts) > 0 && parts[0] != "" {
+				return strings.ToUpper(parts[0][:1]) + parts[0][1:] + " demo"
+			}
+		}
+	}
+	cleaned := strings.Join(strings.Fields(strings.ReplaceAll(message, "\n", " ")), " ")
+	for _, prefix := range []string{"please ", "create a demo for ", "create a product demo for ", "make a demo for ", "make a product demo for ", "show "} {
+		if strings.HasPrefix(strings.ToLower(cleaned), prefix) {
+			cleaned = strings.TrimSpace(cleaned[len(prefix):])
+			break
+		}
+	}
+	words := strings.Fields(cleaned)
+	if len(words) > 8 {
+		words = words[:8]
+	}
+	cleaned = strings.Trim(strings.Join(words, " "), " .,:;!?-—")
+	if cleaned == "" {
+		return "New demo project"
+	}
+	runes := []rune(cleaned)
+	if len(runes) > 56 {
+		cleaned = strings.TrimSpace(string(runes[:56]))
+	}
+	return cleaned
+}
+
+func assistantConversationDraft(state *orchestrator.CascadeState) bool {
+	return state != nil && state.Status == orchestrator.FlowStatusCreated && state.ProjectIntelligence == nil && state.UnderstandingReport == nil && state.WorkflowGraph == nil && state.ExecutableScriptBundle == nil && state.DesktopCloudRun == nil
+}
+
+func (s *Service) assistantDraftMayAutosave(ctx context.Context, session *model.AssistantSession) bool {
+	if session == nil || !session.Context.CreateProjectOnFirstTurn || session.Configuration.Confirmed || session.Context.ProjectID == "" {
+		return false
+	}
+	state, err := s.LoadProject(ctx, session.Context.ProjectID)
+	return err == nil && assistantConversationDraft(state)
+}
+
+func (s *Service) syncAssistantDraftProject(ctx context.Context, session *model.AssistantSession, now time.Time) error {
+	if session == nil || !session.Context.CreateProjectOnFirstTurn || session.Context.ProjectID == "" {
+		return nil
+	}
+	state, err := s.LoadProject(ctx, session.Context.ProjectID)
+	if err != nil {
+		return err
+	}
+	if !assistantConversationDraft(state) || state.ProjectContext == nil {
+		return nil
+	}
+	project := state.ProjectContext
+	if session.Configuration.ProjectName != "" {
+		project.Name = session.Configuration.ProjectName
+		session.Context.ProjectName = project.Name
+	}
+	project.ProductURL = session.Configuration.ProductURL
+	if session.Configuration.Objective != "" {
+		project.ProductDescription = session.Configuration.Objective
+	}
+	project.TargetAudience = session.Configuration.TargetAudience
+	project.BrandTone = session.Configuration.BrandTone
+	project.MustShow = append([]string{}, session.Configuration.MustShow...)
+	project.MustNotShow = append([]string{}, session.Configuration.MustNotShow...)
+	project.ForbiddenPages = append([]string{}, session.Configuration.ForbiddenPages...)
+	project.ForbiddenData = append([]string{}, session.Configuration.ForbiddenData...)
+	if project.Inputs == nil {
+		project.Inputs = &model.ProjectInputBundle{}
+	}
+	if project.Inputs.Metadata == nil {
+		project.Inputs.Metadata = map[string]any{}
+	}
+	project.Inputs.Metadata["target_duration_sec"] = session.Configuration.TargetDurationSec
+	project.UpdatedAt = now
+	return s.states.Save(ctx, state)
 }
 
 func (s *Service) SubmitAssistantTurn(ctx context.Context, sessionID string, request model.AssistantTurnRequest) (*model.AssistantSession, error) {
@@ -165,23 +310,80 @@ func (s *Service) SubmitAssistantTurn(ctx context.Context, sessionID string, req
 		}
 	}
 	now := time.Now().UTC()
+	if err := s.ensureAssistantDraftProject(ctx, session, message, now); err != nil {
+		return nil, err
+	}
 	session.Status = "thinking"
 	session.Messages = append(session.Messages, model.AssistantMessage{
 		ID: fmt.Sprintf("user_%d", now.UnixNano()), Role: "user", Kind: "answer", Text: message, CreatedAt: now,
 	})
+	if resolved, resolveErr := s.resolveNaturalAssistantDecision(ctx, session, message, request.IdempotencyKey, now); resolved || resolveErr != nil {
+		return session, resolveErr
+	}
+	if session.Context.ProjectID != "" {
+		_, _ = s.AppendProjectActivity(ctx, model.ProjectActivityEvent{
+			ProjectID: session.Context.ProjectID, RunID: session.ID, Mode: model.ProjectCanvasModeAct,
+			Kind: "assistant_action", Status: model.ProjectActivityRunning,
+			Title: "Cascade 正在整理下一步", Detail: "正在读取已批准的项目上下文并准备安全动作摘要。",
+		})
+	}
 	workflow := s.assistantWorkflowProjection(ctx, *session)
 	response := s.generateAssistantResponse(ctx, session.Configuration, workflow, message)
-	if len(request.SelectedSources) > 0 || len(request.CredentialRefs) > 0 {
+	if session.PendingQuestion != nil {
+		questionPatch := applyQuestionAnswer(model.ProjectConfigurationPatch{}, *session.PendingQuestion, message)
+		if session.PendingQuestion.Field == "productURL" && strings.TrimSpace(message) == firstHTTPURL(message) {
+			// A bare URL answers the URL question; it is not an objective or project name.
+			response.Patch = questionPatch
+		} else {
+			response.Patch = applyQuestionAnswer(response.Patch, *session.PendingQuestion, message)
+		}
+		response.HasPatch = response.HasPatch || !configurationPatchEmpty(response.Patch)
+		if response.HasPatch {
+			response.Reply = "Here’s what I understood from your answer. Confirm it, or tell me what to change."
+		}
+	}
+	trustedSelection := len(request.SelectedSources) > 0 || len(request.CredentialRefs) > 0
+	if trustedSelection {
 		patch, patchErr := s.patchForSafeSelections(session.Configuration, request.SelectedSources, request.CredentialRefs)
 		if patchErr != nil {
 			return nil, patchErr
 		}
 		response = assistantModelResponse{Reply: "安全选择已完成。请确认将 opaque refs 写入 configuration；文件内容和凭据不会进入聊天。", Patch: patch, HasPatch: true}
 	}
+	var responseQuestion *model.AssistantQuestion
+	autoSaved := response.HasPatch && !trustedSelection && s.assistantDraftMayAutosave(ctx, session)
+	if autoSaved {
+		next, patchErr := applyConfigurationPatch(session.Configuration, response.Patch)
+		if patchErr != nil {
+			return nil, patchErr
+		}
+		session.Configuration = next
+		response.Patch = model.ProjectConfigurationPatch{}
+		response.HasPatch = false
+		workflow = s.assistantWorkflowProjection(ctx, *session)
+		if err := s.syncAssistantDraftProject(ctx, session, now); err != nil {
+			return nil, err
+		}
+		session.PendingQuestion = nil
+		if next.Readiness == "ready" {
+			response.Reply = "I have enough context to prepare this project. Would you like me to continue?"
+		} else if question := nextAssistantQuestion(next); question != nil {
+			responseQuestion = question
+			session.PendingQuestion = question
+			response.Reply = question.Prompt
+		} else if containsAssistantString(next.MissingFields, "sources") {
+			response.Reply = "Where should I learn about the product from? You can choose a local folder or a GitHub repository."
+			response.SuggestedActions = mergeAssistantActions([]assistantSuggestedAction{{
+				Kind: model.AssistantProposalSelectProjectSource, Title: "Choose a product source",
+				Description:       "Select a local folder or GitHub repository. Cascade stores only a safe reference in the conversation.",
+				TargetWorkstation: model.AssistantWorkstationOverview,
+			}}, response.SuggestedActions)
+		}
+	}
 	proposals := s.proposalsFromModelResponse(session, workflow, response, now)
 	text := strings.TrimSpace(redactAssistantText(response.Reply))
 	if text == "" {
-		text = "我已整理这轮信息。请检查字段变更；确认后才会写入项目 configuration。"
+		text = "I’ve organized what you shared. Review the proposed update before it is saved."
 	}
 	kind := "answer"
 	if len(proposals) > 0 {
@@ -196,7 +398,7 @@ func (s *Service) SubmitAssistantTurn(ctx context.Context, sessionID string, req
 		ID: fmt.Sprintf("agent_%d", now.UnixNano()+1), Role: "agent", Kind: kind, Text: text,
 		GenerationSource: response.GenerationSource, ModelProvider: response.ModelProvider,
 		ModelName: response.ModelName, FallbackReason: response.FallbackReason,
-		CreatedAt: now, TargetWorkstation: model.AssistantWorkstationOverview, Proposals: proposals,
+		CreatedAt: now, TargetWorkstation: model.AssistantWorkstationOverview, Proposals: proposals, Question: responseQuestion,
 	})
 	refreshAssistantNextAction(session)
 	event := model.AssistantEvent{ID: fmt.Sprintf("%020d", now.UnixNano()), SessionID: session.ID, Type: "message", Text: text, CreatedAt: now}
@@ -208,6 +410,19 @@ func (s *Service) SubmitAssistantTurn(ctx context.Context, sessionID string, req
 	refreshAssistantNextAction(session)
 	if err := s.assistantStore.Save(ctx, session); err != nil {
 		return nil, err
+	}
+	if session.Context.ProjectID != "" {
+		activityStatus := model.ProjectActivityCompleted
+		title := "Cascade 已完成这一步"
+		if len(proposals) > 0 {
+			activityStatus = model.ProjectActivityWaitingForApproval
+			title = "等待你的确认"
+		}
+		_, _ = s.AppendProjectActivity(ctx, model.ProjectActivityEvent{
+			ProjectID: session.Context.ProjectID, RunID: session.ID, Mode: model.ProjectCanvasModeAct,
+			Kind: "assistant_action", Status: activityStatus, Title: title,
+			Detail: "确认选项仅显示在左侧对话中。",
+		})
 	}
 	return session, nil
 }
@@ -331,7 +546,7 @@ func (s *Service) generateAssistantResponse(ctx context.Context, draft model.Pro
 	workflowJSON, _ := json.Marshal(workflow)
 	var generated assistantModelResponse
 	trace, err := s.llm.GenerateJSON(ctx, config.ModelTaskPlanning, llm.JSONRequest{
-		System:     "你是 DemoOps 项目配置与流程引导 Agent。只提取用户明确提供的信息，不猜测凭据、路径或业务事实。你只能返回 configuration patch 和受限建议动作，不能执行命令、访问 URL、审批上传、下载成品或提交审核。open_workstation 只能指向 availableWorkstations 中的值。不要在 reply 中复述密码、token、完整本地路径、源码、执行包内容或错误日志。sources[].connected=true 表示该来源已通过安全选择器连接；其真实 ref 和路径被有意隐藏，不得因此要求用户再次选择来源或补充 ref。",
+		System:     "你是 DemoOps 项目配置与流程引导 Agent。只提取用户明确提供的信息，不猜测凭据、路径或业务事实。根据用户已经提供的产品与演示目标，为 projectName 生成简洁、具体的 3–6 个词标题；随着上下文变清晰可以改进标题，但不得加入用户没有表达的业务事实。你只能返回 configuration patch 和受限建议动作，不能执行命令、访问 URL、审批上传、下载成品或提交审核。open_workstation 只能指向 availableWorkstations 中的值。不要在 reply 中复述密码、token、完整本地路径、源码、执行包内容或错误日志。sources[].connected=true 表示该来源已通过安全选择器连接；其真实 ref 和路径被有意隐藏，不得因此要求用户再次选择来源或补充 ref。",
 		User:       fmt.Sprintf("当前 configuration：%s\n当前 workflow：%s\n用户消息：%s", configurationJSON, workflowJSON, message),
 		SchemaName: "demoops_assistant_configuration_proposal_v1", MaxTokens: 1800, Temperature: 0.1,
 		ResponseHint: "reply:string, hasPatch:boolean, patch:ProjectConfigurationPatch, missingFields:string[], suggestedActions:{kind,title,description,targetWorkstation}[]。kind 只能是 configuration_patch/select_local_project/connect_github/attach_requirement_document/attach_brand_asset/store_demo_credential/confirm_configuration/start_local_analysis/open_workstation/continue_with_webpage_evidence。Sources 不能包含本地绝对路径或 secret。",
@@ -404,15 +619,26 @@ func (s *Service) assistantWorkflowProjection(ctx context.Context, session model
 		return workflow
 	}
 	workflow.ProjectAttached = true
-	workflow.Stage = "local_analysis"
-	workflow.Status = "analysis_started"
-	workflow.AvailableWorkstations = append(workflow.AvailableWorkstations, model.AssistantWorkstationEvidence)
-	workflow.RecommendedWorkstation = model.AssistantWorkstationEvidence
 	state, err := s.LoadProject(ctx, projectID)
 	if err != nil || state == nil {
 		workflow.Status = "project_state_unavailable"
 		return workflow
 	}
+	if session.Context.CreateProjectOnFirstTurn && !session.Configuration.Confirmed {
+		workflow.Stage = "configuration"
+		workflow.Status = "configuration_changed"
+		if assistantConversationDraft(state) {
+			workflow.Status = "gathering_project_context"
+		}
+		if session.Configuration.Readiness == "ready" {
+			workflow.Status = "waiting_for_configuration_confirmation"
+		}
+		return workflow
+	}
+	workflow.Stage = "local_analysis"
+	workflow.Status = "analysis_started"
+	workflow.AvailableWorkstations = appendAssistantWorkstation(workflow.AvailableWorkstations, model.AssistantWorkstationEvidence)
+	workflow.RecommendedWorkstation = model.AssistantWorkstationEvidence
 	if state.ProjectIntelligence != nil || state.UnderstandingReport != nil || state.WorkflowGraph != nil {
 		workflow.Stage = "plan_review"
 		workflow.Status = "local_analysis_ready"
@@ -498,7 +724,7 @@ func assistantFallbackResponse(draft model.ProjectConfigurationDraft, message st
 	objective := ""
 	if match := assistantObjectivePattern.FindStringSubmatch(message); len(match) > 1 {
 		objective = strings.TrimSpace(match[1])
-	} else if strings.TrimSpace(draft.Objective) == "" && len(deterministicAssistantActions(message)) == 0 {
+	} else if strings.TrimSpace(draft.Objective) == "" && (len(deterministicAssistantActions(message)) == 0 || assistantMessageContainsDemoBrief(message)) {
 		objective = strings.TrimSpace(redactAssistantText(message))
 	}
 	if objective != "" && len([]rune(objective)) <= 500 {
@@ -539,9 +765,132 @@ func assistantFallbackResponse(draft model.ProjectConfigurationDraft, message st
 		}
 	}
 	return assistantModelResponse{
-		Reply: "我会把这轮信息整理为 configuration 变更。确认前不会保存，也不会启动分析。",
+		Reply: "I’ll organize that into a clear project update for you to review.",
 		Patch: patch, HasPatch: hasPatch, SuggestedActions: deterministicAssistantActions(message),
 	}
+}
+
+func assistantMessageContainsDemoBrief(message string) bool {
+	normalized := strings.ToLower(message)
+	return (strings.Contains(normalized, "演示") && strings.Contains(normalized, "制作")) ||
+		(strings.Contains(normalized, "demo") && (strings.Contains(normalized, "create") || strings.Contains(normalized, "make")))
+}
+
+func applyQuestionAnswer(patch model.ProjectConfigurationPatch, question model.AssistantQuestion, message string) model.ProjectConfigurationPatch {
+	value := strings.TrimSpace(redactAssistantText(message))
+	if value == "" {
+		return patch
+	}
+	switch question.Field {
+	case "projectName":
+		patch.ProjectName = &value
+	case "productURL":
+		if candidate := firstHTTPURL(value); candidate != "" {
+			patch.ProductURL = &candidate
+		}
+	case "objective":
+		patch.Objective = &value
+	case "targetAudience":
+		patch.TargetAudience = &value
+	}
+	return patch
+}
+
+func nextAssistantQuestion(draft model.ProjectConfigurationDraft) *model.AssistantQuestion {
+	missing := map[string]bool{}
+	for _, field := range draft.MissingFields {
+		missing[field] = true
+	}
+	switch {
+	case missing["productURL"]:
+		return &model.AssistantQuestion{Field: "productURL", Prompt: "Which product should this demo cover? Share the product URL if you have it."}
+	case missing["objective"]:
+		return &model.AssistantQuestion{Field: "objective", Prompt: "What should someone understand or believe after watching this demo?"}
+	case missing["targetAudience"]:
+		return &model.AssistantQuestion{Field: "targetAudience", Prompt: "Who is this demo for?", Suggestions: []string{"Sales teams", "Prospective customers", "New users"}}
+	case missing["projectName"]:
+		return &model.AssistantQuestion{Field: "projectName", Prompt: "What should we call this demo project?"}
+	default:
+		return nil
+	}
+}
+
+func assistantNaturalDecision(message string) string {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	if len([]rune(normalized)) > 40 {
+		return ""
+	}
+	confirm := map[string]bool{"yes": true, "y": true, "confirm": true, "continue": true, "go ahead": true, "approve": true, "ok": true, "okay": true, "确认": true, "继续": true, "可以": true, "好的": true}
+	dismiss := map[string]bool{"no": true, "n": true, "cancel": true, "not now": true, "later": true, "don't": true, "do not": true, "取消": true, "不要": true, "稍后": true}
+	if confirm[normalized] {
+		return "confirmed"
+	}
+	if dismiss[normalized] {
+		return "dismissed"
+	}
+	return ""
+}
+
+func latestAvailableAssistantProposal(session *model.AssistantSession) *model.AssistantProposal {
+	if session == nil {
+		return nil
+	}
+	for messageIndex := len(session.Messages) - 1; messageIndex >= 0; messageIndex-- {
+		for proposalIndex := len(session.Messages[messageIndex].Proposals) - 1; proposalIndex >= 0; proposalIndex-- {
+			proposal := &session.Messages[messageIndex].Proposals[proposalIndex]
+			if proposal.Status == "available" {
+				return proposal
+			}
+		}
+	}
+	return nil
+}
+
+func proposalAcceptsNaturalDecision(kind model.AssistantProposalKind) bool {
+	switch kind {
+	case model.AssistantProposalConfigurationPatch, model.AssistantProposalConfirmConfiguration, model.AssistantProposalStartLocalAnalysis, model.AssistantProposalOpenWorkstation:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) resolveNaturalAssistantDecision(ctx context.Context, session *model.AssistantSession, message, idempotencyKey string, now time.Time) (bool, error) {
+	decision := assistantNaturalDecision(message)
+	proposal := latestAvailableAssistantProposal(session)
+	if decision == "" || proposal == nil || !proposalAcceptsNaturalDecision(proposal.Kind) {
+		return false, nil
+	}
+	var followUp *model.AssistantMessage
+	var err error
+	if decision == "confirmed" {
+		if proposal.BaseVersion != session.Configuration.Version {
+			return true, fmt.Errorf("configuration version conflict: current=%d proposal=%d", session.Configuration.Version, proposal.BaseVersion)
+		}
+		followUp, err = s.executeAssistantProposal(ctx, session, proposal)
+		if err != nil {
+			return true, err
+		}
+	} else {
+		followUp = &model.AssistantMessage{ID: fmt.Sprintf("agent_declined_%d", now.UnixNano()), Role: "agent", Kind: "answer", Text: "No changes were made. Tell me what you’d like to adjust.", CreatedAt: now}
+	}
+	proposal.Status = decision
+	session.PendingQuestion = nil
+	if followUp != nil {
+		session.Messages = append(session.Messages, *followUp)
+		if followUp.Question != nil {
+			session.PendingQuestion = followUp.Question
+		}
+	}
+	refreshAssistantPendingStatus(session)
+	refreshAssistantNextAction(session)
+	event := model.AssistantEvent{ID: fmt.Sprintf("%020d", now.UnixNano()+2), SessionID: session.ID, Type: "proposal", Text: string(proposal.Kind) + ": " + decision, CreatedAt: now}
+	session.Events = append(session.Events, event)
+	session.LastEventID = event.ID
+	if strings.TrimSpace(idempotencyKey) != "" {
+		session.ProcessedIdempotency[idempotencyKey] = event.ID
+	}
+	return true, s.assistantStore.Save(ctx, session)
 }
 
 func deterministicAssistantActions(message string) []assistantSuggestedAction {
@@ -651,7 +1000,7 @@ func (s *Service) proposalsFromModelResponse(session *model.AssistantSession, wo
 	proposals := make([]model.AssistantProposal, 0, len(response.SuggestedActions)+1)
 	hasPatch := response.HasPatch && !configurationPatchEmpty(response.Patch)
 	if hasPatch {
-		proposals = append(proposals, newAssistantProposal(model.AssistantProposalConfigurationPatch, "确认 configuration 变更", "应用本轮提取的字段；不会启动分析或上传。", session.Configuration.Version, now, &response.Patch, ""))
+		proposals = append(proposals, newAssistantProposal(model.AssistantProposalConfigurationPatch, "Use this understanding", "Review what Cascade understood. Applying it updates only the project draft; it does not analyze, execute, or upload anything.", session.Configuration.Version, now, &response.Patch, ""))
 	}
 	for _, action := range response.SuggestedActions {
 		// A configuration patch changes the version. Present client actions on the
@@ -785,11 +1134,15 @@ func (s *Service) CompleteAssistantClientAction(ctx context.Context, sessionID, 
 	session.Configuration = next
 	invalidateAssistantAnalysisContext(session)
 	proposal.Status = "confirmed"
+	session.PendingQuestion = nil
 	proposal.ExecutionResult = map[string]any{"configurationVersion": next.Version, "configurationHash": next.Hash, "clientActionCompleted": true}
 	dismissStaleAssistantProposals(session, proposal.ID, next.Version)
 	now := time.Now().UTC()
 	if followUp := configurationFollowUpMessage(next, now); followUp != nil {
 		session.Messages = append(session.Messages, *followUp)
+		if followUp.Question != nil {
+			session.PendingQuestion = followUp.Question
+		}
 	}
 	refreshAssistantPendingStatus(session)
 	event := model.AssistantEvent{ID: fmt.Sprintf("%020d", now.UnixNano()), SessionID: session.ID, Type: "client_action", Text: string(proposal.Kind) + ": completed", CreatedAt: now}
@@ -879,8 +1232,14 @@ func (s *Service) updateAssistantProposal(ctx context.Context, sessionID, propos
 	proposal.Status = status
 	proposalKind := proposal.Kind
 	proposalKey := proposal.IdempotencyKey
+	if status == "confirmed" {
+		session.PendingQuestion = nil
+	}
 	if followUp != nil {
 		session.Messages = append(session.Messages, *followUp)
+		if followUp.Question != nil {
+			session.PendingQuestion = followUp.Question
+		}
 	}
 	refreshAssistantPendingStatus(session)
 	refreshAssistantNextAction(session)
@@ -921,6 +1280,7 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 		if err != nil {
 			return nil, err
 		}
+		input.ProjectID = firstNonEmptyString(session.Context.ProjectID, session.Configuration.AnalysisProjectID)
 		state, err := s.CreateProject(ctx, input)
 		if err != nil {
 			if state == nil || state.ProjectID == "" {
@@ -1011,7 +1371,7 @@ func invalidateAssistantAnalysisContext(session *model.AssistantSession) {
 	if session == nil {
 		return
 	}
-	session.Context.ProjectID = ""
+	session.Configuration.AnalysisProjectID = ""
 	session.ActiveWorkstation = model.AssistantWorkstationOverview
 	session.WorkstationTitle = assistantWorkstationTitle(model.AssistantWorkstationOverview)
 	session.WorkstationStatus = "Configuration 已变更，等待重新分析"
@@ -1021,17 +1381,24 @@ func configurationFollowUpMessage(next model.ProjectConfigurationDraft, now time
 	if next.Readiness == "ready" {
 		return &model.AssistantMessage{
 			ID: fmt.Sprintf("agent_ready_%d", now.UnixNano()), Role: "agent", Kind: "proposal",
-			Text: "配置已完整。确认后会在本机读取项目并生成三合一执行包草稿，不会上传。", CreatedAt: now,
+			Text: "I have enough context to prepare this project. Would you like me to continue?", CreatedAt: now,
 			TargetWorkstation: model.AssistantWorkstationOverview,
-			Proposals:         []model.AssistantProposal{newAssistantProposal(model.AssistantProposalConfirmConfiguration, "确认配置并生成方案", "锁定当前配置，在本机完成分析和执行包草稿；上传仍需单独审批。", next.Version, now, nil, model.AssistantWorkstationApproval)},
+			Proposals:         []model.AssistantProposal{newAssistantProposal(model.AssistantProposalConfirmConfiguration, "Prepare this project", "Cascade will analyze the approved local context and prepare a reviewable execution draft. Nothing will be uploaded.", next.Version, now, nil, model.AssistantWorkstationApproval)},
+		}
+	}
+	if question := nextAssistantQuestion(next); question != nil {
+		return &model.AssistantMessage{
+			ID: fmt.Sprintf("agent_question_%d", now.UnixNano()), Role: "agent", Kind: "answer",
+			Text: question.Prompt, Question: question, CreatedAt: now,
+			TargetWorkstation: model.AssistantWorkstationOverview,
 		}
 	}
 	if containsAssistantString(next.MissingFields, "sources") {
 		return &model.AssistantMessage{
 			ID: fmt.Sprintf("agent_sources_%d", now.UnixNano()), Role: "agent", Kind: "proposal",
-			Text: "还差一个项目来源。请选择本地目录或 GitHub 仓库；两种方式只会保存安全引用。", CreatedAt: now,
+			Text: "Where should I learn about the product from? You can choose a local folder or a GitHub repository.", CreatedAt: now,
 			TargetWorkstation: model.AssistantWorkstationOverview,
-			Proposals:         []model.AssistantProposal{newAssistantProposal(model.AssistantProposalSelectProjectSource, "选择项目来源", "从本地目录或 GitHub HTTPS 仓库中选择一种。", next.Version, now, nil, model.AssistantWorkstationOverview)},
+			Proposals:         []model.AssistantProposal{newAssistantProposal(model.AssistantProposalSelectProjectSource, "Choose a product source", "Select a local folder or GitHub repository. Cascade stores only a safe reference in the conversation.", next.Version, now, nil, model.AssistantWorkstationOverview)},
 		}
 	}
 	return nil
@@ -1080,8 +1447,12 @@ func refreshAssistantNextAction(session *model.AssistantSession) {
 		return
 	}
 	if session.Configuration.Readiness == "ready" {
+		session.PendingQuestion = nil
 		session.NextAction = model.AssistantNextAction{Kind: "confirm_configuration", Title: "确认配置并生成方案", Description: "在本机分析项目并生成三合一草稿，不会上传。", PrimaryLabel: "确认并生成方案", TargetWorkstation: model.AssistantWorkstationOverview, RequiresUserAction: true}
 		return
+	}
+	if question := nextAssistantQuestion(session.Configuration); question != nil {
+		session.PendingQuestion = question
 	}
 	session.NextAction = model.AssistantNextAction{Kind: "provide_configuration", Title: "补全演示目标", Description: "告诉 Cascade 产品地址、目标受众和必须展示的业务流程。", PrimaryLabel: "继续对话", TargetWorkstation: model.AssistantWorkstationOverview, RequiresUserAction: true, MissingFields: append([]string(nil), session.Configuration.MissingFields...)}
 }
@@ -1435,8 +1806,33 @@ func normalizeAssistantSession(session *model.AssistantSession) *model.Assistant
 	}
 	dismissDuplicateAssistantProposals(session)
 	refreshConfigurationMetadata(&session.Configuration)
+	if session.Configuration.Readiness != "ready" && latestAvailableAssistantProposal(session) == nil {
+		session.PendingQuestion = nextAssistantQuestion(session.Configuration)
+		if session.PendingQuestion != nil && assistantQuestionNeedsTurn(session, session.PendingQuestion.Field) {
+			now := time.Now().UTC()
+			session.Messages = append(session.Messages, model.AssistantMessage{
+				ID:   fmt.Sprintf("agent_question_%s_%d", session.PendingQuestion.Field, now.UnixNano()),
+				Role: "agent", Kind: "answer", Text: session.PendingQuestion.Prompt,
+				Question: session.PendingQuestion, CreatedAt: now,
+			})
+		}
+	}
 	refreshAssistantNextAction(session)
 	return session
+}
+
+func assistantQuestionNeedsTurn(session *model.AssistantSession, field string) bool {
+	lastQuestion := -1
+	lastUser := -1
+	for index, message := range session.Messages {
+		if message.Role == "user" {
+			lastUser = index
+		}
+		if message.Question != nil && message.Question.Field == field {
+			lastQuestion = index
+		}
+	}
+	return lastQuestion < lastUser || lastQuestion == -1
 }
 
 func dismissDuplicateAssistantProposals(session *model.AssistantSession) {

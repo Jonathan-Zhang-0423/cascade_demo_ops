@@ -38,9 +38,8 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 	productDescription := RedactSensitiveUserText(input.ProductDescription)
 	mustShow := RedactSensitiveUserTexts(input.MustShow)
 	mustNotShow := RedactSensitiveUserTexts(input.MustNotShow)
-	requirementDocuments := redactRequirementDocuments(input.RequirementDocuments)
-
 	now := time.Now().UTC()
+	requirementDocuments := redactRequirementDocuments(input.RequirementDocuments, now)
 	targetDurationSec := input.TargetDurationSec
 	if targetDurationSec <= 0 {
 		targetDurationSec = 60
@@ -187,7 +186,7 @@ func repositoryInputs(input orchestrator.UserInput) []model.RepositoryInput {
 			URL:      input.GitRepoURL,
 			Provider: "github",
 			ReadOnly: true,
-			Primary:  true,
+			Primary:  input.LocalRepoPath == "" && input.SSHHost == "",
 		})
 	}
 	if input.LocalRepoPath != "" {
@@ -218,7 +217,7 @@ func repositoryInputs(input orchestrator.UserInput) []model.RepositoryInput {
 	return repositories
 }
 
-func redactRequirementDocuments(documents []model.RequirementDocumentInput) []model.RequirementDocumentInput {
+func redactRequirementDocuments(documents []model.RequirementDocumentInput, fallbackUpdatedAt time.Time) []model.RequirementDocumentInput {
 	if len(documents) == 0 {
 		return documents
 	}
@@ -226,6 +225,9 @@ func redactRequirementDocuments(documents []model.RequirementDocumentInput) []mo
 	for _, document := range documents {
 		document.Title = RedactSensitiveUserText(document.Title)
 		document.Body = RedactSensitiveUserText(document.Body)
+		if document.UpdatedAt.IsZero() {
+			document.UpdatedAt = fallbackUpdatedAt
+		}
 		out = append(out, document)
 	}
 	return out

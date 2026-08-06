@@ -921,6 +921,12 @@ func applyProviderRequestOptions(provider config.ModelProvider, payload *openAIC
 	if payload == nil {
 		return
 	}
+	// Kimi K2.7 Code rejects any temperature other than 1. Keep the
+	// compatibility rule model-scoped so other Kimi models and providers retain
+	// the caller's requested sampling behavior.
+	if provider == config.ModelProviderKimi && strings.EqualFold(strings.TrimSpace(payload.Model), "kimi-k2.7-code") {
+		payload.Temperature = 1
+	}
 	if provider == config.ModelProviderGLM {
 		payload.Thinking = &openAIThinking{Type: "disabled"}
 	}

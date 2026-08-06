@@ -1,6 +1,7 @@
 import type { DemoWorkflowGraph, GraphNode, SandboxPolicy } from "../../src/types/workflowGraph";
 import type {
   ApprovalChecklistState,
+  AssistantSessionView,
   CloudRunStatus,
   ExecutionPackagePreview,
   ProjectWorkspaceView,
@@ -79,6 +80,34 @@ export function recommendedWorkstation(workspace: ProjectWorkspaceView): Project
   if (workspace.executableScriptBundle || workspace.packagePreview.buildStatus === "draft" || workspace.stage === "package_approval") return "approval";
   if (workspace.projectIntelligence || workspace.understandingReport) return "plan";
   return workspace.productURL && workspace.inputBundle.raw_user_prompt ? "evidence" : "overview";
+}
+
+const lifecycleOwnedWorkstations = new Set<ProjectWorkstationView>(["approval", "execution", "repair", "assets"]);
+
+// Planning is conversational, while approval and live execution remain owned
+// by deterministic project state. This prevents a stale assistant session from
+// hiding a sensitive or currently running lifecycle surface.
+export function resolveProjectTaskWorkstation(workspace: ProjectWorkspaceView, session?: AssistantSessionView): ProjectWorkstationView {
+  const lifecycleWorkstation = recommendedWorkstation(workspace);
+  if (lifecycleOwnedWorkstations.has(lifecycleWorkstation)) return lifecycleWorkstation;
+
+  const assistantWorkstation = session?.activeWorkstation;
+  if (!assistantWorkstation) return lifecycleWorkstation;
+
+  if (assistantWorkstation === "overview") {
+    return session.configuration.confirmed ? lifecycleWorkstation : "overview";
+  }
+  if (assistantWorkstation === "evidence" && (lifecycleWorkstation === "evidence" || lifecycleWorkstation === "plan")) {
+    return "evidence";
+  }
+  if (assistantWorkstation === "plan" && lifecycleWorkstation === "plan") {
+    return "plan";
+  }
+  return lifecycleWorkstation;
+}
+
+export function displayedProjectWorkstation(taskWorkstation: ProjectWorkstationView, inspectionWorkstation?: ProjectWorkstationView): ProjectWorkstationView {
+  return inspectionWorkstation ?? taskWorkstation;
 }
 
 export function shouldResumeCloudRun(workspace: ProjectWorkspaceView, selectedProjectID?: string): boolean {
