@@ -399,6 +399,10 @@ func (s *DevHTTPServer) handleDirectTransportSettings(w http.ResponseWriter, r *
 }
 
 func (s *DevHTTPServer) handleControlPlaneSettings(w http.ResponseWriter, r *http.Request) {
+	if s.legacyExchangeDisabled() {
+		writeBridgeValue(w, nil, errors.New("legacy_exchange_disabled: Desktop App 正式链路只允许直连 Ubuntu Browser Agent；DemoOps Exchange 已停用"))
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var request ControlPlaneSettingsRequest
 	if err := decodeJSON(r, &request); err != nil {
@@ -563,6 +567,10 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	projectID, suffix, ok := splitProjectRoute(r.URL.Path)
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	if s.legacyExchangeDisabled() && (strings.HasPrefix(suffix, "/cloud/") || suffix == "/cloud-lifecycle") {
+		writeBridgeValue(w, nil, errors.New("legacy_exchange_disabled: Desktop App 正式链路只允许直连 Ubuntu Browser Agent；请使用 browser-agent-direct 接口"))
 		return
 	}
 	switch {
@@ -958,6 +966,17 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// legacyExchangeDisabled keeps the retired DemoOps execution transport out of
+// the shipped Desktop App while preserving the explicitly marked test profile
+// used by compatibility fixtures. Production and development desktop builds
+// must use the direct Ubuntu Browser Agent transport.
+func (s *DevHTTPServer) legacyExchangeDisabled() bool {
+	if s == nil || s.service == nil {
+		return false
+	}
+	return s.service.runtime.Profile == config.ProfileDesktop && s.service.runtime.Environment != "test"
 }
 
 func (s *DevHTTPServer) serveVerifiedDirectArtifact(w http.ResponseWriter, r *http.Request, projectID string) {

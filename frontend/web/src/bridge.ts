@@ -996,46 +996,10 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 	  return ok(current);
     },
     async initExecutionPackageUpload(workspace) {
-	  const preview = workspace.packagePreview;
-      const result = await requestLocal<LocalCloudUploadInitResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/init`, {
-        method: "POST",
-		body: JSON.stringify({
-		  org_id: orgID,
-		  approval_subject_digest_sha256: preview.approvalSubjectDigest ?? preview.packageDigest,
-		  confidence_assessment_hash: preview.confidenceAssessmentHash ?? preview.packageDigest,
-		  risk_confirmed: true,
-		  idempotency_key: `approve-${workspace.id}-${preview.approvalSubjectDigest ?? preview.packageDigest}`,
-		}),
-      });
-      if (!result.ok || !result.data) {
-        return bridgeFailure(result.error ?? "初始化服务器上传会话失败", result.errorInfo);
-      }
-      if (result.data.build) {
-        cloudBuilds.set(workspace.id, result.data.build);
-      }
-      const next = workspaceWithCloudInit(workspace, result.data);
-      projects.set(next.id, next);
-      return ok(uploadInitFromLocal(result.data.init));
+	  return bridgeFailure("legacy_exchange_disabled: 正式 App 只允许直连 Ubuntu Browser Agent；请使用审批并上传");
     },
     async uploadExecutionPackage(workspace) {
-      const build = cloudBuilds.get(workspace.id);
-      const result = await requestLocal<LocalCloudUploadPackageResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/upload`, {
-        method: "POST",
-        body: JSON.stringify({
-          org_id: orgID,
-          upload_id: workspace.cloudRun.uploadID,
-          ...(build ? { build } : {}),
-        }),
-      });
-      if (!result.ok || !result.data) {
-        return bridgeFailure(result.error ?? "上传执行包失败", result.errorInfo);
-      }
-      if (result.data.build) {
-        cloudBuilds.set(workspace.id, result.data.build);
-      }
-      const next = workspaceWithCloudUpload(workspace, result.data);
-      projects.set(next.id, next);
-      return ok(uploadViewFromLocal(result.data.upload));
+	  return bridgeFailure("legacy_exchange_disabled: 正式 App 只允许直连 Ubuntu Browser Agent；请使用审批并上传");
     },
     async pollExecutionPackageStatus(workspace) {
       const exchangePackageID = workspace.cloudRun.exchangePackageID;

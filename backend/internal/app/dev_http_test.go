@@ -1144,6 +1144,34 @@ func TestDesktopProfileDoesNotExposeDevExchangeRunRoutes(t *testing.T) {
 	}
 }
 
+func TestDesktopProfileRejectsLegacyExchangeProjectRoutes(t *testing.T) {
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile: config.ProfileDesktop, Environment: "production", Mode: model.AppModeDesktop,
+		DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "cascade_demoops.db"),
+		DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"),
+		LogRoot: filepath.Join(root, "logs"), ResourceRoot: root, DevRepoRoot: root, SidecarPaths: map[string]string{},
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewDevHTTPServer(service)
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/project_legacy/cloud/init", strings.NewReader(`{"risk_confirmed":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("legacy exchange rejection should use bridge response, got %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if bridge.OK || !strings.Contains(bridge.Error, "legacy_exchange_disabled") {
+		t.Fatalf("legacy exchange route was not rejected: %+v", bridge)
+	}
+}
+
 func TestDesktopCloudEventProxyForwardsSessionAndResumeCursor(t *testing.T) {
 	var authorization, orgID, lastEventID string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

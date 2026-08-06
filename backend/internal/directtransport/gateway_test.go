@@ -247,6 +247,28 @@ func TestGatewayAllocatesDifferentActivePortsToDifferentAppInstallations(t *test
 	}
 }
 
+func TestGatewayRetiresExpiredListenerBeforeReallocatingDedicatedPort(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	port := reserveTestPort(t)
+	current := now
+	gateway, err := NewGateway(Config{
+		ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1",
+		DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true,
+		BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Minute,
+		Now: func() time.Time { return current },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close(context.Background()) })
+	first := requestTestLeaseForInstallation(t, gateway, current, "install_expired_one", "lease_expired_one")
+	current = first.ExpiresAt.Add(time.Millisecond)
+	second := requestTestLeaseForInstallation(t, gateway, current, "install_expired_two", "lease_expired_two")
+	if second.DataPort != port || second.InstallationID == first.InstallationID || len(gateway.leases) != 1 {
+		t.Fatalf("expired listener was not retired and port was not reused: first=%+v second=%+v leases=%d", first, second, len(gateway.leases))
+	}
+}
+
 func TestGatewayRejectsWorkerStatusThatBypassesValidatedResult(t *testing.T) {
 	port := reserveTestPort(t)
 	gateway, err := NewGateway(Config{ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1", DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true, BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour})

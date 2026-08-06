@@ -308,6 +308,19 @@ func (g *Gateway) handleLease(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) allocateLease(installationID string, now time.Time) (model.DirectPortLease, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// Expired listeners must be retired before allocating a new lease.  The
+	// expiry goroutine normally closes them, but a request can arrive in the
+	// small scheduling window between the lease deadline and that goroutine.
+	// Retiring synchronously prevents an App from being assigned a misleading
+	// second port merely because the old listener still owns its socket.
+	for leaseID, runtime := range g.leases {
+		if now.Before(runtime.lease.ExpiresAt) {
+			continue
+		}
+		delete(g.leases, leaseID)
+		_ = runtime.server.Close()
+		_ = runtime.listener.Close()
+	}
 	for _, runtime := range g.leases {
 		if runtime.lease.InstallationID == installationID && now.Before(runtime.lease.ExpiresAt) {
 			return runtime.lease, nil

@@ -1297,37 +1297,14 @@ describe("desktop bridge contract", () => {
     expect(result.error).not.toContain("agents.requirementLLMOutput");
   });
 
-  it("formats structured bridge error details for field-level fixes", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({
-      ok: false,
-      status: 400,
-      statusText: "Bad Request",
-      text: async () => JSON.stringify({
-        ok: false,
-        error: "execution package has no real business action",
-        error_info: {
-          code: "preflight_failed",
-          message: "execution package has no real business action",
-          correlation_id: "bridge_test",
-          retryable: false,
-          details: [{
-            field: "payload.executable_script_bundle.plan_json.steps",
-            reason: "blocking",
-            message: "business action missing",
-            hint: "Add click/fill/select/upload/api_call.",
-          }],
-        },
-      }),
-    })));
-
+  it("fails closed when a caller tries the retired Exchange upload path", async () => {
     const bridge = createLocalBridgeClient();
     const result = await bridge.initExecutionPackageUpload(createWorkspace("product_demo"));
 
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("错误码: preflight_failed");
-    expect(result.error).toContain("字段: payload.executable_script_bundle.plan_json.steps");
-    expect(result.error).toContain("建议: Add click/fill/select/upload/api_call.");
-    expect(result.errorInfo?.code).toBe("preflight_failed");
+    expect(result.error).toContain("legacy_exchange_disabled");
+    expect(result.error).toContain("Ubuntu Browser Agent");
+    expect(result.errorInfo).toBeUndefined();
   });
 
   it("maps local model diagnostics into frontend camelCase DTOs", async () => {
