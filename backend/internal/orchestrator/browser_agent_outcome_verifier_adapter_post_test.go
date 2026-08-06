@@ -277,6 +277,137 @@ func TestValidatePostExecution_MissingEvidenceRefs(t *testing.T) {
 	}
 }
 
+// TestValidatePostExecution_SourcePackageMismatch tests scenario 11: the
+// result package's source_package_id does not match the approved run's
+// source package, meaning the evidence chain does not belong to this run.
+func TestValidatePostExecution_SourcePackageMismatch(t *testing.T) {
+	config := &model.ValidationConfig{
+		PreExecutionEnabled:       true,
+		RealTimeBatchEnabled:      true,
+		PostExecutionBatchEnabled: true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+
+	vctx := model.BrowserAgentValidationContext{
+		RunID:                     "test-post-mismatch-001",
+		SourcePackageID:           "pkg-approved-001",
+		SourceBundleHashSHA256:    "abc123",
+		EffectivePolicyHashSHA256: "def456",
+		WorkflowGraph:             &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan:         &model.StageApprovalPlan{Stages: []model.StageApprovalStage{}},
+		ScriptOutline:             &model.BrowserAgentScriptOutline{},
+		BrowserAgentContract:      &model.BrowserAgentContract{},
+	}
+
+	result := &model.RecordingResultPackage{
+		ResultID:        "result-mismatch-001",
+		SourcePackageID: "pkg-DIFFERENT-999",
+		Status:          model.RecordingResultStatusGenerated,
+		GeneratedAssets: []model.ArtifactRef{
+			{ID: "screenshot-1", Kind: "screenshot", URI: "s3://bucket/s.png"},
+			{ID: "trace-1", Kind: "trace", URI: "s3://bucket/t.zip"},
+			{ID: "video-1", Kind: "video", URI: "s3://bucket/v.mp4"},
+		},
+		StageEventLogRef: &model.ArtifactRef{ID: "log-1", Kind: "stage_event_log"},
+	}
+
+	ctx := context.Background()
+	report, err := adapter.ValidatePostExecution(ctx, vctx, *result, []model.StageExecutionEvent{})
+
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if report.Decision != model.ValidationDecisionStopAndReport {
+		t.Errorf("Expected Decision 'stop_and_report' for source package mismatch, got '%s'", report.Decision)
+	}
+
+	foundCheck := false
+	for _, check := range report.Checks {
+		if check.Code == "RESULT_PACKAGE_MISMATCH" {
+			foundCheck = true
+			if check.Passed {
+				t.Errorf("Result package mismatch check should not pass")
+			}
+			if check.Severity != model.FindingSeverityBlocking {
+				t.Errorf("Result package mismatch should be blocking, got %s", check.Severity)
+			}
+		}
+	}
+
+	if !foundCheck {
+		t.Errorf("Expected RESULT_PACKAGE_MISMATCH check")
+	}
+}
+
+// TestValidatePostExecution_HashMismatch tests scenario 11: the result
+// package's audit-trail source digest does not match the approved run's
+// source bundle hash.
+func TestValidatePostExecution_HashMismatch(t *testing.T) {
+	config := &model.ValidationConfig{
+		PreExecutionEnabled:       true,
+		RealTimeBatchEnabled:      true,
+		PostExecutionBatchEnabled: true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+
+	vctx := model.BrowserAgentValidationContext{
+		RunID:                     "test-post-hash-001",
+		SourcePackageID:           "pkg-approved-002",
+		SourceBundleHashSHA256:    "expected-hash-abc123",
+		EffectivePolicyHashSHA256: "def456",
+		WorkflowGraph:             &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan:         &model.StageApprovalPlan{Stages: []model.StageApprovalStage{}},
+		ScriptOutline:             &model.BrowserAgentScriptOutline{},
+		BrowserAgentContract:      &model.BrowserAgentContract{},
+	}
+
+	result := &model.RecordingResultPackage{
+		ResultID:        "result-hash-001",
+		SourcePackageID: "pkg-approved-002",
+		Status:          model.RecordingResultStatusGenerated,
+		GeneratedAssets: []model.ArtifactRef{
+			{ID: "screenshot-1", Kind: "screenshot", URI: "s3://bucket/s.png"},
+			{ID: "trace-1", Kind: "trace", URI: "s3://bucket/t.zip"},
+			{ID: "video-1", Kind: "video", URI: "s3://bucket/v.mp4"},
+		},
+		StageEventLogRef: &model.ArtifactRef{ID: "log-1", Kind: "stage_event_log"},
+		AuditTrail: model.CloudExecutionAuditTrail{
+			SourcePackageDigest: "actual-hash-DIFFERENT-999",
+		},
+	}
+
+	ctx := context.Background()
+	report, err := adapter.ValidatePostExecution(ctx, vctx, *result, []model.StageExecutionEvent{})
+
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if report.Decision != model.ValidationDecisionStopAndReport {
+		t.Errorf("Expected Decision 'stop_and_report' for hash mismatch, got '%s'", report.Decision)
+	}
+
+	foundCheck := false
+	for _, check := range report.Checks {
+		if check.Code == "RESULT_HASH_MISMATCH" {
+			foundCheck = true
+			if check.Passed {
+				t.Errorf("Result hash mismatch check should not pass")
+			}
+			if check.Severity != model.FindingSeverityBlocking {
+				t.Errorf("Result hash mismatch should be blocking, got %s", check.Severity)
+			}
+		}
+	}
+
+	if !foundCheck {
+		t.Errorf("Expected RESULT_HASH_MISMATCH check")
+	}
+}
+
 // TestValidatePostExecution_ValidComplete tests P0 passes with complete artifacts
 func TestValidatePostExecution_ValidComplete(t *testing.T) {
 	config := &model.ValidationConfig{

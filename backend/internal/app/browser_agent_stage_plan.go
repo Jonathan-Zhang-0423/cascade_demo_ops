@@ -162,7 +162,7 @@ func newBrowserAgentStageOrchestratorWithVerifier(guard BrowserAgentPolicyGuard,
 func (p BrowserAgentRuntimePlan) validationContext() model.BrowserAgentValidationContext {
 	return model.BrowserAgentValidationContext{
 		RunID: p.RunID, SourcePackageID: p.SourcePackageID, SourceBundleHashSHA256: p.SourceBundleHashSHA256,
-		EffectivePolicyHashSHA256: p.PolicyHashSHA256, WorkflowGraph: p.WorkflowGraph, Plan: p.Plan,
+		EffectivePolicyHashSHA256: p.PolicyHashSHA256, AllowedDomains: p.AllowedDomains, WorkflowGraph: p.WorkflowGraph, Plan: p.Plan,
 		StageApprovalPlan: p.StageApprovalPlan, ScriptOutline: p.ScriptOutline, BrowserAgentContract: p.BrowserAgentContract,
 	}
 }
