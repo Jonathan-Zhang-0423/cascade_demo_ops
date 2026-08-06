@@ -119,6 +119,7 @@ export type DesktopBridgeClient = {
   repairFailedScript(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   ackResultPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   acknowledgeResult(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  releaseDirectBrowserAgentLease(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   reviewResult(workspace: ProjectWorkspaceView, decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string): Promise<BridgeResult<ProjectWorkspaceView>>;
 };
 
@@ -467,6 +468,11 @@ type LocalDirectJobStatus = {
 	result_package_id?: string;
 	artifacts?: LocalDirectArtifact[];
 	updated_at: string;
+};
+
+type LocalDirectReleaseResult = {
+  released: boolean;
+  lease?: { lease_id?: string; data_port?: number; expires_at?: string };
 };
 
 type LocalGraphRevisionResult = {
@@ -1105,8 +1111,21 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(next.id, next);
       return ok(next);
     },
-	async acknowledgeResult(workspace) {
+    async acknowledgeResult(workspace) {
 	  return this.ackResultPackage(workspace);
+	},
+	async releaseDirectBrowserAgentLease(workspace) {
+	  if (!workspace.cloudRun.leaseID) return { ok: false, error: "当前项目没有可释放的直连租约" };
+	  if (!isTerminalLocalStatus(workspace.cloudRun.status)) return { ok: false, error: "任务仍在运行，不能释放直连租约" };
+  if (workspace.cloudRun.status === "succeeded" && workspace.cloudRun.resultDownloaded !== true) return { ok: false, error: "必须先完成素材下载和 checksum 校验" };
+	  let native = await callWailsBridge<LocalDirectReleaseResult>("ReleaseDirectBrowserAgentLease", workspace.id);
+	  if (!native.ok) {
+	    native = await requestLocal<LocalDirectReleaseResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/release`, { method: "POST" });
+	  }
+	  if (!native.ok || !native.data?.released) return bridgeFailure(native.error ?? "直连租约释放失败", native.errorInfo);
+	  const next = workspaceWithDirectLeaseReleased(workspace);
+	  projects.set(next.id, next);
+	  return ok(next);
 	},
 	async reviewResult(workspace, decision, summary) {
 	  const resultPackageID = workspace.cloudRun.resultPackageID;
@@ -1550,8 +1569,14 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async ackResultPackage(workspace) {
       return ok(ackWorkspaceAssets(workspace));
     },
-	async acknowledgeResult(workspace) {
+    async acknowledgeResult(workspace) {
 	  return this.ackResultPackage(workspace);
+	},
+	async releaseDirectBrowserAgentLease(workspace) {
+	  if (!workspace.cloudRun.leaseID) return { ok: false, error: "当前项目没有可释放的直连租约" };
+  if (!isTerminalLocalStatus(workspace.cloudRun.status) || (workspace.cloudRun.status === "succeeded" && workspace.cloudRun.resultDownloaded !== true)) return { ok: false, error: "任务未终态或素材尚未校验" };
+	  const next = workspaceWithDirectLeaseReleased(workspace);
+	  return ok(next);
 	},
 	async reviewResult(workspace, decision, summary) {
 	  return ok(workspaceWithReview(workspace, {
@@ -2153,6 +2178,18 @@ function workspaceWithDirectUpload(workspace: ProjectWorkspaceView, result: Loca
       progress: 5,
       retryCount: 0,
       stageHistory: localLifecycleStagesFromPartial("server_intake"),
+    },
+  };
+}
+
+function workspaceWithDirectLeaseReleased(workspace: ProjectWorkspaceView): ProjectWorkspaceView {
+  const { leaseID: _leaseID, dataPort: _dataPort, leaseExpiresAt: _leaseExpiresAt, ...cloudRun } = workspace.cloudRun;
+  return {
+    ...workspace,
+    cloudRun: {
+      ...cloudRun,
+      message: "直连租约已释放，终态结果和已校验素材保留。",
+      currentStep: "直连租约已安全释放",
     },
   };
 }

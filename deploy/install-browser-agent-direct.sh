@@ -63,7 +63,7 @@ private_key_hash="$(openssl pkey -in "$tls_key" -pubout -outform DER 2>/dev/null
 [[ -n "$cert_key_hash" && "$cert_key_hash" == "$private_key_hash" ]] || { echo "TLS certificate and private key do not match" >&2; exit 1; }
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-for source in "$script_dir/systemd/cascade-browser-agent-gateway.service" "$script_dir/systemd/cascade-browser-agent-worker.service" "$script_dir/browser-agent-worker-preflight.sh"; do
+for source in "$script_dir/systemd/cascade-browser-agent-gateway.service" "$script_dir/systemd/cascade-browser-agent-worker.service" "$script_dir/browser-agent-worker-preflight.sh" "$script_dir/preflight-browser-agent-direct.sh"; do
   [[ -f "$source" ]] || { echo "deployment source missing: $source" >&2; exit 1; }
 done
 
@@ -82,6 +82,7 @@ install -d -o root -g root -m 0755 /usr/local/libexec
 install -o root -g root -m 0755 "$gateway_bin" /usr/local/bin/cascade-browser-agent-gateway
 install -o root -g root -m 0755 "$worker_bin" /usr/local/bin/cascade-browser-agent-direct-worker
 install -o root -g root -m 0755 "$script_dir/browser-agent-worker-preflight.sh" /usr/local/libexec/cascade-browser-agent-worker-preflight
+install -o root -g root -m 0755 "$script_dir/preflight-browser-agent-direct.sh" /usr/local/libexec/cascade-browser-agent-direct-preflight
 install -o root -g root -m 0644 "$script_dir/systemd/cascade-browser-agent-gateway.service" /etc/systemd/system/cascade-browser-agent-gateway.service
 install -o root -g root -m 0644 "$script_dir/systemd/cascade-browser-agent-worker.service" /etc/systemd/system/cascade-browser-agent-worker.service
 install -o root -g cascade-browser-gateway -m 0640 "$tls_cert" /etc/cascade-browser-agent/tls/fullchain.pem
@@ -181,4 +182,4 @@ systemctl enable cascade-browser-agent-gateway.service cascade-browser-agent-wor
 systemctl restart cascade-browser-agent-gateway.service cascade-browser-agent-worker.service
 echo "Browser Agent direct services installed. Tokens were not printed."
 echo "Firewall/security-group changes remain manual: TCP 18443 and ${data_start}-${data_end}; never expose 18444."
-echo "Run: sudo bash $script_dir/preflight-browser-agent-direct.sh"
+echo "Run: sudo /usr/local/libexec/cascade-browser-agent-direct-preflight"

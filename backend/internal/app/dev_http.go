@@ -712,6 +712,9 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		review, err := s.service.ReviewDirectResult(r.Context(), projectID, request)
 		writeBridgeValue(w, review, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/release":
+		result, err := s.service.ReleaseDirectTransportLease(r.Context(), projectID)
+		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/init":
 		var request CloudUploadInitRequest
 		if r.Body != nil && r.ContentLength != 0 {

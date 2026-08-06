@@ -54,6 +54,20 @@ type DirectLeaseRequest struct {
 	SignatureBase64        string `json:"signature_base64"`
 }
 
+// DirectLeaseReleaseRequest lets an App retire its dedicated listener when a
+// run and all verified downloads are finished. It uses the same installation
+// signing key as lease allocation, so possession of the bootstrap token alone
+// cannot release another installation's listener.
+type DirectLeaseReleaseRequest struct {
+	ProtocolVersion        string `json:"protocol_version"`
+	InstallationID         string `json:"installation_id"`
+	LeaseID                string `json:"lease_id"`
+	TimestampUnixMS        int64  `json:"timestamp_unix_ms"`
+	RequestNonce           string `json:"request_nonce"`
+	SigningPublicKeyBase64 string `json:"signing_public_key_base64"`
+	SignatureBase64        string `json:"signature_base64"`
+}
+
 // DirectEncryptedMessage is the only App-facing data-port payload. The
 // timestamp and all routing metadata are authenticated as AES-GCM AAD.
 type DirectEncryptedMessage struct {
@@ -395,4 +409,37 @@ func DirectLeaseRequestSigningPayload(request DirectLeaseRequest) []byte {
 		strconv.FormatInt(request.TimestampUnixMS, 10), request.RequestNonce,
 		request.SigningPublicKeyBase64,
 	}, "\n"))
+}
+
+func DirectLeaseReleaseRequestSigningPayload(request DirectLeaseReleaseRequest) []byte {
+	return []byte(strings.Join([]string{
+		"release_lease", request.ProtocolVersion, request.InstallationID, request.LeaseID,
+		strconv.FormatInt(request.TimestampUnixMS, 10), request.RequestNonce,
+		request.SigningPublicKeyBase64,
+	}, "\n"))
+}
+
+func ValidateDirectLeaseReleaseRequest(request DirectLeaseReleaseRequest, now time.Time) error {
+	if request.ProtocolVersion != DirectTransportProtocolVersion {
+		return errors.New("unsupported direct transport protocol")
+	}
+	if strings.TrimSpace(request.InstallationID) == "" || strings.TrimSpace(request.LeaseID) == "" || len(request.InstallationID) > 128 || len(request.LeaseID) > 256 || strings.ContainsAny(request.InstallationID+request.LeaseID, "\r\n\x00") {
+		return errors.New("lease release binding is invalid")
+	}
+	if strings.TrimSpace(request.RequestNonce) == "" || len(request.RequestNonce) > 256 {
+		return errors.New("request_nonce has an invalid format")
+	}
+	publicKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(request.SigningPublicKeyBase64))
+	if err != nil || len(publicKey) != ed25519.PublicKeySize || DirectInstallationID(ed25519.PublicKey(publicKey)) != request.InstallationID {
+		return errors.New("lease release public key binding is invalid")
+	}
+	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(request.SignatureBase64))
+	if err != nil || len(signature) != ed25519.SignatureSize || !ed25519.Verify(ed25519.PublicKey(publicKey), DirectLeaseReleaseRequestSigningPayload(request), signature) {
+		return errors.New("lease release signature is invalid")
+	}
+	requestTime := time.UnixMilli(request.TimestampUnixMS)
+	if delta := now.UTC().Sub(requestTime); delta > DirectTransportMaxClockSkew || delta < -DirectTransportMaxClockSkew {
+		return errors.New("lease release timestamp is outside the allowed clock skew")
+	}
+	return nil
 }

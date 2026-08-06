@@ -536,6 +536,18 @@ export function App() {
     setIsRunningProduct(false);
   }
 
+  async function releaseDirectLease() {
+    setIsRunningProduct(true);
+    const result = await bridge.releaseDirectBrowserAgentLease(workspace);
+    if (result.ok && result.data) {
+      setWorkspace((current) => appendRuntimeLog(result.data!, { level: "success", message: "直连租约已释放", detail: "终态任务和已校验素材已保留；专属数据端口已关闭。" }));
+      void refreshProjects();
+    } else {
+      setWorkspace((current) => appendRuntimeLog({ ...current, cloudRun: { ...current.cloudRun, lastError: result.error ?? "直连租约释放失败" } }, { level: "error", message: "直连租约未释放", detail: result.error ?? "未知错误" }));
+    }
+    setIsRunningProduct(false);
+  }
+
   function submitAgentPrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = agentPrompt.trim();
@@ -617,6 +629,7 @@ export function App() {
           onRepairScript={() => repairFailedScript(true)}
           onApproveAssets={approveAssets}
           onReviewAssets={reviewAssets}
+          onReleaseDirectLease={releaseDirectLease}
           onContinuePageOnly={async () => {
             const binding = workspace.sourceBinding;
             if (!binding) return;
@@ -715,7 +728,7 @@ export function App() {
                     onRepairScript={repairFailedScript}
                   />
                 ) : null}
-                {activeNav === "project_library" || activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={approveAssets} onReview={reviewAssets} /> : null}
+                {activeNav === "project_library" || activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={approveAssets} onReview={reviewAssets} onReleaseLease={releaseDirectLease} /> : null}
                 {activeNav === "editor" ? <VideoEditor /> : null}
                 {activeNav === "settings" ? (
                   <SettingsPanel
@@ -769,6 +782,7 @@ type ProjectAgentWorkspaceProps = {
   onRepairScript: () => void;
   onApproveAssets: () => void;
   onReviewAssets: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
+  onReleaseDirectLease: () => void;
   onContinuePageOnly: () => void;
   assistantScopeKey?: string;
   assistantInitialMessage?: string;
@@ -799,6 +813,7 @@ function ProjectAgentWorkspace({
   onRepairScript,
   onApproveAssets,
   onReviewAssets,
+  onReleaseDirectLease,
   onContinuePageOnly,
   assistantScopeKey,
   assistantInitialMessage,
@@ -882,7 +897,7 @@ function ProjectAgentWorkspace({
 		  {workstationView === "approval" ? <PackageApproval workspace={workspace} checklist={checklist} blockedReasons={blockedReasons} canUpload={canUpload} isLocalMode={bridge.mode === "local"} {...(runtimeHealth ? { runtimeHealth } : {})} runtimeHealthResolved={runtimeHealthResolved} onChecklistChange={onChecklistChange} onUpload={onUpload} onConfigureControlPlane={onConfigureControlPlane} onCloudSuccess={onCloudSuccess} onCloudFailure={onCloudFailure} onRepairScript={onRepairScript} /> : null}
           {workstationView === "execution" ? <div className="section-stack"><CloudRunPanel workspace={workspace} /><RuntimeLogPanel workspace={workspace} /></div> : null}
           {workstationView === "repair" ? <div className="section-stack"><FailureDiagnosticPanel workspace={workspace} onRepairScript={onRepairScript} /><ScriptRepairPanel workspace={workspace} /></div> : null}
-		  {workstationView === "assets" ? <AssetReview workspace={workspace} busy={isGeneratingPackage} onDownload={onApproveAssets} onReview={onReviewAssets} /> : null}
+          {workstationView === "assets" ? <AssetReview workspace={workspace} busy={isGeneratingPackage} onDownload={onApproveAssets} onReview={onReviewAssets} onReleaseLease={onReleaseDirectLease} /> : null}
           {workstationView === "editor" ? <div className="project-editor-workstation"><VideoEditor /></div> : null}
           {isGeneratingPackage ? <div className="project-workstation-progress"><span className="status-dot ok" />Cascade 正在更新工作台…</div> : null}
         </section>
@@ -1801,7 +1816,7 @@ function ScriptRepairPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
 }
 
 function ResultReviewPanel({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {
-  return <AssetReview workspace={workspace} onDownload={onApprove} onReview={() => undefined} />;
+  return <AssetReview workspace={workspace} onDownload={onApprove} onReview={() => undefined} onReleaseLease={() => undefined} />;
 }
 
 function MetricsRow({ workspace }: { workspace: ProjectWorkspaceView }) {
@@ -2312,12 +2327,14 @@ function AssetReview({
   busy = false,
   showDownloadAction = true,
   onDownload,
+  onReleaseLease,
   onReview,
 }: {
   workspace: ProjectWorkspaceView;
   busy?: boolean;
   showDownloadAction?: boolean;
   onDownload: () => void;
+  onReleaseLease: () => void;
   onReview: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
 }) {
   const [reviewSummary, setReviewSummary] = useState("");
@@ -2355,6 +2372,7 @@ function AssetReview({
             <button type="button" className="secondary-action" disabled={busy || !canReview || revisionSummaryRequired} onClick={() => onReview("rerecord_requested", reviewSummary)}>缺少素材，重新录制</button>
           </div>
           {canReview && revisionSummaryRequired ? <div className="input-note">提交重新剪辑或重新录制前，请填写具体修改意见；直接通过无需填写。</div> : null}
+          {workspace.cloudRun.leaseID ? <button type="button" className="secondary-action" disabled={busy || !canReview || workspace.cloudRun.status === "running"} onClick={onReleaseLease}>释放已完成任务的专属数据端口</button> : null}
           {review ? <div className="input-note">已提交：{review.decision === "approved" ? "通过" : review.decision === "reedit_requested" ? "重新剪辑" : "重新录制"}{review.summary ? ` · ${review.summary}` : ""}</div> : null}
         </div>
       </section>

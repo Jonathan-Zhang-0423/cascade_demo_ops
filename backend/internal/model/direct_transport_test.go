@@ -3,6 +3,7 @@ package model
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -107,6 +108,22 @@ func TestDirectTransportRequestSignatureBindsPortTimestampAndPath(t *testing.T) 
 		if err := VerifyDirectTransportRequestSignature(candidate, "POST", changed.path, now.UnixMilli(), "request_nonce", "body_digest", signature, now); err == nil {
 			t.Fatal("signature was not bound to path and port")
 		}
+	}
+}
+
+func TestDirectLeaseReleaseRequestRequiresInstallationSignature(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	seed := sha256.Sum256([]byte("release-install"))
+	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	request := DirectLeaseReleaseRequest{ProtocolVersion: DirectTransportProtocolVersion, InstallationID: DirectInstallationID(publicKey), LeaseID: "lease_release", TimestampUnixMS: now.UnixMilli(), RequestNonce: "release_nonce", SigningPublicKeyBase64: base64.StdEncoding.EncodeToString(publicKey)}
+	request.SignatureBase64 = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, DirectLeaseReleaseRequestSigningPayload(request)))
+	if err := ValidateDirectLeaseReleaseRequest(request, now); err != nil {
+		t.Fatal(err)
+	}
+	request.LeaseID = "lease_other"
+	if err := ValidateDirectLeaseReleaseRequest(request, now); err == nil {
+		t.Fatal("release signature remained valid after lease binding changed")
 	}
 }
 

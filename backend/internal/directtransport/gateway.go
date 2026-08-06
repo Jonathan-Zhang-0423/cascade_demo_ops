@@ -242,6 +242,7 @@ func (g *Gateway) ControlHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/direct/health", g.bootstrapAuth(g.handleHealth))
 	mux.HandleFunc("POST /v1/direct/leases", g.handleLease)
+	mux.HandleFunc("POST /v1/direct/leases/release", g.bootstrapAuth(g.handleLeaseRelease))
 	return securityHeaders(mux)
 }
 
@@ -303,6 +304,43 @@ func (g *Gateway) handleLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, lease)
+}
+
+func (g *Gateway) handleLeaseRelease(w http.ResponseWriter, r *http.Request) {
+	var request model.DirectLeaseReleaseRequest
+	if err := decodeLimitedJSON(r.Body, 1<<20, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	now := g.now().UTC()
+	if err := model.ValidateDirectLeaseReleaseRequest(request, now); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_lease_release", err.Error())
+		return
+	}
+	g.mu.Lock()
+	g.pruneNoncesLocked(now)
+	nonceKey := request.InstallationID + "|release|" + request.RequestNonce
+	if _, exists := g.leaseNonces[nonceKey]; exists {
+		g.mu.Unlock()
+		writeError(w, http.StatusConflict, "replay_detected", "Lease release request nonce was already used.")
+		return
+	}
+	g.leaseNonces[nonceKey] = now.Add(model.DirectTransportMaxClockSkew)
+	runtime, ok := g.leases[request.LeaseID]
+	if !ok || runtime.lease.InstallationID != request.InstallationID {
+		g.mu.Unlock()
+		writeError(w, http.StatusNotFound, "lease_not_found", "Dedicated Browser Agent lease was not found.")
+		return
+	}
+	delete(g.leases, request.LeaseID)
+	_ = runtime.server.Close()
+	_ = runtime.listener.Close()
+	g.mu.Unlock()
+	leaseIDSuffix := request.LeaseID
+	if len(leaseIDSuffix) > 8 {
+		leaseIDSuffix = leaseIDSuffix[len(leaseIDSuffix)-8:]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"protocol_version": model.DirectTransportProtocolVersion, "released": true, "lease_id_suffix": leaseIDSuffix})
 }
 
 func (g *Gateway) allocateLease(installationID string, now time.Time) (model.DirectPortLease, error) {
