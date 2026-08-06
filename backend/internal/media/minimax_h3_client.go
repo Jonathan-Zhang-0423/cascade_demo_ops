@@ -22,10 +22,26 @@ const (
 	defaultMiniMaxH3BaseURL     = "https://api.minimaxi.com"
 )
 
+const (
+	MiniMaxH3TaskQueued    = "queued"
+	MiniMaxH3TaskRunning   = "running"
+	MiniMaxH3TaskSucceeded = "succeeded"
+	MiniMaxH3TaskFailed    = "failed"
+	MiniMaxH3TaskCancelled = "cancelled"
+	MiniMaxH3TaskExpired   = "expired"
+)
+
 // ErrMiniMaxH3LastFrameOnlyNotEnabled marks a request that the upstream H3 V2
 // contract can express, but the current Server capability profile has not
 // enabled or verified. It must be returned before any provider HTTP call.
 var ErrMiniMaxH3LastFrameOnlyNotEnabled = errors.New("h3_last_frame_only_not_supported: MiniMax-H3 last_frame requires a first_frame in the current Server capability profile")
+
+// ErrMiniMaxH3ReferenceAudioNotEnabled and the conservative reference count
+// errors enforce the Server capability profile, which is intentionally
+// narrower than the provider's theoretical limits. These checks happen before
+// disabled/dry-run/real dispatch so an invalid request always makes zero HTTP
+// calls.
+var ErrMiniMaxH3ReferenceAudioNotEnabled = errors.New("h3_reference_audio_not_supported: MiniMax-H3 reference audio is not enabled in the current Server capability profile")
 
 type MiniMaxH3ClientOptions struct {
 	Mode       config.ArkMediaMode
@@ -58,6 +74,22 @@ type miniMaxH3SubmitResponse struct {
 
 type miniMaxH3QueryResponse struct {
 	Task miniMaxH3Task `json:"task"`
+}
+
+type miniMaxH3TaskMutationResponse struct {
+	TaskID string `json:"task_id,omitempty"`
+	Action string `json:"action,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+type MiniMaxH3TaskMutationResult struct {
+	Mode     config.ArkMediaMode  `json:"mode"`
+	Provider config.ModelProvider `json:"provider"`
+	Model    string               `json:"model"`
+	TaskID   string               `json:"task_id,omitempty"`
+	Action   string               `json:"action,omitempty"`
+	Status   string               `json:"status,omitempty"`
+	Trace    ArkMediaCallTrace    `json:"trace"`
 }
 
 type miniMaxH3Task struct {
@@ -102,7 +134,7 @@ func (c *MiniMaxH3Client) CreateContentGenerationTask(ctx context.Context, reque
 	trace := newTrace(c.mode, provider, MiniMaxH3Model, http.MethodPost, endpoint)
 	result := ContentGenerationTaskResult{Mode: c.mode, Provider: provider, Model: MiniMaxH3Model, Trace: trace}
 	if err := validateMiniMaxH3Request(request); err != nil {
-		if errors.Is(err, ErrMiniMaxH3LastFrameOnlyNotEnabled) {
+		if errors.Is(err, ErrMiniMaxH3LastFrameOnlyNotEnabled) || errors.Is(err, ErrMiniMaxH3ReferenceAudioNotEnabled) {
 			result.Trace.ErrorClass = "provider_capability_not_enabled"
 		} else {
 			result.Trace.ErrorClass = "invalid_request"
@@ -194,12 +226,90 @@ func (c *MiniMaxH3Client) GetContentGenerationTask(ctx context.Context, taskID s
 	}
 	result.Response = &ContentGenerationTaskResponse{
 		ID:     response.Task.ID,
-		Status: strings.ToLower(strings.TrimSpace(response.Task.Status)),
+		Status: normalizeMiniMaxH3TaskStatus(response.Task.Status),
 		Model:  firstNonEmpty(response.Task.Model, MiniMaxH3Model),
 		Output: output,
 		Error:  response.Task.Error,
 	}
+	if result.Response.Status == "" {
+		result.Trace.ErrorClass = "provider_status_unknown"
+		return result, fmt.Errorf("MiniMax-H3 query response has unsupported task status %q", response.Task.Status)
+	}
 	return result, nil
+}
+
+// CancelOrDeleteContentGenerationTask maps to the H3 V2 state-dependent
+// DELETE endpoint. The provider cancels queued tasks and deletes terminal task
+// records. Running and already-cancelled tasks are rejected by the provider.
+// This method is intentionally H3-specific and is not part of the shared
+// VideoGenerationClient used by the active Seedance route.
+func (c *MiniMaxH3Client) CancelOrDeleteContentGenerationTask(ctx context.Context, taskID string) (MiniMaxH3TaskMutationResult, error) {
+	provider := config.ModelProvider("minimax-h3")
+	taskID = strings.TrimSpace(taskID)
+	endpoint := miniMaxH3Endpoint(c.baseURL, miniMaxH3GenerationEndpoint+"/"+url.PathEscape(taskID))
+	trace := newTrace(c.mode, provider, MiniMaxH3Model, http.MethodDelete, endpoint)
+	result := MiniMaxH3TaskMutationResult{Mode: c.mode, Provider: provider, Model: MiniMaxH3Model, TaskID: taskID, Trace: trace}
+	if taskID == "" {
+		result.Trace.ErrorClass = "task_id_missing"
+		return result, errors.New("task_id is required")
+	}
+	switch c.mode {
+	case config.ArkMediaModeDisabled:
+		result.Trace.ErrorClass = "disabled"
+		return result, ErrArkMediaDisabled
+	case config.ArkMediaModeDryRun, "":
+		result.Action = "dry_run"
+		result.Status = "dry_run"
+		return result, nil
+	}
+	if c.apiKey == "" {
+		result.Trace.ErrorClass = "api_key_missing"
+		return result, errors.New("MiniMax-H3 API key is missing")
+	}
+
+	var response miniMaxH3TaskMutationResponse
+	trace, err := c.doJSON(ctx, http.MethodDelete, endpoint, nil, &response, trace)
+	result.Trace = trace
+	if err != nil {
+		return result, err
+	}
+	if strings.TrimSpace(response.TaskID) == "" {
+		result.Trace.ErrorClass = "task_id_missing"
+		return result, errors.New("MiniMax-H3 cancel/delete response is missing task_id")
+	}
+	action := strings.ToLower(strings.TrimSpace(response.Action))
+	if action != "cancel" && action != "delete" {
+		result.Trace.ErrorClass = "provider_action_unknown"
+		return result, fmt.Errorf("MiniMax-H3 cancel/delete response has unsupported action %q", response.Action)
+	}
+	status := normalizeMiniMaxH3TaskStatus(response.Status)
+	if status == "" {
+		result.Trace.ErrorClass = "provider_status_unknown"
+		return result, fmt.Errorf("MiniMax-H3 cancel/delete response has unsupported task status %q", response.Status)
+	}
+	result.TaskID = response.TaskID
+	result.Action = action
+	result.Status = status
+	return result, nil
+}
+
+func normalizeMiniMaxH3TaskStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case MiniMaxH3TaskQueued:
+		return MiniMaxH3TaskQueued
+	case MiniMaxH3TaskRunning:
+		return MiniMaxH3TaskRunning
+	case MiniMaxH3TaskSucceeded:
+		return MiniMaxH3TaskSucceeded
+	case MiniMaxH3TaskFailed:
+		return MiniMaxH3TaskFailed
+	case MiniMaxH3TaskCancelled, "canceled":
+		return MiniMaxH3TaskCancelled
+	case MiniMaxH3TaskExpired:
+		return MiniMaxH3TaskExpired
+	default:
+		return ""
+	}
 }
 
 func validateMiniMaxH3Request(request ContentGenerationTaskRequest) error {
@@ -229,7 +339,6 @@ func validateMiniMaxH3Request(request ContentGenerationTaskRequest) error {
 	lastFrameCount := 0
 	referenceImageCount := 0
 	referenceVideoCount := 0
-	referenceAudioCount := 0
 	for _, part := range request.Content {
 		switch part.Type {
 		case "text":
@@ -269,8 +378,7 @@ func validateMiniMaxH3Request(request ContentGenerationTaskRequest) error {
 			if part.AudioURL == nil || strings.TrimSpace(part.AudioURL.URL) == "" || part.Role != "reference_audio" {
 				return errors.New("MiniMax-H3 audio_url requires role=reference_audio and a URL")
 			}
-			referenceMode = true
-			referenceAudioCount++
+			return ErrMiniMaxH3ReferenceAudioNotEnabled
 		default:
 			return fmt.Errorf("MiniMax-H3 content type %q is unsupported", part.Type)
 		}
@@ -287,8 +395,8 @@ func validateMiniMaxH3Request(request ContentGenerationTaskRequest) error {
 	if lastFrameCount > 0 && firstFrameCount == 0 {
 		return ErrMiniMaxH3LastFrameOnlyNotEnabled
 	}
-	if referenceImageCount > 9 || referenceVideoCount > 3 || referenceAudioCount > 3 {
-		return errors.New("MiniMax-H3 reference media count exceeds the documented limit")
+	if referenceImageCount > 4 || referenceVideoCount > 3 || referenceImageCount+referenceVideoCount > 4 {
+		return errors.New("MiniMax-H3 reference media count exceeds the current Server capability profile")
 	}
 	if referenceMode && !visualReferenceFound {
 		return errors.New("MiniMax-H3 reference_audio requires at least one reference image or video")
@@ -342,14 +450,38 @@ func (c *MiniMaxH3Client) doJSON(ctx context.Context, method string, endpoint st
 		return trace, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		trace.ErrorClass = fmt.Sprintf("http_%d", resp.StatusCode)
+		trace.ErrorClass = classifyMiniMaxH3HTTPStatus(resp.StatusCode)
 		return trace, redactMiniMaxH3Secret(fmt.Errorf("MiniMax-H3 HTTP %d: %s", resp.StatusCode, responseSnippet(responseBody)), c.apiKey)
+	}
+	if target == nil || len(bytes.TrimSpace(responseBody)) == 0 {
+		return trace, nil
 	}
 	if err := json.Unmarshal(responseBody, target); err != nil {
 		trace.ErrorClass = "response_parse_failed"
 		return trace, err
 	}
 	return trace, nil
+}
+
+func classifyMiniMaxH3HTTPStatus(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "provider_invalid_request"
+	case http.StatusUnauthorized:
+		return "provider_auth_failed"
+	case http.StatusPaymentRequired:
+		return "provider_insufficient_balance"
+	case http.StatusUnprocessableEntity:
+		return "provider_unprocessable_request"
+	case http.StatusTooManyRequests:
+		return "provider_rate_limited"
+	case http.StatusInternalServerError:
+		return "provider_server_error"
+	case 529:
+		return "provider_overloaded"
+	default:
+		return fmt.Sprintf("provider_http_%d", status)
+	}
 }
 
 func miniMaxH3Endpoint(baseURL string, endpoint string) string {

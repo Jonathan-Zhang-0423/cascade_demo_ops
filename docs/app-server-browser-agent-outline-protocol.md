@@ -448,6 +448,24 @@ demoops.browser_agent_contract.v1
 }
 ```
 
+## 模型生成展示候选兼容性补充（2026-08-05）
+
+模型生成展示候选已经拆分为独立公共协议：[App ↔ Server 生成展示视频能力协议](app-server-generated-video-capability-protocol.md)。本文件不再承载 Seedance 2.0 或 MiniMax-H3 的参数、模式和素材限制，避免把 Provider 专属能力混入 Browser Agent 执行包协议。
+
+当前兼容性结论保持不变：
+
+- 不修改 `ClientExecutionPackage`、`ExecutableRecordingScriptBundle`、`StageApprovalPlan` 或 `ScriptOutline` schema；
+- 当前 App 包体无需新增生成候选字段，无需重新打包；
+- 当前 App → Server 验收不依赖生成候选；
+- App 不传模型 ID、Provider、API Endpoint、API Key、厂商参数、成本治理或 Provider 任务字段；
+- 生成候选失败不能改变正式录屏、截图、分镜或业务验收结果；
+- 独立 schema/version 正式发布前，App 不得把未来逻辑意图塞入现有 required 结构。
+
+Provider 内部协议分别维护：
+
+- [Seedance 2.0 视频生成内部协议](seedance-2-0-video-generation.md)
+- [MiniMax-H3 视频生成接入说明](minimax-h3-video-generation.md)
+
 ## 错误格式
 
 所有 4xx/5xx 错误使用稳定结构，不要只返回字符串：

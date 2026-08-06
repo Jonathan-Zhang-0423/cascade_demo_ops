@@ -141,6 +141,10 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	// Local dev/test only. This is not an App, Exchange, or production runtime API.
 	mux.HandleFunc("POST /v1/desktop/dev-visible-browser-agent/prepare", s.handleDevVisibleBrowserAgent)
 	mux.HandleFunc("/v1/desktop/dev-visible-browser-agent/", s.handleDevVisibleBrowserAgent)
+	// Local App-draft acceptance bypass. It cannot receive package JSON and is
+	// protected again by requireLocalServerAcceptance inside the handler.
+	mux.HandleFunc("POST /v1/desktop/app-package-test-waivers", s.handleAppPackageTestWaivers)
+	mux.HandleFunc("/v1/desktop/app-package-test-waivers/", s.handleAppPackageTestWaivers)
 	mux.HandleFunc("GET /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions/from-result-package", s.handleEditorSessionFromResultPackage)

@@ -68,6 +68,24 @@ func TestDevVisibleTargetURLAcceptsExplicitLoopbackURL(t *testing.T) {
 	}
 }
 
+func TestDevVisiblePostLoginRuntimePlanUsesManualCheckpointOnlyForFirstSessionStage(t *testing.T) {
+	plan := BrowserAgentRuntimePlan{Stages: []BrowserAgentRuntimeStage{
+		{ID: "stage_session", Order: 1, NodeID: "node_session", StageKind: model.BusinessStageKindSessionSetup, URL: "http://127.0.0.1:5000/app", Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionFill}}},
+		{ID: "stage_action", Order: 2, NodeID: "node_action", StageKind: model.BusinessStageKindBusinessAction, URL: "http://127.0.0.1:5000/app", Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionClick}}},
+	}}
+	updated := devVisiblePostLoginRuntimePlan(plan, "http://127.0.0.1:5000/app")
+	if !updated.Stages[0].ManualSessionCheckpoint || updated.Stages[1].ManualSessionCheckpoint {
+		t.Fatalf("only the first post-login session stage may become a manual checkpoint: %+v", updated.Stages)
+	}
+	if updated.Stages[0].Interactions[0].Kind != model.GraphActionFill {
+		t.Fatal("the App-approved interaction semantics must remain unchanged in the runtime copy")
+	}
+	notLoggedIn := devVisiblePostLoginRuntimePlan(plan, "http://127.0.0.1:5000/login")
+	if notLoggedIn.Stages[0].ManualSessionCheckpoint {
+		t.Fatal("a login-page session must never receive the post-login checkpoint")
+	}
+}
+
 func TestDevVisiblePackageBindingRejectsAValidPackageForAnotherOrigin(t *testing.T) {
 	var pkg model.ClientExecutionPackage
 	if err := json.Unmarshal(readContractFixture(t, "client_execution_package.browser_agent_outline.json"), &pkg); err != nil {

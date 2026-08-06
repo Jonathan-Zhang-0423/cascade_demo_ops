@@ -49,6 +49,9 @@ v2 是目标架构，部分模块仍在迁移或尚未实现，不能仅凭文�
 
 ## 视频、素材与模型接入
 
+- [App ↔ Server 生成展示视频能力协议](./app-server-generated-video-capability-protocol.md)
+- [Seedance 2.0 视频生成内部协议](./seedance-2-0-video-generation.md)
+- [Server 生成视频统一候选产物内部协议](./generated-video-candidate-internal-protocol.md)
 - [Server Local Demo Editor MVP](./local-demo-editor-mvp.md)
 - [Demo Edit Plan v1](./demo-edit-plan-v1.md)
 - [Ark Media Integration](./ark-media-integration.md)

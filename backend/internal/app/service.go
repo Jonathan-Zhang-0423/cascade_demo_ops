@@ -58,6 +58,9 @@ type Service struct {
 	// devVisibleBrowserAgent is intentionally separate from the normal runtime.
 	// It exists only for a human-assisted local acceptance login handoff.
 	devVisibleBrowserAgent *devVisibleBrowserAgentManager
+	// devAppPackageTestWaivers never participates in Exchange. It holds only
+	// short-lived, Server-local capabilities for an unchanged App draft.
+	devAppPackageTestWaivers *devAppPackageTestWaiverManager
 }
 
 func (s *Service) SetAssistantProgressSink(sink func(string, orchestrator.ProgressEvent)) {
@@ -143,6 +146,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	}
 	service.controlPlaneURL = loadPersistedControlPlaneURL(runtime.DataRoot)
 	service.devVisibleBrowserAgent = newDevVisibleBrowserAgentManager(service)
+	service.devAppPackageTestWaivers = newDevAppPackageTestWaiverManager(service)
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
 	// Production cloud intake receives only encrypted payload references. Local
 	// and test runtimes retain inline payloads solely for deterministic fixtures

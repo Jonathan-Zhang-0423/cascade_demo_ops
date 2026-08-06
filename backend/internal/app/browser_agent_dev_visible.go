@@ -56,13 +56,20 @@ type DevVisibleBrowserAgentFixedExecuteRequest struct {
 // DevVisibleBrowserAgentResult contains only post-login local test artifacts.
 // The test run is never uploaded to Exchange or reported as production work.
 type DevVisibleBrowserAgentResult struct {
-	Status          string              `json:"status"`
-	ResultID        string              `json:"result_id,omitempty"`
-	VideoPath       string              `json:"video_path,omitempty"`
-	VideoURL        string              `json:"video_url,omitempty"`
-	StageEventPath  string              `json:"stage_event_path,omitempty"`
-	ValidationCount int                 `json:"validation_count,omitempty"`
-	Artifacts       []model.ArtifactRef `json:"artifacts,omitempty"`
+	Status                 string              `json:"status"`
+	ResultID               string              `json:"result_id,omitempty"`
+	VideoPath              string              `json:"video_path,omitempty"`
+	VideoURL               string              `json:"video_url,omitempty"`
+	StageEventPath         string              `json:"stage_event_path,omitempty"`
+	ValidationCount        int                 `json:"validation_count,omitempty"`
+	Artifacts              []model.ArtifactRef `json:"artifacts,omitempty"`
+	DevTestOnly            bool                `json:"dev_test_only,omitempty"`
+	NotForExchangeUpload   bool                `json:"not_for_exchange_upload,omitempty"`
+	TestOnlyWaiver         bool                `json:"test_only_waiver,omitempty"`
+	FormalExchange         bool                `json:"formal_exchange"`
+	AppGenerated           bool                `json:"app_generated,omitempty"`
+	TransportAuthenticated bool                `json:"transport_authenticated"`
+	WaiverID               string              `json:"waiver_id,omitempty"`
 }
 
 // DevVisibleBrowserAgentPackageBinding proves only that an already-approved
@@ -354,6 +361,19 @@ func devVisibleRealProductTestPackage(fixturePath string, targetURL string) (mod
 // guard, stage orchestration, audit events, and outcome verifier as the normal
 // Outline runtime, but never submits an Exchange job or captures login data.
 func (m *devVisibleBrowserAgentManager) ExecuteApprovedPackage(ctx context.Context, sessionID string, request DevVisibleBrowserAgentExecuteRequest) (DevVisibleBrowserAgentView, error) {
+	return m.executePackageWithGuard(ctx, sessionID, request, contractBrowserAgentPolicyGuard{}, nil)
+}
+
+// ExecuteWaivedPackage is callable only by the Server-owned waiver manager.
+// No HTTP caller can provide or mutate package JSON on this path.
+func (m *devVisibleBrowserAgentManager) ExecuteWaivedPackage(ctx context.Context, sessionID string, pkg model.ClientExecutionPackage, guard BrowserAgentPolicyGuard, waiver BrowserAgentTestWaiver) (DevVisibleBrowserAgentView, error) {
+	if !waiver.DevTestOnly || !waiver.NotForExchangeUpload || !waiver.TestOnlyWaiver || waiver.FormalExchange {
+		return DevVisibleBrowserAgentView{}, errors.New("invalid local app-package test waiver")
+	}
+	return m.executePackageWithGuard(ctx, sessionID, DevVisibleBrowserAgentExecuteRequest{Package: pkg, DevTestAck: true}, guard, &waiver)
+}
+
+func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Context, sessionID string, request DevVisibleBrowserAgentExecuteRequest, guard BrowserAgentPolicyGuard, waiver *BrowserAgentTestWaiver) (DevVisibleBrowserAgentView, error) {
 	if err := m.localOnlyGuard(request.DevTestAck); err != nil {
 		return DevVisibleBrowserAgentView{}, err
 	}
@@ -367,22 +387,49 @@ func (m *devVisibleBrowserAgentManager) ExecuteApprovedPackage(ctx context.Conte
 	// A local visible session contains an authenticated browser context. It is
 	// single-use even when validation, execution, or rendering fails.
 	defer m.closeSession(sessionID, session)
-	binding, err := validateDevVisiblePackageBinding(request.Package, session.targetOrigin)
+	var binding DevVisibleBrowserAgentPackageBinding
+	if waiver == nil {
+		binding, err = validateDevVisiblePackageBinding(request.Package, session.targetOrigin)
+	} else {
+		binding, err = validateDevVisibleWaivedPackageBinding(request.Package, session.targetOrigin, *waiver)
+	}
 	if err != nil {
 		return view, err
 	}
 	view.Package = &binding
-	if err := m.applyApprovedExecutionPolicy(ctx, session, request.Package); err != nil {
+	if err := m.applyApprovedExecutionPolicy(ctx, session, request.Package, waiver); err != nil {
 		return view, err
 	}
 
 	startedAt := timeNowUTC()
 	runID := "dev_visible_run_" + safePathSegment(sessionID)
 	recordingDir := filepath.Join(m.service.runtime.ArtifactRoot, "dev-test-only", "visible-browser-agent", safePathSegment(sessionID), "execution")
+	runtimeMode := "dev-visible-post-login"
+	if waiver != nil {
+		runID = "server_local_app_package_waiver_acceptance_" + safePathSegment(waiver.WaiverID)
+		recordingDir = filepath.Join(m.service.runtime.ArtifactRoot, "dev-test-only", "app-package-waiver", safePathSegment(waiver.WaiverID), "execution")
+		runtimeMode = "server-local-app-package-waiver-acceptance"
+	}
 	renderDir := filepath.Join(recordingDir, "render")
-	plan, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Prepare(&request.Package)
+	plan, err := newBrowserAgentStageOrchestrator(guard).Prepare(&request.Package)
 	if err != nil {
 		return view, err
+	}
+	plan = devVisiblePostLoginRuntimePlan(plan, view.ActualURL)
+	if waiver != nil {
+		var applied []BrowserAgentTestWaiverNode
+		plan, applied, err = applyTestOnlyWaiverRuntimeClassifications(plan, *waiver)
+		if err != nil {
+			return view, fmt.Errorf("apply local test-waiver runtime classifications: %w", err)
+		}
+		if err := appendBrowserAgentTestWaiverAudit(waiver.AuditLogPath, map[string]any{
+			"event": "waiver_runtime_classifications_applied", "waiver_id": waiver.WaiverID,
+			"package_id": waiver.PackageID, "bundle_hash_sha256": waiver.BundleHashSHA256, "plan_hash_sha256": waiver.PlanHashSHA256,
+			"classifications": applied, "before": false, "after": true, "runtime_copy_only": true,
+			"original_package_unchanged": true, "formal_runtime_unchanged": true, "occurred_at": timeNowUTC(),
+		}); err != nil {
+			return view, fmt.Errorf("audit local test-waiver runtime classifications: %w", err)
+		}
 	}
 	plan.RunID = runID
 	eventSink, err := newStageEventAuditLog(recordingDir, runID)
@@ -408,7 +455,7 @@ func (m *devVisibleBrowserAgentManager) ExecuteApprovedPackage(ctx context.Conte
 		preReports = append(preReports, pre)
 	}
 	stageRuntime := &localBrowserAgentStageRuntime{session: session.session, stageCount: len(plan.Stages), artifacts: map[string]model.ArtifactRef{}}
-	runResult, runErr := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier).Run(ctx, plan, stageRuntime, stageRuntime, eventSink)
+	runResult, runErr := newBrowserAgentStageOrchestratorWithVerifier(guard, verifier).Run(ctx, plan, stageRuntime, stageRuntime, eventSink)
 	if runResult.AuditError != nil {
 		return view, fmt.Errorf("visible execution audit event failure: %w", runResult.AuditError)
 	}
@@ -418,15 +465,23 @@ func (m *devVisibleBrowserAgentManager) ExecuteApprovedPackage(ctx context.Conte
 		GeneratedAssets: artifacts,
 		StepResults:     browserAgentStepResults(plan, runResult.Events, stageRuntime.artifacts),
 		WorkerID:        "video-worker-browser-agent-dev-visible",
-		RuntimeVersions: map[string]string{"runner": "playwright-browser-agent", "mode": "dev-visible-post-login"},
-		SandboxMetadata: browserAgentSandboxMetadata(&request.Package, map[string]string{"runner": "playwright-browser-agent", "mode": "dev-visible-post-login"}),
+		RuntimeVersions: map[string]string{"runner": "playwright-browser-agent", "mode": runtimeMode},
+		SandboxMetadata: browserAgentSandboxMetadata(&request.Package, map[string]string{"runner": "playwright-browser-agent", "mode": runtimeMode}),
 		StartedAt:       startedAt, CompletedAt: completedAt,
 	}
 	if runErr != nil {
 		recordResult.StepResults = browserAgentFailedStepResults(plan, runResult.Events, stageRuntime.artifacts, runErr)
 		recordResult.FailureDiagnostic = browserAgentFailureDiagnostic(BrowserAgentOutlineRunRequest{Package: &request.Package, RuntimePlan: plan, CloudJobID: runID}, runResult.Events, stageRuntime.artifacts, runErr, completedAt)
 	}
-	result, packageErr := executor.NewRecordingResultPackageFromRecordResult(&request.Package, recordResult, runID, completedAt)
+	var result model.RecordingResultPackage
+	var packageErr error
+	if waiver == nil {
+		result, packageErr = executor.NewRecordingResultPackageFromRecordResult(&request.Package, recordResult, runID, completedAt)
+	} else {
+		result, packageErr = executor.NewLocalTestRecordingResultPackageFromRecordResult(&request.Package, recordResult, runID, completedAt, executor.LocalTestRecordingResultPackageOptions{
+			WaiverID: waiver.WaiverID, SourceBundleHashSHA256: waiver.BundleHashSHA256, SourcePlanHashSHA256: waiver.PlanHashSHA256,
+		})
+	}
 	if packageErr != nil {
 		return view, fmt.Errorf("visible execution result packaging failed: %w", packageErr)
 	}
@@ -450,6 +505,15 @@ func (m *devVisibleBrowserAgentManager) ExecuteApprovedPackage(ctx context.Conte
 		}
 	}
 	view.Result = visibleExecutionResult(result, recordingDir)
+	if waiver != nil {
+		view.Result.DevTestOnly = true
+		view.Result.NotForExchangeUpload = true
+		view.Result.TestOnlyWaiver = true
+		view.Result.FormalExchange = false
+		view.Result.AppGenerated = true
+		view.Result.TransportAuthenticated = false
+		view.Result.WaiverID = waiver.WaiverID
+	}
 	// The session held authentication state only for this local test. Close it
 	// after the bounded execution so it cannot be reused by a later request.
 	if runErr != nil {
@@ -467,15 +531,69 @@ func (m *devVisibleBrowserAgentManager) ExecuteApprovedPackage(ctx context.Conte
 	return view, nil
 }
 
-func (m *devVisibleBrowserAgentManager) applyApprovedExecutionPolicy(ctx context.Context, session devVisibleBrowserAgentSession, pkg model.ClientExecutionPackage) error {
+func devVisiblePostLoginRuntimePlan(plan BrowserAgentRuntimePlan, actualURL string) BrowserAgentRuntimePlan {
+	if !sameDevVisibleRoute(actualURL, "/app") {
+		return plan
+	}
+	plan.Stages = append([]BrowserAgentRuntimeStage{}, plan.Stages...)
+	for index := range plan.Stages {
+		stage := &plan.Stages[index]
+		if stage.Order == 1 && stage.StageKind == model.BusinessStageKindSessionSetup && sameDevVisibleRoute(stage.URL, "/app") {
+			stage.ManualSessionCheckpoint = true
+		}
+	}
+	return plan
+}
+
+func sameDevVisibleRoute(value string, expectedPath string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err == nil && parsed.Path != "" {
+		return strings.EqualFold(strings.TrimRight(parsed.Path, "/"), strings.TrimRight(expectedPath, "/"))
+	}
+	return strings.Contains(strings.ToLower(value), strings.ToLower(expectedPath))
+}
+
+func validateDevVisibleWaivedPackageBinding(pkg model.ClientExecutionPackage, targetOrigin string, waiver BrowserAgentTestWaiver) (DevVisibleBrowserAgentPackageBinding, error) {
+	if pkg.PackageID != waiver.PackageID || pkg.ProjectID != waiver.ProjectID || pkg.ExecutableScriptBundle == nil {
+		return DevVisibleBrowserAgentPackageBinding{}, errors.New("test waiver package or project identity mismatch")
+	}
+	bundle := pkg.ExecutableScriptBundle
+	if bundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 || bundle.Reproducibility.BundleHashSHA256 != waiver.BundleHashSHA256 || bundle.Reproducibility.PlanHashSHA256 != waiver.PlanHashSHA256 {
+		return DevVisibleBrowserAgentPackageBinding{}, errors.New("test waiver runtime or protocol hash mismatch")
+	}
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		return DevVisibleBrowserAgentPackageBinding{}, fmt.Errorf("waived App draft plan compilation failed: %w", err)
+	}
+	baseURL, err := url.Parse(pkg.RecordingRunSpec.BaseURL)
+	if err != nil || devVisibleOrigin(baseURL) != targetOrigin || waiver.AllowedOrigin != targetOrigin {
+		return DevVisibleBrowserAgentPackageBinding{}, errors.New("waived App draft does not match the visible real-page origin")
+	}
+	if !containsExactString(plan.ExplorationScope.AllowedOrigins, targetOrigin) {
+		return DevVisibleBrowserAgentPackageBinding{}, errors.New("waived App draft allowed_origins does not include the visible real-page origin")
+	}
+	if !containsExactString(pkg.RecordingRunSpec.AllowedDomains, baseURL.Hostname()) || !containsExactString(bundle.SecurityPolicy.AllowedDomains, baseURL.Hostname()) {
+		return DevVisibleBrowserAgentPackageBinding{}, errors.New("waived App draft allowed_domains does not include the visible real-page host")
+	}
+	return DevVisibleBrowserAgentPackageBinding{PackageID: pkg.PackageID, Runtime: bundle.ScriptManifest.Runtime, StageCount: len(plan.Stages)}, nil
+}
+
+func (m *devVisibleBrowserAgentManager) applyApprovedExecutionPolicy(ctx context.Context, session devVisibleBrowserAgentSession, pkg model.ClientExecutionPackage, waiver *BrowserAgentTestWaiver) error {
 	plan, err := compileBrowserAgentRuntimePlan(&pkg)
 	if err != nil {
 		return err
 	}
 	selectors := append([]string{}, pkg.RecordingRunSpec.Redactions.MaskSelectors...)
 	selectors = append(selectors, pkg.SafetyReport.RedactionSelectors...)
+	allowedOrigins := append([]string{}, plan.ExplorationScope.AllowedOrigins...)
+	if waiver != nil {
+		// The unchanged App draft may contain scheme candidates discovered during
+		// planning. The local waiver runtime narrows the actual Worker network
+		// policy to the one real-page origin selected by the human login session.
+		allowedOrigins = []string{waiver.AllowedOrigin}
+	}
 	return session.session.ApplyExecutionPolicy(ctx, driver.BrowserAgentWorkerExecutionPolicy{
-		AllowedOrigins: plan.ExplorationScope.AllowedOrigins, AllowedRoutes: plan.ExplorationScope.AllowedRoutes,
+		AllowedOrigins: allowedOrigins, AllowedRoutes: plan.ExplorationScope.AllowedRoutes,
 		ForbiddenPages: plan.ForbiddenPages, ForbiddenPathPrefixes: plan.ExplorationScope.ForbiddenPathPrefixes,
 		ForbiddenKeywords: plan.ExplorationScope.ForbiddenKeywords, MaskSelectors: uniqueStrings(selectors),
 	})

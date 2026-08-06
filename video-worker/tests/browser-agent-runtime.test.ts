@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { evaluateRequiredValidations, resolutionAssertions, urlPolicyError } from "../src/browser-agent-runtime.js";
+import { evidenceBoundNameAllowed, evaluateRequiredValidations, isEvidenceBoundSelectorAlternative, resolutionAssertions, urlPolicyError } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -30,6 +30,26 @@ describe("browser agent navigation policy", () => {
     expect(urlPolicyError("https://app.example.com/dashboard/projects/1", session, false)).toBeUndefined();
     expect(urlPolicyError("http://app.example.com/dashboard", session, false)).toContain("origin_not_allowed");
     expect(urlPolicyError("https://app.example.com/settings", session, false)).toContain("route_not_allowed");
+  });
+});
+
+describe("browser agent App-evidence-bound selector semantics", () => {
+  const candidate = { kind: "css", value: `[data-testid="button-new-project"]` };
+
+  it("accepts the live accessible name when the App scanner appended the same test id", () => {
+    expect(evidenceBoundNameAllowed("新建项目", ["新建项目 button-new-project"], candidate)).toBe(true);
+    expect(evidenceBoundNameAllowed("+ 新建项目", ["新建项目 button-new-project"], candidate)).toBe(true);
+  });
+
+  it("rejects a different business target even when its selector was App-declared", () => {
+    expect(evidenceBoundNameAllowed("删除项目", ["新建项目 button-new-project"], candidate)).toBe(false);
+  });
+
+  it("reuses evidence-bound semantics only for the exact App candidate during re-observation and execution", () => {
+    const stage = { evidence_bound_selector_alternatives: [candidate] };
+    expect(isEvidenceBoundSelectorAlternative(stage, candidate)).toBe(true);
+    expect(isEvidenceBoundSelectorAlternative(stage, { kind: "css", value: `[data-testid="project-list"]` })).toBe(false);
+    expect(isEvidenceBoundSelectorAlternative(stage, { kind: "testid", value: "button-new-project" })).toBe(false);
   });
 });
 

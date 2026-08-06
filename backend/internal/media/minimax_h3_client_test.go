@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -109,6 +110,87 @@ func TestMiniMaxH3ClientQueriesAndNormalizesVideoOutput(t *testing.T) {
 	}
 }
 
+func TestMiniMaxH3ClientNormalizesCancelledSpelling(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task":{"id":"task_h3_1","status":"canceled"}}`))
+	}))
+	defer server.Close()
+
+	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeReal, APIKey: "minimax-secret", BaseURL: server.URL, HTTPClient: server.Client()})
+	result, err := client.GetContentGenerationTask(t.Context(), "task_h3_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response == nil || result.Response.Status != MiniMaxH3TaskCancelled {
+		t.Fatalf("normalized response = %+v", result.Response)
+	}
+}
+
+func TestMiniMaxH3ClientRejectsUnknownProviderStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task":{"id":"task_h3_1","status":"mystery"}}`))
+	}))
+	defer server.Close()
+
+	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeReal, APIKey: "minimax-secret", BaseURL: server.URL, HTTPClient: server.Client()})
+	result, err := client.GetContentGenerationTask(t.Context(), "task_h3_1")
+	if err == nil || result.Trace.ErrorClass != "provider_status_unknown" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestMiniMaxH3ClientCancelsOrDeletesTask(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != miniMaxH3GenerationEndpoint+"/task_h3_1" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task_id":"task_h3_1","action":"cancel","status":"cancelled"}`))
+	}))
+	defer server.Close()
+
+	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeReal, APIKey: "minimax-secret", BaseURL: server.URL, HTTPClient: server.Client()})
+	result, err := client.CancelOrDeleteContentGenerationTask(t.Context(), "task_h3_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TaskID != "task_h3_1" || result.Action != "cancel" || result.Status != MiniMaxH3TaskCancelled {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestMiniMaxH3ClientClassifiesProviderErrors(t *testing.T) {
+	tests := []struct {
+		status int
+		class  string
+	}{
+		{http.StatusBadRequest, "provider_invalid_request"},
+		{http.StatusUnauthorized, "provider_auth_failed"},
+		{http.StatusPaymentRequired, "provider_insufficient_balance"},
+		{http.StatusUnprocessableEntity, "provider_unprocessable_request"},
+		{http.StatusTooManyRequests, "provider_rate_limited"},
+		{http.StatusInternalServerError, "provider_server_error"},
+		{529, "provider_overloaded"},
+	}
+	for _, test := range tests {
+		t.Run(test.class, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(`{"error":{"message":"provider error"}}`))
+			}))
+			defer server.Close()
+			client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeReal, APIKey: "minimax-secret", BaseURL: server.URL, HTTPClient: server.Client()})
+			result, err := client.GetContentGenerationTask(t.Context(), "task_h3_1")
+			if err == nil || result.Trace.ErrorClass != test.class {
+				t.Fatalf("status=%d result=%+v err=%v", test.status, result, err)
+			}
+		})
+	}
+}
+
 func TestMiniMaxH3ClientQueryDryRunMakesNoProviderCall(t *testing.T) {
 	var providerCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -196,6 +278,46 @@ func TestMiniMaxH3ClientRejectsLastFrameOnlyBeforeProviderCall(t *testing.T) {
 	}
 	if result.Response != nil {
 		t.Fatalf("provider response must remain nil for a blocked request: %+v", result.Response)
+	}
+	if got := providerCalls.Load(); got != 0 {
+		t.Fatalf("provider HTTP calls = %d, want 0", got)
+	}
+}
+
+func TestMiniMaxH3ClientEnforcesConservativeReferenceProfileBeforeProviderCall(t *testing.T) {
+	var providerCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeReal, APIKey: "minimax-secret", BaseURL: server.URL, HTTPClient: server.Client()})
+
+	_, err := client.CreateContentGenerationTask(t.Context(), ContentGenerationTaskRequest{
+		Content: []ContentPart{
+			{Type: "text", Text: "Use controlled references."},
+			{Type: "image_url", ImageURL: &MediaURL{URL: "https://example.test/1.png"}, Role: "reference_image"},
+			{Type: "image_url", ImageURL: &MediaURL{URL: "https://example.test/2.png"}, Role: "reference_image"},
+			{Type: "image_url", ImageURL: &MediaURL{URL: "https://example.test/3.png"}, Role: "reference_image"},
+			{Type: "image_url", ImageURL: &MediaURL{URL: "https://example.test/4.png"}, Role: "reference_image"},
+			{Type: "video_url", VideoURL: &MediaURL{URL: "https://example.test/1.mp4"}, Role: "reference_video"},
+		},
+		Duration: 5, Ratio: "adaptive",
+	})
+	if err == nil || !strings.Contains(err.Error(), "current Server capability profile") {
+		t.Fatalf("expected conservative reference limit error, got %v", err)
+	}
+
+	_, err = client.CreateContentGenerationTask(t.Context(), ContentGenerationTaskRequest{
+		Content: []ContentPart{
+			{Type: "text", Text: "Use controlled references."},
+			{Type: "image_url", ImageURL: &MediaURL{URL: "https://example.test/1.png"}, Role: "reference_image"},
+			{Type: "audio_url", AudioURL: &MediaURL{URL: "https://example.test/1.mp3"}, Role: "reference_audio"},
+		},
+		Duration: 5, Ratio: "adaptive",
+	})
+	if !errors.Is(err, ErrMiniMaxH3ReferenceAudioNotEnabled) {
+		t.Fatalf("expected reference audio capability error, got %v", err)
 	}
 	if got := providerCalls.Load(); got != 0 {
 		t.Fatalf("provider HTTP calls = %d, want 0", got)
