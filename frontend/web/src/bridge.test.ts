@@ -473,6 +473,9 @@ describe("desktop bridge contract", () => {
 	  if (url.includes("/browser-agent-direct/review")) {
 		return bridgeJSON({ review_id: "review_split_real", decision: "approved", summary: "成品通过", reviewed_at: "2026-07-14T00:01:00Z" });
 	  }
+	  if (url.includes("/browser-agent-direct/release")) {
+		return bridgeJSON({ released: true, lease_id_suffix: "split_real" });
+	  }
       throw new Error(`unexpected URL ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -482,6 +485,7 @@ describe("desktop bridge contract", () => {
     const completed = await bridge.pollCloudRun(uploaded.data ?? workspace);
 	const acked = await bridge.ackResultPackage(completed.data ?? workspace);
 	const reviewed = await bridge.reviewResult(acked.data ?? completed.data ?? workspace, "approved", "成品通过");
+	const released = await bridge.releaseDirectBrowserAgentLease(reviewed.data ?? acked.data ?? completed.data ?? workspace);
 
     expect(uploaded.ok).toBe(true);
     expect(uploaded.data?.cloudRun.exchangePackageID).toBe("pkg_split_real");
@@ -494,12 +498,16 @@ describe("desktop bridge contract", () => {
 	expect(acked.data?.assets[0]?.mediaURL).toContain("/browser-agent-direct/artifact/media?");
 	expect(JSON.stringify(acked.data)).not.toContain("C:\\DemoOps");
 	expect(reviewed.data?.assets[0]?.status).toBe("approved");
+	expect(released.ok).toBe(true);
+	expect(released.data?.cloudRun.leaseID).toBeUndefined();
+	expect(released.data?.cloudRun.dataPort).toBeUndefined();
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/upload",
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/status?job_id=job_split_real",
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/result?job_id=job_split_real",
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/artifact/download",
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/review",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/release",
 	]);
   });
 

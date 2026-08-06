@@ -88,8 +88,9 @@ pnpm smoke:desktop-installer
 
 `backend/cmd/wails-desktop` is the Windows-first Wails v2/WebView2 entry. It
 serves packaged React assets and the existing Go HTTP bridge in-process, without
-a dev server or listening port. `backend/cmd/desktop` remains the legacy fallback
-until install, upgrade, rollback, and uninstall smoke are complete.
+a dev server or listening port. The old `backend/cmd/desktop` native Exchange
+surface is disabled; it cannot upload, query, or download through the retired
+DemoOps Exchange path.
 
 `backend/cmd/desktop-installer` is the current Windows setup baseline. It is a
 self-extracting installer that embeds the portable zip payload, validates the

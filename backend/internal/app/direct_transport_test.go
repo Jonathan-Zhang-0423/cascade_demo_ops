@@ -132,6 +132,10 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	if err != nil || repeated.ReviewID != review.ReviewID || !repeated.ReviewedAt.Equal(review.ReviewedAt) {
 		t.Fatalf("direct review idempotency did not preserve the original record: first=%+v repeated=%+v err=%v", review, repeated, err)
 	}
+	released, err := service.ReleaseDirectTransportLease(t.Context(), state.ProjectID)
+	if err != nil || !released.Released {
+		t.Fatalf("direct lease was not released after verified terminal result: %+v err=%v", released, err)
+	}
 
 	persisted, err := states.Load(t.Context(), state.ProjectID)
 	if err != nil {
@@ -139,10 +143,10 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	}
 	serialized, _ := json.Marshal(persisted)
 	serializedText := string(serialized)
-	if strings.Contains(serializedText, directAppBootstrapToken) || strings.Contains(serializedText, vault.leaseToken()) {
+	if strings.Contains(serializedText, directAppBootstrapToken) {
 		t.Fatal("project state leaked direct transport token")
 	}
-	if persisted.DesktopCloudRun == nil || persisted.DesktopCloudRun.Transport != directTransportStateName || persisted.DesktopCloudRun.DataPort != port {
+	if persisted.DesktopCloudRun == nil || persisted.DesktopCloudRun.Transport != directTransportStateName || persisted.DesktopCloudRun.DataPort != 0 || persisted.DesktopCloudRun.LeaseID != "" || persisted.DesktopCloudRun.LeaseExpiresAt != nil {
 		t.Fatalf("direct state was not persisted safely: %+v", persisted.DesktopCloudRun)
 	}
 	if !persisted.DesktopCloudRun.ResultDownloaded || persisted.DesktopCloudRun.ResultReview == nil || persisted.DesktopCloudRun.ResultReview.Decision != string(model.ResultReviewApproved) {

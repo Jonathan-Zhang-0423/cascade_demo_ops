@@ -23,7 +23,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:0", "local desktop host address")
 	check := flag.Bool("check", false, "initialize the desktop bridge and exit")
 	openBrowser := flag.Bool("open", true, "open the desktop app window")
-	nativeUI := flag.Bool("native", true, "open the native desktop interface instead of the compatibility web host")
+	nativeUI := flag.Bool("native", false, "deprecated legacy native interface (disabled; use the Wails desktop or direct bridge)")
 	flag.Parse()
 
 	runtimeConfig, err := config.RuntimeConfigFromEnv()
@@ -40,12 +40,9 @@ func main() {
 		writeReady(runtimeConfig, "", "Native desktop runtime is initialized.")
 		return
 	}
-	if *nativeUI && supportsNativeDesktopUI() {
-		logger.Printf("starting native desktop ui")
-		if err := runNativeDesktopUI(runtimeConfig, service, logger); err != nil {
-			must(err, runtimeConfig)
-		}
-		logger.Printf("native desktop ui stopped after %s", time.Since(startedAt))
+	if *nativeUI {
+		logger.Printf("legacy native desktop ui disabled; formal execution requires the Wails direct Browser Agent bridge")
+		writeReady(runtimeConfig, "", "legacy_native_disabled: use the Wails desktop or direct Browser Agent bridge")
 		return
 	}
 
