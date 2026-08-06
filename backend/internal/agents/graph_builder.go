@@ -644,7 +644,12 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 		}
 	}
 	target.URL = firstNonEmpty(best.URL, urlForBusinessStage(stage, entryPoint))
-	target.Selector = best.Selector
+	// A verified test id is an authoritative identity for the control.  Do not
+	// carry a stale/conflicting selector from another component (for example a
+	// project-list container paired with button-new-project evidence).  Keeping
+	// the semantic target and selector in lockstep prevents the runtime from
+	// having to guess which control the App actually approved.
+	target.Selector = canonicalBusinessSelector(best.TestID, best.Selector)
 	target.Label = firstNonEmpty(best.Label, stage.Action.Label)
 	target.Text = best.Text
 	target.Role = best.Role
@@ -669,6 +674,20 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 	return target
 }
 
+func canonicalBusinessSelector(testID, selector string) string {
+	testID = strings.TrimSpace(testID)
+	selector = strings.TrimSpace(selector)
+	if testID == "" {
+		return selector
+	}
+	// A selector that explicitly references the same test id is already
+	// consistent; otherwise prefer the stable data-testid locator.
+	if strings.Contains(strings.ToLower(selector), "data-testid") && strings.Contains(selector, testID) {
+		return selector
+	}
+	return `[data-testid="` + strings.ReplaceAll(testID, `"`, ``) + `"]`
+}
+
 func businessStageValidation(stage model.BusinessStage, action model.GraphActionType, target model.ActionTarget, required bool) model.ValidationSpec {
 	kind := "element_visible"
 	expected := any(true)
@@ -676,9 +695,20 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		kind = "url_matches"
 		expected = firstNonEmpty(target.URL, stage.EntryRoute)
 	} else if stage.Kind == model.BusinessStageKindBusinessAction && strings.TrimPrefix(stage.ID, "business_stage_") == "new_project_entry" {
-		kind = "text_contains"
-		target = model.ActionTarget{}
-		expected = "新建项目"
+		// The clicked button is an action target, not proof that the creation
+		// flow opened.  Prefer an App-verified dialog/input result target and
+		// otherwise require a semantic dialog assertion instead of reusing the
+		// button selector.
+		resultTarget := businessStageResultTarget(stage)
+		if resultTarget.TestID != "" || resultTarget.Selector != "" || resultTarget.Role != "" {
+			target = resultTarget
+			kind = "element_visible"
+			expected = true
+		} else {
+			kind = "text_contains"
+			target = model.ActionTarget{Role: "dialog", Label: "新建项目表单"}
+			expected = "新建项目"
+		}
 	} else if stage.Kind == model.BusinessStageKindBusinessInput && strings.TrimSpace(stage.Action.InputValue) != "" {
 		kind = "value_equals"
 		expected = stage.Action.InputValue
@@ -707,6 +737,16 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		EvidenceRefs: stage.EvidenceRefs,
 		RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2},
 	}
+}
+
+func businessStageResultTarget(stage model.BusinessStage) model.ActionTarget {
+	for _, candidate := range stage.Targets {
+		text := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef, candidate.Label, candidate.Text}, " "))
+		if strings.Contains(text, "dialog") || strings.Contains(text, "modal") || strings.Contains(text, "project-idea") || strings.Contains(text, "项目表单") || strings.Contains(text, "项目名称") {
+			return model.ActionTarget{Selector: canonicalBusinessSelector(candidate.TestID, candidate.Selector), Role: candidate.Role, Text: candidate.Text, Label: candidate.Label, TestID: candidate.TestID, ComponentRef: candidate.ComponentRef, EvidenceRefs: candidate.EvidenceRefs}
+		}
+	}
+	return model.ActionTarget{}
 }
 
 func businessStageStateAssertionKind(stage model.BusinessStage, action model.GraphActionType) string {
@@ -2132,7 +2172,9 @@ func requirementsFromProject(project *model.ProjectContext) []model.GraphRequire
 			ID:          fmt.Sprintf("forbidden_data_%d", i+1),
 			Kind:        "forbidden_data",
 			Description: item,
-			Required:    true,
+			// Forbidden data is a safety constraint, never positive business
+			// coverage.  It is enforced by the security policy validator.
+			Required: false,
 		})
 	}
 	return requirements

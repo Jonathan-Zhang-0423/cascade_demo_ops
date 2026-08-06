@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"cascade-demoops/backend/internal/model"
@@ -148,6 +149,25 @@ func TestBusinessStageNonDestructiveClassifierRejectsGenericAndDangerousActions(
 		id: "start_agent_build", actionType: string(model.GraphActionClick), actionLabel: "启动 agent 构建",
 	}) {
 		t.Fatal("explicit project build action should be classified as non-destructive")
+	}
+}
+
+func TestBusinessStageResultValidationDoesNotReuseClickedButton(t *testing.T) {
+	stage := model.BusinessStage{
+		ID:     "business_stage_new_project_entry",
+		Kind:   model.BusinessStageKindBusinessAction,
+		Action: model.BusinessActionSemantics{Type: string(model.GraphActionClick), Label: "新建项目"},
+		Targets: []model.BusinessTargetCandidate{
+			{Label: "新建项目", TestID: "button-new-project", Selector: "[data-testid='project-list']"},
+			{Label: "项目输入框", TestID: "input-project-idea", Selector: "[data-testid='input-project-idea']"},
+		},
+	}
+	validation := businessStageValidation(stage, model.GraphActionClick, businessStageActionTarget(stage, "https://app.example/app"), true)
+	if validation.Kind != "element_visible" {
+		t.Fatalf("expected result visibility validation, got %+v", validation)
+	}
+	if validation.Target.TestID != "input-project-idea" || strings.Contains(validation.Target.Selector, "project-list") {
+		t.Fatalf("validation reused clicked/stale target: %+v", validation.Target)
 	}
 }
 
