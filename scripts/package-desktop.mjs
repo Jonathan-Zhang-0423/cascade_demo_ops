@@ -167,7 +167,8 @@ function buildPackageManifest() {
     desktop_ui: {
       primary: targetGOOS === "windows" ? "wails_webview2" : "legacy_native",
       uses_browser_shell: targetGOOS === "windows",
-      legacy_fallback_entry: "backend/cmd/desktop",
+      legacy_fallback_entry: "",
+      legacy_fallback_disabled: true,
       native_capabilities: [
         "input_collection",
         "native_input_readiness_summary",

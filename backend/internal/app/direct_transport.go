@@ -274,12 +274,22 @@ func (s *Service) ReleaseDirectTransportLease(ctx context.Context, projectID str
 		return DirectTransportReleaseResult{}, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNotFound {
-		return DirectTransportReleaseResult{}, readDirectHTTPError(response)
-	}
 	if response.StatusCode == http.StatusNotFound {
-		_ = s.deleteDirectLease(projectID)
+		releaseErr := readDirectHTTPError(response)
+		var transportErr *directTransportHTTPError
+		if !errors.As(releaseErr, &transportErr) || transportErr.Code != "lease_not_found" {
+			return DirectTransportReleaseResult{}, errors.New("direct Browser Agent lease release endpoint is unavailable")
+		}
+		if err := s.persistDirectLeaseRelease(ctx, projectID); err != nil {
+			return DirectTransportReleaseResult{}, err
+		}
+		if err := s.deleteDirectLease(projectID); err != nil {
+			return DirectTransportReleaseResult{}, err
+		}
 		return DirectTransportReleaseResult{Released: true, Lease: directLeaseView(lease)}, nil
+	}
+	if response.StatusCode != http.StatusOK {
+		return DirectTransportReleaseResult{}, readDirectHTTPError(response)
 	}
 	var result struct {
 		Released bool `json:"released"`
@@ -289,6 +299,9 @@ func (s *Service) ReleaseDirectTransportLease(ctx context.Context, projectID str
 	}
 	if !result.Released {
 		return DirectTransportReleaseResult{}, errors.New("direct Browser Agent lease release was not acknowledged")
+	}
+	if err := s.persistDirectLeaseRelease(ctx, projectID); err != nil {
+		return DirectTransportReleaseResult{}, err
 	}
 	if err := s.deleteDirectLease(projectID); err != nil {
 		return DirectTransportReleaseResult{}, err
@@ -770,6 +783,16 @@ func (s *Service) persistDirectUpload(ctx context.Context, projectID, orgID stri
 		run.Stage = receipt.Stage
 		run.Message = "执行包已加密上传至专属 Browser Agent 端口。"
 		run.ProgressPercent = 5
+	})
+}
+
+func (s *Service) persistDirectLeaseRelease(ctx context.Context, projectID string) error {
+	return s.updateDesktopCloudRun(ctx, projectID, func(run *orchestrator.DesktopCloudRunState) {
+		run.LeaseID = ""
+		run.DataPort = 0
+		run.LeaseExpiresAt = nil
+		run.Message = "直连租约已释放；终态结果和已校验素材仍保留。"
+		run.Stage = "lease_released"
 	})
 }
 
