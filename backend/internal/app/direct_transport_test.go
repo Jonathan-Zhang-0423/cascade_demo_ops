@@ -73,7 +73,7 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	if build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked {
 		t.Fatalf("draft is blocked: %+v", build.Package.ConfidenceSummary)
 	}
-	upload, err := service.UploadDirectExecutionPackage(t.Context(), state.ProjectID, DirectTransportUploadRequest{OrgID: defaultDesktopOrgID, ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: build.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true, IdempotencyKey: "direct-tetris-approval"})
+	upload, err := service.UploadDirectExecutionPackage(t.Context(), state.ProjectID, DirectTransportUploadRequest{OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256, ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: build.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true, IdempotencyKey: "direct-tetris-approval"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestAppDirectTransportReleasesLeaseWhenPackageUploadFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.UploadDirectExecutionPackage(t.Context(), state.ProjectID, DirectTransportUploadRequest{OrgID: defaultDesktopOrgID, ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: build.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true, IdempotencyKey: "direct-upload-failure"})
+	_, err = service.UploadDirectExecutionPackage(t.Context(), state.ProjectID, DirectTransportUploadRequest{OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256, ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: build.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true, IdempotencyKey: "direct-upload-failure"})
 	if err == nil {
 		t.Fatal("package upload unexpectedly reached the unavailable advertised data host")
 	}

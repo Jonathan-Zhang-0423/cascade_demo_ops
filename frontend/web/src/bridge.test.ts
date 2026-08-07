@@ -60,6 +60,27 @@ describe("desktop bridge contract", () => {
     expect(result.data?.modelProviders.seedance?.apiKeyFallbackEnvs).toEqual(["DOUBAO_API_KEY", "ARK_API_KEY"]);
   });
 
+  it("blocks package preflight with missing authoritative digest before any network request", async () => {
+    const workspace = createWorkspace("product_demo");
+    const notReady = {
+      ...workspace,
+	  packagePreview: {
+		...workspace.packagePreview,
+		packageDigest: "",
+		approvalSubjectDigest: "",
+		confidenceAssessmentHash: "",
+	  },
+    };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").preflightExecutionPackage(notReady);
+
+    expect(result.ok).toBe(false);
+    expect(result.errorInfo?.code).toBe("package_preview_not_ready");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("stores the Browser Agent token through the direct bridge and returns only redacted health", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
 	  if (url.endsWith("/v1/desktop/browser-agent-direct")) {
@@ -525,6 +546,12 @@ describe("desktop bridge contract", () => {
         ok: true,
         data: {
           project_id: "project_real",
+          org_id: "org_desktop",
+          build_status: "draft",
+          approval_subject_digest_sha256: "sha256:approval-real",
+          package_digest_sha256: "sha256:package-real",
+          package: { package_id: "pkg_bundle_real", confidence_summary: { assessment_hash: "sha256:confidence-real", readiness: "ready", overall_score: 0.92, warnings: [], blocking_reasons: [] } },
+          size_report: { algorithm_version: "v1", total_bytes: 1024, section_bytes: {}, stage_count: 1, evidence_count: 1, selector_count: 1 },
           current_node: "HumanApprove",
           status: "awaiting_human_approval",
           project_context: {
@@ -691,7 +718,9 @@ describe("desktop bridge contract", () => {
     expect(result.data?.scriptReadiness?.recommended_scenario_name).toBe("团队协作主线演示");
     expect(result.data?.agentGraphTrace?.steps?.[0]?.tool).toBe("RepoIndexTool");
     expect(result.data?.understanding.routesDetected).toBe(1);
-    expect(result.data?.packagePreview.packageDigest).toBe("sha256:bundle");
+    expect(result.data?.packagePreview.packageDigest).toBe("sha256:package-real");
+    expect(result.data?.packagePreview.approvalSubjectDigest).toBe("sha256:approval-real");
+    expect(result.data?.packagePreview.confidenceAssessmentHash).toBe("sha256:confidence-real");
     expect(result.data?.modelProvenance?.[0]).toContain("kimi-openai-compatible");
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/execution-package",
@@ -721,6 +750,12 @@ describe("desktop bridge contract", () => {
         ok: true,
         data: {
           project_id: "project_real",
+          org_id: "org_desktop",
+          build_status: "draft",
+          approval_subject_digest_sha256: "sha256:approval-real",
+          package_digest_sha256: "sha256:package-real",
+          package: { package_id: "pkg_bundle_real", confidence_summary: { assessment_hash: "sha256:confidence-real", readiness: "ready", overall_score: 0.92, warnings: [], blocking_reasons: [] } },
+          size_report: { algorithm_version: "v1", total_bytes: 1024, section_bytes: {}, stage_count: 1, evidence_count: 1, selector_count: 1 },
           current_node: "HumanApprove",
           status: "awaiting_human_approval",
           project_context: {

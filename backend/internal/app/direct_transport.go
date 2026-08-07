@@ -59,6 +59,7 @@ type DirectTransportRuntimeView struct {
 
 type DirectTransportUploadRequest struct {
 	OrgID                       string `json:"org_id,omitempty"`
+	PackageDigestSHA256         string `json:"package_digest_sha256"`
 	ApprovalSubjectDigestSHA256 string `json:"approval_subject_digest_sha256"`
 	ConfidenceAssessmentHash    string `json:"confidence_assessment_hash"`
 	RiskConfirmed               bool   `json:"risk_confirmed"`
@@ -183,7 +184,10 @@ func (s *Service) DirectTransportStatus(ctx context.Context) (DirectTransportRun
 }
 
 func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID string, request DirectTransportUploadRequest) (DirectTransportUploadResult, error) {
-	approval := CloudUploadInitRequest{OrgID: request.OrgID, ProjectID: projectID, ApprovalSubjectDigestSHA256: request.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: request.ConfidenceAssessmentHash, RiskConfirmed: request.RiskConfirmed, IdempotencyKey: request.IdempotencyKey}
+	if strings.TrimSpace(request.PackageDigestSHA256) == "" {
+		return DirectTransportUploadResult{}, errors.New("direct Browser Agent upload requires the authoritative package digest")
+	}
+	approval := CloudUploadInitRequest{OrgID: request.OrgID, ProjectID: projectID, PackageDigestSHA256: request.PackageDigestSHA256, ApprovalSubjectDigestSHA256: request.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: request.ConfidenceAssessmentHash, RiskConfirmed: request.RiskConfirmed, IdempotencyKey: request.IdempotencyKey}
 	build, err := s.ApproveClientExecutionPackage(ctx, projectID, firstNonEmptyString(request.OrgID, defaultDesktopOrgID), approval)
 	if err != nil {
 		return DirectTransportUploadResult{}, err

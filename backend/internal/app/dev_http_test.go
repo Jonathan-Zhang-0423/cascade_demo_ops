@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +58,56 @@ func TestDevHTTPBridgeGeneratesExecutionPackage(t *testing.T) {
 		if strings.Contains(payload, forbidden) {
 			t.Fatalf("response leaked forbidden value %q: %s", forbidden, payload)
 		}
+	}
+}
+
+func TestDevHTTPBridgeClientPackagePreflightIsLocalAndDigestBound(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	input := orchestrator.UserInput{
+		ProjectID:          "local-preflight-project",
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		ProductDescription: "展示新建项目流程",
+		TargetAudience:     "中国运营团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
+	}
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	build, err := server.service.BuildClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestBody, err := json.Marshal(ClientExecutionPackagePreflightRequest{
+		OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256,
+		ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256,
+		ConfidenceAssessmentHash:    build.Package.ConfidenceSummary.AssessmentHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/"+url.PathEscape(state.ProjectID)+"/client-execution-package/preflight", bytes.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected preflight status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if !bridge.OK {
+		t.Fatalf("local preflight failed: %s", bridge.Error)
+	}
+	var result CloudPackagePreflightResult
+	if err := json.Unmarshal(bridge.Data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Valid || result.BuildStatus != "draft" || result.PackageDigestSHA256 != build.PackageDigestSHA256 || result.ApprovalSubjectDigestSHA256 != build.ApprovalSubjectDigestSHA256 {
+		t.Fatalf("unexpected local preflight result: %+v", result)
 	}
 }
 

@@ -55,6 +55,7 @@ type PackageSizeReport struct {
 type CloudUploadInitRequest struct {
 	OrgID                       string `json:"org_id,omitempty"`
 	ProjectID                   string `json:"project_id,omitempty"`
+	PackageDigestSHA256         string `json:"package_digest_sha256,omitempty"`
 	ApprovalSubjectDigestSHA256 string `json:"approval_subject_digest_sha256"`
 	ConfidenceAssessmentHash    string `json:"confidence_assessment_hash"`
 	RiskConfirmed               bool   `json:"risk_confirmed"`
@@ -82,15 +83,29 @@ type CloudUploadPackageResult struct {
 // CloudPackagePreflightResult is a no-side-effect Server Intake report for
 // the App-generated package. It must pass before upload or Browser execution.
 type CloudPackagePreflightResult struct {
-	Valid          bool                         `json:"valid"`
-	Runtime        string                       `json:"runtime,omitempty"`
-	PackageID      string                       `json:"package_id,omitempty"`
-	StageCount     int                          `json:"stage_count,omitempty"`
-	RequiredChecks int                          `json:"required_checks,omitempty"`
-	AllowedDomains []string                     `json:"allowed_domains,omitempty"`
-	Warnings       []string                     `json:"warnings"`
-	Readiness      *BrowserAgentReadinessReport `json:"browser_agent_readiness,omitempty"`
-	Message        string                       `json:"message"`
+	Valid                       bool                         `json:"valid"`
+	BuildStatus                 string                       `json:"build_status,omitempty"`
+	PackageDigestSHA256         string                       `json:"package_digest_sha256,omitempty"`
+	ApprovalSubjectDigestSHA256 string                       `json:"approval_subject_digest_sha256,omitempty"`
+	ConfidenceAssessmentHash    string                       `json:"confidence_assessment_hash,omitempty"`
+	Runtime                     string                       `json:"runtime,omitempty"`
+	PackageID                   string                       `json:"package_id,omitempty"`
+	StageCount                  int                          `json:"stage_count,omitempty"`
+	RequiredChecks              int                          `json:"required_checks,omitempty"`
+	AllowedDomains              []string                     `json:"allowed_domains,omitempty"`
+	Warnings                    []string                     `json:"warnings"`
+	Readiness                   *BrowserAgentReadinessReport `json:"browser_agent_readiness,omitempty"`
+	Message                     string                       `json:"message"`
+}
+
+// ClientExecutionPackagePreflightRequest is deliberately limited to the
+// authoritative preview identities. It never carries credentials or cloud
+// transport state and therefore cannot allocate a lease or contact Exchange.
+type ClientExecutionPackagePreflightRequest struct {
+	OrgID                       string `json:"org_id,omitempty"`
+	PackageDigestSHA256         string `json:"package_digest_sha256"`
+	ApprovalSubjectDigestSHA256 string `json:"approval_subject_digest_sha256"`
+	ConfidenceAssessmentHash    string `json:"confidence_assessment_hash"`
 }
 
 type CloudStatusRequest struct {
@@ -224,6 +239,31 @@ func (s *Service) BuildClientExecutionPackage(ctx context.Context, projectID str
 	return buildClientExecutionPackageFromState(state, orgID, time.Now().UTC())
 }
 
+// PreflightClientExecutionPackage validates the current authoritative App
+// draft locally. Unlike the retired cloud/preflight route it does not approve,
+// sign, create an Exchange session, or allocate a direct transport lease.
+func (s *Service) PreflightClientExecutionPackage(ctx context.Context, projectID string, request ClientExecutionPackagePreflightRequest) (CloudPackagePreflightResult, error) {
+	packageDigest := strings.TrimSpace(request.PackageDigestSHA256)
+	approvalDigest := strings.TrimSpace(request.ApprovalSubjectDigestSHA256)
+	confidenceHash := strings.TrimSpace(request.ConfidenceAssessmentHash)
+	if packageDigest == "" || approvalDigest == "" || confidenceHash == "" {
+		return CloudPackagePreflightResult{}, errors.New("package_preview_not_ready: package, approval, and confidence digests are required")
+	}
+	build, err := s.BuildClientExecutionPackage(ctx, projectID, firstNonEmptyString(request.OrgID, defaultDesktopOrgID))
+	if err != nil {
+		return CloudPackagePreflightResult{}, err
+	}
+	if build.BuildStatus != "draft" || build.PackageDigestSHA256 != packageDigest || build.ApprovalSubjectDigestSHA256 != approvalDigest || build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash != confidenceHash {
+		return CloudPackagePreflightResult{}, &packagePreviewStaleError{}
+	}
+	result := executionPackagePreflightResult(build.Package)
+	result.BuildStatus = build.BuildStatus
+	result.PackageDigestSHA256 = build.PackageDigestSHA256
+	result.ApprovalSubjectDigestSHA256 = build.ApprovalSubjectDigestSHA256
+	result.ConfidenceAssessmentHash = confidenceHash
+	return result, nil
+}
+
 func (s *Service) ApproveCloudClientExecutionPackage(ctx context.Context, projectID string, orgID string, request CloudUploadInitRequest) (ClientExecutionPackageBuild, ExchangeSession, error) {
 	build, err := s.ApproveClientExecutionPackage(ctx, projectID, orgID, request)
 	if err != nil {
@@ -251,7 +291,7 @@ func (s *Service) ApproveClientExecutionPackage(ctx context.Context, projectID s
 	s.approvalMu.Lock()
 	defer s.approvalMu.Unlock()
 	if cached, ok := s.approvedBuilds[idempotencyCacheKey]; ok {
-		if cached.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || cached.Package.ConfidenceSummary == nil || cached.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
+		if (strings.TrimSpace(request.PackageDigestSHA256) != "" && cached.PackageDigestSHA256 != request.PackageDigestSHA256) || cached.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || cached.Package.ConfidenceSummary == nil || cached.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
 			return ClientExecutionPackageBuild{}, &packagePreviewStaleError{}
 		}
 		return cached, nil
@@ -260,7 +300,7 @@ func (s *Service) ApproveClientExecutionPackage(ctx context.Context, projectID s
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
-	if build.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
+	if (strings.TrimSpace(request.PackageDigestSHA256) != "" && build.PackageDigestSHA256 != request.PackageDigestSHA256) || build.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
 		return ClientExecutionPackageBuild{}, &packagePreviewStaleError{}
 	}
 	if build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked {

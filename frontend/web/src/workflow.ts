@@ -292,7 +292,19 @@ export function packageApprovalBlockedReasons(
   checklist: ApprovalChecklistState,
   sources: SourceConnectionView[],
 ): string[] {
-  const blocked = new Set<string>(preview.blockedReasons);
+	const blocked = new Set<string>(preview.blockedReasons);
+	if (!preview.packageDigest?.trim()) {
+		blocked.add("正式执行包 digest 尚未生成，请重新生成执行包预览。");
+	}
+	if (!preview.approvalSubjectDigest?.trim()) {
+		blocked.add("正式审批对象 digest 尚未生成，请重新生成执行包预览。");
+	}
+	if (!preview.confidenceAssessmentHash?.trim()) {
+		blocked.add("置信度评估 hash 尚未生成，请重新生成执行包预览。");
+	}
+	if (preview.buildStatus !== "draft") {
+		blocked.add("执行包尚未处于可审批草稿状态。");
+	}
   if (preview.readiness === "blocked") {
     blocked.add("执行包确信度门禁未通过，请先修复阻断项。");
   }

@@ -740,10 +740,25 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     },
     async preflightExecutionPackage(workspace) {
 	  const preview = workspace.packagePreview;
-      return requestLocal<CloudPackagePreflightView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/preflight`, {
-        method: "POST",
-		body: JSON.stringify({ org_id: orgID, approval_subject_digest_sha256: preview.approvalSubjectDigest ?? preview.packageDigest, confidence_assessment_hash: preview.confidenceAssessmentHash ?? preview.packageDigest, risk_confirmed: true, idempotency_key: `preflight-${workspace.id}-${preview.approvalSubjectDigest ?? preview.packageDigest}` }),
-      });
+	  const approvalDigest = preview.approvalSubjectDigest?.trim();
+	  const confidenceHash = preview.confidenceAssessmentHash?.trim();
+	  const packageDigest = preview.packageDigest?.trim();
+	  if (!approvalDigest || !confidenceHash || !packageDigest) {
+		return bridgeFailure("正式执行包预检尚未生成权威 digest；请重新生成本地执行包预览。", {
+		  code: "package_preview_not_ready",
+		  message: "正式执行包预检尚未生成权威 digest",
+		  retryable: true,
+		  details: [
+			...(!approvalDigest ? [{ field: "approval_subject_digest_sha256", message: "缺少审批对象 digest", hint: "重新生成执行包预览" }] : []),
+			...(!confidenceHash ? [{ field: "confidence_assessment_hash", message: "缺少置信度评估 hash", hint: "重新生成执行包预览" }] : []),
+			...(!packageDigest ? [{ field: "package_digest_sha256", message: "缺少执行包 digest", hint: "重新生成执行包预览" }] : []),
+		  ],
+		});
+	  }
+	  return requestLocal<CloudPackagePreflightView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/client-execution-package/preflight`, {
+		method: "POST",
+		body: JSON.stringify({ org_id: orgID, package_digest_sha256: packageDigest, approval_subject_digest_sha256: approvalDigest, confidence_assessment_hash: confidenceHash }),
+	  });
     },
     async editorMaterialization(workspace) {
       const resultPackageID = workspace.cloudRun.resultPackageID ?? workspace.cloudRun.resultPackage?.result_id;
@@ -978,8 +993,29 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         return { ok: false, error: result.error ?? "执行包生成失败" };
       }
       const generated = workspaceFromCascadeState(result.data, workspace);
-      projects.set(generated.id, generated);
-      return ok(generated);
+      const buildResult = await requestLocal<LocalClientExecutionPackageBuild>(baseURL, `/v1/desktop/projects/${encodeURIComponent(generated.id)}/client-execution-package`, {
+		method: "POST",
+		body: JSON.stringify({ org_id: orgID }),
+	  });
+	  if (!buildResult.ok || !buildResult.data) {
+		return bridgeFailure(buildResult.error ?? "正式执行包预检失败", buildResult.errorInfo);
+	  }
+	  const build = buildResult.data;
+  if (!build.package || !build.approval_subject_digest_sha256?.trim() || !build.package_digest_sha256?.trim() || !build.package.confidence_summary?.assessment_hash?.trim()) {
+		return bridgeFailure("正式执行包预检未生成完整 digest；上传已阻断。", {
+		  code: "package_preview_not_ready",
+		  message: "正式执行包缺少权威 digest",
+		  retryable: true,
+		  details: [
+			...(!build.approval_subject_digest_sha256?.trim() ? [{ field: "approval_subject_digest_sha256", message: "缺少审批对象 digest", hint: "重新生成执行包预览" }] : []),
+			...(!build.package_digest_sha256?.trim() ? [{ field: "package_digest_sha256", message: "缺少执行包 digest", hint: "重新生成执行包预览" }] : []),
+			...(!build.package?.confidence_summary?.assessment_hash?.trim() ? [{ field: "confidence_assessment_hash", message: "缺少置信度评估 hash", hint: "重新生成执行包预览" }] : []),
+		  ],
+		});
+	  }
+      const prepared = workspaceWithPreparedBuild(generated, build);
+      projects.set(prepared.id, prepared);
+      return ok(prepared);
     },
     async runProductLifecycle(workspace, options) {
       const userInput = userInputFromWorkspace(workspace, options);
@@ -1044,16 +1080,27 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(next.id, next);
       return ok(result.data);
     },
-    async approveAndUploadPackage(workspace) {
+	async approveAndUploadPackage(workspace) {
       const preview = workspace.packagePreview;
+      const packageDigest = preview.packageDigest?.trim();
+      const approvalDigest = preview.approvalSubjectDigest?.trim();
+      const confidenceHash = preview.confidenceAssessmentHash?.trim();
+	  if (!packageDigest || !approvalDigest || !confidenceHash || preview.readiness === "blocked" || preview.buildStatus !== "draft") {
+		return bridgeFailure("当前执行包未满足正式审批前置条件，上传已阻断。", {
+		  code: "package_preview_not_ready",
+		  message: "执行包必须具有正式 digest、置信度 hash 且处于可审批草稿状态",
+		  retryable: true,
+		});
+	  }
       const result = await requestLocal<LocalDirectUploadResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/upload`, {
         method: "POST",
         body: JSON.stringify({
           org_id: orgID,
-          approval_subject_digest_sha256: preview.approvalSubjectDigest ?? preview.packageDigest,
-          confidence_assessment_hash: preview.confidenceAssessmentHash ?? preview.packageDigest,
+          package_digest_sha256: packageDigest,
+          approval_subject_digest_sha256: approvalDigest,
+          confidence_assessment_hash: confidenceHash,
           risk_confirmed: true,
-          idempotency_key: `direct-approve-${workspace.id}-${preview.approvalSubjectDigest ?? preview.packageDigest}`,
+          idempotency_key: `direct-approve-${workspace.id}-${approvalDigest}`,
         }),
       });
       if (!result.ok || !result.data) return bridgeFailure(result.error ?? "加密上传 Browser Agent 执行包失败", result.errorInfo);

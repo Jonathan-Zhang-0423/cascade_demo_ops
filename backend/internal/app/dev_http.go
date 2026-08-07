@@ -677,6 +677,16 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		build, err := s.service.BuildClientExecutionPackage(r.Context(), projectID, request.OrgID)
 		writeBridgeValue(w, build, err)
+	case r.Method == http.MethodPost && suffix == "/client-execution-package/preflight":
+		var request ClientExecutionPackagePreflightRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := decodeJSON(r, &request); err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		result, err := s.service.PreflightClientExecutionPackage(r.Context(), projectID, request)
+		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/upload":
 		var request DirectTransportUploadRequest
 		if err := decodeJSON(r, &request); err != nil {

@@ -443,7 +443,9 @@ export function App() {
     setWorkspace((current) => appendRuntimeLog(current, {
       level: "info",
       message: "审批已确认，开始上传",
-      detail: `当前审批绑定执行包摘要 ${current.packagePreview.approvalSubjectDigest ?? current.packagePreview.packageDigest}。`,
+       detail: current.packagePreview.approvalSubjectDigest
+         ? `当前审批绑定对象 digest ${current.packagePreview.approvalSubjectDigest}。`
+         : "当前审批对象 digest 尚未生成，上传将被阻断。",
     }));
     const result = await bridge.approveAndUploadPackage({
       ...workspace,
