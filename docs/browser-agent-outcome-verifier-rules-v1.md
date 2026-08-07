@@ -89,3 +89,166 @@ go test ./internal/app -run 'TestControlledOutlineScenarioPackages' -count=1
 ```
 
 其中 `internal/orchestrator` 覆盖三阶段适配器的全部失败码与修复提案门禁；`TestControlledOutlineScenarioPackages` 覆盖四个受控 outline 场景包（成功、locator 缺失、required 验证失败、构建未完成）的结构性与端到端验收。
+
+新增的注解字段与 Replay Manifest 测试：
+
+```bash
+cd backend
+go test ./internal/model -run 'TestAnnotateValidation|TestReplayManifest' -count=1
+go test ./internal/app -run 'TestBuild.*ReplayManifest|TestBuildAndWrite' -count=1
+```
+
+## §10.3 三阶段 ValidationReport 示例
+
+下面是一次失败执行中三个阶段报告的精简结构示例，展示每个阶段的 `phase`、`decision`、`checks` 结构和结构化反馈字段。
+
+### 执行前报告（pre_execution）
+
+```json
+{
+  "schema_version": "demoops.validation_report.v1",
+  "report_id": "pre_critical_1786048000000000000",
+  "run_id": "run_controlled_business",
+  "source_package_id": "pkg_bundle_script_graph_...",
+  "source_bundle_hash_sha256": "2e96309...",
+  "policy_hash_sha256": "4459a29...",
+  "phase": "pre_execution",
+  "decision": "continue",
+  "pass_rate": 1.0,
+  "overall_confidence": 0.95,
+  "evidence_quality": "browser_assertion",
+  "checks": [],
+  "created_at": "2026-08-07T12:00:00Z"
+}
+```
+
+> 执行前全部通过时 `checks` 为空，`decision = continue`。若发现问题（如 `MISSING_BUNDLE_HASH`）则 `decision = stop_and_report`，`checks` 携带对应 `code`、`impact`、`suggestion`、`responsibility_domain`。
+
+### 运行时阶段报告（runtime_stage）—— 失败场景
+
+```json
+{
+  "report_id": "runtime_critical_1786048100000000000",
+  "phase": "runtime_stage",
+  "node_id": "business_stage_new_project_entry",
+  "stage_id": "stage_step_01_business_stage_new_project_entry",
+  "decision": "stop_and_report",
+  "pass_rate": 0.0,
+  "checks": [
+    {
+      "id": "runtime_stage_failed_stage_step_01_business_stage_new_project_entry_2",
+      "kind": "stage_failure",
+      "code": "STAGE_FAILED",
+      "node_id": "business_stage_new_project_entry",
+      "stage_id": "stage_step_01_business_stage_new_project_entry",
+      "severity": "blocking",
+      "passed": false,
+      "required": true,
+      "summary": "阶段 stage_step_01_business_stage_new_project_entry 执行失败: ...",
+      "impact": "阶段执行失败，后续依赖阶段无法继续，执行停止。",
+      "suggestion": "查看 failure_diagnostic 中的 error.code 和截图/trace 定位具体原因。",
+      "next_step": "根据 failure_diagnostic.error.code 和 blocked_reasons 定位责任方，修复后重试。",
+      "responsibility_domain": "server"
+    }
+  ]
+}
+```
+
+### 执行后报告（post_execution）—— 正常场景
+
+```json
+{
+  "report_id": "post_1786048200000000000",
+  "phase": "post_execution",
+  "decision": "continue",
+  "pass_rate": 1.0,
+  "overall_confidence": 0.97,
+  "checks": [
+    {
+      "id": "post_no_stage_event_log",
+      "kind": "artifact_completeness",
+      "code": "MISSING_STAGE_EVENT_LOG",
+      "severity": "warning",
+      "passed": false,
+      "required": false,
+      "summary": "缺少 stage_event_log_ref，无法追溯阶段执行 JSONL",
+      "impact": "缺少 stage_event_log，阶段时序无法重放，可追溯性受损。",
+      "suggestion": "确认 Browser Agent 事件日志写入器（BrowserAgentEventLog）正常落盘 JSONL 文件。",
+      "next_step": "由 Server Runtime 侧排查事件日志落盘逻辑。",
+      "responsibility_domain": "server"
+    }
+  ]
+}
+```
+
+> `warning` 级别的 check 不影响 `decision`，不阻断交付；`blocking` 级别的 check 将 `decision` 升为 `stop_and_report`。
+
+## §10.4 可重放清单（Replay Manifest）示例
+
+Replay Manifest 在每次执行结束时写入 `{EventDir}/replay-manifest.json`，并以 `kind="replay_manifest"` 注册为产物。以下是一次旁路测试失败后的精简示例：
+
+```json
+{
+  "schema_version": "demoops.replay_manifest.v1",
+  "manifest_id": "manifest_run_controlled_business",
+  "created_at": "2026-08-06T20:17:10Z",
+
+  "run_id": "run_controlled_business",
+  "package_id": "pkg_bundle_script_graph_1785933490880486000",
+  "bundle_hash_sha256": "2e96309596eed577440f977706d0d83faa838110a552150f6f9fa9fc54b0c051",
+  "policy_hash_sha256": "4459a29cb7a6ab370cf883eb6326ce63f903f916ba23a8cb3240745fbf5465df",
+
+  "dev_test_only": true,
+  "waiver_id": "test_waiver_1786050844694253000",
+  "waiver_allowed_node_ids": [
+    "business_stage_new_project_entry",
+    "business_stage_start_agent_build"
+  ],
+  "waiver_blocked_reasons": [
+    "business_stage_new_project_entry: 安全域、来源或非破坏性约束不完整",
+    "business_stage_start_agent_build: 安全域、来源或非破坏性约束不完整",
+    "关键需求未完整映射到 stage 和证据"
+  ],
+
+  "status": "failed",
+  "failed_node_id": "business_stage_new_project_entry",
+  "final_decision": "stop_and_report",
+
+  "stages": [
+    {
+      "node_id": "business_stage_new_project_entry",
+      "stage_id": "stage_step_01_business_stage_new_project_entry",
+      "order": 1,
+      "status": "failed",
+      "waived": true,
+      "validation_decision": "stop_and_report",
+      "observed_url": "http://127.0.0.1:5100/app",
+      "observed_title": "Cascade AI — Build Apps with AI",
+      "failure_code": "browser_agent_target_not_resolved",
+      "failure_domain": "app",
+      "evidence_artifact_ids": []
+    }
+  ],
+
+  "validation_reports": [
+    { "report_id": "pre_...", "phase": "pre_execution",  "decision": "continue",         "check_count": 0, "fail_count": 0 },
+    { "report_id": "rt_...",  "phase": "runtime_stage",  "decision": "stop_and_report",  "check_count": 1, "fail_count": 1 }
+  ],
+
+  "raw_recording_uri": "file:///.../.cascade-dev/artifacts/.../recording/page@e5162cfa.webm",
+  "browser_trace_uri":  "file:///.../.cascade-dev/artifacts/.../recording/browser-agent-trace.zip",
+  "stage_event_log_uri": "file:///.../.cascade-dev/artifacts/.../execution/browser-agent-stage-events.jsonl",
+  "manifest_uri":       "file:///.../.cascade-dev/artifacts/.../execution/replay-manifest.json",
+
+  "execution_bundle_runtime": "browser-agent-outline-v1",
+  "browser_runtime_version":  "chromium-1228"
+}
+```
+
+**还原失败现场的步骤**（无需凭据）：
+
+1. 定位 `stage_event_log_uri` 文件，按 `sequence` 排序重建事件时序。
+2. 对应 `stages[].evidence_artifact_ids` 找截图与 trace。
+3. 对照 `waiver_blocked_reasons` 与 `stages[].failure_code` 确认根因。
+4. 使用 `bundle_hash_sha256` 验证原始包未被修改。
+5. 查阅 `validation_reports[]` 的 `fail_count` 定位是哪个阶段的验证最先停止。

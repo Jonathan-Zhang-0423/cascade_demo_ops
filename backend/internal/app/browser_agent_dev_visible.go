@@ -504,6 +504,30 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 			return view, fmt.Errorf("visible execution video render failed: %w", err)
 		}
 	}
+
+	// Build and persist the Replay Manifest so the failure scene can be
+	// reconstructed from local artifacts without replaying the run.
+	replayManifest, manifestErr := BuildReplayManifest(BuildReplayManifestInput{
+		Result:    result,
+		Events:    runResult.Events,
+		Package:   request.Package,
+		RunID:     runID,
+		EventDir:  recordingDir,
+		Waiver:    waiver,
+		CreatedAt: timeNowUTC(),
+	})
+	if manifestErr == nil {
+		if replayManifest.ManifestURI != "" {
+			result.GeneratedAssets = append(result.GeneratedAssets, model.ArtifactRef{
+				ID:        "replay_manifest_" + safePathSegment(runID),
+				Kind:      "replay_manifest",
+				URI:       replayManifest.ManifestURI,
+				MimeType:  "application/json",
+				Sensitive: false,
+			})
+		}
+	}
+
 	view.Result = visibleExecutionResult(result, recordingDir)
 	if waiver != nil {
 		view.Result.DevTestOnly = true
