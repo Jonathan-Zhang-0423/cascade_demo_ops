@@ -57,6 +57,10 @@ type ReplayManifest struct {
 	VideoWorkerVersion      string `json:"video_worker_version,omitempty"`
 	ProtocolRuntime         string `json:"protocol_runtime,omitempty"`
 	ExecutionBundleRuntime  string `json:"execution_bundle_runtime,omitempty"`
+
+	// Aggregate statistics for dashboards and quick triage (P2.1).
+	// Populated from the ValidationReports and StepResults of the same run.
+	Aggregate *ValidationAggregate `json:"aggregate,omitempty"`
 }
 
 // ReplayManifestStage is a lightweight summary of a single stage outcome.

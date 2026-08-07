@@ -23,7 +23,8 @@
 | P1.3 四类责任域分类 | 本轮新增完成 | `ResponsibilityDomain`：app/server/validation/environment |
 | P1.4 可自动执行的失败场景矩阵 + 验收报告 | 已完成 | 受控 outline 场景包 + 规则文档 |
 | P1.5 真实 App 原始包独立复跑 | 阻塞 | 见下方风险，受 APP-001 阻塞 |
-| P2.1–P2.4 后续增强 | 未开始 | 文档标注为“后续增强”，非本轮必做；§11 完成标准不含 P2 |
+| P2.1 失败码统计/耗时/重复问题聚合 | 本轮新增完成 | `model.ValidationAggregate` + `AggregateValidation`，内嵌于 Replay Manifest |
+| P2.2–P2.4 后续增强 | 未开始 | P2.2 需要新 HTTP 端点，P2.3/P2.4 依赖真实端到端跑通，均非本轮必做 |
 
 ## 二、交付物（对照 §10）
 
@@ -59,12 +60,14 @@
 - 下一步：需在标准 Server 环境（Chromium/FFmpeg 就绪）复核；不应将本机 `skip`/失败
   记为通过。
 
-### 风险 3：P2 后续增强未开始
+### 风险 3：P2 部分未开始
 
-- P2.1（失败码统计/耗时/聚合）与 P2.2（按 run/package/stage/code 查询接口）
-  不依赖 App 修复，可独立开展。
-- P2.3（验收页面展示数据）与 P2.4（受控重放触发）在真实端到端跑通前收益有限。
-- 下一步：待主线联调打通后再排期。
+- P2.1（失败码统计/耗时/聚合）已完成：`model.ValidationAggregate` + `AggregateValidation`，
+  内嵌于 Replay Manifest 的 `aggregate` 字段，5 项测试全绿。
+- P2.2（按 run/package/stage/code 查询接口）不依赖 App 修复，可独立开展，但需要新
+  HTTP 端点和存储层，建议与 P2.3 UI 一起做。
+- P2.3（验收页面展示数据）与 P2.4（受控重放触发）在真实端到端跑通前收益有限，待
+  APP-001 修复后再排期。
 
 ## 四、跳过、降级与本地测试专用标记
 

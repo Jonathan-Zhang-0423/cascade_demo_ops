@@ -162,6 +162,10 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 		}
 	}
 
+	// Aggregate statistics for dashboards and quick triage (P2.1).
+	agg := model.AggregateValidation(result.ValidationReports, result.StepResults)
+	m.Aggregate = &agg
+
 	// Write to disk.
 	if input.EventDir != "" {
 		if err := os.MkdirAll(input.EventDir, 0o700); err != nil {
