@@ -4,12 +4,49 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"cascade-demoops/backend/internal/model"
 )
+
+func TestPersistLocalVisibleResultPackageRetainsTraceabilityContract(t *testing.T) {
+	result := model.RecordingResultPackage{
+		ResultID:        "result_local_visible",
+		SourcePackageID: "pkg_app_original",
+		CloudJobID:      "run_local_visible",
+		SchemaVersion:   model.RecordingResultPackageSchemaVersion,
+		Status:          model.RecordingResultStatusFailed,
+		StepResults: []model.StepResult{{
+			NodeID: "node_failed", Status: "failed", ObservedState: "required target was not visible",
+		}},
+		ValidationReports: []model.ValidationReport{{
+			SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "validation_stage", RunID: "run_local_visible",
+			SourcePackageID: "pkg_app_original", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+			Phase: model.ValidationPhaseRuntimeStage, NodeID: "node_failed", StageID: "stage_failed",
+			Decision: model.ValidationDecisionStopAndReport, PassRate: 0, OverallConfidence: 1,
+			EvidenceQuality: model.RuntimeObservationActualBrowser, CreatedAt: timeNowUTC(),
+		}},
+		StageEventLogRef: &model.ArtifactRef{ID: "events", Kind: "browser_agent_stage_event_log", URI: "file:///events.jsonl", SHA256: "event_hash"},
+	}
+	path, err := persistLocalVisibleResultPackage(t.TempDir(), result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted model.RecordingResultPackage
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.SourcePackageID != result.SourcePackageID || len(persisted.StepResults) != 1 || len(persisted.ValidationReports) != 1 || persisted.StageEventLogRef == nil || persisted.StageEventLogRef.SHA256 != "event_hash" {
+		t.Fatalf("persisted local result lost traceability fields: %+v", persisted)
+	}
+}
 
 func TestDevVisibleRealProductTestPackageStaysProtocolValidAndBounded(t *testing.T) {
 	fixture := filepath.Join("..", "..", "..", "contracts", "exchange", "v1", "client_execution_package.browser_agent_outline.json")
