@@ -81,6 +81,22 @@ describe("desktop bridge contract", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("blocks direct upload with missing package digest before lease allocation", async () => {
+    const workspace = createWorkspace("product_demo");
+    const notReady = {
+      ...workspace,
+      packagePreview: { ...workspace.packagePreview, packageDigest: "" },
+    };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").approveAndUploadPackage(notReady);
+
+    expect(result.ok).toBe(false);
+    expect(result.errorInfo?.code).toBe("package_preview_not_ready");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("stores the Browser Agent token through the direct bridge and returns only redacted health", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
 	  if (url.endsWith("/v1/desktop/browser-agent-direct")) {
@@ -463,8 +479,10 @@ describe("desktop bridge contract", () => {
       },
       created_at: "2026-07-14T00:00:00Z",
     };
-    const fetchMock = vi.fn(async (url: string) => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
 	  if (url.includes("/browser-agent-direct/upload")) {
+		const request = JSON.parse(String(init?.body));
+		expect(request.package_digest_sha256).toBe(workspace.packagePreview.packageDigest);
 		return bridgeJSON({
 		  build,
 		  lease: { lease_id: "lease_split_real", data_url_host: "browser-agent.example", data_port: 24001, issued_at: "2026-07-14T00:00:00Z", expires_at: "2026-07-14T00:30:00Z", crypto_suite: "hkdf-sha256+aes-256-gcm" },
