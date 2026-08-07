@@ -298,7 +298,14 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		actionResult, err := executor.ExecuteStage(ctx, plan, activeStage)
 		if err != nil {
 			_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
-			return result, newRuntimeExecutionError("browser_agent_action_failed", err)
+			// Preserve stable, redacted worker failure categories (notably the
+			// credential-login broker diagnostics) while keeping generic executor
+			// failures under the historical action_failed code.
+			code := runtimeExecutionErrorCode(err)
+			if code == "execution_failed" || code == "" {
+				code = redactedBrowserAgentFailureCode(err)
+			}
+			return result, newRuntimeExecutionError(code, err)
 		}
 		if actionResult.Observation == nil || !runtimeObservationIsRealEvidence(actionResult.Observation.Source) || len(actionResult.EvidenceRefs) == 0 {
 			_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
@@ -868,6 +875,34 @@ func browserAgentPathForbidden(value string, forbiddenPages []string, forbiddenP
 		}
 	}
 	return false
+}
+
+// Worker errors are intentionally reduced to a fixed, non-sensitive category
+// before they enter the App result package. This preserves useful login
+// diagnostics without leaking Playwright/page text.
+func redactedBrowserAgentFailureCode(err error) string {
+	message := strings.ToLower(strings.TrimSpace(errString(err)))
+	for _, code := range []string{
+		"browser_agent_login_form_not_resolved",
+		"browser_agent_login_continue_not_resolved",
+		"browser_agent_login_password_not_resolved",
+		"browser_agent_login_submit_not_resolved",
+		"browser_agent_login_invalid_credentials",
+		"browser_agent_login_submission_not_confirmed",
+		"browser_agent_login_captcha_required",
+	} {
+		if strings.Contains(message, code) {
+			return code
+		}
+	}
+	return "browser_agent_action_failed"
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func normalizeBrowserAgentDomain(value string) string {

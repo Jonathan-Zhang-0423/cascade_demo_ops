@@ -800,25 +800,45 @@ async function executeApprovedLogin(session: BrowserAgentSession, stage: Browser
 		session.traceActive = false;
 	}
 	try {
-		await username.fill(secret.username, { timeout });
+		try {
+			await username.fill(secret.username, { timeout });
+		} catch {
+			throw new Error("browser_agent_login_form_not_resolved");
+		}
 		if (!await password.isVisible({ timeout: Math.min(timeout, 1_000) }).catch(() => false)) {
-			const continueButton = session.page.locator('button[type="submit"], input[type="submit"]').first();
+			const continueButton = loginSubmitLocator(session.page);
 			if (!await continueButton.isVisible({ timeout }).catch(() => false)) throw new Error("browser_agent_login_continue_not_resolved");
-			await continueButton.click({ timeout });
+			try {
+				await continueButton.click({ timeout });
+			} catch {
+				throw new Error("browser_agent_login_continue_not_resolved");
+			}
 			password = session.page.locator('input[type="password"], input[autocomplete="current-password"]').first();
 			if (!await password.isVisible({ timeout }).catch(() => false)) throw new Error("browser_agent_login_password_not_resolved");
 		}
 		await installImmediateMasks(session.page, [password]);
-		await password.fill(secret.password, { timeout });
-		const submit = session.page.locator('button[type="submit"], input[type="submit"]').first();
+		try {
+			await password.fill(secret.password, { timeout });
+		} catch {
+			throw new Error("browser_agent_login_password_not_resolved");
+		}
+		const submit = loginSubmitLocator(session.page);
 		if (!await submit.isVisible({ timeout }).catch(() => false)) throw new Error("browser_agent_login_submit_not_resolved");
-		await submit.click({ timeout });
+		try {
+			await submit.click({ timeout });
+		} catch {
+			throw new Error("browser_agent_login_submit_not_resolved");
+		}
 		await waitForPageSettled(session.page, Math.min(timeout, 10_000));
-		await session.page.waitForFunction(() => {
-			const pageDocument = (globalThis as any).document;
-			const passwordField = pageDocument.querySelector('input[type="password"]');
-			return !passwordField || !passwordField.offsetParent;
-		}, undefined, { timeout });
+		try {
+			await session.page.waitForFunction(() => {
+				const pageDocument = (globalThis as any).document;
+				const passwordField = pageDocument.querySelector('input[type="password"]');
+				return !passwordField || !passwordField.offsetParent;
+			}, undefined, { timeout });
+		} catch {
+			throw new Error(await classifyLoginSubmissionFailure(session.page));
+		}
 		await installExactTextMasks(session.page, [secret.username]);
 	} finally {
 		secret.username = "";
@@ -826,6 +846,24 @@ async function executeApprovedLogin(session: BrowserAgentSession, stage: Browser
 		session.taskSecrets.delete(passwordRef);
 	}
 	await waitForPageSettled(session.page);
+}
+
+// Return only a stable, redacted category. Never include page text or provider details.
+async function classifyLoginSubmissionFailure(page: any): Promise<string> {
+	try {
+		const captcha = page.locator('text=/验证码|captcha|verify you are human/i').first();
+		if (await captcha.isVisible({ timeout: 300 }).catch(() => false)) return "browser_agent_login_captcha_required";
+		const password = page.locator('input[type="password"], input[autocomplete="current-password"]').first();
+		if (await password.isVisible({ timeout: 300 }).catch(() => false)) return "browser_agent_login_invalid_credentials";
+	} catch {
+		// fall through to the generic redacted category
+	}
+	return "browser_agent_login_submission_not_confirmed";
+}
+
+function loginSubmitLocator(page: any): any {
+	const semantic = page.getByRole("button", { name: /登录|sign\s*in|log\s*in/i }).first();
+	return semantic;
 }
 
 async function openApprovedLoginEntry(session: BrowserAgentSession, timeout: number): Promise<void> {
@@ -838,15 +876,31 @@ async function openApprovedLoginEntry(session: BrowserAgentSession, timeout: num
 	if (await entry.isVisible({ timeout: Math.min(timeout, 2_500) }).catch(() => false)) {
 		await entry.click({ timeout });
 		await waitForPageSettled(session.page, Math.min(timeout, 8_000));
-		return;
+		if (await loginFormVisible(session.page)) return;
+		await clickEmailLoginMethod(session.page, timeout);
+		if (await loginFormVisible(session.page)) return;
 	}
 	for (const route of ["/login", "/signin", "/sign-in", "/auth/login", "/app/login"]) {
 		const targetURL = absoluteTargetURL(route, session.page.url());
 		if (urlPolicyError(targetURL, session, false)) continue;
 		await session.page.goto(targetURL, { waitUntil: "domcontentloaded", timeout }).catch(() => undefined);
 		await waitForPageSettled(session.page, Math.min(timeout, 5_000));
-		const username = session.page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
-		if (await username.isVisible({ timeout: 1_000 }).catch(() => false)) return;
+		if (await loginFormVisible(session.page)) return;
+		await clickEmailLoginMethod(session.page, timeout);
+		if (await loginFormVisible(session.page)) return;
+	}
+}
+
+async function loginFormVisible(page: any): Promise<boolean> {
+	const username = page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
+	return username && await username.isVisible({ timeout: 1_000 }).catch(() => false);
+}
+
+async function clickEmailLoginMethod(page: any, timeout: number): Promise<void> {
+	const chooser = page.getByRole("button", { name: /邮箱登录|email\s+login/i }).first();
+	if (await chooser.isVisible({ timeout: Math.min(timeout, 2_500) }).catch(() => false)) {
+		await chooser.click({ timeout });
+		await waitForPageSettled(page, Math.min(timeout, 5_000));
 	}
 }
 
