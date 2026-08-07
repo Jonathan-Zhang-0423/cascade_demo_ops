@@ -449,6 +449,10 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 			allowedRoutes = append(allowedRoutes, interaction.Target.URL)
 		}
 	}
+	// The worker opens a session at the package recording base URL before it
+	// executes the first stage. That concrete path is part of the approved
+	// navigation scope even when no business interaction targets it directly.
+	allowedRoutes = append(allowedRoutes, doc.RecordingRunSpec.BaseURL, project.ProductURL, graph.EntryPoint)
 	allowedOrigins := []string{}
 	for _, domain := range doc.SafetyPolicy.AllowedDomains {
 		if strings.Contains(domain, "://") {

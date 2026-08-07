@@ -797,8 +797,19 @@ func browserAgentRouteAllowed(value string, allowedRoutes []string) bool {
 
 func normalizeBrowserAgentRoute(value string) string {
 	value = strings.TrimSpace(value)
-	if parsed, err := url.Parse(value); err == nil && parsed.Path != "" {
-		value = parsed.Path
+	if parsed, err := url.Parse(value); err == nil {
+		// Absolute origins (for example https://cascadeai.cn) represent the
+		// site root. Keep route matching semantics identical for absolute URLs
+		// and path-only routes so an initial session navigation is allowed by a
+		// root scope entry ("/").
+		if parsed.IsAbs() && parsed.Hostname() != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+			value = parsed.Path
+			if value == "" {
+				value = "/"
+			}
+		} else if parsed.Path != "" {
+			value = parsed.Path
+		}
 	}
 	path := "/" + strings.Trim(strings.ToLower(value), "/")
 	if path == "" {

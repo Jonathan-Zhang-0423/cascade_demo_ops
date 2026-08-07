@@ -260,6 +260,32 @@ func TestBrowserAgentOutlineAllowsEvidenceBoundInteractionRoute(t *testing.T) {
 	}
 }
 
+func TestBrowserAgentOutlineAllowsInitialBaseURLRoute(t *testing.T) {
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{Profile: config.ProfileDev, Environment: "test", Mode: model.AppModeDesktop, DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"), LogRoot: filepath.Join(root, "logs"), LLMMode: config.LLMModeDeterministic}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{ProjectID: "direct-base-route", Mode: model.AppModeDesktop, ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目并启动 Agent 构建。", TargetAudience: "普通用户", MustShow: []string{"新建项目", "启动 Agent 构建"}, AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: formalAppScreenshotInputs("https://cascadeai.cn")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build, err := service.BuildClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Prepare(&build.Package)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range plan.ExplorationScope.AllowedRoutes {
+		if normalizeBrowserAgentRoute(route) == "/" {
+			return
+		}
+	}
+	t.Fatalf("package base URL route was omitted: %+v", plan.ExplorationScope.AllowedRoutes)
+}
+
 func TestAppDirectTransportReleasesLeaseWhenPackageUploadFails(t *testing.T) {
 	root := t.TempDir()
 	port := reserveDirectAppTestPort(t)
