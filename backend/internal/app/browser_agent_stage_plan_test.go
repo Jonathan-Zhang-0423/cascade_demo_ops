@@ -71,9 +71,103 @@ func TestBrowserAgentReadinessRequiresCredentialGrantForSecretReference(t *testi
 	}
 }
 
+func TestBrowserAgentReadinessRejectsLiteralDynamicRouteValidation(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	step := &pkg.ExecutableScriptBundle.PlanJSON.Steps[1]
+	step.Validations = []model.ValidationSpec{{ID: "result_route", Kind: "url_matches", Target: model.ActionTarget{URL: "https://app.example.com/project/:id"}, Required: true}}
+	pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1].RuntimeRouteVerificationRequired = true
+	report := browserAgentReadiness(&pkg)
+	if report.CanRun || !browserAgentReadinessHasBlocker(report, "dynamic_route_binding_missing") {
+		t.Fatalf("literal dynamic route must be rejected before execution: %+v", report)
+	}
+}
+
+func TestBrowserAgentReadinessAcceptsAppApprovedDynamicRouteTemplate(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	stage := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1]
+	outline := &pkg.ExecutableScriptBundle.ScriptOutline.Stages[1]
+	stage.RuntimeRouteVerificationRequired = true
+	stage.TargetRouteTemplate = "/project/:id"
+	outline.TargetRouteTemplate = "/project/:id"
+	step := &pkg.ExecutableScriptBundle.PlanJSON.Steps[1]
+	step.Validations = []model.ValidationSpec{{ID: "result_route", Kind: "url_matches", Target: model.ActionTarget{URL: "https://app.example.com/project/:id"}, Required: true}}
+	report := browserAgentReadiness(&pkg)
+	if !report.CanRun || browserAgentReadinessHasBlocker(report, "dynamic_route_binding_missing") {
+		t.Fatalf("matching App-approved dynamic route template should be accepted: %+v", report)
+	}
+}
+
+func TestBrowserAgentReadinessRejectsPostActionValidationReusingClickedControl(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	step := &pkg.ExecutableScriptBundle.PlanJSON.Steps[1]
+	step.Action.Type = model.GraphActionClick
+	step.Action.Target = model.ActionTarget{TestID: "button-new-project"}
+	step.Validations = []model.ValidationSpec{{ID: "after_click", Kind: "element_visible", Target: model.ActionTarget{TestID: "button-new-project"}, Required: true}}
+	pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1].StageKind = model.BusinessStageKindBusinessSubmit
+	report := browserAgentReadiness(&pkg)
+	if !report.CanRun || !browserAgentReadinessHasWarning(report, "post_action_validation_reuses_action_target") {
+		t.Fatalf("post-action validation reuse must be surfaced as a readiness warning: %+v", report)
+	}
+}
+
+func TestBrowserAgentReadinessDetectsApprovedActionIdentityReuse(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	stage := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1]
+	stage.StageKind = model.BusinessStageKindBusinessAction
+	outline := &pkg.ExecutableScriptBundle.ScriptOutline.Stages[1]
+	outline.Components = []model.BrowserAgentComponentTarget{{
+		ComponentRef: stage.TargetContract.ComponentRef,
+		Selector:     `[data-testid="button-new-project"]`,
+		EvidenceRefs: stage.TargetContract.EvidenceRefs,
+	}}
+	step := &pkg.ExecutableScriptBundle.PlanJSON.Steps[1]
+	step.Action.Type = model.GraphActionClick
+	step.Action.Target = model.ActionTarget{
+		Selector:     `[data-testid="project-list"]`,
+		Label:        "新建项目 button-new-project",
+		EvidenceRefs: stage.TargetContract.EvidenceRefs,
+	}
+	step.Validations = []model.ValidationSpec{{
+		ID:       "after_click",
+		Kind:     "element_visible",
+		Target:   model.ActionTarget{Selector: `[data-testid="button-new-project"]`},
+		Required: true,
+	}}
+	report := browserAgentReadiness(&pkg)
+	if !browserAgentReadinessHasWarning(report, "post_action_validation_reuses_action_identity") && !browserAgentReadinessHasWarning(report, "post_action_validation_reuses_approved_action_evidence") {
+		t.Fatalf("expected action identity reuse warning, got: %+v", report)
+	}
+}
+
+func TestBrowserAgentReadinessRejectsDeclaredInputWithoutFillAction(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.ProjectContextSummary.Goals = []model.DemoGoal{{
+		ID: "goal_input", ValueProposition: "在输入栏中输入一个业务需求并提交。",
+	}}
+	for index := range pkg.ExecutableScriptBundle.PlanJSON.Steps {
+		pkg.ExecutableScriptBundle.PlanJSON.Steps[index].Action.Type = model.GraphActionClick
+	}
+	for index := range pkg.ExecutableScriptBundle.StageApprovalPlan.Stages {
+		pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[index].Interaction.Kind = model.GraphActionClick
+	}
+	report := browserAgentReadiness(&pkg)
+	if !browserAgentReadinessHasBlocker(report, "declared_business_input_action_missing") {
+		t.Fatalf("declared input without a fill action must be blocked: %+v", report)
+	}
+}
+
 func browserAgentReadinessHasBlocker(report BrowserAgentReadinessReport, code string) bool {
 	for _, blocker := range report.Blockers {
 		if blocker.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func browserAgentReadinessHasWarning(report BrowserAgentReadinessReport, code string) bool {
+	for _, warning := range report.Warnings {
+		if warning.Code == code {
 			return true
 		}
 	}
@@ -149,6 +243,30 @@ func TestBrowserAgentPolicyGuardBlocksDomainControlPlaneAndDestructiveActions(t 
 	destructive.TargetContract.Destructive = true
 	if decision := guard.Authorize(plan, destructive); decision.Allowed || decision.Code != "destructive_action_denied" {
 		t.Fatalf("destructive action was not blocked: %+v", decision)
+	}
+}
+
+func TestBrowserAgentPolicyGuardBindsApprovedDynamicRouteTemplate(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ExplorationScope.AllowedRoutes = []string{"/project/:id"}
+	guard := contractBrowserAgentPolicyGuard{}
+	stage := plan.Stages[0]
+	intent := BrowserAgentActionIntent{
+		NodeID: stage.NodeID, StageID: stage.ID, ActionType: model.GraphActionNavigate,
+		URL: "https://app.example.com/project/proj_42", Route: "/project/proj_42",
+		NonDestructive: true, TargetContract: stage.TargetContract,
+	}
+	if decision := guard.Authorize(plan, intent); !decision.Allowed {
+		t.Fatalf("runtime-created resource route should match approved template: %+v", decision)
+	}
+	intent.URL = "https://app.example.com/settings"
+	intent.Route = "/settings"
+	if decision := guard.Authorize(plan, intent); decision.Allowed || decision.Code != "route_not_allowed" {
+		t.Fatalf("unapproved route must remain blocked: %+v", decision)
 	}
 }
 

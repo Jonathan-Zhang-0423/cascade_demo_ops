@@ -640,6 +640,9 @@ Seedance 2.0 和 H3 都不负责产出 Renderer 可执行的最终分镜 JSON；
 - 序列化候选集合选择前重校验：拒绝篡改后的 schema、安全标志、Provider 组合、任务身份、审核身份或 normalized SHA-256。
 - Editor approval 前置契约：绑定 intent/candidate/set/selection、目标计划 revision、人工证据与 purpose-placement，只允许后续创建补丁，不允许应用补丁或 Renderer；
 - 不可执行 Provider-neutral 编排审计状态机：typed artifact 驱动前向转换、revision/时间单调校验和安全停止，永久禁止 Provider 调用、Editor 写入、Renderer 与 auto-apply。
+- 统一编辑器素材引用编译器：H3 通过所有审核和 Editor approval 后，只转换为本地 normalized 引用，编辑器不读取厂商响应、临时 URL 或 Provider 特有字段；当前仍不写 EditorSession、不应用补丁。
+- 受控候选补丁提案编译器：按既有 `candidate_asset_edit_plan_patch.v1` 的安全语义生成 `manual_or_explicit_opt_in_required` 提案，仍不修改 DemoEditPlan、不应用补丁、不触发 Renderer。
+- H3 callback payload 无副作用解析器：只处理 challenge、task ID、六态和 HTTPS 输出线索；回调固定要求再次 query，不创建候选、不登记素材、不推进正式路由。
 
 当前 Sidecar 尚未注册到 Server 的执行、Director、Seedance fallback 或 A/B comparison 路由。仅设置 `CASCADE_ARK_MEDIA_MODE=real`、`MINIMAX_API_KEY`、`SEEDANCE_API_KEY` 或 `DOUBAO_API_KEY` 都不会创建 H3 Client，也不会触发 H3 视频生成。这是验收期间必须保持的隔离边界。
 
@@ -647,6 +650,7 @@ Seedance 2.0 和 H3 都不负责产出 Renderer 可执行的最终分镜 JSON；
 
 - 任务列表查询；
 - callback_url 公共请求字段和回调处理；
+- callback HTTP route、签名/来源认证和持久化通知去重；
 - H3 Provider 正式路由；
 - 与 EditorSession 候选素材入口的连接；
 - 内容审核 UI、审核证据采集与持久化（人工决定的数据契约已实现，但尚未接运行入口）；
@@ -695,6 +699,11 @@ text + image_url(role=last_frame)
 - [x] 实现未注册路由的确定性结构审核和人工内容决定记录契约；
 - [x] 定义未注册路由的 `normal`/`comparison` 候选集合及人工显式选择契约；
 - [x] 定义 Editor approval 前置契约，只授权未来补丁构造；
+- [x] 实现跨 Provider 混合前的统一编辑器素材引用编译器（未注册路由）；
+- [x] 实现兼容现有 CandidateAssetEditPlanPatch 语义的旁路提案编译器（未注册路由）；
+- [x] 实现未注册 HTTP route 的 H3 callback payload 纯解析器，并固定回调后再次 query；
+- [x] 增加 callback notification-only 的有界内存去重旁路：按 `task_id + normalized_status + payload_sha256` 生成去重键，重复通知不重复产生 query intent；
+- [ ] 生产 callback 仍待补齐 HTTP route、来源认证、持久化/分布式去重；在此之前 callback 仅作为唤醒信号，必须由 query 再次确认任务状态和输出；
 - [ ] 接入内容审核 UI、证据采集、持久化和显式选择流程；
 - [x] 保证隔离候选闭环失败时返回 `continue_without_generated_candidate`；正式路由接入后仍需端到端复验；
 - [x] 增加 400、401、402、422、429、500/529 错误测试；

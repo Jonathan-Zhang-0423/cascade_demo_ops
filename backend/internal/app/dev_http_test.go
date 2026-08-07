@@ -1150,6 +1150,30 @@ func TestDevHTTPBridgeModelDiagnosticsAreRedacted(t *testing.T) {
 	}
 }
 
+func TestDevHTTPBridgeModelReadinessIsRedactedAndUsesRequiredRoutes(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	request := httptest.NewRequest(http.MethodGet, "/v1/desktop/model-readiness", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	payload := response.Body.String()
+	if strings.Contains(payload, "secret") || strings.Contains(payload, "postgres://user:secret") || strings.Contains(payload, "api_key") {
+		t.Fatalf("model readiness leaked sensitive value: %s", payload)
+	}
+	for _, task := range []string{"planning", "code_reading", "multimodal_understanding", "video_operation"} {
+		if !strings.Contains(payload, task) {
+			t.Fatalf("model readiness omitted required task %q: %s", task, payload)
+		}
+	}
+	if !strings.Contains(payload, "cascade.model_readiness.v1") {
+		t.Fatalf("model readiness schema missing: %s", payload)
+	}
+}
+
 func TestCloudDoJSONAcceptsWrappedAndDirectResponses(t *testing.T) {
 	for name, body := range map[string]string{
 		"wrapped": `{"ok":true,"data":{"upload_id":"upload_wrapped","server_public_key_id":"kms_wrapped","cascade_execution_ips":["203.0.113.10"]}}`,
