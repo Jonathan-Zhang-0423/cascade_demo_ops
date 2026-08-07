@@ -1044,8 +1044,8 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 	  return bridgeFailure("legacy_exchange_disabled: 正式 App 只允许直连 Ubuntu Browser Agent；请使用审批并上传");
     },
     async pollExecutionPackageStatus(workspace) {
-      const exchangePackageID = workspace.cloudRun.exchangePackageID;
-      if (!exchangePackageID) {
+      const packageID = workspace.cloudRun.packageID ?? workspace.cloudRun.exchangePackageID;
+      if (!packageID) {
         return { ok: false, error: "缺少 Browser Agent package id，无法轮询服务器状态" };
       }
       const jobID = workspace.cloudRun.cloudJobID;
@@ -2213,6 +2213,8 @@ function workspaceWithDirectUpload(workspace: ProjectWorkspaceView, result: Loca
       ...workspace.cloudRun,
       transport: "browser_agent_direct_v1",
       packageID: receipt.package_id,
+      // Keep exchangePackageID only as a v1 persisted-state compatibility key;
+      // all direct reads and UI labels use the authoritative packageID.
       exchangePackageID: receipt.package_id,
       cloudJobID: receipt.job_id,
       leaseID: result.lease.lease_id,
@@ -2257,6 +2259,7 @@ function workspaceWithDirectStatus(workspace: ProjectWorkspaceView, status: Loca
     ...mapped,
     cloudRun: {
       ...mapped.cloudRun,
+      packageID: status.package_id,
       transport: "browser_agent_direct_v1",
       directArtifacts: (status.artifacts ?? []).map((artifact) => ({
         artifactID: artifact.artifact_id,

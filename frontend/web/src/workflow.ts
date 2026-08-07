@@ -76,7 +76,7 @@ const journeyLabels: Record<ProjectJourneyStepID, string> = {
 export function recommendedWorkstation(workspace: ProjectWorkspaceView): ProjectWorkstationView {
   if (workspace.status === "script_repair_required" || workspace.cloudRun.status === "failed") return "repair";
   if (workspace.cloudRun.resultPackage || workspace.cloudRun.status === "succeeded" || workspace.stage === "result_review") return "assets";
-  if (workspace.cloudRun.exchangePackageID || workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running") return "execution";
+  if (workspace.cloudRun.packageID || workspace.cloudRun.exchangePackageID || workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running") return "execution";
   if (workspace.executableScriptBundle || workspace.packagePreview.buildStatus === "draft" || workspace.stage === "package_approval") return "approval";
   if (workspace.projectIntelligence || workspace.understandingReport) return "plan";
   return workspace.productURL && workspace.inputBundle.raw_user_prompt ? "evidence" : "overview";
@@ -85,7 +85,7 @@ export function recommendedWorkstation(workspace: ProjectWorkspaceView): Project
 export function shouldResumeCloudRun(workspace: ProjectWorkspaceView, selectedProjectID?: string): boolean {
   return selectedProjectID === workspace.id
     && (workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running")
-    && Boolean(workspace.cloudRun.exchangePackageID);
+    && Boolean(workspace.cloudRun.packageID || workspace.cloudRun.exchangePackageID);
 }
 
 export function projectNextAction(workspace: ProjectWorkspaceView): ProjectNextAction {
@@ -360,10 +360,10 @@ function lifecycleFallbackSummary(id: ServerLifecycleStageID, workspace: Project
     return workspace.cloudRun.uploadID ? `upload id: ${workspace.cloudRun.uploadID}` : "等待 /execution-packages/init";
   }
   if (id === "package_uploaded") {
-    return workspace.cloudRun.exchangePackageID ? `exchange id: ${workspace.cloudRun.exchangePackageID}` : "等待上传 ExchangeEnvelope";
+      return workspace.cloudRun.packageID ? `Browser Agent package: ${workspace.cloudRun.packageID}` : workspace.cloudRun.exchangePackageID ? `Browser Agent package: ${workspace.cloudRun.exchangePackageID}` : "等待上传直连执行包";
   }
   if (id === "server_intake") {
-    return workspace.cloudRun.exchangePackageID ? "服务器已接收 metadata 和 artifact descriptor" : "等待服务器接收";
+      return workspace.cloudRun.packageID || workspace.cloudRun.exchangePackageID ? "Ubuntu Browser Agent 已接收加密包和素材描述" : "等待服务器接收";
   }
   if (id === "script_validation") {
     return "校验 TS AST、hash、allowed domains 和安全策略";
