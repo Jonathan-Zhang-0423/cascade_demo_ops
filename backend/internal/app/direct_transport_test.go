@@ -172,6 +172,94 @@ func TestAppDirectTransportRejectsStaleApprovalBeforeLeaseAllocation(t *testing.
 	}
 }
 
+func TestApproveClientExecutionPackageRebindsConfidenceAfterCredentialGrantExpiry(t *testing.T) {
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile: config.ProfileDev, Environment: "test", Mode: model.AppModeDesktop,
+		DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "app.db"),
+		DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"),
+		CacheRoot: filepath.Join(root, "cache"), LogRoot: filepath.Join(root, "logs"),
+		LLMMode: config.LLMModeDeterministic,
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{
+		ProjectID: "direct-credential-confidence", Mode: model.AppModeDesktop,
+		ProductURL: "https://cascadeai.cn/app", ProductDescription: "登录后进入新建项目，填写俄罗斯方块并启动 Agent 构建。",
+		TargetAudience: "普通用户", MustShow: []string{"登录", "新建俄罗斯方块", "启动 Agent 构建"},
+		AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: formalAppScreenshotInputs("https://cascadeai.cn"),
+		DemoUsername: "vault-user", DemoPassword: "vault-password", DemoCredentialRef: "credential://demo/direct-confidence",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := service.BuildClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(draft.Package.CredentialGrants) != 1 || draft.Package.ConfidenceSummary == nil {
+		t.Fatalf("credential-bound draft is incomplete: grants=%d confidence=%+v", len(draft.Package.CredentialGrants), draft.Package.ConfidenceSummary)
+	}
+	approved, err := service.ApproveClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID, CloudUploadInitRequest{
+		PackageDigestSHA256: draft.PackageDigestSHA256, ApprovalSubjectDigestSHA256: draft.ApprovalSubjectDigestSHA256,
+		ConfidenceAssessmentHash: draft.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true,
+		IdempotencyKey: "direct-credential-confidence-approval",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Package.CredentialGrants[0].ExpiresAt.IsZero() {
+		t.Fatal("approved credential grant did not receive a short-lived expiry")
+	}
+	if err := model.ValidatePackageConfidenceSummary(&approved.Package); err != nil {
+		t.Fatalf("approved package retained a stale draft confidence assessment: %v", err)
+	}
+}
+
+func TestBrowserAgentOutlineAllowsEvidenceBoundInteractionRoute(t *testing.T) {
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile: config.ProfileDev, Environment: "test", Mode: model.AppModeDesktop,
+		DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "app.db"),
+		DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"),
+		LogRoot: filepath.Join(root, "logs"), LLMMode: config.LLMModeDeterministic,
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	screenshots := formalAppScreenshotInputs("https://cascadeai.cn")
+	screenshots[0].URL = "https://cascadeai.cn/"
+	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{
+		ProjectID: "direct-login-root-route", Mode: model.AppModeDesktop,
+		ProductURL: "https://cascadeai.cn", ProductDescription: "进入新建项目，填写俄罗斯方块并启动 Agent 构建。",
+		TargetAudience: "普通用户", MustShow: []string{"新建俄罗斯方块", "启动 Agent 构建"},
+		AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: screenshots,
+		DemoUsername: "vault-user", DemoPassword: "vault-password", DemoCredentialRef: "credential://demo/direct-root-route",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build, err := service.BuildClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Prepare(&build.Package)
+	if err != nil {
+		t.Fatalf("evidence-bound root interaction was rejected by its own exploration scope: %v", err)
+	}
+	found := false
+	for _, route := range plan.ExplorationScope.AllowedRoutes {
+		if normalizeBrowserAgentRoute(route) == "/" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("evidence-bound interaction route was omitted: %+v", plan.ExplorationScope.AllowedRoutes)
+	}
+}
+
 func TestAppDirectTransportReleasesLeaseWhenPackageUploadFails(t *testing.T) {
 	root := t.TempDir()
 	port := reserveDirectAppTestPort(t)

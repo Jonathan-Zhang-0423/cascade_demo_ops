@@ -323,6 +323,20 @@ func (s *Service) ApproveClientExecutionPackage(ctx context.Context, projectID s
 	if err := normalizeClientExecutionPackageForUpload(&build.Package); err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
+	// Approval intentionally adds transport-time fields (for example the
+	// short-lived credential grant expiry and the human approval record) to
+	// the authoritative package. Re-assess the exact bytes that will be sent
+	// so Server Intake never receives a draft confidence hash attached to an
+	// approved package. The approval subject digest above remains bound to the
+	// user-reviewed draft; this assessment only binds the final upload view.
+	approvedConfidence, err := model.AssessClientExecutionPackage(&build.Package)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	if approvedConfidence.Readiness == model.PackageReadinessBlocked {
+		return ClientExecutionPackageBuild{}, errors.New("approved execution package became blocked after final confidence assessment")
+	}
+	build.Package.ConfidenceSummary = approvedConfidence
 	if err := model.ValidateClientExecutionPackageForCloudExecution(&build.Package); err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}

@@ -437,6 +437,18 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 			allowedRoutes = append(allowedRoutes, candidate.Route)
 		}
 	}
+	// The interaction target is the page location actually approved by the
+	// App's evidence binding. It can legitimately differ from the semantic
+	// entry route (for example a login form rendered at "/" while the stage is
+	// named "/login"). Keep those exact targets inside the exploration scope;
+	// the runtime guard still enforces allowed origin/domain and forbidden-page
+	// policies before it permits the action.
+	for _, stage := range stages {
+		allowedRoutes = append(allowedRoutes, stage.EntryRoute, stage.Route, stage.TargetRouteTemplate, stage.ExpectedRouteAfterAction, stage.URL)
+		for _, interaction := range stage.Interactions {
+			allowedRoutes = append(allowedRoutes, interaction.Target.URL)
+		}
+	}
 	allowedOrigins := []string{}
 	for _, domain := range doc.SafetyPolicy.AllowedDomains {
 		if strings.Contains(domain, "://") {
