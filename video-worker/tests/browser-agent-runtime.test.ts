@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   evidenceBoundNameAllowed,
   evaluateRequiredValidations,
+  isApprovedCredentialLoginInteraction,
   isEvidenceBoundSelectorAlternative,
   resolutionAssertions,
   urlPolicyError,
@@ -38,6 +39,21 @@ describe("browser agent navigation policy", () => {
     expect(urlPolicyError("https://app.example.com/dashboard/projects/1", session, false)).toBeUndefined();
     expect(urlPolicyError("http://app.example.com/dashboard", session, false)).toContain("origin_not_allowed");
     expect(urlPolicyError("https://app.example.com/settings", session, false)).toContain("route_not_allowed");
+  });
+});
+
+describe("browser agent credential login broker", () => {
+  it("owns login-form discovery only for an approved session secret binding", () => {
+    const stage = { stage_kind: "session_setup" } as any;
+    expect(isApprovedCredentialLoginInteraction(stage, {
+      kind: "fill", input_ref: "credential://demo/test", secret_ref: "credential://demo/test",
+    })).toBe(true);
+    expect(isApprovedCredentialLoginInteraction(stage, {
+      kind: "fill", input_ref: "credential://demo/test", secret_ref: "credential://demo/other",
+    })).toBe(false);
+    expect(isApprovedCredentialLoginInteraction({ stage_kind: "business_input" } as any, {
+      kind: "fill", input_ref: "credential://demo/test", secret_ref: "credential://demo/test",
+    })).toBe(false);
   });
 });
 

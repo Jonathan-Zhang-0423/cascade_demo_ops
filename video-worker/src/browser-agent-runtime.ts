@@ -344,7 +344,13 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
 	let suggestedWaitCondition: string | undefined;
   let resolutionFailure = "";
   let passiveRouteStrategy: string | undefined;
-  if (action && !["navigate", "wait"].includes(action.kind) && !usesPassiveRouteResolution(request.stage, action)) {
+  if (action && isApprovedCredentialLoginInteraction(request.stage, action)) {
+    // The credential broker owns bounded discovery of the login entry and
+    // form. Do not require a fictitious App selector before the broker can
+    // inspect the real page; execution still remains constrained by the
+    // approved session stage, secret grant, origin, routes and policy.
+    passiveRouteStrategy = "approved_credential_login_broker";
+  } else if (action && !["navigate", "wait"].includes(action.kind) && !usesPassiveRouteResolution(request.stage, action)) {
     try {
       resolved = await resolveTarget(session.page, request.stage, action, false);
     } catch (error) {
@@ -507,14 +513,14 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
     await waitForPageSettled(session.page, Math.min(timeout, 5_000));
     return;
   }
+  if (isApprovedCredentialLoginInteraction(stage, interaction)) {
+    await executeApprovedLogin(session, stage, interaction, timeout);
+    return;
+  }
   const resolved = await resolveTarget(session.page, stage, interaction, true);
   if (interaction.kind === "click") {
     await resolved.locator.click({ timeout });
   } else if (interaction.kind === "fill") {
-	if (interaction.secret_ref) {
-		await executeApprovedLogin(session, stage, interaction, timeout);
-		return;
-	}
     if (interaction.input_ref && interaction.value === undefined) throw new Error("browser_agent_input_ref_requires_resolver");
     await resolved.locator.fill(interaction.value || "", { timeout });
   } else if (interaction.kind === "select") {
@@ -529,6 +535,11 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
     throw new Error(`browser_agent_action_not_supported: ${interaction.kind}`);
   }
   await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+}
+
+export function isApprovedCredentialLoginInteraction(stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction): boolean {
+  const secretRef = String(interaction.secret_ref || "").trim();
+  return stage.stage_kind === "session_setup" && interaction.kind === "fill" && secretRef !== "" && secretRef === String(interaction.input_ref || "").trim();
 }
 
 async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, allowSelectorAlternatives: boolean): Promise<ResolvedTarget> {
@@ -775,8 +786,13 @@ async function executeApprovedLogin(session: BrowserAgentSession, stage: Browser
 	}
 	const currentHost = new URL(session.page.url()).hostname;
 	if (!hostAllowed(currentHost, secret.allowed_domains) || !hostAllowed(currentHost, session.allowedDomains)) throw new Error("browser_agent_login_domain_not_allowed");
-	const username = session.page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
+	let username = session.page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
 	let password = session.page.locator('input[type="password"], input[autocomplete="current-password"]').first();
+	if (!await username.isVisible({ timeout: Math.min(timeout, 1_500) }).catch(() => false)) {
+		await openApprovedLoginEntry(session, timeout);
+		username = session.page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
+		password = session.page.locator('input[type="password"], input[autocomplete="current-password"]').first();
+	}
 	if (!await username.isVisible({ timeout }).catch(() => false)) throw new Error("browser_agent_login_form_not_resolved");
 	await installImmediateMasks(session.page, [username]);
 	if (session.recordTrace && session.traceActive) {
@@ -810,6 +826,28 @@ async function executeApprovedLogin(session: BrowserAgentSession, stage: Browser
 		session.taskSecrets.delete(passwordRef);
 	}
 	await waitForPageSettled(session.page);
+}
+
+async function openApprovedLoginEntry(session: BrowserAgentSession, timeout: number): Promise<void> {
+	const entry = session.page.locator([
+		'a[href*="login" i]', 'a[href*="signin" i]', 'a[href*="sign-in" i]',
+		'button:has-text("Try it now")', 'a:has-text("Try it now")',
+		'button:has-text("登录")', 'a:has-text("登录")',
+		'button:has-text("Sign in")', 'a:has-text("Sign in")',
+	].join(", ")).first();
+	if (await entry.isVisible({ timeout: Math.min(timeout, 2_500) }).catch(() => false)) {
+		await entry.click({ timeout });
+		await waitForPageSettled(session.page, Math.min(timeout, 8_000));
+		return;
+	}
+	for (const route of ["/login", "/signin", "/sign-in", "/auth/login", "/app/login"]) {
+		const targetURL = absoluteTargetURL(route, session.page.url());
+		if (urlPolicyError(targetURL, session, false)) continue;
+		await session.page.goto(targetURL, { waitUntil: "domcontentloaded", timeout }).catch(() => undefined);
+		await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+		const username = session.page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
+		if (await username.isVisible({ timeout: 1_000 }).catch(() => false)) return;
+	}
 }
 
 async function clearLoginFormValues(page: any): Promise<void> {
