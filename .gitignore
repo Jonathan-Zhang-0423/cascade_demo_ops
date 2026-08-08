@@ -28,3 +28,6 @@ backend/bin/
 backend/cmd/wails-desktop/build/bin/
 backend/cmd/wails-desktop/frontend/wailsjs/
 .DS_Store
+# superpowers skill artifacts — local only, never push
+docs/superpowers/
+.superpowers/

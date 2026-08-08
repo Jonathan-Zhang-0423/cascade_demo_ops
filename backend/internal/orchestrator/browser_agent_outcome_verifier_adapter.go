@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -48,6 +49,85 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// urlWithinAllowedDomains reports whether value's host is within
+// allowedDomains, treating relative/fragment values as always allowed and
+// requiring an http/https scheme for absolute URLs. Host comparison is
+// case-insensitive, ignores any port, and matches subdomains of an allowed
+// domain (e.g. an allowlisted "example.com" also allows "app.example.com").
+//
+// This intentionally mirrors app.browserAgentURLAllowed. orchestrator cannot
+// import app's unexported helpers directly (app depends on model, and
+// model.BrowserAgentValidationContext exists specifically to keep app and
+// orchestrator decoupled), so the matching logic is duplicated here on
+// purpose rather than inventing different behavior.
+func urlWithinAllowedDomains(value string, allowedDomains []string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "#") {
+		return true
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	for _, domain := range allowedDomains {
+		normalized := normalizeAllowedDomain(domain)
+		if normalized != "" && (host == normalized || strings.HasSuffix(host, "."+normalized)) {
+			return true
+		}
+	}
+	return false
+}
+
+// forbiddenPathMatch reports whether path matches one of forbiddenPrefixes,
+// either exactly or as a segment-bounded prefix (so "/billing" matches
+// "/billing/invoices" but not "/billing-faq"). Matching is case-insensitive.
+// When a match is found, matched is true and matchedPrefix carries the raw
+// (as-declared) prefix that matched, so callers can report it without
+// losing its original casing. Only the first matching prefix is returned,
+// mirroring the previous one-check-per-event behavior.
+//
+// This intentionally mirrors app.browserAgentPathForbidden. See
+// urlWithinAllowedDomains's comment for why the logic is duplicated rather
+// than shared. Unlike the app version, this only takes a single prefix list:
+// BrowserAgentValidationContext only ever surfaces
+// ScriptOutline.AllowedExplorationScope.ForbiddenPathPrefixes at this layer,
+// there is no separate "forbidden pages" list to merge in.
+func forbiddenPathMatch(path string, forbiddenPrefixes []string) (matchedPrefix string, matched bool) {
+	normalizedPath := "/" + strings.TrimLeft(strings.ToLower(strings.TrimSpace(path)), "/")
+	for _, forbidden := range forbiddenPrefixes {
+		if strings.TrimSpace(forbidden) == "" {
+			continue
+		}
+		prefix := "/" + strings.TrimLeft(strings.ToLower(strings.TrimSpace(forbidden)), "/")
+		if prefix == "/" {
+			continue
+		}
+		if normalizedPath == prefix || strings.HasPrefix(normalizedPath, strings.TrimRight(prefix, "/")+"/") {
+			return forbidden, true
+		}
+	}
+	return "", false
+}
+
+// normalizeAllowedDomain lowercases and trims value, accepting either a bare
+// host (optionally with a port) or a full URL, and strips any scheme, path,
+// port, and leading dot so the result can be compared against a parsed
+// URL's lowercased Hostname().
+//
+// This intentionally mirrors app.normalizeBrowserAgentDomain. See
+// urlWithinAllowedDomains's comment for why the logic is duplicated rather
+// than shared.
+func normalizeAllowedDomain(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if strings.Contains(value, "://") {
+		if parsed, err := url.Parse(value); err == nil {
+			return strings.TrimPrefix(parsed.Hostname(), ".")
+		}
+	}
+	return strings.TrimPrefix(strings.Split(strings.Split(value, "/")[0], ":")[0], ".")
+}
+
 // ValidateBeforeExecution checks static context before execution starts.
 // Runs the legacy pre-execution validation (domain/selector/evidence/blocking checks)
 // and converts the LegacyValidationReport to the new ValidationReport format.
@@ -60,7 +140,8 @@ func firstNonEmpty(values ...string) string {
 func (a *BrowserAgentOutcomeVerifierAdapter) ValidateBeforeExecution(
 	ctx context.Context,
 	vctx model.BrowserAgentValidationContext,
-) (model.ValidationReport, error) {
+) (report model.ValidationReport, err error) {
+	defer func() { model.AnnotateValidationChecks(report.Checks) }()
 	// P0 Critical checks: hash verification (must not be empty)
 	criticalChecks := []model.ValidationCheck{}
 
@@ -169,7 +250,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 	ctx context.Context,
 	vctx model.BrowserAgentValidationContext,
 	events []model.StageExecutionEvent,
-) (model.ValidationReport, error) {
+) (report model.ValidationReport, err error) {
+	defer func() { model.AnnotateValidationChecks(report.Checks) }()
 	// P0: Runtime evidence quality checks
 	runtimeChecks := []model.ValidationCheck{}
 
@@ -341,6 +423,47 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 					{ID: fmt.Sprintf("event_%d", i), Kind: "stage_event"},
 				},
 			})
+		}
+	}
+
+	// P0.8: Detect cross-domain access and forbidden-page access (scenario 6)
+	for _, event := range events {
+		if event.Observation == nil || event.Observation.URL == "" {
+			continue
+		}
+		observedURL, parseErr := url.Parse(event.Observation.URL)
+		if parseErr != nil {
+			continue
+		}
+
+		if len(vctx.AllowedDomains) > 0 && !urlWithinAllowedDomains(event.Observation.URL, vctx.AllowedDomains) {
+			runtimeChecks = append(runtimeChecks, model.ValidationCheck{
+				ID:       fmt.Sprintf("runtime_cross_domain_%s", event.StageID),
+				Kind:     "cross_domain_access",
+				Code:     "CROSS_DOMAIN_ACCESS",
+				NodeID:   event.NodeID,
+				StageID:  event.StageID,
+				Severity: model.FindingSeverityBlocking,
+				Passed:   false,
+				Required: true,
+				Summary:  fmt.Sprintf("阶段 %s 观察到的 URL host %q 超出批准的允许域范围", event.StageID, observedURL.Hostname()),
+			})
+		}
+
+		if vctx.ScriptOutline != nil {
+			if prefix, matched := forbiddenPathMatch(observedURL.Path, vctx.ScriptOutline.AllowedExplorationScope.ForbiddenPathPrefixes); matched {
+				runtimeChecks = append(runtimeChecks, model.ValidationCheck{
+					ID:       fmt.Sprintf("runtime_forbidden_page_%s", event.StageID),
+					Kind:     "forbidden_page_access",
+					Code:     "FORBIDDEN_PAGE_ACCESS",
+					NodeID:   event.NodeID,
+					StageID:  event.StageID,
+					Severity: model.FindingSeverityBlocking,
+					Passed:   false,
+					Required: true,
+					Summary:  fmt.Sprintf("阶段 %s 观察到的 URL 命中禁止路径前缀 %q", event.StageID, prefix),
+				})
+			}
 		}
 	}
 
@@ -531,7 +654,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 	vctx model.BrowserAgentValidationContext,
 	result model.RecordingResultPackage,
 	events []model.StageExecutionEvent,
-) (model.ValidationReport, error) {
+) (report model.ValidationReport, err error) {
+	defer func() { model.AnnotateValidationChecks(report.Checks) }()
 	postChecks := []model.ValidationCheck{}
 
 	// P0.0: Verify RecordingResultPackage is not empty
@@ -558,6 +682,30 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 				Summary:  "RecordingResultPackage is empty (ResultID is blank)",
 			}},
 		}, nil
+	}
+
+	// P0.0b: Verify the result package actually belongs to this approved run (scenario 11)
+	if result.SourcePackageID != "" && vctx.SourcePackageID != "" && result.SourcePackageID != vctx.SourcePackageID {
+		postChecks = append(postChecks, model.ValidationCheck{
+			ID:       "post_result_package_mismatch",
+			Kind:     "result_identity_mismatch",
+			Code:     "RESULT_PACKAGE_MISMATCH",
+			Severity: model.FindingSeverityBlocking,
+			Passed:   false,
+			Required: true,
+			Summary:  fmt.Sprintf("结果包 source_package_id (%s) 与本次运行批准包 (%s) 不一致", result.SourcePackageID, vctx.SourcePackageID),
+		})
+	}
+	if result.AuditTrail.SourcePackageDigest != "" && vctx.SourceBundleHashSHA256 != "" && result.AuditTrail.SourcePackageDigest != vctx.SourceBundleHashSHA256 {
+		postChecks = append(postChecks, model.ValidationCheck{
+			ID:       "post_result_hash_mismatch",
+			Kind:     "result_hash_mismatch",
+			Code:     "RESULT_HASH_MISMATCH",
+			Severity: model.FindingSeverityBlocking,
+			Passed:   false,
+			Required: true,
+			Summary:  "结果包审计哈希与批准包源哈希不一致，证据链不可信",
+		})
 	}
 
 	// P0.1: Verify RecordingResultPackage has required artifacts
