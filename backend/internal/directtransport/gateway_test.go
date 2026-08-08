@@ -289,6 +289,28 @@ func TestGatewayReleasesDedicatedLeaseWithInstallationSignature(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsLeaseReleaseWhileInstallationHasActiveJob(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	port := reserveTestPort(t)
+	gateway, err := NewGateway(Config{ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1", DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true, BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close(context.Background()) })
+	lease := requestTestLeaseForInstallation(t, gateway, now, "install_active_release", "active_release_nonce")
+	pkg := loadDirectPackageFixture(t)
+	uploadTestPackage(t, lease, pkg, now, "active_release_package", "active_release_upload")
+	release := signedTestLeaseReleaseRequest(t, now, lease, "active_release_request", "install_active_release")
+	body, _ := json.Marshal(release)
+	request := httptest.NewRequest(http.MethodPost, "/v1/direct/leases/release", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+testBootstrapToken)
+	response := httptest.NewRecorder()
+	gateway.ControlHandler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "lease_has_active_jobs") || len(gateway.leases) != 1 {
+		t.Fatalf("active installation lease was not protected: status=%d body=%s leases=%d", response.Code, response.Body.String(), len(gateway.leases))
+	}
+}
+
 func TestGatewayRejectsWorkerStatusThatBypassesValidatedResult(t *testing.T) {
 	port := reserveTestPort(t)
 	gateway, err := NewGateway(Config{ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1", DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true, BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour})

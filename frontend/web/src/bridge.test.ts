@@ -47,6 +47,37 @@ describe("desktop bridge contract", () => {
 		expect(mapped.assets.find((asset) => asset.kind === "video")?.mediaURL).toContain("/cloud/deliverable/media?");
 		expect(JSON.stringify(mapped)).not.toMatch(/[A-Za-z]:\\/);
 	});
+
+	it("restores direct Browser Agent assets with the direct artifact media route", () => {
+		const fallback = createProjectDraftWorkspace("product_demo");
+		const mapped = workspaceFromCascadeStateForTest({
+			project_id: fallback.id,
+			desktop_cloud_run: {
+				schema_version: "demoops.desktop_cloud_run.v1",
+				transport: "browser_agent_direct_v1",
+				upload_id: "upload_direct",
+				package_id: "pkg_direct",
+				cloud_job_id: "job_direct",
+				status: "completed",
+				result_package_id: "result_direct",
+				result_package: {
+					result_id: "result_direct",
+					source_package_id: "pkg_direct",
+					cloud_job_id: "job_direct",
+					schema_version: "demoops.recording_result_package.v1",
+					status: "generated",
+					verification_report: { reproducibility_match: true, pass_rate: 1 },
+					delivery: { result_package_ref: { id: "result_direct", kind: "result_package", uri: "artifact://result.json", sha256: "b".repeat(64), encrypted: true, sensitive: true }, asset_refs: [{ id: "artifact_direct", role: "final_demo_video", kind: "video", uri: "artifact://demo.webm", mime_type: "video/webm", sha256: "b".repeat(64), encrypted: true, sensitive: true }], ack_required: true },
+					created_at: new Date().toISOString(),
+				} as never,
+				result_downloaded: true,
+				downloaded_assets: [{ artifact_id: "artifact_direct", file_name: "demo.webm", sha256: "b".repeat(64), size_bytes: 12, verified: true }],
+				updated_at: new Date().toISOString(),
+			},
+		}, fallback);
+		expect(mapped.assets.find((asset) => asset.assetID === "artifact_direct")?.mediaURL)
+			.toBe(`/v1/desktop/projects/${fallback.id}/browser-agent-direct/artifact/media?job_id=job_direct&file=demo.webm`);
+	});
   afterEach(() => {
     vi.restoreAllMocks();
   });

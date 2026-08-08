@@ -368,6 +368,59 @@ func TestAppDirectTransportReleasesLeaseWhenPackageUploadFails(t *testing.T) {
 	}
 }
 
+func TestAppDirectTransportDoesNotReleaseSharedInstallationLeaseForActiveProject(t *testing.T) {
+	root := t.TempDir()
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{Profile: config.ProfileDev, Environment: "test", Mode: model.AppModeDesktop, DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "app.db"), DataRoot: filepath.Join(root, "app"), ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"), LogRoot: filepath.Join(root, "logs"), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := model.DirectPortLease{ProtocolVersion: model.DirectTransportProtocolVersion, LeaseID: "lease_shared", InstallationID: "install_shared", DataPort: 24000, LeaseToken: "shared-token", ExpiresAt: time.Now().Add(time.Hour), CryptoSuite: model.DirectTransportCryptoSuite, DataURL: "http://127.0.0.1:24000"}
+	vault := newDirectMemoryVault()
+	service.storeDirectLease = vault.storeLease
+	service.readDirectLease = vault.readLease
+	service.deleteDirectLease = vault.deleteLease
+	data, _ := json.Marshal(lease)
+	if err := vault.storeLease("project_done", data); err != nil {
+		t.Fatal(err)
+	}
+	completed := &orchestrator.CascadeState{ProjectID: "project_done", DesktopCloudRun: &orchestrator.DesktopCloudRunState{Transport: directTransportStateName, LeaseID: lease.LeaseID, CloudJobID: "job_done", Status: "completed", ResultDownloaded: true}}
+	active := &orchestrator.CascadeState{ProjectID: "project_active", DesktopCloudRun: &orchestrator.DesktopCloudRunState{Transport: directTransportStateName, LeaseID: lease.LeaseID, CloudJobID: "job_active", Status: "running"}}
+	if err := states.Save(t.Context(), completed); err != nil {
+		t.Fatal(err)
+	}
+	if err := states.Save(t.Context(), active); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.ReleaseDirectTransportLease(t.Context(), "project_done")
+	if err == nil || !strings.Contains(err.Error(), "shared by another active project") {
+		t.Fatalf("shared active project did not protect the installation lease: %v", err)
+	}
+}
+
+func TestAppDirectTransportDoesNotReacquireExplicitlyReleasedLease(t *testing.T) {
+	root := t.TempDir()
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{Profile: config.ProfileDev, Environment: "test", Mode: model.AppModeDesktop, DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "app.db"), DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"), LogRoot: filepath.Join(root, "logs"), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := model.DirectPortLease{ProtocolVersion: model.DirectTransportProtocolVersion, LeaseID: "lease_released", InstallationID: "install_released", DataPort: 24000, LeaseToken: "released-token", ExpiresAt: time.Now().Add(time.Hour), CryptoSuite: model.DirectTransportCryptoSuite, DataURL: "http://127.0.0.1:24000"}
+	vault := newDirectMemoryVault()
+	service.readDirectLease = vault.readLease
+	service.storeDirectLease = vault.storeLease
+	data, _ := json.Marshal(lease)
+	if err := vault.storeLease("project_released", data); err != nil {
+		t.Fatal(err)
+	}
+	if err := states.Save(t.Context(), &orchestrator.CascadeState{ProjectID: "project_released", DesktopCloudRun: &orchestrator.DesktopCloudRunState{Transport: directTransportStateName, LeaseID: lease.LeaseID, CloudJobID: "job_released", Status: "completed", Stage: "lease_released", ResultDownloaded: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.directLeaseForRequest(t.Context(), "project_released"); err == nil || !strings.Contains(err.Error(), "lease was released") {
+		t.Fatalf("released direct lease was unexpectedly eligible for reacquisition: %v", err)
+	}
+}
+
 func mustMarshalDirectTest(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := json.Marshal(value)

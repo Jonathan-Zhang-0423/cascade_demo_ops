@@ -281,6 +281,7 @@ type LocalRuntimeHealth = {
     model_override: string;
   }>;
   cloud_exchange?: {
+    retired?: boolean;
     configured: boolean;
     exchange_discovered?: boolean;
     installation_paired?: boolean;
@@ -358,6 +359,7 @@ type LocalDesktopCloudRunState = {
 	lease_expires_at?: string;
 	org_id?: string;
 	upload_id?: string;
+	package_id?: string;
 	exchange_package_id?: string;
 	cloud_job_id?: string;
 	status?: string;
@@ -763,6 +765,15 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     async editorMaterialization(workspace) {
       const resultPackageID = workspace.cloudRun.resultPackageID ?? workspace.cloudRun.resultPackage?.result_id;
       if (!resultPackageID) return { ok: false, error: "缺少结果包，无法确认待编辑素材" };
+      if (workspace.cloudRun.transport === "browser_agent_direct_v1") {
+        // Direct results are materialized only after the App has downloaded
+        // and checksum-verified every declared artifact. The direct review
+        // path owns the handoff; never query the retired Exchange endpoint.
+        if (workspace.cloudRun.resultDownloaded !== true) {
+          return { ok: false, error: "直连结果素材尚未完成 checksum 校验" };
+        }
+        return requestLocal<EditorSessionMaterializationView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/editor-materialization`);
+      }
       const query = `?org_id=${encodeURIComponent(orgID)}&result_package_id=${encodeURIComponent(resultPackageID)}`;
       return requestLocal<EditorSessionMaterializationView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/editor-materialization${query}`);
     },
@@ -1949,9 +1960,9 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
 }
 
 function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: LocalDesktopCloudRunState): ProjectWorkspaceView {
-	if (!persisted || (!persisted.upload_id && !persisted.exchange_package_id && !persisted.result_package_id)) return workspace;
+	if (!persisted || (!persisted.upload_id && !persisted.package_id && !persisted.exchange_package_id && !persisted.cloud_job_id && !persisted.result_package_id)) return workspace;
 	const status: LocalExecutionPackageStatusResponse = {
-		exchange_package_id: persisted.exchange_package_id ?? "",
+			exchange_package_id: persisted.package_id ?? persisted.exchange_package_id ?? "",
 		status: persisted.status ?? "queued",
 		...(persisted.cloud_job_id ? { cloud_job_id: persisted.cloud_job_id } : {}),
 		...(persisted.stage ? { stage: persisted.stage } : {}),
@@ -1974,7 +1985,11 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 	const mediaURLs = new Map<string, string>();
 	for (const asset of persisted.downloaded_assets ?? []) {
 		if (!asset.verified || !asset.artifact_id || !asset.file_name || !persisted.result_package_id) continue;
-		mediaURLs.set(asset.artifact_id, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/deliverable/media?result_package_id=${encodeURIComponent(persisted.result_package_id)}&file=${encodeURIComponent(asset.file_name)}`);
+		if (persisted.transport === "browser_agent_direct_v1" && !persisted.cloud_job_id) continue;
+		const mediaURL = persisted.transport === "browser_agent_direct_v1"
+			? `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/artifact/media?job_id=${encodeURIComponent(persisted.cloud_job_id ?? "")}&file=${encodeURIComponent(asset.file_name)}`
+			: `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/deliverable/media?result_package_id=${encodeURIComponent(persisted.result_package_id)}&file=${encodeURIComponent(asset.file_name)}`;
+		mediaURLs.set(asset.artifact_id, mediaURL);
 	}
 	if (persisted.result_downloaded) restored = ackWorkspaceAssets(restored, mediaURLs);
 	else if (mediaURLs.size) restored = {
@@ -2002,6 +2017,7 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 		cloudRun: {
 			...restored.cloudRun,
 			...(persisted.transport === "browser_agent_direct_v1" ? { transport: "browser_agent_direct_v1" as const } : {}),
+			...(persisted.package_id ? { packageID: persisted.package_id } : {}),
 			...(persisted.lease_id ? { leaseID: persisted.lease_id } : {}),
 			...(persisted.data_port ? { dataPort: persisted.data_port } : {}),
 			...(persisted.lease_expires_at ? { leaseExpiresAt: persisted.lease_expires_at } : {}),
@@ -2255,21 +2271,24 @@ function workspaceWithDirectStatus(workspace: ProjectWorkspaceView, status: Loca
 	...(status.result_package_id ? { result_package_id: status.result_package_id } : {}),
   };
   const mapped = workspaceWithCloudStatus(workspace, cloudStatus);
+	const directArtifacts = status.artifacts === undefined
+		? workspace.cloudRun.directArtifacts
+		: status.artifacts.map((artifact) => ({
+			artifactID: artifact.artifact_id,
+			...(artifact.role ? { role: artifact.role } : {}),
+			...(artifact.kind ? { kind: artifact.kind } : {}),
+			fileName: artifact.file_name,
+			...(artifact.mime_type ? { mimeType: artifact.mime_type } : {}),
+			sha256: artifact.sha256,
+			sizeBytes: artifact.size_bytes,
+		}));
   return {
     ...mapped,
     cloudRun: {
       ...mapped.cloudRun,
       packageID: status.package_id,
       transport: "browser_agent_direct_v1",
-      directArtifacts: (status.artifacts ?? []).map((artifact) => ({
-        artifactID: artifact.artifact_id,
-        ...(artifact.role ? { role: artifact.role } : {}),
-        ...(artifact.kind ? { kind: artifact.kind } : {}),
-        fileName: artifact.file_name,
-        ...(artifact.mime_type ? { mimeType: artifact.mime_type } : {}),
-        sha256: artifact.sha256,
-        sizeBytes: artifact.size_bytes,
-      })),
+		...(directArtifacts ? { directArtifacts } : {}),
     },
   };
 }
@@ -2636,7 +2655,7 @@ function lifecycleSummaryFromCloud(id: ServerLifecycleStageID, status: LocalExec
   if (id === "local_generated") return "App 已生成三合一执行包。";
   if (id === "human_approved") return "产品实战模式已自动确认审批清单。";
   if (id === "upload_initialized") return "上传会话已初始化。";
-  if (id === "package_uploaded") return status.exchange_package_id ? `exchange id: ${status.exchange_package_id}` : "执行包已上传。";
+  if (id === "package_uploaded") return status.exchange_package_id ? `package ID: ${status.exchange_package_id}` : "执行包已上传。";
   if (id === "server_intake") return "服务器接收 envelope、payload_ref 和明文 dev payload。";
   if (id === "script_validation") return "服务器校验 hash、脚本策略和 allowed domains。";
   if (id === "sandbox_preparing") return "服务器准备执行 worker 和 artifact workspace。";
@@ -2900,7 +2919,7 @@ function mockLifecycleSummary(id: ServerLifecycleStageID, workspace: ProjectWork
     return `upload id: ${workspace.cloudRun.uploadID ?? `upload_mock_${workspace.id}`}`;
   }
   if (id === "package_uploaded") {
-    return `exchange id: ${workspace.cloudRun.exchangePackageID ?? `xpkg_${workspace.id}`}`;
+    return `package ID: ${workspace.cloudRun.packageID ?? workspace.cloudRun.exchangePackageID ?? `pkg_${workspace.id}`}`;
   }
   if (id === "server_intake") {
     return "服务器只落 metadata、digest、policy 和 artifact descriptor。";
@@ -3201,6 +3220,7 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
   }
   if (local.cloud_exchange) {
     health.cloudExchange = {
+      retired: Boolean(local.cloud_exchange.retired),
       configured: local.cloud_exchange.configured,
       exchangeDiscovered: Boolean(local.cloud_exchange.exchange_discovered),
       installationPaired: Boolean(local.cloud_exchange.installation_paired),

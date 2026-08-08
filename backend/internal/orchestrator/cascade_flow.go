@@ -74,13 +74,17 @@ type CascadeState struct {
 // DesktopCloudRunState is the restart-safe App view of the remote execution.
 // It stores only protocol metadata and safe managed-file names, never local paths.
 type DesktopCloudRunState struct {
-	SchemaVersion     string                         `json:"schema_version"`
-	Transport         string                         `json:"transport,omitempty"`
-	OrgID             string                         `json:"org_id,omitempty"`
-	LeaseID           string                         `json:"lease_id,omitempty"`
-	DataPort          int                            `json:"data_port,omitempty"`
-	LeaseExpiresAt    *time.Time                     `json:"lease_expires_at,omitempty"`
-	UploadID          string                         `json:"upload_id,omitempty"`
+	SchemaVersion  string     `json:"schema_version"`
+	Transport      string     `json:"transport,omitempty"`
+	OrgID          string     `json:"org_id,omitempty"`
+	LeaseID        string     `json:"lease_id,omitempty"`
+	DataPort       int        `json:"data_port,omitempty"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	UploadID       string     `json:"upload_id,omitempty"`
+	// PackageID is the authoritative Browser Agent package identity. The
+	// exchange_package_id field below remains only as a v1 persisted-state
+	// compatibility key for older projects.
+	PackageID         string                         `json:"package_id,omitempty"`
 	ExchangePackageID string                         `json:"exchange_package_id,omitempty"`
 	CloudJobID        string                         `json:"cloud_job_id,omitempty"`
 	Status            string                         `json:"status,omitempty"`

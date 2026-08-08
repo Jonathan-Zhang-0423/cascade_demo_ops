@@ -99,6 +99,81 @@ type DirectResultReviewRequest struct {
 	Review          model.ResultReviewRequest `json:"review"`
 }
 
+// GetDirectEditorMaterialization creates/looks up the local editor handoff
+// only after every artifact referenced by the verified direct result has been
+// downloaded into the App-managed artifact root and checksum-verified.
+func (s *Service) GetDirectEditorMaterialization(ctx context.Context, projectID string) (EditorSessionMaterialization, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil || state.DesktopCloudRun == nil || state.DesktopCloudRun.Transport != directTransportStateName || state.DesktopCloudRun.ResultPackage == nil {
+		return EditorSessionMaterialization{}, errors.New("direct Browser Agent result is unavailable")
+	}
+	run := state.DesktopCloudRun
+	if !run.ResultDownloaded {
+		return EditorSessionMaterialization{Message: "直连结果素材尚未完成 checksum 校验。"}, nil
+	}
+	result := *run.ResultPackage
+	assets := make(map[string]orchestrator.DesktopDownloadedAssetState, len(run.DownloadedAssets))
+	for _, asset := range run.DownloadedAssets {
+		if !asset.Verified || asset.ArtifactID == "" {
+			continue
+		}
+		assets[asset.ArtifactID] = asset
+	}
+	refs := append([]model.ArtifactRef{}, result.GeneratedAssets...)
+	if result.ExecutionTrace != nil {
+		refs = append(refs, result.ExecutionTrace.Artifacts...)
+	}
+	if result.StageEventLogRef != nil {
+		refs = append(refs, *result.StageEventLogRef)
+	}
+	for _, ref := range refs {
+		asset, ok := assets[ref.ID]
+		if !ok || asset.FileName == "" {
+			return EditorSessionMaterialization{Message: "直连结果仍缺少已校验素材：" + ref.ID}, nil
+		}
+		path := filepath.Join(s.runtime.ArtifactRoot, "desktop", "direct-downloads", safePathSegment(projectID), safePathSegment(run.CloudJobID), safePathSegment(asset.FileName))
+		if !pathWithinRoot(path, filepath.Join(s.runtime.ArtifactRoot, "desktop", "direct-downloads")) {
+			return EditorSessionMaterialization{Message: "直连素材路径不在 App 管理目录内。"}, nil
+		}
+		if size, valid := verifiedDownload(path, asset.SHA256, asset.SizeBytes); !valid || size != asset.SizeBytes {
+			return EditorSessionMaterialization{Message: "直连素材 checksum 校验状态无效：" + ref.ID}, nil
+		}
+		ref.URI = path
+		if ref.Metadata == nil {
+			ref.Metadata = map[string]any{}
+		}
+		ref.Metadata["local_path"] = path
+		for index := range result.GeneratedAssets {
+			if result.GeneratedAssets[index].ID == ref.ID {
+				result.GeneratedAssets[index] = ref
+			}
+		}
+		if result.ExecutionTrace != nil {
+			for index := range result.ExecutionTrace.Artifacts {
+				if result.ExecutionTrace.Artifacts[index].ID == ref.ID {
+					result.ExecutionTrace.Artifacts[index] = ref
+				}
+			}
+		}
+		if result.StageEventLogRef != nil && result.StageEventLogRef.ID == ref.ID {
+			*result.StageEventLogRef = ref
+		}
+	}
+	request, err := s.localEditorHandoffRequest(result)
+	if err != nil {
+		return EditorSessionMaterialization{Message: "直连结果已下载，但编辑器交接尚不可用：" + err.Error()}, nil
+	}
+	session, created, err := s.EnsureEditorSessionFromResultPackage(ctx, request)
+	if err != nil {
+		return EditorSessionMaterialization{}, err
+	}
+	message := "直连 Browser Agent 素材已校验并登记，可进入本地编辑器。"
+	if !created {
+		message = "直连 Browser Agent 素材已存在，已复用原编辑会话。"
+	}
+	return EditorSessionMaterialization{Ready: true, Created: created, SessionID: session.SessionID, Message: message}, nil
+}
+
 func (s *Service) SaveDirectTransportSettings(ctx context.Context, request DirectTransportSettingsRequest) (DirectTransportRuntimeView, error) {
 	controlURL, err := validateDirectTransportControlURL(request.ControlURL)
 	if err != nil {
@@ -250,6 +325,19 @@ func (s *Service) ReleaseDirectTransportLease(ctx context.Context, projectID str
 	}
 	if run.Status != "completed" && run.Status != "failed" {
 		return DirectTransportReleaseResult{}, errors.New("direct Browser Agent lease cannot be released while the job is active")
+	}
+	states, err := s.states.List(ctx)
+	if err != nil {
+		return DirectTransportReleaseResult{}, err
+	}
+	for _, candidate := range states {
+		if candidate == nil || candidate.ProjectID == projectID || candidate.DesktopCloudRun == nil {
+			continue
+		}
+		other := candidate.DesktopCloudRun
+		if other.Transport == directTransportStateName && strings.TrimSpace(other.LeaseID) == lease.LeaseID && other.Status != "completed" && other.Status != "failed" && other.Status != "canceled" && other.Status != "expired" {
+			return DirectTransportReleaseResult{}, errors.New("direct Browser Agent lease is shared by another active project")
+		}
 	}
 	if err := s.releaseDirectLeaseRemote(ctx, lease); err != nil {
 		return DirectTransportReleaseResult{}, err
@@ -561,6 +649,12 @@ func (s *Service) ReviewDirectResult(ctx context.Context, projectID string, requ
 }
 
 func (s *Service) directLeaseForRequest(ctx context.Context, projectID string) (model.DirectPortLease, error) {
+	if state, stateErr := s.states.Load(ctx, projectID); stateErr == nil && state.DesktopCloudRun != nil {
+		run := state.DesktopCloudRun
+		if run.Transport == directTransportStateName && run.Stage == "lease_released" {
+			return model.DirectPortLease{}, errors.New("direct Browser Agent lease was released for this run")
+		}
+	}
 	lease, err := s.loadDirectLease(projectID)
 	if err == nil {
 		return lease, nil
@@ -674,6 +768,18 @@ func (s *Service) acquireDirectLease(ctx context.Context, projectID string) (mod
 	}
 	if err := s.storeDirectLease(projectID, encoded); err != nil {
 		return lease, err
+	}
+	// A gateway restart or lease expiry can replace the listener while the
+	// approved job remains active. Persist the new lease metadata immediately so
+	// the App UI and restart state never advertise the retired port.
+	if state, stateErr := s.states.Load(ctx, projectID); stateErr == nil && state.DesktopCloudRun != nil && state.DesktopCloudRun.Transport == directTransportStateName && state.DesktopCloudRun.Stage != "lease_released" {
+		_ = s.updateDesktopCloudRun(ctx, projectID, func(run *orchestrator.DesktopCloudRunState) {
+			run.LeaseID = lease.LeaseID
+			run.DataPort = lease.DataPort
+			expires := lease.ExpiresAt
+			run.LeaseExpiresAt = &expires
+			run.Message = "Browser Agent 直连租约已恢复，使用新的专属数据端口。"
+		})
 	}
 	return lease, nil
 }
@@ -791,6 +897,7 @@ func (s *Service) persistDirectUpload(ctx context.Context, projectID, orgID stri
 		expires := lease.ExpiresAt
 		run.LeaseExpiresAt = &expires
 		run.ExchangePackageID = receipt.PackageID
+		run.PackageID = receipt.PackageID
 		run.CloudJobID = receipt.JobID
 		run.Status = receipt.Status
 		run.Stage = receipt.Stage
@@ -813,6 +920,7 @@ func (s *Service) persistDirectStatus(ctx context.Context, projectID string, sta
 	return s.updateDesktopCloudRun(ctx, projectID, func(run *orchestrator.DesktopCloudRunState) {
 		run.Transport = directTransportStateName
 		run.ExchangePackageID = status.PackageID
+		run.PackageID = status.PackageID
 		run.CloudJobID = status.JobID
 		run.Status = status.Status
 		run.Stage = status.Stage

@@ -332,6 +332,13 @@ func (g *Gateway) handleLeaseRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lease_not_found", "Dedicated Browser Agent lease was not found.")
 		return
 	}
+	for _, record := range g.jobs {
+		if record.InstallationID == request.InstallationID && !directJobTerminal(record.Status.Status) {
+			g.mu.Unlock()
+			writeError(w, http.StatusConflict, "lease_has_active_jobs", "Dedicated Browser Agent lease still has active jobs.")
+			return
+		}
+	}
 	delete(g.leases, request.LeaseID)
 	_ = runtime.server.Close()
 	_ = runtime.listener.Close()
@@ -341,6 +348,15 @@ func (g *Gateway) handleLeaseRelease(w http.ResponseWriter, r *http.Request) {
 		leaseIDSuffix = leaseIDSuffix[len(leaseIDSuffix)-8:]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"protocol_version": model.DirectTransportProtocolVersion, "released": true, "lease_id_suffix": leaseIDSuffix})
+}
+
+func directJobTerminal(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "completed", "failed", "canceled", "expired":
+		return true
+	default:
+		return false
+	}
 }
 
 func (g *Gateway) allocateLease(installationID string, now time.Time) (model.DirectPortLease, error) {

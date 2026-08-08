@@ -102,6 +102,13 @@ const (
 	accelCommand = 1
 )
 
+// The Win32 window is retained only as a compatibility shell. Production
+// Desktop execution must use the Wails direct Browser Agent transport; never
+// let the retired Exchange path make a network request.
+func nativeLegacyExchangeDisabled(runtime config.AppRuntimeConfig) bool {
+	return runtime.Profile == config.ProfileDesktop && runtime.Environment != "test"
+}
+
 var (
 	user32   = syscall.NewLazyDLL("user32.dll")
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
@@ -1369,6 +1376,10 @@ func (a *nativeApp) uploadApprovedPackage() {
 }
 
 func (a *nativeApp) uploadApprovedPackageAsync(projectID string) {
+	if nativeLegacyExchangeDisabled(a.runtimeConfig) {
+		a.postUploadError("legacy_exchange_disabled")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	build, err := a.service.BuildClientExecutionPackage(ctx, projectID, nativeDefaultOrgID)
@@ -1536,6 +1547,10 @@ func (a *nativeApp) queryServerStatus() {
 }
 
 func (a *nativeApp) queryServerStatusAsync(record nativeServerHandoffRecord) {
+	if nativeLegacyExchangeDisabled(a.runtimeConfig) {
+		a.postServerStatusError("legacy_exchange_disabled")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	status, err := a.service.GetCloudExecutionPackageStatus(ctx, app.CloudStatusRequest{
@@ -1653,6 +1668,10 @@ func (a *nativeApp) fetchServerResult() {
 }
 
 func (a *nativeApp) fetchServerResultAsync(record nativeServerHandoffRecord) {
+	if nativeLegacyExchangeDisabled(a.runtimeConfig) {
+		a.postServerResultError("legacy_exchange_disabled")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	result, err := a.service.GetCloudResultPackage(ctx, app.CloudResultRequest{
@@ -1788,6 +1807,10 @@ func (a *nativeApp) downloadServerArtifacts() {
 }
 
 func (a *nativeApp) downloadServerArtifactsAsync(record nativeServerHandoffRecord, deliverables []model.ExecutionDeliverable) {
+	if nativeLegacyExchangeDisabled(a.runtimeConfig) {
+		a.postArtifactDownloadError("legacy_exchange_disabled")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	downloadDir := serverDeliverablesDir(record.OutputDirectory)
@@ -1979,6 +2002,10 @@ func (a *nativeApp) ackServerResult() {
 }
 
 func (a *nativeApp) ackServerResultAsync(record nativeServerHandoffRecord, received []string) {
+	if nativeLegacyExchangeDisabled(a.runtimeConfig) {
+		a.postServerAckError("legacy_exchange_disabled")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	ack, err := a.service.AckCloudResultPackage(ctx, app.CloudAckRequest{

@@ -722,6 +722,9 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		review, err := s.service.ReviewDirectResult(r.Context(), projectID, request)
 		writeBridgeValue(w, review, err)
+	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/editor-materialization":
+		materialization, err := s.service.GetDirectEditorMaterialization(r.Context(), projectID)
+		writeBridgeValue(w, materialization, err)
 	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/release":
 		result, err := s.service.ReleaseDirectTransportLease(r.Context(), projectID)
 		writeBridgeValue(w, result, err)
@@ -890,6 +893,10 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "/cloud/deliverable/media":
 		s.serveVerifiedCloudDeliverable(w, r, projectID)
 	case r.Method == http.MethodGet && suffix == "/cloud/editor-materialization":
+		if s.legacyExchangeDisabled() {
+			writeBridgeValue(w, nil, errors.New("legacy_exchange_disabled: use browser-agent-direct/editor-materialization"))
+			return
+		}
 		result, err := s.service.GetCloudEditorMaterialization(r.Context(), CloudEditorMaterializationRequest{
 			OrgID: r.URL.Query().Get("org_id"), ResultPackageID: r.URL.Query().Get("result_package_id"),
 		})

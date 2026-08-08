@@ -22,7 +22,7 @@ The original authorized draft remains immutable; permitted repairs are auditable
 Models may resolve or suggest targets, while deterministic services enforce execution and safety boundaries.
 ```
 
-The v2 architecture is the target direction and is still being implemented. The versioned exchange and `browser-agent-outline-v1` contracts remain authoritative for implemented code paths until an explicit schema migration lands.
+The shipped Desktop execution path is the direct Browser Agent transport. The retired DemoOps Exchange contracts remain only for explicitly marked test/fixture compatibility and are not an upload or execution capability in production Desktop builds. The `browser-agent-outline-v1` package contract remains authoritative for the payload format.
 
 Documentation:
 

@@ -361,6 +361,7 @@ export type AppCapabilitiesStatus = {
 };
 
 export type CloudExchangeStatus = {
+  retired?: boolean;
   configured: boolean;
   exchangeDiscovered: boolean;
   installationPaired: boolean;
