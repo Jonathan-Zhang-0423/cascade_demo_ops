@@ -516,8 +516,29 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 			return view, fmt.Errorf("visible execution video render failed: %w", err)
 		}
 	}
+	// Build and persist the Replay Manifest so the failure scene can be
+	// reconstructed from local artifacts without replaying the run.
+	replayManifest, manifestErr := BuildReplayManifest(BuildReplayManifestInput{
+		Result:    result,
+		Events:    runResult.Events,
+		Package:   request.Package,
+		RunID:     runID,
+		EventDir:  recordingDir,
+		Waiver:    waiver,
+		CreatedAt: timeNowUTC(),
+	})
+	if manifestErr == nil && replayManifest.ManifestURI != "" {
+		result.GeneratedAssets = append(result.GeneratedAssets, model.ArtifactRef{
+			ID:        "replay_manifest_" + safePathSegment(runID),
+			Kind:      "replay_manifest",
+			URI:       replayManifest.ManifestURI,
+			MimeType:  "application/json",
+			Sensitive: false,
+		})
+	}
 	// Persist the exact result package (including StepResults, ValidationReports,
-	// failure diagnostics and stage-log reference) for local audit/replay.
+	// failure diagnostics, stage-log reference and replay manifest) for local
+	// audit/replay.
 	resultPath, persistErr := persistLocalVisibleResultPackage(recordingDir, result)
 	if persistErr != nil {
 		return view, fmt.Errorf("visible execution result package persistence failed: %w", persistErr)

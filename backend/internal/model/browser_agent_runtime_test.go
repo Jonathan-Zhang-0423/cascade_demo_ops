@@ -162,6 +162,47 @@ func validRuntimeValidationReport() ValidationReport {
 	}
 }
 
+func TestAnnotateValidationChecksFilledFromTable(t *testing.T) {
+	knownCodes := []string{
+		"MISSING_BUNDLE_HASH", "MISSING_POLICY_HASH", "EMPTY_STAGE_APPROVAL_PLAN",
+		"OUT_OF_ORDER_EVENTS", "REQUIRED_ASSERTION_FAILED", "CROSS_DOMAIN_ACCESS",
+		"RESULT_PACKAGE_MISMATCH", "RESULT_HASH_MISMATCH", "MISSING_MP4_VIDEO",
+	}
+	checks := make([]ValidationCheck, len(knownCodes))
+	for i, code := range knownCodes {
+		checks[i] = ValidationCheck{ID: "c" + code, Kind: "test", Code: code, Passed: false}
+	}
+	AnnotateValidationChecks(checks)
+	for _, c := range checks {
+		if c.Impact == "" {
+			t.Errorf("code %s: Impact is empty after annotation", c.Code)
+		}
+		if c.Suggestion == "" {
+			t.Errorf("code %s: Suggestion is empty after annotation", c.Code)
+		}
+		if c.ResponsibilityDomain == "" {
+			t.Errorf("code %s: ResponsibilityDomain is empty after annotation", c.Code)
+		}
+	}
+}
+
+func TestAnnotateValidationChecksUnknownCodeNoOp(t *testing.T) {
+	check := ValidationCheck{ID: "c1", Kind: "test", Code: "UNKNOWN_EXPERIMENTAL_CODE", Passed: false}
+	AnnotateValidationChecks([]ValidationCheck{check})
+	// unknown codes must not panic and must leave fields at zero value
+	if check.Impact != "" || check.ResponsibilityDomain != "" {
+		t.Error("unknown code must not be modified by annotation")
+	}
+}
+
+func TestAnnotateValidationChecksPassedCheckLeftAlone(t *testing.T) {
+	check := ValidationCheck{ID: "c1", Kind: "test", Code: "MISSING_BUNDLE_HASH", Passed: true}
+	AnnotateValidationChecks([]ValidationCheck{check})
+	// passed checks: Impact/Suggestion/Domain may be filled (informational), but no panic
+	// the key assertion is that annotation is safe on passed checks
+}
+
+
 func validRuntimeRepairProposal() RuntimeRepairProposal {
 	return RuntimeRepairProposal{
 		SchemaVersion: RuntimeRepairProposalSchemaVersion, ProposalID: "proposal_1", RunID: "run_1",

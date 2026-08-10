@@ -140,7 +140,8 @@ func normalizeAllowedDomain(value string) string {
 func (a *BrowserAgentOutcomeVerifierAdapter) ValidateBeforeExecution(
 	ctx context.Context,
 	vctx model.BrowserAgentValidationContext,
-) (model.ValidationReport, error) {
+) (report model.ValidationReport, err error) {
+	defer func() { model.AnnotateValidationChecks(report.Checks) }()
 	// P0 Critical checks: hash verification (must not be empty)
 	criticalChecks := []model.ValidationCheck{}
 
@@ -249,7 +250,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 	ctx context.Context,
 	vctx model.BrowserAgentValidationContext,
 	events []model.StageExecutionEvent,
-) (model.ValidationReport, error) {
+) (report model.ValidationReport, err error) {
+	defer func() { model.AnnotateValidationChecks(report.Checks) }()
 	// P0: Runtime evidence quality checks
 	runtimeChecks := []model.ValidationCheck{}
 
@@ -639,7 +641,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 	vctx model.BrowserAgentValidationContext,
 	result model.RecordingResultPackage,
 	events []model.StageExecutionEvent,
-) (model.ValidationReport, error) {
+) (report model.ValidationReport, err error) {
+	defer func() { model.AnnotateValidationChecks(report.Checks) }()
 	postChecks := []model.ValidationCheck{}
 
 	// P0.0: Verify RecordingResultPackage is not empty

@@ -114,17 +114,34 @@ type ValidationReport struct {
 }
 
 type ValidationCheck struct {
-	ID           string          `json:"id"`
-	Kind         string          `json:"kind"`
-	Code         string          `json:"code,omitempty"`
-	NodeID       string          `json:"node_id,omitempty"`
-	StageID      string          `json:"stage_id,omitempty"`
-	Severity     FindingSeverity `json:"severity,omitempty"`
-	Passed       bool            `json:"passed"`
-	Required     bool            `json:"required"`
-	Summary      string          `json:"summary,omitempty"`
-	EvidenceRefs []EvidenceRef   `json:"evidence_refs,omitempty"`
+	ID                   string                `json:"id"`
+	Kind                 string                `json:"kind"`
+	Code                 string                `json:"code,omitempty"`
+	NodeID               string                `json:"node_id,omitempty"`
+	StageID              string                `json:"stage_id,omitempty"`
+	Severity             FindingSeverity       `json:"severity,omitempty"`
+	Passed               bool                  `json:"passed"`
+	Required             bool                  `json:"required"`
+	Summary              string                `json:"summary,omitempty"`
+	EvidenceRefs         []EvidenceRef         `json:"evidence_refs,omitempty"`
+	// P1.2: structured feedback fields populated by AnnotateValidationChecks
+	Impact               string                `json:"impact,omitempty"`
+	Suggestion           string                `json:"suggestion,omitempty"`
+	NextStep             string                `json:"next_step,omitempty"`
+	// P1.3: responsibility domain for cross-team triage
+	ResponsibilityDomain ValidationCheckDomain `json:"responsibility_domain,omitempty"`
 }
+
+// ValidationCheckDomain identifies which side of the system is responsible
+// for resolving the issue reported in a ValidationCheck.
+type ValidationCheckDomain string
+
+const (
+	ValidationCheckDomainApp         ValidationCheckDomain = "app"         // App产包、审批计划或执行包字段问题
+	ValidationCheckDomainServer      ValidationCheckDomain = "server"      // Server 执行引擎或 Browser Agent 运行时问题
+	ValidationCheckDomainValidation  ValidationCheckDomain = "validation"  // Validation Agent 自身配置或逻辑问题
+	ValidationCheckDomainEnvironment ValidationCheckDomain = "environment" // Node、FFmpeg、Chromium 等环境问题
+)
 
 type RuntimeRepairProposal struct {
 	SchemaVersion        string        `json:"schema_version"`
