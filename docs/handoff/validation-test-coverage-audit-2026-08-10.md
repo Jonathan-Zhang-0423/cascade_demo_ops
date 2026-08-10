@@ -68,7 +68,113 @@ done
 
 ## 三、Direct 路径调用确认
 
-（Task 2 完成后填写）
+### 3.1 Direct API 实现现状
+
+**结论**：Direct API 尚未在代码库中实现，仅存在于规格文档中。
+
+**证据**：
+```bash
+# 搜索 Direct API 关键词（TLS 控制端口 18443、数据端口 24000、lease_token、bootstrap-token、DirectEncryptedMessage）
+grep -rn "DirectEncryptedMessage\|18443\|24000\|lease_token\|bootstrap-token" backend/internal
+# 结果：无匹配
+```
+
+**规格文档位置**：
+- `handoff_folders/BrowserAgent-Server开发计划-2026-08-10/browser-agent-direct-api-v1.md`
+
+Direct API 设计包含：
+- TLS 控制通道端口 18443（lease/gateway/worker 协调）
+- 数据端口 24000-24031（加密 recording 数据传输）
+- 客户端直连 Server 的结果上报路径（绕过 HTTPS loopback API）
+
+**当前代码库状态**：App→Server 结果路径仅实现了 HTTPS loopback 方式（`/v1/desktop/*` HTTP API）。
+
+### 3.2 当前执行路径的三阶段调用点
+
+当前执行路径通过 `browser_agent_outline_runner.go` 调用三阶段 OutcomeVerifier：
+
+| 阶段 | 调用位置 | 决策处理位置 | 文件 |
+| --- | --- | --- | --- |
+| **ValidateBeforeExecution** | 第 68 行 | 第 76-78 行 | `backend/internal/app/browser_agent_outline_runner.go` |
+| **ValidateStageEvents** | 第 315 行 | 第 318-323 行 | `backend/internal/app/browser_agent_stage_plan.go` |
+| **ValidatePostExecution** | 第 167 行 | 第 175-187 行 | `backend/internal/app/browser_agent_outline_runner.go` |
+
+**调用链路**：
+1. **Pre-execution**（执行前验证）：
+   ```go
+   // browser_agent_outline_runner.go:68
+   preReport, verifyErr := fullVerifier.ValidateBeforeExecution(ctx, validationContext)
+   
+   // 决策处理（L76-78）
+   if preReport.Decision != model.ValidationDecisionContinue {
+       return model.RecordingResultPackage{}, newRuntimeExecutionError("outcome_pre_verification_failed", ...)
+   }
+   ```
+
+2. **Runtime**（运行时阶段验证）：
+   ```go
+   // browser_agent_stage_plan.go:315
+   report, err := o.verifier.ValidateStageEvents(ctx, plan.validationContext(), stageEvents)
+   
+   // 决策处理（L318-323）
+   if err := report.Validate(); err != nil {
+       return result, newRuntimeExecutionError("outcome_verification_failed", err)
+   }
+   if report.Decision == model.ValidationDecisionRepairAllowed {
+       // 触发修复逻辑
+   }
+   ```
+
+3. **Post-execution**（执行后验证）：
+   ```go
+   // browser_agent_outline_runner.go:167
+   postReport, verifyErr := fullVerifier.ValidatePostExecution(ctx, validationContext, result, runResult.Events)
+   
+   // 决策处理（L175-187）
+   if postReport.Decision != model.ValidationDecisionContinue && result.Status != model.RecordingResultStatusFailed {
+       // 构造失败诊断并终止
+       validationErr := newRuntimeExecutionError("outcome_post_verification_failed", ...)
+       recordResult.StepResults = browserAgentPostValidationFailedStepResults(...)
+       recordResult.FailureDiagnostic = browserAgentFailureDiagnostic(...)
+   }
+   ```
+
+### 3.3 Bypass/Legacy 验证绕过检查
+
+**搜索命令**：
+```bash
+grep -rn "skip.*validation\|bypass.*validation\|legacy.*validation" backend/internal/app backend/internal/orchestrator
+```
+
+**结果**：
+- 共 8 处匹配，均为适配器代码注释中的 "legacy validation" 文本（`browser_agent_outcome_verifier_adapter.go`）
+- 这些注释描述的是适配器对**旧验证组件**的封装（DomainValidator、SelectorValidator、EvidenceValidator 等），并非运行时绕过机制
+
+**关键发现**：`browser_agent_test_waiver.go` 存在 dev-test waiver 机制
+
+**Waiver 机制用途**：
+- **仅用于 dev/test 环境**（硬性校验 `Profile=dev` + `dev_test_ack=true`）
+- **豁免的是 App 置信度门禁**（`BlockingReasons`），允许未完成分类的 non-destructive 动作通过策略守卫
+- **不豁免三阶段 OutcomeVerifier**：
+  - Waiver 通过 `applyTestOnlyWaiverRuntimeClassifications` 在**运行时计划副本**中注入 `NonDestructive=true` 分类
+  - 注入后的计划仍然经过 `ValidateBeforeExecution` / `ValidateStageEvents` / `ValidatePostExecution` 三阶段验证
+  - 参见 `browser_agent_test_waiver.go:354-406`（waiver 应用逻辑）和 `browser_agent_test_waiver.go:497-530`（策略守卫复核）
+
+**结论**：当前代码库中**不存在**三阶段验证的 bypass 或 skip 机制。Dev-test waiver 仅调整前置置信度门禁，不影响 OutcomeVerifier 的完整执行。
+
+### 3.4 待办事项
+
+**一凯 Direct API 实现落地后**，需复核以下内容：
+
+1. **执行入口**：Direct 路径是否复用 `browser_agent_outline_runner.go` 的三阶段调用链路？
+   - 若复用，验证链路无需改动
+   - 若独立实现，需确保新路径调用相同的三阶段 OutcomeVerifier 接口
+
+2. **验证上下文一致性**：Direct 路径构造的 `BrowserAgentValidationContext` 是否与 loopback 路径保持相同的 bundle_hash / plan_hash / policy_hash 校验？
+
+3. **决策处理一致性**：Direct 路径是否按相同逻辑处理 `ValidationDecision`（continue / stop_and_report / repair_allowed / reunderstanding_required）？
+
+**建议**：在 Direct API PR 中增加集成测试，覆盖 Direct 路径的三阶段验证触发（参考 `browser_agent_integration_test.go` 的场景覆盖模式）。
 
 ## 四、发现的遗漏与补充
 
