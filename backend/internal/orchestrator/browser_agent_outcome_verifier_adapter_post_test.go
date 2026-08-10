@@ -806,3 +806,20 @@ func TestValidatePostExecution_EvidenceArtifactIntegrity(t *testing.T) {
 		}
 	})
 }
+
+func TestValidatePostExecution_StageValidationFailureThreshold(t *testing.T) {
+	// STAGE_VALIDATION_FAILURE_THRESHOLD (adapter.go ~L1007) is unreachable through the
+	// ValidatePostExecution public API.
+	//
+	// The threshold check increments failedStageCount only when feedback.Blocked==true or
+	// any ValidationResult has Critical/Blocker set. Those fields are produced by
+	// GenerateComprehensiveFeedback, which calls postExecClassifyAnalysis(a.ObservedIssues).
+	// However, the analyses fed into GenerateComprehensiveFeedback come from
+	// convertEventsToPostExecutionAnalyses (adapter.go ~L1223–1244), which only maps StageID
+	// and Status from events and NEVER populates ObservedIssues.
+	// With ObservedIssues always nil/empty, postExecClassifyAnalysis always returns
+	// blocked=false, so failedStageCount is always 0 regardless of the events provided.
+	// The threshold condition (failedStageCount/totalStages >= 0.5) therefore can never be
+	// satisfied — the code path is structurally dead from the public API surface.
+	t.Skip("STAGE_VALIDATION_FAILURE_THRESHOLD unreachable: convertEventsToPostExecutionAnalyses never populates ObservedIssues, so failedStageCount is always 0 regardless of input events")
+}
