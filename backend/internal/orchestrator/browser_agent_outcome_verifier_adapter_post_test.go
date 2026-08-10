@@ -680,3 +680,129 @@ func TestValidatePostExecution_ObservedStateTraceability(t *testing.T) {
 		}
 	})
 }
+
+// TestValidatePostExecution_EvidenceArtifactIntegrity tests P0.6 evidence_refs artifact existence cross-check
+func TestValidatePostExecution_EvidenceArtifactIntegrity(t *testing.T) {
+	config := &model.ValidationConfig{
+		PreExecutionEnabled:       true,
+		RealTimeBatchEnabled:      true,
+		PostExecutionBatchEnabled: true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+
+	vctx := model.BrowserAgentValidationContext{
+		RunID:                     "test-post-evidence-001",
+		SourcePackageID:           "pkg-post-evidence-001",
+		SourceBundleHashSHA256:    "bundle-hash-123",
+		EffectivePolicyHashSHA256: "policy-hash-456",
+		WorkflowGraph:             &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan: &model.StageApprovalPlan{
+			Stages: []model.StageApprovalStage{
+				{NodeID: "stage-1", Order: 1},
+			},
+		},
+		ScriptOutline:        &model.BrowserAgentScriptOutline{ID: "outline-1"},
+		BrowserAgentContract: &model.BrowserAgentContract{},
+	}
+
+	// Empty events and empty StepResults so P0.5 observed_state check is not triggered
+	events := []model.StageExecutionEvent{}
+
+	t.Run("broken_evidence_ref_warns", func(t *testing.T) {
+		// EvidenceRef.ArtifactID points to "artifact-nonexistent" which is not in GeneratedAssets
+		result := model.RecordingResultPackage{
+			ResultID:        "result-evidence-1",
+			SourcePackageID: "pkg-post-evidence-001",
+			Status:          model.RecordingResultStatusGenerated,
+			StepResults:     []model.StepResult{},
+			AuditTrail:      model.CloudExecutionAuditTrail{SourcePackageDigest: "bundle-hash-123"},
+			ValidationReports: []model.ValidationReport{
+				{
+					ReportID: "pre-report-1",
+					Phase:    model.ValidationPhasePreExecution,
+					Checks: []model.ValidationCheck{
+						{
+							ID:     "check-1",
+							Code:   "SOME_CHECK",
+							Passed: true,
+							EvidenceRefs: []model.EvidenceRef{
+								{ArtifactID: "artifact-nonexistent"},
+							},
+						},
+					},
+				},
+			},
+			GeneratedAssets: []model.ArtifactRef{
+				{ID: "artifact-real", Kind: "screenshot"},
+			},
+		}
+
+		ctx := context.Background()
+		report, err := adapter.ValidatePostExecution(ctx, vctx, result, events)
+		if err != nil {
+			t.Fatalf("ValidatePostExecution failed: %v", err)
+		}
+
+		// Should produce EVIDENCE_ARTIFACT_REFERENCE_BROKEN warning
+		found := false
+		for _, check := range report.Checks {
+			if check.Code == "EVIDENCE_ARTIFACT_REFERENCE_BROKEN" && !check.Passed {
+				found = true
+				if check.Severity != model.FindingSeverityWarning {
+					t.Errorf("check.Severity = %v, want %v", check.Severity, model.FindingSeverityWarning)
+				}
+				if check.Required {
+					t.Errorf("check.Required = true, want false")
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected EVIDENCE_ARTIFACT_REFERENCE_BROKEN warning check, but not found in report")
+		}
+	})
+
+	t.Run("valid_evidence_ref_passes", func(t *testing.T) {
+		// EvidenceRef.ArtifactID points to "artifact-real" which IS in GeneratedAssets
+		result := model.RecordingResultPackage{
+			ResultID:        "result-evidence-2",
+			SourcePackageID: "pkg-post-evidence-001",
+			Status:          model.RecordingResultStatusGenerated,
+			StepResults:     []model.StepResult{},
+			AuditTrail:      model.CloudExecutionAuditTrail{SourcePackageDigest: "bundle-hash-123"},
+			ValidationReports: []model.ValidationReport{
+				{
+					ReportID: "pre-report-2",
+					Phase:    model.ValidationPhasePreExecution,
+					Checks: []model.ValidationCheck{
+						{
+							ID:     "check-2",
+							Code:   "SOME_CHECK",
+							Passed: true,
+							EvidenceRefs: []model.EvidenceRef{
+								{ArtifactID: "artifact-real"},
+							},
+						},
+					},
+				},
+			},
+			GeneratedAssets: []model.ArtifactRef{
+				{ID: "artifact-real", Kind: "screenshot"},
+			},
+		}
+
+		ctx := context.Background()
+		report, err := adapter.ValidatePostExecution(ctx, vctx, result, events)
+		if err != nil {
+			t.Fatalf("ValidatePostExecution failed: %v", err)
+		}
+
+		// Should NOT produce EVIDENCE_ARTIFACT_REFERENCE_BROKEN
+		for _, check := range report.Checks {
+			if check.Code == "EVIDENCE_ARTIFACT_REFERENCE_BROKEN" && !check.Passed {
+				t.Errorf("Unexpected EVIDENCE_ARTIFACT_REFERENCE_BROKEN failure: %v", check.Summary)
+			}
+		}
+	})
+}

@@ -913,6 +913,30 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 		}
 	}
 
+	// P0.6: Verify ValidationCheck evidence_refs point to real artifacts
+	allArtifactIDs := make(map[string]bool)
+	for _, asset := range result.GeneratedAssets {
+		allArtifactIDs[asset.ID] = true
+	}
+	for _, vr := range result.ValidationReports {
+		for _, check := range vr.Checks {
+			for _, evRef := range check.EvidenceRefs {
+				if evRef.ArtifactID != "" && !allArtifactIDs[evRef.ArtifactID] {
+					postChecks = append(postChecks, model.ValidationCheck{
+						ID:       fmt.Sprintf("post_broken_evidence_ref_%s", evRef.ArtifactID),
+						Kind:     "evidence_integrity",
+						Code:     "EVIDENCE_ARTIFACT_REFERENCE_BROKEN",
+						Severity: model.FindingSeverityWarning,
+						Passed:   false,
+						Required: false,
+						Summary:  fmt.Sprintf("ValidationCheck %s 引用 artifact %s 但该 artifact 不存在于 GeneratedAssets", check.ID, evRef.ArtifactID),
+						EvidenceRefs: []model.EvidenceRef{{ID: check.ID, Kind: "validation_check"}},
+					})
+				}
+			}
+		}
+	}
+
 	// If critical post checks failed, return stop_and_report
 	hasBlockingFailure := false
 	for _, check := range postChecks {
