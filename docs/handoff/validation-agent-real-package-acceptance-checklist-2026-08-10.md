@@ -97,7 +97,7 @@ jq '.replay_manifest.final_decision' result-package.json
 
 **检查项：**
 - 所有失败的 ValidationCheck 必须有 `code` 和 `responsibility_domain`
-- `code` 必须在 `browser-agent-outcome-verifier-rules-v1.md` 的22个已定义失败码中
+- `code` 必须是已定义失败码之一：以 `browser-agent-outcome-verifier-rules-v1.md` 的失败码表为准，并加上 `browser_agent_validation_annotations.go` 注解表中已登记的码（例如本轮新增的 warning 级 `EVIDENCE_ARTIFACT_REFERENCE_BROKEN`）。规则文档尚未收录该码时，以注解表为准，不作为不签收理由
 - `responsibility_domain` 必须是 `app` / `server` / `validation` / `environment` 之一
 
 **如何检查：**
@@ -171,7 +171,7 @@ jq '.recording_result.status' result-package.json
 3. **ValidationReport 缺失或乱序**：缺少 pre/post report，或顺序不符合 1+N+1
 4. **决策不一致**：有 blocking 失败但 final_decision = continue（误放行）
 5. **失败码缺失**：失败 check 没有 code 或 responsibility_domain
-6. **失败码未定义**：出现不在22个已定义码中的 code
+6. **失败码未定义**：出现既不在 `browser-agent-outcome-verifier-rules-v1.md` 失败码表、也不在 `browser_agent_validation_annotations.go` 注解表中的 code
 7. **成功场景误判为失败**：预期成功的包被判为 failed
 8. **失败场景误判为成功**：预期失败的包被判为 success
 9. **失败包伪造成功 MP4**：失败包结果中存在 demo_video/mp4 artifact 且 recording status 非 failed（确认失败不会伪造成功 MP4）
