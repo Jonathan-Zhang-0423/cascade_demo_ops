@@ -496,3 +496,187 @@ func TestValidatePostExecution_ValidComplete(t *testing.T) {
 		}
 	}
 }
+
+// TestValidatePostExecution_ObservedStateTraceability tests observed_state traceability cross-check
+func TestValidatePostExecution_ObservedStateTraceability(t *testing.T) {
+	config := &model.ValidationConfig{
+		PreExecutionEnabled:       true,
+		RealTimeBatchEnabled:      true,
+		PostExecutionBatchEnabled: true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+
+	vctx := model.BrowserAgentValidationContext{
+		RunID:                     "test-post-traceability-001",
+		SourcePackageID:           "pkg-post-traceability-001",
+		SourceBundleHashSHA256:    "bundle-hash-123",
+		EffectivePolicyHashSHA256: "policy-hash-456",
+		WorkflowGraph:             &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan: &model.StageApprovalPlan{
+			Stages: []model.StageApprovalStage{
+				{NodeID: "stage-1", Order: 1},
+			},
+		},
+		ScriptOutline:        &model.BrowserAgentScriptOutline{ID: "outline-1"},
+		BrowserAgentContract: &model.BrowserAgentContract{},
+		AllowedDomains:       []string{"example.com"},
+	}
+
+	t.Run("no_source_marker_fails", func(t *testing.T) {
+		// Case 1: observed_state doesn't contain "source=" → fails
+		events := []model.StageExecutionEvent{
+			{
+				EventType: model.StageExecutionEventOutcomeObserved,
+				NodeID:    "stage-1",
+				StageID:   "stage-1",
+				Observation: &model.RuntimeObservation{
+					Source: model.RuntimeObservationActualBrowser,
+					URL:    "https://example.com/page1",
+				},
+				EvidenceRefs: []model.EvidenceRef{
+					{ID: "screenshot-1", Kind: "screenshot"},
+				},
+				OccurredAt: time.Now(),
+			},
+			{
+				EventType:  model.StageExecutionEventStageCompleted,
+				NodeID:     "stage-1",
+				StageID:    "stage-1",
+				OccurredAt: time.Now().Add(1 * time.Second),
+			},
+		}
+
+		result := model.RecordingResultPackage{
+			ResultID:        "result-1",
+			SourcePackageID: "pkg-post-traceability-001",
+			Status:          model.RecordingResultStatusGenerated,
+			StepResults: []model.StepResult{
+				{NodeID: "stage-1", Status: "passed", ObservedState: "manually crafted state"},
+			},
+			AuditTrail:       model.CloudExecutionAuditTrail{SourcePackageDigest: "bundle-hash-123"},
+			GeneratedAssets:  []model.ArtifactRef{},
+			StageEventLogRef: &model.ArtifactRef{ID: "log-1", Kind: "stage_event_log"},
+		}
+
+		ctx := context.Background()
+		report, err := adapter.ValidatePostExecution(ctx, vctx, result, events)
+		if err != nil {
+			t.Fatalf("ValidatePostExecution failed: %v", err)
+		}
+
+		// Should produce observed_state_not_runtime_derived failure
+		found := false
+		for _, check := range report.Checks {
+			if check.Code == "observed_state_not_runtime_derived" && !check.Passed {
+				found = true
+				if check.Severity != model.FindingSeverityBlocking {
+					t.Errorf("check.Severity = %v, want blocking", check.Severity)
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected observed_state_not_runtime_derived check to fail, but not found")
+		}
+	})
+
+	t.Run("no_outcome_event_fails", func(t *testing.T) {
+		// Case 2: observed_state exists but no corresponding outcome_observed event → fails
+		events := []model.StageExecutionEvent{
+			// No outcome_observed event
+			{
+				EventType:  model.StageExecutionEventStageStarted,
+				NodeID:     "stage-1",
+				StageID:    "stage-1",
+				OccurredAt: time.Now(),
+			},
+			{
+				EventType:  model.StageExecutionEventStageCompleted,
+				NodeID:     "stage-1",
+				StageID:    "stage-1",
+				OccurredAt: time.Now().Add(1 * time.Second),
+			},
+		}
+
+		result := model.RecordingResultPackage{
+			ResultID:        "result-2",
+			SourcePackageID: "pkg-post-traceability-001",
+			Status:          model.RecordingResultStatusGenerated,
+			StepResults: []model.StepResult{
+				{NodeID: "stage-1", Status: "passed", ObservedState: "source=runtime"},
+			},
+			AuditTrail:       model.CloudExecutionAuditTrail{SourcePackageDigest: "bundle-hash-123"},
+			GeneratedAssets:  []model.ArtifactRef{},
+			StageEventLogRef: &model.ArtifactRef{ID: "log-1", Kind: "stage_event_log"},
+		}
+
+		ctx := context.Background()
+		report, err := adapter.ValidatePostExecution(ctx, vctx, result, events)
+		if err != nil {
+			t.Fatalf("ValidatePostExecution failed: %v", err)
+		}
+
+		// Should produce observed_state_not_runtime_derived failure
+		found := false
+		for _, check := range report.Checks {
+			if check.Code == "observed_state_not_runtime_derived" && !check.Passed {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected observed_state_not_runtime_derived check to fail when no outcome event exists")
+		}
+	})
+
+	t.Run("valid_traceability_passes", func(t *testing.T) {
+		// Case 3: observed_state contains "source=" AND has real event → passes
+		events := []model.StageExecutionEvent{
+			{
+				EventType: model.StageExecutionEventOutcomeObserved,
+				NodeID:    "stage-1",
+				StageID:   "stage-1",
+				Observation: &model.RuntimeObservation{
+					Source: model.RuntimeObservationActualBrowser,
+					URL:    "https://example.com/page1",
+				},
+				EvidenceRefs: []model.EvidenceRef{
+					{ID: "screenshot-1", Kind: "screenshot"},
+				},
+				OccurredAt: time.Now(),
+			},
+			{
+				EventType:  model.StageExecutionEventStageCompleted,
+				NodeID:     "stage-1",
+				StageID:    "stage-1",
+				OccurredAt: time.Now().Add(1 * time.Second),
+			},
+		}
+
+		result := model.RecordingResultPackage{
+			ResultID:        "result-3",
+			SourcePackageID: "pkg-post-traceability-001",
+			Status:          model.RecordingResultStatusGenerated,
+			StepResults: []model.StepResult{
+				{NodeID: "stage-1", Status: "passed", ObservedState: "source=runtime, url=https://example.com/page1"},
+			},
+			AuditTrail:      model.CloudExecutionAuditTrail{SourcePackageDigest: "bundle-hash-123"},
+			GeneratedAssets: []model.ArtifactRef{},
+			StageEventLogRef: &model.ArtifactRef{ID: "log-1", Kind: "stage_event_log"},
+		}
+
+		ctx := context.Background()
+		report, err := adapter.ValidatePostExecution(ctx, vctx, result, events)
+		if err != nil {
+			t.Fatalf("ValidatePostExecution failed: %v", err)
+		}
+
+		// Should NOT produce observed_state_not_runtime_derived failure
+		for _, check := range report.Checks {
+			if check.Code == "observed_state_not_runtime_derived" && !check.Passed {
+				t.Errorf("Unexpected observed_state_not_runtime_derived failure: %v", check.Summary)
+			}
+		}
+	})
+}
