@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -61,6 +62,7 @@ type DevVisibleBrowserAgentResult struct {
 	VideoPath              string              `json:"video_path,omitempty"`
 	VideoURL               string              `json:"video_url,omitempty"`
 	StageEventPath         string              `json:"stage_event_path,omitempty"`
+	ResultPackagePath      string              `json:"result_package_path,omitempty"`
 	ValidationCount        int                 `json:"validation_count,omitempty"`
 	Artifacts              []model.ArtifactRef `json:"artifacts,omitempty"`
 	DevTestOnly            bool                `json:"dev_test_only,omitempty"`
@@ -485,6 +487,16 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 	if packageErr != nil {
 		return view, fmt.Errorf("visible execution result packaging failed: %w", packageErr)
 	}
+	// The stage log is part of the result contract, not merely a side effect
+	// left on disk. Register its immutable local artifact reference before the
+	// result is exposed so a failed or successful run is fully traceable.
+	if eventSink != nil && eventSink.Count() > 0 {
+		stageArtifact, artifactErr := eventSink.ArtifactRef()
+		if artifactErr != nil {
+			return view, fmt.Errorf("visible execution stage log packaging failed: %w", artifactErr)
+		}
+		result.StageEventLogRef = &stageArtifact
+	}
 	result.ValidationReports = append(result.ValidationReports, preReports...)
 	result.ValidationReports = append(result.ValidationReports, runResult.ValidationReports...)
 	result.PatchLedger = append(result.PatchLedger, runResult.PatchLedger...)
@@ -504,7 +516,6 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 			return view, fmt.Errorf("visible execution video render failed: %w", err)
 		}
 	}
-
 	// Build and persist the Replay Manifest so the failure scene can be
 	// reconstructed from local artifacts without replaying the run.
 	replayManifest, manifestErr := BuildReplayManifest(BuildReplayManifestInput{
@@ -516,19 +527,24 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 		Waiver:    waiver,
 		CreatedAt: timeNowUTC(),
 	})
-	if manifestErr == nil {
-		if replayManifest.ManifestURI != "" {
-			result.GeneratedAssets = append(result.GeneratedAssets, model.ArtifactRef{
-				ID:        "replay_manifest_" + safePathSegment(runID),
-				Kind:      "replay_manifest",
-				URI:       replayManifest.ManifestURI,
-				MimeType:  "application/json",
-				Sensitive: false,
-			})
-		}
+	if manifestErr == nil && replayManifest.ManifestURI != "" {
+		result.GeneratedAssets = append(result.GeneratedAssets, model.ArtifactRef{
+			ID:        "replay_manifest_" + safePathSegment(runID),
+			Kind:      "replay_manifest",
+			URI:       replayManifest.ManifestURI,
+			MimeType:  "application/json",
+			Sensitive: false,
+		})
 	}
-
+	// Persist the exact result package (including StepResults, ValidationReports,
+	// failure diagnostics, stage-log reference and replay manifest) for local
+	// audit/replay.
+	resultPath, persistErr := persistLocalVisibleResultPackage(recordingDir, result)
+	if persistErr != nil {
+		return view, fmt.Errorf("visible execution result package persistence failed: %w", persistErr)
+	}
 	view.Result = visibleExecutionResult(result, recordingDir)
+	view.Result.ResultPackagePath = resultPath
 	if waiver != nil {
 		view.Result.DevTestOnly = true
 		view.Result.NotForExchangeUpload = true
@@ -632,6 +648,21 @@ func visibleExecutionResult(result model.RecordingResultPackage, eventDir string
 		}
 	}
 	return value
+}
+
+func persistLocalVisibleResultPackage(recordingDir string, result model.RecordingResultPackage) (string, error) {
+	if strings.TrimSpace(recordingDir) == "" {
+		return "", errors.New("recording directory is required")
+	}
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(recordingDir, "recording-result-package.json")
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func (m *devVisibleBrowserAgentManager) view(ctx context.Context, sessionID string) (DevVisibleBrowserAgentView, error) {

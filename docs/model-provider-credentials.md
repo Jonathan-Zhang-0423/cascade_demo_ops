@@ -51,6 +51,23 @@ CASCADE_MINIMAX_H3_MODE=disabled|dry_run|real
 - 数据库和执行包只应保存 `secret_ref` 或 provider 名称，不保存原始 key。
 - 后续 provider adapter 应从 runtime config 或 vault resolver 取密钥，不从用户输入、脚本文档或 exchange package 读取明文 key。
 
+## Server 产包前置检查
+
+在要求 App 重新生成正式 `browser-agent-outline-v1` 原始包之前，可调用：
+
+```text
+GET /v1/desktop/model-readiness
+```
+
+该接口探测规划、代码阅读、多模态理解和视频操作四条必需路由，返回
+`cascade.model_readiness.v1`。`ready=true` 只表示四条路由在当前 Engine
+进程中完成了脱敏探测；`ready=false` 时，`findings` 会标出缺失配置、网络错误、
+超时或响应解析错误。接口不会返回密钥、提示词、模型响应正文或本地路径。
+
+该检查是产包前置诊断，不改变已有 App 原始包，也不改变 Server 对执行包的
+正式校验规则。已有完整原始包进入 Server 执行时，不需要再次调用模型；只有
+重新生成或重新规划 App 包时才必须先解决 `model-readiness` 的阻断项。
+
 ## 当前状态
 
 本阶段已经接入 provider-neutral LLM adapter。`CASCADE_LLM_MODE=real` 时会真实调用模型，失败直接返回脱敏错误；`auto` 会在模型不可用时降级 deterministic；`deterministic` 完全不调用外部模型。

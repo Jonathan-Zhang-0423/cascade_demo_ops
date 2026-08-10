@@ -58,6 +58,40 @@ Invoke-RestMethod -Method Post `
 
 ## Approved-package preflight
 
+### Exact App package replay (recommended for end-to-end diagnosis)
+
+When the goal is to prove the Server consumed the exact JSON exported by App,
+use the raw-file waiver endpoint. The endpoint is local dev/test-only. It reads
+the absolute file once, validates the unchanged `browser-agent-outline-v1`
+package and all protocol hashes, then keeps the decoded package in memory. It
+does not rebuild a project draft and does not rewrite the JSON file.
+
+```powershell
+$body = @{
+  package_file = "D:\Engine-7-8\app-tetris-uploadable-package-20260803-212825\app-tetris-uploadable-package-20260803-212825\client_execution_package.json"
+  package_id = "pkg_bundle_script_graph_1785759419656893500"
+  expected_bundle_hash_sha256 = "d8d21b3dad2d54a497748f9c0b70c6bedddb5adb752101e2f805600fd90ec5b7"
+  expected_plan_hash_sha256 = "ea1143961b3ede28424f3254bebe0720527efb87073ddc9a900bf84f5622dbcf"
+  approved_node_ids = @("business_stage_new_project_entry", "business_stage_start_agent_build")
+  dev_test_ack = $true
+} | ConvertTo-Json -Depth 10
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:4317/v1/desktop/app-package-test-waivers/raw-file" `
+  -ContentType "application/json" -Body $body
+```
+
+The file must be inside the local Engine workspace. A changed file, mismatched
+package identity/hash, production profile, or non-loopback request is rejected.
+This endpoint does not relax origin, forbidden-page, destructive-action, or
+required-result validation rules.
+
+The package's `recording_run_spec.base_url`, product URL, allowed origin and
+allowed domain must already describe the visible local page. For example, a
+package generated for `https://cascadeai.cn` cannot be run against
+`http://127.0.0.1:5000/app` by changing only the request; that is an origin
+mismatch and must be reported as an App/package input issue. Do not rewrite the
+package URL or hashes in the Server test path.
+
 Before a future visible execution handoff, the following local endpoint may
 check an existing App package without storing it or performing a browser
 action. The package must already pass the normal protocol validation, have App

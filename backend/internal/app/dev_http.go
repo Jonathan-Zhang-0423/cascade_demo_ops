@@ -122,6 +122,8 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/update/apply", s.handleDesktopUpdateApply)
 	mux.HandleFunc("GET /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
 	mux.HandleFunc("POST /v1/desktop/model-diagnostics", s.handleModelDiagnostics)
+	mux.HandleFunc("GET /v1/desktop/model-readiness", s.handleModelReadiness)
+	mux.HandleFunc("POST /v1/desktop/model-readiness", s.handleModelReadiness)
 	mux.HandleFunc("GET /v1/desktop/projects", s.handleListProjects)
 	mux.HandleFunc("POST /v1/desktop/projects", s.handleCreateProject)
 	mux.HandleFunc("POST /v1/desktop/assistant/sessions", s.handleCreateAssistantSession)
@@ -144,6 +146,7 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	// Local App-draft acceptance bypass. It cannot receive package JSON and is
 	// protected again by requireLocalServerAcceptance inside the handler.
 	mux.HandleFunc("POST /v1/desktop/app-package-test-waivers", s.handleAppPackageTestWaivers)
+	mux.HandleFunc("POST /v1/desktop/app-package-test-waivers/raw-file", s.handleAppPackageRawTestWaiver)
 	mux.HandleFunc("/v1/desktop/app-package-test-waivers/", s.handleAppPackageTestWaivers)
 	mux.HandleFunc("GET /v1/editor/sessions", s.handleEditorSessions)
 	mux.HandleFunc("POST /v1/editor/sessions", s.handleEditorSessions)
@@ -466,6 +469,10 @@ func (s *DevHTTPServer) handleDesktopUpdateApply(w http.ResponseWriter, r *http.
 
 func (s *DevHTTPServer) handleModelDiagnostics(w http.ResponseWriter, r *http.Request) {
 	writeBridgeValue(w, s.service.DiagnoseModels(r.Context()), nil)
+}
+
+func (s *DevHTTPServer) handleModelReadiness(w http.ResponseWriter, r *http.Request) {
+	writeBridgeValue(w, s.service.DiagnoseModelReadiness(r.Context()), nil)
 }
 
 func (s *DevHTTPServer) handleBrowserAgentAcceptance(w http.ResponseWriter, r *http.Request) {

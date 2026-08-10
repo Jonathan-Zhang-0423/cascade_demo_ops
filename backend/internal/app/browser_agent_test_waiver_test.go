@@ -2,6 +2,8 @@ package app
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -314,5 +316,37 @@ func TestAppPackageTestWaiverLocalGuardRejectsCloudProfile(t *testing.T) {
 	manager := newDevAppPackageTestWaiverManager(&Service{runtime: config.AppRuntimeConfig{Profile: config.ProfileCloud, Environment: "development"}})
 	if err := manager.localOnlyGuard(true); err == nil {
 		t.Fatal("cloud profile must never issue a local test waiver")
+	}
+}
+
+func TestRawAppPackageWaiverReadsExactPackageAndRejectsTampering(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	pkg := readBrowserAgentOutlineFixture(t)
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(server.service.runtime.DevRepoRoot, "raw-package-test.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	bundle := pkg.ExecutableScriptBundle
+	waiver, err := server.service.devAppPackageTestWaivers.IssueFromRawFile(t.Context(), DevAppPackageRawWaiverRequest{
+		PackageFile: path, ExpectedPackageID: pkg.PackageID,
+		ExpectedBundleHashSHA256: bundle.Reproducibility.BundleHashSHA256,
+		ExpectedPlanHashSHA256: bundle.Reproducibility.PlanHashSHA256,
+		ApprovedNodeIDs: []string{"node_invite_member"}, DevTestAck: true,
+	})
+	if err == nil || waiver.WaiverID != "" {
+		// The contract fixture has formal approval and no missing classification;
+		// this must not be turned into a waiver merely because it is valid.
+		t.Fatalf("expected node classification failure for a fully classified fixture: waiver=%+v err=%v", waiver, err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.service.devAppPackageTestWaivers.IssueFromRawFile(t.Context(), DevAppPackageRawWaiverRequest{PackageFile: path, ExpectedPackageID: pkg.PackageID, ExpectedBundleHashSHA256: bundle.Reproducibility.BundleHashSHA256, ExpectedPlanHashSHA256: bundle.Reproducibility.PlanHashSHA256, ApprovedNodeIDs: []string{"node_invite_member"}, DevTestAck: true}); err == nil {
+		t.Fatal("raw package with changed bytes should still be semantically stable, but test should not assume byte hash; expected classification failure")
 	}
 }

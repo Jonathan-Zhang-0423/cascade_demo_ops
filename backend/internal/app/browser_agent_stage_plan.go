@@ -788,11 +788,45 @@ func browserAgentRouteAllowed(value string, allowedRoutes []string) bool {
 	path := normalizeBrowserAgentRoute(value)
 	for _, route := range allowedRoutes {
 		approved := normalizeBrowserAgentRoute(route)
-		if approved == "/" || path == approved || strings.HasPrefix(path, strings.TrimRight(approved, "/")+"/") {
+		if approved == "/" || browserAgentRouteTemplatePrefixMatches(path, approved) {
 			return true
 		}
 	}
 	return false
+}
+
+// browserAgentRouteTemplatePrefixMatches binds an App-approved route template
+// (for example /project/:id) to an observed runtime path without persisting
+// the identifier. Static segments remain exact and the observed path may
+// continue into an approved subresource (for example /project/42/logs).
+func browserAgentRouteTemplatePrefixMatches(actualPath, approvedTemplate string) bool {
+	actualParts := browserAgentRouteParts(actualPath)
+	approvedParts := browserAgentRouteParts(approvedTemplate)
+	if len(actualParts) < len(approvedParts) {
+		return false
+	}
+	for index, approved := range approvedParts {
+		if approved == "*" || browserAgentRouteTemplateSegment(approved) {
+			continue
+		}
+		if actualParts[index] != approved {
+			return false
+		}
+	}
+	return true
+}
+
+func browserAgentRouteParts(value string) []string {
+	normalized := normalizeBrowserAgentRoute(value)
+	trimmed := strings.Trim(normalized, "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
+}
+
+func browserAgentRouteTemplateSegment(value string) bool {
+	return value == "*" || strings.HasPrefix(value, ":") || (strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}"))
 }
 
 func normalizeBrowserAgentRoute(value string) string {

@@ -14,7 +14,7 @@
 demoops.generated_shot_candidate.v1
 ```
 
-当前实现提供严格校验、H3 隔离流水线结果转换器、确定性结构审核和人工内容决定记录契约，尚未注册到 App、Director、Executor、EditorSession、Renderer、审核 UI、`normal`、`comparison` 或 `fallback` 路由。
+当前实现提供严格校验、H3 隔离流水线结果转换器、确定性结构审核、人工内容决定记录契约、候选集合/选择契约、Editor approval 契约和统一编辑器引用编译器，尚未注册到 App、Director、Executor、EditorSession、Renderer、审核 UI、`normal`、`comparison` 或 `fallback` 路由。
 
 ## 2. 汇合位置
 
@@ -27,7 +27,10 @@ GeneratedShotIntent
     -> GeneratedShotCandidate
     -> 确定性结构审核（旁路纯函数已实现）
     -> 人工内容审核决定记录（旁路契约已实现，审核 UI 尚未接入）
-    -> 显式选择 A/B 或批准进入编辑器（尚未实现）
+-> 显式选择 A/B 或批准进入编辑器（尚未实现）
+    -> GeneratedShotEditorAssetRef（仅补丁构造输入，旁路已实现）
+    -> GeneratedShotEditPlanPatchProposal（旁路已实现）
+    -> CandidateAssetEditPlanPatch / EditorSession（尚未接入）
     -> 候选分镜补丁（默认不自动应用）
 ```
 
@@ -209,7 +212,82 @@ auto_apply=false
 
 因此本阶段仍不会生成或自动应用 `candidate_asset_edit_plan_patch.json`，也不会修改 `DemoEditPlan`。
 
-## 10. Editor approval 前置契约
+## 10. 统一编辑器素材引用
+
+统一引用使用：
+
+```text
+demoops.generated_shot_editor_asset_ref.v1
+```
+
+`CompileGeneratedShotEditorAssetRef` 只接受已经通过候选、集合、选择和 Editor approval 校验的对象，并输出：
+
+- 本地绝对路径的 normalized artifact；
+- `kind=generated_video_candidate`；
+- MP4/H.264/yuv420p/1920×1080/CFR30 探测摘要；
+- normalized SHA-256、文件大小和时长；
+- Provider 仅作为 Server 审计字段，不作为编辑器分支条件；
+- `source_material_policy=non_authoritative_generated_candidate`；
+- 目标计划 ID、expected revision 和受控 placement。
+
+引用编译器明确拒绝：
+
+- H3/Seedance 临时 URL、Provider asset ID 或原始响应；
+- 未规范化或非 CFR30 媒体；
+- digest 与 approval 不一致的候选；
+- `auto_apply=true` 或 `include_in_demo=true` 的引用；
+- 任何业务 `source_step_id` 绑定。
+
+这是跨 Provider 混合进入编辑器前的统一边界：不同模型可以在不同镜头产生候选，但编辑器只消费同一种 normalized 本地引用。该引用仍只是后续补丁构造输入，不会写 EditorSession、应用补丁或授权 Renderer。
+
+## 11. 受控候选补丁提案
+
+补丁提案使用：
+
+```text
+demoops.generated_shot_edit_plan_patch_proposal.v1
+```
+
+`CompileGeneratedShotEditPlanPatchProposal` 只接受通过统一引用、Editor approval 和候选集合校验的对象，并生成与既有 `candidate_asset_edit_plan_patch.v1` 语义兼容的 Server 内部提案：
+
+```text
+status=proposed_pending_explicit_apply
+application_mode=manual_or_explicit_opt_in_required
+requires_explicit_opt_in=true
+requires_renderer_validation=true
+presentation_only=true
+non_authoritative_only=true
+must_not_bind_source_step=true
+auto_apply=false
+approved_for_demo=false
+include_in_demo=false
+```
+
+提案只保存统一 `asset_ref_id`、目标计划 ID、expected revision、purpose、placement 和时长，不保存 Provider 请求、临时 URL 或业务 `source_step_id`。它不会修改 `DemoEditPlan` 或 `EditorSession`，不会执行 revision compare-and-swap、导入文件、应用补丁或触发 Renderer。
+
+后续正式接入必须先将该提案映射为现有 `CandidateAssetEditPlanPatch`，再经过既有 patch validator、expected revision compare-and-swap、人工显式 opt-in 和 Renderer validation。不能绕过现有 Executor 协议直接把统一引用写入时间线。
+
+## 12. H3 回调通知边界
+
+H3 回调解析使用 Server 内部 schema：
+
+```text
+demoops.minimax_h3_callback.v1
+```
+
+当前只实现无副作用的 payload 解析器：
+
+- challenge 验证请求只原样返回 challenge；
+- 任务通知必须包含 task ID 和受支持的六态之一；
+- 如果调用方提供 expected task ID，回调任务必须完全匹配；
+- 成功通知必须设置 `requires_query=true`，不能仅凭回调宣称任务成功；
+- `content.url`、`output.video_url` 和顶层 `video_url` 只接受 HTTPS，且只作为待查询线索；
+- 解析器不创建任务、不调用 Provider、不登记 artifact、不生成候选、不推进编排状态；
+- 回调仍是轮询的唤醒信号，正式接入后必须再次调用 H3 查询接口确认状态和输出 URL。
+
+当前没有注册 HTTP callback route，也没有把 `callback_url` 写入现有 H3 生产请求；轮询仍是唯一运行路径。
+
+## 13. Editor approval 前置契约
 
 Editor approval 使用：
 
@@ -256,7 +334,7 @@ auto_apply=false
 
 因此批准并不修改 EditorSession，也不应用 `candidate_asset_edit_plan_patch.json`，更不授权 Renderer。补丁构造、补丁校验、revision compare-and-swap、人工应用和 Renderer 复验仍是后续独立阶段。
 
-## 11. 不可执行编排状态机
+## 14. 不可执行编排状态机
 
 编排审计记录使用：
 
@@ -299,7 +377,7 @@ auto_apply=false
 
 这是一份旁路审计状态机，不是生产编排器。它不持有 Client，不创建或查询任务，不下载素材，不触发 Provider，不写编辑器，也不注册 `normal`、`comparison` 或 `fallback` 路由。
 
-## 12. 与 App 协议的关系
+## 15. 与 App 协议的关系
 
 本文件是 Server 内部产物协议，不是 App 输入协议：
 
@@ -310,7 +388,16 @@ auto_apply=false
 
 公共 App 边界见 [App ↔ Server 生成展示视频能力协议](app-server-generated-video-capability-protocol.md)。
 
-## 13. 当前验证方式
+### 15.1 H3 callback notification-only 去重旁路
+
+Server 已具备 `MiniMaxH3CallbackDeduper` 纯内存旁路，用于把已解析的 H3 回调转换为“唤醒查询”的内部记录：
+
+- 去重键为 `task_id + normalized_status + payload_sha256`；同一回调重复到达时返回 `duplicate=true` 且 `query_required=false`。
+- 首次通知只返回 `query_required=true`，并记录接收时间、任务 ID、六态状态和原始 payload 的 SHA-256；不保存完整 Prompt、Key 或完整临时 URL。
+- 记录固定 `notification_only=true`，不会标记任务成功、创建候选、登记 artifact、推进编排、写入 EditorSession 或调用 Provider。
+- 当前实现为有界内存 deduper，仅用于离线协议验证；尚未注册 HTTP route、来源认证、持久化或分布式去重。因此 callback 仍不能替代查询，正式启用前必须补齐这些能力。
+
+## 16. 当前验证方式
 
 验收并行期间仅允许：
 
