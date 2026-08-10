@@ -365,6 +365,173 @@ func TestRepairProposalGenerator_ProposalFields(t *testing.T) {
 	}
 }
 
+// TestRepairProposalGenerator_CaptureTimingKind tests capture_timing repair proposal generation
+func TestRepairProposalGenerator_CaptureTimingKind(t *testing.T) {
+	config := &model.ValidationConfig{EnableRuntimeRepair: true}
+	gen := NewRepairProposalGenerator(config)
+
+	vctx := &model.BrowserAgentValidationContext{
+		RunID:                     "run-capture-001",
+		SourcePackageID:           "pkg-capture-001",
+		SourceBundleHashSHA256:    "bundle-capture-abc",
+		EffectivePolicyHashSHA256: "policy-capture-def",
+	}
+
+	checks := []model.ValidationCheck{
+		{
+			ID:      "check-capture-1",
+			Kind:    "capture_timing",
+			Code:    "CAPTURE_TIMING_ISSUE",
+			NodeID:  "node-capture-1",
+			StageID: "stage-capture-1",
+			Severity: model.FindingSeverityWarning,
+			Passed:  false,
+			Required: false,
+			Summary: "Screenshot captured before element fully rendered",
+		},
+	}
+
+	policy := &model.BrowserAgentRepairPolicy{
+		AllowedRepairKinds: []string{"capture_timing"},
+		EditableFields:     []string{"capture_delay_ms"},
+	}
+
+	proposals := gen.GenerateRepairProposals(vctx, checks, policy)
+
+	if len(proposals) != 1 {
+		t.Fatalf("Expected 1 proposal for capture_timing, got %d", len(proposals))
+	}
+
+	p := proposals[0]
+
+	if p.RepairKind != "capture_timing" {
+		t.Errorf("Expected RepairKind='capture_timing', got '%s'", p.RepairKind)
+	}
+	if p.Field != "capture_delay_ms" {
+		t.Errorf("Expected Field='capture_delay_ms', got '%s'", p.Field)
+	}
+	if p.RunID != vctx.RunID {
+		t.Errorf("Expected RunID='%s', got '%s'", vctx.RunID, p.RunID)
+	}
+	if p.NodeID != checks[0].NodeID {
+		t.Errorf("Expected NodeID='%s', got '%s'", checks[0].NodeID, p.NodeID)
+	}
+	if p.StageID != checks[0].StageID {
+		t.Errorf("Expected StageID='%s', got '%s'", checks[0].StageID, p.StageID)
+	}
+	if p.BaseBundleHashSHA256 != vctx.SourceBundleHashSHA256 {
+		t.Errorf("Expected BaseBundleHashSHA256='%s', got '%s'", vctx.SourceBundleHashSHA256, p.BaseBundleHashSHA256)
+	}
+	if p.PolicyHashSHA256 != vctx.EffectivePolicyHashSHA256 {
+		t.Errorf("Expected PolicyHashSHA256='%s', got '%s'", vctx.EffectivePolicyHashSHA256, p.PolicyHashSHA256)
+	}
+	if err := p.Validate(); err != nil {
+		t.Errorf("Generated capture_timing proposal failed Validate(): %v", err)
+	}
+}
+
+// TestRepairProposalGenerator_FrameResolutionKind tests frame_resolution repair proposal generation
+func TestRepairProposalGenerator_FrameResolutionKind(t *testing.T) {
+	config := &model.ValidationConfig{EnableRuntimeRepair: true}
+	gen := NewRepairProposalGenerator(config)
+
+	vctx := &model.BrowserAgentValidationContext{
+		RunID:                     "run-frame-001",
+		SourcePackageID:           "pkg-frame-001",
+		SourceBundleHashSHA256:    "bundle-frame-abc",
+		EffectivePolicyHashSHA256: "policy-frame-def",
+	}
+
+	checks := []model.ValidationCheck{
+		{
+			ID:      "check-frame-1",
+			Kind:    "frame_resolution",
+			Code:    "FRAME_NOT_FOUND",
+			NodeID:  "node-frame-1",
+			StageID: "stage-frame-1",
+			Severity: model.FindingSeverityBlocking,
+			Passed:  false,
+			Required: true,
+			Summary: "Target element not reachable in current frame context",
+		},
+	}
+
+	policy := &model.BrowserAgentRepairPolicy{
+		AllowedRepairKinds: []string{"frame_resolution"},
+		EditableFields:     []string{"frame_selector"},
+	}
+
+	proposals := gen.GenerateRepairProposals(vctx, checks, policy)
+
+	if len(proposals) != 1 {
+		t.Fatalf("Expected 1 proposal for frame_resolution, got %d", len(proposals))
+	}
+
+	p := proposals[0]
+
+	if p.RepairKind != "frame_resolution" {
+		t.Errorf("Expected RepairKind='frame_resolution', got '%s'", p.RepairKind)
+	}
+	if p.Field != "frame_selector" {
+		t.Errorf("Expected Field='frame_selector', got '%s'", p.Field)
+	}
+	// RuntimeRepairProposal has RequiresApproval field; frame_resolution sets it true
+	if !p.RequiresApproval {
+		t.Errorf("Expected RequiresApproval=true for frame_resolution, got false")
+	}
+}
+
+// TestRepairProposalGenerator_TimingFrameRejectedByPolicy tests that capture_timing and frame_resolution
+// are both blocked when the policy AllowedRepairKinds excludes them
+func TestRepairProposalGenerator_TimingFrameRejectedByPolicy(t *testing.T) {
+	config := &model.ValidationConfig{EnableRuntimeRepair: true}
+	gen := NewRepairProposalGenerator(config)
+
+	vctx := &model.BrowserAgentValidationContext{
+		RunID:                     "run-reject-001",
+		SourcePackageID:           "pkg-reject-001",
+		SourceBundleHashSHA256:    "bundle-reject-abc",
+		EffectivePolicyHashSHA256: "policy-reject-def",
+	}
+
+	checks := []model.ValidationCheck{
+		{
+			ID:      "check-reject-1",
+			Kind:    "capture_timing",
+			Code:    "CAPTURE_TIMING_ISSUE",
+			NodeID:  "node-reject-1",
+			StageID: "stage-reject-1",
+			Severity: model.FindingSeverityWarning,
+			Passed:  false,
+			Required: false,
+			Summary: "Screenshot captured before element fully rendered",
+		},
+		{
+			ID:      "check-reject-2",
+			Kind:    "frame_resolution",
+			Code:    "FRAME_NOT_FOUND",
+			NodeID:  "node-reject-2",
+			StageID: "stage-reject-2",
+			Severity: model.FindingSeverityBlocking,
+			Passed:  false,
+			Required: true,
+			Summary: "Target element not reachable in current frame context",
+		},
+	}
+
+	// Policy excludes both capture_timing and frame_resolution
+	policy := &model.BrowserAgentRepairPolicy{
+		AllowedRepairKinds: []string{"selector_alternative"},
+		EditableFields:     []string{"selector"},
+	}
+
+	proposals := gen.GenerateRepairProposals(vctx, checks, policy)
+
+	if len(proposals) != 0 {
+		t.Errorf("Expected 0 proposals when policy excludes capture_timing and frame_resolution, got %d", len(proposals))
+	}
+}
+
 func TestRepairProposalGenerator_ValidateCompliance(t *testing.T) {
 	config := &model.ValidationConfig{EnableRuntimeRepair: true}
 	gen := NewRepairProposalGenerator(config)
