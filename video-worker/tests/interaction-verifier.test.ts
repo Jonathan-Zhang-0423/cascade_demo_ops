@@ -13,6 +13,43 @@ afterEach(async () => {
 });
 
 describe("interaction verifier login state machine", () => {
+  it("uses the login entry instead of filling a homepage waitlist email field", async () => {
+    server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/workspace") {
+        response.end("<!doctype html><title>Workspace</title><button data-testid='new-project'>New Project</button>");
+        return;
+      }
+      if (request.url === "/login") {
+        response.end(`<!doctype html><title>Login</title>
+          <form onsubmit="event.preventDefault(); location.href='/workspace'">
+            <input type="email" autocomplete="username" />
+            <input type="password" autocomplete="current-password" />
+            <button type="submit">Sign in</button>
+          </form>`);
+        return;
+      }
+      response.end(`<!doctype html><title>Marketing</title>
+        <input data-testid="input-email" type="email" placeholder="Enter your email address" />
+        <button type="button">Join waitlist</button>
+        <a href="/login">Try it now</a>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+
+    const result = await verifyInteractions({
+      product_url: `http://127.0.0.1:${address.port}/`, allowed_domains: ["127.0.0.1"], timeout_ms: 15_000,
+      demo_username: "demo@example.test", demo_password: "fixture-only",
+      intent_goals: [{ id: "new-project", label: "New Project", kind: "click", keywords: ["new", "project"], required: true, business: true }],
+    });
+
+    expect(result.diagnostics?.login_status).toBe("submitted_navigation_observed");
+    expect(result.diagnostics?.login_transitions).toContain("login_trigger_clicked:1");
+    expect(result.diagnostics?.final_url).toContain("/workspace");
+  }, 30_000);
+
   it("handles a login-method chooser before the credential form", async () => {
     server = createServer((request, response) => {
       response.setHeader("content-type", "text/html; charset=utf-8");

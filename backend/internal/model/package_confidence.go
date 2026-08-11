@@ -313,6 +313,50 @@ func ComputePackageApprovalSubjectDigest(pkg ClientExecutionPackage) (string, er
 	}{pkg.ProjectContextSummary, pkg.SourceBindingSummary, pkg.RecordingRunSpec, pkg.ExecutableScriptBundle, safety, pkg.ConfidenceSummary})
 }
 
+func ComputePackageApprovalComponentDigests(pkg ClientExecutionPackage) (map[string]string, error) {
+	if pkg.ExecutableScriptBundle == nil {
+		return nil, fmt.Errorf("execution bundle is required for approval component digests")
+	}
+	bundle := pkg.ExecutableScriptBundle
+	if bundle.PlanJSON == nil || bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil || bundle.BrowserAgentContract == nil || bundle.AgentPromptPolicy == nil {
+		return nil, fmt.Errorf("all formal approval components are required")
+	}
+	components := map[string]any{
+		"plan_json":              bundle.PlanJSON,
+		"stage_approval_plan":    bundle.StageApprovalPlan,
+		"script_outline":         bundle.ScriptOutline,
+		"browser_agent_contract": bundle.BrowserAgentContract,
+		"agent_prompt_policy":    bundle.AgentPromptPolicy,
+		"approval_markdown":      bundle.ApprovalMarkdown,
+	}
+	digests := make(map[string]string, len(components))
+	for name, value := range components {
+		digest, err := DigestCanonicalJSON(value)
+		if err != nil {
+			return nil, err
+		}
+		digests[name] = digest
+	}
+	return digests, nil
+}
+
+func ValidatePackageApprovalComponentDigests(pkg ClientExecutionPackage) error {
+	configured := pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256
+	if len(configured) == 0 {
+		return fmt.Errorf("human approval component digests are required")
+	}
+	actual, err := ComputePackageApprovalComponentDigests(pkg)
+	if err != nil {
+		return err
+	}
+	for name, digest := range actual {
+		if configured[name] != digest {
+			return fmt.Errorf("human approval component digest mismatch: %s", name)
+		}
+	}
+	return nil
+}
+
 func stageConfidenceEvidenceRefs(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) []EvidenceRef {
 	refs := append([]EvidenceRef{}, step.EvidenceRefs...)
 	refs = append(refs, step.Action.Target.EvidenceRefs...)

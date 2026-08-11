@@ -86,15 +86,20 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 		t.Fatalf("worker claimed wrong package: %+v", claimed)
 	}
 	artifactBytes := bytes.Repeat([]byte("Browser Agent real worker bytes;"), model.DirectArtifactChunkBytes/16+1)
-	artifact := uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_video", artifactBytes)
-	result := directAppTestResult(claimed, artifact)
+	artifacts := []model.DirectArtifact{
+		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_video", "final.mp4", "video/mp4", "final_demo", "demo_video", artifactBytes),
+		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_trace", "trace.zip", "application/zip", "browser_trace", "browser_trace", artifactBytes),
+		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_screenshot", "stage.png", "image/png", "stage_evidence", "screenshot", artifactBytes),
+		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_events", "events.jsonl", "application/x-ndjson", "stage_event_log", "browser_agent_stage_event_log", artifactBytes),
+	}
+	result := directAppTestResult(claimed, artifacts)
 	putDirectWorkerJSON(t, gateway.WorkerHandler(), http.MethodPut, "/v1/worker/jobs/"+claimed.JobID+"/result", result, http.StatusOK)
 
 	status, err := service.GetDirectExecutionStatus(t.Context(), state.ProjectID, claimed.JobID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Status != "completed" || status.ResultPackageID != result.ResultID || len(status.Artifacts) != 1 {
+	if status.Status != "completed" || status.ResultPackageID != result.ResultID || len(status.Artifacts) != len(artifacts) {
 		t.Fatalf("unexpected decrypted status: %+v", status)
 	}
 	returned, err := service.GetDirectResult(t.Context(), state.ProjectID, claimed.JobID)
@@ -104,12 +109,14 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	if returned.ResultID != result.ResultID || returned.CloudJobID != claimed.JobID {
 		t.Fatalf("unexpected decrypted result: %+v", returned)
 	}
-	download, err := service.DownloadDirectArtifact(t.Context(), state.ProjectID, DirectArtifactDownloadRequest{JobID: claimed.JobID, Artifact: status.Artifacts[0]})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !download.ChecksumVerified || download.SHA256 != model.SHA256Hex(artifactBytes) {
-		t.Fatalf("artifact download was not verified: %+v", download)
+	for _, artifact := range status.Artifacts {
+		download, err := service.DownloadDirectArtifact(t.Context(), state.ProjectID, DirectArtifactDownloadRequest{JobID: claimed.JobID, Artifact: artifact})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !download.ChecksumVerified || download.SHA256 != model.SHA256Hex(artifactBytes) {
+			t.Fatalf("artifact download was not verified: %+v", download)
+		}
 	}
 	review, err := service.ReviewDirectResult(t.Context(), state.ProjectID, DirectResultReviewRequest{
 		JobID: claimed.JobID, ResultPackageID: result.ResultID,
@@ -214,6 +221,21 @@ func TestApproveClientExecutionPackageRebindsConfidenceAfterCredentialGrantExpir
 	}
 	if err := model.ValidatePackageConfidenceSummary(&approved.Package); err != nil {
 		t.Fatalf("approved package retained a stale draft confidence assessment: %v", err)
+	}
+	actualApprovalDigest, err := model.ComputePackageApprovalSubjectDigest(approved.Package)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.ApprovalSubjectDigestSHA256 != actualApprovalDigest || approved.Package.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 != actualApprovalDigest {
+		t.Fatalf("approved package did not freeze its normalized upload subject: build=%s record=%s actual=%s", approved.ApprovalSubjectDigestSHA256, approved.Package.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256, actualApprovalDigest)
+	}
+	repeated, err := service.ApproveClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID, CloudUploadInitRequest{
+		PackageDigestSHA256: draft.PackageDigestSHA256, ApprovalSubjectDigestSHA256: draft.ApprovalSubjectDigestSHA256,
+		ConfidenceAssessmentHash: draft.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true,
+		IdempotencyKey: "direct-credential-confidence-approval",
+	})
+	if err != nil || repeated.PackageDigestSHA256 != approved.PackageDigestSHA256 || repeated.ApprovalSubjectDigestSHA256 != approved.ApprovalSubjectDigestSHA256 {
+		t.Fatalf("idempotent approval did not return the same normalized package: repeated=%+v err=%v", repeated, err)
 	}
 }
 
@@ -524,14 +546,14 @@ func claimDirectWorkerJob(t *testing.T, gateway *directtransport.Gateway) direct
 	}
 	return job
 }
-func uploadDirectWorkerArtifact(t *testing.T, gateway *directtransport.Gateway, jobID, artifactID string, data []byte) model.DirectArtifact {
+func uploadDirectWorkerArtifact(t *testing.T, gateway *directtransport.Gateway, jobID, artifactID, fileName, mimeType, role, kind string, data []byte) model.DirectArtifact {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodPut, "/v1/worker/jobs/"+jobID+"/artifacts/"+artifactID+"?file_name=recording.webm", bytes.NewReader(data))
+	request := httptest.NewRequest(http.MethodPut, "/v1/worker/jobs/"+jobID+"/artifacts/"+artifactID+"?file_name="+fileName, bytes.NewReader(data))
 	request.Header.Set("Authorization", "Bearer "+directAppWorkerToken)
-	request.Header.Set("Content-Type", "video/webm")
+	request.Header.Set("Content-Type", mimeType)
 	request.Header.Set("X-Artifact-SHA256", model.SHA256Hex(data))
-	request.Header.Set("X-Artifact-Role", "final_demo_video")
-	request.Header.Set("X-Artifact-Kind", "video")
+	request.Header.Set("X-Artifact-Role", role)
+	request.Header.Set("X-Artifact-Kind", kind)
 	response := httptest.NewRecorder()
 	gateway.WorkerHandler().ServeHTTP(response, request)
 	if response.Code != http.StatusCreated {
@@ -555,12 +577,22 @@ func putDirectWorkerJSON(t *testing.T, handler http.Handler, method, path string
 		t.Fatalf("worker request %s status %d: %s", path, response.Code, response.Body.String())
 	}
 }
-func directAppTestResult(job directtransport.WorkerJob, artifact model.DirectArtifact) model.RecordingResultPackage {
+func directAppTestResult(job directtransport.WorkerJob, artifacts []model.DirectArtifact) model.RecordingResultPackage {
 	now := time.Now().UTC()
 	step := model.StepResult{NodeID: job.Package.WorkflowGraph.Nodes[0].ID, Status: "passed", DurationMS: 100}
-	asset := model.ArtifactRef{ID: artifact.ArtifactID, Kind: artifact.Kind, URI: "direct://artifacts/" + artifact.ArtifactID, MimeType: artifact.MimeType, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes}
-	descriptor := model.PackageArtifactDescriptor{ID: artifact.ArtifactID, Role: artifact.Role, Kind: artifact.Kind, URI: "direct://artifacts/" + artifact.ArtifactID, MimeType: artifact.MimeType, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes, Encrypted: true, Sensitive: true}
-	return model.RecordingResultPackage{ResultID: "result_" + job.JobID, SourcePackageID: job.Package.PackageID, CloudJobID: job.JobID, SchemaVersion: model.RecordingResultPackageSchemaVersion, Status: model.RecordingResultStatusGenerated, ExecutionTrace: &model.ExecutionTrace{ID: "trace_" + job.JobID, WorkflowGraphID: job.Package.WorkflowGraph.ID, GraphVersion: job.Package.WorkflowGraph.Version, PassRate: 1, StepResults: []model.StepResult{step}, Artifacts: []model.ArtifactRef{asset}}, StepResults: []model.StepResult{step}, GeneratedAssets: []model.ArtifactRef{asset}, VerificationReport: model.VerificationReport{PassRate: 1, ReproducibilityMatch: true}, AuditTrail: model.CloudExecutionAuditTrail{CompletedAt: now}, Delivery: model.ResultDelivery{ResultPackageRef: model.PackageArtifactDescriptor{ID: "result_package", Role: "recording_result", Kind: model.ArtifactKindRecordingResultPackage, URI: "direct://results/result.json", SHA256: strings.Repeat("a", 64), Encrypted: true, Sensitive: true}, AssetRefs: []model.PackageArtifactDescriptor{descriptor}, RecipientKind: model.ResultRecipientAppInstallation, RecipientKeyID: "direct-lease", EncryptionAlg: model.DirectTransportCryptoSuite, AckRequired: true, ExpiresAt: now.Add(time.Hour)}, CreatedAt: now}
+	refs := make([]model.ArtifactRef, 0, len(artifacts))
+	descriptors := make([]model.PackageArtifactDescriptor, 0, len(artifacts))
+	var stageLog *model.ArtifactRef
+	for _, artifact := range artifacts {
+		ref := model.ArtifactRef{ID: artifact.ArtifactID, Kind: artifact.Kind, URI: "direct://artifacts/" + artifact.ArtifactID, MimeType: artifact.MimeType, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes}
+		refs = append(refs, ref)
+		descriptors = append(descriptors, model.PackageArtifactDescriptor{ID: artifact.ArtifactID, Role: artifact.Role, Kind: artifact.Kind, URI: ref.URI, MimeType: artifact.MimeType, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes, Encrypted: true, Sensitive: true, RecipientKeyID: "direct-lease"})
+		if artifact.Kind == "browser_agent_stage_event_log" {
+			copyRef := ref
+			stageLog = &copyRef
+		}
+	}
+	return model.RecordingResultPackage{ResultID: "result_" + job.JobID, SourcePackageID: job.Package.PackageID, CloudJobID: job.JobID, SchemaVersion: model.RecordingResultPackageSchemaVersion, Status: model.RecordingResultStatusGenerated, ExecutionTrace: &model.ExecutionTrace{ID: "trace_" + job.JobID, WorkflowGraphID: job.Package.WorkflowGraph.ID, GraphVersion: job.Package.WorkflowGraph.Version, PassRate: 1, StepResults: []model.StepResult{step}, Artifacts: refs}, StepResults: []model.StepResult{step}, GeneratedAssets: refs, StageEventLogRef: stageLog, VerificationReport: model.VerificationReport{PassRate: 1, ReproducibilityMatch: true}, AuditTrail: model.CloudExecutionAuditTrail{CompletedAt: now}, Delivery: model.ResultDelivery{ResultPackageRef: model.PackageArtifactDescriptor{ID: "result_package", Role: "recording_result", Kind: model.ArtifactKindRecordingResultPackage, URI: "direct://results/result.json", SHA256: strings.Repeat("a", 64), Encrypted: true, Sensitive: true, RecipientKeyID: "direct-lease"}, AssetRefs: descriptors, RecipientKind: model.ResultRecipientAppInstallation, RecipientKeyID: "direct-lease", EncryptionAlg: model.DirectTransportCryptoSuite, AckRequired: true, ExpiresAt: now.Add(time.Hour)}, CreatedAt: now}
 }
 func reserveDirectAppTestPort(t *testing.T) int {
 	t.Helper()

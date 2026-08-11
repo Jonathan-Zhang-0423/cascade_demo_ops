@@ -788,7 +788,10 @@ async function executeApprovedLogin(session: BrowserAgentSession, stage: Browser
 	if (!hostAllowed(currentHost, secret.allowed_domains) || !hostAllowed(currentHost, session.allowedDomains)) throw new Error("browser_agent_login_domain_not_allowed");
 	let username = session.page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
 	let password = session.page.locator('input[type="password"], input[autocomplete="current-password"]').first();
-	if (!await username.isVisible({ timeout: Math.min(timeout, 1_500) }).catch(() => false)) {
+	// A marketing/waitlist email input is not a login form. Enter the bounded
+	// login-entry flow unless the current page has a password field or clear
+	// authentication context (route/title/auth method control).
+	if (!await loginFormVisible(session.page)) {
 		await openApprovedLoginEntry(session, timeout);
 		username = session.page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
 		password = session.page.locator('input[type="password"], input[autocomplete="current-password"]').first();
@@ -862,7 +865,7 @@ async function classifyLoginSubmissionFailure(page: any): Promise<string> {
 }
 
 function loginSubmitLocator(page: any): any {
-	const semantic = page.getByRole("button", { name: /登录|sign\s*in|log\s*in/i }).first();
+	const semantic = page.getByRole("button", { name: /登录|sign\s*in|log\s*in|继续|continue/i }).first();
 	return semantic;
 }
 
@@ -870,6 +873,8 @@ async function openApprovedLoginEntry(session: BrowserAgentSession, timeout: num
 	const entry = session.page.locator([
 		'a[href*="login" i]', 'a[href*="signin" i]', 'a[href*="sign-in" i]',
 		'button:has-text("Try it now")', 'a:has-text("Try it now")',
+		'button:has-text("Get started")', 'a:has-text("Get started")',
+		'button:has-text("Start building")', 'a:has-text("Start building")',
 		'button:has-text("登录")', 'a:has-text("登录")',
 		'button:has-text("Sign in")', 'a:has-text("Sign in")',
 	].join(", ")).first();
@@ -893,7 +898,24 @@ async function openApprovedLoginEntry(session: BrowserAgentSession, timeout: num
 
 async function loginFormVisible(page: any): Promise<boolean> {
 	const username = page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"]').first();
-	return username && await username.isVisible({ timeout: 1_000 }).catch(() => false);
+	if (!username || !await username.isVisible({ timeout: 1_000 }).catch(() => false)) return false;
+	const password = page.locator('input[type="password"], input[autocomplete="current-password"]').first();
+	if (await password.isVisible({ timeout: 500 }).catch(() => false)) return true;
+	if (loginContextURLAllowedForUsernameStep(page.url())) return true;
+	const title = await page.title().catch(() => "");
+	if (/(login|log\s*in|sign\s*in|登录|登入|登陆)/i.test(title)) return true;
+	const method = page.getByRole("button", { name: /邮箱登录|账号登录|密码登录|email\s*(login|sign\s*in)/i }).first();
+	return await method.isVisible({ timeout: 500 }).catch(() => false);
+}
+
+export function loginContextURLAllowedForUsernameStep(value: string): boolean {
+	try {
+		const path = new URL(value).pathname.toLowerCase();
+		return /(^|\/)(login|signin|sign-in)(\/|$)/.test(path) || /(^|\/)auth(\/|$)/.test(path);
+	} catch {
+		const path = String(value || "").toLowerCase();
+		return /(^|\/)(login|signin|sign-in)(\/|$)/.test(path) || /(^|\/)auth(\/|$)/.test(path);
+	}
 }
 
 async function clickEmailLoginMethod(page: any, timeout: number): Promise<void> {

@@ -801,7 +801,7 @@ async function waitForPageEvidenceReady(page: any, timeoutMS = 8000): Promise<vo
 }
 
 async function firstVisibleLoginTrigger(page: any, timeout = 1800): Promise<any | undefined> {
-  const loginName = /邮箱登录|邮件登录|账号登录|密码登录|登录|登陆|登入|sign\s*in|log\s*in|login|控制台|console|dashboard|进入/i;
+  const loginName = /邮箱登录|邮件登录|账号登录|密码登录|登录|登陆|登入|sign\s*in|log\s*in|login|try\s*it\s*now|get\s*started|start\s*building|控制台|console|dashboard|进入/i;
   const roleCandidates = [
     page.getByRole("link", { name: loginName }).first(),
     page.getByRole("button", { name: loginName }).first(),
@@ -820,6 +820,12 @@ async function firstVisibleLoginTrigger(page: any, timeout = 1800): Promise<any 
     "[data-testid*='login' i]",
     "button:has-text('邮箱登录')",
     "button:has-text('账号登录')",
+    "button:has-text('Try it now')",
+    "a:has-text('Try it now')",
+    "button:has-text('Get started')",
+    "a:has-text('Get started')",
+    "button:has-text('Start building')",
+    "a:has-text('Start building')",
   ], timeout);
 }
 

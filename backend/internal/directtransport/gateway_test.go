@@ -44,6 +44,7 @@ func TestGatewayAllocatesDedicatedPortAndHandsValidatedPackageToWorker(t *testin
 		t.Fatalf("unexpected dedicated lease: %+v", lease)
 	}
 	pkg := loadDirectPackageFixture(t)
+	bindTestDirectPackageOrigin(&pkg, lease.InstallationID)
 	message, err := model.EncryptDirectTransportJSON(pkg, lease, "message_package_1", "client_execution_package", model.DirectTransportDirectionUpload, now)
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +144,37 @@ func TestGatewayRejectsInstallationImpersonationWithSharedBootstrapToken(t *test
 	}
 }
 
+func TestGatewayRejectsPackageWithoutProducerAndApprovalInstallationBinding(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	port := reserveTestPort(t)
+	gateway, err := NewGateway(Config{ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1", DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true, BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close(context.Background()) })
+	lease := requestTestLease(t, gateway, now)
+	pkg := loadDirectPackageFixture(t)
+	message, err := model.EncryptDirectTransportJSON(pkg, lease, "unbound_package", "client_execution_package", model.DirectTransportDirectionUpload, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(message)
+	request, err := http.NewRequest(http.MethodPost, lease.DataURL+"/v1/direct/packages", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signDirectRequest(t, request, lease, body, now, "unbound_request")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	payload, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(string(payload), "unverified_origin") {
+		t.Fatalf("unbound package was not rejected: status=%d body=%s", response.StatusCode, payload)
+	}
+}
+
 func TestGatewayCredentialIsBoundMemoryOnlyAndConsumedOnce(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	port := reserveTestPort(t)
@@ -155,6 +187,7 @@ func TestGatewayCredentialIsBoundMemoryOnlyAndConsumedOnce(t *testing.T) {
 	lease := requestTestLease(t, gateway, now)
 	pkg := loadDirectPackageFixture(t)
 	pkg.CredentialGrants = []model.CredentialGrant{{GrantID: "grant_login", Kind: "username_password", Purpose: "browser_login", CloudSecretRef: "credential://demo/account", ExpiresAt: now.Add(30 * time.Minute), AllowedDomains: []string{"cascadeai.cn"}, AllowedOperations: []string{"fill_username", "fill_password", "submit_login"}, DeleteAfterRun: true}}
+	bindTestDirectPackageOrigin(&pkg, lease.InstallationID)
 	receipt := uploadTestPackage(t, lease, pkg, now, "message_package_credential", "request_package_credential")
 	if receipt.Status != "awaiting_credentials" {
 		t.Fatalf("package bypassed credential gate: %+v", receipt)
@@ -311,6 +344,74 @@ func TestGatewayRejectsLeaseReleaseWhileInstallationHasActiveJob(t *testing.T) {
 	}
 }
 
+func TestGatewayRequiresCompletedResultAckBeforeLeaseRelease(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	port := reserveTestPort(t)
+	gateway, err := NewGateway(Config{ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1", DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true, BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close(context.Background()) })
+	const installationSeed = "install_ack_release"
+	lease := requestTestLeaseForInstallation(t, gateway, now, installationSeed, "ack_release_lease")
+	pkg := loadDirectPackageFixture(t)
+	bindTestDirectPackageOrigin(&pkg, lease.InstallationID)
+	canonical, _ := model.CanonicalJSON(pkg)
+	record, err := gateway.persistNewJob("job_ack_release", lease.LeaseID, lease.InstallationID, pkg, model.SHA256Hex(canonical))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Status.Status = "completed"
+	record.Status.Stage = "completed"
+	record.Status.ResultPackageID = "result_ack_release"
+	record.Artifacts = map[string]artifactRecord{"artifact_video": {Artifact: model.DirectArtifact{ArtifactID: "artifact_video", SHA256: strings.Repeat("a", 64), SizeBytes: 3}}}
+	gateway.jobs[record.Status.JobID] = record
+	if err := gateway.persistJob(record); err != nil {
+		t.Fatal(err)
+	}
+
+	firstRelease := signedTestLeaseReleaseRequest(t, now, lease, "ack_release_before", installationSeed)
+	firstBody, _ := json.Marshal(firstRelease)
+	firstRequest := httptest.NewRequest(http.MethodPost, "/v1/direct/leases/release", bytes.NewReader(firstBody))
+	firstRequest.Header.Set("Authorization", "Bearer "+testBootstrapToken)
+	firstResponse := httptest.NewRecorder()
+	gateway.ControlHandler().ServeHTTP(firstResponse, firstRequest)
+	if firstResponse.Code != http.StatusConflict || !strings.Contains(firstResponse.Body.String(), "result_ack_required") {
+		t.Fatalf("completed lease was released without ACK: status=%d body=%s", firstResponse.Code, firstResponse.Body.String())
+	}
+
+	ack := model.DirectResultAckRequest{ProtocolVersion: model.DirectTransportProtocolVersion, InstallationID: lease.InstallationID, JobID: record.Status.JobID, ResultPackageID: record.Status.ResultPackageID, ReceivedArtifactIDs: []string{"artifact_video"}, VerifiedChecksums: true, AckedAt: now}
+	encryptedAck, err := model.EncryptDirectTransportJSON(ack, lease, "ack_message", "result_ack", model.DirectTransportDirectionUpload, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ackBody, _ := json.Marshal(encryptedAck)
+	ackRequest, err := http.NewRequest(http.MethodPost, lease.DataURL+"/v1/direct/jobs/"+record.Status.JobID+"/ack", bytes.NewReader(ackBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signDirectRequest(t, ackRequest, lease, ackBody, now, "ack_data_request")
+	ackResponse, err := http.DefaultClient.Do(ackRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ackResponse.Body.Close()
+	if ackResponse.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(ackResponse.Body)
+		t.Fatalf("result ACK failed: status=%d body=%s", ackResponse.StatusCode, payload)
+	}
+
+	secondRelease := signedTestLeaseReleaseRequest(t, now, lease, "ack_release_after", installationSeed)
+	secondBody, _ := json.Marshal(secondRelease)
+	secondRequest := httptest.NewRequest(http.MethodPost, "/v1/direct/leases/release", bytes.NewReader(secondBody))
+	secondRequest.Header.Set("Authorization", "Bearer "+testBootstrapToken)
+	secondResponse := httptest.NewRecorder()
+	gateway.ControlHandler().ServeHTTP(secondResponse, secondRequest)
+	if secondResponse.Code != http.StatusOK || len(gateway.leases) != 0 {
+		t.Fatalf("ACKed completed lease was not released: status=%d body=%s", secondResponse.Code, secondResponse.Body.String())
+	}
+}
+
 func TestGatewayRejectsWorkerStatusThatBypassesValidatedResult(t *testing.T) {
 	port := reserveTestPort(t)
 	gateway, err := NewGateway(Config{ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1", DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true, BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour})
@@ -345,6 +446,7 @@ func TestGatewayRejectsWorkerStatusThatBypassesValidatedResult(t *testing.T) {
 
 func uploadTestPackage(t *testing.T, lease model.DirectPortLease, pkg model.ClientExecutionPackage, now time.Time, messageID, requestNonce string) model.DirectPackageReceipt {
 	t.Helper()
+	bindTestDirectPackageOrigin(&pkg, lease.InstallationID)
 	message, err := model.EncryptDirectTransportJSON(pkg, lease, messageID, "client_execution_package", model.DirectTransportDirectionUpload, now)
 	if err != nil {
 		t.Fatal(err)
@@ -373,6 +475,29 @@ func uploadTestPackage(t *testing.T, lease model.DirectPortLease, pkg model.Clie
 		t.Fatal(err)
 	}
 	return receipt
+}
+
+func bindTestDirectPackageOrigin(pkg *model.ClientExecutionPackage, installationID string) {
+	if pkg == nil {
+		return
+	}
+	pkg.ProducerInstallationID = installationID
+	pkg.SafetyReport.HumanApproval.ApprovedByInstallationID = installationID
+	pkg.SafetyReport.HumanApproval.ApprovalSchemaVersion = "cascade.user_approval.v1"
+	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256, _ = model.ComputePackageApprovalComponentDigests(*pkg)
+	pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256, _ = model.ComputePackageApprovalSubjectDigest(*pkg)
+}
+
+func TestFailedResultDiagnosticArtifactsMustMatchUploadedBytes(t *testing.T) {
+	descriptor := model.PackageArtifactDescriptor{ID: "failure_shot", Kind: "screenshot", URI: "direct://jobs/job_failed/artifacts/failure_shot", MimeType: "image/png", SHA256: strings.Repeat("b", 64), SizeBytes: 7}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{ScreenshotRefs: []model.PackageArtifactDescriptor{descriptor}}}
+	if err := validateResultArtifactsAgainstUploads(result, nil); err == nil {
+		t.Fatal("failed diagnostic referenced an artifact that was never uploaded")
+	}
+	uploaded := map[string]artifactRecord{descriptor.ID: {Artifact: model.DirectArtifact{ArtifactID: descriptor.ID, Kind: descriptor.Kind, MimeType: descriptor.MimeType, SHA256: descriptor.SHA256, SizeBytes: descriptor.SizeBytes}}}
+	if err := validateResultArtifactsAgainstUploads(result, uploaded); err != nil {
+		t.Fatalf("matching failed diagnostic artifact was rejected: %v", err)
+	}
 }
 
 func TestGatewayRecoversRunningJobAndRebindsOnlySameInstallation(t *testing.T) {

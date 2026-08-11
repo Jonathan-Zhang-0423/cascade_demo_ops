@@ -79,6 +79,9 @@ type jobRecord struct {
 	Artifacts         map[string]artifactRecord    `json:"artifacts,omitempty"`
 	Credential        *model.DirectCredentialValue `json:"-"`
 	CredentialGrantID string                       `json:"-"`
+	DeliveryAcked     bool                         `json:"delivery_acked,omitempty"`
+	AckedAt           time.Time                    `json:"acked_at,omitempty"`
+	AckedArtifactIDs  []string                     `json:"acked_artifact_ids,omitempty"`
 }
 
 type persistedJobRecord struct {
@@ -89,6 +92,9 @@ type persistedJobRecord struct {
 	AcceptedAt          time.Time                       `json:"accepted_at"`
 	HasResult           bool                            `json:"has_result,omitempty"`
 	Artifacts           map[string]model.DirectArtifact `json:"artifacts,omitempty"`
+	DeliveryAcked       bool                            `json:"delivery_acked,omitempty"`
+	AckedAt             time.Time                       `json:"acked_at,omitempty"`
+	AckedArtifactIDs    []string                        `json:"acked_artifact_ids,omitempty"`
 }
 
 type artifactRecord struct {
@@ -271,7 +277,17 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	g.mu.Lock()
 	active := len(g.leases)
 	g.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"protocol_version": model.DirectTransportProtocolVersion, "crypto_suite": model.DirectTransportCryptoSuite, "active_leases": active, "server_time": g.now().UTC()})
+	writeJSON(w, http.StatusOK, model.DirectHealthResponse{
+		ProtocolVersion: model.DirectTransportProtocolVersion, CryptoSuite: model.DirectTransportCryptoSuite,
+		SupportedProtocolVersions:      []string{model.DirectTransportProtocolVersion},
+		SupportedPackageSchemaVersions: []string{model.ClientExecutionPackageSchemaVersion},
+		SupportedRuntimes:              []string{model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
+		Capabilities: map[string]bool{
+			"credential_envelope": true, "manual_login_checkpoint": false, "artifact_chunk_resume": true,
+			"idempotent_package_upload": true, "explicit_lease_release": true, "formal_result_artifact_gate": true,
+		},
+		ActiveLeases: active, ServerTime: g.now().UTC(),
+	})
 }
 
 func (g *Gateway) handleLease(w http.ResponseWriter, r *http.Request) {
@@ -333,9 +349,14 @@ func (g *Gateway) handleLeaseRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, record := range g.jobs {
-		if record.InstallationID == request.InstallationID && !directJobTerminal(record.Status.Status) {
+		if record.InstallationID == request.InstallationID && record.LeaseID == request.LeaseID && !directJobTerminal(record.Status.Status) {
 			g.mu.Unlock()
 			writeError(w, http.StatusConflict, "lease_has_active_jobs", "Dedicated Browser Agent lease still has active jobs.")
+			return
+		}
+		if record.InstallationID == request.InstallationID && record.LeaseID == request.LeaseID && record.Status.Status == "completed" && !record.DeliveryAcked {
+			g.mu.Unlock()
+			writeError(w, http.StatusConflict, "result_ack_required", "Completed Browser Agent results must be checksum-ACKed before lease release.")
 			return
 		}
 	}
@@ -426,11 +447,66 @@ func (g *Gateway) dataHandler(lease *leaseRuntime) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/direct/packages", func(w http.ResponseWriter, r *http.Request) { g.handlePackage(w, r, lease) })
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/credentials", func(w http.ResponseWriter, r *http.Request) { g.handleCredential(w, r, lease) })
+	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/ack", func(w http.ResponseWriter, r *http.Request) { g.handleResultAck(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}", func(w http.ResponseWriter, r *http.Request) { g.handleJobStatus(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/result", func(w http.ResponseWriter, r *http.Request) { g.handleJobResult(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}", func(w http.ResponseWriter, r *http.Request) { g.handleArtifact(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}/chunks/{chunk_index}", func(w http.ResponseWriter, r *http.Request) { g.handleArtifactChunk(w, r, lease) })
 	return mux
+}
+
+func (g *Gateway) handleResultAck(w http.ResponseWriter, r *http.Request, lease *leaseRuntime) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "ack_too_large", "Result ACK exceeds the transport limit.")
+		return
+	}
+	if err := g.authenticateDataRequest(r, lease, body); err != nil {
+		writeError(w, http.StatusUnauthorized, "direct_request_invalid", err.Error())
+		return
+	}
+	var message model.DirectEncryptedMessage
+	if err := json.Unmarshal(body, &message); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_encrypted_message", "Encrypted ACK message is invalid.")
+		return
+	}
+	var request model.DirectResultAckRequest
+	if err := model.DecryptDirectTransportJSON(message, lease.lease, "result_ack", model.DirectTransportDirectionUpload, g.now(), &request); err != nil {
+		writeError(w, http.StatusBadRequest, "ack_decryption_failed", "Result ACK authentication failed.")
+		return
+	}
+	jobID := r.PathValue("job_id")
+	if request.ProtocolVersion != model.DirectTransportProtocolVersion || request.InstallationID != lease.lease.InstallationID || request.JobID != jobID || !request.VerifiedChecksums || request.AckedAt.IsZero() {
+		writeError(w, http.StatusUnprocessableEntity, "ack_binding_invalid", "Result ACK binding or checksum confirmation is invalid.")
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	record := g.jobs[jobID]
+	if record == nil || record.InstallationID != lease.lease.InstallationID || record.Status.Status != "completed" || record.Status.ResultPackageID != request.ResultPackageID {
+		writeError(w, http.StatusConflict, "ack_not_expected", "Completed result binding was not found for ACK.")
+		return
+	}
+	expected := make([]string, 0, len(record.Artifacts))
+	for id := range record.Artifacts {
+		expected = append(expected, id)
+	}
+	sort.Strings(expected)
+	received := append([]string(nil), request.ReceivedArtifactIDs...)
+	sort.Strings(received)
+	if strings.Join(expected, "\x00") != strings.Join(received, "\x00") {
+		writeError(w, http.StatusUnprocessableEntity, "ack_artifacts_incomplete", "ACK must include every verified result artifact ID.")
+		return
+	}
+	record.DeliveryAcked = true
+	record.AckedAt = request.AckedAt.UTC()
+	record.AckedArtifactIDs = received
+	if err := g.persistJob(record); err != nil {
+		writeError(w, http.StatusInternalServerError, "job_state_write_failed", "Result ACK could not be persisted.")
+		return
+	}
+	receipt := model.DirectResultAckReceipt{ProtocolVersion: model.DirectTransportProtocolVersion, JobID: jobID, ResultPackageID: request.ResultPackageID, ReceivedArtifactIDs: received, VerifiedChecksums: true, AckedAt: record.AckedAt}
+	g.writeEncrypted(w, http.StatusOK, lease, "result_ack_receipt", receipt)
 }
 
 func (g *Gateway) authenticateDataRequest(r *http.Request, lease *leaseRuntime, body []byte) error {
@@ -493,6 +569,20 @@ func (g *Gateway) handlePackage(w http.ResponseWriter, r *http.Request, lease *l
 	}
 	if err := model.ValidateClientExecutionPackageForCloudExecution(&pkg); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "package_validation_failed", err.Error())
+		return
+	}
+	approval := pkg.SafetyReport.HumanApproval
+	if pkg.ProducerInstallationID == "" || pkg.ProducerInstallationID != lease.lease.InstallationID || approval.ApprovedByInstallationID != lease.lease.InstallationID || approval.ApprovalSchemaVersion != "cascade.user_approval.v1" {
+		writeError(w, http.StatusUnprocessableEntity, "unverified_origin", "Package producer, approval, lease, and installation bindings do not match.")
+		return
+	}
+	if err := model.ValidatePackageApprovalComponentDigests(pkg); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "approval_digest_mismatch", err.Error())
+		return
+	}
+	approvalDigest, err := model.ComputePackageApprovalSubjectDigest(pkg)
+	if err != nil || approval.ApprovalSubjectDigestSHA256 == "" || approvalDigest != approval.ApprovalSubjectDigestSHA256 {
+		writeError(w, http.StatusUnprocessableEntity, "approval_digest_mismatch", "Unified approval subject digest does not match the uploaded package.")
 		return
 	}
 	if pkg.ExecutableScriptBundle == nil || pkg.ExecutableScriptBundle.ScriptOutline == nil || pkg.ExecutableScriptBundle.ScriptOutline.Runtime != "browser-agent-outline-v1" {
@@ -740,6 +830,7 @@ func (g *Gateway) persistJob(record *jobRecord) error {
 	if record == nil || strings.TrimSpace(record.Status.JobID) == "" {
 		return errors.New("job record is required")
 	}
+	decorateDirectJobStatus(&record.Status)
 	artifacts := make(map[string]model.DirectArtifact, len(record.Artifacts))
 	for id, item := range record.Artifacts {
 		artifacts[id] = item.Artifact
@@ -747,9 +838,43 @@ func (g *Gateway) persistJob(record *jobRecord) error {
 	persisted := persistedJobRecord{
 		Status: record.Status, LeaseID: record.LeaseID, InstallationID: record.InstallationID,
 		PackageDigestSHA256: record.PackageDigest, AcceptedAt: record.AcceptedAt, HasResult: record.ResultPath != "", Artifacts: artifacts,
+		DeliveryAcked: record.DeliveryAcked, AckedAt: record.AckedAt, AckedArtifactIDs: append([]string(nil), record.AckedArtifactIDs...),
 	}
 	dir := filepath.Join(g.config.SpoolRoot, "jobs", safeSegment(record.Status.JobID))
 	return writeJSONFile(filepath.Join(dir, "job.json"), persisted)
+}
+
+func decorateDirectJobStatus(status *model.DirectJobStatus) {
+	if status == nil {
+		return
+	}
+	status.WaitingReason = ""
+	status.NextAction = ""
+	status.RequiresReapproval = false
+	switch status.Status {
+	case "awaiting_credentials":
+		status.WaitingReason = "credential_envelope_required"
+		status.NextAction = "upload_credential_envelope"
+	case "awaiting_manual_login":
+		status.WaitingReason = "manual_login_checkpoint"
+		status.NextAction = "complete_manual_login"
+	case "queued":
+		status.WaitingReason = "worker_claim_pending"
+		status.NextAction = "wait_for_browser_agent"
+	case "running":
+		status.NextAction = "wait_for_current_stage"
+	case "completed":
+		status.NextAction = "download_and_verify_artifacts"
+	case "failed":
+		if status.BlockingErrorCode == "" {
+			status.BlockingErrorCode = "browser_agent_execution_failed"
+		}
+		status.NextAction = "regenerate_and_reapprove_package"
+		status.RequiresReapproval = true
+	case "canceled", "expired":
+		status.NextAction = "regenerate_and_reapprove_package"
+		status.RequiresReapproval = true
+	}
 }
 
 func (g *Gateway) loadPersistedJobs() error {
@@ -781,6 +906,7 @@ func (g *Gateway) loadPersistedJobs() error {
 		record := &jobRecord{
 			Status: persisted.Status, LeaseID: persisted.LeaseID, InstallationID: persisted.InstallationID,
 			PackageDigest: persisted.PackageDigestSHA256, AcceptedAt: persisted.AcceptedAt, PackagePath: packagePath, Artifacts: map[string]artifactRecord{},
+			DeliveryAcked: persisted.DeliveryAcked, AckedAt: persisted.AckedAt, AckedArtifactIDs: append([]string(nil), persisted.AckedArtifactIDs...),
 		}
 		if record.AcceptedAt.IsZero() {
 			record.AcceptedAt = record.Status.UpdatedAt
@@ -1028,10 +1154,18 @@ func (g *Gateway) handleWorkerResult(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, "result_validation_failed", err.Error())
 			return
 		}
-		if err := validateResultArtifactsAgainstUploads(result, record.Artifacts); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "result_artifact_binding_invalid", err.Error())
-			return
-		}
+	}
+	if err := validateResultArtifactsAgainstUploads(result, record.Artifacts); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "result_artifact_binding_invalid", err.Error())
+		return
+	}
+	if err := model.ValidateFormalRecordingResultArtifacts(&result, &sourcePackage); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "result_artifact_completeness_failed", err.Error())
+		return
+	}
+	if err := validateDirectResultSanitization(result); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "result_contains_local_runtime_data", err.Error())
+		return
 	}
 	path := filepath.Join(g.config.SpoolRoot, "jobs", safeSegment(record.Status.JobID), "result.json")
 	if err := writeJSONFile(path, result); err != nil {
@@ -1045,6 +1179,9 @@ func (g *Gateway) handleWorkerResult(w http.ResponseWriter, r *http.Request) {
 		record.Status.Status = "failed"
 		record.Status.Stage = "failed"
 		record.Status.Message = "Browser Agent returned a validated failure result package."
+		if result.FailureDiagnostic != nil {
+			record.Status.BlockingErrorCode = result.FailureDiagnostic.Error.Code
+		}
 	} else {
 		record.Status.Status = "completed"
 		record.Status.Stage = "completed"
@@ -1061,6 +1198,20 @@ func (g *Gateway) handleWorkerResult(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, record.Status)
 }
 
+func validateDirectResultSanitization(result model.RecordingResultPackage) error {
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	text := strings.ToLower(string(encoded))
+	for _, forbidden := range []string{"dev_local_artifact", "local-dev/result-key", "file://", "/var/lib/", "/home/", "/root/"} {
+		if strings.Contains(text, forbidden) {
+			return fmt.Errorf("formal direct result contains forbidden local runtime marker")
+		}
+	}
+	return nil
+}
+
 func validateResultArtifactsAgainstUploads(result model.RecordingResultPackage, uploaded map[string]artifactRecord) error {
 	refs := append([]model.ArtifactRef(nil), result.GeneratedAssets...)
 	for _, step := range result.StepResults {
@@ -1074,6 +1225,16 @@ func validateResultArtifactsAgainstUploads(result model.RecordingResultPackage, 
 	}
 	if result.StageEventLogRef != nil {
 		refs = append(refs, *result.StageEventLogRef)
+	}
+	if result.FailureDiagnostic != nil {
+		for _, descriptor := range append(append([]model.PackageArtifactDescriptor{}, result.FailureDiagnostic.ScreenshotRefs...), result.FailureDiagnostic.TraceRefs...) {
+			refs = append(refs, model.ArtifactRef{ID: descriptor.ID, Kind: descriptor.Kind, URI: descriptor.URI, MimeType: descriptor.MimeType, SHA256: descriptor.SHA256, SizeBytes: descriptor.SizeBytes})
+		}
+		for _, descriptor := range []*model.PackageArtifactDescriptor{result.FailureDiagnostic.DOMSnapshotRef, result.FailureDiagnostic.AccessibilitySnapshotRef} {
+			if descriptor != nil {
+				refs = append(refs, model.ArtifactRef{ID: descriptor.ID, Kind: descriptor.Kind, URI: descriptor.URI, MimeType: descriptor.MimeType, SHA256: descriptor.SHA256, SizeBytes: descriptor.SizeBytes})
+			}
+		}
 	}
 	seen := map[string]bool{}
 	for _, ref := range refs {

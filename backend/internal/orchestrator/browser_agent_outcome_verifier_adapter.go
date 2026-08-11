@@ -872,13 +872,18 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 		if event.EventType == model.StageExecutionEventOutcomeObserved ||
 			event.EventType == model.StageExecutionEventObservationCollected {
 			if len(event.EvidenceRefs) == 0 {
+				requiredOutcome := event.EventType == model.StageExecutionEventOutcomeObserved
+				severity := model.FindingSeverityWarning
+				if requiredOutcome {
+					severity = model.FindingSeverityBlocking
+				}
 				postChecks = append(postChecks, model.ValidationCheck{
 					ID:       fmt.Sprintf("post_no_evidence_refs_%s_%d", event.StageID, i),
 					Kind:     "evidence_traceability",
 					Code:     "MISSING_EVIDENCE_REFS",
-					Severity: model.FindingSeverityWarning,
+					Severity: severity,
 					Passed:   false,
-					Required: false,
+					Required: requiredOutcome,
 					Summary:  fmt.Sprintf("阶段 %s 事件 %s 缺少 evidence_refs，无法追溯原始证据", event.StageID, event.EventType),
 				})
 			}

@@ -1716,6 +1716,7 @@ export type ClientExecutionPackage = {
   org_id: string;
   project_id: string;
   schema_version: "demoops.client_execution_package.v1";
+  producer_installation_id?: string;
   created_at?: string;
   approved_at?: string;
   project_context_summary?: Record<string, unknown>;
@@ -1872,9 +1873,12 @@ export type ScriptRepairLineage = {
 export type UserApprovalRecord = {
   approval_id: string;
   approved_by_user_id?: string;
+  approved_by_installation_id?: string;
+  approval_schema_version?: string;
   approved_at: string;
   plan_digest_sha256: string;
   approval_subject_digest_sha256?: string;
+  subject_digests_sha256?: Record<string, string>;
   reviewed_node_ids?: string[];
   notes?: string[];
 };

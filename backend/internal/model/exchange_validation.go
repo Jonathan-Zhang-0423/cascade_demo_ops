@@ -52,6 +52,11 @@ func ValidateClientExecutionPackageIntake(envelope *ExchangeEnvelope, pkg *Clien
 				return errors.New("human approval subject digest does not match execution package")
 			}
 		}
+		if len(pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256) > 0 {
+			if err := ValidatePackageApprovalComponentDigests(*pkg); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -113,6 +118,65 @@ func ValidateRecordingResultPackageForRender(result *RecordingResultPackage, sou
 	}
 	if err := result.ValidateDeliverySecurity(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateFormalRecordingResultArtifacts is the final App/Gateway delivery
+// gate. The OutcomeVerifier runs before rendering and may therefore report
+// these as advisory at that earlier phase; a formal completed result may not
+// cross the Direct API boundary until every requested audit artifact exists.
+func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, source *ClientExecutionPackage) error {
+	if result == nil || source == nil {
+		return errors.New("formal result and source package are required")
+	}
+	if result.Status == RecordingResultStatusFailed {
+		if result.FailureDiagnostic == nil {
+			return errors.New("failed_result_missing_diagnostic: formal failed result requires a redacted failure diagnostic")
+		}
+		if len(result.FailureDiagnostic.ScreenshotRefs) == 0 && len(result.FailureDiagnostic.TraceRefs) == 0 {
+			code := strings.ToLower(strings.TrimSpace(result.FailureDiagnostic.Error.Code))
+			infrastructure := strings.Contains(code, "session_start") || strings.Contains(code, "worker_missing") || strings.Contains(code, "node_missing") || strings.Contains(code, "stage_event_audit") || strings.Contains(code, "result_packaging") || strings.Contains(code, "render_failed") || strings.Contains(code, "infrastructure")
+			if !infrastructure {
+				return errors.New("failed_result_missing_evidence: formal failed result requires screenshot or trace evidence")
+			}
+		}
+		return nil
+	}
+	assets := append([]ArtifactRef{}, result.GeneratedAssets...)
+	if result.ExecutionTrace != nil {
+		assets = append(assets, result.ExecutionTrace.Artifacts...)
+	}
+	hasKind := func(kinds ...string) bool {
+		for _, asset := range assets {
+			for _, kind := range kinds {
+				if strings.EqualFold(strings.TrimSpace(asset.Kind), kind) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if source.RecordingRunSpec.Outputs.FinalVideo {
+		hasMP4 := false
+		for _, asset := range assets {
+			if strings.EqualFold(asset.Kind, "demo_video") && strings.EqualFold(asset.MimeType, "video/mp4") {
+				hasMP4 = true
+				break
+			}
+		}
+		if !hasMP4 {
+			return errors.New("result_missing_final_mp4: formal completed result requires the requested demo_video MP4")
+		}
+	}
+	if source.RecordingRunSpec.Outputs.Trace && !hasKind("browser_trace", "execution_trace") {
+		return errors.New("result_missing_browser_trace: formal completed result requires the requested browser trace")
+	}
+	if source.RecordingRunSpec.Outputs.ScreenshotPack && !hasKind("screenshot", "step_screenshot", "failure_screenshot") {
+		return errors.New("result_missing_screenshots: formal completed result requires the requested screenshot evidence")
+	}
+	if result.StageEventLogRef == nil || strings.TrimSpace(result.StageEventLogRef.ID) == "" || strings.TrimSpace(result.StageEventLogRef.URI) == "" {
+		return errors.New("result_missing_stage_event_log: formal completed result requires stage_event_log_ref")
 	}
 	return nil
 }

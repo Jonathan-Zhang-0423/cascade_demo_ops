@@ -80,10 +80,10 @@ func TestValidatePostExecution_MissingArtifacts(t *testing.T) {
 
 	// Result package with no artifacts
 	result := &model.RecordingResultPackage{
-		ResultID:        "result-001",
-		SourcePackageID: "pkg-post-artifacts-001",
-		Status:          model.RecordingResultStatusGenerated,
-		GeneratedAssets: []model.ArtifactRef{}, // Empty!
+		ResultID:         "result-001",
+		SourcePackageID:  "pkg-post-artifacts-001",
+		Status:           model.RecordingResultStatusGenerated,
+		GeneratedAssets:  []model.ArtifactRef{}, // Empty!
 		StageEventLogRef: nil,                   // Missing!
 	}
 
@@ -235,8 +235,8 @@ func TestValidatePostExecution_MissingEvidenceRefs(t *testing.T) {
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,
@@ -266,8 +266,8 @@ func TestValidatePostExecution_MissingEvidenceRefs(t *testing.T) {
 	for _, check := range report.Checks {
 		if check.Code == "MISSING_EVIDENCE_REFS" {
 			foundCheck = true
-			if check.Severity != model.FindingSeverityWarning {
-				t.Errorf("Missing evidence refs should be warning, got %s", check.Severity)
+			if check.Severity != model.FindingSeverityBlocking || !check.Required {
+				t.Errorf("Required outcome evidence refs should be blocking, got severity=%s required=%v", check.Severity, check.Required)
 			}
 		}
 	}
@@ -441,8 +441,8 @@ func TestValidatePostExecution_ValidComplete(t *testing.T) {
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,
@@ -490,8 +490,8 @@ func TestValidatePostExecution_ValidComplete(t *testing.T) {
 	// Should not have critical P0 violations
 	for _, check := range report.Checks {
 		if check.Code == "MISSING_RESULT_PACKAGE" ||
-		   check.Code == "MISSING_STAGE_EVENT_LOG" ||
-		   check.Code == "REQUIRED_STAGE_NOT_COMPLETED" {
+			check.Code == "MISSING_STAGE_EVENT_LOG" ||
+			check.Code == "REQUIRED_STAGE_NOT_COMPLETED" {
 			t.Errorf("Valid complete execution should not trigger P0 blocking check: %s", check.Code)
 		}
 	}

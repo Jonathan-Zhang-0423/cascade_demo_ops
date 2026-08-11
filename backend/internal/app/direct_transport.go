@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,16 +46,20 @@ type directInstallationIdentity struct {
 }
 
 type DirectTransportRuntimeView struct {
-	Configured           bool   `json:"configured"`
-	Reachable            bool   `json:"reachable"`
-	TokenConfigured      bool   `json:"token_configured"`
-	ProtocolVersion      string `json:"protocol_version,omitempty"`
-	CryptoSuite          string `json:"crypto_suite,omitempty"`
-	ControlURLHost       string `json:"control_url_host,omitempty"`
-	ControlURLPath       string `json:"control_url_path,omitempty"`
-	InstallationIDSuffix string `json:"installation_id_suffix,omitempty"`
-	Transport            string `json:"transport"`
-	ErrorClass           string `json:"error_class,omitempty"`
+	Configured                     bool            `json:"configured"`
+	Reachable                      bool            `json:"reachable"`
+	TokenConfigured                bool            `json:"token_configured"`
+	ProtocolVersion                string          `json:"protocol_version,omitempty"`
+	CryptoSuite                    string          `json:"crypto_suite,omitempty"`
+	ControlURLHost                 string          `json:"control_url_host,omitempty"`
+	ControlURLPath                 string          `json:"control_url_path,omitempty"`
+	InstallationIDSuffix           string          `json:"installation_id_suffix,omitempty"`
+	Transport                      string          `json:"transport"`
+	ErrorClass                     string          `json:"error_class,omitempty"`
+	SupportedProtocolVersions      []string        `json:"supported_protocol_versions,omitempty"`
+	SupportedPackageSchemaVersions []string        `json:"supported_package_schema_versions,omitempty"`
+	SupportedRuntimes              []string        `json:"supported_runtimes,omitempty"`
+	Capabilities                   map[string]bool `json:"capabilities,omitempty"`
 }
 
 type DirectTransportUploadRequest struct {
@@ -241,21 +246,34 @@ func (s *Service) DirectTransportStatus(ctx context.Context) (DirectTransportRun
 		view.ErrorClass = "http_" + strconv.Itoa(response.StatusCode)
 		return view, nil
 	}
-	var health struct {
-		ProtocolVersion string `json:"protocol_version"`
-		CryptoSuite     string `json:"crypto_suite"`
-	}
+	var health model.DirectHealthResponse
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&health); err != nil {
 		view.ErrorClass = "invalid_protocol"
 		return view, nil
 	}
 	view.ProtocolVersion = health.ProtocolVersion
 	view.CryptoSuite = health.CryptoSuite
-	view.Reachable = health.ProtocolVersion == model.DirectTransportProtocolVersion && health.CryptoSuite == model.DirectTransportCryptoSuite
+	view.SupportedProtocolVersions = append([]string(nil), health.SupportedProtocolVersions...)
+	view.SupportedPackageSchemaVersions = append([]string(nil), health.SupportedPackageSchemaVersions...)
+	view.SupportedRuntimes = append([]string(nil), health.SupportedRuntimes...)
+	view.Capabilities = health.Capabilities
+	view.Reachable = health.ProtocolVersion == model.DirectTransportProtocolVersion && health.CryptoSuite == model.DirectTransportCryptoSuite &&
+		directSliceContains(health.SupportedProtocolVersions, model.DirectTransportProtocolVersion) &&
+		directSliceContains(health.SupportedPackageSchemaVersions, model.ClientExecutionPackageSchemaVersion) &&
+		directSliceContains(health.SupportedRuntimes, model.ExecutableScriptRuntimeBrowserAgentOutlineV1)
 	if !view.Reachable {
 		view.ErrorClass = "protocol_mismatch"
 	}
 	return view, nil
+}
+
+func directSliceContains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID string, request DirectTransportUploadRequest) (DirectTransportUploadResult, error) {
@@ -278,6 +296,10 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 			_ = s.deleteDirectLease(projectID)
 		}
 	}()
+	build, err = bindDirectExecutionPackageOrigin(build, lease.InstallationID)
+	if err != nil {
+		return DirectTransportUploadResult{}, err
+	}
 	messageID := "package_" + shortID(build.PackageDigestSHA256+request.IdempotencyKey)
 	message, err := model.EncryptDirectTransportJSON(build.Package, lease, messageID, "client_execution_package", model.DirectTransportDirectionUpload, time.Now().UTC())
 	if err != nil {
@@ -305,6 +327,58 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 	}
 	cleanLease = false
 	return DirectTransportUploadResult{Build: build, Lease: directLeaseView(lease), Receipt: receipt, CredentialReceipt: credentialReceipt}, nil
+}
+
+func bindDirectExecutionPackageOrigin(build ClientExecutionPackageBuild, installationID string) (ClientExecutionPackageBuild, error) {
+	installationID = strings.TrimSpace(installationID)
+	if installationID == "" {
+		return ClientExecutionPackageBuild{}, errors.New("direct Browser Agent installation binding is required")
+	}
+	encoded, err := json.Marshal(build.Package)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	var pkg model.ClientExecutionPackage
+	if err := json.Unmarshal(encoded, &pkg); err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	approval := &pkg.SafetyReport.HumanApproval
+	if pkg.ProducerInstallationID != "" && pkg.ProducerInstallationID != installationID {
+		return ClientExecutionPackageBuild{}, errors.New("unverified_origin: package producer installation does not own the direct lease")
+	}
+	if approval.ApprovedByInstallationID != "" && approval.ApprovedByInstallationID != installationID {
+		return ClientExecutionPackageBuild{}, errors.New("unverified_origin: package approval installation does not own the direct lease")
+	}
+	pkg.ProducerInstallationID = installationID
+	approval.ApprovedByInstallationID = installationID
+	approval.ApprovalSchemaVersion = "cascade.user_approval.v1"
+	confidence, err := model.AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	if confidence.Readiness == model.PackageReadinessBlocked {
+		return ClientExecutionPackageBuild{}, errors.New("direct origin binding made the package confidence assessment blocked")
+	}
+	pkg.ConfidenceSummary = confidence
+	approvalDigest, err := refreshPackageApprovalDigests(&pkg)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	if err := model.ValidateClientExecutionPackageForCloudExecution(&pkg); err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	digest, err := model.DigestCanonicalJSON(pkg)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	build.Package = pkg
+	build.ApprovalSubjectDigestSHA256 = approvalDigest
+	build.PackageDigestSHA256 = digest
+	build.SizeReport = packageSizeReportForPackage(pkg)
+	// Direct transport does not expose or consume a Legacy Exchange envelope.
+	build.Envelope = model.ExchangeEnvelope{}
+	build.PayloadRef = model.EncryptedPayloadRef{}
+	return build, nil
 }
 
 // ReleaseDirectTransportLease retires an installation's dedicated listener
@@ -339,6 +413,11 @@ func (s *Service) ReleaseDirectTransportLease(ctx context.Context, projectID str
 			return DirectTransportReleaseResult{}, errors.New("direct Browser Agent lease is shared by another active project")
 		}
 	}
+	if run.Status == "completed" {
+		if err := s.ackDirectResultRemote(ctx, projectID, lease, run); err != nil {
+			return DirectTransportReleaseResult{}, err
+		}
+	}
 	if err := s.releaseDirectLeaseRemote(ctx, lease); err != nil {
 		return DirectTransportReleaseResult{}, err
 	}
@@ -349,6 +428,35 @@ func (s *Service) ReleaseDirectTransportLease(ctx context.Context, projectID str
 		return DirectTransportReleaseResult{}, err
 	}
 	return DirectTransportReleaseResult{Released: true, Lease: directLeaseView(lease)}, nil
+}
+
+func (s *Service) ackDirectResultRemote(ctx context.Context, projectID string, lease model.DirectPortLease, run *orchestrator.DesktopCloudRunState) error {
+	if run == nil || run.CloudJobID == "" || run.ResultPackageID == "" || !run.ResultDownloaded {
+		return errors.New("direct Browser Agent result is not ready for ACK")
+	}
+	ids := make([]string, 0, len(run.DownloadedAssets))
+	for _, asset := range run.DownloadedAssets {
+		if !asset.Verified || asset.ArtifactID == "" {
+			return errors.New("direct Browser Agent ACK requires every artifact checksum")
+		}
+		ids = append(ids, asset.ArtifactID)
+	}
+	sort.Strings(ids)
+	now := time.Now().UTC()
+	request := model.DirectResultAckRequest{ProtocolVersion: model.DirectTransportProtocolVersion, InstallationID: lease.InstallationID, JobID: run.CloudJobID, ResultPackageID: run.ResultPackageID, ReceivedArtifactIDs: ids, VerifiedChecksums: true, AckedAt: now}
+	message, err := model.EncryptDirectTransportJSON(request, lease, "ack_"+shortID(run.CloudJobID+"|"+run.ResultPackageID), "result_ack", model.DirectTransportDirectionUpload, now)
+	if err != nil {
+		return err
+	}
+	var receipt model.DirectResultAckReceipt
+	path := "/v1/direct/jobs/" + url.PathEscape(run.CloudJobID) + "/ack"
+	if err := s.directDataRequest(ctx, lease, http.MethodPost, path, message, "result_ack_receipt", &receipt); err != nil {
+		return err
+	}
+	if receipt.JobID != run.CloudJobID || receipt.ResultPackageID != run.ResultPackageID || !receipt.VerifiedChecksums {
+		return errors.New("direct Browser Agent ACK receipt binding mismatch")
+	}
+	return s.persistCloudAck(ctx, projectID, model.ResultPackageAckResponse{ResultPackageID: receipt.ResultPackageID, ReceivedAssetIDs: receipt.ReceivedArtifactIDs, VerifiedChecksums: true, AckedAt: receipt.AckedAt, AckedByInstallID: lease.InstallationID})
 }
 
 func (s *Service) releaseDirectLeaseRemote(ctx context.Context, lease model.DirectPortLease) error {
@@ -493,6 +601,9 @@ func (s *Service) GetDirectResult(ctx context.Context, projectID, jobID string) 
 		if err := model.ValidateRecordingResultPackageForRender(&result, &build.Package); err != nil {
 			return result, err
 		}
+	}
+	if err := model.ValidateFormalRecordingResultArtifacts(&result, &build.Package); err != nil {
+		return result, err
 	}
 	if err := s.persistCloudResult(ctx, projectID, defaultDesktopOrgID, result); err != nil {
 		return result, err

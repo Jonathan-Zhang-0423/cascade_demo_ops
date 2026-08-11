@@ -34,6 +34,31 @@ func TestGraphBuilderPrefersExecutableBusinessSelector(t *testing.T) {
 	}
 }
 
+func TestSessionSetupValidationUsesPostLoginStateNotEmailActionTarget(t *testing.T) {
+	stage := model.BusinessStage{
+		ID: "business_stage_session_setup", Kind: model.BusinessStageKindSessionSetup,
+		Title: "登录", Objective: "登录后进入工作台", ExpectedRouteAfterAction: "/app",
+		Action: model.BusinessActionSemantics{SuccessState: "已进入工作台"},
+	}
+	target := model.ActionTarget{Selector: "[data-testid='input-email']", TestID: "input-email"}
+	validation := businessStageValidation(stage, model.GraphActionFill, target, true)
+	if validation.Kind != "url_matches" || validation.Target.URL != "/app" || validation.Target.Selector != "" || validation.Expected != "/app" {
+		t.Fatalf("session validation reused the login/waitlist action target: %+v", validation)
+	}
+}
+
+func TestModeSelectionValidationDoesNotReuseClickedControl(t *testing.T) {
+	stage := model.BusinessStage{
+		ID: "business_stage_select_build_mode", Kind: model.BusinessStageKindModeSelection,
+		Title: "选择构建模式", Objective: "Agent 模式已选中",
+		Action: model.BusinessActionSemantics{SuccessState: "Agent 模式已选中"},
+	}
+	validation := businessStageValidation(stage, model.GraphActionClick, model.ActionTarget{Selector: "[data-testid='mode-agent']"}, true)
+	if validation.Kind != "text_contains" || validation.Target.Selector != "" || validation.Expected != "Agent 模式已选中" {
+		t.Fatalf("mode validation reused the action target instead of the success state: %+v", validation)
+	}
+}
+
 func TestGraphBuilderBlocksWhenOnlyGenericSelectorExists(t *testing.T) {
 	project := graphQualityProject()
 	productMap := graphQualityProductMap(

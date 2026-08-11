@@ -49,7 +49,7 @@ type Service struct {
 	sourceRefsMu          sync.RWMutex
 	sourceRefs            map[string]LocalSourceRef
 	approvalMu            sync.Mutex
-	approvedBuilds        map[string]ClientExecutionPackageBuild
+	approvedBuilds        map[string]approvedBuildCacheEntry
 	graphRevisionMu       sync.Mutex
 	graphRevisions        map[string]graphRevisionCacheEntry
 	exchangeSessionMu     sync.Mutex
@@ -154,7 +154,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		editorJobs:          map[string]editorRenderTask{},
 		outlineRunner:       nil,
 		sourceRefs:          map[string]LocalSourceRef{},
-		approvedBuilds:      map[string]ClientExecutionPackageBuild{},
+		approvedBuilds:      map[string]approvedBuildCacheEntry{},
 		graphRevisions:      map[string]graphRevisionCacheEntry{},
 		storeModelKey:       credentialstore.StoreModelAPIKey,
 		readModelKey:        credentialstore.ReadModelAPIKey,

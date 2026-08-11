@@ -185,10 +185,13 @@ type ExchangePackagePolicy struct {
 }
 
 type ClientExecutionPackage struct {
-	PackageID              string                           `json:"package_id"`
-	OrgID                  string                           `json:"org_id"`
-	ProjectID              string                           `json:"project_id"`
-	SchemaVersion          string                           `json:"schema_version"`
+	PackageID     string `json:"package_id"`
+	OrgID         string `json:"org_id"`
+	ProjectID     string `json:"project_id"`
+	SchemaVersion string `json:"schema_version"`
+	// ProducerInstallationID binds a formal Direct package to the same
+	// installation that approved it and owns the transport lease.
+	ProducerInstallationID string                           `json:"producer_installation_id,omitempty"`
 	CreatedAt              time.Time                        `json:"created_at"`
 	ApprovedAt             time.Time                        `json:"approved_at"`
 	ProjectContextSummary  ProjectContextSummary            `json:"project_context_summary"`
@@ -511,13 +514,16 @@ type PackageSafetyReport struct {
 }
 
 type UserApprovalRecord struct {
-	ApprovalID                  string    `json:"approval_id"`
-	ApprovedByUserID            string    `json:"approved_by_user_id,omitempty"`
-	ApprovedAt                  time.Time `json:"approved_at"`
-	PlanDigestSHA256            string    `json:"plan_digest_sha256"`
-	ApprovalSubjectDigestSHA256 string    `json:"approval_subject_digest_sha256,omitempty"`
-	ReviewedNodeIDs             []string  `json:"reviewed_node_ids,omitempty"`
-	Notes                       []string  `json:"notes,omitempty"`
+	ApprovalID                  string            `json:"approval_id"`
+	ApprovedByUserID            string            `json:"approved_by_user_id,omitempty"`
+	ApprovedByInstallationID    string            `json:"approved_by_installation_id,omitempty"`
+	ApprovalSchemaVersion       string            `json:"approval_schema_version,omitempty"`
+	ApprovedAt                  time.Time         `json:"approved_at"`
+	PlanDigestSHA256            string            `json:"plan_digest_sha256"`
+	ApprovalSubjectDigestSHA256 string            `json:"approval_subject_digest_sha256,omitempty"`
+	SubjectDigestsSHA256        map[string]string `json:"subject_digests_sha256,omitempty"`
+	ReviewedNodeIDs             []string          `json:"reviewed_node_ids,omitempty"`
+	Notes                       []string          `json:"notes,omitempty"`
 }
 
 type RecordingResultPackage struct {

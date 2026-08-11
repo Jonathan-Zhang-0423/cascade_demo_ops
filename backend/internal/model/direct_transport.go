@@ -28,6 +28,17 @@ const (
 	DirectArtifactChunkBytes = 4 << 20
 )
 
+type DirectHealthResponse struct {
+	ProtocolVersion                string          `json:"protocol_version"`
+	CryptoSuite                    string          `json:"crypto_suite"`
+	SupportedProtocolVersions      []string        `json:"supported_protocol_versions"`
+	SupportedPackageSchemaVersions []string        `json:"supported_package_schema_versions"`
+	SupportedRuntimes              []string        `json:"supported_runtimes"`
+	Capabilities                   map[string]bool `json:"capabilities"`
+	ActiveLeases                   int             `json:"active_leases"`
+	ServerTime                     time.Time       `json:"server_time"`
+}
+
 // DirectPortLease is issued by the fixed TLS control endpoint. DataURL points
 // at a listener dedicated to one App installation for the lease lifetime.
 // LeaseToken is returned once and must only be kept in the App process/vault.
@@ -136,16 +147,39 @@ type DirectCredentialReceipt struct {
 }
 
 type DirectJobStatus struct {
-	ProtocolVersion string           `json:"protocol_version"`
-	JobID           string           `json:"job_id"`
-	PackageID       string           `json:"package_id"`
-	Status          string           `json:"status"`
-	Stage           string           `json:"stage"`
-	Message         string           `json:"message,omitempty"`
-	ProgressPercent int              `json:"progress_percent,omitempty"`
-	ResultPackageID string           `json:"result_package_id,omitempty"`
-	Artifacts       []DirectArtifact `json:"artifacts,omitempty"`
-	UpdatedAt       time.Time        `json:"updated_at"`
+	ProtocolVersion    string           `json:"protocol_version"`
+	JobID              string           `json:"job_id"`
+	PackageID          string           `json:"package_id"`
+	Status             string           `json:"status"`
+	Stage              string           `json:"stage"`
+	Message            string           `json:"message,omitempty"`
+	WaitingReason      string           `json:"waiting_reason,omitempty"`
+	BlockingErrorCode  string           `json:"blocking_error_code,omitempty"`
+	NextAction         string           `json:"next_action,omitempty"`
+	RequiresReapproval bool             `json:"requires_reapproval,omitempty"`
+	ProgressPercent    int              `json:"progress_percent,omitempty"`
+	ResultPackageID    string           `json:"result_package_id,omitempty"`
+	Artifacts          []DirectArtifact `json:"artifacts,omitempty"`
+	UpdatedAt          time.Time        `json:"updated_at"`
+}
+
+type DirectResultAckRequest struct {
+	ProtocolVersion     string    `json:"protocol_version"`
+	InstallationID      string    `json:"installation_id"`
+	JobID               string    `json:"job_id"`
+	ResultPackageID     string    `json:"result_package_id"`
+	ReceivedArtifactIDs []string  `json:"received_artifact_ids"`
+	VerifiedChecksums   bool      `json:"verified_checksums"`
+	AckedAt             time.Time `json:"acked_at"`
+}
+
+type DirectResultAckReceipt struct {
+	ProtocolVersion     string    `json:"protocol_version"`
+	JobID               string    `json:"job_id"`
+	ResultPackageID     string    `json:"result_package_id"`
+	ReceivedArtifactIDs []string  `json:"received_artifact_ids"`
+	VerifiedChecksums   bool      `json:"verified_checksums"`
+	AckedAt             time.Time `json:"acked_at"`
 }
 
 type DirectArtifact struct {

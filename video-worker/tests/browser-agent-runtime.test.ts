@@ -5,6 +5,7 @@ import {
   evaluateRequiredValidations,
   isApprovedCredentialLoginInteraction,
   isEvidenceBoundSelectorAlternative,
+  loginContextURLAllowedForUsernameStep,
   resolutionAssertions,
   routeTemplateMatches,
   urlPolicyError,
@@ -55,6 +56,13 @@ describe("browser agent credential login broker", () => {
     expect(isApprovedCredentialLoginInteraction({ stage_kind: "business_input" } as any, {
       kind: "fill", input_ref: "credential://demo/test", secret_ref: "credential://demo/test",
     })).toBe(false);
+  });
+
+  it("does not treat a marketing homepage email field as an approved login context", () => {
+    expect(loginContextURLAllowedForUsernameStep("https://app.example.com/")).toBe(false);
+    expect(loginContextURLAllowedForUsernameStep("https://app.example.com/waitlist")).toBe(false);
+    expect(loginContextURLAllowedForUsernameStep("https://app.example.com/login")).toBe(true);
+    expect(loginContextURLAllowedForUsernameStep("https://app.example.com/auth/email")).toBe(true);
   });
 });
 

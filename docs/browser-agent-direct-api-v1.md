@@ -16,7 +16,7 @@ bootstrap token 只存 App 系统凭据库和 Gateway root-only env。lease 分�
 
 ### `GET /v1/direct/health`
 
-需要 bootstrap token。返回仅含协议版本、crypto suite、active lease 数和服务器时间，不返回 token、路径或凭据。
+需要 bootstrap token。返回协议版本、crypto suite、active lease 数、服务器时间，以及 `supported_protocol_versions`、`supported_package_schema_versions`、`supported_runtimes` 和脱敏 `capabilities`。App 必须显式确认当前 Direct v1、`demoops.client_execution_package.v1` 和 `browser-agent-outline-v1` 均受支持；不兼容时返回 `protocol_mismatch`，不得静默回退 Legacy Exchange。响应不返回 token、路径或凭据。
 
 ### `POST /v1/direct/leases`
 
@@ -79,7 +79,16 @@ X-Cascade-Signature: <HMAC-SHA256>
 
 ### `POST /v1/direct/packages`
 
-上传已人工批准且 digest 一致的 `ClientExecutionPackage`。仅接受 `browser-agent-outline-v1`。成功返回加密 `package_receipt`，包含 `job_id`、`package_id`、包 SHA-256、状态和 stage。
+上传已人工批准且 digest 一致的 `ClientExecutionPackage`。仅接受 `browser-agent-outline-v1`。正式包必须同时满足：
+
+- `producer_installation_id` 等于 lease installation；
+- `human_approval.approved_by_installation_id` 等于同一 installation；
+- `approval_schema_version=cascade.user_approval.v1`；
+- 统一 `approval_subject_digest_sha256` 与 `plan_json`、`stage_approval_plan`、`script_outline`、`browser_agent_contract`、`agent_prompt_policy`、`approval_markdown` 子对象 digest 全部一致。
+
+App 批准请求先绑定用户已查看的 preview package/approval/confidence digest。批准后仅允许写入批准记录、短期 credential expiry 和 Direct installation 来源绑定等确定性传输字段；每次形成新的上传视图都必须重新计算包内统一批准摘要和最终 package digest。语义字段或批准子对象发生变化时不得沿用该流程，必须返回 `package_preview_stale` 并重新批准。
+
+任一来源或 digest 不一致返回 `unverified_origin` / `approval_digest_mismatch`。成功返回加密 `package_receipt`，包含 `job_id`、`package_id`、包 SHA-256、状态和 stage。含 credential grant 的包先进入 `awaiting_credentials`，凭据封套通过后进入 `queued`；不需要显式 start，Worker 只从 loopback claim。
 
 ### `POST /v1/direct/jobs/{job_id}/credentials`
 
@@ -91,11 +100,15 @@ X-Cascade-Signature: <HMAC-SHA256>
 
 ### `GET /v1/direct/jobs/{job_id}/result`
 
-只在结果就绪后返回加密 `recording_result`。Server 必须校验结果与源包、trace、stage、业务验证和已上传 artifact 的 digest/size 一致。
+只在结果就绪后返回加密 `recording_result`。Server 必须校验结果与源包、trace、stage、业务验证和已上传 artifact 的 digest/size 一致。正式 completed 结果若请求了 MP4、trace 或截图，则缺一即返回 `result_artifact_completeness_failed`；`stage_event_log_ref` 始终必填。正式 failed 结果必须有脱敏 failure diagnostic，并尽可能包含截图/trace；只有明确的基础设施启动失败允许没有页面素材。
 
 ### `GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}/chunks/{chunk_index}`
 
 每块独立返回加密 `artifact_chunk:<artifact_id>:<index>`，单块上限 4 MiB。App 下载所有块后校验总 SHA-256 和字节数，写入 App-managed artifact root 和 `.verified.sha256` marker；未通过不得 ACK、审核或编辑器交接。
+
+### `POST /v1/direct/jobs/{job_id}/ack`
+
+App 仅在全部 artifact 已下载并通过 SHA-256/字节数校验后发送加密 `result_ack`。请求绑定 installation、job、result package、全部 artifact ID、`verified_checksums=true` 和 ACK 时间。Gateway 返回 `result_ack_receipt`；正式 completed 结果未 ACK 时禁止释放 lease。App 随后显式调用 lease release，编辑器仍使用本地 verified 素材，不依赖 Gateway 路径。
 
 ## Worker 内部接口
 
@@ -103,4 +116,4 @@ Worker API 只监听 `127.0.0.1:18444`，使用独立 Worker token，公网不�
 
 ## Selector 与执行门禁
 
-`script_outline` 是证据绑定路线图，不是可任意改写的脚本。selector 只能来自 App 批准的同一 Evidence ID/业务目标候选；Server 可在运行时进行唯一性、可见性、角色/名称兼容检查和有限 repair。找不到或语义冲突时必须停止并返回 `selector_resolution_failed`、`semantic_target_contract_conflict` 或 `missing_product_evidence`，不能猜测 selector。
+`script_outline` 是证据绑定路线图，不是可任意改写的脚本。selector 只能来自 App 批准的同一 Evidence ID/业务目标候选；Server 可在运行时进行唯一性、可见性、角色/名称兼容检查和有限 repair。登录入口与登录表单必须分开：普通营销页 waitlist/newsletter 邮箱框不能作为登录表单；credential broker 必须先确认密码框或认证路由/标题/认证方式语义，再允许填入账号。`action_target` 与 `success_target` 分开校验，click/select/submit 不得以动作控件仍可见作为成功证据。找不到或语义冲突时必须停止并返回稳定脱敏错误，不能猜测 selector。

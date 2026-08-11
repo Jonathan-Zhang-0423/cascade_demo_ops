@@ -341,6 +341,10 @@ export type BrowserAgentDirectStatus = {
   installationIDSuffix?: string;
   transport: string;
   errorClass?: string;
+  supportedProtocolVersions?: string[];
+  supportedPackageSchemaVersions?: string[];
+  supportedRuntimes?: string[];
+  capabilities?: Record<string, boolean>;
 };
 
 export type AppCapabilitiesStatus = {

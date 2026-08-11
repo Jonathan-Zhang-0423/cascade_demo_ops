@@ -694,6 +694,19 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 	if action == model.GraphActionNavigate {
 		kind = "url_matches"
 		expected = firstNonEmpty(target.URL, stage.EntryRoute)
+	} else if stage.Kind == model.BusinessStageKindSessionSetup {
+		// Login controls are action targets. A visible email field (especially a
+		// homepage waitlist field) cannot prove that authentication succeeded.
+		// Bind the required validation to the approved post-login route/state.
+		if route := strings.TrimSpace(stage.ExpectedRouteAfterAction); route != "" {
+			kind = "url_matches"
+			target = model.ActionTarget{URL: route}
+			expected = route
+		} else {
+			kind = "text_contains"
+			target = model.ActionTarget{Role: "main", Text: firstNonEmpty(stage.Action.SuccessState, stage.Objective, "工作台")}
+			expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, "工作台")
+		}
 	} else if stage.Kind == model.BusinessStageKindBusinessAction && strings.TrimPrefix(stage.ID, "business_stage_") == "new_project_entry" {
 		// The clicked button is an action target, not proof that the creation
 		// flow opened.  Prefer an App-verified dialog/input result target and
@@ -712,6 +725,11 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 	} else if stage.Kind == model.BusinessStageKindBusinessInput && strings.TrimSpace(stage.Action.InputValue) != "" {
 		kind = "value_equals"
 		expected = stage.Action.InputValue
+	} else if stage.Kind == model.BusinessStageKindModeSelection {
+		// A still-visible mode button is not proof that selection took effect.
+		kind = "text_contains"
+		target = model.ActionTarget{Text: firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)}
+		expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)
 	} else if stage.Kind == model.BusinessStageKindBusinessSubmit && strings.TrimSpace(stage.ExpectedRouteAfterAction) != "" {
 		kind = "url_matches"
 		target = model.ActionTarget{URL: stage.ExpectedRouteAfterAction}
@@ -725,6 +743,10 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 			kind = "text_contains"
 			expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)
 		}
+	} else if action == model.GraphActionClick || action == model.GraphActionSelect || action == model.GraphActionUpload || action == model.GraphActionAPICall {
+		kind = "text_contains"
+		target = model.ActionTarget{Text: firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)}
+		expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)
 	}
 	return model.ValidationSpec{
 		ID:           "validate_" + stage.ID,

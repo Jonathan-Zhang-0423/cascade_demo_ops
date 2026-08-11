@@ -43,6 +43,13 @@ type ClientExecutionPackageBuild struct {
 	SizeReport                  PackageSizeReport            `json:"size_report"`
 }
 
+type approvedBuildCacheEntry struct {
+	Build                           ClientExecutionPackageBuild
+	PreviewPackageDigestSHA256      string
+	PreviewApprovalSubjectDigest    string
+	PreviewConfidenceAssessmentHash string
+}
+
 type PackageSizeReport struct {
 	AlgorithmVersion string         `json:"algorithm_version"`
 	TotalBytes       int            `json:"total_bytes"`
@@ -291,10 +298,10 @@ func (s *Service) ApproveClientExecutionPackage(ctx context.Context, projectID s
 	s.approvalMu.Lock()
 	defer s.approvalMu.Unlock()
 	if cached, ok := s.approvedBuilds[idempotencyCacheKey]; ok {
-		if (strings.TrimSpace(request.PackageDigestSHA256) != "" && cached.PackageDigestSHA256 != request.PackageDigestSHA256) || cached.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || cached.Package.ConfidenceSummary == nil || cached.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
+		if (strings.TrimSpace(request.PackageDigestSHA256) != "" && cached.PreviewPackageDigestSHA256 != request.PackageDigestSHA256) || cached.PreviewApprovalSubjectDigest != request.ApprovalSubjectDigestSHA256 || cached.PreviewConfidenceAssessmentHash != request.ConfidenceAssessmentHash {
 			return ClientExecutionPackageBuild{}, &packagePreviewStaleError{}
 		}
-		return cached, nil
+		return cached.Build, nil
 	}
 	build, err := s.BuildClientExecutionPackage(ctx, projectID, orgID)
 	if err != nil {
@@ -327,8 +334,8 @@ func (s *Service) ApproveClientExecutionPackage(ctx context.Context, projectID s
 	// short-lived credential grant expiry and the human approval record) to
 	// the authoritative package. Re-assess the exact bytes that will be sent
 	// so Server Intake never receives a draft confidence hash attached to an
-	// approved package. The approval subject digest above remains bound to the
-	// user-reviewed draft; this assessment only binds the final upload view.
+	// approved package. The request digest above authorizes the reviewed preview;
+	// the approval record below freezes the normalized upload subject.
 	approvedConfidence, err := model.AssessClientExecutionPackage(&build.Package)
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err
@@ -337,6 +344,11 @@ func (s *Service) ApproveClientExecutionPackage(ctx context.Context, projectID s
 		return ClientExecutionPackageBuild{}, errors.New("approved execution package became blocked after final confidence assessment")
 	}
 	build.Package.ConfidenceSummary = approvedConfidence
+	approvalDigest, err := refreshPackageApprovalDigests(&build.Package)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	build.ApprovalSubjectDigestSHA256 = approvalDigest
 	if err := model.ValidateClientExecutionPackageForCloudExecution(&build.Package); err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
@@ -352,10 +364,32 @@ func (s *Service) ApproveClientExecutionPackage(ctx context.Context, projectID s
 	envelope.IdempotencyKey = request.IdempotencyKey
 	build.Envelope, build.PayloadRef = envelope, envelope.PayloadRef
 	if s.approvedBuilds == nil {
-		s.approvedBuilds = map[string]ClientExecutionPackageBuild{}
+		s.approvedBuilds = map[string]approvedBuildCacheEntry{}
 	}
-	s.approvedBuilds[idempotencyCacheKey] = build
+	s.approvedBuilds[idempotencyCacheKey] = approvedBuildCacheEntry{
+		Build:                           build,
+		PreviewPackageDigestSHA256:      strings.TrimSpace(request.PackageDigestSHA256),
+		PreviewApprovalSubjectDigest:    strings.TrimSpace(request.ApprovalSubjectDigestSHA256),
+		PreviewConfidenceAssessmentHash: strings.TrimSpace(request.ConfidenceAssessmentHash),
+	}
 	return build, nil
+}
+
+func refreshPackageApprovalDigests(pkg *model.ClientExecutionPackage) (string, error) {
+	if pkg == nil {
+		return "", errors.New("client execution package is nil")
+	}
+	componentDigests, err := model.ComputePackageApprovalComponentDigests(*pkg)
+	if err != nil {
+		return "", err
+	}
+	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256 = componentDigests
+	approvalDigest, err := model.ComputePackageApprovalSubjectDigest(*pkg)
+	if err != nil {
+		return "", err
+	}
+	pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 = approvalDigest
+	return approvalDigest, nil
 }
 
 type packagePreviewStaleError struct{}

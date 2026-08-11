@@ -86,10 +86,20 @@ func directWorkerFailureResult(pkg *model.ClientExecutionPackage, jobID string, 
 	if strings.TrimSpace(code) == "" {
 		code = "browser_agent_execution_failed"
 	}
-	return executor.NewRecordingResultPackageFromRecordResult(pkg, executor.RecordResult{
+	result, err := executor.NewRecordingResultPackageFromRecordResult(pkg, executor.RecordResult{
 		StepResults: []model.StepResult{{NodeID: nodeID, Status: "failed", StartedAt: now, CompletedAt: now, Error: &model.AgentError{Code: code, Message: "Browser Agent execution failed; inspect the redacted failure category and approved rerun workflow.", Retryable: true}}},
 		WorkerID:    "browser-agent-direct-worker", StartedAt: now, CompletedAt: now,
 	}, jobID, now)
+	if err != nil {
+		return result, err
+	}
+	result.FailureDiagnostic = &model.ScriptFailureDiagnostic{
+		ID: "diag_" + safePathSegment(nodeID), SchemaVersion: model.ScriptFailureDiagnosticSchemaVersion,
+		SourcePackageID: pkg.PackageID, CloudJobID: jobID, FailedNodeID: nodeID, Attempt: 1,
+		Error:           model.AgentError{Code: code, Message: "Browser Agent infrastructure stopped before traceable page evidence was available.", Retryable: true},
+		RedactionReport: model.DiagnosticRedactionReport{Applied: true, PolicyRef: pkg.PackageID + ".redactions", FullHTMLIncluded: false}, CapturedAt: now,
+	}
+	return result, nil
 }
 
 func directWorkerArtifactFiles(result model.RecordingResultPackage, root string) ([]DirectWorkerArtifactFile, error) {
@@ -191,15 +201,50 @@ func prepareDirectWorkerResult(result *model.RecordingResultPackage, jobID strin
 			*result.StageEventLogRef = value
 		}
 	}
-	for index := range result.Delivery.AssetRefs {
-		if value, ok := byID[result.Delivery.AssetRefs[index].ID]; ok {
-			result.Delivery.AssetRefs[index].URI = value.URI
-			result.Delivery.AssetRefs[index].SHA256 = value.SHA256
-			result.Delivery.AssetRefs[index].SizeBytes = value.SizeBytes
+	rewriteDescriptor := func(value *model.PackageArtifactDescriptor) {
+		if value == nil {
+			return
 		}
-		result.Delivery.AssetRefs[index].Encrypted = true
-		result.Delivery.AssetRefs[index].Sensitive = true
-		result.Delivery.AssetRefs[index].RecipientKeyID = "direct-lease"
+		if artifact, ok := byID[value.ID]; ok {
+			value.URI = artifact.URI
+			value.MimeType = artifact.MimeType
+			value.SHA256 = artifact.SHA256
+			value.SizeBytes = artifact.SizeBytes
+		}
+		value.Encrypted = true
+		value.Sensitive = true
+		value.RecipientKeyID = "direct-lease"
+		if value.Metadata != nil {
+			metadata := make(map[string]any, len(value.Metadata))
+			for key, item := range value.Metadata {
+				if strings.EqualFold(key, "local_path") || strings.EqualFold(key, "dev_local_artifact") {
+					continue
+				}
+				metadata[key] = item
+			}
+			value.Metadata = metadata
+		}
+	}
+	if result.FailureDiagnostic != nil {
+		for index := range result.FailureDiagnostic.ScreenshotRefs {
+			rewriteDescriptor(&result.FailureDiagnostic.ScreenshotRefs[index])
+		}
+		for index := range result.FailureDiagnostic.TraceRefs {
+			rewriteDescriptor(&result.FailureDiagnostic.TraceRefs[index])
+		}
+		rewriteDescriptor(result.FailureDiagnostic.DOMSnapshotRef)
+		rewriteDescriptor(result.FailureDiagnostic.AccessibilitySnapshotRef)
+	}
+	for index := range result.Delivery.AssetRefs {
+		rewriteDescriptor(&result.Delivery.AssetRefs[index])
+	}
+	result.Delivery.ResultPackageRef.URI = "direct://jobs/" + url.PathEscape(jobID) + "/result"
+	result.Delivery.ResultPackageRef.Encrypted = true
+	result.Delivery.ResultPackageRef.Sensitive = true
+	result.Delivery.ResultPackageRef.RecipientKeyID = "direct-lease"
+	if result.Delivery.ResultPackageRef.Metadata != nil {
+		delete(result.Delivery.ResultPackageRef.Metadata, "dev_local_artifact")
+		delete(result.Delivery.ResultPackageRef.Metadata, "local_path")
 	}
 	result.Delivery.EncryptionAlg = model.DirectTransportCryptoSuite
 	result.Delivery.RecipientKeyID = "direct-lease"

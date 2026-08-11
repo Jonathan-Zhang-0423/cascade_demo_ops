@@ -426,6 +426,10 @@ type LocalDirectTransportStatus = {
 	installation_id_suffix?: string;
 	transport: string;
 	error_class?: string;
+	supported_protocol_versions?: string[];
+	supported_package_schema_versions?: string[];
+	supported_runtimes?: string[];
+	capabilities?: Record<string, boolean>;
 };
 
 type LocalDirectArtifact = {
@@ -466,6 +470,10 @@ type LocalDirectJobStatus = {
 	status: string;
 	stage: string;
 	message?: string;
+	waiting_reason?: string;
+	blocking_error_code?: string;
+	next_action?: string;
+	requires_reapproval?: boolean;
 	progress_percent?: number;
 	result_package_id?: string;
 	artifacts?: LocalDirectArtifact[];
@@ -3246,6 +3254,10 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
       ...(local.browser_agent_direct.installation_id_suffix ? { installationIDSuffix: local.browser_agent_direct.installation_id_suffix } : {}),
       transport: local.browser_agent_direct.transport,
       ...(local.browser_agent_direct.error_class ? { errorClass: local.browser_agent_direct.error_class } : {}),
+      ...(local.browser_agent_direct.supported_protocol_versions ? { supportedProtocolVersions: local.browser_agent_direct.supported_protocol_versions } : {}),
+      ...(local.browser_agent_direct.supported_package_schema_versions ? { supportedPackageSchemaVersions: local.browser_agent_direct.supported_package_schema_versions } : {}),
+      ...(local.browser_agent_direct.supported_runtimes ? { supportedRuntimes: local.browser_agent_direct.supported_runtimes } : {}),
+      ...(local.browser_agent_direct.capabilities ? { capabilities: local.browser_agent_direct.capabilities } : {}),
     };
   }
   if (local.app_capabilities) {
