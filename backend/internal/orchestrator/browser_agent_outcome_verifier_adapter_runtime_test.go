@@ -939,3 +939,69 @@ func TestValidateStageEvents_CrossDomainAccess_SubdomainMatchesParentDomain(t *t
 		}
 	}
 }
+
+func TestValidateStageEvents_DuplicateStageStarted(t *testing.T) {
+	config := &model.ValidationConfig{
+		PreExecutionEnabled:       true,
+		RealTimeBatchEnabled:      true,
+		PostExecutionBatchEnabled: true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+
+	vctx := model.BrowserAgentValidationContext{
+		RunID:                     "test-run-dup-stage-001",
+		SourcePackageID:           "pkg-dup-stage-001",
+		SourceBundleHashSHA256:    "abc123",
+		EffectivePolicyHashSHA256: "def456",
+		WorkflowGraph:             &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan:         &model.StageApprovalPlan{Stages: []model.StageApprovalStage{}},
+		ScriptOutline:             &model.BrowserAgentScriptOutline{},
+		BrowserAgentContract:      &model.BrowserAgentContract{},
+	}
+
+	// Two StageStarted events for the same stageID → startCount=2 → DUPLICATE_STAGE_STARTED
+	events := []model.StageExecutionEvent{
+		{
+			StageID:    "stage-dup-1",
+			NodeID:     "node-dup-1",
+			EventType:  model.StageExecutionEventStageStarted,
+			OccurredAt: time.Now(),
+		},
+		{
+			StageID:    "stage-dup-1",
+			NodeID:     "node-dup-1",
+			EventType:  model.StageExecutionEventStageStarted,
+			OccurredAt: time.Now().Add(time.Second),
+		},
+	}
+
+	ctx := context.Background()
+	report, err := adapter.ValidateStageEvents(ctx, vctx, events)
+	if err != nil {
+		t.Fatalf("ValidateStageEvents returned unexpected error: %v", err)
+	}
+
+	found := false
+	for _, check := range report.Checks {
+		if check.Code == "DUPLICATE_STAGE_STARTED" {
+			found = true
+			if check.Passed {
+				t.Errorf("DUPLICATE_STAGE_STARTED check.Passed = true, want false")
+			}
+			if check.Severity != model.FindingSeverityWarning {
+				t.Errorf("DUPLICATE_STAGE_STARTED check.Severity = %v, want Warning", check.Severity)
+			}
+			if check.Required {
+				t.Errorf("DUPLICATE_STAGE_STARTED check.Required = true, want false")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected DUPLICATE_STAGE_STARTED check with Passed=false; checks: %+v", report.Checks)
+	}
+	// Warning-only: decision must NOT be stop_and_report
+	if report.Decision == model.ValidationDecisionStopAndReport {
+		t.Errorf("DUPLICATE_STAGE_STARTED is warning-only: expected decision != stop_and_report, got %q", report.Decision)
+	}
+}

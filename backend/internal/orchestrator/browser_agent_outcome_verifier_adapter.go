@@ -872,6 +872,71 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 		}
 	}
 
+	// P0.5: Cross-check StepResult.observed_state traceability
+	if len(result.StepResults) > 0 {
+		// Build set of nodeIDs that have genuine outcome_observed event with actual browser source
+		nodeHasOutcome := make(map[string]bool)
+		for _, event := range events {
+			if event.EventType == model.StageExecutionEventOutcomeObserved &&
+				event.Observation != nil &&
+				event.Observation.Source == model.RuntimeObservationActualBrowser {
+				nodeHasOutcome[event.NodeID] = true
+			}
+		}
+
+		for _, step := range result.StepResults {
+			// If observed_state present but doesn't contain "source=" marker → blocking failure
+			if step.ObservedState != "" && !strings.Contains(step.ObservedState, "source=") {
+				postChecks = append(postChecks, model.ValidationCheck{
+					ID:       fmt.Sprintf("post_observed_state_no_source_%s", step.NodeID),
+					Kind:     "observed_state_traceability",
+					Code:     "observed_state_not_runtime_derived",
+					Severity: model.FindingSeverityBlocking,
+					Passed:   false,
+					Required: true,
+					Summary:  fmt.Sprintf("Step %s observed_state 未标记来源，可能是手工伪造", step.NodeID),
+				})
+			}
+
+			// If observed_state present but no corresponding outcome event → blocking failure
+			if step.ObservedState != "" && !nodeHasOutcome[step.NodeID] {
+				postChecks = append(postChecks, model.ValidationCheck{
+					ID:       fmt.Sprintf("post_observed_state_no_event_%s", step.NodeID),
+					Kind:     "observed_state_traceability",
+					Code:     "observed_state_not_runtime_derived",
+					Severity: model.FindingSeverityBlocking,
+					Passed:   false,
+					Required: true,
+					Summary:  fmt.Sprintf("Step %s observed_state 存在但无对应 outcome_observed 事件", step.NodeID),
+				})
+			}
+		}
+	}
+
+	// P0.6: Verify ValidationCheck evidence_refs point to real artifacts
+	allArtifactIDs := make(map[string]bool)
+	for _, asset := range result.GeneratedAssets {
+		allArtifactIDs[asset.ID] = true
+	}
+	for _, vr := range result.ValidationReports {
+		for _, check := range vr.Checks {
+			for _, evRef := range check.EvidenceRefs {
+				if evRef.ArtifactID != "" && !allArtifactIDs[evRef.ArtifactID] {
+					postChecks = append(postChecks, model.ValidationCheck{
+						ID:       fmt.Sprintf("post_broken_evidence_ref_%s", evRef.ArtifactID),
+						Kind:     "evidence_integrity",
+						Code:     "EVIDENCE_ARTIFACT_REFERENCE_BROKEN",
+						Severity: model.FindingSeverityWarning,
+						Passed:   false,
+						Required: false,
+						Summary:  fmt.Sprintf("ValidationCheck %s 引用 artifact %s 但该 artifact 不存在于 GeneratedAssets", check.ID, evRef.ArtifactID),
+						EvidenceRefs: []model.EvidenceRef{{ID: check.ID, Kind: "validation_check"}},
+					})
+				}
+			}
+		}
+	}
+
 	// If critical post checks failed, return stop_and_report
 	hasBlockingFailure := false
 	for _, check := range postChecks {
