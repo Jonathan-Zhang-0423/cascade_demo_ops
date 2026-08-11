@@ -31,9 +31,26 @@ func TestMissingEvidenceKeepsFailedLoginDiagnosticWhenMarketingControlsWereFound
 	}
 }
 
-func TestBusinessStagePlannerCreatesRequirementDrivenTetrisStages(t *testing.T) {
+func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
+	tests := []struct {
+		intent string
+		want   string
+	}{
+		{intent: "新建项目（13s，2048，构建模式）", want: "2048"},
+		{intent: "项目名称为2026", want: "2026"},
+		{intent: "项目名称：俄罗斯方块", want: "俄罗斯方块"},
+		{intent: "新建项目（13秒，构建模式）", want: ""},
+	}
+	for _, test := range tests {
+		if got := intentProjectName(test.intent); got != test.want {
+			t.Fatalf("intentProjectName(%q)=%q, want %q", test.intent, got, test.want)
+		}
+	}
+}
+
+func TestBusinessStagePlannerCreatesRequirementDrivenProjectStages(t *testing.T) {
 	project := graphQualityProject()
-	project.ProductDescription = "演示登录 7 秒，新建项目 13 秒，项目名称俄罗斯方块，选择构建模式，启动 agent 实际构建，并等待 45 秒观察。"
+	project.ProductDescription = "演示登录 7 秒，新建项目 13 秒，项目名称2048，选择构建模式，启动 agent 实际构建，并等待 45 秒观察。"
 	project.DemoAccount = &model.DemoAccount{
 		UsernameSecretRef: "secret://demo/username",
 		PasswordSecretRef: "secret://demo/password",
@@ -48,14 +65,14 @@ func TestBusinessStagePlannerCreatesRequirementDrivenTetrisStages(t *testing.T) 
 		},
 	}
 	verified := &model.VerifiedInteractionPlan{
-		ID:                  "verified_tetris",
+		ID:                  "verified_project",
 		ProjectID:           project.ID,
 		SchemaVersion:       model.ProjectIntelligencePackSchemaVersion,
 		BusinessActionCount: 3,
 		Actions: []model.VerifiedInteractionAction{
 			{ID: "login", Label: "Login", Kind: "click", Selector: "[data-testid='login-submit']", IsBusiness: false, VerificationStatus: "verified", SelectorScore: 100},
 			{ID: "new_project", Label: "新建项目", Kind: "click", Selector: "[data-testid='new-project']", IsBusiness: true, VerificationStatus: "verified", SelectorScore: 100},
-			{ID: "project_name", Label: "项目名称", Kind: "fill", Selector: "[data-testid='project-name']", InputValue: "俄罗斯方块", IsBusiness: true, VerificationStatus: "verified", SelectorScore: 100},
+			{ID: "project_name", Label: "项目名称", Kind: "fill", Selector: "[data-testid='project-name']", InputValue: "2048", IsBusiness: true, VerificationStatus: "verified", SelectorScore: 100},
 			{ID: "build_mode", Label: "构建模式", Kind: "click", Selector: "[data-testid='build-mode']", IsBusiness: true, VerificationStatus: "verified", SelectorScore: 100},
 			{ID: "start_build", Label: "启动 agent 构建", Kind: "click", Selector: "[data-testid='start-build']", IsBusiness: true, VerificationStatus: "verified", SelectorScore: 100},
 		},
@@ -81,6 +98,9 @@ func TestBusinessStagePlannerCreatesRequirementDrivenTetrisStages(t *testing.T) 
 		if plan.Stages[i].Kind != kind {
 			t.Fatalf("stage %d kind: got %s want %s", i, plan.Stages[i].Kind, kind)
 		}
+		if containsString(plan.Stages[i].Action.WaitConditions, "networkidle") {
+			t.Fatalf("stage %d must not add an unconditional networkidle wait: %+v", i, plan.Stages[i].Action.WaitConditions)
+		}
 	}
 	for _, index := range []int{1, 2, 3, 4} {
 		if !plan.Stages[index].Action.NonDestructive {
@@ -91,7 +111,7 @@ func TestBusinessStagePlannerCreatesRequirementDrivenTetrisStages(t *testing.T) 
 		t.Fatalf("expected 4 core business stages, got %d", plan.CoreBusinessStageCount)
 	}
 	inputStage := plan.Stages[2]
-	if inputStage.Action.InputValue != "俄罗斯方块" || inputStage.Kind != model.BusinessStageKindBusinessInput {
+	if inputStage.Action.InputValue != "2048" || inputStage.Kind != model.BusinessStageKindBusinessInput {
 		t.Fatalf("business input did not preserve project name semantics: %+v", inputStage)
 	}
 	if got := plan.Stages[0].DurationMS; got != 7000 {
@@ -163,11 +183,11 @@ func TestBusinessStageResultValidationDoesNotReuseClickedButton(t *testing.T) {
 		},
 	}
 	validation := businessStageValidation(stage, model.GraphActionClick, businessStageActionTarget(stage, "https://app.example/app"), true)
-	if validation.Kind != "element_visible" {
-		t.Fatalf("expected result visibility validation, got %+v", validation)
+	if validation.Kind != "text_contains" || validation.Target.Role != "dialog" {
+		t.Fatalf("unproven result selector should fall back to a semantic dialog validation, got %+v", validation)
 	}
-	if validation.Target.TestID != "input-project-idea" || strings.Contains(validation.Target.Selector, "project-list") {
-		t.Fatalf("validation reused clicked/stale target: %+v", validation.Target)
+	if validation.Target.TestID != "" || validation.Target.Selector != "" || strings.Contains(validation.Target.Label, "project-list") {
+		t.Fatalf("validation reused an unproven clicked/stale target: %+v", validation.Target)
 	}
 }
 

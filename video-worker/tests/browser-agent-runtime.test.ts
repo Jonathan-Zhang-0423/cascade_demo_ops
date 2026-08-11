@@ -5,11 +5,14 @@ import {
   evaluateRequiredValidations,
   isApprovedCredentialLoginInteraction,
   isEvidenceBoundSelectorAlternative,
+  interactionWaitRequiresNetworkIdle,
   loginContextURLAllowedForUsernameStep,
   resolutionAssertions,
   routeTemplateMatches,
+  stageWaitRequiresNetworkIdle,
   urlPolicyError,
   usesPassiveRouteResolution,
+  waitForPageSettled,
   waitObservationRouteResolution,
 } from "../src/browser-agent-runtime.js";
 
@@ -41,6 +44,50 @@ describe("browser agent navigation policy", () => {
     expect(urlPolicyError("https://app.example.com/dashboard/projects/1", session, false)).toBeUndefined();
     expect(urlPolicyError("http://app.example.com/dashboard", session, false)).toContain("origin_not_allowed");
     expect(urlPolicyError("https://app.example.com/settings", session, false)).toContain("route_not_allowed");
+  });
+});
+
+describe("browser agent approved wait policy", () => {
+  it("does not infer networkidle from generic stability conditions", () => {
+    expect(interactionWaitRequiresNetworkIdle({
+      kind: "click",
+      wait_conditions: ["wait_for_network_or_dom_stable", "wait_for_render_stable_before_capture"],
+    })).toBe(false);
+    expect(stageWaitRequiresNetworkIdle({
+      id: "stage_streaming",
+      order: 1,
+      node_id: "streaming",
+      target_contract: { semantic_id: "target_streaming", destructive: false },
+      interactions: [{ kind: "inspect", non_destructive: true }],
+      wait_conditions: ["wait_after_entry_at_least_250ms"],
+    })).toBe(false);
+  });
+
+  it("honors only an explicit approved networkidle request", () => {
+    expect(interactionWaitRequiresNetworkIdle({ kind: "navigate", wait_until: "networkidle" })).toBe(true);
+    expect(interactionWaitRequiresNetworkIdle({ kind: "click", wait_conditions: ["wait_for_network_idle"] })).toBe(true);
+    expect(stageWaitRequiresNetworkIdle({
+      id: "stage_network_idle",
+      order: 1,
+      node_id: "network_idle",
+      target_contract: { semantic_id: "target_network_idle", destructive: false },
+      interactions: [{ kind: "inspect", non_destructive: true }],
+      wait_conditions: ["networkidle"],
+    })).toBe(true);
+  });
+
+  it("skips the networkidle load state for pages with persistent requests", async () => {
+    const loadStates: string[] = [];
+    const page = {
+      waitForLoadState: async (state: string) => { loadStates.push(state); },
+      waitForTimeout: async () => undefined,
+    };
+    await waitForPageSettled(page, 5_000);
+    expect(loadStates).toEqual(["domcontentloaded"]);
+
+    loadStates.length = 0;
+    await waitForPageSettled(page, 5_000, true);
+    expect(loadStates).toEqual(["domcontentloaded", "networkidle"]);
   });
 });
 

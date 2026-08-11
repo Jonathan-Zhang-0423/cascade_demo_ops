@@ -39,6 +39,14 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		if field, candidate, ok := firstIncompleteSelectorCandidate(step, stage, outline); ok {
 			return &OutlineConsistencyError{Code: "selector_provenance_incomplete", NodeID: step.NodeID, Reason: fmt.Sprintf("has selector candidate %q with incomplete provenance at %s", candidate.Value, field)}
 		}
+		if selectors := distinctPrimarySelectors(step, stage, outline); len(selectors) > 1 {
+			return &OutlineConsistencyError{Code: "selector_binding_mismatch", NodeID: step.NodeID, Reason: "has different primary selectors across plan_json, stage_approval_plan, and script_outline"}
+		}
+		if step.RuntimeAdaptive {
+			if selector := firstPrimarySelector(step, stage, outline); selector != "" && !bundleHasFormalSelectorCandidate(step, stage, outline, selector) {
+				return &OutlineConsistencyError{Code: "selector_primary_provenance_missing", NodeID: step.NodeID, Reason: fmt.Sprintf("uses runtime-adaptive primary selector %q without a matching formal candidate", selector)}
+			}
+		}
 		legacyPlanStep := step.StageKind == "" && step.RouteState == ""
 		if legacyPlanStep {
 			continue
@@ -133,6 +141,84 @@ func SelectorCandidateHasFormalProvenance(candidate SelectorCandidate) bool {
 		}
 	}
 	return false
+}
+
+func distinctPrimarySelectors(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) []string {
+	values := []string{
+		firstNonEmptyOutlineSelector(step.Action.Target.Selector, step.PageTarget.Selector),
+		stage.Interaction.Target.Selector,
+	}
+	for _, interaction := range outline.Interactions {
+		if interaction.Kind == step.Action.Type || len(outline.Interactions) == 1 {
+			values = append(values, interaction.Target.Selector)
+		}
+	}
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		normalized := strings.ToLower(value)
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func firstPrimarySelector(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) string {
+	if values := distinctPrimarySelectors(step, stage, outline); len(values) > 0 {
+		return values[0]
+	}
+	return ""
+}
+
+func bundleHasFormalSelectorCandidate(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage, selector string) bool {
+	candidates := append([]SelectorCandidate{}, step.Action.Target.SelectorAlternatives...)
+	candidates = append(candidates, step.PageTarget.SelectorAlternatives...)
+	candidates = append(candidates, stage.Interaction.Target.SelectorAlternatives...)
+	for _, interaction := range outline.Interactions {
+		candidates = append(candidates, interaction.Target.SelectorAlternatives...)
+	}
+	for _, component := range outline.Components {
+		candidates = append(candidates, component.SelectorAlternatives...)
+	}
+	for _, candidate := range candidates {
+		if SelectorCandidateHasFormalProvenance(candidate) && selectorCandidateMatchesPrimary(candidate, selector) {
+			return true
+		}
+	}
+	return false
+}
+
+func selectorCandidateMatchesPrimary(candidate SelectorCandidate, selector string) bool {
+	candidateValue := strings.TrimSpace(candidate.Value)
+	selector = strings.TrimSpace(selector)
+	if candidateValue == "" || selector == "" {
+		return false
+	}
+	if strings.EqualFold(candidateValue, selector) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(candidate.Kind), "testid") {
+		return false
+	}
+	compact := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(selector, "\"", "'"), " ", ""))
+	want := "data-testid='" + strings.ToLower(candidateValue) + "'"
+	return strings.Contains(compact, want)
+}
+
+func firstNonEmptyOutlineSelector(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func validateRuntimeAdaptiveExecutionContract(bundle *ExecutableRecordingScriptBundle, step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) error {

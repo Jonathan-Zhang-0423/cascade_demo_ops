@@ -392,8 +392,25 @@ func TestIntentFallbackRejectsMismatchedAndNegativeCodeCandidates(t *testing.T) 
 			t.Fatalf("fallback must not bind mismatched/negative selector %q:\n%s", forbidden, text)
 		}
 	}
-	if !(strings.Contains(text, "input[placeholder*='项目']") || strings.Contains(text, "input[aria-label*='项目']")) || !strings.Contains(text, "[data-testid='start-build']") {
-		t.Fatalf("expected semantic selector alternatives to be used:\n%s", text)
+	for _, action := range plan.Actions {
+		if action.Kind != "wait" && action.Selector != "" {
+			t.Fatalf("runtime-adaptive fallback must preserve semantic intent without a guessed primary selector: %+v", action)
+		}
+		if !action.NonDestructive {
+			t.Fatalf("allowlisted fallback action lost its non-destructive authority: %+v", action)
+		}
+		if containsString(action.WaitConditions, "networkidle") {
+			t.Fatalf("runtime-adaptive fallback must not add redundant networkidle waits: %+v", action.WaitConditions)
+		}
+	}
+}
+
+func TestBusinessStageWaitUntilDoesNotDefaultToNetworkIdle(t *testing.T) {
+	if got := businessStageWaitUntil(model.BusinessStage{}); got != "domcontentloaded" {
+		t.Fatalf("default wait_until=%q, want domcontentloaded", got)
+	}
+	if got := businessStageWaitUntil(model.BusinessStage{Action: model.BusinessActionSemantics{WaitConditions: []string{"networkidle"}}}); got != "networkidle" {
+		t.Fatalf("explicit approved networkidle must be preserved, got %q", got)
 	}
 }
 

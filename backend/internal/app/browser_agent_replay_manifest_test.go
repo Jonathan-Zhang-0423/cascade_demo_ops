@@ -31,8 +31,9 @@ func TestBuildAndWriteReplayManifestBasicSuccess(t *testing.T) {
 		PackageID: "pkg_001",
 		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
 			Reproducibility: model.ExecutableScriptReproducibility{
-				BundleHashSHA256: "bundle_hash",
-				PlanHashSHA256:   "plan_hash",
+				BundleHashSHA256:               "bundle_hash",
+				PlanHashSHA256:                 "plan_hash",
+				BrowserAgentContractHashSHA256: "policy_hash",
 			},
 		},
 	}
@@ -53,6 +54,9 @@ func TestBuildAndWriteReplayManifestBasicSuccess(t *testing.T) {
 	}
 	if manifest.BundleHashSHA256 != "bundle_hash" {
 		t.Fatalf("bundle hash not carried: %s", manifest.BundleHashSHA256)
+	}
+	if manifest.PolicyHashSHA256 != "policy_hash" {
+		t.Fatalf("effective Browser Agent policy hash not carried: %s", manifest.PolicyHashSHA256)
 	}
 	if manifest.Status != "success" {
 		t.Fatalf("expected success, got %s", manifest.Status)

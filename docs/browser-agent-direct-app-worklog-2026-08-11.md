@@ -53,12 +53,36 @@
 - 正式 completed 交付门禁新增 raw recording、Replay Manifest、AssetTimelineCatalog、DemoEditPlan、StepResults 和 ValidationReports；关键产物缺 ID/URI/checksum/size 直接阻断。
 - 修正 Windows 本地文件 URI：生成端统一使用 `file:///C:/...`，Direct Worker 解析端正确恢复盘符路径，避免 Replay Manifest 和 StageEventLog 在 Windows 下不可读。
 
+### 8. 结构化产物内容校验与显式 ACK
+
+- Direct Worker 上传前将 Replay Manifest 内部的 MP4、raw recording、trace、StageEventLog 和 manifest 自引用统一改写为当前 job 的 `direct://jobs/{job_id}/artifacts/{artifact_id}`，重新计算最终 SHA-256/size，正式包不再携带 Server 本地路径草稿。
+- Gateway 在摘要/字节数校验后继续解析 Replay Manifest JSON 和 StageEventLog JSONL，复核 schema、run/package/bundle/policy、stage/node、事件序列、真实 outcome evidence、StepResults 与 ValidationReports 索引；错误统一返回 `result_artifact_content_invalid`。
+- App 新增独立 ACK 服务并由 HTTP/Wails 共用；Web 在全部下载与 marker 校验后立即 ACK，持久化 `acked_at`。未 ACK 时人工审核、lease release 和编辑器交接均 fail-closed。
+- 修复 UI 误导：仅下载完成不再显示“服务器 ACK 已发送”；ACK 失败时保留已验证下载，可显式重试 ACK。
+
+### 9. Selector 主目标与跨层防御
+
+- 删除页面扫描失败时对“新建项目”“项目名称”“启动构建”等控件生成的猜测 selector；没有正式页面/源码证据时只保留受限语义目标。
+- runtime-adaptive 动作只有在 `non_destructive=true`、目标合同、路由、安全范围、成功条件和采集计划完整时才能进入执行图。
+- PlanJSON、StageApprovalPlan 和 ScriptOutline 的主 selector 必须一致；漂移返回 `selector_binding_mismatch`。
+- runtime-adaptive 主 selector 必须能精确绑定完整 provenance candidate；否则返回 `selector_primary_provenance_missing`。
+- PreExecutionValidator 再次拒绝没有 formal candidate 的主 selector；repair 池只保留完整 provenance 候选，不再从 component 主 selector 和共享 EvidenceRef 合成伪候选。
+- 项目名称由通用需求结构提取，不再硬编码只识别“俄罗斯方块”；纯数字项目名（例如 `2048`）与带单位的时长（例如 `13s`）分别处理，fixture 中的固定名称只用于测试，不进入生产推断。
+- `VerifiedInteractionAction.non_destructive` 已贯通 BusinessStage、Graph metadata、Plan step、StageApprovalPlan 和 ScriptOutline，任一层漂移继续 fail-closed。
+
+### 10. Runtime 等待去冗余
+
+- Browser Agent Runtime 默认导航改为 `domcontentloaded`，随后仅保留 250ms 短稳定窗口。
+- 不再在 session 初始化、普通点击/填写/选择、登录辅助跳转和 capture 前无条件等待 `networkidle`。
+- 只有批准的 `wait_until=networkidle`、`wait_conditions=networkidle` 或 `wait_for_network_idle` 才执行网络空闲等待。
+- 新增测试证明 `wait_for_network_or_dom_stable`、render-stable 和持续请求页面不会被误判为必须等待网络空闲，同时保留显式 network-idle 请求。
+
 ## 回归测试
 
 - 后端：`go test ./... -count=1` 通过。
-- Video Worker：36 项通过，2 项按既有条件跳过；typecheck 与 build 通过。
+- Video Worker：39 项通过，2 项按既有条件跳过；typecheck 与 build 通过。
 - Web：108 项通过；typecheck 与生产 build 通过。
-- 新增覆盖：缺 Worker/Verifier 版本、Worker claim 协议不匹配、稳定状态持久化、selector provenance、`data-testid` 不进入 accessible name、动作/成功目标复用 blocker、`reunderstanding_required` 生命周期，以及正式 Replay Manifest、编辑器交接产物和 Windows file URI 往返。
+- 新增覆盖：缺 Worker/Verifier 版本、Worker claim 协议不匹配、稳定状态持久化、selector provenance、主 selector 跨层漂移、无 provenance 主 selector、`data-testid` 不进入 accessible name、动作/成功目标复用 blocker、通用/纯数字项目名、按批准条件等待 networkidle、`reunderstanding_required` 生命周期、正式 Replay Manifest/StageEventLog 内容错绑拒绝、显式 ACK 顺序、编辑器 ACK 门禁和 Windows file URI 往返。
 
 ## 接口交接结论
 

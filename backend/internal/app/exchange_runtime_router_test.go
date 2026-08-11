@@ -155,7 +155,7 @@ func (eventPublishingOutlineRunner) Run(ctx context.Context, request BrowserAgen
 	}
 	stage := request.RuntimePlan.Stages[0]
 	bundleHash := request.Package.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
-	policyHash := request.Package.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
+	policyHash := request.RuntimePlan.PolicyHashSHA256
 	event := model.StageExecutionEvent{
 		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: request.RuntimePlan.RunID,
 		SourcePackageID: request.Package.PackageID, SourceBundleHashSHA256: bundleHash, PolicyHashSHA256: policyHash,

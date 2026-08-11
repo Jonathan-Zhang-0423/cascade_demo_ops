@@ -69,6 +69,35 @@ func TestValidateBrowserAgentOutlineConsistencyRequiresSelectorProvenance(t *tes
 	}
 }
 
+func TestValidateBrowserAgentOutlineConsistencyRejectsUnprovenRuntimeAdaptivePrimarySelector(t *testing.T) {
+	bundle := runtimeAdaptiveOutlineBundleForTest()
+	selector := `[data-testid='guessed-login']`
+	bundle.PlanJSON.Steps[0].Action.Target.Selector = selector
+	bundle.StageApprovalPlan.Stages[0].Interaction.Target.Selector = selector
+	bundle.ScriptOutline.Stages[0].Interactions[0].Target.Selector = selector
+	assertOutlineConsistencyCode(t, bundle, "selector_primary_provenance_missing")
+
+	evidence := EvidenceRef{ID: "ev_login_scan", Kind: EvidenceKindBrowserScan}
+	candidate := SelectorCandidate{
+		Kind: "testid", Value: "guessed-login", EvidenceID: evidence.ID, SourceKind: "page_scan", SourceDigest: "sha256:page",
+		ObservedRole: "button", ObservedAccessibleName: "Sign in", ObservedAt: time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC), EvidenceRefs: []EvidenceRef{evidence},
+	}
+	bundle.PlanJSON.Steps[0].Action.Target.SelectorAlternatives = []SelectorCandidate{candidate}
+	bundle.StageApprovalPlan.Stages[0].Interaction.Target.SelectorAlternatives = []SelectorCandidate{candidate}
+	bundle.ScriptOutline.Stages[0].Interactions[0].Target.SelectorAlternatives = []SelectorCandidate{candidate}
+	if err := ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
+		t.Fatalf("runtime-adaptive primary selector with matching provenance should be accepted: %v", err)
+	}
+}
+
+func TestValidateBrowserAgentOutlineConsistencyRejectsPrimarySelectorDrift(t *testing.T) {
+	bundle := consistentOutlineBundleForTest()
+	bundle.PlanJSON.Steps[0].Action.Target.Selector = "#login-email"
+	bundle.StageApprovalPlan.Stages[0].Interaction.Target.Selector = "#login-email"
+	bundle.ScriptOutline.Stages[0].Interactions[0].Target.Selector = "#marketing-email"
+	assertOutlineConsistencyCode(t, bundle, "selector_binding_mismatch")
+}
+
 func assertOutlineConsistencyCode(t *testing.T, bundle *ExecutableRecordingScriptBundle, want string) {
 	t.Helper()
 	err := ValidateBrowserAgentOutlineConsistency(bundle)

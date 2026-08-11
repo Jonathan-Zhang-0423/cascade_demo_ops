@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -92,7 +93,7 @@ func TestEvidenceBoundSelectorCandidatesRequireSameAppEvidence(t *testing.T) {
 	other := model.EvidenceRef{ID: "ev_project_list", Kind: model.EvidenceKindBrowserScan, Confidence: 1}
 	components := []model.BrowserAgentComponentTarget{
 		{ComponentRef: "component:wrong-primary", Selector: `[data-testid="project-list"]`, EvidenceRefs: []model.EvidenceRef{other}},
-		{ComponentRef: "component:new-project", Selector: `[data-testid="button-new-project"]`, Confidence: .9, EvidenceRefs: []model.EvidenceRef{shared}},
+		{ComponentRef: "component:new-project", Selector: `[data-testid="button-new-project"]`, Confidence: .9, EvidenceRefs: []model.EvidenceRef{shared}, SelectorAlternatives: []model.SelectorCandidate{formalSelectorCandidateForTest(`[data-testid="button-new-project"]`, shared, "New project")}},
 		{ComponentRef: "component:unrelated", Selector: `[data-testid="delete-project"]`, EvidenceRefs: []model.EvidenceRef{other}},
 	}
 	interactions := []model.BrowserAgentInteraction{{
@@ -121,8 +122,8 @@ func TestEvidenceBoundSelectorCandidatesRejectMissingAndAmbiguousBindings(t *tes
 
 	ambiguous := evidenceBoundSelectorCandidates(
 		[]model.BrowserAgentComponentTarget{
-			{Selector: `[data-testid="candidate-a"]`, EvidenceRefs: []model.EvidenceRef{shared}},
-			{Selector: `[data-testid="candidate-b"]`, EvidenceRefs: []model.EvidenceRef{shared}},
+			{Selector: `[data-testid="candidate-a"]`, EvidenceRefs: []model.EvidenceRef{shared}, SelectorAlternatives: []model.SelectorCandidate{formalSelectorCandidateForTest(`[data-testid="candidate-a"]`, shared, "Candidate A")}},
+			{Selector: `[data-testid="candidate-b"]`, EvidenceRefs: []model.EvidenceRef{shared}, SelectorAlternatives: []model.SelectorCandidate{formalSelectorCandidateForTest(`[data-testid="candidate-b"]`, shared, "Candidate B")}},
 		},
 		[]model.BrowserAgentInteraction{{Kind: model.GraphActionClick, Target: model.ActionTarget{EvidenceRefs: []model.EvidenceRef{shared}}}},
 	)
@@ -134,10 +135,8 @@ func TestEvidenceBoundSelectorCandidatesRejectMissingAndAmbiguousBindings(t *tes
 func TestBrowserAgentRepairPolicyAppliesEvidenceBoundSelectorWithoutMutatingStage(t *testing.T) {
 	plan, stage := repairPolicyFixture(t)
 	primary := currentStageSelector(stage)
-	candidate := model.SelectorCandidate{
-		Kind: "css", Value: `[data-testid="button-new-project"]`, Source: "app_stage_evidence_binding",
-		EvidenceRefs: []model.EvidenceRef{{ID: "ev_verified_new_project", Kind: model.EvidenceKindBrowserScan}},
-	}
+	evidence := model.EvidenceRef{ID: "ev_verified_new_project", Kind: model.EvidenceKindBrowserScan}
+	candidate := formalSelectorCandidateForTest(`[data-testid="button-new-project"]`, evidence, "New project")
 	stage.EvidenceBoundSelectorAlternatives = []model.SelectorCandidate{candidate}
 	proposal := repairProposalFor(plan, stage, "selector_alternative", "script_outline.stages[].components[].selector", primary, selectorCandidateEncoding(candidate))
 
@@ -157,7 +156,7 @@ func TestBrowserAgentSelectorRepairUsesAppAuthorizedField(t *testing.T) {
 	plan, stage := repairPolicyFixture(t)
 	plan.RepairPolicy.EditableFields = []string{"action.target.selector"}
 	plan.RepairPolicy.ImmutableFields = []string{"action.value", "node_id"}
-	candidate := model.SelectorCandidate{Kind: "css", Value: `[data-testid="button-new-project"]`}
+	candidate := formalSelectorCandidateForTest(`[data-testid="button-new-project"]`, model.EvidenceRef{ID: "ev_verified_new_project", Kind: model.EvidenceKindBrowserScan}, "New project")
 	stage.EvidenceBoundSelectorAlternatives = []model.SelectorCandidate{candidate}
 	observed := BrowserAgentStageObservation{
 		PreferredSelectorAlternative: &candidate,
@@ -177,7 +176,7 @@ func TestBrowserAgentSelectorRepairUsesAppAuthorizedField(t *testing.T) {
 func TestBrowserAgentSelectorRepairDoesNotWidenAppPolicy(t *testing.T) {
 	plan, stage := repairPolicyFixture(t)
 	plan.RepairPolicy.EditableFields = []string{"action.wait_until"}
-	candidate := model.SelectorCandidate{Kind: "css", Value: `[data-testid="button-new-project"]`}
+	candidate := formalSelectorCandidateForTest(`[data-testid="button-new-project"]`, model.EvidenceRef{ID: "ev_verified_new_project", Kind: model.EvidenceKindBrowserScan}, "New project")
 	stage.EvidenceBoundSelectorAlternatives = []model.SelectorCandidate{candidate}
 	proposal := browserAgentSelectorAlternativeProposal(plan, stage, BrowserAgentStageObservation{PreferredSelectorAlternative: &candidate})
 
@@ -209,6 +208,15 @@ func repairPolicyFixture(t *testing.T) (BrowserAgentRuntimePlan, BrowserAgentRun
 		t.Fatal(err)
 	}
 	return plan, plan.Stages[1]
+}
+
+func formalSelectorCandidateForTest(value string, evidence model.EvidenceRef, accessibleName string) model.SelectorCandidate {
+	return model.SelectorCandidate{
+		Kind: "css", Value: value, Confidence: 0.9, StabilityScore: 0.9, Source: "page_scan",
+		EvidenceID: evidence.ID, SourceKind: "page_scan", SourceDigest: "sha256:page-scan",
+		ObservedRole: "button", ObservedAccessibleName: accessibleName,
+		ObservedAt: time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC), EvidenceRefs: []model.EvidenceRef{evidence},
+	}
 }
 
 func repairProposalFor(plan BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage, kind, field, before, after string) model.RuntimeRepairProposal {

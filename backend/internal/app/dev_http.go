@@ -729,6 +729,9 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		review, err := s.service.ReviewDirectResult(r.Context(), projectID, request)
 		writeBridgeValue(w, review, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/ack":
+		receipt, err := s.service.AcknowledgeDirectResult(r.Context(), projectID)
+		writeBridgeValue(w, receipt, err)
 	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/editor-materialization":
 		materialization, err := s.service.GetDirectEditorMaterialization(r.Context(), projectID)
 		writeBridgeValue(w, materialization, err)

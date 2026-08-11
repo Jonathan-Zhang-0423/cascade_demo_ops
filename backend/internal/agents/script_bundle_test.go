@@ -577,7 +577,7 @@ func TestScriptPackagerKeepsRuntimeAdaptiveBusinessAction(t *testing.T) {
 
 func TestScriptPackagerRejectsScriptThatMissesExplicitDemoIntent(t *testing.T) {
 	project, report, productMap, graph := executableBundleFixtures()
-	project.ProductDescription = "演示登录（7s），新建项目（13s，俄罗斯方块，构建模式），agent实际构建演示（45s等待）"
+	project.ProductDescription = "演示登录（7s），新建项目（13s，2048，构建模式），agent实际构建演示（45s等待）"
 	graph.Name = "错误的新建项目演示"
 	graph.Summary = "这份图错误地只包含账号展示和登录按钮。"
 	graph.Nodes[1].ID = "node_user_email_display"
@@ -607,7 +607,7 @@ func TestScriptPackagerRejectsScriptThatMissesExplicitDemoIntent(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected explicit intent mismatch to reject bad executable script")
 	}
-	for _, want := range []string{"script_intent_mismatch", "俄罗斯方块", "构建模式", "45 秒"} {
+	for _, want := range []string{"script_intent_mismatch", "2048", "构建模式", "45 秒"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("expected error to mention %q, got %v", want, err)
 		}

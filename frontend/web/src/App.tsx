@@ -894,7 +894,7 @@ function ProjectAgentWorkspace({
               <div><span>下一步</span><strong>{nextAction.title}</strong><p>{nextAction.description}</p></div>
               {nextAction.kind === "review_plan" ? <button type="button" className="primary-action" onClick={() => setWorkstationView("approval")}>进入上传审批</button> : null}
               {nextAction.kind === "repair" ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onRepairScript}>生成修复包</button> : null}
-              {nextAction.kind === "review_result" && !workspace.cloudRun.resultDownloaded ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onApproveAssets}>{isGeneratingPackage ? "校验中…" : "下载并校验"}</button> : null}
+              {nextAction.kind === "review_result" && !workspace.cloudRun.resultAcknowledged ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onApproveAssets}>{isGeneratingPackage ? "校验中…" : workspace.cloudRun.resultDownloaded ? "重试服务器 ACK" : "下载、校验并 ACK"}</button> : null}
               {nextAction.kind === "complete" ? <button type="button" className="secondary-action" onClick={() => setWorkstationView("editor")}>在 Editor 中打开</button> : null}
             </section>
           ) : null}
@@ -2361,12 +2361,12 @@ function AssetReview({
   const review = workspace.cloudRun.resultReview;
   const videoAsset = workspace.assets.find((asset) => asset.kind === "video");
   const hasResult = Boolean(workspace.cloudRun.resultPackageID || workspace.cloudRun.resultPackage);
-  const canReview = hasResult && workspace.cloudRun.resultDownloaded === true;
+  const canReview = hasResult && workspace.cloudRun.resultDownloaded === true && workspace.cloudRun.resultAcknowledged === true;
   const revisionSummaryRequired = reviewSummary.trim().length === 0;
   return (
     <div className="asset-layout">
       <section className="video-panel">
-        <SectionTitle title="演示视频" meta={workspace.cloudRun.resultDownloaded ? "已下载并校验" : hasResult ? "等待下载" : "待生成"} />
+        <SectionTitle title="演示视频" meta={workspace.cloudRun.resultAcknowledged ? "已校验并 ACK" : workspace.cloudRun.resultDownloaded ? "已校验，等待 ACK" : hasResult ? "等待下载" : "待生成"} />
 		{workspace.cloudRun.lastError ? <div className="error-banner" role="alert"><strong>操作未完成</strong><span>{workspace.cloudRun.lastError}</span></div> : null}
 		{videoAsset?.mediaURL ? <video className="review-video" controls preload="metadata" src={videoAsset.mediaURL}>当前环境无法播放该视频。</video> : <div className="video-frame"><div className="play-symbol">{hasResult ? "待下载" : "生成中"}</div><span>{videoAsset?.title ?? "最终演示视频"}</span></div>}
       </section>
@@ -2381,7 +2381,7 @@ function AssetReview({
           ))}
         </ol>
         <div className="result-review-actions">
-          {showDownloadAction ? <button type="button" className="primary-action" disabled={busy || !hasResult || workspace.cloudRun.resultDownloaded} onClick={onDownload}>{busy ? "正在安全下载…" : workspace.cloudRun.resultDownloaded ? "成品已就绪，可以播放审核" : "下载成片并开始审核"}</button> : workspace.cloudRun.resultDownloaded ? <div className="input-note">成片已安全下载并校验，可以播放和提交审核决定。</div> : null}
+          {showDownloadAction ? <button type="button" className="primary-action" disabled={busy || !hasResult || workspace.cloudRun.resultAcknowledged} onClick={onDownload}>{busy ? "正在安全接收…" : workspace.cloudRun.resultAcknowledged ? "成品已确认接收，可以播放审核" : workspace.cloudRun.resultDownloaded ? "重试服务器 ACK" : "下载、校验并确认接收"}</button> : workspace.cloudRun.resultAcknowledged ? <div className="input-note">成片已安全下载、校验并完成服务器 ACK，可以播放和提交审核决定。</div> : null}
           <label className="field-row">
             <span>审核意见</span>
             <textarea rows={3} value={reviewSummary} onChange={(event) => setReviewSummary(event.currentTarget.value)} placeholder="可对时间点、字幕、节奏或缺失素材进行说明" />

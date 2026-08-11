@@ -499,8 +499,8 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
     const targetURL = absoluteTargetURL(target, session.page.url(), stage.url);
     const policyError = urlPolicyError(targetURL, session, false);
     if (policyError) throw new Error(policyError);
-    await session.page.goto(targetURL, { waitUntil: waitUntil(interaction.wait_until), timeout });
-    await waitForPageSettled(session.page);
+	await session.page.goto(targetURL, { waitUntil: waitUntil(interaction.wait_until), timeout });
+	await waitForPageSettled(session.page, 5_000, interactionWaitRequiresNetworkIdle(interaction, false));
     return;
   }
   if (interaction.kind === "wait") {
@@ -510,11 +510,11 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
   if (usesPassiveRouteResolution(stage, interaction)) {
     const routeResolution = waitObservationRouteResolution(session.page.url(), stage, interaction);
     if (!routeResolution.strategy) throw new Error(routeResolution.failure);
-    await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+	await waitForPageSettled(session.page, Math.min(timeout, 5_000), interactionWaitRequiresNetworkIdle(interaction));
     return;
   }
   if (isApprovedCredentialLoginInteraction(stage, interaction)) {
-    await executeApprovedLogin(session, stage, interaction, timeout);
+	await executeApprovedLogin(session, stage, interaction, timeout, interactionWaitRequiresNetworkIdle(interaction));
     return;
   }
   const resolved = await resolveTarget(session.page, stage, interaction, true);
@@ -534,7 +534,7 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
   } else {
     throw new Error(`browser_agent_action_not_supported: ${interaction.kind}`);
   }
-  await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+	await waitForPageSettled(session.page, Math.min(timeout, 5_000), interactionWaitRequiresNetworkIdle(interaction));
 }
 
 export function isApprovedCredentialLoginInteraction(stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction): boolean {
@@ -773,7 +773,7 @@ function locatorForValidation(page: any, validation: BrowserAgentValidation): an
   return page.locator("body");
 }
 
-async function executeApprovedLogin(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, timeout: number): Promise<void> {
+async function executeApprovedLogin(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, timeout: number, requireNetworkIdle: boolean): Promise<void> {
 	const passwordRef = String(interaction.secret_ref || "").trim();
 	const usernameRef = String(interaction.input_ref || "").trim();
 	if (!passwordRef || passwordRef !== usernameRef) throw new Error("browser_agent_login_secret_binding_invalid");
@@ -832,7 +832,7 @@ async function executeApprovedLogin(session: BrowserAgentSession, stage: Browser
 		} catch {
 			throw new Error("browser_agent_login_submit_not_resolved");
 		}
-		await waitForPageSettled(session.page, Math.min(timeout, 10_000));
+		await waitForPageSettled(session.page, Math.min(timeout, 10_000), requireNetworkIdle);
 		try {
 			await session.page.waitForFunction(() => {
 				const pageDocument = (globalThis as any).document;
@@ -1185,12 +1185,28 @@ function safeURL(value: string): string {
 
 function waitUntil(value?: string): "load" | "domcontentloaded" | "networkidle" {
   if (value === "domcontentloaded" || value === "networkidle") return value;
-  return "load";
+  return "domcontentloaded";
 }
 
-async function waitForPageSettled(page: any, timeoutMS = 5_000): Promise<void> {
+export function interactionWaitRequiresNetworkIdle(interaction: BrowserAgentInteraction, includeWaitUntil = true): boolean {
+  if (includeWaitUntil && String(interaction.wait_until || "").trim().toLowerCase() === "networkidle") return true;
+  return (interaction.wait_conditions || []).some(isExplicitNetworkIdleCondition);
+}
+
+export function stageWaitRequiresNetworkIdle(stage: BrowserAgentWorkerStage): boolean {
+  return (stage.wait_conditions || []).some(isExplicitNetworkIdleCondition);
+}
+
+function isExplicitNetworkIdleCondition(condition: string): boolean {
+  const normalized = String(condition || "").trim().toLowerCase();
+  return normalized === "networkidle" || normalized === "wait_for_network_idle";
+}
+
+export async function waitForPageSettled(page: any, timeoutMS = 5_000, requireNetworkIdle = false): Promise<void> {
   await page.waitForLoadState("domcontentloaded", { timeout: timeoutMS }).catch(() => undefined);
-  await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMS, 3_000) }).catch(() => undefined);
+  if (requireNetworkIdle) {
+    await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMS, 3_000) }).catch(() => undefined);
+  }
   await page.waitForTimeout(250);
 }
 
@@ -1203,7 +1219,7 @@ async function waitForCaptureWindow(page: any, stage: BrowserAgentWorkerStage): 
     if (match) waitMS = Math.max(waitMS, Number(match[1]));
   }
   if (waitMS > 0) await page.waitForTimeout(waitMS);
-  await waitForPageSettled(page);
+  await waitForPageSettled(page, 5_000, stageWaitRequiresNetworkIdle(stage));
 }
 
 function originAllowed(parsed: URL, allowedOrigins: string[]): boolean {

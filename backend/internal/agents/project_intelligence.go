@@ -2114,7 +2114,7 @@ func limitSelectorCandidates(values []model.SelectorCandidate, limit int) []mode
 func waitHintsForSurface(pageURL string, selectors []model.SelectorCandidate, states []string) []string {
 	hints := []string{"等待 body 可见", "截图前保持页面状态稳定"}
 	if isHTTPURL(pageURL) {
-		hints = append(hints, "导航后等待 networkidle 或主要区域可见")
+		hints = append(hints, "导航后等待 domcontentloaded，并确认主要区域可见")
 	}
 	if len(selectors) > 0 {
 		hints = append(hints, "优先等待稳定 selector："+selectors[0].Value)

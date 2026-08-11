@@ -94,6 +94,15 @@ type DirectTransportReleaseResult struct {
 	Lease    DirectTransportLeaseView `json:"lease"`
 }
 
+type DirectResultAckView struct {
+	ProtocolVersion     string    `json:"protocol_version"`
+	JobID               string    `json:"job_id"`
+	ResultPackageID     string    `json:"result_package_id"`
+	ReceivedArtifactIDs []string  `json:"received_artifact_ids"`
+	VerifiedChecksums   bool      `json:"verified_checksums"`
+	AckedAt             time.Time `json:"acked_at"`
+}
+
 type DirectArtifactDownloadRequest struct {
 	JobID           string               `json:"job_id"`
 	Artifact        model.DirectArtifact `json:"artifact"`
@@ -117,6 +126,9 @@ func (s *Service) GetDirectEditorMaterialization(ctx context.Context, projectID 
 	run := state.DesktopCloudRun
 	if !run.ResultDownloaded {
 		return EditorSessionMaterialization{Message: "直连结果素材尚未完成 checksum 校验。"}, nil
+	}
+	if run.AckedAt == nil || run.AckedAt.IsZero() {
+		return EditorSessionMaterialization{Message: "直连结果尚未完成服务器 ACK，暂不能进入编辑器。"}, nil
 	}
 	result := *run.ResultPackage
 	assets := make(map[string]orchestrator.DesktopDownloadedAssetState, len(run.DownloadedAssets))
@@ -420,8 +432,10 @@ func (s *Service) ReleaseDirectTransportLease(ctx context.Context, projectID str
 		}
 	}
 	if run.Status == "completed" {
-		if err := s.ackDirectResultRemote(ctx, projectID, lease, run); err != nil {
-			return DirectTransportReleaseResult{}, err
+		if run.AckedAt == nil || run.AckedAt.IsZero() {
+			if _, err := s.ackDirectResultRemote(ctx, projectID, lease, run); err != nil {
+				return DirectTransportReleaseResult{}, err
+			}
 		}
 	}
 	if err := s.releaseDirectLeaseRemote(ctx, lease); err != nil {
@@ -436,33 +450,95 @@ func (s *Service) ReleaseDirectTransportLease(ctx context.Context, projectID str
 	return DirectTransportReleaseResult{Released: true, Lease: directLeaseView(lease)}, nil
 }
 
-func (s *Service) ackDirectResultRemote(ctx context.Context, projectID string, lease model.DirectPortLease, run *orchestrator.DesktopCloudRunState) error {
-	if run == nil || run.CloudJobID == "" || run.ResultPackageID == "" || !run.ResultDownloaded {
-		return errors.New("direct Browser Agent result is not ready for ACK")
+// AcknowledgeDirectResult performs the protocol ACK as a distinct lifecycle
+// step after every declared artifact has been downloaded and checksum-verified.
+// Lease release and editor materialization both depend on this persisted ACK.
+func (s *Service) AcknowledgeDirectResult(ctx context.Context, projectID string) (DirectResultAckView, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil || state.DesktopCloudRun == nil || state.DesktopCloudRun.Transport != directTransportStateName {
+		return DirectResultAckView{}, errors.New("direct Browser Agent run state is unavailable")
+	}
+	run := state.DesktopCloudRun
+	if run.Status != "completed" || !run.ResultDownloaded {
+		return DirectResultAckView{}, errors.New("direct Browser Agent result must be completed and checksum-verified before ACK")
+	}
+	if run.AckedAt != nil && !run.AckedAt.IsZero() {
+		ids := verifiedDirectArtifactIDs(run)
+		return DirectResultAckView{
+			ProtocolVersion: model.DirectTransportProtocolVersion, JobID: run.CloudJobID,
+			ResultPackageID: run.ResultPackageID, ReceivedArtifactIDs: ids,
+			VerifiedChecksums: true, AckedAt: run.AckedAt.UTC(),
+		}, nil
+	}
+	lease, err := s.directLeaseForRequest(ctx, projectID)
+	if err != nil {
+		return DirectResultAckView{}, err
+	}
+	receipt, err := s.ackDirectResultRemote(ctx, projectID, lease, run)
+	if err != nil {
+		return DirectResultAckView{}, err
+	}
+	return DirectResultAckView{
+		ProtocolVersion: receipt.ProtocolVersion, JobID: receipt.JobID,
+		ResultPackageID: receipt.ResultPackageID, ReceivedArtifactIDs: receipt.ReceivedArtifactIDs,
+		VerifiedChecksums: receipt.VerifiedChecksums, AckedAt: receipt.AckedAt,
+	}, nil
+}
+
+func verifiedDirectArtifactIDs(run *orchestrator.DesktopCloudRunState) []string {
+	if run == nil {
+		return nil
 	}
 	ids := make([]string, 0, len(run.DownloadedAssets))
 	for _, asset := range run.DownloadedAssets {
-		if !asset.Verified || asset.ArtifactID == "" {
-			return errors.New("direct Browser Agent ACK requires every artifact checksum")
+		if asset.Verified && asset.ArtifactID != "" {
+			ids = append(ids, asset.ArtifactID)
 		}
-		ids = append(ids, asset.ArtifactID)
 	}
 	sort.Strings(ids)
+	return ids
+}
+
+func (s *Service) ackDirectResultRemote(ctx context.Context, projectID string, lease model.DirectPortLease, run *orchestrator.DesktopCloudRunState) (model.DirectResultAckReceipt, error) {
+	if run == nil || run.CloudJobID == "" || run.ResultPackageID == "" || !run.ResultDownloaded {
+		return model.DirectResultAckReceipt{}, errors.New("direct Browser Agent result is not ready for ACK")
+	}
+	ids := verifiedDirectArtifactIDs(run)
+	if len(ids) != len(run.DirectArtifacts) {
+		return model.DirectResultAckReceipt{}, errors.New("direct Browser Agent ACK requires every artifact checksum")
+	}
+	for _, expected := range run.DirectArtifacts {
+		index := sort.SearchStrings(ids, expected.ArtifactID)
+		if expected.ArtifactID == "" || index >= len(ids) || ids[index] != expected.ArtifactID {
+			return model.DirectResultAckReceipt{}, errors.New("direct Browser Agent ACK requires every artifact checksum")
+		}
+	}
 	now := time.Now().UTC()
 	request := model.DirectResultAckRequest{ProtocolVersion: model.DirectTransportProtocolVersion, InstallationID: lease.InstallationID, JobID: run.CloudJobID, ResultPackageID: run.ResultPackageID, ReceivedArtifactIDs: ids, VerifiedChecksums: true, AckedAt: now}
 	message, err := model.EncryptDirectTransportJSON(request, lease, "ack_"+shortID(run.CloudJobID+"|"+run.ResultPackageID), "result_ack", model.DirectTransportDirectionUpload, now)
 	if err != nil {
-		return err
+		return model.DirectResultAckReceipt{}, err
 	}
 	var receipt model.DirectResultAckReceipt
 	path := "/v1/direct/jobs/" + url.PathEscape(run.CloudJobID) + "/ack"
 	if err := s.directDataRequest(ctx, lease, http.MethodPost, path, message, "result_ack_receipt", &receipt); err != nil {
-		return err
+		return receipt, err
 	}
-	if receipt.JobID != run.CloudJobID || receipt.ResultPackageID != run.ResultPackageID || !receipt.VerifiedChecksums {
-		return errors.New("direct Browser Agent ACK receipt binding mismatch")
+	if receipt.JobID != run.CloudJobID || receipt.ResultPackageID != run.ResultPackageID || !receipt.VerifiedChecksums || !sameSortedStrings(receipt.ReceivedArtifactIDs, ids) {
+		return receipt, errors.New("direct Browser Agent ACK receipt binding mismatch")
 	}
-	return s.persistCloudAck(ctx, projectID, model.ResultPackageAckResponse{ResultPackageID: receipt.ResultPackageID, ReceivedAssetIDs: receipt.ReceivedArtifactIDs, VerifiedChecksums: true, AckedAt: receipt.AckedAt, AckedByInstallID: lease.InstallationID})
+	if err := s.persistCloudAck(ctx, projectID, model.ResultPackageAckResponse{ResultPackageID: receipt.ResultPackageID, ReceivedAssetIDs: receipt.ReceivedArtifactIDs, VerifiedChecksums: true, AckedAt: receipt.AckedAt, AckedByInstallID: lease.InstallationID}); err != nil {
+		return receipt, err
+	}
+	return receipt, nil
+}
+
+func sameSortedStrings(left, right []string) bool {
+	leftCopy := append([]string(nil), left...)
+	rightCopy := append([]string(nil), right...)
+	sort.Strings(leftCopy)
+	sort.Strings(rightCopy)
+	return strings.Join(leftCopy, "\x00") == strings.Join(rightCopy, "\x00")
 }
 
 func (s *Service) releaseDirectLeaseRemote(ctx context.Context, lease model.DirectPortLease) error {
@@ -733,6 +809,9 @@ func (s *Service) ReviewDirectResult(ctx context.Context, projectID string, requ
 	run := state.DesktopCloudRun
 	if run.Transport != directTransportStateName || run.CloudJobID != request.JobID || run.ResultPackageID != request.ResultPackageID || !run.ResultDownloaded {
 		return model.ResultReviewRecord{}, errors.New("direct result review binding or verified download requirement failed")
+	}
+	if run.AckedAt == nil || run.AckedAt.IsZero() {
+		return model.ResultReviewRecord{}, errors.New("direct result review requires a completed server ACK")
 	}
 	if existing := run.ResultReview; existing != nil && existing.IdempotencyKey == request.Review.IdempotencyKey {
 		if existing.Decision != string(request.Review.Decision) || existing.Summary != strings.TrimSpace(request.Review.Summary) {

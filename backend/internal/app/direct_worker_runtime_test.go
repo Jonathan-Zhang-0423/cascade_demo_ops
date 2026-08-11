@@ -2,9 +2,11 @@ package app
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -21,6 +23,52 @@ func TestLocalFileURIRoundTripsThroughDirectWorkerParser(t *testing.T) {
 	}
 	if filepath.Clean(parsed) != filepath.Clean(path) {
 		t.Fatalf("file URI round trip changed the local path: want=%q got=%q uri=%q", path, parsed, uri)
+	}
+}
+
+func TestFinalizeDirectReplayManifestPublishesAuthenticatedArtifactURIs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "replay-manifest.json")
+	manifest := model.ReplayManifest{
+		SchemaVersion: model.ReplayManifestSchemaVersion, ManifestID: "manifest_run_1", RunID: "run_1", PackageID: "pkg_1",
+		BundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash", Status: "success", FinalDecision: model.ValidationDecisionContinue,
+		ManifestURI: localFileURI(path), MP4URI: "file:///tmp/video.mp4", RawRecordingURI: "file:///tmp/raw.webm", BrowserTraceURI: "file:///tmp/trace.zip",
+		StageEventLogURI: "file:///tmp/events.jsonl", ExecutionBundleRuntime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1, CreatedAt: time.Now().UTC(),
+	}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replay := model.ArtifactRef{ID: "artifact_replay", Kind: "replay_manifest", URI: localFileURI(path), MimeType: "application/json", SHA256: "stale", SizeBytes: 1}
+	result := model.RecordingResultPackage{
+		GeneratedAssets: []model.ArtifactRef{
+			replay,
+			{ID: "artifact_video", Kind: "demo_video", URI: "file:///tmp/video.mp4"},
+			{ID: "artifact_raw", Kind: "raw_recording", URI: "file:///tmp/raw.webm"},
+			{ID: "artifact_trace", Kind: "browser_trace", URI: "file:///tmp/trace.zip"},
+		},
+		StageEventLogRef: &model.ArtifactRef{ID: "artifact_events", Kind: "browser_agent_stage_event_log", URI: "file:///tmp/events.jsonl"},
+		Delivery:         model.ResultDelivery{AssetRefs: []model.PackageArtifactDescriptor{{ID: replay.ID, Kind: replay.Kind, URI: replay.URI, SHA256: replay.SHA256, SizeBytes: replay.SizeBytes}}},
+	}
+	if err := finalizeDirectReplayManifest(&result, "job_1"); err != nil {
+		t.Fatal(err)
+	}
+	finalData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final model.ReplayManifest
+	if err := json.Unmarshal(finalData, &final); err != nil {
+		t.Fatal(err)
+	}
+	if final.ManifestURI != directWorkerArtifactURI("job_1", "artifact_replay") || final.MP4URI != directWorkerArtifactURI("job_1", "artifact_video") || final.RawRecordingURI != directWorkerArtifactURI("job_1", "artifact_raw") || final.BrowserTraceURI != directWorkerArtifactURI("job_1", "artifact_trace") || final.StageEventLogURI != directWorkerArtifactURI("job_1", "artifact_events") {
+		t.Fatalf("manifest retained local or mismatched artifact URIs: %+v", final)
+	}
+	if final.ProtocolRuntime != model.DirectTransportProtocolVersion || result.GeneratedAssets[0].SHA256 != model.SHA256Hex(finalData) || result.GeneratedAssets[0].SizeBytes != int64(len(finalData)) || result.Delivery.AssetRefs[0].SHA256 != result.GeneratedAssets[0].SHA256 {
+		t.Fatalf("manifest checksum, size, protocol, or delivery descriptor was not finalized: manifest=%+v result=%+v", final, result)
 	}
 }
 

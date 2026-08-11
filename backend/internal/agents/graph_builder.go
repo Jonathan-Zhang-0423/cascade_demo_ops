@@ -206,7 +206,7 @@ func (a *GraphBuilderAgent) GenerateGraph(ctx context.Context, project *model.Pr
 				Type:      startActionType,
 				Target:    startTarget,
 				TimeoutMS: 30000,
-				WaitUntil: "networkidle",
+				WaitUntil: "domcontentloaded",
 			},
 			StateAfter: []model.StateAssertion{
 				{
@@ -644,48 +644,52 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 		}
 	}
 	target.URL = firstNonEmpty(best.URL, urlForBusinessStage(stage, entryPoint))
-	// A verified test id is an authoritative identity for the control.  Do not
-	// carry a stale/conflicting selector from another component (for example a
-	// project-list container paired with button-new-project evidence).  Keeping
-	// the semantic target and selector in lockstep prevents the runtime from
-	// having to guess which control the App actually approved.
-	target.Selector = canonicalBusinessSelector(best.TestID, best.Selector)
+	// A selector is executable only when the exact value is represented by a
+	// complete App-approved provenance candidate. TestID/role/label remain
+	// semantic discovery hints; they are not silently promoted to a guessed CSS
+	// locator.
+	target.Selector = selectorForBusinessTarget(best)
 	target.Label = firstNonEmpty(best.Label, stage.Action.Label)
 	target.Text = best.Text
 	target.Role = best.Role
-	target.TestID = best.TestID
+	if target.Selector != "" {
+		target.TestID = best.TestID
+	}
 	target.ComponentRef = best.ComponentRef
 	target.Source = best.VerificationSource
 	target.EvidenceRefs = best.EvidenceRefs
-	target.SelectorAlternatives = append(target.SelectorAlternatives, best.Alternatives...)
-	for _, candidate := range stage.Targets {
-		if candidate.Selector != "" && candidate.Selector != target.Selector {
-			target.SelectorAlternatives = append(target.SelectorAlternatives, model.SelectorCandidate{
-				Kind:           "css",
-				Value:          candidate.Selector,
-				Confidence:     candidate.Confidence,
-				StabilityScore: float64(candidate.SelectorScore) / 100,
-				Source:         firstNonEmpty(candidate.VerificationSource, "business_stage_plan"),
-				EvidenceRefs:   candidate.EvidenceRefs,
-			})
-		}
-	}
+	target.SelectorAlternatives = append(target.SelectorAlternatives, formalBusinessSelectorAlternatives(best.Alternatives)...)
 	target.SelectorAlternatives = uniqueSelectorCandidates(target.SelectorAlternatives)
 	return target
 }
 
-func canonicalBusinessSelector(testID, selector string) string {
-	testID = strings.TrimSpace(testID)
-	selector = strings.TrimSpace(selector)
-	if testID == "" {
-		return selector
+func selectorForBusinessTarget(candidate model.BusinessTargetCandidate) string {
+	selector := strings.TrimSpace(candidate.Selector)
+	if selector == "" {
+		return ""
 	}
-	// A selector that explicitly references the same test id is already
-	// consistent; otherwise prefer the stable data-testid locator.
-	if strings.Contains(strings.ToLower(selector), "data-testid") && strings.Contains(selector, testID) {
-		return selector
+	for _, alternative := range candidate.Alternatives {
+		if !model.SelectorCandidateHasFormalProvenance(alternative) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(alternative.Value), selector) {
+			return selector
+		}
+		if strings.EqualFold(strings.TrimSpace(alternative.Kind), "testid") && strings.Contains(strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(selector, "\"", "'"), " ", "")), "data-testid='"+strings.ToLower(strings.TrimSpace(alternative.Value))+"'") {
+			return selector
+		}
 	}
-	return `[data-testid="` + strings.ReplaceAll(testID, `"`, ``) + `"]`
+	return ""
+}
+
+func formalBusinessSelectorAlternatives(values []model.SelectorCandidate) []model.SelectorCandidate {
+	result := make([]model.SelectorCandidate, 0, len(values))
+	for _, value := range values {
+		if model.SelectorCandidateHasFormalProvenance(value) {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func businessStageValidation(stage model.BusinessStage, action model.GraphActionType, target model.ActionTarget, required bool) model.ValidationSpec {
@@ -765,7 +769,12 @@ func businessStageResultTarget(stage model.BusinessStage) model.ActionTarget {
 	for _, candidate := range stage.Targets {
 		text := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef, candidate.Label, candidate.Text}, " "))
 		if strings.Contains(text, "dialog") || strings.Contains(text, "modal") || strings.Contains(text, "project-idea") || strings.Contains(text, "项目表单") || strings.Contains(text, "项目名称") {
-			return model.ActionTarget{Selector: canonicalBusinessSelector(candidate.TestID, candidate.Selector), Role: candidate.Role, Text: candidate.Text, Label: candidate.Label, TestID: candidate.TestID, ComponentRef: candidate.ComponentRef, EvidenceRefs: candidate.EvidenceRefs}
+			selector := selectorForBusinessTarget(candidate)
+			testID := ""
+			if selector != "" {
+				testID = candidate.TestID
+			}
+			return model.ActionTarget{Selector: selector, Role: candidate.Role, Text: candidate.Text, Label: candidate.Label, TestID: testID, ComponentRef: candidate.ComponentRef, SelectorAlternatives: formalBusinessSelectorAlternatives(candidate.Alternatives), EvidenceRefs: candidate.EvidenceRefs}
 		}
 	}
 	return model.ActionTarget{}
@@ -794,7 +803,7 @@ func businessStageWaitUntil(stage model.BusinessStage) string {
 			return condition
 		}
 	}
-	return "networkidle"
+	return "domcontentloaded"
 }
 
 func urlForBusinessStage(stage model.BusinessStage, entryPoint string) string {
@@ -1046,7 +1055,7 @@ func verifiedStartNode(project *model.ProjectContext, entryPoint string, feature
 		Title:           "打开产品入口",
 		Goal:            "进入页面并给后续已验证动作建立稳定上下文。",
 		FeatureRefs:     []string{featureID},
-		ActionSpec:      &model.GraphAction{Type: actionType, Target: target, TimeoutMS: 30000, WaitUntil: "networkidle"},
+		ActionSpec:      &model.GraphAction{Type: actionType, Target: target, TimeoutMS: 30000, WaitUntil: "domcontentloaded"},
 		StateAfter: []model.StateAssertion{{
 			ID:        "state_after_start_body_visible",
 			Kind:      "dom_visible",
@@ -1101,14 +1110,23 @@ func demoCredentialVariables(project *model.ProjectContext) []model.GraphVariabl
 
 func graphNodeFromVerifiedAction(project *model.ProjectContext, action model.VerifiedInteractionAction, order int, featureID string) *model.GraphNode {
 	selector := strings.TrimSpace(action.Selector)
+	adaptive := action.VerificationStatus == "runtime_adaptive" && action.NonDestructive
 	actionType := graphActionTypeFromKind(action.Kind, selector)
-	if selector == "" && actionType != model.GraphActionWait && actionType != model.GraphActionInspect {
+	if adaptive {
+		actionType = declaredGraphActionType(action.Kind)
+	}
+	if selector != "" && businessActionNeedsExecutableSelector(actionType) && !selectorUsableForBusinessAction(selector) {
+		if !adaptive {
+			return nil
+		}
+		// Runtime-adaptive actions can be resolved from the approved semantic
+		// target contract. Dropping a weak locator is safer than freezing it as
+		// a misleading primary selector.
+		selector = ""
+	}
+	if selector == "" && actionType != model.GraphActionWait && actionType != model.GraphActionInspect && !adaptive {
 		return nil
 	}
-	if businessActionNeedsExecutableSelector(actionType) && !selectorUsableForBusinessAction(selector) {
-		return nil
-	}
-	adaptive := action.VerificationStatus == "runtime_adaptive"
 	sidecarUnavailable := action.VerificationStatus == "sidecar_unavailable"
 	required := (action.IsBusiness || looksLikeLoginAction(action.Label, selector)) && !adaptive && !sidecarUnavailable
 	severity := "warning"
@@ -1196,8 +1214,30 @@ func graphNodeFromVerifiedAction(project *model.ProjectContext, action model.Ver
 			"verification_source":     action.VerificationSource,
 			"selector_score":          action.SelectorScore,
 			"runtime_adaptive":        adaptive,
+			"non_destructive":         action.NonDestructive,
 			"sidecar_unavailable":     sidecarUnavailable,
 		},
+	}
+}
+
+func declaredGraphActionType(kind string) model.GraphActionType {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "click", "button", "cta":
+		return model.GraphActionClick
+	case "fill", "input", "type":
+		return model.GraphActionFill
+	case "select":
+		return model.GraphActionSelect
+	case "upload":
+		return model.GraphActionUpload
+	case "wait":
+		return model.GraphActionWait
+	case "navigate":
+		return model.GraphActionNavigate
+	case "api", "api_call":
+		return model.GraphActionAPICall
+	default:
+		return model.GraphActionInspect
 	}
 }
 
@@ -1511,7 +1551,7 @@ func stabilizationGraphNode(project *model.ProjectContext, intelligence *model.P
 			Type:      model.GraphActionWait,
 			Target:    model.ActionTarget{Selector: selector, EvidenceRefs: evidence},
 			TimeoutMS: 12000,
-			WaitUntil: "networkidle",
+			WaitUntil: "domcontentloaded",
 		},
 		Validations: []model.ValidationSpec{{
 			ID:        "validate_stabilize_entry",

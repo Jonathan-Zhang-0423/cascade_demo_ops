@@ -1312,6 +1312,10 @@ func (g *Gateway) handleWorkerResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "result_artifact_completeness_failed", err.Error())
 		return
 	}
+	if err := validateFormalResultArtifactContents(result, sourcePackage, record.Status.JobID, record.Artifacts); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "result_artifact_content_invalid", err.Error())
+		return
+	}
 	if err := validateDirectResultSanitization(result); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "result_contains_local_runtime_data", err.Error())
 		return

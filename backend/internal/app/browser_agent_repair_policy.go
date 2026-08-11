@@ -116,7 +116,7 @@ func applyBrowserAgentRepair(stage BrowserAgentRuntimeStage, proposal model.Runt
 
 func approvedSelectorCandidate(stage BrowserAgentRuntimeStage, encoded string) (model.SelectorCandidate, bool) {
 	for _, candidate := range stage.EvidenceBoundSelectorAlternatives {
-		if selectorCandidateEncoding(candidate) == encoded {
+		if model.SelectorCandidateHasFormalProvenance(candidate) && selectorCandidateEncoding(candidate) == encoded {
 			return candidate, true
 		}
 	}
@@ -125,7 +125,7 @@ func approvedSelectorCandidate(stage BrowserAgentRuntimeStage, encoded string) (
 			continue
 		}
 		for _, candidate := range component.SelectorAlternatives {
-			if selectorCandidateEncoding(candidate) == encoded {
+			if model.SelectorCandidateHasFormalProvenance(candidate) && selectorCandidateEncoding(candidate) == encoded {
 				return candidate, true
 			}
 		}

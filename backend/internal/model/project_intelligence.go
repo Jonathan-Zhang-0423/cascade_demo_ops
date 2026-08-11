@@ -248,6 +248,7 @@ type VerifiedInteractionAction struct {
 	WaitConditions     []string            `json:"wait_conditions,omitempty"`
 	DurationHintMS     int                 `json:"duration_hint_ms,omitempty"`
 	IsBusiness         bool                `json:"is_business"`
+	NonDestructive     bool                `json:"non_destructive,omitempty"`
 	VerificationStatus string              `json:"verification_status"`
 	VerificationSource string              `json:"verification_source,omitempty"`
 	VerifiedAt         time.Time           `json:"verified_at,omitempty"`

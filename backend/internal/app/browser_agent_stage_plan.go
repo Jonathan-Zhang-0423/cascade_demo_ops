@@ -635,6 +635,9 @@ func evidenceBoundSelectorCandidates(components []model.BrowserAgentComponentTar
 	result := []model.SelectorCandidate{}
 	seen := map[string]struct{}{}
 	appendCandidate := func(candidate model.SelectorCandidate) {
+		if !model.SelectorCandidateHasFormalProvenance(candidate) {
+			return
+		}
 		encoded := selectorCandidateEncoding(candidate)
 		if strings.TrimSpace(candidate.Value) == "" || encoded == ":" {
 			return
@@ -649,12 +652,6 @@ func evidenceBoundSelectorCandidates(components []model.BrowserAgentComponentTar
 		sharedEvidence := sharedEvidenceRefs(component.EvidenceRefs, targetEvidence)
 		if len(sharedEvidence) == 0 {
 			continue
-		}
-		if strings.TrimSpace(component.Selector) != "" {
-			appendCandidate(model.SelectorCandidate{
-				Kind: "css", Value: component.Selector, Source: "app_stage_evidence_binding",
-				Confidence: component.Confidence, EvidenceRefs: sharedEvidence,
-			})
 		}
 		for _, candidate := range component.SelectorAlternatives {
 			candidateEvidence := sharedEvidenceRefs(candidate.EvidenceRefs, targetEvidence)

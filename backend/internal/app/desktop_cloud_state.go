@@ -155,7 +155,7 @@ func (s *Service) persistCloudAck(ctx context.Context, projectID string, ack mod
 			run.AckedAt = &ackedAt
 		}
 		if ack.VerifiedChecksums {
-			run.Message = "App 已下载全部成品、校验 SHA-256 并确认接收。"
+			run.Message = "App 已下载全部成品、校验 SHA-256 并完成服务器 ACK。"
 		}
 	})
 }

@@ -45,7 +45,10 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 	// Hashes — derive from bundle reproducibility when available.
 	if pkg.ExecutableScriptBundle != nil {
 		m.BundleHashSHA256 = pkg.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
-		m.PolicyHashSHA256 = pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
+		m.PolicyHashSHA256 = firstNonEmptyString(
+			pkg.ExecutableScriptBundle.Reproducibility.BrowserAgentContractHashSHA256,
+			pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256,
+		)
 	}
 	// Fallback: take hashes from first ValidationReport if not on bundle.
 	if m.BundleHashSHA256 == "" || m.PolicyHashSHA256 == "" {
@@ -269,6 +272,7 @@ func AttachReplayManifestArtifact(result *model.RecordingResultPackage, manifest
 	localOnly := result.Delivery.RecipientKind == "local_test_only"
 	metadata := map[string]any{
 		"asset_role":      "replay_manifest",
+		"role":            "replay_manifest",
 		"include_in_demo": false,
 	}
 	encrypted := !localOnly

@@ -15,9 +15,9 @@
 11. 动态路由使用 `/project/:id` 或 `{project_id}` 模板，Worker 仅在运行时匹配，不把真实 ID 写回批准包。
 12. 长任务使用结构化 required validations、wait conditions 和最大时长；自然语言“等待完成”不能单独构成完成条件。
 13. `DirectJobStatus` 返回协议、job/package、status/stage/progress，并增加 `waiting_reason`、`blocking_error_code`、`next_action`、`requires_reapproval`；`reunderstanding_required` 另带可选 `reunderstanding_issues[]`。这些稳定字段必须持久化、重载和前端映射；issue 只含脱敏结构和 opaque Evidence ID，UI 不展示 token、内部端口、Worker 堆栈、页面内容或原始 envelope。
-14. 正式 completed 结果强制包含真实 StepResults、ValidationReports、请求中的 raw recording、Replay Manifest 和 StageEventLog；请求最终视频时同时强制 MP4、AssetTimelineCatalog 与 DemoEditPlan，请求 trace/截图时对应产物必填。关键产物必须带 ID、URI、SHA-256 与 size，缺失由 Gateway/App 最终交付门禁阻断。OutcomeVerifier 的渲染前检查可保留 warning，但不能把该 warning 当成正式交付成功。
+14. 正式 completed 结果强制包含真实 StepResults、ValidationReports、请求中的 raw recording、Replay Manifest 和 StageEventLog；请求最终视频时同时强制 MP4、AssetTimelineCatalog 与 DemoEditPlan，请求 trace/截图时对应产物必填。关键产物必须带 ID、URI、SHA-256 与 size，且 Gateway 必须解析 Replay Manifest/StageEventLog 内容并复核 schema、Direct URI、run/package/hash、stage、事件序列和真实 outcome evidence；不能只校验文件摘要。缺失或内容错绑由 Gateway/App 最终交付门禁阻断。OutcomeVerifier 的渲染前检查可保留 warning，但不能把该 warning 当成正式交付成功。
 15. required `outcome_observed` 缺 Evidence refs 为 blocking；附加 observation 缺 Evidence 为 warning。
-16. App 下载全部 chunk、验证 SHA-256/size 并写 `.verified.sha256` 后，发送加密 ACK；ACK 完成后才允许显式释放 lease 和进入编辑器。失败结果不伪造 MP4。
+16. App 下载全部 chunk、验证 SHA-256/size 并写 `.verified.sha256` 后，通过独立 App Service/HTTP/Wails ACK 接口发送加密 ACK并持久化 `acked_at`；ACK 完成后才允许人工审核、显式释放 lease 和进入编辑器。UI 不得在仅下载完成时显示“服务器 ACK 已发送”。失败结果不伪造 MP4。
 17. package 上传按 installation+package+digest 幂等；Gateway 重启后普通 queued/running job 可重领，credential envelope 必须重传。artifact chunk 可按索引重取；canceled/expired 不恢复。
 18. health 明确返回支持的 Direct 协议、包 schema、runtime、Worker 协议、OutcomeVerifier rules 和 capability flags；任一不兼容时 fail-closed，不回退 Legacy Exchange。Worker claim 也固定携带并校验 `cascade.browser_agent_worker.v1`。
 19. `reunderstanding_required` 终止原 job。Gateway 只接受 `ValidationReports[].Decision` 作为权威来源并返回结构化问题；App 清空旧 preview digest 和批准缓存、递增 package generation，重新理解后生成新 package ID/digest，重新人工批准并创建新 job。重复状态轮询不得重复递增 generation。

@@ -111,7 +111,7 @@ Gateway 只能从 `ValidationReports[].Decision` 判断该状态，不得从自�
 
 ### `GET /v1/direct/jobs/{job_id}/result`
 
-只在结果就绪后返回加密 `recording_result`。Server 必须校验结果与源包、trace、stage、业务验证和已上传 artifact 的 digest/size 一致。正式 `browser-agent-outline-v1` completed 结果必须包含真实 `StepResults`、`ValidationReports`、请求中的 `raw_recording`、Replay Manifest 和 `stage_event_log_ref`；请求最终视频时还必须包含 MP4、`asset_timeline_catalog` 与 `demo_edit_plan`，请求 trace/截图时对应产物同样必填。所有关键产物必须带非空 ID、URI、SHA-256 和 `size_bytes`，任一缺失返回 `result_artifact_completeness_failed`。正式 failed 结果必须有脱敏 failure diagnostic，并尽可能包含截图/trace；只有明确的基础设施启动失败允许没有页面素材。
+只在结果就绪后返回加密 `recording_result`。Server 必须校验结果与源包、trace、stage、业务验证和已上传 artifact 的 digest/size 一致。正式 `browser-agent-outline-v1` completed 结果必须包含真实 `StepResults`、`ValidationReports`、请求中的 `raw_recording`、Replay Manifest 和 `stage_event_log_ref`；请求最终视频时还必须包含 MP4、`asset_timeline_catalog` 与 `demo_edit_plan`，请求 trace/截图时对应产物同样必填。所有关键产物必须带非空 ID、URI、SHA-256 和 `size_bytes`，任一缺失返回 `result_artifact_completeness_failed`。Gateway 还必须解析 Replay Manifest JSON 与 StageEventLog JSONL，校验 schema、Direct URI、run/package/bundle/policy、stage/node、事件序列、真实 outcome evidence、StepResults 和 ValidationReports 索引；仅有匹配的文件摘要不能证明结构化证据属于本次运行，内容不一致返回 `result_artifact_content_invalid`。正式 failed 结果必须有脱敏 failure diagnostic，并尽可能包含截图/trace；只有明确的基础设施启动失败允许没有页面素材。
 
 ### `GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}/chunks/{chunk_index}`
 
@@ -119,7 +119,7 @@ Gateway 只能从 `ValidationReports[].Decision` 判断该状态，不得从自�
 
 ### `POST /v1/direct/jobs/{job_id}/ack`
 
-App 仅在全部 artifact 已下载并通过 SHA-256/字节数校验后发送加密 `result_ack`。请求绑定 installation、job、result package、全部 artifact ID、`verified_checksums=true` 和 ACK 时间。Gateway 返回 `result_ack_receipt`；正式 completed 结果未 ACK 时禁止释放 lease。App 随后显式调用 lease release，编辑器仍使用本地 verified 素材，不依赖 Gateway 路径。
+App 仅在全部 artifact 已下载并通过 SHA-256/字节数校验后，通过独立 ACK 服务发送加密 `result_ack`。请求绑定 installation、job、result package、全部 artifact ID、`verified_checksums=true` 和 ACK 时间。Gateway 返回 `result_ack_receipt`，App 持久化 `acked_at`；正式 completed 结果未 ACK 时禁止人工审核、编辑器交接和释放 lease。lease release 可为旧客户端补发 ACK，但不能作为 UI 声称“已确认接收”的隐式替代。编辑器只使用本地 verified 素材，不依赖 Gateway 路径。
 
 ## Worker 内部接口
 
@@ -143,6 +143,10 @@ Worker API 只监听 `127.0.0.1:18444`，使用独立 Worker token，公网不�
 }
 ```
 
-`evidence_id` 必须存在于候选自己的 `evidence_refs`；缺少任一字段返回 `selector_provenance_incomplete`。`data-testid` 只能进入 `test_id/selector`，不得拼入 `observed_accessible_name` 或业务 `allowed_names`。只有语义意图、没有页面/源码证据时可保留 target contract 和运行时自适应主目标，但不得生成伪造的 selector alternatives。
+`evidence_id` 必须存在于候选自己的 `evidence_refs`；缺少任一字段返回 `selector_provenance_incomplete`。`data-testid` 只能进入 `test_id/selector`，不得拼入 `observed_accessible_name` 或业务 `allowed_names`。只有语义意图、没有页面/源码证据时可保留 target contract 和运行时自适应主目标，但不得生成伪造的主 selector 或 selector alternatives。
+
+PlanJSON、StageApprovalPlan 和 ScriptOutline 的非空主 selector 必须一致；runtime-adaptive 主 selector 还必须与一个完整 provenance candidate 精确匹配，否则分别返回 `selector_binding_mismatch` 或 `selector_primary_provenance_missing`。Server/Worker 不得从 component 裸 selector、test ID 或共享 EvidenceRef 合成新候选。
 
 selector 只能来自 App 批准的同一 Evidence ID/业务目标候选；Server 可在运行时进行唯一性、可见性、角色/名称兼容检查和有限 repair。登录入口与登录表单必须分开：普通营销页 waitlist/newsletter 邮箱框不能作为登录表单；credential broker 必须先确认密码框或认证路由/标题/认证方式语义，再允许填入账号。`action_target` 与 `success_target` 分开校验，click/select/submit 不得以动作控件仍可见作为成功证据；该缺陷按 blocker 处理。找不到或语义冲突时必须停止并返回稳定脱敏错误，不能猜测 selector。
+
+Browser Agent Runtime 默认只等待 `domcontentloaded` 和短稳定窗口；仅当批准的 `wait_until=networkidle` 或明确 `wait_for_network_idle` 条件存在时才等待网络空闲。WebSocket、SSE、轮询和持续请求页面不得为每个动作无条件增加 `networkidle` 等待。

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -68,6 +69,9 @@ func (s *Service) RunDirectBrowserAgentJobWithCredentials(ctx context.Context, p
 		if err != nil {
 			return model.RecordingResultPackage{}, nil, fmt.Errorf("direct Browser Agent execution failed and its failure result could not be built: %w", err)
 		}
+	}
+	if err := finalizeDirectReplayManifest(&result, jobID); err != nil {
+		return model.RecordingResultPackage{}, nil, err
 	}
 	files, err := directWorkerArtifactFiles(result, root)
 	if err != nil {
@@ -170,7 +174,7 @@ func prepareDirectWorkerResult(result *model.RecordingResultPackage, jobID strin
 	byID := make(map[string]model.ArtifactRef, len(files))
 	for _, file := range files {
 		artifact := file.Artifact
-		artifact.URI = "direct://jobs/" + url.PathEscape(jobID) + "/artifacts/" + url.PathEscape(artifact.ID)
+		artifact.URI = directWorkerArtifactURI(jobID, artifact.ID)
 		if artifact.Metadata != nil {
 			metadata := make(map[string]any, len(artifact.Metadata))
 			for key, value := range artifact.Metadata {
@@ -252,4 +256,84 @@ func prepareDirectWorkerResult(result *model.RecordingResultPackage, jobID strin
 	}
 	result.Delivery.EncryptionAlg = model.DirectTransportCryptoSuite
 	result.Delivery.RecipientKeyID = "direct-lease"
+}
+
+func directWorkerArtifactURI(jobID, artifactID string) string {
+	return "direct://jobs/" + url.PathEscape(jobID) + "/artifacts/" + url.PathEscape(artifactID)
+}
+
+// finalizeDirectReplayManifest replaces Server-local file references inside
+// the manifest with the authenticated Direct artifact identities that the App
+// will receive. It runs before artifact discovery so the uploaded checksum and
+// size describe the final manifest bytes, not a local-path draft.
+func finalizeDirectReplayManifest(result *model.RecordingResultPackage, jobID string) error {
+	if result == nil {
+		return errors.New("direct result is required")
+	}
+	manifestIndex := -1
+	for index := range result.GeneratedAssets {
+		if result.GeneratedAssets[index].Kind == "replay_manifest" {
+			manifestIndex = index
+			break
+		}
+	}
+	if manifestIndex < 0 {
+		return nil
+	}
+	manifestArtifact := result.GeneratedAssets[manifestIndex]
+	path, err := directWorkerLocalPath(manifestArtifact.URI)
+	if err != nil {
+		return fmt.Errorf("finalize replay manifest path: %w", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("finalize replay manifest read: %w", err)
+	}
+	var manifest model.ReplayManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("finalize replay manifest decode: %w", err)
+	}
+	manifest.ManifestURI = directWorkerArtifactURI(jobID, manifestArtifact.ID)
+	manifest.ProtocolRuntime = model.DirectTransportProtocolVersion
+	findURI := func(kinds ...string) string {
+		values := append([]model.ArtifactRef{}, result.GeneratedAssets...)
+		if result.ExecutionTrace != nil {
+			values = append(values, result.ExecutionTrace.Artifacts...)
+		}
+		for _, artifact := range values {
+			for _, kind := range kinds {
+				if strings.EqualFold(artifact.Kind, kind) && artifact.ID != "" {
+					return directWorkerArtifactURI(jobID, artifact.ID)
+				}
+			}
+		}
+		return ""
+	}
+	manifest.MP4URI = findURI("demo_video", "mp4")
+	manifest.RawRecordingURI = findURI("raw_recording")
+	manifest.BrowserTraceURI = findURI("browser_trace", "execution_trace", "playwright_trace", "trace")
+	if result.StageEventLogRef != nil && result.StageEventLogRef.ID != "" {
+		manifest.StageEventLogURI = directWorkerArtifactURI(jobID, result.StageEventLogRef.ID)
+	}
+	if err := manifest.Validate(); err != nil {
+		return fmt.Errorf("finalize replay manifest validate: %w", err)
+	}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("finalize replay manifest encode: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		return fmt.Errorf("finalize replay manifest write: %w", err)
+	}
+	manifestArtifact.SHA256 = model.SHA256Hex(encoded)
+	manifestArtifact.SizeBytes = int64(len(encoded))
+	result.GeneratedAssets[manifestIndex] = manifestArtifact
+	for index := range result.Delivery.AssetRefs {
+		if result.Delivery.AssetRefs[index].ID == manifestArtifact.ID {
+			result.Delivery.AssetRefs[index].SHA256 = manifestArtifact.SHA256
+			result.Delivery.AssetRefs[index].SizeBytes = manifestArtifact.SizeBytes
+		}
+	}
+	return nil
 }

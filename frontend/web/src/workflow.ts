@@ -109,11 +109,13 @@ export function projectNextAction(workspace: ProjectWorkspaceView): ProjectNextA
   if (workstation === "repair") {
     return { kind: "repair", workstation, title: "修复失败步骤", description: "根据脱敏诊断重新生成脚本；修复后的执行包仍需再次人工审批。" };
   }
-  if (workspace.cloudRun.resultReview?.decision === "approved") {
-    return { kind: "complete", workstation: "assets", title: "成品已通过", description: "最终审核已记录，可以在 Editor 中继续处理或导出成品。" };
+  if (workspace.cloudRun.resultReview?.decision === "approved" && workspace.cloudRun.resultAcknowledged) {
+    return { kind: "complete", workstation: "assets", title: "成品已通过", description: "结果已校验、ACK 并完成最终审核，可以在 Editor 中继续处理或导出成品。" };
   }
-  if (!workspace.cloudRun.resultDownloaded) {
-    return { kind: "review_result", workstation: "assets", title: "下载并校验成品", description: "完整下载结果包并校验 SHA-256 后，才开放人工审核。" };
+  if (!workspace.cloudRun.resultAcknowledged) {
+    return workspace.cloudRun.resultDownloaded
+      ? { kind: "review_result", workstation: "assets", title: "确认接收成品", description: "本地 checksum 已通过；完成服务器 ACK 后才开放人工审核和编辑器交接。" }
+      : { kind: "review_result", workstation: "assets", title: "下载并校验成品", description: "完整下载结果包、校验 SHA-256 并完成服务器 ACK 后，才开放人工审核。" };
   }
   return { kind: "review_result", workstation: "assets", title: "人工审核成品", description: "播放成品并选择通过、重新剪辑或缺少素材需要重新录制。" };
 }

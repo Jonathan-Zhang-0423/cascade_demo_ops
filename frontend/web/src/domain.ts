@@ -245,6 +245,8 @@ export type CloudRunStatusView = {
   repairRequest?: ScriptRepairRequest;
 	resultReview?: ResultReviewState;
 	resultDownloaded?: boolean;
+	resultAcknowledged?: boolean;
+	ackedAt?: string;
 	editorSessionID?: string;
   editorMaterializationMessage?: string;
 };

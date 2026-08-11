@@ -74,9 +74,6 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 	}
 
 	projectName := intentProjectName(intentText)
-	if projectName == "" && containsAnyNormalized(intentText, "俄罗斯方块", "tetris") {
-		projectName = "俄罗斯方块"
-	}
 	wantsNewProject := containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != ""
 	if wantsNewProject {
 		builder.addStage(stageSpec{
@@ -108,8 +105,8 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 				routeState:    model.BusinessRouteStateCreationFlow,
 				entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
 				expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
-				durationMS:    durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", projectName, "俄罗斯方块", "tetris"),
-				keywords:      []string{"项目名称", "项目名", "project name", "name", projectName, "tetris", "俄罗斯方块"},
+				durationMS:    durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", projectName),
+				keywords:      []string{"项目名称", "项目名", "project name", "name", projectName},
 				capture:       []string{"项目名称输入框", "已填写的项目名称"},
 			})
 		}
@@ -818,13 +815,13 @@ func businessStageUncertainties(spec stageSpec, requirements []model.EvidenceReq
 func businessStageWaitConditions(spec stageSpec) []string {
 	switch spec.kind {
 	case model.BusinessStageKindSessionSetup:
-		return []string{"domcontentloaded", "networkidle", "authenticated_workspace_visible"}
+		return []string{"domcontentloaded", "authenticated_workspace_visible"}
 	case model.BusinessStageKindObserveProgress:
-		return []string{"domcontentloaded", "networkidle", "progress_or_log_changes_visible"}
+		return []string{"domcontentloaded", "progress_or_log_changes_visible"}
 	case model.BusinessStageKindFinalObserve:
 		return []string{"domcontentloaded", "final_state_visible"}
 	default:
-		return []string{"domcontentloaded", "networkidle", "target_state_visible"}
+		return []string{"domcontentloaded", "target_state_visible"}
 	}
 }
 
@@ -1052,7 +1049,7 @@ func intentIsObservationOnly(intentText string) bool {
 		return false
 	}
 	return containsAnyNormalized(intentText, "只观察", "仅观察", "观察首页", "不执行真实业务动作", "不要执行", "inspect only", "observation only", "homepage only") &&
-		!containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "构建模式", "开始构建", "启动构建", "实际构建", "俄罗斯方块", "new project", "create project", "build mode", "start build")
+		!containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "项目名称", "项目名", "构建模式", "开始构建", "启动构建", "实际构建", "new project", "create project", "project name", "build mode", "start build")
 }
 
 func boolConfidence(ok bool) float64 {

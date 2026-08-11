@@ -1122,16 +1122,16 @@ func routeIsAdminIntent(value string) bool {
 }
 
 func routeIsProjectCreationStage(value string) bool {
-	return containsAnyNormalized(value, "新建项目", "创建项目", "项目名称", "俄罗斯方块", "project name", "new project", "create project")
+	return containsAnyNormalized(value, "新建项目", "创建项目", "新增项目", "项目名称", "项目名", "project name", "new project", "create project")
 }
 
 func routeIsNewProjectEntryStage(value string) bool {
 	return containsAnyNormalized(value, "新建项目", "创建项目", "new project", "create project") &&
-		!containsAnyNormalized(value, "项目名称", "填写", "输入", "俄罗斯方块", "project name")
+		!containsAnyNormalized(value, "项目名称", "项目名", "填写", "输入", "project name")
 }
 
 func routeCreationStageShouldRemainInWorkspace(value string) bool {
-	return routeIsNewProjectEntryStage(value) || containsAnyNormalized(value, "项目名称", "填写", "输入", "俄罗斯方块", "project name")
+	return routeIsNewProjectEntryStage(value) || containsAnyNormalized(value, "项目名称", "项目名", "填写", "输入", "project name")
 }
 
 func routeIsBuildModeSelectionStage(value string) bool {
@@ -1953,7 +1953,7 @@ func preferredInvestigationQuestionIDsForStage(kind model.BusinessStageKind, ste
 	case model.BusinessStageKindSessionSetup:
 		return []string{"question_session_setup"}
 	case model.BusinessStageKindBusinessInput, model.BusinessStageKindBusinessAction:
-		if containsAnyNormalized(investigationStageMatchText(step, node, nil), "新建项目", "创建项目", "项目名称", "俄罗斯方块", "new project", "create project", "project") {
+		if containsAnyNormalized(investigationStageMatchText(step, node, nil), "新建项目", "创建项目", "新增项目", "项目名称", "项目名", "new project", "create project", "project") {
 			return []string{"question_project_creation"}
 		}
 	case model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit, model.BusinessStageKindObserveProgress, model.BusinessStageKindFinalObserve:
@@ -2147,11 +2147,9 @@ func auditScriptIntentCoverage(project *model.ProjectContext, doc *model.Executi
 		[]string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project name"},
 		"需求要求新建项目，但执行脚本没有新建项目动作",
 	)
-	requireText(
-		[]string{"俄罗斯方块", "tetris"},
-		[]string{"俄罗斯方块", "tetris"},
-		"需求要求项目内容为俄罗斯方块，但执行脚本没有输入或选择俄罗斯方块",
-	)
+	if projectName := intentProjectName(intentText); projectName != "" && !containsAnyNormalized(combined, projectName) {
+		findings = append(findings, fmt.Sprintf("需求要求项目名称为%s，但执行脚本没有输入或选择该项目名称", projectName))
+	}
 	requireText(
 		[]string{"构建模式", "build mode", "builder mode", "构建"},
 		[]string{"构建模式", "build mode", "builder mode", "构建"},
@@ -2164,7 +2162,7 @@ func auditScriptIntentCoverage(project *model.ProjectContext, doc *model.Executi
 	if requiredWait := requiredLongWaitMS(intentText); requiredWait > 0 && !scriptHasWaitAtLeast(doc, sourceText, requiredWait) {
 		findings = append(findings, fmt.Sprintf("需求要求等待至少 %d 秒，但执行脚本没有对应的长等待 stage", requiredWait/1000))
 	}
-	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "俄罗斯方块", "构建模式") &&
+	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "项目名称", "项目名", "构建模式") &&
 		containsAnyNormalized(combined, "user-email-display", "user-name-display") {
 		findings = append(findings, "执行脚本选择了账号展示字段作为业务动作，偏离新建项目/构建需求")
 	}

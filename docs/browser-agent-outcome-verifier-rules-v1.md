@@ -185,7 +185,7 @@ go test ./internal/app -run 'TestBuild.*ReplayManifest|TestBuildAndWrite' -count
 
 ## §10.4 可重放清单（Replay Manifest）示例
 
-Replay Manifest 在每次执行结束时写入 `{EventDir}/replay-manifest.json`，并以 `kind="replay_manifest"`、真实 SHA-256/size 和 delivery descriptor 注册为产物。正式 Direct 路径在渲染与 StageEventLog 绑定完成后生成，因此清单引用的 StepResults、ValidationReports、原始录屏、trace、最终视频和阶段日志来自同一 job/package。以下是一次旁路测试失败后的精简示例：
+Replay Manifest 在每次执行结束时写入 `{EventDir}/replay-manifest.json`，并以 `kind="replay_manifest"`、真实 SHA-256/size 和 delivery descriptor 注册为产物。正式 Direct Worker 上传前把清单中的本地 URI 终结为当前 job 的认证 `direct://` artifact URI 并重新计算摘要；Gateway 会解析清单与 StageEventLog，而不是只相信 artifact kind/hash，复核 run/package/bundle/policy、stage、ValidationReports、事件序列和真实 outcome evidence。正式 Direct 路径在渲染与 StageEventLog 绑定完成后生成，因此清单引用的 StepResults、ValidationReports、原始录屏、trace、最终视频和阶段日志来自同一 job/package。以下是一次旁路测试失败后的精简示例：
 
 ```json
 {

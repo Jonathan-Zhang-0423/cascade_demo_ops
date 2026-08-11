@@ -1408,12 +1408,17 @@ func buildCodeInvestigationQuestions(project *model.ProjectContext, brief *model
 			[]string{"route", "component_or_selector", "api_or_data_model"},
 		)
 	}
-	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "project", "俄罗斯方块", "tetris") {
+	projectName := intentProjectName(intentText)
+	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "project") || projectName != "" {
+		question := "新建项目流程、项目名称输入和创建接口分别由哪些文件实现？"
+		if projectName != "" {
+			question = fmt.Sprintf("新建项目流程、项目名称输入、用户指定名称“%s”的填充语义和创建接口分别由哪些文件实现？", projectName)
+		}
 		add(
 			"question_project_creation",
 			"新建项目",
-			"新建项目流程、项目名称输入、俄罗斯方块填充语义和创建接口分别由哪些文件实现？",
-			[]string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project name", "new", "create", "project", "projects", "项目", "项目名称", "俄罗斯方块", "tetris"},
+			question,
+			append([]string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project name", "new", "create", "project", "projects", "项目", "项目名称"}, projectName),
 			[]string{"route", "component_or_selector", "api_or_data_model"},
 		)
 	}
@@ -1892,8 +1897,9 @@ func buildCodeInvestigationQueries(project *model.ProjectContext, brief *model.R
 	if containsAnyNormalized(intentText, "登录", "登陆", "login", "signin", "邮箱", "密码") {
 		add("定位登录入口、账号表单和认证状态代码。", []string{"登录", "登陆", "login", "signin", "email", "password", "auth"})
 	}
-	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "project", "俄罗斯方块", "tetris") {
-		add("定位新建项目流程、项目名称输入和创建 API。", []string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project name", "项目名称", "俄罗斯方块", "tetris"})
+	projectName := intentProjectName(intentText)
+	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "project") || projectName != "" {
+		add("定位新建项目流程、项目名称输入和创建 API。", append([]string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project name", "项目名称"}, projectName))
 	}
 	if containsAnyNormalized(intentText, "构建模式", "build mode", "agent", "构建", "生成") {
 		add("定位构建模式、agent 启动、进度日志和项目详情页面。", []string{"构建模式", "build mode", "agent", "开始构建", "启动构建", "generate", "build", "progress", "log"})

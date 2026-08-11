@@ -43,6 +43,7 @@ describe("desktop bridge contract", () => {
 		expect(mapped.cloudRun.exchangePackageID).toBe("xpkg_restart");
 		expect(mapped.cloudRun.lastEventID).toBe("xpkg_restart:9");
 		expect(mapped.cloudRun.resultDownloaded).toBe(true);
+		expect(mapped.cloudRun.resultAcknowledged).toBe(true);
 		expect(mapped.cloudRun.resultReview?.decision).toBe("approved");
 		expect(mapped.assets.find((asset) => asset.kind === "video")?.mediaURL).toContain("/cloud/deliverable/media?");
 		expect(JSON.stringify(mapped)).not.toMatch(/[A-Za-z]:\\/);
@@ -86,6 +87,8 @@ describe("desktop bridge contract", () => {
 			blockingErrorCode: "result_ack_pending",
 			nextAction: "review_and_ack_result",
 			requiresReapproval: true,
+			resultDownloaded: true,
+			resultAcknowledged: false,
 		});
 	});
 
@@ -519,6 +522,7 @@ describe("desktop bridge contract", () => {
     expect(resultPackage.data?.delivery?.asset_refs?.every((artifact) => artifact.encrypted && artifact.sensitive)).toBe(true);
 	expect(acked.data?.assets.every((asset) => asset.status !== "approved")).toBe(true);
 	expect(acked.data?.cloudRun.resultDownloaded).toBe(true);
+	expect(acked.data?.cloudRun.resultAcknowledged).toBe(true);
 	expect(reviewed.data?.assets.every((asset) => asset.status === "approved")).toBe(true);
   });
 
@@ -595,6 +599,9 @@ describe("desktop bridge contract", () => {
 	  if (url.includes("/browser-agent-direct/artifact/download")) {
 		return bridgeJSON({ artifact_id: "artifact_video_split", media_url: "/v1/desktop/projects/project_product_demo/browser-agent-direct/artifact/media?job_id=job_split_real&file=video.webm", sha256: "sha256:video", expected_sha256: "sha256:video", checksum_verified: true });
 	  }
+	  if (url.includes("/browser-agent-direct/ack")) {
+		return bridgeJSON({ protocol_version: "cascade.browser_agent_direct.v1", job_id: "job_split_real", result_package_id: "result_split_real", received_artifact_ids: ["artifact_video_split"], verified_checksums: true, acked_at: "2026-07-14T00:00:30Z" });
+	  }
 	  if (url.includes("/browser-agent-direct/review")) {
 		return bridgeJSON({ review_id: "review_split_real", decision: "approved", summary: "成品通过", reviewed_at: "2026-07-14T00:01:00Z" });
 	  }
@@ -621,6 +628,8 @@ describe("desktop bridge contract", () => {
 	expect(completed.data?.assets[0]?.assetID).toBe("artifact_video_split");
 	expect(acked.data?.assets[0]?.status).not.toBe("approved");
 	expect(acked.data?.assets[0]?.mediaURL).toContain("/browser-agent-direct/artifact/media?");
+	expect(acked.data?.cloudRun.resultAcknowledged).toBe(true);
+	expect(acked.data?.cloudRun.ackedAt).toBe("2026-07-14T00:00:30Z");
 	expect(JSON.stringify(acked.data)).not.toContain("C:\\DemoOps");
 	expect(reviewed.data?.assets[0]?.status).toBe("approved");
 	expect(released.ok).toBe(true);
@@ -631,6 +640,7 @@ describe("desktop bridge contract", () => {
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/status?job_id=job_split_real",
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/result?job_id=job_split_real",
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/artifact/download",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/ack",
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/review",
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/release",
 	]);

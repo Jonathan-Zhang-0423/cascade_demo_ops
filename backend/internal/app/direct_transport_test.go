@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -86,16 +87,7 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 		t.Fatalf("worker claimed wrong package: %+v", claimed)
 	}
 	artifactBytes := bytes.Repeat([]byte("Browser Agent real worker bytes;"), model.DirectArtifactChunkBytes/16+1)
-	artifacts := []model.DirectArtifact{
-		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_video", "final.mp4", "video/mp4", "final_demo", "demo_video", artifactBytes),
-		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_raw_recording", "recording.webm", "video/webm", "raw_recording", "raw_recording", artifactBytes),
-		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_trace", "trace.zip", "application/zip", "browser_trace", "browser_trace", artifactBytes),
-		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_screenshot", "stage.png", "image/png", "stage_evidence", "screenshot", artifactBytes),
-		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_events", "events.jsonl", "application/x-ndjson", "stage_event_log", "browser_agent_stage_event_log", artifactBytes),
-		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_replay_manifest", "replay-manifest.json", "application/json", "replay_manifest", "replay_manifest", artifactBytes),
-		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_timeline_catalog", "asset_timeline_catalog.json", "application/json", "render_metadata", "asset_timeline_catalog", artifactBytes),
-		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_edit_plan", "demo_edit_plan.json", "application/json", "render_plan", "demo_edit_plan", artifactBytes),
-	}
+	artifacts := uploadDirectAppFormalArtifacts(t, gateway, claimed, artifactBytes)
 	result := directAppTestResult(claimed, artifacts)
 	putDirectWorkerJSON(t, gateway.WorkerHandler(), http.MethodPut, "/v1/worker/jobs/"+claimed.JobID+"/result", result, http.StatusOK)
 
@@ -118,9 +110,16 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !download.ChecksumVerified || download.SHA256 != model.SHA256Hex(artifactBytes) {
+		if !download.ChecksumVerified || download.SHA256 != artifact.SHA256 {
 			t.Fatalf("artifact download was not verified: %+v", download)
 		}
+	}
+	ack, err := service.AcknowledgeDirectResult(t.Context(), state.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ack.VerifiedChecksums || ack.JobID != claimed.JobID || ack.ResultPackageID != result.ResultID || len(ack.ReceivedArtifactIDs) != len(artifacts) {
+		t.Fatalf("direct result ACK was not bound to every verified artifact: %+v", ack)
 	}
 	review, err := service.ReviewDirectResult(t.Context(), state.ProjectID, DirectResultReviewRequest{
 		JobID: claimed.JobID, ResultPackageID: result.ResultID,
@@ -162,7 +161,7 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	if persisted.DesktopCloudRun == nil || persisted.DesktopCloudRun.Transport != directTransportStateName || persisted.DesktopCloudRun.DataPort != 0 || persisted.DesktopCloudRun.LeaseID != "" || persisted.DesktopCloudRun.LeaseExpiresAt != nil {
 		t.Fatalf("direct state was not persisted safely: %+v", persisted.DesktopCloudRun)
 	}
-	if !persisted.DesktopCloudRun.ResultDownloaded || persisted.DesktopCloudRun.ResultReview == nil || persisted.DesktopCloudRun.ResultReview.Decision != string(model.ResultReviewApproved) {
+	if !persisted.DesktopCloudRun.ResultDownloaded || persisted.DesktopCloudRun.AckedAt == nil || persisted.DesktopCloudRun.ResultReview == nil || persisted.DesktopCloudRun.ResultReview.Decision != string(model.ResultReviewApproved) {
 		t.Fatalf("verified direct download and local review were not persisted: %+v", persisted.DesktopCloudRun)
 	}
 }
@@ -180,6 +179,36 @@ func TestAppDirectTransportRejectsStaleApprovalBeforeLeaseAllocation(t *testing.
 	}
 	if called {
 		t.Fatal("transport token was read before authoritative package approval")
+	}
+}
+
+func TestDirectReviewAndEditorHandoffRequirePersistedServerACK(t *testing.T) {
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), ArtifactRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID := "direct-ack-gate"
+	if err := states.Save(t.Context(), &orchestrator.CascadeState{
+		ProjectID: projectID,
+		DesktopCloudRun: &orchestrator.DesktopCloudRunState{
+			SchemaVersion: desktopCloudRunSchemaVersion, Transport: directTransportStateName,
+			CloudJobID: "job_ack_gate", ResultPackageID: "result_ack_gate", Status: "completed", ResultDownloaded: true,
+			ResultPackage: &model.RecordingResultPackage{ResultID: "result_ack_gate"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.ReviewDirectResult(t.Context(), projectID, DirectResultReviewRequest{
+		JobID: "job_ack_gate", ResultPackageID: "result_ack_gate",
+		Review: model.ResultReviewRequest{IdempotencyKey: "review-before-ack", Decision: model.ResultReviewApproved},
+	})
+	if err == nil || !strings.Contains(err.Error(), "server ACK") {
+		t.Fatalf("review bypassed the ACK gate: %v", err)
+	}
+	materialization, err := service.GetDirectEditorMaterialization(t.Context(), projectID)
+	if err != nil || materialization.Ready || !strings.Contains(materialization.Message, "ACK") {
+		t.Fatalf("editor handoff bypassed the ACK gate: %+v err=%v", materialization, err)
 	}
 }
 
@@ -715,12 +744,30 @@ func putDirectWorkerJSON(t *testing.T, handler http.Handler, method, path string
 }
 func directAppTestResult(job directtransport.WorkerJob, artifacts []model.DirectArtifact) model.RecordingResultPackage {
 	now := time.Now().UTC()
-	step := model.StepResult{NodeID: job.Package.WorkflowGraph.Nodes[0].ID, Status: "passed", DurationMS: 100}
+	steps := make([]model.StepResult, 0, len(job.Package.ExecutableScriptBundle.PlanJSON.Steps))
+	reports := make([]model.ValidationReport, 0, len(job.Package.ExecutableScriptBundle.PlanJSON.Steps))
+	stageByNode := map[string]string{}
+	for _, stage := range job.Package.ExecutableScriptBundle.StageApprovalPlan.Stages {
+		stageByNode[stage.NodeID] = stage.ID
+	}
+	bundleHash := job.Package.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+	policyHash := job.Package.ExecutableScriptBundle.Reproducibility.BrowserAgentContractHashSHA256
+	for index, planStep := range job.Package.ExecutableScriptBundle.PlanJSON.Steps {
+		step := model.StepResult{NodeID: planStep.NodeID, Status: "passed", DurationMS: 100 + index}
+		steps = append(steps, step)
+		reports = append(reports, model.ValidationReport{
+			SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "report_" + job.JobID + "_" + strconv.Itoa(index+1), RunID: job.Package.RecordingRunSpec.RunID,
+			SourcePackageID: job.Package.PackageID, SourceBundleHashSHA256: bundleHash, PolicyHashSHA256: policyHash,
+			Phase: model.ValidationPhaseRuntimeStage, NodeID: planStep.NodeID, StageID: stageByNode[planStep.NodeID], Decision: model.ValidationDecisionContinue,
+			PassRate: 1, OverallConfidence: 1, EvidenceQuality: model.RuntimeObservationActualBrowser,
+			EvidenceRefs: []model.EvidenceRef{{ID: "evidence_result_" + strconv.Itoa(index+1), Kind: model.EvidenceKindWebScreenshot, ArtifactID: "artifact_screenshot"}}, CreatedAt: now,
+		})
+	}
 	refs := make([]model.ArtifactRef, 0, len(artifacts))
 	descriptors := make([]model.PackageArtifactDescriptor, 0, len(artifacts))
 	var stageLog *model.ArtifactRef
 	for _, artifact := range artifacts {
-		ref := model.ArtifactRef{ID: artifact.ArtifactID, Kind: artifact.Kind, URI: "direct://artifacts/" + artifact.ArtifactID, MimeType: artifact.MimeType, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes}
+		ref := model.ArtifactRef{ID: artifact.ArtifactID, Kind: artifact.Kind, URI: directWorkerArtifactURI(job.JobID, artifact.ArtifactID), MimeType: artifact.MimeType, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes}
 		refs = append(refs, ref)
 		descriptors = append(descriptors, model.PackageArtifactDescriptor{ID: artifact.ArtifactID, Role: artifact.Role, Kind: artifact.Kind, URI: ref.URI, MimeType: artifact.MimeType, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes, Encrypted: true, Sensitive: true, RecipientKeyID: "direct-lease"})
 		if artifact.Kind == "browser_agent_stage_event_log" {
@@ -728,26 +775,98 @@ func directAppTestResult(job directtransport.WorkerJob, artifacts []model.Direct
 			stageLog = &copyRef
 		}
 	}
-	bundleHash := job.Package.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
-	policyHash := job.Package.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
-	report := model.ValidationReport{
-		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "report_" + job.JobID, RunID: job.JobID,
-		SourcePackageID: job.Package.PackageID, SourceBundleHashSHA256: bundleHash, PolicyHashSHA256: policyHash,
-		Phase: model.ValidationPhasePostExecution, Decision: model.ValidationDecisionContinue,
-		PassRate: 1, OverallConfidence: 1, EvidenceQuality: model.RuntimeObservationActualBrowser,
-		EvidenceRefs: []model.EvidenceRef{{ID: "evidence_result", Kind: model.EvidenceKindWebScreenshot, ArtifactID: "artifact_screenshot"}}, CreatedAt: now,
-	}
 	return model.RecordingResultPackage{
 		ResultID: "result_" + job.JobID, SourcePackageID: job.Package.PackageID, CloudJobID: job.JobID,
 		SchemaVersion: model.RecordingResultPackageSchemaVersion, Status: model.RecordingResultStatusGenerated,
-		ExecutionTrace: &model.ExecutionTrace{ID: "trace_" + job.JobID, WorkflowGraphID: job.Package.WorkflowGraph.ID, GraphVersion: job.Package.WorkflowGraph.Version, PassRate: 1, StepResults: []model.StepResult{step}, Artifacts: refs},
-		StepResults:    []model.StepResult{step}, GeneratedAssets: refs, ValidationReports: []model.ValidationReport{report}, StageEventLogRef: stageLog,
+		ExecutionTrace: &model.ExecutionTrace{ID: "trace_" + job.JobID, WorkflowGraphID: job.Package.WorkflowGraph.ID, GraphVersion: job.Package.WorkflowGraph.Version, PassRate: 1, StepResults: steps, Artifacts: refs},
+		StepResults:    steps, GeneratedAssets: refs, ValidationReports: reports, StageEventLogRef: stageLog,
 		VerificationReport: model.VerificationReport{PassRate: 1, ReproducibilityMatch: true}, AuditTrail: model.CloudExecutionAuditTrail{CompletedAt: now},
 		Delivery: model.ResultDelivery{
-			ResultPackageRef: model.PackageArtifactDescriptor{ID: "result_package", Role: "recording_result", Kind: model.ArtifactKindRecordingResultPackage, URI: "direct://results/result.json", SHA256: strings.Repeat("a", 64), Encrypted: true, Sensitive: true, RecipientKeyID: "direct-lease"},
+			ResultPackageRef: model.PackageArtifactDescriptor{ID: "result_package", Role: "recording_result", Kind: model.ArtifactKindRecordingResultPackage, URI: "direct://jobs/" + url.PathEscape(job.JobID) + "/result", SHA256: strings.Repeat("a", 64), Encrypted: true, Sensitive: true, RecipientKeyID: "direct-lease"},
 			AssetRefs:        descriptors, RecipientKind: model.ResultRecipientAppInstallation, RecipientKeyID: "direct-lease", EncryptionAlg: model.DirectTransportCryptoSuite, AckRequired: true, ExpiresAt: now.Add(time.Hour),
 		}, CreatedAt: now,
 	}
+}
+
+func uploadDirectAppFormalArtifacts(t *testing.T, gateway *directtransport.Gateway, job directtransport.WorkerJob, mediaBytes []byte) []model.DirectArtifact {
+	t.Helper()
+	artifacts := []model.DirectArtifact{
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_video", "final.mp4", "video/mp4", "final_demo", "demo_video", mediaBytes),
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_raw_recording", "recording.webm", "video/webm", "raw_recording", "raw_recording", mediaBytes),
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_trace", "trace.zip", "application/zip", "browser_trace", "browser_trace", mediaBytes),
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_screenshot", "stage.png", "image/png", "stage_evidence", "screenshot", mediaBytes),
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_timeline_catalog", "asset_timeline_catalog.json", "application/json", "render_metadata", "asset_timeline_catalog", []byte("{}\n")),
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_edit_plan", "demo_edit_plan.json", "application/json", "render_plan", "demo_edit_plan", []byte("{}\n")),
+	}
+	eventBytes := directAppStageEventLogBytes(t, job)
+	artifacts = append(artifacts, uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_events", "events.jsonl", "application/x-ndjson", "stage_event_log", "browser_agent_stage_event_log", eventBytes))
+	provisional := directAppTestResult(job, artifacts)
+	manifestBytes := directAppReplayManifestBytes(t, job, provisional)
+	artifacts = append(artifacts, uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_replay_manifest", "replay-manifest.json", "application/json", "replay_manifest", "replay_manifest", manifestBytes))
+	return artifacts
+}
+
+func directAppStageEventLogBytes(t *testing.T, job directtransport.WorkerJob) []byte {
+	t.Helper()
+	bundle := job.Package.ExecutableScriptBundle
+	stageByNode := map[string]string{}
+	for _, stage := range bundle.StageApprovalPlan.Stages {
+		stageByNode[stage.NodeID] = stage.ID
+	}
+	sequence := int64(0)
+	lines := make([]byte, 0, 4096)
+	now := time.Now().UTC()
+	for index, step := range bundle.PlanJSON.Steps {
+		for _, eventType := range []model.StageExecutionEventType{model.StageExecutionEventStageStarted, model.StageExecutionEventOutcomeObserved, model.StageExecutionEventStageCompleted} {
+			sequence++
+			event := model.StageExecutionEvent{
+				SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_" + strconv.FormatInt(sequence, 10), RunID: job.Package.RecordingRunSpec.RunID,
+				SourcePackageID: job.Package.PackageID, SourceBundleHashSHA256: bundle.Reproducibility.BundleHashSHA256, PolicyHashSHA256: bundle.Reproducibility.BrowserAgentContractHashSHA256,
+				NodeID: step.NodeID, StageID: stageByNode[step.NodeID], Attempt: 1, Sequence: sequence, EventType: eventType, OccurredAt: now.Add(time.Duration(sequence) * time.Millisecond),
+			}
+			if eventType == model.StageExecutionEventOutcomeObserved {
+				event.Observation = &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, URL: "https://cascadeai.cn/project/test", Title: "Stage completed"}
+				event.EvidenceRefs = []model.EvidenceRef{{ID: "runtime_evidence_" + strconv.Itoa(index+1), Kind: model.EvidenceKindWebScreenshot, ArtifactID: "artifact_screenshot"}}
+			}
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines = append(lines, encoded...)
+			lines = append(lines, '\n')
+		}
+	}
+	return lines
+}
+
+func directAppReplayManifestBytes(t *testing.T, job directtransport.WorkerJob, result model.RecordingResultPackage) []byte {
+	t.Helper()
+	bundle := job.Package.ExecutableScriptBundle
+	stageByNode := map[string]string{}
+	for _, stage := range bundle.StageApprovalPlan.Stages {
+		stageByNode[stage.NodeID] = stage.ID
+	}
+	manifest := model.ReplayManifest{
+		SchemaVersion: model.ReplayManifestSchemaVersion, ManifestID: "manifest_" + job.JobID, CreatedAt: time.Now().UTC(),
+		RunID: job.Package.RecordingRunSpec.RunID, PackageID: job.Package.PackageID,
+		BundleHashSHA256: bundle.Reproducibility.BundleHashSHA256, PolicyHashSHA256: bundle.Reproducibility.BrowserAgentContractHashSHA256,
+		Status: "success", FinalDecision: model.ValidationDecisionContinue,
+		MP4URI: directWorkerArtifactURI(job.JobID, "artifact_video"), RawRecordingURI: directWorkerArtifactURI(job.JobID, "artifact_raw_recording"),
+		BrowserTraceURI: directWorkerArtifactURI(job.JobID, "artifact_trace"), StageEventLogURI: directWorkerArtifactURI(job.JobID, "artifact_events"),
+		ManifestURI: directWorkerArtifactURI(job.JobID, "artifact_replay_manifest"), ProtocolRuntime: model.DirectTransportProtocolVersion,
+		ExecutionBundleRuntime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+	}
+	for index, step := range result.StepResults {
+		manifest.Stages = append(manifest.Stages, model.ReplayManifestStage{NodeID: step.NodeID, StageID: stageByNode[step.NodeID], Order: index + 1, Status: step.Status, ValidationDecision: model.ValidationDecisionContinue, EvidenceArtifactIDs: []string{"artifact_screenshot"}})
+	}
+	for _, report := range result.ValidationReports {
+		manifest.ValidationReports = append(manifest.ValidationReports, model.ReplayManifestValidationRef{ReportID: report.ReportID, Phase: report.Phase, Decision: report.Decision, CheckCount: len(report.Checks)})
+	}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(encoded, '\n')
 }
 func reserveDirectAppTestPort(t *testing.T) int {
 	t.Helper()

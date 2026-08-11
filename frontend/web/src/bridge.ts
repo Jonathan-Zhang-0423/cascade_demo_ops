@@ -378,6 +378,7 @@ type LocalDesktopCloudRunState = {
 	result_package_id?: string;
 	result_package?: RecordingResultPackage;
 	result_downloaded?: boolean;
+	acked_at?: string;
 	downloaded_assets?: Array<{
 		artifact_id: string;
 		kind?: string;
@@ -505,6 +506,15 @@ type LocalDirectJobStatus = {
 type LocalDirectReleaseResult = {
   released: boolean;
   lease?: { lease_id?: string; data_port?: number; expires_at?: string };
+};
+
+type LocalDirectAckView = {
+	protocol_version: string;
+	job_id: string;
+	result_package_id: string;
+	received_artifact_ids: string[];
+	verified_checksums: boolean;
+	acked_at: string;
 };
 
 type LocalGraphRevisionResult = {
@@ -802,6 +812,9 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         if (workspace.cloudRun.resultDownloaded !== true) {
           return { ok: false, error: "直连结果素材尚未完成 checksum 校验" };
         }
+		if (workspace.cloudRun.resultAcknowledged !== true) {
+		  return { ok: false, error: "直连结果尚未完成服务器 ACK" };
+		}
         return requestLocal<EditorSessionMaterializationView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/editor-materialization`);
       }
       const query = `?org_id=${encodeURIComponent(orgID)}&result_package_id=${encodeURIComponent(resultPackageID)}`;
@@ -1195,7 +1208,14 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 		}
 		if (download.data.media_url) mediaURLs.set(deliverable.artifactID, download.data.media_url);
 	  }
-      const next = ackWorkspaceAssets(workspace, mediaURLs);
+	  let acknowledged = await callWailsBridge<LocalDirectAckView>("AcknowledgeDirectBrowserAgentResult", workspace.id);
+	  if (!acknowledged.ok) {
+		acknowledged = await requestLocal<LocalDirectAckView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/ack`, { method: "POST" });
+	  }
+	  if (!acknowledged.ok || !acknowledged.data?.verified_checksums || acknowledged.data.job_id !== jobID || acknowledged.data.result_package_id !== resultPackageID || !acknowledged.data.acked_at) {
+		return bridgeFailure(acknowledged.error ?? "全部素材已校验，但服务器 ACK 未完成", acknowledged.errorInfo);
+	  }
+      const next = ackWorkspaceAssets(workspace, mediaURLs, acknowledged.data.acked_at);
       projects.set(next.id, next);
       return ok(next);
     },
@@ -1205,7 +1225,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 	async releaseDirectBrowserAgentLease(workspace) {
 	  if (!workspace.cloudRun.leaseID) return { ok: false, error: "当前项目没有可释放的直连租约" };
 	  if (!isTerminalLocalStatus(workspace.cloudRun.status)) return { ok: false, error: "任务仍在运行，不能释放直连租约" };
-  if (workspace.cloudRun.status === "succeeded" && workspace.cloudRun.resultDownloaded !== true) return { ok: false, error: "必须先完成素材下载和 checksum 校验" };
+  if (workspace.cloudRun.status === "succeeded" && workspace.cloudRun.resultAcknowledged !== true) return { ok: false, error: "必须先完成素材下载、checksum 校验和服务器 ACK" };
 	  let native = await callWailsBridge<LocalDirectReleaseResult>("ReleaseDirectBrowserAgentLease", workspace.id);
 	  if (!native.ok) {
 	    native = await requestLocal<LocalDirectReleaseResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/release`, { method: "POST" });
@@ -1655,14 +1675,14 @@ export function createMockBridgeClient(): DesktopBridgeClient {
       });
     },
     async ackResultPackage(workspace) {
-      return ok(ackWorkspaceAssets(workspace));
+      return ok(ackWorkspaceAssets(workspace, new Map(), new Date().toISOString()));
     },
     async acknowledgeResult(workspace) {
 	  return this.ackResultPackage(workspace);
 	},
 	async releaseDirectBrowserAgentLease(workspace) {
 	  if (!workspace.cloudRun.leaseID) return { ok: false, error: "当前项目没有可释放的直连租约" };
-  if (!isTerminalLocalStatus(workspace.cloudRun.status) || (workspace.cloudRun.status === "succeeded" && workspace.cloudRun.resultDownloaded !== true)) return { ok: false, error: "任务未终态或素材尚未校验" };
+  if (!isTerminalLocalStatus(workspace.cloudRun.status) || (workspace.cloudRun.status === "succeeded" && workspace.cloudRun.resultAcknowledged !== true)) return { ok: false, error: "任务未终态或素材尚未确认接收" };
 	  const next = workspaceWithDirectLeaseReleased(workspace);
 	  return ok(next);
 	},
@@ -2021,7 +2041,10 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 			: `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/deliverable/media?result_package_id=${encodeURIComponent(persisted.result_package_id)}&file=${encodeURIComponent(asset.file_name)}`;
 		mediaURLs.set(asset.artifact_id, mediaURL);
 	}
-	if (persisted.result_downloaded) restored = ackWorkspaceAssets(restored, mediaURLs);
+	if (persisted.result_downloaded) {
+		const acknowledgedAt = persisted.acked_at ?? (persisted.transport === "browser_agent_direct_v1" ? undefined : persisted.updated_at);
+		restored = ackWorkspaceAssets(restored, mediaURLs, acknowledgedAt);
+	}
 	else if (mediaURLs.size) restored = {
 		...restored,
 		assets: restored.assets.map((asset) => {
@@ -3256,8 +3279,9 @@ function mockSuccessfulRecordingResultPackage(workspace: ProjectWorkspaceView): 
   };
 }
 
-function ackWorkspaceAssets(workspace: ProjectWorkspaceView, mediaURLs = new Map<string, string>()): ProjectWorkspaceView {
+function ackWorkspaceAssets(workspace: ProjectWorkspaceView, mediaURLs = new Map<string, string>(), ackedAt?: string): ProjectWorkspaceView {
   const { lastError: _lastError, ...cloudRun } = workspace.cloudRun;
+	const acknowledged = Boolean(ackedAt);
   return {
     ...workspace,
 	assets: workspace.assets.map((asset) => {
@@ -3266,8 +3290,10 @@ function ackWorkspaceAssets(workspace: ProjectWorkspaceView, mediaURLs = new Map
 	}),
     cloudRun: {
       ...cloudRun,
-		message: "App 已下载全部成品、校验 checksum 并确认接收结果包。",
+		message: acknowledged ? "App 已下载全部成品、校验 checksum 并完成服务器 ACK。" : "App 已下载全部成品并校验 checksum，等待服务器 ACK。",
 		resultDownloaded: true,
+		resultAcknowledged: acknowledged,
+		...(ackedAt ? { ackedAt } : {}),
     },
   };
 }
@@ -4062,7 +4088,7 @@ function mockExecutableScriptSource(plan: ExecutionScriptDocument, planHash: str
     const url = step.action.target.url ?? step.page_target.url ?? "";
     lines.push(`  await ctx.log.step(${JSON.stringify(step.node_id)}, ${JSON.stringify(step.title ?? step.node_id)});`);
     if (step.action.type === "navigate" && url) {
-      lines.push(`  await ctx.page.goto(${JSON.stringify(url)}, { waitUntil: "networkidle", timeout: ${step.action.timeout_ms ?? 10000} });`);
+      lines.push(`  await ctx.page.goto(${JSON.stringify(url)}, { waitUntil: "domcontentloaded", timeout: ${step.action.timeout_ms ?? 10000} });`);
     } else if (step.action.type === "click" && selector) {
       lines.push(`  await ctx.page.click(${JSON.stringify(selector)}, { timeout: ${step.action.timeout_ms ?? 10000} });`);
     } else if (step.action.type === "fill" && selector) {
@@ -4116,7 +4142,7 @@ function roleFromAction(action: string): string {
 function mockBrowserAgentBusinessAcceptance(): BrowserAgentBusinessAcceptanceView {
   const stageDefinitions: Array<[string, string, string]> = [
     ["node_open_workspace", "打开项目工作台", "Create project page is visible"],
-    ["node_fill_project_name", "输入项目名称", "Project name equals Tetris Launch"],
+    ["node_fill_project_name", "输入项目名称", "Project name equals Demo Project"],
     ["node_select_build_mode", "选择构建模式", "Build mode selected"],
     ["node_submit_build", "提交构建", "Build result route is visible"],
     ["node_verify_build_result", "验证构建结果", "Build in progress is visible"],

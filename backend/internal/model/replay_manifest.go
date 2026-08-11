@@ -52,11 +52,11 @@ type ReplayManifest struct {
 	ManifestURI      string `json:"manifest_uri,omitempty"`
 
 	// Runtime versions for environment reproducibility
-	ServerRuntimeVersion    string `json:"server_runtime_version,omitempty"`
-	BrowserRuntimeVersion   string `json:"browser_runtime_version,omitempty"`
-	VideoWorkerVersion      string `json:"video_worker_version,omitempty"`
-	ProtocolRuntime         string `json:"protocol_runtime,omitempty"`
-	ExecutionBundleRuntime  string `json:"execution_bundle_runtime,omitempty"`
+	ServerRuntimeVersion   string `json:"server_runtime_version,omitempty"`
+	BrowserRuntimeVersion  string `json:"browser_runtime_version,omitempty"`
+	VideoWorkerVersion     string `json:"video_worker_version,omitempty"`
+	ProtocolRuntime        string `json:"protocol_runtime,omitempty"`
+	ExecutionBundleRuntime string `json:"execution_bundle_runtime,omitempty"`
 
 	// Aggregate statistics for dashboards and quick triage (P2.1).
 	// Populated from the ValidationReports and StepResults of the same run.
@@ -65,32 +65,35 @@ type ReplayManifest struct {
 
 // ReplayManifestStage is a lightweight summary of a single stage outcome.
 type ReplayManifestStage struct {
-	NodeID             string             `json:"node_id"`
-	StageID            string             `json:"stage_id"`
-	Order              int                `json:"order"`
-	Status             string             `json:"status"` // "passed" | "failed" | "not_started"
-	Waived             bool               `json:"waived,omitempty"`
-	ValidationDecision ValidationDecision `json:"validation_decision,omitempty"`
-	ObservedURL        string             `json:"observed_url,omitempty"`
-	ObservedTitle      string             `json:"observed_title,omitempty"`
-	FailureCode        string             `json:"failure_code,omitempty"`
-	FailureDomain      ValidationCheckDomain `json:"failure_domain,omitempty"`
-	EvidenceArtifactIDs []string          `json:"evidence_artifact_ids,omitempty"`
+	NodeID              string                `json:"node_id"`
+	StageID             string                `json:"stage_id"`
+	Order               int                   `json:"order"`
+	Status              string                `json:"status"` // "passed" | "failed" | "not_started"
+	Waived              bool                  `json:"waived,omitempty"`
+	ValidationDecision  ValidationDecision    `json:"validation_decision,omitempty"`
+	ObservedURL         string                `json:"observed_url,omitempty"`
+	ObservedTitle       string                `json:"observed_title,omitempty"`
+	FailureCode         string                `json:"failure_code,omitempty"`
+	FailureDomain       ValidationCheckDomain `json:"failure_domain,omitempty"`
+	EvidenceArtifactIDs []string              `json:"evidence_artifact_ids,omitempty"`
 }
 
 // ReplayManifestValidationRef points to one validation report within the
 // RecordingResultPackage.ValidationReports slice.
 type ReplayManifestValidationRef struct {
-	ReportID  string          `json:"report_id"`
-	Phase     ValidationPhase `json:"phase"`
-	Decision  ValidationDecision `json:"decision"`
-	CheckCount int             `json:"check_count"`
-	FailCount  int             `json:"fail_count"`
+	ReportID   string             `json:"report_id"`
+	Phase      ValidationPhase    `json:"phase"`
+	Decision   ValidationDecision `json:"decision"`
+	CheckCount int                `json:"check_count"`
+	FailCount  int                `json:"fail_count"`
 }
 
 // Validate returns an error if the manifest is missing required identity or
 // timestamp fields.
 func (m ReplayManifest) Validate() error {
+	if m.SchemaVersion != ReplayManifestSchemaVersion {
+		return errors.New("unsupported replay manifest schema version")
+	}
 	if m.ManifestID == "" || m.RunID == "" || m.PackageID == "" {
 		return errors.New("replay manifest requires manifest_id, run_id and package_id")
 	}
@@ -102,6 +105,12 @@ func (m ReplayManifest) Validate() error {
 	}
 	if m.CreatedAt.IsZero() {
 		return errors.New("replay manifest requires created_at")
+	}
+	if m.Status != "success" && m.Status != "failed" {
+		return errors.New("replay manifest status must be success or failed")
+	}
+	if !validValidationDecision(m.FinalDecision) {
+		return errors.New("replay manifest final_decision is invalid")
 	}
 	return nil
 }

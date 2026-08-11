@@ -226,6 +226,10 @@ describe("workflow helpers", () => {
     const completed = { ...running, stage: "result_review" as const, status: "asset_ready" as const, cloudRun: { ...running.cloudRun, status: "succeeded" as const, resultPackageID: "result_1" } };
     expect(recommendedWorkstation(completed)).toBe("assets");
     expect(projectNextAction(completed).kind).toBe("review_result");
+	const reviewedWithoutAck = { ...completed, cloudRun: { ...completed.cloudRun, resultDownloaded: true, resultReview: { decision: "approved" as const, reviewID: "review_1", updatedAt: "2026-08-11T00:00:00Z" } } };
+	expect(projectNextAction(reviewedWithoutAck).title).toBe("确认接收成品");
+	const acknowledged = { ...reviewedWithoutAck, cloudRun: { ...reviewedWithoutAck.cloudRun, resultAcknowledged: true, ackedAt: "2026-08-11T00:00:00Z" } };
+	expect(projectNextAction(acknowledged).kind).toBe("complete");
     expect(projectJourney(completed).map((step) => step.status)).toEqual(["completed", "completed", "completed", "completed", "current"]);
   });
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -345,56 +346,18 @@ func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence 
 		add(intentWaitAction(project, "intent_login_observe", "演示登录完成并进入工作台", "登录完成，进入可演示的产品工作台上下文。", durationMSForIntentKeywords(intentText, "登录", "登陆", "登入", "login", "sign in", "signin"), false))
 	}
 	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") {
-		add(intentSelectorAction(project, candidates, "intent_new_project", "新建项目", "click", "点击新建项目入口", "进入新建项目流程。", durationMSForIntentKeywords(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project"), true, []string{"新建项目", "创建项目", "新增项目", "new project", "create project"}, []string{
-			`[data-testid='new-project']`,
-			`[data-testid='create-project']`,
-			`button:has-text("新建项目")`,
-			`a:has-text("新建项目")`,
-			`[role="button"]:has-text("新建项目")`,
-			`button:has-text("创建项目")`,
-			`button:has-text("New Project")`,
-			`button:has-text("Create Project")`,
-		}))
+		add(intentSelectorAction(project, candidates, "intent_new_project", "新建项目", "click", "点击新建项目入口", "进入新建项目流程。", durationMSForIntentKeywords(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project"), true, []string{"新建项目", "创建项目", "新增项目", "new project", "create project"}))
 	}
 	projectName := intentProjectName(intentText)
 	if projectName != "" {
-		add(intentSelectorAction(project, candidates, "intent_project_name", "输入项目名称："+projectName, "fill", "填写项目名称", "项目名称已填写为 "+projectName+"。", durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", "name", projectName), true, []string{"项目名称", "项目名", "project name", "name", projectName}, []string{
-			`input[placeholder*='项目']`,
-			`input[placeholder*='名称']`,
-			`input[aria-label*='项目']`,
-			`input[aria-label*='名称']`,
-			`input[name*='project' i]`,
-			`input[name*='name' i]`,
-			`textarea[placeholder*='项目']`,
-			`textarea[placeholder*='描述']`,
-		}, withIntentActionValue(projectName)))
+		add(intentSelectorAction(project, candidates, "intent_project_name", "输入项目名称："+projectName, "fill", "填写项目名称", "项目名称已填写为 "+projectName+"。", durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", "name", projectName), true, []string{"项目名称", "项目名", "project name", "name", projectName}, withIntentActionValue(projectName)))
 	}
 	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") {
-		add(intentSelectorAction(project, candidates, "intent_build_mode", "选择构建模式", "click", "选择构建模式", "项目已切换到构建模式。", durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"), true, []string{"构建模式", "build mode", "builder mode", "构建"}, []string{
-			`[data-testid='build-mode']`,
-			`[data-testid='mode-build']`,
-			`button:has-text("构建模式")`,
-			`[role="tab"]:has-text("构建模式")`,
-			`[role="button"]:has-text("构建模式")`,
-			`label:has-text("构建模式")`,
-			`text=构建模式`,
-			`button:has-text("Build Mode")`,
-		}))
+		add(intentSelectorAction(project, candidates, "intent_build_mode", "选择构建模式", "click", "选择构建模式", "项目已切换到构建模式。", durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"), true, []string{"构建模式", "build mode", "builder mode", "构建"}))
 	}
 	if containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "run build", "start build", "生成") ||
 		containsAnyNormalized(intentText, "构建") {
-		add(intentSelectorAction(project, candidates, "intent_start_agent_build", "启动 agent 实际构建", "click", "启动 agent 构建", "agent 已开始根据需求实际构建项目。", durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "agent", "智能体", "构建", "build", "run", "start"), true, []string{"agent", "智能体", "开始构建", "实际构建", "生成", "build", "run", "start"}, []string{
-			`[data-testid='start-build']`,
-			`[data-testid='generate-app']`,
-			`button:has-text("开始构建")`,
-			`button:has-text("开始生成")`,
-			`button:has-text("生成")`,
-			`button:has-text("构建")`,
-			`[role="button"]:has-text("开始构建")`,
-			`[role="button"]:has-text("生成")`,
-			`button:has-text("Build")`,
-			`button:has-text("Run")`,
-		}))
+		add(intentSelectorAction(project, candidates, "intent_start_agent_build", "启动 agent 实际构建", "click", "启动 agent 构建", "agent 已开始根据需求实际构建项目。", durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "agent", "智能体", "构建", "build", "run", "start"), true, []string{"agent", "智能体", "开始构建", "实际构建", "生成", "build", "run", "start"}))
 	}
 	if waitMS := requiredObservationDurationMS(intentText); waitMS > 0 {
 		add(intentWaitAction(project, "intent_agent_build_wait", fmt.Sprintf("等待 agent 实际构建 %d 秒", waitMS/1000), "持续观察 agent 构建过程，等待结果逐步出现。", waitMS, true))
@@ -428,7 +391,6 @@ func intentSelectorAction(
 	durationMS int,
 	business bool,
 	keywords []string,
-	semanticSelectors []string,
 	options ...intentActionOption,
 ) model.VerifiedInteractionAction {
 	selector := ""
@@ -441,9 +403,6 @@ func intentSelectorAction(
 			}
 		}
 	}
-	if selector == "" {
-		selector = bestSelectorValue(semanticSelectors...)
-	}
 	action := model.VerifiedInteractionAction{
 		ID:                 id,
 		IntentGoalID:       id,
@@ -454,9 +413,10 @@ func intentSelectorAction(
 		RouteRef:           safeID("route", firstNonEmpty(project.ProductURL, "product")),
 		ExpectedOutcome:    expected,
 		SuccessState:       success,
-		WaitConditions:     []string{"domcontentloaded", "networkidle"},
+		WaitConditions:     []string{"domcontentloaded"},
 		DurationHintMS:     durationMS,
 		IsBusiness:         business,
+		NonDestructive:     true,
 		VerificationStatus: "runtime_adaptive",
 		VerificationSource: "runtime_adaptive_intent_fallback",
 		SelectorScore:      selectorQualityScore(selector),
@@ -478,9 +438,10 @@ func intentWaitAction(project *model.ProjectContext, id string, label string, su
 		RouteRef:           safeID("route", firstNonEmpty(project.ProductURL, "product")),
 		ExpectedOutcome:    success,
 		SuccessState:       success,
-		WaitConditions:     []string{"domcontentloaded", "networkidle"},
+		WaitConditions:     []string{"domcontentloaded"},
 		DurationHintMS:     durationMS,
 		IsBusiness:         business,
+		NonDestructive:     true,
 		VerificationStatus: "runtime_adaptive",
 		VerificationSource: "runtime_adaptive_intent_fallback",
 	}
@@ -491,6 +452,14 @@ func bestIntentProbe(candidates []model.InteractionProbe, keywords []string, pre
 	bestScore := -1
 	for _, candidate := range candidates {
 		if !candidate.IsBusiness || candidate.IsChrome || !selectorUsableForBusinessAction(candidate.Selector) {
+			continue
+		}
+		// A runtime-adaptive fallback must not promote a code guess or an
+		// unverified primary selector into an executable locator. The primary
+		// value is usable only when the same selector is represented by a
+		// complete, evidence-bound candidate produced by a scan or approved
+		// annotation.
+		if !probeHasFormalSelectorCandidate(candidate) {
 			continue
 		}
 		if !candidateKindMatchesIntent(candidate, preferredKind) || candidateLooksNegativeForIntent(candidate, keywords) {
@@ -510,6 +479,30 @@ func bestIntentProbe(candidates []model.InteractionProbe, keywords []string, pre
 		}
 	}
 	return best, bestScore >= 0
+}
+
+func probeHasFormalSelectorCandidate(probe model.InteractionProbe) bool {
+	selector := strings.TrimSpace(probe.Selector)
+	if selector == "" {
+		return false
+	}
+	for _, candidate := range probe.Alternatives {
+		if model.SelectorCandidateHasFormalProvenance(candidate) && selectorCandidateMatchesSelector(candidate, selector) {
+			return true
+		}
+	}
+	return false
+}
+
+func selectorCandidateMatchesSelector(candidate model.SelectorCandidate, selector string) bool {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(candidate.Value), selector) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(candidate.Kind), "testid") && strings.EqualFold(strings.TrimSpace(candidate.Value), testIDFromSelector(selector))
 }
 
 func candidateKindMatchesIntent(candidate model.InteractionProbe, preferredKind string) bool {
@@ -557,11 +550,50 @@ func explicitDemoIntentText(project *model.ProjectContext, intelligence *model.P
 	return normalizeIntentText(strings.Join(parts, " "))
 }
 
+var intentProjectNamePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?:项目名称|项目名)\s*(?:为|是|[:：=])\s*([^，。；;,\n]{1,48})`),
+	regexp.MustCompile(`(?:项目名称|项目名)\s*([^，。；;,\n\s（(]{1,48})`),
+	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?项目\s*([^，。；;,\n\s（(]{1,48})`),
+	regexp.MustCompile(`project\s+(?:named|called)\s+([a-z0-9][a-z0-9 _-]{0,47})`),
+}
+
+var intentDurationOnlyPattern = regexp.MustCompile(`^\d+(?:\.\d+)?\s*(?:秒|s|sec|secs|second|seconds)$`)
+var intentProjectDetailsPattern = regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?项目\s*[（(]([^）)]{1,96})[）)]`)
+
 func intentProjectName(intentText string) string {
-	if containsAnyNormalized(intentText, "俄罗斯方块", "tetris") {
-		return "俄罗斯方块"
+	intentText = normalizeIntentText(intentText)
+	for _, match := range intentProjectDetailsPattern.FindAllStringSubmatch(intentText, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		for _, part := range strings.FieldsFunc(match[1], func(r rune) bool { return r == ',' || r == '，' || r == ';' || r == '；' }) {
+			if candidate := normalizeIntentProjectNameCandidate(part); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	for _, pattern := range intentProjectNamePatterns {
+		for _, match := range pattern.FindAllStringSubmatch(intentText, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			if candidate := normalizeIntentProjectNameCandidate(match[1]); candidate != "" {
+				return candidate
+			}
+		}
 	}
 	return ""
+}
+
+func normalizeIntentProjectNameCandidate(value string) string {
+	candidate := strings.Trim(strings.TrimSpace(value), `"'“”‘’()（）:：=-`)
+	if candidate == "" || intentDurationOnlyPattern.MatchString(candidate) || containsAnyNormalized(candidate,
+		"新建项目", "创建项目", "新增项目", "new project", "create project",
+		"构建模式", "build mode", "builder mode", "等待", "wait", "agent", "智能体",
+	) {
+		return ""
+	}
+	return candidate
 }
 
 func verifyFromPageEvidence(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, candidates []model.InteractionProbe) (*model.VerifiedInteractionPlan, *model.MissingEvidenceReport) {
@@ -679,7 +711,8 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 			Kind: "wait", URL: firstNonEmpty(response.Diagnostics.FinalURL, response.SourceURL, project.ProductURL),
 			RouteRef:        safeID("route", firstNonEmpty(response.Diagnostics.FinalURL, response.SourceURL, project.ProductURL)),
 			ExpectedOutcome: "登录完成并进入工作台", SuccessState: "浏览器已离开登录页并进入经扫描的产品页面。",
-			WaitConditions: []string{"domcontentloaded", "networkidle"}, VerificationStatus: "verified",
+			WaitConditions: []string{"domcontentloaded"}, VerificationStatus: "verified",
+			NonDestructive:     true,
 			VerificationSource: firstNonEmpty(response.VerificationMode, "playwright_readonly_scan"), VerifiedAt: time.Now().UTC(),
 			EvidenceRefs: []model.EvidenceRef{evidence},
 		})
@@ -850,7 +883,7 @@ func probeFromVerifierResult(result interactionVerifierResult, byID map[string]m
 		IsBusiness:     isBusinessAction(graphActionTypeFromKind(kind, result.Selector)),
 		IsChrome:       actionLooksLikeChromeControl(result.Label, result.Selector),
 		SelectorScore:  selectorQualityScore(result.Selector),
-		WaitConditions: []string{"domcontentloaded", "networkidle"},
+		WaitConditions: []string{"domcontentloaded"},
 	}
 }
 
@@ -930,6 +963,7 @@ func verifiedActionFromProbe(probe model.InteractionProbe, source string, scanID
 		WaitConditions:     probe.WaitConditions,
 		DurationHintMS:     0,
 		IsBusiness:         probe.IsBusiness && !probe.IsChrome && !looksLikeLoginAction(probe.Label, probe.Selector),
+		NonDestructive:     !actionLooksUnsafeOrOffIntent(probe.Label, probe.Selector),
 		VerificationStatus: "verified",
 		VerificationSource: firstNonEmpty(source, probe.Source),
 		VerifiedAt:         time.Now().UTC(),
