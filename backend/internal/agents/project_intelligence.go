@@ -1097,6 +1097,11 @@ func traceGoalToEvidence(goal model.DemoIntentGoal, state *ProjectUnderstandingS
 func interactionProbesFromState(state *ProjectUnderstandingState) []model.InteractionProbe {
 	probes := []model.InteractionProbe{}
 	for _, page := range state.PageSnapshots {
+		pageDigest, _ := model.DigestCanonicalJSON(page)
+		observedAt := page.CapturedAt
+		if observedAt.IsZero() {
+			observedAt = page.CreatedAt
+		}
 		for _, action := range page.Actions {
 			selector := strings.TrimSpace(action.SelectorHint)
 			if selector == "" {
@@ -1107,9 +1112,11 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 				continue
 			}
 			kind := firstNonEmpty(action.Kind, actionKindFromSelector(selector))
+			evidenceRefs := uniqueEvidenceRefs(append(action.EvidenceRefs, page.EvidenceRefs...))
+			label := firstNonEmpty(action.Label, labelFromSelector(selector))
 			probes = append(probes, model.InteractionProbe{
 				ID:             firstNonEmpty(action.ID, "probe_page_"+shortHash(page.ID+selector)),
-				Label:          firstNonEmpty(action.Label, labelFromSelector(selector)),
+				Label:          label,
 				Kind:           kind,
 				Selector:       selector,
 				URL:            actionURL,
@@ -1119,7 +1126,8 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 				IsChrome:       actionLooksLikeChromeControl(action.Label, selector),
 				SelectorScore:  selectorQualityScore(selector),
 				WaitConditions: waitHintsForSurface(page.URL, []model.SelectorCandidate{{Kind: "css", Value: selector}}, page.States),
-				EvidenceRefs:   uniqueEvidenceRefs(append(action.EvidenceRefs, page.EvidenceRefs...)),
+				EvidenceRefs:   evidenceRefs,
+				Alternatives:   selectorProvenanceCandidates(selector, kind, label, "page_scan", pageDigest, observedAt, evidenceRefs, action.Confidence),
 			})
 		}
 		for _, selector := range page.StableSelectors {
@@ -1130,9 +1138,11 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 				continue
 			}
 			kind := actionKindFromSelector(selector.Value)
+			evidenceRefs := uniqueEvidenceRefs(append(selector.EvidenceRefs, page.EvidenceRefs...))
+			label := labelFromSelector(selector.Value)
 			probes = append(probes, model.InteractionProbe{
 				ID:             "probe_page_selector_" + shortHash(page.ID+selector.Value),
-				Label:          labelFromSelector(selector.Value),
+				Label:          label,
 				Kind:           kind,
 				Selector:       selector.Value,
 				URL:            page.URL,
@@ -1142,12 +1152,14 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 				IsChrome:       actionLooksLikeChromeControl(labelFromSelector(selector.Value), selector.Value),
 				SelectorScore:  selectorQualityScore(selector.Value),
 				WaitConditions: waitHintsForSurface(page.URL, []model.SelectorCandidate{selector}, page.States),
-				EvidenceRefs:   uniqueEvidenceRefs(append(selector.EvidenceRefs, page.EvidenceRefs...)),
+				EvidenceRefs:   evidenceRefs,
+				Alternatives:   selectorProvenanceCandidates(selector.Value, kind, label, "page_scan", pageDigest, observedAt, evidenceRefs, selector.Confidence),
 			})
 		}
 	}
 	componentByPathHash := map[string]model.ComponentInsight{}
 	for _, snapshot := range state.CodeSnapshots {
+		observedAt := snapshot.CreatedAt
 		for _, component := range snapshot.Components {
 			if component.FilePathHashSHA256 != "" {
 				componentByPathHash[component.FilePathHashSHA256] = component
@@ -1160,9 +1172,10 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 					continue
 				}
 				kind := actionKindFromSelector(selector)
+				label := firstNonEmpty(firstString(component.ActionLabels, ""), labelFromSelector(selector), component.Name)
 				probes = append(probes, model.InteractionProbe{
 					ID:            "probe_component_" + shortHash(component.ID+selector),
-					Label:         firstNonEmpty(firstString(component.ActionLabels, ""), labelFromSelector(selector), component.Name),
+					Label:         label,
 					Kind:          kind,
 					Selector:      selector,
 					ComponentRef:  component.ID,
@@ -1171,6 +1184,7 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 					IsChrome:      actionLooksLikeChromeControl(component.Name+" "+strings.Join(component.ActionLabels, " "), selector),
 					SelectorScore: selectorQualityScore(selector),
 					EvidenceRefs:  component.EvidenceRefs,
+					Alternatives:  selectorProvenanceCandidates(selector, kind, label, "source_scan", snapshot.SourceDigestSHA256, observedAt, component.EvidenceRefs, component.Confidence),
 				})
 			}
 		}
@@ -1198,10 +1212,64 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 				IsChrome:      actionLooksLikeChromeControl(label, selector.Value),
 				SelectorScore: selectorQualityScore(selector.Value),
 				EvidenceRefs:  uniqueEvidenceRefs(append(selector.EvidenceRefs, component.EvidenceRefs...)),
+				Alternatives:  selectorProvenanceCandidates(selector.Value, kind, label, "source_scan", snapshot.SourceDigestSHA256, observedAt, uniqueEvidenceRefs(append(selector.EvidenceRefs, component.EvidenceRefs...)), selector.Confidence),
 			})
 		}
 	}
 	return dedupeInteractionProbes(probes)
+}
+
+func selectorProvenanceCandidates(selector, actionKind, label, sourceKind, sourceDigest string, observedAt time.Time, evidenceRefs []model.EvidenceRef, confidence float64) []model.SelectorCandidate {
+	evidenceID := ""
+	for _, ref := range evidenceRefs {
+		if strings.TrimSpace(ref.ID) != "" {
+			evidenceID = ref.ID
+			break
+		}
+	}
+	name := selectorAccessibleName(label, selector)
+	if strings.TrimSpace(selector) == "" || evidenceID == "" || strings.TrimSpace(sourceDigest) == "" || observedAt.IsZero() || name == "" {
+		return nil
+	}
+	kind, value := selectorCandidateIdentity(selector)
+	if confidence <= 0 {
+		confidence = 0.78
+	}
+	candidate := model.SelectorCandidate{
+		Kind: kind, Value: value, Confidence: confidence, StabilityScore: float64(selectorQualityScore(selector)) / 100,
+		Source: sourceKind, EvidenceID: evidenceID, SourceKind: sourceKind, SourceDigest: sourceDigest,
+		ObservedRole: observedRoleForAction(actionKind, selector), ObservedAccessibleName: name, ObservedAt: observedAt,
+		LastValidatedAt: observedAt, EvidenceRefs: evidenceRefs,
+	}
+	if !model.SelectorCandidateHasFormalProvenance(candidate) {
+		return nil
+	}
+	return []model.SelectorCandidate{candidate}
+}
+
+func selectorAccessibleName(label, selector string) string {
+	name := strings.TrimSpace(label)
+	if testID := testIDFromSelector(selector); testID != "" {
+		name = strings.TrimSpace(strings.ReplaceAll(name, testID, ""))
+	}
+	name = strings.Trim(name, " -_:/|[]()")
+	return name
+}
+
+func observedRoleForAction(actionKind, selector string) string {
+	lower := strings.ToLower(selector)
+	switch graphActionTypeFromKind(actionKind, selector) {
+	case model.GraphActionFill:
+		return "textbox"
+	case model.GraphActionSelect:
+		return "combobox"
+	case model.GraphActionUpload:
+		return "button"
+	}
+	if strings.Contains(lower, "a[") || strings.HasPrefix(strings.TrimSpace(lower), "a:") || strings.Contains(lower, "role=\"link\"") {
+		return "link"
+	}
+	return "button"
 }
 
 func featureCapabilitiesFromState(state *ProjectUnderstandingState) []model.FeatureCapability {

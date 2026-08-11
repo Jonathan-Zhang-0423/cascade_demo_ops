@@ -174,12 +174,13 @@ func buildExecutableScriptBundle(
 	now time.Time,
 	intelligence *model.ProjectIntelligencePack,
 ) (*model.ExecutableRecordingScriptBundle, error) {
+	stagePlan := buildStageApprovalPlan(project, report, graph, doc, intelligence, now)
+	outline := buildBrowserAgentScriptOutline(project, graph, doc, stagePlan, intelligence, now)
+	retainFormalSelectorCandidates(doc, stagePlan, outline)
 	planHash, err := doc.ComputeScriptHash()
 	if err != nil {
 		return nil, err
 	}
-	stagePlan := buildStageApprovalPlan(project, report, graph, doc, intelligence, now)
-	outline := buildBrowserAgentScriptOutline(project, graph, doc, stagePlan, intelligence, now)
 	promptPolicy := buildBrowserAgentPromptPolicy(project, graph, doc, outline, now)
 	browserAgentContract := buildBrowserAgentContract(project, graph, doc, now)
 	dossier := buildProjectUnderstandingDossier(project, report, productMap, graph, intelligence, now)
@@ -298,6 +299,45 @@ func buildExecutableScriptBundle(
 		return nil, ensureValidBundle(bundle)
 	}
 	return bundle, nil
+}
+
+func retainFormalSelectorCandidates(doc *model.ExecutionScriptDocument, stagePlan *model.StageApprovalPlan, outline *model.BrowserAgentScriptOutline) {
+	retain := func(values []model.SelectorCandidate) []model.SelectorCandidate {
+		out := make([]model.SelectorCandidate, 0, len(values))
+		for _, candidate := range values {
+			if model.SelectorCandidateHasFormalProvenance(candidate) {
+				out = append(out, candidate)
+			}
+		}
+		return out
+	}
+	if doc != nil {
+		for index := range doc.Steps {
+			step := &doc.Steps[index]
+			step.PageTarget.SelectorAlternatives = retain(step.PageTarget.SelectorAlternatives)
+			step.Action.Target.SelectorAlternatives = retain(step.Action.Target.SelectorAlternatives)
+			for validationIndex := range step.Validations {
+				validation := &step.Validations[validationIndex]
+				validation.Target.SelectorAlternatives = retain(validation.Target.SelectorAlternatives)
+			}
+		}
+	}
+	if stagePlan != nil {
+		for index := range stagePlan.Stages {
+			stagePlan.Stages[index].Interaction.Target.SelectorAlternatives = retain(stagePlan.Stages[index].Interaction.Target.SelectorAlternatives)
+		}
+	}
+	if outline != nil {
+		for stageIndex := range outline.Stages {
+			stage := &outline.Stages[stageIndex]
+			for componentIndex := range stage.Components {
+				stage.Components[componentIndex].SelectorAlternatives = retain(stage.Components[componentIndex].SelectorAlternatives)
+			}
+			for interactionIndex := range stage.Interactions {
+				stage.Interactions[interactionIndex].Target.SelectorAlternatives = retain(stage.Interactions[interactionIndex].Target.SelectorAlternatives)
+			}
+		}
+	}
 }
 
 func firstIntelligencePack(values ...*model.ProjectIntelligencePack) *model.ProjectIntelligencePack {
@@ -551,11 +591,12 @@ func buildBrowserAgentContract(project *model.ProjectContext, graph *model.DemoW
 	maskSelectors := append([]string{}, doc.SafetyPolicy.Redactions.MaskSelectors...)
 	maskSelectors = append(maskSelectors, "input[type=password]", "[data-sensitive=true]")
 	return &model.BrowserAgentContract{
-		ID:              "browser_agent_contract_" + doc.ID,
-		ProjectID:       project.ID,
-		WorkflowGraphID: graph.ID,
-		SchemaVersion:   model.BrowserAgentContractSchemaVersion,
-		Mode:            "suggest_only",
+		ID:                          "browser_agent_contract_" + doc.ID,
+		ProjectID:                   project.ID,
+		WorkflowGraphID:             graph.ID,
+		SchemaVersion:               model.BrowserAgentContractSchemaVersion,
+		Mode:                        "suggest_only",
+		OutcomeVerifierRulesVersion: model.BrowserAgentOutcomeVerifierRulesVersion,
 		BusinessAuthority: model.BrowserAgentBusinessAuthority{
 			Source:                             "workflow_graph_plan_json_and_validations",
 			ScriptMayChangeBusinessIntent:      false,

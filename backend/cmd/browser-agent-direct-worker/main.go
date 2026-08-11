@@ -103,6 +103,9 @@ func (w *worker) claim(ctx context.Context) (directtransport.WorkerJob, bool, er
 	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<20)).Decode(&job); err != nil {
 		return job, false, err
 	}
+	if job.ProtocolVersion != model.DirectWorkerProtocolVersion {
+		return job, false, fmt.Errorf("worker protocol mismatch")
+	}
 	return job, true, nil
 }
 

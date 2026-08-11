@@ -103,9 +103,10 @@ type artifactRecord struct {
 }
 
 type WorkerJob struct {
-	JobID   string                       `json:"job_id"`
-	LeaseID string                       `json:"lease_id"`
-	Package model.ClientExecutionPackage `json:"package"`
+	ProtocolVersion string                       `json:"protocol_version"`
+	JobID           string                       `json:"job_id"`
+	LeaseID         string                       `json:"lease_id"`
+	Package         model.ClientExecutionPackage `json:"package"`
 }
 
 type WorkerCredential struct {
@@ -279,9 +280,11 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	g.mu.Unlock()
 	writeJSON(w, http.StatusOK, model.DirectHealthResponse{
 		ProtocolVersion: model.DirectTransportProtocolVersion, CryptoSuite: model.DirectTransportCryptoSuite,
-		SupportedProtocolVersions:      []string{model.DirectTransportProtocolVersion},
-		SupportedPackageSchemaVersions: []string{model.ClientExecutionPackageSchemaVersion},
-		SupportedRuntimes:              []string{model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
+		SupportedProtocolVersions:             []string{model.DirectTransportProtocolVersion},
+		SupportedPackageSchemaVersions:        []string{model.ClientExecutionPackageSchemaVersion},
+		SupportedRuntimes:                     []string{model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
+		SupportedWorkerProtocolVersions:       []string{model.DirectWorkerProtocolVersion},
+		SupportedOutcomeVerifierRulesVersions: []string{model.BrowserAgentOutcomeVerifierRulesVersion},
 		Capabilities: map[string]bool{
 			"credential_envelope": true, "manual_login_checkpoint": false, "artifact_chunk_resume": true,
 			"idempotent_package_upload": true, "explicit_lease_release": true, "formal_result_artifact_gate": true,
@@ -587,6 +590,10 @@ func (g *Gateway) handlePackage(w http.ResponseWriter, r *http.Request, lease *l
 	}
 	if pkg.ExecutableScriptBundle == nil || pkg.ExecutableScriptBundle.ScriptOutline == nil || pkg.ExecutableScriptBundle.ScriptOutline.Runtime != "browser-agent-outline-v1" {
 		writeError(w, http.StatusUnprocessableEntity, "unsupported_runtime", "Only browser-agent-outline-v1 packages are accepted.")
+		return
+	}
+	if pkg.ExecutableScriptBundle.BrowserAgentContract == nil || pkg.ExecutableScriptBundle.BrowserAgentContract.OutcomeVerifierRulesVersion != model.BrowserAgentOutcomeVerifierRulesVersion {
+		writeError(w, http.StatusUnprocessableEntity, "outcome_verifier_rules_mismatch", "Package outcome verifier rules version is unsupported.")
 		return
 	}
 	canonical, _ := model.CanonicalJSON(pkg)
@@ -992,7 +999,7 @@ func (g *Gateway) handleWorkerClaim(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, "package_invalid", "Stored package is invalid.")
 		return
 	}
-	writeJSON(w, http.StatusOK, WorkerJob{JobID: jobID, LeaseID: record.LeaseID, Package: pkg})
+	writeJSON(w, http.StatusOK, WorkerJob{ProtocolVersion: model.DirectWorkerProtocolVersion, JobID: jobID, LeaseID: record.LeaseID, Package: pkg})
 }
 
 func (g *Gateway) handleWorkerCredentialConsume(w http.ResponseWriter, r *http.Request) {

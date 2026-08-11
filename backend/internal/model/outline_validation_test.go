@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestValidateBrowserAgentOutlineConsistencyRejectsContractDrift(t *testing.T) {
 	bundle := consistentOutlineBundleForTest()
@@ -49,6 +52,21 @@ func TestValidateBrowserAgentOutlineConsistencyRejectsIncompleteRuntimeAdaptiveC
 	bundle = runtimeAdaptiveOutlineBundleForTest()
 	bundle.ScriptOutline.Stages[0].RuntimeAdaptive = false
 	assertOutlineConsistencyCode(t, bundle, "runtime_adaptive_mismatch")
+}
+
+func TestValidateBrowserAgentOutlineConsistencyRequiresSelectorProvenance(t *testing.T) {
+	bundle := consistentOutlineBundleForTest()
+	bundle.PlanJSON.Steps[0].Action.Target.SelectorAlternatives = []SelectorCandidate{{Kind: "testid", Value: "login-submit"}}
+	assertOutlineConsistencyCode(t, bundle, "selector_provenance_incomplete")
+
+	evidence := EvidenceRef{ID: "ev_login_submit", Kind: EvidenceKindBrowserScan}
+	bundle.PlanJSON.Steps[0].Action.Target.SelectorAlternatives[0] = SelectorCandidate{
+		Kind: "testid", Value: "login-submit", EvidenceID: evidence.ID, SourceKind: "page_scan", SourceDigest: "sha256:page",
+		ObservedRole: "button", ObservedAccessibleName: "Sign in", ObservedAt: time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC), EvidenceRefs: []EvidenceRef{evidence},
+	}
+	if err := ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
+		t.Fatalf("complete selector provenance should be accepted: %v", err)
+	}
 }
 
 func assertOutlineConsistencyCode(t *testing.T, bundle *ExecutableRecordingScriptBundle, want string) {

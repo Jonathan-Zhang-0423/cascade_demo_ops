@@ -484,6 +484,11 @@ func bindTestDirectPackageOrigin(pkg *model.ClientExecutionPackage, installation
 	pkg.ProducerInstallationID = installationID
 	pkg.SafetyReport.HumanApproval.ApprovedByInstallationID = installationID
 	pkg.SafetyReport.HumanApproval.ApprovalSchemaVersion = "cascade.user_approval.v1"
+	if pkg.ExecutableScriptBundle != nil && pkg.ExecutableScriptBundle.BrowserAgentContract != nil {
+		pkg.ExecutableScriptBundle.BrowserAgentContract.OutcomeVerifierRulesVersion = model.BrowserAgentOutcomeVerifierRulesVersion
+		contractHash, _ := model.DigestCanonicalJSON(pkg.ExecutableScriptBundle.BrowserAgentContract)
+		pkg.ExecutableScriptBundle.Reproducibility.BrowserAgentContractHashSHA256 = contractHash
+	}
 	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256, _ = model.ComputePackageApprovalComponentDigests(*pkg)
 	pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256, _ = model.ComputePackageApprovalSubjectDigest(*pkg)
 }

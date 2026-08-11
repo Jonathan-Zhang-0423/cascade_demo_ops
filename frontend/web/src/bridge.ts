@@ -365,6 +365,10 @@ type LocalDesktopCloudRunState = {
 	status?: string;
 	stage?: string;
 	message?: string;
+	waiting_reason?: string;
+	blocking_error_code?: string;
+	next_action?: string;
+	requires_reapproval?: boolean;
 	progress_percent?: number;
 	last_event_id?: string;
 	stage_history?: LocalExecutionStageEvent[];
@@ -429,6 +433,8 @@ type LocalDirectTransportStatus = {
 	supported_protocol_versions?: string[];
 	supported_package_schema_versions?: string[];
 	supported_runtimes?: string[];
+	supported_worker_protocol_versions?: string[];
+	supported_outcome_verifier_rules_versions?: string[];
 	capabilities?: Record<string, boolean>;
 };
 
@@ -2029,6 +2035,10 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 			...(persisted.lease_id ? { leaseID: persisted.lease_id } : {}),
 			...(persisted.data_port ? { dataPort: persisted.data_port } : {}),
 			...(persisted.lease_expires_at ? { leaseExpiresAt: persisted.lease_expires_at } : {}),
+			...(persisted.waiting_reason ? { waitingReason: persisted.waiting_reason } : {}),
+			...(persisted.blocking_error_code ? { blockingErrorCode: persisted.blocking_error_code } : {}),
+			...(persisted.next_action ? { nextAction: persisted.next_action } : {}),
+			...(persisted.requires_reapproval !== undefined ? { requiresReapproval: persisted.requires_reapproval } : {}),
 			...(persisted.direct_artifacts ? { directArtifacts: persisted.direct_artifacts.map((artifact) => ({ artifactID: artifact.artifact_id, ...(artifact.role ? { role: artifact.role } : {}), ...(artifact.kind ? { kind: artifact.kind } : {}), fileName: artifact.file_name, ...(artifact.mime_type ? { mimeType: artifact.mime_type } : {}), sha256: artifact.sha256, sizeBytes: artifact.size_bytes })) } : {}),
 			...(persisted.result_package_id ? { resultPackageID: persisted.result_package_id } : {}),
 			...(persisted.last_event_id ? { lastEventID: persisted.last_event_id } : {}),
@@ -2246,7 +2256,7 @@ function workspaceWithDirectUpload(workspace: ProjectWorkspaceView, result: Loca
       leaseExpiresAt: result.lease.expires_at,
       status: mapCloudRunStatus(receipt.status),
       stage: receipt.stage,
-      message: "执行包已通过专属端口加密发送给 Browser Agent。",
+      message: "执行包已通过短期加密会话发送给 Browser Agent。",
       currentStep: "等待 Browser Agent 领取执行包",
       progress: 5,
       retryCount: 0,
@@ -2296,6 +2306,10 @@ function workspaceWithDirectStatus(workspace: ProjectWorkspaceView, status: Loca
       ...mapped.cloudRun,
       packageID: status.package_id,
       transport: "browser_agent_direct_v1",
+		...(status.waiting_reason ? { waitingReason: status.waiting_reason } : {}),
+		...(status.blocking_error_code ? { blockingErrorCode: status.blocking_error_code } : {}),
+		...(status.next_action ? { nextAction: status.next_action } : {}),
+		...(status.requires_reapproval !== undefined ? { requiresReapproval: status.requires_reapproval } : {}),
 		...(directArtifacts ? { directArtifacts } : {}),
     },
   };
@@ -3257,6 +3271,8 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
       ...(local.browser_agent_direct.supported_protocol_versions ? { supportedProtocolVersions: local.browser_agent_direct.supported_protocol_versions } : {}),
       ...(local.browser_agent_direct.supported_package_schema_versions ? { supportedPackageSchemaVersions: local.browser_agent_direct.supported_package_schema_versions } : {}),
       ...(local.browser_agent_direct.supported_runtimes ? { supportedRuntimes: local.browser_agent_direct.supported_runtimes } : {}),
+	  ...(local.browser_agent_direct.supported_worker_protocol_versions ? { supportedWorkerProtocolVersions: local.browser_agent_direct.supported_worker_protocol_versions } : {}),
+	  ...(local.browser_agent_direct.supported_outcome_verifier_rules_versions ? { supportedOutcomeVerifierRulesVersions: local.browser_agent_direct.supported_outcome_verifier_rules_versions } : {}),
       ...(local.browser_agent_direct.capabilities ? { capabilities: local.browser_agent_direct.capabilities } : {}),
     };
   }

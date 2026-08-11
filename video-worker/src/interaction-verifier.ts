@@ -1,5 +1,6 @@
 import { launchOptionsWithProxy } from "./playwright-proxy.js";
 import { configuredBrowserExecutable } from "./browser-executable.js";
+import { createHash } from "node:crypto";
 
 type VerifyInteractionRequest = {
   product_url?: string;
@@ -65,6 +66,12 @@ type VerifiedInteractionCandidate = InteractionCandidate & {
   page_title?: string;
   message?: string;
   verified_at?: string;
+  evidence_id?: string;
+  source_kind?: "page_scan";
+  source_digest?: string;
+  observed_role?: string;
+  observed_accessible_name?: string;
+  observed_at?: string;
 };
 
 const minimumEvidenceSettleMS = 1000;
@@ -117,6 +124,7 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
     diagnostics.login_status = loginStatus;
     let pageTitle = await page.title().catch(() => "");
     let currentURL = page.url();
+    let sourceDigest = await pageEvidenceDigest(page, currentURL);
     diagnostics.final_url = currentURL;
     diagnostics.page_title = pageTitle;
     for (const candidate of request.candidates || []) {
@@ -152,6 +160,7 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
           page_url: currentURL,
           page_title: pageTitle,
           verified_at: new Date().toISOString(),
+          ...await selectorProvenance(locator, candidate, currentURL, scanID, sourceDigest),
         });
       } catch (error) {
         results.push({
@@ -170,14 +179,15 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
       pageTitle = await page.title().catch(() => "");
       diagnostics.final_url = currentURL;
       diagnostics.page_title = pageTitle;
+	  sourceDigest = await pageEvidenceDigest(page, currentURL);
       for (let index = 0; index < results.length; index += 1) {
 		const current = results[index];
 		if (!current || current.status === "verified") continue;
-		const rescanned = await verifyCandidateOnPage(page, current, currentURL, pageTitle);
+		const rescanned = await verifyCandidateOnPage(page, current, currentURL, pageTitle, scanID, sourceDigest);
         if (rescanned.status === "verified") results[index] = rescanned;
       }
     }
-    const discovered = await discoverBusinessActionsAcrossSafePages(page, request.intent_goals || [], request, currentURL, pageTitle);
+    const discovered = await discoverBusinessActionsAcrossSafePages(page, request.intent_goals || [], request, currentURL, pageTitle, scanID);
     diagnostics.discovered_business_control_count = discovered.length;
     const seenSelectors = new Set(results.map((result) => normalizeSelectorText(result.selector)));
     for (const item of discovered) {
@@ -206,7 +216,7 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
   }
 }
 
-async function verifyCandidateOnPage(page: any, candidate: InteractionCandidate, pageURL: string, pageTitle: string): Promise<VerifiedInteractionCandidate> {
+async function verifyCandidateOnPage(page: any, candidate: InteractionCandidate, pageURL: string, pageTitle: string, scanID: string, sourceDigest: string): Promise<VerifiedInteractionCandidate> {
   const selector = candidate.selector?.trim();
   if (!selector) return { ...candidate, status: "selector_missing", page_url: pageURL, page_title: pageTitle, message: "selector is empty" };
   try {
@@ -222,7 +232,7 @@ async function verifyCandidateOnPage(page: any, candidate: InteractionCandidate,
     if (action === "fill" && !editable) {
       return { ...candidate, status: "not_editable", visible, enabled, editable, page_url: pageURL, page_title: pageTitle };
     }
-    return { ...candidate, status: "verified", visible, enabled, editable, page_url: pageURL, page_title: pageTitle, verified_at: new Date().toISOString() };
+    return { ...candidate, status: "verified", visible, enabled, editable, page_url: pageURL, page_title: pageTitle, verified_at: new Date().toISOString(), ...await selectorProvenance(locator, candidate, pageURL, scanID, sourceDigest) };
   } catch (error) {
     return { ...candidate, status: "error", page_url: pageURL, page_title: pageTitle, message: error instanceof Error ? error.message : String(error) };
   }
@@ -272,6 +282,7 @@ async function discoverBusinessActions(
   request: VerifyInteractionRequest,
   pageURL: string,
   pageTitle: string,
+  scanID: string,
 ): Promise<VerifiedInteractionCandidate[]> {
   const visibleControls = await page.locator("button, a[href], input, textarea, select, [role='button'], [role='link'], [data-testid], [data-test], [data-cy], [aria-label]").evaluateAll((elements: any[]) => {
     return elements.slice(0, 250).map((element, index) => {
@@ -307,21 +318,23 @@ async function discoverBusinessActions(
     .filter((control: any) => control.visible && !control.disabled)
     .filter((control: any) => !isURLForbiddenByScope(control.attrs?.href, request))
     .map((control: any) => {
-      const label = controlLabel(control);
+      const label = accessibleControlName(control);
       const selector = selectorForControl(control, label);
       const kind = actionKindForControl(control);
       const score = businessControlScore(label, selector, goals, kind);
       const goal = bestGoalForControl(label, selector, goals, kind);
       return { control, label, selector, kind, score, goal };
     })
-    .filter((item: any) => item.selector && item.goal && item.score >= 35 && !looksLikeChromeControl(`${item.label} ${item.selector}`) && !looksLikeControlPlaneSignal(`${item.label} ${item.selector}`))
+    .filter((item: any) => item.selector && item.label && item.goal && item.score >= 35 && !looksLikeChromeControl(`${item.label} ${item.selector}`) && !looksLikeControlPlaneSignal(`${item.label} ${item.selector}`))
     .sort((a: any, b: any) => b.score - a.score)
     .slice(0, 8);
 
   const now = new Date().toISOString();
+  const sourceDigest = await pageEvidenceDigest(page, pageURL);
   return scored.map((item: any, index: number) => {
+    const id = `browser_discovered_${index + 1}_${hashText(`${item.selector}|${item.label}`)}`;
     const result: VerifiedInteractionCandidate = {
-      id: `browser_discovered_${index + 1}_${hashText(`${item.selector}|${item.label}`)}`,
+      id,
       label: item.label,
       kind: item.kind,
       selector: item.selector,
@@ -334,6 +347,12 @@ async function discoverBusinessActions(
       page_title: pageTitle,
       message: "login-aware readonly DOM scan discovered a visible business control",
       verified_at: now,
+      evidence_id: selectorEvidenceID(scanID, id, item.selector),
+      source_kind: "page_scan",
+      source_digest: sourceDigest,
+      observed_role: observedControlRole(item.control, item.kind),
+      observed_accessible_name: item.label,
+      observed_at: now,
     };
     if (item.goal?.id) {
       result.intent_goal_id = item.goal.id;
@@ -348,6 +367,7 @@ async function discoverBusinessActionsAcrossSafePages(
   request: VerifyInteractionRequest,
   pageURL: string,
   pageTitle: string,
+  scanID: string,
 ): Promise<VerifiedInteractionCandidate[]> {
   const out: VerifiedInteractionCandidate[] = [];
   const seen = new Set<string>();
@@ -359,7 +379,7 @@ async function discoverBusinessActionsAcrossSafePages(
       out.push(item);
     }
   };
-  add(await discoverBusinessActions(page, goals, request, pageURL, pageTitle));
+  add(await discoverBusinessActions(page, goals, request, pageURL, pageTitle, scanID));
   if (out.length >= 3) return out;
 
   const links = await safeExplorationLinks(page, goals, request);
@@ -369,7 +389,7 @@ async function discoverBusinessActionsAcrossSafePages(
     await page.goto(link.href, { waitUntil: "domcontentloaded", timeout: Math.min(request.timeout_ms || 20000, 8000) }).catch(() => undefined);
     await waitForPageEvidenceReady(page, Math.min(request.timeout_ms || 20000, 5000));
     const title = await page.title().catch(() => "");
-    add(await discoverBusinessActions(page, goals, request, page.url(), title));
+    add(await discoverBusinessActions(page, goals, request, page.url(), title, scanID));
   }
   if (page.url() !== originalURL) {
     await page.goto(originalURL, { waitUntil: "domcontentloaded", timeout: Math.min(request.timeout_ms || 20000, 6000) }).catch(() => undefined);
@@ -400,17 +420,80 @@ async function safeExplorationLinks(page: any, goals: InteractionGoal[], request
     .sort((a: any, b: any) => b.score - a.score);
 }
 
-function controlLabel(control: any): string {
+function accessibleControlName(control: any): string {
   return [
     control.text,
     control.attrs?.aria,
     control.attrs?.placeholder,
     control.attrs?.title,
-    control.attrs?.testid,
-    control.attrs?.name,
-    control.attrs?.id,
-    control.attrs?.href,
   ].filter(Boolean).join(" ").trim().replace(/\s+/g, " ").slice(0, 140);
+}
+
+function observedControlRole(control: any, actionKind: string): string {
+  const explicit = String(control.attrs?.role || "").trim().toLowerCase();
+  if (explicit) return explicit;
+  const tag = String(control.tag || "").toLowerCase();
+  const type = String(control.attrs?.type || "").toLowerCase();
+  if (tag === "a") return "link";
+  if (tag === "button" || ["button", "submit", "reset"].includes(type)) return "button";
+  if (tag === "select") return "combobox";
+  if (tag === "textarea" || tag === "input" && !["checkbox", "radio", "file"].includes(type)) return "textbox";
+  if (type === "checkbox") return "checkbox";
+  if (type === "radio") return "radio";
+  if (type === "file") return "button";
+  return normalizeAction(actionKind) === "fill" ? "textbox" : "button";
+}
+
+async function selectorProvenance(locator: any, candidate: InteractionCandidate, pageURL: string, scanID: string, sourceDigest: string): Promise<Pick<VerifiedInteractionCandidate, "evidence_id" | "source_kind" | "source_digest" | "observed_role" | "observed_accessible_name" | "observed_at">> {
+  const semantics = await locator.evaluate((element: any) => {
+    const tag = String(element.tagName || "").toLowerCase();
+    const type = String(element.getAttribute?.("type") || "").toLowerCase();
+    const explicitRole = String(element.getAttribute?.("role") || "").trim().toLowerCase();
+    const labelledBy = String(element.getAttribute?.("aria-labelledby") || "").trim().split(/\s+/).filter(Boolean)
+      .map((id: string) => element.ownerDocument?.getElementById(id)?.textContent || "").join(" ");
+    const labels = Array.from(element.labels || []).map((label: any) => label.textContent || "").join(" ");
+    const text = String(element.innerText || element.textContent || "");
+    const name = [element.getAttribute?.("aria-label") || "", labelledBy, labels, text, element.getAttribute?.("placeholder") || "", element.getAttribute?.("title") || "", element.getAttribute?.("alt") || ""]
+      .map((value) => String(value).trim().replace(/\s+/g, " ")).find(Boolean) || "";
+    let role = explicitRole;
+    if (!role && tag === "a") role = "link";
+    if (!role && (tag === "button" || ["button", "submit", "reset"].includes(type))) role = "button";
+    if (!role && tag === "select") role = "combobox";
+    if (!role && (tag === "textarea" || tag === "input" && !["checkbox", "radio", "file"].includes(type))) role = "textbox";
+    if (!role && type === "checkbox") role = "checkbox";
+    if (!role && type === "radio") role = "radio";
+    if (!role && type === "file") role = "button";
+    return { role, name: name.slice(0, 160) };
+  }).catch(() => ({ role: "", name: "" }));
+  const observedAt = new Date().toISOString();
+  return {
+    evidence_id: selectorEvidenceID(scanID, candidate.id || "candidate", candidate.selector || ""),
+    source_kind: "page_scan",
+    source_digest: sourceDigest || sha256Text(`page|${pageURL}`),
+    observed_role: semantics.role || (normalizeAction(candidate.kind) === "fill" ? "textbox" : "button"),
+    observed_accessible_name: semantics.name,
+    observed_at: observedAt,
+  };
+}
+
+async function pageEvidenceDigest(page: any, pageURL: string): Promise<string> {
+  const evidence = await page.locator("button, a[href], input, textarea, select, [role], [aria-label]").evaluateAll((elements: any[]) => elements.slice(0, 200).map((element) => ({
+    tag: String(element.tagName || "").toLowerCase(),
+    role: element.getAttribute?.("role") || "",
+    aria: element.getAttribute?.("aria-label") || "",
+    placeholder: element.getAttribute?.("placeholder") || "",
+    title: element.getAttribute?.("title") || "",
+    text: String(element.innerText || element.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120),
+  }))).catch(() => []);
+  return sha256Text(JSON.stringify({ page_url: pageURL, controls: evidence }));
+}
+
+function selectorEvidenceID(scanID: string, candidateID: string, selector: string): string {
+  return `ev_browser_scan_${hashText(`${scanID}|${candidateID}|${selector}`)}`;
+}
+
+function sha256Text(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function selectorForControl(control: any, label: string): string {

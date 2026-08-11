@@ -179,6 +179,65 @@ func TestAppDirectTransportRejectsStaleApprovalBeforeLeaseAllocation(t *testing.
 	}
 }
 
+func TestAppDirectTransportRejectsMissingWorkerAndVerifierVersionNegotiation(t *testing.T) {
+	health := model.DirectHealthResponse{
+		ProtocolVersion:                model.DirectTransportProtocolVersion,
+		CryptoSuite:                    model.DirectTransportCryptoSuite,
+		SupportedProtocolVersions:      []string{model.DirectTransportProtocolVersion},
+		SupportedPackageSchemaVersions: []string{model.ClientExecutionPackageSchemaVersion},
+		SupportedRuntimes:              []string{model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/direct/health" {
+			http.NotFound(response, request)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(health)
+	}))
+	t.Cleanup(server.Close)
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), ArtifactRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.directTransportURL = server.URL
+	service.readDirectToken = func() (string, error) { return directAppBootstrapToken, nil }
+
+	view, err := service.DirectTransportStatus(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Reachable || view.ErrorClass != "protocol_mismatch" {
+		t.Fatalf("missing worker/verifier negotiation must fail closed: %+v", view)
+	}
+}
+
+func TestPersistDirectStatusRetainsStableGatewayGuidance(t *testing.T) {
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), ArtifactRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := states.Save(t.Context(), &orchestrator.CascadeState{ProjectID: "direct_guidance"}); err != nil {
+		t.Fatal(err)
+	}
+	status := model.DirectJobStatus{
+		JobID: "job_guidance", PackageID: "pkg_guidance", Status: "awaiting_manual_login", Stage: "login_checkpoint",
+		WaitingReason: "manual_login_required", BlockingErrorCode: "login_checkpoint_pending", NextAction: "complete_manual_login", RequiresReapproval: true,
+	}
+	if err := service.persistDirectStatus(t.Context(), "direct_guidance", status); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := states.Load(t.Context(), "direct_guidance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := persisted.DesktopCloudRun
+	if run == nil || run.WaitingReason != status.WaitingReason || run.BlockingErrorCode != status.BlockingErrorCode || run.NextAction != status.NextAction || !run.RequiresReapproval {
+		t.Fatalf("stable Gateway guidance was lost during persistence: %+v", run)
+	}
+}
+
 func TestApproveClientExecutionPackageRebindsConfidenceAfterCredentialGrantExpiry(t *testing.T) {
 	root := t.TempDir()
 	service, err := NewService(config.AppRuntimeConfig{

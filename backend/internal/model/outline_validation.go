@@ -36,6 +36,9 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		if !stageOK || !outlineOK {
 			continue
 		}
+		if field, candidate, ok := firstIncompleteSelectorCandidate(step, stage, outline); ok {
+			return &OutlineConsistencyError{Code: "selector_provenance_incomplete", NodeID: step.NodeID, Reason: fmt.Sprintf("has selector candidate %q with incomplete provenance at %s", candidate.Value, field)}
+		}
 		legacyPlanStep := step.StageKind == "" && step.RouteState == ""
 		if legacyPlanStep {
 			continue
@@ -73,6 +76,63 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		}
 	}
 	return nil
+}
+
+func firstIncompleteSelectorCandidate(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) (string, SelectorCandidate, bool) {
+	groups := []struct {
+		field      string
+		candidates []SelectorCandidate
+	}{
+		{"plan_json.steps[].page_target.selector_alternatives", step.PageTarget.SelectorAlternatives},
+		{"plan_json.steps[].action.target.selector_alternatives", step.Action.Target.SelectorAlternatives},
+		{"stage_approval_plan.stages[].interaction.target.selector_alternatives", stage.Interaction.Target.SelectorAlternatives},
+	}
+	for index, validation := range step.Validations {
+		groups = append(groups, struct {
+			field      string
+			candidates []SelectorCandidate
+		}{fmt.Sprintf("plan_json.steps[].validations[%d].target.selector_alternatives", index), validation.Target.SelectorAlternatives})
+	}
+	for index, component := range outline.Components {
+		groups = append(groups, struct {
+			field      string
+			candidates []SelectorCandidate
+		}{fmt.Sprintf("script_outline.stages[].components[%d].selector_alternatives", index), component.SelectorAlternatives})
+	}
+	for index, interaction := range outline.Interactions {
+		groups = append(groups, struct {
+			field      string
+			candidates []SelectorCandidate
+		}{fmt.Sprintf("script_outline.stages[].interactions[%d].target.selector_alternatives", index), interaction.Target.SelectorAlternatives})
+	}
+	for _, group := range groups {
+		for _, candidate := range group.candidates {
+			if !SelectorCandidateHasFormalProvenance(candidate) {
+				return group.field, candidate, true
+			}
+		}
+	}
+	return "", SelectorCandidate{}, false
+}
+
+func SelectorCandidateHasFormalProvenance(candidate SelectorCandidate) bool {
+	if strings.TrimSpace(candidate.Kind) == "" || strings.TrimSpace(candidate.Value) == "" ||
+		strings.TrimSpace(candidate.EvidenceID) == "" || strings.TrimSpace(candidate.SourceDigest) == "" ||
+		strings.TrimSpace(candidate.ObservedRole) == "" || strings.TrimSpace(candidate.ObservedAccessibleName) == "" ||
+		candidate.ObservedAt.IsZero() {
+		return false
+	}
+	switch strings.TrimSpace(candidate.SourceKind) {
+	case "source_scan", "page_scan", "approved_manual_annotation":
+	default:
+		return false
+	}
+	for _, ref := range candidate.EvidenceRefs {
+		if strings.TrimSpace(ref.ID) == strings.TrimSpace(candidate.EvidenceID) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRuntimeAdaptiveExecutionContract(bundle *ExecutableRecordingScriptBundle, step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) error {

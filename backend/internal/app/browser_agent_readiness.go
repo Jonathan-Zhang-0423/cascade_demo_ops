@@ -51,6 +51,13 @@ func browserAgentReadiness(pkg *model.ClientExecutionPackage) BrowserAgentReadin
 		if len(interactions) == 0 {
 			interactions = []model.BrowserAgentInteraction{approved.Interaction}
 		}
+		if field, candidate, ok := browserAgentIncompleteSelectorCandidate(step, approved, outline); ok {
+			report.addBlocker(BrowserAgentReadinessFinding{
+				Code: "selector_provenance_incomplete", NodeID: approved.NodeID, Field: field,
+				Message: "Selector candidate is not bound to complete App-approved source provenance: " + candidate.Value,
+				Hint:    "Regenerate the candidate from a source scan, page scan, or approved manual annotation with evidence ID, source digest, observed role/name, and observation time. Do not emit generic selector guesses.",
+			})
+		}
 		hasValidation := requiredBrowserValidation(step.Validations)
 		if stageRequiresObservableOutcome(approved.StageKind) && !hasValidation {
 			report.addBlocker(BrowserAgentReadinessFinding{
@@ -89,10 +96,10 @@ func browserAgentReadiness(pkg *model.ClientExecutionPackage) BrowserAgentReadin
 			}
 		}
 		if finding := browserAgentActionOutcomeFinding(approved, interactions, step); finding != nil {
-			report.addWarning(*finding)
+			report.addBlocker(*finding)
 		}
 		if finding := browserAgentOutcomeUsesApprovedActionEvidence(approved, outline, interactions, step); finding != nil {
-			report.addWarning(*finding)
+			report.addBlocker(*finding)
 		}
 		for _, finding := range browserAgentMissingBusinessInputFindings(approved, interactions, step, pkg) {
 			report.addBlocker(finding)
@@ -104,12 +111,43 @@ func browserAgentReadiness(pkg *model.ClientExecutionPackage) BrowserAgentReadin
 	return report
 }
 
+func browserAgentIncompleteSelectorCandidate(step model.ScriptStep, stage model.StageApprovalStage, outline model.BrowserAgentOutlineStage) (string, model.SelectorCandidate, bool) {
+	groups := []struct {
+		field      string
+		candidates []model.SelectorCandidate
+	}{
+		{"payload.executable_script_bundle.plan_json.steps[].page_target.selector_alternatives", step.PageTarget.SelectorAlternatives},
+		{"payload.executable_script_bundle.plan_json.steps[].action.target.selector_alternatives", step.Action.Target.SelectorAlternatives},
+		{"payload.executable_script_bundle.stage_approval_plan.stages[].interaction.target.selector_alternatives", stage.Interaction.Target.SelectorAlternatives},
+	}
+	for _, component := range outline.Components {
+		groups = append(groups, struct {
+			field      string
+			candidates []model.SelectorCandidate
+		}{"payload.executable_script_bundle.script_outline.stages[].components[].selector_alternatives", component.SelectorAlternatives})
+	}
+	for _, interaction := range outline.Interactions {
+		groups = append(groups, struct {
+			field      string
+			candidates []model.SelectorCandidate
+		}{"payload.executable_script_bundle.script_outline.stages[].interactions[].target.selector_alternatives", interaction.Target.SelectorAlternatives})
+	}
+	for _, group := range groups {
+		for _, candidate := range group.candidates {
+			if !model.SelectorCandidateHasFormalProvenance(candidate) {
+				return group.field, candidate, true
+			}
+		}
+	}
+	return "", model.SelectorCandidate{}, false
+}
+
 // browserAgentOutcomeUsesApprovedActionEvidence catches a subtle App export
 // defect: the action may use an approved alternative (for example the
 // button-new-project selector), while the required post-action validation
 // points at that same action control. Once the click opens a dialog the
 // control is hidden, so this validation cannot prove the intended transition.
-// This is diagnostics only; the Server never invents a replacement target.
+// This is a formal readiness gate; the Server never invents a replacement target.
 func browserAgentOutcomeUsesApprovedActionEvidence(approved model.StageApprovalStage, outline model.BrowserAgentOutlineStage, interactions []model.BrowserAgentInteraction, step model.ScriptStep) *BrowserAgentReadinessFinding {
 	if step.Action.Type != model.GraphActionClick && step.Action.Type != model.GraphActionSelect && step.Action.Type != model.GraphActionUpload {
 		return nil
@@ -161,9 +199,9 @@ func browserAgentOutcomeUsesApprovedActionEvidence(approved model.StageApprovalS
 			if sameStableTarget(candidateTarget, validation.Target) {
 				return &BrowserAgentReadinessFinding{
 					Code: "post_action_validation_reuses_approved_action_evidence", NodeID: approved.NodeID,
-					Field: "payload.executable_script_bundle.plan_json.steps[].validations[].target",
+					Field:   "payload.executable_script_bundle.plan_json.steps[].validations[].target",
 					Message: "Post-action validation reuses an App-approved action selector alternative; it may be hidden by the resulting dialog or state.",
-					Hint: "Regenerate the App package with a selector/evidence for the resulting dialog, route, status, or content. Server will not infer or invent that target.",
+					Hint:    "Regenerate the App package with a selector/evidence for the resulting dialog, route, status, or content. Server will not infer or invent that target.",
 				}
 			}
 		}
@@ -175,9 +213,9 @@ func browserAgentOutcomeUsesApprovedActionEvidence(approved model.StageApprovalS
 		if actionTargetIdentityMatchesLabel(action, validation.Target) {
 			return &BrowserAgentReadinessFinding{
 				Code: "post_action_validation_reuses_action_identity", NodeID: approved.NodeID,
-				Field: "payload.executable_script_bundle.plan_json.steps[].validations[].target",
+				Field:   "payload.executable_script_bundle.plan_json.steps[].validations[].target",
 				Message: "Post-action validation names the same control identity as the action instead of the resulting business state.",
-				Hint: "Regenerate the App package with an explicit result selector such as the opened dialog or input field; Server will not infer or invent it.",
+				Hint:    "Regenerate the App package with an explicit result selector such as the opened dialog or input field; Server will not infer or invent it.",
 			}
 		}
 	}
@@ -235,9 +273,9 @@ func browserAgentMissingBusinessInputFindings(approved model.StageApprovalStage,
 	if approved.StageKind == model.BusinessStageKindBusinessInput {
 		return []BrowserAgentReadinessFinding{{
 			Code: "business_input_action_missing", NodeID: approved.NodeID,
-			Field: "payload.executable_script_bundle.plan_json.steps[].action",
+			Field:   "payload.executable_script_bundle.plan_json.steps[].action",
 			Message: "Business input stage is not a fill/select action, so the declared user input cannot be replayed.",
-			Hint: "Regenerate the App package with an explicit non-secret fill interaction and a required result validation.",
+			Hint:    "Regenerate the App package with an explicit non-secret fill interaction and a required result validation.",
 		}}
 	}
 	// Do not guess from free-form prose for ordinary action stages. The App is

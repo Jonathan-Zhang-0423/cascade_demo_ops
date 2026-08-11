@@ -226,6 +226,10 @@ export type CloudRunStatusView = {
   status: CloudRunStatus;
   stage?: string;
   message?: string;
+  waitingReason?: string;
+  blockingErrorCode?: string;
+  nextAction?: string;
+  requiresReapproval?: boolean;
   stageHistory?: ServerLifecycleStageView[];
   failureSummary?: string;
   sandboxMetadata?: SandboxExecutionMetadata;
@@ -344,6 +348,8 @@ export type BrowserAgentDirectStatus = {
   supportedProtocolVersions?: string[];
   supportedPackageSchemaVersions?: string[];
   supportedRuntimes?: string[];
+  supportedWorkerProtocolVersions?: string[];
+  supportedOutcomeVerifierRulesVersions?: string[];
   capabilities?: Record<string, boolean>;
 };
 

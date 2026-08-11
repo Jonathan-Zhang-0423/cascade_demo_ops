@@ -18,25 +18,29 @@ import (
 )
 
 const (
-	DirectTransportProtocolVersion = "cascade.browser_agent_direct.v1"
-	DirectTransportCryptoSuite     = "hkdf-sha256+aes-256-gcm"
-	DirectTransportDirectionUpload = "app_to_browser_agent"
-	DirectTransportDirectionResult = "browser_agent_to_app"
-	DirectTransportMaxClockSkew    = 5 * time.Minute
+	DirectTransportProtocolVersion          = "cascade.browser_agent_direct.v1"
+	DirectWorkerProtocolVersion             = "cascade.browser_agent_worker.v1"
+	DirectTransportCryptoSuite              = "hkdf-sha256+aes-256-gcm"
+	BrowserAgentOutcomeVerifierRulesVersion = "browser-agent-outcome-verifier-rules-v1"
+	DirectTransportDirectionUpload          = "app_to_browser_agent"
+	DirectTransportDirectionResult          = "browser_agent_to_app"
+	DirectTransportMaxClockSkew             = 5 * time.Minute
 	// DirectArtifactChunkBytes bounds App and gateway memory while each chunk
 	// remains independently authenticated by the lease-derived AEAD key.
 	DirectArtifactChunkBytes = 4 << 20
 )
 
 type DirectHealthResponse struct {
-	ProtocolVersion                string          `json:"protocol_version"`
-	CryptoSuite                    string          `json:"crypto_suite"`
-	SupportedProtocolVersions      []string        `json:"supported_protocol_versions"`
-	SupportedPackageSchemaVersions []string        `json:"supported_package_schema_versions"`
-	SupportedRuntimes              []string        `json:"supported_runtimes"`
-	Capabilities                   map[string]bool `json:"capabilities"`
-	ActiveLeases                   int             `json:"active_leases"`
-	ServerTime                     time.Time       `json:"server_time"`
+	ProtocolVersion                       string          `json:"protocol_version"`
+	CryptoSuite                           string          `json:"crypto_suite"`
+	SupportedProtocolVersions             []string        `json:"supported_protocol_versions"`
+	SupportedPackageSchemaVersions        []string        `json:"supported_package_schema_versions"`
+	SupportedRuntimes                     []string        `json:"supported_runtimes"`
+	SupportedWorkerProtocolVersions       []string        `json:"supported_worker_protocol_versions"`
+	SupportedOutcomeVerifierRulesVersions []string        `json:"supported_outcome_verifier_rules_versions"`
+	Capabilities                          map[string]bool `json:"capabilities"`
+	ActiveLeases                          int             `json:"active_leases"`
+	ServerTime                            time.Time       `json:"server_time"`
 }
 
 // DirectPortLease is issued by the fixed TLS control endpoint. DataURL points

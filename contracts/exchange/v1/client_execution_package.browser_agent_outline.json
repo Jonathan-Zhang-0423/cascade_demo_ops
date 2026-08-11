@@ -281,15 +281,15 @@
               "id": "validation_node_invite_member",
               "kind": "element_visible",
               "target": {
-                "test_id": "invite-member"
+                "test_id": "invite-dialog"
               },
-              "assertion": "Approved target is visible",
+              "assertion": "Invite dialog is visible",
               "required": true,
               "evidence_refs": [
                 {
-                  "id": "ev_selector_invite",
+                  "id": "ev_invite_dialog",
                   "kind": "source_code",
-                  "summary": "Invite control summary"
+                  "summary": "Invite dialog result summary"
                 }
               ]
             }
@@ -629,7 +629,20 @@
                   "confidence": 0.92,
                   "stability_score": 0.9,
                   "source": "source_code",
-                  "last_validated_at": "0001-01-01T00:00:00Z"
+                  "evidence_id": "ev_selector_invite",
+                  "source_kind": "source_scan",
+                  "source_digest": "sha256:tree",
+                  "observed_role": "button",
+                  "observed_accessible_name": "Invite teammate",
+                  "observed_at": "2026-07-14T00:00:00Z",
+                  "last_validated_at": "2026-07-14T00:00:00Z",
+                  "evidence_refs": [
+                    {
+                      "id": "ev_selector_invite",
+                      "kind": "source_code",
+                      "summary": "Invite control summary"
+                    }
+                  ]
                 }
               ],
               "evidence_refs": [
@@ -799,6 +812,7 @@
       "workflow_graph_id": "graph_contract",
       "schema_version": "demoops.browser_agent_contract.v1",
       "mode": "bounded_runtime_repair",
+      "outcome_verifier_rules_version": "browser-agent-outcome-verifier-rules-v1",
       "business_authority": {
         "source": "app_approved_stage_plan",
         "script_may_change_business_intent": false,
@@ -981,14 +995,14 @@
       "file_system_policy": "no_direct_fs_access"
     },
     "reproducibility": {
-      "plan_hash_sha256": "0a790bac139e29ea1601d7c8ff1ccd6f2125d1926f834f7d04660ce06a51ce04",
+      "plan_hash_sha256": "c06019a4994223a8007161bade1675629aae5b01178f922d5ff21a23db133f3d",
       "stage_plan_hash_sha256": "897bbe4a1d77ca38125a12d04e5c338c26ba75f56c1308953196115b57d34888",
-      "outline_hash_sha256": "9631db1d5174258d2ec13052b0db49819abab55e60d111c8cb8c58116227f5ad",
+      "outline_hash_sha256": "4a8396ad8dddae294df84d61ef0a55ddc8888f32b761c558f9c0fb8602e84de1",
       "prompt_policy_hash_sha256": "d7e927013f7a6dac54f7323d9b0ab333cc4ea4e9c96b9b6de85e5fc211e55e2f",
       "understanding_dossier_hash_sha256": "5ac443d96ff42a0ed607e71c4cae7d3bcaf780d32660ae23ce146aa154a5fe76",
-      "browser_agent_contract_hash_sha256": "a01e8dd9c9b5737fe1e3e6d61cff3446fec4b8885e4fc8311d8701c7adff4c4a",
+      "browser_agent_contract_hash_sha256": "f5d1ed7687a25783b3d3a87dd1b29a9809a48b2e37eb1be8875b2bf57c8b7f4a",
       "markdown_hash_sha256": "1e3885486ca89f31a76fff9b4add940482985a6872a9ccb2c012c579982b4865",
-      "bundle_hash_sha256": "52124df39037af545cc7a0a0a40b85337ac5b93da534c5af996895ef6c36b0c3",
+      "bundle_hash_sha256": "5236b97d50fcfb7a557264b6309b4759e37f38e116c55059172483ae738bd1c3",
       "graph_hash_sha256": "3ee8c1762a68386a21e8fb598a98872bb014aa3b8d4886a831ab7cc650e0d79c",
       "source_snapshot_digest": "sha256:tree"
     },

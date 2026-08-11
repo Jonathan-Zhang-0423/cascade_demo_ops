@@ -9,17 +9,17 @@
 5. 包上传后自动进入 `awaiting_credentials` 或 `queued`，不提供 App→Worker start。Worker 仅通过 `127.0.0.1:18444` claim。
 6. 当前正式生产支持一次性 credential envelope，health capability 明确返回 `manual_login_checkpoint=false`；本地 dev-visible 流程仍可人工登录，但不能冒充正式 Direct 验收。
 7. 每条 required 需求必须闭合到 workflow requirement、stage、action/input、required validation 和 Evidence；关键链路缺失 fail-closed。
-8. selector 候选的 kind/value、来源和 Evidence 保持 App 批准边界；`data-testid` 不拼接进 accessible name。Server 只使用同 stage、同业务目标、同 Evidence 绑定候选。
+8. selector 候选固定携带 `evidence_id`、`source_kind`、`source_digest`、`observed_role`、`observed_accessible_name`、`observed_at`，且 `evidence_id` 必须存在于候选 `evidence_refs`；缺失时 App 预检与 Gateway 同时返回 `selector_provenance_incomplete`。`data-testid` 不拼接进 accessible name。Server 只使用同 stage、同业务目标、同 Evidence 绑定候选。
 9. 登录入口和表单分离；仅有普通 email input 不构成登录表单。营销 waitlist/newsletter 控件不能接收 credential。
 10. `action_target` 与 `success_target` 分离。fill 可用 `value_equals` 验证输入结果；click/select/submit 必须验证动作后路由、状态、弹窗、日志或结果控件。
 11. 动态路由使用 `/project/:id` 或 `{project_id}` 模板，Worker 仅在运行时匹配，不把真实 ID 写回批准包。
 12. 长任务使用结构化 required validations、wait conditions 和最大时长；自然语言“等待完成”不能单独构成完成条件。
-13. `DirectJobStatus` 返回协议、job/package、status/stage/progress，并增加 `waiting_reason`、`blocking_error_code`、`next_action`、`requires_reapproval`。不展示 token、端口密钥、Worker 堆栈或原始 envelope。
+13. `DirectJobStatus` 返回协议、job/package、status/stage/progress，并增加 `waiting_reason`、`blocking_error_code`、`next_action`、`requires_reapproval`。四个稳定字段必须持久化、重载和前端映射；UI 不展示 token、内部端口、Worker 堆栈或原始 envelope。
 14. 正式 completed 结果按请求强制包含最终 MP4、Browser trace、截图和 StageEventLog；缺失由 Gateway/App 最终交付门禁阻断。OutcomeVerifier 的渲染前检查可保留 warning，但不能把该 warning 当成正式交付成功。
 15. required `outcome_observed` 缺 Evidence refs 为 blocking；附加 observation 缺 Evidence 为 warning。
 16. App 下载全部 chunk、验证 SHA-256/size 并写 `.verified.sha256` 后，发送加密 ACK；ACK 完成后才允许显式释放 lease 和进入编辑器。失败结果不伪造 MP4。
 17. package 上传按 installation+package+digest 幂等；Gateway 重启后普通 queued/running job 可重领，credential envelope 必须重传。artifact chunk 可按索引重取；canceled/expired 不恢复。
-18. health 明确返回支持的协议、包 schema、runtime 和 capability flags；不兼容时 fail-closed，不回退 Legacy Exchange。
+18. health 明确返回支持的 Direct 协议、包 schema、runtime、Worker 协议、OutcomeVerifier rules 和 capability flags；任一不兼容时 fail-closed，不回退 Legacy Exchange。Worker claim 也固定携带并校验 `cascade.browser_agent_worker.v1`。
 19. `reunderstanding_required` 终止原 job。Server/Verifier只返回结构化问题；App 重新理解、生成新 package ID/digest、重新人工批准并创建新 job。
 
 ## 稳定状态机
@@ -45,3 +45,7 @@ package_received（接收瞬间）
 - Direct failure diagnostic、delivery refs 和 result ref 统一改写为 `direct://`，移除 `dev_local_artifact`、`local-dev/result-key` 和服务器本地路径。
 - package producer、approval、lease、installation 及批准子 digest 统一强校验。
 - 正式结果完整性、ACK、lease release 和 capability negotiation 形成同一协议闭环。
+- `waiting_reason`、`blocking_error_code`、`next_action`、`requires_reapproval` 不再在 App 持久化或 Bridge 映射中丢失。
+- selector candidate provenance 已贯通页面扫描、Go DTO、执行包和 Gateway；无证据的泛化 alternatives 在打包前剥离。
+- click/select/upload 复用动作目标作为成功验证由 warning 升为正式 blocker。
+- App 用户界面只展示安全执行会话，不展示动态数据端口实现。

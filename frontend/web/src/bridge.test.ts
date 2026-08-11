@@ -59,6 +59,10 @@ describe("desktop bridge contract", () => {
 				package_id: "pkg_direct",
 				cloud_job_id: "job_direct",
 				status: "completed",
+				waiting_reason: "artifact_ack_required",
+				blocking_error_code: "result_ack_pending",
+				next_action: "review_and_ack_result",
+				requires_reapproval: true,
 				result_package_id: "result_direct",
 				result_package: {
 					result_id: "result_direct",
@@ -77,6 +81,12 @@ describe("desktop bridge contract", () => {
 		}, fallback);
 		expect(mapped.assets.find((asset) => asset.assetID === "artifact_direct")?.mediaURL)
 			.toBe(`/v1/desktop/projects/${fallback.id}/browser-agent-direct/artifact/media?job_id=job_direct&file=demo.webm`);
+		expect(mapped.cloudRun).toMatchObject({
+			waitingReason: "artifact_ack_required",
+			blockingErrorCode: "result_ack_pending",
+			nextAction: "review_and_ack_result",
+			requiresReapproval: true,
+		});
 	});
   afterEach(() => {
     vi.restoreAllMocks();

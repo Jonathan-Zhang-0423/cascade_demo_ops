@@ -542,7 +542,7 @@ export function App() {
     setIsRunningProduct(true);
     const result = await bridge.releaseDirectBrowserAgentLease(workspace);
     if (result.ok && result.data) {
-      setWorkspace((current) => appendRuntimeLog(result.data!, { level: "success", message: "直连租约已释放", detail: "终态任务和已校验素材已保留；专属数据端口已关闭。" }));
+      setWorkspace((current) => appendRuntimeLog(result.data!, { level: "success", message: "安全执行会话已释放", detail: "终态任务和已校验素材仍保留。" }));
       void refreshProjects();
     } else {
       setWorkspace((current) => appendRuntimeLog({ ...current, cloudRun: { ...current.cloudRun, lastError: result.error ?? "直连租约释放失败" } }, { level: "error", message: "直连租约未释放", detail: result.error ?? "未知错误" }));
@@ -1783,12 +1783,15 @@ function CloudRunPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
 	  {workspace.cloudRun.transport === "browser_agent_direct_v1" ? <section className="table-section">
 		<SectionTitle title="Browser Agent 直连" meta={workspace.cloudRun.cloudJobID ? "已分配任务" : "等待上传"} />
 		<div className="settings-grid">
-		  <Fact label="专属数据端口" value={workspace.cloudRun.dataPort ? String(workspace.cloudRun.dataPort) : "审批上传时分配"} />
+		  <Fact label="当前阶段" value={workspace.cloudRun.stage ?? "等待上传"} />
 		  <Fact label="短期租约" value={workspace.cloudRun.leaseID ? `…${workspace.cloudRun.leaseID.slice(-12)}` : "尚未申请"} />
 		  <Fact label="租约到期" value={workspace.cloudRun.leaseExpiresAt ? formatTimestamp(workspace.cloudRun.leaseExpiresAt) : "—"} />
 		  <Fact label="Browser Agent Job" value={workspace.cloudRun.cloudJobID ?? "等待服务器接收"} />
 		  <Fact label="返回素材" value={`${workspace.cloudRun.directArtifacts?.length ?? 0} 个`} />
-		  <Fact label="传输保护" value="AES-256-GCM + HKDF-SHA256" />
+		  <Fact label="等待原因" value={workspace.cloudRun.waitingReason ?? "无"} />
+		  <Fact label="阻断代码" value={workspace.cloudRun.blockingErrorCode ?? "无"} />
+		  <Fact label="下一步" value={workspace.cloudRun.nextAction ?? "等待服务器状态"} />
+		  <Fact label="需要重新审批" value={workspace.cloudRun.requiresReapproval ? "是" : "否"} />
 		</div>
 	  </section> : null}
       <ServerLifecyclePanel workspace={workspace} />
@@ -2042,7 +2045,7 @@ function PackageApproval({
 		<ApprovalSummaryCard label="直连协议" value={direct?.reachable ? "健康检查通过" : "不可达"} detail={direct?.protocolVersion ?? "browser-agent-direct-v1"} />
 		<ApprovalSummaryCard label="安全传输" value={direct?.tokenConfigured ? "令牌已入系统凭据库" : "未配置令牌"} detail={direct?.cryptoSuite ?? "AES-256-GCM + HKDF-SHA256"} />
 		<ApprovalSummaryCard label="包预检" value={workspace.packagePreview.readiness === "ready" ? "已通过" : workspace.packagePreview.readiness === "review_required" ? "需复核" : "未通过"} detail={workspace.packagePreview.approvalSubjectDigest ? "当前 digest 已生成" : "等待生成正式 digest"} />
-		<ApprovalSummaryCard label="上传与执行" value={workspace.cloudRun.cloudJobID ? cloudStatusLabel(workspace.cloudRun.status) : "尚未上传"} detail={workspace.cloudRun.cloudJobID ? `Browser Agent job ${workspace.cloudRun.cloudJobID.slice(-12)}` : "审批后才申请专属短期数据端口"} />
+		<ApprovalSummaryCard label="上传与执行" value={workspace.cloudRun.cloudJobID ? cloudStatusLabel(workspace.cloudRun.status) : "尚未上传"} detail={workspace.cloudRun.cloudJobID ? `Browser Agent job ${workspace.cloudRun.cloudJobID.slice(-12)}` : "审批后才建立短期安全执行会话"} />
 	  </div>
 
 	  {workspace.packagePreview.confidenceWarnings?.length ? <div className="notice-card warning"><strong>{runtimeEvidencePending ? "运行时证据待采集" : "需要重点复核"}</strong><p>{workspace.packagePreview.confidenceWarnings.slice(0, 3).join("；")}</p></div> : null}
@@ -2096,7 +2099,7 @@ function ControlPlaneConnectionCard({ runtimeHealth, resolved, onConfigure }: { 
 		setSaving(false);
 	}
 	return <section className="approval-server-card">
-		<div><span>{resolved ? runtimeHealth?.browserAgentDirect?.configured ? "配置已保存，协议尚未就绪" : "需要连接" : "正在检查"}</span><strong>{resolved ? "连接 Ubuntu Browser Agent 服务器" : "正在读取执行服务器配置…"}</strong><p>访问令牌只写入操作系统凭据库。当前包审批通过后，App 才向固定 TLS 控制端口申请专属短期数据端口并加密上传。</p></div>
+		<div><span>{resolved ? runtimeHealth?.browserAgentDirect?.configured ? "配置已保存，协议尚未就绪" : "需要连接" : "正在检查"}</span><strong>{resolved ? "连接 Ubuntu Browser Agent 服务器" : "正在读取执行服务器配置…"}</strong><p>访问令牌只写入操作系统凭据库。当前包审批通过后，App 才建立短期加密执行会话并上传。</p></div>
 		<form onSubmit={submit}><input value={baseURL} onChange={(event) => setBaseURL(event.currentTarget.value)} placeholder="https://browser-agent.example:18443" aria-label="Browser Agent 控制地址" autoComplete="url" disabled={!resolved || saving} /><input type="password" value={accessToken} onChange={(event) => setAccessToken(event.currentTarget.value)} placeholder="服务器访问令牌（仅保存到系统凭据库）" aria-label="Browser Agent 访问令牌" autoComplete="off" disabled={!resolved || saving} /><button type="submit" className="primary-action" disabled={!resolved || saving || !baseURL.trim() || !accessToken.trim()}>{saving ? "验证中…" : "保存并验证"}</button></form>
 		{error ? <div className="error-banner">{error}</div> : null}
 		{runtimeHealth?.browserAgentDirect?.controlURLHost ? <small>当前：{browserAgentDirectLabel(runtimeHealth)}</small> : null}
@@ -2374,7 +2377,7 @@ function AssetReview({
             <button type="button" className="secondary-action" disabled={busy || !canReview || revisionSummaryRequired} onClick={() => onReview("rerecord_requested", reviewSummary)}>缺少素材，重新录制</button>
           </div>
           {canReview && revisionSummaryRequired ? <div className="input-note">提交重新剪辑或重新录制前，请填写具体修改意见；直接通过无需填写。</div> : null}
-          {workspace.cloudRun.leaseID ? <button type="button" className="secondary-action" disabled={busy || !canReview || workspace.cloudRun.status === "running"} onClick={onReleaseLease}>释放已完成任务的专属数据端口</button> : null}
+          {workspace.cloudRun.leaseID ? <button type="button" className="secondary-action" disabled={busy || !canReview || workspace.cloudRun.status === "running"} onClick={onReleaseLease}>释放已完成任务的安全执行会话</button> : null}
           {review ? <div className="input-note">已提交：{review.decision === "approved" ? "通过" : review.decision === "reedit_requested" ? "重新剪辑" : "重新录制"}{review.summary ? ` · ${review.summary}` : ""}</div> : null}
         </div>
       </section>
@@ -2488,7 +2491,7 @@ function SettingsPanel({
       <section className="table-section">
         <SectionTitle title="Ubuntu Browser Agent 服务器" meta={runtimeHealth?.browserAgentDirect?.reachable ? "协议可达" : runtimeHealth?.browserAgentDirect?.configured ? "配置已保存，未连通" : "需要连接"} />
         <form className="control-plane-form" onSubmit={saveControlPlane}>
-          <div><strong>{runtimeHealth?.browserAgentDirect?.configured ? `${runtimeHealth.browserAgentDirect.controlURLHost ?? "Browser Agent server"}${runtimeHealth.browserAgentDirect.controlURLPath ?? ""}` : "配置 Browser Agent 直连网关"}</strong><span>使用服务器的固定 HTTPS 控制端口。令牌只保存到 Windows Credential Manager；执行包审批后才申请专属短期数据端口。此处不接收 SSH 密码。</span></div>
+          <div><strong>{runtimeHealth?.browserAgentDirect?.configured ? `${runtimeHealth.browserAgentDirect.controlURLHost ?? "Browser Agent server"}${runtimeHealth.browserAgentDirect.controlURLPath ?? ""}` : "配置 Browser Agent 直连网关"}</strong><span>使用服务器的 HTTPS 控制地址。令牌只保存到 Windows Credential Manager；执行包审批后才建立短期安全执行会话。此处不接收 SSH 密码。</span></div>
           <input value={controlPlaneURL} onChange={(event) => setControlPlaneURL(event.currentTarget.value)} placeholder="https://browser-agent.example:18443" aria-label="Browser Agent 控制地址" autoComplete="url" />
 		  <input type="password" value={controlPlaneAccessToken} onChange={(event) => setControlPlaneAccessToken(event.currentTarget.value)} placeholder="访问令牌（仅保存到系统凭据库）" aria-label="Browser Agent 访问令牌" autoComplete="off" />
           <button type="submit" className="primary-action" disabled={controlPlaneSaving || !controlPlaneURL.trim() || !controlPlaneAccessToken.trim()}>{controlPlaneSaving ? "验证中…" : runtimeHealth?.browserAgentDirect?.reachable ? "更换服务器" : runtimeHealth?.browserAgentDirect?.configured ? "重新验证" : "保存并验证"}</button>

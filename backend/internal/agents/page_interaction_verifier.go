@@ -152,14 +152,20 @@ type interactionVerifierDiagnostics struct {
 
 type interactionVerifierResult struct {
 	interactionVerifierItem
-	Status     string    `json:"status,omitempty"`
-	Visible    bool      `json:"visible,omitempty"`
-	Enabled    bool      `json:"enabled,omitempty"`
-	Editable   bool      `json:"editable,omitempty"`
-	PageURL    string    `json:"page_url,omitempty"`
-	PageTitle  string    `json:"page_title,omitempty"`
-	Message    string    `json:"message,omitempty"`
-	VerifiedAt time.Time `json:"verified_at,omitempty"`
+	Status                 string    `json:"status,omitempty"`
+	Visible                bool      `json:"visible,omitempty"`
+	Enabled                bool      `json:"enabled,omitempty"`
+	Editable               bool      `json:"editable,omitempty"`
+	PageURL                string    `json:"page_url,omitempty"`
+	PageTitle              string    `json:"page_title,omitempty"`
+	Message                string    `json:"message,omitempty"`
+	VerifiedAt             time.Time `json:"verified_at,omitempty"`
+	EvidenceID             string    `json:"evidence_id,omitempty"`
+	SourceKind             string    `json:"source_kind,omitempty"`
+	SourceDigest           string    `json:"source_digest,omitempty"`
+	ObservedRole           string    `json:"observed_role,omitempty"`
+	ObservedAccessibleName string    `json:"observed_accessible_name,omitempty"`
+	ObservedAt             time.Time `json:"observed_at,omitempty"`
 }
 
 type interactionVerifierResponseError struct {
@@ -429,26 +435,14 @@ func intentSelectorAction(
 	alternatives := []model.SelectorCandidate{}
 	if probe, ok := bestIntentProbe(candidates, keywords, kind); ok {
 		selector = probe.Selector
-		alternatives = append(alternatives, model.SelectorCandidate{
-			Kind:           "css",
-			Value:          probe.Selector,
-			Confidence:     0.7,
-			StabilityScore: float64(probe.SelectorScore) / 100,
-			Source:         "feature_trace_code_evidence",
-			EvidenceRefs:   probe.EvidenceRefs,
-		})
-	}
-	for _, selectorCandidate := range semanticSelectors {
-		alternatives = append(alternatives, model.SelectorCandidate{
-			Kind:           "css",
-			Value:          selectorCandidate,
-			Confidence:     0.68,
-			StabilityScore: float64(selectorQualityScore(selectorCandidate)) / 100,
-			Source:         "runtime_adaptive_intent",
-		})
+		for _, candidate := range probe.Alternatives {
+			if model.SelectorCandidateHasFormalProvenance(candidate) {
+				alternatives = append(alternatives, candidate)
+			}
+		}
 	}
 	if selector == "" {
-		selector = bestSelectorCandidate(alternatives)
+		selector = bestSelectorValue(semanticSelectors...)
 	}
 	action := model.VerifiedInteractionAction{
 		ID:                 id,
@@ -707,13 +701,18 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 		if action.VerifiedAt.IsZero() {
 			action.VerifiedAt = time.Now().UTC()
 		}
-		action.EvidenceRefs = append(action.EvidenceRefs, model.EvidenceRef{
-			ID:         "ev_browser_scan_" + shortHash(response.BrowserScanID+result.ID),
+		evidence := model.EvidenceRef{
+			ID:         firstNonEmpty(result.EvidenceID, "ev_browser_scan_"+shortHash(response.BrowserScanID+result.ID)),
 			Kind:       model.EvidenceKindBrowserScan,
 			Summary:    "只读页面预扫描确认 selector 可见可用：" + result.Selector,
 			FieldPath:  "verified_interaction_plan.actions." + result.ID,
 			Confidence: 0.9,
-		})
+		}
+		action.EvidenceRefs = append(action.EvidenceRefs, evidence)
+		action.Alternatives = formalSelectorCandidates(action.Alternatives)
+		if candidate, ok := selectorCandidateFromVerifierResult(result, evidence); ok {
+			action.Alternatives = uniqueSelectorCandidates(append(action.Alternatives, candidate))
+		}
 		plan.Actions = append(plan.Actions, action)
 		if action.IsBusiness {
 			plan.BusinessActionCount++
@@ -842,7 +841,7 @@ func probeFromVerifierResult(result interactionVerifierResult, byID map[string]m
 	return model.InteractionProbe{
 		ID:             firstNonEmpty(result.ID, "probe_browser_scan_"+shortHash(result.Selector+result.Label)),
 		IntentGoalID:   result.IntentGoalID,
-		Label:          firstNonEmpty(result.Label, labelFromSelector(result.Selector)),
+		Label:          firstNonEmpty(result.ObservedAccessibleName, result.Label, labelFromSelector(result.Selector)),
 		Kind:           kind,
 		Selector:       result.Selector,
 		URL:            result.PageURL,
@@ -853,6 +852,53 @@ func probeFromVerifierResult(result interactionVerifierResult, byID map[string]m
 		SelectorScore:  selectorQualityScore(result.Selector),
 		WaitConditions: []string{"domcontentloaded", "networkidle"},
 	}
+}
+
+func formalSelectorCandidates(values []model.SelectorCandidate) []model.SelectorCandidate {
+	out := make([]model.SelectorCandidate, 0, len(values))
+	for _, candidate := range values {
+		if model.SelectorCandidateHasFormalProvenance(candidate) {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func selectorCandidateFromVerifierResult(result interactionVerifierResult, evidence model.EvidenceRef) (model.SelectorCandidate, bool) {
+	if strings.TrimSpace(result.Selector) == "" {
+		return model.SelectorCandidate{}, false
+	}
+	kind, value := selectorCandidateIdentity(result.Selector)
+	observedAt := result.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = result.VerifiedAt
+	}
+	candidate := model.SelectorCandidate{
+		Kind:                   kind,
+		Value:                  value,
+		Confidence:             0.9,
+		StabilityScore:         float64(selectorQualityScore(result.Selector)) / 100,
+		Source:                 firstNonEmpty(result.SourceKind, "page_scan"),
+		EvidenceID:             firstNonEmpty(result.EvidenceID, evidence.ID),
+		SourceKind:             firstNonEmpty(result.SourceKind, "page_scan"),
+		SourceDigest:           result.SourceDigest,
+		ObservedRole:           result.ObservedRole,
+		ObservedAccessibleName: firstNonEmpty(result.ObservedAccessibleName, result.Label),
+		ObservedAt:             observedAt,
+		LastValidatedAt:        result.VerifiedAt,
+		EvidenceRefs:           []model.EvidenceRef{evidence},
+	}
+	return candidate, model.SelectorCandidateHasFormalProvenance(candidate)
+}
+
+func selectorCandidateIdentity(value string) (string, string) {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	if strings.Contains(lower, "data-testid") {
+		if testID := testIDFromSelector(value); testID != "" {
+			return "testid", testID
+		}
+	}
+	return "css", value
 }
 
 func emptyVerifiedPlan(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, mode string, scanID string, sourceURL string) *model.VerifiedInteractionPlan {

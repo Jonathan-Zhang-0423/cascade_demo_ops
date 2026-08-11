@@ -218,7 +218,12 @@ describe("interaction verifier safe state exploration", () => {
     expect(result.ok).toBe(true);
     expect(result.verification_mode).toBe("playwright_safe_state_scan");
     expect(result.diagnostics?.safe_state_transitions).toContain("applied:business_stage_new_project_entry");
-    expect(result.results.find((item) => item.id === "project-name")?.status).toBe("verified");
+    const projectName = result.results.find((item) => item.id === "project-name");
+    expect(projectName?.status).toBe("verified");
+    expect(projectName).toMatchObject({ source_kind: "page_scan", observed_role: "textbox", observed_accessible_name: "Project name" });
+    expect(projectName?.source_digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(projectName?.evidence_id).toMatch(/^ev_browser_scan_/);
+    expect(projectName?.observed_accessible_name).not.toContain("project-name");
   }, 30_000);
 
   it("rejects destructive transition semantics", async () => {

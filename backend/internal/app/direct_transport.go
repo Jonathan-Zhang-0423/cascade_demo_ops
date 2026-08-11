@@ -46,20 +46,22 @@ type directInstallationIdentity struct {
 }
 
 type DirectTransportRuntimeView struct {
-	Configured                     bool            `json:"configured"`
-	Reachable                      bool            `json:"reachable"`
-	TokenConfigured                bool            `json:"token_configured"`
-	ProtocolVersion                string          `json:"protocol_version,omitempty"`
-	CryptoSuite                    string          `json:"crypto_suite,omitempty"`
-	ControlURLHost                 string          `json:"control_url_host,omitempty"`
-	ControlURLPath                 string          `json:"control_url_path,omitempty"`
-	InstallationIDSuffix           string          `json:"installation_id_suffix,omitempty"`
-	Transport                      string          `json:"transport"`
-	ErrorClass                     string          `json:"error_class,omitempty"`
-	SupportedProtocolVersions      []string        `json:"supported_protocol_versions,omitempty"`
-	SupportedPackageSchemaVersions []string        `json:"supported_package_schema_versions,omitempty"`
-	SupportedRuntimes              []string        `json:"supported_runtimes,omitempty"`
-	Capabilities                   map[string]bool `json:"capabilities,omitempty"`
+	Configured                            bool            `json:"configured"`
+	Reachable                             bool            `json:"reachable"`
+	TokenConfigured                       bool            `json:"token_configured"`
+	ProtocolVersion                       string          `json:"protocol_version,omitempty"`
+	CryptoSuite                           string          `json:"crypto_suite,omitempty"`
+	ControlURLHost                        string          `json:"control_url_host,omitempty"`
+	ControlURLPath                        string          `json:"control_url_path,omitempty"`
+	InstallationIDSuffix                  string          `json:"installation_id_suffix,omitempty"`
+	Transport                             string          `json:"transport"`
+	ErrorClass                            string          `json:"error_class,omitempty"`
+	SupportedProtocolVersions             []string        `json:"supported_protocol_versions,omitempty"`
+	SupportedPackageSchemaVersions        []string        `json:"supported_package_schema_versions,omitempty"`
+	SupportedRuntimes                     []string        `json:"supported_runtimes,omitempty"`
+	SupportedWorkerProtocolVersions       []string        `json:"supported_worker_protocol_versions,omitempty"`
+	SupportedOutcomeVerifierRulesVersions []string        `json:"supported_outcome_verifier_rules_versions,omitempty"`
+	Capabilities                          map[string]bool `json:"capabilities,omitempty"`
 }
 
 type DirectTransportUploadRequest struct {
@@ -256,11 +258,15 @@ func (s *Service) DirectTransportStatus(ctx context.Context) (DirectTransportRun
 	view.SupportedProtocolVersions = append([]string(nil), health.SupportedProtocolVersions...)
 	view.SupportedPackageSchemaVersions = append([]string(nil), health.SupportedPackageSchemaVersions...)
 	view.SupportedRuntimes = append([]string(nil), health.SupportedRuntimes...)
+	view.SupportedWorkerProtocolVersions = append([]string(nil), health.SupportedWorkerProtocolVersions...)
+	view.SupportedOutcomeVerifierRulesVersions = append([]string(nil), health.SupportedOutcomeVerifierRulesVersions...)
 	view.Capabilities = health.Capabilities
 	view.Reachable = health.ProtocolVersion == model.DirectTransportProtocolVersion && health.CryptoSuite == model.DirectTransportCryptoSuite &&
 		directSliceContains(health.SupportedProtocolVersions, model.DirectTransportProtocolVersion) &&
 		directSliceContains(health.SupportedPackageSchemaVersions, model.ClientExecutionPackageSchemaVersion) &&
-		directSliceContains(health.SupportedRuntimes, model.ExecutableScriptRuntimeBrowserAgentOutlineV1)
+		directSliceContains(health.SupportedRuntimes, model.ExecutableScriptRuntimeBrowserAgentOutlineV1) &&
+		directSliceContains(health.SupportedWorkerProtocolVersions, model.DirectWorkerProtocolVersion) &&
+		directSliceContains(health.SupportedOutcomeVerifierRulesVersions, model.BrowserAgentOutcomeVerifierRulesVersion)
 	if !view.Reachable {
 		view.ErrorClass = "protocol_mismatch"
 	}
@@ -889,7 +895,7 @@ func (s *Service) acquireDirectLease(ctx context.Context, projectID string) (mod
 			run.DataPort = lease.DataPort
 			expires := lease.ExpiresAt
 			run.LeaseExpiresAt = &expires
-			run.Message = "Browser Agent 直连租约已恢复，使用新的专属数据端口。"
+			run.Message = "Browser Agent 安全执行会话已恢复。"
 		})
 	}
 	return lease, nil
@@ -1012,7 +1018,7 @@ func (s *Service) persistDirectUpload(ctx context.Context, projectID, orgID stri
 		run.CloudJobID = receipt.JobID
 		run.Status = receipt.Status
 		run.Stage = receipt.Stage
-		run.Message = "执行包已加密上传至专属 Browser Agent 端口。"
+		run.Message = "执行包已通过短期加密会话上传至 Browser Agent。"
 		run.ProgressPercent = 5
 	})
 }
@@ -1036,6 +1042,10 @@ func (s *Service) persistDirectStatus(ctx context.Context, projectID string, sta
 		run.Status = status.Status
 		run.Stage = status.Stage
 		run.Message = status.Message
+		run.WaitingReason = status.WaitingReason
+		run.BlockingErrorCode = status.BlockingErrorCode
+		run.NextAction = status.NextAction
+		run.RequiresReapproval = status.RequiresReapproval
 		run.ProgressPercent = status.ProgressPercent
 		run.ResultPackageID = status.ResultPackageID
 		run.DirectArtifacts = append([]model.DirectArtifact(nil), status.Artifacts...)

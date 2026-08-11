@@ -105,8 +105,8 @@ func TestBrowserAgentReadinessRejectsPostActionValidationReusingClickedControl(t
 	step.Validations = []model.ValidationSpec{{ID: "after_click", Kind: "element_visible", Target: model.ActionTarget{TestID: "button-new-project"}, Required: true}}
 	pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1].StageKind = model.BusinessStageKindBusinessSubmit
 	report := browserAgentReadiness(&pkg)
-	if !report.CanRun || !browserAgentReadinessHasWarning(report, "post_action_validation_reuses_action_target") {
-		t.Fatalf("post-action validation reuse must be surfaced as a readiness warning: %+v", report)
+	if report.CanRun || !browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_action_target") {
+		t.Fatalf("post-action validation reuse must block formal execution: %+v", report)
 	}
 }
 
@@ -134,8 +134,8 @@ func TestBrowserAgentReadinessDetectsApprovedActionIdentityReuse(t *testing.T) {
 		Required: true,
 	}}
 	report := browserAgentReadiness(&pkg)
-	if !browserAgentReadinessHasWarning(report, "post_action_validation_reuses_action_identity") && !browserAgentReadinessHasWarning(report, "post_action_validation_reuses_approved_action_evidence") {
-		t.Fatalf("expected action identity reuse warning, got: %+v", report)
+	if report.CanRun || (!browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_action_identity") && !browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_approved_action_evidence")) {
+		t.Fatalf("expected action identity reuse blocker, got: %+v", report)
 	}
 }
 
@@ -159,15 +159,6 @@ func TestBrowserAgentReadinessRejectsDeclaredInputWithoutFillAction(t *testing.T
 func browserAgentReadinessHasBlocker(report BrowserAgentReadinessReport, code string) bool {
 	for _, blocker := range report.Blockers {
 		if blocker.Code == code {
-			return true
-		}
-	}
-	return false
-}
-
-func browserAgentReadinessHasWarning(report BrowserAgentReadinessReport, code string) bool {
-	for _, warning := range report.Warnings {
-		if warning.Code == code {
 			return true
 		}
 	}
