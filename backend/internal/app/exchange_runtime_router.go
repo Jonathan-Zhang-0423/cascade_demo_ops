@@ -105,6 +105,23 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 			}
 			result.StageEventLogRef = &artifact
 		}
+		// Formal Direct results must carry a replay manifest that indexes the
+		// same runtime events, validation reports and final rendered assets. Build
+		// it after the runner returns so the manifest includes the stage log and
+		// editor-facing render artifacts produced by the Outline Runner.
+		if eventSink != nil {
+			manifest, manifestErr := BuildReplayManifest(BuildReplayManifestInput{
+				Result: result, Events: eventSink.Events(), Package: *request.Package,
+				RunID: runtimePlan.RunID, EventDir: request.RecordingOutputDir,
+				CreatedAt: request.ResultCreatedAt,
+			})
+			if manifestErr != nil {
+				return model.RecordingResultPackage{}, newRuntimeExecutionError("replay_manifest_unavailable", manifestErr)
+			}
+			if err := AttachReplayManifestArtifact(&result, manifest); err != nil {
+				return model.RecordingResultPackage{}, newRuntimeExecutionError("replay_manifest_unavailable", err)
+			}
+		}
 		return result, nil
 	default:
 		return model.RecordingResultPackage{}, newRuntimeExecutionError(runtimeErrorUnsupported, fmt.Errorf("execution package runtime %q is not supported", runtimeName))

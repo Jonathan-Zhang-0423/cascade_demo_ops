@@ -111,7 +111,7 @@ Gateway 只能从 `ValidationReports[].Decision` 判断该状态，不得从自�
 
 ### `GET /v1/direct/jobs/{job_id}/result`
 
-只在结果就绪后返回加密 `recording_result`。Server 必须校验结果与源包、trace、stage、业务验证和已上传 artifact 的 digest/size 一致。正式 completed 结果若请求了 MP4、trace 或截图，则缺一即返回 `result_artifact_completeness_failed`；`stage_event_log_ref` 始终必填。正式 failed 结果必须有脱敏 failure diagnostic，并尽可能包含截图/trace；只有明确的基础设施启动失败允许没有页面素材。
+只在结果就绪后返回加密 `recording_result`。Server 必须校验结果与源包、trace、stage、业务验证和已上传 artifact 的 digest/size 一致。正式 `browser-agent-outline-v1` completed 结果必须包含真实 `StepResults`、`ValidationReports`、请求中的 `raw_recording`、Replay Manifest 和 `stage_event_log_ref`；请求最终视频时还必须包含 MP4、`asset_timeline_catalog` 与 `demo_edit_plan`，请求 trace/截图时对应产物同样必填。所有关键产物必须带非空 ID、URI、SHA-256 和 `size_bytes`，任一缺失返回 `result_artifact_completeness_failed`。正式 failed 结果必须有脱敏 failure diagnostic，并尽可能包含截图/trace；只有明确的基础设施启动失败允许没有页面素材。
 
 ### `GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}/chunks/{chunk_index}`
 

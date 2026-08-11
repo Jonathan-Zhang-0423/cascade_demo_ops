@@ -88,9 +88,13 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	artifactBytes := bytes.Repeat([]byte("Browser Agent real worker bytes;"), model.DirectArtifactChunkBytes/16+1)
 	artifacts := []model.DirectArtifact{
 		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_video", "final.mp4", "video/mp4", "final_demo", "demo_video", artifactBytes),
+		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_raw_recording", "recording.webm", "video/webm", "raw_recording", "raw_recording", artifactBytes),
 		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_trace", "trace.zip", "application/zip", "browser_trace", "browser_trace", artifactBytes),
 		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_screenshot", "stage.png", "image/png", "stage_evidence", "screenshot", artifactBytes),
 		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_events", "events.jsonl", "application/x-ndjson", "stage_event_log", "browser_agent_stage_event_log", artifactBytes),
+		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_replay_manifest", "replay-manifest.json", "application/json", "replay_manifest", "replay_manifest", artifactBytes),
+		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_timeline_catalog", "asset_timeline_catalog.json", "application/json", "render_metadata", "asset_timeline_catalog", artifactBytes),
+		uploadDirectWorkerArtifact(t, gateway, claimed.JobID, "artifact_edit_plan", "demo_edit_plan.json", "application/json", "render_plan", "demo_edit_plan", artifactBytes),
 	}
 	result := directAppTestResult(claimed, artifacts)
 	putDirectWorkerJSON(t, gateway.WorkerHandler(), http.MethodPut, "/v1/worker/jobs/"+claimed.JobID+"/result", result, http.StatusOK)
@@ -724,7 +728,26 @@ func directAppTestResult(job directtransport.WorkerJob, artifacts []model.Direct
 			stageLog = &copyRef
 		}
 	}
-	return model.RecordingResultPackage{ResultID: "result_" + job.JobID, SourcePackageID: job.Package.PackageID, CloudJobID: job.JobID, SchemaVersion: model.RecordingResultPackageSchemaVersion, Status: model.RecordingResultStatusGenerated, ExecutionTrace: &model.ExecutionTrace{ID: "trace_" + job.JobID, WorkflowGraphID: job.Package.WorkflowGraph.ID, GraphVersion: job.Package.WorkflowGraph.Version, PassRate: 1, StepResults: []model.StepResult{step}, Artifacts: refs}, StepResults: []model.StepResult{step}, GeneratedAssets: refs, StageEventLogRef: stageLog, VerificationReport: model.VerificationReport{PassRate: 1, ReproducibilityMatch: true}, AuditTrail: model.CloudExecutionAuditTrail{CompletedAt: now}, Delivery: model.ResultDelivery{ResultPackageRef: model.PackageArtifactDescriptor{ID: "result_package", Role: "recording_result", Kind: model.ArtifactKindRecordingResultPackage, URI: "direct://results/result.json", SHA256: strings.Repeat("a", 64), Encrypted: true, Sensitive: true, RecipientKeyID: "direct-lease"}, AssetRefs: descriptors, RecipientKind: model.ResultRecipientAppInstallation, RecipientKeyID: "direct-lease", EncryptionAlg: model.DirectTransportCryptoSuite, AckRequired: true, ExpiresAt: now.Add(time.Hour)}, CreatedAt: now}
+	bundleHash := job.Package.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+	policyHash := job.Package.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
+	report := model.ValidationReport{
+		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "report_" + job.JobID, RunID: job.JobID,
+		SourcePackageID: job.Package.PackageID, SourceBundleHashSHA256: bundleHash, PolicyHashSHA256: policyHash,
+		Phase: model.ValidationPhasePostExecution, Decision: model.ValidationDecisionContinue,
+		PassRate: 1, OverallConfidence: 1, EvidenceQuality: model.RuntimeObservationActualBrowser,
+		EvidenceRefs: []model.EvidenceRef{{ID: "evidence_result", Kind: model.EvidenceKindWebScreenshot, ArtifactID: "artifact_screenshot"}}, CreatedAt: now,
+	}
+	return model.RecordingResultPackage{
+		ResultID: "result_" + job.JobID, SourcePackageID: job.Package.PackageID, CloudJobID: job.JobID,
+		SchemaVersion: model.RecordingResultPackageSchemaVersion, Status: model.RecordingResultStatusGenerated,
+		ExecutionTrace: &model.ExecutionTrace{ID: "trace_" + job.JobID, WorkflowGraphID: job.Package.WorkflowGraph.ID, GraphVersion: job.Package.WorkflowGraph.Version, PassRate: 1, StepResults: []model.StepResult{step}, Artifacts: refs},
+		StepResults:    []model.StepResult{step}, GeneratedAssets: refs, ValidationReports: []model.ValidationReport{report}, StageEventLogRef: stageLog,
+		VerificationReport: model.VerificationReport{PassRate: 1, ReproducibilityMatch: true}, AuditTrail: model.CloudExecutionAuditTrail{CompletedAt: now},
+		Delivery: model.ResultDelivery{
+			ResultPackageRef: model.PackageArtifactDescriptor{ID: "result_package", Role: "recording_result", Kind: model.ArtifactKindRecordingResultPackage, URI: "direct://results/result.json", SHA256: strings.Repeat("a", 64), Encrypted: true, Sensitive: true, RecipientKeyID: "direct-lease"},
+			AssetRefs:        descriptors, RecipientKind: model.ResultRecipientAppInstallation, RecipientKeyID: "direct-lease", EncryptionAlg: model.DirectTransportCryptoSuite, AckRequired: true, ExpiresAt: now.Add(time.Hour),
+		}, CreatedAt: now,
+	}
 }
 func reserveDirectAppTestPort(t *testing.T) int {
 	t.Helper()

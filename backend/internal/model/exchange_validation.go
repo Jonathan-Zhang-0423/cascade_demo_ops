@@ -147,36 +147,72 @@ func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, sour
 	if result.ExecutionTrace != nil {
 		assets = append(assets, result.ExecutionTrace.Artifacts...)
 	}
-	hasKind := func(kinds ...string) bool {
+	findKind := func(kinds ...string) (ArtifactRef, bool) {
 		for _, asset := range assets {
 			for _, kind := range kinds {
 				if strings.EqualFold(strings.TrimSpace(asset.Kind), kind) {
-					return true
+					return asset, true
 				}
 			}
 		}
-		return false
+		return ArtifactRef{}, false
+	}
+	requireArtifact := func(code string, kinds ...string) error {
+		artifact, ok := findKind(kinds...)
+		if !ok {
+			return fmt.Errorf("%s: formal completed result is missing the required artifact", code)
+		}
+		if strings.TrimSpace(artifact.ID) == "" || strings.TrimSpace(artifact.URI) == "" || strings.TrimSpace(artifact.SHA256) == "" || artifact.SizeBytes <= 0 {
+			return fmt.Errorf("%s: required artifact must include non-empty id, uri, sha256 and size_bytes", code)
+		}
+		return nil
+	}
+	if len(result.StepResults) == 0 {
+		return errors.New("result_missing_step_results: formal completed result requires runtime StepResults")
+	}
+	if len(result.ValidationReports) == 0 {
+		return errors.New("result_missing_validation_reports: formal completed result requires ValidationReports")
+	}
+	if source.RecordingRunSpec.Outputs.RawRecording {
+		if err := requireArtifact("result_missing_raw_recording", "raw_recording"); err != nil {
+			return err
+		}
+	}
+	if source.ExecutableScriptBundle != nil && source.ExecutableScriptBundle.ScriptManifest.Runtime == ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		if err := requireArtifact("result_missing_replay_manifest", "replay_manifest"); err != nil {
+			return err
+		}
 	}
 	if source.RecordingRunSpec.Outputs.FinalVideo {
-		hasMP4 := false
-		for _, asset := range assets {
-			if strings.EqualFold(asset.Kind, "demo_video") && strings.EqualFold(asset.MimeType, "video/mp4") {
-				hasMP4 = true
-				break
-			}
-		}
-		if !hasMP4 {
+		video, ok := findKind("demo_video", "mp4")
+		if !ok || !strings.EqualFold(strings.TrimSpace(video.MimeType), "video/mp4") {
 			return errors.New("result_missing_final_mp4: formal completed result requires the requested demo_video MP4")
 		}
+		if strings.TrimSpace(video.ID) == "" || strings.TrimSpace(video.URI) == "" || strings.TrimSpace(video.SHA256) == "" || video.SizeBytes <= 0 {
+			return errors.New("result_missing_final_mp4: requested demo_video must include non-empty id, uri, sha256 and size_bytes")
+		}
+		if err := requireArtifact("result_missing_asset_timeline_catalog", "asset_timeline_catalog"); err != nil {
+			return err
+		}
+		if err := requireArtifact("result_missing_demo_edit_plan", "demo_edit_plan"); err != nil {
+			return err
+		}
 	}
-	if source.RecordingRunSpec.Outputs.Trace && !hasKind("browser_trace", "execution_trace") {
-		return errors.New("result_missing_browser_trace: formal completed result requires the requested browser trace")
+	if source.RecordingRunSpec.Outputs.Trace {
+		if err := requireArtifact("result_missing_browser_trace", "browser_trace", "execution_trace"); err != nil {
+			return err
+		}
 	}
-	if source.RecordingRunSpec.Outputs.ScreenshotPack && !hasKind("screenshot", "step_screenshot", "failure_screenshot") {
-		return errors.New("result_missing_screenshots: formal completed result requires the requested screenshot evidence")
+	if source.RecordingRunSpec.Outputs.ScreenshotPack {
+		if err := requireArtifact("result_missing_screenshots", "screenshot", "step_screenshot", "failure_screenshot"); err != nil {
+			return err
+		}
 	}
 	if result.StageEventLogRef == nil || strings.TrimSpace(result.StageEventLogRef.ID) == "" || strings.TrimSpace(result.StageEventLogRef.URI) == "" {
 		return errors.New("result_missing_stage_event_log: formal completed result requires stage_event_log_ref")
+	}
+	if result.StageEventLogRef.SHA256 == "" || result.StageEventLogRef.SizeBytes <= 0 {
+		return errors.New("result_missing_stage_event_log: stage_event_log_ref must include sha256 and size_bytes")
 	}
 	return nil
 }

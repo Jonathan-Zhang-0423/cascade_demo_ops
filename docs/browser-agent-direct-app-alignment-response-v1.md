@@ -15,7 +15,7 @@
 11. 动态路由使用 `/project/:id` 或 `{project_id}` 模板，Worker 仅在运行时匹配，不把真实 ID 写回批准包。
 12. 长任务使用结构化 required validations、wait conditions 和最大时长；自然语言“等待完成”不能单独构成完成条件。
 13. `DirectJobStatus` 返回协议、job/package、status/stage/progress，并增加 `waiting_reason`、`blocking_error_code`、`next_action`、`requires_reapproval`；`reunderstanding_required` 另带可选 `reunderstanding_issues[]`。这些稳定字段必须持久化、重载和前端映射；issue 只含脱敏结构和 opaque Evidence ID，UI 不展示 token、内部端口、Worker 堆栈、页面内容或原始 envelope。
-14. 正式 completed 结果按请求强制包含最终 MP4、Browser trace、截图和 StageEventLog；缺失由 Gateway/App 最终交付门禁阻断。OutcomeVerifier 的渲染前检查可保留 warning，但不能把该 warning 当成正式交付成功。
+14. 正式 completed 结果强制包含真实 StepResults、ValidationReports、请求中的 raw recording、Replay Manifest 和 StageEventLog；请求最终视频时同时强制 MP4、AssetTimelineCatalog 与 DemoEditPlan，请求 trace/截图时对应产物必填。关键产物必须带 ID、URI、SHA-256 与 size，缺失由 Gateway/App 最终交付门禁阻断。OutcomeVerifier 的渲染前检查可保留 warning，但不能把该 warning 当成正式交付成功。
 15. required `outcome_observed` 缺 Evidence refs 为 blocking；附加 observation 缺 Evidence 为 warning。
 16. App 下载全部 chunk、验证 SHA-256/size 并写 `.verified.sha256` 后，发送加密 ACK；ACK 完成后才允许显式释放 lease 和进入编辑器。失败结果不伪造 MP4。
 17. package 上传按 installation+package+digest 幂等；Gateway 重启后普通 queued/running job 可重领，credential envelope 必须重传。artifact chunk 可按索引重取；canceled/expired 不恢复。

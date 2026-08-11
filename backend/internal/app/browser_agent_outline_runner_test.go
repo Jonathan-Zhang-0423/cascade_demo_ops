@@ -554,8 +554,10 @@ func (s *busyWaitAuditBrowserAgentWorkerSession) Abort() error { return nil }
 
 func readStageEventAudit(t *testing.T, uri string) []model.StageExecutionEvent {
 	t.Helper()
-	path := strings.TrimPrefix(uri, "file://")
-	path = filepath.FromSlash(strings.ReplaceAll(path, "%5C", "\\"))
+	path, err := directWorkerLocalPath(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -601,7 +603,7 @@ func TestManualSessionCheckpointRevalidatesWithoutExecutingCredentialAction(t *t
 		ID: "stage_session", Order: 1, NodeID: "node_session", StageKind: model.BusinessStageKindSessionSetup,
 		ManualSessionCheckpoint: true, TargetContract: model.BrowserAgentTargetContract{SemanticID: "session_target"},
 		Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionFill, SecretRef: "secret://password"}},
-		Validations: []model.ValidationSpec{{ID: "validate_app", Kind: "url_matches", Required: true}},
+		Validations:  []model.ValidationSpec{{ID: "validate_app", Kind: "url_matches", Required: true}},
 	}
 	observed, err := runtime.ObserveStage(context.Background(), BrowserAgentRuntimePlan{}, stage)
 	if err != nil || !observed.TargetResolved {

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -155,6 +156,9 @@ func directWorkerLocalPath(value string) (string, error) {
 	path, err := url.PathUnescape(parsed.Path)
 	if err != nil {
 		return "", err
+	}
+	if runtime.GOOS == "windows" && len(path) >= 3 && path[0] == '/' && path[2] == ':' {
+		path = path[1:]
 	}
 	return filepath.FromSlash(path), nil
 }

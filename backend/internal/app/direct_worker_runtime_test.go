@@ -2,11 +2,27 @@ package app
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"cascade-demoops/backend/internal/model"
 )
+
+func TestLocalFileURIRoundTripsThroughDirectWorkerParser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recording", "replay-manifest.json")
+	uri := localFileURI(path)
+	if filepath.VolumeName(path) != "" && !strings.HasPrefix(uri, "file:///") {
+		t.Fatalf("Windows file URI treated the drive as an authority: %q", uri)
+	}
+	parsed, err := directWorkerLocalPath(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(parsed) != filepath.Clean(path) {
+		t.Fatalf("file URI round trip changed the local path: want=%q got=%q uri=%q", path, parsed, uri)
+	}
+}
 
 func TestPrepareDirectWorkerResultRewritesEveryDiagnosticArtifact(t *testing.T) {
 	artifact := model.ArtifactRef{ID: "failure-shot", Kind: "screenshot", URI: "file:///var/lib/cascade/jobs/failure.png", MimeType: "image/png", SHA256: "abc", SizeBytes: 42, Metadata: map[string]any{"local_path": "/var/lib/cascade/jobs/failure.png"}}

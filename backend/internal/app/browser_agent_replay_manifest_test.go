@@ -135,9 +135,9 @@ func TestBuildReplayManifestWaiverContext(t *testing.T) {
 		},
 	}
 	waiver := BrowserAgentTestWaiver{
-		WaiverID:   "wv_001",
-		DevTestOnly: true,
-		AllowedNodes: []BrowserAgentTestWaiverNode{{NodeID: "node_1"}, {NodeID: "node_2"}},
+		WaiverID:       "wv_001",
+		DevTestOnly:    true,
+		AllowedNodes:   []BrowserAgentTestWaiverNode{{NodeID: "node_1"}, {NodeID: "node_2"}},
 		BlockedReasons: []string{"reason_a"},
 	}
 	manifest, err := BuildReplayManifest(BuildReplayManifestInput{
@@ -157,5 +157,39 @@ func TestBuildReplayManifestWaiverContext(t *testing.T) {
 	}
 	if len(manifest.WaiverBlockedReasons) != 1 {
 		t.Errorf("expected 1 blocked reason, got %d", len(manifest.WaiverBlockedReasons))
+	}
+}
+
+func TestBuildReplayManifestBindsStageEventsAndTraceArtifacts(t *testing.T) {
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	result := model.RecordingResultPackage{
+		Status:            model.RecordingResultStatusGenerated,
+		StepResults:       []model.StepResult{{NodeID: "node_build", Status: "passed", Artifacts: []model.ArtifactRef{{ID: "shot_build", Kind: "screenshot", URI: "file:///shot.png"}}}},
+		ExecutionTrace:    &model.ExecutionTrace{Artifacts: []model.ArtifactRef{{ID: "trace_build", Kind: "browser_trace", URI: "file:///trace.zip"}}},
+		ValidationReports: []model.ValidationReport{{ReportID: "runtime_build", NodeID: "node_build", StageID: "stage_build", Decision: model.ValidationDecisionContinue}},
+	}
+	pkg := model.ClientExecutionPackage{PackageID: "pkg_build", ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
+		ScriptManifest:  model.ExecutableScriptManifest{Runtime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
+		Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bundle_build", PlanHashSHA256: "policy_build"},
+	}}
+	manifest, err := BuildReplayManifest(BuildReplayManifestInput{
+		Result: result, Package: pkg, RunID: "run_build", EventDir: t.TempDir(), CreatedAt: now,
+		Events: []model.StageExecutionEvent{{
+			NodeID: "node_build", StageID: "stage_build",
+			Observation:  &model.RuntimeObservation{URL: "https://example.com/project/1", Title: "Build complete"},
+			EvidenceRefs: []model.EvidenceRef{{ID: "evidence_build", ArtifactID: "shot_build"}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Stages) != 1 || manifest.Stages[0].StageID != "stage_build" || manifest.Stages[0].ObservedTitle != "Build complete" || manifest.Stages[0].ValidationDecision != model.ValidationDecisionContinue {
+		t.Fatalf("manifest stage binding is incomplete: %+v", manifest.Stages)
+	}
+	if len(manifest.Stages[0].EvidenceArtifactIDs) != 1 || manifest.Stages[0].EvidenceArtifactIDs[0] != "shot_build" {
+		t.Fatalf("manifest evidence IDs are not deduplicated and bound: %+v", manifest.Stages[0].EvidenceArtifactIDs)
+	}
+	if manifest.BrowserTraceURI != "file:///trace.zip" || manifest.ExecutionBundleRuntime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		t.Fatalf("manifest runtime or trace provenance is missing: %+v", manifest)
 	}
 }

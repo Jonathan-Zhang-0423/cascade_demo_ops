@@ -1386,6 +1386,13 @@ func newEditorID(prefix string) (string, error) {
 
 func localFileURI(filePath string) string {
 	path := filepath.ToSlash(filepath.Clean(filePath))
+	// A file URI has an empty authority. On Windows, url.URL would otherwise
+	// serialize C:/... as file://C:/..., treating the drive letter as a host;
+	// prefixing the absolute slash preserves file:///C:/... and allows strict
+	// local-artifact parsing to reject actual remote file authorities.
+	if filepath.IsAbs(filePath) && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
 	return (&url.URL{Scheme: "file", Path: path}).String()
 }
 

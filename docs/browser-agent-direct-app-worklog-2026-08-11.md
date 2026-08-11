@@ -46,12 +46,19 @@
 - 项目状态新增可选 package generation；首次收到该终态时递增一次，使重新理解后的 package ID 与 digest 均不同，重复轮询不会重复递增。
 - Web 将该状态路由到重新理解/审批入口，不再误归类为普通 selector/script repair。
 
+### 7. 正式结果产物和 Replay Manifest
+
+- Outline Router 在渲染完成并绑定 StageEventLog 后生成 `demoops.replay_manifest.v1`，以 `kind=replay_manifest`、真实 SHA-256/size 和 delivery descriptor 纳入 Direct Worker 上传集合。
+- Replay Manifest 与同一 job/package、StepResults、ValidationReports、StageEventLog 和最终渲染素材绑定；本地可见执行复用同一 artifact 封装逻辑。
+- 正式 completed 交付门禁新增 raw recording、Replay Manifest、AssetTimelineCatalog、DemoEditPlan、StepResults 和 ValidationReports；关键产物缺 ID/URI/checksum/size 直接阻断。
+- 修正 Windows 本地文件 URI：生成端统一使用 `file:///C:/...`，Direct Worker 解析端正确恢复盘符路径，避免 Replay Manifest 和 StageEventLog 在 Windows 下不可读。
+
 ## 回归测试
 
 - 后端：`go test ./... -count=1` 通过。
 - Video Worker：36 项通过，2 项按既有条件跳过；typecheck 与 build 通过。
 - Web：108 项通过；typecheck 与生产 build 通过。
-- 新增覆盖：缺 Worker/Verifier 版本、Worker claim 协议不匹配、稳定状态持久化、selector provenance、`data-testid` 不进入 accessible name、动作/成功目标复用 blocker，以及 `reunderstanding_required` 的结构化状态、审批失效和 package identity 轮换。
+- 新增覆盖：缺 Worker/Verifier 版本、Worker claim 协议不匹配、稳定状态持久化、selector provenance、`data-testid` 不进入 accessible name、动作/成功目标复用 blocker、`reunderstanding_required` 生命周期，以及正式 Replay Manifest、编辑器交接产物和 Windows file URI 往返。
 
 ## 接口交接结论
 
@@ -66,4 +73,4 @@ Browser Agent 侧可以依赖以下稳定约束：
 
 ## 尚未声称完成
 
-本轮完成的是本地代码、协议与自动化门禁收口，不等同于真实 `cascadeai.cn` 线上 Browser Agent 业务验收。线上仍需使用正式 installation、有效服务器部署和真实 Chromium 结果完成上传、执行、MP4/trace/截图/StageEventLog、分块下载、checksum、ACK 与编辑器交接闭环；不得以 fixture 替代。
+本轮完成的是本地代码、协议与自动化门禁收口，不等同于真实 `cascadeai.cn` 线上 Browser Agent 业务验收。线上仍需使用正式 installation、有效服务器部署和真实 Chromium 结果完成上传、执行、StepResults/ValidationReports、raw recording、MP4/trace/截图/StageEventLog、Replay Manifest、编辑器清单、分块下载、checksum、ACK 与编辑器交接闭环；不得以 fixture 替代。

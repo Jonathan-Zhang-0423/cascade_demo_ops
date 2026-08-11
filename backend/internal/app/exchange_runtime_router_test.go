@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -80,6 +82,40 @@ func TestOutlineRuntimePublishesStageEventAuditArtifact(t *testing.T) {
 	if result.ExecutionRuntime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 || result.StageEventLogRef == nil || result.StageEventLogRef.SHA256 == "" {
 		t.Fatalf("outline result did not receive runtime provenance: %+v", result)
 	}
+	var replayRef *model.ArtifactRef
+	for index := range result.GeneratedAssets {
+		if result.GeneratedAssets[index].Kind == "replay_manifest" {
+			replayRef = &result.GeneratedAssets[index]
+			break
+		}
+	}
+	if replayRef == nil || replayRef.SHA256 == "" || replayRef.SizeBytes <= 0 {
+		t.Fatalf("outline result did not publish a checksummed replay manifest: %+v", result.GeneratedAssets)
+	}
+	manifestPath, err := directWorkerLocalPath(replayRef.URI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest model.ReplayManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ManifestURI == "" || manifest.StageEventLogURI == "" || manifest.RunID != pkg.RecordingRunSpec.RunID {
+		t.Fatalf("replay manifest is not bound to the same job and stage log: %+v", manifest)
+	}
+	foundDelivery := false
+	for _, descriptor := range result.Delivery.AssetRefs {
+		if descriptor.ID == replayRef.ID && descriptor.SHA256 == replayRef.SHA256 && descriptor.SizeBytes == replayRef.SizeBytes {
+			foundDelivery = true
+		}
+	}
+	if !foundDelivery {
+		t.Fatalf("replay manifest is absent from delivery descriptors: %+v", result.Delivery.AssetRefs)
+	}
 }
 
 func TestExecutionRuntimeRouterBlocksContractViolationBeforeOutlineRunner(t *testing.T) {
@@ -117,10 +153,13 @@ func (eventPublishingOutlineRunner) Run(ctx context.Context, request BrowserAgen
 	if len(request.RuntimePlan.Stages) == 0 {
 		return model.RecordingResultPackage{}, errors.New("compiled runtime plan missing")
 	}
+	stage := request.RuntimePlan.Stages[0]
+	bundleHash := request.Package.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+	policyHash := request.Package.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
 	event := model.StageExecutionEvent{
-		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: "run_1",
-		SourcePackageID: "pkg_1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
-		NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 1,
+		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1", RunID: request.RuntimePlan.RunID,
+		SourcePackageID: request.Package.PackageID, SourceBundleHashSHA256: bundleHash, PolicyHashSHA256: policyHash,
+		NodeID: stage.NodeID, StageID: stage.ID, Attempt: 1, Sequence: 1,
 		EventType: model.StageExecutionEventObservationCollected, OccurredAt: time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC),
 		Observation:  &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, Title: "项目详情"},
 		EvidenceRefs: []model.EvidenceRef{{ID: "artifact_1"}},
@@ -128,7 +167,7 @@ func (eventPublishingOutlineRunner) Run(ctx context.Context, request BrowserAgen
 	if err := request.EventSink.Append(ctx, event); err != nil {
 		return model.RecordingResultPackage{}, err
 	}
-	return model.RecordingResultPackage{SourcePackageID: "pkg_1"}, nil
+	return model.RecordingResultPackage{SourcePackageID: request.Package.PackageID}, nil
 }
 
 func (r *stubOutlineRuntimeRunner) Run(context.Context, BrowserAgentOutlineRunRequest) (model.RecordingResultPackage, error) {
