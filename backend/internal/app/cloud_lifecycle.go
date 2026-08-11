@@ -1140,6 +1140,9 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 	}
 	backfillRuntimeAdaptiveAuthority(graph, bundleForPackage)
 	packageID := "pkg_" + firstNonEmptyString(state.ExecutableScriptBundle.ID, state.ScriptDocument.ID, graph.ID)
+	if state.ExecutionPackageGeneration > 0 {
+		packageID += fmt.Sprintf("_r%d", state.ExecutionPackageGeneration)
+	}
 	pkg := model.ClientExecutionPackage{
 		PackageID:              packageID,
 		OrgID:                  orgID,

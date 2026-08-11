@@ -238,6 +238,79 @@ func TestPersistDirectStatusRetainsStableGatewayGuidance(t *testing.T) {
 	}
 }
 
+func TestPersistDirectReunderstandingStatusInvalidatesApprovalAndRotatesPackageIdentity(t *testing.T) {
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), ArtifactRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{
+		ProjectID: "direct-reunderstanding", Mode: model.AppModeDesktop,
+		ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目，填写俄罗斯方块并启动 Agent 构建。",
+		TargetAudience: "普通用户", MustShow: []string{"新建俄罗斯方块", "启动 Agent 构建"},
+		AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: formalAppScreenshotInputs("https://cascadeai.cn"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := service.BuildClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.approvedBuilds[state.ProjectID+"|old-approval"] = approvedBuildCacheEntry{Build: original}
+	status := model.DirectJobStatus{
+		JobID: "job_old", PackageID: original.Package.PackageID, Status: "failed", Stage: "failed",
+		BlockingErrorCode: "reunderstanding_required", NextAction: "regenerate_package_from_structured_issues", RequiresReapproval: true,
+		ReunderstandingIssues: []model.DirectReunderstandingIssue{{Code: "STAGE_VALIDATION_FAILURE_THRESHOLD", StageID: "stage_build", Severity: model.FindingSeverityBlocking, Required: true}},
+	}
+	if err := service.persistDirectStatus(t.Context(), state.ProjectID, status); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := states.Load(t.Context(), state.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Approved || persisted.CurrentNode != orchestrator.NodeHumanApprove || persisted.Status != orchestrator.FlowStatusAwaitingHuman || persisted.ExecutionPackageGeneration != 1 {
+		t.Fatalf("reunderstanding did not invalidate the App approval lifecycle: %+v", persisted)
+	}
+	if persisted.DesktopCloudRun == nil || len(persisted.DesktopCloudRun.ReunderstandingIssues) != 1 {
+		t.Fatalf("structured reunderstanding issues were not restart-safe: %+v", persisted.DesktopCloudRun)
+	}
+	if len(service.approvedBuilds) != 0 {
+		t.Fatalf("old digest-bound approval cache survived reunderstanding: %+v", service.approvedBuilds)
+	}
+	regenerated, err := service.BuildClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regenerated.Package.PackageID == original.Package.PackageID || regenerated.PackageDigestSHA256 == original.PackageDigestSHA256 {
+		t.Fatalf("reunderstanding reused invalidated package identity: old=%s/%s new=%s/%s", original.Package.PackageID, original.PackageDigestSHA256, regenerated.Package.PackageID, regenerated.PackageDigestSHA256)
+	}
+	if err := service.persistDirectStatus(t.Context(), state.ProjectID, status); err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := states.Load(t.Context(), state.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.ExecutionPackageGeneration != 1 {
+		t.Fatalf("idempotent status polling rotated package identity repeatedly: generation=%d", repeated.ExecutionPackageGeneration)
+	}
+	if err := service.persistDirectUpload(t.Context(), state.ProjectID, defaultDesktopOrgID,
+		model.DirectPortLease{LeaseID: "lease_new", DataPort: 24001, ExpiresAt: time.Now().UTC().Add(time.Hour)},
+		model.DirectPackageReceipt{PackageID: regenerated.Package.PackageID, JobID: "job_new", Status: "queued", Stage: "server_intake"}); err != nil {
+		t.Fatal(err)
+	}
+	newRunState, err := states.Load(t.Context(), state.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRun := newRunState.DesktopCloudRun
+	if newRun == nil || newRun.BlockingErrorCode != "" || newRun.RequiresReapproval || len(newRun.ReunderstandingIssues) != 0 || newRun.ResultPackageID != "" {
+		t.Fatalf("new package upload retained terminal state from the invalidated job: %+v", newRun)
+	}
+}
+
 func TestApproveClientExecutionPackageRebindsConfidenceAfterCredentialGrantExpiry(t *testing.T) {
 	root := t.TempDir()
 	service, err := NewService(config.AppRuntimeConfig{

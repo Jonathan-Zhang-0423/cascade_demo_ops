@@ -88,6 +88,51 @@ describe("desktop bridge contract", () => {
 			requiresReapproval: true,
 		});
 	});
+
+	it("restores reunderstanding_required as a new approval gate with structured issues", () => {
+		const fallback = createWorkspace("product_demo");
+		const mapped = workspaceFromCascadeStateForTest({
+			project_id: fallback.id,
+			desktop_cloud_run: {
+				schema_version: "demoops.desktop_cloud_run.v1",
+				transport: "browser_agent_direct_v1",
+				package_id: "pkg_invalidated",
+				cloud_job_id: "job_terminal",
+				status: "failed",
+				stage: "failed",
+				blocking_error_code: "reunderstanding_required",
+				next_action: "regenerate_package_from_structured_issues",
+				requires_reapproval: true,
+				reunderstanding_issues: [{
+					code: "STAGE_VALIDATION_FAILURE_THRESHOLD",
+					stage_id: "stage_build",
+					node_id: "node_build",
+					severity: "blocking",
+					required: true,
+					summary: "2/3 stages failed validation",
+					evidence_ids: ["evidence_build"],
+				}],
+				updated_at: new Date().toISOString(),
+			},
+		}, fallback);
+		expect(mapped.stage).toBe("package_approval");
+		expect(mapped.status).toBe("awaiting_approval");
+		expect(mapped.packagePreview.packageDigest).toBe("");
+		expect(mapped.packagePreview.approvalSubjectDigest).toBe("");
+		expect(mapped.packagePreview.confidenceAssessmentHash).toBe("");
+		expect(mapped.cloudRun).toMatchObject({
+			status: "failed",
+			blockingErrorCode: "reunderstanding_required",
+			nextAction: "regenerate_package_from_structured_issues",
+			requiresReapproval: true,
+		});
+		expect(mapped.cloudRun.reunderstandingIssues?.[0]).toMatchObject({
+			code: "STAGE_VALIDATION_FAILURE_THRESHOLD",
+			stageID: "stage_build",
+			nodeID: "node_build",
+			evidenceIDs: ["evidence_build"],
+		});
+	});
   afterEach(() => {
     vi.restoreAllMocks();
   });

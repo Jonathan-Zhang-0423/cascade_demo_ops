@@ -122,6 +122,23 @@ describe("workflow helpers", () => {
     expect(mapCloudStatus("unknown")).toBe("not_uploaded");
   });
 
+	it("routes reunderstanding_required to approval instead of generic script repair", () => {
+		const workspace = createWorkspace("product_demo");
+		const failed = {
+			...workspace,
+			status: "script_repair_required" as const,
+			stage: "script_repair" as const,
+			cloudRun: {
+				...workspace.cloudRun,
+				status: "failed" as const,
+				blockingErrorCode: "reunderstanding_required",
+				requiresReapproval: true,
+			},
+		};
+		expect(recommendedWorkstation(failed)).toBe("approval");
+		expect(projectNextAction(failed).kind).toBe("approve_upload");
+	});
+
   it("keeps the desktop workflow stage labels complete and ordered by app model", () => {
     expect(Object.keys(workflowStageLabels)).toEqual([
       "setup",

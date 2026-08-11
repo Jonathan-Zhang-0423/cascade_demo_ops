@@ -131,6 +131,11 @@ export function App() {
     void refreshProjects();
   }, [bridge]);
 
+	useEffect(() => {
+		if (workspace.cloudRun.blockingErrorCode !== "reunderstanding_required") return;
+		setChecklist((current) => resetApprovalChecklistForRepair(current));
+	}, [workspace.cloudRun.blockingErrorCode]);
+
   useEffect(() => {
     if (!shouldResumeCloudRun(workspace, selectedProjectID)) return;
     let cancelled = false;
@@ -1794,6 +1799,14 @@ function CloudRunPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
 		  <Fact label="需要重新审批" value={workspace.cloudRun.requiresReapproval ? "是" : "否"} />
 		</div>
 	  </section> : null}
+	  {workspace.cloudRun.reunderstandingIssues?.length ? <section className="table-section">
+		<SectionTitle title="需要重新理解的问题" meta={`${workspace.cloudRun.reunderstandingIssues.length} 项结构化阻断`} />
+		<div className="blocked-list">{workspace.cloudRun.reunderstandingIssues.map((issue) => (
+		  <span key={`${issue.code}-${issue.stageID ?? "global"}-${issue.nodeID ?? "global"}`}>
+			{issue.stageID ? `${issue.stageID} · ` : ""}{issue.summary || issue.code}{issue.suggestion ? `；建议：${issue.suggestion}` : ""}
+		  </span>
+		))}</div>
+	  </section> : null}
       <ServerLifecyclePanel workspace={workspace} />
     </div>
   );
@@ -2049,6 +2062,8 @@ function PackageApproval({
 	  </div>
 
 	  {workspace.packagePreview.confidenceWarnings?.length ? <div className="notice-card warning"><strong>{runtimeEvidencePending ? "运行时证据待采集" : "需要重点复核"}</strong><p>{workspace.packagePreview.confidenceWarnings.slice(0, 3).join("；")}</p></div> : null}
+	  {workspace.cloudRun.blockingErrorCode === "reunderstanding_required" ? <div className="notice-card warning"><strong>原执行包审批已失效</strong><p>Browser Agent 的运行时事实表明当前业务理解需要重新生成。旧 Job 已终止；请根据下方结构化问题调整方案，并对新的 package ID 与 digest 重新审批。</p></div> : null}
+	  {workspace.cloudRun.reunderstandingIssues?.length ? <div className="blocked-list">{workspace.cloudRun.reunderstandingIssues.map((issue) => <span key={`${issue.code}-${issue.stageID ?? "global"}-${issue.nodeID ?? "global"}`}>{issue.stageID ? `${issue.stageID} · ` : ""}{issue.summary || issue.code}{issue.nextStep ? `；下一步：${issue.nextStep}` : ""}</span>)}</div> : null}
 	  {workspace.cloudRun.lastError ? <div className="error-banner">{workspace.cloudRun.lastError}</div> : null}
 	  {systemBlockers.length ? <div className="blocked-list">{[...new Set(systemBlockers)].map((reason) => <span key={reason}>{reason}</span>)}</div> : null}
 

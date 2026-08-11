@@ -97,7 +97,17 @@ App 批准请求先绑定用户已查看的 preview package/approval/confidence 
 
 ### `GET /v1/direct/jobs/{job_id}`
 
-返回加密 `job_status`。除 `status`、`stage`、`progress_percent` 外，稳定业务字段包括 `waiting_reason`、`blocking_error_code`、`next_action`、`requires_reapproval`。终态为 `completed`、`failed`、`canceled` 或 `expired`；结果包 ID 和 artifact descriptor 由状态返回。App 必须持久化并在重启后恢复这些字段，但 UI 不展示 Worker token、内部端口、堆栈或原始 envelope。
+返回加密 `job_status`。除 `status`、`stage`、`progress_percent` 外，稳定业务字段包括 `waiting_reason`、`blocking_error_code`、`next_action`、`requires_reapproval`，以及仅在权威验证决策为 `reunderstanding_required` 时返回的可选 `reunderstanding_issues[]`。每个 issue 只含 code、stage/node ID、severity、responsibility domain、脱敏摘要/建议和 opaque evidence ID，不含页面内容、浏览器对象或凭据。终态为 `completed`、`failed`、`canceled` 或 `expired`；结果包 ID 和 artifact descriptor 由状态返回。App 必须持久化并在重启后恢复这些字段，但 UI 不展示 Worker token、内部端口、堆栈或原始 envelope。
+
+`reunderstanding_required` 保持 `status=failed` 的不可恢复终态，同时固定：
+
+```text
+blocking_error_code = reunderstanding_required
+next_action = regenerate_package_from_structured_issues
+requires_reapproval = true
+```
+
+Gateway 只能从 `ValidationReports[].Decision` 判断该状态，不得从自然语言 message 推断。App 收到后失效旧批准与旧 preview，递增 package generation；重新理解后必须形成新 package ID/digest，并由用户重新审批后创建新 job。
 
 ### `GET /v1/direct/jobs/{job_id}/result`
 

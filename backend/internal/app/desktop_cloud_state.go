@@ -14,6 +14,15 @@ import (
 const desktopCloudRunSchemaVersion = "demoops.desktop_cloud_run.v1"
 
 func (s *Service) updateDesktopCloudRun(ctx context.Context, projectID string, update func(*orchestrator.DesktopCloudRunState)) error {
+	return s.updateDesktopCloudState(ctx, projectID, func(state *orchestrator.CascadeState) {
+		if state.DesktopCloudRun == nil {
+			state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
+		}
+		update(state.DesktopCloudRun)
+	})
+}
+
+func (s *Service) updateDesktopCloudState(ctx context.Context, projectID string, update func(*orchestrator.CascadeState)) error {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		return errors.New("project_id is required")
@@ -24,12 +33,11 @@ func (s *Service) updateDesktopCloudRun(ctx context.Context, projectID string, u
 	if err != nil {
 		return err
 	}
-	if state.DesktopCloudRun == nil {
-		state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
+	update(state)
+	if state.DesktopCloudRun != nil {
+		state.DesktopCloudRun.SchemaVersion = desktopCloudRunSchemaVersion
+		state.DesktopCloudRun.UpdatedAt = time.Now().UTC()
 	}
-	update(state.DesktopCloudRun)
-	state.DesktopCloudRun.SchemaVersion = desktopCloudRunSchemaVersion
-	state.DesktopCloudRun.UpdatedAt = time.Now().UTC()
 	return s.states.Save(ctx, state)
 }
 

@@ -1006,7 +1006,11 @@ func (s *Service) loadDirectLease(projectID string) (model.DirectPortLease, erro
 }
 
 func (s *Service) persistDirectUpload(ctx context.Context, projectID, orgID string, lease model.DirectPortLease, receipt model.DirectPackageReceipt) error {
-	return s.updateDesktopCloudRun(ctx, projectID, func(run *orchestrator.DesktopCloudRunState) {
+	return s.updateDesktopCloudState(ctx, projectID, func(state *orchestrator.CascadeState) {
+		if state.DesktopCloudRun == nil {
+			state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
+		}
+		run := state.DesktopCloudRun
 		run.Transport = directTransportStateName
 		run.OrgID = orgID
 		run.LeaseID = lease.LeaseID
@@ -1020,6 +1024,19 @@ func (s *Service) persistDirectUpload(ctx context.Context, projectID, orgID stri
 		run.Stage = receipt.Stage
 		run.Message = "执行包已通过短期加密会话上传至 Browser Agent。"
 		run.ProgressPercent = 5
+		run.WaitingReason = ""
+		run.BlockingErrorCode = ""
+		run.NextAction = ""
+		run.RequiresReapproval = false
+		run.ReunderstandingIssues = nil
+		run.ResultPackageID = ""
+		run.ResultPackage = nil
+		run.ResultDownloaded = false
+		run.AckedAt = nil
+		run.DownloadedAssets = nil
+		run.DirectArtifacts = nil
+		run.ResultReview = nil
+		state.ErrorMessage = ""
 	})
 }
 
@@ -1034,7 +1051,12 @@ func (s *Service) persistDirectLeaseRelease(ctx context.Context, projectID strin
 }
 
 func (s *Service) persistDirectStatus(ctx context.Context, projectID string, status model.DirectJobStatus) error {
-	return s.updateDesktopCloudRun(ctx, projectID, func(run *orchestrator.DesktopCloudRunState) {
+	return s.updateDesktopCloudState(ctx, projectID, func(state *orchestrator.CascadeState) {
+		if state.DesktopCloudRun == nil {
+			state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
+		}
+		run := state.DesktopCloudRun
+		wasReunderstanding := run.BlockingErrorCode == "reunderstanding_required"
 		run.Transport = directTransportStateName
 		run.ExchangePackageID = status.PackageID
 		run.PackageID = status.PackageID
@@ -1049,7 +1071,32 @@ func (s *Service) persistDirectStatus(ctx context.Context, projectID string, sta
 		run.ProgressPercent = status.ProgressPercent
 		run.ResultPackageID = status.ResultPackageID
 		run.DirectArtifacts = append([]model.DirectArtifact(nil), status.Artifacts...)
+		run.ReunderstandingIssues = append([]model.DirectReunderstandingIssue(nil), status.ReunderstandingIssues...)
+		if status.BlockingErrorCode == "reunderstanding_required" {
+			if !wasReunderstanding {
+				state.ExecutionPackageGeneration++
+			}
+			state.Approved = false
+			state.CurrentNode = orchestrator.NodeHumanApprove
+			state.Status = orchestrator.FlowStatusAwaitingHuman
+			state.ErrorMessage = "Browser Agent 运行事实要求重新理解并重新审批执行方案。"
+			s.invalidateApprovedBuildsForProject(projectID)
+		}
 	})
+}
+
+func (s *Service) invalidateApprovedBuildsForProject(projectID string) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return
+	}
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
+	for key := range s.approvedBuilds {
+		if strings.HasPrefix(key, projectID+"|") {
+			delete(s.approvedBuilds, key)
+		}
+	}
 }
 
 func (s *Service) effectiveDirectTransportURL() string {

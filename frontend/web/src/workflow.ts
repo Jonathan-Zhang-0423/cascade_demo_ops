@@ -74,6 +74,7 @@ const journeyLabels: Record<ProjectJourneyStepID, string> = {
 };
 
 export function recommendedWorkstation(workspace: ProjectWorkspaceView): ProjectWorkstationView {
+	if (workspace.cloudRun.blockingErrorCode === "reunderstanding_required") return "approval";
   if (workspace.status === "script_repair_required" || workspace.cloudRun.status === "failed") return "repair";
   if (workspace.cloudRun.resultPackage || workspace.cloudRun.status === "succeeded" || workspace.stage === "result_review") return "assets";
   if (workspace.cloudRun.packageID || workspace.cloudRun.exchangePackageID || workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running") return "execution";

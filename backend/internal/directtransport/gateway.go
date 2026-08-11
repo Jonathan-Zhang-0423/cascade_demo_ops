@@ -873,15 +873,153 @@ func decorateDirectJobStatus(status *model.DirectJobStatus) {
 	case "completed":
 		status.NextAction = "download_and_verify_artifacts"
 	case "failed":
-		if status.BlockingErrorCode == "" {
-			status.BlockingErrorCode = "browser_agent_execution_failed"
+		if status.BlockingErrorCode == "reunderstanding_required" {
+			status.NextAction = "regenerate_package_from_structured_issues"
+			status.RequiresReapproval = true
+			if status.Message == "" {
+				status.Message = "Browser Agent validation requires App re-understanding; the original job is terminal."
+			}
+		} else {
+			if status.BlockingErrorCode == "" {
+				status.BlockingErrorCode = "browser_agent_execution_failed"
+			}
+			status.NextAction = "regenerate_and_reapprove_package"
+			status.RequiresReapproval = true
 		}
-		status.NextAction = "regenerate_and_reapprove_package"
-		status.RequiresReapproval = true
 	case "canceled", "expired":
 		status.NextAction = "regenerate_and_reapprove_package"
 		status.RequiresReapproval = true
 	}
+}
+
+// directResultRequiresReunderstanding uses only the authoritative validation
+// decision, never natural-language failure text. A reunderstanding decision
+// takes precedence over ordinary failed diagnostics because it defines the
+// App's next lifecycle transition.
+func directResultRequiresReunderstanding(result model.RecordingResultPackage) bool {
+	for _, report := range result.ValidationReports {
+		if report.Decision == model.ValidationDecisionReunderstandingRequired {
+			return true
+		}
+	}
+	return false
+}
+
+func directReunderstandingIssues(result model.RecordingResultPackage) []model.DirectReunderstandingIssue {
+	if !directResultRequiresReunderstanding(result) {
+		return nil
+	}
+	issues := make([]model.DirectReunderstandingIssue, 0, 8)
+	seen := map[string]struct{}{}
+	for _, report := range result.ValidationReports {
+		for _, check := range report.Checks {
+			if check.Passed || (!check.Required && check.Severity != model.FindingSeverityBlocking && report.Decision != model.ValidationDecisionReunderstandingRequired) {
+				continue
+			}
+			code := strings.TrimSpace(check.Code)
+			if code == "" {
+				code = "validation_check_failed"
+			}
+			stageID := firstNonEmptyDirect(check.StageID, report.StageID)
+			nodeID := firstNonEmptyDirect(check.NodeID, report.NodeID)
+			key := code + "|" + stageID + "|" + nodeID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			severity := check.Severity
+			if severity == "" {
+				severity = model.FindingSeverityBlocking
+			}
+			issues = append(issues, model.DirectReunderstandingIssue{
+				Code: code, StageID: stageID, NodeID: nodeID, Severity: severity, Required: check.Required,
+				Summary: sanitizeDirectIssueText(check.Summary), Impact: sanitizeDirectIssueText(check.Impact),
+				Suggestion: sanitizeDirectIssueText(check.Suggestion), NextStep: sanitizeDirectIssueText(check.NextStep),
+				ResponsibilityDomain: check.ResponsibilityDomain,
+				EvidenceIDs:          directEvidenceIDs(check.EvidenceRefs),
+			})
+			if len(issues) >= 32 {
+				return issues
+			}
+		}
+	}
+	if len(issues) == 0 {
+		issues = append(issues, model.DirectReunderstandingIssue{Code: "reunderstanding_required", Severity: model.FindingSeverityBlocking, Required: true, Summary: "运行时验证要求 App 重新理解并重新审批执行方案。"})
+	}
+	return issues
+}
+
+func directEvidenceIDs(refs []model.EvidenceRef) []string {
+	ids := make([]string, 0, len(refs))
+	seen := map[string]struct{}{}
+	for _, ref := range refs {
+		id := strings.TrimSpace(ref.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func sanitizeDirectIssueText(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	for _, token := range []string{"bearer ", "authorization:", "authorization=", "cookie:", "cookie=", "password", "密码", "api key", "apikey", "secret", "token", "私钥", "private key", "sk-"} {
+		if strings.Contains(lower, token) {
+			return "已脱敏的结构化诊断信息"
+		}
+	}
+	runes := []rune(value)
+	if len(runes) > 512 {
+		return string(runes[:512])
+	}
+	return value
+}
+
+func firstNonEmptyDirect(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func applyDirectResultStatus(status *model.DirectJobStatus, result model.RecordingResultPackage) {
+	if status == nil {
+		return
+	}
+	status.ResultPackageID = result.ResultID
+	status.ReunderstandingIssues = nil
+	if result.Status == model.RecordingResultStatusFailed {
+		status.Status = "failed"
+		status.Stage = "failed"
+		if directResultRequiresReunderstanding(result) {
+			status.BlockingErrorCode = "reunderstanding_required"
+			status.Message = "Browser Agent validation requires App re-understanding; the original job is terminal."
+			status.ReunderstandingIssues = directReunderstandingIssues(result)
+		} else {
+			status.Message = "Browser Agent returned a validated failure result package."
+			if result.FailureDiagnostic != nil {
+				status.BlockingErrorCode = result.FailureDiagnostic.Error.Code
+			}
+		}
+	} else {
+		status.Status = "completed"
+		status.Stage = "completed"
+		status.Message = "Browser Agent returned a validated result package."
+		status.BlockingErrorCode = ""
+	}
+	status.ProgressPercent = 100
+	decorateDirectJobStatus(status)
 }
 
 func (g *Gateway) loadPersistedJobs() error {
@@ -1157,6 +1295,10 @@ func (g *Gateway) handleWorkerResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Status != model.RecordingResultStatusFailed {
+		if directResultRequiresReunderstanding(result) {
+			writeError(w, http.StatusUnprocessableEntity, "result_validation_failed", "reunderstanding_required results must terminate the job as a failed diagnostic package.")
+			return
+		}
 		if err := model.ValidateRecordingResultPackageForRender(&result, &sourcePackage); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, "result_validation_failed", err.Error())
 			return
@@ -1181,20 +1323,7 @@ func (g *Gateway) handleWorkerResult(w http.ResponseWriter, r *http.Request) {
 	}
 	g.mu.Lock()
 	record.ResultPath = path
-	record.Status.ResultPackageID = result.ResultID
-	if result.Status == model.RecordingResultStatusFailed {
-		record.Status.Status = "failed"
-		record.Status.Stage = "failed"
-		record.Status.Message = "Browser Agent returned a validated failure result package."
-		if result.FailureDiagnostic != nil {
-			record.Status.BlockingErrorCode = result.FailureDiagnostic.Error.Code
-		}
-	} else {
-		record.Status.Status = "completed"
-		record.Status.Stage = "completed"
-		record.Status.Message = "Browser Agent returned a validated result package."
-	}
-	record.Status.ProgressPercent = 100
+	applyDirectResultStatus(&record.Status, result)
 	record.Status.UpdatedAt = g.now().UTC()
 	if err := g.persistJob(record); err != nil {
 		g.mu.Unlock()

@@ -37,12 +37,21 @@
 - 保留既有正式 completed 素材完整性门禁、ACK 后释放 lease、installation/producer/approval 绑定和幂等批准。
 - App 仅展示稳定业务状态，不展示 Worker token、内部端口、堆栈、原始 envelope 或凭据。
 
+### 6. `reunderstanding_required` 生命周期
+
+- Gateway 仅依据 `ValidationReports[].Decision` 识别该终态，不从 message 或失败文本推断。
+- `DirectJobStatus` 新增兼容字段 `reunderstanding_issues`，只返回 code、stage/node、severity、责任域、脱敏建议和 opaque Evidence ID。
+- 稳定状态固定为 `status=failed`、`blocking_error_code=reunderstanding_required`、`next_action=regenerate_package_from_structured_issues`、`requires_reapproval=true`。
+- App 持久化并重载结构化问题，退回执行包审批节点，清除旧批准缓存和旧 preview digest。
+- 项目状态新增可选 package generation；首次收到该终态时递增一次，使重新理解后的 package ID 与 digest 均不同，重复轮询不会重复递增。
+- Web 将该状态路由到重新理解/审批入口，不再误归类为普通 selector/script repair。
+
 ## 回归测试
 
 - 后端：`go test ./... -count=1` 通过。
 - Video Worker：36 项通过，2 项按既有条件跳过；typecheck 与 build 通过。
-- Web：106 项通过；typecheck 与生产 build 通过。
-- 新增覆盖：缺 Worker/Verifier 版本、Worker claim 协议不匹配、稳定状态持久化、selector provenance、`data-testid` 不进入 accessible name、动作/成功目标复用 blocker。
+- Web：108 项通过；typecheck 与生产 build 通过。
+- 新增覆盖：缺 Worker/Verifier 版本、Worker claim 协议不匹配、稳定状态持久化、selector provenance、`data-testid` 不进入 accessible name、动作/成功目标复用 blocker，以及 `reunderstanding_required` 的结构化状态、审批失效和 package identity 轮换。
 
 ## 接口交接结论
 
@@ -53,6 +62,7 @@ Browser Agent 侧可以依赖以下稳定约束：
 3. selector alternatives 要么来源完整，要么不出现在正式包；Server 不应补造候选。
 4. `waiting_reason`、`blocking_error_code`、`next_action`、`requires_reapproval` 可作为稳定 UI/恢复字段。
 5. `post_action_validation_reuses_action_target` 和同类 Evidence 复用错误必须阻止正式执行。
+6. `reunderstanding_required` 以结构化 issues 终止旧 job；App 必须生成新 package ID/digest 并重新审批，Server 不改写 App 计划。
 
 ## 尚未声称完成
 

@@ -164,7 +164,30 @@ type DirectJobStatus struct {
 	ProgressPercent    int              `json:"progress_percent,omitempty"`
 	ResultPackageID    string           `json:"result_package_id,omitempty"`
 	Artifacts          []DirectArtifact `json:"artifacts,omitempty"`
-	UpdatedAt          time.Time        `json:"updated_at"`
+	// ReunderstandingIssues is populated only when the authoritative outcome
+	// verifier decision requires the App to regenerate its business plan. It
+	// intentionally contains structured, redacted fields rather than raw page
+	// content, browser output, or credentials.
+	ReunderstandingIssues []DirectReunderstandingIssue `json:"reunderstanding_issues,omitempty"`
+	UpdatedAt             time.Time                    `json:"updated_at"`
+}
+
+// DirectReunderstandingIssue is the stable Direct API representation of one
+// validation problem that the App must use when re-understanding a failed run.
+// EvidenceIDs are opaque references only; the Gateway never returns evidence
+// payloads or browser/page objects in job status.
+type DirectReunderstandingIssue struct {
+	Code                 string                `json:"code"`
+	StageID              string                `json:"stage_id,omitempty"`
+	NodeID               string                `json:"node_id,omitempty"`
+	Severity             FindingSeverity       `json:"severity,omitempty"`
+	Required             bool                  `json:"required,omitempty"`
+	Summary              string                `json:"summary,omitempty"`
+	Impact               string                `json:"impact,omitempty"`
+	Suggestion           string                `json:"suggestion,omitempty"`
+	NextStep             string                `json:"next_step,omitempty"`
+	ResponsibilityDomain ValidationCheckDomain `json:"responsibility_domain,omitempty"`
+	EvidenceIDs          []string              `json:"evidence_ids,omitempty"`
 }
 
 type DirectResultAckRequest struct {

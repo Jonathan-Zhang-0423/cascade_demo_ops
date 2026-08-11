@@ -63,12 +63,17 @@ type CascadeState struct {
 	ExecutableScriptBundle   *model.ExecutableRecordingScriptBundle `json:"executable_script_bundle,omitempty"`
 	ExecutableScriptArtifact *model.ArtifactRef                     `json:"executable_script_artifact,omitempty"`
 	ApprovalMarkdownArtifact *model.ArtifactRef                     `json:"approval_markdown_artifact,omitempty"`
-	Approved                 bool                                   `json:"approved"`
-	RehearsePassRate         float64                                `json:"rehearse_pass_rate"`
-	Artifacts                *GeneratedArtifacts                    `json:"artifacts,omitempty"`
-	DesktopCloudRun          *DesktopCloudRunState                  `json:"desktop_cloud_run,omitempty"`
-	ErrorMessage             string                                 `json:"error_message,omitempty"`
-	ArchivedAt               *time.Time                             `json:"archived_at,omitempty"`
+	// ExecutionPackageGeneration is incremented when a terminal Browser Agent
+	// validation result requires App re-understanding. It keeps the next
+	// package identity distinct from the invalidated approved package while
+	// remaining optional for v1 project-state JSON.
+	ExecutionPackageGeneration int                   `json:"execution_package_generation,omitempty"`
+	Approved                   bool                  `json:"approved"`
+	RehearsePassRate           float64               `json:"rehearse_pass_rate"`
+	Artifacts                  *GeneratedArtifacts   `json:"artifacts,omitempty"`
+	DesktopCloudRun            *DesktopCloudRunState `json:"desktop_cloud_run,omitempty"`
+	ErrorMessage               string                `json:"error_message,omitempty"`
+	ArchivedAt                 *time.Time            `json:"archived_at,omitempty"`
 }
 
 // DesktopCloudRunState is the restart-safe App view of the remote execution.
@@ -84,29 +89,30 @@ type DesktopCloudRunState struct {
 	// PackageID is the authoritative Browser Agent package identity. The
 	// exchange_package_id field below remains only as a v1 persisted-state
 	// compatibility key for older projects.
-	PackageID          string                         `json:"package_id,omitempty"`
-	ExchangePackageID  string                         `json:"exchange_package_id,omitempty"`
-	CloudJobID         string                         `json:"cloud_job_id,omitempty"`
-	Status             string                         `json:"status,omitempty"`
-	Stage              string                         `json:"stage,omitempty"`
-	Message            string                         `json:"message,omitempty"`
-	WaitingReason      string                         `json:"waiting_reason,omitempty"`
-	BlockingErrorCode  string                         `json:"blocking_error_code,omitempty"`
-	NextAction         string                         `json:"next_action,omitempty"`
-	RequiresReapproval bool                           `json:"requires_reapproval,omitempty"`
-	ProgressPercent    int                            `json:"progress_percent,omitempty"`
-	LastEventID        string                         `json:"last_event_id,omitempty"`
-	StageHistory       []model.ExecutionStageEvent    `json:"stage_history,omitempty"`
-	FailureSummary     *model.ExecutionFailureSummary `json:"failure_summary,omitempty"`
-	Error              *model.AgentError              `json:"error,omitempty"`
-	ResultPackageID    string                         `json:"result_package_id,omitempty"`
-	ResultPackage      *model.RecordingResultPackage  `json:"result_package,omitempty"`
-	ResultDownloaded   bool                           `json:"result_downloaded,omitempty"`
-	AckedAt            *time.Time                     `json:"acked_at,omitempty"`
-	DownloadedAssets   []DesktopDownloadedAssetState  `json:"downloaded_assets,omitempty"`
-	DirectArtifacts    []model.DirectArtifact         `json:"direct_artifacts,omitempty"`
-	ResultReview       *DesktopResultReviewState      `json:"result_review,omitempty"`
-	UpdatedAt          time.Time                      `json:"updated_at"`
+	PackageID             string                             `json:"package_id,omitempty"`
+	ExchangePackageID     string                             `json:"exchange_package_id,omitempty"`
+	CloudJobID            string                             `json:"cloud_job_id,omitempty"`
+	Status                string                             `json:"status,omitempty"`
+	Stage                 string                             `json:"stage,omitempty"`
+	Message               string                             `json:"message,omitempty"`
+	WaitingReason         string                             `json:"waiting_reason,omitempty"`
+	BlockingErrorCode     string                             `json:"blocking_error_code,omitempty"`
+	NextAction            string                             `json:"next_action,omitempty"`
+	RequiresReapproval    bool                               `json:"requires_reapproval,omitempty"`
+	ReunderstandingIssues []model.DirectReunderstandingIssue `json:"reunderstanding_issues,omitempty"`
+	ProgressPercent       int                                `json:"progress_percent,omitempty"`
+	LastEventID           string                             `json:"last_event_id,omitempty"`
+	StageHistory          []model.ExecutionStageEvent        `json:"stage_history,omitempty"`
+	FailureSummary        *model.ExecutionFailureSummary     `json:"failure_summary,omitempty"`
+	Error                 *model.AgentError                  `json:"error,omitempty"`
+	ResultPackageID       string                             `json:"result_package_id,omitempty"`
+	ResultPackage         *model.RecordingResultPackage      `json:"result_package,omitempty"`
+	ResultDownloaded      bool                               `json:"result_downloaded,omitempty"`
+	AckedAt               *time.Time                         `json:"acked_at,omitempty"`
+	DownloadedAssets      []DesktopDownloadedAssetState      `json:"downloaded_assets,omitempty"`
+	DirectArtifacts       []model.DirectArtifact             `json:"direct_artifacts,omitempty"`
+	ResultReview          *DesktopResultReviewState          `json:"result_review,omitempty"`
+	UpdatedAt             time.Time                          `json:"updated_at"`
 }
 
 type DesktopDownloadedAssetState struct {

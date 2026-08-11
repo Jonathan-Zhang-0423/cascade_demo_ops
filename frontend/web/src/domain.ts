@@ -230,6 +230,7 @@ export type CloudRunStatusView = {
   blockingErrorCode?: string;
   nextAction?: string;
   requiresReapproval?: boolean;
+  reunderstandingIssues?: ReunderstandingIssueView[];
   stageHistory?: ServerLifecycleStageView[];
   failureSummary?: string;
   sandboxMetadata?: SandboxExecutionMetadata;
@@ -245,7 +246,21 @@ export type CloudRunStatusView = {
 	resultReview?: ResultReviewState;
 	resultDownloaded?: boolean;
 	editorSessionID?: string;
-	editorMaterializationMessage?: string;
+  editorMaterializationMessage?: string;
+};
+
+export type ReunderstandingIssueView = {
+  code: string;
+  stageID?: string;
+  nodeID?: string;
+  severity?: string;
+  required?: boolean;
+  summary?: string;
+  impact?: string;
+  suggestion?: string;
+  nextStep?: string;
+  responsibilityDomain?: string;
+  evidenceIDs?: string[];
 };
 
 export type ServerExecutionAcceptanceView = {

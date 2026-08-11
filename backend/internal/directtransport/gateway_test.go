@@ -599,6 +599,50 @@ func TestGatewayWorkerReleaseRestoresCredentialGateOrQueue(t *testing.T) {
 	}
 }
 
+func TestDirectResultReunderstandingDecisionProducesStableStructuredTerminalStatus(t *testing.T) {
+	result := model.RecordingResultPackage{
+		ResultID: "result_reunderstanding",
+		Status:   model.RecordingResultStatusFailed,
+		ValidationReports: []model.ValidationReport{{
+			Decision: model.ValidationDecisionReunderstandingRequired,
+			StageID:  "stage_build",
+			NodeID:   "node_build",
+			Checks: []model.ValidationCheck{{
+				ID: "check_build_threshold", Kind: "execution_quality", Code: "STAGE_VALIDATION_FAILURE_THRESHOLD",
+				Severity: model.FindingSeverityBlocking, Required: true, Passed: false,
+				Summary: "2/3 stages failed validation", Suggestion: "Regenerate the App plan from observed routes.",
+				EvidenceRefs: []model.EvidenceRef{{ID: "evidence_stage_build"}},
+			}},
+		}},
+	}
+	status := model.DirectJobStatus{JobID: "job_reunderstanding", PackageID: "pkg_old", Status: "running"}
+	applyDirectResultStatus(&status, result)
+	if status.Status != "failed" || status.Stage != "failed" || status.BlockingErrorCode != "reunderstanding_required" {
+		t.Fatalf("authoritative reunderstanding decision was flattened: %+v", status)
+	}
+	if status.NextAction != "regenerate_package_from_structured_issues" || !status.RequiresReapproval || status.ProgressPercent != 100 {
+		t.Fatalf("reunderstanding lifecycle guidance is incomplete: %+v", status)
+	}
+	if len(status.ReunderstandingIssues) != 1 {
+		t.Fatalf("structured reunderstanding issues were lost: %+v", status.ReunderstandingIssues)
+	}
+	issue := status.ReunderstandingIssues[0]
+	if issue.Code != "STAGE_VALIDATION_FAILURE_THRESHOLD" || issue.StageID != "stage_build" || issue.NodeID != "node_build" || len(issue.EvidenceIDs) != 1 || issue.EvidenceIDs[0] != "evidence_stage_build" {
+		t.Fatalf("unexpected structured issue mapping: %+v", issue)
+	}
+}
+
+func TestDirectReunderstandingIssueTextIsRedactedBeforeStatusPersistence(t *testing.T) {
+	result := model.RecordingResultPackage{ValidationReports: []model.ValidationReport{{
+		Decision: model.ValidationDecisionReunderstandingRequired,
+		Checks:   []model.ValidationCheck{{ID: "secret", Kind: "diagnostic", Code: "SENSITIVE_DIAGNOSTIC", Passed: false, Summary: "password=do-not-persist"}},
+	}}}
+	issues := directReunderstandingIssues(result)
+	if len(issues) != 1 || strings.Contains(issues[0].Summary, "do-not-persist") || issues[0].Summary != "已脱敏的结构化诊断信息" {
+		t.Fatalf("sensitive diagnostic text reached Direct status: %+v", issues)
+	}
+}
+
 func requestTestLease(t *testing.T, gateway *Gateway, now time.Time) model.DirectPortLease {
 	t.Helper()
 	return requestTestLeaseForInstallation(t, gateway, now, "install_test", "lease_nonce_1")

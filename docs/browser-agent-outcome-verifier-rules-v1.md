@@ -53,7 +53,7 @@
 | `RESULT_PACKAGE_MISMATCH` | `post_execution` | `blocking` | 是 | 结果包 `source_package_id` 与批准运行的包不一致。 | 11 |
 | `RESULT_HASH_MISMATCH` | `post_execution` | `blocking` | 是 | `AuditTrail.SourcePackageDigest` 与批准包 `SourceBundleHashSHA256` 不一致。 | 11 |
 | `REQUIRED_STAGE_NOT_COMPLETED` | `post_execution` | `blocking` | 是 | `StageApprovalPlan` 中的必需 stage 没有完成事件。 | 4 |
-| `MISSING_EVIDENCE_REFS` | `post_execution` | `warning` | 否 | `outcome_observed` 事件缺少 `evidence_refs`。 | 9 |
+| `MISSING_EVIDENCE_REFS` | `post_execution` | `blocking` | 是 | required `outcome_observed` 事件缺少 `evidence_refs`；附加 `observation_collected` 缺少引用仍为 warning。 | 9 |
 | `MISSING_TRACE_ARTIFACT` | `post_execution` | `warning` | 否 | 结果包缺少 trace 类产物。 | 10 |
 | `MISSING_SCREENSHOTS` | `post_execution` | `warning` | 否 | 结果包缺少截图证据。 | 10 |
 | `MISSING_MP4_VIDEO` | `post_execution` | `warning` | 否 | 结果包缺少 MP4 视频。 | 10 |

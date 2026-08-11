@@ -369,6 +369,7 @@ type LocalDesktopCloudRunState = {
 	blocking_error_code?: string;
 	next_action?: string;
 	requires_reapproval?: boolean;
+	reunderstanding_issues?: LocalDirectReunderstandingIssue[];
 	progress_percent?: number;
 	last_event_id?: string;
 	stage_history?: LocalExecutionStageEvent[];
@@ -448,6 +449,20 @@ type LocalDirectArtifact = {
 	size_bytes: number;
 };
 
+type LocalDirectReunderstandingIssue = {
+	code: string;
+	stage_id?: string;
+	node_id?: string;
+	severity?: string;
+	required?: boolean;
+	summary?: string;
+	impact?: string;
+	suggestion?: string;
+	next_step?: string;
+	responsibility_domain?: string;
+	evidence_ids?: string[];
+};
+
 type LocalDirectUploadResult = {
 	build: LocalClientExecutionPackageBuild;
 	lease: {
@@ -483,6 +498,7 @@ type LocalDirectJobStatus = {
 	progress_percent?: number;
 	result_package_id?: string;
 	artifacts?: LocalDirectArtifact[];
+	reunderstanding_issues?: LocalDirectReunderstandingIssue[];
 	updated_at: string;
 };
 
@@ -2026,7 +2042,7 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 			requested_at: persisted.result_review.updated_at,
 		} : undefined);
 	}
-	return {
+	const finalWorkspace: ProjectWorkspaceView = {
 		...restored,
 		cloudRun: {
 			...restored.cloudRun,
@@ -2039,11 +2055,27 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 			...(persisted.blocking_error_code ? { blockingErrorCode: persisted.blocking_error_code } : {}),
 			...(persisted.next_action ? { nextAction: persisted.next_action } : {}),
 			...(persisted.requires_reapproval !== undefined ? { requiresReapproval: persisted.requires_reapproval } : {}),
+			...(persisted.reunderstanding_issues ? { reunderstandingIssues: mapDirectReunderstandingIssues(persisted.reunderstanding_issues) } : {}),
 			...(persisted.direct_artifacts ? { directArtifacts: persisted.direct_artifacts.map((artifact) => ({ artifactID: artifact.artifact_id, ...(artifact.role ? { role: artifact.role } : {}), ...(artifact.kind ? { kind: artifact.kind } : {}), fileName: artifact.file_name, ...(artifact.mime_type ? { mimeType: artifact.mime_type } : {}), sha256: artifact.sha256, sizeBytes: artifact.size_bytes })) } : {}),
 			...(persisted.result_package_id ? { resultPackageID: persisted.result_package_id } : {}),
 			...(persisted.last_event_id ? { lastEventID: persisted.last_event_id } : {}),
 		},
 	};
+	if (persisted.blocking_error_code === "reunderstanding_required") {
+		return {
+			...finalWorkspace,
+			stage: "package_approval",
+			status: "awaiting_approval",
+			packagePreview: {
+				...finalWorkspace.packagePreview,
+				packageDigest: "",
+				approvalSubjectDigest: "",
+				confidenceAssessmentHash: "",
+				blockedReasons: [...new Set([...finalWorkspace.packagePreview.blockedReasons, "Browser Agent 要求重新理解；旧执行包审批已失效。"])],
+			},
+		};
+	}
+	return finalWorkspace;
 }
 
 function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, lifecycle: LocalCloudLifecycleResult): ProjectWorkspaceView {
@@ -2095,6 +2127,20 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
 }
 
 function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: LocalClientExecutionPackageBuild): ProjectWorkspaceView {
+	const {
+		cloudJobID: _cloudJobID,
+		exchangePackageID: _exchangePackageID,
+		resultPackageID: _resultPackageID,
+		resultPackage: _resultPackage,
+		failureDiagnostic: _failureDiagnostic,
+		repairRequest: _repairRequest,
+		blockingErrorCode: _blockingErrorCode,
+		nextAction: _nextAction,
+		requiresReapproval: _requiresReapproval,
+		reunderstandingIssues: _reunderstandingIssues,
+		directArtifacts: _directArtifacts,
+		...cloudRunBase
+	} = workspace.cloudRun;
   return {
     ...workspace,
     stage: "package_approval",
@@ -2115,7 +2161,7 @@ function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: Loca
 	  blockedReasons: build.package.confidence_summary?.blocking_reasons ?? workspace.packagePreview.blockedReasons,
     },
     cloudRun: {
-      ...workspace.cloudRun,
+	  ...cloudRunBase,
       packageID: build.package.package_id ?? workspace.cloudRun.packageID,
       status: "not_uploaded",
       stage: "local_generated",
@@ -2231,6 +2277,21 @@ function workspaceWithCloudStatus(workspace: ProjectWorkspaceView, status: Local
 
 function workspaceWithDirectUpload(workspace: ProjectWorkspaceView, result: LocalDirectUploadResult): ProjectWorkspaceView {
   const receipt = result.receipt;
+	const {
+		resultPackageID: _resultPackageID,
+		resultPackage: _resultPackage,
+		failureDiagnostic: _failureDiagnostic,
+		repairRequest: _repairRequest,
+		blockingErrorCode: _blockingErrorCode,
+		waitingReason: _waitingReason,
+		nextAction: _nextAction,
+		requiresReapproval: _requiresReapproval,
+		reunderstandingIssues: _reunderstandingIssues,
+		directArtifacts: _directArtifacts,
+		resultReview: _resultReview,
+		resultDownloaded: _resultDownloaded,
+		...cloudRunBase
+	} = workspace.cloudRun;
   return {
     ...workspace,
     stage: "cloud_run",
@@ -2244,7 +2305,7 @@ function workspaceWithDirectUpload(workspace: ProjectWorkspaceView, result: Loca
       ipAllowlistAcknowledged: true,
     },
     cloudRun: {
-      ...workspace.cloudRun,
+	  ...cloudRunBase,
       transport: "browser_agent_direct_v1",
       packageID: receipt.package_id,
       // Keep exchangePackageID only as a v1 persisted-state compatibility key;
@@ -2277,6 +2338,22 @@ function workspaceWithDirectLeaseReleased(workspace: ProjectWorkspaceView): Proj
   };
 }
 
+function mapDirectReunderstandingIssues(issues: LocalDirectReunderstandingIssue[]) {
+	return issues.map((issue) => ({
+		code: issue.code,
+		...(issue.stage_id ? { stageID: issue.stage_id } : {}),
+		...(issue.node_id ? { nodeID: issue.node_id } : {}),
+		...(issue.severity ? { severity: issue.severity } : {}),
+		...(issue.required !== undefined ? { required: issue.required } : {}),
+		...(issue.summary ? { summary: issue.summary } : {}),
+		...(issue.impact ? { impact: issue.impact } : {}),
+		...(issue.suggestion ? { suggestion: issue.suggestion } : {}),
+		...(issue.next_step ? { nextStep: issue.next_step } : {}),
+		...(issue.responsibility_domain ? { responsibilityDomain: issue.responsibility_domain } : {}),
+		...(issue.evidence_ids ? { evidenceIDs: issue.evidence_ids } : {}),
+	}));
+}
+
 function workspaceWithDirectStatus(workspace: ProjectWorkspaceView, status: LocalDirectJobStatus): ProjectWorkspaceView {
   const cloudStatus: LocalExecutionPackageStatusResponse = {
     exchange_package_id: status.package_id,
@@ -2288,7 +2365,21 @@ function workspaceWithDirectStatus(workspace: ProjectWorkspaceView, status: Loca
 	...(status.progress_percent !== undefined ? { progress_percent: status.progress_percent } : {}),
 	...(status.result_package_id ? { result_package_id: status.result_package_id } : {}),
   };
-  const mapped = workspaceWithCloudStatus(workspace, cloudStatus);
+	const mappedBase = workspaceWithCloudStatus(workspace, cloudStatus);
+	const mapped = status.blocking_error_code === "reunderstanding_required"
+		? {
+			...mappedBase,
+			stage: "package_approval" as const,
+			status: "awaiting_approval" as const,
+			packagePreview: {
+				...mappedBase.packagePreview,
+				packageDigest: "",
+				approvalSubjectDigest: "",
+				confidenceAssessmentHash: "",
+				blockedReasons: [...new Set([...mappedBase.packagePreview.blockedReasons, "Browser Agent 要求重新理解；旧执行包审批已失效。"])],
+			},
+		}
+		: mappedBase;
 	const directArtifacts = status.artifacts === undefined
 		? workspace.cloudRun.directArtifacts
 		: status.artifacts.map((artifact) => ({
@@ -2310,6 +2401,7 @@ function workspaceWithDirectStatus(workspace: ProjectWorkspaceView, status: Loca
 		...(status.blocking_error_code ? { blockingErrorCode: status.blocking_error_code } : {}),
 		...(status.next_action ? { nextAction: status.next_action } : {}),
 		...(status.requires_reapproval !== undefined ? { requiresReapproval: status.requires_reapproval } : {}),
+		...(status.reunderstanding_issues ? { reunderstandingIssues: mapDirectReunderstandingIssues(status.reunderstanding_issues) } : {}),
 		...(directArtifacts ? { directArtifacts } : {}),
     },
   };
