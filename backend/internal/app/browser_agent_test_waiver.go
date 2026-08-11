@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,6 +25,18 @@ const browserAgentTestWaiverSchemaVersion = "demoops.browser_agent_test_waiver.v
 type DevAppPackageWaiverRequest struct {
 	ProjectID                string   `json:"project_id"`
 	PackageID                string   `json:"package_id"`
+	ExpectedBundleHashSHA256 string   `json:"expected_bundle_hash_sha256"`
+	ExpectedPlanHashSHA256   string   `json:"expected_plan_hash_sha256"`
+	ApprovedNodeIDs          []string `json:"approved_node_ids"`
+	DevTestAck               bool     `json:"dev_test_ack"`
+}
+
+// DevAppPackageRawWaiverRequest binds a waiver to an App-produced package
+// file already present on the local workstation. The file is read once,
+// validated, and retained only in memory; its JSON is never rewritten.
+type DevAppPackageRawWaiverRequest struct {
+	PackageFile              string   `json:"package_file"`
+	ExpectedPackageID        string   `json:"package_id"`
 	ExpectedBundleHashSHA256 string   `json:"expected_bundle_hash_sha256"`
 	ExpectedPlanHashSHA256   string   `json:"expected_plan_hash_sha256"`
 	ApprovedNodeIDs          []string `json:"approved_node_ids"`
@@ -52,6 +66,7 @@ type BrowserAgentTestWaiver struct {
 	BundleHashSHA256       string                       `json:"bundle_hash_sha256"`
 	PlanHashSHA256         string                       `json:"plan_hash_sha256"`
 	OriginalPackageDigest  string                       `json:"original_package_digest_sha256"`
+	RawPackageSHA256       string                       `json:"raw_package_sha256,omitempty"`
 	ApprovalSubjectDigest  string                       `json:"approval_subject_digest_sha256"`
 	AllowedOrigin          string                       `json:"allowed_origin"`
 	AllowedNodes           []BrowserAgentTestWaiverNode `json:"allowed_nodes"`
@@ -71,6 +86,7 @@ type BrowserAgentTestWaiver struct {
 type devAppPackageTestWaiverRecord struct {
 	view         BrowserAgentTestWaiver
 	packageValue model.ClientExecutionPackage
+	rawFile      string
 }
 
 type devAppPackageTestWaiverManager struct {
@@ -125,6 +141,9 @@ func (m *devAppPackageTestWaiverManager) Issue(ctx context.Context, request DevA
 	}
 	if err := verifyAppDraftProtocolHashes(bundle); err != nil {
 		return BrowserAgentTestWaiver{}, err
+	}
+	if strings.TrimSpace(request.ExpectedBundleHashSHA256) == "" || strings.TrimSpace(request.ExpectedPlanHashSHA256) == "" {
+		return BrowserAgentTestWaiver{}, errors.New("expected bundle and plan hashes are required")
 	}
 	if pkg.PackageID != request.PackageID || bundle.Reproducibility.BundleHashSHA256 != request.ExpectedBundleHashSHA256 || bundle.Reproducibility.PlanHashSHA256 != request.ExpectedPlanHashSHA256 {
 		return BrowserAgentTestWaiver{}, errors.New("project/package identity or expected bundle/plan hash does not match the Server-rebuilt App draft")
@@ -197,6 +216,133 @@ func (m *devAppPackageTestWaiverManager) Issue(ctx context.Context, request DevA
 	m.records[waiverID] = devAppPackageTestWaiverRecord{view: view, packageValue: pkg}
 	m.mu.Unlock()
 	return view, nil
+}
+
+// IssueFromRawFile is the strict local path for replaying the exact App
+// package exported to disk. Unlike Issue, it never rebuilds package state from
+// a project. This is deliberately dev/test-only and loopback-only at HTTP.
+func (m *devAppPackageTestWaiverManager) IssueFromRawFile(ctx context.Context, request DevAppPackageRawWaiverRequest) (BrowserAgentTestWaiver, error) {
+	if err := m.localOnlyGuard(request.DevTestAck); err != nil {
+		return BrowserAgentTestWaiver{}, err
+	}
+	path, err := m.validateRawPackagePath(request.PackageFile)
+	if err != nil {
+		return BrowserAgentTestWaiver{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return BrowserAgentTestWaiver{}, fmt.Errorf("read App execution package file: %w", err)
+	}
+	var pkg model.ClientExecutionPackage
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return BrowserAgentTestWaiver{}, fmt.Errorf("decode App execution package file: %w", err)
+	}
+	if err := model.ValidateClientExecutionPackageForLocalTestWaiver(&pkg); err != nil {
+		return BrowserAgentTestWaiver{}, fmt.Errorf("raw App package validation failed: %w", err)
+	}
+	bundle := pkg.ExecutableScriptBundle
+	if bundle == nil || bundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		return BrowserAgentTestWaiver{}, errors.New("raw App package must use browser-agent-outline-v1")
+	}
+	if err := verifyAppDraftProtocolHashes(bundle); err != nil {
+		return BrowserAgentTestWaiver{}, err
+	}
+	if strings.TrimSpace(request.ExpectedPackageID) != "" && pkg.PackageID != strings.TrimSpace(request.ExpectedPackageID) {
+		return BrowserAgentTestWaiver{}, errors.New("raw App package_id does not match the requested identity")
+	}
+	if bundle.Reproducibility.BundleHashSHA256 != strings.TrimSpace(request.ExpectedBundleHashSHA256) || bundle.Reproducibility.PlanHashSHA256 != strings.TrimSpace(request.ExpectedPlanHashSHA256) {
+		return BrowserAgentTestWaiver{}, errors.New("raw App package bundle/plan hash does not match the requested identity")
+	}
+	if len(request.ApprovedNodeIDs) == 0 {
+		return BrowserAgentTestWaiver{}, errors.New("approved_node_ids are required")
+	}
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		return BrowserAgentTestWaiver{}, fmt.Errorf("compile unchanged raw App package: %w", err)
+	}
+	target, err := devVisibleTargetURL(pkg.RecordingRunSpec.BaseURL)
+	if err != nil {
+		return BrowserAgentTestWaiver{}, fmt.Errorf("raw App package is outside the local visible acceptance target: %w", err)
+	}
+	productURL, err := url.Parse(strings.TrimSpace(pkg.ProjectContextSummary.ProductURL))
+	if err != nil || devVisibleOrigin(productURL) != devVisibleOrigin(target) {
+		return BrowserAgentTestWaiver{}, errors.New("raw App package product_url does not match recording_run_spec.base_url")
+	}
+	if !containsExactString(plan.ExplorationScope.AllowedOrigins, devVisibleOrigin(target)) || !visibleOriginsRestricted(plan.ExplorationScope.AllowedOrigins, devVisibleOrigin(target)) {
+		return BrowserAgentTestWaiver{}, errors.New("raw App package allowed_origins must contain only its local visible origin")
+	}
+	if !containsExactString(pkg.RecordingRunSpec.AllowedDomains, target.Hostname()) || !containsExactString(bundle.SecurityPolicy.AllowedDomains, target.Hostname()) {
+		return BrowserAgentTestWaiver{}, errors.New("raw App package allowed_domains must include the local visible host")
+	}
+	requested := map[string]bool{}
+	for _, nodeID := range request.ApprovedNodeIDs {
+		nodeID = strings.TrimSpace(nodeID)
+		if nodeID == "" || requested[nodeID] {
+			return BrowserAgentTestWaiver{}, errors.New("approved_node_ids must contain unique non-empty node IDs")
+		}
+		requested[nodeID] = true
+	}
+	allowed := make([]BrowserAgentTestWaiverNode, 0, len(requested))
+	for _, stage := range plan.Stages {
+		if !requested[stage.NodeID] {
+			continue
+		}
+		if stage.TargetContract.Destructive {
+			return BrowserAgentTestWaiver{}, fmt.Errorf("node %s is explicitly destructive and can never receive a test waiver", stage.NodeID)
+		}
+		found := false
+		for index, interaction := range stage.Interactions {
+			if interaction.NonDestructive {
+				continue
+			}
+			allowed = append(allowed, BrowserAgentTestWaiverNode{NodeID: stage.NodeID, StageID: stage.ID, InteractionIndex: index, ActionType: interaction.Kind, SemanticID: stage.TargetContract.SemanticID})
+			found = true
+		}
+		if !found {
+			return BrowserAgentTestWaiver{}, fmt.Errorf("node %s has no missing non-destructive classification to waive", stage.NodeID)
+		}
+		delete(requested, stage.NodeID)
+	}
+	if len(requested) != 0 {
+		return BrowserAgentTestWaiver{}, fmt.Errorf("approved_node_ids contains nodes not present in the raw App package: %v", mapKeys(requested))
+	}
+	digest, err := model.DigestCanonicalJSON(pkg)
+	if err != nil {
+		return BrowserAgentTestWaiver{}, err
+	}
+	now := timeNowUTC()
+	waiverID := fmt.Sprintf("test_waiver_%d", now.UnixNano())
+	auditDir := filepath.Join(m.service.runtime.ArtifactRoot, "dev-test-only", "app-package-waiver", safePathSegment(waiverID))
+	rawHash := fmt.Sprintf("%x", sha256.Sum256(data))
+	view := BrowserAgentTestWaiver{SchemaVersion: browserAgentTestWaiverSchemaVersion, WaiverID: waiverID, ProjectID: pkg.ProjectID, PackageID: pkg.PackageID, BundleHashSHA256: bundle.Reproducibility.BundleHashSHA256, PlanHashSHA256: bundle.Reproducibility.PlanHashSHA256, OriginalPackageDigest: digest, RawPackageSHA256: rawHash, AllowedOrigin: devVisibleOrigin(target), AllowedNodes: allowed, BlockedReasons: packageBlockingReasons(pkg), DevTestOnly: true, NotForExchangeUpload: true, TestOnlyWaiver: true, FormalExchange: false, AppGenerated: true, TransportAuthenticated: false, IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), Status: "issued", AuditLogPath: filepath.Join(auditDir, "test-waiver-audit.jsonl")}
+	if err := appendBrowserAgentTestWaiverAudit(view.AuditLogPath, map[string]any{"event": "waiver_issued_from_raw_app_package", "package_file": path, "waiver": view, "occurred_at": now}); err != nil {
+		return BrowserAgentTestWaiver{}, err
+	}
+	m.mu.Lock()
+	m.records[waiverID] = devAppPackageTestWaiverRecord{view: view, packageValue: pkg, rawFile: path}
+	m.mu.Unlock()
+	_ = ctx
+	return view, nil
+}
+
+func (m *devAppPackageTestWaiverManager) validateRawPackagePath(value string) (string, error) {
+	path := filepath.Clean(strings.TrimSpace(value))
+	if path == "." || !filepath.IsAbs(path) {
+		return "", errors.New("package_file must be an absolute local path")
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return "", errors.New("package_file must point to an existing JSON file")
+	}
+	root := filepath.Clean(m.service.runtime.DevRepoRoot)
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("package_file must be inside the local Engine workspace")
+	}
+	if strings.ToLower(filepath.Ext(path)) != ".json" {
+		return "", errors.New("package_file must use the .json extension")
+	}
+	return path, nil
 }
 
 // applyTestOnlyWaiverRuntimeClassifications supplies the one missing safety
@@ -289,17 +435,38 @@ func (m *devAppPackageTestWaiverManager) Run(ctx context.Context, waiverID strin
 	if record.view.Status != "issued" || timeNowUTC().After(record.view.ExpiresAt) {
 		return DevVisibleBrowserAgentView{}, errors.New("app-package test waiver is expired or already consumed")
 	}
-	// Rebuild from local App state immediately before execution. CreatedAt may
-	// differ, so compare stable identity, approval subject and protocol hashes.
-	build, err := m.service.BuildClientExecutionPackage(ctx, record.view.ProjectID, defaultDesktopOrgID)
-	if err != nil {
-		return DevVisibleBrowserAgentView{}, fmt.Errorf("rebuild App draft before waiver run: %w", err)
-	}
-	if build.Package.PackageID != record.view.PackageID || build.ApprovalSubjectDigestSHA256 != record.view.ApprovalSubjectDigest || build.Package.ExecutableScriptBundle == nil || build.Package.ExecutableScriptBundle.Reproducibility.BundleHashSHA256 != record.view.BundleHashSHA256 || build.Package.ExecutableScriptBundle.Reproducibility.PlanHashSHA256 != record.view.PlanHashSHA256 {
-		return DevVisibleBrowserAgentView{}, errors.New("App draft changed after waiver issuance; issue a new waiver")
-	}
-	if err := verifyAppDraftProtocolHashes(build.Package.ExecutableScriptBundle); err != nil {
-		return DevVisibleBrowserAgentView{}, err
+	if record.rawFile != "" {
+		data, readErr := os.ReadFile(record.rawFile)
+		if readErr != nil {
+			return DevVisibleBrowserAgentView{}, fmt.Errorf("read raw App package before waiver run: %w", readErr)
+		}
+		if record.view.RawPackageSHA256 != "" && fmt.Sprintf("%x", sha256.Sum256(data)) != record.view.RawPackageSHA256 {
+			return DevVisibleBrowserAgentView{}, errors.New("raw App package bytes changed after waiver issuance; issue a new waiver")
+		}
+		var current model.ClientExecutionPackage
+		if decodeErr := json.Unmarshal(data, &current); decodeErr != nil {
+			return DevVisibleBrowserAgentView{}, fmt.Errorf("decode raw App package before waiver run: %w", decodeErr)
+		}
+		currentDigest, digestErr := model.DigestCanonicalJSON(current)
+		if digestErr != nil || currentDigest != record.view.OriginalPackageDigest {
+			return DevVisibleBrowserAgentView{}, errors.New("raw App package changed after waiver issuance; issue a new waiver")
+		}
+		if err := verifyAppDraftProtocolHashes(current.ExecutableScriptBundle); err != nil {
+			return DevVisibleBrowserAgentView{}, err
+		}
+	} else {
+		// Legacy project-bound local path retained for compatibility with earlier
+		// Server tests; it is never used by the raw-package endpoint.
+		if record.packageValue.PackageID != record.view.PackageID || record.packageValue.ExecutableScriptBundle == nil {
+			return DevVisibleBrowserAgentView{}, errors.New("stored original App draft identity is invalid")
+		}
+		bundle := record.packageValue.ExecutableScriptBundle
+		if bundle.Reproducibility.BundleHashSHA256 != record.view.BundleHashSHA256 || bundle.Reproducibility.PlanHashSHA256 != record.view.PlanHashSHA256 {
+			return DevVisibleBrowserAgentView{}, errors.New("stored original App draft hashes changed after waiver issuance")
+		}
+		if err := verifyAppDraftProtocolHashes(bundle); err != nil {
+			return DevVisibleBrowserAgentView{}, err
+		}
 	}
 	digest, err := model.DigestCanonicalJSON(record.packageValue)
 	if err != nil || digest != record.view.OriginalPackageDigest {
@@ -480,4 +647,27 @@ func (s *DevHTTPServer) handleAppPackageTestWaivers(w http.ResponseWriter, r *ht
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func (s *DevHTTPServer) handleAppPackageRawTestWaiver(w http.ResponseWriter, r *http.Request) {
+	if err := s.requireLocalServerAcceptance(r); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	manager := s.service.devAppPackageTestWaivers
+	if manager == nil {
+		writeBridgeValue(w, nil, errors.New("app-package test waiver manager is not configured"))
+		return
+	}
+	var request DevAppPackageRawWaiverRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	value, err := manager.IssueFromRawFile(r.Context(), request)
+	writeBridgeValue(w, value, err)
 }

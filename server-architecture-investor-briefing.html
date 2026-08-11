@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cascade DemoOps Server 架构与投资人问答</title>
+  <style>
+    :root { --ink:#14213d; --muted:#5f6b7a; --blue:#2457d6; --cyan:#0b8ea8; --paper:#fff; --bg:#edf2f8; --line:#dce4ef; --green:#147d64; --amber:#a35b00; --red:#b33a3a; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; color:var(--ink); background:var(--bg); font:16px/1.72 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; }
+    a { color:var(--blue); text-decoration:none; }
+    .hero { color:#fff; background:linear-gradient(130deg,#101d3c 0%,#183a78 58%,#0b8094 100%); padding:68px max(24px,calc((100vw - 1180px)/2)); }
+    .eyebrow { font-size:13px; font-weight:800; letter-spacing:.16em; opacity:.78; text-transform:uppercase; }
+    h1 { max-width:900px; margin:12px 0 16px; font-size:clamp(34px,5vw,62px); line-height:1.12; letter-spacing:-.04em; }
+    .hero p { max-width:870px; margin:0; color:#dce8ff; font-size:19px; }
+    .meta { display:flex; flex-wrap:wrap; gap:10px; margin-top:26px; }
+    .meta span { padding:7px 12px; border:1px solid #ffffff42; border-radius:999px; background:#ffffff0d; font-size:13px; }
+    .layout { display:grid; grid-template-columns:260px minmax(0,900px); gap:30px; max-width:1220px; margin:30px auto; padding:0 20px 60px; align-items:start; }
+    nav { position:sticky; top:20px; padding:18px; border:1px solid var(--line); border-radius:18px; background:#fff; box-shadow:0 8px 28px #26364d12; }
+    nav strong { display:block; margin-bottom:9px; }
+    nav a { display:block; padding:7px 9px; color:#47556a; border-radius:8px; font-size:14px; }
+    nav a:hover { color:var(--blue); background:#f1f5ff; }
+    main { min-width:0; }
+    section { margin-bottom:24px; padding:34px; border:1px solid var(--line); border-radius:20px; background:var(--paper); box-shadow:0 8px 30px #26364d0c; }
+    h2 { margin:0 0 18px; font-size:29px; line-height:1.3; letter-spacing:-.025em; }
+    h3 { margin:26px 0 10px; font-size:20px; }
+    h4 { margin:0 0 5px; font-size:16px; }
+    p { margin:9px 0; }
+    .lead { color:#33435a; font-size:18px; }
+    .callout { margin:20px 0; padding:18px 20px; border-left:5px solid var(--blue); border-radius:10px; background:#f1f5ff; }
+    .callout.good { border-color:var(--green); background:#effaf7; }
+    .callout.warn { border-color:var(--amber); background:#fff8ec; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    .card { padding:18px; border:1px solid var(--line); border-radius:14px; background:#fbfcfe; }
+    .card p { margin:4px 0 0; color:var(--muted); font-size:14px; }
+    .tag { display:inline-block; margin:2px 4px 2px 0; padding:3px 9px; border-radius:999px; color:#17417f; background:#eaf1ff; font-size:12px; font-weight:700; }
+    .flow { display:grid; gap:10px; margin:20px 0; }
+    .step { display:grid; grid-template-columns:42px 1fr; gap:13px; align-items:start; padding:15px; border:1px solid var(--line); border-radius:13px; background:#fbfcff; }
+    .num { display:grid; place-items:center; width:34px; height:34px; color:#fff; background:var(--blue); border-radius:10px; font-weight:800; }
+    .arrow { padding-left:16px; color:#8da0ba; font-weight:800; }
+    table { width:100%; border-collapse:collapse; margin:16px 0; font-size:14px; }
+    th,td { padding:12px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { background:#f3f6fa; }
+    code { padding:2px 5px; border-radius:5px; background:#eff3f8; font-family:Consolas,monospace; font-size:.9em; }
+    pre { overflow:auto; padding:18px; color:#dbe8ff; background:#111d35; border-radius:14px; font:14px/1.6 Consolas,monospace; }
+    ul,ol { padding-left:22px; }
+    .qa { margin:12px 0; border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+    .qa summary { cursor:pointer; padding:17px 20px; background:#f8fafc; font-weight:800; list-style:none; }
+    .qa summary::-webkit-details-marker { display:none; }
+    .qa summary::before { content:"＋"; display:inline-block; width:24px; color:var(--blue); }
+    .qa[open] summary::before { content:"－"; }
+    .answer { padding:5px 20px 20px 44px; }
+    .answer strong { color:#153f91; }
+    .small { color:var(--muted); font-size:13px; }
+    footer { max-width:900px; margin:0 auto 50px; padding:0 20px; color:#718096; text-align:center; font-size:13px; }
+    @media (max-width:900px) { .layout { grid-template-columns:1fr; } nav { position:relative; top:0; } .grid { grid-template-columns:1fr; } section { padding:24px; } }
+    @media print { body { background:#fff; font-size:11pt; } .hero { padding:30px; } nav { display:none; } .layout { display:block; max-width:none; margin:0; padding:0; } section { box-shadow:none; break-inside:avoid; margin:0 0 12px; } details { break-inside:avoid; } details:not([open]) .answer { display:block; } .qa summary::before { content:""; } }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="eyebrow">Cascade DemoOps · Server Briefing</div>
+    <h1>Server 架构、交付责任链与投资人问答</h1>
+    <p>一份基于当前代码与 v2 权威架构整理的内部讲解材料：解释 App 把已审批执行包交付后，Server 如何把“业务意图”转化为可验证、可审计、可交付的视频结果。</p>
+    <div class="meta"><span>更新：2026-07-30</span><span>范围：Server / Exchange / Browser Agent / Editor</span><span>口径：已实现与规划明确分离</span></div>
+  </header>
+
+  <div class="layout">
+    <nav aria-label="目录">
+      <strong>目录</strong>
+      <a href="#one-line">一句话定位</a><a href="#architecture">总体架构</a><a href="#boundary">App / Server 边界</a><a href="#handoff">交付后责任链</a><a href="#tasks">我的 Server 任务</a><a href="#security">安全与审计</a><a href="#status">现状与路线</a><a href="#metrics">核心指标</a><a href="#qa">投资人问答</a><a href="#pitch">60 秒话术</a>
+    </nav>
+
+    <main>
+      <section id="one-line">
+        <h2>一句话定位</h2>
+        <p class="lead"><strong>Cascade DemoOps Server 是把 App 侧已理解、已编排、已审批的产品演示意图，安全地执行在真实页面上，并生成经过结果验证、可编辑、可追溯的视频交付物的执行与媒体控制面。</strong></p>
+        <div class="callout good">我们的差异不是“能自动点击网页”，而是把协议校验、执行授权、真实页面证据、Outcome Verifier、受控修复和视频结果绑定成一条可信链路。</div>
+        <div class="grid">
+          <div class="card"><h4>输入</h4><p>版本化 Exchange Envelope、Client Execution Package、审批与安全策略、业务动作和结果契约。</p></div>
+          <div class="card"><h4>输出</h4><p>Recording Result Package、步骤结果、验证报告、审计事件、失败诊断、素材目录和最终视频。</p></div>
+          <div class="card"><h4>核心价值</h4><p>将不稳定网页自动化变成边界清晰、失败可解释、结果可验收的生产流水线。</p></div>
+          <div class="card"><h4>Server 不做什么</h4><p>不替 App 发明业务目标，不绕过审批，不保存明文凭据，不用剪辑掩盖执行失败。</p></div>
+        </div>
+      </section>
+
+      <section id="architecture">
+        <h2>总体架构：控制面、执行面、验证面、媒体面</h2>
+        <pre>App（业务理解、流程编排、人审授权）
+  │  Exchange Envelope + Client Execution Package
+  ▼
+┌──────────── Server 控制面 ────────────┐
+│ 身份/安装配对 · Intake · 幂等 · 状态机 │
+│ Schema/签名/Hash/来源/审批/策略校验      │
+└────────────────┬──────────────────────┘
+                 ▼
+┌──────────── Server 执行面 ────────────┐
+│ Runtime Router → Browser Agent/兼容运行时│
+│ Playwright 隔离上下文 · 域名/路由/动作边界│
+└────────────────┬──────────────────────┘
+                 ▼
+┌──────────── 验证与修复面 ─────────────┐
+│ Outcome Verifier · Stage Events         │
+│ Repair Policy Guard · Runtime Patch Ledger│
+└────────────────┬──────────────────────┘
+                 ▼
+┌──────────── 媒体与交付面 ─────────────┐
+│ 录制/截图/Trace → Asset Catalog         │
+│ DemoEditPlan → 预览/FFmpeg → Result/ACK │
+└────────────────────────────────────────┘</pre>
+        <h3>代码模块映射</h3>
+        <table><thead><tr><th>层</th><th>职责</th><th>当前主要模块</th></tr></thead><tbody>
+          <tr><td>协议与领域模型</td><td>定义包、状态、验证、编辑计划和结果契约</td><td><code>backend/internal/model</code></td></tr>
+          <tr><td>控制面 / Intake</td><td>上传初始化、安装身份、幂等、防重放、状态、取消、结果和 ACK</td><td><code>backend/internal/app/exchange_*</code></td></tr>
+          <tr><td>运行时路由</td><td>根据 manifest runtime 选择 Browser Agent Outline 或兼容执行器</td><td><code>exchange_runtime_router.go</code></td></tr>
+          <tr><td>浏览器编排</td><td>编译 Stage、策略守卫、事件审计、Outcome Verifier、受控修复</td><td><code>browser_agent_*.go</code></td></tr>
+          <tr><td>Worker / 驱动</td><td>Go 与 Node Worker RPC、Playwright 执行、隔离与素材采集</td><td><code>internal/driver</code>、<code>video-worker/src</code></td></tr>
+          <tr><td>视频编辑</td><td>素材时间线、默认编辑计划、编辑会话、预览与最终渲染</td><td><code>internal/executor</code>、<code>renderer.ts</code></td></tr>
+          <tr><td>存储</td><td>本地布局、状态存储及数据库/Repository 抽象</td><td><code>storage</code>、<code>store</code>、<code>repository</code>、<code>database</code></td></tr>
+        </tbody></table>
+      </section>
+
+      <section id="boundary">
+        <h2>App 与 Server 的责任边界</h2>
+        <table><thead><tr><th>问题</th><th>App 侧权威</th><th>Server 侧权威</th></tr></thead><tbody>
+          <tr><td>为什么做、演示什么</td><td>用户意图、业务目标、步骤语义、业务顺序</td><td>不新增、不替换业务目的</td></tr>
+          <tr><td>是否允许执行</td><td>人审授权、批准时间、计划摘要 Hash</td><td>验证授权与 Hash 完整一致；只允许收紧策略</td></tr>
+          <tr><td>页面现在是什么样</td><td>可提供源码线索和候选提示</td><td>以真实运行时页面、role/name/testid/frame 为准</td></tr>
+          <tr><td>动作是否成功</td><td>定义 Outcome Contract 和 required validation</td><td>Outcome Verifier 根据真实结果作最终判断</td></tr>
+          <tr><td>技术漂移如何处理</td><td>原始审批草案保持不可变</td><td>仅对 selector/frame/wait 等低风险问题生成可审计 Patch</td></tr>
+          <tr><td>视频如何交付</td><td>输出要求、品牌/时长/素材偏好</td><td>素材编目、编辑计划、渲染、结果打包与交付</td></tr>
+        </tbody></table>
+        <div class="callout warn"><strong>关键原则：</strong>业务语义来自 App/外部证据；实时页面事实来自 Server Browser Agent；成功与否来自 Outcome Verifier。任何单一 LLM 置信度都不能越过硬门槛。</div>
+      </section>
+
+      <section id="handoff">
+        <h2>App 交付之后：Server 的端到端责任链</h2>
+        <div class="flow">
+          <div class="step"><div class="num">1</div><div><h4>建立可信传输</h4>通过安装配对和会话身份确认发送方；协商公钥、加密套件、压缩、大小和有效期。生产路径只接受加密 payload reference，不把明文执行包当作普通请求体。</div></div>
+          <div class="arrow">↓</div>
+          <div class="step"><div class="num">2</div><div><h4>Intake 与协议校验</h4>校验 Schema、包类型、组织/项目、签名、摘要、nonce、防重放、TTL、幂等键、附件引用、审批字段和来源绑定。不合格时返回机器可读错误及修复建议。</div></div>
+          <div class="arrow">↓</div>
+          <div class="step"><div class="num">3</div><div><h4>运行时计划编译与路由</h4>根据 <code>script_manifest.runtime</code> 选择执行器；把 Browser Agent Outline 编译为 Server 可执行 Stage，并校验允许域名、来源、路由、禁用页面、敏感字段和资源上限。</div></div>
+          <div class="arrow">↓</div>
+          <div class="step"><div class="num">4</div><div><h4>隔离执行与证据采集</h4>在独立浏览器上下文中执行动作，记录阶段事件、动作前后截图、必要 Trace/录屏和运行时版本；凭据通过受限 grant/ref 进入，不进入普通日志和结果包。</div></div>
+          <div class="arrow">↓</div>
+          <div class="step"><div class="num">5</div><div><h4>Outcome Verifier 判定</h4>动作“没有报错”不等于成功。对 required validation 逐项验证；验证失败就停止或进入允许的修复逻辑，不能把失败素材包装成成功。</div></div>
+          <div class="arrow">↓</div>
+          <div class="step"><div class="num">6</div><div><h4>受控运行时修复</h4>仅允许 selector、frame、wait 等技术性小修复；不得更改业务目的、action type、输入、顺序、副作用或成功标准。每个 Patch 带原因、证据、范围与审计记录。</div></div>
+          <div class="arrow">↓</div>
+          <div class="step"><div class="num">7</div><div><h4>素材编目与视频编辑</h4>把录屏、动作后脱敏截图、步骤结果组织为 Asset Timeline Catalog；生成受字段锁约束的 DemoEditPlan，支持预览、调整和 FFmpeg 最终渲染。</div></div>
+          <div class="arrow">↓</div>
+          <div class="step"><div class="num">8</div><div><h4>结果打包、交付与 ACK</h4>生成 Recording Result Package，绑定源 Package ID、状态、验证报告、修复账本、视频和诊断；支持下载、复核、修订、保留策略和消费确认。</div></div>
+        </div>
+      </section>
+
+      <section id="tasks">
+        <h2>我负责的 Server 侧任务</h2>
+        <p class="lead">你的核心职责可以概括为：<strong>把 App 的“已批准意图”可靠地变成“已验证结果”，并交付可用视频，而不是仅仅把脚本跑完。</strong></p>
+        <div class="grid">
+          <div class="card"><h4>1. 协议契约与兼容性</h4><p>维护 Exchange、Execution Package、Browser Agent Outline、Result Package 的版本；提供 fixture、兼容矩阵和明确迁移策略。</p></div>
+          <div class="card"><h4>2. Intake 安全门</h4><p>完善身份、签名、摘要、加密引用、防重放、幂等、审批 Hash、域名和输出策略校验；确保非法包不能进入 Worker。</p></div>
+          <div class="card"><h4>3. 任务状态机</h4><p>维护 initialized/uploaded/accepted/queued/running/completed/failed/canceled/expired，保证重试、取消和终态幂等。</p></div>
+          <div class="card"><h4>4. Runtime Router</h4><p>按 runtime manifest 分派执行器，冻结旧运行时、推进 <code>browser-agent-outline-v1</code>，避免分支逻辑散落在业务代码。</p></div>
+          <div class="card"><h4>5. Browser Agent 编排</h4><p>编译 Stage、建立隔离上下文、执行政策守卫、目标解析、超时、资源回收和结构化事件审计。</p></div>
+          <div class="card"><h4>6. Outcome Verifier</h4><p>把成功标准结构化；实现执行前、逐步骤和执行后验证，保存决策证据，并确保验证失败不能被编辑层掩盖。</p></div>
+          <div class="card"><h4>7. Repair Policy</h4><p>限定允许修复的字段、风险级别、次数和证据要求；保留不可变原稿与 Patch Ledger，支持回放和责任定位。</p></div>
+          <div class="card"><h4>8. 录制与脱敏</h4><p>管理截图、录屏、Trace 的启停、遮罩与保留期；确保密码、Token、Cookie、Storage 和敏感输入不进入普通产物。</p></div>
+          <div class="card"><h4>9. 视频编辑与渲染</h4><p>维护素材目录、默认编辑计划、锁定字段、预览/最终渲染、静态截图成片、FFmpeg 错误归因与质量验证。</p></div>
+          <div class="card"><h4>10. 结果与交付</h4><p>生成可验证 Result Package，提供状态、下载、ACK、复核、修订与清理；保证结果和原输入、运行证据形成闭环。</p></div>
+          <div class="card"><h4>11. 可观测性与 SLO</h4><p>分阶段记录延迟、成功率、验证失败率、修复率、渲染耗时、队列等待、资源占用和错误码分布。</p></div>
+          <div class="card"><h4>12. 测试与发布</h4><p>契约测试、确定性 fixture、Worker 测试、真实页面 acceptance、失败注入、安全测试、版本回滚和容量验证。</p></div>
+        </div>
+        <h3>推荐优先级</h3>
+        <ol>
+          <li><strong>P0：可信闭环。</strong>生产 Intake 加密引用、安装身份、审批/Hash、Outcome Verifier、终态和结果包全部贯通。</li>
+          <li><strong>P0：安全与隔离。</strong>域名/路由/动作政策不可绕过，凭据和敏感页面数据不落普通存储。</li>
+          <li><strong>P1：稳定性。</strong>队列、租约、幂等重试、超时回收、失败诊断、Worker 横向扩展。</li>
+          <li><strong>P1：媒体质量。</strong>素材时间线、预览、最终渲染、音频/字幕/品牌模板和结果 QA。</li>
+          <li><strong>P2：v2 探索与双证据融合。</strong>逐步由“执行 App Outline”演进到 Server 真实页面探索和冲突分类。</li>
+        </ol>
+      </section>
+
+      <section id="security">
+        <h2>安全、隐私与审计设计</h2>
+        <table><thead><tr><th>风险</th><th>Server 控制</th><th>对外回答要点</th></tr></thead><tbody>
+          <tr><td>伪造或篡改执行包</td><td>安装身份、签名、canonical digest、审批 Hash、nonce、防重放、TTL</td><td>Server 不信任普通 JSON 自报身份，每个执行结果可回链到获批输入。</td></tr>
+          <tr><td>越权访问网页</td><td>allowed domains/origins/routes、forbidden pages/actions、隔离上下文</td><td>模型只能在政策围栏内提出候选，确定性守卫拥有最终否决权。</td></tr>
+          <tr><td>凭据泄露</td><td>grant/ref、密钥封装、日志脱敏、遮罩、禁止保存 Cookie/Storage 明文</td><td>凭据是短生命周期能力，不是执行包字段。</td></tr>
+          <tr><td>误判成功</td><td>required Outcome Validation、执行前/后验证、失败诊断</td><td>点击成功不是业务成功；只有验证通过才进入成功结果。</td></tr>
+          <tr><td>自动修复改变业务</td><td>Repair Policy 白名单、原稿不可变、Patch Ledger</td><td>只修技术漂移，不改业务意图、输入、副作用和成功标准。</td></tr>
+          <tr><td>敏感媒体长期留存</td><td>分级产物、加密、retention、ACK 后清理、可审计删除</td><td>保留策略是结果契约的一部分，而不是运维口头约定。</td></tr>
+        </tbody></table>
+      </section>
+
+      <section id="status">
+        <h2>当前实现与 v2 路线：如何准确表述</h2>
+        <div class="grid">
+          <div class="card"><h4>当前已具备 / 代码中可见</h4><p>版本化交换与结果模型、Intake 状态机、幂等与防重放机制、安装身份路径、Runtime Router、Browser Agent Outline 执行、Stage 审计、Outcome Verifier、Repair Policy、录制结果、编辑/渲染模型、本地可见登录验收链路。</p></div>
+          <div class="card"><h4>仍在演进 / 不应过度承诺</h4><p>v2 完整 Exploration Session API、真实部署页面的大规模自主探索、双证据融合引擎、云 KMS/对象存储全生产化、分布式队列与 Worker 池、完整多租户生产 SLO、专业级编辑器能力。</p></div>
+        </div>
+        <div class="callout"><strong>推荐口径：</strong>“核心契约和确定性执行闭环已经形成，并有本地/测试实现；下一阶段是将同一套边界工程化为可横向扩展、强隔离的生产控制面，而不是重写产品逻辑。”</div>
+      </section>
+
+      <section id="metrics">
+        <h2>投资人最关心的可量化指标</h2>
+        <table><thead><tr><th>指标</th><th>定义</th><th>为什么重要</th></tr></thead><tbody>
+          <tr><td>Verified Completion Rate</td><td>required validations 全部通过的任务 / 已启动任务</td><td>比“脚本无异常退出”更接近客户价值。</td></tr>
+          <tr><td>First-pass Success Rate</td><td>无需 Repair 即成功的任务占比</td><td>衡量 App 包质量与页面稳定性。</td></tr>
+          <tr><td>Safe Repair Recovery Rate</td><td>低风险漂移经允许 Patch 后恢复的比例</td><td>衡量系统面对 UI 变化的韧性。</td></tr>
+          <tr><td>Time to Verified Video</td><td>上传完成至验证视频可下载的 P50/P95</td><td>直接关联单位时间产能和客户体验。</td></tr>
+          <tr><td>Cost per Verified Minute</td><td>浏览器、模型、存储和渲染成本 / 验证视频分钟</td><td>决定规模化毛利。</td></tr>
+          <tr><td>Protocol Rejection Quality</td><td>Intake 拒绝可定位率、修复后成功率</td><td>减少联调和客户支持成本。</td></tr>
+          <tr><td>Security Boundary Violations</td><td>越域、敏感信息落盘、策略绕过事件</td><td>目标必须为零，属于企业销售底线。</td></tr>
+          <tr><td>Artifact Delivery Reliability</td><td>结果包生成、下载、ACK 和清理成功率</td><td>确保“执行成功”真正转化为可消费交付。</td></tr>
+        </tbody></table>
+      </section>
+
+      <section id="qa">
+        <h2>投资人可能提问与详细回答示例</h2>
+        <p class="small">点击问题展开。回答中的数据指标应在正式路演前替换为真实压测或客户数据，禁止把设计目标表述为既有业绩。</p>
+
+        <details class="qa" open><summary>1. Server 到底解决了什么不可替代的问题？</summary><div class="answer"><p><strong>示例回答：</strong>App 能理解产品和生成演示计划，但从计划到可信视频之间还有一个高风险缺口：网页会变化、选择器会漂移、动作不报错也可能没有产生业务结果、录制素材还要经过编辑和交付。Server 的价值是把这一段变成协议化生产流水线。它验证来源和审批，在隔离浏览器里执行，用 Outcome Verifier 判断真实结果，只允许低风险技术修复，最后把证据和视频绑定进结果包。因此我们卖的不是一次性的脚本生成，而是可重复、可审计的“verified demo production”。</p></div></details>
+
+        <details class="qa"><summary>2. 为什么不直接在 App 本地完成执行和剪辑？</summary><div class="answer"><p><strong>示例回答：</strong>本地执行适合低成本预览，但不适合作为统一的企业交付权威。客户端环境差异大、容易离线、资源不可控，也难以统一安全策略、审计、版本和重试。Server 可以集中管理运行时版本、浏览器镜像、策略、渲染资源、状态和结果保留，同时让 App 保留业务理解与人机交互优势。我们仍支持本地开发验收，但生产结果由 Server 形成统一可信链路。</p></div></details>
+
+        <details class="qa"><summary>3. 你们和 Playwright、录屏工具或 RPA 有什么区别？</summary><div class="answer"><p><strong>示例回答：</strong>Playwright 是优秀的浏览器执行基础设施，我们建立在它之上，但产品边界更高一层。传统脚本/RPA 关注“做动作”，我们还要验证动作代表的业务结果、限制自动修复不能改变意图、把每一步证据映射到视频素材，并通过版本化结果包交付。简单说，Playwright 是执行引擎之一；Cascade Server 是围绕业务授权、可信执行和媒体交付的控制面。</p></div></details>
+
+        <details class="qa"><summary>4. 网页 UI 经常变化，系统会不会非常脆弱？</summary><div class="answer"><p><strong>示例回答：</strong>我们把变化分成两类。业务变化必须回到 App/审批方重新确认，Server 不擅自改；技术漂移，例如 testid、frame 或等待条件变化，可以由真实页面观察产生候选，再经过 Repair Policy Guard 判断是否属于允许范围。修复以 Patch 叠加在不可变原稿上并进入账本。这样既提高恢复率，又不会用“智能”掩盖业务语义被改变。我们会用 First-pass Success 和 Safe Repair Recovery 两个指标分别衡量基础质量和韧性。</p></div></details>
+
+        <details class="qa"><summary>5. 如何证明视频里的流程真的成功，而不是只录到了点击？</summary><div class="answer"><p><strong>示例回答：</strong>每个关键动作都应带 Outcome Contract，例如元素可见、URL 状态、业务记录出现或指定状态变化。Server 在动作后运行 required validations；只有验证通过才把步骤标记为成功。验证报告、步骤事件和素材引用进入 Recording Result Package。编辑层不能把 failed step 变成成功，也不能通过剪辑隐藏 required validation 失败。这是我们和普通“操作录屏生成器”的核心区别。</p></div></details>
+
+        <details class="qa"><summary>6. 客户密码、Cookie 和产品数据会不会泄露？</summary><div class="answer"><p><strong>示例回答：</strong>设计上不把明文密码、Token、Cookie 或 Storage 放进普通执行包。生产链路使用加密 payload reference 和安装身份，凭据应通过短生命周期 grant/ref 进入隔离 Worker。浏览器 Observation、日志和结果包只保存允许且脱敏的字段；敏感选择器在截图和录制时遮罩，媒体按保留策略清理。当前代码已经体现这些契约和本地安全边界，云 KMS、对象存储和多租户隔离是生产化重点。</p></div></details>
+
+        <details class="qa"><summary>7. LLM 或 Browser Agent 会不会执行危险操作？</summary><div class="answer"><p><strong>示例回答：</strong>模型不拥有最终执行权。允许域名、来源、路由、禁用页面、动作类型、输入、资源上限和结果标准由确定性政策守卫执行；模型只能在边界内提出候选。高风险或业务语义变化不能由修复机制放行，必须回到外部授权。我们的安全模型是“模型建议、确定性服务裁决、证据系统验收”。</p></div></details>
+
+        <details class="qa"><summary>8. 系统如何支持规模化和高并发？</summary><div class="answer"><p><strong>示例回答：</strong>架构天然按控制面和 Worker 面拆分。控制面负责 Intake、幂等状态机、队列、租约和结果索引；浏览器与渲染 Worker 是有资源配额的短生命周期任务，可按队列深度横向扩展。对象存储承载大媒体，数据库只存元数据和引用。当前仓库已经有运行时路由、状态和驱动边界，下一步生产化重点是持久队列、Worker 租约、容器隔离、容量调度和 P95 SLO 验证。</p></div></details>
+
+        <details class="qa"><summary>9. 单个视频的成本如何控制，毛利空间在哪里？</summary><div class="answer"><p><strong>示例回答：</strong>主要成本来自浏览器时长、模型调用、视频编码和媒体存储。我们的策略是确定性解析优先、模型只处理不确定部分；执行证据和编辑素材复用；预览使用较低分辨率；最终渲染按需；失败尽早在 Intake 或 preflight 阶段拒绝，避免启动昂贵 Worker。核心单位经济指标是 Cost per Verified Minute，而不是每次 API 调用成本。正式数字会由真实 workload 的 P50/P95 采样给出。</p></div></details>
+
+        <details class="qa"><summary>10. 竞争壁垒是什么？别人也能拼接 LLM、Playwright 和 FFmpeg。</summary><div class="answer"><p><strong>示例回答：</strong>单个组件都可以买到，壁垒在长期积累的跨层契约和反馈数据：业务动作与真实页面目标的对齐、结果验证规则、失败分类、允许修复策略、步骤证据到视频素材的映射，以及不同产品/版本下的恢复数据。这些决定稳定性、安全性和交付质量。随着任务增长，我们积累的是“什么情况下可以安全执行并证明成功”的结构化知识，而不是只积累 Prompt。</p></div></details>
+
+        <details class="qa"><summary>11. Server 出故障后如何重试，是否会重复执行有副作用的动作？</summary><div class="answer"><p><strong>示例回答：</strong>上传和任务使用组织范围内的幂等键，状态机区分未启动、运行中和终态；Server 不会因为客户端重试就自动重复一个已开始或已结束的任务。对于有业务副作用的 Stage，还需要结合动作级幂等设计、前置状态观察和 Outcome Verification 决定恢复策略。生产化会使用 Worker lease、heartbeat 和 checkpoint：无法证明安全重放时，任务进入人工复核而不是盲目重试。</p></div></details>
+
+        <details class="qa"><summary>12. 如何做多租户隔离和企业合规？</summary><div class="answer"><p><strong>示例回答：</strong>所有资源以 org/project/install/session/package 形成授权链，媒体和密钥引用必须带租户边界。生产目标是每任务隔离 Worker、最小权限网络出口、租户级密钥或 envelope key、加密对象存储、结构化审计、可配置 retention、导出和删除证明。合规认证本身需要独立项目推进；我们不会把架构控制直接宣称为已经获得某项认证。</p></div></details>
+
+        <details class="qa"><summary>13. 为什么需要自定义 Exchange Package，而不是普通 REST JSON？</summary><div class="answer"><p><strong>示例回答：</strong>因为这是跨信任边界的可执行工作负载，不只是业务数据。Envelope 把发送者、组织项目、包类型、Schema、摘要、签名、nonce、有效期、加密引用、保留和执行窗口绑定起来；幂等和防重放也在同一契约内。普通 REST body 可以传字段，但很难形成可独立验证、可长期演进和可审计的执行授权载体。</p></div></details>
+
+        <details class="qa"><summary>14. 视频编辑为什么在 Server，而不是交给第三方生成式视频模型？</summary><div class="answer"><p><strong>示例回答：</strong>产品演示首先要求真实性和可追溯性。Server 的默认编辑计划只使用已有、已验证的录制或动作后截图，锁定来源、步骤顺序和关键字段，FFmpeg 提供确定性渲染。生成式媒体可以作为受控增强层，例如片头或旁白，但不能替换产品执行证据。这样既可保证品牌和效率，也避免模型“创造”不存在的产品状态。</p></div></details>
+
+        <details class="qa"><summary>15. 当前最大的技术风险和未来 6—12 个月重点是什么？</summary><div class="answer"><p><strong>示例回答：</strong>最大风险不是能不能跑通一次，而是跨产品、版本和租户稳定运行。近期重点有三类：第一，完成生产 Intake、密钥、对象存储、队列和 Worker 隔离；第二，用真实样本提升 verified completion、失败诊断和安全修复率；第三，把 v2 的 Server 探索与双证据融合逐步落地。我们会按阶段门槛推进：先保证可信闭环，再优化成功率和成本，最后扩大自主探索范围。</p></div></details>
+      </section>
+
+      <section id="pitch">
+        <h2>60 秒对外介绍话术</h2>
+        <div class="callout good"><p>“Cascade DemoOps 把软件产品演示从人工录制变成可验证的自动化生产。App 负责理解客户产品、组织业务步骤并完成人审授权；Server 接收版本化的加密执行包，在隔离浏览器中按策略执行，用 Outcome Verifier 判断每一步是否真正产生业务结果，并只对 selector、frame、wait 这类低风险技术漂移进行可审计修复。执行证据随后进入受约束的视频编辑和 FFmpeg 渲染，最终以可追溯的结果包交付。我们的核心不是让 AI 随便操作网页，而是让企业能够安全、稳定、规模化地产出可信产品视频。”</p></div>
+        <h3>三个必须坚持的表达</h3>
+        <ul><li>说“已验证成功”，不要只说“自动执行成功”。</li><li>说“模型建议、确定性政策裁决”，不要说“Agent 可以自由操作客户系统”。</li><li>清楚区分当前代码能力、测试闭环与尚待生产化的 v2 路线。</li></ul>
+      </section>
+    </main>
+  </div>
+  <footer>本材料依据 Cascade DemoOps Engine 当前仓库及 Server v2 架构文档整理。正式对外使用前，请补充真实客户案例、性能压测、成本与安全审计数据。</footer>
+</body>
+</html>

@@ -986,14 +986,51 @@ function urlMatches(actualValue: string, expectedValue: string): boolean {
   try {
     const actual = new URL(actualValue);
     const expected = new URL(expectedValue, actualValue);
-    if (actual.origin !== expected.origin) return false;
-    const expectedParts = expected.pathname.split("/").filter(Boolean);
-    const actualParts = actual.pathname.split("/").filter(Boolean);
-    if (expectedParts.length !== actualParts.length) return false;
-    return expectedParts.every((part, index) => part.startsWith(":") || part === actualParts[index]);
+    return actual.origin === expected.origin && routeTemplateMatches(actual.pathname, expected.pathname);
   } catch {
-    return safeURL(actualValue).includes(expectedValue);
+    return routeTemplateMatches(safeURL(actualValue), expectedValue);
   }
+}
+
+// App outlines may deliberately describe a resource route without knowing the
+// runtime-created identifier (for example /project/:id). The Server/Worker
+// binds that template to the observed URL at validation time; it never writes
+// the discovered identifier back into the App package or its hashes.
+export function routeTemplateMatches(actualPath: string, expectedPath: string): boolean {
+  const actual = normalizeRoutePath(actualPath);
+  const expected = normalizeRoutePath(expectedPath);
+  if (expected === "/") return actual === "/";
+  const expectedParts = expected.split("/").filter(Boolean);
+  const actualParts = actual.split("/").filter(Boolean);
+  if (expectedParts.length !== actualParts.length) return false;
+  return expectedParts.every((part, index) => {
+    const dynamic = part.startsWith(":") || (part.startsWith("{") && part.endsWith("}"));
+    return dynamic || part === "*" || part === actualParts[index];
+  });
+}
+
+function routeTemplatePrefixMatches(actualPath: string, expectedPath: string): boolean {
+  const actual = normalizeRoutePath(actualPath);
+  const expected = normalizeRoutePath(expectedPath);
+  if (expected === "/") return true;
+  const expectedParts = expected.split("/").filter(Boolean);
+  const actualParts = actual.split("/").filter(Boolean);
+  if (actualParts.length < expectedParts.length) return false;
+  return expectedParts.every((part, index) => {
+    const dynamic = part.startsWith(":") || (part.startsWith("{") && part.endsWith("}"));
+    return dynamic || part === "*" || part === actualParts[index];
+  });
+}
+
+function normalizeRoutePath(value: string): string {
+  let pathValue = String(value || "").trim();
+  try {
+    pathValue = new URL(pathValue).pathname;
+  } catch {
+    // Relative route templates are expected in the outline contract.
+  }
+  pathValue = `/${pathValue.replace(/^\/+/, "").replace(/\/+$/, "")}`.toLowerCase();
+  return pathValue === "" ? "/" : pathValue;
 }
 
 function locatorFromAlternative(page: any, kind: string, value: string): any | undefined {
@@ -1162,7 +1199,7 @@ function routeAllowed(pathname: string, allowedRoutes: string[]): boolean {
   const path = normalizeRoute(pathname);
   return allowedRoutes.some((route) => {
     const approved = normalizeRoute(route);
-    return approved === "/" || path === approved || path.startsWith(`${approved}/`);
+    return approved === "/" || routeTemplatePrefixMatches(path, approved) || path.startsWith(`${approved}/`);
   });
 }
 

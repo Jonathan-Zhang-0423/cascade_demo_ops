@@ -6,6 +6,7 @@ import {
   isApprovedCredentialLoginInteraction,
   isEvidenceBoundSelectorAlternative,
   resolutionAssertions,
+  routeTemplateMatches,
   urlPolicyError,
   usesPassiveRouteResolution,
   waitObservationRouteResolution,
@@ -187,5 +188,29 @@ describe("browser agent route validation", () => {
 	  validations: [{ id: "final_heading", kind: "text_contains", target: { role: "heading", text: "Build complete" }, required: true }],
 	};
 	expect(usesPassiveRouteResolution(stage, interaction)).toBe(false);
+  });
+});
+
+describe("browser agent runtime route templates", () => {
+  it("matches a runtime-created resource id without changing the template", () => {
+    expect(routeTemplateMatches("/project/proj_42", "/project/:id")).toBe(true);
+    expect(routeTemplateMatches("https://app.example.com/project/proj_42", "https://app.example.com/project/:id")).toBe(true);
+    expect(routeTemplateMatches("/project/proj_42/logs", "/project/:id")).toBe(false);
+    expect(routeTemplateMatches("/workspace/proj_42", "/project/:id")).toBe(false);
+  });
+
+  it("keeps dynamic route policy inside the approved template and blocks control paths", () => {
+    const session = {
+      allowedDomains: ["app.example.com"],
+      allowedOrigins: ["https://app.example.com"],
+      allowedRoutes: ["/project/:id"],
+      forbiddenPages: ["/v1"],
+      forbiddenPathPrefixes: [],
+      forbiddenKeywords: [],
+    } as any;
+    expect(urlPolicyError("https://app.example.com/project/proj_42", session, false)).toBeUndefined();
+    expect(urlPolicyError("https://app.example.com/project/proj_42/logs", session, false)).toBeUndefined();
+    expect(urlPolicyError("https://app.example.com/settings", session, false)).toContain("route_not_allowed");
+    expect(urlPolicyError("https://app.example.com/v1/execution-packages", { ...session, allowedRoutes: ["/"] }, false)).toContain("forbidden_page");
   });
 });
