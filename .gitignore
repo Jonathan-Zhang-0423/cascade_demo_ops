@@ -31,3 +31,12 @@ backend/cmd/wails-desktop/frontend/wailsjs/
 # superpowers skill artifacts — local only, never push
 docs/superpowers/
 .superpowers/
+
+# Local Browser Agent diagnostics and generated binaries.
+/backend/tmp/
+/tmp/
+/test-runs/
+
+# Retained local-only legacy Exchange acceptance diagnostic; the formal App
+# production path is Browser Agent Direct v1.
+/backend/internal/app/app_formal_e2e_test.go
