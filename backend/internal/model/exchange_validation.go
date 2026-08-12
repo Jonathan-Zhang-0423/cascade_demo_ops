@@ -4,9 +4,34 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
+
+type DirectPackageValidationError struct {
+	Code    string
+	Message string
+}
+
+func (e *DirectPackageValidationError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func directPackageValidationError(code, message string) error {
+	return &DirectPackageValidationError{Code: code, Message: message}
+}
+
+func DirectPackageValidationCode(err error) string {
+	var validationErr *DirectPackageValidationError
+	if errors.As(err, &validationErr) && validationErr.Code != "" {
+		return validationErr.Code
+	}
+	return "package_validation_failed"
+}
 
 func ValidateClientExecutionPackageIntake(envelope *ExchangeEnvelope, pkg *ClientExecutionPackage, now time.Time, seenNonces map[string]bool, verifier ExchangeSignatureVerifier) error {
 	if envelope == nil {
@@ -75,6 +100,176 @@ func ValidateClientExecutionPackageForCloudExecution(pkg *ClientExecutionPackage
 		return err
 	}
 	return ValidatePackageConfidenceSummary(pkg)
+}
+
+// ValidateClientExecutionPackageForDirectExecution applies the formal Direct
+// intake gate on top of the shared cloud package validation. Direct execution
+// must be bound to the exact package content and stage set that the user
+// approved; transport authentication alone is not evidence of that approval.
+func ValidateClientExecutionPackageForDirectExecution(pkg *ClientExecutionPackage) error {
+	if err := ValidateClientExecutionPackageForCloudExecution(pkg); err != nil {
+		return err
+	}
+	if pkg.ExecutableScriptBundle == nil || pkg.ExecutableScriptBundle.ScriptManifest.Runtime != ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		return errors.New("direct execution requires browser-agent-outline-v1 runtime")
+	}
+	approval := pkg.SafetyReport.HumanApproval
+	producerInstallationID := strings.TrimSpace(pkg.ProducerInstallationID)
+	approvedByInstallationID := strings.TrimSpace(approval.ApprovedByInstallationID)
+	if producerInstallationID == "" || approvedByInstallationID == "" || producerInstallationID != approvedByInstallationID {
+		return directPackageValidationError("unverified_origin", "direct execution installation producer and approval origin are missing or inconsistent")
+	}
+	if pkg.ApprovedAt.IsZero() {
+		return errors.New("direct execution requires package approved_at")
+	}
+	if strings.TrimSpace(approval.ApprovalID) == "" {
+		return errors.New("direct execution requires human approval_id")
+	}
+	if approval.ApprovedAt.IsZero() {
+		return errors.New("direct execution requires human approval approved_at")
+	}
+	if !pkg.ApprovedAt.Equal(approval.ApprovedAt) {
+		return errors.New("direct execution package approved_at does not match human approval approved_at")
+	}
+	planDigest := strings.TrimSpace(approval.PlanDigestSHA256)
+	if planDigest == "" || planDigest != pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256 {
+		return errors.New("direct execution human approval plan digest does not match execution plan")
+	}
+	if strings.TrimSpace(approval.ApprovalSchemaVersion) != UserApprovalSchemaVersion {
+		return directPackageValidationError("approval_digest_mismatch", fmt.Sprintf("direct execution approval_schema_version must be %q", UserApprovalSchemaVersion))
+	}
+	expectedSubjectDigests, err := ComputeApprovalSubjectDigestsSHA256(*pkg)
+	if err != nil {
+		return directPackageValidationError("approval_digest_mismatch", "direct execution approval subject objects are incomplete")
+	}
+	if approval.SubjectDigestsSHA256 != expectedSubjectDigests {
+		return directPackageValidationError("approval_digest_mismatch", "direct execution approval subject digests do not match frozen package objects")
+	}
+	approvedSubjectDigest := strings.TrimSpace(approval.ApprovalSubjectDigestSHA256)
+	if approvedSubjectDigest == "" {
+		return directPackageValidationError("approval_digest_mismatch", "direct execution requires human approval subject digest")
+	}
+	actualSubjectDigest, err := ComputePackageApprovalSubjectDigest(*pkg)
+	if err != nil {
+		return err
+	}
+	if approvedSubjectDigest != actualSubjectDigest {
+		return directPackageValidationError("approval_digest_mismatch", "direct execution human approval subject digest does not match execution package")
+	}
+	reviewed := make(map[string]bool, len(approval.ReviewedNodeIDs))
+	for _, nodeID := range approval.ReviewedNodeIDs {
+		if nodeID = strings.TrimSpace(nodeID); nodeID != "" {
+			reviewed[nodeID] = true
+		}
+	}
+	for _, stage := range pkg.ExecutableScriptBundle.StageApprovalPlan.Stages {
+		if !reviewed[stage.NodeID] {
+			return fmt.Errorf("direct execution stage node_id %q was not reviewed by the user", stage.NodeID)
+		}
+	}
+	if err := validateDirectSelectorProvenance(pkg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ValidateClientExecutionPackageForDirectInstallation(pkg *ClientExecutionPackage, installationID string) error {
+	if err := ValidateClientExecutionPackageForDirectExecution(pkg); err != nil {
+		return err
+	}
+	installationID = strings.TrimSpace(installationID)
+	if installationID == "" || pkg.ProducerInstallationID != installationID || pkg.SafetyReport.HumanApproval.ApprovedByInstallationID != installationID {
+		return directPackageValidationError("unverified_origin", "lease installation does not match package producer and approval installation")
+	}
+	return nil
+}
+
+func validateDirectSelectorProvenance(pkg *ClientExecutionPackage) error {
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		return err
+	}
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	return walkDirectSelectorProvenance(value, "package")
+}
+
+func walkDirectSelectorProvenance(value any, path string) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			child := typed[key]
+			childPath := path + "." + key
+			if key == "selector_alternatives" || key == "dom_hints" {
+				items, ok := child.([]any)
+				if !ok {
+					return directPackageValidationError("selector_provenance_incomplete", childPath+" must be an array")
+				}
+				for index, item := range items {
+					data, err := json.Marshal(item)
+					if err != nil {
+						return err
+					}
+					var candidate SelectorCandidate
+					if err := json.Unmarshal(data, &candidate); err != nil {
+						return directPackageValidationError("selector_provenance_incomplete", fmt.Sprintf("%s[%d] is invalid", childPath, index))
+					}
+					if err := validateDirectSelectorCandidate(candidate, fmt.Sprintf("%s[%d]", childPath, index)); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if err := walkDirectSelectorProvenance(child, childPath); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for index, item := range typed {
+			if err := walkDirectSelectorProvenance(item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateDirectSelectorCandidate(candidate SelectorCandidate, path string) error {
+	validKind := candidate.Kind == "testid" || candidate.Kind == "role" || candidate.Kind == "css"
+	validSource := candidate.SourceKind == "source_scan" || candidate.SourceKind == "page_scan" || candidate.SourceKind == "approved_manual_annotation"
+	if !validKind || strings.TrimSpace(candidate.Value) == "" || strings.TrimSpace(candidate.EvidenceID) == "" || !validSource || !isLowerSHA256(candidate.SourceDigest) || strings.TrimSpace(candidate.ObservedRole) == "" || strings.TrimSpace(candidate.ObservedAccessibleName) == "" || candidate.ObservedAt == nil || candidate.ObservedAt.IsZero() || len(candidate.EvidenceRefs) == 0 {
+		return directPackageValidationError("selector_provenance_incomplete", path+" is missing required selector provenance")
+	}
+	foundEvidence := false
+	for _, ref := range candidate.EvidenceRefs {
+		if ref.ID == candidate.EvidenceID && strings.TrimSpace(string(ref.Kind)) != "" {
+			foundEvidence = true
+			break
+		}
+	}
+	if !foundEvidence {
+		return directPackageValidationError("selector_provenance_incomplete", path+" evidence_id is not bound to evidence_refs")
+	}
+	return nil
+}
+
+func isLowerSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateClientExecutionPackageForLocalTestWaiver validates the complete App
