@@ -22,6 +22,15 @@ backend/.cache/
 /.tooling/
 backend/.tmp-go-cache/
 backend/.tmp-go-tmp/
+.go-cache/
+.tmp-go-build-cache/
+.tmp-go-modcache/
+.tmp-h3-go-build-cache/
+.tmp-h3-go-work/
+.tmp-go-work/
+backend/.tmp-go-work/
+backend/*.test.exe
+backend/tospreflight.exe
 backend/bin/
 .gocache/
 .gotmp/
