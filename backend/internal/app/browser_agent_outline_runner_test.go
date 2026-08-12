@@ -564,12 +564,43 @@ func hasStageEvent(events []model.StageExecutionEvent, eventType model.StageExec
 }
 
 type stubBrowserAgentWorkerSession struct {
-	observeCalls    int
-	executeCalls    int
-	revalidateCalls int
-	closeCalls      int
-	recordingPath   string
-	failNodeID      string
+	observeCalls            int
+	executeCalls            int
+	credentialExecuteCalls  int
+	credentialSecretMatched bool
+	revalidateCalls         int
+	closeCalls              int
+	recordingPath           string
+	failNodeID              string
+}
+
+func TestBrowserAgentStageUsesCredentialBrokerWithoutEmbeddingSecretInStage(t *testing.T) {
+	const (
+		secretRef = "vault://approved/login"
+		secret    = "credential-value-for-test"
+	)
+	broker, err := newOneTimeBrowserAgentCredentialBroker(secretRef, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broker.Destroy()
+	session := &stubBrowserAgentWorkerSession{}
+	runtime := &localBrowserAgentStageRuntime{session: session, credentialResolver: broker, stageCount: 1, artifacts: map[string]model.ArtifactRef{}}
+	stage := BrowserAgentRuntimeStage{
+		ID: "stage_login", Order: 1, NodeID: "node_login",
+		TargetContract: model.BrowserAgentTargetContract{SemanticID: "login_password", Destructive: false},
+		Interactions:   []model.BrowserAgentInteraction{{Kind: model.GraphActionFill, SecretRef: secretRef, NonDestructive: true}},
+	}
+	result, err := runtime.ExecuteStage(context.Background(), BrowserAgentRuntimePlan{}, stage)
+	if err != nil || result.Observation == nil {
+		t.Fatalf("credential broker execution failed: result=%+v err=%v", result, err)
+	}
+	if session.credentialExecuteCalls != 1 || session.executeCalls != 1 || !session.credentialSecretMatched {
+		t.Fatalf("credential was not delivered through the narrow worker method: %+v", session)
+	}
+	if stage.Interactions[0].Value != "" {
+		t.Fatal("resolved credential must not be copied into the approved runtime stage")
+	}
 }
 
 func TestManualSessionCheckpointRevalidatesWithoutExecutingCredentialAction(t *testing.T) {
@@ -579,7 +610,7 @@ func TestManualSessionCheckpointRevalidatesWithoutExecutingCredentialAction(t *t
 		ID: "stage_session", Order: 1, NodeID: "node_session", StageKind: model.BusinessStageKindSessionSetup,
 		ManualSessionCheckpoint: true, TargetContract: model.BrowserAgentTargetContract{SemanticID: "session_target"},
 		Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionFill, SecretRef: "secret://password"}},
-		Validations: []model.ValidationSpec{{ID: "validate_app", Kind: "url_matches", Required: true}},
+		Validations:  []model.ValidationSpec{{ID: "validate_app", Kind: "url_matches", Required: true}},
 	}
 	observed, err := runtime.ObserveStage(context.Background(), BrowserAgentRuntimePlan{}, stage)
 	if err != nil || !observed.TargetResolved {
@@ -630,6 +661,16 @@ func (s *stubBrowserAgentWorkerSession) Execute(_ context.Context, stage driver.
 		EvidenceRefs: []model.EvidenceRef{{ID: "evidence_" + artifact.ID, Kind: model.EvidenceKindWebScreenshot, ArtifactID: artifact.ID, Confidence: 1}},
 		Artifacts:    []model.ArtifactRef{artifact}, TargetResolved: true,
 	}, nil
+}
+
+func (s *stubBrowserAgentWorkerSession) ExecuteWithSecrets(ctx context.Context, stage driver.BrowserAgentWorkerStage, secrets map[string]string) (driver.BrowserAgentWorkerStageResult, error) {
+	s.credentialExecuteCalls++
+	for _, interaction := range stage.Interactions {
+		if interaction.SecretRef != "" && secrets[interaction.SecretRef] == "credential-value-for-test" {
+			s.credentialSecretMatched = true
+		}
+	}
+	return s.Execute(ctx, stage)
 }
 
 func (s *stubBrowserAgentWorkerSession) Revalidate(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {

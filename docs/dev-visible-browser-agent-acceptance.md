@@ -3,8 +3,9 @@
 This tool is **dev/test only**. It is not part of the production Browser Agent
 runtime, Exchange API, App-to-Server protocol, or cloud execution path.
 
-Its purpose is to prove that a human can manually authenticate an isolated,
-visible browser on a real local product page before an approved package is run.
+Its purpose is to prove that an isolated, visible browser can authenticate on a
+real local product page before an approved package is run. Manual login remains
+available; local test runs may use the automatic-login handoff described below.
 It never imports the user's existing browser profile, Cookie, local storage,
 password, Token, API key, email, or phone number.
 
@@ -14,7 +15,9 @@ password, Token, API key, email, or phone number.
 - Requires an explicit `dev_test_ack: true` request field.
 - Accepts only `http://127.0.0.1:<port>/...`, without query, fragment, or URL credentials.
 - Opens Chromium with a new isolated context; it does not reuse the user's normal browser.
-- Disables video recording and Playwright Trace during manual login. The status endpoint returns only sanitized URL and title.
+- Manual login disables video recording and Playwright Trace. Automatic login
+  enables masked video recording and starts Playwright Trace only after login;
+  the status endpoint always returns only sanitized URL and title.
 - The requested target origin is checked again after manual login. A mismatch returns `source_mismatch`; no business action is performed. A same-origin post-login redirect is allowed because real products often route from `/login` to a workspace page.
 - A session expires after 20 minutes and can be explicitly aborted. It is never a production session.
 
@@ -23,7 +26,7 @@ password, Token, API key, email, or phone number.
 Start the real local product first, for example `http://127.0.0.1:5000/app`,
 then start the Engine dev bridge with its normal local-only configuration.
 
-Open the isolated visible browser:
+Open the isolated visible browser for manual login:
 
 ```powershell
 $body = @{ target_url = "http://127.0.0.1:5000/app"; dev_test_ack = $true } | ConvertTo-Json
@@ -56,6 +59,27 @@ Invoke-RestMethod -Method Post `
   -Uri "http://127.0.0.1:4317/v1/desktop/dev-visible-browser-agent/<session_id>/abort"
 ```
 
+### No-manual-login local test mode
+
+For a fully automated local acceptance run, do not place credentials in the
+App package or request body. Set them only in the local Server process, then
+set `auto_login=true` in the prepare request:
+
+```powershell
+$env:CASCADE_DEV_VISIBLE_LOGIN_EMAIL = "<local-test-email>"
+$env:CASCADE_DEV_VISIBLE_LOGIN_PASSWORD = "<local-test-password>"
+$body = @{ target_url = "http://127.0.0.1:5000/app"; auto_login = $true; dev_test_ack = $true } | ConvertTo-Json
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:4317/v1/desktop/dev-visible-browser-agent/prepare" `
+  -ContentType "application/json" -Body $body
+```
+
+The Worker fills only the local product's login form, masks email/password
+inputs, returns no credential values, and starts Trace after the login redirect.
+The original App package remains the only source of business actions. If the
+login form is not recognized, the run fails closed; it does not fall back to
+manual input or alter the package.
+
 ## Approved-package preflight
 
 ### Exact App package replay (recommended for end-to-end diagnosis)
@@ -83,7 +107,10 @@ Invoke-RestMethod -Method Post `
 The file must be inside the local Engine workspace. A changed file, mismatched
 package identity/hash, production profile, or non-loopback request is rejected.
 This endpoint does not relax origin, forbidden-page, destructive-action, or
-required-result validation rules.
+required-result validation rules. It also requires the App package confidence
+summary to be `blocked` and every requested waiver node to be explicitly named
+by a node-scoped blocking reason; a valid package or an unrelated node cannot
+receive a waiver.
 
 The package's `recording_run_spec.base_url`, product URL, allowed origin and
 allowed domain must already describe the visible local page. For example, a
@@ -158,9 +185,12 @@ Invoke-RestMethod -Method Post `
 
 This endpoint repeats protocol and origin validation, applies the approved
 policy, executes stages with the existing Outcome Verifier, and closes the
-authenticated browser even if execution fails. The resulting MP4, when the
-package requests `final_video`, is composed from post-action masked screenshots
-only. It never includes the manual login journey or a raw login recording.
+authenticated browser even if execution fails. The close result is merged into
+the result package, including raw WebM, Trace and recovered screenshots. The
+rendering pipeline then produces MP4 when the package requests `final_video`.
+Manual login is excluded from video; automatic-login runs may include the
+masked login window in raw WebM, but credentials remain covered and never enter
+Trace, logs or the result JSON.
 
 The next phase may reuse this design only through a separately implemented,
 protocol-validated and human-approved package execution handoff. It must not

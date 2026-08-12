@@ -24,13 +24,17 @@ import (
 )
 
 type DevHTTPServer struct {
-	service               *Service
-	events                *devEventStore
-	autoRunExchange       bool
-	storeGitHubToken      func(string) error
-	storeDemoCredential   func(string, string, string) error
-	githubTokenConfigured func() bool
-	deleteGitHubToken     func() error
+	service                  *Service
+	direct                   *DirectHTTPServer
+	events                   *devEventStore
+	autoRunExchange          bool
+	storeGitHubToken         func(string) error
+	storeDemoCredential      func(string, string, string) error
+	readDemoCredential       func(string) (credentialstore.DemoCredential, error)
+	githubTokenConfigured    func() bool
+	deleteGitHubToken        func() error
+	demoCredentialMu         sync.RWMutex
+	ephemeralDemoCredentials map[string]credentialstore.DemoCredential
 }
 
 type githubCredentialRequest struct {
@@ -50,7 +54,8 @@ type devLocalSourceRequest struct {
 }
 
 type ExecutionPackageRequest struct {
-	UserInput *orchestrator.UserInput `json:"user_input,omitempty"`
+	UserInput     *orchestrator.UserInput `json:"user_input,omitempty"`
+	CredentialRef string                  `json:"credential_ref,omitempty"`
 }
 
 type ClientExecutionPackageRequest struct {
@@ -84,15 +89,20 @@ type DevExecutionEvent struct {
 
 func NewDevHTTPServer(service *Service) *DevHTTPServer {
 	server := &DevHTTPServer{
-		service:               service,
-		events:                newDevEventStore(),
-		storeGitHubToken:      credentialstore.StoreGitHubToken,
-		storeDemoCredential:   credentialstore.StoreDemoCredential,
-		githubTokenConfigured: credentialstore.GitHubTokenConfigured,
-		deleteGitHubToken:     credentialstore.DeleteGitHubToken,
+		service:                  service,
+		events:                   newDevEventStore(),
+		storeGitHubToken:         credentialstore.StoreGitHubToken,
+		storeDemoCredential:      credentialstore.StoreDemoCredential,
+		readDemoCredential:       credentialstore.ReadDemoCredential,
+		githubTokenConfigured:    credentialstore.GitHubTokenConfigured,
+		deleteGitHubToken:        credentialstore.DeleteGitHubToken,
+		ephemeralDemoCredentials: map[string]credentialstore.DemoCredential{},
 	}
 	if service != nil {
 		service.SetAssistantProgressSink(server.emitProjectEvent)
+		if service.devVisibleBrowserAgent != nil {
+			service.devVisibleBrowserAgent.readDemoCredential = server.readLocalDemoCredential
+		}
 	}
 	return server
 }
@@ -100,6 +110,7 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 func NewControlPlaneHTTPServer(service *Service) *DevHTTPServer {
 	server := NewDevHTTPServer(service)
 	server.autoRunExchange = true
+	server.direct = NewDirectHTTPServer(service, os.Getenv("CASCADE_DIRECT_PUBLIC_HOST"), os.Getenv("CASCADE_DIRECT_BOOTSTRAP_TOKEN"), os.Getenv("CASCADE_DIRECT_WORKER_TOKEN"))
 	return server
 }
 
@@ -428,8 +439,31 @@ func (s *DevHTTPServer) handleStoreDemoCredential(w http.ResponseWriter, r *http
 		writeBridgeValue(w, nil, errors.New("invalid demo credential ref"))
 		return
 	}
-	err := s.storeDemoCredential(request.Ref, request.Username, request.Password)
-	writeBridgeValue(w, map[string]any{"secretRef": "credential://demo/" + request.Ref, "configured": err == nil}, err)
+	storage, err := s.storeLocalDemoCredential(r, request)
+	writeBridgeValue(w, map[string]any{"secretRef": "credential://demo/" + request.Ref, "configured": err == nil, "storage": storage}, err)
+}
+
+func (s *DevHTTPServer) storeLocalDemoCredential(r *http.Request, request demoCredentialRequest) (string, error) {
+	if s == nil || s.storeDemoCredential == nil {
+		return "", errors.New("demo credential store is unavailable")
+	}
+	if err := s.storeDemoCredential(request.Ref, request.Username, request.Password); err == nil {
+		return "os_credential_store", nil
+	} else if s.service == nil || s.service.runtime.Profile != config.ProfileDev || !strings.EqualFold(s.service.runtime.Environment, "development") || !requestFromLoopback(r) {
+		return "", err
+	}
+	// Local development fallback for non-interactive Server processes that do
+	// not have access to the developer's Windows Credential Manager logon
+	// session. Secrets remain only in this process and disappear on exit.
+	s.demoCredentialMu.Lock()
+	defer s.demoCredentialMu.Unlock()
+	if s.ephemeralDemoCredentials == nil {
+		s.ephemeralDemoCredentials = map[string]credentialstore.DemoCredential{}
+	}
+	s.ephemeralDemoCredentials[request.Ref] = credentialstore.DemoCredential{
+		Username: strings.TrimSpace(request.Username), Password: request.Password,
+	}
+	return "dev_ephemeral_memory", nil
 }
 
 func (s *DevHTTPServer) handlePlanningModelSettings(w http.ResponseWriter, r *http.Request) {
@@ -611,7 +645,19 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			err   error
 		)
 		if request.UserInput != nil {
-			state, err = s.service.GenerateExecutionPackage(ctx, *request.UserInput)
+			input := *request.UserInput
+			if strings.TrimSpace(request.CredentialRef) != "" {
+				credential, credentialErr := s.readDevExecutionCredential(request.CredentialRef)
+				if credentialErr != nil {
+					state, err = nil, credentialErr
+				} else {
+					input.DemoUsername = credential.Username
+					input.DemoPassword = credential.Password
+					state, err = s.service.GenerateExecutionPackage(ctx, input)
+				}
+			} else {
+				state, err = s.service.GenerateExecutionPackage(ctx, input)
+			}
 		} else {
 			state, err = s.service.RegenerateExecutionPackage(ctx, projectID)
 		}
@@ -905,6 +951,53 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// readDevExecutionCredential resolves an opaque local credential reference for
+// the App's in-process page scan. The reference, rather than secret material,
+// is the only value accepted in the formal package-generation request.
+func (s *DevHTTPServer) readDevExecutionCredential(ref string) (credentialstore.DemoCredential, error) {
+	name, err := devDemoCredentialName(ref)
+	if err != nil {
+		return credentialstore.DemoCredential{}, err
+	}
+	return s.readLocalDemoCredential(name)
+}
+
+func (s *DevHTTPServer) readLocalDemoCredential(name string) (credentialstore.DemoCredential, error) {
+	if s == nil || s.readDemoCredential == nil {
+		return credentialstore.DemoCredential{}, errors.New("demo credential store is unavailable")
+	}
+	s.demoCredentialMu.RLock()
+	ephemeral, exists := s.ephemeralDemoCredentials[name]
+	s.demoCredentialMu.RUnlock()
+	if exists {
+		if strings.TrimSpace(ephemeral.Username) == "" || ephemeral.Password == "" {
+			return credentialstore.DemoCredential{}, errors.New("execution package credential_ref is empty")
+		}
+		return ephemeral, nil
+	}
+	credential, err := s.readDemoCredential(name)
+	if err != nil {
+		return credentialstore.DemoCredential{}, errors.New("demo credential_ref is unavailable")
+	}
+	if strings.TrimSpace(credential.Username) == "" || credential.Password == "" {
+		return credentialstore.DemoCredential{}, errors.New("demo credential_ref is empty")
+	}
+	return credential, nil
+}
+
+func devDemoCredentialName(ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	const prefix = "credential://demo/"
+	if !strings.HasPrefix(ref, prefix) || len(ref) <= len(prefix) {
+		return "", errors.New("credential_ref must be an opaque credential://demo/ reference")
+	}
+	name := strings.TrimPrefix(ref, prefix)
+	if strings.ContainsAny(name, "/\\:\x00\r\n") {
+		return "", errors.New("credential_ref has an invalid format")
+	}
+	return name, nil
+}
+
 func (s *DevHTTPServer) serveVerifiedCloudDeliverable(w http.ResponseWriter, r *http.Request, projectID string) {
 	resultPackageID := strings.TrimSpace(r.URL.Query().Get("result_package_id"))
 	fileName := strings.TrimSpace(r.URL.Query().Get("file"))
@@ -1175,10 +1268,7 @@ func redactBridgeError(message string) string {
 func userFacingBridgeError(message string) string {
 	lower := strings.ToLower(message)
 	switch {
-	case strings.Contains(lower, "llm json parse failed"),
-		strings.Contains(lower, "cannot unmarshal"),
-		strings.Contains(lower, "invalid character"),
-		strings.Contains(lower, "unexpected non-whitespace character after json"):
+	case isLLMJSONError(lower):
 		return "模型返回的 JSON 结构不稳定，系统已记录诊断。请重试，或使用 CASCADE_LLM_MODE=auto 让产品流程在格式异常时安全降级。"
 	case strings.Contains(message, "执行包没有真实业务动作"):
 		return message

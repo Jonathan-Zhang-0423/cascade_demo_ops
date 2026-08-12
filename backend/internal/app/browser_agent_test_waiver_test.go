@@ -2,10 +2,10 @@ package app
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +45,65 @@ func TestOnlyWaiverPolicyGuardWaivesOnlyExactUnclassifiedNode(t *testing.T) {
 	other.TargetContract = plan.Stages[0].TargetContract
 	if decision := (testOnlyWaiverPolicyGuard{waiver: waiver}).Authorize(plan, other); decision.Allowed {
 		t.Fatalf("unlisted node must remain denied: %+v", decision)
+	}
+}
+
+func TestWaiverTargetsMustBeNamedByAppBlockingReport(t *testing.T) {
+	pkg := model.ClientExecutionPackage{ConfidenceSummary: &model.PackageConfidenceSummary{
+		Readiness:       model.PackageReadinessBlocked,
+		BlockingReasons: []string{"node_blocked: 缺少必填确定性结果验证"},
+	}}
+	allowed := []BrowserAgentTestWaiverNode{{NodeID: "node_blocked"}}
+	if _, err := validateWaiverTargetsAgainstBlockingReport(pkg, allowed, nil); err != nil {
+		t.Fatalf("node named by the App blocking report must be eligible: %v", err)
+	}
+	for _, nodeID := range []string{"node_unblocked", ""} {
+		candidate := []BrowserAgentTestWaiverNode{{NodeID: nodeID}}
+		if _, err := validateWaiverTargetsAgainstBlockingReport(pkg, candidate, nil); err == nil {
+			t.Fatalf("node %q without an explicit App blocking reason must be rejected", nodeID)
+		}
+	}
+	ready := pkg
+	ready.ConfidenceSummary = &model.PackageConfidenceSummary{Readiness: model.PackageReadinessReviewRequired, BlockingReasons: []string{"node_blocked: review"}}
+	if _, err := validateWaiverTargetsAgainstBlockingReport(ready, allowed, nil); err == nil {
+		t.Fatal("review_required package must not receive a blocking waiver")
+	}
+}
+
+func TestWaiverRejectsUnscopedOrUnapprovedBlockingReasons(t *testing.T) {
+	allowed := []BrowserAgentTestWaiverNode{{NodeID: "node_blocked"}}
+	for name, reasons := range map[string][]string{
+		"unscoped":        {"node_blocked: missing classification", "critical requirement is not mapped to a stage"},
+		"unapproved node": {"node_blocked: missing classification", "node_other: missing evidence"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pkg := model.ClientExecutionPackage{ConfidenceSummary: &model.PackageConfidenceSummary{
+				Readiness:       model.PackageReadinessBlocked,
+				BlockingReasons: reasons,
+			}}
+			if _, err := validateWaiverTargetsAgainstBlockingReport(pkg, allowed, nil); err == nil {
+				t.Fatal("limited waiver must reject every blocking reason it cannot explicitly and exhaustively scope")
+			}
+		})
+	}
+}
+
+func TestWaiverApprovesExactGlobalBlockingReasonHashOnly(t *testing.T) {
+	reason := "critical requirement is not mapped to a stage"
+	pkg := model.ClientExecutionPackage{ConfidenceSummary: &model.PackageConfidenceSummary{
+		Readiness:       model.PackageReadinessBlocked,
+		BlockingReasons: []string{"node_blocked: missing classification", reason},
+	}}
+	allowed := []BrowserAgentTestWaiverNode{{NodeID: "node_blocked"}}
+	hash := model.SHA256Hex([]byte(reason))
+	approved, err := validateWaiverTargetsAgainstBlockingReport(pkg, allowed, []string{hash})
+	if err != nil || len(approved) != 1 || approved[0] != hash {
+		t.Fatalf("exact global reason hash should be audited and accepted: approved=%v err=%v", approved, err)
+	}
+	for _, hashes := range [][]string{{model.SHA256Hex([]byte("other"))}, {hash, hash}, {hash, strings.Repeat("z", 64)}} {
+		if _, err := validateWaiverTargetsAgainstBlockingReport(pkg, allowed, hashes); err == nil {
+			t.Fatalf("mismatched, duplicate, or malformed global reason hashes must be rejected: %v", hashes)
+		}
 	}
 }
 
@@ -335,8 +394,8 @@ func TestRawAppPackageWaiverReadsExactPackageAndRejectsTampering(t *testing.T) {
 	waiver, err := server.service.devAppPackageTestWaivers.IssueFromRawFile(t.Context(), DevAppPackageRawWaiverRequest{
 		PackageFile: path, ExpectedPackageID: pkg.PackageID,
 		ExpectedBundleHashSHA256: bundle.Reproducibility.BundleHashSHA256,
-		ExpectedPlanHashSHA256: bundle.Reproducibility.PlanHashSHA256,
-		ApprovedNodeIDs: []string{"node_invite_member"}, DevTestAck: true,
+		ExpectedPlanHashSHA256:   bundle.Reproducibility.PlanHashSHA256,
+		ApprovedNodeIDs:          []string{"node_invite_member"}, DevTestAck: true,
 	})
 	if err == nil || waiver.WaiverID != "" {
 		// The contract fixture has formal approval and no missing classification;
