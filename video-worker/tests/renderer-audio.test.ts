@@ -77,6 +77,20 @@ describe("editor audio policy", () => {
     expect(validateEditPlan({ catalog, edit_plan: invalid }).errors.map((item) => item.code)).toEqual(expect.arrayContaining(["invalid_still_output_duration", "still_source_time_range_not_allowed"]));
   });
 
+  it("rejects a screenshot explicitly mislabeled as video", () => {
+    const invalid = plan();
+    invalid.shots.push({
+      id: "mislabelled_screenshot",
+      source_artifact_id: "step_screenshot",
+      presentation_kind: "video",
+      source_time_range_ms: [7_500, 10_600],
+      purpose: "Screenshot must not be treated as a video source",
+    });
+    const report = validateEditPlan({ catalog, edit_plan: invalid });
+    expect(report.valid).toBe(false);
+    expect(report.errors.map((item) => item.code)).toContain("time_range_outside_source");
+  });
+
   it("rejects invalid modes and out-of-range volume", () => {
     const invalid = plan();
     invalid.audio = { mode: "invalid" as "source", volume_percent: 250 };

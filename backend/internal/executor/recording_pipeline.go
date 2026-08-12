@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -133,6 +134,23 @@ func validateFinalMP4Delivery(ctx context.Context, service DeliveryRenderService
 	format := strings.ToLower(probe.Format)
 	if format != "" && !strings.Contains(format, "mp4") && !strings.Contains(format, "mov") {
 		return fmt.Errorf("final_video_container_mismatch: ffprobe format=%q", probe.Format)
+	}
+	if result.RequirementReportPath != "" {
+		var report struct {
+			Status string `json:"status"`
+			Errors []struct {
+				Code string `json:"code"`
+			} `json:"errors"`
+		}
+		if data, readErr := os.ReadFile(result.RequirementReportPath); readErr == nil {
+			if unmarshalErr := json.Unmarshal(data, &report); unmarshalErr == nil {
+				for _, finding := range report.Errors {
+					if finding.Code == "rendered_duration_mismatch" {
+						return errors.New("final_video_quality_gate: rendered duration does not match edit plan")
+					}
+				}
+			}
+		}
 	}
 	return nil
 }

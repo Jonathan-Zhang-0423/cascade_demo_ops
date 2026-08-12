@@ -567,6 +567,8 @@ interface RequirementSatisfactionReport {
     step_by_step_docs_path: string | undefined;
     timeline_duration_sec: number;
     edit_plan_target_duration_sec: number | undefined;
+    rendered_video_duration_sec?: number;
+    rendered_video_expected_duration_sec?: number;
     rendered_operations: string[];
     planned_overlay_types: string[];
     applied_overlay_types: string[];
@@ -929,8 +931,29 @@ function defaultOperationsForStep(step: TimelineStep): EditOperation[] {
 }
 
 function normalizeEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog): DemoEditPlan {
+  const artifactByID = new Map(catalog.artifacts.map((artifact) => [artifact.id, artifact]));
+  const normalizedShots = (plan.shots || []).map((shot) => {
+    const artifact = artifactByID.get(shot.source_artifact_id);
+    // A screenshot is a presentation still unless an upstream plan explicitly
+    // declares it as video. This repairs legacy/director plans that omitted the
+    // presentation field while preserving validation for contradictory plans.
+    if (!shot.presentation_kind && artifact && isPresentationStillArtifact(artifact)) {
+      const { source_time_range_ms: _sourceTimeRange, ...stillShot } = shot;
+      const sourceDuration = shot.source_time_range_ms
+        ? Math.max(250, shot.source_time_range_ms[1] - shot.source_time_range_ms[0])
+        : 1_000;
+      return {
+        ...stillShot,
+        presentation_kind: "still" as const,
+        output_duration_ms: Math.min(15_000, sourceDuration),
+        operations: [],
+      };
+    }
+    return shot;
+  });
   return {
     ...plan,
+    shots: normalizedShots,
     schema_version: plan.schema_version || DEMO_EDIT_PLAN_SCHEMA_VERSION,
     catalog_id: plan.catalog_id || catalog.catalog_id,
     source_authority: plan.source_authority || DEMO_EDIT_SOURCE_AUTHORITY,
@@ -1106,7 +1129,7 @@ function validateShotPresentation(shot: DemoEditShot, artifact: TimelineArtifact
     }
     return;
   }
-  if (!artifact || artifact.kind !== "step_screenshot" || !artifact.mime_type?.startsWith("image/") || artifact.metadata?.presentation_only !== true) {
+  if (!artifact || !isPresentationStillArtifact(artifact)) {
     errors.push(finding("invalid_still_source", "still shots must reference a non-sensitive presentation_only step_screenshot image", `${shotPath}.source_artifact_id`));
   }
   if (shot.source_time_range_ms) {
@@ -1118,6 +1141,12 @@ function validateShotPresentation(shot: DemoEditShot, artifact: TimelineArtifact
   if ((shot.operations?.length ?? 0) > 0) {
     errors.push(finding("still_operations_not_supported", "still shots do not support edit operations in the first renderer version", `${shotPath}.operations`));
   }
+}
+
+function isPresentationStillArtifact(artifact: TimelineArtifact): boolean {
+  if (artifact.sensitive || !artifact.mime_type?.startsWith("image/")) return false;
+  if (artifact.kind === "step_screenshot" && artifact.metadata?.presentation_only === true) return true;
+  return artifact.kind === "screenshot" && artifact.include_in_demo === true;
 }
 
 function validateCollaborationBoundary(plan: DemoEditPlan, errors: ValidationFinding[]): void {
@@ -1389,6 +1418,31 @@ function buildRequirementSatisfactionReport(
   const failedStepIDs = catalog.steps.filter((step) => isFailedExecutionStatus(step.status)).map((step) => step.step_id);
   const passedStepCount = catalog.steps.filter((step) => isPassedExecutionStatus(step.status)).length;
   const actualScreenshotStepIDs = screenshotStepIDsForCatalog(catalog);
+  const expectedRenderedDurationMS = outputDurationMS(editPlan);
+  const actualRenderedDurationSec = mediaNormalization.output?.duration_sec;
+
+  if (mediaNormalization.status === "ok" && actualRenderedDurationSec !== undefined && expectedRenderedDurationMS > 0) {
+    const expectedRenderedDurationSec = expectedRenderedDurationMS / 1000;
+    const toleranceSec = Math.max(0.25, expectedRenderedDurationSec * 0.05);
+    if (Math.abs(actualRenderedDurationSec - expectedRenderedDurationSec) > toleranceSec) {
+      errors.push(requirementFinding(
+        "rendered_duration_mismatch",
+        `Rendered video duration is ${actualRenderedDurationSec.toFixed(3)}s, but the edit plan contributes ${expectedRenderedDurationSec.toFixed(3)}s (tolerance ${toleranceSec.toFixed(3)}s).`,
+        "media_normalization_report.output.duration_sec",
+      ));
+      checks.push({
+        code: "rendered_duration",
+        status: "fail",
+        message: "Rendered video duration does not match the effective edit-plan timeline.",
+      });
+    } else {
+      checks.push({
+        code: "rendered_duration",
+        status: "pass",
+        message: "Rendered video duration matches the effective edit-plan timeline.",
+      });
+    }
+  }
 
   if (productTargetDuration && recordingTargetDurationSec && productTargetDuration !== recordingTargetDurationSec) {
     warnings.push(requirementFinding(
@@ -1586,6 +1640,8 @@ function buildRequirementSatisfactionReport(
       step_by_step_docs_path: stepDocsPath,
       timeline_duration_sec: Math.round(catalog.timeline.duration_ms / 1000),
       edit_plan_target_duration_sec: editPlanTargetDurationSec,
+      ...(actualRenderedDurationSec !== undefined ? { rendered_video_duration_sec: actualRenderedDurationSec } : {}),
+      ...(expectedRenderedDurationMS > 0 ? { rendered_video_expected_duration_sec: expectedRenderedDurationMS / 1000 } : {}),
       rendered_operations: compositor.applied_operations || [],
       planned_overlay_types: plannedOverlayTypes,
       applied_overlay_types: appliedOverlayTypes,
