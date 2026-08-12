@@ -80,6 +80,8 @@ func bridgeErrorCode(err error) string {
 	switch {
 	case isLLMJSONError(lower):
 		return "llm_output_invalid"
+	case strings.Contains(lower, "json: cannot unmarshal") || strings.Contains(lower, "invalid character") || strings.Contains(lower, "unexpected non-whitespace character after json"):
+		return "bad_request"
 	case isMissingEvidenceError(lower):
 		return "missing_evidence"
 	case strings.Contains(lower, "cloud") || strings.Contains(lower, "returned "):
@@ -145,8 +147,13 @@ func bridgeErrorRetryable(err error) bool {
 }
 
 func isLLMJSONError(lower string) bool {
-	return strings.Contains(lower, "llm json parse failed") ||
-		strings.Contains(lower, "cannot unmarshal") ||
+	if strings.Contains(lower, "llm json parse failed") {
+		return true
+	}
+	if !strings.Contains(lower, "llm") && !strings.Contains(lower, "model output") {
+		return false
+	}
+	return strings.Contains(lower, "cannot unmarshal") ||
 		strings.Contains(lower, "invalid character") ||
 		strings.Contains(lower, "unexpected non-whitespace character after json")
 }

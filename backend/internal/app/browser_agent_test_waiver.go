@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,24 +24,26 @@ const browserAgentTestWaiverSchemaVersion = "demoops.browser_agent_test_waiver.v
 // DevAppPackageWaiverRequest identifies an App-generated draft already held by
 // the local Server. It deliberately cannot carry package JSON or actions.
 type DevAppPackageWaiverRequest struct {
-	ProjectID                string   `json:"project_id"`
-	PackageID                string   `json:"package_id"`
-	ExpectedBundleHashSHA256 string   `json:"expected_bundle_hash_sha256"`
-	ExpectedPlanHashSHA256   string   `json:"expected_plan_hash_sha256"`
-	ApprovedNodeIDs          []string `json:"approved_node_ids"`
-	DevTestAck               bool     `json:"dev_test_ack"`
+	ProjectID                    string   `json:"project_id"`
+	PackageID                    string   `json:"package_id"`
+	ExpectedBundleHashSHA256     string   `json:"expected_bundle_hash_sha256"`
+	ExpectedPlanHashSHA256       string   `json:"expected_plan_hash_sha256"`
+	ApprovedNodeIDs              []string `json:"approved_node_ids"`
+	ApprovedBlockingReasonHashes []string `json:"approved_blocking_reason_hashes,omitempty"`
+	DevTestAck                   bool     `json:"dev_test_ack"`
 }
 
 // DevAppPackageRawWaiverRequest binds a waiver to an App-produced package
 // file already present on the local workstation. The file is read once,
 // validated, and retained only in memory; its JSON is never rewritten.
 type DevAppPackageRawWaiverRequest struct {
-	PackageFile              string   `json:"package_file"`
-	ExpectedPackageID        string   `json:"package_id"`
-	ExpectedBundleHashSHA256 string   `json:"expected_bundle_hash_sha256"`
-	ExpectedPlanHashSHA256   string   `json:"expected_plan_hash_sha256"`
-	ApprovedNodeIDs          []string `json:"approved_node_ids"`
-	DevTestAck               bool     `json:"dev_test_ack"`
+	PackageFile                  string   `json:"package_file"`
+	ExpectedPackageID            string   `json:"package_id"`
+	ExpectedBundleHashSHA256     string   `json:"expected_bundle_hash_sha256"`
+	ExpectedPlanHashSHA256       string   `json:"expected_plan_hash_sha256"`
+	ApprovedNodeIDs              []string `json:"approved_node_ids"`
+	ApprovedBlockingReasonHashes []string `json:"approved_blocking_reason_hashes,omitempty"`
+	DevTestAck                   bool     `json:"dev_test_ack"`
 }
 
 type DevAppPackageWaiverRunRequest struct {
@@ -59,28 +62,29 @@ type BrowserAgentTestWaiverNode struct {
 // BrowserAgentTestWaiver is a short-lived, Server-issued in-memory capability.
 // It never changes the App package and is never accepted by Exchange.
 type BrowserAgentTestWaiver struct {
-	SchemaVersion          string                       `json:"schema_version"`
-	WaiverID               string                       `json:"waiver_id"`
-	ProjectID              string                       `json:"project_id"`
-	PackageID              string                       `json:"package_id"`
-	BundleHashSHA256       string                       `json:"bundle_hash_sha256"`
-	PlanHashSHA256         string                       `json:"plan_hash_sha256"`
-	OriginalPackageDigest  string                       `json:"original_package_digest_sha256"`
-	RawPackageSHA256       string                       `json:"raw_package_sha256,omitempty"`
-	ApprovalSubjectDigest  string                       `json:"approval_subject_digest_sha256"`
-	AllowedOrigin          string                       `json:"allowed_origin"`
-	AllowedNodes           []BrowserAgentTestWaiverNode `json:"allowed_nodes"`
-	BlockedReasons         []string                     `json:"blocked_reasons,omitempty"`
-	DevTestOnly            bool                         `json:"dev_test_only"`
-	NotForExchangeUpload   bool                         `json:"not_for_exchange_upload"`
-	TestOnlyWaiver         bool                         `json:"test_only_waiver"`
-	FormalExchange         bool                         `json:"formal_exchange"`
-	AppGenerated           bool                         `json:"app_generated"`
-	TransportAuthenticated bool                         `json:"transport_authenticated"`
-	IssuedAt               time.Time                    `json:"issued_at"`
-	ExpiresAt              time.Time                    `json:"expires_at"`
-	Status                 string                       `json:"status"`
-	AuditLogPath           string                       `json:"audit_log_path,omitempty"`
+	SchemaVersion                string                       `json:"schema_version"`
+	WaiverID                     string                       `json:"waiver_id"`
+	ProjectID                    string                       `json:"project_id"`
+	PackageID                    string                       `json:"package_id"`
+	BundleHashSHA256             string                       `json:"bundle_hash_sha256"`
+	PlanHashSHA256               string                       `json:"plan_hash_sha256"`
+	OriginalPackageDigest        string                       `json:"original_package_digest_sha256"`
+	RawPackageSHA256             string                       `json:"raw_package_sha256,omitempty"`
+	ApprovalSubjectDigest        string                       `json:"approval_subject_digest_sha256"`
+	AllowedOrigin                string                       `json:"allowed_origin"`
+	AllowedNodes                 []BrowserAgentTestWaiverNode `json:"allowed_nodes"`
+	ApprovedBlockingReasonHashes []string                     `json:"approved_blocking_reason_hashes,omitempty"`
+	BlockedReasons               []string                     `json:"blocked_reasons,omitempty"`
+	DevTestOnly                  bool                         `json:"dev_test_only"`
+	NotForExchangeUpload         bool                         `json:"not_for_exchange_upload"`
+	TestOnlyWaiver               bool                         `json:"test_only_waiver"`
+	FormalExchange               bool                         `json:"formal_exchange"`
+	AppGenerated                 bool                         `json:"app_generated"`
+	TransportAuthenticated       bool                         `json:"transport_authenticated"`
+	IssuedAt                     time.Time                    `json:"issued_at"`
+	ExpiresAt                    time.Time                    `json:"expires_at"`
+	Status                       string                       `json:"status"`
+	AuditLogPath                 string                       `json:"audit_log_path,omitempty"`
 }
 
 type devAppPackageTestWaiverRecord struct {
@@ -191,6 +195,10 @@ func (m *devAppPackageTestWaiverManager) Issue(ctx context.Context, request DevA
 	if len(allowed) == 0 {
 		return BrowserAgentTestWaiver{}, errors.New("approved_node_ids does not identify an unclassified non-destructive action")
 	}
+	approvedReasonHashes, err := validateWaiverTargetsAgainstBlockingReport(pkg, allowed, request.ApprovedBlockingReasonHashes)
+	if err != nil {
+		return BrowserAgentTestWaiver{}, err
+	}
 	originalDigest, err := model.DigestCanonicalJSON(pkg)
 	if err != nil {
 		return BrowserAgentTestWaiver{}, err
@@ -203,7 +211,7 @@ func (m *devAppPackageTestWaiverManager) Issue(ctx context.Context, request DevA
 		ProjectID: pkg.ProjectID, PackageID: pkg.PackageID,
 		BundleHashSHA256: bundle.Reproducibility.BundleHashSHA256, PlanHashSHA256: bundle.Reproducibility.PlanHashSHA256,
 		OriginalPackageDigest: originalDigest, ApprovalSubjectDigest: build.ApprovalSubjectDigestSHA256,
-		AllowedOrigin: devVisibleOrigin(target), AllowedNodes: allowed,
+		AllowedOrigin: devVisibleOrigin(target), AllowedNodes: allowed, ApprovedBlockingReasonHashes: approvedReasonHashes,
 		BlockedReasons: packageBlockingReasons(pkg), DevTestOnly: true, NotForExchangeUpload: true, TestOnlyWaiver: true,
 		FormalExchange: false, AppGenerated: true, TransportAuthenticated: false,
 		IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), Status: "issued",
@@ -268,10 +276,19 @@ func (m *devAppPackageTestWaiverManager) IssueFromRawFile(ctx context.Context, r
 	if err != nil || devVisibleOrigin(productURL) != devVisibleOrigin(target) {
 		return BrowserAgentTestWaiver{}, errors.New("raw App package product_url does not match recording_run_spec.base_url")
 	}
-	if !containsExactString(plan.ExplorationScope.AllowedOrigins, devVisibleOrigin(target)) || !visibleOriginsRestricted(plan.ExplorationScope.AllowedOrigins, devVisibleOrigin(target)) {
-		return BrowserAgentTestWaiver{}, errors.New("raw App package allowed_origins must contain only its local visible origin")
+	visibleOrigin := devVisibleOrigin(target)
+	if !containsExactString(plan.ExplorationScope.AllowedOrigins, visibleOrigin) {
+		return BrowserAgentTestWaiver{}, errors.New("raw App package allowed_origins must include its local visible origin")
 	}
-	if !containsExactString(pkg.RecordingRunSpec.AllowedDomains, target.Hostname()) || !containsExactString(bundle.SecurityPolicy.AllowedDomains, target.Hostname()) {
+	// App planning may preserve an HTTPS candidate for the same loopback
+	// host/port even when the actual product is served over HTTP. The raw
+	// package remains unchanged; this test-only waiver accepts that narrowly
+	// equivalent local alias and the runtime policy below still pins the Worker
+	// to visibleOrigin. Any different host, port, path, or scheme is rejected.
+	if !localVisibleOriginAliasesOnly(plan.ExplorationScope.AllowedOrigins, target) {
+		return BrowserAgentTestWaiver{}, errors.New("raw App package allowed_origins must be limited to the local visible origin or its same loopback scheme alias")
+	}
+	if !localVisibleHostAllowed(pkg.RecordingRunSpec.AllowedDomains, target) || !localVisibleHostAllowed(bundle.SecurityPolicy.AllowedDomains, target) {
 		return BrowserAgentTestWaiver{}, errors.New("raw App package allowed_domains must include the local visible host")
 	}
 	requested := map[string]bool{}
@@ -306,6 +323,10 @@ func (m *devAppPackageTestWaiverManager) IssueFromRawFile(ctx context.Context, r
 	if len(requested) != 0 {
 		return BrowserAgentTestWaiver{}, fmt.Errorf("approved_node_ids contains nodes not present in the raw App package: %v", mapKeys(requested))
 	}
+	approvedReasonHashes, err := validateWaiverTargetsAgainstBlockingReport(pkg, allowed, request.ApprovedBlockingReasonHashes)
+	if err != nil {
+		return BrowserAgentTestWaiver{}, err
+	}
 	digest, err := model.DigestCanonicalJSON(pkg)
 	if err != nil {
 		return BrowserAgentTestWaiver{}, err
@@ -314,7 +335,7 @@ func (m *devAppPackageTestWaiverManager) IssueFromRawFile(ctx context.Context, r
 	waiverID := fmt.Sprintf("test_waiver_%d", now.UnixNano())
 	auditDir := filepath.Join(m.service.runtime.ArtifactRoot, "dev-test-only", "app-package-waiver", safePathSegment(waiverID))
 	rawHash := fmt.Sprintf("%x", sha256.Sum256(data))
-	view := BrowserAgentTestWaiver{SchemaVersion: browserAgentTestWaiverSchemaVersion, WaiverID: waiverID, ProjectID: pkg.ProjectID, PackageID: pkg.PackageID, BundleHashSHA256: bundle.Reproducibility.BundleHashSHA256, PlanHashSHA256: bundle.Reproducibility.PlanHashSHA256, OriginalPackageDigest: digest, RawPackageSHA256: rawHash, AllowedOrigin: devVisibleOrigin(target), AllowedNodes: allowed, BlockedReasons: packageBlockingReasons(pkg), DevTestOnly: true, NotForExchangeUpload: true, TestOnlyWaiver: true, FormalExchange: false, AppGenerated: true, TransportAuthenticated: false, IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), Status: "issued", AuditLogPath: filepath.Join(auditDir, "test-waiver-audit.jsonl")}
+	view := BrowserAgentTestWaiver{SchemaVersion: browserAgentTestWaiverSchemaVersion, WaiverID: waiverID, ProjectID: pkg.ProjectID, PackageID: pkg.PackageID, BundleHashSHA256: bundle.Reproducibility.BundleHashSHA256, PlanHashSHA256: bundle.Reproducibility.PlanHashSHA256, OriginalPackageDigest: digest, RawPackageSHA256: rawHash, AllowedOrigin: devVisibleOrigin(target), AllowedNodes: allowed, ApprovedBlockingReasonHashes: approvedReasonHashes, BlockedReasons: packageBlockingReasons(pkg), DevTestOnly: true, NotForExchangeUpload: true, TestOnlyWaiver: true, FormalExchange: false, AppGenerated: true, TransportAuthenticated: false, IssuedAt: now, ExpiresAt: now.Add(15 * time.Minute), Status: "issued", AuditLogPath: filepath.Join(auditDir, "test-waiver-audit.jsonl")}
 	if err := appendBrowserAgentTestWaiverAudit(view.AuditLogPath, map[string]any{"event": "waiver_issued_from_raw_app_package", "package_file": path, "waiver": view, "occurred_at": now}); err != nil {
 		return BrowserAgentTestWaiver{}, err
 	}
@@ -343,6 +364,43 @@ func (m *devAppPackageTestWaiverManager) validateRawPackagePath(value string) (s
 		return "", errors.New("package_file must use the .json extension")
 	}
 	return path, nil
+}
+
+func localVisibleOriginAliasesOnly(origins []string, target *url.URL) bool {
+	if target == nil || target.Hostname() == "" || target.Port() == "" {
+		return false
+	}
+	for _, raw := range origins {
+		parsed, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || parsed.Scheme == "" || parsed.Hostname() != target.Hostname() || parsed.Port() != target.Port() || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return false
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return false
+		}
+		if !isLoopbackHost(parsed.Hostname()) {
+			return false
+		}
+	}
+	return true
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+func localVisibleHostAllowed(values []string, target *url.URL) bool {
+	if target == nil || !isLoopbackHost(target.Hostname()) {
+		return false
+	}
+	for _, value := range values {
+		candidate := strings.TrimSpace(value)
+		if strings.EqualFold(candidate, target.Host) || strings.EqualFold(candidate, target.Hostname()) {
+			return true
+		}
+	}
+	return false
 }
 
 // applyTestOnlyWaiverRuntimeClassifications supplies the one missing safety
@@ -554,6 +612,68 @@ func packageBlockingReasons(pkg model.ClientExecutionPackage) []string {
 		return nil
 	}
 	return append([]string{}, pkg.ConfidenceSummary.BlockingReasons...)
+}
+
+func validateWaiverTargetsAgainstBlockingReport(pkg model.ClientExecutionPackage, allowed []BrowserAgentTestWaiverNode, approvedBlockingReasonHashes []string) ([]string, error) {
+	if pkg.ConfidenceSummary == nil || pkg.ConfidenceSummary.Readiness != model.PackageReadinessBlocked || len(pkg.ConfidenceSummary.BlockingReasons) == 0 {
+		return nil, errors.New("test waiver requires an App blocking report with explicit blocking reasons")
+	}
+	approved := make(map[string]bool, len(allowed))
+	for _, node := range allowed {
+		nodeID := strings.TrimSpace(node.NodeID)
+		if nodeID == "" {
+			return nil, errors.New("test waiver contains an empty node identity")
+		}
+		approved[nodeID] = true
+	}
+	approvedGlobal := make(map[string]bool, len(approvedBlockingReasonHashes))
+	for _, value := range approvedBlockingReasonHashes {
+		hash := strings.ToLower(strings.TrimSpace(value))
+		if len(hash) != 64 || approvedGlobal[hash] {
+			return nil, errors.New("approved_blocking_reason_hashes must contain unique SHA-256 values")
+		}
+		for _, character := range hash {
+			if !strings.ContainsRune("0123456789abcdef", character) {
+				return nil, errors.New("approved_blocking_reason_hashes must contain unique SHA-256 values")
+			}
+		}
+		approvedGlobal[hash] = true
+	}
+	matched := make(map[string]bool, len(approved))
+	matchedGlobal := make(map[string]bool, len(approvedGlobal))
+	for _, reason := range pkg.ConfidenceSummary.BlockingReasons {
+		reason = strings.TrimSpace(reason)
+		separator := strings.Index(reason, ":")
+		if separator <= 0 {
+			hash := model.SHA256Hex([]byte(reason))
+			if !approvedGlobal[hash] {
+				return nil, fmt.Errorf("test waiver does not explicitly approve global App blocking reason sha256=%s", hash)
+			}
+			matchedGlobal[hash] = true
+			continue
+		}
+		nodeID := strings.TrimSpace(reason[:separator])
+		if !approved[nodeID] {
+			return nil, fmt.Errorf("test waiver does not approve App blocking node %q", nodeID)
+		}
+		matched[nodeID] = true
+	}
+	for nodeID := range approved {
+		if !matched[nodeID] {
+			return nil, fmt.Errorf("test waiver node %q is not named by the App blocking report", nodeID)
+		}
+	}
+	for hash := range approvedGlobal {
+		if !matchedGlobal[hash] {
+			return nil, fmt.Errorf("approved global App blocking reason sha256=%s is not present in the package", hash)
+		}
+	}
+	result := make([]string, 0, len(matchedGlobal))
+	for hash := range matchedGlobal {
+		result = append(result, hash)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func verifyAppDraftProtocolHashes(bundle *model.ExecutableRecordingScriptBundle) error {

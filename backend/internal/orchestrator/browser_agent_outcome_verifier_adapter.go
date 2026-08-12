@@ -363,7 +363,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 
 		// P0.5: Check for missing observation evidence in critical events
 		if event.EventType == model.StageExecutionEventOutcomeObserved ||
-		   event.EventType == model.StageExecutionEventObservationCollected {
+			event.EventType == model.StageExecutionEventObservationCollected {
 			if event.Observation == nil {
 				runtimeChecks = append(runtimeChecks, model.ValidationCheck{
 					ID:       fmt.Sprintf("runtime_no_observation_%s_%d", event.StageID, i),
@@ -578,6 +578,9 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 			if obs.URL != "" {
 				parts = append(parts, "url="+obs.URL)
 			}
+			if expectedRoute, ok := adapterVerifiedExpectedRoute(vctx.StageApprovalPlan, nid, obs.URL); ok {
+				parts = append(parts, "route_template_verified="+expectedRoute)
+			}
 			if obs.Source != "" {
 				parts = append(parts, "source="+string(obs.Source))
 			}
@@ -623,6 +626,66 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 	}
 
 	return newReport, nil
+}
+
+// adapterVerifiedExpectedRoute translates a protocol-level dynamic route into
+// evidence understood by the legacy validator. It never mutates runtime events
+// or the approved plan and only emits the marker after independently matching
+// the actual browser URL against the App-approved route template.
+func adapterVerifiedExpectedRoute(plan *model.StageApprovalPlan, nodeID, observedURL string) (string, bool) {
+	if plan == nil || strings.TrimSpace(observedURL) == "" {
+		return "", false
+	}
+	for _, stage := range plan.Stages {
+		if stage.NodeID != nodeID || strings.TrimSpace(stage.ExpectedRouteAfterAction) == "" {
+			continue
+		}
+		if adapterRouteTemplateMatches(observedURL, stage.ExpectedRouteAfterAction) {
+			return stage.ExpectedRouteAfterAction, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+func adapterRouteTemplateMatches(observedRaw, expectedRaw string) bool {
+	observed, observedErr := url.Parse(strings.TrimSpace(observedRaw))
+	expected, expectedErr := url.Parse(strings.TrimSpace(expectedRaw))
+	if observedErr != nil || expectedErr != nil || observed.Path == "" || expected.Path == "" {
+		return false
+	}
+	if expected.Host != "" && !strings.EqualFold(observed.Host, expected.Host) {
+		return false
+	}
+
+	observedSegments := adapterRouteSegments(observed.Path)
+	expectedSegments := adapterRouteSegments(expected.Path)
+	for i, expectedSegment := range expectedSegments {
+		if expectedSegment == "*" {
+			return i < len(observedSegments)
+		}
+		if i >= len(observedSegments) {
+			return false
+		}
+		if strings.HasPrefix(expectedSegment, ":") {
+			if observedSegments[i] == "" {
+				return false
+			}
+			continue
+		}
+		if !strings.EqualFold(observedSegments[i], expectedSegment) {
+			return false
+		}
+	}
+	return len(observedSegments) == len(expectedSegments)
+}
+
+func adapterRouteSegments(path string) []string {
+	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
 }
 
 // ValidatePostExecution validates final results after execution.
@@ -806,8 +869,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 		if event.EventType == model.StageExecutionEventOutcomeObserved && event.Observation != nil {
 			// Check evidence quality
 			if event.Observation.Source == model.RuntimeObservationActualBrowser ||
-			   event.Observation.Source == model.RuntimeObservationAssertion ||
-			   event.Observation.Source == model.RuntimeObservationArtifact {
+				event.Observation.Source == model.RuntimeObservationAssertion ||
+				event.Observation.Source == model.RuntimeObservationArtifact {
 				stageOutcomes[event.StageID] = true
 			}
 		}
@@ -857,7 +920,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 	// P0.4: Verify stage events have traceable evidence_refs
 	for i, event := range events {
 		if event.EventType == model.StageExecutionEventOutcomeObserved ||
-		   event.EventType == model.StageExecutionEventObservationCollected {
+			event.EventType == model.StageExecutionEventObservationCollected {
 			if len(event.EvidenceRefs) == 0 {
 				postChecks = append(postChecks, model.ValidationCheck{
 					ID:       fmt.Sprintf("post_no_evidence_refs_%s_%d", event.StageID, i),
@@ -1019,8 +1082,8 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 
 	// P1: Generate repair proposals for failed checks (if repair allowed and not recommending reunderstanding)
 	if a.config.EnableRuntimeRepair &&
-	   vctx.BrowserAgentContract != nil &&
-	   newReport.Decision != model.ValidationDecisionReunderstandingRequired {
+		vctx.BrowserAgentContract != nil &&
+		newReport.Decision != model.ValidationDecisionReunderstandingRequired {
 		proposals := a.repairGen.GenerateRepairProposals(&vctx, newReport.Checks, &vctx.BrowserAgentContract.RepairPolicy)
 		if len(proposals) > 0 {
 			// Store proposal IDs in report
@@ -1167,14 +1230,14 @@ func (a *BrowserAgentOutcomeVerifierAdapter) buildLegacyReportFromResults(
 	}
 
 	return model.LegacyValidationReport{
-		ID:                 fmt.Sprintf("%s_%d", phase, time.Now().UnixNano()),
+		ID:                  fmt.Sprintf("%s_%d", phase, time.Now().UnixNano()),
 		ValidationContextID: packageID,
-		Phase:              model.LegacyValidationPhase(phase),
-		GlobalFeedbackType: feedbackType,
-		PassedStages:       passed,
-		FailedStages:       failed,
-		TotalStages:        len(results),
-		StageFeedbacks:     []model.StageFeedback{},
+		Phase:               model.LegacyValidationPhase(phase),
+		GlobalFeedbackType:  feedbackType,
+		PassedStages:        passed,
+		FailedStages:        failed,
+		TotalStages:         len(results),
+		StageFeedbacks:      []model.StageFeedback{},
 	}
 }
 

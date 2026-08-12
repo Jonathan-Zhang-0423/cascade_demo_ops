@@ -40,7 +40,7 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 	// Hashes — derive from bundle reproducibility when available.
 	if pkg.ExecutableScriptBundle != nil {
 		m.BundleHashSHA256 = pkg.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
-		m.PolicyHashSHA256 = pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
+		m.PolicyHashSHA256 = pkg.ExecutableScriptBundle.Reproducibility.BrowserAgentContractHashSHA256
 	}
 	// Fallback: take hashes from first ValidationReport if not on bundle.
 	if m.BundleHashSHA256 == "" || m.PolicyHashSHA256 == "" {
@@ -59,7 +59,8 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 
 	// Runtime name.
 	if pkg.ExecutableScriptBundle != nil {
-		m.ExecutionBundleRuntime = model.ExecutableScriptRuntimeBrowserAgentOutlineV1
+		m.ProtocolRuntime = pkg.ExecutableScriptBundle.ScriptManifest.Runtime
+		m.ExecutionBundleRuntime = pkg.ExecutableScriptBundle.ScriptManifest.Runtime
 	}
 	if versions := result.AuditTrail.RuntimeVersions; len(versions) > 0 {
 		m.ServerRuntimeVersion = versions["server"]
@@ -79,6 +80,9 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 
 	// Final ValidationDecision: take the most restrictive decision across all reports.
 	m.FinalDecision = finalValidationDecision(result.ValidationReports)
+	if result.Status == model.RecordingResultStatusFailed && m.FinalDecision == model.ValidationDecisionContinue {
+		m.FinalDecision = model.ValidationDecisionStopAndReport
+	}
 
 	// Validation report index.
 	for _, rpt := range result.ValidationReports {
@@ -97,12 +101,30 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 		})
 	}
 
+	stageByNode := map[string]model.StageApprovalStage{}
+	if pkg.ExecutableScriptBundle != nil && pkg.ExecutableScriptBundle.StageApprovalPlan != nil {
+		for _, stage := range pkg.ExecutableScriptBundle.StageApprovalPlan.Stages {
+			stageByNode[stage.NodeID] = stage
+		}
+	}
+	decisionByNode := map[string]model.ValidationDecision{}
+	for _, report := range result.ValidationReports {
+		if report.NodeID != "" {
+			decisionByNode[report.NodeID] = report.Decision
+		}
+	}
+
 	// Per-stage summary from StepResults.
 	for i, step := range result.StepResults {
 		stage := model.ReplayManifestStage{
-			NodeID: step.NodeID,
-			Order:  i + 1,
-			Status: step.Status,
+			NodeID:             step.NodeID,
+			Order:              i + 1,
+			Status:             step.Status,
+			ValidationDecision: decisionByNode[step.NodeID],
+		}
+		if approved, ok := stageByNode[step.NodeID]; ok {
+			stage.StageID = approved.ID
+			stage.Order = approved.Order
 		}
 		if step.Error != nil {
 			stage.FailureCode = step.Error.Code

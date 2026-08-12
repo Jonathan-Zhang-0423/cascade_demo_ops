@@ -14,32 +14,44 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/driver"
 	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/model"
 )
 
+const (
+	devVisibleAutoLoginEmailEnv    = "CASCADE_DEV_VISIBLE_LOGIN_EMAIL"
+	devVisibleAutoLoginPasswordEnv = "CASCADE_DEV_VISIBLE_LOGIN_PASSWORD"
+)
+
 // DevVisibleBrowserAgentPrepareRequest is a local test-only handoff. It opens
 // a brand-new visible browser profile; it deliberately cannot accept cookies,
-// credentials, storage snapshots, or a production execution package.
+// credentials, storage snapshots, or a production execution package in the
+// request. Optional automatic-login credentials come from an opaque local
+// credential reference or, for backwards-compatible dev runs, local Server
+// process environment variables.
 type DevVisibleBrowserAgentPrepareRequest struct {
 	TargetURL     string   `json:"target_url"`
 	MaskSelectors []string `json:"mask_selectors,omitempty"`
+	AutoLogin     bool     `json:"auto_login,omitempty"`
+	CredentialRef string   `json:"credential_ref,omitempty"`
 	DevTestAck    bool     `json:"dev_test_ack"`
 }
 
 type DevVisibleBrowserAgentView struct {
-	DevTestOnly  bool                                  `json:"dev_test_only"`
-	SessionID    string                                `json:"session_id,omitempty"`
-	Status       string                                `json:"status"`
-	TargetOrigin string                                `json:"target_origin,omitempty"`
-	ActualURL    string                                `json:"actual_url,omitempty"`
-	PageTitle    string                                `json:"page_title,omitempty"`
-	ExpiresAt    time.Time                             `json:"expires_at,omitempty"`
-	ManualAction string                                `json:"manual_action,omitempty"`
-	Message      string                                `json:"message"`
-	Package      *DevVisibleBrowserAgentPackageBinding `json:"package,omitempty"`
-	Result       *DevVisibleBrowserAgentResult         `json:"result,omitempty"`
+	DevTestOnly    bool                                  `json:"dev_test_only"`
+	SessionID      string                                `json:"session_id,omitempty"`
+	Status         string                                `json:"status"`
+	TargetOrigin   string                                `json:"target_origin,omitempty"`
+	ActualURL      string                                `json:"actual_url,omitempty"`
+	PageTitle      string                                `json:"page_title,omitempty"`
+	ExpiresAt      time.Time                             `json:"expires_at,omitempty"`
+	ManualAction   string                                `json:"manual_action,omitempty"`
+	AutomaticLogin bool                                  `json:"automatic_login,omitempty"`
+	Message        string                                `json:"message"`
+	Package        *DevVisibleBrowserAgentPackageBinding `json:"package,omitempty"`
+	Result         *DevVisibleBrowserAgentResult         `json:"result,omitempty"`
 }
 
 type DevVisibleBrowserAgentExecuteRequest struct {
@@ -105,22 +117,27 @@ type DevVisibleBrowserAgentApprovedPackageView struct {
 }
 
 type devVisibleBrowserAgentSession struct {
-	session      *driver.BrowserAgentWorkerSession
-	targetOrigin string
-	expiresAt    time.Time
+	session        *driver.BrowserAgentWorkerSession
+	targetOrigin   string
+	expiresAt      time.Time
+	automaticLogin bool
 }
 
 // devVisibleBrowserAgentManager is intentionally not reused by the normal
-// Outline runner. Holding this session is what lets a human log in manually
-// without Server ever observing or importing authentication state.
+// Outline runner. The login handoff may be manual or local-test automatic, but
+// no authentication state is exported from the isolated browser context.
 type devVisibleBrowserAgentManager struct {
-	service  *Service
-	mu       sync.Mutex
-	sessions map[string]devVisibleBrowserAgentSession
+	service            *Service
+	readDemoCredential func(string) (credentialstore.DemoCredential, error)
+	mu                 sync.Mutex
+	sessions           map[string]devVisibleBrowserAgentSession
 }
 
 func newDevVisibleBrowserAgentManager(service *Service) *devVisibleBrowserAgentManager {
-	return &devVisibleBrowserAgentManager{service: service, sessions: map[string]devVisibleBrowserAgentSession{}}
+	return &devVisibleBrowserAgentManager{
+		service: service, readDemoCredential: credentialstore.ReadDemoCredential,
+		sessions: map[string]devVisibleBrowserAgentSession{},
+	}
 }
 
 func (m *devVisibleBrowserAgentManager) Prepare(ctx context.Context, request DevVisibleBrowserAgentPrepareRequest) (DevVisibleBrowserAgentView, error) {
@@ -134,6 +151,27 @@ func (m *devVisibleBrowserAgentManager) Prepare(ctx context.Context, request Dev
 	if err != nil {
 		return DevVisibleBrowserAgentView{}, err
 	}
+	autoLoginEmail, autoLoginPassword := "", ""
+	if request.AutoLogin {
+		if strings.TrimSpace(request.CredentialRef) != "" {
+			credential, credentialErr := m.resolveAutoLoginCredential(request.CredentialRef)
+			if credentialErr != nil {
+				return DevVisibleBrowserAgentView{}, credentialErr
+			}
+			autoLoginEmail = strings.TrimSpace(credential.Username)
+			autoLoginPassword = credential.Password
+		} else {
+			autoLoginEmail = strings.TrimSpace(os.Getenv(devVisibleAutoLoginEmailEnv))
+			autoLoginPassword = os.Getenv(devVisibleAutoLoginPasswordEnv)
+		}
+		if autoLoginEmail == "" || autoLoginPassword == "" {
+			return DevVisibleBrowserAgentView{}, fmt.Errorf("auto_login requires credential_ref or %s and %s in the local Server process", devVisibleAutoLoginEmailEnv, devVisibleAutoLoginPasswordEnv)
+		}
+	}
+	defer func() {
+		autoLoginEmail = ""
+		autoLoginPassword = ""
+	}()
 	if !fileExists(m.service.localVideoWorkerPath()) {
 		return DevVisibleBrowserAgentView{}, errors.New("video-worker build artifact is not available")
 	}
@@ -143,7 +181,7 @@ func (m *devVisibleBrowserAgentManager) Prepare(ctx context.Context, request Dev
 
 	identifier := fmt.Sprintf("dev_visible_%d", timeNowUTC().UnixNano())
 	outputDir := filepath.Join(m.service.runtime.ArtifactRoot, "dev-test-only", "visible-browser-agent", identifier)
-	recordingSensitive := false
+	recordingSensitive := request.AutoLogin
 	recordTrace := false
 	worker := driver.NewBrowserAgentWorker(m.service.nodeBinaryForExecution(), m.service.localVideoWorkerPath(), m.service.videoWorkerEnvironment())
 	// Browser startup on a developer workstation may consume most of the
@@ -155,8 +193,9 @@ func (m *devVisibleBrowserAgentManager) Prepare(ctx context.Context, request Dev
 		Browser: driver.BrowserAgentWorkerBrowser{
 			Engine: "chromium", Headless: false,
 			Viewport: driver.BrowserAgentWorkerViewport{Width: 1440, Height: 900},
-			// No video is recorded during manual login.
-			RecordVideo: false,
+			// Manual login is never recorded. The automatic local-test path may
+			// record because the Worker masks both credential inputs before fill.
+			RecordVideo: request.AutoLogin,
 		},
 		AllowedDomains: []string{"127.0.0.1"}, AllowedOrigins: []string{devVisibleOrigin(target)}, AllowedRoutes: []string{"/"},
 		MaskSelectors:      uniqueStrings(append(defaultDevVisibleMaskSelectors(), request.MaskSelectors...)),
@@ -171,11 +210,38 @@ func (m *devVisibleBrowserAgentManager) Prepare(ctx context.Context, request Dev
 		_ = session.Abort()
 		return DevVisibleBrowserAgentView{}, fmt.Errorf("navigate isolated visible browser: %w", err)
 	}
+	if request.AutoLogin {
+		loginCtx, cancelLogin := context.WithTimeout(ctx, 75*time.Second)
+		_, loginErr := session.AutoLoginDevVisible(loginCtx, autoLoginEmail, autoLoginPassword)
+		cancelLogin()
+		if loginErr != nil {
+			_ = session.Abort()
+			return DevVisibleBrowserAgentView{}, fmt.Errorf("complete local automatic login: %w", loginErr)
+		}
+	}
 	expiresAt := timeNowUTC().Add(20 * time.Minute)
 	m.mu.Lock()
-	m.sessions[opened.SessionID] = devVisibleBrowserAgentSession{session: session, targetOrigin: devVisibleOrigin(target), expiresAt: expiresAt}
+	m.sessions[opened.SessionID] = devVisibleBrowserAgentSession{session: session, targetOrigin: devVisibleOrigin(target), expiresAt: expiresAt, automaticLogin: request.AutoLogin}
 	m.mu.Unlock()
 	return m.view(ctx, opened.SessionID)
+}
+
+func (m *devVisibleBrowserAgentManager) resolveAutoLoginCredential(ref string) (credentialstore.DemoCredential, error) {
+	name, err := devDemoCredentialName(ref)
+	if err != nil {
+		return credentialstore.DemoCredential{}, err
+	}
+	if m == nil || m.readDemoCredential == nil {
+		return credentialstore.DemoCredential{}, errors.New("dev visible credential store is unavailable")
+	}
+	credential, err := m.readDemoCredential(name)
+	if err != nil {
+		return credentialstore.DemoCredential{}, errors.New("dev visible credential_ref is unavailable")
+	}
+	if strings.TrimSpace(credential.Username) == "" || credential.Password == "" {
+		return credentialstore.DemoCredential{}, errors.New("dev visible credential_ref is empty")
+	}
+	return credential, nil
 }
 
 func (m *devVisibleBrowserAgentManager) Continue(ctx context.Context, sessionID string) (DevVisibleBrowserAgentView, error) {
@@ -388,7 +454,12 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 	}
 	// A local visible session contains an authenticated browser context. It is
 	// single-use even when validation, execution, or rendering fails.
-	defer m.closeSession(sessionID, session)
+	sessionClosed := false
+	defer func() {
+		if !sessionClosed {
+			m.closeSession(sessionID, session)
+		}
+	}()
 	var binding DevVisibleBrowserAgentPackageBinding
 	if waiver == nil {
 		binding, err = validateDevVisiblePackageBinding(request.Package, session.targetOrigin)
@@ -456,19 +527,38 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 		}
 		preReports = append(preReports, pre)
 	}
+	traceCtx, cancelTrace := context.WithTimeout(ctx, 15*time.Second)
+	if err := session.session.BeginExecutionRecording(traceCtx); err != nil {
+		cancelTrace()
+		return view, fmt.Errorf("start post-login execution trace: %w", err)
+	}
+	cancelTrace()
 	stageRuntime := &localBrowserAgentStageRuntime{session: session.session, stageCount: len(plan.Stages), artifacts: map[string]model.ArtifactRef{}}
 	runResult, runErr := newBrowserAgentStageOrchestratorWithVerifier(guard, verifier).Run(ctx, plan, stageRuntime, stageRuntime, eventSink)
 	if runResult.AuditError != nil {
 		return view, fmt.Errorf("visible execution audit event failure: %w", runResult.AuditError)
 	}
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 30*time.Second)
+	closeResult, closeErr := session.session.Close(closeCtx)
+	cancelClose()
+	_, _ = m.take(sessionID)
+	sessionClosed = true
+	if closeErr != nil {
+		return view, fmt.Errorf("finalize visible browser recording: %w", closeErr)
+	}
+	mergeVisibleCloseArtifacts(stageRuntime.artifacts, closeResult)
 	completedAt := timeNowUTC()
 	artifacts := mapBrowserAgentArtifacts(stageRuntime.artifacts)
+	runtimeVersions := map[string]string{"runner": "playwright-browser-agent", "mode": runtimeMode}
+	for key, value := range closeResult.RuntimeVersions {
+		runtimeVersions[key] = value
+	}
 	recordResult := executor.RecordResult{
 		GeneratedAssets: artifacts,
 		StepResults:     browserAgentStepResults(plan, runResult.Events, stageRuntime.artifacts),
 		WorkerID:        "video-worker-browser-agent-dev-visible",
-		RuntimeVersions: map[string]string{"runner": "playwright-browser-agent", "mode": runtimeMode},
-		SandboxMetadata: browserAgentSandboxMetadata(&request.Package, map[string]string{"runner": "playwright-browser-agent", "mode": runtimeMode}),
+		RuntimeVersions: runtimeVersions,
+		SandboxMetadata: browserAgentSandboxMetadata(&request.Package, runtimeVersions),
 		StartedAt:       startedAt, CompletedAt: completedAt,
 	}
 	if runErr != nil {
@@ -612,7 +702,7 @@ func validateDevVisibleWaivedPackageBinding(pkg model.ClientExecutionPackage, ta
 	if !containsExactString(plan.ExplorationScope.AllowedOrigins, targetOrigin) {
 		return DevVisibleBrowserAgentPackageBinding{}, errors.New("waived App draft allowed_origins does not include the visible real-page origin")
 	}
-	if !containsExactString(pkg.RecordingRunSpec.AllowedDomains, baseURL.Hostname()) || !containsExactString(bundle.SecurityPolicy.AllowedDomains, baseURL.Hostname()) {
+	if !localVisibleHostAllowed(pkg.RecordingRunSpec.AllowedDomains, baseURL) || !localVisibleHostAllowed(bundle.SecurityPolicy.AllowedDomains, baseURL) {
 		return DevVisibleBrowserAgentPackageBinding{}, errors.New("waived App draft allowed_domains does not include the visible real-page host")
 	}
 	return DevVisibleBrowserAgentPackageBinding{PackageID: pkg.PackageID, Runtime: bundle.ScriptManifest.Runtime, StageCount: len(plan.Stages)}, nil
@@ -648,6 +738,17 @@ func visibleExecutionResult(result model.RecordingResultPackage, eventDir string
 		}
 	}
 	return value
+}
+
+func mergeVisibleCloseArtifacts(target map[string]model.ArtifactRef, closeResult driver.BrowserAgentWorkerCloseResult) {
+	if target == nil {
+		return
+	}
+	for _, artifact := range closeResult.Artifacts {
+		if strings.TrimSpace(artifact.ID) != "" {
+			target[artifact.ID] = artifact
+		}
+	}
 }
 
 func persistLocalVisibleResultPackage(recordingDir string, result model.RecordingResultPackage) (string, error) {
@@ -687,7 +788,7 @@ func (m *devVisibleBrowserAgentManager) readySessionView(ctx context.Context, se
 	if err != nil {
 		return DevVisibleBrowserAgentView{}, devVisibleBrowserAgentSession{}, fmt.Errorf("inspect isolated visible browser: %w", err)
 	}
-	view := DevVisibleBrowserAgentView{DevTestOnly: true, SessionID: sessionID, TargetOrigin: session.targetOrigin, ActualURL: status.URL, PageTitle: status.Title, ExpiresAt: session.expiresAt}
+	view := DevVisibleBrowserAgentView{DevTestOnly: true, SessionID: sessionID, TargetOrigin: session.targetOrigin, ActualURL: status.URL, PageTitle: status.Title, ExpiresAt: session.expiresAt, AutomaticLogin: session.automaticLogin}
 	actual, parseErr := url.Parse(status.URL)
 	if parseErr != nil || devVisibleOrigin(actual) != session.targetOrigin {
 		view.Status = "source_mismatch"
@@ -701,7 +802,11 @@ func (m *devVisibleBrowserAgentManager) readySessionView(ctx context.Context, se
 		return view, session, nil
 	}
 	view.Status = "ready_for_approved_package"
-	view.Message = "已确认隔离浏览器位于真实目标页面。此本地测试接口只完成登录接力；后续仅可执行经协议校验和人工审批的执行包。"
+	if session.automaticLogin {
+		view.Message = "已通过本地测试专用的一次性自动登录接力进入真实目标页面；凭据未写入包、日志或 Trace。后续仅可执行经协议校验和人工审批的执行包。"
+	} else {
+		view.Message = "已确认隔离浏览器位于真实目标页面。此本地测试接口只完成登录接力；后续仅可执行经协议校验和人工审批的执行包。"
+	}
 	return view, session, nil
 }
 
@@ -734,7 +839,7 @@ func validateDevVisiblePackageBinding(pkg model.ClientExecutionPackage, targetOr
 	if !visibleOriginsRestricted(plan.ExplorationScope.AllowedOrigins, targetOrigin) {
 		return DevVisibleBrowserAgentPackageBinding{}, errors.New("approved package allowed_origins must be limited to the visible real-page origin")
 	}
-	if !containsExactString(pkg.RecordingRunSpec.AllowedDomains, baseURL.Hostname()) || !containsExactString(bundle.SecurityPolicy.AllowedDomains, baseURL.Hostname()) {
+	if !localVisibleHostAllowed(pkg.RecordingRunSpec.AllowedDomains, baseURL) || !localVisibleHostAllowed(bundle.SecurityPolicy.AllowedDomains, baseURL) {
 		return DevVisibleBrowserAgentPackageBinding{}, errors.New("approved package allowed_domains does not include the visible real-page host")
 	}
 	return DevVisibleBrowserAgentPackageBinding{PackageID: pkg.PackageID, Runtime: bundle.ScriptManifest.Runtime, StageCount: len(plan.Stages)}, nil

@@ -63,6 +63,9 @@ type BrowserAgentWorkerStage struct {
 	EntryRoute                        string                              `json:"entry_route,omitempty"`
 	Route                             string                              `json:"route,omitempty"`
 	URL                               string                              `json:"url,omitempty"`
+	TargetRouteTemplate               string                              `json:"target_route_template,omitempty"`
+	ExpectedRouteAfterAction          string                              `json:"expected_route_after_action,omitempty"`
+	RuntimeRouteVerificationRequired  bool                                `json:"runtime_route_verification_required,omitempty"`
 	TargetContract                    model.BrowserAgentTargetContract    `json:"target_contract"`
 	Components                        []model.BrowserAgentComponentTarget `json:"components,omitempty"`
 	Interactions                      []model.BrowserAgentInteraction     `json:"interactions"`
@@ -79,6 +82,9 @@ type BrowserAgentWorkerStage struct {
 type BrowserAgentWorkerStageRequest struct {
 	SessionID string                  `json:"session_id"`
 	Stage     BrowserAgentWorkerStage `json:"stage"`
+	// Secrets is an ephemeral RPC-only map keyed by an approved opaque
+	// secret_ref. It must never be copied into stage data, logs, or artifacts.
+	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
 type BrowserAgentWorkerStageResult struct {
@@ -179,6 +185,12 @@ func (s *BrowserAgentWorkerSession) Execute(ctx context.Context, stage BrowserAg
 	return result, err
 }
 
+func (s *BrowserAgentWorkerSession) ExecuteWithSecrets(ctx context.Context, stage BrowserAgentWorkerStage, secrets map[string]string) (BrowserAgentWorkerStageResult, error) {
+	var result BrowserAgentWorkerStageResult
+	err := s.call(ctx, "browser_agent_execute", BrowserAgentWorkerStageRequest{SessionID: s.sessionID, Stage: stage, Secrets: secrets}, &result)
+	return result, err
+}
+
 // Revalidate waits for the approved capture window and observes the outcome
 // again without repeating click/fill/select or any other business action.
 func (s *BrowserAgentWorkerSession) Revalidate(ctx context.Context, stage BrowserAgentWorkerStage) (BrowserAgentWorkerStageResult, error) {
@@ -204,6 +216,26 @@ func (s *BrowserAgentWorkerSession) NavigateDevVisible(ctx context.Context, targ
 	var result BrowserAgentWorkerStatus
 	err := s.call(ctx, "browser_agent_dev_visible_navigate", map[string]string{"session_id": s.sessionID, "target_url": targetURL}, &result)
 	return result, err
+}
+
+// AutoLoginDevVisible is a local test-only handoff. The credentials are sent
+// over the private Worker stdin RPC and the Worker returns only redacted page
+// metadata; callers must not persist or log the arguments.
+func (s *BrowserAgentWorkerSession) AutoLoginDevVisible(ctx context.Context, email, password string) (BrowserAgentWorkerStatus, error) {
+	var result BrowserAgentWorkerStatus
+	err := s.call(ctx, "browser_agent_dev_visible_auto_login", map[string]string{
+		"session_id": s.sessionID,
+		"email":      email,
+		"password":   password,
+	}, &result)
+	return result, err
+}
+
+// BeginExecutionRecording starts the trace only after any local login handoff
+// has completed. This keeps login values out of the Playwright trace.
+func (s *BrowserAgentWorkerSession) BeginExecutionRecording(ctx context.Context) error {
+	var result struct{}
+	return s.call(ctx, "browser_agent_dev_visible_begin_recording", map[string]string{"session_id": s.sessionID}, &result)
 }
 
 func (s *BrowserAgentWorkerSession) Close(ctx context.Context) (BrowserAgentWorkerCloseResult, error) {

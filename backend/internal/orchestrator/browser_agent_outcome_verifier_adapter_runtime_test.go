@@ -31,13 +31,13 @@ func TestValidateStageEvents_OutOfOrderEvents(t *testing.T) {
 	// Out-of-order: completed before started
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageCompleted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageCompleted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now().Add(1 * time.Second),
 		},
 	}
@@ -95,13 +95,13 @@ func TestValidateStageEvents_DerivedFromPlanEvidence(t *testing.T) {
 	// Event with derived_from_plan evidence (should be rejected)
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationDerivedPlan, // Invalid!
@@ -160,13 +160,13 @@ func TestValidateStageEvents_MissingOutcomeObserved(t *testing.T) {
 	// Completed without outcome_observed
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageCompleted, // No outcome_observed!
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageCompleted, // No outcome_observed!
 			OccurredAt: time.Now().Add(1 * time.Second),
 		},
 	}
@@ -221,8 +221,8 @@ func TestValidateStageEvents_MissingObservation(t *testing.T) {
 	// outcome_observed without observation field
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
@@ -280,13 +280,13 @@ func TestValidateStageEvents_RequiredAssertionFailed(t *testing.T) {
 	// Event with failed assertion
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,
@@ -352,13 +352,13 @@ func TestValidateStageEvents_ValidFlow(t *testing.T) {
 	// Valid event flow
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageStarted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageStarted,
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,
@@ -373,8 +373,8 @@ func TestValidateStageEvents_ValidFlow(t *testing.T) {
 			},
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventStageCompleted,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventStageCompleted,
 			OccurredAt: time.Now().Add(2 * time.Second),
 		},
 	}
@@ -399,13 +399,76 @@ func TestValidateStageEvents_ValidFlow(t *testing.T) {
 	// Should not have critical P0 violations
 	for _, check := range report.Checks {
 		if check.Code == "OUT_OF_ORDER_EVENTS" ||
-		   check.Code == "DERIVED_FROM_PLAN_EVIDENCE" ||
-		   check.Code == "MISSING_OUTCOME_OBSERVED" ||
-		   check.Code == "NO_OBSERVATION_EVIDENCE" ||
-		   check.Code == "REQUIRED_ASSERTION_FAILED" {
+			check.Code == "DERIVED_FROM_PLAN_EVIDENCE" ||
+			check.Code == "MISSING_OUTCOME_OBSERVED" ||
+			check.Code == "NO_OBSERVATION_EVIDENCE" ||
+			check.Code == "REQUIRED_ASSERTION_FAILED" {
 			t.Errorf("Valid flow should not trigger P0 check: %s", check.Code)
 		}
 	}
+}
+
+func TestValidateStageEvents_AppApprovedDynamicRoute(t *testing.T) {
+	config := &model.ValidationConfig{
+		PreExecutionEnabled:       true,
+		RealTimeBatchEnabled:      true,
+		PostExecutionBatchEnabled: true,
+	}
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(config)
+	now := time.Now()
+
+	baseContext := model.BrowserAgentValidationContext{
+		RunID:                     "test-run-dynamic-route-001",
+		SourcePackageID:           "pkg-dynamic-route-001",
+		SourceBundleHashSHA256:    "abc123",
+		EffectivePolicyHashSHA256: "def456",
+		WorkflowGraph:             &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan:                      &model.ExecutionScriptDocument{},
+		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+			ID:                               "step-4",
+			NodeID:                           "business_stage_start_agent_build",
+			ExpectedRouteAfterAction:         "/project/:id",
+			RuntimeRouteVerificationRequired: true,
+		}}},
+		ScriptOutline:        &model.BrowserAgentScriptOutline{},
+		BrowserAgentContract: &model.BrowserAgentContract{},
+	}
+
+	stageEvents := func(observedURL string) []model.StageExecutionEvent {
+		observation := &model.RuntimeObservation{
+			Source: model.RuntimeObservationAssertion,
+			URL:    observedURL,
+			Assertions: []model.RuntimeAssertion{
+				{Kind: "action_click_completed", Passed: true, Actual: "semantic_build"},
+				{Kind: "required_element_visible:validate_build", Passed: true, Actual: "expected_route_after_action_verified"},
+			},
+		}
+		return []model.StageExecutionEvent{
+			{NodeID: "business_stage_start_agent_build", StageID: "stage-step-4", EventType: model.StageExecutionEventStageStarted, OccurredAt: now},
+			{NodeID: "business_stage_start_agent_build", StageID: "stage-step-4", EventType: model.StageExecutionEventOutcomeObserved, OccurredAt: now.Add(time.Second), Observation: observation},
+			{NodeID: "business_stage_start_agent_build", StageID: "stage-step-4", EventType: model.StageExecutionEventStageCompleted, OccurredAt: now.Add(2 * time.Second), Observation: observation},
+		}
+	}
+
+	t.Run("real dynamic route continues", func(t *testing.T) {
+		report, err := adapter.ValidateStageEvents(context.Background(), baseContext, stageEvents("http://127.0.0.1:5000/project/elhq3xeomsp50778"))
+		if err != nil {
+			t.Fatalf("ValidateStageEvents returned error: %v", err)
+		}
+		if report.Decision != model.ValidationDecisionContinue || report.PassRate != 1 {
+			t.Fatalf("dynamic route report = decision %q pass_rate %.2f, want continue/1", report.Decision, report.PassRate)
+		}
+	})
+
+	t.Run("wrong route still requires repair", func(t *testing.T) {
+		report, err := adapter.ValidateStageEvents(context.Background(), baseContext, stageEvents("http://127.0.0.1:5000/app"))
+		if err != nil {
+			t.Fatalf("ValidateStageEvents returned error: %v", err)
+		}
+		if report.Decision != model.ValidationDecisionRepairAllowed || report.PassRate >= 1 {
+			t.Fatalf("wrong route report = decision %q pass_rate %.2f, want repair_allowed/<1", report.Decision, report.PassRate)
+		}
+	})
 }
 
 // TestValidateStageEvents_CrossDomainAccess tests scenario 6: the agent
@@ -433,9 +496,9 @@ func TestValidateStageEvents_CrossDomainAccess(t *testing.T) {
 
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			NodeID:    "node-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			NodeID:     "node-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now(),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,
@@ -508,9 +571,9 @@ func TestValidateStageEvents_ForbiddenPageAccess(t *testing.T) {
 
 	events := []model.StageExecutionEvent{
 		{
-			StageID:   "stage-1",
-			NodeID:    "node-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			NodeID:     "node-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now(),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,

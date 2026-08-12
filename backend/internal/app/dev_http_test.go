@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
@@ -214,6 +215,68 @@ func TestDevHTTPBridgeDemoCredentialReturnsOnlyOpaqueRef(t *testing.T) {
 	}
 	if !strings.Contains(payload, `"secretRef":"credential://demo/assistant-demo"`) || len(stored) != 3 || stored[2] != "private-password" {
 		t.Fatalf("credential was not stored through the local vault adapter: payload=%s stored=%v", payload, stored)
+	}
+}
+
+func TestDevHTTPBridgeUsesEphemeralCredentialFallbackOnlyInLocalDevelopment(t *testing.T) {
+	server := newTestDevHTTPServerWithEnvironment(t, "development")
+	server.storeDemoCredential = func(string, string, string) error {
+		return errors.New("interactive credential store is unavailable")
+	}
+	server.readDemoCredential = func(string) (credentialstore.DemoCredential, error) {
+		return credentialstore.DemoCredential{}, errors.New("persistent credential is unavailable")
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/demo-credential", strings.NewReader(`{"ref":"ephemeral-e2e","username":"private-user","password":"private-password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "127.0.0.1:51234"
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"storage":"dev_ephemeral_memory"`) {
+		t.Fatalf("local development fallback was not used: status=%d body=%s", response.Code, response.Body.String())
+	}
+	credential, err := server.readDevExecutionCredential("credential://demo/ephemeral-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.Username != "private-user" || credential.Password != "private-password" {
+		t.Fatalf("ephemeral credential was not retained in process memory: %+v", credential)
+	}
+}
+
+func TestDevHTTPExecutionPackageResolvesOnlyOpaqueCredentialRef(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	resolvedRef := ""
+	server.readDemoCredential = func(ref string) (credentialstore.DemoCredential, error) {
+		resolvedRef = ref
+		return credentialstore.DemoCredential{Username: "private-user", Password: "private-password"}, nil
+	}
+	body := `{"credential_ref":"credential://demo/unattended-e2e","user_input":{"mode":"desktop"}}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/auto/execution-package", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if resolvedRef != "unattended-e2e" {
+		t.Fatalf("opaque credential ref was not resolved: %q", resolvedRef)
+	}
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid empty project input to fail after credential resolution, got %d: %s", response.Code, response.Body.String())
+	}
+	serialized := response.Body.String()
+	if strings.Contains(serialized, "private-user") || strings.Contains(serialized, "private-password") {
+		t.Fatalf("execution package response leaked resolved credential material: %s", serialized)
+	}
+}
+
+func TestDevHTTPExecutionPackageRejectsMalformedCredentialRef(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	for _, ref := range []string{"demo/unattended", "credential://demo/", "credential://demo/bad/ref"} {
+		if _, err := server.readDevExecutionCredential(ref); err == nil {
+			t.Fatalf("malformed credential ref %q was accepted", ref)
+		}
 	}
 }
 
@@ -945,6 +1008,17 @@ func TestDevHTTPBridgeSanitizesLLMJSONErrors(t *testing.T) {
 	}
 	if !strings.Contains(message, "模型返回的 JSON 结构不稳定") {
 		t.Fatalf("expected user-facing LLM JSON error, got: %s", message)
+	}
+}
+
+func TestBridgeErrorDoesNotMisclassifyRequestJSONAsLLMFailure(t *testing.T) {
+	err := errors.New("json: cannot unmarshal string into Go struct field DevAppPackageRawWaiverRequest.approved_blocking_reason_hashes of type []string")
+	info := bridgeErrorInfo(err)
+	if info.Code != "bad_request" || info.Retryable {
+		t.Fatalf("request JSON shape error must not be reported as an LLM failure: %+v", info)
+	}
+	if strings.Contains(info.Message, "模型返回") || !strings.Contains(info.Message, "cannot unmarshal") {
+		t.Fatalf("request JSON error should preserve an actionable decoder message: %q", info.Message)
 	}
 }
 
