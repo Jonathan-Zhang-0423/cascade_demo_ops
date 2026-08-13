@@ -63,6 +63,7 @@ func (s *Service) runUploadedExecutionPackageSync(ctx context.Context, orgID str
 		RecordingOutputDir: recordingDir, RenderOutputDir: renderDir, ResultCreatedAt: time.Now().UTC(),
 		Progress: func(stage string, message string, progress int) {
 			canonicalStage, canonicalProgress := canonicalExecutionStage(stage, progress)
+			s.appendCloudActivity(ctx, pkg.ProjectID, cloudJobID, stage, message, canonicalProgress)
 			_, _ = s.exchange.MarkExecutionStage(ctx, orgID, exchangePackageID, canonicalStage, message, canonicalProgress)
 		},
 	})

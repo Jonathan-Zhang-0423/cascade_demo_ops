@@ -849,6 +849,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/product-run/prepare":
 		startedAt := time.Now()
+		runID := "prepare_" + projectID + "_" + strconv.FormatInt(startedAt.UnixNano(), 10)
 		var request CloudLifecycleRequest
 		if r.Body != nil && r.ContentLength != 0 {
 			if err := decodeJSON(r, &request); err != nil {
@@ -864,11 +865,14 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			Message: "开始本地产品实战准备",
 			Detail:  "只运行本地理解、页面预扫描、执行图和脚本包生成；不会连接云端 exchange。",
 		})
+		s.service.appendProgressActivity(r.Context(), projectID, runID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelInfo, Message: "正在准备项目理解", Detail: "读取已批准的项目来源并生成执行方案。"})
 		ctx := orchestrator.WithProgressSink(r.Context(), func(event orchestrator.ProgressEvent) {
 			s.emitProjectEvent(projectID, event)
+			s.service.appendProgressActivity(r.Context(), projectID, runID, event)
 		})
 		result, err := s.service.PrepareProductRun(ctx, request)
 		if err != nil {
+			s.service.appendProgressActivity(r.Context(), projectID, runID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelError, Message: "项目理解未完成", Detail: err.Error()})
 			s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
 				Level:     orchestrator.ProgressLevelError,
 				Message:   "本地产品实战准备失败",
@@ -876,6 +880,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 				ElapsedMS: time.Since(startedAt).Milliseconds(),
 			})
 		} else {
+			s.service.appendProgressActivity(r.Context(), projectID, runID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelSuccess, Message: "执行方案已准备完成", Detail: "等待你在对话中确认下一步。"})
 			s.events.CopyProjectEvents(projectID, result.State.ProjectID)
 			s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
 				Level:     orchestrator.ProgressLevelSuccess,
@@ -1064,6 +1069,14 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "/execution-events":
 		afterID, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 		writeBridgeValue(w, s.events.List(projectID, afterID), nil)
+	case r.Method == http.MethodGet && suffix == "/activity-state":
+		state, err := s.service.GetProjectActivityState(r.Context(), projectID)
+		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodGet && suffix == "/activity-events":
+		events, err := s.service.ListProjectActivityEvents(r.Context(), projectID, r.URL.Query().Get("after"))
+		writeBridgeValue(w, events, err)
+	case r.Method == http.MethodGet && strings.HasPrefix(suffix, "/browser-frame/"):
+		s.serveProjectBrowserFrame(w, r, projectID, strings.TrimPrefix(suffix, "/browser-frame/"))
 	default:
 		http.NotFound(w, r)
 	}
@@ -1100,6 +1113,28 @@ func (s *DevHTTPServer) serveVerifiedDirectArtifact(w http.ResponseWriter, r *ht
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeFile(w, r, filePath)
+}
+
+func (s *DevHTTPServer) serveProjectBrowserFrame(w http.ResponseWriter, r *http.Request, projectID, frameRef string) {
+	frameRef = strings.TrimSpace(frameRef)
+	if frameRef == "" || filepath.Base(frameRef) != frameRef || (!strings.HasSuffix(strings.ToLower(frameRef), ".png") && !strings.HasSuffix(strings.ToLower(frameRef), ".jpg") && !strings.HasSuffix(strings.ToLower(frameRef), ".jpeg")) {
+		writeBridgeValue(w, nil, errors.New("browser frame reference is invalid"))
+		return
+	}
+	state, err := s.service.GetProjectActivityState(r.Context(), projectID)
+	if err != nil || state.Current == nil || state.Current.Browser == nil || state.Current.Browser.FrameRef != frameRef || !state.Current.Browser.Redacted {
+		writeBridgeValue(w, nil, errors.New("redacted browser frame was not found"))
+		return
+	}
+	path := filepath.Join(s.service.runtime.ArtifactRoot, "project_activity_frames", safePathSegment(projectID), frameRef)
+	info, statErr := os.Stat(path)
+	if statErr != nil || !info.Mode().IsRegular() {
+		writeBridgeValue(w, nil, errors.New("redacted browser frame was not found"))
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeFile(w, r, path)
 }
 
 // readDevExecutionCredential resolves an opaque local credential reference for

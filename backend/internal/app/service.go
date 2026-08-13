@@ -30,6 +30,7 @@ type Service struct {
 	states                store.StateStore
 	assistantStore        store.AssistantStore
 	accounts              *accountService
+	activity              *projectActivityStore
 	assistantMu           sync.Mutex
 	assistantProgressMu   sync.RWMutex
 	assistantProgressSink func(string, orchestrator.ProgressEvent)
@@ -150,6 +151,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		states:              states,
 		assistantStore:      assistantStoreForRuntime(runtime),
 		accounts:            newAccountService(runtime, accountStoreForRuntime(runtime)),
+		activity:            newProjectActivityStore(filepath.Join(runtime.DataRoot, "project_activity")),
 		layout:              storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
 		exchange:            newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
 		runningTasks:        map[string]context.CancelFunc{},
