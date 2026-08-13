@@ -796,6 +796,15 @@ export type CodeInvestigationQuestion = {
   confidence?: number;
 };
 
+export type CodeInvestigationNextAction = {
+  tool: string;
+  reason?: string;
+  query_terms?: string[];
+  command_kind?: string;
+  expected_evidence?: string[];
+  depends_on_tool_call_id?: string;
+};
+
 export type CodeInvestigationToolCall = {
   id: string;
   tool: string;
@@ -2323,15 +2332,6 @@ export type InvestigationQuestionRef = {
   next_actions?: CodeInvestigationNextAction[];
   tool_call_ids?: string[];
   confidence?: number;
-};
-
-export type CodeInvestigationNextAction = {
-  tool: string;
-  reason?: string;
-  query_terms?: string[];
-  command_kind?: string;
-  expected_evidence?: string[];
-  depends_on_tool_call_id?: string;
 };
 
 export type BrowserAgentTargetContract = {

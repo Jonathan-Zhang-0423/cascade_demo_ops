@@ -75,7 +75,7 @@ func (s *FileStateStore) Load(ctx context.Context, projectID string) (*orchestra
 	data, err := os.ReadFile(s.statePath(projectID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, errors.New("state not found")
+			return nil, ErrStateNotFound
 		}
 		return nil, err
 	}

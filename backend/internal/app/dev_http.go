@@ -123,6 +123,23 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/desktop/github-credential", s.handleStoreGitHubCredential)
 	mux.HandleFunc("DELETE /v1/desktop/github-credential", s.handleDeleteGitHubCredential)
 	mux.HandleFunc("POST /v1/desktop/demo-credential", s.handleStoreDemoCredential)
+	mux.HandleFunc("GET /v1/desktop/account/session", s.handleAccountSession)
+	mux.HandleFunc("POST /v1/desktop/account/session/dev", s.handleAccountDevLogin)
+	mux.HandleFunc("POST /v1/desktop/account/session/login", s.handleAccountPasswordLogin)
+	mux.HandleFunc("POST /v1/desktop/account/logout", s.handleAccountLogout)
+	mux.HandleFunc("POST /v1/desktop/account/password/set", s.handleAccountPasswordSet)
+	mux.HandleFunc("POST /v1/desktop/account/password/change", s.handleAccountPasswordChange)
+	mux.HandleFunc("POST /v1/desktop/account/password/reset/start", s.handleAccountPasswordResetStart)
+	mux.HandleFunc("POST /v1/desktop/account/password/reset/confirm", s.handleAccountPasswordResetConfirm)
+	mux.HandleFunc("GET /v1/desktop/account/profile", s.handleAccountProfile)
+	mux.HandleFunc("PUT /v1/desktop/account/profile", s.handleAccountProfile)
+	mux.HandleFunc("GET /v1/desktop/account/plan", s.handleAccountPlan)
+	mux.HandleFunc("GET /v1/desktop/account/verification/{channel}", s.handleAccountVerificationState)
+	mux.HandleFunc("POST /v1/desktop/account/verification/{channel}/start", s.handleAccountVerificationStart)
+	mux.HandleFunc("POST /v1/desktop/account/verification/{channel}/confirm", s.handleAccountVerificationConfirm)
+	mux.HandleFunc("POST /v1/desktop/account/github/device", s.handleAccountGitHubDeviceStart)
+	mux.HandleFunc("GET /v1/desktop/account/github/device/{flowID}", s.handleAccountGitHubDevicePoll)
+	mux.HandleFunc("DELETE /v1/desktop/account/github", s.handleAccountGitHubDisconnect)
 	mux.HandleFunc("PUT /v1/desktop/planning-model", s.handlePlanningModelSettings)
 	mux.HandleFunc("DELETE /v1/desktop/planning-model/{provider}", s.handleDeletePlanningModelSettings)
 	mux.HandleFunc("POST /v1/desktop/planning-model/verify", s.handleVerifyPlanningModel)
@@ -832,6 +849,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/product-run/prepare":
 		startedAt := time.Now()
+		runID := "prepare_" + projectID + "_" + strconv.FormatInt(startedAt.UnixNano(), 10)
 		var request CloudLifecycleRequest
 		if r.Body != nil && r.ContentLength != 0 {
 			if err := decodeJSON(r, &request); err != nil {
@@ -847,11 +865,14 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			Message: "开始本地产品实战准备",
 			Detail:  "只运行本地理解、页面预扫描、执行图和脚本包生成；不会连接云端 exchange。",
 		})
+		s.service.appendProgressActivity(r.Context(), projectID, runID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelInfo, Message: "正在准备项目理解", Detail: "读取已批准的项目来源并生成执行方案。"})
 		ctx := orchestrator.WithProgressSink(r.Context(), func(event orchestrator.ProgressEvent) {
 			s.emitProjectEvent(projectID, event)
+			s.service.appendProgressActivity(r.Context(), projectID, runID, event)
 		})
 		result, err := s.service.PrepareProductRun(ctx, request)
 		if err != nil {
+			s.service.appendProgressActivity(r.Context(), projectID, runID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelError, Message: "项目理解未完成", Detail: err.Error()})
 			s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
 				Level:     orchestrator.ProgressLevelError,
 				Message:   "本地产品实战准备失败",
@@ -859,6 +880,7 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 				ElapsedMS: time.Since(startedAt).Milliseconds(),
 			})
 		} else {
+			s.service.appendProgressActivity(r.Context(), projectID, runID, orchestrator.ProgressEvent{Level: orchestrator.ProgressLevelSuccess, Message: "执行方案已准备完成", Detail: "等待你在对话中确认下一步。"})
 			s.events.CopyProjectEvents(projectID, result.State.ProjectID)
 			s.emitProjectEvent(projectID, orchestrator.ProgressEvent{
 				Level:     orchestrator.ProgressLevelSuccess,
@@ -1047,6 +1069,14 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "/execution-events":
 		afterID, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 		writeBridgeValue(w, s.events.List(projectID, afterID), nil)
+	case r.Method == http.MethodGet && suffix == "/activity-state":
+		state, err := s.service.GetProjectActivityState(r.Context(), projectID)
+		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodGet && suffix == "/activity-events":
+		events, err := s.service.ListProjectActivityEvents(r.Context(), projectID, r.URL.Query().Get("after"))
+		writeBridgeValue(w, events, err)
+	case r.Method == http.MethodGet && strings.HasPrefix(suffix, "/browser-frame/"):
+		s.serveProjectBrowserFrame(w, r, projectID, strings.TrimPrefix(suffix, "/browser-frame/"))
 	default:
 		http.NotFound(w, r)
 	}
@@ -1083,6 +1113,28 @@ func (s *DevHTTPServer) serveVerifiedDirectArtifact(w http.ResponseWriter, r *ht
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeFile(w, r, filePath)
+}
+
+func (s *DevHTTPServer) serveProjectBrowserFrame(w http.ResponseWriter, r *http.Request, projectID, frameRef string) {
+	frameRef = strings.TrimSpace(frameRef)
+	if frameRef == "" || filepath.Base(frameRef) != frameRef || (!strings.HasSuffix(strings.ToLower(frameRef), ".png") && !strings.HasSuffix(strings.ToLower(frameRef), ".jpg") && !strings.HasSuffix(strings.ToLower(frameRef), ".jpeg")) {
+		writeBridgeValue(w, nil, errors.New("browser frame reference is invalid"))
+		return
+	}
+	state, err := s.service.GetProjectActivityState(r.Context(), projectID)
+	if err != nil || state.Current == nil || state.Current.Browser == nil || state.Current.Browser.FrameRef != frameRef || !state.Current.Browser.Redacted {
+		writeBridgeValue(w, nil, errors.New("redacted browser frame was not found"))
+		return
+	}
+	path := filepath.Join(s.service.runtime.ArtifactRoot, "project_activity_frames", safePathSegment(projectID), frameRef)
+	info, statErr := os.Stat(path)
+	if statErr != nil || !info.Mode().IsRegular() {
+		writeBridgeValue(w, nil, errors.New("redacted browser frame was not found"))
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeFile(w, r, path)
 }
 
 // readDevExecutionCredential resolves an opaque local credential reference for
@@ -1335,7 +1387,7 @@ func withDevCORS(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID, X-Cascade-Org-ID")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

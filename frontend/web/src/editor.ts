@@ -280,7 +280,7 @@ export type EditorClient = {
 type BridgeEnvelope<T> = { ok: boolean; data?: T; error?: string };
 
 export function createEditorClient(): EditorClient {
-  if (import.meta.env.VITE_CASCADE_BRIDGE !== "local") {
+  if (import.meta.env.MODE === "test" || import.meta.env.VITE_CASCADE_BRIDGE !== "local") {
     return createMockEditorClient();
   }
   const baseURL = String(import.meta.env.VITE_CASCADE_BRIDGE_URL || "").replace(/\/$/, "");

@@ -29,7 +29,11 @@ type Service struct {
 	flow                  *orchestrator.CascadeFlow
 	states                store.StateStore
 	assistantStore        store.AssistantStore
+	accounts              *accountService
+	activity              *projectActivityStore
 	assistantMu           sync.Mutex
+	assistantRunsMu       sync.Mutex
+	assistantRuns         map[string]context.CancelFunc
 	assistantProgressMu   sync.RWMutex
 	assistantProgressSink func(string, orchestrator.ProgressEvent)
 	controlPlaneMu        sync.RWMutex
@@ -148,6 +152,9 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		flow:                flow,
 		states:              states,
 		assistantStore:      assistantStoreForRuntime(runtime),
+		accounts:            newAccountService(runtime, accountStoreForRuntime(runtime)),
+		activity:            newProjectActivityStore(filepath.Join(runtime.DataRoot, "project_activity")),
+		assistantRuns:       map[string]context.CancelFunc{},
 		layout:              storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
 		exchange:            newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
 		runningTasks:        map[string]context.CancelFunc{},
@@ -208,6 +215,13 @@ func assistantStoreForRuntime(runtime config.AppRuntimeConfig) store.AssistantSt
 		return store.NewMemoryAssistantStore()
 	}
 	return store.NewFileAssistantStore(filepath.Join(runtime.DataRoot, "assistant_sessions"))
+}
+
+func accountStoreForRuntime(runtime config.AppRuntimeConfig) store.AccountStore {
+	if strings.TrimSpace(runtime.DataRoot) == "" {
+		return store.NewMemoryAccountStore()
+	}
+	return store.NewFileAccountStore(filepath.Join(runtime.DataRoot, "account", "account.json"))
 }
 
 // SetBrowserAgentOutcomeVerifier installs the Server-side Validation Agent
@@ -349,6 +363,11 @@ type ProjectSummary struct {
 	GeneratedAssetCount int       `json:"generated_asset_count"`
 	CreatedAt           time.Time `json:"created_at,omitempty"`
 	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+	AssistantSessionID  string    `json:"assistant_session_id,omitempty"`
+	LastMessagePreview  string    `json:"last_message_preview,omitempty"`
+	LastActivityAt      time.Time `json:"last_activity_at,omitempty"`
+	ActiveTurnStatus    string    `json:"active_turn_status,omitempty"`
+	NextAction          string    `json:"next_action,omitempty"`
 }
 
 func (s *Service) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
@@ -361,10 +380,45 @@ func (s *Service) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		if state == nil || state.ProjectID == "" || state.ArchivedAt != nil {
 			continue
 		}
-		result = append(result, projectSummaryFromState(state))
+		summary := projectSummaryFromState(state)
+		sessionID := summary.AssistantSessionID
+		if sessionID == "" {
+			sessionID = assistantID(model.AssistantSurfaceProjects, "project_"+state.ProjectID)
+		}
+		summary.AssistantSessionID = sessionID
+		if session, loadErr := s.assistantStore.Load(ctx, sessionID); loadErr == nil && session != nil {
+			for index := len(session.Messages) - 1; index >= 0; index-- {
+				message := session.Messages[index]
+				if strings.TrimSpace(message.Text) == "" || message.ID == "welcome" {
+					continue
+				}
+				summary.LastMessagePreview = truncateProjectPreview(strings.TrimSpace(message.Text), 160)
+				summary.LastActivityAt = message.CreatedAt
+				break
+			}
+			if session.ActiveTurn != nil {
+				summary.ActiveTurnStatus = session.ActiveTurn.Status
+			}
+			summary.NextAction = session.NextAction.Title
+		}
+		if summary.LastActivityAt.IsZero() {
+			summary.LastActivityAt = summary.UpdatedAt
+		}
+		result = append(result, summary)
 	}
-	sort.SliceStable(result, func(i, j int) bool { return result[i].UpdatedAt.After(result[j].UpdatedAt) })
+	sort.SliceStable(result, func(i, j int) bool { return result[i].LastActivityAt.After(result[j].LastActivityAt) })
 	return result, nil
+}
+
+func truncateProjectPreview(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit <= 1 {
+		return "…"
+	}
+	return strings.TrimSpace(string(runes[:limit-1])) + "…"
 }
 
 func (s *Service) ArchiveProject(ctx context.Context, projectID string) error {
@@ -384,6 +438,7 @@ func projectSummaryFromState(state *orchestrator.CascadeState) ProjectSummary {
 		summary.ProductURL = state.ProjectContext.ProductURL
 		summary.CreatedAt = state.ProjectContext.CreatedAt
 		summary.UpdatedAt = state.ProjectContext.UpdatedAt
+		summary.AssistantSessionID = state.ProjectContext.AssistantSessionID
 	}
 	if summary.UpdatedAt.IsZero() {
 		summary.UpdatedAt = summary.CreatedAt
