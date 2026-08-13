@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, urlPolicyError, validatedStageSecretValues } from "../src/browser-agent-runtime.js";
+import { captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, urlPolicyError, validatedStageSecretValues, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -254,6 +254,140 @@ describe("browser agent App-evidence-bound selector semantics", () => {
       destructive: false,
     };
     await expect(resolveUniqueVisibleEvidenceBoundTarget(locator, "interaction_css", contract, candidate, "fill")).resolves.toBeDefined();
+  });
+
+  it("records every evidence-bound resolution outcome without selector or page text", async () => {
+    const locator = (count: number, role: string, name: string, visible = true) => ({
+      count: async () => count,
+      first: () => ({
+        isVisible: async () => visible,
+        evaluate: async () => ({ role, name }),
+      }),
+    });
+    const contract = {
+      semantic_id: "project_idea_input",
+      allowed_roles: ["textbox"],
+      allowed_names: ["Project idea input"],
+      forbidden_names: ["Delete"],
+      destructive: false,
+    };
+    const cases = [
+      { target: locator(0, "textbox", "Project idea input"), outcome: "no_candidates" },
+      { target: locator(2, "textbox", "Project idea input"), outcome: "ambiguous" },
+      { target: locator(1, "textbox", "Project idea input", false), outcome: "not_visible" },
+      { target: locator(1, "button", "Project idea input"), outcome: "role_mismatch" },
+      { target: locator(1, "textbox", "Different private page text"), outcome: "name_mismatch" },
+      { target: locator(1, "textbox", "Project idea input"), outcome: "resolved" },
+    ] as const;
+
+    for (const entry of cases) {
+      const attempts: BrowserTargetResolutionAttempt[] = [];
+      await resolveUniqueVisibleEvidenceBoundTarget(entry.target, "approved_evidence_css", contract, candidate, "click", undefined, attempts);
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]).toMatchObject({
+        strategy: "approved_evidence_css",
+        evidence_bound: true,
+        outcome: entry.outcome,
+      });
+      const audit = JSON.stringify(attempts);
+      expect(audit).not.toContain(candidate.value);
+      expect(audit).not.toContain("Project idea input");
+      expect(audit).not.toContain("Different private page text");
+    }
+
+    const forbiddenAttempts: BrowserTargetResolutionAttempt[] = [];
+    await expect(resolveUniqueVisibleEvidenceBoundTarget(
+      locator(1, "textbox", "Delete project"),
+      "approved_evidence_css",
+      contract,
+      candidate,
+      "click",
+      undefined,
+      forbiddenAttempts,
+    )).rejects.toThrow("browser_agent_forbidden_target_name");
+    expect(forbiddenAttempts).toEqual([expect.objectContaining({ outcome: "forbidden_name", evidence_bound: true })]);
+    expect(JSON.stringify(forbiddenAttempts)).not.toContain("Delete project");
+  });
+
+  it("audits role/name, testid, and exact App CSS resolution paths in order", async () => {
+    const absent = {
+      count: async () => 0,
+      first: () => ({ isVisible: async () => false }),
+    };
+    const live = (role: string, name: string) => ({
+      count: async () => 1,
+      first: () => ({ isVisible: async () => true, evaluate: async () => ({ role, name }) }),
+    });
+    const targetByTestID = live("button", "New Project");
+    const page = {
+      getByRole: () => absent,
+      getByTestId: (value: string) => value === "button-new-project" ? targetByTestID : absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => absent,
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_new_project",
+      order: 1,
+      node_id: "new_project",
+      target_contract: {
+        semantic_id: "new_project",
+        allowed_roles: ["button"],
+        allowed_names: ["New Project"],
+        destructive: false,
+      },
+      components: [{ component_ref: "new-project", test_id: "button-new-project" }],
+      interactions: [{ kind: "click", target: { selector: "[data-testid='button-new-project']" }, non_destructive: true }],
+    };
+
+    const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
+    expect(resolved.strategy).toBe("component_testid");
+    expect(attempts.map((attempt) => [attempt.strategy, attempt.outcome])).toEqual([
+      ["role:button+approved_name", "no_candidates"],
+      ["component_testid", "resolved"],
+    ]);
+    expect(JSON.stringify(attempts)).not.toContain("button-new-project");
+    expect(JSON.stringify(attempts)).not.toContain("New Project");
+  });
+
+  it("fails closed on an ambiguous exact App CSS target and records the bounded attempt", async () => {
+    const ambiguous = {
+      count: async () => 2,
+      first: () => ({ isVisible: async () => true, evaluate: async () => ({ role: "button", name: "Build" }) }),
+    };
+    const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const page = {
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: (selector: string) => selector === "[data-testid='build']" ? ambiguous : absent,
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_build",
+      order: 1,
+      node_id: "build",
+      target_contract: {
+        semantic_id: "build",
+        allowed_roles: ["button"],
+        allowed_names: ["Build"],
+        destructive: false,
+        evidence_refs: [{ id: "evidence-build" }],
+      },
+      evidence_bound_selector_alternatives: [{ kind: "css", value: "[data-testid='build']" }],
+      interactions: [{ kind: "click", target: { selector: "[data-testid='build']" }, non_destructive: true }],
+    };
+
+    await expect(resolveTarget(page, stage, stage.interactions[0], false, attempts)).rejects.toThrow("browser_agent_target_not_resolved");
+    expect(attempts).toContainEqual(expect.objectContaining({
+      strategy: "interaction_css",
+      candidate_count: 2,
+      evidence_bound: true,
+      outcome: "ambiguous",
+    }));
+    expect(JSON.stringify(attempts)).not.toContain("[data-testid='build']");
   });
 });
 

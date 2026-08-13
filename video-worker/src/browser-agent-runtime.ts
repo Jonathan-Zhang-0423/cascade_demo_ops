@@ -789,7 +789,7 @@ export function recoveredScreenshotMetadata(
   };
 }
 
-async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, allowSelectorAlternatives: boolean, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget> {
+export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, allowSelectorAlternatives: boolean, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget> {
 	const candidates: Array<{ strategy: string; locator: any; evidenceBoundAlternative?: { kind: string; value: string } }> = [];
 	const contract = stage.target_contract;
 	const preferred = stage.preferred_selector_alternative;

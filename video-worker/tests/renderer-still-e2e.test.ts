@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { render, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
+import { defaultEditPlan, render, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
 
 const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
 const ffmpegAvailable = spawnSync(ffmpegPath, ["-version"], { stdio: "ignore", windowsHide: true }).status === 0;
@@ -191,6 +191,82 @@ function catalogForDefaultTargetStill(recordingPath: string, afterPath: string, 
 }
 
 describe("static screenshot compositor e2e", () => {
+  it("uses distinct approved stage screenshots to satisfy a 60 second delivery intent", () => {
+    const evidenceCatalog = catalogForDefaultTargetStill("recording.mp4", "after.png", "target.png");
+    evidenceCatalog.timeline.recording_artifact_id = "recording";
+    evidenceCatalog.artifacts[0]!.sensitive = true;
+    evidenceCatalog.steps = [];
+    evidenceCatalog.artifacts = [evidenceCatalog.artifacts[0]!];
+
+    for (let stage = 1; stage <= 6; stage++) {
+      const stepID = `stage_${stage}`;
+      const afterID = `${stepID}_after`;
+      const targetID = `${stepID}_target`;
+      evidenceCatalog.artifacts.push({
+        id: afterID,
+        kind: "screenshot",
+        uri: pathToFileURL(`${afterID}.png`).href,
+        local_path: `${afterID}.png`,
+        mime_type: "image/png",
+        source_step_id: stepID,
+        include_in_demo: true,
+        metadata: { capture_phase: "after" },
+      }, {
+        id: targetID,
+        kind: "target_geometry_screenshot",
+        uri: pathToFileURL(`${targetID}.png`).href,
+        local_path: `${targetID}.png`,
+        mime_type: "image/png",
+        source_step_id: stepID,
+        include_in_demo: false,
+        metadata: {
+          capture_phase: "target",
+          target_geometry: {
+            schema_version: "demoops.browser_target_geometry.v1",
+            target_semantic_id: `target_${stage}`,
+            resolution_strategy: "approved_evidence_css",
+            selector_digest_sha256: String(stage).repeat(64),
+            captured_at: "2026-08-13T00:00:00Z",
+            recording_offset_ms: stage * 1000,
+            viewport: { width: 2560, height: 1440, dpr: 1 },
+            element_box_css_px: { x: 100, y: 100, width: 200, height: 80 },
+            element_box_normalized: { x: 0.04, y: 0.07, width: 0.08, height: 0.06 },
+            screenshot_artifact_id: targetID,
+            confidence: 1,
+          },
+        },
+      });
+      evidenceCatalog.steps.push({
+        step_id: stepID,
+        order: stage - 1,
+        action: "click",
+        status: "passed",
+        required: true,
+        start_ms: (stage - 1) * 1000,
+        end_ms: stage * 1000,
+        duration_ms: 1000,
+        artifacts: [afterID, targetID],
+        expected_outcome: `Complete stage ${stage}`,
+      });
+    }
+
+    const editPlan = defaultEditPlan(evidenceCatalog, 60);
+    expect(editPlan.target_duration_ms).toBe(60_000);
+    expect(editPlan.shots).toHaveLength(12);
+    expect(new Set(editPlan.shots.map((shot) => shot.source_artifact_id)).size).toBe(12);
+    expect(editPlan.shots.reduce((total, shot) => total + (shot.output_duration_ms || 0), 0)).toBe(60_000);
+    expect(editPlan.shots.every((shot) => (shot.output_duration_ms || 0) <= 15_000)).toBe(true);
+    for (const shot of editPlan.shots) {
+      const targetOverlays = (shot.overlays || []).filter((overlay) => overlay.type === "highlight_box" || overlay.type === "cursor_highlight");
+      if (shot.source_artifact_id.endsWith("_target")) {
+        expect(targetOverlays).not.toHaveLength(0);
+        expect(targetOverlays.every((overlay) => overlay.target_evidence_artifact_id === shot.source_artifact_id)).toBe(true);
+      } else {
+        expect(targetOverlays).toHaveLength(0);
+      }
+    }
+  });
+
   renderWithFFmpeg("builds the default target callout from the exact same verified screenshot", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cascade-default-target-still-"));
     try {

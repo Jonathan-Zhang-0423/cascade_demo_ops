@@ -87,6 +87,14 @@
 - 模型审计明确为 `invoked=false`、`suggestion_origin=deterministic_server_director`、`provider_output_adopted=false`。本轮未调用 Seedance，不能把该视频描述为 Seedance 编排结果。
 - 该回归仍为 `dev_test_only=true`、`formal_exchange=false`，只证明 Server 真实页面执行、证据驱动编排和 2K MP4 交付，不代表生产 Direct Exchange 已验收。
 
+### 2026-08-13 离线安全静态编辑回归
+
+- 修复静态截图编排只使用每阶段单张截图、导致 60 秒交付意图被压缩为约 30 秒的问题：现在按阶段顺序选择不同的已批准、非敏感截图，并均匀分配目标时长；不重复使用同一截图，不用重复帧伪造业务过程。
+- 修复同一阶段不同截图之间的目标几何继承：只有截图自身携带匹配 `target_geometry` 时才绘制圈选；`after`/`revalidate` 截图不会继承 `target` 截图的圈选。
+- 新增 `video-worker/scripts/accept-safe-still-editor-local.mjs`，可对已有 `asset_timeline_catalog.json` 做离线 Server 编辑验收，不启动 Chromium、不调用 Browser Agent、不调用模型、不解除 raw recording 敏感标记。
+- 使用真实页面回归 catalog 离线生成 9 个唯一安全截图镜头，编辑计划 60 秒，实际 MP4 60.208667 秒；FFprobe：2560x1440、H.264、yuv420p、30fps、AAC。模型审计为 `invoked=false`。
+- 该结果证明 Server 静态素材编辑与质量门禁，不代表重新录制的正式 App→Server 端到端验收，也不代表 Seedance/TOS/TTS 已参与。
+
 ### 暂缓项
 
 - Doubao TTS 缺少 `VOLC_TTS_APP_ID`、`VOLC_TTS_ACCESS_KEY`、`VOLC_TTS_RESOURCE_ID`、`VOLC_TTS_SPEAKER`，暂缓真实旁白验收；无旁白交付不受影响。
