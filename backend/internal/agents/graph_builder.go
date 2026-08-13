@@ -527,6 +527,14 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	}
 	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup || stage.Kind == model.BusinessStageKindFinalObserve
 	validations := []model.ValidationSpec{businessStageValidation(stage, actionType, target, required)}
+	if stage.Kind == model.BusinessStageKindSessionSetup {
+		validations = append(validations, model.ValidationSpec{
+			ID: "validate_authenticated_workspace_" + stage.ID, Kind: "element_visible",
+			Target:    model.ActionTarget{Role: "main", Label: firstNonEmpty(stage.Action.SuccessState, "已认证工作区")},
+			Assertion: "登录后必须出现已认证工作区标识", Expected: true, Severity: "blocking", Required: true,
+			EvidenceRefs: stage.EvidenceRefs,
+		})
+	}
 	metadata := map[string]any{
 		"business_stage_id":           stage.ID,
 		"business_stage_kind":         string(stage.Kind),
@@ -639,7 +647,7 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 	}
 	best := stage.Targets[0]
 	for _, candidate := range stage.Targets {
-		if candidate.SelectorScore > best.SelectorScore {
+		if businessTargetRank(candidate) > businessTargetRank(best) {
 			best = candidate
 		}
 	}
@@ -661,6 +669,31 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 	target.SelectorAlternatives = append(target.SelectorAlternatives, formalBusinessSelectorAlternatives(best.Alternatives)...)
 	target.SelectorAlternatives = uniqueSelectorCandidates(target.SelectorAlternatives)
 	return target
+}
+
+func businessTargetRank(candidate model.BusinessTargetCandidate) int {
+	rank := candidate.SelectorScore
+	if candidate.IsVerified {
+		rank += 100
+	}
+	for _, alternative := range candidate.Alternatives {
+		if alternative.SourceKind == "page_scan" && model.SelectorCandidateHasFormalProvenance(alternative) && selectorCandidateMatchesValue(alternative, candidate.Selector) {
+			rank += 1000
+			break
+		}
+	}
+	return rank
+}
+
+func selectorCandidateMatchesValue(candidate model.SelectorCandidate, selector string) bool {
+	if strings.EqualFold(strings.TrimSpace(candidate.Value), strings.TrimSpace(selector)) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(candidate.Kind), "testid") {
+		return false
+	}
+	compact := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(selector, "\"", "'"), " ", ""))
+	return strings.Contains(compact, "data-testid='"+strings.ToLower(strings.TrimSpace(candidate.Value))+"'")
 }
 
 func selectorForBusinessTarget(candidate model.BusinessTargetCandidate) string {
@@ -695,10 +728,7 @@ func formalBusinessSelectorAlternatives(values []model.SelectorCandidate) []mode
 func businessStageValidation(stage model.BusinessStage, action model.GraphActionType, target model.ActionTarget, required bool) model.ValidationSpec {
 	kind := "element_visible"
 	expected := any(true)
-	if action == model.GraphActionNavigate {
-		kind = "url_matches"
-		expected = firstNonEmpty(target.URL, stage.EntryRoute)
-	} else if stage.Kind == model.BusinessStageKindSessionSetup {
+	if stage.Kind == model.BusinessStageKindSessionSetup {
 		// Login controls are action targets. A visible email field (especially a
 		// homepage waitlist field) cannot prove that authentication succeeded.
 		// Bind the required validation to the approved post-login route/state.
@@ -711,6 +741,9 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 			target = model.ActionTarget{Role: "main", Text: firstNonEmpty(stage.Action.SuccessState, stage.Objective, "工作台")}
 			expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, "工作台")
 		}
+	} else if action == model.GraphActionNavigate {
+		kind = "url_matches"
+		expected = firstNonEmpty(target.URL, stage.EntryRoute)
 	} else if stage.Kind == model.BusinessStageKindBusinessAction && strings.TrimPrefix(stage.ID, "business_stage_") == "new_project_entry" {
 		// The clicked button is an action target, not proof that the creation
 		// flow opened.  Prefer an App-verified dialog/input result target and

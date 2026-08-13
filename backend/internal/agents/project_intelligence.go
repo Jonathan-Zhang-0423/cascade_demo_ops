@@ -1127,7 +1127,7 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 				SelectorScore:  selectorQualityScore(selector),
 				WaitConditions: waitHintsForSurface(page.URL, []model.SelectorCandidate{{Kind: "css", Value: selector}}, page.States),
 				EvidenceRefs:   evidenceRefs,
-				Alternatives:   selectorProvenanceCandidates(selector, kind, label, "page_scan", pageDigest, observedAt, evidenceRefs, action.Confidence),
+				Alternatives:   selectorProvenanceCandidates(selector, kind, label, "page_scan", pageDigest, actionURL, observedAt, evidenceRefs, action.Confidence),
 			})
 		}
 		for _, selector := range page.StableSelectors {
@@ -1153,7 +1153,7 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 				SelectorScore:  selectorQualityScore(selector.Value),
 				WaitConditions: waitHintsForSurface(page.URL, []model.SelectorCandidate{selector}, page.States),
 				EvidenceRefs:   evidenceRefs,
-				Alternatives:   selectorProvenanceCandidates(selector.Value, kind, label, "page_scan", pageDigest, observedAt, evidenceRefs, selector.Confidence),
+				Alternatives:   selectorProvenanceCandidates(selector.Value, kind, label, "page_scan", pageDigest, page.URL, observedAt, evidenceRefs, selector.Confidence),
 			})
 		}
 	}
@@ -1184,7 +1184,7 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 					IsChrome:      actionLooksLikeChromeControl(component.Name+" "+strings.Join(component.ActionLabels, " "), selector),
 					SelectorScore: selectorQualityScore(selector),
 					EvidenceRefs:  component.EvidenceRefs,
-					Alternatives:  selectorProvenanceCandidates(selector, kind, label, "source_scan", snapshot.SourceDigestSHA256, observedAt, component.EvidenceRefs, component.Confidence),
+					Alternatives:  selectorProvenanceCandidates(selector, kind, label, "source_scan", snapshot.SourceDigestSHA256, "", observedAt, component.EvidenceRefs, component.Confidence),
 				})
 			}
 		}
@@ -1212,14 +1212,14 @@ func interactionProbesFromState(state *ProjectUnderstandingState) []model.Intera
 				IsChrome:      actionLooksLikeChromeControl(label, selector.Value),
 				SelectorScore: selectorQualityScore(selector.Value),
 				EvidenceRefs:  uniqueEvidenceRefs(append(selector.EvidenceRefs, component.EvidenceRefs...)),
-				Alternatives:  selectorProvenanceCandidates(selector.Value, kind, label, "source_scan", snapshot.SourceDigestSHA256, observedAt, uniqueEvidenceRefs(append(selector.EvidenceRefs, component.EvidenceRefs...)), selector.Confidence),
+				Alternatives:  selectorProvenanceCandidates(selector.Value, kind, label, "source_scan", snapshot.SourceDigestSHA256, "", observedAt, uniqueEvidenceRefs(append(selector.EvidenceRefs, component.EvidenceRefs...)), selector.Confidence),
 			})
 		}
 	}
 	return dedupeInteractionProbes(probes)
 }
 
-func selectorProvenanceCandidates(selector, actionKind, label, sourceKind, sourceDigest string, observedAt time.Time, evidenceRefs []model.EvidenceRef, confidence float64) []model.SelectorCandidate {
+func selectorProvenanceCandidates(selector, actionKind, label, sourceKind, sourceDigest, observedURL string, observedAt time.Time, evidenceRefs []model.EvidenceRef, confidence float64) []model.SelectorCandidate {
 	evidenceID := ""
 	for _, ref := range evidenceRefs {
 		if strings.TrimSpace(ref.ID) != "" {
@@ -1238,8 +1238,13 @@ func selectorProvenanceCandidates(selector, actionKind, label, sourceKind, sourc
 	candidate := model.SelectorCandidate{
 		Kind: kind, Value: value, Confidence: confidence, StabilityScore: float64(selectorQualityScore(selector)) / 100,
 		Source: sourceKind, EvidenceID: evidenceID, SourceKind: sourceKind, SourceDigest: sourceDigest,
-		ObservedRole: observedRoleForAction(actionKind, selector), ObservedAccessibleName: name, ObservedAt: observedAt,
+		ObservedRole: observedRoleForAction(actionKind, selector), ObservedAccessibleName: name, ObservedAt: &observedAt,
 		LastValidatedAt: observedAt, EvidenceRefs: evidenceRefs,
+	}
+	if sourceKind == "page_scan" {
+		candidate.ObservedURL = observedURL
+		candidate.ObservedRouteTemplate = pathFromURL(observedURL)
+		candidate.EvidenceDigestSHA256 = sourceDigest
 	}
 	if !model.SelectorCandidateHasFormalProvenance(candidate) {
 		return nil

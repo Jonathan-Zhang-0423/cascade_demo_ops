@@ -567,15 +567,21 @@ func TestDevHTTPBridgeRejectsForeignOriginBeforeCredentialMutation(t *testing.T)
 }
 
 func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *testing.T) {
-	server := newTestDevHTTPServer(t)
-	repoPath := createDevBridgeFixtureRepo(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestDevHTTPServerWithRepository(t, repoRoot)
+	product := newAuthenticatedWorkspaceTestServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
 		Mode:               model.AppModeDesktop,
-		ProductURL:         "https://cascadeai.cn",
-		LocalRepoPath:      repoPath,
+		ProductURL:         product.URL,
 		ProductDescription: "演示登录（10s，账号demo.user@example.test密码FixtureOnly987），然后新建项目。",
 		TargetAudience:     "运营",
-		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://cascadeai.cn")},
+		AllowedDomains:     []string{"127.0.0.1"},
+		DemoUsername:       "demo.user@example.test",
+		DemoPassword:       "FixtureOnly987",
+		DemoCredentialRef:  "credential://demo/dev-http-redaction",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -1621,8 +1627,19 @@ func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
 }
 
 func newTestDevHTTPServerWithEnvironment(t *testing.T, environment string) *DevHTTPServer {
+	return newTestDevHTTPServerWithEnvironmentAndRepository(t, environment, "")
+}
+
+func newTestDevHTTPServerWithRepository(t *testing.T, repoRoot string) *DevHTTPServer {
+	return newTestDevHTTPServerWithEnvironmentAndRepository(t, "test", repoRoot)
+}
+
+func newTestDevHTTPServerWithEnvironmentAndRepository(t *testing.T, environment, repoRoot string) *DevHTTPServer {
 	t.Helper()
 	root := t.TempDir()
+	if strings.TrimSpace(repoRoot) == "" {
+		repoRoot = root
+	}
 	service, err := NewService(config.AppRuntimeConfig{
 		Profile:         config.ProfileDev,
 		Environment:     environment,
@@ -1634,7 +1651,7 @@ func newTestDevHTTPServerWithEnvironment(t *testing.T, environment string) *DevH
 		CacheRoot:       filepath.Join(root, "cache"),
 		LogRoot:         filepath.Join(root, "logs"),
 		ResourceRoot:    root,
-		DevRepoRoot:     root,
+		DevRepoRoot:     repoRoot,
 		SidecarPaths:    map[string]string{},
 		DatabaseURL:     "postgres://user:secret@example/db",
 		LLMMode:         config.LLMModeDeterministic,

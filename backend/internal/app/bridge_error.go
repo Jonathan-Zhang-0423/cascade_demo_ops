@@ -22,6 +22,10 @@ type packagePreflightError struct {
 	Findings []model.AgentFinding
 }
 
+type directReunderstandingError struct{ code, message string }
+
+func (e *directReunderstandingError) Error() string { return e.code + ": " + e.message }
+
 func (e *packagePreflightError) Error() string {
 	if e == nil {
 		return ""
@@ -79,6 +83,10 @@ func bridgeErrorCode(err error) string {
 	var previewStaleErr *packagePreviewStaleError
 	if errors.As(err, &previewStaleErr) {
 		return "package_preview_stale"
+	}
+	var repairErr *directReunderstandingError
+	if errors.As(err, &repairErr) {
+		return repairErr.code
 	}
 	lower := strings.ToLower(err.Error())
 	switch {

@@ -293,6 +293,7 @@ func TestPersistDirectReunderstandingStatusInvalidatesApprovalAndRotatesPackageI
 	service.approvedBuilds[state.ProjectID+"|old-approval"] = approvedBuildCacheEntry{Build: original}
 	status := model.DirectJobStatus{
 		JobID: "job_old", PackageID: original.Package.PackageID, Status: "failed", Stage: "failed",
+		ResultPackageID:   "result_old",
 		BlockingErrorCode: "reunderstanding_required", NextAction: "regenerate_package_from_structured_issues", RequiresReapproval: true,
 		ReunderstandingIssues: []model.DirectReunderstandingIssue{{Code: "STAGE_VALIDATION_FAILURE_THRESHOLD", StageID: "stage_build", Severity: model.FindingSeverityBlocking, Required: true}},
 	}
@@ -329,7 +330,7 @@ func TestPersistDirectReunderstandingStatusInvalidatesApprovalAndRotatesPackageI
 	if repeated.ExecutionPackageGeneration != 1 {
 		t.Fatalf("idempotent status polling rotated package identity repeatedly: generation=%d", repeated.ExecutionPackageGeneration)
 	}
-	if err := service.persistDirectUpload(t.Context(), state.ProjectID, defaultDesktopOrgID,
+	if err := service.persistDirectUpload(t.Context(), state.ProjectID, regenerated,
 		model.DirectPortLease{LeaseID: "lease_new", DataPort: 24001, ExpiresAt: time.Now().UTC().Add(time.Hour)},
 		model.DirectPackageReceipt{PackageID: regenerated.Package.PackageID, JobID: "job_new", Status: "queued", Stage: "server_intake"}); err != nil {
 		t.Fatal(err)
@@ -342,26 +343,34 @@ func TestPersistDirectReunderstandingStatusInvalidatesApprovalAndRotatesPackageI
 	if newRun == nil || newRun.BlockingErrorCode != "" || newRun.RequiresReapproval || len(newRun.ReunderstandingIssues) != 0 || newRun.ResultPackageID != "" {
 		t.Fatalf("new package upload retained terminal state from the invalidated job: %+v", newRun)
 	}
+	if newRun.PackageDigestSHA256 != regenerated.PackageDigestSHA256 || newRun.GraphDigestSHA256 != regenerated.Package.Reproducibility.GraphHashSHA256 || newRun.BundleHashSHA256 == "" || newRun.PlanHashSHA256 == "" {
+		t.Fatalf("direct upload did not persist authoritative package lineage: %+v", newRun)
+	}
 }
 
 func TestApproveClientExecutionPackageRebindsConfidenceAfterCredentialGrantExpiry(t *testing.T) {
+	product := newAuthenticatedWorkspaceTestServer(t)
 	root := t.TempDir()
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
 	service, err := NewService(config.AppRuntimeConfig{
 		Profile: config.ProfileDev, Environment: "test", Mode: model.AppModeDesktop,
 		DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "app.db"),
 		DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"),
 		CacheRoot: filepath.Join(root, "cache"), LogRoot: filepath.Join(root, "logs"),
-		LLMMode: config.LLMModeDeterministic,
+		LLMMode: config.LLMModeDeterministic, DevRepoRoot: repoRoot,
 	}, store.NewMemoryStateStore())
 	if err != nil {
 		t.Fatal(err)
 	}
 	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{
 		ProjectID: "direct-credential-confidence", Mode: model.AppModeDesktop,
-		ProductURL: "https://cascadeai.cn/app", ProductDescription: "登录后进入新建项目，填写俄罗斯方块并启动 Agent 构建。",
+		ProductURL: product.URL + "/login", ProductDescription: "登录后进入新建项目，填写俄罗斯方块并启动 Agent 构建。",
 		TargetAudience: "普通用户", MustShow: []string{"登录", "新建俄罗斯方块", "启动 Agent 构建"},
-		AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: formalAppScreenshotInputs("https://cascadeai.cn"),
-		DemoUsername: "vault-user", DemoPassword: "vault-password", DemoCredentialRef: "credential://demo/direct-confidence",
+		AllowedDomains: []string{"127.0.0.1"},
+		DemoUsername:   "vault-user@example.test", DemoPassword: "vault-password", DemoCredentialRef: "credential://demo/direct-confidence",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -405,24 +414,27 @@ func TestApproveClientExecutionPackageRebindsConfidenceAfterCredentialGrantExpir
 }
 
 func TestBrowserAgentOutlineAllowsEvidenceBoundInteractionRoute(t *testing.T) {
+	product := newAuthenticatedWorkspaceTestServer(t)
 	root := t.TempDir()
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
 	service, err := NewService(config.AppRuntimeConfig{
 		Profile: config.ProfileDev, Environment: "test", Mode: model.AppModeDesktop,
 		DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "app.db"),
 		DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"),
-		LogRoot: filepath.Join(root, "logs"), LLMMode: config.LLMModeDeterministic,
+		LogRoot: filepath.Join(root, "logs"), LLMMode: config.LLMModeDeterministic, DevRepoRoot: repoRoot,
 	}, store.NewMemoryStateStore())
 	if err != nil {
 		t.Fatal(err)
 	}
-	screenshots := formalAppScreenshotInputs("https://cascadeai.cn")
-	screenshots[0].URL = "https://cascadeai.cn/"
 	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{
 		ProjectID: "direct-login-root-route", Mode: model.AppModeDesktop,
-		ProductURL: "https://cascadeai.cn", ProductDescription: "进入新建项目，填写俄罗斯方块并启动 Agent 构建。",
+		ProductURL: product.URL, ProductDescription: "进入新建项目，填写俄罗斯方块并启动 Agent 构建。",
 		TargetAudience: "普通用户", MustShow: []string{"新建俄罗斯方块", "启动 Agent 构建"},
-		AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: screenshots,
-		DemoUsername: "vault-user", DemoPassword: "vault-password", DemoCredentialRef: "credential://demo/direct-root-route",
+		AllowedDomains: []string{"127.0.0.1"},
+		DemoUsername:   "vault-user@example.test", DemoPassword: "vault-password", DemoCredentialRef: "credential://demo/direct-root-route",
 	})
 	if err != nil {
 		t.Fatal(err)

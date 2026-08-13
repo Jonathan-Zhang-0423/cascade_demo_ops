@@ -175,7 +175,7 @@ func TestBuildReplayManifestBindsStageEventsAndTraceArtifacts(t *testing.T) {
 	}
 	pkg := model.ClientExecutionPackage{PackageID: "pkg_build", ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
 		ScriptManifest:  model.ExecutableScriptManifest{Runtime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
-		Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bundle_build", PlanHashSHA256: "policy_build"},
+		Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bundle_build", PlanHashSHA256: "plan_build", BrowserAgentContractHashSHA256: "policy_build"},
 	}}
 	manifest, err := BuildReplayManifest(BuildReplayManifestInput{
 		Result: result, Package: pkg, RunID: "run_build", EventDir: t.TempDir(), CreatedAt: now,

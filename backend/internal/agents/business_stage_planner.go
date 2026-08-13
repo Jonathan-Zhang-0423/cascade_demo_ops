@@ -416,6 +416,16 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 	evidence := evidenceRefsForBusinessTargets(targets)
 	requirements := b.source.evidenceRequirementsForStage(spec, targets)
 	uncertainties := businessStageUncertainties(spec, requirements, evidence)
+	entryRoute := firstNonEmpty(spec.entryRoute, "/")
+	expectedRoute := firstNonEmpty(spec.expectedRoute, spec.entryRoute, "/")
+	if spec.kind == model.BusinessStageKindSessionSetup {
+		if observed := authenticationEntryRouteFromTargets(targets); observed != "" {
+			entryRoute = observed
+		}
+		if workspace := authenticatedWorkspaceRouteFromTargets(targets); workspace != "" {
+			expectedRoute = workspace
+		}
+	}
 	stage := model.BusinessStage{
 		ID:                       stageID,
 		Order:                    order,
@@ -424,8 +434,8 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		Objective:                spec.objective,
 		UserIntent:               b.intentText,
 		RouteState:               spec.routeState,
-		EntryRoute:               firstNonEmpty(spec.entryRoute, "/"),
-		ExpectedRouteAfterAction: firstNonEmpty(spec.expectedRoute, spec.entryRoute, "/"),
+		EntryRoute:               entryRoute,
+		ExpectedRouteAfterAction: expectedRoute,
 		DurationMS:               spec.durationMS,
 		Action: model.BusinessActionSemantics{
 			Type:           spec.actionType,
@@ -444,6 +454,29 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		Confidence:           businessStageConfidence(spec, targets, requirements),
 	}
 	b.stages = append(b.stages, stage)
+}
+
+func authenticationEntryRouteFromTargets(targets []model.BusinessTargetCandidate) string {
+	for _, target := range targets {
+		for _, candidate := range target.Alternatives {
+			if candidate.SourceKind != "page_scan" || !strings.EqualFold(strings.TrimSpace(candidate.ObservedPageRole), "authentication") || !strings.EqualFold(strings.TrimSpace(candidate.ObservedFormRole), "authentication") {
+				continue
+			}
+			if route := firstNonEmpty(candidate.ObservedURL, candidate.ObservedRouteTemplate); strings.TrimSpace(route) != "" {
+				return route
+			}
+		}
+	}
+	return ""
+}
+
+func authenticatedWorkspaceRouteFromTargets(targets []model.BusinessTargetCandidate) string {
+	for _, target := range targets {
+		if target.IsVerified && strings.TrimSpace(target.URL) != "" {
+			return target.URL
+		}
+	}
+	return ""
 }
 
 func businessStageIsApprovedNonDestructive(spec stageSpec) bool {

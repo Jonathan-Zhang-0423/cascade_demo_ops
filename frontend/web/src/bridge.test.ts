@@ -118,8 +118,8 @@ describe("desktop bridge contract", () => {
 				updated_at: new Date().toISOString(),
 			},
 		}, fallback);
-		expect(mapped.stage).toBe("package_approval");
-		expect(mapped.status).toBe("awaiting_approval");
+		expect(mapped.stage).toBe("script_repair");
+		expect(mapped.status).toBe("script_repair_required");
 		expect(mapped.packagePreview.packageDigest).toBe("");
 		expect(mapped.packagePreview.approvalSubjectDigest).toBe("");
 		expect(mapped.packagePreview.confidenceAssessmentHash).toBe("");
@@ -313,6 +313,69 @@ describe("desktop bridge contract", () => {
     expect(result.error).toContain("执行包预览已过期");
   });
 
+  it("submits only persisted Direct failure lineage and preserves package_preview_stale", async () => {
+    const workspace = createWorkspace("product_demo");
+    const failed = {
+      ...workspace,
+      stage: "script_repair" as const,
+      status: "script_repair_required" as const,
+      cloudRun: {
+        ...workspace.cloudRun,
+        packageID: "pkg_failed",
+        cloudJobID: "job_failed",
+        resultPackageID: "result_failed",
+        status: "failed" as const,
+        stage: "reunderstanding_required",
+        blockingErrorCode: "reunderstanding_required",
+        requiresReapproval: true,
+        packageDigestSHA256: "sha256:package-failed",
+        graphDigestSHA256: "sha256:graph-failed",
+        bundleHashSHA256: "sha256:bundle-failed",
+        planHashSHA256: "sha256:plan-failed",
+        diagnosticDigestSHA256: "sha256:diagnostic-failed",
+        reunderstandingIssues: [{ issueID: "issue_route", code: "selector_route_provenance_mismatch", required: true }],
+        resultPackage: {
+          result_id: "result_failed", source_package_id: "pkg_failed", cloud_job_id: "job_failed",
+          schema_version: "demoops.recording_result_package.v1", status: "failed",
+          verification_report: { reproducibility_match: true }, delivery: { result_package_ref: {}, ack_required: false },
+          created_at: new Date().toISOString(),
+        } as never,
+        repairRequest: {
+          id: "repair_failed", source_result_id: "result_failed", source_package_id: "pkg_failed", cloud_job_id: "job_failed",
+          failed_bundle_hash_sha256: "sha256:bundle-failed", failed_plan_hash_sha256: "sha256:plan-failed", approval_required: true,
+        },
+      },
+    };
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(`http://127.0.0.1:4317/v1/desktop/projects/${workspace.id}/browser-agent-direct/reunderstand`);
+      expect(init?.method).toBe("POST");
+      const body = JSON.parse(String(init?.body));
+      expect(body).toEqual({
+        schema_version: "demoops.direct_failure_reunderstanding.v1",
+        source_job_id: "job_failed", source_result_id: "result_failed", source_package_id: "pkg_failed", repair_request_id: "repair_failed",
+        base_package_digest_sha256: "sha256:package-failed", base_graph_digest_sha256: "sha256:graph-failed",
+        failed_bundle_hash_sha256: "sha256:bundle-failed", failed_plan_hash_sha256: "sha256:plan-failed",
+        diagnostic_digest_sha256: "sha256:diagnostic-failed", selected_issue_ids: ["issue_route"],
+        idempotency_key: `direct-reunderstand-${workspace.id}-result_failed`, user_confirmed: true,
+      });
+      expect(JSON.stringify(body)).not.toMatch(/selector|observed_url|password|credential/i);
+      return {
+        ok: false, status: 400, text: async () => JSON.stringify({
+          ok: false, error: "package preview changed",
+          error_info: { code: "package_preview_stale", message: "执行包预览已过期", correlation_id: "repair-stale", retryable: false },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").repairFailedScript(failed);
+
+    expect(result.ok).toBe(false);
+    expect(result.errorInfo?.code).toBe("package_preview_stale");
+    expect(result.data).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("submits manual configuration through the pending-proposal endpoint", async () => {
     const session = {
       id: "assistant_manual",
@@ -468,7 +531,7 @@ describe("desktop bridge contract", () => {
     expect(failure.data?.cloudRun.artifactSummary?.encrypted).toBeGreaterThan(0);
   });
 
-  it("generates repaired bundles with lineage and returns to approval", async () => {
+  it("does not upgrade an ordinary mock action failure into reunderstanding", async () => {
     const bridge = createMockBridgeClient();
     const workspace = createWorkspace("product_demo");
     const failure = await bridge.simulateCloudFailure(workspace);
@@ -478,12 +541,54 @@ describe("desktop bridge contract", () => {
 
     const repaired = await bridge.repairFailedScript(failure.data);
 
+    expect(repaired.ok).toBe(false);
+    expect(repaired.errorInfo?.code).toBe("reunderstanding_incomplete");
+    expect(repaired.data).toBeUndefined();
+  });
+
+  it("reproduces the reunderstanding gate and invalidates the old mock lifecycle", async () => {
+    const bridge = createMockBridgeClient();
+    const workspace = createWorkspace("product_demo");
+    const failure = await bridge.simulateCloudFailure(workspace);
+    if (!failure.data?.cloudRun.resultPackage || !failure.data.cloudRun.failureDiagnostic || !failure.data.cloudRun.repairRequest) {
+      throw new Error("expected traceable failure workspace");
+    }
+    const resultPackage = failure.data.cloudRun.resultPackage;
+    const repairRequest = failure.data.cloudRun.repairRequest;
+    const issueID = "issue_auth_context";
+    const failed = {
+      ...failure.data,
+      cloudRun: {
+        ...failure.data.cloudRun,
+        packageID: resultPackage.source_package_id,
+        cloudJobID: resultPackage.cloud_job_id,
+        resultPackageID: resultPackage.result_id,
+        blockingErrorCode: "reunderstanding_required",
+        requiresReapproval: true,
+        packageDigestSHA256: failure.data.packagePreview.packageDigest,
+        graphDigestSHA256: failure.data.packagePreview.graphDigest,
+        bundleHashSHA256: repairRequest.failed_bundle_hash_sha256 ?? "sha256:mock-bundle",
+        planHashSHA256: repairRequest.failed_plan_hash_sha256 ?? "sha256:mock-plan",
+        diagnosticDigestSHA256: "sha256:mock-diagnostic",
+        reunderstandingIssues: [{ issueID, code: "authentication_context_unverified", required: true }],
+      },
+    };
+
+    const repaired = await bridge.repairFailedScript(failed);
+
     expect(repaired.ok).toBe(true);
     expect(repaired.data?.stage).toBe("package_approval");
     expect(repaired.data?.status).toBe("awaiting_approval");
-    expect(repaired.data?.executableScriptBundle?.repair_lineage?.source_result_id).toBe(failure.data.cloudRun.repairRequest?.source_result_id);
+    expect(repaired.data?.executableScriptBundle?.repair_lineage?.source_result_id).toBe(repairRequest.source_result_id);
     expect(repaired.data?.executableScriptBundle?.script_manifest.runtime).toBe("browser-agent-outline-v1");
     expect(repaired.data?.scriptMarkdown).toContain("本次修复说明");
+    expect(repaired.data?.packagePreview).toMatchObject({ buildStatus: "draft", readiness: "review_required", humanApprovalRequired: true });
+    expect(repaired.data?.packagePreview.packageDigest).not.toBe(failed.packagePreview.packageDigest);
+    expect(repaired.data?.packagePreview.graphDigest).not.toBe(failed.packagePreview.graphDigest);
+    expect(repaired.data?.cloudRun).toMatchObject({ status: "not_uploaded", stage: "local_generated", requiresReapproval: true });
+    expect(repaired.data?.cloudRun.cloudJobID).toBeUndefined();
+    expect(repaired.data?.cloudRun.resultPackage).toBeUndefined();
+    expect(repaired.data?.cloudRun.approvalSubjectDigestSHA256).toBeTruthy();
   });
 
   it("keeps checksum ack separate from the mock human review", async () => {

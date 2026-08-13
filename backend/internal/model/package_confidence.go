@@ -349,13 +349,13 @@ func ComputeApprovalSubjectDigestsSHA256(pkg ClientExecutionPackage) (ApprovalSu
 	}, nil
 }
 
-func ComputePackageApprovalComponentDigests(pkg ClientExecutionPackage) (map[string]string, error) {
+func ComputePackageApprovalComponentDigests(pkg ClientExecutionPackage) (ApprovalSubjectDigestsSHA256, error) {
 	if pkg.ExecutableScriptBundle == nil {
-		return nil, fmt.Errorf("execution bundle is required for approval component digests")
+		return ApprovalSubjectDigestsSHA256{}, fmt.Errorf("execution bundle is required for approval component digests")
 	}
 	bundle := pkg.ExecutableScriptBundle
 	if bundle.PlanJSON == nil || bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil || bundle.BrowserAgentContract == nil || bundle.AgentPromptPolicy == nil {
-		return nil, fmt.Errorf("all formal approval components are required")
+		return ApprovalSubjectDigestsSHA256{}, fmt.Errorf("all formal approval components are required")
 	}
 	components := map[string]any{
 		"plan_json":              bundle.PlanJSON,
@@ -369,26 +369,28 @@ func ComputePackageApprovalComponentDigests(pkg ClientExecutionPackage) (map[str
 	for name, value := range components {
 		digest, err := DigestCanonicalJSON(value)
 		if err != nil {
-			return nil, err
+			return ApprovalSubjectDigestsSHA256{}, err
 		}
 		digests[name] = digest
 	}
-	return digests, nil
+	return ApprovalSubjectDigestsSHA256{
+		PlanJSON: digests["plan_json"], StageApprovalPlan: digests["stage_approval_plan"],
+		ScriptOutline: digests["script_outline"], BrowserAgentContract: digests["browser_agent_contract"],
+		AgentPromptPolicy: digests["agent_prompt_policy"], ApprovalMarkdown: digests["approval_markdown"],
+	}, nil
 }
 
 func ValidatePackageApprovalComponentDigests(pkg ClientExecutionPackage) error {
 	configured := pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256
-	if len(configured) == 0 {
+	if configured.Empty() {
 		return fmt.Errorf("human approval component digests are required")
 	}
 	actual, err := ComputePackageApprovalComponentDigests(pkg)
 	if err != nil {
 		return err
 	}
-	for name, digest := range actual {
-		if configured[name] != digest {
-			return fmt.Errorf("human approval component digest mismatch: %s", name)
-		}
+	if configured != actual {
+		return fmt.Errorf("human approval component digest mismatch")
 	}
 	return nil
 }

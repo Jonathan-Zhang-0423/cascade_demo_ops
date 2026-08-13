@@ -448,7 +448,7 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 			RouteState:                       stage.RouteState,
 			Objective:                        stage.Objective,
 			EntryRoute:                       stage.EntryRoute,
-			Route:                            stage.TargetRoute,
+			Route:                            stage.EntryRoute,
 			TargetRouteTemplate:              stage.TargetRouteTemplate,
 			ExpectedRouteAfterAction:         stage.ExpectedRouteAfterAction,
 			RuntimeRouteVerificationRequired: stage.RuntimeRouteVerificationRequired,
@@ -1036,6 +1036,13 @@ func routeContractForNode(node *model.GraphNode, action model.ScriptActionInstru
 			contract.ExpectedRouteAfterAction = expected
 		}
 	}
+	observedValues := []any{action.Target.Selector, action.Target.SelectorAlternatives, target.Selector, target.SelectorAlternatives}
+	if node != nil && node.ActionSpec != nil {
+		observedValues = append(observedValues, node.ActionSpec.Target.Selector, node.ActionSpec.Target.SelectorAlternatives)
+	}
+	if observedRoute := observedPageScanRoute(observedValues...); observedRoute != "" {
+		contract.EntryRoute = observedRoute
+	}
 	if contract.TargetURL == "" && node != nil {
 		contract.TargetURL = urlIfHTTP(node.PageRef)
 	}
@@ -1065,6 +1072,9 @@ func routeContractForNode(node *model.GraphNode, action model.ScriptActionInstru
 	}
 	contract.TargetRoute = route
 	contract.TargetRouteTemplate = routeTemplateForStage(route, semanticText, intelligence)
+	if routeTemplateDynamic(contract.TargetRouteTemplate) && routePathFromCandidate(contract.TargetURL) == routePathFromCandidate(contract.EntryRoute) {
+		contract.TargetURL = ""
+	}
 	if contract.ExpectedRouteAfterAction == "" {
 		contract.ExpectedRouteAfterAction = expectedRouteAfterActionForStage(semanticText, contract.EntryRoute, contract.TargetRouteTemplate, intelligence)
 	}
@@ -1089,6 +1099,45 @@ func routeContractForNode(node *model.GraphNode, action model.ScriptActionInstru
 		contract.TargetRouteTemplate = contract.TargetRoute
 	}
 	return contract
+}
+
+func observedPageScanRoute(primaryValues ...any) string {
+	primaries := map[string]bool{}
+	candidates := []model.SelectorCandidate{}
+	for _, value := range primaryValues {
+		switch typed := value.(type) {
+		case string:
+			if normalized := strings.ToLower(strings.TrimSpace(typed)); normalized != "" {
+				primaries[normalized] = true
+			}
+		case []model.SelectorCandidate:
+			candidates = append(candidates, typed...)
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate.SourceKind != "page_scan" || !selectorCandidateMatchesPrimaryValue(candidate, primaries) {
+			continue
+		}
+		if route := normalizeRouteTemplate(firstNonEmpty(candidate.ObservedRouteTemplate, routePathFromCandidate(candidate.ObservedURL))); route != "" {
+			return route
+		}
+	}
+	return ""
+}
+
+func selectorCandidateMatchesPrimaryValue(candidate model.SelectorCandidate, primaries map[string]bool) bool {
+	value := strings.ToLower(strings.TrimSpace(candidate.Value))
+	if primaries[value] {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(candidate.Kind), "testid") {
+		for primary := range primaries {
+			if strings.Contains(strings.ReplaceAll(strings.ReplaceAll(primary, "\"", "'"), " ", ""), "data-testid='"+value+"'") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func routeSemanticText(node *model.GraphNode, action model.ScriptActionInstruction, target model.ScriptPageTarget) string {
@@ -1461,9 +1510,14 @@ func normalizeRouteTemplate(route string) string {
 	if route == "" {
 		return "/"
 	}
-	route = strings.ReplaceAll(route, "{id}", ":id")
-	route = strings.ReplaceAll(route, "[id]", ":id")
-	return route
+	route = strings.ReplaceAll(route, "[id]", "{id}")
+	segments := strings.Split(route, "/")
+	for index, segment := range segments {
+		if strings.HasPrefix(segment, ":") && len(segment) > 1 && !strings.ContainsAny(segment[1:], ":{}[]*") {
+			segments[index] = "{" + segment[1:] + "}"
+		}
+	}
+	return strings.Join(segments, "/")
 }
 
 func routeCandidateAllowed(route string) bool {
@@ -1524,7 +1578,12 @@ func routeTemplateForStage(route string, semanticText string, intelligence *mode
 }
 
 func routeTemplateDynamic(route string) bool {
-	return strings.Contains(route, ":") || strings.Contains(route, "*")
+	for _, segment := range strings.Split(strings.Trim(route, "/"), "/") {
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") && len(segment) > 2 {
+			return true
+		}
+	}
+	return false
 }
 
 func routeURLFromTemplate(route string, intelligence *model.ProjectIntelligencePack) string {
@@ -2349,14 +2408,17 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 		target := scriptPageTargetForNode(node)
 		validations := append([]model.ValidationSpec{}, node.Validations...)
 		routeContract := routeContractForNode(node, action, target, intelligence, previousRoute)
+		if routeContract.EntryRoute != "" {
+			target.URL = routeContract.EntryRoute
+		}
+		if routeContract.TargetRouteTemplate != "" && routeTemplateDynamic(routeContract.TargetRouteTemplate) && routePathFromCandidate(routeContract.TargetURL) == routePathFromCandidate(routeContract.EntryRoute) {
+			routeContract.TargetURL = ""
+		}
 		if routeContract.TargetRoute != "" {
 			target.PageRef = routeContract.TargetRoute
 		}
 		if routeContract.TargetURL != "" {
-			if target.URL == "" {
-				target.URL = routeContract.TargetURL
-			}
-			if action.Target.URL == "" {
+			if action.Target.URL == "" || routeContract.TargetURL == "" {
 				action.Target.URL = routeContract.TargetURL
 			}
 		}

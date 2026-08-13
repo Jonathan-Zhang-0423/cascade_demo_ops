@@ -177,6 +177,7 @@ type DirectJobStatus struct {
 // EvidenceIDs are opaque references only; the Gateway never returns evidence
 // payloads or browser/page objects in job status.
 type DirectReunderstandingIssue struct {
+	IssueID              string                `json:"issue_id,omitempty"`
 	Code                 string                `json:"code"`
 	StageID              string                `json:"stage_id,omitempty"`
 	NodeID               string                `json:"node_id,omitempty"`
@@ -188,6 +189,19 @@ type DirectReunderstandingIssue struct {
 	NextStep             string                `json:"next_step,omitempty"`
 	ResponsibilityDomain ValidationCheckDomain `json:"responsibility_domain,omitempty"`
 	EvidenceIDs          []string              `json:"evidence_ids,omitempty"`
+}
+
+// StableDirectReunderstandingIssueID binds selection to the structured issue
+// identity without exposing validation text or browser evidence payloads.
+func StableDirectReunderstandingIssueID(issue DirectReunderstandingIssue) string {
+	seed := strings.Join([]string{
+		strings.TrimSpace(issue.Code),
+		strings.TrimSpace(issue.StageID),
+		strings.TrimSpace(issue.NodeID),
+		strings.TrimSpace(string(issue.ResponsibilityDomain)),
+	}, "|")
+	sum := sha256.Sum256([]byte(seed))
+	return "issue_" + hex.EncodeToString(sum[:12])
 }
 
 type DirectResultAckRequest struct {

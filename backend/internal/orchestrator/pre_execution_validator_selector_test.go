@@ -7,6 +7,8 @@ import (
 	"cascade-demoops/backend/internal/model"
 )
 
+func timePtr(value time.Time) *time.Time { return &value }
+
 func TestPreExecutionSelectorCheckRejectsUnprovenRuntimeAdaptivePrimary(t *testing.T) {
 	stage := model.StageApprovalStage{
 		NodeID:          "node_create",
@@ -29,7 +31,7 @@ func TestPreExecutionSelectorCheckAcceptsEvidenceBoundRuntimeAdaptivePrimary(t *
 	evidence := model.EvidenceRef{ID: "ev_create", Kind: model.EvidenceKindBrowserScan}
 	candidate := model.SelectorCandidate{
 		Kind: "testid", Value: "create-project", EvidenceID: evidence.ID, SourceKind: "page_scan", SourceDigest: "sha256:page",
-		ObservedRole: "button", ObservedAccessibleName: "Create project", ObservedAt: time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC), EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.9,
+		ObservedRole: "button", ObservedAccessibleName: "Create project", ObservedAt: timePtr(time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)), EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.9,
 	}
 	stage := model.StageApprovalStage{
 		NodeID:          "node_create",

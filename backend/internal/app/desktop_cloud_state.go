@@ -84,15 +84,52 @@ func (s *Service) persistCloudStatus(ctx context.Context, projectID, orgID strin
 }
 
 func (s *Service) persistCloudResult(ctx context.Context, projectID, orgID string, result model.RecordingResultPackage) error {
-	return s.updateDesktopCloudRun(ctx, projectID, func(run *orchestrator.DesktopCloudRunState) {
+	diagnosticDigest := ""
+	if result.FailureDiagnostic != nil {
+		var err error
+		diagnosticDigest, err = model.DigestCanonicalJSON(result.FailureDiagnostic)
+		if err != nil {
+			return err
+		}
+	}
+	requiresInvalidation := false
+	err := s.updateDesktopCloudState(ctx, projectID, func(state *orchestrator.CascadeState) {
+		if state.DesktopCloudRun == nil {
+			state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
+		}
+		run := state.DesktopCloudRun
 		run.OrgID = firstNonEmptyString(orgID, run.OrgID, defaultDesktopOrgID)
 		run.ResultPackageID = firstNonEmptyString(result.ResultID, run.ResultPackageID)
 		run.CloudJobID = firstNonEmptyString(result.CloudJobID, run.CloudJobID)
 		run.ResultPackage = &result
+		run.DiagnosticDigestSHA256 = diagnosticDigest
 		if result.Status == model.RecordingResultStatusFailed {
 			run.Status = "failed"
 			run.Stage = "failed"
 			run.Message = "服务器返回失败诊断。"
+			issues := directIssuesFromFailedResult(result, state.ExecutableScriptBundle)
+			if len(issues) > 0 {
+				run.Stage = "reunderstanding_required"
+				run.Message = "权威验证或 App 确定性审计要求重新理解并重新审批执行方案。"
+				run.BlockingErrorCode = "reunderstanding_required"
+				run.NextAction = "regenerate_package_from_structured_issues"
+				run.RequiresReapproval = true
+				run.ReunderstandingIssues = withDirectIssueIDs(issues)
+				if run.LastRepairSourceID != result.ResultID {
+					state.ExecutionPackageGeneration++
+					run.LastRepairSourceID = result.ResultID
+				}
+				state.Approved = false
+				state.CurrentNode = orchestrator.NodeHumanApprove
+				state.Status = orchestrator.FlowStatusAwaitingHuman
+				state.ErrorMessage = "Browser Agent 运行事实要求重新理解并重新审批执行方案。"
+				requiresInvalidation = true
+			} else {
+				run.BlockingErrorCode = ""
+				run.NextAction = ""
+				run.RequiresReapproval = false
+				run.ReunderstandingIssues = nil
+			}
 		} else {
 			run.Status = "completed"
 			run.Stage = "completed"
@@ -100,6 +137,10 @@ func (s *Service) persistCloudResult(ctx context.Context, projectID, orgID strin
 		}
 		run.ProgressPercent = 100
 	})
+	if err == nil && requiresInvalidation {
+		s.invalidateApprovedBuildsForProject(projectID)
+	}
+	return err
 }
 
 func (s *Service) persistCloudDownload(ctx context.Context, projectID, resultPackageID string, download CloudDeliverableDownloadResult) error {

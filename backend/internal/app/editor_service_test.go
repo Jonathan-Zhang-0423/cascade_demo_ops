@@ -25,7 +25,7 @@ func TestEditorSessionImportSaveAndRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.Revision != 1 || len(session.PresentationCapabilities) != 1 || session.PresentationCapabilities[0].Capability != model.PresentationVideoCandidateCapability || len(session.ProviderCapabilities) != 0 {
+	if session.Revision != 1 || len(session.PresentationCapabilities) != 1 || session.PresentationCapabilities[0].Capability != model.PresentationVideoCandidateCapability || len(session.ProviderCapabilities) != 1 || session.ProviderCapabilities[0].Provider != "seedance" {
 		t.Fatalf("unexpected initial editor session: %+v", session)
 	}
 	if session.EditPlan.Audio == nil || session.EditPlan.Audio.Mode != "source" || session.EditPlan.Audio.VolumePercent != 100 {

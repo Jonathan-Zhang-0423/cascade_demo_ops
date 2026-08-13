@@ -370,6 +370,13 @@ type LocalDesktopCloudRunState = {
 	next_action?: string;
 	requires_reapproval?: boolean;
 	reunderstanding_issues?: LocalDirectReunderstandingIssue[];
+	diagnostic_digest_sha256?: string;
+	package_digest_sha256?: string;
+	graph_digest_sha256?: string;
+	bundle_hash_sha256?: string;
+	plan_hash_sha256?: string;
+	approval_subject_digest_sha256?: string;
+	confidence_assessment_hash?: string;
 	progress_percent?: number;
 	last_event_id?: string;
 	stage_history?: LocalExecutionStageEvent[];
@@ -451,6 +458,7 @@ type LocalDirectArtifact = {
 };
 
 type LocalDirectReunderstandingIssue = {
+	issue_id?: string;
 	code: string;
 	stage_id?: string;
 	node_id?: string;
@@ -462,6 +470,34 @@ type LocalDirectReunderstandingIssue = {
 	next_step?: string;
 	responsibility_domain?: string;
 	evidence_ids?: string[];
+};
+
+type LocalDirectFailureReunderstandingRequest = {
+	schema_version: "demoops.direct_failure_reunderstanding.v1";
+	source_job_id: string;
+	source_result_id: string;
+	source_package_id: string;
+	repair_request_id: string;
+	base_package_digest_sha256: string;
+	base_graph_digest_sha256: string;
+	failed_bundle_hash_sha256: string;
+	failed_plan_hash_sha256: string;
+	diagnostic_digest_sha256: string;
+	selected_issue_ids: string[];
+	idempotency_key: string;
+	user_confirmed: true;
+};
+
+type LocalDirectFailureReunderstandingResult = {
+	state: LocalCascadeState;
+	build?: LocalClientExecutionPackageBuild;
+	new_package_id?: string;
+	package_digest_sha256?: string;
+	graph_digest_sha256?: string;
+	approval_subject_digest_sha256?: string;
+	confidence_assessment_hash?: string;
+	issues?: LocalDirectReunderstandingIssue[];
+	requires_reapproval: boolean;
 };
 
 type LocalDirectUploadResult = {
@@ -1114,6 +1150,10 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         const resultPackage = await this.getResultPackage(next);
         if (resultPackage.ok && resultPackage.data) {
           next = workspaceWithResultPackage(next, resultPackage.data);
+		  if (result.data.status === "failed") {
+			const authoritative = await requestLocal<LocalCascadeState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}`);
+			if (authoritative.ok && authoritative.data) next = workspaceFromCascadeState(authoritative.data, next);
+		  }
         }
       }
       projects.set(next.id, next);
@@ -1170,7 +1210,48 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return ok(localFutureWorkspace(workspace, "失败诊断将在云端录制接入后启用。"));
     },
     async repairFailedScript(workspace) {
-      return ok(localFutureWorkspace(workspace, "脚本修复将在失败诊断接入后启用。"));
+	  const run = workspace.cloudRun;
+	  const result = run.resultPackage;
+	  const repair = run.repairRequest;
+	  const issues = run.reunderstandingIssues ?? [];
+	  const selectedIssueIDs = issues.filter((issue) => issue.required).map((issue) => issue.issueID).filter(Boolean);
+	  const request: LocalDirectFailureReunderstandingRequest = {
+		schema_version: "demoops.direct_failure_reunderstanding.v1",
+		source_job_id: repair?.cloud_job_id ?? result?.cloud_job_id ?? run.cloudJobID ?? "",
+		source_result_id: repair?.source_result_id ?? result?.result_id ?? run.resultPackageID ?? "",
+		source_package_id: repair?.source_package_id ?? result?.source_package_id ?? run.packageID,
+		repair_request_id: repair?.id ?? "",
+		base_package_digest_sha256: run.packageDigestSHA256 ?? "",
+		base_graph_digest_sha256: run.graphDigestSHA256 ?? "",
+		failed_bundle_hash_sha256: run.bundleHashSHA256 ?? repair?.failed_bundle_hash_sha256 ?? "",
+		failed_plan_hash_sha256: run.planHashSHA256 ?? repair?.failed_plan_hash_sha256 ?? "",
+		diagnostic_digest_sha256: run.diagnosticDigestSHA256 ?? "",
+		selected_issue_ids: selectedIssueIDs,
+		idempotency_key: `direct-reunderstand-${workspace.id}-${repair?.source_result_id ?? result?.result_id ?? "missing"}`,
+		user_confirmed: true,
+	  };
+	  const missing = Object.entries(request).filter(([key, value]) => key !== "selected_issue_ids" && key !== "user_confirmed" && typeof value === "string" && !value.trim()).map(([key]) => key);
+	  if (missing.length > 0 || issues.some((issue) => issue.required && !issue.issueID)) {
+		return bridgeFailure("重新理解所需的权威失败 lineage 不完整，已阻止生成草稿。", {
+		  code: "repair_lineage_mismatch",
+		  message: "失败结果缺少权威 identity、digest 或 issue_id",
+		  retryable: true,
+		  details: missing.map((field) => ({ field, message: "缺少必填 lineage 字段", hint: "重新读取 Browser Agent 结果包" })),
+		});
+	  }
+	  let repaired = await callWailsBridge<LocalDirectFailureReunderstandingResult>("ReunderstandDirectBrowserAgentFailure", workspace.id, request);
+	  if (!repaired.ok) {
+		repaired = await requestLocal<LocalDirectFailureReunderstandingResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/reunderstand`, { method: "POST", body: JSON.stringify(request) });
+	  }
+	  if (!repaired.ok || !repaired.data) return bridgeFailure(repaired.error ?? "重新扫描与草稿生成失败", repaired.errorInfo);
+	  if (!repaired.data.build || !repaired.data.requires_reapproval) {
+		return bridgeFailure("重新理解未产生可重新审批的正式草稿。", { code: "reunderstanding_incomplete", message: "服务未返回 draft build", retryable: true });
+	  }
+	  let next = workspaceFromCascadeState(repaired.data.state, workspace);
+	  cloudBuilds.set(workspace.id, repaired.data.build);
+	  next = workspaceWithPreparedBuild(next, repaired.data.build);
+	  projects.set(next.id, next);
+	  return ok(next);
     },
     async ackResultPackage(workspace) {
 	  const resultPackageID = workspace.cloudRun.resultPackageID;
@@ -1635,22 +1716,69 @@ export function createMockBridgeClient(): DesktopBridgeClient {
       });
     },
     async repairFailedScript(workspace) {
-      const diagnostic = workspace.cloudRun.failureDiagnostic ?? mockFailureDiagnostic(workspace);
-      const repairRequest = workspace.cloudRun.repairRequest ?? mockFailedRecordingResultPackage(workspace).repair_request;
-      const scriptDocument = workspace.scriptDocument ?? mockScriptDocument(workspace);
+      const run = workspace.cloudRun;
+      const diagnostic = run.failureDiagnostic;
+      const repairRequest = run.repairRequest;
+      const resultPackage = run.resultPackage;
+      const issues = run.reunderstandingIssues ?? [];
+      if (run.status !== "failed" || run.blockingErrorCode !== "reunderstanding_required") {
+        return bridgeFailure("普通 Browser Agent 失败不能进入重新理解。", {
+          code: "reunderstanding_incomplete",
+          message: "只有权威验证或确定性 App 门禁问题可触发重新理解",
+          retryable: false,
+        });
+      }
+      const missingLineage = !diagnostic || !repairRequest || !resultPackage
+        || !run.cloudJobID || !run.resultPackageID || !run.packageID
+        || !run.packageDigestSHA256 || !run.graphDigestSHA256
+        || !run.bundleHashSHA256 || !run.planHashSHA256 || !run.diagnosticDigestSHA256
+        || repairRequest.cloud_job_id !== run.cloudJobID
+        || repairRequest.source_result_id !== run.resultPackageID
+        || repairRequest.source_package_id !== run.packageID
+        || resultPackage.result_id !== run.resultPackageID
+        || resultPackage.source_package_id !== run.packageID
+        || issues.length === 0
+        || issues.some((issue) => issue.required && !issue.issueID);
+      if (missingLineage) {
+        return bridgeFailure("重新理解所需的权威失败 lineage 不完整，已阻止生成草稿。", {
+          code: "repair_lineage_mismatch",
+          message: "失败结果缺少权威 identity、digest 或 issue_id",
+          retryable: true,
+        });
+      }
+      const repairSeed = `${workspace.id}|${run.resultPackageID}|${run.packageDigestSHA256}|${issues.map((issue) => issue.issueID).sort().join("|")}`;
+      const graphDigest = mockHash(`reunderstood-graph|${repairSeed}`);
+      const rescannedWorkspace: ProjectWorkspaceView = {
+        ...workspace,
+        planReview: {
+          ...workspace.planReview,
+          graph: { ...workspace.planReview.graph, version: workspace.planReview.graph.version + 1 },
+        },
+        packagePreview: { ...workspace.packagePreview, graphDigest },
+      };
+      const scriptDocument = mockScriptDocument(rescannedWorkspace);
       const repairedMarkdown = mockRepairApprovalMarkdown(workspace, diagnostic);
       const repairedBundle = mockExecutableScriptBundle({
-        ...workspace,
+        ...rescannedWorkspace,
         scriptDocument,
         scriptMarkdown: repairedMarkdown,
       }, {
         diagnostic,
-        sourceCloudJobID: repairRequest?.cloud_job_id ?? "job_failed",
-        sourceResultID: repairRequest?.source_result_id ?? "result_failed",
-        repairAttempt: repairRequest?.repair_attempt ?? 1,
+        sourceCloudJobID: repairRequest.cloud_job_id,
+        sourceResultID: repairRequest.source_result_id,
+        repairAttempt: (repairRequest.repair_attempt ?? 0) + 1,
       });
+      const packageDigest = repairedBundle.reproducibility.bundle_hash_sha256 ?? mockHash(`package|${repairSeed}`);
+      const approvalSubjectDigest = mockHash(`approval|${packageDigest}|${graphDigest}`);
+      const confidenceAssessmentHash = mockHash(`confidence|${packageDigest}|${graphDigest}`);
+      const { uploadID: _uploadID, exchangePackageID: _exchangePackageID, cloudJobID: _cloudJobID,
+        resultPackageID: _resultPackageID, resultPackage: _resultPackage, failureDiagnostic: _failureDiagnostic,
+        repairRequest: _repairRequest, resultReview: _resultReview, directArtifacts: _directArtifacts,
+        resultDownloaded: _resultDownloaded, resultAcknowledged: _resultAcknowledged, ackedAt: _ackedAt,
+        editorSessionID: _editorSessionID, blockingErrorCode: _blockingErrorCode, nextAction: _nextAction,
+        waitingReason: _waitingReason, ...preservedRun } = run;
       return ok({
-        ...workspace,
+        ...rescannedWorkspace,
         stage: "package_approval",
         status: "awaiting_approval",
         scriptDocument,
@@ -1658,18 +1786,32 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         executableScriptBundle: repairedBundle,
         packagePreview: {
           ...workspace.packagePreview,
-          packageDigest: repairedBundle.reproducibility.bundle_hash_sha256 ?? workspace.packagePreview.packageDigest,
-          graphDigest: repairedBundle.reproducibility.plan_hash_sha256,
+          packageID: `pkg_reunderstood_${mockHash(repairSeed).slice(-12)}`,
+          packageDigest,
+          graphDigest,
+          approvalSubjectDigest,
+          confidenceAssessmentHash,
+          buildStatus: "draft",
+          readiness: "review_required",
           humanApprovalRequired: true,
-          blockedReasons: ["修复后的脚本必须重新审批"],
+          blockedReasons: ["重新理解后的执行包必须重新审批"],
         },
         cloudRun: {
-          ...workspace.cloudRun,
+          ...preservedRun,
           status: "not_uploaded",
           stage: "local_generated",
-          message: "修复后的三合一方案包已生成，等待重新审批。",
-          currentStep: "修复包已生成，等待人工审批",
+          message: "重新扫描生成的新草稿已持久化，等待重新审批。",
+          currentStep: "新草稿已生成，等待人工审批",
           progress: 0,
+          requiresReapproval: true,
+          reunderstandingIssues: issues,
+          packageID: `pkg_reunderstood_${mockHash(repairSeed).slice(-12)}`,
+          packageDigestSHA256: packageDigest,
+          graphDigestSHA256: graphDigest,
+          bundleHashSHA256: repairedBundle.reproducibility.bundle_hash_sha256 ?? mockHash(`bundle|${repairSeed}`),
+          planHashSHA256: repairedBundle.reproducibility.plan_hash_sha256,
+          approvalSubjectDigestSHA256: approvalSubjectDigest,
+          confidenceAssessmentHash,
           stageHistory: mockLifecycleStages(workspace, "local_generated"),
         },
       });
@@ -2079,6 +2221,13 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 			...(persisted.next_action ? { nextAction: persisted.next_action } : {}),
 			...(persisted.requires_reapproval !== undefined ? { requiresReapproval: persisted.requires_reapproval } : {}),
 			...(persisted.reunderstanding_issues ? { reunderstandingIssues: mapDirectReunderstandingIssues(persisted.reunderstanding_issues) } : {}),
+			...(persisted.diagnostic_digest_sha256 ? { diagnosticDigestSHA256: persisted.diagnostic_digest_sha256 } : {}),
+			...(persisted.package_digest_sha256 ? { packageDigestSHA256: persisted.package_digest_sha256 } : {}),
+			...(persisted.graph_digest_sha256 ? { graphDigestSHA256: persisted.graph_digest_sha256 } : {}),
+			...(persisted.bundle_hash_sha256 ? { bundleHashSHA256: persisted.bundle_hash_sha256 } : {}),
+			...(persisted.plan_hash_sha256 ? { planHashSHA256: persisted.plan_hash_sha256 } : {}),
+			...(persisted.approval_subject_digest_sha256 ? { approvalSubjectDigestSHA256: persisted.approval_subject_digest_sha256 } : {}),
+			...(persisted.confidence_assessment_hash ? { confidenceAssessmentHash: persisted.confidence_assessment_hash } : {}),
 			...(persisted.direct_artifacts ? { directArtifacts: persisted.direct_artifacts.map((artifact) => ({ artifactID: artifact.artifact_id, ...(artifact.role ? { role: artifact.role } : {}), ...(artifact.kind ? { kind: artifact.kind } : {}), fileName: artifact.file_name, ...(artifact.mime_type ? { mimeType: artifact.mime_type } : {}), sha256: artifact.sha256, sizeBytes: artifact.size_bytes })) } : {}),
 			...(persisted.result_package_id ? { resultPackageID: persisted.result_package_id } : {}),
 			...(persisted.last_event_id ? { lastEventID: persisted.last_event_id } : {}),
@@ -2087,8 +2236,8 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 	if (persisted.blocking_error_code === "reunderstanding_required") {
 		return {
 			...finalWorkspace,
-			stage: "package_approval",
-			status: "awaiting_approval",
+			stage: "script_repair",
+			status: "script_repair_required",
 			packagePreview: {
 				...finalWorkspace.packagePreview,
 				packageDigest: "",
@@ -2161,6 +2310,7 @@ function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: Loca
 		nextAction: _nextAction,
 		requiresReapproval: _requiresReapproval,
 		reunderstandingIssues: _reunderstandingIssues,
+		diagnosticDigestSHA256: _diagnosticDigestSHA256,
 		directArtifacts: _directArtifacts,
 		...cloudRunBase
 	} = workspace.cloudRun;
@@ -2345,6 +2495,12 @@ function workspaceWithDirectUpload(workspace: ProjectWorkspaceView, result: Loca
       progress: 5,
       retryCount: 0,
       stageHistory: localLifecycleStagesFromPartial("server_intake"),
+	  packageDigestSHA256: result.build.package_digest_sha256,
+	  graphDigestSHA256: result.build.package.reproducibility?.graph_hash_sha256 ?? workspace.packagePreview.graphDigest,
+	  ...(result.build.package.executable_script_bundle?.reproducibility.bundle_hash_sha256 ? { bundleHashSHA256: result.build.package.executable_script_bundle.reproducibility.bundle_hash_sha256 } : {}),
+	  ...(result.build.package.executable_script_bundle?.reproducibility.plan_hash_sha256 ? { planHashSHA256: result.build.package.executable_script_bundle.reproducibility.plan_hash_sha256 } : {}),
+	  approvalSubjectDigestSHA256: result.build.approval_subject_digest_sha256,
+	  ...(result.build.package.confidence_summary?.assessment_hash ? { confidenceAssessmentHash: result.build.package.confidence_summary.assessment_hash } : {}),
     },
   };
 }
@@ -2363,6 +2519,7 @@ function workspaceWithDirectLeaseReleased(workspace: ProjectWorkspaceView): Proj
 
 function mapDirectReunderstandingIssues(issues: LocalDirectReunderstandingIssue[]) {
 	return issues.map((issue) => ({
+		issueID: issue.issue_id ?? "",
 		code: issue.code,
 		...(issue.stage_id ? { stageID: issue.stage_id } : {}),
 		...(issue.node_id ? { nodeID: issue.node_id } : {}),
@@ -2392,8 +2549,8 @@ function workspaceWithDirectStatus(workspace: ProjectWorkspaceView, status: Loca
 	const mapped = status.blocking_error_code === "reunderstanding_required"
 		? {
 			...mappedBase,
-			stage: "package_approval" as const,
-			status: "awaiting_approval" as const,
+			stage: "script_repair" as const,
+			status: "script_repair_required" as const,
 			packagePreview: {
 				...mappedBase.packagePreview,
 				packageDigest: "",

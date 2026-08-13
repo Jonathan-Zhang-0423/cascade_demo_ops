@@ -198,6 +198,11 @@ type SelectorCandidate struct {
 	SourceDigest           string        `json:"source_digest,omitempty"`
 	ObservedRole           string        `json:"observed_role,omitempty"`
 	ObservedAccessibleName string        `json:"observed_accessible_name,omitempty"`
+	ObservedURL            string        `json:"observed_url,omitempty"`
+	ObservedRouteTemplate  string        `json:"observed_route_template,omitempty"`
+	ObservedPageRole       string        `json:"observed_page_role,omitempty"`
+	ObservedFormRole       string        `json:"observed_form_role,omitempty"`
+	EvidenceDigestSHA256   string        `json:"evidence_digest_sha256,omitempty"`
 	ObservedAt             *time.Time    `json:"observed_at,omitempty"`
 	Confidence             float64       `json:"confidence,omitempty"`
 	StabilityScore         float64       `json:"stability_score,omitempty"`

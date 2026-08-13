@@ -134,6 +134,11 @@ func (b *DesktopBridge) DirectBrowserAgentResult(projectID, jobID string) Bridge
 	return bridgeValue(result, err)
 }
 
+func (b *DesktopBridge) ReunderstandDirectBrowserAgentFailure(projectID string, request DirectFailureReunderstandingRequest) BridgeResponse {
+	result, err := b.service.ReunderstandDirectBrowserAgentFailure(context.Background(), projectID, request)
+	return bridgeValue(result, err)
+}
+
 func (b *DesktopBridge) DownloadDirectBrowserAgentArtifact(projectID string, request DirectArtifactDownloadRequest) BridgeResponse {
 	result, err := b.service.DownloadDirectArtifact(context.Background(), projectID, request)
 	return bridgeValue(result, err)

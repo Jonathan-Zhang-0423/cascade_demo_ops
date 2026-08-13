@@ -381,6 +381,26 @@ func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
 	}
 }
 
+func newAuthenticatedWorkspaceTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Path == "/workspace" {
+			_, _ = w.Write([]byte(`<!doctype html><title>Workspace</title><main aria-label="Builder workspace" data-testid="workspace"><button data-testid="new-project">新建项目 New project</button><label>项目名称 Project name<input data-testid="project-name-input" aria-label="项目名称 Project name"></label><button data-testid="build-mode">构建模式 Build mode</button><button data-testid="start-build">启动构建 Start build</button></main>`))
+			return
+		}
+		_, _ = w.Write([]byte(`<!doctype html><title>Login</title>
+<button id="email-login" type="button" onclick="document.querySelector('#form').hidden=false">邮箱登录</button>
+<form id="form" hidden onsubmit="event.preventDefault(); location.href='/workspace'">
+  <input type="email" autocomplete="username" />
+  <input type="password" autocomplete="current-password" />
+  <button type="submit">登录</button>
+</form>`))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 func TestAgentActionsV2AutoAnalyzesAfterSourceAction(t *testing.T) {
 	t.Setenv("CASCADE_AGENT_ACTIONS_V2", "true")
 	testPage := httptest.NewServer(http.HandlerFunc(controlledBusinessFixtureHandler))

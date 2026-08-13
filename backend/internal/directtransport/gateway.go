@@ -931,20 +931,24 @@ func directReunderstandingIssues(result model.RecordingResultPackage) []model.Di
 			if severity == "" {
 				severity = model.FindingSeverityBlocking
 			}
-			issues = append(issues, model.DirectReunderstandingIssue{
+			issue := model.DirectReunderstandingIssue{
 				Code: code, StageID: stageID, NodeID: nodeID, Severity: severity, Required: check.Required,
 				Summary: sanitizeDirectIssueText(check.Summary), Impact: sanitizeDirectIssueText(check.Impact),
 				Suggestion: sanitizeDirectIssueText(check.Suggestion), NextStep: sanitizeDirectIssueText(check.NextStep),
 				ResponsibilityDomain: check.ResponsibilityDomain,
 				EvidenceIDs:          directEvidenceIDs(check.EvidenceRefs),
-			})
+			}
+			issue.IssueID = model.StableDirectReunderstandingIssueID(issue)
+			issues = append(issues, issue)
 			if len(issues) >= 32 {
 				return issues
 			}
 		}
 	}
 	if len(issues) == 0 {
-		issues = append(issues, model.DirectReunderstandingIssue{Code: "reunderstanding_required", Severity: model.FindingSeverityBlocking, Required: true, Summary: "运行时验证要求 App 重新理解并重新审批执行方案。"})
+		issue := model.DirectReunderstandingIssue{Code: "reunderstanding_required", Severity: model.FindingSeverityBlocking, Required: true, Summary: "运行时验证要求 App 重新理解并重新审批执行方案。"}
+		issue.IssueID = model.StableDirectReunderstandingIssueID(issue)
+		issues = append(issues, issue)
 	}
 	return issues
 }

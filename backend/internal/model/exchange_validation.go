@@ -30,6 +30,10 @@ func DirectPackageValidationCode(err error) string {
 	if errors.As(err, &validationErr) && validationErr.Code != "" {
 		return validationErr.Code
 	}
+	var consistencyErr *OutlineConsistencyError
+	if errors.As(err, &consistencyErr) && consistencyErr.Code != "" {
+		return consistencyErr.Code
+	}
 	return "package_validation_failed"
 }
 
@@ -77,7 +81,7 @@ func ValidateClientExecutionPackageIntake(envelope *ExchangeEnvelope, pkg *Clien
 				return errors.New("human approval subject digest does not match execution package")
 			}
 		}
-		if len(pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256) > 0 {
+		if !pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256.Empty() {
 			if err := ValidatePackageApprovalComponentDigests(*pkg); err != nil {
 				return err
 			}

@@ -2,6 +2,8 @@ package model
 
 import (
 	"fmt"
+	"net/url"
+	"path"
 	"strings"
 )
 
@@ -41,6 +43,23 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		}
 		if selectors := distinctPrimarySelectors(step, stage, outline); len(selectors) > 1 {
 			return &OutlineConsistencyError{Code: "selector_binding_mismatch", NodeID: step.NodeID, Reason: "has different primary selectors across plan_json, stage_approval_plan, and script_outline"}
+		}
+		if err := validateExecutionRouteConsistency(step, stage, outline); err != nil {
+			return &OutlineConsistencyError{Code: "selector_route_provenance_mismatch", NodeID: step.NodeID, Reason: err.Error()}
+		}
+		if err := validatePrimarySelectorRouteProvenance(step, stage, outline); err != nil {
+			return &OutlineConsistencyError{Code: "selector_route_provenance_mismatch", NodeID: step.NodeID, Reason: err.Error()}
+		}
+		if stageRequiresAuthenticationContext(step, stage, outline) {
+			if !stageHasLoginEntryEvidence(step, stage, outline) {
+				return &OutlineConsistencyError{Code: "login_entry_evidence_missing", NodeID: step.NodeID, Reason: "does not bind the approved authentication entry route to formal page-scan evidence"}
+			}
+			if !stageHasVerifiedAuthenticationContext(step, stage, outline) {
+				return &OutlineConsistencyError{Code: "authentication_context_unverified", NodeID: step.NodeID, Reason: "does not prove an authentication page and password-bearing authentication form, or includes marketing email semantics"}
+			}
+			if !stageHasLoginSuccessValidation(step, stage, outline) {
+				return &OutlineConsistencyError{Code: "login_success_validation_missing", NodeID: step.NodeID, Reason: "requires both a post-login route assertion and an authenticated workspace element assertion"}
+			}
 		}
 		if step.RuntimeAdaptive {
 			if selector := firstPrimarySelector(step, stage, outline); selector != "" && !bundleHasFormalSelectorCandidate(step, stage, outline, selector) {
@@ -86,6 +105,236 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 	return nil
 }
 
+func validateExecutionRouteConsistency(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) error {
+	routes := []struct {
+		field string
+		value string
+	}{
+		{"plan_json.steps[].page_target.url", step.PageTarget.URL},
+		{"stage_approval_plan.stages[].entry_route", stage.EntryRoute},
+		{"script_outline.stages[].route", outline.Route},
+	}
+	var base struct{ field, value string }
+	for _, candidate := range routes {
+		candidate.value = strings.TrimSpace(candidate.value)
+		if candidate.value == "" {
+			continue
+		}
+		if base.value == "" {
+			base = candidate
+			continue
+		}
+		if !routesEquivalent(base.value, candidate.value) {
+			return fmt.Errorf("binds incompatible execution routes at %s and %s", base.field, candidate.field)
+		}
+	}
+	return nil
+}
+
+func validatePrimarySelectorRouteProvenance(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) error {
+	executionRoute := firstNonEmptyOutlineRoute(step.PageTarget.URL, stage.EntryRoute, outline.Route)
+	if strings.TrimSpace(executionRoute) == "" {
+		return nil
+	}
+	primary := firstPrimarySelector(step, stage, outline)
+	if strings.TrimSpace(primary) == "" {
+		return nil
+	}
+	for _, candidate := range primarySelectorCandidates(step, stage, outline) {
+		if !selectorCandidateMatchesPrimary(candidate, primary) || strings.TrimSpace(candidate.SourceKind) != "page_scan" {
+			continue
+		}
+		observedRoute := firstNonEmptyOutlineRoute(candidate.ObservedRouteTemplate, candidate.ObservedURL)
+		if observedRoute == "" || !routesEquivalent(observedRoute, executionRoute) {
+			return fmt.Errorf("uses primary selector %q observed on page-scan route %q, not execution route %q", primary, observedRoute, executionRoute)
+		}
+	}
+	return nil
+}
+
+func primarySelectorCandidates(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) []SelectorCandidate {
+	values := append([]SelectorCandidate{}, step.PageTarget.SelectorAlternatives...)
+	values = append(values, step.Action.Target.SelectorAlternatives...)
+	values = append(values, stage.Interaction.Target.SelectorAlternatives...)
+	for _, interaction := range outline.Interactions {
+		values = append(values, interaction.Target.SelectorAlternatives...)
+	}
+	for _, component := range outline.Components {
+		values = append(values, component.SelectorAlternatives...)
+	}
+	return values
+}
+
+func firstNonEmptyOutlineRoute(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func routesEquivalent(left, right string) bool {
+	return routeMatches(left, right) || routeMatches(right, left)
+}
+
+func routeMatches(observed, expected string) bool {
+	observedURL, observedAbsolute, ok := parseOutlineRoute(observed)
+	if !ok {
+		return false
+	}
+	expectedURL, expectedAbsolute, ok := parseOutlineRoute(expected)
+	if !ok {
+		return false
+	}
+	if observedAbsolute && expectedAbsolute && !strings.EqualFold(observedURL.Scheme+"://"+observedURL.Host, expectedURL.Scheme+"://"+expectedURL.Host) {
+		return false
+	}
+	observedSegments := outlineRouteSegments(observedURL.Path)
+	expectedSegments := outlineRouteSegments(expectedURL.Path)
+	if len(observedSegments) != len(expectedSegments) {
+		return false
+	}
+	for index := range expectedSegments {
+		expectedSegment := expectedSegments[index]
+		if strings.HasPrefix(expectedSegment, "{") && strings.HasSuffix(expectedSegment, "}") && len(expectedSegment) > 2 {
+			if observedSegments[index] == "" {
+				return false
+			}
+			continue
+		}
+		if observedSegments[index] != expectedSegment {
+			return false
+		}
+	}
+	if (expectedURL.RawQuery != "" || observedURL.RawQuery != "") && observedURL.Query().Encode() != expectedURL.Query().Encode() {
+		return false
+	}
+	return true
+}
+
+func parseOutlineRoute(value string) (*url.URL, bool, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, false, false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return nil, false, false
+	}
+	absolute := parsed.IsAbs() || parsed.Host != ""
+	parsed.Fragment = ""
+	parsed.Path = path.Clean("/" + strings.TrimPrefix(parsed.Path, "/"))
+	return parsed, absolute, true
+}
+
+func outlineRouteSegments(value string) []string {
+	value = strings.Trim(path.Clean("/"+strings.TrimPrefix(value, "/")), "/")
+	if value == "" || value == "." {
+		return nil
+	}
+	return strings.Split(value, "/")
+}
+
+func stageRequiresAuthenticationContext(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) bool {
+	if step.StageKind != BusinessStageKindSessionSetup {
+		return false
+	}
+	text := strings.ToLower(strings.Join([]string{
+		step.Title, step.ExpectedOutcome, step.Action.Target.Label, step.Action.Target.Text,
+		stage.Title, stage.Objective, stage.BusinessIntent, stage.SuccessState,
+		outline.Objective, outline.SuccessState,
+	}, " "))
+	return stageHasSecretRef(step, stage) || containsAnyOutlineToken(text, "login", "sign in", "signin", "auth", "登录", "登陆", "登入", "密码", "password")
+}
+
+func stageHasLoginEntryEvidence(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) bool {
+	authRoute := firstNonEmptyOutlineRoute(step.PageTarget.URL, stage.EntryRoute, outline.Route)
+	if authRoute == "" {
+		return false
+	}
+	for _, candidate := range primarySelectorCandidates(step, stage, outline) {
+		if candidate.SourceKind != "page_scan" || candidate.ObservedURL == "" || candidate.EvidenceID == "" {
+			continue
+		}
+		if routesEquivalent(candidate.ObservedURL, authRoute) {
+			return true
+		}
+	}
+	return false
+}
+
+func stageHasVerifiedAuthenticationContext(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) bool {
+	targetNames := []string{}
+	if step.TargetContract != nil {
+		targetNames = append(targetNames, step.TargetContract.AllowedNames...)
+	}
+	if stage.TargetContract != nil {
+		targetNames = append(targetNames, stage.TargetContract.AllowedNames...)
+	}
+	if outline.TargetContract != nil {
+		targetNames = append(targetNames, outline.TargetContract.AllowedNames...)
+	}
+	for _, name := range targetNames {
+		if marketingAuthenticationName(name) {
+			return false
+		}
+	}
+	for _, candidate := range primarySelectorCandidates(step, stage, outline) {
+		if candidate.SourceKind != "page_scan" {
+			continue
+		}
+		if marketingAuthenticationName(candidate.ObservedAccessibleName) {
+			return false
+		}
+		if strings.EqualFold(strings.TrimSpace(candidate.ObservedPageRole), "authentication") && strings.EqualFold(strings.TrimSpace(candidate.ObservedFormRole), "authentication") && candidate.EvidenceDigestSHA256 != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func stageHasLoginSuccessValidation(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) bool {
+	authRoute := firstNonEmptyOutlineRoute(step.PageTarget.URL, stage.EntryRoute, outline.Route)
+	hasPostLoginRoute := false
+	hasWorkspaceState := false
+	for _, validation := range step.Validations {
+		if !validation.Required {
+			continue
+		}
+		if validation.Kind == "url_matches" {
+			target := strings.TrimSpace(validation.Target.URL)
+			if target == "" {
+				if expected, ok := validation.Expected.(string); ok {
+					target = strings.TrimSpace(expected)
+				}
+			}
+			if target != "" && authRoute != "" && !routesEquivalent(target, authRoute) {
+				hasPostLoginRoute = true
+			}
+			continue
+		}
+		if validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != "" {
+			hasWorkspaceState = true
+		}
+	}
+	return hasPostLoginRoute && hasWorkspaceState
+}
+
+func marketingAuthenticationName(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return containsAnyOutlineToken(value, "newsletter", "waitlist", "subscribe", "marketing", "enter your email address", "订阅", "候补")
+}
+
+func containsAnyOutlineToken(value string, tokens ...string) bool {
+	for _, token := range tokens {
+		if strings.Contains(value, token) {
+			return true
+		}
+	}
+	return false
+}
+
 func firstIncompleteSelectorCandidate(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) (string, SelectorCandidate, bool) {
 	groups := []struct {
 		field      string
@@ -127,7 +376,7 @@ func SelectorCandidateHasFormalProvenance(candidate SelectorCandidate) bool {
 	if strings.TrimSpace(candidate.Kind) == "" || strings.TrimSpace(candidate.Value) == "" ||
 		strings.TrimSpace(candidate.EvidenceID) == "" || strings.TrimSpace(candidate.SourceDigest) == "" ||
 		strings.TrimSpace(candidate.ObservedRole) == "" || strings.TrimSpace(candidate.ObservedAccessibleName) == "" ||
-		candidate.ObservedAt.IsZero() {
+		candidate.ObservedAt == nil || candidate.ObservedAt.IsZero() {
 		return false
 	}
 	switch strings.TrimSpace(candidate.SourceKind) {

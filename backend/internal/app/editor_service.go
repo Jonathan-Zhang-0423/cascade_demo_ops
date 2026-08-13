@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/model"
 )
@@ -812,6 +813,15 @@ func (s *Service) editorPresentationCapabilities() []model.EditorPresentationCap
 			PresentationOnly: true, RequiresExplicitReview: true, MayReplaceCapturedUI: false,
 			FailureBlocksRecordingDelivery: false,
 		},
+	}}
+}
+
+func (s *Service) editorProviderCapabilities() []model.EditorProviderCapability {
+	credential := s.runtime.ModelProviders[config.ModelProviderSeedance]
+	return []model.EditorProviderCapability{{
+		Provider: "seedance", Task: "generated_video_candidate", Mode: string(s.runtime.ArkMediaMode), Configured: credential.Enabled,
+		Model: credential.DefaultModel, OutputKind: "generated_video_candidate", AutoInclude: false, RequiresReview: true,
+		PresentationOnly: true, CanRepresentBusiness: false,
 	}}
 }
 

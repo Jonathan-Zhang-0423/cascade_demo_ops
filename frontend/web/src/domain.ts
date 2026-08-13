@@ -231,6 +231,13 @@ export type CloudRunStatusView = {
   nextAction?: string;
   requiresReapproval?: boolean;
   reunderstandingIssues?: ReunderstandingIssueView[];
+  diagnosticDigestSHA256?: string;
+  packageDigestSHA256?: string;
+  graphDigestSHA256?: string;
+  bundleHashSHA256?: string;
+  planHashSHA256?: string;
+  approvalSubjectDigestSHA256?: string;
+  confidenceAssessmentHash?: string;
   stageHistory?: ServerLifecycleStageView[];
   failureSummary?: string;
   sandboxMetadata?: SandboxExecutionMetadata;
@@ -252,6 +259,7 @@ export type CloudRunStatusView = {
 };
 
 export type ReunderstandingIssueView = {
+  issueID: string;
   code: string;
   stageID?: string;
   nodeID?: string;

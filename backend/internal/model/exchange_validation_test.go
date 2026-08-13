@@ -62,7 +62,7 @@ func TestValidateClientExecutionPackageForDirectExecutionRejectsIncompleteOrStal
 				}
 				pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 = digest
 			},
-			message: "selector provenance",
+			message: "selector_provenance_incomplete",
 			code:    "selector_provenance_incomplete",
 		},
 		{
@@ -235,6 +235,9 @@ func populateSelectorProvenanceForTest(t *testing.T, pkg *ClientExecutionPackage
 							candidate["source_digest"] = SHA256Hex([]byte(fmt.Sprintf("%v:%v:%d", candidate["kind"], candidate["value"], index)))
 							candidate["observed_role"] = "button"
 							candidate["observed_accessible_name"] = fmt.Sprintf("Approved target %d", index)
+							candidate["observed_url"] = "https://app.example.com/dashboard"
+							candidate["observed_route_template"] = "/dashboard"
+							candidate["evidence_digest_sha256"] = candidate["source_digest"]
 							candidate["observed_at"] = observedAt.UTC().Format(time.RFC3339Nano)
 							candidate["evidence_refs"] = []any{map[string]any{"id": evidenceID, "kind": "browser_scan"}}
 						}

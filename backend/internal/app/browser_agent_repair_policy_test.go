@@ -7,6 +7,8 @@ import (
 	"cascade-demoops/backend/internal/model"
 )
 
+func timePtr(value time.Time) *time.Time { return &value }
+
 func TestBrowserAgentRepairPolicyApprovesBoundedWaitRepair(t *testing.T) {
 	plan, stage := repairPolicyFixture(t)
 	proposal := repairProposalFor(plan, stage, "wait_strategy", "script_outline.stages[].wait_conditions", "wait_after_entry_at_least_1000ms", "wait_after_entry_at_least_1500ms")
@@ -215,7 +217,7 @@ func formalSelectorCandidateForTest(value string, evidence model.EvidenceRef, ac
 		Kind: "css", Value: value, Confidence: 0.9, StabilityScore: 0.9, Source: "page_scan",
 		EvidenceID: evidence.ID, SourceKind: "page_scan", SourceDigest: "sha256:page-scan",
 		ObservedRole: "button", ObservedAccessibleName: accessibleName,
-		ObservedAt: time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC), EvidenceRefs: []model.EvidenceRef{evidence},
+		ObservedAt: timePtr(time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)), EvidenceRefs: []model.EvidenceRef{evidence},
 	}
 }
 

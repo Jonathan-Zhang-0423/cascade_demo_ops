@@ -754,6 +754,14 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/result":
 		result, err := s.service.GetDirectResult(r.Context(), projectID, r.URL.Query().Get("job_id"))
 		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/reunderstand":
+		var request DirectFailureReunderstandingRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		result, err := s.service.ReunderstandDirectBrowserAgentFailure(r.Context(), projectID, request)
+		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/artifact/download":
 		var request DirectArtifactDownloadRequest
 		if err := decodeJSON(r, &request); err != nil {

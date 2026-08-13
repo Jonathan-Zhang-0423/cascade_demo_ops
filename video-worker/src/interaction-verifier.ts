@@ -54,6 +54,7 @@ type InteractionVerifierDiagnostics = {
   verified_candidate_count?: number;
   discovered_business_control_count?: number;
   login_transitions?: string[];
+  login_evidence?: VerifiedInteractionCandidate[];
   safe_state_transitions?: string[];
 };
 
@@ -71,6 +72,11 @@ type VerifiedInteractionCandidate = InteractionCandidate & {
   source_digest?: string;
   observed_role?: string;
   observed_accessible_name?: string;
+  observed_url?: string;
+  observed_route_template?: string;
+  observed_page_role?: string;
+  observed_form_role?: string;
+  evidence_digest_sha256?: string;
   observed_at?: string;
 };
 
@@ -114,14 +120,16 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
   try {
     await page.goto(productURL, { waitUntil: "domcontentloaded", timeout });
     await waitForPageEvidenceReady(page, Math.min(timeout, 8000));
-    const loginStatus = await attemptLoginIfCredentialsProvided(page, {
+    const loginAttempt = await attemptLoginIfCredentialsProvided(page, {
       ...(request.demo_username ? { username: request.demo_username } : {}),
       ...(request.demo_password ? { password: request.demo_password } : {}),
       timeout,
+      scanID,
       transitions: diagnostics.login_transitions = [],
     });
     diagnostics.login_attempted = Boolean(request.demo_username && request.demo_password);
-    diagnostics.login_status = loginStatus;
+    diagnostics.login_status = loginAttempt.status;
+    diagnostics.login_evidence = loginAttempt.evidence;
     let pageTitle = await page.title().catch(() => "");
     let currentURL = page.url();
     let sourceDigest = await pageEvidenceDigest(page, currentURL);
@@ -444,7 +452,7 @@ function observedControlRole(control: any, actionKind: string): string {
   return normalizeAction(actionKind) === "fill" ? "textbox" : "button";
 }
 
-async function selectorProvenance(locator: any, candidate: InteractionCandidate, pageURL: string, scanID: string, sourceDigest: string): Promise<Pick<VerifiedInteractionCandidate, "evidence_id" | "source_kind" | "source_digest" | "observed_role" | "observed_accessible_name" | "observed_at">> {
+async function selectorProvenance(locator: any, candidate: InteractionCandidate, pageURL: string, scanID: string, sourceDigest: string): Promise<Pick<VerifiedInteractionCandidate, "evidence_id" | "source_kind" | "source_digest" | "observed_role" | "observed_accessible_name" | "observed_url" | "observed_route_template" | "observed_page_role" | "observed_form_role" | "evidence_digest_sha256" | "observed_at">> {
   const semantics = await locator.evaluate((element: any) => {
     const tag = String(element.tagName || "").toLowerCase();
     const type = String(element.getAttribute?.("type") || "").toLowerCase();
@@ -463,8 +471,13 @@ async function selectorProvenance(locator: any, candidate: InteractionCandidate,
     if (!role && type === "checkbox") role = "checkbox";
     if (!role && type === "radio") role = "radio";
     if (!role && type === "file") role = "button";
-    return { role, name: name.slice(0, 160) };
-  }).catch(() => ({ role: "", name: "" }));
+    const form = element.closest?.("form");
+    const formText = String(form?.getAttribute?.("aria-label") || form?.getAttribute?.("name") || form?.getAttribute?.("id") || "").toLowerCase();
+    const hasPassword = Boolean(form?.querySelector?.('input[type="password"]'));
+    const formRole = hasPassword || /login|sign[ -]?in|auth|登录/.test(formText) ? "authentication" : form ? "generic" : "none";
+    const pageRole = formRole === "authentication" ? "authentication" : "product";
+    return { role, name: name.slice(0, 160), formRole, pageRole };
+  }).catch(() => ({ role: "", name: "", formRole: "none", pageRole: "unknown" }));
   const observedAt = new Date().toISOString();
   return {
     evidence_id: selectorEvidenceID(scanID, candidate.id || "candidate", candidate.selector || ""),
@@ -472,6 +485,11 @@ async function selectorProvenance(locator: any, candidate: InteractionCandidate,
     source_digest: sourceDigest || sha256Text(`page|${pageURL}`),
     observed_role: semantics.role || (normalizeAction(candidate.kind) === "fill" ? "textbox" : "button"),
     observed_accessible_name: semantics.name,
+    observed_url: pageURL,
+    observed_route_template: new URL(pageURL).pathname,
+    observed_page_role: semantics.pageRole,
+    observed_form_role: semantics.formRole,
+    evidence_digest_sha256: sourceDigest || sha256Text(`page|${pageURL}`),
     observed_at: observedAt,
   };
 }
@@ -697,12 +715,13 @@ function uniqueWords(values: string[]): string[] {
 
 async function attemptLoginIfCredentialsProvided(
   page: any,
-  credentials: { username?: string; password?: string; timeout: number; transitions?: string[] },
-): Promise<string> {
+  credentials: { username?: string; password?: string; timeout: number; scanID: string; transitions?: string[] },
+): Promise<{ status: string; evidence: VerifiedInteractionCandidate[] }> {
   const username = credentials.username?.trim();
   const password = credentials.password;
+  const evidence: VerifiedInteractionCandidate[] = [];
   if (!username || !password) {
-    return "credentials_missing";
+    return { status: "credentials_missing", evidence };
   }
 
   const transitions = credentials.transitions || [];
@@ -732,6 +751,7 @@ async function attemptLoginIfCredentialsProvided(
       transitions.push(`login_trigger_not_found:${attempt}`);
       break;
     }
+    await appendLoginEvidence(evidence, trigger, "login_entry", "click", page, credentials.scanID);
     transitions.push(`login_trigger_found:${attempt}`);
     const clicked = await trigger.click({ timeout: 4000 }).then(() => true).catch(() => false);
     transitions.push(clicked ? `login_trigger_clicked:${attempt}` : `login_trigger_click_failed:${attempt}`);
@@ -747,14 +767,18 @@ async function attemptLoginIfCredentialsProvided(
   }
   if (!passwordInput) {
     transitions.push("login_form_not_found");
-    return "login_form_not_found";
+    return { status: "login_form_not_found", evidence };
   }
   transitions.push("password_input_visible");
+  const formSubmit = await firstVisibleLoginSubmit(page);
+  if (formSubmit) {
+    await appendLoginEvidence(evidence, formSubmit, "login_form_submit", "click", page, credentials.scanID);
+  }
   if (!usernameFilled) {
     const usernameInput = await firstVisibleLocatorAcrossFrames(page, usernameInputSelectors(), 3000);
     if (!usernameInput) {
       transitions.push("username_input_not_found");
-      return "username_input_not_found";
+      return { status: "username_input_not_found", evidence };
     }
     await usernameInput.fill(username, { timeout: 3500 }).catch(() => undefined);
     usernameFilled = true;
@@ -776,19 +800,60 @@ async function attemptLoginIfCredentialsProvided(
     const failure = await classifyVisibleLoginFailure(page);
     if (failure) {
       transitions.push(`login_failure:${failure}`);
-      return `submitted_${failure}`;
+      return { status: `submitted_${failure}`, evidence };
     }
     transitions.push("submitted_login_form_still_visible");
-    return "submitted_login_form_still_visible";
+    return { status: "submitted_login_form_still_visible", evidence };
   }
   const finalURL = page.url();
   const authenticatedContextVisible = await hasAuthenticatedContextMarker(page);
   if (looksLikeLoginURL(finalURL) || (finalURL === preSubmitURL && !authenticatedContextVisible)) {
     transitions.push("submitted_still_on_login_url");
-    return "submitted_still_on_login_url";
+    return { status: "submitted_still_on_login_url", evidence };
   }
   transitions.push("authenticated_navigation_observed");
-  return "submitted_navigation_observed";
+  return { status: "submitted_navigation_observed", evidence };
+}
+
+async function appendLoginEvidence(
+  evidence: VerifiedInteractionCandidate[],
+  locator: any,
+  id: string,
+  kind: string,
+  page: any,
+  scanID: string,
+): Promise<void> {
+  const selector = await stableSelectorForLoginEvidence(locator);
+  if (!selector || evidence.some((item) => item.selector === selector)) return;
+  const pageURL = page.url();
+  const candidate: InteractionCandidate = { id, kind, selector };
+  const sourceDigest = await pageEvidenceDigest(page, pageURL);
+  evidence.push({
+    ...candidate,
+    status: "verified",
+    visible: true,
+    enabled: true,
+    page_url: pageURL,
+    page_title: await page.title().catch(() => ""),
+    verified_at: new Date().toISOString(),
+    ...await selectorProvenance(locator, candidate, pageURL, scanID, sourceDigest),
+  });
+}
+
+async function stableSelectorForLoginEvidence(locator: any): Promise<string> {
+  return locator.evaluate((element: any) => {
+    const escape = (value: string) => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const tag = String(element.tagName || "").toLowerCase();
+    const testID = String(element.getAttribute?.("data-testid") || "").trim();
+    if (testID) return `[data-testid="${escape(testID)}"]`;
+    const id = String(element.id || "").trim();
+    if (id && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
+    const name = String(element.getAttribute?.("name") || "").trim();
+    if (tag && name) return `${tag}[name="${escape(name)}"]`;
+    const type = String(element.getAttribute?.("type") || "").trim().toLowerCase();
+    if (tag && type) return `${tag}[type="${escape(type)}"]`;
+    return "";
+  }).catch(() => "");
 }
 
 async function classifyVisibleLoginFailure(page: any): Promise<string> {

@@ -290,10 +290,10 @@ func TestBusinessStagePlannerUsesCodeDiscoveredStageRoutes(t *testing.T) {
 	if got := stageByKind[model.BusinessStageKindBusinessInput].EntryRoute; got != "/workspace/projects/new" {
 		t.Fatalf("project name stage should use discovered creation route, got %q", got)
 	}
-	if got := stageByKind[model.BusinessStageKindBusinessSubmit].ExpectedRouteAfterAction; got != "/workspace/projects/:id/build" {
+	if got := stageByKind[model.BusinessStageKindBusinessSubmit].ExpectedRouteAfterAction; got != "/workspace/projects/{id}/build" {
 		t.Fatalf("start build stage should transition to discovered build route, got %q", got)
 	}
-	if got := stageByKind[model.BusinessStageKindObserveProgress].EntryRoute; got != "/workspace/projects/:id/build" {
+	if got := stageByKind[model.BusinessStageKindObserveProgress].EntryRoute; got != "/workspace/projects/{id}/build" {
 		t.Fatalf("observe stage should use discovered build route, got %q", got)
 	}
 }

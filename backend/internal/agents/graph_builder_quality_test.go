@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -132,6 +133,14 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 	project := graphQualityProject()
 	project.DemoAccount = &model.DemoAccount{UsernameSecretRef: "credential://demo/test", PasswordSecretRef: "credential://demo/test"}
 	runtimePageEvidence := []model.EvidenceRef{{ID: "ev_runtime_dashboard", Kind: model.EvidenceKindBrowserScan, Summary: "Browser Scan confirmed the current dashboard state"}}
+	authObservedAt := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	authEvidence := []model.EvidenceRef{{ID: "ev_login_form", Kind: model.EvidenceKindBrowserScan, Summary: "Browser Scan confirmed the password-bearing authentication form"}}
+	authCandidate := model.SelectorCandidate{
+		Kind: "testid", Value: "login-password", EvidenceID: "ev_login_form", SourceKind: "page_scan", SourceDigest: "sha256:login-page",
+		ObservedRole: "textbox", ObservedAccessibleName: "Password", ObservedURL: "https://app.example.com/login", ObservedRouteTemplate: "/login",
+		ObservedPageRole: "authentication", ObservedFormRole: "authentication", EvidenceDigestSHA256: "sha256:login-page",
+		ObservedAt: &authObservedAt, LastValidatedAt: authObservedAt, EvidenceRefs: authEvidence,
+	}
 	project.Inputs = &model.ProjectInputBundle{Requirements: []model.DemoRequirement{
 		{ID: "requirement_project_name", Kind: "must_show", Description: "填写俄罗斯方块", Required: true},
 		{ID: "requirement_observe_progress", Kind: "must_show", Description: "观察构建进度", Required: true},
@@ -153,7 +162,8 @@ func TestGraphBuilderUsesBusinessStagePlanAsPrimaryGraphSpine(t *testing.T) {
 				ExpectedRouteAfterAction: "/app",
 				DurationMS:               7000,
 				Action:                   model.BusinessActionSemantics{Type: string(model.GraphActionFill), Label: "登录", SuccessState: "进入工作台", NonDestructive: true},
-				EvidenceRefs:             runtimePageEvidence,
+				Targets:                  []model.BusinessTargetCandidate{{ID: "target_login_password", Label: "登录表单", Kind: "fill", Selector: "[data-testid='login-password']", TestID: "login-password", SelectorScore: 100, IsVerified: true, VerificationStatus: "verified", VerificationSource: "page_scan", EvidenceRefs: authEvidence, Alternatives: []model.SelectorCandidate{authCandidate}}},
+				EvidenceRefs:             append(append([]model.EvidenceRef{}, runtimePageEvidence...), authEvidence...),
 			},
 			{
 				ID:                       "business_stage_project_name_input",

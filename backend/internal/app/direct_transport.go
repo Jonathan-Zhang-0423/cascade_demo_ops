@@ -340,7 +340,7 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 		receipt.Status = value.Status
 		receipt.Stage = value.Stage
 	}
-	if err := s.persistDirectUpload(ctx, projectID, build.OrgID, lease, receipt); err != nil {
+	if err := s.persistDirectUpload(ctx, projectID, build, lease, receipt); err != nil {
 		return DirectTransportUploadResult{}, err
 	}
 	cleanLease = false
@@ -1084,20 +1084,30 @@ func (s *Service) loadDirectLease(projectID string) (model.DirectPortLease, erro
 	return lease, nil
 }
 
-func (s *Service) persistDirectUpload(ctx context.Context, projectID, orgID string, lease model.DirectPortLease, receipt model.DirectPackageReceipt) error {
+func (s *Service) persistDirectUpload(ctx context.Context, projectID string, build ClientExecutionPackageBuild, lease model.DirectPortLease, receipt model.DirectPackageReceipt) error {
 	return s.updateDesktopCloudState(ctx, projectID, func(state *orchestrator.CascadeState) {
 		if state.DesktopCloudRun == nil {
 			state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
 		}
 		run := state.DesktopCloudRun
 		run.Transport = directTransportStateName
-		run.OrgID = orgID
+		run.OrgID = build.OrgID
 		run.LeaseID = lease.LeaseID
 		run.DataPort = lease.DataPort
 		expires := lease.ExpiresAt
 		run.LeaseExpiresAt = &expires
 		run.ExchangePackageID = receipt.PackageID
 		run.PackageID = receipt.PackageID
+		run.PackageDigestSHA256 = build.PackageDigestSHA256
+		run.GraphDigestSHA256 = build.Package.Reproducibility.GraphHashSHA256
+		run.ApprovalSubjectDigestSHA256 = build.ApprovalSubjectDigestSHA256
+		if build.Package.ConfidenceSummary != nil {
+			run.ConfidenceAssessmentHash = build.Package.ConfidenceSummary.AssessmentHash
+		}
+		if build.Package.ExecutableScriptBundle != nil {
+			run.BundleHashSHA256 = build.Package.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+			run.PlanHashSHA256 = build.Package.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
+		}
 		run.CloudJobID = receipt.JobID
 		run.Status = receipt.Status
 		run.Stage = receipt.Stage
@@ -1110,6 +1120,7 @@ func (s *Service) persistDirectUpload(ctx context.Context, projectID, orgID stri
 		run.ReunderstandingIssues = nil
 		run.ResultPackageID = ""
 		run.ResultPackage = nil
+		run.DiagnosticDigestSHA256 = ""
 		run.ResultDownloaded = false
 		run.AckedAt = nil
 		run.DownloadedAssets = nil
@@ -1135,7 +1146,6 @@ func (s *Service) persistDirectStatus(ctx context.Context, projectID string, sta
 			state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
 		}
 		run := state.DesktopCloudRun
-		wasReunderstanding := run.BlockingErrorCode == "reunderstanding_required"
 		run.Transport = directTransportStateName
 		run.ExchangePackageID = status.PackageID
 		run.PackageID = status.PackageID
@@ -1150,10 +1160,11 @@ func (s *Service) persistDirectStatus(ctx context.Context, projectID string, sta
 		run.ProgressPercent = status.ProgressPercent
 		run.ResultPackageID = status.ResultPackageID
 		run.DirectArtifacts = append([]model.DirectArtifact(nil), status.Artifacts...)
-		run.ReunderstandingIssues = append([]model.DirectReunderstandingIssue(nil), status.ReunderstandingIssues...)
+		run.ReunderstandingIssues = withDirectIssueIDs(status.ReunderstandingIssues)
 		if status.BlockingErrorCode == "reunderstanding_required" {
-			if !wasReunderstanding {
+			if sourceResultID := strings.TrimSpace(status.ResultPackageID); sourceResultID != "" && run.LastRepairSourceID != sourceResultID {
 				state.ExecutionPackageGeneration++
+				run.LastRepairSourceID = sourceResultID
 			}
 			state.Approved = false
 			state.CurrentNode = orchestrator.NodeHumanApprove
@@ -1162,6 +1173,19 @@ func (s *Service) persistDirectStatus(ctx context.Context, projectID string, sta
 			s.invalidateApprovedBuildsForProject(projectID)
 		}
 	})
+}
+
+func withDirectIssueIDs(issues []model.DirectReunderstandingIssue) []model.DirectReunderstandingIssue {
+	if len(issues) == 0 {
+		return nil
+	}
+	out := append([]model.DirectReunderstandingIssue(nil), issues...)
+	for index := range out {
+		if strings.TrimSpace(out[index].IssueID) == "" {
+			out[index].IssueID = model.StableDirectReunderstandingIssueID(out[index])
+		}
+	}
+	return out
 }
 
 func (s *Service) invalidateApprovedBuildsForProject(projectID string) {

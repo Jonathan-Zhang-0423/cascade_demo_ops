@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+func timePtr(value time.Time) *time.Time { return &value }
+
 func TestValidateBrowserAgentOutlineConsistencyRejectsContractDrift(t *testing.T) {
 	bundle := consistentOutlineBundleForTest()
 	bundle.ScriptOutline.Stages[0].RouteState = BusinessRouteStateBuildRunning
@@ -22,10 +24,16 @@ func TestValidateBrowserAgentOutlineConsistencyRejectsGenericObservationEvidence
 	bundle.ScriptOutline.Stages[0].StageKind = BusinessStageKindObserveProgress
 	bundle.PlanJSON.Steps[0].Action.Type = GraphActionWait
 	bundle.PlanJSON.Steps[0].EvidenceRefs = []EvidenceRef{{ID: "ev_product_url", Kind: EvidenceKindBrowserScan, Summary: "产品 URL 输入"}}
+	bundle.PlanJSON.Steps[0].Action.Target.EvidenceRefs = nil
+	bundle.PlanJSON.Steps[0].Action.Target.SelectorAlternatives = nil
 	bundle.StageApprovalPlan.Stages[0].EvidenceRefs = bundle.PlanJSON.Steps[0].EvidenceRefs
 	bundle.StageApprovalPlan.Stages[0].Interaction.EvidenceRefs = nil
+	bundle.StageApprovalPlan.Stages[0].Interaction.Target.EvidenceRefs = nil
+	bundle.StageApprovalPlan.Stages[0].Interaction.Target.SelectorAlternatives = nil
 	bundle.ScriptOutline.Stages[0].EvidenceRefs = bundle.PlanJSON.Steps[0].EvidenceRefs
 	bundle.ScriptOutline.Stages[0].Interactions[0].EvidenceRefs = nil
+	bundle.ScriptOutline.Stages[0].Interactions[0].Target.EvidenceRefs = nil
+	bundle.ScriptOutline.Stages[0].Interactions[0].Target.SelectorAlternatives = nil
 	assertOutlineConsistencyCode(t, bundle, "runtime_page_evidence_missing")
 }
 
@@ -37,11 +45,10 @@ func TestValidateBrowserAgentOutlineConsistencyRejectsWorkspaceWithoutCredential
 	assertOutlineConsistencyCode(t, bundle, "session_auth_evidence_missing")
 }
 
-func TestValidateBrowserAgentOutlineConsistencyAcceptsCompleteRuntimeAdaptiveContractWithoutPageEvidence(t *testing.T) {
+func TestValidateBrowserAgentOutlineConsistencyRejectsRuntimeAdaptiveLoginWithoutPageEvidence(t *testing.T) {
 	bundle := runtimeAdaptiveOutlineBundleForTest()
-	if err := ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
-		t.Fatalf("complete runtime-adaptive contract should defer page evidence to Browser Agent: %v", err)
-	}
+	clearSelectorProvenanceForTest(bundle)
+	assertOutlineConsistencyCode(t, bundle, "login_entry_evidence_missing")
 }
 
 func TestValidateBrowserAgentOutlineConsistencyRejectsIncompleteRuntimeAdaptiveContract(t *testing.T) {
@@ -62,7 +69,7 @@ func TestValidateBrowserAgentOutlineConsistencyRequiresSelectorProvenance(t *tes
 	evidence := EvidenceRef{ID: "ev_login_submit", Kind: EvidenceKindBrowserScan}
 	bundle.PlanJSON.Steps[0].Action.Target.SelectorAlternatives[0] = SelectorCandidate{
 		Kind: "testid", Value: "login-submit", EvidenceID: evidence.ID, SourceKind: "page_scan", SourceDigest: "sha256:page",
-		ObservedRole: "button", ObservedAccessibleName: "Sign in", ObservedAt: time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC), EvidenceRefs: []EvidenceRef{evidence},
+		ObservedRole: "button", ObservedAccessibleName: "Sign in", ObservedAt: timePtr(time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)), EvidenceRefs: []EvidenceRef{evidence},
 	}
 	if err := ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
 		t.Fatalf("complete selector provenance should be accepted: %v", err)
@@ -80,7 +87,9 @@ func TestValidateBrowserAgentOutlineConsistencyRejectsUnprovenRuntimeAdaptivePri
 	evidence := EvidenceRef{ID: "ev_login_scan", Kind: EvidenceKindBrowserScan}
 	candidate := SelectorCandidate{
 		Kind: "testid", Value: "guessed-login", EvidenceID: evidence.ID, SourceKind: "page_scan", SourceDigest: "sha256:page",
-		ObservedRole: "button", ObservedAccessibleName: "Sign in", ObservedAt: time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC), EvidenceRefs: []EvidenceRef{evidence},
+		ObservedRole: "button", ObservedAccessibleName: "Sign in", ObservedURL: "https://app.example/login", ObservedRouteTemplate: "/login",
+		ObservedPageRole: "authentication", ObservedFormRole: "authentication", EvidenceDigestSHA256: "sha256:page",
+		ObservedAt: timePtr(time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)), EvidenceRefs: []EvidenceRef{evidence},
 	}
 	bundle.PlanJSON.Steps[0].Action.Target.SelectorAlternatives = []SelectorCandidate{candidate}
 	bundle.StageApprovalPlan.Stages[0].Interaction.Target.SelectorAlternatives = []SelectorCandidate{candidate}
@@ -109,18 +118,42 @@ func assertOutlineConsistencyCode(t *testing.T, bundle *ExecutableRecordingScrip
 
 func consistentOutlineBundleForTest() *ExecutableRecordingScriptBundle {
 	evidence := []EvidenceRef{{ID: "ev_runtime_page", Kind: EvidenceKindWebScreenshot}}
-	step := ScriptStep{
-		NodeID: "node_session", StageKind: BusinessStageKindSessionSetup, RouteState: BusinessRouteStateWorkspace, NonDestructive: true,
-		Action:       ScriptActionInstruction{Type: GraphActionFill, SecretRef: "secret://demo/password", Target: ActionTarget{Label: "登录表单"}},
-		Validations:  []ValidationSpec{{ID: "validate_workspace", Kind: "url_matches", Target: ActionTarget{URL: "https://app.example/workspace"}, Expected: "/workspace", Required: true}},
+	observedAt := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
+	candidate := SelectorCandidate{
+		Kind: "testid", Value: "login-password", EvidenceID: "ev_runtime_page", SourceKind: "page_scan", SourceDigest: "sha256:login-page",
+		ObservedRole: "textbox", ObservedAccessibleName: "Password", ObservedURL: "https://app.example/login", ObservedRouteTemplate: "/login",
+		ObservedPageRole: "authentication", ObservedFormRole: "authentication", EvidenceDigestSHA256: "sha256:login-page", ObservedAt: &observedAt,
 		EvidenceRefs: evidence,
 	}
-	interaction := BrowserAgentInteraction{Kind: GraphActionFill, SecretRef: "secret://demo/password", Target: ActionTarget{Label: "登录表单"}, NonDestructive: true, EvidenceRefs: evidence}
+	target := ActionTarget{Selector: "[data-testid='login-password']", Label: "登录表单", SelectorAlternatives: []SelectorCandidate{candidate}, EvidenceRefs: evidence}
+	step := ScriptStep{
+		NodeID: "node_session", StageKind: BusinessStageKindSessionSetup, RouteState: BusinessRouteStateWorkspace, NonDestructive: true,
+		PageTarget: ScriptPageTarget{URL: "https://app.example/login"},
+		Action:     ScriptActionInstruction{Type: GraphActionFill, SecretRef: "secret://demo/password", Target: target},
+		Validations: []ValidationSpec{
+			{ID: "validate_workspace_route", Kind: "url_matches", Target: ActionTarget{URL: "https://app.example/workspace"}, Expected: "/workspace", Required: true},
+			{ID: "validate_workspace_root", Kind: "element_visible", Target: ActionTarget{Selector: "[data-testid='workspace-root']"}, Required: true},
+		},
+		EvidenceRefs: evidence,
+	}
+	interaction := BrowserAgentInteraction{Kind: GraphActionFill, SecretRef: "secret://demo/password", Target: target, NonDestructive: true, EvidenceRefs: evidence}
 	return &ExecutableRecordingScriptBundle{
 		PlanJSON:          &ExecutionScriptDocument{Steps: []ScriptStep{step}},
-		StageApprovalPlan: &StageApprovalPlan{Stages: []StageApprovalStage{{NodeID: step.NodeID, StageKind: step.StageKind, RouteState: step.RouteState, Interaction: interaction, EvidenceRefs: evidence}}},
-		ScriptOutline:     &BrowserAgentScriptOutline{Stages: []BrowserAgentOutlineStage{{NodeID: step.NodeID, StageKind: step.StageKind, RouteState: step.RouteState, Interactions: []BrowserAgentInteraction{interaction}, EvidenceRefs: evidence}}},
+		StageApprovalPlan: &StageApprovalPlan{Stages: []StageApprovalStage{{NodeID: step.NodeID, StageKind: step.StageKind, RouteState: step.RouteState, EntryRoute: "https://app.example/login", TargetURL: "https://app.example/login", ExpectedRouteAfterAction: "https://app.example/workspace", Interaction: interaction, EvidenceRefs: evidence}}},
+		ScriptOutline: &BrowserAgentScriptOutline{Stages: []BrowserAgentOutlineStage{{
+			NodeID: step.NodeID, StageKind: step.StageKind, RouteState: step.RouteState, EntryRoute: "https://app.example/login", Route: "https://app.example/login", URL: "https://app.example/login",
+			ExpectedRouteAfterAction: "https://app.example/workspace", Interactions: []BrowserAgentInteraction{interaction}, EvidenceRefs: evidence,
+		}}},
 	}
+}
+
+func clearSelectorProvenanceForTest(bundle *ExecutableRecordingScriptBundle) {
+	bundle.PlanJSON.Steps[0].Action.Target.Selector = ""
+	bundle.PlanJSON.Steps[0].Action.Target.SelectorAlternatives = nil
+	bundle.StageApprovalPlan.Stages[0].Interaction.Target.Selector = ""
+	bundle.StageApprovalPlan.Stages[0].Interaction.Target.SelectorAlternatives = nil
+	bundle.ScriptOutline.Stages[0].Interactions[0].Target.Selector = ""
+	bundle.ScriptOutline.Stages[0].Interactions[0].Target.SelectorAlternatives = nil
 }
 
 func runtimeAdaptiveOutlineBundleForTest() *ExecutableRecordingScriptBundle {

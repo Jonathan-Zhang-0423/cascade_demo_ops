@@ -642,3 +642,19 @@ func readBrowserAgentOutlineFixture(t *testing.T) model.ClientExecutionPackage {
 	}
 	return pkg
 }
+
+func refreshTestPackageApprovalDigests(t *testing.T, pkg *model.ClientExecutionPackage) {
+	t.Helper()
+	if pkg == nil || pkg.SafetyReport.HumanApproval.ApprovalID == "" {
+		return
+	}
+	var err error
+	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256, err = model.ComputePackageApprovalComponentDigests(*pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256, err = model.ComputePackageApprovalSubjectDigest(*pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+}

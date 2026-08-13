@@ -141,14 +141,15 @@ type interactionVerifierResponse struct {
 }
 
 type interactionVerifierDiagnostics struct {
-	LoginAttempted                 bool     `json:"login_attempted,omitempty"`
-	LoginStatus                    string   `json:"login_status,omitempty"`
-	FinalURL                       string   `json:"final_url,omitempty"`
-	PageTitle                      string   `json:"page_title,omitempty"`
-	CandidateCount                 int      `json:"candidate_count,omitempty"`
-	VerifiedCandidateCount         int      `json:"verified_candidate_count,omitempty"`
-	DiscoveredBusinessControlCount int      `json:"discovered_business_control_count,omitempty"`
-	LoginTransitions               []string `json:"login_transitions,omitempty"`
+	LoginAttempted                 bool                        `json:"login_attempted,omitempty"`
+	LoginStatus                    string                      `json:"login_status,omitempty"`
+	FinalURL                       string                      `json:"final_url,omitempty"`
+	PageTitle                      string                      `json:"page_title,omitempty"`
+	CandidateCount                 int                         `json:"candidate_count,omitempty"`
+	VerifiedCandidateCount         int                         `json:"verified_candidate_count,omitempty"`
+	DiscoveredBusinessControlCount int                         `json:"discovered_business_control_count,omitempty"`
+	LoginTransitions               []string                    `json:"login_transitions,omitempty"`
+	LoginEvidence                  []interactionVerifierResult `json:"login_evidence,omitempty"`
 }
 
 type interactionVerifierResult struct {
@@ -166,6 +167,11 @@ type interactionVerifierResult struct {
 	SourceDigest           string    `json:"source_digest,omitempty"`
 	ObservedRole           string    `json:"observed_role,omitempty"`
 	ObservedAccessibleName string    `json:"observed_accessible_name,omitempty"`
+	ObservedURL            string    `json:"observed_url,omitempty"`
+	ObservedRouteTemplate  string    `json:"observed_route_template,omitempty"`
+	ObservedPageRole       string    `json:"observed_page_role,omitempty"`
+	ObservedFormRole       string    `json:"observed_form_role,omitempty"`
+	EvidenceDigestSHA256   string    `json:"evidence_digest_sha256,omitempty"`
 	ObservedAt             time.Time `json:"observed_at,omitempty"`
 }
 
@@ -706,7 +712,7 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 			FieldPath:  "verified_interaction_plan.actions.intent_login_observe",
 			Confidence: 0.92,
 		}
-		plan.Actions = append(plan.Actions, model.VerifiedInteractionAction{
+		loginAction := model.VerifiedInteractionAction{
 			ID: "intent_login_observe", IntentGoalID: "intent_login_observe", Label: "演示登录完成并进入工作台",
 			Kind: "wait", URL: firstNonEmpty(response.Diagnostics.FinalURL, response.SourceURL, project.ProductURL),
 			RouteRef:        safeID("route", firstNonEmpty(response.Diagnostics.FinalURL, response.SourceURL, project.ProductURL)),
@@ -715,7 +721,21 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 			NonDestructive:     true,
 			VerificationSource: firstNonEmpty(response.VerificationMode, "playwright_readonly_scan"), VerifiedAt: time.Now().UTC(),
 			EvidenceRefs: []model.EvidenceRef{evidence},
-		})
+		}
+		for _, loginResult := range response.Diagnostics.LoginEvidence {
+			loginEvidence := model.EvidenceRef{
+				ID:   firstNonEmpty(loginResult.EvidenceID, "ev_browser_scan_login_control_"+shortHash(response.BrowserScanID+loginResult.ID)),
+				Kind: model.EvidenceKindBrowserScan, Summary: "本地浏览器预扫描确认认证入口或密码表单控件。",
+				FieldPath: "verified_interaction_plan.actions.intent_login_observe.selector_alternatives", Confidence: 0.92,
+			}
+			if candidate, ok := selectorCandidateFromVerifierResult(loginResult, loginEvidence); ok {
+				loginAction.Alternatives = uniqueSelectorCandidates(append(loginAction.Alternatives, candidate))
+				loginAction.EvidenceRefs = append(loginAction.EvidenceRefs, loginEvidence)
+				plan.EvidenceRefs = append(plan.EvidenceRefs, loginEvidence)
+			}
+		}
+		loginAction.EvidenceRefs = uniqueEvidenceRefs(loginAction.EvidenceRefs)
+		plan.Actions = append(plan.Actions, loginAction)
 		plan.EvidenceRefs = append(plan.EvidenceRefs, evidence)
 	}
 	for _, result := range response.Results {
@@ -917,7 +937,12 @@ func selectorCandidateFromVerifierResult(result interactionVerifierResult, evide
 		SourceDigest:           result.SourceDigest,
 		ObservedRole:           result.ObservedRole,
 		ObservedAccessibleName: firstNonEmpty(result.ObservedAccessibleName, result.Label),
-		ObservedAt:             observedAt,
+		ObservedURL:            firstNonEmpty(result.ObservedURL, result.PageURL),
+		ObservedRouteTemplate:  result.ObservedRouteTemplate,
+		ObservedPageRole:       result.ObservedPageRole,
+		ObservedFormRole:       result.ObservedFormRole,
+		EvidenceDigestSHA256:   firstNonEmpty(result.EvidenceDigestSHA256, result.SourceDigest),
+		ObservedAt:             &observedAt,
 		LastValidatedAt:        result.VerifiedAt,
 		EvidenceRefs:           []model.EvidenceRef{evidence},
 	}
