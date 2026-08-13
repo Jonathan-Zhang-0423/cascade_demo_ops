@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, resolutionAssertions, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, urlPolicyError, validatedStageSecretValues } from "../src/browser-agent-runtime.js";
+import { captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, urlPolicyError, validatedStageSecretValues } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -13,6 +13,95 @@ describe("browser agent target resolution feedback", () => {
     expect(resolutionAssertions(undefined, "", "https://app.example.com/dashboard")).toEqual([
       { kind: "page_observed", passed: true, actual: "https://app.example.com/dashboard" },
     ]);
+  });
+});
+
+describe("browser agent recording profile", () => {
+  it("rejects a non-canonical recording viewport before opening Chromium", async () => {
+    await expect(import("../src/browser-agent-runtime.js").then(({ openBrowserAgentSession }) => openBrowserAgentSession({
+      output_dir: "artifacts/test-only",
+      allowed_domains: ["app.example.com"],
+      browser: { viewport: { width: 1440, height: 900 } },
+    }))).rejects.toThrow("browser_agent_recording_resolution_mismatch");
+  });
+});
+
+describe("browser agent bounded target-name redundancy", () => {
+  it("normalizes only approved action/control wording and keeps exact business identity", () => {
+    expect(normalizedApprovedTargetName("点击新建项目入口")).toBe("新建项目");
+    expect(normalizedApprovedTargetName("请选择构建按钮")).toBe("构建");
+    expect(normalizedApprovedTargetName("Please click the New Project button")).toBe("New Project");
+    expect(normalizedApprovedTargetName("删除项目")).toBe("删除项目");
+  });
+});
+
+describe("browser agent target geometry evidence", () => {
+  it("clips a live DOM box to the content viewport and stores only a selector digest", async () => {
+    const locator = { boundingBox: async () => ({ x: -10, y: 100, width: 210, height: 80 }) };
+    const geometry = await captureTargetGeometry({
+      openedAtMS: Date.now() - 500,
+      page: {
+        viewportSize: () => ({ width: 1000, height: 500 }),
+        evaluate: async () => 2,
+      },
+    } as any, {
+      id: "stage_create", order: 1, node_id: "create",
+      target_contract: { semantic_id: "new_project", destructive: false },
+      interactions: [{ kind: "click", non_destructive: true }],
+    }, {
+      locator,
+      strategy: "approved_evidence_css",
+      approvedAlternative: { kind: "css", value: "[data-testid='button-new-project']" },
+    }, "artifact_target");
+    expect(geometry).toMatchObject({
+      schema_version: "demoops.browser_target_geometry.v1",
+      target_semantic_id: "new_project",
+      resolution_strategy: "approved_evidence_css",
+      viewport: { width: 1000, height: 500, dpr: 2 },
+      element_box_css_px: { x: 0, y: 100, width: 200, height: 80 },
+      element_box_normalized: { x: 0, y: 0.2, width: 0.2, height: 0.16 },
+      screenshot_artifact_id: "artifact_target",
+      confidence: 1,
+    });
+    expect(geometry?.selector_digest_sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(geometry)).not.toContain("button-new-project");
+  });
+
+  it("fails closed when the target has no visible in-viewport geometry", async () => {
+    const geometry = await captureTargetGeometry({
+      openedAtMS: Date.now(),
+      page: { viewportSize: () => ({ width: 1000, height: 500 }), evaluate: async () => 1 },
+    } as any, {
+      id: "stage_create", order: 1, node_id: "create",
+      target_contract: { semantic_id: "new_project", destructive: false },
+      interactions: [{ kind: "click", non_destructive: true }],
+    }, { locator: { boundingBox: async () => null }, strategy: "component_testid" });
+    expect(geometry).toBeUndefined();
+  });
+
+  it("retains verified target geometry when close recovers stage screenshots", () => {
+    const geometry = {
+      schema_version: "demoops.browser_target_geometry.v1" as const,
+      target_semantic_id: "new_project",
+      resolution_strategy: "approved_evidence_css",
+      selector_digest_sha256: "a".repeat(64),
+      captured_at: "2026-08-13T00:00:00Z",
+      recording_offset_ms: 1200,
+      viewport: { width: 2560, height: 1440, dpr: 1 },
+      element_box_css_px: { x: 100, y: 80, width: 200, height: 60 },
+      element_box_normalized: { x: 0.0390625, y: 0.0555555556, width: 0.078125, height: 0.0416666667 },
+      screenshot_artifact_id: "artifact_session_create_target",
+      confidence: 1,
+    };
+    const evidence = new Map([["artifact_session_create_target", geometry]]);
+
+    expect(recoveredScreenshotMetadata("target", "artifact_session_create_target", evidence)).toMatchObject({
+      capture_phase: "target",
+      recovered_at_session_close: true,
+      target_geometry: geometry,
+    });
+    expect(recoveredScreenshotMetadata("before", "artifact_session_create_target", evidence)).not.toHaveProperty("target_geometry");
+    expect(recoveredScreenshotMetadata("target", "artifact_session_other_target", evidence)).not.toHaveProperty("target_geometry");
   });
 });
 
@@ -112,6 +201,32 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     await expect(resolveUniqueVisibleEvidenceBoundTarget(locator(1, "button", ""), "interaction_css", contract, candidate, "fill")).resolves.toBeUndefined();
     await expect(resolveUniqueVisibleEvidenceBoundTarget(locator(2, "textbox", ""), "interaction_css", contract, candidate, "fill")).resolves.toBeUndefined();
     await expect(resolveUniqueVisibleEvidenceBoundTarget(locator(1, "textbox", "Delete project"), "interaction_css", contract, candidate, "fill")).rejects.toThrow("browser_agent_forbidden_target_name");
+  });
+
+  it("accepts a localized name only for one exact evidence-bound selector and keeps safety checks", async () => {
+    const locator = (count: number, role: string, name: string) => ({
+      count: async () => count,
+      first() {
+        return {
+          isVisible: async () => true,
+          evaluate: async () => ({ role, name }),
+        };
+      },
+    });
+    const contract = {
+      semantic_id: "start_build",
+      allowed_roles: ["button"],
+      allowed_names: ["Build"],
+      forbidden_names: ["Delete", "删除"],
+      destructive: false,
+    };
+    const exactEvidenceSelector = { kind: "css", value: `[data-testid="button-create-project"]` };
+
+    await expect(resolveUniqueVisibleEvidenceBoundTarget(locator(1, "button", "构建!"), "interaction_css", contract, exactEvidenceSelector, "click")).resolves.toBeUndefined();
+    await expect(resolveUniqueVisibleEvidenceBoundTarget(locator(1, "button", "构建!"), "interaction_css", contract, exactEvidenceSelector, "click", { allowSelectorIdentityOnly: true })).resolves.toBeDefined();
+    await expect(resolveUniqueVisibleEvidenceBoundTarget(locator(2, "button", "构建!"), "interaction_css", contract, exactEvidenceSelector, "click", { allowSelectorIdentityOnly: true })).resolves.toBeUndefined();
+    await expect(resolveUniqueVisibleEvidenceBoundTarget(locator(1, "link", "构建!"), "interaction_css", contract, exactEvidenceSelector, "click", { allowSelectorIdentityOnly: true })).resolves.toBeUndefined();
+    await expect(resolveUniqueVisibleEvidenceBoundTarget(locator(1, "button", "删除项目"), "interaction_css", contract, exactEvidenceSelector, "click", { allowSelectorIdentityOnly: true })).rejects.toThrow("browser_agent_forbidden_target_name");
   });
 
   it("does not treat a textarea's current value as its accessible name", async () => {

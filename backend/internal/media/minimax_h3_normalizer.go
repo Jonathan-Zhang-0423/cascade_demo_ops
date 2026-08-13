@@ -44,6 +44,10 @@ type FFmpegMiniMaxH3MediaNormalizer struct {
 	FFmpegPath  string
 	FFprobePath string
 	Runner      MiniMaxH3CommandRunner
+	// MaxDurationSec is optional. It is used when an immutable recording must
+	// produce a bounded provider-reference derivative; generated candidates
+	// leave it unset so their complete provider output is preserved.
+	MaxDurationSec int
 }
 
 func (n FFmpegMiniMaxH3MediaNormalizer) Normalize(ctx context.Context, sourcePath string, destinationPath string) (MiniMaxH3MediaProbe, MiniMaxH3MediaProbe, error) {
@@ -108,9 +112,17 @@ func (n FFmpegMiniMaxH3MediaNormalizer) Normalize(ctx context.Context, sourcePat
 		"-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
 		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-fps_mode", "cfr",
 		"-c:a", "aac", "-movflags", "+faststart",
-		temporaryPath,
 	}
+	if n.MaxDurationSec > 0 {
+		args = append(args, "-t", strconv.Itoa(n.MaxDurationSec))
+	}
+	args = append(args, temporaryPath)
 	commandResult, err := runner.Run(ctx, ffmpegPath, args...)
+	if err != nil && ffmpegFPSModeUnsupported(commandResult) {
+		_ = os.Remove(temporaryPath)
+		legacyArgs := replaceFFmpegFPSModeWithVSync(args)
+		commandResult, err = runner.Run(ctx, ffmpegPath, legacyArgs...)
+	}
 	if err != nil {
 		_ = os.Remove(temporaryPath)
 		return originalProbe, MiniMaxH3MediaProbe{}, fmt.Errorf("ffmpeg normalization failed: %s", compactMiniMaxH3CommandError(commandResult, err))
@@ -129,6 +141,22 @@ func (n FFmpegMiniMaxH3MediaNormalizer) Normalize(ctx context.Context, sourcePat
 		return originalProbe, normalizedProbe, err
 	}
 	return originalProbe, normalizedProbe, nil
+}
+
+func ffmpegFPSModeUnsupported(result MiniMaxH3CommandResult) bool {
+	message := strings.ToLower(string(result.Stderr) + " " + string(result.Stdout))
+	return strings.Contains(message, "unrecognized option 'fps_mode'") || strings.Contains(message, "option not found") && strings.Contains(message, "fps_mode")
+}
+
+func replaceFFmpegFPSModeWithVSync(args []string) []string {
+	result := append([]string{}, args...)
+	for index := 0; index+1 < len(result); index++ {
+		if result[index] == "-fps_mode" {
+			result[index] = "-vsync"
+			return result
+		}
+	}
+	return result
 }
 
 type miniMaxH3FFProbeResponse struct {

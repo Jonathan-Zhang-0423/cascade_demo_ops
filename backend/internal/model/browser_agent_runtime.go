@@ -80,10 +80,55 @@ type RuntimeAction struct {
 }
 
 type RuntimeObservation struct {
-	Source     RuntimeObservationSource `json:"source"`
-	URL        string                   `json:"url,omitempty"`
-	Title      string                   `json:"title,omitempty"`
-	Assertions []RuntimeAssertion       `json:"assertions,omitempty"`
+	Source                   RuntimeObservationSource         `json:"source"`
+	URL                      string                           `json:"url,omitempty"`
+	Title                    string                           `json:"title,omitempty"`
+	Assertions               []RuntimeAssertion               `json:"assertions,omitempty"`
+	TargetGeometry           *BrowserTargetGeometry           `json:"target_geometry,omitempty"`
+	TargetResolutionAttempts []BrowserTargetResolutionAttempt `json:"target_resolution_attempts,omitempty"`
+}
+
+// BrowserTargetResolutionAttempt is a redacted locator diagnostic. It records
+// only counts and policy outcomes, never selector values, page text, DOM, or
+// form values.
+type BrowserTargetResolutionAttempt struct {
+	Strategy       string `json:"strategy"`
+	CandidateCount int    `json:"candidate_count"`
+	Unique         bool   `json:"unique"`
+	Visible        bool   `json:"visible"`
+	EvidenceBound  bool   `json:"evidence_bound"`
+	RoleAllowed    *bool  `json:"role_allowed,omitempty"`
+	NameAllowed    *bool  `json:"name_allowed,omitempty"`
+	Outcome        string `json:"outcome"`
+}
+
+// BrowserTargetGeometry is captured from the live DOM immediately before the
+// approved action. It contains no page text or input values.
+type BrowserTargetGeometry struct {
+	SchemaVersion        string                   `json:"schema_version"`
+	TargetSemanticID     string                   `json:"target_semantic_id"`
+	ResolutionStrategy   string                   `json:"resolution_strategy"`
+	SelectorDigestSHA256 string                   `json:"selector_digest_sha256"`
+	CapturedAt           time.Time                `json:"captured_at"`
+	RecordingOffsetMS    int64                    `json:"recording_offset_ms"`
+	Viewport             BrowserGeometryViewport  `json:"viewport"`
+	ElementBoxCSSPX      BrowserGeometryRectangle `json:"element_box_css_px"`
+	ElementBoxNormalized BrowserGeometryRectangle `json:"element_box_normalized"`
+	ScreenshotArtifactID string                   `json:"screenshot_artifact_id,omitempty"`
+	Confidence           float64                  `json:"confidence"`
+}
+
+type BrowserGeometryViewport struct {
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+	DPR    float64 `json:"dpr"`
+}
+
+type BrowserGeometryRectangle struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 type RuntimeAssertion struct {
@@ -114,20 +159,20 @@ type ValidationReport struct {
 }
 
 type ValidationCheck struct {
-	ID                   string                `json:"id"`
-	Kind                 string                `json:"kind"`
-	Code                 string                `json:"code,omitempty"`
-	NodeID               string                `json:"node_id,omitempty"`
-	StageID              string                `json:"stage_id,omitempty"`
-	Severity             FindingSeverity       `json:"severity,omitempty"`
-	Passed               bool                  `json:"passed"`
-	Required             bool                  `json:"required"`
-	Summary              string                `json:"summary,omitempty"`
-	EvidenceRefs         []EvidenceRef         `json:"evidence_refs,omitempty"`
+	ID           string          `json:"id"`
+	Kind         string          `json:"kind"`
+	Code         string          `json:"code,omitempty"`
+	NodeID       string          `json:"node_id,omitempty"`
+	StageID      string          `json:"stage_id,omitempty"`
+	Severity     FindingSeverity `json:"severity,omitempty"`
+	Passed       bool            `json:"passed"`
+	Required     bool            `json:"required"`
+	Summary      string          `json:"summary,omitempty"`
+	EvidenceRefs []EvidenceRef   `json:"evidence_refs,omitempty"`
 	// P1.2: structured feedback fields populated by AnnotateValidationChecks
-	Impact               string                `json:"impact,omitempty"`
-	Suggestion           string                `json:"suggestion,omitempty"`
-	NextStep             string                `json:"next_step,omitempty"`
+	Impact     string `json:"impact,omitempty"`
+	Suggestion string `json:"suggestion,omitempty"`
+	NextStep   string `json:"next_step,omitempty"`
 	// P1.3: responsibility domain for cross-team triage
 	ResponsibilityDomain ValidationCheckDomain `json:"responsibility_domain,omitempty"`
 }
@@ -213,8 +258,59 @@ func (e StageExecutionEvent) Validate() error {
 				return err
 			}
 		}
+		if e.Observation.TargetGeometry != nil {
+			if err := validateBrowserTargetGeometry(*e.Observation.TargetGeometry); err != nil {
+				return err
+			}
+		}
+		if len(e.Observation.TargetResolutionAttempts) > 128 {
+			return errors.New("runtime observation contains too many target resolution attempts")
+		}
+		for _, attempt := range e.Observation.TargetResolutionAttempts {
+			if strings.TrimSpace(attempt.Strategy) == "" || !validTargetResolutionOutcome(attempt.Outcome) {
+				return errors.New("target resolution attempt requires a strategy and supported outcome")
+			}
+			if attempt.CandidateCount < 0 || attempt.CandidateCount > 10_000 {
+				return errors.New("target resolution attempt candidate_count is out of range")
+			}
+			if err := validateRuntimeContractText(attempt.Strategy, attempt.Outcome); err != nil {
+				return err
+			}
+		}
 	}
 	return validateRuntimeEvidenceRefs(e.EvidenceRefs)
+}
+
+func validTargetResolutionOutcome(value string) bool {
+	switch value {
+	case "resolved", "no_candidates", "ambiguous", "not_visible", "role_mismatch", "name_mismatch", "forbidden_name", "unsupported_selector":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateBrowserTargetGeometry(value BrowserTargetGeometry) error {
+	if value.SchemaVersion != "demoops.browser_target_geometry.v1" {
+		return errors.New("unsupported browser target geometry schema version")
+	}
+	if anyBlank(value.TargetSemanticID, value.ResolutionStrategy, value.SelectorDigestSHA256) || value.CapturedAt.IsZero() {
+		return errors.New("browser target geometry is missing identity fields or captured_at")
+	}
+	if value.RecordingOffsetMS < 0 || value.Viewport.Width <= 0 || value.Viewport.Height <= 0 || value.Viewport.DPR <= 0 {
+		return errors.New("browser target geometry requires a valid recording offset and viewport")
+	}
+	if value.ElementBoxCSSPX.Width <= 0 || value.ElementBoxCSSPX.Height <= 0 {
+		return errors.New("browser target geometry requires a positive CSS pixel box")
+	}
+	normalized := value.ElementBoxNormalized
+	if normalized.X < 0 || normalized.Y < 0 || normalized.Width <= 0 || normalized.Height <= 0 || normalized.X+normalized.Width > 1.000001 || normalized.Y+normalized.Height > 1.000001 {
+		return errors.New("browser target geometry normalized box must remain within the viewport")
+	}
+	if !unitInterval(value.Confidence) {
+		return errors.New("browser target geometry confidence must be between 0 and 1")
+	}
+	return validateRuntimeContractText(value.TargetSemanticID, value.ResolutionStrategy, value.SelectorDigestSHA256, value.ScreenshotArtifactID)
 }
 
 func (r ValidationReport) Validate() error {
@@ -331,8 +427,15 @@ func validValidationDecision(value ValidationDecision) bool {
 		value == ValidationDecisionStopAndReport || value == ValidationDecisionReunderstandingRequired
 }
 
-func realSuccessEvidence(value RuntimeObservationSource) bool {
+// RuntimeObservationIsRealEvidence reports whether an observation came from
+// the running browser or a runtime artifact. Plan-derived observations never
+// satisfy execution or delivery verification.
+func RuntimeObservationIsRealEvidence(value RuntimeObservationSource) bool {
 	return value == RuntimeObservationActualBrowser || value == RuntimeObservationAssertion || value == RuntimeObservationArtifact
+}
+
+func realSuccessEvidence(value RuntimeObservationSource) bool {
+	return RuntimeObservationIsRealEvidence(value)
 }
 
 func unitInterval(value float64) bool {

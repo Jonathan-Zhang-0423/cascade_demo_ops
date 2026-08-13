@@ -540,15 +540,11 @@ func (v deterministicBrowserAgentStageVerifier) ValidateStageEvents(_ context.Co
 }
 
 func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver.BrowserAgentWorkerOpenRequest {
-	viewport := driver.BrowserAgentWorkerViewport{Width: 1440, Height: 900}
-	if request.Package.RecordingRunSpec.Outputs.ResolutionWidth > 0 && request.Package.RecordingRunSpec.Outputs.ResolutionHeight > 0 {
-		viewport = driver.BrowserAgentWorkerViewport{Width: request.Package.RecordingRunSpec.Outputs.ResolutionWidth, Height: request.Package.RecordingRunSpec.Outputs.ResolutionHeight}
-	} else if len(request.Package.RecordingRunSpec.Browser.Viewports) > 0 {
-		candidate := request.Package.RecordingRunSpec.Browser.Viewports[0]
-		if candidate.Width > 0 && candidate.Height > 0 {
-			viewport = driver.BrowserAgentWorkerViewport{Width: candidate.Width, Height: candidate.Height}
-		}
-	}
+	// Browser Agent recordings are evidence masters, not delivery renders.
+	// Keep one canonical 16:9 2K web-content viewport so later crop, highlight,
+	// and model-reference coordinates share a stable frame. App output sizing
+	// remains an independent delivery intent applied by the editor.
+	viewport := driver.BrowserAgentWorkerViewport{Width: 2560, Height: 1440}
 	maskSelectors := append([]string{}, request.Package.RecordingRunSpec.Redactions.MaskSelectors...)
 	maskSelectors = append(maskSelectors, request.Package.SafetyReport.RedactionSelectors...)
 	recordingSensitive := true

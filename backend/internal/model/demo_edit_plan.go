@@ -299,6 +299,10 @@ type EditOverlay struct {
 	Text           string          `json:"text,omitempty"`
 	SourceStepID   string          `json:"source_step_id,omitempty"`
 	TargetSelector string          `json:"target_selector,omitempty"`
+	// TargetEvidenceArtifactID binds a target-oriented overlay to the Browser
+	// Agent screenshot that carries the observed target geometry.
+	TargetEvidenceArtifactID string `json:"target_evidence_artifact_id,omitempty"`
+	GeometrySource          string `json:"geometry_source,omitempty"`
 	StartMS        *int            `json:"start_ms,omitempty"`
 	EndMS          *int            `json:"end_ms,omitempty"`
 	// Shape geometry is normalized (0..1) to its parent shot. It remains

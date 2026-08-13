@@ -96,6 +96,26 @@ type RenderRequest struct {
 	AssetTimelineCatalog       *model.AssetTimelineCatalog   `json:"asset_timeline_catalog,omitempty"`
 	EditPlan                   *model.DemoEditPlan           `json:"edit_plan,omitempty"`
 	RenderProfile              *model.EditorRenderProfile    `json:"render_profile,omitempty"`
+	ModelExecution             *RenderModelExecutionAudit    `json:"model_execution,omitempty"`
+}
+
+// RenderModelExecutionAudit distinguishes a provider call from a model change
+// that was actually admitted into the deterministic edit plan and rendered.
+type RenderModelExecutionAudit struct {
+	Invoked               bool     `json:"invoked"`
+	Provider              string   `json:"provider,omitempty"`
+	Model                 string   `json:"model,omitempty"`
+	RequestTraceID        string   `json:"request_trace_id,omitempty"`
+	PlanSource            string   `json:"plan_source"`
+	ProviderCallStatus    string   `json:"provider_call_status,omitempty"`
+	RealCallMade          bool     `json:"real_call_made,omitempty"`
+	ProviderOutputAdopted bool     `json:"provider_output_adopted"`
+	SuggestionOrigin      string   `json:"suggestion_origin,omitempty"`
+	SuggestionID          string   `json:"suggestion_id,omitempty"`
+	PatchID               string   `json:"patch_id,omitempty"`
+	PatchApplied          bool     `json:"patch_applied,omitempty"`
+	AdoptedShotIDs        []string `json:"adopted_shot_ids,omitempty"`
+	Note                  string   `json:"note,omitempty"`
 }
 
 type RenderResult struct {

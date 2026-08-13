@@ -65,6 +65,60 @@ func TestFFmpegMiniMaxH3MediaNormalizerUsesLockedProfileAndDoubleProbe(t *testin
 	}
 }
 
+func TestFFmpegMiniMaxH3MediaNormalizerBoundsProviderReferenceDuration(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "evidence.webm")
+	if err := os.WriteFile(source, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &scriptedMiniMaxH3CommandRunner{}
+	normalizer := FFmpegMiniMaxH3MediaNormalizer{FFmpegPath: "ffmpeg-test", FFprobePath: "ffprobe-test", Runner: runner, MaxDurationSec: 5}
+	if _, _, err := normalizer.Normalize(t.Context(), source, filepath.Join(root, "reference.mp4")); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("command calls = %+v", runner.calls)
+	}
+	ffmpegArgs := strings.Join(runner.calls[1].args, " ")
+	if !strings.Contains(ffmpegArgs, "-t 5") {
+		t.Fatalf("provider reference must be limited to five seconds: %s", ffmpegArgs)
+	}
+}
+
+func TestFFmpegMiniMaxH3MediaNormalizerFallsBackForLegacyFFmpegFPSMode(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "evidence.webm")
+	if err := os.WriteFile(source, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ffmpegCalls := 0
+	runner := MiniMaxH3CommandRunnerFunc(func(_ context.Context, command string, args ...string) (MiniMaxH3CommandResult, error) {
+		if strings.Contains(strings.ToLower(filepath.Base(command)), "ffprobe") {
+			path := args[len(args)-1]
+			if strings.Contains(filepath.Base(path), ".tmp.") {
+				return MiniMaxH3CommandResult{Stdout: []byte(`{"format":{"format_name":"mov,mp4","duration":"5"},"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"30/1","r_frame_rate":"30/1"}]}`)}, nil
+			}
+			return MiniMaxH3CommandResult{Stdout: []byte(`{"format":{"format_name":"matroska,webm","duration":"8"},"streams":[{"codec_type":"video","codec_name":"vp8","pix_fmt":"yuv420p","width":2560,"height":1440,"avg_frame_rate":"25/1","r_frame_rate":"25/1"}]}`)}, nil
+		}
+		ffmpegCalls++
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "-fps_mode cfr") {
+			return MiniMaxH3CommandResult{Stderr: []byte("Unrecognized option 'fps_mode'. Error splitting the argument list: Option not found")}, errors.New("exit status 1")
+		}
+		if !strings.Contains(joined, "-vsync cfr") {
+			t.Fatalf("legacy retry missing -vsync cfr: %s", joined)
+		}
+		return MiniMaxH3CommandResult{}, os.WriteFile(args[len(args)-1], []byte("normalized"), 0o644)
+	})
+
+	if _, _, err := (FFmpegMiniMaxH3MediaNormalizer{Runner: runner}).Normalize(t.Context(), source, filepath.Join(root, "reference.mp4")); err != nil {
+		t.Fatal(err)
+	}
+	if ffmpegCalls != 2 {
+		t.Fatalf("expected one modern attempt and one legacy retry, got %d", ffmpegCalls)
+	}
+}
+
 func TestFFmpegMiniMaxH3MediaNormalizerRejectsBadNormalizedProbe(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "original.mp4")

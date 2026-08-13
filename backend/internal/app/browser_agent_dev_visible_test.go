@@ -107,6 +107,27 @@ func TestDevVisibleTargetURLAcceptsExplicitLoopbackURL(t *testing.T) {
 	}
 }
 
+func TestDevVisibleOpenRequestUsesCanonical2KEvidenceViewport(t *testing.T) {
+	target, err := devVisibleTargetURL("http://127.0.0.1:5000/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := devVisibleBrowserAgentOpenRequest(
+		"session-2k", t.TempDir(), target,
+		DevVisibleBrowserAgentPrepareRequest{AutoLogin: true, MaskSelectors: []string{"[data-private]"}},
+		true, false,
+	)
+	if open.Browser.Viewport.Width != 2560 || open.Browser.Viewport.Height != 1440 {
+		t.Fatalf("visible acceptance must capture the canonical 2K 16:9 evidence master: %+v", open.Browser.Viewport)
+	}
+	if !open.Browser.RecordVideo || open.Browser.Headless {
+		t.Fatalf("unexpected visible acceptance browser options: %+v", open.Browser)
+	}
+	if len(open.AllowedOrigins) != 1 || open.AllowedOrigins[0] != "http://127.0.0.1:5000" {
+		t.Fatalf("visible acceptance origin scope changed: %+v", open.AllowedOrigins)
+	}
+}
+
 func TestDevVisiblePostLoginRuntimePlanUsesManualCheckpointOnlyForFirstSessionStage(t *testing.T) {
 	plan := BrowserAgentRuntimePlan{Stages: []BrowserAgentRuntimeStage{
 		{ID: "stage_session", Order: 1, NodeID: "node_session", StageKind: model.BusinessStageKindSessionSetup, URL: "http://127.0.0.1:5000/app", Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionFill}}},

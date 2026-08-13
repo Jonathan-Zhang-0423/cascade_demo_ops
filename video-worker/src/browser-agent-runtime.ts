@@ -12,6 +12,7 @@ type BrowserAgentTargetContract = {
   forbidden_names?: string[];
   component_ref?: string;
   destructive: boolean;
+  evidence_refs?: Array<{ id?: string; kind?: string; artifact_id?: string; confidence?: number }>;
 };
 
 type BrowserAgentComponentTarget = {
@@ -120,6 +121,33 @@ type RuntimeObservation = {
   url?: string;
   title?: string;
   assertions?: Array<{ kind: string; passed: boolean; actual?: string }>;
+  target_geometry?: BrowserTargetGeometry;
+  target_resolution_attempts?: BrowserTargetResolutionAttempt[];
+};
+
+export type BrowserTargetResolutionAttempt = {
+  strategy: string;
+  candidate_count: number;
+  unique: boolean;
+  visible: boolean;
+  evidence_bound: boolean;
+  role_allowed?: boolean;
+  name_allowed?: boolean;
+  outcome: "resolved" | "no_candidates" | "ambiguous" | "not_visible" | "role_mismatch" | "name_mismatch" | "forbidden_name" | "unsupported_selector";
+};
+
+export type BrowserTargetGeometry = {
+  schema_version: "demoops.browser_target_geometry.v1";
+  target_semantic_id: string;
+  resolution_strategy: string;
+  selector_digest_sha256: string;
+  captured_at: string;
+  recording_offset_ms: number;
+  viewport: { width: number; height: number; dpr: number };
+  element_box_css_px: { x: number; y: number; width: number; height: number };
+  element_box_normalized: { x: number; y: number; width: number; height: number };
+  screenshot_artifact_id?: string;
+  confidence: number;
 };
 
 type EvidenceRef = {
@@ -178,13 +206,18 @@ type BrowserAgentSession = {
 	recordingSensitive: boolean;
 	recordTrace: boolean;
 	traceActive: boolean;
+	openedAtMS: number;
+	targetGeometryByArtifactID: Map<string, BrowserTargetGeometry>;
 };
 
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
 
 const sessions = new Map<string, BrowserAgentSession>();
 const targetProbeTimeoutMS = 2_000;
-const defaultViewport = { width: 1440, height: 900 };
+// Canonical Browser Agent evidence master. Playwright records only the page
+// content viewport: browser chrome, the desktop, and off-viewport page content
+// are excluded.
+const defaultViewport = { width: 2560, height: 1440 };
 const actionTimeoutMS = 10_000;
 const screenshotTimeoutMS = 8_000;
 const secretInputMaskSelector = '[data-cascade-secret-input="true"]';
@@ -192,6 +225,10 @@ const secretInputMaskSelector = '[data-cascade-secret-input="true"]';
 export async function openBrowserAgentSession(request: BrowserAgentOpenRequest): Promise<{ session_id: string; runtime_versions: Record<string, string> }> {
   if (!request.output_dir?.trim()) throw new Error("browser_agent_output_dir_required");
   if (!Array.isArray(request.allowed_domains) || request.allowed_domains.length === 0) throw new Error("browser_agent_allowed_domains_required");
+  const requestedViewport = request.browser?.viewport;
+  if (requestedViewport && (requestedViewport.width !== defaultViewport.width || requestedViewport.height !== defaultViewport.height)) {
+    throw new Error(`browser_agent_recording_resolution_mismatch: got=${requestedViewport.width}x${requestedViewport.height} want=${defaultViewport.width}x${defaultViewport.height}`);
+  }
   const sessionID = safeName(request.session_id || `browser_agent_${randomUUID()}`);
   if (sessions.has(sessionID)) throw new Error(`browser_agent_session_exists: ${sessionID}`);
 
@@ -242,6 +279,8 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	recordingSensitive: request.recording_sensitive ?? true,
 	recordTrace,
 	traceActive: recordTrace,
+	openedAtMS: Date.now(),
+	targetGeometryByArtifactID: new Map(),
   };
   await page.route("**/*", async (route: any) => {
     // Route allowlists apply to document navigation, not the page's JS/CSS/media.
@@ -438,15 +477,22 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   const artifact = await captureScreenshot(session, request.stage, "before");
   let resolved: ResolvedTarget | undefined;
   let approvedAlternative: { kind: string; value: string } | undefined;
+	let targetGeometry: BrowserTargetGeometry | undefined;
 	let suggestedWaitCondition: string | undefined;
   let resolutionFailure = "";
+  const resolutionAttempts: BrowserTargetResolutionAttempt[] = [];
   if (action && interactionRequiresResolvedTarget(action.kind)) {
     try {
-      resolved = await resolveTarget(session.page, request.stage, action, false);
+      resolved = await resolveTarget(session.page, request.stage, action, false, resolutionAttempts);
+		targetGeometry = await captureTargetGeometry(session, request.stage, resolved, artifact.id);
+		if (!targetGeometry) {
+			resolved = undefined;
+			resolutionFailure = `browser_agent_target_not_resolved: ${request.stage.node_id}; strategies=target_geometry_unavailable`;
+		}
     } catch (error) {
       if (!isTargetResolutionFailure(error)) throw error;
       resolutionFailure = safeResolutionFailure(error);
-      approvedAlternative = await resolveSingleApprovedAlternative(session.page, request.stage, action.kind);
+      approvedAlternative = await resolveSingleApprovedAlternative(session.page, request.stage, action.kind, resolutionAttempts);
 		if (!approvedAlternative && await pageStillBusy(session.page)) {
 			suggestedWaitCondition = suggestedEntryWaitCondition(request.stage);
 		}
@@ -455,7 +501,7 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   const evidence = screenshotEvidence(artifact, request.stage, "执行前页面观察");
   const assertions = resolutionAssertions(resolved?.strategy, resolutionFailure, safeURL(session.page.url()));
   return {
-    observation: await observation(session.page, "actual_browser_observation", assertions),
+    observation: await observation(session.page, "actual_browser_observation", assertions, targetGeometry, resolutionAttempts),
     evidence_refs: [evidence],
     artifacts: [artifact],
     target_resolved: Boolean(resolved) || Boolean(action && !interactionRequiresResolvedTarget(action.kind)),
@@ -472,6 +518,49 @@ function safeResolutionFailure(error: unknown): string {
   const message = String(error instanceof Error ? error.message : error);
   // The resolver emits only stage id and attempted strategy names; do not leak page text or DOM.
   return message.replace(/[\r\n]+/g, " ").slice(0, 500);
+}
+
+export async function captureTargetGeometry(
+  session: Pick<BrowserAgentSession, "page" | "openedAtMS">,
+  stage: BrowserAgentWorkerStage,
+  resolved: ResolvedTarget,
+  screenshotArtifactID?: string,
+): Promise<BrowserTargetGeometry | undefined> {
+  const box = await withTimeout(resolved.locator.boundingBox(), targetProbeTimeoutMS, null as { x: number; y: number; width: number; height: number } | null);
+  const viewport = session.page.viewportSize?.() || await session.page.evaluate(() => ({
+    width: (globalThis as any).innerWidth,
+    height: (globalThis as any).innerHeight,
+  })).catch(() => undefined);
+  if (!box || !viewport || viewport.width <= 0 || viewport.height <= 0) return undefined;
+  const left = Math.max(0, Math.min(viewport.width, Number(box.x)));
+  const top = Math.max(0, Math.min(viewport.height, Number(box.y)));
+  const right = Math.max(left, Math.min(viewport.width, Number(box.x) + Number(box.width)));
+  const bottom = Math.max(top, Math.min(viewport.height, Number(box.y) + Number(box.height)));
+  if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) return undefined;
+  const dpr = await session.page.evaluate(() => Number((globalThis as any).devicePixelRatio) || 1).catch(() => 1);
+  const selectorIdentity = JSON.stringify({
+    target_semantic_id: stage.target_contract.semantic_id,
+    strategy: resolved.strategy,
+    alternative: resolved.approvedAlternative || null,
+  });
+  return {
+    schema_version: "demoops.browser_target_geometry.v1",
+    target_semantic_id: stage.target_contract.semantic_id,
+    resolution_strategy: resolved.strategy,
+    selector_digest_sha256: createHash("sha256").update(selectorIdentity).digest("hex"),
+    captured_at: new Date().toISOString(),
+    recording_offset_ms: Math.max(0, Date.now() - session.openedAtMS),
+    viewport: { width: viewport.width, height: viewport.height, dpr: Number.isFinite(dpr) && dpr > 0 ? dpr : 1 },
+    element_box_css_px: { x: left, y: top, width: right - left, height: bottom - top },
+    element_box_normalized: {
+      x: left / viewport.width,
+      y: top / viewport.height,
+      width: (right - left) / viewport.width,
+      height: (bottom - top) / viewport.height,
+    },
+    ...(screenshotArtifactID ? { screenshot_artifact_id: screenshotArtifactID } : {}),
+    confidence: 1,
+  };
 }
 
 // Navigation and page-observation interactions are bound to the approved
@@ -535,9 +624,17 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   validateStage(request.stage);
   const secretValues = validatedStageSecretValues(request.stage, request.secrets);
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
+  const targetArtifacts: ArtifactRef[] = [];
+  const targetEvidence: EvidenceRef[] = [];
+  let targetGeometry: BrowserTargetGeometry | undefined;
   try {
   for (const interaction of request.stage.interactions) {
-    await executeInteraction(session, request.stage, interaction, secretValues);
+    const actionEvidence = await executeInteraction(session, request.stage, interaction, secretValues);
+    if (actionEvidence) {
+      targetGeometry = actionEvidence.geometry;
+      targetArtifacts.push(actionEvidence.artifact);
+      targetEvidence.push(screenshotEvidence(actionEvidence.artifact, request.stage, "动作目标几何证据"));
+    }
     assertions.push({ kind: `action_${interaction.kind}_completed`, passed: true, actual: request.stage.target_contract.semantic_id });
   }
   await waitForCaptureWindow(session.page, request.stage);
@@ -545,9 +642,9 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   const artifact = await captureScreenshot(session, request.stage, "after");
   const evidence = screenshotEvidence(artifact, request.stage, "执行后结果证据");
   return {
-    observation: await observation(session.page, "browser_assertion", assertions),
-    evidence_refs: [evidence],
-    artifacts: [artifact],
+    observation: await observation(session.page, "browser_assertion", assertions, targetGeometry),
+    evidence_refs: [...targetEvidence, evidence],
+    artifacts: [...targetArtifacts, artifact],
     target_resolved: true,
   };
   } finally {
@@ -606,17 +703,18 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   // Failed observations may throw after their before-capture. Recover every
   // stage screenshot here so the Server can build a protocol failure package.
   for (const entry of await readdir(session.outputDir).catch(() => [] as string[])) {
-    const match = /^stage-\d+-(.+)-(before|after|revalidate)\.png$/i.exec(entry);
+    const match = /^stage-\d+-(.+)-(before|target|after|revalidate)\.png$/i.exec(entry);
     if (!match) continue;
     const nodeID = match[1] || "unknown";
     const phase = (match[2] || "before").toLowerCase();
+    const artifactID = `artifact_${safeName(session.id)}_${safeName(nodeID)}_${phase}`;
     artifacts.push(await artifactRef(
-      `artifact_${safeName(session.id)}_${safeName(nodeID)}_${phase}`,
-      "screenshot",
+      artifactID,
+      phase === "target" ? "target_geometry_screenshot" : "screenshot",
       path.join(session.outputDir, entry),
       "image/png",
       nodeID,
-      { include_in_demo: phase === "after" || phase === "revalidate", capture_phase: phase, recovered_at_session_close: true },
+      recoveredScreenshotMetadata(phase, artifactID, session.targetGeometryByArtifactID),
       false,
     ));
   }
@@ -628,7 +726,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   };
 }
 
-async function executeInteraction(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, secretValues: Record<string, string>): Promise<void> {
+async function executeInteraction(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, secretValues: Record<string, string>): Promise<{ geometry: BrowserTargetGeometry; artifact: ArtifactRef } | undefined> {
   if (interaction.non_destructive !== true || stage.target_contract.destructive) throw new Error("browser_agent_destructive_action_denied");
   const timeout = numericParameter(interaction.parameters, "timeout_ms", actionTimeoutMS, 250, 60_000);
   if (interaction.kind === "navigate") {
@@ -650,17 +748,21 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
     return;
   }
   const resolved = await resolveTarget(session.page, stage, interaction, true);
+  if (interaction.secret_ref) await prepareSecretTarget(session, resolved.locator);
+  const targetArtifact = await captureScreenshot(session, stage, "target");
+  const targetGeometry = await captureTargetGeometry(session, stage, resolved, targetArtifact.id);
+  if (!targetGeometry) throw new Error(`browser_agent_target_geometry_unavailable: ${stage.node_id}`);
+  targetArtifact.metadata.target_geometry = targetGeometry;
+  session.targetGeometryByArtifactID.set(targetArtifact.id, targetGeometry);
   if (interaction.kind === "click") {
     await resolved.locator.click({ timeout });
   } else if (interaction.kind === "fill") {
     if (interaction.input_ref && !interaction.secret_ref && interaction.value === undefined) throw new Error("browser_agent_input_ref_requires_resolver");
     const value = interaction.secret_ref ? requiredStageSecretValue(interaction.secret_ref, secretValues) : interaction.value || "";
-    if (interaction.secret_ref) await prepareSecretTarget(session, resolved.locator);
     await resolved.locator.fill(value, { timeout });
   } else if (interaction.kind === "select") {
     if (interaction.input_ref && !interaction.secret_ref && interaction.value === undefined) throw new Error("browser_agent_input_ref_requires_resolver");
     const value = interaction.secret_ref ? requiredStageSecretValue(interaction.secret_ref, secretValues) : interaction.value || "";
-    if (interaction.secret_ref) await prepareSecretTarget(session, resolved.locator);
     await resolved.locator.selectOption(value, { timeout });
   } else if (interaction.kind === "assert") {
     await resolved.locator.waitFor({ state: "visible", timeout });
@@ -670,27 +772,49 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
     throw new Error(`browser_agent_action_not_supported: ${interaction.kind}`);
   }
   await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+  return { geometry: targetGeometry, artifact: targetArtifact };
 }
 
-async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, allowSelectorAlternatives: boolean): Promise<ResolvedTarget> {
+export function recoveredScreenshotMetadata(
+  phase: string,
+  artifactID: string,
+  targetGeometryByArtifactID: ReadonlyMap<string, BrowserTargetGeometry>,
+): Record<string, unknown> {
+  const targetGeometry = phase === "target" ? targetGeometryByArtifactID.get(artifactID) : undefined;
+  return {
+    include_in_demo: phase === "after" || phase === "revalidate",
+    capture_phase: phase,
+    recovered_at_session_close: true,
+    ...(targetGeometry ? { target_geometry: targetGeometry } : {}),
+  };
+}
+
+async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, allowSelectorAlternatives: boolean, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget> {
 	const candidates: Array<{ strategy: string; locator: any; evidenceBoundAlternative?: { kind: string; value: string } }> = [];
 	const contract = stage.target_contract;
 	const preferred = stage.preferred_selector_alternative;
 	if (preferred) {
 		const locator = locatorFromAlternative(page, preferred.kind, preferred.value);
-		if (!locator) throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=preferred_${preferred.kind}`);
+		if (!locator) {
+      attempts.push(targetResolutionAttempt(`preferred_${preferred.kind}`, 0, false, false, isEvidenceBoundSelectorAlternative(stage, preferred), "unsupported_selector"));
+      throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=preferred_${preferred.kind}`);
+    }
 		// A selector recovered through an App evidence binding must be rechecked
 		// with the same bounded semantics used during discovery. Ordinary App
 		// alternatives keep the original exact target-contract validation.
 		const resolved = isEvidenceBoundSelectorAlternative(stage, preferred)
-			? await resolveUniqueVisibleEvidenceBoundTarget(locator, `approved_evidence_${preferred.kind}`, contract, preferred, interaction.kind)
-			: await resolveUniqueVisibleContractTarget(locator, `approved_${preferred.kind}`, contract);
+			? await resolveUniqueVisibleEvidenceBoundTarget(locator, `approved_evidence_${preferred.kind}`, contract, preferred, interaction.kind, undefined, attempts)
+			: await resolveUniqueVisibleContractTarget(locator, `approved_${preferred.kind}`, contract, attempts);
 		if (!resolved) throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=preferred_${preferred.kind}`);
 		return { ...resolved, approvedAlternative: { kind: preferred.kind, value: preferred.value } };
 	}
   for (const role of contract.allowed_roles || []) {
     for (const name of contract.allowed_names || []) {
       candidates.push({ strategy: `role:${role}+approved_name`, locator: page.getByRole(role, { name, exact: true }) });
+      const normalizedName = normalizedApprovedTargetName(name);
+      if (normalizedName && normalizeElementName(normalizedName) !== normalizeElementName(name)) {
+        candidates.push({ strategy: `role:${role}+normalized_approved_name`, locator: page.getByRole(role, { name: normalizedName, exact: true }) });
+      }
     }
   }
   const components = (stage.components || []).filter((component) => !contract.component_ref || component.component_ref === contract.component_ref);
@@ -711,7 +835,12 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
     if (component.selector) candidates.push({ strategy: "component_css", locator: page.locator(component.selector) });
   }
   if (interaction.target?.selector) {
-    const evidenceBoundAlternative = evidenceBoundCSSAlternative(stage, interaction.target.selector);
+    // An App target that carries an evidence reference is already an
+    // approved binding. Keep the selector exact, but permit a localized
+    // accessible name (for example `Build` -> `构建!`) when the unique
+    // element still satisfies the contract role and forbidden-name checks.
+    const evidenceBoundAlternative = evidenceBoundCSSAlternative(stage, interaction.target.selector)
+      || (contract.evidence_refs?.length ? { kind: "css", value: interaction.target.selector } : undefined);
     candidates.push({
       strategy: "interaction_css",
       locator: page.locator(interaction.target.selector),
@@ -724,46 +853,17 @@ async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interact
     if (seen.has(candidate.strategy)) continue;
     seen.add(candidate.strategy);
     const resolved = candidate.evidenceBoundAlternative
-      ? await resolveUniqueVisibleEvidenceBoundTarget(candidate.locator, candidate.strategy, contract, candidate.evidenceBoundAlternative, interaction.kind)
-      : await resolveUniqueVisibleContractTarget(candidate.locator, candidate.strategy, contract);
+      ? await resolveUniqueVisibleEvidenceBoundTarget(candidate.locator, candidate.strategy, contract, candidate.evidenceBoundAlternative, interaction.kind, { allowSelectorIdentityOnly: true }, attempts)
+      : await resolveUniqueVisibleContractTarget(candidate.locator, candidate.strategy, contract, attempts);
     if (resolved) return resolved;
   }
-  const semanticRepair = await resolveEvidenceBoundDialogAction(page, stage, interaction);
-  if (semanticRepair) return semanticRepair;
   throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=${[...seen].join(",") || "none"}`);
-}
-
-async function resolveEvidenceBoundDialogAction(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction): Promise<ResolvedTarget | undefined> {
-  if (interaction.kind !== "click") return undefined;
-  const semanticText = [
-    stage.node_id,
-    stage.objective,
-    ...(stage.target_contract?.allowed_names || []),
-    interaction.target?.text,
-    interaction.target?.label,
-  ].filter(Boolean).join(" ");
-  if (!/(构建|创建|build|create)/i.test(semanticText)) return undefined;
-  const surfaces = ['[data-testid="dialog-new-project"]', '[role="dialog"]', '[data-testid*="dialog" i]'];
-  for (const surface of surfaces) {
-    try {
-      const dialog = page.locator(surface).filter({ has: page.locator('button') }).first();
-      if (!await dialog.isVisible({ timeout: 750 })) continue;
-      const buttons = dialog.locator('button').filter({ hasText: /构建|创建|build|create/i });
-      if (await buttons.count() !== 1 || !await buttons.first().isVisible({ timeout: 750 })) continue;
-      const semantics = await compactElementSemantics(buttons.first());
-      if (forbiddenName(semantics.name, stage.target_contract?.forbidden_names || [])) continue;
-      return { locator: buttons.first(), strategy: "server_semantic_dialog_action" };
-    } catch {
-      // Continue probing the next evidence-bound dialog surface.
-    }
-  }
-  return undefined;
 }
 
 // This is the only discovery step allowed after the primary locator fails.
 // It checks App-approved alternatives one by one and returns nothing unless
 // exactly one live target is unique, visible, and contract-compatible.
-async function resolveSingleApprovedAlternative(page: any, stage: BrowserAgentWorkerStage, interactionKind: string): Promise<{ kind: string; value: string } | undefined> {
+async function resolveSingleApprovedAlternative(page: any, stage: BrowserAgentWorkerStage, interactionKind: string, attempts: BrowserTargetResolutionAttempt[] = []): Promise<{ kind: string; value: string } | undefined> {
   const matched: Array<{ kind: string; value: string }> = [];
   const seen = new Set<string>();
   const probe = async (alternative: { kind: string; value: string }, evidenceBound: boolean) => {
@@ -773,8 +873,8 @@ async function resolveSingleApprovedAlternative(page: any, stage: BrowserAgentWo
     const locator = locatorFromAlternative(page, alternative.kind, alternative.value);
     if (!locator) return;
     const resolved = evidenceBound
-      ? await resolveUniqueVisibleEvidenceBoundTarget(locator, `approved_evidence_${alternative.kind}`, stage.target_contract, alternative, interactionKind)
-      : await resolveUniqueVisibleContractTarget(locator, `approved_${alternative.kind}`, stage.target_contract);
+      ? await resolveUniqueVisibleEvidenceBoundTarget(locator, `approved_evidence_${alternative.kind}`, stage.target_contract, alternative, interactionKind, undefined, attempts)
+      : await resolveUniqueVisibleContractTarget(locator, `approved_${alternative.kind}`, stage.target_contract, attempts);
     if (resolved) matched.push({ kind: alternative.kind, value: alternative.value });
   };
   for (const alternative of stage.evidence_bound_selector_alternatives || []) {
@@ -801,18 +901,35 @@ function evidenceBoundCSSAlternative(stage: Pick<BrowserAgentWorkerStage, "evide
   );
 }
 
-export async function resolveUniqueVisibleEvidenceBoundTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract, alternative: { kind: string; value: string }, interactionKind: string): Promise<ResolvedTarget | undefined> {
+export async function resolveUniqueVisibleEvidenceBoundTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract, alternative: { kind: string; value: string }, interactionKind: string, options?: { allowSelectorIdentityOnly?: boolean }, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget | undefined> {
   const count = await withTimeout(locator.count(), targetProbeTimeoutMS, 0);
-  if (count !== 1) return undefined;
+  if (count !== 1) {
+    attempts.push(targetResolutionAttempt(strategy, count, false, false, true, count === 0 ? "no_candidates" : "ambiguous"));
+    return undefined;
+  }
   const unique = locator.first();
-  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) return undefined;
+  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, false, true, "not_visible"));
+    return undefined;
+  }
   const semantics = await withTimeout(compactElementSemantics(unique), targetProbeTimeoutMS, { role: "", name: "" });
   if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, true, true, "forbidden_name", false, false));
     throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
   }
   const allowedRoles = (contract.allowed_roles || []).map((value) => value.trim().toLowerCase()).filter(Boolean);
-  if (allowedRoles.length > 0 && !allowedRoles.includes(semantics.role)) return undefined;
-  if (!evidenceBoundNameAllowedForInteraction(semantics.name, contract.allowed_names || [], alternative, interactionKind)) return undefined;
+  const roleAllowed = allowedRoles.length === 0 || allowedRoles.includes(semantics.role);
+  if (!roleAllowed) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, true, true, "role_mismatch", false));
+    return undefined;
+  }
+  const nameAllowed = evidenceBoundNameAllowedForInteraction(semantics.name, contract.allowed_names || [], alternative, interactionKind)
+    || options?.allowSelectorIdentityOnly === true;
+  if (!nameAllowed) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, true, true, "name_mismatch", true, false));
+    return undefined;
+  }
+  attempts.push(targetResolutionAttempt(strategy, count, true, true, true, "resolved", true, true));
   return { locator: unique, strategy };
 }
 
@@ -853,17 +970,59 @@ function normalizeEvidenceBoundElementName(value: string): string {
   return normalizeElementName(value).replace(/^[^\p{L}\p{N}]+/gu, "").trim();
 }
 
-async function resolveUniqueVisibleContractTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract): Promise<ResolvedTarget | undefined> {
+async function resolveUniqueVisibleContractTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget | undefined> {
   const count = await withTimeout(locator.count(), targetProbeTimeoutMS, 0);
-  if (count !== 1) return undefined;
+  if (count !== 1) {
+    attempts.push(targetResolutionAttempt(strategy, count, false, false, false, count === 0 ? "no_candidates" : "ambiguous"));
+    return undefined;
+  }
   const unique = locator.first();
-  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) return undefined;
+  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, false, false, "not_visible"));
+    return undefined;
+  }
   const semantics = await withTimeout(compactElementSemantics(unique), targetProbeTimeoutMS, { role: "", name: "" });
-  if (!semanticsAllowed(semantics, contract)) return undefined;
   if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "forbidden_name", false, false));
     throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
   }
+  const allowedRoles = (contract.allowed_roles || []).map((value) => value.trim().toLowerCase()).filter(Boolean);
+  const roleAllowed = allowedRoles.length === 0 || allowedRoles.includes(semantics.role);
+  if (!roleAllowed) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "role_mismatch", false));
+    return undefined;
+  }
+  const allowedNames = (contract.allowed_names || []).map(normalizeElementName).filter(Boolean);
+  const normalizedActual = normalizeElementName(semantics.name);
+  const nameAllowed = allowedNames.length === 0 || allowedNames.some((name) => name === normalizedActual || normalizeElementName(normalizedApprovedTargetName(name)) === normalizedActual);
+  if (!nameAllowed) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "name_mismatch", true, false));
+    return undefined;
+  }
+  attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "resolved", true, true));
   return { locator: unique, strategy };
+}
+
+function targetResolutionAttempt(
+  strategy: string,
+  candidateCount: number,
+  unique: boolean,
+  visible: boolean,
+  evidenceBound: boolean,
+  outcome: BrowserTargetResolutionAttempt["outcome"],
+  roleAllowed?: boolean,
+  nameAllowed?: boolean,
+): BrowserTargetResolutionAttempt {
+  return {
+    strategy,
+    candidate_count: Math.max(0, Math.min(10_000, Math.trunc(candidateCount))),
+    unique,
+    visible,
+    evidence_bound: evidenceBound,
+    ...(roleAllowed !== undefined ? { role_allowed: roleAllowed } : {}),
+    ...(nameAllowed !== undefined ? { name_allowed: nameAllowed } : {}),
+    outcome,
+  };
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMS: number, fallback: T): Promise<T> {
@@ -1149,14 +1308,14 @@ function locatorFromAlternative(page: any, kind: string, value: string): any | u
   return undefined;
 }
 
-async function captureScreenshot(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, phase: "before" | "after" | "revalidate"): Promise<ArtifactRef> {
+async function captureScreenshot(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, phase: "before" | "target" | "after" | "revalidate"): Promise<ArtifactRef> {
   const fileName = `stage-${String(stage.order).padStart(3, "0")}-${safeName(stage.node_id)}-${phase}.png`;
   const filePath = path.join(session.outputDir, fileName);
   const masks = session.maskSelectors.filter(Boolean).map((selector) => session.page.locator(selector));
   await session.page.screenshot({ path: filePath, fullPage: false, mask: masks, timeout: screenshotTimeoutMS });
   return artifactRef(
     `artifact_${safeName(session.id)}_${safeName(stage.node_id)}_${phase}`,
-    phase === "after" || phase === "revalidate" ? "step_screenshot" : "screenshot",
+    phase === "after" || phase === "revalidate" ? "step_screenshot" : phase === "target" ? "target_geometry_screenshot" : "screenshot",
     filePath,
     "image/png",
     stage.node_id,
@@ -1183,12 +1342,14 @@ function screenshotEvidence(artifact: ArtifactRef, stage: BrowserAgentWorkerStag
   };
 }
 
-async function observation(page: any, source: RuntimeObservation["source"], assertions: NonNullable<RuntimeObservation["assertions"]>): Promise<RuntimeObservation> {
+async function observation(page: any, source: RuntimeObservation["source"], assertions: NonNullable<RuntimeObservation["assertions"]>, targetGeometry?: BrowserTargetGeometry, resolutionAttempts: BrowserTargetResolutionAttempt[] = []): Promise<RuntimeObservation> {
   return {
     source,
     url: safeURL(page.url()),
     title: redactText(await page.title().catch(() => "")),
     assertions,
+    ...(targetGeometry ? { target_geometry: targetGeometry } : {}),
+    ...(resolutionAttempts.length > 0 ? { target_resolution_attempts: resolutionAttempts } : {}),
   };
 }
 
@@ -1394,8 +1555,23 @@ function semanticsAllowed(actual: { role: string; name: string }, contract: Brow
   const allowedRoles = (contract.allowed_roles || []).map((value) => value.trim().toLowerCase()).filter(Boolean);
   if (allowedRoles.length > 0 && !allowedRoles.includes(actual.role)) return false;
   const allowedNames = (contract.allowed_names || []).map(normalizeElementName).filter(Boolean);
-  if (allowedNames.length > 0 && !allowedNames.includes(normalizeElementName(actual.name))) return false;
+  const normalizedActual = normalizeElementName(actual.name);
+  if (allowedNames.length > 0 && !allowedNames.some((name) => name === normalizedActual || normalizeElementName(normalizedApprovedTargetName(name)) === normalizedActual)) return false;
   return true;
+}
+
+// This is deterministic normalization of an App-approved name, not fuzzy DOM
+// discovery. The resulting name must still resolve exactly once with the
+// approved role and pass the immutable forbidden-name contract.
+export function normalizedApprovedTargetName(value: string): string {
+  let normalized = String(value || "").trim().replace(/\s+/g, " ");
+  normalized = normalized
+    .replace(/^(?:请|然后|接着|第一步|第二步|第三步|第四步)?\s*(?:点击|单击|选择|打开|进入|按下)\s*/u, "")
+    .replace(/\s*(?:入口|按钮|按键|链接|控件|选项)$/u, "")
+    .replace(/^(?:please\s+)?(?:click|select|open|choose|press)\s+(?:the\s+)?/i, "")
+    .replace(/\s+(?:entry|button|link|control|option)$/i, "")
+    .trim();
+  return normalized;
 }
 
 function normalizeElementName(value: string): string {
