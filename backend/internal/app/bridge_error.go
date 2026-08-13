@@ -64,6 +64,10 @@ func bridgeErrorCode(err error) string {
 	if errors.As(err, &protocolErr) && protocolErr.code != "" {
 		return protocolErr.code
 	}
+	var verificationErr *accountVerificationError
+	if errors.As(err, &verificationErr) {
+		return verificationErr.code
+	}
 	var mismatchErr *model.ProductSourceMismatchError
 	if errors.As(err, &mismatchErr) {
 		return "product_source_mismatch"
@@ -153,6 +157,10 @@ func bridgeErrorDetails(err error) []exchangeHTTPErrorDetail {
 func bridgeErrorRetryable(err error) bool {
 	if err == nil {
 		return false
+	}
+	var verificationErr *accountVerificationError
+	if errors.As(err, &verificationErr) {
+		return verificationErr.retryable
 	}
 	lower := strings.ToLower(err.Error())
 	return isLLMJSONError(lower) || strings.Contains(lower, "timeout") || strings.Contains(lower, "temporarily")

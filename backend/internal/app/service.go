@@ -29,6 +29,7 @@ type Service struct {
 	flow                  *orchestrator.CascadeFlow
 	states                store.StateStore
 	assistantStore        store.AssistantStore
+	accounts              *accountService
 	assistantMu           sync.Mutex
 	assistantProgressMu   sync.RWMutex
 	assistantProgressSink func(string, orchestrator.ProgressEvent)
@@ -148,6 +149,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		flow:                flow,
 		states:              states,
 		assistantStore:      assistantStoreForRuntime(runtime),
+		accounts:            newAccountService(runtime, accountStoreForRuntime(runtime)),
 		layout:              storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
 		exchange:            newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
 		runningTasks:        map[string]context.CancelFunc{},
@@ -208,6 +210,13 @@ func assistantStoreForRuntime(runtime config.AppRuntimeConfig) store.AssistantSt
 		return store.NewMemoryAssistantStore()
 	}
 	return store.NewFileAssistantStore(filepath.Join(runtime.DataRoot, "assistant_sessions"))
+}
+
+func accountStoreForRuntime(runtime config.AppRuntimeConfig) store.AccountStore {
+	if strings.TrimSpace(runtime.DataRoot) == "" {
+		return store.NewMemoryAccountStore()
+	}
+	return store.NewFileAccountStore(filepath.Join(runtime.DataRoot, "account", "account.json"))
 }
 
 // SetBrowserAgentOutcomeVerifier installs the Server-side Validation Agent

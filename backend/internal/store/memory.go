@@ -9,6 +9,8 @@ import (
 	"cascade-demoops/backend/internal/orchestrator"
 )
 
+var ErrStateNotFound = errors.New("state not found")
+
 type StateStore interface {
 	Save(ctx context.Context, state *orchestrator.CascadeState) error
 	Load(ctx context.Context, projectID string) (*orchestrator.CascadeState, error)
@@ -47,7 +49,7 @@ func (s *MemoryStateStore) Load(ctx context.Context, projectID string) (*orchest
 	defer s.mu.RUnlock()
 	state, ok := s.states[projectID]
 	if !ok {
-		return nil, errors.New("state not found")
+		return nil, ErrStateNotFound
 	}
 	return state, nil
 }
