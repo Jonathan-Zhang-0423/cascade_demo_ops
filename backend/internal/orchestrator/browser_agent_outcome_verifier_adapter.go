@@ -564,9 +564,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 			sr.DurationMS = int(acc.completedAt.Sub(acc.startedAt).Milliseconds())
 		}
 		obs := acc.observation
-		isRealEvidence := obs != nil && (obs.Source == model.RuntimeObservationActualBrowser ||
-			obs.Source == model.RuntimeObservationAssertion ||
-			obs.Source == model.RuntimeObservationArtifact)
+		isRealEvidence := obs != nil && model.RuntimeObservationIsRealEvidence(obs.Source)
 		if acc.failed || !isRealEvidence {
 			sr.Status = "failed"
 			if !isRealEvidence {
@@ -868,9 +866,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 	for _, event := range events {
 		if event.EventType == model.StageExecutionEventOutcomeObserved && event.Observation != nil {
 			// Check evidence quality
-			if event.Observation.Source == model.RuntimeObservationActualBrowser ||
-				event.Observation.Source == model.RuntimeObservationAssertion ||
-				event.Observation.Source == model.RuntimeObservationArtifact {
+			if model.RuntimeObservationIsRealEvidence(event.Observation.Source) {
 				stageOutcomes[event.StageID] = true
 			}
 		}
@@ -937,12 +933,15 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 
 	// P0.5: Cross-check StepResult.observed_state traceability
 	if len(result.StepResults) > 0 {
-		// Build set of nodeIDs that have genuine outcome_observed event with actual browser source
+		// Build the set of nodes that have a genuine runtime outcome. Successful
+		// Worker actions are browser assertions; treating only passive browser
+		// observations as real would reject an otherwise fully evidenced run.
 		nodeHasOutcome := make(map[string]bool)
 		for _, event := range events {
 			if event.EventType == model.StageExecutionEventOutcomeObserved &&
 				event.Observation != nil &&
-				event.Observation.Source == model.RuntimeObservationActualBrowser {
+				model.RuntimeObservationIsRealEvidence(event.Observation.Source) &&
+				len(event.EvidenceRefs) > 0 {
 				nodeHasOutcome[event.NodeID] = true
 			}
 		}
@@ -986,13 +985,13 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 			for _, evRef := range check.EvidenceRefs {
 				if evRef.ArtifactID != "" && !allArtifactIDs[evRef.ArtifactID] {
 					postChecks = append(postChecks, model.ValidationCheck{
-						ID:       fmt.Sprintf("post_broken_evidence_ref_%s", evRef.ArtifactID),
-						Kind:     "evidence_integrity",
-						Code:     "EVIDENCE_ARTIFACT_REFERENCE_BROKEN",
-						Severity: model.FindingSeverityWarning,
-						Passed:   false,
-						Required: false,
-						Summary:  fmt.Sprintf("ValidationCheck %s 引用 artifact %s 但该 artifact 不存在于 GeneratedAssets", check.ID, evRef.ArtifactID),
+						ID:           fmt.Sprintf("post_broken_evidence_ref_%s", evRef.ArtifactID),
+						Kind:         "evidence_integrity",
+						Code:         "EVIDENCE_ARTIFACT_REFERENCE_BROKEN",
+						Severity:     model.FindingSeverityWarning,
+						Passed:       false,
+						Required:     false,
+						Summary:      fmt.Sprintf("ValidationCheck %s 引用 artifact %s 但该 artifact 不存在于 GeneratedAssets", check.ID, evRef.ArtifactID),
 						EvidenceRefs: []model.EvidenceRef{{ID: check.ID, Kind: "validation_check"}},
 					})
 				}
@@ -1289,7 +1288,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) convertEventsToPostExecutionAnalyse
 	for _, event := range events {
 		// Build a minimal StepResult from event
 		stepResult := &model.StepResult{
-			NodeID: event.StageID,
+			NodeID: event.NodeID,
 			Status: string(event.EventType), // Use EventType as status approximation
 		}
 
@@ -1299,7 +1298,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) convertEventsToPostExecutionAnalyse
 		}
 
 		analyses = append(analyses, model.PostExecutionAnalysis{
-			NodeID:     event.StageID,
+			NodeID:     event.NodeID,
 			StepResult: stepResult,
 		})
 	}

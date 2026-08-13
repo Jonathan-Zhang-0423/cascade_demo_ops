@@ -195,6 +195,12 @@ func TestRunClientExecutionRecordingAndRenderCallsExecutorInProtocolOrder(t *tes
 	if service.renderRequest.EditPlan == nil || service.renderRequest.EditPlan.PlanID != "plan_1_director_applied" {
 		t.Fatalf("second render should receive the patched demo edit plan: %+v", service.renderRequest.EditPlan)
 	}
+	if service.renderRequest.ModelExecution == nil || service.renderRequest.ModelExecution.PlanSource != "server_director" || !service.renderRequest.ModelExecution.PatchApplied || service.renderRequest.ModelExecution.ProviderOutputAdopted {
+		t.Fatalf("second render must distinguish deterministic Director adoption from provider-output adoption: %+v", service.renderRequest.ModelExecution)
+	}
+	if len(service.renderRequest.ModelExecution.AdoptedShotIDs) == 0 {
+		t.Fatalf("second render must record the exact Director-patched shots: %+v", service.renderRequest.ModelExecution)
+	}
 	if len(result.RenderResult.DemoEditPlan.Shots) == 0 || len(result.RenderResult.DemoEditPlan.Shots[0].Overlays) == 0 {
 		t.Fatalf("patched final demo edit plan should include director caption overlays: %+v", result.RenderResult.DemoEditPlan)
 	}
@@ -463,15 +469,67 @@ func TestRunClientExecutionRecordingAndRenderRejectsMissingRenderOutput(t *testi
 
 func TestValidateFinalMP4DeliveryRejectsWebMAndUnavailableProbe(t *testing.T) {
 	service := &fakeRecordingRenderService{}
-	if err := validateFinalMP4Delivery(t.Context(), service, RenderResult{VideoPath: filepath.Join(t.TempDir(), "final.webm")}); err == nil || !strings.Contains(err.Error(), "final_video_not_mp4") {
+	if err := validateFinalMP4Delivery(t.Context(), service, nil, RenderResult{VideoPath: filepath.Join(t.TempDir(), "final.webm")}); err == nil || !strings.Contains(err.Error(), "final_video_not_mp4") {
 		t.Fatalf("expected WebM delivery rejection, got %v", err)
 	}
 
 	path := filepath.Join(t.TempDir(), "final.mp4")
 	writeTestFile(t, path, "mp4 fixture")
 	service.probeResult = MediaProbeResult{Path: path, Format: "mov,mp4", VideoCodec: "h264", DurationMS: 1000, Width: 1280, Height: 720, FFProbeAvailable: false}
-	if err := validateFinalMP4Delivery(t.Context(), service, RenderResult{VideoPath: path}); err == nil || !strings.Contains(err.Error(), "final_video_probe_unavailable") {
+	if err := validateFinalMP4Delivery(t.Context(), service, nil, RenderResult{VideoPath: path}); err == nil || !strings.Contains(err.Error(), "final_video_probe_unavailable") {
 		t.Fatalf("expected ffprobe availability rejection, got %v", err)
+	}
+}
+
+func TestValidateFinalMP4DeliveryEnforcesRequested2KProfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "final.mp4")
+	writeTestFile(t, path, "mp4 fixture")
+	service := &fakeRecordingRenderService{probeResult: MediaProbeResult{
+		Path: path, Format: "mov,mp4", VideoCodec: "h264", DurationMS: 1000,
+		Width: 1920, Height: 1080, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true,
+	}}
+	profile := &model.EditorRenderProfile{Mode: "final", Width: 2560, Height: 1440, FPS: 30, Format: "mp4", CRF: 18}
+	if err := validateFinalMP4Delivery(t.Context(), service, profile, RenderResult{VideoPath: path}); err == nil || !strings.Contains(err.Error(), "final_video_resolution_mismatch") {
+		t.Fatalf("expected 1080p output to fail the 2K delivery gate, got %v", err)
+	}
+	service.probeResult.Width, service.probeResult.Height = 2560, 1440
+	if err := validateFinalMP4Delivery(t.Context(), service, profile, RenderResult{VideoPath: path}); err != nil {
+		t.Fatalf("expected canonical 2K H.264 output to pass, got %v", err)
+	}
+}
+
+func TestValidateBrowserAgentEvidenceMasterRejectsUpscaledLowResolutionSource(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	pkg.ExecutableScriptBundle.ScriptManifest.Runtime = model.ExecutableScriptRuntimeBrowserAgentOutlineV1
+	rawPath := filepath.Join(t.TempDir(), "recording.webm")
+	writeTestFile(t, rawPath, "webm fixture")
+	recording := &model.RecordingResultPackage{GeneratedAssets: []model.ArtifactRef{{
+		ID: "raw_1", Kind: "raw_recording", URI: rawPath,
+	}}}
+	service := &fakeRecordingRenderService{probeResult: MediaProbeResult{
+		Path: rawPath, Format: "matroska,webm", VideoCodec: "vp8", DurationMS: 1000,
+		Width: 1440, Height: 900, FPS: 25, PixelFormat: "yuv420p", FFProbeAvailable: true,
+	}}
+	err := validateBrowserAgentEvidenceMaster(t.Context(), service, &pkg, recording)
+	if err == nil || !strings.Contains(err.Error(), "recording_evidence_resolution_mismatch") {
+		t.Fatalf("expected low-resolution Browser Agent evidence to be rejected, got %v", err)
+	}
+}
+
+func TestValidateBrowserAgentEvidenceMasterAcceptsCanonical2KSource(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	pkg.ExecutableScriptBundle.ScriptManifest.Runtime = model.ExecutableScriptRuntimeBrowserAgentOutlineV1
+	rawPath := filepath.Join(t.TempDir(), "recording.webm")
+	writeTestFile(t, rawPath, "webm fixture")
+	recording := &model.RecordingResultPackage{GeneratedAssets: []model.ArtifactRef{{
+		ID: "raw_1", Kind: "raw_recording", URI: rawPath,
+	}}}
+	service := &fakeRecordingRenderService{probeResult: MediaProbeResult{
+		Path: rawPath, Format: "matroska,webm", VideoCodec: "vp8", DurationMS: 1000,
+		Width: 2560, Height: 1440, FPS: 25, PixelFormat: "yuv420p", FFProbeAvailable: true,
+	}}
+	if err := validateBrowserAgentEvidenceMaster(t.Context(), service, &pkg, recording); err != nil {
+		t.Fatalf("expected canonical 2K Browser Agent evidence to pass, got %v", err)
 	}
 }
 
@@ -496,7 +554,7 @@ func (s *fakeRecordingRenderService) ProbeMedia(ctx context.Context, request Med
 	if s.probeResult.VideoCodec != "" || s.probeResult.FFProbeAvailable {
 		return s.probeResult, nil
 	}
-	return MediaProbeResult{Path: request.Path, Format: "mov,mp4,m4a,3gp,3g2,mj2", DurationMS: 1200, VideoCodec: "h264", Width: 1920, Height: 1080, FPS: 30, FFProbeAvailable: true}, nil
+	return MediaProbeResult{Path: request.Path, Format: "mov,mp4,m4a,3gp,3g2,mj2", DurationMS: 1200, VideoCodec: "h264", Width: 2560, Height: 1440, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true}, nil
 }
 
 func (s *fakeRecordingRenderService) Record(ctx context.Context, request RecordRequest) (RecordResult, error) {

@@ -84,6 +84,9 @@ func RenderClientExecutionRecordingResult(ctx context.Context, service DeliveryR
 		return RenderRequest{}, RenderResult{}, errors.New("render service, source package, and recording result are required")
 	}
 	request := RecordingRenderPipelineRequest{SourcePackage: source, RenderOutputDir: outputDir, Progress: progress}
+	if err := validateBrowserAgentEvidenceMaster(ctx, service, source, recording); err != nil {
+		return RenderRequest{}, RenderResult{}, err
+	}
 	renderRequest, err := NewRenderRequestFromRecordingResult(source, recording, outputDir)
 	if err != nil {
 		return RenderRequest{}, RenderResult{}, err
@@ -101,7 +104,7 @@ func RenderClientExecutionRecordingResult(ctx context.Context, service DeliveryR
 	if err != nil {
 		return RenderRequest{}, RenderResult{}, err
 	}
-	if err := validateFinalMP4Delivery(ctx, service, renderResult); err != nil {
+	if err := validateFinalMP4Delivery(ctx, service, renderRequest.RenderProfile, renderResult); err != nil {
 		return RenderRequest{}, RenderResult{}, err
 	}
 	AttachRenderResultArtifacts(source, recording, renderResult, recording.CreatedAt)
@@ -109,7 +112,58 @@ func RenderClientExecutionRecordingResult(ctx context.Context, service DeliveryR
 	return renderRequest, renderResult, nil
 }
 
-func validateFinalMP4Delivery(ctx context.Context, service DeliveryRenderService, result RenderResult) error {
+func validateBrowserAgentEvidenceMaster(ctx context.Context, service DeliveryRenderService, source *model.ClientExecutionPackage, recording *model.RecordingResultPackage) error {
+	if source.ExecutableScriptBundle == nil || source.ExecutableScriptBundle.ScriptManifest.Runtime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		return nil
+	}
+	var raw *model.ArtifactRef
+	for index := range recording.GeneratedAssets {
+		if strings.EqualFold(strings.TrimSpace(recording.GeneratedAssets[index].Kind), "raw_recording") {
+			raw = &recording.GeneratedAssets[index]
+			break
+		}
+	}
+	if raw == nil {
+		return errors.New("recording_evidence_missing: browser-agent delivery requires a raw_recording evidence master")
+	}
+	path := ""
+	if raw.Metadata != nil {
+		if localPath, ok := raw.Metadata["local_path"].(string); ok {
+			path = strings.TrimSpace(localPath)
+		}
+	}
+	if path == "" {
+		path = strings.TrimSpace(raw.URI)
+	}
+	path = normalizedArtifactURI(path)
+	if !filepath.IsAbs(path) {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("recording_evidence_not_local: raw recording path could not be resolved: %w", err)
+		}
+		path = absolute
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("recording_evidence_not_local: raw recording is not available for quality validation: %w", err)
+	}
+	probe, err := service.ProbeMedia(ctx, MediaProbeRequest{Path: path})
+	if err != nil {
+		return fmt.Errorf("recording_evidence_probe_failed: %w", err)
+	}
+	if !probe.FFProbeAvailable {
+		return errors.New("recording_evidence_probe_unavailable: ffprobe is required before editing browser evidence")
+	}
+	const expectedWidth, expectedHeight = 2560, 1440
+	if probe.Width != expectedWidth || probe.Height != expectedHeight {
+		return fmt.Errorf("recording_evidence_resolution_mismatch: got=%dx%d want=%dx%d; final 2K upscaling is not accepted as 2K source evidence", probe.Width, probe.Height, expectedWidth, expectedHeight)
+	}
+	if probe.DurationMS <= 0 || strings.TrimSpace(probe.VideoCodec) == "" {
+		return fmt.Errorf("recording_evidence_not_decodable: codec=%q duration_ms=%d", probe.VideoCodec, probe.DurationMS)
+	}
+	return nil
+}
+
+func validateFinalMP4Delivery(ctx context.Context, service DeliveryRenderService, expected *model.EditorRenderProfile, result RenderResult) error {
 	videoPath := strings.TrimSpace(result.VideoPath)
 	if !strings.EqualFold(filepath.Ext(videoPath), ".mp4") {
 		return fmt.Errorf("final_video_not_mp4: renderer returned %q", filepath.Ext(videoPath))
@@ -130,6 +184,20 @@ func validateFinalMP4Delivery(ctx context.Context, service DeliveryRenderService
 	}
 	if probe.VideoCodec == "" || probe.DurationMS <= 0 || probe.Width <= 0 || probe.Height <= 0 {
 		return fmt.Errorf("final_video_not_decodable: format=%q codec=%q duration_ms=%d dimensions=%dx%d", probe.Format, probe.VideoCodec, probe.DurationMS, probe.Width, probe.Height)
+	}
+	if expected != nil {
+		if expected.Width > 0 && expected.Height > 0 && (probe.Width != expected.Width || probe.Height != expected.Height) {
+			return fmt.Errorf("final_video_resolution_mismatch: got=%dx%d want=%dx%d", probe.Width, probe.Height, expected.Width, expected.Height)
+		}
+		if expected.FPS > 0 && probe.FPS > 0 && (probe.FPS < float64(expected.FPS)-0.25 || probe.FPS > float64(expected.FPS)+0.25) {
+			return fmt.Errorf("final_video_fps_mismatch: got=%.3f want=%d", probe.FPS, expected.FPS)
+		}
+	}
+	if !strings.Contains(strings.ToLower(probe.VideoCodec), "h264") {
+		return fmt.Errorf("final_video_codec_mismatch: got=%q want=h264", probe.VideoCodec)
+	}
+	if probe.PixelFormat != "" && !strings.EqualFold(probe.PixelFormat, "yuv420p") {
+		return fmt.Errorf("final_video_pixel_format_mismatch: got=%q want=yuv420p", probe.PixelFormat)
 	}
 	format := strings.ToLower(probe.Format)
 	if format != "" && !strings.Contains(format, "mp4") && !strings.Contains(format, "mov") {
@@ -167,6 +235,7 @@ func applyDirectorPatchAndRerender(ctx context.Context, service RenderService, r
 	reportPipelineProgress(request, "applying_director_patch", "Applying validated director captions and shot hints, then re-rendering from captured assets.", 96)
 	patchedRequest := renderRequest
 	patchedRequest.EditPlan = &patchedPlan
+	patchedRequest.ModelExecution = renderModelExecutionAudit(renderResult, applyResult)
 	patchedRenderResult, err := service.Render(ctx, patchedRequest)
 	if err != nil {
 		applyResult = MarkDirectorPatchApplyRerenderFailed(applyResult, err)
@@ -179,6 +248,35 @@ func applyDirectorPatchAndRerender(ctx context.Context, service RenderService, r
 	patchedRenderResult = carryDirectorArtifacts(renderResult, patchedRenderResult)
 	applyResult = MarkDirectorPatchApplyRerendered(applyResult, patchedRenderResult)
 	return persistDirectorPatchApplyResult(request.RenderOutputDir, patchedRenderResult, applyResult)
+}
+
+func renderModelExecutionAudit(renderResult RenderResult, applyResult model.DirectorEditPlanPatchApplyResult) *RenderModelExecutionAudit {
+	suggestion := renderResult.DirectorEditSuggestion
+	if suggestion == nil {
+		return nil
+	}
+	audit := &RenderModelExecutionAudit{
+		Invoked: suggestion.Adapter.RealCallMade, Provider: suggestion.Adapter.Provider, Model: suggestion.Adapter.Model,
+		PlanSource: "server_director", RealCallMade: suggestion.Adapter.RealCallMade,
+		ProviderOutputAdopted: false, SuggestionOrigin: "deterministic_server_director",
+		SuggestionID: suggestion.SuggestionID, PatchApplied: applyResult.Applied,
+		Note: "Director suggestions are presentation-only; this audit separately records provider invocation and admission into the rendered edit plan.",
+	}
+	if renderResult.DirectorEditPlanPatch != nil {
+		audit.PatchID = renderResult.DirectorEditPlanPatch.PatchID
+	}
+	if suggestion.ProviderCall != nil {
+		audit.ProviderCallStatus = suggestion.ProviderCall.Status
+		audit.RealCallMade = suggestion.ProviderCall.RealCallMade
+		audit.Invoked = suggestion.ProviderCall.RealCallMade
+		audit.Provider = suggestion.ProviderCall.Provider
+		audit.Model = suggestion.ProviderCall.Model
+		audit.RequestTraceID = suggestion.ProviderCall.TaskID
+	}
+	if applyResult.Applied {
+		audit.AdoptedShotIDs = append(audit.AdoptedShotIDs, applyResult.AppliedShotIDs...)
+	}
+	return audit
 }
 
 func carryDirectorArtifacts(from RenderResult, to RenderResult) RenderResult {

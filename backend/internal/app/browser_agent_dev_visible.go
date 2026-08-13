@@ -188,19 +188,7 @@ func (m *devVisibleBrowserAgentManager) Prepare(ctx context.Context, request Dev
 	// request budget. Keep it separate from the real-page navigation budget.
 	openCtx, cancelOpen := context.WithTimeout(ctx, 60*time.Second)
 	defer cancelOpen()
-	session, opened, err := worker.Open(openCtx, driver.BrowserAgentWorkerOpenRequest{
-		SessionID: identifier, OutputDir: outputDir,
-		Browser: driver.BrowserAgentWorkerBrowser{
-			Engine: "chromium", Headless: false,
-			Viewport: driver.BrowserAgentWorkerViewport{Width: 1440, Height: 900},
-			// Manual login is never recorded. The automatic local-test path may
-			// record because the Worker masks both credential inputs before fill.
-			RecordVideo: request.AutoLogin,
-		},
-		AllowedDomains: []string{"127.0.0.1"}, AllowedOrigins: []string{devVisibleOrigin(target)}, AllowedRoutes: []string{"/"},
-		MaskSelectors:      uniqueStrings(append(defaultDevVisibleMaskSelectors(), request.MaskSelectors...)),
-		RecordingSensitive: &recordingSensitive, RecordTrace: &recordTrace,
-	})
+	session, opened, err := worker.Open(openCtx, devVisibleBrowserAgentOpenRequest(identifier, outputDir, target, request, recordingSensitive, recordTrace))
 	if err != nil {
 		return DevVisibleBrowserAgentView{}, fmt.Errorf("start isolated visible browser: %w", err)
 	}
@@ -580,25 +568,49 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 	// The stage log is part of the result contract, not merely a side effect
 	// left on disk. Register its immutable local artifact reference before the
 	// result is exposed so a failed or successful run is fully traceable.
+	var stageEventArtifact *model.ArtifactRef
 	if eventSink != nil && eventSink.Count() > 0 {
 		stageArtifact, artifactErr := eventSink.ArtifactRef()
 		if artifactErr != nil {
 			return view, fmt.Errorf("visible execution stage log packaging failed: %w", artifactErr)
 		}
 		result.StageEventLogRef = &stageArtifact
+		stageEventArtifact = &stageArtifact
 	}
 	result.ValidationReports = append(result.ValidationReports, preReports...)
 	result.ValidationReports = append(result.ValidationReports, runResult.ValidationReports...)
 	result.PatchLedger = append(result.PatchLedger, runResult.PatchLedger...)
 	if fullVerifier != nil && result.Status != model.RecordingResultStatusFailed {
 		post, verifyErr := fullVerifier.ValidatePostExecution(ctx, validationContext, result, runResult.Events)
-		if verifyErr != nil || post.Validate() != nil || post.Decision != model.ValidationDecisionContinue {
-			if verifyErr != nil {
-				return view, fmt.Errorf("visible execution post-verification failed: %w", verifyErr)
-			}
-			return view, errors.New("visible execution post-verification stopped the result")
+		if verifyErr != nil {
+			return view, fmt.Errorf("visible execution post-verification failed: %w", verifyErr)
+		}
+		if err := post.Validate(); err != nil {
+			return view, fmt.Errorf("visible execution post-verification returned an invalid report: %w", err)
 		}
 		result.ValidationReports = append(result.ValidationReports, post)
+		if post.Decision != model.ValidationDecisionContinue {
+			validationErr := newRuntimeExecutionError("outcome_post_verification_failed", fmt.Errorf("post-execution verifier stopped package with decision %s", post.Decision))
+			recordResult.StepResults = browserAgentPostValidationFailedStepResults(recordResult.StepResults, post, validationErr)
+			recordResult.FailureDiagnostic = browserAgentFailureDiagnostic(BrowserAgentOutlineRunRequest{
+				Package: &request.Package, RuntimePlan: plan, CloudJobID: runID,
+			}, runResult.Events, stageRuntime.artifacts, validationErr, completedAt)
+			if waiver == nil {
+				result, packageErr = executor.NewRecordingResultPackageFromRecordResult(&request.Package, recordResult, runID, completedAt)
+			} else {
+				result, packageErr = executor.NewLocalTestRecordingResultPackageFromRecordResult(&request.Package, recordResult, runID, completedAt, executor.LocalTestRecordingResultPackageOptions{
+					WaiverID: waiver.WaiverID, SourceBundleHashSHA256: waiver.BundleHashSHA256, SourcePlanHashSHA256: waiver.PlanHashSHA256,
+				})
+			}
+			if packageErr != nil {
+				return view, fmt.Errorf("visible execution post-verification failure packaging failed: %w", packageErr)
+			}
+			result.StageEventLogRef = stageEventArtifact
+			result.ValidationReports = append(result.ValidationReports, preReports...)
+			result.ValidationReports = append(result.ValidationReports, runResult.ValidationReports...)
+			result.ValidationReports = append(result.ValidationReports, post)
+			result.PatchLedger = append(result.PatchLedger, runResult.PatchLedger...)
+		}
 	}
 	if result.Status == model.RecordingResultStatusGenerated && request.Package.RecordingRunSpec.Outputs.FinalVideo {
 		renderService := m.service.editorWorker
@@ -646,7 +658,7 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 	}
 	// The session held authentication state only for this local test. Close it
 	// after the bounded execution so it cannot be reused by a later request.
-	if runErr != nil {
+	if runErr != nil || result.Status == model.RecordingResultStatusFailed {
 		view.Result.Status = "failed"
 		view.Message = "真实页面执行已停止并保留脱敏诊断；未生成可交付视频。"
 		return view, nil
@@ -659,6 +671,20 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 	view.Result.Status = "completed"
 	view.Message = "真实页面已按审批包完成步骤；MP4 仅由登录后的脱敏步骤截图合成。"
 	return view, nil
+}
+
+func devVisibleBrowserAgentOpenRequest(identifier, outputDir string, target *url.URL, request DevVisibleBrowserAgentPrepareRequest, recordingSensitive, recordTrace bool) driver.BrowserAgentWorkerOpenRequest {
+	return driver.BrowserAgentWorkerOpenRequest{
+		SessionID: identifier, OutputDir: outputDir,
+		Browser: driver.BrowserAgentWorkerBrowser{
+			Engine: "chromium", Headless: false,
+			Viewport:    driver.BrowserAgentWorkerViewport{Width: 2560, Height: 1440},
+			RecordVideo: request.AutoLogin,
+		},
+		AllowedDomains: []string{"127.0.0.1"}, AllowedOrigins: []string{devVisibleOrigin(target)}, AllowedRoutes: []string{"/"},
+		MaskSelectors:      uniqueStrings(append(defaultDevVisibleMaskSelectors(), request.MaskSelectors...)),
+		RecordingSensitive: &recordingSensitive, RecordTrace: &recordTrace,
+	}
 }
 
 func devVisiblePostLoginRuntimePlan(plan BrowserAgentRuntimePlan, actualURL string) BrowserAgentRuntimePlan {

@@ -28,6 +28,10 @@ func NewRenderRequestFromRecordingResult(source *model.ClientExecutionPackage, r
 		ExecutionTrace:         result.ExecutionTrace,
 		GeneratedAssets:        result.GeneratedAssets,
 		RecordingResultPackage: result,
+		RenderProfile: &model.EditorRenderProfile{
+			Mode: "final", Width: 2560, Height: 1440, FPS: 30,
+			Format: "mp4", Preset: "medium", CRF: 18,
+		},
 	}
 	if len(request.GeneratedAssets) == 0 && result.ExecutionTrace != nil {
 		request.GeneratedAssets = result.ExecutionTrace.Artifacts

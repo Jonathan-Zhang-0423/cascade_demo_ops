@@ -80,10 +80,10 @@ func TestValidatePostExecution_MissingArtifacts(t *testing.T) {
 
 	// Result package with no artifacts
 	result := &model.RecordingResultPackage{
-		ResultID:        "result-001",
-		SourcePackageID: "pkg-post-artifacts-001",
-		Status:          model.RecordingResultStatusGenerated,
-		GeneratedAssets: []model.ArtifactRef{}, // Empty!
+		ResultID:         "result-001",
+		SourcePackageID:  "pkg-post-artifacts-001",
+		Status:           model.RecordingResultStatusGenerated,
+		GeneratedAssets:  []model.ArtifactRef{}, // Empty!
 		StageEventLogRef: nil,                   // Missing!
 	}
 
@@ -235,8 +235,8 @@ func TestValidatePostExecution_MissingEvidenceRefs(t *testing.T) {
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,
@@ -441,8 +441,8 @@ func TestValidatePostExecution_ValidComplete(t *testing.T) {
 			OccurredAt: time.Now(),
 		},
 		{
-			StageID:   "stage-1",
-			EventType: model.StageExecutionEventOutcomeObserved,
+			StageID:    "stage-1",
+			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: time.Now().Add(1 * time.Second),
 			Observation: &model.RuntimeObservation{
 				Source: model.RuntimeObservationActualBrowser,
@@ -490,8 +490,8 @@ func TestValidatePostExecution_ValidComplete(t *testing.T) {
 	// Should not have critical P0 violations
 	for _, check := range report.Checks {
 		if check.Code == "MISSING_RESULT_PACKAGE" ||
-		   check.Code == "MISSING_STAGE_EVENT_LOG" ||
-		   check.Code == "REQUIRED_STAGE_NOT_COMPLETED" {
+			check.Code == "MISSING_STAGE_EVENT_LOG" ||
+			check.Code == "REQUIRED_STAGE_NOT_COMPLETED" {
 			t.Errorf("Valid complete execution should not trigger P0 blocking check: %s", check.Code)
 		}
 	}
@@ -661,8 +661,8 @@ func TestValidatePostExecution_ObservedStateTraceability(t *testing.T) {
 			StepResults: []model.StepResult{
 				{NodeID: "stage-1", Status: "passed", ObservedState: "source=runtime, url=https://example.com/page1"},
 			},
-			AuditTrail:      model.CloudExecutionAuditTrail{SourcePackageDigest: "bundle-hash-123"},
-			GeneratedAssets: []model.ArtifactRef{},
+			AuditTrail:       model.CloudExecutionAuditTrail{SourcePackageDigest: "bundle-hash-123"},
+			GeneratedAssets:  []model.ArtifactRef{},
 			StageEventLogRef: &model.ArtifactRef{ID: "log-1", Kind: "stage_event_log"},
 		}
 
@@ -822,4 +822,55 @@ func TestValidatePostExecution_StageValidationFailureThreshold(t *testing.T) {
 	// The threshold condition (failedStageCount/totalStages >= 0.5) therefore can never be
 	// satisfied — the code path is structurally dead from the public API surface.
 	t.Skip("STAGE_VALIDATION_FAILURE_THRESHOLD unreachable: convertEventsToPostExecutionAnalyses never populates ObservedIssues, so failedStageCount is always 0 regardless of input events")
+}
+
+func TestValidatePostExecution_BrowserAssertionIsTraceableRuntimeEvidence(t *testing.T) {
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(&model.ValidationConfig{
+		PreExecutionEnabled: true, RealTimeBatchEnabled: true, PostExecutionBatchEnabled: true,
+	})
+	vctx := model.BrowserAgentValidationContext{
+		RunID: "run-browser-assertion", SourcePackageID: "pkg-browser-assertion",
+		SourceBundleHashSHA256: "bundle-hash", EffectivePolicyHashSHA256: "policy-hash",
+		WorkflowGraph:     &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan:              &model.ExecutionScriptDocument{},
+		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{NodeID: "node-click", Order: 1}}},
+		ScriptOutline:     &model.BrowserAgentScriptOutline{ID: "outline"}, BrowserAgentContract: &model.BrowserAgentContract{},
+	}
+	now := time.Now()
+	events := []model.StageExecutionEvent{
+		{EventType: model.StageExecutionEventStageStarted, NodeID: "node-click", StageID: "stage-click", OccurredAt: now},
+		{
+			EventType: model.StageExecutionEventOutcomeObserved, NodeID: "node-click", StageID: "stage-click", OccurredAt: now.Add(time.Second),
+			Observation:  &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, URL: "https://example.com/app", Assertions: []model.RuntimeAssertion{{Kind: "action_click_completed", Passed: true}}},
+			EvidenceRefs: []model.EvidenceRef{{ID: "evidence-click", Kind: "webpage_screenshot", ArtifactID: "artifact-click"}},
+		},
+		{EventType: model.StageExecutionEventStageCompleted, NodeID: "node-click", StageID: "stage-click", OccurredAt: now.Add(2 * time.Second)},
+	}
+	result := model.RecordingResultPackage{
+		ResultID: "result-browser-assertion", SourcePackageID: "pkg-browser-assertion", Status: model.RecordingResultStatusGenerated,
+		StepResults:      []model.StepResult{{NodeID: "node-click", Status: "passed", ObservedState: "source=browser_assertion url=https://example.com/app"}},
+		AuditTrail:       model.CloudExecutionAuditTrail{SourcePackageDigest: "bundle-hash"},
+		GeneratedAssets:  []model.ArtifactRef{{ID: "artifact-click", Kind: "screenshot"}},
+		StageEventLogRef: &model.ArtifactRef{ID: "stage-log", Kind: "stage_event_log"},
+	}
+	report, err := adapter.ValidatePostExecution(context.Background(), vctx, result, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range report.Checks {
+		if check.Code == "observed_state_not_runtime_derived" && !check.Passed {
+			t.Fatalf("an evidenced Worker browser assertion was rejected as synthetic: %+v", check)
+		}
+	}
+}
+
+func TestConvertEventsToPostExecutionAnalysesPreservesNodeIdentity(t *testing.T) {
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(&model.ValidationConfig{})
+	analyses := adapter.convertEventsToPostExecutionAnalyses([]model.StageExecutionEvent{{
+		NodeID: "node-business-action", StageID: "stage-step-02", EventType: model.StageExecutionEventOutcomeObserved,
+		Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, URL: "https://example.com/project/1"},
+	}})
+	if len(analyses) != 1 || analyses[0].NodeID != "node-business-action" || analyses[0].StepResult == nil || analyses[0].StepResult.NodeID != "node-business-action" {
+		t.Fatalf("post-execution analysis lost App node identity: %+v", analyses)
+	}
 }

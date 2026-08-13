@@ -79,7 +79,7 @@ func (s *Service) CreateEditorSession(ctx context.Context, request model.EditorC
 			Audio:                &model.DemoEditAudioPolicy{Mode: "source", VolumePercent: 100},
 		},
 		PreviewProfile:       model.EditorRenderProfile{Mode: "preview", Width: 1280, Height: 720, FPS: 30, Format: "mp4", Preset: "ultrafast", CRF: 28},
-		FinalProfile:         model.EditorRenderProfile{Mode: "final", Width: 1920, Height: 1080, FPS: 30, Format: "mp4", Preset: "medium", CRF: 21},
+		FinalProfile:         model.EditorRenderProfile{Mode: "final", Width: 2560, Height: 1440, FPS: 30, Format: "mp4", Preset: "medium", CRF: 18},
 		Preview:              model.EditorRenderState{Status: model.EditorRenderStatusNotStarted},
 		FinalRender:          model.EditorRenderState{Status: model.EditorRenderStatusNotStarted},
 		ProviderCapabilities: s.editorProviderCapabilities(),

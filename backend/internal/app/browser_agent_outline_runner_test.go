@@ -49,6 +49,9 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 	if len(openRequest.AllowedDomains) == 0 || len(openRequest.ForbiddenPathPrefixes) == 0 {
 		t.Fatalf("worker session did not receive runtime network policy: %+v", openRequest)
 	}
+	if openRequest.Browser.Viewport.Width != 2560 || openRequest.Browser.Viewport.Height != 1440 {
+		t.Fatalf("Browser Agent evidence master must use the canonical 2K 16:9 web viewport: %+v", openRequest.Browser.Viewport)
+	}
 	if session.observeCalls != len(plan.Stages) || session.executeCalls != len(plan.Stages) || session.closeCalls != 1 {
 		t.Fatalf("runner did not preserve one browser session across stages: %+v", session)
 	}
@@ -716,7 +719,7 @@ func (stubBrowserAgentRenderService) Render(_ context.Context, request executor.
 }
 
 func (stubBrowserAgentRenderService) ProbeMedia(_ context.Context, request executor.MediaProbeRequest) (executor.MediaProbeResult, error) {
-	return executor.MediaProbeResult{Path: request.Path, Format: "mov,mp4", DurationMS: 1000, VideoCodec: "h264", Width: 1280, Height: 720, FPS: 30, FFProbeAvailable: true}, nil
+	return executor.MediaProbeResult{Path: request.Path, Format: "mov,mp4", DurationMS: 1000, VideoCodec: "h264", Width: 2560, Height: 1440, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true}, nil
 }
 
 func (s *stubBrowserAgentWorkerSession) Abort() error { return nil }
@@ -812,8 +815,8 @@ func TestDeterministicBrowserAgentPostVerifierReportsObservedStageCompletionMiss
 			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: now,
 			Observation: &model.RuntimeObservation{
-				Source: model.RuntimeObservationActualBrowser,
-				URL:    "https://app.example.com/dashboard",
+				Source:     model.RuntimeObservationActualBrowser,
+				URL:        "https://app.example.com/dashboard",
 				Assertions: []model.RuntimeAssertion{{Kind: "action_completed", Passed: true}},
 			},
 			EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}},
@@ -880,8 +883,8 @@ func TestDeterministicBrowserAgentPostVerifierReportsEvidenceRefsMissing(t *test
 			EventType:  model.StageExecutionEventOutcomeObserved,
 			OccurredAt: now,
 			Observation: &model.RuntimeObservation{
-				Source: model.RuntimeObservationActualBrowser,
-				URL:    "https://app.example.com/dashboard",
+				Source:     model.RuntimeObservationActualBrowser,
+				URL:        "https://app.example.com/dashboard",
 				Assertions: []model.RuntimeAssertion{{Kind: "action_completed", Passed: true}},
 			},
 			EvidenceRefs: []model.EvidenceRef{}, // no evidence refs

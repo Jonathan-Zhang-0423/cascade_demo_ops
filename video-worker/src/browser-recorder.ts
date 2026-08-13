@@ -143,7 +143,7 @@ type ScreenshotCaptureResult = {
 };
 
 const screenshotTimeoutMS = 8000;
-const defaultViewport = { width: 1920, height: 1080 };
+const defaultViewport = { width: 2560, height: 1440 };
 const pageSettleTimeoutMS = 5000;
 const pageSettleMinimumMS = 1000;
 

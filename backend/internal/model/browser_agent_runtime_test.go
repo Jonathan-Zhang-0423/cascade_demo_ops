@@ -36,6 +36,73 @@ func TestStageExecutionEventJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStageExecutionEventTargetGeometryRoundTripAndValidation(t *testing.T) {
+	now := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+	event := StageExecutionEvent{
+		SchemaVersion: StageExecutionEventSchemaVersion, EventID: "event_geometry", RunID: "run_geometry",
+		SourcePackageID: "pkg_geometry", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+		NodeID: "node_create", StageID: "stage_create", Attempt: 1, Sequence: 1,
+		EventType: StageExecutionEventTargetResolved, OccurredAt: now,
+		Observation: &RuntimeObservation{Source: RuntimeObservationActualBrowser, TargetGeometry: &BrowserTargetGeometry{
+			SchemaVersion: "demoops.browser_target_geometry.v1", TargetSemanticID: "new_project",
+			ResolutionStrategy: "approved_evidence_css", SelectorDigestSHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			CapturedAt: now, RecordingOffsetMS: 250,
+			Viewport:             BrowserGeometryViewport{Width: 2560, Height: 1440, DPR: 1},
+			ElementBoxCSSPX:      BrowserGeometryRectangle{X: 128, Y: 144, Width: 256, Height: 72},
+			ElementBoxNormalized: BrowserGeometryRectangle{X: .05, Y: .1, Width: .1, Height: .05},
+			ScreenshotArtifactID: "artifact_target", Confidence: 1,
+		}},
+		EvidenceRefs: []EvidenceRef{{ID: "evidence_target", ArtifactID: "artifact_target"}},
+	}
+	if err := event.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded StageExecutionEvent
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(event, decoded) {
+		t.Fatalf("target geometry changed after JSON round trip: want=%+v got=%+v", event.Observation.TargetGeometry, decoded.Observation.TargetGeometry)
+	}
+	decoded.Observation.TargetGeometry.ElementBoxNormalized.Width = 1
+	if err := decoded.Validate(); err == nil {
+		t.Fatal("out-of-viewport normalized geometry must be rejected")
+	}
+}
+
+func TestStageExecutionEventTargetResolutionAttemptsAreRedactedAndValidated(t *testing.T) {
+	roleAllowed, nameAllowed := true, false
+	event := validStageExecutionEvent()
+	event.Observation.TargetResolutionAttempts = []BrowserTargetResolutionAttempt{
+		{Strategy: "role:button+approved_name", CandidateCount: 0, Outcome: "no_candidates"},
+		{Strategy: "approved_evidence_css", CandidateCount: 1, Unique: true, Visible: true, EvidenceBound: true, RoleAllowed: &roleAllowed, NameAllowed: &nameAllowed, Outcome: "name_mismatch"},
+	}
+	if err := event.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) == "" || !reflect.DeepEqual(event.Observation.TargetResolutionAttempts, func() []BrowserTargetResolutionAttempt {
+		var decoded StageExecutionEvent
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		return decoded.Observation.TargetResolutionAttempts
+	}()) {
+		t.Fatal("target resolution attempts changed during JSON round trip")
+	}
+	event.Observation.TargetResolutionAttempts[0].Outcome = "page_text_dump"
+	if err := event.Validate(); err == nil {
+		t.Fatal("unsupported target resolution outcomes must be rejected")
+	}
+}
+
 func TestValidationReportRequiresActualEvidenceToContinue(t *testing.T) {
 	report := validRuntimeValidationReport()
 	report.EvidenceQuality = RuntimeObservationDerivedPlan
@@ -201,7 +268,6 @@ func TestAnnotateValidationChecksPassedCheckLeftAlone(t *testing.T) {
 	// passed checks: Impact/Suggestion/Domain may be filled (informational), but no panic
 	// the key assertion is that annotation is safe on passed checks
 }
-
 
 func validRuntimeRepairProposal() RuntimeRepairProposal {
 	return RuntimeRepairProposal{

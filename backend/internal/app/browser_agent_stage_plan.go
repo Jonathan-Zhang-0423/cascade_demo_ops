@@ -510,12 +510,7 @@ func selectorCandidateEncoding(candidate model.SelectorCandidate) string {
 }
 
 func runtimeObservationIsRealEvidence(source model.RuntimeObservationSource) bool {
-	switch source {
-	case model.RuntimeObservationActualBrowser, model.RuntimeObservationAssertion, model.RuntimeObservationArtifact:
-		return true
-	default:
-		return false
-	}
+	return model.RuntimeObservationIsRealEvidence(source)
 }
 
 func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserAgentRuntimePlan, error) {
