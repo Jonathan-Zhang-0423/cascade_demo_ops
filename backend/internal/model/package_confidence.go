@@ -304,13 +304,49 @@ func ComputePackageApprovalSubjectDigest(pkg ClientExecutionPackage) (string, er
 		PolicyFindings: pkg.SafetyReport.PolicyFindings,
 	}
 	return DigestCanonicalJSON(struct {
-		Project    ProjectContextSummary            `json:"project"`
-		Source     *SourceBindingSummary            `json:"source,omitempty"`
-		Run        RecordingRunSpec                 `json:"run"`
-		Bundle     *ExecutableRecordingScriptBundle `json:"bundle"`
-		Safety     PackageSafetyReport              `json:"safety"`
-		Confidence *PackageConfidenceSummary        `json:"confidence"`
-	}{pkg.ProjectContextSummary, pkg.SourceBindingSummary, pkg.RecordingRunSpec, pkg.ExecutableScriptBundle, safety, pkg.ConfidenceSummary})
+		ProducerInstallationID string                           `json:"producer_installation_id,omitempty"`
+		Project                ProjectContextSummary            `json:"project"`
+		Source                 *SourceBindingSummary            `json:"source,omitempty"`
+		Run                    RecordingRunSpec                 `json:"run"`
+		Bundle                 *ExecutableRecordingScriptBundle `json:"bundle"`
+		Safety                 PackageSafetyReport              `json:"safety"`
+		Confidence             *PackageConfidenceSummary        `json:"confidence"`
+	}{pkg.ProducerInstallationID, pkg.ProjectContextSummary, pkg.SourceBindingSummary, pkg.RecordingRunSpec, pkg.ExecutableScriptBundle, safety, pkg.ConfidenceSummary})
+}
+
+func ComputeApprovalSubjectDigestsSHA256(pkg ClientExecutionPackage) (ApprovalSubjectDigestsSHA256, error) {
+	bundle := pkg.ExecutableScriptBundle
+	if bundle == nil || bundle.PlanJSON == nil || bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil || bundle.BrowserAgentContract == nil || bundle.AgentPromptPolicy == nil {
+		return ApprovalSubjectDigestsSHA256{}, fmt.Errorf("approval subject objects are incomplete")
+	}
+	plan, err := bundle.PlanJSON.ComputeScriptHash()
+	if err != nil {
+		return ApprovalSubjectDigestsSHA256{}, err
+	}
+	stagePlan, err := DigestCanonicalJSON(bundle.StageApprovalPlan)
+	if err != nil {
+		return ApprovalSubjectDigestsSHA256{}, err
+	}
+	outline, err := DigestCanonicalJSON(bundle.ScriptOutline)
+	if err != nil {
+		return ApprovalSubjectDigestsSHA256{}, err
+	}
+	contract, err := DigestCanonicalJSON(bundle.BrowserAgentContract)
+	if err != nil {
+		return ApprovalSubjectDigestsSHA256{}, err
+	}
+	prompt, err := DigestCanonicalJSON(bundle.AgentPromptPolicy)
+	if err != nil {
+		return ApprovalSubjectDigestsSHA256{}, err
+	}
+	markdown := strings.TrimSpace(bundle.ApprovalMarkdown.SHA256)
+	if markdown == "" {
+		return ApprovalSubjectDigestsSHA256{}, fmt.Errorf("approval markdown digest is required")
+	}
+	return ApprovalSubjectDigestsSHA256{
+		PlanJSON: plan, StageApprovalPlan: stagePlan, ScriptOutline: outline,
+		BrowserAgentContract: contract, AgentPromptPolicy: prompt, ApprovalMarkdown: markdown,
+	}, nil
 }
 
 func ComputePackageApprovalComponentDigests(pkg ClientExecutionPackage) (map[string]string, error) {

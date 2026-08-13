@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"cascade-demoops/backend/internal/credentialstore"
+	"cascade-demoops/backend/internal/driver"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -105,6 +107,27 @@ func TestDevVisibleTargetURLAcceptsExplicitLoopbackURL(t *testing.T) {
 	}
 }
 
+func TestDevVisibleOpenRequestUsesCanonical2KEvidenceViewport(t *testing.T) {
+	target, err := devVisibleTargetURL("http://127.0.0.1:5000/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := devVisibleBrowserAgentOpenRequest(
+		"session-2k", t.TempDir(), target,
+		DevVisibleBrowserAgentPrepareRequest{AutoLogin: true, MaskSelectors: []string{"[data-private]"}},
+		true, false,
+	)
+	if open.Browser.Viewport.Width != 2560 || open.Browser.Viewport.Height != 1440 {
+		t.Fatalf("visible acceptance must capture the canonical 2K 16:9 evidence master: %+v", open.Browser.Viewport)
+	}
+	if !open.Browser.RecordVideo || open.Browser.Headless {
+		t.Fatalf("unexpected visible acceptance browser options: %+v", open.Browser)
+	}
+	if len(open.AllowedOrigins) != 1 || open.AllowedOrigins[0] != "http://127.0.0.1:5000" {
+		t.Fatalf("visible acceptance origin scope changed: %+v", open.AllowedOrigins)
+	}
+}
+
 func TestDevVisiblePostLoginRuntimePlanUsesManualCheckpointOnlyForFirstSessionStage(t *testing.T) {
 	plan := BrowserAgentRuntimePlan{Stages: []BrowserAgentRuntimeStage{
 		{ID: "stage_session", Order: 1, NodeID: "node_session", StageKind: model.BusinessStageKindSessionSetup, URL: "http://127.0.0.1:5000/app", Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionFill}}},
@@ -180,6 +203,68 @@ func TestDevVisiblePrepareRejectsExternalTargetBeforeWorkerStarts(t *testing.T) 
 
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "127.0.0.1") {
 		t.Fatalf("expected external target rejection, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDevVisibleAutomaticLoginRequiresServerEnvironmentBeforeWorkerStarts(t *testing.T) {
+	t.Setenv(devVisibleAutoLoginEmailEnv, "")
+	t.Setenv(devVisibleAutoLoginPasswordEnv, "")
+	server := newTestDevHTTPServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/dev-visible-browser-agent/prepare", strings.NewReader(`{"target_url":"http://127.0.0.1:5000/app","auto_login":true,"dev_test_ack":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), devVisibleAutoLoginEmailEnv) || !strings.Contains(response.Body.String(), devVisibleAutoLoginPasswordEnv) {
+		t.Fatalf("expected automatic-login environment error, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDevVisibleAutomaticLoginResolvesOpaqueCredentialRef(t *testing.T) {
+	manager := newDevVisibleBrowserAgentManager(nil)
+	resolvedRef := ""
+	manager.readDemoCredential = func(ref string) (credentialstore.DemoCredential, error) {
+		resolvedRef = ref
+		return credentialstore.DemoCredential{Username: "private-user", Password: "private-password"}, nil
+	}
+
+	credential, err := manager.resolveAutoLoginCredential("credential://demo/unattended-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedRef != "unattended-e2e" || credential.Username != "private-user" || credential.Password != "private-password" {
+		t.Fatalf("opaque credential ref was not resolved correctly: ref=%q credential=%+v", resolvedRef, credential)
+	}
+	if _, err := manager.resolveAutoLoginCredential("credential://demo/bad/ref"); err == nil {
+		t.Fatal("malformed visible-browser credential_ref was accepted")
+	}
+}
+
+func TestDevVisiblePrepareRejectsCredentialsInRequestBody(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/dev-visible-browser-agent/prepare", strings.NewReader(`{"target_url":"http://127.0.0.1:5000/app","auto_login":true,"email":"user@example.com","password":"not-accepted","dev_test_ack":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || !strings.Contains(strings.ToLower(response.Body.String()), "unknown field") {
+		t.Fatalf("expected request credential fields to be rejected, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestMergeVisibleCloseArtifactsAddsRecordingTraceAndRecoveredEvidence(t *testing.T) {
+	target := map[string]model.ArtifactRef{"stage": {ID: "stage", Kind: "screenshot"}}
+	mergeVisibleCloseArtifacts(target, driver.BrowserAgentWorkerCloseResult{Artifacts: []model.ArtifactRef{
+		{ID: "raw", Kind: "raw_recording", URI: "file:///raw.webm"},
+		{ID: "trace", Kind: "browser_trace", URI: "file:///trace.zip"},
+		{ID: "recovered", Kind: "screenshot", URI: "file:///recovered.png"},
+	}})
+	for _, id := range []string{"stage", "raw", "trace", "recovered"} {
+		if _, ok := target[id]; !ok {
+			t.Fatalf("close artifact %q was not merged: %+v", id, target)
+		}
 	}
 }
 

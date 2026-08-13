@@ -185,13 +185,11 @@ type ExchangePackagePolicy struct {
 }
 
 type ClientExecutionPackage struct {
-	PackageID     string `json:"package_id"`
-	OrgID         string `json:"org_id"`
-	ProjectID     string `json:"project_id"`
-	SchemaVersion string `json:"schema_version"`
-	// ProducerInstallationID binds a formal Direct package to the same
-	// installation that approved it and owns the transport lease.
+	PackageID              string                           `json:"package_id"`
 	ProducerInstallationID string                           `json:"producer_installation_id,omitempty"`
+	OrgID                  string                           `json:"org_id"`
+	ProjectID              string                           `json:"project_id"`
+	SchemaVersion          string                           `json:"schema_version"`
 	CreatedAt              time.Time                        `json:"created_at"`
 	ApprovedAt             time.Time                        `json:"approved_at"`
 	ProjectContextSummary  ProjectContextSummary            `json:"project_context_summary"`
@@ -210,22 +208,21 @@ type ClientExecutionPackage struct {
 }
 
 type ProjectContextSummary struct {
-	ContextID                     string                         `json:"context_id"`
-	SchemaVersion                 string                         `json:"schema_version,omitempty"`
-	Mode                          AppMode                        `json:"mode"`
-	Name                          string                         `json:"name,omitempty"`
-	ProductURL                    string                         `json:"product_url"`
-	TargetAudience                string                         `json:"target_audience"`
-	UseCases                      []DemoUseCase                  `json:"use_cases,omitempty"`
-	Goals                         []DemoGoal                     `json:"goals,omitempty"`
-	Audiences                     []AudienceProfile              `json:"audiences,omitempty"`
-	BrandKit                      *BrandKit                      `json:"brand_kit,omitempty"`
-	AccessPolicy                  *AccessPolicy                  `json:"access_policy,omitempty"`
-	SecurityPolicy                *SecurityPolicy                `json:"security_policy,omitempty"`
-	InputFingerprints             map[string]string              `json:"input_fingerprints,omitempty"`
-	KnowledgeRefs                 []EvidenceRef                  `json:"knowledge_refs,omitempty"`
-	PresentationGenerationIntents []PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
-	Metadata                      map[string]string              `json:"metadata,omitempty"`
+	ContextID         string            `json:"context_id"`
+	SchemaVersion     string            `json:"schema_version,omitempty"`
+	Mode              AppMode           `json:"mode"`
+	Name              string            `json:"name,omitempty"`
+	ProductURL        string            `json:"product_url"`
+	TargetAudience    string            `json:"target_audience"`
+	UseCases          []DemoUseCase     `json:"use_cases,omitempty"`
+	Goals             []DemoGoal        `json:"goals,omitempty"`
+	Audiences         []AudienceProfile `json:"audiences,omitempty"`
+	BrandKit          *BrandKit         `json:"brand_kit,omitempty"`
+	AccessPolicy      *AccessPolicy     `json:"access_policy,omitempty"`
+	SecurityPolicy    *SecurityPolicy   `json:"security_policy,omitempty"`
+	InputFingerprints map[string]string `json:"input_fingerprints,omitempty"`
+	KnowledgeRefs     []EvidenceRef     `json:"knowledge_refs,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
 }
 
 type ProductMapSummary struct {
@@ -514,16 +511,27 @@ type PackageSafetyReport struct {
 }
 
 type UserApprovalRecord struct {
-	ApprovalID                  string            `json:"approval_id"`
-	ApprovedByUserID            string            `json:"approved_by_user_id,omitempty"`
-	ApprovedByInstallationID    string            `json:"approved_by_installation_id,omitempty"`
-	ApprovalSchemaVersion       string            `json:"approval_schema_version,omitempty"`
-	ApprovedAt                  time.Time         `json:"approved_at"`
-	PlanDigestSHA256            string            `json:"plan_digest_sha256"`
-	ApprovalSubjectDigestSHA256 string            `json:"approval_subject_digest_sha256,omitempty"`
-	SubjectDigestsSHA256        map[string]string `json:"subject_digests_sha256,omitempty"`
-	ReviewedNodeIDs             []string          `json:"reviewed_node_ids,omitempty"`
-	Notes                       []string          `json:"notes,omitempty"`
+	ApprovalID                  string                       `json:"approval_id"`
+	ApprovedByUserID            string                       `json:"approved_by_user_id,omitempty"`
+	ApprovedByInstallationID    string                       `json:"approved_by_installation_id,omitempty"`
+	ApprovalSchemaVersion       string                       `json:"approval_schema_version,omitempty"`
+	ApprovedAt                  time.Time                    `json:"approved_at"`
+	PlanDigestSHA256            string                       `json:"plan_digest_sha256"`
+	ApprovalSubjectDigestSHA256 string                       `json:"approval_subject_digest_sha256,omitempty"`
+	SubjectDigestsSHA256        ApprovalSubjectDigestsSHA256 `json:"subject_digests_sha256,omitempty"`
+	ReviewedNodeIDs             []string                     `json:"reviewed_node_ids,omitempty"`
+	Notes                       []string                     `json:"notes,omitempty"`
+}
+
+const UserApprovalSchemaVersion = "cascade.user_approval.v1"
+
+type ApprovalSubjectDigestsSHA256 struct {
+	PlanJSON             string `json:"plan_json,omitempty"`
+	StageApprovalPlan    string `json:"stage_approval_plan,omitempty"`
+	ScriptOutline        string `json:"script_outline,omitempty"`
+	BrowserAgentContract string `json:"browser_agent_contract,omitempty"`
+	AgentPromptPolicy    string `json:"agent_prompt_policy,omitempty"`
+	ApprovalMarkdown     string `json:"approval_markdown,omitempty"`
 }
 
 type RecordingResultPackage struct {
@@ -546,6 +554,25 @@ type RecordingResultPackage struct {
 	AuditTrail            CloudExecutionAuditTrail  `json:"audit_trail"`
 	Delivery              ResultDelivery            `json:"delivery"`
 	CreatedAt             time.Time                 `json:"created_at"`
+}
+
+// ValidateDirectConsistency enforces the App↔Gateway result binding after a
+// Worker has produced a recording result. It intentionally accepts only the
+// immutable identity and digest fields needed by the Direct transport.
+func (r *RecordingResultPackage) ValidateDirectConsistency(sourcePackageID, sourcePackageDigest, jobID string) error {
+	if r == nil || r.ResultID == "" || r.SourcePackageID == "" {
+		return errors.New("direct result package identity is missing")
+	}
+	if sourcePackageID == "" || r.SourcePackageID != sourcePackageID {
+		return errors.New("direct result source_package_id does not match approved package")
+	}
+	if jobID == "" || r.CloudJobID != jobID {
+		return errors.New("direct result cloud_job_id does not match job")
+	}
+	if sourcePackageDigest == "" || r.AuditTrail.SourcePackageDigest != sourcePackageDigest {
+		return errors.New("direct result source package digest does not match approved package")
+	}
+	return r.ValidateStatusContract()
 }
 
 type ScriptFailureDiagnostic struct {

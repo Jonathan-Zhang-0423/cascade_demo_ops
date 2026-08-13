@@ -23,6 +23,7 @@ const (
 
 type executionRuntimeRequest struct {
 	Package            *model.ClientExecutionPackage
+	CredentialResolver browserAgentCredentialResolver
 	CloudJobID         string
 	RecordingOutputDir string
 	RenderOutputDir    string
@@ -37,6 +38,7 @@ type executionRuntimeRequest struct {
 type BrowserAgentOutlineRunRequest struct {
 	Package            *model.ClientExecutionPackage
 	RuntimePlan        BrowserAgentRuntimePlan
+	CredentialResolver browserAgentCredentialResolver
 	CloudJobID         string
 	RecordingOutputDir string
 	RenderOutputDir    string
@@ -90,13 +92,10 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 			return model.RecordingResultPackage{}, newRuntimeExecutionError("stage_event_audit_unavailable", err)
 		}
 		result, err := r.outline.Run(ctx, BrowserAgentOutlineRunRequest{
-			Package: request.Package, RuntimePlan: runtimePlan, CloudJobID: request.CloudJobID,
+			Package: request.Package, RuntimePlan: runtimePlan, CredentialResolver: request.CredentialResolver, CloudJobID: request.CloudJobID,
 			RecordingOutputDir: request.RecordingOutputDir, RenderOutputDir: request.RenderOutputDir,
 			ResultCreatedAt: request.ResultCreatedAt, Progress: request.Progress, EventSink: eventSink, TaskSecrets: request.TaskSecrets,
 		})
-		if err != nil {
-			return model.RecordingResultPackage{}, err
-		}
 		result.ExecutionRuntime = runtimeName
 		if eventSink != nil && eventSink.Count() > 0 {
 			artifact, artifactErr := eventSink.ArtifactRef()
@@ -104,6 +103,9 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 				return model.RecordingResultPackage{}, newRuntimeExecutionError("stage_event_audit_unavailable", artifactErr)
 			}
 			result.StageEventLogRef = &artifact
+		}
+		if err != nil {
+			return result, err
 		}
 		// Formal Direct results must carry a replay manifest that indexes the
 		// same runtime events, validation reports and final rendered assets. Build

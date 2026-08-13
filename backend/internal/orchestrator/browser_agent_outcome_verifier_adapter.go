@@ -564,9 +564,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 			sr.DurationMS = int(acc.completedAt.Sub(acc.startedAt).Milliseconds())
 		}
 		obs := acc.observation
-		isRealEvidence := obs != nil && (obs.Source == model.RuntimeObservationActualBrowser ||
-			obs.Source == model.RuntimeObservationAssertion ||
-			obs.Source == model.RuntimeObservationArtifact)
+		isRealEvidence := obs != nil && model.RuntimeObservationIsRealEvidence(obs.Source)
 		if acc.failed || !isRealEvidence {
 			sr.Status = "failed"
 			if !isRealEvidence {
@@ -577,6 +575,9 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 			parts := []string{}
 			if obs.URL != "" {
 				parts = append(parts, "url="+obs.URL)
+			}
+			if expectedRoute, ok := adapterVerifiedExpectedRoute(vctx.StageApprovalPlan, nid, obs.URL); ok {
+				parts = append(parts, "route_template_verified="+expectedRoute)
 			}
 			if obs.Source != "" {
 				parts = append(parts, "source="+string(obs.Source))
@@ -621,21 +622,68 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 			// We only generate and reference them here
 		}
 	}
-	// repair_allowed is a promise that the stage runner can consume a concrete
-	// proposal. Non-blocking legacy warnings without an allowed patch remain
-	// auditable, but must not send the runner into a proposal-less repair path.
-	if newReport.Decision == model.ValidationDecisionRepairAllowed && len(newReport.RepairProposalRefs) == 0 {
-		newReport.Decision = model.ValidationDecisionContinue
-		if len(newReport.EvidenceRefs) == 0 {
-			newReport.EvidenceRefs = append(newReport.EvidenceRefs, model.EvidenceRef{
-				ID:      firstNonEmpty(vctx.SourceBundleHashSHA256, "unknown_bundle"),
-				Kind:    model.EvidenceKindSourceCode,
-				Summary: "runtime validation found no applicable repair proposal",
-			})
-		}
-	}
 
 	return newReport, nil
+}
+
+// adapterVerifiedExpectedRoute translates a protocol-level dynamic route into
+// evidence understood by the legacy validator. It never mutates runtime events
+// or the approved plan and only emits the marker after independently matching
+// the actual browser URL against the App-approved route template.
+func adapterVerifiedExpectedRoute(plan *model.StageApprovalPlan, nodeID, observedURL string) (string, bool) {
+	if plan == nil || strings.TrimSpace(observedURL) == "" {
+		return "", false
+	}
+	for _, stage := range plan.Stages {
+		if stage.NodeID != nodeID || strings.TrimSpace(stage.ExpectedRouteAfterAction) == "" {
+			continue
+		}
+		if adapterRouteTemplateMatches(observedURL, stage.ExpectedRouteAfterAction) {
+			return stage.ExpectedRouteAfterAction, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+func adapterRouteTemplateMatches(observedRaw, expectedRaw string) bool {
+	observed, observedErr := url.Parse(strings.TrimSpace(observedRaw))
+	expected, expectedErr := url.Parse(strings.TrimSpace(expectedRaw))
+	if observedErr != nil || expectedErr != nil || observed.Path == "" || expected.Path == "" {
+		return false
+	}
+	if expected.Host != "" && !strings.EqualFold(observed.Host, expected.Host) {
+		return false
+	}
+
+	observedSegments := adapterRouteSegments(observed.Path)
+	expectedSegments := adapterRouteSegments(expected.Path)
+	for i, expectedSegment := range expectedSegments {
+		if expectedSegment == "*" {
+			return i < len(observedSegments)
+		}
+		if i >= len(observedSegments) {
+			return false
+		}
+		if strings.HasPrefix(expectedSegment, ":") {
+			if observedSegments[i] == "" {
+				return false
+			}
+			continue
+		}
+		if !strings.EqualFold(observedSegments[i], expectedSegment) {
+			return false
+		}
+	}
+	return len(observedSegments) == len(expectedSegments)
+}
+
+func adapterRouteSegments(path string) []string {
+	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
 }
 
 // ValidatePostExecution validates final results after execution.
@@ -818,9 +866,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 	for _, event := range events {
 		if event.EventType == model.StageExecutionEventOutcomeObserved && event.Observation != nil {
 			// Check evidence quality
-			if event.Observation.Source == model.RuntimeObservationActualBrowser ||
-				event.Observation.Source == model.RuntimeObservationAssertion ||
-				event.Observation.Source == model.RuntimeObservationArtifact {
+			if model.RuntimeObservationIsRealEvidence(event.Observation.Source) {
 				stageOutcomes[event.StageID] = true
 			}
 		}
@@ -872,20 +918,83 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 		if event.EventType == model.StageExecutionEventOutcomeObserved ||
 			event.EventType == model.StageExecutionEventObservationCollected {
 			if len(event.EvidenceRefs) == 0 {
-				requiredOutcome := event.EventType == model.StageExecutionEventOutcomeObserved
-				severity := model.FindingSeverityWarning
-				if requiredOutcome {
-					severity = model.FindingSeverityBlocking
-				}
 				postChecks = append(postChecks, model.ValidationCheck{
 					ID:       fmt.Sprintf("post_no_evidence_refs_%s_%d", event.StageID, i),
 					Kind:     "evidence_traceability",
 					Code:     "MISSING_EVIDENCE_REFS",
-					Severity: severity,
+					Severity: model.FindingSeverityWarning,
 					Passed:   false,
-					Required: requiredOutcome,
+					Required: false,
 					Summary:  fmt.Sprintf("阶段 %s 事件 %s 缺少 evidence_refs，无法追溯原始证据", event.StageID, event.EventType),
 				})
+			}
+		}
+	}
+
+	// P0.5: Cross-check StepResult.observed_state traceability
+	if len(result.StepResults) > 0 {
+		// Build the set of nodes that have a genuine runtime outcome. Successful
+		// Worker actions are browser assertions; treating only passive browser
+		// observations as real would reject an otherwise fully evidenced run.
+		nodeHasOutcome := make(map[string]bool)
+		for _, event := range events {
+			if event.EventType == model.StageExecutionEventOutcomeObserved &&
+				event.Observation != nil &&
+				model.RuntimeObservationIsRealEvidence(event.Observation.Source) &&
+				len(event.EvidenceRefs) > 0 {
+				nodeHasOutcome[event.NodeID] = true
+			}
+		}
+
+		for _, step := range result.StepResults {
+			// If observed_state present but doesn't contain "source=" marker → blocking failure
+			if step.ObservedState != "" && !strings.Contains(step.ObservedState, "source=") {
+				postChecks = append(postChecks, model.ValidationCheck{
+					ID:       fmt.Sprintf("post_observed_state_no_source_%s", step.NodeID),
+					Kind:     "observed_state_traceability",
+					Code:     "observed_state_not_runtime_derived",
+					Severity: model.FindingSeverityBlocking,
+					Passed:   false,
+					Required: true,
+					Summary:  fmt.Sprintf("Step %s observed_state 未标记来源，可能是手工伪造", step.NodeID),
+				})
+			}
+
+			// If observed_state present but no corresponding outcome event → blocking failure
+			if step.ObservedState != "" && !nodeHasOutcome[step.NodeID] {
+				postChecks = append(postChecks, model.ValidationCheck{
+					ID:       fmt.Sprintf("post_observed_state_no_event_%s", step.NodeID),
+					Kind:     "observed_state_traceability",
+					Code:     "observed_state_not_runtime_derived",
+					Severity: model.FindingSeverityBlocking,
+					Passed:   false,
+					Required: true,
+					Summary:  fmt.Sprintf("Step %s observed_state 存在但无对应 outcome_observed 事件", step.NodeID),
+				})
+			}
+		}
+	}
+
+	// P0.6: Verify ValidationCheck evidence_refs point to real artifacts
+	allArtifactIDs := make(map[string]bool)
+	for _, asset := range result.GeneratedAssets {
+		allArtifactIDs[asset.ID] = true
+	}
+	for _, vr := range result.ValidationReports {
+		for _, check := range vr.Checks {
+			for _, evRef := range check.EvidenceRefs {
+				if evRef.ArtifactID != "" && !allArtifactIDs[evRef.ArtifactID] {
+					postChecks = append(postChecks, model.ValidationCheck{
+						ID:           fmt.Sprintf("post_broken_evidence_ref_%s", evRef.ArtifactID),
+						Kind:         "evidence_integrity",
+						Code:         "EVIDENCE_ARTIFACT_REFERENCE_BROKEN",
+						Severity:     model.FindingSeverityWarning,
+						Passed:       false,
+						Required:     false,
+						Summary:      fmt.Sprintf("ValidationCheck %s 引用 artifact %s 但该 artifact 不存在于 GeneratedAssets", check.ID, evRef.ArtifactID),
+						EvidenceRefs: []model.EvidenceRef{{ID: check.ID, Kind: "validation_check"}},
+					})
+				}
 			}
 		}
 	}
@@ -1179,7 +1288,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) convertEventsToPostExecutionAnalyse
 	for _, event := range events {
 		// Build a minimal StepResult from event
 		stepResult := &model.StepResult{
-			NodeID: event.StageID,
+			NodeID: event.NodeID,
 			Status: string(event.EventType), // Use EventType as status approximation
 		}
 
@@ -1189,7 +1298,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) convertEventsToPostExecutionAnalyse
 		}
 
 		analyses = append(analyses, model.PostExecutionAnalysis{
-			NodeID:     event.StageID,
+			NodeID:     event.NodeID,
 			StepResult: stepResult,
 		})
 	}

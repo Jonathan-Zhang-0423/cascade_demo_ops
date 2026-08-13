@@ -2,10 +2,13 @@ package executor
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -649,6 +652,7 @@ func TestNewArkMediaGenerationResultWithOptionsPollsAndDownloadsCandidateArtifac
 		Client:           client,
 		PollAttempts:     1,
 		Downloader:       httpArkMediaCandidateDownloader{client: server.Client()},
+		Normalizer:       scriptedArkMediaNormalizer{normalizedBytes: []byte("normalized mp4 bytes")},
 		MaxDownloadBytes: 1024,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 15, 20, 0, 1, 0, time.UTC)
@@ -658,16 +662,17 @@ func TestNewArkMediaGenerationResultWithOptionsPollsAndDownloadsCandidateArtifac
 	if client.getTaskID != "task_download" || client.getCalls != 1 {
 		t.Fatalf("expected one provider poll for task_download, got task=%q calls=%d", client.getTaskID, client.getCalls)
 	}
-	if result.Status != "candidate_artifacts_downloaded" || result.ProviderStatus != "succeeded" {
-		t.Fatalf("expected downloaded generation result, got %+v", result)
+	if result.Status != "candidate_artifacts_normalized" || result.ProviderStatus != "succeeded" {
+		t.Fatalf("expected normalized generation result, got %+v", result)
 	}
 	if len(result.PollAttempts) != 1 || result.PollAttempts[0].CandidateURLCount != 1 {
 		t.Fatalf("expected poll attempt to record candidate URL count: %+v", result.PollAttempts)
 	}
-	if len(result.CandidateArtifacts) != 1 || len(result.DownloadedArtifacts) != 1 {
-		t.Fatalf("expected one remote candidate and one downloaded artifact: %+v", result)
+	if len(result.CandidateArtifacts) != 1 || len(result.DownloadedArtifacts) != 2 {
+		t.Fatalf("expected one remote candidate, one provider original, and one normalized derivative: %+v", result)
 	}
 	downloaded := result.DownloadedArtifacts[0]
+	normalized := result.DownloadedArtifacts[1]
 	data, err := os.ReadFile(downloaded.URI)
 	if err != nil {
 		t.Fatal(err)
@@ -678,11 +683,88 @@ func TestNewArkMediaGenerationResultWithOptionsPollsAndDownloadsCandidateArtifac
 	if downloaded.Metadata["provider_output_url"] != server.URL+"/generated/demo.mp4" || downloaded.Metadata["include_in_demo"] != false {
 		t.Fatalf("downloaded artifact must preserve provider URL and remain opt-in: %+v", downloaded.Metadata)
 	}
+	if normalized.URI == downloaded.URI || filepath.Ext(normalized.URI) != ".mp4" || normalized.SHA256 == "" || normalized.SizeBytes <= 0 {
+		t.Fatalf("normalized derivative must be a distinct integrity-addressed MP4: original=%+v normalized=%+v", downloaded, normalized)
+	}
+	if normalized.Metadata["provider_original_artifact_id"] != downloaded.ID || normalized.Metadata["artifact_variant"] != "normalized" || normalized.Metadata["normalization_profile"] != media.GeneratedShotNormalizationProfile {
+		t.Fatalf("normalized derivative metadata mismatch: %+v", normalized.Metadata)
+	}
 
 	review := ReviewArkMediaCandidateAssets(&source, &result, time.Date(2026, 7, 15, 20, 0, 2, 0, time.UTC))
-	if review.Status != "rejected" || len(review.RejectedArtifacts) != 1 || len(review.PendingReviewArtifacts) != 0 || len(review.ApprovedArtifacts) != 0 || result.DownloadedArtifacts[0].Metadata["approved_for_demo"] != false || result.DownloadedArtifacts[0].Metadata["media_eligible"] != false {
-		t.Fatalf("downloaded provider original must remain rejected until media normalization: review=%+v artifact=%+v", review, result.DownloadedArtifacts[0])
+	if review.Status != "partially_approved" || len(review.ApprovedArtifacts) != 1 || len(review.RejectedArtifacts) != 1 {
+		t.Fatalf("only the normalized derivative should pass review: %+v", review)
 	}
+	if result.DownloadedArtifacts[0].Metadata["approved_for_demo"] != false || result.DownloadedArtifacts[1].Metadata["approved_for_demo"] != true {
+		t.Fatalf("provider original and normalized derivative review boundary mismatch: %+v", result.DownloadedArtifacts)
+	}
+}
+
+func TestNewArkMediaGenerationResultWithOptionsKeepsNormalizationFailureNonFatal(t *testing.T) {
+	videoBytes := []byte("fake mp4 bytes")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write(videoBytes)
+	}))
+	defer server.Close()
+
+	source := sampleClientExecutionPackageForExecutorTest(t)
+	suggestion := model.DirectorEditSuggestion{
+		SuggestionID:    "suggestion_normalization_failure",
+		SourcePackageID: source.PackageID,
+		ProviderCall: &model.DirectorProviderCall{
+			Status: "submitted", Provider: "seedance", Model: "doubao-seedance-2-0-260128",
+			TaskID: "task_normalization_failure", ProviderStatus: "queued", RealCallMade: true, NonAuthoritative: true,
+		},
+	}
+	client := &fakeArkMediaClient{getResult: media.ContentGenerationTaskResult{
+		Mode: config.ArkMediaModeReal, Provider: config.ModelProviderSeedance, Model: "doubao-seedance-2-0-260128",
+		Response: &media.ContentGenerationTaskResponse{
+			ID: "task_normalization_failure", Status: "succeeded", Model: "doubao-seedance-2-0-260128",
+			Output: map[string]any{"video_url": server.URL + "/generated/demo.mp4"},
+		},
+	}}
+
+	result := NewArkMediaGenerationResultWithOptions(t.Context(), &source, suggestion, time.Now().UTC(), ArkMediaGenerationOptions{
+		OutputDir: t.TempDir(), Client: client, PollAttempts: 1,
+		Downloader:       httpArkMediaCandidateDownloader{client: server.Client()},
+		Normalizer:       scriptedArkMediaNormalizer{err: errors.New("probe rejected candidate")},
+		MaxDownloadBytes: 1024,
+	})
+
+	if result.Status != "candidate_artifacts_downloaded_unreviewable" || len(result.DownloadedArtifacts) != 1 {
+		t.Fatalf("normalization failure must retain the provider original without blocking the main pipeline: %+v", result)
+	}
+	if !containsArkMediaWarning(result.Warnings, "candidate_media_normalization_failed") {
+		t.Fatalf("normalization failure must be traceable: %+v", result.Warnings)
+	}
+	review := ReviewArkMediaCandidateAssets(&source, &result, time.Now().UTC())
+	if review.Status != "rejected" || len(review.ApprovedArtifacts) != 0 {
+		t.Fatalf("unnormalized provider original must never be adopted: %+v", review)
+	}
+}
+
+type scriptedArkMediaNormalizer struct {
+	normalizedBytes []byte
+	err             error
+}
+
+func (n scriptedArkMediaNormalizer) Normalize(_ context.Context, _ string, destinationPath string) (media.MiniMaxH3MediaProbe, media.MiniMaxH3MediaProbe, error) {
+	if n.err != nil {
+		return media.MiniMaxH3MediaProbe{}, media.MiniMaxH3MediaProbe{}, n.err
+	}
+	if err := os.WriteFile(destinationPath, n.normalizedBytes, 0o600); err != nil {
+		return media.MiniMaxH3MediaProbe{}, media.MiniMaxH3MediaProbe{}, err
+	}
+	return media.MiniMaxH3MediaProbe{Format: "mp4", VideoCodec: "h264", Width: 1280, Height: 720, FPS: 25, DurationSec: 2}, media.MiniMaxH3MediaProbe{Format: "mp4", VideoCodec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, FPS: 30, CFR: true, DurationSec: 2}, nil
+}
+
+func containsArkMediaWarning(findings []model.ArkMediaReadinessFinding, code string) bool {
+	for _, finding := range findings {
+		if finding.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func findArtifactByURI(artifacts []model.ArtifactRef, uri string) *model.ArtifactRef {

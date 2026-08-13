@@ -26,7 +26,9 @@
 
 代码位置：[audio_model.go](../backend/internal/media/audio_model.go)。
 
-目前支持 `dry_run`，会记录规范化请求但不访问厂商；`real` 模式在官方 API 文档到位前明确返回 `protocol_pending`，不会猜测 Endpoint、请求字段或响应结构。
+目前支持 `dry_run`，会记录规范化请求但不访问厂商。`real` 模式已按已确认的 OpenSpeech Token 协议接入 `synthesize`：异步提交、轮询、短时 HTTPS 下载、SHA-256 与 FFprobe 回验；`transcribe`、`enhance`、`voice_convert` 仍明确返回 `protocol_pending`。
+
+配置完成后可在 `backend` 目录运行 `go run ./cmd/ttspreflight`。该命令只合成固定的非敏感短句并生成待试听候选，输出哈希和 FFprobe 元数据；不会把候选写入正式 `DemoEditPlan`。
 
 注意：`transcribe` 使用 LAS 语音识别算子，`synthesize` 使用豆包语音服务，不能把两者都直接发送到通用模型 `doubao-seed-2-0-mini-260428` 的 Responses API。
 

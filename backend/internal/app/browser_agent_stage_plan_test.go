@@ -15,6 +15,14 @@ import (
 
 func TestCompileBrowserAgentRuntimePlanKeepsApprovedStageOrderAndSemantics(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
+	approved := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1]
+	outline := &pkg.ExecutableScriptBundle.ScriptOutline.Stages[1]
+	approved.TargetRouteTemplate = "/project/:id"
+	approved.ExpectedRouteAfterAction = "/project/:id"
+	approved.RuntimeRouteVerificationRequired = true
+	outline.TargetRouteTemplate = "/project/:id"
+	outline.ExpectedRouteAfterAction = "/project/:id"
+	outline.RuntimeRouteVerificationRequired = true
 	plan, err := compileBrowserAgentRuntimePlan(&pkg)
 	if err != nil {
 		t.Fatal(err)
@@ -30,6 +38,9 @@ func TestCompileBrowserAgentRuntimePlanKeepsApprovedStageOrderAndSemantics(t *te
 	}
 	if len(plan.Stages[0].Validations) == 0 || !plan.Stages[0].Validations[0].Required {
 		t.Fatalf("compiled stage lost required outcome validations: %+v", plan.Stages[0])
+	}
+	if plan.Stages[1].ExpectedRouteAfterAction != "/project/:id" || plan.Stages[1].TargetRouteTemplate != "/project/:id" || !plan.Stages[1].RuntimeRouteVerificationRequired {
+		t.Fatalf("compiled stage lost App-approved post-action route verification: %+v", plan.Stages[1])
 	}
 }
 

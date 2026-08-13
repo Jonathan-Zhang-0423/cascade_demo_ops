@@ -193,15 +193,15 @@ type ActionTarget struct {
 type SelectorCandidate struct {
 	Kind                   string        `json:"kind"`
 	Value                  string        `json:"value"`
-	Confidence             float64       `json:"confidence,omitempty"`
-	StabilityScore         float64       `json:"stability_score,omitempty"`
-	Source                 string        `json:"source,omitempty"`
 	EvidenceID             string        `json:"evidence_id,omitempty"`
 	SourceKind             string        `json:"source_kind,omitempty"`
 	SourceDigest           string        `json:"source_digest,omitempty"`
 	ObservedRole           string        `json:"observed_role,omitempty"`
 	ObservedAccessibleName string        `json:"observed_accessible_name,omitempty"`
-	ObservedAt             time.Time     `json:"observed_at,omitempty"`
+	ObservedAt             *time.Time    `json:"observed_at,omitempty"`
+	Confidence             float64       `json:"confidence,omitempty"`
+	StabilityScore         float64       `json:"stability_score,omitempty"`
+	Source                 string        `json:"source,omitempty"`
 	LastValidatedAt        time.Time     `json:"last_validated_at,omitempty"`
 	EvidenceRefs           []EvidenceRef `json:"evidence_refs,omitempty"`
 }

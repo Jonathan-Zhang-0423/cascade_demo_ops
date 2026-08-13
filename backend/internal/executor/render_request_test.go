@@ -58,6 +58,9 @@ func TestNewRenderRequestFromRecordingResultUsesTeamProtocolPayloads(t *testing.
 	if request.DurationSec != 45 || request.OutputDir != "artifacts/render" {
 		t.Fatalf("render request lost run spec settings: %+v", request)
 	}
+	if request.RenderProfile == nil || request.RenderProfile.Mode != "final" || request.RenderProfile.Width != 2560 || request.RenderProfile.Height != 1440 || request.RenderProfile.FPS != 30 || request.RenderProfile.CRF != 18 || request.RenderProfile.Format != "mp4" {
+		t.Fatalf("formal Browser Agent render request lost the canonical 2K delivery profile: %+v", request.RenderProfile)
+	}
 	if len(request.GeneratedAssets) != 1 || request.GeneratedAssets[0].ID != "artifact_raw_recording" {
 		t.Fatalf("render request lost generated assets: %+v", request.GeneratedAssets)
 	}

@@ -58,6 +58,12 @@ func enrichRenderResultForDirector(ctx context.Context, source *model.ClientExec
 
 	directorRef := fileMaterialRef(artifactID(source.PackageID, "director_input", 1), "director_input", directorInputPath, "application/json")
 	arkPlan := NewArkMediaDryRunPlan(source, directorRef, directorInput, createdAt)
+	normalizedArkRequirements, arkReferenceFindings := normalizeArkVideoReferences(ctx, arkPlan.SourceAssetRequirements, outputDir, media.FFmpegMiniMaxH3MediaNormalizer{
+		FFmpegPath: envOrDefaultTrimmed("CASCADE_FFMPEG_PATH", "ffmpeg"), FFprobePath: envOrDefaultTrimmed("CASCADE_FFPROBE_PATH", "ffprobe"), MaxDurationSec: seedanceReferenceDurationSec,
+	})
+	arkPlan.SourceAssetRequirements = normalizedArkRequirements
+	arkPlan.RealCallReadiness = arkMediaRealCallReadiness(source, arkPlan.SourceAssetRequirements)
+	arkPlan.RealCallReadiness.Blockers = append(arkPlan.RealCallReadiness.Blockers, arkReferenceFindings...)
 	arkPlanPath := filepath.Join(outputDir, "ark_media_dry_run_plan.json")
 	if err := writeIndentedJSONFile(arkPlanPath, arkPlan); err != nil {
 		return err

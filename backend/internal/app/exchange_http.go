@@ -104,6 +104,17 @@ func (s *DevHTTPServer) registerDevExchangeRoutes(mux *http.ServeMux) {
 // Desktop bridge, editor, model settings, and dev diagnostics remain loopback-only.
 func (s *DevHTTPServer) ControlPlaneHandler() http.Handler {
 	mux := http.NewServeMux()
+	if s.direct == nil {
+		s.direct = NewDirectHTTPServer(s.service, os.Getenv("CASCADE_DIRECT_PUBLIC_HOST"), os.Getenv("CASCADE_DIRECT_BOOTSTRAP_TOKEN"), os.Getenv("CASCADE_DIRECT_WORKER_TOKEN"))
+	}
+	// Direct API is the production App path. Legacy Exchange routes remain
+	// below for compatibility only when explicitly enabled by the runtime.
+	mux.Handle("/v1/direct/", s.direct.ControlHandler())
+	if s.service != nil && s.service.runtime.Profile == config.ProfileCloud && strings.EqualFold(s.service.runtime.Environment, "production") {
+		mux.HandleFunc("/v1/", s.handleLegacyExchangeDisabled)
+		mux.HandleFunc("/aigc/v1/", s.handleLegacyExchangeDisabled)
+		return withControlPlaneHeaders(mux)
+	}
 	s.registerControlPlaneBootstrapRoutes(mux)
 	auth := s.requireInstallationSession
 	mux.HandleFunc("POST /v1/execution-packages/init", auth(s.handleExecutionPackageInit))
@@ -117,6 +128,10 @@ func (s *DevHTTPServer) ControlPlaneHandler() http.Handler {
 	mux.HandleFunc("POST /v1/result-packages/{id}/reviews", auth(s.handleResultPackageReview))
 	mux.HandleFunc("POST /v1/result-packages/{id}/revisions", auth(s.handleResultPackageRevision))
 	return withControlPlaneHeaders(mux)
+}
+
+func (s *DevHTTPServer) handleLegacyExchangeDisabled(w http.ResponseWriter, r *http.Request) {
+	writeExchangeError(w, http.StatusGone, "legacy_exchange_disabled", errors.New("production Desktop must use browser-agent Direct API v1"))
 }
 
 func (s *DevHTTPServer) devExchangeHTTPEnabledForRuntime() bool {

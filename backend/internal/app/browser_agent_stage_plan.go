@@ -38,24 +38,27 @@ type BrowserAgentRuntimePlan struct {
 }
 
 type BrowserAgentRuntimeStage struct {
-	ID             string
-	Order          int
-	NodeID         string
-	StageKind      model.BusinessStageKind
-	Objective      string
-	BusinessIntent string
-	EntryRoute     string
-	Route          string
-	URL            string
-	TargetContract model.BrowserAgentTargetContract
-	Components     []model.BrowserAgentComponentTarget
-	Interactions   []model.BrowserAgentInteraction
-	WaitConditions []string
-	CapturePoints  []string
-	CapturePlan    *model.BrowserAgentCapturePlan
-	SuccessState   string
-	DurationMS     int
-	Validations    []model.ValidationSpec
+	ID                               string
+	Order                            int
+	NodeID                           string
+	StageKind                        model.BusinessStageKind
+	Objective                        string
+	BusinessIntent                   string
+	EntryRoute                       string
+	Route                            string
+	URL                              string
+	TargetRouteTemplate              string
+	ExpectedRouteAfterAction         string
+	RuntimeRouteVerificationRequired bool
+	TargetContract                   model.BrowserAgentTargetContract
+	Components                       []model.BrowserAgentComponentTarget
+	Interactions                     []model.BrowserAgentInteraction
+	WaitConditions                   []string
+	CapturePoints                    []string
+	CapturePlan                      *model.BrowserAgentCapturePlan
+	SuccessState                     string
+	DurationMS                       int
+	Validations                      []model.ValidationSpec
 	// PreferredSelectorAlternative exists only for this in-memory run. It is
 	// set after the Worker has verified one App-approved fallback candidate.
 	PreferredSelectorAlternative *model.SelectorCandidate
@@ -514,12 +517,7 @@ func selectorCandidateEncoding(candidate model.SelectorCandidate) string {
 }
 
 func runtimeObservationIsRealEvidence(source model.RuntimeObservationSource) bool {
-	switch source {
-	case model.RuntimeObservationActualBrowser, model.RuntimeObservationAssertion, model.RuntimeObservationArtifact:
-		return true
-	default:
-		return false
-	}
+	return model.RuntimeObservationIsRealEvidence(source)
 }
 
 func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserAgentRuntimePlan, error) {
@@ -610,7 +608,10 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 			ID: approved.ID, Order: approved.Order, NodeID: approved.NodeID, StageKind: approved.StageKind, Objective: approved.Objective,
 			BusinessIntent: approved.BusinessIntent, EntryRoute: firstNonEmptyString(outline.EntryRoute, approved.EntryRoute),
 			Route: firstNonEmptyString(outline.Route, approved.TargetRoute), URL: firstNonEmptyString(outline.URL, approved.TargetURL),
-			TargetContract: *approvedTarget, Components: append([]model.BrowserAgentComponentTarget{}, outline.Components...),
+			TargetRouteTemplate:              firstNonEmptyString(outline.TargetRouteTemplate, approved.TargetRouteTemplate),
+			ExpectedRouteAfterAction:         firstNonEmptyString(outline.ExpectedRouteAfterAction, approved.ExpectedRouteAfterAction),
+			RuntimeRouteVerificationRequired: outline.RuntimeRouteVerificationRequired || approved.RuntimeRouteVerificationRequired,
+			TargetContract:                   *approvedTarget, Components: append([]model.BrowserAgentComponentTarget{}, outline.Components...),
 			Interactions:   append([]model.BrowserAgentInteraction{}, outline.Interactions...),
 			WaitConditions: append([]string{}, outline.WaitConditions...), CapturePoints: append([]string{}, outline.CapturePoints...),
 			CapturePlan: capturePlan, SuccessState: approved.SuccessState, DurationMS: approved.DurationMS,

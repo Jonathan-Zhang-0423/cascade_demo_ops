@@ -32,6 +32,7 @@ type ArkMediaGenerationOptions struct {
 	PollAttempts     int
 	PollInterval     time.Duration
 	Downloader       arkMediaCandidateDownloader
+	Normalizer       media.MiniMaxH3MediaNormalizer
 	MaxDownloadBytes int64
 	Now              func() time.Time
 }
@@ -71,10 +72,15 @@ func NewArkMediaGenerationResultWithOptions(ctx context.Context, source *model.C
 			downloader = httpArkMediaCandidateDownloader{client: http.DefaultClient}
 		}
 		downloaded, warnings := downloadArkMediaCandidateArtifacts(ctx, sourcePackageIDForGeneration(source, suggestion), result.CandidateArtifacts, filepath.Join(options.OutputDir, arkMediaOutputDownloadDirectory), downloader, options.MaxDownloadBytes, createdAt)
-		result.DownloadedArtifacts = downloaded
+		normalized, normalizationWarnings := normalizeArkMediaCandidateArtifacts(ctx, sourcePackageIDForGeneration(source, suggestion), downloaded, options.Normalizer, createdAt)
+		result.DownloadedArtifacts = append(downloaded, normalized...)
 		result.Warnings = appendReadinessFindings(result.Warnings, warnings...)
-		if len(downloaded) > 0 {
-			result.Status = "candidate_artifacts_downloaded"
+		result.Warnings = appendReadinessFindings(result.Warnings, normalizationWarnings...)
+		if len(normalized) > 0 {
+			result.Status = "candidate_artifacts_normalized"
+			result.Warnings = removeReadinessFindingsByCode(result.Warnings, "no_candidate_urls")
+		} else if len(downloaded) > 0 {
+			result.Status = "candidate_artifacts_downloaded_unreviewable"
 			result.Warnings = removeReadinessFindingsByCode(result.Warnings, "no_candidate_urls")
 		}
 	}
@@ -94,13 +100,77 @@ func arkMediaGenerationOptionsFromEnv(outputDir string, now func() time.Time) Ar
 		pollAttempts = 0
 	}
 	return ArkMediaGenerationOptions{
-		OutputDir:        envOrDefaultTrimmed("CASCADE_ARK_MEDIA_OUTPUT_DIR", outputDir),
-		Client:           client,
-		PollAttempts:     pollAttempts,
-		PollInterval:     durationFromMillisEnv("CASCADE_ARK_MEDIA_POLL_INTERVAL_MS", defaultArkMediaPollInterval),
+		OutputDir:    envOrDefaultTrimmed("CASCADE_ARK_MEDIA_OUTPUT_DIR", outputDir),
+		Client:       client,
+		PollAttempts: pollAttempts,
+		PollInterval: durationFromMillisEnv("CASCADE_ARK_MEDIA_POLL_INTERVAL_MS", defaultArkMediaPollInterval),
+		Normalizer: media.FFmpegMiniMaxH3MediaNormalizer{
+			FFmpegPath:  envOrDefaultTrimmed("CASCADE_FFMPEG_PATH", "ffmpeg"),
+			FFprobePath: envOrDefaultTrimmed("CASCADE_FFPROBE_PATH", "ffprobe"),
+		},
 		MaxDownloadBytes: int64FromEnv("CASCADE_ARK_MEDIA_DOWNLOAD_MAX_BYTES", defaultArkMediaDownloadMaxBytes),
 		Now:              now,
 	}
+}
+
+func normalizeArkMediaCandidateArtifacts(ctx context.Context, sourcePackageID string, downloaded []model.ArtifactRef, normalizer media.MiniMaxH3MediaNormalizer, createdAt time.Time) ([]model.ArtifactRef, []model.ArkMediaReadinessFinding) {
+	result := []model.ArtifactRef{}
+	warnings := []model.ArkMediaReadinessFinding{}
+	for index, original := range downloaded {
+		if original.Kind != "generated_video_candidate" || !strings.HasPrefix(strings.ToLower(original.MimeType), "video/") {
+			continue
+		}
+		if normalizer == nil {
+			warnings = append(warnings, model.ArkMediaReadinessFinding{Code: "candidate_media_normalizer_missing", Message: "downloaded video candidate cannot enter review until FFmpeg and FFprobe normalization is configured", RefID: original.ID})
+			continue
+		}
+		extension := filepath.Ext(original.URI)
+		destination := strings.TrimSuffix(original.URI, extension) + ".normalized.mp4"
+		originalProbe, normalizedProbe, err := normalizer.Normalize(ctx, original.URI, destination)
+		if err != nil {
+			warnings = append(warnings, model.ArkMediaReadinessFinding{Code: "candidate_media_normalization_failed", Message: err.Error(), RefID: original.ID, TaskID: artifactStringMetadata(original.Metadata, "task_id")})
+			continue
+		}
+		digest, size, err := arkMediaFileDigest(destination)
+		if err != nil {
+			warnings = append(warnings, model.ArkMediaReadinessFinding{Code: "candidate_normalized_digest_failed", Message: err.Error(), RefID: original.ID})
+			continue
+		}
+		metadata := cloneArtifactMetadata(original.Metadata)
+		metadata["provider_original_artifact_id"] = original.ID
+		metadata["provider_original_sha256"] = original.SHA256
+		metadata["artifact_variant"] = "normalized"
+		metadata["normalization_status"] = "ok"
+		metadata["media_probe_status"] = "ok"
+		metadata["normalization_profile"] = media.GeneratedShotNormalizationProfile
+		metadata["duration_ms"] = int(normalizedProbe.DurationSec*1000 + 0.5)
+		metadata["original_media_probe"] = originalProbe
+		metadata["normalized_media_probe"] = normalizedProbe
+		metadata["include_in_demo"] = false
+		metadata["approved_for_demo"] = false
+		metadata["presentation_only"] = true
+		metadata["non_authoritative"] = true
+		result = append(result, model.ArtifactRef{
+			ID: artifactID(sourcePackageID, original.Kind+"_normalized", index+1), Kind: original.Kind,
+			URI: destination, MimeType: "video/mp4", SHA256: digest, SizeBytes: size,
+			CreatedAt: createdAt, Sensitive: false, Metadata: metadata,
+		})
+	}
+	return result, warnings
+}
+
+func arkMediaFileDigest(path string) (string, int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	size, err := io.Copy(hash, file)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), size, nil
 }
 
 func pollArkMediaProviderTask(ctx context.Context, result *model.ArkMediaGenerationResult, sourcePackageID string, createdAt time.Time, options ArkMediaGenerationOptions) {

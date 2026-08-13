@@ -4,7 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { audioVolumeExpression, render, validateEditPlan, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
+import { audioVolumeExpression, globalCaptionCuesForOutputWindow, render, validateEditPlan, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
 
 const catalog: AssetTimelineCatalog = {
   schema_version: "demoops.asset_timeline_catalog.v1",
@@ -77,6 +77,20 @@ describe("editor audio policy", () => {
     expect(validateEditPlan({ catalog, edit_plan: invalid }).errors.map((item) => item.code)).toEqual(expect.arrayContaining(["invalid_still_output_duration", "still_source_time_range_not_allowed"]));
   });
 
+  it("rejects a screenshot explicitly mislabeled as video", () => {
+    const invalid = plan();
+    invalid.shots.push({
+      id: "mislabelled_screenshot",
+      source_artifact_id: "step_screenshot",
+      presentation_kind: "video",
+      source_time_range_ms: [7_500, 10_600],
+      purpose: "Screenshot must not be treated as a video source",
+    });
+    const report = validateEditPlan({ catalog, edit_plan: invalid });
+    expect(report.valid).toBe(false);
+    expect(report.errors.map((item) => item.code)).toContain("time_range_outside_source");
+  });
+
   it("rejects invalid modes and out-of-range volume", () => {
     const invalid = plan();
     invalid.audio = { mode: "invalid" as "source", volume_percent: 250 };
@@ -128,6 +142,21 @@ describe("editor audio policy", () => {
     expect(audioVolumeExpression(audio, 2000, 2000)).toEqual({ expression: "if(between(t,0.000,1.000),0.00,if(between(t,1.000,2.000),0.60,1.00))", usesSource: true });
     expect(audioVolumeExpression(audio, 0, 2000, 500)).toEqual({ expression: "if(between(t,1.500,2.500),0.00,1.00)", usesSource: true });
     expect(audioVolumeExpression({ mode: "mute", volume_percent: 100 }, 0, 2000)).toEqual({ expression: "0.00", usesSource: false });
+  });
+
+  it("clips global caption cues into each output segment before the only video encode", () => {
+    const editPlan = plan();
+    editPlan.caption_cues = [
+      { id: "cross_segment", output_range_ms: [750, 1250], text: "Build the project", source: "user_configured" },
+      { id: "second_segment", output_range_ms: [1500, 1900], text: "Review the result", source: "model_confirmed" },
+    ];
+    expect(globalCaptionCuesForOutputWindow(editPlan, 0, 1000)).toEqual([
+      { start_ms: 750, end_ms: 1000, text: "Build the project" },
+    ]);
+    expect(globalCaptionCuesForOutputWindow(editPlan, 1000, 1000)).toEqual([
+      { start_ms: 0, end_ms: 250, text: "Build the project" },
+      { start_ms: 500, end_ms: 900, text: "Review the result" },
+    ]);
   });
 
   it("accepts confirmed narration and caption cues but rejects invalid candidate data", () => {

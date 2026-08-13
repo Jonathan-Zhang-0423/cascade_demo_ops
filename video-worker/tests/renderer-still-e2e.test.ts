@@ -103,7 +103,168 @@ function planWithShape(): DemoEditPlan {
   return result;
 }
 
+function planWithTargetEvidence(): DemoEditPlan {
+  const result = plan();
+  result.shots[0]!.operations = [{ type: "zoom_pan", zoom: 2, x: 0.9, y: 0.5 }];
+  result.shots[0]!.overlays = [{
+    type: "highlight_box",
+    shape: "rectangle",
+    x: 0.01,
+    y: 0.01,
+    width: 0.02,
+    height: 0.02,
+    target_evidence_artifact_id: "screenshot",
+    geometry_source: "browser_agent_target_geometry_v1",
+    start_ms: 0,
+    end_ms: 900,
+  }];
+  return result;
+}
+
+function catalogWithTargetEvidence(recordingPath: string, screenshotPath: string): AssetTimelineCatalog {
+  const result = catalog(recordingPath, screenshotPath);
+  result.artifacts[1]!.metadata = {
+    presentation_only: true,
+    target_geometry: {
+      schema_version: "demoops.browser_target_geometry.v1",
+      target_semantic_id: "build_button",
+      resolution_strategy: "role_name",
+      selector_digest_sha256: "a".repeat(64),
+      captured_at: "2026-08-13T00:00:00Z",
+      recording_offset_ms: 500,
+      viewport: { width: 2560, height: 1440, dpr: 1 },
+      element_box_css_px: { x: 1664, y: 648, width: 256, height: 144 },
+      element_box_normalized: { x: 0.65, y: 0.45, width: 0.1, height: 0.1 },
+      screenshot_artifact_id: "screenshot",
+      confidence: 1,
+    },
+  };
+  return result;
+}
+
+function catalogForDefaultTargetStill(recordingPath: string, afterPath: string, targetPath: string): AssetTimelineCatalog {
+  const result = catalog(recordingPath, afterPath);
+  result.timeline.recording_artifact_id = "recording";
+  result.artifacts[0]!.sensitive = true;
+  result.artifacts[1]!.id = "after_screenshot";
+  result.artifacts[1]!.kind = "screenshot";
+  result.artifacts[1]!.source_step_id = "create_project";
+  result.artifacts[1]!.metadata = { capture_phase: "after" };
+  result.artifacts.push({
+    id: "target_screenshot",
+    kind: "target_geometry_screenshot",
+    uri: pathToFileURL(targetPath).href,
+    local_path: targetPath,
+    mime_type: "image/png",
+    source_step_id: "create_project",
+    include_in_demo: false,
+    metadata: {
+      capture_phase: "target",
+      target_geometry: {
+        schema_version: "demoops.browser_target_geometry.v1",
+        target_semantic_id: "new_project",
+        resolution_strategy: "approved_evidence_css",
+        selector_digest_sha256: "b".repeat(64),
+        captured_at: "2026-08-13T00:00:00Z",
+        recording_offset_ms: 500,
+        viewport: { width: 2560, height: 1440, dpr: 1 },
+        element_box_css_px: { x: 1536, y: 576, width: 256, height: 144 },
+        element_box_normalized: { x: 0.6, y: 0.4, width: 0.1, height: 0.1 },
+        screenshot_artifact_id: "target_screenshot",
+        confidence: 1,
+      },
+    },
+  });
+  result.steps = [{
+    step_id: "create_project",
+    order: 0,
+    action: "click",
+    status: "passed",
+    required: true,
+    start_ms: 0,
+    end_ms: 1000,
+    duration_ms: 1000,
+    artifacts: ["after_screenshot", "target_screenshot"],
+    expected_outcome: "Open the new project dialog",
+  }];
+  return result;
+}
+
 describe("static screenshot compositor e2e", () => {
+  renderWithFFmpeg("builds the default target callout from the exact same verified screenshot", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-default-target-still-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const afterPath = path.join(root, "after.png");
+      const targetPath = path.join(root, "target.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-t", "1", "-c:v", "mpeg4", recordingPath]);
+      generateScreenshot(afterPath);
+      generateScreenshot(targetPath);
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: catalogForDefaultTargetStill(recordingPath, afterPath, targetPath),
+        render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" },
+      });
+      const savedPlan = JSON.parse(await readFile(result.demo_edit_plan_path, "utf8"));
+      const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
+      expect(savedPlan.shots[0]).toMatchObject({
+        source_artifact_id: "target_screenshot",
+        presentation_kind: "still",
+        overlays: expect.arrayContaining([
+          expect.objectContaining({ type: "highlight_box", target_evidence_artifact_id: "target_screenshot" }),
+          expect.objectContaining({ type: "cursor_highlight", target_evidence_artifact_id: "target_screenshot" }),
+        ]),
+      });
+      expect(manifest.compositor.applied_operations).toEqual(expect.arrayContaining(["highlight_box", "cursor_highlight"]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  renderWithFFmpeg("does not draw target geometry over a different still from the same step", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-target-source-mismatch-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const afterPath = path.join(root, "after.png");
+      const targetPath = path.join(root, "target.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-t", "1", "-c:v", "mpeg4", recordingPath]);
+      generateScreenshot(afterPath);
+      generateScreenshot(targetPath);
+      const evidenceCatalog = catalogForDefaultTargetStill(recordingPath, afterPath, targetPath);
+      const editPlan: DemoEditPlan = {
+        ...plan(),
+        target_duration_ms: 1000,
+        shots: [{
+          id: "mismatched_still",
+          source_artifact_id: "after_screenshot",
+          source_step_id: "create_project",
+          presentation_kind: "still",
+          output_duration_ms: 1000,
+          purpose: "Show result",
+          overlays: [{
+            type: "highlight_box",
+            shape: "rectangle",
+            target_evidence_artifact_id: "target_screenshot",
+            geometry_source: "browser_agent_target_geometry_v1",
+          }],
+        }],
+      };
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: evidenceCatalog,
+        edit_plan: editPlan,
+        render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" },
+      });
+      const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
+      expect(manifest.compositor.applied_operations).not.toContain("highlight_box");
+      expect(manifest.compositor.skipped_operations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "highlight_box", reason: "target_geometry_source_mismatch" }),
+      ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   renderWithFFmpeg("renders a still image with a silent compatible audio stream and concatenates it to recording video", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cascade-still-render-"));
     try {
@@ -125,7 +286,20 @@ describe("static screenshot compositor e2e", () => {
       const probe = spawnSync(ffmpegPath, ["-hide_banner", "-i", result.video_path], { encoding: "utf8", windowsHide: true });
       const mediaInfo = `${probe.stdout}\n${probe.stderr}`;
 
-      expect(manifest).toMatchObject({ status: "rendered", compositor: { method: "ffmpeg_trim_concat" } });
+      expect(manifest).toMatchObject({
+        status: "rendered",
+        compositor: {
+          method: "ffmpeg_trim_concat",
+          encoding_audit: {
+            source_master_preserved: true,
+            segment_video_encode_passes: 1,
+            concat_video_mode: "stream_copy",
+            post_process_video_mode: "not_applicable",
+            max_lossy_video_encode_passes_per_output_frame: 1,
+            global_captions_embedded_during_segment_encode: false,
+          },
+        },
+      });
       expect(output.size).toBeGreaterThan(0);
       expect(mediaInfo).toContain("320x180");
       expect(mediaInfo).toMatch(/Video:/);
@@ -135,7 +309,7 @@ describe("static screenshot compositor e2e", () => {
     }
   }, 30_000);
 
-  renderWithFFmpeg("burns a supported rectangle annotation into the rendered video", async () => {
+  renderWithFFmpeg("skips target annotations that have no Browser Agent geometry evidence", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cascade-shape-render-"));
     try {
       const recordingPath = path.join(root, "recording.mp4");
@@ -144,10 +318,42 @@ describe("static screenshot compositor e2e", () => {
       generateScreenshot(screenshotPath);
       const result = await render({ output_dir: path.join(root, "render"), asset_timeline_catalog: catalog(recordingPath, screenshotPath), edit_plan: planWithShape(), render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" } });
       const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
-      expect(manifest.compositor.applied_operations).toContain("highlight_box");
-      expect(manifest.compositor.skipped_operations).not.toEqual(expect.arrayContaining([expect.objectContaining({ type: "highlight_box" })]));
+      expect(manifest.compositor.applied_operations).not.toContain("highlight_box");
+      expect(manifest.compositor.skipped_operations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "highlight_box", reason: "missing_target_geometry" }),
+      ]));
       const savedPlan = JSON.parse(await readFile(result.demo_edit_plan_path, "utf8"));
       expect(savedPlan.shots[0].overlays[0]).toMatchObject({ rotation: 24, scale_x: 125, scale_y: 75 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  renderWithFFmpeg("renders evidence-bound target geometry after zoom and preserves its audit binding", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-evidence-shape-render-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const screenshotPath = path.join(root, "step.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "mpeg4", "-c:a", "aac", recordingPath]);
+      generateScreenshot(screenshotPath);
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: catalogWithTargetEvidence(recordingPath, screenshotPath),
+        edit_plan: planWithTargetEvidence(),
+        render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" },
+      });
+      const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
+      const overlay = manifest.compositor.shot_plan[0].overlays[0];
+      expect(manifest.compositor.applied_operations).toContain("highlight_box");
+      expect(overlay).toMatchObject({
+        target_evidence_artifact_id: "screenshot",
+        geometry_source: "browser_agent_target_geometry_v1",
+        target_geometry_verified: true,
+        coordinate_space: "post_edit_normalized",
+      });
+      expect(overlay.x + overlay.width / 2).toBeCloseTo(0.5, 2);
+      expect(overlay.y + overlay.height / 2).toBeCloseTo(0.5, 2);
+      expect(overlay.x).not.toBeCloseTo(0.01, 2);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

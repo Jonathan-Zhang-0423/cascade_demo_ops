@@ -56,7 +56,7 @@ func TestBuildAndWriteReplayManifestBasicSuccess(t *testing.T) {
 		t.Fatalf("bundle hash not carried: %s", manifest.BundleHashSHA256)
 	}
 	if manifest.PolicyHashSHA256 != "policy_hash" {
-		t.Fatalf("effective Browser Agent policy hash not carried: %s", manifest.PolicyHashSHA256)
+		t.Fatalf("policy hash must bind the browser agent contract: %s", manifest.PolicyHashSHA256)
 	}
 	if manifest.Status != "success" {
 		t.Fatalf("expected success, got %s", manifest.Status)
@@ -102,8 +102,9 @@ func TestBuildReplayManifestFailedStatusFromResult(t *testing.T) {
 		PackageID: "pkg_002",
 		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
 			Reproducibility: model.ExecutableScriptReproducibility{
-				BundleHashSHA256: "bundle_hash_2",
-				PlanHashSHA256:   "plan_hash_2",
+				BundleHashSHA256:               "bundle_hash_2",
+				PlanHashSHA256:                 "plan_hash_2",
+				BrowserAgentContractHashSHA256: "policy_hash_2",
 			},
 		},
 	}
@@ -135,7 +136,7 @@ func TestBuildReplayManifestWaiverContext(t *testing.T) {
 	pkg := model.ClientExecutionPackage{
 		PackageID: "pkg_003",
 		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
-			Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bh", PlanHashSHA256: "ph"},
+			Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bh", PlanHashSHA256: "ph", BrowserAgentContractHashSHA256: "policy"},
 		},
 	}
 	waiver := BrowserAgentTestWaiver{

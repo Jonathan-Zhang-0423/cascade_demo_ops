@@ -52,6 +52,9 @@ func TestLocalBrowserAgentOutlineRunnerBuildsAuditableResultPackage(t *testing.T
 	if openRequest.InitialURL != pkg.ProjectContextSummary.ProductURL {
 		t.Fatalf("worker must start from the approved product URL, not a broader base origin: %q", openRequest.InitialURL)
 	}
+	if openRequest.Browser.Viewport.Width != 2560 || openRequest.Browser.Viewport.Height != 1440 {
+		t.Fatalf("Browser Agent evidence master must use the canonical 2K 16:9 web viewport: %+v", openRequest.Browser.Viewport)
+	}
 	if session.observeCalls != len(plan.Stages) || session.executeCalls != len(plan.Stages) || session.closeCalls != 1 {
 		t.Fatalf("runner did not preserve one browser session across stages: %+v", session)
 	}
@@ -588,12 +591,43 @@ func hasStageEvent(events []model.StageExecutionEvent, eventType model.StageExec
 }
 
 type stubBrowserAgentWorkerSession struct {
-	observeCalls    int
-	executeCalls    int
-	revalidateCalls int
-	closeCalls      int
-	recordingPath   string
-	failNodeID      string
+	observeCalls            int
+	executeCalls            int
+	credentialExecuteCalls  int
+	credentialSecretMatched bool
+	revalidateCalls         int
+	closeCalls              int
+	recordingPath           string
+	failNodeID              string
+}
+
+func TestBrowserAgentStageUsesCredentialBrokerWithoutEmbeddingSecretInStage(t *testing.T) {
+	const (
+		secretRef = "vault://approved/login"
+		secret    = "credential-value-for-test"
+	)
+	broker, err := newOneTimeBrowserAgentCredentialBroker(secretRef, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broker.Destroy()
+	session := &stubBrowserAgentWorkerSession{}
+	runtime := &localBrowserAgentStageRuntime{session: session, credentialResolver: broker, stageCount: 1, artifacts: map[string]model.ArtifactRef{}}
+	stage := BrowserAgentRuntimeStage{
+		ID: "stage_login", Order: 1, NodeID: "node_login",
+		TargetContract: model.BrowserAgentTargetContract{SemanticID: "login_password", Destructive: false},
+		Interactions:   []model.BrowserAgentInteraction{{Kind: model.GraphActionFill, SecretRef: secretRef, NonDestructive: true}},
+	}
+	result, err := runtime.ExecuteStage(context.Background(), BrowserAgentRuntimePlan{}, stage)
+	if err != nil || result.Observation == nil {
+		t.Fatalf("credential broker execution failed: result=%+v err=%v", result, err)
+	}
+	if session.credentialExecuteCalls != 1 || session.executeCalls != 1 || !session.credentialSecretMatched {
+		t.Fatalf("credential was not delivered through the narrow worker method: %+v", session)
+	}
+	if stage.Interactions[0].Value != "" {
+		t.Fatal("resolved credential must not be copied into the approved runtime stage")
+	}
 }
 
 func TestManualSessionCheckpointRevalidatesWithoutExecutingCredentialAction(t *testing.T) {
@@ -656,6 +690,16 @@ func (s *stubBrowserAgentWorkerSession) Execute(_ context.Context, stage driver.
 	}, nil
 }
 
+func (s *stubBrowserAgentWorkerSession) ExecuteWithSecrets(ctx context.Context, stage driver.BrowserAgentWorkerStage, secrets map[string]string) (driver.BrowserAgentWorkerStageResult, error) {
+	s.credentialExecuteCalls++
+	for _, interaction := range stage.Interactions {
+		if interaction.SecretRef != "" && secrets[interaction.SecretRef] == "credential-value-for-test" {
+			s.credentialSecretMatched = true
+		}
+	}
+	return s.Execute(ctx, stage)
+}
+
 func (s *stubBrowserAgentWorkerSession) Revalidate(_ context.Context, stage driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error) {
 	s.revalidateCalls++
 	artifact := stubBrowserAgentArtifact(stage.NodeID, "revalidate")
@@ -699,7 +743,7 @@ func (stubBrowserAgentRenderService) Render(_ context.Context, request executor.
 }
 
 func (stubBrowserAgentRenderService) ProbeMedia(_ context.Context, request executor.MediaProbeRequest) (executor.MediaProbeResult, error) {
-	return executor.MediaProbeResult{Path: request.Path, Format: "mov,mp4", DurationMS: 1000, VideoCodec: "h264", Width: 1280, Height: 720, FPS: 30, FFProbeAvailable: true}, nil
+	return executor.MediaProbeResult{Path: request.Path, Format: "mov,mp4", DurationMS: 1000, VideoCodec: "h264", Width: 2560, Height: 1440, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true}, nil
 }
 
 func (s *stubBrowserAgentWorkerSession) Abort() error { return nil }
@@ -709,6 +753,214 @@ func stubBrowserAgentArtifact(nodeID, phase string) model.ArtifactRef {
 		ID: "artifact_" + nodeID + "_" + phase, Kind: "screenshot", URI: "file:///" + nodeID + "-" + phase + ".png",
 		MimeType: "image/png", SHA256: "sha256_" + nodeID + "_" + phase, SizeBytes: 10, Sensitive: true,
 		SourceNodeID: nodeID, Metadata: map[string]any{"include_in_demo": phase == "after" || phase == "revalidate"},
+	}
+}
+
+func TestDeterministicBrowserAgentVerifierPreExecutionReportsContractMissing(t *testing.T) {
+	report, err := newDeterministicBrowserAgentStageVerifier(nil).ValidateBeforeExecution(
+		context.Background(),
+		model.BrowserAgentValidationContext{
+			RunID: "run_contract_missing", SourcePackageID: "pkg_1",
+			SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
+			StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{NodeID: "node_1"}}},
+			ScriptOutline:     &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{NodeID: "node_1"}}},
+			// BrowserAgentContract deliberately nil → structurePassed=false → approved_contract_missing
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport {
+		t.Fatalf("expected stop_and_report when BrowserAgentContract is nil, got %q", report.Decision)
+	}
+	if !validationReportHasCheckCode(report, "approved_contract_missing", false) {
+		t.Fatalf("expected approved_contract_missing check with Passed=false; report: %+v", report)
+	}
+	for _, check := range report.Checks {
+		if check.Code == "approved_contract_missing" {
+			if check.Severity != model.FindingSeverityBlocking {
+				t.Errorf("approved_contract_missing severity = %v, want Blocking", check.Severity)
+			}
+			if !check.Required {
+				t.Errorf("approved_contract_missing Required = false, want true")
+			}
+		}
+	}
+}
+
+func TestDeterministicBrowserAgentVerifierPreExecutionReportsStagePlanEmpty(t *testing.T) {
+	report, err := newDeterministicBrowserAgentStageVerifier(nil).ValidateBeforeExecution(
+		context.Background(),
+		model.BrowserAgentValidationContext{
+			RunID: "run_stage_plan_empty", SourcePackageID: "pkg_1",
+			SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
+			// All three non-nil so structurePassed=true, but Stages empty → stagePlanPassed=false
+			StageApprovalPlan:    &model.StageApprovalPlan{Stages: []model.StageApprovalStage{}},
+			ScriptOutline:        &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{}},
+			BrowserAgentContract: &model.BrowserAgentContract{ID: "contract_1"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport {
+		t.Fatalf("expected stop_and_report when stage plan has no stages, got %q", report.Decision)
+	}
+	if !validationReportHasCheckCode(report, "approved_stage_plan_empty", false) {
+		t.Fatalf("expected approved_stage_plan_empty check with Passed=false; report: %+v", report)
+	}
+	for _, check := range report.Checks {
+		if check.Code == "approved_stage_plan_empty" {
+			if check.Severity != model.FindingSeverityBlocking {
+				t.Errorf("approved_stage_plan_empty severity = %v, want Blocking", check.Severity)
+			}
+			if !check.Required {
+				t.Errorf("approved_stage_plan_empty Required = false, want true")
+			}
+		}
+	}
+}
+
+func TestDeterministicBrowserAgentPostVerifierReportsObservedStageCompletionMissing(t *testing.T) {
+	verifier := deterministicBrowserAgentStageVerifier{}
+	now := timeNowUTC()
+	vctx := model.BrowserAgentValidationContext{
+		RunID: "run_completion_missing", SourcePackageID: "pkg_1",
+		SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
+	}
+	// OutcomeObserved with ActualBrowser (hasObservation=true) but NO StageCompleted event
+	// → completed["node_1"]=false → completionPassed=false
+	events := []model.StageExecutionEvent{
+		{
+			SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1",
+			RunID: "run_completion_missing", SourcePackageID: "pkg_1",
+			SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+			NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 1,
+			EventType:  model.StageExecutionEventOutcomeObserved,
+			OccurredAt: now,
+			Observation: &model.RuntimeObservation{
+				Source:     model.RuntimeObservationActualBrowser,
+				URL:        "https://app.example.com/dashboard",
+				Assertions: []model.RuntimeAssertion{{Kind: "action_completed", Passed: true}},
+			},
+			EvidenceRefs: []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}},
+		},
+		// StageCompleted intentionally omitted
+	}
+	result := model.RecordingResultPackage{
+		SourcePackageID: "pkg_1",
+		StepResults: []model.StepResult{{
+			NodeID:        "node_1",
+			Status:        "passed",
+			ObservedState: "source=browser url=https://app.example.com/dashboard",
+			Artifacts:     []model.ArtifactRef{{ID: "artifact_1", SourceNodeID: "node_1"}},
+		}},
+		ValidationReports: []model.ValidationReport{{
+			SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "report_pre",
+			RunID: "run_completion_missing", SourcePackageID: "pkg_1",
+			SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+			Phase: model.ValidationPhaseRuntimeStage, NodeID: "node_1",
+			Decision: model.ValidationDecisionContinue, PassRate: 1, OverallConfidence: 1,
+			EvidenceQuality: model.RuntimeObservationActualBrowser,
+			EvidenceRefs:    []model.EvidenceRef{{ID: "evidence_1", Kind: model.EvidenceKindWebScreenshot}},
+			CreatedAt:       now,
+		}},
+	}
+	report, err := verifier.ValidatePostExecution(context.Background(), vctx, result, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport {
+		t.Fatalf("expected stop_and_report when stage completion event missing, got %q", report.Decision)
+	}
+	if !validationReportHasCheckCode(report, "observed_stage_completion_missing", false) {
+		t.Fatalf("expected observed_stage_completion_missing check with Passed=false; report: %+v", report)
+	}
+	for _, check := range report.Checks {
+		if check.Code == "observed_stage_completion_missing" {
+			if check.Severity != model.FindingSeverityBlocking {
+				t.Errorf("observed_stage_completion_missing severity = %v, want Blocking", check.Severity)
+			}
+			if !check.Required {
+				t.Errorf("observed_stage_completion_missing Required = false, want true")
+			}
+		}
+	}
+}
+
+func TestDeterministicBrowserAgentPostVerifierReportsEvidenceRefsMissing(t *testing.T) {
+	verifier := deterministicBrowserAgentStageVerifier{}
+	now := timeNowUTC()
+	vctx := model.BrowserAgentValidationContext{
+		RunID: "run_evidence_missing", SourcePackageID: "pkg_1",
+		SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
+	}
+	// StageCompleted + OutcomeObserved with ActualBrowser (hasObservation=true, completionPassed=true)
+	// but OutcomeObserved has NO EvidenceRefs and StepResult has no Artifacts
+	// → nodeEvidence=[] and Artifacts=[] → evidencePassed=false
+	events := []model.StageExecutionEvent{
+		{
+			SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_1",
+			RunID: "run_evidence_missing", SourcePackageID: "pkg_1",
+			SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+			NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 1,
+			EventType:  model.StageExecutionEventOutcomeObserved,
+			OccurredAt: now,
+			Observation: &model.RuntimeObservation{
+				Source:     model.RuntimeObservationActualBrowser,
+				URL:        "https://app.example.com/dashboard",
+				Assertions: []model.RuntimeAssertion{{Kind: "action_completed", Passed: true}},
+			},
+			EvidenceRefs: []model.EvidenceRef{}, // no evidence refs
+		},
+		{
+			SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_2",
+			RunID: "run_evidence_missing", SourcePackageID: "pkg_1",
+			SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+			NodeID: "node_1", StageID: "stage_1", Attempt: 1, Sequence: 2,
+			EventType:    model.StageExecutionEventStageCompleted,
+			OccurredAt:   now.Add(time.Second),
+			EvidenceRefs: []model.EvidenceRef{},
+		},
+	}
+	result := model.RecordingResultPackage{
+		SourcePackageID: "pkg_1",
+		StepResults: []model.StepResult{{
+			NodeID:        "node_1",
+			Status:        "passed",
+			ObservedState: "source=browser url=https://app.example.com/dashboard",
+			Artifacts:     []model.ArtifactRef{}, // no artifacts
+		}},
+		ValidationReports: []model.ValidationReport{{
+			SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "report_runtime",
+			RunID: "run_evidence_missing", SourcePackageID: "pkg_1",
+			SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+			Phase: model.ValidationPhaseRuntimeStage, NodeID: "node_1",
+			Decision: model.ValidationDecisionContinue, PassRate: 1, OverallConfidence: 1,
+			EvidenceQuality: model.RuntimeObservationActualBrowser,
+			EvidenceRefs:    []model.EvidenceRef{{ID: "runtime_report_ev", Kind: model.EvidenceKindWebScreenshot}},
+			CreatedAt:       now,
+		}},
+	}
+	report, err := verifier.ValidatePostExecution(context.Background(), vctx, result, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport {
+		t.Fatalf("expected stop_and_report when evidence refs are missing, got %q", report.Decision)
+	}
+	if !validationReportHasCheckCode(report, "evidence_refs_missing", false) {
+		t.Fatalf("expected evidence_refs_missing check with Passed=false; report: %+v", report)
+	}
+	for _, check := range report.Checks {
+		if check.Code == "evidence_refs_missing" {
+			if check.Severity != model.FindingSeverityBlocking {
+				t.Errorf("evidence_refs_missing severity = %v, want Blocking", check.Severity)
+			}
+			if !check.Required {
+				t.Errorf("evidence_refs_missing Required = false, want true")
+			}
+		}
 	}
 }
 

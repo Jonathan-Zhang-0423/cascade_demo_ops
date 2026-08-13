@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"cascade-demoops/backend/internal/config"
 )
@@ -54,6 +55,7 @@ type AudioModelTranscriptSegment struct {
 type AudioModelOutput struct {
 	AssetRef     string                        `json:"asset_ref,omitempty"`
 	DownloadURL  string                        `json:"download_url,omitempty"`
+	LocalPath    string                        `json:"-"`
 	MimeType     string                        `json:"mime_type,omitempty"`
 	DurationMS   int                           `json:"duration_ms,omitempty"`
 	SampleRateHZ int                           `json:"sample_rate_hz,omitempty"`
@@ -88,6 +90,9 @@ type AudioClient struct {
 	mode     config.ArkMediaMode
 	http     *http.Client
 	provider config.ModelProviderCredential
+	tts      openSpeechTTSConfig
+	sleep    func(context.Context, time.Duration) error
+	probe    func(context.Context, string, string) (audioProbeResult, error)
 }
 
 func NewAudioClient(runtime config.AppRuntimeConfig, httpClient *http.Client) *AudioClient {
@@ -98,17 +103,25 @@ func NewAudioClient(runtime config.AppRuntimeConfig, httpClient *http.Client) *A
 	if provider.Provider == "" {
 		provider.Provider = config.ModelProviderDoubao
 	}
-	if strings.TrimSpace(provider.DefaultModel) == "" {
-		provider.DefaultModel = firstNonEmpty(os.Getenv("DOUBAO_AUDIO_MODEL"), os.Getenv("CASCADE_AUDIO_MODEL"))
-	}
+	provider.DefaultModel = firstNonEmpty(
+		os.Getenv("DOUBAO_AUDIO_MODEL"),
+		os.Getenv("CASCADE_AUDIO_MODEL"),
+		os.Getenv("VOLC_TTS_RESOURCE_ID"),
+		provider.DefaultModel,
+	)
 	mode := runtime.ArkMediaMode
 	if mode == "" {
 		mode = config.ArkMediaModeDryRun
 	}
-	return &AudioClient{mode: mode, http: httpClient, provider: provider}
+	return &AudioClient{
+		mode: mode, http: httpClient, provider: provider,
+		tts:   openSpeechTTSConfigFromEnv(runtime),
+		sleep: sleepWithContext,
+		probe: probeAudioCandidate,
+	}
 }
 
-func (c *AudioClient) Process(_ context.Context, request AudioModelInput) (AudioModelResult, error) {
+func (c *AudioClient) Process(ctx context.Context, request AudioModelInput) (AudioModelResult, error) {
 	modelName := firstNonEmpty(request.Model, c.provider.DefaultModel)
 	request.Model = modelName
 	result := AudioModelResult{
@@ -127,10 +140,17 @@ func (c *AudioClient) Process(_ context.Context, request AudioModelInput) (Audio
 		result.Request = &request
 		return result, nil
 	case config.ArkMediaModeReal:
-		// Do not guess a vendor endpoint or response schema. The concrete
-		// adapter is enabled only after the official audio API document lands.
-		result.Trace.ErrorClass = "protocol_pending"
-		return result, ErrAudioModelProtocolPending
+		if request.Operation != AudioModelOperationSynthesize {
+			result.Trace.ErrorClass = "protocol_pending"
+			return result, ErrAudioModelProtocolPending
+		}
+		response, trace, err := c.processDoubaoTTS(ctx, request, result.Trace)
+		result.Trace = trace
+		if err != nil {
+			return result, err
+		}
+		result.Response = response
+		return result, nil
 	default:
 		result.Trace.ErrorClass = "unsupported_mode"
 		return result, fmt.Errorf("unsupported audio model mode %q", c.mode)

@@ -26,6 +26,10 @@ type browserAgentWorkerRevalidationSession interface {
 	Revalidate(context.Context, driver.BrowserAgentWorkerStage) (driver.BrowserAgentWorkerStageResult, error)
 }
 
+type browserAgentWorkerCredentialSession interface {
+	ExecuteWithSecrets(context.Context, driver.BrowserAgentWorkerStage, map[string]string) (driver.BrowserAgentWorkerStageResult, error)
+}
+
 type browserAgentWorkerSessionFactory func(context.Context, driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error)
 
 type localBrowserAgentOutlineRunner struct {
@@ -38,10 +42,11 @@ type localBrowserAgentOutlineRunner struct {
 }
 
 type localBrowserAgentStageRuntime struct {
-	session    browserAgentWorkerSession
-	progress   func(stage string, message string, progress int)
-	stageCount int
-	artifacts  map[string]model.ArtifactRef
+	session            browserAgentWorkerSession
+	credentialResolver browserAgentCredentialResolver
+	progress           func(stage string, message string, progress int)
+	stageCount         int
+	artifacts          map[string]model.ArtifactRef
 }
 
 func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request BrowserAgentOutlineRunRequest) (model.RecordingResultPackage, error) {
@@ -121,7 +126,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	}()
 
 	stageRuntime := &localBrowserAgentStageRuntime{
-		session: session, progress: request.Progress, stageCount: len(request.RuntimePlan.Stages), artifacts: map[string]model.ArtifactRef{},
+		session: session, credentialResolver: request.CredentialResolver, progress: request.Progress, stageCount: len(request.RuntimePlan.Stages), artifacts: map[string]model.ArtifactRef{},
 	}
 	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier)
 	startedAt := timeNowUTC()
@@ -194,7 +199,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 			renderService = r.service.editorWorker
 		}
 		if _, _, err := executor.RenderClientExecutionRecordingResult(ctx, renderService, request.Package, &result, request.RenderOutputDir, request.Progress); err != nil {
-			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_render_failed", err)
+			return result, newRuntimeExecutionError("browser_agent_render_failed", err)
 		}
 	}
 	return result, nil
@@ -229,7 +234,22 @@ func (r *localBrowserAgentStageRuntime) ExecuteStage(ctx context.Context, _ Brow
 		progressBrowserAgent(r.progress, "validating_runtime_stage", fmt.Sprintf("Verifying manual login checkpoint for stage %d.", stage.Order), minInt(progress+4, 84))
 		return BrowserAgentStageActionResult{Observation: &result.Observation, EvidenceRefs: result.EvidenceRefs}, nil
 	}
-	result, err := r.session.Execute(ctx, workerStageFromRuntime(stage))
+	workerStage := workerStageFromRuntime(stage)
+	secretValues, err := browserAgentStageSecretValues(workerStage, r.credentialResolver)
+	if err != nil {
+		return BrowserAgentStageActionResult{}, err
+	}
+	defer clearBrowserAgentStageSecrets(secretValues)
+	var result driver.BrowserAgentWorkerStageResult
+	if len(secretValues) > 0 {
+		credentialSession, ok := r.session.(browserAgentWorkerCredentialSession)
+		if !ok {
+			return BrowserAgentStageActionResult{}, errors.New("browser-agent worker does not support credential broker execution")
+		}
+		result, err = credentialSession.ExecuteWithSecrets(ctx, workerStage, secretValues)
+	} else {
+		result, err = r.session.Execute(ctx, workerStage)
+	}
 	if err != nil {
 		return BrowserAgentStageActionResult{}, err
 	}
@@ -521,15 +541,11 @@ func (v deterministicBrowserAgentStageVerifier) ValidateStageEvents(_ context.Co
 }
 
 func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver.BrowserAgentWorkerOpenRequest {
-	viewport := driver.BrowserAgentWorkerViewport{Width: 1440, Height: 900}
-	if request.Package.RecordingRunSpec.Outputs.ResolutionWidth > 0 && request.Package.RecordingRunSpec.Outputs.ResolutionHeight > 0 {
-		viewport = driver.BrowserAgentWorkerViewport{Width: request.Package.RecordingRunSpec.Outputs.ResolutionWidth, Height: request.Package.RecordingRunSpec.Outputs.ResolutionHeight}
-	} else if len(request.Package.RecordingRunSpec.Browser.Viewports) > 0 {
-		candidate := request.Package.RecordingRunSpec.Browser.Viewports[0]
-		if candidate.Width > 0 && candidate.Height > 0 {
-			viewport = driver.BrowserAgentWorkerViewport{Width: candidate.Width, Height: candidate.Height}
-		}
-	}
+	// Browser Agent recordings are evidence masters, not delivery renders.
+	// Keep one canonical 16:9 2K web-content viewport so later crop, highlight,
+	// and model-reference coordinates share a stable frame. App output sizing
+	// remains an independent delivery intent applied by the editor.
+	viewport := driver.BrowserAgentWorkerViewport{Width: 2560, Height: 1440}
 	maskSelectors := append([]string{}, request.Package.RecordingRunSpec.Redactions.MaskSelectors...)
 	maskSelectors = append(maskSelectors, request.Package.SafetyReport.RedactionSelectors...)
 	recordingSensitive := true
@@ -555,9 +571,11 @@ func workerStageFromRuntime(stage BrowserAgentRuntimeStage) driver.BrowserAgentW
 	return driver.BrowserAgentWorkerStage{
 		ID: stage.ID, Order: stage.Order, NodeID: stage.NodeID, StageKind: stage.StageKind, Objective: stage.Objective,
 		EntryRoute: stage.EntryRoute, Route: stage.Route, URL: stage.URL, TargetContract: stage.TargetContract,
-		Components:     append([]model.BrowserAgentComponentTarget{}, stage.Components...),
-		Interactions:   append([]model.BrowserAgentInteraction{}, stage.Interactions...),
-		WaitConditions: append([]string{}, stage.WaitConditions...), CapturePlan: stage.CapturePlan,
+		TargetRouteTemplate: stage.TargetRouteTemplate, ExpectedRouteAfterAction: stage.ExpectedRouteAfterAction,
+		RuntimeRouteVerificationRequired: stage.RuntimeRouteVerificationRequired,
+		Components:                       append([]model.BrowserAgentComponentTarget{}, stage.Components...),
+		Interactions:                     append([]model.BrowserAgentInteraction{}, stage.Interactions...),
+		WaitConditions:                   append([]string{}, stage.WaitConditions...), CapturePlan: stage.CapturePlan,
 		SuccessState: stage.SuccessState, DurationMS: stage.DurationMS,
 		Validations:                       append([]model.ValidationSpec{}, stage.Validations...),
 		PreferredSelectorAlternative:      stage.PreferredSelectorAlternative,

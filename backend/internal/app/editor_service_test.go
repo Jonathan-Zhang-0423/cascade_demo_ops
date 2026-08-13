@@ -31,6 +31,9 @@ func TestEditorSessionImportSaveAndRender(t *testing.T) {
 	if session.EditPlan.Audio == nil || session.EditPlan.Audio.Mode != "source" || session.EditPlan.Audio.VolumePercent != 100 {
 		t.Fatalf("unexpected default audio policy: %+v", session.EditPlan.Audio)
 	}
+	if session.FinalProfile.Width != 2560 || session.FinalProfile.Height != 1440 || session.FinalProfile.FPS != 30 || session.FinalProfile.CRF != 18 {
+		t.Fatalf("default final editor profile must preserve the canonical 2K evidence-master quality: %+v", session.FinalProfile)
+	}
 
 	sourcePath := filepath.Join(t.TempDir(), "recording.mp4")
 	if err := os.WriteFile(sourcePath, []byte("fixture"), 0o600); err != nil {

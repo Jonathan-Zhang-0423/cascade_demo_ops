@@ -157,6 +157,12 @@ var validationCheckMetaTable = map[string]validationCheckMeta{
 		NextStep:             "由 App 侧重新启动产品理解流程，生成更准确的执行包；不应在 Validation Agent 内降低阈值。",
 		ResponsibilityDomain: ValidationCheckDomainApp,
 	},
+	"EVIDENCE_ARTIFACT_REFERENCE_BROKEN": {
+		Impact:               "ValidationCheck 引用的 artifact 证据不存在，无法核验原始证据",
+		Suggestion:           "检查 artifact 生成逻辑是否完整；确认 evidence_refs 的 artifact_id 引用正确",
+		NextStep:             "审查 artifact 生成与引用的代码路径",
+		ResponsibilityDomain: ValidationCheckDomainServer,
+	},
 }
 
 // AnnotateValidationChecks fills in structured feedback fields (Impact,
