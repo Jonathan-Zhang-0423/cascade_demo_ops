@@ -389,6 +389,11 @@ func TestDevHTTPAssistantV2CompletesIndependentActionsAndRejectsStaleDigest(t *t
 	request.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(turn, request)
 	session = decodeBridgeAssistantSession(t, turn)
+	completedSession, err := waitForAssistantTurn(t, server.service, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session = *completedSession
 	sourceAction := findAssistantActionBySpec(t, session, "source.select_local")
 	registered, err := server.service.RegisterLocalSource("local_repository", t.TempDir())
 	if err != nil {

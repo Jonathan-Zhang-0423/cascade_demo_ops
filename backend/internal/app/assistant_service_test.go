@@ -29,6 +29,314 @@ func newAssistantTestService(t *testing.T) *Service {
 	return service
 }
 
+func TestAssistantTurnPersistsBeforeBackgroundGeneration(t *testing.T) {
+	service := newAssistantTestService(t)
+	projectID := "proj_durable_first_turn"
+	session, err := service.CreateAssistantSession(t.Context(), model.AssistantContext{
+		Surface: model.AssistantSurfaceProjects, ScopeKey: "project_" + projectID,
+		ProjectID: projectID, CreateProjectOnFirstTurn: true, Locale: "en-US",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := service.SubmitAssistantTurn(t.Context(), session.ID, model.AssistantTurnRequest{
+		Message: "Create a 60 second launch demo for prospective customers", IdempotencyKey: "durable-first-turn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.ActiveTurn == nil || queued.ActiveTurn.Status != "queued" {
+		t.Fatalf("turn was not durably queued: %+v", queued.ActiveTurn)
+	}
+	if len(queued.Messages) < 2 || queued.Messages[len(queued.Messages)-1].Role != "user" {
+		t.Fatalf("user message was not returned with the queued turn: %+v", queued.Messages)
+	}
+	state, err := service.LoadProject(t.Context(), projectID)
+	if err != nil || state.ProjectContext == nil {
+		t.Fatalf("draft project was not persisted before generation: state=%+v err=%v", state, err)
+	}
+	if state.ProjectContext.AssistantSessionID != session.ID {
+		t.Fatalf("project did not retain its canonical session: %+v", state.ProjectContext)
+	}
+
+	completed, err := waitForAssistantTurn(t, service, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.ActiveTurn == nil || completed.ActiveTurn.Status != "completed" {
+		t.Fatalf("background turn did not complete: %+v", completed.ActiveTurn)
+	}
+	duplicate, err := service.SubmitAssistantTurn(t.Context(), session.ID, model.AssistantTurnRequest{
+		Message: "Create a 60 second launch demo for prospective customers", IdempotencyKey: "durable-first-turn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	userMessages := 0
+	for _, message := range duplicate.Messages {
+		if message.Role == "user" {
+			userMessages++
+		}
+	}
+	if userMessages != 1 {
+		t.Fatalf("idempotent retry duplicated the user message: %d", userMessages)
+	}
+}
+
+func TestAssistantInterruptedTurnBecomesRetryable(t *testing.T) {
+	service := newAssistantTestService(t)
+	session, err := service.CreateAssistantSession(t.Context(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "interrupted", Locale: "en-US"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	session.Status = "thinking"
+	session.ActiveTurn = &model.AssistantActiveTurn{ID: "turn_interrupted", UserMessageID: "user_interrupted", Status: "running", StartedAt: now}
+	session.Messages = append(session.Messages, model.AssistantMessage{ID: "user_interrupted", Role: "user", Kind: "answer", Text: "Keep this message", CreatedAt: now})
+	if err := service.assistantStore.Save(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := service.GetAssistantSession(t.Context(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.ActiveTurn == nil || reopened.ActiveTurn.Status != "failed" || reopened.ActiveTurn.FailureReason == "" {
+		t.Fatalf("interrupted turn was not made retryable: %+v", reopened.ActiveTurn)
+	}
+	preserved := false
+	for _, message := range reopened.Messages {
+		if message.Role == "user" && message.Text == "Keep this message" {
+			preserved = true
+		}
+	}
+	if !preserved {
+		t.Fatalf("interrupted user message was lost: %+v", reopened.Messages)
+	}
+}
+
+func waitForAssistantTurn(t *testing.T, service *Service, sessionID string) (*model.AssistantSession, error) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		session, err := service.GetAssistantSession(t.Context(), sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if session.ActiveTurn != nil && session.ActiveTurn.Status != "queued" && session.ActiveTurn.Status != "running" {
+			return session, nil
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return nil, errors.New("assistant turn did not finish before test deadline")
+}
+
+func TestAssistantStartsWithOneNaturalQuestion(t *testing.T) {
+	service := newAssistantTestService(t)
+	session, err := service.CreateAssistantSession(t.Context(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "natural-question"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.PendingQuestion == nil || session.PendingQuestion.Field != "productURL" {
+		t.Fatalf("expected one product URL question, got %+v", session.PendingQuestion)
+	}
+	if len(session.Messages) != 1 || session.Messages[0].Question == nil || session.Messages[0].Question.Field != "productURL" {
+		t.Fatalf("question was not attached to the assistant turn: %+v", session.Messages)
+	}
+}
+
+func TestAssistantAudienceQuestionOffersRankedBestGuesses(t *testing.T) {
+	question := nextAssistantQuestion(model.ProjectConfigurationDraft{
+		Objective:     "Help new users get started quickly",
+		MissingFields: []string{"targetAudience"},
+	})
+	if question == nil || question.Field != "targetAudience" || len(question.Options) != 3 {
+		t.Fatalf("expected a structured audience choice, got %+v", question)
+	}
+	if question.Options[0].Label != "New users" || !question.Options[0].Recommended || question.Options[0].Description == "" {
+		t.Fatalf("best guess was not ranked first with context: %+v", question.Options)
+	}
+	for index := 1; index < len(question.Options); index++ {
+		if question.Options[index].Recommended {
+			t.Fatalf("only the first option may be recommended: %+v", question.Options)
+		}
+	}
+}
+
+func TestAssistantClarificationSanitizationRanksOneRecommendation(t *testing.T) {
+	question := sanitizeAssistantClarification(&model.AssistantQuestion{
+		Field: "brandTone", Prompt: "Which direction should I use?",
+		Options: []model.AssistantQuestionOption{
+			{Label: "Formal", Value: "Formal", Description: "Use a restrained enterprise tone."},
+			{Label: "Warm", Value: "Warm", Description: "Use approachable, human language.", Recommended: true},
+			{Label: "Warm duplicate", Value: "Warm", Description: "Duplicate value should be removed."},
+		},
+	})
+	if question == nil || len(question.Options) != 2 || question.Options[0].Label != "Warm" || !question.Options[0].Recommended || question.Options[1].Recommended {
+		t.Fatalf("clarification choices were not normalized: %+v", question)
+	}
+	if unsafe := sanitizeAssistantClarification(&model.AssistantQuestion{Field: "credentialRefs", Prompt: "Choose", Options: question.Options}); unsafe != nil {
+		t.Fatalf("unsafe clarification field was accepted: %+v", unsafe)
+	}
+}
+
+func TestAssistantNaturalDecisionAcceptsConversationalPhrases(t *testing.T) {
+	for phrase, expected := range map[string]string{
+		"Sounds good!":    "confirmed",
+		"go for it":       "confirmed",
+		"就这样":             "confirmed",
+		"Not yet.":        "dismissed",
+		"先不要":             "dismissed",
+		"make it shorter": "",
+	} {
+		if actual := assistantNaturalDecision(phrase); actual != expected {
+			t.Fatalf("decision for %q: got %q want %q", phrase, actual, expected)
+		}
+	}
+}
+
+func TestAssistantAmbiguousProposalConfirmationAsksForAChoice(t *testing.T) {
+	service := newAssistantTestService(t)
+	session, err := service.CreateAssistantSession(t.Context(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "ambiguous-proposal-choice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	retry := newAssistantProposal(model.AssistantProposalRetryPageScan, "Scan the page again", "Collect fresh browser evidence before rebuilding.", session.Configuration.Version, now, nil, model.AssistantWorkstationEvidence)
+	regenerate := newAssistantProposal(model.AssistantProposalRegenerateExecutionPackage, "Regenerate the package", "Rebuild from the currently available evidence.", session.Configuration.Version, now, nil, model.AssistantWorkstationRepair)
+	session.Messages = append(session.Messages, model.AssistantMessage{ID: "repair-options", Role: "agent", Kind: "proposal", Text: "I found two safe repair paths.", Proposals: []model.AssistantProposal{retry, regenerate}, CreatedAt: now})
+	if err := service.assistantStore.Save(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.SubmitAssistantTurnAndWait(t.Context(), session.ID, model.AssistantTurnRequest{Message: "sounds good", IdempotencyKey: "ambiguous-yes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PendingQuestion == nil || result.PendingQuestion.Field != "proposalChoice" || len(result.PendingQuestion.Options) != 2 || !result.PendingQuestion.Options[0].Recommended {
+		t.Fatalf("generic confirmation guessed between multiple actions: %+v", result.PendingQuestion)
+	}
+	if findAssistantProposal(result, retry.ID).Status != "available" || findAssistantProposal(result, regenerate.ID).Status != "available" {
+		t.Fatalf("asking for clarification changed an action: %+v", result.Messages)
+	}
+	proposals := []*model.AssistantProposal{findAssistantProposal(result, retry.ID), findAssistantProposal(result, regenerate.ID)}
+	if selected := assistantProposalChoice(proposals, "retry the page scan"); selected == nil || selected.ID != retry.ID {
+		t.Fatalf("free-form repair choice was not understood: %+v", selected)
+	}
+}
+
+func TestAssistantRevisionSupersedesOldConversationalProposal(t *testing.T) {
+	now := time.Now().UTC()
+	proposal := newAssistantProposal(model.AssistantProposalConfigurationPatch, "Use this understanding", "Apply the current interpretation.", 1, now, &model.ProjectConfigurationPatch{}, model.AssistantWorkstationOverview)
+	session := &model.AssistantSession{Messages: []model.AssistantMessage{{ID: "proposal", Role: "agent", Kind: "proposal", Proposals: []model.AssistantProposal{proposal}, CreatedAt: now}}}
+
+	dismissSupersededAssistantProposals(session, "Could you explain what this changes?")
+	if findAssistantProposal(session, proposal.ID).Status != "available" {
+		t.Fatal("asking a question dismissed the pending interpretation")
+	}
+	dismissSupersededAssistantProposals(session, "Make it shorter and focus on onboarding instead")
+	if findAssistantProposal(session, proposal.ID).Status != "dismissed" {
+		t.Fatal("a revised intent left the previous interpretation active")
+	}
+}
+
+func TestAssistantFirstTurnCreatesAndAutosavesConversationProject(t *testing.T) {
+	service := newAssistantTestService(t)
+	ctx := t.Context()
+	projectID := "proj_conversation_first"
+	context := model.AssistantContext{
+		Surface: model.AssistantSurfaceProjects, ScopeKey: "project_" + projectID,
+		ProjectID: projectID, CreateProjectOnFirstTurn: true,
+	}
+	session, err := service.CreateAssistantSession(ctx, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projects, err := service.ListProjects(ctx); err != nil || len(projects) != 0 {
+		t.Fatalf("empty conversation created a project: projects=%+v err=%v", projects, err)
+	}
+
+	message := "为 https://example.com 制作面向产品团队的 60 秒演示，项目名叫 Example Approval Demo，演示目标为展示审批流程，重点展示创建和批准请求"
+	turn, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: message, IdempotencyKey: "first-project-turn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Context.ProjectID != projectID || turn.Configuration.ProjectName != "Example Approval Demo" || turn.Configuration.ProductURL != "https://example.com" || turn.Configuration.TargetAudience != "产品团队" {
+		t.Fatalf("first turn was not autosaved into the bound project: context=%+v config=%+v", turn.Context, turn.Configuration)
+	}
+	if findAssistantProposalByKind(turn, model.AssistantProposalConfigurationPatch) != nil {
+		t.Fatalf("draft background fields still required per-turn confirmation: %+v", turn.Messages)
+	}
+	projects, err := service.ListProjects(ctx)
+	if err != nil || len(projects) != 1 || projects[0].ID != projectID || projects[0].Name != "Example Approval Demo" || projects[0].Status != "draft" {
+		t.Fatalf("conversation project was not listed as a named draft: projects=%+v err=%v", projects, err)
+	}
+	state, err := service.LoadProject(ctx, projectID)
+	if err != nil || !assistantConversationDraft(state) || state.ProjectContext == nil || state.ProjectContext.ProductDescription == "" {
+		t.Fatalf("conversation project state was not persisted: state=%+v err=%v", state, err)
+	}
+
+	retried, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: message, IdempotencyKey: "first-project-turn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _ = service.ListProjects(ctx)
+	if len(projects) != 1 || len(retried.Messages) != len(turn.Messages) {
+		t.Fatalf("idempotent retry duplicated project or messages: projects=%d messages=%d/%d", len(projects), len(retried.Messages), len(turn.Messages))
+	}
+	reopened, err := service.CreateAssistantSession(ctx, context)
+	if err != nil || len(reopened.Messages) != len(turn.Messages) {
+		t.Fatalf("project conversation did not reopen with its history: messages=%d err=%v", len(reopened.Messages), err)
+	}
+}
+
+func TestAssistantNaturalConfirmationAppliesVisiblePatch(t *testing.T) {
+	service := newAssistantTestService(t)
+	session, err := service.CreateAssistantSession(t.Context(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "natural-confirmation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := service.SubmitAssistantTurnAndWait(t.Context(), session.ID, model.AssistantTurnRequest{Message: "https://example.com", IdempotencyKey: "answer-url"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := findAssistantProposalByKind(turn, model.AssistantProposalConfigurationPatch)
+	if proposal == nil || proposal.Status != "available" {
+		t.Fatalf("expected a visible configuration proposal, got %+v", turn.Messages)
+	}
+	confirmed, err := service.SubmitAssistantTurnAndWait(t.Context(), turn.ID, model.AssistantTurnRequest{Message: "yes", IdempotencyKey: "confirm-url"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.Configuration.ProductURL != "https://example.com" || findAssistantProposalByKind(confirmed, model.AssistantProposalConfigurationPatch) != nil {
+		t.Fatalf("natural confirmation did not apply the visible patch: config=%+v", confirmed.Configuration)
+	}
+	if confirmed.PendingQuestion == nil || confirmed.PendingQuestion.Field != "objective" {
+		t.Fatalf("assistant did not continue with the next missing question: %+v", confirmed.PendingQuestion)
+	}
+}
+
+func TestAssistantNaturalConfirmationDoesNotBypassSecurePicker(t *testing.T) {
+	service := newAssistantTestService(t)
+	session, err := service.CreateAssistantSession(t.Context(), model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "natural-secure-gate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := newAssistantProposal(model.AssistantProposalSelectProjectSource, "Choose source", "Choose a trusted source.", session.Configuration.Version, time.Now().UTC(), nil, model.AssistantWorkstationOverview)
+	session.Messages = append(session.Messages, model.AssistantMessage{ID: "secure-proposal", Role: "agent", Kind: "proposal", Text: "Choose a trusted source.", Proposals: []model.AssistantProposal{proposal}, CreatedAt: time.Now().UTC()})
+	if err := service.assistantStore.Save(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.SubmitAssistantTurnAndWait(t.Context(), session.ID, model.AssistantTurnRequest{Message: "yes", IdempotencyKey: "unsafe-shortcut"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secureProposal := findAssistantProposalByKind(result, model.AssistantProposalSelectProjectSource)
+	if secureProposal == nil || secureProposal.Status != "available" {
+		t.Fatalf("a natural-language shortcut bypassed a trusted picker: %+v", secureProposal)
+	}
+}
+
 func TestAgentActionsV2ExtractsReferenceTaskWithoutPersistingSecretsOrPaths(t *testing.T) {
 	t.Setenv("CASCADE_AGENT_ACTIONS_V2", "true")
 	service := newAssistantTestService(t)
@@ -42,7 +350,7 @@ func TestAgentActionsV2ExtractsReferenceTaskWithoutPersistingSecretsOrPaths(t *t
 		t.Fatal(err)
 	}
 	message := `项目地址cascadeai.cn，本地地址` + repoPath + `，任务目标登陆网页进入工作台，新建项目俄罗斯方块并且等待agent演示输出，测试用账号demo@example.test，密码FixtureOnly987`
-	turn, err := service.SubmitAssistantTurn(context.Background(), session.ID, model.AssistantTurnRequest{Message: message, IdempotencyKey: "reference-turn"})
+	turn, err := service.SubmitAssistantTurnAndWait(context.Background(), session.ID, model.AssistantTurnRequest{Message: message, IdempotencyKey: "reference-turn"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +489,7 @@ func TestAssistantBuildsLocalDraftFromRealSourceAndBrowserScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{
+	turn, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{
 		Message:        "为 " + testPage.URL + " 制作一个面向产品团队的 60 秒演示，项目名叫 Controlled Builder，重点展示创建项目并启动构建",
 		IdempotencyKey: "real-local-turn",
 	})
@@ -435,7 +743,7 @@ func TestAgentActionsV2AutoAnalyzesAfterSourceAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := service.SubmitAssistantTurn(context.Background(), session.ID, model.AssistantTurnRequest{Message: "为 " + testPage.URL + " 制作 60 秒演示，项目名叫 V2 Auto，目标是创建项目并启动构建，请读取本地项目目录", IdempotencyKey: "v2-auto-turn"})
+	turn, err := service.SubmitAssistantTurnAndWait(context.Background(), session.ID, model.AssistantTurnRequest{Message: "为 " + testPage.URL + " 制作 60 秒演示，项目名叫 V2 Auto，目标是创建项目并启动构建，请读取本地项目目录", IdempotencyKey: "v2-auto-turn"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +849,7 @@ func TestAssistantConfigurationPatchRequiresConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{Message: "产品是 https://example.com", IdempotencyKey: "turn-1"})
+	turn, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "产品是 https://example.com", IdempotencyKey: "turn-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +928,7 @@ func TestAssistantUsesRealLLMToProposeConfiguration(t *testing.T) {
 	if err := service.assistantStore.Save(t.Context(), session); err != nil {
 		t.Fatal(err)
 	}
-	turn, err := service.SubmitAssistantTurn(t.Context(), session.ID, model.AssistantTurnRequest{Message: "做一支给运营负责人看的演示，重点是让他们看到审批能变快", IdempotencyKey: "real-llm-turn"})
+	turn, err := service.SubmitAssistantTurnAndWait(t.Context(), session.ID, model.AssistantTurnRequest{Message: "做一支给运营负责人看的演示，重点是让他们看到审批能变快", IdempotencyKey: "real-llm-turn"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -781,7 +1089,10 @@ func TestAssistantConfigurationChangeInvalidatesPriorAnalysisContext(t *testing.
 	if err := service.states.Save(ctx, state); err != nil {
 		t.Fatal(err)
 	}
-	session, err := service.CreateAssistantSession(ctx, model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "stale-analysis-context", ProjectID: projectID})
+	session, err := service.CreateAssistantSession(ctx, model.AssistantContext{
+		Surface: model.AssistantSurfaceProjects, ScopeKey: "project_" + projectID,
+		ProjectID: projectID, CreateProjectOnFirstTurn: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,12 +1106,12 @@ func TestAssistantConfigurationChangeInvalidatesPriorAnalysisContext(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Context.ProjectID != "" || updated.Configuration.AnalysisProjectID != "" || updated.Configuration.Confirmed || updated.ActiveWorkstation != model.AssistantWorkstationOverview {
+	if updated.Context.ProjectID != projectID || updated.Configuration.AnalysisProjectID != "" || updated.Configuration.Confirmed || updated.ActiveWorkstation != model.AssistantWorkstationOverview {
 		t.Fatalf("configuration change retained stale analysis authority: context=%+v config=%+v workstation=%s", updated.Context, updated.Configuration, updated.ActiveWorkstation)
 	}
 	workflow := service.assistantWorkflowProjection(ctx, *updated)
-	if workflow.ProjectAttached || workflow.Stage != "configuration" || assistantWorkstationAvailable(workflow, model.AssistantWorkstationApproval) {
-		t.Fatalf("stale project remained visible to assistant workflow: %+v", workflow)
+	if !workflow.ProjectAttached || workflow.Stage != "configuration" || assistantWorkstationAvailable(workflow, model.AssistantWorkstationApproval) {
+		t.Fatalf("stale analysis authority remained visible to assistant workflow: %+v", workflow)
 	}
 }
 
@@ -899,7 +1210,7 @@ func TestAssistantExtractsExplicitChineseConfigurationWithoutSideEffects(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{Message: "为 https://example.com 制作一个面向产品团队的 60 秒演示，项目名叫 Example Demo，重点展示审批流程"})
+	turn, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "为 https://example.com 制作一个面向产品团队的 60 秒演示，项目名叫 Example Demo，重点展示审批流程"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -930,7 +1241,7 @@ func TestAssistantRoutesExplicitSafeActionsWithoutOverwritingObjective(t *testin
 	if err := service.assistantStore.Save(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	turn, err := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{Message: "帮我连接 GitHub 仓库"})
+	turn, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "帮我连接 GitHub 仓库"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -940,6 +1251,64 @@ func TestAssistantRoutesExplicitSafeActionsWithoutOverwritingObjective(t *testin
 	proposals := turn.Messages[len(turn.Messages)-1].Proposals
 	if len(proposals) != 1 || proposals[0].Kind != model.AssistantProposalConnectGitHub || proposals[0].Patch != nil {
 		t.Fatalf("expected one restricted GitHub action, got %+v", proposals)
+	}
+}
+
+func TestAssistantConnectsGitHubURLFromTheConversation(t *testing.T) {
+	service := newAssistantTestService(t)
+	ctx := context.Background()
+	session, err := service.CreateAssistantSession(ctx, model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "github-in-chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "Could you connect my GitHub repository?", IdempotencyKey: "ask-github"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := findAssistantProposalByKind(requested, model.AssistantProposalConnectGitHub)
+	if proposal == nil || proposal.Status != "available" {
+		t.Fatalf("GitHub request did not leave a conversational source prompt: %+v", requested.Messages)
+	}
+
+	connected, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "Use https://github.com/acme/product-demo.git", IdempotencyKey: "github-url"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(connected.Configuration.Sources) != 1 || connected.Configuration.Sources[0].Kind != "github_repository" || connected.Configuration.Sources[0].URL != "https://github.com/acme/product-demo" || connected.Configuration.Sources[0].Label != "acme/product-demo" {
+		t.Fatalf("chat URL was not normalized into the project source: %+v", connected.Configuration.Sources)
+	}
+	if resolved := findAssistantProposal(connected, proposal.ID); resolved == nil || resolved.Status != "confirmed" {
+		t.Fatalf("GitHub proposal was not resolved by the chat turn: %+v", resolved)
+	}
+	serialized, _ := json.Marshal(connected.Messages)
+	if !strings.Contains(string(serialized), "connected acme/product-demo") {
+		t.Fatalf("conversation did not acknowledge the connected repository: %s", serialized)
+	}
+	retried, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "Use https://github.com/acme/product-demo.git", IdempotencyKey: "github-url"})
+	if err != nil || len(retried.Configuration.Sources) != 1 || len(retried.Messages) != len(connected.Messages) {
+		t.Fatalf("GitHub chat retry was not idempotent: sources=%+v messages=%d/%d err=%v", retried.Configuration.Sources, len(retried.Messages), len(connected.Messages), err)
+	}
+}
+
+func TestAssistantExplainsInvalidGitHubURLInTheConversation(t *testing.T) {
+	service := newAssistantTestService(t)
+	ctx := context.Background()
+	session, _ := service.CreateAssistantSession(ctx, model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "github-invalid-in-chat"})
+	requested, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "Connect GitHub", IdempotencyKey: "ask-github-invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := findAssistantProposalByKind(requested, model.AssistantProposalConnectGitHub)
+	result, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "http://github.com/acme/product-demo", IdempotencyKey: "invalid-github-url"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Configuration.Sources) != 0 || proposal == nil || findAssistantProposal(result, proposal.ID).Status != "available" {
+		t.Fatalf("invalid URL changed the pending source: config=%+v proposal=%+v", result.Configuration, proposal)
+	}
+	last := result.Messages[len(result.Messages)-1]
+	if last.Role != "agent" || !strings.Contains(last.Text, "clean HTTPS repository URL") {
+		t.Fatalf("invalid URL did not receive conversational guidance: %+v", last)
 	}
 }
 
@@ -967,7 +1336,7 @@ func TestAssistantSerializesPatchBeforeSourceActions(t *testing.T) {
 	service := newAssistantTestService(t)
 	ctx := context.Background()
 	session, _ := service.CreateAssistantSession(ctx, model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "serialized-actions"})
-	turn, err := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{Message: "为 https://example.com 制作面向产品团队的演示，项目名叫 Serialized，并连接 GitHub"})
+	turn, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "为 https://example.com 制作面向产品团队的演示，项目名叫 Serialized，并连接 GitHub"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1080,7 +1449,7 @@ func TestAssistantProposalRejectsStaleVersion(t *testing.T) {
 	service := newAssistantTestService(t)
 	ctx := context.Background()
 	session, _ := service.CreateAssistantSession(ctx, model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "stale"})
-	turn, _ := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{Message: "https://example.com"})
+	turn, _ := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: "https://example.com"})
 	proposal := &turn.Messages[len(turn.Messages)-1].Proposals[0]
 	proposal.BaseVersion = 0
 	turn.Configuration.Version = 2
@@ -1097,7 +1466,7 @@ func TestAssistantRedactsSecretsAndAbsolutePaths(t *testing.T) {
 	service := newAssistantTestService(t)
 	ctx := context.Background()
 	session, _ := service.CreateAssistantSession(ctx, model.AssistantContext{Surface: model.AssistantSurfaceProjects, ScopeKey: "redact"})
-	turn, err := service.SubmitAssistantTurn(ctx, session.ID, model.AssistantTurnRequest{Message: `password=super-secret C:\\Users\\Alice\\private-project`})
+	turn, err := service.SubmitAssistantTurnAndWait(ctx, session.ID, model.AssistantTurnRequest{Message: `password=super-secret C:\\Users\\Alice\\private-project`})
 	if err != nil {
 		t.Fatal(err)
 	}
