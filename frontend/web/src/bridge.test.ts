@@ -1652,6 +1652,38 @@ describe("desktop bridge contract", () => {
     );
   });
 
+  it("maps project activity state and polling cursors into the four-state canvas contract", async () => {
+    const event = {
+      id: "18",
+      project_id: "project_real",
+      run_id: "run_real",
+      mode: "browser",
+      kind: "screenshot",
+      status: "running",
+      title: "Capturing a safe frame",
+      progress: 48,
+      occurred_at: "2026-08-01T10:00:00Z",
+      browser: { url: "https://example.com/onboarding", title: "Onboarding", frame_ref: "frame.png", redacted: true },
+      capture: { kind: "screenshot", phase: "active" },
+    };
+    const fetchMock = vi.fn(async (url: string) => bridgeJSON(url.includes("activity-state")
+      ? { project_id: "project_real", mode: "browser", run_id: "run_real", status: "running", current: event, recent: [event], last_event_id: "18" }
+      : [event]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bridge = createLocalBridgeClient();
+    const state = await bridge.getProjectActivityState("project_real");
+    const events = await bridge.listProjectActivityEvents("project_real", "17");
+
+    expect(state.data).toMatchObject({ projectID: "project_real", mode: "browser", lastEventID: "18", current: { browser: { frameRef: "frame.png", redacted: true } } });
+    expect(events.data?.[0]).toMatchObject({ id: "18", capture: { kind: "screenshot", phase: "active" } });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/v1/desktop/projects/project_real/activity-events?after=17",
+      expect.objectContaining({ headers: expect.objectContaining({ "Content-Type": "application/json" }) }),
+    );
+    expect(bridge.browserFrameURL("project_real", "frame.png")).toBe("/v1/desktop/projects/project_real/browser-frame/frame.png");
+  });
+
   it("uses same-origin local bridge by default so the demo stays on port 3000", async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,

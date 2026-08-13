@@ -1,4 +1,4 @@
-import type { CodeInvestigationNextAction, CodeInvestigationQualitySummary, CodeInvestigationQuestion, CodeInvestigationToolCall, CodeInvestigationTrace, CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
+import type { CodeInvestigationNextAction, CodeInvestigationToolCall, CodeUnderstandingSnapshot } from "../../src/types/workflowGraph";
 import type { ProjectWorkspaceView } from "./domain";
 
 export type AgentPipelineStatus = "pending" | "completed" | "attention";
@@ -19,13 +19,8 @@ export type CodeSummaryView = {
   components: number;
   selectors: number;
   sourceDigest: string;
-  toolCalls: number;
-  searchedFiles: number;
-  selectedFiles: number;
-  investigationMode: string;
-  investigationQuestions: number;
-  openInvestigationQuestions: number;
-  snippetWindows: number;
+  degraded: boolean;
+  toolBreakdown: Record<string, number>;
   specializedToolCalls: number;
   shellRunToolCalls: number;
   selectedFileRatio: number;
@@ -34,34 +29,24 @@ export type CodeSummaryView = {
   investigationOverreadRisk: string;
   investigationSourceTextPolicy: string;
   remainingInvestigationGaps: string[];
-  investigationQualityConfidence: number | undefined;
-  toolBreakdown: Record<string, number>;
-  degraded: boolean;
+  investigationQualityConfidence: number;
 };
 
-export type CodeInvestigationToolView = {
-  id: string;
+export type CodeInvestigationToolCallView = {
   tool: string;
   summary: string;
-  selectionReason?: string;
   readPolicy?: string;
   sourceTextPolicy?: string;
-  selectedFiles: number;
-  matchedFiles: number;
-  snippetWindows: number;
-  pathHashCount: number;
+  selectionReason?: string;
 };
 
 export type CodeInvestigationQuestionView = {
   id: string;
-  label: string;
   question: string;
-  status: string;
-  evidenceSummary: string;
-  remainingGaps: string[];
-  nextActions: CodeInvestigationNextAction[];
-  confidence?: number;
-  toolCalls: CodeInvestigationToolView[];
+  status?: string;
+  summary?: string;
+  toolCalls: CodeInvestigationToolCallView[];
+  nextActions?: CodeInvestigationNextAction[];
 };
 
 export function updateWorkspaceInputs(
@@ -69,25 +54,40 @@ export function updateWorkspaceInputs(
   patch: {
     productURL?: string;
     localRepoPath?: string;
-    gitRepoURL?: string;
     rawUserPrompt?: string;
     targetAudience?: string;
     forbiddenPagesText?: string;
     forbiddenDataText?: string;
+    gitRepoURL?: string;
   },
 ): ProjectWorkspaceView {
   const productURL = patch.productURL ?? workspace.productURL;
   const targetAudience = patch.targetAudience ?? workspace.targetAudience;
-  const localRepoPath = patch.localRepoPath ?? workspace.inputBundle.repositories?.find((repo) => repo.local_path)?.local_path ?? "";
-  const gitRepoURL = patch.gitRepoURL ?? workspace.inputBundle.repositories?.find((repo) => repo.url)?.url ?? "";
+  const existingRepositories = workspace.inputBundle.repositories ?? [];
+  const existingLocalRepository = existingRepositories.find((repo) => repo.kind === "local" || repo.provider === "local" || !repo.provider);
+  const existingGitHubRepository = existingRepositories.find((repo) => repo.kind === "github" || repo.provider === "github");
+  const localRepoPath = patch.localRepoPath ?? existingLocalRepository?.local_path ?? "";
+  const gitRepoURL = patch.gitRepoURL ?? existingGitHubRepository?.url ?? "";
   const rawUserPrompt = patch.rawUserPrompt ?? workspace.inputBundle.raw_user_prompt ?? "";
   const forbiddenPages = patch.forbiddenPagesText !== undefined ? splitLines(patch.forbiddenPagesText) : workspace.planReview.forbiddenPages;
   const existingForbiddenData = Array.isArray(workspace.inputBundle.metadata?.forbidden_data) ? workspace.inputBundle.metadata.forbidden_data.filter(isString) : undefined;
   const forbiddenData = patch.forbiddenDataText !== undefined ? splitLines(patch.forbiddenDataText) : existingForbiddenData ?? workspace.scriptDocument?.safety_policy.forbidden_data ?? ["客户邮箱", "API Key", "访问令牌"];
-  const repositories = [
-    ...(gitRepoURL ? [{ url: gitRepoURL, provider: "github", read_only: true, primary: !localRepoPath }] : []),
-    ...(localRepoPath ? [{ local_path: localRepoPath, provider: "local", read_only: true, primary: !gitRepoURL }] : []),
-  ];
+  let repositories = existingRepositories;
+  if (patch.gitRepoURL !== undefined) {
+    repositories = existingRepositories.filter((repo) => !(repo.kind === "github" || repo.provider === "github"));
+    if (gitRepoURL) {
+      repositories = [...repositories, { url: gitRepoURL, provider: "github", read_only: true, primary: false }];
+    }
+  }
+  if (patch.localRepoPath !== undefined) {
+    repositories = repositories.filter((repo) => !(repo.kind === "local" || repo.provider === "local" || (!repo.provider && repo.local_path)));
+    if (localRepoPath) {
+      repositories = [
+        ...repositories,
+        { ...(existingLocalRepository ?? { provider: "local", read_only: true, primary: repositories.length === 0 }), local_path: localRepoPath, provider: "local", read_only: true, primary: repositories.length === 0 },
+      ];
+    }
+  }
 
   const next: ProjectWorkspaceView = {
     ...workspace,
@@ -108,7 +108,7 @@ export function updateWorkspaceInputs(
         return { ...source, status: localRepoPath ? "ready" : "needs_attention", detail: localRepoPath ? `本地项目目录：${localRepoPath}` : "未提供本地项目目录，可使用需求和页面材料降级生成。" };
       }
       if (source.kind === "github_repo") {
-        return { ...source, status: gitRepoURL ? "ready" : "needs_attention", detail: gitRepoURL ? `GitHub 只读仓库：${gitRepoURL}` : "可选填写 GitHub 仓库 URL；与本地项目目录并列，不互相替代。" };
+        return { ...source, status: gitRepoURL ? "ready" : "needs_attention", detail: gitRepoURL ? `GitHub 仓库已配置：${redactRepositoryURL(gitRepoURL)}` : "未提供 GitHub 仓库 URL，可继续使用本地目录或其他材料。" };
       }
       return source;
     }),
@@ -131,8 +131,12 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
   const snapshots = workspace.understandingReport?.code_snapshots ?? [];
   const architecture = workspace.projectIntelligence?.architecture;
   const fileCount = snapshots.reduce((total, snapshot) => total + (snapshot.file_count ?? 0), 0);
-  const toolCalls = snapshots.flatMap((snapshot) => snapshot.investigation_trace?.tool_calls ?? []);
-  const qualitySummaries = snapshots.map((snapshot) => snapshot.investigation_quality).filter(isCodeInvestigationQualitySummary);
+  const quality = snapshots.find((snapshot) => snapshot.investigation_quality)?.investigation_quality;
+  const trace = snapshots.find((snapshot) => snapshot.investigation_trace)?.investigation_trace;
+  const toolBreakdown = (trace?.tool_calls ?? []).reduce<Record<string, number>>((counts, call) => {
+    counts[call.tool] = (counts[call.tool] ?? 0) + 1;
+    return counts;
+  }, {});
   return {
     fileCount,
     frameworks: unique([...(architecture?.frameworks ?? []), ...snapshots.flatMap((snapshot) => snapshot.frameworks ?? [])]),
@@ -140,62 +144,33 @@ export function codeSummaryFromWorkspace(workspace: ProjectWorkspaceView): CodeS
     components: architecture?.modules?.reduce((total, module) => total + (module.component_refs?.length ?? 0), 0) ?? snapshots.reduce((total, snapshot) => total + (snapshot.components?.length ?? 0), 0),
     selectors: snapshots.reduce((total, snapshot) => total + (snapshot.selectors?.length ?? 0), 0),
     sourceDigest: workspace.projectIntelligence?.source_digest_sha256 ?? firstSourceDigest(snapshots, workspace.understandingReport?.source_digest_sha256),
-    toolCalls: snapshots.reduce((total, snapshot) => total + (snapshot.investigation_trace?.tool_calls?.length ?? 0), 0),
-    searchedFiles: snapshots.reduce((total, snapshot) => total + (snapshot.investigation_trace?.total_files_searched ?? 0), 0),
-    selectedFiles: snapshots.reduce((total, snapshot) => total + (snapshot.investigation_trace?.total_files_selected ?? snapshot.file_count ?? 0), 0),
-    investigationMode: snapshots.find((snapshot) => snapshot.investigation_trace?.mode)?.investigation_trace?.mode ?? "",
-    investigationQuestions: snapshots.reduce((total, snapshot) => total + (snapshot.investigation_trace?.questions?.length ?? 0), 0),
-    openInvestigationQuestions: snapshots.reduce(
-      (total, snapshot) => total + (snapshot.investigation_trace?.questions?.filter((question) => question.status !== "answered").length ?? 0),
-      0,
-    ),
-    snippetWindows: snapshots.reduce(
-      (total, snapshot) => total + (snapshot.investigation_trace?.tool_calls?.reduce((sum, call) => sum + (call.snippet_refs?.length ?? 0), 0) ?? 0),
-      0,
-    ),
-    specializedToolCalls: qualitySummaries.reduce((total, quality) => total + (quality.specialized_tool_call_count ?? 0), 0),
-    shellRunToolCalls: qualitySummaries.reduce((total, quality) => total + (quality.shell_run_tool_call_count ?? 0), 0),
-    selectedFileRatio: maxNumber(qualitySummaries.map((quality) => quality.selected_file_ratio)),
-    searchFileRatio: maxNumber(qualitySummaries.map((quality) => quality.search_file_ratio)),
-    investigationQualitySummary: qualitySummaries.find((quality) => quality.summary)?.summary ?? "",
-    investigationOverreadRisk: worstOverreadRisk(qualitySummaries.map((quality) => quality.overread_risk)),
-    investigationSourceTextPolicy: unique(qualitySummaries.map((quality) => quality.source_text_policy ?? "")).join(" / "),
-    remainingInvestigationGaps: unique(qualitySummaries.flatMap((quality) => quality.remaining_gaps ?? [])),
-    investigationQualityConfidence: averageConfidence(qualitySummaries.map((quality) => quality.confidence)),
-    toolBreakdown: toolCalls.reduce<Record<string, number>>((counts, call) => {
-      counts[call.tool] = (counts[call.tool] ?? 0) + 1;
-      return counts;
-    }, {}),
     degraded: hasRepoInput(workspace) && snapshots.length > 0 && fileCount === 0,
+    toolBreakdown,
+    specializedToolCalls: quality?.specialized_tool_call_count ?? 0,
+    shellRunToolCalls: quality?.shell_run_tool_call_count ?? 0,
+    selectedFileRatio: quality?.selected_file_ratio ?? 0,
+    searchFileRatio: quality?.search_file_ratio ?? 0,
+    investigationQualitySummary: quality?.summary ?? trace?.summary ?? "",
+    investigationOverreadRisk: quality?.overread_risk ?? "",
+    investigationSourceTextPolicy: quality?.source_text_policy ?? "",
+    remainingInvestigationGaps: quality?.remaining_gaps ?? [],
+    investigationQualityConfidence: quality?.confidence ?? 0,
   };
 }
 
-export function codeInvestigationQuestionsFromWorkspace(workspace: ProjectWorkspaceView, limit = 6): CodeInvestigationQuestionView[] {
-  const snapshots = workspace.understandingReport?.code_snapshots ?? [];
-  const out: CodeInvestigationQuestionView[] = [];
-  for (const snapshot of snapshots) {
-    const trace = snapshot.investigation_trace;
-    if (!trace?.questions?.length) {
-      continue;
-    }
-    for (const question of trace.questions) {
-      if (out.length >= limit) {
-        return out;
-      }
-      out.push({
-        id: question.id,
-        label: question.intent_label || question.id,
-        question: question.question,
-        status: question.status || "pending",
-        evidenceSummary: question.evidence_summary || "尚未形成证据摘要",
-        remainingGaps: question.remaining_gaps ?? [],
-        nextActions: question.next_actions ?? [],
-        ...(typeof question.confidence === "number" ? { confidence: question.confidence } : {}),
-        toolCalls: toolViewsForQuestion(trace, question),
-      });
-    }
-  }
-  return out;
+export function codeInvestigationQuestionsFromWorkspace(workspace: ProjectWorkspaceView): CodeInvestigationQuestionView[] {
+  const snapshot = (workspace.understandingReport?.code_snapshots ?? []).find((item) => item.investigation_trace);
+  const trace = snapshot?.investigation_trace;
+  if (!trace?.questions?.length) return [];
+  const calls = new Map((trace.tool_calls ?? []).map((call) => [call.id, call]));
+  return trace.questions.map((question) => ({
+    id: question.id,
+    question: question.question,
+    ...(question.status ? { status: question.status } : {}),
+    ...(question.evidence_summary ? { summary: question.evidence_summary } : {}),
+    toolCalls: (question.tool_call_ids ?? []).map((id) => calls.get(id)).filter((call): call is CodeInvestigationToolCall => Boolean(call)).map(investigationToolCallView),
+    ...(question.next_actions?.length ? { nextActions: question.next_actions } : {}),
+  }));
 }
 
 export function agentPipelineItems(workspace: ProjectWorkspaceView): AgentPipelineItem[] {
@@ -226,7 +201,7 @@ export function agentPipelineItems(workspace: ProjectWorkspaceView): AgentPipeli
       detail: codeSummary.degraded
         ? "路径不可读或无可扫描文件，已降级使用其他材料"
         : codeSummary.fileCount > 0
-          ? `${codeSummary.fileCount} 个结构化读取 / ${codeSummary.toolCalls || 0} 次工具调用 / ${codeSummary.investigationQuestions || 0} 个调查问题`
+          ? `${codeSummary.fileCount} 个文件 / ${codeSummary.frameworks.join("、") || "框架待识别"}`
           : "未提供项目根目录",
     },
     {
@@ -282,51 +257,6 @@ export function agentPipelineItems(workspace: ProjectWorkspaceView): AgentPipeli
   ];
 }
 
-function toolViewsForQuestion(trace: CodeInvestigationTrace, question: CodeInvestigationQuestion): CodeInvestigationToolView[] {
-  const calls = trace.tool_calls ?? [];
-  const explicitIDs = new Set(question.tool_call_ids ?? []);
-  const selected = calls.filter((call) => explicitIDs.has(call.id) || metadataQuestionID(call) === question.id);
-  const seen = new Set<string>();
-  return selected
-    .filter((call) => {
-      if (seen.has(call.id)) {
-        return false;
-      }
-      seen.add(call.id);
-      return true;
-    })
-    .map((call) => ({
-      id: call.id,
-      tool: call.tool,
-      summary: safeToolSummary(call),
-      ...(call.selection_reason ? { selectionReason: call.selection_reason } : {}),
-      ...(call.read_policy ? { readPolicy: call.read_policy } : {}),
-      ...(call.source_text_policy ? { sourceTextPolicy: call.source_text_policy } : {}),
-      selectedFiles: call.selected_file_count ?? 0,
-      matchedFiles: call.matched_file_count ?? 0,
-      snippetWindows: call.snippet_refs?.length ?? 0,
-      pathHashCount: call.path_hashes?.length ?? 0,
-    }));
-}
-
-function metadataQuestionID(call: CodeInvestigationToolCall): string | undefined {
-  const value = call.metadata?.question_id;
-  return typeof value === "string" ? value : undefined;
-}
-
-function safeToolSummary(call: CodeInvestigationToolCall): string {
-  if (call.output_summary) {
-    return call.output_summary;
-  }
-  const parts = [
-    call.matched_file_count !== undefined ? `matched=${call.matched_file_count}` : "",
-    call.selected_file_count !== undefined ? `selected=${call.selected_file_count}` : "",
-    call.snippet_refs?.length ? `windows=${call.snippet_refs.length}` : "",
-    call.path_hashes?.length ? `path_hashes=${call.path_hashes.length}` : "",
-  ].filter(Boolean);
-  return parts.join(" · ") || "已执行";
-}
-
 function readinessStatus(workspace: ProjectWorkspaceView): AgentPipelineStatus {
   if (workspace.scriptReadiness?.blockers?.length) {
     return "attention";
@@ -374,42 +304,27 @@ function domainsFromURL(productURL: string, fallback: string[]): string[] {
   }
 }
 
+function investigationToolCallView(call: CodeInvestigationToolCall): CodeInvestigationToolCallView {
+  return {
+    tool: call.tool,
+    summary: call.output_summary ?? call.purpose ?? "bounded tool call completed",
+    ...(call.read_policy ? { readPolicy: call.read_policy } : {}),
+    ...(call.source_text_policy ? { sourceTextPolicy: call.source_text_policy } : {}),
+    ...(call.selection_reason ? { selectionReason: call.selection_reason } : {}),
+  };
+}
+
+function redactRepositoryURL(value: string): string {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.host}${parsed.pathname}`;
+  } catch {
+    return "已配置";
+  }
+}
+
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
-}
-
-function isCodeInvestigationQualitySummary(value: CodeInvestigationQualitySummary | undefined): value is CodeInvestigationQualitySummary {
-  return Boolean(value);
-}
-
-function worstOverreadRisk(values: Array<string | undefined>): string {
-  const normalized = new Set(values.filter(Boolean));
-  if (normalized.has("high")) {
-    return "high";
-  }
-  if (normalized.has("medium")) {
-    return "medium";
-  }
-  if (normalized.has("low")) {
-    return "low";
-  }
-  if (normalized.has("unknown")) {
-    return "unknown";
-  }
-  return "";
-}
-
-function maxNumber(values: Array<number | undefined>): number {
-  const valid = values.filter((value): value is number => typeof value === "number");
-  return valid.length ? Math.max(...valid) : 0;
-}
-
-function averageConfidence(values: Array<number | undefined>): number | undefined {
-  const valid = values.filter((value): value is number => typeof value === "number");
-  if (!valid.length) {
-    return undefined;
-  }
-  return valid.reduce((total, value) => total + value, 0) / valid.length;
 }
 
 function isString(value: unknown): value is string {

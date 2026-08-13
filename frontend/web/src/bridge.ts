@@ -1,4 +1,10 @@
 import type {
+  AccountPlanView,
+  AccountProfileView,
+  AccountVerificationChannel,
+  AccountVerificationStartView,
+  AccountVerificationStateView,
+  AccountSessionView,
   CloudArtifactSummary,
   ExecutionPackageUploadInitView,
   ExecutionPackageUploadView,
@@ -7,7 +13,10 @@ import type {
   AssistantEventView,
   AssistantSessionView,
   ConfigurationSourceRefView,
+  GitHubDeviceFlowView,
   ProjectConfigurationPatchView,
+  ProjectActivityEventView,
+  ProjectActivityStateView,
   ProjectSummaryView,
   ProjectWorkspaceView,
   ProductSourceBindingView,
@@ -56,6 +65,23 @@ export type ProjectCreationInput = {
 
 export type DesktopBridgeClient = {
   mode: "mock" | "local";
+  accountSession(): Promise<BridgeResult<AccountSessionView>>;
+  devAccountLogin(): Promise<BridgeResult<AccountSessionView>>;
+  passwordAccountLogin(identifier: string, password: string): Promise<BridgeResult<AccountSessionView>>;
+  accountLogout(): Promise<BridgeResult<AccountSessionView>>;
+  accountProfile(): Promise<BridgeResult<AccountProfileView>>;
+  updateAccountProfile(profile: Pick<AccountProfileView, "displayName">): Promise<BridgeResult<AccountProfileView>>;
+  setAccountPassword(password: string): Promise<BridgeResult<AccountSessionView>>;
+  changeAccountPassword(currentPassword: string, newPassword: string): Promise<BridgeResult<AccountSessionView>>;
+  startAccountPasswordReset(channel: AccountVerificationChannel, destination: string): Promise<BridgeResult<AccountVerificationStartView>>;
+  confirmAccountPasswordReset(channel: AccountVerificationChannel, destination: string, code: string, newPassword: string): Promise<BridgeResult<AccountSessionView>>;
+  startAccountVerification(channel: AccountVerificationChannel, destination: string): Promise<BridgeResult<AccountVerificationStartView>>;
+  accountVerificationState(channel: AccountVerificationChannel): Promise<BridgeResult<AccountVerificationStateView>>;
+  confirmAccountVerification(channel: AccountVerificationChannel, code: string): Promise<BridgeResult<AccountProfileView>>;
+  accountPlan(): Promise<BridgeResult<AccountPlanView>>;
+  startGitHubDeviceFlow(): Promise<BridgeResult<GitHubDeviceFlowView>>;
+  pollGitHubDeviceFlow(flowID: string): Promise<BridgeResult<GitHubDeviceFlowView>>;
+  disconnectAccountGitHub(): Promise<BridgeResult<AccountProfileView>>;
   runtimeHealth(): Promise<BridgeResult<RuntimeHealthView>>;
   configureControlPlane(baseURL: string, accessToken: string): Promise<BridgeResult<RuntimeHealthView>>;
   configurePlanningModel(provider: string, model: string, apiKey: string, proxyURL?: string): Promise<BridgeResult<RuntimeHealthView>>;
@@ -75,6 +101,9 @@ export type DesktopBridgeClient = {
   browserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
   runBrowserAgentBusinessAcceptance(): Promise<BridgeResult<BrowserAgentBusinessAcceptanceView>>;
   executionEvents(projectID: string, afterID?: string): Promise<BridgeResult<RuntimeLogEntry[]>>;
+  getProjectActivityState(projectID: string): Promise<BridgeResult<ProjectActivityStateView>>;
+  listProjectActivityEvents(projectID: string, afterID?: string): Promise<BridgeResult<ProjectActivityEventView[]>>;
+  browserFrameURL(projectID: string, frameRef: string): string;
   createProject(input: ScenarioID | ProjectCreationInput): Promise<BridgeResult<ProjectWorkspaceView>>;
   listProjects(): Promise<BridgeResult<ProjectSummaryView[]>>;
 
@@ -195,6 +224,14 @@ export type BridgeRunOptions = {
 export type GitHubCredentialStatus = {
   configured: boolean;
 };
+
+type LocalGitHubIdentity = { id: number; login: string; name?: string; avatar_url?: string; profile_url?: string; connected_at: string };
+type LocalAccountProfile = { id: string; display_name: string; email?: string; avatar_url?: string; initials: string; email_verification: AccountProfileView["emailVerification"]; has_password: boolean; github?: LocalGitHubIdentity; updated_at: string };
+type LocalAccountSession = { authenticated: boolean; user?: LocalAccountProfile; dev_login_available: boolean; password_setup_required: boolean };
+type LocalAccountVerificationStart = { channel: AccountVerificationChannel; masked_destination: string; status: "pending"; expires_at: string; resend_at: string; development_code?: string };
+type LocalAccountVerificationState = { channel: AccountVerificationChannel; status: AccountProfileView["emailVerification"]; masked_destination?: string; expires_at?: string; resend_at?: string };
+type LocalAccountPlan = { id: string; name: string; status: AccountPlanView["status"]; credits_included: number; credits_used: number; credits_remaining: number; cycle_start: string; cycle_end: string; usage: Array<{ category: AccountPlanView["usage"][number]["category"]; credits: number }> };
+type LocalGitHubDeviceFlow = { id: string; status: GitHubDeviceFlowView["status"]; user_code: string; verification_uri: string; expires_at: string; interval_seconds: number; github?: LocalGitHubIdentity; error?: string };
 
 export type DesktopUpdateStatus = {
   configured: boolean;
@@ -721,6 +758,35 @@ type LocalExecutionEvent = {
   created_at: string;
 };
 
+type LocalProjectActivityEvent = {
+  id: string;
+  project_id: string;
+  run_id: string;
+  mode: ProjectActivityEventView["mode"];
+  kind: string;
+  status: ProjectActivityEventView["status"];
+  title: string;
+  detail?: string;
+  progress?: number;
+  occurred_at: string;
+  browser?: { url?: string; title?: string; frame_ref?: string; redacted: true };
+  capture?: ProjectActivityEventView["capture"];
+  editor_session_id?: string;
+  editor_revision?: number;
+};
+
+type LocalProjectActivityState = {
+  project_id: string;
+  mode: ProjectActivityStateView["mode"];
+  run_id?: string;
+  status?: ProjectActivityStateView["status"];
+  current?: LocalProjectActivityEvent;
+  recent?: LocalProjectActivityEvent[];
+  last_event_id?: string;
+  editor_session_id?: string;
+  updated_at?: string;
+};
+
 type LocalProjectContext = {
   id: string;
   name?: string;
@@ -778,6 +844,67 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
   const orgID = import.meta.env.VITE_CASCADE_ORG_ID || "org_desktop";
   return {
     mode: "local",
+    async accountSession() {
+      return mapAccountSessionResult(await requestLocal<LocalAccountSession>(baseURL, "/v1/desktop/account/session"));
+    },
+    async devAccountLogin() {
+      return mapAccountSessionResult(await requestLocal<LocalAccountSession>(baseURL, "/v1/desktop/account/session/dev", { method: "POST" }));
+    },
+    async passwordAccountLogin(identifier, password) {
+      return mapAccountSessionResult(await requestLocal<LocalAccountSession>(baseURL, "/v1/desktop/account/session/login", { method: "POST", body: JSON.stringify({ identifier, password }) }));
+    },
+    async accountLogout() {
+      return mapAccountSessionResult(await requestLocal<LocalAccountSession>(baseURL, "/v1/desktop/account/logout", { method: "POST" }));
+    },
+    async accountProfile() {
+      const result = await requestLocal<LocalAccountProfile>(baseURL, "/v1/desktop/account/profile");
+      return result.ok && result.data ? ok(accountProfileFromLocal(result.data)) : bridgeFailure(result.error ?? "Account profile is unavailable", result.errorInfo);
+    },
+    async updateAccountProfile(profile) {
+      const result = await requestLocal<LocalAccountProfile>(baseURL, "/v1/desktop/account/profile", { method: "PUT", body: JSON.stringify({ display_name: profile.displayName }) });
+      return result.ok && result.data ? ok(accountProfileFromLocal(result.data)) : bridgeFailure(result.error ?? "Account profile could not be saved", result.errorInfo);
+    },
+    async setAccountPassword(password) {
+      return mapAccountSessionResult(await requestLocal<LocalAccountSession>(baseURL, "/v1/desktop/account/password/set", { method: "POST", body: JSON.stringify({ password }) }));
+    },
+    async changeAccountPassword(currentPassword, newPassword) {
+      return mapAccountSessionResult(await requestLocal<LocalAccountSession>(baseURL, "/v1/desktop/account/password/change", { method: "POST", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }));
+    },
+    async startAccountPasswordReset(channel, destination) {
+      const result = await requestLocal<LocalAccountVerificationStart>(baseURL, "/v1/desktop/account/password/reset/start", { method: "POST", body: JSON.stringify({ channel, destination }) });
+      return result.ok && result.data ? ok(accountVerificationStartFromLocal(result.data)) : bridgeFailure(result.error ?? "Password reset could not start", result.errorInfo);
+    },
+    async confirmAccountPasswordReset(channel, destination, code, newPassword) {
+      return mapAccountSessionResult(await requestLocal<LocalAccountSession>(baseURL, "/v1/desktop/account/password/reset/confirm", { method: "POST", body: JSON.stringify({ channel, destination, code, new_password: newPassword }) }));
+    },
+    async startAccountVerification(channel, destination) {
+      const result = await requestLocal<LocalAccountVerificationStart>(baseURL, `/v1/desktop/account/verification/${channel}/start`, { method: "POST", body: JSON.stringify({ destination }) });
+      return result.ok && result.data ? ok(accountVerificationStartFromLocal(result.data)) : bridgeFailure(result.error ?? `${channel} verification could not start`, result.errorInfo);
+    },
+    async accountVerificationState(channel) {
+      const result = await requestLocal<LocalAccountVerificationState>(baseURL, `/v1/desktop/account/verification/${channel}`);
+      return result.ok && result.data ? ok(accountVerificationStateFromLocal(result.data)) : bridgeFailure(result.error ?? `${channel} verification state is unavailable`, result.errorInfo);
+    },
+    async confirmAccountVerification(channel, code) {
+      const result = await requestLocal<LocalAccountProfile>(baseURL, `/v1/desktop/account/verification/${channel}/confirm`, { method: "POST", body: JSON.stringify({ code }) });
+      return result.ok && result.data ? ok(accountProfileFromLocal(result.data)) : bridgeFailure(result.error ?? `${channel} verification could not be confirmed`, result.errorInfo);
+    },
+    async accountPlan() {
+      const result = await requestLocal<LocalAccountPlan>(baseURL, "/v1/desktop/account/plan");
+      return result.ok && result.data ? ok(accountPlanFromLocal(result.data)) : bridgeFailure(result.error ?? "Account plan is unavailable", result.errorInfo);
+    },
+    async startGitHubDeviceFlow() {
+      const result = await requestLocal<LocalGitHubDeviceFlow>(baseURL, "/v1/desktop/account/github/device", { method: "POST" });
+      return result.ok && result.data ? ok(githubDeviceFlowFromLocal(result.data)) : bridgeFailure(result.error ?? "GitHub authorization could not start", result.errorInfo);
+    },
+    async pollGitHubDeviceFlow(flowID) {
+      const result = await requestLocal<LocalGitHubDeviceFlow>(baseURL, `/v1/desktop/account/github/device/${encodeURIComponent(flowID)}`);
+      return result.ok && result.data ? ok(githubDeviceFlowFromLocal(result.data)) : bridgeFailure(result.error ?? "GitHub authorization status is unavailable", result.errorInfo);
+    },
+    async disconnectAccountGitHub() {
+      const result = await requestLocal<LocalAccountProfile>(baseURL, "/v1/desktop/account/github", { method: "DELETE" });
+      return result.ok && result.data ? ok(accountProfileFromLocal(result.data)) : bridgeFailure(result.error ?? "GitHub account could not be disconnected", result.errorInfo);
+    },
     async runtimeHealth() {
       const result = await requestLocal<LocalRuntimeHealth>(baseURL, "/v1/desktop/runtime-health");
       if (!result.ok || !result.data) {
@@ -876,6 +1003,20 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       }
       return ok(result.data.map(runtimeLogFromLocalEvent));
     },
+    async getProjectActivityState(projectID) {
+      const result = await requestLocal<LocalProjectActivityState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/activity-state`);
+      if (!result.ok || !result.data) return { ok: false, error: result.error ?? "项目活动状态不可用" };
+      return ok(projectActivityStateFromLocal(result.data));
+    },
+    async listProjectActivityEvents(projectID, afterID) {
+      const query = afterID ? `?after=${encodeURIComponent(afterID)}` : "";
+      const result = await requestLocal<LocalProjectActivityEvent[]>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/activity-events${query}`);
+      if (!result.ok || !result.data) return { ok: false, error: result.error ?? "项目活动记录不可用" };
+      return ok(result.data.map(projectActivityEventFromLocal));
+    },
+    browserFrameURL(projectID, frameRef) {
+      return `${baseURL}/v1/desktop/projects/${encodeURIComponent(projectID)}/browser-frame/${encodeURIComponent(frameRef)}`;
+    },
     async createProject(input) {
       const scenarioID = typeof input === "string" ? input : input.scenarioID ?? "product_demo";
       if (typeof input === "string") {
@@ -896,9 +1037,9 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return this.listProjectSummaries();
     },
     async listProjectSummaries() {
-      const result = await requestLocal<Array<{ id: string; name: string; product_url?: string; stage: ProjectSummaryView["stage"]; status: ProjectSummaryView["status"]; asset_count: number; generated_asset_count: number; created_at?: string; updated_at?: string }>>(baseURL, "/v1/desktop/projects");
+      const result = await requestLocal<Array<{ id: string; name: string; product_url?: string; stage: ProjectSummaryView["stage"]; status: ProjectSummaryView["status"]; asset_count: number; generated_asset_count: number; created_at?: string; updated_at?: string; assistant_session_id?: string; last_message_preview?: string; last_activity_at?: string; active_turn_status?: string; next_action?: string }>>(baseURL, "/v1/desktop/projects");
       if (!result.ok || !result.data) return { ok: false, error: result.error ?? "项目列表不可用" };
-      return ok(result.data.map((item) => ({ id: item.id, name: item.name, productURL: item.product_url ?? "", stage: item.stage, status: item.status, assetCount: item.asset_count, generatedAssetCount: item.generated_asset_count, ...(item.created_at ? { createdAt: item.created_at } : {}), ...(item.updated_at ? { updatedAt: item.updated_at } : {}) })));
+      return ok(result.data.map((item) => ({ id: item.id, name: item.name, productURL: item.product_url ?? "", stage: item.stage, status: item.status, assetCount: item.asset_count, generatedAssetCount: item.generated_asset_count, ...(item.created_at ? { createdAt: item.created_at } : {}), ...(item.updated_at ? { updatedAt: item.updated_at } : {}), ...(item.assistant_session_id ? { assistantSessionID: item.assistant_session_id } : {}), ...(item.last_message_preview ? { lastMessagePreview: item.last_message_preview } : {}), ...(item.last_activity_at ? { lastActivityAt: item.last_activity_at } : {}), ...(item.active_turn_status ? { activeTurnStatus: item.active_turn_status } : {}), ...(item.next_action ? { nextAction: item.next_action } : {}) })));
     },
     async archiveProject(projectID) {
       return requestLocal<{ archived: boolean }>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}/archive`, { method: "POST" });
@@ -1342,7 +1483,17 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 
 export function createMockBridgeClient(): DesktopBridgeClient {
   const projects = new Map<string, ProjectWorkspaceView>();
+  const assistantSessions = new Map<string, AssistantSessionView>();
   let githubCredentialConfigured = false;
+	let mockAccountAuthenticated = true;
+	let mockAccountProfile: AccountProfileView = mockDefaultAccountProfile();
+	let mockAccountPassword = "";
+	const mockPlan = mockAccountPlan();
+	const mockGitHubFlows = new Map<string, GitHubDeviceFlowView>();
+	const mockVerificationCodes = new Map<AccountVerificationChannel, string>();
+	const mockVerificationFlows = new Map<AccountVerificationChannel, AccountVerificationStartView>();
+	const mockVerificationDestinations = new Map<AccountVerificationChannel, string>();
+	const mockPasswordResetCodes = new Map<AccountVerificationChannel, string>();
 	let mockControlPlaneURL = "";
 	let mockControlPlaneConnected = false;
 	let mockAccessTokenConfigured = false;
@@ -1394,6 +1545,107 @@ export function createMockBridgeClient(): DesktopBridgeClient {
 
   return {
     mode: "mock",
+    async accountSession() {
+	  return ok({ authenticated: mockAccountAuthenticated, devLoginAvailable: true, passwordSetupRequired: !mockAccountPassword, ...(mockAccountAuthenticated ? { user: mockAccountProfile } : {}) });
+	},
+	async devAccountLogin() {
+	  mockAccountAuthenticated = true;
+	  return ok({ authenticated: true, user: mockAccountProfile, devLoginAvailable: true, passwordSetupRequired: !mockAccountPassword });
+	},
+	async passwordAccountLogin(identifier, password) {
+	  if (!mockAccountPassword || password !== mockAccountPassword || ![mockAccountProfile.displayName, mockAccountProfile.email].filter(Boolean).some((value) => value!.toLowerCase() === identifier.trim().toLowerCase())) return { ok: false, error: "Email, username, or password is incorrect" };
+	  mockAccountAuthenticated = true;
+	  return ok({ authenticated: true, user: mockAccountProfile, devLoginAvailable: true, passwordSetupRequired: false });
+	},
+	async accountLogout() {
+	  mockAccountAuthenticated = false;
+	  return ok({ authenticated: false, devLoginAvailable: true, passwordSetupRequired: !mockAccountPassword });
+	},
+	async accountProfile() {
+	  return mockAccountAuthenticated ? ok(mockAccountProfile) : { ok: false, error: "Account session is not authenticated" };
+	},
+	async updateAccountProfile(profile) {
+	  if (!mockAccountAuthenticated) return { ok: false, error: "Account session is not authenticated" };
+	  const displayName = profile.displayName.trim();
+	  if (!displayName) return { ok: false, error: "Display name is required" };
+	  mockAccountProfile = { ...mockAccountProfile, displayName, initials: accountInitialsFromName(displayName), updatedAt: new Date().toISOString() };
+	  return ok(mockAccountProfile);
+	},
+	async setAccountPassword(password) {
+	  if (!mockAccountAuthenticated) return { ok: false, error: "Account session is not authenticated" };
+	  if (mockAccountPassword) return { ok: false, error: "A password is already configured" };
+	  if (password.length < 12 || password.length > 128) return { ok: false, error: "Password must contain 12 to 128 characters" };
+	  mockAccountPassword = password; mockAccountAuthenticated = false; mockAccountProfile = { ...mockAccountProfile, hasPassword: true };
+	  return ok({ authenticated: false, devLoginAvailable: true, passwordSetupRequired: false });
+	},
+	async changeAccountPassword(currentPassword, newPassword) {
+	  if (!mockAccountAuthenticated) return { ok: false, error: "Account session is not authenticated" };
+	  if (currentPassword !== mockAccountPassword) return { ok: false, error: "Current password is incorrect" };
+	  if (newPassword.length < 12 || newPassword.length > 128) return { ok: false, error: "Password must contain 12 to 128 characters" };
+	  mockAccountPassword = newPassword; mockAccountAuthenticated = false;
+	  return ok({ authenticated: false, devLoginAvailable: true, passwordSetupRequired: false });
+	},
+	async startAccountPasswordReset(channel, destination) {
+	  const code = "654321"; mockPasswordResetCodes.set(channel, code);
+	  const now = Date.now();
+	  return ok({ channel, maskedDestination: channel === "email" ? destination.replace(/^(.).*@/, "$1•••@") : `••••${destination.replace(/\D/g, "").slice(-4)}`, status: "pending", expiresAt: new Date(now + 600000).toISOString(), resendAt: new Date(now + 60000).toISOString(), developmentCode: code });
+	},
+	async confirmAccountPasswordReset(channel, _destination, code, newPassword) {
+	  if (mockPasswordResetCodes.get(channel) !== code || newPassword.length < 12 || newPassword.length > 128) return { ok: false, error: "Password reset could not be confirmed" };
+	  mockPasswordResetCodes.clear(); mockAccountPassword = newPassword; mockAccountAuthenticated = false; mockAccountProfile = { ...mockAccountProfile, hasPassword: true };
+	  return ok({ authenticated: false, devLoginAvailable: true, passwordSetupRequired: false });
+	},
+	async startAccountVerification(channel, destination) {
+	  if (!mockAccountAuthenticated) return { ok: false, error: "Account session is not authenticated" };
+	  if (!destination.trim()) return { ok: false, error: `Enter a ${channel} to verify` };
+	  const code = "123456";
+	  mockVerificationCodes.set(channel, code);
+	  mockVerificationDestinations.set(channel, destination.trim());
+	  const now = Date.now();
+	  const flow: AccountVerificationStartView = { channel, maskedDestination: channel === "email" ? destination.replace(/^(.).*@/, "$1•••@") : `••••${destination.replace(/\D/g, "").slice(-4)}`, status: "pending", expiresAt: new Date(now + 600000).toISOString(), resendAt: new Date(now + 60000).toISOString(), developmentCode: code };
+	  mockVerificationFlows.set(channel, flow);
+	  return ok(flow);
+	},
+	async accountVerificationState(channel) {
+	  if (!mockAccountAuthenticated) return { ok: false, error: "Account session is not authenticated" };
+	  const flow = mockVerificationFlows.get(channel);
+	  if (flow && new Date(flow.expiresAt).getTime() > Date.now()) return ok({ channel, status: "pending", maskedDestination: flow.maskedDestination, expiresAt: flow.expiresAt, resendAt: flow.resendAt });
+	  if (flow) { mockVerificationFlows.delete(channel); mockVerificationCodes.delete(channel); }
+	  return ok({ channel, status: mockAccountProfile.emailVerification });
+	},
+	async confirmAccountVerification(channel, code) {
+	  if (!mockAccountAuthenticated) return { ok: false, error: "Account session is not authenticated" };
+	  if (mockVerificationCodes.get(channel) !== code.trim()) return { ok: false, error: "Verification code is invalid or has expired" };
+	  mockVerificationCodes.delete(channel);
+	  mockVerificationFlows.delete(channel);
+	  const destination = mockVerificationDestinations.get(channel); mockVerificationDestinations.delete(channel);
+	  if (!destination) return { ok: false, error: "Verification destination is missing" };
+	  mockAccountProfile = { ...mockAccountProfile, email: destination, emailVerification: "verified", updatedAt: new Date().toISOString() };
+	  return ok(mockAccountProfile);
+	},
+	async accountPlan() {
+	  return mockAccountAuthenticated ? ok(mockPlan) : { ok: false, error: "Account session is not authenticated" };
+	},
+	async startGitHubDeviceFlow() {
+	  if (!mockAccountAuthenticated) return { ok: false, error: "Account session is not authenticated" };
+	  const flow: GitHubDeviceFlowView = { id: `github_mock_${Date.now()}`, status: "pending", userCode: "CASCADE-DEV", verificationURI: "https://github.com/login/device", expiresAt: new Date(Date.now() + 600000).toISOString(), intervalSeconds: 1 };
+	  mockGitHubFlows.set(flow.id, flow);
+	  return ok(flow);
+	},
+	async pollGitHubDeviceFlow(flowID) {
+	  const flow = mockGitHubFlows.get(flowID);
+	  if (!flow) return { ok: false, error: "GitHub authorization session was not found" };
+	  const github = { id: 4243, login: "jonathan-zhang", name: "Jonathan Zhang", avatarURL: "https://avatars.githubusercontent.com/u/4243?v=4", profileURL: "https://github.com/jonathan-zhang", connectedAt: new Date().toISOString() };
+	  const authorized: GitHubDeviceFlowView = { ...flow, status: "authorized", github };
+	  mockGitHubFlows.set(flowID, authorized);
+	  mockAccountProfile = { ...mockAccountProfile, github, updatedAt: new Date().toISOString() };
+	  return ok(authorized);
+	},
+	async disconnectAccountGitHub() {
+	  const { github: _github, ...profileWithoutGitHub } = mockAccountProfile;
+	  mockAccountProfile = { ...profileWithoutGitHub, updatedAt: new Date().toISOString() };
+	  return ok(mockAccountProfile);
+	},
     async runtimeHealth() {
 	  return runtimeHealth();
     },
@@ -1489,6 +1741,15 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async executionEvents() {
       return ok([]);
     },
+    async getProjectActivityState(projectID) {
+      return ok({ projectID, mode: "empty", recent: [] });
+    },
+    async listProjectActivityEvents() {
+      return ok([]);
+    },
+    browserFrameURL(projectID, frameRef) {
+      return `/v1/desktop/projects/${encodeURIComponent(projectID)}/browser-frame/${encodeURIComponent(frameRef)}`;
+    },
     async createProject(input) {
       const scenarioID = typeof input === "string" ? input : input.scenarioID ?? "product_demo";
       const project = createWorkspace(scenarioID);
@@ -1510,10 +1771,33 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     },
     async archiveProject(projectID) { projects.delete(projectID); return ok({ archived: true }); },
     async deleteProject(projectID) { projects.delete(projectID); return ok({ deleted: true }); },
-    async createAssistantSession(context) { return ok(mockAssistantSession(context)); },
-    async getAssistantSession() { return { ok: false, error: "Mock Assistant session is not persisted" }; },
-    async submitAssistantTurn(_sessionID, message) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" }, message)); },
-    async proposeAssistantConfigurationPatch(_sessionID, _patch, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" }, "已生成手动 configuration 提案")); },
+    async createAssistantSession(context) {
+      const session = mockAssistantSession(context);
+      assistantSessions.set(session.id, session);
+      return ok(session);
+    },
+    async getAssistantSession(sessionID) {
+      const session = assistantSessions.get(sessionID);
+      return session ? ok(session) : { ok: false, error: "Mock Assistant session was not found" };
+    },
+    async submitAssistantTurn(sessionID, message) {
+      const current = assistantSessions.get(sessionID) ?? mockAssistantSession({ surface: "projects", scopeKey: "mock" });
+      let next = appendMockAssistantTurn(current, message);
+      if (current.context.createProjectOnFirstTurn && current.context.projectID) {
+        const projectID = current.context.projectID;
+        const name = mockConversationProjectName(message);
+        if (!projects.has(projectID)) {
+          const seed = createProjectDraftWorkspace("product_demo");
+          projects.set(projectID, { ...seed, id: projectID, name, inputBundle: { ...seed.inputBundle, raw_user_prompt: message } });
+        }
+        next = { ...next, context: { ...next.context, projectName: name } };
+      }
+      assistantSessions.set(next.id, next);
+      return ok(next);
+    },
+    async proposeAssistantConfigurationPatch(_sessionID, _patch, _baseVersion, _idempotencyKey) {
+      return ok(appendMockAssistantTurn(mockAssistantSession({ surface: "projects", scopeKey: "mock" }), "已生成手动 configuration 提案"));
+    },
     async listAssistantEvents() { return ok([]); },
     async confirmAssistantProposal(_sessionID, _proposalID, _baseVersion, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
     async completeAssistantClientAction(_sessionID, _proposalID, _baseVersion, _result, _idempotencyKey) { return ok(mockAssistantSession({ surface: "projects", scopeKey: "mock" })); },
@@ -1844,6 +2128,81 @@ export function createMockBridgeClient(): DesktopBridgeClient {
   };
 }
 
+function accountProfileFromLocal(profile: LocalAccountProfile): AccountProfileView {
+  return {
+    id: profile.id,
+    displayName: profile.display_name,
+    initials: profile.initials,
+    emailVerification: profile.email_verification,
+    hasPassword: profile.has_password,
+    updatedAt: profile.updated_at,
+    ...(profile.email ? { email: profile.email } : {}),
+    ...(profile.avatar_url ? { avatarURL: profile.avatar_url } : {}),
+    ...(profile.github ? { github: githubIdentityFromLocal(profile.github) } : {}),
+  };
+}
+
+function accountVerificationStartFromLocal(value: LocalAccountVerificationStart): AccountVerificationStartView {
+  return {
+    channel: value.channel,
+    maskedDestination: value.masked_destination,
+    status: value.status,
+    expiresAt: value.expires_at,
+    resendAt: value.resend_at,
+    ...(value.development_code ? { developmentCode: value.development_code } : {}),
+  };
+}
+
+function accountVerificationStateFromLocal(value: LocalAccountVerificationState): AccountVerificationStateView {
+  return {
+    channel: value.channel,
+    status: value.status,
+    ...(value.masked_destination ? { maskedDestination: value.masked_destination } : {}),
+    ...(value.expires_at ? { expiresAt: value.expires_at } : {}),
+    ...(value.resend_at ? { resendAt: value.resend_at } : {}),
+  };
+}
+
+function githubIdentityFromLocal(identity: LocalGitHubIdentity) {
+  return {
+    id: identity.id,
+    login: identity.login,
+    connectedAt: identity.connected_at,
+    ...(identity.name ? { name: identity.name } : {}),
+    ...(identity.avatar_url ? { avatarURL: identity.avatar_url } : {}),
+    ...(identity.profile_url ? { profileURL: identity.profile_url } : {}),
+  };
+}
+
+function mapAccountSessionResult(result: BridgeResult<LocalAccountSession>): BridgeResult<AccountSessionView> {
+  if (!result.ok || !result.data) return bridgeFailure(result.error ?? "Account session is unavailable", result.errorInfo);
+  return ok({ authenticated: result.data.authenticated, devLoginAvailable: result.data.dev_login_available, passwordSetupRequired: result.data.password_setup_required, ...(result.data.user ? { user: accountProfileFromLocal(result.data.user) } : {}) });
+}
+
+function accountPlanFromLocal(plan: LocalAccountPlan): AccountPlanView {
+  return { id: plan.id, name: plan.name, status: plan.status, creditsIncluded: plan.credits_included, creditsUsed: plan.credits_used, creditsRemaining: plan.credits_remaining, cycleStart: plan.cycle_start, cycleEnd: plan.cycle_end, usage: plan.usage };
+}
+
+function githubDeviceFlowFromLocal(flow: LocalGitHubDeviceFlow): GitHubDeviceFlowView {
+  return { id: flow.id, status: flow.status, userCode: flow.user_code, verificationURI: flow.verification_uri, expiresAt: flow.expires_at, intervalSeconds: flow.interval_seconds, ...(flow.github ? { github: githubIdentityFromLocal(flow.github) } : {}), ...(flow.error ? { error: flow.error } : {}) };
+}
+
+function mockDefaultAccountProfile(): AccountProfileView {
+  return { id: "user_local", displayName: "Jonathan Zhang", email: "jonathan@cascade.ai", initials: "JZ", emailVerification: "unverified", hasPassword: false, updatedAt: new Date().toISOString() };
+}
+
+function mockAccountPlan(): AccountPlanView {
+  const now = new Date();
+  const cycleStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const cycleEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return { id: "plan_local_pro", name: "Pro", status: "active", creditsIncluded: 1000, creditsUsed: 360, creditsRemaining: 640, cycleStart: cycleStart.toISOString(), cycleEnd: cycleEnd.toISOString(), usage: [{ category: "research", credits: 80 }, { category: "browser", credits: 160 }, { category: "video", credits: 120 }] };
+}
+
+function accountInitialsFromName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return `${parts[0]?.[0] ?? "C"}${parts.length > 1 ? parts[parts.length - 1]?.[0] ?? "" : ""}`.toUpperCase();
+}
+
 function ok<T>(data: T): BridgeResult<T> {
   return { ok: true, data };
 }
@@ -1914,9 +2273,9 @@ async function callWailsBridge<T>(method: string, ...args: unknown[]): Promise<B
   }
 }
 
-function mockAssistantSession(context: AssistantContextView, message = ""): AssistantSessionView {
+function mockAssistantSession(context: AssistantContextView): AssistantSessionView {
   const configuration = {
-    projectName: "示例项目", productURL: "https://example.com", objective: message || "展示核心产品价值",
+    projectName: "示例项目", productURL: "https://example.com", objective: "展示核心产品价值",
     targetAudience: "潜在客户", targetDurationSec: 60, sources: [{ ref: "source_mock_local", kind: "local_repository", label: "sample-project" }],
     version: 1, hash: "sha256:mock", readiness: "ready" as const, confirmed: false,
   };
@@ -1924,8 +2283,27 @@ function mockAssistantSession(context: AssistantContextView, message = ""): Assi
     id: `assistant_${context.scopeKey}`, context, status: "waiting_for_user", activeWorkstation: "overview",
     workstationTitle: "项目配置", workstationStatus: "等待确认", configuration,
     nextAction: { kind: "confirm_configuration", title: "确认配置并生成方案", description: "在本机分析项目并生成三合一草稿，不会上传。", primaryLabel: "确认并生成方案", targetWorkstation: "overview", requiresUserAction: true, blocked: false },
-    messages: [{ id: "welcome", role: "agent", kind: "answer", text: message ? "我已整理为 configuration 提案。" : "描述你想制作的产品演示，我会先整理 configuration。", createdAt: new Date().toISOString() }],
+    messages: [{ id: "welcome", role: "agent", kind: "answer", text: "描述你想制作的产品演示，我会先整理 configuration。", createdAt: new Date().toISOString() }],
   };
+}
+
+function appendMockAssistantTurn(session: AssistantSessionView, message: string): AssistantSessionView {
+  const timestamp = Date.now();
+  return {
+    ...session,
+    status: "waiting_for_user",
+    configuration: { ...session.configuration, objective: message },
+    messages: [
+      ...session.messages,
+      { id: `user_${timestamp}`, role: "user", kind: "answer", text: message, createdAt: new Date(timestamp).toISOString() },
+      { id: `agent_${timestamp + 1}`, role: "agent", kind: "answer", text: "I’ve organized what you shared. What would you like to refine next?", createdAt: new Date(timestamp + 1).toISOString() },
+    ],
+  };
+}
+
+function mockConversationProjectName(message: string): string {
+  const words = message.trim().replace(/\s+/g, " ").split(" ").filter(Boolean).slice(0, 8);
+  return words.join(" ") || "New demo project";
 }
 
 function formatLocalBridgeError(errorInfo: LocalBridgeErrorInfo | undefined, fallback: string): string {
@@ -1996,6 +2374,39 @@ function runtimeLogFromLocalEvent(event: LocalExecutionEvent): RuntimeLogEntry {
     ...(event.detail ? { detail: event.detail } : {}),
     ...(event.node ? { node: event.node } : {}),
     ...(typeof event.elapsed_ms === "number" ? { elapsedMS: event.elapsed_ms } : {}),
+  };
+}
+
+function projectActivityEventFromLocal(event: LocalProjectActivityEvent): ProjectActivityEventView {
+  return {
+    id: event.id,
+    projectID: event.project_id,
+    runID: event.run_id,
+    mode: event.mode,
+    kind: event.kind,
+    status: event.status,
+    title: event.title,
+    occurredAt: event.occurred_at,
+    ...(event.detail ? { detail: event.detail } : {}),
+    ...(typeof event.progress === "number" ? { progress: event.progress } : {}),
+    ...(event.browser ? { browser: { ...event.browser, ...(event.browser.frame_ref ? { frameRef: event.browser.frame_ref } : {}) } } : {}),
+    ...(event.capture ? { capture: event.capture } : {}),
+    ...(event.editor_session_id ? { editorSessionID: event.editor_session_id } : {}),
+    ...(typeof event.editor_revision === "number" ? { editorRevision: event.editor_revision } : {}),
+  };
+}
+
+function projectActivityStateFromLocal(state: LocalProjectActivityState): ProjectActivityStateView {
+  return {
+    projectID: state.project_id,
+    mode: state.mode,
+    recent: (state.recent ?? []).map(projectActivityEventFromLocal),
+    ...(state.run_id ? { runID: state.run_id } : {}),
+    ...(state.status ? { status: state.status } : {}),
+    ...(state.current ? { current: projectActivityEventFromLocal(state.current) } : {}),
+    ...(state.last_event_id ? { lastEventID: state.last_event_id } : {}),
+    ...(state.editor_session_id ? { editorSessionID: state.editor_session_id } : {}),
+    ...(state.updated_at ? { updatedAt: state.updated_at } : {}),
   };
 }
 

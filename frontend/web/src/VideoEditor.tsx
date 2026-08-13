@@ -4,6 +4,7 @@ import type { EditorArtifact, EditorOverlay, EditorPlan, EditorSession, EditorSh
 import { editorPlansEqual, emptyEditorHistory, recordEditorHistory, redoEditorHistory, undoEditorHistory } from "./editorHistory";
 import { compilePresentationComposition, finalRendererSupports, finalRendererSupportsOverlay, overlayExportStatus } from "./presentationComposition";
 import { activeCaptionText, audioPreviewState, buildAudioSegments, deleteShotInPlan, mergeAudioSegmentInPlan, patchAudioSegmentInPlan, reorderShotInPlan, requiredStepCoverage, setStillDurationInPlan, snapMilliseconds, sourceSnapPoints, splitAudioAtOutputMS, splitShotAtOutputMS, targetIndexForOutputMS, trimShotInPlan } from "./timelineEditing";
+import { copy, getStoredLocale } from "./locale";
 import "./editorWorkspace.css";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
@@ -66,6 +67,8 @@ export type ExportIssue = {
 };
 
 export function VideoEditor({ initialSessionID }: { initialSessionID?: string }) {
+  const locale = getStoredLocale();
+  const t = (english: string, chinese: string) => copy(locale, english, chinese);
   const client = useMemo(() => createEditorClient(), []);
   const [sessions, setSessions] = useState<EditorSession[]>([]);
   const [session, setSession] = useState<EditorSession>();
@@ -1294,28 +1297,28 @@ export function VideoEditor({ initialSessionID }: { initialSessionID?: string })
     if (tool === "style") setMediaTab("style");
   }
 
-  const panelTitle = activeTool === "style" ? "智能制作" : activeTool === "captions" ? "字幕库" : activeTool === "text" ? "文本与字幕" : activeTool === "shapes" ? "标注" : activeTool === "generated" ? "生成候选" : "素材";
+  const panelTitle = activeTool === "style" ? t("Smart production", "智能制作") : activeTool === "captions" ? t("Caption library", "字幕库") : activeTool === "text" ? t("Text and captions", "文本与字幕") : activeTool === "shapes" ? t("Annotations", "标注") : activeTool === "generated" ? t("Generated options", "生成候选") : t("Assets", "素材");
 	const automation = editorAutomationForDisplay(session);
 
   return (
     <div className="studio-shell">
       <header className="studio-topbar">
         <div className="studio-topbar-left">
-          <select className="studio-project-select" aria-label="编辑项目" value={session?.session_id ?? ""} onChange={(event) => {
+          <select className="studio-project-select" aria-label={t("Edit project", "编辑项目")} value={session?.session_id ?? ""} onChange={(event) => {
             const next = sessions.find((item) => item.session_id === event.target.value);
             if (next) loadSession(next);
           }}>
-            <option value="">选择编辑项目</option>
+            <option value="">{t("Choose an editing project", "选择编辑项目")}</option>
             {sessions.map((item) => <option key={item.session_id} value={item.session_id}>{sessionSelectLabel(item)}</option>)}
           </select>
           {session ? <span className="studio-revision">r{session.revision}</span> : null}
-          <button className={`studio-save-state ${saveState}`} disabled={!session || saveState === "saved" || busy === "save"} onClick={savePlan}>{saveStateLabel(saveState)}</button>
+          <button className={`studio-save-state ${saveState}`} disabled={!session || saveState === "saved" || busy === "save"} onClick={savePlan}>{saveStateLabel(saveState, locale)}</button>
         </div>
 
         <div className="studio-history-actions">
-          <button className="studio-icon-button" title="撤销 Ctrl+Z" disabled={!draftPlan || history.past.length === 0 || busy !== ""} onClick={undo}>↶</button>
-          <button className="studio-icon-button" title="重做 Ctrl+Shift+Z" disabled={!draftPlan || history.future.length === 0 || busy !== ""} onClick={redo}>↷</button>
-          <button className="studio-icon-button studio-split-icon-button" aria-label={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} title={`在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`} disabled={!draftPlan || busy !== ""} onClick={splitShot}><ScissorsIcon /></button>
+          <button className="studio-icon-button" title={t("Undo Ctrl+Z", "撤销 Ctrl+Z")} disabled={!draftPlan || history.past.length === 0 || busy !== ""} onClick={undo}>↶</button>
+          <button className="studio-icon-button" title={t("Redo Ctrl+Shift+Z", "重做 Ctrl+Shift+Z")} disabled={!draftPlan || history.future.length === 0 || busy !== ""} onClick={redo}>↷</button>
+          <button className="studio-icon-button studio-split-icon-button" aria-label={t(`Split ${selectedTrack} at playhead`, `在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`)} title={t(`Split ${selectedTrack} at playhead`, `在播放头处分割${selectedTrack === "audio" ? "音频" : "视频"}`)} disabled={!draftPlan || busy !== ""} onClick={splitShot}><ScissorsIcon /></button>
         </div>
 
         <div className="studio-topbar-actions">
@@ -1326,16 +1329,16 @@ export function VideoEditor({ initialSessionID }: { initialSessionID?: string })
             <span>{failedChecks.length > 0 ? "!" : "✓"}</span>
             <span>{busy === "validate" ? "校验中" : `导出校验 ${passedChecks.length}/${exportChecks.length}`}</span>
           </button>
-          <button className="studio-ghost-button" onClick={() => setImportOpen(true)}>导入</button>
+          <button className="studio-ghost-button" onClick={() => setImportOpen(true)}>{t("Import", "导入")}</button>
           {session?.preview.status === "running" ? (
             <button className="studio-outline-button" disabled={busy !== ""} onClick={() => void cancelRender("preview")}>{busy === "cancel-preview" ? "停止中" : "取消预览"}</button>
           ) : (
-            <button className="studio-outline-button" disabled={!session || busy !== "" || saveState === "saving" || session?.final_render.status === "running"} onClick={() => void render("preview")}>{busy === "preview" ? "启动中" : "生成预览"}</button>
+            <button className="studio-outline-button" disabled={!session || busy !== "" || saveState === "saving" || session?.final_render.status === "running"} onClick={() => void render("preview")}>{busy === "preview" ? t("Starting…", "启动中") : t("Generate preview", "生成预览")}</button>
           )}
           {session?.final_render.status === "running" ? (
             <button className="studio-primary-button" disabled={busy !== ""} onClick={() => void cancelRender("final")}>{busy === "cancel-final" ? "停止中" : "取消导出"}</button>
           ) : (
-            <button className="studio-primary-button" disabled={!session || busy !== "" || saveState === "saving" || session?.preview.status === "running"} onClick={() => void render("final")}>{busy === "final" ? "启动中" : session?.final_render.status === "ready" ? "重新导出 MP4" : "导出 MP4"}</button>
+            <button className="studio-primary-button" disabled={!session || busy !== "" || saveState === "saving" || session?.preview.status === "running"} onClick={() => void render("final")}>{busy === "final" ? t("Starting…", "启动中") : session?.final_render.status === "ready" ? t("Export MP4 again", "重新导出 MP4") : t("Export MP4", "导出 MP4")}</button>
           )}
           {finalDownloadURL && session ? <a className="studio-render-download" href={finalDownloadURL} download={`${sessionDisplayName(session)}.mp4`}>下载成片</a> : null}
         </div>
@@ -1582,9 +1585,9 @@ export function VideoEditor({ initialSessionID }: { initialSessionID?: string })
       ) : (
         <div className="studio-empty-state">
           <div className="studio-empty-illustration">▶</div>
-          <strong>创建第一个本地视频项目</strong>
-          <span>从录屏、Server 本机路径或 RecordingResultPackage 开始。</span>
-          <button className="studio-primary-button" onClick={() => setImportOpen(true)}>新建或导入</button>
+          <strong>{t("Create your first local video project", "创建第一个本地视频项目")}</strong>
+          <span>{t("Start with a recording, a local server file, or a result package.", "从录屏、Server 本机路径或 RecordingResultPackage 开始。")}</span>
+          <button className="studio-primary-button" onClick={() => setImportOpen(true)}>{t("Create or import", "新建或导入")}</button>
         </div>
       )}
 
@@ -2110,8 +2113,10 @@ export function renderFailureDetail(state: EditorSession["final_render"]): strin
   return "成片导出失败：" + raw;
 }
 
-function saveStateLabel(state: SaveState): string {
-  return ({ saved: "已保存", dirty: "待自动保存", saving: "保存中", error: "保存失败" } as const)[state];
+function saveStateLabel(state: SaveState, locale: "en-US" | "zh-CN"): string {
+  return locale === "zh-CN"
+    ? ({ saved: "已保存", dirty: "待自动保存", saving: "保存中", error: "保存失败" } as const)[state]
+    : ({ saved: "Saved", dirty: "Unsaved", saving: "Saving", error: "Save failed" } as const)[state];
 }
 
 function sessionDisplayName(session: EditorSession): string {

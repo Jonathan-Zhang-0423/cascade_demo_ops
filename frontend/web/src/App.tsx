@@ -1,24 +1,36 @@
-import { useEffect, useMemo, useState, type FormEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 import type { GraphNode, RepositoryInput, SandboxPolicy } from "../../src/types/workflowGraph";
 import { agentPipelineItems, codeSummaryFromWorkspace, updateWorkspaceInputs } from "./agentPipeline";
-import { createBridgeClient, userInputFromWorkspace } from "./bridge";
+import { createBridgeClient, userInputFromWorkspace, type DesktopBridgeClient } from "./bridge";
 import type {
+	AccountPlanView,
+	AccountProfileView,
+	AccountSessionView,
 	ApprovalChecklistState,
 	AssistantSessionView,
 	ModelDiagnosticResult,
 	NavSection,
 	ProjectWorkspaceView,
 	ProjectSummaryView,
-	ProjectWorkstationView,
+	ProjectActivityEventView,
+	ProjectActivityStateView,
+	ProjectCanvasMode,
 	RuntimeHealthView,
 	RuntimeLogEntry,
 	ScenarioID,
 	WorkspaceStage,
 } from "./domain";
+import { AccountMenu } from "./AccountMenu";
+import { AccountLoadingScreen, AccountPage, LoginScreen, PlanPanel, ProfilePanel } from "./AccountPages";
 import { createProjectDraftWorkspace, createWorkspace, initialChecklist } from "./mockWorkspace";
 import { scenarioTemplates } from "./scenarios";
 import { VideoEditor } from "./VideoEditor";
+import { ProjectCanvas } from "./ProjectCanvas";
 import { AssistantConversationPanel, AssistantWidget } from "./AssistantWidget";
+import { getDailyAgentHeadline, millisecondsUntilNextLocalDay } from "./dailyHeadline";
+import { createProjectConversationIdentity } from "./projectConversation";
+import { copy, getStoredLocale, storeLocale, type CascadeLocale } from "./locale";
 import {
   canUploadExecutionPackage,
 	beginGraphRevision,
@@ -27,10 +39,7 @@ import {
   lifecycleStatusLabel,
   lifecycleStatusTone,
   packageApprovalBlockedReasons,
-  projectJourney,
-  projectNextAction,
   projectStatusLabels,
-  recommendedWorkstation,
   resetApprovalChecklistForRepair,
   sandboxProfileLabel,
   sandboxRiskLevel,
@@ -42,43 +51,67 @@ import {
 
 const workflowStages = Object.entries(workflowStageLabels).map(([id, label]) => ({ id: id as WorkspaceStage, label }));
 
-const dailyAgentHeadlines = [
-  "Let’s make the product explain itself.",
-  "Turn the happy path into a good story.",
-  "Your product has a point. Let’s make it visible.",
-  "A useful demo starts with one honest sentence.",
-  "Let’s give your best workflow a proper entrance.",
-  "Less screen tour, more point made.",
-  "Find the shortest path to the “aha.”",
-  "Make the clicks earn their screen time.",
-  "Today’s agenda: one clear story, zero wandering.",
-  "Let’s turn product behavior into customer proof.",
-  "The product is ready. Let’s make the story catch up.",
-  "Give us the outcome; we’ll choreograph the clicks.",
-  "Good demos don’t tour. They reveal.",
-  "Let’s make the useful parts impossible to miss.",
-  "A clean demo is product truth with good timing.",
-  "Show the work, skip the wandering.",
-  "Let’s put the “why” between the clicks.",
-  "Start with the customer win; the route comes next.",
-  "Your workflow, edited for attention.",
-  "Make every click move the story.",
-  "Let’s turn the product path into a proof path.",
-] as const;
-
-function getDailyAgentHeadline(date = new Date()) {
-  const localDay = Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86_400_000);
-  return dailyAgentHeadlines[localDay % dailyAgentHeadlines.length] ?? dailyAgentHeadlines[0];
-}
-
 type ProjectActionPrompt = {
   kind: "archive" | "delete";
   project: ProjectSummaryView;
 };
 
+const defaultSidebarWidth = 204;
+const minimumSidebarWidth = 180;
+const maximumSidebarWidth = 360;
+const defaultProjectChatWidth = 400;
+const minimumProjectChatWidth = 320;
+const maximumProjectChatWidth = 640;
+const minimumProjectCanvasWidth = 480;
+
+function clampSidebarWidth(width: number) {
+  return Math.min(maximumSidebarWidth, Math.max(minimumSidebarWidth, width));
+}
+
+function storedSidebarWidth() {
+  try {
+    const savedWidth = Number(window.localStorage.getItem("cascade-sidebar-width"));
+    return Number.isFinite(savedWidth) && savedWidth > 0 ? clampSidebarWidth(savedWidth) : defaultSidebarWidth;
+  } catch {
+    return defaultSidebarWidth;
+  }
+}
+
+function projectChatMaximumWidth(containerWidth: number) {
+  return Math.max(minimumProjectChatWidth, Math.min(maximumProjectChatWidth, Math.floor(containerWidth - minimumProjectCanvasWidth)));
+}
+
+function clampProjectChatWidth(width: number, containerWidth: number) {
+  return Math.min(projectChatMaximumWidth(containerWidth), Math.max(minimumProjectChatWidth, width));
+}
+
+function storedProjectChatWidth() {
+  try {
+    const savedWidth = Number(window.localStorage.getItem("cascade-project-chat-width"));
+    return Number.isFinite(savedWidth) && savedWidth > 0
+      ? Math.min(maximumProjectChatWidth, Math.max(minimumProjectChatWidth, savedWidth))
+      : defaultProjectChatWidth;
+  } catch {
+    return defaultProjectChatWidth;
+  }
+}
+
 export function App() {
 	const bridge = useMemo(() => createBridgeClient(), []);
+	const workspacePreview = useMemo(() => {
+		if (!import.meta.env.DEV) return undefined;
+		const value = new URLSearchParams(window.location.search).get("workspacePreview");
+		return value && ["empty", "act", "browser", "editor"].includes(value) ? value as ProjectCanvasMode : undefined;
+	}, []);
 	const [activeNav, setActiveNav] = useState<NavSection>("projects");
+	const [locale, setLocale] = useState<CascadeLocale>(getStoredLocale);
+	const [libraryConversationIdentity, setLibraryConversationIdentity] = useState(() => createProjectConversationIdentity());
+	const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
+	const [accountSession, setAccountSession] = useState<AccountSessionView>();
+	const [accountResolved, setAccountResolved] = useState(false);
+	const [accountError, setAccountError] = useState("");
+	const [accountPlan, setAccountPlan] = useState<AccountPlanView>();
+	const [accountPlanError, setAccountPlanError] = useState("");
 	const [workspace, setWorkspace] = useState<ProjectWorkspaceView>(() => createProjectDraftWorkspace("product_demo"));
   const [projectSummaries, setProjectSummaries] = useState<ProjectSummaryView[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
@@ -100,8 +133,6 @@ export function App() {
   const [isRunningProduct, setIsRunningProduct] = useState(false);
 	const [graphDirty, setGraphDirty] = useState(false);
 	const [graphSaveError, setGraphSaveError] = useState("");
-  const [agentPrompt, setAgentPrompt] = useState("");
-  const [configurationSession, setConfigurationSession] = useState<{ scopeKey: string; initialMessage: string }>();
 
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
 	const serverBlockedReason = executionServerBlockedReason(runtimeHealthResolved, runtimeHealth?.browserAgentDirect);
@@ -111,8 +142,53 @@ export function App() {
 	...(serverBlockedReason ? [serverBlockedReason] : []),
   ];
   const canUpload = blockedReasons.length === 0 && canUploadExecutionPackage(workspace.packagePreview, checklist, workspace.sourceConnections);
-  const navItems = useMemo(() => buildNavItems(runtimeHealth?.appCapabilities?.developerUI === true), [runtimeHealth?.appCapabilities?.developerUI]);
+  const navItems = useMemo(() => buildNavItems(locale), [locale]);
   const isProjectAgentWorkspace = activeNav === "project_library" && selectedProjectID !== undefined;
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("cascade-sidebar-width", String(sidebarWidth));
+    } catch {
+      // The sidebar remains resizable when browser storage is unavailable.
+    }
+  }, [sidebarWidth]);
+
+  useEffect(() => storeLocale(locale), [locale]);
+
+  function beginSidebarResize(event: MouseEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startingX = event.clientX;
+    const startingWidth = sidebarWidth;
+    document.body.classList.add("sidebar-is-resizing");
+
+    const resize = (moveEvent: globalThis.MouseEvent) => {
+      setSidebarWidth(clampSidebarWidth(startingWidth + moveEvent.clientX - startingX));
+    };
+    const finish = () => {
+      document.body.classList.remove("sidebar-is-resizing");
+      window.removeEventListener("mousemove", resize);
+      window.removeEventListener("mouseup", finish);
+    };
+
+    window.addEventListener("mousemove", resize);
+    window.addEventListener("mouseup", finish);
+  }
+
+  useEffect(() => {
+    let mounted = true;
+    bridge.accountSession().then(async (result) => {
+      if (!mounted) return;
+      if (result.ok && result.data) {
+        setAccountSession(result.data);
+        setAccountError("");
+        if (result.data.authenticated) void refreshAccountPlan();
+      } else {
+        setAccountError(result.error ?? "Account session is unavailable.");
+      }
+      setAccountResolved(true);
+    });
+    return () => { mounted = false; };
+  }, [bridge]);
 
   useEffect(() => {
     let mounted = true;
@@ -128,8 +204,9 @@ export function App() {
   }, [bridge]);
 
   useEffect(() => {
+    if (!accountSession?.authenticated) return;
     void refreshProjects();
-  }, [bridge]);
+  }, [bridge, accountSession?.authenticated]);
 
 	useEffect(() => {
 		if (workspace.cloudRun.blockingErrorCode !== "reunderstanding_required") return;
@@ -170,12 +247,49 @@ export function App() {
     setProjectsLoading(false);
   }
 
+  async function refreshAccountPlan() {
+    const result = await bridge.accountPlan();
+    if (result.ok && result.data) {
+      setAccountPlan(result.data);
+      setAccountPlanError("");
+    } else {
+      setAccountPlanError(result.error ?? "Account plan is unavailable.");
+    }
+  }
 
-  async function openProject(projectID: string, preserveAssistantSession = false) {
+  async function logoutAccount() {
+    setAccountError("");
+    const result = await bridge.accountLogout();
+    if (!result.ok || !result.data) { setAccountError(result.error ?? "Account sign-out failed."); return; }
+    setAccountSession(result.data);
+    setAccountPlan(undefined);
+    setModelDiagnostics([]);
+    try { window.sessionStorage.clear(); } catch { /* Session storage may be unavailable in a restricted WebView. */ }
+    setSelectedProjectID(undefined);
+    setActiveNav("projects");
+  }
+
+  function updateAccountProfile(profile: AccountProfileView) {
+    setAccountSession((current) => ({ authenticated: true, user: profile, devLoginAvailable: current?.devLoginAvailable ?? false, passwordSetupRequired: !profile.hasPassword }));
+  }
+
+  function updateAccountSession(session: AccountSessionView) {
+    setAccountSession(session);
+    setAccountError("");
+    if (session.authenticated) {
+      setActiveNav("projects");
+      void refreshAccountPlan();
+    } else {
+      setAccountPlan(undefined);
+    }
+  }
+
+
+  async function openProject(projectID: string, _preserveAssistantSession = false): Promise<boolean> {
     const result = await bridge.loadProject(projectID);
     if (!result.ok || !result.data) {
       setProjectsError(result.error ?? "项目加载失败");
-      return;
+      return false;
     }
     setWorkspace(result.data);
     setSelectedProjectID(result.data.id);
@@ -184,10 +298,24 @@ export function App() {
 	setGraphDirty(false);
 	setGraphSaveError("");
     setDemoCredentials({ username: "", password: "" });
-    if (!preserveAssistantSession) setConfigurationSession(undefined);
     setProjectsError("");
     setRepositoryMessage("");
     setRepositoryError("");
+    return true;
+  }
+
+  async function startConversationProject(projectID: string, source: "home" | "library") {
+    if (source === "library") setLibraryConversationIdentity(createProjectConversationIdentity());
+    setActiveNav("project_library");
+    await openProject(projectID, true);
+    void refreshProjects();
+  }
+
+  async function refreshConversationProject(projectID: string) {
+    const result = await bridge.loadProject(projectID);
+    if (!result.ok || !result.data) return;
+    setWorkspace((current) => current.id === projectID ? result.data! : current);
+    void refreshProjects();
   }
 
   function patchWorkspace(patch: Partial<ProjectWorkspaceView>) {
@@ -255,7 +383,6 @@ export function App() {
       setSelectedNodeID(result.data.planReview.graph.nodes[0]?.id ?? "");
       setChecklist(initialChecklist);
       setDemoCredentials({ username: "", password: "" });
-      setConfigurationSession(undefined);
       void refreshProjects();
       setActiveNav("project_library");
     }
@@ -554,20 +681,6 @@ export function App() {
     }
     setIsRunningProduct(false);
   }
-
-  function submitAgentPrompt(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const prompt = agentPrompt.trim();
-    if (!prompt) return;
-    const draft = updateWorkspaceInputs(createProjectDraftWorkspace(workspace.scenarioID), { rawUserPrompt: prompt });
-    setWorkspace(draft);
-    setSelectedProjectID(draft.id);
-    setChecklist(initialChecklist);
-    setConfigurationSession({ scopeKey: `new_${Date.now()}`, initialMessage: prompt });
-    setAgentPrompt("");
-    setActiveNav("project_library");
-  }
-
   async function saveRepositoryConnections(repositories: RepositoryInput[]) {
     const nextWorkspace = {
       ...workspace,
@@ -608,12 +721,23 @@ export function App() {
     void saveRepositoryConnections(repositories);
   }
 
+  if (workspacePreview) {
+    return <ProjectCanvasPreview bridge={bridge} mode={workspacePreview} />;
+  }
+
+  if (!accountResolved) return <AccountLoadingScreen />;
+  if (!accountSession?.authenticated || !accountSession.user) return <LoginScreen bridge={bridge} session={accountSession ?? { authenticated: false, devLoginAvailable: false, passwordSetupRequired: false }} initialError={accountError} onSessionChange={updateAccountSession} />;
+
   return (
-    <div className={`app-shell ${isProjectAgentWorkspace ? "project-agent-shell" : ""}`}>
+    <div
+      className={`app-shell ${isProjectAgentWorkspace ? "project-agent-shell" : ""}`}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+    >
       {isProjectAgentWorkspace ? (
         <ProjectAgentWorkspace
           bridge={bridge}
           workspace={workspace}
+          locale={locale}
           {...(runtimeHealth ? { runtimeHealth } : {})}
 		  runtimeHealthResolved={runtimeHealthResolved}
           blockedReasons={blockedReasons}
@@ -623,6 +747,7 @@ export function App() {
           selectedNodeID={selectedNodeID}
           onBack={() => { setSelectedProjectID(undefined); void refreshProjects(); }}
           onOpenProjectFromAssistant={(projectID) => { void openProject(projectID, true); }}
+          onAssistantSessionChange={() => { void refreshConversationProject(workspace.id); }}
           onChecklistChange={setChecklist}
           onSelectNode={setSelectedNodeID}
           onPatchNode={patchNode}
@@ -643,12 +768,11 @@ export function App() {
             const result = await bridge.continueWithWebpageEvidence(workspace.id, binding.assessment_hash, `page-only-${binding.assessment_hash}`);
             if (result.ok && result.data) setWorkspace(result.data);
           }}
-          {...(configurationSession ? { assistantScopeKey: configurationSession.scopeKey, assistantInitialMessage: configurationSession.initialMessage } : {})}
         />
       ) : <>
       <aside className="sidebar" aria-label="主导航">
         <div className="brand-block">
-          <img className="brand-logo" src="/Logo_full_black.png" alt="Cascade" />
+          <img className="brand-logo brand-logo-full" src="/Logo_full_black.png" alt="Cascade AI" />
         </div>
         <nav className="nav-list">
           {navItems.map((item) => (
@@ -669,49 +793,90 @@ export function App() {
             </button>
           ))}
         </nav>
-        <div className="runtime-strip">
-          <span className="status-dot ok" />
-          <span>桌面端</span>
-          <span>本地库</span>
-        </div>
+        <AccountMenu
+          profile={accountSession.user}
+          {...(accountPlan ? { plan: accountPlan } : {})}
+          onNavigate={(section) => { setSelectedProjectID(undefined); setActiveNav(section); }}
+          onLogout={() => void logoutAccount()}
+        />
+        <div
+          className="sidebar-resize-handle"
+          role="separator"
+          aria-label="调整侧栏宽度"
+          aria-orientation="vertical"
+          aria-valuemin={minimumSidebarWidth}
+          aria-valuemax={maximumSidebarWidth}
+          aria-valuenow={sidebarWidth}
+          tabIndex={0}
+          onMouseDown={beginSidebarResize}
+          onDoubleClick={() => setSidebarWidth(defaultSidebarWidth)}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            setSidebarWidth((width) => clampSidebarWidth(width + (event.key === "ArrowRight" ? 12 : -12)));
+          }}
+        />
       </aside>
 
       <main
         className={`workspace ${activeNav === "editor" ? "editor-workspace-mode" : ""} ${
-          activeNav === "project_library" || activeNav === "repositories" || activeNav === "assets" ? "surface-library" : activeNav === "settings" ? "surface-settings" : ""
+          activeNav === "projects" ? "surface-home" :
+          activeNav === "project_library" || activeNav === "repositories" || activeNav === "assets" ? "surface-library" : activeNav === "settings" ? "surface-settings surface-account" : activeNav === "profile" || activeNav === "plan" ? "surface-account" : ""
         }`}
       >
         {activeNav === "projects" ? (
           <AgentHome
-            prompt={agentPrompt}
-            isGeneratingPackage={isRunningProduct}
-            onPromptChange={setAgentPrompt}
-            onSubmitPrompt={submitAgentPrompt}
+            bridge={bridge}
+            locale={locale}
+            projects={projectSummaries}
+            onOpenProject={openProject}
+            onProjectCreated={(projectID) => void startConversationProject(projectID, "home")}
           />
         ) : activeNav === "project_library" && !selectedProjectID ? (
-          <ProjectsPanel
-            projects={projectSummaries}
-            isLoading={projectsLoading}
-            error={projectsError}
-            message={projectsActionMessage}
-            activeActionProjectID={projectsActionProjectID}
-            actionPrompt={projectActionPrompt}
-            onOpen={openProject}
-            onArchive={requestArchiveProject}
-            onDelete={requestDeleteProject}
-            onCancelAction={cancelProjectAction}
-            onConfirmAction={confirmProjectAction}
-            onRetry={refreshProjects}
-            onGoHome={() => setActiveNav("projects")}
-          />
+          <div className="project-library-conversation-surface">
+            <ProjectsPanel
+              projects={projectSummaries}
+              isLoading={projectsLoading}
+              error={projectsError}
+              message={projectsActionMessage}
+              activeActionProjectID={projectsActionProjectID}
+              actionPrompt={projectActionPrompt}
+              onOpen={openProject}
+              onArchive={requestArchiveProject}
+              onDelete={requestDeleteProject}
+              onCancelAction={cancelProjectAction}
+              onConfirmAction={confirmProjectAction}
+              onDismissMessage={() => setProjectsActionMessage("")}
+              onRetry={refreshProjects}
+              onGoHome={() => setActiveNav("projects")}
+            />
+          </div>
         ) : activeNav === "repositories" ? (
           <RepositoriesPanel
             workspace={workspace}
+            locale={locale}
             message={repositoryMessage}
             error={repositoryError}
-            onConnect={connectRepository}
             onDisconnect={disconnectRepository}
           />
+        ) : activeNav === "profile" ? (
+          <ProfilePanel bridge={bridge} profile={accountSession.user} onProfileChange={updateAccountProfile} onSessionChange={updateAccountSession} onLogout={() => void logoutAccount()} />
+        ) : activeNav === "settings" ? (
+          <SettingsPanel
+            diagnostics={modelDiagnostics}
+            diagnosticsError={diagnosticsError}
+            isRunningDiagnostics={isRunningDiagnostics}
+            onRunDiagnostics={runModelDiagnostics}
+            onConfigureControlPlane={configureControlPlane}
+            onConfigurePlanningModel={configurePlanningModel}
+            onDeletePlanningModel={deletePlanningModel}
+            developerUI={runtimeHealth?.appCapabilities?.developerUI === true}
+            locale={locale}
+            onLocaleChange={setLocale}
+            {...(runtimeHealth ? { runtimeHealth } : {})}
+          />
+        ) : activeNav === "plan" ? (
+          <PlanPanel {...(accountPlan ? { plan: accountPlan } : {})} error={accountPlanError} onRetry={() => void refreshAccountPlan()} />
         ) : (
           <>
             {activeNav !== "editor" ? <ProjectHeader workspace={workspace} /> : null}
@@ -736,37 +901,92 @@ export function App() {
                   />
                 ) : null}
                 {activeNav === "project_library" || activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={approveAssets} onReview={reviewAssets} onReleaseLease={releaseDirectLease} /> : null}
-                {activeNav === "editor" ? <VideoEditor /> : null}
-                {activeNav === "settings" ? (
-                  <SettingsPanel
-                    workspace={workspace}
-                    diagnostics={modelDiagnostics}
-                    diagnosticsError={diagnosticsError}
-                    isRunningDiagnostics={isRunningDiagnostics}
-                    onRunDiagnostics={runModelDiagnostics}
-                    onConfigureControlPlane={configureControlPlane}
-                    onConfigurePlanningModel={configurePlanningModel}
-                    onDeletePlanningModel={deletePlanningModel}
-                    developerUI={runtimeHealth?.appCapabilities?.developerUI === true}
-                    {...(runtimeHealth ? { runtimeHealth } : {})}
-                  />
-                ) : null}
+                {activeNav === "editor" ? <div className="editor-conversation-layout editor-pill-layout">
+                  <div className="editor-precision-surface"><VideoEditor /></div>
+                </div> : null}
               </section>
               {activeNav !== "editor" ? <Inspector workspace={workspace} selectedNode={selectedNode} blockedReasons={blockedReasons} /> : null}
             </div>
           </>
         )}
-        {activeNav === "project_library" ? <AssistantWidget bridge={bridge} context={{ surface: "projects", scopeKey: selectedProjectID ? `project_${selectedProjectID}` : "index", ...(selectedProjectID ? { projectID: selectedProjectID, projectName: workspace.name } : {}) }} onOpenProject={openProject} /> : null}
-        {activeNav === "repositories" ? <AssistantWidget bridge={bridge} context={{ surface: "repositories", scopeKey: `workspace_${workspace.id}`, projectID: workspace.id, projectName: workspace.name, repositoryLabel: "Connected repositories" }} /> : null}
       </main>
+      <AssistantWidget
+        bridge={bridge}
+        visible={activeNav === "project_library" && !selectedProjectID}
+        panelTitle={copy(locale, "Cascade — Projects", "Cascade — 项目")}
+        context={{ surface: "projects", scopeKey: libraryConversationIdentity.scopeKey, projectID: libraryConversationIdentity.projectID, createProjectOnFirstTurn: true, locale }}
+        onOpenProject={openProject}
+        onProjectCreated={(projectID) => void startConversationProject(projectID, "library")}
+      />
+      <AssistantWidget
+        bridge={bridge}
+        visible={activeNav === "repositories"}
+        panelTitle={copy(locale, "Cascade — Repositories", "Cascade — 代码仓库")}
+        context={!workspace.id.startsWith("draft_")
+          ? { surface: "projects", scopeKey: `project_${workspace.id}`, projectID: workspace.id, projectName: workspace.name, locale }
+          : { surface: "repositories", scopeKey: "repository_library", repositoryLabel: "Connected repositories", locale }}
+      />
+      <AssistantWidget
+        bridge={bridge}
+        visible={activeNav === "editor"}
+        panelTitle={copy(locale, "Cascade — Editor", "Cascade — 编辑器")}
+        context={!workspace.id.startsWith("draft_")
+          ? { surface: "projects", scopeKey: `project_${workspace.id}`, projectID: workspace.id, projectName: workspace.name, locale }
+          : { surface: "projects", scopeKey: "editor_draft", locale }}
+      />
       </>}
     </div>
   );
 }
 
+function ProjectCanvasPreview({ bridge, mode }: { bridge: ReturnType<typeof createBridgeClient>; mode: ProjectCanvasMode }) {
+  const workspace = useMemo(() => {
+    const preview = createWorkspace("product_demo");
+    return { ...preview, id: "preview_project", name: "Customer onboarding demo" };
+  }, []);
+  const activity = useMemo<ProjectActivityStateView>(() => previewActivityState(mode), [mode]);
+  return <div className="app-shell project-agent-shell workspace-preview-shell">
+    <div className="project-agent-layout">
+      <aside className="project-agent-chat" aria-label="Project Cascade Agent">
+        <header className="project-agent-chat-header"><button type="button" className="project-agent-back">← Projects</button><strong className="project-agent-project-name">{workspace.name}</strong></header>
+        <div className="workspace-preview-chat">
+          <div className="workspace-preview-message agent">I’ll turn this onboarding flow into a concise, evidence-backed product demo.</div>
+          {mode !== "empty" ? <div className="workspace-preview-message user">Show the customer journey and prepare the final video.</div> : null}
+          <div className="workspace-preview-composer">Message Cascade…<span>↵</span></div>
+        </div>
+      </aside>
+      <main className="project-workstation" aria-label="Project canvas preview"><button type="button" className="project-agent-chat-toggle">Open Cascade</button><ProjectCanvas bridge={bridge} workspace={workspace} activity={activity} events={activity.recent} forcedMode={mode} /></main>
+    </div>
+  </div>;
+}
+
+function previewActivityState(mode: ProjectCanvasMode): ProjectActivityStateView {
+  const now = new Date().toISOString();
+  const base = { projectID: "preview_project", runID: "preview_run", occurredAt: now };
+  if (mode === "empty") return { projectID: "preview_project", mode, recent: [] };
+  if (mode === "act") {
+    const recent: ProjectActivityEventView[] = [
+      { ...base, id: "1", mode, kind: "repository", status: "completed", title: "Connected the approved repository" },
+      { ...base, id: "2", mode, kind: "requirements", status: "completed", title: "Read the product requirements" },
+      { ...base, id: "3", mode, kind: "plan", status: "running", title: "Writing the execution plan", detail: "Mapping the shortest customer journey and validating capture rules.", progress: 62 },
+    ];
+    const current = recent[2] as ProjectActivityEventView;
+    return { projectID: "preview_project", mode, runID: "preview_run", status: "running", current, recent, lastEventID: "3", updatedAt: now };
+  }
+  if (mode === "browser") {
+    const current: ProjectActivityEventView = { ...base, id: "4", mode, kind: "browser_observation", status: "running", title: "Exploring the onboarding workspace", detail: "Recording the approved path and capturing a safe checkpoint.", progress: 46, browser: { url: "https://app.example.com/onboarding", title: "Workspace onboarding", redacted: true }, capture: { kind: "recording", phase: "active" } };
+    const screenshot: ProjectActivityEventView = { ...base, id: "5", mode, kind: "screenshot", status: "running", title: "Capturing a checkpoint", browser: { url: "https://app.example.com/onboarding", title: "Workspace onboarding", redacted: true }, capture: { kind: "screenshot", phase: "active" } };
+    return { projectID: "preview_project", mode, runID: "preview_run", status: "running", current, recent: [current, screenshot], lastEventID: "5", updatedAt: now };
+  }
+  const complete = new URLSearchParams(window.location.search).get("takeover") === "complete";
+  const current: ProjectActivityEventView = { ...base, id: "6", mode, kind: "editor_revision", status: complete ? "completed" : "running", title: complete ? "Edit ready for review" : "Trimming idle time and aligning captions", detail: complete ? "Cascade completed the validated revision." : "Direct interaction is paused while Cascade validates this revision.", editorSessionID: "preview_editor" };
+  return { projectID: "preview_project", mode, runID: "preview_run", status: current.status, ...(complete ? {} : { current }), recent: [current], lastEventID: "6", editorSessionID: "preview_editor", updatedAt: now };
+}
+
 type ProjectAgentWorkspaceProps = {
   bridge: ReturnType<typeof createBridgeClient>;
   workspace: ProjectWorkspaceView;
+  locale: CascadeLocale;
   runtimeHealth?: RuntimeHealthView;
 	runtimeHealthResolved: boolean;
   blockedReasons: string[];
@@ -776,6 +996,7 @@ type ProjectAgentWorkspaceProps = {
   selectedNodeID: string;
   onBack: () => void;
   onOpenProjectFromAssistant: (projectID: string) => void;
+  onAssistantSessionChange: (session: AssistantSessionView) => void;
   onChecklistChange: (state: ApprovalChecklistState) => void;
   onSelectNode: (id: string) => void;
   onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
@@ -791,127 +1012,242 @@ type ProjectAgentWorkspaceProps = {
   onReviewAssets: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
   onReleaseDirectLease: () => void;
   onContinuePageOnly: () => void;
-  assistantScopeKey?: string;
-  assistantInitialMessage?: string;
 };
 
 function ProjectAgentWorkspace({
   bridge,
   workspace,
-  runtimeHealth,
-	runtimeHealthResolved,
+  locale,
   blockedReasons,
   checklist,
   canUpload,
   isGeneratingPackage,
-  selectedNodeID,
   onBack,
   onOpenProjectFromAssistant,
+  onAssistantSessionChange,
   onChecklistChange,
-  onSelectNode,
-  onPatchNode,
 	graphDirty,
-	graphSaveError,
 	onSaveGraphRevision,
   onUpload,
-	onConfigureControlPlane,
-  onCloudSuccess,
-  onCloudFailure,
   onRepairScript,
-  onApproveAssets,
   onReviewAssets,
   onReleaseDirectLease,
-  onContinuePageOnly,
-  assistantScopeKey,
-  assistantInitialMessage,
 }: ProjectAgentWorkspaceProps) {
-  const [workstationView, setWorkstationView] = useState<ProjectWorkstationView>(() => recommendedWorkstation(workspace));
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
-  const [assistantSession, setAssistantSession] = useState<AssistantSessionView>();
-  const [assistantSuggestion, setAssistantSuggestion] = useState<{ id: string; text: string }>();
-  const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
-  const statusLabel = projectStatusLabels[workspace.status];
-  const runtimeLabel = runtimeHealth?.localDataConfigured ? "本地能力就绪" : runtimeHealth ? "本地能力需处理" : "正在检查本地能力";
+  const [projectChatWidth, setProjectChatWidth] = useState(storedProjectChatWidth);
+  const [projectChatMaxWidth, setProjectChatMaxWidth] = useState(maximumProjectChatWidth);
+  const [projectChatResizing, setProjectChatResizing] = useState(false);
+  const projectAgentLayoutRef = useRef<HTMLDivElement>(null);
+  const mobileChatToggleRef = useRef<HTMLButtonElement>(null);
+  const restoreMobileChatFocusRef = useRef(false);
+  const [activity, setActivity] = useState<ProjectActivityStateView>();
+  const [activityEvents, setActivityEvents] = useState<ProjectActivityEventView[]>([]);
 
   useEffect(() => {
-    setWorkstationView(recommendedWorkstation(workspace));
-  }, [workspace.id, workspace.status, workspace.stage, workspace.cloudRun.status, workspace.cloudRun.exchangePackageID, workspace.cloudRun.resultPackageID, workspace.packagePreview.buildStatus]);
+    let disposed = false;
+    let timer = 0;
+    let lastEventID = "";
+    setActivity(undefined);
+    setActivityEvents([]);
+    async function poll() {
+      const [stateResult, eventsResult] = await Promise.all([
+        bridge.getProjectActivityState(workspace.id),
+        bridge.listProjectActivityEvents(workspace.id, lastEventID || undefined),
+      ]);
+      if (disposed) return;
+      if (stateResult.ok && stateResult.data) {
+        setActivity(stateResult.data);
+      }
+      if (eventsResult.ok && eventsResult.data?.length) {
+        setActivityEvents((existing) => {
+          const merged = new Map(existing.map((event) => [event.id, event]));
+          eventsResult.data?.forEach((event) => merged.set(event.id, event));
+          return [...merged.values()].slice(-100);
+        });
+        lastEventID = eventsResult.data.at(-1)?.id || lastEventID;
+      }
+      timer = window.setTimeout(poll, stateResult.data?.status === "running" ? 750 : 2000);
+    }
+    void poll();
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [bridge, workspace.id]);
 
   useEffect(() => {
-    setAssistantSession(undefined);
-  }, [assistantScopeKey]);
+    if (mobileChatOpen || !restoreMobileChatFocusRef.current) return;
+    restoreMobileChatFocusRef.current = false;
+    window.requestAnimationFrame(() => mobileChatToggleRef.current?.focus());
+  }, [mobileChatOpen]);
 
-  const nextAction = projectNextAction(workspace);
-  const journey = projectJourney(workspace);
-	const showWorkstationTask = workstationView === "plan" || nextAction.kind === "complete";
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("cascade-project-chat-width", String(Math.round(projectChatWidth)));
+    } catch {
+      // Resizing remains available if browser storage is unavailable.
+    }
+  }, [projectChatWidth]);
+
+  useEffect(() => {
+    function fitChatToWorkspace() {
+      if (window.innerWidth <= 760) return;
+      const containerWidth = projectAgentLayoutRef.current?.getBoundingClientRect().width ?? window.innerWidth;
+      const nextMaximum = projectChatMaximumWidth(containerWidth);
+      setProjectChatMaxWidth(nextMaximum);
+      setProjectChatWidth((width) => clampProjectChatWidth(width, containerWidth));
+    }
+    fitChatToWorkspace();
+    window.addEventListener("resize", fitChatToWorkspace);
+    return () => window.removeEventListener("resize", fitChatToWorkspace);
+  }, []);
+
+  function beginProjectChatResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const pointerID = event.pointerId;
+    const startingX = event.clientX;
+    const startingWidth = projectChatWidth;
+    const containerWidth = projectAgentLayoutRef.current?.getBoundingClientRect().width ?? window.innerWidth;
+    setProjectChatMaxWidth(projectChatMaximumWidth(containerWidth));
+    setProjectChatResizing(true);
+    document.body.classList.add("project-chat-is-resizing");
+    handle.setPointerCapture(pointerID);
+
+    const resize = (moveEvent: globalThis.PointerEvent) => {
+      if (moveEvent.pointerId !== pointerID) return;
+      setProjectChatWidth(clampProjectChatWidth(startingWidth + moveEvent.clientX - startingX, containerWidth));
+    };
+    const finish = () => {
+      setProjectChatResizing(false);
+      document.body.classList.remove("project-chat-is-resizing");
+      if (handle.hasPointerCapture(pointerID)) handle.releasePointerCapture(pointerID);
+      window.removeEventListener("pointermove", resize);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("keydown", cancel);
+    };
+    const cancel = (keyEvent: globalThis.KeyboardEvent) => {
+      if (keyEvent.key !== "Escape") return;
+      setProjectChatWidth(startingWidth);
+      finish();
+    };
+
+    window.addEventListener("pointermove", resize);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    window.addEventListener("keydown", cancel);
+  }
+
+  function closeMobileChat() {
+    restoreMobileChatFocusRef.current = true;
+    setMobileChatOpen(false);
+  }
 
   return (
-    <div className="project-agent-layout">
+    <div
+      ref={projectAgentLayoutRef}
+      className="project-agent-layout"
+      style={{ "--project-chat-width": `${projectChatWidth}px` } as CSSProperties}
+    >
       <aside className={`project-agent-chat ${mobileChatOpen ? "mobile-open" : ""}`} aria-label="Project Cascade Agent">
         <header className="project-agent-chat-header">
-          <button type="button" className="project-agent-back" onClick={onBack}>← 返回项目库</button>
-          <div className="project-agent-identity">
-            <span className="project-agent-mark"><img src="/Cascade_launcher_mark.png" alt="" /></span>
-            <div><strong>Cascade Agent</strong><small>{workspace.name}</small></div>
-          </div>
-          <div className="project-agent-status-row"><span className="status-dot ok" />{runtimeLabel}<span className="project-agent-status-divider" />{statusLabel}</div>
-          <button type="button" className="project-agent-mobile-close" onClick={() => setMobileChatOpen(false)}>关闭对话</button>
+          <button type="button" className="project-agent-back" onClick={onBack}>← {copy(locale, "Projects", "项目")}</button>
+          <strong className="project-agent-project-name" title={workspace.name}>{workspace.name}</strong>
+          <button type="button" className="project-agent-mobile-close" aria-label={copy(locale, "Close Cascade conversation", "关闭 Cascade 对话")} onClick={closeMobileChat}>{copy(locale, "Close", "关闭")}</button>
         </header>
         <AssistantConversationPanel
           bridge={bridge}
           context={{
             surface: "projects",
-            scopeKey: assistantScopeKey ?? `project_${workspace.id}`,
+            scopeKey: `project_${workspace.id}`,
             ...(workspace.id.startsWith("draft_") ? {} : { projectID: workspace.id }),
             projectName: workspace.name,
+            locale,
           }}
-          {...(assistantInitialMessage ? { initialMessage: assistantInitialMessage } : {})}
-          {...(assistantSuggestion ? { suggestedMessage: assistantSuggestion } : {})}
           embedded
           showHeader={false}
+          focusComposer={mobileChatOpen}
+          {...(mobileChatOpen ? { onClose: closeMobileChat } : {})}
           onOpenProject={onOpenProjectFromAssistant}
-          onWorkstationChange={setWorkstationView}
-          onSessionChange={setAssistantSession}
+          onSessionChange={onAssistantSessionChange}
+          contextualContent={<ProjectChatContextualAction workspace={workspace} blockedReasons={blockedReasons} checklist={checklist} canUpload={canUpload} graphDirty={graphDirty} onChecklistChange={onChecklistChange} onSaveGraphRevision={onSaveGraphRevision} onUpload={onUpload} onRepairScript={onRepairScript} onReviewAssets={onReviewAssets} onReleaseDirectLease={onReleaseDirectLease} />}
         />
       </aside>
-      <main className="project-workstation" aria-label="Project workstation">
-        <header className="project-workstation-header">
-          <div><p className="eyebrow">实时工作台</p><h1>{workstationTitle(workstationView)}</h1><p>{workstationDescription(workstationView)}</p></div>
-          <div className="project-workstation-meta"><span>{workspace.productURL || "等待补充产品地址"}</span><StatusPill label={statusLabel} tone={workspace.status === "asset_ready" ? "green" : workspace.status === "script_repair_required" ? "yellow" : "blue"} /></div>
-          <button type="button" className="project-agent-chat-toggle" onClick={() => setMobileChatOpen(true)}>打开 Cascade 对话</button>
-        </header>
-        <nav className="project-journey" aria-label="Demo production progress">
-          {journey.map((step, index) => (
-			<button key={step.id} type="button" className={`project-journey-step ${step.status}`} disabled={step.status === "upcoming"} onClick={() => setWorkstationView(step.workstation)}>
-              <span>{step.status === "completed" ? "✓" : index + 1}</span>
-              <strong>{step.label}</strong>
-            </button>
-          ))}
-        </nav>
-        <section className={`project-workstation-canvas ${workstationView === "editor" ? "project-workstation-editor-canvas" : ""}`}>
-		  {showWorkstationTask ? (
-            <section className="project-next-action" aria-label="Recommended next action">
-              <div><span>下一步</span><strong>{nextAction.title}</strong><p>{nextAction.description}</p></div>
-              {nextAction.kind === "review_plan" ? <button type="button" className="primary-action" onClick={() => setWorkstationView("approval")}>进入上传审批</button> : null}
-              {nextAction.kind === "repair" ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onRepairScript}>生成修复包</button> : null}
-              {nextAction.kind === "review_result" && !workspace.cloudRun.resultAcknowledged ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onApproveAssets}>{isGeneratingPackage ? "校验中…" : workspace.cloudRun.resultDownloaded ? "重试服务器 ACK" : "下载、校验并 ACK"}</button> : null}
-              {nextAction.kind === "complete" ? <button type="button" className="secondary-action" onClick={() => setWorkstationView("editor")}>在 Editor 中打开</button> : null}
-            </section>
-          ) : null}
-          {workstationView === "overview" ? <ProjectOverviewWorkstation workspace={workspace} {...(assistantSession ? { assistantSession } : {})} onContinueConfiguration={() => setMobileChatOpen(true)} /> : null}
-          {workstationView === "evidence" ? <UnderstandingStagePanel workspace={workspace} onSuggestChange={(text) => { setAssistantSuggestion({ id: `${Date.now()}-${text}`, text }); setMobileChatOpen(true); }} onContinuePageOnly={onContinuePageOnly} /> : null}
-		  {workstationView === "plan" ? <PlanReviewPanel workspace={workspace} selectedNodeID={selectedNodeID} onSelectNode={onSelectNode} onPatchNode={onPatchNode} graphDirty={graphDirty} graphSaveError={graphSaveError} onSaveGraphRevision={onSaveGraphRevision} /> : null}
-		  {workstationView === "approval" ? <PackageApproval workspace={workspace} checklist={checklist} blockedReasons={blockedReasons} canUpload={canUpload} isLocalMode={bridge.mode === "local"} {...(runtimeHealth ? { runtimeHealth } : {})} runtimeHealthResolved={runtimeHealthResolved} onChecklistChange={onChecklistChange} onUpload={onUpload} onConfigureControlPlane={onConfigureControlPlane} onCloudSuccess={onCloudSuccess} onCloudFailure={onCloudFailure} onRepairScript={onRepairScript} /> : null}
-          {workstationView === "execution" ? <div className="section-stack"><CloudRunPanel workspace={workspace} /><RuntimeLogPanel workspace={workspace} /></div> : null}
-          {workstationView === "repair" ? <div className="section-stack"><FailureDiagnosticPanel workspace={workspace} onRepairScript={onRepairScript} /><ScriptRepairPanel workspace={workspace} /></div> : null}
-          {workstationView === "assets" ? <AssetReview workspace={workspace} busy={isGeneratingPackage} onDownload={onApproveAssets} onReview={onReviewAssets} onReleaseLease={onReleaseDirectLease} /> : null}
-          {workstationView === "editor" ? <div className="project-editor-workstation"><VideoEditor /></div> : null}
-          {isGeneratingPackage ? <div className="project-workstation-progress"><span className="status-dot ok" />Cascade 正在更新工作台…</div> : null}
-        </section>
-        {selectedNode && workstationView === "plan" ? <aside className="project-workstation-drawer" aria-label="Selected plan detail"><strong>{selectedNode.title ?? selectedNode.action}</strong><span>{selectedNode.selector || "Page transition"}</span><small>{selectedNode.expected_outcome}</small></aside> : null}
+      <div
+        className="project-agent-chat-resize-handle"
+        role="separator"
+        aria-label="Resize project chat panel"
+        aria-orientation="vertical"
+        aria-valuemin={minimumProjectChatWidth}
+        aria-valuemax={projectChatMaxWidth}
+        aria-valuenow={Math.round(projectChatWidth)}
+        data-resizing={projectChatResizing ? "true" : undefined}
+        tabIndex={0}
+        onPointerDown={beginProjectChatResize}
+        onDoubleClick={() => {
+          const containerWidth = projectAgentLayoutRef.current?.getBoundingClientRect().width ?? window.innerWidth;
+          setProjectChatWidth(clampProjectChatWidth(defaultProjectChatWidth, containerWidth));
+        }}
+        onKeyDown={(event) => {
+          const containerWidth = projectAgentLayoutRef.current?.getBoundingClientRect().width ?? window.innerWidth;
+          const step = event.shiftKey ? 32 : 8;
+          let nextWidth: number | undefined;
+          if (event.key === "ArrowLeft") nextWidth = projectChatWidth - step;
+          else if (event.key === "ArrowRight") nextWidth = projectChatWidth + step;
+          else if (event.key === "Home") nextWidth = minimumProjectChatWidth;
+          else if (event.key === "End") nextWidth = projectChatMaximumWidth(containerWidth);
+          if (nextWidth === undefined) return;
+          event.preventDefault();
+          setProjectChatWidth(clampProjectChatWidth(nextWidth, containerWidth));
+        }}
+      />
+      <main className="project-workstation" aria-label="Project canvas">
+        <button ref={mobileChatToggleRef} type="button" className="project-agent-chat-toggle" onClick={() => setMobileChatOpen(true)}>打开 Cascade</button>
+        <ProjectCanvas bridge={bridge} workspace={workspace} {...(activity ? { activity } : {})} events={activityEvents} />
+        {isGeneratingPackage && !activity?.current ? <div className="project-workstation-progress"><span className="status-dot ok" />Cascade 正在准备任务…</div> : null}
       </main>
     </div>
   );
+}
+
+function ProjectChatContextualAction({ workspace, blockedReasons, checklist, canUpload, graphDirty, onChecklistChange, onSaveGraphRevision, onUpload, onRepairScript, onReviewAssets, onReleaseDirectLease }: {
+  workspace: ProjectWorkspaceView;
+  blockedReasons: string[];
+  checklist: ApprovalChecklistState;
+  canUpload: boolean;
+  graphDirty: boolean;
+  onChecklistChange: (state: ApprovalChecklistState) => void;
+  onSaveGraphRevision: () => void;
+  onUpload: () => void;
+  onRepairScript: () => void;
+  onReviewAssets: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
+  onReleaseDirectLease: () => void;
+}) {
+  if (graphDirty) {
+    return <article className="assistant-message assistant-message-agent assistant-contextual-turn"><span className="assistant-sr-only">Assistant</span><p>The execution plan changed, so the previous package digest and approval are no longer valid.</p><section className="project-chat-action warning" aria-label="Save execution plan"><strong>Save the revised plan</strong><p>I’ll regenerate the preview and ask for approval again before execution.</p><button type="button" onClick={onSaveGraphRevision}>Save and regenerate preview</button></section></article>;
+  }
+  if (workspace.stage === "package_approval") {
+    const confirmations: Array<[keyof ApprovalChecklistState, string]> = [
+      ["userApprovedPlan", "The recording path matches my intent"],
+      ["sourceSummaryOnlyAcknowledged", "Only summaries, hashes, and approved evidence are uploaded"],
+      ["redactionsReviewed", "I reviewed forbidden pages and redaction rules"],
+      ["ipAllowlistAcknowledged", "The product environment allows the execution service"],
+    ];
+    if (workspace.packagePreview.credentialGrants.length) confirmations.splice(2, 0, ["credentialGrantAcknowledged", "I reviewed the temporary credential scope"]);
+    return <article className="assistant-message assistant-message-agent assistant-contextual-turn"><span className="assistant-sr-only">Assistant</span><p>I’m ready to run the browser workflow. Please review these permissions before I continue.</p><section className="project-chat-action" aria-label="Execution approval">
+        <strong>Review before browser execution</strong>
+        <p>Nothing will be uploaded or executed until you approve this package.</p>
+        <div>{confirmations.map(([key, label]) => <label key={key}><input type="checkbox" checked={checklist[key]} onChange={() => onChecklistChange({ ...checklist, [key]: !checklist[key] })} /><span>{label}</span></label>)}</div>
+        {blockedReasons.length ? <small>{blockedReasons.slice(0, 2).join(" · ")}</small> : null}
+        <button type="button" disabled={!canUpload} onClick={onUpload}>{canUpload ? "Approve and start" : "Complete the checks above"}</button>
+      </section></article>;
+  }
+  if (workspace.stage === "script_repair") {
+    return <article className="assistant-message assistant-message-agent assistant-contextual-turn"><span className="assistant-sr-only">Assistant</span><p>The run needs a repair before it can continue.</p><section className="project-chat-action warning" aria-label="Repair approval"><strong>Prepare a validated repair</strong><p>{workspace.cloudRun.failureSummary || workspace.cloudRun.lastError || "Cascade preserved the last safe browser state."}</p><button type="button" onClick={onRepairScript}>Approve repair preparation</button></section></article>;
+  }
+  if (workspace.stage === "result_review") {
+    return <article className="assistant-message assistant-message-agent assistant-contextual-turn"><span className="assistant-sr-only">Assistant</span><p>The first result is ready. How would you like me to continue?</p><section className="project-chat-action" aria-label="Asset review"><strong>Review the result</strong><p>The editor remains available on the right for precise review.</p><div className="project-chat-action-buttons"><button type="button" onClick={() => onReviewAssets("approved")}>Approve result</button><button type="button" className="muted" onClick={() => onReviewAssets("reedit_requested")}>Request re-edit</button>{workspace.cloudRun.leaseID ? <button type="button" className="muted" disabled={workspace.cloudRun.status === "running"} onClick={onReleaseDirectLease}>Release secure session</button> : null}</div></section></article>;
+  }
+  return null;
 }
 
 function ProjectOverviewWorkstation({ workspace, assistantSession, onContinueConfiguration }: { workspace: ProjectWorkspaceView; assistantSession?: AssistantSessionView; onContinueConfiguration: () => void }) {
@@ -960,16 +1296,6 @@ function pendingConfigurationAction(session: AssistantSessionView | undefined): 
   if (kinds.includes("confirm_configuration") || kinds.includes("start_local_analysis")) return "summary";
   if (kinds.some((kind) => ["select_local_project", "connect_github", "attach_requirement_document", "attach_brand_asset", "store_demo_credential"].includes(kind))) return "safe_action";
   return "none";
-}
-
-function workstationTitle(view: ProjectWorkstationView): string {
-  const labels: Record<ProjectWorkstationView, string> = { overview: "项目配置", evidence: "证据与产品理解", plan: "演示方案", approval: "执行包审批", execution: "服务器执行进度", repair: "修复工作台", assets: "成品审核", editor: "视频编辑器" };
-  return labels[view];
-}
-
-function workstationDescription(view: ProjectWorkstationView): string {
-  const descriptions: Record<ProjectWorkstationView, string> = { overview: "通过左侧对话补齐配置，右侧实时展示已确认内容。", evidence: "检查 Cascade 使用了哪些证据、来源是否一致，以及还有什么不确定。", plan: "确认业务阶段、录制顺序和成功标准，再进入独立上传审批。", approval: "明确查看服务器将访问、使用和录制的内容。", execution: "自动展示 BrowserAgent、录制、剪辑和渲染进度。", repair: "根据脱敏诊断决定重新剪辑还是重新录制。", assets: "下载校验成片，并提交通过或返工意见。", editor: "对已生成的视频进行精确调整。" };
-  return descriptions[view];
 }
 
 function appendRuntimeLog(workspace: ProjectWorkspaceView, entry: Omit<RuntimeLogEntry, "id" | "time">): ProjectWorkspaceView {
@@ -1030,37 +1356,61 @@ function ProjectHeader({
 }
 
 function AgentHome({
-  prompt,
-  isGeneratingPackage,
-  onPromptChange,
-  onSubmitPrompt,
+  bridge,
+  locale,
+  projects,
+  onOpenProject,
+  onProjectCreated,
 }: {
-  prompt: string;
-  isGeneratingPackage: boolean;
-  onPromptChange: (value: string) => void;
-  onSubmitPrompt: (event: FormEvent<HTMLFormElement>) => void;
+  bridge: DesktopBridgeClient;
+  locale: CascadeLocale;
+  projects: ProjectSummaryView[];
+  onOpenProject: (projectID: string) => void;
+  onProjectCreated: (projectID: string) => void;
 }) {
-  const dailyHeadline = getDailyAgentHeadline();
+  const [hasHomeThread, setHasHomeThread] = useState(false);
+  const [dailyHeadline, setDailyHeadline] = useState(() => getDailyAgentHeadline());
+  const [conversationIdentity] = useState(() => createProjectConversationIdentity());
+
+  useEffect(() => {
+    let timeoutID: number;
+    const rotateHeadline = () => {
+      const now = new Date();
+      setDailyHeadline(getDailyAgentHeadline(now));
+      timeoutID = window.setTimeout(rotateHeadline, millisecondsUntilNextLocalDay(now) + 25);
+    };
+
+    const now = new Date();
+    timeoutID = window.setTimeout(rotateHeadline, millisecondsUntilNextLocalDay(now) + 25);
+    return () => window.clearTimeout(timeoutID);
+  }, []);
+
   return (
     <div className="agent-home">
-      <section className="agent-hero" aria-label="Cascade Agent">
-        <h1>{dailyHeadline}</h1>
-        <form className="agent-composer" onSubmit={onSubmitPrompt}>
-          <textarea
-            value={prompt}
-            onChange={(event) => onPromptChange(event.currentTarget.value)}
-            rows={4}
-            placeholder="例如：为我们的审批产品制作一支面向销售团队的 60 秒演示，重点展示从提交到通过的流程。"
-            aria-label="描述你想制作的演示"
+      <section className={`agent-hero ${hasHomeThread ? "has-thread" : ""}`} aria-label="Cascade Agent">
+        <header className="agent-home-header">
+          <h1>{dailyHeadline}</h1>
+        </header>
+        <div className="agent-home-conversation">
+          <AssistantConversationPanel
+            bridge={bridge}
+            context={{ surface: "projects", scopeKey: conversationIdentity.scopeKey, projectID: conversationIdentity.projectID, createProjectOnFirstTurn: true, locale }}
+            embedded
+            showHeader={false}
+            presentation="home"
+            onOpenProject={onOpenProject}
+            onProjectCreated={onProjectCreated}
+            onThreadStart={() => setHasHomeThread(true)}
+            onSessionChange={(session) => setHasHomeThread(session.messages.some((message) => message.role === "user"))}
           />
-          <div className="agent-composer-footer">
-            <span>发送后直接创建一段新的项目对话；分析与上传仍需分别确认。</span>
-            <button type="submit" className="agent-submit" disabled={isGeneratingPackage || !prompt.trim()}>
-              {isGeneratingPackage ? "处理中" : "开始配置"}
-              <span aria-hidden="true">↗</span>
-            </button>
-          </div>
-        </form>
+        </div>
+        {!hasHomeThread && projects.length > 0 ? <div className="home-recent-projects" aria-label={copy(locale, "Recent projects", "最近项目")}>
+          <span>{copy(locale, "Continue where you left off", "继续最近的项目")}</span>
+          <div>{projects.slice(0, 3).map((project) => <button type="button" key={project.id} onClick={() => onOpenProject(project.id)}>
+            <strong>{project.name}</strong>
+            <small>{project.lastMessagePreview || project.nextAction || copy(locale, "Continue the conversation", "继续对话")}</small>
+          </button>)}</div>
+        </div> : null}
       </section>
     </div>
   );
@@ -1078,6 +1428,7 @@ function ProjectsPanel({
   onDelete,
   onCancelAction,
   onConfirmAction,
+  onDismissMessage,
   onRetry,
   onGoHome,
 }: {
@@ -1092,47 +1443,101 @@ function ProjectsPanel({
   onDelete: (project: ProjectSummaryView) => void;
   onCancelAction: () => void;
   onConfirmAction: () => void;
+  onDismissMessage: () => void;
   onRetry: () => void;
   onGoHome: () => void;
 }) {
+  const [actionMenu, setActionMenu] = useState<{ projectID: string; top?: number; right: number; bottom?: number }>();
+  const actionMenuRef = useRef<HTMLDivElement>(null);
+  const actionMenuButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const previousActionPrompt = useRef<ProjectActionPrompt>();
+  const projectsHeadingRef = useRef<HTMLHeadingElement>(null);
+
   function stopRowClick(event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
   }
+
+  function closeActionMenu(restoreFocus = false) {
+    const projectID = actionMenu?.projectID;
+    setActionMenu(undefined);
+    if (restoreFocus && projectID) requestAnimationFrame(() => actionMenuButtonRefs.current.get(projectID)?.focus());
+  }
+
+  function toggleActionMenu(event: MouseEvent<HTMLButtonElement>, projectID: string) {
+    stopRowClick(event);
+    if (actionMenu?.projectID === projectID) {
+      closeActionMenu(true);
+      return;
+    }
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const opensUp = window.innerHeight - bounds.bottom < 132;
+    setActionMenu({
+      projectID,
+      right: Math.max(12, window.innerWidth - bounds.right),
+      ...(opensUp ? { bottom: window.innerHeight - bounds.top + 6 } : { top: bounds.bottom + 6 }),
+    });
+    requestAnimationFrame(() => actionMenuRef.current?.querySelector<HTMLButtonElement>("[role='menuitem']")?.focus());
+  }
+
+  function requestProjectAction(project: ProjectSummaryView, kind: ProjectActionPrompt["kind"]) {
+    setActionMenu(undefined);
+    if (kind === "archive") onArchive(project);
+    else onDelete(project);
+  }
+
+  useEffect(() => {
+    if (!actionMenu) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const trigger = actionMenuButtonRefs.current.get(actionMenu.projectID);
+      if (!actionMenuRef.current?.contains(event.target as Node) && !trigger?.contains(event.target as Node)) closeActionMenu();
+    };
+    const closeOnKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeActionMenu(true);
+    };
+    const closeOnViewportChange = () => closeActionMenu();
+    window.addEventListener("pointerdown", closeOnPointerDown);
+    window.addEventListener("keydown", closeOnKeyDown);
+    window.addEventListener("resize", closeOnViewportChange);
+    window.addEventListener("scroll", closeOnViewportChange, true);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnPointerDown);
+      window.removeEventListener("keydown", closeOnKeyDown);
+      window.removeEventListener("resize", closeOnViewportChange);
+      window.removeEventListener("scroll", closeOnViewportChange, true);
+    };
+  }, [actionMenu]);
+
+  useEffect(() => {
+    const previous = previousActionPrompt.current;
+    previousActionPrompt.current = actionPrompt;
+    if (!previous || actionPrompt) return;
+    requestAnimationFrame(() => {
+      const trigger = actionMenuButtonRefs.current.get(previous.project.id);
+      if (trigger?.isConnected) trigger.focus();
+      else projectsHeadingRef.current?.focus();
+    });
+  }, [actionPrompt]);
+
+  useEffect(() => {
+    if (!message) return;
+    const timeout = window.setTimeout(onDismissMessage, 5000);
+    return () => window.clearTimeout(timeout);
+  }, [message]);
+
+  const menuProject = actionMenu ? projects.find((project) => project.id === actionMenu.projectID) : undefined;
 
   return (
     <section className="projects-panel" aria-label="Projects">
       <div className="projects-panel-header">
         <div>
           <p className="eyebrow">Demo workspace</p>
-          <h1>Projects</h1>
+          <h1 ref={projectsHeadingRef} tabIndex={-1}>Projects</h1>
           <p className="projects-panel-intro">Every demo session, its evidence, and the assets Cascade made from it.</p>
         </div>
         <span className="project-count">{projects.length} {projects.length === 1 ? "project" : "projects"}</span>
       </div>
-      {message ? <div className="projects-action-message" role="status">{message}</div> : null}
-      {actionPrompt ? (
-        <div className={actionPrompt.kind === "delete" ? "project-action-confirm danger" : "project-action-confirm"} role="dialog" aria-modal="false" aria-label={`${actionPrompt.kind === "delete" ? "Delete" : "Archive"} project`}>
-          <div>
-            <strong>{actionPrompt.kind === "delete" ? `Would you like to delete "${actionPrompt.project.name}"?` : `Would you like to archive "${actionPrompt.project.name}"?`}</strong>
-            <span>
-              {actionPrompt.kind === "delete"
-                ? "This removes the local project record from Cascade."
-                : "This hides the project from the default Projects list while keeping its local record."}
-            </span>
-          </div>
-          <div className="project-action-confirm-actions">
-            <button type="button" className="row-action muted" disabled={activeActionProjectID === actionPrompt.project.id} onClick={onCancelAction}>No</button>
-            <button
-              type="button"
-              className={actionPrompt.kind === "delete" ? "row-action danger" : "row-action"}
-              disabled={activeActionProjectID === actionPrompt.project.id}
-              onClick={onConfirmAction}
-            >
-              {activeActionProjectID === actionPrompt.project.id ? "Working..." : "Yes"}
-            </button>
-          </div>
-        </div>
-      ) : null}
+      {message ? <div className="projects-action-toast" role="status"><span aria-hidden="true">✓</span><strong>{message}</strong><button type="button" aria-label="Dismiss notification" onClick={onDismissMessage}>×</button></div> : null}
+      {actionPrompt ? <ProjectActionDialog prompt={actionPrompt} busy={activeActionProjectID === actionPrompt.project.id} onCancel={onCancelAction} onConfirm={onConfirmAction} /> : null}
       {error ? (
         <div className="projects-state error-banner">
           <strong>Projects are unavailable.</strong>
@@ -1148,86 +1553,143 @@ function ProjectsPanel({
           <button type="button" className="row-action" onClick={onGoHome}>Go to Home</button>
         </div>
       ) : (
-        <div className="projects-table-wrap">
-          <table className="projects-table">
-            <thead>
-              <tr>
-                <th>Project</th>
-                <th>Product</th>
-                <th>Stage</th>
-                <th>Status</th>
-                <th>Assets</th>
-                <th aria-label="Actions" />
-              </tr>
-            </thead>
-            <tbody>
-              {projects.map((project) => (
-                <tr key={project.id} onClick={() => onOpen(project.id)}>
-                  <td>
-                    <button
-                      type="button"
-                      className="project-name-link"
-                      onClick={(event) => {
-                        stopRowClick(event);
-                        onOpen(project.id);
-                      }}
-                    >
-                      {project.name}
-                    </button>
-                    <small>{project.id}</small>
-                  </td>
-                  <td className="project-url">{project.productURL || "Product URL pending"}</td>
-                  <td>{workflowStageLabels[project.stage]}</td>
-                  <td><StatusPill label={projectStatusLabels[project.status]} tone={project.status === "asset_ready" ? "green" : project.status === "script_repair_required" ? "yellow" : "blue"} /></td>
-                  <td>{project.generatedAssetCount}/{project.assetCount || "—"}</td>
-                  <td>
-                    <div className="project-row-actions">
-                      <button
-                        type="button"
-                        className="row-action"
-                        disabled={activeActionProjectID === project.id}
-                        onClick={(event) => {
-                          stopRowClick(event);
-                          onOpen(project.id);
-                        }}
-                      >
-                        Open
-                      </button>
-                      <button
-                        type="button"
-                        className="row-action muted"
-                        disabled={activeActionProjectID === project.id}
-                        onClick={(event) => {
-                          stopRowClick(event);
-                          onArchive(project);
-                        }}
-                      >
-                        Archive
-                      </button>
-                      <button
-                        type="button"
-                        className="row-action danger"
-                        disabled={activeActionProjectID === project.id}
-                        onClick={(event) => {
-                          stopRowClick(event);
-                          onDelete(project);
-                        }}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="project-thread-list" aria-label="Project conversations">
+          {projects.map((project) => {
+            const isWorking = project.activeTurnStatus === "queued" || project.activeTurnStatus === "running";
+            return <article className="project-thread-row" key={project.id}>
+              <button type="button" className="project-thread-open" onClick={() => onOpen(project.id)}>
+                <span className="project-thread-main">
+                  <span className="project-thread-title"><strong>{project.name}</strong>{isWorking ? <em><span />Cascade is working</em> : null}</span>
+                  <span className="project-thread-preview">{project.lastMessagePreview || project.nextAction || "Start or continue the conversation with Cascade."}</span>
+                  <span className="project-thread-context">{project.productURL || "Product source not connected"}</span>
+                </span>
+                <span className="project-thread-meta">
+                  <time dateTime={project.lastActivityAt || project.updatedAt}>{formatProjectActivityTime(project.lastActivityAt || project.updatedAt)}</time>
+                  <span>{project.nextAction || workflowStageLabels[project.stage]}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="project-more-action"
+                aria-label={`More actions for ${project.name}`}
+                aria-haspopup="menu"
+                aria-expanded={actionMenu?.projectID === project.id}
+                ref={(node) => {
+                  if (node) actionMenuButtonRefs.current.set(project.id, node);
+                  else actionMenuButtonRefs.current.delete(project.id);
+                }}
+                disabled={activeActionProjectID === project.id}
+                onClick={(event) => toggleActionMenu(event, project.id)}
+              ><span aria-hidden="true">•••</span></button>
+            </article>;
+          })}
         </div>
       )}
+      {menuProject && actionMenu ? createPortal(
+        <div
+          ref={actionMenuRef}
+          className="project-row-menu"
+          role="menu"
+          aria-label={`Actions for ${menuProject.name}`}
+          style={{ top: actionMenu.top, right: actionMenu.right, bottom: actionMenu.bottom }}
+          onKeyDown={(event) => {
+            const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("[role='menuitem']"));
+            const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+            if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End") {
+              event.preventDefault();
+              const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : event.key === "ArrowDown" ? (currentIndex + 1) % items.length : (currentIndex - 1 + items.length) % items.length;
+              items[nextIndex]?.focus();
+            } else if (event.key === "Tab") {
+              setActionMenu(undefined);
+            }
+          }}
+        >
+          <button type="button" role="menuitem" onClick={() => requestProjectAction(menuProject, "archive")}><ProjectActionGlyph kind="archive" />Archive project</button>
+          <div className="project-row-menu-separator" role="separator" />
+          <button type="button" role="menuitem" className="danger" onClick={() => requestProjectAction(menuProject, "delete")}><ProjectActionGlyph kind="delete" />Delete project</button>
+        </div>,
+        document.body,
+      ) : null}
     </section>
   );
 }
 
-type RepositoryKind = "github" | "local" | "server";
+function formatProjectActivityTime(value?: string) {
+  if (!value) return "Recently";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Recently";
+  const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return "Now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d`;
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+}
+
+function ProjectActionGlyph({ kind }: { kind: ProjectActionPrompt["kind"] }) {
+  return kind === "archive" ? (
+    <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3.5 6.5h13v10h-13zM2.75 3.5h14.5v3H2.75zM8 10h4" /></svg>
+  ) : (
+    <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 6h12M8 3.5h4M6 6l.7 10h6.6L14 6M8.5 9v4.5M11.5 9v4.5" /></svg>
+  );
+}
+
+function ProjectActionDialog({ prompt, busy, onCancel, onConfirm }: { prompt: ProjectActionPrompt; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const isDelete = prompt.kind === "delete";
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
+    requestAnimationFrame(() => cancelButtonRef.current?.focus());
+    return () => {
+      if (dialog.open) dialog.close();
+    };
+  }, [prompt.kind, prompt.project.id]);
+
+  return createPortal(
+    <dialog
+      ref={dialogRef}
+      className={`project-action-dialog ${isDelete ? "danger" : ""}`}
+      aria-labelledby="project-action-dialog-title"
+      aria-describedby="project-action-dialog-description"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!busy) onCancel();
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || busy) return;
+        event.preventDefault();
+        onCancel();
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget && !busy) onCancel();
+      }}
+    >
+      <div className="project-action-dialog-content">
+        <div className="project-action-dialog-icon"><ProjectActionGlyph kind={prompt.kind} /></div>
+        <div className="project-action-dialog-copy">
+          <span>{isDelete ? "Permanent action" : "Project housekeeping"}</span>
+          <h2 id="project-action-dialog-title">{isDelete ? "Delete this project?" : "Archive this project?"}</h2>
+          <p id="project-action-dialog-description">
+            {isDelete
+              ? <><strong>“{prompt.project.name}”</strong> will be permanently removed from Cascade on this device. This can’t be undone.</>
+              : <><strong>“{prompt.project.name}”</strong> will be hidden from the Projects list. Its local record will be preserved.</>}
+          </p>
+        </div>
+        <div className="project-action-dialog-actions">
+          <button ref={cancelButtonRef} type="button" className="project-action-cancel" disabled={busy} onClick={onCancel}>Cancel</button>
+          <button type="button" className={isDelete ? "project-action-submit danger" : "project-action-submit"} disabled={busy} onClick={onConfirm}>
+            {busy ? (isDelete ? "Deleting…" : "Archiving…") : (isDelete ? "Delete project" : "Archive project")}
+          </button>
+        </div>
+      </div>
+    </dialog>,
+    document.body,
+  );
+}
 
 function safeLocalPathLabel(path?: string) {
   const normalized = (path ?? "").replaceAll("\\", "/").replace(/\/+$/, "");
@@ -1236,51 +1698,26 @@ function safeLocalPathLabel(path?: string) {
 
 function RepositoriesPanel({
   workspace,
+  locale,
   message,
   error,
-  onConnect,
   onDisconnect,
 }: {
   workspace: ProjectWorkspaceView;
+  locale: CascadeLocale;
   message: string;
   error: string;
-  onConnect: (repository: RepositoryInput) => void;
   onDisconnect: (index: number) => void;
 }) {
-  const [kind, setKind] = useState<RepositoryKind>("github");
-  const [form, setForm] = useState({ url: "", branch: "main", localPath: "", host: "", port: "22", path: "", username: "", secretRef: "" });
   const repositories = workspace.inputBundle.repositories ?? [];
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const base: RepositoryInput = { kind, provider: kind, read_only: true };
-    if (kind === "github") {
-      if (!form.url.trim()) return;
-      onConnect({ ...base, url: form.url.trim(), branch: form.branch.trim() || "main" });
-    } else if (kind === "local") {
-      if (!form.localPath.trim()) return;
-      onConnect({ ...base, local_path: form.localPath.trim() });
-    } else {
-      if (!form.host.trim() || !form.path.trim()) return;
-      onConnect({
-        ...base,
-        host: form.host.trim(),
-        port: Number(form.port) || 22,
-        path: form.path.trim(),
-        ...(form.username.trim() ? { username: form.username.trim() } : {}),
-        ...(form.secretRef.trim() ? { secret_ref: form.secretRef.trim() } : {}),
-      });
-    }
-    setForm((current) => ({ ...current, url: "", localPath: "", host: "", path: "", username: "", secretRef: "" }));
-  }
 
   return (
     <section className="repositories-panel" aria-label="Repositories">
       <header className="repositories-header">
         <div>
-          <p className="eyebrow">Source connections</p>
-          <h1>Repositories</h1>
-          <p>Connect read-only source material for Cascade to understand and use in your demo workspace.</p>
+          <p className="eyebrow">{copy(locale, "Source connections", "来源连接")}</p>
+          <h1>{copy(locale, "Repositories", "代码仓库")}</h1>
+          <p>{copy(locale, "Tell Cascade where the product lives. Public URLs stay in the conversation; local files and credentials use secure native controls.", "告诉 Cascade 产品代码在哪里。公开链接可直接在对话中发送；本地文件和凭据仍使用安全的系统控件。")}</p>
         </div>
         <StatusPill label={`${repositories.length} connected`} tone={repositories.length > 0 ? "green" : "neutral"} />
       </header>
@@ -1305,38 +1742,10 @@ function RepositoriesPanel({
         )}
       </section>
 
-      <section className="repository-section">
-        <SectionTitle title="Connect a repository" meta="Choose one source" />
-        <div className="repository-kind-tabs" role="tablist" aria-label="Repository source type">
-          {(["github", "local", "server"] as RepositoryKind[]).map((item) => (
-            <button key={item} type="button" className={kind === item ? "repository-kind active" : "repository-kind"} onClick={() => setKind(item)}>
-              {item === "github" ? "GitHub" : item === "local" ? "Local repository" : "Server repository"}
-            </button>
-          ))}
-        </div>
-        <form className="repository-form" onSubmit={submit}>
-          {kind === "github" ? (
-            <>
-              <label className="field-row wide"><span>GitHub repository URL</span><input value={form.url} onChange={(event) => setForm({ ...form, url: event.currentTarget.value })} placeholder="https://github.com/org/repository" /></label>
-              <label className="field-row"><span>Branch</span><input value={form.branch} onChange={(event) => setForm({ ...form, branch: event.currentTarget.value })} placeholder="main" /></label>
-            </>
-          ) : kind === "local" ? (
-            <label className="field-row wide"><span>Local repository path</span><input value={form.localPath} onChange={(event) => setForm({ ...form, localPath: event.currentTarget.value })} placeholder="/Users/you/Projects/product" /></label>
-          ) : (
-            <>
-              <label className="field-row"><span>Server host</span><input value={form.host} onChange={(event) => setForm({ ...form, host: event.currentTarget.value })} placeholder="staging.example.com" /></label>
-              <label className="field-row"><span>SSH port</span><input value={form.port} onChange={(event) => setForm({ ...form, port: event.currentTarget.value })} inputMode="numeric" placeholder="22" /></label>
-              <label className="field-row"><span>Username</span><input value={form.username} onChange={(event) => setForm({ ...form, username: event.currentTarget.value })} placeholder="deploy" /></label>
-              <label className="field-row"><span>Repository path</span><input value={form.path} onChange={(event) => setForm({ ...form, path: event.currentTarget.value })} placeholder="/srv/product" /></label>
-              <label className="field-row wide"><span>Credential reference</span><input value={form.secretRef} onChange={(event) => setForm({ ...form, secretRef: event.currentTarget.value })} placeholder="vault://server-key (optional)" /></label>
-            </>
-          )}
-          <div className="repository-form-footer">
-            <span>Connections are stored as read-only references. Secrets are never entered here.</span>
-            <button type="submit" className="primary-action">Connect repository</button>
-          </div>
-        </form>
-      </section>
+      <div className="repository-agent-hint">
+        <span className="assistant-logo-mark" aria-hidden="true"><img src="/Logo_simple_white.png" alt="" /></span>
+        <div><strong>{copy(locale, "Need another source?", "需要连接其他来源？")}</strong><span>{copy(locale, "Use Ask Cascade to paste a GitHub URL, choose a local folder, or describe where the source lives.", "点击“问问 Cascade”，粘贴 GitHub 链接、选择本地文件夹，或描述来源位置。")}</span></div>
+      </div>
       {message ? <div className="repository-feedback success">{message}</div> : null}
       {error ? <div className="repository-feedback error">{error}</div> : null}
     </section>
@@ -2349,6 +2758,7 @@ function AssetReview({
   onDownload,
   onReleaseLease,
   onReview,
+  onOpenEditor,
 }: {
   workspace: ProjectWorkspaceView;
   busy?: boolean;
@@ -2356,6 +2766,7 @@ function AssetReview({
   onDownload: () => void;
   onReleaseLease: () => void;
   onReview: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
+  onOpenEditor?: () => void;
 }) {
   const [reviewSummary, setReviewSummary] = useState("");
   const review = workspace.cloudRun.resultReview;
@@ -2390,6 +2801,7 @@ function AssetReview({
             <button type="button" className="primary-action" disabled={busy || !canReview} onClick={() => onReview("approved", reviewSummary)}>通过</button>
             <button type="button" className="secondary-action" disabled={busy || !canReview || revisionSummaryRequired} onClick={() => onReview("reedit_requested", reviewSummary)}>需要重新剪辑</button>
             <button type="button" className="secondary-action" disabled={busy || !canReview || revisionSummaryRequired} onClick={() => onReview("rerecord_requested", reviewSummary)}>缺少素材，重新录制</button>
+            {onOpenEditor ? <button type="button" className="secondary-action" disabled={busy || !canReview} onClick={onOpenEditor}>在编辑器中打开</button> : null}
           </div>
           {canReview && revisionSummaryRequired ? <div className="input-note">提交重新剪辑或重新录制前，请填写具体修改意见；直接通过无需填写。</div> : null}
           {workspace.cloudRun.leaseID ? <button type="button" className="secondary-action" disabled={busy || !canReview || workspace.cloudRun.status === "running"} onClick={onReleaseLease}>释放已完成任务的安全执行会话</button> : null}
@@ -2401,7 +2813,6 @@ function AssetReview({
 }
 
 function SettingsPanel({
-  workspace,
   runtimeHealth,
   diagnostics,
   diagnosticsError,
@@ -2411,8 +2822,9 @@ function SettingsPanel({
   onConfigurePlanningModel,
   onDeletePlanningModel,
   developerUI,
+  locale,
+  onLocaleChange,
 }: {
-  workspace: ProjectWorkspaceView;
   runtimeHealth?: RuntimeHealthView;
   diagnostics: ModelDiagnosticResult[];
   diagnosticsError: string;
@@ -2422,6 +2834,8 @@ function SettingsPanel({
   onConfigurePlanningModel: (provider: string, model: string, apiKey: string, proxyURL: string) => Promise<string>;
   onDeletePlanningModel: (provider: string) => Promise<string>;
   developerUI: boolean;
+  locale: CascadeLocale;
+  onLocaleChange: (locale: CascadeLocale) => void;
 }) {
   const [controlPlaneURL, setControlPlaneURL] = useState("");
   const [controlPlaneAccessToken, setControlPlaneAccessToken] = useState("");
@@ -2459,12 +2873,12 @@ function SettingsPanel({
     ? diagnostics.find((item) => item.task === "planning" && item.provider === planningRoute.provider && item.model === planningRoute.model)
     : undefined;
   const planningModelStatus = !planningProvider?.configured
-    ? { label: "规则兜底可用", tone: "neutral" as const, detail: "尚未保存真实模型凭据。" }
+    ? { label: copy(locale, "Local fallback ready", "规则兜底可用"), tone: "neutral" as const, detail: copy(locale, "No model credential is saved yet.", "尚未保存真实模型凭据。") }
     : planningDiagnostic?.ok
-      ? { label: "真实 LLM 已验证", tone: "green" as const, detail: `${planningRoute?.provider} / ${planningRoute?.model} · ${planningDiagnostic.latencyMS ?? 0}ms` }
+      ? { label: copy(locale, "Model connection verified", "真实 LLM 已验证"), tone: "green" as const, detail: `${planningRoute?.provider} / ${planningRoute?.model} · ${planningDiagnostic.latencyMS ?? 0}ms` }
       : planningDiagnostic
-        ? { label: "实际调用失败，规则兜底中", tone: "yellow" as const, detail: planningDiagnostic.errorClass ?? planningDiagnostic.error ?? "provider_error" }
-        : { label: "凭据已保存，等待验证", tone: "yellow" as const, detail: `${planningRoute?.provider ?? modelProvider} / ${planningRoute?.model ?? modelName}` };
+        ? { label: copy(locale, "Using local fallback", "实际调用失败，规则兜底中"), tone: "yellow" as const, detail: planningDiagnostic.errorClass ?? planningDiagnostic.error ?? "provider_error" }
+        : { label: copy(locale, "Credential saved; verification pending", "凭据已保存，等待验证"), tone: "yellow" as const, detail: `${planningRoute?.provider ?? modelProvider} / ${planningRoute?.model ?? modelName}` };
   async function saveControlPlane(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setControlPlaneSaving(true);
@@ -2492,17 +2906,24 @@ function SettingsPanel({
     setModelSettingsSaving(false);
   }
   return (
-    <div className="section-stack">
-      <SectionTitle title="设置" meta="运行时正常" />
+    <AccountPage title={copy(locale, "Settings", "设置")} description={copy(locale, "Choose how Cascade speaks, connects, and runs.", "选择 Cascade 的语言、连接和运行方式。")}>
+    <div className="section-stack account-settings-stack">
+      <section className="table-section settings-language-section">
+        <SectionTitle title={copy(locale, "Language", "语言")} meta={locale === "zh-CN" ? "简体中文" : "English"} />
+        <div className="settings-language-options" role="radiogroup" aria-label={copy(locale, "Interface language", "界面语言")}>
+          <button type="button" role="radio" aria-checked={locale === "en-US"} className={locale === "en-US" ? "selected" : ""} onClick={() => onLocaleChange("en-US")}><strong>English</strong><span>English (US)</span></button>
+          <button type="button" role="radio" aria-checked={locale === "zh-CN"} className={locale === "zh-CN" ? "selected" : ""} onClick={() => onLocaleChange("zh-CN")}><strong>简体中文</strong><span>Chinese (Simplified)</span></button>
+        </div>
+      </section>
       <div className="settings-grid">
-        <Fact label="凭据保险箱" value="仅保存本地引用" />
-        <Fact label="资产存储" value="本地文件存储" />
-        <Fact label="允许域名" value={workspace.planReview.allowedDomains.join(", ")} />
-        <Fact label="禁止页面" value={workspace.planReview.forbiddenPages.join(", ")} />
-        <Fact label="LLM 模式" value={runtimeHealth?.llmMode ?? "auto"} />
-        <Fact label="模型适配版本" value={runtimeHealth?.modelAdapterVersion ?? "domestic-llm-adapter-v1"} />
-        <Fact label="Browser Agent 直连" value={directLabel} />
+        <Fact label={copy(locale, "Privacy", "隐私")} value={copy(locale, "Secrets stay on this device", "凭据仅保存在本机")} />
+        <Fact label={copy(locale, "Project files", "项目文件")} value={copy(locale, "Stored locally", "保存在本地")} />
+        <Fact label={copy(locale, "Cascade model", "Cascade 模型")} value={planningModelStatus.label} />
+        <Fact label={copy(locale, "Execution service", "执行服务")} value={directLabel} />
       </div>
+      <details className="developer-settings">
+        <summary><span>{copy(locale, "Developer settings", "开发者设置")}</span><small>{copy(locale, "Models, server connection, and diagnostics", "模型、服务器连接和诊断")}</small></summary>
+        <div className="section-stack">
       <section className="table-section">
         <SectionTitle title="Ubuntu Browser Agent 服务器" meta={runtimeHealth?.browserAgentDirect?.reachable ? "协议可达" : runtimeHealth?.browserAgentDirect?.configured ? "配置已保存，未连通" : "需要连接"} />
         <form className="control-plane-form" onSubmit={saveControlPlane}>
@@ -2516,7 +2937,7 @@ function SettingsPanel({
       <section className="table-section">
         <SectionTitle title="Cascade Agent 模型" meta={planningModelStatus.label} />
         <form className="model-connection-form" onSubmit={savePlanningModel}>
-          <div><strong>连接真实 LLM</strong><span>API key 只保存到 Windows Credential Manager，不进入项目、聊天、日志或安装包。未配置或临时不可用时，Cascade 会明确使用规则兜底。</span></div>
+          <div><strong>连接真实 LLM</strong><span>API key 只保存到系统凭据库，不进入项目、聊天、日志或安装包。未配置或临时不可用时，Cascade 会明确使用规则兜底。</span></div>
           <label><span>供应商</span><select value={modelProvider} onChange={(event) => { const provider = event.currentTarget.value; setModelProvider(provider); setModelName(provider === "glm" ? "glm-5.2" : provider === "minimax" ? "minimax-m3" : provider === "deepseek" ? "deepseek-v4-flash" : "kimi-k2.7-code"); }}><option value="kimi">Kimi</option><option value="glm">GLM</option><option value="minimax">MiniMax</option><option value="deepseek">DeepSeek</option></select></label>
           <label><span>模型</span><input required value={modelName} onChange={(event) => setModelName(event.currentTarget.value)} autoComplete="off" /></label>
           <label><span>API Key</span><input required type="password" value={modelAPIKey} onChange={(event) => setModelAPIKey(event.currentTarget.value)} autoComplete="off" placeholder="仅保存到系统凭据库" /></label>
@@ -2628,7 +3049,10 @@ function SettingsPanel({
           </tbody>
         </table>
       </section> : null}
+        </div>
+      </details>
     </div>
+    </AccountPage>
   );
 }
 
@@ -2702,13 +3126,12 @@ function scenarioLabel(id: ScenarioID): string {
   return labels[id];
 }
 
-function buildNavItems(developerUI: boolean): Array<{ id: NavSection; label: string; badge?: string }> {
+function buildNavItems(locale: CascadeLocale): Array<{ id: NavSection; label: string; badge?: string }> {
   return [
-    { id: "projects", label: "Home" },
-    { id: "project_library", label: "Projects" },
-    { id: "editor", label: "Editor" },
-    { id: "settings", label: "Settings" },
-    ...(developerUI ? [{ id: "repositories" as const, label: "Repositories (Dev)" }] : []),
+    { id: "projects", label: copy(locale, "Home", "首页") },
+    { id: "project_library", label: copy(locale, "Projects", "项目") },
+    { id: "editor", label: copy(locale, "Editor", "编辑器") },
+    { id: "repositories", label: copy(locale, "Repositories", "代码仓库") },
   ];
 }
 
