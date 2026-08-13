@@ -572,6 +572,12 @@ func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *test
 		t.Fatal(err)
 	}
 	server := newTestDevHTTPServerWithRepository(t, repoRoot)
+	server.readDemoCredential = func(ref string) (credentialstore.DemoCredential, error) {
+		if ref != "dev-http-redaction" {
+			return credentialstore.DemoCredential{}, errors.New("credential not found")
+		}
+		return credentialstore.DemoCredential{Username: "demo.user@example.test", Password: "FixtureOnly987"}, nil
+	}
 	product := newAuthenticatedWorkspaceTestServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
 		Mode:               model.AppModeDesktop,

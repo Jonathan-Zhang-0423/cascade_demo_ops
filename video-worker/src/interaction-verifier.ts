@@ -471,9 +471,24 @@ async function selectorProvenance(locator: any, candidate: InteractionCandidate,
     if (!role && type === "checkbox") role = "checkbox";
     if (!role && type === "radio") role = "radio";
     if (!role && type === "file") role = "button";
+    const visiblePassword = (container: any) => Array.from(container?.querySelectorAll?.('input[type="password"]') || []).some((input: any) => {
+      if (input.hidden || input.disabled || input.getAttribute?.("aria-hidden") === "true") return false;
+      const style = input.ownerDocument?.defaultView?.getComputedStyle?.(input);
+      if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) return false;
+      const rect = input.getBoundingClientRect?.();
+      return !rect || rect.width > 0 && rect.height > 0;
+    });
     const form = element.closest?.("form");
-    const formText = String(form?.getAttribute?.("aria-label") || form?.getAttribute?.("name") || form?.getAttribute?.("id") || "").toLowerCase();
-    const hasPassword = Boolean(form?.querySelector?.('input[type="password"]'));
+    let authContainer = form && visiblePassword(form) ? form : null;
+    for (let ancestor = element.parentElement, depth = 0; !authContainer && ancestor && ancestor !== element.ownerDocument?.body && depth < 10; ancestor = ancestor.parentElement, depth += 1) {
+      if (visiblePassword(ancestor)) authContainer = ancestor;
+    }
+    const semanticContainer = authContainer || form;
+    const formText = String([
+      semanticContainer?.getAttribute?.("aria-label"), semanticContainer?.getAttribute?.("name"), semanticContainer?.getAttribute?.("id"),
+      semanticContainer?.getAttribute?.("role"), semanticContainer?.getAttribute?.("data-testid"),
+    ].filter(Boolean).join(" ")).toLowerCase();
+    const hasPassword = Boolean(authContainer);
     const formRole = hasPassword || /login|sign[ -]?in|auth|登录/.test(formText) ? "authentication" : form ? "generic" : "none";
     const pageRole = formRole === "authentication" ? "authentication" : "product";
     return { role, name: name.slice(0, 160), formRole, pageRole };

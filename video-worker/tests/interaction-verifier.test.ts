@@ -226,6 +226,41 @@ describe("interaction verifier safe state exploration", () => {
     expect(projectName?.observed_accessible_name).not.toContain("project-name");
   }, 30_000);
 
+  it("binds a component login dialog without a native form to authentication provenance", async () => {
+    server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/workspace") {
+        response.end("<!doctype html><title>Workspace</title><button data-testid='new-project'>New Project</button>");
+        return;
+      }
+      response.end(`<!doctype html><title>Login</title>
+        <div role="dialog" aria-label="Sign in">
+          <input name="email" type="email" autocomplete="username" />
+          <input name="password" type="password" autocomplete="current-password" />
+          <button data-testid="login-submit" type="button" onclick="location.href='/workspace'">Sign in</button>
+        </div>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+
+    const result = await verifyInteractions({
+      product_url: `http://127.0.0.1:${address.port}/login`, allowed_domains: ["127.0.0.1"], timeout_ms: 15_000,
+      demo_username: "demo@example.test", demo_password: "fixture-only",
+      intent_goals: [{ id: "new-project", label: "New Project", kind: "click", keywords: ["new", "project"], required: true, business: true }],
+    });
+
+    expect(result.diagnostics?.login_status).toBe("submitted_navigation_observed");
+    const submitEvidence = result.diagnostics?.login_evidence?.find((item) => item.id === "login_form_submit");
+    expect(submitEvidence).toMatchObject({
+      source_kind: "page_scan",
+      observed_page_role: "authentication",
+      observed_form_role: "authentication",
+    });
+    expect(submitEvidence?.evidence_digest_sha256).toMatch(/^sha256:[a-f0-9]{64}$/);
+  }, 30_000);
+
   it("rejects destructive transition semantics", async () => {
     server = createServer((_request, response) => {
       response.setHeader("content-type", "text/html; charset=utf-8");

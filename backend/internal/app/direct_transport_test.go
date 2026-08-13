@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/directtransport"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
@@ -365,6 +366,12 @@ func TestApproveClientExecutionPackageRebindsConfidenceAfterCredentialGrantExpir
 	if err != nil {
 		t.Fatal(err)
 	}
+	service.readDemoCredential = func(ref string) (credentialstore.DemoCredential, error) {
+		if ref != "direct-confidence" {
+			return credentialstore.DemoCredential{}, errors.New("credential not found")
+		}
+		return credentialstore.DemoCredential{Username: "vault-user@example.test", Password: "vault-password"}, nil
+	}
 	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{
 		ProjectID: "direct-credential-confidence", Mode: model.AppModeDesktop,
 		ProductURL: product.URL + "/login", ProductDescription: "登录后进入新建项目，填写俄罗斯方块并启动 Agent 构建。",
@@ -428,6 +435,12 @@ func TestBrowserAgentOutlineAllowsEvidenceBoundInteractionRoute(t *testing.T) {
 	}, store.NewMemoryStateStore())
 	if err != nil {
 		t.Fatal(err)
+	}
+	service.readDemoCredential = func(ref string) (credentialstore.DemoCredential, error) {
+		if ref != "direct-root-route" {
+			return credentialstore.DemoCredential{}, errors.New("credential not found")
+		}
+		return credentialstore.DemoCredential{Username: "vault-user@example.test", Password: "vault-password"}, nil
 	}
 	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{
 		ProjectID: "direct-login-root-route", Mode: model.AppModeDesktop,

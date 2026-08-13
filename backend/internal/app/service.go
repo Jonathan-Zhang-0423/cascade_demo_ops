@@ -268,7 +268,11 @@ func (s *Service) DiagnosePlanningModel(ctx context.Context) llm.DiagnosticResul
 }
 
 func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
-	state, err := s.flow.Start(ctx, input)
+	hydrated, err := s.hydrateDemoCredentialInput(input)
+	if err != nil {
+		return nil, err
+	}
+	state, err := s.flow.Start(ctx, hydrated)
 	if err != nil {
 		if state != nil && state.ProjectID != "" {
 			_ = s.states.Save(ctx, state)
@@ -279,6 +283,41 @@ func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInpu
 		return nil, err
 	}
 	return state, nil
+}
+
+// hydrateDemoCredentialInput resolves an opaque local vault reference only at
+// the execution boundary. The hydrated strings are passed to the in-memory
+// flow and are never written back to the project input/state.
+func (s *Service) hydrateDemoCredentialInput(input orchestrator.UserInput) (orchestrator.UserInput, error) {
+	ref := strings.TrimSpace(input.DemoCredentialRef)
+	if ref == "" {
+		return input, nil
+	}
+	const prefix = "credential://demo/"
+	if !strings.HasPrefix(ref, prefix) || len(ref) <= len(prefix) {
+		return input, errors.New("demo credential ref is unavailable")
+	}
+	name := strings.TrimPrefix(ref, prefix)
+	if strings.ContainsAny(name, "/\\:\x00\r\n") {
+		return input, errors.New("demo credential ref is unavailable")
+	}
+	if s == nil || s.readDemoCredential == nil {
+		return input, errors.New("demo credential ref is unavailable")
+	}
+	credential, err := s.readDemoCredential(name)
+	if err != nil || strings.TrimSpace(credential.Username) == "" || credential.Password == "" {
+		return input, errors.New("demo credential ref is unavailable")
+	}
+	if input.DemoUsername != "" && input.DemoUsername != credential.Username {
+		return input, errors.New("demo credential does not match supplied credentials")
+	}
+	if input.DemoPassword != "" && input.DemoPassword != credential.Password {
+		return input, errors.New("demo credential does not match supplied credentials")
+	}
+	input.DemoUsername = credential.Username
+	input.DemoPassword = credential.Password
+	input.DemoCredentialRef = ref
+	return input, nil
 }
 
 func (s *Service) LoadProject(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
@@ -623,12 +662,6 @@ func userInputFromProjectContext(project *model.ProjectContext) (orchestrator.Us
 			if !strings.HasPrefix(value.SecretRef, prefix) {
 				continue
 			}
-			credential, err := credentialstore.ReadDemoCredential(strings.TrimPrefix(value.SecretRef, prefix))
-			if err != nil {
-				return input, errors.New("demo credential ref is unavailable")
-			}
-			input.DemoUsername = credential.Username
-			input.DemoPassword = credential.Password
 			input.DemoCredentialRef = value.SecretRef
 			break
 		}

@@ -99,6 +99,7 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 		ephemeralDemoCredentials: map[string]credentialstore.DemoCredential{},
 	}
 	if service != nil {
+		service.readDemoCredential = server.readLocalDemoCredential
 		service.SetAssistantProgressSink(server.emitProjectEvent)
 		if service.devVisibleBrowserAgent != nil {
 			service.devVisibleBrowserAgent.readDemoCredential = server.readLocalDemoCredential

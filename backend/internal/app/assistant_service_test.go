@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
@@ -301,6 +302,12 @@ func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	service.readDemoCredential = func(ref string) (credentialstore.DemoCredential, error) {
+		if ref != "two-step-login" {
+			return credentialstore.DemoCredential{}, errors.New("credential not found")
+		}
+		return credentialstore.DemoCredential{Username: "demo@example.test", Password: "fixture-only-password"}, nil
+	}
 	if !fileExists(service.localVideoWorkerPath()) || !commandReady(service.nodeBinaryForExecution()) {
 		t.Skip("real local video-worker runtime is unavailable")
 	}
@@ -313,8 +320,7 @@ func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
 		TargetAudience:     "产品团队",
 		MustShow:           []string{"登录进入工作台", "点击新建项目"},
 		AllowedDomains:     []string{"127.0.0.1"},
-		DemoUsername:       "demo@example.test",
-		DemoPassword:       "fixture-only-password",
+		DemoCredentialRef:  "credential://demo/two-step-login",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -376,8 +382,8 @@ func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(serialized), "fixture-only-password") {
-		t.Fatal("ephemeral login password leaked into state or execution package")
+	if strings.Contains(string(serialized), "fixture-only-password") || strings.Contains(string(serialized), "demo@example.test") {
+		t.Fatal("ephemeral login credential leaked into state or execution package")
 	}
 }
 

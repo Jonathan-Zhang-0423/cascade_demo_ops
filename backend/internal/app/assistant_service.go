@@ -1333,12 +1333,6 @@ func (s *Service) userInputFromConfiguration(draft model.ProjectConfigurationDra
 		if !strings.HasPrefix(ref, prefix) {
 			continue
 		}
-		credential, err := credentialstore.ReadDemoCredential(strings.TrimPrefix(ref, prefix))
-		if err != nil {
-			return input, errors.New("demo credential ref is unavailable")
-		}
-		input.DemoUsername = credential.Username
-		input.DemoPassword = credential.Password
 		input.DemoCredentialRef = ref
 		break
 	}
