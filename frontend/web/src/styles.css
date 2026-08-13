@@ -7949,7 +7949,7 @@ body .project-agent-conversation .assistant-composer-footer button:disabled {
 
   .assistant-widget-panel {
     position: fixed;
-    inset: 8px;
+    inset: 8px 8px 8px 112px;
   }
 
   .assistant-widget-panel .assistant-dialogue {
