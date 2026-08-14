@@ -211,9 +211,9 @@ func seedanceProviderRequest(input model.DirectorInput, arkPlan model.ArkMediaDr
 		referenceURIs = append(referenceURIs, ref.URI)
 		switch {
 		case strings.HasPrefix(ref.MimeType, "video/"):
-			content = append(content, media.ContentPart{Type: "video_url", VideoURL: &media.MediaURL{URL: ref.URI}})
+			content = append(content, media.ContentPart{Type: "video_url", VideoURL: &media.MediaURL{URL: ref.URI}, Role: "reference_video"})
 		case strings.HasPrefix(ref.MimeType, "image/"):
-			content = append(content, media.ContentPart{Type: "image_url", ImageURL: &media.MediaURL{URL: ref.URI}})
+			content = append(content, media.ContentPart{Type: "image_url", ImageURL: &media.MediaURL{URL: ref.URI}, Role: "reference_image"})
 		}
 	}
 	request := media.ContentGenerationTaskRequest{

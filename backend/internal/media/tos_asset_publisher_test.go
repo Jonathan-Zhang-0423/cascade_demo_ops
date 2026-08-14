@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,20 @@ type fakeTOSObjectClient struct {
 	presignInput *tos.PreSignedURLInput
 	putErr       error
 	presignErr   error
+}
+
+func TestClassifyTOSPublishErrorRedactsProviderDetails(t *testing.T) {
+	for _, test := range []struct{ input, want string }{
+		{"TOS statuscode=403 AccessDenied ak=secret", "access_denied"},
+		{"NoSuchBucket: bucket missing", "bucket_not_found"},
+		{"dial tcp 1.2.3.4:443: connectex", "network_error"},
+		{"request timeout", "timeout"},
+		{"unexpected provider response", "provider_error"},
+	} {
+		if got := classifyTOSPublishError(errors.New(test.input)); got != test.want {
+			t.Fatalf("classifyTOSPublishError(%q)=%q want %q", test.input, got, test.want)
+		}
+	}
 }
 
 func (f *fakeTOSObjectClient) PutObjectV2(_ context.Context, input *tos.PutObjectV2Input) (*tos.PutObjectV2Output, error) {

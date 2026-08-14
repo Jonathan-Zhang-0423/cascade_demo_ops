@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,7 +28,7 @@ func main() {
 	}
 	text := strings.TrimSpace(os.Getenv("CASCADE_TTS_PREFLIGHT_TEXT"))
 	if text == "" {
-		text = "Cascade 配音链路测试。"
+		text = "Cascade audio pipeline preflight."
 	}
 	if len([]rune(text)) > 80 {
 		must(fmt.Errorf("CASCADE_TTS_PREFLIGHT_TEXT must not exceed 80 characters"))
@@ -45,6 +47,12 @@ func main() {
 		must(fmt.Errorf("TTS preflight completed without a candidate output"))
 	}
 	output := result.Response.Output
+	audit := media.NewAudioCandidateAudit(result, time.Now())
+	auditPath := strings.TrimSpace(os.Getenv("CASCADE_TTS_PREFLIGHT_AUDIT_PATH"))
+	if auditPath == "" {
+		auditPath = filepath.Join(repoRoot, "artifacts", "tts-preflight", "latest", "tts-candidate-audit.json")
+	}
+	must(writeAudit(auditPath, audit))
 	fmt.Println("TTS preflight passed")
 	fmt.Printf("provider=%s\n", result.Provider)
 	fmt.Printf("resource_id=%s\n", result.Model)
@@ -55,8 +63,24 @@ func main() {
 	fmt.Printf("sample_rate_hz=%d\n", output.SampleRateHZ)
 	fmt.Printf("channels=%d\n", output.Channels)
 	fmt.Printf("sha256=%s\n", output.SHA256)
+	fmt.Printf("audit_path=%s\n", auditPath)
+	fmt.Printf("real_call_made=%t\n", audit.RealCallMade)
+	fmt.Printf("download_verified=%t\n", audit.DownloadVerified)
+	fmt.Printf("ffprobe_verified=%t\n", audit.FFprobeVerified)
+	fmt.Printf("provider_output_adopted=%t\n", audit.ProviderOutputAdopted)
 	fmt.Println("review_state=candidate_only")
 	fmt.Println("inserted_into_demo_edit_plan=false")
+}
+
+func writeAudit(path string, audit media.AudioCandidateAudit) error {
+	data, err := json.MarshalIndent(audit, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 func must(err error) {
