@@ -48,6 +48,24 @@ func TestSessionSetupValidationUsesPostLoginStateNotEmailActionTarget(t *testing
 	}
 }
 
+func TestSessionSetupActionTargetKeepsAuthenticationEntryRoute(t *testing.T) {
+	stage := model.BusinessStage{
+		ID:                       "business_stage_session_setup",
+		Kind:                     model.BusinessStageKindSessionSetup,
+		EntryRoute:               "/login",
+		ExpectedRouteAfterAction: "/workspace",
+		Targets: []model.BusinessTargetCandidate{{
+			ID:         "verified_login_outcome",
+			URL:        "/workspace",
+			IsVerified: true,
+		}},
+	}
+	target := businessStageActionTarget(stage, "https://product.example/login")
+	if target.URL != "https://product.example/login" {
+		t.Fatalf("session action target used post-login route: %+v", target)
+	}
+}
+
 func TestModeSelectionValidationDoesNotReuseClickedControl(t *testing.T) {
 	stage := model.BusinessStage{
 		ID: "business_stage_select_build_mode", Kind: model.BusinessStageKindModeSelection,

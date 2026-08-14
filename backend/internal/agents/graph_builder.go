@@ -651,7 +651,12 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 			best = candidate
 		}
 	}
-	target.URL = firstNonEmpty(best.URL, urlForBusinessStage(stage, entryPoint))
+	// Session setup has two distinct routes: the authentication entry and the
+	// authenticated workspace observed after submission. The action must start
+	// from the former; the latter belongs to the success validation contract.
+	if stage.Kind != model.BusinessStageKindSessionSetup {
+		target.URL = firstNonEmpty(best.URL, urlForBusinessStage(stage, entryPoint))
+	}
 	// A selector is executable only when the exact value is represented by a
 	// complete App-approved provenance candidate. TestID/role/label remain
 	// semantic discovery hints; they are not silently promoted to a guessed CSS
