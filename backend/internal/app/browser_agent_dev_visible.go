@@ -629,14 +629,11 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 		Waiver:    waiver,
 		CreatedAt: timeNowUTC(),
 	})
-	if manifestErr == nil && replayManifest.ManifestURI != "" {
-		result.GeneratedAssets = append(result.GeneratedAssets, model.ArtifactRef{
-			ID:        "replay_manifest_" + safePathSegment(runID),
-			Kind:      "replay_manifest",
-			URI:       replayManifest.ManifestURI,
-			MimeType:  "application/json",
-			Sensitive: false,
-		})
+	if manifestErr != nil {
+		return view, fmt.Errorf("visible execution replay manifest failed: %w", manifestErr)
+	}
+	if err := AttachReplayManifestArtifact(&result, replayManifest); err != nil {
+		return view, fmt.Errorf("visible execution replay manifest artifact failed: %w", err)
 	}
 	// Persist the exact result package (including StepResults, ValidationReports,
 	// failure diagnostics, stage-log reference and replay manifest) for local

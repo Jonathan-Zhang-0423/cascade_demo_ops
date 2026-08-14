@@ -30,6 +30,7 @@ const (
 	errorClassTimeout            = "timeout"
 	errorClassResponseParse      = "response_parse_failed"
 	errorClassJSONParse          = "json_parse_failed"
+	errorClassContentFiltered    = "content_filtered"
 )
 
 type Client interface {
@@ -97,7 +98,7 @@ type DiagnosticResult struct {
 	OK             bool                 `json:"ok"`
 	HTTPStatus     int                  `json:"http_status,omitempty"`
 	ErrorClass     string               `json:"error_class,omitempty"`
-	Error          string               `json:"error,omitempty"`
+	Error          string               `json:"-"`
 	LatencyMS      int                  `json:"latency_ms,omitempty"`
 	CheckedAt      time.Time            `json:"checked_at"`
 }
@@ -146,10 +147,11 @@ func (t *CallTrace) Metadata() map[string]any {
 }
 
 type Router struct {
-	mu      sync.RWMutex
-	runtime config.AppRuntimeConfig
-	http    *http.Client
-	policy  CallPolicy
+	mu          sync.RWMutex
+	runtime     config.AppRuntimeConfig
+	http        *http.Client
+	policy      CallPolicy
+	diagnostics map[string]DiagnosticResult
 }
 
 func (r *Router) UpdateRuntime(runtime config.AppRuntimeConfig) {
@@ -159,6 +161,7 @@ func (r *Router) UpdateRuntime(runtime config.AppRuntimeConfig) {
 	r.mu.Lock()
 	r.runtime = runtime
 	r.http = httpClientForRuntime(runtime, r.policy.Timeout)
+	r.diagnostics = map[string]DiagnosticResult{}
 	r.mu.Unlock()
 }
 
@@ -213,6 +216,9 @@ func (p CallPolicy) AllowsFallback(class string, err error) bool {
 	// A malformed provider response cannot safely enrich an execution plan. In
 	// auto mode, retain the locally generated deterministic plan instead.
 	if class == errorClassJSONParse || class == errorClassResponseParse {
+		return true
+	}
+	if class == errorClassContentFiltered {
 		return true
 	}
 	if class == errorClassTimeout || class == "http_429" || class == "http_503" {
@@ -349,7 +355,7 @@ func (a minimaxAdapter) BuildMultimodalPayload(route config.ModelTaskRoute, req 
 
 func NewRouter(runtime config.AppRuntimeConfig) *Router {
 	policy := DefaultCallPolicy()
-	return &Router{runtime: runtime, http: httpClientForRuntime(runtime, policy.Timeout), policy: policy}
+	return &Router{runtime: runtime, http: httpClientForRuntime(runtime, policy.Timeout), policy: policy, diagnostics: map[string]DiagnosticResult{}}
 }
 
 func httpClientForRuntime(runtime config.AppRuntimeConfig, timeout time.Duration) *http.Client {
@@ -406,11 +412,13 @@ func (r *Router) DiagnoseTask(ctx context.Context, task config.ModelTask) Diagno
 	result := diagnosticResultForRoute(r.runtimeSnapshot(), route, provider, task, trace, now)
 	if err != nil {
 		result.ErrorClass = fallbackReason(trace, "route_error")
-		result.Error = redactSensitive(err.Error())
+		r.rememberDiagnostic(result)
 		return result
 	}
 	if route.Provider == config.ModelProviderSeedance {
-		return r.diagnoseSeedance(ctx, route, provider, result)
+		result = r.diagnoseSeedance(ctx, route, provider, result)
+		r.rememberDiagnostic(result)
+		return result
 	}
 	text, callTrace, err := r.callText(ctx, route, provider, TextRequest{
 		System:      "You are a provider diagnostic probe. Return only OK.",
@@ -424,16 +432,29 @@ func (r *Router) DiagnoseTask(ctx context.Context, task config.ModelTask) Diagno
 	if err != nil {
 		result.ErrorClass = fallbackReason(callTrace, "provider_error")
 		result.HTTPStatus = httpStatusFromFallback(result.ErrorClass)
-		result.Error = redactSensitive(err.Error())
+		r.rememberDiagnostic(result)
 		return result
 	}
 	if strings.TrimSpace(text) == "" {
 		result.ErrorClass = "empty_response"
-		result.Error = "provider returned an empty response"
+		r.rememberDiagnostic(result)
 		return result
 	}
 	result.OK = true
+	r.rememberDiagnostic(result)
 	return result
+}
+
+func (r *Router) rememberDiagnostic(result DiagnosticResult) {
+	if r == nil || result.Provider == "" || result.Model == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.diagnostics == nil {
+		r.diagnostics = map[string]DiagnosticResult{}
+	}
+	r.diagnostics[diagnosticKey(result.Provider, result.Model)] = result
 }
 
 // Seedance is an asynchronous media API, not a chat-completions model. A
@@ -443,7 +464,6 @@ func (r *Router) diagnoseSeedance(ctx context.Context, route config.ModelTaskRou
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		result.ErrorClass = errorClassHTTPError
-		result.Error = redactSensitive(err.Error())
 		return result
 	}
 	request.Header.Set("Authorization", "Bearer "+provider.APIKey)
@@ -452,14 +472,12 @@ func (r *Router) diagnoseSeedance(ctx context.Context, route config.ModelTaskRou
 	result.LatencyMS = int(time.Since(started).Milliseconds())
 	if err != nil {
 		result.ErrorClass = errorClassHTTPError
-		result.Error = redactSensitive(err.Error())
 		return result
 	}
 	defer response.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 	if readErr != nil {
 		result.ErrorClass = "read_error"
-		result.Error = redactSensitive(readErr.Error())
 		return result
 	}
 	result.HTTPStatus = response.StatusCode
@@ -472,7 +490,6 @@ func (r *Router) diagnoseSeedance(ctx context.Context, route config.ModelTaskRou
 		return result
 	}
 	result.ErrorClass = fmt.Sprintf("http_%d", response.StatusCode)
-	result.Error = redactProviderHTTPError(response.StatusCode, data).Error()
 	return result
 }
 
@@ -522,12 +539,22 @@ func (r *Router) GenerateJSON(ctx context.Context, task config.ModelTask, req JS
 	}
 	if err != nil {
 		class := fallbackReason(trace, "provider_error")
+		if fallbackText, fallbackTrace, ok := r.tryHealthyPlanningFallback(ctx, task, route, class, TextRequest{System: req.System, User: req.User, MaxTokens: req.MaxTokens, Temperature: req.Temperature, JSONMode: true}); ok {
+			if decodeErr := DecodeJSONContent(fallbackText, target); decodeErr == nil {
+				return fallbackTrace, nil
+			}
+		}
 		if !r.shouldFallback(class, err) {
 			return trace, err
 		}
 		return traceWithFallback(trace, class), ErrDeterministicRequired{Reason: class}
 	}
 	if err := DecodeJSONContent(text, target); err != nil {
+		if fallbackText, fallbackTrace, ok := r.tryHealthyPlanningFallback(ctx, task, route, errorClassJSONParse, TextRequest{System: req.System, User: req.User, MaxTokens: req.MaxTokens, Temperature: req.Temperature, JSONMode: true}); ok {
+			if decodeErr := DecodeJSONContent(fallbackText, target); decodeErr == nil {
+				return fallbackTrace, nil
+			}
+		}
 		if !r.shouldFallback(errorClassJSONParse, err) {
 			return trace, fmt.Errorf("llm JSON parse failed: %w", err)
 		}
@@ -547,12 +574,115 @@ func (r *Router) GenerateText(ctx context.Context, task config.ModelTask, req Te
 	text, trace, err := r.callText(ctx, route, provider, req)
 	if err != nil {
 		class := fallbackReason(trace, "provider_error")
+		if fallbackText, fallbackTrace, ok := r.tryHealthyPlanningFallback(ctx, task, route, class, req); ok {
+			return fallbackText, fallbackTrace, nil
+		}
 		if !r.shouldFallback(class, err) {
 			return "", trace, err
 		}
 		return "", traceWithFallback(trace, class), ErrDeterministicRequired{Reason: class}
 	}
 	return text, trace, nil
+}
+
+func (r *Router) tryHealthyPlanningFallback(ctx context.Context, task config.ModelTask, failedRoute config.ModelTaskRoute, class string, req TextRequest) (string, *CallTrace, bool) {
+	if r == nil || task != config.ModelTaskPlanning || !r.policy.AllowsFallback(class, errors.New(class)) || class == "http_401" {
+		return "", nil, false
+	}
+	r.diagnosePlanningFallbackCandidates(ctx, failedRoute.Provider)
+	runtime := r.runtimeSnapshot()
+	type candidate struct {
+		route    config.ModelTaskRoute
+		provider config.ModelProviderCredential
+	}
+	candidates := []candidate{}
+	r.mu.RLock()
+	for providerID, provider := range runtime.ModelProviders {
+		if providerID == failedRoute.Provider || !provider.Enabled || strings.TrimSpace(provider.APIKey) == "" || strings.TrimSpace(provider.BaseURL) == "" {
+			continue
+		}
+		modelName := strings.TrimSpace(provider.DefaultModel)
+		if modelName == "" || !r.diagnostics[diagnosticKey(providerID, modelName)].OK {
+			continue
+		}
+		candidates = append(candidates, candidate{route: config.ModelTaskRoute{Task: task, Provider: providerID, Model: modelName}, provider: provider})
+	}
+	r.mu.RUnlock()
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].route.Provider < candidates[j].route.Provider })
+	for _, item := range candidates {
+		text, trace, err := r.callText(ctx, item.route, item.provider, req)
+		if err != nil {
+			continue
+		}
+		copy := *trace
+		copy.FallbackReason = "planning_provider_fallback_from_" + string(failedRoute.Provider) + "_" + class
+		copy.ErrorClass = ""
+		return text, &copy, true
+	}
+	return "", nil, false
+}
+
+func (r *Router) diagnosePlanningFallbackCandidates(ctx context.Context, failedProvider config.ModelProvider) {
+	runtime := r.runtimeSnapshot()
+	type candidate struct {
+		id       config.ModelProvider
+		provider config.ModelProviderCredential
+		routed   bool
+	}
+	candidates := []candidate{}
+	for providerID, provider := range runtime.ModelProviders {
+		if providerID == failedProvider || !provider.Enabled || strings.TrimSpace(provider.APIKey) == "" || strings.TrimSpace(provider.BaseURL) == "" || strings.TrimSpace(provider.DefaultModel) == "" {
+			continue
+		}
+		if providerID == config.ModelProviderSeedance || providerID == config.ModelProviderSeedream {
+			continue
+		}
+		routed := false
+		for _, route := range runtime.ModelTaskRoutes {
+			routed = routed || route.Provider == providerID
+		}
+		candidates = append(candidates, candidate{id: providerID, provider: provider, routed: routed})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].routed != candidates[j].routed {
+			return candidates[i].routed
+		}
+		return candidates[i].id < candidates[j].id
+	})
+	for _, item := range candidates {
+		providerID, provider := item.id, item.provider
+		key := diagnosticKey(providerID, provider.DefaultModel)
+		r.mu.RLock()
+		existing, alreadyChecked := r.diagnostics[key]
+		r.mu.RUnlock()
+		if alreadyChecked {
+			if existing.OK {
+				return
+			}
+			continue
+		}
+		diagnosticCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		started := time.Now()
+		_, trace, err := r.callText(diagnosticCtx, config.ModelTaskRoute{Task: config.ModelTaskPlanning, Provider: providerID, Model: provider.DefaultModel}, provider, TextRequest{
+			System: "You are a provider diagnostic probe. Return only OK.", User: "Return OK.", MaxTokens: 32,
+		})
+		cancel()
+		result := diagnosticResultForRoute(runtime, config.ModelTaskRoute{Task: config.ModelTaskPlanning, Provider: providerID, Model: provider.DefaultModel}, provider, config.ModelTaskPlanning, trace, started.UTC())
+		result.LatencyMS = int(time.Since(started).Milliseconds())
+		result.OK = err == nil
+		if err != nil {
+			result.ErrorClass = fallbackReason(trace, "provider_error")
+			result.HTTPStatus = httpStatusFromFallback(result.ErrorClass)
+		}
+		r.rememberDiagnostic(result)
+		if result.OK {
+			return
+		}
+	}
+}
+
+func diagnosticKey(provider config.ModelProvider, model string) string {
+	return string(provider) + "|" + strings.TrimSpace(model)
 }
 
 func (r *Router) GenerateMultimodal(ctx context.Context, task config.ModelTask, req MultimodalRequest, target any) (*CallTrace, error) {
@@ -691,7 +821,11 @@ func (r *Router) doChat(ctx context.Context, route config.ModelTaskRoute, provid
 		return "", traceWithError(trace, "read_error"), redactError(err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", traceWithError(trace, fmt.Sprintf("http_%d", resp.StatusCode)), redactProviderHTTPError(resp.StatusCode, data)
+		class := fmt.Sprintf("http_%d", resp.StatusCode)
+		if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden && providerResponseWasContentFiltered(data) {
+			class = errorClassContentFiltered
+		}
+		return "", traceWithError(trace, class), redactProviderHTTPError(resp.StatusCode, data)
 	}
 	content, usage, err := adapter.ParseResponse(data)
 	if usage != nil {
@@ -702,6 +836,16 @@ func (r *Router) doChat(ctx context.Context, route config.ModelTaskRoute, provid
 		return "", traceWithError(trace, errorClassResponseParse), err
 	}
 	return content, trace, nil
+}
+
+func providerResponseWasContentFiltered(data []byte) bool {
+	lower := strings.ToLower(string(data))
+	for _, marker := range []string{"content_filter", "content filter", "content filtered", "sensitive content", `"code":"1301"`, `"code":1301`} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func diagnosticResultForRoute(runtime config.AppRuntimeConfig, route config.ModelTaskRoute, provider config.ModelProviderCredential, task config.ModelTask, trace *CallTrace, checkedAt time.Time) DiagnosticResult {
@@ -984,8 +1128,11 @@ func applyProviderRequestOptions(provider config.ModelProvider, modelName string
 	if provider == config.ModelProviderGLM {
 		payload.Thinking = &openAIThinking{Type: "disabled"}
 	}
-	if provider == config.ModelProviderKimi && strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "kimi-k2.7-code") {
-		payload.Temperature = 1
+	if provider == config.ModelProviderKimi {
+		model := strings.ToLower(strings.TrimSpace(modelName))
+		if strings.HasPrefix(model, "kimi-k2.7-code") || strings.HasPrefix(model, "kimi-k3") {
+			payload.Temperature = 1
+		}
 	}
 }
 

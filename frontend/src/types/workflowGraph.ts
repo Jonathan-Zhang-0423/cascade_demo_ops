@@ -364,6 +364,12 @@ export type SelectorCandidate = {
   confidence?: number;
   stability_score?: number;
   source?: string;
+  evidence_id?: string;
+  source_kind?: "source_scan" | "page_scan" | "approved_manual_annotation" | string;
+  source_digest?: string;
+  observed_role?: string;
+  observed_accessible_name?: string;
+  observed_at?: string;
   last_validated_at?: string;
   evidence_refs?: EvidenceRef[];
 };
@@ -1716,6 +1722,7 @@ export type ClientExecutionPackage = {
   org_id: string;
   project_id: string;
   schema_version: "demoops.client_execution_package.v1";
+  producer_installation_id?: string;
   created_at?: string;
   approved_at?: string;
   project_context_summary?: Record<string, unknown>;
@@ -1872,9 +1879,12 @@ export type ScriptRepairLineage = {
 export type UserApprovalRecord = {
   approval_id: string;
   approved_by_user_id?: string;
+  approved_by_installation_id?: string;
+  approval_schema_version?: string;
   approved_at: string;
   plan_digest_sha256: string;
   approval_subject_digest_sha256?: string;
+  subject_digests_sha256?: Record<string, string>;
   reviewed_node_ids?: string[];
   notes?: string[];
 };

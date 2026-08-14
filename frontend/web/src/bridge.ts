@@ -57,7 +57,7 @@ export type ProjectCreationInput = {
 export type DesktopBridgeClient = {
   mode: "mock" | "local";
   runtimeHealth(): Promise<BridgeResult<RuntimeHealthView>>;
-  configureControlPlane(baseURL: string): Promise<BridgeResult<RuntimeHealthView>>;
+  configureControlPlane(baseURL: string, accessToken: string): Promise<BridgeResult<RuntimeHealthView>>;
   configurePlanningModel(provider: string, model: string, apiKey: string, proxyURL?: string): Promise<BridgeResult<RuntimeHealthView>>;
   deletePlanningModel(provider: string): Promise<BridgeResult<RuntimeHealthView>>;
   verifyPlanningModel(): Promise<BridgeResult<ModelDiagnosticResult>>;
@@ -101,6 +101,7 @@ export type DesktopBridgeClient = {
   selectBrandAssets(): Promise<BridgeResult<ConfigurationSourceRefView[]>>;
   storeDemoCredential(ref: string, username: string, password: string): Promise<BridgeResult<{ secretRef: string; configured: boolean }>>;
   saveWorkspace(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+	reviseWorkflowGraph(workspace: ProjectWorkspaceView, idempotencyKey: string): Promise<BridgeResult<ProjectWorkspaceView>>;
   saveProjectInputs(projectID: string, inputs: ProjectInputBundle): Promise<BridgeResult<ProjectWorkspaceView>>;
   getUnderstandingReport(projectID: string): Promise<BridgeResult<MultimodalUnderstandingReport>>;
   getExecutionScriptDocument(projectID: string): Promise<BridgeResult<ExecutionScriptDocument>>;
@@ -118,6 +119,7 @@ export type DesktopBridgeClient = {
   repairFailedScript(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   ackResultPackage(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   acknowledgeResult(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
+  releaseDirectBrowserAgentLease(workspace: ProjectWorkspaceView): Promise<BridgeResult<ProjectWorkspaceView>>;
   reviewResult(workspace: ProjectWorkspaceView, decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string): Promise<BridgeResult<ProjectWorkspaceView>>;
 };
 
@@ -185,6 +187,7 @@ export type BridgeRunOptions = {
   demoCredentials?: {
     username?: string;
     password?: string;
+	secretRef?: string;
   };
   onCloudStatus?: (workspace: ProjectWorkspaceView) => void;
 };
@@ -278,6 +281,7 @@ type LocalRuntimeHealth = {
     model_override: string;
   }>;
   cloud_exchange?: {
+    retired?: boolean;
     configured: boolean;
     exchange_discovered?: boolean;
     installation_paired?: boolean;
@@ -290,6 +294,7 @@ type LocalRuntimeHealth = {
     environment?: string;
     dev_plaintext?: boolean;
   };
+  browser_agent_direct?: LocalDirectTransportStatus;
   app_capabilities?: {
     developer_ui?: boolean;
     demo_asset_generation_console?: boolean;
@@ -348,13 +353,30 @@ type LocalCascadeState = {
 
 type LocalDesktopCloudRunState = {
 	schema_version: string;
+	transport?: string;
+	lease_id?: string;
+	data_port?: number;
+	lease_expires_at?: string;
 	org_id?: string;
 	upload_id?: string;
+	package_id?: string;
 	exchange_package_id?: string;
 	cloud_job_id?: string;
 	status?: string;
 	stage?: string;
 	message?: string;
+	waiting_reason?: string;
+	blocking_error_code?: string;
+	next_action?: string;
+	requires_reapproval?: boolean;
+	reunderstanding_issues?: LocalDirectReunderstandingIssue[];
+	diagnostic_digest_sha256?: string;
+	package_digest_sha256?: string;
+	graph_digest_sha256?: string;
+	bundle_hash_sha256?: string;
+	plan_hash_sha256?: string;
+	approval_subject_digest_sha256?: string;
+	confidence_assessment_hash?: string;
 	progress_percent?: number;
 	last_event_id?: string;
 	stage_history?: LocalExecutionStageEvent[];
@@ -363,6 +385,7 @@ type LocalDesktopCloudRunState = {
 	result_package_id?: string;
 	result_package?: RecordingResultPackage;
 	result_downloaded?: boolean;
+	acked_at?: string;
 	downloaded_assets?: Array<{
 		artifact_id: string;
 		kind?: string;
@@ -373,6 +396,7 @@ type LocalDesktopCloudRunState = {
 		size_bytes?: number;
 		verified: boolean;
 	}>;
+	direct_artifacts?: LocalDirectArtifact[];
 	result_review?: {
 		decision: "approved" | "reedit_requested" | "rerecord_requested";
 		review_id?: string;
@@ -402,6 +426,139 @@ type LocalClientExecutionPackageBuild = {
     evidence_count: number;
     selector_count: number;
   };
+};
+
+type LocalDirectTransportStatus = {
+	configured: boolean;
+	reachable: boolean;
+	token_configured: boolean;
+	protocol_version?: string;
+	crypto_suite?: string;
+	control_url_host?: string;
+	control_url_path?: string;
+	installation_id_suffix?: string;
+	transport: string;
+	error_class?: string;
+	supported_protocol_versions?: string[];
+	supported_package_schema_versions?: string[];
+	supported_runtimes?: string[];
+	supported_worker_protocol_versions?: string[];
+	supported_outcome_verifier_rules_versions?: string[];
+	capabilities?: Record<string, boolean>;
+};
+
+type LocalDirectArtifact = {
+	artifact_id: string;
+	role?: string;
+	kind?: string;
+	file_name: string;
+	mime_type?: string;
+	sha256: string;
+	size_bytes: number;
+};
+
+type LocalDirectReunderstandingIssue = {
+	issue_id?: string;
+	code: string;
+	stage_id?: string;
+	node_id?: string;
+	severity?: string;
+	required?: boolean;
+	summary?: string;
+	impact?: string;
+	suggestion?: string;
+	next_step?: string;
+	responsibility_domain?: string;
+	evidence_ids?: string[];
+};
+
+type LocalDirectFailureReunderstandingRequest = {
+	schema_version: "demoops.direct_failure_reunderstanding.v1";
+	source_job_id: string;
+	source_result_id: string;
+	source_package_id: string;
+	repair_request_id: string;
+	base_package_digest_sha256: string;
+	base_graph_digest_sha256: string;
+	failed_bundle_hash_sha256: string;
+	failed_plan_hash_sha256: string;
+	diagnostic_digest_sha256: string;
+	selected_issue_ids: string[];
+	idempotency_key: string;
+	user_confirmed: true;
+};
+
+type LocalDirectFailureReunderstandingResult = {
+	state: LocalCascadeState;
+	build?: LocalClientExecutionPackageBuild;
+	new_package_id?: string;
+	package_digest_sha256?: string;
+	graph_digest_sha256?: string;
+	approval_subject_digest_sha256?: string;
+	confidence_assessment_hash?: string;
+	issues?: LocalDirectReunderstandingIssue[];
+	requires_reapproval: boolean;
+};
+
+type LocalDirectUploadResult = {
+	build: LocalClientExecutionPackageBuild;
+	lease: {
+		lease_id: string;
+		data_url_host: string;
+		data_port: number;
+		issued_at: string;
+		expires_at: string;
+		crypto_suite: string;
+	};
+	receipt: {
+		protocol_version: string;
+		job_id: string;
+		package_id: string;
+		package_digest_sha256: string;
+		status: string;
+		stage: string;
+		accepted_at: string;
+	};
+};
+
+type LocalDirectJobStatus = {
+	protocol_version: string;
+	job_id: string;
+	package_id: string;
+	status: string;
+	stage: string;
+	message?: string;
+	waiting_reason?: string;
+	blocking_error_code?: string;
+	next_action?: string;
+	requires_reapproval?: boolean;
+	progress_percent?: number;
+	result_package_id?: string;
+	artifacts?: LocalDirectArtifact[];
+	reunderstanding_issues?: LocalDirectReunderstandingIssue[];
+	updated_at: string;
+};
+
+type LocalDirectReleaseResult = {
+  released: boolean;
+  lease?: { lease_id?: string; data_port?: number; expires_at?: string };
+};
+
+type LocalDirectAckView = {
+	protocol_version: string;
+	job_id: string;
+	result_package_id: string;
+	received_artifact_ids: string[];
+	verified_checksums: boolean;
+	acked_at: string;
+};
+
+type LocalGraphRevisionResult = {
+	state: LocalCascadeState;
+	build: LocalClientExecutionPackageBuild;
+	graph_digest_sha256: string;
+	approval_subject_digest_sha256: string;
+	confidence_assessment_hash: string;
 };
 
 type LocalCloudLifecycleResult = {
@@ -661,14 +818,41 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     },
     async preflightExecutionPackage(workspace) {
 	  const preview = workspace.packagePreview;
-      return requestLocal<CloudPackagePreflightView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/preflight`, {
-        method: "POST",
-		body: JSON.stringify({ org_id: orgID, approval_subject_digest_sha256: preview.approvalSubjectDigest ?? preview.packageDigest, confidence_assessment_hash: preview.confidenceAssessmentHash ?? preview.packageDigest, risk_confirmed: true, idempotency_key: `preflight-${workspace.id}-${preview.approvalSubjectDigest ?? preview.packageDigest}` }),
-      });
+	  const approvalDigest = preview.approvalSubjectDigest?.trim();
+	  const confidenceHash = preview.confidenceAssessmentHash?.trim();
+	  const packageDigest = preview.packageDigest?.trim();
+	  if (!approvalDigest || !confidenceHash || !packageDigest) {
+		return bridgeFailure("正式执行包预检尚未生成权威 digest；请重新生成本地执行包预览。", {
+		  code: "package_preview_not_ready",
+		  message: "正式执行包预检尚未生成权威 digest",
+		  retryable: true,
+		  details: [
+			...(!approvalDigest ? [{ field: "approval_subject_digest_sha256", message: "缺少审批对象 digest", hint: "重新生成执行包预览" }] : []),
+			...(!confidenceHash ? [{ field: "confidence_assessment_hash", message: "缺少置信度评估 hash", hint: "重新生成执行包预览" }] : []),
+			...(!packageDigest ? [{ field: "package_digest_sha256", message: "缺少执行包 digest", hint: "重新生成执行包预览" }] : []),
+		  ],
+		});
+	  }
+	  return requestLocal<CloudPackagePreflightView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/client-execution-package/preflight`, {
+		method: "POST",
+		body: JSON.stringify({ org_id: orgID, package_digest_sha256: packageDigest, approval_subject_digest_sha256: approvalDigest, confidence_assessment_hash: confidenceHash }),
+	  });
     },
     async editorMaterialization(workspace) {
       const resultPackageID = workspace.cloudRun.resultPackageID ?? workspace.cloudRun.resultPackage?.result_id;
       if (!resultPackageID) return { ok: false, error: "缺少结果包，无法确认待编辑素材" };
+      if (workspace.cloudRun.transport === "browser_agent_direct_v1") {
+        // Direct results are materialized only after the App has downloaded
+        // and checksum-verified every declared artifact. The direct review
+        // path owns the handoff; never query the retired Exchange endpoint.
+        if (workspace.cloudRun.resultDownloaded !== true) {
+          return { ok: false, error: "直连结果素材尚未完成 checksum 校验" };
+        }
+		if (workspace.cloudRun.resultAcknowledged !== true) {
+		  return { ok: false, error: "直连结果尚未完成服务器 ACK" };
+		}
+        return requestLocal<EditorSessionMaterializationView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/editor-materialization`);
+      }
       const query = `?org_id=${encodeURIComponent(orgID)}&result_package_id=${encodeURIComponent(resultPackageID)}`;
       return requestLocal<EditorSessionMaterializationView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/editor-materialization${query}`);
     },
@@ -742,10 +926,15 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
     async confirmAssistantProposal(sessionID, proposalID, baseVersion, idempotencyKey) {
       return requestLocal<AssistantSessionView>(baseURL, `/v1/desktop/assistant/sessions/${encodeURIComponent(sessionID)}/proposals/${encodeURIComponent(proposalID)}/confirm`, { method: "POST", body: JSON.stringify({ baseVersion, idempotencyKey }) });
     },
-    async configureControlPlane(controlPlaneBaseURL) {
-      const result = await requestLocal<LocalRuntimeHealth>(baseURL, "/v1/desktop/control-plane", { method: "PUT", body: JSON.stringify({ base_url: controlPlaneBaseURL }) });
-      if (!result.ok || !result.data) return bridgeFailure(result.error ?? "执行服务器配置失败", result.errorInfo);
-      return ok(runtimeHealthFromLocal(result.data));
+    async configureControlPlane(controlPlaneBaseURL, accessToken) {
+      const native = await callWailsBridge<LocalDirectTransportStatus>("ConfigureDirectBrowserAgent", controlPlaneBaseURL, accessToken);
+      if (!native.ok) {
+        const result = await requestLocal<LocalDirectTransportStatus>(baseURL, "/v1/desktop/browser-agent-direct", { method: "PUT", body: JSON.stringify({ control_url: controlPlaneBaseURL, access_token: accessToken }) });
+        if (!result.ok) return bridgeFailure(result.error ?? "Browser Agent 服务器配置失败", result.errorInfo);
+      }
+      const health = await requestLocal<LocalRuntimeHealth>(baseURL, "/v1/desktop/runtime-health");
+      if (!health.ok || !health.data) return bridgeFailure(health.error ?? "Browser Agent 服务器状态不可用", health.errorInfo);
+      return ok(runtimeHealthFromLocal(health.data));
     },
     async configurePlanningModel(provider, model, apiKey, proxyURL = "") {
       const native = await callWailsBridge<LocalRuntimeHealth>("StorePlanningModelCredential", provider, model, apiKey, proxyURL);
@@ -844,6 +1033,30 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
+	async reviseWorkflowGraph(workspace, idempotencyKey) {
+		const request = {
+			base_graph_digest_sha256: workspace.packagePreview.graphDigest,
+			patches: workspace.planReview.graph.nodes.map((node) => ({
+				node_id: node.id,
+				is_screenshot: node.is_screenshot,
+				has_zoom: node.has_zoom,
+			})),
+			idempotency_key: idempotencyKey,
+		};
+		let result = await callWailsBridge<LocalGraphRevisionResult>("ReviseWorkflowGraph", workspace.id, request);
+		if (!result.ok) {
+			result = await requestLocal<LocalGraphRevisionResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/workflow-graph/revisions`, {
+				method: "POST",
+				body: JSON.stringify(request),
+			});
+		}
+		if (!result.ok || !result.data) return bridgeFailure(result.error ?? "执行图修订失败", result.errorInfo);
+		let revised = workspaceFromCascadeState(result.data.state, workspace);
+		cloudBuilds.set(workspace.id, result.data.build);
+		revised = workspaceWithPreparedBuild(revised, result.data.build);
+		projects.set(workspace.id, revised);
+		return ok(revised);
+	},
     async getUnderstandingReport(projectID) {
       const loaded = await this.loadProject(projectID);
       return loaded.ok && loaded.data?.understandingReport ? ok(loaded.data.understandingReport) : { ok: false, error: loaded.error ?? "理解报告尚未生成" };
@@ -870,8 +1083,29 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
         return { ok: false, error: result.error ?? "执行包生成失败" };
       }
       const generated = workspaceFromCascadeState(result.data, workspace);
-      projects.set(generated.id, generated);
-      return ok(generated);
+      const buildResult = await requestLocal<LocalClientExecutionPackageBuild>(baseURL, `/v1/desktop/projects/${encodeURIComponent(generated.id)}/client-execution-package`, {
+		method: "POST",
+		body: JSON.stringify({ org_id: orgID }),
+	  });
+	  if (!buildResult.ok || !buildResult.data) {
+		return bridgeFailure(buildResult.error ?? "正式执行包预检失败", buildResult.errorInfo);
+	  }
+	  const build = buildResult.data;
+  if (!build.package || !build.approval_subject_digest_sha256?.trim() || !build.package_digest_sha256?.trim() || !build.package.confidence_summary?.assessment_hash?.trim()) {
+		return bridgeFailure("正式执行包预检未生成完整 digest；上传已阻断。", {
+		  code: "package_preview_not_ready",
+		  message: "正式执行包缺少权威 digest",
+		  retryable: true,
+		  details: [
+			...(!build.approval_subject_digest_sha256?.trim() ? [{ field: "approval_subject_digest_sha256", message: "缺少审批对象 digest", hint: "重新生成执行包预览" }] : []),
+			...(!build.package_digest_sha256?.trim() ? [{ field: "package_digest_sha256", message: "缺少执行包 digest", hint: "重新生成执行包预览" }] : []),
+			...(!build.package?.confidence_summary?.assessment_hash?.trim() ? [{ field: "confidence_assessment_hash", message: "缺少置信度评估 hash", hint: "重新生成执行包预览" }] : []),
+		  ],
+		});
+	  }
+      const prepared = workspaceWithPreparedBuild(generated, build);
+      projects.set(prepared.id, prepared);
+      return ok(prepared);
     },
     async runProductLifecycle(workspace, options) {
       const userInput = userInputFromWorkspace(workspace, options);
@@ -894,62 +1128,32 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 	  return ok(current);
     },
     async initExecutionPackageUpload(workspace) {
-	  const preview = workspace.packagePreview;
-      const result = await requestLocal<LocalCloudUploadInitResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/init`, {
-        method: "POST",
-		body: JSON.stringify({
-		  org_id: orgID,
-		  approval_subject_digest_sha256: preview.approvalSubjectDigest ?? preview.packageDigest,
-		  confidence_assessment_hash: preview.confidenceAssessmentHash ?? preview.packageDigest,
-		  risk_confirmed: true,
-		  idempotency_key: `approve-${workspace.id}-${preview.approvalSubjectDigest ?? preview.packageDigest}`,
-		}),
-      });
-      if (!result.ok || !result.data) {
-        return bridgeFailure(result.error ?? "初始化服务器上传会话失败", result.errorInfo);
-      }
-      if (result.data.build) {
-        cloudBuilds.set(workspace.id, result.data.build);
-      }
-      const next = workspaceWithCloudInit(workspace, result.data);
-      projects.set(next.id, next);
-      return ok(uploadInitFromLocal(result.data.init));
+	  return bridgeFailure("legacy_exchange_disabled: 正式 App 只允许直连 Ubuntu Browser Agent；请使用审批并上传");
     },
     async uploadExecutionPackage(workspace) {
-      const build = cloudBuilds.get(workspace.id);
-      const result = await requestLocal<LocalCloudUploadPackageResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/upload`, {
-        method: "POST",
-        body: JSON.stringify({
-          org_id: orgID,
-          upload_id: workspace.cloudRun.uploadID,
-          ...(build ? { build } : {}),
-        }),
-      });
-      if (!result.ok || !result.data) {
-        return bridgeFailure(result.error ?? "上传执行包失败", result.errorInfo);
-      }
-      if (result.data.build) {
-        cloudBuilds.set(workspace.id, result.data.build);
-      }
-      const next = workspaceWithCloudUpload(workspace, result.data);
-      projects.set(next.id, next);
-      return ok(uploadViewFromLocal(result.data.upload));
+	  return bridgeFailure("legacy_exchange_disabled: 正式 App 只允许直连 Ubuntu Browser Agent；请使用审批并上传");
     },
     async pollExecutionPackageStatus(workspace) {
-      const exchangePackageID = workspace.cloudRun.exchangePackageID;
-      if (!exchangePackageID) {
-        return { ok: false, error: "缺少 exchange package id，无法轮询服务器状态" };
+      const packageID = workspace.cloudRun.packageID ?? workspace.cloudRun.exchangePackageID;
+      if (!packageID) {
+        return { ok: false, error: "缺少 Browser Agent package id，无法轮询服务器状态" };
       }
-      const query = `?org_id=${encodeURIComponent(orgID)}&exchange_package_id=${encodeURIComponent(exchangePackageID)}`;
-      const result = await requestLocal<LocalExecutionPackageStatusResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/status${query}`);
+      const jobID = workspace.cloudRun.cloudJobID;
+      if (!jobID) return { ok: false, error: "缺少 Browser Agent job id，无法轮询服务器状态" };
+      const query = `?job_id=${encodeURIComponent(jobID)}`;
+      const result = await requestLocal<LocalDirectJobStatus>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/status${query}`);
       if (!result.ok || !result.data) {
-        return bridgeFailure(result.error ?? "轮询服务器执行状态失败", result.errorInfo);
+        return bridgeFailure(result.error ?? "轮询 Browser Agent 执行状态失败", result.errorInfo);
       }
-      let next = workspaceWithCloudStatus(workspace, result.data);
+      let next = workspaceWithDirectStatus(workspace, result.data);
       if (result.data.result_package_id && isTerminalLocalStatus(result.data.status)) {
         const resultPackage = await this.getResultPackage(next);
         if (resultPackage.ok && resultPackage.data) {
           next = workspaceWithResultPackage(next, resultPackage.data);
+		  if (result.data.status === "failed") {
+			const authoritative = await requestLocal<LocalCascadeState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}`);
+			if (authoritative.ok && authoritative.data) next = workspaceFromCascadeState(authoritative.data, next);
+		  }
         }
       }
       projects.set(next.id, next);
@@ -959,33 +1163,43 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       if (workspace.cloudRun.resultPackage) {
         return ok(workspace.cloudRun.resultPackage);
       }
-      const resultPackageID = workspace.cloudRun.resultPackageID;
-      if (!resultPackageID) {
-        return { ok: false, error: "缺少 result package id，无法读取服务器结果包" };
-      }
-      const query = `?org_id=${encodeURIComponent(orgID)}&result_package_id=${encodeURIComponent(resultPackageID)}`;
-      const result = await requestLocal<RecordingResultPackage>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/result${query}`);
+      const jobID = workspace.cloudRun.cloudJobID;
+      if (!jobID) return { ok: false, error: "缺少 Browser Agent job id，无法读取结果包" };
+      const query = `?job_id=${encodeURIComponent(jobID)}`;
+      const result = await requestLocal<RecordingResultPackage>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/result${query}`);
       if (!result.ok || !result.data) {
-        return bridgeFailure(result.error ?? "读取服务器结果包失败", result.errorInfo);
+        return bridgeFailure(result.error ?? "读取 Browser Agent 结果包失败", result.errorInfo);
       }
       const next = workspaceWithResultPackage(workspace, result.data);
       projects.set(next.id, next);
       return ok(result.data);
     },
-    async approveAndUploadPackage(workspace) {
-      const init = await this.initExecutionPackageUpload(workspace);
-      if (!init.ok || !init.data) {
-        return bridgeFailure(init.error ?? "初始化服务器上传会话失败", init.errorInfo);
-      }
-      const initialized = workspaceWithCloudInit(workspace, {
-        build: cloudBuilds.get(workspace.id),
-        init: localInitResponseFromView(init.data),
+	async approveAndUploadPackage(workspace) {
+      const preview = workspace.packagePreview;
+      const packageDigest = preview.packageDigest?.trim();
+      const approvalDigest = preview.approvalSubjectDigest?.trim();
+      const confidenceHash = preview.confidenceAssessmentHash?.trim();
+	  if (!packageDigest || !approvalDigest || !confidenceHash || preview.readiness === "blocked" || preview.buildStatus !== "draft") {
+		return bridgeFailure("当前执行包未满足正式审批前置条件，上传已阻断。", {
+		  code: "package_preview_not_ready",
+		  message: "执行包必须具有正式 digest、置信度 hash 且处于可审批草稿状态",
+		  retryable: true,
+		});
+	  }
+      const result = await requestLocal<LocalDirectUploadResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/upload`, {
+        method: "POST",
+        body: JSON.stringify({
+          org_id: orgID,
+          package_digest_sha256: packageDigest,
+          approval_subject_digest_sha256: approvalDigest,
+          confidence_assessment_hash: confidenceHash,
+          risk_confirmed: true,
+          idempotency_key: `direct-approve-${workspace.id}-${approvalDigest}`,
+        }),
       });
-      const upload = await this.uploadExecutionPackage(initialized);
-      if (!upload.ok || !upload.data) {
-        return bridgeFailure(upload.error ?? "上传执行包失败", upload.errorInfo);
-      }
-      const uploaded = workspaceWithCloudUpload(initialized, localUploadPackageResultFromView(upload.data, cloudBuilds.get(workspace.id)));
+      if (!result.ok || !result.data) return bridgeFailure(result.error ?? "加密上传 Browser Agent 执行包失败", result.errorInfo);
+      cloudBuilds.set(workspace.id, result.data.build);
+      const uploaded = workspaceWithDirectUpload(workspace, result.data);
       projects.set(uploaded.id, uploaded);
       return ok(uploaded);
     },
@@ -996,68 +1210,122 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return ok(localFutureWorkspace(workspace, "失败诊断将在云端录制接入后启用。"));
     },
     async repairFailedScript(workspace) {
-      return ok(localFutureWorkspace(workspace, "脚本修复将在失败诊断接入后启用。"));
+	  const run = workspace.cloudRun;
+	  const result = run.resultPackage;
+	  const repair = run.repairRequest;
+	  const issues = run.reunderstandingIssues ?? [];
+	  const selectedIssueIDs = issues.filter((issue) => issue.required).map((issue) => issue.issueID).filter(Boolean);
+	  const request: LocalDirectFailureReunderstandingRequest = {
+		schema_version: "demoops.direct_failure_reunderstanding.v1",
+		source_job_id: repair?.cloud_job_id ?? result?.cloud_job_id ?? run.cloudJobID ?? "",
+		source_result_id: repair?.source_result_id ?? result?.result_id ?? run.resultPackageID ?? "",
+		source_package_id: repair?.source_package_id ?? result?.source_package_id ?? run.packageID,
+		repair_request_id: repair?.id ?? "",
+		base_package_digest_sha256: run.packageDigestSHA256 ?? "",
+		base_graph_digest_sha256: run.graphDigestSHA256 ?? "",
+		failed_bundle_hash_sha256: run.bundleHashSHA256 ?? repair?.failed_bundle_hash_sha256 ?? "",
+		failed_plan_hash_sha256: run.planHashSHA256 ?? repair?.failed_plan_hash_sha256 ?? "",
+		diagnostic_digest_sha256: run.diagnosticDigestSHA256 ?? "",
+		selected_issue_ids: selectedIssueIDs,
+		idempotency_key: `direct-reunderstand-${workspace.id}-${repair?.source_result_id ?? result?.result_id ?? "missing"}`,
+		user_confirmed: true,
+	  };
+	  const missing = Object.entries(request).filter(([key, value]) => key !== "selected_issue_ids" && key !== "user_confirmed" && typeof value === "string" && !value.trim()).map(([key]) => key);
+	  if (missing.length > 0 || issues.some((issue) => issue.required && !issue.issueID)) {
+		return bridgeFailure("重新理解所需的权威失败 lineage 不完整，已阻止生成草稿。", {
+		  code: "repair_lineage_mismatch",
+		  message: "失败结果缺少权威 identity、digest 或 issue_id",
+		  retryable: true,
+		  details: missing.map((field) => ({ field, message: "缺少必填 lineage 字段", hint: "重新读取 Browser Agent 结果包" })),
+		});
+	  }
+	  let repaired = await callWailsBridge<LocalDirectFailureReunderstandingResult>("ReunderstandDirectBrowserAgentFailure", workspace.id, request);
+	  if (!repaired.ok) {
+		repaired = await requestLocal<LocalDirectFailureReunderstandingResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/reunderstand`, { method: "POST", body: JSON.stringify(request) });
+	  }
+	  if (!repaired.ok || !repaired.data) return bridgeFailure(repaired.error ?? "重新扫描与草稿生成失败", repaired.errorInfo);
+	  if (!repaired.data.build || !repaired.data.requires_reapproval) {
+		return bridgeFailure("重新理解未产生可重新审批的正式草稿。", { code: "reunderstanding_incomplete", message: "服务未返回 draft build", retryable: true });
+	  }
+	  let next = workspaceFromCascadeState(repaired.data.state, workspace);
+	  cloudBuilds.set(workspace.id, repaired.data.build);
+	  next = workspaceWithPreparedBuild(next, repaired.data.build);
+	  projects.set(next.id, next);
+	  return ok(next);
     },
     async ackResultPackage(workspace) {
 	  const resultPackageID = workspace.cloudRun.resultPackageID;
       if (!resultPackageID) {
 		return { ok: false, error: "缺少 result package id，无法下载结果包" };
       }
-	  const deliverables = workspace.cloudRun.resultPackage?.delivery?.asset_refs ?? [];
+	  const deliverables = workspace.cloudRun.directArtifacts ?? [];
 	  if (deliverables.length === 0) {
 		return { ok: false, error: "结果包没有可下载的成品 artifact" };
 	  }
-	  const receivedAssetIDs: string[] = [];
 	  const mediaURLs = new Map<string, string>();
+	  const jobID = workspace.cloudRun.cloudJobID;
+	  if (!jobID) return { ok: false, error: "缺少 Browser Agent job id，无法下载成品" };
 	  for (const deliverable of deliverables) {
-		const download = await requestLocal<LocalCloudDeliverableDownloadResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/deliverable/download`, {
+		const download = await requestLocal<LocalCloudDeliverableDownloadResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/artifact/download`, {
 		  method: "POST",
 		  body: JSON.stringify({
-			org_id: orgID,
-			result_package_id: resultPackageID,
-			exchange_package_id: workspace.cloudRun.exchangePackageID,
-			deliverable,
+			job_id: jobID,
+			artifact: {
+			  artifact_id: deliverable.artifactID,
+			  role: deliverable.role,
+			  kind: deliverable.kind,
+			  file_name: deliverable.fileName,
+			  mime_type: deliverable.mimeType,
+			  sha256: deliverable.sha256,
+			  size_bytes: deliverable.sizeBytes,
+			},
 		  }),
 		});
 		if (!download.ok || !download.data) {
-		  return bridgeFailure(download.error ?? `下载成品 ${deliverable.id} 失败`, download.errorInfo);
+		  return bridgeFailure(download.error ?? `下载成品 ${deliverable.artifactID} 失败`, download.errorInfo);
 		}
 		if (!download.data.checksum_verified) {
-		  return { ok: false, error: `成品 ${deliverable.id} checksum 校验失败，未发送接收确认` };
+		  return { ok: false, error: `成品 ${deliverable.artifactID} checksum 校验失败，未发送接收确认` };
 		}
-		receivedAssetIDs.push(deliverable.id);
-		if (download.data.media_url) mediaURLs.set(deliverable.id, download.data.media_url);
+		if (download.data.media_url) mediaURLs.set(deliverable.artifactID, download.data.media_url);
 	  }
-      const result = await requestLocal<LocalResultPackageAckResponse>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/ack`, {
-        method: "POST",
-        body: JSON.stringify({
-          org_id: orgID,
-          result_package_id: resultPackageID,
-          exchange_package_id: workspace.cloudRun.exchangePackageID,
-          received_asset_ids: receivedAssetIDs,
-          verified_checksums: true,
-        }),
-      });
-      if (!result.ok || !result.data) {
-        return bridgeFailure(result.error ?? "确认结果包失败", result.errorInfo);
-      }
-      const next = ackWorkspaceAssets(workspace, mediaURLs);
+	  let acknowledged = await callWailsBridge<LocalDirectAckView>("AcknowledgeDirectBrowserAgentResult", workspace.id);
+	  if (!acknowledged.ok) {
+		acknowledged = await requestLocal<LocalDirectAckView>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/ack`, { method: "POST" });
+	  }
+	  if (!acknowledged.ok || !acknowledged.data?.verified_checksums || acknowledged.data.job_id !== jobID || acknowledged.data.result_package_id !== resultPackageID || !acknowledged.data.acked_at) {
+		return bridgeFailure(acknowledged.error ?? "全部素材已校验，但服务器 ACK 未完成", acknowledged.errorInfo);
+	  }
+      const next = ackWorkspaceAssets(workspace, mediaURLs, acknowledged.data.acked_at);
       projects.set(next.id, next);
       return ok(next);
     },
-	async acknowledgeResult(workspace) {
+    async acknowledgeResult(workspace) {
 	  return this.ackResultPackage(workspace);
+	},
+	async releaseDirectBrowserAgentLease(workspace) {
+	  if (!workspace.cloudRun.leaseID) return { ok: false, error: "当前项目没有可释放的直连租约" };
+	  if (!isTerminalLocalStatus(workspace.cloudRun.status)) return { ok: false, error: "任务仍在运行，不能释放直连租约" };
+  if (workspace.cloudRun.status === "succeeded" && workspace.cloudRun.resultAcknowledged !== true) return { ok: false, error: "必须先完成素材下载、checksum 校验和服务器 ACK" };
+	  let native = await callWailsBridge<LocalDirectReleaseResult>("ReleaseDirectBrowserAgentLease", workspace.id);
+	  if (!native.ok) {
+	    native = await requestLocal<LocalDirectReleaseResult>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/release`, { method: "POST" });
+	  }
+	  if (!native.ok || !native.data?.released) return bridgeFailure(native.error ?? "直连租约释放失败", native.errorInfo);
+	  const next = workspaceWithDirectLeaseReleased(workspace);
+	  projects.set(next.id, next);
+	  return ok(next);
 	},
 	async reviewResult(workspace, decision, summary) {
 	  const resultPackageID = workspace.cloudRun.resultPackageID;
 	  if (!resultPackageID) {
 		return { ok: false, error: "缺少 result package id，无法提交人工审核" };
 	  }
-	  const idempotencyKey = `${workspace.id}:${resultPackageID}:${decision}:${Date.now()}`;
-	  const reviewed = await requestLocal<LocalResultReviewRecord>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/review`, {
+	  const idempotencyKey = `direct-review:${workspace.id}:${resultPackageID}:${decision}:${summary?.trim() ?? ""}`;
+	  const reviewed = await requestLocal<LocalResultReviewRecord>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/review`, {
 		method: "POST",
 		body: JSON.stringify({
-		  org_id: orgID,
+		  job_id: workspace.cloudRun.cloudJobID,
 		  result_package_id: resultPackageID,
 		  review: { idempotency_key: idempotencyKey, decision, summary: summary?.trim() || undefined },
 		}),
@@ -1065,26 +1333,7 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
 	  if (!reviewed.ok || !reviewed.data) {
 		return bridgeFailure(reviewed.error ?? "提交人工审核失败", reviewed.errorInfo);
 	  }
-	  let revision: LocalResultRevisionRecord | undefined;
-	  if (decision !== "approved") {
-		const revised = await requestLocal<LocalResultRevisionRecord>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/revision`, {
-		  method: "POST",
-		  body: JSON.stringify({
-			org_id: orgID,
-			result_package_id: resultPackageID,
-			revision: {
-			  idempotency_key: `${idempotencyKey}:revision`,
-			  requested_action: decision === "rerecord_requested" ? "rerecord" : "reedit",
-			  summary: summary?.trim() || undefined,
-			},
-		  }),
-		});
-		if (!revised.ok || !revised.data) {
-		  return bridgeFailure(revised.error ?? "提交返工请求失败", revised.errorInfo);
-		}
-		revision = revised.data;
-	  }
-	  const next = workspaceWithReview(workspace, reviewed.data, revision);
+	  const next = workspaceWithReview(workspace, reviewed.data);
 	  projects.set(next.id, next);
 	  return ok(next);
 	},
@@ -1096,6 +1345,7 @@ export function createMockBridgeClient(): DesktopBridgeClient {
   let githubCredentialConfigured = false;
 	let mockControlPlaneURL = "";
 	let mockControlPlaneConnected = false;
+	let mockAccessTokenConfigured = false;
   const initial = createWorkspace("product_demo");
   projects.set(initial.id, initial);
 
@@ -1131,6 +1381,15 @@ export function createMockBridgeClient(): DesktopBridgeClient {
       environment: "development",
       devPlaintext: mockControlPlaneURL.startsWith("http://"),
     },
+	browserAgentDirect: {
+	  configured: mockControlPlaneURL !== "",
+	  reachable: mockControlPlaneConnected,
+	  tokenConfigured: mockAccessTokenConfigured,
+	  protocolVersion: "browser-agent-direct-v1",
+	  cryptoSuite: "AES-256-GCM+HKDF-SHA256",
+	  ...(mockControlPlaneURL ? { controlURLHost: new URL(mockControlPlaneURL).host } : {}),
+	  transport: "browser_agent_direct_v1",
+	},
   });
 
   return {
@@ -1138,19 +1397,21 @@ export function createMockBridgeClient(): DesktopBridgeClient {
     async runtimeHealth() {
 	  return runtimeHealth();
     },
-    async configureControlPlane(baseURL) {
+    async configureControlPlane(baseURL, accessToken) {
       const normalized = baseURL.trim().replace(/\/+$/, "");
       let parsed: URL;
       try {
         parsed = new URL(normalized);
       } catch {
-        return { ok: false, error: "请输入有效的 DemoOps 控制面地址" };
+		return { ok: false, error: "请输入有效的 Ubuntu Browser Agent 控制地址" };
       }
       const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
       if (parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.protocol !== "https:" && !(loopback && parsed.protocol === "http:"))) {
-        return { ok: false, error: "控制面必须使用 HTTPS；SSH 转发仅允许 loopback HTTP" };
-      }
+		return { ok: false, error: "Browser Agent 控制地址必须使用 HTTPS；开发测试仅允许 loopback HTTP" };
+	  }
+	  if (!accessToken.trim()) return { ok: false, error: "请输入 Browser Agent 访问令牌" };
       mockControlPlaneURL = normalized;
+	  mockAccessTokenConfigured = true;
 	  mockControlPlaneConnected = true;
       return runtimeHealth();
     },
@@ -1284,6 +1545,27 @@ export function createMockBridgeClient(): DesktopBridgeClient {
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
+	async reviseWorkflowGraph(workspace) {
+		const scriptDocument = mockScriptDocument(workspace);
+		const executableScriptBundle = mockExecutableScriptBundle({ ...workspace, scriptDocument });
+		const graphDigest = executableScriptBundle.reproducibility.graph_hash_sha256 ?? workspace.packagePreview.graphDigest;
+		const approvalDigest = executableScriptBundle.reproducibility.bundle_hash_sha256 ?? workspace.packagePreview.packageDigest;
+		const revised: ProjectWorkspaceView = {
+			...workspace,
+			scriptDocument,
+			executableScriptBundle,
+			packagePreview: {
+				...workspace.packagePreview,
+				graphDigest,
+				packageDigest: approvalDigest,
+				approvalSubjectDigest: approvalDigest,
+				confidenceAssessmentHash: approvalDigest,
+				buildStatus: "draft" as const,
+			},
+		};
+		projects.set(workspace.id, revised);
+		return ok(revised);
+	},
     async saveProjectInputs(projectID, inputs) {
       const project = projects.get(projectID);
       if (!project) return { ok: false, error: "未找到项目" };
@@ -1434,22 +1716,69 @@ export function createMockBridgeClient(): DesktopBridgeClient {
       });
     },
     async repairFailedScript(workspace) {
-      const diagnostic = workspace.cloudRun.failureDiagnostic ?? mockFailureDiagnostic(workspace);
-      const repairRequest = workspace.cloudRun.repairRequest ?? mockFailedRecordingResultPackage(workspace).repair_request;
-      const scriptDocument = workspace.scriptDocument ?? mockScriptDocument(workspace);
+      const run = workspace.cloudRun;
+      const diagnostic = run.failureDiagnostic;
+      const repairRequest = run.repairRequest;
+      const resultPackage = run.resultPackage;
+      const issues = run.reunderstandingIssues ?? [];
+      if (run.status !== "failed" || run.blockingErrorCode !== "reunderstanding_required") {
+        return bridgeFailure("普通 Browser Agent 失败不能进入重新理解。", {
+          code: "reunderstanding_incomplete",
+          message: "只有权威验证或确定性 App 门禁问题可触发重新理解",
+          retryable: false,
+        });
+      }
+      const missingLineage = !diagnostic || !repairRequest || !resultPackage
+        || !run.cloudJobID || !run.resultPackageID || !run.packageID
+        || !run.packageDigestSHA256 || !run.graphDigestSHA256
+        || !run.bundleHashSHA256 || !run.planHashSHA256 || !run.diagnosticDigestSHA256
+        || repairRequest.cloud_job_id !== run.cloudJobID
+        || repairRequest.source_result_id !== run.resultPackageID
+        || repairRequest.source_package_id !== run.packageID
+        || resultPackage.result_id !== run.resultPackageID
+        || resultPackage.source_package_id !== run.packageID
+        || issues.length === 0
+        || issues.some((issue) => issue.required && !issue.issueID);
+      if (missingLineage) {
+        return bridgeFailure("重新理解所需的权威失败 lineage 不完整，已阻止生成草稿。", {
+          code: "repair_lineage_mismatch",
+          message: "失败结果缺少权威 identity、digest 或 issue_id",
+          retryable: true,
+        });
+      }
+      const repairSeed = `${workspace.id}|${run.resultPackageID}|${run.packageDigestSHA256}|${issues.map((issue) => issue.issueID).sort().join("|")}`;
+      const graphDigest = mockHash(`reunderstood-graph|${repairSeed}`);
+      const rescannedWorkspace: ProjectWorkspaceView = {
+        ...workspace,
+        planReview: {
+          ...workspace.planReview,
+          graph: { ...workspace.planReview.graph, version: workspace.planReview.graph.version + 1 },
+        },
+        packagePreview: { ...workspace.packagePreview, graphDigest },
+      };
+      const scriptDocument = mockScriptDocument(rescannedWorkspace);
       const repairedMarkdown = mockRepairApprovalMarkdown(workspace, diagnostic);
       const repairedBundle = mockExecutableScriptBundle({
-        ...workspace,
+        ...rescannedWorkspace,
         scriptDocument,
         scriptMarkdown: repairedMarkdown,
       }, {
         diagnostic,
-        sourceCloudJobID: repairRequest?.cloud_job_id ?? "job_failed",
-        sourceResultID: repairRequest?.source_result_id ?? "result_failed",
-        repairAttempt: repairRequest?.repair_attempt ?? 1,
+        sourceCloudJobID: repairRequest.cloud_job_id,
+        sourceResultID: repairRequest.source_result_id,
+        repairAttempt: (repairRequest.repair_attempt ?? 0) + 1,
       });
+      const packageDigest = repairedBundle.reproducibility.bundle_hash_sha256 ?? mockHash(`package|${repairSeed}`);
+      const approvalSubjectDigest = mockHash(`approval|${packageDigest}|${graphDigest}`);
+      const confidenceAssessmentHash = mockHash(`confidence|${packageDigest}|${graphDigest}`);
+      const { uploadID: _uploadID, exchangePackageID: _exchangePackageID, cloudJobID: _cloudJobID,
+        resultPackageID: _resultPackageID, resultPackage: _resultPackage, failureDiagnostic: _failureDiagnostic,
+        repairRequest: _repairRequest, resultReview: _resultReview, directArtifacts: _directArtifacts,
+        resultDownloaded: _resultDownloaded, resultAcknowledged: _resultAcknowledged, ackedAt: _ackedAt,
+        editorSessionID: _editorSessionID, blockingErrorCode: _blockingErrorCode, nextAction: _nextAction,
+        waitingReason: _waitingReason, ...preservedRun } = run;
       return ok({
-        ...workspace,
+        ...rescannedWorkspace,
         stage: "package_approval",
         status: "awaiting_approval",
         scriptDocument,
@@ -1457,27 +1786,47 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         executableScriptBundle: repairedBundle,
         packagePreview: {
           ...workspace.packagePreview,
-          packageDigest: repairedBundle.reproducibility.bundle_hash_sha256 ?? workspace.packagePreview.packageDigest,
-          graphDigest: repairedBundle.reproducibility.plan_hash_sha256,
+          packageID: `pkg_reunderstood_${mockHash(repairSeed).slice(-12)}`,
+          packageDigest,
+          graphDigest,
+          approvalSubjectDigest,
+          confidenceAssessmentHash,
+          buildStatus: "draft",
+          readiness: "review_required",
           humanApprovalRequired: true,
-          blockedReasons: ["修复后的脚本必须重新审批"],
+          blockedReasons: ["重新理解后的执行包必须重新审批"],
         },
         cloudRun: {
-          ...workspace.cloudRun,
+          ...preservedRun,
           status: "not_uploaded",
           stage: "local_generated",
-          message: "修复后的三合一方案包已生成，等待重新审批。",
-          currentStep: "修复包已生成，等待人工审批",
+          message: "重新扫描生成的新草稿已持久化，等待重新审批。",
+          currentStep: "新草稿已生成，等待人工审批",
           progress: 0,
+          requiresReapproval: true,
+          reunderstandingIssues: issues,
+          packageID: `pkg_reunderstood_${mockHash(repairSeed).slice(-12)}`,
+          packageDigestSHA256: packageDigest,
+          graphDigestSHA256: graphDigest,
+          bundleHashSHA256: repairedBundle.reproducibility.bundle_hash_sha256 ?? mockHash(`bundle|${repairSeed}`),
+          planHashSHA256: repairedBundle.reproducibility.plan_hash_sha256,
+          approvalSubjectDigestSHA256: approvalSubjectDigest,
+          confidenceAssessmentHash,
           stageHistory: mockLifecycleStages(workspace, "local_generated"),
         },
       });
     },
     async ackResultPackage(workspace) {
-      return ok(ackWorkspaceAssets(workspace));
+      return ok(ackWorkspaceAssets(workspace, new Map(), new Date().toISOString()));
     },
-	async acknowledgeResult(workspace) {
+    async acknowledgeResult(workspace) {
 	  return this.ackResultPackage(workspace);
+	},
+	async releaseDirectBrowserAgentLease(workspace) {
+	  if (!workspace.cloudRun.leaseID) return { ok: false, error: "当前项目没有可释放的直连租约" };
+  if (!isTerminalLocalStatus(workspace.cloudRun.status) || (workspace.cloudRun.status === "succeeded" && workspace.cloudRun.resultAcknowledged !== true)) return { ok: false, error: "任务未终态或素材尚未确认接收" };
+	  const next = workspaceWithDirectLeaseReleased(workspace);
+	  return ok(next);
 	},
 	async reviewResult(workspace, decision, summary) {
 	  return ok(workspaceWithReview(workspace, {
@@ -1676,7 +2025,8 @@ export function userInputFromWorkspace(workspace: ProjectWorkspaceView, options?
     forbidden_pages: workspace.planReview.forbiddenPages,
     forbidden_data: forbiddenData,
     ...(username ? { demo_username: username } : {}),
-    ...(password ? { demo_password: password } : {}),
+	...(password ? { demo_password: password } : {}),
+	...(options?.demoCredentials?.secretRef ? { demo_credential_ref: options.demoCredentials.secretRef } : {}),
   };
 }
 
@@ -1802,9 +2152,9 @@ function workspaceFromCascadeState(state: LocalCascadeState, fallback: ProjectWo
 }
 
 function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: LocalDesktopCloudRunState): ProjectWorkspaceView {
-	if (!persisted || (!persisted.upload_id && !persisted.exchange_package_id && !persisted.result_package_id)) return workspace;
+	if (!persisted || (!persisted.upload_id && !persisted.package_id && !persisted.exchange_package_id && !persisted.cloud_job_id && !persisted.result_package_id)) return workspace;
 	const status: LocalExecutionPackageStatusResponse = {
-		exchange_package_id: persisted.exchange_package_id ?? "",
+			exchange_package_id: persisted.package_id ?? persisted.exchange_package_id ?? "",
 		status: persisted.status ?? "queued",
 		...(persisted.cloud_job_id ? { cloud_job_id: persisted.cloud_job_id } : {}),
 		...(persisted.stage ? { stage: persisted.stage } : {}),
@@ -1827,9 +2177,16 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 	const mediaURLs = new Map<string, string>();
 	for (const asset of persisted.downloaded_assets ?? []) {
 		if (!asset.verified || !asset.artifact_id || !asset.file_name || !persisted.result_package_id) continue;
-		mediaURLs.set(asset.artifact_id, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/deliverable/media?result_package_id=${encodeURIComponent(persisted.result_package_id)}&file=${encodeURIComponent(asset.file_name)}`);
+		if (persisted.transport === "browser_agent_direct_v1" && !persisted.cloud_job_id) continue;
+		const mediaURL = persisted.transport === "browser_agent_direct_v1"
+			? `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/artifact/media?job_id=${encodeURIComponent(persisted.cloud_job_id ?? "")}&file=${encodeURIComponent(asset.file_name)}`
+			: `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/cloud/deliverable/media?result_package_id=${encodeURIComponent(persisted.result_package_id)}&file=${encodeURIComponent(asset.file_name)}`;
+		mediaURLs.set(asset.artifact_id, mediaURL);
 	}
-	if (persisted.result_downloaded) restored = ackWorkspaceAssets(restored, mediaURLs);
+	if (persisted.result_downloaded) {
+		const acknowledgedAt = persisted.acked_at ?? (persisted.transport === "browser_agent_direct_v1" ? undefined : persisted.updated_at);
+		restored = ackWorkspaceAssets(restored, mediaURLs, acknowledgedAt);
+	}
 	else if (mediaURLs.size) restored = {
 		...restored,
 		assets: restored.assets.map((asset) => {
@@ -1850,14 +2207,47 @@ function restoreDesktopCloudRun(workspace: ProjectWorkspaceView, persisted?: Loc
 			requested_at: persisted.result_review.updated_at,
 		} : undefined);
 	}
-	return {
+	const finalWorkspace: ProjectWorkspaceView = {
 		...restored,
 		cloudRun: {
 			...restored.cloudRun,
+			...(persisted.transport === "browser_agent_direct_v1" ? { transport: "browser_agent_direct_v1" as const } : {}),
+			...(persisted.package_id ? { packageID: persisted.package_id } : {}),
+			...(persisted.lease_id ? { leaseID: persisted.lease_id } : {}),
+			...(persisted.data_port ? { dataPort: persisted.data_port } : {}),
+			...(persisted.lease_expires_at ? { leaseExpiresAt: persisted.lease_expires_at } : {}),
+			...(persisted.waiting_reason ? { waitingReason: persisted.waiting_reason } : {}),
+			...(persisted.blocking_error_code ? { blockingErrorCode: persisted.blocking_error_code } : {}),
+			...(persisted.next_action ? { nextAction: persisted.next_action } : {}),
+			...(persisted.requires_reapproval !== undefined ? { requiresReapproval: persisted.requires_reapproval } : {}),
+			...(persisted.reunderstanding_issues ? { reunderstandingIssues: mapDirectReunderstandingIssues(persisted.reunderstanding_issues) } : {}),
+			...(persisted.diagnostic_digest_sha256 ? { diagnosticDigestSHA256: persisted.diagnostic_digest_sha256 } : {}),
+			...(persisted.package_digest_sha256 ? { packageDigestSHA256: persisted.package_digest_sha256 } : {}),
+			...(persisted.graph_digest_sha256 ? { graphDigestSHA256: persisted.graph_digest_sha256 } : {}),
+			...(persisted.bundle_hash_sha256 ? { bundleHashSHA256: persisted.bundle_hash_sha256 } : {}),
+			...(persisted.plan_hash_sha256 ? { planHashSHA256: persisted.plan_hash_sha256 } : {}),
+			...(persisted.approval_subject_digest_sha256 ? { approvalSubjectDigestSHA256: persisted.approval_subject_digest_sha256 } : {}),
+			...(persisted.confidence_assessment_hash ? { confidenceAssessmentHash: persisted.confidence_assessment_hash } : {}),
+			...(persisted.direct_artifacts ? { directArtifacts: persisted.direct_artifacts.map((artifact) => ({ artifactID: artifact.artifact_id, ...(artifact.role ? { role: artifact.role } : {}), ...(artifact.kind ? { kind: artifact.kind } : {}), fileName: artifact.file_name, ...(artifact.mime_type ? { mimeType: artifact.mime_type } : {}), sha256: artifact.sha256, sizeBytes: artifact.size_bytes })) } : {}),
 			...(persisted.result_package_id ? { resultPackageID: persisted.result_package_id } : {}),
 			...(persisted.last_event_id ? { lastEventID: persisted.last_event_id } : {}),
 		},
 	};
+	if (persisted.blocking_error_code === "reunderstanding_required") {
+		return {
+			...finalWorkspace,
+			stage: "script_repair",
+			status: "script_repair_required",
+			packagePreview: {
+				...finalWorkspace.packagePreview,
+				packageDigest: "",
+				approvalSubjectDigest: "",
+				confidenceAssessmentHash: "",
+				blockedReasons: [...new Set([...finalWorkspace.packagePreview.blockedReasons, "Browser Agent 要求重新理解；旧执行包审批已失效。"])],
+			},
+		};
+	}
+	return finalWorkspace;
 }
 
 function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, lifecycle: LocalCloudLifecycleResult): ProjectWorkspaceView {
@@ -1909,6 +2299,21 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
 }
 
 function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: LocalClientExecutionPackageBuild): ProjectWorkspaceView {
+	const {
+		cloudJobID: _cloudJobID,
+		exchangePackageID: _exchangePackageID,
+		resultPackageID: _resultPackageID,
+		resultPackage: _resultPackage,
+		failureDiagnostic: _failureDiagnostic,
+		repairRequest: _repairRequest,
+		blockingErrorCode: _blockingErrorCode,
+		nextAction: _nextAction,
+		requiresReapproval: _requiresReapproval,
+		reunderstandingIssues: _reunderstandingIssues,
+		diagnosticDigestSHA256: _diagnosticDigestSHA256,
+		directArtifacts: _directArtifacts,
+		...cloudRunBase
+	} = workspace.cloudRun;
   return {
     ...workspace,
     stage: "package_approval",
@@ -1929,7 +2334,7 @@ function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: Loca
 	  blockedReasons: build.package.confidence_summary?.blocking_reasons ?? workspace.packagePreview.blockedReasons,
     },
     cloudRun: {
-      ...workspace.cloudRun,
+	  ...cloudRunBase,
       packageID: build.package.package_id ?? workspace.cloudRun.packageID,
       status: "not_uploaded",
       stage: "local_generated",
@@ -2041,6 +2446,145 @@ function workspaceWithCloudStatus(workspace: ProjectWorkspaceView, status: Local
     },
     status,
   });
+}
+
+function workspaceWithDirectUpload(workspace: ProjectWorkspaceView, result: LocalDirectUploadResult): ProjectWorkspaceView {
+  const receipt = result.receipt;
+	const {
+		resultPackageID: _resultPackageID,
+		resultPackage: _resultPackage,
+		failureDiagnostic: _failureDiagnostic,
+		repairRequest: _repairRequest,
+		blockingErrorCode: _blockingErrorCode,
+		waitingReason: _waitingReason,
+		nextAction: _nextAction,
+		requiresReapproval: _requiresReapproval,
+		reunderstandingIssues: _reunderstandingIssues,
+		directArtifacts: _directArtifacts,
+		resultReview: _resultReview,
+		resultDownloaded: _resultDownloaded,
+		...cloudRunBase
+	} = workspace.cloudRun;
+  return {
+    ...workspace,
+    stage: "cloud_run",
+    status: "cloud_running",
+    packagePreview: {
+      ...workspace.packagePreview,
+      packageID: result.build.package.package_id,
+      packageDigest: result.build.package_digest_sha256,
+      buildStatus: result.build.build_status,
+      encrypted: true,
+      ipAllowlistAcknowledged: true,
+    },
+    cloudRun: {
+	  ...cloudRunBase,
+      transport: "browser_agent_direct_v1",
+      packageID: receipt.package_id,
+      // Keep exchangePackageID only as a v1 persisted-state compatibility key;
+      // all direct reads and UI labels use the authoritative packageID.
+      exchangePackageID: receipt.package_id,
+      cloudJobID: receipt.job_id,
+      leaseID: result.lease.lease_id,
+      dataPort: result.lease.data_port,
+      leaseExpiresAt: result.lease.expires_at,
+      status: mapCloudRunStatus(receipt.status),
+      stage: receipt.stage,
+      message: "执行包已通过短期加密会话发送给 Browser Agent。",
+      currentStep: "等待 Browser Agent 领取执行包",
+      progress: 5,
+      retryCount: 0,
+      stageHistory: localLifecycleStagesFromPartial("server_intake"),
+	  packageDigestSHA256: result.build.package_digest_sha256,
+	  graphDigestSHA256: result.build.package.reproducibility?.graph_hash_sha256 ?? workspace.packagePreview.graphDigest,
+	  ...(result.build.package.executable_script_bundle?.reproducibility.bundle_hash_sha256 ? { bundleHashSHA256: result.build.package.executable_script_bundle.reproducibility.bundle_hash_sha256 } : {}),
+	  ...(result.build.package.executable_script_bundle?.reproducibility.plan_hash_sha256 ? { planHashSHA256: result.build.package.executable_script_bundle.reproducibility.plan_hash_sha256 } : {}),
+	  approvalSubjectDigestSHA256: result.build.approval_subject_digest_sha256,
+	  ...(result.build.package.confidence_summary?.assessment_hash ? { confidenceAssessmentHash: result.build.package.confidence_summary.assessment_hash } : {}),
+    },
+  };
+}
+
+function workspaceWithDirectLeaseReleased(workspace: ProjectWorkspaceView): ProjectWorkspaceView {
+  const { leaseID: _leaseID, dataPort: _dataPort, leaseExpiresAt: _leaseExpiresAt, ...cloudRun } = workspace.cloudRun;
+  return {
+    ...workspace,
+    cloudRun: {
+      ...cloudRun,
+      message: "直连租约已释放，终态结果和已校验素材保留。",
+      currentStep: "直连租约已安全释放",
+    },
+  };
+}
+
+function mapDirectReunderstandingIssues(issues: LocalDirectReunderstandingIssue[]) {
+	return issues.map((issue) => ({
+		issueID: issue.issue_id ?? "",
+		code: issue.code,
+		...(issue.stage_id ? { stageID: issue.stage_id } : {}),
+		...(issue.node_id ? { nodeID: issue.node_id } : {}),
+		...(issue.severity ? { severity: issue.severity } : {}),
+		...(issue.required !== undefined ? { required: issue.required } : {}),
+		...(issue.summary ? { summary: issue.summary } : {}),
+		...(issue.impact ? { impact: issue.impact } : {}),
+		...(issue.suggestion ? { suggestion: issue.suggestion } : {}),
+		...(issue.next_step ? { nextStep: issue.next_step } : {}),
+		...(issue.responsibility_domain ? { responsibilityDomain: issue.responsibility_domain } : {}),
+		...(issue.evidence_ids ? { evidenceIDs: issue.evidence_ids } : {}),
+	}));
+}
+
+function workspaceWithDirectStatus(workspace: ProjectWorkspaceView, status: LocalDirectJobStatus): ProjectWorkspaceView {
+  const cloudStatus: LocalExecutionPackageStatusResponse = {
+    exchange_package_id: status.package_id,
+    cloud_job_id: status.job_id,
+    status: status.status,
+    stage: status.stage,
+    updated_at: status.updated_at,
+	...(status.message ? { message: status.message } : {}),
+	...(status.progress_percent !== undefined ? { progress_percent: status.progress_percent } : {}),
+	...(status.result_package_id ? { result_package_id: status.result_package_id } : {}),
+  };
+	const mappedBase = workspaceWithCloudStatus(workspace, cloudStatus);
+	const mapped = status.blocking_error_code === "reunderstanding_required"
+		? {
+			...mappedBase,
+			stage: "script_repair" as const,
+			status: "script_repair_required" as const,
+			packagePreview: {
+				...mappedBase.packagePreview,
+				packageDigest: "",
+				approvalSubjectDigest: "",
+				confidenceAssessmentHash: "",
+				blockedReasons: [...new Set([...mappedBase.packagePreview.blockedReasons, "Browser Agent 要求重新理解；旧执行包审批已失效。"])],
+			},
+		}
+		: mappedBase;
+	const directArtifacts = status.artifacts === undefined
+		? workspace.cloudRun.directArtifacts
+		: status.artifacts.map((artifact) => ({
+			artifactID: artifact.artifact_id,
+			...(artifact.role ? { role: artifact.role } : {}),
+			...(artifact.kind ? { kind: artifact.kind } : {}),
+			fileName: artifact.file_name,
+			...(artifact.mime_type ? { mimeType: artifact.mime_type } : {}),
+			sha256: artifact.sha256,
+			sizeBytes: artifact.size_bytes,
+		}));
+  return {
+    ...mapped,
+    cloudRun: {
+      ...mapped.cloudRun,
+      packageID: status.package_id,
+      transport: "browser_agent_direct_v1",
+		...(status.waiting_reason ? { waitingReason: status.waiting_reason } : {}),
+		...(status.blocking_error_code ? { blockingErrorCode: status.blocking_error_code } : {}),
+		...(status.next_action ? { nextAction: status.next_action } : {}),
+		...(status.requires_reapproval !== undefined ? { requiresReapproval: status.requires_reapproval } : {}),
+		...(status.reunderstanding_issues ? { reunderstandingIssues: mapDirectReunderstandingIssues(status.reunderstanding_issues) } : {}),
+		...(directArtifacts ? { directArtifacts } : {}),
+    },
+  };
 }
 
 function workspaceWithResultPackage(workspace: ProjectWorkspaceView, resultPackage: RecordingResultPackage): ProjectWorkspaceView {
@@ -2405,7 +2949,7 @@ function lifecycleSummaryFromCloud(id: ServerLifecycleStageID, status: LocalExec
   if (id === "local_generated") return "App 已生成三合一执行包。";
   if (id === "human_approved") return "产品实战模式已自动确认审批清单。";
   if (id === "upload_initialized") return "上传会话已初始化。";
-  if (id === "package_uploaded") return status.exchange_package_id ? `exchange id: ${status.exchange_package_id}` : "执行包已上传。";
+  if (id === "package_uploaded") return status.exchange_package_id ? `package ID: ${status.exchange_package_id}` : "执行包已上传。";
   if (id === "server_intake") return "服务器接收 envelope、payload_ref 和明文 dev payload。";
   if (id === "script_validation") return "服务器校验 hash、脚本策略和 allowed domains。";
   if (id === "sandbox_preparing") return "服务器准备执行 worker 和 artifact workspace。";
@@ -2669,7 +3213,7 @@ function mockLifecycleSummary(id: ServerLifecycleStageID, workspace: ProjectWork
     return `upload id: ${workspace.cloudRun.uploadID ?? `upload_mock_${workspace.id}`}`;
   }
   if (id === "package_uploaded") {
-    return `exchange id: ${workspace.cloudRun.exchangePackageID ?? `xpkg_${workspace.id}`}`;
+    return `package ID: ${workspace.cloudRun.packageID ?? workspace.cloudRun.exchangePackageID ?? `pkg_${workspace.id}`}`;
   }
   if (id === "server_intake") {
     return "服务器只落 metadata、digest、policy 和 artifact descriptor。";
@@ -2892,8 +3436,9 @@ function mockSuccessfulRecordingResultPackage(workspace: ProjectWorkspaceView): 
   };
 }
 
-function ackWorkspaceAssets(workspace: ProjectWorkspaceView, mediaURLs = new Map<string, string>()): ProjectWorkspaceView {
+function ackWorkspaceAssets(workspace: ProjectWorkspaceView, mediaURLs = new Map<string, string>(), ackedAt?: string): ProjectWorkspaceView {
   const { lastError: _lastError, ...cloudRun } = workspace.cloudRun;
+	const acknowledged = Boolean(ackedAt);
   return {
     ...workspace,
 	assets: workspace.assets.map((asset) => {
@@ -2902,8 +3447,10 @@ function ackWorkspaceAssets(workspace: ProjectWorkspaceView, mediaURLs = new Map
 	}),
     cloudRun: {
       ...cloudRun,
-		message: "App 已下载全部成品、校验 checksum 并确认接收结果包。",
+		message: acknowledged ? "App 已下载全部成品、校验 checksum 并完成服务器 ACK。" : "App 已下载全部成品并校验 checksum，等待服务器 ACK。",
 		resultDownloaded: true,
+		resultAcknowledged: acknowledged,
+		...(ackedAt ? { ackedAt } : {}),
     },
   };
 }
@@ -2970,6 +3517,7 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
   }
   if (local.cloud_exchange) {
     health.cloudExchange = {
+      retired: Boolean(local.cloud_exchange.retired),
       configured: local.cloud_exchange.configured,
       exchangeDiscovered: Boolean(local.cloud_exchange.exchange_discovered),
       installationPaired: Boolean(local.cloud_exchange.installation_paired),
@@ -2981,6 +3529,26 @@ function runtimeHealthFromLocal(local: LocalRuntimeHealth): RuntimeHealthView {
       authMode: local.cloud_exchange.auth_mode ?? "unpaired",
       ...(local.cloud_exchange.environment ? { environment: local.cloud_exchange.environment } : {}),
       devPlaintext: Boolean(local.cloud_exchange.dev_plaintext),
+    };
+  }
+  if (local.browser_agent_direct) {
+    health.browserAgentDirect = {
+      configured: local.browser_agent_direct.configured,
+      reachable: local.browser_agent_direct.reachable,
+      tokenConfigured: local.browser_agent_direct.token_configured,
+      ...(local.browser_agent_direct.protocol_version ? { protocolVersion: local.browser_agent_direct.protocol_version } : {}),
+      ...(local.browser_agent_direct.crypto_suite ? { cryptoSuite: local.browser_agent_direct.crypto_suite } : {}),
+      ...(local.browser_agent_direct.control_url_host ? { controlURLHost: local.browser_agent_direct.control_url_host } : {}),
+      ...(local.browser_agent_direct.control_url_path ? { controlURLPath: local.browser_agent_direct.control_url_path } : {}),
+      ...(local.browser_agent_direct.installation_id_suffix ? { installationIDSuffix: local.browser_agent_direct.installation_id_suffix } : {}),
+      transport: local.browser_agent_direct.transport,
+      ...(local.browser_agent_direct.error_class ? { errorClass: local.browser_agent_direct.error_class } : {}),
+      ...(local.browser_agent_direct.supported_protocol_versions ? { supportedProtocolVersions: local.browser_agent_direct.supported_protocol_versions } : {}),
+      ...(local.browser_agent_direct.supported_package_schema_versions ? { supportedPackageSchemaVersions: local.browser_agent_direct.supported_package_schema_versions } : {}),
+      ...(local.browser_agent_direct.supported_runtimes ? { supportedRuntimes: local.browser_agent_direct.supported_runtimes } : {}),
+	  ...(local.browser_agent_direct.supported_worker_protocol_versions ? { supportedWorkerProtocolVersions: local.browser_agent_direct.supported_worker_protocol_versions } : {}),
+	  ...(local.browser_agent_direct.supported_outcome_verifier_rules_versions ? { supportedOutcomeVerifierRulesVersions: local.browser_agent_direct.supported_outcome_verifier_rules_versions } : {}),
+      ...(local.browser_agent_direct.capabilities ? { capabilities: local.browser_agent_direct.capabilities } : {}),
     };
   }
   if (local.app_capabilities) {
@@ -3677,7 +4245,7 @@ function mockExecutableScriptSource(plan: ExecutionScriptDocument, planHash: str
     const url = step.action.target.url ?? step.page_target.url ?? "";
     lines.push(`  await ctx.log.step(${JSON.stringify(step.node_id)}, ${JSON.stringify(step.title ?? step.node_id)});`);
     if (step.action.type === "navigate" && url) {
-      lines.push(`  await ctx.page.goto(${JSON.stringify(url)}, { waitUntil: "networkidle", timeout: ${step.action.timeout_ms ?? 10000} });`);
+      lines.push(`  await ctx.page.goto(${JSON.stringify(url)}, { waitUntil: "domcontentloaded", timeout: ${step.action.timeout_ms ?? 10000} });`);
     } else if (step.action.type === "click" && selector) {
       lines.push(`  await ctx.page.click(${JSON.stringify(selector)}, { timeout: ${step.action.timeout_ms ?? 10000} });`);
     } else if (step.action.type === "fill" && selector) {
@@ -3731,7 +4299,7 @@ function roleFromAction(action: string): string {
 function mockBrowserAgentBusinessAcceptance(): BrowserAgentBusinessAcceptanceView {
   const stageDefinitions: Array<[string, string, string]> = [
     ["node_open_workspace", "打开项目工作台", "Create project page is visible"],
-    ["node_fill_project_name", "输入项目名称", "Project name equals Tetris Launch"],
+    ["node_fill_project_name", "输入项目名称", "Project name equals Demo Project"],
     ["node_select_build_mode", "选择构建模式", "Build mode selected"],
     ["node_submit_build", "提交构建", "Build result route is visible"],
     ["node_verify_build_result", "验证构建结果", "Build in progress is visible"],

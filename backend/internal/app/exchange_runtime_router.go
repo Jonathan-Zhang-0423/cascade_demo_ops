@@ -29,6 +29,7 @@ type executionRuntimeRequest struct {
 	RenderOutputDir    string
 	ResultCreatedAt    time.Time
 	Progress           func(stage string, message string, progress int)
+	TaskSecrets        map[string]driver.BrowserAgentTaskSecret
 }
 
 // BrowserAgentOutlineRunRequest is the Server-internal handoff to the new
@@ -44,6 +45,7 @@ type BrowserAgentOutlineRunRequest struct {
 	ResultCreatedAt    time.Time
 	Progress           func(stage string, message string, progress int)
 	EventSink          StageExecutionEventSink
+	TaskSecrets        map[string]driver.BrowserAgentTaskSecret
 }
 
 type BrowserAgentOutlineRunner interface {
@@ -92,7 +94,7 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 		result, err := r.outline.Run(ctx, BrowserAgentOutlineRunRequest{
 			Package: request.Package, RuntimePlan: runtimePlan, CredentialResolver: request.CredentialResolver, CloudJobID: request.CloudJobID,
 			RecordingOutputDir: request.RecordingOutputDir, RenderOutputDir: request.RenderOutputDir,
-			ResultCreatedAt: request.ResultCreatedAt, Progress: request.Progress, EventSink: eventSink,
+			ResultCreatedAt: request.ResultCreatedAt, Progress: request.Progress, EventSink: eventSink, TaskSecrets: request.TaskSecrets,
 		})
 		result.ExecutionRuntime = runtimeName
 		if eventSink != nil && eventSink.Count() > 0 {
@@ -104,6 +106,23 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 		}
 		if err != nil {
 			return result, err
+		}
+		// Formal Direct results must carry a replay manifest that indexes the
+		// same runtime events, validation reports and final rendered assets. Build
+		// it after the runner returns so the manifest includes the stage log and
+		// editor-facing render artifacts produced by the Outline Runner.
+		if eventSink != nil {
+			manifest, manifestErr := BuildReplayManifest(BuildReplayManifestInput{
+				Result: result, Events: eventSink.Events(), Package: *request.Package,
+				RunID: runtimePlan.RunID, EventDir: request.RecordingOutputDir,
+				CreatedAt: request.ResultCreatedAt,
+			})
+			if manifestErr != nil {
+				return model.RecordingResultPackage{}, newRuntimeExecutionError("replay_manifest_unavailable", manifestErr)
+			}
+			if err := AttachReplayManifestArtifact(&result, manifest); err != nil {
+				return model.RecordingResultPackage{}, newRuntimeExecutionError("replay_manifest_unavailable", err)
+			}
 		}
 		return result, nil
 	default:

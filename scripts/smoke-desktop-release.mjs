@@ -19,7 +19,9 @@ if (channel !== "internal") {
   const version = packageManifest.version;
   const installer = resolve(root, "dist", "release", `CascadeDemoOps-${version}-windows-x64-setup.exe`);
   assertFile(installer, "Inno Setup installer");
-  assert(runtimeManifest.control_plane?.base_url?.startsWith("https://"), `${channel} package must embed its DemoOps HTTPS control plane`);
+  assert(runtimeManifest.browser_agent_direct?.protocol_version === "browser-agent-direct-v1", `${channel} package must declare Browser Agent direct transport`);
+  assert(runtimeManifest.browser_agent_direct?.control_url_embedded === false, `${channel} package must require user-managed Browser Agent server configuration`);
+  assert(runtimeManifest.browser_agent_direct?.access_token_embedded === false, `${channel} package must not embed Browser Agent credentials`);
 }
 console.log(`Desktop release smoke passed for ${channel} channel.`);
 

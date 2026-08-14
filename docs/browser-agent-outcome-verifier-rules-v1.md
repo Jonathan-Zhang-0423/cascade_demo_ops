@@ -53,7 +53,7 @@
 | `RESULT_PACKAGE_MISMATCH` | `post_execution` | `blocking` | 是 | 结果包 `source_package_id` 与批准运行的包不一致。 | 11 |
 | `RESULT_HASH_MISMATCH` | `post_execution` | `blocking` | 是 | `AuditTrail.SourcePackageDigest` 与批准包 `SourceBundleHashSHA256` 不一致。 | 11 |
 | `REQUIRED_STAGE_NOT_COMPLETED` | `post_execution` | `blocking` | 是 | `StageApprovalPlan` 中的必需 stage 没有完成事件。 | 4 |
-| `MISSING_EVIDENCE_REFS` | `post_execution` | `warning` | 否 | `outcome_observed` 事件缺少 `evidence_refs`。 | 9 |
+| `MISSING_EVIDENCE_REFS` | `post_execution` | `blocking` | 是 | required `outcome_observed` 事件缺少 `evidence_refs`；附加 `observation_collected` 缺少引用仍为 warning。 | 9 |
 | `MISSING_TRACE_ARTIFACT` | `post_execution` | `warning` | 否 | 结果包缺少 trace 类产物。 | 10 |
 | `MISSING_SCREENSHOTS` | `post_execution` | `warning` | 否 | 结果包缺少截图证据。 | 10 |
 | `MISSING_MP4_VIDEO` | `post_execution` | `warning` | 否 | 结果包缺少 MP4 视频。 | 10 |
@@ -185,7 +185,7 @@ go test ./internal/app -run 'TestBuild.*ReplayManifest|TestBuildAndWrite' -count
 
 ## §10.4 可重放清单（Replay Manifest）示例
 
-Replay Manifest 在每次执行结束时写入 `{EventDir}/replay-manifest.json`，并以 `kind="replay_manifest"` 注册为产物。以下是一次旁路测试失败后的精简示例：
+Replay Manifest 在每次执行结束时写入 `{EventDir}/replay-manifest.json`，并以 `kind="replay_manifest"`、真实 SHA-256/size 和 delivery descriptor 注册为产物。正式 Direct Worker 上传前把清单中的本地 URI 终结为当前 job 的认证 `direct://` artifact URI 并重新计算摘要；Gateway 会解析清单与 StageEventLog，而不是只相信 artifact kind/hash，复核 run/package/bundle/policy、stage、ValidationReports、事件序列和真实 outcome evidence。正式 Direct 路径在渲染与 StageEventLog 绑定完成后生成，因此清单引用的 StepResults、ValidationReports、原始录屏、trace、最终视频和阶段日志来自同一 job/package。以下是一次旁路测试失败后的精简示例：
 
 ```json
 {

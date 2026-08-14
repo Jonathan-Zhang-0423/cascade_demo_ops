@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +62,56 @@ func TestDevHTTPBridgeGeneratesExecutionPackage(t *testing.T) {
 	}
 }
 
+func TestDevHTTPBridgeClientPackagePreflightIsLocalAndDigestBound(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	input := orchestrator.UserInput{
+		ProjectID:          "local-preflight-project",
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		ProductDescription: "展示新建项目流程",
+		TargetAudience:     "中国运营团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
+	}
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	build, err := server.service.BuildClientExecutionPackage(t.Context(), state.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestBody, err := json.Marshal(ClientExecutionPackagePreflightRequest{
+		OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256,
+		ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256,
+		ConfidenceAssessmentHash:    build.Package.ConfidenceSummary.AssessmentHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/"+url.PathEscape(state.ProjectID)+"/client-execution-package/preflight", bytes.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected preflight status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if !bridge.OK {
+		t.Fatalf("local preflight failed: %s", bridge.Error)
+	}
+	var result CloudPackagePreflightResult
+	if err := json.Unmarshal(bridge.Data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Valid || result.BuildStatus != "draft" || result.PackageDigestSHA256 != build.PackageDigestSHA256 || result.ApprovalSubjectDigestSHA256 != build.ApprovalSubjectDigestSHA256 {
+		t.Fatalf("unexpected local preflight result: %+v", result)
+	}
+}
+
 func TestDevHTTPBridgeReadsLocalRepoSummary(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	repoPath := createDevBridgeFixtureRepo(t)
@@ -68,7 +119,7 @@ func TestDevHTTPBridgeReadsLocalRepoSummary(t *testing.T) {
 		Mode:               model.AppModeDesktop,
 		ProductURL:         "https://app.example.com",
 		LocalRepoPath:      repoPath,
-		ProductDescription: "展示团队邀请流程",
+		ProductDescription: "展示新建项目流程",
 		TargetAudience:     "中国运营团队",
 		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
 	}})
@@ -516,15 +567,27 @@ func TestDevHTTPBridgeRejectsForeignOriginBeforeCredentialMutation(t *testing.T)
 }
 
 func TestBuildClientExecutionPackageRedactsCredentialTextBeforePreflight(t *testing.T) {
-	server := newTestDevHTTPServer(t)
-	repoPath := createDevBridgeFixtureRepo(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestDevHTTPServerWithRepository(t, repoRoot)
+	server.readDemoCredential = func(ref string) (credentialstore.DemoCredential, error) {
+		if ref != "dev-http-redaction" {
+			return credentialstore.DemoCredential{}, errors.New("credential not found")
+		}
+		return credentialstore.DemoCredential{Username: "demo.user@example.test", Password: "FixtureOnly987"}, nil
+	}
+	product := newAuthenticatedWorkspaceTestServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
 		Mode:               model.AppModeDesktop,
-		ProductURL:         "https://cascadeai.cn",
-		LocalRepoPath:      repoPath,
+		ProductURL:         product.URL,
 		ProductDescription: "演示登录（10s，账号demo.user@example.test密码FixtureOnly987），然后新建项目。",
 		TargetAudience:     "运营",
-		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://cascadeai.cn")},
+		AllowedDomains:     []string{"127.0.0.1"},
+		DemoUsername:       "demo.user@example.test",
+		DemoPassword:       "FixtureOnly987",
+		DemoCredentialRef:  "credential://demo/dev-http-redaction",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -609,6 +672,30 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	}
 }
 
+func TestBuildClientExecutionPackagePreviewDigestIsStable(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode: model.AppModeDesktop, ProductURL: "https://app.example.com",
+		ProductDescription: "创建项目并启动构建。", TargetAudience: "普通用户",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://app.example.com")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	first, err := buildClientExecutionPackageFromState(&state, "org_test", time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := buildClientExecutionPackageFromState(&state, "org_test", time.Unix(200, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PackageDigestSHA256 != second.PackageDigestSHA256 || first.ApprovalSubjectDigestSHA256 != second.ApprovalSubjectDigestSHA256 {
+		t.Fatalf("unchanged preview digests must be stable: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestBlockingMissingEvidenceCannotBeDowngradedToWarning(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	pkg.ExecutableScriptBundle.StageApprovalPlan.UncertaintyReport = []model.StageUncertainty{{ID: "missing_business", Kind: "missing_evidence", Summary: "关键业务证据缺失", Blocking: true}}
@@ -648,6 +735,43 @@ func TestBuildClientExecutionPackageRejectsInjectedCodeSelectorInPageOnlyMode(t 
 	var preflight *packagePreflightError
 	if !errors.As(err, &preflight) || len(preflight.Findings) == 0 || preflight.Findings[0].ID != "source_evidence_leakage" {
 		t.Fatalf("expected source_evidence_leakage preflight, got %T: %v", err, err)
+	}
+}
+
+func TestPageOnlyPackageRetainsRequirementsAndStripsSourceExecutionEvidence(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	repoPath := createDevBridgeFixtureRepo(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		Mode: model.AppModeDesktop, ProductURL: "https://app.example.com", LocalRepoPath: repoPath,
+		ProductDescription: "展示新建项目并进入工作台。", TargetAudience: "普通用户",
+		MustShow: []string{"新建项目", "工作台状态"}, MustNotShow: []string{"API Key"},
+		ForbiddenPages: []string{"/billing"}, ForbiddenData: []string{"客户邮箱"},
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL("https://app.example.com")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	if state.SourceBinding == nil || state.SourceBinding.EffectiveMode != model.ProductSourceModePageOnly {
+		t.Fatalf("fixture must enter page-only mode: %+v", state.SourceBinding)
+	}
+	if state.ProjectContext == nil || state.ProjectContext.Inputs == nil || len(state.ProjectContext.Inputs.Requirements) != 5 {
+		t.Fatalf("structured requirements were not retained in page-only state: %+v", state.ProjectContext)
+	}
+	build, err := buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if build.Package.WorkflowGraph == nil || len(build.Package.WorkflowGraph.Requirements) != 5 {
+		t.Fatalf("page-only package lost structured requirements: %+v", build.Package.WorkflowGraph)
+	}
+	if model.ClientPackageContainsSourceDerivedExecutionEvidence(&build.Package) {
+		t.Fatalf("page-only package retained source-derived execution evidence at %v", packageSourceEvidenceLocations(&build.Package))
+	}
+	for _, requirement := range build.Package.WorkflowGraph.Requirements {
+		if requirement.Kind != "must_show" && requirement.Required {
+			t.Fatalf("negative safety constraint was counted as positive coverage: %+v", requirement)
+		}
 	}
 }
 
@@ -890,7 +1014,7 @@ func TestPrepareProductRunReadsMatchedLocalProjectAndStopsAtDraftApproval(t *tes
 		Mode:               model.AppModeDesktop,
 		ProductURL:         "https://app.example.com",
 		LocalRepoPath:      repoPath,
-		ProductDescription: "展示团队邀请流程。",
+		ProductDescription: "展示新建项目流程。",
 		TargetAudience:     "中国运营团队",
 	}})
 	if err != nil {
@@ -1154,6 +1278,34 @@ func TestDesktopProfileDoesNotExposeDevExchangeRunRoutes(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("desktop profile must not expose local dev recording run route, got status %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestDesktopProfileRejectsLegacyExchangeProjectRoutes(t *testing.T) {
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile: config.ProfileDesktop, Environment: "production", Mode: model.AppModeDesktop,
+		DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "cascade_demoops.db"),
+		DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"),
+		LogRoot: filepath.Join(root, "logs"), ResourceRoot: root, DevRepoRoot: root, SidecarPaths: map[string]string{},
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewDevHTTPServer(service)
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/project_legacy/cloud/init", strings.NewReader(`{"risk_confirmed":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("legacy exchange rejection should use bridge response, got %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if bridge.OK || !strings.Contains(bridge.Error, "legacy_exchange_disabled") {
+		t.Fatalf("legacy exchange route was not rejected: %+v", bridge)
 	}
 }
 
@@ -1481,8 +1633,19 @@ func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
 }
 
 func newTestDevHTTPServerWithEnvironment(t *testing.T, environment string) *DevHTTPServer {
+	return newTestDevHTTPServerWithEnvironmentAndRepository(t, environment, "")
+}
+
+func newTestDevHTTPServerWithRepository(t *testing.T, repoRoot string) *DevHTTPServer {
+	return newTestDevHTTPServerWithEnvironmentAndRepository(t, "test", repoRoot)
+}
+
+func newTestDevHTTPServerWithEnvironmentAndRepository(t *testing.T, environment, repoRoot string) *DevHTTPServer {
 	t.Helper()
 	root := t.TempDir()
+	if strings.TrimSpace(repoRoot) == "" {
+		repoRoot = root
+	}
 	service, err := NewService(config.AppRuntimeConfig{
 		Profile:         config.ProfileDev,
 		Environment:     environment,
@@ -1494,7 +1657,7 @@ func newTestDevHTTPServerWithEnvironment(t *testing.T, environment string) *DevH
 		CacheRoot:       filepath.Join(root, "cache"),
 		LogRoot:         filepath.Join(root, "logs"),
 		ResourceRoot:    root,
-		DevRepoRoot:     root,
+		DevRepoRoot:     repoRoot,
 		SidecarPaths:    map[string]string{},
 		DatabaseURL:     "postgres://user:secret@example/db",
 		LLMMode:         config.LLMModeDeterministic,

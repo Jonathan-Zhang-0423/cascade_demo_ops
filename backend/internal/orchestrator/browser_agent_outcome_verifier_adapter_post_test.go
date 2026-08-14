@@ -261,13 +261,13 @@ func TestValidatePostExecution_MissingEvidenceRefs(t *testing.T) {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
 
-	// Missing evidence_refs is a warning, not blocking
+	// Required outcome observations without evidence are blocking.
 	foundCheck := false
 	for _, check := range report.Checks {
 		if check.Code == "MISSING_EVIDENCE_REFS" {
 			foundCheck = true
-			if check.Severity != model.FindingSeverityWarning {
-				t.Errorf("Missing evidence refs should be warning, got %s", check.Severity)
+			if check.Severity != model.FindingSeverityBlocking || !check.Required {
+				t.Errorf("Required outcome evidence refs should be blocking, got severity=%s required=%v", check.Severity, check.Required)
 			}
 		}
 	}

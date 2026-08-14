@@ -393,6 +393,16 @@ func (pev *PreExecutionValidator) buildSelectorCheck(stage model.StageApprovalSt
 		NodeID:        nodeID,
 		Confidence:    0.8,
 	}
+	if stage.RuntimeAdaptive && strings.TrimSpace(stage.Interaction.Target.Selector) != "" && !preExecTargetHasFormalPrimarySelector(stage.Interaction.Target) {
+		check.Target = stage.Interaction.Target.Selector
+		check.Required = true
+		check.Executed = true
+		check.Passed = false
+		check.Details = "runtime-adaptive primary selector is not represented by a complete evidence-bound candidate"
+		check.RiskLevel = "critical"
+		check.Confidence = 0.1
+		return check
+	}
 	sel, selType, selConf, present := preExecEffectiveSelector(stage)
 	check.Target = sel
 	if present {
@@ -625,12 +635,19 @@ func preExecHostAllowed(host string, allowed []string) bool {
 func preExecEffectiveSelector(stage model.StageApprovalStage) (selector, selectorType string, confidence float64, present bool) {
 	target := stage.Interaction.Target
 	if target.Selector != "" {
-		return target.Selector, "primary", 0.9, true
+		if !stage.RuntimeAdaptive {
+			return target.Selector, "primary", 0.9, true
+		}
+		for _, candidate := range target.SelectorAlternatives {
+			if model.SelectorCandidateHasFormalProvenance(candidate) && preExecCandidateMatchesSelector(candidate, target.Selector) {
+				return target.Selector, "primary_evidence_bound", maxFloat(candidate.Confidence, 0.8), true
+			}
+		}
 	}
 	bestVal := ""
 	bestConf := 0.0
 	for _, cand := range target.SelectorAlternatives {
-		if cand.Value == "" {
+		if cand.Value == "" || !model.SelectorCandidateHasFormalProvenance(cand) {
 			continue
 		}
 		if bestVal == "" || cand.Confidence > bestConf {
@@ -645,6 +662,33 @@ func preExecEffectiveSelector(stage model.StageApprovalStage) (selector, selecto
 		return "[data-testid=\"" + target.TestID + "\"]", "testid", 0.7, true
 	}
 	return "", "", 0, false
+}
+
+func preExecTargetHasFormalPrimarySelector(target model.ActionTarget) bool {
+	for _, candidate := range target.SelectorAlternatives {
+		if model.SelectorCandidateHasFormalProvenance(candidate) && preExecCandidateMatchesSelector(candidate, target.Selector) {
+			return true
+		}
+	}
+	return false
+}
+
+func preExecCandidateMatchesSelector(candidate model.SelectorCandidate, selector string) bool {
+	if strings.EqualFold(strings.TrimSpace(candidate.Value), strings.TrimSpace(selector)) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(candidate.Kind), "testid") {
+		return false
+	}
+	compact := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(selector, "\"", "'"), " ", ""))
+	return strings.Contains(compact, "data-testid='"+strings.ToLower(strings.TrimSpace(candidate.Value))+"'")
+}
+
+func maxFloat(left, right float64) float64 {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 // preExecBlockingUncertaintiesForStage collects plan-level blocking

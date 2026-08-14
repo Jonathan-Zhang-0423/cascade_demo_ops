@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,7 +30,15 @@ type RuntimeConfigView struct {
 	ModelProviders         map[string]ProviderCredentialView `json:"model_providers"`
 	ModelTaskRoutes        map[string]ModelTaskRouteView     `json:"model_task_routes"`
 	CloudExchange          CloudExchangeRuntimeView          `json:"cloud_exchange"`
+	BrowserAgentDirect     DirectTransportRuntimeView        `json:"browser_agent_direct"`
 	AppCapabilities        AppCapabilitiesRuntimeView        `json:"app_capabilities"`
+}
+
+func (s *Service) RuntimeConfigView(ctx context.Context) RuntimeConfigView {
+	view := NewRuntimeConfigView(s.RuntimeConfig(), s.ExchangeIdentityStatus(ctx))
+	direct, _ := s.DirectTransportStatus(ctx)
+	view.BrowserAgentDirect = direct
+	return view
 }
 
 type ProviderCredentialView struct {
@@ -49,6 +58,11 @@ type ModelTaskRouteView struct {
 }
 
 type CloudExchangeRuntimeView struct {
+	// Retired is true when the legacy DemoOps Exchange transport is unavailable
+	// to the shipped Desktop runtime.  The fields below are retained for v1
+	// persisted-state compatibility only and must not be interpreted as an
+	// upload capability when Retired is true.
+	Retired            bool   `json:"retired"`
 	Configured         bool   `json:"configured"`
 	ExchangeDiscovered bool   `json:"exchange_discovered"`
 	InstallationPaired bool   `json:"installation_paired"`
@@ -135,6 +149,16 @@ func developerUIEnabled(profile config.RuntimeProfile) bool {
 }
 
 func cloudExchangeRuntimeView(runtime config.AppRuntimeConfig, exchangeStatus ExchangeIdentityStatus) CloudExchangeRuntimeView {
+	retired := runtime.Profile == config.ProfileDesktop && runtime.Environment != "test"
+	if retired {
+		return CloudExchangeRuntimeView{
+			Retired:      true,
+			Configured:   false,
+			AuthMode:     "retired",
+			Environment:  runtime.Environment,
+			DevPlaintext: false,
+		}
+	}
 	host := ""
 	path := ""
 	if exchangeStatus.BaseURLHost != "" {
@@ -151,6 +175,7 @@ func cloudExchangeRuntimeView(runtime config.AppRuntimeConfig, exchangeStatus Ex
 		authMode = "unpaired"
 	}
 	return CloudExchangeRuntimeView{
+		Retired:            false,
 		Configured:         exchangeStatus.SessionValid || runtime.CloudExchangeBaseURL != "" || exchangeStatus.ExchangeDiscovered,
 		ExchangeDiscovered: exchangeStatus.ExchangeDiscovered || runtime.CloudExchangeBaseURL != "",
 		InstallationPaired: exchangeStatus.InstallationPaired,

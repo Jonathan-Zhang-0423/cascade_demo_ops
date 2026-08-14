@@ -21,6 +21,7 @@ import { VideoEditor } from "./VideoEditor";
 import { AssistantConversationPanel, AssistantWidget } from "./AssistantWidget";
 import {
   canUploadExecutionPackage,
+	beginGraphRevision,
 	executionServerBlockedReason,
   lifecycleStagesFromWorkspace,
   lifecycleStatusLabel,
@@ -97,13 +98,16 @@ export function App() {
   const [checklist, setChecklist] = useState<ApprovalChecklistState>(initialChecklist);
   const [selectedNodeID, setSelectedNodeID] = useState(workspace.planReview.graph.nodes[0]?.id ?? "");
   const [isRunningProduct, setIsRunningProduct] = useState(false);
+	const [graphDirty, setGraphDirty] = useState(false);
+	const [graphSaveError, setGraphSaveError] = useState("");
   const [agentPrompt, setAgentPrompt] = useState("");
   const [configurationSession, setConfigurationSession] = useState<{ scopeKey: string; initialMessage: string }>();
 
   const selectedNode = workspace.planReview.graph.nodes.find((node) => node.id === selectedNodeID) ?? workspace.planReview.graph.nodes[0];
-	const serverBlockedReason = executionServerBlockedReason(runtimeHealthResolved, runtimeHealth?.cloudExchange?.sessionValid);
+	const serverBlockedReason = executionServerBlockedReason(runtimeHealthResolved, runtimeHealth?.browserAgentDirect);
   const blockedReasons = [
     ...packageApprovalBlockedReasons(workspace.packagePreview, checklist, workspace.sourceConnections),
+	...(graphDirty ? ["执行图有未保存修改，请先保存并重新生成执行包预览。"] : []),
 	...(serverBlockedReason ? [serverBlockedReason] : []),
   ];
   const canUpload = blockedReasons.length === 0 && canUploadExecutionPackage(workspace.packagePreview, checklist, workspace.sourceConnections);
@@ -126,6 +130,11 @@ export function App() {
   useEffect(() => {
     void refreshProjects();
   }, [bridge]);
+
+	useEffect(() => {
+		if (workspace.cloudRun.blockingErrorCode !== "reunderstanding_required") return;
+		setChecklist((current) => resetApprovalChecklistForRepair(current));
+	}, [workspace.cloudRun.blockingErrorCode]);
 
   useEffect(() => {
     if (!shouldResumeCloudRun(workspace, selectedProjectID)) return;
@@ -172,6 +181,8 @@ export function App() {
     setSelectedProjectID(result.data.id);
     setSelectedNodeID(result.data.planReview.graph.nodes[0]?.id ?? "");
     setChecklist(initialChecklist);
+	setGraphDirty(false);
+	setGraphSaveError("");
     setDemoCredentials({ username: "", password: "" });
     if (!preserveAssistantSession) setConfigurationSession(undefined);
     setProjectsError("");
@@ -184,25 +195,53 @@ export function App() {
   }
 
   function patchNode(nodeID: string, patch: Partial<GraphNode>) {
+	const revision = beginGraphRevision(workspace.planReview.graph, nodeID, patch, initialChecklist);
     setWorkspace((current) => ({
       ...current,
       planReview: {
         ...current.planReview,
-        graph: updateGraphNode(current.planReview.graph, nodeID, patch),
+		graph: revision.graph,
       },
     }));
+	setGraphDirty(revision.graphDirty);
+	setGraphSaveError("");
+	setChecklist(revision.checklist);
   }
 
-  function bridgeRunOptions() {
+	async function saveGraphRevision() {
+		if (!graphDirty || isRunningProduct) return;
+		setIsRunningProduct(true);
+		setGraphSaveError("");
+		const result = await bridge.reviseWorkflowGraph(workspace, `graph-revision-${workspace.id}-${Date.now()}`);
+		if (result.ok && result.data) {
+			setWorkspace(result.data);
+			setGraphDirty(false);
+			setChecklist(initialChecklist);
+		} else {
+			setGraphSaveError(result.error ?? "执行图保存失败");
+		}
+		setIsRunningProduct(false);
+	}
+
+  async function prepareBridgeRunOptions() {
     const username = demoCredentials.username.trim();
     const password = demoCredentials.password;
     if (!username && !password) {
       return undefined;
     }
-    return {
+	if (!username || !password) {
+		throw new Error("测试账号和密码必须同时填写。");
+	}
+	const credentialRef = `project-${workspace.id.replace(/[^A-Za-z0-9_.-]+/g, "-").slice(0, 80)}`;
+	const stored = await bridge.storeDemoCredential(credentialRef, username, password);
+	if (!stored.ok || !stored.data?.configured) {
+		throw new Error(stored.error ?? "测试账号无法保存到 Windows 凭据库。");
+	}
+	return {
       demoCredentials: {
         ...(username ? { username } : {}),
         ...(password ? { password } : {}),
+		secretRef: stored.data.secretRef,
       },
     };
   }
@@ -303,11 +342,13 @@ export function App() {
     const poller = window.setInterval(() => {
       void pollRuntimeEvents();
     }, 1500);
-    try {
+	try {
+	  const runOptions = await prepareBridgeRunOptions();
       const result = await bridge.runProductLifecycle({
         ...workspace,
         packagePreview: { ...workspace.packagePreview, ipAllowlistAcknowledged: true },
-      }, bridgeRunOptions());
+      }, runOptions);
+	  setDemoCredentials({ username: "", password: "" });
       window.clearInterval(poller);
       await pollRuntimeEvents();
       if (result.ok && result.data) {
@@ -337,7 +378,10 @@ export function App() {
           message: "产品实战自动流程失败",
           detail: message,
         }));
-      }
+	  }
+	} catch (error) {
+	  const message = error instanceof Error ? error.message : "测试账号无法安全保存或运行。";
+	  setWorkspace((current) => appendRuntimeLog({ ...current, cloudRun: { ...current.cloudRun, status: "failed", lastError: message, currentStep: message, message } }, { level: "error", message: "产品实战准备失败", detail: message }));
     } finally {
       window.clearInterval(poller);
       setIsRunningProduct(false);
@@ -356,8 +400,8 @@ export function App() {
     setIsRunningDiagnostics(false);
   }
 
-  async function configureControlPlane(baseURL: string) {
-    const result = await bridge.configureControlPlane(baseURL);
+  async function configureControlPlane(baseURL: string, accessToken: string) {
+    const result = await bridge.configureControlPlane(baseURL, accessToken);
     if (result.ok && result.data) {
       setRuntimeHealth(result.data);
       return "";
@@ -404,7 +448,9 @@ export function App() {
     setWorkspace((current) => appendRuntimeLog(current, {
       level: "info",
       message: "审批已确认，开始上传",
-      detail: `当前审批绑定执行包摘要 ${current.packagePreview.approvalSubjectDigest ?? current.packagePreview.packageDigest}。`,
+       detail: current.packagePreview.approvalSubjectDigest
+         ? `当前审批绑定对象 digest ${current.packagePreview.approvalSubjectDigest}。`
+         : "当前审批对象 digest 尚未生成，上传将被阻断。",
     }));
     const result = await bridge.approveAndUploadPackage({
       ...workspace,
@@ -497,6 +543,18 @@ export function App() {
     setIsRunningProduct(false);
   }
 
+  async function releaseDirectLease() {
+    setIsRunningProduct(true);
+    const result = await bridge.releaseDirectBrowserAgentLease(workspace);
+    if (result.ok && result.data) {
+      setWorkspace((current) => appendRuntimeLog(result.data!, { level: "success", message: "安全执行会话已释放", detail: "终态任务和已校验素材仍保留。" }));
+      void refreshProjects();
+    } else {
+      setWorkspace((current) => appendRuntimeLog({ ...current, cloudRun: { ...current.cloudRun, lastError: result.error ?? "直连租约释放失败" } }, { level: "error", message: "直连租约未释放", detail: result.error ?? "未知错误" }));
+    }
+    setIsRunningProduct(false);
+  }
+
   function submitAgentPrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = agentPrompt.trim();
@@ -568,6 +626,9 @@ export function App() {
           onChecklistChange={setChecklist}
           onSelectNode={setSelectedNodeID}
           onPatchNode={patchNode}
+		  graphDirty={graphDirty}
+		  graphSaveError={graphSaveError}
+		  onSaveGraphRevision={saveGraphRevision}
           onUpload={() => uploadPackage(true)}
 		  onConfigureControlPlane={configureControlPlane}
           onCloudSuccess={() => simulateCloudSuccess(true)}
@@ -575,6 +636,7 @@ export function App() {
           onRepairScript={() => repairFailedScript(true)}
           onApproveAssets={approveAssets}
           onReviewAssets={reviewAssets}
+          onReleaseDirectLease={releaseDirectLease}
           onContinuePageOnly={async () => {
             const binding = workspace.sourceBinding;
             if (!binding) return;
@@ -673,7 +735,7 @@ export function App() {
                     onRepairScript={repairFailedScript}
                   />
                 ) : null}
-                {activeNav === "project_library" || activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={approveAssets} onReview={reviewAssets} /> : null}
+                {activeNav === "project_library" || activeNav === "assets" ? <AssetReview workspace={workspace} onDownload={approveAssets} onReview={reviewAssets} onReleaseLease={releaseDirectLease} /> : null}
                 {activeNav === "editor" ? <VideoEditor /> : null}
                 {activeNav === "settings" ? (
                   <SettingsPanel
@@ -717,13 +779,17 @@ type ProjectAgentWorkspaceProps = {
   onChecklistChange: (state: ApprovalChecklistState) => void;
   onSelectNode: (id: string) => void;
   onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
+	graphDirty: boolean;
+	graphSaveError: string;
+	onSaveGraphRevision: () => void;
   onUpload: () => void;
-	onConfigureControlPlane: (baseURL: string) => Promise<string>;
+	onConfigureControlPlane: (baseURL: string, accessToken: string) => Promise<string>;
   onCloudSuccess: () => void;
   onCloudFailure: () => void;
   onRepairScript: () => void;
   onApproveAssets: () => void;
   onReviewAssets: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
+  onReleaseDirectLease: () => void;
   onContinuePageOnly: () => void;
   assistantScopeKey?: string;
   assistantInitialMessage?: string;
@@ -744,6 +810,9 @@ function ProjectAgentWorkspace({
   onChecklistChange,
   onSelectNode,
   onPatchNode,
+	graphDirty,
+	graphSaveError,
+	onSaveGraphRevision,
   onUpload,
 	onConfigureControlPlane,
   onCloudSuccess,
@@ -751,6 +820,7 @@ function ProjectAgentWorkspace({
   onRepairScript,
   onApproveAssets,
   onReviewAssets,
+  onReleaseDirectLease,
   onContinuePageOnly,
   assistantScopeKey,
   assistantInitialMessage,
@@ -824,17 +894,17 @@ function ProjectAgentWorkspace({
               <div><span>下一步</span><strong>{nextAction.title}</strong><p>{nextAction.description}</p></div>
               {nextAction.kind === "review_plan" ? <button type="button" className="primary-action" onClick={() => setWorkstationView("approval")}>进入上传审批</button> : null}
               {nextAction.kind === "repair" ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onRepairScript}>生成修复包</button> : null}
-              {nextAction.kind === "review_result" && !workspace.cloudRun.resultDownloaded ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onApproveAssets}>{isGeneratingPackage ? "校验中…" : "下载并校验"}</button> : null}
+              {nextAction.kind === "review_result" && !workspace.cloudRun.resultAcknowledged ? <button type="button" className="primary-action" disabled={isGeneratingPackage} onClick={onApproveAssets}>{isGeneratingPackage ? "校验中…" : workspace.cloudRun.resultDownloaded ? "重试服务器 ACK" : "下载、校验并 ACK"}</button> : null}
               {nextAction.kind === "complete" ? <button type="button" className="secondary-action" onClick={() => setWorkstationView("editor")}>在 Editor 中打开</button> : null}
             </section>
           ) : null}
           {workstationView === "overview" ? <ProjectOverviewWorkstation workspace={workspace} {...(assistantSession ? { assistantSession } : {})} onContinueConfiguration={() => setMobileChatOpen(true)} /> : null}
           {workstationView === "evidence" ? <UnderstandingStagePanel workspace={workspace} onSuggestChange={(text) => { setAssistantSuggestion({ id: `${Date.now()}-${text}`, text }); setMobileChatOpen(true); }} onContinuePageOnly={onContinuePageOnly} /> : null}
-          {workstationView === "plan" ? <PlanReviewPanel workspace={workspace} selectedNodeID={selectedNodeID} onSelectNode={onSelectNode} onPatchNode={onPatchNode} /> : null}
+		  {workstationView === "plan" ? <PlanReviewPanel workspace={workspace} selectedNodeID={selectedNodeID} onSelectNode={onSelectNode} onPatchNode={onPatchNode} graphDirty={graphDirty} graphSaveError={graphSaveError} onSaveGraphRevision={onSaveGraphRevision} /> : null}
 		  {workstationView === "approval" ? <PackageApproval workspace={workspace} checklist={checklist} blockedReasons={blockedReasons} canUpload={canUpload} isLocalMode={bridge.mode === "local"} {...(runtimeHealth ? { runtimeHealth } : {})} runtimeHealthResolved={runtimeHealthResolved} onChecklistChange={onChecklistChange} onUpload={onUpload} onConfigureControlPlane={onConfigureControlPlane} onCloudSuccess={onCloudSuccess} onCloudFailure={onCloudFailure} onRepairScript={onRepairScript} /> : null}
           {workstationView === "execution" ? <div className="section-stack"><CloudRunPanel workspace={workspace} /><RuntimeLogPanel workspace={workspace} /></div> : null}
           {workstationView === "repair" ? <div className="section-stack"><FailureDiagnosticPanel workspace={workspace} onRepairScript={onRepairScript} /><ScriptRepairPanel workspace={workspace} /></div> : null}
-		  {workstationView === "assets" ? <AssetReview workspace={workspace} busy={isGeneratingPackage} onDownload={onApproveAssets} onReview={onReviewAssets} /> : null}
+          {workstationView === "assets" ? <AssetReview workspace={workspace} busy={isGeneratingPackage} onDownload={onApproveAssets} onReview={onReviewAssets} onReleaseLease={onReleaseDirectLease} /> : null}
           {workstationView === "editor" ? <div className="project-editor-workstation"><VideoEditor /></div> : null}
           {isGeneratingPackage ? <div className="project-workstation-progress"><span className="status-dot ok" />Cascade 正在更新工作台…</div> : null}
         </section>
@@ -1658,14 +1728,22 @@ function PlanReviewPanel({
   selectedNodeID,
   onSelectNode,
   onPatchNode,
+	graphDirty = false,
+	graphSaveError = "",
+	onSaveGraphRevision = () => undefined,
 }: {
   workspace: ProjectWorkspaceView;
   selectedNodeID: string;
   onSelectNode: (id: string) => void;
   onPatchNode: (id: string, patch: Partial<GraphNode>) => void;
+	graphDirty?: boolean;
+	graphSaveError?: string;
+	onSaveGraphRevision?: () => void;
 }) {
   return (
     <div className="section-stack">
+	  {graphDirty ? <div className="notice-card warning"><strong>执行图有未保存修改</strong><p>保存后会重新生成执行包和 digest，原审批将失效。</p><button type="button" className="primary-action" onClick={onSaveGraphRevision}>保存并重新生成预览</button></div> : null}
+	  {graphSaveError ? <div className="notice-card error"><strong>执行图保存失败</strong><p>{graphSaveError}</p></div> : null}
       <GraphReviewTable workspace={workspace} selectedNodeID={selectedNodeID} onSelectNode={onSelectNode} onPatchNode={onPatchNode} />
       <section className="table-section">
         <SectionTitle title="录制策略" meta="RecordingRunSpec 预览" />
@@ -1707,6 +1785,28 @@ function CloudRunPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
         <div className="execution-progress-value"><strong>{Math.max(0, Math.min(workspace.cloudRun.progress, 100))}%</strong><span>{cloudStatusLabel(workspace.cloudRun.status)}</span></div>
         <div className="progress-track"><span style={{ width: `${Math.max(0, Math.min(workspace.cloudRun.progress, 100))}%` }} /></div>
       </section>
+	  {workspace.cloudRun.transport === "browser_agent_direct_v1" ? <section className="table-section">
+		<SectionTitle title="Browser Agent 直连" meta={workspace.cloudRun.cloudJobID ? "已分配任务" : "等待上传"} />
+		<div className="settings-grid">
+		  <Fact label="当前阶段" value={workspace.cloudRun.stage ?? "等待上传"} />
+		  <Fact label="短期租约" value={workspace.cloudRun.leaseID ? `…${workspace.cloudRun.leaseID.slice(-12)}` : "尚未申请"} />
+		  <Fact label="租约到期" value={workspace.cloudRun.leaseExpiresAt ? formatTimestamp(workspace.cloudRun.leaseExpiresAt) : "—"} />
+		  <Fact label="Browser Agent Job" value={workspace.cloudRun.cloudJobID ?? "等待服务器接收"} />
+		  <Fact label="返回素材" value={`${workspace.cloudRun.directArtifacts?.length ?? 0} 个`} />
+		  <Fact label="等待原因" value={workspace.cloudRun.waitingReason ?? "无"} />
+		  <Fact label="阻断代码" value={workspace.cloudRun.blockingErrorCode ?? "无"} />
+		  <Fact label="下一步" value={workspace.cloudRun.nextAction ?? "等待服务器状态"} />
+		  <Fact label="需要重新审批" value={workspace.cloudRun.requiresReapproval ? "是" : "否"} />
+		</div>
+	  </section> : null}
+	  {workspace.cloudRun.reunderstandingIssues?.length ? <section className="table-section">
+		<SectionTitle title="需要重新理解的问题" meta={`${workspace.cloudRun.reunderstandingIssues.length} 项结构化阻断`} />
+		<div className="blocked-list">{workspace.cloudRun.reunderstandingIssues.map((issue) => (
+		  <span key={`${issue.code}-${issue.stageID ?? "global"}-${issue.nodeID ?? "global"}`}>
+			{issue.stageID ? `${issue.stageID} · ` : ""}{issue.summary || issue.code}{issue.suggestion ? `；建议：${issue.suggestion}` : ""}
+		  </span>
+		))}</div>
+	  </section> : null}
       <ServerLifecyclePanel workspace={workspace} />
     </div>
   );
@@ -1734,7 +1834,7 @@ function ScriptRepairPanel({ workspace }: { workspace: ProjectWorkspaceView }) {
 }
 
 function ResultReviewPanel({ workspace, onApprove }: { workspace: ProjectWorkspaceView; onApprove: () => void }) {
-  return <AssetReview workspace={workspace} onDownload={onApprove} onReview={() => undefined} />;
+  return <AssetReview workspace={workspace} onDownload={onApprove} onReview={() => undefined} onReleaseLease={() => undefined} />;
 }
 
 function MetricsRow({ workspace }: { workspace: ProjectWorkspaceView }) {
@@ -1890,7 +1990,7 @@ function PackageApproval({
 	runtimeHealthResolved: boolean;
   onChecklistChange: (state: ApprovalChecklistState) => void;
   onUpload: () => void;
-	onConfigureControlPlane: (baseURL: string) => Promise<string>;
+	onConfigureControlPlane: (baseURL: string, accessToken: string) => Promise<string>;
   onCloudSuccess: () => void;
   onCloudFailure: () => void;
   onRepairScript: () => void;
@@ -1900,7 +2000,8 @@ function PackageApproval({
   }
   const bundle = workspace.executableScriptBundle;
 	const stages = [...(bundle?.stage_approval_plan?.stages ?? [])].sort((left, right) => left.order - right.order);
-	const connected = runtimeHealth?.cloudExchange?.sessionValid === true;
+	const direct = runtimeHealth?.browserAgentDirect;
+	const connected = direct?.configured === true && direct.tokenConfigured === true && direct.reachable === true;
 	const requiredConfirmations = [
 		!checklist.userApprovedPlan,
 		!checklist.ipAllowlistAcknowledged && !workspace.packagePreview.ipAllowlistAcknowledged,
@@ -1913,7 +2014,8 @@ function PackageApproval({
 		...(workspace.packagePreview.readiness === "blocked" ? ["执行包证据确信度未达到上传要求，请返回理解阶段补充材料。"] : []),
 		...workspace.sourceConnections.filter((source) => source.status === "blocked").map((source) => `${source.label} 仍处于阻塞状态。`),
 	];
-	const readinessLabel = workspace.packagePreview.readiness === "ready" ? "证据充分" : workspace.packagePreview.readiness === "review_required" ? "需要重点复核" : "不可上传";
+	const runtimeEvidencePending = workspace.packagePreview.confidenceWarnings?.some((warning) => warning.includes("Browser Agent") && warning.includes("运行时"));
+	const readinessLabel = workspace.packagePreview.readiness === "ready" ? (runtimeEvidencePending ? "合同可执行" : "证据充分") : workspace.packagePreview.readiness === "review_required" ? (runtimeEvidencePending ? "合同待复核" : "需要重点复核") : "不可上传";
 
   return (
 	<div className="section-stack approval-workspace">
@@ -1951,9 +2053,17 @@ function PackageApproval({
 		</div>
 	  </section>
 
-	  {!runtimeHealthResolved || !connected ? <ControlPlaneConnectionCard {...(runtimeHealth ? { runtimeHealth } : {})} resolved={runtimeHealthResolved} onConfigure={onConfigureControlPlane} /> : <div className="approval-server-ready"><span className="status-dot ok" /><div><strong>执行服务器已连接</strong><small>{cloudExchangeLabel(runtimeHealth)}</small></div></div>}
+	  {!runtimeHealthResolved || !connected ? <ControlPlaneConnectionCard {...(runtimeHealth ? { runtimeHealth } : {})} resolved={runtimeHealthResolved} onConfigure={onConfigureControlPlane} /> : <div className="approval-server-ready"><span className="status-dot ok" /><div><strong>Ubuntu Browser Agent 服务器已连接</strong><small>{browserAgentDirectLabel(runtimeHealth)}</small></div></div>}
+	  <div className="approval-summary-grid">
+		<ApprovalSummaryCard label="直连协议" value={direct?.reachable ? "健康检查通过" : "不可达"} detail={direct?.protocolVersion ?? "browser-agent-direct-v1"} />
+		<ApprovalSummaryCard label="安全传输" value={direct?.tokenConfigured ? "令牌已入系统凭据库" : "未配置令牌"} detail={direct?.cryptoSuite ?? "AES-256-GCM + HKDF-SHA256"} />
+		<ApprovalSummaryCard label="包预检" value={workspace.packagePreview.readiness === "ready" ? "已通过" : workspace.packagePreview.readiness === "review_required" ? "需复核" : "未通过"} detail={workspace.packagePreview.approvalSubjectDigest ? "当前 digest 已生成" : "等待生成正式 digest"} />
+		<ApprovalSummaryCard label="上传与执行" value={workspace.cloudRun.cloudJobID ? cloudStatusLabel(workspace.cloudRun.status) : "尚未上传"} detail={workspace.cloudRun.cloudJobID ? `Browser Agent job ${workspace.cloudRun.cloudJobID.slice(-12)}` : "审批后才建立短期安全执行会话"} />
+	  </div>
 
-	  {workspace.packagePreview.confidenceWarnings?.length ? <div className="notice-card warning"><strong>需要重点复核</strong><p>{workspace.packagePreview.confidenceWarnings.slice(0, 3).join("；")}</p></div> : null}
+	  {workspace.packagePreview.confidenceWarnings?.length ? <div className="notice-card warning"><strong>{runtimeEvidencePending ? "运行时证据待采集" : "需要重点复核"}</strong><p>{workspace.packagePreview.confidenceWarnings.slice(0, 3).join("；")}</p></div> : null}
+	  {workspace.cloudRun.blockingErrorCode === "reunderstanding_required" ? <div className="notice-card warning"><strong>原执行包审批已失效</strong><p>Browser Agent 的运行时事实表明当前业务理解需要重新生成。旧 Job 已终止；请根据下方结构化问题调整方案，并对新的 package ID 与 digest 重新审批。</p></div> : null}
+	  {workspace.cloudRun.reunderstandingIssues?.length ? <div className="blocked-list">{workspace.cloudRun.reunderstandingIssues.map((issue) => <span key={`${issue.code}-${issue.stageID ?? "global"}-${issue.nodeID ?? "global"}`}>{issue.stageID ? `${issue.stageID} · ` : ""}{issue.summary || issue.code}{issue.nextStep ? `；下一步：${issue.nextStep}` : ""}</span>)}</div> : null}
 	  {workspace.cloudRun.lastError ? <div className="error-banner">{workspace.cloudRun.lastError}</div> : null}
 	  {systemBlockers.length ? <div className="blocked-list">{[...new Set(systemBlockers)].map((reason) => <span key={reason}>{reason}</span>)}</div> : null}
 
@@ -1964,7 +2074,7 @@ function PackageApproval({
 		  <ApprovalCheck checked={checklist.sourceSummaryOnlyAcknowledged} label="确认只上传摘要、hash 和已批准证据，不上传完整源码" onChange={() => toggle("sourceSummaryOnlyAcknowledged")} />
 		  {workspace.packagePreview.credentialGrants.length ? <ApprovalCheck checked={checklist.credentialGrantAcknowledged} label="已复核临时账号权限、用途和过期范围" onChange={() => toggle("credentialGrantAcknowledged")} /> : null}
 		  <ApprovalCheck checked={checklist.redactionsReviewed} label="已复核禁止页面、禁止数据与打码策略" onChange={() => toggle("redactionsReviewed")} />
-		  <ApprovalCheck checked={checklist.ipAllowlistAcknowledged || workspace.packagePreview.ipAllowlistAcknowledged} label="已确认目标环境允许 DemoOps 执行服务器访问" onChange={() => toggle("ipAllowlistAcknowledged")} />
+		  <ApprovalCheck checked={checklist.ipAllowlistAcknowledged || workspace.packagePreview.ipAllowlistAcknowledged} label="已确认目标环境允许 Ubuntu Browser Agent 服务器访问" onChange={() => toggle("ipAllowlistAcknowledged")} />
 		</div>
 	  </section>
 
@@ -1990,22 +2100,24 @@ function ApprovalCheck({ checked, label, onChange }: { checked: boolean; label: 
 	return <label className={`approval-check ${checked ? "checked" : ""}`}><input type="checkbox" checked={checked} onChange={onChange} /><span>{checked ? "✓" : ""}</span><strong>{label}</strong></label>;
 }
 
-function ControlPlaneConnectionCard({ runtimeHealth, resolved, onConfigure }: { runtimeHealth?: RuntimeHealthView; resolved: boolean; onConfigure: (baseURL: string) => Promise<string> }) {
+function ControlPlaneConnectionCard({ runtimeHealth, resolved, onConfigure }: { runtimeHealth?: RuntimeHealthView; resolved: boolean; onConfigure: (baseURL: string, accessToken: string) => Promise<string> }) {
 	const [baseURL, setBaseURL] = useState("");
+	const [accessToken, setAccessToken] = useState("");
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState("");
 	async function submit(event: FormEvent<HTMLFormElement>) {
 		event.preventDefault();
 		setSaving(true);
-		const nextError = await onConfigure(baseURL.trim());
+		const nextError = await onConfigure(baseURL.trim(), accessToken);
 		setError(nextError);
+		if (!nextError) setAccessToken("");
 		setSaving(false);
 	}
 	return <section className="approval-server-card">
-		<div><span>{resolved ? runtimeHealth?.cloudExchange?.configured ? "地址已保存，握手未完成" : "需要连接" : "正在检查"}</span><strong>{resolved ? "连接 DemoOps 执行服务器" : "正在读取执行服务器配置…"}</strong><p>连接会立即验证服务可达性并完成安装身份握手。使用独立 HTTPS 控制面；通过 SSH 转发时可填写 `http://127.0.0.1:端口`。</p></div>
-		<form onSubmit={submit}><input value={baseURL} onChange={(event) => setBaseURL(event.currentTarget.value)} placeholder="https://control.demoops.example" aria-label="DemoOps 执行服务器地址" autoComplete="url" disabled={!resolved || saving} /><button type="submit" className="primary-action" disabled={!resolved || saving || !baseURL.trim()}>{saving ? "连接中…" : "连接并继续"}</button></form>
+		<div><span>{resolved ? runtimeHealth?.browserAgentDirect?.configured ? "配置已保存，协议尚未就绪" : "需要连接" : "正在检查"}</span><strong>{resolved ? "连接 Ubuntu Browser Agent 服务器" : "正在读取执行服务器配置…"}</strong><p>访问令牌只写入操作系统凭据库。当前包审批通过后，App 才建立短期加密执行会话并上传。</p></div>
+		<form onSubmit={submit}><input value={baseURL} onChange={(event) => setBaseURL(event.currentTarget.value)} placeholder="https://browser-agent.example:18443" aria-label="Browser Agent 控制地址" autoComplete="url" disabled={!resolved || saving} /><input type="password" value={accessToken} onChange={(event) => setAccessToken(event.currentTarget.value)} placeholder="服务器访问令牌（仅保存到系统凭据库）" aria-label="Browser Agent 访问令牌" autoComplete="off" disabled={!resolved || saving} /><button type="submit" className="primary-action" disabled={!resolved || saving || !baseURL.trim() || !accessToken.trim()}>{saving ? "验证中…" : "保存并验证"}</button></form>
 		{error ? <div className="error-banner">{error}</div> : null}
-		{runtimeHealth?.cloudExchange?.baseURLHost ? <small>当前：{cloudExchangeLabel(runtimeHealth)}</small> : null}
+		{runtimeHealth?.browserAgentDirect?.controlURLHost ? <small>当前：{browserAgentDirectLabel(runtimeHealth)}</small> : null}
 	</section>;
 }
 
@@ -2225,29 +2337,36 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
+function formatTimestamp(value: string): string {
+	const parsed = new Date(value);
+	return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("zh-CN", { hour12: false });
+}
+
 function AssetReview({
   workspace,
   busy = false,
   showDownloadAction = true,
   onDownload,
+  onReleaseLease,
   onReview,
 }: {
   workspace: ProjectWorkspaceView;
   busy?: boolean;
   showDownloadAction?: boolean;
   onDownload: () => void;
+  onReleaseLease: () => void;
   onReview: (decision: "approved" | "reedit_requested" | "rerecord_requested", summary?: string) => void;
 }) {
   const [reviewSummary, setReviewSummary] = useState("");
   const review = workspace.cloudRun.resultReview;
   const videoAsset = workspace.assets.find((asset) => asset.kind === "video");
   const hasResult = Boolean(workspace.cloudRun.resultPackageID || workspace.cloudRun.resultPackage);
-  const canReview = hasResult && workspace.cloudRun.resultDownloaded === true;
+  const canReview = hasResult && workspace.cloudRun.resultDownloaded === true && workspace.cloudRun.resultAcknowledged === true;
   const revisionSummaryRequired = reviewSummary.trim().length === 0;
   return (
     <div className="asset-layout">
       <section className="video-panel">
-        <SectionTitle title="演示视频" meta={workspace.cloudRun.resultDownloaded ? "已下载并校验" : hasResult ? "等待下载" : "待生成"} />
+        <SectionTitle title="演示视频" meta={workspace.cloudRun.resultAcknowledged ? "已校验并 ACK" : workspace.cloudRun.resultDownloaded ? "已校验，等待 ACK" : hasResult ? "等待下载" : "待生成"} />
 		{workspace.cloudRun.lastError ? <div className="error-banner" role="alert"><strong>操作未完成</strong><span>{workspace.cloudRun.lastError}</span></div> : null}
 		{videoAsset?.mediaURL ? <video className="review-video" controls preload="metadata" src={videoAsset.mediaURL}>当前环境无法播放该视频。</video> : <div className="video-frame"><div className="play-symbol">{hasResult ? "待下载" : "生成中"}</div><span>{videoAsset?.title ?? "最终演示视频"}</span></div>}
       </section>
@@ -2262,7 +2381,7 @@ function AssetReview({
           ))}
         </ol>
         <div className="result-review-actions">
-          {showDownloadAction ? <button type="button" className="primary-action" disabled={busy || !hasResult || workspace.cloudRun.resultDownloaded} onClick={onDownload}>{busy ? "正在安全下载…" : workspace.cloudRun.resultDownloaded ? "成品已就绪，可以播放审核" : "下载成片并开始审核"}</button> : workspace.cloudRun.resultDownloaded ? <div className="input-note">成片已安全下载并校验，可以播放和提交审核决定。</div> : null}
+          {showDownloadAction ? <button type="button" className="primary-action" disabled={busy || !hasResult || workspace.cloudRun.resultAcknowledged} onClick={onDownload}>{busy ? "正在安全接收…" : workspace.cloudRun.resultAcknowledged ? "成品已确认接收，可以播放审核" : workspace.cloudRun.resultDownloaded ? "重试服务器 ACK" : "下载、校验并确认接收"}</button> : workspace.cloudRun.resultAcknowledged ? <div className="input-note">成片已安全下载、校验并完成服务器 ACK，可以播放和提交审核决定。</div> : null}
           <label className="field-row">
             <span>审核意见</span>
             <textarea rows={3} value={reviewSummary} onChange={(event) => setReviewSummary(event.currentTarget.value)} placeholder="可对时间点、字幕、节奏或缺失素材进行说明" />
@@ -2273,6 +2392,7 @@ function AssetReview({
             <button type="button" className="secondary-action" disabled={busy || !canReview || revisionSummaryRequired} onClick={() => onReview("rerecord_requested", reviewSummary)}>缺少素材，重新录制</button>
           </div>
           {canReview && revisionSummaryRequired ? <div className="input-note">提交重新剪辑或重新录制前，请填写具体修改意见；直接通过无需填写。</div> : null}
+          {workspace.cloudRun.leaseID ? <button type="button" className="secondary-action" disabled={busy || !canReview || workspace.cloudRun.status === "running"} onClick={onReleaseLease}>释放已完成任务的安全执行会话</button> : null}
           {review ? <div className="input-note">已提交：{review.decision === "approved" ? "通过" : review.decision === "reedit_requested" ? "重新剪辑" : "重新录制"}{review.summary ? ` · ${review.summary}` : ""}</div> : null}
         </div>
       </section>
@@ -2298,12 +2418,13 @@ function SettingsPanel({
   diagnosticsError: string;
   isRunningDiagnostics: boolean;
   onRunDiagnostics: () => void;
-  onConfigureControlPlane: (baseURL: string) => Promise<string>;
+  onConfigureControlPlane: (baseURL: string, accessToken: string) => Promise<string>;
   onConfigurePlanningModel: (provider: string, model: string, apiKey: string, proxyURL: string) => Promise<string>;
   onDeletePlanningModel: (provider: string) => Promise<string>;
   developerUI: boolean;
 }) {
   const [controlPlaneURL, setControlPlaneURL] = useState("");
+  const [controlPlaneAccessToken, setControlPlaneAccessToken] = useState("");
   const [controlPlaneError, setControlPlaneError] = useState("");
   const [controlPlaneSaving, setControlPlaneSaving] = useState(false);
   const [modelProvider, setModelProvider] = useState("kimi");
@@ -2331,7 +2452,7 @@ function SettingsPanel({
     route.provider,
     route.model,
   ]);
-  const exchangeLabel = cloudExchangeLabel(runtimeHealth);
+  const directLabel = browserAgentDirectLabel(runtimeHealth);
   const planningRoute = runtimeHealth?.modelTaskRoutes.planning;
   const planningProvider = planningRoute ? runtimeHealth?.modelProviders[planningRoute.provider] : undefined;
   const planningDiagnostic = planningRoute
@@ -2347,9 +2468,12 @@ function SettingsPanel({
   async function saveControlPlane(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setControlPlaneSaving(true);
-    const error = await onConfigureControlPlane(controlPlaneURL.trim());
+    const error = await onConfigureControlPlane(controlPlaneURL.trim(), controlPlaneAccessToken);
     setControlPlaneError(error);
-    if (!error) setControlPlaneURL("");
+    if (!error) {
+	  setControlPlaneURL("");
+	  setControlPlaneAccessToken("");
+	}
     setControlPlaneSaving(false);
   }
   async function savePlanningModel(event: FormEvent<HTMLFormElement>) {
@@ -2377,14 +2501,15 @@ function SettingsPanel({
         <Fact label="禁止页面" value={workspace.planReview.forbiddenPages.join(", ")} />
         <Fact label="LLM 模式" value={runtimeHealth?.llmMode ?? "auto"} />
         <Fact label="模型适配版本" value={runtimeHealth?.modelAdapterVersion ?? "domestic-llm-adapter-v1"} />
-        <Fact label="云端安全连接" value={exchangeLabel} />
+        <Fact label="Browser Agent 直连" value={directLabel} />
       </div>
       <section className="table-section">
-        <SectionTitle title="执行服务器" meta={runtimeHealth?.cloudExchange?.sessionValid ? "已连接" : runtimeHealth?.cloudExchange?.configured ? "地址已保存，未连接" : "需要连接"} />
+        <SectionTitle title="Ubuntu Browser Agent 服务器" meta={runtimeHealth?.browserAgentDirect?.reachable ? "协议可达" : runtimeHealth?.browserAgentDirect?.configured ? "配置已保存，未连通" : "需要连接"} />
         <form className="control-plane-form" onSubmit={saveControlPlane}>
-          <div><strong>{runtimeHealth?.cloudExchange?.configured ? `${runtimeHealth.cloudExchange.baseURLHost ?? "DemoOps server"}${runtimeHealth.cloudExchange.baseURLPath ?? ""}` : "连接 DemoOps 控制面"}</strong><span>保存后会立即检查服务可达性并完成安装身份握手。正式环境必须使用独立 HTTPS 地址；SSH 转发可使用 http://127.0.0.1:端口。这里不会保存服务器密码或 token。</span></div>
-          <input value={controlPlaneURL} onChange={(event) => setControlPlaneURL(event.currentTarget.value)} placeholder="https://control.demoops.example" aria-label="DemoOps 控制面地址" autoComplete="url" />
-          <button type="submit" className="primary-action" disabled={controlPlaneSaving || !controlPlaneURL.trim()}>{controlPlaneSaving ? "连接中…" : runtimeHealth?.cloudExchange?.sessionValid ? "更换服务器" : runtimeHealth?.cloudExchange?.configured ? "重新连接" : "连接服务器"}</button>
+          <div><strong>{runtimeHealth?.browserAgentDirect?.configured ? `${runtimeHealth.browserAgentDirect.controlURLHost ?? "Browser Agent server"}${runtimeHealth.browserAgentDirect.controlURLPath ?? ""}` : "配置 Browser Agent 直连网关"}</strong><span>使用服务器的 HTTPS 控制地址。令牌只保存到 Windows Credential Manager；执行包审批后才建立短期安全执行会话。此处不接收 SSH 密码。</span></div>
+          <input value={controlPlaneURL} onChange={(event) => setControlPlaneURL(event.currentTarget.value)} placeholder="https://browser-agent.example:18443" aria-label="Browser Agent 控制地址" autoComplete="url" />
+		  <input type="password" value={controlPlaneAccessToken} onChange={(event) => setControlPlaneAccessToken(event.currentTarget.value)} placeholder="访问令牌（仅保存到系统凭据库）" aria-label="Browser Agent 访问令牌" autoComplete="off" />
+          <button type="submit" className="primary-action" disabled={controlPlaneSaving || !controlPlaneURL.trim() || !controlPlaneAccessToken.trim()}>{controlPlaneSaving ? "验证中…" : runtimeHealth?.browserAgentDirect?.reachable ? "更换服务器" : runtimeHealth?.browserAgentDirect?.configured ? "重新验证" : "保存并验证"}</button>
         </form>
         {controlPlaneError ? <div className="error-banner" role="alert">{controlPlaneError}</div> : null}
       </section>
@@ -2646,25 +2771,13 @@ function cloudStatusLabel(status: string): string {
   return labels[status] ?? status;
 }
 
-function cloudExchangeLabel(runtimeHealth: RuntimeHealthView | undefined): string {
-  const exchange = runtimeHealth?.cloudExchange;
-  if (!exchange) {
-    return "未配对云端";
-  }
-  const target = [exchange.baseURLHost, exchange.baseURLPath].filter(Boolean).join("");
-  if (exchange.authMode === "dev_token") {
-    return `${target || "云端"} · 旧联调令牌兼容`;
-  }
-  if (exchange.devPlaintext) {
-    return `${target || "云端"} · 联调明文通道，仅用于测试`;
-  }
-  if (exchange.sessionValid) {
-    return `${target || "云端"} · 已连接 · 安装密钥已启用`;
-  }
-  if (exchange.installationPaired) {
-    return `${target || "云端"} · 会话已过期，自动刷新中`;
-  }
-  return target ? `${target} · 未配对云端` : "未配对云端";
+function browserAgentDirectLabel(runtimeHealth: RuntimeHealthView | undefined): string {
+  const direct = runtimeHealth?.browserAgentDirect;
+  if (!direct?.configured) return "尚未配置";
+  const target = [direct.controlURLHost, direct.controlURLPath].filter(Boolean).join("") || "Browser Agent 服务器";
+  if (!direct.tokenConfigured) return `${target} · 访问令牌未配置`;
+  if (!direct.reachable) return `${target} · 协议不可达${direct.errorClass ? `（${direct.errorClass}）` : ""}`;
+  return `${target} · 直连协议可达`;
 }
 
 function assetKindLabel(kind: string): string {

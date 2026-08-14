@@ -54,6 +54,11 @@ const appSurfaces = [
   },
 ];
 const serverConnectivity = {
+  primary_transport: "browser_agent_direct_v1",
+  demoops_exchange_primary: false,
+  fixed_tls_control_port: true,
+  dedicated_data_port_per_lease: true,
+  timestamp_token_authenticated_encryption: true,
   required_for_local_generation: false,
   server_recording_required: true,
   local_recording_execution: false,
@@ -72,10 +77,10 @@ const serverConnectivity = {
     "video_editing",
   ],
   reserved_interfaces: [
-    "ExchangeCapabilityResolver",
-    "ExchangeIdentityStore",
-    "ExchangeSessionManager",
-    "CloudLifecycleClient",
+    "BrowserAgentDirectClient",
+    "DirectInstallationIdentityStore",
+    "DirectLeaseManager",
+    "DirectArtifactVerifier",
   ],
 };
 

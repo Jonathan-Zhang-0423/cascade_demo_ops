@@ -26,6 +26,7 @@ type stageEventAuditLog struct {
 	artifactID   string
 	seenEventIDs map[string]bool
 	lastSequence map[string]int64
+	events       []model.StageExecutionEvent
 	count        int
 }
 
@@ -84,6 +85,7 @@ func (l *stageEventAuditLog) Append(ctx context.Context, event model.StageExecut
 	}
 	l.seenEventIDs[event.EventID] = true
 	l.lastSequence[event.RunID] = event.Sequence
+	l.events = append(l.events, event)
 	l.count++
 	return nil
 }
@@ -95,6 +97,18 @@ func (l *stageEventAuditLog) Count() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.count
+}
+
+// Events returns the immutable event snapshot used to build the replay
+// manifest. The JSONL file remains the authoritative downloadable audit log;
+// this copy only avoids reparsing it while the result package is finalized.
+func (l *stageEventAuditLog) Events() []model.StageExecutionEvent {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]model.StageExecutionEvent(nil), l.events...)
 }
 
 func (l *stageEventAuditLog) ArtifactRef() (model.ArtifactRef, error) {

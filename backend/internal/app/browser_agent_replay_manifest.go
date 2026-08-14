@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"cascade-demoops/backend/internal/model"
@@ -28,13 +29,17 @@ type BuildReplayManifestInput struct {
 func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, error) {
 	pkg := input.Package
 	result := input.Result
+	createdAt := input.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = timeNowUTC()
+	}
 
 	m := model.ReplayManifest{
 		SchemaVersion: model.ReplayManifestSchemaVersion,
 		ManifestID:    "manifest_" + safePathSegment(input.RunID),
 		RunID:         input.RunID,
 		PackageID:     pkg.PackageID,
-		CreatedAt:     input.CreatedAt,
+		CreatedAt:     createdAt,
 	}
 
 	// Hashes — derive from bundle reproducibility when available.
@@ -129,17 +134,52 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 		if step.Error != nil {
 			stage.FailureCode = step.Error.Code
 		}
-		// Observed URL / title from stage events.
+		// Bind the stage ID and most recent observed URL/title from the same
+		// immutable event stream used by StageEventLog.
 		for _, ev := range input.Events {
-			if ev.NodeID == step.NodeID && ev.Observation != nil && ev.Observation.URL != "" {
-				stage.ObservedURL = ev.Observation.URL
-				stage.ObservedTitle = ev.Observation.Title
-				break
+			if ev.NodeID != step.NodeID {
+				continue
 			}
+			if stage.StageID == "" {
+				stage.StageID = ev.StageID
+			}
+			if ev.Observation != nil {
+				if ev.Observation.URL != "" {
+					stage.ObservedURL = ev.Observation.URL
+				}
+				if ev.Observation.Title != "" {
+					stage.ObservedTitle = ev.Observation.Title
+				}
+			}
+			for _, ref := range ev.EvidenceRefs {
+				if ref.ArtifactID != "" {
+					stage.EvidenceArtifactIDs = appendUniqueReplayString(stage.EvidenceArtifactIDs, ref.ArtifactID)
+				}
+			}
+		}
+		// Carry the most restrictive stage decision and the first structured
+		// responsibility domain explaining a failed check.
+		stageReports := []model.ValidationReport{}
+		for _, report := range result.ValidationReports {
+			if report.NodeID != step.NodeID && (stage.StageID == "" || report.StageID != stage.StageID) {
+				continue
+			}
+			stageReports = append(stageReports, report)
+			if stage.FailureDomain == "" {
+				for _, check := range report.Checks {
+					if !check.Passed && check.ResponsibilityDomain != "" {
+						stage.FailureDomain = check.ResponsibilityDomain
+						break
+					}
+				}
+			}
+		}
+		if len(stageReports) > 0 {
+			stage.ValidationDecision = finalValidationDecision(stageReports)
 		}
 		// Evidence artifact IDs.
 		for _, art := range step.Artifacts {
-			stage.EvidenceArtifactIDs = append(stage.EvidenceArtifactIDs, art.ID)
+			stage.EvidenceArtifactIDs = appendUniqueReplayString(stage.EvidenceArtifactIDs, art.ID)
 		}
 		// Waived flag.
 		if input.Waiver != nil {
@@ -154,7 +194,11 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 	}
 
 	// Artifact URIs.
-	for _, art := range result.GeneratedAssets {
+	artifacts := append([]model.ArtifactRef{}, result.GeneratedAssets...)
+	if result.ExecutionTrace != nil {
+		artifacts = append(artifacts, result.ExecutionTrace.Artifacts...)
+	}
+	for _, art := range artifacts {
 		switch art.Kind {
 		case "demo_video", "mp4":
 			if m.MP4URI == "" {
@@ -188,23 +232,115 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 	agg := model.AggregateValidation(result.ValidationReports, result.StepResults)
 	m.Aggregate = &agg
 
-	// Write to disk.
+	// Set the URI before serializing so the manifest is self-describing. The
+	// local file URI is rewritten to the authenticated Direct artifact URI in
+	// the result package before it crosses the Gateway boundary.
+	manifestPath := ""
 	if input.EventDir != "" {
 		if err := os.MkdirAll(input.EventDir, 0o700); err != nil {
 			return model.ReplayManifest{}, fmt.Errorf("replay manifest: create event dir: %w", err)
 		}
-		manifestPath := filepath.Join(input.EventDir, "replay-manifest.json")
-		data, err := json.MarshalIndent(m, "", "  ")
-		if err != nil {
-			return model.ReplayManifest{}, fmt.Errorf("replay manifest: marshal: %w", err)
-		}
+		manifestPath = filepath.Join(input.EventDir, "replay-manifest.json")
+		m.ManifestURI = localFileURI(manifestPath)
+	}
+	if err := m.Validate(); err != nil {
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest: validate: %w", err)
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest: marshal: %w", err)
+	}
+	if manifestPath != "" {
 		if err := os.WriteFile(manifestPath, append(data, '\n'), 0o600); err != nil {
 			return model.ReplayManifest{}, fmt.Errorf("replay manifest: write: %w", err)
 		}
-		m.ManifestURI = localFileURI(manifestPath)
 	}
 
 	return m, nil
+}
+
+func appendUniqueReplayString(values []string, value string) []string {
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+// AttachReplayManifestArtifact makes the manifest a first-class result
+// artifact. It is deliberately shared by the formal Direct runner and the
+// local visible runner so both paths expose the same artifact identity,
+// checksum, size and editor-facing delivery descriptor.
+func AttachReplayManifestArtifact(result *model.RecordingResultPackage, manifest model.ReplayManifest) error {
+	if result == nil || strings.TrimSpace(manifest.ManifestURI) == "" {
+		return fmt.Errorf("replay manifest artifact requires a persisted manifest URI")
+	}
+	path, err := directWorkerLocalPath(manifest.ManifestURI)
+	if err != nil {
+		return fmt.Errorf("replay manifest artifact path %q: %w", manifest.ManifestURI, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("replay manifest artifact read: %w", err)
+	}
+	artifactID := "replay_manifest_" + safePathSegment(manifest.RunID)
+	localOnly := result.Delivery.RecipientKind == "local_test_only"
+	metadata := map[string]any{
+		"asset_role":      "replay_manifest",
+		"role":            "replay_manifest",
+		"include_in_demo": false,
+	}
+	encrypted := !localOnly
+	recipientKeyID := result.Delivery.RecipientKeyID
+	if localOnly {
+		metadata["dev_test_only"] = true
+		metadata["not_for_exchange_upload"] = true
+		metadata["test_only_waiver"] = true
+		if result.Delivery.ResultPackageRef.Metadata != nil {
+			if waiverID, ok := result.Delivery.ResultPackageRef.Metadata["waiver_id"]; ok {
+				metadata["waiver_id"] = waiverID
+			}
+		}
+		recipientKeyID = ""
+	}
+	artifact := model.ArtifactRef{
+		ID: artifactID, Kind: "replay_manifest", URI: manifest.ManifestURI,
+		MimeType: "application/json", SHA256: model.SHA256Hex(data), SizeBytes: int64(len(data)),
+		Sensitive: encrypted, Metadata: metadata,
+	}
+	result.GeneratedAssets = upsertReplayManifestArtifact(result.GeneratedAssets, artifact)
+	result.Delivery.AssetRefs = upsertReplayManifestDescriptor(result.Delivery.AssetRefs, model.PackageArtifactDescriptor{
+		ID: artifact.ID, Role: "replay_manifest", Kind: artifact.Kind, URI: artifact.URI,
+		MimeType: artifact.MimeType, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes,
+		Encrypted: encrypted, Sensitive: encrypted, RecipientKeyID: recipientKeyID, Metadata: metadata,
+	})
+	return nil
+}
+
+func upsertReplayManifestArtifact(values []model.ArtifactRef, artifact model.ArtifactRef) []model.ArtifactRef {
+	out := make([]model.ArtifactRef, 0, len(values)+1)
+	for _, value := range values {
+		if value.ID == artifact.ID || value.Kind == artifact.Kind {
+			continue
+		}
+		out = append(out, value)
+	}
+	return append(out, artifact)
+}
+
+func upsertReplayManifestDescriptor(values []model.PackageArtifactDescriptor, descriptor model.PackageArtifactDescriptor) []model.PackageArtifactDescriptor {
+	out := make([]model.PackageArtifactDescriptor, 0, len(values)+1)
+	for _, value := range values {
+		if value.ID == descriptor.ID || value.Kind == descriptor.Kind {
+			continue
+		}
+		out = append(out, value)
+	}
+	return append(out, descriptor)
 }
 
 // finalValidationDecision returns the most restrictive ValidationDecision seen

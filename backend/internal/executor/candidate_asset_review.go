@@ -17,19 +17,20 @@ func ReviewArkMediaCandidateAssets(source *model.ClientExecutionPackage, generat
 		sourcePackageID = generationResult.SourcePackageID
 	}
 	review := model.CandidateAssetReview{
-		SchemaVersion:     model.CandidateAssetReviewSchemaVersion,
-		ReviewID:          "candidate_asset_review_" + safeID(firstNonEmptyString(sourcePackageID, "unknown_package")),
-		CreatedAt:         createdAt,
-		SourcePackageID:   sourcePackageID,
-		Status:            "no_candidates",
-		Policy:            candidateAssetReviewPolicy(),
-		Items:             []model.CandidateAssetReviewItem{},
-		ApprovedArtifacts: []model.ArtifactRef{},
-		RejectedArtifacts: []model.ArtifactRef{},
-		Warnings:          []model.ArkMediaReadinessFinding{},
+		SchemaVersion:          model.CandidateAssetReviewSchemaVersion,
+		ReviewID:               "candidate_asset_review_" + safeID(firstNonEmptyString(sourcePackageID, "unknown_package")),
+		CreatedAt:              createdAt,
+		SourcePackageID:        sourcePackageID,
+		Status:                 "no_candidates",
+		Policy:                 candidateAssetReviewPolicy(),
+		Items:                  []model.CandidateAssetReviewItem{},
+		ApprovedArtifacts:      []model.ArtifactRef{},
+		PendingReviewArtifacts: []model.ArtifactRef{},
+		RejectedArtifacts:      []model.ArtifactRef{},
+		Warnings:               []model.ArkMediaReadinessFinding{},
 		Notes: []string{
-			"Approved candidates remain presentation-only and must not represent customer-side script steps.",
-			"Approval only allows future DemoEditPlan references; it does not automatically include generated candidates in the final video.",
+			"Media-eligible candidates remain unapproved until a user explicitly reviews their content.",
+			"User approval only allows future DemoEditPlan references; it never automatically includes generated candidates in the final video.",
 		},
 	}
 	if generationResult == nil {
@@ -50,23 +51,23 @@ func ReviewArkMediaCandidateAssets(source *model.ClientExecutionPackage, generat
 		return review
 	}
 
-	approvedCount := 0
+	eligibleCount := 0
 	for index, artifact := range generationResult.DownloadedArtifacts {
 		item, reviewedArtifact := reviewCandidateAsset(artifact)
 		review.Items = append(review.Items, item)
 		generationResult.DownloadedArtifacts[index] = reviewedArtifact
-		if item.ApprovedForDemo {
-			approvedCount++
-			review.ApprovedArtifacts = append(review.ApprovedArtifacts, reviewedArtifact)
+		if item.MediaEligible {
+			eligibleCount++
+			review.PendingReviewArtifacts = append(review.PendingReviewArtifacts, reviewedArtifact)
 		} else {
 			review.RejectedArtifacts = append(review.RejectedArtifacts, reviewedArtifact)
 		}
 	}
 	switch {
-	case approvedCount == len(generationResult.DownloadedArtifacts):
-		review.Status = "approved"
-	case approvedCount > 0:
-		review.Status = "partially_approved"
+	case eligibleCount == len(generationResult.DownloadedArtifacts):
+		review.Status = "media_eligible_awaiting_user_review"
+	case eligibleCount > 0:
+		review.Status = "partially_media_eligible_awaiting_user_review"
 	default:
 		review.Status = "rejected"
 	}
@@ -75,13 +76,14 @@ func ReviewArkMediaCandidateAssets(source *model.ClientExecutionPackage, generat
 
 func candidateAssetReviewPolicy() model.CandidateAssetReviewPolicy {
 	return model.CandidateAssetReviewPolicy{
-		DecisionMode:             "conservative_auto_review",
-		SourceMaterialPolicy:     "non_authoritative_generated_candidate",
-		AllowedKinds:             []string{"generated_video_candidate"},
-		RequiresLocalFile:        true,
-		RequiresNonAuthoritative: true,
-		RequiresPresentationOnly: true,
-		AutoIncludeInDemo:        false,
+		DecisionMode:               "media_validation_only",
+		SourceMaterialPolicy:       "non_authoritative_generated_candidate",
+		AllowedKinds:               []string{"generated_video_candidate"},
+		RequiresLocalFile:          true,
+		RequiresNonAuthoritative:   true,
+		RequiresPresentationOnly:   true,
+		AutoIncludeInDemo:          false,
+		RequiresExplicitUserReview: true,
 	}
 }
 
@@ -89,75 +91,79 @@ func reviewCandidateAsset(artifact model.ArtifactRef) (model.CandidateAssetRevie
 	reasons := []string{}
 	risks := []string{}
 	findings := []model.ArkMediaReadinessFinding{}
-	approved := true
+	mediaEligible := true
 	reviewed := artifact
 	reviewed.Metadata = cloneArtifactMetadata(reviewed.Metadata)
 
 	if artifact.Kind != "generated_video_candidate" {
-		approved = false
+		mediaEligible = false
 		findings = append(findings, candidateReviewFinding("unsupported_candidate_kind", "only generated_video_candidate can be approved for deterministic rendering", artifact.ID))
 	}
 	if !strings.HasPrefix(strings.ToLower(artifact.MimeType), "video/") {
-		approved = false
+		mediaEligible = false
 		findings = append(findings, candidateReviewFinding("unsupported_candidate_mime", "only video candidates can be approved by the current compositor", artifact.ID))
 	}
 	if !isLocalArtifactURI(artifact.URI) {
-		approved = false
+		mediaEligible = false
 		findings = append(findings, candidateReviewFinding("candidate_not_local", "candidate must be downloaded to a local artifact before approval", artifact.ID))
 	}
 	if artifact.Sensitive {
-		approved = false
+		mediaEligible = false
 		findings = append(findings, candidateReviewFinding("candidate_sensitive", "sensitive generated candidates cannot be approved for demo use", artifact.ID))
 	}
 	if artifact.SourceNodeID != "" {
-		approved = false
+		mediaEligible = false
 		findings = append(findings, candidateReviewFinding("candidate_bound_to_script_step", "generated candidates cannot be bound to customer-side script steps", artifact.ID))
 	}
 	if stringMetadataBool(artifact.Metadata, "non_authoritative") != true {
-		approved = false
+		mediaEligible = false
 		findings = append(findings, candidateReviewFinding("non_authoritative_missing", "candidate must carry non_authoritative=true", artifact.ID))
 	}
 	if artifactStringMetadata(artifact.Metadata, "source_material_policy") != "non_authoritative_generated_candidate" {
-		approved = false
+		mediaEligible = false
 		findings = append(findings, candidateReviewFinding("candidate_policy_missing", "candidate must carry non_authoritative_generated_candidate policy", artifact.ID))
 	}
 	if artifact.SHA256 == "" || artifact.SizeBytes <= 0 {
-		approved = false
+		mediaEligible = false
 		findings = append(findings, candidateReviewFinding("candidate_integrity_missing", "candidate must include sha256 and size_bytes after download", artifact.ID))
 	}
 	if !candidateArtifactHasEditorMediaProfile(artifact) {
-		approved = false
+		mediaEligible = false
 		findings = append(findings, candidateReviewFinding("candidate_media_not_normalized", "candidate must be a probed normalized derivative using the editor MP4/H.264/yuv420p/1920x1080/CFR30 profile", artifact.ID))
 	}
 
-	if approved {
+	if mediaEligible {
 		reasons = append(reasons,
 			"candidate is a local downloaded video artifact",
 			"candidate is explicitly non-authoritative and presentation-only",
 			"candidate is not bound to a customer-side script step",
 		)
-		reviewed.Metadata["approved_for_demo"] = true
-		reviewed.Metadata["approval_mode"] = "conservative_auto_review"
+		reviewed.Metadata["approved_for_demo"] = false
+		reviewed.Metadata["media_eligible"] = true
+		reviewed.Metadata["explicit_review_required"] = true
 		reviewed.Metadata["presentation_only"] = true
 	} else {
 		risks = append(risks, "candidate cannot be safely referenced by DemoEditPlan until findings are resolved")
 		reviewed.Metadata["approved_for_demo"] = false
+		reviewed.Metadata["media_eligible"] = false
 	}
 	reviewed.Metadata["include_in_demo"] = false
 	reviewed.Metadata["source_material_policy"] = "non_authoritative_generated_candidate"
 
 	item := model.CandidateAssetReviewItem{
-		ArtifactID:       artifact.ID,
-		Kind:             artifact.Kind,
-		URI:              artifact.URI,
-		MimeType:         artifact.MimeType,
-		Status:           "rejected",
-		ApprovedForDemo:  approved,
-		IncludeInDemo:    false,
-		PresentationOnly: approved,
-		Reasons:          reasons,
-		Risks:            risks,
-		Findings:         findings,
+		ArtifactID:             artifact.ID,
+		Kind:                   artifact.Kind,
+		URI:                    artifact.URI,
+		MimeType:               artifact.MimeType,
+		Status:                 "rejected",
+		ApprovedForDemo:        false,
+		MediaEligible:          mediaEligible,
+		ExplicitReviewRequired: mediaEligible,
+		IncludeInDemo:          false,
+		PresentationOnly:       mediaEligible,
+		Reasons:                reasons,
+		Risks:                  risks,
+		Findings:               findings,
 		ApprovedMetadata: map[string]any{
 			"approved_for_demo":      reviewed.Metadata["approved_for_demo"],
 			"include_in_demo":        false,
@@ -166,8 +172,8 @@ func reviewCandidateAsset(artifact model.ArtifactRef) (model.CandidateAssetRevie
 			"presentation_only":      reviewed.Metadata["presentation_only"],
 		},
 	}
-	if approved {
-		item.Status = "approved"
+	if mediaEligible {
+		item.Status = "awaiting_user_review"
 	}
 	return item, reviewed
 }

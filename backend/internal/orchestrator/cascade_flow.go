@@ -63,37 +63,79 @@ type CascadeState struct {
 	ExecutableScriptBundle   *model.ExecutableRecordingScriptBundle `json:"executable_script_bundle,omitempty"`
 	ExecutableScriptArtifact *model.ArtifactRef                     `json:"executable_script_artifact,omitempty"`
 	ApprovalMarkdownArtifact *model.ArtifactRef                     `json:"approval_markdown_artifact,omitempty"`
-	Approved                 bool                                   `json:"approved"`
-	RehearsePassRate         float64                                `json:"rehearse_pass_rate"`
-	Artifacts                *GeneratedArtifacts                    `json:"artifacts,omitempty"`
-	DesktopCloudRun          *DesktopCloudRunState                  `json:"desktop_cloud_run,omitempty"`
-	ErrorMessage             string                                 `json:"error_message,omitempty"`
-	ArchivedAt               *time.Time                             `json:"archived_at,omitempty"`
+	// ExecutionPackageGeneration is incremented when a terminal Browser Agent
+	// validation result requires App re-understanding. It keeps the next
+	// package identity distinct from the invalidated approved package while
+	// remaining optional for v1 project-state JSON.
+	ExecutionPackageGeneration int                   `json:"execution_package_generation,omitempty"`
+	Approved                   bool                  `json:"approved"`
+	RehearsePassRate           float64               `json:"rehearse_pass_rate"`
+	Artifacts                  *GeneratedArtifacts   `json:"artifacts,omitempty"`
+	DesktopCloudRun            *DesktopCloudRunState `json:"desktop_cloud_run,omitempty"`
+	ErrorMessage               string                `json:"error_message,omitempty"`
+	ArchivedAt                 *time.Time            `json:"archived_at,omitempty"`
 }
 
 // DesktopCloudRunState is the restart-safe App view of the remote execution.
 // It stores only protocol metadata and safe managed-file names, never local paths.
 type DesktopCloudRunState struct {
-	SchemaVersion     string                         `json:"schema_version"`
-	OrgID             string                         `json:"org_id,omitempty"`
-	UploadID          string                         `json:"upload_id,omitempty"`
-	ExchangePackageID string                         `json:"exchange_package_id,omitempty"`
-	CloudJobID        string                         `json:"cloud_job_id,omitempty"`
-	Status            string                         `json:"status,omitempty"`
-	Stage             string                         `json:"stage,omitempty"`
-	Message           string                         `json:"message,omitempty"`
-	ProgressPercent   int                            `json:"progress_percent,omitempty"`
-	LastEventID       string                         `json:"last_event_id,omitempty"`
-	StageHistory      []model.ExecutionStageEvent    `json:"stage_history,omitempty"`
-	FailureSummary    *model.ExecutionFailureSummary `json:"failure_summary,omitempty"`
-	Error             *model.AgentError              `json:"error,omitempty"`
-	ResultPackageID   string                         `json:"result_package_id,omitempty"`
-	ResultPackage     *model.RecordingResultPackage  `json:"result_package,omitempty"`
-	ResultDownloaded  bool                           `json:"result_downloaded,omitempty"`
-	AckedAt           *time.Time                     `json:"acked_at,omitempty"`
-	DownloadedAssets  []DesktopDownloadedAssetState  `json:"downloaded_assets,omitempty"`
-	ResultReview      *DesktopResultReviewState      `json:"result_review,omitempty"`
-	UpdatedAt         time.Time                      `json:"updated_at"`
+	SchemaVersion  string     `json:"schema_version"`
+	Transport      string     `json:"transport,omitempty"`
+	OrgID          string     `json:"org_id,omitempty"`
+	LeaseID        string     `json:"lease_id,omitempty"`
+	DataPort       int        `json:"data_port,omitempty"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	UploadID       string     `json:"upload_id,omitempty"`
+	// PackageID is the authoritative Browser Agent package identity. The
+	// exchange_package_id field below remains only as a v1 persisted-state
+	// compatibility key for older projects.
+	PackageID                   string                             `json:"package_id,omitempty"`
+	ExchangePackageID           string                             `json:"exchange_package_id,omitempty"`
+	CloudJobID                  string                             `json:"cloud_job_id,omitempty"`
+	Status                      string                             `json:"status,omitempty"`
+	Stage                       string                             `json:"stage,omitempty"`
+	Message                     string                             `json:"message,omitempty"`
+	WaitingReason               string                             `json:"waiting_reason,omitempty"`
+	BlockingErrorCode           string                             `json:"blocking_error_code,omitempty"`
+	NextAction                  string                             `json:"next_action,omitempty"`
+	RequiresReapproval          bool                               `json:"requires_reapproval,omitempty"`
+	ReunderstandingIssues       []model.DirectReunderstandingIssue `json:"reunderstanding_issues,omitempty"`
+	ProgressPercent             int                                `json:"progress_percent,omitempty"`
+	LastEventID                 string                             `json:"last_event_id,omitempty"`
+	StageHistory                []model.ExecutionStageEvent        `json:"stage_history,omitempty"`
+	FailureSummary              *model.ExecutionFailureSummary     `json:"failure_summary,omitempty"`
+	Error                       *model.AgentError                  `json:"error,omitempty"`
+	ResultPackageID             string                             `json:"result_package_id,omitempty"`
+	ResultPackage               *model.RecordingResultPackage      `json:"result_package,omitempty"`
+	DiagnosticDigestSHA256      string                             `json:"diagnostic_digest_sha256,omitempty"`
+	ResultDownloaded            bool                               `json:"result_downloaded,omitempty"`
+	AckedAt                     *time.Time                         `json:"acked_at,omitempty"`
+	DownloadedAssets            []DesktopDownloadedAssetState      `json:"downloaded_assets,omitempty"`
+	DirectArtifacts             []model.DirectArtifact             `json:"direct_artifacts,omitempty"`
+	ResultReview                *DesktopResultReviewState          `json:"result_review,omitempty"`
+	PackageDigestSHA256         string                             `json:"package_digest_sha256,omitempty"`
+	GraphDigestSHA256           string                             `json:"graph_digest_sha256,omitempty"`
+	ApprovalSubjectDigestSHA256 string                             `json:"approval_subject_digest_sha256,omitempty"`
+	ConfidenceAssessmentHash    string                             `json:"confidence_assessment_hash,omitempty"`
+	BundleHashSHA256            string                             `json:"bundle_hash_sha256,omitempty"`
+	PlanHashSHA256              string                             `json:"plan_hash_sha256,omitempty"`
+	LastRepairSourceID          string                             `json:"last_repair_source_result_id,omitempty"`
+	RepairHistory               []DesktopDirectRepairAuditState    `json:"repair_history,omitempty"`
+	UpdatedAt                   time.Time                          `json:"updated_at"`
+}
+
+type DesktopDirectRepairAuditState struct {
+	SourceResultID        string                             `json:"source_result_id"`
+	SourcePackageID       string                             `json:"source_package_id"`
+	SourceJobID           string                             `json:"source_job_id"`
+	RepairRequestID       string                             `json:"repair_request_id,omitempty"`
+	IdempotencyKey        string                             `json:"idempotency_key,omitempty"`
+	RequestDigestSHA256   string                             `json:"request_digest_sha256,omitempty"`
+	NewPackageID          string                             `json:"new_package_id,omitempty"`
+	ResultPackage         *model.RecordingResultPackage      `json:"result_package,omitempty"`
+	DownloadedAssets      []DesktopDownloadedAssetState      `json:"downloaded_assets,omitempty"`
+	ReunderstandingIssues []model.DirectReunderstandingIssue `json:"reunderstanding_issues,omitempty"`
+	CreatedAt             time.Time                          `json:"created_at"`
 }
 
 type DesktopDownloadedAssetState struct {
@@ -108,13 +150,15 @@ type DesktopDownloadedAssetState struct {
 }
 
 type DesktopResultReviewState struct {
-	Decision       string    `json:"decision"`
-	ReviewID       string    `json:"review_id,omitempty"`
-	RevisionID     string    `json:"revision_id,omitempty"`
-	RevisionAction string    `json:"revision_action,omitempty"`
-	RevisionStatus string    `json:"revision_status,omitempty"`
-	Summary        string    `json:"summary,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	Decision          string    `json:"decision"`
+	ReviewID          string    `json:"review_id,omitempty"`
+	IdempotencyKey    string    `json:"idempotency_key,omitempty"`
+	ReviewerInstallID string    `json:"reviewer_install_id,omitempty"`
+	RevisionID        string    `json:"revision_id,omitempty"`
+	RevisionAction    string    `json:"revision_action,omitempty"`
+	RevisionStatus    string    `json:"revision_status,omitempty"`
+	Summary           string    `json:"summary,omitempty"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type GeneratedArtifacts struct {
@@ -124,34 +168,37 @@ type GeneratedArtifacts struct {
 }
 
 type UserInput struct {
-	ProjectID              string                           `json:"project_id,omitempty"`
-	Mode                   model.AppMode                    `json:"mode"`
-	ProductURL             string                           `json:"product_url"`
-	GitRepoURL             string                           `json:"git_repo_url,omitempty"`
-	LocalRepoPath          string                           `json:"local_repo_path,omitempty"`
-	ProductDescription     string                           `json:"product_description,omitempty"`
-	TargetDurationSec      int                              `json:"target_duration_sec,omitempty"`
-	Code                   []model.CodeInput                `json:"code,omitempty"`
-	RequirementDocuments   []model.RequirementDocumentInput `json:"requirement_documents,omitempty"`
-	WebpageScreenshots     []model.WebpageScreenshotInput   `json:"webpage_screenshots,omitempty"`
-	TargetAudience         string                           `json:"target_audience"`
-	BrandTone              string                           `json:"brand_tone,omitempty"`
-	MustShow               []string                         `json:"must_show,omitempty"`
-	MustNotShow            []string                         `json:"must_not_show,omitempty"`
-	ForbiddenPages         []string                         `json:"forbidden_pages,omitempty"`
-	ForbiddenData          []string                         `json:"forbidden_data,omitempty"`
-	AllowedDomains         []string                         `json:"allowed_domains,omitempty"`
-	DemoUsername           string                           `json:"demo_username,omitempty"`
-	DemoPassword           string                           `json:"demo_password,omitempty"`
-	SSHHost                string                           `json:"ssh_host,omitempty"`
-	SSHPort                int                              `json:"ssh_port,omitempty"`
-	SSHUsername            string                           `json:"ssh_username,omitempty"`
-	SSHPrivateKeySecretRef string                           `json:"ssh_private_key_secret_ref,omitempty"`
-	SSHPasswordSecretRef   string                           `json:"ssh_password_secret_ref,omitempty"`
-	SSHAllowedPaths        []string                         `json:"ssh_allowed_paths,omitempty"`
-	SSHAllowedCommands     []string                         `json:"ssh_allowed_commands,omitempty"`
-	SourceBindingDecision  string                           `json:"source_binding_decision,omitempty"`
-	SourceBindingHash      string                           `json:"source_binding_hash,omitempty"`
+	ProjectID                     string                               `json:"project_id,omitempty"`
+	Mode                          model.AppMode                        `json:"mode"`
+	ProductURL                    string                               `json:"product_url"`
+	GitRepoURL                    string                               `json:"git_repo_url,omitempty"`
+	LocalRepoPath                 string                               `json:"local_repo_path,omitempty"`
+	ProductDescription            string                               `json:"product_description,omitempty"`
+	TargetDurationSec             int                                  `json:"target_duration_sec,omitempty"`
+	Code                          []model.CodeInput                    `json:"code,omitempty"`
+	RequirementDocuments          []model.RequirementDocumentInput     `json:"requirement_documents,omitempty"`
+	WebpageScreenshots            []model.WebpageScreenshotInput       `json:"webpage_screenshots,omitempty"`
+	TargetAudience                string                               `json:"target_audience"`
+	BrandTone                     string                               `json:"brand_tone,omitempty"`
+	MustShow                      []string                             `json:"must_show,omitempty"`
+	MustNotShow                   []string                             `json:"must_not_show,omitempty"`
+	Requirements                  []model.DemoRequirement              `json:"requirements,omitempty"`
+	PresentationGenerationIntents []model.PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
+	ForbiddenPages                []string                             `json:"forbidden_pages,omitempty"`
+	ForbiddenData                 []string                             `json:"forbidden_data,omitempty"`
+	AllowedDomains                []string                             `json:"allowed_domains,omitempty"`
+	DemoUsername                  string                               `json:"demo_username,omitempty"`
+	DemoPassword                  string                               `json:"demo_password,omitempty"`
+	DemoCredentialRef             string                               `json:"demo_credential_ref,omitempty"`
+	SSHHost                       string                               `json:"ssh_host,omitempty"`
+	SSHPort                       int                                  `json:"ssh_port,omitempty"`
+	SSHUsername                   string                               `json:"ssh_username,omitempty"`
+	SSHPrivateKeySecretRef        string                               `json:"ssh_private_key_secret_ref,omitempty"`
+	SSHPasswordSecretRef          string                               `json:"ssh_password_secret_ref,omitempty"`
+	SSHAllowedPaths               []string                             `json:"ssh_allowed_paths,omitempty"`
+	SSHAllowedCommands            []string                             `json:"ssh_allowed_commands,omitempty"`
+	SourceBindingDecision         string                               `json:"source_binding_decision,omitempty"`
+	SourceBindingHash             string                               `json:"source_binding_hash,omitempty"`
 }
 
 type PageVerificationCredentials struct {
@@ -417,6 +464,16 @@ func (f *CascadeFlow) Start(ctx context.Context, input UserInput) (*CascadeState
 	}
 	state.ProductMap = productMap
 	logNodeDone(ctx, state.CurrentNode, nodeStart, "ProductMapAgent 完成产品地图生成", fmt.Sprintf("pages=%d features=%d workflows=%d", len(productMap.Pages), len(productMap.Features), len(productMap.Workflows)))
+	if f.deps.BusinessStagePlanner != nil {
+		preScanStagePlan, planErr := f.deps.BusinessStagePlanner.PlanBusinessStages(ctx, project, brief, report, productMap, intelligence, nil)
+		if planErr != nil {
+			logNodeError(ctx, NodePageInteractionVerify, nodeStart, planErr)
+			return fail(state, planErr), planErr
+		}
+		if intelligence != nil {
+			intelligence.BusinessStagePlan = preScanStagePlan
+		}
+	}
 
 	state.CurrentNode = NodePageInteractionVerify
 	nodeStart = logNodeStart(ctx, state.CurrentNode)
@@ -557,6 +614,44 @@ func (f *CascadeFlow) ApproveAndContinue(ctx context.Context, state *CascadeStat
 	}
 	state.Artifacts = artifacts
 	state.Status = FlowStatusCompleted
+	return state, nil
+}
+
+// RepackageReviewedGraph persists a reviewed graph revision and rebuilds all
+// digest-bound package documents without entering the legacy rehearsal path.
+func (f *CascadeFlow) RepackageReviewedGraph(ctx context.Context, state *CascadeState, graph *model.DemoWorkflowGraph) (*CascadeState, error) {
+	if state == nil || state.ProjectContext == nil {
+		return nil, errors.New("project context is missing")
+	}
+	if graph == nil {
+		return nil, errors.New("workflow graph is missing")
+	}
+	pkg, err := f.deps.ScriptPackager.PackageScript(ctx, state.ProjectContext, state.UnderstandingReport, state.ProductMap, graph, state.ProjectIntelligence)
+	if err != nil {
+		return state, err
+	}
+	state.WorkflowGraph = graph
+	state.ScriptDocument = pkg.Document
+	state.ScriptMarkdown = pkg.Markdown
+	state.ScriptMarkdownArtifact = pkg.MarkdownArtifact
+	state.ScriptMarkdownPath = ""
+	if pkg.MarkdownArtifact != nil {
+		state.ScriptMarkdownPath = pkg.MarkdownArtifact.URI
+	}
+	state.ExecutableScriptBundle = pkg.ExecutableBundle
+	state.ExecutableScriptArtifact = nil
+	state.ApprovalMarkdownArtifact = nil
+	if pkg.ExecutableBundle != nil {
+		state.ExecutableScriptArtifact = pkg.ExecutableBundle.PlaywrightScript.Artifact
+		state.ApprovalMarkdownArtifact = pkg.ExecutableBundle.ApprovalMarkdown.Artifact
+	}
+	state.CurrentNode = NodeHumanApprove
+	state.Status = FlowStatusAwaitingHuman
+	state.Approved = false
+	state.RehearsePassRate = 0
+	state.Artifacts = nil
+	state.DesktopCloudRun = nil
+	state.ErrorMessage = ""
 	return state, nil
 }
 

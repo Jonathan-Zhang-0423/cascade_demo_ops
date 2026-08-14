@@ -99,6 +99,7 @@ func NewDevHTTPServer(service *Service) *DevHTTPServer {
 		ephemeralDemoCredentials: map[string]credentialstore.DemoCredential{},
 	}
 	if service != nil {
+		service.readDemoCredential = server.readLocalDemoCredential
 		service.SetAssistantProgressSink(server.emitProjectEvent)
 		if service.devVisibleBrowserAgent != nil {
 			service.devVisibleBrowserAgent.readDemoCredential = server.readLocalDemoCredential
@@ -117,6 +118,7 @@ func NewControlPlaneHTTPServer(service *Service) *DevHTTPServer {
 func (s *DevHTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/desktop/runtime-health", s.handleRuntimeHealth)
+	mux.HandleFunc("PUT /v1/desktop/browser-agent-direct", s.handleDirectTransportSettings)
 	mux.HandleFunc("PUT /v1/desktop/control-plane", s.handleControlPlaneSettings)
 	mux.HandleFunc("GET /v1/desktop/github-credential", s.handleGitHubCredentialStatus)
 	mux.HandleFunc("POST /v1/desktop/github-credential", s.handleStoreGitHubCredential)
@@ -280,6 +282,14 @@ func (s *DevHTTPServer) handleEditorSessionRoute(w http.ResponseWriter, r *http.
 		}
 		session, err := s.service.SaveEditorPlan(r.Context(), sessionID, request)
 		writeBridgeValue(w, session, err)
+	case r.Method == http.MethodPost && suffix == "/presentation-candidates/review":
+		var request model.EditorReviewPresentationCandidateRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		session, err := s.service.ReviewEditorPresentationCandidate(r.Context(), sessionID, request)
+		writeBridgeValue(w, session, err)
 	case r.Method == http.MethodPost && suffix == "/style-drafts":
 		var request model.EditorStyleDraftRequest
 		if err := decodeJSON(r, &request); err != nil {
@@ -390,10 +400,24 @@ func handleEditorMedia(w http.ResponseWriter, r *http.Request, service *Service,
 }
 
 func (s *DevHTTPServer) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
-	writeBridgeValue(w, NewRuntimeConfigView(s.service.RuntimeConfig(), s.service.ExchangeIdentityStatus(r.Context())), nil)
+	writeBridgeValue(w, s.service.RuntimeConfigView(r.Context()), nil)
+}
+
+func (s *DevHTTPServer) handleDirectTransportSettings(w http.ResponseWriter, r *http.Request) {
+	var request DirectTransportSettingsRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	view, err := s.service.SaveDirectTransportSettings(r.Context(), request)
+	writeBridgeValue(w, view, err)
 }
 
 func (s *DevHTTPServer) handleControlPlaneSettings(w http.ResponseWriter, r *http.Request) {
+	if s.legacyExchangeDisabled() {
+		writeBridgeValue(w, nil, errors.New("legacy_exchange_disabled: Desktop App 正式链路只允许直连 Ubuntu Browser Agent；DemoOps Exchange 已停用"))
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var request ControlPlaneSettingsRequest
 	if err := decodeJSON(r, &request); err != nil {
@@ -587,6 +611,10 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		http.NotFound(w, r)
 		return
 	}
+	if s.legacyExchangeDisabled() && (strings.HasPrefix(suffix, "/cloud/") || suffix == "/cloud-lifecycle") {
+		writeBridgeValue(w, nil, errors.New("legacy_exchange_disabled: Desktop App 正式链路只允许直连 Ubuntu Browser Agent；请使用 browser-agent-direct 接口"))
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && suffix == "":
 		state, err := s.service.LoadProject(r.Context(), projectID)
@@ -616,6 +644,14 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		projectContext, err := s.service.SaveProjectInput(r.Context(), projectID, inputs)
 		writeBridgeValue(w, projectContext, err)
+	case r.Method == http.MethodPost && suffix == "/workflow-graph/revisions":
+		var request GraphRevisionRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		result, err := s.service.ReviseWorkflowGraph(r.Context(), projectID, request)
+		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/execution-package":
 		startedAt := time.Now()
 		log.Printf("dev_bridge execution_package_start project_id=%s", projectID)
@@ -695,6 +731,68 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		build, err := s.service.BuildClientExecutionPackage(r.Context(), projectID, request.OrgID)
 		writeBridgeValue(w, build, err)
+	case r.Method == http.MethodPost && suffix == "/client-execution-package/preflight":
+		var request ClientExecutionPackagePreflightRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := decodeJSON(r, &request); err != nil {
+				writeBridgeValue(w, nil, err)
+				return
+			}
+		}
+		result, err := s.service.PreflightClientExecutionPackage(r.Context(), projectID, request)
+		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/upload":
+		var request DirectTransportUploadRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		result, err := s.service.UploadDirectExecutionPackage(r.Context(), projectID, request)
+		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/status":
+		status, err := s.service.GetDirectExecutionStatus(r.Context(), projectID, r.URL.Query().Get("job_id"))
+		writeBridgeValue(w, status, err)
+	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/result":
+		result, err := s.service.GetDirectResult(r.Context(), projectID, r.URL.Query().Get("job_id"))
+		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/reunderstand":
+		var request DirectFailureReunderstandingRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		result, err := s.service.ReunderstandDirectBrowserAgentFailure(r.Context(), projectID, request)
+		writeBridgeValue(w, result, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/artifact/download":
+		var request DirectArtifactDownloadRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		download, err := s.service.DownloadDirectArtifact(r.Context(), projectID, request)
+		if err == nil && download.ChecksumVerified {
+			download.MediaURL = "/v1/desktop/projects/" + url.PathEscape(projectID) + "/browser-agent-direct/artifact/media?job_id=" + url.QueryEscape(request.JobID) + "&file=" + url.QueryEscape(filepath.Base(download.LocalPath))
+		}
+		writeBridgeValue(w, download, err)
+	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/artifact/media":
+		s.serveVerifiedDirectArtifact(w, r, projectID)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/review":
+		var request DirectResultReviewRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		review, err := s.service.ReviewDirectResult(r.Context(), projectID, request)
+		writeBridgeValue(w, review, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/ack":
+		receipt, err := s.service.AcknowledgeDirectResult(r.Context(), projectID)
+		writeBridgeValue(w, receipt, err)
+	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/editor-materialization":
+		materialization, err := s.service.GetDirectEditorMaterialization(r.Context(), projectID)
+		writeBridgeValue(w, materialization, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/release":
+		result, err := s.service.ReleaseDirectTransportLease(r.Context(), projectID)
+		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodPost && suffix == "/cloud/init":
 		var request CloudUploadInitRequest
 		if r.Body != nil && r.ContentLength != 0 {
@@ -860,6 +958,10 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "/cloud/deliverable/media":
 		s.serveVerifiedCloudDeliverable(w, r, projectID)
 	case r.Method == http.MethodGet && suffix == "/cloud/editor-materialization":
+		if s.legacyExchangeDisabled() {
+			writeBridgeValue(w, nil, errors.New("legacy_exchange_disabled: use browser-agent-direct/editor-materialization"))
+			return
+		}
 		result, err := s.service.GetCloudEditorMaterialization(r.Context(), CloudEditorMaterializationRequest{
 			OrgID: r.URL.Query().Get("org_id"), ResultPackageID: r.URL.Query().Get("result_package_id"),
 		})
@@ -949,6 +1051,39 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// legacyExchangeDisabled keeps the retired DemoOps execution transport out of
+// the shipped Desktop App while preserving the explicitly marked test profile
+// used by compatibility fixtures. Production and development desktop builds
+// must use the direct Ubuntu Browser Agent transport.
+func (s *DevHTTPServer) legacyExchangeDisabled() bool {
+	if s == nil || s.service == nil {
+		return false
+	}
+	return s.service.runtime.Profile == config.ProfileDesktop && s.service.runtime.Environment != "test"
+}
+
+func (s *DevHTTPServer) serveVerifiedDirectArtifact(w http.ResponseWriter, r *http.Request, projectID string) {
+	jobID := strings.TrimSpace(r.URL.Query().Get("job_id"))
+	fileName := strings.TrimSpace(r.URL.Query().Get("file"))
+	if jobID == "" || fileName == "" || filepath.Base(fileName) != fileName || strings.HasSuffix(strings.ToLower(fileName), ".part") {
+		writeBridgeValue(w, nil, errors.New("verified direct artifact media reference is invalid"))
+		return
+	}
+	filePath := filepath.Join(s.service.runtime.ArtifactRoot, "desktop", "direct-downloads", safePathSegment(projectID), safePathSegment(jobID), fileName)
+	if !pathWithinRoot(filePath, filepath.Join(s.service.runtime.ArtifactRoot, "desktop", "direct-downloads")) {
+		writeBridgeValue(w, nil, errors.New("verified direct artifact path is invalid"))
+		return
+	}
+	info, err := os.Stat(filePath)
+	if err != nil || !info.Mode().IsRegular() || !verifyDownloadedDeliverableMedia(filePath) {
+		writeBridgeValue(w, nil, errors.New("verified direct artifact was not found"))
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeFile(w, r, filePath)
 }
 
 // readDevExecutionCredential resolves an opaque local credential reference for

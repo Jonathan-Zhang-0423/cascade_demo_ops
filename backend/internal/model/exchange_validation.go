@@ -30,6 +30,10 @@ func DirectPackageValidationCode(err error) string {
 	if errors.As(err, &validationErr) && validationErr.Code != "" {
 		return validationErr.Code
 	}
+	var consistencyErr *OutlineConsistencyError
+	if errors.As(err, &consistencyErr) && consistencyErr.Code != "" {
+		return consistencyErr.Code
+	}
 	return "package_validation_failed"
 }
 
@@ -75,6 +79,11 @@ func ValidateClientExecutionPackageIntake(envelope *ExchangeEnvelope, pkg *Clien
 			}
 			if digest != pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 {
 				return errors.New("human approval subject digest does not match execution package")
+			}
+		}
+		if !pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256.Empty() {
+			if err := ValidatePackageApprovalComponentDigests(*pkg); err != nil {
+				return err
 			}
 		}
 	}
@@ -308,6 +317,101 @@ func ValidateRecordingResultPackageForRender(result *RecordingResultPackage, sou
 	}
 	if err := result.ValidateDeliverySecurity(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateFormalRecordingResultArtifacts is the final App/Gateway delivery
+// gate. The OutcomeVerifier runs before rendering and may therefore report
+// these as advisory at that earlier phase; a formal completed result may not
+// cross the Direct API boundary until every requested audit artifact exists.
+func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, source *ClientExecutionPackage) error {
+	if result == nil || source == nil {
+		return errors.New("formal result and source package are required")
+	}
+	if result.Status == RecordingResultStatusFailed {
+		if result.FailureDiagnostic == nil {
+			return errors.New("failed_result_missing_diagnostic: formal failed result requires a redacted failure diagnostic")
+		}
+		if len(result.FailureDiagnostic.ScreenshotRefs) == 0 && len(result.FailureDiagnostic.TraceRefs) == 0 {
+			code := strings.ToLower(strings.TrimSpace(result.FailureDiagnostic.Error.Code))
+			infrastructure := strings.Contains(code, "session_start") || strings.Contains(code, "worker_missing") || strings.Contains(code, "node_missing") || strings.Contains(code, "stage_event_audit") || strings.Contains(code, "result_packaging") || strings.Contains(code, "render_failed") || strings.Contains(code, "infrastructure")
+			if !infrastructure {
+				return errors.New("failed_result_missing_evidence: formal failed result requires screenshot or trace evidence")
+			}
+		}
+		return nil
+	}
+	assets := append([]ArtifactRef{}, result.GeneratedAssets...)
+	if result.ExecutionTrace != nil {
+		assets = append(assets, result.ExecutionTrace.Artifacts...)
+	}
+	findKind := func(kinds ...string) (ArtifactRef, bool) {
+		for _, asset := range assets {
+			for _, kind := range kinds {
+				if strings.EqualFold(strings.TrimSpace(asset.Kind), kind) {
+					return asset, true
+				}
+			}
+		}
+		return ArtifactRef{}, false
+	}
+	requireArtifact := func(code string, kinds ...string) error {
+		artifact, ok := findKind(kinds...)
+		if !ok {
+			return fmt.Errorf("%s: formal completed result is missing the required artifact", code)
+		}
+		if strings.TrimSpace(artifact.ID) == "" || strings.TrimSpace(artifact.URI) == "" || strings.TrimSpace(artifact.SHA256) == "" || artifact.SizeBytes <= 0 {
+			return fmt.Errorf("%s: required artifact must include non-empty id, uri, sha256 and size_bytes", code)
+		}
+		return nil
+	}
+	if len(result.StepResults) == 0 {
+		return errors.New("result_missing_step_results: formal completed result requires runtime StepResults")
+	}
+	if len(result.ValidationReports) == 0 {
+		return errors.New("result_missing_validation_reports: formal completed result requires ValidationReports")
+	}
+	if source.RecordingRunSpec.Outputs.RawRecording {
+		if err := requireArtifact("result_missing_raw_recording", "raw_recording"); err != nil {
+			return err
+		}
+	}
+	if source.ExecutableScriptBundle != nil && source.ExecutableScriptBundle.ScriptManifest.Runtime == ExecutableScriptRuntimeBrowserAgentOutlineV1 {
+		if err := requireArtifact("result_missing_replay_manifest", "replay_manifest"); err != nil {
+			return err
+		}
+	}
+	if source.RecordingRunSpec.Outputs.FinalVideo {
+		video, ok := findKind("demo_video", "mp4")
+		if !ok || !strings.EqualFold(strings.TrimSpace(video.MimeType), "video/mp4") {
+			return errors.New("result_missing_final_mp4: formal completed result requires the requested demo_video MP4")
+		}
+		if strings.TrimSpace(video.ID) == "" || strings.TrimSpace(video.URI) == "" || strings.TrimSpace(video.SHA256) == "" || video.SizeBytes <= 0 {
+			return errors.New("result_missing_final_mp4: requested demo_video must include non-empty id, uri, sha256 and size_bytes")
+		}
+		if err := requireArtifact("result_missing_asset_timeline_catalog", "asset_timeline_catalog"); err != nil {
+			return err
+		}
+		if err := requireArtifact("result_missing_demo_edit_plan", "demo_edit_plan"); err != nil {
+			return err
+		}
+	}
+	if source.RecordingRunSpec.Outputs.Trace {
+		if err := requireArtifact("result_missing_browser_trace", "browser_trace", "execution_trace"); err != nil {
+			return err
+		}
+	}
+	if source.RecordingRunSpec.Outputs.ScreenshotPack {
+		if err := requireArtifact("result_missing_screenshots", "screenshot", "step_screenshot", "failure_screenshot"); err != nil {
+			return err
+		}
+	}
+	if result.StageEventLogRef == nil || strings.TrimSpace(result.StageEventLogRef.ID) == "" || strings.TrimSpace(result.StageEventLogRef.URI) == "" {
+		return errors.New("result_missing_stage_event_log: formal completed result requires stage_event_log_ref")
+	}
+	if result.StageEventLogRef.SHA256 == "" || result.StageEventLogRef.SizeBytes <= 0 {
+		return errors.New("result_missing_stage_event_log: stage_event_log_ref must include sha256 and size_bytes")
 	}
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -99,15 +100,16 @@ func (a *PageInteractionVerifierAgent) VerifyInteractions(
 }
 
 type interactionVerifierRequest struct {
-	ProductURL     string                    `json:"product_url,omitempty"`
-	TimeoutMS      int                       `json:"timeout_ms,omitempty"`
-	Headless       bool                      `json:"headless"`
-	AllowedDomains []string                  `json:"allowed_domains,omitempty"`
-	ForbiddenPaths []string                  `json:"forbidden_path_prefixes,omitempty"`
-	Candidates     []interactionVerifierItem `json:"candidates,omitempty"`
-	IntentGoals    []interactionVerifierGoal `json:"intent_goals,omitempty"`
-	DemoUsername   string                    `json:"demo_username,omitempty"`
-	DemoPassword   string                    `json:"demo_password,omitempty"`
+	ProductURL           string                    `json:"product_url,omitempty"`
+	TimeoutMS            int                       `json:"timeout_ms,omitempty"`
+	Headless             bool                      `json:"headless"`
+	AllowedDomains       []string                  `json:"allowed_domains,omitempty"`
+	ForbiddenPaths       []string                  `json:"forbidden_path_prefixes,omitempty"`
+	Candidates           []interactionVerifierItem `json:"candidates,omitempty"`
+	IntentGoals          []interactionVerifierGoal `json:"intent_goals,omitempty"`
+	SafeStateTransitions []interactionVerifierItem `json:"safe_state_transitions,omitempty"`
+	DemoUsername         string                    `json:"demo_username,omitempty"`
+	DemoPassword         string                    `json:"demo_password,omitempty"`
 }
 
 type interactionVerifierGoal struct {
@@ -139,26 +141,38 @@ type interactionVerifierResponse struct {
 }
 
 type interactionVerifierDiagnostics struct {
-	LoginAttempted                 bool     `json:"login_attempted,omitempty"`
-	LoginStatus                    string   `json:"login_status,omitempty"`
-	FinalURL                       string   `json:"final_url,omitempty"`
-	PageTitle                      string   `json:"page_title,omitempty"`
-	CandidateCount                 int      `json:"candidate_count,omitempty"`
-	VerifiedCandidateCount         int      `json:"verified_candidate_count,omitempty"`
-	DiscoveredBusinessControlCount int      `json:"discovered_business_control_count,omitempty"`
-	LoginTransitions               []string `json:"login_transitions,omitempty"`
+	LoginAttempted                 bool                        `json:"login_attempted,omitempty"`
+	LoginStatus                    string                      `json:"login_status,omitempty"`
+	FinalURL                       string                      `json:"final_url,omitempty"`
+	PageTitle                      string                      `json:"page_title,omitempty"`
+	CandidateCount                 int                         `json:"candidate_count,omitempty"`
+	VerifiedCandidateCount         int                         `json:"verified_candidate_count,omitempty"`
+	DiscoveredBusinessControlCount int                         `json:"discovered_business_control_count,omitempty"`
+	LoginTransitions               []string                    `json:"login_transitions,omitempty"`
+	LoginEvidence                  []interactionVerifierResult `json:"login_evidence,omitempty"`
 }
 
 type interactionVerifierResult struct {
 	interactionVerifierItem
-	Status     string    `json:"status,omitempty"`
-	Visible    bool      `json:"visible,omitempty"`
-	Enabled    bool      `json:"enabled,omitempty"`
-	Editable   bool      `json:"editable,omitempty"`
-	PageURL    string    `json:"page_url,omitempty"`
-	PageTitle  string    `json:"page_title,omitempty"`
-	Message    string    `json:"message,omitempty"`
-	VerifiedAt time.Time `json:"verified_at,omitempty"`
+	Status                 string    `json:"status,omitempty"`
+	Visible                bool      `json:"visible,omitempty"`
+	Enabled                bool      `json:"enabled,omitempty"`
+	Editable               bool      `json:"editable,omitempty"`
+	PageURL                string    `json:"page_url,omitempty"`
+	PageTitle              string    `json:"page_title,omitempty"`
+	Message                string    `json:"message,omitempty"`
+	VerifiedAt             time.Time `json:"verified_at,omitempty"`
+	EvidenceID             string    `json:"evidence_id,omitempty"`
+	SourceKind             string    `json:"source_kind,omitempty"`
+	SourceDigest           string    `json:"source_digest,omitempty"`
+	ObservedRole           string    `json:"observed_role,omitempty"`
+	ObservedAccessibleName string    `json:"observed_accessible_name,omitempty"`
+	ObservedURL            string    `json:"observed_url,omitempty"`
+	ObservedRouteTemplate  string    `json:"observed_route_template,omitempty"`
+	ObservedPageRole       string    `json:"observed_page_role,omitempty"`
+	ObservedFormRole       string    `json:"observed_form_role,omitempty"`
+	EvidenceDigestSHA256   string    `json:"evidence_digest_sha256,omitempty"`
+	ObservedAt             time.Time `json:"observed_at,omitempty"`
 }
 
 type interactionVerifierResponseError struct {
@@ -192,15 +206,16 @@ func (a *PageInteractionVerifierAgent) verifyWithSidecar(ctx context.Context, pr
 	}
 	var response interactionVerifierResponse
 	err := a.manager.CallJSONRPC(ctx, spec, "verify_interactions", interactionVerifierRequest{
-		ProductURL:     project.ProductURL,
-		TimeoutMS:      20000,
-		Headless:       true,
-		AllowedDomains: allowedDomainsFromScope(project, intelligence.RunIntentScope),
-		ForbiddenPaths: intelligence.RunIntentScope.ForbiddenPathPrefixes,
-		Candidates:     items,
-		IntentGoals:    verifierGoals(intelligence),
-		DemoUsername:   credentials.DemoUsername,
-		DemoPassword:   credentials.DemoPassword,
+		ProductURL:           project.ProductURL,
+		TimeoutMS:            20000,
+		Headless:             true,
+		AllowedDomains:       allowedDomainsFromScope(project, intelligence.RunIntentScope),
+		ForbiddenPaths:       intelligence.RunIntentScope.ForbiddenPathPrefixes,
+		Candidates:           items,
+		IntentGoals:          verifierGoals(intelligence),
+		SafeStateTransitions: verifierSafeStateTransitions(project, intelligence),
+		DemoUsername:         credentials.DemoUsername,
+		DemoPassword:         credentials.DemoPassword,
 	}, &response)
 	if err != nil {
 		return nil, nil, err
@@ -210,6 +225,32 @@ func (a *PageInteractionVerifierAgent) verifyWithSidecar(ctx context.Context, pr
 		return emptyVerifiedPlan(project, intelligence, response.VerificationMode, response.BrowserScanID, response.SourceURL), report, nil
 	}
 	return verifiedPlanFromScanResults(project, intelligence, response, byID), missingEvidenceFromScanResults(project, intelligence, response, byID), nil
+}
+
+func verifierSafeStateTransitions(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack) []interactionVerifierItem {
+	if project == nil || intelligence == nil || intelligence.BusinessStagePlan == nil {
+		return nil
+	}
+	for _, stage := range intelligence.BusinessStagePlan.Stages {
+		stageID := strings.TrimPrefix(stage.ID, "business_stage_")
+		semanticText := strings.Join([]string{stage.Title, stage.Objective, stage.Action.Label, stage.Action.SuccessState}, " ")
+		if stageID != "new_project_entry" || stage.Kind != model.BusinessStageKindBusinessAction ||
+			model.GraphActionType(stage.Action.Type) != model.GraphActionClick || !stage.Action.NonDestructive ||
+			containsAnyNormalized(semanticText, "delete", "remove", "destroy", "payment", "pay", "billing", "purchase", "refund", "permission", "role", "api key", "secret", "token", "删除", "移除", "销毁", "支付", "购买", "退款", "账单", "权限", "角色", "密钥", "令牌") {
+			continue
+		}
+		for _, target := range stage.Targets {
+			if strings.TrimSpace(target.Selector) == "" || !isURLAllowedByRunScope(intelligence.RunIntentScope, target.URL) ||
+				isControlPlaneSignal(intelligence.RunIntentScope, target.URL, target.Label, target.Selector) {
+				continue
+			}
+			return []interactionVerifierItem{{
+				ID: stage.ID, IntentGoalID: target.IntentGoalID, Label: firstNonEmpty(target.Label, stage.Action.Label),
+				Kind: string(model.GraphActionClick), Selector: target.Selector, URL: firstNonEmpty(target.URL, stage.EntryRoute, project.ProductURL),
+			}}
+		}
+	}
+	return nil
 }
 
 func verifierCandidates(intelligence *model.ProjectIntelligencePack) []model.InteractionProbe {
@@ -311,56 +352,18 @@ func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence 
 		add(intentWaitAction(project, "intent_login_observe", "演示登录完成并进入工作台", "登录完成，进入可演示的产品工作台上下文。", durationMSForIntentKeywords(intentText, "登录", "登陆", "登入", "login", "sign in", "signin"), false))
 	}
 	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") {
-		add(intentSelectorAction(project, candidates, "intent_new_project", "新建项目", "click", "点击新建项目入口", "进入新建项目流程。", durationMSForIntentKeywords(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project"), true, []string{"新建项目", "创建项目", "新增项目", "new project", "create project"}, []string{
-			`[data-testid='new-project']`,
-			`[data-testid='create-project']`,
-			`button:has-text("新建项目")`,
-			`a:has-text("新建项目")`,
-			`[role="button"]:has-text("新建项目")`,
-			`button:has-text("创建项目")`,
-			`button:has-text("New Project")`,
-			`button:has-text("Create Project")`,
-		}))
+		add(intentSelectorAction(project, candidates, "intent_new_project", "新建项目", "click", "点击新建项目入口", "进入新建项目流程。", durationMSForIntentKeywords(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project"), true, []string{"新建项目", "创建项目", "新增项目", "new project", "create project"}))
 	}
 	projectName := intentProjectName(intentText)
 	if projectName != "" {
-		add(intentSelectorAction(project, candidates, "intent_project_name", "输入项目名称："+projectName, "fill", "填写项目名称", "项目名称已填写为 "+projectName+"。", durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", "name", projectName), true, []string{"项目名称", "项目名", "project name", "name", projectName}, []string{
-			`input[placeholder*='项目']`,
-			`input[placeholder*='名称']`,
-			`input[aria-label*='项目']`,
-			`input[aria-label*='名称']`,
-			`input[name*='project' i]`,
-			`input[name*='name' i]`,
-			`textarea[placeholder*='项目']`,
-			`textarea[placeholder*='描述']`,
-		}, withIntentActionValue(projectName)))
+		add(intentSelectorAction(project, candidates, "intent_project_name", "输入项目名称："+projectName, "fill", "填写项目名称", "项目名称已填写为 "+projectName+"。", durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", "name", projectName), true, []string{"项目名称", "项目名", "project name", "name", projectName}, withIntentActionValue(projectName)))
 	}
 	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") {
-		add(intentSelectorAction(project, candidates, "intent_build_mode", "选择构建模式", "click", "选择构建模式", "项目已切换到构建模式。", durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"), true, []string{"构建模式", "build mode", "builder mode", "构建"}, []string{
-			`[data-testid='build-mode']`,
-			`[data-testid='mode-build']`,
-			`button:has-text("构建模式")`,
-			`[role="tab"]:has-text("构建模式")`,
-			`[role="button"]:has-text("构建模式")`,
-			`label:has-text("构建模式")`,
-			`text=构建模式`,
-			`button:has-text("Build Mode")`,
-		}))
+		add(intentSelectorAction(project, candidates, "intent_build_mode", "选择构建模式", "click", "选择构建模式", "项目已切换到构建模式。", durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"), true, []string{"构建模式", "build mode", "builder mode", "构建"}))
 	}
 	if containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "run build", "start build", "生成") ||
 		containsAnyNormalized(intentText, "构建") {
-		add(intentSelectorAction(project, candidates, "intent_start_agent_build", "启动 agent 实际构建", "click", "启动 agent 构建", "agent 已开始根据需求实际构建项目。", durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "agent", "智能体", "构建", "build", "run", "start"), true, []string{"agent", "智能体", "开始构建", "实际构建", "生成", "build", "run", "start"}, []string{
-			`[data-testid='start-build']`,
-			`[data-testid='generate-app']`,
-			`button:has-text("开始构建")`,
-			`button:has-text("开始生成")`,
-			`button:has-text("生成")`,
-			`button:has-text("构建")`,
-			`[role="button"]:has-text("开始构建")`,
-			`[role="button"]:has-text("生成")`,
-			`button:has-text("Build")`,
-			`button:has-text("Run")`,
-		}))
+		add(intentSelectorAction(project, candidates, "intent_start_agent_build", "启动 agent 实际构建", "click", "启动 agent 构建", "agent 已开始根据需求实际构建项目。", durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "agent", "智能体", "构建", "build", "run", "start"), true, []string{"agent", "智能体", "开始构建", "实际构建", "生成", "build", "run", "start"}))
 	}
 	if waitMS := requiredObservationDurationMS(intentText); waitMS > 0 {
 		add(intentWaitAction(project, "intent_agent_build_wait", fmt.Sprintf("等待 agent 实际构建 %d 秒", waitMS/1000), "持续观察 agent 构建过程，等待结果逐步出现。", waitMS, true))
@@ -394,33 +397,17 @@ func intentSelectorAction(
 	durationMS int,
 	business bool,
 	keywords []string,
-	semanticSelectors []string,
 	options ...intentActionOption,
 ) model.VerifiedInteractionAction {
 	selector := ""
 	alternatives := []model.SelectorCandidate{}
 	if probe, ok := bestIntentProbe(candidates, keywords, kind); ok {
 		selector = probe.Selector
-		alternatives = append(alternatives, model.SelectorCandidate{
-			Kind:           "css",
-			Value:          probe.Selector,
-			Confidence:     0.7,
-			StabilityScore: float64(probe.SelectorScore) / 100,
-			Source:         "feature_trace_code_evidence",
-			EvidenceRefs:   probe.EvidenceRefs,
-		})
-	}
-	for _, selectorCandidate := range semanticSelectors {
-		alternatives = append(alternatives, model.SelectorCandidate{
-			Kind:           "css",
-			Value:          selectorCandidate,
-			Confidence:     0.68,
-			StabilityScore: float64(selectorQualityScore(selectorCandidate)) / 100,
-			Source:         "runtime_adaptive_intent",
-		})
-	}
-	if selector == "" {
-		selector = bestSelectorCandidate(alternatives)
+		for _, candidate := range probe.Alternatives {
+			if model.SelectorCandidateHasFormalProvenance(candidate) {
+				alternatives = append(alternatives, candidate)
+			}
+		}
 	}
 	action := model.VerifiedInteractionAction{
 		ID:                 id,
@@ -432,9 +419,10 @@ func intentSelectorAction(
 		RouteRef:           safeID("route", firstNonEmpty(project.ProductURL, "product")),
 		ExpectedOutcome:    expected,
 		SuccessState:       success,
-		WaitConditions:     []string{"domcontentloaded", "networkidle"},
+		WaitConditions:     []string{"domcontentloaded"},
 		DurationHintMS:     durationMS,
 		IsBusiness:         business,
+		NonDestructive:     true,
 		VerificationStatus: "runtime_adaptive",
 		VerificationSource: "runtime_adaptive_intent_fallback",
 		SelectorScore:      selectorQualityScore(selector),
@@ -456,9 +444,10 @@ func intentWaitAction(project *model.ProjectContext, id string, label string, su
 		RouteRef:           safeID("route", firstNonEmpty(project.ProductURL, "product")),
 		ExpectedOutcome:    success,
 		SuccessState:       success,
-		WaitConditions:     []string{"domcontentloaded", "networkidle"},
+		WaitConditions:     []string{"domcontentloaded"},
 		DurationHintMS:     durationMS,
 		IsBusiness:         business,
+		NonDestructive:     true,
 		VerificationStatus: "runtime_adaptive",
 		VerificationSource: "runtime_adaptive_intent_fallback",
 	}
@@ -469,6 +458,14 @@ func bestIntentProbe(candidates []model.InteractionProbe, keywords []string, pre
 	bestScore := -1
 	for _, candidate := range candidates {
 		if !candidate.IsBusiness || candidate.IsChrome || !selectorUsableForBusinessAction(candidate.Selector) {
+			continue
+		}
+		// A runtime-adaptive fallback must not promote a code guess or an
+		// unverified primary selector into an executable locator. The primary
+		// value is usable only when the same selector is represented by a
+		// complete, evidence-bound candidate produced by a scan or approved
+		// annotation.
+		if !probeHasFormalSelectorCandidate(candidate) {
 			continue
 		}
 		if !candidateKindMatchesIntent(candidate, preferredKind) || candidateLooksNegativeForIntent(candidate, keywords) {
@@ -488,6 +485,30 @@ func bestIntentProbe(candidates []model.InteractionProbe, keywords []string, pre
 		}
 	}
 	return best, bestScore >= 0
+}
+
+func probeHasFormalSelectorCandidate(probe model.InteractionProbe) bool {
+	selector := strings.TrimSpace(probe.Selector)
+	if selector == "" {
+		return false
+	}
+	for _, candidate := range probe.Alternatives {
+		if model.SelectorCandidateHasFormalProvenance(candidate) && selectorCandidateMatchesSelector(candidate, selector) {
+			return true
+		}
+	}
+	return false
+}
+
+func selectorCandidateMatchesSelector(candidate model.SelectorCandidate, selector string) bool {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(candidate.Value), selector) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(candidate.Kind), "testid") && strings.EqualFold(strings.TrimSpace(candidate.Value), testIDFromSelector(selector))
 }
 
 func candidateKindMatchesIntent(candidate model.InteractionProbe, preferredKind string) bool {
@@ -535,11 +556,50 @@ func explicitDemoIntentText(project *model.ProjectContext, intelligence *model.P
 	return normalizeIntentText(strings.Join(parts, " "))
 }
 
+var intentProjectNamePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?:项目名称|项目名)\s*(?:为|是|[:：=])\s*([^，。；;,\n]{1,48})`),
+	regexp.MustCompile(`(?:项目名称|项目名)\s*([^，。；;,\n\s（(]{1,48})`),
+	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?项目\s*([^，。；;,\n\s（(]{1,48})`),
+	regexp.MustCompile(`project\s+(?:named|called)\s+([a-z0-9][a-z0-9 _-]{0,47})`),
+}
+
+var intentDurationOnlyPattern = regexp.MustCompile(`^\d+(?:\.\d+)?\s*(?:秒|s|sec|secs|second|seconds)$`)
+var intentProjectDetailsPattern = regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?项目\s*[（(]([^）)]{1,96})[）)]`)
+
 func intentProjectName(intentText string) string {
-	if containsAnyNormalized(intentText, "俄罗斯方块", "tetris") {
-		return "俄罗斯方块"
+	intentText = normalizeIntentText(intentText)
+	for _, match := range intentProjectDetailsPattern.FindAllStringSubmatch(intentText, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		for _, part := range strings.FieldsFunc(match[1], func(r rune) bool { return r == ',' || r == '，' || r == ';' || r == '；' }) {
+			if candidate := normalizeIntentProjectNameCandidate(part); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	for _, pattern := range intentProjectNamePatterns {
+		for _, match := range pattern.FindAllStringSubmatch(intentText, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			if candidate := normalizeIntentProjectNameCandidate(match[1]); candidate != "" {
+				return candidate
+			}
+		}
 	}
 	return ""
+}
+
+func normalizeIntentProjectNameCandidate(value string) string {
+	candidate := strings.Trim(strings.TrimSpace(value), `"'“”‘’()（）:：=-`)
+	if candidate == "" || intentDurationOnlyPattern.MatchString(candidate) || containsAnyNormalized(candidate,
+		"新建项目", "创建项目", "新增项目", "new project", "create project",
+		"构建模式", "build mode", "builder mode", "等待", "wait", "agent", "智能体",
+	) {
+		return ""
+	}
+	return candidate
 }
 
 func verifyFromPageEvidence(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, candidates []model.InteractionProbe) (*model.VerifiedInteractionPlan, *model.MissingEvidenceReport) {
@@ -652,15 +712,30 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 			FieldPath:  "verified_interaction_plan.actions.intent_login_observe",
 			Confidence: 0.92,
 		}
-		plan.Actions = append(plan.Actions, model.VerifiedInteractionAction{
+		loginAction := model.VerifiedInteractionAction{
 			ID: "intent_login_observe", IntentGoalID: "intent_login_observe", Label: "演示登录完成并进入工作台",
 			Kind: "wait", URL: firstNonEmpty(response.Diagnostics.FinalURL, response.SourceURL, project.ProductURL),
 			RouteRef:        safeID("route", firstNonEmpty(response.Diagnostics.FinalURL, response.SourceURL, project.ProductURL)),
 			ExpectedOutcome: "登录完成并进入工作台", SuccessState: "浏览器已离开登录页并进入经扫描的产品页面。",
-			WaitConditions: []string{"domcontentloaded", "networkidle"}, VerificationStatus: "verified",
+			WaitConditions: []string{"domcontentloaded"}, VerificationStatus: "verified",
+			NonDestructive:     true,
 			VerificationSource: firstNonEmpty(response.VerificationMode, "playwright_readonly_scan"), VerifiedAt: time.Now().UTC(),
 			EvidenceRefs: []model.EvidenceRef{evidence},
-		})
+		}
+		for _, loginResult := range response.Diagnostics.LoginEvidence {
+			loginEvidence := model.EvidenceRef{
+				ID:   firstNonEmpty(loginResult.EvidenceID, "ev_browser_scan_login_control_"+shortHash(response.BrowserScanID+loginResult.ID)),
+				Kind: model.EvidenceKindBrowserScan, Summary: "本地浏览器预扫描确认认证入口或密码表单控件。",
+				FieldPath: "verified_interaction_plan.actions.intent_login_observe.selector_alternatives", Confidence: 0.92,
+			}
+			if candidate, ok := selectorCandidateFromVerifierResult(loginResult, loginEvidence); ok {
+				loginAction.Alternatives = uniqueSelectorCandidates(append(loginAction.Alternatives, candidate))
+				loginAction.EvidenceRefs = append(loginAction.EvidenceRefs, loginEvidence)
+				plan.EvidenceRefs = append(plan.EvidenceRefs, loginEvidence)
+			}
+		}
+		loginAction.EvidenceRefs = uniqueEvidenceRefs(loginAction.EvidenceRefs)
+		plan.Actions = append(plan.Actions, loginAction)
 		plan.EvidenceRefs = append(plan.EvidenceRefs, evidence)
 	}
 	for _, result := range response.Results {
@@ -668,7 +743,7 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 			continue
 		}
 		probe := probeFromVerifierResult(result, byID)
-		if !probe.IsBusiness || probe.IsChrome || !selectorUsableForBusinessAction(probe.Selector) ||
+		if !verifiedProbeSemanticallyValid(result, probe, intelligence) || !probe.IsBusiness || probe.IsChrome || !selectorUsableForBusinessAction(probe.Selector) ||
 			!isURLAllowedByRunScope(intelligence.RunIntentScope, probe.URL) ||
 			isControlPlaneSignal(intelligence.RunIntentScope, probe.URL, probe.Label, probe.Selector) {
 			continue
@@ -679,13 +754,18 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 		if action.VerifiedAt.IsZero() {
 			action.VerifiedAt = time.Now().UTC()
 		}
-		action.EvidenceRefs = append(action.EvidenceRefs, model.EvidenceRef{
-			ID:         "ev_browser_scan_" + shortHash(response.BrowserScanID+result.ID),
+		evidence := model.EvidenceRef{
+			ID:         firstNonEmpty(result.EvidenceID, "ev_browser_scan_"+shortHash(response.BrowserScanID+result.ID)),
 			Kind:       model.EvidenceKindBrowserScan,
 			Summary:    "只读页面预扫描确认 selector 可见可用：" + result.Selector,
 			FieldPath:  "verified_interaction_plan.actions." + result.ID,
 			Confidence: 0.9,
-		})
+		}
+		action.EvidenceRefs = append(action.EvidenceRefs, evidence)
+		action.Alternatives = formalSelectorCandidates(action.Alternatives)
+		if candidate, ok := selectorCandidateFromVerifierResult(result, evidence); ok {
+			action.Alternatives = uniqueSelectorCandidates(append(action.Alternatives, candidate))
+		}
 		plan.Actions = append(plan.Actions, action)
 		if action.IsBusiness {
 			plan.BusinessActionCount++
@@ -697,6 +777,31 @@ func verifiedPlanFromScanResults(project *model.ProjectContext, intelligence *mo
 		plan.Confidence = 0.86
 	}
 	return plan
+}
+
+func verifiedProbeSemanticallyValid(result interactionVerifierResult, probe model.InteractionProbe, intelligence *model.ProjectIntelligencePack) bool {
+	kind := strings.ToLower(strings.TrimSpace(firstNonEmpty(result.Kind, probe.Kind)))
+	selectorText := normalizeIntentText(strings.Join([]string{result.Label, result.Selector, probe.Label, probe.Selector}, " "))
+	if kind == "fill" && (!result.Editable || containsAnyNormalized(selectorText, "button", "role button", "has text", "a href")) {
+		return false
+	}
+	if containsAnyNormalized(selectorText, "忘记密码", "找回密码", "重置密码", "forgot password", "reset password", "返回登录", "back to login", "注册", "sign up", "register", "create account") {
+		return false
+	}
+	if probe.IntentGoalID == "" || intelligence == nil || intelligence.DemoIntent == nil {
+		return true
+	}
+	for _, goal := range intelligence.DemoIntent.Goals {
+		if goal.ID != probe.IntentGoalID {
+			continue
+		}
+		want := strings.ToLower(strings.TrimSpace(firstNonEmpty(goal.PreferredAction, goal.Kind)))
+		if want == "business_action" || want == "auth" || want == "" {
+			return true
+		}
+		return graphActionTypeFromKind(kind, probe.Selector) == model.GraphActionType(want)
+	}
+	return false
 }
 
 func missingEvidenceFromScanResults(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, response interactionVerifierResponse, byID map[string]model.InteractionProbe) *model.MissingEvidenceReport {
@@ -721,6 +826,15 @@ func missingEvidenceFromScanResults(project *model.ProjectContext, intelligence 
 	if response.Error != nil {
 		report.Items = append(report.Items, missingEvidenceItem(project, "", firstNonEmpty(response.Error.Code, "page_scan_failed"), response.Error.Message, "确认产品 URL 可访问后重试页面预扫描。"))
 	}
+	if response.Diagnostics != nil && response.Diagnostics.LoginAttempted && response.Diagnostics.LoginStatus != "submitted_navigation_observed" {
+		report.Items = append(report.Items, missingEvidenceItem(
+			project,
+			"intent_login_observe",
+			firstNonEmpty(response.Diagnostics.LoginStatus, "login_not_verified"),
+			scanDiagnosticSummary(response.Diagnostics),
+			"确认公开产品入口是否能进入登录页，以及测试账号是否可完成登录；不得把登录页营销控件作为登录成功证据。",
+		))
+	}
 	verified := 0
 	for _, result := range response.Results {
 		if result.Status == "verified" {
@@ -735,7 +849,8 @@ func missingEvidenceFromScanResults(project *model.ProjectContext, intelligence 
 			report.Items = append(report.Items, missingEvidenceItem(project, "", "page_scan_diagnostic", summary, "确认登录后是否进入工作台、目标业务控件是否在当前页面可见；必要时补充截图标注或稳定 data-testid/role/name。"))
 		}
 	}
-	report.Blocking = verified == 0 && len(report.Items) > 0
+	loginFailed := response.Diagnostics != nil && response.Diagnostics.LoginAttempted && response.Diagnostics.LoginStatus != "submitted_navigation_observed"
+	report.Blocking = loginFailed || verified == 0 && len(report.Items) > 0
 	if report.Blocking {
 		report.Summary = "no verified business action: 页面预扫描没有确认任何业务动作，已阻止生成录制脚本。"
 		if summary := scanDiagnosticSummary(response.Diagnostics); summary != "" {
@@ -762,7 +877,7 @@ func verifierGoals(intelligence *model.ProjectIntelligencePack) []interactionVer
 		goals = append(goals, interactionVerifierGoal{
 			ID:       goal.ID,
 			Label:    goal.Label,
-			Kind:     goal.Kind,
+			Kind:     firstNonEmpty(goal.PreferredAction, goal.Kind),
 			Keywords: goal.TargetKeywords,
 			Required: goal.Required,
 			Business: goal.BusinessCritical,
@@ -779,7 +894,7 @@ func probeFromVerifierResult(result interactionVerifierResult, byID map[string]m
 	return model.InteractionProbe{
 		ID:             firstNonEmpty(result.ID, "probe_browser_scan_"+shortHash(result.Selector+result.Label)),
 		IntentGoalID:   result.IntentGoalID,
-		Label:          firstNonEmpty(result.Label, labelFromSelector(result.Selector)),
+		Label:          firstNonEmpty(result.ObservedAccessibleName, result.Label, labelFromSelector(result.Selector)),
 		Kind:           kind,
 		Selector:       result.Selector,
 		URL:            result.PageURL,
@@ -788,8 +903,60 @@ func probeFromVerifierResult(result interactionVerifierResult, byID map[string]m
 		IsBusiness:     isBusinessAction(graphActionTypeFromKind(kind, result.Selector)),
 		IsChrome:       actionLooksLikeChromeControl(result.Label, result.Selector),
 		SelectorScore:  selectorQualityScore(result.Selector),
-		WaitConditions: []string{"domcontentloaded", "networkidle"},
+		WaitConditions: []string{"domcontentloaded"},
 	}
+}
+
+func formalSelectorCandidates(values []model.SelectorCandidate) []model.SelectorCandidate {
+	out := make([]model.SelectorCandidate, 0, len(values))
+	for _, candidate := range values {
+		if model.SelectorCandidateHasFormalProvenance(candidate) {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func selectorCandidateFromVerifierResult(result interactionVerifierResult, evidence model.EvidenceRef) (model.SelectorCandidate, bool) {
+	if strings.TrimSpace(result.Selector) == "" {
+		return model.SelectorCandidate{}, false
+	}
+	kind, value := selectorCandidateIdentity(result.Selector)
+	observedAt := result.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = result.VerifiedAt
+	}
+	candidate := model.SelectorCandidate{
+		Kind:                   kind,
+		Value:                  value,
+		Confidence:             0.9,
+		StabilityScore:         float64(selectorQualityScore(result.Selector)) / 100,
+		Source:                 firstNonEmpty(result.SourceKind, "page_scan"),
+		EvidenceID:             firstNonEmpty(result.EvidenceID, evidence.ID),
+		SourceKind:             firstNonEmpty(result.SourceKind, "page_scan"),
+		SourceDigest:           result.SourceDigest,
+		ObservedRole:           result.ObservedRole,
+		ObservedAccessibleName: firstNonEmpty(result.ObservedAccessibleName, result.Label),
+		ObservedURL:            firstNonEmpty(result.ObservedURL, result.PageURL),
+		ObservedRouteTemplate:  result.ObservedRouteTemplate,
+		ObservedPageRole:       result.ObservedPageRole,
+		ObservedFormRole:       result.ObservedFormRole,
+		EvidenceDigestSHA256:   firstNonEmpty(result.EvidenceDigestSHA256, result.SourceDigest),
+		ObservedAt:             &observedAt,
+		LastValidatedAt:        result.VerifiedAt,
+		EvidenceRefs:           []model.EvidenceRef{evidence},
+	}
+	return candidate, model.SelectorCandidateHasFormalProvenance(candidate)
+}
+
+func selectorCandidateIdentity(value string) (string, string) {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	if strings.Contains(lower, "data-testid") {
+		if testID := testIDFromSelector(value); testID != "" {
+			return "testid", testID
+		}
+	}
+	return "css", value
 }
 
 func emptyVerifiedPlan(project *model.ProjectContext, intelligence *model.ProjectIntelligencePack, mode string, scanID string, sourceURL string) *model.VerifiedInteractionPlan {
@@ -821,6 +988,7 @@ func verifiedActionFromProbe(probe model.InteractionProbe, source string, scanID
 		WaitConditions:     probe.WaitConditions,
 		DurationHintMS:     0,
 		IsBusiness:         probe.IsBusiness && !probe.IsChrome && !looksLikeLoginAction(probe.Label, probe.Selector),
+		NonDestructive:     !actionLooksUnsafeOrOffIntent(probe.Label, probe.Selector),
 		VerificationStatus: "verified",
 		VerificationSource: firstNonEmpty(source, probe.Source),
 		VerifiedAt:         time.Now().UTC(),

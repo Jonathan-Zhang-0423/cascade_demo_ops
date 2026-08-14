@@ -205,6 +205,19 @@ export type ExecutionPackageUploadView = {
 
 export type CloudRunStatusView = {
   packageID: string;
+  transport?: "browser_agent_direct_v1" | "legacy_exchange";
+  leaseID?: string;
+  dataPort?: number;
+  leaseExpiresAt?: string;
+  directArtifacts?: Array<{
+    artifactID: string;
+    role?: string;
+    kind?: string;
+    fileName: string;
+    mimeType?: string;
+    sha256: string;
+    sizeBytes: number;
+  }>;
   uploadID?: string;
   exchangePackageID?: string;
   cloudJobID?: string;
@@ -213,6 +226,18 @@ export type CloudRunStatusView = {
   status: CloudRunStatus;
   stage?: string;
   message?: string;
+  waitingReason?: string;
+  blockingErrorCode?: string;
+  nextAction?: string;
+  requiresReapproval?: boolean;
+  reunderstandingIssues?: ReunderstandingIssueView[];
+  diagnosticDigestSHA256?: string;
+  packageDigestSHA256?: string;
+  graphDigestSHA256?: string;
+  bundleHashSHA256?: string;
+  planHashSHA256?: string;
+  approvalSubjectDigestSHA256?: string;
+  confidenceAssessmentHash?: string;
   stageHistory?: ServerLifecycleStageView[];
   failureSummary?: string;
   sandboxMetadata?: SandboxExecutionMetadata;
@@ -227,8 +252,25 @@ export type CloudRunStatusView = {
   repairRequest?: ScriptRepairRequest;
 	resultReview?: ResultReviewState;
 	resultDownloaded?: boolean;
+	resultAcknowledged?: boolean;
+	ackedAt?: string;
 	editorSessionID?: string;
-	editorMaterializationMessage?: string;
+  editorMaterializationMessage?: string;
+};
+
+export type ReunderstandingIssueView = {
+  issueID: string;
+  code: string;
+  stageID?: string;
+  nodeID?: string;
+  severity?: string;
+  required?: boolean;
+  summary?: string;
+  impact?: string;
+  suggestion?: string;
+  nextStep?: string;
+  responsibilityDomain?: string;
+  evidenceIDs?: string[];
 };
 
 export type ServerExecutionAcceptanceView = {
@@ -313,7 +355,27 @@ export type RuntimeHealthView = {
   modelProviders: Record<string, ProviderCredentialStatus>;
   modelTaskRoutes: Record<string, ModelTaskRouteStatus>;
   cloudExchange?: CloudExchangeStatus;
+  browserAgentDirect?: BrowserAgentDirectStatus;
   appCapabilities?: AppCapabilitiesStatus;
+};
+
+export type BrowserAgentDirectStatus = {
+  configured: boolean;
+  reachable: boolean;
+  tokenConfigured: boolean;
+  protocolVersion?: string;
+  cryptoSuite?: string;
+  controlURLHost?: string;
+  controlURLPath?: string;
+  installationIDSuffix?: string;
+  transport: string;
+  errorClass?: string;
+  supportedProtocolVersions?: string[];
+  supportedPackageSchemaVersions?: string[];
+  supportedRuntimes?: string[];
+  supportedWorkerProtocolVersions?: string[];
+  supportedOutcomeVerifierRulesVersions?: string[];
+  capabilities?: Record<string, boolean>;
 };
 
 export type AppCapabilitiesStatus = {
@@ -334,6 +396,7 @@ export type AppCapabilitiesStatus = {
 };
 
 export type CloudExchangeStatus = {
+  retired?: boolean;
   configured: boolean;
   exchangeDiscovered: boolean;
   installationPaired: boolean;

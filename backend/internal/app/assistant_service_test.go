@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
@@ -301,6 +302,12 @@ func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	service.readDemoCredential = func(ref string) (credentialstore.DemoCredential, error) {
+		if ref != "two-step-login" {
+			return credentialstore.DemoCredential{}, errors.New("credential not found")
+		}
+		return credentialstore.DemoCredential{Username: "demo@example.test", Password: "fixture-only-password"}, nil
+	}
 	if !fileExists(service.localVideoWorkerPath()) || !commandReady(service.nodeBinaryForExecution()) {
 		t.Skip("real local video-worker runtime is unavailable")
 	}
@@ -313,8 +320,7 @@ func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
 		TargetAudience:     "产品团队",
 		MustShow:           []string{"登录进入工作台", "点击新建项目"},
 		AllowedDomains:     []string{"127.0.0.1"},
-		DemoUsername:       "demo@example.test",
-		DemoPassword:       "fixture-only-password",
+		DemoCredentialRef:  "credential://demo/two-step-login",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -329,6 +335,41 @@ func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked || build.Package.ConfidenceSummary.RequirementCoverage != 1 {
+		t.Fatalf("real login package must be coverage-ready: summary=%+v requirements=%+v", build.Package.ConfidenceSummary, build.Package.WorkflowGraph.Requirements)
+	}
+	assertSessionStageEvidence := func(layer string, kind model.BusinessStageKind, refs []model.EvidenceRef, hasRequiredValidation bool) {
+		t.Helper()
+		if kind != model.BusinessStageKindSessionSetup {
+			return
+		}
+		hasRuntime := false
+		for _, ref := range refs {
+			if ref.Kind == model.EvidenceKindBrowserScan || ref.Kind == model.EvidenceKindBrowserTrace {
+				hasRuntime = true
+			}
+		}
+		if !hasRuntime || !hasRequiredValidation {
+			t.Fatalf("%s session stage lacks runtime evidence or deterministic success contract: refs=%+v", layer, refs)
+		}
+	}
+	for _, step := range build.Package.ExecutableScriptBundle.PlanJSON.Steps {
+		hasValidation := false
+		for _, validation := range step.Validations {
+			hasValidation = hasValidation || validation.Required
+		}
+		assertSessionStageEvidence("plan", step.StageKind, step.EvidenceRefs, hasValidation)
+	}
+	for _, stage := range build.Package.ExecutableScriptBundle.StageApprovalPlan.Stages {
+		assertSessionStageEvidence("stage approval", stage.StageKind, append(stage.EvidenceRefs, stage.Interaction.EvidenceRefs...), stage.SuccessState != "" && stage.TargetContract != nil)
+	}
+	for _, stage := range build.Package.ExecutableScriptBundle.ScriptOutline.Stages {
+		refs := append([]model.EvidenceRef{}, stage.EvidenceRefs...)
+		for _, interaction := range stage.Interactions {
+			refs = append(refs, interaction.EvidenceRefs...)
+		}
+		assertSessionStageEvidence("outline", stage.StageKind, refs, stage.SuccessState != "" && stage.TargetContract != nil)
+	}
 	for _, finding := range append(append([]model.AgentFinding{}, build.Package.SafetyReport.PolicyFindings...), build.Package.ExecutableScriptBundle.Validation.Findings...) {
 		if strings.Contains(finding.ID, "runtime_page_evidence_missing") || strings.Contains(finding.ID, "bundle_hash_mismatch") {
 			t.Fatalf("successful login evidence produced a secondary blocker: %+v", finding)
@@ -341,9 +382,29 @@ func TestTwoStepLoginScanBindsRuntimeEvidenceAndBuildsDraft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(serialized), "fixture-only-password") {
-		t.Fatal("ephemeral login password leaked into state or execution package")
+	if strings.Contains(string(serialized), "fixture-only-password") || strings.Contains(string(serialized), "demo@example.test") {
+		t.Fatal("ephemeral login credential leaked into state or execution package")
 	}
+}
+
+func newAuthenticatedWorkspaceTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Path == "/workspace" {
+			_, _ = w.Write([]byte(`<!doctype html><title>Workspace</title><main aria-label="Builder workspace" data-testid="workspace"><button data-testid="new-project">新建项目 New project</button><label>项目名称 Project name<input data-testid="project-name-input" aria-label="项目名称 Project name"></label><button data-testid="build-mode">构建模式 Build mode</button><button data-testid="start-build">启动构建 Start build</button></main>`))
+			return
+		}
+		_, _ = w.Write([]byte(`<!doctype html><title>Login</title>
+<button id="email-login" type="button" onclick="document.querySelector('#form').hidden=false">邮箱登录</button>
+<form id="form" hidden onsubmit="event.preventDefault(); location.href='/workspace'">
+  <input type="email" autocomplete="username" />
+  <input type="password" autocomplete="current-password" />
+  <button type="submit">登录</button>
+</form>`))
+	}))
+	t.Cleanup(server.Close)
+	return server
 }
 
 func TestAgentActionsV2AutoAnalyzesAfterSourceAction(t *testing.T) {

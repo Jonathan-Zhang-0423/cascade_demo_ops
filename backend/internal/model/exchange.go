@@ -208,21 +208,22 @@ type ClientExecutionPackage struct {
 }
 
 type ProjectContextSummary struct {
-	ContextID         string            `json:"context_id"`
-	SchemaVersion     string            `json:"schema_version,omitempty"`
-	Mode              AppMode           `json:"mode"`
-	Name              string            `json:"name,omitempty"`
-	ProductURL        string            `json:"product_url"`
-	TargetAudience    string            `json:"target_audience"`
-	UseCases          []DemoUseCase     `json:"use_cases,omitempty"`
-	Goals             []DemoGoal        `json:"goals,omitempty"`
-	Audiences         []AudienceProfile `json:"audiences,omitempty"`
-	BrandKit          *BrandKit         `json:"brand_kit,omitempty"`
-	AccessPolicy      *AccessPolicy     `json:"access_policy,omitempty"`
-	SecurityPolicy    *SecurityPolicy   `json:"security_policy,omitempty"`
-	InputFingerprints map[string]string `json:"input_fingerprints,omitempty"`
-	KnowledgeRefs     []EvidenceRef     `json:"knowledge_refs,omitempty"`
-	Metadata          map[string]string `json:"metadata,omitempty"`
+	ContextID                     string                         `json:"context_id"`
+	SchemaVersion                 string                         `json:"schema_version,omitempty"`
+	Mode                          AppMode                        `json:"mode"`
+	Name                          string                         `json:"name,omitempty"`
+	ProductURL                    string                         `json:"product_url"`
+	TargetAudience                string                         `json:"target_audience"`
+	UseCases                      []DemoUseCase                  `json:"use_cases,omitempty"`
+	Goals                         []DemoGoal                     `json:"goals,omitempty"`
+	Audiences                     []AudienceProfile              `json:"audiences,omitempty"`
+	BrandKit                      *BrandKit                      `json:"brand_kit,omitempty"`
+	AccessPolicy                  *AccessPolicy                  `json:"access_policy,omitempty"`
+	SecurityPolicy                *SecurityPolicy                `json:"security_policy,omitempty"`
+	InputFingerprints             map[string]string              `json:"input_fingerprints,omitempty"`
+	KnowledgeRefs                 []EvidenceRef                  `json:"knowledge_refs,omitempty"`
+	PresentationGenerationIntents []PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
+	Metadata                      map[string]string              `json:"metadata,omitempty"`
 }
 
 type ProductMapSummary struct {
@@ -532,6 +533,10 @@ type ApprovalSubjectDigestsSHA256 struct {
 	BrowserAgentContract string `json:"browser_agent_contract,omitempty"`
 	AgentPromptPolicy    string `json:"agent_prompt_policy,omitempty"`
 	ApprovalMarkdown     string `json:"approval_markdown,omitempty"`
+}
+
+func (d ApprovalSubjectDigestsSHA256) Empty() bool {
+	return d == (ApprovalSubjectDigestsSHA256{})
 }
 
 type RecordingResultPackage struct {

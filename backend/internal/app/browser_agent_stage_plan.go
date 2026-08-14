@@ -301,7 +301,14 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		actionResult, err := executor.ExecuteStage(ctx, plan, activeStage)
 		if err != nil {
 			_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
-			return result, newRuntimeExecutionError("browser_agent_action_failed", err)
+			// Preserve stable, redacted worker failure categories (notably the
+			// credential-login broker diagnostics) while keeping generic executor
+			// failures under the historical action_failed code.
+			code := runtimeExecutionErrorCode(err)
+			if code == "execution_failed" || code == "" {
+				code = redactedBrowserAgentFailureCode(err)
+			}
+			return result, newRuntimeExecutionError(code, err)
 		}
 		if actionResult.Observation == nil || !runtimeObservationIsRealEvidence(actionResult.Observation.Source) || len(actionResult.EvidenceRefs) == 0 {
 			_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
@@ -629,6 +636,9 @@ func evidenceBoundSelectorCandidates(components []model.BrowserAgentComponentTar
 	result := []model.SelectorCandidate{}
 	seen := map[string]struct{}{}
 	appendCandidate := func(candidate model.SelectorCandidate) {
+		if !model.SelectorCandidateHasFormalProvenance(candidate) {
+			return
+		}
 		encoded := selectorCandidateEncoding(candidate)
 		if strings.TrimSpace(candidate.Value) == "" || encoded == ":" {
 			return
@@ -643,12 +653,6 @@ func evidenceBoundSelectorCandidates(components []model.BrowserAgentComponentTar
 		sharedEvidence := sharedEvidenceRefs(component.EvidenceRefs, targetEvidence)
 		if len(sharedEvidence) == 0 {
 			continue
-		}
-		if strings.TrimSpace(component.Selector) != "" {
-			appendCandidate(model.SelectorCandidate{
-				Kind: "css", Value: component.Selector, Source: "app_stage_evidence_binding",
-				Confidence: component.Confidence, EvidenceRefs: sharedEvidence,
-			})
 		}
 		for _, candidate := range component.SelectorAlternatives {
 			candidateEvidence := sharedEvidenceRefs(candidate.EvidenceRefs, targetEvidence)
@@ -832,8 +836,19 @@ func browserAgentRouteTemplateSegment(value string) bool {
 
 func normalizeBrowserAgentRoute(value string) string {
 	value = strings.TrimSpace(value)
-	if parsed, err := url.Parse(value); err == nil && parsed.Path != "" {
-		value = parsed.Path
+	if parsed, err := url.Parse(value); err == nil {
+		// Absolute origins (for example https://cascadeai.cn) represent the
+		// site root. Keep route matching semantics identical for absolute URLs
+		// and path-only routes so an initial session navigation is allowed by a
+		// root scope entry ("/").
+		if parsed.IsAbs() && parsed.Hostname() != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+			value = parsed.Path
+			if value == "" {
+				value = "/"
+			}
+		} else if parsed.Path != "" {
+			value = parsed.Path
+		}
 	}
 	path := "/" + strings.Trim(strings.ToLower(value), "/")
 	if path == "" {
@@ -892,6 +907,34 @@ func browserAgentPathForbidden(value string, forbiddenPages []string, forbiddenP
 		}
 	}
 	return false
+}
+
+// Worker errors are intentionally reduced to a fixed, non-sensitive category
+// before they enter the App result package. This preserves useful login
+// diagnostics without leaking Playwright/page text.
+func redactedBrowserAgentFailureCode(err error) string {
+	message := strings.ToLower(strings.TrimSpace(errString(err)))
+	for _, code := range []string{
+		"browser_agent_login_form_not_resolved",
+		"browser_agent_login_continue_not_resolved",
+		"browser_agent_login_password_not_resolved",
+		"browser_agent_login_submit_not_resolved",
+		"browser_agent_login_invalid_credentials",
+		"browser_agent_login_submission_not_confirmed",
+		"browser_agent_login_captcha_required",
+	} {
+		if strings.Contains(message, code) {
+			return code
+		}
+	}
+	return "browser_agent_action_failed"
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func normalizeBrowserAgentDomain(value string) string {

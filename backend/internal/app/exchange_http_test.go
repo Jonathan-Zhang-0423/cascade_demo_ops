@@ -290,6 +290,7 @@ func TestDevExchangeHTTPValidateAcceptsPackageWithoutPersistingState(t *testing.
 	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
 		t.Fatal(err)
 	}
+	refreshTestPackageApprovalDigests(t, &pkg)
 	envelope := sampleEnvelopeForAppTest(t, pkg, now)
 
 	result := exchangeHTTPDo[CloudPackagePreflightResult](t, server, http.MethodPost, "/aigc/v1/execution-packages/validate", exchangeUploadHTTPBody{
@@ -557,6 +558,7 @@ func TestDevExchangeHTTPRunEndpointBlocksUnreadyBrowserAgentBeforeStartingWorker
 	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
 		t.Fatal(err)
 	}
+	refreshTestPackageApprovalDigests(t, &pkg)
 
 	initPayload := exchangeHTTPDo[model.ExecutionPackageInitResponse](t, server, http.MethodPost, "/v1/execution-packages/init", model.ExecutionPackageInitRequest{
 		OrgID: pkg.OrgID, ProjectID: pkg.ProjectID, PackageKind: model.ExchangePackageKindClientExecution,

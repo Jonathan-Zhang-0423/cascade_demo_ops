@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
@@ -104,6 +105,32 @@ func TestRouterGenerateJSONOpenAICompatibleRequest(t *testing.T) {
 	}
 	if trace.Provider != config.ModelProviderKimi || trace.OutputTokens != 6 {
 		t.Fatalf("unexpected trace: %+v", trace)
+	}
+}
+
+func TestKimiK3ForcesSupportedTemperature(t *testing.T) {
+	var gotTemperature float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		gotTemperature, _ = payload["temperature"].(float64)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"ok\"}"}}]}`))
+	}))
+	defer server.Close()
+	runtime := testRuntime(config.ModelProviderKimi, server.URL)
+	route := runtime.ModelTaskRoutes[config.ModelTaskPlanning]
+	route.Model = "kimi-k3"
+	runtime.ModelTaskRoutes[config.ModelTaskPlanning] = route
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	if _, err := NewRouter(runtime).GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u", Temperature: 0.1}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if gotTemperature != 1 {
+		t.Fatalf("Kimi K3 temperature = %v, want 1", gotTemperature)
 	}
 }
 
@@ -239,6 +266,110 @@ func TestRouterAutoDoesNotFallbackOnUnauthorized(t *testing.T) {
 	}
 	if trace == nil || trace.ErrorClass != "http_401" || trace.FallbackReason != "" {
 		t.Fatalf("expected http_401 without fallback, got %+v", trace)
+	}
+}
+
+func TestRouterPlanningFallsBackOnlyToDiagnosedHealthyProvider(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"code":"1301","message":"content filtered"}}`, http.StatusBadRequest)
+	}))
+	defer primary.Close()
+	secondaryCalls := 0
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryCalls++
+		if r.Header.Get("Authorization") != "Bearer secondary-key" {
+			t.Fatalf("fallback used the wrong provider credential")
+		}
+		if secondaryCalls == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"OK"}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"healthy fallback\"}"}}]}`))
+	}))
+	defer secondary.Close()
+
+	runtime := testRuntime(config.ModelProviderKimi, primary.URL)
+	runtime.ModelProviders[config.ModelProviderGLM] = config.ModelProviderCredential{
+		Provider: config.ModelProviderGLM, APIKey: "secondary-key", BaseURL: secondary.URL, DefaultModel: "glm-5.2", Enabled: true,
+	}
+	runtime.ModelTaskRoutes[config.ModelTaskCodeReading] = config.ModelTaskRoute{Task: config.ModelTaskCodeReading, Provider: config.ModelProviderGLM, Model: "glm-5.2"}
+	router := NewRouter(runtime)
+	if diagnostic := router.DiagnoseTask(context.Background(), config.ModelTaskCodeReading); !diagnostic.OK {
+		t.Fatalf("secondary provider diagnostic was not healthy: %+v", diagnostic)
+	}
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	trace, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Summary != "healthy fallback" || trace.Provider != config.ModelProviderGLM || !strings.Contains(trace.FallbackReason, "content_filtered") {
+		t.Fatalf("planning did not use the diagnosed healthy provider: out=%+v trace=%+v", out, trace)
+	}
+}
+
+func TestRouterPlanningDiagnosesHealthyFallbackAfterPrimaryTimeout(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer primary.Close()
+	secondaryCalls := 0
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryCalls++
+		content := "OK"
+		if secondaryCalls > 1 {
+			content = `{"summary":"timeout fallback"}`
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})
+	}))
+	defer secondary.Close()
+	runtime := testRuntime(config.ModelProviderKimi, primary.URL)
+	runtime.ModelProviders[config.ModelProviderGLM] = config.ModelProviderCredential{Provider: config.ModelProviderGLM, APIKey: "secondary-key", BaseURL: secondary.URL, DefaultModel: "glm-5.2", Enabled: true}
+	runtime.ModelProviders[config.ModelProviderDeepSeek] = config.ModelProviderCredential{Provider: config.ModelProviderDeepSeek, APIKey: "slow-key", BaseURL: primary.URL, DefaultModel: "deepseek-v4-flash", Enabled: true}
+	runtime.ModelTaskRoutes[config.ModelTaskCodeReading] = config.ModelTaskRoute{Task: config.ModelTaskCodeReading, Provider: config.ModelProviderGLM, Model: "glm-5.2"}
+	router := NewRouter(runtime)
+	router.http.Timeout = 40 * time.Millisecond
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	trace, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Summary != "timeout fallback" || trace.Provider != config.ModelProviderGLM || !strings.Contains(trace.FallbackReason, "timeout") || secondaryCalls != 2 {
+		t.Fatalf("timeout did not diagnose and use healthy fallback: out=%+v trace=%+v calls=%d", out, trace, secondaryCalls)
+	}
+}
+
+func TestRouterPlanningNeverHidesUnauthorizedBehindHealthyFallback(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"invalid authentication content_filter"}`, http.StatusUnauthorized)
+	}))
+	defer primary.Close()
+	secondaryCalls := 0
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryCalls++
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"OK"}}]}`))
+	}))
+	defer secondary.Close()
+
+	runtime := testRuntime(config.ModelProviderKimi, primary.URL)
+	runtime.ModelProviders[config.ModelProviderGLM] = config.ModelProviderCredential{Provider: config.ModelProviderGLM, APIKey: "secondary-key", BaseURL: secondary.URL, DefaultModel: "glm-5.2", Enabled: true}
+	runtime.ModelTaskRoutes[config.ModelTaskCodeReading] = config.ModelTaskRoute{Task: config.ModelTaskCodeReading, Provider: config.ModelProviderGLM, Model: "glm-5.2"}
+	router := NewRouter(runtime)
+	if diagnostic := router.DiagnoseTask(context.Background(), config.ModelTaskCodeReading); !diagnostic.OK {
+		t.Fatalf("secondary provider diagnostic was not healthy: %+v", diagnostic)
+	}
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	trace, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &out)
+	if err == nil || IsDeterministicFallback(err) || trace == nil || trace.ErrorClass != "http_401" {
+		t.Fatalf("401 must remain a credential error: trace=%+v err=%v", trace, err)
+	}
+	if secondaryCalls != 1 {
+		t.Fatalf("healthy secondary was called after 401; calls=%d", secondaryCalls)
 	}
 }
 
@@ -400,6 +531,13 @@ func TestRouterDiagnoseTaskReturnsRedactedProviderStatus(t *testing.T) {
 	}
 	if strings.Contains(result.Error, "sk-secret-value") || strings.Contains(result.Error, "bearer-secret") {
 		t.Fatalf("diagnostic leaked secret: %+v", result)
+	}
+	serialized, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(serialized), "provider HTTP") || strings.Contains(string(serialized), "invalid key") || strings.Contains(string(serialized), `"error"`) {
+		t.Fatalf("diagnostic response exposed provider error text instead of status-only fields: %s", serialized)
 	}
 }
 

@@ -2,19 +2,17 @@ import { describe, expect, it } from "vitest";
 import { createEditorClient, decodeEditorBridgeResponse } from "./editor";
 
 describe("local demo editor client", () => {
-  it("keeps mock editor sessions revisioned and Seedance opt-in only", async () => {
+  it("keeps mock editor sessions revisioned and presentation generation optional", async () => {
     const client = createEditorClient();
     expect(client.mode).toBe("mock");
 
     const created = await client.createSession("测试剪辑");
     expect(created.ok).toBe(true);
     const session = created.data!;
-    expect(session.provider_capabilities[0]).toMatchObject({
-      provider: "seedance",
-      auto_include: false,
-      requires_review: true,
-      presentation_only: true,
-      can_represent_business_step: false,
+    expect(session.presentation_capabilities[0]).toMatchObject({
+      capability: "presentation_video_candidate",
+      profile_version: "server-presentation-video-v1",
+      policies: { requires_explicit_review: true, presentation_only: true, may_replace_captured_ui: false, failure_blocks_recording_delivery: false },
     });
 
     const imported = await client.importAsset(session.session_id, "D:\\recordings\\demo.mp4");

@@ -43,6 +43,13 @@ type ClientExecutionPackageBuild struct {
 	SizeReport                  PackageSizeReport            `json:"size_report"`
 }
 
+type approvedBuildCacheEntry struct {
+	Build                           ClientExecutionPackageBuild
+	PreviewPackageDigestSHA256      string
+	PreviewApprovalSubjectDigest    string
+	PreviewConfidenceAssessmentHash string
+}
+
 type PackageSizeReport struct {
 	AlgorithmVersion string         `json:"algorithm_version"`
 	TotalBytes       int            `json:"total_bytes"`
@@ -55,6 +62,7 @@ type PackageSizeReport struct {
 type CloudUploadInitRequest struct {
 	OrgID                       string `json:"org_id,omitempty"`
 	ProjectID                   string `json:"project_id,omitempty"`
+	PackageDigestSHA256         string `json:"package_digest_sha256,omitempty"`
 	ApprovalSubjectDigestSHA256 string `json:"approval_subject_digest_sha256"`
 	ConfidenceAssessmentHash    string `json:"confidence_assessment_hash"`
 	RiskConfirmed               bool   `json:"risk_confirmed"`
@@ -82,15 +90,29 @@ type CloudUploadPackageResult struct {
 // CloudPackagePreflightResult is a no-side-effect Server Intake report for
 // the App-generated package. It must pass before upload or Browser execution.
 type CloudPackagePreflightResult struct {
-	Valid          bool                         `json:"valid"`
-	Runtime        string                       `json:"runtime,omitempty"`
-	PackageID      string                       `json:"package_id,omitempty"`
-	StageCount     int                          `json:"stage_count,omitempty"`
-	RequiredChecks int                          `json:"required_checks,omitempty"`
-	AllowedDomains []string                     `json:"allowed_domains,omitempty"`
-	Warnings       []string                     `json:"warnings"`
-	Readiness      *BrowserAgentReadinessReport `json:"browser_agent_readiness,omitempty"`
-	Message        string                       `json:"message"`
+	Valid                       bool                         `json:"valid"`
+	BuildStatus                 string                       `json:"build_status,omitempty"`
+	PackageDigestSHA256         string                       `json:"package_digest_sha256,omitempty"`
+	ApprovalSubjectDigestSHA256 string                       `json:"approval_subject_digest_sha256,omitempty"`
+	ConfidenceAssessmentHash    string                       `json:"confidence_assessment_hash,omitempty"`
+	Runtime                     string                       `json:"runtime,omitempty"`
+	PackageID                   string                       `json:"package_id,omitempty"`
+	StageCount                  int                          `json:"stage_count,omitempty"`
+	RequiredChecks              int                          `json:"required_checks,omitempty"`
+	AllowedDomains              []string                     `json:"allowed_domains,omitempty"`
+	Warnings                    []string                     `json:"warnings"`
+	Readiness                   *BrowserAgentReadinessReport `json:"browser_agent_readiness,omitempty"`
+	Message                     string                       `json:"message"`
+}
+
+// ClientExecutionPackagePreflightRequest is deliberately limited to the
+// authoritative preview identities. It never carries credentials or cloud
+// transport state and therefore cannot allocate a lease or contact Exchange.
+type ClientExecutionPackagePreflightRequest struct {
+	OrgID                       string `json:"org_id,omitempty"`
+	PackageDigestSHA256         string `json:"package_digest_sha256"`
+	ApprovalSubjectDigestSHA256 string `json:"approval_subject_digest_sha256"`
+	ConfidenceAssessmentHash    string `json:"confidence_assessment_hash"`
 }
 
 type CloudStatusRequest struct {
@@ -224,32 +246,78 @@ func (s *Service) BuildClientExecutionPackage(ctx context.Context, projectID str
 	return buildClientExecutionPackageFromState(state, orgID, time.Now().UTC())
 }
 
+// PreflightClientExecutionPackage validates the current authoritative App
+// draft locally. Unlike the retired cloud/preflight route it does not approve,
+// sign, create an Exchange session, or allocate a direct transport lease.
+func (s *Service) PreflightClientExecutionPackage(ctx context.Context, projectID string, request ClientExecutionPackagePreflightRequest) (CloudPackagePreflightResult, error) {
+	packageDigest := strings.TrimSpace(request.PackageDigestSHA256)
+	approvalDigest := strings.TrimSpace(request.ApprovalSubjectDigestSHA256)
+	confidenceHash := strings.TrimSpace(request.ConfidenceAssessmentHash)
+	if packageDigest == "" || approvalDigest == "" || confidenceHash == "" {
+		return CloudPackagePreflightResult{}, errors.New("package_preview_not_ready: package, approval, and confidence digests are required")
+	}
+	build, err := s.BuildClientExecutionPackage(ctx, projectID, firstNonEmptyString(request.OrgID, defaultDesktopOrgID))
+	if err != nil {
+		return CloudPackagePreflightResult{}, err
+	}
+	if build.BuildStatus != "draft" || build.PackageDigestSHA256 != packageDigest || build.ApprovalSubjectDigestSHA256 != approvalDigest || build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash != confidenceHash {
+		return CloudPackagePreflightResult{}, &packagePreviewStaleError{}
+	}
+	result := executionPackagePreflightResult(build.Package)
+	result.BuildStatus = build.BuildStatus
+	result.PackageDigestSHA256 = build.PackageDigestSHA256
+	result.ApprovalSubjectDigestSHA256 = build.ApprovalSubjectDigestSHA256
+	result.ConfidenceAssessmentHash = confidenceHash
+	return result, nil
+}
+
 func (s *Service) ApproveCloudClientExecutionPackage(ctx context.Context, projectID string, orgID string, request CloudUploadInitRequest) (ClientExecutionPackageBuild, ExchangeSession, error) {
+	build, err := s.ApproveClientExecutionPackage(ctx, projectID, orgID, request)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+	}
+	session, err := s.EnsureExchangeSession(ctx, build.OrgID, build.ProjectID)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+	}
+	build, err = s.signBuildWithExchangeSession(build, session)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+	}
+	return build, session, nil
+}
+
+// ApproveClientExecutionPackage applies the authoritative package approval
+// gate without selecting a transport. Direct Browser Agent and legacy
+// Exchange delivery must both use this exact digest-bound approval path.
+func (s *Service) ApproveClientExecutionPackage(ctx context.Context, projectID string, orgID string, request CloudUploadInitRequest) (ClientExecutionPackageBuild, error) {
 	if strings.TrimSpace(request.ApprovalSubjectDigestSHA256) == "" || strings.TrimSpace(request.ConfidenceAssessmentHash) == "" || strings.TrimSpace(request.IdempotencyKey) == "" || !request.RiskConfirmed {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, errors.New("execution package requires preview digest, confidence hash, idempotency key, and explicit risk confirmation")
+		return ClientExecutionPackageBuild{}, errors.New("execution package requires preview digest, confidence hash, idempotency key, and explicit risk confirmation")
 	}
 	idempotencyCacheKey := strings.TrimSpace(projectID) + "|" + strings.TrimSpace(request.IdempotencyKey)
 	s.approvalMu.Lock()
 	defer s.approvalMu.Unlock()
 	if cached, ok := s.approvedBuilds[idempotencyCacheKey]; ok {
-		if cached.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || cached.Package.ConfidenceSummary == nil || cached.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
-			return ClientExecutionPackageBuild{}, ExchangeSession{}, &packagePreviewStaleError{}
+		if (strings.TrimSpace(request.PackageDigestSHA256) != "" && cached.PreviewPackageDigestSHA256 != request.PackageDigestSHA256) || cached.PreviewApprovalSubjectDigest != request.ApprovalSubjectDigestSHA256 || cached.PreviewConfidenceAssessmentHash != request.ConfidenceAssessmentHash {
+			return ClientExecutionPackageBuild{}, &packagePreviewStaleError{}
 		}
-		session, err := s.EnsureExchangeSession(ctx, cached.OrgID, cached.ProjectID)
-		return cached, session, err
+		return cached.Build, nil
 	}
 	build, err := s.BuildClientExecutionPackage(ctx, projectID, orgID)
 	if err != nil {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+		return ClientExecutionPackageBuild{}, err
 	}
-	if build.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, &packagePreviewStaleError{}
+	if (strings.TrimSpace(request.PackageDigestSHA256) != "" && build.PackageDigestSHA256 != request.PackageDigestSHA256) || build.ApprovalSubjectDigestSHA256 != request.ApprovalSubjectDigestSHA256 || build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash != request.ConfidenceAssessmentHash {
+		return ClientExecutionPackageBuild{}, &packagePreviewStaleError{}
 	}
 	if build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, errors.New("blocked execution package cannot be approved")
+		return ClientExecutionPackageBuild{}, errors.New("blocked execution package cannot be approved")
 	}
 	now := time.Now().UTC()
 	build.Package.ApprovedAt = now
+	for index := range build.Package.CredentialGrants {
+		build.Package.CredentialGrants[index].ExpiresAt = now.Add(45 * time.Minute)
+	}
 	build.Package.SafetyReport.AllowedToUpload = true
 	build.Package.SafetyReport.HumanApproval = model.UserApprovalRecord{
 		ApprovalID: "approval_" + shortID(request.IdempotencyKey), ApprovedByUserID: "desktop_user", ApprovedAt: now,
@@ -260,35 +328,68 @@ func (s *Service) ApproveCloudClientExecutionPackage(ctx context.Context, projec
 	}
 	build.BuildStatus = "approved"
 	if err := normalizeClientExecutionPackageForUpload(&build.Package); err != nil {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+		return ClientExecutionPackageBuild{}, err
 	}
+	// Approval intentionally adds transport-time fields (for example the
+	// short-lived credential grant expiry and the human approval record) to
+	// the authoritative package. Re-assess the exact bytes that will be sent
+	// so Server Intake never receives a draft confidence hash attached to an
+	// approved package. The request digest above authorizes the reviewed preview;
+	// the approval record below freezes the normalized upload subject.
+	approvedConfidence, err := model.AssessClientExecutionPackage(&build.Package)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	if approvedConfidence.Readiness == model.PackageReadinessBlocked {
+		return ClientExecutionPackageBuild{}, errors.New("approved execution package became blocked after final confidence assessment")
+	}
+	build.Package.ConfidenceSummary = approvedConfidence
+	approvalDigest, err := refreshPackageApprovalDigests(&build.Package)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	build.ApprovalSubjectDigestSHA256 = approvalDigest
 	if err := model.ValidateClientExecutionPackageForCloudExecution(&build.Package); err != nil {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+		return ClientExecutionPackageBuild{}, err
 	}
 	packageDigest, err := model.DigestCanonicalJSON(build.Package)
 	if err != nil {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+		return ClientExecutionPackageBuild{}, err
 	}
 	build.PackageDigestSHA256 = packageDigest
 	envelope, err := envelopeForClientExecutionPackage(build.Package, now)
 	if err != nil {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
+		return ClientExecutionPackageBuild{}, err
 	}
 	envelope.IdempotencyKey = request.IdempotencyKey
 	build.Envelope, build.PayloadRef = envelope, envelope.PayloadRef
-	session, err := s.EnsureExchangeSession(ctx, build.OrgID, build.ProjectID)
-	if err != nil {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
-	}
-	build, err = s.signBuildWithExchangeSession(build, session)
-	if err != nil {
-		return ClientExecutionPackageBuild{}, ExchangeSession{}, err
-	}
 	if s.approvedBuilds == nil {
-		s.approvedBuilds = map[string]ClientExecutionPackageBuild{}
+		s.approvedBuilds = map[string]approvedBuildCacheEntry{}
 	}
-	s.approvedBuilds[idempotencyCacheKey] = build
-	return build, session, nil
+	s.approvedBuilds[idempotencyCacheKey] = approvedBuildCacheEntry{
+		Build:                           build,
+		PreviewPackageDigestSHA256:      strings.TrimSpace(request.PackageDigestSHA256),
+		PreviewApprovalSubjectDigest:    strings.TrimSpace(request.ApprovalSubjectDigestSHA256),
+		PreviewConfidenceAssessmentHash: strings.TrimSpace(request.ConfidenceAssessmentHash),
+	}
+	return build, nil
+}
+
+func refreshPackageApprovalDigests(pkg *model.ClientExecutionPackage) (string, error) {
+	if pkg == nil {
+		return "", errors.New("client execution package is nil")
+	}
+	componentDigests, err := model.ComputePackageApprovalComponentDigests(*pkg)
+	if err != nil {
+		return "", err
+	}
+	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256 = componentDigests
+	approvalDigest, err := model.ComputePackageApprovalSubjectDigest(*pkg)
+	if err != nil {
+		return "", err
+	}
+	pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256 = approvalDigest
+	return approvalDigest, nil
 }
 
 type packagePreviewStaleError struct{}
@@ -403,12 +504,13 @@ func compactProjectContextForPrepareResponse(project *model.ProjectContext) *mod
 	}
 	if project.Inputs != nil {
 		out.Inputs = &model.ProjectInputBundle{
-			ProductURLs:          project.Inputs.ProductURLs,
-			Repositories:         compactRepositoriesForPrepareResponse(project.Inputs.Repositories),
-			Credentials:          project.Inputs.Credentials,
-			Requirements:         project.Inputs.Requirements,
-			RawUserPrompt:        truncateForUpload(project.Inputs.RawUserPrompt, 1000),
-			RequirementDocuments: compactRequirementDocumentsForPrepareResponse(project.Inputs.RequirementDocuments),
+			ProductURLs:                   project.Inputs.ProductURLs,
+			Repositories:                  compactRepositoriesForPrepareResponse(project.Inputs.Repositories),
+			Credentials:                   project.Inputs.Credentials,
+			Requirements:                  project.Inputs.Requirements,
+			PresentationGenerationIntents: append([]model.PresentationGenerationIntent{}, project.Inputs.PresentationGenerationIntents...),
+			RawUserPrompt:                 truncateForUpload(project.Inputs.RawUserPrompt, 1000),
+			RequirementDocuments:          compactRequirementDocumentsForPrepareResponse(project.Inputs.RequirementDocuments),
 		}
 	}
 	return out
@@ -608,21 +710,12 @@ func (s *Service) signBuildWithExchangeSession(build ClientExecutionPackageBuild
 }
 
 func (s *Service) InitCloudExecutionPackageUpload(ctx context.Context, build ClientExecutionPackageBuild) (model.ExecutionPackageInitResponse, error) {
-	session, err := s.EnsureExchangeSession(ctx, build.OrgID, build.ProjectID)
-	if err != nil {
-		return model.ExecutionPackageInitResponse{}, err
-	}
 	client := &http.Client{Timeout: 60 * time.Second}
-	return cloudPostJSON[model.ExecutionPackageInitResponse](ctx, client, session.BaseURL+"/v1/execution-packages/init", session.SessionToken, "", model.ExecutionPackageInitRequest{
-		OrgID:       build.OrgID,
-		ProjectID:   build.ProjectID,
-		PackageKind: model.ExchangePackageKindClientExecution,
-		Producer: model.ExchangeProducer{
-			AppVersion:     defaultDesktopAppVersion,
-			InstallID:      session.InstallID,
-			DeviceID:       session.DeviceID,
-			RuntimeProfile: "desktop-product-run",
-		},
+	return withExchangeSessionRetry(ctx, s, build.OrgID, build.ProjectID, func(session ExchangeSession) (model.ExecutionPackageInitResponse, error) {
+		return cloudPostJSON[model.ExecutionPackageInitResponse](ctx, client, session.BaseURL+"/v1/execution-packages/init", session.SessionToken, "", model.ExecutionPackageInitRequest{
+			OrgID: build.OrgID, ProjectID: build.ProjectID, PackageKind: model.ExchangePackageKindClientExecution,
+			Producer: model.ExchangeProducer{AppVersion: defaultDesktopAppVersion, InstallID: session.InstallID, DeviceID: session.DeviceID, RuntimeProfile: "desktop-product-run"},
+		})
 	})
 }
 
@@ -630,20 +723,15 @@ func (s *Service) UploadBuiltCloudExecutionPackage(ctx context.Context, uploadID
 	if strings.TrimSpace(uploadID) == "" {
 		return model.ExecutionPackageUploadResponse{}, errors.New("upload_id is required")
 	}
-	session, err := s.EnsureExchangeSession(ctx, build.OrgID, build.ProjectID)
-	if err != nil {
-		return model.ExecutionPackageUploadResponse{}, err
-	}
-	build, err = s.signBuildWithExchangeSession(build, session)
-	if err != nil {
-		return model.ExecutionPackageUploadResponse{}, err
-	}
 	client := &http.Client{Timeout: 60 * time.Second}
-	return cloudPostJSON[model.ExecutionPackageUploadResponse](ctx, client, session.BaseURL+"/v1/execution-packages", session.SessionToken, "", map[string]any{
-		"upload_id":   uploadID,
-		"envelope":    build.Envelope,
-		"payload_ref": build.PayloadRef,
-		"payload":     build.Package,
+	return withExchangeSessionRetry(ctx, s, build.OrgID, build.ProjectID, func(session ExchangeSession) (model.ExecutionPackageUploadResponse, error) {
+		signed, err := s.signBuildWithExchangeSession(build, session)
+		if err != nil {
+			return model.ExecutionPackageUploadResponse{}, err
+		}
+		return cloudPostJSON[model.ExecutionPackageUploadResponse](ctx, client, session.BaseURL+"/v1/execution-packages", session.SessionToken, "", map[string]any{
+			"upload_id": uploadID, "envelope": signed.Envelope, "payload_ref": signed.PayloadRef, "payload": signed.Package,
+		})
 	})
 }
 
@@ -668,24 +756,20 @@ func (s *Service) GetCloudExecutionPackageStatus(ctx context.Context, request Cl
 	if strings.TrimSpace(request.ExchangePackageID) == "" {
 		return model.ExecutionPackageStatusResponse{}, errors.New("exchange_package_id is required")
 	}
-	session, err := s.EnsureExchangeSession(ctx, request.OrgID, "")
-	if err != nil {
-		return model.ExecutionPackageStatusResponse{}, err
-	}
 	client := &http.Client{Timeout: 60 * time.Second}
-	return cloudGetJSON[model.ExecutionPackageStatusResponse](ctx, client, session.BaseURL+"/v1/execution-packages/"+url.PathEscape(request.ExchangePackageID)+"/status", session.SessionToken, firstNonEmptyString(request.OrgID, defaultDesktopOrgID))
+	return withExchangeSessionRetry(ctx, s, request.OrgID, "", func(session ExchangeSession) (model.ExecutionPackageStatusResponse, error) {
+		return cloudGetJSON[model.ExecutionPackageStatusResponse](ctx, client, session.BaseURL+"/v1/execution-packages/"+url.PathEscape(request.ExchangePackageID)+"/status", session.SessionToken, firstNonEmptyString(request.OrgID, defaultDesktopOrgID))
+	})
 }
 
 func (s *Service) GetCloudResultPackage(ctx context.Context, request CloudResultRequest) (model.RecordingResultPackage, error) {
 	if strings.TrimSpace(request.ResultPackageID) == "" {
 		return model.RecordingResultPackage{}, errors.New("result_package_id is required")
 	}
-	session, err := s.EnsureExchangeSession(ctx, request.OrgID, "")
-	if err != nil {
-		return model.RecordingResultPackage{}, err
-	}
 	client := &http.Client{Timeout: 60 * time.Second}
-	return cloudGetJSON[model.RecordingResultPackage](ctx, client, session.BaseURL+"/v1/result-packages/"+url.PathEscape(request.ResultPackageID), session.SessionToken, firstNonEmptyString(request.OrgID, defaultDesktopOrgID))
+	return withExchangeSessionRetry(ctx, s, request.OrgID, "", func(session ExchangeSession) (model.RecordingResultPackage, error) {
+		return cloudGetJSON[model.RecordingResultPackage](ctx, client, session.BaseURL+"/v1/result-packages/"+url.PathEscape(request.ResultPackageID), session.SessionToken, firstNonEmptyString(request.OrgID, defaultDesktopOrgID))
+	})
 }
 
 func (s *Service) DownloadCloudResultDeliverable(ctx context.Context, request CloudDeliverableDownloadRequest) (CloudDeliverableDownloadResult, error) {
@@ -1049,11 +1133,16 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
+	agents.RebindGraphRequirementsForPackage(project, graphForPackage)
 	bundleForPackage, err := cloneExecutableBundleForPackage(state.ExecutableScriptBundle)
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
+	backfillRuntimeAdaptiveAuthority(graph, bundleForPackage)
 	packageID := "pkg_" + firstNonEmptyString(state.ExecutableScriptBundle.ID, state.ScriptDocument.ID, graph.ID)
+	if state.ExecutionPackageGeneration > 0 {
+		packageID += fmt.Sprintf("_r%d", state.ExecutionPackageGeneration)
+	}
 	pkg := model.ClientExecutionPackage{
 		PackageID:              packageID,
 		OrgID:                  orgID,
@@ -1066,6 +1155,7 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 		WorkflowGraph:          graphForPackage,
 		RecordingRunSpec:       runSpec,
 		ExecutableScriptBundle: bundleForPackage,
+		CredentialGrants:       credentialGrantsForPackage(project, runSpec, packageID),
 		EvidenceBundle:         evidenceBundleForPackage(state),
 		Reproducibility: model.ReproducibilitySpec{
 			GraphHashSHA256:       graphDigest,
@@ -1120,7 +1210,7 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
-	packageDigest, err := model.DigestCanonicalJSON(pkg)
+	packageDigest, err := semanticClientExecutionPackageDigest(pkg)
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
@@ -1134,6 +1224,64 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 		PackageDigestSHA256:         packageDigest,
 		SizeReport:                  sizeReport,
 	}, nil
+}
+
+func credentialGrantsForPackage(project *model.ProjectContext, runSpec model.RecordingRunSpec, packageID string) []model.CredentialGrant {
+	if project == nil || project.DemoAccount == nil {
+		return nil
+	}
+	ref := strings.TrimSpace(project.DemoAccount.PasswordSecretRef)
+	if ref == "" || ref != strings.TrimSpace(project.DemoAccount.UsernameSecretRef) || !strings.HasPrefix(ref, "credential://demo/") {
+		return nil
+	}
+	domains := append([]string(nil), runSpec.AllowedDomains...)
+	sort.Strings(domains)
+	return []model.CredentialGrant{{
+		GrantID: "grant_" + shortID(packageID+"|"+ref+"|"+strings.Join(domains, ",")),
+		Kind:    "username_password", Purpose: "browser_login", Scope: "approved_session_setup_login_form",
+		CloudSecretRef: ref, AllowedDomains: domains,
+		AllowedOperations: []string{"fill_username", "fill_password", "submit_login"},
+		DeleteAfterRun:    true,
+	}}
+}
+
+func backfillRuntimeAdaptiveAuthority(graph *model.DemoWorkflowGraph, bundle *model.ExecutableRecordingScriptBundle) {
+	if graph == nil || bundle == nil || bundle.PlanJSON == nil || bundle.StageApprovalPlan == nil || bundle.ScriptOutline == nil {
+		return
+	}
+	adaptive := map[string]bool{}
+	for _, node := range graph.Nodes {
+		if node == nil || node.Metadata == nil || node.Metadata["runtime_adaptive"] != true {
+			continue
+		}
+		nonDestructive, ok := node.Metadata["non_destructive"].(bool)
+		if ok && nonDestructive {
+			adaptive[node.ID] = true
+		}
+	}
+	for i := range bundle.PlanJSON.Steps {
+		if adaptive[bundle.PlanJSON.Steps[i].NodeID] {
+			bundle.PlanJSON.Steps[i].RuntimeAdaptive = true
+		}
+	}
+	for i := range bundle.StageApprovalPlan.Stages {
+		if adaptive[bundle.StageApprovalPlan.Stages[i].NodeID] {
+			bundle.StageApprovalPlan.Stages[i].RuntimeAdaptive = true
+		}
+	}
+	for i := range bundle.ScriptOutline.Stages {
+		if adaptive[bundle.ScriptOutline.Stages[i].NodeID] {
+			bundle.ScriptOutline.Stages[i].RuntimeAdaptive = true
+		}
+	}
+}
+
+func semanticClientExecutionPackageDigest(pkg model.ClientExecutionPackage) (string, error) {
+	// Preview timestamps are presentation metadata and must not invalidate an unchanged approval subject.
+	pkg.CreatedAt = time.Time{}
+	pkg.ApprovedAt = time.Time{}
+	pkg.SafetyReport.HumanApproval = model.UserApprovalRecord{}
+	return model.DigestCanonicalJSON(pkg)
 }
 
 func synchronizeReadinessWithPackageFindings(state *orchestrator.CascadeState, findings []model.AgentFinding) {
@@ -1399,7 +1547,14 @@ func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model
 			Goal:            truncateForUpload(step.BusinessValue, 200),
 			PageRef:         firstNonEmptyString(step.PageTarget.URL, step.Action.Target.URL),
 			EvidenceRefs:    compactEvidenceRefsForUpload(step.EvidenceRefs, 3),
+			Validations:     compactValidationsForUpload(step.Validations),
 			DurationHintMS:  step.Timing.DurationMS,
+			Metadata: map[string]any{
+				"business_stage_id":    stepBusinessStageID(bundle, step.NodeID),
+				"business_stage_kind":  string(step.StageKind),
+				"business_route_state": string(step.RouteState),
+				"non_destructive":      step.NonDestructive,
+			},
 		})
 		if previous != "" && nodeID != "" {
 			out.Edges = append(out.Edges, &model.GraphEdge{
@@ -1410,6 +1565,34 @@ func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model
 			})
 		}
 		previous = nodeID
+	}
+	return out
+}
+
+func stepBusinessStageID(bundle *model.ExecutableRecordingScriptBundle, nodeID string) string {
+	if bundle != nil && bundle.StageApprovalPlan != nil {
+		for _, stage := range bundle.StageApprovalPlan.Stages {
+			if stage.NodeID == nodeID {
+				return stage.BusinessStageID
+			}
+		}
+	}
+	return ""
+}
+
+func compactValidationsForUpload(values []model.ValidationSpec) []model.ValidationSpec {
+	out := make([]model.ValidationSpec, 0, 2)
+	for _, value := range values {
+		if !value.Required {
+			continue
+		}
+		value.Assertion = truncateForUpload(value.Assertion, 160)
+		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 2)
+		value.RepairPolicy = nil
+		out = append(out, value)
+		if len(out) == 2 {
+			break
+		}
 	}
 	return out
 }
@@ -1680,8 +1863,8 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 		stage.SuccessState = truncateForUpload(stage.SuccessState, 240)
 		stage.WaitConditions = limitStringsForUpload(stage.WaitConditions, 4)
 		stage.CapturePoints = limitStringsForUpload(stage.CapturePoints, 4)
-		stage.CanModify = limitStringsForUpload(stage.CanModify, 8)
-		stage.MustPreserve = limitStringsForUpload(stage.MustPreserve, 8)
+		stage.CanModify = compactContractFieldsForUpload(stage.CanModify, []string{"selector"}, 8)
+		stage.MustPreserve = compactContractFieldsForUpload(stage.MustPreserve, []string{"success_state", "safety_policy"}, 8)
 		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 3)
 		if stage.TargetContract != nil {
 			compactTargetContractForUpload(stage.TargetContract)
@@ -1706,6 +1889,31 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 		}
 	}
 	outline.UncertaintyReport = compactStageUncertaintiesForUpload(outline.UncertaintyReport, 4)
+}
+
+func compactContractFieldsForUpload(values, required []string, limit int) []string {
+	out := make([]string, 0, limit)
+	seen := map[string]bool{}
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] || len(out) >= limit {
+			return
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	for _, requiredField := range required {
+		for _, value := range values {
+			if strings.Contains(strings.ToLower(value), requiredField) {
+				add(value)
+				break
+			}
+		}
+	}
+	for _, value := range values {
+		add(value)
+	}
+	return out
 }
 
 func compactBrowserAgentContractForUpload(contract *model.BrowserAgentContract) {
@@ -2079,6 +2287,7 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 	}
 	if outlineRuntime {
 		findings = append(findings, preflightBrowserAgentOutline(pkg.ExecutableScriptBundle)...)
+		findings = append(findings, preflightFiveLayerNonDestructiveConsensus(state, pkg)...)
 	}
 	if repeatedLoginCount > 1 {
 		findings = append(findings, packagePreflightFinding(
@@ -2187,6 +2396,64 @@ func blockingFindings(findings []model.AgentFinding) []model.AgentFinding {
 		}
 	}
 	return blockers
+}
+
+func preflightFiveLayerNonDestructiveConsensus(state *orchestrator.CascadeState, pkg *model.ClientExecutionPackage) []model.AgentFinding {
+	if state == nil || state.ProjectIntelligence == nil || state.ProjectIntelligence.BusinessStagePlan == nil || pkg == nil || pkg.WorkflowGraph == nil || pkg.ExecutableScriptBundle == nil || pkg.ExecutableScriptBundle.PlanJSON == nil || pkg.ExecutableScriptBundle.StageApprovalPlan == nil || pkg.ExecutableScriptBundle.ScriptOutline == nil {
+		return []model.AgentFinding{packagePreflightFinding("non_destructive_consensus_missing", model.FindingSeverityBlocking, "five-layer non_destructive consensus cannot be established", "Regenerate BusinessStagePlan, WorkflowGraph, PlanJSON, StageApprovalPlan, and BrowserAgentOutline together.")}
+	}
+	stages := map[string]model.BusinessStage{}
+	for _, stage := range state.ProjectIntelligence.BusinessStagePlan.Stages {
+		stages[stage.ID] = stage
+	}
+	graphNodes := map[string]*model.GraphNode{}
+	for _, node := range pkg.WorkflowGraph.Nodes {
+		if node != nil {
+			graphNodes[node.ID] = node
+		}
+	}
+	approval := map[string]model.StageApprovalStage{}
+	for _, stage := range pkg.ExecutableScriptBundle.StageApprovalPlan.Stages {
+		approval[stage.NodeID] = stage
+	}
+	outline := map[string]model.BrowserAgentOutlineStage{}
+	for _, stage := range pkg.ExecutableScriptBundle.ScriptOutline.Stages {
+		outline[stage.NodeID] = stage
+	}
+	findings := []model.AgentFinding{}
+	for _, step := range pkg.ExecutableScriptBundle.PlanJSON.Steps {
+		approved, approvalOK := approval[step.NodeID]
+		outlined, outlineOK := outline[step.NodeID]
+		node, nodeOK := graphNodes[step.NodeID]
+		stageID := ""
+		if approvalOK {
+			stageID = approved.BusinessStageID
+		}
+		stage, stageOK := stages[stageID]
+		graphValue, graphOK := workflowNodeNonDestructive(node)
+		consistent := stageOK && nodeOK && graphOK && approvalOK && outlineOK && len(outlined.Interactions) > 0 &&
+			stage.Action.NonDestructive == step.NonDestructive && graphValue == step.NonDestructive && approved.Interaction.NonDestructive == step.NonDestructive
+		if consistent {
+			for _, interaction := range outlined.Interactions {
+				if interaction.NonDestructive != step.NonDestructive {
+					consistent = false
+					break
+				}
+			}
+		}
+		if !consistent {
+			findings = append(findings, packagePreflightFinding("non_destructive_consensus_"+shortID(step.NodeID), model.FindingSeverityBlocking, "non_destructive policy differs across BusinessStage, WorkflowGraph, PlanJSON, StageApprovalPlan, or BrowserAgentOutline: "+step.NodeID, "Regenerate all execution layers from the authoritative graph; do not upload a partially updated package."))
+		}
+	}
+	return findings
+}
+
+func workflowNodeNonDestructive(node *model.GraphNode) (bool, bool) {
+	if node == nil || node.Metadata == nil {
+		return false, false
+	}
+	value, ok := node.Metadata["non_destructive"].(bool)
+	return value, ok
 }
 
 func preflightBrowserAgentOutline(bundle *model.ExecutableRecordingScriptBundle) []model.AgentFinding {
@@ -2726,18 +2993,26 @@ func projectContextSummaryForPackage(project *model.ProjectContext, state *orche
 	}
 	goals := demoGoalsForPackage(project)
 	return model.ProjectContextSummary{
-		ContextID:         "ctx_" + project.ID,
-		SchemaVersion:     model.ProjectContextSchemaVersion,
-		Mode:              project.Mode,
-		Name:              project.Name,
-		ProductURL:        project.ProductURL,
-		TargetAudience:    project.TargetAudience,
-		Goals:             goals,
-		Audiences:         append([]model.AudienceProfile{}, project.Audiences...),
-		AccessPolicy:      project.AccessPolicy,
-		SecurityPolicy:    project.SecurityPolicy,
-		InputFingerprints: inputFingerprints,
+		ContextID:                     "ctx_" + project.ID,
+		SchemaVersion:                 model.ProjectContextSchemaVersion,
+		Mode:                          project.Mode,
+		Name:                          project.Name,
+		ProductURL:                    project.ProductURL,
+		TargetAudience:                project.TargetAudience,
+		Goals:                         goals,
+		Audiences:                     append([]model.AudienceProfile{}, project.Audiences...),
+		AccessPolicy:                  project.AccessPolicy,
+		SecurityPolicy:                project.SecurityPolicy,
+		PresentationGenerationIntents: presentationGenerationIntentsForPackage(project),
+		InputFingerprints:             inputFingerprints,
 	}
+}
+
+func presentationGenerationIntentsForPackage(project *model.ProjectContext) []model.PresentationGenerationIntent {
+	if project == nil || project.Inputs == nil {
+		return nil
+	}
+	return append([]model.PresentationGenerationIntent{}, project.Inputs.PresentationGenerationIntents...)
 }
 
 func productMapSummaryForPackage(project *model.ProjectContext, productMap *model.ProductMap) model.ProductMapSummary {

@@ -190,6 +190,38 @@ func TestRuntimeConfigViewUsesExecutionReadinessForVideoWorker(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigViewRetiresExchangeForProductionDesktop(t *testing.T) {
+	runtime := config.AppRuntimeConfig{
+		Profile:              config.ProfileDesktop,
+		Environment:          "production",
+		CloudExchangeBaseURL: "https://legacy.example.test",
+	}
+	view := NewRuntimeConfigView(runtime, ExchangeIdentityStatus{
+		ExchangeDiscovered: true,
+		InstallationPaired: true,
+		SessionValid:       true,
+		AuthMode:           "installation_key",
+	})
+	if !view.CloudExchange.Retired || view.CloudExchange.Configured || view.CloudExchange.ExchangeDiscovered || view.CloudExchange.SessionValid {
+		t.Fatalf("production desktop must expose retired exchange state only: %+v", view.CloudExchange)
+	}
+	if view.CloudExchange.AuthMode != "retired" {
+		t.Fatalf("unexpected retired auth mode: %+v", view.CloudExchange)
+	}
+}
+
+func TestRuntimeConfigViewKeepsExchangeFixtureInTestEnvironment(t *testing.T) {
+	runtime := config.AppRuntimeConfig{
+		Profile:              config.ProfileDesktop,
+		Environment:          "test",
+		CloudExchangeBaseURL: "https://legacy.example.test",
+	}
+	view := NewRuntimeConfigView(runtime, ExchangeIdentityStatus{})
+	if view.CloudExchange.Retired || !view.CloudExchange.Configured {
+		t.Fatalf("test compatibility environment should retain exchange fixture: %+v", view.CloudExchange)
+	}
+}
+
 func newTestBridge(t *testing.T) *DesktopBridge {
 	t.Helper()
 	root := t.TempDir()

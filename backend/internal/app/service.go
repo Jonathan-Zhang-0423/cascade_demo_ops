@@ -34,6 +34,9 @@ type Service struct {
 	assistantProgressSink func(string, orchestrator.ProgressEvent)
 	controlPlaneMu        sync.RWMutex
 	controlPlaneURL       string
+	directTransportMu     sync.RWMutex
+	directTransportURL    string
+	directIdentityMu      sync.Mutex
 	layout                storage.LocalLayout
 	exchange              *ExchangeIntakeService
 	runningMu             sync.Mutex
@@ -46,11 +49,23 @@ type Service struct {
 	sourceRefsMu          sync.RWMutex
 	sourceRefs            map[string]LocalSourceRef
 	approvalMu            sync.Mutex
-	approvedBuilds        map[string]ClientExecutionPackageBuild
+	approvedBuilds        map[string]approvedBuildCacheEntry
+	graphRevisionMu       sync.Mutex
+	graphRevisions        map[string]graphRevisionCacheEntry
+	exchangeSessionMu     sync.Mutex
 	cloudStateMu          sync.Mutex
 	storeModelKey         func(string, string) error
 	readModelKey          func(string) (string, error)
 	deleteModelKey        func(string) error
+	storeDirectToken      func(string) error
+	readDirectToken       func() (string, error)
+	deleteDirectToken     func() error
+	storeDirectIdentity   func([]byte) error
+	readDirectIdentity    func() ([]byte, error)
+	storeDirectLease      func(string, []byte) error
+	readDirectLease       func(string) ([]byte, error)
+	deleteDirectLease     func(string) error
+	readDemoCredential    func(string) (credentialstore.DemoCredential, error)
 	verifierMu            sync.RWMutex
 	// outcomeVerifier is Server-owned. It never receives a browser/page object
 	// and is snapshotted when an Outline run begins.
@@ -128,21 +143,31 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		return nil, err
 	}
 	service := &Service{
-		runtime:        runtime,
-		llm:            llmRouter,
-		flow:           flow,
-		states:         states,
-		assistantStore: assistantStoreForRuntime(runtime),
-		layout:         storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
-		exchange:       newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
-		runningTasks:   map[string]context.CancelFunc{},
-		editorJobs:     map[string]editorRenderTask{},
-		outlineRunner:  nil,
-		sourceRefs:     map[string]LocalSourceRef{},
-		approvedBuilds: map[string]ClientExecutionPackageBuild{},
-		storeModelKey:  credentialstore.StoreModelAPIKey,
-		readModelKey:   credentialstore.ReadModelAPIKey,
-		deleteModelKey: credentialstore.DeleteModelAPIKey,
+		runtime:             runtime,
+		llm:                 llmRouter,
+		flow:                flow,
+		states:              states,
+		assistantStore:      assistantStoreForRuntime(runtime),
+		layout:              storage.NewLocalLayout(runtime.DataRoot, runtime.ArtifactRoot, runtime.CacheRoot, runtime.LogRoot),
+		exchange:            newExchangeIntakeService(nil, newFileExchangeSnapshotStore(filepath.Join(runtime.DataRoot, "exchange_state"))),
+		runningTasks:        map[string]context.CancelFunc{},
+		editorJobs:          map[string]editorRenderTask{},
+		outlineRunner:       nil,
+		sourceRefs:          map[string]LocalSourceRef{},
+		approvedBuilds:      map[string]approvedBuildCacheEntry{},
+		graphRevisions:      map[string]graphRevisionCacheEntry{},
+		storeModelKey:       credentialstore.StoreModelAPIKey,
+		readModelKey:        credentialstore.ReadModelAPIKey,
+		deleteModelKey:      credentialstore.DeleteModelAPIKey,
+		storeDirectToken:    credentialstore.StoreDirectBrowserAgentToken,
+		readDirectToken:     credentialstore.ReadDirectBrowserAgentToken,
+		deleteDirectToken:   credentialstore.DeleteDirectBrowserAgentToken,
+		storeDirectIdentity: credentialstore.StoreDirectBrowserAgentIdentity,
+		readDirectIdentity:  credentialstore.ReadDirectBrowserAgentIdentity,
+		storeDirectLease:    credentialstore.StoreDirectBrowserAgentLease,
+		readDirectLease:     credentialstore.ReadDirectBrowserAgentLease,
+		deleteDirectLease:   credentialstore.DeleteDirectBrowserAgentLease,
+		readDemoCredential:  credentialstore.ReadDemoCredential,
 	}
 	service.controlPlaneURL = loadPersistedControlPlaneURL(runtime.DataRoot)
 	service.devVisibleBrowserAgent = newDevVisibleBrowserAgentManager(service)
@@ -243,7 +268,11 @@ func (s *Service) DiagnosePlanningModel(ctx context.Context) llm.DiagnosticResul
 }
 
 func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
-	state, err := s.flow.Start(ctx, input)
+	hydrated, err := s.hydrateDemoCredentialInput(input)
+	if err != nil {
+		return nil, err
+	}
+	state, err := s.flow.Start(ctx, hydrated)
 	if err != nil {
 		if state != nil && state.ProjectID != "" {
 			_ = s.states.Save(ctx, state)
@@ -254,6 +283,41 @@ func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInpu
 		return nil, err
 	}
 	return state, nil
+}
+
+// hydrateDemoCredentialInput resolves an opaque local vault reference only at
+// the execution boundary. The hydrated strings are passed to the in-memory
+// flow and are never written back to the project input/state.
+func (s *Service) hydrateDemoCredentialInput(input orchestrator.UserInput) (orchestrator.UserInput, error) {
+	ref := strings.TrimSpace(input.DemoCredentialRef)
+	if ref == "" {
+		return input, nil
+	}
+	const prefix = "credential://demo/"
+	if !strings.HasPrefix(ref, prefix) || len(ref) <= len(prefix) {
+		return input, errors.New("demo credential ref is unavailable")
+	}
+	name := strings.TrimPrefix(ref, prefix)
+	if strings.ContainsAny(name, "/\\:\x00\r\n") {
+		return input, errors.New("demo credential ref is unavailable")
+	}
+	if s == nil || s.readDemoCredential == nil {
+		return input, errors.New("demo credential ref is unavailable")
+	}
+	credential, err := s.readDemoCredential(name)
+	if err != nil || strings.TrimSpace(credential.Username) == "" || credential.Password == "" {
+		return input, errors.New("demo credential ref is unavailable")
+	}
+	if input.DemoUsername != "" && input.DemoUsername != credential.Username {
+		return input, errors.New("demo credential does not match supplied credentials")
+	}
+	if input.DemoPassword != "" && input.DemoPassword != credential.Password {
+		return input, errors.New("demo credential does not match supplied credentials")
+	}
+	input.DemoUsername = credential.Username
+	input.DemoPassword = credential.Password
+	input.DemoCredentialRef = ref
+	return input, nil
 }
 
 func (s *Service) LoadProject(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
@@ -300,7 +364,10 @@ func (s *Service) DecideSourceBinding(ctx context.Context, projectID string, req
 	if state.ProjectContext == nil {
 		return nil, errors.New("project context is missing")
 	}
-	input := userInputFromProjectContext(state.ProjectContext)
+	input, err := userInputFromProjectContext(state.ProjectContext)
+	if err != nil {
+		return nil, err
+	}
 	input.ProjectID = projectID
 	input.SourceBindingDecision = request.Decision
 	input.SourceBindingHash = request.AssessmentHash
@@ -428,7 +495,11 @@ func (s *Service) RegenerateExecutionPackage(ctx context.Context, projectID stri
 	if state.ProjectContext == nil {
 		return nil, errors.New("project context is missing")
 	}
-	return s.CreateProject(ctx, userInputFromProjectContext(state.ProjectContext))
+	input, err := userInputFromProjectContext(state.ProjectContext)
+	if err != nil {
+		return nil, err
+	}
+	return s.CreateProject(ctx, input)
 }
 
 func stateHasNoCoreBusinessAction(state *orchestrator.CascadeState) bool {
@@ -442,6 +513,9 @@ func stateHasNoCoreBusinessAction(state *orchestrator.CascadeState) bool {
 }
 
 func (s *Service) SaveProjectInput(ctx context.Context, projectID string, inputs model.ProjectInputBundle) (*model.ProjectContext, error) {
+	if err := model.ValidatePresentationGenerationIntents(inputs.PresentationGenerationIntents); err != nil {
+		return nil, err
+	}
 	state, err := s.states.Load(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -538,7 +612,7 @@ func (s *Service) ArtifactURI(projectID string, fileName string) string {
 	return s.layout.ArtifactURI(projectID, fileName)
 }
 
-func userInputFromProjectContext(project *model.ProjectContext) orchestrator.UserInput {
+func userInputFromProjectContext(project *model.ProjectContext) (orchestrator.UserInput, error) {
 	input := orchestrator.UserInput{
 		ProjectID:          project.ID,
 		Mode:               project.Mode,
@@ -562,6 +636,8 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 		input.AllowedDomains = append([]string{}, project.AccessPolicy.AllowedDomains...)
 	}
 	if project.Inputs != nil {
+		input.Requirements = append([]model.DemoRequirement{}, project.Inputs.Requirements...)
+		input.PresentationGenerationIntents = append([]model.PresentationGenerationIntent{}, project.Inputs.PresentationGenerationIntents...)
 		input.Code = codeInputsForProjectRerun(project)
 		input.RequirementDocuments = append([]model.RequirementDocumentInput{}, project.Inputs.RequirementDocuments...)
 		input.WebpageScreenshots = append([]model.WebpageScreenshotInput{}, project.Inputs.WebpageScreenshots...)
@@ -581,8 +657,16 @@ func userInputFromProjectContext(project *model.ProjectContext) orchestrator.Use
 		if input.ProductDescription == "" {
 			input.ProductDescription = project.Inputs.RawUserPrompt
 		}
+		for _, value := range project.Inputs.Credentials {
+			const prefix = "credential://demo/"
+			if !strings.HasPrefix(value.SecretRef, prefix) {
+				continue
+			}
+			input.DemoCredentialRef = value.SecretRef
+			break
+		}
 	}
-	return input
+	return input, nil
 }
 
 func codeInputsForProjectRerun(project *model.ProjectContext) []model.CodeInput {

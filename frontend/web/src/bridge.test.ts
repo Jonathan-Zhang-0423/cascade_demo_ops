@@ -43,9 +43,98 @@ describe("desktop bridge contract", () => {
 		expect(mapped.cloudRun.exchangePackageID).toBe("xpkg_restart");
 		expect(mapped.cloudRun.lastEventID).toBe("xpkg_restart:9");
 		expect(mapped.cloudRun.resultDownloaded).toBe(true);
+		expect(mapped.cloudRun.resultAcknowledged).toBe(true);
 		expect(mapped.cloudRun.resultReview?.decision).toBe("approved");
 		expect(mapped.assets.find((asset) => asset.kind === "video")?.mediaURL).toContain("/cloud/deliverable/media?");
 		expect(JSON.stringify(mapped)).not.toMatch(/[A-Za-z]:\\/);
+	});
+
+	it("restores direct Browser Agent assets with the direct artifact media route", () => {
+		const fallback = createProjectDraftWorkspace("product_demo");
+		const mapped = workspaceFromCascadeStateForTest({
+			project_id: fallback.id,
+			desktop_cloud_run: {
+				schema_version: "demoops.desktop_cloud_run.v1",
+				transport: "browser_agent_direct_v1",
+				upload_id: "upload_direct",
+				package_id: "pkg_direct",
+				cloud_job_id: "job_direct",
+				status: "completed",
+				waiting_reason: "artifact_ack_required",
+				blocking_error_code: "result_ack_pending",
+				next_action: "review_and_ack_result",
+				requires_reapproval: true,
+				result_package_id: "result_direct",
+				result_package: {
+					result_id: "result_direct",
+					source_package_id: "pkg_direct",
+					cloud_job_id: "job_direct",
+					schema_version: "demoops.recording_result_package.v1",
+					status: "generated",
+					verification_report: { reproducibility_match: true, pass_rate: 1 },
+					delivery: { result_package_ref: { id: "result_direct", kind: "result_package", uri: "artifact://result.json", sha256: "b".repeat(64), encrypted: true, sensitive: true }, asset_refs: [{ id: "artifact_direct", role: "final_demo_video", kind: "video", uri: "artifact://demo.webm", mime_type: "video/webm", sha256: "b".repeat(64), encrypted: true, sensitive: true }], ack_required: true },
+					created_at: new Date().toISOString(),
+				} as never,
+				result_downloaded: true,
+				downloaded_assets: [{ artifact_id: "artifact_direct", file_name: "demo.webm", sha256: "b".repeat(64), size_bytes: 12, verified: true }],
+				updated_at: new Date().toISOString(),
+			},
+		}, fallback);
+		expect(mapped.assets.find((asset) => asset.assetID === "artifact_direct")?.mediaURL)
+			.toBe(`/v1/desktop/projects/${fallback.id}/browser-agent-direct/artifact/media?job_id=job_direct&file=demo.webm`);
+		expect(mapped.cloudRun).toMatchObject({
+			waitingReason: "artifact_ack_required",
+			blockingErrorCode: "result_ack_pending",
+			nextAction: "review_and_ack_result",
+			requiresReapproval: true,
+			resultDownloaded: true,
+			resultAcknowledged: false,
+		});
+	});
+
+	it("restores reunderstanding_required as a new approval gate with structured issues", () => {
+		const fallback = createWorkspace("product_demo");
+		const mapped = workspaceFromCascadeStateForTest({
+			project_id: fallback.id,
+			desktop_cloud_run: {
+				schema_version: "demoops.desktop_cloud_run.v1",
+				transport: "browser_agent_direct_v1",
+				package_id: "pkg_invalidated",
+				cloud_job_id: "job_terminal",
+				status: "failed",
+				stage: "failed",
+				blocking_error_code: "reunderstanding_required",
+				next_action: "regenerate_package_from_structured_issues",
+				requires_reapproval: true,
+				reunderstanding_issues: [{
+					code: "STAGE_VALIDATION_FAILURE_THRESHOLD",
+					stage_id: "stage_build",
+					node_id: "node_build",
+					severity: "blocking",
+					required: true,
+					summary: "2/3 stages failed validation",
+					evidence_ids: ["evidence_build"],
+				}],
+				updated_at: new Date().toISOString(),
+			},
+		}, fallback);
+		expect(mapped.stage).toBe("script_repair");
+		expect(mapped.status).toBe("script_repair_required");
+		expect(mapped.packagePreview.packageDigest).toBe("");
+		expect(mapped.packagePreview.approvalSubjectDigest).toBe("");
+		expect(mapped.packagePreview.confidenceAssessmentHash).toBe("");
+		expect(mapped.cloudRun).toMatchObject({
+			status: "failed",
+			blockingErrorCode: "reunderstanding_required",
+			nextAction: "regenerate_package_from_structured_issues",
+			requiresReapproval: true,
+		});
+		expect(mapped.cloudRun.reunderstandingIssues?.[0]).toMatchObject({
+			code: "STAGE_VALIDATION_FAILURE_THRESHOLD",
+			stageID: "stage_build",
+			nodeID: "node_build",
+			evidenceIDs: ["evidence_build"],
+		});
 	});
   afterEach(() => {
     vi.restoreAllMocks();
@@ -60,11 +149,50 @@ describe("desktop bridge contract", () => {
     expect(result.data?.modelProviders.seedance?.apiKeyFallbackEnvs).toEqual(["DOUBAO_API_KEY", "ARK_API_KEY"]);
   });
 
-  it("configures the control plane through the local bridge without credentials", async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
-      expect(init?.body).toBe(JSON.stringify({ base_url: "http://127.0.0.1:4317" }));
-      expect(String(init?.body)).not.toMatch(/password|token|Authorization/i);
-      return bridgeJSON({
+  it("blocks package preflight with missing authoritative digest before any network request", async () => {
+    const workspace = createWorkspace("product_demo");
+    const notReady = {
+      ...workspace,
+	  packagePreview: {
+		...workspace.packagePreview,
+		packageDigest: "",
+		approvalSubjectDigest: "",
+		confidenceAssessmentHash: "",
+	  },
+    };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").preflightExecutionPackage(notReady);
+
+    expect(result.ok).toBe(false);
+    expect(result.errorInfo?.code).toBe("package_preview_not_ready");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks direct upload with missing package digest before lease allocation", async () => {
+    const workspace = createWorkspace("product_demo");
+    const notReady = {
+      ...workspace,
+      packagePreview: { ...workspace.packagePreview, packageDigest: "" },
+    };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").approveAndUploadPackage(notReady);
+
+    expect(result.ok).toBe(false);
+    expect(result.errorInfo?.code).toBe("package_preview_not_ready");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("stores the Browser Agent token through the direct bridge and returns only redacted health", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+	  if (url.endsWith("/v1/desktop/browser-agent-direct")) {
+		expect(init?.body).toBe(JSON.stringify({ control_url: "http://127.0.0.1:4317", access_token: "direct-test-token" }));
+		return bridgeJSON({ configured: true, reachable: true, token_configured: true, protocol_version: "browser-agent-direct-v1", crypto_suite: "AES-256-GCM+HKDF-SHA256", control_url_host: "127.0.0.1:4317", transport: "browser_agent_direct_v1" });
+	  }
+	  return bridgeJSON({
         profile: "desktop",
         database_configured: true,
         local_data_configured: true,
@@ -74,26 +202,178 @@ describe("desktop bridge contract", () => {
         sidecars: {},
         model_providers: {},
         model_task_routes: {},
-        cloud_exchange: {
-          configured: true,
-          exchange_discovered: true,
-		  installation_paired: true,
-		  session_valid: true,
-          base_url_host: "127.0.0.1:4317",
-		  auth_mode: "installation_session",
-        },
+		browser_agent_direct: { configured: true, reachable: true, token_configured: true, protocol_version: "browser-agent-direct-v1", crypto_suite: "AES-256-GCM+HKDF-SHA256", control_url_host: "127.0.0.1:4317", transport: "browser_agent_direct_v1" },
       });
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await createLocalBridgeClient("http://wails.localhost").configureControlPlane("http://127.0.0.1:4317");
+    const result = await createLocalBridgeClient("http://wails.localhost").configureControlPlane("http://127.0.0.1:4317", "direct-test-token");
 
     expect(result.ok).toBe(true);
-	expect(result.data?.cloudExchange).toMatchObject({ configured: true, sessionValid: true, authMode: "installation_session", baseURLHost: "127.0.0.1:4317" });
+	expect(result.data?.browserAgentDirect).toMatchObject({ configured: true, reachable: true, tokenConfigured: true, controlURLHost: "127.0.0.1:4317" });
+	expect(JSON.stringify(result.data)).not.toContain("direct-test-token");
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://wails.localhost/v1/desktop/control-plane",
+      "http://wails.localhost/v1/desktop/browser-agent-direct",
       expect.objectContaining({ method: "PUT", headers: expect.objectContaining({ "Content-Type": "application/json" }) }),
     );
+  });
+
+  it("saves only allowed graph fields and replaces stale preview digests", async () => {
+    const workspace = createWorkspace("product_demo");
+    const revisedGraph = {
+      ...workspace.planReview.graph,
+      version: workspace.planReview.graph.version + 1,
+      nodes: workspace.planReview.graph.nodes.map((node) => ({ ...node, has_zoom: false })),
+    };
+    const revisedBundle = {
+      id: "bundle_revised",
+      script_manifest: { runtime: "browser-agent-outline-v1" },
+      approval_markdown: { inline_markdown: "# Revised" },
+      reproducibility: { graph_hash_sha256: "sha256:new-graph", plan_hash_sha256: "sha256:new-plan" },
+    } as never;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(`http://127.0.0.1:4317/v1/desktop/projects/${workspace.id}/workflow-graph/revisions`);
+      expect(init?.method).toBe("POST");
+      const request = JSON.parse(String(init?.body));
+      expect(request.base_graph_digest_sha256).toBe(workspace.packagePreview.graphDigest);
+      expect(request.idempotency_key).toBe("revision-front-1");
+      expect(request.patches).toHaveLength(workspace.planReview.graph.nodes.length);
+      expect(Object.keys(request.patches[0]).sort()).toEqual(["has_zoom", "is_screenshot", "node_id"]);
+      return bridgeJSON({
+        state: {
+          project_id: workspace.id,
+          current_node: "HumanApprove",
+          status: "awaiting_human_approval",
+          project_context: {
+            id: workspace.id,
+            product_url: workspace.productURL,
+            target_audience: workspace.targetAudience,
+            inputs: workspace.inputBundle,
+          },
+          workflow_graph: revisedGraph,
+          executable_script_bundle: revisedBundle,
+        },
+        build: {
+          org_id: "org_desktop",
+          project_id: workspace.id,
+          package: {
+            package_id: "pkg_revised",
+            workflow_graph: revisedGraph,
+            executable_script_bundle: revisedBundle,
+            confidence_summary: {
+              assessment_hash: "sha256:new-confidence",
+              readiness: "ready",
+              overall_score: 0.97,
+              blocking_reasons: [],
+              warnings: [],
+            },
+          },
+          build_status: "draft",
+          approval_subject_digest_sha256: "sha256:new-approval",
+          package_digest_sha256: "sha256:new-package",
+          size_report: { algorithm_version: "v1", total_bytes: 1234, section_bytes: {}, stage_count: 2, evidence_count: 2, selector_count: 2 },
+        },
+        graph_digest_sha256: "sha256:new-graph",
+        approval_subject_digest_sha256: "sha256:new-approval",
+        confidence_assessment_hash: "sha256:new-confidence",
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").reviseWorkflowGraph(workspace, "revision-front-1");
+
+    expect(result.ok).toBe(true);
+    expect(result.data?.planReview.graph.version).toBe(revisedGraph.version);
+    expect(result.data?.packagePreview).toMatchObject({
+      graphDigest: "sha256:new-graph",
+      packageDigest: "sha256:new-package",
+      approvalSubjectDigest: "sha256:new-approval",
+      confidenceAssessmentHash: "sha256:new-confidence",
+      buildStatus: "draft",
+    });
+  });
+
+  it("propagates structured package_preview_stale from graph revision", async () => {
+    const workspace = createWorkspace("product_demo");
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({
+        ok: false,
+        error: "package preview changed",
+        error_info: { code: "package_preview_stale", message: "执行包预览已过期", correlation_id: "revision-stale", retryable: false },
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").reviseWorkflowGraph(workspace, "revision-stale");
+
+    expect(result.ok).toBe(false);
+    expect(result.errorInfo?.code).toBe("package_preview_stale");
+    expect(result.error).toContain("执行包预览已过期");
+  });
+
+  it("submits only persisted Direct failure lineage and preserves package_preview_stale", async () => {
+    const workspace = createWorkspace("product_demo");
+    const failed = {
+      ...workspace,
+      stage: "script_repair" as const,
+      status: "script_repair_required" as const,
+      cloudRun: {
+        ...workspace.cloudRun,
+        packageID: "pkg_failed",
+        cloudJobID: "job_failed",
+        resultPackageID: "result_failed",
+        status: "failed" as const,
+        stage: "reunderstanding_required",
+        blockingErrorCode: "reunderstanding_required",
+        requiresReapproval: true,
+        packageDigestSHA256: "sha256:package-failed",
+        graphDigestSHA256: "sha256:graph-failed",
+        bundleHashSHA256: "sha256:bundle-failed",
+        planHashSHA256: "sha256:plan-failed",
+        diagnosticDigestSHA256: "sha256:diagnostic-failed",
+        reunderstandingIssues: [{ issueID: "issue_route", code: "selector_route_provenance_mismatch", required: true }],
+        resultPackage: {
+          result_id: "result_failed", source_package_id: "pkg_failed", cloud_job_id: "job_failed",
+          schema_version: "demoops.recording_result_package.v1", status: "failed",
+          verification_report: { reproducibility_match: true }, delivery: { result_package_ref: {}, ack_required: false },
+          created_at: new Date().toISOString(),
+        } as never,
+        repairRequest: {
+          id: "repair_failed", source_result_id: "result_failed", source_package_id: "pkg_failed", cloud_job_id: "job_failed",
+          failed_bundle_hash_sha256: "sha256:bundle-failed", failed_plan_hash_sha256: "sha256:plan-failed", approval_required: true,
+        },
+      },
+    };
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(`http://127.0.0.1:4317/v1/desktop/projects/${workspace.id}/browser-agent-direct/reunderstand`);
+      expect(init?.method).toBe("POST");
+      const body = JSON.parse(String(init?.body));
+      expect(body).toEqual({
+        schema_version: "demoops.direct_failure_reunderstanding.v1",
+        source_job_id: "job_failed", source_result_id: "result_failed", source_package_id: "pkg_failed", repair_request_id: "repair_failed",
+        base_package_digest_sha256: "sha256:package-failed", base_graph_digest_sha256: "sha256:graph-failed",
+        failed_bundle_hash_sha256: "sha256:bundle-failed", failed_plan_hash_sha256: "sha256:plan-failed",
+        diagnostic_digest_sha256: "sha256:diagnostic-failed", selected_issue_ids: ["issue_route"],
+        idempotency_key: `direct-reunderstand-${workspace.id}-result_failed`, user_confirmed: true,
+      });
+      expect(JSON.stringify(body)).not.toMatch(/selector|observed_url|password|credential/i);
+      return {
+        ok: false, status: 400, text: async () => JSON.stringify({
+          ok: false, error: "package preview changed",
+          error_info: { code: "package_preview_stale", message: "执行包预览已过期", correlation_id: "repair-stale", retryable: false },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createLocalBridgeClient("http://127.0.0.1:4317").repairFailedScript(failed);
+
+    expect(result.ok).toBe(false);
+    expect(result.errorInfo?.code).toBe("package_preview_stale");
+    expect(result.data).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("submits manual configuration through the pending-proposal endpoint", async () => {
@@ -160,10 +440,10 @@ describe("desktop bridge contract", () => {
 
   it("keeps mock control-plane settings stateful for browser UI smoke", async () => {
     const bridge = createMockBridgeClient();
-		expect((await bridge.runtimeHealth()).data?.cloudExchange?.configured).toBe(false);
-    expect((await bridge.configureControlPlane("http://public.example:4317")).ok).toBe(false);
-	expect((await bridge.configureControlPlane("http://localhost:4317")).data?.cloudExchange).toMatchObject({ configured: true, sessionValid: true, baseURLHost: "localhost:4317" });
-		expect((await bridge.runtimeHealth()).data?.cloudExchange?.configured).toBe(true);
+		expect((await bridge.runtimeHealth()).data?.browserAgentDirect?.configured).toBe(false);
+		expect((await bridge.configureControlPlane("http://public.example:4317", "mock-token")).ok).toBe(false);
+	expect((await bridge.configureControlPlane("http://localhost:4317", "mock-token")).data?.browserAgentDirect).toMatchObject({ configured: true, reachable: true, tokenConfigured: true, controlURLHost: "localhost:4317" });
+		expect((await bridge.runtimeHealth()).data?.browserAgentDirect?.configured).toBe(true);
   });
 
   it("registers browser local projects only through the acknowledged dev route", async () => {
@@ -251,7 +531,7 @@ describe("desktop bridge contract", () => {
     expect(failure.data?.cloudRun.artifactSummary?.encrypted).toBeGreaterThan(0);
   });
 
-  it("generates repaired bundles with lineage and returns to approval", async () => {
+  it("does not upgrade an ordinary mock action failure into reunderstanding", async () => {
     const bridge = createMockBridgeClient();
     const workspace = createWorkspace("product_demo");
     const failure = await bridge.simulateCloudFailure(workspace);
@@ -261,12 +541,54 @@ describe("desktop bridge contract", () => {
 
     const repaired = await bridge.repairFailedScript(failure.data);
 
+    expect(repaired.ok).toBe(false);
+    expect(repaired.errorInfo?.code).toBe("reunderstanding_incomplete");
+    expect(repaired.data).toBeUndefined();
+  });
+
+  it("reproduces the reunderstanding gate and invalidates the old mock lifecycle", async () => {
+    const bridge = createMockBridgeClient();
+    const workspace = createWorkspace("product_demo");
+    const failure = await bridge.simulateCloudFailure(workspace);
+    if (!failure.data?.cloudRun.resultPackage || !failure.data.cloudRun.failureDiagnostic || !failure.data.cloudRun.repairRequest) {
+      throw new Error("expected traceable failure workspace");
+    }
+    const resultPackage = failure.data.cloudRun.resultPackage;
+    const repairRequest = failure.data.cloudRun.repairRequest;
+    const issueID = "issue_auth_context";
+    const failed = {
+      ...failure.data,
+      cloudRun: {
+        ...failure.data.cloudRun,
+        packageID: resultPackage.source_package_id,
+        cloudJobID: resultPackage.cloud_job_id,
+        resultPackageID: resultPackage.result_id,
+        blockingErrorCode: "reunderstanding_required",
+        requiresReapproval: true,
+        packageDigestSHA256: failure.data.packagePreview.packageDigest,
+        graphDigestSHA256: failure.data.packagePreview.graphDigest,
+        bundleHashSHA256: repairRequest.failed_bundle_hash_sha256 ?? "sha256:mock-bundle",
+        planHashSHA256: repairRequest.failed_plan_hash_sha256 ?? "sha256:mock-plan",
+        diagnosticDigestSHA256: "sha256:mock-diagnostic",
+        reunderstandingIssues: [{ issueID, code: "authentication_context_unverified", required: true }],
+      },
+    };
+
+    const repaired = await bridge.repairFailedScript(failed);
+
     expect(repaired.ok).toBe(true);
     expect(repaired.data?.stage).toBe("package_approval");
     expect(repaired.data?.status).toBe("awaiting_approval");
-    expect(repaired.data?.executableScriptBundle?.repair_lineage?.source_result_id).toBe(failure.data.cloudRun.repairRequest?.source_result_id);
+    expect(repaired.data?.executableScriptBundle?.repair_lineage?.source_result_id).toBe(repairRequest.source_result_id);
     expect(repaired.data?.executableScriptBundle?.script_manifest.runtime).toBe("browser-agent-outline-v1");
     expect(repaired.data?.scriptMarkdown).toContain("本次修复说明");
+    expect(repaired.data?.packagePreview).toMatchObject({ buildStatus: "draft", readiness: "review_required", humanApprovalRequired: true });
+    expect(repaired.data?.packagePreview.packageDigest).not.toBe(failed.packagePreview.packageDigest);
+    expect(repaired.data?.packagePreview.graphDigest).not.toBe(failed.packagePreview.graphDigest);
+    expect(repaired.data?.cloudRun).toMatchObject({ status: "not_uploaded", stage: "local_generated", requiresReapproval: true });
+    expect(repaired.data?.cloudRun.cloudJobID).toBeUndefined();
+    expect(repaired.data?.cloudRun.resultPackage).toBeUndefined();
+    expect(repaired.data?.cloudRun.approvalSubjectDigestSHA256).toBeTruthy();
   });
 
   it("keeps checksum ack separate from the mock human review", async () => {
@@ -305,6 +627,7 @@ describe("desktop bridge contract", () => {
     expect(resultPackage.data?.delivery?.asset_refs?.every((artifact) => artifact.encrypted && artifact.sensitive)).toBe(true);
 	expect(acked.data?.assets.every((asset) => asset.status !== "approved")).toBe(true);
 	expect(acked.data?.cloudRun.resultDownloaded).toBe(true);
+	expect(acked.data?.cloudRun.resultAcknowledged).toBe(true);
 	expect(reviewed.data?.assets.every((asset) => asset.status === "approved")).toBe(true);
   });
 
@@ -313,9 +636,13 @@ describe("desktop bridge contract", () => {
     const build = {
       org_id: "org_desktop",
       project_id: workspace.id,
-      package: { package_id: "pkg_split_real" },
+	  package: { package_id: "pkg_split_real" },
       envelope: { crypto: { payload_digest_sha256: "sha256:payload-split" } },
       payload_ref: { kind: "inline", sha256: "sha256:payload-split", encrypted: true, sensitive: true },
+	  build_status: "approved",
+	  approval_subject_digest_sha256: "sha256:approval-split",
+	  package_digest_sha256: "sha256:package-split",
+	  size_report: { algorithm_version: "v1", total_bytes: 1024, section_bytes: {}, stage_count: 1, evidence_count: 1, selector_count: 0 },
     };
     const resultPackage = {
       result_id: "result_split_real",
@@ -347,68 +674,44 @@ describe("desktop bridge contract", () => {
       },
       created_at: "2026-07-14T00:00:00Z",
     };
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.includes("/cloud/init")) {
-        return bridgeJSON({
-          build,
-          init: {
-            upload_id: "upload_split_real",
-            server_public_key_id: "server-key",
-            supported_crypto_suites: ["aes-256-gcm"],
-            cascade_execution_ips: ["203.0.113.10"],
-          },
-        });
-      }
-      if (url.includes("/cloud/upload")) {
-        return bridgeJSON({
-          build,
-          upload: {
-            exchange_package_id: "xpkg_split_real",
-            cloud_job_id: "job_split_real",
-            status: "running",
-          },
-        });
-      }
-      if (url.includes("/cloud/status")) {
-        return bridgeJSON({
-          exchange_package_id: "xpkg_split_real",
-          cloud_job_id: "job_split_real",
-          status: "completed",
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+	  if (url.includes("/browser-agent-direct/upload")) {
+		const request = JSON.parse(String(init?.body));
+		expect(request.package_digest_sha256).toBe(workspace.packagePreview.packageDigest);
+		return bridgeJSON({
+		  build,
+		  lease: { lease_id: "lease_split_real", data_url_host: "browser-agent.example", data_port: 24001, issued_at: "2026-07-14T00:00:00Z", expires_at: "2026-07-14T00:30:00Z", crypto_suite: "hkdf-sha256+aes-256-gcm" },
+		  receipt: { protocol_version: "cascade.browser_agent_direct.v1", job_id: "job_split_real", package_id: "pkg_split_real", package_digest_sha256: "sha256:package-split", status: "running", stage: "browser_agent_queue", accepted_at: "2026-07-14T00:00:00Z" },
+		});
+	  }
+	  if (url.includes("/browser-agent-direct/status")) {
+		return bridgeJSON({
+		  protocol_version: "cascade.browser_agent_direct.v1",
+		  package_id: "pkg_split_real",
+		  job_id: "job_split_real",
+		  status: "completed",
           stage: "completed",
           message: "录制完成",
           progress_percent: 100,
           result_package_id: "result_split_real",
-		  result_summary: {
-			acceptance: {
-			  origin: "server_controlled_fixture",
-			  app_generated: false,
-			  formal_exchange: true,
-			  strict_evidence_complete: true,
-			  final_mp4_available: true,
-			  status: "server_fixture_only",
-			},
-		  },
-          stage_history: [
-            { stage: "accepted", status: "completed", message: "已接收", progress_percent: 20, updated_at: "2026-07-14T00:00:01Z" },
-			{ stage: "validating_pre_execution", status: "completed", message: "执行前校验通过", progress_percent: 36, updated_at: "2026-07-14T00:00:03Z" },
-			{ stage: "running_browser_agent", status: "completed", message: "浏览器智能执行完成", progress_percent: 68, updated_at: "2026-07-14T00:00:10Z" },
-			{ stage: "validating_runtime_stage", status: "completed", message: "步骤结果校验完成", progress_percent: 82, updated_at: "2026-07-14T00:00:12Z" },
-			{ stage: "validating_post_execution", status: "completed", message: "执行后复核完成", progress_percent: 95, updated_at: "2026-07-14T00:00:16Z" },
-            { stage: "completed", status: "completed", message: "结果返回", progress_percent: 100, updated_at: "2026-07-14T00:00:20Z" },
-          ],
-        });
-      }
-	  if (url.includes("/cloud/result")) {
+		  artifacts: [{ artifact_id: "artifact_video_split", role: "final_demo_video", kind: "video", file_name: "video.webm", mime_type: "video/webm", sha256: "sha256:video", size_bytes: 128 }],
+		  updated_at: "2026-07-14T00:00:20Z",
+		});
+	  }
+	  if (url.includes("/browser-agent-direct/result")) {
 		return bridgeJSON(resultPackage);
 	  }
-	  if (url.includes("/cloud/deliverable/download")) {
-		return bridgeJSON({ artifact_id: "artifact_video_split", media_url: "/v1/desktop/projects/project_product_demo/cloud/deliverable/media?result_package_id=result_split_real&file=video.webm", sha256: "sha256:video", expected_sha256: "sha256:video", checksum_verified: true });
+	  if (url.includes("/browser-agent-direct/artifact/download")) {
+		return bridgeJSON({ artifact_id: "artifact_video_split", media_url: "/v1/desktop/projects/project_product_demo/browser-agent-direct/artifact/media?job_id=job_split_real&file=video.webm", sha256: "sha256:video", expected_sha256: "sha256:video", checksum_verified: true });
 	  }
-	  if (url.includes("/cloud/ack")) {
-		return bridgeJSON({ result_package_id: "result_split_real", status: "acked", delivery_status: "acked" });
+	  if (url.includes("/browser-agent-direct/ack")) {
+		return bridgeJSON({ protocol_version: "cascade.browser_agent_direct.v1", job_id: "job_split_real", result_package_id: "result_split_real", received_artifact_ids: ["artifact_video_split"], verified_checksums: true, acked_at: "2026-07-14T00:00:30Z" });
 	  }
-	  if (url.includes("/cloud/review")) {
+	  if (url.includes("/browser-agent-direct/review")) {
 		return bridgeJSON({ review_id: "review_split_real", decision: "approved", summary: "成品通过", reviewed_at: "2026-07-14T00:01:00Z" });
+	  }
+	  if (url.includes("/browser-agent-direct/release")) {
+		return bridgeJSON({ released: true, lease_id_suffix: "split_real" });
 	  }
       throw new Error(`unexpected URL ${url}`);
     });
@@ -419,27 +722,32 @@ describe("desktop bridge contract", () => {
     const completed = await bridge.pollCloudRun(uploaded.data ?? workspace);
 	const acked = await bridge.ackResultPackage(completed.data ?? workspace);
 	const reviewed = await bridge.reviewResult(acked.data ?? completed.data ?? workspace, "approved", "成品通过");
+	const released = await bridge.releaseDirectBrowserAgentLease(reviewed.data ?? acked.data ?? completed.data ?? workspace);
 
     expect(uploaded.ok).toBe(true);
-    expect(uploaded.data?.cloudRun.exchangePackageID).toBe("xpkg_split_real");
+    expect(uploaded.data?.cloudRun.exchangePackageID).toBe("pkg_split_real");
+	expect(uploaded.data?.cloudRun.transport).toBe("browser_agent_direct_v1");
+	expect(uploaded.data?.cloudRun.dataPort).toBe(24001);
     expect(completed.data?.stage).toBe("result_review");
     expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "script_validation")?.status).toBe("completed");
-	expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "browser_execution")?.summary).toBe("步骤结果校验完成");
-	expect(completed.data?.cloudRun.stageHistory?.find((stage) => stage.id === "video_rendering")?.summary).toBe("执行后复核完成");
 	expect(completed.data?.assets[0]?.assetID).toBe("artifact_video_split");
-	expect(completed.data?.cloudRun.currentStep).toBe("这是 Server 受控验收素材，不能作为 App 到 Server 联调通过依据。");
 	expect(acked.data?.assets[0]?.status).not.toBe("approved");
-	expect(acked.data?.assets[0]?.mediaURL).toContain("/cloud/deliverable/media?");
+	expect(acked.data?.assets[0]?.mediaURL).toContain("/browser-agent-direct/artifact/media?");
+	expect(acked.data?.cloudRun.resultAcknowledged).toBe(true);
+	expect(acked.data?.cloudRun.ackedAt).toBe("2026-07-14T00:00:30Z");
 	expect(JSON.stringify(acked.data)).not.toContain("C:\\DemoOps");
 	expect(reviewed.data?.assets[0]?.status).toBe("approved");
+	expect(released.ok).toBe(true);
+	expect(released.data?.cloudRun.leaseID).toBeUndefined();
+	expect(released.data?.cloudRun.dataPort).toBeUndefined();
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
-      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/init",
-      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/upload",
-      "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/status?org_id=org_desktop&exchange_package_id=xpkg_split_real",
-	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/result?org_id=org_desktop&result_package_id=result_split_real",
-	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/deliverable/download",
-	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/ack",
-	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/cloud/review",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/upload",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/status?job_id=job_split_real",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/result?job_id=job_split_real",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/artifact/download",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/ack",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/review",
+	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/release",
 	]);
   });
 
@@ -457,6 +765,12 @@ describe("desktop bridge contract", () => {
         ok: true,
         data: {
           project_id: "project_real",
+          org_id: "org_desktop",
+          build_status: "draft",
+          approval_subject_digest_sha256: "sha256:approval-real",
+          package_digest_sha256: "sha256:package-real",
+          package: { package_id: "pkg_bundle_real", confidence_summary: { assessment_hash: "sha256:confidence-real", readiness: "ready", overall_score: 0.92, warnings: [], blocking_reasons: [] } },
+          size_report: { algorithm_version: "v1", total_bytes: 1024, section_bytes: {}, stage_count: 1, evidence_count: 1, selector_count: 1 },
           current_node: "HumanApprove",
           status: "awaiting_human_approval",
           project_context: {
@@ -623,7 +937,9 @@ describe("desktop bridge contract", () => {
     expect(result.data?.scriptReadiness?.recommended_scenario_name).toBe("团队协作主线演示");
     expect(result.data?.agentGraphTrace?.steps?.[0]?.tool).toBe("RepoIndexTool");
     expect(result.data?.understanding.routesDetected).toBe(1);
-    expect(result.data?.packagePreview.packageDigest).toBe("sha256:bundle");
+    expect(result.data?.packagePreview.packageDigest).toBe("sha256:package-real");
+    expect(result.data?.packagePreview.approvalSubjectDigest).toBe("sha256:approval-real");
+    expect(result.data?.packagePreview.confidenceAssessmentHash).toBe("sha256:confidence-real");
     expect(result.data?.modelProvenance?.[0]).toContain("kimi-openai-compatible");
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/execution-package",
@@ -653,6 +969,12 @@ describe("desktop bridge contract", () => {
         ok: true,
         data: {
           project_id: "project_real",
+          org_id: "org_desktop",
+          build_status: "draft",
+          approval_subject_digest_sha256: "sha256:approval-real",
+          package_digest_sha256: "sha256:package-real",
+          package: { package_id: "pkg_bundle_real", confidence_summary: { assessment_hash: "sha256:confidence-real", readiness: "ready", overall_score: 0.92, warnings: [], blocking_reasons: [] } },
+          size_report: { algorithm_version: "v1", total_bytes: 1024, section_bytes: {}, stage_count: 1, evidence_count: 1, selector_count: 1 },
           current_node: "HumanApprove",
           status: "awaiting_human_approval",
           project_context: {
@@ -1237,37 +1559,14 @@ describe("desktop bridge contract", () => {
     expect(result.error).not.toContain("agents.requirementLLMOutput");
   });
 
-  it("formats structured bridge error details for field-level fixes", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({
-      ok: false,
-      status: 400,
-      statusText: "Bad Request",
-      text: async () => JSON.stringify({
-        ok: false,
-        error: "execution package has no real business action",
-        error_info: {
-          code: "preflight_failed",
-          message: "execution package has no real business action",
-          correlation_id: "bridge_test",
-          retryable: false,
-          details: [{
-            field: "payload.executable_script_bundle.plan_json.steps",
-            reason: "blocking",
-            message: "business action missing",
-            hint: "Add click/fill/select/upload/api_call.",
-          }],
-        },
-      }),
-    })));
-
+  it("fails closed when a caller tries the retired Exchange upload path", async () => {
     const bridge = createLocalBridgeClient();
     const result = await bridge.initExecutionPackageUpload(createWorkspace("product_demo"));
 
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("错误码: preflight_failed");
-    expect(result.error).toContain("字段: payload.executable_script_bundle.plan_json.steps");
-    expect(result.error).toContain("建议: Add click/fill/select/upload/api_call.");
-    expect(result.errorInfo?.code).toBe("preflight_failed");
+    expect(result.error).toContain("legacy_exchange_disabled");
+    expect(result.error).toContain("Ubuntu Browser Agent");
+    expect(result.errorInfo).toBeUndefined();
   });
 
   it("maps local model diagnostics into frontend camelCase DTOs", async () => {

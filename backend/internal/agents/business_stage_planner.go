@@ -74,9 +74,6 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 	}
 
 	projectName := intentProjectName(intentText)
-	if projectName == "" && containsAnyNormalized(intentText, "俄罗斯方块", "tetris") {
-		projectName = "俄罗斯方块"
-	}
 	wantsNewProject := containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != ""
 	if wantsNewProject {
 		builder.addStage(stageSpec{
@@ -108,8 +105,8 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 				routeState:    model.BusinessRouteStateCreationFlow,
 				entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
 				expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
-				durationMS:    durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", projectName, "俄罗斯方块", "tetris"),
-				keywords:      []string{"项目名称", "项目名", "project name", "name", projectName, "tetris", "俄罗斯方块"},
+				durationMS:    durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", projectName),
+				keywords:      []string{"项目名称", "项目名", "project name", "name", projectName},
 				capture:       []string{"项目名称输入框", "已填写的项目名称"},
 			})
 		}
@@ -419,6 +416,16 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 	evidence := evidenceRefsForBusinessTargets(targets)
 	requirements := b.source.evidenceRequirementsForStage(spec, targets)
 	uncertainties := businessStageUncertainties(spec, requirements, evidence)
+	entryRoute := firstNonEmpty(spec.entryRoute, "/")
+	expectedRoute := firstNonEmpty(spec.expectedRoute, spec.entryRoute, "/")
+	if spec.kind == model.BusinessStageKindSessionSetup {
+		if observed := authenticationEntryRouteFromTargets(targets); observed != "" {
+			entryRoute = observed
+		}
+		if workspace := authenticatedWorkspaceRouteFromTargets(targets); workspace != "" {
+			expectedRoute = workspace
+		}
+	}
 	stage := model.BusinessStage{
 		ID:                       stageID,
 		Order:                    order,
@@ -427,8 +434,8 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		Objective:                spec.objective,
 		UserIntent:               b.intentText,
 		RouteState:               spec.routeState,
-		EntryRoute:               firstNonEmpty(spec.entryRoute, "/"),
-		ExpectedRouteAfterAction: firstNonEmpty(spec.expectedRoute, spec.entryRoute, "/"),
+		EntryRoute:               entryRoute,
+		ExpectedRouteAfterAction: expectedRoute,
 		DurationMS:               spec.durationMS,
 		Action: model.BusinessActionSemantics{
 			Type:           spec.actionType,
@@ -438,7 +445,7 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 			SuccessState:   spec.successState,
 			WaitConditions: businessStageWaitConditions(spec),
 			CapturePoints:  spec.capture,
-			NonDestructive: spec.nonDestructive || spec.kind == model.BusinessStageKindObserveProgress || spec.kind == model.BusinessStageKindFinalObserve || spec.kind == model.BusinessStageKindSessionSetup,
+			NonDestructive: businessStageIsApprovedNonDestructive(spec),
 		},
 		Targets:              targets,
 		EvidenceRequirements: requirements,
@@ -447,6 +454,54 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		Confidence:           businessStageConfidence(spec, targets, requirements),
 	}
 	b.stages = append(b.stages, stage)
+}
+
+func authenticationEntryRouteFromTargets(targets []model.BusinessTargetCandidate) string {
+	for _, target := range targets {
+		for _, candidate := range target.Alternatives {
+			if candidate.SourceKind != "page_scan" || !strings.EqualFold(strings.TrimSpace(candidate.ObservedPageRole), "authentication") || !strings.EqualFold(strings.TrimSpace(candidate.ObservedFormRole), "authentication") {
+				continue
+			}
+			if route := firstNonEmpty(candidate.ObservedURL, candidate.ObservedRouteTemplate); strings.TrimSpace(route) != "" {
+				return route
+			}
+		}
+	}
+	return ""
+}
+
+func authenticatedWorkspaceRouteFromTargets(targets []model.BusinessTargetCandidate) string {
+	for _, target := range targets {
+		if target.IsVerified && strings.TrimSpace(target.URL) != "" {
+			return target.URL
+		}
+	}
+	return ""
+}
+
+func businessStageIsApprovedNonDestructive(spec stageSpec) bool {
+	if spec.nonDestructive || spec.kind == model.BusinessStageKindObserveProgress || spec.kind == model.BusinessStageKindFinalObserve || spec.kind == model.BusinessStageKindSessionSetup {
+		return true
+	}
+	allowedAction := map[string]model.GraphActionType{
+		"new_project_entry":  model.GraphActionClick,
+		"project_name_input": model.GraphActionFill,
+		"select_build_mode":  model.GraphActionClick,
+		"start_agent_build":  model.GraphActionClick,
+	}
+	want, ok := allowedAction[spec.id]
+	if !ok || model.GraphActionType(spec.actionType) != want {
+		return false
+	}
+	semanticText := strings.Join(append([]string{
+		spec.title, spec.objective, spec.actionLabel, spec.inputSemantic,
+		spec.inputValue, spec.successState,
+	}, spec.keywords...), " ")
+	return !containsAnyNormalized(semanticText,
+		"delete", "remove", "destroy", "payment", "pay", "billing", "purchase", "refund",
+		"permission", "role", "api key", "secret", "token", "删除", "移除", "销毁", "支付",
+		"购买", "退款", "账单", "权限", "角色", "密钥", "令牌",
+	)
 }
 
 func (b *businessStagePlanBuilder) finalRouteState() model.BusinessRouteState {
@@ -508,11 +563,30 @@ func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTa
 	targets := []model.BusinessTargetCandidate{}
 	targets = append(targets, s.targetsFromVerifiedPlan(spec)...)
 	targets = append(targets, s.targetsFromFeatureTrace(spec)...)
+	targets = append(targets, s.resultTargetsForStage(spec)...)
 	targets = uniqueBusinessTargetCandidates(targets)
 	if len(targets) > 5 {
 		targets = targets[:5]
 	}
 	return targets
+}
+
+func (s businessTargetSource) resultTargetsForStage(spec stageSpec) []model.BusinessTargetCandidate {
+	if spec.id != "new_project_entry" || s.verifiedPlan == nil {
+		return nil
+	}
+	out := []model.BusinessTargetCandidate{}
+	for _, action := range s.verifiedPlan.Actions {
+		text := strings.Join([]string{action.ID, action.Label, action.Selector, action.ComponentRef, action.ExpectedOutcome, action.SuccessState}, " ")
+		if action.VerificationStatus != "verified" || !containsAnyNormalized(text,
+			"dialog-new-project", "new-project-dialog", "create-project-dialog", "input-project-idea", "project-idea", "项目弹窗", "项目表单", "项目名称") {
+			continue
+		}
+		candidate := businessTargetFromVerifiedAction(action)
+		candidate.ID = "result_" + candidate.ID
+		out = append(out, candidate)
+	}
+	return out
 }
 
 func (s businessTargetSource) targetsFromVerifiedPlan(spec stageSpec) []model.BusinessTargetCandidate {
@@ -521,6 +595,10 @@ func (s businessTargetSource) targetsFromVerifiedPlan(spec stageSpec) []model.Bu
 	}
 	out := []model.BusinessTargetCandidate{}
 	for _, action := range s.verifiedPlan.Actions {
+		if spec.kind == model.BusinessStageKindSessionSetup && verifiedLoginOutcomeAction(action) {
+			out = append(out, businessTargetFromVerifiedAction(action))
+			continue
+		}
 		if !businessActionMatchesStage(spec, action.Label, action.Kind, action.Selector, action.InputValue, action.ComponentRef) {
 			continue
 		}
@@ -530,6 +608,18 @@ func (s businessTargetSource) targetsFromVerifiedPlan(spec stageSpec) []model.Bu
 		out = append(out, businessTargetFromVerifiedAction(action))
 	}
 	return out
+}
+
+func verifiedLoginOutcomeAction(action model.VerifiedInteractionAction) bool {
+	if action.ID != "intent_login_observe" || action.VerificationStatus != "verified" || strings.TrimSpace(action.URL) == "" {
+		return false
+	}
+	for _, ref := range action.EvidenceRefs {
+		if ref.Kind == model.EvidenceKindBrowserScan || ref.Kind == model.EvidenceKindBrowserTrace {
+			return true
+		}
+	}
+	return false
 }
 
 func (s businessTargetSource) targetsFromFeatureTrace(spec stageSpec) []model.BusinessTargetCandidate {
@@ -615,12 +705,14 @@ func (s businessTargetSource) evidenceRequirementsForStage(spec stageSpec, targe
 }
 
 func businessTargetFromVerifiedAction(action model.VerifiedInteractionAction) model.BusinessTargetCandidate {
+	testID := testIDFromSelector(action.Selector)
 	return model.BusinessTargetCandidate{
 		ID:                 firstNonEmpty(action.ID, "target_verified_"+shortHash(action.Label+action.Selector)),
 		IntentGoalID:       action.IntentGoalID,
 		Label:              action.Label,
 		Kind:               action.Kind,
 		Selector:           action.Selector,
+		TestID:             testID,
 		URL:                action.URL,
 		RouteRef:           action.RouteRef,
 		Route:              routePathFromCandidate(action.URL),
@@ -636,12 +728,14 @@ func businessTargetFromVerifiedAction(action model.VerifiedInteractionAction) mo
 }
 
 func businessTargetFromProbe(probe model.InteractionProbe) model.BusinessTargetCandidate {
+	testID := testIDFromSelector(probe.Selector)
 	return model.BusinessTargetCandidate{
 		ID:                 firstNonEmpty(probe.ID, "target_probe_"+shortHash(probe.Label+probe.Selector)),
 		IntentGoalID:       probe.IntentGoalID,
 		Label:              probe.Label,
 		Kind:               probe.Kind,
 		Selector:           probe.Selector,
+		TestID:             testID,
 		URL:                probe.URL,
 		RouteRef:           probe.RouteRef,
 		Route:              routePathFromCandidate(probe.URL),
@@ -654,6 +748,19 @@ func businessTargetFromProbe(probe model.InteractionProbe) model.BusinessTargetC
 		EvidenceRefs:       probe.EvidenceRefs,
 		Alternatives:       probe.Alternatives,
 	}
+}
+
+func testIDFromSelector(selector string) string {
+	selector = strings.TrimSpace(selector)
+	for _, marker := range []string{"data-testid=\"", "data-testid='"} {
+		if index := strings.Index(selector, marker); index >= 0 {
+			value := selector[index+len(marker):]
+			if end := strings.IndexAny(value, "\"'"); end >= 0 {
+				return strings.TrimSpace(value[:end])
+			}
+		}
+	}
+	return ""
 }
 
 func businessProbeAllowedForStage(spec stageSpec, probe model.InteractionProbe) bool {
@@ -671,6 +778,21 @@ func businessProbeAllowedForStage(spec stageSpec, probe model.InteractionProbe) 
 
 func businessActionMatchesStage(spec stageSpec, label string, kind string, selector string, value string, componentRef string) bool {
 	text := strings.Join([]string{label, kind, selector, value, componentRef}, " ")
+	wantAction := model.GraphActionType(spec.actionType)
+	gotAction := graphActionTypeFromKind(kind, selector)
+	if wantAction != "" && gotAction != wantAction {
+		return false
+	}
+	switch spec.id {
+	case "new_project_entry":
+		return containsAnyNormalized(text, "new project", "create project", "new-project", "create-project", "新建项目", "创建项目", "新增项目")
+	case "project_name_input":
+		return containsAnyNormalized(text, "project name", "project-name", "项目名称", "项目名", spec.inputValue)
+	case "select_build_mode":
+		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "构建模式")
+	case "start_agent_build":
+		return containsAnyNormalized(text, "start build", "start-build", "run build", "generate app", "启动 agent", "启动agent", "启动构建", "开始构建", "开始生成")
+	}
 	if containsAnyNormalized(text, spec.keywords...) {
 		return true
 	}
@@ -726,13 +848,13 @@ func businessStageUncertainties(spec stageSpec, requirements []model.EvidenceReq
 func businessStageWaitConditions(spec stageSpec) []string {
 	switch spec.kind {
 	case model.BusinessStageKindSessionSetup:
-		return []string{"domcontentloaded", "networkidle", "authenticated_workspace_visible"}
+		return []string{"domcontentloaded", "authenticated_workspace_visible"}
 	case model.BusinessStageKindObserveProgress:
-		return []string{"domcontentloaded", "networkidle", "progress_or_log_changes_visible"}
+		return []string{"domcontentloaded", "progress_or_log_changes_visible"}
 	case model.BusinessStageKindFinalObserve:
 		return []string{"domcontentloaded", "final_state_visible"}
 	default:
-		return []string{"domcontentloaded", "networkidle", "target_state_visible"}
+		return []string{"domcontentloaded", "target_state_visible"}
 	}
 }
 
@@ -960,7 +1082,7 @@ func intentIsObservationOnly(intentText string) bool {
 		return false
 	}
 	return containsAnyNormalized(intentText, "只观察", "仅观察", "观察首页", "不执行真实业务动作", "不要执行", "inspect only", "observation only", "homepage only") &&
-		!containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "构建模式", "开始构建", "启动构建", "实际构建", "俄罗斯方块", "new project", "create project", "build mode", "start build")
+		!containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "项目名称", "项目名", "构建模式", "开始构建", "启动构建", "实际构建", "new project", "create project", "project name", "build mode", "start build")
 }
 
 func boolConfidence(ok bool) float64 {

@@ -32,9 +32,13 @@ assert(runtimeManifest.updates?.app_executable === "../cascade-demoops-desktop.e
 if (manifest.release_channel === "internal") {
   assert(runtimeManifest.updates?.manifest_url === "", "internal package must not invent an update origin");
 }
-if (manifest.release_channel !== "internal") {
-  assert(runtimeManifest.control_plane?.base_url?.startsWith("https://"), "beta/stable package must embed its DemoOps HTTPS control plane");
-}
+assert(runtimeManifest.browser_agent_direct?.protocol_version === "browser-agent-direct-v1", "desktop package must declare the Browser Agent direct protocol");
+assert(runtimeManifest.browser_agent_direct?.control_url_embedded === false, "desktop package must not embed an execution-server address");
+assert(runtimeManifest.browser_agent_direct?.access_token_embedded === false, "desktop package must not embed a Browser Agent access token");
+assert(runtimeManifest.browser_agent_direct?.provisioning_tool === "../tools/browser-agent-direct-configure.exe", "desktop package must declare the direct provisioning tool");
+assert(runtimeManifest.browser_agent_direct?.provisioning_tool_token_argument_supported === false, "direct provisioning tool must reject token arguments");
+assert(runtimeManifest.browser_agent_direct?.provisioning_tool_strict_known_hosts === true, "direct provisioning tool must require strict known_hosts");
+assert(runtimeManifest.browser_agent_direct?.provisioning_tool_ssh_host_key_algorithm === "ssh-ed25519", "direct provisioning tool must pin the Ed25519 host-key algorithm");
 assertNativeCapabilities(manifest.desktop_ui, "desktop package manifest");
 assert(manifest.runtimes?.node?.path === "resources/runtimes/node/node.exe", "desktop package manifest must include bundled node runtime");
 if (manifest.release_channel !== "internal") {
@@ -43,8 +47,13 @@ if (manifest.release_channel !== "internal") {
 }
 assert(manifest.server_connectivity?.required_for_local_generation === false, "server connectivity must be optional for local generation");
 assertServerRecordingBoundary(manifest.server_connectivity, "desktop package manifest");
+assert(manifest.server_connectivity?.provisioning_tool?.path === "tools/browser-agent-direct-configure.exe", "desktop package must include the direct provisioning tool path");
+assert(manifest.server_connectivity?.provisioning_tool?.token_argument_supported === false, "provisioning tool must not accept a token argument");
+assert(manifest.server_connectivity?.provisioning_tool?.token_stdout_supported === false, "provisioning tool must not output tokens");
+assert(manifest.server_connectivity?.provisioning_tool?.strict_known_hosts === true, "provisioning tool must pin SSH host keys");
+assert(manifest.server_connectivity?.provisioning_tool?.ssh_host_key_algorithm === "ssh-ed25519", "provisioning tool must pin the Ed25519 host-key algorithm");
 assert(Array.isArray(manifest.server_connectivity?.reserved_interfaces), "server reserved interfaces are required");
-for (const name of ["ExchangeCapabilityResolver", "ExchangeIdentityStore", "ExchangeSessionManager", "CloudLifecycleClient"]) {
+for (const name of ["BrowserAgentDirectClient", "DirectInstallationIdentityStore", "DirectLeaseManager", "DirectArtifactVerifier"]) {
   assert(manifest.server_connectivity.reserved_interfaces.includes(name), `missing reserved interface ${name}`);
 }
 assertRequiredAppSurfaces(manifest);
@@ -58,6 +67,7 @@ const entries = listZipEntries(zipPath);
 for (const required of [
   "cascade-demoops-desktop.exe",
   "cascade-demoops-updater.exe",
+  "tools/browser-agent-direct-configure.exe",
   "package-manifest.json",
   "resources/desktop-runtime.json",
   "resources/runtimes/node/node.exe",
@@ -75,8 +85,10 @@ expandZip(zipPath, smokeRoot);
 
 const entrypoint = resolve(smokeRoot, manifest.entrypoint || "cascade-demoops-desktop.exe");
 const updater = resolve(smokeRoot, manifest.updater.path);
+const directConfigurer = resolve(smokeRoot, manifest.server_connectivity.provisioning_tool.path);
 assertFile(entrypoint, "desktop entrypoint");
 assertFile(updater, "desktop updater");
+assertFile(directConfigurer, "Browser Agent direct provisioning tool");
 assertWindowsGuiSubsystem(entrypoint, "desktop entrypoint");
 assertFile(resolve(smokeRoot, manifest.resource_manifest || "resources/desktop-runtime.json"), "desktop runtime manifest");
 assertPackagedWebSurfaces(resolve(smokeRoot, "resources", "web"));
@@ -112,6 +124,14 @@ const updaterCheck = spawnSync(updater, ["--check"], { cwd: smokeRoot, encoding:
 if (updaterCheck.status !== 0) throw new Error(`desktop updater check failed: ${updaterCheck.stderr || updaterCheck.stdout}`);
 const updaterPayload = JSON.parse(updaterCheck.stdout);
 assert(updaterPayload.ready === true && updaterPayload.rollback === true, "desktop updater did not report verified rollback readiness");
+const directConfigurerCheck = spawnSync(directConfigurer, ["--check"], { cwd: smokeRoot, encoding: "utf8" });
+if (directConfigurerCheck.status !== 0) throw new Error(`direct provisioning tool check failed: ${directConfigurerCheck.stderr || directConfigurerCheck.stdout}`);
+const directConfigurerPayload = JSON.parse(directConfigurerCheck.stdout);
+assert(directConfigurerPayload.ready === true, "direct provisioning tool did not report ready=true");
+assert(directConfigurerPayload.token_argument_supported === false, "direct provisioning tool must not accept token arguments");
+assert(directConfigurerPayload.strict_known_hosts === true && directConfigurerPayload.ssh_public_key_only === true, "direct provisioning tool must enforce pinned public-key SSH");
+assert(directConfigurerPayload.ssh_host_key_algorithm === "ssh-ed25519", "direct provisioning tool must report the pinned Ed25519 host-key algorithm");
+assert(directConfigurerPayload.credential_store === "windows_credential_manager", "direct provisioning tool must use Windows Credential Manager");
 
 console.log(`Desktop package smoke passed: ${zipPath}`);
 
@@ -146,6 +166,11 @@ function assertNativeCapabilities(desktopUI, label) {
 }
 
 function assertServerRecordingBoundary(connectivity, label) {
+  assert(connectivity?.primary_transport === "browser_agent_direct_v1", `${label} must use Browser Agent direct transport`);
+  assert(connectivity?.demoops_exchange_primary === false, `${label} must not use DemoOps Exchange as the primary transport`);
+  assert(connectivity?.fixed_tls_control_port === true, `${label} must use a fixed TLS control port`);
+  assert(connectivity?.dedicated_data_port_per_lease === true, `${label} must allocate a dedicated data port per lease`);
+  assert(connectivity?.timestamp_token_authenticated_encryption === true, `${label} must bind encrypted transfer to timestamp and token material`);
   assert(connectivity?.server_recording_required === true, `${label} must require server-side production recording`);
   assert(connectivity?.local_recording_execution === false, `${label} must not advertise local production recording`);
   assert(connectivity.server_responsibilities?.includes("browser_execution"), `${label} must assign browser execution to server`);
@@ -198,7 +223,7 @@ function assertPackagedWebSurfaces(webRoot) {
     "执行包审批",
     "来源一致性",
 	"确认服务器将看到和录制的内容",
-	"连接 DemoOps 执行服务器",
+	"连接 Ubuntu Browser Agent 服务器",
 	"录制范围与阶段顺序符合我的意图",
 	"开发者技术详情",
   ]);

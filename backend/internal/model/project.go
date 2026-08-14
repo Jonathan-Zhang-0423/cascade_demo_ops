@@ -76,19 +76,53 @@ type ServerAccess struct {
 }
 
 type ProjectInputBundle struct {
-	ProductURLs          []ProductURLInput          `json:"product_urls,omitempty"`
-	Code                 []CodeInput                `json:"code,omitempty"`
-	Repositories         []RepositoryInput          `json:"repositories,omitempty"`
-	RequirementDocuments []RequirementDocumentInput `json:"requirement_documents,omitempty"`
-	WebpageScreenshots   []WebpageScreenshotInput   `json:"webpage_screenshots,omitempty"`
-	Credentials          []CredentialInput          `json:"credentials,omitempty"`
-	KnowledgeSources     []KnowledgeSource          `json:"knowledge_sources,omitempty"`
-	ReleaseNotes         []ReleaseNoteInput         `json:"release_notes,omitempty"`
-	BrandKit             *BrandKit                  `json:"brand_kit,omitempty"`
-	Scenarios            []DemoScenario             `json:"scenarios,omitempty"`
-	Requirements         []DemoRequirement          `json:"requirements,omitempty"`
-	RawUserPrompt        string                     `json:"raw_user_prompt,omitempty"`
-	Metadata             map[string]any             `json:"metadata,omitempty"`
+	ProductURLs                   []ProductURLInput              `json:"product_urls,omitempty"`
+	Code                          []CodeInput                    `json:"code,omitempty"`
+	Repositories                  []RepositoryInput              `json:"repositories,omitempty"`
+	RequirementDocuments          []RequirementDocumentInput     `json:"requirement_documents,omitempty"`
+	WebpageScreenshots            []WebpageScreenshotInput       `json:"webpage_screenshots,omitempty"`
+	Credentials                   []CredentialInput              `json:"credentials,omitempty"`
+	KnowledgeSources              []KnowledgeSource              `json:"knowledge_sources,omitempty"`
+	ReleaseNotes                  []ReleaseNoteInput             `json:"release_notes,omitempty"`
+	BrandKit                      *BrandKit                      `json:"brand_kit,omitempty"`
+	Scenarios                     []DemoScenario                 `json:"scenarios,omitempty"`
+	Requirements                  []DemoRequirement              `json:"requirements,omitempty"`
+	PresentationGenerationIntents []PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
+	RawUserPrompt                 string                         `json:"raw_user_prompt,omitempty"`
+	Metadata                      map[string]any                 `json:"metadata,omitempty"`
+}
+
+type PresentationGenerationIntent struct {
+	IntentID           string                              `json:"intent_id"`
+	Capability         string                              `json:"capability"`
+	Purpose            string                              `json:"purpose"`
+	Required           bool                                `json:"required"`
+	ReferenceAssetRefs []string                            `json:"reference_asset_refs,omitempty"`
+	RequestedSlot      PresentationGenerationRequestedSlot `json:"requested_slot"`
+	ContentPolicy      PresentationGenerationContentPolicy `json:"content_policy"`
+	FailurePolicy      string                              `json:"failure_policy"`
+	// Decode-only compatibility fields make prohibited business bindings
+	// observable to validation instead of silently ignoring them.
+	SourceStepID   string `json:"source_step_id,omitempty"`
+	BusinessStepID string `json:"business_step_id,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ModelID        string `json:"model_id,omitempty"`
+	APIEndpoint    string `json:"api_endpoint,omitempty"`
+	GenerationFPS  int    `json:"generation_fps,omitempty"`
+	GenerateAudio  *bool  `json:"generate_audio,omitempty"`
+}
+
+type PresentationGenerationRequestedSlot struct {
+	PreferredDurationSec int    `json:"preferred_duration_sec"`
+	AspectRatio          string `json:"aspect_ratio"`
+}
+
+type PresentationGenerationContentPolicy struct {
+	PresentationOnly         bool `json:"presentation_only"`
+	MayRepresentBusinessStep bool `json:"may_represent_business_step"`
+	MayReplaceCapturedUI     bool `json:"may_replace_captured_ui"`
+	RequiresExplicitReview   bool `json:"requires_explicit_review"`
 }
 
 type ProductURLInput struct {

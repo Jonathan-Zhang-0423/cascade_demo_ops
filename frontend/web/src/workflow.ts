@@ -1,6 +1,7 @@
 import type { DemoWorkflowGraph, GraphNode, SandboxPolicy } from "../../src/types/workflowGraph";
 import type {
   ApprovalChecklistState,
+  BrowserAgentDirectStatus,
   CloudRunStatus,
   ExecutionPackagePreview,
   ProjectWorkspaceView,
@@ -73,9 +74,10 @@ const journeyLabels: Record<ProjectJourneyStepID, string> = {
 };
 
 export function recommendedWorkstation(workspace: ProjectWorkspaceView): ProjectWorkstationView {
+	if (workspace.cloudRun.blockingErrorCode === "reunderstanding_required") return "approval";
   if (workspace.status === "script_repair_required" || workspace.cloudRun.status === "failed") return "repair";
   if (workspace.cloudRun.resultPackage || workspace.cloudRun.status === "succeeded" || workspace.stage === "result_review") return "assets";
-  if (workspace.cloudRun.exchangePackageID || workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running") return "execution";
+  if (workspace.cloudRun.packageID || workspace.cloudRun.exchangePackageID || workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running") return "execution";
   if (workspace.executableScriptBundle || workspace.packagePreview.buildStatus === "draft" || workspace.stage === "package_approval") return "approval";
   if (workspace.projectIntelligence || workspace.understandingReport) return "plan";
   return workspace.productURL && workspace.inputBundle.raw_user_prompt ? "evidence" : "overview";
@@ -84,7 +86,7 @@ export function recommendedWorkstation(workspace: ProjectWorkspaceView): Project
 export function shouldResumeCloudRun(workspace: ProjectWorkspaceView, selectedProjectID?: string): boolean {
   return selectedProjectID === workspace.id
     && (workspace.cloudRun.status === "queued" || workspace.cloudRun.status === "running")
-    && Boolean(workspace.cloudRun.exchangePackageID);
+    && Boolean(workspace.cloudRun.packageID || workspace.cloudRun.exchangePackageID);
 }
 
 export function projectNextAction(workspace: ProjectWorkspaceView): ProjectNextAction {
@@ -107,18 +109,22 @@ export function projectNextAction(workspace: ProjectWorkspaceView): ProjectNextA
   if (workstation === "repair") {
     return { kind: "repair", workstation, title: "修复失败步骤", description: "根据脱敏诊断重新生成脚本；修复后的执行包仍需再次人工审批。" };
   }
-  if (workspace.cloudRun.resultReview?.decision === "approved") {
-    return { kind: "complete", workstation: "assets", title: "成品已通过", description: "最终审核已记录，可以在 Editor 中继续处理或导出成品。" };
+  if (workspace.cloudRun.resultReview?.decision === "approved" && workspace.cloudRun.resultAcknowledged) {
+    return { kind: "complete", workstation: "assets", title: "成品已通过", description: "结果已校验、ACK 并完成最终审核，可以在 Editor 中继续处理或导出成品。" };
   }
-  if (!workspace.cloudRun.resultDownloaded) {
-    return { kind: "review_result", workstation: "assets", title: "下载并校验成品", description: "完整下载结果包并校验 SHA-256 后，才开放人工审核。" };
+  if (!workspace.cloudRun.resultAcknowledged) {
+    return workspace.cloudRun.resultDownloaded
+      ? { kind: "review_result", workstation: "assets", title: "确认接收成品", description: "本地 checksum 已通过；完成服务器 ACK 后才开放人工审核和编辑器交接。" }
+      : { kind: "review_result", workstation: "assets", title: "下载并校验成品", description: "完整下载结果包、校验 SHA-256 并完成服务器 ACK 后，才开放人工审核。" };
   }
   return { kind: "review_result", workstation: "assets", title: "人工审核成品", description: "播放成品并选择通过、重新剪辑或缺少素材需要重新录制。" };
 }
 
-export function executionServerBlockedReason(resolved: boolean, sessionValid: boolean | undefined): string | undefined {
+export function executionServerBlockedReason(resolved: boolean, direct: BrowserAgentDirectStatus | undefined): string | undefined {
 	if (!resolved) return "正在检查执行服务器连接。";
-	if (sessionValid !== true) return "执行服务器尚未完成连接与安装身份验证。";
+	if (!direct?.configured) return "尚未配置 Ubuntu Browser Agent 服务器地址。";
+	if (!direct.tokenConfigured) return "尚未在系统凭据库保存 Browser Agent 访问令牌。";
+	if (!direct.reachable) return "Browser Agent 直连协议健康检查尚未通过。";
 	return undefined;
 }
 
@@ -150,6 +156,19 @@ export function updateGraphNode(graph: DemoWorkflowGraph, nodeID: string, patch:
   return {
     ...graph,
     nodes: graph.nodes.map((node) => (node.id === nodeID ? { ...node, ...patch } : node)),
+  };
+}
+
+export function beginGraphRevision(
+  graph: DemoWorkflowGraph,
+  nodeID: string,
+  patch: Partial<GraphNode>,
+  initialChecklist: ApprovalChecklistState,
+): { graph: DemoWorkflowGraph; graphDirty: true; checklist: ApprovalChecklistState } {
+  return {
+    graph: updateGraphNode(graph, nodeID, patch),
+    graphDirty: true,
+    checklist: { ...initialChecklist },
   };
 }
 
@@ -276,7 +295,19 @@ export function packageApprovalBlockedReasons(
   checklist: ApprovalChecklistState,
   sources: SourceConnectionView[],
 ): string[] {
-  const blocked = new Set<string>(preview.blockedReasons);
+	const blocked = new Set<string>(preview.blockedReasons);
+	if (!preview.packageDigest?.trim()) {
+		blocked.add("正式执行包 digest 尚未生成，请重新生成执行包预览。");
+	}
+	if (!preview.approvalSubjectDigest?.trim()) {
+		blocked.add("正式审批对象 digest 尚未生成，请重新生成执行包预览。");
+	}
+	if (!preview.confidenceAssessmentHash?.trim()) {
+		blocked.add("置信度评估 hash 尚未生成，请重新生成执行包预览。");
+	}
+	if (preview.buildStatus !== "draft") {
+		blocked.add("执行包尚未处于可审批草稿状态。");
+	}
   if (preview.readiness === "blocked") {
     blocked.add("执行包确信度门禁未通过，请先修复阻断项。");
   }
@@ -284,7 +315,7 @@ export function packageApprovalBlockedReasons(
     blocked.add("上传前必须完成人工审批。");
   }
   if (!checklist.ipAllowlistAcknowledged && !preview.ipAllowlistAcknowledged) {
-    blocked.add("需要确认 DemoOps 执行服务器出口 IP 已加入客户环境白名单。");
+    blocked.add("需要确认目标环境允许 Ubuntu Browser Agent 服务器访问。");
   }
   if (!checklist.sourceSummaryOnlyAcknowledged || !preview.sourceSummaryOnly) {
     blocked.add("需要确认仅上传代码结构摘要，不上传完整源码。");
@@ -332,10 +363,10 @@ function lifecycleFallbackSummary(id: ServerLifecycleStageID, workspace: Project
     return workspace.cloudRun.uploadID ? `upload id: ${workspace.cloudRun.uploadID}` : "等待 /execution-packages/init";
   }
   if (id === "package_uploaded") {
-    return workspace.cloudRun.exchangePackageID ? `exchange id: ${workspace.cloudRun.exchangePackageID}` : "等待上传 ExchangeEnvelope";
+      return workspace.cloudRun.packageID ? `Browser Agent package: ${workspace.cloudRun.packageID}` : workspace.cloudRun.exchangePackageID ? `Browser Agent package: ${workspace.cloudRun.exchangePackageID}` : "等待上传直连执行包";
   }
   if (id === "server_intake") {
-    return workspace.cloudRun.exchangePackageID ? "服务器已接收 metadata 和 artifact descriptor" : "等待服务器接收";
+      return workspace.cloudRun.packageID || workspace.cloudRun.exchangePackageID ? "Ubuntu Browser Agent 已接收加密包和素材描述" : "等待服务器接收";
   }
   if (id === "script_validation") {
     return "校验 TS AST、hash、allowed domains 和安全策略";

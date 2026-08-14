@@ -34,6 +34,30 @@ func TestEditorHTTPCreateListAndGetSession(t *testing.T) {
 	}
 }
 
+func TestEditorHTTPPresentationCandidateReviewUsesServiceBoundary(t *testing.T) {
+	service := newTestEditorService(t)
+	service.editorWorker = &fakeEditorWorker{}
+	session, err := service.CreateEditorSession(t.Context(), model.EditorCreateSessionRequest{Name: "审核接口"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.editorMu.Lock()
+	stored, err := service.loadEditorSession(session.SessionID)
+	if err == nil {
+		stored.AssetCatalog.Artifacts = append(stored.AssetCatalog.Artifacts, model.TimelineArtifact{ID: "candidate_http", Kind: "generated_video_candidate", URI: "file:///candidate.mp4", Metadata: map[string]any{"media_eligible": true, "non_authoritative": true, "presentation_only": true, "source_material_policy": "non_authoritative_generated_candidate"}})
+		err = service.saveEditorSessionUnlocked(stored)
+	}
+	service.editorMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := editorHTTPValue[model.EditorSession](t, NewDevHTTPServer(service), http.MethodPost, "/v1/editor/sessions/"+session.SessionID+"/presentation-candidates/review", map[string]any{"expected_revision": session.Revision, "artifact_id": "candidate_http", "approved": true})
+	metadata := updated.AssetCatalog.Artifacts[len(updated.AssetCatalog.Artifacts)-1].Metadata
+	if metadata["approved_for_demo"] != true || metadata["approval_mode"] != "explicit_user_review" {
+		t.Fatalf("HTTP review did not persist explicit approval: %+v", metadata)
+	}
+}
+
 func TestEditorHTTPCreateSessionFromResultPackage(t *testing.T) {
 	service := newTestEditorService(t)
 	sourcePath := filepath.Join(t.TempDir(), "recording.mp4")

@@ -177,6 +177,7 @@ type StageApprovalStage struct {
 	TargetRouteTemplate              string                       `json:"target_route_template,omitempty"`
 	ExpectedRouteAfterAction         string                       `json:"expected_route_after_action,omitempty"`
 	RuntimeRouteVerificationRequired bool                         `json:"runtime_route_verification_required,omitempty"`
+	RuntimeAdaptive                  bool                         `json:"runtime_adaptive,omitempty"`
 	CandidateRoutes                  []BrowserAgentRouteCandidate `json:"candidate_routes,omitempty"`
 	TargetURL                        string                       `json:"target_url,omitempty"`
 	ComponentRefs                    []string                     `json:"component_refs,omitempty"`
@@ -274,6 +275,7 @@ type BrowserAgentOutlineStage struct {
 	TargetRouteTemplate              string                        `json:"target_route_template,omitempty"`
 	ExpectedRouteAfterAction         string                        `json:"expected_route_after_action,omitempty"`
 	RuntimeRouteVerificationRequired bool                          `json:"runtime_route_verification_required,omitempty"`
+	RuntimeAdaptive                  bool                          `json:"runtime_adaptive,omitempty"`
 	CandidateRoutes                  []BrowserAgentRouteCandidate  `json:"candidate_routes,omitempty"`
 	URL                              string                        `json:"url,omitempty"`
 	Components                       []BrowserAgentComponentTarget `json:"components,omitempty"`
@@ -362,18 +364,19 @@ type BrowserAgentPromptPolicy struct {
 }
 
 type BrowserAgentContract struct {
-	ID                string                        `json:"id"`
-	ProjectID         string                        `json:"project_id"`
-	WorkflowGraphID   string                        `json:"workflow_graph_id"`
-	SchemaVersion     string                        `json:"schema_version"`
-	Mode              string                        `json:"mode"`
-	BusinessAuthority BrowserAgentBusinessAuthority `json:"business_authority"`
-	RepairPolicy      BrowserAgentRepairPolicy      `json:"repair_policy"`
-	ObservationPolicy BrowserAgentObservationPolicy `json:"observation_policy"`
-	ModelPolicy       BrowserAgentModelPolicy       `json:"model_policy"`
-	ConflictPolicy    BrowserAgentConflictPolicy    `json:"conflict_policy"`
-	CreatedAt         time.Time                     `json:"created_at,omitempty"`
-	UpdatedAt         time.Time                     `json:"updated_at,omitempty"`
+	ID                          string                        `json:"id"`
+	ProjectID                   string                        `json:"project_id"`
+	WorkflowGraphID             string                        `json:"workflow_graph_id"`
+	SchemaVersion               string                        `json:"schema_version"`
+	Mode                        string                        `json:"mode"`
+	OutcomeVerifierRulesVersion string                        `json:"outcome_verifier_rules_version,omitempty"`
+	BusinessAuthority           BrowserAgentBusinessAuthority `json:"business_authority"`
+	RepairPolicy                BrowserAgentRepairPolicy      `json:"repair_policy"`
+	ObservationPolicy           BrowserAgentObservationPolicy `json:"observation_policy"`
+	ModelPolicy                 BrowserAgentModelPolicy       `json:"model_policy"`
+	ConflictPolicy              BrowserAgentConflictPolicy    `json:"conflict_policy"`
+	CreatedAt                   time.Time                     `json:"created_at,omitempty"`
+	UpdatedAt                   time.Time                     `json:"updated_at,omitempty"`
 }
 
 type BrowserAgentBusinessAuthority struct {

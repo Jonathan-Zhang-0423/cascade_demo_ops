@@ -106,6 +106,9 @@ func (s *Service) ExchangeIdentityStatus(ctx context.Context) ExchangeIdentitySt
 }
 
 func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, projectID string) (ExchangeSession, error) {
+	s.exchangeSessionMu.Lock()
+	defer s.exchangeSessionMu.Unlock()
+
 	baseURL, err := s.discoverExchangeBaseURL()
 	if err != nil {
 		return ExchangeSession{}, err
@@ -121,6 +124,27 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 	if isInstallationSessionUsable(record, baseURL) {
 		return sessionFromRecord(record, baseURL, ""), nil
 	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	if installationSessionBelongsToBaseURL(record, baseURL) {
+		response, refreshErr := refreshExchangeInstallationSession(ctx, client, baseURL, record.SessionToken)
+		if refreshErr == nil {
+			applyInstallationSessionResponse(&record, response)
+			if err := store.save(record); err != nil {
+				return ExchangeSession{}, err
+			}
+			return sessionFromRecord(record, baseURL, ""), nil
+		}
+		if !exchangeSessionMustRePair(refreshErr) {
+			if strings.TrimSpace(s.runtime.CloudExchangeToken) != "" && !isLocalExchangeBaseURL(baseURL) {
+				return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
+			}
+			return ExchangeSession{}, refreshErr
+		}
+		clearInstallationSession(&record)
+		if err := store.save(record); err != nil {
+			return ExchangeSession{}, err
+		}
+	}
 	// Keep legacy remote control planes on their existing bearer-token path.
 	// Local bridges deliberately continue to register an installation so the
 	// receiving Server can bind the upload to a verified installation identity.
@@ -128,7 +152,6 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 		return sessionFromRecord(record, baseURL, s.runtime.CloudExchangeToken), nil
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
 	discovery, err := cloudGetPublicJSON[model.ExchangeBootstrapDiscoveryResponse](ctx, client, baseURL+"/.well-known/cascade-exchange")
 	if err != nil {
 		if !isLocalExchangeBaseURL(baseURL) && !isOptionalExchangeDiscoveryError(err) {
@@ -197,16 +220,110 @@ func (s *Service) EnsureExchangeSession(ctx context.Context, orgID string, proje
 		}
 		return ExchangeSession{}, err
 	}
+	applyInstallationSessionResponse(&record, response)
+	if err := store.save(record); err != nil {
+		return ExchangeSession{}, err
+	}
+	return sessionFromRecord(record, baseURL, ""), nil
+}
+
+func refreshExchangeInstallationSession(ctx context.Context, client *http.Client, baseURL string, sessionToken string) (model.AppInstallationSessionResponse, error) {
+	var zero model.AppInstallationSessionResponse
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/v1/app-installations/refresh", nil)
+	if err != nil {
+		return zero, err
+	}
+	setExchangeAuthHeader(req, sessionToken)
+	return cloudDoJSON[model.AppInstallationSessionResponse](client, req)
+}
+
+func installationSessionBelongsToBaseURL(record exchangeIdentityRecord, baseURL string) bool {
+	return strings.TrimSpace(record.SessionToken) != "" && record.ExchangeBaseURL == strings.TrimRight(baseURL, "/")
+}
+
+func exchangeSessionMustRePair(err error) bool {
+	if err == nil {
+		return false
+	}
+	return exchangeSessionAuthFailure(err) ||
+		isOptionalExchangeDiscoveryError(err)
+}
+
+func exchangeSessionAuthFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var protocolErr *exchangeProtocolError
+	if errors.As(err, &protocolErr) {
+		switch strings.ToLower(strings.TrimSpace(protocolErr.code)) {
+		case "unauthorized", "installation_session_required", "session_expired", "session_invalid", "invalid_session":
+			return true
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "returned 401:") ||
+		strings.Contains(lower, "invalid or expired") ||
+		strings.Contains(lower, "session expired")
+}
+
+func withExchangeSessionRetry[T any](ctx context.Context, service *Service, orgID string, projectID string, call func(ExchangeSession) (T, error)) (T, error) {
+	session, err := service.EnsureExchangeSession(ctx, orgID, projectID)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	result, err := call(session)
+	if err == nil || session.AuthMode == exchangeAuthModeDevToken || !exchangeSessionAuthFailure(err) {
+		return result, err
+	}
+	if clearErr := service.invalidateExchangeSession(session); clearErr != nil {
+		var zero T
+		return zero, clearErr
+	}
+	refreshed, refreshErr := service.EnsureExchangeSession(ctx, orgID, projectID)
+	if refreshErr != nil {
+		var zero T
+		return zero, refreshErr
+	}
+	return call(refreshed)
+}
+
+func (s *Service) invalidateExchangeSession(session ExchangeSession) error {
+	s.exchangeSessionMu.Lock()
+	defer s.exchangeSessionMu.Unlock()
+	store := s.exchangeIdentityStore()
+	record, err := store.load()
+	if err != nil {
+		return err
+	}
+	if record.SessionToken != session.SessionToken || record.ExchangeBaseURL != strings.TrimRight(session.BaseURL, "/") {
+		return nil
+	}
+	clearInstallationSession(&record)
+	return store.save(record)
+}
+
+func clearInstallationSession(record *exchangeIdentityRecord) {
+	if record == nil {
+		return
+	}
+	record.SessionID = ""
+	record.SessionToken = ""
+	record.SessionExpiresAt = time.Time{}
+	record.ResultRecipientKeyID = ""
+	record.UpdatedAt = time.Now().UTC()
+}
+
+func applyInstallationSessionResponse(record *exchangeIdentityRecord, response model.AppInstallationSessionResponse) {
+	if record == nil {
+		return
+	}
 	record.SessionID = response.SessionID
 	record.SessionToken = response.SessionToken
 	record.SessionExpiresAt = response.ExpiresAt
 	record.ResultRecipientKeyID = response.ResultRecipientKeyID
 	record.ServerKeyID = response.ServerKeyID
 	record.UpdatedAt = time.Now().UTC()
-	if err := store.save(record); err != nil {
-		return ExchangeSession{}, err
-	}
-	return sessionFromRecord(record, baseURL, ""), nil
 }
 
 func (s *Service) currentExchangeSession(ctx context.Context) (ExchangeSession, error) {

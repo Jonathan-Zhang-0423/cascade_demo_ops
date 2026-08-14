@@ -168,6 +168,10 @@ func (s *DevHTTPServer) handleAppInstallationSession(w http.ResponseWriter, r *h
 
 func (s *DevHTTPServer) handleAppInstallationRefresh(w http.ResponseWriter, r *http.Request) {
 	response, err := s.service.exchange.RefreshInstallationSession(r.Context(), sessionTokenFromRequest(r))
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "invalid or expired") {
+		writeExchangeError(w, http.StatusUnauthorized, "installation_session_required", err)
+		return
+	}
 	writeExchangeValue(w, response, err)
 }
 

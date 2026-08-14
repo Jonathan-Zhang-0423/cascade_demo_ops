@@ -116,8 +116,8 @@ func TestBrowserAgentReadinessRejectsPostActionValidationReusingClickedControl(t
 	step.Validations = []model.ValidationSpec{{ID: "after_click", Kind: "element_visible", Target: model.ActionTarget{TestID: "button-new-project"}, Required: true}}
 	pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1].StageKind = model.BusinessStageKindBusinessSubmit
 	report := browserAgentReadiness(&pkg)
-	if !report.CanRun || !browserAgentReadinessHasWarning(report, "post_action_validation_reuses_action_target") {
-		t.Fatalf("post-action validation reuse must be surfaced as a readiness warning: %+v", report)
+	if report.CanRun || !browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_action_target") {
+		t.Fatalf("post-action validation reuse must block formal execution: %+v", report)
 	}
 }
 
@@ -145,8 +145,8 @@ func TestBrowserAgentReadinessDetectsApprovedActionIdentityReuse(t *testing.T) {
 		Required: true,
 	}}
 	report := browserAgentReadiness(&pkg)
-	if !browserAgentReadinessHasWarning(report, "post_action_validation_reuses_action_identity") && !browserAgentReadinessHasWarning(report, "post_action_validation_reuses_approved_action_evidence") {
-		t.Fatalf("expected action identity reuse warning, got: %+v", report)
+	if report.CanRun || (!browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_action_identity") && !browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_approved_action_evidence")) {
+		t.Fatalf("expected action identity reuse blocker, got: %+v", report)
 	}
 }
 
@@ -170,15 +170,6 @@ func TestBrowserAgentReadinessRejectsDeclaredInputWithoutFillAction(t *testing.T
 func browserAgentReadinessHasBlocker(report BrowserAgentReadinessReport, code string) bool {
 	for _, blocker := range report.Blockers {
 		if blocker.Code == code {
-			return true
-		}
-	}
-	return false
-}
-
-func browserAgentReadinessHasWarning(report BrowserAgentReadinessReport, code string) bool {
-	for _, warning := range report.Warnings {
-		if warning.Code == code {
 			return true
 		}
 	}
@@ -617,6 +608,23 @@ func ptrBrowserAgentPackage(pkg model.ClientExecutionPackage) *model.ClientExecu
 	return &pkg
 }
 
+func TestCompactGraphRequirementsForUploadDropsBlankNodeRefs(t *testing.T) {
+	got := compactGraphRequirementsForUpload([]model.GraphRequirement{{
+		ID: "requirement", Kind: "must_show", Required: true,
+		NodeRefs: []string{"", "  ", "node_a", "node_a", "node_b"},
+	}})
+	if len(got) != 1 || len(got[0].NodeRefs) != 2 || got[0].NodeRefs[0] != "node_a" || got[0].NodeRefs[1] != "node_b" {
+		t.Fatalf("blank or duplicate node refs survived upload compaction: %+v", got)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) == "" || string(encoded) == "null" {
+		t.Fatalf("requirements were not serialized: %s", encoded)
+	}
+}
+
 func readBrowserAgentOutlineFixture(t *testing.T) model.ClientExecutionPackage {
 	t.Helper()
 	_, current, _, ok := runtime.Caller(0)
@@ -633,4 +641,20 @@ func readBrowserAgentOutlineFixture(t *testing.T) model.ClientExecutionPackage {
 		t.Fatal(err)
 	}
 	return pkg
+}
+
+func refreshTestPackageApprovalDigests(t *testing.T, pkg *model.ClientExecutionPackage) {
+	t.Helper()
+	if pkg == nil || pkg.SafetyReport.HumanApproval.ApprovalID == "" {
+		return
+	}
+	var err error
+	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256, err = model.ComputePackageApprovalComponentDigests(*pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg.SafetyReport.HumanApproval.ApprovalSubjectDigestSHA256, err = model.ComputePackageApprovalSubjectDigest(*pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
 }

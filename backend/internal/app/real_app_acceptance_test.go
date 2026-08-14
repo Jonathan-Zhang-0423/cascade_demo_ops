@@ -111,6 +111,7 @@ func uploadAcceptanceTestPackage(t *testing.T, service *Service, authenticated b
 	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
 		t.Fatal(err)
 	}
+	refreshTestPackageApprovalDigests(t, &pkg)
 	now := time.Date(2026, 8, 3, 2, 0, 0, 0, time.UTC)
 	service.exchange.now = fixedClock(now)
 	producer := model.ExchangeProducer{InstallID: "install_acceptance_test", RuntimeProfile: "desktop-product-run"}

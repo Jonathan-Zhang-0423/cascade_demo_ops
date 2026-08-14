@@ -14,6 +14,15 @@ import (
 const desktopCloudRunSchemaVersion = "demoops.desktop_cloud_run.v1"
 
 func (s *Service) updateDesktopCloudRun(ctx context.Context, projectID string, update func(*orchestrator.DesktopCloudRunState)) error {
+	return s.updateDesktopCloudState(ctx, projectID, func(state *orchestrator.CascadeState) {
+		if state.DesktopCloudRun == nil {
+			state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
+		}
+		update(state.DesktopCloudRun)
+	})
+}
+
+func (s *Service) updateDesktopCloudState(ctx context.Context, projectID string, update func(*orchestrator.CascadeState)) error {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		return errors.New("project_id is required")
@@ -24,12 +33,11 @@ func (s *Service) updateDesktopCloudRun(ctx context.Context, projectID string, u
 	if err != nil {
 		return err
 	}
-	if state.DesktopCloudRun == nil {
-		state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
+	update(state)
+	if state.DesktopCloudRun != nil {
+		state.DesktopCloudRun.SchemaVersion = desktopCloudRunSchemaVersion
+		state.DesktopCloudRun.UpdatedAt = time.Now().UTC()
 	}
-	update(state.DesktopCloudRun)
-	state.DesktopCloudRun.SchemaVersion = desktopCloudRunSchemaVersion
-	state.DesktopCloudRun.UpdatedAt = time.Now().UTC()
 	return s.states.Save(ctx, state)
 }
 
@@ -76,15 +84,52 @@ func (s *Service) persistCloudStatus(ctx context.Context, projectID, orgID strin
 }
 
 func (s *Service) persistCloudResult(ctx context.Context, projectID, orgID string, result model.RecordingResultPackage) error {
-	return s.updateDesktopCloudRun(ctx, projectID, func(run *orchestrator.DesktopCloudRunState) {
+	diagnosticDigest := ""
+	if result.FailureDiagnostic != nil {
+		var err error
+		diagnosticDigest, err = model.DigestCanonicalJSON(result.FailureDiagnostic)
+		if err != nil {
+			return err
+		}
+	}
+	requiresInvalidation := false
+	err := s.updateDesktopCloudState(ctx, projectID, func(state *orchestrator.CascadeState) {
+		if state.DesktopCloudRun == nil {
+			state.DesktopCloudRun = &orchestrator.DesktopCloudRunState{SchemaVersion: desktopCloudRunSchemaVersion}
+		}
+		run := state.DesktopCloudRun
 		run.OrgID = firstNonEmptyString(orgID, run.OrgID, defaultDesktopOrgID)
 		run.ResultPackageID = firstNonEmptyString(result.ResultID, run.ResultPackageID)
 		run.CloudJobID = firstNonEmptyString(result.CloudJobID, run.CloudJobID)
 		run.ResultPackage = &result
+		run.DiagnosticDigestSHA256 = diagnosticDigest
 		if result.Status == model.RecordingResultStatusFailed {
 			run.Status = "failed"
 			run.Stage = "failed"
 			run.Message = "服务器返回失败诊断。"
+			issues := directIssuesFromFailedResult(result, state.ExecutableScriptBundle)
+			if len(issues) > 0 {
+				run.Stage = "reunderstanding_required"
+				run.Message = "权威验证或 App 确定性审计要求重新理解并重新审批执行方案。"
+				run.BlockingErrorCode = "reunderstanding_required"
+				run.NextAction = "regenerate_package_from_structured_issues"
+				run.RequiresReapproval = true
+				run.ReunderstandingIssues = withDirectIssueIDs(issues)
+				if run.LastRepairSourceID != result.ResultID {
+					state.ExecutionPackageGeneration++
+					run.LastRepairSourceID = result.ResultID
+				}
+				state.Approved = false
+				state.CurrentNode = orchestrator.NodeHumanApprove
+				state.Status = orchestrator.FlowStatusAwaitingHuman
+				state.ErrorMessage = "Browser Agent 运行事实要求重新理解并重新审批执行方案。"
+				requiresInvalidation = true
+			} else {
+				run.BlockingErrorCode = ""
+				run.NextAction = ""
+				run.RequiresReapproval = false
+				run.ReunderstandingIssues = nil
+			}
 		} else {
 			run.Status = "completed"
 			run.Stage = "completed"
@@ -92,6 +137,10 @@ func (s *Service) persistCloudResult(ctx context.Context, projectID, orgID strin
 		}
 		run.ProgressPercent = 100
 	})
+	if err == nil && requiresInvalidation {
+		s.invalidateApprovedBuildsForProject(projectID)
+	}
+	return err
 }
 
 func (s *Service) persistCloudDownload(ctx context.Context, projectID, resultPackageID string, download CloudDeliverableDownloadResult) error {
@@ -110,13 +159,31 @@ func (s *Service) persistCloudDownload(ctx context.Context, projectID, resultPac
 			SizeBytes:  download.SizeBytes,
 			Verified:   true,
 		}
+		replaced := false
 		for index := range run.DownloadedAssets {
 			if run.DownloadedAssets[index].ArtifactID == asset.ArtifactID {
 				run.DownloadedAssets[index] = asset
-				return
+				replaced = true
+				break
 			}
 		}
-		run.DownloadedAssets = append(run.DownloadedAssets, asset)
+		if !replaced {
+			run.DownloadedAssets = append(run.DownloadedAssets, asset)
+		}
+		if run.Transport == directTransportStateName && len(run.DirectArtifacts) > 0 {
+			verified := make(map[string]bool, len(run.DownloadedAssets))
+			for _, downloaded := range run.DownloadedAssets {
+				verified[downloaded.ArtifactID] = downloaded.Verified
+			}
+			allVerified := true
+			for _, expected := range run.DirectArtifacts {
+				if !verified[expected.ArtifactID] {
+					allVerified = false
+					break
+				}
+			}
+			run.ResultDownloaded = allVerified
+		}
 	})
 }
 
@@ -129,7 +196,7 @@ func (s *Service) persistCloudAck(ctx context.Context, projectID string, ack mod
 			run.AckedAt = &ackedAt
 		}
 		if ack.VerifiedChecksums {
-			run.Message = "App 已下载全部成品、校验 SHA-256 并确认接收。"
+			run.Message = "App 已下载全部成品、校验 SHA-256 并完成服务器 ACK。"
 		}
 	})
 }
@@ -138,10 +205,9 @@ func (s *Service) persistCloudReview(ctx context.Context, projectID string, revi
 	return s.updateDesktopCloudRun(ctx, projectID, func(run *orchestrator.DesktopCloudRunState) {
 		run.ResultPackageID = firstNonEmptyString(review.ResultPackageID, run.ResultPackageID)
 		run.ResultReview = &orchestrator.DesktopResultReviewState{
-			Decision:  string(review.Decision),
-			ReviewID:  review.ReviewID,
-			Summary:   review.Summary,
-			UpdatedAt: review.ReviewedAt,
+			Decision: string(review.Decision), ReviewID: review.ReviewID,
+			IdempotencyKey: review.IdempotencyKey, ReviewerInstallID: review.ReviewerInstallID,
+			Summary: review.Summary, UpdatedAt: review.ReviewedAt,
 		}
 	})
 }

@@ -1201,6 +1201,44 @@ func populateDirectSelectorProvenanceFixture(t *testing.T, pkg *model.ClientExec
 	if err := json.Unmarshal(data, pkg); err != nil {
 		t.Fatal(err)
 	}
+	setRoute := func(candidates []model.SelectorCandidate, route string) {
+		for index := range candidates {
+			candidates[index].ObservedURL = route
+			candidates[index].ObservedRouteTemplate = route
+			candidates[index].ObservedPageRole = "product"
+			candidates[index].ObservedFormRole = "none"
+			candidates[index].EvidenceDigestSHA256 = candidates[index].SourceDigest
+		}
+	}
+	if pkg.ExecutableScriptBundle == nil {
+		return
+	}
+	if plan := pkg.ExecutableScriptBundle.PlanJSON; plan != nil {
+		for index := range plan.Steps {
+			route := plan.Steps[index].PageTarget.URL
+			setRoute(plan.Steps[index].PageTarget.SelectorAlternatives, route)
+			setRoute(plan.Steps[index].Action.Target.SelectorAlternatives, route)
+			for validationIndex := range plan.Steps[index].Validations {
+				setRoute(plan.Steps[index].Validations[validationIndex].Target.SelectorAlternatives, route)
+			}
+		}
+	}
+	if plan := pkg.ExecutableScriptBundle.StageApprovalPlan; plan != nil {
+		for index := range plan.Stages {
+			setRoute(plan.Stages[index].Interaction.Target.SelectorAlternatives, plan.Stages[index].EntryRoute)
+		}
+	}
+	if outline := pkg.ExecutableScriptBundle.ScriptOutline; outline != nil {
+		for index := range outline.Stages {
+			route := outline.Stages[index].Route
+			for componentIndex := range outline.Stages[index].Components {
+				setRoute(outline.Stages[index].Components[componentIndex].SelectorAlternatives, route)
+			}
+			for interactionIndex := range outline.Stages[index].Interactions {
+				setRoute(outline.Stages[index].Interactions[interactionIndex].Target.SelectorAlternatives, route)
+			}
+		}
+	}
 }
 
 func clearFirstDirectSelectorEvidenceID(t *testing.T, pkg *model.ClientExecutionPackage) {

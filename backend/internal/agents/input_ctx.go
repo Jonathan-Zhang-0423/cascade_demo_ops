@@ -25,6 +25,9 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 	if input.Mode != model.AppModeWeb && input.Mode != model.AppModeDesktop {
 		return nil, fmt.Errorf("unsupported app mode: %s", input.Mode)
 	}
+	if err := model.ValidatePresentationGenerationIntents(input.PresentationGenerationIntents); err != nil {
+		return nil, err
+	}
 	hasProductURL := strings.TrimSpace(input.ProductURL) != ""
 	hasCode := strings.TrimSpace(input.GitRepoURL) != "" || strings.TrimSpace(input.LocalRepoPath) != "" || len(input.Code) > 0
 	hasRequirements := strings.TrimSpace(input.ProductDescription) != "" || len(input.RequirementDocuments) > 0
@@ -71,12 +74,15 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 		ForbiddenPages:     uniqueStrings(append(append([]string{}, input.ForbiddenPages...), defaultControlPlaneForbiddenPaths()...)),
 		ForbiddenData:      input.ForbiddenData,
 		Inputs: &model.ProjectInputBundle{
-			ProductURLs:          productURLInputs(input),
-			Code:                 codeInputs(input),
-			Repositories:         repositoryInputs(input),
-			RequirementDocuments: requirementDocuments,
-			WebpageScreenshots:   input.WebpageScreenshots,
-			KnowledgeSources:     knowledgeSourcesFromInputs(input),
+			ProductURLs:                   productURLInputs(input),
+			Code:                          codeInputs(input),
+			Repositories:                  repositoryInputs(input),
+			RequirementDocuments:          requirementDocuments,
+			WebpageScreenshots:            input.WebpageScreenshots,
+			KnowledgeSources:              knowledgeSourcesFromInputs(input),
+			Requirements:                  structuredDemoRequirements(input.Requirements, mustShow, mustNotShow, input.ForbiddenPages, input.ForbiddenData),
+			PresentationGenerationIntents: append([]model.PresentationGenerationIntent{}, input.PresentationGenerationIntents...),
+			RawUserPrompt:                 productDescription,
 			Scenarios: []model.DemoScenario{
 				{
 					ID:              "scenario_primary",
@@ -129,17 +135,21 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 			Decision: input.SourceBindingDecision, AssessmentHash: input.SourceBindingHash,
 		}
 	}
-	if input.DemoUsername != "" || input.DemoPassword != "" {
+	if input.DemoUsername != "" || input.DemoPassword != "" || input.DemoCredentialRef != "" {
+		credentialRef := strings.TrimSpace(input.DemoCredentialRef)
+		if credentialRef == "" {
+			credentialRef = "local-dev/demo_account"
+		}
 		project.DemoAccount = &model.DemoAccount{
-			UsernameSecretRef: "local-dev/demo_username",
-			PasswordSecretRef: "local-dev/demo_password",
+			UsernameSecretRef: credentialRef,
+			PasswordSecretRef: credentialRef,
 			Provider:          "demo_account",
 			Scope:             "browser_login",
 		}
 		project.Inputs.Credentials = append(project.Inputs.Credentials, model.CredentialInput{
 			ID:            "demo_account",
 			Kind:          "username_password",
-			SecretRef:     "local-dev/demo_account",
+			SecretRef:     credentialRef,
 			Scope:         "browser_login",
 			RequiredFor:   []string{"browser_scan", "workflow_rehearsal"},
 			SessionPolicy: "isolated_ephemeral_session",
@@ -161,6 +171,54 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 		}
 	}
 	return project, nil
+}
+
+func structuredDemoRequirements(existing []model.DemoRequirement, mustShow, mustNotShow, forbiddenPages, forbiddenData []string) []model.DemoRequirement {
+	out := make([]model.DemoRequirement, 0, len(existing)+len(mustShow)+len(mustNotShow)+len(forbiddenPages)+len(forbiddenData))
+	seen := map[string]bool{}
+	add := func(value model.DemoRequirement) {
+		value.Kind = strings.TrimSpace(value.Kind)
+		value.Description = RedactSensitiveUserText(value.Description)
+		if value.Kind == "" || value.Description == "" {
+			return
+		}
+		key := value.Kind + "\x00" + normalizeIntentText(value.Description)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		if strings.TrimSpace(value.ID) == "" {
+			digest := strings.TrimPrefix(model.SHA256Hex([]byte(key)), "sha256:")
+			value.ID = "requirement_" + value.Kind + "_" + digest[:12]
+		}
+		value.Required = value.Kind == "must_show"
+		if len(value.EvidenceRefs) == 0 {
+			value.EvidenceRefs = []model.EvidenceRef{{
+				ID:         "ev_" + value.ID,
+				Kind:       model.EvidenceKindUserInput,
+				Summary:    "用户明确提交的结构化演示要求",
+				FieldPath:  "project_input_bundle.requirements." + value.ID,
+				Confidence: 1,
+			}}
+		}
+		out = append(out, value)
+	}
+	for _, value := range existing {
+		add(value)
+	}
+	for _, item := range mustShow {
+		add(model.DemoRequirement{Kind: "must_show", Description: item, Required: true})
+	}
+	for _, item := range mustNotShow {
+		add(model.DemoRequirement{Kind: "must_not_show", Description: item})
+	}
+	for _, item := range forbiddenPages {
+		add(model.DemoRequirement{Kind: "forbidden_page", Description: item})
+	}
+	for _, item := range forbiddenData {
+		add(model.DemoRequirement{Kind: "forbidden_data", Description: item})
+	}
+	return out
 }
 
 func defaultUseCaseForAudience(audience string) model.DemoUseCase {

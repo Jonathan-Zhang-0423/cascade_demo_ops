@@ -153,6 +153,170 @@ func TestEnsureExchangeSessionUsesRemoteDiscoveryChallengeForConfiguredHTTPS(t *
 	}
 }
 
+func TestEnsureExchangeSessionRefreshesNearExpiryWithoutRegisteringAgain(t *testing.T) {
+	registerHits := 0
+	refreshHits := 0
+	oldToken := "cassess_old_refresh_fixture"
+	installID := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/aigc/.well-known/cascade-exchange":
+			discovery := localBootstrapDiscovery("http://"+r.Host+"/aigc", "development", time.Now().UTC())
+			_ = json.NewEncoder(w).Encode(discovery)
+		case "/aigc/v1/app-installations/register":
+			registerHits++
+			var request model.AppInstallationRegisterRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			installID = request.InstallID
+			_ = json.NewEncoder(w).Encode(model.AppInstallationSessionResponse{
+				InstallID: request.InstallID, SessionID: "sess_initial", SessionToken: oldToken,
+				ExpiresAt: time.Now().UTC().Add(30 * time.Second), ServerKeyID: defaultServerPublicKeyID,
+				ResultRecipientKeyID: installationResultKeyID(request.InstallID), AuthMode: exchangeAuthModeInstallation,
+			})
+		case "/aigc/v1/app-installations/refresh":
+			refreshHits++
+			if r.Header.Get("Authorization") != "Cascade-Session "+oldToken {
+				t.Fatalf("refresh did not use the current installation session")
+			}
+			_ = json.NewEncoder(w).Encode(model.AppInstallationSessionResponse{
+				InstallID: installID, SessionID: "sess_refreshed", SessionToken: "cassess_refreshed_fixture",
+				ExpiresAt: time.Now().UTC().Add(time.Hour), ServerKeyID: defaultServerPublicKeyID,
+				ResultRecipientKeyID: "result_refreshed", AuthMode: exchangeAuthModeInstallation,
+			})
+		default:
+			t.Fatalf("unexpected exchange request: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := newExchangeIdentityTestService(t, server.URL+"/aigc", "")
+	first, err := service.EnsureExchangeSession(t.Context(), "org_1", "project_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SessionToken != oldToken || registerHits != 1 {
+		t.Fatalf("initial pairing failed: session=%+v register_hits=%d", first, registerHits)
+	}
+	registerHits = 0
+	second, err := service.EnsureExchangeSession(t.Context(), "org_1", "project_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshHits != 1 || registerHits != 0 || second.SessionToken != "cassess_refreshed_fixture" {
+		t.Fatalf("near-expiry session was not refreshed in place: refresh=%d register=%d session=%+v", refreshHits, registerHits, second)
+	}
+}
+
+func TestEnsureExchangeSessionRePairsOnceAfterRefreshUnauthorized(t *testing.T) {
+	registerHits := 0
+	refreshHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/aigc/.well-known/cascade-exchange":
+			discovery := localBootstrapDiscovery("http://"+r.Host+"/aigc", "development", time.Now().UTC())
+			_ = json.NewEncoder(w).Encode(discovery)
+		case "/aigc/v1/app-installations/register":
+			registerHits++
+			var request model.AppInstallationRegisterRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			token := "cassess_old_unauthorized_fixture"
+			if registerHits > 1 {
+				token = "cassess_repaired_fixture"
+			}
+			_ = json.NewEncoder(w).Encode(model.AppInstallationSessionResponse{
+				InstallID: request.InstallID, SessionID: "sess_pair", SessionToken: token,
+				ExpiresAt: time.Now().UTC().Add(30 * time.Second), ServerKeyID: defaultServerPublicKeyID,
+				ResultRecipientKeyID: installationResultKeyID(request.InstallID), AuthMode: exchangeAuthModeInstallation,
+			})
+		case "/aigc/v1/app-installations/refresh":
+			refreshHits++
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(exchangeHTTPError{Error: exchangeHTTPErrorBody{Code: "installation_session_required", Message: "installation session is invalid or expired"}})
+		default:
+			t.Fatalf("unexpected exchange request: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := newExchangeIdentityTestService(t, server.URL+"/aigc", "")
+	if _, err := service.EnsureExchangeSession(t.Context(), "org_1", "project_1"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.EnsureExchangeSession(t.Context(), "org_1", "project_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshHits != 1 || registerHits != 2 || session.SessionToken != "cassess_repaired_fixture" {
+		t.Fatalf("unauthorized refresh did not trigger exactly one re-pair: refresh=%d register=%d session=%+v", refreshHits, registerHits, session)
+	}
+	record, err := service.exchangeIdentityStore().load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.SessionToken != "cassess_repaired_fixture" || strings.Contains(record.SessionToken, "old_unauthorized") {
+		t.Fatalf("stale session was not replaced: %+v", record)
+	}
+}
+
+func TestCloudStatusRePairsOnceWhenServerRevokesUsableSession(t *testing.T) {
+	registerHits := 0
+	statusHits := 0
+	oldToken := "cassess_server_revoked_fixture"
+	newToken := "cassess_server_repaired_fixture"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/aigc/.well-known/cascade-exchange":
+			discovery := localBootstrapDiscovery("http://"+r.Host+"/aigc", "development", time.Now().UTC())
+			_ = json.NewEncoder(w).Encode(discovery)
+		case "/aigc/v1/app-installations/register":
+			registerHits++
+			var request model.AppInstallationRegisterRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			token := oldToken
+			if registerHits > 1 {
+				token = newToken
+			}
+			_ = json.NewEncoder(w).Encode(model.AppInstallationSessionResponse{
+				InstallID: request.InstallID, SessionID: "sess_status", SessionToken: token,
+				ExpiresAt: time.Now().UTC().Add(time.Hour), ServerKeyID: defaultServerPublicKeyID,
+				ResultRecipientKeyID: installationResultKeyID(request.InstallID), AuthMode: exchangeAuthModeInstallation,
+			})
+		case "/aigc/v1/execution-packages/xpkg_status/status":
+			statusHits++
+			if r.Header.Get("Authorization") == "Cascade-Session "+oldToken {
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(exchangeHTTPError{Error: exchangeHTTPErrorBody{Code: "installation_session_required", Message: "session expired"}})
+				return
+			}
+			if r.Header.Get("Authorization") != "Cascade-Session "+newToken {
+				t.Fatalf("status retry did not use the repaired session")
+			}
+			_ = json.NewEncoder(w).Encode(model.ExecutionPackageStatusResponse{ExchangePackageID: "xpkg_status", Status: model.ExchangePackageStatusRunning})
+		default:
+			t.Fatalf("unexpected exchange request: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := newExchangeIdentityTestService(t, server.URL+"/aigc", "")
+	if _, err := service.EnsureExchangeSession(t.Context(), "org_1", "project_1"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.GetCloudExecutionPackageStatus(t.Context(), CloudStatusRequest{OrgID: "org_1", ExchangePackageID: "xpkg_status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != model.ExchangePackageStatusRunning || statusHits != 2 || registerHits != 2 {
+		t.Fatalf("server-side revocation was not retried exactly once: status=%+v status_hits=%d register_hits=%d", status, statusHits, registerHits)
+	}
+}
+
 func TestEnsureExchangeSessionKeepsBearerTokenForExternalLegacyExchange(t *testing.T) {
 	root := t.TempDir()
 	service, err := NewService(config.AppRuntimeConfig{
@@ -261,6 +425,22 @@ func TestEnsureExchangeSessionRequiresIndependentControlPlaneConfiguration(t *te
 	if err == nil || !strings.Contains(err.Error(), "execution server is not configured") {
 		t.Fatalf("expected an explicit unconfigured control plane error, got %v", err)
 	}
+}
+
+func newExchangeIdentityTestService(t *testing.T, baseURL string, token string) *Service {
+	t.Helper()
+	root := t.TempDir()
+	service, err := NewService(config.AppRuntimeConfig{
+		Profile: config.ProfileDev, Environment: "development", Mode: model.AppModeDesktop,
+		DatabaseDialect: config.DatabaseSQLite, SQLitePath: filepath.Join(root, "cascade_demoops.db"),
+		DataRoot: root, ArtifactRoot: filepath.Join(root, "artifacts"), CacheRoot: filepath.Join(root, "cache"),
+		LogRoot: filepath.Join(root, "logs"), ResourceRoot: root, DevRepoRoot: root,
+		CloudExchangeBaseURL: baseURL, CloudExchangeToken: token, LLMMode: config.LLMModeDeterministic,
+	}, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

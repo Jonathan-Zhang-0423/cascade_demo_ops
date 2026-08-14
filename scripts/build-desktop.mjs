@@ -19,6 +19,12 @@ if (!spec) {
 const out = resolve("dist", "desktop", spec.goos, `cascade-demoops-desktop${spec.ext}`);
 mkdirSync(dirname(out), { recursive: true });
 
+if (spec.goos === "windows") {
+  const result = spawnSync("node", ["scripts/build-wails-desktop.mjs"], { cwd: resolve("."), stdio: "inherit" });
+  if (result.status !== 0) process.exit(result.status ?? 1);
+  process.exit(0);
+}
+
 const buildArgs = ["build", "-o", out];
 if (spec.goos === "windows") {
   buildArgs.push("-ldflags", "-H=windowsgui");

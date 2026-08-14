@@ -922,9 +922,9 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 					ID:       fmt.Sprintf("post_no_evidence_refs_%s_%d", event.StageID, i),
 					Kind:     "evidence_traceability",
 					Code:     "MISSING_EVIDENCE_REFS",
-					Severity: model.FindingSeverityWarning,
+					Severity: model.FindingSeverityBlocking,
 					Passed:   false,
-					Required: false,
+					Required: true,
 					Summary:  fmt.Sprintf("阶段 %s 事件 %s 缺少 evidence_refs，无法追溯原始证据", event.StageID, event.EventType),
 				})
 			}

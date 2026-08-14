@@ -691,10 +691,10 @@ func TestNewArkMediaGenerationResultWithOptionsPollsAndDownloadsCandidateArtifac
 	}
 
 	review := ReviewArkMediaCandidateAssets(&source, &result, time.Date(2026, 7, 15, 20, 0, 2, 0, time.UTC))
-	if review.Status != "partially_approved" || len(review.ApprovedArtifacts) != 1 || len(review.RejectedArtifacts) != 1 {
-		t.Fatalf("only the normalized derivative should pass review: %+v", review)
+	if review.Status != "partially_media_eligible_awaiting_user_review" || len(review.PendingReviewArtifacts) != 1 || len(review.ApprovedArtifacts) != 0 || len(review.RejectedArtifacts) != 1 {
+		t.Fatalf("normalized derivative should await explicit user review: %+v", review)
 	}
-	if result.DownloadedArtifacts[0].Metadata["approved_for_demo"] != false || result.DownloadedArtifacts[1].Metadata["approved_for_demo"] != true {
+	if result.DownloadedArtifacts[0].Metadata["approved_for_demo"] != false || result.DownloadedArtifacts[1].Metadata["approved_for_demo"] != false || result.DownloadedArtifacts[1].Metadata["explicit_review_required"] != true {
 		t.Fatalf("provider original and normalized derivative review boundary mismatch: %+v", result.DownloadedArtifacts)
 	}
 }
