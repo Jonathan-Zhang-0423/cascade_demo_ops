@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/url"
 	"os"
@@ -98,6 +99,12 @@ func enrichRenderResultForDirector(ctx context.Context, source *model.ClientExec
 	if err != nil {
 		return err
 	}
+
+	// Log director gate diagnostics when blocked
+	if gate := suggestion.ProviderGate; gate != nil && gate.Status == "blocked_before_provider_call" {
+		logDirectorGateDiagnostics(gate, outputDir)
+	}
+
 	suggestionPath := filepath.Join(outputDir, "director_edit_suggestion.json")
 	if err := writeIndentedJSONFile(suggestionPath, suggestion); err != nil {
 		return err
@@ -2033,4 +2040,70 @@ func writeIndentedJSONFile(path string, value any) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+// logDirectorGateDiagnostics writes a human-readable diagnostic report when director provider gate is blocked
+func logDirectorGateDiagnostics(gate *model.DirectorProviderGate, outputDir string) {
+	if gate == nil || len(gate.Blockers) == 0 {
+		return
+	}
+
+	diagnosticPath := filepath.Join(outputDir, "director_gate_diagnostics.txt")
+	var buf strings.Builder
+
+	buf.WriteString("Director Provider Gate Diagnostics\n")
+	buf.WriteString("=====================================\n\n")
+	buf.WriteString(fmt.Sprintf("Status: %s\n", gate.Status))
+	buf.WriteString(fmt.Sprintf("Mode: %s\n", gate.Mode))
+	buf.WriteString(fmt.Sprintf("Provider: %s\n", gate.Provider))
+	buf.WriteString(fmt.Sprintf("Model: %s\n\n", gate.Model))
+
+	if len(gate.Blockers) > 0 {
+		buf.WriteString("BLOCKERS:\n")
+		buf.WriteString("---------\n")
+		for i, blocker := range gate.Blockers {
+			buf.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, blocker.Code, blocker.Message))
+			if blocker.TaskID != "" {
+				buf.WriteString(fmt.Sprintf("   Task ID: %s\n", blocker.TaskID))
+			}
+			if blocker.RefID != "" {
+				buf.WriteString(fmt.Sprintf("   Ref ID: %s\n", blocker.RefID))
+			}
+			buf.WriteString("\n")
+		}
+	}
+
+	if len(gate.Warnings) > 0 {
+		buf.WriteString("\nWARNINGS:\n")
+		buf.WriteString("---------\n")
+		for i, warning := range gate.Warnings {
+			buf.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, warning.Code, warning.Message))
+			if warning.TaskID != "" {
+				buf.WriteString(fmt.Sprintf("   Task ID: %s\n", warning.TaskID))
+			}
+			if warning.RefID != "" {
+				buf.WriteString(fmt.Sprintf("   Ref ID: %s\n", warning.RefID))
+			}
+			buf.WriteString("\n")
+		}
+	}
+
+	if len(gate.RequiredBeforeRealCall) > 0 {
+		buf.WriteString("\nREQUIRED BEFORE REAL CALL:\n")
+		buf.WriteString("--------------------------\n")
+		for i, req := range gate.RequiredBeforeRealCall {
+			buf.WriteString(fmt.Sprintf("%d. %s\n", i+1, req))
+		}
+		buf.WriteString("\n")
+	}
+
+	if gate.ModeGate != "" {
+		buf.WriteString(fmt.Sprintf("\nMode Gate: %s\n", gate.ModeGate))
+	}
+
+	// Write to file
+	if err := os.WriteFile(diagnosticPath, []byte(buf.String()), 0o644); err != nil {
+		// Log error but don't fail the pipeline
+		fmt.Fprintf(os.Stderr, "Warning: failed to write director gate diagnostics: %v\n", err)
+	}
 }

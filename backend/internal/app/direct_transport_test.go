@@ -64,7 +64,7 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 		t.Fatalf("direct status is not ready: %+v", view)
 	}
 
-	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{ProjectID: "direct-tetris", Mode: model.AppModeDesktop, ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目，填写项目名俄罗斯方块，启动 Agent 构建并观察实际进度。", TargetAudience: "普通用户", MustShow: []string{"进入新建项目", "填写俄罗斯方块", "启动 Agent 构建", "观察构建进度"}, MustNotShow: []string{"密码", "令牌"}, ForbiddenPages: []string{"/billing"}, ForbiddenData: []string{"密码", "令牌"}, AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: formalAppScreenshotInputs("https://cascadeai.cn")})
+	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{ProjectID: "direct-tetris", Mode: model.AppModeDesktop, ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目，填写项目名俄罗斯方块，启动 Agent 构建并观察实际进度。", TargetAudience: "普通用户", MustShow: []string{"进入新建项目", "填写俄罗斯方块", "启动 Agent 构建", "观察构建进度"}, MustNotShow: []string{"密码", "令牌"}, ForbiddenPages: []string{"/billing"}, ForbiddenData: []string{"密码", "令牌"}, AllowedDomains: []string{"cascadeai.cn"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestPersistDirectReunderstandingStatusInvalidatesApprovalAndRotatesPackageI
 		ProjectID: "direct-reunderstanding", Mode: model.AppModeDesktop,
 		ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目，填写俄罗斯方块并启动 Agent 构建。",
 		TargetAudience: "普通用户", MustShow: []string{"新建俄罗斯方块", "启动 Agent 构建"},
-		AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: formalAppScreenshotInputs("https://cascadeai.cn"),
+		AllowedDomains: []string{"cascadeai.cn"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -478,7 +478,7 @@ func TestBrowserAgentOutlineAllowsInitialBaseURLRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{ProjectID: "direct-base-route", Mode: model.AppModeDesktop, ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目并启动 Agent 构建。", TargetAudience: "普通用户", MustShow: []string{"新建项目", "启动 Agent 构建"}, AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: formalAppScreenshotInputs("https://cascadeai.cn")})
+	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{ProjectID: "direct-base-route", Mode: model.AppModeDesktop, ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目并启动 Agent 构建。", TargetAudience: "普通用户", MustShow: []string{"新建项目", "启动 Agent 构建"}, AllowedDomains: []string{"cascadeai.cn"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +557,7 @@ func TestAppDirectTransportReleasesLeaseWhenPackageUploadFails(t *testing.T) {
 	if _, err := service.SaveDirectTransportSettings(t.Context(), DirectTransportSettingsRequest{ControlURL: control.URL, AccessToken: directAppBootstrapToken}); err != nil {
 		t.Fatal(err)
 	}
-	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{ProjectID: "direct-upload-failure", Mode: model.AppModeDesktop, ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目，填写项目名俄罗斯方块，启动 Agent 构建并观察实际进度。", TargetAudience: "普通用户", MustShow: []string{"进入新建项目", "填写俄罗斯方块", "启动 Agent 构建", "观察构建进度"}, MustNotShow: []string{"密码", "令牌"}, ForbiddenPages: []string{"/billing"}, ForbiddenData: []string{"密码", "令牌"}, AllowedDomains: []string{"cascadeai.cn"}, WebpageScreenshots: formalAppScreenshotInputs("https://cascadeai.cn")})
+	state, err := service.CreateProject(t.Context(), orchestrator.UserInput{ProjectID: "direct-upload-failure", Mode: model.AppModeDesktop, ProductURL: "https://cascadeai.cn/app", ProductDescription: "进入新建项目，填写项目名俄罗斯方块，启动 Agent 构建并观察实际进度。", TargetAudience: "普通用户", MustShow: []string{"进入新建项目", "填写俄罗斯方块", "启动 Agent 构建", "观察构建进度"}, MustNotShow: []string{"密码", "令牌"}, ForbiddenPages: []string{"/billing"}, ForbiddenData: []string{"密码", "令牌"}, AllowedDomains: []string{"cascadeai.cn"}})
 	if err != nil {
 		t.Fatal(err)
 	}
