@@ -19,14 +19,34 @@ func (s *DirectHTTPServer) directRuntimeFailureResult(ctx context.Context, pkg *
 		return model.RecordingResultPackage{}, errors.New("cannot package Direct runtime failure without an approved stage")
 	}
 	stage := pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[0]
-	code := runtimeExecutionErrorCode(runErr)
+
+	// Phase 3: Extract error code from blocking validation checks first, fallback to Go error.
+	code := extractFirstBlockingValidationCode(existing.ValidationReports)
+	if code == "" {
+		code = runtimeExecutionErrorCode(runErr)
+	}
+
+	// Attach all blocking validation reports to diagnostic for deep traceability.
+	blockingReports := filterBlockingReports(existing.ValidationReports)
+	browserEvidenceUnavailable := directInfrastructureFailureCode(code)
+
 	diagnostic := &model.ScriptFailureDiagnostic{
 		ID: "diag_" + safePathSegment(stage.NodeID), SchemaVersion: model.ScriptFailureDiagnosticSchemaVersion,
 		SourcePackageID: pkg.PackageID, CloudJobID: jobID, FailedNodeID: stage.NodeID, FailedStepOrder: stage.Order, Attempt: 1,
 		Error:           model.AgentError{Code: code, Message: "Server runtime failed before browser evidence was available."},
 		RedactionReport: model.DiagnosticRedactionReport{Applied: true, PolicyRef: pkg.PackageID + ".redactions", FullHTMLIncluded: false},
+		BrowserEvidenceUnavailable: browserEvidenceUnavailable,
 		CapturedAt:      createdAt,
 	}
+	// Embed blocking ValidationReports into diagnostic (Phase 2).
+	if len(blockingReports) > 0 {
+		// Annotate checks with Impact/Suggestion/NextStep metadata before embedding
+		for i := range blockingReports {
+			model.AnnotateValidationChecks(blockingReports[i].Checks)
+		}
+		diagnostic.ValidationReports = blockingReports
+	}
+
 	step := model.StepResult{
 		NodeID: stage.NodeID, Status: "failed", StartedAt: createdAt, CompletedAt: createdAt,
 		ObservedState: "source=artifact_observation; infrastructure_failure=" + code,
@@ -150,4 +170,37 @@ func directInfrastructureFailureCode(code string) bool {
 	default:
 		return false
 	}
+}
+
+// extractFirstBlockingValidationCode returns the Code of the first blocking
+// ValidationCheck that failed across all ValidationReports. Returns "" if no
+// blocking failures exist.
+func extractFirstBlockingValidationCode(reports []model.ValidationReport) string {
+	for _, rpt := range reports {
+		for _, chk := range rpt.Checks {
+			if !chk.Passed && chk.Severity == model.FindingSeverityBlocking {
+				return chk.Code
+			}
+		}
+	}
+	return ""
+}
+
+// filterBlockingReports returns a subset of reports containing at least one
+// blocking failed check.
+func filterBlockingReports(reports []model.ValidationReport) []model.ValidationReport {
+	blocking := []model.ValidationReport{}
+	for _, rpt := range reports {
+		hasBlocking := false
+		for _, chk := range rpt.Checks {
+			if !chk.Passed && chk.Severity == model.FindingSeverityBlocking {
+				hasBlocking = true
+				break
+			}
+		}
+		if hasBlocking {
+			blocking = append(blocking, rpt)
+		}
+	}
+	return blocking
 }

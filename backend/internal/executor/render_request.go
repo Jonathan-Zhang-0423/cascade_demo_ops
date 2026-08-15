@@ -19,7 +19,15 @@ func NewRenderRequestFromRecordingResult(source *model.ClientExecutionPackage, r
 	if validationErr != nil {
 		return RenderRequest{}, validationErr
 	}
+	// Priority: workflow_graph.assets.target_duration_sec (product delivery intent) >
+	// recording_run_spec.timeline.target_duration_sec (capture plan) > fallback (60s)
 	durationSec := source.RecordingRunSpec.Timeline.TargetDurationSec
+	if graphAssets := source.WorkflowGraph.Assets; graphAssets != nil && graphAssets.TargetDurationSec > 0 {
+		durationSec = graphAssets.TargetDurationSec
+	}
+	if durationSec == 0 {
+		durationSec = 60 // default product demo target
+	}
 	request := RenderRequest{
 		Graph:                  source.WorkflowGraph,
 		OutputDir:              outputDir,

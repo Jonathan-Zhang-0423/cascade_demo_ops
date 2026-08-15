@@ -723,7 +723,9 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
 
   const loaded = await loadRenderInputs(request);
   const catalog = request.asset_timeline_catalog || (await buildAssetTimelineCatalog(request, loaded));
-  const editPlan = request.edit_plan ? normalizeEditPlan(request.edit_plan, catalog) : defaultEditPlan(catalog, request.duration_sec);
+  // Priority: request.duration_sec (from Go backend) > workflow_graph.assets.target_duration_sec > catalog timeline
+  const requestedDurationSec = request.duration_sec || request.graph?.assets?.target_duration_sec || Math.max(1, Math.ceil(catalog.timeline.duration_ms / 1000));
+  const editPlan = request.edit_plan ? normalizeEditPlan(request.edit_plan, catalog) : defaultEditPlan(catalog, requestedDurationSec);
   const validationReport = validateDemoEditPlan(editPlan, catalog);
 
   if (!validationReport.valid) {

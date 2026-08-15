@@ -597,9 +597,11 @@ type ScriptFailureDiagnostic struct {
 	NetworkEvents            []NetworkEventSummary       `json:"network_events,omitempty"`
 	DOMSnapshotRef           *PackageArtifactDescriptor  `json:"dom_snapshot_ref,omitempty"`
 	AccessibilitySnapshotRef *PackageArtifactDescriptor  `json:"accessibility_snapshot_ref,omitempty"`
-	RedactionReport          DiagnosticRedactionReport   `json:"redaction_report"`
-	RepairHints              []ScriptRepairHint          `json:"repair_hints,omitempty"`
-	CapturedAt               time.Time                   `json:"captured_at,omitempty"`
+	RedactionReport            DiagnosticRedactionReport   `json:"redaction_report"`
+	RepairHints                []ScriptRepairHint          `json:"repair_hints,omitempty"`
+	CapturedAt                 time.Time                   `json:"captured_at,omitempty"`
+	BrowserEvidenceUnavailable bool                        `json:"browser_evidence_unavailable,omitempty"`
+	ValidationReports          []ValidationReport          `json:"validation_reports,omitempty"`
 }
 
 type ConsoleEventSummary struct {
@@ -638,6 +640,17 @@ type ScriptRepairHint struct {
 	SuggestedAction    string              `json:"suggested_action,omitempty"`
 	Confidence         float64             `json:"confidence,omitempty"`
 	EvidenceRefs       []EvidenceRef       `json:"evidence_refs,omitempty"`
+}
+
+// ValidationEventPayload carries validation check results emitted during
+// package or runtime execution. It allows App and Server to emit validation
+// findings throughout the lifecycle.
+type ValidationEventPayload struct {
+	ExecutionID      string            `json:"execution_id"`
+	ValidationKind   string            `json:"validation_kind"` // "pre_execution", "runtime_stage", "runtime_global", "media_delivery"
+	ValidationPhase  string            `json:"validation_phase,omitempty"`
+	Checks           []ValidationCheck `json:"checks"`
+	Timestamp        time.Time         `json:"timestamp"`
 }
 
 type ScriptRepairRequest struct {
