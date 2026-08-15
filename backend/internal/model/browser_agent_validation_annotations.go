@@ -163,6 +163,32 @@ var validationCheckMetaTable = map[string]validationCheckMeta{
 		NextStep:             "审查 artifact 生成与引用的代码路径",
 		ResponsibilityDomain: ValidationCheckDomainServer,
 	},
+
+	// ── 新增稳定码（工作包 F 缺口补全）──────────────────────────────────────
+	"url_change_not_business_completion": {
+		Impact:               "仅 URL 改变不能证明业务动作完成，可能是跳转到错误页或中间页",
+		Suggestion:           "检查 post-action assertion 是否验证了实际业务状态（如表单提交后的成功提示、新记录出现等）",
+		NextStep:             "审查 Outline 中该 stage 的 expected_outcome 定义，确保包含业务状态验证而非仅 URL 匹配",
+		ResponsibilityDomain: ValidationCheckDomainApp,
+	},
+	"forbidden_operation_attempted": {
+		Impact:               "尝试执行合约明确禁止的操作，违反 BrowserAgentContract 约束",
+		Suggestion:           "检查 BrowserAgentContract.forbidden_operations 与 Outline 动作定义是否冲突",
+		NextStep:             "修改 Outline 移除禁止操作，或调整 BrowserAgentContract 放宽限制",
+		ResponsibilityDomain: ValidationCheckDomainApp,
+	},
+	"media_artifact_generation_failed": {
+		Impact:               "视频或截图生成失败，不影响执行结果准确性但缺少演示素材",
+		Suggestion:           "检查 FFmpeg 可用性、磁盘空间和录屏原始数据完整性",
+		NextStep:             "查看 video_worker 日志（stderr）和录屏目录权限",
+		ResponsibilityDomain: ValidationCheckDomainMediaDelivery,
+	},
+	"media_artifact_upload_failed": {
+		Impact:               "artifact 已成功生成但上传到存储（S3/OSS）失败，本地可访问但无法分享",
+		Suggestion:           "检查存储凭证（AccessKey/SecretKey）、网络连通性和存储桶权限",
+		NextStep:             "查看 artifact uploader 日志和 S3/OSS API 返回的错误码",
+		ResponsibilityDomain: ValidationCheckDomainMediaDelivery,
+	},
 }
 
 // AnnotateValidationChecks fills in structured feedback fields (Impact,

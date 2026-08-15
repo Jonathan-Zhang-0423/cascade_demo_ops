@@ -175,6 +175,8 @@ type ValidationCheck struct {
 	NextStep   string `json:"next_step,omitempty"`
 	// P1.3: responsibility domain for cross-team triage
 	ResponsibilityDomain ValidationCheckDomain `json:"responsibility_domain,omitempty"`
+	// Artifact reference when check targets a specific artifact
+	ArtifactID string `json:"artifact_id,omitempty"`
 }
 
 // ValidationCheckDomain identifies which side of the system is responsible
@@ -182,10 +184,11 @@ type ValidationCheck struct {
 type ValidationCheckDomain string
 
 const (
-	ValidationCheckDomainApp         ValidationCheckDomain = "app"         // App产包、审批计划或执行包字段问题
-	ValidationCheckDomainServer      ValidationCheckDomain = "server"      // Server 执行引擎或 Browser Agent 运行时问题
-	ValidationCheckDomainValidation  ValidationCheckDomain = "validation"  // Validation Agent 自身配置或逻辑问题
-	ValidationCheckDomainEnvironment ValidationCheckDomain = "environment" // Node、FFmpeg、Chromium 等环境问题
+	ValidationCheckDomainApp            ValidationCheckDomain = "app"             // App产包、审批计划或执行包字段问题
+	ValidationCheckDomainServer         ValidationCheckDomain = "server"          // Server 执行引擎或 Browser Agent 运行时问题
+	ValidationCheckDomainValidation     ValidationCheckDomain = "validation"      // Validation Agent 自身配置或逻辑问题
+	ValidationCheckDomainEnvironment    ValidationCheckDomain = "environment"     // Node、FFmpeg、Chromium 等环境问题
+	ValidationCheckDomainMediaDelivery  ValidationCheckDomain = "media_delivery"  // 视频编辑、MP4生成、artifact上传等媒体交付问题
 )
 
 type RuntimeRepairProposal struct {
