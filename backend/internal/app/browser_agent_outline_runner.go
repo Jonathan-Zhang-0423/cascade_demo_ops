@@ -328,9 +328,22 @@ func (v deterministicBrowserAgentStageVerifier) ValidateBeforeExecution(_ contex
 	checks = append(checks, runtimeValidationCheck("check_approved_hashes", "approved_hash_binding", "approved_hash_missing", hashPassed, "Server verified the approved package and Browser Agent policy hashes are present.", evidence))
 	stagePlanPassed := validationContext.StageApprovalPlan != nil && len(validationContext.StageApprovalPlan.Stages) > 0 && validationContext.ScriptOutline != nil && len(validationContext.ScriptOutline.Stages) > 0
 	checks = append(checks, runtimeValidationCheck("check_approved_stage_count", "approved_stage_count", "approved_stage_plan_empty", stagePlanPassed, "Server verified the approved stage plan and script outline contain executable stages.", evidence))
+
+	// Readiness checks: business input completeness, selector provenance, action structure.
+	// Converted from browserAgentReadiness findings to ValidationCheck format.
+	readinessChecks := convertReadinessToValidationChecks(validationContext)
+	checks = append(checks, readinessChecks...)
+
 	decision := model.ValidationDecisionContinue
 	if !structurePassed || !hashPassed || !stagePlanPassed {
 		decision = model.ValidationDecisionStopAndReport
+	}
+	// If any readiness check is blocking and failed, escalate decision.
+	for _, chk := range readinessChecks {
+		if !chk.Passed && chk.Severity == model.FindingSeverityBlocking {
+			decision = model.ValidationDecisionStopAndReport
+			break
+		}
 	}
 	passRate := validationPassRate(checks)
 	reportBundleHash := firstNonEmptyString(validationContext.SourceBundleHashSHA256, "missing_source_bundle_hash")
@@ -425,6 +438,60 @@ func runtimeValidationCheck(id, kind, code string, passed bool, summary string, 
 		Summary: summary, EvidenceRefs: append([]model.EvidenceRef{}, evidenceRefs...),
 	}
 }
+
+// convertReadinessToValidationChecks translates browserAgentReadiness findings
+// into ValidationCheck format for pre-execution validation. All readiness issues
+// are assigned ResponsibilityDomain = app (package structure problems).
+func convertReadinessToValidationChecks(validationContext model.BrowserAgentValidationContext) []model.ValidationCheck {
+	// Construct a minimal ClientExecutionPackage from validation context for readiness check.
+	pkg := &model.ClientExecutionPackage{
+		PackageID: validationContext.SourcePackageID,
+		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
+			ScriptManifest: model.ExecutableScriptManifest{
+				Runtime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+			},
+			StageApprovalPlan: validationContext.StageApprovalPlan,
+			ScriptOutline:     validationContext.ScriptOutline,
+			PlanJSON:          validationContext.Plan,
+		},
+	}
+
+	readinessReport := browserAgentReadiness(pkg)
+	checks := []model.ValidationCheck{}
+
+	// Convert blockers.
+	for _, finding := range readinessReport.Blockers {
+		checks = append(checks, model.ValidationCheck{
+			ID:                   "readiness_blocker_" + finding.Code,
+			Kind:                 "readiness",
+			Code:                 finding.Code,
+			NodeID:               finding.NodeID,
+			Severity:             model.FindingSeverityBlocking,
+			Passed:               false,
+			Required:             true,
+			Summary:              finding.Message,
+			ResponsibilityDomain: model.ValidationCheckDomainApp,
+		})
+	}
+
+	// Convert warnings.
+	for _, finding := range readinessReport.Warnings {
+		checks = append(checks, model.ValidationCheck{
+			ID:                   "readiness_warning_" + finding.Code,
+			Kind:                 "readiness",
+			Code:                 finding.Code,
+			NodeID:               finding.NodeID,
+			Severity:             model.FindingSeverityWarning,
+			Passed:               false,
+			Required:             false,
+			Summary:              finding.Message,
+			ResponsibilityDomain: model.ValidationCheckDomainApp,
+		})
+	}
+
+	return checks
+}
+
 
 func validationPassRate(checks []model.ValidationCheck) float64 {
 	if len(checks) == 0 {
