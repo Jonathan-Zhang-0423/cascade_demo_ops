@@ -435,6 +435,13 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 		if parseErr != nil {
 			continue
 		}
+		// Browser-internal initial states (about:blank before the first
+		// navigation) are not domain accesses. Only real http(s) page URLs can
+		// violate the approved domain boundary; this skips them without
+		// relaxing the check for actual navigations.
+		if observedURL.Scheme != "http" && observedURL.Scheme != "https" {
+			continue
+		}
 
 		if len(vctx.AllowedDomains) > 0 && !urlWithinAllowedDomains(event.Observation.URL, vctx.AllowedDomains) {
 			runtimeChecks = append(runtimeChecks, model.ValidationCheck{
@@ -478,11 +485,22 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 		}
 
 		if hasBlockingFailure {
+			// ValidationReport.Validate() requires NodeID and StageID for
+			// runtime_stage reports; bind the report to the failing stage.
+			blockNodeID, blockStageID := "", ""
+			for _, ev := range events {
+				if ev.NodeID != "" && ev.StageID != "" {
+					blockNodeID, blockStageID = ev.NodeID, ev.StageID
+					break
+				}
+			}
 			newReport := model.ValidationReport{
 				SchemaVersion:          model.ValidationReportSchemaVersion,
 				ReportID:               fmt.Sprintf("runtime_critical_%d", time.Now().UnixNano()),
 				RunID:                  firstNonEmpty(vctx.RunID, vctx.SourcePackageID, "validation_run"),
 				SourcePackageID:        vctx.SourcePackageID,
+				NodeID:                 blockNodeID,
+				StageID:                blockStageID,
 				SourceBundleHashSHA256: vctx.SourceBundleHashSHA256,
 				PolicyHashSHA256:       vctx.EffectivePolicyHashSHA256,
 				Phase:                  model.ValidationPhaseRuntimeStage,

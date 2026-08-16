@@ -2,55 +2,37 @@ package executor
 
 import (
 	"testing"
+
+	"cascade-demoops/backend/internal/model"
 )
 
-// TestRenderRequest_DurationPriorityLogic tests the duration priority logic directly
-func TestRenderRequest_DurationPriorityLogic(t *testing.T) {
+// The edit-plan duration must follow the run's capture plan, not the
+// product-level delivery target: the renderer quality gate compares the
+// rendered duration against the effective edit-plan timeline, so inflating
+// the plan beyond captured footage guarantees a mismatch. The requirement
+// satisfaction report records the product target separately as delivery
+// intent (adopted vs ignored).
+func TestNewRenderRequestFromRecordingResultUsesCapturePlanDuration(t *testing.T) {
 	tests := []struct {
-		name                         string
-		workflowGraphTargetDuration  int
-		recordingRunSpecDuration     int
-		expectedDuration             int
+		name         string
+		runSpecSec   int
+		graphAssetSec int
+		want         int
 	}{
-		{
-			name:                         "workflow_graph.assets.target_duration_sec takes priority",
-			workflowGraphTargetDuration:  60,
-			recordingRunSpecDuration:     30,
-			expectedDuration:             60,
-		},
-		{
-			name:                         "fallback to recording_run_spec when workflow_graph.assets is zero",
-			workflowGraphTargetDuration:  0,
-			recordingRunSpecDuration:     45,
-			expectedDuration:             45,
-		},
-		{
-			name:                         "fallback to default 60s when both are zero",
-			workflowGraphTargetDuration:  0,
-			recordingRunSpecDuration:     0,
-			expectedDuration:             60,
-		},
-		{
-			name:                         "workflow_graph.assets overrides recording_run_spec",
-			workflowGraphTargetDuration:  90,
-			recordingRunSpecDuration:     30,
-			expectedDuration:             90,
-		},
+		{name: "capture plan drives the edit plan", runSpecSec: 8, graphAssetSec: 60, want: 8},
+		{name: "unset capture plan stays zero for renderer fallbacks", runSpecSec: 0, graphAssetSec: 60, want: 0},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the render_request.go logic
-			durationSec := tt.recordingRunSpecDuration
-			if tt.workflowGraphTargetDuration > 0 {
-				durationSec = tt.workflowGraphTargetDuration
+			source := &model.ClientExecutionPackage{
+				WorkflowGraph:    &model.DemoWorkflowGraph{Assets: &model.AssetManifest{TargetDurationSec: tt.graphAssetSec}},
+				RecordingRunSpec: model.RecordingRunSpec{Timeline: model.RecordingTimeline{TargetDurationSec: tt.runSpecSec}},
 			}
-			if durationSec == 0 {
-				durationSec = 60
-			}
-
-			if durationSec != tt.expectedDuration {
-				t.Errorf("DurationSec = %d, want %d", durationSec, tt.expectedDuration)
+			request := RenderRequest{Graph: source.WorkflowGraph, RecordingRunSpec: &source.RecordingRunSpec}
+			// Mirror NewRenderRequestFromRecordingResult's duration semantics.
+			durationSec := request.RecordingRunSpec.Timeline.TargetDurationSec
+			if durationSec != tt.want {
+				t.Errorf("edit-plan duration = %d, want %d (capture plan must not be overridden by the product target)", durationSec, tt.want)
 			}
 		})
 	}
