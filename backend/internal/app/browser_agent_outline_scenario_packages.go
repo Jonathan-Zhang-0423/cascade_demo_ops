@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -192,10 +193,19 @@ func controlledOutlineSelectorRepairPackage(fixturePath, baseURL string) (model.
 	if err != nil {
 		return model.ClientExecutionPackage{}, err
 	}
+	// The approved alternative must carry formal App provenance: evidence ID,
+	// source digest, observed role/name, and observation time, exactly like a
+	// real App-exported candidate. The runtime may only repair within it.
+	observedAt := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	component := model.BrowserAgentComponentTarget{
 		ComponentRef: "component:confirm-action", TestID: "stale-confirm-action",
-		SelectorAlternatives: []model.SelectorCandidate{{Kind: "testid", Value: "current-confirm-action", Confidence: 1, StabilityScore: 1, Source: "app_approved_fixture"}},
-		EvidenceRefs:         []model.EvidenceRef{evidence}, Confidence: 1,
+		SelectorAlternatives: []model.SelectorCandidate{{
+			Kind: "testid", Value: "current-confirm-action", Confidence: 1, StabilityScore: 1, Source: "app_approved_fixture",
+			EvidenceID: evidence.ID, SourceKind: "approved_manual_annotation", SourceDigest: "fixture:" + evidence.ID,
+			ObservedRole: "button", ObservedAccessibleName: "Confirm action", ObservedAt: &observedAt,
+			EvidenceRefs: []model.EvidenceRef{evidence},
+		}},
+		EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1,
 	}
 	specs := []controlledBusinessStageSpec{
 		outlineNavigateStage(baseURL, evidence),

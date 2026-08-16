@@ -19,15 +19,14 @@ func NewRenderRequestFromRecordingResult(source *model.ClientExecutionPackage, r
 	if validationErr != nil {
 		return RenderRequest{}, validationErr
 	}
-	// Priority: workflow_graph.assets.target_duration_sec (product delivery intent) >
-	// recording_run_spec.timeline.target_duration_sec (capture plan) > fallback (60s)
+	// The edit plan must stay consistent with what the renderer can produce
+	// from THIS run's captured material (the quality gate compares rendered
+	// duration against the effective edit-plan timeline). Product-level
+	// delivery targets (workflow_graph.assets.target_duration_sec) may exceed
+	// available footage; the requirement satisfaction report records them as
+	// adopted delivery intent while the actual render keeps capture fidelity.
+	// Editor pacing toward the product target stays in mainline scope.
 	durationSec := source.RecordingRunSpec.Timeline.TargetDurationSec
-	if graphAssets := source.WorkflowGraph.Assets; graphAssets != nil && graphAssets.TargetDurationSec > 0 {
-		durationSec = graphAssets.TargetDurationSec
-	}
-	if durationSec == 0 {
-		durationSec = 60 // default product demo target
-	}
 	request := RenderRequest{
 		Graph:                  source.WorkflowGraph,
 		OutputDir:              outputDir,

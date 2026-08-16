@@ -292,6 +292,12 @@ func (s *Service) runProtocolAcceptanceScenario(ctx context.Context, pkg model.C
 	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
 		return protocolAcceptanceRun{}, err
 	}
+	// Scenario fixtures mutate the Server-owned base package after its digest
+	// was baked; refresh the approval digests exactly like the production
+	// approval path so exchange intake compares a self-consistent subject.
+	if _, err := refreshPackageApprovalDigests(&pkg); err != nil {
+		return protocolAcceptanceRun{}, err
+	}
 	now := timeNowUTC()
 	envelope, err := envelopeForClientExecutionPackage(pkg, now)
 	if err != nil {
