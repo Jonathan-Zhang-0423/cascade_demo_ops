@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"cascade-demoops/backend/internal/finalfilm"
+	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -30,6 +31,26 @@ type FinalFilmDirectorPlanRequest struct {
 type FinalFilmGenerateRequest struct {
 	ExpectedRevision  int    `json:"expected_revision"`
 	PreferredProvider string `json:"preferred_provider,omitempty"`
+}
+
+type FinalFilmContentReviewRequest struct {
+	ExpectedRevision int                                      `json:"expected_revision"`
+	Decision         media.GeneratedShotContentReviewDecision `json:"decision"`
+}
+
+type FinalFilmSelectionRequest struct {
+	ExpectedRevision int                                  `json:"expected_revision"`
+	Decision         media.GeneratedShotSelectionDecision `json:"decision"`
+}
+
+type FinalFilmEditorApprovalRequest struct {
+	ExpectedRevision int                                       `json:"expected_revision"`
+	Decision         media.GeneratedShotEditorApprovalDecision `json:"decision"`
+}
+
+type FinalFilmApplyPatchRequest struct {
+	ExpectedRevision int    `json:"expected_revision"`
+	PatchID          string `json:"patch_id"`
 }
 
 type FinalFilmCancelRequest struct {
@@ -101,6 +122,34 @@ func (s *Service) RunFinalFilmGeneratedCandidates(ctx context.Context, jobID str
 		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
 	}
 	return s.finalFilm.RunGeneratedCandidates(ctx, jobID, request.ExpectedRevision, request.PreferredProvider)
+}
+
+func (s *Service) ReviewFinalFilmGeneratedContent(ctx context.Context, jobID string, request FinalFilmContentReviewRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.RecordGeneratedContentReview(ctx, jobID, request.ExpectedRevision, request.Decision)
+}
+
+func (s *Service) SelectFinalFilmGeneratedCandidate(ctx context.Context, jobID string, request FinalFilmSelectionRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.RecordGeneratedSelection(ctx, jobID, request.ExpectedRevision, request.Decision)
+}
+
+func (s *Service) ApproveFinalFilmGeneratedCandidate(ctx context.Context, jobID string, request FinalFilmEditorApprovalRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.RecordGeneratedEditorApproval(ctx, jobID, request.ExpectedRevision, request.Decision)
+}
+
+func (s *Service) ApplyFinalFilmGeneratedPatch(ctx context.Context, jobID string, request FinalFilmApplyPatchRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.ApplyGeneratedPatch(ctx, jobID, request.ExpectedRevision, request.PatchID)
 }
 
 func (s *Service) CancelFinalFilmJob(ctx context.Context, jobID string, request FinalFilmCancelRequest) (model.FinalFilmJob, error) {

@@ -25,6 +25,12 @@ type GeneratedTrackRecord struct {
 	Executions        []media.GeneratedShotProviderExecutionResult `json:"executions,omitempty"`
 	Candidates        []media.GeneratedShotCandidate               `json:"candidates,omitempty"`
 	StructuralReviews []media.GeneratedShotStructuralReview        `json:"structural_reviews,omitempty"`
+	ContentReviews    []media.GeneratedShotContentReview           `json:"content_reviews,omitempty"`
+	CandidateSets     []media.GeneratedShotCandidateSet            `json:"candidate_sets,omitempty"`
+	Selections        []media.GeneratedShotSelection               `json:"selections,omitempty"`
+	EditorApprovals   []media.GeneratedShotEditorApproval          `json:"editor_approvals,omitempty"`
+	EditorAssetRefs   []media.GeneratedShotEditorAssetRef          `json:"editor_asset_refs,omitempty"`
+	PatchProposals    []media.GeneratedShotEditPlanPatchProposal   `json:"patch_proposals,omitempty"`
 	StartedAt         time.Time                                    `json:"started_at,omitempty"`
 	UpdatedAt         time.Time                                    `json:"updated_at"`
 }

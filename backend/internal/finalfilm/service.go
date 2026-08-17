@@ -20,6 +20,7 @@ const finalFilmEventSchemaVersion = "demoops.final_film_event.v1"
 type Renderer interface {
 	Render(context.Context, executor.RenderRequest) (executor.RenderResult, error)
 	ValidateEditPlan(context.Context, executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error)
+	ProbeMedia(context.Context, executor.MediaProbeRequest) (executor.MediaProbeResult, error)
 }
 
 type ServiceOptions struct {

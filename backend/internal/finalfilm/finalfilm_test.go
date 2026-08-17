@@ -3,6 +3,7 @@ package finalfilm
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -163,6 +164,83 @@ func TestGenerationApprovalRejectsMissingDirectorPlan(t *testing.T) {
 	}
 }
 
+func TestGeneratedCandidateRequiresHumanReviewSelectionAndEditorApprovalBeforePatch(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	adapter := &fakeGeneratedShotProvider{root: t.TempDir()}
+	registry := media.NewGeneratedShotProviderRegistry()
+	if err := registry.Register(adapter); err != nil {
+		t.Fatal(err)
+	}
+	service.providers = registry
+	catalog, plan := finalFilmFixture()
+	intent, _ := model.PresentationGenerationIntentDefaults("intro_review", "intro", nil)
+	job, err := service.CreateJob(context.Background(), CreateJobRequest{
+		EditorSessionID: "editor_review", EditorRevision: 1, SourcePackageID: "package_review", Catalog: catalog, BaselinePlan: plan,
+		Intents: []model.PresentationGenerationIntent{intent}, RenderProfile: finalFilmProfile(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.RunBaseline(context.Background(), job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.SubmitDirectorPlan(context.Background(), job.JobID, job.Revision, finalFilmDirectorPlan(job, intent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.DecideGeneration(context.Background(), job.JobID, job.Revision, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.RunGeneratedCandidates(context.Background(), job.JobID, job.Revision, media.GeneratedShotProviderMiniMaxH3)
+	if err != nil || job.State != model.FinalFilmJobAwaitingContentReview {
+		t.Fatalf("candidate generation did not stop at content review: job=%+v err=%v", job, err)
+	}
+	record, _ := decodeGeneratedTrack(job.GeneratedTrack)
+	candidate := record.Candidates[0]
+	structural := record.StructuralReviews[0]
+	job, err = service.RecordGeneratedContentReview(context.Background(), job.JobID, job.Revision, media.GeneratedShotContentReviewDecision{
+		ReviewID: "content_review_1", StructuralReviewID: structural.ReviewID, CandidateID: candidate.CandidateID, IntentID: intent.IntentID,
+		ReviewerID: "reviewer_1", ReviewerKind: "human", ReviewedAt: time.Unix(300, 0), Decision: media.GeneratedShotContentDecisionApprove,
+		Assertions:   media.GeneratedShotContentSafetyAssertions{PurposeMatchesIntent: true, NoCapturedUIReplacement: true, NoBusinessFactClaims: true, NoUnverifiedTextOrNumbers: true, NoReferenceFactMutation: true},
+		EvidenceRefs: []string{"review://content/1"}, Reason: "presentation-only content verified",
+	})
+	if err != nil || job.State != model.FinalFilmJobAwaitingCandidateSelection {
+		t.Fatalf("content review did not stop at selection: job=%+v err=%v", job, err)
+	}
+	record, _ = decodeGeneratedTrack(job.GeneratedTrack)
+	set := record.CandidateSets[0]
+	job, err = service.RecordGeneratedSelection(context.Background(), job.JobID, job.Revision, media.GeneratedShotSelectionDecision{
+		SelectionID: "selection_1", SetID: set.SetID, CandidateID: candidate.CandidateID,
+		SelectorID: "selector_1", SelectorKind: "human", SelectedAt: time.Unix(301, 0), EvidenceRefs: []string{"review://selection/1"}, Reason: "selected after visual comparison",
+	})
+	if err != nil || job.State != model.FinalFilmJobAwaitingEditorApproval {
+		t.Fatalf("selection did not stop at editor approval: job=%+v err=%v", job, err)
+	}
+	record, _ = decodeGeneratedTrack(job.GeneratedTrack)
+	selection := record.Selections[0]
+	job, err = service.RecordGeneratedEditorApproval(context.Background(), job.JobID, job.Revision, media.GeneratedShotEditorApprovalDecision{
+		ApprovalID: "editor_approval_1", SelectionID: selection.SelectionID, CandidateID: candidate.CandidateID,
+		ApproverID: "editor_1", ApproverKind: "human", ApprovedAt: time.Unix(302, 0), TargetPlanID: plan.PlanID,
+		ExpectedPlanRevision: 1, Placement: "before_first_required_step", EvidenceRefs: []string{"review://editor/1"}, Reason: "approved as non-factual intro",
+	})
+	if err != nil || job.State != model.FinalFilmJobAwaitingPatchApply {
+		t.Fatalf("editor approval did not create a pending patch: job=%+v err=%v", job, err)
+	}
+	record, _ = decodeGeneratedTrack(job.GeneratedTrack)
+	if len(record.PatchProposals) != 1 || record.PatchProposals[0].AutoApply || record.PatchProposals[0].IncludeInDemo || !record.PatchProposals[0].RequiresExplicitOptIn {
+		t.Fatalf("unsafe generated patch proposal: %+v", record.PatchProposals)
+	}
+	job, err = service.ApplyGeneratedPatch(context.Background(), job.JobID, job.Revision, record.PatchProposals[0].PatchID)
+	if err != nil || job.State != model.FinalFilmJobCompleted || job.FinalPlan == nil || job.FinalCatalog == nil || job.AppliedGeneratedPatchID == "" {
+		t.Fatalf("explicit generated patch was not rendered: job=%+v err=%v", job, err)
+	}
+	if service.renderer.(*fakeFinalFilmRenderer).renderCalls != 2 || job.FinalPlan.Shots[0].SourceStepID != "" || job.FinalPlan.Shots[1].SourceStepID != "step_1" || job.FinalPlan.Shots[2].SourceStepID != "step_2" {
+		t.Fatalf("final plan did not preserve the locked fact track: %+v", job.FinalPlan.Shots)
+	}
+}
+
 func TestFinalFilmInvalidConstraintDoesNotPersistJob(t *testing.T) {
 	root := t.TempDir()
 	renderer := &fakeFinalFilmRenderer{validation: model.DemoEditPlanValidationReport{Valid: true}}
@@ -210,15 +288,60 @@ type fakeFinalFilmRenderer struct {
 	renderCalls   int
 }
 
+type fakeGeneratedShotProvider struct{ root string }
+
+func (f *fakeGeneratedShotProvider) Descriptor() media.GeneratedShotProviderDescriptor {
+	return media.GeneratedShotProviderDescriptor{Provider: media.GeneratedShotProviderMiniMaxH3, Model: media.MiniMaxH3Model, ProfileVersion: f.Profile().ProfileVersion, Enabled: true}
+}
+
+func (f *fakeGeneratedShotProvider) Profile() media.GeneratedShotCapabilityProfile {
+	return (media.MiniMaxH3GeneratedShotCompiler{}).Profile()
+}
+
+func (f *fakeGeneratedShotProvider) Preflight(_ context.Context, intent media.GeneratedShotIntent) media.GeneratedShotProviderPreflight {
+	report := media.PreflightGeneratedShotIntent(intent, []media.GeneratedShotProviderCompiler{media.MiniMaxH3GeneratedShotCompiler{}}, []media.GeneratedShotProviderAvailability{{Provider: media.GeneratedShotProviderMiniMaxH3, Enabled: true}})
+	return report.Providers[0]
+}
+
+func (f *fakeGeneratedShotProvider) Execute(_ context.Context, request media.GeneratedShotProviderExecutionRequest) (media.GeneratedShotProviderExecutionResult, error) {
+	candidate := media.GeneratedShotCandidate{
+		SchemaVersion: media.GeneratedShotCandidateSchemaVersion, CandidateID: "candidate_" + request.Intent.IntentID,
+		IntentID: request.Intent.IntentID, Provider: media.GeneratedShotProviderMiniMaxH3, ProviderTaskID: "task_1",
+		Status: media.GeneratedShotCandidateReadyForReview, FailurePolicy: media.GeneratedShotFailureContinue,
+		NonAuthoritative: true, PresentationOnly: true, RequiresExplicitReview: true,
+		OriginalArtifact:   media.GeneratedShotCandidateArtifact{Role: "original", Path: filepath.Join(f.root, "original.mp4"), MimeType: "video/mp4", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SizeBytes: 100, Probe: media.GeneratedShotMediaProbe{DurationSec: 5}},
+		NormalizedArtifact: media.GeneratedShotCandidateArtifact{Role: "normalized", Path: filepath.Join(f.root, "normalized.mp4"), MimeType: "video/mp4", SHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", SizeBytes: 90, NormalizationStatus: "ok", NormalizationProfile: media.GeneratedShotNormalizationProfile, Probe: media.GeneratedShotMediaProbe{Format: "mp4", VideoCodec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, FPS: 30, CFR: true, DurationSec: 5}},
+	}
+	review := media.ReviewGeneratedShotCandidateStructure("structural_1", request.Intent, candidate)
+	return media.GeneratedShotProviderExecutionResult{SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: media.GeneratedShotProviderMiniMaxH3, Model: media.MiniMaxH3Model, IntentID: request.Intent.IntentID, Status: media.GeneratedShotCandidateReadyForReview, ProviderTaskID: "task_1", Candidate: &candidate, StructuralReview: &review, FailurePolicy: media.GeneratedShotFailureContinue}, nil
+}
+
+func (f *fakeGeneratedShotProvider) Cancel(context.Context, string) error { return nil }
+
 func (f *fakeFinalFilmRenderer) ValidateEditPlan(_ context.Context, _ executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error) {
 	f.validateCalls++
 	return f.validation, f.validationErr
 }
 
+func (f *fakeFinalFilmRenderer) ProbeMedia(_ context.Context, request executor.MediaProbeRequest) (executor.MediaProbeResult, error) {
+	return executor.MediaProbeResult{
+		Path: request.Path, SizeBytes: 1000, SHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		MimeType: "video/mp4", Format: "mp4", DurationMS: 9000, VideoCodec: "h264", Width: 1920, Height: 1080,
+		FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true,
+	}, nil
+}
+
 func (f *fakeFinalFilmRenderer) Render(_ context.Context, request executor.RenderRequest) (executor.RenderResult, error) {
 	f.renderCalls++
-	if request.ModelExecution == nil || request.ModelExecution.Invoked || request.ModelExecution.ProviderOutputAdopted {
-		return executor.RenderResult{}, errors.New("baseline render model audit is unsafe")
+	if request.ModelExecution == nil {
+		return executor.RenderResult{}, errors.New("render model audit is missing")
+	}
+	if request.ModelExecution.PlanSource == "validated_fact_track_baseline" {
+		if request.ModelExecution.Invoked || request.ModelExecution.ProviderOutputAdopted {
+			return executor.RenderResult{}, errors.New("baseline render model audit is unsafe")
+		}
+	} else if !request.ModelExecution.Invoked || !request.ModelExecution.ProviderOutputAdopted || !request.ModelExecution.PatchApplied {
+		return executor.RenderResult{}, errors.New("generated final render model audit is incomplete")
 	}
 	return f.renderResult, f.renderErr
 }
@@ -229,6 +352,9 @@ func newFinalFilmTestService(t *testing.T) (*Service, *fakeFinalFilmRenderer) {
 	renderer := &fakeFinalFilmRenderer{
 		validation:   model.DemoEditPlanValidationReport{SchemaVersion: model.DemoEditPlanValidationSchemaVersion, Valid: true},
 		renderResult: executor.RenderResult{VideoPath: filepath.Join(root, "baseline.mp4"), RenderManifestPath: filepath.Join(root, "manifest.json")},
+	}
+	if err := os.WriteFile(renderer.renderResult.RenderManifestPath, []byte(`{"compositor":{"quality_status":"ok","ffmpeg_available":true,"fallback_reason":"","planned_operations":["trim"],"applied_operations":["trim"],"skipped_operations":[]},"requirement_satisfaction_report":{"status":"satisfied"}}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	sequence := 0
 	registry := media.NewGeneratedShotProviderRegistry()

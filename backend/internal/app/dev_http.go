@@ -230,6 +230,38 @@ func (s *DevHTTPServer) handleFinalFilmJobRoute(w http.ResponseWriter, r *http.R
 		}
 		job, err := s.service.RunFinalFilmGeneratedCandidates(r.Context(), jobID, request)
 		writeBridgeValue(w, job, err)
+	case r.Method == http.MethodPost && suffix == "/content-review":
+		var request FinalFilmContentReviewRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		job, err := s.service.ReviewFinalFilmGeneratedContent(r.Context(), jobID, request)
+		writeBridgeValue(w, job, err)
+	case r.Method == http.MethodPost && suffix == "/selection":
+		var request FinalFilmSelectionRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		job, err := s.service.SelectFinalFilmGeneratedCandidate(r.Context(), jobID, request)
+		writeBridgeValue(w, job, err)
+	case r.Method == http.MethodPost && suffix == "/editor-approval":
+		var request FinalFilmEditorApprovalRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		job, err := s.service.ApproveFinalFilmGeneratedCandidate(r.Context(), jobID, request)
+		writeBridgeValue(w, job, err)
+	case r.Method == http.MethodPost && suffix == "/apply-patch":
+		var request FinalFilmApplyPatchRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		job, err := s.service.ApplyFinalFilmGeneratedPatch(r.Context(), jobID, request)
+		writeBridgeValue(w, job, err)
 	case r.Method == http.MethodPost && suffix == "/cancel":
 		var request FinalFilmCancelRequest
 		if err := decodeJSON(r, &request); err != nil {

@@ -417,3 +417,16 @@ type Store interface {
 - 生成失败或无可选 Provider 时，状态收敛为 `completed_without_generated_track`，最终输出仍绑定先前完成的确定性录屏基线。
 
 后续尚需：候选人工内容审核、A/B 选择、Editor approval、补丁显式应用、最终合成与输出验收；Seedance 2.5/Aleph Adapter；前端控制面板。
+
+### 2026-08-17：P0 第三批审核与合成闭环完成
+
+已落地：
+
+- App API 串联人工内容审核、候选选择、独立 Editor approval；每一层均复用既有 provider-neutral media 合同，并持久化进 `GeneratedTrackRecord`；
+- Editor approval 只生成 `GeneratedShotEditPlanPatchProposal`，不直接修改时间线；`POST /apply-patch` 是独立显式 opt-in；
+- apply 阶段构造隔离的 final catalog/plan，生成候选不得绑定 `source_step_id`，并逐镜头验证 baseline 的事实素材、步骤与时间范围没有变化；
+- Renderer 再次验证最终计划后执行 FFmpeg 确定性合成；Render audit 明确记录 Provider 输出已采用、补丁 ID 与新增镜头 ID；
+- 最终输出必须通过 ffprobe 完整性、分辨率/FPS、MP4/H.264/yuv420p、FFmpeg 无 fallback、无 skipped operation、需求满足报告等验收，否则自动回退 baseline；
+- 多候选审核/选择/批准可以持久化推进；当前 renderer revision 对同一作业的多补丁原子应用会明确拒绝，不会静默遗漏镜头。
+
+后续尚需：多补丁原子应用、黑帧/冻结帧/响度/OCR 深度质量门禁；Seedance 2.5/Aleph Adapter；前端控制面板；真实 workflow 端到端成片验收。
