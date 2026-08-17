@@ -56,7 +56,7 @@ func TestReplayManifestStageCarriesReplayableTargetAndEvidenceMetadata(t *testin
 	m := validReplayManifest()
 	m.Stages = []ReplayManifestStage{{
 		NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed",
-		TargetURL: "https://app.example/projects/{project_id}",
+		TargetURL:         "https://app.example/projects/{project_id}",
 		ActionEvidenceIDs: []string{"e-action"}, OutcomeEvidenceIDs: []string{"e-outcome"},
 		RecordingStartOffsetMS: 100, RecordingEndOffsetMS: 900,
 		Viewport: &BrowserGeometryViewport{Width: 1280, Height: 720, DPR: 1},
@@ -74,6 +74,17 @@ func TestReplayManifestStageRejectsInvalidRecordingInterval(t *testing.T) {
 	m.Stages = []ReplayManifestStage{{NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed", RecordingStartOffsetMS: 900, RecordingEndOffsetMS: 100}}
 	if err := m.Validate(); err == nil {
 		t.Fatal("replay manifest must reject a reversed recording interval")
+	}
+}
+
+func TestReplayManifestRejectsIncompleteSelectorRepairAudit(t *testing.T) {
+	m := validReplayManifest()
+	m.Stages = []ReplayManifestStage{{
+		NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed",
+		SelectorRepairs: []ReplayManifestSelectorRepair{{OriginalSelector: "[data-testid=old]", CandidateSelector: "[data-testid=new]"}},
+	}}
+	if err := m.Validate(); err == nil {
+		t.Fatal("selector repair without evidence and match count must fail")
 	}
 }
 

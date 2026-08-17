@@ -112,6 +112,7 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 			stageByNode[stage.NodeID] = stage
 		}
 	}
+	traceArtifactIDs := replayTraceArtifactIDs(result)
 	decisionByNode := map[string]model.ValidationDecision{}
 	for _, report := range result.ValidationReports {
 		if report.NodeID != "" {
@@ -134,9 +135,21 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 			for _, ref := range approved.Interaction.EvidenceRefs {
 				if ref.ID != "" {
 					stage.ActionEvidenceIDs = appendUniqueReplayString(stage.ActionEvidenceIDs, ref.ID)
+					stage.ActionDefinitionEvidenceIDs = appendUniqueReplayString(stage.ActionDefinitionEvidenceIDs, ref.ID)
+				}
+			}
+			for _, ref := range approved.EvidenceRefs {
+				if ref.ID != "" {
+					stage.ActionDefinitionEvidenceIDs = appendUniqueReplayString(stage.ActionDefinitionEvidenceIDs, ref.ID)
+				}
+			}
+			for _, ref := range approved.Interaction.Target.EvidenceRefs {
+				if ref.ID != "" {
+					stage.ActionDefinitionEvidenceIDs = appendUniqueReplayString(stage.ActionDefinitionEvidenceIDs, ref.ID)
 				}
 			}
 		}
+		stage.TraceArtifactIDs = append(stage.TraceArtifactIDs, traceArtifactIDs...)
 		if step.Error != nil {
 			stage.FailureCode = step.Error.Code
 		}
@@ -167,6 +180,9 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 					}
 				}
 			}
+			if ev.EventID != "" {
+				stage.StageEventIDs = appendUniqueReplayString(stage.StageEventIDs, ev.EventID)
+			}
 			for _, ref := range ev.EvidenceRefs {
 				if ref.ArtifactID != "" {
 					stage.EvidenceArtifactIDs = appendUniqueReplayString(stage.EvidenceArtifactIDs, ref.ArtifactID)
@@ -177,8 +193,17 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 				if ref.ID != "" && (ev.EventType == model.StageExecutionEventActionStarted || ev.EventType == model.StageExecutionEventActionCompleted) {
 					stage.ActionEvidenceIDs = appendUniqueReplayString(stage.ActionEvidenceIDs, ref.ID)
 				}
+				if ref.ArtifactID != "" && ref.Kind == model.EvidenceKindWebScreenshot {
+					if ev.EventType == model.StageExecutionEventActionStarted || ev.EventType == model.StageExecutionEventTargetResolved || ev.EventType == model.StageExecutionEventObservationCollected {
+						stage.BeforeScreenshotArtifactIDs = appendUniqueReplayString(stage.BeforeScreenshotArtifactIDs, ref.ArtifactID)
+					}
+					if ev.EventType == model.StageExecutionEventActionCompleted || ev.EventType == model.StageExecutionEventOutcomeObserved || ev.EventType == model.StageExecutionEventStageCompleted {
+						stage.AfterScreenshotArtifactIDs = appendUniqueReplayString(stage.AfterScreenshotArtifactIDs, ref.ArtifactID)
+					}
+				}
 			}
 		}
+		stage.SelectorRepairs = replaySelectorRepairs(result, step.NodeID, input.Events)
 		// Carry the most restrictive stage decision and the first structured
 		// responsibility domain explaining a failed check.
 		stageReports := []model.ValidationReport{}
@@ -279,6 +304,62 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 	}
 
 	return m, nil
+}
+
+func replayTraceArtifactIDs(result model.RecordingResultPackage) []string {
+	var ids []string
+	if result.ExecutionTrace == nil {
+		return ids
+	}
+	for _, artifact := range result.ExecutionTrace.Artifacts {
+		if artifact.ID != "" && (artifact.Kind == "browser_trace" || artifact.Kind == "execution_trace" || artifact.Kind == "trace") {
+			ids = appendUniqueReplayString(ids, artifact.ID)
+		}
+	}
+	return ids
+}
+
+func replaySelectorRepairs(result model.RecordingResultPackage, nodeID string, events []model.StageExecutionEvent) []model.ReplayManifestSelectorRepair {
+	var repairs []model.ReplayManifestSelectorRepair
+	for _, entry := range result.PatchLedger {
+		if entry.NodeID != nodeID || !entry.Applied || !strings.Contains(strings.ToLower(entry.Field), "selector") {
+			continue
+		}
+		repair := model.ReplayManifestSelectorRepair{OriginalSelector: entry.Before, CandidateSelector: entry.After}
+		for _, ref := range entry.EvidenceRefs {
+			if ref.ID != "" {
+				repair.EvidenceIDs = appendUniqueReplayString(repair.EvidenceIDs, ref.ID)
+			}
+		}
+		for _, event := range events {
+			if event.NodeID != nodeID {
+				continue
+			}
+			if event.Observation != nil {
+				for _, attempt := range event.Observation.TargetResolutionAttempts {
+					if attempt.CandidateCount > repair.CandidateCount {
+						repair.CandidateCount = attempt.CandidateCount
+					}
+				}
+			}
+			for _, ref := range event.EvidenceRefs {
+				if ref.ID == "" {
+					continue
+				}
+				if event.EventType == model.StageExecutionEventActionStarted || event.EventType == model.StageExecutionEventTargetResolved {
+					repair.BeforeEvidenceIDs = appendUniqueReplayString(repair.BeforeEvidenceIDs, ref.ID)
+				}
+				if event.EventType == model.StageExecutionEventActionCompleted || event.EventType == model.StageExecutionEventOutcomeObserved {
+					repair.AfterEvidenceIDs = appendUniqueReplayString(repair.AfterEvidenceIDs, ref.ID)
+				}
+			}
+		}
+		if repair.CandidateCount == 0 {
+			repair.CandidateCount = 1
+		}
+		repairs = append(repairs, repair)
+	}
+	return repairs
 }
 
 func appendUniqueReplayString(values []string, value string) []string {

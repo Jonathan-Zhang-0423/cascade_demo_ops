@@ -176,14 +176,17 @@ func TestBuildReplayManifestBindsStageEventsAndTraceArtifacts(t *testing.T) {
 	pkg := model.ClientExecutionPackage{PackageID: "pkg_build", ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
 		ScriptManifest:  model.ExecutableScriptManifest{Runtime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
 		Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bundle_build", PlanHashSHA256: "plan_build", BrowserAgentContractHashSHA256: "policy_build"},
+		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{ID: "stage_build", NodeID: "node_build", Order: 1,
+			Interaction:  model.BrowserAgentInteraction{Kind: model.GraphActionClick, EvidenceRefs: []model.EvidenceRef{{ID: "approved_build_action"}}},
+			EvidenceRefs: []model.EvidenceRef{{ID: "approved_build_stage"}},
+		}}},
 	}}
 	manifest, err := BuildReplayManifest(BuildReplayManifestInput{
 		Result: result, Package: pkg, RunID: "run_build", EventDir: t.TempDir(), CreatedAt: now,
-		Events: []model.StageExecutionEvent{{
-			NodeID: "node_build", StageID: "stage_build",
-			Observation:  &model.RuntimeObservation{URL: "https://example.com/project/1", Title: "Build complete"},
-			EvidenceRefs: []model.EvidenceRef{{ID: "evidence_build", ArtifactID: "shot_build"}},
-		}},
+		Events: []model.StageExecutionEvent{
+			{EventID: "event_before", NodeID: "node_build", StageID: "stage_build", EventType: model.StageExecutionEventActionStarted, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_before", Kind: model.EvidenceKindWebScreenshot, ArtifactID: "shot_build"}}},
+			{EventID: "event_after", NodeID: "node_build", StageID: "stage_build", EventType: model.StageExecutionEventOutcomeObserved, Observation: &model.RuntimeObservation{URL: "https://example.com/project/1", Title: "Build complete"}, EvidenceRefs: []model.EvidenceRef{{ID: "evidence_build", Kind: model.EvidenceKindWebScreenshot, ArtifactID: "shot_build"}}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,6 +196,10 @@ func TestBuildReplayManifestBindsStageEventsAndTraceArtifacts(t *testing.T) {
 	}
 	if len(manifest.Stages[0].EvidenceArtifactIDs) != 1 || manifest.Stages[0].EvidenceArtifactIDs[0] != "shot_build" {
 		t.Fatalf("manifest evidence IDs are not deduplicated and bound: %+v", manifest.Stages[0].EvidenceArtifactIDs)
+	}
+	stage := manifest.Stages[0]
+	if len(stage.ActionDefinitionEvidenceIDs) != 2 || len(stage.BeforeScreenshotArtifactIDs) != 1 || len(stage.AfterScreenshotArtifactIDs) != 1 || len(stage.StageEventIDs) != 2 || len(stage.TraceArtifactIDs) != 1 {
+		t.Fatalf("manifest did not retain structured stage evidence: %+v", stage)
 	}
 	if manifest.BrowserTraceURI != "file:///trace.zip" || manifest.ExecutionBundleRuntime != model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
 		t.Fatalf("manifest runtime or trace provenance is missing: %+v", manifest)

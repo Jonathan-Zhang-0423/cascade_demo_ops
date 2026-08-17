@@ -65,23 +65,40 @@ type ReplayManifest struct {
 
 // ReplayManifestStage is a lightweight summary of a single stage outcome.
 type ReplayManifestStage struct {
-	NodeID                 string                   `json:"node_id"`
-	StageID                string                   `json:"stage_id"`
-	Order                  int                      `json:"order"`
-	Status                 string                   `json:"status"` // "passed" | "failed" | "not_started"
-	Waived                 bool                     `json:"waived,omitempty"`
-	ValidationDecision     ValidationDecision       `json:"validation_decision,omitempty"`
-	ObservedURL            string                   `json:"observed_url,omitempty"`
-	ObservedTitle          string                   `json:"observed_title,omitempty"`
-	TargetURL              string                   `json:"target_url,omitempty"`
-	FailureCode            string                   `json:"failure_code,omitempty"`
-	FailureDomain          ValidationCheckDomain    `json:"failure_domain,omitempty"`
-	EvidenceArtifactIDs    []string                 `json:"evidence_artifact_ids,omitempty"`
-	ActionEvidenceIDs      []string                 `json:"action_evidence_ids,omitempty"`
-	OutcomeEvidenceIDs     []string                 `json:"outcome_evidence_ids,omitempty"`
-	RecordingStartOffsetMS int64                    `json:"recording_start_offset_ms,omitempty"`
-	RecordingEndOffsetMS   int64                    `json:"recording_end_offset_ms,omitempty"`
-	Viewport               *BrowserGeometryViewport `json:"viewport,omitempty"`
+	NodeID                      string                         `json:"node_id"`
+	StageID                     string                         `json:"stage_id"`
+	Order                       int                            `json:"order"`
+	Status                      string                         `json:"status"` // "passed" | "failed" | "not_started"
+	Waived                      bool                           `json:"waived,omitempty"`
+	ValidationDecision          ValidationDecision             `json:"validation_decision,omitempty"`
+	ObservedURL                 string                         `json:"observed_url,omitempty"`
+	ObservedTitle               string                         `json:"observed_title,omitempty"`
+	TargetURL                   string                         `json:"target_url,omitempty"`
+	FailureCode                 string                         `json:"failure_code,omitempty"`
+	FailureDomain               ValidationCheckDomain          `json:"failure_domain,omitempty"`
+	EvidenceArtifactIDs         []string                       `json:"evidence_artifact_ids,omitempty"`
+	ActionEvidenceIDs           []string                       `json:"action_evidence_ids,omitempty"`
+	OutcomeEvidenceIDs          []string                       `json:"outcome_evidence_ids,omitempty"`
+	RecordingStartOffsetMS      int64                          `json:"recording_start_offset_ms,omitempty"`
+	RecordingEndOffsetMS        int64                          `json:"recording_end_offset_ms,omitempty"`
+	Viewport                    *BrowserGeometryViewport       `json:"viewport,omitempty"`
+	ActionDefinitionEvidenceIDs []string                       `json:"action_definition_evidence_ids,omitempty"`
+	BeforeScreenshotArtifactIDs []string                       `json:"before_screenshot_artifact_ids,omitempty"`
+	AfterScreenshotArtifactIDs  []string                       `json:"after_screenshot_artifact_ids,omitempty"`
+	StageEventIDs               []string                       `json:"stage_event_ids,omitempty"`
+	TraceArtifactIDs            []string                       `json:"trace_artifact_ids,omitempty"`
+	SelectorRepairs             []ReplayManifestSelectorRepair `json:"selector_repairs,omitempty"`
+}
+
+// ReplayManifestSelectorRepair records an App-approved selector alternative
+// used by the Server. It contains only approved selectors and redacted counts.
+type ReplayManifestSelectorRepair struct {
+	OriginalSelector  string   `json:"original_selector"`
+	CandidateSelector string   `json:"candidate_selector"`
+	EvidenceIDs       []string `json:"evidence_ids,omitempty"`
+	CandidateCount    int      `json:"candidate_count"`
+	BeforeEvidenceIDs []string `json:"before_evidence_ids,omitempty"`
+	AfterEvidenceIDs  []string `json:"after_evidence_ids,omitempty"`
 }
 
 // ReplayManifestValidationRef points to one validation report within the
@@ -130,6 +147,11 @@ func (m ReplayManifest) Validate() error {
 		}
 		if err := validateRuntimeContractText(stage.TargetURL, stage.ObservedURL, stage.ObservedTitle); err != nil {
 			return err
+		}
+		for _, repair := range stage.SelectorRepairs {
+			if repair.OriginalSelector == "" || repair.CandidateSelector == "" || repair.CandidateCount < 1 || len(repair.EvidenceIDs) == 0 || len(repair.BeforeEvidenceIDs) == 0 || len(repair.AfterEvidenceIDs) == 0 {
+				return errors.New("replay manifest selector repair is missing approved selector audit evidence")
+			}
 		}
 		if index > 0 && stage.Order <= m.Stages[index-1].Order {
 			return errors.New("replay manifest stages must be ordered")

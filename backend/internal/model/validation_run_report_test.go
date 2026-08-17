@@ -74,6 +74,42 @@ func TestRecordingResultValidatesAttachedValidationRunReport(t *testing.T) {
 	}
 }
 
+func TestValidationRunReportFormalStagesRequireCompleteEvidenceBundle(t *testing.T) {
+	report := validValidationRunReport()
+	report.FormalAppServerSuccess = true
+	report.AppGenerated = true
+	report.TransportAuthenticated = true
+	report.FormalExchange = true
+	report.Stages = []ValidationRunStageSummary{{NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed"}}
+	if err := report.Validate(); err == nil {
+		t.Fatal("formal stage without action, screenshots, event and trace evidence must fail")
+	}
+	report.Stages[0].ActionDefinitionEvidenceIDs = []string{"approved-action"}
+	report.Stages[0].BeforeScreenshotArtifactIDs = []string{"shot-before"}
+	report.Stages[0].AfterScreenshotArtifactIDs = []string{"shot-after"}
+	report.Stages[0].StageEventIDs = []string{"event-1"}
+	report.Stages[0].TraceArtifactIDs = []string{"trace-1"}
+	if err := report.Validate(); err != nil {
+		t.Fatalf("complete formal stage evidence bundle rejected: %v", err)
+	}
+}
+
+func TestValidationFailureCategoryForEverySupportedDomain(t *testing.T) {
+	cases := map[ValidationCheckDomain]ValidationFailureCategory{
+		ValidationCheckDomainApp:               ValidationFailureCategoryAppPackageContract,
+		ValidationCheckDomainServer:            ValidationFailureCategoryServerExecution,
+		ValidationCheckDomainBrowserRuntime:    ValidationFailureCategoryBrowserRuntime,
+		ValidationCheckDomainMediaDelivery:     ValidationFailureCategoryMediaEvidence,
+		ValidationCheckDomainProviderCandidate: ValidationFailureCategoryProviderCandidate,
+		ValidationCheckDomainEnvironment:       ValidationFailureCategoryEnvironment,
+	}
+	for domain, want := range cases {
+		if got := ValidationFailureCategoryForDomain(domain); got != want {
+			t.Fatalf("domain %q: want %q, got %q", domain, want, got)
+		}
+	}
+}
+
 func validValidationRunReport() ValidationRunReport {
 	return ValidationRunReport{
 		SchemaVersion: ValidationRunReportSchemaVersion,

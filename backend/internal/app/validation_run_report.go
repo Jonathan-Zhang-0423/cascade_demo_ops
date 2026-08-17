@@ -76,6 +76,20 @@ func BuildValidationRunReport(result model.RecordingResultPackage, pkg model.Cli
 
 	for index, step := range result.StepResults {
 		stage := model.ValidationRunStageSummary{NodeID: step.NodeID, Order: index + 1, Status: step.Status}
+		for _, manifestStage := range manifest.Stages {
+			if manifestStage.NodeID != step.NodeID {
+				continue
+			}
+			stage.StageID = manifestStage.StageID
+			stage.Order = manifestStage.Order
+			stage.ActionDefinitionEvidenceIDs = append([]string{}, manifestStage.ActionDefinitionEvidenceIDs...)
+			stage.BeforeScreenshotArtifactIDs = append([]string{}, manifestStage.BeforeScreenshotArtifactIDs...)
+			stage.AfterScreenshotArtifactIDs = append([]string{}, manifestStage.AfterScreenshotArtifactIDs...)
+			stage.StageEventIDs = append([]string{}, manifestStage.StageEventIDs...)
+			stage.TraceArtifactIDs = append([]string{}, manifestStage.TraceArtifactIDs...)
+			stage.SelectorRepairs = append([]model.ReplayManifestSelectorRepair{}, manifestStage.SelectorRepairs...)
+			break
+		}
 		for _, phaseReport := range result.ValidationReports {
 			if phaseReport.NodeID != step.NodeID && phaseReport.StageID != stage.StageID {
 				continue
@@ -137,13 +151,18 @@ func BuildValidationRunReport(result model.RecordingResultPackage, pkg model.Cli
 				ID: check.ID, Code: check.Code, Category: model.ValidationFailureCategoryForDomain(check.ResponsibilityDomain),
 				Domain: check.ResponsibilityDomain, Severity: check.Severity, Passed: check.Passed,
 				NodeID: firstNonEmpty(check.NodeID, phaseReport.NodeID), StageID: firstNonEmpty(check.StageID, phaseReport.StageID),
-				ArtifactID: firstEvidenceArtifactID(findingEvidence), Summary: check.Summary,
-				EvidenceRefs: findingEvidence, RecommendedRepair: firstNonEmpty(check.NextStep, check.Suggestion),
+				ArtifactID: firstEvidenceArtifactID(findingEvidence), Summary: firstNonEmpty(check.Summary, check.Impact, check.Code),
+				EvidenceRefs: findingEvidence, RecommendedRepair: firstNonEmpty(check.NextStep, check.Suggestion, "Inspect the referenced evidence and correct the responsible contract or runtime condition."),
 				ReproducibleWhen: append([]string{}, report.ReproducibilityConditions...),
+			}
+			for _, ref := range findingEvidence {
+				if !containsValidationRunEvidence(report.EvidenceRefs, ref) {
+					report.EvidenceRefs = append(report.EvidenceRefs, ref)
+				}
 			}
 			if !check.Passed || check.Severity == model.FindingSeverityWarning {
 				report.Findings = append(report.Findings, finding)
-				feedback := model.ValidationFeedback{Code: check.Code, Summary: firstNonEmpty(check.Impact, check.Summary), NextStep: firstNonEmpty(check.NextStep, check.Suggestion), EvidenceRefs: findingEvidence}
+				feedback := model.ValidationFeedback{Code: check.Code, Summary: firstNonEmpty(check.Impact, check.Summary, check.Code), NextStep: firstNonEmpty(check.NextStep, check.Suggestion, finding.RecommendedRepair), EvidenceRefs: findingEvidence}
 				if check.ResponsibilityDomain == model.ValidationCheckDomainApp {
 					report.AppFeedback = append(report.AppFeedback, feedback)
 				} else {
@@ -156,6 +175,18 @@ func BuildValidationRunReport(result model.RecordingResultPackage, pkg model.Cli
 		return model.ValidationRunReport{}, err
 	}
 	return report, nil
+}
+
+func containsValidationRunEvidence(values []model.EvidenceRef, target model.EvidenceRef) bool {
+	for _, value := range values {
+		if value.ID != "" && value.ID == target.ID {
+			return true
+		}
+		if value.ID == "" && target.ID == "" && value.ArtifactID != "" && value.ArtifactID == target.ArtifactID {
+			return true
+		}
+	}
+	return false
 }
 
 func executableHashes(pkg model.ClientExecutionPackage) (string, string) {

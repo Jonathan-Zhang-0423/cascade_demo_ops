@@ -64,3 +64,47 @@ func TestBuildValidationRunReportRejectsHashMismatch(t *testing.T) {
 		t.Fatal("hash mismatch must be rejected")
 	}
 }
+
+func TestBuildValidationRunReportClassifiesRuntimeProviderAndEnvironmentFindings(t *testing.T) {
+	now := time.Now().UTC()
+	checks := []model.ValidationCheck{
+		{ID: "runtime", Kind: "runtime", Code: "session_expired", Passed: false, Severity: model.FindingSeverityBlocking, ResponsibilityDomain: model.ValidationCheckDomainBrowserRuntime, EvidenceRefs: []model.EvidenceRef{{ID: "session-shot", ArtifactID: "shot-session"}}},
+		{ID: "provider", Kind: "candidate", Code: "candidate_model_timeout", Passed: false, Severity: model.FindingSeverityWarning, ResponsibilityDomain: model.ValidationCheckDomainProviderCandidate, EvidenceRefs: []model.EvidenceRef{{ID: "provider-log"}}},
+		{ID: "environment", Kind: "environment", Code: "chromium_unavailable", Passed: false, Severity: model.FindingSeverityBlocking, ResponsibilityDomain: model.ValidationCheckDomainEnvironment, EvidenceRefs: []model.EvidenceRef{{ID: "environment-log"}}},
+	}
+	result := model.RecordingResultPackage{SourcePackageID: "pkg-1", Status: model.RecordingResultStatusFailed, ValidationReports: []model.ValidationReport{{
+		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "vr-1", RunID: "run-1", SourcePackageID: "pkg-1", SourceBundleHashSHA256: "bundle-1", PolicyHashSHA256: "policy-1",
+		Phase: model.ValidationPhaseRuntimeStage, NodeID: "node-1", StageID: "stage-1", Decision: model.ValidationDecisionStopAndReport,
+		EvidenceQuality: model.RuntimeObservationActualBrowser, CreatedAt: now, Checks: checks,
+	}}, StepResults: []model.StepResult{{NodeID: "node-1", Status: "failed"}}}
+	pkg := model.ClientExecutionPackage{PackageID: "pkg-1", ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bundle-1", BrowserAgentContractHashSHA256: "policy-1"}}}
+	manifest := model.ReplayManifest{ManifestID: "manifest-run-1", RunID: "run-1", PackageID: "pkg-1", BundleHashSHA256: "bundle-1", PolicyHashSHA256: "policy-1", Status: "failed", FinalDecision: model.ValidationDecisionStopAndReport, CreatedAt: now}
+	report, err := BuildValidationRunReport(result, pkg, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Findings) != 3 || report.Findings[0].Category != model.ValidationFailureCategoryBrowserRuntime || report.Findings[1].Category != model.ValidationFailureCategoryProviderCandidate || report.Findings[2].Category != model.ValidationFailureCategoryEnvironment {
+		t.Fatalf("failure categories were not preserved: %+v", report.Findings)
+	}
+	if report.Findings[0].RecommendedRepair == "" || len(report.EvidenceRefs) != 3 {
+		t.Fatalf("findings must receive a repair fallback and report-level evidence index: %+v", report)
+	}
+}
+
+func TestBuildValidationRunReportCopiesStructuredStageEvidenceFromReplayManifest(t *testing.T) {
+	now := time.Now().UTC()
+	result := model.RecordingResultPackage{SourcePackageID: "pkg-1", Status: model.RecordingResultStatusGenerated,
+		StepResults:       []model.StepResult{{NodeID: "node-1", Status: "passed"}},
+		ValidationReports: []model.ValidationReport{{SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "vr-1", RunID: "run-1", SourcePackageID: "pkg-1", SourceBundleHashSHA256: "bundle-1", PolicyHashSHA256: "policy-1", Phase: model.ValidationPhaseRuntimeStage, NodeID: "node-1", StageID: "stage-1", Decision: model.ValidationDecisionContinue, EvidenceQuality: model.RuntimeObservationActualBrowser, CreatedAt: now}}}
+	pkg := model.ClientExecutionPackage{PackageID: "pkg-1", ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bundle-1", BrowserAgentContractHashSHA256: "policy-1"}}}
+	manifest := model.ReplayManifest{ManifestID: "manifest-run-1", RunID: "run-1", PackageID: "pkg-1", BundleHashSHA256: "bundle-1", PolicyHashSHA256: "policy-1", Status: "success", FinalDecision: model.ValidationDecisionContinue, CreatedAt: now,
+		Stages: []model.ReplayManifestStage{{NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed", ActionDefinitionEvidenceIDs: []string{"approved-action"}, BeforeScreenshotArtifactIDs: []string{"shot-before"}, AfterScreenshotArtifactIDs: []string{"shot-after"}, StageEventIDs: []string{"event-1"}, TraceArtifactIDs: []string{"trace-1"}}}}
+	report, err := BuildValidationRunReport(result, pkg, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := report.Stages[0]
+	if len(stage.ActionDefinitionEvidenceIDs) != 1 || len(stage.BeforeScreenshotArtifactIDs) != 1 || len(stage.AfterScreenshotArtifactIDs) != 1 || len(stage.StageEventIDs) != 1 || len(stage.TraceArtifactIDs) != 1 {
+		t.Fatalf("structured replay evidence was not copied into the validation report: %+v", stage)
+	}
+}

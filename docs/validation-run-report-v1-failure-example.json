@@ -1,0 +1,42 @@
+{
+  "schema_version": "demoops.validation_run_report.v1",
+  "report_id": "validation_run_historical_failure_001",
+  "run_id": "run_historical_failure_001",
+  "package_id": "pkg_historical_failure_001",
+  "bundle_hash_sha256": "fixture-bundle-sha256",
+  "policy_hash_sha256": "fixture-policy-sha256",
+  "status": "failed",
+  "final_decision": "stop_and_report",
+  "original_package_unchanged": true,
+  "formal_app_server_success": false,
+  "source_origin": "historical_server_fixture",
+  "stages": [{
+    "node_id": "node_submit_build",
+    "stage_id": "stage_submit_build",
+    "order": 4,
+    "status": "failed",
+    "failure_codes": ["session_expired"],
+    "action_definition_evidence_ids": ["ev_approved_submit"],
+    "before_screenshot_artifact_ids": ["artifact_before_submit"],
+    "after_screenshot_artifact_ids": ["artifact_session_expired"],
+    "stage_event_ids": ["event_action_started", "event_stage_failed"],
+    "trace_artifact_ids": ["artifact_browser_trace"]
+  }],
+  "findings": [{
+    "id": "finding_session_expired",
+    "code": "session_expired",
+    "category": "browser_runtime",
+    "responsibility_domain": "browser_runtime",
+    "severity": "blocking",
+    "passed": false,
+    "node_id": "node_submit_build",
+    "stage_id": "stage_submit_build",
+    "artifact_id": "artifact_session_expired",
+    "summary": "The authenticated browser session expired before the approved submit action completed.",
+    "evidence_refs": [{"id": "ev_session_expired", "kind": "webpage_screenshot", "artifact_id": "artifact_session_expired"}],
+    "reproducible_when": ["source_package_id=pkg_historical_failure_001", "same authenticated-session lifetime"],
+    "recommended_repair": "Refresh the approved execution session, then replay stage_submit_build using the referenced trace."
+  }],
+  "replay_manifest_id": "manifest_run_historical_failure_001",
+  "created_at": "2026-08-18T00:00:00Z"
+}
