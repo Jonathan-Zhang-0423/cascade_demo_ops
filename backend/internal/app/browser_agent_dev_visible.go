@@ -635,6 +635,11 @@ func (m *devVisibleBrowserAgentManager) executePackageWithGuard(ctx context.Cont
 	if err := AttachReplayManifestArtifact(&result, replayManifest); err != nil {
 		return view, fmt.Errorf("visible execution replay manifest artifact failed: %w", err)
 	}
+	validationRunReport, reportErr := BuildValidationRunReport(result, request.Package, replayManifest)
+	if reportErr != nil {
+		return view, fmt.Errorf("visible execution validation run report failed: %w", reportErr)
+	}
+	result.ValidationRunReport = &validationRunReport
 	// Persist the exact result package (including StepResults, ValidationReports,
 	// failure diagnostics, stage-log reference and replay manifest) for local
 	// audit/replay.

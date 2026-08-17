@@ -551,6 +551,7 @@ type RecordingResultPackage struct {
 	VerificationReport    VerificationReport        `json:"verification_report"`
 	ExecutionRuntime      string                    `json:"execution_runtime,omitempty"`
 	ValidationReports     []ValidationReport        `json:"validation_reports,omitempty"`
+	ValidationRunReport   *ValidationRunReport      `json:"validation_run_report,omitempty"`
 	PatchLedger           []RuntimePatchLedgerEntry `json:"patch_ledger,omitempty"`
 	StageEventLogRef      *ArtifactRef              `json:"stage_event_log_ref,omitempty"`
 	FailureDiagnostic     *ScriptFailureDiagnostic  `json:"failure_diagnostic,omitempty"`
@@ -581,22 +582,22 @@ func (r *RecordingResultPackage) ValidateDirectConsistency(sourcePackageID, sour
 }
 
 type ScriptFailureDiagnostic struct {
-	ID                       string                      `json:"id"`
-	SchemaVersion            string                      `json:"schema_version"`
-	SourcePackageID          string                      `json:"source_package_id"`
-	CloudJobID               string                      `json:"cloud_job_id"`
-	FailedNodeID             string                      `json:"failed_node_id"`
-	FailedStepOrder          int                         `json:"failed_step_order,omitempty"`
-	Attempt                  int                         `json:"attempt,omitempty"`
-	Error                    AgentError                  `json:"error"`
-	CurrentURL               string                      `json:"current_url,omitempty"`
-	PageTitle                string                      `json:"page_title,omitempty"`
-	ScreenshotRefs           []PackageArtifactDescriptor `json:"screenshot_refs,omitempty"`
-	TraceRefs                []PackageArtifactDescriptor `json:"trace_refs,omitempty"`
-	ConsoleEvents            []ConsoleEventSummary       `json:"console_events,omitempty"`
-	NetworkEvents            []NetworkEventSummary       `json:"network_events,omitempty"`
-	DOMSnapshotRef           *PackageArtifactDescriptor  `json:"dom_snapshot_ref,omitempty"`
-	AccessibilitySnapshotRef *PackageArtifactDescriptor  `json:"accessibility_snapshot_ref,omitempty"`
+	ID                         string                      `json:"id"`
+	SchemaVersion              string                      `json:"schema_version"`
+	SourcePackageID            string                      `json:"source_package_id"`
+	CloudJobID                 string                      `json:"cloud_job_id"`
+	FailedNodeID               string                      `json:"failed_node_id"`
+	FailedStepOrder            int                         `json:"failed_step_order,omitempty"`
+	Attempt                    int                         `json:"attempt,omitempty"`
+	Error                      AgentError                  `json:"error"`
+	CurrentURL                 string                      `json:"current_url,omitempty"`
+	PageTitle                  string                      `json:"page_title,omitempty"`
+	ScreenshotRefs             []PackageArtifactDescriptor `json:"screenshot_refs,omitempty"`
+	TraceRefs                  []PackageArtifactDescriptor `json:"trace_refs,omitempty"`
+	ConsoleEvents              []ConsoleEventSummary       `json:"console_events,omitempty"`
+	NetworkEvents              []NetworkEventSummary       `json:"network_events,omitempty"`
+	DOMSnapshotRef             *PackageArtifactDescriptor  `json:"dom_snapshot_ref,omitempty"`
+	AccessibilitySnapshotRef   *PackageArtifactDescriptor  `json:"accessibility_snapshot_ref,omitempty"`
 	RedactionReport            DiagnosticRedactionReport   `json:"redaction_report"`
 	RepairHints                []ScriptRepairHint          `json:"repair_hints,omitempty"`
 	CapturedAt                 time.Time                   `json:"captured_at,omitempty"`
@@ -646,11 +647,11 @@ type ScriptRepairHint struct {
 // package or runtime execution. It allows App and Server to emit validation
 // findings throughout the lifecycle.
 type ValidationEventPayload struct {
-	ExecutionID      string            `json:"execution_id"`
-	ValidationKind   string            `json:"validation_kind"` // "pre_execution", "runtime_stage", "runtime_global", "media_delivery"
-	ValidationPhase  string            `json:"validation_phase,omitempty"`
-	Checks           []ValidationCheck `json:"checks"`
-	Timestamp        time.Time         `json:"timestamp"`
+	ExecutionID     string            `json:"execution_id"`
+	ValidationKind  string            `json:"validation_kind"` // "pre_execution", "runtime_stage", "runtime_global", "media_delivery"
+	ValidationPhase string            `json:"validation_phase,omitempty"`
+	Checks          []ValidationCheck `json:"checks"`
+	Timestamp       time.Time         `json:"timestamp"`
 }
 
 type ScriptRepairRequest struct {
@@ -729,6 +730,14 @@ func (r *RecordingResultPackage) ValidateStatusContract() error {
 		}
 		if report.SourcePackageID != r.SourcePackageID {
 			return errors.New("validation report source_package_id does not match recording result")
+		}
+	}
+	if r.ValidationRunReport != nil {
+		if err := r.ValidationRunReport.Validate(); err != nil {
+			return fmt.Errorf("invalid validation run report: %w", err)
+		}
+		if r.ValidationRunReport.PackageID != r.SourcePackageID || r.ValidationRunReport.RunID == "" {
+			return errors.New("validation run report does not match recording result identity")
 		}
 	}
 	for _, entry := range r.PatchLedger {

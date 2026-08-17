@@ -34,5 +34,8 @@ func validationContextFromPackage(pkg *model.ClientExecutionPackage) model.Brows
 	if pkg.RecordingRunSpec.AllowedDomains != nil {
 		context.AllowedDomains = append([]string{}, pkg.RecordingRunSpec.AllowedDomains...)
 	}
+	if bundle.ScriptOutline != nil {
+		context.ForbiddenActions = append([]string{}, bundle.ScriptOutline.ForbiddenActions...)
+	}
 	return context
 }

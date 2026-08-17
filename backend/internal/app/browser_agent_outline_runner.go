@@ -521,7 +521,6 @@ func convertReadinessToValidationChecks(validationContext model.BrowserAgentVali
 	return checks
 }
 
-
 func validationPassRate(checks []model.ValidationCheck) float64 {
 	if len(checks) == 0 {
 		return 0
@@ -584,14 +583,32 @@ func (v deterministicBrowserAgentStageVerifier) ValidateStageEvents(_ context.Co
 		checks = append(checks, runtimeValidationCheck("check_"+safePathSegment(last.StageID)+"_identity", "runtime_event_identity", "runtime_event_identity_mismatch", identityPassed, "Runtime event identity must match the approved package and policy hashes.", last.EvidenceRefs))
 	}
 	for _, event := range events {
+		if event.Action != nil && browserAgentForbiddenAction(event.Action.Kind, validationContext.ForbiddenActions) {
+			decision = model.ValidationDecisionStopAndReport
+			total++
+			checks = append(checks, model.ValidationCheck{
+				ID: "check_" + safePathSegment(event.StageID) + "_forbidden_operation", Kind: "forbidden_operation",
+				Code: "forbidden_operation_attempted", NodeID: event.NodeID, StageID: event.StageID,
+				Severity: model.FindingSeverityBlocking, Passed: false, Required: true,
+				Summary:      "Runtime attempted an operation that the approved Browser Agent contract forbids.",
+				EvidenceRefs: append([]model.EvidenceRef{}, event.EvidenceRefs...), ResponsibilityDomain: model.ValidationCheckDomainApp,
+			})
+		}
 		if event.EventType != model.StageExecutionEventOutcomeObserved || event.Observation == nil {
 			continue
 		}
+		urlAssertionPassed := false
+		businessAssertionPassed := false
 		for index, assertion := range event.Observation.Assertions {
 			observedChecks[assertion.Kind] = assertion.Passed
 			total++
 			if assertion.Passed {
 				passed++
+				if strings.Contains(strings.ToLower(assertion.Kind), "url") {
+					urlAssertionPassed = true
+				} else {
+					businessAssertionPassed = true
+				}
 			} else {
 				decision = model.ValidationDecisionStopAndReport
 			}
@@ -599,6 +616,17 @@ func (v deterministicBrowserAgentStageVerifier) ValidateStageEvents(_ context.Co
 				ID: fmt.Sprintf("check_%s_%02d", safePathSegment(last.StageID), index+1), Kind: assertion.Kind,
 				Passed: assertion.Passed, Required: true, Summary: "依据真实浏览器结果执行确定性检查。",
 				EvidenceRefs: append([]model.EvidenceRef{}, event.EvidenceRefs...),
+			})
+		}
+		if urlAssertionPassed && !businessAssertionPassed {
+			decision = model.ValidationDecisionStopAndReport
+			total++
+			checks = append(checks, model.ValidationCheck{
+				ID: "check_" + safePathSegment(last.StageID) + "_business_outcome", Kind: "business_outcome_semantics",
+				Code: "url_change_not_business_completion", NodeID: last.NodeID, StageID: last.StageID,
+				Severity: model.FindingSeverityBlocking, Passed: false, Required: true,
+				Summary:      "A URL change alone cannot prove that the approved business outcome completed.",
+				EvidenceRefs: append([]model.EvidenceRef{}, event.EvidenceRefs...), ResponsibilityDomain: model.ValidationCheckDomainApp,
 			})
 		}
 	}
@@ -634,6 +662,19 @@ func (v deterministicBrowserAgentStageVerifier) ValidateStageEvents(_ context.Co
 		OverallConfidence: passRate, EvidenceQuality: evidenceQuality, Checks: checks,
 		EvidenceRefs: append([]model.EvidenceRef{}, last.EvidenceRefs...), CreatedAt: timeNowUTC(),
 	}, nil
+}
+
+func browserAgentForbiddenAction(kind string, forbidden []string) bool {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if kind == "" {
+		return false
+	}
+	for _, value := range forbidden {
+		if strings.ToLower(strings.TrimSpace(value)) == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver.BrowserAgentWorkerOpenRequest {
