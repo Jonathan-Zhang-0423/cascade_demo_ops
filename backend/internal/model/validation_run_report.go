@@ -45,13 +45,19 @@ type ValidationRunReport struct {
 }
 
 type ValidationRunStageSummary struct {
-	NodeID              string             `json:"node_id"`
-	StageID             string             `json:"stage_id"`
-	Order               int                `json:"order"`
-	Status              string             `json:"status"`
-	Decision            ValidationDecision `json:"decision,omitempty"`
-	FailureCodes        []string           `json:"failure_codes,omitempty"`
-	EvidenceArtifactIDs []string           `json:"evidence_artifact_ids,omitempty"`
+	NodeID                      string                         `json:"node_id"`
+	StageID                     string                         `json:"stage_id"`
+	Order                       int                            `json:"order"`
+	Status                      string                         `json:"status"`
+	Decision                    ValidationDecision             `json:"decision,omitempty"`
+	FailureCodes                []string                       `json:"failure_codes,omitempty"`
+	EvidenceArtifactIDs         []string                       `json:"evidence_artifact_ids,omitempty"`
+	ActionDefinitionEvidenceIDs []string                       `json:"action_definition_evidence_ids,omitempty"`
+	BeforeScreenshotArtifactIDs []string                       `json:"before_screenshot_artifact_ids,omitempty"`
+	AfterScreenshotArtifactIDs  []string                       `json:"after_screenshot_artifact_ids,omitempty"`
+	StageEventIDs               []string                       `json:"stage_event_ids,omitempty"`
+	TraceArtifactIDs            []string                       `json:"trace_artifact_ids,omitempty"`
+	SelectorRepairs             []ReplayManifestSelectorRepair `json:"selector_repairs,omitempty"`
 }
 
 type ValidationRunFinding struct {
@@ -93,12 +99,18 @@ func (r ValidationRunReport) Validate() error {
 	if r.FormalAppServerSuccess && (!r.OriginalPackageUnchanged || !r.AppGenerated || !r.TransportAuthenticated || !r.FormalExchange) {
 		return errors.New("formal app-server success requires original_package_unchanged and formal provenance")
 	}
+	if r.formalExecution() && len(r.Stages) == 0 {
+		return errors.New("formal validation run report requires at least one stage evidence bundle")
+	}
 	for index, stage := range r.Stages {
 		if anyBlank(stage.NodeID, stage.StageID) || stage.Order < 1 {
 			return fmt.Errorf("validation run stage %d is missing node/stage identity or order", index)
 		}
 		if stage.Decision != "" && !validValidationDecision(stage.Decision) {
 			return fmt.Errorf("validation run stage %d has invalid decision", index)
+		}
+		if r.formalExecution() && (len(stage.ActionDefinitionEvidenceIDs) == 0 || len(stage.BeforeScreenshotArtifactIDs) == 0 || len(stage.AfterScreenshotArtifactIDs) == 0 || len(stage.StageEventIDs) == 0 || len(stage.TraceArtifactIDs) == 0) {
+			return fmt.Errorf("formal validation run stage %d is missing required action, screenshot, event, or trace evidence", index)
 		}
 	}
 	for index, finding := range r.Findings {
@@ -110,6 +122,9 @@ func (r ValidationRunReport) Validate() error {
 		}
 		if !finding.Passed && len(finding.EvidenceRefs) == 0 && finding.ArtifactID == "" {
 			return fmt.Errorf("validation finding %d requires evidence_refs or artifact_id", index)
+		}
+		if !finding.Passed && (finding.Summary == "" || finding.RecommendedRepair == "" || len(finding.ReproducibleWhen) == 0) {
+			return fmt.Errorf("validation finding %d requires summary, recommended_repair and reproducibility conditions", index)
 		}
 		if err := validateRuntimeContractText(finding.Summary, finding.RecommendedRepair); err != nil {
 			return err
@@ -124,6 +139,10 @@ func (r ValidationRunReport) Validate() error {
 		}
 	}
 	return validateRuntimeEvidenceRefs(r.EvidenceRefs)
+}
+
+func (r ValidationRunReport) formalExecution() bool {
+	return r.OriginalPackageUnchanged && r.AppGenerated && r.TransportAuthenticated && r.FormalExchange
 }
 
 func validValidationFailureCategory(value ValidationFailureCategory) bool {
@@ -145,6 +164,10 @@ func ValidationFailureCategoryForDomain(domain ValidationCheckDomain) Validation
 		return ValidationFailureCategoryEnvironment
 	case ValidationCheckDomainMediaDelivery:
 		return ValidationFailureCategoryMediaEvidence
+	case ValidationCheckDomainBrowserRuntime:
+		return ValidationFailureCategoryBrowserRuntime
+	case ValidationCheckDomainProviderCandidate:
+		return ValidationFailureCategoryProviderCandidate
 	case ValidationCheckDomainServer:
 		return ValidationFailureCategoryServerExecution
 	default:

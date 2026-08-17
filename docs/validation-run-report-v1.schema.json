@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://demoops.local/schemas/validation-run-report-v1.json",
+  "title": "DemoOps ValidationRunReport v1",
+  "type": "object",
+  "required": ["schema_version", "report_id", "run_id", "package_id", "bundle_hash_sha256", "policy_hash_sha256", "status", "final_decision", "original_package_unchanged", "formal_app_server_success", "created_at"],
+  "properties": {
+    "schema_version": {"const": "demoops.validation_run_report.v1"},
+    "report_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "package_id": {"type": "string", "minLength": 1},
+    "bundle_hash_sha256": {"type": "string", "minLength": 1},
+    "policy_hash_sha256": {"type": "string", "minLength": 1},
+    "status": {"enum": ["success", "failed"]},
+    "final_decision": {"enum": ["continue", "repair_allowed", "stop_and_report", "reunderstanding_required"]},
+    "original_package_unchanged": {"const": true},
+    "formal_app_server_success": {"type": "boolean"},
+    "stages": {"type": "array", "items": {"$ref": "#/$defs/stage"}},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/evidenceRef"}},
+    "replay_manifest_id": {"type": "string"},
+    "reproducibility_conditions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "app_feedback": {"type": "array", "items": {"$ref": "#/$defs/feedback"}},
+    "server_feedback": {"type": "array", "items": {"$ref": "#/$defs/feedback"}},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "evidenceRef": {"type": "object", "properties": {"id": {"type": "string"}, "kind": {"type": "string"}, "artifact_id": {"type": "string"}}},
+    "stage": {"type": "object", "required": ["node_id", "stage_id", "order", "status"], "properties": {"node_id": {"type": "string"}, "stage_id": {"type": "string"}, "order": {"type": "integer", "minimum": 1}, "status": {"type": "string"}, "action_definition_evidence_ids": {"type": "array", "items": {"type": "string"}}, "before_screenshot_artifact_ids": {"type": "array", "items": {"type": "string"}}, "after_screenshot_artifact_ids": {"type": "array", "items": {"type": "string"}}, "stage_event_ids": {"type": "array", "items": {"type": "string"}}, "trace_artifact_ids": {"type": "array", "items": {"type": "string"}}}},
+    "finding": {"type": "object", "required": ["id", "code", "category", "responsibility_domain", "severity", "passed"], "properties": {"id": {"type": "string"}, "code": {"type": "string"}, "category": {"enum": ["app_package_contract", "server_execution", "browser_runtime", "media_evidence", "provider_candidate", "environment"]}, "responsibility_domain": {"type": "string"}, "severity": {"type": "string"}, "passed": {"type": "boolean"}, "evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/evidenceRef"}}, "recommended_repair": {"type": "string"}, "reproducible_when": {"type": "array", "items": {"type": "string"}}}},
+    "feedback": {"type": "object", "required": ["code", "summary"], "properties": {"code": {"type": "string"}, "summary": {"type": "string"}, "next_step": {"type": "string"}, "evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/evidenceRef"}}}}
+  }
+}

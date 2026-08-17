@@ -184,11 +184,13 @@ type ValidationCheck struct {
 type ValidationCheckDomain string
 
 const (
-	ValidationCheckDomainApp           ValidationCheckDomain = "app"            // App产包、审批计划或执行包字段问题
-	ValidationCheckDomainServer        ValidationCheckDomain = "server"         // Server 执行引擎或 Browser Agent 运行时问题
-	ValidationCheckDomainValidation    ValidationCheckDomain = "validation"     // Validation Agent 自身配置或逻辑问题
-	ValidationCheckDomainEnvironment   ValidationCheckDomain = "environment"    // Node、FFmpeg、Chromium 等环境问题
-	ValidationCheckDomainMediaDelivery ValidationCheckDomain = "media_delivery" // 视频编辑、MP4生成、artifact上传等媒体交付问题
+	ValidationCheckDomainApp               ValidationCheckDomain = "app"                // App产包、审批计划或执行包字段问题
+	ValidationCheckDomainServer            ValidationCheckDomain = "server"             // Server 执行引擎或 Browser Agent 运行时问题
+	ValidationCheckDomainValidation        ValidationCheckDomain = "validation"         // Validation Agent 自身配置或逻辑问题
+	ValidationCheckDomainEnvironment       ValidationCheckDomain = "environment"        // Node、FFmpeg、Chromium 等环境问题
+	ValidationCheckDomainMediaDelivery     ValidationCheckDomain = "media_delivery"     // 视频编辑、MP4生成、artifact上传等媒体交付问题
+	ValidationCheckDomainBrowserRuntime    ValidationCheckDomain = "browser_runtime"    // 页面导航、会话、可见性或超时问题
+	ValidationCheckDomainProviderCandidate ValidationCheckDomain = "provider_candidate" // 仅候选模型任务，不代表页面业务成功
 )
 
 type RuntimeRepairProposal struct {

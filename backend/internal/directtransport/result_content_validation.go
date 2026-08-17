@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 
 	"cascade-demoops/backend/internal/model"
@@ -31,7 +32,11 @@ func validateFormalResultArtifactContents(result model.RecordingResultPackage, s
 		return err
 	}
 	if source.ExecutableScriptBundle != nil && source.ExecutableScriptBundle.ScriptManifest.Runtime == model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
-		if err := validateReplayManifestContents(result, source, jobID, uploaded); err != nil {
+		manifest, err := validateReplayManifestContents(result, source, jobID, uploaded)
+		if err != nil {
+			return err
+		}
+		if err := validateValidationRunReportContents(result, source, manifest, uploaded); err != nil {
 			return err
 		}
 	}
@@ -240,39 +245,39 @@ func validateStageEventLogContents(result model.RecordingResultPackage, source m
 	return nil
 }
 
-func validateReplayManifestContents(result model.RecordingResultPackage, source model.ClientExecutionPackage, jobID string, uploaded map[string]artifactRecord) error {
+func validateReplayManifestContents(result model.RecordingResultPackage, source model.ClientExecutionPackage, jobID string, uploaded map[string]artifactRecord) (model.ReplayManifest, error) {
 	manifestRef, ok := findResultArtifactByKind(result, "replay_manifest")
 	if !ok {
-		return fmt.Errorf("replay manifest reference is missing")
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest reference is missing")
 	}
 	record, ok := uploaded[manifestRef.ID]
 	if !ok {
-		return fmt.Errorf("replay manifest upload is missing")
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest upload is missing")
 	}
 	data, err := readStructuredResultArtifact(record)
 	if err != nil {
-		return fmt.Errorf("replay manifest cannot be read: %w", err)
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest cannot be read: %w", err)
 	}
 	var manifest model.ReplayManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return fmt.Errorf("replay manifest contains invalid JSON: %w", err)
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest contains invalid JSON: %w", err)
 	}
 	if err := manifest.Validate(); err != nil {
-		return err
+		return model.ReplayManifest{}, err
 	}
 	bundle := source.ExecutableScriptBundle
 	if manifest.DevTestOnly || manifest.WaiverID != "" || len(manifest.WaiverAllowedNodeIDs) > 0 || len(manifest.WaiverBlockedReasons) > 0 {
-		return fmt.Errorf("formal replay manifest contains test-waiver fields")
+		return model.ReplayManifest{}, fmt.Errorf("formal replay manifest contains test-waiver fields")
 	}
 	if manifest.RunID != source.RecordingRunSpec.RunID || manifest.PackageID != source.PackageID || manifest.BundleHashSHA256 != bundle.Reproducibility.BundleHashSHA256 || manifest.PolicyHashSHA256 != bundle.Reproducibility.BrowserAgentContractHashSHA256 {
-		return fmt.Errorf("replay manifest is not bound to the approved package hashes and run")
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest is not bound to the approved package hashes and run")
 	}
 	if manifest.Status != "success" || manifest.ExecutionBundleRuntime != bundle.ScriptManifest.Runtime || manifest.ProtocolRuntime != model.DirectTransportProtocolVersion {
-		return fmt.Errorf("replay manifest runtime or success status is invalid")
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest runtime or success status is invalid")
 	}
 	expectedManifestURI := "direct://jobs/" + url.PathEscape(jobID) + "/artifacts/" + url.PathEscape(manifestRef.ID)
 	if manifest.ManifestURI != expectedManifestURI || result.StageEventLogRef == nil || manifest.StageEventLogURI != result.StageEventLogRef.URI {
-		return fmt.Errorf("replay manifest artifact URIs are not bound to this Direct job")
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest artifact URIs are not bound to this Direct job")
 	}
 	for _, binding := range []struct {
 		uri      string
@@ -285,20 +290,20 @@ func validateReplayManifestContents(result model.RecordingResultPackage, source 
 	} {
 		if binding.uri == "" {
 			if binding.required {
-				return fmt.Errorf("replay manifest is missing a requested result artifact URI")
+				return model.ReplayManifest{}, fmt.Errorf("replay manifest is missing a requested result artifact URI")
 			}
 			continue
 		}
 		artifact, exists := findResultArtifactByKind(result, binding.kinds...)
 		if !exists || binding.uri != artifact.URI {
-			return fmt.Errorf("replay manifest references an artifact outside the result package")
+			return model.ReplayManifest{}, fmt.Errorf("replay manifest references an artifact outside the result package")
 		}
 	}
 	if manifest.FinalDecision != mostRestrictiveResultDecision(result.ValidationReports) {
-		return fmt.Errorf("replay manifest final decision does not match ValidationReports")
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest final decision does not match ValidationReports")
 	}
 	if len(manifest.ValidationReports) != len(result.ValidationReports) || len(manifest.Stages) != len(result.StepResults) {
-		return fmt.Errorf("replay manifest report or stage index is incomplete")
+		return model.ReplayManifest{}, fmt.Errorf("replay manifest report or stage index is incomplete")
 	}
 	stageByNode := make(map[string]string, len(bundle.StageApprovalPlan.Stages))
 	for _, stage := range bundle.StageApprovalPlan.Stages {
@@ -307,7 +312,7 @@ func validateReplayManifestContents(result model.RecordingResultPackage, source 
 	for index, stage := range manifest.Stages {
 		step := result.StepResults[index]
 		if stage.NodeID != step.NodeID || stage.StageID != stageByNode[step.NodeID] || stage.Order != index+1 || stage.Status != step.Status {
-			return fmt.Errorf("replay manifest stage index does not match StepResults")
+			return model.ReplayManifest{}, fmt.Errorf("replay manifest stage index does not match StepResults")
 		}
 		stageReports := make([]model.ValidationReport, 0, 1)
 		for _, report := range result.ValidationReports {
@@ -316,14 +321,14 @@ func validateReplayManifestContents(result model.RecordingResultPackage, source 
 			}
 		}
 		if len(stageReports) > 0 && stage.ValidationDecision != mostRestrictiveResultDecision(stageReports) {
-			return fmt.Errorf("replay manifest stage decision does not match ValidationReports")
+			return model.ReplayManifest{}, fmt.Errorf("replay manifest stage decision does not match ValidationReports")
 		}
 		if len(stage.EvidenceArtifactIDs) == 0 {
-			return fmt.Errorf("replay manifest stage is missing outcome evidence artifacts")
+			return model.ReplayManifest{}, fmt.Errorf("replay manifest stage is missing outcome evidence artifacts")
 		}
 		for _, artifactID := range stage.EvidenceArtifactIDs {
 			if _, exists := uploaded[artifactID]; !exists {
-				return fmt.Errorf("replay manifest stage references an artifact that was not uploaded")
+				return model.ReplayManifest{}, fmt.Errorf("replay manifest stage references an artifact that was not uploaded")
 			}
 		}
 	}
@@ -336,10 +341,67 @@ func validateReplayManifestContents(result model.RecordingResultPackage, source 
 			}
 		}
 		if ref.ReportID != report.ReportID || ref.Phase != report.Phase || ref.Decision != report.Decision || ref.CheckCount != len(report.Checks) || ref.FailCount != failed {
-			return fmt.Errorf("replay manifest validation index does not match ValidationReports")
+			return model.ReplayManifest{}, fmt.Errorf("replay manifest validation index does not match ValidationReports")
+		}
+	}
+	return manifest, nil
+}
+
+// validateValidationRunReportContents binds the inline report to the exact
+// uploaded ReplayManifest. This prevents a structurally valid report from a
+// different run, package, or stage timeline being delivered with this result.
+func validateValidationRunReportContents(result model.RecordingResultPackage, source model.ClientExecutionPackage, manifest model.ReplayManifest, uploaded map[string]artifactRecord) error {
+	report := result.ValidationRunReport
+	if report == nil {
+		return fmt.Errorf("formal outline result is missing validation run report")
+	}
+	if err := report.Validate(); err != nil {
+		return fmt.Errorf("validation run report is invalid: %w", err)
+	}
+	bundle := source.ExecutableScriptBundle
+	if report.RunID != manifest.RunID || report.PackageID != manifest.PackageID || report.BundleHashSHA256 != bundle.Reproducibility.BundleHashSHA256 || report.PolicyHashSHA256 != bundle.Reproducibility.BrowserAgentContractHashSHA256 {
+		return fmt.Errorf("validation run report is not bound to the approved package hashes and run")
+	}
+	if report.ReplayManifestID != manifest.ManifestID || report.Status != manifest.Status || report.FinalDecision != manifest.FinalDecision {
+		return fmt.Errorf("validation run report does not match the uploaded replay manifest outcome")
+	}
+	if len(report.Stages) != len(manifest.Stages) {
+		return fmt.Errorf("validation run report stage index does not match the uploaded replay manifest")
+	}
+	for index, stage := range report.Stages {
+		manifestStage := manifest.Stages[index]
+		if stage.NodeID != manifestStage.NodeID || stage.StageID != manifestStage.StageID || stage.Order != manifestStage.Order || stage.Status != manifestStage.Status || stage.Decision != manifestStage.ValidationDecision ||
+			!reflect.DeepEqual(stage.EvidenceArtifactIDs, manifestStage.EvidenceArtifactIDs) ||
+			!reflect.DeepEqual(stage.ActionDefinitionEvidenceIDs, manifestStage.ActionDefinitionEvidenceIDs) ||
+			!reflect.DeepEqual(stage.BeforeScreenshotArtifactIDs, manifestStage.BeforeScreenshotArtifactIDs) ||
+			!reflect.DeepEqual(stage.AfterScreenshotArtifactIDs, manifestStage.AfterScreenshotArtifactIDs) ||
+			!reflect.DeepEqual(stage.StageEventIDs, manifestStage.StageEventIDs) ||
+			!reflect.DeepEqual(stage.TraceArtifactIDs, manifestStage.TraceArtifactIDs) ||
+			!reflect.DeepEqual(stage.SelectorRepairs, manifestStage.SelectorRepairs) {
+			return fmt.Errorf("validation run report stage index does not match the uploaded replay manifest")
+		}
+		for _, artifactID := range append(append(append([]string{}, stage.EvidenceArtifactIDs...), stage.BeforeScreenshotArtifactIDs...), append(stage.AfterScreenshotArtifactIDs, stage.TraceArtifactIDs...)...) {
+			if _, ok := uploaded[artifactID]; !ok {
+				return fmt.Errorf("validation run report stage references an artifact that was not uploaded")
+			}
+		}
+	}
+	for _, evidence := range append(report.EvidenceRefs, reportFindingEvidenceRefs(report.Findings)...) {
+		if evidence.ArtifactID != "" {
+			if _, ok := uploaded[evidence.ArtifactID]; !ok {
+				return fmt.Errorf("validation run report references an artifact that was not uploaded")
+			}
 		}
 	}
 	return nil
+}
+
+func reportFindingEvidenceRefs(findings []model.ValidationRunFinding) []model.EvidenceRef {
+	refs := make([]model.EvidenceRef, 0)
+	for _, finding := range findings {
+		refs = append(refs, finding.EvidenceRefs...)
+	}
+	return refs
 }
 
 func findResultArtifactByKind(result model.RecordingResultPackage, kinds ...string) (model.ArtifactRef, bool) {

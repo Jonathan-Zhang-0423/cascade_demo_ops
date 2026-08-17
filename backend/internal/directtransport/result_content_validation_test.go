@@ -78,6 +78,14 @@ func TestFormalResultArtifactContentsRejectValidationReportHashMismatch(t *testi
 	}
 }
 
+func TestFormalResultArtifactContentsRejectValidationRunReportForAnotherReplayManifest(t *testing.T) {
+	source, result, uploaded := formalResultContentFixture(t)
+	result.ValidationRunReport.ReplayManifestID = "manifest_other"
+	if err := validateFormalResultArtifactContents(result, source, result.CloudJobID, uploaded); err == nil {
+		t.Fatal("ValidationRunReport bound to another ReplayManifest was accepted")
+	}
+}
+
 func formalResultContentFixture(t *testing.T) (model.ClientExecutionPackage, model.RecordingResultPackage, map[string]artifactRecord) {
 	t.Helper()
 	source := loadDirectPackageFixture(t)
@@ -164,6 +172,20 @@ func formalResultContentFixture(t *testing.T) (model.ClientExecutionPackage, mod
 	}
 	for _, report := range reports {
 		manifest.ValidationReports = append(manifest.ValidationReports, model.ReplayManifestValidationRef{ReportID: report.ReportID, Phase: report.Phase, Decision: report.Decision})
+	}
+	result.ValidationRunReport = &model.ValidationRunReport{
+		SchemaVersion: model.ValidationRunReportSchemaVersion, ReportID: "validation_run_content", CreatedAt: now,
+		RunID: source.RecordingRunSpec.RunID, PackageID: source.PackageID,
+		BundleHashSHA256: bundle.Reproducibility.BundleHashSHA256, PolicyHashSHA256: bundle.Reproducibility.BrowserAgentContractHashSHA256,
+		Status: "success", FinalDecision: model.ValidationDecisionContinue, OriginalPackageUnchanged: true,
+		SourceOrigin: "server_controlled_fixture", ReplayManifestID: manifest.ManifestID,
+		ReproducibilityConditions: []string{"same package and policy hashes"},
+	}
+	for _, stage := range manifest.Stages {
+		result.ValidationRunReport.Stages = append(result.ValidationRunReport.Stages, model.ValidationRunStageSummary{
+			NodeID: stage.NodeID, StageID: stage.StageID, Order: stage.Order, Status: stage.Status,
+			Decision: stage.ValidationDecision, EvidenceArtifactIDs: append([]string(nil), stage.EvidenceArtifactIDs...),
+		})
 	}
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {

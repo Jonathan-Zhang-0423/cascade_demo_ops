@@ -96,6 +96,7 @@ func validateDirectStructuredArtifacts(job *direct.Job, source model.ClientExecu
 	outcomeEvidence := map[string]bool{}
 	completed := map[string]bool{}
 	failed := map[string]bool{}
+	geometryByNode := map[string]model.BrowserTargetGeometry{}
 	var previousSequence int64
 	for _, event := range events {
 		if eventIDs[event.EventID] || event.Sequence <= previousSequence {
@@ -118,6 +119,9 @@ func validateDirectStructuredArtifacts(job *direct.Job, source model.ClientExecu
 		case model.StageExecutionEventStageFailed:
 			failed[event.NodeID] = true
 		}
+		if event.Observation != nil && event.Observation.TargetGeometry != nil {
+			geometryByNode[event.NodeID] = *event.Observation.TargetGeometry
+		}
 	}
 
 	manifestStages := map[string]model.ReplayManifestStage{}
@@ -129,6 +133,14 @@ func validateDirectStructuredArtifacts(job *direct.Job, source model.ClientExecu
 		manifestStage, manifestStageExists := manifestStages[step.NodeID]
 		if !approvedStage || !manifestStageExists || manifestStage.StageID != stage.ID || manifestStage.Status != step.Status {
 			return newDirectResultContractError("result_artifact_content_invalid", "replay manifest does not match the result step for node %q", step.NodeID)
+		}
+		if geometry, hasGeometry := geometryByNode[step.NodeID]; hasGeometry {
+			if geometry.ScreenshotArtifactID == "" || !containsDirectString(manifestStage.BeforeScreenshotArtifactIDs, geometry.ScreenshotArtifactID) {
+				return newDirectResultContractError("result_artifact_content_invalid", "target geometry for node %q is not bound to its pre-action screenshot", step.NodeID)
+			}
+			if artifact, exists := directResultArtifactByID(result, geometry.ScreenshotArtifactID); exists && !directArtifactViewportMatches(artifact, geometry.Viewport) {
+				return newDirectResultContractError("result_artifact_content_invalid", "target geometry viewport does not match screenshot dimensions for node %q", step.NodeID)
+			}
 		}
 		switch step.Status {
 		case "passed":
@@ -162,6 +174,57 @@ func validateDirectStructuredArtifacts(job *direct.Job, source model.ClientExecu
 		return newDirectResultContractError("result_artifact_content_invalid", "replay manifest does not reference the requested browser trace")
 	}
 	return nil
+}
+
+func containsDirectString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func directResultArtifactByID(result model.RecordingResultPackage, id string) (model.ArtifactRef, bool) {
+	for _, artifact := range directResultArtifactRefs(result) {
+		if artifact.ID == id {
+			return artifact, true
+		}
+	}
+	return model.ArtifactRef{}, false
+}
+
+// directArtifactViewportMatches checks only declared, non-sensitive image
+// dimensions. Missing dimensions remain backward compatible; when supplied,
+// a mismatch is a hard evidence-contract error.
+func directArtifactViewportMatches(artifact model.ArtifactRef, viewport model.BrowserGeometryViewport) bool {
+	if artifact.Metadata == nil {
+		return true
+	}
+	width, hasWidth := directArtifactNumber(artifact.Metadata["width"])
+	height, hasHeight := directArtifactNumber(artifact.Metadata["height"])
+	if !hasWidth || !hasHeight {
+		return true
+	}
+	return width == viewport.Width && height == viewport.Height
+}
+
+func directArtifactNumber(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func decodeDirectStageEventBytes(data []byte) ([]model.StageExecutionEvent, error) {
