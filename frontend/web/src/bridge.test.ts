@@ -769,7 +769,11 @@ describe("desktop bridge contract", () => {
           build_status: "draft",
           approval_subject_digest_sha256: "sha256:approval-real",
           package_digest_sha256: "sha256:package-real",
-          package: { package_id: "pkg_bundle_real", confidence_summary: { assessment_hash: "sha256:confidence-real", readiness: "ready", overall_score: 0.92, warnings: [], blocking_reasons: [] } },
+          package: {
+            package_id: "pkg_bundle_real",
+            confidence_summary: { assessment_hash: "sha256:confidence-real", readiness: "ready", overall_score: 0.92, warnings: [], blocking_reasons: [] },
+            metadata: { staleness_status: "current", plan_generated_at: "2026-08-17T09:00:00Z", source_snapshot_at: "2026-08-17T08:50:00Z", page_scan_at: "2026-08-17T08:55:00Z" },
+          },
           size_report: { algorithm_version: "v1", total_bytes: 1024, section_bytes: {}, stage_count: 1, evidence_count: 1, selector_count: 1 },
           current_node: "HumanApprove",
           status: "awaiting_human_approval",
@@ -940,6 +944,9 @@ describe("desktop bridge contract", () => {
     expect(result.data?.packagePreview.packageDigest).toBe("sha256:package-real");
     expect(result.data?.packagePreview.approvalSubjectDigest).toBe("sha256:approval-real");
     expect(result.data?.packagePreview.confidenceAssessmentHash).toBe("sha256:confidence-real");
+    expect(result.data?.packagePreview.stalenessStatus).toBe("current");
+    expect(result.data?.packagePreview.planGeneratedAt).toBe("2026-08-17T09:00:00Z");
+    expect(result.data?.packagePreview.pageScanAt).toBe("2026-08-17T08:55:00Z");
     expect(result.data?.modelProvenance?.[0]).toContain("kimi-openai-compatible");
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/execution-package",

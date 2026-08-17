@@ -1632,6 +1632,7 @@ func minFloat64(left float64, right float64) float64 {
 }
 
 func componentTargetsForStep(step model.ScriptStep, stage model.StageApprovalStage, intelligence *model.ProjectIntelligencePack) []model.BrowserAgentComponentTarget {
+	_ = intelligence
 	target := step.Action.Target
 	if target.Selector == "" {
 		target.Selector = step.PageTarget.Selector
@@ -1653,27 +1654,45 @@ func componentTargetsForStep(step model.ScriptStep, stage model.StageApprovalSta
 		EvidenceRefs:         mergeStageEvidenceRefs(stage.EvidenceRefs, target.EvidenceRefs),
 		Confidence:           stage.Confidence,
 	}}
-	if intelligence != nil && intelligence.VerifiedInteraction != nil {
-		for _, action := range intelligence.VerifiedInteraction.Actions {
-			if action.IntentGoalID == "" && action.ID == "" {
-				continue
-			}
-			if action.ComponentRef == "" && action.Selector == "" && len(action.Alternatives) == 0 {
-				continue
-			}
-			components = append(components, model.BrowserAgentComponentTarget{
-				ComponentRef:         action.ComponentRef,
-				RouteRef:             action.RouteRef,
-				Source:               action.VerificationSource,
-				Label:                action.Label,
-				Selector:             action.Selector,
-				SelectorAlternatives: action.Alternatives,
-				EvidenceRefs:         action.EvidenceRefs,
-				Confidence:           stage.Confidence,
-			})
+	// Keep only action and outcome components that belong to this stage.  The
+	// previous implementation copied every verified interaction into every
+	// stage, which both bloated the package and allowed an unrelated component
+	// selector to conflict with the approved action target.
+	for _, validation := range step.Validations {
+		result := validation.Target
+		if result.Selector == "" && result.TestID == "" && result.Role == "" && result.Label == "" && result.Text == "" {
+			continue
 		}
+		components = append(components, model.BrowserAgentComponentTarget{
+			ComponentRef:         result.ComponentRef,
+			RouteRef:             stage.TargetRoute,
+			Source:               result.Source,
+			Role:                 result.Role,
+			Name:                 firstNonEmpty(result.Label, result.Text),
+			Text:                 result.Text,
+			Label:                result.Label,
+			TestID:               result.TestID,
+			Selector:             result.Selector,
+			SelectorAlternatives: append([]model.SelectorCandidate{}, result.SelectorAlternatives...),
+			EvidenceRefs:         mergeStageEvidenceRefs(validation.EvidenceRefs, result.EvidenceRefs),
+			Confidence:           stage.Confidence,
+		})
 	}
-	return components
+	return uniqueBrowserAgentComponentTargets(components)
+}
+
+func uniqueBrowserAgentComponentTargets(values []model.BrowserAgentComponentTarget) []model.BrowserAgentComponentTarget {
+	seen := map[string]bool{}
+	out := make([]model.BrowserAgentComponentTarget, 0, len(values))
+	for _, value := range values {
+		key := strings.ToLower(strings.TrimSpace(value.ComponentRef + "|" + value.Selector + "|" + value.TestID + "|" + value.Role + "|" + value.Name))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func waitConditionsForStep(step model.ScriptStep) []string {
@@ -2615,13 +2634,10 @@ func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstr
 		firstNonEmpty(target.ComponentRef, node.PageRef, pageTarget.PageRef),
 		firstNonEmpty(target.TestID, target.Role, target.Label, target.Text, target.Selector, node.Title),
 	}, "|")
-	allowedNames := uniqueStrings(nonEmptyStrings(
-		target.Label,
-		target.Text,
-		node.Title,
-		node.Goal,
-		node.ExpectedOutcome,
-	))
+	allowedNames := accessibleNamesForActionTarget(target)
+	if len(allowedNames) == 0 && (action.Type == model.GraphActionNavigate || action.Type == model.GraphActionWait || action.Type == model.GraphActionInspect) {
+		allowedNames = uniqueStrings(nonEmptyStrings(target.Label, target.Text, node.Title))
+	}
 	allowedRoles := []string{}
 	if target.Role != "" {
 		allowedRoles = append(allowedRoles, target.Role)
@@ -2631,7 +2647,6 @@ func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstr
 		allowedRoles = append(allowedRoles, "textbox", "combobox", "radio", "checkbox")
 	}
 	for _, validation := range validations {
-		allowedNames = append(allowedNames, validation.Target.Label, validation.Target.Text)
 		if validation.Target.Role != "" {
 			allowedRoles = append(allowedRoles, validation.Target.Role)
 		}
@@ -2644,9 +2659,51 @@ func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstr
 		ForbiddenNames: []string{"删除", "移除", "支付", "账单", "API Key", "Delete", "Remove", "Pay", "Billing"},
 		ComponentRef:   firstNonEmpty(target.ComponentRef, firstString(node.FeatureRefs, ""), node.PageRef),
 		Destructive:    destructiveActionText(node.Title + " " + node.Goal + " " + node.Description + " " + target.Label + " " + target.Text),
-		EvidenceRefs:   uniqueEvidenceRefs(node.EvidenceRefs),
+		EvidenceRefs:   uniqueEvidenceRefs(append(append([]model.EvidenceRef{}, node.EvidenceRefs...), target.EvidenceRefs...)),
 		Confidence:     0.76,
 	}
+}
+
+func accessibleNamesForActionTarget(target model.ActionTarget) []string {
+	testIDs := nonEmptyStrings(target.TestID)
+	for _, candidate := range target.SelectorAlternatives {
+		if strings.EqualFold(strings.TrimSpace(candidate.Kind), "testid") {
+			testIDs = append(testIDs, candidate.Value)
+		}
+	}
+	names := []string{}
+	for _, candidate := range target.SelectorAlternatives {
+		if name := strings.TrimSpace(candidate.ObservedAccessibleName); name != "" {
+			names = append(names, name)
+		}
+	}
+	for _, value := range []string{target.Label, target.Text} {
+		value = stripTestIDFromAccessibleName(value, testIDs)
+		if value != "" {
+			names = append(names, value)
+		}
+	}
+	return uniqueStrings(names)
+}
+
+func stripTestIDFromAccessibleName(value string, testIDs []string) string {
+	value = strings.TrimSpace(value)
+	for _, testID := range testIDs {
+		testID = strings.TrimSpace(testID)
+		if testID == "" {
+			continue
+		}
+		if strings.EqualFold(value, testID) {
+			return ""
+		}
+		if len(value) > len(testID) && strings.EqualFold(value[len(value)-len(testID):], testID) {
+			prefix := strings.TrimSpace(value[:len(value)-len(testID)])
+			if prefix != value {
+				return prefix
+			}
+		}
+	}
+	return value
 }
 
 func destructiveActionText(value string) bool {
@@ -2799,7 +2856,10 @@ func scriptActionForNode(node *model.GraphNode) model.ScriptActionInstruction {
 			Preconditions: node.ActionSpec.Preconditions,
 		}
 		if businessStageKindForNode(node) == model.BusinessStageKindSessionSetup && node.Metadata != nil {
-			action.Type = model.GraphActionFill
+			// Formal login is a brokered session operation, not a single DOM fill.
+			// Keep the opaque ref in the approved package while the Worker consumes
+			// the structured username/password grant under the session_setup scope.
+			action.Type = model.GraphActionInspect
 			action.Value = ""
 			if secretRef, ok := node.Metadata["demo_password_secret_ref"].(string); ok {
 				action.SecretRef = secretRef

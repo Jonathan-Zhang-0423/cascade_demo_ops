@@ -144,6 +144,10 @@ export type ExecutionPackagePreview = {
   confidenceWarnings?: string[];
   totalBytes?: number;
   sectionBytes?: Record<string, number>;
+  planGeneratedAt?: string;
+  sourceSnapshotAt?: string;
+  pageScanAt?: string;
+  stalenessStatus?: "current" | "inputs_newer_than_plan";
 };
 
 export type CredentialGrantPreview = {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/llm"
@@ -572,6 +573,25 @@ func TestScriptPackagerKeepsRuntimeAdaptiveBusinessAction(t *testing.T) {
 	}
 	if !strings.Contains(outlineAuditText(outlineStage), "new-project") && !strings.Contains(outlineAuditText(outlineStage), "新建项目") {
 		t.Fatalf("expected adaptive outline to carry selector alternatives: %+v", outlineStage)
+	}
+}
+
+func TestTargetContractUsesAccessibleNameWithoutTestID(t *testing.T) {
+	evidence := model.EvidenceRef{ID: "ev_new_project", Kind: model.EvidenceKindBrowserScan}
+	observedAt := time.Now().UTC()
+	target := model.ActionTarget{
+		Label:  "新建项目 button-new-project",
+		TestID: "button-new-project",
+		SelectorAlternatives: []model.SelectorCandidate{{
+			Kind: "testid", Value: "button-new-project", EvidenceID: evidence.ID,
+			SourceKind: "page_scan", SourceDigest: "sha256:page", ObservedRole: "button",
+			ObservedAccessibleName: "新建项目", ObservedAt: &observedAt, EvidenceRefs: []model.EvidenceRef{evidence},
+		}},
+	}
+	node := &model.GraphNode{ID: "new_project", Title: "进入新建项目流程", Goal: "打开创建流程", ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Target: target}, EvidenceRefs: []model.EvidenceRef{evidence}}
+	contract := targetContractForNode(node, model.ScriptActionInstruction{Type: model.GraphActionClick, Target: target}, model.ScriptPageTarget{}, nil)
+	if len(contract.AllowedNames) != 1 || contract.AllowedNames[0] != "新建项目" {
+		t.Fatalf("allowed_names must preserve the real accessible name only: %+v", contract.AllowedNames)
 	}
 }
 

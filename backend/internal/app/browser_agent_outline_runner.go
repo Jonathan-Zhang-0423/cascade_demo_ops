@@ -47,6 +47,7 @@ type localBrowserAgentStageRuntime struct {
 	progress           func(stage string, message string, progress int)
 	stageCount         int
 	artifacts          map[string]model.ArtifactRef
+	taskSecretRefs     map[string]bool
 }
 
 func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request BrowserAgentOutlineRunRequest) (model.RecordingResultPackage, error) {
@@ -126,7 +127,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	}()
 
 	stageRuntime := &localBrowserAgentStageRuntime{
-		session: session, credentialResolver: request.CredentialResolver, progress: request.Progress, stageCount: len(request.RuntimePlan.Stages), artifacts: map[string]model.ArtifactRef{},
+		session: session, credentialResolver: request.CredentialResolver, progress: request.Progress, stageCount: len(request.RuntimePlan.Stages), artifacts: map[string]model.ArtifactRef{}, taskSecretRefs: taskSecretRefSet(request.TaskSecrets),
 	}
 	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier)
 	startedAt := timeNowUTC()
@@ -235,6 +236,15 @@ func (r *localBrowserAgentStageRuntime) ExecuteStage(ctx context.Context, _ Brow
 		return BrowserAgentStageActionResult{Observation: &result.Observation, EvidenceRefs: result.EvidenceRefs}, nil
 	}
 	workerStage := workerStageFromRuntime(stage)
+	if browserAgentStageUsesTaskSecret(workerStage, r.taskSecretRefs) {
+		result, err := r.session.Execute(ctx, workerStage)
+		if err != nil {
+			return BrowserAgentStageActionResult{}, err
+		}
+		r.collect(result.Artifacts)
+		progressBrowserAgent(r.progress, "validating_runtime_stage", fmt.Sprintf("正在验证第 %d 个阶段的真实页面结果。", stage.Order), minInt(progress+4, 84))
+		return BrowserAgentStageActionResult{Observation: &result.Observation, EvidenceRefs: result.EvidenceRefs}, nil
+	}
 	secretValues, err := browserAgentStageSecretValues(workerStage, r.credentialResolver)
 	if err != nil {
 		return BrowserAgentStageActionResult{}, err
@@ -256,6 +266,25 @@ func (r *localBrowserAgentStageRuntime) ExecuteStage(ctx context.Context, _ Brow
 	r.collect(result.Artifacts)
 	progressBrowserAgent(r.progress, "validating_runtime_stage", fmt.Sprintf("正在验证第 %d 个阶段的真实页面结果。", stage.Order), minInt(progress+4, 84))
 	return BrowserAgentStageActionResult{Observation: &result.Observation, EvidenceRefs: result.EvidenceRefs}, nil
+}
+
+func taskSecretRefSet(values map[string]driver.BrowserAgentTaskSecret) map[string]bool {
+	refs := make(map[string]bool, len(values))
+	for ref := range values {
+		if ref = strings.TrimSpace(ref); ref != "" {
+			refs[ref] = true
+		}
+	}
+	return refs
+}
+
+func browserAgentStageUsesTaskSecret(stage driver.BrowserAgentWorkerStage, refs map[string]bool) bool {
+	for _, interaction := range stage.Interactions {
+		if refs[strings.TrimSpace(interaction.SecretRef)] {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *localBrowserAgentStageRuntime) revalidateManualSessionCheckpoint(ctx context.Context, stage BrowserAgentRuntimeStage) (driver.BrowserAgentWorkerStageResult, error) {

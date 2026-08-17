@@ -28,6 +28,38 @@ func TestPackageConfidenceUsesWeakestRequiredStage(t *testing.T) {
 	}
 }
 
+func TestPackageConfidenceDoesNotAwardResultScoreForReusedClickTarget(t *testing.T) {
+	pkg := confidenceFixture(t)
+	index := -1
+	for i := range pkg.ExecutableScriptBundle.PlanJSON.Steps {
+		if pkg.ExecutableScriptBundle.PlanJSON.Steps[i].Action.Type == GraphActionClick {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		t.Fatal("confidence fixture has no click stage")
+	}
+	step := &pkg.ExecutableScriptBundle.PlanJSON.Steps[index]
+	step.Validations = []ValidationSpec{{
+		ID: "wrong_result", Kind: "element_visible", Target: step.Action.Target, Expected: true, Required: true,
+	}}
+	summary, err := AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assessment *PackageStageConfidenceAssessment
+	for i := range summary.Stages {
+		if summary.Stages[i].NodeID == step.NodeID {
+			assessment = &summary.Stages[i]
+			break
+		}
+	}
+	if assessment == nil || assessment.ResultValidationScore != 0 || summary.DeterministicValidationCoverage >= 1 {
+		t.Fatalf("reusing a clicked control must not receive full result-validation confidence: stage=%+v summary=%+v", assessment, summary)
+	}
+}
+
 func TestPackageConfidenceAssessmentIsDeterministic(t *testing.T) {
 	pkg := confidenceFixture(t)
 	first, err := AssessClientExecutionPackage(&pkg)

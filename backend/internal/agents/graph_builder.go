@@ -681,6 +681,18 @@ func businessTargetRank(candidate model.BusinessTargetCandidate) int {
 	if candidate.IsVerified {
 		rank += 100
 	}
+	semanticHandle := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
+	if containsAnyNormalized(semanticHandle, "button-", "input-", "new-project", "create-project", "project-name", "build-mode", "start-build", "create-project") {
+		rank += 350
+	}
+	if containsAnyNormalized(semanticHandle, "workspace", "project-list", "container", "page-root", "app-root") || selectorLooksGeneric(candidate.Selector) {
+		rank -= 500
+	}
+	if len([]rune(strings.TrimSpace(candidate.Label))) > 80 {
+		// A scan that concatenates the text of many descendant controls is a
+		// container summary, not the accessible name of one actionable target.
+		rank -= 400
+	}
 	for _, alternative := range candidate.Alternatives {
 		if alternative.SourceKind == "page_scan" && model.SelectorCandidateHasFormalProvenance(alternative) && selectorCandidateMatchesValue(alternative, candidate.Selector) {
 			rank += 1000
@@ -805,8 +817,11 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 
 func businessStageResultTarget(stage model.BusinessStage) model.ActionTarget {
 	for _, candidate := range stage.Targets {
-		text := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef, candidate.Label, candidate.Text}, " "))
-		if strings.Contains(text, "dialog") || strings.Contains(text, "modal") || strings.Contains(text, "project-idea") || strings.Contains(text, "项目表单") || strings.Contains(text, "项目名称") {
+		structure := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
+		semantics := strings.ToLower(strings.Join([]string{candidate.Label, candidate.Text}, " "))
+		explicitResultHandle := strings.Contains(structure, "dialog") || strings.Contains(structure, "modal") || strings.Contains(structure, "project-idea") || strings.Contains(structure, "project-name")
+		verifiedInputResult := model.GraphActionType(candidate.Kind) == model.GraphActionFill && !selectorLooksGeneric(candidate.Selector) && containsAnyNormalized(semantics, "项目名称", "项目名", "project name", "project idea")
+		if explicitResultHandle || verifiedInputResult {
 			selector := selectorForBusinessTarget(candidate)
 			testID := ""
 			if selector != "" {

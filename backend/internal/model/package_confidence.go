@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const PackageConfidenceAlgorithmVersion = "demoops.package_confidence.v2"
+const PackageConfidenceAlgorithmVersion = "demoops.package_confidence.v3"
 
 type PackageReadiness string
 
@@ -105,11 +105,11 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 		needsValidation := stepRequiresBrowserAgentValidation(step)
 		if needsValidation {
 			validationNeeded++
-			if stepHasDeterministicBrowserAgentValidation(step) {
+			if stepHasSemanticallyValidBrowserAgentValidation(step) {
 				a.ResultValidationScore = 1
 				validationCovered++
 			} else {
-				a.BlockingReasons = append(a.BlockingReasons, "缺少必填确定性结果验证")
+				a.BlockingReasons = append(a.BlockingReasons, "必填结果验证未证明业务结果，或错误复用了动作目标")
 			}
 		} else {
 			a.ResultValidationScore = 1
@@ -234,7 +234,7 @@ func packageRequirementCovered(pkg *ClientExecutionPackage, requirement GraphReq
 		step, stage, outline, hasExecutionLayers := packageExecutionLayersForNode(pkg, ref)
 		hasRequiredValidation := false
 		for _, validation := range node.Validations {
-			if validation.Required && (len(validation.EvidenceRefs) > 0 || len(node.EvidenceRefs) > 0 || (node.ActionSpec != nil && len(node.ActionSpec.Target.EvidenceRefs) > 0) || (hasExecutionLayers && step.RuntimeAdaptive && stepHasDeterministicBrowserAgentValidation(step))) {
+			if validation.Required && validationProvesBusinessOutcome(step, validation) && (len(validation.EvidenceRefs) > 0 || len(node.EvidenceRefs) > 0 || (node.ActionSpec != nil && len(node.ActionSpec.Target.EvidenceRefs) > 0) || (hasExecutionLayers && step.RuntimeAdaptive && stepHasSemanticallyValidBrowserAgentValidation(step))) {
 				hasRequiredValidation = true
 				break
 			}

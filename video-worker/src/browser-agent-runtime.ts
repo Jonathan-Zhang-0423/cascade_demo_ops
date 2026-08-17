@@ -23,7 +23,27 @@ type BrowserAgentComponentTarget = {
   label?: string;
   test_id?: string;
   selector?: string;
-  selector_alternatives?: Array<{ kind: string; value: string }>;
+  selector_alternatives?: BrowserAgentSelectorCandidate[];
+};
+
+type BrowserAgentSelectorCandidate = {
+  kind: string;
+  value: string;
+  observed_role?: string;
+  observed_accessible_name?: string;
+  observed_url?: string;
+  observed_route_template?: string;
+  observed_page_role?: string;
+  observed_form_role?: string;
+  evidence_digest_sha256?: string;
+};
+
+type BrowserAgentTaskSecret = {
+  username: string;
+  password: string;
+  expires_at: string;
+  allowed_domains: string[];
+  allowed_operations: string[];
 };
 
 type BrowserAgentInteraction = {
@@ -67,6 +87,7 @@ export type BrowserAgentWorkerStage = {
   id: string;
   order: number;
   node_id: string;
+  stage_kind?: string;
   objective?: string;
   entry_route?: string;
   route?: string;
@@ -86,13 +107,14 @@ export type BrowserAgentWorkerStage = {
   success_state?: string;
   duration_ms?: number;
   validations?: BrowserAgentValidation[];
-  preferred_selector_alternative?: { kind: string; value: string };
-  evidence_bound_selector_alternatives?: Array<{ kind: string; value: string }>;
+  preferred_selector_alternative?: BrowserAgentSelectorCandidate;
+  evidence_bound_selector_alternatives?: BrowserAgentSelectorCandidate[];
 };
 
 export type BrowserAgentOpenRequest = {
   session_id?: string;
   output_dir: string;
+  initial_url?: string;
   browser?: {
     engine?: string;
     headless?: boolean;
@@ -108,6 +130,7 @@ export type BrowserAgentOpenRequest = {
   mask_selectors?: string[];
 	recording_sensitive?: boolean;
 	record_trace?: boolean;
+  task_secrets?: Record<string, BrowserAgentTaskSecret>;
 };
 
 export type BrowserAgentStageRequest = {
@@ -208,6 +231,7 @@ type BrowserAgentSession = {
 	traceActive: boolean;
 	openedAtMS: number;
 	targetGeometryByArtifactID: Map<string, BrowserTargetGeometry>;
+  taskSecrets: Record<string, BrowserAgentTaskSecret>;
 };
 
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
@@ -281,6 +305,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	traceActive: recordTrace,
 	openedAtMS: Date.now(),
 	targetGeometryByArtifactID: new Map(),
+    taskSecrets: validatedTaskSecrets(request.task_secrets),
   };
   await page.route("**/*", async (route: any) => {
     // Route allowlists apply to document navigation, not the page's JS/CSS/media.
@@ -292,6 +317,16 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
     await route.continue();
   });
   sessions.set(sessionID, session);
+  try {
+    if (request.initial_url?.trim()) {
+      await navigateWithinSessionPolicy(session, request.initial_url, "domcontentloaded", actionTimeoutMS);
+    }
+  } catch (error) {
+    sessions.delete(sessionID);
+    await settleWithin(context.close(), 5_000);
+    await settleWithin(browser.close(), 3_000);
+    throw error;
+  }
   return { session_id: sessionID, runtime_versions: { runner: "playwright-browser-agent", browser: engineName } };
 }
 
@@ -471,6 +506,7 @@ export async function browserAgentApplyExecutionPolicy(request: BrowserAgentExec
 export async function observeBrowserAgentStage(request: BrowserAgentStageRequest): Promise<BrowserAgentStageResult> {
   const session = requiredSession(request.session_id);
   validateStage(request.stage);
+  await ensureStageExecutionRoute(session, request.stage);
   const action = request.stage.interactions[0];
   await waitForObservationWindow(session.page, request.stage);
   // Preserve redacted evidence even when semantic target resolution fails.
@@ -622,13 +658,16 @@ export function resolutionAssertions(strategy: string | undefined, failure: stri
 export async function executeBrowserAgentStage(request: BrowserAgentStageRequest): Promise<BrowserAgentStageResult> {
   const session = requiredSession(request.session_id);
   validateStage(request.stage);
-  const secretValues = validatedStageSecretValues(request.stage, request.secrets);
+  await ensureStageExecutionRoute(session, request.stage);
+  const taskSecretRef = formalAuthenticationTaskSecretRef(session, request.stage);
+  const secretValues = taskSecretRef ? {} : validatedStageSecretValues(request.stage, request.secrets);
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   const targetArtifacts: ArtifactRef[] = [];
   const targetEvidence: EvidenceRef[] = [];
   const resolutionAttempts: BrowserTargetResolutionAttempt[] = [];
   let targetGeometry: BrowserTargetGeometry | undefined;
   try {
+  if (taskSecretRef) await executeFormalAuthentication(session, request.stage, taskSecretRef);
   for (const interaction of request.stage.interactions) {
     const actionEvidence = await executeInteraction(session, request.stage, interaction, secretValues, resolutionAttempts);
     if (actionEvidence) {
@@ -674,6 +713,7 @@ export async function revalidateBrowserAgentStage(request: BrowserAgentStageRequ
 export async function closeBrowserAgentSession(request: { session_id: string }): Promise<BrowserAgentCloseResult> {
   const session = requiredSession(request.session_id);
   sessions.delete(session.id);
+  clearTaskSecrets(session.taskSecrets);
   const artifacts: ArtifactRef[] = [];
   let recordingPath: string | undefined;
   const recordingPathPromise = session.video?.path().catch(() => undefined);
@@ -740,10 +780,7 @@ async function executeInteraction(
     const target = interaction.target?.url || stage.url || stage.route || stage.entry_route;
     if (!target) throw new Error(`browser_agent_navigation_target_missing: ${stage.node_id}`);
     const targetURL = absoluteTargetURL(target, session.page.url(), stage.url);
-    const policyError = urlPolicyError(targetURL, session, false);
-    if (policyError) throw new Error(policyError);
-    await session.page.goto(targetURL, { waitUntil: waitUntil(interaction.wait_until), timeout });
-    await waitForPageSettled(session.page);
+    await navigateWithinSessionPolicy(session, targetURL, waitUntil(interaction.wait_until), timeout);
     return;
   }
   if (interaction.kind === "wait") {
@@ -1424,6 +1461,162 @@ function absoluteTargetURL(target: string, currentURL: string, stageURL?: string
     if (!base) throw new Error("browser_agent_relative_navigation_without_base_url");
     return new URL(target, base).toString();
   }
+}
+
+function validatedTaskSecrets(provided?: Record<string, BrowserAgentTaskSecret>): Record<string, BrowserAgentTaskSecret> {
+  const values: Record<string, BrowserAgentTaskSecret> = {};
+  for (const [ref, value] of Object.entries(provided || {})) {
+    if (!ref.trim() || !value || !String(value.username || "").trim() || !String(value.password || "")) {
+      throw new Error("browser_agent_task_secret_invalid");
+    }
+    const expiresAt = Date.parse(String(value.expires_at || ""));
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error("browser_agent_task_secret_expired");
+    if (!Array.isArray(value.allowed_domains) || value.allowed_domains.length === 0 || !Array.isArray(value.allowed_operations)) {
+      throw new Error("browser_agent_task_secret_scope_invalid");
+    }
+    values[ref] = value;
+  }
+  return values;
+}
+
+function formalAuthenticationTaskSecretRef(session: BrowserAgentSession, stage: BrowserAgentWorkerStage): string | undefined {
+  const refs = [...new Set(stage.interactions.map((interaction) => String(interaction.secret_ref || "").trim()).filter(Boolean))];
+  if (refs.length === 0) return undefined;
+  if (refs.length !== 1 || stage.stage_kind !== "session_setup") throw new Error("browser_agent_task_secret_stage_not_approved");
+  const ref = refs[0]!;
+  const secret = session.taskSecrets[ref];
+  if (!secret) return undefined;
+  const required = ["fill_username", "fill_password", "submit_login"];
+  if (!required.every((operation) => secret.allowed_operations.includes(operation))) throw new Error("browser_agent_task_secret_operation_not_approved");
+  const current = new URL(session.page.url());
+  if (!hostAllowed(current.hostname, secret.allowed_domains)) throw new Error("browser_agent_task_secret_domain_not_approved");
+  if (Date.parse(secret.expires_at) <= Date.now()) throw new Error("browser_agent_task_secret_expired");
+  if (!stageHasAuthenticationProvenance(stage, session.page.url())) throw new Error("authentication_context_unverified");
+  return ref;
+}
+
+async function executeFormalAuthentication(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, secretRef: string): Promise<void> {
+  const secret = session.taskSecrets[secretRef];
+  if (!secret) throw new Error("browser_agent_task_secret_unavailable");
+  const entryURL = session.page.url();
+  try {
+    let passwordInput = await firstVisibleLocator(session.page, passwordInputSelectors());
+    if (!passwordInput) {
+      const entry = await firstApprovedAuthenticationLocator(session.page, stage, false);
+      if (!entry) throw new Error("login_entry_evidence_missing");
+      await entry.click({ timeout: actionTimeoutMS });
+      await waitForPageSettled(session.page, 5_000);
+      passwordInput = await firstVisibleLocator(session.page, passwordInputSelectors());
+    }
+    const usernameInput = await firstVisibleLocator(session.page, usernameInputSelectors());
+    const submit = await firstApprovedAuthenticationLocator(session.page, stage, true);
+    if (!usernameInput || !passwordInput || !submit) throw new Error("authentication_context_unverified");
+    await prepareSecretTarget(session, usernameInput);
+    await prepareSecretTarget(session, passwordInput);
+    await suspendTraceForSecretInput(session);
+    await usernameInput.fill(secret.username, { timeout: actionTimeoutMS });
+    await passwordInput.fill(secret.password, { timeout: actionTimeoutMS });
+    await submit.click({ timeout: actionTimeoutMS });
+    await session.page.waitForURL((value: URL) => !urlMatches(value.toString(), entryURL), { timeout: 60_000 });
+    await waitForPageSettled(session.page, 10_000);
+    const policyError = urlPolicyError(session.page.url(), session, false);
+    if (policyError) throw new Error(policyError);
+    if (urlMatches(session.page.url(), entryURL)) throw new Error("login_success_validation_missing");
+    if (stage.expected_route_after_action && !urlMatches(session.page.url(), stage.expected_route_after_action)) {
+      throw new Error("login_success_validation_missing");
+    }
+  } finally {
+    secret.username = "";
+    secret.password = "";
+    delete session.taskSecrets[secretRef];
+    await resumeTraceAfterSecretInput(session);
+  }
+}
+
+function usernameInputSelectors(): string[] {
+  return ['input[type="email"]', 'input[name="email"]', 'input[autocomplete="email"]', 'input[autocomplete="username"]', 'input[name*="user" i]'];
+}
+
+function passwordInputSelectors(): string[] {
+  return ['input[type="password"]', 'input[name="password"]', 'input[autocomplete="current-password"]'];
+}
+
+function authenticationCandidates(stage: BrowserAgentWorkerStage): BrowserAgentSelectorCandidate[] {
+  return [...(stage.components || []).flatMap((component) => component.selector_alternatives || []), ...(stage.evidence_bound_selector_alternatives || [])]
+    .filter((candidate, index, all) => candidate?.value && all.findIndex((item) => item.kind === candidate.kind && item.value === candidate.value) === index);
+}
+
+function stageHasAuthenticationProvenance(stage: BrowserAgentWorkerStage, currentURL: string): boolean {
+  return authenticationCandidates(stage).some((candidate) =>
+    candidate.observed_page_role === "authentication"
+    && candidate.observed_form_role === "authentication"
+    && Boolean(candidate.evidence_digest_sha256)
+    && Boolean(candidate.observed_url)
+    && urlMatches(candidate.observed_url!, stage.url || stage.route || stage.entry_route || currentURL));
+}
+
+async function firstApprovedAuthenticationLocator(page: any, stage: BrowserAgentWorkerStage, formSubmit: boolean): Promise<any | undefined> {
+  for (const candidate of authenticationCandidates(stage)) {
+    const isForm = candidate.observed_page_role === "authentication" && candidate.observed_form_role === "authentication";
+    if (formSubmit !== isForm || !candidate.observed_url || !urlMatches(candidate.observed_url, page.url())) continue;
+    const locator = locatorFromAlternative(page, candidate.kind, candidate.value)?.first();
+    if (locator && await locator.isVisible({ timeout: 1_000 }).catch(() => false)) return locator;
+  }
+  return undefined;
+}
+
+async function suspendTraceForSecretInput(session: BrowserAgentSession): Promise<void> {
+  if (!session.traceActive) return;
+  await session.context.tracing.stop({ path: session.tracePath });
+  session.traceActive = false;
+}
+
+async function resumeTraceAfterSecretInput(session: BrowserAgentSession): Promise<void> {
+  if (!session.recordTrace || session.traceActive) return;
+  await session.context.tracing.start({ screenshots: true, snapshots: true, sources: false });
+  session.traceActive = true;
+}
+
+function clearTaskSecrets(values: Record<string, BrowserAgentTaskSecret>): void {
+  for (const ref of Object.keys(values)) {
+    values[ref]!.username = "";
+    values[ref]!.password = "";
+    delete values[ref];
+  }
+}
+
+export function stageExecutionTargetURL(stage: BrowserAgentWorkerStage, currentURL: string): string | undefined {
+  const target = String(stage.url || stage.route || stage.entry_route || "").trim();
+  if (!target) return undefined;
+  return absoluteTargetURL(target, currentURL, stage.url);
+}
+
+async function ensureStageExecutionRoute(session: BrowserAgentSession, stage: BrowserAgentWorkerStage): Promise<void> {
+  const targetURL = stageExecutionTargetURL(stage, session.page.url());
+  if (!targetURL) return;
+  if (urlMatches(session.page.url(), targetURL)) {
+    const currentError = urlPolicyError(session.page.url(), session, false);
+    if (currentError) throw new Error(currentError);
+    return;
+  }
+  await navigateWithinSessionPolicy(session, targetURL, "domcontentloaded", actionTimeoutMS);
+  if (!urlMatches(session.page.url(), targetURL)) {
+    throw new Error(`browser_agent_stage_route_not_reached: ${stage.node_id}`);
+  }
+}
+
+async function navigateWithinSessionPolicy(
+  session: BrowserAgentSession,
+  targetURL: string,
+  loadState: "load" | "domcontentloaded" | "networkidle",
+  timeout: number,
+): Promise<void> {
+  const policyError = urlPolicyError(targetURL, session, false);
+  if (policyError) throw new Error(policyError);
+  await session.page.goto(targetURL, { waitUntil: loadState, timeout });
+  await waitForPageSettled(session.page);
+  const finalPolicyError = urlPolicyError(session.page.url(), session, false);
+  if (finalPolicyError) throw new Error(finalPolicyError);
 }
 
 function safeURL(value: string): string {

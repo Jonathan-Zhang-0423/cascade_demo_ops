@@ -565,13 +565,33 @@ func businessStagePlanUsable(plan *model.BusinessStagePlan) bool {
 	if plan == nil || len(plan.Stages) == 0 {
 		return false
 	}
-	if plan.CoreBusinessStageCount > 0 {
-		return true
-	}
+	coreCount := 0
 	for _, stage := range plan.Stages {
 		switch stage.Kind {
 		case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
-			return true
+			coreCount++
+			if !businessStageHasVerifiedPageEvidence(stage) {
+				return false
+			}
+		}
+	}
+	return coreCount > 0
+}
+
+func businessStageHasVerifiedPageEvidence(stage model.BusinessStage) bool {
+	for _, target := range stage.Targets {
+		if !target.IsVerified {
+			continue
+		}
+		refs := append([]model.EvidenceRef{}, target.EvidenceRefs...)
+		for _, candidate := range target.Alternatives {
+			refs = append(refs, candidate.EvidenceRefs...)
+		}
+		for _, ref := range refs {
+			switch ref.Kind {
+			case model.EvidenceKindBrowserScan, model.EvidenceKindBrowserTrace, model.EvidenceKindWebScreenshot:
+				return true
+			}
 		}
 	}
 	return false

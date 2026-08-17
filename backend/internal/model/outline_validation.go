@@ -44,6 +44,12 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		if selectors := distinctPrimarySelectors(step, stage, outline); len(selectors) > 1 {
 			return &OutlineConsistencyError{Code: "selector_binding_mismatch", NodeID: step.NodeID, Reason: "has different primary selectors across plan_json, stage_approval_plan, and script_outline"}
 		}
+		if err := validateActionComponentBinding(step, stage, outline); err != nil {
+			return &OutlineConsistencyError{Code: "action_component_binding_mismatch", NodeID: step.NodeID, Reason: err.Error()}
+		}
+		if err := validateBusinessInputConsensus(step, stage, outline); err != nil {
+			return &OutlineConsistencyError{Code: "business_input_binding_mismatch", NodeID: step.NodeID, Reason: err.Error()}
+		}
 		if err := validateExecutionRouteConsistency(step, stage, outline); err != nil {
 			return &OutlineConsistencyError{Code: "selector_route_provenance_mismatch", NodeID: step.NodeID, Reason: err.Error()}
 		}
@@ -87,8 +93,8 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 				return &OutlineConsistencyError{Code: "non_destructive_mismatch", NodeID: step.NodeID, Reason: "changes the App-approved non_destructive policy in script_outline"}
 			}
 		}
-		if stepRequiresBrowserAgentValidation(step) && !stepHasDeterministicBrowserAgentValidation(step) {
-			return &OutlineConsistencyError{Code: "deterministic_validation_missing", NodeID: step.NodeID, Reason: "requires a concrete URL, element, text, attribute, value, count, or title assertion"}
+		if stepRequiresBrowserAgentValidation(step) && !stepHasSemanticallyValidBrowserAgentValidation(step) {
+			return &OutlineConsistencyError{Code: "deterministic_validation_missing", NodeID: step.NodeID, Reason: "requires a concrete result assertion that proves the business outcome rather than rechecking the action target"}
 		}
 		if step.RuntimeAdaptive {
 			if err := validateRuntimeAdaptiveExecutionContract(bundle, step, stage, outline); err != nil {
@@ -101,6 +107,106 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		if step.StageKind == BusinessStageKindSessionSetup && stageLooksAuthenticated(stage, outline) && !stageHasSecretRef(step, stage) && !stageHasHumanCheckpoint(bundle, step.NodeID) {
 			return &OutlineConsistencyError{Code: "session_auth_evidence_missing", NodeID: step.NodeID, Reason: "claims an authenticated workspace without a secret_ref or human checkpoint"}
 		}
+	}
+	return nil
+}
+
+func validateActionComponentBinding(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) error {
+	componentRefs := nonEmptyNormalizedStrings(
+		step.Action.Target.ComponentRef,
+		contractComponentRef(step.TargetContract),
+		stage.Interaction.Target.ComponentRef,
+		contractComponentRef(stage.TargetContract),
+		contractComponentRef(outline.TargetContract),
+	)
+	for _, interaction := range outline.Interactions {
+		componentRefs = appendUniqueNormalized(componentRefs, interaction.Target.ComponentRef)
+	}
+	if len(componentRefs) > 1 {
+		return fmt.Errorf("binds the action to different component_ref values across approval layers")
+	}
+	if len(componentRefs) == 0 {
+		return nil
+	}
+	componentRef := componentRefs[0]
+	actionSelector := firstPrimarySelector(step, stage, outline)
+	for _, component := range outline.Components {
+		if !strings.EqualFold(strings.TrimSpace(component.ComponentRef), componentRef) {
+			continue
+		}
+		componentSelector := strings.TrimSpace(component.Selector)
+		if actionSelector != "" && componentSelector != "" && !strings.EqualFold(actionSelector, componentSelector) {
+			return fmt.Errorf("action selector %q conflicts with component %q selector %q", actionSelector, componentRef, componentSelector)
+		}
+		if actionSelector != "" && len(component.SelectorAlternatives) > 0 && !selectorCandidatesContainPrimary(component.SelectorAlternatives, actionSelector) {
+			return fmt.Errorf("action selector %q is not bound to component %q evidence candidates", actionSelector, componentRef)
+		}
+	}
+	// Legacy controlled fixtures may omit component summaries entirely.  When a
+	// component is present it must agree exactly; absence is handled by the
+	// runtime-adaptive discoverability and package preflight gates.
+	return nil
+}
+
+func contractComponentRef(contract *BrowserAgentTargetContract) string {
+	if contract == nil {
+		return ""
+	}
+	return contract.ComponentRef
+}
+
+func nonEmptyNormalizedStrings(values ...string) []string {
+	out := []string{}
+	for _, value := range values {
+		out = appendUniqueNormalized(out, value)
+	}
+	return out
+}
+
+func appendUniqueNormalized(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if strings.EqualFold(existing, value) {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func selectorCandidatesContainPrimary(candidates []SelectorCandidate, selector string) bool {
+	for _, candidate := range candidates {
+		if SelectorCandidateHasFormalProvenance(candidate) && selectorCandidateMatchesPrimary(candidate, selector) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateBusinessInputConsensus(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) error {
+	if step.StageKind == BusinessStageKindSessionSetup || (step.StageKind != BusinessStageKindBusinessInput && step.Action.Type != GraphActionFill) {
+		return nil
+	}
+	values := nonEmptyNormalizedStrings(step.Action.Value, stage.Interaction.Value)
+	refs := nonEmptyNormalizedStrings(step.Action.InputRef, stage.Interaction.InputRef)
+	for _, interaction := range outline.Interactions {
+		values = appendUniqueNormalized(values, interaction.Value)
+		refs = appendUniqueNormalized(refs, interaction.InputRef)
+	}
+	for _, input := range stage.InputContent {
+		values = appendUniqueNormalized(values, input.Value)
+		refs = appendUniqueNormalized(refs, input.InputRef)
+	}
+	if len(values) > 1 {
+		return fmt.Errorf("contains different approved fill values across plan, approval, and outline")
+	}
+	if len(refs) > 1 {
+		return fmt.Errorf("contains different input_ref values across plan, approval, and outline")
+	}
+	if len(values) == 0 && len(refs) == 0 && strings.TrimSpace(step.Action.SecretRef) == "" && strings.TrimSpace(stage.Interaction.SecretRef) == "" {
+		return fmt.Errorf("has no approved fill value or input_ref")
 	}
 	return nil
 }
@@ -538,6 +644,88 @@ func stepHasDeterministicBrowserAgentValidation(step ScriptStep) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// stepHasSemanticallyValidBrowserAgentValidation distinguishes a populated
+// assertion from one that actually proves the approved business outcome.
+// Re-checking that a clicked button is still visible is deterministic, but it
+// does not prove that the click opened, submitted, or changed anything.
+func stepHasSemanticallyValidBrowserAgentValidation(step ScriptStep) bool {
+	for _, validation := range step.Validations {
+		if !validation.Required || !deterministicValidationHasTargetOrExpected(validation) {
+			continue
+		}
+		if validationProvesBusinessOutcome(step, validation) {
+			return true
+		}
+	}
+	return false
+}
+
+func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool {
+	hasTarget := validation.Target.URL != "" || validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != ""
+	hasExpected := strings.TrimSpace(validation.Assertion) != "" || validation.Expected != nil
+	switch validation.Kind {
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+		return hasTarget || hasExpected
+	default:
+		return false
+	}
+}
+
+func validationProvesBusinessOutcome(step ScriptStep, validation ValidationSpec) bool {
+	if step.StageKind == BusinessStageKindBusinessInput || (step.Action.Type == GraphActionFill && step.StageKind != BusinessStageKindSessionSetup) {
+		if validation.Kind != "value_equals" {
+			return false
+		}
+		if step.Action.Value != "" {
+			expected, ok := validation.Expected.(string)
+			if !ok || strings.TrimSpace(expected) != strings.TrimSpace(step.Action.Value) {
+				return false
+			}
+		}
+		return true
+	}
+	if step.Action.Type == GraphActionClick {
+		if actionAndValidationTargetEquivalent(step.Action.Target, validation.Target) {
+			switch validation.Kind {
+			case "element_visible", "text_contains", "element_count":
+				return false
+			}
+		}
+		if validation.Kind == "url_matches" {
+			resultRoute := firstNonEmptyOutlineRoute(validation.Target.URL, stringExpected(validation.Expected))
+			entryRoute := firstNonEmptyOutlineRoute(step.PageTarget.URL, step.Action.Target.URL)
+			if resultRoute == "" || (entryRoute != "" && routesEquivalent(resultRoute, entryRoute)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func stringExpected(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func actionAndValidationTargetEquivalent(action ActionTarget, result ActionTarget) bool {
+	comparisons := [][2]string{
+		{action.Selector, result.Selector},
+		{action.TestID, result.TestID},
+		{action.ComponentRef, result.ComponentRef},
+	}
+	for _, pair := range comparisons {
+		if strings.TrimSpace(pair[0]) != "" && strings.EqualFold(strings.TrimSpace(pair[0]), strings.TrimSpace(pair[1])) {
+			return true
+		}
+	}
+	if action.Role != "" && strings.EqualFold(strings.TrimSpace(action.Role), strings.TrimSpace(result.Role)) {
+		actionName := firstNonEmptyOutlineRoute(action.Label, action.Text)
+		resultName := firstNonEmptyOutlineRoute(result.Label, result.Text)
+		return actionName != "" && strings.EqualFold(actionName, resultName)
 	}
 	return false
 }

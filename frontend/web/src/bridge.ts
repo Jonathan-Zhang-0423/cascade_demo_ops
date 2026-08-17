@@ -2299,6 +2299,12 @@ function workspaceFromCloudLifecycleResult(workspace: ProjectWorkspaceView, life
 }
 
 function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: LocalClientExecutionPackageBuild): ProjectWorkspaceView {
+	const metadata = build.package.metadata ?? {};
+	const metadataString = (key: string) => typeof metadata[key] === "string" ? metadata[key] as string : undefined;
+	const planGeneratedAt = metadataString("plan_generated_at");
+	const sourceSnapshotAt = metadataString("source_snapshot_at");
+	const pageScanAt = metadataString("page_scan_at");
+	const stalenessStatus = metadataString("staleness_status");
 	const {
 		cloudJobID: _cloudJobID,
 		exchangePackageID: _exchangePackageID,
@@ -2331,6 +2337,10 @@ function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: Loca
 	  ...(build.package.confidence_summary?.warnings ? { confidenceWarnings: build.package.confidence_summary.warnings } : {}),
 	  ...(build.size_report?.total_bytes != null ? { totalBytes: build.size_report.total_bytes } : {}),
 	  ...(build.size_report?.section_bytes ? { sectionBytes: build.size_report.section_bytes } : {}),
+	  ...(planGeneratedAt ? { planGeneratedAt } : {}),
+	  ...(sourceSnapshotAt ? { sourceSnapshotAt } : {}),
+	  ...(pageScanAt ? { pageScanAt } : {}),
+	  ...(stalenessStatus === "current" || stalenessStatus === "inputs_newer_than_plan" ? { stalenessStatus } : {}),
 	  blockedReasons: build.package.confidence_summary?.blocking_reasons ?? workspace.packagePreview.blockedReasons,
     },
     cloudRun: {

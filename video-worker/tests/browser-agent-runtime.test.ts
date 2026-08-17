@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, urlPolicyError, validatedStageSecretValues, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -149,6 +149,29 @@ describe("browser agent navigation policy", () => {
     expect(urlPolicyError("https://app.example.com/dashboard/projects/1", session, false)).toBeUndefined();
     expect(urlPolicyError("http://app.example.com/dashboard", session, false)).toContain("origin_not_allowed");
     expect(urlPolicyError("https://app.example.com/settings", session, false)).toContain("route_not_allowed");
+  });
+
+  it("resolves a stage execution route from about:blank before target lookup", () => {
+    expect(stageExecutionTargetURL({
+      id: "stage-login", order: 1, node_id: "login", url: "https://app.example.com/login", entry_route: "/login",
+      target_contract: { semantic_id: "login", destructive: false }, interactions: [{ kind: "fill", non_destructive: true }],
+    }, "about:blank")).toBe("https://app.example.com/login");
+  });
+
+  it("uses the approved absolute stage URL as the base for a relative entry route", () => {
+    expect(stageExecutionTargetURL({
+      id: "stage-project", order: 2, node_id: "project", entry_route: "/dashboard",
+      url: "https://app.example.com/dashboard", target_contract: { semantic_id: "project", destructive: false },
+      interactions: [{ kind: "click", non_destructive: true }],
+    }, "about:blank")).toBe("https://app.example.com/dashboard");
+  });
+
+  it("keeps disallowed stage targets subject to the existing policy", () => {
+    const target = stageExecutionTargetURL({
+      id: "stage-foreign", order: 1, node_id: "foreign", url: "https://evil.example/login",
+      target_contract: { semantic_id: "foreign", destructive: false }, interactions: [{ kind: "click", non_destructive: true }],
+    }, "about:blank");
+    expect(urlPolicyError(target!, session, false)).toContain("domain_not_allowed");
   });
 });
 

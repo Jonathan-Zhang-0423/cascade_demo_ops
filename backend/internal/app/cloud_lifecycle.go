@@ -1177,6 +1177,9 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 			"dev_plaintext_upload_mode": true,
 		},
 	}
+	for key, value := range packageGenerationLineageMetadata(state) {
+		pkg.Metadata[key] = value
+	}
 	if state.SourceBinding != nil {
 		pkg.SourceBindingSummary = &model.SourceBindingSummary{
 			SchemaVersion: model.ProductSourceBindingAssessmentSchemaVersion,
@@ -2210,6 +2213,9 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 	if finding := preflightSourceBinding(state, pkg); finding != nil {
 		findings = append(findings, *finding)
 	}
+	if finding := preflightPackageStaleness(state); finding != nil {
+		findings = append(findings, *finding)
+	}
 	if pkg == nil || pkg.ExecutableScriptBundle == nil || pkg.ExecutableScriptBundle.PlanJSON == nil {
 		return append(findings, packagePreflightFinding(
 			"script_bundle_missing",
@@ -2316,6 +2322,91 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 		}
 	}
 	return findings
+}
+
+func packageGenerationLineageMetadata(state *orchestrator.CascadeState) map[string]any {
+	metadata := map[string]any{"staleness_status": "current"}
+	if state == nil {
+		return metadata
+	}
+	planAt := time.Time{}
+	if state.ExecutableScriptBundle != nil {
+		planAt = state.ExecutableScriptBundle.UpdatedAt
+		if planAt.IsZero() {
+			planAt = state.ExecutableScriptBundle.CreatedAt
+		}
+	}
+	sourceAt, pageAt := latestPackageEvidenceTimes(state)
+	if !planAt.IsZero() {
+		metadata["plan_generated_at"] = planAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !sourceAt.IsZero() {
+		metadata["source_snapshot_at"] = sourceAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !pageAt.IsZero() {
+		metadata["page_scan_at"] = pageAt.UTC().Format(time.RFC3339Nano)
+	}
+	if state.WorkflowGraph != nil && !state.WorkflowGraph.UpdatedAt.IsZero() {
+		metadata["workflow_graph_updated_at"] = state.WorkflowGraph.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if packageInputsNewerThanPlan(state, planAt, sourceAt, pageAt) {
+		metadata["staleness_status"] = "inputs_newer_than_plan"
+		metadata["regeneration_required"] = true
+	}
+	return metadata
+}
+
+func latestPackageEvidenceTimes(state *orchestrator.CascadeState) (time.Time, time.Time) {
+	sourceAt, pageAt := time.Time{}, time.Time{}
+	if state == nil {
+		return sourceAt, pageAt
+	}
+	for _, snapshot := range state.CodeSnapshots {
+		if snapshot.CreatedAt.After(sourceAt) {
+			sourceAt = snapshot.CreatedAt
+		}
+	}
+	for _, snapshot := range state.PageSnapshots {
+		observedAt := snapshot.CapturedAt
+		if observedAt.IsZero() {
+			observedAt = snapshot.CreatedAt
+		}
+		if observedAt.After(pageAt) {
+			pageAt = observedAt
+		}
+	}
+	return sourceAt, pageAt
+}
+
+func packageInputsNewerThanPlan(state *orchestrator.CascadeState, planAt, sourceAt, pageAt time.Time) bool {
+	if state == nil || planAt.IsZero() {
+		return false
+	}
+	if sourceAt.After(planAt) || pageAt.After(planAt) {
+		return true
+	}
+	return state.ProjectContext != nil && state.ProjectContext.UpdatedAt.After(planAt)
+}
+
+func preflightPackageStaleness(state *orchestrator.CascadeState) *model.AgentFinding {
+	if state == nil || state.ExecutableScriptBundle == nil {
+		return nil
+	}
+	planAt := state.ExecutableScriptBundle.UpdatedAt
+	if planAt.IsZero() {
+		planAt = state.ExecutableScriptBundle.CreatedAt
+	}
+	sourceAt, pageAt := latestPackageEvidenceTimes(state)
+	if !packageInputsNewerThanPlan(state, planAt, sourceAt, pageAt) {
+		return nil
+	}
+	finding := packagePreflightFinding(
+		"execution_plan_stale",
+		model.FindingSeverityBlocking,
+		"需求、源码或页面证据在执行计划生成后发生了变化",
+		"重新运行项目理解、页面扫描和执行计划生成，再进行审批。",
+	)
+	return &finding
 }
 
 func preflightSourceBinding(state *orchestrator.CascadeState, pkg *model.ClientExecutionPackage) *model.AgentFinding {

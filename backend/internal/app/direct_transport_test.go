@@ -27,10 +27,6 @@ import (
 	"cascade-demoops/backend/internal/store"
 )
 
-func formalAppScreenshotInputs(pageURL string) []model.WebpageScreenshotInput {
-	return []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL(pageURL)}
-}
-
 func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *testing.T) {
 	root := t.TempDir()
 	port := reserveDirectAppTestPort(t)

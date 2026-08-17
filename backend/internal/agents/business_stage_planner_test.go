@@ -191,6 +191,19 @@ func TestBusinessStageResultValidationDoesNotReuseClickedButton(t *testing.T) {
 	}
 }
 
+func TestBusinessTargetRankPrefersSpecificControlOverTextAggregatingContainer(t *testing.T) {
+	container := model.BusinessTargetCandidate{
+		Label: "新建项目 New project 项目名称 Project name 构建模式 Build mode 启动构建 Start build Builder workspace",
+		Kind:  "click", Selector: "[data-testid='workspace']", TestID: "workspace", SelectorScore: 100, IsVerified: true,
+	}
+	button := model.BusinessTargetCandidate{
+		Label: "新建项目", Kind: "click", Selector: "[data-testid='button-new-project']", TestID: "button-new-project", SelectorScore: 100, IsVerified: true,
+	}
+	if businessTargetRank(container) >= businessTargetRank(button) {
+		t.Fatalf("a text-aggregating workspace container must not outrank the concrete new-project button: container=%d button=%d", businessTargetRank(container), businessTargetRank(button))
+	}
+}
+
 func TestBusinessStagePlannerDoesNotBindLoginToProjectNameStage(t *testing.T) {
 	project := graphQualityProject()
 	project.ProductDescription = "登录后新建项目，项目名称俄罗斯方块。"

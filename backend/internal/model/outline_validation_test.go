@@ -107,6 +107,63 @@ func TestValidateBrowserAgentOutlineConsistencyRejectsPrimarySelectorDrift(t *te
 	assertOutlineConsistencyCode(t, bundle, "selector_binding_mismatch")
 }
 
+func TestValidateBrowserAgentOutlineConsistencyRejectsActionComponentSelectorConflict(t *testing.T) {
+	bundle := consistentOutlineBundleForTest()
+	componentRef := "component:new-project"
+	for index := range bundle.PlanJSON.Steps {
+		bundle.PlanJSON.Steps[index].Action.Target.ComponentRef = componentRef
+	}
+	bundle.StageApprovalPlan.Stages[0].Interaction.Target.ComponentRef = componentRef
+	bundle.ScriptOutline.Stages[0].Interactions[0].Target.ComponentRef = componentRef
+	bundle.ScriptOutline.Stages[0].Components = []BrowserAgentComponentTarget{{
+		ComponentRef: componentRef,
+		Selector:     "[data-testid='button-new-project']",
+	}}
+	assertOutlineConsistencyCode(t, bundle, "action_component_binding_mismatch")
+}
+
+func TestSemanticValidationRejectsVisibleClickedControlAsOutcome(t *testing.T) {
+	step := ScriptStep{
+		StageKind: BusinessStageKindBusinessAction,
+		Action: ScriptActionInstruction{Type: GraphActionClick, Target: ActionTarget{
+			Selector: "[data-testid='button-new-project']", TestID: "button-new-project",
+		}},
+		Validations: []ValidationSpec{{
+			ID: "wrong_result", Kind: "element_visible", Required: true,
+			Target: ActionTarget{Selector: "[data-testid='button-new-project']", TestID: "button-new-project"},
+		}},
+	}
+	if stepHasSemanticallyValidBrowserAgentValidation(step) {
+		t.Fatal("a still-visible clicked control must not prove the business outcome")
+	}
+	step.Validations[0].Target = ActionTarget{Selector: "[data-testid='dialog-new-project']", TestID: "dialog-new-project"}
+	if !stepHasSemanticallyValidBrowserAgentValidation(step) {
+		t.Fatal("a concrete post-click result target should prove the business outcome")
+	}
+}
+
+func TestValidateBrowserAgentOutlineConsistencyRejectsBusinessInputValueDrift(t *testing.T) {
+	bundle := consistentOutlineBundleForTest()
+	step := &bundle.PlanJSON.Steps[0]
+	step.StageKind = BusinessStageKindBusinessInput
+	step.Action.Type = GraphActionFill
+	step.Action.SecretRef = ""
+	step.Action.Value = "贪吃蛇游戏"
+	step.Validations = []ValidationSpec{{ID: "value", Kind: "value_equals", Target: step.Action.Target, Expected: "贪吃蛇游戏", Required: true}}
+	stage := &bundle.StageApprovalPlan.Stages[0]
+	stage.StageKind = BusinessStageKindBusinessInput
+	stage.Interaction.Kind = GraphActionFill
+	stage.Interaction.SecretRef = ""
+	stage.Interaction.Value = "入口"
+	stage.InputContent = []StageInputContent{{Kind: "project_name", Value: "贪吃蛇游戏"}}
+	outline := &bundle.ScriptOutline.Stages[0]
+	outline.StageKind = BusinessStageKindBusinessInput
+	outline.Interactions[0].Kind = GraphActionFill
+	outline.Interactions[0].SecretRef = ""
+	outline.Interactions[0].Value = "贪吃蛇游戏"
+	assertOutlineConsistencyCode(t, bundle, "business_input_binding_mismatch")
+}
+
 func assertOutlineConsistencyCode(t *testing.T, bundle *ExecutableRecordingScriptBundle, want string) {
 	t.Helper()
 	err := ValidateBrowserAgentOutlineConsistency(bundle)

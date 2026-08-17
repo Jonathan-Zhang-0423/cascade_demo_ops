@@ -2029,6 +2029,7 @@ function PackageApproval({
 		<ApprovalSummaryCard label="录制方案" value={`${stages.length} 个阶段 · ${workspace.planReview.targetDurationSec} 秒`} detail={workspace.planReview.outputRequests.map(assetKindLabel).join("、") || "演示视频"} />
 		<ApprovalSummaryCard label="上传数据" value={workspace.packagePreview.sourceSummaryOnly ? "仅摘要与证据引用" : "上传范围异常"} detail={`精简后 ${workspace.packagePreview.totalBytes == null ? "待统计" : formatBytes(workspace.packagePreview.totalBytes)} · ${workspace.packagePreview.encrypted ? "加密传输" : "未加密"}`} />
 		<ApprovalSummaryCard label="隐私保护" value={`${workspace.planReview.redactionSelectors.length} 条打码规则`} detail={`${workspace.planReview.forbiddenPages.length} 个禁止页面 · 不包含完整源码`} />
+		<ApprovalSummaryCard label="计划新鲜度" value={workspace.packagePreview.stalenessStatus === "inputs_newer_than_plan" ? "必须重新生成" : "输入未晚于计划"} detail={workspace.packagePreview.planGeneratedAt ? `计划 ${formatTimestamp(workspace.packagePreview.planGeneratedAt)}${workspace.packagePreview.pageScanAt ? ` · 页面 ${formatTimestamp(workspace.packagePreview.pageScanAt)}` : ""}${workspace.packagePreview.sourceSnapshotAt ? ` · 源码 ${formatTimestamp(workspace.packagePreview.sourceSnapshotAt)}` : ""}` : "等待生成时间信息"} />
 	  </div>
 
 	  <section className="approval-section">
