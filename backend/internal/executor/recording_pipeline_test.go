@@ -498,6 +498,22 @@ func TestValidateFinalMP4DeliveryEnforcesRequested2KProfile(t *testing.T) {
 	}
 }
 
+func TestValidateFinalMP4DeliveryRejectsUnsatisfiedRequirementReport(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "final.mp4")
+	reportPath := filepath.Join(dir, "requirement_satisfaction_report.json")
+	writeTestFile(t, path, "mp4 fixture")
+	writeTestFile(t, reportPath, `{"status":"not_satisfied","errors":[{"code":"edit_plan_timeline_duration_mismatch"}]}`)
+	service := &fakeRecordingRenderService{probeResult: MediaProbeResult{
+		Path: path, Format: "mov,mp4", VideoCodec: "h264", DurationMS: 1000,
+		Width: 2560, Height: 1440, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true,
+	}}
+	err := validateFinalMP4Delivery(t.Context(), service, nil, RenderResult{VideoPath: path, RequirementReportPath: reportPath})
+	if err == nil || !strings.Contains(err.Error(), "final_video_quality_gate: edit_plan_timeline_duration_mismatch") {
+		t.Fatalf("expected unsatisfied requirement report to block delivery, got %v", err)
+	}
+}
+
 func TestValidateBrowserAgentEvidenceMasterRejectsUpscaledLowResolutionSource(t *testing.T) {
 	pkg := sampleClientExecutionPackageForExecutorTest(t)
 	pkg.ExecutableScriptBundle.ScriptManifest.Runtime = model.ExecutableScriptRuntimeBrowserAgentOutlineV1

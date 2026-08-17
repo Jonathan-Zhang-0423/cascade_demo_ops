@@ -297,6 +297,31 @@ describe("static screenshot compositor e2e", () => {
     }
   }, 30_000);
 
+  renderWithFFmpeg("reports a blocking mismatch when shot duration is shorter than the declared edit target", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-edit-duration-gate-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const screenshotPath = path.join(root, "screenshot.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-t", "1", "-c:v", "mpeg4", recordingPath]);
+      generateScreenshot(screenshotPath);
+      const editPlan = plan();
+      editPlan.target_duration_ms = 3000;
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: catalog(recordingPath, screenshotPath),
+        edit_plan: editPlan,
+        render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" },
+      });
+      const report = JSON.parse(await readFile(result.requirement_satisfaction_report_path, "utf8"));
+      expect(report.status).toBe("not_satisfied");
+      expect(report.errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "edit_plan_timeline_duration_mismatch", path: "demo_edit_plan.shots" }),
+      ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   renderWithFFmpeg("does not draw target geometry over a different still from the same step", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cascade-target-source-mismatch-"));
     try {

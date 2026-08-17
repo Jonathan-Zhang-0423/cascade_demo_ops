@@ -25,6 +25,7 @@
 - FFmpeg 片段保持同一媒体规格，concat 使用 stream copy。
 - 已满足交付规格的合成 MP4 仅 remux/faststart，不再次有损编码。
 - 使用 FFprobe 验证原片尺寸、最终编码、像素格式、帧率和音频。
+- `DemoEditPlan.shots` 的有效时长总和必须与 `target_duration_ms` 在 5%/250ms 容差内一致；否则报告 `edit_plan_timeline_duration_mismatch`，Server 最终交付门禁拒绝该 MP4，禁止“镜头只有 35 秒但目标写 60 秒”的自洽短片被误报为满足。
 
 ### 批次 2：目标解析与几何证据
 
@@ -41,6 +42,7 @@
 - 缺少几何证据的镜头可保留，但不得绘制目标圈选。
 - render manifest 记录每个覆盖层的证据来源和坐标变换结果。
 - 已通过真实 FFmpeg 像素测试：无几何证据时不绘制圈选；有证据时，圈选在 zoom 后仍绑定正确目标。
+- 预观察和正式动作执行都必须保存脱敏的 `target_resolution_attempts`；不能只记录预扫描策略而丢失真正点击/填写时的再次解析结果。
 
 ### 批次 4：模型素材与旁白
 

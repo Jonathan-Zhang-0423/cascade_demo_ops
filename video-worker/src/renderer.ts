@@ -1666,8 +1666,31 @@ function buildRequirementSatisfactionReport(
   const failedStepIDs = catalog.steps.filter((step) => isFailedExecutionStatus(step.status)).map((step) => step.step_id);
   const passedStepCount = catalog.steps.filter((step) => isPassedExecutionStatus(step.status)).length;
   const actualScreenshotStepIDs = screenshotStepIDsForCatalog(catalog);
+  const declaredEditPlanDurationMS = editPlan.target_duration_ms || 0;
   const expectedRenderedDurationMS = outputDurationMS(editPlan);
   const actualRenderedDurationSec = mediaNormalization.output?.duration_sec;
+
+  if (declaredEditPlanDurationMS > 0 && expectedRenderedDurationMS > 0) {
+    const toleranceMS = Math.max(250, declaredEditPlanDurationMS * 0.05);
+    if (Math.abs(expectedRenderedDurationMS - declaredEditPlanDurationMS) > toleranceMS) {
+      errors.push(requirementFinding(
+        "edit_plan_timeline_duration_mismatch",
+        `Edit-plan shots contribute ${(expectedRenderedDurationMS / 1000).toFixed(3)}s, but target_duration_ms requires ${(declaredEditPlanDurationMS / 1000).toFixed(3)}s (tolerance ${(toleranceMS / 1000).toFixed(3)}s).`,
+        "demo_edit_plan.shots",
+      ));
+      checks.push({
+        code: "edit_plan_timeline_duration",
+        status: "fail",
+        message: "Edit-plan shot duration does not satisfy the declared target duration.",
+      });
+    } else {
+      checks.push({
+        code: "edit_plan_timeline_duration",
+        status: "pass",
+        message: "Edit-plan shot duration satisfies the declared target duration.",
+      });
+    }
+  }
 
   if (mediaNormalization.status === "ok" && actualRenderedDurationSec !== undefined && expectedRenderedDurationMS > 0) {
     const expectedRenderedDurationSec = expectedRenderedDurationMS / 1000;

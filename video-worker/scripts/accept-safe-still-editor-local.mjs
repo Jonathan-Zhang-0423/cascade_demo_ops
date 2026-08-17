@@ -91,6 +91,9 @@ if (summary.edit_plan_duration_sec !== targetDurationSec) {
 if (summary.model_execution?.invoked !== false) {
   throw new Error("safe still acceptance unexpectedly reported a model invocation");
 }
+if (summary.status !== "satisfied") {
+  throw new Error(`safe still acceptance requirement report is ${summary.status}`);
+}
 
 await writeFile(path.join(outputDir, "safe-still-editor-summary.json"), JSON.stringify(summary, null, 2), "utf8");
 console.log(JSON.stringify(summary, null, 2));
