@@ -93,10 +93,13 @@ Seedance 只生成非权威展示素材：
 
 - 现有运行请求：`backend/internal/executor/director_adapter.go`
 - Ark Client：`backend/internal/media/ark_client.go`
-- 未注册 dry-run Profile：`backend/internal/media/generated_shot_profiles.go`
+- Capability Profile/Compiler：`backend/internal/media/generated_shot_profiles.go`
+- FinalFilm Adapter：`backend/internal/media/seedance_provider_adapter.go`
 - 详细厂商参数基线：[ark-model-parameters.md](ark-model-parameters.md)
 - Ark 运行准备：[ark-media-integration.md](ark-media-integration.md)
 
-当前 dry-run Profile 不接 App、Director、Executor、comparison 或 fallback 路由，不会改变现有验收请求。
+Seedance 2.0 Adapter 已接入 FinalFilm Provider Registry，复用 Ark create/query transport、HTTPS 下载器和 H3 的 FFmpeg/ffprobe normalizer，并输出统一的 `GeneratedShotCandidate`。真实调用必须同时满足 `CASCADE_ARK_MEDIA_MODE=real`、有效 Ark/Seedance 凭据、精确视频 route 和独立 `CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true`；仅配置 API key 不会启用。
 
-Seedance 与 H3 未来规范化产物的共同字段见 [Server 生成视频统一候选产物内部协议](generated-video-candidate-internal-protocol.md)。当前 Seedance 运行链路尚未切换到该协议；在补齐独立的下载、双探测和规范化证据前，不得直接构造统一候选对象。
+Seedance 与 H3 的规范化共同字段见 [Server 生成视频统一候选产物内部协议](generated-video-candidate-internal-protocol.md)。两路只在统一意图与候选层汇合，厂商请求、响应、任务 ID 和临时 URL 保持隔离。
+
+截至 2026-08-17，BytePlus/ModelArk 官方直连资料仍以 Seedance 2.0 系列和 `dreamina-seedance-2-0-260128` 为当前 API 基线，因此本 Adapter 不猜测或替换模型 ID。Runway API 已另行提供 `seedance2_5`（4～30 秒、480p/720p/1080p、reference/extend V2V）；若后续接入，应新增独立 transport/profile、费用策略和验收，不能把 Runway 型号直接写入已验证的 Ark route。

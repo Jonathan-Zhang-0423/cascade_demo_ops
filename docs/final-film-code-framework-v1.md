@@ -7,7 +7,7 @@
 1. **事实轨**：Browser Agent 真实录屏、截图、验证结果和用户确认的音频，只允许由 `DemoEditPlan` 与 FFmpeg 确定性处理。
 2. **展示轨**：片头、片尾、章节转场、抽象 B-roll 和品牌氛围等非事实镜头，可由 Seedance、MiniMax-H3、Aleph 等 Provider 生成或修改，但必须作为候选经过审核后才能进入时间线。
 
-现有仓库已经实现了大部分底层安全组件。按能力模块估算约 **70% 可复用**；但按已经接入生产主链路估算约 **45% 已连通**。本阶段不应重写候选协议、编辑计划或 Renderer，而应增加一个 Server 侧 `FinalFilmService`，把已有模块编排成持久化、可恢复、可审计的作业链。
+现有仓库已经实现并接通大部分底层安全组件。按能力模块估算约 **85% 可复用**，按本地 App/Server 主链路估算约 **80% 已连通**；剩余工作主要是分布式治理、深层质量门禁和 localized V2V，而不是重写候选协议、编辑计划或 Renderer。`FinalFilmService` 已把已有模块编排成持久化、可恢复、可审计的作业链。
 
 ## 2. 当前实现与复用比例
 
@@ -17,15 +17,15 @@
 | 确定性编辑计划 | `DemoEditPlan`、locked fields、required step order | 直接复用，补 plan revision/constraint ref | 85% |
 | Director 输入与受限 Patch | `DirectorInput`、Suggestion、Patch Builder、Patch Validator | 复用；拆掉其中的 Provider 调用职责 | 70% |
 | Provider-neutral 意图 | `GeneratedShotIntent`、Preflight、Capability Profile | 复用；把 4–15 秒公共硬编码下沉到 Provider Profile | 75% |
-| MiniMax-H3 | Client、Admission、Harness、轮询、下载、规范化、结构审核 | 直接复用并接入正式 Job Runner | 80% |
-| Seedance | Ark Client、真实任务调用、轮询、候选下载、2.0 Compiler | 复用传输层；新增 2.5 Profile/Compiler | 60% |
+| MiniMax-H3 | Client、Admission、Harness、轮询、下载、规范化、结构审核、正式 Job Runner 和真实成片 E2E | 已直接复用 | 95% |
+| Seedance | Ark Client、真实任务调用、轮询、下载、规范化和 2.0 Adapter | 当前 Ark 2.0 路由已复用；Runway `seedance2_5` 应作为独立未来 Profile/Adapter，不覆盖已验证路由 | 90% |
 | Aleph 2 | 尚无专属 Adapter | 复用下载、规范化、候选、审核和配额框架 | 20% |
 | 候选审核与选择 | Structural Review、Human Content Review、Candidate Set、Selection、Editor Approval | 直接复用并接 API | 85% |
 | 编辑器候选门禁 | 候选媒体检查、显式用户审批、禁止绑定业务步骤 | 直接复用 | 80% |
 | FFmpeg Renderer | trim/concat、静帧、字幕、音频、旁白、画面操作、候选门禁 | 直接复用；后续再拆文件 | 90% |
-| 作业编排与恢复 | 有 dry-run Orchestration Record，但禁止真实 Provider/Editor/Renderer 权限 | 新建 production job state machine | 30% |
-| 持久化 | EditorSession 为本地 JSON；DB 有通用 jobs/assets/reviews/render_jobs | 复用表思想，新增 final-film 专用关联与幂等记录 | 40% |
-| 前端 | 已有候选审核和时间线编辑 | 复用；新增生成请求、进度、A/B 选择和失败回退 UI | 65% |
+| 作业编排与恢复 | `FinalFilmJob`、revision CAS、连续事件、baseline fallback 和原子补丁应用 | 已接通；后续换分布式 Store/queue | 90% |
+| 持久化 | FinalFilm 本地原子 FileStore；DB 有通用 jobs/assets/reviews/render_jobs | 本地产品链已复用；生产多实例需持久化 Store | 70% |
+| 前端 | 最终成片面板、生成授权、Provider 选择、审核、选择、Editor approval、原子应用和事件审计 | 已接通；A/B comparison 尚未开放 | 90% |
 
 ## 3. 当前必须修正的结构问题
 
