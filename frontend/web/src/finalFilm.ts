@@ -88,7 +88,7 @@ export type FinalFilmClient = {
   renderBaseline(jobID: string): Promise<EditorClientResult<FinalFilmJob>>;
   planDirector(jobID: string, revision: number): Promise<EditorClientResult<FinalFilmJob>>;
   decideGeneration(jobID: string, revision: number, approved: boolean, reason?: string): Promise<EditorClientResult<FinalFilmJob>>;
-  generate(jobID: string, revision: number): Promise<EditorClientResult<FinalFilmJob>>;
+  generate(jobID: string, revision: number, preferredProvider: "minimax-h3" | "seedance-2.0"): Promise<EditorClientResult<FinalFilmJob>>;
   review(jobID: string, revision: number, decision: Record<string, unknown>): Promise<EditorClientResult<FinalFilmJob>>;
   select(jobID: string, revision: number, decision: Record<string, unknown>): Promise<EditorClientResult<FinalFilmJob>>;
   approve(jobID: string, revision: number, decision: Record<string, unknown>): Promise<EditorClientResult<FinalFilmJob>>;
@@ -134,7 +134,7 @@ export function createFinalFilmClient(): FinalFilmClient {
     renderBaseline: (jobID) => post<FinalFilmJob>(jobPath(jobID, "/render")),
     planDirector: (jobID, revision) => post<FinalFilmJob>(jobPath(jobID, "/plan-director"), { expected_revision: revision }),
     decideGeneration: (jobID, revision, approved, reason) => post<FinalFilmJob>(jobPath(jobID, "/generation-approval"), { expected_revision: revision, approved, ...(reason ? { reason } : {}) }),
-    generate: (jobID, revision) => post<FinalFilmJob>(jobPath(jobID, "/generate"), { expected_revision: revision, preferred_provider: "minimax-h3" }),
+    generate: (jobID, revision, preferredProvider) => post<FinalFilmJob>(jobPath(jobID, "/generate"), { expected_revision: revision, preferred_provider: preferredProvider }),
     review: (jobID, revision, decision) => post<FinalFilmJob>(jobPath(jobID, "/content-review"), { expected_revision: revision, decision }),
     select: (jobID, revision, decision) => post<FinalFilmJob>(jobPath(jobID, "/selection"), { expected_revision: revision, decision }),
     approve: (jobID, revision, decision) => post<FinalFilmJob>(jobPath(jobID, "/editor-approval"), { expected_revision: revision, decision }),

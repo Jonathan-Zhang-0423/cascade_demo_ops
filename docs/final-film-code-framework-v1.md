@@ -65,7 +65,7 @@ type PresentationIntentCompiler interface {
 
 ### 3.3 公共意图混入 Provider 交集限制
 
-当前 `GeneratedShotIntent` 把时长锁在 4–15 秒、引用数量锁在 4 个。这适用于当前 H3/Seedance 2.0 项目 Profile，但会阻止 Seedance 2.5 的 30 秒能力。
+当前 `GeneratedShotIntent` 把时长锁在 4–15 秒、引用数量锁在 4 个。这与当前 H3/Seedance 2.0 展示镜头 Profile 一致；Aleph 2 的 2–30 秒 V2V 编辑应使用后续独立的 localized-edit intent，不能把更宽的编辑权限混入展示镜头合同。
 
 调整原则：
 
@@ -80,7 +80,7 @@ type PresentationIntentCompiler interface {
 
 ### 3.5 H3 专属规范化应抽成公共组件
 
-H3 已完成 `ffprobe -> FFmpeg -> ffprobe`，输出锁定为 MP4/H.264/yuv420p/1920x1080/CFR30。应把实现抽成 Provider-neutral `MediaNormalizer`；H3、Seedance 2.5、Aleph 2 都调用同一实现，Provider 目录只保留结果转换。
+H3 已完成 `ffprobe -> FFmpeg -> ffprobe`，输出锁定为 MP4/H.264/yuv420p/1920x1080/CFR30。应把实现抽成 Provider-neutral `MediaNormalizer`；H3、Seedance 2.0、Aleph 2 都调用同一实现，Provider 目录只保留结果转换。
 
 ## 4. 推荐目录结构
 
@@ -116,7 +116,7 @@ backend/internal/
     provider_adapter.go        # 新增统一 Provider Adapter 接口
     provider_registry.go       # 新增 Adapter 注册表
     minimax_h3_*.go            # 现有实现
-    seedance_25_*.go           # 新 Profile/Compiler/Adapter
+    seedance_20_*.go           # 现行 Profile/Compiler/Adapter
     runway_client.go           # Aleph/Seedance via Runway 的共享 transport
     aleph2_*.go                # 局部 V2V 编辑 Adapter
 
@@ -248,9 +248,9 @@ sha256(job_id + job_revision + intent_id + provider + profile_version + request_
 | 意图 | 默认路由 | 备选 | 禁止条件 |
 | --- | --- | --- | --- |
 | 真实素材拼接、裁剪、字幕、音频 | Renderer | 无 | 永远不交给生成模型 |
-| intro/outro/brand atmosphere | MiniMax-H3 或 Seedance 2.5 | 两路 A/B | 不得出现产品事实或可读 UI |
-| section divider/transition | Seedance 2.5 | H3 首尾帧 | 不能替换 required UI shot |
-| 多素材视听叙事 | Seedance 2.5 | H3 短镜头 | 必须为非事实展示槽位 |
+| intro/outro/brand atmosphere | MiniMax-H3 或 Seedance 2.0 | 两路 A/B | 不得出现产品事实或可读 UI |
+| section divider/transition | Seedance 2.0 | H3 首尾帧 | 不能替换 required UI shot |
+| 多素材视听叙事 | Seedance 2.0 | H3 短镜头 | 必须为非事实展示槽位 |
 | 局部 V2V 修补 | Aleph 2 | 不自动 fallback | 真实 UI、数字、表格、按钮默认禁止 |
 | UI 录屏质量修复 | FFmpeg/确定性滤镜 | 重新录制 | 禁止生成式重绘 |
 
@@ -329,12 +329,12 @@ type Store interface {
 - 将当前 Editor 候选审核与新的 content/editor approval 身份关联；
 - 增加作业恢复、重复回调和幂等测试。
 
-### P2：Seedance 2.5
+### P2：Seedance 2.0 生产 Adapter
 
-- 新增独立 Profile 和 Compiler，不覆盖 Seedance 2.0；
-- 若使用 Runway transport，Provider ID 与 Model ID 分开记录；
-- 支持 30 秒槽位，但仍由 Server 约束总时长和用途；
-- 对视频/音频参考、绿幕输出建立独立 capability flag；
+- 复用既有 Ark Client、2.0 Profile/Compiler、HTTPS 下载和 FFmpeg 规范化；
+- Provider ID 与 Model ID 分开记录，不把 Ark 原始响应交给 Editor；
+- 保持 4–15 秒展示槽位，对图片/视频参考继续执行公共 URI/MIME 门禁；
+- 对音频生成和 V2V 编辑另建 capability flag，默认不进入当前展示镜头合同；
 - 真实调用只在显式 real mode、密钥、预算和用户授权均通过后发生。
 
 ### P3：Aleph 2 局部编辑
@@ -367,7 +367,7 @@ type Store interface {
 9. 一条 H3 失败后仍完成 baseline render 的 E2E；
 10. 一条未审核候选无法进入 Renderer 的 E2E。
 
-完成这批后，再接 Seedance 2.5 或 Aleph 2，不会把新供应商逻辑继续堆进 Director 或 `renderer.ts`。
+完成这批后，再接 Seedance 2.0 或 Aleph 2，不会把新供应商逻辑继续堆进 Director 或 `renderer.ts`。
 
 ## 12. 验收口径
 
@@ -402,7 +402,7 @@ type Store interface {
 - Director 输出受控 `GeneratedShotIntent.prompt` 的正式合同和规划模型接线；
 - FinalFilmJob Runner 调用 Provider Registry 并持久化候选；
 - 内容审核、A/B 选择、Editor approval 与候选 Patch 的 API 串联；
-- Seedance 2.5/Aleph 2 Adapter；
+- Aleph 2 localized V2V Adapter；
 - 前端 FinalFilm 作业面板；
 - 真实 Provider workflow E2E 和最终生成候选合成验收。
 
@@ -416,7 +416,7 @@ type Store interface {
 - H3 workflow 从 `.env` 读取显式视频路由和 API key，并额外要求 Server 侧价格/额度配置；缺少任一配置时以 disabled adapter 失败关闭，不影响事实轨基线交付；
 - 生成失败或无可选 Provider 时，状态收敛为 `completed_without_generated_track`，最终输出仍绑定先前完成的确定性录屏基线。
 
-后续尚需：候选人工内容审核、A/B 选择、Editor approval、补丁显式应用、最终合成与输出验收；Seedance 2.5/Aleph Adapter；前端控制面板。
+后续尚需：候选人工内容审核、A/B 选择、Editor approval、补丁显式应用、最终合成与输出验收；Seedance 2.0/Aleph Adapter；前端控制面板。
 
 ### 2026-08-17：P0 第三批审核与合成闭环完成
 
@@ -435,4 +435,11 @@ type Store interface {
 - 候选播放器只通过 `GET /v1/final-film/jobs/{id}/media/{candidate_id}` 读取该作业已持久化且通过结构校验的 normalized 文件，不接受浏览器传入任意本机路径；
 - 未保存的 Editor 草稿不能打开工作流；前端 Mock 模式明确禁用真实工作流，不伪造 Provider 或审核结果。
 
-后续尚需：黑帧/冻结帧/响度/OCR 深度质量门禁；Seedance 2.5/Aleph Adapter；真实 workflow 端到端成片验收。
+新增 Provider 落地：
+
+- Seedance 2.0 已实现 `GeneratedShotProviderAdapter`，复用 Ark create/query transport、公共 HTTPS 下载器和 FFmpeg/FFprobe normalizer；
+- Adapter 在 Provider HTTP 前再次要求持久化生成授权、幂等键、admission scope、输出目录和 capability preflight；
+- 真实路由还必须同时满足 `CASCADE_ARK_MEDIA_MODE=real`、Seedance 凭据、精确的视频 route 和独立 `CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true`，仅配置 API key 不会启用；
+- Web 面板可显式选择 H3 或 Seedance 2.0；两路产物最终都收敛为同一 candidate/review/selection/approval/patch 合同。
+
+后续尚需：黑帧/冻结帧/响度/OCR 深度质量门禁；Aleph 2 localized V2V Adapter；真实 workflow 端到端成片验收。
