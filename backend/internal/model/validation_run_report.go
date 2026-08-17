@@ -99,6 +99,9 @@ func (r ValidationRunReport) Validate() error {
 	if r.FormalAppServerSuccess && (!r.OriginalPackageUnchanged || !r.AppGenerated || !r.TransportAuthenticated || !r.FormalExchange) {
 		return errors.New("formal app-server success requires original_package_unchanged and formal provenance")
 	}
+	if r.formalExecution() && len(r.Stages) == 0 {
+		return errors.New("formal validation run report requires at least one stage evidence bundle")
+	}
 	for index, stage := range r.Stages {
 		if anyBlank(stage.NodeID, stage.StageID) || stage.Order < 1 {
 			return fmt.Errorf("validation run stage %d is missing node/stage identity or order", index)

@@ -80,6 +80,9 @@ func TestValidationRunReportFormalStagesRequireCompleteEvidenceBundle(t *testing
 	report.AppGenerated = true
 	report.TransportAuthenticated = true
 	report.FormalExchange = true
+	if err := report.Validate(); err == nil {
+		t.Fatal("formal report without stages must fail")
+	}
 	report.Stages = []ValidationRunStageSummary{{NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed"}}
 	if err := report.Validate(); err == nil {
 		t.Fatal("formal stage without action, screenshots, event and trace evidence must fail")

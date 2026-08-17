@@ -1,0 +1,32 @@
+{
+  "schema_version": "demoops.replay_manifest.v1",
+  "manifest_id": "manifest_run_server_fixture_001",
+  "run_id": "run_server_fixture_001",
+  "package_id": "pkg_server_fixture_001",
+  "bundle_hash_sha256": "fixture-bundle-sha256",
+  "policy_hash_sha256": "fixture-policy-sha256",
+  "dev_test_only": true,
+  "status": "failed",
+  "final_decision": "stop_and_report",
+  "stages": [{
+    "node_id": "node_submit_build",
+    "stage_id": "stage_submit_build",
+    "order": 4,
+    "status": "failed",
+    "target_url": "https://fixture.example/projects/{project_id}",
+    "failure_code": "session_expired",
+    "failure_domain": "browser_runtime",
+    "action_definition_evidence_ids": ["ev_approved_submit"],
+    "before_screenshot_artifact_ids": ["artifact_before_submit"],
+    "after_screenshot_artifact_ids": ["artifact_session_expired"],
+    "stage_event_ids": ["event_action_started", "event_stage_failed"],
+    "trace_artifact_ids": ["artifact_browser_trace"],
+    "recording_start_offset_ms": 4200,
+    "recording_end_offset_ms": 5100,
+    "viewport": {"width": 1280, "height": 720, "dpr": 1}
+  }],
+  "raw_recording_uri": "direct://jobs/fixture/artifacts/artifact_raw_recording",
+  "browser_trace_uri": "direct://jobs/fixture/artifacts/artifact_browser_trace",
+  "stage_event_log_uri": "direct://jobs/fixture/artifacts/artifact_stage_events",
+  "created_at": "2026-08-18T00:00:00Z"
+}
