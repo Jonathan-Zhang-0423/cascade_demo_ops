@@ -166,9 +166,65 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/editor/sessions/from-result-package", s.handleEditorSessionFromResultPackage)
 	mux.HandleFunc("GET /v1/editor/style-templates", s.handleEditorStyleTemplates)
 	mux.HandleFunc("/v1/editor/sessions/", s.handleEditorSessionRoute)
+	mux.HandleFunc("POST /v1/final-film/jobs", s.handleFinalFilmJobs)
+	mux.HandleFunc("/v1/final-film/jobs/", s.handleFinalFilmJobRoute)
 	s.registerExchangeBootstrapRoutes(mux)
 	s.registerDevExchangeRoutes(mux)
 	return withDevLogging(withDevCORS(mux))
+}
+
+func (s *DevHTTPServer) handleFinalFilmJobs(w http.ResponseWriter, r *http.Request) {
+	var request FinalFilmCreateRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	job, err := s.service.CreateFinalFilmJob(r.Context(), request)
+	writeBridgeValue(w, job, err)
+}
+
+func (s *DevHTTPServer) handleFinalFilmJobRoute(w http.ResponseWriter, r *http.Request) {
+	const prefix = "/v1/final-film/jobs/"
+	remainder := strings.TrimPrefix(r.URL.Path, prefix)
+	parts := strings.SplitN(remainder, "/", 2)
+	jobID := strings.TrimSpace(parts[0])
+	if jobID == "" || strings.Contains(jobID, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	suffix := ""
+	if len(parts) == 2 {
+		suffix = "/" + strings.Trim(parts[1], "/")
+	}
+	switch {
+	case r.Method == http.MethodGet && suffix == "":
+		job, err := s.service.GetFinalFilmJob(r.Context(), jobID)
+		writeBridgeValue(w, job, err)
+	case r.Method == http.MethodGet && suffix == "/events":
+		events, err := s.service.ListFinalFilmEvents(r.Context(), jobID)
+		writeBridgeValue(w, events, err)
+	case r.Method == http.MethodPost && suffix == "/render":
+		job, err := s.service.RunFinalFilmBaseline(r.Context(), jobID)
+		writeBridgeValue(w, job, err)
+	case r.Method == http.MethodPost && suffix == "/generation-approval":
+		var request FinalFilmGenerationDecisionRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		job, err := s.service.DecideFinalFilmGeneration(r.Context(), jobID, request)
+		writeBridgeValue(w, job, err)
+	case r.Method == http.MethodPost && suffix == "/cancel":
+		var request FinalFilmCancelRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		job, err := s.service.CancelFinalFilmJob(r.Context(), jobID, request)
+		writeBridgeValue(w, job, err)
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func (s *DevHTTPServer) handleDevRegisterLocalSource(w http.ResponseWriter, r *http.Request) {

@@ -381,3 +381,27 @@ type Store interface {
 - 每个最终镜头可追溯到真实素材或已批准的展示意图；
 - 最终视频可追溯到 catalog、constraint set、edit plan revision 和 artifact digest；
 - 日志、事件、API 和产物中不出现 API key、Authorization header 或本地敏感凭据。
+
+## 13. 实施状态
+
+### 2026-08-17：P0 第一批接线完成
+
+已落地：
+
+- `StoryboardConstraintSet`、required-step 覆盖、事实素材绑定、时间范围和展示槽位验证；
+- `FinalFilmJob`、revision CAS、本地原子持久化和连续事件审计；
+- baseline-first Service：创建作业前先编译约束并调用 Renderer 校验，创建后先渲染事实轨；
+- 存在展示意图时停在 `awaiting_generation_approval`，没有显式授权时 Provider 调用为 0；
+- 用户拒绝生成或生成轨失败时，使用已完成的 baseline 进入 `completed_without_generated_track`；
+- App API：创建、读取、事件、baseline render、generation approval 和 cancel；
+- Provider Registry 与 MiniMax-H3 Adapter；H3 Adapter 在任何 Provider 调用前再次校验持久化授权、幂等键、admission scope、输出目录和 capability preflight；
+- 全量 Go 回归通过。
+
+尚未完成：
+
+- Director 输出受控 `GeneratedShotIntent.prompt` 的正式合同和规划模型接线；
+- FinalFilmJob Runner 调用 Provider Registry 并持久化候选；
+- 内容审核、A/B 选择、Editor approval 与候选 Patch 的 API 串联；
+- Seedance 2.5/Aleph 2 Adapter；
+- 前端 FinalFilm 作业面板；
+- 真实 Provider workflow E2E 和最终生成候选合成验收。

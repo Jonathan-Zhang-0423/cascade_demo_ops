@@ -16,6 +16,7 @@ import (
 	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/driver"
 	"cascade-demoops/backend/internal/executor"
+	"cascade-demoops/backend/internal/finalfilm"
 	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
@@ -45,6 +46,7 @@ type Service struct {
 	editorWorker          editorWorker
 	editorJobsMu          sync.Mutex
 	editorJobs            map[string]editorRenderTask
+	finalFilm             *finalfilm.Service
 	outlineRunner         BrowserAgentOutlineRunner
 	sourceRefsMu          sync.RWMutex
 	sourceRefs            map[string]LocalSourceRef
@@ -173,6 +175,14 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	service.devVisibleBrowserAgent = newDevVisibleBrowserAgentManager(service)
 	service.devAppPackageTestWaivers = newDevAppPackageTestWaiverManager(service)
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
+	finalFilmService, err := finalfilm.NewService(finalfilm.ServiceOptions{
+		Store: finalfilm.NewFileStore(filepath.Join(runtime.DataRoot, "final_film_jobs")), Renderer: service.editorWorker,
+		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	service.finalFilm = finalFilmService
 	// Production cloud intake receives only encrypted payload references. Local
 	// and test runtimes retain inline payloads solely for deterministic fixtures
 	// and never relax the production transport rule.
