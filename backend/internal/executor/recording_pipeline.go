@@ -212,10 +212,12 @@ func validateFinalMP4Delivery(ctx context.Context, service DeliveryRenderService
 		}
 		if data, readErr := os.ReadFile(result.RequirementReportPath); readErr == nil {
 			if unmarshalErr := json.Unmarshal(data, &report); unmarshalErr == nil {
-				for _, finding := range report.Errors {
-					if finding.Code == "rendered_duration_mismatch" {
-						return errors.New("final_video_quality_gate: rendered duration does not match edit plan")
+				if strings.EqualFold(strings.TrimSpace(report.Status), "not_satisfied") || len(report.Errors) > 0 {
+					code := "requirement_report_not_satisfied"
+					if len(report.Errors) > 0 && strings.TrimSpace(report.Errors[0].Code) != "" {
+						code = strings.TrimSpace(report.Errors[0].Code)
 					}
+					return fmt.Errorf("final_video_quality_gate: %s", code)
 				}
 			}
 		}

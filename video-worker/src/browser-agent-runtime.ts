@@ -626,10 +626,11 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   const targetArtifacts: ArtifactRef[] = [];
   const targetEvidence: EvidenceRef[] = [];
+  const resolutionAttempts: BrowserTargetResolutionAttempt[] = [];
   let targetGeometry: BrowserTargetGeometry | undefined;
   try {
   for (const interaction of request.stage.interactions) {
-    const actionEvidence = await executeInteraction(session, request.stage, interaction, secretValues);
+    const actionEvidence = await executeInteraction(session, request.stage, interaction, secretValues, resolutionAttempts);
     if (actionEvidence) {
       targetGeometry = actionEvidence.geometry;
       targetArtifacts.push(actionEvidence.artifact);
@@ -642,7 +643,7 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   const artifact = await captureScreenshot(session, request.stage, "after");
   const evidence = screenshotEvidence(artifact, request.stage, "执行后结果证据");
   return {
-    observation: await observation(session.page, "browser_assertion", assertions, targetGeometry),
+    observation: await observation(session.page, "browser_assertion", assertions, targetGeometry, resolutionAttempts),
     evidence_refs: [...targetEvidence, evidence],
     artifacts: [...targetArtifacts, artifact],
     target_resolved: true,
@@ -726,7 +727,13 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   };
 }
 
-async function executeInteraction(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, secretValues: Record<string, string>): Promise<{ geometry: BrowserTargetGeometry; artifact: ArtifactRef } | undefined> {
+async function executeInteraction(
+  session: BrowserAgentSession,
+  stage: BrowserAgentWorkerStage,
+  interaction: BrowserAgentInteraction,
+  secretValues: Record<string, string>,
+  resolutionAttempts: BrowserTargetResolutionAttempt[] = [],
+): Promise<{ geometry: BrowserTargetGeometry; artifact: ArtifactRef } | undefined> {
   if (interaction.non_destructive !== true || stage.target_contract.destructive) throw new Error("browser_agent_destructive_action_denied");
   const timeout = numericParameter(interaction.parameters, "timeout_ms", actionTimeoutMS, 250, 60_000);
   if (interaction.kind === "navigate") {
@@ -747,7 +754,7 @@ async function executeInteraction(session: BrowserAgentSession, stage: BrowserAg
     await waitForPageSettled(session.page, Math.min(timeout, 5_000));
     return;
   }
-  const resolved = await resolveTarget(session.page, stage, interaction, true);
+  const resolved = await resolveTarget(session.page, stage, interaction, true, resolutionAttempts);
   if (interaction.secret_ref) await prepareSecretTarget(session, resolved.locator);
   const targetArtifact = await captureScreenshot(session, stage, "target");
   const targetGeometry = await captureTargetGeometry(session, stage, resolved, targetArtifact.id);
@@ -789,7 +796,7 @@ export function recoveredScreenshotMetadata(
   };
 }
 
-async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, allowSelectorAlternatives: boolean, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget> {
+export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, allowSelectorAlternatives: boolean, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget> {
 	const candidates: Array<{ strategy: string; locator: any; evidenceBoundAlternative?: { kind: string; value: string } }> = [];
 	const contract = stage.target_contract;
 	const preferred = stage.preferred_selector_alternative;

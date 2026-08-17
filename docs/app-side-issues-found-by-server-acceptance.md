@@ -149,6 +149,16 @@
 - 事实：当前包为 `123556 bytes`，超过 `96 KiB` 软预算。
 - App 侧建议：对重复 Evidence、组件和文字采用引用或去重结构，同时保留必要审计证据。
 
+### APP-015：正式产包丢失用户指定的项目需求值
+
+- 状态：待 App 修复
+- 严重程度：阻断
+- 最新证据：2026-08-14 正式 App 原包 `pkg_bundle_script_graph_1786701737851639900`，原包路径 `artifacts/dev-test-only/unattended-app-server-e2e/20260814-095807/client_execution_package.json`，审计路径为同目录 `app-package-outline-audit.json`。
+- 事实：用户输入和审计期望均为“贪吃蛇游戏”，但 `business_stage_project_name_input` 被生成成 `fill value="入口"`；包内不存在填写“贪吃蛇游戏”的候选动作。
+- 证据缺口：该 fill 动作没有 selector/evidence 绑定；后续“启动 agent 构建”点击也没有 selector/evidence 绑定。
+- 正式门禁结果：`confidence_summary.readiness=blocked`、`safety_report.allowed_to_upload=false`、未产生有效审批时间，唯一全局阻断原因为“关键需求未完整映射到 stage 和证据”。Server 没有签发正式 Direct lease、没有启动 Chromium，也没有改写原包。
+- App 侧建议：从用户输入的明确业务值生成不可丢失的 requirement binding；产包前检查“原始要求精确值 → fill interaction.value/input_ref → selector/evidence → required validation”的闭环。模型生成“入口”等无来源占位词时必须 fail closed 并返回缺失字段提示。
+
 ## 4. 已确认但不属于 App 侧的问题
 
 ### SERVER-001：本地测试结果打包曾错误依赖正式 Exchange 上传许可

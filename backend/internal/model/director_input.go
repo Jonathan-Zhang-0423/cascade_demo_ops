@@ -511,16 +511,19 @@ type ArkAssetPublicationResult struct {
 }
 
 type ArkAssetPublicationResultItem struct {
-	SourceRef         DirectorMaterialRef  `json:"source_ref"`
-	ProposedPublicRef *DirectorMaterialRef `json:"proposed_public_ref,omitempty"`
-	TaskIDs           []string             `json:"task_ids,omitempty"`
-	Usage             string               `json:"usage,omitempty"`
-	Required          bool                 `json:"required"`
-	Status            string               `json:"status"`
-	Published         bool                 `json:"published"`
-	DryRun            bool                 `json:"dry_run"`
-	CanUseForRealCall bool                 `json:"can_use_for_real_call"`
-	ActionRequired    string               `json:"action_required,omitempty"`
+	SourceRef          DirectorMaterialRef  `json:"source_ref"`
+	ProposedPublicRef  *DirectorMaterialRef `json:"proposed_public_ref,omitempty"`
+	TaskIDs            []string             `json:"task_ids,omitempty"`
+	Usage              string               `json:"usage,omitempty"`
+	Required           bool                 `json:"required"`
+	Status             string               `json:"status"`
+	Published          bool                 `json:"published"`
+	DryRun             bool                 `json:"dry_run"`
+	CanUseForRealCall  bool                 `json:"can_use_for_real_call"`
+	ActionRequired     string               `json:"action_required,omitempty"`
+	FailureStage       string               `json:"failure_stage,omitempty"`
+	ErrorClass         string               `json:"error_class,omitempty"`
+	ProviderHTTPStatus int                  `json:"provider_http_status,omitempty"`
 }
 
 type ArkMediaGenerationResult struct {

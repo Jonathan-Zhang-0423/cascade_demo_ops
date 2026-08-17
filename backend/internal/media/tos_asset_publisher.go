@@ -132,11 +132,18 @@ func (p *TOSAssetPublisher) publishItem(ctx context.Context, sourcePackageID str
 	_, err = p.client.PutObjectV2(ctx, &tos.PutObjectV2Input{PutObjectBasicInput: tos.PutObjectBasicInput{Bucket: p.config.Bucket, Key: key, ContentLength: info.Size(), ContentType: contentType}, Content: file})
 	if err != nil {
 		result.Status, result.ActionRequired = "tos_upload_failed", "verify TOS bucket, region, endpoint, object-prefix policy, and uploader credentials"
+		result.FailureStage, result.ErrorClass = "put_object", classifyTOSPublishError(err)
 		return result
 	}
 	signed, err := p.client.PreSignedURL(&tos.PreSignedURLInput{HTTPMethod: enum.HttpMethodGet, Bucket: p.config.Bucket, Key: key, Expires: int64(p.config.SignedURLTTL.Seconds())})
 	if err != nil || signed == nil || strings.TrimSpace(signed.SignedUrl) == "" {
 		result.Status, result.ActionRequired = "tos_presign_failed", "verify the uploader can generate a signed GET URL for the selected TOS object"
+		result.FailureStage = "presign_get"
+		if err != nil {
+			result.ErrorClass = classifyTOSPublishError(err)
+		} else {
+			result.ErrorClass = "empty_presigned_url"
+		}
 		return result
 	}
 	ref := item.Ref
@@ -144,6 +151,27 @@ func (p *TOSAssetPublisher) publishItem(ctx context.Context, sourcePackageID str
 	result.ProposedPublicRef = &ref
 	result.Status, result.Published, result.CanUseForRealCall, result.ActionRequired = "published_presigned", true, true, ""
 	return result
+}
+
+func classifyTOSPublishError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "accessdenied"), strings.Contains(message, "access denied"), strings.Contains(message, "forbidden"), strings.Contains(message, "statuscode=403"), strings.Contains(message, "http 403"):
+		return "access_denied"
+	case strings.Contains(message, "nosuchbucket"), strings.Contains(message, "no such bucket"), strings.Contains(message, "statuscode=404"), strings.Contains(message, "http 404"):
+		return "bucket_not_found"
+	case strings.Contains(message, "invalidaccesskey"), strings.Contains(message, "invalid access key"), strings.Contains(message, "signature"):
+		return "credential_or_signature_rejected"
+	case strings.Contains(message, "timeout"), strings.Contains(message, "deadline exceeded"):
+		return "timeout"
+	case strings.Contains(message, "connection reset"), strings.Contains(message, "connectex"), strings.Contains(message, "no such host"), strings.Contains(message, "dial tcp"):
+		return "network_error"
+	default:
+		return "provider_error"
+	}
 }
 
 func (p *TOSAssetPublisher) objectKey(sourcePackageID string, index int, item model.ArkAssetPublicationItem) string {

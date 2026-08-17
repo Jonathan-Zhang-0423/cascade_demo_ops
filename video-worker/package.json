@@ -13,7 +13,8 @@
     "smoke:render:format-fallback": "node scripts/smoke-render-format-fallback.mjs",
     "smoke:record:playwright": "node scripts/smoke-record-playwright.mjs",
     "smoke:browser-agent": "node scripts/smoke-browser-agent.mjs",
-    "accept:browser-agent": "node scripts/accept-browser-agent.mjs"
+    "accept:browser-agent": "node scripts/accept-browser-agent.mjs",
+    "accept:safe-still-editor": "node scripts/accept-safe-still-editor-local.mjs"
   },
   "dependencies": {
     "playwright": "^1.61.1"

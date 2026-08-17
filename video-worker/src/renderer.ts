@@ -918,7 +918,7 @@ function timelineStep(
   return step;
 }
 
-function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): DemoEditPlan {
+export function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): DemoEditPlan {
   const demoArtifacts = catalog.artifacts.filter(isDemoMaterial);
   const recordingArtifactID =
     findDemoArtifactByID(catalog, catalog.timeline.recording_artifact_id)?.id || demoArtifacts.find((artifact) => artifact.kind === "raw_recording")?.id;
@@ -931,21 +931,34 @@ function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): D
   // context so manual credentials can never enter a video artifact. Its final
   // MP4 is composed only from post-action, redacted screenshots.
   if (!recordingArtifactID && stillArtifacts.length > 0) {
-    const stillDurationMS = Math.max(1_000, Math.min(5_000, Math.floor(targetDurationMS / Math.max(1, steps.length))));
-    const stillShots = steps.flatMap((step, index) => {
+    const candidates = steps.flatMap((step, stepIndex) => {
       const geometryEvidence = targetGeometryEvidenceForStep(catalog, step);
-      const postActionArtifact = step.artifacts
-        .map((artifactID) => findDemoArtifactByID(catalog, artifactID))
-        .find((artifact): artifact is TimelineArtifact => Boolean(artifact && isPresentationStillArtifact(artifact)));
-      const sourceArtifact = geometryEvidence?.artifact || postActionArtifact;
-      if (!sourceArtifact) return [];
-      const shot = defaultShotForStep(step, index, sourceArtifact.id, catalog, geometryEvidence);
+      return presentationStillArtifactsForStep(catalog, step, geometryEvidence).map((artifact, artifactIndex) => ({
+        step,
+        stepIndex,
+        artifact,
+        artifactIndex,
+        geometryEvidence: geometryEvidence?.artifact.id === artifact.id ? geometryEvidence : undefined,
+      }));
+    });
+    const selected = selectStillCandidatesForDuration(candidates, steps.length, targetDurationMS);
+    const durations = distributeStillDurations(selected.length, targetDurationMS);
+    const stillShots = selected.map((candidate, index) => {
+      const shot = defaultShotForStep(candidate.step, candidate.stepIndex, candidate.artifact.id, catalog, candidate.geometryEvidence ?? null);
+      shot.id = `shot_${String(index + 1).padStart(3, "0")}_${safeName(candidate.step.step_id)}_${candidate.artifactIndex + 1}`;
       shot.presentation_kind = "still";
-      shot.output_duration_ms = stillDurationMS;
+      shot.output_duration_ms = durations[index] as number;
       delete shot.source_time_range_ms;
       shot.operations = [];
-      return [shot];
+      const shotDurationMS = shot.output_duration_ms;
+      shot.overlays = (shot.overlays || []).map((overlay) => ({
+        ...overlay,
+        start_ms: Math.min(overlay.start_ms ?? 0, Math.max(0, shotDurationMS - 100)),
+        end_ms: Math.min(overlay.end_ms ?? shotDurationMS, shotDurationMS),
+      }));
+      return shot;
     });
+    const actualDurationMS = stillShots.reduce((total, shot) => total + (shot.output_duration_ms || 0), 0);
     return {
       schema_version: DEMO_EDIT_PLAN_SCHEMA_VERSION,
       plan_id: `edit_plan_${safeName(catalog.run_id)}`,
@@ -957,7 +970,7 @@ function defaultEditPlan(catalog: AssetTimelineCatalog, durationSec?: number): D
       script_order_policy: "preserve_required_step_order",
       locked_fields: [...REQUIRED_LOCKED_FIELDS],
       model_editable_fields: [...ALLOWED_MODEL_EDITABLE_FIELDS],
-      target_duration_ms: stillDurationMS * stillShots.length,
+      target_duration_ms: actualDurationMS,
       shots: stillShots,
       global_style: { color_grade: "neutral_product_ui", pacing: "clear_and_direct", transition_style: "simple_cut" },
       audio: { mode: "mute", volume_percent: 0 },
@@ -999,9 +1012,11 @@ function defaultShotForStep(
   index: number,
   sourceArtifactID: string,
   catalog?: AssetTimelineCatalog,
-  knownGeometryEvidence?: { artifact: TimelineArtifact; geometry: BrowserTargetGeometry },
+  knownGeometryEvidence?: { artifact: TimelineArtifact; geometry: BrowserTargetGeometry } | null,
 ): DemoEditShot {
-  const geometryEvidence = knownGeometryEvidence || (catalog ? targetGeometryEvidenceForStep(catalog, step) : undefined);
+  const geometryEvidence = knownGeometryEvidence === null
+    ? undefined
+    : knownGeometryEvidence || (catalog ? targetGeometryEvidenceForStep(catalog, step) : undefined);
   const sourceArtifact = catalog ? findDemoArtifactByID(catalog, sourceArtifactID) : undefined;
   const still = Boolean(sourceArtifact && isPresentationStillArtifact(sourceArtifact));
   const shot: DemoEditShot = {
@@ -1653,8 +1668,31 @@ function buildRequirementSatisfactionReport(
   const failedStepIDs = catalog.steps.filter((step) => isFailedExecutionStatus(step.status)).map((step) => step.step_id);
   const passedStepCount = catalog.steps.filter((step) => isPassedExecutionStatus(step.status)).length;
   const actualScreenshotStepIDs = screenshotStepIDsForCatalog(catalog);
+  const declaredEditPlanDurationMS = editPlan.target_duration_ms || 0;
   const expectedRenderedDurationMS = outputDurationMS(editPlan);
   const actualRenderedDurationSec = mediaNormalization.output?.duration_sec;
+
+  if (declaredEditPlanDurationMS > 0 && expectedRenderedDurationMS > 0) {
+    const toleranceMS = Math.max(250, declaredEditPlanDurationMS * 0.05);
+    if (Math.abs(expectedRenderedDurationMS - declaredEditPlanDurationMS) > toleranceMS) {
+      errors.push(requirementFinding(
+        "edit_plan_timeline_duration_mismatch",
+        `Edit-plan shots contribute ${(expectedRenderedDurationMS / 1000).toFixed(3)}s, but target_duration_ms requires ${(declaredEditPlanDurationMS / 1000).toFixed(3)}s (tolerance ${(toleranceMS / 1000).toFixed(3)}s).`,
+        "demo_edit_plan.shots",
+      ));
+      checks.push({
+        code: "edit_plan_timeline_duration",
+        status: "fail",
+        message: "Edit-plan shot duration does not satisfy the declared target duration.",
+      });
+    } else {
+      checks.push({
+        code: "edit_plan_timeline_duration",
+        status: "pass",
+        message: "Edit-plan shot duration satisfies the declared target duration.",
+      });
+    }
+  }
 
   if (mediaNormalization.status === "ok" && actualRenderedDurationSec !== undefined && expectedRenderedDurationMS > 0) {
     const expectedRenderedDurationSec = expectedRenderedDurationMS / 1000;
@@ -2844,6 +2882,45 @@ function mediaNormalizationTarget(profile?: RenderProfile): MediaNormalizationTa
     height: boundedInteger(profile.height, MEDIA_NORMALIZATION_TARGET.height, 180, 2160),
     fps: boundedInteger(profile.fps, MEDIA_NORMALIZATION_TARGET.fps, 1, 60),
   };
+}
+
+function presentationStillArtifactsForStep(
+  catalog: AssetTimelineCatalog,
+  step: TimelineStep,
+  geometryEvidence?: { artifact: TimelineArtifact; geometry: BrowserTargetGeometry },
+): TimelineArtifact[] {
+  const candidates = [
+    ...(geometryEvidence ? [geometryEvidence.artifact] : []),
+    ...step.artifacts.map((artifactID) => findDemoArtifactByID(catalog, artifactID)),
+    ...catalog.artifacts.filter((artifact) => artifact.source_step_id === step.step_id),
+  ];
+  const seen = new Set<string>();
+  return candidates.filter((artifact): artifact is TimelineArtifact => {
+    if (!artifact || seen.has(artifact.id) || !isPresentationStillArtifact(artifact)) return false;
+    seen.add(artifact.id);
+    return true;
+  });
+}
+
+function selectStillCandidatesForDuration<T extends { stepIndex: number }>(candidates: T[], stepCount: number, targetDurationMS: number): T[] {
+  const maxShots = Math.max(1, Math.floor(targetDurationMS / 250));
+  if (candidates.length <= maxShots) return candidates;
+  const primary = candidates.filter((candidate, index) => candidates.findIndex((item) => item.stepIndex === candidate.stepIndex) === index);
+  if (primary.length >= maxShots) return primary.slice(0, maxShots);
+  if (targetDurationMS < candidates.length * 250 || stepCount > maxShots) return primary;
+  return candidates.slice(0, maxShots);
+}
+
+function distributeStillDurations(count: number, targetDurationMS: number): number[] {
+  if (count <= 0) return [];
+  const deliverableDurationMS = Math.min(targetDurationMS, count * 15_000);
+  const base = Math.max(250, Math.floor(deliverableDurationMS / count));
+  let remainder = Math.max(0, deliverableDurationMS - base * count);
+  return Array.from({ length: count }, () => {
+    const extra = Math.min(remainder, 15_000 - base);
+    remainder -= extra;
+    return base + extra;
+  });
 }
 
 function isTargetOrientedOverlay(overlay: { type: string }): boolean {

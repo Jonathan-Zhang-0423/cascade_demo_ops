@@ -419,6 +419,16 @@ func readyPublicationResultForAdapterTest() *model.ArkAssetPublicationResult {
 	}
 }
 
+func TestSeedanceProviderRequestMarksReferenceMediaRoles(t *testing.T) {
+	request, _ := seedanceProviderRequest(minimalDirectorInputForAdapterTest(), minimalArkPlanForAdapterTest(), readyPublicationResultForAdapterTest())
+	if len(request.Content) != 2 {
+		t.Fatalf("expected prompt and one reference, got %+v", request.Content)
+	}
+	if request.Content[1].Type != "video_url" || request.Content[1].Role != "reference_video" || request.Content[1].VideoURL == nil {
+		t.Fatalf("reference video role is missing: %+v", request.Content[1])
+	}
+}
+
 func hasReadinessCode(findings []model.ArkMediaReadinessFinding, code string) bool {
 	for _, finding := range findings {
 		if finding.Code == code {

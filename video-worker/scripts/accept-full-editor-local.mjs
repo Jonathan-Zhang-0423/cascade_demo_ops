@@ -5,7 +5,9 @@ import { render } from "../dist/renderer.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const prior = path.join(root, ".cascade-dev", "artifacts", "dev-test-only", "app-package-waiver", "test_waiver_1786506084390811200", "execution", "render");
-const catalogPath = path.join(prior, "asset_timeline_catalog.json");
+const catalogPath = process.env.CASCADE_FULL_EDITOR_CATALOG
+  ? path.resolve(process.env.CASCADE_FULL_EDITOR_CATALOG)
+  : path.join(prior, "asset_timeline_catalog.json");
 const outputDir = path.join(root, ".cascade-dev", "artifacts", "dev-test-only", "full-editor-acceptance", `run-${new Date().toISOString().replace(/[:.]/g, "-")}`);
 
 const catalog = JSON.parse(await readFile(catalogPath, "utf8"));
@@ -129,5 +131,8 @@ const summary = {
   traceability: { catalog: catalogPath, request: path.join(outputDir, "full-editor-acceptance-request.json"), render_manifest: result.render_manifest_path, requirement_report: result.requirement_satisfaction_report_path },
   model_execution: request.model_execution,
 };
+if (summary.status !== "satisfied") {
+  throw new Error(`full editor acceptance requirement report is ${summary.status}`);
+}
 await writeFile(path.join(outputDir, "full-editor-acceptance-summary.json"), JSON.stringify(summary, null, 2), "utf8");
 console.log(JSON.stringify(summary, null, 2));

@@ -110,6 +110,26 @@ func TestArkMediaClientRealGetContentGenerationTaskParsesOutput(t *testing.T) {
 	}
 }
 
+func TestArkMediaClientNormalizesSeedanceContentAndTopLevelURLs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"task_1","status":"succeeded","content":{"video_url":"https://asset.example/content.mp4"},"last_frame_url":"https://asset.example/last.png"}`))
+	}))
+	defer server.Close()
+
+	result, err := NewClient(testArkRuntime(config.ArkMediaModeReal, server.URL+"/api/v3"), server.Client()).GetContentGenerationTask(t.Context(), "task_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response == nil || result.Response.Output["last_frame_url"] != "https://asset.example/last.png" {
+		t.Fatalf("top-level output URL was not normalized: %+v", result.Response)
+	}
+	content, ok := result.Response.Output["content"].(map[string]any)
+	if !ok || content["video_url"] != "https://asset.example/content.mp4" {
+		t.Fatalf("content output URL was not normalized: %+v", result.Response)
+	}
+}
+
 func TestArkMediaClientRealGenerateImagesUsesSeedreamProvider(t *testing.T) {
 	var gotPath string
 	var gotAuth string

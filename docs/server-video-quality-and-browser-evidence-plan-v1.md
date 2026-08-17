@@ -25,6 +25,7 @@
 - FFmpeg 片段保持同一媒体规格，concat 使用 stream copy。
 - 已满足交付规格的合成 MP4 仅 remux/faststart，不再次有损编码。
 - 使用 FFprobe 验证原片尺寸、最终编码、像素格式、帧率和音频。
+- `DemoEditPlan.shots` 的有效时长总和必须与 `target_duration_ms` 在 5%/250ms 容差内一致；否则报告 `edit_plan_timeline_duration_mismatch`，Server 最终交付门禁拒绝该 MP4，禁止“镜头只有 35 秒但目标写 60 秒”的自洽短片被误报为满足。
 
 ### 批次 2：目标解析与几何证据
 
@@ -41,6 +42,7 @@
 - 缺少几何证据的镜头可保留，但不得绘制目标圈选。
 - render manifest 记录每个覆盖层的证据来源和坐标变换结果。
 - 已通过真实 FFmpeg 像素测试：无几何证据时不绘制圈选；有证据时，圈选在 zoom 后仍绑定正确目标。
+- 预观察和正式动作执行都必须保存脱敏的 `target_resolution_attempts`；不能只记录预扫描策略而丢失真正点击/填写时的再次解析结果。
 
 ### 批次 4：模型素材与旁白
 
@@ -86,6 +88,14 @@
 - 最终 MP4：`2560x1440`、H.264、yuv420p、30fps、AAC、30.145 秒；render manifest 实际应用 `caption`、`highlight_box`、`cursor_highlight`、`concat`，无跳过的圈选操作。
 - 模型审计明确为 `invoked=false`、`suggestion_origin=deterministic_server_director`、`provider_output_adopted=false`。本轮未调用 Seedance，不能把该视频描述为 Seedance 编排结果。
 - 该回归仍为 `dev_test_only=true`、`formal_exchange=false`，只证明 Server 真实页面执行、证据驱动编排和 2K MP4 交付，不代表生产 Direct Exchange 已验收。
+
+### 2026-08-13 离线安全静态编辑回归
+
+- 修复静态截图编排只使用每阶段单张截图、导致 60 秒交付意图被压缩为约 30 秒的问题：现在按阶段顺序选择不同的已批准、非敏感截图，并均匀分配目标时长；不重复使用同一截图，不用重复帧伪造业务过程。
+- 修复同一阶段不同截图之间的目标几何继承：只有截图自身携带匹配 `target_geometry` 时才绘制圈选；`after`/`revalidate` 截图不会继承 `target` 截图的圈选。
+- 新增 `video-worker/scripts/accept-safe-still-editor-local.mjs`，可对已有 `asset_timeline_catalog.json` 做离线 Server 编辑验收，不启动 Chromium、不调用 Browser Agent、不调用模型、不解除 raw recording 敏感标记。
+- 使用真实页面回归 catalog 离线生成 9 个唯一安全截图镜头，编辑计划 60 秒，实际 MP4 60.208667 秒；FFprobe：2560x1440、H.264、yuv420p、30fps、AAC。模型审计为 `invoked=false`。
+- 该结果证明 Server 静态素材编辑与质量门禁，不代表重新录制的正式 App→Server 端到端验收，也不代表 Seedance/TOS/TTS 已参与。
 
 ### 暂缓项
 

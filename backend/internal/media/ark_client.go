@@ -71,11 +71,14 @@ type MediaURL struct {
 }
 
 type ContentGenerationTaskResponse struct {
-	ID     string         `json:"id,omitempty"`
-	Status string         `json:"status,omitempty"`
-	Model  string         `json:"model,omitempty"`
-	Output map[string]any `json:"output,omitempty"`
-	Error  *ProviderError `json:"error,omitempty"`
+	ID           string         `json:"id,omitempty"`
+	Status       string         `json:"status,omitempty"`
+	Model        string         `json:"model,omitempty"`
+	Output       map[string]any `json:"output,omitempty"`
+	Content      any            `json:"content,omitempty"`
+	VideoURL     string         `json:"video_url,omitempty"`
+	LastFrameURL string         `json:"last_frame_url,omitempty"`
+	Error        *ProviderError `json:"error,omitempty"`
 }
 
 type ContentGenerationTaskResult struct {
@@ -178,7 +181,30 @@ func (c *Client) CreateContentGenerationTask(ctx context.Context, request Conten
 		return result, err
 	}
 	result.Response = &response
+	normalizeContentGenerationTaskOutput(result.Response)
 	return result, nil
+}
+
+func normalizeContentGenerationTaskOutput(response *ContentGenerationTaskResponse) {
+	if response == nil {
+		return
+	}
+	output := map[string]any{}
+	for key, value := range response.Output {
+		output[key] = value
+	}
+	if response.Content != nil {
+		output["content"] = response.Content
+	}
+	if strings.TrimSpace(response.VideoURL) != "" {
+		output["video_url"] = response.VideoURL
+	}
+	if strings.TrimSpace(response.LastFrameURL) != "" {
+		output["last_frame_url"] = response.LastFrameURL
+	}
+	if len(output) > 0 {
+		response.Output = output
+	}
 }
 
 func (c *Client) GetContentGenerationTask(ctx context.Context, taskID string) (ContentGenerationTaskResult, error) {
@@ -211,6 +237,7 @@ func (c *Client) GetContentGenerationTask(ctx context.Context, taskID string) (C
 		return result, err
 	}
 	result.Response = &response
+	normalizeContentGenerationTaskOutput(result.Response)
 	return result, nil
 }
 
