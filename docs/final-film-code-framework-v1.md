@@ -405,3 +405,15 @@ type Store interface {
 - Seedance 2.5/Aleph 2 Adapter；
 - 前端 FinalFilm 作业面板；
 - 真实 Provider workflow E2E 和最终生成候选合成验收。
+
+### 2026-08-17：P0 第二批执行边界完成
+
+已落地：
+
+- `FinalFilmDirectorPlan` / `FinalFilmGeneratedSpec`：Director 只能给出展示用途、prompt 和已批准素材引用，不能指定视频 Provider、模型、API，也不能绑定业务步骤；prompt 以 SHA-256 锁定；
+- `POST /v1/final-film/jobs/{id}/director-plan`：生成授权前持久化并验证 Director 规格；没有合法计划不能批准生成；
+- `POST /v1/final-film/jobs/{id}/generate`：Job Runner 只消费已持久化计划与授权引用，经 Provider Registry 执行，并持久化执行记录、标准化候选和结构审核；
+- H3 workflow 从 `.env` 读取显式视频路由和 API key，并额外要求 Server 侧价格/额度配置；缺少任一配置时以 disabled adapter 失败关闭，不影响事实轨基线交付；
+- 生成失败或无可选 Provider 时，状态收敛为 `completed_without_generated_track`，最终输出仍绑定先前完成的确定性录屏基线。
+
+后续尚需：候选人工内容审核、A/B 选择、Editor approval、补丁显式应用、最终合成与输出验收；Seedance 2.5/Aleph Adapter；前端控制面板。

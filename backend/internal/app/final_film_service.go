@@ -22,6 +22,16 @@ type FinalFilmGenerationDecisionRequest struct {
 	Reason           string `json:"reason,omitempty"`
 }
 
+type FinalFilmDirectorPlanRequest struct {
+	ExpectedRevision int                         `json:"expected_revision"`
+	Plan             model.FinalFilmDirectorPlan `json:"plan"`
+}
+
+type FinalFilmGenerateRequest struct {
+	ExpectedRevision  int    `json:"expected_revision"`
+	PreferredProvider string `json:"preferred_provider,omitempty"`
+}
+
 type FinalFilmCancelRequest struct {
 	ExpectedRevision int    `json:"expected_revision"`
 	Reason           string `json:"reason"`
@@ -77,6 +87,20 @@ func (s *Service) DecideFinalFilmGeneration(ctx context.Context, jobID string, r
 		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
 	}
 	return s.finalFilm.DecideGeneration(ctx, jobID, request.ExpectedRevision, request.Approved, request.Reason)
+}
+
+func (s *Service) SubmitFinalFilmDirectorPlan(ctx context.Context, jobID string, request FinalFilmDirectorPlanRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.SubmitDirectorPlan(ctx, jobID, request.ExpectedRevision, request.Plan)
+}
+
+func (s *Service) RunFinalFilmGeneratedCandidates(ctx context.Context, jobID string, request FinalFilmGenerateRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.RunGeneratedCandidates(ctx, jobID, request.ExpectedRevision, request.PreferredProvider)
 }
 
 func (s *Service) CancelFinalFilmJob(ctx context.Context, jobID string, request FinalFilmCancelRequest) (model.FinalFilmJob, error) {

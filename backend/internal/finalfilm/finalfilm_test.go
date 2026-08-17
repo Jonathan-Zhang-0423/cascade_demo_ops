@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/executor"
+	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -106,7 +107,7 @@ func TestFinalFilmNoGenerationIntentCompletesFromBaseline(t *testing.T) {
 func TestFinalFilmGenerationFailureFallsBackToDurableBaseline(t *testing.T) {
 	service, _ := newFinalFilmTestService(t)
 	catalog, plan := finalFilmFixture()
-	intent, _ := model.PresentationGenerationIntentDefaults("intro_1", "intro", []string{"shot_1"})
+	intent, _ := model.PresentationGenerationIntentDefaults("intro_1", "intro", nil)
 	job, err := service.CreateJob(context.Background(), CreateJobRequest{
 		EditorSessionID: "editor_1", EditorRevision: 1, SourcePackageID: "package_1", Catalog: catalog, BaselinePlan: plan,
 		Intents: []model.PresentationGenerationIntent{intent}, RenderProfile: finalFilmProfile(),
@@ -118,6 +119,10 @@ func TestFinalFilmGenerationFailureFallsBackToDurableBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	job, err = service.SubmitDirectorPlan(context.Background(), job.JobID, job.Revision, finalFilmDirectorPlan(job, intent))
+	if err != nil {
+		t.Fatal(err)
+	}
 	job, err = service.DecideGeneration(context.Background(), job.JobID, job.Revision, true, "")
 	if err != nil {
 		t.Fatal(err)
@@ -125,12 +130,36 @@ func TestFinalFilmGenerationFailureFallsBackToDurableBaseline(t *testing.T) {
 	if job.State != model.FinalFilmJobGeneratingCandidates || !job.GenerationAuthorized {
 		t.Fatalf("generation was not explicitly authorized: %+v", job)
 	}
-	job, err = service.RecordGenerationFailure(context.Background(), job.JobID, job.Revision, "provider_timeout")
+	job, err = service.RunGeneratedCandidates(context.Background(), job.JobID, job.Revision, media.GeneratedShotProviderMiniMaxH3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job.State != model.FinalFilmJobCompletedWithoutGenerated || job.FinalRender.VideoPath != job.BaselineRender.VideoPath || job.GenerationSkipReason != "provider_timeout" {
+	if job.State != model.FinalFilmJobCompletedWithoutGenerated || job.FinalRender.VideoPath != job.BaselineRender.VideoPath || job.GenerationSkipReason == "" {
 		t.Fatalf("baseline fallback failed: %+v", job)
+	}
+	record, err := decodeGeneratedTrack(job.GeneratedTrack)
+	if err != nil || len(record.Executions) != 1 || record.Executions[0].ErrorClass != "provider_selection_failed" {
+		t.Fatalf("provider failure audit was not persisted: record=%+v err=%v", record, err)
+	}
+}
+
+func TestGenerationApprovalRejectsMissingDirectorPlan(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	catalog, plan := finalFilmFixture()
+	intent, _ := model.PresentationGenerationIntentDefaults("intro_1", "intro", nil)
+	job, err := service.CreateJob(context.Background(), CreateJobRequest{
+		EditorSessionID: "editor_1", EditorRevision: 1, SourcePackageID: "package_1", Catalog: catalog, BaselinePlan: plan,
+		Intents: []model.PresentationGenerationIntent{intent}, RenderProfile: finalFilmProfile(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.RunBaseline(context.Background(), job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.DecideGeneration(context.Background(), job.JobID, job.Revision, true, ""); err == nil {
+		t.Fatal("expected approval without a persisted Director plan to fail")
 	}
 }
 
@@ -202,9 +231,18 @@ func newFinalFilmTestService(t *testing.T) (*Service, *fakeFinalFilmRenderer) {
 		renderResult: executor.RenderResult{VideoPath: filepath.Join(root, "baseline.mp4"), RenderManifestPath: filepath.Join(root, "manifest.json")},
 	}
 	sequence := 0
+	registry := media.NewGeneratedShotProviderRegistry()
+	disabled, err := media.NewMiniMaxH3ProviderAdapter(media.MiniMaxH3ProviderAdapterOptions{Enabled: false, DisabledReason: "disabled for final-film test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(disabled); err != nil {
+		t.Fatal(err)
+	}
 	service, err := NewService(ServiceOptions{
 		Store: NewFileStore(filepath.Join(root, "jobs")), Renderer: renderer, OutputRoot: filepath.Join(root, "outputs"),
-		Now: func() time.Time { sequence++; return time.Unix(int64(100+sequence), 0) },
+		Providers: registry,
+		Now:       func() time.Time { sequence++; return time.Unix(int64(100+sequence), 0) },
 		NewID: func(prefix string) (string, error) {
 			sequence++
 			return prefix + "_test_" + time.Unix(int64(sequence), 0).Format("150405"), nil
@@ -214,6 +252,21 @@ func newFinalFilmTestService(t *testing.T) (*Service, *fakeFinalFilmRenderer) {
 		t.Fatal(err)
 	}
 	return service, renderer
+}
+
+func finalFilmDirectorPlan(job model.FinalFilmJob, intent model.PresentationGenerationIntent) model.FinalFilmDirectorPlan {
+	prompt := "Cinematic abstract brand atmosphere with soft light and geometric motion; no product UI, facts, numbers, or readable text."
+	return model.FinalFilmDirectorPlan{
+		SchemaVersion: model.FinalFilmDirectorPlanSchemaVersion, PlanID: "director_plan_1", JobID: job.JobID,
+		ConstraintSetID: job.Constraints.ConstraintSetID, DirectorRunID: "director_run_1", GeneratedAt: time.Unix(200, 0),
+		Specs: []model.FinalFilmGeneratedSpec{{
+			SpecID: "generated_spec_1", IntentID: intent.IntentID, Purpose: intent.Purpose,
+			Prompt: prompt, PromptSHA256: model.FinalFilmPromptSHA256(prompt), DurationSec: intent.RequestedSlot.PreferredDurationSec,
+			AspectRatio: intent.RequestedSlot.AspectRatio, ReferenceArtifactIDs: append([]string{}, intent.ReferenceAssetRefs...),
+			ContentPolicy: model.FinalFilmGeneratedSpecContentPolicy{PresentationOnly: true, NoCapturedUIRecreation: true, NoBusinessFactClaims: true, NoUnverifiedText: true, RequiresExplicitReview: true},
+			FailurePolicy: model.PresentationGenerationFailureContinue,
+		}},
+	}
 }
 
 func finalFilmFixture() (model.AssetTimelineCatalog, model.DemoEditPlan) {

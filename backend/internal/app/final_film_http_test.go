@@ -47,7 +47,7 @@ func TestFinalFilmHTTPCreatesAndRendersFactTrackBeforeGenerationApproval(t *test
 		"editor_session_id": session.SessionID, "expected_revision": 2,
 		"presentation_generation_intents": []map[string]any{{
 			"intent_id": "intro_http", "capability": "presentation_video_candidate", "purpose": "intro", "required": false,
-			"reference_asset_refs": []string{"recording_http"},
+			"reference_asset_refs": []string{},
 			"requested_slot":       map[string]any{"preferred_duration_sec": 5, "aspect_ratio": "16:9"},
 			"content_policy":       map[string]any{"presentation_only": true, "may_represent_business_step": false, "may_replace_captured_ui": false, "requires_explicit_review": true},
 			"failure_policy":       "continue_without_generated_candidate",
@@ -68,6 +68,24 @@ func TestFinalFilmHTTPCreatesAndRendersFactTrackBeforeGenerationApproval(t *test
 	events := editorHTTPValue[[]model.FinalFilmEvent](t, server, "GET", "/v1/final-film/jobs/"+job.JobID+"/events", nil)
 	if len(events) != 3 || events[2].State != model.FinalFilmJobAwaitingGenerationApproval {
 		t.Fatalf("unexpected final film events: %+v", events)
+	}
+	prompt := "Abstract cinematic software brand intro; no UI recreation, business claims, numbers, logos, or readable text."
+	job = editorHTTPValue[model.FinalFilmJob](t, server, "POST", "/v1/final-film/jobs/"+job.JobID+"/director-plan", map[string]any{
+		"expected_revision": job.Revision,
+		"plan": map[string]any{
+			"schema_version": model.FinalFilmDirectorPlanSchemaVersion, "plan_id": "director_plan_http",
+			"job_id": job.JobID, "constraint_set_id": job.Constraints.ConstraintSetID, "director_run_id": "director_run_http",
+			"generated_at": time.Now().UTC(),
+			"specs": []map[string]any{{
+				"spec_id": "spec_http", "intent_id": "intro_http", "purpose": "intro", "prompt": prompt,
+				"prompt_sha256": model.FinalFilmPromptSHA256(prompt), "duration_sec": 5, "aspect_ratio": "16:9",
+				"content_policy": map[string]any{"presentation_only": true, "no_captured_ui_recreation": true, "no_business_fact_claims": true, "no_unverified_text": true, "requires_explicit_review": true},
+				"failure_policy": model.PresentationGenerationFailureContinue,
+			}},
+		},
+	})
+	if job.DirectorPlan == nil || job.Phase != "director_generated_shot_plan_ready" {
+		t.Fatalf("director plan was not persisted: %+v", job)
 	}
 	job = editorHTTPValue[model.FinalFilmJob](t, server, "POST", "/v1/final-film/jobs/"+job.JobID+"/generation-approval", map[string]any{
 		"expected_revision": job.Revision, "approved": false, "reason": "用户选择只使用真实录屏",

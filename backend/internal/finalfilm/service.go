@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cascade-demoops/backend/internal/executor"
+	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -22,19 +23,23 @@ type Renderer interface {
 }
 
 type ServiceOptions struct {
-	Store      Store
-	Renderer   Renderer
-	OutputRoot string
-	Now        func() time.Time
-	NewID      func(string) (string, error)
+	Store           Store
+	Renderer        Renderer
+	OutputRoot      string
+	Now             func() time.Time
+	NewID           func(string) (string, error)
+	Providers       *media.GeneratedShotProviderRegistry
+	ProviderTimeout time.Duration
 }
 
 type Service struct {
-	store      Store
-	renderer   Renderer
-	outputRoot string
-	now        func() time.Time
-	newID      func(string) (string, error)
+	store           Store
+	renderer        Renderer
+	outputRoot      string
+	now             func() time.Time
+	newID           func(string) (string, error)
+	providers       *media.GeneratedShotProviderRegistry
+	providerTimeout time.Duration
 }
 
 type CreateJobRequest struct {
@@ -62,7 +67,11 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if newID == nil {
 		newID = randomID
 	}
-	return &Service{store: options.Store, renderer: options.Renderer, outputRoot: filepath.Clean(options.OutputRoot), now: now, newID: newID}, nil
+	providerTimeout := options.ProviderTimeout
+	if providerTimeout <= 0 {
+		providerTimeout = 20 * time.Minute
+	}
+	return &Service{store: options.Store, renderer: options.Renderer, outputRoot: filepath.Clean(options.OutputRoot), now: now, newID: newID, providers: options.Providers, providerTimeout: providerTimeout}, nil
 }
 
 // CreateJob compiles and validates all immutable fact-track constraints before
@@ -192,8 +201,15 @@ func (s *Service) DecideGeneration(ctx context.Context, jobID string, expectedRe
 	next.Revision++
 	next.UpdatedAt = s.now().UTC()
 	if approve {
+		if job.DirectorPlan == nil {
+			return model.FinalFilmJob{}, errors.New("generation approval requires a validated persisted director plan")
+		}
+		if _, err := decodeGeneratedTrack(job.GeneratedTrack); err != nil {
+			return model.FinalFilmJob{}, err
+		}
 		next.GenerationAuthorized = true
 		next.GenerationAuthorizedAt = next.UpdatedAt
+		next.GenerationAuthorizationRef = fmt.Sprintf("finalfilm:%s:r%d", job.JobID, next.Revision)
 		next.State = model.FinalFilmJobGeneratingCandidates
 		next.Phase = "generation_authorized_pending_provider_runner"
 	} else {
@@ -286,6 +302,14 @@ func ValidateJob(job model.FinalFilmJob) error {
 	}
 	if job.GenerationAuthorized && job.GenerationAuthorizedAt.IsZero() {
 		return errors.New("authorized generation requires an authorization timestamp")
+	}
+	if job.GenerationAuthorized && (strings.TrimSpace(job.GenerationAuthorizationRef) == "" || job.DirectorPlan == nil) {
+		return errors.New("authorized generation requires a persisted director plan and authorization reference")
+	}
+	if job.DirectorPlan != nil {
+		if err := model.ValidateFinalFilmDirectorPlan(*job.DirectorPlan, job.JobID, job.Constraints, job.PresentationIntents); err != nil {
+			return err
+		}
 	}
 	return nil
 }

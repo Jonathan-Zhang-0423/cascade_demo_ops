@@ -175,9 +175,13 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	service.devVisibleBrowserAgent = newDevVisibleBrowserAgentManager(service)
 	service.devAppPackageTestWaivers = newDevAppPackageTestWaiverManager(service)
 	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
+	providerRegistry, err := finalFilmProviderRegistry(runtime)
+	if err != nil {
+		return nil, err
+	}
 	finalFilmService, err := finalfilm.NewService(finalfilm.ServiceOptions{
 		Store: finalfilm.NewFileStore(filepath.Join(runtime.DataRoot, "final_film_jobs")), Renderer: service.editorWorker,
-		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"),
+		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"), Providers: providerRegistry,
 	})
 	if err != nil {
 		return nil, err
