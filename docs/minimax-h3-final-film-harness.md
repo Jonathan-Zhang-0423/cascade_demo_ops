@@ -68,12 +68,16 @@ MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 
 也可使用隔离的 `MINIMAX_H3_API_KEY`、`MINIMAX_H3_BASE_URL`。Harness 会保留配置中的区域主机，并在拼接 H3 `/v2` 路径前剥离单独的 `/v1` 或 `/v2` 后缀。
 
-## 生产接入剩余项
+## App 接入与真实验收状态
 
-Operator harness 已验证真实生成闭环，但正式 App 自动化还需要：
+正式 FinalFilm workflow 已完成以下接线：
 
-1. 将 Director 输出中的展示镜头意图持久化为 `GeneratedShotIntent`。
-2. 使用持久化/分布式 admission、幂等键、配额和成本对账替代 operator 显式授权。
-3. 接入内容审核 UI、候选选择和 Editor approval。
-4. 只把审核通过的 normalized artifact 编译成候选补丁，再由现有 Renderer 生成最终成片。
-5. H3 失败始终降级到不含生成候选的确定性成片，不影响真实录屏交付。
+1. Director 受限输出由 Server 编译并持久化为 `GeneratedShotIntent`，模型不能选择 Provider、改写事实轨或指定业务步骤。
+2. H3 Adapter 只有在作业完成 baseline、Director 计划落库、用户显式授权且 admission/幂等/费用配置全部通过后才可调用 Provider。
+3. normalized candidate 必须依次经过人工内容审核、人工选择、独立 Editor approval 和显式补丁应用；任何步骤都不能自动跳过。
+4. Renderer 只做确定性 trim/concat/normalize；最终输出再次验证 SHA-256、ffprobe 媒体 Profile、FFmpeg 无 fallback、无 skipped operation 和需求满足报告。
+5. H3 不可用、生成失败、审核拒绝或最终合成验收失败时，均回退已经完成的事实轨 baseline。
+
+`backend/internal/finalfilm/real_h3_e2e_test.go` 提供环境门控的真实素材 E2E。它读取已经持久化的 `harness_result.json`，不会创建第二个 Provider 任务；只有 operator 完成人工逐帧审核并显式设置 `CASCADE_REAL_H3_E2E_APPROVED=true` 后，才会把该真实候选回放进完整 FinalFilm 状态机，并通过真实 Node Worker、FFmpeg 和 ffprobe 生成最终视频。普通单元测试和 CI 默认跳过该用例，因而不会产生费用。
+
+仍需继续建设的是生产级分布式 admission/幂等/usage 对账，以及黑帧、冻结帧、响度和 OCR 等更深层质量门禁；这些不影响当前“真实 H3 候选 + 人工审核 + 确定性最终合成”的闭环可执行性。

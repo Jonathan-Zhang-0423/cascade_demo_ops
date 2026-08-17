@@ -497,10 +497,21 @@ func (f *fakeFinalFilmRenderer) ValidateEditPlan(_ context.Context, _ executor.E
 
 func (f *fakeFinalFilmRenderer) ProbeMedia(_ context.Context, request executor.MediaProbeRequest) (executor.MediaProbeResult, error) {
 	return executor.MediaProbeResult{
-		Path: request.Path, SizeBytes: 1000, SHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Path: request.Path, SizeBytes: 1000, SHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		MimeType: "video/mp4", Format: "mp4", DurationMS: 9000, VideoCodec: "h264", Width: 1920, Height: 1080,
-		FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true,
+		FPS: 29.79, PixelFormat: "yuv420p", FFProbeAvailable: true,
 	}, nil
+}
+
+func TestNormalizedFinalFilmSHA256AcceptsWorkerPrefixAndRejectsMalformedDigest(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	actual, err := normalizedFinalFilmSHA256(" SHA256:" + strings.ToUpper(digest) + " ")
+	if err != nil || actual != digest {
+		t.Fatalf("worker digest was not normalized: digest=%q err=%v", actual, err)
+	}
+	if _, err := normalizedFinalFilmSHA256("sha256:not-a-digest"); err == nil {
+		t.Fatal("malformed final video digest was accepted")
+	}
 }
 
 func (f *fakeFinalFilmRenderer) Render(_ context.Context, request executor.RenderRequest) (executor.RenderResult, error) {

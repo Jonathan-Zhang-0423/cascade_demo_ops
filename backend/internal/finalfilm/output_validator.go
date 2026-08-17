@@ -2,6 +2,7 @@ package finalfilm
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,12 +40,20 @@ func validateFinalFilmOutput(ctx context.Context, renderer Renderer, result exec
 	if err != nil {
 		return fail(fmt.Errorf("probe final video: %w", err))
 	}
-	validation.VideoSHA256, validation.VideoSizeBytes = strings.ToLower(strings.TrimSpace(probe.SHA256)), probe.SizeBytes
+	validation.VideoSHA256, err = normalizedFinalFilmSHA256(probe.SHA256)
+	if err != nil {
+		return fail(err)
+	}
+	validation.VideoSizeBytes = probe.SizeBytes
 	validation.Width, validation.Height, validation.FPS, validation.DurationMS = probe.Width, probe.Height, probe.FPS, probe.DurationMS
-	if !probe.FFProbeAvailable || probe.SizeBytes <= 0 || len(validation.VideoSHA256) != 64 || probe.DurationMS <= 0 {
+	if !probe.FFProbeAvailable || probe.SizeBytes <= 0 || probe.DurationMS <= 0 {
 		return fail(errors.New("final video probe lacks ffprobe, integrity, size, or duration evidence"))
 	}
-	if probe.Width != profile.Width || probe.Height != profile.Height || math.Abs(probe.FPS-float64(profile.FPS)) > 0.01 {
+	// The worker reports ffprobe's average frame rate. A CFR30 concat can have
+	// a small average-rate delta at segment/audio boundaries even though its
+	// nominal stream rate is 30/1. Match the worker normalizer's 0.25fps
+	// tolerance while still rejecting material profile drift.
+	if probe.Width != profile.Width || probe.Height != profile.Height || math.Abs(probe.FPS-float64(profile.FPS)) > 0.25 {
 		return fail(fmt.Errorf("final video profile mismatch: got %dx%d %.3ffps", probe.Width, probe.Height, probe.FPS))
 	}
 	if !strings.Contains(strings.ToLower(probe.Format), "mp4") || !strings.EqualFold(probe.VideoCodec, "h264") || !strings.EqualFold(probe.PixelFormat, "yuv420p") {
@@ -76,4 +85,14 @@ func validateFinalFilmOutput(ctx context.Context, renderer Renderer, result exec
 	}
 	validation.Status = "passed"
 	return validation, nil
+}
+
+func normalizedFinalFilmSHA256(value string) (string, error) {
+	digest := strings.ToLower(strings.TrimSpace(value))
+	digest = strings.TrimPrefix(digest, "sha256:")
+	decoded, err := hex.DecodeString(digest)
+	if err != nil || len(decoded) != 32 {
+		return "", errors.New("final video probe returned an invalid SHA-256 digest")
+	}
+	return digest, nil
 }

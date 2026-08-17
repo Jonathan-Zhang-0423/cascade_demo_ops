@@ -442,4 +442,12 @@ type Store interface {
 - 真实路由还必须同时满足 `CASCADE_ARK_MEDIA_MODE=real`、Seedance 凭据、精确的视频 route 和独立 `CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true`，仅配置 API key 不会启用；
 - Web 面板可显式选择 H3 或 Seedance 2.0；两路产物最终都收敛为同一 candidate/review/selection/approval/patch 合同。
 
-后续尚需：黑帧/冻结帧/响度/OCR 深度质量门禁；Aleph 2 localized V2V Adapter；真实 workflow 端到端成片验收。
+### 2026-08-17：真实 H3 workflow 端到端成片验收完成
+
+- 新增环境门控的 `real_h3_e2e_test.go`：复用已付费并持久化的 H3 task/candidate，明确不发起第二次 Provider HTTP 请求；
+- 用例完整经过 baseline、Director 计划、生成授权、Provider Registry、人工内容审核、人工选择、Editor approval、显式补丁应用、Renderer 和最终输出验收共 11 个持久化事件；
+- 真实 Node Worker + FFmpeg 将 1920×1080/CFR30 H3 开场候选与事实轨 fixture 确定性拼接，输出 MP4/H.264/yuv420p/AAC，最终状态为 `completed_with_approved_generated_track`；
+- 时间轴抽帧确认 H3 展示轨位于开场，事实轨顺序保持不变，无黑帧和错序；该事实轨是专用于 harness 的确定性测试 fixture，不冒充真实产品录屏；
+- 真实验收同时修复 Worker `sha256:<hex>` 与 Go 验收器裸 digest 的格式不兼容，并将平均帧率容差与 Worker 现有规范化门禁统一为 ±0.25fps，仍拒绝实际 Profile 漂移。
+
+后续尚需：黑帧/冻结帧/响度/OCR 深度质量门禁；Aleph 2 localized V2V Adapter；生产级分布式 admission、跨进程幂等和实际 usage 对账。Seedance 2.0 真实出站验收应单独授权和执行，不作为 H3 闭环的完成条件。

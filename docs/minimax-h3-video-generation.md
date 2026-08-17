@@ -584,7 +584,7 @@ Provider 原始响应
 
 原始文件和规范化副本必须使用不同 artifact ID 与 SHA-256。A/B 只表示同一展示意图下的候选关系，不得依赖相同文件名、URL 字段或厂商响应结构。
 
-当前代码已经完成厂商输出 URL 归一化、时效 URL 下载、original/normalized SHA-256 记录，以及隔离的 `ffprobe -> FFmpeg -> ffprobe` 规范化闭环；现有候选审核和 Renderer 也具备规范化元数据门禁。但该 H3 闭环尚未注册正式路由、尚未连接 EditorSession、尚未用真实 H3 产物验收，因此仍不得把 H3 原始产物直接交给编辑器，也不得宣称 A/B 候选已具备正式运行能力。只有 normalized artifact 能作为后续内容审核的输入，且不能自动加入时间线。
+当前代码已经完成厂商输出 URL 归一化、时效 URL 下载、original/normalized SHA-256 记录，以及隔离的 `ffprobe -> FFmpeg -> ffprobe` 规范化闭环。H3 Adapter 已注册到 FinalFilm Job Runner，并已用真实 H3 产物完成从人工内容审核、选择、Editor approval、显式补丁到 Renderer 最终成片的环境门控 E2E。原始产物仍不得交给编辑器；只有 normalized artifact 能进入审核，而且任何候选都不能自动加入时间线。A/B `comparison` 编排尚未开放。
 
 ### 14.5 分镜 JSON 的所有权
 
@@ -650,21 +650,20 @@ Seedance 2.0 和 H3 都不负责产出 Renderer 可执行的最终分镜 JSON；
 - harness 支持创建、恢复已有 task、下载、双探测规范化、Provider-neutral 候选转换和自动结构审核，并固定停在人工内容审核之前；
 - `backend/cmd/minimaxh3harness` 真实调用入口；真实调用不会打印 API Key，失败后可用 `-task-id` 恢复而不重复创建付费任务。
 
-当前被动 Sidecar 尚未注册到 App 的执行、Director、Seedance fallback 或 A/B comparison 路由。只有显式运行 `minimaxh3harness`，且 `CASCADE_VIDEO_PROVIDER`/`CASCADE_VIDEO_MODEL` 明确选择 H3 时，operator harness 才允许复用 `MINIMAX_API_KEY`。普通 App 启动和仅设置密钥仍不会触发 H3 视频生成。
+H3 已通过独立 Adapter 注册到 FinalFilm 执行路由，但仍不会因为普通 App 启动或仅设置密钥而触发。真实调用还必须同时满足显式视频路由、Server 价格/额度策略、持久化 Director 计划、baseline 已完成和用户生成授权。`minimaxh3harness` 仍保留为 operator 创建/恢复工具；Seedance 自动 fallback 与 A/B `comparison` 尚未开放。
 
 ### 15.2 尚未实现或尚未接入
 
 - 任务列表查询；
 - callback_url 公共请求字段和回调处理；
 - callback HTTP route、签名/来源认证和持久化通知去重；
-- H3 Provider 的正式 App/Server 队列路由（operator harness 已可执行）；
-- 与 EditorSession 候选素材入口的连接；
-- 内容审核 UI、审核证据采集与持久化（人工决定的数据契约已实现，但尚未接运行入口）；
+- 分布式/多实例 Provider 队列与跨进程幂等；
+- Seedance/H3 A/B `comparison` 和显式 fallback 编排；
 - 生产级持久化/分布式配额、实际用量对账、运营成本配置和跨进程幂等控制。
 
 上述“配额、成本、并发、重试和幂等控制”中，单进程内存版 Admission 治理已经实现；正式接入前仍需完成持久化/分布式一致性、运营配置来源、跨进程配额、真实单价核验和任务成功后的实际 `usage.total_seconds` 对账。因此当前不能把内存版治理视为生产配额系统。
 
-当前下载与 MediaNormalizer 已作为隔离组件落地，但尚未注册执行路由，也尚未在真实 H3 返回素材上做调用验收。代码产出的 `normalized_candidate_ready_for_review` 只表示媒体格式门禁通过，不表示内容审核通过，更不表示可以自动加入时间线。
+当前下载与 MediaNormalizer 已作为隔离组件落地、注册 FinalFilm 执行路由，并在真实 H3 返回素材上完成调用及最终合成验收。代码产出的 `normalized_candidate_ready_for_review` 仍只表示媒体格式门禁通过，不表示内容审核通过，更不表示可以自动加入时间线。
 
 ### 15.3 仅尾帧模式的项目决策
 
@@ -701,7 +700,7 @@ text + image_url(role=last_frame)
 - [x] 增加不执行 Provider 的能力预检矩阵，并保持 H3 默认不可选；
 - [x] 定义 Provider-neutral 规范化候选产物协议和 H3 隔离转换器；
 - [x] 实现未注册路由、不可执行的 Provider-neutral 编排审计状态机；
-- [ ] 接入正式 Provider-neutral 任务编排执行器；
+- [x] 接入正式 Provider-neutral FinalFilm Job Runner；
 - [x] 接入可恢复的 operator harness 并完成真实 H3 生成、下载和规范化验收；
 - [x] 实现未注册路由的确定性结构审核和人工内容决定记录契约；
 - [x] 定义未注册路由的 `normal`/`comparison` 候选集合及人工显式选择契约；
@@ -711,11 +710,11 @@ text + image_url(role=last_frame)
 - [x] 实现未注册 HTTP route 的 H3 callback payload 纯解析器，并固定回调后再次 query；
 - [x] 增加 callback notification-only 的有界内存去重旁路：按 `task_id + normalized_status + payload_sha256` 生成去重键，重复通知不重复产生 query intent；
 - [ ] 生产 callback 仍待补齐 HTTP route、来源认证、持久化/分布式去重；在此之前 callback 仅作为唤醒信号，必须由 query 再次确认任务状态和输出；
-- [ ] 接入内容审核 UI、证据采集、持久化和显式选择流程；
-- [x] 保证隔离候选闭环失败时返回 `continue_without_generated_candidate`；正式路由接入后仍需端到端复验；
+- [x] 接入内容审核 UI、证据采集、持久化和显式选择流程；
+- [x] 保证隔离候选闭环失败时返回 `continue_without_generated_candidate`，并完成真实 H3 候选最终合成 E2E；
 - [x] 增加 400、401、402、422、429、500/529 错误测试；
 - [x] 增加真实调用前的单进程 Admission 配额、并发、超时、成本估算和幂等门禁；正式路由前仍需持久化/分布式治理与 usage 对账；
-- [ ] 更新 APP 能力 Profile，但不向 APP 暴露具体模型 ID。
+- [x] 更新 APP 能力 Profile；App 只选择 Provider 能力，不接收具体模型 ID。
 
 ## 17. 资料来源与维护规则
 

@@ -14,7 +14,7 @@
 demoops.generated_shot_candidate.v1
 ```
 
-当前实现提供严格校验、H3 隔离流水线结果转换器、确定性结构审核、人工内容决定记录契约、候选集合/选择契约、Editor approval 契约和统一编辑器引用编译器，尚未注册到 App、Director、Executor、EditorSession、Renderer、审核 UI、`normal`、`comparison` 或 `fallback` 路由。
+当前实现已把严格校验、H3/Seedance 2.0 Adapter、确定性结构审核、人工内容审核、候选集合/选择、Editor approval、统一编辑器引用、原子补丁应用和 Renderer 最终合成注册到 FinalFilm App/Server workflow。`comparison` 和自动 `fallback` 编排仍未开放；单 Provider 失败固定回退事实轨 baseline。
 
 ## 2. 汇合位置
 
@@ -26,12 +26,13 @@ GeneratedShotIntent
     -> ffprobe -> FFmpeg -> ffprobe
     -> GeneratedShotCandidate
     -> 确定性结构审核（旁路纯函数已实现）
-    -> 人工内容审核决定记录（旁路契约已实现，审核 UI 尚未接入）
--> 显式选择 A/B 或批准进入编辑器（尚未实现）
-    -> GeneratedShotEditorAssetRef（仅补丁构造输入，旁路已实现）
-    -> GeneratedShotEditPlanPatchProposal（旁路已实现）
-    -> CandidateAssetEditPlanPatch / EditorSession（尚未接入）
-    -> 候选分镜补丁（默认不自动应用）
+    -> 人工内容审核决定记录（UI 与持久化状态机已接入）
+    -> 显式选择已审核候选
+    -> 独立 Editor approval
+    -> GeneratedShotEditorAssetRef
+    -> GeneratedShotEditPlanPatchProposal（默认不自动应用）
+    -> 用户显式整批应用全部已批准补丁
+    -> Renderer 再校验并确定性合成
 ```
 
 Seedance 与 H3 只能在 `GeneratedShotIntent` 和 `GeneratedShotCandidate` 两个 Provider-neutral 层汇合。不得交换厂商请求、响应或把一方输出作为另一方的输入。
@@ -100,7 +101,7 @@ Server 不信任扩展名、MIME 声明或 Provider 元数据，必须依据下�
 
 ## 7. Seedance 当前状态
 
-Seedance 2.0 仍使用现有运行链路。本轮不修改该链路，也不把它切换到本协议。后续必须先为 Seedance 补齐与 H3 同等级的 `download -> probe -> normalize -> probe` 产物证据，再增加独立转换器；不能仅因 Seedance 返回 MP4 就跳过规范化门禁。
+Seedance 2.0 已实现独立 `GeneratedShotProviderAdapter`，复用 Ark create/query transport、HTTPS 下载器和与 H3 同等级的 `download -> probe -> normalize -> probe` 门禁，并收敛为本文统一候选对象。它必须由独立的 `CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true` 与真实 Ark 模式共同启用；仅存在 API key 不会触发调用。Seedance 与 H3 的原始响应和请求参数仍保持隔离。
 
 ## 8. 结构审核与内容审核
 
