@@ -431,5 +431,8 @@ type Store interface {
 - `between_sections` / `presentation_gap` 必须绑定 required step 锚点，服务端将其插入该步骤最后一个事实镜头之后；intro/outro 则明确约束为首尾位置；
 - Director 已接入现有 LLM Router：模型只返回受限的视觉风格、运动和色板枚举，服务端再编译不含产品 UI、业务事实、数字、Logo 和可读文本的生成提示词，并锁定 hash、时长、比例和素材引用；
 - `POST /v1/final-film/jobs/{id}/plan-director` 从当前 job revision 读取锁定约束并落库，仍保留 `director-plan` 端点用于经过同等校验的外部计划提交。
+- Web Editor 增加“最终成片”控制面板：创建/恢复作业、baseline、Director、费用授权、H3 执行、逐候选人工内容审核、人工选择、Editor 批准、锚点选择、全补丁原子应用和事件审计均按 job state/revision 推进；
+- 候选播放器只通过 `GET /v1/final-film/jobs/{id}/media/{candidate_id}` 读取该作业已持久化且通过结构校验的 normalized 文件，不接受浏览器传入任意本机路径；
+- 未保存的 Editor 草稿不能打开工作流；前端 Mock 模式明确禁用真实工作流，不伪造 Provider 或审核结果。
 
-后续尚需：黑帧/冻结帧/响度/OCR 深度质量门禁；Seedance 2.5/Aleph Adapter；前端控制面板；真实 workflow 端到端成片验收。
+后续尚需：黑帧/冻结帧/响度/OCR 深度质量门禁；Seedance 2.5/Aleph Adapter；真实 workflow 端到端成片验收。

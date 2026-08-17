@@ -235,6 +235,13 @@ func TestGeneratedCandidateRequiresHumanReviewSelectionAndEditorApprovalBeforePa
 	record, _ := decodeGeneratedTrack(job.GeneratedTrack)
 	candidate := record.Candidates[0]
 	structural := record.StructuralReviews[0]
+	mediaPath, err := service.CandidateMediaPath(context.Background(), job.JobID, candidate.CandidateID)
+	if err != nil || mediaPath != candidate.NormalizedArtifact.Path {
+		t.Fatalf("persisted candidate media was not safely resolved: path=%q err=%v", mediaPath, err)
+	}
+	if _, err := service.CandidateMediaPath(context.Background(), job.JobID, "../../arbitrary.mp4"); err == nil {
+		t.Fatal("unpersisted candidate media path was accepted")
+	}
 	job, err = service.RecordGeneratedContentReview(context.Background(), job.JobID, job.Revision, media.GeneratedShotContentReviewDecision{
 		ReviewID: "content_review_1", StructuralReviewID: structural.ReviewID, CandidateID: candidate.CandidateID, IntentID: intent.IntentID,
 		ReviewerID: "reviewer_1", ReviewerKind: "human", ReviewedAt: time.Unix(300, 0), Decision: media.GeneratedShotContentDecisionApprove,
@@ -458,6 +465,12 @@ func (f *fakeGeneratedShotProvider) Execute(_ context.Context, request media.Gen
 		NonAuthoritative: true, PresentationOnly: true, RequiresExplicitReview: true,
 		OriginalArtifact:   media.GeneratedShotCandidateArtifact{Role: "original", Path: filepath.Join(f.root, request.Intent.IntentID+"_original.mp4"), MimeType: "video/mp4", SHA256: originalDigest, SizeBytes: 100, Probe: media.GeneratedShotMediaProbe{DurationSec: 5}},
 		NormalizedArtifact: media.GeneratedShotCandidateArtifact{Role: "normalized", Path: filepath.Join(f.root, request.Intent.IntentID+"_normalized.mp4"), MimeType: "video/mp4", SHA256: normalizedDigest, SizeBytes: 90, NormalizationStatus: "ok", NormalizationProfile: media.GeneratedShotNormalizationProfile, Probe: media.GeneratedShotMediaProbe{Format: "mp4", VideoCodec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, FPS: 30, CFR: true, DurationSec: 5}},
+	}
+	if err := os.WriteFile(candidate.OriginalArtifact.Path, []byte("original candidate"), 0o600); err != nil {
+		return media.GeneratedShotProviderExecutionResult{}, err
+	}
+	if err := os.WriteFile(candidate.NormalizedArtifact.Path, []byte("normalized candidate"), 0o600); err != nil {
+		return media.GeneratedShotProviderExecutionResult{}, err
 	}
 	review := media.ReviewGeneratedShotCandidateStructure("structural_"+request.Intent.IntentID, request.Intent, candidate)
 	return media.GeneratedShotProviderExecutionResult{SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: media.GeneratedShotProviderMiniMaxH3, Model: media.MiniMaxH3Model, IntentID: request.Intent.IntentID, Status: media.GeneratedShotCandidateReadyForReview, ProviderTaskID: taskID, Candidate: &candidate, StructuralReview: &review, FailurePolicy: media.GeneratedShotFailureContinue}, nil

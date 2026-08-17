@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -74,6 +75,36 @@ func (s *Service) SubmitDirectorPlan(ctx context.Context, jobID string, expected
 		return model.FinalFilmJob{}, err
 	}
 	return next, nil
+}
+
+// CandidateMediaPath resolves only a normalized candidate already persisted on
+// the requested job. HTTP adapters can use it for human review without ever
+// accepting an arbitrary filesystem path from the browser.
+func (s *Service) CandidateMediaPath(ctx context.Context, jobID, candidateID string) (string, error) {
+	job, err := s.store.GetJob(ctx, jobID)
+	if err != nil {
+		return "", err
+	}
+	record, err := decodeGeneratedTrack(job.GeneratedTrack)
+	if err != nil {
+		return "", err
+	}
+	candidate := findGeneratedCandidate(record, strings.TrimSpace(candidateID))
+	if candidate == nil {
+		return "", errors.New("generated candidate not found")
+	}
+	if err := media.ValidateGeneratedShotCandidate(*candidate); err != nil {
+		return "", fmt.Errorf("validate generated candidate media: %w", err)
+	}
+	path := filepath.Clean(strings.TrimSpace(candidate.NormalizedArtifact.Path))
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat generated candidate media: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("generated candidate media is not a regular file")
+	}
+	return path, nil
 }
 
 // RunGeneratedCandidates is the only final-film service method allowed to

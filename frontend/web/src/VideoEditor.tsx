@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createEditorClient } from "./editor";
 import type { EditorArtifact, EditorOverlay, EditorPlan, EditorSession, EditorShot, EditorStyleDraft, EditorTimelineStep, EditorValidationReport, VideoStyleTemplate } from "./editor";
+import { FinalFilmPanel } from "./FinalFilmPanel";
 import { editorPlansEqual, emptyEditorHistory, recordEditorHistory, redoEditorHistory, undoEditorHistory } from "./editorHistory";
 import { compilePresentationComposition, finalRendererSupports, finalRendererSupportsOverlay, overlayExportStatus } from "./presentationComposition";
 import { activeCaptionText, audioPreviewState, buildAudioSegments, deleteShotInPlan, mergeAudioSegmentInPlan, patchAudioSegmentInPlan, reorderShotInPlan, requiredStepCoverage, setStillDurationInPlan, snapMilliseconds, sourceSnapPoints, splitAudioAtOutputMS, splitShotAtOutputMS, targetIndexForOutputMS, trimShotInPlan } from "./timelineEditing";
@@ -95,6 +96,7 @@ export function VideoEditor({ initialSessionID }: { initialSessionID?: string })
   const [captionImportText, setCaptionImportText] = useState("");
   const [validationOpen, setValidationOpen] = useState(false);
 	const [automationOpen, setAutomationOpen] = useState(false);
+	const [finalFilmOpen, setFinalFilmOpen] = useState(false);
   const [validationReport, setValidationReport] = useState<EditorValidationReport>();
   const [previewMode, setPreviewMode] = useState<PreviewMode>("source");
   const [playheadMS, setPlayheadMS] = useState(0);
@@ -1322,6 +1324,7 @@ export function VideoEditor({ initialSessionID }: { initialSessionID?: string })
 		  {automation ? <button className={`studio-automation-button ${automationTone(automation.validation_state)}`} onClick={() => setAutomationOpen(true)} title="查看素材如何由 Server Browser Agent 执行、验证和修复">
 			<span aria-hidden="true">✦</span><span>{automationStatusLabel(automation.validation_state)}</span>
 		  </button> : null}
+          <button className="studio-outline-button" title={!session?.edit_plan.shots.length ? "请先导入并编排事实素材" : saveState === "saved" ? "打开 baseline-first 最终成片工作流" : "请先保存当前编辑计划"} disabled={!session?.edit_plan.shots.length || busy !== "" || saveState !== "saved"} onClick={() => setFinalFilmOpen(true)}>最终成片</button>
           <button className={`studio-validation-button ${failedChecks.length > 0 ? "blocked" : ""}`} disabled={!session || busy === "validate"} onClick={() => void validatePlan(true)}>
             <span>{failedChecks.length > 0 ? "!" : "✓"}</span>
             <span>{busy === "validate" ? "校验中" : `导出校验 ${passedChecks.length}/${exportChecks.length}`}</span>
@@ -1592,6 +1595,7 @@ export function VideoEditor({ initialSessionID }: { initialSessionID?: string })
       {captionImportOpen ? <CaptionImportDialog value={captionImportText} onChange={setCaptionImportText} onClose={() => setCaptionImportOpen(false)} onImport={importCaptionsFromText} /> : null}
       {validationOpen ? <ValidationDrawer checks={exportChecks} issues={exportIssues} report={currentValidation} onClose={() => setValidationOpen(false)} onFocusIssue={(issue) => { if (issue.shotID) setSelectedShotID(issue.shotID); if (issue.overlayID) setSelectedOverlayID(issue.overlayID); setSelectedTrack("video"); setValidationOpen(false); }} /> : null}
 	  {automationOpen && automation ? <AutomationDrawer automation={automation} onClose={() => setAutomationOpen(false)} /> : null}
+      {finalFilmOpen && session ? <FinalFilmPanel session={session} onClose={() => setFinalFilmOpen(false)} /> : null}
       {message ? <div className="studio-toast"><span>{message}</span><button onClick={() => setMessage("")}>×</button></div> : null}
     </div>
   );

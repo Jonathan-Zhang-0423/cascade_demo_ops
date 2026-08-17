@@ -108,6 +108,13 @@ func (s *Service) ListFinalFilmEvents(ctx context.Context, jobID string) ([]mode
 	return s.finalFilm.ListEvents(ctx, jobID)
 }
 
+func (s *Service) FinalFilmCandidateMediaPath(ctx context.Context, jobID, candidateID string) (string, error) {
+	if s.finalFilm == nil {
+		return "", errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.CandidateMediaPath(ctx, jobID, candidateID)
+}
+
 func (s *Service) DecideFinalFilmGeneration(ctx context.Context, jobID string, request FinalFilmGenerationDecisionRequest) (model.FinalFilmJob, error) {
 	if s.finalFilm == nil {
 		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")

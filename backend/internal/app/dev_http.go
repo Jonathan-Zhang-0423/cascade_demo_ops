@@ -203,6 +203,19 @@ func (s *DevHTTPServer) handleFinalFilmJobRoute(w http.ResponseWriter, r *http.R
 	case r.Method == http.MethodGet && suffix == "/events":
 		events, err := s.service.ListFinalFilmEvents(r.Context(), jobID)
 		writeBridgeValue(w, events, err)
+	case r.Method == http.MethodGet && strings.HasPrefix(suffix, "/media/"):
+		candidateID := strings.TrimSpace(strings.TrimPrefix(suffix, "/media/"))
+		if candidateID == "" || strings.ContainsAny(candidateID, `/\\`) || strings.Contains(candidateID, "..") {
+			http.NotFound(w, r)
+			return
+		}
+		path, err := s.service.FinalFilmCandidateMediaPath(r.Context(), jobID, candidateID)
+		if err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		http.ServeFile(w, r, path)
 	case r.Method == http.MethodPost && suffix == "/render":
 		job, err := s.service.RunFinalFilmBaseline(r.Context(), jobID)
 		writeBridgeValue(w, job, err)
