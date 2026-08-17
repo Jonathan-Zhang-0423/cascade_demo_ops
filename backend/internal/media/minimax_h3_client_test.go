@@ -48,6 +48,70 @@ func TestMiniMaxH3ClientSubmitsAndNormalizesTaskID(t *testing.T) {
 	}
 }
 
+func TestMiniMaxH3ClientSupports768PAndStripsGenericV1BasePath(t *testing.T) {
+	var body miniMaxH3SubmitRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != miniMaxH3GenerationEndpoint {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"task_id":"task_h3_768"}`))
+	}))
+	defer server.Close()
+
+	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeReal, APIKey: "secret", BaseURL: server.URL + "/v1", HTTPClient: server.Client()})
+	result, err := client.CreateContentGenerationTask(t.Context(), ContentGenerationTaskRequest{
+		Content:    []ContentPart{{Type: "text", Text: "Create a restrained abstract transition."}},
+		Resolution: "768P", Duration: 4, Ratio: "16:9",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.Resolution != "768P" || result.Response == nil || result.Response.ID != "task_h3_768" {
+		t.Fatalf("body=%+v result=%+v", body, result)
+	}
+}
+
+func TestMiniMaxH3ClientCreatesContextIRAndReadsEnhancedPrompt(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == miniMaxH3ContextIREndpoint:
+			var body miniMaxH3ContextIRRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Model != MiniMaxH3Model || body.Duration != 4 || len(body.Content) != 1 {
+				t.Fatalf("context body = %+v", body)
+			}
+			_, _ = w.Write([]byte(`{"task_id":"context_1"}`))
+		case r.Method == http.MethodGet && r.URL.Path == miniMaxH3QueryEndpoint+"/context_1":
+			_, _ = w.Write([]byte(`{"task":{"id":"context_1","model":"MiniMax-H3","status":"succeeded","task_type":"h3_context_ir","content":{"prompt":"Enhanced presentation prompt"}}}`))
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeReal, APIKey: "secret", BaseURL: server.URL, HTTPClient: server.Client()})
+	created, err := client.CreateH3ContextIRTask(t.Context(), ContentGenerationTaskRequest{
+		Content: []ContentPart{{Type: "text", Text: "Original prompt"}}, Resolution: "768P", Duration: 4, Ratio: "16:9",
+	})
+	if err != nil || created.Response == nil || created.Response.ID != "context_1" {
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+	queried, err := client.GetContentGenerationTask(t.Context(), created.Response.ID)
+	if err != nil || queried.Response == nil || queried.Response.Output["enhanced_prompt"] != "Enhanced presentation prompt" || queried.Response.Output["task_type"] != "h3_context_ir" {
+		t.Fatalf("queried=%+v err=%v", queried, err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls=%d", calls)
+	}
+}
+
 func TestMiniMaxH3ClientValidatesReferenceModes(t *testing.T) {
 	client := NewMiniMaxH3Client(MiniMaxH3ClientOptions{Mode: config.ArkMediaModeDryRun})
 	_, err := client.CreateContentGenerationTask(t.Context(), ContentGenerationTaskRequest{

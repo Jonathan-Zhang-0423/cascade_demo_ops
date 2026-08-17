@@ -18,6 +18,7 @@ import (
 const (
 	MiniMaxH3Model              = "MiniMax-H3"
 	miniMaxH3GenerationEndpoint = "/v2/video_generation"
+	miniMaxH3ContextIREndpoint  = "/v2/h3_context_ir"
 	miniMaxH3QueryEndpoint      = "/v2/query/video_generation"
 	defaultMiniMaxH3BaseURL     = "https://api.minimaxi.com"
 )
@@ -67,6 +68,14 @@ type miniMaxH3SubmitRequest struct {
 	AIGCWatermark bool          `json:"aigc_watermark"`
 }
 
+type miniMaxH3ContextIRRequest struct {
+	Model       string        `json:"model"`
+	Content     []ContentPart `json:"content"`
+	Duration    int           `json:"duration"`
+	Ratio       string        `json:"ratio,omitempty"`
+	CallbackURL string        `json:"callback_url,omitempty"`
+}
+
 type miniMaxH3SubmitResponse struct {
 	TaskID string         `json:"task_id,omitempty"`
 	Error  *ProviderError `json:"error,omitempty"`
@@ -109,7 +118,8 @@ type miniMaxH3Task struct {
 }
 
 type miniMaxH3TaskContent struct {
-	URL string `json:"url,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
 }
 
 func NewMiniMaxH3Client(options MiniMaxH3ClientOptions) *MiniMaxH3Client {
@@ -142,11 +152,15 @@ func (c *MiniMaxH3Client) CreateContentGenerationTask(ctx context.Context, reque
 		return result, err
 	}
 	request.Model = MiniMaxH3Model
+	resolution := strings.ToUpper(strings.TrimSpace(request.Resolution))
+	if resolution == "" {
+		resolution = "2K"
+	}
 
 	submit := miniMaxH3SubmitRequest{
 		Model:         MiniMaxH3Model,
 		Content:       request.Content,
-		Resolution:    "2K",
+		Resolution:    resolution,
 		Duration:      request.Duration,
 		Ratio:         request.Ratio,
 		AIGCWatermark: request.Watermark,
@@ -187,6 +201,53 @@ func (c *MiniMaxH3Client) CreateContentGenerationTask(ctx context.Context, reque
 	return result, nil
 }
 
+// CreateH3ContextIRTask asks H3 to enrich the prompt while preserving the
+// original multimodal intent. It creates an asynchronous reasoning task only;
+// it does not generate or approve a video.
+func (c *MiniMaxH3Client) CreateH3ContextIRTask(ctx context.Context, request ContentGenerationTaskRequest) (ContentGenerationTaskResult, error) {
+	provider := config.ModelProvider("minimax-h3")
+	endpoint := miniMaxH3Endpoint(c.baseURL, miniMaxH3ContextIREndpoint)
+	trace := newTrace(c.mode, provider, MiniMaxH3Model, http.MethodPost, endpoint)
+	result := ContentGenerationTaskResult{Mode: c.mode, Provider: provider, Model: MiniMaxH3Model, Trace: trace}
+	if err := validateMiniMaxH3Request(request); err != nil {
+		if errors.Is(err, ErrMiniMaxH3LastFrameOnlyNotEnabled) || errors.Is(err, ErrMiniMaxH3ReferenceAudioNotEnabled) {
+			result.Trace.ErrorClass = "provider_capability_not_enabled"
+		} else {
+			result.Trace.ErrorClass = "invalid_request"
+		}
+		return result, err
+	}
+	request.Model = MiniMaxH3Model
+	request.Resolution = ""
+	contextRequest := miniMaxH3ContextIRRequest{
+		Model: MiniMaxH3Model, Content: request.Content, Duration: request.Duration, Ratio: request.Ratio,
+	}
+	switch c.mode {
+	case config.ArkMediaModeDisabled:
+		result.Trace.ErrorClass = "disabled"
+		return result, ErrArkMediaDisabled
+	case config.ArkMediaModeDryRun, "":
+		result.Request = &request
+		return result, nil
+	}
+	if c.apiKey == "" {
+		result.Trace.ErrorClass = "api_key_missing"
+		return result, errors.New("MiniMax-H3 API key is missing")
+	}
+	var response miniMaxH3SubmitResponse
+	trace, err := c.doJSON(ctx, http.MethodPost, endpoint, contextRequest, &response, trace)
+	result.Trace = trace
+	if err != nil {
+		return result, err
+	}
+	if strings.TrimSpace(response.TaskID) == "" {
+		result.Trace.ErrorClass = "task_id_missing"
+		return result, errors.New("MiniMax-H3 Context-IR response is missing task_id")
+	}
+	result.Response = &ContentGenerationTaskResponse{ID: response.TaskID, Status: MiniMaxH3TaskQueued, Model: MiniMaxH3Model}
+	return result, nil
+}
+
 func (c *MiniMaxH3Client) GetContentGenerationTask(ctx context.Context, taskID string) (ContentGenerationTaskResult, error) {
 	provider := config.ModelProvider("minimax-h3")
 	taskID = strings.TrimSpace(taskID)
@@ -223,6 +284,12 @@ func (c *MiniMaxH3Client) GetContentGenerationTask(ctx context.Context, taskID s
 	output := map[string]any{}
 	if videoURL := strings.TrimSpace(response.Task.Content.URL); videoURL != "" {
 		output["video_url"] = videoURL
+	}
+	if prompt := strings.TrimSpace(response.Task.Content.Prompt); prompt != "" {
+		output["enhanced_prompt"] = prompt
+	}
+	if taskType := strings.TrimSpace(response.Task.TaskType); taskType != "" {
+		output["task_type"] = taskType
 	}
 	result.Response = &ContentGenerationTaskResponse{
 		ID:     response.Task.ID,
@@ -319,8 +386,8 @@ func validateMiniMaxH3Request(request ContentGenerationTaskRequest) error {
 	if request.Duration < 4 || request.Duration > 15 {
 		return errors.New("MiniMax-H3 duration must be an integer from 4 to 15 seconds")
 	}
-	if request.Resolution != "" && !strings.EqualFold(strings.TrimSpace(request.Resolution), "2K") {
-		return errors.New("MiniMax-H3 resolution must be 2K")
+	if resolution := strings.ToUpper(strings.TrimSpace(request.Resolution)); resolution != "" && resolution != "2K" && resolution != "768P" {
+		return errors.New("MiniMax-H3 resolution must be 768P or 2K")
 	}
 	if !miniMaxH3RatioAllowed(request.Ratio) {
 		return errors.New("MiniMax-H3 ratio is unsupported")
@@ -489,6 +556,14 @@ func miniMaxH3Endpoint(baseURL string, endpoint string) string {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return strings.TrimRight(baseURL, "/") + endpoint
 	}
+	// Generic MiniMax text-model configuration commonly ends in /v1. H3 owns
+	// its /v2 paths, so retain the configured regional host but remove a lone
+	// API-version suffix before appending the H3 endpoint.
+	trimmedPath := strings.TrimRight(parsed.Path, "/")
+	if trimmedPath == "/v1" || trimmedPath == "/v2" {
+		trimmedPath = ""
+	}
+	parsed.Path = trimmedPath
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + endpoint
 	return parsed.String()
 }

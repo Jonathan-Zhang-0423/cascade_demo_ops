@@ -3,7 +3,7 @@
 > 文档状态：项目级技术基线，包含官方接口契约摘要、Server 使用边界和当前实现状态
 > 整理日期：2026-08-04
 > 适用模型：`MiniMax-H3`
-> API 基地址：`https://api.minimaxi.com`
+> API 基地址：按 API Key 区域选择 `https://api.minimaxi.com`（中国区）或 `https://api.minimax.io`（全球区）；H3 自行追加 `/v2` 路径
 > 范围：MiniMax 视频生成 V2；不包含 MiniMax 文本模型、语音、图像或旧版 Hailuo/S2V 视频接口
 
 ## 1. 项目定位
@@ -36,6 +36,7 @@ API Key 只能保存在环境变量或密钥管理系统中，不得写入执行
 | 操作 | 方法与路径 | 用途 |
 | --- | --- | --- |
 | 创建任务 | `POST /v2/video_generation` | 创建异步 H3 视频生成任务 |
+| 上下文增强 | `POST /v2/h3_context_ir` | 基于相同多模态输入生成增强 Prompt，不直接生成视频 |
 | 查询单个任务 | `GET /v2/query/video_generation/{task_id}` | 获取状态、错误、用量和生成视频 URL |
 | 查询任务列表 | `GET /v2/query/video_generation` | 分页查询最近 7 天任务 |
 | 取消或删除 | `DELETE /v2/video_generation/{task_id}` | queued 时取消，终态时删除记录 |
@@ -63,7 +64,7 @@ Authorization: Bearer <MINIMAX_API_KEY>
       "text": "生成一个不包含产品 UI 和业务事实的抽象品牌片头"
     }
   ],
-  "resolution": "2K",
+  "resolution": "768P",
   "duration": 5,
   "ratio": "16:9",
   "aigc_watermark": false
@@ -86,7 +87,7 @@ Authorization: Bearer <MINIMAX_API_KEY>
 | --- | ---: | --- | --- |
 | `model` | 是 | 当前为 `MiniMax-H3` | 由 Server 固定，APP 不传 |
 | `content` | 是 | 多模态数组 | 必须至少包含一个非空 text |
-| `resolution` | 是 | 当前仅 `2K` | 由 Server 固定 |
+| `resolution` | 是 | `768P`、`2K` | operator harness 默认 768P；通过质量门禁后可按成片档位使用 2K |
 | `duration` | 是 | 整数 4～15 秒 | 默认 5 秒 |
 | `ratio` | 视模式而定 | 见宽高比规则 | 默认 16:9 或按模式归一化 |
 | `callback_url` | 否 | 状态回调 | 首期继续轮询；稳定回调端点上线后再启用 |
@@ -231,9 +232,10 @@ Server 必须使用媒体探测读取真实容器、编码、时长、尺寸和 
 
 ### 6.1 分辨率
 
-H3 当前创建接口只接受：
+H3 当前创建接口接受：
 
 ```text
+768P
 2K
 ```
 
@@ -610,7 +612,7 @@ Seedance 2.0 和 H3 都不负责产出 Renderer 可执行的最终分镜 JSON；
 - `POST /v2/video_generation` 创建任务；
 - Bearer 鉴权；
 - `dry_run`、`real`、`disabled` 模式；
-- 2K、4～15 秒和宽高比校验；
+- 768P/2K、4～15 秒和宽高比校验；
 - text、图片、视频 content 类型；识别音频 content 但按当前 Capability Profile 在调用前拒绝；
 - 帧模式与参考模式互斥校验；
 - 参考图片、视频、音频数量上限校验；
@@ -643,15 +645,19 @@ Seedance 2.0 和 H3 都不负责产出 Renderer 可执行的最终分镜 JSON；
 - 统一编辑器素材引用编译器：H3 通过所有审核和 Editor approval 后，只转换为本地 normalized 引用，编辑器不读取厂商响应、临时 URL 或 Provider 特有字段；当前仍不写 EditorSession、不应用补丁。
 - 受控候选补丁提案编译器：按既有 `candidate_asset_edit_plan_patch.v1` 的安全语义生成 `manual_or_explicit_opt_in_required` 提案，仍不修改 DemoEditPlan、不应用补丁、不触发 Renderer。
 - H3 callback payload 无副作用解析器：只处理 challenge、task ID、六态和 HTTPS 输出线索；回调固定要求再次 query，不创建候选、不登记素材、不推进正式路由。
+- H3-Context-IR 创建和增强 Prompt 查询；
+- 可执行 operator harness：显式 H3 视频路由下读取 `.env` 密钥，保留中国区/全球区主机并剥离旧 `/v1` 后拼接 H3 V2 路径；
+- harness 支持创建、恢复已有 task、下载、双探测规范化、Provider-neutral 候选转换和自动结构审核，并固定停在人工内容审核之前；
+- `backend/cmd/minimaxh3harness` 真实调用入口；真实调用不会打印 API Key，失败后可用 `-task-id` 恢复而不重复创建付费任务。
 
-当前 Sidecar 尚未注册到 Server 的执行、Director、Seedance fallback 或 A/B comparison 路由。仅设置 `CASCADE_ARK_MEDIA_MODE=real`、`MINIMAX_API_KEY`、`SEEDANCE_API_KEY` 或 `DOUBAO_API_KEY` 都不会创建 H3 Client，也不会触发 H3 视频生成。这是验收期间必须保持的隔离边界。
+当前被动 Sidecar 尚未注册到 App 的执行、Director、Seedance fallback 或 A/B comparison 路由。只有显式运行 `minimaxh3harness`，且 `CASCADE_VIDEO_PROVIDER`/`CASCADE_VIDEO_MODEL` 明确选择 H3 时，operator harness 才允许复用 `MINIMAX_API_KEY`。普通 App 启动和仅设置密钥仍不会触发 H3 视频生成。
 
 ### 15.2 尚未实现或尚未接入
 
 - 任务列表查询；
 - callback_url 公共请求字段和回调处理；
 - callback HTTP route、签名/来源认证和持久化通知去重；
-- H3 Provider 正式路由；
+- H3 Provider 的正式 App/Server 队列路由（operator harness 已可执行）；
 - 与 EditorSession 候选素材入口的连接；
 - 内容审核 UI、审核证据采集与持久化（人工决定的数据契约已实现，但尚未接运行入口）；
 - 生产级持久化/分布式配额、实际用量对账、运营成本配置和跨进程幂等控制。
@@ -696,6 +702,7 @@ text + image_url(role=last_frame)
 - [x] 定义 Provider-neutral 规范化候选产物协议和 H3 隔离转换器；
 - [x] 实现未注册路由、不可执行的 Provider-neutral 编排审计状态机；
 - [ ] 接入正式 Provider-neutral 任务编排执行器；
+- [x] 接入可恢复的 operator harness 并完成真实 H3 生成、下载和规范化验收；
 - [x] 实现未注册路由的确定性结构审核和人工内容决定记录契约；
 - [x] 定义未注册路由的 `normal`/`comparison` 候选集合及人工显式选择契约；
 - [x] 定义 Editor approval 前置契约，只授权未来补丁构造；
