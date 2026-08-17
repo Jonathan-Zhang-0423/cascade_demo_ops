@@ -88,6 +88,21 @@ func TestReplayManifestRejectsIncompleteSelectorRepairAudit(t *testing.T) {
 	}
 }
 
+func TestReplayManifestRejectsSensitiveSelectorRepairAudit(t *testing.T) {
+	m := validReplayManifest()
+	m.Stages = []ReplayManifestStage{{
+		NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed",
+		SelectorRepairs: []ReplayManifestSelectorRepair{{
+			OriginalSelector: "button[data-auth='Bearer secret']", CandidateSelector: "#approved-target",
+			CandidateCount: 1, EvidenceIDs: []string{"approved-selector"},
+			BeforeEvidenceIDs: []string{"before-shot"}, AfterEvidenceIDs: []string{"after-shot"},
+		}},
+	}}
+	if err := m.Validate(); err == nil {
+		t.Fatal("selector repair audit containing a credential token was accepted")
+	}
+}
+
 func validReplayManifest() ReplayManifest {
 	return ReplayManifest{
 		SchemaVersion:    ReplayManifestSchemaVersion,

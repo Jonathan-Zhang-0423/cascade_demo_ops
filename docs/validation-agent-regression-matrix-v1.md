@@ -17,7 +17,8 @@
 | fill 后验证 | 输入语义和提交值不能漂移 | `TestValidateBrowserAgentOutlineConsistencyRejectsBusinessInputValueDrift` |
 | 动作/结果目标分离 | outcome 只能由后置断言证明 | `TestSemanticValidationRejectsVisibleClickedControlAsOutcome` |
 | 目标几何 | 事件几何字段与截图维度一致 | `TestStageExecutionEventTargetGeometryRoundTripAndValidation`, `TestDirectArtifactViewportMatchesWhenDimensionsAreDeclared` |
-| selector repair 审计 | 原/候选 selector、证据和命中数不完整时拒绝 | `TestReplayManifestRejectsIncompleteSelectorRepairAudit` |
+| selector repair 审计 | 原/候选 selector、证据和命中数不完整或包含敏感文本时拒绝 | `TestReplayManifestRejectsIncompleteSelectorRepairAudit`, `TestReplayManifestRejectsSensitiveSelectorRepairAudit` |
+| 报告/回放一致性 | 内联报告必须绑定本次上传的 ReplayManifest、阶段和证据 | `TestFormalResultArtifactContentsRejectValidationRunReportForAnotherReplayManifest` |
 
 建议执行：
 

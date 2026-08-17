@@ -152,6 +152,12 @@ func (m ReplayManifest) Validate() error {
 			if repair.OriginalSelector == "" || repair.CandidateSelector == "" || repair.CandidateCount < 1 || len(repair.EvidenceIDs) == 0 || len(repair.BeforeEvidenceIDs) == 0 || len(repair.AfterEvidenceIDs) == 0 {
 				return errors.New("replay manifest selector repair is missing approved selector audit evidence")
 			}
+			values := append([]string{repair.OriginalSelector, repair.CandidateSelector}, repair.EvidenceIDs...)
+			values = append(values, repair.BeforeEvidenceIDs...)
+			values = append(values, repair.AfterEvidenceIDs...)
+			if err := validateRuntimeContractText(values...); err != nil {
+				return err
+			}
 		}
 		if index > 0 && stage.Order <= m.Stages[index-1].Order {
 			return errors.New("replay manifest stages must be ordered")
