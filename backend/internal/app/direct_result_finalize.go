@@ -50,6 +50,11 @@ func (s *DirectHTTPServer) finalizeDirectResult(_ context.Context, jobID, root s
 	if err != nil {
 		return err
 	}
+	validationRunReport, err := BuildValidationRunReport(*result, pkg, manifest)
+	if err != nil {
+		return fmt.Errorf("build validation run report: %w", err)
+	}
+	result.ValidationRunReport = &validationRunReport
 	manifestArtifactID := manifest.ManifestID
 	manifest.ManifestURI = directArtifactURI(jobID, manifestArtifactID)
 	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")

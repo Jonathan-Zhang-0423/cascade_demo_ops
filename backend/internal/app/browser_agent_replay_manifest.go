@@ -130,6 +130,12 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 		if approved, ok := stageByNode[step.NodeID]; ok {
 			stage.StageID = approved.ID
 			stage.Order = approved.Order
+			stage.TargetURL = firstNonEmpty(approved.TargetURL, approved.TargetRoute, approved.ExpectedRouteAfterAction)
+			for _, ref := range approved.Interaction.EvidenceRefs {
+				if ref.ID != "" {
+					stage.ActionEvidenceIDs = appendUniqueReplayString(stage.ActionEvidenceIDs, ref.ID)
+				}
+			}
 		}
 		if step.Error != nil {
 			stage.FailureCode = step.Error.Code
@@ -150,10 +156,26 @@ func BuildReplayManifest(input BuildReplayManifestInput) (model.ReplayManifest, 
 				if ev.Observation.Title != "" {
 					stage.ObservedTitle = ev.Observation.Title
 				}
+				if ev.Observation.TargetGeometry != nil {
+					geometry := ev.Observation.TargetGeometry
+					stage.Viewport = &geometry.Viewport
+					if stage.RecordingStartOffsetMS == 0 || ev.EventType == model.StageExecutionEventActionStarted {
+						stage.RecordingStartOffsetMS = geometry.RecordingOffsetMS
+					}
+					if ev.EventType == model.StageExecutionEventOutcomeObserved || ev.EventType == model.StageExecutionEventStageCompleted {
+						stage.RecordingEndOffsetMS = geometry.RecordingOffsetMS
+					}
+				}
 			}
 			for _, ref := range ev.EvidenceRefs {
 				if ref.ArtifactID != "" {
 					stage.EvidenceArtifactIDs = appendUniqueReplayString(stage.EvidenceArtifactIDs, ref.ArtifactID)
+				}
+				if ref.ID != "" && ev.EventType == model.StageExecutionEventOutcomeObserved {
+					stage.OutcomeEvidenceIDs = appendUniqueReplayString(stage.OutcomeEvidenceIDs, ref.ID)
+				}
+				if ref.ID != "" && (ev.EventType == model.StageExecutionEventActionStarted || ev.EventType == model.StageExecutionEventActionCompleted) {
+					stage.ActionEvidenceIDs = appendUniqueReplayString(stage.ActionEvidenceIDs, ref.ID)
 				}
 			}
 		}

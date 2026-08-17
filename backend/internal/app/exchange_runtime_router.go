@@ -123,6 +123,11 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 			if err := AttachReplayManifestArtifact(&result, manifest); err != nil {
 				return model.RecordingResultPackage{}, newRuntimeExecutionError("replay_manifest_unavailable", err)
 			}
+			validationRunReport, reportErr := BuildValidationRunReport(result, *request.Package, manifest)
+			if reportErr != nil {
+				return model.RecordingResultPackage{}, newRuntimeExecutionError("validation_run_report_unavailable", reportErr)
+			}
+			result.ValidationRunReport = &validationRunReport
 		}
 		return result, nil
 	default:

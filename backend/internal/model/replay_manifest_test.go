@@ -52,6 +52,31 @@ func TestReplayManifestStageOrderingPreserved(t *testing.T) {
 	}
 }
 
+func TestReplayManifestStageCarriesReplayableTargetAndEvidenceMetadata(t *testing.T) {
+	m := validReplayManifest()
+	m.Stages = []ReplayManifestStage{{
+		NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed",
+		TargetURL: "https://app.example/projects/{project_id}",
+		ActionEvidenceIDs: []string{"e-action"}, OutcomeEvidenceIDs: []string{"e-outcome"},
+		RecordingStartOffsetMS: 100, RecordingEndOffsetMS: 900,
+		Viewport: &BrowserGeometryViewport{Width: 1280, Height: 720, DPR: 1},
+	}}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("replayable stage metadata should validate: %v", err)
+	}
+	if m.Stages[0].RecordingEndOffsetMS != 900 || m.Stages[0].Viewport.Width != 1280 {
+		t.Fatalf("replay metadata was not retained: %+v", m.Stages[0])
+	}
+}
+
+func TestReplayManifestStageRejectsInvalidRecordingInterval(t *testing.T) {
+	m := validReplayManifest()
+	m.Stages = []ReplayManifestStage{{NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed", RecordingStartOffsetMS: 900, RecordingEndOffsetMS: 100}}
+	if err := m.Validate(); err == nil {
+		t.Fatal("replay manifest must reject a reversed recording interval")
+	}
+}
+
 func validReplayManifest() ReplayManifest {
 	return ReplayManifest{
 		SchemaVersion:    ReplayManifestSchemaVersion,

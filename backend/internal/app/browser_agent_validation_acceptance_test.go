@@ -116,6 +116,45 @@ func TestURLMatchAloneDoesNotProveBusinessCompletion(t *testing.T) {
 	if !urlPassed || !businessFailed {
 		t.Fatalf("report must keep URL pass and business failure distinguishable: %+v", report.Checks)
 	}
+	var semanticCode bool
+	for _, check := range report.Checks {
+		if check.Code == "url_change_not_business_completion" {
+			semanticCode = true
+			if check.ResponsibilityDomain != model.ValidationCheckDomainApp || check.Severity != model.FindingSeverityBlocking {
+				t.Fatalf("URL-only semantic finding must be blocking App feedback: %+v", check)
+			}
+		}
+	}
+	if !semanticCode {
+		t.Fatalf("URL-only outcome must emit url_change_not_business_completion: %+v", report.Checks)
+	}
+}
+
+func TestForbiddenOperationAttemptedIsReportedFromRuntimeAction(t *testing.T) {
+	verifier := deterministicBrowserAgentStageVerifier{}
+	report, err := verifier.ValidateStageEvents(context.Background(), model.BrowserAgentValidationContext{
+		RunID: "run-forbidden", SourcePackageID: "pkg-1", SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
+		ForbiddenActions: []string{"delete_project"},
+	}, []model.StageExecutionEvent{{
+		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event-forbidden", RunID: "run-forbidden", SourcePackageID: "pkg-1", SourceBundleHashSHA256: "bundle_hash", PolicyHashSHA256: "policy_hash",
+		NodeID: "node-1", StageID: "stage-1", Attempt: 1, Sequence: 1, EventType: model.StageExecutionEventActionStarted, OccurredAt: timeNowUTC(),
+		Action: &model.RuntimeAction{Kind: "delete_project"}, EvidenceRefs: []model.EvidenceRef{{ID: "e-forbidden", Kind: model.EvidenceKindExecutionRun}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != model.ValidationDecisionStopAndReport {
+		t.Fatalf("forbidden action must stop execution: %+v", report)
+	}
+	for _, check := range report.Checks {
+		if check.Code == "forbidden_operation_attempted" {
+			if check.ResponsibilityDomain != model.ValidationCheckDomainApp || check.Severity != model.FindingSeverityBlocking {
+				t.Fatalf("forbidden operation finding has wrong routing: %+v", check)
+			}
+			return
+		}
+	}
+	t.Fatalf("forbidden operation finding missing: %+v", report.Checks)
 }
 
 // 相同输入重复运行应产生稳定 finding code 和可比较证据：同一验证上下文
@@ -124,8 +163,8 @@ func TestValidationFindingsAreStableAcrossRepeatedRuns(t *testing.T) {
 	vctx := model.BrowserAgentValidationContext{
 		RunID: "run_stability", SourcePackageID: "pkg_1",
 		SourceBundleHashSHA256: "bundle_hash", EffectivePolicyHashSHA256: "policy_hash",
-		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{ID: "stage-1", Order: 1, NodeID: "node_1"}}},
-		ScriptOutline:     &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{NodeID: "node_1"}}},
+		StageApprovalPlan:    &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{ID: "stage-1", Order: 1, NodeID: "node_1"}}},
+		ScriptOutline:        &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{NodeID: "node_1"}}},
 		BrowserAgentContract: &model.BrowserAgentContract{ID: "contract_1"},
 	}
 	events := func() []model.StageExecutionEvent {

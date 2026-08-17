@@ -65,17 +65,23 @@ type ReplayManifest struct {
 
 // ReplayManifestStage is a lightweight summary of a single stage outcome.
 type ReplayManifestStage struct {
-	NodeID              string                `json:"node_id"`
-	StageID             string                `json:"stage_id"`
-	Order               int                   `json:"order"`
-	Status              string                `json:"status"` // "passed" | "failed" | "not_started"
-	Waived              bool                  `json:"waived,omitempty"`
-	ValidationDecision  ValidationDecision    `json:"validation_decision,omitempty"`
-	ObservedURL         string                `json:"observed_url,omitempty"`
-	ObservedTitle       string                `json:"observed_title,omitempty"`
-	FailureCode         string                `json:"failure_code,omitempty"`
-	FailureDomain       ValidationCheckDomain `json:"failure_domain,omitempty"`
-	EvidenceArtifactIDs []string              `json:"evidence_artifact_ids,omitempty"`
+	NodeID                 string                   `json:"node_id"`
+	StageID                string                   `json:"stage_id"`
+	Order                  int                      `json:"order"`
+	Status                 string                   `json:"status"` // "passed" | "failed" | "not_started"
+	Waived                 bool                     `json:"waived,omitempty"`
+	ValidationDecision     ValidationDecision       `json:"validation_decision,omitempty"`
+	ObservedURL            string                   `json:"observed_url,omitempty"`
+	ObservedTitle          string                   `json:"observed_title,omitempty"`
+	TargetURL              string                   `json:"target_url,omitempty"`
+	FailureCode            string                   `json:"failure_code,omitempty"`
+	FailureDomain          ValidationCheckDomain    `json:"failure_domain,omitempty"`
+	EvidenceArtifactIDs    []string                 `json:"evidence_artifact_ids,omitempty"`
+	ActionEvidenceIDs      []string                 `json:"action_evidence_ids,omitempty"`
+	OutcomeEvidenceIDs     []string                 `json:"outcome_evidence_ids,omitempty"`
+	RecordingStartOffsetMS int64                    `json:"recording_start_offset_ms,omitempty"`
+	RecordingEndOffsetMS   int64                    `json:"recording_end_offset_ms,omitempty"`
+	Viewport               *BrowserGeometryViewport `json:"viewport,omitempty"`
 }
 
 // ReplayManifestValidationRef points to one validation report within the
@@ -111,6 +117,23 @@ func (m ReplayManifest) Validate() error {
 	}
 	if !validValidationDecision(m.FinalDecision) {
 		return errors.New("replay manifest final_decision is invalid")
+	}
+	for index, stage := range m.Stages {
+		if stage.Order < 1 || stage.NodeID == "" || stage.StageID == "" {
+			return errors.New("replay manifest stage requires node_id, stage_id and positive order")
+		}
+		if stage.RecordingStartOffsetMS < 0 || stage.RecordingEndOffsetMS < 0 || (stage.RecordingEndOffsetMS > 0 && stage.RecordingEndOffsetMS < stage.RecordingStartOffsetMS) {
+			return errors.New("replay manifest stage recording interval is invalid")
+		}
+		if stage.Viewport != nil && (stage.Viewport.Width <= 0 || stage.Viewport.Height <= 0 || stage.Viewport.DPR <= 0) {
+			return errors.New("replay manifest stage viewport is invalid")
+		}
+		if err := validateRuntimeContractText(stage.TargetURL, stage.ObservedURL, stage.ObservedTitle); err != nil {
+			return err
+		}
+		if index > 0 && stage.Order <= m.Stages[index-1].Order {
+			return errors.New("replay manifest stages must be ordered")
+		}
 	}
 	return nil
 }
