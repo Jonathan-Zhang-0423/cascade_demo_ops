@@ -372,6 +372,9 @@ func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, sour
 	if len(result.ValidationReports) == 0 {
 		return errors.New("result_missing_validation_reports: formal completed result requires ValidationReports")
 	}
+	if source.ExecutableScriptBundle != nil && source.ExecutableScriptBundle.ScriptManifest.Runtime == ExecutableScriptRuntimeBrowserAgentOutlineV1 && result.ValidationRunReport == nil {
+		return errors.New("result_missing_validation_run_report: formal completed outline result requires ValidationRunReport")
+	}
 	if source.RecordingRunSpec.Outputs.RawRecording {
 		if err := requireArtifact("result_missing_raw_recording", "raw_recording"); err != nil {
 			return err

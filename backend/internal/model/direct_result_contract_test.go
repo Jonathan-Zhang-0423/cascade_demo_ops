@@ -39,6 +39,7 @@ func TestFormalOutlineResultRequiresReplayAndEditorHandoffArtifacts(t *testing.T
 	}{
 		{name: "step results", code: "result_missing_step_results", mutate: func(result *RecordingResultPackage) { result.StepResults = nil }},
 		{name: "validation reports", code: "result_missing_validation_reports", mutate: func(result *RecordingResultPackage) { result.ValidationReports = nil }},
+		{name: "validation run report", code: "result_missing_validation_run_report", mutate: func(result *RecordingResultPackage) { result.ValidationRunReport = nil }},
 		{name: "raw recording", code: "result_missing_raw_recording", mutate: func(result *RecordingResultPackage) {
 			result.GeneratedAssets = removeFormalArtifact(result.GeneratedAssets, "raw_recording")
 		}},
@@ -85,8 +86,9 @@ func completeFormalOutlineResult() (*ClientExecutionPackage, *RecordingResultPac
 	}
 	result := &RecordingResultPackage{
 		Status: RecordingResultStatusGenerated, ExecutionTrace: &ExecutionTrace{},
-		StepResults:       []StepResult{{NodeID: "node_1", Status: "passed"}},
-		ValidationReports: []ValidationReport{{ReportID: "report_1", Decision: ValidationDecisionContinue}},
+		StepResults:         []StepResult{{NodeID: "node_1", Status: "passed"}},
+		ValidationReports:   []ValidationReport{{ReportID: "report_1", Decision: ValidationDecisionContinue}},
+		ValidationRunReport: &ValidationRunReport{},
 		GeneratedAssets: []ArtifactRef{
 			artifact("raw", "raw_recording", "video/webm"),
 			artifact("video", "demo_video", "video/mp4"),
