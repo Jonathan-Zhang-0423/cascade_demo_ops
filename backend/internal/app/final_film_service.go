@@ -28,6 +28,10 @@ type FinalFilmDirectorPlanRequest struct {
 	Plan             model.FinalFilmDirectorPlan `json:"plan"`
 }
 
+type FinalFilmDirectorPlanningRequest struct {
+	ExpectedRevision int `json:"expected_revision"`
+}
+
 type FinalFilmGenerateRequest struct {
 	ExpectedRevision  int    `json:"expected_revision"`
 	PreferredProvider string `json:"preferred_provider,omitempty"`
@@ -49,8 +53,9 @@ type FinalFilmEditorApprovalRequest struct {
 }
 
 type FinalFilmApplyPatchRequest struct {
-	ExpectedRevision int    `json:"expected_revision"`
-	PatchID          string `json:"patch_id"`
+	ExpectedRevision int      `json:"expected_revision"`
+	PatchID          string   `json:"patch_id"`
+	PatchIDs         []string `json:"patch_ids,omitempty"`
 }
 
 type FinalFilmCancelRequest struct {
@@ -117,6 +122,13 @@ func (s *Service) SubmitFinalFilmDirectorPlan(ctx context.Context, jobID string,
 	return s.finalFilm.SubmitDirectorPlan(ctx, jobID, request.ExpectedRevision, request.Plan)
 }
 
+func (s *Service) PlanFinalFilmDirectorShots(ctx context.Context, jobID string, request FinalFilmDirectorPlanningRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.PlanDirectorGeneratedShots(ctx, jobID, request.ExpectedRevision)
+}
+
 func (s *Service) RunFinalFilmGeneratedCandidates(ctx context.Context, jobID string, request FinalFilmGenerateRequest) (model.FinalFilmJob, error) {
 	if s.finalFilm == nil {
 		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
@@ -149,7 +161,11 @@ func (s *Service) ApplyFinalFilmGeneratedPatch(ctx context.Context, jobID string
 	if s.finalFilm == nil {
 		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
 	}
-	return s.finalFilm.ApplyGeneratedPatch(ctx, jobID, request.ExpectedRevision, request.PatchID)
+	patchIDs := append([]string{}, request.PatchIDs...)
+	if len(patchIDs) == 0 && strings.TrimSpace(request.PatchID) != "" {
+		patchIDs = []string{request.PatchID}
+	}
+	return s.finalFilm.ApplyGeneratedPatches(ctx, jobID, request.ExpectedRevision, patchIDs)
 }
 
 func (s *Service) CancelFinalFilmJob(ctx context.Context, jobID string, request FinalFilmCancelRequest) (model.FinalFilmJob, error) {

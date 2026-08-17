@@ -45,6 +45,7 @@ type FinalFilmJob struct {
 	FinalCatalog               *AssetTimelineCatalog          `json:"final_catalog,omitempty"`
 	FinalPlan                  *DemoEditPlan                  `json:"final_plan,omitempty"`
 	AppliedGeneratedPatchID    string                         `json:"applied_generated_patch_id,omitempty"`
+	AppliedGeneratedPatchIDs   []string                       `json:"applied_generated_patch_ids,omitempty"`
 	RenderProfile              EditorRenderProfile            `json:"render_profile"`
 	PresentationIntents        []PresentationGenerationIntent `json:"presentation_intents,omitempty"`
 	DirectorPlan               *FinalFilmDirectorPlan         `json:"director_plan,omitempty"`

@@ -427,6 +427,9 @@ type Store interface {
 - apply 阶段构造隔离的 final catalog/plan，生成候选不得绑定 `source_step_id`，并逐镜头验证 baseline 的事实素材、步骤与时间范围没有变化；
 - Renderer 再次验证最终计划后执行 FFmpeg 确定性合成；Render audit 明确记录 Provider 输出已采用、补丁 ID 与新增镜头 ID；
 - 最终输出必须通过 ffprobe 完整性、分辨率/FPS、MP4/H.264/yuv420p、FFmpeg 无 fallback、无 skipped operation、需求满足报告等验收，否则自动回退 baseline；
-- 多候选审核/选择/批准可以持久化推进；当前 renderer revision 对同一作业的多补丁原子应用会明确拒绝，不会静默遗漏镜头。
+- 多候选审核/选择/批准可以持久化推进；同一作业的全部补丁必须按显式顺序一次提交、一次校验和一次渲染，任一补丁缺失、重复、越权或锚点非法都会整批拒绝；
+- `between_sections` / `presentation_gap` 必须绑定 required step 锚点，服务端将其插入该步骤最后一个事实镜头之后；intro/outro 则明确约束为首尾位置；
+- Director 已接入现有 LLM Router：模型只返回受限的视觉风格、运动和色板枚举，服务端再编译不含产品 UI、业务事实、数字、Logo 和可读文本的生成提示词，并锁定 hash、时长、比例和素材引用；
+- `POST /v1/final-film/jobs/{id}/plan-director` 从当前 job revision 读取锁定约束并落库，仍保留 `director-plan` 端点用于经过同等校验的外部计划提交。
 
-后续尚需：多补丁原子应用、黑帧/冻结帧/响度/OCR 深度质量门禁；Seedance 2.5/Aleph Adapter；前端控制面板；真实 workflow 端到端成片验收。
+后续尚需：黑帧/冻结帧/响度/OCR 深度质量门禁；Seedance 2.5/Aleph Adapter；前端控制面板；真实 workflow 端到端成片验收。

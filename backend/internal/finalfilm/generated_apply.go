@@ -13,33 +13,27 @@ import (
 	"cascade-demoops/backend/internal/model"
 )
 
-// ApplyGeneratedPatch is the explicit opt-in boundary. It imports exactly one
-// normalized, reviewed candidate into an isolated final catalog, validates the
-// resulting deterministic plan, and only then renders it. The baseline plan
-// and catalog remain immutable in the job for audit and fallback.
+// ApplyGeneratedPatch preserves the original single-patch API as a wrapper.
 func (s *Service) ApplyGeneratedPatch(ctx context.Context, jobID string, expectedRevision int, patchID string) (model.FinalFilmJob, error) {
+	return s.ApplyGeneratedPatches(ctx, jobID, expectedRevision, []string{patchID})
+}
+
+// ApplyGeneratedPatches is the atomic explicit opt-in boundary. The request
+// must name every approved proposal exactly once and in the desired order.
+func (s *Service) ApplyGeneratedPatches(ctx context.Context, jobID string, expectedRevision int, patchIDs []string) (model.FinalFilmJob, error) {
 	job, record, err := s.generatedTrackJob(ctx, jobID, expectedRevision, model.FinalFilmJobAwaitingPatchApply)
 	if err != nil {
 		return model.FinalFilmJob{}, err
 	}
-	proposal := findPatchProposal(record, strings.TrimSpace(patchID))
-	if proposal == nil {
-		return model.FinalFilmJob{}, errors.New("generated patch proposal not found")
-	}
-	if err := media.ValidateGeneratedShotEditPlanPatchProposal(*proposal); err != nil {
-		return model.FinalFilmJob{}, err
-	}
-	if len(record.PatchProposals) != 1 {
-		return model.FinalFilmJob{}, errors.New("atomic multi-patch application is required when more than one presentation intent is approved; this renderer revision supports one approved patch per job")
-	}
-	assetRef := findEditorAssetRef(record, proposal.AssetRefID)
-	if assetRef == nil || assetRef.TargetPlanID != job.BaselinePlan.PlanID || assetRef.ExpectedPlanRevision != job.EditorRevision {
-		return model.FinalFilmJob{}, errors.New("generated patch lost its approved editor asset or plan binding")
-	}
-	finalCatalog, finalPlan, shotID, err := compileAppliedGeneratedPlan(job, *proposal, *assetRef)
+	proposals, err := selectAtomicPatchBatch(record, patchIDs)
 	if err != nil {
 		return model.FinalFilmJob{}, err
 	}
+	finalCatalog, finalPlan, shotIDs, provider, providerModel, err := compileAppliedGeneratedPlanBatch(job, record, proposals)
+	if err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	patchAuditID := strings.Join(patchIDs, ",")
 	if err := validateFactTrackUnchanged(job.BaselinePlan, finalPlan); err != nil {
 		return model.FinalFilmJob{}, err
 	}
@@ -57,16 +51,12 @@ func (s *Service) ApplyGeneratedPatch(ctx context.Context, jobID string, expecte
 	rendering.Phase = "rendering_approved_generated_patch"
 	rendering.FinalCatalog = &finalCatalog
 	rendering.FinalPlan = &finalPlan
-	rendering.AppliedGeneratedPatchID = proposal.PatchID
+	rendering.AppliedGeneratedPatchID = patchAuditID
+	rendering.AppliedGeneratedPatchIDs = append([]string{}, patchIDs...)
 	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, rendering, s.event(rendering, rendering.Phase, "已显式应用生成候选补丁，开始确定性最终合成", map[string]any{
-		"patch_id": proposal.PatchID, "candidate_id": proposal.CandidateID, "adopted_shot_id": shotID,
+		"patch_ids": patchIDs, "adopted_shot_ids": shotIDs,
 	})); err != nil {
 		return model.FinalFilmJob{}, err
-	}
-	execution := findProviderExecution(record, proposal.CandidateID)
-	provider, providerModel := proposal.Provider, ""
-	if execution != nil {
-		provider, providerModel = execution.Provider, execution.Model
 	}
 	result, renderErr := s.renderer.Render(ctx, executor.RenderRequest{
 		OutputDir:   filepath.Join(s.outputRoot, job.JobID, fmt.Sprintf("final-r%d", rendering.Revision)),
@@ -75,7 +65,7 @@ func (s *Service) ApplyGeneratedPatch(ctx context.Context, jobID string, expecte
 		ModelExecution: &executor.RenderModelExecutionAudit{
 			Invoked: true, Provider: provider, Model: providerModel, PlanSource: "explicitly_approved_generated_patch",
 			ProviderCallStatus: "candidate_normalized_and_human_approved", RealCallMade: true,
-			ProviderOutputAdopted: true, PatchID: proposal.PatchID, PatchApplied: true, AdoptedShotIDs: []string{shotID},
+			ProviderOutputAdopted: true, PatchID: patchAuditID, PatchApplied: true, AdoptedShotIDs: shotIDs,
 			Note: "provider execution occurred before rendering; renderer performs deterministic composition only",
 		},
 	})
@@ -90,7 +80,7 @@ func (s *Service) ApplyGeneratedPatch(ctx context.Context, jobID string, expecte
 		fallback.Phase = "completed_without_generated_track"
 		fallback.GenerationSkipReason = "approved generated patch render failed: " + renderErr.Error()
 		fallback.FinalRender = fallback.BaselineRender
-		if err := s.store.TransitionJob(context.Background(), job.JobID, rendering.Revision, fallback, s.event(fallback, fallback.Phase, "生成补丁最终合成失败，已回退事实轨基线", map[string]any{"patch_id": proposal.PatchID})); err != nil {
+		if err := s.store.TransitionJob(context.Background(), job.JobID, rendering.Revision, fallback, s.event(fallback, fallback.Phase, "生成补丁最终合成失败，已回退事实轨基线", map[string]any{"patch_ids": patchIDs})); err != nil {
 			return model.FinalFilmJob{}, err
 		}
 		return fallback, nil
@@ -105,7 +95,7 @@ func (s *Service) ApplyGeneratedPatch(ctx context.Context, jobID string, expecte
 		fallback.GenerationSkipReason = "approved generated patch output validation failed: " + outputErr.Error()
 		fallback.FinalRender = fallback.BaselineRender
 		fallback.FinalOutputValidation = &outputValidation
-		if err := s.store.TransitionJob(context.Background(), job.JobID, rendering.Revision, fallback, s.event(fallback, fallback.Phase, "最终输出验收失败，已回退事实轨基线", map[string]any{"patch_id": proposal.PatchID})); err != nil {
+		if err := s.store.TransitionJob(context.Background(), job.JobID, rendering.Revision, fallback, s.event(fallback, fallback.Phase, "最终输出验收失败，已回退事实轨基线", map[string]any{"patch_ids": patchIDs})); err != nil {
 			return model.FinalFilmJob{}, err
 		}
 		return fallback, nil
@@ -121,24 +111,122 @@ func (s *Service) ApplyGeneratedPatch(ctx context.Context, jobID string, expecte
 	}
 	completed.FinalOutputValidation = &outputValidation
 	if err := s.store.TransitionJob(ctx, job.JobID, rendering.Revision, completed, s.event(completed, completed.Phase, "已完成含人工批准展示镜头的确定性最终合成", map[string]any{
-		"patch_id": proposal.PatchID, "video_path": result.VideoPath, "provider_output_adopted": true,
+		"patch_ids": patchIDs, "video_path": result.VideoPath, "provider_output_adopted": true,
 	})); err != nil {
 		return model.FinalFilmJob{}, err
 	}
 	return completed, nil
 }
 
-func compileAppliedGeneratedPlan(job model.FinalFilmJob, proposal media.GeneratedShotEditPlanPatchProposal, ref media.GeneratedShotEditorAssetRef) (model.AssetTimelineCatalog, model.DemoEditPlan, string, error) {
-	if proposal.CandidateID != ref.CandidateID || proposal.IntentID != ref.IntentID || proposal.PatchID == "" {
-		return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, "", errors.New("generated patch proposal and editor asset reference do not match")
+func selectAtomicPatchBatch(record GeneratedTrackRecord, patchIDs []string) ([]media.GeneratedShotEditPlanPatchProposal, error) {
+	if len(patchIDs) == 0 || len(patchIDs) != len(record.PatchProposals) {
+		return nil, errors.New("atomic patch application must name every approved generated patch")
 	}
-	durationMS := int(math.Round(ref.DurationSec * 1000))
-	if durationMS <= 0 || durationMS != proposal.DurationMS {
-		return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, "", errors.New("generated patch duration binding is invalid")
+	seen := map[string]bool{}
+	selected := make([]media.GeneratedShotEditPlanPatchProposal, 0, len(patchIDs))
+	for _, rawID := range patchIDs {
+		patchID := strings.TrimSpace(rawID)
+		if patchID == "" || seen[patchID] {
+			return nil, errors.New("patch_ids contains a blank or duplicate patch")
+		}
+		seen[patchID] = true
+		proposal := findPatchProposal(record, patchID)
+		if proposal == nil {
+			return nil, fmt.Errorf("generated patch proposal %s not found", patchID)
+		}
+		if err := media.ValidateGeneratedShotEditPlanPatchProposal(*proposal); err != nil {
+			return nil, err
+		}
+		selected = append(selected, *proposal)
 	}
+	return selected, nil
+}
+
+func compileAppliedGeneratedPlanBatch(job model.FinalFilmJob, record GeneratedTrackRecord, proposals []media.GeneratedShotEditPlanPatchProposal) (model.AssetTimelineCatalog, model.DemoEditPlan, []string, string, string, error) {
 	catalog := job.Catalog
 	catalog.Artifacts = append([]model.TimelineArtifact{}, job.Catalog.Artifacts...)
-	catalog.Artifacts = append(catalog.Artifacts, model.TimelineArtifact{
+	plan := job.BaselinePlan
+	plan.Shots = append([]model.DemoEditShot{}, job.BaselinePlan.Shots...)
+	prefix := []model.DemoEditShot{}
+	suffix := []model.DemoEditShot{}
+	afterStep := map[string][]model.DemoEditShot{}
+	shotIDs := make([]string, 0, len(proposals))
+	providers := map[string]bool{}
+	models := map[string]bool{}
+	for _, proposal := range proposals {
+		ref := findEditorAssetRef(record, proposal.AssetRefID)
+		if ref == nil || ref.TargetPlanID != job.BaselinePlan.PlanID || ref.ExpectedPlanRevision != job.EditorRevision {
+			return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, nil, "", "", errors.New("generated patch lost its approved editor asset or plan binding")
+		}
+		if proposal.CandidateID != ref.CandidateID || proposal.IntentID != ref.IntentID || proposal.AnchorAfterStepID != ref.AnchorAfterStepID {
+			return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, nil, "", "", errors.New("generated patch proposal and editor asset reference do not match")
+		}
+		durationMS := int(math.Round(ref.DurationSec * 1000))
+		if durationMS <= 0 || durationMS != proposal.DurationMS {
+			return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, nil, "", "", errors.New("generated patch duration binding is invalid")
+		}
+		for _, artifact := range catalog.Artifacts {
+			if artifact.ID == ref.AssetRefID {
+				return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, nil, "", "", fmt.Errorf("generated asset %s is duplicated", ref.AssetRefID)
+			}
+		}
+		catalog.Artifacts = append(catalog.Artifacts, generatedTimelineArtifact(*ref, durationMS))
+		rangeMS := model.MillisecondRange{0, durationMS}
+		start, end := 0, durationMS
+		shotID := "generated_shot_" + proposal.CandidateID
+		shot := model.DemoEditShot{
+			ID: shotID, SourceArtifactID: ref.AssetRefID, SourceTimeRangeMS: &rangeMS,
+			Purpose:    "Optional presentation-only segment approved by human content review and Editor approval.",
+			Operations: []model.EditOperation{{Type: model.EditOperationTrim, StartMS: &start, EndMS: &end}},
+		}
+		shotIDs = append(shotIDs, shotID)
+		switch proposal.Placement {
+		case "before_first_required_step":
+			prefix = append(prefix, shot)
+		case "after_last_required_step":
+			suffix = append(suffix, shot)
+		case "between_sections", "presentation_gap":
+			if !requiredStepExists(job.Constraints.RequiredStepOrder, proposal.AnchorAfterStepID) {
+				return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, nil, "", "", fmt.Errorf("generated patch anchor %s is not a required step", proposal.AnchorAfterStepID)
+			}
+			afterStep[proposal.AnchorAfterStepID] = append(afterStep[proposal.AnchorAfterStepID], shot)
+		default:
+			return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, nil, "", "", fmt.Errorf("unsupported generated patch placement %s", proposal.Placement)
+		}
+		providers[proposal.Provider] = true
+		if execution := findProviderExecution(record, proposal.CandidateID); execution != nil {
+			providers[execution.Provider] = true
+			if execution.Model != "" {
+				models[execution.Model] = true
+			}
+		}
+	}
+	lastShotForStep := map[string]int{}
+	for index, shot := range plan.Shots {
+		if shot.SourceStepID != "" {
+			lastShotForStep[shot.SourceStepID] = index
+		}
+	}
+	assembled := append([]model.DemoEditShot{}, prefix...)
+	for index, shot := range plan.Shots {
+		assembled = append(assembled, shot)
+		if shot.SourceStepID != "" && lastShotForStep[shot.SourceStepID] == index {
+			assembled = append(assembled, afterStep[shot.SourceStepID]...)
+		}
+	}
+	assembled = append(assembled, suffix...)
+	plan.Shots = assembled
+	digest, err := digestJSON(proposals)
+	if err != nil {
+		return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, nil, "", "", err
+	}
+	plan.PlanID = job.BaselinePlan.PlanID + "+generated_" + digest[:12]
+	plan.TargetDurationMS = effectiveTargetDuration(plan)
+	return catalog, plan, shotIDs, collapsedIdentity(providers), collapsedIdentity(models), nil
+}
+
+func generatedTimelineArtifact(ref media.GeneratedShotEditorAssetRef, durationMS int) model.TimelineArtifact {
+	return model.TimelineArtifact{
 		ID: ref.AssetRefID, Kind: media.GeneratedShotEditorAssetKind, URI: ref.URI, LocalPath: ref.URI,
 		MimeType: ref.MimeType, SHA256: ref.SHA256, SizeBytes: ref.SizeBytes, DurationMS: durationMS,
 		AssetRole: "presentation_generated_candidate", IncludeInDemo: true,
@@ -150,28 +238,32 @@ func compileAppliedGeneratedPlan(job model.FinalFilmJob, proposal media.Generate
 			"width": ref.Width, "height": ref.Height, "fps": ref.FPS, "cfr": ref.CFR,
 			"candidate_id": ref.CandidateID, "intent_id": ref.IntentID, "editor_approval_id": ref.EditorApprovalID,
 		},
-	})
-	plan := job.BaselinePlan
-	plan.Shots = append([]model.DemoEditShot{}, job.BaselinePlan.Shots...)
-	plan.PlanID = job.BaselinePlan.PlanID + "+" + proposal.PatchID
-	rangeMS := model.MillisecondRange{0, durationMS}
-	start, end := 0, durationMS
-	shotID := "generated_shot_" + proposal.CandidateID
-	shot := model.DemoEditShot{
-		ID: shotID, SourceArtifactID: ref.AssetRefID, SourceTimeRangeMS: &rangeMS,
-		Purpose:    "Optional presentation-only segment approved by human content review and Editor approval.",
-		Operations: []model.EditOperation{{Type: model.EditOperationTrim, StartMS: &start, EndMS: &end}},
 	}
-	switch proposal.Placement {
-	case "before_first_required_step":
-		plan.Shots = append([]model.DemoEditShot{shot}, plan.Shots...)
-	case "after_last_required_step":
-		plan.Shots = append(plan.Shots, shot)
-	default:
-		return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, "", errors.New("this final-film version requires an explicit section anchor for between_sections or presentation_gap placement")
+}
+
+func requiredStepExists(required []string, stepID string) bool {
+	for _, value := range required {
+		if value == stepID {
+			return true
+		}
 	}
-	plan.TargetDurationMS = effectiveTargetDuration(plan)
-	return catalog, plan, shotID, nil
+	return false
+}
+
+func collapsedIdentity(values map[string]bool) string {
+	result := []string{}
+	for value := range values {
+		if strings.TrimSpace(value) != "" {
+			result = append(result, value)
+		}
+	}
+	if len(result) == 1 {
+		return result[0]
+	}
+	if len(result) > 1 {
+		return "multiple"
+	}
+	return ""
 }
 
 func validateFactTrackUnchanged(baseline, final model.DemoEditPlan) error {

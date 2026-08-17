@@ -181,7 +181,7 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	}
 	finalFilmService, err := finalfilm.NewService(finalfilm.ServiceOptions{
 		Store: finalfilm.NewFileStore(filepath.Join(runtime.DataRoot, "final_film_jobs")), Renderer: service.editorWorker,
-		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"), Providers: providerRegistry,
+		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"), Providers: providerRegistry, Planner: newFinalFilmDirectorPlanner(llmRouter),
 	})
 	if err != nil {
 		return nil, err

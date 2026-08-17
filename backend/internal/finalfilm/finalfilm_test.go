@@ -3,8 +3,10 @@ package finalfilm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +166,39 @@ func TestGenerationApprovalRejectsMissingDirectorPlan(t *testing.T) {
 	}
 }
 
+func TestPlanDirectorGeneratedShotsPersistsPlannerOutputAtExpectedRevision(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	catalog, plan := finalFilmFixture()
+	intent, _ := model.PresentationGenerationIntentDefaults("intro_planner", "intro", nil)
+	job, err := service.CreateJob(context.Background(), CreateJobRequest{
+		EditorSessionID: "editor_planner", EditorRevision: 1, SourcePackageID: "package_planner", Catalog: catalog, BaselinePlan: plan,
+		Intents: []model.PresentationGenerationIntent{intent}, RenderProfile: finalFilmProfile(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.RunBaseline(context.Background(), job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner := &recordingDirectorPlanner{}
+	service.planner = planner
+	previousRevision := job.Revision
+	job, err = service.PlanDirectorGeneratedShots(context.Background(), job.JobID, previousRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 1 || planner.request.JobID != job.JobID || planner.request.Constraints.ConstraintSetID != job.Constraints.ConstraintSetID {
+		t.Fatalf("planner did not receive the locked job inputs: %+v", planner)
+	}
+	if job.Revision != previousRevision+1 || job.DirectorPlan == nil || job.Phase != "director_generated_shot_plan_ready" {
+		t.Fatalf("planner output was not persisted through the normal Director-plan transition: %+v", job)
+	}
+	if _, err := service.PlanDirectorGeneratedShots(context.Background(), job.JobID, previousRevision); err == nil {
+		t.Fatal("expected stale Director planning revision to be rejected")
+	}
+}
+
 func TestGeneratedCandidateRequiresHumanReviewSelectionAndEditorApprovalBeforePatch(t *testing.T) {
 	service, _ := newFinalFilmTestService(t)
 	adapter := &fakeGeneratedShotProvider{root: t.TempDir()}
@@ -241,6 +276,113 @@ func TestGeneratedCandidateRequiresHumanReviewSelectionAndEditorApprovalBeforePa
 	}
 }
 
+func TestGeneratedPatchBatchAtomicallyPlacesIntroDividerAndOutro(t *testing.T) {
+	service, renderer := newFinalFilmTestService(t)
+	registry := media.NewGeneratedShotProviderRegistry()
+	if err := registry.Register(&fakeGeneratedShotProvider{root: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	service.providers = registry
+	catalog, plan := finalFilmFixture()
+	intro, _ := model.PresentationGenerationIntentDefaults("intro_batch", "intro", nil)
+	divider, _ := model.PresentationGenerationIntentDefaults("divider_batch", "section_divider", nil)
+	outro, _ := model.PresentationGenerationIntentDefaults("outro_batch", "outro", nil)
+	intents := []model.PresentationGenerationIntent{intro, divider, outro}
+	job, err := service.CreateJob(context.Background(), CreateJobRequest{
+		EditorSessionID: "editor_batch", EditorRevision: 1, SourcePackageID: "package_batch", Catalog: catalog, BaselinePlan: plan,
+		Intents: intents, RenderProfile: finalFilmProfile(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.RunBaseline(context.Background(), job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.SubmitDirectorPlan(context.Background(), job.JobID, job.Revision, finalFilmDirectorPlanForIntents(job, intents))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.DecideGeneration(context.Background(), job.JobID, job.Revision, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.RunGeneratedCandidates(context.Background(), job.JobID, job.Revision, media.GeneratedShotProviderMiniMaxH3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _ := decodeGeneratedTrack(job.GeneratedTrack)
+	if len(record.Candidates) != 3 || len(record.StructuralReviews) != 3 {
+		t.Fatalf("expected three generated candidates: %+v", record)
+	}
+	for index, candidate := range record.Candidates {
+		structural := record.StructuralReviews[index]
+		job, err = service.RecordGeneratedContentReview(context.Background(), job.JobID, job.Revision, media.GeneratedShotContentReviewDecision{
+			ReviewID: fmt.Sprintf("content_batch_%d", index), StructuralReviewID: structural.ReviewID,
+			CandidateID: candidate.CandidateID, IntentID: candidate.IntentID, ReviewerID: "reviewer_batch", ReviewerKind: "human",
+			ReviewedAt: time.Unix(int64(400+index), 0), Decision: media.GeneratedShotContentDecisionApprove,
+			Assertions:   media.GeneratedShotContentSafetyAssertions{PurposeMatchesIntent: true, NoCapturedUIReplacement: true, NoBusinessFactClaims: true, NoUnverifiedTextOrNumbers: true, NoReferenceFactMutation: true},
+			EvidenceRefs: []string{fmt.Sprintf("review://batch/content/%d", index)}, Reason: "approved presentation-only candidate",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if job.State != model.FinalFilmJobAwaitingCandidateSelection {
+		t.Fatalf("batch review state = %s", job.State)
+	}
+	record, _ = decodeGeneratedTrack(job.GeneratedTrack)
+	for index, set := range record.CandidateSets {
+		job, err = service.RecordGeneratedSelection(context.Background(), job.JobID, job.Revision, media.GeneratedShotSelectionDecision{
+			SelectionID: fmt.Sprintf("selection_batch_%d", index), SetID: set.SetID, CandidateID: set.Candidates[0].CandidateID,
+			SelectorID: "selector_batch", SelectorKind: "human", SelectedAt: time.Unix(int64(410+index), 0),
+			EvidenceRefs: []string{fmt.Sprintf("review://batch/selection/%d", index)}, Reason: "selected approved candidate",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if job.State != model.FinalFilmJobAwaitingEditorApproval {
+		t.Fatalf("batch selection state = %s", job.State)
+	}
+	record, _ = decodeGeneratedTrack(job.GeneratedTrack)
+	for index, selection := range record.Selections {
+		placement := "before_first_required_step"
+		anchorAfterStepID := ""
+		if selection.IntentID == outro.IntentID {
+			placement = "after_last_required_step"
+		} else if selection.IntentID == divider.IntentID {
+			placement = "between_sections"
+			anchorAfterStepID = "step_1"
+		}
+		job, err = service.RecordGeneratedEditorApproval(context.Background(), job.JobID, job.Revision, media.GeneratedShotEditorApprovalDecision{
+			ApprovalID: fmt.Sprintf("approval_batch_%d", index), SelectionID: selection.SelectionID, CandidateID: selection.SelectedCandidateID,
+			ApproverID: "editor_batch", ApproverKind: "human", ApprovedAt: time.Unix(int64(420+index), 0),
+			TargetPlanID: plan.PlanID, ExpectedPlanRevision: 1, Placement: placement, AnchorAfterStepID: anchorAfterStepID,
+			EvidenceRefs: []string{fmt.Sprintf("review://batch/editor/%d", index)}, Reason: "approved deterministic placement",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if job.State != model.FinalFilmJobAwaitingPatchApply {
+		t.Fatalf("batch approval state = %s", job.State)
+	}
+	record, _ = decodeGeneratedTrack(job.GeneratedTrack)
+	patchIDs := []string{record.PatchProposals[0].PatchID, record.PatchProposals[1].PatchID, record.PatchProposals[2].PatchID}
+	job, err = service.ApplyGeneratedPatches(context.Background(), job.JobID, job.Revision, patchIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != model.FinalFilmJobCompleted || len(job.AppliedGeneratedPatchIDs) != 3 || renderer.renderCalls != 2 {
+		t.Fatalf("batch was not rendered atomically: %+v", job)
+	}
+	shots := job.FinalPlan.Shots
+	if len(shots) != 5 || shots[0].SourceStepID != "" || shots[1].SourceStepID != "step_1" || shots[2].SourceStepID != "" || shots[3].SourceStepID != "step_2" || shots[4].SourceStepID != "" {
+		t.Fatalf("intro/fact/divider/fact/outro order is unsafe: %+v", shots)
+	}
+}
+
 func TestFinalFilmInvalidConstraintDoesNotPersistJob(t *testing.T) {
 	root := t.TempDir()
 	renderer := &fakeFinalFilmRenderer{validation: model.DemoEditPlanValidationReport{Valid: true}}
@@ -304,19 +446,36 @@ func (f *fakeGeneratedShotProvider) Preflight(_ context.Context, intent media.Ge
 }
 
 func (f *fakeGeneratedShotProvider) Execute(_ context.Context, request media.GeneratedShotProviderExecutionRequest) (media.GeneratedShotProviderExecutionResult, error) {
+	originalDigest, normalizedDigest := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	if request.Intent.Purpose == media.GeneratedShotPurposeOutro {
+		originalDigest, normalizedDigest = strings.Repeat("d", 64), strings.Repeat("e", 64)
+	}
+	taskID := "task_" + request.Intent.IntentID
 	candidate := media.GeneratedShotCandidate{
 		SchemaVersion: media.GeneratedShotCandidateSchemaVersion, CandidateID: "candidate_" + request.Intent.IntentID,
-		IntentID: request.Intent.IntentID, Provider: media.GeneratedShotProviderMiniMaxH3, ProviderTaskID: "task_1",
+		IntentID: request.Intent.IntentID, Provider: media.GeneratedShotProviderMiniMaxH3, ProviderTaskID: taskID,
 		Status: media.GeneratedShotCandidateReadyForReview, FailurePolicy: media.GeneratedShotFailureContinue,
 		NonAuthoritative: true, PresentationOnly: true, RequiresExplicitReview: true,
-		OriginalArtifact:   media.GeneratedShotCandidateArtifact{Role: "original", Path: filepath.Join(f.root, "original.mp4"), MimeType: "video/mp4", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SizeBytes: 100, Probe: media.GeneratedShotMediaProbe{DurationSec: 5}},
-		NormalizedArtifact: media.GeneratedShotCandidateArtifact{Role: "normalized", Path: filepath.Join(f.root, "normalized.mp4"), MimeType: "video/mp4", SHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", SizeBytes: 90, NormalizationStatus: "ok", NormalizationProfile: media.GeneratedShotNormalizationProfile, Probe: media.GeneratedShotMediaProbe{Format: "mp4", VideoCodec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, FPS: 30, CFR: true, DurationSec: 5}},
+		OriginalArtifact:   media.GeneratedShotCandidateArtifact{Role: "original", Path: filepath.Join(f.root, request.Intent.IntentID+"_original.mp4"), MimeType: "video/mp4", SHA256: originalDigest, SizeBytes: 100, Probe: media.GeneratedShotMediaProbe{DurationSec: 5}},
+		NormalizedArtifact: media.GeneratedShotCandidateArtifact{Role: "normalized", Path: filepath.Join(f.root, request.Intent.IntentID+"_normalized.mp4"), MimeType: "video/mp4", SHA256: normalizedDigest, SizeBytes: 90, NormalizationStatus: "ok", NormalizationProfile: media.GeneratedShotNormalizationProfile, Probe: media.GeneratedShotMediaProbe{Format: "mp4", VideoCodec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, FPS: 30, CFR: true, DurationSec: 5}},
 	}
-	review := media.ReviewGeneratedShotCandidateStructure("structural_1", request.Intent, candidate)
-	return media.GeneratedShotProviderExecutionResult{SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: media.GeneratedShotProviderMiniMaxH3, Model: media.MiniMaxH3Model, IntentID: request.Intent.IntentID, Status: media.GeneratedShotCandidateReadyForReview, ProviderTaskID: "task_1", Candidate: &candidate, StructuralReview: &review, FailurePolicy: media.GeneratedShotFailureContinue}, nil
+	review := media.ReviewGeneratedShotCandidateStructure("structural_"+request.Intent.IntentID, request.Intent, candidate)
+	return media.GeneratedShotProviderExecutionResult{SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: media.GeneratedShotProviderMiniMaxH3, Model: media.MiniMaxH3Model, IntentID: request.Intent.IntentID, Status: media.GeneratedShotCandidateReadyForReview, ProviderTaskID: taskID, Candidate: &candidate, StructuralReview: &review, FailurePolicy: media.GeneratedShotFailureContinue}, nil
 }
 
 func (f *fakeGeneratedShotProvider) Cancel(context.Context, string) error { return nil }
+
+type recordingDirectorPlanner struct {
+	calls   int
+	request DirectorPlanRequest
+}
+
+func (p *recordingDirectorPlanner) PlanGeneratedShots(_ context.Context, request DirectorPlanRequest) (model.FinalFilmDirectorPlan, error) {
+	p.calls++
+	p.request = request
+	job := model.FinalFilmJob{JobID: request.JobID, Constraints: request.Constraints}
+	return finalFilmDirectorPlanForIntents(job, request.Intents), nil
+}
 
 func (f *fakeFinalFilmRenderer) ValidateEditPlan(_ context.Context, _ executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error) {
 	f.validateCalls++
@@ -381,18 +540,25 @@ func newFinalFilmTestService(t *testing.T) (*Service, *fakeFinalFilmRenderer) {
 }
 
 func finalFilmDirectorPlan(job model.FinalFilmJob, intent model.PresentationGenerationIntent) model.FinalFilmDirectorPlan {
-	prompt := "Cinematic abstract brand atmosphere with soft light and geometric motion; no product UI, facts, numbers, or readable text."
-	return model.FinalFilmDirectorPlan{
+	return finalFilmDirectorPlanForIntents(job, []model.PresentationGenerationIntent{intent})
+}
+
+func finalFilmDirectorPlanForIntents(job model.FinalFilmJob, intents []model.PresentationGenerationIntent) model.FinalFilmDirectorPlan {
+	plan := model.FinalFilmDirectorPlan{
 		SchemaVersion: model.FinalFilmDirectorPlanSchemaVersion, PlanID: "director_plan_1", JobID: job.JobID,
 		ConstraintSetID: job.Constraints.ConstraintSetID, DirectorRunID: "director_run_1", GeneratedAt: time.Unix(200, 0),
-		Specs: []model.FinalFilmGeneratedSpec{{
-			SpecID: "generated_spec_1", IntentID: intent.IntentID, Purpose: intent.Purpose,
+	}
+	for index, intent := range intents {
+		prompt := "Cinematic abstract brand atmosphere with soft light and geometric motion; no product UI, facts, numbers, or readable text. Purpose: " + intent.Purpose
+		plan.Specs = append(plan.Specs, model.FinalFilmGeneratedSpec{
+			SpecID: fmt.Sprintf("generated_spec_%d", index+1), IntentID: intent.IntentID, Purpose: intent.Purpose,
 			Prompt: prompt, PromptSHA256: model.FinalFilmPromptSHA256(prompt), DurationSec: intent.RequestedSlot.PreferredDurationSec,
 			AspectRatio: intent.RequestedSlot.AspectRatio, ReferenceArtifactIDs: append([]string{}, intent.ReferenceAssetRefs...),
 			ContentPolicy: model.FinalFilmGeneratedSpecContentPolicy{PresentationOnly: true, NoCapturedUIRecreation: true, NoBusinessFactClaims: true, NoUnverifiedText: true, RequiresExplicitReview: true},
 			FailurePolicy: model.PresentationGenerationFailureContinue,
-		}},
+		})
 	}
+	return plan
 }
 
 func finalFilmFixture() (model.AssetTimelineCatalog, model.DemoEditPlan) {

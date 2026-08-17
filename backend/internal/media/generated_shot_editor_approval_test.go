@@ -62,6 +62,24 @@ func TestGeneratedShotEditorApprovalEnforcesPurposePlacement(t *testing.T) {
 	}
 }
 
+func TestGeneratedShotEditorApprovalRequiresExplicitSectionAnchor(t *testing.T) {
+	intent, candidate, set, selection := generatedShotApprovalFixture(t)
+	intent.Purpose = GeneratedShotPurposeSectionDivider
+	decision := validGeneratedShotEditorApprovalDecision()
+	decision.Placement = "between_sections"
+	if _, err := RecordGeneratedShotEditorApproval(intent, candidate, set, selection, decision); err == nil {
+		t.Fatal("expected section placement without an anchor to be rejected")
+	}
+	decision.AnchorAfterStepID = "required_step_1"
+	approval, err := RecordGeneratedShotEditorApproval(intent, candidate, set, selection, decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approval.AnchorAfterStepID != "required_step_1" {
+		t.Fatalf("section anchor was not persisted: %+v", approval)
+	}
+}
+
 func TestGeneratedShotEditorApprovalRejectsCandidateSummaryMismatch(t *testing.T) {
 	intent, candidate, set, selection := generatedShotApprovalFixture(t)
 	candidate.NormalizedArtifact.SHA256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

@@ -39,6 +39,7 @@ type GeneratedShotEditorAssetRef struct {
 	TargetPlanID         string  `json:"target_plan_id"`
 	ExpectedPlanRevision int     `json:"expected_plan_revision"`
 	Placement            string  `json:"placement"`
+	AnchorAfterStepID    string  `json:"anchor_after_step_id,omitempty"`
 	ApprovedForDemo      bool    `json:"approved_for_demo"`
 	IncludeInDemo        bool    `json:"include_in_demo"`
 	AutoApply            bool    `json:"auto_apply"`
@@ -98,7 +99,7 @@ func CompileGeneratedShotEditorAssetRef(intent GeneratedShotIntent, candidate Ge
 		SourceMaterialPolicy: GeneratedShotSourceMaterialPolicy,
 		NonAuthoritative:     true, PresentationOnly: true, EditorApprovalID: approval.ApprovalID,
 		TargetPlanID: approval.TargetPlanID, ExpectedPlanRevision: approval.ExpectedPlanRevision,
-		Placement: approval.Placement, ApprovedForDemo: true, IncludeInDemo: false, AutoApply: false,
+		Placement: approval.Placement, AnchorAfterStepID: approval.AnchorAfterStepID, ApprovedForDemo: true, IncludeInDemo: false, AutoApply: false,
 	}
 	if err := ValidateGeneratedShotEditorAssetRef(ref); err != nil {
 		return GeneratedShotEditorAssetRef{}, err
@@ -133,6 +134,9 @@ func ValidateGeneratedShotEditorAssetRef(ref GeneratedShotEditorAssetRef) error 
 	}
 	if strings.TrimSpace(ref.EditorApprovalID) == "" || strings.TrimSpace(ref.TargetPlanID) == "" || ref.ExpectedPlanRevision < 1 || strings.TrimSpace(ref.Placement) == "" {
 		return fail("editor_approval_id", "generated_editor_ref_approval_binding_missing", "editor approval, target plan, revision, and placement are required")
+	}
+	if !generatedShotPlacementAnchorAllowed(ref.Placement, ref.AnchorAfterStepID) {
+		return fail("anchor_after_step_id", "generated_editor_ref_anchor_invalid", "editor reference placement anchor is invalid")
 	}
 	if !ref.ApprovedForDemo || ref.IncludeInDemo || ref.AutoApply {
 		return fail("approved_for_demo", "generated_editor_ref_safety_envelope_invalid", "reference may be approved for patch construction but cannot auto-include or auto-apply")

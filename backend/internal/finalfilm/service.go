@@ -31,6 +31,7 @@ type ServiceOptions struct {
 	NewID           func(string) (string, error)
 	Providers       *media.GeneratedShotProviderRegistry
 	ProviderTimeout time.Duration
+	Planner         DirectorPlanner
 }
 
 type Service struct {
@@ -41,6 +42,7 @@ type Service struct {
 	newID           func(string) (string, error)
 	providers       *media.GeneratedShotProviderRegistry
 	providerTimeout time.Duration
+	planner         DirectorPlanner
 }
 
 type CreateJobRequest struct {
@@ -72,7 +74,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if providerTimeout <= 0 {
 		providerTimeout = 20 * time.Minute
 	}
-	return &Service{store: options.Store, renderer: options.Renderer, outputRoot: filepath.Clean(options.OutputRoot), now: now, newID: newID, providers: options.Providers, providerTimeout: providerTimeout}, nil
+	return &Service{store: options.Store, renderer: options.Renderer, outputRoot: filepath.Clean(options.OutputRoot), now: now, newID: newID, providers: options.Providers, providerTimeout: providerTimeout, planner: options.Planner}, nil
 }
 
 // CreateJob compiles and validates all immutable fact-track constraints before

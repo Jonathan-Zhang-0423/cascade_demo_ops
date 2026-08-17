@@ -27,6 +27,7 @@ type GeneratedShotEditPlanPatchProposal struct {
 	ApplicationMode        string   `json:"application_mode"`
 	AssetRefID             string   `json:"asset_ref_id"`
 	Placement              string   `json:"placement"`
+	AnchorAfterStepID      string   `json:"anchor_after_step_id,omitempty"`
 	Purpose                string   `json:"purpose"`
 	DurationMS             int      `json:"duration_ms"`
 	RequiresExplicitOptIn  bool     `json:"requires_explicit_opt_in"`
@@ -82,7 +83,7 @@ func CompileGeneratedShotEditPlanPatchProposal(intent GeneratedShotIntent, candi
 	if editorRef.AssetRefID == "" || editorRef.AssetRefID != "generated_candidate_"+candidate.CandidateID+"_normalized" {
 		return fail("asset_ref_id", "generated_patch_asset_ref_mismatch", "editor reference identity does not match the normalized candidate")
 	}
-	if editorRef.TargetPlanID != approval.TargetPlanID || editorRef.ExpectedPlanRevision != approval.ExpectedPlanRevision || editorRef.Placement != approval.Placement {
+	if editorRef.TargetPlanID != approval.TargetPlanID || editorRef.ExpectedPlanRevision != approval.ExpectedPlanRevision || editorRef.Placement != approval.Placement || editorRef.AnchorAfterStepID != approval.AnchorAfterStepID {
 		return fail("target_plan_id", "generated_patch_plan_binding_mismatch", "editor reference and approval plan bindings must match")
 	}
 	durationMS := int(math.Round(candidate.NormalizedArtifact.Probe.DurationSec * 1000))
@@ -95,7 +96,7 @@ func CompileGeneratedShotEditPlanPatchProposal(intent GeneratedShotIntent, candi
 		TargetPlanID:  approval.TargetPlanID, ExpectedPlanRevision: approval.ExpectedPlanRevision,
 		IntentID: intent.IntentID, CandidateID: candidate.CandidateID, Provider: candidate.Provider,
 		Status: GeneratedShotEditPlanPatchProposed, ApplicationMode: GeneratedShotEditPlanPatchApplicationMode,
-		AssetRefID: editorRef.AssetRefID, Placement: editorRef.Placement, Purpose: intent.Purpose,
+		AssetRefID: editorRef.AssetRefID, Placement: editorRef.Placement, AnchorAfterStepID: editorRef.AnchorAfterStepID, Purpose: intent.Purpose,
 		DurationMS: durationMS, RequiresExplicitOptIn: true, RequiresRendererReview: true,
 		PresentationOnly: true, NonAuthoritativeOnly: true, MustNotBindSourceStep: true,
 		AutoApply: false, ApprovedForDemo: false, IncludeInDemo: false, EditorApprovalID: approval.ApprovalID,
@@ -122,6 +123,9 @@ func ValidateGeneratedShotEditPlanPatchProposal(proposal GeneratedShotEditPlanPa
 	}
 	if strings.TrimSpace(proposal.AssetRefID) == "" || strings.TrimSpace(proposal.Placement) == "" || strings.TrimSpace(proposal.Purpose) == "" || proposal.DurationMS <= 0 {
 		return fail("asset_ref_id", "generated_patch_payload_missing", "asset reference, placement, purpose, and positive duration are required")
+	}
+	if !generatedShotPlacementAnchorAllowed(proposal.Placement, proposal.AnchorAfterStepID) {
+		return fail("anchor_after_step_id", "generated_patch_anchor_invalid", "patch placement anchor is invalid")
 	}
 	if !proposal.RequiresExplicitOptIn || !proposal.RequiresRendererReview || !proposal.PresentationOnly || !proposal.NonAuthoritativeOnly || !proposal.MustNotBindSourceStep {
 		return fail("policy", "generated_patch_policy_unsafe", "patch proposal must require explicit opt-in and renderer validation and remain presentation-only")

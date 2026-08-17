@@ -21,6 +21,7 @@ type GeneratedShotEditorApprovalDecision struct {
 	TargetPlanID         string    `json:"target_plan_id"`
 	ExpectedPlanRevision int       `json:"expected_plan_revision"`
 	Placement            string    `json:"placement"`
+	AnchorAfterStepID    string    `json:"anchor_after_step_id,omitempty"`
 	EvidenceRefs         []string  `json:"evidence_refs,omitempty"`
 	Reason               string    `json:"reason"`
 }
@@ -42,6 +43,7 @@ type GeneratedShotEditorApproval struct {
 	TargetPlanID            string    `json:"target_plan_id"`
 	ExpectedPlanRevision    int       `json:"expected_plan_revision"`
 	Placement               string    `json:"placement"`
+	AnchorAfterStepID       string    `json:"anchor_after_step_id,omitempty"`
 	EvidenceRefs            []string  `json:"evidence_refs,omitempty"`
 	Reason                  string    `json:"reason"`
 	Status                  string    `json:"status"`
@@ -105,6 +107,9 @@ func RecordGeneratedShotEditorApproval(intent GeneratedShotIntent, candidate Gen
 	if !generatedShotPlacementAllowed(intent.Purpose, decision.Placement) {
 		return fail("placement", "generated_editor_approval_placement_invalid", "placement is not allowed for the reviewed intent purpose")
 	}
+	if !generatedShotPlacementAnchorAllowed(decision.Placement, decision.AnchorAfterStepID) {
+		return fail("anchor_after_step_id", "generated_editor_approval_anchor_invalid", "section and presentation-gap placements require an explicit step anchor; intro/outro placements forbid one")
+	}
 	if strings.TrimSpace(decision.Reason) == "" || len(nonEmptyUniqueStrings(decision.EvidenceRefs)) == 0 {
 		return fail("evidence_refs", "generated_editor_approval_evidence_missing", "editor approval requires a reason and evidence")
 	}
@@ -115,7 +120,7 @@ func RecordGeneratedShotEditorApproval(intent GeneratedShotIntent, candidate Gen
 		NormalizedSHA256: strings.ToLower(candidate.NormalizedArtifact.SHA256),
 		ApproverID:       strings.TrimSpace(decision.ApproverID), ApproverKind: decision.ApproverKind, ApprovedAt: decision.ApprovedAt.UTC(),
 		TargetPlanID: strings.TrimSpace(decision.TargetPlanID), ExpectedPlanRevision: decision.ExpectedPlanRevision,
-		Placement: decision.Placement, EvidenceRefs: nonEmptyUniqueStrings(decision.EvidenceRefs), Reason: strings.TrimSpace(decision.Reason),
+		Placement: decision.Placement, AnchorAfterStepID: strings.TrimSpace(decision.AnchorAfterStepID), EvidenceRefs: nonEmptyUniqueStrings(decision.EvidenceRefs), Reason: strings.TrimSpace(decision.Reason),
 		Status: GeneratedShotEditorApprovedPendingPatch, PatchCreationAuthorized: true,
 		PatchApplyAuthorized: false, RendererAuthorized: false, MustNotBindSourceStep: true,
 		ApprovedForDemo: true, IncludeInDemo: false, AutoApply: false,
@@ -148,6 +153,9 @@ func ValidateGeneratedShotEditorApproval(set GeneratedShotCandidateSet, selectio
 	if strings.TrimSpace(approval.TargetPlanID) == "" || approval.ExpectedPlanRevision < 1 || strings.TrimSpace(approval.Placement) == "" {
 		return fail("target_plan_id", "generated_editor_approval_plan_binding_missing", "plan binding, revision, and placement are required")
 	}
+	if !generatedShotPlacementAnchorAllowed(approval.Placement, approval.AnchorAfterStepID) {
+		return fail("anchor_after_step_id", "generated_editor_approval_anchor_invalid", "serialized approval placement anchor is invalid")
+	}
 	if strings.TrimSpace(approval.Reason) == "" || len(nonEmptyUniqueStrings(approval.EvidenceRefs)) == 0 {
 		return fail("evidence_refs", "generated_editor_approval_evidence_missing", "approval requires a reason and evidence")
 	}
@@ -167,6 +175,18 @@ func generatedShotPlacementAllowed(purpose string, placement string) bool {
 		return placement == "between_sections"
 	case GeneratedShotPurposeAbstractBRoll, GeneratedShotPurposeBrandAtmosphere:
 		return placement == "presentation_gap"
+	default:
+		return false
+	}
+}
+
+func generatedShotPlacementAnchorAllowed(placement, anchor string) bool {
+	hasAnchor := strings.TrimSpace(anchor) != ""
+	switch placement {
+	case "before_first_required_step", "after_last_required_step":
+		return !hasAnchor
+	case "between_sections", "presentation_gap":
+		return hasAnchor
 	default:
 		return false
 	}

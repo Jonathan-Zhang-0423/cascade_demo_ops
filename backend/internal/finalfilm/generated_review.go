@@ -107,6 +107,21 @@ func (s *Service) RecordGeneratedEditorApproval(ctx context.Context, jobID strin
 	if decision.TargetPlanID != job.BaselinePlan.PlanID || decision.ExpectedPlanRevision != job.EditorRevision {
 		return model.FinalFilmJob{}, errors.New("editor approval must bind the baseline plan and captured editor revision")
 	}
+	if decision.AnchorAfterStepID != "" {
+		anchorIndex := -1
+		for index, stepID := range job.Constraints.RequiredStepOrder {
+			if stepID == decision.AnchorAfterStepID {
+				anchorIndex = index
+				break
+			}
+		}
+		if anchorIndex < 0 {
+			return model.FinalFilmJob{}, errors.New("editor approval placement anchor must reference a required fact step")
+		}
+		if decision.Placement == "between_sections" && anchorIndex == len(job.Constraints.RequiredStepOrder)-1 {
+			return model.FinalFilmJob{}, errors.New("between_sections anchor must precede another required fact step")
+		}
+	}
 	approval, err := media.RecordGeneratedShotEditorApproval(*intent, *candidate, *set, *selection, decision)
 	if err != nil {
 		return model.FinalFilmJob{}, err
