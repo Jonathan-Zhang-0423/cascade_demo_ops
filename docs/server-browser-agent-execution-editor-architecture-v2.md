@@ -1376,7 +1376,7 @@ render-manifest.ts
 
 ### 阶段四：受约束分镜设计与多 Provider 分镜头实现
 
-目标：在不让生成模型取得业务事实、最终分镜或编辑器控制权的前提下，提高分镜质量，并把 Seedance 2.0 与 MiniMax-H3 纳入同一套非权威展示镜头实现层。
+目标：在不让生成模型取得业务事实、最终分镜或编辑器控制权的前提下，提高分镜质量，并把 Seedance 2.5 与 MiniMax-H3 纳入同一套非权威展示镜头实现层。
 
 固定流程：
 
@@ -1389,7 +1389,7 @@ App 业务要求和视频要求
     -> Server 将建议转换为字段受限的 DirectorEditPlanPatch
     -> 重新校验 App 约束、事实素材、步骤覆盖和媒体能力边界
     -> Server/Renderer 产出最终可执行 DemoEditPlan
-    -> Seedance 2.0 / MiniMax-H3 实现被批准的非事实展示镜头
+    -> Seedance 2.5 / MiniMax-H3 实现被批准的非事实展示镜头
     -> Provider 输出规范化、内容审核、A/B 选择或 fallback
     -> Renderer 校验并合成最终视频
 ```
@@ -1432,12 +1432,12 @@ App 约束不是末尾补做的验收项，而是从分镜草稿开始贯穿整�
 - Server Capability Profile 和 Provider 调用边界；
 - 最终 `DemoEditPlan` revision。
 
-分镜头实现层同时考虑 Seedance 2.0 和 MiniMax-H3：
+分镜头实现层同时考虑 Seedance 2.5 和 MiniMax-H3：
 
 | 模式 | 编排方式 | 使用条件 |
 | --- | --- | --- |
-| `normal` | Seedance 2.0 实现已批准的展示镜头 | 默认主路由 |
-| `comparison` | Seedance 2.0 和 MiniMax-H3 使用同一展示意图及各自合法参数并行产出 A/B 候选 | 用户显式选择或评测任务 |
+| `normal` | 用户显式选择 Seedance 2.5 或 MiniMax-H3 实现已批准的展示镜头 | 单 Provider，不自动 fallback |
+| `comparison` | Seedance 2.5 和 MiniMax-H3 使用同一展示意图及各自合法参数产出 A/B 候选 | 分别授权并由用户显式选择 |
 | `fallback` | Seedance 失败后，MiniMax-H3 使用原始受控素材独立实现相同展示意图 | H3 路由、能力校验和质量门禁全部就绪后 |
 
 禁止把 Seedance 输出送入 H3 二次生成，或把 H3 输出送入 Seedance 二次生成。两路 Provider 的请求/响应保持隔离，只在 Server 内部候选协议层汇合。
@@ -1469,7 +1469,7 @@ MP4 / H.264 / yuv420p / 1920x1080 / CFR 30fps
 2. 将当前基础 `demo_edit_plan.json` 拆分为可审计草稿与最终受控 revision；
 3. 规划模型 Adapter、结构化建议 Schema、超时/失败回退和零直接生效机制；
 4. Patch 白名单、App 约束复验、事实素材锁定和 required-step 覆盖验证；
-5. Provider-neutral `GeneratedShotIntent`、Seedance 2.0 Adapter 和独立 H3 Adapter；
+5. Provider-neutral `GeneratedShotIntent`、Seedance 2.5 Adapter 和独立 H3 Adapter；
 6. H3 查询、下载、取消、独立 feature flag、配额、幂等和错误分类；
 7. 候选 `ffprobe -> FFmpeg -> ffprobe` MediaNormalizer；
 8. `normal`、`comparison`、`fallback` 路由及 A/B 候选关系记录；
@@ -1481,7 +1481,7 @@ MP4 / H.264 / yuv420p / 1920x1080 / CFR 30fps
 - 每个最终镜头都能追溯到 App 约束、真实素材或已批准的非权威展示意图；
 - required 步骤、顺序、事实素材和真实时间范围不会被规划模型或视频生成模型修改；
 - 规划模型输出非法、超时或缺失时，确定性分镜仍可独立完成交付；
-- Seedance 2.0 与 H3 原始格式不同也只能通过统一 normalized artifact 进入编辑器；
+- Seedance 2.5 与 H3 原始格式不同也只能通过统一 normalized artifact 进入编辑器；
 - `comparison` 能产生可追溯 A/B 候选，但不会自动选择或加入时间线；
 - `fallback` 不使用前一模型产物作为后一模型输入；
 - H3 未正式接入路由前，任何普通 E2E、真实媒体模式或 MiniMax 通用密钥配置都不会触发 H3；

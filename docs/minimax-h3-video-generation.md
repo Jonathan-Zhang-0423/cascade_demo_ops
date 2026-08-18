@@ -21,7 +21,7 @@ MiniMax-H3 在 Cascade DemoOps Server 中属于可选的展示视频候选 Provi
     -> 确定性 Renderer / FFmpeg 最终成片
 ```
 
-H3 与 Seedance 2.0 是同级候选生成 Provider。默认不把一个模型的输出交给另一个模型再次生成。
+H3 与 Seedance 2.5 是同级候选生成 Provider。默认不把一个模型的输出交给另一个模型再次生成。
 
 ## 2. 官方接口概览
 
@@ -466,7 +466,7 @@ Server 不得向供应商传递本地文件路径。输入只能使用：
 
 ## 13. 与 APP 的能力边界
 
-App 公共字段、稳定错误和兼容策略以 [App ↔ Server 生成展示视频能力协议](app-server-generated-video-capability-protocol.md) 为准。本节只保留 H3 内部 Profile 的映射说明；H3 专属 role、2K、仅尾帧和参考音频限制不得写成 Seedance 2.0 或所有 Provider 的共同协议。
+App 公共字段、稳定错误和兼容策略以 [App ↔ Server 生成展示视频能力协议](app-server-generated-video-capability-protocol.md) 为准。本节只保留 H3 内部 Profile 的映射说明；H3 专属 role、2K、仅尾帧和参考音频限制不得写成 Seedance 2.5 或所有 Provider 的共同协议。
 
 APP 不传模型 ID、供应商、API Endpoint 或厂商参数，只提交逻辑能力和展示意图：
 
@@ -510,19 +510,19 @@ APP 必须遵循 Server 返回的能力 Profile。Server 收到请求后仍需�
 
 这是 Server 当前可验证能力，不等于 H3 厂商理论最大能力。
 
-## 14. 与 Seedance 2.0 的编排关系
+## 14. 与 Seedance 2.5 的编排关系
 
-Seedance 2.0 的独立项目 Profile 见 [Seedance 2.0 视频生成内部协议](seedance-2-0-video-generation.md)。两份 Provider 协议分别维护请求格式和能力边界，只在公共 `GeneratedShotIntent` 与 [Server 生成视频统一候选产物内部协议](generated-video-candidate-internal-protocol.md) 层汇合。
+Seedance 2.5 的独立项目 Profile 见 [Seedance 2.5 FinalFilm 接入说明](seedance-2-5-video-generation.md)。两份 Provider 协议分别维护请求格式和能力边界，只在公共 `GeneratedShotIntent` 与 [Server 生成视频统一候选产物内部协议](generated-video-candidate-internal-protocol.md) 层汇合。
 
 推荐三种模式：
 
 ### 14.1 normal
 
 ```text
-Seedance 2.0 单独生成候选
+Seedance 2.5 单独生成候选
 ```
 
-Seedance 2.0 是当前主 Provider。
+Seedance 2.5 与 H3 是当前并列 Provider，由用户显式选择。
 
 ### 14.2 fallback
 
@@ -538,7 +538,7 @@ Seedance 创建或生成失败
 
 ```text
 同一展示意图
-    -> Seedance 2.0 候选 A
+    -> Seedance 2.5 候选 A
     -> MiniMax-H3 候选 B
     -> 分别规范化和审核
     -> 用户二选一
@@ -556,7 +556,7 @@ H3 输出 -> Seedance 二次生成
 
 ### 14.4 A/B 候选的统一编辑器协议
 
-Seedance 2.0 与 H3 的请求体和原始响应由各自 Provider Adapter 负责，编辑器不得读取厂商响应，也不得直接读取厂商返回的原始视频。两路结果必须先转换为同一个 Server 内部对象：
+Seedance 2.5 与 H3 的请求体和原始响应由各自 Provider Adapter 负责，编辑器不得读取厂商响应，也不得直接读取厂商返回的原始视频。两路结果必须先转换为同一个 Server 内部对象：
 
 ```text
 Provider 原始响应
@@ -588,7 +588,7 @@ Provider 原始响应
 
 ### 14.5 分镜 JSON 的所有权
 
-Seedance 2.0 和 H3 都不负责产出 Renderer 可执行的最终分镜 JSON；它们只负责生成候选视频素材。
+Seedance 2.5 和 H3 都不负责产出 Renderer 可执行的最终分镜 JSON；它们只负责生成候选视频素材。
 
 | 文件 | 当前生产者 | 是否可直接驱动 Renderer |
 | --- | --- | --- |
@@ -634,11 +634,11 @@ Seedance 2.0 和 H3 都不负责产出 Renderer 可执行的最终分镜 JSON；
 - 独立 Admission 治理层：显式并发上限、周期请求数、周期输出秒数、周期估算成本、Provider 调用超时和 Server 内部幂等键；全部在 Provider 调用前校验和预留；
 - 成本以整数微单位估算，代码不内置厂商单价。没有当前已核验的每输出秒成本和周期成本上限时，治理提交器拒绝初始化；
 - 同 scope、同幂等键、同请求只重放首次结果，不产生第二次 Provider 调用或预算扣减；同键不同请求冲突拒绝；首次已尝试 Provider 的预算即使调用失败也不返还，避免失败重试绕过配额。
-- Provider-neutral 预检报告：Seedance 2.0 与 H3 独立判断能力兼容性，Provider 未经 Server 内部策略显式启用时默认不可选，报告固定 `executable=false`；
+- Provider-neutral 预检报告：Seedance 2.5 与 H3 独立判断能力兼容性，Provider 未经 Server 内部策略显式启用时默认不可选，报告固定 `executable=false`；
 - Provider-neutral 规范化候选协议和 H3 转换器：只接受审计 task ID 一致、非权威、展示专用且通过锁定媒体 Profile 的 original/normalized 产物，转换后仍固定 `approved_for_demo=false`、`include_in_demo=false`。
 - Provider-neutral 确定性结构审核：校验 intent/candidate 绑定、规范化状态、时长边界和规范化时长漂移，只能放行到内容审核；
 - 人工内容审核决定记录契约：禁止模型自我批准，要求审核证据及 UI/业务事实/文字数字/参考事实五项安全确认；批准后仍处于 `content_approved_pending_selection`，不能进入时间线。
-- Provider-neutral 候选集合与显式选择契约：`normal` 只接受一个已审核候选，`comparison` 强制 Seedance 2.0/H3 各一个同 intent 候选；人工选择后仍为 `selected_pending_editor_approval`，不自动批准或应用时间线补丁；
+- Provider-neutral 候选集合与显式选择契约：`normal` 只接受一个已审核候选，`comparison` 强制 Seedance 2.5/H3 各一个同 intent 候选；人工选择后仍为 `selected_pending_editor_approval`，不自动批准或应用时间线补丁；
 - 序列化候选集合选择前重校验：拒绝篡改后的 schema、安全标志、Provider 组合、任务身份、审核身份或 normalized SHA-256。
 - Editor approval 前置契约：绑定 intent/candidate/set/selection、目标计划 revision、人工证据与 purpose-placement，只允许后续创建补丁，不允许应用补丁或 Renderer；
 - 不可执行 Provider-neutral 编排审计状态机：typed artifact 驱动前向转换、revision/时间单调校验和安全停止，永久禁止 Provider 调用、Editor 写入、Renderer 与 auto-apply。

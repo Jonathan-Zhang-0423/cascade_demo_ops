@@ -1,5 +1,5 @@
 // Command seedancepreflight performs one small, explicitly authorized real
-// Seedance task using a selected local reference asset. It never changes an
+// Seedance 2.5 task using a selected local reference asset. It never changes an
 // edit plan and writes only redacted task/output metadata.
 package main
 
@@ -80,9 +80,9 @@ func main() {
 		}
 		ref := pub.Items[0].ProposedPublicRef
 		request := media.ContentGenerationTaskRequest{
-			Model:      runtime.ModelProviders[config.ModelProviderSeedance].DefaultModel,
-			Content:    []media.ContentPart{{Type: "text", Text: "Create a concise presentation-only transition from the supplied product recording. Do not invent UI or business actions."}, {Type: "video_url", VideoURL: &media.MediaURL{URL: ref.URI}, Role: "reference_video"}},
-			Resolution: "1080p", Ratio: "16:9", Duration: 5, GenerateAudio: false, ReturnLastFrame: true, Watermark: false,
+			Model:   runtime.ModelProviders[config.ModelProviderSeedance].DefaultModel,
+			Content: []media.ContentPart{{Type: "text", Text: "Create a concise presentation-only transition from the supplied product recording. Do not invent UI or business actions."}, {Type: "video_url", VideoURL: &media.MediaURL{URL: ref.URI}, Role: "reference_video"}},
+			Ratio:   "16:9", Duration: 5, GenerateAudio: false, ReturnLastFrame: false, Watermark: false,
 		}
 		initial, err := client.CreateContentGenerationTask(ctx, request)
 		audit["provider"] = initial.Provider

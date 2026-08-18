@@ -1369,7 +1369,7 @@ export function createMockBridgeClient(): DesktopBridgeClient {
       planning: { provider: "kimi", model: "kimi-k2.7-code", providerOverride: "CASCADE_PLANNING_PROVIDER", modelOverride: "CASCADE_PLANNING_MODEL" },
       code_reading: { provider: "glm", model: "glm-5.2", providerOverride: "CASCADE_CODE_READING_PROVIDER", modelOverride: "CASCADE_CODE_READING_MODEL" },
       multimodal_understanding: { provider: "minimax", model: "minimax-m3", providerOverride: "CASCADE_MULTIMODAL_PROVIDER", modelOverride: "CASCADE_MULTIMODAL_MODEL" },
-      video_operation: { provider: "seedance", model: "seedance-2.0", providerOverride: "CASCADE_VIDEO_PROVIDER", modelOverride: "CASCADE_VIDEO_MODEL" },
+      video_operation: { provider: "seedance", model: "seedance-2.5", providerOverride: "CASCADE_VIDEO_PROVIDER", modelOverride: "CASCADE_VIDEO_MODEL" },
     },
     cloudExchange: {
       configured: mockControlPlaneURL !== "",
@@ -1452,7 +1452,7 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         mockDiagnostic("kimi", "planning", "kimi-k2.7-code"),
         mockDiagnostic("glm", "code_reading", "glm-5.2"),
         mockDiagnostic("minimax", "multimodal_understanding", "minimax-m3"),
-        mockDiagnostic("seedance", "video_operation", "seedance-2.0"),
+        mockDiagnostic("seedance", "video_operation", "seedance-2.5"),
       ]);
     },
     async preflightExecutionPackage(workspace) {

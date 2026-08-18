@@ -1,6 +1,7 @@
 import type { EditorClientResult, EditorPlan, EditorSession } from "./editor";
 
 export type FinalFilmPurpose = "intro" | "outro" | "section_divider" | "abstract_broll" | "brand_atmosphere";
+export type FinalFilmProvider = "minimax-h3" | "seedance-2.5";
 
 export type FinalFilmPresentationIntent = {
   intent_id: string;
@@ -88,7 +89,7 @@ export type FinalFilmClient = {
   renderBaseline(jobID: string): Promise<EditorClientResult<FinalFilmJob>>;
   planDirector(jobID: string, revision: number): Promise<EditorClientResult<FinalFilmJob>>;
   decideGeneration(jobID: string, revision: number, approved: boolean, reason?: string): Promise<EditorClientResult<FinalFilmJob>>;
-  generate(jobID: string, revision: number, preferredProvider: "minimax-h3" | "seedance-2.0"): Promise<EditorClientResult<FinalFilmJob>>;
+  generate(jobID: string, revision: number, preferredProvider: FinalFilmProvider): Promise<EditorClientResult<FinalFilmJob>>;
   review(jobID: string, revision: number, decision: Record<string, unknown>): Promise<EditorClientResult<FinalFilmJob>>;
   select(jobID: string, revision: number, decision: Record<string, unknown>): Promise<EditorClientResult<FinalFilmJob>>;
   approve(jobID: string, revision: number, decision: Record<string, unknown>): Promise<EditorClientResult<FinalFilmJob>>;

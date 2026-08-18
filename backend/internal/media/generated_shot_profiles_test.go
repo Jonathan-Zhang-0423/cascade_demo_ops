@@ -56,6 +56,28 @@ func TestGeneratedShotCompilersProduceIndependentProviderRequests(t *testing.T) 
 	}
 }
 
+func TestSeedance25CompilerMatchesArkMultimodalContract(t *testing.T) {
+	intent := validGeneratedShotIntent()
+	intent.References = []GeneratedShotReference{
+		{ArtifactID: "image_1", URI: "https://assets.example.test/reference.png", MimeType: "image/png", Usage: GeneratedShotReferenceGeneral},
+		{ArtifactID: "video_1", URI: "https://assets.example.test/reference.mp4", MimeType: "video/mp4", Usage: GeneratedShotReferenceGeneral},
+	}
+	compiled, err := (Seedance25GeneratedShotCompiler{}).Compile(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := compiled.Request
+	if compiled.Provider != GeneratedShotProviderSeedance25 || request.Model != Seedance25ServerModel || request.Ratio != "16:9" || request.Duration != 5 {
+		t.Fatalf("Seedance 2.5 identity contract mismatch: %+v", compiled)
+	}
+	if request.Resolution != "" || request.GenerateAudio || request.ReturnLastFrame || request.Watermark {
+		t.Fatalf("Seedance 2.5 safety defaults mismatch: %+v", request)
+	}
+	if len(request.Content) != 3 || request.Content[1].Role != "reference_image" || request.Content[2].Role != "reference_video" {
+		t.Fatalf("Seedance 2.5 reference-role contract mismatch: %+v", request.Content)
+	}
+}
+
 func TestGeneratedShotProviderProfilesRejectDifferentBoundaries(t *testing.T) {
 	vertical := validGeneratedShotIntent()
 	vertical.AspectRatio = "9:16"
@@ -88,8 +110,9 @@ func TestGeneratedShotProfilesRejectLastFrameOnlyBeforeCompilation(t *testing.T)
 		ArtifactID: "last", URI: "https://assets.example.test/last.png", MimeType: "image/png", Usage: GeneratedShotReferenceLastFrame,
 	}}
 	for name, compiler := range map[string]GeneratedShotProviderCompiler{
-		"seedance": Seedance20GeneratedShotCompiler{},
-		"h3":       MiniMaxH3GeneratedShotCompiler{},
+		"seedance-2.0": Seedance20GeneratedShotCompiler{},
+		"seedance-2.5": Seedance25GeneratedShotCompiler{},
+		"h3":           MiniMaxH3GeneratedShotCompiler{},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := compiler.Compile(intent); err == nil {

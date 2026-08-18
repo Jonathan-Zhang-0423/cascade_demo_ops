@@ -116,7 +116,7 @@ func ValidateGeneratedShotPreflightReport(report GeneratedShotPreflightReport) e
 	seen := map[string]struct{}{}
 	for index, provider := range report.Providers {
 		field := fmt.Sprintf("providers[%d]", index)
-		if provider.Provider != GeneratedShotProviderSeedance20 && provider.Provider != GeneratedShotProviderMiniMaxH3 {
+		if !isSupportedGeneratedShotProvider(provider.Provider) {
 			return &GeneratedShotProviderValidationError{Provider: provider.Provider, Field: field + ".provider", Code: "generated_preflight_provider_unsupported", Message: "provider is unsupported"}
 		}
 		if _, exists := seen[provider.Provider]; exists {

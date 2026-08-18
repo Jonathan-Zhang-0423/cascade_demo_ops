@@ -89,7 +89,7 @@ explicitly enabled.
 
 ## Seedance Video Generation
 
-本节是 Seedance/Ark 厂商参数资料基线。Server 当前开放边界、与 App 公共协议的分层关系和未注册 dry-run Profile 以 [Seedance 2.0 视频生成内部协议](seedance-2-0-video-generation.md) 为准。MiniMax-H3 的参数不得写入或推导自本节。
+本节保留 Seedance 2.0 的历史厂商参数基线，不能据此推导 2.5 参数。Server 当前开放边界与官方 2.5 请求合同以 [Seedance 2.5 FinalFilm 接入说明](seedance-2-5-video-generation.md) 为准。MiniMax-H3 的参数不得写入或推导自本节。
 
 Endpoint:
 

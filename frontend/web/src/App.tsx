@@ -2575,7 +2575,7 @@ function SettingsPanel({
             </tr>
           </thead>
           <tbody>
-            {(routeRows.length > 0 ? routeRows : [["计划生成", "kimi", "kimi-k2.7-code"], ["代码阅读", "glm", "glm-5.2"], ["多模态理解", "minimax", "minimax-m3"], ["视频操作", "seedance", "seedance-2.0"]]).map(([task, provider, modelName]) => (
+            {(routeRows.length > 0 ? routeRows : [["计划生成", "kimi", "kimi-k2.7-code"], ["代码阅读", "glm", "glm-5.2"], ["多模态理解", "minimax", "minimax-m3"], ["视频操作", "seedance", "seedance-2.5"]]).map(([task, provider, modelName]) => (
               <tr key={task}>
                 <td>{task}</td>
                 <td>{provider}</td>

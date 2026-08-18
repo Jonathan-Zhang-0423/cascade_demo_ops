@@ -93,7 +93,7 @@ func (e *GeneratedShotSelectionValidationError) Error() string {
 }
 
 // NewGeneratedShotCandidateSet creates a non-executable selection set. Normal
-// requires one candidate; comparison requires exactly one Seedance 2.0 and one
+// requires one candidate; comparison requires exactly one Seedance and one
 // H3 candidate for the same intent. Fallback execution is intentionally absent.
 func NewGeneratedShotCandidateSet(setID string, intent GeneratedShotIntent, mode string, reviewed []GeneratedShotReviewedCandidate) (GeneratedShotCandidateSet, error) {
 	fail := func(field string, code string, message string) (GeneratedShotCandidateSet, error) {
@@ -162,8 +162,8 @@ func NewGeneratedShotCandidateSet(setID string, intent GeneratedShotIntent, mode
 		})
 	}
 	if mode == GeneratedShotCandidateSetModeComparison {
-		if _, ok := providers[GeneratedShotProviderSeedance20]; !ok {
-			return fail("candidates", "generated_candidate_set_provider_pair_invalid", "comparison requires one Seedance 2.0 candidate")
+		if !generatedShotProviderSetHasSeedance(providers) {
+			return fail("candidates", "generated_candidate_set_provider_pair_invalid", "comparison requires one Seedance candidate")
 		}
 		if _, ok := providers[GeneratedShotProviderMiniMaxH3]; !ok {
 			return fail("candidates", "generated_candidate_set_provider_pair_invalid", "comparison requires one MiniMax-H3 candidate")
@@ -232,7 +232,7 @@ func ValidateGeneratedShotCandidateSet(set GeneratedShotCandidateSet) error {
 		if strings.TrimSpace(entry.CandidateID) == "" || strings.TrimSpace(entry.ProviderTaskID) == "" || strings.TrimSpace(entry.ContentReviewID) == "" {
 			return fail(field, "generated_candidate_set_entry_identity_missing", "candidate, provider task, and content review identities are required")
 		}
-		if entry.Provider != GeneratedShotProviderSeedance20 && entry.Provider != GeneratedShotProviderMiniMaxH3 {
+		if !isSupportedGeneratedShotProvider(entry.Provider) {
 			return fail(field+".provider", "generated_candidate_set_provider_unsupported", "candidate provider is unsupported")
 		}
 		digest := strings.ToLower(strings.TrimSpace(entry.NormalizedSHA256))
@@ -262,8 +262,8 @@ func ValidateGeneratedShotCandidateSet(set GeneratedShotCandidateSet) error {
 		if len(providers) != 2 {
 			return fail("candidates", "generated_candidate_set_provider_pair_invalid", "comparison requires different providers")
 		}
-		if _, ok := providers[GeneratedShotProviderSeedance20]; !ok {
-			return fail("candidates", "generated_candidate_set_provider_pair_invalid", "comparison requires Seedance 2.0")
+		if !generatedShotProviderSetHasSeedance(providers) {
+			return fail("candidates", "generated_candidate_set_provider_pair_invalid", "comparison requires Seedance")
 		}
 		if _, ok := providers[GeneratedShotProviderMiniMaxH3]; !ok {
 			return fail("candidates", "generated_candidate_set_provider_pair_invalid", "comparison requires MiniMax-H3")

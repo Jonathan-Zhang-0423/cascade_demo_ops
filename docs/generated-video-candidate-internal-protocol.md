@@ -6,7 +6,7 @@
 
 ## 1. 目的
 
-本协议定义 Seedance 2.0 与 MiniMax-H3 在完成各自 Provider 请求、下载和媒体规范化后，如何汇合为统一的 Server 内部候选对象。厂商请求体、原始响应、临时下载 URL 和模型 ID 不得进入本对象，也不得直接交给编辑器。
+本协议定义 Seedance 2.5 与 MiniMax-H3 在完成各自 Provider 请求、下载和媒体规范化后，如何汇合为统一的 Server 内部候选对象。厂商请求体、原始响应、临时下载 URL 和模型 ID 不得进入本对象，也不得直接交给编辑器。
 
 当前 schema：
 
@@ -14,7 +14,7 @@
 demoops.generated_shot_candidate.v1
 ```
 
-当前实现已把严格校验、H3/Seedance 2.0 Adapter、确定性结构审核、人工内容审核、候选集合/选择、Editor approval、统一编辑器引用、原子补丁应用和 Renderer 最终合成注册到 FinalFilm App/Server workflow。`comparison` 和自动 `fallback` 编排仍未开放；单 Provider 失败固定回退事实轨 baseline。
+当前实现已把严格校验、H3/Seedance 2.5 Adapter、确定性结构审核、人工内容审核、候选集合/选择、Editor approval、统一编辑器引用、原子补丁应用和 Renderer 最终合成注册到 FinalFilm App/Server workflow。自动跨 Provider `fallback` 不开放；单 Provider 失败固定回退事实轨 baseline。
 
 ## 2. 汇合位置
 
@@ -101,7 +101,7 @@ Server 不信任扩展名、MIME 声明或 Provider 元数据，必须依据下�
 
 ## 7. Seedance 当前状态
 
-Seedance 2.0 已实现独立 `GeneratedShotProviderAdapter`，复用 Ark create/query transport、HTTPS 下载器和与 H3 同等级的 `download -> probe -> normalize -> probe` 门禁，并收敛为本文统一候选对象。它必须由独立的 `CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true` 与真实 Ark 模式共同启用；仅存在 API key 不会触发调用。Seedance 与 H3 的原始响应和请求参数仍保持隔离。
+Seedance 2.5 已实现独立版本化 `GeneratedShotProviderAdapter`，复用 Ark create/query transport、HTTPS 下载器和与 H3 同等级的 `download -> probe -> normalize -> probe` 门禁，并收敛为本文统一候选对象。它必须由独立的 `CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true`、精确模型 ID 与真实 Ark 模式共同启用；仅存在 API key 不会触发调用。Seedance 与 H3 的原始响应和请求参数仍保持隔离。
 
 ## 8. 结构审核与内容审核
 
@@ -163,7 +163,7 @@ demoops.generated_shot_candidate_set.v1
 | 模式 | 约束 |
 | --- | --- |
 | `normal` | 恰好一个已经通过人工内容审核的候选，仍需明确选择 |
-| `comparison` | 恰好两个候选，必须分别来自 Seedance 2.0 和 MiniMax-H3，且属于同一个 intent |
+| `comparison` | 恰好两个候选，必须分别来自 Seedance 2.5 和 MiniMax-H3，且属于同一个 intent |
 
 `comparison` 还要求：
 
@@ -364,7 +364,7 @@ stopped_without_generated_candidate
 failure_policy=continue_without_generated_candidate
 ```
 
-每次状态推进都必须携带并重校验对应 typed artifact，不能只提交目标状态字符串。状态 revision 必须递增，更新时间必须单调递增。comparison 的 preflight 必须同时包含 Seedance 2.0 与 MiniMax-H3 两个独立 Provider 结果。
+每次状态推进都必须携带并重校验对应 typed artifact，不能只提交目标状态字符串。状态 revision 必须递增，更新时间必须单调递增。comparison 的 preflight 必须同时包含 Seedance 2.5 与 MiniMax-H3 两个独立 Provider 结果。
 
 该状态机固定：
 

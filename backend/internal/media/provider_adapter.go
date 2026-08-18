@@ -28,6 +28,7 @@ type GeneratedShotProviderExecutionRequest struct {
 	AdmissionScope       string              `json:"admission_scope"`
 	OutputDir            string              `json:"output_dir"`
 	Timeout              time.Duration       `json:"timeout"`
+	ResumeProviderTaskID string              `json:"resume_provider_task_id,omitempty"`
 }
 
 type GeneratedShotProviderExecutionResult struct {

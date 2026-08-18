@@ -88,7 +88,7 @@ func ValidateGeneratedShotCandidate(candidate GeneratedShotCandidate) error {
 	if strings.TrimSpace(candidate.CandidateID) == "" || strings.TrimSpace(candidate.IntentID) == "" {
 		return fail("candidate_id", "generated_candidate_identity_missing", "candidate_id and intent_id are required")
 	}
-	if candidate.Provider != GeneratedShotProviderSeedance20 && candidate.Provider != GeneratedShotProviderMiniMaxH3 {
+	if !isSupportedGeneratedShotProvider(candidate.Provider) {
 		return fail("provider", "generated_candidate_provider_unsupported", "provider is unsupported by the current internal contract")
 	}
 	if strings.TrimSpace(candidate.ProviderTaskID) == "" {

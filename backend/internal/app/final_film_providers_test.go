@@ -19,7 +19,7 @@ func TestFinalFilmProviderRegistryEnablesH3OnlyWithExplicitRouteKeyAndBudget(t *
 	}
 	descriptors := registry.Descriptors()
 	h3 := finalFilmProviderDescriptor(descriptors, media.GeneratedShotProviderMiniMaxH3)
-	seedance := finalFilmProviderDescriptor(descriptors, media.GeneratedShotProviderSeedance20)
+	seedance := finalFilmProviderDescriptor(descriptors, media.GeneratedShotProviderSeedance25)
 	if len(descriptors) != 2 || h3 == nil || !h3.Enabled || seedance == nil || seedance.Enabled {
 		t.Fatalf("unexpected final-film provider registry: %+v", descriptors)
 	}
@@ -34,22 +34,22 @@ func TestFinalFilmProviderRegistryEnablesH3OnlyWithExplicitRouteKeyAndBudget(t *
 	}
 }
 
-func TestFinalFilmProviderRegistryEnablesSeedanceOnlyWithExplicitRealRoute(t *testing.T) {
+func TestFinalFilmProviderRegistryEnablesSeedance25IndependentlyFromH3Route(t *testing.T) {
 	t.Setenv("CASCADE_SEEDANCE_FINAL_FILM_ENABLED", "true")
 	runtime := config.AppRuntimeConfig{
 		ArkMediaMode: config.ArkMediaModeReal, FFmpegPath: "ffmpeg", FFprobePath: "ffprobe",
 		ModelProviders: map[config.ModelProvider]config.ModelProviderCredential{
-			config.ModelProviderSeedance: {Provider: config.ModelProviderSeedance, APIKey: "test-only-key", BaseURL: "https://ark.example.test/api/v3", DefaultModel: media.Seedance20ServerModel, Enabled: true},
+			config.ModelProviderSeedance: {Provider: config.ModelProviderSeedance, APIKey: "test-only-key", BaseURL: "https://ark.example.test/api/v3", DefaultModel: media.Seedance25ServerModel, Enabled: true},
 		},
 		ModelTaskRoutes: map[config.ModelTask]config.ModelTaskRoute{
-			config.ModelTaskVideoOperation: {Task: config.ModelTaskVideoOperation, Provider: config.ModelProviderSeedance, Model: media.Seedance20ServerModel},
+			config.ModelTaskVideoOperation: {Task: config.ModelTaskVideoOperation, Provider: config.ModelProviderMinimax, Model: media.MiniMaxH3Model},
 		},
 	}
 	registry, err := finalFilmProviderRegistry(runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	descriptor := finalFilmProviderDescriptor(registry.Descriptors(), media.GeneratedShotProviderSeedance20)
+	descriptor := finalFilmProviderDescriptor(registry.Descriptors(), media.GeneratedShotProviderSeedance25)
 	if descriptor == nil || !descriptor.Enabled {
 		t.Fatalf("explicit Seedance final-film route was not enabled: %+v", registry.Descriptors())
 	}
@@ -59,7 +59,7 @@ func TestFinalFilmProviderRegistryEnablesSeedanceOnlyWithExplicitRealRoute(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if descriptor := finalFilmProviderDescriptor(registry.Descriptors(), media.GeneratedShotProviderSeedance20); descriptor == nil || descriptor.Enabled {
+	if descriptor := finalFilmProviderDescriptor(registry.Descriptors(), media.GeneratedShotProviderSeedance25); descriptor == nil || descriptor.Enabled {
 		t.Fatalf("Seedance key and route enabled execution without explicit final-film opt-in: %+v", registry.Descriptors())
 	}
 }

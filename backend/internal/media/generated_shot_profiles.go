@@ -8,9 +8,28 @@ import (
 
 const (
 	GeneratedShotProviderSeedance20 = "seedance-2.0"
+	GeneratedShotProviderSeedance25 = "seedance-2.5"
 	GeneratedShotProviderMiniMaxH3  = "minimax-h3"
 	Seedance20ServerModel           = "doubao-seedance-2-0-260128"
+	Seedance25ServerModel           = "doubao-seedance-2-5-260628"
 )
+
+func isGeneratedShotSeedanceProvider(provider string) bool {
+	return provider == GeneratedShotProviderSeedance20 || provider == GeneratedShotProviderSeedance25
+}
+
+func isSupportedGeneratedShotProvider(provider string) bool {
+	return isGeneratedShotSeedanceProvider(provider) || provider == GeneratedShotProviderMiniMaxH3
+}
+
+func generatedShotProviderSetHasSeedance(providers map[string]struct{}) bool {
+	for provider := range providers {
+		if isGeneratedShotSeedanceProvider(provider) {
+			return true
+		}
+	}
+	return false
+}
 
 type GeneratedShotCapabilityProfile struct {
 	Provider                 string   `json:"provider"`
@@ -78,6 +97,61 @@ func (Seedance20GeneratedShotCompiler) Profile() GeneratedShotCapabilityProfile 
 			"Frame-role requests remain disabled until independently tested and enabled in a profile revision.",
 		},
 	}
+}
+
+// Seedance25GeneratedShotCompiler is intentionally a separate profile from
+// Seedance 2.0 even though both use Ark's content-generation task transport.
+// The model identity and reference roles are provider contract, not App input.
+// The first production profile remains narrower than the vendor example:
+// presentation-only, 16:9, 4-15 seconds, silent output, and at most four
+// already-published image/video references.
+type Seedance25GeneratedShotCompiler struct{}
+
+func (Seedance25GeneratedShotCompiler) Profile() GeneratedShotCapabilityProfile {
+	return GeneratedShotCapabilityProfile{
+		Provider: GeneratedShotProviderSeedance25, ProfileVersion: "demoops.seedance_2_5_generated_shot.v1",
+		MinDurationSec: 4, MaxDurationSec: 15, AllowedAspectRatios: []string{"16:9"},
+		MaxReferences: 4, MaxReferenceImages: 4, MaxReferenceVideos: 3,
+		GeneralReferencesEnabled: true, FirstFrameEnabled: false, FirstLastFrameEnabled: false,
+		LastFrameOnlyEnabled: false, ReferenceAudioEnabled: false, NativeOutputFPS: nil,
+		NormalizedOutputProfile: "MP4/H.264/yuv420p/1920x1080/CFR30",
+		FailurePolicy:           GeneratedShotFailureContinue,
+		Notes: []string{
+			"Ark model is pinned to doubao-seedance-2-5-260628; App cannot override it.",
+			"The vendor supports native audio and audio references, but the FinalFilm presentation profile keeps both disabled until audio content review and loudness gates exist.",
+			"Provider output is always downloaded and normalized before human review or Editor access.",
+		},
+	}
+}
+
+func (compiler Seedance25GeneratedShotCompiler) Compile(intent GeneratedShotIntent) (GeneratedShotCompiledRequest, error) {
+	profile := compiler.Profile()
+	if err := ValidateGeneratedShotIntent(intent); err != nil {
+		return GeneratedShotCompiledRequest{}, err
+	}
+	if err := validateIntentAgainstGeneratedShotProfile(intent, profile); err != nil {
+		return GeneratedShotCompiledRequest{}, err
+	}
+	content := []ContentPart{{Type: "text", Text: strings.TrimSpace(intent.Prompt)}}
+	for _, ref := range intent.References {
+		switch strings.ToLower(strings.TrimSpace(ref.MimeType)) {
+		case "image/png", "image/jpeg":
+			content = append(content, ContentPart{Type: "image_url", ImageURL: &MediaURL{URL: strings.TrimSpace(ref.URI)}, Role: "reference_image"})
+		case "video/mp4", "video/quicktime":
+			content = append(content, ContentPart{Type: "video_url", VideoURL: &MediaURL{URL: strings.TrimSpace(ref.URI)}, Role: "reference_video"})
+		default:
+			return GeneratedShotCompiledRequest{}, providerShotError(profile.Provider, "references", "seedance_25_reference_mime_unsupported", "reference MIME is not enabled by the Seedance 2.5 FinalFilm profile")
+		}
+	}
+	request := ContentGenerationTaskRequest{
+		Model: Seedance25ServerModel, Content: content, Ratio: intent.AspectRatio,
+		Duration: intent.DurationSec, GenerateAudio: false, ReturnLastFrame: false, Watermark: false,
+	}
+	return GeneratedShotCompiledRequest{
+		Provider: profile.Provider, ProfileVersion: profile.ProfileVersion, Model: Seedance25ServerModel,
+		IntentID: intent.IntentID, Request: request, DryRunOnly: true,
+		Warnings: []string{"preflight compiler only; execution still requires persisted generation authorization and the Seedance 2.5 Server opt-in"},
+	}, nil
 }
 
 func (compiler Seedance20GeneratedShotCompiler) Compile(intent GeneratedShotIntent) (GeneratedShotCompiledRequest, error) {

@@ -106,7 +106,7 @@ func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
 		ModelTaskPlanning:                {Provider: ModelProviderKimi, Model: "kimi-k2.7-code"},
 		ModelTaskCodeReading:             {Provider: ModelProviderGLM, Model: "glm-5.2"},
 		ModelTaskMultimodalUnderstanding: {Provider: ModelProviderMinimax, Model: "minimax-m3"},
-		ModelTaskVideoOperation:          {Provider: ModelProviderSeedance, Model: "doubao-seedance-2-0-260128"},
+		ModelTaskVideoOperation:          {Provider: ModelProviderSeedance, Model: "doubao-seedance-2-5-260628"},
 	}
 	for task, want := range expected {
 		got := cfg.ModelTaskRoutes[task]
@@ -123,7 +123,7 @@ func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
 	if cfg.ModelProviders[ModelProviderMinimax].DefaultModel != "minimax-m3" {
 		t.Fatalf("minimax default model = %q", cfg.ModelProviders[ModelProviderMinimax].DefaultModel)
 	}
-	if cfg.ModelProviders[ModelProviderSeedance].DefaultModel != "doubao-seedance-2-0-260128" {
+	if cfg.ModelProviders[ModelProviderSeedance].DefaultModel != "doubao-seedance-2-5-260628" {
 		t.Fatalf("seedance default model = %q", cfg.ModelProviders[ModelProviderSeedance].DefaultModel)
 	}
 	if cfg.ModelProviders[ModelProviderSeedream].DefaultModel != "doubao-seedream-5-0-pro-260628" {

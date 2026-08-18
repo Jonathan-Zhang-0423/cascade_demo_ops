@@ -11,11 +11,61 @@ import (
 type stubSeedanceVideoClient struct {
 	createCalls int
 	pollCalls   int
+	lastRequest ContentGenerationTaskRequest
 }
 
-func (c *stubSeedanceVideoClient) CreateContentGenerationTask(context.Context, ContentGenerationTaskRequest) (ContentGenerationTaskResult, error) {
+func (c *stubSeedanceVideoClient) CreateContentGenerationTask(_ context.Context, request ContentGenerationTaskRequest) (ContentGenerationTaskResult, error) {
 	c.createCalls++
+	c.lastRequest = request
 	return ContentGenerationTaskResult{Response: &ContentGenerationTaskResponse{ID: "seedance_task_1", Status: "queued"}}, nil
+}
+
+func TestSeedance25ProviderAdapterPinsOfficialModelAndEntersCommonReview(t *testing.T) {
+	client := &stubSeedanceVideoClient{}
+	adapter, err := NewSeedance25ProviderAdapter(Seedance25ProviderAdapterOptions{
+		Enabled: true, Client: client, Downloader: stubSeedanceDownloader{}, Normalizer: stubSeedanceNormalizer{}, PollInterval: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputDir := t.TempDir()
+	result, err := adapter.Execute(context.Background(), GeneratedShotProviderExecutionRequest{
+		Intent: validGeneratedShotIntent(), GenerationAuthorized: true, AuthorizationRef: "approval://seedance-2.5/1",
+		IdempotencyKey: "seedance-2.5-idempotency", AdmissionScope: "final-film:seedance-2.5", OutputDir: outputDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.lastRequest.Model != Seedance25ServerModel || client.lastRequest.GenerateAudio || client.lastRequest.ReturnLastFrame {
+		t.Fatalf("unexpected Seedance 2.5 request: %+v", client.lastRequest)
+	}
+	if result.Provider != GeneratedShotProviderSeedance25 || result.Candidate == nil || result.Candidate.Provider != GeneratedShotProviderSeedance25 || !result.StructuralReview.StructurallyEligible {
+		t.Fatalf("Seedance 2.5 did not enter common review contract: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, GeneratedShotProviderSeedance25, "seedance_task_1", "normalized.mp4")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSeedance25ProviderAdapterResumesWithoutCreatingAnotherTask(t *testing.T) {
+	client := &stubSeedanceVideoClient{}
+	adapter, err := NewSeedance25ProviderAdapter(Seedance25ProviderAdapterOptions{
+		Enabled: true, Client: client, Downloader: stubSeedanceDownloader{}, Normalizer: stubSeedanceNormalizer{}, PollInterval: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := adapter.Execute(context.Background(), GeneratedShotProviderExecutionRequest{
+		Intent: validGeneratedShotIntent(), GenerationAuthorized: true, AuthorizationRef: "approval://resume/1",
+		IdempotencyKey: "resume-idempotency", AdmissionScope: "final-film:resume", OutputDir: t.TempDir(),
+		ResumeProviderTaskID: "seedance_task_1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.createCalls != 0 || client.pollCalls != 1 || result.ProviderTaskID != "seedance_task_1" {
+		t.Fatalf("resume should query exactly once without creating: client=%+v result=%+v", client, result)
+	}
 }
 
 func (c *stubSeedanceVideoClient) GetContentGenerationTask(context.Context, string) (ContentGenerationTaskResult, error) {

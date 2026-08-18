@@ -135,7 +135,7 @@ Server 必须：
 
 公共协议不得承载 Provider 参数。Server 内部使用独立文档：
 
-- Seedance 2.0：[seedance-2-0-video-generation.md](seedance-2-0-video-generation.md)
+- Seedance 2.5：[seedance-2-5-video-generation.md](seedance-2-5-video-generation.md)
 - MiniMax-H3：[minimax-h3-video-generation.md](minimax-h3-video-generation.md)
 - 多 Provider 编排：[server-browser-agent-execution-editor-architecture-v2.md](server-browser-agent-execution-editor-architecture-v2.md#阶段四受约束分镜设计与多-provider-分镜头实现)
 
