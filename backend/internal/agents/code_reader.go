@@ -1268,13 +1268,14 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 		call.FallbackReason = llmFallbackReason(err, modelTrace)
 		return fallback, call
 	}
-	queries := codeInvestigationQueriesFromLLM(output, budget, questions)
-	if len(queries) == 0 {
+	plannedQueries := codeInvestigationQueriesFromLLM(output, budget, questions)
+	if len(plannedQueries) == 0 {
 		call.OutputSummary = fmt.Sprintf("模型未返回有效查询，使用确定性查询计划 %d 条。", len(fallback))
 		call.SelectedFileCount = len(fallback)
 		call.FallbackReason = "empty_llm_plan"
 		return fallback, call
 	}
+	queries := append(requirementCriticalInvestigationQueries(fallback), plannedQueries...)
 	queries = append(queries, fallback...)
 	queries = dedupeCodeInvestigationQueries(queries)
 	if budget.DrilldownRounds > 0 && len(queries) > budget.DrilldownRounds {
@@ -1285,6 +1286,19 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 	call.SelectedFileCount = len(queries)
 	call.Confidence = maxFloat(0.68, output.Confidence)
 	return queries, call
+}
+
+func requirementCriticalInvestigationQueries(queries []codeInvestigationQuery) []codeInvestigationQuery {
+	out := []codeInvestigationQuery{}
+	for _, wanted := range []string{"question_build_completion", "question_playable_result"} {
+		for _, query := range queries {
+			if query.questionID == wanted {
+				out = append(out, query)
+				break
+			}
+		}
+	}
+	return out
 }
 
 func llmFallbackReason(err error, trace *llm.CallTrace) string {
@@ -1398,6 +1412,24 @@ func buildCodeInvestigationQuestions(project *model.ProjectContext, brief *model
 			QueryTerms:       terms,
 			Status:           "open",
 		})
+	}
+	if wantsBuildCompletion(intentText) {
+		add(
+			"question_build_completion",
+			"Agent 构建完成结果",
+			"Agent 全部步骤完成时，哪个结果组件、稳定 selector 和状态分支可以确定性证明构建完成？",
+			[]string{"build-result-card", "build result", "build_complete", "all_complete", "all complete", "全部步骤完成", "构建完成", "completed"},
+			[]string{"component_or_selector", "style_or_state"},
+		)
+	}
+	if wantsPlayableKeyboardVerification(intentText) {
+		add(
+			"question_playable_result",
+			"可玩预览与键盘结果",
+			"最终预览容器、iframe/canvas、得分和键盘事件由哪些组件与稳定 selector 实现？",
+			[]string{"preview-iframe", "preview panel", "iframe", "canvas", "tetris", "score", "ArrowLeft", "ArrowDown"},
+			[]string{"component_or_selector", "style_or_state"},
+		)
 	}
 	if containsAnyNormalized(intentText, "登录", "登陆", "login", "signin", "邮箱", "密码") {
 		add(

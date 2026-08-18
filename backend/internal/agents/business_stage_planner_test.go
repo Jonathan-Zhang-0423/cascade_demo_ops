@@ -156,6 +156,24 @@ func TestBusinessStagePlannerAddsBoundedKeyboardPlayabilityVerification(t *testi
 	}
 }
 
+func TestFinalObserveAcceptsSourceBoundResultSelectorsBeforeActionHeuristics(t *testing.T) {
+	completion := stageSpec{
+		id: "final_observe", kind: model.BusinessStageKindFinalObserve,
+		actionType: string(model.GraphActionInspect), keywords: []string{"构建完成"},
+	}
+	if !businessActionMatchesStage(completion, "Agent build result", "click", "[data-testid='build-result-card']", "", "PlanComponents") {
+		t.Fatal("source-bound build result selector was rejected because its heuristic action kind looked clickable")
+	}
+
+	preview := stageSpec{
+		id: "playable_preview", kind: model.BusinessStageKindFinalObserve,
+		actionType: string(model.GraphActionInspect), keywords: []string{"预览"},
+	}
+	if !businessActionMatchesStage(preview, "Playable preview", "click", "[data-testid='preview-iframe']", "", "PreviewPanel") {
+		t.Fatal("source-bound playable preview selector was rejected because its heuristic action kind looked clickable")
+	}
+}
+
 func TestIntentGoalTreatsProjectRequirementInputAsFillWithSelectorAliases(t *testing.T) {
 	goal := intentGoalFromText("输入俄罗斯方块需求并创建项目")
 	if goal.PreferredAction != "fill" || !goal.BusinessCritical {

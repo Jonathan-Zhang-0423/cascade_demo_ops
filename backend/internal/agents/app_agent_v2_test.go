@@ -1041,6 +1041,31 @@ func TestCodeReaderLLMPlannerCanChooseNextGrepQuery(t *testing.T) {
 	}
 }
 
+func TestCodeReaderPrioritizesBuildCompletionAndPlayableResultQuestions(t *testing.T) {
+	project := &model.ProjectContext{
+		ID:                 "project_completion_evidence",
+		ProductDescription: "等待 Agent 全部步骤完成，再打开俄罗斯方块预览并用方向键试玩，确认棋盘和得分变化。",
+	}
+	budget := model.CodeReadBudget{DrilldownRounds: 2}
+	questions := buildCodeInvestigationQuestions(project, nil, budget)
+	if len(questions) < 2 {
+		t.Fatalf("expected the two requirement-critical questions first, got %+v", questions)
+	}
+	if questions[0].ID != "question_build_completion" || !stringSliceContains(questions[0].QueryTerms, "build-result-card") {
+		t.Fatalf("build completion evidence was not prioritized: %+v", questions)
+	}
+	if questions[1].ID != "question_playable_result" || !stringSliceContains(questions[1].QueryTerms, "preview-iframe") {
+		t.Fatalf("playable preview evidence was not prioritized: %+v", questions)
+	}
+
+	fallback := buildCodeInvestigationQueries(project, nil, budget, questions)
+	planned := []codeInvestigationQuery{{questionID: "question_ad_hoc", terms: []string{"generic"}}}
+	queries := append(requirementCriticalInvestigationQueries(fallback), planned...)
+	if len(queries) < 2 || queries[0].questionID != "question_build_completion" || queries[1].questionID != "question_playable_result" {
+		t.Fatalf("model plan could starve requirement-critical queries: %+v", queries)
+	}
+}
+
 func TestProjectInvestigationToolSuiteIsReusableWithoutCodeReader(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{

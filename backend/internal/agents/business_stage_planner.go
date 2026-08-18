@@ -955,6 +955,14 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 	text := strings.Join([]string{label, kind, selector, value, componentRef}, " ")
 	labelText := normalizeIntentText(label)
 	selectorText := normalizeIntentText(strings.Join([]string{selector, componentRef}, " "))
+	if spec.kind == model.BusinessStageKindFinalObserve {
+		if spec.id == "final_observe" && containsAnyNormalized(text, "build-result-card", "build result", "build_complete", "all_complete", "构建完成", "全部步骤完成") {
+			return true
+		}
+		if spec.id == "playable_preview" && containsAnyNormalized(text, "preview-iframe", "preview panel", "playable", "tetris", "棋盘", "得分") {
+			return true
+		}
+	}
 	wantAction := model.GraphActionType(spec.actionType)
 	gotAction := graphActionTypeFromKind(kind, selector)
 	if wantAction != "" && gotAction != wantAction {
