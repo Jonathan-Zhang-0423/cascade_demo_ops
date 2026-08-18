@@ -235,6 +235,47 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		nonDestructive: true,
 	})
 
+	if wantsPlayableKeyboardVerification(intentText) {
+		playableName := firstNonEmpty(projectName, "游戏")
+		builder.addStage(stageSpec{
+			id:             "playable_preview",
+			kind:           model.BusinessStageKindFinalObserve,
+			title:          "打开并核验" + playableName + "试玩界面",
+			objective:      "确认最终预览中真实显示" + playableName + "棋盘、得分和键盘操作说明。",
+			actionType:     string(model.GraphActionInspect),
+			actionLabel:    "核验可试玩预览",
+			successState:   playableName + "棋盘、得分和方向/旋转操作说明均可见。",
+			routeState:     builder.finalRouteState(),
+			entryRoute:     builder.finalEntryRoute(),
+			expectedRoute:  builder.finalEntryRoute(),
+			durationMS:     5000,
+			keywords:       []string{"俄罗斯方块", "棋盘", "得分", "操作说明", "预览", "tetris", "board", "score", "controls", "preview"},
+			capture:        []string{playableName + "棋盘", "得分", "键盘操作说明"},
+			nonDestructive: true,
+		})
+		builder.addStage(stageSpec{
+			id:            "verify_playable_controls",
+			kind:          model.BusinessStageKindFinalObserve,
+			title:         "用键盘实际试玩" + playableName,
+			objective:     "依次按左、右、下和旋转键，核验方块位置或形状确实发生画面变化。",
+			actionType:    string(model.GraphActionPress),
+			actionLabel:   "按方向键试玩",
+			successState:  "按键后棋盘画面发生变化，证明游戏可由键盘实际操作。",
+			routeState:    builder.finalRouteState(),
+			entryRoute:    builder.finalEntryRoute(),
+			expectedRoute: builder.finalEntryRoute(),
+			durationMS:    6000,
+			keywords:      []string{"按左", "按右", "按下", "旋转", "方向键", "键盘", "试玩", "位置", "形状", "ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp"},
+			capture:       []string{"按键前棋盘", "按键后棋盘变化"},
+			parameters: map[string]string{
+				"keys":               "ArrowLeft,ArrowRight,ArrowDown,ArrowUp",
+				"inter_key_delay_ms": "350",
+				"focus_preview":      "true",
+			},
+			nonDestructive: true,
+		})
+	}
+
 	return builder.plan(), nil
 }
 
@@ -254,6 +295,7 @@ type stageSpec struct {
 	durationMS     int
 	keywords       []string
 	capture        []string
+	parameters     map[string]string
 	nonDestructive bool
 }
 
@@ -262,6 +304,7 @@ type intentDurationHint struct {
 	Context    string
 	CenterRune int
 	Maximum    bool
+	FinalFilm  bool
 }
 
 var intentDurationPattern = regexp.MustCompile(`(?i)(\d+)\s*(毫秒|ms|秒|s|sec|secs|second|seconds|分钟|mins|minutes|min|m)`)
@@ -284,7 +327,7 @@ func durationMSForIntentKeywords(intentText string, keywords ...string) int {
 	best := 0
 	bestDistance := 0
 	for _, hint := range hints {
-		if hint.Maximum {
+		if hint.Maximum || hint.FinalFilm {
 			continue
 		}
 		distance, ok := nearestKeywordDistance(normalized, hint.CenterRune, keywords)
@@ -336,9 +379,21 @@ func durationHintsFromIntent(intentText string) []intentDurationHint {
 			Context:    string(runes[windowStart:windowEnd]),
 			CenterRune: (startRune + endRune) / 2,
 			Maximum:    durationHintIsMaximum(runes, startRune, endRune),
+			FinalFilm:  durationHintIsFinalFilm(runes, startRune, endRune),
 		})
 	}
 	return out
+}
+
+func durationHintIsFinalFilm(runes []rune, startRune int, endRune int) bool {
+	windowStart := maxInt(0, startRune-20)
+	windowEnd := minInt(len(runes), endRune+20)
+	context := normalizeIntentText(string(runes[windowStart:windowEnd]))
+	return containsAnyNormalized(context,
+		"最终成片", "成片时长", "最终输出", "输出 mp4", "输出mp4", "mp4 成片", "mp4成片",
+		"真实操作演示", "演示时长", "整段演示", "完整演示",
+		"final film", "final video", "final mp4", "video duration",
+	)
 }
 
 func durationHintIsMaximum(runes []rune, startRune int, endRune int) bool {
@@ -381,6 +436,17 @@ func completionWaitTimeoutMS(intentText string) int {
 		best = maxBuildCompletionWaitMS
 	}
 	return minInt(best, maxBuildCompletionWaitMS)
+}
+
+func wantsPlayableKeyboardVerification(intentText string) bool {
+	text := normalizeIntentText(intentText)
+	keyboardRequested := containsAnyNormalized(text,
+		"键盘", "方向键", "按左", "按右", "按下", "旋转", "arrowleft", "arrowright", "arrowdown", "arrowup", "keyboard",
+	)
+	playableResultRequested := containsAnyNormalized(text,
+		"实际可玩", "实际试玩", "试玩", "可操作", "俄罗斯方块", "tetris", "棋盘", "方块位置", "方块形状", "playable",
+	)
+	return keyboardRequested && playableResultRequested
 }
 
 func nearestKeywordDistance(normalizedIntent string, centerRune int, keywords []string) (int, bool) {
@@ -502,6 +568,7 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 			SuccessState:   spec.successState,
 			WaitConditions: businessStageWaitConditions(spec),
 			CapturePoints:  spec.capture,
+			Parameters:     spec.parameters,
 			NonDestructive: businessStageIsApprovedNonDestructive(spec),
 		},
 		Targets:              targets,

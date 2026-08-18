@@ -129,6 +129,31 @@ func TestPackageConfidenceIgnoresSafetyConstraintsForPositiveCoverage(t *testing
 	}
 }
 
+func TestPackageConfidenceScopesPostProductionRequirementsOutsideBrowserPackage(t *testing.T) {
+	pkg := confidenceFixture(t)
+	pkg.WorkflowGraph.Requirements = []GraphRequirement{
+		{ID: "director", Kind: "must_show", Description: "导演模型制定脚本并由 Seedance 2.5 生成候选，FFmpeg 合成最终 MP4 成片", Required: true},
+	}
+	summary, err := AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 1 {
+		t.Fatalf("post-production requirements belong to final-film assessment, not browser-package coverage: %+v", summary)
+	}
+
+	pkg.WorkflowGraph.Requirements = []GraphRequirement{
+		{ID: "playable", Kind: "must_show", Description: "按左、右、下和旋转键后方块位置或形状变化", Required: true},
+	}
+	summary, err = AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 0 {
+		t.Fatalf("an unmapped browser/playability requirement must still block browser-package coverage: %+v", summary)
+	}
+}
+
 func TestPackageConfidenceAllowsCompleteRuntimeAdaptiveContractWithoutPriorPageEvidence(t *testing.T) {
 	pkg := confidenceFixture(t)
 	makeConfidenceStageRuntimeAdaptive(t, &pkg, 0)

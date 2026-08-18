@@ -40,6 +40,9 @@ func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
 		{intent: "新建项目（13s，2048，构建模式）", want: "2048"},
 		{intent: "项目名称为2026", want: "2026"},
 		{intent: "项目名称：俄罗斯方块", want: "俄罗斯方块"},
+		{intent: "新建名为“俄罗斯方块”的项目，要求 Agent 实际生成代码", want: "俄罗斯方块"},
+		{intent: "登录、创建俄罗斯方块项目、等待 Agent 真正编写完代码", want: "俄罗斯方块"},
+		{intent: "新建项目 启动 Agent 实际构建", want: ""},
 		{intent: "新建项目（13秒，构建模式）", want: ""},
 	}
 	for _, test := range tests {
@@ -62,6 +65,45 @@ func TestCompletionWaitUsesMaximumAsTimeoutNotCaptureDuration(t *testing.T) {
 	}
 	if got := completionWaitTimeoutMS("停留在项目详情页查看状态"); got != 0 {
 		t.Fatalf("ordinary final observation must not receive a long poll, got %d", got)
+	}
+	finalFilmIntent := "登录并创建项目，最终成片时长 2 分钟，输出 MP4。"
+	if got := durationMSForIntentKeywords(finalFilmIntent, "登录"); got != 0 {
+		t.Fatalf("final-film duration leaked into login capture timing: %d", got)
+	}
+	if got := durationMSForIntentKeywords(finalFilmIntent, "最终", "结果"); got != 0 {
+		t.Fatalf("final-film duration leaked into browser final-observe timing: %d", got)
+	}
+	globalDemoIntent := "面向产品团队制作约120秒真实操作演示：通过安全凭据登录并创建项目。"
+	if got := durationMSForIntentKeywords(globalDemoIntent, "登录"); got != 0 {
+		t.Fatalf("global demo duration leaked into login capture timing: %d", got)
+	}
+}
+
+func TestBusinessStagePlannerAddsBoundedKeyboardPlayabilityVerification(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "创建俄罗斯方块项目，等待 Agent 真正编写完成，打开最终预览看清棋盘、得分和操作说明，再按左、右、下和旋转键，确认方块位置或形状变化。"
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var preview, keyboard *model.BusinessStage
+	for index := range plan.Stages {
+		switch plan.Stages[index].ID {
+		case "business_stage_playable_preview":
+			preview = &plan.Stages[index]
+		case "business_stage_verify_playable_controls":
+			keyboard = &plan.Stages[index]
+		}
+	}
+	if preview == nil || keyboard == nil {
+		t.Fatalf("playability stages missing: %+v", plan.Stages)
+	}
+	if keyboard.Action.Type != string(model.GraphActionPress) || keyboard.Action.Parameters["keys"] != "ArrowLeft,ArrowRight,ArrowDown,ArrowUp" || !keyboard.Action.NonDestructive {
+		t.Fatalf("keyboard stage is not strictly bounded: %+v", keyboard)
+	}
+	node := graphNodeFromBusinessStage(project, *keyboard, project.ProductURL, "feature_playable")
+	if node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionPress || len(node.Validations) != 1 || node.Validations[0].Kind != "page_changed" || !node.Validations[0].Required {
+		t.Fatalf("keyboard graph node must require visual-change evidence: %+v", node)
 	}
 }
 

@@ -578,6 +578,12 @@ func explicitDemoIntentText(project *model.ProjectContext, intelligence *model.P
 var intentProjectNamePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?:项目名称|项目名)\s*(?:为|是|[:：=])\s*([^，。；;,\n]{1,48})`),
 	regexp.MustCompile(`(?:项目名称|项目名)\s*([^，。；;,\n\s（(]{1,48})`),
+	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?(?:名为|名称为|项目名为)\s*[“”"'‘’]*([^“”"'‘’，。；;,\n]{1,48})[“”"'‘’]*(?:的)?项目`),
+	// Chinese requests commonly put the desired name before “项目”, for
+	// example “创建俄罗斯方块项目”. Match that form before the generic
+	// “创建项目 <token>” form so the following operation (“启动 Agent”) is
+	// never mistaken for the project name.
+	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?([^，。；;,\n\s（）()]{1,32})项目`),
 	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?项目\s*([^，。；;,\n\s（(]{1,48})`),
 	regexp.MustCompile(`project\s+(?:named|called)\s+([a-z0-9][a-z0-9 _-]{0,47})`),
 }
@@ -615,6 +621,7 @@ func normalizeIntentProjectNameCandidate(value string) string {
 	if candidate == "" || intentDurationOnlyPattern.MatchString(candidate) || containsAnyNormalized(candidate,
 		"新建项目", "创建项目", "新增项目", "new project", "create project",
 		"构建模式", "build mode", "builder mode", "等待", "wait", "agent", "智能体",
+		"启动", "开始", "输入", "填写", "选择", "打开", "进入", "查看", "提交", "创建", "新建", "新增",
 	) {
 		return ""
 	}

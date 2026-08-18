@@ -36,6 +36,7 @@ const (
 	GraphActionFill     GraphActionType = "fill"
 	GraphActionSelect   GraphActionType = "select"
 	GraphActionUpload   GraphActionType = "upload"
+	GraphActionPress    GraphActionType = "press"
 	GraphActionWait     GraphActionType = "wait"
 	GraphActionAssert   GraphActionType = "assert"
 	GraphActionInspect  GraphActionType = "inspect"

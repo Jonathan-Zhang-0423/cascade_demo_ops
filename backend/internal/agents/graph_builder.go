@@ -513,12 +513,25 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	} else if stage.Kind == model.BusinessStageKindFinalObserve {
 		nodeType = model.GraphNodeTypeEnd
 	}
-	if stage.Kind == model.BusinessStageKindObserveProgress || stage.Kind == model.BusinessStageKindFinalObserve {
+	if stage.Kind == model.BusinessStageKindObserveProgress || (stage.Kind == model.BusinessStageKindFinalObserve && actionType == model.GraphActionInspect) {
 		actionType = model.GraphActionWait
 		if stage.Kind == model.BusinessStageKindFinalObserve {
 			actionType = model.GraphActionInspect
 		}
 		target.Selector = ""
+		selector = ""
+	}
+	if actionType == model.GraphActionPress {
+		// Keyboard actions target the approved page/preview route, not an
+		// arbitrary DOM control. Preserve semantic evidence while ensuring the
+		// Worker never tries to resolve or click an inferred selector.
+		target.Selector = ""
+		target.TestID = ""
+		target.Role = ""
+		target.ComponentRef = ""
+		target.SelectorAlternatives = nil
+		target.Label = stage.Action.Label
+		target.Text = stage.Action.Label
 		selector = ""
 	}
 	actionValue := stage.Action.InputValue
@@ -553,6 +566,10 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 		metadata["demo_username_secret_ref"] = project.DemoAccount.UsernameSecretRef
 		metadata["demo_password_secret_ref"] = project.DemoAccount.PasswordSecretRef
 	}
+	parameters := map[string]any{}
+	for key, value := range stage.Action.Parameters {
+		parameters[key] = value
+	}
 	return &model.GraphNode{
 		ID:              stage.ID,
 		Action:          string(actionType),
@@ -568,13 +585,14 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 		PageRef:         pageRef,
 		FeatureRefs:     uniqueStrings([]string{featureID, stage.ID}),
 		ActionSpec: &model.GraphAction{
-			Type:      actionType,
-			Target:    target,
-			Value:     actionValue,
-			InputRef:  stage.Action.InputRef,
-			SecretRef: stage.Action.SecretRef,
-			TimeoutMS: stage.DurationMS,
-			WaitUntil: businessStageWaitUntil(stage),
+			Type:       actionType,
+			Target:     target,
+			Value:      actionValue,
+			InputRef:   stage.Action.InputRef,
+			SecretRef:  stage.Action.SecretRef,
+			Parameters: parameters,
+			TimeoutMS:  stage.DurationMS,
+			WaitUntil:  businessStageWaitUntil(stage),
 		},
 		StateAfter: []model.StateAssertion{{
 			ID:           "state_after_" + stage.ID,
@@ -632,6 +650,9 @@ func businessStageGraphActionType(stage model.BusinessStage) model.GraphActionTy
 	case model.BusinessStageKindObserveProgress:
 		return model.GraphActionWait
 	case model.BusinessStageKindFinalObserve:
+		if declared := graphActionTypeFromKind(stage.Action.Type, ""); declared == model.GraphActionPress {
+			return declared
+		}
 		return model.GraphActionInspect
 	default:
 		return graphActionTypeFromKind(stage.Action.Type, "")
@@ -850,7 +871,7 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		kind = "url_matches"
 		target = model.ActionTarget{URL: stage.ExpectedRouteAfterAction}
 		expected = stage.ExpectedRouteAfterAction
-	} else if stage.Kind == model.BusinessStageKindFinalObserve && wantsBuildCompletion(stage.UserIntent) {
+	} else if stage.Kind == model.BusinessStageKindFinalObserve && strings.TrimPrefix(stage.ID, "business_stage_") == "final_observe" && wantsBuildCompletion(stage.UserIntent) {
 		if completionTarget, ok := businessStageCompletionTarget(stage); ok {
 			target = completionTarget
 			kind = "element_visible"
@@ -864,6 +885,14 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 			expected = firstNonEmpty(stage.Action.SuccessState, "Agent 构建已完成")
 		}
 		timeoutMS = completionWaitTimeoutMS(stage.UserIntent)
+	} else if action == model.GraphActionPress {
+		kind = "page_changed"
+		target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+		expected = true
+	} else if stage.Kind == model.BusinessStageKindFinalObserve && strings.TrimPrefix(stage.ID, "business_stage_") == "playable_preview" {
+		kind = "playable_surface_visible"
+		target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+		expected = true
 	} else if action == model.GraphActionWait || action == model.GraphActionInspect {
 		if route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute); route != "" {
 			kind = "url_matches"
@@ -972,6 +1001,9 @@ func isExplicitNewProjectResultCandidate(candidate model.BusinessTargetCandidate
 func businessStageStateAssertionKind(stage model.BusinessStage, action model.GraphActionType) string {
 	if action == model.GraphActionNavigate {
 		return "page_loaded"
+	}
+	if action == model.GraphActionPress {
+		return "page_changed"
 	}
 	if stage.Kind == model.BusinessStageKindObserveProgress || stage.Kind == model.BusinessStageKindFinalObserve {
 		return "observation"
@@ -1419,6 +1451,8 @@ func declaredGraphActionType(kind string) model.GraphActionType {
 		return model.GraphActionSelect
 	case "upload":
 		return model.GraphActionUpload
+	case "press", "keypress", "keyboard", "key_press":
+		return model.GraphActionPress
 	case "wait":
 		return model.GraphActionWait
 	case "navigate":
@@ -2076,6 +2110,8 @@ func validGraphAction(value string) model.GraphActionType {
 		return model.GraphActionSelect
 	case model.GraphActionUpload:
 		return model.GraphActionUpload
+	case model.GraphActionPress:
+		return model.GraphActionPress
 	case model.GraphActionWait:
 		return model.GraphActionWait
 	case model.GraphActionAssert:
@@ -2336,6 +2372,8 @@ func graphActionTypeFromKind(kind string, selector string) model.GraphActionType
 			return model.GraphActionInspect
 		}
 		return model.GraphActionUpload
+	case "press", "keypress", "keyboard", "key_press":
+		return model.GraphActionPress
 	case "wait":
 		return model.GraphActionWait
 	case "assert", "validate":
@@ -2544,6 +2582,13 @@ func requirementStageKinds(description string) map[model.BusinessStageKind]int {
 	switch {
 	case match("登录", "登入", "sign in", "signin", "login", "authenticated", "authentication"):
 		kinds[model.BusinessStageKindSessionSetup] = 120
+	case match("按左", "按右", "按下", "旋转", "方向键", "键盘", "方块位置", "方块形状", "keyboard", "arrowleft", "arrowright", "arrowdown", "arrowup"):
+		kinds[model.BusinessStageKindFinalObserve] = 160
+	case match("最终预览", "棋盘", "得分", "操作说明", "试玩", "可玩", "tetris", "board", "score", "controls", "playable"):
+		kinds[model.BusinessStageKindFinalObserve] = 150
+	case match("最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "maximum", "timeout", "wait until complete"):
+		kinds[model.BusinessStageKindFinalObserve] = 140
+		kinds[model.BusinessStageKindObserveProgress] = 110
 	case match("最终实际", "实际效果", "运行效果", "最终效果", "最终结果", "成品", "actual result", "final result", "final output", "working result"):
 		kinds[model.BusinessStageKindFinalObserve] = 120
 		kinds[model.BusinessStageKindObserveProgress] = 100

@@ -231,6 +231,7 @@ type BrowserAgentSession = {
 	traceActive: boolean;
 	openedAtMS: number;
 	targetGeometryByArtifactID: Map<string, BrowserTargetGeometry>;
+	visualChangeByNodeID: Map<string, boolean>;
   taskSecrets: Record<string, BrowserAgentTaskSecret>;
 };
 
@@ -307,6 +308,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	traceActive: recordTrace,
 	openedAtMS: Date.now(),
 	targetGeometryByArtifactID: new Map(),
+	visualChangeByNodeID: new Map(),
     taskSecrets: validatedTaskSecrets(request.task_secrets),
   };
   await page.route("**/*", async (route: any) => {
@@ -605,7 +607,7 @@ export async function captureTargetGeometry(
 // route and runtime validations, not to a clickable DOM target. Mutating and
 // element-assertion actions still fail closed unless a unique target resolves.
 export function interactionRequiresResolvedTarget(kind: string): boolean {
-  return !["navigate", "wait", "inspect"].includes(String(kind || "").trim().toLowerCase());
+  return !["navigate", "wait", "inspect", "press"].includes(String(kind || "").trim().toLowerCase());
 }
 
 export function validatedStageSecretValues(stage: BrowserAgentWorkerStage, provided?: Record<string, string>): Record<string, string> {
@@ -680,7 +682,7 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
     assertions.push({ kind: `action_${interaction.kind}_completed`, passed: true, actual: request.stage.target_contract.semantic_id });
   }
   await waitForCaptureWindow(session.page, request.stage);
-  assertions.push(...await evaluateRequiredValidations(session.page, request.stage));
+  assertions.push(...await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID));
   const artifact = await captureScreenshot(session, request.stage, "after");
   const evidence = screenshotEvidence(artifact, request.stage, "执行后结果证据");
   return {
@@ -701,7 +703,7 @@ export async function revalidateBrowserAgentStage(request: BrowserAgentStageRequ
   const session = requiredSession(request.session_id);
   validateStage(request.stage);
   await waitForCaptureWindow(session.page, request.stage);
-  const assertions = await evaluateRequiredValidations(session.page, request.stage);
+  const assertions = await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID);
   const artifact = await captureScreenshot(session, request.stage, "revalidate");
   const evidence = screenshotEvidence(artifact, request.stage, "修复截图时机后的结果证据");
   return {
@@ -791,6 +793,23 @@ async function executeInteraction(
   }
   if (interaction.kind === "inspect") {
     await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+    return;
+  }
+  if (interaction.kind === "press") {
+    const keys = approvedKeyboardKeys(interaction.parameters);
+    if (keys.length === 0) throw new Error(`browser_agent_keyboard_keys_not_approved: ${stage.node_id}`);
+    if (booleanParameter(interaction.parameters, "focus_preview", false)) {
+      await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000));
+    }
+    const before = await pageVisualDigest(session.page);
+    const delayMS = numericParameter(interaction.parameters, "inter_key_delay_ms", 350, 100, 1_000);
+    const digests = new Set<string>([before]);
+    for (const key of keys) {
+      await session.page.keyboard.press(key);
+      await session.page.waitForTimeout(delayMS);
+      digests.add(await pageVisualDigest(session.page));
+    }
+    session.visualChangeByNodeID.set(stage.node_id, digests.size > 1);
     return;
   }
   const resolved = await resolveTarget(session.page, stage, interaction, true, resolutionAttempts);
@@ -1107,7 +1126,11 @@ async function valueWithin<T>(promise: Promise<T>, timeoutMS: number, fallback: 
   }
 }
 
-export async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerStage): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
+export async function evaluateRequiredValidations(
+  page: any,
+  stage: BrowserAgentWorkerStage,
+  visualChangeByNodeID?: ReadonlyMap<string, boolean>,
+): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   for (const validation of (stage.validations || []).filter((item) => item.required)) {
     const timeout = validationTimeoutMilliseconds(stage, validation);
@@ -1187,6 +1210,13 @@ export async function evaluateRequiredValidations(page: any, stage: BrowserAgent
         const title = await page.title();
         passed = Boolean(expected) && title.includes(expected);
         actual = redactText(title);
+      } else if (validation.kind === "page_changed") {
+        passed = visualChangeByNodeID?.get(stage.node_id) === true;
+        actual = passed ? "visual_changed_after_approved_keys" : "no_verified_visual_change";
+      } else if (validation.kind === "playable_surface_visible") {
+        const result = await waitForPlayableSurface(page, timeout);
+        passed = result.surface && result.score && result.controls;
+        actual = `surface=${result.surface};score=${result.score};controls=${result.controls}`;
       } else {
         actual = "unsupported_required_validation";
       }
@@ -1758,6 +1788,74 @@ function numericParameter(parameters: Record<string, unknown> | undefined, key: 
   const value = Number(parameters?.[key]);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function booleanParameter(parameters: Record<string, unknown> | undefined, key: string, fallback: boolean): boolean {
+  const value = parameters?.[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (value.trim().toLowerCase() === "true") return true;
+    if (value.trim().toLowerCase() === "false") return false;
+  }
+  return fallback;
+}
+
+export function approvedKeyboardKeys(parameters: Record<string, unknown> | undefined): string[] {
+  const raw = parameters?.keys;
+  const values = Array.isArray(raw)
+    ? raw.map((value) => typeof value === "string" ? value.trim() : "")
+    : typeof raw === "string" ? raw.split(/[;,\s]+/).map((value) => value.trim()) : [];
+  const keys = values.filter(Boolean);
+  const allowed = new Set(["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp"]);
+  if (keys.length === 0 || keys.length > 8 || keys.some((key) => !allowed.has(key))) return [];
+  return keys;
+}
+
+async function pageVisualDigest(page: any): Promise<string> {
+  const bytes = await page.screenshot({ type: "png", animations: "disabled", caret: "hide", timeout: screenshotTimeoutMS });
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function focusLargestPlayableSurface(page: any, timeout: number): Promise<void> {
+  const candidates: any[] = [];
+  for (const selector of ["iframe:visible", "canvas:visible", '[data-testid*="preview" i]:visible', '[class*="game-board" i]:visible']) {
+    const locator = page.locator(selector);
+    const count = Math.min(12, await locator.count().catch(() => 0));
+    for (let index = 0; index < count; index += 1) candidates.push(locator.nth(index));
+  }
+  let best: { locator: any; area: number } | undefined;
+  for (const locator of candidates) {
+    const box = await locator.boundingBox().catch(() => null);
+    const area = box ? Number(box.width) * Number(box.height) : 0;
+    if (area > (best?.area || 0)) best = { locator, area };
+  }
+  if (best && best.area > 2_500) {
+    await best.locator.click({ timeout }).catch(() => undefined);
+    await page.waitForTimeout(150);
+  }
+}
+
+async function waitForPlayableSurface(page: any, timeout: number): Promise<{ surface: boolean; score: boolean; controls: boolean }> {
+  const deadline = Date.now() + Math.max(250, Math.min(timeout, standardValidationTimeoutMS));
+  let latest = { surface: false, score: false, controls: false };
+  do {
+    const frames = typeof page.frames === "function" ? page.frames() : [page];
+    let text = "";
+    for (const frame of frames) {
+      const frameText = await frame.locator?.("body")?.innerText({ timeout: 750 }).catch(() => "") || "";
+      text += ` ${frameText}`;
+      for (const selector of ["canvas:visible", '[data-testid*="board" i]:visible', '[class*="board" i]:visible', '[class*="tetris" i]:visible']) {
+        if (await frame.locator?.(selector)?.first()?.isVisible({ timeout: 500 }).catch(() => false)) latest.surface = true;
+      }
+    }
+    if (!latest.surface) latest.surface = await page.locator?.("iframe:visible")?.first()?.isVisible({ timeout: 500 }).catch(() => false) || false;
+    const normalized = String(text).toLowerCase();
+    latest.score = /得分|分数|score|lines|行数/.test(normalized);
+    latest.controls = /方向键|左右|旋转|操作|arrow|keyboard|controls|move|rotate|←|→|↓|↑/.test(normalized);
+    if (latest.surface && latest.score && latest.controls) return latest;
+    await page.waitForTimeout?.(250);
+  } while (Date.now() < deadline);
+  return latest;
 }
 
 function forbiddenName(actual: string, forbidden: string[]): boolean {

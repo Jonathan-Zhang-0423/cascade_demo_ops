@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -129,10 +129,17 @@ describe("browser agent credential broker boundary", () => {
     expect(interactionRequiresResolvedTarget("navigate")).toBe(false);
     expect(interactionRequiresResolvedTarget("wait")).toBe(false);
     expect(interactionRequiresResolvedTarget("inspect")).toBe(false);
+		expect(interactionRequiresResolvedTarget("press")).toBe(false);
     expect(interactionRequiresResolvedTarget("click")).toBe(true);
     expect(interactionRequiresResolvedTarget("fill")).toBe(true);
     expect(interactionRequiresResolvedTarget("assert")).toBe(true);
   });
+
+	it("accepts only the four approved gameplay keys", () => {
+		expect(approvedKeyboardKeys({ keys: "ArrowLeft,ArrowRight,ArrowDown,ArrowUp" })).toEqual(["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp"]);
+		expect(approvedKeyboardKeys({ keys: "Control+L" })).toEqual([]);
+		expect(approvedKeyboardKeys({ keys: ["ArrowLeft", "Delete"] })).toEqual([]);
+	});
 });
 
 describe("browser agent navigation policy", () => {
@@ -415,6 +422,19 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 });
 
 describe("browser agent required validations", () => {
+	it("requires an execution-recorded visual change for keyboard playability", async () => {
+		const stage = {
+			id: "stage_play", order: 8, node_id: "verify_playable_controls", stage_kind: "final_observe",
+			target_contract: { semantic_id: "tetris_keyboard", destructive: false },
+			interactions: [{ kind: "press", non_destructive: true }],
+			validations: [{ id: "changed", kind: "page_changed", expected: true, required: true }],
+		};
+		expect(await evaluateRequiredValidations({}, stage, new Map([[stage.node_id, true]]))).toEqual([{
+			kind: "required_page_changed:changed", passed: true, actual: "visual_changed_after_approved_keys",
+		}]);
+		expect((await evaluateRequiredValidations({}, stage, new Map()))[0]?.passed).toBe(false);
+	});
+
   it("allows a bounded long poll only for a non-destructive final completion observation", async () => {
     const finalStage = {
       id: "stage_final", order: 7, node_id: "final_observe", stage_kind: "final_observe",

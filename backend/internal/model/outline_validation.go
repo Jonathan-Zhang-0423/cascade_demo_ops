@@ -615,7 +615,44 @@ func runtimeAdaptiveTargetDiscoverable(step ScriptStep, stage StageApprovalStage
 	hasSemanticHints := contract != nil && (len(contract.AllowedRoles) > 0 || len(contract.AllowedNames) > 0 || strings.TrimSpace(contract.ComponentRef) != "")
 	hasRoute := step.Action.Type == GraphActionNavigate && (target.URL != "" || step.PageTarget.URL != "")
 	hasRoute = hasRoute || stage.EntryRoute != "" || stage.TargetRoute != "" || stage.TargetRouteTemplate != "" || len(stage.CandidateRoutes) > 0
+	if step.Action.Type == GraphActionPress {
+		return hasRoute && approvedKeyboardActionParameters(step.Action.Parameters)
+	}
 	return hasRoute && (hasLocator || hasSemanticHints || step.Action.Type == GraphActionNavigate)
+}
+
+func approvedKeyboardActionParameters(parameters map[string]any) bool {
+	raw, ok := parameters["keys"]
+	if !ok {
+		return false
+	}
+	keys := []string{}
+	switch value := raw.(type) {
+	case string:
+		keys = strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' || r == ' ' })
+	case []string:
+		keys = append(keys, value...)
+	case []any:
+		for _, item := range value {
+			text, ok := item.(string)
+			if !ok {
+				return false
+			}
+			keys = append(keys, text)
+		}
+	default:
+		return false
+	}
+	if len(keys) == 0 || len(keys) > 8 {
+		return false
+	}
+	allowed := map[string]bool{"ArrowLeft": true, "ArrowRight": true, "ArrowDown": true, "ArrowUp": true}
+	for _, key := range keys {
+		if !allowed[strings.TrimSpace(key)] {
+			return false
+		}
+	}
+	return true
 }
 
 func validRuntimeAdaptiveCapturePlan(plan *BrowserAgentCapturePlan) bool {
@@ -639,7 +676,7 @@ func stepHasDeterministicBrowserAgentValidation(step ScriptStep) bool {
 		hasTarget := validation.Target.URL != "" || validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != ""
 		hasExpected := strings.TrimSpace(validation.Assertion) != "" || validation.Expected != nil
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
 			if hasTarget || hasExpected {
 				return true
 			}
@@ -668,7 +705,7 @@ func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool 
 	hasTarget := validation.Target.URL != "" || validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != ""
 	hasExpected := strings.TrimSpace(validation.Assertion) != "" || validation.Expected != nil
 	switch validation.Kind {
-	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
 		return hasTarget || hasExpected
 	default:
 		return false
@@ -676,6 +713,9 @@ func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool 
 }
 
 func validationProvesBusinessOutcome(step ScriptStep, validation ValidationSpec) bool {
+	if step.Action.Type == GraphActionPress {
+		return validation.Kind == "page_changed" && validation.Expected == true && approvedKeyboardActionParameters(step.Action.Parameters)
+	}
 	if step.StageKind == BusinessStageKindBusinessInput || (step.Action.Type == GraphActionFill && step.StageKind != BusinessStageKindSessionSetup) {
 		if validation.Kind != "value_equals" {
 			return false

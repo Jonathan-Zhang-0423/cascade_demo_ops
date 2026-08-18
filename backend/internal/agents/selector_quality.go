@@ -184,6 +184,41 @@ func businessActionNeedsExecutableSelector(action model.GraphActionType) bool {
 	}
 }
 
+func approvedKeyboardKeys(parameters map[string]any) []string {
+	raw, ok := parameters["keys"]
+	if !ok {
+		return nil
+	}
+	keys := []string{}
+	switch value := raw.(type) {
+	case string:
+		keys = strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' || r == ' ' })
+	case []string:
+		keys = append(keys, value...)
+	case []any:
+		for _, item := range value {
+			text, ok := item.(string)
+			if !ok {
+				return nil
+			}
+			keys = append(keys, text)
+		}
+	default:
+		return nil
+	}
+	if len(keys) == 0 || len(keys) > 8 {
+		return nil
+	}
+	allowed := map[string]bool{"ArrowLeft": true, "ArrowRight": true, "ArrowDown": true, "ArrowUp": true}
+	for index := range keys {
+		keys[index] = strings.TrimSpace(keys[index])
+		if !allowed[keys[index]] {
+			return nil
+		}
+	}
+	return keys
+}
+
 func normalizeSelector(selector string) string {
 	value := strings.TrimSpace(strings.ToLower(selector))
 	value = strings.Trim(value, "`")

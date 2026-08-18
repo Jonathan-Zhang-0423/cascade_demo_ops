@@ -929,7 +929,7 @@ func stageHasEvidence(stage StageApprovalStage) bool {
 
 func stepRequiresBrowserAgentValidation(step ScriptStep) bool {
 	switch step.Action.Type {
-	case GraphActionNavigate, GraphActionClick, GraphActionFill, GraphActionSelect, GraphActionUpload, GraphActionAPICall:
+	case GraphActionNavigate, GraphActionClick, GraphActionFill, GraphActionSelect, GraphActionUpload, GraphActionPress, GraphActionAPICall:
 		return true
 	case GraphActionWait, GraphActionInspect:
 		return step.StageKind == BusinessStageKindSessionSetup || step.StageKind == BusinessStageKindObserveProgress || step.StageKind == BusinessStageKindFinalObserve
@@ -944,7 +944,7 @@ func stepHasRequiredBrowserAgentValidation(step ScriptStep) bool {
 			continue
 		}
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
 			return true
 		}
 	}

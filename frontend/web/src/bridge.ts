@@ -4300,7 +4300,7 @@ function roleFromAction(action: string): string {
   if (action === "select") {
     return "combobox";
   }
-  if (action === "navigate" || action === "inspect" || action === "assert" || action === "wait") {
+  if (action === "navigate" || action === "inspect" || action === "assert" || action === "wait" || action === "press") {
     return "region";
   }
   return "button";
@@ -4337,7 +4337,7 @@ function stageKindFromAction(action: string): string {
   if (action === "fill" || action === "upload") return "business_input";
   if (action === "select") return "mode_selection";
   if (action === "wait") return "observe_progress";
-  if (action === "assert" || action === "inspect") return "final_observe";
+  if (action === "assert" || action === "inspect" || action === "press") return "final_observe";
   return "business_action";
 }
 

@@ -282,6 +282,15 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 			builder.WriteString("  await ctx.page.setInputFiles(" + jsString(selector) + ", await ctx.secrets.getFile(" + jsString(fileRef) + "));\n")
 		}
 		builder.WriteString("  await ctx.page.waitForTimeout(1000);\n")
+	case model.GraphActionPress:
+		keys := approvedKeyboardKeys(step.Action.Parameters)
+		if len(keys) == 0 {
+			return fmt.Errorf("press step %q has no approved keyboard keys", step.NodeID)
+		}
+		for _, key := range keys {
+			builder.WriteString("  await ctx.page.keyboard.press(" + jsString(key) + ");\n")
+			builder.WriteString("  await ctx.page.waitForTimeout(350);\n")
+		}
 	case model.GraphActionWait:
 		if selector != "" {
 			builder.WriteString("  await ctx.page.locator(" + jsString(selector) + ").waitFor({ timeout: " + fmt.Sprint(timeoutMS) + " });\n")
@@ -516,7 +525,7 @@ func preActionPauseMS(actionType model.GraphActionType, durationMS int) int {
 		return 0
 	}
 	switch actionType {
-	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload:
+	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionPress:
 		return 1200
 	case model.GraphActionInspect, model.GraphActionWait:
 		return 0

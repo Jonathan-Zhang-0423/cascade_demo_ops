@@ -76,7 +76,7 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 	requiredRequirements, coveredRequirements := 0, 0
 	if pkg.WorkflowGraph != nil {
 		for _, requirement := range pkg.WorkflowGraph.Requirements {
-			if !requirement.Required {
+			if !requirement.Required || !requirementAppliesToClientBrowserExecution(requirement) {
 				continue
 			}
 			requiredRequirements++
@@ -213,6 +213,28 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 	}
 	summary.AssessmentHash = hash
 	return summary, nil
+}
+
+// The client execution package covers browser interaction and recording. It
+// deliberately retains downstream Director/video/editing requirements in the
+// workflow graph for traceability, but those are assessed by the final-film
+// pipeline and must not make an otherwise executable browser package fail its
+// own requirement-coverage gate.
+func requirementAppliesToClientBrowserExecution(requirement GraphRequirement) bool {
+	text := strings.ToLower(strings.TrimSpace(requirement.Description))
+	return !containsAnyPackageRequirementSignal(text,
+		"导演", "director", "seedance", "minimax h3", "h3 模型", "h3模型",
+		"ffmpeg", "视频模型", "成片", "后期", "剪辑合成", "final film", "final mp4",
+	)
+}
+
+func containsAnyPackageRequirementSignal(text string, values ...string) bool {
+	for _, value := range values {
+		if strings.Contains(text, strings.ToLower(value)) {
+			return true
+		}
+	}
+	return false
 }
 
 func packageRequirementCovered(pkg *ClientExecutionPackage, requirement GraphRequirement) bool {
