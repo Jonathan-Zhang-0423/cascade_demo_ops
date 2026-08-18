@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -361,6 +362,9 @@ func durationHintsFromIntent(intentText string) []intentDurationHint {
 		if len(match) < 6 {
 			continue
 		}
+		if durationMatchEmbeddedInIdentifier(normalized, match) {
+			continue
+		}
 		value, err := strconv.Atoi(normalized[match[2]:match[3]])
 		if err != nil || value <= 0 {
 			continue
@@ -385,13 +389,37 @@ func durationHintsFromIntent(intentText string) []intentDurationHint {
 	return out
 }
 
+func durationMatchEmbeddedInIdentifier(text string, match []int) bool {
+	if len(match) < 6 || match[0] < 0 || match[1] < 0 {
+		return true
+	}
+	if match[0] > 0 {
+		previous, _ := utf8.DecodeLastRuneInString(text[:match[0]])
+		if isASCIIIdentifierRune(previous) {
+			return true
+		}
+	}
+	unit := strings.ToLower(text[match[4]:match[5]])
+	if unit != "毫秒" && unit != "秒" && unit != "分钟" && match[1] < len(text) {
+		next, _ := utf8.DecodeRuneInString(text[match[1]:])
+		if isASCIIIdentifierRune(next) {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIIdentifierRune(value rune) bool {
+	return value == '_' || (value >= '0' && value <= '9') || (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z')
+}
+
 func durationHintIsFinalFilm(runes []rune, startRune int, endRune int) bool {
 	windowStart := maxInt(0, startRune-20)
 	windowEnd := minInt(len(runes), endRune+20)
 	context := normalizeIntentText(string(runes[windowStart:windowEnd]))
 	return containsAnyNormalized(context,
 		"最终成片", "成片时长", "最终输出", "输出 mp4", "输出mp4", "mp4 成片", "mp4成片",
-		"真实操作演示", "演示时长", "整段演示", "完整演示",
+		"真实操作演示", "演示时长", "整段演示", "完整演示", "演示视频", "编码演示", "产出一条", "节奏清晰",
 		"final film", "final video", "final mp4", "video duration",
 	)
 }

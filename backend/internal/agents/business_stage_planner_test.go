@@ -77,6 +77,13 @@ func TestCompletionWaitUsesMaximumAsTimeoutNotCaptureDuration(t *testing.T) {
 	if got := durationMSForIntentKeywords(globalDemoIntent, "登录"); got != 0 {
 		t.Fatalf("global demo duration leaked into login capture timing: %d", got)
 	}
+	generatedSummary := "面向产品与研发团队，产出一条约120秒、节奏清晰、证据完整的真实 Agent 编码演示视频，展示登录与最终结果。"
+	if got := durationMSForIntentKeywords(generatedSummary, "登录", "最终"); got != 0 {
+		t.Fatalf("generated final-video duration leaked into browser stage timing: %d", got)
+	}
+	if hints := durationHintsFromIntent("显式选择 Seedance 2.5 或 MiniMax H3 生成候选，并完成 step 4 Seedance 审核"); len(hints) != 0 {
+		t.Fatalf("model names or numbered steps were misread as durations: %+v", hints)
+	}
 }
 
 func TestBusinessStagePlannerAddsBoundedKeyboardPlayabilityVerification(t *testing.T) {
