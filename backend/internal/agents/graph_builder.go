@@ -2540,7 +2540,7 @@ func requirementPreferredNodeIDs(description string) map[string]int {
 		preferred["business_stage_verify_playable_controls"] = 1000
 	case match("最终预览", "棋盘", "得分", "操作说明", "试玩", "可玩", "tetris", "board", "score", "controls", "playable"):
 		preferred["business_stage_playable_preview"] = 1000
-	case match("最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "maximum", "timeout", "wait until complete"):
+	case match("持续轮询", "轮询直到", "步骤完成", "最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "build_complete", "maximum", "timeout", "wait until complete"):
 		preferred["business_stage_final_observe"] = 1000
 	}
 	return preferred
@@ -2602,7 +2602,7 @@ func requirementStageKinds(description string) map[model.BusinessStageKind]int {
 		kinds[model.BusinessStageKindFinalObserve] = 160
 	case match("最终预览", "棋盘", "得分", "操作说明", "试玩", "可玩", "tetris", "board", "score", "controls", "playable"):
 		kinds[model.BusinessStageKindFinalObserve] = 150
-	case match("最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "maximum", "timeout", "wait until complete"):
+	case match("持续轮询", "轮询直到", "步骤完成", "最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "build_complete", "maximum", "timeout", "wait until complete"):
 		kinds[model.BusinessStageKindFinalObserve] = 140
 		kinds[model.BusinessStageKindObserveProgress] = 110
 	case match("最终实际", "实际效果", "运行效果", "最终效果", "最终结果", "成品", "actual result", "final result", "final output", "working result"):
