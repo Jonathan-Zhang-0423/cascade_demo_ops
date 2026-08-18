@@ -20,6 +20,8 @@ type PageInteractionVerifierAgent struct {
 	manager *sidecar.Manager
 }
 
+const pageInteractionVerifierTimeoutMS = 60 * 1000
+
 func NewPageInteractionVerifierAgent() *PageInteractionVerifierAgent {
 	return &PageInteractionVerifierAgent{}
 }
@@ -206,8 +208,13 @@ func (a *PageInteractionVerifierAgent) verifyWithSidecar(ctx context.Context, pr
 	}
 	var response interactionVerifierResponse
 	err := a.manager.CallJSONRPC(ctx, spec, "verify_interactions", interactionVerifierRequest{
-		ProductURL:           project.ProductURL,
-		TimeoutMS:            20000,
+		ProductURL: project.ProductURL,
+		// Production product pages can keep DOMContentLoaded pending while
+		// authentication/runtime chunks warm up. Twenty seconds produced a false
+		// page_unreachable result on an otherwise healthy page, discarding formal
+		// login and business-control evidence. Keep this bounded but give the real
+		// browser scan enough time to reach the authenticated workspace.
+		TimeoutMS:            pageInteractionVerifierTimeoutMS,
 		Headless:             true,
 		AllowedDomains:       allowedDomainsFromScope(project, intelligence.RunIntentScope),
 		ForbiddenPaths:       intelligence.RunIntentScope.ForbiddenPathPrefixes,
