@@ -54,6 +54,15 @@ func ReviewArkMediaCandidateAssets(source *model.ClientExecutionPackage, generat
 	eligibleCount := 0
 	for index, artifact := range generationResult.DownloadedArtifacts {
 		item, reviewedArtifact := reviewCandidateAsset(artifact)
+		if isNormalizedSeedanceCandidate(*generationResult, artifact) {
+			candidate, err := NewSeedanceGeneratedShotCandidate(*generationResult, artifact)
+			if err != nil {
+				item = rejectCandidateForGeneratedShotContract(item, &reviewedArtifact, err)
+			} else {
+				reviewedArtifact.Metadata["generated_shot_candidate_schema"] = candidate.SchemaVersion
+				reviewedArtifact.Metadata["generated_shot_candidate_status"] = candidate.Status
+			}
+		}
 		review.Items = append(review.Items, item)
 		generationResult.DownloadedArtifacts[index] = reviewedArtifact
 		if item.MediaEligible {
@@ -72,6 +81,34 @@ func ReviewArkMediaCandidateAssets(source *model.ClientExecutionPackage, generat
 		review.Status = "rejected"
 	}
 	return review
+}
+
+func isNormalizedSeedanceCandidate(result model.ArkMediaGenerationResult, artifact model.ArtifactRef) bool {
+	return (result.Provider == "seedance" || result.Provider == "seedance-2.0") &&
+		artifactStringMetadata(artifact.Metadata, "artifact_variant") == "normalized"
+}
+
+func rejectCandidateForGeneratedShotContract(item model.CandidateAssetReviewItem, artifact *model.ArtifactRef, err error) model.CandidateAssetReviewItem {
+	item.Status = "rejected"
+	item.MediaEligible = false
+	item.ExplicitReviewRequired = false
+	item.PresentationOnly = false
+	item.Reasons = nil
+	item.Risks = append(item.Risks, "candidate failed the provider-neutral generated-shot contract")
+	item.Findings = append(item.Findings, candidateReviewFinding("generated_shot_candidate_invalid", err.Error(), artifact.ID))
+	if artifact.Metadata == nil {
+		artifact.Metadata = map[string]any{}
+	}
+	artifact.Metadata["generated_shot_candidate_status"] = "invalid"
+	artifact.Metadata["generated_shot_candidate_error"] = err.Error()
+	artifact.Metadata["approved_for_demo"] = false
+	artifact.Metadata["media_eligible"] = false
+	artifact.Metadata["explicit_review_required"] = false
+	artifact.Metadata["presentation_only"] = false
+	artifact.Metadata["include_in_demo"] = false
+	item.ApprovedMetadata["approved_for_demo"] = false
+	item.ApprovedMetadata["presentation_only"] = false
+	return item
 }
 
 func candidateAssetReviewPolicy() model.CandidateAssetReviewPolicy {

@@ -1164,11 +1164,23 @@ func summarizeExecutionAcceptance(state *exchangePackageState, result model.Reco
 	validation := summarizeExecutionValidation(result)
 	strictEvidence := validation != nil && validation.Status == "complete"
 	finalMP4 := false
+	dualDelivery := state != nil && model.RequiresDualMediaDelivery(&state.Payload)
+	hasMaster2K, hasDelivery1080, hasDeliverablesManifest := false, false, false
 	for _, asset := range result.GeneratedAssets {
 		if asset.Kind == "demo_video" && strings.EqualFold(asset.MimeType, "video/mp4") {
 			finalMP4 = true
-			break
 		}
+		switch strings.ToLower(strings.TrimSpace(asset.Kind)) {
+		case "final_video_final_master_2k":
+			hasMaster2K = true
+		case "final_video_final_delivery_1080p":
+			hasDelivery1080 = true
+		case "deliverables_manifest":
+			hasDeliverablesManifest = true
+		}
+	}
+	if dualDelivery {
+		finalMP4 = finalMP4 && hasMaster2K && hasDelivery1080 && hasDeliverablesManifest
 	}
 	status := "incomplete"
 	if result.Status == model.RecordingResultStatusFailed {

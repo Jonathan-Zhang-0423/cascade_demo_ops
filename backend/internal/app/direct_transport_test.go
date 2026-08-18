@@ -821,6 +821,9 @@ func uploadDirectAppFormalArtifacts(t *testing.T, gateway *directtransport.Gatew
 	t.Helper()
 	artifacts := []model.DirectArtifact{
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_video", "final.mp4", "video/mp4", "final_demo", "demo_video", mediaBytes),
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_master_2k", "final_master_2k.mp4", "video/mp4", "final_master_2k", "final_video_final_master_2k", mediaBytes),
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_delivery_1080p", "final_delivery_1080p.mp4", "video/mp4", "final_delivery_1080p", "final_video_final_delivery_1080p", mediaBytes),
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_deliverables_manifest", "deliverables_manifest.json", "application/json", "deliverables_manifest", "deliverables_manifest", []byte("{}\n")),
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_raw_recording", "recording.webm", "video/webm", "raw_recording", "raw_recording", mediaBytes),
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_trace", "trace.zip", "application/zip", "browser_trace", "browser_trace", mediaBytes),
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_screenshot", "stage.png", "image/png", "stage_evidence", "screenshot", mediaBytes),

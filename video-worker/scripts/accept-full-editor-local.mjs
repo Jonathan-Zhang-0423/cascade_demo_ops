@@ -91,9 +91,16 @@ const shots = steps.flatMap((step, stepIndex) => {
   });
 });
 
+// This is a local editor acceptance fixture, not a product-duration claim.
+// Its target must be derived from the actual selected source ranges so the
+// requirement gate can detect a real compositor defect instead of a fixture
+// that asks 27 seconds of captured evidence to impersonate a 60-second demo.
+const acceptanceTargetDurationMS = shots.reduce((total, shot) => total + (shot.source_time_range_ms[1] - shot.source_time_range_ms[0]), 0);
+if (acceptanceTargetDurationMS <= 0) throw new Error("full editor acceptance has no usable source duration");
+
 const request = {
   output_dir: outputDir,
-  graph: { id: catalog.workflow_graph_id, version: catalog.graph_version, assets: { target_duration_sec: Math.ceil(catalog.timeline.duration_ms / 1000), final_video_formats: ["mp4"] } },
+  graph: { id: catalog.workflow_graph_id, version: catalog.graph_version, assets: { target_duration_sec: Math.ceil(acceptanceTargetDurationMS / 1000), final_video_formats: ["mp4"] } },
   asset_timeline_catalog: catalog,
   edit_plan: {
     schema_version: "demoops.demo_edit_plan.v1",
@@ -105,7 +112,7 @@ const request = {
     script_order_policy: "preserve_required_step_order",
     locked_fields: lockedFields,
     model_editable_fields: [],
-    target_duration_ms: catalog.timeline.duration_ms,
+    target_duration_ms: acceptanceTargetDurationMS,
     shots,
     global_style: { color_grade: "neutral_enterprise", pacing: "dynamic", transition_style: "fade" },
     audio: { mode: "source", volume_percent: 85, split_points_ms: [10000, 20000], segment_settings: [{ start_ms: 10000, end_ms: 20000, mode: "mute", volume_percent: 0 }] },
@@ -126,13 +133,16 @@ const summary = {
   planned_operations: manifest.compositor?.planned_operations || [],
   applied_operations: manifest.compositor?.applied_operations || [],
   skipped_operations: manifest.compositor?.skipped_operations || [],
+  target_overlay_evidence_failures: report.actual?.target_overlay_evidence_failures || [],
+  target_overlay_evidence_root_causes: report.actual?.target_overlay_evidence_root_causes || [],
   step_count: shots.length,
   represented_step_ids: report.actual?.represented_step_ids || [],
   traceability: { catalog: catalogPath, request: path.join(outputDir, "full-editor-acceptance-request.json"), render_manifest: result.render_manifest_path, requirement_report: result.requirement_satisfaction_report_path },
+  acceptance_fixture: { source_duration_constrained: true, selected_source_duration_ms: acceptanceTargetDurationMS, catalog_declared_duration_ms: catalog.timeline.duration_ms },
   model_execution: request.model_execution,
 };
+await writeFile(path.join(outputDir, "full-editor-acceptance-summary.json"), JSON.stringify(summary, null, 2), "utf8");
 if (summary.status !== "satisfied") {
   throw new Error(`full editor acceptance requirement report is ${summary.status}`);
 }
-await writeFile(path.join(outputDir, "full-editor-acceptance-summary.json"), JSON.stringify(summary, null, 2), "utf8");
 console.log(JSON.stringify(summary, null, 2));

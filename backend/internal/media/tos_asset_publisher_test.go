@@ -25,6 +25,7 @@ func TestClassifyTOSPublishErrorRedactsProviderDetails(t *testing.T) {
 		{"TOS statuscode=403 AccessDenied ak=secret", "access_denied"},
 		{"NoSuchBucket: bucket missing", "bucket_not_found"},
 		{"dial tcp 1.2.3.4:443: connectex", "network_error"},
+		{"connectex: access to socket forbidden by its access permissions", "network_error"},
 		{"request timeout", "timeout"},
 		{"unexpected provider response", "provider_error"},
 	} {
@@ -87,5 +88,26 @@ func TestTOSAssetPublisherConfigFromEnvDoesNotRequireStaticPublicURL(t *testing.
 	config, configured := TOSAssetPublisherConfigFromEnv(func(key string) string { return values[key] })
 	if !configured || config.Prefix != "ark-media" || config.SignedURLTTL != time.Hour {
 		t.Fatalf("unexpected TOS config: %+v configured=%t", config, configured)
+	}
+}
+
+func TestTOSAssetPublisherRequiresRetentionAcknowledgement(t *testing.T) {
+	fake := &fakeTOSObjectClient{}
+	publisher := newTOSAssetPublisherForClient(TOSAssetPublisherConfig{Bucket: "cascade-ark-media-test"}, fake, func() time.Time {
+		return time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	})
+	retention := model.DefaultMediaDeliveryPreferences().TOSRetention
+	plan := model.ArkAssetPublicationPlan{SourcePackageID: "pkg_ack", TOSRetention: retention, Items: []model.ArkAssetPublicationItem{{
+		Ref: model.DirectorMaterialRef{ID: "source", URI: filepath.Join(t.TempDir(), "source.mp4"), MimeType: "video/mp4"}, Required: true, Status: "ready_after_publication",
+	}}}
+	result, err := publisher.PublishArkAssets(t.Context(), plan, model.DirectorMaterialRef{ID: "plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "blocked" || result.CanUseForRealCall || len(result.Blockers) != 1 || result.Blockers[0].Code != "tos_retention_client_ack_required" {
+		t.Fatalf("unexpected retention admission result: %+v", result)
+	}
+	if fake.putInput != nil {
+		t.Fatal("publisher uploaded bytes before retention acknowledgement")
 	}
 }

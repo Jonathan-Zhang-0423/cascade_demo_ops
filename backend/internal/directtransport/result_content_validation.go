@@ -27,12 +27,40 @@ func validateFormalResultArtifactContents(result model.RecordingResultPackage, s
 	if err := validateFormalResultExecutionBindings(result, source, uploaded); err != nil {
 		return err
 	}
+	if err := validateDualDeliveryArtifacts(result, source, uploaded); err != nil {
+		return err
+	}
 	if err := validateStageEventLogContents(result, source, uploaded); err != nil {
 		return err
 	}
 	if source.ExecutableScriptBundle != nil && source.ExecutableScriptBundle.ScriptManifest.Runtime == model.ExecutableScriptRuntimeBrowserAgentOutlineV1 {
 		if err := validateReplayManifestContents(result, source, jobID, uploaded); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateDualDeliveryArtifacts(result model.RecordingResultPackage, source model.ClientExecutionPackage, uploaded map[string]artifactRecord) error {
+	if !source.RecordingRunSpec.Outputs.FinalVideo || !model.RequiresDualMediaDelivery(&source) {
+		return nil
+	}
+	for _, requirement := range []struct {
+		kind string
+		mime string
+		name string
+	}{
+		{kind: "final_video_final_master_2k", mime: "video/mp4", name: "2K final MP4"},
+		{kind: "final_video_final_delivery_1080p", mime: "video/mp4", name: "1080p final MP4"},
+		{kind: "deliverables_manifest", mime: "application/json", name: "deliverables manifest"},
+	} {
+		artifact, ok := findResultArtifactByKind(result, requirement.kind)
+		if !ok {
+			return fmt.Errorf("result is missing required %s", requirement.name)
+		}
+		upload, ok := uploaded[artifact.ID]
+		if !ok || !strings.EqualFold(strings.TrimSpace(upload.Artifact.MimeType), requirement.mime) {
+			return fmt.Errorf("required %s was not uploaded with the expected MIME type", requirement.name)
 		}
 	}
 	return nil

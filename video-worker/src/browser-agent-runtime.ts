@@ -205,7 +205,7 @@ type BrowserAgentSession = {
 	maskSelectors: string[];
 	recordingSensitive: boolean;
 	recordTrace: boolean;
-	traceActive: boolean;
+  traceActive: boolean;
 	openedAtMS: number;
 	targetGeometryByArtifactID: Map<string, BrowserTargetGeometry>;
 };
@@ -260,6 +260,9 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	if (recordTrace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   const page = await context.newPage();
   const video = page.video?.();
+  // Playwright begins page video capture with this browser session. Keep this
+  // origin so every later target geometry can be mapped back to the raw WebM.
+  const openedAtMS = Date.now();
   const session: BrowserAgentSession = {
     id: sessionID,
     browser,
@@ -279,7 +282,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	recordingSensitive: request.recording_sensitive ?? true,
 	recordTrace,
 	traceActive: recordTrace,
-	openedAtMS: Date.now(),
+	openedAtMS,
 	targetGeometryByArtifactID: new Map(),
   };
   await page.route("**/*", async (route: any) => {
@@ -697,7 +700,13 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
       recordingPath,
       "video/webm",
       undefined,
-      { include_in_demo: true, redaction_applied: true, mask_selector_count: session.maskSelectors.length },
+      {
+        include_in_demo: true,
+        redaction_applied: true,
+        mask_selector_count: session.maskSelectors.length,
+        recording_timebase_schema_version: "demoops.browser_recording_timebase.v1",
+        recording_started_at_unix_ms: session.openedAtMS,
+      },
       session.recordingSensitive,
     ));
   }

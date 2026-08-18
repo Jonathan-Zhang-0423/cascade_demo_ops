@@ -644,6 +644,17 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		}
 		projectContext, err := s.service.SaveProjectInput(r.Context(), projectID, inputs)
 		writeBridgeValue(w, projectContext, err)
+	case r.Method == http.MethodGet && suffix == "/media-delivery-policy":
+		view, err := s.service.GetMediaDeliveryPolicy(r.Context(), projectID)
+		writeBridgeValue(w, view, err)
+	case r.Method == http.MethodPut && suffix == "/media-delivery-policy":
+		var preferences model.MediaDeliveryPreferences
+		if err := decodeJSON(r, &preferences); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		view, err := s.service.SaveMediaDeliveryPolicy(r.Context(), projectID, preferences)
+		writeBridgeValue(w, view, err)
 	case r.Method == http.MethodPost && suffix == "/workflow-graph/revisions":
 		var request GraphRevisionRequest
 		if err := decodeJSON(r, &request); err != nil {
