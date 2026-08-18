@@ -40,7 +40,7 @@ func main() {
 	baseURL := flag.String("gateway-url", env("CASCADE_DIRECT_WORKER_GATEWAY_URL", "http://127.0.0.1:18444"), "loopback gateway Worker API")
 	outputRoot := flag.String("output-root", env("CASCADE_DIRECT_WORKER_OUTPUT_ROOT", "/var/lib/cascade-browser-agent/worker"), "ephemeral Browser Agent output root")
 	poll := flag.Duration("poll-interval", envDuration("CASCADE_DIRECT_WORKER_POLL_INTERVAL", 2*time.Second), "job poll interval")
-	runTimeout := flag.Duration("run-timeout", envDuration("CASCADE_DIRECT_WORKER_RUN_TIMEOUT", 25*time.Minute), "maximum runtime per job")
+	runTimeout := flag.Duration("run-timeout", envDuration("CASCADE_DIRECT_WORKER_RUN_TIMEOUT", 45*time.Minute), "maximum runtime per job")
 	flag.Parse()
 	parsed, err := url.Parse(strings.TrimRight(*baseURL, "/"))
 	must(err)
@@ -140,13 +140,15 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 		fmt.Fprintln(os.Stderr, "execution failed job=", safeID(job.JobID), "class=browser_agent_execution_failed")
 		return
 	}
+	finalizeCtx, finalizeCancel := workerFinalizationContext(parent)
+	defer finalizeCancel()
 	for _, file := range files {
-		if err := w.uploadArtifact(ctx, job.JobID, file); err != nil {
+		if err := w.uploadArtifact(finalizeCtx, job.JobID, file); err != nil {
 			fmt.Fprintln(os.Stderr, "artifact upload failed job=", safeID(job.JobID), "class=artifact_upload_failed")
 			return
 		}
 	}
-	if err := w.submitResult(ctx, job.JobID, result); err != nil {
+	if err := w.submitResult(finalizeCtx, job.JobID, result); err != nil {
 		diagnosticCode := "none"
 		if result.FailureDiagnostic != nil {
 			diagnosticCode = safeID(result.FailureDiagnostic.Error.Code)
@@ -156,6 +158,13 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	}
 	completed = true
 	fmt.Fprintln(os.Stdout, "job completed job=", safeID(job.JobID), "artifacts=", len(files))
+}
+
+func workerFinalizationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	// Execution may legitimately consume its full budget while producing a
+	// structured failure package. Detach cancellation for the bounded result
+	// handoff so an expired browser context cannot make the diagnostic vanish.
+	return context.WithTimeout(context.WithoutCancel(parent), 2*time.Minute)
 }
 
 func (w *worker) release(ctx context.Context, jobID, reason string) error {
