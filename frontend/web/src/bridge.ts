@@ -1005,15 +1005,30 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return this.loadProject(projectID);
     },
     async loadProject(projectID) {
-      const cached = projects.get(projectID);
-      if (cached) {
-        return ok(cached);
-      }
-      const result = await requestLocal<LocalCascadeState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}`);
-      if (!result.ok || !result.data) {
-        return { ok: false, error: result.error ?? "未找到项目" };
-      }
-      const workspace = workspaceFromCascadeState(result.data, createProjectDraftWorkspace("product_demo"));
+	  let workspace = projects.get(projectID);
+	  if (!workspace) {
+		const result = await requestLocal<LocalCascadeState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}`);
+		if (!result.ok || !result.data) {
+		  return { ok: false, error: result.error ?? "未找到项目" };
+		}
+		workspace = workspaceFromCascadeState(result.data, createProjectDraftWorkspace("product_demo"));
+	  }
+	  const previewIncomplete = Boolean(workspace.executableScriptBundle) && (
+		!workspace.packagePreview.packageDigest?.trim() ||
+		!workspace.packagePreview.approvalSubjectDigest?.trim() ||
+		!workspace.packagePreview.confidenceAssessmentHash?.trim() ||
+		workspace.packagePreview.buildStatus !== "draft"
+	  );
+	  if (previewIncomplete) {
+		const buildResult = await requestLocal<LocalClientExecutionPackageBuild>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/client-execution-package`, {
+		  method: "POST",
+		  body: JSON.stringify({ org_id: orgID }),
+		});
+		if (buildResult.ok && buildResult.data) {
+		  cloudBuilds.set(workspace.id, buildResult.data);
+		  workspace = workspaceWithPreparedBuild(workspace, buildResult.data);
+		}
+	  }
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
