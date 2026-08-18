@@ -941,6 +941,7 @@ func demoIntentFromState(state *ProjectUnderstandingState) *model.DemoIntentSpec
 			Confidence:       0.78,
 		})
 	}
+	goals = appendDerivedProjectCreationGoals(goals, state)
 	for _, rawGoal := range requirementGoalTexts(state) {
 		goal := intentGoalFromText(rawGoal)
 		if goal.Label == "" {
@@ -988,6 +989,68 @@ func demoIntentFromState(state *ProjectUnderstandingState) *model.DemoIntentSpec
 		Confidence:      intentConfidence(goals),
 		CreatedAt:       now,
 	}
+}
+
+func appendDerivedProjectCreationGoals(goals []model.DemoIntentGoal, state *ProjectUnderstandingState) []model.DemoIntentGoal {
+	intentText := normalizeIntentText(strings.Join(requirementGoalTexts(state), " "))
+	appendGoal := func(goal model.DemoIntentGoal) {
+		if !containsIntentGoal(goals, goal.ID, goal.Label) {
+			goals = append(goals, goal)
+		}
+	}
+	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "新建名为", "创建名为", "new project", "create project") || intentProjectName(intentText) != "" {
+		appendGoal(model.DemoIntentGoal{
+			ID:               "intent_new_project_entry",
+			Label:            "进入新建项目流程",
+			Kind:             "business_action",
+			Required:         true,
+			BusinessCritical: true,
+			TargetKeywords:   []string{"新建项目", "创建项目", "new project", "create project", "button-new-project"},
+			PreferredAction:  "click",
+			SuccessState:     "项目创建表单或弹窗可见",
+			Confidence:       0.9,
+		})
+	}
+	if projectName := intentProjectName(intentText); projectName != "" {
+		appendGoal(model.DemoIntentGoal{
+			ID:               "intent_project_requirement_input",
+			Label:            "填写项目需求：" + projectName,
+			Kind:             "business_input",
+			Required:         true,
+			BusinessCritical: true,
+			TargetKeywords:   []string{"项目需求", "项目名称", "project idea", "project prompt", "project name", "input-project-idea", "idea", "prompt", projectName},
+			PreferredAction:  "fill",
+			SuccessState:     "项目需求已填写为用户指定内容",
+			Confidence:       0.9,
+		})
+	}
+	if containsAnyNormalized(intentText, "实际构建", "直接构建", "直接生成", "direct build", "build directly") {
+		appendGoal(model.DemoIntentGoal{
+			ID:               "intent_direct_build_mode",
+			Label:            "关闭计划模式并直接构建",
+			Kind:             "mode_selection",
+			Required:         true,
+			BusinessCritical: true,
+			TargetKeywords:   []string{"计划", "规划", "plan", "mode", "plan mode", "mode-plan", "button-mode-plan"},
+			PreferredAction:  "click",
+			SuccessState:     "计划优先模式已关闭",
+			Confidence:       0.9,
+		})
+	}
+	if containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "启动构建", "run build", "start build", "生成", "构建") {
+		appendGoal(model.DemoIntentGoal{
+			ID:               "intent_start_agent_build",
+			Label:            "提交并启动 Agent 实际构建",
+			Kind:             "business_submit",
+			Required:         true,
+			BusinessCritical: true,
+			TargetKeywords:   []string{"构建", "生成", "build", "generate", "submit", "button-create-project", "开始构建", "启动构建"},
+			PreferredAction:  "click",
+			SuccessState:     "Agent 实际构建过程开始",
+			Confidence:       0.9,
+		})
+	}
+	return goals
 }
 
 func featureTraceFromState(state *ProjectUnderstandingState) *model.FeatureTraceResult {

@@ -259,6 +259,52 @@ describe("interaction verifier safe state exploration", () => {
     expect(result.results.find((item) => item.selector === '[data-testid="button-create-project"]')).toMatchObject({ status: "verified", kind: "click" });
   }, 30_000);
 
+  it("continues from an applied login transition into an explicitly requested project-creation dialog", async () => {
+    server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/workspace") {
+        response.end(`<!doctype html><title>Workspace</title>
+          <main data-testid="dashboard-page"><div data-testid="card-project-old">Old Project</div></main>
+          <button data-testid="button-new-project" onclick="document.querySelector('#dialog').hidden=false">New Project</button>
+          <section id="dialog" data-testid="dialog-new-project" hidden>
+            <textarea data-testid="input-project-idea" placeholder="Describe your project idea"></textarea>
+            <button data-testid="button-mode-plan">Plan</button>
+            <button data-testid="button-create-project">Build</button>
+          </section>`);
+        return;
+      }
+      response.end(`<!doctype html><title>Login</title><button data-testid="login-submit" onclick="location.href='/workspace'">Sign in</button>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+    const productURL = `http://127.0.0.1:${address.port}`;
+
+    const result = await verifyInteractions({
+      product_url: `${productURL}/login`,
+      allowed_domains: ["127.0.0.1"],
+      timeout_ms: 15_000,
+      candidates: [{ id: "login", kind: "click", selector: "[data-testid='login-submit']", url: `${productURL}/login` }],
+      safe_state_transitions: [{ id: "login", label: "Sign in", kind: "click", selector: "[data-testid='login-submit']", url: `${productURL}/login` }],
+      intent_goals: [
+        { id: "new-project", label: "Create new project", kind: "click", keywords: ["new", "project"], required: true, business: true },
+        { id: "project-idea", label: "Enter project idea", kind: "fill", keywords: ["project", "idea"], required: true, business: true },
+        { id: "direct-build", label: "Disable plan mode", kind: "click", keywords: ["plan", "mode"], required: true, business: true },
+        { id: "start-build", label: "Start build", kind: "click", keywords: ["build"], required: true, business: true },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.diagnostics?.safe_state_transitions).toContain("applied:login");
+    expect(result.diagnostics?.safe_state_transitions).toContain("applied:discovered_new_project_entry");
+    for (const selector of ['[data-testid="input-project-idea"]', '[data-testid="button-mode-plan"]', '[data-testid="button-create-project"]']) {
+      expect(result.results.some((item) => item.selector === selector && item.status === "verified")).toBe(true);
+    }
+    expect(result.results.some((item) => /dashboard-page|card-project-old/.test(item.selector || ""))).toBe(false);
+    expect(result.results.some((item) => /dialog-new-project/.test(item.selector || ""))).toBe(false);
+  }, 30_000);
+
   it("binds a component login dialog without a native form to authentication provenance", async () => {
     server = createServer((request, response) => {
       response.setHeader("content-type", "text/html; charset=utf-8");

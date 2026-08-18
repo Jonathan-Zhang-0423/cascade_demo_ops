@@ -182,10 +182,8 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
     }
     const safeTransitions = await applySafeStateTransitions(page, request, timeout);
     diagnostics.safe_state_transitions = safeTransitions;
-    if (!safeTransitions.some((value) => value.startsWith("applied:"))) {
-      const discoveredTransition = await applyDiscoveredNewProjectTransition(page, request.intent_goals || [], request, timeout);
-      if (discoveredTransition) safeTransitions.push(discoveredTransition);
-    }
+    const discoveredTransition = await applyDiscoveredNewProjectTransition(page, request.intent_goals || [], request, timeout);
+    if (discoveredTransition) safeTransitions.push(discoveredTransition);
     if (safeTransitions.some((value) => value.startsWith("applied:"))) {
       currentURL = page.url();
       pageTitle = await page.title().catch(() => "");
@@ -301,6 +299,19 @@ async function applyDiscoveredNewProjectTransition(
   });
   if (!explicitlyRequested || isURLForbiddenByScope(page.url(), request)) return "";
 
+  const creationInputVisible = await page.locator("input, textarea").evaluateAll((elements: any[]) => elements.some((element) => {
+    const html = element as any;
+    const rect = html.getBoundingClientRect();
+    const style = (globalThis as any).getComputedStyle(html);
+    const semantic = String([
+      element.getAttribute("data-testid"), element.getAttribute("data-test"), element.getAttribute("data-cy"),
+      element.getAttribute("name"), element.getAttribute("aria-label"), element.getAttribute("placeholder"),
+    ].filter(Boolean).join(" ")).toLowerCase();
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" &&
+      /(project[-_ ]?(idea|name|prompt)|(idea|name|prompt)[-_ ]?project|项目.{0,4}(需求|名称|描述))/.test(semantic);
+  })).catch(() => false);
+  if (creationInputVisible) return "already_visible:new_project_creation";
+
   const controls = await page.locator("button, [role='button']").evaluateAll((elements: any[]) => elements.slice(0, 120).map((element) => {
     const html = element as any;
     const rect = html.getBoundingClientRect();
@@ -379,6 +390,7 @@ async function discoverBusinessActions(
 
   const scored = visibleControls
     .filter((control: any) => control.visible && !control.disabled)
+    .filter((control: any) => isSemanticallyInteractiveControl(control))
     .filter((control: any) => !isURLForbiddenByScope(control.attrs?.href, request))
     .map((control: any) => {
       const label = accessibleControlName(control);
@@ -422,6 +434,12 @@ async function discoverBusinessActions(
     }
     return result;
   });
+}
+
+function isSemanticallyInteractiveControl(control: any): boolean {
+  const tag = String(control?.tag || "").toLowerCase();
+  const role = String(control?.attrs?.role || "").toLowerCase();
+  return ["button", "a", "input", "textarea", "select"].includes(tag) || ["button", "link", "textbox", "combobox", "checkbox", "radio"].includes(role);
 }
 
 async function discoverBusinessActionsAcrossSafePages(

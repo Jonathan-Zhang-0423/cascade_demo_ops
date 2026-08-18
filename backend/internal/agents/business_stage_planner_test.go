@@ -135,6 +135,28 @@ func TestIntentGoalTreatsProjectRequirementInputAsFillWithSelectorAliases(t *tes
 	}
 }
 
+func TestDemoIntentDerivesAtomicProjectCreationGoalsFromCompoundLoginRequirement(t *testing.T) {
+	state := &ProjectUnderstandingState{Project: &model.ProjectContext{
+		ID:                 "project_atomic_intent",
+		ProductDescription: "通过安全凭据登录，新建名为“俄罗斯方块”的项目，要求 Agent 实际构建可运行代码。",
+	}}
+	intent := demoIntentFromState(state)
+	want := map[string]string{
+		"intent_new_project_entry":         "click",
+		"intent_project_requirement_input": "fill",
+		"intent_direct_build_mode":         "click",
+		"intent_start_agent_build":         "click",
+	}
+	for _, goal := range intent.Goals {
+		if action, ok := want[goal.ID]; ok && goal.PreferredAction == action && goal.BusinessCritical && goal.Required {
+			delete(want, goal.ID)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("compound login requirement did not produce all atomic project-creation goals: missing=%v goals=%+v", want, intent.Goals)
+	}
+}
+
 func TestBusinessStagePlannerDoesNotInferProjectNameFromDerivedIntentMetadata(t *testing.T) {
 	project := graphQualityProject()
 	project.ProductDescription = "演示登录，然后新建项目。"
