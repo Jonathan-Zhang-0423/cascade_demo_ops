@@ -64,7 +64,7 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 				return &OutlineConsistencyError{Code: "authentication_context_unverified", NodeID: step.NodeID, Reason: "does not prove an authentication page and password-bearing authentication form, or includes marketing email semantics"}
 			}
 			if !stageHasLoginSuccessValidation(step, stage, outline) {
-				return &OutlineConsistencyError{Code: "login_success_validation_missing", NodeID: step.NodeID, Reason: "requires both a post-login route assertion and an authenticated workspace element assertion"}
+				return &OutlineConsistencyError{Code: "login_success_validation_missing", NodeID: step.NodeID, Reason: "requires a post-login route assertion bound to formal browser-scan evidence, or that route plus a formally observed authenticated-page element assertion"}
 			}
 		}
 		if step.RuntimeAdaptive {
@@ -402,29 +402,50 @@ func stageHasVerifiedAuthenticationContext(step ScriptStep, stage StageApprovalS
 
 func stageHasLoginSuccessValidation(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) bool {
 	authRoute := firstNonEmptyOutlineRoute(step.PageTarget.URL, stage.EntryRoute, outline.Route)
-	hasPostLoginRoute := false
-	hasWorkspaceState := false
 	for _, validation := range step.Validations {
-		if !validation.Required {
+		if !validation.Required || validation.Kind != "url_matches" {
 			continue
 		}
-		if validation.Kind == "url_matches" {
-			target := strings.TrimSpace(validation.Target.URL)
-			if target == "" {
-				if expected, ok := validation.Expected.(string); ok {
-					target = strings.TrimSpace(expected)
-				}
+		target := strings.TrimSpace(validation.Target.URL)
+		if target == "" {
+			if expected, ok := validation.Expected.(string); ok {
+				target = strings.TrimSpace(expected)
 			}
-			if target != "" && authRoute != "" && !routesEquivalent(target, authRoute) {
-				hasPostLoginRoute = true
-			}
+		}
+		if target == "" || authRoute == "" || routesEquivalent(target, authRoute) {
 			continue
 		}
-		if validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != "" {
-			hasWorkspaceState = true
+		if evidenceRefsIncludeFormalBrowserScan(validation.EvidenceRefs) || stageHasFormallyObservedPostLoginElement(step, target) {
+			return true
 		}
 	}
-	return hasPostLoginRoute && hasWorkspaceState
+	return false
+}
+
+func evidenceRefsIncludeFormalBrowserScan(refs []EvidenceRef) bool {
+	for _, ref := range refs {
+		if ref.Kind == EvidenceKindBrowserScan && strings.TrimSpace(ref.ID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func stageHasFormallyObservedPostLoginElement(step ScriptStep, postLoginRoute string) bool {
+	for _, validation := range step.Validations {
+		if !validation.Required || validation.Kind == "url_matches" {
+			continue
+		}
+		for _, candidate := range validation.Target.SelectorAlternatives {
+			if candidate.SourceKind != "page_scan" || !SelectorCandidateHasFormalProvenance(candidate) {
+				continue
+			}
+			if candidate.ObservedURL != "" && routesEquivalent(candidate.ObservedURL, postLoginRoute) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func marketingAuthenticationName(value string) bool {

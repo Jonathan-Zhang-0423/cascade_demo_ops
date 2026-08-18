@@ -51,6 +51,21 @@ func TestValidateBrowserAgentOutlineConsistencyRejectsRuntimeAdaptiveLoginWithou
 	assertOutlineConsistencyCode(t, bundle, "login_entry_evidence_missing")
 }
 
+func TestValidateBrowserAgentOutlineConsistencyAcceptsEvidenceBoundPostLoginRouteWithoutInventedWorkspaceElement(t *testing.T) {
+	bundle := consistentOutlineBundleForTest()
+	bundle.PlanJSON.Steps[0].Validations = bundle.PlanJSON.Steps[0].Validations[:1]
+	if err := ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
+		t.Fatalf("evidence-bound post-login route should be sufficient without an invented workspace selector: %v", err)
+	}
+}
+
+func TestValidateBrowserAgentOutlineConsistencyRejectsUnprovenPostLoginRoute(t *testing.T) {
+	bundle := consistentOutlineBundleForTest()
+	bundle.PlanJSON.Steps[0].Validations = bundle.PlanJSON.Steps[0].Validations[:1]
+	bundle.PlanJSON.Steps[0].Validations[0].EvidenceRefs = nil
+	assertOutlineConsistencyCode(t, bundle, "login_success_validation_missing")
+}
+
 func TestValidateBrowserAgentOutlineConsistencyRejectsIncompleteRuntimeAdaptiveContract(t *testing.T) {
 	bundle := runtimeAdaptiveOutlineBundleForTest()
 	bundle.ScriptOutline.Stages[0].TargetContract = nil
@@ -174,7 +189,7 @@ func assertOutlineConsistencyCode(t *testing.T, bundle *ExecutableRecordingScrip
 }
 
 func consistentOutlineBundleForTest() *ExecutableRecordingScriptBundle {
-	evidence := []EvidenceRef{{ID: "ev_runtime_page", Kind: EvidenceKindWebScreenshot}}
+	evidence := []EvidenceRef{{ID: "ev_runtime_page", Kind: EvidenceKindBrowserScan}}
 	observedAt := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	candidate := SelectorCandidate{
 		Kind: "testid", Value: "login-password", EvidenceID: "ev_runtime_page", SourceKind: "page_scan", SourceDigest: "sha256:login-page",
@@ -188,7 +203,7 @@ func consistentOutlineBundleForTest() *ExecutableRecordingScriptBundle {
 		PageTarget: ScriptPageTarget{URL: "https://app.example/login"},
 		Action:     ScriptActionInstruction{Type: GraphActionFill, SecretRef: "secret://demo/password", Target: target},
 		Validations: []ValidationSpec{
-			{ID: "validate_workspace_route", Kind: "url_matches", Target: ActionTarget{URL: "https://app.example/workspace"}, Expected: "/workspace", Required: true},
+			{ID: "validate_workspace_route", Kind: "url_matches", Target: ActionTarget{URL: "https://app.example/workspace"}, Expected: "/workspace", Required: true, EvidenceRefs: evidence},
 			{ID: "validate_workspace_root", Kind: "element_visible", Target: ActionTarget{Selector: "[data-testid='workspace-root']"}, Required: true},
 		},
 		EvidenceRefs: evidence,
