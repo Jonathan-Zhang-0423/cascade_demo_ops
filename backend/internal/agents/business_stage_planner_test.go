@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -217,6 +218,90 @@ func TestBusinessTargetRankPrefersSpecificControlOverTextAggregatingContainer(t 
 	}
 	if businessTargetRank(container) >= businessTargetRank(button) {
 		t.Fatalf("a text-aggregating workspace container must not outrank the concrete new-project button: container=%d button=%d", businessTargetRank(container), businessTargetRank(button))
+	}
+}
+
+func TestNewProjectEntryPrefersStableButtonOverExistingProjectNamedNewProject(t *testing.T) {
+	stage := model.BusinessStage{
+		ID:   "business_stage_new_project_entry",
+		Kind: model.BusinessStageKindBusinessAction,
+		Action: model.BusinessActionSemantics{
+			Type: string(model.GraphActionClick), Label: "点击新建项目入口", NonDestructive: true,
+		},
+		Targets: []model.BusinessTargetCandidate{
+			formalPageScanBusinessTarget("card-project-rh1fgnvomr6qbe7n", "click", "button", "03 新建项目"),
+			formalPageScanBusinessTarget("text-project-name-rh1fgnvomr6qbe7n", "click", "button", "新建项目"),
+			formalPageScanBusinessTarget("button-new-project", "click", "button", "新建项目"),
+		},
+	}
+
+	target := businessStageActionTarget(stage, "https://cascadeai.cn/app")
+	if target.TestID != "button-new-project" || target.Selector != "[data-testid='button-new-project']" {
+		t.Fatalf("existing project entities must not replace the stable new-project entry: %+v", target)
+	}
+}
+
+func TestNewProjectResultRejectsExistingProjectNameAndUsesOpenedFormInput(t *testing.T) {
+	stage := model.BusinessStage{
+		ID:   "business_stage_new_project_entry",
+		Kind: model.BusinessStageKindBusinessAction,
+		Action: model.BusinessActionSemantics{
+			Type: string(model.GraphActionClick), Label: "点击新建项目入口", SuccessState: "新建项目表单可见",
+		},
+		Targets: []model.BusinessTargetCandidate{
+			formalPageScanBusinessTarget("text-project-name-rh1fgnvomr6qbe7n", "click", "button", "新建项目"),
+			formalPageScanBusinessTarget("button-new-project", "click", "button", "新建项目"),
+			formalPageScanBusinessTarget("input-project-idea", "fill", "textbox", "项目名称"),
+		},
+	}
+
+	validation := businessStageValidation(stage, model.GraphActionClick, businessStageActionTarget(stage, "https://cascadeai.cn/app"), true)
+	if validation.Kind != "element_visible" || validation.Target.TestID != "input-project-idea" || validation.Target.Selector != "[data-testid='input-project-idea']" {
+		t.Fatalf("new-project validation must use the opened form input, got %+v", validation)
+	}
+}
+
+func TestVerifierSafeStateTransitionUsesOnlyStableNewProjectEntry(t *testing.T) {
+	project := &model.ProjectContext{ID: "project_safe_transition", ProductURL: "https://cascadeai.cn/app"}
+	stage := model.BusinessStage{
+		ID:   "business_stage_new_project_entry",
+		Kind: model.BusinessStageKindBusinessAction,
+		Action: model.BusinessActionSemantics{
+			Type: string(model.GraphActionClick), Label: "点击新建项目入口", NonDestructive: true,
+		},
+		EntryRoute: "https://cascadeai.cn/app",
+		Targets: []model.BusinessTargetCandidate{
+			formalPageScanBusinessTarget("card-project-rh1fgnvomr6qbe7n", "click", "button", "03 新建项目"),
+			formalPageScanBusinessTarget("button-new-project", "click", "button", "新建项目"),
+		},
+	}
+	for index := range stage.Targets {
+		stage.Targets[index].URL = project.ProductURL
+	}
+	intelligence := &model.ProjectIntelligencePack{
+		RunIntentScope:    &model.RunIntentScope{ProductOrigin: "https://cascadeai.cn", ProductURL: project.ProductURL, AllowedOrigins: []string{"https://cascadeai.cn"}},
+		BusinessStagePlan: &model.BusinessStagePlan{Stages: []model.BusinessStage{stage}},
+	}
+
+	transitions := verifierSafeStateTransitions(project, intelligence)
+	if len(transitions) != 1 || transitions[0].Selector != "[data-testid='button-new-project']" {
+		t.Fatalf("safe exploration selected a stale project entity: %+v", transitions)
+	}
+}
+
+func formalPageScanBusinessTarget(testID string, kind string, role string, accessibleName string) model.BusinessTargetCandidate {
+	now := time.Date(2026, 8, 18, 8, 48, 10, 0, time.UTC)
+	evidence := model.EvidenceRef{ID: "ev_" + testID, Kind: model.EvidenceKindBrowserScan, Confidence: 0.9}
+	selector := "[data-testid='" + testID + "']"
+	return model.BusinessTargetCandidate{
+		ID: "target_" + testID, Label: accessibleName, Kind: kind, Selector: selector, TestID: testID,
+		SelectorScore: 100, IsVerified: true, VerificationStatus: "verified", VerificationSource: "playwright_readonly_scan",
+		EvidenceRefs: []model.EvidenceRef{evidence},
+		Alternatives: []model.SelectorCandidate{{
+			Kind: "testid", Value: testID, EvidenceID: evidence.ID, SourceKind: "page_scan", SourceDigest: "sha256:" + testID,
+			ObservedRole: role, ObservedAccessibleName: accessibleName, ObservedURL: "https://cascadeai.cn/app", ObservedAt: &now,
+			EvidenceRefs: []model.EvidenceRef{evidence},
+		}},
 	}
 }
 

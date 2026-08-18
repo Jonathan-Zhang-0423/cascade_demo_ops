@@ -645,12 +645,24 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 		target.Text = stage.Action.Label
 		return target
 	}
-	best := stage.Targets[0]
-	for _, candidate := range stage.Targets {
-		if businessTargetRank(candidate) > businessTargetRank(best) {
-			best = candidate
+	bestIndex := -1
+	for index, candidate := range stage.Targets {
+		if !businessTargetEligibleForStageAction(stage, candidate) {
+			continue
+		}
+		if bestIndex < 0 || businessStageTargetRank(stage, candidate) > businessStageTargetRank(stage, stage.Targets[bestIndex]) {
+			bestIndex = index
 		}
 	}
+	if bestIndex < 0 {
+		// Fail closed when a business stage has only similarly named containers,
+		// stale entities, or post-action result controls. Runtime repair may bind
+		// a concrete action, but the App must not promote one of those guesses.
+		target.Label = stage.Action.Label
+		target.Text = stage.Action.Label
+		return target
+	}
+	best := stage.Targets[bestIndex]
 	// Session setup has two distinct routes: the authentication entry and the
 	// authenticated workspace observed after submission. The action must start
 	// from the former; the latter belongs to the success validation contract.
@@ -682,8 +694,13 @@ func businessTargetRank(candidate model.BusinessTargetCandidate) int {
 		rank += 100
 	}
 	semanticHandle := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
-	if containsAnyNormalized(semanticHandle, "button-", "input-", "new-project", "create-project", "project-name", "build-mode", "start-build", "create-project") {
+	if containsAnyNormalized(semanticHandle, "button-", "input-", "new-project", "create-project", "build-mode", "start-build") {
 		rank += 350
+	}
+	if containsAnyNormalized(semanticHandle, "card-project-", "text-project-name-", "emoji-project-", "project-menu-", "rename-project", "delete-project") {
+		// These handles identify an existing project entity, not a creation
+		// control or the result of opening the creation flow.
+		rank -= 2000
 	}
 	if containsAnyNormalized(semanticHandle, "workspace", "project-list", "container", "page-root", "app-root") || selectorLooksGeneric(candidate.Selector) {
 		rank -= 500
@@ -700,6 +717,50 @@ func businessTargetRank(candidate model.BusinessTargetCandidate) int {
 		}
 	}
 	return rank
+}
+
+func businessStageTargetRank(stage model.BusinessStage, candidate model.BusinessTargetCandidate) int {
+	rank := businessTargetRank(candidate)
+	if isNewProjectEntryStage(stage) && isExplicitNewProjectEntryCandidate(candidate) {
+		rank += 3000
+	}
+	return rank
+}
+
+func businessTargetEligibleForStageAction(stage model.BusinessStage, candidate model.BusinessTargetCandidate) bool {
+	if !isNewProjectEntryStage(stage) {
+		return true
+	}
+	return isExplicitNewProjectEntryCandidate(candidate)
+}
+
+func isNewProjectEntryStage(stage model.BusinessStage) bool {
+	return stage.Kind == model.BusinessStageKindBusinessAction && strings.TrimPrefix(stage.ID, "business_stage_") == "new_project_entry"
+}
+
+func isExplicitNewProjectEntryCandidate(candidate model.BusinessTargetCandidate) bool {
+	if graphActionTypeFromKind(candidate.Kind, candidate.Selector) != model.GraphActionClick {
+		return false
+	}
+	structure := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
+	if containsAnyNormalized(structure,
+		"card-project-", "text-project-name-", "emoji-project-", "project-menu-",
+		"dashboard-page", "project-list", "rename-project", "delete-project",
+	) {
+		return false
+	}
+	if containsAnyNormalized(structure,
+		"button-new-project", "new-project-button", "new-project-trigger", "create-project-trigger",
+	) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(candidate.TestID), "new-project") {
+		return true
+	}
+	semantics := strings.ToLower(strings.Join([]string{candidate.Label, candidate.Text, candidate.Role}, " "))
+	return containsAnyNormalized(structure, "button") && containsAnyNormalized(semantics,
+		"new project", "create project", "新建项目", "创建项目", "新增项目",
+	)
 }
 
 func selectorCandidateMatchesValue(candidate model.SelectorCandidate, selector string) bool {
@@ -865,21 +926,47 @@ func businessStageCompletionTarget(stage model.BusinessStage) (model.ActionTarge
 }
 
 func businessStageResultTarget(stage model.BusinessStage) model.ActionTarget {
-	for _, candidate := range stage.Targets {
-		structure := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
-		semantics := strings.ToLower(strings.Join([]string{candidate.Label, candidate.Text}, " "))
-		explicitResultHandle := strings.Contains(structure, "dialog") || strings.Contains(structure, "modal") || strings.Contains(structure, "project-idea") || strings.Contains(structure, "project-name")
-		verifiedInputResult := model.GraphActionType(candidate.Kind) == model.GraphActionFill && !selectorLooksGeneric(candidate.Selector) && containsAnyNormalized(semantics, "项目名称", "项目名", "project name", "project idea")
-		if explicitResultHandle || verifiedInputResult {
-			selector := selectorForBusinessTarget(candidate)
-			testID := ""
-			if selector != "" {
-				testID = candidate.TestID
-			}
-			return model.ActionTarget{Selector: selector, Role: candidate.Role, Text: candidate.Text, Label: candidate.Label, TestID: testID, ComponentRef: candidate.ComponentRef, SelectorAlternatives: formalBusinessSelectorAlternatives(candidate.Alternatives), EvidenceRefs: candidate.EvidenceRefs}
+	bestIndex := -1
+	for index, candidate := range stage.Targets {
+		if !isExplicitNewProjectResultCandidate(candidate) {
+			continue
+		}
+		if bestIndex < 0 || businessTargetRank(candidate) > businessTargetRank(stage.Targets[bestIndex]) {
+			bestIndex = index
 		}
 	}
+	if bestIndex >= 0 {
+		candidate := stage.Targets[bestIndex]
+		selector := selectorForBusinessTarget(candidate)
+		if selector == "" {
+			return model.ActionTarget{}
+		}
+		return model.ActionTarget{Selector: selector, Role: candidate.Role, Text: candidate.Text, Label: candidate.Label, TestID: candidate.TestID, ComponentRef: candidate.ComponentRef, SelectorAlternatives: formalBusinessSelectorAlternatives(candidate.Alternatives), EvidenceRefs: candidate.EvidenceRefs}
+	}
 	return model.ActionTarget{}
+}
+
+func isExplicitNewProjectResultCandidate(candidate model.BusinessTargetCandidate) bool {
+	structure := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
+	if containsAnyNormalized(structure,
+		"card-project-", "text-project-name-", "emoji-project-", "project-menu-",
+		"dashboard-page", "project-list", "button-new-project", "rename-project", "delete-project",
+	) {
+		return false
+	}
+	if containsAnyNormalized(structure, "dialog-new-project", "new-project-dialog", "create-project-dialog", "new-project-modal", "create-project-modal") {
+		return true
+	}
+	if graphActionTypeFromKind(candidate.Kind, candidate.Selector) != model.GraphActionFill || selectorLooksGeneric(candidate.Selector) {
+		return false
+	}
+	if containsAnyNormalized(structure,
+		"input-project-idea", "project-idea", "input-project-name", "project-name-input", "new-project-name", "create-project-name",
+	) {
+		return true
+	}
+	semantics := strings.ToLower(strings.Join([]string{candidate.Label, candidate.Text, candidate.Role}, " "))
+	return containsAnyNormalized(semantics, "项目名称", "项目名", "project name", "project idea")
 }
 
 func businessStageStateAssertionKind(stage model.BusinessStage, action model.GraphActionType) string {

@@ -634,12 +634,13 @@ func (s businessTargetSource) resultTargetsForStage(spec stageSpec) []model.Busi
 	}
 	out := []model.BusinessTargetCandidate{}
 	for _, action := range s.verifiedPlan.Actions {
-		text := strings.Join([]string{action.ID, action.Label, action.Selector, action.ComponentRef, action.ExpectedOutcome, action.SuccessState}, " ")
-		if action.VerificationStatus != "verified" || !containsAnyNormalized(text,
-			"dialog-new-project", "new-project-dialog", "create-project-dialog", "input-project-idea", "project-idea", "项目弹窗", "项目表单", "项目名称") {
+		if action.VerificationStatus != "verified" {
 			continue
 		}
 		candidate := businessTargetFromVerifiedAction(action)
+		if !isExplicitNewProjectResultCandidate(candidate) {
+			continue
+		}
 		candidate.ID = "result_" + candidate.ID
 		out = append(out, candidate)
 	}

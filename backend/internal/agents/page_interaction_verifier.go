@@ -239,11 +239,20 @@ func verifierSafeStateTransitions(project *model.ProjectContext, intelligence *m
 			containsAnyNormalized(semanticText, "delete", "remove", "destroy", "payment", "pay", "billing", "purchase", "refund", "permission", "role", "api key", "secret", "token", "删除", "移除", "销毁", "支付", "购买", "退款", "账单", "权限", "角色", "密钥", "令牌") {
 			continue
 		}
-		for _, target := range stage.Targets {
-			if strings.TrimSpace(target.Selector) == "" || !isURLAllowedByRunScope(intelligence.RunIntentScope, target.URL) ||
-				isControlPlaneSignal(intelligence.RunIntentScope, target.URL, target.Label, target.Selector) {
+		bestIndex := -1
+		for index, target := range stage.Targets {
+			targetURL := firstNonEmpty(target.URL, stage.EntryRoute, project.ProductURL)
+			if strings.TrimSpace(target.Selector) == "" || !isExplicitNewProjectEntryCandidate(target) ||
+				!isURLAllowedByRunScope(intelligence.RunIntentScope, targetURL) ||
+				isControlPlaneSignal(intelligence.RunIntentScope, targetURL, target.Label, target.Selector) {
 				continue
 			}
+			if bestIndex < 0 || businessStageTargetRank(stage, target) > businessStageTargetRank(stage, stage.Targets[bestIndex]) {
+				bestIndex = index
+			}
+		}
+		if bestIndex >= 0 {
+			target := stage.Targets[bestIndex]
 			return []interactionVerifierItem{{
 				ID: stage.ID, IntentGoalID: target.IntentGoalID, Label: firstNonEmpty(target.Label, stage.Action.Label),
 				Kind: string(model.GraphActionClick), Selector: target.Selector, URL: firstNonEmpty(target.URL, stage.EntryRoute, project.ProductURL),
