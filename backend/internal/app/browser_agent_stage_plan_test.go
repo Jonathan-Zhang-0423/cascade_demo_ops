@@ -156,6 +156,30 @@ func TestBrowserAgentReadinessDetectsApprovedActionIdentityReuse(t *testing.T) {
 	}
 }
 
+func TestBrowserAgentReadinessAcceptsIndependentResultComponentWithSharedStageEvidence(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	stage := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1]
+	stage.StageKind = model.BusinessStageKindBusinessAction
+	stage.TargetContract.ComponentRef = "new-project-action"
+	step := &pkg.ExecutableScriptBundle.PlanJSON.Steps[1]
+	step.Action.Type = model.GraphActionClick
+	step.Action.Target = model.ActionTarget{
+		Selector: `[data-testid="button-new-project"]`, TestID: "button-new-project", EvidenceRefs: stage.TargetContract.EvidenceRefs,
+	}
+	step.Validations = []model.ValidationSpec{{
+		ID: "after_click", Kind: "element_visible", Target: model.ActionTarget{Selector: `[data-testid="dialog-new-project"]`, TestID: "dialog-new-project"}, Required: true,
+	}}
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[1].Components = []model.BrowserAgentComponentTarget{
+		{ComponentRef: "new-project-action", Selector: `[data-testid="button-new-project"]`, TestID: "button-new-project", EvidenceRefs: stage.TargetContract.EvidenceRefs},
+		{Selector: `[data-testid="dialog-new-project"]`, TestID: "dialog-new-project", EvidenceRefs: stage.TargetContract.EvidenceRefs},
+	}
+
+	report := browserAgentReadiness(&pkg)
+	if browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_approved_action_evidence") {
+		t.Fatalf("independent result-state component was misclassified as the approved action: %+v", report)
+	}
+}
+
 func TestBrowserAgentReadinessRejectsDeclaredInputWithoutFillAction(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	pkg.ProjectContextSummary.Goals = []model.DemoGoal{{

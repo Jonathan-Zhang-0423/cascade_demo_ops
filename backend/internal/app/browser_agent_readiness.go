@@ -173,7 +173,10 @@ func browserAgentOutcomeUsesApprovedActionEvidence(approved model.StageApprovalS
 		// interaction target. Treat that as evidence-bound action identity for
 		// diagnostics, but never mutate or execute the validation target.
 		for _, component := range outline.Components {
-			if component.ComponentRef != "" && approved.TargetContract.ComponentRef != "" && component.ComponentRef != approved.TargetContract.ComponentRef {
+			// Only a component explicitly bound to the approved action contract
+			// can expand action identity. Result-state components intentionally
+			// have no action component_ref and may share the stage evidence set.
+			if approved.TargetContract.ComponentRef != "" && component.ComponentRef != approved.TargetContract.ComponentRef {
 				continue
 			}
 			if len(actionEvidence) == 0 || !evidenceRefsOverlap(actionEvidence, evidenceIDSet(component.EvidenceRefs)) {
