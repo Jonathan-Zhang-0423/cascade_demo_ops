@@ -540,14 +540,6 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	}
 	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup || stage.Kind == model.BusinessStageKindFinalObserve
 	validations := []model.ValidationSpec{businessStageValidation(stage, actionType, target, required)}
-	if stage.Kind == model.BusinessStageKindSessionSetup {
-		validations = append(validations, model.ValidationSpec{
-			ID: "validate_authenticated_workspace_" + stage.ID, Kind: "element_visible",
-			Target:    model.ActionTarget{Role: "main", Label: firstNonEmpty(stage.Action.SuccessState, "已认证工作区")},
-			Assertion: "登录后必须出现已认证工作区标识", Expected: true, Severity: "blocking", Required: true,
-			EvidenceRefs: stage.EvidenceRefs,
-		})
-	}
 	metadata := map[string]any{
 		"business_stage_id":           stage.ID,
 		"business_stage_kind":         string(stage.Kind),

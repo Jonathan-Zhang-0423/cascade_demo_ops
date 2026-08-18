@@ -76,6 +76,18 @@ func TestSessionSetupValidationUsesPostLoginStateNotEmailActionTarget(t *testing
 	}
 }
 
+func TestSessionSetupGraphDoesNotInventAnUnscannedWorkspaceElement(t *testing.T) {
+	stage := model.BusinessStage{
+		ID: "business_stage_session_setup", Kind: model.BusinessStageKindSessionSetup,
+		EntryRoute: "/login", ExpectedRouteAfterAction: "/app",
+		Action: model.BusinessActionSemantics{SuccessState: "登录完成，页面进入工作台或目标业务页面。", NonDestructive: true},
+	}
+	node := graphNodeFromBusinessStage(&model.ProjectContext{}, stage, "https://product.example/login", "")
+	if len(node.Validations) != 1 || node.Validations[0].Kind != "url_matches" || node.Validations[0].Target.URL != "/app" {
+		t.Fatalf("session setup must keep only the evidence-bound post-login route validation: %+v", node.Validations)
+	}
+}
+
 func TestSessionSetupActionTargetKeepsAuthenticationEntryRoute(t *testing.T) {
 	stage := model.BusinessStage{
 		ID:                       "business_stage_session_setup",
