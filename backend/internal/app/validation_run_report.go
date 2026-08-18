@@ -82,6 +82,7 @@ func BuildValidationRunReport(result model.RecordingResultPackage, pkg model.Cli
 			}
 			stage.StageID = manifestStage.StageID
 			stage.Order = manifestStage.Order
+			stage.EvidenceArtifactIDs = append([]string{}, manifestStage.EvidenceArtifactIDs...)
 			stage.ActionDefinitionEvidenceIDs = append([]string{}, manifestStage.ActionDefinitionEvidenceIDs...)
 			stage.BeforeScreenshotArtifactIDs = append([]string{}, manifestStage.BeforeScreenshotArtifactIDs...)
 			stage.AfterScreenshotArtifactIDs = append([]string{}, manifestStage.AfterScreenshotArtifactIDs...)

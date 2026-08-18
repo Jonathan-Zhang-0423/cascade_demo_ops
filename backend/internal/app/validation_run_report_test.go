@@ -98,13 +98,13 @@ func TestBuildValidationRunReportCopiesStructuredStageEvidenceFromReplayManifest
 		ValidationReports: []model.ValidationReport{{SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "vr-1", RunID: "run-1", SourcePackageID: "pkg-1", SourceBundleHashSHA256: "bundle-1", PolicyHashSHA256: "policy-1", Phase: model.ValidationPhaseRuntimeStage, NodeID: "node-1", StageID: "stage-1", Decision: model.ValidationDecisionContinue, EvidenceQuality: model.RuntimeObservationActualBrowser, CreatedAt: now}}}
 	pkg := model.ClientExecutionPackage{PackageID: "pkg-1", ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bundle-1", BrowserAgentContractHashSHA256: "policy-1"}}}
 	manifest := model.ReplayManifest{ManifestID: "manifest-run-1", RunID: "run-1", PackageID: "pkg-1", BundleHashSHA256: "bundle-1", PolicyHashSHA256: "policy-1", Status: "success", FinalDecision: model.ValidationDecisionContinue, CreatedAt: now,
-		Stages: []model.ReplayManifestStage{{NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed", ActionDefinitionEvidenceIDs: []string{"approved-action"}, BeforeScreenshotArtifactIDs: []string{"shot-before"}, AfterScreenshotArtifactIDs: []string{"shot-after"}, StageEventIDs: []string{"event-1"}, TraceArtifactIDs: []string{"trace-1"}}}}
+		Stages: []model.ReplayManifestStage{{NodeID: "node-1", StageID: "stage-1", Order: 1, Status: "passed", EvidenceArtifactIDs: []string{"outcome-shot"}, ActionDefinitionEvidenceIDs: []string{"approved-action"}, BeforeScreenshotArtifactIDs: []string{"shot-before"}, AfterScreenshotArtifactIDs: []string{"shot-after"}, StageEventIDs: []string{"event-1"}, TraceArtifactIDs: []string{"trace-1"}}}}
 	report, err := BuildValidationRunReport(result, pkg, manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stage := report.Stages[0]
-	if len(stage.ActionDefinitionEvidenceIDs) != 1 || len(stage.BeforeScreenshotArtifactIDs) != 1 || len(stage.AfterScreenshotArtifactIDs) != 1 || len(stage.StageEventIDs) != 1 || len(stage.TraceArtifactIDs) != 1 {
+	if len(stage.EvidenceArtifactIDs) != 1 || stage.EvidenceArtifactIDs[0] != "outcome-shot" || len(stage.ActionDefinitionEvidenceIDs) != 1 || len(stage.BeforeScreenshotArtifactIDs) != 1 || len(stage.AfterScreenshotArtifactIDs) != 1 || len(stage.StageEventIDs) != 1 || len(stage.TraceArtifactIDs) != 1 {
 		t.Fatalf("structured replay evidence was not copied into the validation report: %+v", stage)
 	}
 }

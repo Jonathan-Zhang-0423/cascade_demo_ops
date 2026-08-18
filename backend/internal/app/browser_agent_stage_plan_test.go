@@ -431,6 +431,26 @@ func TestBrowserAgentStageOrchestratorAppliesOnlyWorkerVerifiedSelectorAlternati
 	}
 }
 
+func TestCurrentStageSelectorFallsBackToApprovedSemanticLocator(t *testing.T) {
+	stage := BrowserAgentRuntimeStage{
+		TargetContract: model.BrowserAgentTargetContract{SemanticID: "invite-member", ComponentRef: "component:invite-button"},
+		Components: []model.BrowserAgentComponentTarget{{
+			ComponentRef: "component:invite-button",
+			Role:         "button",
+			Name:         "Invite teammate",
+			TestID:       "invite-member",
+		}},
+	}
+	if got := currentStageSelector(stage); got != "testid:invite-member" {
+		t.Fatalf("approved test id should identify the pre-repair locator, got %q", got)
+	}
+
+	stage.Components[0].TestID = ""
+	if got := currentStageSelector(stage); got != "role:button:name:Invite teammate" {
+		t.Fatalf("approved role and name should identify the pre-repair locator, got %q", got)
+	}
+}
+
 func TestBrowserAgentStageOrchestratorStopsWithoutWorkerVerifiedAlternative(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	plan, err := compileBrowserAgentRuntimePlan(&pkg)

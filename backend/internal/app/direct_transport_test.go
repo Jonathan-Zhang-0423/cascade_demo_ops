@@ -89,7 +89,7 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	}
 	artifactBytes := bytes.Repeat([]byte("Browser Agent real worker bytes;"), model.DirectArtifactChunkBytes/16+1)
 	artifacts := uploadDirectAppFormalArtifacts(t, gateway, claimed, artifactBytes)
-	result := directAppTestResult(claimed, artifacts)
+	result := directAppTestResult(t, claimed, artifacts)
 	putDirectWorkerJSON(t, gateway.WorkerHandler(), http.MethodPut, "/v1/worker/jobs/"+claimed.JobID+"/result", result, http.StatusOK)
 
 	status, err := service.GetDirectExecutionStatus(t.Context(), state.ProjectID, claimed.JobID)
@@ -767,7 +767,8 @@ func putDirectWorkerJSON(t *testing.T, handler http.Handler, method, path string
 		t.Fatalf("worker request %s status %d: %s", path, response.Code, response.Body.String())
 	}
 }
-func directAppTestResult(job directtransport.WorkerJob, artifacts []model.DirectArtifact) model.RecordingResultPackage {
+func directAppTestResult(t *testing.T, job directtransport.WorkerJob, artifacts []model.DirectArtifact) model.RecordingResultPackage {
+	t.Helper()
 	now := time.Now().UTC()
 	steps := make([]model.StepResult, 0, len(job.Package.ExecutableScriptBundle.PlanJSON.Steps))
 	reports := make([]model.ValidationReport, 0, len(job.Package.ExecutableScriptBundle.PlanJSON.Steps))
@@ -800,7 +801,7 @@ func directAppTestResult(job directtransport.WorkerJob, artifacts []model.Direct
 			stageLog = &copyRef
 		}
 	}
-	return model.RecordingResultPackage{
+	result := model.RecordingResultPackage{
 		ResultID: "result_" + job.JobID, SourcePackageID: job.Package.PackageID, CloudJobID: job.JobID,
 		SchemaVersion: model.RecordingResultPackageSchemaVersion, Status: model.RecordingResultStatusGenerated,
 		ExecutionTrace: &model.ExecutionTrace{ID: "trace_" + job.JobID, WorkflowGraphID: job.Package.WorkflowGraph.ID, GraphVersion: job.Package.WorkflowGraph.Version, PassRate: 1, StepResults: steps, Artifacts: refs},
@@ -811,6 +812,13 @@ func directAppTestResult(job directtransport.WorkerJob, artifacts []model.Direct
 			AssetRefs:        descriptors, RecipientKind: model.ResultRecipientAppInstallation, RecipientKeyID: "direct-lease", EncryptionAlg: model.DirectTransportCryptoSuite, AckRequired: true, ExpiresAt: now.Add(time.Hour),
 		}, CreatedAt: now,
 	}
+	manifest := directAppReplayManifest(job, result)
+	validationRunReport, err := BuildValidationRunReport(result, job.Package, manifest)
+	if err != nil {
+		t.Fatalf("direct App test fixture validation run report: %v", err)
+	}
+	result.ValidationRunReport = &validationRunReport
+	return result
 }
 
 func uploadDirectAppFormalArtifacts(t *testing.T, gateway *directtransport.Gateway, job directtransport.WorkerJob, mediaBytes []byte) []model.DirectArtifact {
@@ -825,7 +833,7 @@ func uploadDirectAppFormalArtifacts(t *testing.T, gateway *directtransport.Gatew
 	}
 	eventBytes := directAppStageEventLogBytes(t, job)
 	artifacts = append(artifacts, uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_events", "events.jsonl", "application/x-ndjson", "stage_event_log", "browser_agent_stage_event_log", eventBytes))
-	provisional := directAppTestResult(job, artifacts)
+	provisional := directAppTestResult(t, job, artifacts)
 	manifestBytes := directAppReplayManifestBytes(t, job, provisional)
 	artifacts = append(artifacts, uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_replay_manifest", "replay-manifest.json", "application/json", "replay_manifest", "replay_manifest", manifestBytes))
 	return artifacts
@@ -866,6 +874,15 @@ func directAppStageEventLogBytes(t *testing.T, job directtransport.WorkerJob) []
 
 func directAppReplayManifestBytes(t *testing.T, job directtransport.WorkerJob, result model.RecordingResultPackage) []byte {
 	t.Helper()
+	manifest := directAppReplayManifest(job, result)
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(encoded, '\n')
+}
+
+func directAppReplayManifest(job directtransport.WorkerJob, result model.RecordingResultPackage) model.ReplayManifest {
 	bundle := job.Package.ExecutableScriptBundle
 	stageByNode := map[string]string{}
 	for _, stage := range bundle.StageApprovalPlan.Stages {
@@ -882,16 +899,20 @@ func directAppReplayManifestBytes(t *testing.T, job directtransport.WorkerJob, r
 		ExecutionBundleRuntime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
 	}
 	for index, step := range result.StepResults {
-		manifest.Stages = append(manifest.Stages, model.ReplayManifestStage{NodeID: step.NodeID, StageID: stageByNode[step.NodeID], Order: index + 1, Status: step.Status, ValidationDecision: model.ValidationDecisionContinue, EvidenceArtifactIDs: []string{"artifact_screenshot"}})
+		firstEvent := index*3 + 1
+		manifest.Stages = append(manifest.Stages, model.ReplayManifestStage{
+			NodeID: step.NodeID, StageID: stageByNode[step.NodeID], Order: index + 1, Status: step.Status, ValidationDecision: model.ValidationDecisionContinue,
+			EvidenceArtifactIDs:         []string{"artifact_screenshot"},
+			ActionDefinitionEvidenceIDs: []string{"approved_action_" + step.NodeID},
+			BeforeScreenshotArtifactIDs: []string{"artifact_screenshot"}, AfterScreenshotArtifactIDs: []string{"artifact_screenshot"},
+			StageEventIDs:    []string{"event_" + strconv.Itoa(firstEvent), "event_" + strconv.Itoa(firstEvent+1), "event_" + strconv.Itoa(firstEvent+2)},
+			TraceArtifactIDs: []string{"artifact_trace"},
+		})
 	}
 	for _, report := range result.ValidationReports {
 		manifest.ValidationReports = append(manifest.ValidationReports, model.ReplayManifestValidationRef{ReportID: report.ReportID, Phase: report.Phase, Decision: report.Decision, CheckCount: len(report.Checks)})
 	}
-	encoded, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return append(encoded, '\n')
+	return manifest
 }
 func reserveDirectAppTestPort(t *testing.T) int {
 	t.Helper()

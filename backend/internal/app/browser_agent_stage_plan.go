@@ -506,8 +506,36 @@ func boundedEntryWaitMilliseconds(condition string) (int, bool) {
 func currentStageSelector(stage BrowserAgentRuntimeStage) string {
 	for _, component := range stage.Components {
 		if stage.TargetContract.ComponentRef == "" || component.ComponentRef == stage.TargetContract.ComponentRef {
-			return component.Selector
+			if selector := strings.TrimSpace(component.Selector); selector != "" {
+				return selector
+			}
+			if testID := strings.TrimSpace(component.TestID); testID != "" {
+				return "testid:" + testID
+			}
+			if role := strings.TrimSpace(component.Role); role != "" {
+				name := firstNonEmptyString(component.Name, component.Label, component.Text)
+				if name != "" {
+					return "role:" + role + ":name:" + strings.TrimSpace(name)
+				}
+			}
 		}
+	}
+	for _, interaction := range stage.Interactions {
+		if selector := strings.TrimSpace(interaction.Target.Selector); selector != "" {
+			return selector
+		}
+		if testID := strings.TrimSpace(interaction.Target.TestID); testID != "" {
+			return "testid:" + testID
+		}
+		if role := strings.TrimSpace(interaction.Target.Role); role != "" {
+			name := firstNonEmptyString(interaction.Target.Label, interaction.Target.Text)
+			if name != "" {
+				return "role:" + role + ":name:" + strings.TrimSpace(name)
+			}
+		}
+	}
+	if semanticID := strings.TrimSpace(stage.TargetContract.SemanticID); semanticID != "" {
+		return "semantic:" + semanticID
 	}
 	return ""
 }
