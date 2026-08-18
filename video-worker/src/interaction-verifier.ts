@@ -459,7 +459,7 @@ async function discoverBusinessActions(
 
   const now = new Date().toISOString();
   const sourceDigest = await pageEvidenceDigest(page, pageURL);
-  return scored.map((item: any, index: number) => {
+  const actions = scored.map((item: any, index: number) => {
     const id = `browser_discovered_${index + 1}_${hashText(`${item.selector}|${item.label}`)}`;
     const result: VerifiedInteractionCandidate = {
       id,
@@ -486,6 +486,72 @@ async function discoverBusinessActions(
       result.intent_goal_id = item.goal.id;
     }
     return result;
+  });
+  const resultStates = await discoverProjectCreationResultStates(page, goals, pageURL, pageTitle, scanID, sourceDigest, now);
+  return [...actions, ...resultStates];
+}
+
+async function discoverProjectCreationResultStates(
+  page: any,
+  goals: InteractionGoal[],
+  pageURL: string,
+  pageTitle: string,
+  scanID: string,
+  sourceDigest: string,
+  observedAt: string,
+): Promise<VerifiedInteractionCandidate[]> {
+  const goal = goals.find((candidate) => {
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
+    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "click" &&
+      /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
+  });
+  if (!goal) return [];
+  const states = await page.locator("dialog, [role='dialog'], [data-testid*='dialog' i], [data-testid*='modal' i]").evaluateAll((elements: any[]) => elements.slice(0, 40).map((element) => {
+    const html = element as any;
+    const rect = html.getBoundingClientRect();
+    const style = (globalThis as any).getComputedStyle(html);
+    return {
+      text: String(html.innerText || html.textContent || "").trim().replace(/\s+/g, " ").slice(0, 160),
+      testid: element.getAttribute("data-testid") || element.getAttribute("data-test") || element.getAttribute("data-cy") || "",
+      aria: element.getAttribute("aria-label") || "",
+      id: element.getAttribute("id") || "",
+      role: element.getAttribute("role") || "dialog",
+      visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none",
+    };
+  })).catch(() => []);
+  return states.flatMap((state: any, index: number) => {
+    const semantic = normalizeSelectorText(`${state.text} ${state.testid} ${state.aria} ${state.id}`);
+    if (!state.visible || !/(new[-_ ]?project|create[-_ ]?project|新建项目|创建项目|今天你想做什么)/i.test(semantic)) return [];
+    const selector = state.testid ? `[data-testid="${escapeCSSString(state.testid)}"]` : state.aria ? `[aria-label="${escapeCSSString(state.aria)}"]` : state.id && /^[A-Za-z][\w-]*$/.test(state.id) ? `#${state.id}` : "";
+    if (!selector) return [];
+    const id = `browser_state_${index + 1}_${hashText(`${selector}|${state.text}`)}`;
+    return [{
+      id,
+      intent_goal_id: goal.id,
+      label: state.text || state.aria || "New project dialog",
+      kind: "inspect",
+      selector,
+      url: pageURL,
+      status: "verified" as const,
+      visible: true,
+      enabled: true,
+      editable: false,
+      page_url: pageURL,
+      page_title: pageTitle,
+      message: "safe-state scan verified the visible result container independently from action controls",
+      verified_at: observedAt,
+      evidence_id: selectorEvidenceID(scanID, id, selector),
+      source_kind: "page_scan" as const,
+      source_digest: sourceDigest,
+      observed_role: state.role || "dialog",
+      observed_accessible_name: state.text || state.aria || "New project dialog",
+      observed_url: pageURL,
+      observed_route_template: new URL(pageURL).pathname,
+      observed_page_role: "product",
+      observed_form_role: "generic",
+      evidence_digest_sha256: sourceDigest,
+      observed_at: observedAt,
+    }];
   });
 }
 

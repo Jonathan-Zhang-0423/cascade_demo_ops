@@ -540,6 +540,22 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	}
 	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup || stage.Kind == model.BusinessStageKindFinalObserve
 	validations := []model.ValidationSpec{businessStageValidation(stage, actionType, target, required)}
+	if required && (validations[0].Kind == "page_changed" || validations[0].Kind == "playable_surface_visible") {
+		route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute)
+		if route != "" {
+			validations = append(validations, model.ValidationSpec{
+				ID:           "validate_readiness_anchor_" + stage.ID,
+				Kind:         "url_matches",
+				Target:       model.ActionTarget{URL: route},
+				Assertion:    "阶段仍停留在用户批准的项目业务路由。",
+				Expected:     route,
+				Severity:     "blocking",
+				Required:     true,
+				EvidenceRefs: stage.EvidenceRefs,
+				RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: false, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 1},
+			})
+		}
+	}
 	metadata := map[string]any{
 		"business_stage_id":           stage.ID,
 		"business_stage_kind":         string(stage.Kind),
@@ -948,12 +964,19 @@ func businessStageCompletionTarget(stage model.BusinessStage) (model.ActionTarge
 
 func businessStageResultTarget(stage model.BusinessStage) model.ActionTarget {
 	bestIndex := -1
+	bestScore := -1
 	for index, candidate := range stage.Targets {
 		if !isExplicitNewProjectResultCandidate(candidate) {
 			continue
 		}
-		if bestIndex < 0 || businessTargetRank(candidate) > businessTargetRank(stage.Targets[bestIndex]) {
+		score := businessTargetRank(candidate)
+		structure := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
+		if containsAnyNormalized(structure, "dialog-new-project", "new-project-dialog", "create-project-dialog", "new-project-modal", "create-project-modal") {
+			score += 1000
+		}
+		if bestIndex < 0 || score > bestScore {
 			bestIndex = index
+			bestScore = score
 		}
 	}
 	if bestIndex >= 0 {

@@ -303,7 +303,7 @@ describe("interaction verifier safe state exploration", () => {
       expect(result.results.some((item) => item.selector === selector && item.status === "verified")).toBe(true);
     }
     expect(result.results.some((item) => /dashboard-page|card-project-old/.test(item.selector || ""))).toBe(false);
-    expect(result.results.some((item) => /dialog-new-project/.test(item.selector || ""))).toBe(false);
+    expect(result.results.find((item) => /dialog-new-project/.test(item.selector || ""))).toMatchObject({ kind: "inspect", status: "verified", observed_role: "dialog" });
   }, 30_000);
 
   it("binds a component login dialog without a native form to authentication provenance", async () => {

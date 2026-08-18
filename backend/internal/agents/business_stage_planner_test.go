@@ -117,7 +117,7 @@ func TestBusinessStagePlannerAddsBoundedKeyboardPlayabilityVerification(t *testi
 		t.Fatalf("keyboard stage is not strictly bounded: %+v", keyboard)
 	}
 	node := graphNodeFromBusinessStage(project, *keyboard, project.ProductURL, "feature_playable")
-	if node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionPress || len(node.Validations) != 1 || node.Validations[0].Kind != "page_changed" || !node.Validations[0].Required {
+	if node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionPress || len(node.Validations) != 2 || node.Validations[0].Kind != "page_changed" || !node.Validations[0].Required || node.Validations[1].Kind != "url_matches" || !node.Validations[1].Required {
 		t.Fatalf("keyboard graph node must require visual-change evidence: %+v", node)
 	}
 }
