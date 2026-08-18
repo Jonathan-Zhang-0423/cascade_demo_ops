@@ -871,10 +871,13 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		kind = "value_equals"
 		expected = stage.Action.InputValue
 	} else if stage.Kind == model.BusinessStageKindModeSelection {
-		// A still-visible mode button is not proof that selection took effect.
-		kind = "text_contains"
-		target = model.ActionTarget{Text: firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)}
-		expected = firstNonEmpty(stage.Action.SuccessState, stage.Objective, stage.Title)
+		// The product mode toggle changes checkbox/icon styling without emitting
+		// the planner's prose as DOM text. Prove the user-visible state transition
+		// with the same bounded visual-diff assertion used for keyboard controls;
+		// graph compilation adds an independent approved-route readiness anchor.
+		kind = "page_changed"
+		target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+		expected = true
 	} else if stage.Kind == model.BusinessStageKindBusinessSubmit && strings.TrimSpace(stage.ExpectedRouteAfterAction) != "" {
 		kind = "url_matches"
 		target = model.ActionTarget{URL: stage.ExpectedRouteAfterAction}

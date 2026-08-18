@@ -113,7 +113,7 @@ func TestModeSelectionValidationDoesNotReuseClickedControl(t *testing.T) {
 		Action: model.BusinessActionSemantics{SuccessState: "Agent 模式已选中"},
 	}
 	validation := businessStageValidation(stage, model.GraphActionClick, model.ActionTarget{Selector: "[data-testid='mode-agent']"}, true)
-	if validation.Kind != "text_contains" || validation.Target.Selector != "" || validation.Expected != "Agent 模式已选中" {
+	if validation.Kind != "page_changed" || validation.Target.Selector != "" || validation.Expected != true {
 		t.Fatalf("mode validation reused the action target instead of the success state: %+v", validation)
 	}
 }

@@ -238,15 +238,18 @@ func TestBusinessStagePlannerActualBuildDisablesPlanFirstMode(t *testing.T) {
 	}
 	foundInput := false
 	foundMode := false
+	modeHasVisualValidation := false
 	for _, stage := range plan.Stages {
 		switch stage.ID {
 		case "business_stage_project_name_input":
 			foundInput = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='input-project-idea']"
 		case "business_stage_select_build_mode":
 			foundMode = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='button-mode-plan']" && strings.Contains(stage.Objective, "关闭仅规划模式")
+			node := graphNodeFromBusinessStage(project, stage, project.ProductURL, "feature_direct_build")
+			modeHasVisualValidation = len(node.Validations) == 2 && node.Validations[0].Kind == "page_changed" && node.Validations[0].Expected == true && node.Validations[1].Kind == "url_matches"
 		}
 	}
-	if !foundInput || !foundMode {
+	if !foundInput || !foundMode || !modeHasVisualValidation {
 		t.Fatalf("actual build must bind the project idea input and disable plan-first mode: %+v", plan.Stages)
 	}
 }
