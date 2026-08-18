@@ -2501,6 +2501,7 @@ func bindGraphRequirements(project *model.ProjectContext, graph *model.DemoWorkf
 		}
 		keywords := intentKeywordsForText(requirement.Description)
 		preferredKinds := requirementStageKinds(requirement.Description)
+		preferredNodeIDs := requirementPreferredNodeIDs(requirement.Description)
 		bestScore := 0
 		var best *model.GraphNode
 		for _, node := range graph.Nodes {
@@ -2519,6 +2520,7 @@ func bindGraphRequirements(project *model.ProjectContext, graph *model.DemoWorkf
 			text := strings.Join([]string{node.ID, node.Title, node.Goal, node.Description, node.Action, node.InputData, node.ExpectedOutcome, narrativeCaption(node), narrativeCallout(node)}, " ")
 			score := keywordMatchScore(keywords, text)
 			score += stageKindScore
+			score += preferredNodeIDs[node.ID]
 			if score > bestScore {
 				bestScore, best = score, node
 			}
@@ -2528,6 +2530,20 @@ func bindGraphRequirements(project *model.ProjectContext, graph *model.DemoWorkf
 			requirement.EvidenceRefs = uniqueEvidenceRefs(append(requirement.EvidenceRefs, graphNodeEvidenceRefs(best)...))
 		}
 	}
+}
+
+func requirementPreferredNodeIDs(description string) map[string]int {
+	match := func(values ...string) bool { return containsAnyNormalized(description, values...) }
+	preferred := map[string]int{}
+	switch {
+	case match("按左", "按右", "按下", "旋转", "方向键", "键盘", "方块位置", "方块形状", "keyboard", "arrowleft", "arrowright", "arrowdown", "arrowup"):
+		preferred["business_stage_verify_playable_controls"] = 1000
+	case match("最终预览", "棋盘", "得分", "操作说明", "试玩", "可玩", "tetris", "board", "score", "controls", "playable"):
+		preferred["business_stage_playable_preview"] = 1000
+	case match("最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "maximum", "timeout", "wait until complete"):
+		preferred["business_stage_final_observe"] = 1000
+	}
+	return preferred
 }
 
 func graphNodeHasPlanBackedRuntimeContract(node *model.GraphNode) bool {

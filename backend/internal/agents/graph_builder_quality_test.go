@@ -307,6 +307,8 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 		validatedNode("business_stage_start_build", model.BusinessStageKindBusinessSubmit),
 		validatedNode("business_stage_observe_progress", model.BusinessStageKindObserveProgress),
 		validatedNode("business_stage_final_observe", model.BusinessStageKindFinalObserve),
+		validatedNode("business_stage_playable_preview", model.BusinessStageKindFinalObserve),
+		validatedNode("business_stage_verify_playable_controls", model.BusinessStageKindFinalObserve),
 		{ID: "business_stage_unverified_submit", Metadata: map[string]any{"business_stage_kind": string(model.BusinessStageKindBusinessSubmit)}, EvidenceRefs: evidence},
 	}}
 	project := &model.ProjectContext{Inputs: &model.ProjectInputBundle{Requirements: []model.DemoRequirement{
@@ -314,6 +316,9 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 		{ID: "create", Kind: "must_show", Description: "新建项目并填写项目名称", Required: true},
 		{ID: "start", Kind: "must_show", Description: "Agent 已启动", Required: true},
 		{ID: "result", Kind: "must_show", Description: "最终实际运行效果", Required: true},
+		{ID: "complete", Kind: "must_show", Description: "最多等待 20 分钟直到 Agent 构建完成", Required: true},
+		{ID: "playable", Kind: "must_show", Description: "最终预览显示俄罗斯方块棋盘、得分和操作说明", Required: true},
+		{ID: "keyboard", Kind: "must_show", Description: "用方向键实际试玩并确认方块位置发生变化", Required: true},
 		{ID: "secret", Kind: "must_not_show", Description: "不得显示密码", Required: true},
 	}}}
 
@@ -322,6 +327,8 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 	want := map[string]string{
 		"login": "business_stage_session_setup", "create": "business_stage_new_project_entry",
 		"start": "business_stage_start_build", "result": "business_stage_final_observe",
+		"complete": "business_stage_final_observe", "playable": "business_stage_playable_preview",
+		"keyboard": "business_stage_verify_playable_controls",
 	}
 	for _, requirement := range graph.Requirements {
 		if requirement.Kind != "must_show" {
