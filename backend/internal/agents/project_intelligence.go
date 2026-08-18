@@ -2512,6 +2512,9 @@ func intentGoalFromText(text string) model.DemoIntentGoal {
 	case containsAny(lower, "搜索", "search", "筛选", "filter"):
 		preferredAction = "fill"
 		success = "搜索或筛选结果可见"
+	case containsAny(lower, "填写", "输入", "描述需求", "需求描述", "fill", "enter", "type", "prompt"):
+		preferredAction = "fill"
+		success = "输入内容已填写并可供下一步提交"
 	case containsAny(lower, "上传", "upload", "导入", "import"):
 		preferredAction = "upload"
 		success = "上传结果或导入状态可见"
@@ -2568,6 +2571,20 @@ func intentKeywordsForText(text string) []string {
 			keywords = append(keywords, token)
 		}
 	}
+	semanticAliases := []struct {
+		matches []string
+		aliases []string
+	}{
+		{[]string{"项目", "工程", "project"}, []string{"项目", "project"}},
+		{[]string{"填写", "输入", "描述需求", "需求描述", "fill", "enter", "type", "prompt"}, []string{"填写", "输入", "fill", "input", "enter", "idea", "prompt", "description"}},
+		{[]string{"新建", "创建", "新增", "create", "new"}, []string{"新建", "创建", "create", "new"}},
+		{[]string{"生成", "构建", "generate", "build"}, []string{"生成", "构建", "generate", "build"}},
+	}
+	for _, group := range semanticAliases {
+		if containsAny(lower, group.matches...) {
+			keywords = append(keywords, group.aliases...)
+		}
+	}
 	for _, token := range strings.FieldsFunc(lower, func(r rune) bool {
 		return r == ' ' || r == ',' || r == ';' || r == '，' || r == '。' || r == '/' || r == '-' || r == '_' || r == ':'
 	}) {
@@ -2579,7 +2596,7 @@ func intentKeywordsForText(text string) []string {
 	if len(keywords) == 0 && strings.TrimSpace(text) != "" {
 		keywords = append(keywords, strings.TrimSpace(text))
 	}
-	return limitStrings(uniqueStrings(keywords), 10)
+	return limitStrings(uniqueStrings(keywords), 16)
 }
 
 func requirementEvidenceRefs(brief *model.RequirementBrief) []model.EvidenceRef {

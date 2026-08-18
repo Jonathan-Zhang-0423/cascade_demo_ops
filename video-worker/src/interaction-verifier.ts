@@ -182,6 +182,10 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
     }
     const safeTransitions = await applySafeStateTransitions(page, request, timeout);
     diagnostics.safe_state_transitions = safeTransitions;
+    if (!safeTransitions.some((value) => value.startsWith("applied:"))) {
+      const discoveredTransition = await applyDiscoveredNewProjectTransition(page, request.intent_goals || [], request, timeout);
+      if (discoveredTransition) safeTransitions.push(discoveredTransition);
+    }
     if (safeTransitions.some((value) => value.startsWith("applied:"))) {
       currentURL = page.url();
       pageTitle = await page.title().catch(() => "");
@@ -282,6 +286,57 @@ async function applySafeStateTransitions(page: any, request: VerifyInteractionRe
     transitions.push(`applied:${transition.id || "unknown"}`);
   }
   return transitions;
+}
+
+async function applyDiscoveredNewProjectTransition(
+  page: any,
+  goals: InteractionGoal[],
+  request: VerifyInteractionRequest,
+  timeout: number,
+): Promise<string> {
+  const explicitlyRequested = goals.some((goal) => {
+    if (!goal.required || !goal.business || normalizeAction(goal.kind) !== "click") return false;
+    const semantic = normalizeSelectorText(`${goal.label || ""} ${(goal.keywords || []).join(" ")}`);
+    return /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
+  });
+  if (!explicitlyRequested || isURLForbiddenByScope(page.url(), request)) return "";
+
+  const controls = await page.locator("button, [role='button']").evaluateAll((elements: any[]) => elements.slice(0, 120).map((element) => {
+    const html = element as any;
+    const rect = html.getBoundingClientRect();
+    const style = (globalThis as any).getComputedStyle(html);
+    return {
+      text: String(html.innerText || html.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120),
+      testid: element.getAttribute("data-testid") || element.getAttribute("data-test") || element.getAttribute("data-cy") || "",
+      aria: element.getAttribute("aria-label") || "",
+      id: element.getAttribute("id") || "",
+      visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none",
+      disabled: Boolean((html as any).disabled) || element.getAttribute("aria-disabled") === "true",
+    };
+  })).catch(() => []);
+
+  const candidates = controls
+    .filter((control: any) => control.visible && !control.disabled)
+    .map((control: any) => {
+      const semantic = normalizeSelectorText(`${control.text} ${control.aria} ${control.testid} ${control.id}`);
+      let selector = "";
+      if (control.testid) selector = `[data-testid="${escapeCSSString(control.testid)}"]`;
+      else if (control.aria) selector = `[aria-label="${escapeCSSString(control.aria)}"]`;
+      else if (control.id && /^[A-Za-z][\w-]*$/.test(control.id)) selector = `#${control.id}`;
+      const requested = /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
+      const staleEntity = /(card-project-|text-project-name-|emoji-project-|project-menu-|project-list|dashboard-page)/i.test(semantic);
+      const score = (control.testid ? 100 : control.aria ? 70 : control.id ? 50 : 0) + (/button-new-project|new-project-button|create-project-button/i.test(semantic) ? 80 : 0);
+      return { selector, semantic, requested, staleEntity, score };
+    })
+    .filter((candidate: any) => candidate.selector && candidate.requested && !candidate.staleEntity && !looksLikeDestructiveControl(candidate.semantic) && !looksLikeControlPlaneSignal(candidate.semantic))
+    .sort((left: any, right: any) => right.score - left.score);
+  if (candidates.length === 0 || (candidates.length > 1 && candidates[0].score === candidates[1].score)) return "";
+
+  const clicked = await page.locator(candidates[0].selector).first().click({ timeout: Math.min(timeout, 4000) }).then(() => true).catch(() => false);
+  if (!clicked) return "discovered_failed:new_project_entry";
+  await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
+  if (isURLForbiddenByScope(page.url(), request)) return "discovered_result_scope_rejected:new_project_entry";
+  return "applied:discovered_new_project_entry";
 }
 
 async function discoverBusinessActions(

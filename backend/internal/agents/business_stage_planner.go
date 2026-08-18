@@ -74,7 +74,11 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		})
 	}
 
-	projectName := intentProjectName(intentText)
+	// Project names are user-provided values. Never infer them from the
+	// normalized intent graph because that graph also contains action kinds,
+	// selector aliases, and other generated metadata that may follow a phrase
+	// such as "new project".
+	projectName := intentProjectName(businessStageExplicitRequirementText(project, brief, report))
 	wantsNewProject := containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != ""
 	if wantsNewProject {
 		builder.addStage(stageSpec{
@@ -113,21 +117,32 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		}
 	}
 
-	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") {
+	wantsDirectBuildMode := containsAnyNormalized(intentText, "实际构建", "直接构建", "直接生成", "direct build", "build directly")
+	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") || wantsDirectBuildMode {
+		modeTitle := "选择构建模式"
+		modeObjective := "在项目创建流程中选择构建模式。"
+		modeSuccess := "构建模式已被选中，后续可以启动 agent 构建。"
+		modeKeywords := []string{"构建模式", "build mode", "builder mode", "构建", "mode"}
+		if wantsDirectBuildMode {
+			modeTitle = "切换为直接构建模式"
+			modeObjective = "关闭仅规划模式，让项目提交后直接启动 agent 生成可运行代码。"
+			modeSuccess = "仅规划模式已关闭，项目将以直接构建模式启动。"
+			modeKeywords = append(modeKeywords, "计划", "规划", "plan", "direct build", "实际构建", "直接构建")
+		}
 		builder.addStage(stageSpec{
 			id:            "select_build_mode",
 			kind:          model.BusinessStageKindModeSelection,
-			title:         "选择构建模式",
-			objective:     "在项目创建流程中选择构建模式。",
+			title:         modeTitle,
+			objective:     modeObjective,
 			actionType:    string(model.GraphActionClick),
 			actionLabel:   "选择构建模式",
 			inputSemantic: "build_mode",
-			successState:  "构建模式已被选中，后续可以启动 agent 构建。",
+			successState:  modeSuccess,
 			routeState:    model.BusinessRouteStateCreationFlow,
 			entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
 			expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
 			durationMS:    durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"),
-			keywords:      []string{"构建模式", "build mode", "builder mode", "构建", "mode"},
+			keywords:      modeKeywords,
 			capture:       []string{"构建模式选项", "已选择构建模式"},
 		})
 	}
@@ -947,9 +962,9 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 	case "new_project_entry":
 		return containsAnyNormalized(text, "new project", "create project", "new-project", "create-project", "新建项目", "创建项目", "新增项目")
 	case "project_name_input":
-		return containsAnyNormalized(text, "project name", "project-name", "项目名称", "项目名", spec.inputValue)
+		return containsAnyNormalized(text, "project name", "project-name", "project idea", "project-idea", "project prompt", "project-prompt", "项目名称", "项目名", "项目需求", "需求描述", "idea", "prompt", spec.inputValue)
 	case "select_build_mode":
-		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "构建模式")
+		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "mode plan", "mode-plan", "plan mode", "plan-mode", "构建模式", "规划模式", "计划模式")
 	case "start_agent_build":
 		return containsAnyNormalized(text, "start build", "start-build", "run build", "generate app", "启动 agent", "启动agent", "启动构建", "开始构建", "开始生成")
 	}
@@ -1233,6 +1248,26 @@ func businessStageIntentText(project *model.ProjectContext, brief *model.Require
 		for _, goal := range intelligence.DemoIntent.Goals {
 			parts = append(parts, goal.Label, goal.Kind, goal.PreferredAction, goal.TargetPageHint, goal.SuccessState, strings.Join(goal.TargetKeywords, " "))
 		}
+	}
+	return normalizeIntentText(strings.Join(parts, " "))
+}
+
+func businessStageExplicitRequirementText(project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport) string {
+	parts := []string{}
+	if project != nil {
+		parts = append(parts, project.ProductDescription, strings.Join(project.MustShow, " "), strings.Join(project.MustNotShow, " "))
+		if project.Inputs != nil {
+			parts = append(parts, project.Inputs.RawUserPrompt)
+			for _, doc := range project.Inputs.RequirementDocuments {
+				parts = append(parts, doc.Title, doc.Body)
+			}
+		}
+	}
+	if brief != nil {
+		parts = append(parts, brief.Scenario, brief.Objective, strings.Join(brief.MustShow, " "), strings.Join(brief.MustNotShow, " "))
+	}
+	if report != nil && report.RequirementBrief != nil {
+		parts = append(parts, report.RequirementBrief.Scenario, report.RequirementBrief.Objective)
 	}
 	return normalizeIntentText(strings.Join(parts, " "))
 }

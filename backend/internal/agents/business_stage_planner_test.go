@@ -122,6 +122,69 @@ func TestBusinessStagePlannerAddsBoundedKeyboardPlayabilityVerification(t *testi
 	}
 }
 
+func TestIntentGoalTreatsProjectRequirementInputAsFillWithSelectorAliases(t *testing.T) {
+	goal := intentGoalFromText("输入俄罗斯方块需求并创建项目")
+	if goal.PreferredAction != "fill" || !goal.BusinessCritical {
+		t.Fatalf("project requirement input must remain a business fill action: %+v", goal)
+	}
+	joined := strings.Join(goal.TargetKeywords, " ")
+	for _, keyword := range []string{"project", "input", "idea", "prompt"} {
+		if !strings.Contains(joined, keyword) {
+			t.Fatalf("project input goal is missing selector alias %q: %+v", keyword, goal.TargetKeywords)
+		}
+	}
+}
+
+func TestBusinessStagePlannerDoesNotInferProjectNameFromDerivedIntentMetadata(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "演示登录，然后新建项目。"
+	intelligence := graphQualityIntelligence()
+	intelligence.DemoIntent.Goals = []model.DemoIntentGoal{{
+		ID:               "intent_new_project",
+		Label:            "新建项目",
+		Kind:             "business_action",
+		PreferredAction:  "click",
+		Required:         true,
+		BusinessCritical: true,
+		TargetKeywords:   []string{"新建项目", "project", "input", "auth"},
+	}}
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, intelligence, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range plan.Stages {
+		if stage.ID == "business_stage_project_name_input" {
+			t.Fatalf("derived intent metadata must not be treated as a user-provided project name: %+v", stage)
+		}
+	}
+}
+
+func TestBusinessStagePlannerActualBuildDisablesPlanFirstMode(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "创建俄罗斯方块项目，要求 Agent 实际构建可运行代码。"
+	verified := &model.VerifiedInteractionPlan{Actions: []model.VerifiedInteractionAction{
+		{ID: "idea", Label: "Project idea", Kind: "fill", Selector: "[data-testid='input-project-idea']", IsBusiness: true, VerificationStatus: "verified"},
+		{ID: "plan", Label: "Plan", Kind: "click", Selector: "[data-testid='button-mode-plan']", IsBusiness: true, VerificationStatus: "verified"},
+	}}
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, graphQualityIntelligence(), verified)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundInput := false
+	foundMode := false
+	for _, stage := range plan.Stages {
+		switch stage.ID {
+		case "business_stage_project_name_input":
+			foundInput = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='input-project-idea']"
+		case "business_stage_select_build_mode":
+			foundMode = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='button-mode-plan']" && strings.Contains(stage.Objective, "关闭仅规划模式")
+		}
+	}
+	if !foundInput || !foundMode {
+		t.Fatalf("actual build must bind the project idea input and disable plan-first mode: %+v", plan.Stages)
+	}
+}
+
 func TestBusinessStagePlannerCreatesRequirementDrivenProjectStages(t *testing.T) {
 	project := graphQualityProject()
 	project.ProductDescription = "演示登录 7 秒，新建项目 13 秒，项目名称2048，选择构建模式，启动 agent 实际构建，并等待 45 秒观察。"
