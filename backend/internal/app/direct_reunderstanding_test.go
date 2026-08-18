@@ -52,6 +52,14 @@ func TestPersistCloudResultUpgradesStoppedRequiredAppAssertion(t *testing.T) {
 	}
 }
 
+func TestDirectReunderstandingIssuesDeduplicateByStableIdentity(t *testing.T) {
+	issue := model.DirectReunderstandingIssue{Code: "REQUIRED_ASSERTION_FAILED", NodeID: "mode", Required: true, ResponsibilityDomain: model.ValidationCheckDomainApp}
+	issues := withDirectIssueIDs([]model.DirectReunderstandingIssue{issue, issue})
+	if len(issues) != 1 || issues[0].IssueID == "" {
+		t.Fatalf("duplicate validation summaries must collapse to one stable issue: %+v", issues)
+	}
+}
+
 func TestDirectFailureReunderstandingLifecycleAndIdempotency(t *testing.T) {
 	service, states, state, build := newDirectReunderstandingTestState(t)
 	service.approvedBuilds[state.ProjectID+"|old"] = approvedBuildCacheEntry{Build: build}

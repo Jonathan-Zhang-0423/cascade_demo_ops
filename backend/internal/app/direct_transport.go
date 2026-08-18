@@ -1226,11 +1226,17 @@ func withDirectIssueIDs(issues []model.DirectReunderstandingIssue) []model.Direc
 	if len(issues) == 0 {
 		return nil
 	}
-	out := append([]model.DirectReunderstandingIssue(nil), issues...)
-	for index := range out {
-		if strings.TrimSpace(out[index].IssueID) == "" {
-			out[index].IssueID = model.StableDirectReunderstandingIssueID(out[index])
+	out := make([]model.DirectReunderstandingIssue, 0, len(issues))
+	seen := map[string]bool{}
+	for _, issue := range issues {
+		if strings.TrimSpace(issue.IssueID) == "" {
+			issue.IssueID = model.StableDirectReunderstandingIssueID(issue)
 		}
+		if seen[issue.IssueID] {
+			continue
+		}
+		seen[issue.IssueID] = true
+		out = append(out, issue)
 	}
 	return out
 }
