@@ -826,7 +826,10 @@ func verifiedProbeSemanticallyValid(result interactionVerifierResult, probe mode
 		if want == "business_action" || want == "auth" || want == "" {
 			return true
 		}
-		return graphActionTypeFromKind(kind, probe.Selector) == model.GraphActionType(want)
+		if graphActionTypeFromKind(kind, probe.Selector) == model.GraphActionType(want) {
+			return true
+		}
+		return want == string(model.GraphActionClick) && isVerifiedNewProjectResultState(result, kind)
 	}
 	return false
 }
@@ -931,6 +934,7 @@ func probeFromVerifierResult(result interactionVerifierResult, byID map[string]m
 		return probe
 	}
 	kind := firstNonEmpty(result.Kind, actionKindFromSelector(result.Selector))
+	business := isBusinessAction(graphActionTypeFromKind(kind, result.Selector)) || isVerifiedNewProjectResultState(result, kind)
 	return model.InteractionProbe{
 		ID:             firstNonEmpty(result.ID, "probe_browser_scan_"+shortHash(result.Selector+result.Label)),
 		IntentGoalID:   result.IntentGoalID,
@@ -940,11 +944,25 @@ func probeFromVerifierResult(result interactionVerifierResult, byID map[string]m
 		URL:            result.PageURL,
 		RouteRef:       safeID("route", pathFromURL(result.PageURL)),
 		Source:         "browser_scan_discovery",
-		IsBusiness:     isBusinessAction(graphActionTypeFromKind(kind, result.Selector)),
+		IsBusiness:     business,
 		IsChrome:       actionLooksLikeChromeControl(result.Label, result.Selector),
 		SelectorScore:  selectorQualityScore(result.Selector),
 		WaitConditions: []string{"domcontentloaded"},
 	}
+}
+
+// A discovered dialog is not an action by itself, but it is independent
+// post-action evidence for the approved new-project click. Preserve only this
+// narrowly identified result state in the verified business plan so graph
+// validation does not have to reuse a later input/action selector.
+func isVerifiedNewProjectResultState(result interactionVerifierResult, kind string) bool {
+	if graphActionTypeFromKind(kind, result.Selector) != model.GraphActionInspect || !strings.EqualFold(strings.TrimSpace(result.ObservedRole), "dialog") {
+		return false
+	}
+	goal := normalizeIntentText(result.IntentGoalID)
+	semantic := normalizeIntentText(strings.Join([]string{result.Label, result.ObservedAccessibleName, result.Selector}, " "))
+	return containsAnyNormalized(goal, "new project", "create project", "new_project", "create_project") &&
+		containsAnyNormalized(semantic, "new project", "create project", "new-project", "create-project", "新建项目", "创建项目", "今天你想做什么")
 }
 
 func formalSelectorCandidates(values []model.SelectorCandidate) []model.SelectorCandidate {

@@ -52,6 +52,40 @@ func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
 	}
 }
 
+func TestVerifiedPlanPreservesIndependentNewProjectDialogResult(t *testing.T) {
+	project := graphQualityProject()
+	intelligence := graphQualityIntelligence()
+	intelligence.RunIntentScope = runIntentScopeForProject(project)
+	intelligence.DemoIntent.Goals = []model.DemoIntentGoal{{
+		ID: "intent_new_project_entry", Label: "新建项目", PreferredAction: "click", Required: true, BusinessCritical: true,
+	}}
+	observedAt := time.Now().UTC()
+	response := interactionVerifierResponse{OK: true, VerificationMode: "playwright_safe_state_scan", BrowserScanID: "scan_dialog", Results: []interactionVerifierResult{{
+		interactionVerifierItem: interactionVerifierItem{
+			ID: "browser_state_dialog", IntentGoalID: "intent_new_project_entry", Label: "今天你想做什么？ 新建项目", Kind: "inspect",
+			Selector: "[data-testid=\"dialog-new-project\"]", URL: project.ProductURL,
+		},
+		Status: "verified", Visible: true, Enabled: true, PageURL: project.ProductURL,
+		VerifiedAt: observedAt, EvidenceID: "ev_dialog", SourceKind: "page_scan", SourceDigest: "sha256:dialog",
+		ObservedRole: "dialog", ObservedAccessibleName: "今天你想做什么？ 新建项目", ObservedURL: project.ProductURL,
+		ObservedRouteTemplate: "/app", ObservedPageRole: "product", ObservedFormRole: "generic",
+		EvidenceDigestSHA256: "sha256:dialog", ObservedAt: observedAt,
+	}}}
+	probe := probeFromVerifierResult(response.Results[0], nil)
+	predicate := isVerifiedNewProjectResultState(response.Results[0], "inspect")
+	usable := selectorUsableForBusinessAction(probe.Selector)
+	semantic := verifiedProbeSemanticallyValid(response.Results[0], probe, intelligence)
+	inScope := isURLAllowedByRunScope(intelligence.RunIntentScope, probe.URL)
+	if !predicate || !probe.IsBusiness || probe.IsChrome || !usable || !semantic || !inScope {
+		t.Fatalf("new-project dialog did not satisfy the narrow verified-result predicate: predicate=%t business=%t chrome=%t usable=%t semantic=%t in_scope=%t probe=%+v", predicate, probe.IsBusiness, probe.IsChrome, usable, semantic, inScope, probe)
+	}
+
+	plan := verifiedPlanFromScanResults(project, intelligence, response, nil)
+	if len(plan.Actions) != 1 || !plan.Actions[0].IsBusiness || plan.Actions[0].Kind != "inspect" || plan.Actions[0].Selector != "[data-testid=\"dialog-new-project\"]" {
+		t.Fatalf("independent new-project dialog result was dropped from the verified plan: %+v", plan.Actions)
+	}
+}
+
 func TestCompletionWaitUsesMaximumAsTimeoutNotCaptureDuration(t *testing.T) {
 	intent := "等待 Agent 真正编写完代码，轮询直到全部步骤完成，最多 20 分钟；最终成片时长 2 分钟。"
 	if got := requiredObservationDurationMS(intent); got != 0 {
