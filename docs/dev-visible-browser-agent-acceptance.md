@@ -80,6 +80,26 @@ The original App package remains the only source of business actions. If the
 login form is not recognized, the run fails closed; it does not fall back to
 manual input or alter the package.
 
+### Recording Timebase Contract
+
+For every newly captured Browser Agent recording, the Server writes these
+redacted metadata fields on the `raw_recording` artifact:
+
+- `recording_timebase_schema_version=demoops.browser_recording_timebase.v1`
+- `recording_started_at_unix_ms`
+
+`target_geometry.recording_offset_ms` is measured from that same recording
+origin. The Server renderer maps each `StepResult.started_at` and
+`completed_at` into the raw recording by subtracting
+`recording_started_at_unix_ms`; it must not compact stage durations into a new
+zero-based timeline. This keeps browser target callouts tied to the actual
+captured frame, including any post-login wait before the first business action.
+
+Old recordings without this metadata remain non-authoritative for target
+callouts. If their evidence cannot be mapped to the source segment, the
+requirement report returns `not_satisfied` rather than drawing a guessed
+annotation.
+
 ## Approved-package preflight
 
 ### Exact App package replay (recommended for end-to-end diagnosis)

@@ -88,6 +88,7 @@ type ProjectInputBundle struct {
 	Scenarios                     []DemoScenario                 `json:"scenarios,omitempty"`
 	Requirements                  []DemoRequirement              `json:"requirements,omitempty"`
 	PresentationGenerationIntents []PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
+	MediaDeliveryPreferences      *MediaDeliveryPreferences      `json:"media_delivery_preferences,omitempty"`
 	RawUserPrompt                 string                         `json:"raw_user_prompt,omitempty"`
 	Metadata                      map[string]any                 `json:"metadata,omitempty"`
 }

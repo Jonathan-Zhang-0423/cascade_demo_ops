@@ -91,6 +91,7 @@ export interface RenderRequest {
   asset_timeline_catalog?: AssetTimelineCatalog;
   edit_plan?: DemoEditPlan;
   render_profile?: RenderProfile;
+  delivery_profiles?: DeliveryProfile[];
   model_execution?: ModelExecutionAudit;
 }
 
@@ -119,6 +120,23 @@ export interface RenderProfile {
   format?: "mp4" | "webm" | "mov";
   preset?: string;
   crf?: number;
+  output_file_name?: string;
+}
+
+export interface DeliveryProfile extends RenderProfile {
+  id: "final_master_2k" | "final_delivery_1080p" | string;
+}
+
+export interface RenderDeliverable {
+  id: string;
+  status: "complete" | "failed";
+  video_path?: string;
+  render_manifest_path?: string;
+  media_normalization_report_path?: string;
+  profile: DeliveryProfile;
+  sha256?: string;
+  size_bytes?: number;
+  error?: string;
 }
 
 export interface RenderResult {
@@ -136,6 +154,9 @@ export interface RenderResult {
   validation_report: DemoEditPlanValidationReport;
   media_normalization_report?: MediaNormalizationReport;
   requirement_satisfaction_report?: RequirementSatisfactionReport;
+  delivery_status?: "complete" | "incomplete";
+  delivery_manifest_path?: string;
+  deliverables?: RenderDeliverable[];
 }
 
 interface DemoWorkflowGraph {
@@ -507,6 +528,7 @@ interface CompositorShot {
   source_uri?: string;
   source_path?: string;
   source_time_range_ms?: [number, number];
+  output_time_range_ms?: [number, number];
   presentation_kind: "video" | "still";
   duration_ms: number;
   operations: string[];
@@ -551,6 +573,29 @@ interface CompositorOverlay {
   target_geometry_verified?: boolean;
   target_geometry_issue?: string;
   coordinate_space?: "post_edit_normalized";
+  evidence_recording_offset_ms?: number;
+  evidence_source_time_range_ms?: [number, number];
+  output_time_range_ms?: [number, number];
+}
+
+interface TargetOverlayEvidenceFailure {
+  type: string;
+  reason: string;
+  shot_id: string;
+  source_step_id?: string;
+  target_evidence_artifact_id?: string;
+  evidence_recording_offset_ms?: number;
+  evidence_source_time_range_ms?: [number, number];
+}
+
+interface TargetOverlayEvidenceRootCause {
+  reason: string;
+  source_step_id?: string;
+  target_evidence_artifact_id?: string;
+  overlay_types: string[];
+  affected_shot_ids: string[];
+  evidence_recording_offset_ms?: number;
+  expected_source_time_range_ms?: [number, number];
 }
 
 interface VideoCodecConfig {
@@ -656,6 +701,8 @@ interface RequirementSatisfactionReport {
     rendered_operations: string[];
     planned_overlay_types: string[];
     applied_overlay_types: string[];
+    target_overlay_evidence_failures: TargetOverlayEvidenceFailure[];
+    target_overlay_evidence_root_causes: TargetOverlayEvidenceRootCause[];
     represented_step_ids: string[];
     passed_step_count: number;
     failed_step_ids: string[];
@@ -718,6 +765,121 @@ const MEDIA_NORMALIZATION_TARGET: MediaNormalizationTarget = {
 };
 
 export async function render(request: RenderRequest): Promise<RenderResult> {
+  if (request.delivery_profiles && request.delivery_profiles.length > 0) {
+    return renderDeliverables(request);
+  }
+  return renderSingle(request);
+}
+
+async function renderDeliverables(request: RenderRequest): Promise<RenderResult> {
+  const profiles = request.delivery_profiles || [];
+  if (profiles.length !== 2) {
+    throw new Error(`dual_delivery_requires_two_profiles: got=${profiles.length}`);
+  }
+  const requiredProfiles: DeliveryProfile[] = [
+    {
+      id: "final_master_2k",
+      mode: "final",
+      width: 2560,
+      height: 1440,
+      fps: 30,
+      format: "mp4",
+      preset: "medium",
+      crf: 18,
+      output_file_name: "final_master_2k.mp4",
+    },
+    {
+      id: "final_delivery_1080p",
+      mode: "final",
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      format: "mp4",
+      preset: "medium",
+      crf: 18,
+      output_file_name: "final_delivery_1080p.mp4",
+    },
+  ];
+  const byID = new Map(profiles.map((profile) => [profile.id, profile]));
+  const ordered = requiredProfiles.map((required) => {
+    const supplied = byID.get(required.id);
+    if (!supplied) return required;
+    return { ...required, ...supplied, id: required.id, output_file_name: required.output_file_name } as DeliveryProfile;
+  });
+  const rootOutputDir = request.output_dir || "artifacts/rendered";
+  await mkdir(rootOutputDir, { recursive: true });
+  const deliverables: RenderDeliverable[] = [];
+  let baseResult: RenderResult | undefined;
+  const { delivery_profiles: _deliveryProfiles, ...singleRequestBase } = request;
+  const loaded = await loadRenderInputs(request);
+  const sharedCatalog = request.asset_timeline_catalog || (await buildAssetTimelineCatalog(request, loaded));
+  const requestedDurationSec = request.duration_sec || request.graph?.assets?.target_duration_sec || Math.max(1, Math.ceil(sharedCatalog.timeline.duration_ms / 1000));
+  const sharedEditPlan = request.edit_plan ? normalizeEditPlan(request.edit_plan, sharedCatalog) : defaultEditPlan(sharedCatalog, requestedDurationSec);
+  const sharedValidation = validateDemoEditPlan(sharedEditPlan, sharedCatalog);
+  if (!sharedValidation.valid) {
+    throw new Error(`dual_delivery_edit_plan_rejected: ${sharedValidation.errors.map((error) => `${error.code}: ${error.message}`).join("; ")}`);
+  }
+  for (const profile of ordered) {
+    const profileDir = path.join(rootOutputDir, "deliverables", profile.id);
+    try {
+      const result = await renderSingle({
+        ...singleRequestBase,
+        output_dir: profileDir,
+        render_profile: profile,
+        asset_timeline_catalog: sharedCatalog,
+        edit_plan: sharedEditPlan,
+      });
+      const digest = await fileDigest(result.video_path);
+      const deliverable: RenderDeliverable = {
+        id: profile.id,
+        status: "complete",
+        video_path: result.video_path,
+        render_manifest_path: result.render_manifest_path,
+        profile,
+        ...digest,
+      };
+      if (result.media_normalization_report_path) {
+        deliverable.media_normalization_report_path = result.media_normalization_report_path;
+      }
+      deliverables.push(deliverable);
+      if (!baseResult) baseResult = result;
+    } catch (error) {
+      deliverables.push({
+        id: profile.id,
+        status: "failed",
+        profile,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const complete = deliverables.length === 2 && deliverables.every((item) => item.status === "complete");
+  const deliveryManifestPath = path.join(rootOutputDir, "deliverables_manifest.json");
+  await writeJSON(deliveryManifestPath, {
+    schema_version: "demoops.deliverables_manifest.v1",
+    status: complete ? "complete" : "incomplete",
+    required_profiles: ordered.map((profile) => ({ id: profile.id, width: profile.width, height: profile.height, fps: profile.fps, format: profile.format })),
+    source_plan_digest: baseResult ? await fileDigest(baseResult.demo_edit_plan_path) : undefined,
+    deliverables,
+    note: complete
+      ? "Both delivery profiles were rendered from the same normalized edit plan."
+      : "At least one required delivery profile failed; partial files are diagnostic only and do not constitute a completed delivery.",
+  });
+  if (!baseResult) {
+    throw new Error(`dual_delivery_incomplete: ${deliveryManifestPath}`);
+  }
+  if (!complete) {
+    throw new Error(`dual_delivery_incomplete: ${deliveryManifestPath}`);
+  }
+  return {
+    ...baseResult,
+    video_path: deliverables.find((item) => item.id === "final_master_2k")?.video_path || baseResult.video_path,
+    delivery_status: "complete",
+    delivery_manifest_path: deliveryManifestPath,
+    deliverables,
+  };
+}
+
+async function renderSingle(request: RenderRequest): Promise<RenderResult> {
   const outputDir = request.output_dir || "artifacts/rendered";
   await mkdir(outputDir, { recursive: true });
 
@@ -745,7 +907,7 @@ export async function render(request: RenderRequest): Promise<RenderResult> {
   const mediaNormalization =
     request.render_profile?.mode === "preview"
       ? await skippedPreviewNormalization(outputDir, request.render_profile)
-      : await normalizeSourceReferenceVideo(outputDir, catalog, editPlan, compositor.video_path, mediaNormalizationTarget(request.render_profile));
+      : await normalizeSourceReferenceVideo(outputDir, catalog, editPlan, compositor.video_path, mediaNormalizationTarget(request.render_profile), request.render_profile?.output_file_name);
   const sourceReferenceVideoPath = mediaNormalization.report.status === "ok" ? mediaNormalization.report.reference_video_path : undefined;
   const videoPath = sourceReferenceVideoPath || compositor.video_path;
   const stepDocsPath = path.join(outputDir, "step_by_step.md");
@@ -837,11 +999,14 @@ async function buildAssetTimelineCatalog(request: RenderRequest, loaded: LoadedR
   const runID = loaded.artifactManifest?.run_id || trace?.id?.replace(/^trace_/, "") || `render_${safeName(workflowGraphID)}`;
   const nodesByID = new Map((graph?.nodes || []).map((node) => [node.id, node]));
   const traceSteps = trace?.step_results || loaded.recordingResultPackage?.step_results || [];
-  const steps = traceSteps.length > 0 ? buildTimelineStepsFromTrace(traceSteps, nodesByID) : buildTimelineStepsFromGraph(graph?.nodes || []);
+  const recordingArtifact = firstRecordingArtifact(loaded.generatedAssets);
+  const recordingTimeOriginMS = recordingStartedAtUnixMS(recordingArtifact);
+  const steps = traceSteps.length > 0
+    ? buildTimelineStepsFromTrace(traceSteps, nodesByID, recordingTimeOriginMS)
+    : buildTimelineStepsFromGraph(graph?.nodes || []);
   const traceDurationMS = durationFromDates(trace?.started_at, trace?.completed_at);
   const requestedDurationMS = (request.duration_sec || 0) * 1000;
   const totalDurationMS = Math.max(maxStepEnd(steps), traceDurationMS, requestedDurationMS);
-  const recordingArtifact = firstRecordingArtifact(loaded.generatedAssets);
   const artifacts = await Promise.all(
     loaded.generatedAssets.map((artifact) => timelineArtifactFromRef(artifact, artifact.id === recordingArtifact?.id ? totalDurationMS : undefined)),
   );
@@ -866,16 +1031,30 @@ async function buildAssetTimelineCatalog(request: RenderRequest, loaded: LoadedR
   };
 }
 
-function buildTimelineStepsFromTrace(stepResults: StepResult[], nodesByID: Map<string, GraphNode>): TimelineStep[] {
+export function buildTimelineStepsFromTrace(stepResults: StepResult[], nodesByID: Map<string, GraphNode>, recordingTimeOriginMS?: number): TimelineStep[] {
   let cursor = 0;
   return stepResults.map((step, index) => {
     const node = nodesByID.get(step.node_id);
     const durationMS = positiveDuration(step.duration_ms) || durationFromDates(step.started_at, step.completed_at) || durationHint(node);
-    const startMS = cursor;
-    const endMS = startMS + durationMS;
+    const startedAtMS = timestampMS(step.started_at);
+    const completedAtMS = timestampMS(step.completed_at);
+    const hasRecordingTimebase = recordingTimeOriginMS !== undefined && startedAtMS !== undefined && completedAtMS !== undefined && completedAtMS >= startedAtMS && startedAtMS >= recordingTimeOriginMS;
+    const startMS = hasRecordingTimebase ? startedAtMS - recordingTimeOriginMS : cursor;
+    const endMS = hasRecordingTimebase ? completedAtMS - recordingTimeOriginMS : startMS + durationMS;
     cursor = endMS;
     return timelineStep(step.node_id, index, actionForNode(node), step.status, startMS, endMS, node, step.observed_state, step.artifacts || []);
   });
+}
+
+function recordingStartedAtUnixMS(artifact: ArtifactRef | undefined): number | undefined {
+  const value = artifact?.metadata?.recording_started_at_unix_ms;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function timestampMS(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function buildTimelineStepsFromGraph(nodes: GraphNode[]): TimelineStep[] {
@@ -1039,6 +1218,15 @@ function defaultShotForStep(
   };
   if (geometryEvidence) {
     const box = paddedNormalizedTargetBox(geometryEvidence.geometry.element_box_normalized);
+    // A Browser Agent box belongs to a specific source-recording instant. For
+    // video shots, position the callout around that instant rather than always
+    // at the start of a trimmed segment. Still shots show the exact evidence
+    // frame, so they keep a zero-based local timeline.
+    const targetLocalMS = still
+      ? 0
+      : Math.max(0, Math.min(step.duration_ms, geometryEvidence.geometry.recording_offset_ms - step.start_ms));
+    const highlightStartMS = Math.max(0, targetLocalMS - 150);
+    const cursorStartMS = Math.max(0, targetLocalMS - 100);
     shot.overlays?.push({
       type: "highlight_box",
       shape: "rectangle",
@@ -1048,8 +1236,8 @@ function defaultShotForStep(
       height: box.height,
       color: "#1da7ff",
       stroke_width: 4,
-      start_ms: 0,
-      end_ms: Math.min(step.duration_ms, 1500),
+      start_ms: highlightStartMS,
+      end_ms: Math.min(step.duration_ms, highlightStartMS + 1500),
       target_evidence_artifact_id: geometryEvidence.artifact.id,
       geometry_source: "browser_agent_target_geometry_v1",
     });
@@ -1057,8 +1245,8 @@ function defaultShotForStep(
       type: "cursor_highlight",
       color: "#ffd166",
       stroke_width: 5,
-      start_ms: 0,
-      end_ms: Math.min(step.duration_ms, 1200),
+      start_ms: cursorStartMS,
+      end_ms: Math.min(step.duration_ms, cursorStartMS + 1200),
       target_evidence_artifact_id: geometryEvidence.artifact.id,
       geometry_source: "browser_agent_target_geometry_v1",
     });
@@ -1246,7 +1434,7 @@ function validateDemoEditPlan(plan: DemoEditPlan, catalog: AssetTimelineCatalog)
     validateShotPresentation(shot, artifact, shotPath, errors);
     validateShotTimeRange(shot, artifact, catalog, `${shotPath}.source_time_range_ms`, errors);
     validateOperations(shot.operations || [], `${shotPath}.operations`, errors);
-    validateOverlays(shot.overlays || [], stepByID, artifactByID, shot.source_step_id, shot.source_artifact_id, still, `${shotPath}.overlays`, errors, warnings);
+    validateOverlays(shot.overlays || [], stepByID, artifactByID, shot.source_step_id, shot.source_artifact_id, still, shot.source_time_range_ms, `${shotPath}.overlays`, errors, warnings);
   });
 
   const representedSteps = new Set(plan.shots
@@ -1444,6 +1632,7 @@ function validateOverlays(
   shotStepID: string | undefined,
   shotSourceArtifactID: string,
   still: boolean,
+  sourceTimeRangeMS: [number, number] | undefined,
   pathValue: string,
   errors: ValidationFinding[],
   warnings: ValidationFinding[],
@@ -1457,7 +1646,7 @@ function validateOverlays(
       errors.push(finding("unknown_overlay_step", `Overlay references missing source step ${overlay.source_step_id}`, `${overlayPath}.source_step_id`));
     }
     if (isTargetOrientedOverlay(overlay)) {
-      const evidenceIssue = targetOverlayEvidenceIssue(overlay, artifactByID, shotStepID, shotSourceArtifactID, still);
+      const evidenceIssue = targetOverlayEvidenceIssue(overlay, artifactByID, shotStepID, shotSourceArtifactID, still, sourceTimeRangeMS);
       if (evidenceIssue) {
         warnings.push(finding(
           evidenceIssue === "missing_target_geometry" ? "missing_target_geometry" : "invalid_target_geometry_evidence",
@@ -1661,6 +1850,8 @@ function buildRequirementSatisfactionReport(
   const screenshotCount = catalog.artifacts.filter((artifact) => isScreenshotArtifact(artifact)).length;
   const plannedOverlayTypes = plannedOverlayTypesForPlan(editPlan);
   const appliedOverlayTypes = overlayTypesAppliedByCompositor(compositor);
+  const targetOverlayEvidenceFailures = targetOverlayEvidenceFailuresForCompositor(compositor);
+  const targetOverlayEvidenceRootCauses = targetOverlayEvidenceRootCausesForFailures(targetOverlayEvidenceFailures);
   const adoptedValues = adoptedRequirementValues(graph, runSpec, editPlanTargetDurationSec, requestedFormats, finalFormat);
   const stepChecks = buildStepRequirementChecks(graph, catalog, editPlan);
   const assetChecks = buildAssetRequirementChecks(graph, runSpec, catalog, compositor, mediaNormalization, finalVideoPath, stepDocsPath);
@@ -1878,6 +2069,29 @@ function buildRequirementSatisfactionReport(
     }
   }
 
+  // A target-aware overlay is an evidence assertion, not decorative styling.
+  // Do not report a deliverable as satisfactory when the requested target
+  // cannot be mapped to a frame in its source recording.
+  for (const rootCause of targetOverlayEvidenceRootCauses) {
+    const sourceRange = rootCause.expected_source_time_range_ms;
+    const timeContext = rootCause.evidence_recording_offset_ms !== undefined && sourceRange
+      ? ` Evidence offset=${rootCause.evidence_recording_offset_ms}ms; expected source range=${sourceRange[0]}-${sourceRange[1]}ms.`
+      : "";
+    const overlayTypes = rootCause.overlay_types.join(", ");
+    errors.push(requirementFinding(
+      "target_overlay_evidence_unusable",
+      `Cannot render ${overlayTypes} for ${rootCause.affected_shot_ids.length} shot(s) because its Browser Agent evidence is unusable: ${rootCause.reason}.${timeContext}`,
+      rootCause.target_evidence_artifact_id
+        ? `asset_timeline_catalog.artifacts[${rootCause.target_evidence_artifact_id}].metadata.target_geometry.recording_offset_ms`
+        : "render_manifest.compositor.skipped_operations",
+    ));
+    checks.push({
+      code: `target_overlay_evidence_${safeName(rootCause.target_evidence_artifact_id || rootCause.reason)}`,
+      status: "fail",
+      message: `${overlayTypes} cannot be safely mapped to their rendered shots (${rootCause.reason}).${timeContext}`,
+    });
+  }
+
   const status: RequirementSatisfactionReport["status"] = errors.length > 0 ? "not_satisfied" : warnings.length > 0 ? "satisfied_with_warnings" : "satisfied";
   return {
     schema_version: REQUIREMENT_SATISFACTION_REPORT_SCHEMA_VERSION,
@@ -1918,6 +2132,8 @@ function buildRequirementSatisfactionReport(
       rendered_operations: compositor.applied_operations || [],
       planned_overlay_types: plannedOverlayTypes,
       applied_overlay_types: appliedOverlayTypes,
+      target_overlay_evidence_failures: targetOverlayEvidenceFailures,
+      target_overlay_evidence_root_causes: targetOverlayEvidenceRootCauses,
       represented_step_ids: representedStepIDs,
       passed_step_count: passedStepCount,
       failed_step_ids: failedStepIDs,
@@ -2449,6 +2665,66 @@ function overlayTypesAppliedByCompositor(compositor: CompositorResult): string[]
   return [...values].sort();
 }
 
+function targetOverlayEvidenceFailuresForCompositor(compositor: CompositorResult): TargetOverlayEvidenceFailure[] {
+  const evidenceFailures = new Set([
+    "missing_target_geometry",
+    "invalid_target_geometry_evidence",
+    "target_geometry_step_mismatch",
+    "target_geometry_artifact_mismatch",
+    "target_geometry_source_mismatch",
+    "target_geometry_time_invalid",
+    "target_geometry_time_unbound",
+    "target_geometry_time_mismatch",
+  ]);
+  const failures: TargetOverlayEvidenceFailure[] = [];
+  for (const shot of compositor.shot_plan || []) {
+    for (const overlay of shot.overlays) {
+      if (!isTargetOrientedOverlay(overlay) || overlay.target_geometry_verified !== false) continue;
+      const reason = overlay.target_geometry_issue || "missing_target_geometry";
+      if (!evidenceFailures.has(reason)) continue;
+      failures.push({
+        type: overlay.type,
+        reason,
+        shot_id: shot.id,
+        ...(shot.source_step_id ? { source_step_id: shot.source_step_id } : {}),
+        ...(overlay.target_evidence_artifact_id ? { target_evidence_artifact_id: overlay.target_evidence_artifact_id } : {}),
+        ...(overlay.evidence_recording_offset_ms !== undefined ? { evidence_recording_offset_ms: overlay.evidence_recording_offset_ms } : {}),
+        ...(overlay.evidence_source_time_range_ms ? { evidence_source_time_range_ms: overlay.evidence_source_time_range_ms } : {}),
+      });
+    }
+  }
+  return failures;
+}
+
+function targetOverlayEvidenceRootCausesForFailures(failures: TargetOverlayEvidenceFailure[]): TargetOverlayEvidenceRootCause[] {
+  const grouped = new Map<string, TargetOverlayEvidenceRootCause>();
+  for (const failure of failures) {
+    const key = `${failure.reason}:${failure.target_evidence_artifact_id || failure.source_step_id || failure.shot_id}`;
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, {
+        reason: failure.reason,
+        ...(failure.source_step_id ? { source_step_id: failure.source_step_id } : {}),
+        ...(failure.target_evidence_artifact_id ? { target_evidence_artifact_id: failure.target_evidence_artifact_id } : {}),
+        overlay_types: [failure.type],
+        affected_shot_ids: [failure.shot_id],
+        ...(failure.evidence_recording_offset_ms !== undefined ? { evidence_recording_offset_ms: failure.evidence_recording_offset_ms } : {}),
+        ...(failure.evidence_source_time_range_ms ? { expected_source_time_range_ms: [...failure.evidence_source_time_range_ms] as [number, number] } : {}),
+      });
+      continue;
+    }
+    if (!existing.overlay_types.includes(failure.type)) existing.overlay_types.push(failure.type);
+    if (!existing.affected_shot_ids.includes(failure.shot_id)) existing.affected_shot_ids.push(failure.shot_id);
+    if (failure.evidence_source_time_range_ms) {
+      const current = existing.expected_source_time_range_ms;
+      existing.expected_source_time_range_ms = current
+        ? [Math.min(current[0], failure.evidence_source_time_range_ms[0]), Math.max(current[1], failure.evidence_source_time_range_ms[1])]
+        : [...failure.evidence_source_time_range_ms] as [number, number];
+    }
+  }
+  return [...grouped.values()];
+}
+
 function requirementFinding(code: string, message: string, pathValue?: string): RequirementFinding {
   const result: RequirementFinding = { code, message };
   if (pathValue) result.path = pathValue;
@@ -2461,6 +2737,7 @@ async function normalizeSourceReferenceVideo(
   editPlan: DemoEditPlan,
   preferredSourcePath?: string,
   target: MediaNormalizationTarget = MEDIA_NORMALIZATION_TARGET,
+  outputFileName?: string,
 ): Promise<{ report_path: string; report: MediaNormalizationReport }> {
   const reportPath = path.join(outputDir, "media_normalization_report.json");
   const report: MediaNormalizationReport = {
@@ -2531,7 +2808,7 @@ async function normalizeSourceReferenceVideo(
     return { report_path: reportPath, report };
   }
 
-  const referenceVideoPath = path.join(outputDir, "source_reference.mp4");
+  const referenceVideoPath = path.join(outputDir, outputFileName || "source_reference.mp4");
   const inputValidation = validateNormalizedMedia(report.input, target);
   if (ffprobeAvailable && Object.values(inputValidation).every(Boolean)) {
     const remuxResult = await runCommand(ffmpegPath, [
@@ -2761,7 +3038,7 @@ function firstCompositableVideoArtifact(catalog: AssetTimelineCatalog, editPlan:
 function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEditPlan): CompositorShot[] {
   const fallbackArtifact = firstCompositableVideoArtifact(catalog, editPlan);
   const artifactByID = new Map(catalog.artifacts.map((artifact) => [artifact.id, artifact]));
-  return editPlan.shots
+  const shots = editPlan.shots
     .map((shot) => {
       const still = isStillShot(shot);
       // Never fall back from a missing screenshot to an unrelated recording.
@@ -2781,7 +3058,8 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
         ...(operation.speed !== undefined ? { speed: operation.speed } : {}),
         ...(operation.style !== undefined ? { style: operation.style } : {}),
       }));
-      const overlays = (shot.overlays || []).map((overlay) => {
+      const sourceOverlays = shot.overlays || [];
+      const overlays = sourceOverlays.map((overlay) => {
         const plannedOverlay: CompositorShot["overlays"][number] = { type: overlay.type };
         if (overlay.text !== undefined) plannedOverlay.text = overlay.text;
         if (overlay.start_ms !== undefined) plannedOverlay.start_ms = overlay.start_ms;
@@ -2806,23 +3084,36 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
         if (overlay.target_evidence_artifact_id !== undefined) plannedOverlay.target_evidence_artifact_id = overlay.target_evidence_artifact_id;
         if (overlay.geometry_source !== undefined) plannedOverlay.geometry_source = overlay.geometry_source;
         if (isTargetOrientedOverlay(overlay)) {
-          const issue = targetOverlayEvidenceIssue(overlay, artifactByID, shot.source_step_id, shot.source_artifact_id, still);
+          const evidenceArtifact = artifactByID.get(overlay.target_evidence_artifact_id as string);
+          const evidenceGeometry = targetGeometryFromMetadata(evidenceArtifact?.metadata);
+          if (evidenceGeometry) {
+            plannedOverlay.evidence_recording_offset_ms = evidenceGeometry.recording_offset_ms;
+            if (sourceRange) plannedOverlay.evidence_source_time_range_ms = [...sourceRange] as [number, number];
+          }
+          const issue = targetOverlayEvidenceIssue(overlay, artifactByID, shot.source_step_id, shot.source_artifact_id, still, shot.source_time_range_ms);
           if (issue) {
             plannedOverlay.target_geometry_verified = false;
             plannedOverlay.target_geometry_issue = issue;
           } else {
-            const evidenceArtifact = artifactByID.get(overlay.target_evidence_artifact_id as string);
-            const geometry = targetGeometryFromMetadata(evidenceArtifact?.metadata) as BrowserTargetGeometry;
+            const geometry = evidenceGeometry as BrowserTargetGeometry;
             const transformed = transformTargetBoxForShot(geometry.element_box_normalized, editOperations);
             const targetBox = overlay.type === "cursor_highlight"
               ? cursorBoxAtTargetCenter(transformed)
               : paddedNormalizedTargetBox(transformed);
-            plannedOverlay.x = targetBox.x;
-            plannedOverlay.y = targetBox.y;
-            plannedOverlay.width = targetBox.width;
-            plannedOverlay.height = targetBox.height;
-            plannedOverlay.target_geometry_verified = true;
-            plannedOverlay.coordinate_space = "post_edit_normalized";
+            const privacyIssue = targetOverlayPrivacyIssue(overlay, targetBox, sourceOverlays, durationMS);
+            if (privacyIssue) {
+              plannedOverlay.target_geometry_verified = false;
+              plannedOverlay.target_geometry_issue = privacyIssue;
+            } else {
+              plannedOverlay.x = targetBox.x;
+              plannedOverlay.y = targetBox.y;
+              plannedOverlay.width = targetBox.width;
+              plannedOverlay.height = targetBox.height;
+              plannedOverlay.target_geometry_verified = true;
+              plannedOverlay.coordinate_space = "post_edit_normalized";
+              plannedOverlay.evidence_recording_offset_ms = geometry.recording_offset_ms;
+              if (sourceRange) plannedOverlay.evidence_source_time_range_ms = [...sourceRange] as [number, number];
+            }
           }
         }
         return plannedOverlay;
@@ -2843,6 +3134,18 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
       return planned;
     })
     .filter((shot) => shot.source_path && shot.duration_ms > 0 && (shot.presentation_kind === "still" || shot.source_time_range_ms));
+  let outputCursorMS = 0;
+  for (const shot of shots) {
+    shot.output_time_range_ms = [outputCursorMS, outputCursorMS + shot.duration_ms];
+    for (const overlay of shot.overlays) {
+      if (!isTargetOrientedOverlay(overlay) || overlay.target_geometry_verified !== true) continue;
+      const startMS = Math.max(0, Math.min(shot.duration_ms, overlay.start_ms ?? 0));
+      const endMS = Math.min(shot.duration_ms, Math.max(startMS, overlay.end_ms ?? shot.duration_ms));
+      overlay.output_time_range_ms = [outputCursorMS + startMS, outputCursorMS + endMS];
+    }
+    outputCursorMS += shot.duration_ms;
+  }
+  return shots;
 }
 
 function sourceRangeForStep(catalog: AssetTimelineCatalog, stepID?: string): [number, number] | undefined {
@@ -2933,6 +3236,7 @@ function targetOverlayEvidenceIssue(
   shotStepID?: string,
   shotSourceArtifactID?: string,
   still = false,
+  sourceTimeRangeMS?: [number, number],
 ): string | undefined {
   if (!overlay.target_evidence_artifact_id || overlay.geometry_source !== "browser_agent_target_geometry_v1") {
     return "missing_target_geometry";
@@ -2943,6 +3247,12 @@ function targetOverlayEvidenceIssue(
   if (artifact.source_step_id && shotStepID && artifact.source_step_id !== shotStepID) return "target_geometry_step_mismatch";
   if (geometry.screenshot_artifact_id && geometry.screenshot_artifact_id !== artifact.id) return "target_geometry_artifact_mismatch";
   if (still && shotSourceArtifactID !== artifact.id) return "target_geometry_source_mismatch";
+  if (!Number.isFinite(geometry.recording_offset_ms) || geometry.recording_offset_ms < 0) return "target_geometry_time_invalid";
+  if (!still) {
+    if (!sourceTimeRangeMS) return "target_geometry_time_unbound";
+    const [startMS, endMS] = sourceTimeRangeMS;
+    if (geometry.recording_offset_ms < startMS || geometry.recording_offset_ms > endMS) return "target_geometry_time_mismatch";
+  }
   return undefined;
 }
 
@@ -2986,6 +3296,43 @@ function transformNormalizedBoxThroughWindow(
   const right = clamp01((box.x + box.width - windowX) / windowWidth);
   const bottom = clamp01((box.y + box.height - windowY) / windowHeight);
   return { x: left, y: top, width: Math.max(0.001, right - left), height: Math.max(0.001, bottom - top) };
+}
+
+function targetOverlayPrivacyIssue(
+  target: EditOverlay,
+  targetBox: { x: number; y: number; width: number; height: number },
+  overlays: EditOverlay[],
+  shotDurationMS: number,
+): string | undefined {
+  const targetRange = normalizedOverlayTimeRange(target, shotDurationMS);
+  for (const overlay of overlays) {
+    if (overlay.type !== "blur_region") continue;
+    const blurRange = normalizedOverlayTimeRange(overlay, shotDurationMS);
+    if (!timeRangesOverlap(targetRange, blurRange)) continue;
+    const blurBox = {
+      x: normalizedShapeNumber(overlay.x, 0), y: normalizedShapeNumber(overlay.y, 0),
+      width: boundedNumber(overlay.width ?? 0.2, 0.2, 0.01, 1), height: boundedNumber(overlay.height ?? 0.12, 0.12, 0.01, 1),
+    };
+    if (normalizedBoxesOverlap(targetBox, blurBox)) return "target_geometry_privacy_overlap";
+  }
+  return undefined;
+}
+
+function normalizedOverlayTimeRange(overlay: Pick<EditOverlay, "start_ms" | "end_ms">, shotDurationMS: number): [number, number] {
+  const start = Math.max(0, Math.min(shotDurationMS, overlay.start_ms ?? 0));
+  const end = Math.min(shotDurationMS, Math.max(start, overlay.end_ms ?? shotDurationMS));
+  return [start, end];
+}
+
+function timeRangesOverlap(left: [number, number], right: [number, number]): boolean {
+  return left[0] < right[1] && right[0] < left[1];
+}
+
+function normalizedBoxesOverlap(
+  left: { x: number; y: number; width: number; height: number },
+  right: { x: number; y: number; width: number; height: number },
+): boolean {
+  return left.x < right.x + right.width && right.x < left.x + left.width && left.y < right.y + right.height && right.y < left.y + left.height;
 }
 
 function cursorBoxAtTargetCenter(box: BrowserTargetGeometry["element_box_normalized"]): BrowserTargetGeometry["element_box_normalized"] {
@@ -3957,6 +4304,15 @@ async function writeJSON(filePath: string, value: unknown): Promise<void> {
 async function sha256File(filePath: string): Promise<string> {
   const data = await readFile(filePath);
   return createHash("sha256").update(data).digest("hex");
+}
+
+async function fileDigest(filePath: string): Promise<{ sha256?: string; size_bytes?: number }> {
+  try {
+    const [data, info] = await Promise.all([readFile(filePath), stat(filePath)]);
+    return { sha256: createHash("sha256").update(data).digest("hex"), size_bytes: info.size };
+  } catch {
+    return {};
+  }
 }
 
 function fileURI(filePath: string): string {

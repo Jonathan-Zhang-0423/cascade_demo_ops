@@ -815,6 +815,17 @@ func validateDirectSuccessfulResult(source model.ClientExecutionPackage, result 
 	if source.RecordingRunSpec.Outputs.FinalVideo && !directHasArtifact(refs, []string{"demo_video"}, "video/mp4") {
 		return errors.New("direct successful result is missing requested final MP4")
 	}
+	if source.RecordingRunSpec.Outputs.FinalVideo && model.RequiresDualMediaDelivery(&source) {
+		if !directHasArtifact(refs, []string{"final_video_final_master_2k"}, "video/mp4") {
+			return errors.New("direct successful result is missing requested 2K final MP4")
+		}
+		if !directHasArtifact(refs, []string{"final_video_final_delivery_1080p"}, "video/mp4") {
+			return errors.New("direct successful result is missing requested 1080p final MP4")
+		}
+		if !directHasArtifact(refs, []string{"deliverables_manifest"}, "application/json") {
+			return errors.New("direct successful result is missing deliverables manifest")
+		}
+	}
 	if source.RecordingRunSpec.Outputs.StepByStepDocs && !directHasArtifact(refs, []string{"step_by_step_docs"}, "") {
 		return errors.New("direct successful result is missing requested step-by-step documentation")
 	}

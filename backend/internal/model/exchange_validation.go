@@ -399,6 +399,17 @@ func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, sour
 		if err := requireArtifact("result_missing_demo_edit_plan", "demo_edit_plan"); err != nil {
 			return err
 		}
+		if RequiresDualMediaDelivery(source) {
+			if err := requireArtifact("result_missing_final_master_2k", "final_video_final_master_2k"); err != nil {
+				return err
+			}
+			if err := requireArtifact("result_missing_final_delivery_1080p", "final_video_final_delivery_1080p"); err != nil {
+				return err
+			}
+			if err := requireArtifact("result_missing_deliverables_manifest", "deliverables_manifest"); err != nil {
+				return err
+			}
+		}
 	}
 	if source.RecordingRunSpec.Outputs.Trace {
 		if err := requireArtifact("result_missing_browser_trace", "browser_trace", "execution_trace"); err != nil {
@@ -417,6 +428,19 @@ func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, sour
 		return errors.New("result_missing_stage_event_log: stage_event_log_ref must include sha256 and size_bytes")
 	}
 	return nil
+}
+
+// RequiresDualMediaDelivery reports whether this package uses the approved
+// two-file delivery contract. Both formal validation and client-facing status
+// summaries must use this one predicate.
+func RequiresDualMediaDelivery(source *ClientExecutionPackage) bool {
+	if source == nil || source.ProjectContextSummary.MediaDeliveryPreferences == nil {
+		return false
+	}
+	preferences := NormalizeMediaDeliveryPreferences(source.ProjectContextSummary.MediaDeliveryPreferences)
+	return len(preferences.OutputProfiles) == 2 &&
+		preferences.OutputProfiles[0].ID == MediaOutputProfileMaster2K &&
+		preferences.OutputProfiles[1].ID == MediaOutputProfileDelivery1080
 }
 
 // ValidateLocalTestRecordingResultPackageForRender is deliberately separate

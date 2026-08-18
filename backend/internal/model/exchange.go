@@ -223,6 +223,7 @@ type ProjectContextSummary struct {
 	InputFingerprints             map[string]string              `json:"input_fingerprints,omitempty"`
 	KnowledgeRefs                 []EvidenceRef                  `json:"knowledge_refs,omitempty"`
 	PresentationGenerationIntents []PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
+	MediaDeliveryPreferences      *MediaDeliveryPreferences      `json:"media_delivery_preferences,omitempty"`
 	Metadata                      map[string]string              `json:"metadata,omitempty"`
 }
 

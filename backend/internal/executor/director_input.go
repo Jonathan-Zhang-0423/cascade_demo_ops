@@ -685,8 +685,13 @@ func NewArkAssetPublicationPlan(source *model.ClientExecutionPackage, arkPlanRef
 		}
 	}
 	sourcePackageID := arkPlan.SourcePackageID
+	retention := model.DefaultMediaDeliveryPreferences().TOSRetention
 	if source != nil && source.PackageID != "" {
 		sourcePackageID = source.PackageID
+	}
+	if source != nil && source.ProjectContextSummary.MediaDeliveryPreferences != nil {
+		preferences := model.NormalizeMediaDeliveryPreferences(source.ProjectContextSummary.MediaDeliveryPreferences)
+		retention = preferences.TOSRetention
 	}
 	return model.ArkAssetPublicationPlan{
 		SchemaVersion:       model.ArkAssetPublicationPlanSchemaVersion,
@@ -698,6 +703,7 @@ func NewArkAssetPublicationPlan(source *model.ClientExecutionPackage, arkPlanRef
 		Status:              status,
 		PublicationStrategy: "publish selected local captured assets as short-lived HTTPS URLs or provider asset references before CASCADE_ARK_MEDIA_MODE=real",
 		URLTTLHours:         24,
+		TOSRetention:        retention,
 		Items:               items,
 		Blockers:            blockers,
 		Warnings:            warnings,

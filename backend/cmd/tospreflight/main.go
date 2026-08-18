@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,12 @@ import (
 )
 
 func main() {
+	lifecycleDays := flag.Int("lifecycle-days", 30, "expected enabled lifecycle expiration in days for the configured object prefix")
+	skipLifecycle := flag.Bool("skip-lifecycle", false, "skip read-only lifecycle verification for a connectivity-only preflight")
+	flag.Parse()
+	if *lifecycleDays <= 0 || *lifecycleDays > 365 {
+		must(fmt.Errorf("-lifecycle-days must be between 1 and 365"))
+	}
 	cwd, err := os.Getwd()
 	must(err)
 	repoRoot := config.DiscoverDevRepoRoot(cwd)
@@ -87,6 +94,25 @@ func main() {
 		must(fmt.Errorf("signed GET content verification failed"))
 	}
 	must(cleanup())
+	if *skipLifecycle {
+		fmt.Printf("TOS preflight passed (connectivity-only; lifecycle verification skipped)\n")
+		fmt.Printf("bucket=%s\n", tosConfig.Bucket)
+		fmt.Printf("key_prefix=%s/preflight/\n", strings.Trim(tosConfig.Prefix, "/"))
+		fmt.Printf("uploaded_bytes=%d\n", len(payload))
+		fmt.Printf("content_sha256_prefix=%x\n", sum[:6])
+		fmt.Printf("signed_get=verified\n")
+		fmt.Printf("cleanup=completed\n")
+		fmt.Printf("lifecycle=skipped\n")
+		return
+	}
+	lifecycle, err := client.GetBucketLifecycle(ctx, &tos.GetBucketLifecycleInput{Bucket: tosConfig.Bucket})
+	must(err)
+	lifecycleVerification := media.VerifyTOSLifecycleRules(lifecycle.Rules, tosConfig.Prefix, *lifecycleDays)
+	if lifecycleVerification.Status != "verified" {
+		fmt.Printf("TOS connectivity/signed_get=verified\n")
+		fmt.Printf("TOS lifecycle=status:%s prefix:%s expected_days:%d matched_rule_id:%s reason:%s\n", lifecycleVerification.Status, lifecycleVerification.ExpectedPrefix, lifecycleVerification.ExpectedDays, lifecycleVerification.MatchedRuleID, lifecycleVerification.Reason)
+		must(fmt.Errorf("TOS lifecycle rule was not verified; no bucket rule was changed"))
+	}
 
 	fmt.Printf("TOS preflight passed\n")
 	fmt.Printf("bucket=%s\n", tosConfig.Bucket)
@@ -95,6 +121,10 @@ func main() {
 	fmt.Printf("content_sha256_prefix=%x\n", sum[:6])
 	fmt.Printf("signed_get=verified\n")
 	fmt.Printf("cleanup=completed\n")
+	fmt.Printf("lifecycle=verified\n")
+	fmt.Printf("lifecycle_prefix=%s\n", lifecycleVerification.ExpectedPrefix)
+	fmt.Printf("lifecycle_days=%d\n", lifecycleVerification.ExpectedDays)
+	fmt.Printf("lifecycle_rule_id=%s\n", lifecycleVerification.MatchedRuleID)
 }
 
 func must(err error) {

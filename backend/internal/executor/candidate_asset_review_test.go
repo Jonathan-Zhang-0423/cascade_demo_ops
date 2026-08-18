@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -46,6 +47,23 @@ func TestReviewArkMediaCandidateAssetsKeepsSafeDownloadedVideoCandidatePendingEx
 	}
 	if review.Items[0].ApprovedForDemo || !review.Items[0].MediaEligible || !review.Items[0].ExplicitReviewRequired || !review.Items[0].PresentationOnly {
 		t.Fatalf("review item did not capture explicit-review boundary: %+v", review.Items[0])
+	}
+}
+
+func TestReviewArkMediaCandidateAssetsRejectsSeedanceCandidateOutsideUnifiedContract(t *testing.T) {
+	original := model.ArtifactRef{ID: "original", Kind: "generated_video_candidate", URI: filepath.Join(t.TempDir(), "original.mp4"), MimeType: "video/mp4", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SizeBytes: 64, Metadata: map[string]any{"download_status": "downloaded"}}
+	normalized := model.ArtifactRef{ID: "normalized", Kind: "generated_video_candidate", URI: filepath.Join(t.TempDir(), "normalized.mp4"), MimeType: "video/mp4", SHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", SizeBytes: 32, Metadata: map[string]any{
+		"provider_original_artifact_id": "original", "artifact_variant": "normalized", "normalization_status": "ok", "media_probe_status": "ok", "normalization_profile": media.GeneratedShotNormalizationProfile,
+		"source_material_policy": "non_authoritative_generated_candidate", "non_authoritative": true, "presentation_only": true,
+		// The required normalized_media_probe is intentionally absent.
+	}}
+	result := model.ArkMediaGenerationResult{Provider: "seedance", TaskID: "task-1", Status: "candidate_artifacts_normalized", NonAuthoritative: true, DownloadedArtifacts: []model.ArtifactRef{original, normalized}}
+	review := ReviewArkMediaCandidateAssets(nil, &result, time.Now().UTC())
+	if review.Status != "rejected" || len(review.PendingReviewArtifacts) != 0 || len(review.RejectedArtifacts) != 2 {
+		t.Fatalf("invalid Seedance candidate must be rejected: %+v", review)
+	}
+	if result.DownloadedArtifacts[1].Metadata["generated_shot_candidate_status"] != "invalid" {
+		t.Fatalf("contract failure must be traceable: %+v", result.DownloadedArtifacts[1].Metadata)
 	}
 }
 
