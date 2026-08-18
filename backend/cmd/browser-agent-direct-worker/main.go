@@ -147,7 +147,11 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 		}
 	}
 	if err := w.submitResult(ctx, job.JobID, result); err != nil {
-		fmt.Fprintln(os.Stderr, "result submit failed job=", safeID(job.JobID), "class=result_submit_failed")
+		diagnosticCode := "none"
+		if result.FailureDiagnostic != nil {
+			diagnosticCode = safeID(result.FailureDiagnostic.Error.Code)
+		}
+		fmt.Fprintln(os.Stderr, "result submit failed job=", safeID(job.JobID), "class=result_submit_failed", "gateway_code=", gatewayErrorCode(err), "result_status=", safeID(string(result.Status)), "diagnostic_code=", diagnosticCode)
 		return
 	}
 	completed = true
@@ -262,7 +266,39 @@ func (w *worker) request(ctx context.Context, method, path string, body io.Reade
 
 func responseError(response *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	return fmt.Errorf("worker gateway HTTP %d: %s", response.StatusCode, redactError(errors.New(string(data))))
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(data, &payload)
+	return &workerGatewayError{status: response.StatusCode, code: safeID(payload.Error.Code)}
+}
+
+type workerGatewayError struct {
+	status int
+	code   string
+}
+
+func (e *workerGatewayError) Error() string {
+	return fmt.Sprintf("worker gateway HTTP %d code=%s", e.status, firstNonEmptyWorker(e.code, "unknown"))
+}
+
+func gatewayErrorCode(err error) string {
+	var gatewayErr *workerGatewayError
+	if errors.As(err, &gatewayErr) {
+		return firstNonEmptyWorker(gatewayErr.code, "unknown")
+	}
+	return "network_error"
+}
+
+func firstNonEmptyWorker(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 func clearCredentialMap(values map[string]model.DirectCredentialValue) {
 	for key, value := range values {
