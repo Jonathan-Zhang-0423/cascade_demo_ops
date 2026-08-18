@@ -892,7 +892,7 @@ func deniedBrowserAgentPolicy(code string, reason string) BrowserAgentPolicyDeci
 func browserAgentActionTypeAllowed(action model.GraphActionType) bool {
 	switch action {
 	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect,
-		model.GraphActionUpload, model.GraphActionWait, model.GraphActionAssert, model.GraphActionInspect:
+		model.GraphActionUpload, model.GraphActionWait, model.GraphActionAssert, model.GraphActionInspect, model.GraphActionPress:
 		return true
 	default:
 		return false

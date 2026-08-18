@@ -44,6 +44,12 @@ func TestCompileBrowserAgentRuntimePlanKeepsApprovedStageOrderAndSemantics(t *te
 	}
 }
 
+func TestBrowserAgentPolicyAllowsApprovedKeyboardPress(t *testing.T) {
+	if !browserAgentActionTypeAllowed(model.GraphActionPress) {
+		t.Fatal("approved non-destructive keyboard press must be executable by the Browser Agent policy")
+	}
+}
+
 func TestBrowserAgentReadinessAcceptsCompleteFixture(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	report := browserAgentReadiness(&pkg)
