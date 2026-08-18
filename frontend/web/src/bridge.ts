@@ -539,6 +539,17 @@ type LocalDirectJobStatus = {
 	updated_at: string;
 };
 
+type LocalDirectCredentialReceipt = {
+	protocol_version: string;
+	job_id: string;
+	package_id: string;
+	grant_id: string;
+	secret_ref: string;
+	status: string;
+	stage: string;
+	accepted_at: string;
+};
+
 type LocalDirectReleaseResult = {
   released: boolean;
   lease?: { lease_id?: string; data_port?: number; expires_at?: string };
@@ -1156,10 +1167,21 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       const jobID = workspace.cloudRun.cloudJobID;
       if (!jobID) return { ok: false, error: "缺少 Browser Agent job id，无法轮询服务器状态" };
       const query = `?job_id=${encodeURIComponent(jobID)}`;
-      const result = await requestLocal<LocalDirectJobStatus>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/status${query}`);
+	  let result = await requestLocal<LocalDirectJobStatus>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/status${query}`);
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "轮询 Browser Agent 执行状态失败", result.errorInfo);
       }
+	  if (result.data.status === "awaiting_credentials" && result.data.next_action === "upload_credential_envelope" && result.data.requires_reapproval !== true) {
+		const restored = await requestLocal<LocalDirectCredentialReceipt>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/credentials/reupload`, {
+		  method: "POST",
+		  body: JSON.stringify({ job_id: jobID }),
+		});
+		if (!restored.ok || !restored.data || restored.data.job_id !== jobID || restored.data.status !== "queued") {
+		  return bridgeFailure(restored.error ?? "Browser Agent 临时凭据安全重传失败", restored.errorInfo);
+		}
+		result = await requestLocal<LocalDirectJobStatus>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/status${query}`);
+		if (!result.ok || !result.data) return bridgeFailure(result.error ?? "凭据重传后状态确认失败", result.errorInfo);
+	  }
       let next = workspaceWithDirectStatus(workspace, result.data);
       if (result.data.result_package_id && isTerminalLocalStatus(result.data.status)) {
         const resultPackage = await this.getResultPackage(next);

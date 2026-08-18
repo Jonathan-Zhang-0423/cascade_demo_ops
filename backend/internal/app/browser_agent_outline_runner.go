@@ -474,7 +474,10 @@ func runtimeValidationCheck(id, kind, code string, passed bool, summary string, 
 func convertReadinessToValidationChecks(validationContext model.BrowserAgentValidationContext) []model.ValidationCheck {
 	// Construct a minimal ClientExecutionPackage from validation context for readiness check.
 	pkg := &model.ClientExecutionPackage{
-		PackageID: validationContext.SourcePackageID,
+		PackageID:             validationContext.SourcePackageID,
+		ProjectContextSummary: validationContext.ProjectContextSummary,
+		ProductMapSummary:     validationContext.ProductMapSummary,
+		CredentialGrants:      append([]model.CredentialGrant(nil), validationContext.CredentialGrants...),
 		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
 			ScriptManifest: model.ExecutableScriptManifest{
 				Runtime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,

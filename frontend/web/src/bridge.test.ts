@@ -806,6 +806,41 @@ describe("desktop bridge contract", () => {
 	]);
   });
 
+  it("securely reuploads an expired one-time credential envelope without reapproval", async () => {
+	const workspace = createWorkspace("product_demo");
+	const running = {
+	  ...workspace,
+	  cloudRun: { ...workspace.cloudRun, packageID: "pkg_recover", exchangePackageID: "pkg_recover", cloudJobID: "job_recover", status: "running" as const },
+	};
+	let statusReads = 0;
+	const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+	  if (url.includes("/browser-agent-direct/status")) {
+		statusReads++;
+		return bridgeJSON(statusReads === 1 ? {
+		  protocol_version: "cascade.browser_agent_direct.v1", job_id: "job_recover", package_id: "pkg_recover",
+		  status: "awaiting_credentials", stage: "credential_reupload_required", next_action: "upload_credential_envelope",
+		  requires_reapproval: false, progress_percent: 5, updated_at: "2026-08-18T11:00:00Z",
+		} : {
+		  protocol_version: "cascade.browser_agent_direct.v1", job_id: "job_recover", package_id: "pkg_recover",
+		  status: "queued", stage: "browser_agent_queue", progress_percent: 5, updated_at: "2026-08-18T11:00:01Z",
+		});
+	  }
+	  if (url.includes("/browser-agent-direct/credentials/reupload")) {
+		expect(init?.method).toBe("POST");
+		expect(JSON.parse(String(init?.body))).toEqual({ job_id: "job_recover" });
+		return bridgeJSON({ protocol_version: "cascade.browser_agent_direct.v1", job_id: "job_recover", package_id: "pkg_recover", grant_id: "grant_login", secret_ref: "credential://demo/ref", status: "queued", stage: "browser_agent_queue", accepted_at: "2026-08-18T11:00:01Z" });
+	  }
+	  throw new Error(`unexpected URL ${url}`);
+	});
+	vi.stubGlobal("fetch", fetchMock);
+
+	const result = await createLocalBridgeClient("http://127.0.0.1:4317").pollCloudRun(running);
+	expect(result.ok).toBe(true);
+	expect(result.data?.cloudRun.status).toBe("queued");
+	expect(result.data?.cloudRun.requiresReapproval).not.toBe(true);
+	expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("maps local dev bridge execution packages into the workspace approval view", async () => {
     const workspace = updateWorkspaceInputs(createWorkspace("product_demo"), {
       productURL: "https://real.example.com",

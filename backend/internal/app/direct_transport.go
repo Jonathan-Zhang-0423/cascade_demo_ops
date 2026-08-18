@@ -660,6 +660,52 @@ func (s *Service) GetDirectExecutionStatus(ctx context.Context, projectID, jobID
 	return status, nil
 }
 
+// ReuploadDirectCredential restores the one-time in-memory credential grant
+// after a Worker release or Gateway restart. It reuses only the approved grant
+// identity/scope and reads the secret value afresh from the local vault; it
+// never requires another package approval and never persists plaintext.
+func (s *Service) ReuploadDirectCredential(ctx context.Context, projectID, jobID string) (model.DirectCredentialReceipt, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return model.DirectCredentialReceipt{}, err
+	}
+	run := state.DesktopCloudRun
+	if run == nil || run.Transport != directTransportStateName || strings.TrimSpace(jobID) == "" || run.CloudJobID != jobID || run.PackageID == "" || run.PackageDigestSHA256 == "" {
+		return model.DirectCredentialReceipt{}, errors.New("direct Browser Agent credential recovery does not match the active job")
+	}
+	lease, err := s.loadDirectLease(projectID)
+	if err != nil {
+		return model.DirectCredentialReceipt{}, err
+	}
+	grants := append([]model.CredentialGrant(nil), run.DirectCredentialGrants...)
+	if len(grants) == 0 {
+		// Compatibility for jobs uploaded before direct_credential_grants became
+		// restart-safe state: rebuild only the non-secret grant metadata.
+		draft, buildErr := s.BuildClientExecutionPackage(ctx, projectID, firstNonEmptyString(run.OrgID, defaultDesktopOrgID))
+		if buildErr != nil {
+			return model.DirectCredentialReceipt{}, buildErr
+		}
+		grants = append(grants, draft.Package.CredentialGrants...)
+	}
+	build := ClientExecutionPackageBuild{PackageDigestSHA256: run.PackageDigestSHA256}
+	build.Package.PackageID = run.PackageID
+	build.Package.CredentialGrants = grants
+	receipt := model.DirectPackageReceipt{JobID: jobID, PackageID: run.PackageID, PackageDigest: run.PackageDigestSHA256}
+	accepted, err := s.uploadDirectCredential(ctx, lease, receipt, build)
+	if err != nil {
+		return accepted, err
+	}
+	status := model.DirectJobStatus{
+		ProtocolVersion: model.DirectTransportProtocolVersion, JobID: jobID, PackageID: run.PackageID,
+		Status: accepted.Status, Stage: accepted.Stage, Message: "Credential grant was securely restored from the local vault.",
+		ProgressPercent: 5, UpdatedAt: accepted.AcceptedAt,
+	}
+	if err := s.persistDirectStatus(ctx, projectID, status); err != nil {
+		return accepted, err
+	}
+	return accepted, nil
+}
+
 func (s *Service) GetDirectResult(ctx context.Context, projectID, jobID string) (model.RecordingResultPackage, error) {
 	var result model.RecordingResultPackage
 	if err := s.directProjectRead(ctx, projectID, "/v1/direct/jobs/"+url.PathEscape(jobID)+"/result", "recording_result", &result); err != nil {
@@ -1125,6 +1171,7 @@ func (s *Service) persistDirectUpload(ctx context.Context, projectID string, bui
 		run.AckedAt = nil
 		run.DownloadedAssets = nil
 		run.DirectArtifacts = nil
+		run.DirectCredentialGrants = append([]model.CredentialGrant(nil), build.Package.CredentialGrants...)
 		run.ResultReview = nil
 		state.ErrorMessage = ""
 	})

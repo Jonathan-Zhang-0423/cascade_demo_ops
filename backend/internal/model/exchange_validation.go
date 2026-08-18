@@ -335,7 +335,7 @@ func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, sour
 		}
 		if len(result.FailureDiagnostic.ScreenshotRefs) == 0 && len(result.FailureDiagnostic.TraceRefs) == 0 {
 			code := strings.ToLower(strings.TrimSpace(result.FailureDiagnostic.Error.Code))
-			infrastructure := strings.Contains(code, "session_start") || strings.Contains(code, "worker_missing") || strings.Contains(code, "node_missing") || strings.Contains(code, "stage_event_audit") || strings.Contains(code, "result_packaging") || strings.Contains(code, "render_failed") || strings.Contains(code, "infrastructure")
+			infrastructure := result.FailureDiagnostic.BrowserEvidenceUnavailable || strings.Contains(code, "session_start") || strings.Contains(code, "worker_missing") || strings.Contains(code, "node_missing") || strings.Contains(code, "stage_event_audit") || strings.Contains(code, "result_packaging") || strings.Contains(code, "render_failed") || strings.Contains(code, "infrastructure") || strings.Contains(code, "outcome_pre_verification") || strings.Contains(code, "outline_runner_unavailable")
 			if !infrastructure {
 				return errors.New("failed_result_missing_evidence: formal failed result requires screenshot or trace evidence")
 			}

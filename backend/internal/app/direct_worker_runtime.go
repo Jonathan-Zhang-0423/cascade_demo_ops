@@ -103,6 +103,7 @@ func directWorkerFailureResult(pkg *model.ClientExecutionPackage, jobID string, 
 		SourcePackageID: pkg.PackageID, CloudJobID: jobID, FailedNodeID: nodeID, Attempt: 1,
 		Error:           model.AgentError{Code: code, Message: "Browser Agent infrastructure stopped before traceable page evidence was available.", Retryable: true},
 		RedactionReport: model.DiagnosticRedactionReport{Applied: true, PolicyRef: pkg.PackageID + ".redactions", FullHTMLIncluded: false}, CapturedAt: now,
+		BrowserEvidenceUnavailable: directInfrastructureFailureCode(code),
 	}
 	return result, nil
 }

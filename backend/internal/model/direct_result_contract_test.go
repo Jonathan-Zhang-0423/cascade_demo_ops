@@ -124,3 +124,17 @@ func TestFormalFailedResultRequiresTraceableDiagnostic(t *testing.T) {
 		t.Fatalf("traceable failed result was rejected: %v", err)
 	}
 }
+
+func TestFormalInfrastructureFailureCanExplicitlyDeclareBrowserEvidenceUnavailable(t *testing.T) {
+	result := &RecordingResultPackage{
+		Status: RecordingResultStatusFailed,
+		FailureDiagnostic: &ScriptFailureDiagnostic{
+			Error:                      AgentError{Code: "outcome_pre_verification_failed"},
+			RedactionReport:            DiagnosticRedactionReport{Applied: true},
+			BrowserEvidenceUnavailable: true,
+		},
+	}
+	if err := ValidateFormalRecordingResultArtifacts(result, &ClientExecutionPackage{}); err != nil {
+		t.Fatalf("explicit infrastructure failure was rejected: %v", err)
+	}
+}

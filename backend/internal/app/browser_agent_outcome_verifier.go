@@ -20,6 +20,9 @@ func validationContextFromPackage(pkg *model.ClientExecutionPackage) model.Brows
 		return context
 	}
 	context.SourcePackageID = pkg.PackageID
+	context.ProjectContextSummary = pkg.ProjectContextSummary
+	context.ProductMapSummary = pkg.ProductMapSummary
+	context.CredentialGrants = append([]model.CredentialGrant(nil), pkg.CredentialGrants...)
 	context.WorkflowGraph = pkg.WorkflowGraph
 	if pkg.ExecutableScriptBundle == nil {
 		return context

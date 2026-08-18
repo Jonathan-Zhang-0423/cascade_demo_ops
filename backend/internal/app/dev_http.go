@@ -877,6 +877,16 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/status":
 		status, err := s.service.GetDirectExecutionStatus(r.Context(), projectID, r.URL.Query().Get("job_id"))
 		writeBridgeValue(w, status, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/credentials/reupload":
+		var request struct {
+			JobID string `json:"job_id"`
+		}
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		receipt, err := s.service.ReuploadDirectCredential(r.Context(), projectID, request.JobID)
+		writeBridgeValue(w, receipt, err)
 	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/result":
 		result, err := s.service.GetDirectResult(r.Context(), projectID, r.URL.Query().Get("job_id"))
 		writeBridgeValue(w, result, err)
