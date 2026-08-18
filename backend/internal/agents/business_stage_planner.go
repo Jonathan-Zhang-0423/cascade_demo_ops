@@ -953,6 +953,8 @@ func businessProbeAllowedForStage(spec stageSpec, probe model.InteractionProbe) 
 
 func businessActionMatchesStage(spec stageSpec, label string, kind string, selector string, value string, componentRef string) bool {
 	text := strings.Join([]string{label, kind, selector, value, componentRef}, " ")
+	labelText := normalizeIntentText(label)
+	selectorText := normalizeIntentText(strings.Join([]string{selector, componentRef}, " "))
 	wantAction := model.GraphActionType(spec.actionType)
 	gotAction := graphActionTypeFromKind(kind, selector)
 	if wantAction != "" && gotAction != wantAction {
@@ -960,13 +962,21 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 	}
 	switch spec.id {
 	case "new_project_entry":
-		return containsAnyNormalized(text, "new project", "create project", "new-project", "create-project", "新建项目", "创建项目", "新增项目")
+		if containsAnyNormalized(selectorText, "button-create-project", "create-project-button") && !containsAnyNormalized(selectorText, "button-new-project", "new-project-button") {
+			return false
+		}
+		return containsAnyNormalized(labelText, "new project", "create project", "新建项目", "创建项目", "新增项目") ||
+			containsAnyNormalized(selectorText, "button-new-project", "new-project-button", "new-project-entry", "create-project-entry")
 	case "project_name_input":
 		return containsAnyNormalized(text, "project name", "project-name", "project idea", "project-idea", "project prompt", "project-prompt", "项目名称", "项目名", "项目需求", "需求描述", "idea", "prompt", spec.inputValue)
 	case "select_build_mode":
 		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "mode plan", "mode-plan", "plan mode", "plan-mode", "构建模式", "规划模式", "计划模式")
 	case "start_agent_build":
-		return containsAnyNormalized(text, "start build", "start-build", "run build", "generate app", "启动 agent", "启动agent", "启动构建", "开始构建", "开始生成")
+		if containsAnyNormalized(labelText+" "+selectorText, "build mode", "build-mode", "builder mode", "mode-plan", "plan-mode", "构建模式", "规划模式", "计划模式") {
+			return false
+		}
+		return containsAnyNormalized(labelText, "build", "generate", "run", "start", "构建", "生成", "启动", "开始") ||
+			containsAnyNormalized(selectorText, "button-create-project", "create-project-button", "start-build", "run-build", "generate-app")
 	}
 	if containsAnyNormalized(text, spec.keywords...) {
 		return true

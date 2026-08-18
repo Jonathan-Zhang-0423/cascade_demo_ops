@@ -325,6 +325,38 @@ func TestBusinessStagePlannerDoesNotCrossBindAllowlistedActionTargets(t *testing
 	}
 }
 
+func TestBusinessStagePlannerSeparatesNewProjectEntryFromCreateProjectSubmit(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "新建名为“俄罗斯方块”的项目，要求 Agent 实际构建。"
+	verified := &model.VerifiedInteractionPlan{Actions: []model.VerifiedInteractionAction{
+		{ID: "entry", Label: "新建项目", Kind: "click", Selector: "[data-testid='button-new-project']", IsBusiness: true, VerificationStatus: "verified"},
+		{ID: "idea", Label: "项目需求", Kind: "fill", Selector: "[data-testid='input-project-idea']", IsBusiness: true, VerificationStatus: "verified"},
+		{ID: "mode", Label: "计划", Kind: "click", Selector: "[data-testid='button-mode-plan']", IsBusiness: true, VerificationStatus: "verified"},
+		{ID: "submit", Label: "构建！", Kind: "click", Selector: "[data-testid='button-create-project']", IsBusiness: true, VerificationStatus: "verified"},
+	}}
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, graphQualityIntelligence(), verified)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"business_stage_new_project_entry": "[data-testid='button-new-project']",
+		"business_stage_start_agent_build": "[data-testid='button-create-project']",
+	}
+	for _, stage := range plan.Stages {
+		selector, ok := want[stage.ID]
+		if !ok {
+			continue
+		}
+		if len(stage.Targets) == 0 || stage.Targets[0].Selector != selector {
+			t.Fatalf("stage %s cross-bound create entry and submit controls: got=%+v want=%s", stage.ID, stage.Targets, selector)
+		}
+		delete(want, stage.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing project creation stages: %v", want)
+	}
+}
+
 func TestBusinessStageNonDestructiveClassifierRejectsGenericAndDangerousActions(t *testing.T) {
 	if businessStageIsApprovedNonDestructive(stageSpec{id: "primary_business_action", actionType: string(model.GraphActionClick)}) {
 		t.Fatal("generic click must not be classified as non-destructive")
