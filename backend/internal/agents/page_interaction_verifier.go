@@ -115,12 +115,13 @@ type interactionVerifierRequest struct {
 }
 
 type interactionVerifierGoal struct {
-	ID       string   `json:"id,omitempty"`
-	Label    string   `json:"label,omitempty"`
-	Kind     string   `json:"kind,omitempty"`
-	Keywords []string `json:"keywords,omitempty"`
-	Required bool     `json:"required,omitempty"`
-	Business bool     `json:"business,omitempty"`
+	ID         string   `json:"id,omitempty"`
+	Label      string   `json:"label,omitempty"`
+	Kind       string   `json:"kind,omitempty"`
+	Keywords   []string `json:"keywords,omitempty"`
+	Required   bool     `json:"required,omitempty"`
+	Business   bool     `json:"business,omitempty"`
+	InputValue string   `json:"input_value,omitempty"`
 }
 
 type interactionVerifierItem struct {
@@ -901,15 +902,28 @@ func verifierGoals(intelligence *model.ProjectIntelligencePack) []interactionVer
 			continue
 		}
 		goals = append(goals, interactionVerifierGoal{
-			ID:       goal.ID,
-			Label:    goal.Label,
-			Kind:     firstNonEmpty(goal.PreferredAction, goal.Kind),
-			Keywords: goal.TargetKeywords,
-			Required: goal.Required,
-			Business: goal.BusinessCritical,
+			ID:         goal.ID,
+			Label:      goal.Label,
+			Kind:       firstNonEmpty(goal.PreferredAction, goal.Kind),
+			Keywords:   goal.TargetKeywords,
+			Required:   goal.Required,
+			Business:   goal.BusinessCritical,
+			InputValue: verifierGoalInputValue(goal),
 		})
 	}
 	return goals
+}
+
+func verifierGoalInputValue(goal model.DemoIntentGoal) string {
+	if goal.ID != "intent_project_requirement_input" || goal.PreferredAction != "fill" || !goal.Required || !goal.BusinessCritical {
+		return ""
+	}
+	const prefix = "填写项目需求："
+	value := strings.TrimSpace(strings.TrimPrefix(goal.Label, prefix))
+	if value == goal.Label || value == "" || len([]rune(value)) > 512 || containsAnyNormalized(value, "password", "passwd", "secret", "token", "api key", "密码", "口令", "密钥", "令牌") {
+		return ""
+	}
+	return value
 }
 
 func probeFromVerifierResult(result interactionVerifierResult, byID map[string]model.InteractionProbe) model.InteractionProbe {

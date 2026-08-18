@@ -22,6 +22,7 @@ type InteractionGoal = {
   keywords?: string[];
   required?: boolean;
   business?: boolean;
+  input_value?: string;
 };
 
 type InteractionCandidate = {
@@ -184,6 +185,8 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
     diagnostics.safe_state_transitions = safeTransitions;
     const discoveredTransition = await applyDiscoveredNewProjectTransition(page, request.intent_goals || [], request, timeout);
     if (discoveredTransition) safeTransitions.push(discoveredTransition);
+    const projectInputTransition = await applyDiscoveredProjectInput(page, request.intent_goals || [], request, timeout);
+    if (projectInputTransition) safeTransitions.push(projectInputTransition);
     if (safeTransitions.some((value) => value.startsWith("applied:"))) {
       currentURL = page.url();
       pageTitle = await page.title().catch(() => "");
@@ -348,6 +351,56 @@ async function applyDiscoveredNewProjectTransition(
   await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
   if (isURLForbiddenByScope(page.url(), request)) return "discovered_result_scope_rejected:new_project_entry";
   return "applied:discovered_new_project_entry";
+}
+
+async function applyDiscoveredProjectInput(
+  page: any,
+  goals: InteractionGoal[],
+  request: VerifyInteractionRequest,
+  timeout: number,
+): Promise<string> {
+  const goal = goals.find((candidate) => {
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
+    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "fill" &&
+      typeof candidate.input_value === "string" && candidate.input_value.trim().length > 0 && candidate.input_value.length <= 512 &&
+      /(项目需求|项目名称|project idea|project prompt|project name|input-project-idea)/i.test(semantic) &&
+      !/(password|passwd|secret|token|api key|密码|口令|密钥|令牌)/i.test(candidate.input_value);
+  });
+  if (!goal || isURLForbiddenByScope(page.url(), request)) return "";
+
+  const controls = await page.locator("input, textarea").evaluateAll((elements: any[]) => elements.slice(0, 80).map((element) => {
+    const html = element as any;
+    const rect = html.getBoundingClientRect();
+    const style = (globalThis as any).getComputedStyle(html);
+    const semantic = String([
+      element.getAttribute("data-testid"), element.getAttribute("data-test"), element.getAttribute("data-cy"),
+      element.getAttribute("name"), element.getAttribute("aria-label"), element.getAttribute("placeholder"),
+    ].filter(Boolean).join(" ")).toLowerCase();
+    const testid = element.getAttribute("data-testid") || element.getAttribute("data-test") || element.getAttribute("data-cy") || "";
+    const name = element.getAttribute("name") || "";
+    return {
+      testid,
+      name,
+      tag: String(html.tagName || "input").toLowerCase(),
+      semantic,
+      eligible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" &&
+        !html.disabled && !html.readOnly && !["password", "hidden", "file"].includes(String(html.type || "").toLowerCase()),
+      score: (testid ? 100 : 40) + (/(project[-_ ]?(idea|name|prompt)|(idea|name|prompt)[-_ ]?project|项目.{0,4}(需求|名称|描述))/.test(semantic) ? 100 : 0),
+    };
+  })).catch(() => []);
+  const resolvedControls = controls.map((control: any) => ({
+    ...control,
+    selector: control.testid ? `[data-testid="${escapeCSSString(control.testid)}"]` : control.name ? `${control.tag}[name="${escapeCSSString(control.name)}"]` : "",
+  }));
+  const candidates = resolvedControls.filter((control: any) => control.eligible && control.selector && control.score >= 140).sort((left: any, right: any) => right.score - left.score);
+  if (candidates.length === 0) {
+    return "discovered_unavailable:project_creation_input";
+  }
+  if (candidates.length > 1 && candidates[0].score === candidates[1].score) return "discovered_ambiguous:project_creation_input";
+  const filled = await page.locator(candidates[0].selector).first().fill(goal.input_value!.trim(), { timeout: Math.min(timeout, 4000) }).then(() => true).catch(() => false);
+  if (!filled) return "discovered_failed:project_creation_input";
+  await page.waitForTimeout(250);
+  return "applied:discovered_project_creation_input";
 }
 
 async function discoverBusinessActions(

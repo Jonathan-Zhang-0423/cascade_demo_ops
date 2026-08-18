@@ -267,9 +267,9 @@ describe("interaction verifier safe state exploration", () => {
           <main data-testid="dashboard-page"><div data-testid="card-project-old">Old Project</div></main>
           <button data-testid="button-new-project" onclick="document.querySelector('#dialog').hidden=false">New Project</button>
           <section id="dialog" data-testid="dialog-new-project" hidden>
-            <textarea data-testid="input-project-idea" placeholder="Describe your project idea"></textarea>
+            <input data-testid="input-project-idea" placeholder="Describe your project idea" oninput="document.querySelector('[data-testid=button-create-project]').disabled=!this.value.trim()">
             <button data-testid="button-mode-plan">Plan</button>
-            <button data-testid="button-create-project">Build</button>
+            <button data-testid="button-create-project" disabled>Build</button>
           </section>`);
         return;
       }
@@ -289,7 +289,7 @@ describe("interaction verifier safe state exploration", () => {
       safe_state_transitions: [{ id: "login", label: "Sign in", kind: "click", selector: "[data-testid='login-submit']", url: `${productURL}/login` }],
       intent_goals: [
         { id: "new-project", label: "Create new project", kind: "click", keywords: ["new", "project"], required: true, business: true },
-        { id: "project-idea", label: "Enter project idea", kind: "fill", keywords: ["project", "idea"], required: true, business: true },
+        { id: "project-idea", label: "Enter project idea", kind: "fill", keywords: ["project", "idea"], required: true, business: true, input_value: "Russian Tetris" },
         { id: "direct-build", label: "Disable plan mode", kind: "click", keywords: ["plan", "mode"], required: true, business: true },
         { id: "start-build", label: "Start build", kind: "click", keywords: ["build"], required: true, business: true },
       ],
@@ -298,6 +298,7 @@ describe("interaction verifier safe state exploration", () => {
     expect(result.ok).toBe(true);
     expect(result.diagnostics?.safe_state_transitions).toContain("applied:login");
     expect(result.diagnostics?.safe_state_transitions).toContain("applied:discovered_new_project_entry");
+    expect(result.diagnostics?.safe_state_transitions, JSON.stringify(result.diagnostics?.safe_state_transitions)).toContain("applied:discovered_project_creation_input");
     for (const selector of ['[data-testid="input-project-idea"]', '[data-testid="button-mode-plan"]', '[data-testid="button-create-project"]']) {
       expect(result.results.some((item) => item.selector === selector && item.status === "verified")).toBe(true);
     }

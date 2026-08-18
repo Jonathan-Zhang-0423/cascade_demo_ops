@@ -155,6 +155,16 @@ func TestDemoIntentDerivesAtomicProjectCreationGoalsFromCompoundLoginRequirement
 	if len(want) != 0 {
 		t.Fatalf("compound login requirement did not produce all atomic project-creation goals: missing=%v goals=%+v", want, intent.Goals)
 	}
+	verifier := verifierGoals(&model.ProjectIntelligencePack{DemoIntent: intent})
+	foundInput := false
+	for _, goal := range verifier {
+		if goal.ID == "intent_project_requirement_input" && goal.InputValue == "俄罗斯方块" {
+			foundInput = true
+		}
+	}
+	if !foundInput {
+		t.Fatalf("page verifier did not receive the bounded approved project input value: %+v", verifier)
+	}
 }
 
 func TestBusinessStagePlannerDoesNotInferProjectNameFromDerivedIntentMetadata(t *testing.T) {
