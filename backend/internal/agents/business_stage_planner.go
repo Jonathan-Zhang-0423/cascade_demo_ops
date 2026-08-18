@@ -327,8 +327,9 @@ func durationMSForIntentKeywords(intentText string, keywords ...string) int {
 	}
 	best := 0
 	bestDistance := 0
+	hasFinalFilmPipeline := durationIntentHasFinalFilmPipeline(normalized)
 	for _, hint := range hints {
-		if hint.Maximum || hint.FinalFilm {
+		if hint.Maximum || hint.FinalFilm || (hasFinalFilmPipeline && hint.ValueMS >= 60*1000) {
 			continue
 		}
 		distance, ok := nearestKeywordDistance(normalized, hint.CenterRune, keywords)
@@ -341,6 +342,12 @@ func durationMSForIntentKeywords(intentText string, keywords ...string) int {
 		}
 	}
 	return best
+}
+
+func durationIntentHasFinalFilmPipeline(text string) bool {
+	return containsAnyNormalized(text, "ffmpeg") && containsAnyNormalized(text,
+		"最终 mp4", "最终mp4", "最终成片", "合成为最终成片", "合成最终成片", "final mp4", "final film",
+	)
 }
 
 func requiredObservationDurationMS(intentText string) int {

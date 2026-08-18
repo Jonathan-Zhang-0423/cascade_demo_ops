@@ -88,6 +88,10 @@ func TestCompletionWaitUsesMaximumAsTimeoutNotCaptureDuration(t *testing.T) {
 	if got := durationMSForIntentKeywords(concatenatedRequirements, "登录", "最终"); got != 0 {
 		t.Fatalf("concatenated final-film requirement leaked into browser stage timing: %d", got)
 	}
+	fullPipelineIntent := "完成一次约120秒的真实 Agent 编码与可玩结果演示：从安全登录、新建项目到键盘试玩，最后由 Director 规划镜头并经 FFmpeg 合成最终成片。"
+	if got := durationMSForIntentKeywords(fullPipelineIntent, "登录", "最终", "结果"); got != 0 {
+		t.Fatalf("pipeline-wide final duration leaked into browser stage timing: %d", got)
+	}
 }
 
 func TestBusinessStagePlannerAddsBoundedKeyboardPlayabilityVerification(t *testing.T) {
