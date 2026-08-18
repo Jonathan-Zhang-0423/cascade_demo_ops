@@ -215,7 +215,7 @@ describe("desktop bridge contract", () => {
 					package_id: "pkg_hydrated",
 					workflow_graph: workspace.planReview.graph,
 					executable_script_bundle: bundle,
-					confidence_summary: { assessment_hash: "sha256:confidence", readiness: "review_required", overall_score: 0.91, blocking_reasons: [], warnings: ["soft budget"] },
+					confidence_summary: { assessment_hash: "sha256:confidence", readiness: "review_required", overall_score: 0.91, warnings: ["soft budget"] },
 					metadata: { staleness_status: "current" },
 				},
 				build_status: "draft",
@@ -229,13 +229,14 @@ describe("desktop bridge contract", () => {
 		const result = await createLocalBridgeClient("http://127.0.0.1:4317").loadProject(workspace.id);
 
 		expect(result.ok).toBe(true);
-		expect(result.data?.packagePreview).toMatchObject({
+			expect(result.data?.packagePreview).toMatchObject({
 			packageID: "pkg_hydrated",
 			packageDigest: "sha256:package",
 			approvalSubjectDigest: "sha256:approval",
 			confidenceAssessmentHash: "sha256:confidence",
 			readiness: "review_required",
-			buildStatus: "draft",
+				buildStatus: "draft",
+				blockedReasons: [],
 		});
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});

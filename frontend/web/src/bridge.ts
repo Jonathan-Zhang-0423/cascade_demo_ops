@@ -2356,7 +2356,7 @@ function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: Loca
 	  ...(sourceSnapshotAt ? { sourceSnapshotAt } : {}),
 	  ...(pageScanAt ? { pageScanAt } : {}),
 	  ...(stalenessStatus === "current" || stalenessStatus === "inputs_newer_than_plan" ? { stalenessStatus } : {}),
-	  blockedReasons: build.package.confidence_summary?.blocking_reasons ?? workspace.packagePreview.blockedReasons,
+	  blockedReasons: build.package.confidence_summary ? (build.package.confidence_summary.blocking_reasons ?? []) : workspace.packagePreview.blockedReasons,
     },
     cloudRun: {
 	  ...cloudRunBase,
