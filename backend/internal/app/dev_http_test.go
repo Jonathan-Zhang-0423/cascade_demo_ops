@@ -672,6 +672,26 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	}
 }
 
+func TestBrowserAgentPreflightAcceptsPlayableAndKeyboardValidations(t *testing.T) {
+	tests := []model.ScriptStep{
+		{
+			NodeID: "business_stage_playable_preview", StageKind: model.BusinessStageKindFinalObserve,
+			Action:      model.ScriptActionInstruction{Type: model.GraphActionInspect},
+			Validations: []model.ValidationSpec{{Kind: "playable_surface_visible", Expected: true, Required: true}},
+		},
+		{
+			NodeID: "business_stage_verify_playable_controls", StageKind: model.BusinessStageKindFinalObserve,
+			Action:      model.ScriptActionInstruction{Type: model.GraphActionPress},
+			Validations: []model.ValidationSpec{{Kind: "page_changed", Expected: true, Required: true}},
+		},
+	}
+	for _, step := range tests {
+		if !browserAgentStepNeedsValidation(step) || !browserAgentStepHasRequiredValidation(step) {
+			t.Fatalf("playable browser-agent step must pass required-validation preflight: %+v", step)
+		}
+	}
+}
+
 func TestBuildClientExecutionPackagePreviewDigestIsStable(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{

@@ -2864,7 +2864,7 @@ func stageEvidenceRequired(stage model.StageApprovalStage) bool {
 
 func browserAgentStepNeedsValidation(step model.ScriptStep) bool {
 	switch step.Action.Type {
-	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
+	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall, model.GraphActionPress:
 		return true
 	case model.GraphActionWait, model.GraphActionInspect:
 		return step.StageKind == model.BusinessStageKindSessionSetup || step.StageKind == model.BusinessStageKindObserveProgress || step.StageKind == model.BusinessStageKindFinalObserve
@@ -2879,7 +2879,7 @@ func browserAgentStepHasRequiredValidation(step model.ScriptStep) bool {
 			continue
 		}
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
 			return true
 		}
 	}
