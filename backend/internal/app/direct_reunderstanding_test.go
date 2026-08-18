@@ -30,6 +30,28 @@ func TestPersistCloudResultDoesNotUpgradeOrdinaryBrowserActionFailure(t *testing
 	}
 }
 
+func TestPersistCloudResultUpgradesStoppedRequiredAppAssertion(t *testing.T) {
+	service, states, state, build := newDirectReunderstandingTestState(t)
+	result := directReunderstandingFailedResult(build, false)
+	result.ValidationReports = []model.ValidationReport{{
+		Decision: model.ValidationDecisionStopAndReport,
+		Checks: []model.ValidationCheck{{
+			ID: "check_app_assertion", Code: "REQUIRED_ASSERTION_FAILED", NodeID: build.Package.ExecutableScriptBundle.PlanJSON.Steps[0].NodeID,
+			Severity: model.FindingSeverityBlocking, Required: true, Summary: "approved App assertion did not match the real page", ResponsibilityDomain: model.ValidationCheckDomainApp,
+		}},
+	}}
+	if err := service.persistCloudResult(t.Context(), state.ProjectID, defaultDesktopOrgID, result); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := states.Load(t.Context(), state.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.DesktopCloudRun == nil || persisted.DesktopCloudRun.Stage != "reunderstanding_required" || persisted.DesktopCloudRun.BlockingErrorCode != "reunderstanding_required" || len(persisted.DesktopCloudRun.ReunderstandingIssues) != 1 {
+		t.Fatalf("required App-owned stopped assertion was not promoted to formal re-understanding: %+v", persisted.DesktopCloudRun)
+	}
+}
+
 func TestDirectFailureReunderstandingLifecycleAndIdempotency(t *testing.T) {
 	service, states, state, build := newDirectReunderstandingTestState(t)
 	service.approvedBuilds[state.ProjectID+"|old"] = approvedBuildCacheEntry{Build: build}

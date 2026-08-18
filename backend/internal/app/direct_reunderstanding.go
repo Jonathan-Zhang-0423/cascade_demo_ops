@@ -180,11 +180,16 @@ func directReunderstandingResult(state *orchestrator.CascadeState, build ClientE
 func directIssuesFromFailedResult(result model.RecordingResultPackage, bundle *model.ExecutableRecordingScriptBundle) []model.DirectReunderstandingIssue {
 	issues := []model.DirectReunderstandingIssue{}
 	for _, report := range result.ValidationReports {
-		if report.Decision != model.ValidationDecisionReunderstandingRequired {
-			continue
-		}
 		for _, check := range report.Checks {
 			if check.Passed {
+				continue
+			}
+			// Runtime must stop immediately on any required assertion failure,
+			// so its report may correctly say stop_and_report. When the same
+			// check is explicitly owned by the App package, it still represents
+			// an authoritative re-understanding issue rather than an ordinary
+			// browser/environment failure.
+			if report.Decision != model.ValidationDecisionReunderstandingRequired && !(check.Required && check.ResponsibilityDomain == model.ValidationCheckDomainApp) {
 				continue
 			}
 			issue := model.DirectReunderstandingIssue{Code: firstNonEmptyString(check.Code, check.Kind), StageID: firstNonEmptyString(check.StageID, report.StageID), NodeID: firstNonEmptyString(check.NodeID, report.NodeID), Severity: check.Severity, Required: check.Required, Summary: check.Summary, Impact: check.Impact, Suggestion: check.Suggestion, NextStep: check.NextStep, ResponsibilityDomain: check.ResponsibilityDomain, EvidenceIDs: evidenceIDs(check.EvidenceRefs)}
