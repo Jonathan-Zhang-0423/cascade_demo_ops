@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -430,9 +430,21 @@ describe("browser agent required validations", () => {
 			validations: [{ id: "changed", kind: "page_changed", expected: true, required: true }],
 		};
 		expect(await evaluateRequiredValidations({}, stage, new Map([[stage.node_id, true]]))).toEqual([{
-			kind: "required_page_changed:changed", passed: true, actual: "visual_changed_after_approved_keys",
+			kind: "required_page_changed:changed", passed: true, actual: "visual_changed_after_approved_action",
 		}]);
 		expect((await evaluateRequiredValidations({}, stage, new Map()))[0]?.passed).toBe(false);
+	});
+
+	it("captures click digests only when the approved stage requires visual change", () => {
+		const stage = {
+			id: "stage_mode", order: 4, node_id: "select_build_mode",
+			target_contract: { semantic_id: "build_mode", destructive: false },
+			interactions: [{ kind: "click", non_destructive: true }],
+			validations: [{ id: "changed", kind: "page_changed", expected: true, required: true }],
+		};
+		expect(interactionRequiresVisualChangeEvidence(stage, "click")).toBe(true);
+		expect(interactionRequiresVisualChangeEvidence(stage, "fill")).toBe(false);
+		expect(interactionRequiresVisualChangeEvidence({ ...stage, validations: [{ ...stage.validations[0], required: false }] }, "click")).toBe(false);
 	});
 
   it("allows a bounded long poll only for a non-destructive final completion observation", async () => {

@@ -828,6 +828,8 @@ async function executeInteraction(
   if (!targetGeometry) throw new Error(`browser_agent_target_geometry_unavailable: ${stage.node_id}`);
   targetArtifact.metadata.target_geometry = targetGeometry;
   session.targetGeometryByArtifactID.set(targetArtifact.id, targetGeometry);
+	const trackVisualChange = interactionRequiresVisualChangeEvidence(stage, interaction.kind);
+	const visualDigestBefore = trackVisualChange ? await pageVisualDigest(session.page) : "";
   if (interaction.kind === "click") {
     await resolved.locator.click({ timeout });
   } else if (interaction.kind === "fill") {
@@ -846,7 +848,14 @@ async function executeInteraction(
     throw new Error(`browser_agent_action_not_supported: ${interaction.kind}`);
   }
   await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+	if (trackVisualChange) {
+		session.visualChangeByNodeID.set(stage.node_id, visualDigestBefore !== await pageVisualDigest(session.page));
+	}
   return { geometry: targetGeometry, artifact: targetArtifact };
+}
+
+export function interactionRequiresVisualChangeEvidence(stage: BrowserAgentWorkerStage, interactionKind: string): boolean {
+	return interactionKind === "click" && (stage.validations || []).some((validation) => validation.required && validation.kind === "page_changed");
 }
 
 export function recoveredScreenshotMetadata(
@@ -1221,7 +1230,7 @@ export async function evaluateRequiredValidations(
         actual = redactText(title);
       } else if (validation.kind === "page_changed") {
         passed = visualChangeByNodeID?.get(stage.node_id) === true;
-        actual = passed ? "visual_changed_after_approved_keys" : "no_verified_visual_change";
+		actual = passed ? "visual_changed_after_approved_action" : "no_verified_visual_change";
       } else if (validation.kind === "playable_surface_visible") {
         const result = await waitForPlayableSurface(page, timeout);
         passed = result.surface && result.score && result.controls;
