@@ -418,7 +418,7 @@ func durationHintIsFinalFilm(runes []rune, startRune int, endRune int) bool {
 	windowEnd := minInt(len(runes), endRune+20)
 	context := normalizeIntentText(string(runes[windowStart:windowEnd]))
 	return containsAnyNormalized(context,
-		"最终成片", "成片时长", "最终输出", "输出 mp4", "输出mp4", "mp4 成片", "mp4成片",
+		"最终成片", "成片时长", "最终输出", "输出 mp4", "输出mp4", "最终 mp4", "最终mp4", "mp4 成片", "mp4成片", "ffmpeg",
 		"真实操作演示", "演示时长", "整段演示", "完整演示", "演示视频", "编码演示", "产出一条", "节奏清晰",
 		"final film", "final video", "final mp4", "video duration",
 	)
