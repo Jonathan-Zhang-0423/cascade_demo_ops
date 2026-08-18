@@ -244,6 +244,8 @@ const targetProbeTimeoutMS = 2_000;
 const defaultViewport = { width: 2560, height: 1440 };
 const actionTimeoutMS = 10_000;
 const screenshotTimeoutMS = 8_000;
+const standardValidationTimeoutMS = 30_000;
+const finalCompletionValidationTimeoutMS = 20 * 60 * 1000;
 const secretInputMaskSelector = '[data-cascade-secret-input="true"]';
 
 export async function openBrowserAgentSession(request: BrowserAgentOpenRequest): Promise<{ session_id: string; runtime_versions: Record<string, string> }> {
@@ -1108,7 +1110,7 @@ async function valueWithin<T>(promise: Promise<T>, timeoutMS: number, fallback: 
 export async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerStage): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   for (const validation of (stage.validations || []).filter((item) => item.required)) {
-    const timeout = Math.max(250, Math.min(30_000, validation.timeout_ms || actionTimeoutMS));
+    const timeout = validationTimeoutMilliseconds(stage, validation);
     let passed = false;
     let actual = "not_satisfied";
     try {
@@ -1132,7 +1134,7 @@ export async function evaluateRequiredValidations(page: any, stage: BrowserAgent
         actual = String(readyState);
       } else if (validation.kind === "element_visible") {
         const locator = locatorForValidation(page, validation);
-        passed = await locator.first().isVisible({ timeout }).catch(() => false);
+        passed = await waitForLocatorVisible(locator, timeout);
         actual = passed ? "visible" : "not_visible";
         if (!passed && await evidenceBoundFormControlOutcomeVerified(page, stage)) {
           // The App may retain a pre-scan result selector while its approved
@@ -1160,7 +1162,7 @@ export async function evaluateRequiredValidations(page: any, stage: BrowserAgent
         actual = passed ? "hidden" : "visible";
       } else if (validation.kind === "text_contains") {
         const expected = scalarExpected(validation);
-        passed = Boolean(expected) && await page.locator("body").evaluate((element: any, value: string) => String(element.innerText || "").includes(value), String(expected)).catch(() => false);
+        passed = Boolean(expected) && await waitForPageText(page, String(expected), timeout);
         actual = passed ? "matched" : "not_matched";
       } else if (validation.kind === "attribute_equals") {
         const locator = locatorForValidation(page, validation).first();
@@ -1195,6 +1197,44 @@ export async function evaluateRequiredValidations(page: any, stage: BrowserAgent
     assertions.push({ kind: `required_${validation.kind}:${validation.id}`, passed, actual });
   }
   return assertions;
+}
+
+export function validationTimeoutMilliseconds(stage: BrowserAgentWorkerStage, validation: BrowserAgentValidation): number {
+  const requested = Math.max(250, Math.trunc(Number(validation.timeout_ms) || actionTimeoutMS));
+  if (requested <= standardValidationTimeoutMS) return requested;
+  if (!longCompletionValidationAllowed(stage, validation)) return standardValidationTimeoutMS;
+  return Math.min(requested, finalCompletionValidationTimeoutMS);
+}
+
+function longCompletionValidationAllowed(stage: BrowserAgentWorkerStage, validation: BrowserAgentValidation): boolean {
+  if (stage.stage_kind !== "final_observe" || stage.target_contract?.destructive) return false;
+  if (!stage.interactions.length || stage.interactions.some((interaction) => !["wait", "inspect"].includes(String(interaction.kind || "").toLowerCase()))) return false;
+  return validation.kind === "element_visible" || validation.kind === "text_contains";
+}
+
+async function waitForLocatorVisible(locator: any, timeout: number): Promise<boolean> {
+  const first = locator.first();
+  if (typeof first.waitFor === "function") {
+    try {
+      await first.waitFor({ state: "visible", timeout });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return first.isVisible({ timeout }).catch(() => false);
+}
+
+async function waitForPageText(page: any, expected: string, timeout: number): Promise<boolean> {
+  if (typeof page.waitForFunction === "function") {
+    try {
+      await page.waitForFunction((value: string) => String((globalThis as any).document?.body?.innerText || "").includes(value), expected, { timeout });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return page.locator("body").evaluate((element: any, value: string) => String(element.innerText || "").includes(value), expected).catch(() => false);
 }
 
 function approvedObservationRouteTemplateVerified(

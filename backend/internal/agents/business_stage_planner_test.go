@@ -48,6 +48,22 @@ func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
 	}
 }
 
+func TestCompletionWaitUsesMaximumAsTimeoutNotCaptureDuration(t *testing.T) {
+	intent := "等待 Agent 真正编写完代码，轮询直到全部步骤完成，最多 20 分钟；最终成片时长 2 分钟。"
+	if got := requiredObservationDurationMS(intent); got != 0 {
+		t.Fatalf("a maximum completion wait must not become a minimum capture duration, got %d", got)
+	}
+	if got := completionWaitTimeoutMS(intent); got != 20*60*1000 {
+		t.Fatalf("completion timeout=%d, want %d", got, 20*60*1000)
+	}
+	if got := completionWaitTimeoutMS("等待 Agent 构建完成"); got != maxBuildCompletionWaitMS {
+		t.Fatalf("default completion timeout=%d, want %d", got, maxBuildCompletionWaitMS)
+	}
+	if got := completionWaitTimeoutMS("停留在项目详情页查看状态"); got != 0 {
+		t.Fatalf("ordinary final observation must not receive a long poll, got %d", got)
+	}
+}
+
 func TestBusinessStagePlannerCreatesRequirementDrivenProjectStages(t *testing.T) {
 	project := graphQualityProject()
 	project.ProductDescription = "演示登录 7 秒，新建项目 13 秒，项目名称2048，选择构建模式，启动 agent 实际构建，并等待 45 秒观察。"

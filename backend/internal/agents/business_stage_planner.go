@@ -171,6 +171,8 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		})
 	}
 
+	wantsCompletion := wantsBuildCompletion(intentText)
+
 	if len(builder.stages) == 0 && intentIsObservationOnly(intentText) {
 		builder.addStage(stageSpec{
 			id:             "observation_only",
@@ -208,19 +210,27 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		})
 	}
 
+	finalObjective := "停留在最终业务页面，截图并让观众看清楚当前结果。"
+	finalSuccessState := "最终业务状态保持可观察。"
+	finalKeywords := []string{"结果", "状态", "预览", "详情", "result", "preview", "detail"}
+	if wantsCompletion {
+		finalObjective = "轮询等待明确的 Agent 构建完成结果，完成后停留在最终业务页面并截图。"
+		finalSuccessState = "页面出现由产品代码证据绑定的 Agent 构建完成结果，而不是仅有加载状态或构建中状态。"
+		finalKeywords = append(finalKeywords, "构建完成", "全部步骤完成", "编写完成", "build complete", "build_complete", "all complete", "all steps", "build-result", "completed")
+	}
 	builder.addStage(stageSpec{
 		id:             "final_observe",
 		kind:           model.BusinessStageKindFinalObserve,
 		title:          "收束并观察最终状态",
-		objective:      "停留在最终业务页面，截图并让观众看清楚当前结果。",
+		objective:      finalObjective,
 		actionType:     string(model.GraphActionInspect),
 		actionLabel:    "观察最终状态",
-		successState:   "最终业务状态保持可观察。",
+		successState:   finalSuccessState,
 		routeState:     builder.finalRouteState(),
 		entryRoute:     builder.finalEntryRoute(),
 		expectedRoute:  builder.finalEntryRoute(),
 		durationMS:     durationMSForIntentKeywords(intentText, "最终", "收束", "结果", "状态", "预览", "详情", "final", "result", "preview", "detail"),
-		keywords:       []string{"结果", "状态", "预览", "详情", "result", "preview", "detail"},
+		keywords:       finalKeywords,
 		capture:        []string{"最终状态截图"},
 		nonDestructive: true,
 	})
@@ -251,6 +261,7 @@ type intentDurationHint struct {
 	ValueMS    int
 	Context    string
 	CenterRune int
+	Maximum    bool
 }
 
 var intentDurationPattern = regexp.MustCompile(`(?i)(\d+)\s*(毫秒|ms|秒|s|sec|secs|second|seconds|分钟|mins|minutes|min|m)`)
@@ -273,6 +284,9 @@ func durationMSForIntentKeywords(intentText string, keywords ...string) int {
 	best := 0
 	bestDistance := 0
 	for _, hint := range hints {
+		if hint.Maximum {
+			continue
+		}
 		distance, ok := nearestKeywordDistance(normalized, hint.CenterRune, keywords)
 		if !ok || distance > maxDurationKeywordDistanceRunes {
 			continue
@@ -321,9 +335,52 @@ func durationHintsFromIntent(intentText string) []intentDurationHint {
 			ValueMS:    durationMS,
 			Context:    string(runes[windowStart:windowEnd]),
 			CenterRune: (startRune + endRune) / 2,
+			Maximum:    durationHintIsMaximum(runes, startRune, endRune),
 		})
 	}
 	return out
+}
+
+func durationHintIsMaximum(runes []rune, startRune int, endRune int) bool {
+	windowStart := maxInt(0, startRune-14)
+	windowEnd := minInt(len(runes), endRune+10)
+	context := normalizeIntentText(string(runes[windowStart:windowEnd]))
+	return containsAnyNormalized(context,
+		"最多", "至多", "不超过", "最大", "上限", "超时", "最长", "max", "maximum", "up to", "timeout", "at most",
+	)
+}
+
+const maxBuildCompletionWaitMS = 20 * 60 * 1000
+
+func wantsBuildCompletion(intentText string) bool {
+	text := normalizeIntentText(intentText)
+	return containsAnyNormalized(text,
+		"等待 agent 真正", "等待agent真正", "直到 agent", "直到agent", "构建完成", "编写完", "编写完成",
+		"全部步骤完成", "所有步骤完成", "明确 build_complete", "build_complete", "build complete", "all_complete",
+		"all complete", "all steps complete", "wait until complete", "wait for completion",
+	)
+}
+
+func completionWaitTimeoutMS(intentText string) int {
+	if !wantsBuildCompletion(intentText) {
+		return 0
+	}
+	best := 0
+	normalized := normalizeIntentText(intentText)
+	keywords := []string{"等待", "直到", "构建完成", "编写完", "完成", "build_complete", "build complete", "all complete", "wait", "timeout"}
+	for _, hint := range durationHintsFromIntent(intentText) {
+		if !hint.Maximum {
+			continue
+		}
+		if distance, ok := nearestKeywordDistance(normalized, hint.CenterRune, keywords); !ok || distance > maxDurationKeywordDistanceRunes+8 {
+			continue
+		}
+		best = maxInt(best, hint.ValueMS)
+	}
+	if best <= 0 {
+		best = maxBuildCompletionWaitMS
+	}
+	return minInt(best, maxBuildCompletionWaitMS)
 }
 
 func nearestKeywordDistance(normalizedIntent string, centerRune int, keywords []string) (int, bool) {

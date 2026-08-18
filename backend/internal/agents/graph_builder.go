@@ -745,6 +745,7 @@ func formalBusinessSelectorAlternatives(values []model.SelectorCandidate) []mode
 func businessStageValidation(stage model.BusinessStage, action model.GraphActionType, target model.ActionTarget, required bool) model.ValidationSpec {
 	kind := "element_visible"
 	expected := any(true)
+	timeoutMS := 0
 	if stage.Kind == model.BusinessStageKindSessionSetup {
 		// Login controls are action targets. A visible email field (especially a
 		// homepage waitlist field) cannot prove that authentication succeeded.
@@ -788,6 +789,20 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		kind = "url_matches"
 		target = model.ActionTarget{URL: stage.ExpectedRouteAfterAction}
 		expected = stage.ExpectedRouteAfterAction
+	} else if stage.Kind == model.BusinessStageKindFinalObserve && wantsBuildCompletion(stage.UserIntent) {
+		if completionTarget, ok := businessStageCompletionTarget(stage); ok {
+			target = completionTarget
+			kind = "element_visible"
+			expected = true
+		} else {
+			// Fail closed on the immutable completion claim. The result text must
+			// appear before the bounded timeout; a matching route alone is not a
+			// completed build.
+			kind = "text_contains"
+			target = model.ActionTarget{Text: firstNonEmpty(stage.Action.SuccessState, "Agent 构建已完成")}
+			expected = firstNonEmpty(stage.Action.SuccessState, "Agent 构建已完成")
+		}
+		timeoutMS = completionWaitTimeoutMS(stage.UserIntent)
 	} else if action == model.GraphActionWait || action == model.GraphActionInspect {
 		if route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute); route != "" {
 			kind = "url_matches"
@@ -808,11 +823,45 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		Target:       target,
 		Assertion:    firstNonEmpty(stage.Action.SuccessState, stage.Objective),
 		Expected:     expected,
+		TimeoutMS:    timeoutMS,
 		Severity:     severityForBusinessStage(stage, required),
 		Required:     required,
 		EvidenceRefs: stage.EvidenceRefs,
 		RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2},
 	}
+}
+
+func businessStageCompletionTarget(stage model.BusinessStage) (model.ActionTarget, bool) {
+	bestScore := -1
+	best := model.ActionTarget{}
+	for _, candidate := range stage.Targets {
+		semantic := strings.ToLower(strings.Join([]string{candidate.ID, candidate.IntentGoalID, candidate.Label, candidate.Text, candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
+		if !containsAnyNormalized(semantic,
+			"build-result", "build complete", "build_complete", "all complete", "all steps", "completed",
+			"构建完成", "全部步骤完成", "所有步骤完成", "完成结果",
+		) {
+			continue
+		}
+		selector := selectorForBusinessTarget(candidate)
+		if selector == "" && candidate.TestID == "" {
+			continue
+		}
+		score := businessTargetRank(candidate)
+		if containsAnyNormalized(semantic, "build-result-card", "build_complete", "all_complete", "构建完成") {
+			score += 1000
+		}
+		if score <= bestScore {
+			continue
+		}
+		bestScore = score
+		best = model.ActionTarget{
+			Selector: selector, Role: candidate.Role, Text: candidate.Text, Label: candidate.Label,
+			TestID: candidate.TestID, ComponentRef: candidate.ComponentRef,
+			SelectorAlternatives: formalBusinessSelectorAlternatives(candidate.Alternatives),
+			EvidenceRefs:         candidate.EvidenceRefs,
+		}
+	}
+	return best, bestScore >= 0
 }
 
 func businessStageResultTarget(stage model.BusinessStage) model.ActionTarget {

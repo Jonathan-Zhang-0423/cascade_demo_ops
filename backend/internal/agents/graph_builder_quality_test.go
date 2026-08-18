@@ -35,6 +35,34 @@ func TestGraphBuilderPrefersExecutableBusinessSelector(t *testing.T) {
 	}
 }
 
+func TestFinalBuildCompletionValidationUsesEvidenceBoundResultAndLongPoll(t *testing.T) {
+	now := time.Now().UTC()
+	evidence := model.EvidenceRef{ID: "ev_build_result", Kind: model.EvidenceKindCodeSnapshot, Confidence: 0.9}
+	candidate := model.SelectorCandidate{
+		Kind: "testid", Value: "build-result-card", EvidenceID: evidence.ID, SourceKind: "source_scan",
+		SourceDigest: "sha256:build-result", ObservedRole: "region", ObservedAccessibleName: "Build completed",
+		ObservedAt: &now, EvidenceRefs: []model.EvidenceRef{evidence},
+	}
+	stage := model.BusinessStage{
+		ID: "business_stage_final_observe", Kind: model.BusinessStageKindFinalObserve,
+		UserIntent: "等待 Agent 真正编写完代码，直到全部步骤完成，最多 20 分钟。",
+		EntryRoute: "/project/:id", ExpectedRouteAfterAction: "/project/:id",
+		Action: model.BusinessActionSemantics{SuccessState: "Agent 构建完成结果可见"},
+		Targets: []model.BusinessTargetCandidate{{
+			ID: "intent_agent_build_complete", Label: "Agent 构建完成结果", Kind: "inspect",
+			Selector: "[data-testid='build-result-card']", TestID: "build-result-card", SelectorScore: 100,
+			EvidenceRefs: []model.EvidenceRef{evidence}, Alternatives: []model.SelectorCandidate{candidate},
+		}},
+	}
+	validation := businessStageValidation(stage, model.GraphActionInspect, businessStageActionTarget(stage, "https://app.example.com"), true)
+	if validation.Kind != "element_visible" || validation.Target.TestID != "build-result-card" || validation.TimeoutMS != maxBuildCompletionWaitMS {
+		t.Fatalf("completion validation must poll the evidence-bound result, got %+v", validation)
+	}
+	if validation.Target.URL != "" {
+		t.Fatalf("completion validation must not accept the build route by itself: %+v", validation.Target)
+	}
+}
+
 func TestSessionSetupValidationUsesPostLoginStateNotEmailActionTarget(t *testing.T) {
 	stage := model.BusinessStage{
 		ID: "business_stage_session_setup", Kind: model.BusinessStageKindSessionSetup,

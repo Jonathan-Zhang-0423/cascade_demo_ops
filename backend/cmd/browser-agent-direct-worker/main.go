@@ -40,7 +40,7 @@ func main() {
 	baseURL := flag.String("gateway-url", env("CASCADE_DIRECT_WORKER_GATEWAY_URL", "http://127.0.0.1:18444"), "loopback gateway Worker API")
 	outputRoot := flag.String("output-root", env("CASCADE_DIRECT_WORKER_OUTPUT_ROOT", "/var/lib/cascade-browser-agent/worker"), "ephemeral Browser Agent output root")
 	poll := flag.Duration("poll-interval", envDuration("CASCADE_DIRECT_WORKER_POLL_INTERVAL", 2*time.Second), "job poll interval")
-	runTimeout := flag.Duration("run-timeout", envDuration("CASCADE_DIRECT_WORKER_RUN_TIMEOUT", 20*time.Minute), "maximum runtime per job")
+	runTimeout := flag.Duration("run-timeout", envDuration("CASCADE_DIRECT_WORKER_RUN_TIMEOUT", 25*time.Minute), "maximum runtime per job")
 	flag.Parse()
 	parsed, err := url.Parse(strings.TrimRight(*baseURL, "/"))
 	must(err)

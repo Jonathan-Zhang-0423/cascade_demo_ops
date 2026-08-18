@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -415,6 +415,25 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 });
 
 describe("browser agent required validations", () => {
+  it("allows a bounded long poll only for a non-destructive final completion observation", async () => {
+    const finalStage = {
+      id: "stage_final", order: 7, node_id: "final_observe", stage_kind: "final_observe",
+      target_contract: { semantic_id: "build_complete", destructive: false },
+      interactions: [{ kind: "inspect", non_destructive: true }],
+    };
+    const validation = { id: "build_complete", kind: "element_visible", target: { test_id: "build-result-card" }, required: true, timeout_ms: 1_200_000 };
+    expect(validationTimeoutMilliseconds(finalStage, validation)).toBe(1_200_000);
+    expect(validationTimeoutMilliseconds({ ...finalStage, stage_kind: "business_submit", interactions: [{ kind: "click", non_destructive: true }] }, validation)).toBe(30_000);
+    expect(validationTimeoutMilliseconds(finalStage, { ...validation, timeout_ms: 9_999_999 })).toBe(1_200_000);
+
+    let waitOptions: unknown;
+    const assertions = await evaluateRequiredValidations({
+      getByTestId: () => ({ first: () => ({ waitFor: async (options: unknown) => { waitOptions = options; } }) }),
+    }, { ...finalStage, validations: [validation] });
+    expect(waitOptions).toEqual({ state: "visible", timeout: 1_200_000 });
+    expect(assertions).toEqual([{ kind: "required_element_visible:build_complete", passed: true, actual: "visible" }]);
+  });
+
   it("accepts the App page_loaded validation for an interactive document", async () => {
     const assertions = await evaluateRequiredValidations({
       evaluate: async () => "interactive",

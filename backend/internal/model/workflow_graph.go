@@ -239,6 +239,7 @@ type ValidationSpec struct {
 	Target       ActionTarget  `json:"target,omitempty"`
 	Assertion    string        `json:"assertion,omitempty"`
 	Expected     any           `json:"expected,omitempty"`
+	TimeoutMS    int           `json:"timeout_ms,omitempty"`
 	Severity     string        `json:"severity,omitempty"`
 	Required     bool          `json:"required"`
 	RepairPolicy *RepairPolicy `json:"repair_policy,omitempty"`

@@ -3063,7 +3063,7 @@ func envelopeForClientExecutionPackage(pkg model.ClientExecutionPackage, now tim
 		},
 		Policy: model.ExchangePackagePolicy{
 			ReplayProtection:       true,
-			MaxExecutionWindowSec:  900,
+			MaxExecutionWindowSec:  30 * 60,
 			DeletePayloadAfterRun:  true,
 			HumanApprovalRequired:  true,
 			StructureSummaryOnly:   true,

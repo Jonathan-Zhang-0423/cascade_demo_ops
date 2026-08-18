@@ -365,6 +365,9 @@ func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence 
 		containsAnyNormalized(intentText, "构建") {
 		add(intentSelectorAction(project, candidates, "intent_start_agent_build", "启动 agent 实际构建", "click", "启动 agent 构建", "agent 已开始根据需求实际构建项目。", durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "agent", "智能体", "构建", "build", "run", "start"), true, []string{"agent", "智能体", "开始构建", "实际构建", "生成", "build", "run", "start"}))
 	}
+	if wantsBuildCompletion(intentText) {
+		add(intentSelectorAction(project, candidates, "intent_agent_build_complete", "Agent 构建完成结果", "inspect", "等待产品明确报告构建完成", "Agent 构建已完成且最终结果可见。", 0, true, []string{"build-result", "build complete", "build_complete", "all complete", "completed", "构建完成", "全部步骤完成", "完成结果"}))
+	}
 	if waitMS := requiredObservationDurationMS(intentText); waitMS > 0 {
 		add(intentWaitAction(project, "intent_agent_build_wait", fmt.Sprintf("等待 agent 实际构建 %d 秒", waitMS/1000), "持续观察 agent 构建过程，等待结果逐步出现。", waitMS, true))
 	}
