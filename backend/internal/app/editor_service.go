@@ -715,6 +715,15 @@ func (s *Service) renderEditorSession(ctx context.Context, sessionID string, pre
 		AssetTimelineCatalog: &session.AssetCatalog,
 		EditPlan:             &session.EditPlan,
 		RenderProfile:        &profile,
+		DeliveryProfiles: func() []model.EditorRenderProfile {
+			if preview {
+				return nil
+			}
+			return []model.EditorRenderProfile{
+				{ID: model.MediaOutputProfileMaster2K, Mode: "final", Width: 2560, Height: 1440, FPS: 30, Format: "mp4", Preset: "medium", CRF: 18},
+				{ID: model.MediaOutputProfileDelivery1080, Mode: "final", Width: 1920, Height: 1080, FPS: 30, Format: "mp4", Preset: "medium", CRF: 18},
+			}
+		}(),
 	})
 
 	s.editorMu.Lock()
@@ -745,6 +754,7 @@ func (s *Service) renderEditorSession(ctx context.Context, sessionID string, pre
 		state.Progress = 100
 		state.VideoPath = result.VideoPath
 		state.RenderManifestPath = result.RenderManifestPath
+		state.DeliveryManifestPath = result.DeliveryManifestPath
 		latest.Status = model.EditorSessionStatusReady
 	}
 	setEditorRenderState(&latest, preview, state)

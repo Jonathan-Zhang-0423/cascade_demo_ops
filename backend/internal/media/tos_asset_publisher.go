@@ -73,6 +73,24 @@ func (p *TOSAssetPublisher) PublishArkAssets(ctx context.Context, plan model.Ark
 	if p == nil || p.client == nil {
 		return model.ArkAssetPublicationResult{}, errors.New("TOS asset publisher is not initialized")
 	}
+	retention := plan.TOSRetention
+	var deleteAfter time.Time
+	if strings.TrimSpace(retention.Mode) != "" {
+		if err := model.ValidateMediaDeliveryPreferences(&model.MediaDeliveryPreferences{TOSRetention: retention}); err != nil {
+			return model.ArkAssetPublicationResult{}, fmt.Errorf("tos_retention_policy_invalid: %w", err)
+		}
+		if !retention.ClientDisclosureAcknowledged {
+			return model.ArkAssetPublicationResult{
+				SchemaVersion: model.ArkAssetPublicationResultSchemaVersion,
+				ResultID:      "ark_asset_publication_result_" + safeResultID(plan.SourcePackageID),
+				CreatedAt:     p.now().UTC(), Mode: "private_tos_presigned_url", Publisher: "volcengine_tos_asset_publisher",
+				SourcePackageID: plan.SourcePackageID, PublicationPlanRef: planRef, Status: "blocked", CanUseForRealCall: false,
+				TOSRetention: retention, Blockers: []model.ArkMediaReadinessFinding{{Code: "tos_retention_client_ack_required", Message: "client must acknowledge the selected TOS retention policy before asset publication", RefID: plan.SourcePackageID}},
+				Notes: []string{"No TOS bytes were uploaded because retention disclosure acknowledgement is required."},
+			}, nil
+		}
+		deleteAfter = p.now().UTC().Add(time.Duration(retention.RetentionDays) * 24 * time.Hour)
+	}
 	items := make([]model.ArkAssetPublicationResultItem, 0, len(plan.Items))
 	blockers := append([]model.ArkMediaReadinessFinding{}, plan.Blockers...)
 	warnings := append([]model.ArkMediaReadinessFinding{}, plan.Warnings...)
@@ -93,6 +111,7 @@ func (p *TOSAssetPublisher) PublishArkAssets(ctx context.Context, plan model.Ark
 		SchemaVersion: model.ArkAssetPublicationResultSchemaVersion, ResultID: "ark_asset_publication_result_" + safeResultID(plan.SourcePackageID), CreatedAt: p.now().UTC(),
 		Mode: "private_tos_presigned_url", Publisher: "volcengine_tos_asset_publisher", SourcePackageID: plan.SourcePackageID, PublicationPlanRef: planRef,
 		Status: status, CanUseForRealCall: allRequiredReady && len(blockers) == 0, ContainsDryRunRefs: false, Items: items, Blockers: blockers, Warnings: warnings,
+		TOSRetention: retention, DeleteAfter: deleteAfter,
 		Notes: []string{
 			"Selected captured assets were uploaded to a private TOS bucket and exposed only through short-lived signed GET URLs.",
 			"Source code, credentials, browser cookies, and execution packages are not uploaded by this publisher.",
@@ -159,16 +178,16 @@ func classifyTOSPublishError(err error) string {
 	}
 	message := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(message, "timeout"), strings.Contains(message, "deadline exceeded"):
+		return "timeout"
+	case strings.Contains(message, "connection reset"), strings.Contains(message, "connectex"), strings.Contains(message, "no such host"), strings.Contains(message, "dial tcp"):
+		return "network_error"
 	case strings.Contains(message, "accessdenied"), strings.Contains(message, "access denied"), strings.Contains(message, "forbidden"), strings.Contains(message, "statuscode=403"), strings.Contains(message, "http 403"):
 		return "access_denied"
 	case strings.Contains(message, "nosuchbucket"), strings.Contains(message, "no such bucket"), strings.Contains(message, "statuscode=404"), strings.Contains(message, "http 404"):
 		return "bucket_not_found"
 	case strings.Contains(message, "invalidaccesskey"), strings.Contains(message, "invalid access key"), strings.Contains(message, "signature"):
 		return "credential_or_signature_rejected"
-	case strings.Contains(message, "timeout"), strings.Contains(message, "deadline exceeded"):
-		return "timeout"
-	case strings.Contains(message, "connection reset"), strings.Contains(message, "connectex"), strings.Contains(message, "no such host"), strings.Contains(message, "dial tcp"):
-		return "network_error"
 	default:
 		return "provider_error"
 	}

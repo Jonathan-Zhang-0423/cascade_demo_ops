@@ -30,6 +30,7 @@ const (
 )
 
 type EditorRenderProfile struct {
+	ID     string `json:"id,omitempty"`
 	Mode   string `json:"mode"`
 	Width  int    `json:"width"`
 	Height int    `json:"height"`
@@ -40,17 +41,18 @@ type EditorRenderProfile struct {
 }
 
 type EditorRenderState struct {
-	Status             EditorRenderStatus `json:"status"`
-	JobID              string             `json:"job_id,omitempty"`
-	Phase              string             `json:"phase,omitempty"`
-	Progress           int                `json:"progress,omitempty"`
-	CancelRequested    bool               `json:"cancel_requested,omitempty"`
-	Revision           int                `json:"revision,omitempty"`
-	StartedAt          time.Time          `json:"started_at,omitempty"`
-	CompletedAt        time.Time          `json:"completed_at,omitempty"`
-	VideoPath          string             `json:"video_path,omitempty"`
-	RenderManifestPath string             `json:"render_manifest_path,omitempty"`
-	Error              string             `json:"error,omitempty"`
+	Status               EditorRenderStatus `json:"status"`
+	JobID                string             `json:"job_id,omitempty"`
+	Phase                string             `json:"phase,omitempty"`
+	Progress             int                `json:"progress,omitempty"`
+	CancelRequested      bool               `json:"cancel_requested,omitempty"`
+	Revision             int                `json:"revision,omitempty"`
+	StartedAt            time.Time          `json:"started_at,omitempty"`
+	CompletedAt          time.Time          `json:"completed_at,omitempty"`
+	VideoPath            string             `json:"video_path,omitempty"`
+	RenderManifestPath   string             `json:"render_manifest_path,omitempty"`
+	DeliveryManifestPath string             `json:"delivery_manifest_path,omitempty"`
+	Error                string             `json:"error,omitempty"`
 }
 
 // EditorPresentationCapabilityProfile is the stable App-facing contract for

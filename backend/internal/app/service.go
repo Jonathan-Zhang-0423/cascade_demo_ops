@@ -530,6 +530,11 @@ func (s *Service) SaveProjectInput(ctx context.Context, projectID string, inputs
 	if err := model.ValidatePresentationGenerationIntents(inputs.PresentationGenerationIntents); err != nil {
 		return nil, err
 	}
+	preferences := model.NormalizeMediaDeliveryPreferences(inputs.MediaDeliveryPreferences)
+	if err := model.ValidateMediaDeliveryPreferences(&preferences); err != nil {
+		return nil, err
+	}
+	inputs.MediaDeliveryPreferences = &preferences
 	state, err := s.states.Load(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -759,6 +764,7 @@ func executionPackagePreflightResult(pkg model.ClientExecutionPackage) CloudPack
 			}
 		}
 	}
+	result.Diagnostics = packagePreflightDiagnostics(pkg)
 	return result
 }
 

@@ -102,6 +102,7 @@ type CloudPackagePreflightResult struct {
 	AllowedDomains              []string                     `json:"allowed_domains,omitempty"`
 	Warnings                    []string                     `json:"warnings"`
 	Readiness                   *BrowserAgentReadinessReport `json:"browser_agent_readiness,omitempty"`
+	Diagnostics                 *PackagePreflightDiagnostics `json:"package_diagnostics,omitempty"`
 	Message                     string                       `json:"message"`
 }
 
@@ -503,12 +504,14 @@ func compactProjectContextForPrepareResponse(project *model.ProjectContext) *mod
 		UpdatedAt:          project.UpdatedAt,
 	}
 	if project.Inputs != nil {
+		preferences := model.NormalizeMediaDeliveryPreferences(project.Inputs.MediaDeliveryPreferences)
 		out.Inputs = &model.ProjectInputBundle{
 			ProductURLs:                   project.Inputs.ProductURLs,
 			Repositories:                  compactRepositoriesForPrepareResponse(project.Inputs.Repositories),
 			Credentials:                   project.Inputs.Credentials,
 			Requirements:                  project.Inputs.Requirements,
 			PresentationGenerationIntents: append([]model.PresentationGenerationIntent{}, project.Inputs.PresentationGenerationIntents...),
+			MediaDeliveryPreferences:      &preferences,
 			RawUserPrompt:                 truncateForUpload(project.Inputs.RawUserPrompt, 1000),
 			RequirementDocuments:          compactRequirementDocumentsForPrepareResponse(project.Inputs.RequirementDocuments),
 		}
@@ -3095,6 +3098,7 @@ func projectContextSummaryForPackage(project *model.ProjectContext, state *orche
 		AccessPolicy:                  project.AccessPolicy,
 		SecurityPolicy:                project.SecurityPolicy,
 		PresentationGenerationIntents: presentationGenerationIntentsForPackage(project),
+		MediaDeliveryPreferences:      mediaDeliveryPreferencesForPackage(project),
 		InputFingerprints:             inputFingerprints,
 	}
 }
@@ -3104,6 +3108,18 @@ func presentationGenerationIntentsForPackage(project *model.ProjectContext) []mo
 		return nil
 	}
 	return append([]model.PresentationGenerationIntent{}, project.Inputs.PresentationGenerationIntents...)
+}
+
+func mediaDeliveryPreferencesForPackage(project *model.ProjectContext) *model.MediaDeliveryPreferences {
+	if project == nil {
+		return nil
+	}
+	var configured *model.MediaDeliveryPreferences
+	if project.Inputs != nil {
+		configured = project.Inputs.MediaDeliveryPreferences
+	}
+	preferences := model.NormalizeMediaDeliveryPreferences(configured)
+	return &preferences
 }
 
 func productMapSummaryForPackage(project *model.ProjectContext, productMap *model.ProductMap) model.ProductMapSummary {
@@ -3344,7 +3360,8 @@ func isAbsoluteHTTPURL(value string) bool {
 func receivedAssetIDs(deliverables []model.ExecutionDeliverable) []string {
 	out := []string{}
 	for _, deliverable := range deliverables {
-		if deliverable.Kind == "demo_video" && deliverable.ID != "" {
+		kind := strings.ToLower(strings.TrimSpace(deliverable.Kind))
+		if deliverable.ID != "" && (kind == "demo_video" || kind == "final_video_final_master_2k" || kind == "final_video_final_delivery_1080p" || kind == "deliverables_manifest") {
 			out = append(out, deliverable.ID)
 		}
 	}

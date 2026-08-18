@@ -463,19 +463,20 @@ type ArkMediaReadinessFinding struct {
 }
 
 type ArkAssetPublicationPlan struct {
-	SchemaVersion       string                     `json:"schema_version"`
-	PlanID              string                     `json:"plan_id"`
-	CreatedAt           time.Time                  `json:"created_at"`
-	Mode                string                     `json:"mode"`
-	SourcePackageID     string                     `json:"source_package_id"`
-	ArkMediaDryRunRef   DirectorMaterialRef        `json:"ark_media_dry_run_ref"`
-	Status              string                     `json:"status"`
-	PublicationStrategy string                     `json:"publication_strategy"`
-	URLTTLHours         int                        `json:"url_ttl_hours"`
-	Items               []ArkAssetPublicationItem  `json:"items,omitempty"`
-	Blockers            []ArkMediaReadinessFinding `json:"blockers,omitempty"`
-	Warnings            []ArkMediaReadinessFinding `json:"warnings,omitempty"`
-	Notes               []string                   `json:"notes,omitempty"`
+	SchemaVersion       string                      `json:"schema_version"`
+	PlanID              string                      `json:"plan_id"`
+	CreatedAt           time.Time                   `json:"created_at"`
+	Mode                string                      `json:"mode"`
+	SourcePackageID     string                      `json:"source_package_id"`
+	ArkMediaDryRunRef   DirectorMaterialRef         `json:"ark_media_dry_run_ref"`
+	Status              string                      `json:"status"`
+	PublicationStrategy string                      `json:"publication_strategy"`
+	URLTTLHours         int                         `json:"url_ttl_hours"`
+	TOSRetention        MediaTOSRetentionPreference `json:"tos_retention,omitempty"`
+	Items               []ArkAssetPublicationItem   `json:"items,omitempty"`
+	Blockers            []ArkMediaReadinessFinding  `json:"blockers,omitempty"`
+	Warnings            []ArkMediaReadinessFinding  `json:"warnings,omitempty"`
+	Notes               []string                    `json:"notes,omitempty"`
 }
 
 type ArkAssetPublicationItem struct {
@@ -507,6 +508,8 @@ type ArkAssetPublicationResult struct {
 	Items              []ArkAssetPublicationResultItem `json:"items,omitempty"`
 	Blockers           []ArkMediaReadinessFinding      `json:"blockers,omitempty"`
 	Warnings           []ArkMediaReadinessFinding      `json:"warnings,omitempty"`
+	TOSRetention       MediaTOSRetentionPreference     `json:"tos_retention,omitempty"`
+	DeleteAfter        time.Time                       `json:"delete_after,omitempty"`
 	Notes              []string                        `json:"notes,omitempty"`
 }
 

@@ -39,6 +39,10 @@ func NewRenderRequestFromRecordingResult(source *model.ClientExecutionPackage, r
 			Mode: "final", Width: 2560, Height: 1440, FPS: 30,
 			Format: "mp4", Preset: "medium", CRF: 18,
 		},
+		DeliveryProfiles: []model.EditorRenderProfile{
+			{ID: model.MediaOutputProfileMaster2K, Mode: "final", Width: 2560, Height: 1440, FPS: 30, Format: "mp4", Preset: "medium", CRF: 18},
+			{ID: model.MediaOutputProfileDelivery1080, Mode: "final", Width: 1920, Height: 1080, FPS: 30, Format: "mp4", Preset: "medium", CRF: 18},
+		},
 	}
 	if len(request.GeneratedAssets) == 0 && result.ExecutionTrace != nil {
 		request.GeneratedAssets = result.ExecutionTrace.Artifacts

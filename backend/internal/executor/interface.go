@@ -96,6 +96,7 @@ type RenderRequest struct {
 	AssetTimelineCatalog       *model.AssetTimelineCatalog   `json:"asset_timeline_catalog,omitempty"`
 	EditPlan                   *model.DemoEditPlan           `json:"edit_plan,omitempty"`
 	RenderProfile              *model.EditorRenderProfile    `json:"render_profile,omitempty"`
+	DeliveryProfiles           []model.EditorRenderProfile   `json:"delivery_profiles,omitempty"`
 	ModelExecution             *RenderModelExecutionAudit    `json:"model_execution,omitempty"`
 }
 
@@ -140,6 +141,9 @@ type RenderResult struct {
 	RenderManifestPath                   string                                        `json:"render_manifest_path,omitempty"`
 	MediaNormalizationReportPath         string                                        `json:"media_normalization_report_path,omitempty"`
 	RequirementReportPath                string                                        `json:"requirement_satisfaction_report_path,omitempty"`
+	DeliveryStatus                       string                                        `json:"delivery_status,omitempty"`
+	DeliveryManifestPath                 string                                        `json:"delivery_manifest_path,omitempty"`
+	Deliverables                         []RenderDeliverable                           `json:"deliverables,omitempty"`
 	AssetTimelineCatalog                 *model.AssetTimelineCatalog                   `json:"asset_timeline_catalog,omitempty"`
 	DemoEditPlan                         *model.DemoEditPlan                           `json:"demo_edit_plan,omitempty"`
 	DirectorInput                        *model.DirectorInput                          `json:"director_input,omitempty"`
@@ -155,6 +159,18 @@ type RenderResult struct {
 	CandidateAssetReview                 *model.CandidateAssetReview                   `json:"candidate_asset_review,omitempty"`
 	CandidateAssetEditPatch              *model.CandidateAssetEditPlanPatch            `json:"candidate_asset_edit_patch,omitempty"`
 	ValidationReport                     *model.DemoEditPlanValidationReport           `json:"validation_report,omitempty"`
+}
+
+type RenderDeliverable struct {
+	ID                           string                    `json:"id"`
+	Status                       string                    `json:"status"`
+	VideoPath                    string                    `json:"video_path,omitempty"`
+	RenderManifestPath           string                    `json:"render_manifest_path,omitempty"`
+	MediaNormalizationReportPath string                    `json:"media_normalization_report_path,omitempty"`
+	Profile                      model.EditorRenderProfile `json:"profile"`
+	SHA256                       string                    `json:"sha256,omitempty"`
+	SizeBytes                    int64                     `json:"size_bytes,omitempty"`
+	Error                        string                    `json:"error,omitempty"`
 }
 
 type Viewport struct {

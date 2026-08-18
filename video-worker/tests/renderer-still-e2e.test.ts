@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { defaultEditPlan, render, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
+import { buildTimelineStepsFromTrace, defaultEditPlan, render, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
 
 const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
 const ffmpegAvailable = spawnSync(ffmpegPath, ["-version"], { stdio: "ignore", windowsHide: true }).status === 0;
@@ -191,6 +191,54 @@ function catalogForDefaultTargetStill(recordingPath: string, afterPath: string, 
 }
 
 describe("static screenshot compositor e2e", () => {
+  it("rejects a dual delivery request unless both approved profiles are supplied", async () => {
+    await expect(render({
+      output_dir: path.join(tmpdir(), "cascade-invalid-dual-delivery"),
+      delivery_profiles: [{ id: "final_master_2k", mode: "final", width: 2560, height: 1440, fps: 30, format: "mp4" }],
+    })).rejects.toThrow("dual_delivery_requires_two_profiles");
+  });
+
+  renderWithFFmpeg("renders both required delivery files from one edit plan", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-dual-delivery-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const screenshotPath = path.join(root, "screenshot.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-t", "1", "-c:v", "mpeg4", recordingPath]);
+      generateScreenshot(screenshotPath);
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: catalog(recordingPath, screenshotPath),
+        edit_plan: plan(),
+        delivery_profiles: [
+          { id: "final_master_2k", mode: "final", width: 2560, height: 1440, fps: 30, format: "mp4" },
+          { id: "final_delivery_1080p", mode: "final", width: 1920, height: 1080, fps: 30, format: "mp4" },
+        ],
+      });
+      expect(result.delivery_status).toBe("complete");
+      expect(result.deliverables?.map((item) => item.id)).toEqual(["final_master_2k", "final_delivery_1080p"]);
+      expect(result.deliverables?.every((item) => item.status === "complete" && item.sha256 && item.size_bytes)).toBe(true);
+      expect(result.deliverables?.[0]?.video_path).toMatch(/final_master_2k\.mp4$/);
+      expect(result.deliverables?.[1]?.video_path).toMatch(/final_delivery_1080p\.mp4$/);
+      const manifest = JSON.parse(await readFile(result.delivery_manifest_path!, "utf8"));
+      expect(manifest.status).toBe("complete");
+      expect(manifest.deliverables).toHaveLength(2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("uses the Browser Agent recording origin instead of compacting elapsed stage durations", () => {
+    const recordingStartMS = Date.parse("2026-08-17T12:00:00.000Z");
+    const steps = buildTimelineStepsFromTrace([
+      { node_id: "new_project", status: "passed", started_at: "2026-08-17T12:00:24.003Z", completed_at: "2026-08-17T12:00:24.893Z" },
+      { node_id: "project_name", status: "passed", started_at: "2026-08-17T12:00:27.690Z", completed_at: "2026-08-17T12:00:28.200Z" },
+    ], new Map(), recordingStartMS);
+    expect(steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ step_id: "new_project", start_ms: 24003, end_ms: 24893 }),
+      expect.objectContaining({ step_id: "project_name", start_ms: 27690, end_ms: 28200 }),
+    ]));
+  });
+
   it("uses distinct approved stage screenshots to satisfy a 60 second delivery intent", () => {
     const evidenceCatalog = catalogForDefaultTargetStill("recording.mp4", "after.png", "target.png");
     evidenceCatalog.timeline.recording_artifact_id = "recording";
@@ -451,10 +499,75 @@ describe("static screenshot compositor e2e", () => {
         geometry_source: "browser_agent_target_geometry_v1",
         target_geometry_verified: true,
         coordinate_space: "post_edit_normalized",
+        evidence_recording_offset_ms: 500,
+        evidence_source_time_range_ms: [0, 1000],
+        output_time_range_ms: [0, 900],
       });
       expect(overlay.x + overlay.width / 2).toBeCloseTo(0.5, 2);
       expect(overlay.y + overlay.height / 2).toBeCloseTo(0.5, 2);
       expect(overlay.x).not.toBeCloseTo(0.01, 2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  renderWithFFmpeg("skips target annotations when the captured click is outside the video shot time range", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-target-time-mismatch-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const screenshotPath = path.join(root, "step.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-t", "1", "-c:v", "mpeg4", recordingPath]);
+      generateScreenshot(screenshotPath);
+      const editPlan = planWithTargetEvidence();
+      editPlan.shots[0]!.source_time_range_ms = [0, 200];
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: catalogWithTargetEvidence(recordingPath, screenshotPath),
+        edit_plan: editPlan,
+        render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" },
+      });
+      const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
+      const report = JSON.parse(await readFile(result.requirement_satisfaction_report_path, "utf8"));
+      expect(manifest.compositor.applied_operations).not.toContain("highlight_box");
+      expect(manifest.compositor.skipped_operations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "highlight_box", reason: "target_geometry_time_mismatch" }),
+      ]));
+      expect(report.status).toBe("not_satisfied");
+      expect(report.actual.target_overlay_evidence_failures).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "highlight_box", reason: "target_geometry_time_mismatch", shot_id: "recording_shot", target_evidence_artifact_id: "screenshot" }),
+      ]));
+      expect(report.actual.target_overlay_evidence_root_causes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ reason: "target_geometry_time_mismatch", target_evidence_artifact_id: "screenshot", overlay_types: ["highlight_box"] }),
+      ]));
+      expect(report.errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "target_overlay_evidence_unusable", path: "asset_timeline_catalog.artifacts[screenshot].metadata.target_geometry.recording_offset_ms" }),
+      ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  renderWithFFmpeg("keeps privacy blur ahead of an overlapping target annotation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-target-privacy-overlap-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const screenshotPath = path.join(root, "step.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-t", "1", "-c:v", "mpeg4", recordingPath]);
+      generateScreenshot(screenshotPath);
+      const editPlan = planWithTargetEvidence();
+      editPlan.shots[0]!.overlays!.push({ type: "blur_region", x: 0.55, y: 0.35, width: 0.3, height: 0.3, start_ms: 0, end_ms: 900 });
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: catalogWithTargetEvidence(recordingPath, screenshotPath),
+        edit_plan: editPlan,
+        render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" },
+      });
+      const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
+      expect(manifest.compositor.applied_operations).not.toContain("highlight_box");
+      expect(manifest.compositor.applied_operations).toContain("blur_region");
+      expect(manifest.compositor.skipped_operations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "highlight_box", reason: "target_geometry_privacy_overlap" }),
+      ]));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
