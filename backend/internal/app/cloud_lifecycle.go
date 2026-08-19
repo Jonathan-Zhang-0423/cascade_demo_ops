@@ -1122,7 +1122,7 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 		return ClientExecutionPackageBuild{}, errors.New("project must have context, workflow graph, script document, and executable bundle")
 	}
 	if !scriptDocumentHasBusinessAction(state.ScriptDocument) {
-		return ClientExecutionPackageBuild{}, errors.New("执行包没有真实业务动作，已阻止上传服务器录制。请补充页面扫描、截图标注或稳定 selector，使脚本包含 click/fill/select/upload/api_call 等至少一个有效步骤。")
+		return ClientExecutionPackageBuild{}, errors.New("执行包没有真实业务动作，已阻止上传服务器录制。请补充页面扫描、截图标注或稳定 selector，使脚本包含 click/fill/select/upload/press/api_call 等至少一个有效步骤。")
 	}
 	orgID = firstNonEmptyString(orgID, defaultDesktopOrgID)
 	project := state.ProjectContext
@@ -2291,6 +2291,15 @@ func scriptDocumentHasBusinessAction(doc *model.ExecutionScriptDocument) bool {
 		switch step.Action.Type {
 		case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
 			return true
+		case model.GraphActionPress:
+			if !step.NonDestructive || !model.ApprovedKeyboardActionParameters(step.Action.Parameters) {
+				continue
+			}
+			for _, validation := range step.Validations {
+				if validation.Required && validation.Kind == "page_changed" && validation.Expected == true {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -2319,7 +2328,7 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 			"business_action_missing",
 			model.FindingSeverityBlocking,
 			"execution package has no real business action",
-			"Add page scan evidence or stable selectors so the script includes click/fill/select/upload/api_call.",
+			"Add page scan evidence or stable selectors so the script includes click/fill/select/upload/press/api_call.",
 		))
 	}
 	if state != nil && state.ScriptReadinessReport != nil && !state.ScriptReadinessReport.CanProceed {

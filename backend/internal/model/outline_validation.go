@@ -676,6 +676,13 @@ func approvedKeyboardActionParameters(parameters map[string]any) bool {
 	return true
 }
 
+// ApprovedKeyboardActionParameters exposes the same bounded arrow-key policy
+// to package gates so an evidence-backed gameplay verification is treated as
+// a real business action without admitting arbitrary keyboard shortcuts.
+func ApprovedKeyboardActionParameters(parameters map[string]any) bool {
+	return approvedKeyboardActionParameters(parameters)
+}
+
 func validRuntimeAdaptiveCapturePlan(plan *BrowserAgentCapturePlan) bool {
 	return plan != nil && strings.TrimSpace(plan.Intent) != "" && (strings.TrimSpace(plan.PrimaryArtifact) != "" || len(plan.RequiredAssets) > 0)
 }

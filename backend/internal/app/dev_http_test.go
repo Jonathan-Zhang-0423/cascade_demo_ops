@@ -792,6 +792,29 @@ func TestBrowserAgentPreflightAcceptsPlayableAndKeyboardValidations(t *testing.T
 	}
 }
 
+func TestScriptDocumentTreatsOnlyBoundedVerifiedKeyboardPlayAsBusinessAction(t *testing.T) {
+	valid := model.ScriptStep{
+		NodeID: "business_stage_verify_playable_controls", NonDestructive: true,
+		Action: model.ScriptActionInstruction{Type: model.GraphActionPress, Parameters: map[string]any{
+			"keys": "ArrowLeft,ArrowRight,ArrowDown,ArrowUp",
+		}},
+		Validations: []model.ValidationSpec{{Kind: "page_changed", Expected: true, Required: true}},
+	}
+	if !scriptDocumentHasBusinessAction(&model.ExecutionScriptDocument{Steps: []model.ScriptStep{valid}}) {
+		t.Fatal("bounded gameplay keyboard verification was not accepted as a real business action")
+	}
+	invalidKey := valid
+	invalidKey.Action.Parameters = map[string]any{"keys": "Control+L"}
+	if scriptDocumentHasBusinessAction(&model.ExecutionScriptDocument{Steps: []model.ScriptStep{invalidKey}}) {
+		t.Fatal("arbitrary keyboard shortcut was accepted as a real business action")
+	}
+	missingEvidence := valid
+	missingEvidence.Validations = nil
+	if scriptDocumentHasBusinessAction(&model.ExecutionScriptDocument{Steps: []model.ScriptStep{missingEvidence}}) {
+		t.Fatal("keyboard action without required visual-change evidence was accepted")
+	}
+}
+
 func TestBuildClientExecutionPackagePreviewDigestIsStable(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
