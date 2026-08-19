@@ -672,6 +672,46 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	}
 }
 
+func TestBrowserAgentUploadViewCompactsInvestigationTraceAndRedundantRoutes(t *testing.T) {
+	questions := []model.InvestigationQuestionRef{
+		{
+			ID:              "question_result",
+			IntentLabel:     strings.Repeat("result ", 20),
+			Status:          "answered",
+			EvidenceSummary: strings.Repeat("confirmed source evidence ", 20),
+			RemainingGaps:   []string{"first gap", "second gap", "third gap"},
+			NextActions:     []model.CodeInvestigationNextAction{{Tool: "code_search", Reason: strings.Repeat("detail ", 40)}},
+			ToolCallIDs:     []string{"tool_1", "tool_2"},
+			Confidence:      0.93,
+		},
+	}
+	routes := []model.BrowserAgentRouteCandidate{{Route: "/project/:id", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route", Summary: strings.Repeat("route ", 50)}}}}
+	plan := &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+		EntryRoute: "/project/:id", CandidateRoutes: routes, InvestigationQuestionRefs: questions,
+	}}}
+	outline := &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{
+		Route: "/project/:id", CandidateRoutes: routes, InvestigationQuestionRefs: questions,
+	}}}
+
+	compactStageApprovalPlanForUpload(plan)
+	compactBrowserAgentOutlineForUpload(outline)
+
+	for name, refs := range map[string][]model.InvestigationQuestionRef{
+		"stage plan": plan.Stages[0].InvestigationQuestionRefs,
+		"outline":    outline.Stages[0].InvestigationQuestionRefs,
+	} {
+		if len(refs) != 1 || refs[0].ID != "question_result" || refs[0].Status != "answered" || refs[0].Confidence != 0.93 {
+			t.Fatalf("%s lost compact investigation identity: %+v", name, refs)
+		}
+		if refs[0].NextActions != nil || refs[0].ToolCallIDs != nil || len(refs[0].RemainingGaps) != 2 || len([]rune(refs[0].EvidenceSummary)) > 160 {
+			t.Fatalf("%s retained oversized local investigation trace: %+v", name, refs[0])
+		}
+	}
+	if plan.Stages[0].CandidateRoutes != nil || outline.Stages[0].CandidateRoutes != nil {
+		t.Fatalf("fixed routes must not duplicate candidate routes in upload view: plan=%+v outline=%+v", plan.Stages[0].CandidateRoutes, outline.Stages[0].CandidateRoutes)
+	}
+}
+
 func TestBrowserAgentPreflightAcceptsPlayableAndKeyboardValidations(t *testing.T) {
 	tests := []model.ScriptStep{
 		{

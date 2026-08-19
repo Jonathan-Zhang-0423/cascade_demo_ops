@@ -1832,7 +1832,9 @@ func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {
 		stage.WaitConditions = limitStringsForUpload(stage.WaitConditions, 4)
 		stage.CapturePoints = limitStringsForUpload(stage.CapturePoints, 4)
 		stage.RiskNotes = limitStringsForUpload(stage.RiskNotes, 3)
+		stage.InvestigationQuestionRefs = compactInvestigationQuestionRefsForUpload(stage.InvestigationQuestionRefs, 2)
 		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 3)
+		stage.CandidateRoutes = compactRouteCandidatesForUpload(stage.CandidateRoutes, stage.EntryRoute, stage.TargetRoute)
 		stage.Interaction.EvidenceRefs = compactEvidenceRefsForUpload(stage.Interaction.EvidenceRefs, 2)
 		stage.Interaction.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(stage.Interaction.Target.SelectorAlternatives, 2)
 		stage.Interaction.Target.EvidenceRefs = compactEvidenceRefsForUpload(stage.Interaction.Target.EvidenceRefs, 2)
@@ -1871,7 +1873,9 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 		stage.CapturePoints = limitStringsForUpload(stage.CapturePoints, 4)
 		stage.CanModify = compactContractFieldsForUpload(stage.CanModify, []string{"selector"}, 8)
 		stage.MustPreserve = compactContractFieldsForUpload(stage.MustPreserve, []string{"success_state", "safety_policy"}, 8)
+		stage.InvestigationQuestionRefs = compactInvestigationQuestionRefsForUpload(stage.InvestigationQuestionRefs, 2)
 		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 3)
+		stage.CandidateRoutes = compactRouteCandidatesForUpload(stage.CandidateRoutes, stage.EntryRoute, stage.Route)
 		if stage.TargetContract != nil {
 			compactTargetContractForUpload(stage.TargetContract)
 		}
@@ -1918,6 +1922,55 @@ func compactContractFieldsForUpload(values, required []string, limit int) []stri
 	}
 	for _, value := range values {
 		add(value)
+	}
+	return out
+}
+
+func compactInvestigationQuestionRefsForUpload(refs []model.InvestigationQuestionRef, limit int) []model.InvestigationQuestionRef {
+	if limit <= 0 || len(refs) == 0 {
+		return nil
+	}
+	out := make([]model.InvestigationQuestionRef, 0, minInt(len(refs), limit))
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		ref.ID = strings.TrimSpace(ref.ID)
+		if ref.ID == "" || seen[ref.ID] {
+			continue
+		}
+		seen[ref.ID] = true
+		ref.IntentLabel = truncateForUpload(ref.IntentLabel, 80)
+		ref.EvidenceSummary = truncateForUpload(ref.EvidenceSummary, 160)
+		ref.RemainingGaps = limitStringsForUpload(ref.RemainingGaps, 2)
+		// Tool-call IDs and detailed next-action recipes are local investigation
+		// trace. The server only needs the question, status, confirmed evidence,
+		// and any remaining gap to decide whether bounded runtime observation is
+		// still necessary.
+		ref.NextActions = nil
+		ref.ToolCallIDs = nil
+		out = append(out, ref)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func compactRouteCandidatesForUpload(candidates []model.BrowserAgentRouteCandidate, fixedRoutes ...string) []model.BrowserAgentRouteCandidate {
+	for _, route := range fixedRoutes {
+		if strings.TrimSpace(route) != "" {
+			return nil
+		}
+	}
+	if len(candidates) > 2 {
+		candidates = candidates[:2]
+	}
+	out := make([]model.BrowserAgentRouteCandidate, len(candidates))
+	for i, candidate := range candidates {
+		candidate.Name = truncateForUpload(candidate.Name, 80)
+		candidate.Source = truncateForUpload(candidate.Source, 80)
+		candidate.MatchedKeyword = truncateForUpload(candidate.MatchedKeyword, 80)
+		candidate.EvidenceRefs = compactEvidenceRefsForUpload(candidate.EvidenceRefs, 1)
+		out[i] = candidate
 	}
 	return out
 }
