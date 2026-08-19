@@ -179,6 +179,8 @@ func TestFinalObserveConsumesExactResultSelectorsFromCodeSnapshots(t *testing.T)
 	project.ProductDescription = "创建俄罗斯方块项目，等待 Agent 真正编写完成，打开最终预览并按方向键试玩。"
 	evidence := model.EvidenceRef{ID: "ev_code_result_anchor", Kind: model.EvidenceKindSourceCode, Confidence: 0.82}
 	report := &model.MultimodalUnderstandingReport{CodeSnapshots: []model.CodeUnderstandingSnapshot{{
+		SourceDigestSHA256: "sha256:source-result-anchors",
+		CreatedAt:          time.Now().UTC(),
 		Components: []model.ComponentInsight{
 			{ID: "component_build_result", Name: "BuildResultCard", SelectorHints: []string{"[data-testid='build-result-card']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
 			{ID: "component_preview", Name: "PreviewPanel", SelectorHints: []string{"[data-testid='preview-iframe']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
@@ -198,7 +200,7 @@ func TestFinalObserveConsumesExactResultSelectorsFromCodeSnapshots(t *testing.T)
 		if !ok {
 			continue
 		}
-		if len(stage.Targets) == 0 || stage.Targets[0].TestID != testID || stage.Targets[0].VerificationSource != "local_code_snapshot" {
+		if len(stage.Targets) == 0 || stage.Targets[0].TestID != testID || stage.Targets[0].VerificationSource != "local_code_snapshot" || len(stage.Targets[0].Alternatives) == 0 || !model.SelectorCandidateHasFormalProvenance(stage.Targets[0].Alternatives[0]) {
 			t.Fatalf("stage %s did not bind source result selector %s: %+v", stage.ID, testID, stage.Targets)
 		}
 		node := graphNodeFromBusinessStage(project, stage, project.ProductURL, "feature_result_anchor")

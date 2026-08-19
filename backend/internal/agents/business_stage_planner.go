@@ -767,9 +767,10 @@ func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.B
 				if testIDFromSelector(hint) != preferredTestID {
 					continue
 				}
+				label := firstNonEmpty(component.Name, spec.actionLabel)
 				out = append(out, model.BusinessTargetCandidate{
 					ID:                 "target_code_" + shortHash(spec.id+component.ID+selector),
-					Label:              firstNonEmpty(component.Name, spec.actionLabel),
+					Label:              label,
 					Kind:               spec.actionType,
 					Selector:           selector,
 					TestID:             preferredTestID,
@@ -781,6 +782,7 @@ func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.B
 					VerificationStatus: "code_evidence",
 					VerificationSource: "local_code_snapshot",
 					EvidenceRefs:       component.EvidenceRefs,
+					Alternatives:       selectorProvenanceCandidates(selector, spec.actionType, label, "source_scan", snapshot.SourceDigestSHA256, "", snapshot.CreatedAt, component.EvidenceRefs, component.Confidence),
 				})
 				break
 			}
@@ -789,9 +791,10 @@ func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.B
 			if testIDFromSelector(insight.Value) != preferredTestID {
 				continue
 			}
+			label := firstNonEmpty(spec.actionLabel, labelFromSelector(selector))
 			out = append(out, model.BusinessTargetCandidate{
 				ID:                 "target_code_selector_" + shortHash(spec.id+insight.FilePathHashSHA256+selector),
-				Label:              spec.actionLabel,
+				Label:              label,
 				Kind:               spec.actionType,
 				Selector:           selector,
 				TestID:             preferredTestID,
@@ -802,6 +805,7 @@ func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.B
 				VerificationStatus: "code_evidence",
 				VerificationSource: "local_code_snapshot",
 				EvidenceRefs:       insight.EvidenceRefs,
+				Alternatives:       selectorProvenanceCandidates(selector, spec.actionType, label, "source_scan", snapshot.SourceDigestSHA256, "", snapshot.CreatedAt, insight.EvidenceRefs, insight.Confidence),
 			})
 		}
 	}
