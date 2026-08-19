@@ -174,6 +174,40 @@ func TestFinalObserveAcceptsSourceBoundResultSelectorsBeforeActionHeuristics(t *
 	}
 }
 
+func TestFinalObserveConsumesExactResultSelectorsFromCodeSnapshots(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "创建俄罗斯方块项目，等待 Agent 真正编写完成，打开最终预览并按方向键试玩。"
+	evidence := model.EvidenceRef{ID: "ev_code_result_anchor", Kind: model.EvidenceKindSourceCode, Confidence: 0.82}
+	report := &model.MultimodalUnderstandingReport{CodeSnapshots: []model.CodeUnderstandingSnapshot{{
+		Components: []model.ComponentInsight{
+			{ID: "component_build_result", Name: "BuildResultCard", SelectorHints: []string{"[data-testid='build-result-card']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
+			{ID: "component_preview", Name: "PreviewPanel", SelectorHints: []string{"[data-testid='preview-iframe']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
+		},
+	}}}
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, report, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"business_stage_final_observe":            "build-result-card",
+		"business_stage_playable_preview":         "preview-iframe",
+		"business_stage_verify_playable_controls": "preview-iframe",
+	}
+	for _, stage := range plan.Stages {
+		testID, ok := want[stage.ID]
+		if !ok {
+			continue
+		}
+		if len(stage.Targets) == 0 || stage.Targets[0].TestID != testID || stage.Targets[0].VerificationSource != "local_code_snapshot" {
+			t.Fatalf("stage %s did not bind source result selector %s: %+v", stage.ID, testID, stage.Targets)
+		}
+		delete(want, stage.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("result stages missing from plan: %+v", want)
+	}
+}
+
 func TestIntentGoalTreatsProjectRequirementInputAsFillWithSelectorAliases(t *testing.T) {
 	goal := intentGoalFromText("输入俄罗斯方块需求并创建项目")
 	if goal.PreferredAction != "fill" || !goal.BusinessCritical {

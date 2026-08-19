@@ -736,6 +736,7 @@ type businessTargetSource struct {
 func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTargetCandidate {
 	targets := []model.BusinessTargetCandidate{}
 	targets = append(targets, s.targetsFromVerifiedPlan(spec)...)
+	targets = append(targets, s.targetsFromCodeSnapshots(spec)...)
 	targets = append(targets, s.targetsFromFeatureTrace(spec)...)
 	targets = append(targets, s.resultTargetsForStage(spec)...)
 	targets = uniqueBusinessTargetCandidates(targets)
@@ -743,6 +744,68 @@ func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTa
 		targets = targets[:5]
 	}
 	return targets
+}
+
+func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.BusinessTargetCandidate {
+	preferredTestID := ""
+	switch spec.id {
+	case "final_observe":
+		preferredTestID = "build-result-card"
+	case "playable_preview", "verify_playable_controls":
+		preferredTestID = "preview-iframe"
+	default:
+		return nil
+	}
+	if s.report == nil || len(s.report.CodeSnapshots) == 0 {
+		return nil
+	}
+	selector := "[data-testid='" + preferredTestID + "']"
+	out := []model.BusinessTargetCandidate{}
+	for _, snapshot := range s.report.CodeSnapshots {
+		for _, component := range snapshot.Components {
+			for _, hint := range component.SelectorHints {
+				if testIDFromSelector(hint) != preferredTestID {
+					continue
+				}
+				out = append(out, model.BusinessTargetCandidate{
+					ID:                 "target_code_" + shortHash(spec.id+component.ID+selector),
+					Label:              firstNonEmpty(component.Name, spec.actionLabel),
+					Kind:               spec.actionType,
+					Selector:           selector,
+					TestID:             preferredTestID,
+					Route:              spec.entryRoute,
+					ComponentRef:       firstNonEmpty(component.ID, component.Name),
+					SelectorScore:      96,
+					Confidence:         maxFloat64(component.Confidence, 0.76),
+					IsVerified:         false,
+					VerificationStatus: "code_evidence",
+					VerificationSource: "local_code_snapshot",
+					EvidenceRefs:       component.EvidenceRefs,
+				})
+				break
+			}
+		}
+		for _, insight := range snapshot.Selectors {
+			if testIDFromSelector(insight.Value) != preferredTestID {
+				continue
+			}
+			out = append(out, model.BusinessTargetCandidate{
+				ID:                 "target_code_selector_" + shortHash(spec.id+insight.FilePathHashSHA256+selector),
+				Label:              spec.actionLabel,
+				Kind:               spec.actionType,
+				Selector:           selector,
+				TestID:             preferredTestID,
+				Route:              spec.entryRoute,
+				SelectorScore:      int(maxFloat64(insight.StabilityScore*100, 92)),
+				Confidence:         maxFloat64(insight.Confidence, 0.76),
+				IsVerified:         false,
+				VerificationStatus: "code_evidence",
+				VerificationSource: "local_code_snapshot",
+				EvidenceRefs:       insight.EvidenceRefs,
+			})
+		}
+	}
+	return out
 }
 
 func (s businessTargetSource) resultTargetsForStage(spec stageSpec) []model.BusinessTargetCandidate {

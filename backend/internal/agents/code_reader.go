@@ -1290,7 +1290,7 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 
 func requirementCriticalInvestigationQueries(queries []codeInvestigationQuery) []codeInvestigationQuery {
 	out := []codeInvestigationQuery{}
-	for _, wanted := range []string{"question_build_completion", "question_playable_result"} {
+	for _, wanted := range []string{"question_result_anchors", "question_build_completion", "question_playable_result"} {
 		for _, query := range queries {
 			if query.questionID == wanted {
 				out = append(out, query)
@@ -1412,6 +1412,22 @@ func buildCodeInvestigationQuestions(project *model.ProjectContext, brief *model
 			QueryTerms:       terms,
 			Status:           "open",
 		})
+	}
+	resultAnchorTerms := []string{}
+	if wantsBuildCompletion(intentText) {
+		resultAnchorTerms = append(resultAnchorTerms, "build-result-card")
+	}
+	if wantsPlayableKeyboardVerification(intentText) {
+		resultAnchorTerms = append(resultAnchorTerms, "preview-iframe")
+	}
+	if len(resultAnchorTerms) > 0 {
+		add(
+			"question_result_anchors",
+			"最终结果代码锚点",
+			"哪些精确的稳定 selector 可以证明构建完成并定位可玩预览？",
+			resultAnchorTerms,
+			[]string{"component_or_selector"},
+		)
 	}
 	if wantsBuildCompletion(intentText) {
 		add(

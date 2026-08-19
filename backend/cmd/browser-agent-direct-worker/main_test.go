@@ -24,7 +24,8 @@ func TestWorkerFinalizationContextOutlivesExpiredExecutionContext(t *testing.T) 
 	default:
 	}
 	deadline, ok := ctx.Deadline()
-	if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 2*time.Minute {
+	remaining := time.Until(deadline)
+	if !ok || remaining < workerFinalizationTimeout-time.Second || remaining > workerFinalizationTimeout {
 		t.Fatalf("finalization context is not independently bounded: deadline=%v ok=%t", deadline, ok)
 	}
 }

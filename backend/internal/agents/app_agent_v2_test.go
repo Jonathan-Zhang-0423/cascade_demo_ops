@@ -1048,20 +1048,23 @@ func TestCodeReaderPrioritizesBuildCompletionAndPlayableResultQuestions(t *testi
 	}
 	budget := model.CodeReadBudget{DrilldownRounds: 2}
 	questions := buildCodeInvestigationQuestions(project, nil, budget)
-	if len(questions) < 2 {
-		t.Fatalf("expected the two requirement-critical questions first, got %+v", questions)
+	if len(questions) < 3 {
+		t.Fatalf("expected the result-anchor and two requirement-critical questions first, got %+v", questions)
 	}
-	if questions[0].ID != "question_build_completion" || !stringSliceContains(questions[0].QueryTerms, "build-result-card") {
+	if questions[0].ID != "question_result_anchors" || !stringSliceContains(questions[0].QueryTerms, "build-result-card") || !stringSliceContains(questions[0].QueryTerms, "preview-iframe") {
+		t.Fatalf("exact result anchors were not prioritized into the first bounded search: %+v", questions)
+	}
+	if questions[1].ID != "question_build_completion" || !stringSliceContains(questions[1].QueryTerms, "build-result-card") {
 		t.Fatalf("build completion evidence was not prioritized: %+v", questions)
 	}
-	if questions[1].ID != "question_playable_result" || !stringSliceContains(questions[1].QueryTerms, "preview-iframe") {
+	if questions[2].ID != "question_playable_result" || !stringSliceContains(questions[2].QueryTerms, "preview-iframe") {
 		t.Fatalf("playable preview evidence was not prioritized: %+v", questions)
 	}
 
 	fallback := buildCodeInvestigationQueries(project, nil, budget, questions)
 	planned := []codeInvestigationQuery{{questionID: "question_ad_hoc", terms: []string{"generic"}}}
 	queries := append(requirementCriticalInvestigationQueries(fallback), planned...)
-	if len(queries) < 2 || queries[0].questionID != "question_build_completion" || queries[1].questionID != "question_playable_result" {
+	if len(queries) < 2 || queries[0].questionID != "question_result_anchors" || queries[1].questionID != "question_build_completion" || !stringSliceContains(queries[0].terms, "preview-iframe") {
 		t.Fatalf("model plan could starve requirement-critical queries: %+v", queries)
 	}
 }
