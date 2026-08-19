@@ -726,6 +726,7 @@ func workerStageFromRuntime(stage BrowserAgentRuntimeStage) driver.BrowserAgentW
 	return driver.BrowserAgentWorkerStage{
 		ID: stage.ID, Order: stage.Order, NodeID: stage.NodeID, StageKind: stage.StageKind, Objective: stage.Objective,
 		EntryRoute: stage.EntryRoute, Route: stage.Route, URL: stage.URL, TargetContract: stage.TargetContract,
+		InteractionContract: stage.InteractionContract,
 		TargetRouteTemplate: stage.TargetRouteTemplate, ExpectedRouteAfterAction: stage.ExpectedRouteAfterAction,
 		RuntimeRouteVerificationRequired: stage.RuntimeRouteVerificationRequired,
 		Components:                       append([]model.BrowserAgentComponentTarget{}, stage.Components...),

@@ -51,6 +51,7 @@ type BrowserAgentRuntimeStage struct {
 	ExpectedRouteAfterAction         string
 	RuntimeRouteVerificationRequired bool
 	TargetContract                   model.BrowserAgentTargetContract
+	InteractionContract              *model.InteractionContract
 	Components                       []model.BrowserAgentComponentTarget
 	Interactions                     []model.BrowserAgentInteraction
 	WaitConditions                   []string
@@ -675,6 +676,15 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		if approvedTarget == nil || outlineTarget == nil || approvedTarget.SemanticID != outlineTarget.SemanticID || approvedTarget.Destructive != outlineTarget.Destructive {
 			return BrowserAgentRuntimePlan{}, newRuntimeExecutionError(runtimeErrorBrowserAgentContractViolation, fmt.Errorf("browser-agent target contract conflict for node_id %q", approved.NodeID))
 		}
+		approvedInteraction, outlineInteraction, planInteraction := approved.InteractionContract, outline.InteractionContract, planStep.InteractionContract
+		if approvedInteraction != nil || outlineInteraction != nil || planInteraction != nil {
+			if approvedInteraction == nil || outlineInteraction == nil || planInteraction == nil || approvedInteraction.ContractID != outlineInteraction.ContractID || approvedInteraction.ContractID != planInteraction.ContractID {
+				return BrowserAgentRuntimePlan{}, newRuntimeExecutionError(runtimeErrorBrowserAgentContractViolation, fmt.Errorf("browser-agent interaction contract conflict for node_id %q", approved.NodeID))
+			}
+			if err := model.ValidateInteractionContract(*approvedInteraction); err != nil {
+				return BrowserAgentRuntimePlan{}, newRuntimeExecutionError(runtimeErrorBrowserAgentContractViolation, fmt.Errorf("browser-agent interaction contract invalid for node_id %q: %w", approved.NodeID, err))
+			}
+		}
 		capturePlan := mergeApprovedCapturePlan(approved.CapturePlan, outline.CapturePlan)
 		plan.Stages = append(plan.Stages, BrowserAgentRuntimeStage{
 			ID: approved.ID, Order: approved.Order, NodeID: approved.NodeID, StageKind: approved.StageKind, Objective: approved.Objective,
@@ -684,8 +694,9 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 			ExpectedRouteAfterAction:         firstNonEmptyString(outline.ExpectedRouteAfterAction, approved.ExpectedRouteAfterAction),
 			RuntimeRouteVerificationRequired: outline.RuntimeRouteVerificationRequired || approved.RuntimeRouteVerificationRequired,
 			TargetContract:                   *approvedTarget, Components: append([]model.BrowserAgentComponentTarget{}, outline.Components...),
-			Interactions:   append([]model.BrowserAgentInteraction{}, outline.Interactions...),
-			WaitConditions: append([]string{}, outline.WaitConditions...), CapturePoints: append([]string{}, outline.CapturePoints...),
+			InteractionContract: approvedInteraction,
+			Interactions:        append([]model.BrowserAgentInteraction{}, outline.Interactions...),
+			WaitConditions:      append([]string{}, outline.WaitConditions...), CapturePoints: append([]string{}, outline.CapturePoints...),
 			CapturePlan: capturePlan, SuccessState: approved.SuccessState, DurationMS: approved.DurationMS,
 			Validations:                       append([]model.ValidationSpec{}, planStep.Validations...),
 			EvidenceBoundSelectorAlternatives: evidenceBoundSelectorCandidates(outline.Components, outline.Interactions),

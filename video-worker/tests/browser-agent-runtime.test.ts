@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, captureTargetGeometry, classifyPlayableSurfaceFrame, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, captureTargetGeometry, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -422,17 +422,19 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 });
 
 describe("browser agent required validations", () => {
-	it("keeps playable evidence co-located inside one real board surface", () => {
+	it("classifies an interactive surface without product copy", () => {
+		expect(classifyInteractiveSurfaceFrame(true, true, true)).toEqual({ surface: true, stateful: true, focusable: true });
+		expect(classifyInteractiveSurfaceFrame(false, true, true)).toEqual({ surface: false, stateful: false, focusable: false });
 		expect(classifyPlayableSurfaceFrame("Score 0 Controls ArrowLeft ArrowRight", true)).toEqual({ surface: true, score: true, controls: true });
 		expect(classifyPlayableSurfaceFrame("Score 0 Controls ArrowLeft ArrowRight", false)).toEqual({ surface: false, score: false, controls: false });
 		expect(classifyPlayableSurfaceFrame("Build completed. Score and keyboard controls are ready.", false)).toEqual({ surface: false, score: false, controls: false });
 	});
 
-	it("requires the App-bound preview iframe before accepting playable surface evidence", async () => {
+	it("requires the App-bound frame before accepting interactive surface evidence", async () => {
 		const frame = {
 			locator: (selector: string) => selector === "body"
 				? { innerText: async () => "Score 0 Controls ArrowLeft ArrowRight" }
-				: { first: () => ({ isVisible: async () => selector.includes("canvas") }) },
+				: { first: () => ({ isVisible: async () => selector.includes("canvas"), boundingBox: async () => ({ x: 0, y: 0, width: 640, height: 480 }) }) },
 		};
 		const page = {
 			getByTestId: (testID: string) => ({ first: () => ({ waitFor: async () => {
@@ -443,22 +445,22 @@ describe("browser agent required validations", () => {
 			waitForTimeout: async () => undefined,
 		};
 		const stage = {
-			id: "stage_preview", order: 8, node_id: "playable_preview", stage_kind: "final_observe",
-			target_contract: { semantic_id: "tetris_preview", destructive: false },
+			id: "stage_preview", order: 8, node_id: "interactive_preview", stage_kind: "final_observe",
+			target_contract: { semantic_id: "interactive_preview", destructive: false },
 			interactions: [{ kind: "inspect", non_destructive: true }],
 			validations: [{ id: "preview", kind: "playable_surface_visible", target: { test_id: "preview-iframe" }, expected: true, required: true }],
 		};
 		expect(await evaluateRequiredValidations(page, stage)).toEqual([{
-			kind: "required_playable_surface_visible:preview", passed: true, actual: "bound_target=true;surface=true;score=true;controls=true",
+			kind: "required_playable_surface_visible:preview", passed: true, actual: "bound_target=true;interactive_surface=true;stateful=true;focusable=true",
 		}]);
 		const missing = { ...page, getByTestId: () => ({ first: () => ({ waitFor: async () => { throw new Error("missing"); } }) }) };
-		expect((await evaluateRequiredValidations(missing, stage))[0]).toMatchObject({ passed: false, actual: "bound_target=false;surface=true;score=true;controls=true" });
+		expect((await evaluateRequiredValidations(missing, stage))[0]).toMatchObject({ passed: false, actual: "bound_target=false;interactive_surface=true;stateful=true;focusable=true" });
 	});
 
-	it("rejects a blank preview iframe even when the surrounding agent text mentions score and controls", async () => {
+	it("rejects a frame without an interactive surface regardless of surrounding completion copy", async () => {
 		const mainFrame = {
 			locator: (selector: string) => selector === "body"
-				? { innerText: async () => "俄罗斯方块已完成，支持得分和方向键控制" }
+				? { innerText: async () => "The requested workflow is complete." }
 				: { first: () => ({ isVisible: async () => false }) },
 		};
 		const blankPreviewFrame = {
@@ -472,30 +474,30 @@ describe("browser agent required validations", () => {
 			waitForTimeout: async () => undefined,
 		};
 		const stage = {
-			id: "stage_preview", order: 8, node_id: "playable_preview", stage_kind: "final_observe",
-			target_contract: { semantic_id: "tetris_preview", destructive: false },
+			id: "stage_preview", order: 8, node_id: "interactive_preview", stage_kind: "final_observe",
+			target_contract: { semantic_id: "interactive_preview", destructive: false },
 			interactions: [{ kind: "inspect", non_destructive: true }],
 			validations: [{ id: "preview", kind: "playable_surface_visible", target: { test_id: "preview-iframe" }, expected: true, required: true, timeout_ms: 250 }],
 		};
 		expect(await evaluateRequiredValidations(page, stage)).toEqual([{
-			kind: "required_playable_surface_visible:preview", passed: false, actual: "bound_target=true;surface=false;score=false;controls=false",
+			kind: "required_playable_surface_visible:preview", passed: false, actual: "bound_target=true;interactive_surface=false;stateful=false;focusable=false",
 		}]);
 	});
 
-	it("requires an execution-recorded visual change for keyboard playability", async () => {
+	it("requires an execution-recorded state change for an approved keyboard interaction", async () => {
 		const stage = {
-			id: "stage_play", order: 8, node_id: "verify_playable_controls", stage_kind: "final_observe",
-			target_contract: { semantic_id: "tetris_keyboard", destructive: false },
+			id: "stage_interact", order: 8, node_id: "verify_interaction", stage_kind: "final_observe",
+			target_contract: { semantic_id: "interactive_keyboard", destructive: false },
 			interactions: [{ kind: "press", non_destructive: true }],
 			validations: [{ id: "changed", kind: "page_changed", expected: true, required: true }],
 		};
 		expect(await evaluateRequiredValidations({}, stage, new Map([[stage.node_id, true]]))).toEqual([{
-			kind: "required_page_changed:changed", passed: true, actual: "visual_changed_after_approved_action",
+			kind: "required_page_changed:changed", passed: true, actual: "observed_state_changed_after_approved_action",
 		}]);
 		expect((await evaluateRequiredValidations({}, stage, new Map()))[0]?.passed).toBe(false);
 	});
 
-	it("captures click digests only when the approved stage requires visual change", () => {
+	it("captures outcome digests for any approved state-changing interaction", () => {
 		const stage = {
 			id: "stage_mode", order: 4, node_id: "select_build_mode",
 			target_contract: { semantic_id: "build_mode", destructive: false },
@@ -503,7 +505,7 @@ describe("browser agent required validations", () => {
 			validations: [{ id: "changed", kind: "page_changed", expected: true, required: true }],
 		};
 		expect(interactionRequiresVisualChangeEvidence(stage, "click")).toBe(true);
-		expect(interactionRequiresVisualChangeEvidence(stage, "fill")).toBe(false);
+		expect(interactionRequiresVisualChangeEvidence(stage, "fill")).toBe(true);
 		expect(interactionRequiresVisualChangeEvidence({ ...stage, validations: [{ ...stage.validations[0], required: false }] }, "click")).toBe(false);
 	});
 

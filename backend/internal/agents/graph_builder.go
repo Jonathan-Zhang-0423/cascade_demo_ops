@@ -552,7 +552,7 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	}
 	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup || stage.Kind == model.BusinessStageKindFinalObserve
 	validations := []model.ValidationSpec{businessStageValidation(stage, actionType, target, required)}
-	if required && (validations[0].Kind == "page_changed" || validations[0].Kind == "playable_surface_visible") {
+	if required && (validations[0].Kind == "page_changed" || validations[0].Kind == "interactive_surface_visible" || validations[0].Kind == "playable_surface_visible") {
 		route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute)
 		if route != "" {
 			validations = append(validations, model.ValidationSpec{
@@ -930,7 +930,7 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		}
 		expected = true
 	} else if stage.Kind == model.BusinessStageKindFinalObserve && strings.TrimPrefix(stage.ID, "business_stage_") == "playable_preview" {
-		kind = "playable_surface_visible"
+		kind = "interactive_surface_visible"
 		if previewTarget, ok := businessStageExactTestIDTarget(stage, "preview-iframe"); ok {
 			target = previewTarget
 		} else {

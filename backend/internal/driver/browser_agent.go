@@ -79,6 +79,7 @@ type BrowserAgentWorkerStage struct {
 	ExpectedRouteAfterAction          string                              `json:"expected_route_after_action,omitempty"`
 	RuntimeRouteVerificationRequired  bool                                `json:"runtime_route_verification_required,omitempty"`
 	TargetContract                    model.BrowserAgentTargetContract    `json:"target_contract"`
+	InteractionContract               *model.InteractionContract          `json:"interaction_contract,omitempty"`
 	Components                        []model.BrowserAgentComponentTarget `json:"components,omitempty"`
 	Interactions                      []model.BrowserAgentInteraction     `json:"interactions"`
 	WaitConditions                    []string                            `json:"wait_conditions,omitempty"`

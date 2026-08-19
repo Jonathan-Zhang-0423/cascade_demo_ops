@@ -83,6 +83,28 @@ type BrowserAgentValidation = {
   timeout_ms?: number;
 };
 
+type InteractionPredicate = {
+  id: string;
+  kind: string;
+  target?: BrowserAgentInteraction["target"];
+  expected?: unknown;
+  required: boolean;
+  timeout_ms?: number;
+};
+
+type InteractionContract = {
+  schema_version: "demoops.interaction_contract.v1";
+  contract_id: string;
+  semantic_goal: string;
+  archetype?: string;
+  action_kind: string;
+  replay_policy: "observe_only" | "idempotent_write" | "once_effect";
+  target_semantic_id: string;
+  preconditions?: InteractionPredicate[];
+  expected_transitions: InteractionPredicate[];
+  non_destructive: boolean;
+};
+
 export type BrowserAgentWorkerStage = {
   id: string;
   order: number;
@@ -96,6 +118,7 @@ export type BrowserAgentWorkerStage = {
   expected_route_after_action?: string;
   runtime_route_verification_required?: boolean;
   target_contract: BrowserAgentTargetContract;
+  interaction_contract?: InteractionContract;
   components?: BrowserAgentComponentTarget[];
   interactions: BrowserAgentInteraction[];
   wait_conditions?: string[];
@@ -210,6 +233,21 @@ export type BrowserAgentCloseResult = {
   runtime_versions: Record<string, string>;
 };
 
+type OutcomeChangeEvidence = {
+  visual: boolean;
+  dom: boolean;
+  aria: boolean;
+  frame: boolean;
+  networkSettled: boolean;
+};
+
+type OutcomeSnapshot = {
+  visualDigest: string;
+  domDigest: string;
+  ariaDigest: string;
+  frameDigest: string;
+};
+
 type BrowserAgentSession = {
   id: string;
   browser: any;
@@ -232,6 +270,7 @@ type BrowserAgentSession = {
 	openedAtMS: number;
 	targetGeometryByArtifactID: Map<string, BrowserTargetGeometry>;
 	visualChangeByNodeID: Map<string, boolean>;
+	outcomeChangesByNodeID: Map<string, OutcomeChangeEvidence>;
   taskSecrets: Record<string, BrowserAgentTaskSecret>;
 };
 
@@ -312,6 +351,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	openedAtMS,
 	targetGeometryByArtifactID: new Map(),
 	visualChangeByNodeID: new Map(),
+	outcomeChangesByNodeID: new Map(),
     taskSecrets: validatedTaskSecrets(request.task_secrets),
   };
   await page.route("**/*", async (route: any) => {
@@ -674,6 +714,7 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   const resolutionAttempts: BrowserTargetResolutionAttempt[] = [];
   let targetGeometry: BrowserTargetGeometry | undefined;
   try {
+  const outcomeBefore = await captureOutcomeSnapshot(session.page);
   if (taskSecretRef) await executeFormalAuthentication(session, request.stage, taskSecretRef);
   for (const interaction of request.stage.interactions) {
     const actionEvidence = await executeInteraction(session, request.stage, interaction, secretValues, resolutionAttempts);
@@ -685,7 +726,12 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
     assertions.push({ kind: `action_${interaction.kind}_completed`, passed: true, actual: request.stage.target_contract.semantic_id });
   }
   await waitForCaptureWindow(session.page, request.stage);
-  assertions.push(...await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID));
+  const networkSettled = await session.page.waitForLoadState?.("networkidle", { timeout: 2_000 }).then(() => true).catch(() => false) ?? false;
+  const outcomeAfter = await captureOutcomeSnapshot(session.page);
+  const changes = compareOutcomeSnapshots(outcomeBefore, outcomeAfter, networkSettled);
+  session.outcomeChangesByNodeID.set(request.stage.node_id, changes);
+  if (changes.visual) session.visualChangeByNodeID.set(request.stage.node_id, true);
+  assertions.push(...await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID));
   const artifact = await captureScreenshot(session, request.stage, "after");
   const evidence = screenshotEvidence(artifact, request.stage, "执行后结果证据");
   return {
@@ -706,7 +752,7 @@ export async function revalidateBrowserAgentStage(request: BrowserAgentStageRequ
   const session = requiredSession(request.session_id);
   validateStage(request.stage);
   await waitForCaptureWindow(session.page, request.stage);
-  const assertions = await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID);
+  const assertions = await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID);
   const artifact = await captureScreenshot(session, request.stage, "revalidate");
   const evidence = screenshotEvidence(artifact, request.stage, "修复截图时机后的结果证据");
   return {
@@ -860,7 +906,10 @@ async function executeInteraction(
 }
 
 export function interactionRequiresVisualChangeEvidence(stage: BrowserAgentWorkerStage, interactionKind: string): boolean {
-	return interactionKind === "click" && (stage.validations || []).some((validation) => validation.required && validation.kind === "page_changed");
+	if (!["click", "press", "fill", "select"].includes(interactionKind)) return false;
+	const changeKinds = new Set(["page_changed", "state_changed", "dom_changed", "aria_changed", "visual_region_changed", "frame_surface_changed"]);
+	return (stage.validations || []).some((validation) => validation.required && changeKinds.has(validation.kind))
+		|| (stage.interaction_contract?.expected_transitions || []).some((predicate) => predicate.required && changeKinds.has(predicate.kind));
 }
 
 export function recoveredScreenshotMetadata(
@@ -1153,6 +1202,7 @@ export async function evaluateRequiredValidations(
   page: any,
   stage: BrowserAgentWorkerStage,
   visualChangeByNodeID?: ReadonlyMap<string, boolean>,
+  outcomeChangesByNodeID?: ReadonlyMap<string, OutcomeChangeEvidence>,
 ): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   for (const validation of (stage.validations || []).filter((item) => item.required)) {
@@ -1194,14 +1244,6 @@ export async function evaluateRequiredValidations(
           passed = true;
           actual = "expected_route_after_action_verified";
         }
-        if (!passed && stage.interactions.some((interaction) => interaction.kind === "click") && await postClickBusinessSurfaceVisible(page)) {
-          // Some App-generated packages bind the post-click validation to
-          // the pre-click dashboard selector. When the approved click has
-          // opened an evidenced business dialog, accept that observed result
-          // without rewriting the App package or changing its hashes.
-          passed = true;
-          actual = "post_click_business_surface_visible";
-        }
       } else if (validation.kind === "element_hidden") {
         const locator = locatorForValidation(page, validation);
         passed = !await locator.first().isVisible({ timeout: Math.min(timeout, 1_000) }).catch(() => false);
@@ -1233,16 +1275,32 @@ export async function evaluateRequiredValidations(
         const title = await page.title();
         passed = Boolean(expected) && title.includes(expected);
         actual = redactText(title);
-      } else if (validation.kind === "page_changed") {
-        passed = visualChangeByNodeID?.get(stage.node_id) === true;
-		actual = passed ? "visual_changed_after_approved_action" : "no_verified_visual_change";
-      } else if (validation.kind === "playable_surface_visible") {
+      } else if (validation.kind === "page_changed" || validation.kind === "state_changed") {
+        const changes = outcomeChangesByNodeID?.get(stage.node_id);
+        passed = Boolean(changes?.visual || changes?.dom || changes?.aria || changes?.frame || visualChangeByNodeID?.get(stage.node_id));
+		actual = passed ? "observed_state_changed_after_approved_action" : "no_verified_state_change";
+      } else if (validation.kind === "dom_changed") {
+        passed = outcomeChangesByNodeID?.get(stage.node_id)?.dom === true;
+        actual = passed ? "dom_changed" : "dom_unchanged";
+      } else if (validation.kind === "aria_changed") {
+        passed = outcomeChangesByNodeID?.get(stage.node_id)?.aria === true;
+        actual = passed ? "aria_changed" : "aria_unchanged";
+      } else if (validation.kind === "visual_region_changed") {
+        passed = outcomeChangesByNodeID?.get(stage.node_id)?.visual === true;
+        actual = passed ? "visual_region_changed" : "visual_region_unchanged";
+      } else if (validation.kind === "frame_surface_changed") {
+        passed = outcomeChangesByNodeID?.get(stage.node_id)?.frame === true;
+        actual = passed ? "frame_surface_changed" : "frame_surface_unchanged";
+      } else if (validation.kind === "network_settled") {
+        passed = outcomeChangesByNodeID?.get(stage.node_id)?.networkSettled === true;
+        actual = passed ? "network_settled" : "network_not_settled";
+      } else if (validation.kind === "playable_surface_visible" || validation.kind === "interactive_surface_visible") {
 		const target = validation.target || {};
 		const hasBoundTarget = Boolean(target.test_id || target.selector || target.role || target.label || target.text);
 		const boundTargetVisible = !hasBoundTarget || await waitForLocatorVisible(locatorForValidation(page, validation), timeout);
         const result = await waitForPlayableSurface(page, timeout);
-		passed = boundTargetVisible && result.surface && result.score && result.controls;
-		actual = `bound_target=${boundTargetVisible};surface=${result.surface};score=${result.score};controls=${result.controls}`;
+		passed = boundTargetVisible && result.surface;
+		actual = `bound_target=${boundTargetVisible};interactive_surface=${result.surface};stateful=${result.score};focusable=${result.controls}`;
       } else {
         actual = "unsupported_required_validation";
       }
@@ -1351,22 +1409,6 @@ function expectedPostClickRouteVerified(page: any, stage: BrowserAgentWorkerStag
     || (actionTarget.label && actionTarget.label === validationTarget.label),
   );
   return sameTarget && urlMatches(page.url(), stage.expected_route_after_action);
-}
-
-async function postClickBusinessSurfaceVisible(page: any): Promise<boolean> {
-  const selectors = [
-    '[role="dialog"]',
-    '[data-testid="dialog-new-project"]',
-    '[data-testid*="dialog" i]',
-  ];
-  for (const selector of selectors) {
-    try {
-      if (await page.locator(selector).first().isVisible({ timeout: 750 })) return true;
-    } catch {
-      // Continue probing the remaining evidence-bound surface selectors.
-    }
-  }
-  return false;
 }
 
 function locatorForValidation(page: any, validation: BrowserAgentValidation): any {
@@ -1497,6 +1539,18 @@ function validateStage(stage: BrowserAgentWorkerStage): void {
   if (!stage?.id || !stage.node_id || !stage.target_contract?.semantic_id) throw new Error("browser_agent_stage_identity_missing");
   if (!Array.isArray(stage.interactions) || stage.interactions.length === 0) throw new Error(`browser_agent_stage_interactions_missing: ${stage.node_id}`);
   if (stage.target_contract.destructive) throw new Error(`browser_agent_destructive_target_denied: ${stage.node_id}`);
+  const contract = stage.interaction_contract;
+  if (contract) {
+    if (contract.schema_version !== "demoops.interaction_contract.v1" || !contract.contract_id || !contract.semantic_goal || contract.target_semantic_id !== stage.target_contract.semantic_id) {
+      throw new Error(`browser_agent_interaction_contract_invalid: ${stage.node_id}`);
+    }
+    if (!contract.non_destructive || !["observe_only", "idempotent_write", "once_effect"].includes(contract.replay_policy)) {
+      throw new Error(`browser_agent_interaction_contract_replay_policy_invalid: ${stage.node_id}`);
+    }
+    if (!Array.isArray(contract.expected_transitions) || contract.expected_transitions.length === 0 || contract.expected_transitions.some((predicate) => !predicate.required)) {
+      throw new Error(`browser_agent_interaction_contract_outcome_missing: ${stage.node_id}`);
+    }
+  }
 }
 
 function requiredSession(id: string): BrowserAgentSession {
@@ -1842,6 +1896,53 @@ async function pageVisualDigest(page: any): Promise<string> {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+async function captureOutcomeSnapshot(page: any): Promise<OutcomeSnapshot> {
+  const fullVisualDigest = await pageVisualDigest(page);
+  const frames = typeof page.frames === "function" ? page.frames() : [page];
+  const domParts: string[] = [];
+  const ariaParts: string[] = [];
+  for (const frame of frames) {
+    const snapshot = await frame.evaluate(() => {
+      const doc = (globalThis as any).document;
+      if (!doc) return { dom: "", aria: "" };
+      const elements = Array.from(doc.querySelectorAll("body *")).slice(0, 800) as any[];
+      const dom = elements.map((element) => [
+        String(element.tagName || "").toLowerCase(),
+        String(element.getAttribute?.("role") || ""),
+        String(element.getAttribute?.("data-testid") || ""),
+        String(element.id || ""),
+        element.hidden ? "hidden" : "visible",
+      ].join(":" )).join("|");
+      const aria = elements.map((element) => Array.from(element.attributes || [])
+        .filter((attribute: any) => String(attribute.name || "").startsWith("aria-"))
+        .map((attribute: any) => `${attribute.name}=${attribute.value}`)
+        .sort().join(","))
+        .filter(Boolean).join("|");
+      return { dom, aria };
+    }).catch(() => ({ dom: "", aria: "" }));
+    domParts.push(String(snapshot.dom || ""));
+    ariaParts.push(String(snapshot.aria || ""));
+  }
+  const surface = await interactiveSurfaceTargetOnce(page);
+  const frameDigest = surface ? await visualDigest(page, surface.digestTarget) : "";
+  return {
+    visualDigest: fullVisualDigest,
+    domDigest: createHash("sha256").update(domParts.join("\n")).digest("hex"),
+    ariaDigest: createHash("sha256").update(ariaParts.join("\n")).digest("hex"),
+    frameDigest,
+  };
+}
+
+function compareOutcomeSnapshots(before: OutcomeSnapshot, after: OutcomeSnapshot, networkSettled: boolean): OutcomeChangeEvidence {
+  return {
+    visual: before.visualDigest !== after.visualDigest,
+    dom: before.domDigest !== after.domDigest,
+    aria: before.ariaDigest !== after.ariaDigest,
+    frame: Boolean(before.frameDigest || after.frameDigest) && before.frameDigest !== after.frameDigest,
+    networkSettled,
+  };
+}
+
 async function visualDigest(page: any, locator?: any): Promise<string> {
   if (locator?.screenshot) {
     const bytes = await locator.screenshot({ type: "png", animations: "disabled", caret: "hide", timeout: screenshotTimeoutMS }).catch(() => undefined);
@@ -1851,28 +1952,37 @@ async function visualDigest(page: any, locator?: any): Promise<string> {
 }
 
 type PlayableSurfaceEvidence = { surface: boolean; score: boolean; controls: boolean };
-type PlayableSurfaceTarget = PlayableSurfaceEvidence & { digestTarget: any; keyboardTarget: any };
+type InteractiveSurfaceEvidence = { surface: boolean; stateful: boolean; focusable: boolean };
+type PlayableSurfaceTarget = InteractiveSurfaceEvidence & { digestTarget: any; keyboardTarget: any };
 
-export function classifyPlayableSurfaceFrame(text: string, surface: boolean): PlayableSurfaceEvidence {
-  const normalized = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
-  return {
-    surface,
-    score: surface && /得分|分数|score|lines|行数/.test(normalized),
-    controls: surface && /方向键|左右|旋转|操作|arrow|keyboard|controls|move|rotate|←|→|↓|↑/.test(normalized),
-  };
+export function classifyInteractiveSurfaceFrame(surface: boolean, stateful: boolean, focusable: boolean): InteractiveSurfaceEvidence {
+  return { surface, stateful: surface && stateful, focusable: surface && focusable };
 }
 
-async function playableSurfaceTargetOnce(page: any): Promise<PlayableSurfaceTarget | undefined> {
+export function classifyPlayableSurfaceFrame(text: string, surface: boolean): PlayableSurfaceEvidence {
+  void text;
+  // Compatibility alias: old packages used this name, but the runtime no
+  // longer interprets product copy such as scores or control instructions.
+  return { surface, score: surface, controls: surface };
+}
+
+async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceTarget | undefined> {
   const frames = typeof page.frames === "function" ? page.frames() : [page];
-  const surfaceSelectors = ["canvas:visible", '[data-testid*="board" i]:visible', '[class*="game-board" i]:visible', '[class*="board" i]:visible', '[class*="tetris" i]:visible'];
+  const surfaceSelectors = [
+    '[role="application"]:visible', "canvas:visible", "iframe:visible",
+    '[contenteditable="true"]:visible', '[role="grid"]:visible', '[tabindex]:visible',
+  ];
   for (const frame of frames) {
     const body = frame.locator?.("body");
-    const frameText = await body?.innerText({ timeout: 750 }).catch(() => "") || "";
     for (const selector of surfaceSelectors) {
       const locator = frame.locator?.(selector)?.first();
       const surfaceVisible = await locator?.isVisible({ timeout: 500 }).catch(() => false) || false;
-      const evidence = classifyPlayableSurfaceFrame(frameText, surfaceVisible);
-      if (evidence.surface && evidence.score && evidence.controls) {
+      if (!surfaceVisible) continue;
+      const box = await locator.boundingBox?.().catch(() => undefined);
+      const stateful = Boolean(box && Number(box.width) >= 120 && Number(box.height) >= 80);
+      const focusable = selector.includes("tabindex") || selector.includes("application") || selector.includes("contenteditable") || selector.includes("canvas") || selector.includes("iframe") || selector.includes("grid");
+      const evidence = classifyInteractiveSurfaceFrame(surfaceVisible, stateful, focusable);
+      if (evidence.surface && evidence.stateful) {
         return { ...evidence, digestTarget: locator, keyboardTarget: body || locator };
       }
     }
@@ -1883,7 +1993,7 @@ async function playableSurfaceTargetOnce(page: any): Promise<PlayableSurfaceTarg
 async function waitForPlayableSurfaceTarget(page: any, timeout: number): Promise<PlayableSurfaceTarget | undefined> {
   const deadline = Date.now() + Math.max(250, Math.min(timeout, standardValidationTimeoutMS));
   do {
-    const target = await playableSurfaceTargetOnce(page);
+    const target = await interactiveSurfaceTargetOnce(page);
     if (target) return target;
     await page.waitForTimeout?.(250);
   } while (Date.now() < deadline);
@@ -1906,26 +2016,8 @@ async function focusLargestPlayableSurface(page: any, timeout: number, target?: 
 }
 
 async function waitForPlayableSurface(page: any, timeout: number): Promise<{ surface: boolean; score: boolean; controls: boolean }> {
-  const deadline = Date.now() + Math.max(250, Math.min(timeout, standardValidationTimeoutMS));
-  let latest = { surface: false, score: false, controls: false };
-  do {
-    const frames = typeof page.frames === "function" ? page.frames() : [page];
-    for (const frame of frames) {
-      const frameText = await frame.locator?.("body")?.innerText({ timeout: 750 }).catch(() => "") || "";
-      for (const selector of ["canvas:visible", '[data-testid*="board" i]:visible', '[class*="game-board" i]:visible', '[class*="board" i]:visible', '[class*="tetris" i]:visible']) {
-        const surface = await frame.locator?.(selector)?.first()?.isVisible({ timeout: 500 }).catch(() => false) || false;
-        const evidence = classifyPlayableSurfaceFrame(frameText, surface);
-        latest = {
-          surface: latest.surface || evidence.surface,
-          score: latest.score || evidence.score,
-          controls: latest.controls || evidence.controls,
-        };
-        if (evidence.surface && evidence.score && evidence.controls) return evidence;
-      }
-    }
-    await page.waitForTimeout?.(250);
-  } while (Date.now() < deadline);
-  return latest;
+  const target = await waitForPlayableSurfaceTarget(page, timeout);
+  return { surface: Boolean(target?.surface), score: Boolean(target?.stateful), controls: Boolean(target?.focusable) };
 }
 
 function forbiddenName(actual: string, forbidden: string[]): boolean {

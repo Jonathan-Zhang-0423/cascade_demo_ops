@@ -399,6 +399,7 @@ func buildStageApprovalPlan(project *model.ProjectContext, report *model.Multimo
 			InputContent:                     inputContentForStage(step, evidence),
 			Interaction:                      interaction,
 			TargetContract:                   targetContract,
+			InteractionContract:              step.InteractionContract,
 			SuccessState:                     firstNonEmpty(step.ExpectedOutcome, validationSummary(step.Validations)),
 			WaitConditions:                   waitConditionsForStep(step),
 			CapturePoints:                    capturePointsForStep(step),
@@ -458,6 +459,7 @@ func buildBrowserAgentScriptOutline(project *model.ProjectContext, graph *model.
 			Components:                       components,
 			Interactions:                     interactions,
 			TargetContract:                   stage.TargetContract,
+			InteractionContract:              stage.InteractionContract,
 			WaitConditions:                   stage.WaitConditions,
 			CapturePoints:                    stage.CapturePoints,
 			CapturePlan:                      stage.CapturePlan,
@@ -2464,7 +2466,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 				nonDestructive = approved
 			}
 		}
-		steps = append(steps, model.ScriptStep{
+		step := model.ScriptStep{
 			ID:              fmt.Sprintf("step_%02d_%s", i+1, node.ID),
 			Order:           i + 1,
 			NodeID:          node.ID,
@@ -2484,7 +2486,9 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 			Narrative:       narrative,
 			EvidenceRefs:    node.EvidenceRefs,
 			Blocking:        isBlockingScriptStep(node, action.Type, validations),
-		})
+		}
+		step.InteractionContract = interactionContractForStep(step, node, targetContract, evidenceForInteractionContract(node, action, validations))
+		steps = append(steps, step)
 		if routeContract.ExpectedRouteAfterAction != "" {
 			previousRoute = routeContract.ExpectedRouteAfterAction
 		} else if routeContract.TargetRoute != "" {
@@ -2493,7 +2497,111 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 		elapsedMS += durationMS
 		_ = elapsedMS
 	}
+	archetype := productArchetypeForSteps(steps)
+	for index := range steps {
+		if steps[index].InteractionContract != nil {
+			steps[index].InteractionContract.Archetype = archetype
+		}
+	}
 	return steps
+}
+
+func evidenceForInteractionContract(node *model.GraphNode, action model.ScriptActionInstruction, validations []model.ValidationSpec) []model.EvidenceRef {
+	refs := append([]model.EvidenceRef{}, node.EvidenceRefs...)
+	refs = append(refs, action.Target.EvidenceRefs...)
+	for _, validation := range validations {
+		refs = append(refs, validation.EvidenceRefs...)
+		refs = append(refs, validation.Target.EvidenceRefs...)
+	}
+	return uniqueEvidenceRefs(refs)
+}
+
+func interactionContractForStep(step model.ScriptStep, node *model.GraphNode, target *model.BrowserAgentTargetContract, evidence []model.EvidenceRef) *model.InteractionContract {
+	if node == nil || target == nil || target.Destructive || !step.NonDestructive || len(evidence) == 0 {
+		return nil
+	}
+	predicates := make([]model.InteractionPredicate, 0, len(step.Validations))
+	for _, validation := range step.Validations {
+		if !validation.Required || !validationKindAllowedForBrowserAgent(validation.Kind) {
+			continue
+		}
+		kind := strings.TrimSpace(validation.Kind)
+		if kind == "playable_surface_visible" {
+			kind = "interactive_surface_visible"
+		}
+		predicates = append(predicates, model.InteractionPredicate{
+			ID: validation.ID, Kind: kind, Target: validation.Target, Expected: validation.Expected,
+			Required: true, TimeoutMS: validation.TimeoutMS, EvidenceRefs: uniqueEvidenceRefs(validation.EvidenceRefs),
+		})
+	}
+	if len(predicates) == 0 {
+		return nil
+	}
+	preconditions := make([]model.InteractionPredicate, 0, len(step.Action.Preconditions))
+	for _, assertion := range step.Action.Preconditions {
+		if !validationKindAllowedForBrowserAgent(assertion.Kind) {
+			continue
+		}
+		preconditions = append(preconditions, model.InteractionPredicate{
+			ID:   firstNonEmpty(assertion.ID, "precondition_"+shortHash(step.NodeID+"|"+assertion.Kind)),
+			Kind: assertion.Kind, Target: assertion.Target, Expected: assertion.Expected,
+			Required: assertion.Required, TimeoutMS: assertion.TimeoutMS, EvidenceRefs: uniqueEvidenceRefs(assertion.EvidenceRefs),
+		})
+	}
+	contract := &model.InteractionContract{
+		SchemaVersion: model.InteractionContractSchemaVersion,
+		ContractID:    "interaction_" + shortHash(step.NodeID+"|"+string(step.Action.Type)+"|"+target.SemanticID),
+		SemanticGoal:  firstNonEmpty(step.BusinessValue, step.ExpectedOutcome, step.Title),
+		Archetype:     model.ProductArchetypeUnknown, ActionKind: step.Action.Type, ReplayPolicy: interactionReplayPolicy(step.Action.Type), TargetSemanticID: target.SemanticID,
+		Preconditions: preconditions, ExpectedTransitions: predicates, EvidenceRefs: evidence, NonDestructive: true,
+	}
+	if err := model.ValidateInteractionContract(*contract); err != nil {
+		return nil
+	}
+	return contract
+}
+
+func interactionReplayPolicy(action model.GraphActionType) model.InteractionReplayPolicy {
+	switch action {
+	case model.GraphActionWait, model.GraphActionInspect, model.GraphActionAssert:
+		return model.InteractionReplayObserveOnly
+	case model.GraphActionFill, model.GraphActionSelect:
+		return model.InteractionReplayIdempotentWrite
+	default:
+		return model.InteractionReplayOnceEffect
+	}
+}
+
+// productArchetypeForSteps classifies observed interaction structure only. It
+// deliberately ignores hostname, paths, selectors, and brand copy.
+func productArchetypeForSteps(steps []model.ScriptStep) model.ProductArchetype {
+	counts := map[model.GraphActionType]int{}
+	progress, finalObserve := 0, 0
+	for _, step := range steps {
+		counts[step.Action.Type]++
+		switch step.StageKind {
+		case model.BusinessStageKindObserveProgress:
+			progress++
+		case model.BusinessStageKindFinalObserve:
+			finalObserve++
+		}
+	}
+	if counts[model.GraphActionPress] > 0 {
+		return model.ProductArchetypeInteractive
+	}
+	if progress > 0 && finalObserve > 0 && (counts[model.GraphActionClick] > 0 || counts[model.GraphActionAPICall] > 0) {
+		return model.ProductArchetypeAsyncBuilder
+	}
+	if counts[model.GraphActionFill]+counts[model.GraphActionSelect] >= 2 && counts[model.GraphActionClick] > 0 {
+		return model.ProductArchetypeCRUDForm
+	}
+	if counts[model.GraphActionClick] >= 2 && finalObserve > 0 {
+		return model.ProductArchetypeCanvasEditor
+	}
+	if len(steps) > 0 && counts[model.GraphActionInspect]+counts[model.GraphActionWait] >= (len(steps)+1)/2 {
+		return model.ProductArchetypeDashboard
+	}
+	return model.ProductArchetypeUnknown
 }
 
 func nodeVerifiedForBusinessAction(node *model.GraphNode) bool {
@@ -2627,7 +2735,7 @@ func hasRequiredValidation(validations []model.ValidationSpec) bool {
 
 func validationKindAllowedForBrowserAgent(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
 		return true
 	default:
 		return false

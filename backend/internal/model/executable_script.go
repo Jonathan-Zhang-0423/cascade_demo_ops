@@ -187,6 +187,7 @@ type StageApprovalStage struct {
 	InputContent                     []StageInputContent          `json:"input_content,omitempty"`
 	Interaction                      BrowserAgentInteraction      `json:"interaction"`
 	TargetContract                   *BrowserAgentTargetContract  `json:"target_contract,omitempty"`
+	InteractionContract              *InteractionContract         `json:"interaction_contract,omitempty"`
 	SuccessState                     string                       `json:"success_state,omitempty"`
 	WaitConditions                   []string                     `json:"wait_conditions,omitempty"`
 	CapturePoints                    []string                     `json:"capture_points,omitempty"`
@@ -281,6 +282,7 @@ type BrowserAgentOutlineStage struct {
 	Components                       []BrowserAgentComponentTarget `json:"components,omitempty"`
 	Interactions                     []BrowserAgentInteraction     `json:"interactions,omitempty"`
 	TargetContract                   *BrowserAgentTargetContract   `json:"target_contract,omitempty"`
+	InteractionContract              *InteractionContract          `json:"interaction_contract,omitempty"`
 	WaitConditions                   []string                      `json:"wait_conditions,omitempty"`
 	CapturePoints                    []string                      `json:"capture_points,omitempty"`
 	CapturePlan                      *BrowserAgentCapturePlan      `json:"capture_plan,omitempty"`
