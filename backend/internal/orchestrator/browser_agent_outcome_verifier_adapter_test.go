@@ -132,6 +132,9 @@ func TestValidateStageEvents(t *testing.T) {
 	if report.Phase != "runtime_stage" {
 		t.Errorf("Expected Phase 'runtime_stage', got '%s'", report.Phase)
 	}
+	if len(report.Checks) == 0 {
+		t.Fatal("runtime adapter dropped the legacy validation results needed by repair policy")
+	}
 }
 
 func TestValidatePostExecution(t *testing.T) {

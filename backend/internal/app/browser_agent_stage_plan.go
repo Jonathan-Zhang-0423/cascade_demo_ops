@@ -439,7 +439,7 @@ func warningOnlyRepairDecisionCanContinue(report model.ValidationReport, observa
 		if check.Passed {
 			continue
 		}
-		if check.Severity == model.FindingSeverityBlocking {
+		if check.Severity != model.FindingSeverityWarning || (check.Code != string(model.ValidationResultTypeWarning) && check.Code != string(model.ValidationResultTypeUncertainty)) {
 			return false
 		}
 		hasWarning = true

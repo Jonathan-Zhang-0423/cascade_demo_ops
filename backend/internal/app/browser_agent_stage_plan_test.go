@@ -587,7 +587,7 @@ type stubStageVerifier struct {
 func TestWarningOnlyRepairDecisionContinuesAfterPassedBrowserAssertions(t *testing.T) {
 	report := model.ValidationReport{
 		Decision: model.ValidationDecisionRepairAllowed,
-		Checks:   []model.ValidationCheck{{Severity: model.FindingSeverityWarning, Passed: false}},
+		Checks:   []model.ValidationCheck{{Code: string(model.ValidationResultTypeWarning), Severity: model.FindingSeverityWarning, Passed: false}},
 	}
 	observation := &model.RuntimeObservation{Assertions: []model.RuntimeAssertion{{Kind: "element_visible", Passed: true}}}
 	if !warningOnlyRepairDecisionCanContinue(report, observation) {

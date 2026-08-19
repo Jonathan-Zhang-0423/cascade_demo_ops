@@ -616,6 +616,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 
 	// Convert to new report and append runtime checks
 	newReport := a.convertToNewReport(legacyReport, "runtime_stage", vctx)
+	newReport.Checks = append(newReport.Checks, a.validationResultsToChecks(validationResults)...)
 	// ValidationReport.Validate() requires NodeID and StageID for runtime_stage phase.
 	// Extract them from the first event that carries both fields.
 	for _, ev := range events {
@@ -642,6 +643,21 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 	}
 
 	return newReport, nil
+}
+
+func (a *BrowserAgentOutcomeVerifierAdapter) validationResultsToChecks(results []model.ValidationResult) []model.ValidationCheck {
+	checks := make([]model.ValidationCheck, 0, len(results))
+	for _, result := range results {
+		resultType := string(result.Type)
+		summary := firstNonEmpty(result.Description, result.Title, result.ValidationRule, resultType)
+		checks = append(checks, model.ValidationCheck{
+			ID: result.ID, Kind: resultType, Code: resultType, NodeID: result.NodeID,
+			Severity: a.mapSeverity(resultType, result.Critical || result.Blocker),
+			Passed:   result.Type == model.ValidationResultTypePassed, Required: result.Critical || result.Blocker,
+			Summary: summary, EvidenceRefs: append([]model.EvidenceRef{}, result.EvidenceRefs...),
+		})
+	}
+	return checks
 }
 
 // adapterVerifiedExpectedRoute translates a protocol-level dynamic route into
