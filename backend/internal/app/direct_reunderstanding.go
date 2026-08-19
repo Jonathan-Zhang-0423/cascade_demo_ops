@@ -252,6 +252,22 @@ func directIssuesFromFailedResult(result model.RecordingResultPackage, bundle *m
 			issues = append(issues, issue)
 		}
 	}
+	if len(issues) == 0 && bundle != nil && bundle.RepairLineage != nil && result.FailureDiagnostic != nil &&
+		result.FailureDiagnostic.FailedNodeID == "business_stage_final_observe" && strings.TrimSpace(result.FailureDiagnostic.Error.Code) == "browser_agent_observation_failed" {
+		stageID := ""
+		if result.FailureDiagnostic.FailedStepOrder > 0 {
+			stageID = fmt.Sprintf("stage_step_%02d_business_stage_final_observe", result.FailureDiagnostic.FailedStepOrder)
+		}
+		issue := model.DirectReunderstandingIssue{
+			Code: "browser_agent_observation_failed", StageID: stageID, NodeID: result.FailureDiagnostic.FailedNodeID,
+			Severity: model.FindingSeverityBlocking, Required: true,
+			Summary:              "The terminal repair could not re-enter the completed project through its approved navigation step.",
+			Suggestion:           "Reuse the exact completed project card on the authenticated dashboard, then re-run only final verification.",
+			ResponsibilityDomain: model.ValidationCheckDomainApp,
+		}
+		issue.IssueID = model.StableDirectReunderstandingIssueID(issue)
+		issues = append(issues, issue)
+	}
 	return issues
 }
 
@@ -287,15 +303,15 @@ func directReunderstandingIssueID(issue model.DirectReunderstandingIssue) string
 }
 
 func terminalPlayableVerificationRepairGraph(state *orchestrator.CascadeState, result model.RecordingResultPackage, now time.Time) (*model.DemoWorkflowGraph, bool, error) {
-	if result.FailureDiagnostic == nil || result.FailureDiagnostic.FailedNodeID != "business_stage_verify_playable_controls" {
+	if result.FailureDiagnostic == nil {
+		return nil, false, nil
+	}
+	terminalNavigationRepair := result.FailureDiagnostic.FailedNodeID == "business_stage_final_observe" && state != nil && state.WorkflowGraph != nil && strings.HasPrefix(state.WorkflowGraph.ID, "graph_terminal_playable_repair_")
+	if result.FailureDiagnostic.FailedNodeID != "business_stage_verify_playable_controls" && !terminalNavigationRepair {
 		return nil, false, nil
 	}
 	if state == nil || state.ProjectContext == nil || state.WorkflowGraph == nil {
 		return nil, true, fmt.Errorf("terminal playable verification repair is missing project or workflow state")
-	}
-	projectURL, err := approvedTerminalProjectURL(state.ProjectContext, result.FailureDiagnostic.CurrentURL)
-	if err != nil {
-		return nil, true, err
 	}
 	graph, err := cloneWorkflowGraphForPackage(state.WorkflowGraph)
 	if err != nil {
@@ -319,21 +335,60 @@ func terminalPlayableVerificationRepairGraph(state *orchestrator.CascadeState, r
 			return nil, true, fmt.Errorf("terminal playable verification repair is missing required node %s", id)
 		}
 	}
+	projectURLSource := result.FailureDiagnostic.CurrentURL
+	if terminalNavigationRepair {
+		projectURLSource = byID[resumeNodeID].ActionSpec.Target.URL
+	}
+	projectURL, err := approvedTerminalProjectURL(state.ProjectContext, projectURLSource)
+	if err != nil {
+		return nil, true, err
+	}
 	resume := byID[resumeNodeID]
 	resume.Type = model.GraphNodeTypeAction
-	resume.Action = string(model.GraphActionNavigate)
 	resume.Title = "重新进入已完成项目并观察最终状态"
-	resume.Goal = "直接打开已完成项目，确认构建结果仍然可用。"
-	resume.PageRef = projectURL
-	resume.ActionSpec.Type = model.GraphActionNavigate
-	resume.ActionSpec.Target.URL = projectURL
+	resume.Goal = "打开已完成项目，确认构建结果仍然可用。"
 	resume.ActionSpec.TimeoutMS = 30_000
 	resume.ActionSpec.WaitUntil = "domcontentloaded"
 	resume.StateAfter = nil
+	if terminalNavigationRepair {
+		parsedProjectURL, _ := url.Parse(projectURL)
+		projectID := strings.TrimPrefix(parsedProjectURL.Path, "/project/")
+		appURL := parsedProjectURL.Scheme + "://" + parsedProjectURL.Host + "/app"
+		testID := "card-project-" + projectID
+		selector := `[data-testid="` + testID + `"]`
+		evidenceID := ""
+		if len(resume.EvidenceRefs) > 0 {
+			evidenceID = resume.EvidenceRefs[0].ID
+		}
+		resume.Action = string(model.GraphActionClick)
+		resume.Selector = selector
+		resume.PageRef = "/app"
+		resume.ActionSpec.Type = model.GraphActionClick
+		resume.ActionSpec.Target = model.ActionTarget{
+			URL: appURL, Selector: selector, TestID: testID, Source: "local_code_snapshot",
+			ComponentRef: "component:dashboard-project-card", EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...),
+			SelectorAlternatives: []model.SelectorCandidate{{
+				Kind: "testid", Value: testID, EvidenceID: evidenceID, SourceKind: "source_scan", Source: "source_scan",
+				ObservedURL: appURL, ObservedRouteTemplate: "/app", ObservedPageRole: "workspace", Confidence: 0.9,
+			}},
+		}
+		resume.Validations = append(resume.Validations, model.ValidationSpec{
+			ID: "validate_terminal_repair_project_route", Kind: "url_matches", Target: model.ActionTarget{URL: projectURL},
+			Expected: projectURL, Required: true, Severity: "blocking", EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...),
+		})
+		if resume.Capture != nil {
+			resume.Capture.FocusSelector = selector
+		}
+	} else {
+		resume.Action = string(model.GraphActionNavigate)
+		resume.PageRef = projectURL
+		resume.ActionSpec.Type = model.GraphActionNavigate
+		resume.ActionSpec.Target.URL = projectURL
+	}
 	if resume.Metadata == nil {
 		resume.Metadata = map[string]any{}
 	}
-	resume.Metadata["business_stage_entry_route"] = projectURL
+	resume.Metadata["business_stage_entry_route"] = resume.PageRef
 	resume.Metadata["expected_route_after_action"] = projectURL
 	resume.Metadata["terminal_repair_resume"] = true
 	byID[sessionNodeID].Type = model.GraphNodeTypeStart

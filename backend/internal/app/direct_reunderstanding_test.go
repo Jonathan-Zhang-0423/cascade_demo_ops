@@ -102,6 +102,30 @@ func TestTerminalPlayableVerificationRepairGraphResumesExactBuiltProject(t *test
 	if _, eligible, err := terminalPlayableVerificationRepairGraph(state, foreign, time.Now()); !eligible || err == nil {
 		t.Fatalf("foreign failure URL was accepted: eligible=%v err=%v", eligible, err)
 	}
+	navigationFailure := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
+		FailedNodeID: "business_stage_final_observe", FailedStepOrder: 2, CurrentURL: "https://app.example.com/app",
+		Error: model.AgentError{Code: "browser_agent_observation_failed"},
+	}}
+	retried, eligible, err := terminalPlayableVerificationRepairGraph(&orchestrator.CascadeState{ProjectContext: state.ProjectContext, WorkflowGraph: repaired}, navigationFailure, time.Now())
+	if err != nil || !eligible {
+		t.Fatalf("terminal navigation failure was not converted to dashboard-card resume: eligible=%v err=%v", eligible, err)
+	}
+	resume = retried.Nodes[1]
+	if resume.ActionSpec.Type != model.GraphActionClick || resume.PageRef != "/app" || resume.ActionSpec.Target.TestID != "card-project-already-built" {
+		t.Fatalf("terminal navigation repair did not click the exact completed project card: %+v", resume)
+	}
+}
+
+func TestDirectIssuesPromoteTerminalRepairNavigationFailure(t *testing.T) {
+	bundle := &model.ExecutableRecordingScriptBundle{RepairLineage: &model.ScriptRepairLineage{SourceResultID: "source_result"}}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
+		FailedNodeID: "business_stage_final_observe", FailedStepOrder: 2,
+		Error: model.AgentError{Code: "browser_agent_observation_failed"},
+	}}
+	issues := directIssuesFromFailedResult(result, bundle)
+	if len(issues) != 1 || !issues[0].Required || issues[0].ResponsibilityDomain != model.ValidationCheckDomainApp || issues[0].StageID != "stage_step_02_business_stage_final_observe" {
+		t.Fatalf("terminal repair navigation failure was not promoted to an App repair issue: %+v", issues)
+	}
 }
 
 func TestDirectFailureReunderstandingLifecycleAndIdempotency(t *testing.T) {
