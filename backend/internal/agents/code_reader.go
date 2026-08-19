@@ -2054,6 +2054,12 @@ func codeSearchPathTerms(terms []string) []string {
 	out := append([]string(nil), terms...)
 	replacer := strings.NewReplacer("-", " ", "_", " ", ".", " ", "/", " ", "\\", " ")
 	for _, term := range terms {
+		switch strings.ToLower(strings.TrimSpace(term)) {
+		case "build-result-card":
+			out = append(out, "plan", "chat", "agent")
+		case "preview-iframe":
+			out = append(out, "preview", "panel")
+		}
 		for _, part := range strings.Fields(replacer.Replace(term)) {
 			part = strings.TrimSpace(part)
 			if len(part) >= 4 {

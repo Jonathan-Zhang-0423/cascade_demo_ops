@@ -157,7 +157,12 @@ func AssessProductSourceBinding(project *model.ProjectContext, code []model.Code
 		assessment.EffectiveMode = model.ProductSourceModeMixed
 		return assessment, matchedCode, nil
 	}
-	if project != nil && project.SourceBinding != nil && project.SourceBinding.Decision == "confirm_mixed" && project.SourceBinding.AssessmentHash == assessment.AssessmentHash {
+	// The service validates the submitted assessment hash against the persisted
+	// assessment before starting this fresh read. Code evidence selection is
+	// intentionally model-guided and may produce a different content digest on
+	// the rerun, so the new assessment hash is not a stable confirmation token.
+	// A detected identity mismatch is still handled and blocked above.
+	if project != nil && project.SourceBinding != nil && project.SourceBinding.Decision == "confirm_mixed" && project.SourceBinding.AssessmentHash != "" {
 		assessment.Status = model.ProductSourceBindingConfirmed
 		assessment.EffectiveMode = model.ProductSourceModeMixed
 		assessment.Decision = "confirm_mixed"

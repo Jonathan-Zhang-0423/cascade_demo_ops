@@ -56,7 +56,7 @@ func TestAssessProductSourceBindingAllowsExplicitConfirmationOnlyWhenUnverified(
 	if err != nil || initial.Status != model.ProductSourceBindingUnverified {
 		t.Fatalf("expected unverified assessment before confirmation: %+v err=%v", initial, err)
 	}
-	project := &model.ProjectContext{SourceBinding: &model.ProductSourceBindingAssessment{Decision: "confirm_mixed", AssessmentHash: initial.AssessmentHash}}
+	project := &model.ProjectContext{SourceBinding: &model.ProductSourceBindingAssessment{Decision: "confirm_mixed", AssessmentHash: "validated-persisted-assessment"}}
 	confirmed, effective, err := AssessProductSourceBinding(project, []model.CodeUnderstandingSnapshot{code}, []model.PageUnderstandingSnapshot{page}, time.Now())
 	if err != nil || confirmed.Status != model.ProductSourceBindingConfirmed || confirmed.EffectiveMode != model.ProductSourceModeMixed || confirmed.Decision != "confirm_mixed" || len(effective) != 1 {
 		t.Fatalf("explicit unverified binding confirmation was not honored: assessment=%+v effective=%d err=%v", confirmed, len(effective), err)

@@ -1083,8 +1083,8 @@ func TestCodeSearchFindsEveryExactResultAnchorWithinBoundedScan(t *testing.T) {
 		candidates = append(candidates, codeCandidateFile{path: path, rel: rel, name: filepath.Base(path), size: info.Size()})
 	}
 	for rel, content := range map[string]string{
-		"src/components/results/BuildResultCard.tsx": `export const Done = () => <div data-testid="build-result-card" />`,
-		"src/components/preview/PreviewPanel.tsx":    `export const Preview = () => <iframe data-testid="preview-iframe" />`,
+		"src/components/ide/chat/plan-components.tsx": `export const Done = () => <div data-testid="build-result-card" />`,
+		"src/components/preview/PreviewPanel.tsx":     `export const Preview = () => <iframe data-testid="preview-iframe" />`,
 	} {
 		writeFixtureFile(t, root, rel, content)
 		path := filepath.Join(root, filepath.FromSlash(rel))
