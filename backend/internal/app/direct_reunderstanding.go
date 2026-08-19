@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -99,18 +101,37 @@ func (s *Service) ReunderstandDirectBrowserAgentFailure(ctx context.Context, pro
 			return DirectFailureReunderstandingResult{}, &directReunderstandingError{"bad_request", "all required reunderstanding issues must be selected"}
 		}
 	}
-	input, err := userInputFromProjectContext(state.ProjectContext)
-	if err != nil {
-		return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", "required local credential or project input is unavailable"}
-	}
 	generation := state.ExecutionPackageGeneration
-	next, err := s.CreateProject(ctx, input)
+	now := time.Now().UTC()
+	graph, terminalRepair, err := terminalPlayableVerificationRepairGraph(state, *result, now)
 	if err != nil {
-		return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", "real page rescan and package regeneration did not complete"}
+		return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", err.Error()}
+	}
+	var next *orchestrator.CascadeState
+	if terminalRepair {
+		next, err = cloneCascadeStateForRevision(state)
+		if err == nil {
+			next, err = s.flow.RepackageReviewedGraph(ctx, next, graph)
+		}
+		if err != nil {
+			return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", "terminal playable verification package regeneration did not complete"}
+		}
+	} else {
+		input, inputErr := userInputFromProjectContext(state.ProjectContext)
+		if inputErr != nil {
+			return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", "required local credential or project input is unavailable"}
+		}
+		next, err = s.CreateProject(ctx, input)
+		if err != nil {
+			return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", "real page rescan and package regeneration did not complete"}
+		}
 	}
 	next.ExecutionPackageGeneration = generation
-	now := time.Now().UTC()
-	lineage := &model.ScriptRepairLineage{BaseBundleID: state.ExecutableScriptBundle.ID, BaseBundleHashSHA256: request.FailedBundleHashSHA256, SourceResultID: result.ResultID, SourceCloudJobID: result.CloudJobID, RepairAttempt: result.RepairRequest.RepairAttempt + 1, ChangeSummary: "Re-understood from redacted Browser Agent failure evidence; requires approval.", DiagnosticRefs: directDiagnosticRefs(*result.FailureDiagnostic), CreatedAt: now}
+	changeSummary := "Re-understood from redacted Browser Agent failure evidence; requires approval."
+	if terminalRepair {
+		changeSummary = "Resume the already-built project at the exact approved failure URL and re-run only final playable-surface and keyboard-change verification; requires approval."
+	}
+	lineage := &model.ScriptRepairLineage{BaseBundleID: state.ExecutableScriptBundle.ID, BaseBundleHashSHA256: request.FailedBundleHashSHA256, SourceResultID: result.ResultID, SourceCloudJobID: result.CloudJobID, RepairAttempt: result.RepairRequest.RepairAttempt + 1, ChangeSummary: changeSummary, DiagnosticRefs: directDiagnosticRefs(*result.FailureDiagnostic), CreatedAt: now}
 	if next.ExecutableScriptBundle == nil {
 		return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", "regenerated executable bundle is missing"}
 	}
@@ -236,4 +257,125 @@ func directReunderstandingIssueID(issue model.DirectReunderstandingIssue) string
 		return strings.TrimSpace(issue.IssueID)
 	}
 	return model.StableDirectReunderstandingIssueID(issue)
+}
+
+func terminalPlayableVerificationRepairGraph(state *orchestrator.CascadeState, result model.RecordingResultPackage, now time.Time) (*model.DemoWorkflowGraph, bool, error) {
+	if result.FailureDiagnostic == nil || result.FailureDiagnostic.FailedNodeID != "business_stage_verify_playable_controls" {
+		return nil, false, nil
+	}
+	if state == nil || state.ProjectContext == nil || state.WorkflowGraph == nil {
+		return nil, true, fmt.Errorf("terminal playable verification repair is missing project or workflow state")
+	}
+	projectURL, err := approvedTerminalProjectURL(state.ProjectContext, result.FailureDiagnostic.CurrentURL)
+	if err != nil {
+		return nil, true, err
+	}
+	graph, err := cloneWorkflowGraphForPackage(state.WorkflowGraph)
+	if err != nil {
+		return nil, true, err
+	}
+	const (
+		sessionNodeID = "business_stage_session_setup"
+		resumeNodeID  = "business_stage_final_observe"
+		previewNodeID = "business_stage_playable_preview"
+		playNodeID    = "business_stage_verify_playable_controls"
+	)
+	wanted := map[string]bool{sessionNodeID: true, resumeNodeID: true, previewNodeID: true, playNodeID: true}
+	byID := map[string]*model.GraphNode{}
+	for _, node := range graph.Nodes {
+		if node != nil && wanted[node.ID] {
+			byID[node.ID] = node
+		}
+	}
+	for _, id := range []string{sessionNodeID, resumeNodeID, previewNodeID, playNodeID} {
+		if byID[id] == nil || byID[id].ActionSpec == nil {
+			return nil, true, fmt.Errorf("terminal playable verification repair is missing required node %s", id)
+		}
+	}
+	resume := byID[resumeNodeID]
+	resume.Type = model.GraphNodeTypeAction
+	resume.Action = string(model.GraphActionNavigate)
+	resume.Title = "重新进入已完成项目并观察最终状态"
+	resume.Goal = "直接打开已完成项目，确认构建结果仍然可用。"
+	resume.PageRef = projectURL
+	resume.ActionSpec.Type = model.GraphActionNavigate
+	resume.ActionSpec.Target.URL = projectURL
+	resume.ActionSpec.TimeoutMS = 30_000
+	resume.ActionSpec.WaitUntil = "domcontentloaded"
+	resume.StateAfter = nil
+	if resume.Metadata == nil {
+		resume.Metadata = map[string]any{}
+	}
+	resume.Metadata["business_stage_entry_route"] = projectURL
+	resume.Metadata["expected_route_after_action"] = projectURL
+	resume.Metadata["terminal_repair_resume"] = true
+	byID[sessionNodeID].Type = model.GraphNodeTypeStart
+	byID[previewNodeID].Type = model.GraphNodeTypeAction
+	byID[playNodeID].Type = model.GraphNodeTypeEnd
+	graph.ID = fmt.Sprintf("graph_terminal_playable_repair_%d", now.UnixNano())
+	graph.Version = 1
+	graph.Status = model.GraphStatusReviewReady
+	graph.Name = "已完成项目的试玩与键盘终点重验"
+	graph.Summary = "复用已构建成功的项目，只补录最终预览、棋盘可见性与方向键画面变化证据。"
+	graph.Nodes = []*model.GraphNode{byID[sessionNodeID], resume, byID[previewNodeID], byID[playNodeID]}
+	graph.Edges = []*model.GraphEdge{
+		{ID: "edge_terminal_repair_session_resume", FromNode: sessionNodeID, ToNode: resumeNodeID, Condition: "validated", Priority: 1},
+		{ID: "edge_terminal_repair_resume_preview", FromNode: resumeNodeID, ToNode: previewNodeID, Condition: "validated", Priority: 2},
+		{ID: "edge_terminal_repair_preview_play", FromNode: previewNodeID, ToNode: playNodeID, Condition: "validated", Priority: 3},
+	}
+	for index := range graph.Requirements {
+		graph.Requirements[index].NodeRefs = retainedNodeRefs(graph.Requirements[index].NodeRefs, wanted)
+	}
+	filteredNarratives := make([]*model.NarrativeSegment, 0, len(graph.Narratives))
+	for _, narrative := range graph.Narratives {
+		if narrative == nil {
+			continue
+		}
+		narrative.NodeRefs = retainedNodeRefs(narrative.NodeRefs, wanted)
+		if len(narrative.NodeRefs) > 0 {
+			filteredNarratives = append(filteredNarratives, narrative)
+		}
+	}
+	graph.Narratives = filteredNarratives
+	if graph.Assets != nil {
+		for index := range graph.Assets.RequestedAssets {
+			graph.Assets.RequestedAssets[index].SourceNodeIDs = retainedNodeRefs(graph.Assets.RequestedAssets[index].SourceNodeIDs, wanted)
+		}
+		graph.Assets.GeneratedAssets = nil
+	}
+	graph.Review = nil
+	graph.CreatedAt = now
+	graph.UpdatedAt = now
+	return graph, true, nil
+}
+
+func approvedTerminalProjectURL(project *model.ProjectContext, raw string) (string, error) {
+	target, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || target == nil || target.Scheme == "" || target.Host == "" {
+		return "", fmt.Errorf("terminal playable verification failure URL is not a concrete project route")
+	}
+	pathParts := strings.Split(strings.Trim(target.Path, "/"), "/")
+	if len(pathParts) != 2 || pathParts[0] != "project" || strings.TrimSpace(pathParts[1]) == "" {
+		return "", fmt.Errorf("terminal playable verification failure URL is not a concrete project route")
+	}
+	base, err := url.Parse(strings.TrimSpace(project.ProductURL))
+	if err != nil || base.Scheme == "" || base.Host == "" || !strings.EqualFold(target.Scheme, base.Scheme) || !strings.EqualFold(target.Host, base.Host) {
+		return "", fmt.Errorf("terminal playable verification failure URL is outside the approved product origin")
+	}
+	if browserAgentPathForbidden(target.String(), project.ForbiddenPages, nil) {
+		return "", fmt.Errorf("terminal playable verification failure URL is forbidden by the project policy")
+	}
+	target.RawQuery = ""
+	target.Fragment = ""
+	return target.String(), nil
+}
+
+func retainedNodeRefs(values []string, wanted map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if wanted[value] {
+			out = append(out, value)
+		}
+	}
+	return out
 }

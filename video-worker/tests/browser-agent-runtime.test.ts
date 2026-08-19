@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, captureTargetGeometry, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, captureTargetGeometry, classifyPlayableSurfaceFrame, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -422,6 +422,12 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 });
 
 describe("browser agent required validations", () => {
+	it("keeps playable evidence co-located inside one real board surface", () => {
+		expect(classifyPlayableSurfaceFrame("Score 0 Controls ArrowLeft ArrowRight", true)).toEqual({ surface: true, score: true, controls: true });
+		expect(classifyPlayableSurfaceFrame("Score 0 Controls ArrowLeft ArrowRight", false)).toEqual({ surface: false, score: false, controls: false });
+		expect(classifyPlayableSurfaceFrame("Build completed. Score and keyboard controls are ready.", false)).toEqual({ surface: false, score: false, controls: false });
+	});
+
 	it("requires the App-bound preview iframe before accepting playable surface evidence", async () => {
 		const frame = {
 			locator: (selector: string) => selector === "body"
@@ -447,6 +453,33 @@ describe("browser agent required validations", () => {
 		}]);
 		const missing = { ...page, getByTestId: () => ({ first: () => ({ waitFor: async () => { throw new Error("missing"); } }) }) };
 		expect((await evaluateRequiredValidations(missing, stage))[0]).toMatchObject({ passed: false, actual: "bound_target=false;surface=true;score=true;controls=true" });
+	});
+
+	it("rejects a blank preview iframe even when the surrounding agent text mentions score and controls", async () => {
+		const mainFrame = {
+			locator: (selector: string) => selector === "body"
+				? { innerText: async () => "俄罗斯方块已完成，支持得分和方向键控制" }
+				: { first: () => ({ isVisible: async () => false }) },
+		};
+		const blankPreviewFrame = {
+			locator: (selector: string) => selector === "body"
+				? { innerText: async () => "" }
+				: { first: () => ({ isVisible: async () => false }) },
+		};
+		const page = {
+			getByTestId: () => ({ first: () => ({ waitFor: async () => undefined }) }),
+			frames: () => [mainFrame, blankPreviewFrame],
+			waitForTimeout: async () => undefined,
+		};
+		const stage = {
+			id: "stage_preview", order: 8, node_id: "playable_preview", stage_kind: "final_observe",
+			target_contract: { semantic_id: "tetris_preview", destructive: false },
+			interactions: [{ kind: "inspect", non_destructive: true }],
+			validations: [{ id: "preview", kind: "playable_surface_visible", target: { test_id: "preview-iframe" }, expected: true, required: true, timeout_ms: 250 }],
+		};
+		expect(await evaluateRequiredValidations(page, stage)).toEqual([{
+			kind: "required_playable_surface_visible:preview", passed: false, actual: "bound_target=true;surface=false;score=false;controls=false",
+		}]);
 	});
 
 	it("requires an execution-recorded visual change for keyboard playability", async () => {

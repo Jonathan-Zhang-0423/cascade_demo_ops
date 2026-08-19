@@ -807,16 +807,21 @@ async function executeInteraction(
   if (interaction.kind === "press") {
     const keys = approvedKeyboardKeys(interaction.parameters);
     if (keys.length === 0) throw new Error(`browser_agent_keyboard_keys_not_approved: ${stage.node_id}`);
+    let playableTarget: PlayableSurfaceTarget | undefined;
     if (booleanParameter(interaction.parameters, "focus_preview", false)) {
-		  await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target);
+		  playableTarget = await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target);
     }
-    const before = await pageVisualDigest(session.page);
+    const before = await visualDigest(session.page, playableTarget?.digestTarget);
     const delayMS = numericParameter(interaction.parameters, "inter_key_delay_ms", 350, 100, 1_000);
     const digests = new Set<string>([before]);
     for (const key of keys) {
-      await session.page.keyboard.press(key);
+      if (playableTarget?.keyboardTarget?.press) {
+        await playableTarget.keyboardTarget.press(key, { timeout }).catch(async () => session.page.keyboard.press(key));
+      } else {
+        await session.page.keyboard.press(key);
+      }
       await session.page.waitForTimeout(delayMS);
-      digests.add(await pageVisualDigest(session.page));
+      digests.add(await visualDigest(session.page, playableTarget?.digestTarget));
     }
     session.visualChangeByNodeID.set(stage.node_id, digests.size > 1);
     return;
@@ -1837,31 +1842,67 @@ async function pageVisualDigest(page: any): Promise<string> {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function focusLargestPlayableSurface(page: any, timeout: number, target?: BrowserAgentInteraction["target"]): Promise<void> {
+async function visualDigest(page: any, locator?: any): Promise<string> {
+  if (locator?.screenshot) {
+    const bytes = await locator.screenshot({ type: "png", animations: "disabled", caret: "hide", timeout: screenshotTimeoutMS }).catch(() => undefined);
+    if (bytes) return createHash("sha256").update(bytes).digest("hex");
+  }
+  return pageVisualDigest(page);
+}
+
+type PlayableSurfaceEvidence = { surface: boolean; score: boolean; controls: boolean };
+type PlayableSurfaceTarget = PlayableSurfaceEvidence & { digestTarget: any; keyboardTarget: any };
+
+export function classifyPlayableSurfaceFrame(text: string, surface: boolean): PlayableSurfaceEvidence {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+  return {
+    surface,
+    score: surface && /得分|分数|score|lines|行数/.test(normalized),
+    controls: surface && /方向键|左右|旋转|操作|arrow|keyboard|controls|move|rotate|←|→|↓|↑/.test(normalized),
+  };
+}
+
+async function playableSurfaceTargetOnce(page: any): Promise<PlayableSurfaceTarget | undefined> {
+  const frames = typeof page.frames === "function" ? page.frames() : [page];
+  const surfaceSelectors = ["canvas:visible", '[data-testid*="board" i]:visible', '[class*="game-board" i]:visible', '[class*="board" i]:visible', '[class*="tetris" i]:visible'];
+  for (const frame of frames) {
+    const body = frame.locator?.("body");
+    const frameText = await body?.innerText({ timeout: 750 }).catch(() => "") || "";
+    for (const selector of surfaceSelectors) {
+      const locator = frame.locator?.(selector)?.first();
+      const surfaceVisible = await locator?.isVisible({ timeout: 500 }).catch(() => false) || false;
+      const evidence = classifyPlayableSurfaceFrame(frameText, surfaceVisible);
+      if (evidence.surface && evidence.score && evidence.controls) {
+        return { ...evidence, digestTarget: locator, keyboardTarget: body || locator };
+      }
+    }
+  }
+  return undefined;
+}
+
+async function waitForPlayableSurfaceTarget(page: any, timeout: number): Promise<PlayableSurfaceTarget | undefined> {
+  const deadline = Date.now() + Math.max(250, Math.min(timeout, standardValidationTimeoutMS));
+  do {
+    const target = await playableSurfaceTargetOnce(page);
+    if (target) return target;
+    await page.waitForTimeout?.(250);
+  } while (Date.now() < deadline);
+  return undefined;
+}
+
+async function focusLargestPlayableSurface(page: any, timeout: number, target?: BrowserAgentInteraction["target"]): Promise<PlayableSurfaceTarget | undefined> {
 	if (target?.test_id) {
 		const approved = page.getByTestId(target.test_id).first();
 		if (await approved.isVisible({ timeout: Math.min(timeout, 1_500) }).catch(() => false)) {
 			await approved.click({ timeout }).catch(() => undefined);
 			await page.waitForTimeout(150);
-			return;
 		}
 	}
-  const candidates: any[] = [];
-  for (const selector of ["iframe:visible", "canvas:visible", '[data-testid*="preview" i]:visible', '[class*="game-board" i]:visible']) {
-    const locator = page.locator(selector);
-    const count = Math.min(12, await locator.count().catch(() => 0));
-    for (let index = 0; index < count; index += 1) candidates.push(locator.nth(index));
-  }
-  let best: { locator: any; area: number } | undefined;
-  for (const locator of candidates) {
-    const box = await locator.boundingBox().catch(() => null);
-    const area = box ? Number(box.width) * Number(box.height) : 0;
-    if (area > (best?.area || 0)) best = { locator, area };
-  }
-  if (best && best.area > 2_500) {
-    await best.locator.click({ timeout }).catch(() => undefined);
-    await page.waitForTimeout(150);
-  }
+  const playable = await waitForPlayableSurfaceTarget(page, timeout);
+  if (!playable) return undefined;
+  await playable.digestTarget.click({ timeout }).catch(() => undefined);
+  await page.waitForTimeout(150);
+  return playable;
 }
 
 async function waitForPlayableSurface(page: any, timeout: number): Promise<{ surface: boolean; score: boolean; controls: boolean }> {
@@ -1869,19 +1910,19 @@ async function waitForPlayableSurface(page: any, timeout: number): Promise<{ sur
   let latest = { surface: false, score: false, controls: false };
   do {
     const frames = typeof page.frames === "function" ? page.frames() : [page];
-    let text = "";
     for (const frame of frames) {
       const frameText = await frame.locator?.("body")?.innerText({ timeout: 750 }).catch(() => "") || "";
-      text += ` ${frameText}`;
-      for (const selector of ["canvas:visible", '[data-testid*="board" i]:visible', '[class*="board" i]:visible', '[class*="tetris" i]:visible']) {
-        if (await frame.locator?.(selector)?.first()?.isVisible({ timeout: 500 }).catch(() => false)) latest.surface = true;
+      for (const selector of ["canvas:visible", '[data-testid*="board" i]:visible', '[class*="game-board" i]:visible', '[class*="board" i]:visible', '[class*="tetris" i]:visible']) {
+        const surface = await frame.locator?.(selector)?.first()?.isVisible({ timeout: 500 }).catch(() => false) || false;
+        const evidence = classifyPlayableSurfaceFrame(frameText, surface);
+        latest = {
+          surface: latest.surface || evidence.surface,
+          score: latest.score || evidence.score,
+          controls: latest.controls || evidence.controls,
+        };
+        if (evidence.surface && evidence.score && evidence.controls) return evidence;
       }
     }
-    if (!latest.surface) latest.surface = await page.locator?.("iframe:visible")?.first()?.isVisible({ timeout: 500 }).catch(() => false) || false;
-    const normalized = String(text).toLowerCase();
-    latest.score = /得分|分数|score|lines|行数/.test(normalized);
-    latest.controls = /方向键|左右|旋转|操作|arrow|keyboard|controls|move|rotate|←|→|↓|↑/.test(normalized);
-    if (latest.surface && latest.score && latest.controls) return latest;
     await page.waitForTimeout?.(250);
   } while (Date.now() < deadline);
   return latest;
