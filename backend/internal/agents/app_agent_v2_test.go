@@ -1069,6 +1069,58 @@ func TestCodeReaderPrioritizesBuildCompletionAndPlayableResultQuestions(t *testi
 	}
 }
 
+func TestCodeSearchFindsEveryExactResultAnchorWithinBoundedScan(t *testing.T) {
+	root := t.TempDir()
+	candidates := make([]codeCandidateFile, 0, 132)
+	for i := 0; i < 130; i++ {
+		rel := fmt.Sprintf("src/components/Generic%03d.tsx", i)
+		writeFixtureFile(t, root, rel, `export const Generic = () => <div>generic component</div>`)
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, codeCandidateFile{path: path, rel: rel, name: filepath.Base(path), size: info.Size()})
+	}
+	for rel, content := range map[string]string{
+		"src/components/results/BuildResultCard.tsx": `export const Done = () => <div data-testid="build-result-card" />`,
+		"src/components/preview/PreviewPanel.tsx":    `export const Preview = () => <iframe data-testid="preview-iframe" />`,
+	} {
+		writeFixtureFile(t, root, rel, content)
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, codeCandidateFile{path: path, rel: rel, name: filepath.Base(path), size: info.Size()})
+	}
+
+	query := codeInvestigationQuery{
+		questionID: "question_result_anchors",
+		terms:      []string{"build-result-card", "preview-iframe"},
+	}
+	result, err := searchCodeCandidatesForQuery(context.Background(), candidates, map[string]bool{}, query, model.CodeReadBudget{
+		ToolSearchFileLimit:    2,
+		ToolSearchBytesPerFile: 32 * 1024,
+		ToolSearchResultLimit:  2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.searched != 2 || len(result.matches) != 2 {
+		t.Fatalf("expected both exact anchors inside the two-file scan, got searched=%d matches=%+v", result.searched, result.matches)
+	}
+	found := map[string]bool{}
+	for _, match := range result.matches {
+		for _, term := range match.terms {
+			found[term] = true
+		}
+	}
+	if !found["build-result-card"] || !found["preview-iframe"] {
+		t.Fatalf("bounded result truncation dropped an exact anchor: %+v", result.matches)
+	}
+}
+
 func TestProjectInvestigationToolSuiteIsReusableWithoutCodeReader(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, root, "package.json", `{

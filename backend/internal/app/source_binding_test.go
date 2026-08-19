@@ -63,6 +63,43 @@ func TestDecideSourceBindingIsIdempotentAfterPageOnlyDecision(t *testing.T) {
 	}
 }
 
+func TestDecideSourceBindingRejectsMixedConfirmationForDetectedMismatch(t *testing.T) {
+	ctx := context.Background()
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := sourceBindingDecisionState("project-mismatch-confirmation", "assessment-current")
+	if err := states.Save(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.DecideSourceBinding(ctx, state.ProjectID, SourceBindingDecisionRequest{Decision: "confirm_mixed", AssessmentHash: "assessment-current", IdempotencyKey: "decision-confirm-mismatch"})
+	if err == nil || err.Error() != "confirm_mixed is allowed only for an unverified source binding without a detected mismatch" {
+		t.Fatalf("detected mismatch confirmation was not rejected: %v", err)
+	}
+}
+
+func TestDecideSourceBindingIsIdempotentAfterMixedConfirmation(t *testing.T) {
+	ctx := context.Background()
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := sourceBindingDecisionState("project-confirmed", "assessment-current")
+	state.SourceBinding.Status = model.ProductSourceBindingConfirmed
+	state.SourceBinding.Decision = "confirm_mixed"
+	state.SourceBinding.EffectiveMode = model.ProductSourceModeMixed
+	if err := states.Save(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.DecideSourceBinding(ctx, state.ProjectID, SourceBindingDecisionRequest{Decision: "confirm_mixed", AssessmentHash: "assessment-current", IdempotencyKey: "decision-confirm-repeat"})
+	if err != nil || got != state {
+		t.Fatalf("repeated mixed confirmation must return current state without rerun: got=%p want=%p err=%v", got, state, err)
+	}
+}
+
 func sourceBindingDecisionState(projectID, assessmentHash string) *orchestrator.CascadeState {
 	assessment := &model.ProductSourceBindingAssessment{
 		SchemaVersion: model.ProductSourceBindingAssessmentSchemaVersion,

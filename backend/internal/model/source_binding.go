@@ -12,10 +12,15 @@ type ProductSourceBindingStatus string
 
 const (
 	ProductSourceBindingMatched       ProductSourceBindingStatus = "matched"
+	ProductSourceBindingConfirmed     ProductSourceBindingStatus = "confirmed"
 	ProductSourceBindingMismatched    ProductSourceBindingStatus = "mismatched"
 	ProductSourceBindingUnverified    ProductSourceBindingStatus = "unverified"
 	ProductSourceBindingNotApplicable ProductSourceBindingStatus = "not_applicable"
 )
+
+func ProductSourceBindingAllowsMixed(status ProductSourceBindingStatus) bool {
+	return status == ProductSourceBindingMatched || status == ProductSourceBindingConfirmed
+}
 
 type ProductSourceEffectiveMode string
 

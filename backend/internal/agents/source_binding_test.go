@@ -49,6 +49,37 @@ func TestAssessProductSourceBindingUnverifiedDefaultsToPageOnly(t *testing.T) {
 	}
 }
 
+func TestAssessProductSourceBindingAllowsExplicitConfirmationOnlyWhenUnverified(t *testing.T) {
+	page := model.PageUnderstandingSnapshot{ProductIdentitySignals: []model.ProductIdentitySignal{{Kind: "deployment_origin", Strength: "strong", ValueSHA256: hashString("https://alpha.example")}}}
+	code := model.CodeUnderstandingSnapshot{ID: "code", SourceDigestSHA256: "digest", ProductIdentitySignals: []model.ProductIdentitySignal{{Kind: "product_name", Strength: "medium", ValueSHA256: hashString("alpha-app")}}}
+	initial, _, err := AssessProductSourceBinding(&model.ProjectContext{}, []model.CodeUnderstandingSnapshot{code}, []model.PageUnderstandingSnapshot{page}, time.Now())
+	if err != nil || initial.Status != model.ProductSourceBindingUnverified {
+		t.Fatalf("expected unverified assessment before confirmation: %+v err=%v", initial, err)
+	}
+	project := &model.ProjectContext{SourceBinding: &model.ProductSourceBindingAssessment{Decision: "confirm_mixed", AssessmentHash: initial.AssessmentHash}}
+	confirmed, effective, err := AssessProductSourceBinding(project, []model.CodeUnderstandingSnapshot{code}, []model.PageUnderstandingSnapshot{page}, time.Now())
+	if err != nil || confirmed.Status != model.ProductSourceBindingConfirmed || confirmed.EffectiveMode != model.ProductSourceModeMixed || confirmed.Decision != "confirm_mixed" || len(effective) != 1 {
+		t.Fatalf("explicit unverified binding confirmation was not honored: assessment=%+v effective=%d err=%v", confirmed, len(effective), err)
+	}
+}
+
+func TestAssessProductSourceBindingDoesNotConfirmDetectedMismatch(t *testing.T) {
+	page := model.PageUnderstandingSnapshot{ProductIdentitySignals: []model.ProductIdentitySignal{
+		{Kind: "deployment_origin", Strength: "strong", ValueSHA256: hashString("https://alpha.example")},
+		{Kind: "product_name", Strength: "medium", ValueSHA256: hashString("alpha")},
+	}}
+	code := model.CodeUnderstandingSnapshot{ID: "code", SourceDigestSHA256: "digest", ProductIdentitySignals: []model.ProductIdentitySignal{
+		{Kind: "deployment_origin", Strength: "strong", ValueSHA256: hashString("https://beta.example")},
+		{Kind: "product_name", Strength: "medium", ValueSHA256: hashString("beta")},
+	}}
+	initial, _, _ := AssessProductSourceBinding(&model.ProjectContext{}, []model.CodeUnderstandingSnapshot{code}, []model.PageUnderstandingSnapshot{page}, time.Now())
+	project := &model.ProjectContext{SourceBinding: &model.ProductSourceBindingAssessment{Decision: "confirm_mixed", AssessmentHash: initial.AssessmentHash}}
+	confirmed, effective, err := AssessProductSourceBinding(project, []model.CodeUnderstandingSnapshot{code}, []model.PageUnderstandingSnapshot{page}, time.Now())
+	if err == nil || confirmed.Status != model.ProductSourceBindingMismatched || confirmed.EffectiveMode != model.ProductSourceModeBlocked || len(effective) != 0 {
+		t.Fatalf("detected mismatch was incorrectly overridable: assessment=%+v effective=%d err=%v", confirmed, len(effective), err)
+	}
+}
+
 func TestAssessProductSourceBindingMultipleSourcesBlocksOnAnyMismatch(t *testing.T) {
 	page := model.PageUnderstandingSnapshot{ProductIdentitySignals: []model.ProductIdentitySignal{
 		{Kind: "deployment_origin", Strength: "strong", ValueSHA256: hashString("https://alpha.example")},

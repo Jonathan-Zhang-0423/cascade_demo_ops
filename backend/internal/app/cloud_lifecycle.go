@@ -2426,7 +2426,7 @@ func preflightSourceBinding(state *orchestrator.CascadeState, pkg *model.ClientE
 		finding := packagePreflightFinding("source_binding_missing", model.FindingSeverityBlocking, "网页与源码的来源绑定评估缺失", "重新运行本地分析，再生成执行包。")
 		return &finding
 	}
-	if assessment.EffectiveMode == model.ProductSourceModeMixed && assessment.Status != model.ProductSourceBindingMatched {
+	if assessment.EffectiveMode == model.ProductSourceModeMixed && !model.ProductSourceBindingAllowsMixed(assessment.Status) {
 		finding := packagePreflightFinding("product_source_mismatch", model.FindingSeverityBlocking, "网页与源码来源不匹配", "更换网页或源码；也可以显式选择仅使用网页证据。")
 		return &finding
 	}

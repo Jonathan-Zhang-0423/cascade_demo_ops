@@ -1985,7 +1985,7 @@ func codeIntentTextParts(project *model.ProjectContext, brief *model.Requirement
 
 func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidateFile, selectedKeys map[string]bool, query codeInvestigationQuery, budget model.CodeReadBudget) (codeSearchResult, error) {
 	result := codeSearchResult{}
-	for _, candidate := range candidates {
+	for _, candidate := range prioritizeCodeCandidatesForQuery(candidates, query) {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
@@ -2032,10 +2032,77 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 		}
 		return result.matches[i].score > result.matches[j].score
 	})
-	if budget.ToolSearchResultLimit > 0 && len(result.matches) > budget.ToolSearchResultLimit {
-		result.matches = result.matches[:budget.ToolSearchResultLimit]
-	}
+	result.matches = limitCodeSearchMatchesForQuery(result.matches, query.terms, budget.ToolSearchResultLimit)
 	return result, nil
+}
+
+func prioritizeCodeCandidatesForQuery(candidates []codeCandidateFile, query codeInvestigationQuery) []codeCandidateFile {
+	ordered := append([]codeCandidateFile(nil), candidates...)
+	pathTerms := codeSearchPathTerms(query.terms)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		left := keywordMatchScore(pathTerms, filepath.ToSlash(ordered[i].rel), ordered[i].name)*1000 + ordered[i].score
+		right := keywordMatchScore(pathTerms, filepath.ToSlash(ordered[j].rel), ordered[j].name)*1000 + ordered[j].score
+		if left == right {
+			return filepath.ToSlash(ordered[i].rel) < filepath.ToSlash(ordered[j].rel)
+		}
+		return left > right
+	})
+	return ordered
+}
+
+func codeSearchPathTerms(terms []string) []string {
+	out := append([]string(nil), terms...)
+	replacer := strings.NewReplacer("-", " ", "_", " ", ".", " ", "/", " ", "\\", " ")
+	for _, term := range terms {
+		for _, part := range strings.Fields(replacer.Replace(term)) {
+			part = strings.TrimSpace(part)
+			if len(part) >= 4 {
+				out = append(out, part)
+			}
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func limitCodeSearchMatchesForQuery(matches []codeSearchMatch, terms []string, limit int) []codeSearchMatch {
+	if limit <= 0 || len(matches) <= limit {
+		return matches
+	}
+	selected := make([]codeSearchMatch, 0, limit)
+	selectedPaths := map[string]bool{}
+	for _, term := range terms {
+		for _, match := range matches {
+			if !containsStringFold(match.terms, term) || selectedPaths[match.candidate.rel] {
+				continue
+			}
+			selected = append(selected, match)
+			selectedPaths[match.candidate.rel] = true
+			break
+		}
+		if len(selected) >= limit {
+			return selected
+		}
+	}
+	for _, match := range matches {
+		if selectedPaths[match.candidate.rel] {
+			continue
+		}
+		selected = append(selected, match)
+		selectedPaths[match.candidate.rel] = true
+		if len(selected) >= limit {
+			break
+		}
+	}
+	return selected
+}
+
+func containsStringFold(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(wanted)) {
+			return true
+		}
+	}
+	return false
 }
 
 func budgetForRemainingToolSearch(budget model.CodeReadBudget, searched int) (model.CodeReadBudget, bool) {

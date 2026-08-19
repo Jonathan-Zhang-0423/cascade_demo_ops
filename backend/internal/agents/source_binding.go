@@ -157,6 +157,12 @@ func AssessProductSourceBinding(project *model.ProjectContext, code []model.Code
 		assessment.EffectiveMode = model.ProductSourceModeMixed
 		return assessment, matchedCode, nil
 	}
+	if project != nil && project.SourceBinding != nil && project.SourceBinding.Decision == "confirm_mixed" && project.SourceBinding.AssessmentHash == assessment.AssessmentHash {
+		assessment.Status = model.ProductSourceBindingConfirmed
+		assessment.EffectiveMode = model.ProductSourceModeMixed
+		assessment.Decision = "confirm_mixed"
+		return assessment, append([]model.CodeUnderstandingSnapshot{}, code...), nil
+	}
 	assessment.Status = model.ProductSourceBindingUnverified
 	assessment.EffectiveMode = model.ProductSourceModePageOnly
 	return assessment, nil, nil

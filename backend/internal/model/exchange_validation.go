@@ -584,7 +584,7 @@ func validateSourceBindingSummary(pkg *ClientExecutionPackage) error {
 	if summary.SchemaVersion != ProductSourceBindingAssessmentSchemaVersion || summary.AssessmentHash == "" {
 		return errors.New("source_binding_summary is invalid")
 	}
-	if summary.EffectiveMode == ProductSourceModeBlocked || summary.EffectiveMode == ProductSourceModeMixed && summary.Status != ProductSourceBindingMatched {
+	if summary.EffectiveMode == ProductSourceModeBlocked || summary.EffectiveMode == ProductSourceModeMixed && !ProductSourceBindingAllowsMixed(summary.Status) {
 		return errors.New("product_source_mismatch: source binding does not allow mixed execution evidence")
 	}
 	if summary.EffectiveMode == ProductSourceModePageOnly && ClientPackageContainsSourceDerivedExecutionEvidence(pkg) {

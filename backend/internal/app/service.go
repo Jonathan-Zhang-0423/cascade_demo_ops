@@ -356,7 +356,7 @@ func (s *Service) GetSourceBinding(ctx context.Context, projectID string) (*mode
 }
 
 func (s *Service) DecideSourceBinding(ctx context.Context, projectID string, request SourceBindingDecisionRequest) (*orchestrator.CascadeState, error) {
-	if request.Decision != "continue_page_only" {
+	if request.Decision != "continue_page_only" && request.Decision != "confirm_mixed" {
 		return nil, errors.New("unsupported source binding decision")
 	}
 	if strings.TrimSpace(request.IdempotencyKey) == "" {
@@ -372,7 +372,10 @@ func (s *Service) DecideSourceBinding(ctx context.Context, projectID string, req
 	if request.AssessmentHash == "" || request.AssessmentHash != state.SourceBinding.AssessmentHash {
 		return nil, &SourceBindingStaleError{}
 	}
-	if state.SourceBinding.Decision == request.Decision && state.SourceBinding.EffectiveMode == model.ProductSourceModePageOnly {
+	if request.Decision == "confirm_mixed" && state.SourceBinding.Status != model.ProductSourceBindingUnverified && state.SourceBinding.Status != model.ProductSourceBindingConfirmed {
+		return nil, errors.New("confirm_mixed is allowed only for an unverified source binding without a detected mismatch")
+	}
+	if state.SourceBinding.Decision == request.Decision && (state.SourceBinding.EffectiveMode == model.ProductSourceModePageOnly || state.SourceBinding.EffectiveMode == model.ProductSourceModeMixed) {
 		return state, nil
 	}
 	if state.ProjectContext == nil {

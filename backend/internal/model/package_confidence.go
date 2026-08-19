@@ -449,7 +449,7 @@ func bestEvidenceQuality(refs []EvidenceRef, binding *SourceBindingSummary) floa
 		case EvidenceKindWebScreenshot, EvidenceKindScreenshotOCR, EvidenceKindVisionFinding:
 			quality = .82
 		case EvidenceKindSourceCode, EvidenceKindCodeSnapshot, EvidenceKindRepoSnapshot:
-			if binding != nil && binding.Status == ProductSourceBindingMatched && binding.EffectiveMode == ProductSourceModeMixed {
+			if binding != nil && ProductSourceBindingAllowsMixed(binding.Status) && binding.EffectiveMode == ProductSourceModeMixed {
 				quality = .7
 			}
 		case EvidenceKindRequirementDoc:
