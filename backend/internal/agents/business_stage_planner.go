@@ -599,6 +599,10 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 			expectedRoute = workspace
 		}
 	}
+	if creationControlObservedOnRoute(spec.id, targets, b.routeHints.workspace) {
+		entryRoute = b.routeHints.workspace
+		expectedRoute = b.routeHints.workspace
+	}
 	stage := model.BusinessStage{
 		ID:                       stageID,
 		Order:                    order,
@@ -628,6 +632,25 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		Confidence:           businessStageConfidence(spec, targets, requirements),
 	}
 	b.stages = append(b.stages, stage)
+}
+
+func creationControlObservedOnRoute(stageID string, targets []model.BusinessTargetCandidate, route string) bool {
+	if route == "" || (stageID != "new_project_entry" && stageID != "project_name_input" && stageID != "select_build_mode") {
+		return false
+	}
+	want := routePathFromCandidate(route)
+	for _, target := range targets {
+		candidates := []string{target.URL, target.Route}
+		for _, alternative := range target.Alternatives {
+			candidates = append(candidates, alternative.ObservedURL, alternative.ObservedRouteTemplate)
+		}
+		for _, candidate := range candidates {
+			if candidate != "" && routePathFromCandidate(candidate) == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func authenticationEntryRouteFromTargets(targets []model.BusinessTargetCandidate) string {

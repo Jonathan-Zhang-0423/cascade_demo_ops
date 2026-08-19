@@ -290,8 +290,8 @@ func TestBusinessStagePlannerActualBuildDisablesPlanFirstMode(t *testing.T) {
 	project := graphQualityProject()
 	project.ProductDescription = "创建俄罗斯方块项目，要求 Agent 实际构建可运行代码。"
 	verified := &model.VerifiedInteractionPlan{Actions: []model.VerifiedInteractionAction{
-		{ID: "idea", Label: "Project idea", Kind: "fill", Selector: "[data-testid='input-project-idea']", IsBusiness: true, VerificationStatus: "verified"},
-		{ID: "plan", Label: "Plan", Kind: "click", Selector: "[data-testid='button-mode-plan']", IsBusiness: true, VerificationStatus: "verified"},
+		{ID: "idea", Label: "Project idea", Kind: "fill", URL: "https://app.example.com/app", Selector: "[data-testid='input-project-idea']", IsBusiness: true, VerificationStatus: "verified"},
+		{ID: "plan", Label: "Plan", Kind: "click", URL: "https://app.example.com/app", Selector: "[data-testid='button-mode-plan']", IsBusiness: true, VerificationStatus: "verified"},
 	}}
 	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, graphQualityIntelligence(), verified)
 	if err != nil {
@@ -307,7 +307,7 @@ func TestBusinessStagePlannerActualBuildDisablesPlanFirstMode(t *testing.T) {
 		case "business_stage_select_build_mode":
 			foundMode = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='button-mode-plan']" && strings.Contains(stage.Objective, "关闭仅规划模式")
 			node := graphNodeFromBusinessStage(project, stage, project.ProductURL, "feature_direct_build")
-			modeHasVisualValidation = len(node.Validations) == 2 && node.Validations[0].Kind == "page_changed" && node.Validations[0].Expected == true && node.Validations[1].Kind == "url_matches"
+			modeHasVisualValidation = stage.EntryRoute == "/app" && stage.ExpectedRouteAfterAction == "/app" && len(node.Validations) == 2 && node.Validations[0].Kind == "page_changed" && node.Validations[0].Expected == true && node.Validations[1].Kind == "url_matches" && node.Validations[1].Target.URL == "/app"
 		}
 	}
 	if !foundInput || !foundMode || !modeHasVisualValidation {
