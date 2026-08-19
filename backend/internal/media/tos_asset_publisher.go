@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,7 @@ type TOSAssetPublisherConfig struct {
 	AccessKey    string
 	SecretKey    string
 	Endpoint     string
+	APIEndpoint  string
 	Region       string
 	Bucket       string
 	Prefix       string
@@ -41,6 +43,7 @@ type tosObjectClient interface {
 type TOSAssetPublisher struct {
 	config TOSAssetPublisherConfig
 	client tosObjectClient
+	signer tosObjectClient
 	now    func() time.Time
 }
 
@@ -52,18 +55,29 @@ func NewTOSAssetPublisher(config TOSAssetPublisherConfig, now func() time.Time) 
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	config = normalizeTOSAssetPublisherConfig(config)
-	client, err := tos.NewClientV2(config.Endpoint, tos.WithRegion(config.Region), tos.WithCredentials(tos.NewStaticCredentials(config.AccessKey, config.SecretKey)))
+	client, err := tos.NewClientV2(firstNonEmpty(config.APIEndpoint, config.Endpoint), tos.WithRegion(config.Region), tos.WithCredentials(tos.NewStaticCredentials(config.AccessKey, config.SecretKey)))
 	if err != nil {
 		return nil, fmt.Errorf("create TOS client: %w", err)
 	}
-	return newTOSAssetPublisherForClient(config, client, now), nil
+	signer := client
+	if strings.TrimSpace(config.APIEndpoint) != "" && !strings.EqualFold(strings.TrimSpace(config.APIEndpoint), strings.TrimSpace(config.Endpoint)) {
+		signer, err = tos.NewClientV2(config.Endpoint, tos.WithRegion(config.Region), tos.WithCredentials(tos.NewStaticCredentials(config.AccessKey, config.SecretKey)))
+		if err != nil {
+			return nil, fmt.Errorf("create TOS signing client: %w", err)
+		}
+	}
+	return newTOSAssetPublisherForClients(config, client, signer, now), nil
 }
 
 func newTOSAssetPublisherForClient(config TOSAssetPublisherConfig, client tosObjectClient, now func() time.Time) *TOSAssetPublisher {
+	return newTOSAssetPublisherForClients(config, client, client, now)
+}
+
+func newTOSAssetPublisherForClients(config TOSAssetPublisherConfig, client, signer tosObjectClient, now func() time.Time) *TOSAssetPublisher {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
-	return &TOSAssetPublisher{config: normalizeTOSAssetPublisherConfig(config), client: client, now: now}
+	return &TOSAssetPublisher{config: normalizeTOSAssetPublisherConfig(config), client: client, signer: signer, now: now}
 }
 
 func (p *TOSAssetPublisher) PublishArkAssets(ctx context.Context, plan model.ArkAssetPublicationPlan, planRef model.DirectorMaterialRef) (model.ArkAssetPublicationResult, error) {
@@ -154,7 +168,11 @@ func (p *TOSAssetPublisher) publishItem(ctx context.Context, sourcePackageID str
 		result.FailureStage, result.ErrorClass = "put_object", classifyTOSPublishError(err)
 		return result
 	}
-	signed, err := p.client.PreSignedURL(&tos.PreSignedURLInput{HTTPMethod: enum.HttpMethodGet, Bucket: p.config.Bucket, Key: key, Expires: int64(p.config.SignedURLTTL.Seconds())})
+	signer := p.signer
+	if signer == nil {
+		signer = p.client
+	}
+	signed, err := signer.PreSignedURL(&tos.PreSignedURLInput{HTTPMethod: enum.HttpMethodGet, Bucket: p.config.Bucket, Key: key, Expires: int64(p.config.SignedURLTTL.Seconds())})
 	if err != nil || signed == nil || strings.TrimSpace(signed.SignedUrl) == "" {
 		result.Status, result.ActionRequired = "tos_presign_failed", "verify the uploader can generate a signed GET URL for the selected TOS object"
 		result.FailureStage = "presign_get"
@@ -165,11 +183,29 @@ func (p *TOSAssetPublisher) publishItem(ctx context.Context, sourcePackageID str
 		}
 		return result
 	}
+	if !arkPrivateTOSPresignedURLAllowed(signed.SignedUrl) {
+		result.Status, result.ActionRequired = "tos_presign_ark_input_url_invalid", "configure the cn-beijing private-TOS ivolces.com endpoint so the signed GET URL is accepted by Ark without making the bucket public"
+		result.FailureStage, result.ErrorClass = "presign_get", "ark_private_tos_url_required"
+		return result
+	}
 	ref := item.Ref
 	ref.URI, ref.MimeType = signed.SignedUrl, contentType
 	result.ProposedPublicRef = &ref
 	result.Status, result.Published, result.CanUseForRealCall, result.ActionRequired = "published_presigned", true, true, ""
 	return result
+}
+
+// arkPrivateTOSPresignedURLAllowed is intentionally stricter than generic
+// public-HTTPS validation. Ark's documented private-input route uses a
+// cn-beijing ivolces.com GET presigned URL, not a browser-facing public URL or
+// a VPC-only internal endpoint.
+func arkPrivateTOSPresignedURLAllowed(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	return host == "tos-cn-beijing.ivolces.com" || strings.HasSuffix(host, ".tos-cn-beijing.ivolces.com")
 }
 
 func classifyTOSPublishError(err error) string {
@@ -227,7 +263,7 @@ func TOSAssetPublisherConfigFromEnv(getenv func(string) string) (TOSAssetPublish
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	config := TOSAssetPublisherConfig{AccessKey: getenv("VOLC_TOS_ACCESS_KEY"), SecretKey: getenv("VOLC_TOS_SECRET_KEY"), Endpoint: getenv("VOLC_TOS_ENDPOINT"), Region: getenv("VOLC_TOS_REGION"), Bucket: getenv("VOLC_TOS_BUCKET"), Prefix: getenv("VOLC_TOS_PREFIX")}
+	config := TOSAssetPublisherConfig{AccessKey: getenv("VOLC_TOS_ACCESS_KEY"), SecretKey: getenv("VOLC_TOS_SECRET_KEY"), Endpoint: getenv("VOLC_TOS_ENDPOINT"), APIEndpoint: getenv("VOLC_TOS_API_ENDPOINT"), Region: getenv("VOLC_TOS_REGION"), Bucket: getenv("VOLC_TOS_BUCKET"), Prefix: getenv("VOLC_TOS_PREFIX")}
 	if raw := strings.TrimSpace(getenv("VOLC_TOS_SIGNED_URL_TTL_SEC")); raw != "" {
 		if ttl, err := time.ParseDuration(raw + "s"); err == nil {
 			config.SignedURLTTL = ttl

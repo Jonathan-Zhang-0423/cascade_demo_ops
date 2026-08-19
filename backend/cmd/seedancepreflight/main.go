@@ -110,11 +110,8 @@ func main() {
 			fatal(errors.New("TOS publication did not produce a provider-ready URL"))
 		}
 		ref := pub.Items[0].ProposedPublicRef
-		request := media.ContentGenerationTaskRequest{
-			Model:   runtime.ModelProviders[config.ModelProviderSeedance].DefaultModel,
-			Content: []media.ContentPart{{Type: "text", Text: "Create a concise presentation-only transition from the supplied product recording. Do not invent UI or business actions."}, {Type: "video_url", VideoURL: &media.MediaURL{URL: ref.URI}, Role: "reference_video"}},
-			Ratio:   "16:9", Duration: 5, GenerateAudio: false, ReturnLastFrame: false, Watermark: false,
-		}
+		request := seedancePreflightRequest(runtime.ModelProviders[config.ModelProviderSeedance].DefaultModel, ref.URI)
+		audit["request_profile"] = seedancePreflightRequestProfile(request)
 		initial, err := client.CreateContentGenerationTask(ctx, request)
 		audit["provider"] = initial.Provider
 		audit["model"] = initial.Model
@@ -367,6 +364,36 @@ func probeSeedanceReference(ctx context.Context, ffprobePath, source string) (se
 
 func seedancePreflightSourcePackageID(created time.Time) string {
 	return fmt.Sprintf("seedance_preflight_%d", created.UTC().UnixNano())
+}
+
+// seedancePreflightRequest deliberately has no execution authority. It keeps
+// the existing 2.0 request shape intact while compiling the documented 2.5
+// reference-task fields when that exact model is configured.
+func seedancePreflightRequest(modelName string, referenceURL string) media.ContentGenerationTaskRequest {
+	request := media.ContentGenerationTaskRequest{
+		Model: strings.TrimSpace(modelName),
+		Content: []media.ContentPart{
+			{Type: "text", Text: "Create a concise presentation-only transition from the supplied product recording. Do not invent UI or business actions."},
+			{Type: "video_url", VideoURL: &media.MediaURL{URL: strings.TrimSpace(referenceURL)}, Role: "reference_video"},
+		},
+		Resolution: "1080p", Ratio: "16:9", Duration: 5, GenerateAudio: false, ReturnLastFrame: true, Watermark: false,
+	}
+	if request.Model == media.Seedance25ServerModel {
+		request.OmniReferenceTaskType = "reference"
+		request.OutputFormat = "mp4"
+	}
+	return request
+}
+
+// seedancePreflightRequestProfile is audit-safe: it intentionally excludes
+// content, source URL, signed query parameters, and credentials.
+func seedancePreflightRequestProfile(request media.ContentGenerationTaskRequest) map[string]any {
+	return map[string]any{
+		"model": request.Model, "omni_reference_task_type": request.OmniReferenceTaskType,
+		"resolution": request.Resolution, "ratio": request.Ratio, "duration": request.Duration,
+		"generate_audio": request.GenerateAudio, "return_last_frame": request.ReturnLastFrame,
+		"watermark": request.Watermark, "output_format": request.OutputFormat,
+	}
 }
 
 func responseID(value *media.ContentGenerationTaskResponse) string {

@@ -68,6 +68,9 @@ func TestOpenSpeechTTSSynthesizesPollsDownloadsAndRedactsTransientURL(t *testing
 		if strings.Contains(string(body), "tts-secret-test") {
 			t.Errorf("access key leaked into request body")
 		}
+		if r.URL.Path == "/api/v3/tts/submit" && strings.Contains(string(body), `"unique_id"`) {
+			t.Errorf("unique_id must remain a header-only concern")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v3/tts/submit":
@@ -76,7 +79,7 @@ func TestOpenSpeechTTSSynthesizesPollsDownloadsAndRedactsTransientURL(t *testing
 			}
 			_, _ = io.WriteString(w, `{"code":20000000,"data":{"task_id":"task-test","task_status":1}}`)
 		case "/api/v3/tts/query":
-			_, _ = io.WriteString(w, `{"code":20000000,"data":{"task_id":"task-test","task_status":2,"audio_url":"`+server.URL+`/audio.mp3","sentences":[{"text":"测试配音","startTime":0.25,"endTime":1.75}]}}`)
+			_, _ = io.WriteString(w, `{"code":20000000,"data":{"task_id":"task-test","task_status":2,"audio_url":"`+server.URL+`/audio.mp3","sentences":[{"text":"测试配音","begin_time":0.25,"end_time":1.75}]}}`)
 		default:
 			http.NotFound(w, r)
 		}

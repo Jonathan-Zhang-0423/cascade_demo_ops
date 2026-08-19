@@ -20,6 +20,15 @@ C:\Users\15193\Desktop\模型参数
 When vendor docs are refreshed, update this file first and keep runtime code
 pointing to the project-local rules instead of relying on desktop-only files.
 
+Seedance 2.5 has a separate target-migration baseline at
+[Seedance 2.5 与 Ark 媒体能力迁移基线](seedance-2-5-migration-baseline.md).
+The 2026-08-19 provider-account capability snapshot is incorporated in that
+baseline without recording account IDs, balances, keys, temporary URLs, or
+other operational secrets.
+It records the 2026-08-19 vendor refresh and its stricter task-routing rules.
+Runtime defaults remain unchanged until the new Provider path completes real
+preflight and candidate-only acceptance.
+
 ## Project Boundary
 
 Ark media models are optional presentation helpers. They must not replace or
@@ -254,8 +263,9 @@ The code should block real Seedance calls unless all are true:
 
 - `CASCADE_ARK_MEDIA_MODE=real`
 - provider key is configured
-- all selected source assets are public HTTPS URLs, provider asset IDs, or small
-  Base64 payloads within provider limits
+- all selected source assets use `cn-beijing` private-TOS `ivolces.com` HTTPS
+  GET presigned URLs, provider asset IDs, or small Base64 payloads within
+  provider limits; source buckets must not be made public for model access
 - source video is mp4/mov with accepted codecs
 - source video references satisfy 2-15 seconds each and <= 15 seconds total
 - requested `duration` is valid for the chosen model
@@ -311,7 +321,7 @@ Recommended defaults:
 
 | Model | Model ID | Size options | Output formats | Notes |
 | --- | --- | --- | --- | --- |
-| Seedream 5.0 Pro | `doubao-seedream-5-0-pro-260628` | 1K, 2K | png, jpeg | Single image only; max 10 reference images. |
+| Seedream 5.0 Pro | `doubao-seedream-5-0-pro-260628` | 1K, 1.5K, 2K | png, jpeg | Max 10 reference images; supports interaction editing and `layer_decomposition`; does not support sequential group images. |
 | Seedream 5.0 Lite | `doubao-seedream-5-0-260128` or `doubao-seedream-5-0-lite-260128` | 2K, 3K, 4K | png, jpeg | Group images supported; input refs + generated images <= 15. |
 | Seedream 4.5 | `doubao-seedream-4-5-251128` | 2K, 4K | jpeg | Max 14 reference images. |
 | Seedream 4.0 | `doubao-seedream-4-0-250828` | 1K, 2K, 4K | jpeg | Supports fast prompt optimization mode. |
@@ -328,6 +338,21 @@ Image API request notes:
 - Seedream 5.0 Pro supports up to 10 reference images.
 - Seedream 5.0 Lite, 4.5, and 4.0 support up to 14 reference images.
 - For group generation, input references plus generated images must be <= 15.
+- `layer_decomposition=true` is only available to 5.0 Pro: one PNG/JPEG input
+  of at least 512x512, `size=auto`, up to 16 foreground layers plus a base
+  image. It is for non-product candidate art only.
+- `sequential_image_generation=auto` and
+  `sequential_image_generation_options.max_images=1..15` are only available
+  to 5.0 Lite, 4.5, and 4.0; never send them to 5.0 Pro.
+- `tools=[{"type":"web_search"}]` is only available to 5.0 Lite. Streaming
+  (`stream=true`) is supported by 5.0 Lite, 4.5, and 4.0, not by 5.0 Pro.
+- Current account capability snapshot: the listed Seedream models are Public
+  and support direct Model-ID calls. This confirms availability, not a
+  completed project real-call acceptance.
+- Private `cn-beijing` TOS inputs should use a one-hour HTTPS GET presigned
+  `*.tos-cn-beijing.ivolces.com` URL. It lets Ark retrieve the image without
+  making the source bucket public. The full policy is in the Seedance 2.5
+  baseline and applies equally to the Seedream `image` field.
 
 ### Seedream Validation Details
 
@@ -336,8 +361,7 @@ Input image constraints:
 - Accepted formats: jpeg, png, webp, bmp, tiff, gif, heic, heif.
 - Each input image must be <= 30 MB.
 - Aspect ratio must be within `[1/16, 16]`.
-- Width and height must both be greater than 14 px.
-- Total pixels must be <= 36,000,000.
+- Total pixels must be within 196 through 36,000,000.
 
 Output size controls:
 
@@ -351,6 +375,29 @@ Output size controls:
 For enterprise demo compositing, prefer `size=2K`, `response_format=url`, and
 `output_format=png` when available. Use `b64_json` only for small controlled
 tests because it increases request/response payload pressure.
+
+Generated image URLs expire after about 24 hours. On a successful candidate
+result, download once to controlled storage, record a URL digest rather than
+the full signed URL, probe the dimensions/format, compute SHA-256, and retain
+the provider task/result metadata for audit. Image URLs have no documented
+download-count cap; that must not be confused with Seedance video URLs.
+
+### Seedream Request-Type Guards
+
+The Server must validate model-specific fields before an API call:
+
+| Use case | Required model/fields | Reject before provider call when |
+| --- | --- | --- |
+| Controlled single image / image edit | 5.0 Pro; up to 10 references; `size=1K|1.5K|2K` or a valid pixel size | group, stream, or web search fields are supplied |
+| Sequential non-product concept images | 5.0 Lite, 4.5, or 4.0; `sequential_image_generation=auto`; `max_images=1..15` | reference-image count plus requested output exceeds 15 |
+| Layer extraction | 5.0 Pro; exactly one PNG/JPEG reference at least 512x512; `layer_decomposition=true`; `size=auto` | input is not eligible, more than one reference is supplied, or the output is intended to recreate product UI |
+| External-search illustration | 5.0 Lite only; `tools=[{"type":"web_search"}]` | any other Seedream model is selected |
+
+Only successful images are billable. For group output, use
+`usage.generated_images` rather than the requested count as the actual
+success/charge/audit quantity. 5.0 Pro layer extraction is charged per
+returned layer; all project cost estimates remain advisory until the provider
+response is recorded.
 
 ## Mapping To Our Pipeline
 

@@ -44,10 +44,6 @@ type openSpeechTTSConfig struct {
 }
 
 type openSpeechTTSRequest struct {
-	User struct {
-		UID string `json:"uid"`
-	} `json:"user"`
-	UniqueID  string                         `json:"unique_id"`
 	ReqParams openSpeechTTSRequestParameters `json:"req_params"`
 }
 
@@ -61,8 +57,6 @@ type openSpeechTTSRequestParameters struct {
 type openSpeechTTSAudioParams struct {
 	Format          string `json:"format"`
 	SampleRate      int    `json:"sample_rate"`
-	SpeechRate      int    `json:"speech_rate"`
-	LoudnessRate    int    `json:"loudness_rate"`
 	EnableTimestamp bool   `json:"enable_timestamp"`
 }
 
@@ -82,8 +76,10 @@ type openSpeechTTSResultData struct {
 
 type openSpeechTTSSentence struct {
 	Text      string  `json:"text,omitempty"`
+	BeginTime float64 `json:"begin_time,omitempty"`
+	EndTime   float64 `json:"end_time,omitempty"`
 	StartTime float64 `json:"startTime,omitempty"`
-	EndTime   float64 `json:"endTime,omitempty"`
+	LegacyEnd float64 `json:"endTime,omitempty"`
 }
 
 type audioProbeResult struct {
@@ -118,19 +114,19 @@ func (c *AudioClient) processDoubaoTTS(ctx context.Context, request AudioModelIn
 		trace.ErrorClass = "request_id_failed"
 		return nil, trace, err
 	}
-	body := openSpeechTTSRequest{UniqueID: requestID}
-	body.User.UID = "cascade-server"
+	body := openSpeechTTSRequest{}
 	body.ReqParams = openSpeechTTSRequestParameters{
 		Text:    request.Text,
 		Speaker: firstNonEmpty(request.VoiceID, c.tts.DefaultSpeaker),
 		AudioParams: openSpeechTTSAudioParams{
 			Format:          firstNonEmpty(request.OutputFormat, "mp3"),
 			SampleRate:      positiveOrDefault(request.SampleRateHZ, 24000),
-			SpeechRate:      speechRateForTTS(request.Speed),
-			LoudnessRate:    boundedOptionInt(request.Options, "loudness_rate", 0, -50, 100),
 			EnableTimestamp: true,
 		},
-		Additions: map[string]any{"silence_duration": boundedOptionInt(request.Options, "silence_duration", 300, 0, 3000)},
+		Additions: map[string]any{
+			"speech_rate":   speechRateForTTS(request.Speed),
+			"loudness_rate": boundedOptionInt(request.Options, "loudness_rate", 0, -50, 100),
+		},
 	}
 
 	submitEndpoint := openSpeechEndpoint(c.tts.BaseURL, openSpeechTTSSubmitPath)
@@ -161,7 +157,7 @@ func (c *AudioClient) processDoubaoTTS(ctx context.Context, request AudioModelIn
 		queryEndpoint := openSpeechEndpoint(c.tts.BaseURL, openSpeechTTSQueryPath)
 		queryTrace := newTrace(c.mode, config.ModelProviderDoubao, c.tts.ResourceID, http.MethodPost, queryEndpoint)
 		var query openSpeechTTSResponse
-		queryTrace, err = c.doOpenSpeechTTSJSON(ctx, queryEndpoint, requestID, map[string]string{"task_id": submit.Data.TaskID}, &query, queryTrace)
+		queryTrace, err = c.doOpenSpeechTTSJSON(ctx, queryEndpoint, requestID, map[string]string{"taskid": submit.Data.TaskID}, &query, queryTrace)
 		trace = queryTrace
 		if err != nil {
 			return providerResponse, trace, err
@@ -364,8 +360,16 @@ func validateOpenSpeechTTSResponse(response openSpeechTTSResponse) error {
 func transcriptFromTTSSentences(values []openSpeechTTSSentence) []AudioModelTranscriptSegment {
 	result := make([]AudioModelTranscriptSegment, 0, len(values))
 	for _, value := range values {
-		start := int(value.StartTime*1000 + 0.5)
-		end := int(value.EndTime*1000 + 0.5)
+		startValue := value.BeginTime
+		if startValue == 0 {
+			startValue = value.StartTime
+		}
+		endValue := value.EndTime
+		if endValue == 0 {
+			endValue = value.LegacyEnd
+		}
+		start := int(startValue*1000 + 0.5)
+		end := int(endValue*1000 + 0.5)
 		if end <= start {
 			continue
 		}

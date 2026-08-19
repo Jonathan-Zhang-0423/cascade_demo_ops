@@ -48,6 +48,11 @@ type FFmpegMiniMaxH3MediaNormalizer struct {
 	// produce a bounded provider-reference derivative; generated candidates
 	// leave it unset so their complete provider output is preserved.
 	MaxDurationSec int
+	// StartOffsetMS and MaxDurationMS support precise, deterministic slices of
+	// immutable recordings before they are supplied as provider references.
+	// Millisecond fields take precedence over MaxDurationSec when configured.
+	StartOffsetMS int
+	MaxDurationMS int
 }
 
 func (n FFmpegMiniMaxH3MediaNormalizer) Normalize(ctx context.Context, sourcePath string, destinationPath string) (MiniMaxH3MediaProbe, MiniMaxH3MediaProbe, error) {
@@ -55,6 +60,9 @@ func (n FFmpegMiniMaxH3MediaNormalizer) Normalize(ctx context.Context, sourcePat
 	destinationPath = strings.TrimSpace(destinationPath)
 	if sourcePath == "" || destinationPath == "" {
 		return MiniMaxH3MediaProbe{}, MiniMaxH3MediaProbe{}, errors.New("source and destination paths are required")
+	}
+	if n.StartOffsetMS < 0 || n.MaxDurationMS < 0 || n.MaxDurationSec < 0 {
+		return MiniMaxH3MediaProbe{}, MiniMaxH3MediaProbe{}, errors.New("normalization time bounds cannot be negative")
 	}
 	sourceAbs, err := filepath.Abs(sourcePath)
 	if err != nil {
@@ -108,12 +116,19 @@ func (n FFmpegMiniMaxH3MediaNormalizer) Normalize(ctx context.Context, sourcePat
 	args := []string{
 		"-nostdin", "-hide_banner", "-loglevel", "error",
 		"-i", sourceAbs,
+	}
+	if n.StartOffsetMS > 0 {
+		args = append(args, "-ss", formatMediaDurationMS(n.StartOffsetMS))
+	}
+	args = append(args,
 		"-map", "0:v:0", "-map", "0:a?",
 		"-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
 		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-fps_mode", "cfr",
 		"-c:a", "aac", "-movflags", "+faststart",
-	}
-	if n.MaxDurationSec > 0 {
+	)
+	if n.MaxDurationMS > 0 {
+		args = append(args, "-t", formatMediaDurationMS(n.MaxDurationMS))
+	} else if n.MaxDurationSec > 0 {
 		args = append(args, "-t", strconv.Itoa(n.MaxDurationSec))
 	}
 	args = append(args, temporaryPath)
@@ -141,6 +156,10 @@ func (n FFmpegMiniMaxH3MediaNormalizer) Normalize(ctx context.Context, sourcePat
 		return originalProbe, normalizedProbe, err
 	}
 	return originalProbe, normalizedProbe, nil
+}
+
+func formatMediaDurationMS(value int) string {
+	return strconv.FormatFloat(float64(value)/1000, 'f', 3, 64)
 }
 
 func ffmpegFPSModeUnsupported(result MiniMaxH3CommandResult) bool {

@@ -36,7 +36,7 @@ func TestSeedance25ProviderAdapterPinsOfficialModelAndEntersCommonReview(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.lastRequest.Model != Seedance25ServerModel || client.lastRequest.GenerateAudio || client.lastRequest.ReturnLastFrame {
+	if client.lastRequest.Model != Seedance25ServerModel || client.lastRequest.GenerateAudio || !client.lastRequest.ReturnLastFrame {
 		t.Fatalf("unexpected Seedance 2.5 request: %+v", client.lastRequest)
 	}
 	if result.Provider != GeneratedShotProviderSeedance25 || result.Candidate == nil || result.Candidate.Provider != GeneratedShotProviderSeedance25 || !result.StructuralReview.StructurallyEligible {

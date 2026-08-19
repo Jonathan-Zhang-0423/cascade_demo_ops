@@ -81,6 +81,31 @@ func TestArkMediaClientRealCreateContentGenerationTaskUsesArkEndpointAndBearer(t
 	}
 }
 
+func TestArkMediaClientPreservesSeedance25RequestFields(t *testing.T) {
+	var gotBody ContentGenerationTaskRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"task_25","status":"queued","model":"doubao-seedance-2-5-260628"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(testArkRuntime(config.ArkMediaModeReal, server.URL+"/api/v3"), server.Client())
+	_, err := client.CreateContentGenerationTask(t.Context(), ContentGenerationTaskRequest{
+		Model: "doubao-seedance-2-5-260628", Content: []ContentPart{{Type: "text", Text: "presentation-only"}},
+		OmniReferenceTaskType: "auto", Resolution: "1080p", Ratio: "16:9", Duration: 5,
+		GenerateAudio: false, ReturnLastFrame: true, Watermark: false, OutputFormat: "mp4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBody.Model != "doubao-seedance-2-5-260628" || gotBody.OmniReferenceTaskType != "auto" || gotBody.OutputFormat != "mp4" || !gotBody.ReturnLastFrame {
+		t.Fatalf("Seedance 2.5 fields lost in request: %+v", gotBody)
+	}
+}
+
 func TestArkMediaClientRealGetContentGenerationTaskParsesOutput(t *testing.T) {
 	var gotPath string
 	var gotAuth string

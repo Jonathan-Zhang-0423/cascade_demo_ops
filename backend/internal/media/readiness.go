@@ -71,7 +71,7 @@ func MediaReadinessFromEnv(getenv func(string) string, commandReady func(string)
 
 func checksPassedExcept(checks []MediaReadinessCheck, excludedPrefix string) bool {
 	for _, check := range checks {
-		if strings.HasPrefix(check.Name, excludedPrefix) {
+		if excludedPrefix != "" && strings.HasPrefix(check.Name, excludedPrefix) {
 			continue
 		}
 		if !check.Passed {
