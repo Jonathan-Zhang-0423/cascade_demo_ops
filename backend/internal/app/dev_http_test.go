@@ -661,7 +661,7 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payload) > 256*1024 {
+	if len(payload) > 240*1024 {
 		t.Fatalf("outline upload package too large: %d bytes", len(payload))
 	}
 	if build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash == "" || build.ApprovalSubjectDigestSHA256 == "" || build.SizeReport.TotalBytes == 0 {

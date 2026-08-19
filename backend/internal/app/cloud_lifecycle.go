@@ -1534,7 +1534,7 @@ func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model
 		Assets:        compactAssetManifestForUpload(graph.Assets),
 		Nodes:         []*model.GraphNode{},
 		Edges:         []*model.GraphEdge{},
-		EvidenceRefs:  compactEvidenceRefsForUpload(graph.EvidenceRefs, 4),
+		EvidenceRefs:  compactEvidenceRefsForUpload(graph.EvidenceRefs, 2),
 		CreatedAt:     graph.CreatedAt,
 		UpdatedAt:     graph.UpdatedAt,
 	}
@@ -1547,13 +1547,9 @@ func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model
 		out.Nodes = append(out.Nodes, &model.GraphNode{
 			ID:              nodeID,
 			Action:          string(step.Action.Type),
-			ExpectedOutcome: truncateForUpload(step.ExpectedOutcome, 200),
+			ExpectedOutcome: truncateForUpload(step.ExpectedOutcome, 120),
 			Type:            model.GraphNodeTypeAction,
-			Title:           truncateForUpload(firstNonEmptyString(step.Title, step.NodeID), 120),
-			Goal:            truncateForUpload(step.BusinessValue, 200),
-			PageRef:         firstNonEmptyString(step.PageTarget.URL, step.Action.Target.URL),
-			EvidenceRefs:    compactEvidenceRefsForUpload(step.EvidenceRefs, 3),
-			Validations:     compactValidationsForUpload(step.Validations),
+			Title:           truncateForUpload(firstNonEmptyString(step.Title, step.NodeID), 80),
 			DurationHintMS:  step.Timing.DurationMS,
 			Metadata: map[string]any{
 				"business_stage_id":    stepBusinessStageID(bundle, step.NodeID),
@@ -1586,23 +1582,6 @@ func stepBusinessStageID(bundle *model.ExecutableRecordingScriptBundle, nodeID s
 	return ""
 }
 
-func compactValidationsForUpload(values []model.ValidationSpec) []model.ValidationSpec {
-	out := make([]model.ValidationSpec, 0, 2)
-	for _, value := range values {
-		if !value.Required {
-			continue
-		}
-		value.Assertion = truncateForUpload(value.Assertion, 160)
-		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 2)
-		value.RepairPolicy = nil
-		out = append(out, value)
-		if len(out) == 2 {
-			break
-		}
-	}
-	return out
-}
-
 func compactWorkflowIntentForUpload(intent *model.WorkflowIntent) *model.WorkflowIntent {
 	if intent == nil {
 		return nil
@@ -1618,14 +1597,14 @@ func compactWorkflowIntentForUpload(intent *model.WorkflowIntent) *model.Workflo
 }
 
 func compactGraphRequirementsForUpload(values []model.GraphRequirement) []model.GraphRequirement {
-	out := make([]model.GraphRequirement, 0, minInt(len(values), 16))
+	out := make([]model.GraphRequirement, 0, minInt(len(values), 6))
 	for _, value := range values {
-		if len(out) >= 16 {
+		if len(out) >= 6 {
 			break
 		}
-		value.Description = truncateForUpload(value.Description, 240)
-		value.NodeRefs = limitStringsForUpload(value.NodeRefs, 8)
-		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 3)
+		value.Description = truncateForUpload(value.Description, 160)
+		value.NodeRefs = limitStringsForUpload(value.NodeRefs, 4)
+		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 1)
 		out = append(out, value)
 	}
 	return out
