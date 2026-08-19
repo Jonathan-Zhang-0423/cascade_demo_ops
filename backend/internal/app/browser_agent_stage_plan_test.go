@@ -584,6 +584,26 @@ type stubStageVerifier struct {
 	calls    int
 }
 
+func TestWarningOnlyRepairDecisionContinuesAfterPassedBrowserAssertions(t *testing.T) {
+	report := model.ValidationReport{
+		Decision: model.ValidationDecisionRepairAllowed,
+		Checks:   []model.ValidationCheck{{Severity: model.FindingSeverityWarning, Passed: false}},
+	}
+	observation := &model.RuntimeObservation{Assertions: []model.RuntimeAssertion{{Kind: "element_visible", Passed: true}}}
+	if !warningOnlyRepairDecisionCanContinue(report, observation) {
+		t.Fatal("warning-only compatibility feedback should not require an invented repair proposal")
+	}
+	report.Checks = append(report.Checks, model.ValidationCheck{Severity: model.FindingSeverityBlocking, Passed: false})
+	if warningOnlyRepairDecisionCanContinue(report, observation) {
+		t.Fatal("blocking findings must not bypass runtime repair or stop policy")
+	}
+	report.Checks = report.Checks[:1]
+	observation.Assertions[0].Passed = false
+	if warningOnlyRepairDecisionCanContinue(report, observation) {
+		t.Fatal("failed browser assertions must not be normalized to continue")
+	}
+}
+
 type countingStageExecutor struct{ calls int }
 
 func (e *countingStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
