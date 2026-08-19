@@ -1550,6 +1550,8 @@ func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model
 			ExpectedOutcome: truncateForUpload(step.ExpectedOutcome, 120),
 			Type:            model.GraphNodeTypeAction,
 			Title:           truncateForUpload(firstNonEmptyString(step.Title, step.NodeID), 80),
+			EvidenceRefs:    compactEvidenceRefsForUpload(step.EvidenceRefs, 1),
+			Validations:     compactValidationsForUpload(step.Validations),
 			DurationHintMS:  step.Timing.DurationMS,
 			Metadata: map[string]any{
 				"business_stage_id":    stepBusinessStageID(bundle, step.NodeID),
@@ -1580,6 +1582,21 @@ func stepBusinessStageID(bundle *model.ExecutableRecordingScriptBundle, nodeID s
 		}
 	}
 	return ""
+}
+
+func compactValidationsForUpload(values []model.ValidationSpec) []model.ValidationSpec {
+	for _, value := range values {
+		if !value.Required {
+			continue
+		}
+		value.Assertion = truncateForUpload(value.Assertion, 100)
+		value.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(value.Target.SelectorAlternatives, 1)
+		value.Target.EvidenceRefs = compactEvidenceRefsForUpload(value.Target.EvidenceRefs, 1)
+		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 1)
+		value.RepairPolicy = nil
+		return []model.ValidationSpec{value}
+	}
+	return nil
 }
 
 func compactWorkflowIntentForUpload(intent *model.WorkflowIntent) *model.WorkflowIntent {
