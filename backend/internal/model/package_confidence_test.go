@@ -114,6 +114,28 @@ func TestPackageRequirementCoverageRequiresNodeValidationAndEvidence(t *testing.
 	}
 }
 
+func TestTerminalPlayableRepairScopesCoverageToRetainedRequirements(t *testing.T) {
+	pkg := confidenceFixture(t)
+	pkg.WorkflowGraph.ID = "graph_terminal_playable_repair_1"
+	pkg.ExecutableScriptBundle.RepairLineage = &ScriptRepairLineage{SourceResultID: "result_completed_source"}
+	pkg.WorkflowGraph.Requirements = []GraphRequirement{{ID: "already_completed_creation", Kind: "must_show", Description: "创建项目", Required: true}}
+	summary, err := AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 1 {
+		t.Fatalf("terminal repair should not re-cover requirements outside its retained nodes: %+v", summary)
+	}
+	pkg.ExecutableScriptBundle.RepairLineage = nil
+	summary, err = AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 0 {
+		t.Fatalf("ordinary packages must still cover every browser requirement: %+v", summary)
+	}
+}
+
 func TestPackageConfidenceIgnoresSafetyConstraintsForPositiveCoverage(t *testing.T) {
 	pkg := confidenceFixture(t)
 	pkg.WorkflowGraph.Requirements = []GraphRequirement{

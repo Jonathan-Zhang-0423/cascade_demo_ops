@@ -151,6 +151,17 @@ func TestDirectFailureReunderstandingLifecycleAndIdempotency(t *testing.T) {
 	if err != nil || idempotent.NewPackageID != repaired.NewPackageID || idempotent.PackageDigestSHA256 != repaired.PackageDigestSHA256 {
 		t.Fatalf("same idempotency request did not return the same draft: result=%+v err=%v", idempotent, err)
 	}
+	repaired.State.DesktopCloudRun.Stage = "reunderstanding_incomplete"
+	repaired.State.DesktopCloudRun.Status = "failed"
+	repaired.State.DesktopCloudRun.BlockingErrorCode = "reunderstanding_incomplete"
+	repaired.State.DesktopCloudRun.PackageID = ""
+	if err := states.Save(t.Context(), repaired.State); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := service.ReunderstandDirectBrowserAgentFailure(t.Context(), state.ProjectID, request)
+	if err != nil || recovered.State.DesktopCloudRun.Stage != "local_generated" || recovered.State.DesktopCloudRun.Status != "not_uploaded" || recovered.State.DesktopCloudRun.BlockingErrorCode != "" || recovered.State.DesktopCloudRun.PackageID != repaired.NewPackageID {
+		t.Fatalf("idempotent repair did not recover persisted package-gate state: result=%+v err=%v", recovered, err)
+	}
 	bridge := &DesktopBridge{service: service}
 	wails := bridge.ReunderstandDirectBrowserAgentFailure(state.ProjectID, request)
 	if !wails.OK {

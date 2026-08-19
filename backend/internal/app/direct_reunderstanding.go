@@ -184,6 +184,33 @@ func (s *Service) currentReunderstandingResult(ctx context.Context, state *orche
 	if err != nil {
 		return DirectFailureReunderstandingResult{State: state, Issues: issues, RequiresReapproval: true}, &directReunderstandingError{"reunderstanding_incomplete", "regenerated draft still fails the formal package gate"}
 	}
+	if state.DesktopCloudRun != nil {
+		run := state.DesktopCloudRun
+		run.Status = "not_uploaded"
+		run.Stage = "local_generated"
+		run.Message = "重新理解草稿已生成，等待人工审批。"
+		run.BlockingErrorCode = ""
+		run.NextAction = "approve_reunderstood_package"
+		run.RequiresReapproval = true
+		run.PackageID = build.Package.PackageID
+		run.ExchangePackageID = build.Package.PackageID
+		run.PackageDigestSHA256 = build.PackageDigestSHA256
+		run.GraphDigestSHA256 = build.Package.Reproducibility.GraphHashSHA256
+		run.ApprovalSubjectDigestSHA256 = build.ApprovalSubjectDigestSHA256
+		if build.Package.ConfidenceSummary != nil {
+			run.ConfidenceAssessmentHash = build.Package.ConfidenceSummary.AssessmentHash
+		}
+		if build.Package.ExecutableScriptBundle != nil {
+			run.BundleHashSHA256 = build.Package.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+			run.PlanHashSHA256 = build.Package.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
+		}
+		if len(run.RepairHistory) > 0 {
+			run.RepairHistory[len(run.RepairHistory)-1].NewPackageID = build.Package.PackageID
+		}
+		if err := s.states.Save(ctx, state); err != nil {
+			return DirectFailureReunderstandingResult{}, err
+		}
+	}
 	return directReunderstandingResult(state, build, issues), nil
 }
 

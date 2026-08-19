@@ -74,9 +74,16 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 		summary.SourceBindingMode = pkg.SourceBindingSummary.EffectiveMode
 	}
 	requiredRequirements, coveredRequirements := 0, 0
+	terminalRepairScope := terminalPlayableRepairRequirementScope(pkg)
 	if pkg.WorkflowGraph != nil {
 		for _, requirement := range pkg.WorkflowGraph.Requirements {
 			if !requirement.Required || !requirementAppliesToClientBrowserExecution(requirement) {
+				continue
+			}
+			// A terminal repair deliberately reuses evidence from the completed
+			// source run. Only requirements retained on its four resume/verify
+			// nodes belong to this supplemental browser package.
+			if terminalRepairScope && len(requirement.NodeRefs) == 0 {
 				continue
 			}
 			requiredRequirements++
@@ -213,6 +220,11 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 	}
 	summary.AssessmentHash = hash
 	return summary, nil
+}
+
+func terminalPlayableRepairRequirementScope(pkg *ClientExecutionPackage) bool {
+	return pkg != nil && pkg.WorkflowGraph != nil && strings.HasPrefix(pkg.WorkflowGraph.ID, "graph_terminal_playable_repair_") &&
+		pkg.ExecutableScriptBundle != nil && pkg.ExecutableScriptBundle.RepairLineage != nil && strings.TrimSpace(pkg.ExecutableScriptBundle.RepairLineage.SourceResultID) != ""
 }
 
 // The client execution package covers browser interaction and recording. It
