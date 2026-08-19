@@ -808,7 +808,7 @@ async function executeInteraction(
     const keys = approvedKeyboardKeys(interaction.parameters);
     if (keys.length === 0) throw new Error(`browser_agent_keyboard_keys_not_approved: ${stage.node_id}`);
     if (booleanParameter(interaction.parameters, "focus_preview", false)) {
-      await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000));
+		  await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target);
     }
     const before = await pageVisualDigest(session.page);
     const delayMS = numericParameter(interaction.parameters, "inter_key_delay_ms", 350, 100, 1_000);
@@ -1232,9 +1232,12 @@ export async function evaluateRequiredValidations(
         passed = visualChangeByNodeID?.get(stage.node_id) === true;
 		actual = passed ? "visual_changed_after_approved_action" : "no_verified_visual_change";
       } else if (validation.kind === "playable_surface_visible") {
+		const target = validation.target || {};
+		const hasBoundTarget = Boolean(target.test_id || target.selector || target.role || target.label || target.text);
+		const boundTargetVisible = !hasBoundTarget || await waitForLocatorVisible(locatorForValidation(page, validation), timeout);
         const result = await waitForPlayableSurface(page, timeout);
-        passed = result.surface && result.score && result.controls;
-        actual = `surface=${result.surface};score=${result.score};controls=${result.controls}`;
+		passed = boundTargetVisible && result.surface && result.score && result.controls;
+		actual = `bound_target=${boundTargetVisible};surface=${result.surface};score=${result.score};controls=${result.controls}`;
       } else {
         actual = "unsupported_required_validation";
       }
@@ -1834,7 +1837,15 @@ async function pageVisualDigest(page: any): Promise<string> {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function focusLargestPlayableSurface(page: any, timeout: number): Promise<void> {
+async function focusLargestPlayableSurface(page: any, timeout: number, target?: BrowserAgentInteraction["target"]): Promise<void> {
+	if (target?.test_id) {
+		const approved = page.getByTestId(target.test_id).first();
+		if (await approved.isVisible({ timeout: Math.min(timeout, 1_500) }).catch(() => false)) {
+			await approved.click({ timeout }).catch(() => undefined);
+			await page.waitForTimeout(150);
+			return;
+		}
+	}
   const candidates: any[] = [];
   for (const selector of ["iframe:visible", "canvas:visible", '[data-testid*="preview" i]:visible', '[class*="game-board" i]:visible']) {
     const locator = page.locator(selector);

@@ -201,6 +201,10 @@ func TestFinalObserveConsumesExactResultSelectorsFromCodeSnapshots(t *testing.T)
 		if len(stage.Targets) == 0 || stage.Targets[0].TestID != testID || stage.Targets[0].VerificationSource != "local_code_snapshot" {
 			t.Fatalf("stage %s did not bind source result selector %s: %+v", stage.ID, testID, stage.Targets)
 		}
+		node := graphNodeFromBusinessStage(project, stage, project.ProductURL, "feature_result_anchor")
+		if node.ActionSpec == nil || node.ActionSpec.Target.TestID != testID || len(node.Validations) == 0 || node.Validations[0].Target.TestID != testID {
+			t.Fatalf("stage %s dropped source result selector %s while compiling the graph: %+v", stage.ID, testID, node)
+		}
 		delete(want, stage.ID)
 	}
 	if len(want) != 0 {

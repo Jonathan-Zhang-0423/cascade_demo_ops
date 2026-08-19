@@ -522,11 +522,14 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 		selector = ""
 	}
 	if actionType == model.GraphActionPress {
-		// Keyboard actions target the approved page/preview route, not an
-		// arbitrary DOM control. Preserve semantic evidence while ensuring the
-		// Worker never tries to resolve or click an inferred selector.
+		// Keyboard actions never execute an inferred CSS selector. Preserve only
+		// the exact source-bound preview TestID so the Worker can focus the
+		// approved iframe before dispatching the bounded arrow-key sequence.
+		approvedPreviewTestID := target.Source == "local_code_snapshot" && strings.EqualFold(target.TestID, "preview-iframe")
 		target.Selector = ""
-		target.TestID = ""
+		if !approvedPreviewTestID {
+			target.TestID = ""
+		}
 		target.Role = ""
 		target.ComponentRef = ""
 		target.SelectorAlternatives = nil
@@ -669,6 +672,19 @@ func businessStageGraphActionType(stage model.BusinessStage) model.GraphActionTy
 
 func businessStageActionTarget(stage model.BusinessStage, entryPoint string) model.ActionTarget {
 	target := model.ActionTarget{URL: urlForBusinessStage(stage, entryPoint)}
+	if stage.Kind == model.BusinessStageKindFinalObserve {
+		wanted := ""
+		switch strings.TrimPrefix(stage.ID, "business_stage_") {
+		case "final_observe":
+			wanted = "build-result-card"
+		case "playable_preview", "verify_playable_controls":
+			wanted = "preview-iframe"
+		}
+		if exact, ok := businessStageExactTestIDTarget(stage, wanted); ok {
+			exact.URL = target.URL
+			return exact
+		}
+	}
 	if len(stage.Targets) == 0 {
 		target.Label = stage.Action.Label
 		target.Text = stage.Action.Label
@@ -706,7 +722,7 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 	target.Label = firstNonEmpty(best.Label, stage.Action.Label)
 	target.Text = best.Text
 	target.Role = best.Role
-	if target.Selector != "" {
+	if target.Selector != "" || (best.VerificationSource == "local_code_snapshot" && best.TestID != "") {
 		target.TestID = best.TestID
 	}
 	target.ComponentRef = best.ComponentRef
@@ -898,11 +914,19 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		timeoutMS = completionWaitTimeoutMS(stage.UserIntent)
 	} else if action == model.GraphActionPress {
 		kind = "page_changed"
-		target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+		if previewTarget, ok := businessStageExactTestIDTarget(stage, "preview-iframe"); ok {
+			target = previewTarget
+		} else {
+			target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+		}
 		expected = true
 	} else if stage.Kind == model.BusinessStageKindFinalObserve && strings.TrimPrefix(stage.ID, "business_stage_") == "playable_preview" {
 		kind = "playable_surface_visible"
-		target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+		if previewTarget, ok := businessStageExactTestIDTarget(stage, "preview-iframe"); ok {
+			target = previewTarget
+		} else {
+			target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+		}
 		expected = true
 	} else if action == model.GraphActionWait || action == model.GraphActionInspect {
 		if route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute); route != "" {
@@ -930,6 +954,39 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		EvidenceRefs: stage.EvidenceRefs,
 		RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2},
 	}
+}
+
+func businessStageExactTestIDTarget(stage model.BusinessStage, wanted string) (model.ActionTarget, bool) {
+	bestIndex := -1
+	bestScore := -1
+	for index, candidate := range stage.Targets {
+		if !strings.EqualFold(strings.TrimSpace(candidate.TestID), strings.TrimSpace(wanted)) {
+			continue
+		}
+		score := businessTargetRank(candidate)
+		if candidate.VerificationSource == "local_code_snapshot" {
+			score += 1000
+		}
+		if bestIndex < 0 || score > bestScore {
+			bestIndex = index
+			bestScore = score
+		}
+	}
+	if bestIndex < 0 {
+		return model.ActionTarget{}, false
+	}
+	candidate := stage.Targets[bestIndex]
+	return model.ActionTarget{
+		Selector:             selectorForBusinessTarget(candidate),
+		Source:               candidate.VerificationSource,
+		Role:                 candidate.Role,
+		Text:                 candidate.Text,
+		Label:                candidate.Label,
+		TestID:               candidate.TestID,
+		ComponentRef:         candidate.ComponentRef,
+		SelectorAlternatives: formalBusinessSelectorAlternatives(candidate.Alternatives),
+		EvidenceRefs:         candidate.EvidenceRefs,
+	}, true
 }
 
 func businessStageCompletionTarget(stage model.BusinessStage) (model.ActionTarget, bool) {
