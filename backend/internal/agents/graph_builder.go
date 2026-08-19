@@ -523,16 +523,25 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	}
 	if actionType == model.GraphActionPress {
 		// Keyboard actions never execute an inferred CSS selector. Preserve only
-		// the exact source-bound preview TestID so the Worker can focus the
-		// approved iframe before dispatching the bounded arrow-key sequence.
+		// the exact source-bound preview TestID and its formal provenance so the
+		// Worker can focus the approved iframe before dispatching the bounded
+		// arrow-key sequence.
 		approvedPreviewTestID := target.Source == "local_code_snapshot" && strings.EqualFold(target.TestID, "preview-iframe")
+		formalPreviewCandidates := []model.SelectorCandidate{}
+		if approvedPreviewTestID {
+			for _, candidate := range target.SelectorAlternatives {
+				if model.SelectorCandidateHasFormalProvenance(candidate) && strings.EqualFold(candidate.Kind, "testid") && strings.EqualFold(candidate.Value, target.TestID) {
+					formalPreviewCandidates = append(formalPreviewCandidates, candidate)
+				}
+			}
+		}
 		target.Selector = ""
 		if !approvedPreviewTestID {
 			target.TestID = ""
 		}
 		target.Role = ""
 		target.ComponentRef = ""
-		target.SelectorAlternatives = nil
+		target.SelectorAlternatives = formalPreviewCandidates
 		target.Label = stage.Action.Label
 		target.Text = stage.Action.Label
 		selector = ""

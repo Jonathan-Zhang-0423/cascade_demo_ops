@@ -1792,6 +1792,7 @@ func compactScriptStepForUpload(step *model.ScriptStep) {
 	if step == nil {
 		return
 	}
+	promoteRequiredValidationSelectorProvenanceForUpload(step)
 	step.BusinessValue = truncateForUpload(step.BusinessValue, 240)
 	step.ExpectedOutcome = truncateForUpload(step.ExpectedOutcome, 240)
 	step.EvidenceRefs = compactEvidenceRefsForUpload(step.EvidenceRefs, 3)
@@ -1812,6 +1813,30 @@ func compactScriptStepForUpload(step *model.ScriptStep) {
 	step.Narrative.Voiceover = truncateForUpload(step.Narrative.Voiceover, 240)
 	step.Narrative.Caption = truncateForUpload(step.Narrative.Caption, 160)
 	step.Narrative.Callout = truncateForUpload(step.Narrative.Callout, 120)
+}
+
+func promoteRequiredValidationSelectorProvenanceForUpload(step *model.ScriptStep) {
+	if step == nil || len(step.Action.Target.SelectorAlternatives) > 0 {
+		return
+	}
+	for _, validation := range step.Validations {
+		if !validation.Required {
+			continue
+		}
+		for _, candidate := range validation.Target.SelectorAlternatives {
+			if !model.SelectorCandidateHasFormalProvenance(candidate) || !selectorCandidateMatchesUploadTarget(candidate, step.Action.Target) {
+				continue
+			}
+			step.Action.Target.SelectorAlternatives = append(step.Action.Target.SelectorAlternatives, candidate)
+		}
+	}
+}
+
+func selectorCandidateMatchesUploadTarget(candidate model.SelectorCandidate, target model.ActionTarget) bool {
+	if strings.EqualFold(strings.TrimSpace(candidate.Kind), "testid") && strings.EqualFold(strings.TrimSpace(candidate.Value), strings.TrimSpace(target.TestID)) && strings.TrimSpace(target.TestID) != "" {
+		return true
+	}
+	return strings.TrimSpace(candidate.Value) != "" && strings.EqualFold(strings.TrimSpace(candidate.Value), strings.TrimSpace(target.Selector))
 }
 
 func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {

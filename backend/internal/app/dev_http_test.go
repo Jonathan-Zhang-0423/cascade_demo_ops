@@ -712,6 +712,27 @@ func TestBrowserAgentUploadViewCompactsInvestigationTraceAndRedundantRoutes(t *t
 	}
 }
 
+func TestCompactScriptStepPromotesMatchingFormalValidationSelector(t *testing.T) {
+	observedAt := time.Now().UTC()
+	candidate := model.SelectorCandidate{
+		Kind: "testid", Value: "preview-iframe", EvidenceID: "ev_preview", SourceKind: "source_scan",
+		SourceDigest: "sha256:preview", ObservedRole: "iframe", ObservedAccessibleName: "Preview",
+		ObservedAt: &observedAt, EvidenceRefs: []model.EvidenceRef{{ID: "ev_preview", Kind: model.EvidenceKindSourceCode}},
+	}
+	step := model.ScriptStep{
+		Action: model.ScriptActionInstruction{Type: model.GraphActionPress, Target: model.ActionTarget{
+			Selector: "[data-testid='preview-iframe']", TestID: "preview-iframe",
+		}},
+		Validations: []model.ValidationSpec{{Required: true, Target: model.ActionTarget{SelectorAlternatives: []model.SelectorCandidate{candidate}}}},
+	}
+
+	compactScriptStepForUpload(&step)
+
+	if len(step.Action.Target.SelectorAlternatives) != 1 || step.Action.Target.SelectorAlternatives[0].EvidenceID != "ev_preview" {
+		t.Fatalf("matching formal validation selector was not promoted to the action target: %+v", step.Action.Target.SelectorAlternatives)
+	}
+}
+
 func TestBrowserAgentPreflightAcceptsPlayableAndKeyboardValidations(t *testing.T) {
 	tests := []model.ScriptStep{
 		{

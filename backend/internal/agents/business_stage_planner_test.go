@@ -207,6 +207,9 @@ func TestFinalObserveConsumesExactResultSelectorsFromCodeSnapshots(t *testing.T)
 		if node.ActionSpec == nil || node.ActionSpec.Target.TestID != testID || len(node.Validations) == 0 || node.Validations[0].Target.TestID != testID {
 			t.Fatalf("stage %s dropped source result selector %s while compiling the graph: %+v", stage.ID, testID, node)
 		}
+		if stage.ID == "business_stage_verify_playable_controls" && (len(node.ActionSpec.Target.SelectorAlternatives) == 0 || !model.SelectorCandidateHasFormalProvenance(node.ActionSpec.Target.SelectorAlternatives[0])) {
+			t.Fatalf("keyboard stage dropped formal preview selector provenance: %+v", node.ActionSpec.Target)
+		}
 		delete(want, stage.ID)
 	}
 	if len(want) != 0 {
