@@ -1905,7 +1905,14 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 		}
 		for j := range stage.Components {
 			component := &stage.Components[j]
-			component.SelectorAlternatives = compactSelectorCandidatesForUpload(component.SelectorAlternatives, 1)
+			selectorLimit := 1
+			if stage.StageKind == model.BusinessStageKindSessionSetup {
+				// Two-step authentication needs both the approved method chooser and
+				// the authentication-form submit candidate. The credential broker
+				// will still reject either candidate if its formal provenance is absent.
+				selectorLimit = 2
+			}
+			component.SelectorAlternatives = compactSelectorCandidatesForUpload(component.SelectorAlternatives, selectorLimit)
 			component.EvidenceRefs = compactEvidenceRefsForUpload(component.EvidenceRefs, 1)
 		}
 		if len(stage.Interactions) > 1 {
@@ -1916,7 +1923,11 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 			interaction.EvidenceRefs = compactEvidenceRefsForUpload(interaction.EvidenceRefs, 2)
 			interaction.WaitConditions = limitStringsForUpload(interaction.WaitConditions, 3)
 			interaction.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(interaction.Target.SelectorAlternatives, 2)
-			interaction.Target.EvidenceRefs = compactEvidenceRefsForUpload(interaction.Target.EvidenceRefs, 2)
+			targetEvidenceLimit := 2
+			if stage.StageKind == model.BusinessStageKindSessionSetup {
+				targetEvidenceLimit = 3
+			}
+			interaction.Target.EvidenceRefs = compactEvidenceRefsForUpload(interaction.Target.EvidenceRefs, targetEvidenceLimit)
 		}
 	}
 	outline.UncertaintyReport = compactStageUncertaintiesForUpload(outline.UncertaintyReport, 4)

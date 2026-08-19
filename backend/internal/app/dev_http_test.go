@@ -733,6 +733,45 @@ func TestCompactScriptStepPromotesMatchingFormalValidationSelector(t *testing.T)
 	}
 }
 
+func TestOutlineUploadKeepsTwoStepAuthenticationProvenance(t *testing.T) {
+	observedAt := time.Now().UTC()
+	refEntry := model.EvidenceRef{ID: "ev_email_method", Kind: model.EvidenceKindBrowserScan}
+	refSubmit := model.EvidenceRef{ID: "ev_login_submit", Kind: model.EvidenceKindBrowserScan}
+	candidate := func(value, evidenceID, name, pageRole, formRole string, ref model.EvidenceRef) model.SelectorCandidate {
+		return model.SelectorCandidate{
+			Kind: "css", Value: value, EvidenceID: evidenceID, SourceKind: "page_scan", SourceDigest: "sha256:" + evidenceID,
+			ObservedRole: "button", ObservedAccessibleName: name, ObservedURL: "https://app.example.com/login",
+			ObservedPageRole: pageRole, ObservedFormRole: formRole, EvidenceDigestSHA256: "sha256:" + evidenceID,
+			ObservedAt: &observedAt, EvidenceRefs: []model.EvidenceRef{ref},
+		}
+	}
+	entry := candidate("button[type='button']", refEntry.ID, "邮箱登录", "product", "none", refEntry)
+	submit := candidate("button[type='submit']", refSubmit.ID, "登录", "authentication", "authentication", refSubmit)
+	outline := &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{
+		StageKind: model.BusinessStageKindSessionSetup,
+		Components: []model.BrowserAgentComponentTarget{{
+			SelectorAlternatives: []model.SelectorCandidate{entry, submit}, EvidenceRefs: []model.EvidenceRef{refEntry, refSubmit},
+		}},
+		Interactions: []model.BrowserAgentInteraction{{Target: model.ActionTarget{
+			SelectorAlternatives: []model.SelectorCandidate{entry, submit}, EvidenceRefs: []model.EvidenceRef{refEntry, refSubmit},
+		}}},
+	}}}
+
+	compactBrowserAgentOutlineForUpload(outline)
+	bound := evidenceBoundSelectorCandidates(outline.Stages[0].Components, outline.Stages[0].Interactions)
+
+	if len(bound) != 2 {
+		t.Fatalf("two-step authentication provenance was not retained: %+v", bound)
+	}
+	foundSubmit := false
+	for _, item := range bound {
+		foundSubmit = foundSubmit || item.ObservedPageRole == "authentication" && item.ObservedFormRole == "authentication"
+	}
+	if !foundSubmit {
+		t.Fatalf("authentication form submit provenance is missing: %+v", bound)
+	}
+}
+
 func TestBrowserAgentPreflightAcceptsPlayableAndKeyboardValidations(t *testing.T) {
 	tests := []model.ScriptStep{
 		{
