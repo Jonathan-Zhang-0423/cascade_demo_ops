@@ -106,3 +106,24 @@ func TestPublicationRequiresRetentionAck(t *testing.T) {
 		t.Fatal("unrelated publication failure must not be reported as retention acknowledgement")
 	}
 }
+
+func TestSeedancePreflightRequestUsesSeedance25ReferenceFieldsWithoutLeakingURL(t *testing.T) {
+	request := seedancePreflightRequest("doubao-seedance-2-5-260628", "https://private-bucket.tos-cn-beijing.ivolces.com/source.mp4?secret=must-not-audit")
+	if request.OmniReferenceTaskType != "reference" || request.OutputFormat != "mp4" || request.Model != "doubao-seedance-2-5-260628" {
+		t.Fatalf("Seedance 2.5 request = %+v", request)
+	}
+	profile := seedancePreflightRequestProfile(request)
+	if profile["model"] != "doubao-seedance-2-5-260628" || profile["output_format"] != "mp4" {
+		t.Fatalf("request profile = %+v", profile)
+	}
+	if _, exists := profile["content"]; exists {
+		t.Fatalf("audit profile must not include signed source URL: %+v", profile)
+	}
+}
+
+func TestSeedancePreflightRequestPreservesLegacyShapeForNon25Model(t *testing.T) {
+	request := seedancePreflightRequest("doubao-seedance-2-0-260128", "https://assets.example/source.mp4")
+	if request.OmniReferenceTaskType != "" || request.OutputFormat != "" {
+		t.Fatalf("legacy request unexpectedly changed: %+v", request)
+	}
+}

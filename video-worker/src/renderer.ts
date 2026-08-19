@@ -3884,10 +3884,14 @@ async function applyNarrationsAndGlobalCaptions(
       const label = `narration_${index}`;
       narrationLabels.push(`[${label}]`);
       filters.push(
-        `[${index + 1}:a]atrim=start=${secondsArg(narration.source_time_range_ms[0])}:end=${secondsArg(narration.source_time_range_ms[1])},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=${(narration.volume_percent / 100).toFixed(2)},adelay=${Math.round(narration.output_time_range_ms[0])}:all=1[${label}]`,
+        // aformat fixes narration to stereo first. Use explicit per-channel
+        // delays instead of adelay's newer all= option for FFmpeg compatibility.
+        `[${index + 1}:a]atrim=start=${secondsArg(narration.source_time_range_ms[0])}:end=${secondsArg(narration.source_time_range_ms[1])},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=${(narration.volume_percent / 100).toFixed(2)},adelay=${Math.round(narration.output_time_range_ms[0])}|${Math.round(narration.output_time_range_ms[0])}[${label}]`,
       );
     });
-    filters.push(`[base_audio]${narrationLabels.join("")}amix=inputs=${narrationPlan.inputs.length + 1}:duration=first:normalize=0[mixed_audio]`);
+    // Keep the portable amix option set. Older FFmpeg builds do not support
+    // normalize=, while duration=first preserves the rendered video timeline.
+    filters.push(`[base_audio]${narrationLabels.join("")}amix=inputs=${narrationPlan.inputs.length + 1}:duration=first[mixed_audio]`);
   }
 
   if (filters.length > 0) {
@@ -4008,7 +4012,11 @@ function runCommand(command: string, args: string[]): Promise<{ code: number | n
 
 function compactProcessError(prefix: string, result: { stderr: string; stdout: string; error?: string }): string {
   const message = result.error || result.stderr || result.stdout || "unknown error";
-  return `${prefix}: ${message.replace(/\s+/g, " ").slice(0, 300)}`;
+  const compact = message.replace(/\s+/g, " ").trim();
+  // FFmpeg writes its actionable error after the verbose build banner. Keep
+  // the tail so result packages can identify the failed filter or stream.
+  const detail = compact.length > 600 ? compact.slice(-600) : compact;
+  return `${prefix}: ${detail}`;
 }
 
 function secondsArg(valueMS: number): string {

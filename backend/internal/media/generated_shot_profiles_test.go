@@ -56,25 +56,40 @@ func TestGeneratedShotCompilersProduceIndependentProviderRequests(t *testing.T) 
 	}
 }
 
-func TestSeedance25CompilerMatchesArkMultimodalContract(t *testing.T) {
+func TestSeedance25CompilerUsesOfficialReferenceFieldsWithoutEnablingCalls(t *testing.T) {
 	intent := validGeneratedShotIntent()
 	intent.References = []GeneratedShotReference{
-		{ArtifactID: "image_1", URI: "https://assets.example.test/reference.png", MimeType: "image/png", Usage: GeneratedShotReferenceGeneral},
-		{ArtifactID: "video_1", URI: "https://assets.example.test/reference.mp4", MimeType: "video/mp4", Usage: GeneratedShotReferenceGeneral},
+		{ArtifactID: "image_1", URI: "https://bucket.tos-cn-beijing.ivolces.com/reference.png?signature=redacted", MimeType: "image/png", Usage: GeneratedShotReferenceGeneral},
+		{ArtifactID: "video_1", URI: "https://bucket.tos-cn-beijing.ivolces.com/reference.mp4?signature=redacted", MimeType: "video/mp4", Usage: GeneratedShotReferenceGeneral},
 	}
 	compiled, err := (Seedance25GeneratedShotCompiler{}).Compile(intent)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !compiled.DryRunOnly || compiled.Provider != GeneratedShotProviderSeedance25 || compiled.Model != Seedance25ServerModel {
+		t.Fatalf("compiled safety envelope = %+v", compiled)
+	}
 	request := compiled.Request
-	if compiled.Provider != GeneratedShotProviderSeedance25 || request.Model != Seedance25ServerModel || request.Ratio != "16:9" || request.Duration != 5 {
-		t.Fatalf("Seedance 2.5 identity contract mismatch: %+v", compiled)
+	if request.OmniReferenceTaskType != "reference" || request.OutputFormat != "mp4" || request.Resolution != "1080p" || request.GenerateAudio || request.Watermark || !request.ReturnLastFrame {
+		t.Fatalf("Seedance 2.5 request = %+v", request)
 	}
-	if request.Resolution != "" || request.GenerateAudio || request.ReturnLastFrame || request.Watermark {
-		t.Fatalf("Seedance 2.5 safety defaults mismatch: %+v", request)
+	if len(request.Content) != 3 || request.Content[1].Role != "reference_image" || request.Content[1].ImageURL == nil || request.Content[2].Role != "reference_video" || request.Content[2].VideoURL == nil {
+		t.Fatalf("Seedance 2.5 content = %+v", request.Content)
 	}
-	if len(request.Content) != 3 || request.Content[1].Role != "reference_image" || request.Content[2].Role != "reference_video" {
-		t.Fatalf("Seedance 2.5 reference-role contract mismatch: %+v", request.Content)
+}
+
+func TestSeedance25CompilerLocksFrameModeToAdaptive(t *testing.T) {
+	intent := validGeneratedShotIntent()
+	intent.AspectRatio = "16:9"
+	intent.References = []GeneratedShotReference{{
+		ArtifactID: "first", URI: "https://assets.example.test/first.png", MimeType: "image/png", Usage: GeneratedShotReferenceFirstFrame,
+	}}
+	compiled, err := (Seedance25GeneratedShotCompiler{}).Compile(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Request.Ratio != "adaptive" || compiled.Request.OmniReferenceTaskType != "auto" || compiled.Request.Content[1].Role != "first_frame" {
+		t.Fatalf("Seedance 2.5 frame request = %+v", compiled.Request)
 	}
 }
 

@@ -18,6 +18,7 @@ type fakeTOSObjectClient struct {
 	presignInput *tos.PreSignedURLInput
 	putErr       error
 	presignErr   error
+	presignURL   string
 }
 
 func TestClassifyTOSPublishErrorRedactsProviderDetails(t *testing.T) {
@@ -42,7 +43,11 @@ func (f *fakeTOSObjectClient) PutObjectV2(_ context.Context, input *tos.PutObjec
 
 func (f *fakeTOSObjectClient) PreSignedURL(input *tos.PreSignedURLInput) (*tos.PreSignedURLOutput, error) {
 	f.presignInput = input
-	return &tos.PreSignedURLOutput{SignedUrl: "https://tos-cn-beijing.ivolces.com/signed"}, f.presignErr
+	url := f.presignURL
+	if url == "" {
+		url = "https://private-bucket.tos-cn-beijing.ivolces.com/signed"
+	}
+	return &tos.PreSignedURLOutput{SignedUrl: url}, f.presignErr
 }
 
 func TestTOSAssetPublisherUploadsSelectedAssetAndReturnsSignedURL(t *testing.T) {
@@ -75,8 +80,26 @@ func TestTOSAssetPublisherUploadsSelectedAssetAndReturnsSignedURL(t *testing.T) 
 	if fake.putInput.Key != "ark-media/pkg_01/001_source_reference.mp4" || fake.presignInput == nil || fake.presignInput.Key != fake.putInput.Key {
 		t.Fatalf("unexpected TOS object key: put=%+v presign=%+v", fake.putInput, fake.presignInput)
 	}
-	if result.Items[0].ProposedPublicRef == nil || result.Items[0].ProposedPublicRef.URI != "https://tos-cn-beijing.ivolces.com/signed" {
+	if result.Items[0].ProposedPublicRef == nil || result.Items[0].ProposedPublicRef.URI != "https://private-bucket.tos-cn-beijing.ivolces.com/signed" {
 		t.Fatalf("expected signed URL only in the local publication result: %+v", result.Items[0])
+	}
+}
+
+func TestTOSAssetPublisherRejectsNonArkPrivatePresignedURLBeforeProviderUse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.mp4")
+	if err := os.WriteFile(path, []byte("mp4-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publisher := newTOSAssetPublisherForClient(TOSAssetPublisherConfig{Bucket: "cascade-ark-media-test"}, &fakeTOSObjectClient{presignURL: "https://private-bucket.tos-cn-beijing.volces.com/signed"}, time.Now)
+	plan := model.ArkAssetPublicationPlan{SourcePackageID: "pkg_ark_url", Items: []model.ArkAssetPublicationItem{{
+		Ref: model.DirectorMaterialRef{ID: "source", URI: path, MimeType: "video/mp4"}, Required: true, Status: "ready_after_publication",
+	}}}
+	result, err := publisher.PublishArkAssets(t.Context(), plan, model.DirectorMaterialRef{ID: "plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CanUseForRealCall || result.Items[0].Status != "tos_presign_ark_input_url_invalid" || result.Items[0].ErrorClass != "ark_private_tos_url_required" {
+		t.Fatalf("non-private Ark URL must be blocked: %+v", result)
 	}
 }
 
