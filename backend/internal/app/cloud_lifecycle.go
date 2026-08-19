@@ -2830,6 +2830,10 @@ func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) 
 			sessionSetupCount++
 		case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
 			coreBusinessCount++
+		default:
+			if stageIsVerifiedKeyboardBusinessAction(bundle, stage) {
+				coreBusinessCount++
+			}
 		}
 		if stage.StageKind != model.BusinessStageKindSessionSetup && stageLooksLikeLoginOrCredential(stage) {
 			findings = append(findings, packagePreflightFinding(
@@ -2889,6 +2893,23 @@ func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) 
 		))
 	}
 	return findings
+}
+
+func stageIsVerifiedKeyboardBusinessAction(bundle *model.ExecutableRecordingScriptBundle, stage model.StageApprovalStage) bool {
+	if bundle == nil || bundle.PlanJSON == nil || stage.Interaction.Kind != model.GraphActionPress || !stage.Interaction.NonDestructive || !model.ApprovedKeyboardActionParameters(stage.Interaction.Parameters) {
+		return false
+	}
+	for _, step := range bundle.PlanJSON.Steps {
+		if step.NodeID != stage.NodeID || step.Action.Type != model.GraphActionPress || !step.NonDestructive || !model.ApprovedKeyboardActionParameters(step.Action.Parameters) {
+			continue
+		}
+		for _, validation := range step.Validations {
+			if validation.Required && validation.Kind == "page_changed" && validation.Expected == true {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func stageLooksLikeLoginOrCredential(stage model.StageApprovalStage) bool {

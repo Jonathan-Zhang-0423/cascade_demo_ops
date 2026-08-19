@@ -815,6 +815,36 @@ func TestScriptDocumentTreatsOnlyBoundedVerifiedKeyboardPlayAsBusinessAction(t *
 	}
 }
 
+func TestBusinessStagePreflightCountsVerifiedFinalKeyboardPlayAsCoreAction(t *testing.T) {
+	step := model.ScriptStep{
+		NodeID: "business_stage_verify_playable_controls", StageKind: model.BusinessStageKindFinalObserve, NonDestructive: true,
+		Action: model.ScriptActionInstruction{Type: model.GraphActionPress, Parameters: map[string]any{
+			"keys": "ArrowLeft,ArrowRight,ArrowDown,ArrowUp",
+		}},
+		Validations: []model.ValidationSpec{{Kind: "page_changed", Expected: true, Required: true}},
+	}
+	bundle := &model.ExecutableRecordingScriptBundle{
+		PlanJSON: &model.ExecutionScriptDocument{Steps: []model.ScriptStep{step}},
+		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+			NodeID: step.NodeID, StageKind: model.BusinessStageKindFinalObserve,
+			Interaction: model.BrowserAgentInteraction{Kind: model.GraphActionPress, Parameters: step.Action.Parameters, NonDestructive: true},
+		}}},
+	}
+	for _, finding := range preflightBusinessStageKinds(bundle) {
+		if finding.ID == "business_stage_missing" {
+			t.Fatalf("verified gameplay keyboard action was rejected as observation-only: %+v", finding)
+		}
+	}
+	bundle.StageApprovalPlan.Stages[0].Interaction.Parameters = map[string]any{"keys": "Control+L"}
+	foundMissing := false
+	for _, finding := range preflightBusinessStageKinds(bundle) {
+		foundMissing = foundMissing || finding.ID == "business_stage_missing"
+	}
+	if !foundMissing {
+		t.Fatal("arbitrary keyboard shortcut was counted as a core business stage")
+	}
+}
+
 func TestBuildClientExecutionPackagePreviewDigestIsStable(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
