@@ -79,7 +79,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 			return model.RecordingResultPackage{}, newRuntimeExecutionError("outcome_pre_verification_failed", err)
 		}
 		preReports = append(preReports, preReport)
-		if preReport.Decision != model.ValidationDecisionContinue {
+		if !preExecutionValidationAllowsRun(preReport) {
 			return model.RecordingResultPackage{}, newRuntimeExecutionError("outcome_pre_verification_failed", errors.New("approved Browser Agent package did not pass pre-execution verification"))
 		}
 	}
@@ -204,6 +204,21 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		}
 	}
 	return result, nil
+}
+
+func preExecutionValidationAllowsRun(report model.ValidationReport) bool {
+	if report.Decision == model.ValidationDecisionContinue {
+		return true
+	}
+	if report.Decision != model.ValidationDecisionRepairAllowed {
+		return false
+	}
+	for _, check := range report.Checks {
+		if !check.Passed && check.Severity == model.FindingSeverityBlocking {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *localBrowserAgentStageRuntime) ObserveStage(ctx context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
