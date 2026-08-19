@@ -599,9 +599,9 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 			expectedRoute = workspace
 		}
 	}
-	if creationControlObservedOnRoute(spec.id, targets, b.routeHints.workspace) {
-		entryRoute = b.routeHints.workspace
-		expectedRoute = b.routeHints.workspace
+	if observedRoute := observedCreationControlRoute(spec.id, targets); observedRoute != "" {
+		entryRoute = observedRoute
+		expectedRoute = observedRoute
 	}
 	stage := model.BusinessStage{
 		ID:                       stageID,
@@ -634,23 +634,27 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 	b.stages = append(b.stages, stage)
 }
 
-func creationControlObservedOnRoute(stageID string, targets []model.BusinessTargetCandidate, route string) bool {
-	if route == "" || (stageID != "new_project_entry" && stageID != "project_name_input" && stageID != "select_build_mode") {
-		return false
+func observedCreationControlRoute(stageID string, targets []model.BusinessTargetCandidate) string {
+	if stageID != "new_project_entry" && stageID != "project_name_input" && stageID != "select_build_mode" {
+		return ""
 	}
-	want := routePathFromCandidate(route)
 	for _, target := range targets {
-		candidates := []string{target.URL, target.Route}
+		candidates := []string{}
+		if target.IsVerified {
+			candidates = append(candidates, target.URL, target.Route)
+		}
 		for _, alternative := range target.Alternatives {
-			candidates = append(candidates, alternative.ObservedURL, alternative.ObservedRouteTemplate)
+			if alternative.SourceKind == "page_scan" || alternative.Source == "page_scan" {
+				candidates = append(candidates, alternative.ObservedURL, alternative.ObservedRouteTemplate)
+			}
 		}
 		for _, candidate := range candidates {
-			if candidate != "" && routePathFromCandidate(candidate) == want {
-				return true
+			if route := routePathFromCandidate(candidate); route != "" {
+				return route
 			}
 		}
 	}
-	return false
+	return ""
 }
 
 func authenticationEntryRouteFromTargets(targets []model.BusinessTargetCandidate) string {
