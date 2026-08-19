@@ -330,12 +330,12 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 				return result, newRuntimeExecutionError("outcome_verification_failed", err)
 			}
 			result.ValidationReports = append(result.ValidationReports, report)
-			if report.Decision == model.ValidationDecisionRepairAllowed && warningOnlyRepairDecisionCanContinue(report, actionResult.Observation) {
+			if normalized, ok := normalizeWarningOnlyRepairDecision(report, actionResult.Observation, actionResult.EvidenceRefs); ok {
 				// The legacy Validation Agent maps warning-only feedback to
 				// repair_allowed even when every browser assertion passed. With no
 				// concrete failing check there is nothing safe to patch; retain the
 				// warning report and continue instead of inventing a repair proposal.
-				report.Decision = model.ValidationDecisionContinue
+				report = normalized
 				result.ValidationReports[len(result.ValidationReports)-1] = report
 			}
 			if report.Decision == model.ValidationDecisionRepairAllowed {
@@ -453,6 +453,17 @@ func warningOnlyRepairDecisionCanContinue(report model.ValidationReport, observa
 		}
 	}
 	return true
+}
+
+func normalizeWarningOnlyRepairDecision(report model.ValidationReport, observation *model.RuntimeObservation, evidence []model.EvidenceRef) (model.ValidationReport, bool) {
+	if !warningOnlyRepairDecisionCanContinue(report, observation) || len(evidence) == 0 {
+		return report, false
+	}
+	report.Decision = model.ValidationDecisionContinue
+	if len(report.EvidenceRefs) == 0 {
+		report.EvidenceRefs = append([]model.EvidenceRef{}, evidence...)
+	}
+	return report, true
 }
 
 func runtimeActionForStage(stage BrowserAgentRuntimeStage) *model.RuntimeAction {

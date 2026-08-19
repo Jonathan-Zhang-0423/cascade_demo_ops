@@ -586,12 +586,23 @@ type stubStageVerifier struct {
 
 func TestWarningOnlyRepairDecisionContinuesAfterPassedBrowserAssertions(t *testing.T) {
 	report := model.ValidationReport{
-		Decision: model.ValidationDecisionRepairAllowed,
-		Checks:   []model.ValidationCheck{{Code: string(model.ValidationResultTypeWarning), Severity: model.FindingSeverityWarning, Passed: false}},
+		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "warning_report", RunID: "run_warning",
+		SourcePackageID: "pkg_warning", SourceBundleHashSHA256: "bundle_warning", PolicyHashSHA256: "policy_warning",
+		Phase: model.ValidationPhaseRuntimeStage, NodeID: "node_warning", StageID: "stage_warning",
+		Decision: model.ValidationDecisionRepairAllowed, PassRate: .5, OverallConfidence: .8,
+		EvidenceQuality: model.RuntimeObservationAssertion, CreatedAt: timeNowUTC(),
+		Checks: []model.ValidationCheck{{ID: "warning_check", Kind: "warning", Code: string(model.ValidationResultTypeWarning), Severity: model.FindingSeverityWarning, Passed: false, Summary: "warning-only compatibility check"}},
 	}
 	observation := &model.RuntimeObservation{Assertions: []model.RuntimeAssertion{{Kind: "element_visible", Passed: true}}}
 	if !warningOnlyRepairDecisionCanContinue(report, observation) {
 		t.Fatal("warning-only compatibility feedback should not require an invented repair proposal")
+	}
+	normalized, ok := normalizeWarningOnlyRepairDecision(report, observation, []model.EvidenceRef{{ID: "runtime_screenshot", Kind: model.EvidenceKindWebScreenshot}})
+	if !ok || normalized.Decision != model.ValidationDecisionContinue || len(normalized.EvidenceRefs) != 1 {
+		t.Fatalf("normalized continue report must retain real runtime evidence: %+v", normalized)
+	}
+	if err := normalized.Validate(); err != nil {
+		t.Fatalf("normalized continue report must satisfy the formal report contract: %v", err)
 	}
 	report.Checks = append(report.Checks, model.ValidationCheck{Severity: model.FindingSeverityBlocking, Passed: false})
 	if warningOnlyRepairDecisionCanContinue(report, observation) {
