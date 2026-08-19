@@ -703,7 +703,7 @@ func TestBrowserAgentUploadViewCompactsInvestigationTraceAndRedundantRoutes(t *t
 		if len(refs) != 1 || refs[0].ID != "question_result" || refs[0].Status != "answered" || refs[0].Confidence != 0.93 {
 			t.Fatalf("%s lost compact investigation identity: %+v", name, refs)
 		}
-		if refs[0].NextActions != nil || refs[0].ToolCallIDs != nil || len(refs[0].RemainingGaps) != 2 || len([]rune(refs[0].EvidenceSummary)) > 160 {
+		if refs[0].NextActions != nil || refs[0].ToolCallIDs != nil || len(refs[0].RemainingGaps) != 1 || len([]rune(refs[0].EvidenceSummary)) > 100 {
 			t.Fatalf("%s retained oversized local investigation trace: %+v", name, refs[0])
 		}
 	}

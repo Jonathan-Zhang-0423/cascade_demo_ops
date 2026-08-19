@@ -1832,7 +1832,7 @@ func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {
 		stage.WaitConditions = limitStringsForUpload(stage.WaitConditions, 4)
 		stage.CapturePoints = limitStringsForUpload(stage.CapturePoints, 4)
 		stage.RiskNotes = limitStringsForUpload(stage.RiskNotes, 3)
-		stage.InvestigationQuestionRefs = compactInvestigationQuestionRefsForUpload(stage.InvestigationQuestionRefs, 2)
+		stage.InvestigationQuestionRefs = compactInvestigationQuestionRefsForUpload(stage.InvestigationQuestionRefs, 1)
 		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 3)
 		stage.CandidateRoutes = compactRouteCandidatesForUpload(stage.CandidateRoutes, stage.EntryRoute, stage.TargetRoute)
 		stage.Interaction.EvidenceRefs = compactEvidenceRefsForUpload(stage.Interaction.EvidenceRefs, 2)
@@ -1873,19 +1873,19 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 		stage.CapturePoints = limitStringsForUpload(stage.CapturePoints, 4)
 		stage.CanModify = compactContractFieldsForUpload(stage.CanModify, []string{"selector"}, 8)
 		stage.MustPreserve = compactContractFieldsForUpload(stage.MustPreserve, []string{"success_state", "safety_policy"}, 8)
-		stage.InvestigationQuestionRefs = compactInvestigationQuestionRefsForUpload(stage.InvestigationQuestionRefs, 2)
+		stage.InvestigationQuestionRefs = compactInvestigationQuestionRefsForUpload(stage.InvestigationQuestionRefs, 1)
 		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 3)
 		stage.CandidateRoutes = compactRouteCandidatesForUpload(stage.CandidateRoutes, stage.EntryRoute, stage.Route)
 		if stage.TargetContract != nil {
 			compactTargetContractForUpload(stage.TargetContract)
 		}
-		if len(stage.Components) > 3 {
-			stage.Components = stage.Components[:3]
+		if len(stage.Components) > 1 {
+			stage.Components = stage.Components[:1]
 		}
 		for j := range stage.Components {
 			component := &stage.Components[j]
-			component.SelectorAlternatives = compactSelectorCandidatesForUpload(component.SelectorAlternatives, 2)
-			component.EvidenceRefs = compactEvidenceRefsForUpload(component.EvidenceRefs, 2)
+			component.SelectorAlternatives = compactSelectorCandidatesForUpload(component.SelectorAlternatives, 1)
+			component.EvidenceRefs = compactEvidenceRefsForUpload(component.EvidenceRefs, 1)
 		}
 		if len(stage.Interactions) > 1 {
 			stage.Interactions = stage.Interactions[:1]
@@ -1939,8 +1939,8 @@ func compactInvestigationQuestionRefsForUpload(refs []model.InvestigationQuestio
 		}
 		seen[ref.ID] = true
 		ref.IntentLabel = truncateForUpload(ref.IntentLabel, 80)
-		ref.EvidenceSummary = truncateForUpload(ref.EvidenceSummary, 160)
-		ref.RemainingGaps = limitStringsForUpload(ref.RemainingGaps, 2)
+		ref.EvidenceSummary = truncateForUpload(ref.EvidenceSummary, 100)
+		ref.RemainingGaps = limitStringsForUpload(ref.RemainingGaps, 1)
 		// Tool-call IDs and detailed next-action recipes are local investigation
 		// trace. The server only needs the question, status, confirmed evidence,
 		// and any remaining gap to decide whether bounded runtime observation is
