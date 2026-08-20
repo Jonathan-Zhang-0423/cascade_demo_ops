@@ -244,7 +244,11 @@ func applyControlledBusinessStages(pkg *model.ClientExecutionPackage, specs []co
 	bundle.ScriptOutline.BaseURL, bundle.ScriptOutline.ProductOrigin = baseURL, baseURL
 	bundle.ScriptOutline.Summary = "Server may only adapt selector and wait details inside this controlled project-builder flow."
 	bundle.ScriptOutline.AllowedExplorationScope.AllowedOrigins = []string{baseURL}
-	bundle.ScriptOutline.AllowedExplorationScope.AllowedRoutes = []string{"/app", "/project/demo-tetris"}
+	// "/" is the worker's session entry: the worker opens the package base URL
+	// before the first stage executes, so the root route belongs to the
+	// approved navigation scope exactly like production packages do
+	// (script_packager includes RecordingRunSpec.BaseURL in allowed routes).
+	bundle.ScriptOutline.AllowedExplorationScope.AllowedRoutes = []string{"/", "/app", "/project/demo-tetris"}
 	bundle.ScriptOutline.AllowedExplorationScope.ForbiddenPathPrefixes = []string{"/billing", "/admin", "/v1"}
 	bundle.ScriptOutline.AllowedExplorationScope.ForbiddenKeywords = []string{"delete", "payment", "api key"}
 	bundle.ScriptOutline.AllowedExplorationScope.AllowNonDestructive = true

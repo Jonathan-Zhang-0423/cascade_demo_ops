@@ -196,15 +196,27 @@ func controlledOutlineSelectorRepairPackage(fixturePath, baseURL string) (model.
 	// The approved alternative must carry formal App provenance: evidence ID,
 	// source digest, observed role/name, and observation time, exactly like a
 	// real App-exported candidate. The runtime may only repair within it.
+	// The stale primary selector is also a registered candidate: the outline
+	// validation gate requires the action's primary selector to bind to one of
+	// the component's evidence-bound candidates (stale primary = the one the
+	// runtime will fail on, then switch to the current alternative).
 	observedAt := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	component := model.BrowserAgentComponentTarget{
 		ComponentRef: "component:confirm-action", TestID: "stale-confirm-action",
-		SelectorAlternatives: []model.SelectorCandidate{{
-			Kind: "testid", Value: "current-confirm-action", Confidence: 1, StabilityScore: 1, Source: "app_approved_fixture",
-			EvidenceID: evidence.ID, SourceKind: "approved_manual_annotation", SourceDigest: "fixture:" + evidence.ID,
-			ObservedRole: "button", ObservedAccessibleName: "Confirm action", ObservedAt: &observedAt,
-			EvidenceRefs: []model.EvidenceRef{evidence},
-		}},
+		SelectorAlternatives: []model.SelectorCandidate{
+			{
+				Kind: "testid", Value: "stale-confirm-action", Confidence: 1, StabilityScore: 1, Source: "app_approved_fixture",
+				EvidenceID: evidence.ID, SourceKind: "approved_manual_annotation", SourceDigest: "fixture:" + evidence.ID,
+				ObservedRole: "button", ObservedAccessibleName: "Confirm action", ObservedAt: &observedAt,
+				EvidenceRefs: []model.EvidenceRef{evidence},
+			},
+			{
+				Kind: "testid", Value: "current-confirm-action", Confidence: 1, StabilityScore: 1, Source: "app_approved_fixture",
+				EvidenceID: evidence.ID, SourceKind: "approved_manual_annotation", SourceDigest: "fixture:" + evidence.ID,
+				ObservedRole: "button", ObservedAccessibleName: "Confirm action", ObservedAt: &observedAt,
+				EvidenceRefs: []model.EvidenceRef{evidence},
+			},
+		},
 		EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1,
 	}
 	specs := []controlledBusinessStageSpec{

@@ -722,6 +722,7 @@
           "https://app.example.com"
         ],
         "allowed_routes": [
+          "/",
           "/dashboard"
         ],
         "forbidden_path_prefixes": [
