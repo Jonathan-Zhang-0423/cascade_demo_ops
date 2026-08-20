@@ -20,6 +20,8 @@
     "verify": "node scripts/verify-local.mjs",
     "validate:server-render": "node scripts/validate-server-render.mjs",
     "smoke:validate-server-render": "node scripts/smoke-validate-server-render.mjs",
+	"validate:director-skills": "node scripts/validate-director-skills.mjs",
+	"validate:site-neutral-core": "node scripts/validate-site-neutral-core.mjs",
 	"harness:minimax-h3": "cd backend && go run ./cmd/minimaxh3harness",
     "build:desktop:win": "node scripts/build-desktop.mjs windows",
 	"build:desktop:wails": "node scripts/build-wails-desktop.mjs",

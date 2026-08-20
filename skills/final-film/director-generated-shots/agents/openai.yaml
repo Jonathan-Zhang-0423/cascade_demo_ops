@@ -1,0 +1,4 @@
+interface:
+  display_name: "Director Generated Shots"
+  short_description: "Design safe H3 and Seedance chapter packaging"
+  default_prompt: "Design provider-neutral presentation shots and retry feedback for the supplied factual story plan."

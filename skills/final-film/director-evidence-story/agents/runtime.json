@@ -1,0 +1,1 @@
+{"schema_version":"demoops.director_skill_runtime.v1","skill_id":"director-evidence-story","version":"1.0.0","inputs":["DirectorEvidenceDigest"],"outputs":["DirectorStoryPlan"],"references":["references/runtime-contract.md"],"forbidden_router_inputs":["hostname","fixed_route","selector","product_name"]}

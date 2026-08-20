@@ -18,6 +18,20 @@ mkdirSync(goTmp, { recursive: true });
 
 const steps = [
   {
+    name: "Director skill validation",
+    command: process.execPath,
+    args: [resolve(root, "scripts", "validate-director-skills.mjs")],
+    cwd: root,
+    group: "node",
+  },
+  {
+    name: "Site-neutral core gate",
+    command: process.execPath,
+    args: [resolve(root, "scripts", "validate-site-neutral-core.mjs")],
+    cwd: root,
+    group: "node",
+  },
+  {
     name: "Go version",
     ...goStep("version"),
     cwd: backendDir,

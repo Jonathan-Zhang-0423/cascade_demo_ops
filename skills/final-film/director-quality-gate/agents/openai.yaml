@@ -1,0 +1,4 @@
+interface:
+  display_name: "Director Quality Gate"
+  short_description: "Score candidates, retry once, then fall back safely"
+  default_prompt: "Evaluate candidate reports and decide accept, one retry, or factual-track fallback."

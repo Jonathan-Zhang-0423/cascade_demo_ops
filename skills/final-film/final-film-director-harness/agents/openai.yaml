@@ -1,0 +1,4 @@
+interface:
+  display_name: "Final Film Director Harness"
+  short_description: "Run and recover the H3 Seedance FFmpeg harness"
+  default_prompt: "Run or debug the guided final-film harness using verified evidence and persisted checkpoints."
