@@ -27,6 +27,7 @@ export function FinalFilmPanel({ session, onClose }: { session: EditorSession; o
   const [reviewReason, setReviewReason] = useState("已在本地播放器完整检查，内容仅作展示用途。");
   const [anchorByIntent, setAnchorByIntent] = useState<Record<string, string>>({});
   const [preferredProvider, setPreferredProvider] = useState<FinalFilmProvider>("minimax-h3");
+  const [automatic, setAutomatic] = useState(true);
 
   const track = job?.generated_track;
   const pendingCandidate = track?.candidates?.find((candidate) => !track.content_reviews?.some((review) => review.candidate_id === candidate.candidate_id));
@@ -61,7 +62,7 @@ export function FinalFilmPanel({ session, onClose }: { session: EditorSession; o
     const selected = (Object.keys(purposes) as FinalFilmPurpose[]).filter((purpose) => purposes[purpose]);
     const nonce = Date.now();
     const intents = selected.map((purpose, index) => buildFinalFilmIntent(purpose, durationSec, nonce + index));
-    await run("create", () => client.create(session, intents));
+    await run("create", () => automatic ? client.createAutomated(session) : client.create(session, intents));
   }
 
   async function resumeJob() {
@@ -139,10 +140,14 @@ export function FinalFilmPanel({ session, onClose }: { session: EditorSession; o
             {client.mode !== "local" ? <div className="final-film-notice blocked">当前是前端 Mock 模式；请使用本地 Bridge 启动后执行真实 FinalFilm workflow。</div> : null}
             {!job ? <>
               <section className="final-film-card">
-                <h3>1. 选择可选展示镜头</h3>
+                <h3>1. 选择成片工作流</h3>
+                <label><input type="checkbox" checked={automatic} onChange={(event) => setAutomatic(event.target.checked)} /> <strong>跨站自动导演（推荐）</strong></label>
+                <p>{automatic ? "一次启动与费用授权后自动分析事实轨、调用 H3/Seedance、质检、FFmpeg 合成并停在最终人工终审。" : "兼容模式：逐镜头进行内容审核、选择和 Editor 批准。"}</p>
+                {!automatic ? <>
                 <p>它们不能替代录屏中的业务步骤。未选任何项目时仍可创建纯事实轨成片。</p>
                 <div className="final-film-purpose-grid">{purposeOptions.map((option) => <label key={option.value}><input type="checkbox" checked={purposes[option.value]} onChange={(event) => setPurposes((current) => ({ ...current, [option.value]: event.target.checked }))} /><span><strong>{option.label}</strong><small>{option.detail}</small></span></label>)}</div>
                 <label className="studio-field"><span>每段期望时长（4–15 秒）</span><input type="number" min="4" max="15" value={durationSec} onChange={(event) => setDurationSec(Number(event.target.value))} /></label>
+                </> : null}
                 <button className="studio-primary-button" disabled={Boolean(busy) || client.mode !== "local"} onClick={() => void createJob()}>{busy === "create" ? "创建中" : "锁定事实轨并创建作业"}</button>
               </section>
               <section className="final-film-card compact"><h3>恢复已有作业</h3><div className="final-film-inline"><input value={resumeID} onChange={(event) => setResumeID(event.target.value)} placeholder="finalfilm_..." /><button className="studio-outline-button" disabled={Boolean(busy) || client.mode !== "local"} onClick={() => void resumeJob()}>恢复</button></div></section>
@@ -163,6 +168,10 @@ export function FinalFilmPanel({ session, onClose }: { session: EditorSession; o
               {job.state === "awaiting_generated_editor_approval" && pendingSelection && pendingPurpose ? <EditorApproval job={job} selection={pendingSelection} purpose={pendingPurpose} anchor={anchorByIntent[pendingSelection.intent_id] || defaultAnchor(job, pendingPurpose)} busy={busy} onAnchor={(anchor) => setAnchorByIntent((current) => ({ ...current, [pendingSelection.intent_id]: anchor }))} onApprove={() => void approveSelection()} /> : null}
 
               {job.state === "awaiting_generated_patch_apply" ? <section className="final-film-card final-film-explicit"><h3>显式应用全部补丁</h3><p>将按下面的顺序一次校验、一次写入隔离计划并只渲染一次；任何一项失败都会整批拒绝。</p><ol>{(track?.patch_proposals ?? []).map((patch) => <li key={patch.patch_id}><strong>{purposeLabel(purposeByIntent[patch.intent_id])}</strong><span>{patch.placement}{patch.anchor_after_step_id ? ` · after ${patch.anchor_after_step_id}` : ""}</span></li>)}</ol><button className="studio-primary-button" disabled={Boolean(busy)} onClick={() => void run("apply", () => client.apply(job.job_id, job.revision, (track?.patch_proposals ?? []).map((patch) => patch.patch_id)))}>{busy === "apply" ? "合成与验收中…" : "确认应用并生成最终成片"}</button></section> : null}
+
+              {job.automation_profile && ["analyzing_evidence", "planning", "generating_presentation", "quality_gate", "composing"].includes(job.state) ? <section className="final-film-card"><h3>自动导演正在执行</h3><p>当前阶段：{stateLabel(job.state)}。模型调用 {job.run_authorization?.provider_calls_used ?? 0}/{job.run_authorization?.max_provider_calls ?? 0}；每个槽位最多重生一次。</p><button className="studio-outline-button" disabled={Boolean(busy)} onClick={() => void resumeJob()}>刷新进度</button></section> : null}
+
+              {job.state === "awaiting_final_review" && job.review_package ? <section className="final-film-card final-film-result success"><h3>唯一一次人工终审</h3><p>请完整播放 90–120 秒成片，并按需下载包含事实轨、原始录制、Provider 素材、EDL 和质量报告的审核包。</p><video src={client.finalMediaURL(job.job_id)} controls preload="metadata" /><p><a href={client.reviewPackageURL(job.job_id)} download>下载本地审核包</a></p><label className="studio-field"><span>拒绝原因 / 修订要求</span><textarea rows={3} value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} /></label><div className="final-film-actions"><button className="studio-ghost-button" disabled={Boolean(busy)} onClick={() => void run("final-reject", () => client.finalReview(job.job_id, job.revision, "reject", "local_human_reviewer", job.review_package!.package_id, reviewReason.trim()))}>拒绝并创建修订</button><button className="studio-primary-button" disabled={Boolean(busy)} onClick={() => void run("final-accept", () => client.finalReview(job.job_id, job.revision, "accept", "local_human_reviewer", job.review_package!.package_id))}>接受最终成片</button></div></section> : null}
 
               {terminal ? <section className={`final-film-card final-film-result ${job.state === "completed" ? "success" : "fallback"}`}><h3>{job.state === "completed" ? "最终成片已通过验收" : "工作流已收敛"}</h3><p>{job.generation_skip_reason || job.last_error?.message || (job.state === "completed" ? "事实轨与已批准展示镜头已完成确定性合成。" : "最终输出使用事实轨基线。")}</p>{job.final_render?.video_path ? <code>{job.final_render.video_path}</code> : null}</section> : null}
 
@@ -198,6 +207,7 @@ function EditorApproval({ job, selection, purpose, anchor, busy, onAnchor, onApp
 }
 
 function primaryAction(job: FinalFilmJob, client: ReturnType<typeof createFinalFilmClient>, run: (name: string, operation: () => Promise<Awaited<ReturnType<typeof client.get>>>) => Promise<void>, preferredProvider: FinalFilmProvider, onProvider: (provider: FinalFilmProvider) => void) {
+  if (job.state === "baseline_ready" && job.automation_profile === "guided-demo-v1") return { title: "启动跨站自动导演", detail: "本次授权固定使用 H3 片头/片尾、Seedance 2.5 章节转场；每个槽位最多两次调用，失败自动回退事实轨。", label: "授权并自动生成成片", run: () => run("automation", () => client.runAutomation(job.job_id, job.revision, `local-final-film:${job.job_id}:${Date.now()}`, 8)), secondary: null };
   if (job.state === "baseline_ready") return { title: "渲染事实轨基线", detail: "先完成无需任何视频模型的确定性基线；之后生成失败仍可交付它。", label: "渲染 baseline", run: () => run("baseline", () => client.renderBaseline(job.job_id)), secondary: null };
   if (job.state === "awaiting_generation_approval" && !job.director_plan) return { title: "Director 制定受控展示方案", detail: "模型只选择视觉风格、运动与色板枚举；服务端负责安全提示词、时长、比例和引用锁定。", label: "运行 Director 规划", run: () => run("director", () => client.planDirector(job.job_id, job.revision)), secondary: null };
   if (job.state === "awaiting_generation_approval" && job.director_plan) return { title: "生成费用与权限确认", detail: `Director 计划 ${job.director_plan.plan_id} 已锁定。只有点击批准后，Server 才能调用视频 Provider。`, label: "批准本次生成", run: () => run("authorize", () => client.decideGeneration(job.job_id, job.revision, true)), secondary: <button className="studio-ghost-button" onClick={() => void run("reject", () => client.decideGeneration(job.job_id, job.revision, false, "用户选择仅交付事实轨基线"))}>拒绝生成并使用 baseline</button> };
@@ -214,11 +224,11 @@ const purposeOptions: Array<{ value: FinalFilmPurpose; label: string; detail: st
 ];
 
 const workflowSteps = [
-  { state: "baseline", label: "事实轨", detail: "锁定并渲染 baseline", states: ["baseline_ready", "rendering_baseline"] },
-  { state: "director", label: "Director", detail: "受控展示配方", states: ["awaiting_generation_approval"] },
-  { state: "provider", label: "Provider", detail: "显式授权后生成", states: ["generating_candidates"] },
+  { state: "baseline", label: "事实轨", detail: "锁定并渲染 baseline", states: ["baseline_ready", "rendering_baseline", "analyzing_evidence"] },
+  { state: "director", label: "Director", detail: "证据驱动叙事与 EDL", states: ["awaiting_generation_approval", "planning"] },
+  { state: "provider", label: "Provider", detail: "H3 / Seedance 固定分工", states: ["generating_candidates", "generating_presentation", "quality_gate"] },
   { state: "review", label: "人工审核", detail: "内容、选择、Editor", states: ["awaiting_generated_content_review", "awaiting_generated_candidate_selection", "awaiting_generated_editor_approval"] },
-  { state: "compose", label: "合成验收", detail: "原子补丁与回退", states: ["awaiting_generated_patch_apply", "validating_final_plan", "rendering", "validating_output", "completed", "completed_without_generated_track"] },
+  { state: "compose", label: "合成验收", detail: "FFmpeg 与最终终审", states: ["awaiting_generated_patch_apply", "validating_final_plan", "rendering", "validating_output", "composing", "awaiting_final_review", "completed", "completed_without_generated_track"] },
 ];
 
 function stepTone(job: FinalFilmJob | undefined, states: string[]) {
@@ -246,7 +256,7 @@ function purposeLabel(purpose: FinalFilmPurpose | undefined): string {
 }
 
 function stateLabel(state: string): string {
-  return ({ baseline_ready: "基线待渲染", rendering_baseline: "基线渲染中", awaiting_generation_approval: "等待生成决策", generating_candidates: "等待执行生成", awaiting_generated_content_review: "等待内容审核", awaiting_generated_candidate_selection: "等待候选选择", awaiting_generated_editor_approval: "等待 Editor 批准", awaiting_generated_patch_apply: "等待显式应用补丁", rendering: "最终合成中", validating_output: "最终验收中", completed: "已完成", completed_without_generated_track: "已回退事实轨", failed: "失败", cancelled: "已取消" } as Record<string, string>)[state] || state;
+  return ({ baseline_ready: "基线待渲染", rendering_baseline: "基线渲染中", analyzing_evidence: "分析事实证据", planning: "自动导演规划", generating_presentation: "生成包装镜头", quality_gate: "候选质检与重生", composing: "FFmpeg 合成验收", awaiting_final_review: "等待最终人工终审", revision_requested: "已请求修订", awaiting_generation_approval: "等待生成决策", generating_candidates: "等待执行生成", awaiting_generated_content_review: "等待内容审核", awaiting_generated_candidate_selection: "等待候选选择", awaiting_generated_editor_approval: "等待 Editor 批准", awaiting_generated_patch_apply: "等待显式应用补丁", rendering: "最终合成中", validating_output: "最终验收中", completed: "已完成", completed_without_generated_track: "已回退事实轨", failed: "失败", cancelled: "已取消" } as Record<string, string>)[state] || state;
 }
 
 function localID(prefix: string): string {

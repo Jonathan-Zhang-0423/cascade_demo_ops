@@ -15,6 +15,7 @@ type FinalFilmCreateRequest struct {
 	ExpectedRevision    int                                  `json:"expected_revision"`
 	SourcePackageID     string                               `json:"source_package_id,omitempty"`
 	PresentationIntents []model.PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
+	AutomationProfile   string                               `json:"automation_profile,omitempty"`
 }
 
 type FinalFilmGenerationDecisionRequest struct {
@@ -63,6 +64,20 @@ type FinalFilmCancelRequest struct {
 	Reason           string `json:"reason"`
 }
 
+type FinalFilmRunRequest struct {
+	ExpectedRevision int    `json:"expected_revision"`
+	AuthorizationRef string `json:"authorization_ref"`
+	MaxProviderCalls int    `json:"max_provider_calls"`
+}
+
+type FinalFilmFinalReviewRequest struct {
+	ExpectedRevision int    `json:"expected_revision"`
+	Decision         string `json:"decision"`
+	Reason           string `json:"reason,omitempty"`
+	ReviewerRef      string `json:"reviewer_ref"`
+	PackageID        string `json:"package_id"`
+}
+
 func (s *Service) CreateFinalFilmJob(ctx context.Context, request FinalFilmCreateRequest) (model.FinalFilmJob, error) {
 	if s.finalFilm == nil {
 		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
@@ -84,6 +99,7 @@ func (s *Service) CreateFinalFilmJob(ctx context.Context, request FinalFilmCreat
 	return s.finalFilm.CreateJob(ctx, finalfilm.CreateJobRequest{
 		EditorSessionID: session.SessionID, EditorRevision: session.Revision, SourcePackageID: sourcePackageID,
 		Catalog: session.AssetCatalog, BaselinePlan: session.EditPlan, Intents: request.PresentationIntents, RenderProfile: session.FinalProfile,
+		AutomationProfile: request.AutomationProfile,
 	})
 }
 
@@ -180,4 +196,41 @@ func (s *Service) CancelFinalFilmJob(ctx context.Context, jobID string, request 
 		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
 	}
 	return s.finalFilm.Cancel(ctx, jobID, request.ExpectedRevision, request.Reason)
+}
+
+func (s *Service) RunFinalFilmAutomation(ctx context.Context, jobID string, request FinalFilmRunRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	job, err := s.finalFilm.AuthorizeAutomation(ctx, jobID, request.ExpectedRevision, request.AuthorizationRef, request.MaxProviderCalls)
+	if err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	go func() {
+		if _, resumeErr := s.finalFilm.ResumeAutomation(context.Background(), jobID); resumeErr != nil {
+			_, _ = s.finalFilm.MarkAutomationFailed(context.Background(), jobID, resumeErr)
+		}
+	}()
+	return job, nil
+}
+
+func (s *Service) ReviewFinalFilmOutput(ctx context.Context, jobID string, request FinalFilmFinalReviewRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.RecordFinalReview(ctx, jobID, request.ExpectedRevision, request.Decision, request.Reason, request.ReviewerRef, request.PackageID)
+}
+
+func (s *Service) FinalFilmOutputMediaPath(ctx context.Context, jobID string) (string, error) {
+	if s.finalFilm == nil {
+		return "", errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.FinalMediaPath(ctx, jobID)
+}
+
+func (s *Service) FinalFilmReviewPackagePath(ctx context.Context, jobID string) (string, error) {
+	if s.finalFilm == nil {
+		return "", errors.New("final film workflow is unavailable")
+	}
+	return s.finalFilm.ReviewPackagePath(ctx, jobID)
 }

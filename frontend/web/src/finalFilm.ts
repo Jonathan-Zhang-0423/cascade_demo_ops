@@ -70,6 +70,12 @@ export type FinalFilmJob = {
   applied_generated_patch_ids?: string[];
   final_output_validation?: { status: string; width?: number; height?: number; fps?: number; duration_ms?: number; error?: string };
   last_error?: { code: string; message: string; retryable: boolean };
+  automation_profile?: "guided-demo-v1";
+  run_authorization?: { authorization_ref: string; max_provider_calls: number; provider_calls_used: number };
+  evidence_digest?: { digest_id: string; source_duration_ms: number; interaction_density: number };
+  quality_reports?: Array<{ report_id: string; intent_id: string; provider: string; attempt: number; score: number; decision: string; findings?: string[] }>;
+  review_package?: { package_id: string; job_revision: number; directory_path: string; zip_path: string; manifest_path: string };
+  final_review?: { decision: string; reason?: string; reviewer_ref: string };
 };
 
 export type FinalFilmEvent = {
@@ -84,6 +90,7 @@ export type FinalFilmEvent = {
 export type FinalFilmClient = {
   mode: "local" | "unavailable";
   create(session: EditorSession, intents: FinalFilmPresentationIntent[]): Promise<EditorClientResult<FinalFilmJob>>;
+  createAutomated(session: EditorSession): Promise<EditorClientResult<FinalFilmJob>>;
   get(jobID: string): Promise<EditorClientResult<FinalFilmJob>>;
   events(jobID: string): Promise<EditorClientResult<FinalFilmEvent[]>>;
   renderBaseline(jobID: string): Promise<EditorClientResult<FinalFilmJob>>;
@@ -95,6 +102,10 @@ export type FinalFilmClient = {
   approve(jobID: string, revision: number, decision: Record<string, unknown>): Promise<EditorClientResult<FinalFilmJob>>;
   apply(jobID: string, revision: number, patchIDs: string[]): Promise<EditorClientResult<FinalFilmJob>>;
   candidateMediaURL(jobID: string, candidateID: string): string;
+  runAutomation(jobID: string, revision: number, authorizationRef: string, maxProviderCalls: number): Promise<EditorClientResult<FinalFilmJob>>;
+  finalReview(jobID: string, revision: number, decision: "accept" | "reject", reviewerRef: string, packageID: string, reason?: string): Promise<EditorClientResult<FinalFilmJob>>;
+  finalMediaURL(jobID: string): string;
+  reviewPackageURL(jobID: string): string;
 };
 
 type BridgeEnvelope<T> = { ok: boolean; data?: T; error?: string };
@@ -130,6 +141,11 @@ export function createFinalFilmClient(): FinalFilmClient {
       expected_revision: session.revision,
       presentation_generation_intents: intents,
     }),
+    createAutomated: (session) => post<FinalFilmJob>("/v1/final-film/jobs", {
+      editor_session_id: session.session_id,
+      expected_revision: session.revision,
+      automation_profile: "guided-demo-v1",
+    }),
     get: (jobID) => request<FinalFilmJob>(jobPath(jobID)),
     events: (jobID) => request<FinalFilmEvent[]>(jobPath(jobID, "/events")),
     renderBaseline: (jobID) => post<FinalFilmJob>(jobPath(jobID, "/render")),
@@ -141,6 +157,10 @@ export function createFinalFilmClient(): FinalFilmClient {
     approve: (jobID, revision, decision) => post<FinalFilmJob>(jobPath(jobID, "/editor-approval"), { expected_revision: revision, decision }),
     apply: (jobID, revision, patchIDs) => post<FinalFilmJob>(jobPath(jobID, "/apply-patch"), { expected_revision: revision, patch_ids: patchIDs }),
     candidateMediaURL: (jobID, candidateID) => jobPath(jobID, `/media/${encodeURIComponent(candidateID)}`),
+    runAutomation: (jobID, revision, authorizationRef, maxProviderCalls) => post<FinalFilmJob>(jobPath(jobID, "/run"), { expected_revision: revision, authorization_ref: authorizationRef, max_provider_calls: maxProviderCalls }),
+    finalReview: (jobID, revision, decision, reviewerRef, packageID, reason) => post<FinalFilmJob>(jobPath(jobID, "/final-review"), { expected_revision: revision, decision, reviewer_ref: reviewerRef, package_id: packageID, ...(reason ? { reason } : {}) }),
+    finalMediaURL: (jobID) => jobPath(jobID, "/final-media"),
+    reviewPackageURL: (jobID) => jobPath(jobID, "/review-package"),
   };
 }
 
@@ -165,8 +185,8 @@ function unavailableFinalFilmClient(): FinalFilmClient {
   const unavailable = async <T>(): Promise<EditorClientResult<T>> => ({ ok: false, error: "最终成片工作流只在本地 Bridge 模式可用。" });
   return {
     mode: "unavailable",
-    create: unavailable, get: unavailable, events: unavailable, renderBaseline: unavailable, planDirector: unavailable,
+    create: unavailable, createAutomated: unavailable, get: unavailable, events: unavailable, renderBaseline: unavailable, planDirector: unavailable,
     decideGeneration: unavailable, generate: unavailable, review: unavailable, select: unavailable, approve: unavailable, apply: unavailable,
-    candidateMediaURL: () => "",
+    candidateMediaURL: () => "", runAutomation: unavailable, finalReview: unavailable, finalMediaURL: () => "", reviewPackageURL: () => "",
   };
 }

@@ -183,7 +183,7 @@ func TestAppDirectTransportRejectsStaleApprovalBeforeLeaseAllocation(t *testing.
 	}
 }
 
-func TestDirectReviewAndEditorHandoffRequirePersistedServerACK(t *testing.T) {
+func TestDirectReviewRequiresACKButEditorHandoffUsesVerifiedRequiredMaterial(t *testing.T) {
 	states := store.NewMemoryStateStore()
 	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), ArtifactRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
 	if err != nil {
@@ -208,8 +208,8 @@ func TestDirectReviewAndEditorHandoffRequirePersistedServerACK(t *testing.T) {
 		t.Fatalf("review bypassed the ACK gate: %v", err)
 	}
 	materialization, err := service.GetDirectEditorMaterialization(t.Context(), projectID)
-	if err != nil || materialization.Ready || !strings.Contains(materialization.Message, "ACK") {
-		t.Fatalf("editor handoff bypassed the ACK gate: %+v err=%v", materialization, err)
+	if err != nil || materialization.Ready || strings.Contains(materialization.Message, "ACK") {
+		t.Fatalf("editor handoff must be independent from ACK and wait only for required media: %+v err=%v", materialization, err)
 	}
 }
 

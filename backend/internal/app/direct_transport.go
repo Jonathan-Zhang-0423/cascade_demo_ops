@@ -115,21 +115,16 @@ type DirectResultReviewRequest struct {
 	Review          model.ResultReviewRequest `json:"review"`
 }
 
-// GetDirectEditorMaterialization creates/looks up the local editor handoff
-// only after every artifact referenced by the verified direct result has been
-// downloaded into the App-managed artifact root and checksum-verified.
+// GetDirectEditorMaterialization creates/looks up the local editor handoff as
+// soon as the completed result's required raw recording is checksum-verified.
+// Optional diagnostics and the independent server ACK delivery state never
+// erase or block an already verified editor input.
 func (s *Service) GetDirectEditorMaterialization(ctx context.Context, projectID string) (EditorSessionMaterialization, error) {
 	state, err := s.states.Load(ctx, projectID)
 	if err != nil || state.DesktopCloudRun == nil || state.DesktopCloudRun.Transport != directTransportStateName || state.DesktopCloudRun.ResultPackage == nil {
 		return EditorSessionMaterialization{}, errors.New("direct Browser Agent result is unavailable")
 	}
 	run := state.DesktopCloudRun
-	if !run.ResultDownloaded {
-		return EditorSessionMaterialization{Message: "直连结果素材尚未完成 checksum 校验。"}, nil
-	}
-	if run.AckedAt == nil || run.AckedAt.IsZero() {
-		return EditorSessionMaterialization{Message: "直连结果尚未完成服务器 ACK，暂不能进入编辑器。"}, nil
-	}
 	result := *run.ResultPackage
 	assets := make(map[string]orchestrator.DesktopDownloadedAssetState, len(run.DownloadedAssets))
 	for _, asset := range run.DownloadedAssets {
@@ -145,17 +140,31 @@ func (s *Service) GetDirectEditorMaterialization(ctx context.Context, projectID 
 	if result.StageEventLogRef != nil {
 		refs = append(refs, *result.StageEventLogRef)
 	}
+	requiredRecordingFound := false
+	optionalMissing := 0
 	for _, ref := range refs {
+		required := isRawRecordingArtifact(ref)
 		asset, ok := assets[ref.ID]
 		if !ok || asset.FileName == "" {
-			return EditorSessionMaterialization{Message: "直连结果仍缺少已校验素材：" + ref.ID}, nil
+			if required {
+				return EditorSessionMaterialization{Message: "直连结果仍缺少已校验录屏素材：" + ref.ID}, nil
+			}
+			optionalMissing++
+			continue
 		}
 		path := filepath.Join(s.runtime.ArtifactRoot, "desktop", "direct-downloads", safePathSegment(projectID), safePathSegment(run.CloudJobID), safePathSegment(asset.FileName))
 		if !pathWithinRoot(path, filepath.Join(s.runtime.ArtifactRoot, "desktop", "direct-downloads")) {
 			return EditorSessionMaterialization{Message: "直连素材路径不在 App 管理目录内。"}, nil
 		}
 		if size, valid := verifiedDownload(path, asset.SHA256, asset.SizeBytes); !valid || size != asset.SizeBytes {
-			return EditorSessionMaterialization{Message: "直连素材 checksum 校验状态无效：" + ref.ID}, nil
+			if required {
+				return EditorSessionMaterialization{Message: "直连录屏素材 checksum 校验状态无效：" + ref.ID}, nil
+			}
+			optionalMissing++
+			continue
+		}
+		if required {
+			requiredRecordingFound = true
 		}
 		ref.URI = path
 		if ref.Metadata == nil {
@@ -178,6 +187,9 @@ func (s *Service) GetDirectEditorMaterialization(ctx context.Context, projectID 
 			*result.StageEventLogRef = ref
 		}
 	}
+	if !requiredRecordingFound {
+		return EditorSessionMaterialization{Message: "直连结果尚未提供已校验的必需录屏素材。"}, nil
+	}
 	request, err := s.localEditorHandoffRequest(result)
 	if err != nil {
 		return EditorSessionMaterialization{Message: "直连结果已下载，但编辑器交接尚不可用：" + err.Error()}, nil
@@ -189,6 +201,9 @@ func (s *Service) GetDirectEditorMaterialization(ctx context.Context, projectID 
 	message := "直连 Browser Agent 素材已校验并登记，可进入本地编辑器。"
 	if !created {
 		message = "直连 Browser Agent 素材已存在，已复用原编辑会话。"
+	}
+	if optionalMissing > 0 {
+		message += fmt.Sprintf(" %d 个可选诊断素材稍后可继续下载，不阻塞编辑。", optionalMissing)
 	}
 	return EditorSessionMaterialization{Ready: true, Created: created, SessionID: session.SessionID, Message: message}, nil
 }

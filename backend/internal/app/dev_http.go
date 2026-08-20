@@ -203,6 +203,22 @@ func (s *DevHTTPServer) handleFinalFilmJobRoute(w http.ResponseWriter, r *http.R
 	case r.Method == http.MethodGet && suffix == "/events":
 		events, err := s.service.ListFinalFilmEvents(r.Context(), jobID)
 		writeBridgeValue(w, events, err)
+	case r.Method == http.MethodGet && suffix == "/final-media":
+		path, err := s.service.FinalFilmOutputMediaPath(r.Context(), jobID)
+		if err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		http.ServeFile(w, r, path)
+	case r.Method == http.MethodGet && suffix == "/review-package":
+		path, err := s.service.FinalFilmReviewPackagePath(r.Context(), jobID)
+		if err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="final-film-review-package.zip"`)
+		http.ServeFile(w, r, path)
 	case r.Method == http.MethodGet && strings.HasPrefix(suffix, "/media/"):
 		candidateID := strings.TrimSpace(strings.TrimPrefix(suffix, "/media/"))
 		if candidateID == "" || strings.ContainsAny(candidateID, `/\\`) || strings.Contains(candidateID, "..") {
@@ -218,6 +234,22 @@ func (s *DevHTTPServer) handleFinalFilmJobRoute(w http.ResponseWriter, r *http.R
 		http.ServeFile(w, r, path)
 	case r.Method == http.MethodPost && suffix == "/render":
 		job, err := s.service.RunFinalFilmBaseline(r.Context(), jobID)
+		writeBridgeValue(w, job, err)
+	case r.Method == http.MethodPost && suffix == "/run":
+		var request FinalFilmRunRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		job, err := s.service.RunFinalFilmAutomation(r.Context(), jobID, request)
+		writeBridgeValue(w, job, err)
+	case r.Method == http.MethodPost && suffix == "/final-review":
+		var request FinalFilmFinalReviewRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		job, err := s.service.ReviewFinalFilmOutput(r.Context(), jobID, request)
 		writeBridgeValue(w, job, err)
 	case r.Method == http.MethodPost && suffix == "/generation-approval":
 		var request FinalFilmGenerationDecisionRequest

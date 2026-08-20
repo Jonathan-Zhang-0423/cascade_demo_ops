@@ -179,14 +179,22 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	if err != nil {
 		return nil, err
 	}
+	directorSkillRoot := filepath.Join(runtime.DevRepoRoot, "skills", "final-film")
+	if runtime.Profile == config.ProfileDesktop {
+		directorSkillRoot = filepath.Join(runtime.ResourceRoot, "skills", "final-film")
+	}
+	if info, statErr := os.Stat(directorSkillRoot); statErr != nil || !info.IsDir() {
+		directorSkillRoot = ""
+	}
 	finalFilmService, err := finalfilm.NewService(finalfilm.ServiceOptions{
 		Store: finalfilm.NewFileStore(filepath.Join(runtime.DataRoot, "final_film_jobs")), Renderer: service.editorWorker,
-		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"), Providers: providerRegistry, Planner: newFinalFilmDirectorPlanner(llmRouter),
+		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"), Providers: providerRegistry, Planner: newFinalFilmDirectorPlanner(llmRouter), SkillRoot: directorSkillRoot,
 	})
 	if err != nil {
 		return nil, err
 	}
 	service.finalFilm = finalFilmService
+	service.finalFilm.ResumeRunnableAutomations()
 	// Production cloud intake receives only encrypted payload references. Local
 	// and test runtimes retain inline payloads solely for deterministic fixtures
 	// and never relax the production transport rule.
