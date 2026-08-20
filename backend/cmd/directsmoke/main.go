@@ -148,7 +148,7 @@ func normalizeServerControlledFixture(original []byte, pkg model.ClientExecution
 	pkg.SafetyReport.HumanApproval.ApprovedByInstallationID = installationID
 	pkg.SafetyReport.HumanApproval.ApprovalSchemaVersion = model.UserApprovalSchemaVersion
 	pkg.SafetyReport.HumanApproval.PlanDigestSHA256 = pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
-	subjectDigests, err := model.ComputeApprovalSubjectDigestsSHA256(pkg)
+	subjectDigests, err := model.ComputePackageApprovalComponentDigests(pkg)
 	if err != nil {
 		return nil, pkg, err
 	}
