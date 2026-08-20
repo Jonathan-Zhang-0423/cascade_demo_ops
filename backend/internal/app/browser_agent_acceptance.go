@@ -355,6 +355,15 @@ func protocolAcceptancePackage(fixturePath string, baseURL string) (model.Client
 	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
 		return model.ClientExecutionPackage{}, err
 	}
+	// Session entry must stay inside the approved route scope: the worker opens
+	// the session at the product URL before executing the first stage, so the
+	// declared product entry is the fixture's first approved route rather than
+	// the bare base origin (which the route policy would reject as "/").
+	if outline := pkg.ExecutableScriptBundle; outline != nil && outline.ScriptOutline != nil {
+		if routes := outline.ScriptOutline.AllowedExplorationScope.AllowedRoutes; len(routes) > 0 && strings.HasPrefix(routes[0], "/") {
+			pkg.ProjectContextSummary.ProductURL = baseURL + routes[0]
+		}
+	}
 	return pkg, nil
 }
 
