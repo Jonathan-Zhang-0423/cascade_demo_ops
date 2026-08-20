@@ -22,6 +22,9 @@ type Seedance20ProviderAdapterOptions struct {
 	PollInterval     time.Duration
 	MaxDownloadBytes int64
 	Now              func() time.Time
+	// Admission is used by Seedance 2.5 to enforce Server-owned account and
+	// endpoint task limits. Seedance 2.0 callers leave it nil.
+	Admission *Seedance25AdmissionGate
 }
 
 type Seedance25ProviderAdapterOptions = Seedance20ProviderAdapterOptions
@@ -125,6 +128,24 @@ func (a *Seedance20ProviderAdapter) Execute(ctx context.Context, request Generat
 	if err != nil {
 		return fail("provider_request_compile_failed", err)
 	}
+	var admission *Seedance25AdmissionLease
+	if a.provider == GeneratedShotProviderSeedance25 && a.options.Admission != nil {
+		admission, err = a.options.Admission.Acquire(request.AdmissionScope, request.IdempotencyKey, compiled.Request)
+		if err != nil {
+			var admissionErr *Seedance25AdmissionError
+			if errors.As(err, &admissionErr) {
+				return fail(admissionErr.Code, err)
+			}
+			return fail("seedance_2_5_admission_failed", err)
+		}
+		if strings.TrimSpace(request.ResumeProviderTaskID) == "" && admission.ResumeProviderTaskID != "" {
+			request.ResumeProviderTaskID = admission.ResumeProviderTaskID
+		}
+	}
+	terminal := false
+	if admission != nil {
+		defer func() { admission.Finish(terminal) }()
+	}
 	if request.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, request.Timeout)
@@ -135,18 +156,26 @@ func (a *Seedance20ProviderAdapter) Execute(ctx context.Context, request Generat
 	if result.ProviderTaskID == "" {
 		created, createErr := a.options.Client.CreateContentGenerationTask(ctx, compiled.Request)
 		if createErr != nil {
+			if admission != nil {
+				admission.Abort()
+			}
 			return fail(firstNonEmpty(created.Trace.ErrorClass, "provider_create_failed"), createErr)
 		}
 		if created.Response == nil || strings.TrimSpace(created.Response.ID) == "" {
 			return fail("provider_task_id_missing", fmt.Errorf("%s create response is missing task ID", a.label))
 		}
 		result.ProviderTaskID = strings.TrimSpace(created.Response.ID)
+		if admission != nil {
+			admission.BindProviderTask(result.ProviderTaskID)
+		}
 		initial = created
 	}
 	videoURL, providerStatus, err := a.waitForOutput(ctx, result.ProviderTaskID, initial)
 	if err != nil {
+		terminal = seedanceTaskStatusTerminal(providerStatus)
 		return fail("provider_task_"+firstNonEmpty(providerStatus, "failed"), err)
 	}
+	terminal = true
 	candidate, review, err := a.persistCandidate(ctx, request, result.ProviderTaskID, videoURL)
 	if err != nil {
 		return fail("provider_output_processing_failed", err)
@@ -155,6 +184,15 @@ func (a *Seedance20ProviderAdapter) Execute(ctx context.Context, request Generat
 	result.StructuralReview = &review
 	result.Status = GeneratedShotCandidateReadyForReview
 	return result, nil
+}
+
+func seedanceTaskStatusTerminal(status string) bool {
+	switch normalizeSeedanceTaskStatus(status) {
+	case "succeeded", "failed", "cancelled", "expired":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *Seedance20ProviderAdapter) waitForOutput(ctx context.Context, taskID string, initial ContentGenerationTaskResult) (string, string, error) {

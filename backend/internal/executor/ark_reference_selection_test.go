@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
@@ -98,6 +99,38 @@ func TestMaterializeSeedanceReferenceWindowRejectsTamperedSelection(t *testing.T
 	selection.ReferenceWindowRangeMS = model.MillisecondRange{0, 6_000}
 	if _, err := MaterializeSeedanceReferenceWindow(context.Background(), &catalog, selection, t.TempDir(), media.FFmpegMiniMaxH3MediaNormalizer{}); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestBuildSeedanceReferencePublicationPlanBindsPassedStageAndKeepsModelOnly(t *testing.T) {
+	catalog := seedanceSelectionCatalog()
+	selection, err := SelectSeedanceReferenceWindow(&catalog, "build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := model.DirectorMaterialRef{ID: "recording_build_seedance_reference", URI: "D:/artifacts/reference.mp4", MimeType: "video/mp4", IncludeInDemo: false, SourceNodeID: "build", AssetRole: "seedance_stage_reference_video"}
+	plan, err := BuildSeedanceReferencePublicationPlan(&catalog, selection, ref, "pkg_01", "task_01", model.DefaultMediaDeliveryPreferences().TOSRetention, time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.SchemaVersion != SeedanceReferencePublicationPlanSchemaVersion || plan.Status != "ready_after_publication" || plan.PublicationStrategy != "private_tos_presigned_url" || len(plan.Items) != 1 {
+		t.Fatalf("unexpected publication plan: %+v", plan)
+	}
+	item := plan.Items[0]
+	if !item.Required || !item.NeedsPublication || item.NeedsConversion || item.Usage != "seedance_reference_video" || item.TaskIDs[0] != "task_01" || item.Ref.IncludeInDemo {
+		t.Fatalf("publication item violates model-only policy: %+v", item)
+	}
+}
+
+func TestBuildSeedanceReferencePublicationPlanRejectsDemoInclusion(t *testing.T) {
+	catalog := seedanceSelectionCatalog()
+	selection, err := SelectSeedanceReferenceWindow(&catalog, "build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := model.DirectorMaterialRef{ID: "reference", URI: "D:/artifacts/reference.mp4", MimeType: "video/mp4", IncludeInDemo: true}
+	if _, err := BuildSeedanceReferencePublicationPlan(&catalog, selection, ref, "pkg", "task", model.MediaTOSRetentionPreference{}, time.Now()); err == nil || !strings.Contains(err.Error(), "included in the delivered demo") {
+		t.Fatalf("expected model-only inclusion guard, got %v", err)
 	}
 }
 

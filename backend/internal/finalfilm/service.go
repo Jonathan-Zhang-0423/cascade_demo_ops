@@ -32,17 +32,30 @@ type ServiceOptions struct {
 	Providers       *media.GeneratedShotProviderRegistry
 	ProviderTimeout time.Duration
 	Planner         DirectorPlanner
+	// AssetPublisher is used only by the Seedance 2.5 reference bridge. It
+	// publishes a short, normalized derivative of already-passed recording
+	// evidence; it never publishes an execution package or browser state.
+	AssetPublisher      media.AssetPublisher
+	ReferenceNormalizer media.FFmpegMiniMaxH3MediaNormalizer
+	ReferenceRetention  model.MediaTOSRetentionPreference
+	// RequireTestNarration is an explicit, process-local acceptance option. It
+	// is false by default and must never be persisted in an App package.
+	RequireTestNarration bool
 }
 
 type Service struct {
-	store           Store
-	renderer        Renderer
-	outputRoot      string
-	now             func() time.Time
-	newID           func(string) (string, error)
-	providers       *media.GeneratedShotProviderRegistry
-	providerTimeout time.Duration
-	planner         DirectorPlanner
+	store                Store
+	renderer             Renderer
+	outputRoot           string
+	now                  func() time.Time
+	newID                func(string) (string, error)
+	providers            *media.GeneratedShotProviderRegistry
+	providerTimeout      time.Duration
+	planner              DirectorPlanner
+	assetPublisher       media.AssetPublisher
+	referenceNormalizer  media.FFmpegMiniMaxH3MediaNormalizer
+	referenceRetention   model.MediaTOSRetentionPreference
+	requireTestNarration bool
 }
 
 type CreateJobRequest struct {
@@ -74,7 +87,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if providerTimeout <= 0 {
 		providerTimeout = 20 * time.Minute
 	}
-	return &Service{store: options.Store, renderer: options.Renderer, outputRoot: filepath.Clean(options.OutputRoot), now: now, newID: newID, providers: options.Providers, providerTimeout: providerTimeout, planner: options.Planner}, nil
+	return &Service{store: options.Store, renderer: options.Renderer, outputRoot: filepath.Clean(options.OutputRoot), now: now, newID: newID, providers: options.Providers, providerTimeout: providerTimeout, planner: options.Planner, assetPublisher: options.AssetPublisher, referenceNormalizer: options.ReferenceNormalizer, referenceRetention: options.ReferenceRetention, requireTestNarration: options.RequireTestNarration}, nil
 }
 
 // CreateJob compiles and validates all immutable fact-track constraints before

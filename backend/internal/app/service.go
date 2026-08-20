@@ -18,6 +18,7 @@ import (
 	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/finalfilm"
 	"cascade-demoops/backend/internal/llm"
+	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/storage"
@@ -179,9 +180,13 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	if err != nil {
 		return nil, err
 	}
+	finalFilmPublisher := finalFilmAssetPublisher()
 	finalFilmService, err := finalfilm.NewService(finalfilm.ServiceOptions{
 		Store: finalfilm.NewFileStore(filepath.Join(runtime.DataRoot, "final_film_jobs")), Renderer: service.editorWorker,
 		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"), Providers: providerRegistry, Planner: newFinalFilmDirectorPlanner(llmRouter),
+		AssetPublisher: finalFilmPublisher, ReferenceNormalizer: media.FFmpegMiniMaxH3MediaNormalizer{FFmpegPath: runtime.FFmpegPath, FFprobePath: runtime.FFprobePath},
+		ReferenceRetention:   model.DefaultMediaDeliveryPreferences().TOSRetention,
+		RequireTestNarration: strings.TrimSpace(os.Getenv("CASCADE_ACCEPTANCE_REQUIRE_NARRATION")) == "1",
 	})
 	if err != nil {
 		return nil, err

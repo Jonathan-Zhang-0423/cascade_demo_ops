@@ -82,6 +82,19 @@ func TestReadAuditRejectsNonSeedanceOrNonNormalizedStatus(t *testing.T) {
 	}
 }
 
+func TestReadAuditAcceptsSeedance25CompletedCandidate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "seedance_audit.json")
+	content := `{"provider":"seedance-2.5","model":"doubao-seedance-2-5-260628","status":"candidate_downloaded_and_normalized","provider_status":"succeeded","task_id":"task-25","source_package_id":"pkg-25"}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	audit, err := readAudit(path)
+	if err != nil || audit.Provider != "seedance-2.5" {
+		t.Fatalf("Seedance 2.5 audit should be accepted: audit=%+v err=%v", audit, err)
+	}
+}
+
 func validCandidateAudit(t *testing.T) preflightAudit {
 	t.Helper()
 	dir := t.TempDir()

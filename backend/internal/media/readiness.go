@@ -56,8 +56,11 @@ func MediaReadinessFromEnv(getenv func(string) string, commandReady func(string)
 	for _, name := range tos {
 		r.add("tos_"+strings.ToLower(strings.TrimPrefix(name, "VOLC_TOS_"))+"_configured", strings.TrimSpace(getenv(name)) != "", "value is not recorded")
 	}
-	for _, name := range []string{"VOLC_TTS_APP_ID", "VOLC_TTS_ACCESS_KEY", "VOLC_TTS_RESOURCE_ID", "VOLC_TTS_SPEAKER"} {
+	for _, name := range []string{"VOLC_TTS_AGENT_PLAN_API_KEY", "VOLC_TTS_RESOURCE_ID", "VOLC_TTS_SPEAKER"} {
 		value := strings.TrimSpace(getenv(name))
+		if name == "VOLC_TTS_AGENT_PLAN_API_KEY" {
+			value = firstNonEmpty(value, getenv("VOLC_TTS_ACCESS_KEY"))
+		}
 		if name == "VOLC_TTS_RESOURCE_ID" {
 			value = firstNonEmpty(value, "seed-tts-2.0")
 		}
