@@ -251,38 +251,38 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		nonDestructive: true,
 	})
 
-	if wantsPlayableKeyboardVerification(intentText) {
-		playableName := firstNonEmpty(projectName, "游戏")
+	if wantsInteractiveSurfaceVerification(intentText) {
+		interactiveName := firstNonEmpty(projectName, "交互结果")
 		builder.addStage(stageSpec{
-			id:             "playable_preview",
+			id:             "interactive_surface_observe",
 			kind:           model.BusinessStageKindFinalObserve,
-			title:          "打开并核验" + playableName + "试玩界面",
-			objective:      "确认最终预览中真实显示" + playableName + "棋盘、得分和键盘操作说明。",
+			title:          "打开并核验" + interactiveName + "交互界面",
+			objective:      "确认最终结果中存在由运行时证据绑定的可交互区域。",
 			actionType:     string(model.GraphActionInspect),
-			actionLabel:    "核验可试玩预览",
-			successState:   playableName + "棋盘、得分和方向/旋转操作说明均可见。",
+			actionLabel:    "核验交互区域",
+			successState:   "交互区域及其运行时状态可见。",
 			routeState:     builder.finalRouteState(),
 			entryRoute:     builder.finalEntryRoute(),
 			expectedRoute:  builder.finalEntryRoute(),
 			durationMS:     5000,
-			keywords:       []string{"俄罗斯方块", "棋盘", "得分", "操作说明", "预览", "tetris", "board", "score", "controls", "preview"},
-			capture:        []string{playableName + "棋盘", "得分", "键盘操作说明"},
+			keywords:       []string{"交互", "可操作", "画布", "预览", "interactive", "canvas", "iframe", "controls", "preview"},
+			capture:        []string{"交互区域", "操作前运行时状态"},
 			nonDestructive: true,
 		})
 		builder.addStage(stageSpec{
-			id:            "verify_playable_controls",
+			id:            "interactive_surface_change",
 			kind:          model.BusinessStageKindFinalObserve,
-			title:         "用键盘实际试玩" + playableName,
-			objective:     "依次按左、右、下和旋转键，核验方块位置或形状确实发生画面变化。",
+			title:         "用键盘实际操作" + interactiveName,
+			objective:     "在已批准的交互区域内执行键盘操作，并核验画面状态确实发生变化。",
 			actionType:    string(model.GraphActionPress),
-			actionLabel:   "按方向键试玩",
-			successState:  "按键后棋盘画面发生变化，证明游戏可由键盘实际操作。",
+			actionLabel:   "执行键盘交互",
+			successState:  "操作前后交互区域的视觉状态发生可验证变化。",
 			routeState:    builder.finalRouteState(),
 			entryRoute:    builder.finalEntryRoute(),
 			expectedRoute: builder.finalEntryRoute(),
 			durationMS:    6000,
-			keywords:      []string{"按左", "按右", "按下", "旋转", "方向键", "键盘", "试玩", "位置", "形状", "ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp"},
-			capture:       []string{"按键前棋盘", "按键后棋盘变化"},
+			keywords:      []string{"方向键", "键盘", "交互", "操作", "keyboard", "interactive"},
+			capture:       []string{"操作前交互区域", "操作后视觉变化"},
 			parameters: map[string]string{
 				"keys":               "ArrowLeft,ArrowRight,ArrowDown,ArrowUp",
 				"inter_key_delay_ms": "350",
@@ -488,15 +488,15 @@ func completionWaitTimeoutMS(intentText string) int {
 	return minInt(best, maxBuildCompletionWaitMS)
 }
 
-func wantsPlayableKeyboardVerification(intentText string) bool {
+func wantsInteractiveSurfaceVerification(intentText string) bool {
 	text := normalizeIntentText(intentText)
 	keyboardRequested := containsAnyNormalized(text,
 		"键盘", "方向键", "按左", "按右", "按下", "旋转", "arrowleft", "arrowright", "arrowdown", "arrowup", "keyboard",
 	)
-	playableResultRequested := containsAnyNormalized(text,
-		"实际可玩", "实际试玩", "试玩", "可操作", "俄罗斯方块", "tetris", "棋盘", "方块位置", "方块形状", "playable",
+	interactiveResultRequested := containsAnyNormalized(text,
+		"实际可玩", "实际试玩", "试玩", "可操作", "最终预览", "交互", "画布", "interactive", "playable", "canvas",
 	)
-	return keyboardRequested && playableResultRequested
+	return keyboardRequested && interactiveResultRequested
 }
 
 func nearestKeywordDistance(normalizedIntent string, centerRune int, keywords []string) (int, bool) {
@@ -774,24 +774,18 @@ func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTa
 }
 
 func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.BusinessTargetCandidate {
-	preferredTestID := ""
-	switch spec.id {
-	case "final_observe":
-		preferredTestID = "build-result-card"
-	case "playable_preview", "verify_playable_controls":
-		preferredTestID = "preview-iframe"
-	default:
+	if spec.kind != model.BusinessStageKindFinalObserve {
 		return nil
 	}
 	if s.report == nil || len(s.report.CodeSnapshots) == 0 {
 		return nil
 	}
-	selector := "[data-testid='" + preferredTestID + "']"
 	out := []model.BusinessTargetCandidate{}
 	for _, snapshot := range s.report.CodeSnapshots {
 		for _, component := range snapshot.Components {
 			for _, hint := range component.SelectorHints {
-				if testIDFromSelector(hint) != preferredTestID {
+				selector := strings.TrimSpace(hint)
+				if selector == "" || !containsAnyNormalized(strings.Join([]string{component.Name, selector}, " "), spec.keywords...) {
 					continue
 				}
 				label := firstNonEmpty(component.Name, spec.actionLabel)
@@ -800,7 +794,7 @@ func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.B
 					Label:              label,
 					Kind:               spec.actionType,
 					Selector:           selector,
-					TestID:             preferredTestID,
+					TestID:             testIDFromSelector(selector),
 					Route:              spec.entryRoute,
 					ComponentRef:       firstNonEmpty(component.ID, component.Name),
 					SelectorScore:      96,
@@ -815,7 +809,8 @@ func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.B
 			}
 		}
 		for _, insight := range snapshot.Selectors {
-			if testIDFromSelector(insight.Value) != preferredTestID {
+			selector := strings.TrimSpace(insight.Value)
+			if selector == "" || !containsAnyNormalized(selector, spec.keywords...) {
 				continue
 			}
 			label := firstNonEmpty(spec.actionLabel, labelFromSelector(selector))
@@ -824,7 +819,7 @@ func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.B
 				Label:              label,
 				Kind:               spec.actionType,
 				Selector:           selector,
-				TestID:             preferredTestID,
+				TestID:             testIDFromSelector(selector),
 				Route:              spec.entryRoute,
 				SelectorScore:      int(maxFloat64(insight.StabilityScore*100, 92)),
 				Confidence:         maxFloat64(insight.Confidence, 0.76),
@@ -1049,13 +1044,8 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 	text := strings.Join([]string{label, kind, selector, value, componentRef}, " ")
 	labelText := normalizeIntentText(label)
 	selectorText := normalizeIntentText(strings.Join([]string{selector, componentRef}, " "))
-	if spec.kind == model.BusinessStageKindFinalObserve {
-		if spec.id == "final_observe" && containsAnyNormalized(text, "build-result-card", "build result", "build_complete", "all_complete", "构建完成", "全部步骤完成") {
-			return true
-		}
-		if spec.id == "playable_preview" && containsAnyNormalized(text, "preview-iframe", "preview panel", "playable", "tetris", "棋盘", "得分") {
-			return true
-		}
+	if spec.kind == model.BusinessStageKindFinalObserve && containsAnyNormalized(text, spec.keywords...) {
+		return true
 	}
 	wantAction := model.GraphActionType(spec.actionType)
 	gotAction := graphActionTypeFromKind(kind, selector)
@@ -1064,11 +1054,7 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 	}
 	switch spec.id {
 	case "new_project_entry":
-		if containsAnyNormalized(selectorText, "button-create-project", "create-project-button") && !containsAnyNormalized(selectorText, "button-new-project", "new-project-button") {
-			return false
-		}
-		return containsAnyNormalized(labelText, "new project", "create project", "新建项目", "创建项目", "新增项目") ||
-			containsAnyNormalized(selectorText, "button-new-project", "new-project-button", "new-project-entry", "create-project-entry")
+		return containsAnyNormalized(labelText+" "+selectorText, "new project", "create project", "新建项目", "创建项目", "新增项目")
 	case "project_name_input":
 		return containsAnyNormalized(text, "project name", "project-name", "project idea", "project-idea", "project prompt", "project-prompt", "项目名称", "项目名", "项目需求", "需求描述", "idea", "prompt", spec.inputValue)
 	case "select_build_mode":
@@ -1077,8 +1063,7 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 		if containsAnyNormalized(labelText+" "+selectorText, "build mode", "build-mode", "builder mode", "mode-plan", "plan-mode", "构建模式", "规划模式", "计划模式") {
 			return false
 		}
-		return containsAnyNormalized(labelText, "build", "generate", "run", "start", "构建", "生成", "启动", "开始") ||
-			containsAnyNormalized(selectorText, "button-create-project", "create-project-button", "start-build", "run-build", "generate-app")
+		return containsAnyNormalized(labelText+" "+selectorText, "build", "generate", "run", "start", "构建", "生成", "启动", "开始")
 	}
 	if containsAnyNormalized(text, spec.keywords...) {
 		return true
@@ -1227,7 +1212,7 @@ func businessRouteHints(project *model.ProjectContext, productMap *model.Product
 		firstExistingRouteTemplate([]string{"/workspace/projects/new", "/projects/new", "/project/new", "/app/projects/new", "/app"}, intelligence, firstNonEmpty(workspace, "/")),
 	)
 	projectDetail := firstNonEmpty(
-		dynamicProjectRouteTemplate(intelligence, "/project/:id"),
+		dynamicProjectRouteTemplate(intelligence, ""),
 		semanticArchitectureRouteTemplate(intelligence, []string{"project", "detail", "workspace", "项目", "详情"}, true, true),
 	)
 	buildRunning := firstNonEmpty(

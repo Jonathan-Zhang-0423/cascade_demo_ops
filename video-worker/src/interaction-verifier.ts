@@ -183,10 +183,12 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
     }
     const safeTransitions = await applySafeStateTransitions(page, request, timeout);
     diagnostics.safe_state_transitions = safeTransitions;
-    const discoveredTransition = await applyDiscoveredNewProjectTransition(page, request.intent_goals || [], request, timeout);
+    const discoveredTransition = safeTransitions.some((value) => value.startsWith("applied:") && !/(login|auth|session)/i.test(value))
+      ? ""
+      : await applyDiscoveredGoalTransition(page, request.intent_goals || [], request, timeout);
     if (discoveredTransition) safeTransitions.push(discoveredTransition);
-    const projectInputTransition = await applyDiscoveredProjectInput(page, request.intent_goals || [], request, timeout);
-    if (projectInputTransition) safeTransitions.push(projectInputTransition);
+    const goalInputTransition = await applyDiscoveredGoalInput(page, request.intent_goals || [], request, timeout);
+    if (goalInputTransition) safeTransitions.push(goalInputTransition);
     if (safeTransitions.some((value) => value.startsWith("applied:"))) {
       currentURL = page.url();
       pageTitle = await page.title().catch(() => "");
@@ -289,31 +291,14 @@ async function applySafeStateTransitions(page: any, request: VerifyInteractionRe
   return transitions;
 }
 
-async function applyDiscoveredNewProjectTransition(
+async function applyDiscoveredGoalTransition(
   page: any,
   goals: InteractionGoal[],
   request: VerifyInteractionRequest,
   timeout: number,
 ): Promise<string> {
-  const explicitlyRequested = goals.some((goal) => {
-    if (!goal.required || !goal.business || normalizeAction(goal.kind) !== "click") return false;
-    const semantic = normalizeSelectorText(`${goal.label || ""} ${(goal.keywords || []).join(" ")}`);
-    return /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
-  });
-  if (!explicitlyRequested || isURLForbiddenByScope(page.url(), request)) return "";
-
-  const creationInputVisible = await page.locator("input, textarea").evaluateAll((elements: any[]) => elements.some((element) => {
-    const html = element as any;
-    const rect = html.getBoundingClientRect();
-    const style = (globalThis as any).getComputedStyle(html);
-    const semantic = String([
-      element.getAttribute("data-testid"), element.getAttribute("data-test"), element.getAttribute("data-cy"),
-      element.getAttribute("name"), element.getAttribute("aria-label"), element.getAttribute("placeholder"),
-    ].filter(Boolean).join(" ")).toLowerCase();
-    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" &&
-      /(project[-_ ]?(idea|name|prompt)|(idea|name|prompt)[-_ ]?project|项目.{0,4}(需求|名称|描述))/.test(semantic);
-  })).catch(() => false);
-  if (creationInputVisible) return "already_visible:new_project_creation";
+  const goal = goals.find((candidate) => candidate.required && candidate.business && normalizeAction(candidate.kind) === "click");
+  if (!goal || isURLForbiddenByScope(page.url(), request)) return "";
 
   const controls = await page.locator("button, [role='button']").evaluateAll((elements: any[]) => elements.slice(0, 120).map((element) => {
     const html = element as any;
@@ -337,33 +322,29 @@ async function applyDiscoveredNewProjectTransition(
       if (control.testid) selector = `[data-testid="${escapeCSSString(control.testid)}"]`;
       else if (control.aria) selector = `[aria-label="${escapeCSSString(control.aria)}"]`;
       else if (control.id && /^[A-Za-z][\w-]*$/.test(control.id)) selector = `#${control.id}`;
-      const requested = /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
-      const staleEntity = /(card-project-|text-project-name-|emoji-project-|project-menu-|project-list|dashboard-page)/i.test(semantic);
-      const score = (control.testid ? 100 : control.aria ? 70 : control.id ? 50 : 0) + (/button-new-project|new-project-button|create-project-button/i.test(semantic) ? 80 : 0);
-      return { selector, semantic, requested, staleEntity, score };
+      const score = businessControlScore(semantic, selector, [goal], "click") + (control.testid ? 100 : control.aria ? 70 : control.id ? 50 : 0);
+      return { selector, semantic, score };
     })
-    .filter((candidate: any) => candidate.selector && candidate.requested && !candidate.staleEntity && !looksLikeDestructiveControl(candidate.semantic) && !looksLikeControlPlaneSignal(candidate.semantic))
+    .filter((candidate: any) => candidate.selector && candidate.score > 0 && !looksLikeDestructiveControl(candidate.semantic) && !looksLikeControlPlaneSignal(candidate.semantic))
     .sort((left: any, right: any) => right.score - left.score);
   if (candidates.length === 0 || (candidates.length > 1 && candidates[0].score === candidates[1].score)) return "";
 
   const clicked = await page.locator(candidates[0].selector).first().click({ timeout: Math.min(timeout, 4000) }).then(() => true).catch(() => false);
-  if (!clicked) return "discovered_failed:new_project_entry";
+  if (!clicked) return `discovered_failed:${goal.id || "business_transition"}`;
   await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
-  if (isURLForbiddenByScope(page.url(), request)) return "discovered_result_scope_rejected:new_project_entry";
-  return "applied:discovered_new_project_entry";
+  if (isURLForbiddenByScope(page.url(), request)) return `discovered_result_scope_rejected:${goal.id || "business_transition"}`;
+  return `applied:discovered_${goal.id || "business_transition"}`;
 }
 
-async function applyDiscoveredProjectInput(
+async function applyDiscoveredGoalInput(
   page: any,
   goals: InteractionGoal[],
   request: VerifyInteractionRequest,
   timeout: number,
 ): Promise<string> {
   const goal = goals.find((candidate) => {
-    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
     return candidate.required && candidate.business && normalizeAction(candidate.kind) === "fill" &&
       typeof candidate.input_value === "string" && candidate.input_value.trim().length > 0 && candidate.input_value.length <= 512 &&
-      /(项目需求|项目名称|project idea|project prompt|project name|input-project-idea)/i.test(semantic) &&
       !/(password|passwd|secret|token|api key|密码|口令|密钥|令牌)/i.test(candidate.input_value);
   });
   if (!goal || isURLForbiddenByScope(page.url(), request)) return "";
@@ -385,22 +366,22 @@ async function applyDiscoveredProjectInput(
       semantic,
       eligible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" &&
         !html.disabled && !html.readOnly && !["password", "hidden", "file"].includes(String(html.type || "").toLowerCase()),
-      score: (testid ? 100 : 40) + (/(project[-_ ]?(idea|name|prompt)|(idea|name|prompt)[-_ ]?project|项目.{0,4}(需求|名称|描述))/.test(semantic) ? 100 : 0),
+      score: 0,
     };
   })).catch(() => []);
   const resolvedControls = controls.map((control: any) => ({
     ...control,
     selector: control.testid ? `[data-testid="${escapeCSSString(control.testid)}"]` : control.name ? `${control.tag}[name="${escapeCSSString(control.name)}"]` : "",
-  }));
-  const candidates = resolvedControls.filter((control: any) => control.eligible && control.selector && control.score >= 140).sort((left: any, right: any) => right.score - left.score);
+  })).map((control: any) => ({ ...control, score: businessControlScore(control.semantic, control.selector, [goal], "fill") + (control.testid ? 100 : 40) }));
+  const candidates = resolvedControls.filter((control: any) => control.eligible && control.selector && control.score > 40).sort((left: any, right: any) => right.score - left.score);
   if (candidates.length === 0) {
-    return "discovered_unavailable:project_creation_input";
+    return `discovered_unavailable:${goal.id || "business_input"}`;
   }
-  if (candidates.length > 1 && candidates[0].score === candidates[1].score) return "discovered_ambiguous:project_creation_input";
-  const filled = await page.locator(candidates[0].selector).first().fill(goal.input_value!.trim(), { timeout: Math.min(timeout, 4000) }).then(() => true).catch(() => false);
-  if (!filled) return "discovered_failed:project_creation_input";
+  if (candidates.length > 1 && candidates[0].score === candidates[1].score) return `discovered_ambiguous:${goal.id || "business_input"}`;
+  const filled = await page.locator(candidates[0].selector).first().fill(goal.input_value!, { timeout: Math.min(timeout, 4000) }).then(() => true).catch(() => false);
+  if (!filled) return `discovered_failed:${goal.id || "business_input"}`;
   await page.waitForTimeout(250);
-  return "applied:discovered_project_creation_input";
+  return `applied:discovered_${goal.id || "business_input"}`;
 }
 
 async function discoverBusinessActions(
@@ -487,11 +468,11 @@ async function discoverBusinessActions(
     }
     return result;
   });
-  const resultStates = await discoverProjectCreationResultStates(page, goals, pageURL, pageTitle, scanID, sourceDigest, now);
+  const resultStates = await discoverObservedResultStates(page, goals, pageURL, pageTitle, scanID, sourceDigest, now);
   return [...actions, ...resultStates];
 }
 
-async function discoverProjectCreationResultStates(
+async function discoverObservedResultStates(
   page: any,
   goals: InteractionGoal[],
   pageURL: string,
@@ -500,13 +481,9 @@ async function discoverProjectCreationResultStates(
   sourceDigest: string,
   observedAt: string,
 ): Promise<VerifiedInteractionCandidate[]> {
-  const goal = goals.find((candidate) => {
-    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
-    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "click" &&
-      /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
-  });
-  if (!goal) return [];
-  const states = await page.locator("dialog, [role='dialog'], [data-testid*='dialog' i], [data-testid*='modal' i]").evaluateAll((elements: any[]) => elements.slice(0, 40).map((element) => {
+  const eligibleGoals = goals.filter((candidate) => candidate.required && candidate.business && normalizeAction(candidate.kind) === "click");
+  if (eligibleGoals.length === 0) return [];
+  const states = await page.locator("dialog, [role='dialog'], [role='region'][aria-label], [data-testid*='dialog' i], [data-testid*='modal' i]").evaluateAll((elements: any[]) => elements.slice(0, 40).map((element) => {
     const html = element as any;
     const rect = html.getBoundingClientRect();
     const style = (globalThis as any).getComputedStyle(html);
@@ -521,14 +498,16 @@ async function discoverProjectCreationResultStates(
   })).catch(() => []);
   return states.flatMap((state: any, index: number) => {
     const semantic = normalizeSelectorText(`${state.text} ${state.testid} ${state.aria} ${state.id}`);
-    if (!state.visible || !/(new[-_ ]?project|create[-_ ]?project|新建项目|创建项目|今天你想做什么)/i.test(semantic)) return [];
+    if (!state.visible || !semantic) return [];
+    const goal = bestGoalForControl(semantic, "", eligibleGoals, "click") || (eligibleGoals.length === 1 && state.role === "dialog" ? eligibleGoals[0] : undefined);
+    if (!goal) return [];
     const selector = state.testid ? `[data-testid="${escapeCSSString(state.testid)}"]` : state.aria ? `[aria-label="${escapeCSSString(state.aria)}"]` : state.id && /^[A-Za-z][\w-]*$/.test(state.id) ? `#${state.id}` : "";
     if (!selector) return [];
     const id = `browser_state_${index + 1}_${hashText(`${selector}|${state.text}`)}`;
     return [{
       id,
       intent_goal_id: goal.id,
-      label: state.text || state.aria || "New project dialog",
+      label: state.aria || state.text || "Observed result surface",
       kind: "inspect",
       selector,
       url: pageURL,
@@ -544,11 +523,11 @@ async function discoverProjectCreationResultStates(
       source_kind: "page_scan" as const,
       source_digest: sourceDigest,
       observed_role: state.role || "dialog",
-      observed_accessible_name: state.text || state.aria || "New project dialog",
+      observed_accessible_name: state.aria || state.text || "Observed result surface",
       observed_url: pageURL,
       observed_route_template: new URL(pageURL).pathname,
       observed_page_role: "product",
-      observed_form_role: "generic",
+      observed_form_role: state.role || "generic",
       evidence_digest_sha256: sourceDigest,
       observed_at: observedAt,
     }];

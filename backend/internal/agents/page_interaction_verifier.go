@@ -240,9 +240,8 @@ func verifierSafeStateTransitions(project *model.ProjectContext, intelligence *m
 		return nil
 	}
 	for _, stage := range intelligence.BusinessStagePlan.Stages {
-		stageID := strings.TrimPrefix(stage.ID, "business_stage_")
 		semanticText := strings.Join([]string{stage.Title, stage.Objective, stage.Action.Label, stage.Action.SuccessState}, " ")
-		if stageID != "new_project_entry" || stage.Kind != model.BusinessStageKindBusinessAction ||
+		if stage.Kind != model.BusinessStageKindBusinessAction ||
 			model.GraphActionType(stage.Action.Type) != model.GraphActionClick || !stage.Action.NonDestructive ||
 			containsAnyNormalized(semanticText, "delete", "remove", "destroy", "payment", "pay", "billing", "purchase", "refund", "permission", "role", "api key", "secret", "token", "删除", "移除", "销毁", "支付", "购买", "退款", "账单", "权限", "角色", "密钥", "令牌") {
 			continue
@@ -250,7 +249,7 @@ func verifierSafeStateTransitions(project *model.ProjectContext, intelligence *m
 		bestIndex := -1
 		for index, target := range stage.Targets {
 			targetURL := firstNonEmpty(target.URL, stage.EntryRoute, project.ProductURL)
-			if strings.TrimSpace(target.Selector) == "" || !isExplicitNewProjectEntryCandidate(target) ||
+			if strings.TrimSpace(target.Selector) == "" || !selectorUsableForBusinessAction(target.Selector) ||
 				!isURLAllowedByRunScope(intelligence.RunIntentScope, targetURL) ||
 				isControlPlaneSignal(intelligence.RunIntentScope, targetURL, target.Label, target.Selector) {
 				continue
@@ -581,7 +580,7 @@ var intentProjectNamePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?:项目名称|项目名)\s*([^，。；;,\n\s（(]{1,48})`),
 	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?(?:名为|名称为|项目名为)\s*[“”"'‘’]*([^“”"'‘’，。；;,\n]{1,48})[“”"'‘’]*(?:的)?项目`),
 	// Chinese requests commonly put the desired name before “项目”, for
-	// example “创建俄罗斯方块项目”. Match that form before the generic
+	// example a user-provided entity name. Match that form before the generic
 	// “创建项目 <token>” form so the following operation (“启动 Agent”) is
 	// never mistaken for the project name.
 	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?([^，。；;,\n\s（）()]{1,32})项目`),

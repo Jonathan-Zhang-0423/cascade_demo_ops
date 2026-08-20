@@ -341,7 +341,7 @@ func devVisibleRealProductTestPackage(fixturePath string, targetURL string) (mod
 			Action:     model.BrowserAgentInteraction{Kind: model.GraphActionClick, Target: model.ActionTarget{TestID: "button-new-project"}, NonDestructive: true, WaitConditions: []string{"wait_after_entry_at_least_250ms"}, SelectorPolicy: "prefer_testid"},
 			Target:     model.BrowserAgentTargetContract{SemanticID: "target_new_project", Purpose: "新建项目按钮", AllowedRoles: []string{"button"}, ComponentRef: "component:new-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
 			Component:  model.BrowserAgentComponentTarget{ComponentRef: "component:new-project", Role: "button", TestID: "button-new-project", EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 1},
-			Validation: model.ValidationSpec{ID: "validation_new_project_dialog", Kind: "element_visible", Target: model.ActionTarget{TestID: "dialog-new-project"}, Required: true, EvidenceRefs: []model.EvidenceRef{evidence}},
+			Validation: model.ValidationSpec{ID: "validation_new_project_dialog", Kind: "element_visible", Target: model.ActionTarget{Role: "dialog", Label: "新建项目"}, Required: true, EvidenceRefs: []model.EvidenceRef{evidence}},
 		},
 		{
 			NodeID: "node_fill_project_idea", StageID: "stage_fill_project_idea", Title: "输入项目需求", Objective: "项目需求已填入批准内容", Intent: "只在新建项目对话框中填入已批准内容，不读取或修改任何敏感字段。", Route: "/app", Success: "需求内容为贪吃蛇游戏", Kind: model.BusinessStageKindBusinessInput, RouteState: model.BusinessRouteStateCreationFlow,

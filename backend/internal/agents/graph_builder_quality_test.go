@@ -319,8 +319,8 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 		validatedNode("business_stage_start_build", model.BusinessStageKindBusinessSubmit),
 		validatedNode("business_stage_observe_progress", model.BusinessStageKindObserveProgress),
 		validatedNode("business_stage_final_observe", model.BusinessStageKindFinalObserve),
-		validatedNode("business_stage_playable_preview", model.BusinessStageKindFinalObserve),
-		validatedNode("business_stage_verify_playable_controls", model.BusinessStageKindFinalObserve),
+		validatedNode("business_stage_interactive_surface_observe", model.BusinessStageKindFinalObserve),
+		validatedNode("business_stage_interactive_surface_change", model.BusinessStageKindFinalObserve),
 		{ID: "business_stage_unverified_submit", Metadata: map[string]any{"business_stage_kind": string(model.BusinessStageKindBusinessSubmit)}, EvidenceRefs: evidence},
 	}}
 	project := &model.ProjectContext{Inputs: &model.ProjectInputBundle{Requirements: []model.DemoRequirement{
@@ -340,9 +340,9 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 	want := map[string]string{
 		"login": "business_stage_session_setup", "create": "business_stage_new_project_entry",
 		"start": "business_stage_start_build", "result": "business_stage_final_observe",
-		"complete": "business_stage_final_observe", "playable": "business_stage_playable_preview",
+		"complete": "business_stage_final_observe", "playable": "business_stage_interactive_surface_observe",
 		"poll_complete": "business_stage_final_observe",
-		"keyboard":      "business_stage_verify_playable_controls",
+		"keyboard":      "business_stage_interactive_surface_change",
 	}
 	for _, requirement := range graph.Requirements {
 		if requirement.Kind != "must_show" {

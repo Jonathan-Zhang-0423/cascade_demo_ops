@@ -1326,9 +1326,6 @@ func routeMatchScore(path string, name string, semanticText string, keywords []s
 	if routeTemplateDynamic(path) && strings.Contains(path, "project") && (projectBuild || (projectCreation && !newProjectEntry)) {
 		score += 10
 	}
-	if (path == "/project/:id" || path == "/project/:project_id") && (projectBuild || projectCreation) {
-		score += 8
-	}
 	if routeLooksLikeSourcePath(path) {
 		score -= 100
 	}
@@ -1347,7 +1344,7 @@ func routeFallbackForStage(semanticText string, previousRoute string, intelligen
 		return previousRoute
 	}
 	if routeIsProjectBuildStage(normalized) {
-		return projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, firstNonEmpty(previousRoute, "/project/:id")))
+		return projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, previousRoute))
 	}
 	if routeIsBuildModeSelectionStage(normalized) {
 		return appWorkspaceRouteTemplate(intelligence)
@@ -1367,14 +1364,14 @@ func expectedRouteAfterActionForStage(semanticText string, entryRoute string, ta
 	case routeIsUserLoginStage(normalized):
 		return firstExistingRouteTemplate([]string{"/app", "/dashboard", "/workspace"}, intelligence, "/app")
 	case routeIsProjectBuildStage(normalized):
-		return projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, firstNonEmpty(targetRoute, entryRoute, "/project/:id")))
+		return projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, firstNonEmpty(targetRoute, entryRoute)))
 	case routeIsBuildModeSelectionStage(normalized):
 		return appWorkspaceRouteTemplate(intelligence)
 	case routeIsProjectCreationStage(normalized):
 		if routeCreationStageShouldRemainInWorkspace(normalized) {
 			return appWorkspaceRouteTemplate(intelligence)
 		}
-		return dynamicProjectRouteTemplate(intelligence, "/project/:id")
+		return dynamicProjectRouteTemplate(intelligence, firstNonEmpty(targetRoute, entryRoute))
 	}
 	if routeTemplateDynamic(targetRoute) {
 		return targetRoute
@@ -1445,37 +1442,36 @@ func appWorkspaceRouteTemplate(intelligence *model.ProjectIntelligencePack) stri
 }
 
 func dynamicProjectRouteTemplate(intelligence *model.ProjectIntelligencePack, fallback string) string {
-	return firstExistingDynamicRouteTemplate([]string{
-		"/project/:id",
-		"/project/:project_id",
-		"/projects/:id",
-		"/projects/:project_id",
-		"/workspace/projects/:id",
-		"/workspace/projects/:project_id",
-		"/app/projects/:id",
-		"/app/projects/:project_id",
-	}, intelligence, fallback)
+	return bestObservedDynamicRouteTemplate(intelligence, fallback, []string{"project", "workspace", "detail", "项目", "详情"})
 }
 
 func projectBuildRouteTemplate(intelligence *model.ProjectIntelligencePack, fallback string) string {
-	return firstExistingDynamicRouteTemplate([]string{
-		"/project/:id/build",
-		"/project/:project_id/build",
-		"/projects/:id/build",
-		"/projects/:project_id/build",
-		"/workspace/projects/:id/build",
-		"/workspace/projects/:project_id/build",
-		"/app/projects/:id/build",
-		"/app/projects/:project_id/build",
-		"/project/:id",
-		"/project/:project_id",
-		"/projects/:id",
-		"/projects/:project_id",
-		"/workspace/projects/:id",
-		"/workspace/projects/:project_id",
-		"/app/projects/:id",
-		"/app/projects/:project_id",
-	}, intelligence, fallback)
+	return bestObservedDynamicRouteTemplate(intelligence, fallback, []string{"build", "progress", "log", "project", "构建", "进度", "日志"})
+}
+
+// bestObservedDynamicRouteTemplate selects only from the route tree produced
+// by project understanding. It deliberately has no remembered product route
+// shapes: two sites with different nesting or parameter names receive the
+// same semantic scoring behavior.
+func bestObservedDynamicRouteTemplate(intelligence *model.ProjectIntelligencePack, fallback string, keywords []string) string {
+	if intelligence == nil || intelligence.Architecture == nil {
+		return fallback
+	}
+	bestRoute, bestScore := "", 0
+	for _, item := range intelligence.Architecture.RouteTree {
+		candidate := normalizeRouteTemplate(item.Path)
+		if !routeCandidateAllowed(candidate) || !routeTemplateDynamic(candidate) {
+			continue
+		}
+		score := semanticArchitectureRouteScore(candidate, item, keywords)
+		if score > bestScore {
+			bestRoute, bestScore = candidate, score
+		}
+	}
+	if bestRoute != "" {
+		return bestRoute
+	}
+	return fallback
 }
 
 func routeExactInArchitecture(route string, intelligence *model.ProjectIntelligencePack) bool {
@@ -1569,12 +1565,12 @@ func routeTemplateForStage(route string, semanticText string, intelligence *mode
 	}
 	if routeIsProjectBuildStage(normalized) {
 		if strings.Contains(route, "project") {
-			return projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, "/project/:id"))
+			return projectBuildRouteTemplate(intelligence, dynamicProjectRouteTemplate(intelligence, route))
 		}
 		return route
 	}
 	if routeIsProjectCreationStage(normalized) && !routeIsNewProjectEntryStage(normalized) && strings.Contains(route, "project") {
-		return dynamicProjectRouteTemplate(intelligence, "/project/:id")
+		return dynamicProjectRouteTemplate(intelligence, route)
 	}
 	return route
 }
@@ -2575,33 +2571,7 @@ func interactionReplayPolicy(action model.GraphActionType) model.InteractionRepl
 // productArchetypeForSteps classifies observed interaction structure only. It
 // deliberately ignores hostname, paths, selectors, and brand copy.
 func productArchetypeForSteps(steps []model.ScriptStep) model.ProductArchetype {
-	counts := map[model.GraphActionType]int{}
-	progress, finalObserve := 0, 0
-	for _, step := range steps {
-		counts[step.Action.Type]++
-		switch step.StageKind {
-		case model.BusinessStageKindObserveProgress:
-			progress++
-		case model.BusinessStageKindFinalObserve:
-			finalObserve++
-		}
-	}
-	if counts[model.GraphActionPress] > 0 {
-		return model.ProductArchetypeInteractive
-	}
-	if progress > 0 && finalObserve > 0 && (counts[model.GraphActionClick] > 0 || counts[model.GraphActionAPICall] > 0) {
-		return model.ProductArchetypeAsyncBuilder
-	}
-	if counts[model.GraphActionFill]+counts[model.GraphActionSelect] >= 2 && counts[model.GraphActionClick] > 0 {
-		return model.ProductArchetypeCRUDForm
-	}
-	if counts[model.GraphActionClick] >= 2 && finalObserve > 0 {
-		return model.ProductArchetypeCanvasEditor
-	}
-	if len(steps) > 0 && counts[model.GraphActionInspect]+counts[model.GraphActionWait] >= (len(steps)+1)/2 {
-		return model.ProductArchetypeDashboard
-	}
-	return model.ProductArchetypeUnknown
+	return routeProductArchetype(steps)
 }
 
 func nodeVerifiedForBusinessAction(node *model.GraphNode) bool {

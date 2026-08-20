@@ -61,7 +61,7 @@ func TestDirectReunderstandingIssuesDeduplicateByStableIdentity(t *testing.T) {
 	}
 }
 
-func TestTerminalPlayableVerificationRepairGraphResumesExactBuiltProject(t *testing.T) {
+func TestTerminalInteractionRepairGraphResumesObservedRouteWithoutReplayingWrites(t *testing.T) {
 	const (
 		projectID  = "project_terminal_repair"
 		projectURL = "https://app.example.com/project/already-built"
@@ -78,12 +78,12 @@ func TestTerminalPlayableVerificationRepairGraphResumesExactBuiltProject(t *test
 		node("business_stage_session_setup", model.BusinessStageKindSessionSetup, model.GraphActionNavigate),
 		node("business_stage_new_project_entry", model.BusinessStageKindBusinessAction, model.GraphActionClick),
 		node("business_stage_final_observe", model.BusinessStageKindFinalObserve, model.GraphActionInspect),
-		node("business_stage_playable_preview", model.BusinessStageKindFinalObserve, model.GraphActionInspect),
-		node("business_stage_verify_playable_controls", model.BusinessStageKindFinalObserve, model.GraphActionPress),
+		node("business_stage_interactive_surface_observe", model.BusinessStageKindFinalObserve, model.GraphActionInspect),
+		node("business_stage_interactive_surface_change", model.BusinessStageKindFinalObserve, model.GraphActionPress),
 	}
 	state := &orchestrator.CascadeState{ProjectContext: &model.ProjectContext{ID: projectID, ProductURL: "https://app.example.com", ForbiddenPages: []string{"/admin"}}, WorkflowGraph: graph}
-	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{FailedNodeID: "business_stage_verify_playable_controls", CurrentURL: projectURL}}
-	repaired, eligible, err := terminalPlayableVerificationRepairGraph(state, result, time.Date(2026, 8, 19, 17, 0, 0, 0, time.UTC))
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{FailedNodeID: "business_stage_interactive_surface_change", CurrentURL: projectURL}}
+	repaired, eligible, err := terminalInteractionVerificationRepairGraph(state, result, time.Date(2026, 8, 19, 17, 0, 0, 0, time.UTC))
 	if err != nil || !eligible {
 		t.Fatalf("terminal repair was not created: eligible=%v err=%v", eligible, err)
 	}
@@ -98,21 +98,16 @@ func TestTerminalPlayableVerificationRepairGraphResumesExactBuiltProject(t *test
 		t.Fatalf("keyboard verification is not the terminal node: %+v", repaired.Nodes[3])
 	}
 	foreign := result
-	foreign.FailureDiagnostic = &model.ScriptFailureDiagnostic{FailedNodeID: "business_stage_verify_playable_controls", CurrentURL: "https://evil.example/project/already-built"}
-	if _, eligible, err := terminalPlayableVerificationRepairGraph(state, foreign, time.Now()); !eligible || err == nil {
+	foreign.FailureDiagnostic = &model.ScriptFailureDiagnostic{FailedNodeID: "business_stage_interactive_surface_change", CurrentURL: "https://evil.example/project/already-built"}
+	if _, eligible, err := terminalInteractionVerificationRepairGraph(state, foreign, time.Now()); !eligible || err == nil {
 		t.Fatalf("foreign failure URL was accepted: eligible=%v err=%v", eligible, err)
 	}
 	navigationFailure := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
 		FailedNodeID: "business_stage_final_observe", FailedStepOrder: 2, CurrentURL: "https://app.example.com/app",
 		Error: model.AgentError{Code: "browser_agent_observation_failed"},
 	}}
-	retried, eligible, err := terminalPlayableVerificationRepairGraph(&orchestrator.CascadeState{ProjectContext: state.ProjectContext, WorkflowGraph: repaired}, navigationFailure, time.Now())
-	if err != nil || !eligible {
-		t.Fatalf("terminal navigation failure was not converted to dashboard-card resume: eligible=%v err=%v", eligible, err)
-	}
-	resume = retried.Nodes[1]
-	if resume.ActionSpec.Type != model.GraphActionClick || resume.PageRef != "/app" || resume.ActionSpec.Target.TestID != "card-project-already-built" {
-		t.Fatalf("terminal navigation repair did not click the exact completed project card: %+v", resume)
+	if _, eligible, err := terminalInteractionVerificationRepairGraph(&orchestrator.CascadeState{ProjectContext: state.ProjectContext, WorkflowGraph: repaired}, navigationFailure, time.Now()); !eligible || err == nil {
+		t.Fatalf("a failed generic route restore must stop for re-understanding instead of synthesizing a site selector: eligible=%v err=%v", eligible, err)
 	}
 }
 

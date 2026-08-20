@@ -254,9 +254,43 @@ describe("interaction verifier safe state exploration", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.diagnostics?.safe_state_transitions).toContain("applied:discovered_new_project_entry");
+    expect(result.diagnostics?.safe_state_transitions).toContain("applied:discovered_new-project");
     expect(result.results.find((item) => item.selector === '[data-testid="input-project-idea"]')).toMatchObject({ status: "verified", kind: "fill", editable: true });
     expect(result.results.find((item) => item.selector === '[data-testid="button-create-project"]')).toMatchObject({ status: "verified", kind: "click" });
+  }, 30_000);
+
+  it("discovers a generic CRUD form from goal semantics without project selectors", async () => {
+    server = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Tasks</title>
+        <button data-testid="add-task" onclick="document.querySelector('#editor').hidden=false">Add task</button>
+        <section id="editor" role="dialog" aria-label="Task editor" hidden>
+          <input data-testid="task-title" aria-label="Task title">
+          <button data-testid="save-task">Save task</button>
+        </section>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fixture server did not bind");
+    const productURL = `http://127.0.0.1:${address.port}/tasks`;
+
+    const result = await verifyInteractions({
+      product_url: productURL,
+      allowed_domains: ["127.0.0.1"],
+      timeout_ms: 15_000,
+      intent_goals: [
+        { id: "add-task", label: "Add task", kind: "click", keywords: ["add", "task"], required: true, business: true },
+        { id: "task-title", label: "Task title", kind: "fill", keywords: ["task", "title"], required: true, business: true, input_value: "  Keep spacing  " },
+        { id: "save-task", label: "Save task", kind: "click", keywords: ["save", "task"], required: true, business: true },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.diagnostics?.safe_state_transitions).toContain("applied:discovered_add-task");
+    expect(result.diagnostics?.safe_state_transitions).toContain("applied:discovered_task-title");
+    expect(result.results.find((item) => item.selector === '[data-testid="task-title"]')).toMatchObject({ status: "verified", kind: "fill" });
+    expect(result.results.find((item) => /Task editor/.test(item.observed_accessible_name || ""))).toMatchObject({ status: "verified", kind: "inspect", observed_role: "dialog" });
   }, 30_000);
 
   it("continues from an applied login transition into an explicitly requested project-creation dialog", async () => {
@@ -297,8 +331,8 @@ describe("interaction verifier safe state exploration", () => {
 
     expect(result.ok).toBe(true);
     expect(result.diagnostics?.safe_state_transitions).toContain("applied:login");
-    expect(result.diagnostics?.safe_state_transitions).toContain("applied:discovered_new_project_entry");
-    expect(result.diagnostics?.safe_state_transitions, JSON.stringify(result.diagnostics?.safe_state_transitions)).toContain("applied:discovered_project_creation_input");
+    expect(result.diagnostics?.safe_state_transitions).toContain("applied:discovered_new-project");
+    expect(result.diagnostics?.safe_state_transitions, JSON.stringify(result.diagnostics?.safe_state_transitions)).toContain("applied:discovered_project-idea");
     for (const selector of ['[data-testid="input-project-idea"]', '[data-testid="button-mode-plan"]', '[data-testid="button-create-project"]']) {
       expect(result.results.some((item) => item.selector === selector && item.status === "verified")).toBe(true);
     }

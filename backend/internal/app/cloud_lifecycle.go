@@ -2856,6 +2856,17 @@ func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) 
 			if strings.TrimSpace(stage.ExpectedRouteAfterAction) != "" && strings.TrimSpace(stage.ExpectedRouteAfterAction) != strings.TrimSpace(stage.EntryRoute) {
 				hasPostSubmitTransition = true
 			}
+			if stage.InteractionContract != nil {
+				for _, observation := range stage.InteractionContract.ExpectedTransitions {
+					if observation.Required && (observation.Kind == "dom_changed" || observation.Kind == "aria_changed" || observation.Kind == "network_settled" || observation.Kind == "visual_region_changed" || observation.Kind == "frame_surface_changed" || observation.Kind == "page_changed" || observation.Kind == "state_changed") {
+						hasPostSubmitTransition = true
+						break
+					}
+				}
+			}
+			if stageHasVerifiedOutcomeTransition(bundle, stage) {
+				hasPostSubmitTransition = true
+			}
 		}
 		if stage.StageKind == model.BusinessStageKindObserveProgress {
 			if stage.Interaction.Kind == model.GraphActionClick || stage.Interaction.Kind == model.GraphActionFill || stage.Interaction.Kind == model.GraphActionSelect {
@@ -2895,6 +2906,27 @@ func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) 
 	return findings
 }
 
+func stageHasVerifiedOutcomeTransition(bundle *model.ExecutableRecordingScriptBundle, stage model.StageApprovalStage) bool {
+	if bundle == nil || bundle.PlanJSON == nil {
+		return false
+	}
+	for _, step := range bundle.PlanJSON.Steps {
+		if step.NodeID != stage.NodeID {
+			continue
+		}
+		for _, validation := range step.Validations {
+			if !validation.Required {
+				continue
+			}
+			switch validation.Kind {
+			case "url_matches", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "page_changed", "state_changed":
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func stageIsVerifiedKeyboardBusinessAction(bundle *model.ExecutableRecordingScriptBundle, stage model.StageApprovalStage) bool {
 	if bundle == nil || bundle.PlanJSON == nil || stage.Interaction.Kind != model.GraphActionPress || !stage.Interaction.NonDestructive || !model.ApprovedKeyboardActionParameters(stage.Interaction.Parameters) {
 		return false
@@ -2904,7 +2936,7 @@ func stageIsVerifiedKeyboardBusinessAction(bundle *model.ExecutableRecordingScri
 			continue
 		}
 		for _, validation := range step.Validations {
-			if validation.Required && validation.Kind == "page_changed" && validation.Expected == true {
+			if validation.Required && (validation.Kind == "page_changed" || validation.Kind == "frame_surface_changed" || validation.Kind == "visual_region_changed") && validation.Expected == true {
 				return true
 			}
 		}
@@ -2918,11 +2950,6 @@ func stageLooksLikeLoginOrCredential(stage model.StageApprovalStage) bool {
 		stage.NodeID,
 		stage.Title,
 		stage.Objective,
-		stage.BusinessIntent,
-		stage.TargetRoute,
-		stage.TargetRouteTemplate,
-		stage.EntryRoute,
-		stage.ExpectedRouteAfterAction,
 		stage.Interaction.Target.Label,
 		stage.Interaction.Target.Text,
 		stage.Interaction.Target.TestID,

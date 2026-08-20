@@ -4,14 +4,23 @@ import { extname, resolve } from "node:path";
 const roots = [
   resolve("backend", "internal", "model", "interaction_contract.go"),
 	resolve("backend", "internal", "model", "browser_agent_runtime.go"),
+	resolve("backend", "internal", "agents", "business_stage_planner.go"),
+	resolve("backend", "internal", "agents", "code_reader.go"),
+	resolve("backend", "internal", "agents", "graph_builder.go"),
+	resolve("backend", "internal", "agents", "page_interaction_verifier.go"),
 	resolve("backend", "internal", "agents", "script_packager.go"),
+	resolve("backend", "internal", "app", "direct_reunderstanding.go"),
 	resolve("backend", "internal", "app", "browser_agent_stage_plan.go"),
 	resolve("backend", "internal", "app", "browser_agent_event_log.go"),
   resolve("backend", "internal", "finalfilm"),
   resolve("video-worker", "src", "browser-agent-runtime.ts"),
+  resolve("video-worker", "src", "interaction-verifier.ts"),
   resolve("skills", "final-film"),
 ];
-const forbidden = ["cascadeai.cn", "tetris", "俄罗斯方块", "dialog-new-project", "preview-iframe", "card-project-"];
+const forbidden = [
+  "cascadeai.cn", "tetris", "俄罗斯方块", "dialog-new-project", "preview-iframe", "card-project-",
+  "build-result-card", "playable_preview", "verify_playable_controls", "/project/:id",
+];
 const files = [];
 for (const root of roots) collect(root, files);
 for (const file of files) {

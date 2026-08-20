@@ -138,9 +138,9 @@ func TestBusinessStagePlannerAddsBoundedKeyboardPlayabilityVerification(t *testi
 	var preview, keyboard *model.BusinessStage
 	for index := range plan.Stages {
 		switch plan.Stages[index].ID {
-		case "business_stage_playable_preview":
+		case "business_stage_interactive_surface_observe":
 			preview = &plan.Stages[index]
-		case "business_stage_verify_playable_controls":
+		case "business_stage_interactive_surface_change":
 			keyboard = &plan.Stages[index]
 		}
 	}
@@ -151,7 +151,7 @@ func TestBusinessStagePlannerAddsBoundedKeyboardPlayabilityVerification(t *testi
 		t.Fatalf("keyboard stage is not strictly bounded: %+v", keyboard)
 	}
 	node := graphNodeFromBusinessStage(project, *keyboard, project.ProductURL, "feature_playable")
-	if node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionPress || len(node.Validations) != 2 || node.Validations[0].Kind != "page_changed" || !node.Validations[0].Required || node.Validations[1].Kind != "url_matches" || !node.Validations[1].Required {
+	if node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionPress || len(node.Validations) != 2 || node.Validations[0].Kind != "frame_surface_changed" || !node.Validations[0].Required || node.Validations[1].Kind != "url_matches" || !node.Validations[1].Required {
 		t.Fatalf("keyboard graph node must require visual-change evidence: %+v", node)
 	}
 }
@@ -161,13 +161,13 @@ func TestFinalObserveAcceptsSourceBoundResultSelectorsBeforeActionHeuristics(t *
 		id: "final_observe", kind: model.BusinessStageKindFinalObserve,
 		actionType: string(model.GraphActionInspect), keywords: []string{"构建完成"},
 	}
-	if !businessActionMatchesStage(completion, "Agent build result", "click", "[data-testid='build-result-card']", "", "PlanComponents") {
+	if !businessActionMatchesStage(completion, "Agent 构建完成结果", "click", "[data-testid='build-result-card']", "", "PlanComponents") {
 		t.Fatal("source-bound build result selector was rejected because its heuristic action kind looked clickable")
 	}
 
 	preview := stageSpec{
-		id: "playable_preview", kind: model.BusinessStageKindFinalObserve,
-		actionType: string(model.GraphActionInspect), keywords: []string{"预览"},
+		id: "interactive_surface_observe", kind: model.BusinessStageKindFinalObserve,
+		actionType: string(model.GraphActionInspect), keywords: []string{"预览", "interactive", "preview"},
 	}
 	if !businessActionMatchesStage(preview, "Playable preview", "click", "[data-testid='preview-iframe']", "", "PreviewPanel") {
 		t.Fatal("source-bound playable preview selector was rejected because its heuristic action kind looked clickable")
@@ -182,8 +182,8 @@ func TestFinalObserveConsumesExactResultSelectorsFromCodeSnapshots(t *testing.T)
 		SourceDigestSHA256: "sha256:source-result-anchors",
 		CreatedAt:          time.Now().UTC(),
 		Components: []model.ComponentInsight{
-			{ID: "component_build_result", Name: "BuildResultCard", SelectorHints: []string{"[data-testid='build-result-card']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
-			{ID: "component_preview", Name: "PreviewPanel", SelectorHints: []string{"[data-testid='preview-iframe']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
+			{ID: "component_build_result", Name: "CompletedResultSurface", SelectorHints: []string{"[data-testid='result-surface']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
+			{ID: "component_preview", Name: "InteractiveSurface", SelectorHints: []string{"[data-testid='interactive-surface']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
 		},
 	}}}
 	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, report, nil, nil, nil)
@@ -191,9 +191,9 @@ func TestFinalObserveConsumesExactResultSelectorsFromCodeSnapshots(t *testing.T)
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"business_stage_final_observe":            "build-result-card",
-		"business_stage_playable_preview":         "preview-iframe",
-		"business_stage_verify_playable_controls": "preview-iframe",
+		"business_stage_final_observe":               "result-surface",
+		"business_stage_interactive_surface_observe": "interactive-surface",
+		"business_stage_interactive_surface_change":  "interactive-surface",
 	}
 	for _, stage := range plan.Stages {
 		testID, ok := want[stage.ID]
@@ -207,7 +207,7 @@ func TestFinalObserveConsumesExactResultSelectorsFromCodeSnapshots(t *testing.T)
 		if node.ActionSpec == nil || node.ActionSpec.Target.TestID != testID || len(node.Validations) == 0 || node.Validations[0].Target.TestID != testID {
 			t.Fatalf("stage %s dropped source result selector %s while compiling the graph: %+v", stage.ID, testID, node)
 		}
-		if stage.ID == "business_stage_verify_playable_controls" && (len(node.ActionSpec.Target.SelectorAlternatives) == 0 || !model.SelectorCandidateHasFormalProvenance(node.ActionSpec.Target.SelectorAlternatives[0])) {
+		if stage.ID == "business_stage_interactive_surface_change" && (len(node.ActionSpec.Target.SelectorAlternatives) == 0 || !model.SelectorCandidateHasFormalProvenance(node.ActionSpec.Target.SelectorAlternatives[0])) {
 			t.Fatalf("keyboard stage dropped formal preview selector provenance: %+v", node.ActionSpec.Target)
 		}
 		delete(want, stage.ID)
@@ -512,7 +512,7 @@ func TestNewProjectEntryPrefersStableButtonOverExistingProjectNamedNewProject(t 
 		},
 		Targets: []model.BusinessTargetCandidate{
 			formalPageScanBusinessTarget("card-project-rh1fgnvomr6qbe7n", "click", "button", "03 新建项目"),
-			formalPageScanBusinessTarget("text-project-name-rh1fgnvomr6qbe7n", "click", "button", "新建项目"),
+			formalPageScanBusinessTarget("text-project-name-rh1fgnvomr6qbe7n", "click", "button", "Existing project: 新建项目"),
 			formalPageScanBusinessTarget("button-new-project", "click", "button", "新建项目"),
 		},
 	}
@@ -531,7 +531,7 @@ func TestNewProjectResultRejectsExistingProjectNameAndUsesOpenedFormInput(t *tes
 			Type: string(model.GraphActionClick), Label: "点击新建项目入口", SuccessState: "新建项目表单可见",
 		},
 		Targets: []model.BusinessTargetCandidate{
-			formalPageScanBusinessTarget("text-project-name-rh1fgnvomr6qbe7n", "click", "button", "新建项目"),
+			formalPageScanBusinessTarget("text-project-name-rh1fgnvomr6qbe7n", "click", "button", "Existing project: 新建项目"),
 			formalPageScanBusinessTarget("button-new-project", "click", "button", "新建项目"),
 			formalPageScanBusinessTarget("input-project-idea", "fill", "textbox", "项目名称"),
 		},

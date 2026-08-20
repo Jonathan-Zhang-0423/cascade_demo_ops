@@ -522,26 +522,26 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 		selector = ""
 	}
 	if actionType == model.GraphActionPress {
-		// Keyboard actions never execute an inferred CSS selector. Preserve only
-		// the exact source-bound preview TestID and its formal provenance so the
-		// Worker can focus the approved iframe before dispatching the bounded
-		// arrow-key sequence.
-		approvedPreviewTestID := target.Source == "local_code_snapshot" && strings.EqualFold(target.TestID, "preview-iframe")
-		formalPreviewCandidates := []model.SelectorCandidate{}
-		if approvedPreviewTestID {
+		// Keyboard actions never execute an inferred CSS selector. Preserve an
+		// exact source-bound target only when its selector provenance is formal;
+		// the Worker can then focus the approved region before dispatch.
+		approvedSourceTarget := target.Source == "local_code_snapshot" && strings.TrimSpace(target.TestID) != ""
+		formalTargetCandidates := []model.SelectorCandidate{}
+		if approvedSourceTarget {
 			for _, candidate := range target.SelectorAlternatives {
 				if model.SelectorCandidateHasFormalProvenance(candidate) && strings.EqualFold(candidate.Kind, "testid") && strings.EqualFold(candidate.Value, target.TestID) {
-					formalPreviewCandidates = append(formalPreviewCandidates, candidate)
+					formalTargetCandidates = append(formalTargetCandidates, candidate)
 				}
 			}
+			approvedSourceTarget = len(formalTargetCandidates) > 0
 		}
 		target.Selector = ""
-		if !approvedPreviewTestID {
+		if !approvedSourceTarget {
 			target.TestID = ""
 		}
 		target.Role = ""
 		target.ComponentRef = ""
-		target.SelectorAlternatives = formalPreviewCandidates
+		target.SelectorAlternatives = formalTargetCandidates
 		target.Label = stage.Action.Label
 		target.Text = stage.Action.Label
 		selector = ""
@@ -552,7 +552,7 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	}
 	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup || stage.Kind == model.BusinessStageKindFinalObserve
 	validations := []model.ValidationSpec{businessStageValidation(stage, actionType, target, required)}
-	if required && (validations[0].Kind == "page_changed" || validations[0].Kind == "interactive_surface_visible" || validations[0].Kind == "playable_surface_visible") {
+	if required && (validations[0].Kind == "page_changed" || validations[0].Kind == "frame_surface_changed" || validations[0].Kind == "interactive_surface_visible" || validations[0].Kind == "playable_surface_visible") {
 		route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute)
 		if route != "" {
 			validations = append(validations, model.ValidationSpec{
@@ -681,19 +681,6 @@ func businessStageGraphActionType(stage model.BusinessStage) model.GraphActionTy
 
 func businessStageActionTarget(stage model.BusinessStage, entryPoint string) model.ActionTarget {
 	target := model.ActionTarget{URL: urlForBusinessStage(stage, entryPoint)}
-	if stage.Kind == model.BusinessStageKindFinalObserve {
-		wanted := ""
-		switch strings.TrimPrefix(stage.ID, "business_stage_") {
-		case "final_observe":
-			wanted = "build-result-card"
-		case "playable_preview", "verify_playable_controls":
-			wanted = "preview-iframe"
-		}
-		if exact, ok := businessStageExactTestIDTarget(stage, wanted); ok {
-			exact.URL = target.URL
-			return exact
-		}
-	}
 	if len(stage.Targets) == 0 {
 		target.Label = stage.Action.Label
 		target.Text = stage.Action.Label
@@ -747,16 +734,11 @@ func businessTargetRank(candidate model.BusinessTargetCandidate) int {
 	if candidate.IsVerified {
 		rank += 100
 	}
-	semanticHandle := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
-	if containsAnyNormalized(semanticHandle, "button-", "input-", "new-project", "create-project", "build-mode", "start-build") {
+	role := strings.ToLower(strings.TrimSpace(candidate.Role))
+	if role == "button" || role == "textbox" || role == "combobox" || role == "link" || role == "dialog" || role == "region" {
 		rank += 350
 	}
-	if containsAnyNormalized(semanticHandle, "card-project-", "text-project-name-", "emoji-project-", "project-menu-", "rename-project", "delete-project") {
-		// These handles identify an existing project entity, not a creation
-		// control or the result of opening the creation flow.
-		rank -= 2000
-	}
-	if containsAnyNormalized(semanticHandle, "workspace", "project-list", "container", "page-root", "app-root") || selectorLooksGeneric(candidate.Selector) {
+	if selectorLooksGeneric(candidate.Selector) {
 		rank -= 500
 	}
 	if len([]rune(strings.TrimSpace(candidate.Label))) > 80 {
@@ -796,25 +778,13 @@ func isExplicitNewProjectEntryCandidate(candidate model.BusinessTargetCandidate)
 	if graphActionTypeFromKind(candidate.Kind, candidate.Selector) != model.GraphActionClick {
 		return false
 	}
-	structure := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
-	if containsAnyNormalized(structure,
-		"card-project-", "text-project-name-", "emoji-project-", "project-menu-",
-		"dashboard-page", "project-list", "rename-project", "delete-project",
-	) {
+	semanticName := normalizeIntentText(firstNonEmpty(candidate.Label, candidate.Text))
+	switch semanticName {
+	case "new project", "create project", "create new project", "新建项目", "创建项目", "新增项目", "打开新建项目", "进入新建项目":
+		return true
+	default:
 		return false
 	}
-	if containsAnyNormalized(structure,
-		"button-new-project", "new-project-button", "new-project-trigger", "create-project-trigger",
-	) {
-		return true
-	}
-	if strings.EqualFold(strings.TrimSpace(candidate.TestID), "new-project") {
-		return true
-	}
-	semantics := strings.ToLower(strings.Join([]string{candidate.Label, candidate.Text, candidate.Role}, " "))
-	return containsAnyNormalized(structure, "button") && containsAnyNormalized(semantics,
-		"new project", "create project", "新建项目", "创建项目", "新增项目",
-	)
 }
 
 func selectorCandidateMatchesValue(candidate model.SelectorCandidate, selector string) bool {
@@ -903,10 +873,16 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		kind = "page_changed"
 		target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
 		expected = true
-	} else if stage.Kind == model.BusinessStageKindBusinessSubmit && strings.TrimSpace(stage.ExpectedRouteAfterAction) != "" {
-		kind = "url_matches"
-		target = model.ActionTarget{URL: stage.ExpectedRouteAfterAction}
-		expected = stage.ExpectedRouteAfterAction
+	} else if stage.Kind == model.BusinessStageKindBusinessSubmit {
+		if strings.TrimSpace(stage.ExpectedRouteAfterAction) != "" && normalizeRouteTemplate(stage.ExpectedRouteAfterAction) != normalizeRouteTemplate(stage.EntryRoute) {
+			kind = "url_matches"
+			target = model.ActionTarget{URL: stage.ExpectedRouteAfterAction}
+			expected = stage.ExpectedRouteAfterAction
+		} else {
+			kind = "dom_changed"
+			target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+			expected = true
+		}
 	} else if stage.Kind == model.BusinessStageKindFinalObserve && strings.TrimPrefix(stage.ID, "business_stage_") == "final_observe" && wantsBuildCompletion(stage.UserIntent) {
 		if completionTarget, ok := businessStageCompletionTarget(stage); ok {
 			target = completionTarget
@@ -922,18 +898,14 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		}
 		timeoutMS = completionWaitTimeoutMS(stage.UserIntent)
 	} else if action == model.GraphActionPress {
-		kind = "page_changed"
-		if previewTarget, ok := businessStageExactTestIDTarget(stage, "preview-iframe"); ok {
-			target = previewTarget
-		} else {
+		kind = "frame_surface_changed"
+		if target.Selector == "" && target.TestID == "" && target.Role == "" {
 			target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
 		}
 		expected = true
-	} else if stage.Kind == model.BusinessStageKindFinalObserve && strings.TrimPrefix(stage.ID, "business_stage_") == "playable_preview" {
+	} else if stage.Kind == model.BusinessStageKindFinalObserve && strings.TrimPrefix(stage.ID, "business_stage_") == "interactive_surface_observe" {
 		kind = "interactive_surface_visible"
-		if previewTarget, ok := businessStageExactTestIDTarget(stage, "preview-iframe"); ok {
-			target = previewTarget
-		} else {
+		if target.Selector == "" && target.TestID == "" && target.Role == "" {
 			target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
 		}
 		expected = true
@@ -965,39 +937,6 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 	}
 }
 
-func businessStageExactTestIDTarget(stage model.BusinessStage, wanted string) (model.ActionTarget, bool) {
-	bestIndex := -1
-	bestScore := -1
-	for index, candidate := range stage.Targets {
-		if !strings.EqualFold(strings.TrimSpace(candidate.TestID), strings.TrimSpace(wanted)) {
-			continue
-		}
-		score := businessTargetRank(candidate)
-		if candidate.VerificationSource == "local_code_snapshot" {
-			score += 1000
-		}
-		if bestIndex < 0 || score > bestScore {
-			bestIndex = index
-			bestScore = score
-		}
-	}
-	if bestIndex < 0 {
-		return model.ActionTarget{}, false
-	}
-	candidate := stage.Targets[bestIndex]
-	return model.ActionTarget{
-		Selector:             selectorForBusinessTarget(candidate),
-		Source:               candidate.VerificationSource,
-		Role:                 candidate.Role,
-		Text:                 candidate.Text,
-		Label:                candidate.Label,
-		TestID:               candidate.TestID,
-		ComponentRef:         candidate.ComponentRef,
-		SelectorAlternatives: formalBusinessSelectorAlternatives(candidate.Alternatives),
-		EvidenceRefs:         candidate.EvidenceRefs,
-	}, true
-}
-
 func businessStageCompletionTarget(stage model.BusinessStage) (model.ActionTarget, bool) {
 	bestScore := -1
 	best := model.ActionTarget{}
@@ -1014,7 +953,7 @@ func businessStageCompletionTarget(stage model.BusinessStage) (model.ActionTarge
 			continue
 		}
 		score := businessTargetRank(candidate)
-		if containsAnyNormalized(semantic, "build-result-card", "build_complete", "all_complete", "构建完成") {
+		if containsAnyNormalized(semantic, "build_complete", "all_complete", "构建完成") {
 			score += 1000
 		}
 		if score <= bestScore {
@@ -1039,8 +978,7 @@ func businessStageResultTarget(stage model.BusinessStage) model.ActionTarget {
 			continue
 		}
 		score := businessTargetRank(candidate)
-		structure := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
-		if containsAnyNormalized(structure, "dialog-new-project", "new-project-dialog", "create-project-dialog", "new-project-modal", "create-project-modal") {
+		if strings.EqualFold(strings.TrimSpace(candidate.Role), "dialog") || strings.EqualFold(strings.TrimSpace(candidate.Role), "region") {
 			score += 1000
 		}
 		if bestIndex < 0 || score > bestScore {
@@ -1060,25 +998,14 @@ func businessStageResultTarget(stage model.BusinessStage) model.ActionTarget {
 }
 
 func isExplicitNewProjectResultCandidate(candidate model.BusinessTargetCandidate) bool {
-	structure := strings.ToLower(strings.Join([]string{candidate.TestID, candidate.Selector, candidate.ComponentRef}, " "))
-	if containsAnyNormalized(structure,
-		"card-project-", "text-project-name-", "emoji-project-", "project-menu-",
-		"dashboard-page", "project-list", "button-new-project", "rename-project", "delete-project",
-	) {
-		return false
-	}
-	if containsAnyNormalized(structure, "dialog-new-project", "new-project-dialog", "create-project-dialog", "new-project-modal", "create-project-modal") {
+	role := strings.ToLower(strings.TrimSpace(candidate.Role))
+	if role == "dialog" || role == "region" {
 		return true
 	}
 	if graphActionTypeFromKind(candidate.Kind, candidate.Selector) != model.GraphActionFill || selectorLooksGeneric(candidate.Selector) {
 		return false
 	}
-	if containsAnyNormalized(structure,
-		"input-project-idea", "project-idea", "input-project-name", "project-name-input", "new-project-name", "create-project-name",
-	) {
-		return true
-	}
-	semantics := strings.ToLower(strings.Join([]string{candidate.Label, candidate.Text, candidate.Role}, " "))
+	semantics := strings.ToLower(strings.Join([]string{candidate.Label, candidate.Text, candidate.ComponentRef}, " "))
 	return containsAnyNormalized(semantics, "项目名称", "项目名", "project name", "project idea")
 }
 
@@ -1087,7 +1014,7 @@ func businessStageStateAssertionKind(stage model.BusinessStage, action model.Gra
 		return "page_loaded"
 	}
 	if action == model.GraphActionPress {
-		return "page_changed"
+		return "frame_surface_changed"
 	}
 	if stage.Kind == model.BusinessStageKindObserveProgress || stage.Kind == model.BusinessStageKindFinalObserve {
 		return "observation"
@@ -2620,10 +2547,10 @@ func requirementPreferredNodeIDs(description string) map[string]int {
 	match := func(values ...string) bool { return containsAnyNormalized(description, values...) }
 	preferred := map[string]int{}
 	switch {
-	case match("按左", "按右", "按下", "旋转", "方向键", "键盘", "方块位置", "方块形状", "keyboard", "arrowleft", "arrowright", "arrowdown", "arrowup"):
-		preferred["business_stage_verify_playable_controls"] = 1000
-	case match("最终预览", "棋盘", "得分", "操作说明", "试玩", "可玩", "tetris", "board", "score", "controls", "playable"):
-		preferred["business_stage_playable_preview"] = 1000
+	case match("方向键", "键盘", "交互变化", "实际操作", "keyboard", "interactive"):
+		preferred["business_stage_interactive_surface_change"] = 1000
+	case match("最终预览", "交互区域", "操作说明", "试玩", "可玩", "canvas", "controls", "playable", "interactive"):
+		preferred["business_stage_interactive_surface_observe"] = 1000
 	case match("持续轮询", "轮询直到", "步骤完成", "最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "build_complete", "maximum", "timeout", "wait until complete"):
 		preferred["business_stage_final_observe"] = 1000
 	}
@@ -2682,9 +2609,9 @@ func requirementStageKinds(description string) map[model.BusinessStageKind]int {
 	switch {
 	case match("登录", "登入", "sign in", "signin", "login", "authenticated", "authentication"):
 		kinds[model.BusinessStageKindSessionSetup] = 120
-	case match("按左", "按右", "按下", "旋转", "方向键", "键盘", "方块位置", "方块形状", "keyboard", "arrowleft", "arrowright", "arrowdown", "arrowup"):
+	case match("方向键", "键盘", "交互变化", "实际操作", "keyboard", "interactive"):
 		kinds[model.BusinessStageKindFinalObserve] = 160
-	case match("最终预览", "棋盘", "得分", "操作说明", "试玩", "可玩", "tetris", "board", "score", "controls", "playable"):
+	case match("最终预览", "交互区域", "操作说明", "试玩", "可玩", "canvas", "controls", "playable", "interactive"):
 		kinds[model.BusinessStageKindFinalObserve] = 150
 	case match("持续轮询", "轮询直到", "步骤完成", "最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "build_complete", "maximum", "timeout", "wait until complete"):
 		kinds[model.BusinessStageKindFinalObserve] = 140

@@ -1051,20 +1051,20 @@ func TestCodeReaderPrioritizesBuildCompletionAndPlayableResultQuestions(t *testi
 	if len(questions) < 3 {
 		t.Fatalf("expected the result-anchor and two requirement-critical questions first, got %+v", questions)
 	}
-	if questions[0].ID != "question_result_anchors" || !stringSliceContains(questions[0].QueryTerms, "build-result-card") || !stringSliceContains(questions[0].QueryTerms, "preview-iframe") {
-		t.Fatalf("exact result anchors were not prioritized into the first bounded search: %+v", questions)
+	if questions[0].ID != "question_result_anchors" || !stringSliceContains(questions[0].QueryTerms, "completed") || !stringSliceContains(questions[0].QueryTerms, "interactive") {
+		t.Fatalf("semantic result anchors were not prioritized into the first bounded search: %+v", questions)
 	}
-	if questions[1].ID != "question_build_completion" || !stringSliceContains(questions[1].QueryTerms, "build-result-card") {
+	if questions[1].ID != "question_build_completion" || !stringSliceContains(questions[1].QueryTerms, "completed") {
 		t.Fatalf("build completion evidence was not prioritized: %+v", questions)
 	}
-	if questions[2].ID != "question_playable_result" || !stringSliceContains(questions[2].QueryTerms, "preview-iframe") {
-		t.Fatalf("playable preview evidence was not prioritized: %+v", questions)
+	if questions[2].ID != "question_interactive_result" || !stringSliceContains(questions[2].QueryTerms, "interactive") {
+		t.Fatalf("interactive surface evidence was not prioritized: %+v", questions)
 	}
 
 	fallback := buildCodeInvestigationQueries(project, nil, budget, questions)
 	planned := []codeInvestigationQuery{{questionID: "question_ad_hoc", terms: []string{"generic"}}}
 	queries := append(requirementCriticalInvestigationQueries(fallback), planned...)
-	if len(queries) < 2 || queries[0].questionID != "question_result_anchors" || queries[1].questionID != "question_build_completion" || !stringSliceContains(queries[0].terms, "preview-iframe") {
+	if len(queries) < 2 || queries[0].questionID != "question_result_anchors" || queries[1].questionID != "question_build_completion" || !stringSliceContains(queries[0].terms, "interactive") {
 		t.Fatalf("model plan could starve requirement-critical queries: %+v", queries)
 	}
 }
@@ -1083,8 +1083,8 @@ func TestCodeSearchFindsEveryExactResultAnchorWithinBoundedScan(t *testing.T) {
 		candidates = append(candidates, codeCandidateFile{path: path, rel: rel, name: filepath.Base(path), size: info.Size()})
 	}
 	for rel, content := range map[string]string{
-		"src/components/ide/chat/plan-components.tsx": `export const Done = () => <div data-testid="build-result-card" />`,
-		"src/components/preview/PreviewPanel.tsx":     `export const Preview = () => <iframe data-testid="preview-iframe" />`,
+		"src/components/results/CompletedStatus.tsx":       `export const Done = () => <div aria-label="completed result" />`,
+		"src/components/interaction/InteractiveCanvas.tsx": `export const Preview = () => <canvas aria-label="interactive canvas" />`,
 	} {
 		writeFixtureFile(t, root, rel, content)
 		path := filepath.Join(root, filepath.FromSlash(rel))
@@ -1097,7 +1097,7 @@ func TestCodeSearchFindsEveryExactResultAnchorWithinBoundedScan(t *testing.T) {
 
 	query := codeInvestigationQuery{
 		questionID: "question_result_anchors",
-		terms:      []string{"build-result-card", "preview-iframe"},
+		terms:      []string{"completed", "interactive"},
 	}
 	result, err := searchCodeCandidatesForQuery(context.Background(), candidates, map[string]bool{}, query, model.CodeReadBudget{
 		ToolSearchFileLimit:    2,
@@ -1116,7 +1116,7 @@ func TestCodeSearchFindsEveryExactResultAnchorWithinBoundedScan(t *testing.T) {
 			found[term] = true
 		}
 	}
-	if !found["build-result-card"] || !found["preview-iframe"] {
+	if !found["completed"] || !found["interactive"] {
 		t.Fatalf("bounded result truncation dropped an exact anchor: %+v", result.matches)
 	}
 }

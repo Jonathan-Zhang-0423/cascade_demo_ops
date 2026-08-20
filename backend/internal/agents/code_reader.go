@@ -1290,7 +1290,7 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 
 func requirementCriticalInvestigationQueries(queries []codeInvestigationQuery) []codeInvestigationQuery {
 	out := []codeInvestigationQuery{}
-	for _, wanted := range []string{"question_result_anchors", "question_build_completion", "question_playable_result"} {
+	for _, wanted := range []string{"question_result_anchors", "question_build_completion", "question_interactive_result"} {
 		for _, query := range queries {
 			if query.questionID == wanted {
 				out = append(out, query)
@@ -1415,16 +1415,16 @@ func buildCodeInvestigationQuestions(project *model.ProjectContext, brief *model
 	}
 	resultAnchorTerms := []string{}
 	if wantsBuildCompletion(intentText) {
-		resultAnchorTerms = append(resultAnchorTerms, "build-result-card")
+		resultAnchorTerms = append(resultAnchorTerms, "completed", "result", "status")
 	}
-	if wantsPlayableKeyboardVerification(intentText) {
-		resultAnchorTerms = append(resultAnchorTerms, "preview-iframe")
+	if wantsInteractiveSurfaceVerification(intentText) {
+		resultAnchorTerms = append(resultAnchorTerms, "interactive", "iframe", "canvas")
 	}
 	if len(resultAnchorTerms) > 0 {
 		add(
 			"question_result_anchors",
 			"最终结果代码锚点",
-			"哪些精确的稳定 selector 可以证明构建完成并定位可玩预览？",
+			"哪些来自源码的稳定 selector 可以证明目标结果并定位交互区域？",
 			resultAnchorTerms,
 			[]string{"component_or_selector"},
 		)
@@ -1434,16 +1434,16 @@ func buildCodeInvestigationQuestions(project *model.ProjectContext, brief *model
 			"question_build_completion",
 			"Agent 构建完成结果",
 			"Agent 全部步骤完成时，哪个结果组件、稳定 selector 和状态分支可以确定性证明构建完成？",
-			[]string{"build-result-card", "build result", "build_complete", "all_complete", "all complete", "全部步骤完成", "构建完成", "completed"},
+			[]string{"build result", "build_complete", "all_complete", "all complete", "全部步骤完成", "构建完成", "completed", "status"},
 			[]string{"component_or_selector", "style_or_state"},
 		)
 	}
-	if wantsPlayableKeyboardVerification(intentText) {
+	if wantsInteractiveSurfaceVerification(intentText) {
 		add(
-			"question_playable_result",
-			"可玩预览与键盘结果",
-			"最终预览容器、iframe/canvas、得分和键盘事件由哪些组件与稳定 selector 实现？",
-			[]string{"preview-iframe", "preview panel", "iframe", "canvas", "tetris", "score", "ArrowLeft", "ArrowDown"},
+			"question_interactive_result",
+			"交互区域与键盘结果",
+			"最终交互容器、iframe/canvas 和键盘事件由哪些组件与稳定 selector 实现？",
+			[]string{"interactive", "preview panel", "iframe", "canvas", "keyboard", "keydown"},
 			[]string{"component_or_selector", "style_or_state"},
 		)
 	}
@@ -2054,12 +2054,6 @@ func codeSearchPathTerms(terms []string) []string {
 	out := append([]string(nil), terms...)
 	replacer := strings.NewReplacer("-", " ", "_", " ", ".", " ", "/", " ", "\\", " ")
 	for _, term := range terms {
-		switch strings.ToLower(strings.TrimSpace(term)) {
-		case "build-result-card":
-			out = append(out, "plan", "chat", "agent")
-		case "preview-iframe":
-			out = append(out, "preview", "panel")
-		}
 		for _, part := range strings.Fields(replacer.Replace(term)) {
 			part = strings.TrimSpace(part)
 			if len(part) >= 4 {

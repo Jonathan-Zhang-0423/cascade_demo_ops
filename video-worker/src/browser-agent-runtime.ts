@@ -1452,7 +1452,7 @@ function urlMatches(actualValue: string, expectedValue: string): boolean {
 }
 
 // App outlines may deliberately describe a resource route without knowing the
-// runtime-created identifier (for example /project/:id). The Server/Worker
+// runtime-created identifier in an observed route template. The Server/Worker
 // binds that template to the observed URL at validation time; it never writes
 // the discovered identifier back into the App package or its hashes.
 export function routeTemplateMatches(actualPath: string, expectedPath: string): boolean {

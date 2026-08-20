@@ -103,7 +103,7 @@ func (s *Service) ReunderstandDirectBrowserAgentFailure(ctx context.Context, pro
 	}
 	generation := state.ExecutionPackageGeneration
 	now := time.Now().UTC()
-	graph, terminalRepair, err := terminalPlayableVerificationRepairGraph(state, *result, now)
+	graph, terminalRepair, err := terminalInteractionVerificationRepairGraph(state, *result, now)
 	if err != nil {
 		return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", err.Error()}
 	}
@@ -114,7 +114,7 @@ func (s *Service) ReunderstandDirectBrowserAgentFailure(ctx context.Context, pro
 			next, err = s.flow.RepackageReviewedGraph(ctx, next, graph)
 		}
 		if err != nil {
-			return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", "terminal playable verification package regeneration did not complete"}
+			return DirectFailureReunderstandingResult{}, &directReunderstandingError{"reunderstanding_incomplete", "terminal interaction verification package regeneration did not complete"}
 		}
 	} else {
 		input, inputErr := userInputFromProjectContext(state.ProjectContext)
@@ -129,7 +129,7 @@ func (s *Service) ReunderstandDirectBrowserAgentFailure(ctx context.Context, pro
 	next.ExecutionPackageGeneration = generation
 	changeSummary := "Re-understood from redacted Browser Agent failure evidence; requires approval."
 	if terminalRepair {
-		changeSummary = "Resume the already-built project at the exact approved failure URL and re-run only final playable-surface and keyboard-change verification; requires approval."
+		changeSummary = "Resume the exact approved failure URL and re-run only the terminal observation and interaction-change verification; requires approval."
 	}
 	lineage := &model.ScriptRepairLineage{BaseBundleID: state.ExecutableScriptBundle.ID, BaseBundleHashSHA256: request.FailedBundleHashSHA256, SourceResultID: result.ResultID, SourceCloudJobID: result.CloudJobID, RepairAttempt: result.RepairRequest.RepairAttempt + 1, ChangeSummary: changeSummary, DiagnosticRefs: directDiagnosticRefs(*result.FailureDiagnostic), CreatedAt: now}
 	if next.ExecutableScriptBundle == nil {
@@ -261,8 +261,8 @@ func directIssuesFromFailedResult(result model.RecordingResultPackage, bundle *m
 		issue := model.DirectReunderstandingIssue{
 			Code: "browser_agent_observation_failed", StageID: stageID, NodeID: result.FailureDiagnostic.FailedNodeID,
 			Severity: model.FindingSeverityBlocking, Required: true,
-			Summary:              "The terminal repair could not re-enter the completed project through its approved navigation step.",
-			Suggestion:           "Reuse the exact completed project card on the authenticated dashboard, then re-run only final verification.",
+			Summary:              "The terminal repair could not restore the evidence-bound product route.",
+			Suggestion:           "Refresh the observed route and result-surface evidence, then re-run only final verification.",
 			ResponsibilityDomain: model.ValidationCheckDomainApp,
 		}
 		issue.IssueID = model.StableDirectReunderstandingIssueID(issue)
@@ -302,108 +302,113 @@ func directReunderstandingIssueID(issue model.DirectReunderstandingIssue) string
 	return model.StableDirectReunderstandingIssueID(issue)
 }
 
-func terminalPlayableVerificationRepairGraph(state *orchestrator.CascadeState, result model.RecordingResultPackage, now time.Time) (*model.DemoWorkflowGraph, bool, error) {
-	if result.FailureDiagnostic == nil {
+func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState, result model.RecordingResultPackage, now time.Time) (*model.DemoWorkflowGraph, bool, error) {
+	if result.FailureDiagnostic == nil || state == nil || state.WorkflowGraph == nil {
 		return nil, false, nil
 	}
-	terminalNavigationRepair := result.FailureDiagnostic.FailedNodeID == "business_stage_final_observe" && state != nil && state.WorkflowGraph != nil && strings.HasPrefix(state.WorkflowGraph.ID, "graph_terminal_playable_repair_")
-	if result.FailureDiagnostic.FailedNodeID != "business_stage_verify_playable_controls" && !terminalNavigationRepair {
+	failedIndex := -1
+	for index, node := range state.WorkflowGraph.Nodes {
+		if node != nil && node.ID == result.FailureDiagnostic.FailedNodeID {
+			failedIndex = index
+			break
+		}
+	}
+	if failedIndex < 0 || state.WorkflowGraph.Nodes[failedIndex].ActionSpec == nil {
 		return nil, false, nil
 	}
-	if state == nil || state.ProjectContext == nil || state.WorkflowGraph == nil {
-		return nil, true, fmt.Errorf("terminal playable verification repair is missing project or workflow state")
+	failedAction := state.WorkflowGraph.Nodes[failedIndex].ActionSpec.Type
+	if strings.HasPrefix(state.WorkflowGraph.ID, "graph_terminal_interaction_repair_") && failedAction == model.GraphActionNavigate {
+		return nil, true, fmt.Errorf("terminal interaction repair could not restore the previously observed runtime route")
+	}
+	isTerminalInteraction := failedAction == model.GraphActionPress || failedAction == model.GraphActionInspect || failedAction == model.GraphActionWait
+	if !isTerminalInteraction {
+		return nil, false, nil
+	}
+	if state.ProjectContext == nil {
+		return nil, true, fmt.Errorf("terminal interaction repair is missing project state")
+	}
+	observedURL, err := approvedTerminalProjectURL(state.ProjectContext, result.FailureDiagnostic.CurrentURL)
+	if err != nil {
+		return nil, true, err
 	}
 	graph, err := cloneWorkflowGraphForPackage(state.WorkflowGraph)
 	if err != nil {
 		return nil, true, err
 	}
-	const (
-		sessionNodeID = "business_stage_session_setup"
-		resumeNodeID  = "business_stage_final_observe"
-		previewNodeID = "business_stage_playable_preview"
-		playNodeID    = "business_stage_verify_playable_controls"
-	)
-	wanted := map[string]bool{sessionNodeID: true, resumeNodeID: true, previewNodeID: true, playNodeID: true}
-	byID := map[string]*model.GraphNode{}
-	for _, node := range graph.Nodes {
-		if node != nil && wanted[node.ID] {
-			byID[node.ID] = node
+
+	resumeIndex := failedIndex
+	for resumeIndex > 0 {
+		candidate := graph.Nodes[resumeIndex-1]
+		if candidate == nil || candidate.ActionSpec == nil {
+			break
 		}
-	}
-	for _, id := range []string{sessionNodeID, resumeNodeID, previewNodeID, playNodeID} {
-		if byID[id] == nil || byID[id].ActionSpec == nil {
-			return nil, true, fmt.Errorf("terminal playable verification repair is missing required node %s", id)
+		action := candidate.ActionSpec.Type
+		if action != model.GraphActionInspect && action != model.GraphActionWait && action != model.GraphActionPress {
+			break
 		}
+		resumeIndex--
 	}
-	projectURLSource := result.FailureDiagnostic.CurrentURL
-	if terminalNavigationRepair {
-		projectURLSource = byID[resumeNodeID].ActionSpec.Target.URL
-	}
-	projectURL, err := approvedTerminalProjectURL(state.ProjectContext, projectURLSource)
-	if err != nil {
-		return nil, true, err
-	}
-	resume := byID[resumeNodeID]
+	resume := graph.Nodes[resumeIndex]
 	resume.Type = model.GraphNodeTypeAction
-	resume.Title = "重新进入已完成项目并观察最终状态"
-	resume.Goal = "打开已完成项目，确认构建结果仍然可用。"
+	resume.Title = "恢复已验证页面状态并重验终点"
+	resume.Goal = "回到失败证据记录的同源页面，只重新观察终点交互结果。"
+	resume.Action = string(model.GraphActionNavigate)
+	resume.Selector = ""
+	resume.PageRef = observedURL
+	resume.ActionSpec.Type = model.GraphActionNavigate
+	resume.ActionSpec.Target = model.ActionTarget{URL: observedURL, EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...)}
 	resume.ActionSpec.TimeoutMS = 30_000
 	resume.ActionSpec.WaitUntil = "domcontentloaded"
 	resume.StateAfter = nil
-	if terminalNavigationRepair {
-		parsedProjectURL, _ := url.Parse(projectURL)
-		projectID := strings.TrimPrefix(parsedProjectURL.Path, "/project/")
-		appURL := parsedProjectURL.Scheme + "://" + parsedProjectURL.Host + "/app"
-		testID := "card-project-" + projectID
-		selector := `[data-testid="` + testID + `"]`
-		evidenceID := ""
-		if len(resume.EvidenceRefs) > 0 {
-			evidenceID = resume.EvidenceRefs[0].ID
-		}
-		resume.Action = string(model.GraphActionClick)
-		resume.Selector = selector
-		resume.PageRef = "/app"
-		resume.ActionSpec.Type = model.GraphActionClick
-		resume.ActionSpec.Target = model.ActionTarget{
-			URL: appURL, Selector: selector, TestID: testID, Source: "local_code_snapshot",
-			ComponentRef: "component:dashboard-project-card", EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...),
-			SelectorAlternatives: []model.SelectorCandidate{{
-				Kind: "testid", Value: testID, EvidenceID: evidenceID, SourceKind: "source_scan", Source: "source_scan",
-				ObservedURL: appURL, ObservedRouteTemplate: "/app", ObservedPageRole: "workspace", Confidence: 0.9,
-			}},
-		}
-		resume.Validations = append(resume.Validations, model.ValidationSpec{
-			ID: "validate_terminal_repair_project_route", Kind: "url_matches", Target: model.ActionTarget{URL: projectURL},
-			Expected: projectURL, Required: true, Severity: "blocking", EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...),
-		})
-		if resume.Capture != nil {
-			resume.Capture.FocusSelector = selector
-		}
-	} else {
-		resume.Action = string(model.GraphActionNavigate)
-		resume.PageRef = projectURL
-		resume.ActionSpec.Type = model.GraphActionNavigate
-		resume.ActionSpec.Target.URL = projectURL
-	}
+	resume.Validations = []model.ValidationSpec{{
+		ID: "validate_terminal_repair_observed_route", Kind: "url_matches", Target: model.ActionTarget{URL: observedURL},
+		Expected: observedURL, Required: true, Severity: "blocking", EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...),
+	}}
 	if resume.Metadata == nil {
 		resume.Metadata = map[string]any{}
 	}
-	resume.Metadata["business_stage_entry_route"] = resume.PageRef
-	resume.Metadata["expected_route_after_action"] = projectURL
 	resume.Metadata["terminal_repair_resume"] = true
-	byID[sessionNodeID].Type = model.GraphNodeTypeStart
-	byID[previewNodeID].Type = model.GraphNodeTypeAction
-	byID[playNodeID].Type = model.GraphNodeTypeEnd
-	graph.ID = fmt.Sprintf("graph_terminal_playable_repair_%d", now.UnixNano())
+	resume.Metadata["expected_route_after_action"] = observedURL
+
+	retained := make([]*model.GraphNode, 0, failedIndex-resumeIndex+2)
+	for index, node := range graph.Nodes {
+		if index >= resumeIndex {
+			break
+		}
+		if node != nil && node.ActionSpec != nil && node.ID != resume.ID && (node.Type == model.GraphNodeTypeStart || node.ActionSpec.Type == model.GraphActionNavigate) {
+			node.Type = model.GraphNodeTypeStart
+			retained = append(retained, node)
+			break
+		}
+	}
+	for index := resumeIndex; index <= failedIndex; index++ {
+		node := graph.Nodes[index]
+		if node == nil || node.ActionSpec == nil {
+			continue
+		}
+		if index > resumeIndex && node.ActionSpec.Type != model.GraphActionInspect && node.ActionSpec.Type != model.GraphActionWait && node.ActionSpec.Type != model.GraphActionPress {
+			return nil, true, fmt.Errorf("terminal interaction repair would replay a non-observation action %s", node.ID)
+		}
+		node.Type = model.GraphNodeTypeAction
+		retained = append(retained, node)
+	}
+	if len(retained) < 2 {
+		return nil, true, fmt.Errorf("terminal interaction repair has no verified observation suffix")
+	}
+	retained[len(retained)-1].Type = model.GraphNodeTypeEnd
+	wanted := map[string]bool{}
+	for _, node := range retained {
+		wanted[node.ID] = true
+	}
+	graph.ID = fmt.Sprintf("graph_terminal_interaction_repair_%d", now.UnixNano())
 	graph.Version = 1
 	graph.Status = model.GraphStatusReviewReady
-	graph.Name = "已完成项目的试玩与键盘终点重验"
-	graph.Summary = "复用已构建成功的项目，只补录最终预览、棋盘可见性与方向键画面变化证据。"
-	graph.Nodes = []*model.GraphNode{byID[sessionNodeID], resume, byID[previewNodeID], byID[playNodeID]}
-	graph.Edges = []*model.GraphEdge{
-		{ID: "edge_terminal_repair_session_resume", FromNode: sessionNodeID, ToNode: resumeNodeID, Condition: "validated", Priority: 1},
-		{ID: "edge_terminal_repair_resume_preview", FromNode: resumeNodeID, ToNode: previewNodeID, Condition: "validated", Priority: 2},
-		{ID: "edge_terminal_repair_preview_play", FromNode: previewNodeID, ToNode: playNodeID, Condition: "validated", Priority: 3},
+	graph.Name = "终点交互状态重验"
+	graph.Summary = "从失败证据中的同源页面恢复，只执行观察与交互验证，不重放创建、提交或计费动作。"
+	graph.Nodes = retained
+	graph.Edges = make([]*model.GraphEdge, 0, len(retained)-1)
+	for index := 1; index < len(retained); index++ {
+		graph.Edges = append(graph.Edges, &model.GraphEdge{ID: fmt.Sprintf("edge_terminal_repair_%02d", index), FromNode: retained[index-1].ID, ToNode: retained[index].ID, Condition: "validated", Priority: index})
 	}
 	for index := range graph.Requirements {
 		graph.Requirements[index].NodeRefs = retainedNodeRefs(graph.Requirements[index].NodeRefs, wanted)
@@ -434,18 +439,14 @@ func terminalPlayableVerificationRepairGraph(state *orchestrator.CascadeState, r
 func approvedTerminalProjectURL(project *model.ProjectContext, raw string) (string, error) {
 	target, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || target == nil || target.Scheme == "" || target.Host == "" {
-		return "", fmt.Errorf("terminal playable verification failure URL is not a concrete project route")
-	}
-	pathParts := strings.Split(strings.Trim(target.Path, "/"), "/")
-	if len(pathParts) != 2 || pathParts[0] != "project" || strings.TrimSpace(pathParts[1]) == "" {
-		return "", fmt.Errorf("terminal playable verification failure URL is not a concrete project route")
+		return "", fmt.Errorf("terminal interaction failure URL is not a concrete product route")
 	}
 	base, err := url.Parse(strings.TrimSpace(project.ProductURL))
 	if err != nil || base.Scheme == "" || base.Host == "" || !strings.EqualFold(target.Scheme, base.Scheme) || !strings.EqualFold(target.Host, base.Host) {
-		return "", fmt.Errorf("terminal playable verification failure URL is outside the approved product origin")
+		return "", fmt.Errorf("terminal interaction failure URL is outside the approved product origin")
 	}
 	if browserAgentPathForbidden(target.String(), project.ForbiddenPages, nil) {
-		return "", fmt.Errorf("terminal playable verification failure URL is forbidden by the project policy")
+		return "", fmt.Errorf("terminal interaction failure URL is forbidden by the project policy")
 	}
 	target.RawQuery = ""
 	target.Fragment = ""

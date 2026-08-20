@@ -507,7 +507,7 @@ func hasLiteralDynamicRoute(value string) bool {
 // A click/submit stage must normally validate the state it caused, not merely
 // prove that the clicked control is still visible. This catches the common App
 // package defect where the post-action validation accidentally copies the
-// action selector (for example button-new-project instead of dialog-new-project).
+// action selector instead of independently observing the resulting surface.
 func browserAgentActionOutcomeFinding(approved model.StageApprovalStage, interactions []model.BrowserAgentInteraction, step model.ScriptStep) *BrowserAgentReadinessFinding {
 	if step.Action.Type != model.GraphActionClick && step.Action.Type != model.GraphActionSelect && step.Action.Type != model.GraphActionUpload {
 		return nil

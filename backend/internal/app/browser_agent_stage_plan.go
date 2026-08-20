@@ -957,7 +957,7 @@ func browserAgentRouteAllowed(value string, allowedRoutes []string) bool {
 }
 
 // browserAgentRouteTemplatePrefixMatches binds an App-approved route template
-// (for example /project/:id) to an observed runtime path without persisting
+// to an observed runtime path without persisting
 // the identifier. Static segments remain exact and the observed path may
 // continue into an approved subresource (for example /project/42/logs).
 func browserAgentRouteTemplatePrefixMatches(actualPath, approvedTemplate string) bool {

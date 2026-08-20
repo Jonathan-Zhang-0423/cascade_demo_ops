@@ -11,7 +11,7 @@ Skill version: `1.0.0`.
 
 ## Workflow
 
-1. Read `references/runtime-contract.md` before producing structured output.
+1. Read `references/runtime-contract.md` and `references/product-archetypes.md` before producing structured output.
 2. Confirm every required step has a positive source range, observed outcome, and artifact reference. Stop if a factual step is unsupported.
 3. Preserve required-step order exactly. Group adjacent steps into setup, action, result, and proof beats only when that grouping does not reorder them.
 4. Keep input, submit, result, and real interaction at 1x. Mark genuinely idle ranges for 4-12x compression; prefer 8x.
