@@ -18,6 +18,12 @@ describe("FFmpeg media probe fallback", () => {
     expect(result).toMatchObject({ quality_analysis_available: true, black_duration_ms: 300, freeze_duration_ms: 1200, silence_duration_ms: 5000, verified_silence: true, integrated_lufs: -16.4, true_peak_db: -1.3 });
   });
 
+  it("counts a detector interval that remains open at end of file", () => {
+    const result = { path: "x.mp4", file_name: "x.mp4", size_bytes: 1, sha256: "x", mime_type: "video/mp4", ffprobe_available: true, duration_ms: 5000 } as MediaProbeResult;
+    applyFFmpegQualityAnalysis(result, ["freeze_start: 3.5", "silence_start: 4.25", "black_start:4.8"].join("\n"));
+    expect(result).toMatchObject({ freeze_duration_ms: 1500, silence_duration_ms: 750, black_duration_ms: 200 });
+  });
+
   it("extracts duration and stream metadata without ffprobe", () => {
     const result: MediaProbeResult = {
       path: "D:\\media\\source.mp4",

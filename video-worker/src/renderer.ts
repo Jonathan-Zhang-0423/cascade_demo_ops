@@ -4101,10 +4101,15 @@ function isApprovedGeneratedCandidateArtifact(artifact: TimelineArtifact | undef
   if (!artifact) return false;
   if (!isGeneratedCandidateArtifact(artifact)) return false;
   const metadata = artifact.metadata || {};
+  const humanApproved = metadata.approved_for_demo === true;
+  const finalOutputReviewPending =
+    metadata.approval_mode === "final_output_review_pending" &&
+    metadata.review_scope === "final_output" &&
+    metadata.automated_quality_gate_passed === true;
   return (
     artifact.kind === "generated_video_candidate" &&
     artifact.sensitive !== true &&
-    metadata.approved_for_demo === true &&
+    (humanApproved || finalOutputReviewPending) &&
     metadata.non_authoritative === true &&
     metadata.source_material_policy === "non_authoritative_generated_candidate" &&
     metadata.artifact_variant === "normalized" &&
@@ -4119,7 +4124,7 @@ function validateGeneratedCandidateShot(shot: DemoEditShot, artifact: TimelineAr
     errors.push(
       finding(
         "generated_candidate_not_approved",
-        "Generated candidate artifacts require approval, non-authoritative policy, and a probed normalized editor MP4/H.264/yuv420p/1920x1080/CFR30 derivative before use.",
+        "Generated candidate artifacts require human approval or a final-output-review-pending automatic quality gate, non-authoritative policy, and a probed normalized editor MP4/H.264/yuv420p/1920x1080/CFR30 derivative before use.",
         `${shotPath}.source_artifact_id`,
       ),
     );

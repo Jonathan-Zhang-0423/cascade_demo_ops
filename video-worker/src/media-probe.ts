@@ -127,9 +127,9 @@ export async function probeMediaFile(request: MediaProbeRequest): Promise<MediaP
 
 export function applyFFmpegQualityAnalysis(result: MediaProbeResult, output: string): void {
   result.quality_analysis_available = true;
-  result.black_duration_ms = sumDurations(output, /black_duration:([0-9]+(?:\.[0-9]+)?)/g);
-  result.freeze_duration_ms = sumDurations(output, /freeze_duration:\s*([0-9]+(?:\.[0-9]+)?)/g);
-  result.silence_duration_ms = sumDurations(output, /silence_duration:\s*([0-9]+(?:\.[0-9]+)?)/g);
+  result.black_duration_ms = sumDetectedIntervals(output, "black", result.duration_ms);
+  result.freeze_duration_ms = sumDetectedIntervals(output, "freeze", result.duration_ms);
+  result.silence_duration_ms = sumDetectedIntervals(output, "silence", result.duration_ms);
   result.verified_silence = (result.duration_ms ?? 0) > 0 && result.silence_duration_ms >= Math.max(0, (result.duration_ms ?? 0) - 500);
   const loudness = [...output.matchAll(/\bI:\s*(-?[0-9]+(?:\.[0-9]+)?)\s*LUFS/g)].at(-1)?.[1];
   const peak = [...output.matchAll(/\bPeak:\s*(-?[0-9]+(?:\.[0-9]+)?)\s*dBFS/g)].at(-1)?.[1];
@@ -137,10 +137,29 @@ export function applyFFmpegQualityAnalysis(result: MediaProbeResult, output: str
   if (peak !== undefined && Number.isFinite(Number(peak))) result.true_peak_db = Number(peak);
 }
 
-function sumDurations(output: string, pattern: RegExp): number {
-  let total = 0;
-  for (const match of output.matchAll(pattern)) total += Number(match[1] ?? 0);
-  return Math.max(0, Math.round(total * 1000));
+function sumDetectedIntervals(output: string, kind: "black" | "freeze" | "silence", durationMS: number | undefined): number {
+  const pattern = new RegExp(`${kind}_(start|end):\\s*([0-9]+(?:\\.[0-9]+)?)`, "g");
+  let totalSeconds = 0;
+  let openStart: number | undefined;
+  for (const match of output.matchAll(pattern)) {
+    const value = Number(match[2]);
+    if (!Number.isFinite(value)) continue;
+    if (match[1] === "start") {
+      openStart = value;
+      continue;
+    }
+    if (openStart !== undefined) {
+      totalSeconds += Math.max(0, value - openStart);
+      openStart = undefined;
+    }
+  }
+  // freezedetect and silencedetect can leave the final interval open at EOF.
+  // Counting only emitted *_duration lines systematically under-reports a
+  // frozen or silent tail and makes baseline-relative quality gates unstable.
+  if (openStart !== undefined && durationMS !== undefined) {
+    totalSeconds += Math.max(0, durationMS / 1000 - openStart);
+  }
+  return Math.max(0, Math.round(totalSeconds * 1000));
 }
 
 export function applyFFmpegProbeFallback(result: MediaProbeResult, output: string): void {

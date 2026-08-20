@@ -82,7 +82,13 @@ try {
 
   const approvedRequest = structuredClone(baseRequest);
   approvedRequest.output_dir = path.join(root, "render-approved");
-  approvedRequest.generated_assets[0].metadata.approved_for_demo = true;
+  Object.assign(approvedRequest.generated_assets[0].metadata, {
+    approved_for_demo: true,
+    artifact_variant: "normalized",
+    normalization_status: "ok",
+    media_probe_status: "ok",
+    normalization_profile: "editor_mp4_h264_yuv420p_1920x1080_cfr30_v1",
+  });
 
   const result = await render(approvedRequest);
   const manifest = JSON.parse(await readFile(result.render_manifest_path, "utf8"));
@@ -93,6 +99,20 @@ try {
   assert.equal(manifest.compositor.method, "copy_source_recording");
   assert.deepEqual(report.actual.represented_step_ids, []);
   assert.ok(report.step_checks.some((check) => check.step_id === "node_open" && check.represented_in_edit_plan === false));
+
+  const finalReviewPendingRequest = structuredClone(baseRequest);
+  finalReviewPendingRequest.output_dir = path.join(root, "render-final-review-pending");
+  Object.assign(finalReviewPendingRequest.generated_assets[0].metadata, {
+    approval_mode: "final_output_review_pending",
+    review_scope: "final_output",
+    automated_quality_gate_passed: true,
+    artifact_variant: "normalized",
+    normalization_status: "ok",
+    media_probe_status: "ok",
+    normalization_profile: "editor_mp4_h264_yuv420p_1920x1080_cfr30_v1",
+  });
+  const pendingResult = await render(finalReviewPendingRequest);
+  assert.equal(pendingResult.validation_report.valid, true);
 } finally {
   if (previousFFmpeg === undefined) {
     delete process.env.CASCADE_FFMPEG_PATH;

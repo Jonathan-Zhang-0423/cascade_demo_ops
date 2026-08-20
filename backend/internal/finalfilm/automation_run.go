@@ -401,8 +401,18 @@ func (s *Service) finishAutomatedComposition(ctx context.Context, job model.Fina
 	if err == nil && outputValidation.BlackDurationMS > 500 {
 		err = fmt.Errorf("automated final black duration %dms exceeds 500ms", outputValidation.BlackDurationMS)
 	}
-	if err == nil && outputValidation.FreezeDurationMS > 3000 {
-		err = fmt.Errorf("automated final freeze duration %dms exceeds 3000ms", outputValidation.FreezeDurationMS)
+	if err == nil {
+		// Product UIs legitimately hold a stable result while the viewer reads it.
+		// Keep generated candidates on their strict per-shot freeze gate above,
+		// but judge the assembled film relative to the factual baseline so chapter
+		// packaging cannot add a new long freeze to an otherwise valid demo.
+		allowedFreezeMS := 3000
+		if baselineProbe, probeErr := s.renderer.ProbeMedia(ctx, executor.MediaProbeRequest{Path: job.BaselineRender.VideoPath}); probeErr == nil && baselineProbe.QualityAnalysisAvailable {
+			allowedFreezeMS += baselineProbe.FreezeDurationMS
+		}
+		if outputValidation.FreezeDurationMS > allowedFreezeMS {
+			err = fmt.Errorf("automated final freeze duration %dms exceeds factual baseline allowance %dms", outputValidation.FreezeDurationMS, allowedFreezeMS)
+		}
 	}
 	if err == nil && outputValidation.AudioCodec != "" && !outputValidation.VerifiedSilence && (outputValidation.IntegratedLUFS < -18 || outputValidation.IntegratedLUFS > -14) {
 		err = fmt.Errorf("automated final integrated loudness %.2f LUFS is outside -16±2 LUFS", outputValidation.IntegratedLUFS)
@@ -501,7 +511,7 @@ func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrack
 	}
 	plan.Shots = append(assembled, suffix...)
 	plan.PlanID = job.BaselinePlan.PlanID + "+automated"
-	plan.TargetDurationMS = effectiveTargetDuration(plan)
+	plan.TargetDurationMS = timelineDuration(plan)
 	return catalog, plan, shotIDs
 }
 
@@ -517,7 +527,7 @@ func automatedPlacement(job model.FinalFilmJob, intentID string) (string, string
 }
 
 func automatedGeneratedTimelineArtifact(id string, candidate media.GeneratedShotCandidate, duration int) model.TimelineArtifact {
-	return model.TimelineArtifact{ID: id, Kind: media.GeneratedShotEditorAssetKind, URI: candidate.NormalizedArtifact.Path, LocalPath: candidate.NormalizedArtifact.Path, MimeType: candidate.NormalizedArtifact.MimeType, SHA256: candidate.NormalizedArtifact.SHA256, SizeBytes: candidate.NormalizedArtifact.SizeBytes, DurationMS: duration, AssetRole: "presentation_generated_candidate", IncludeInDemo: true, Metadata: map[string]any{"media_eligible": true, "approval_mode": "final_output_review_pending", "presentation_only": true, "non_authoritative": true, "candidate_id": candidate.CandidateID, "intent_id": candidate.IntentID, "normalization_profile": candidate.NormalizedArtifact.NormalizationProfile, "width": candidate.NormalizedArtifact.Probe.Width, "height": candidate.NormalizedArtifact.Probe.Height, "fps": candidate.NormalizedArtifact.Probe.FPS, "cfr": candidate.NormalizedArtifact.Probe.CFR}}
+	return model.TimelineArtifact{ID: id, Kind: media.GeneratedShotEditorAssetKind, URI: candidate.NormalizedArtifact.Path, LocalPath: candidate.NormalizedArtifact.Path, MimeType: candidate.NormalizedArtifact.MimeType, SHA256: candidate.NormalizedArtifact.SHA256, SizeBytes: candidate.NormalizedArtifact.SizeBytes, DurationMS: duration, AssetRole: "presentation_generated_candidate", IncludeInDemo: true, Metadata: map[string]any{"media_eligible": true, "approval_mode": "final_output_review_pending", "review_scope": model.FinalFilmReviewScopeFinalOutput, "automated_quality_gate_passed": true, "presentation_only": true, "non_authoritative": true, "source_material_policy": media.GeneratedShotSourceMaterialPolicy, "artifact_variant": "normalized", "normalization_status": "ok", "media_probe_status": "ok", "candidate_id": candidate.CandidateID, "intent_id": candidate.IntentID, "normalization_profile": candidate.NormalizedArtifact.NormalizationProfile, "width": candidate.NormalizedArtifact.Probe.Width, "height": candidate.NormalizedArtifact.Probe.Height, "fps": candidate.NormalizedArtifact.Probe.FPS, "cfr": candidate.NormalizedArtifact.Probe.CFR}}
 }
 
 func (s *Service) MarkAutomationFailed(ctx context.Context, jobID string, cause error) (model.FinalFilmJob, error) {

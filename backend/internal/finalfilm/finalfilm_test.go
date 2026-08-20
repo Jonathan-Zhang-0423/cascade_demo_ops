@@ -281,6 +281,9 @@ func TestGeneratedCandidateRequiresHumanReviewSelectionAndEditorApprovalBeforePa
 	if service.renderer.(*fakeFinalFilmRenderer).renderCalls != 2 || job.FinalPlan.Shots[0].SourceStepID != "" || job.FinalPlan.Shots[1].SourceStepID != "step_1" || job.FinalPlan.Shots[2].SourceStepID != "step_2" {
 		t.Fatalf("final plan did not preserve the locked fact track: %+v", job.FinalPlan.Shots)
 	}
+	if job.FinalPlan.TargetDurationMS != timelineDuration(*job.FinalPlan) || job.FinalPlan.TargetDurationMS <= plan.TargetDurationMS {
+		t.Fatalf("generated presentation shot did not extend the assembled EDL duration: baseline=%d final=%d", plan.TargetDurationMS, job.FinalPlan.TargetDurationMS)
+	}
 }
 
 func TestGeneratedPatchBatchAtomicallyPlacesIntroDividerAndOutro(t *testing.T) {
@@ -557,7 +560,7 @@ func newFinalFilmTestService(t *testing.T) (*Service, *fakeFinalFilmRenderer) {
 	service, err := NewService(ServiceOptions{
 		Store: NewFileStore(filepath.Join(root, "jobs")), Renderer: renderer, OutputRoot: filepath.Join(root, "outputs"),
 		Providers: registry, SkillRoot: filepath.Join("..", "..", "..", "skills", "final-film"),
-		Now:       func() time.Time { sequence++; return time.Unix(int64(100+sequence), 0) },
+		Now: func() time.Time { sequence++; return time.Unix(int64(100+sequence), 0) },
 		NewID: func(prefix string) (string, error) {
 			sequence++
 			return prefix + "_test_" + time.Unix(int64(sequence), 0).Format("150405"), nil

@@ -221,7 +221,7 @@ func compileAppliedGeneratedPlanBatch(job model.FinalFilmJob, record GeneratedTr
 		return model.AssetTimelineCatalog{}, model.DemoEditPlan{}, nil, "", "", err
 	}
 	plan.PlanID = job.BaselinePlan.PlanID + "+generated_" + digest[:12]
-	plan.TargetDurationMS = effectiveTargetDuration(plan)
+	plan.TargetDurationMS = timelineDuration(plan)
 	return catalog, plan, shotIDs, collapsedIdentity(providers), collapsedIdentity(models), nil
 }
 

@@ -165,6 +165,13 @@ func effectiveTargetDuration(plan model.DemoEditPlan) int {
 	if plan.TargetDurationMS > 0 {
 		return plan.TargetDurationMS
 	}
+	return timelineDuration(plan)
+}
+
+// timelineDuration always derives the output duration from the assembled EDL.
+// It deliberately ignores a previously declared target because inserting or
+// removing generated presentation shots changes the rendered timeline.
+func timelineDuration(plan model.DemoEditPlan) int {
 	total := 0
 	for _, shot := range plan.Shots {
 		if shot.OutputDurationMS > 0 {
