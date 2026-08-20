@@ -20,6 +20,10 @@ type StageExecutionEventSink interface {
 	Append(context.Context, model.StageExecutionEvent) error
 }
 
+type stageExecutionEventHistory interface {
+	Events() []model.StageExecutionEvent
+}
+
 type stageEventAuditLog struct {
 	mu           sync.Mutex
 	path         string
@@ -37,12 +41,53 @@ func newStageEventAuditLog(recordingOutputDir string, cloudJobID string) (*stage
 	if err := os.MkdirAll(recordingOutputDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create stage event audit directory: %w", err)
 	}
-	return &stageEventAuditLog{
+	log := &stageEventAuditLog{
 		path:         filepath.Join(recordingOutputDir, "browser-agent-stage-events.jsonl"),
 		artifactID:   "stage_event_log_" + safePathSegment(cloudJobID),
 		seenEventIDs: map[string]bool{},
 		lastSequence: map[string]int64{},
-	}, nil
+	}
+	if err := log.loadExisting(); err != nil {
+		return nil, err
+	}
+	return log, nil
+}
+
+func (l *stageEventAuditLog) loadExisting() error {
+	file, err := os.Open(l.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open existing stage event audit log: %w", err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	line := 0
+	for scanner.Scan() {
+		line++
+		if len(scanner.Bytes()) == 0 {
+			continue
+		}
+		var event model.StageExecutionEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return fmt.Errorf("decode existing stage event audit log line %d: %w", line, err)
+		}
+		if err := event.Validate(); err != nil {
+			return fmt.Errorf("validate existing stage event audit log line %d: %w", line, err)
+		}
+		if l.seenEventIDs[event.EventID] || event.Sequence <= l.lastSequence[event.RunID] {
+			return fmt.Errorf("existing stage event audit log is not strictly ordered at line %d", line)
+		}
+		l.seenEventIDs[event.EventID] = true
+		l.lastSequence[event.RunID] = event.Sequence
+		l.events = append(l.events, event)
+		l.count++
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan existing stage event audit log: %w", err)
+	}
+	return nil
 }
 
 func (l *stageEventAuditLog) Append(ctx context.Context, event model.StageExecutionEvent) error {

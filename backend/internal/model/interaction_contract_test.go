@@ -25,6 +25,24 @@ func TestInteractionContractRequiresIndependentOutcomeAndReplayPolicy(t *testing
 	}
 }
 
+func TestInteractionContractRejectsClickValidatedOnlyByActionTargetVisibility(t *testing.T) {
+	target := ActionTarget{TestID: "create-item"}
+	contract := InteractionContract{
+		SchemaVersion: InteractionContractSchemaVersion, ContractID: "interaction_weak_click",
+		SemanticGoal: "Create an item", ActionKind: GraphActionClick, ReplayPolicy: InteractionReplayOnceEffect,
+		TargetSemanticID: "create_item", ActionTarget: target,
+		ExpectedTransitions: []InteractionPredicate{{ID: "weak_result", Kind: "element_visible", Target: target, Required: true}},
+		EvidenceRefs:        []EvidenceRef{{ID: "evidence_click"}}, NonDestructive: true,
+	}
+	if err := ValidateInteractionContract(contract); err == nil {
+		t.Fatal("click action was accepted when its only outcome was the same button remaining visible")
+	}
+	contract.ExpectedTransitions = append(contract.ExpectedTransitions, InteractionPredicate{ID: "actual_result", Kind: "dom_changed", Required: true})
+	if err := ValidateInteractionContract(contract); err != nil {
+		t.Fatalf("independent click outcome was rejected: %v", err)
+	}
+}
+
 func TestInteractionContractAcceptsAllGenericObserverKinds(t *testing.T) {
 	for _, kind := range []string{"state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible"} {
 		contract := InteractionContract{

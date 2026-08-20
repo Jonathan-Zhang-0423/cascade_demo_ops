@@ -30,6 +30,7 @@ type InteractionContract struct {
 	ActionKind          GraphActionType         `json:"action_kind"`
 	ReplayPolicy        InteractionReplayPolicy `json:"replay_policy"`
 	TargetSemanticID    string                  `json:"target_semantic_id"`
+	ActionTarget        ActionTarget            `json:"action_target,omitempty"`
 	Preconditions       []InteractionPredicate  `json:"preconditions,omitempty"`
 	ExpectedTransitions []InteractionPredicate  `json:"expected_transitions"`
 	EvidenceRefs        []EvidenceRef           `json:"evidence_refs"`
@@ -107,7 +108,35 @@ func ValidateInteractionContract(contract InteractionContract) error {
 			return errors.New("every expected interaction transition must be required")
 		}
 	}
+	if contract.ActionKind == GraphActionClick {
+		independent := false
+		for _, predicate := range contract.ExpectedTransitions {
+			if predicate.Kind != "element_visible" || !sameInteractionTarget(contract.ActionTarget, predicate.Target) {
+				independent = true
+				break
+			}
+		}
+		if !independent {
+			return errors.New("click outcome cannot only re-observe the action target as visible")
+		}
+	}
 	return nil
+}
+
+func sameInteractionTarget(left, right ActionTarget) bool {
+	leftValues := []string{left.Selector, left.TestID, left.Role, left.Label, left.Text, left.URL}
+	rightValues := []string{right.Selector, right.TestID, right.Role, right.Label, right.Text, right.URL}
+	hasValue := false
+	for index := range leftValues {
+		l, r := strings.TrimSpace(leftValues[index]), strings.TrimSpace(rightValues[index])
+		if l != "" || r != "" {
+			hasValue = true
+		}
+		if l != r {
+			return false
+		}
+	}
+	return hasValue
 }
 
 func validProductArchetype(value ProductArchetype) bool {

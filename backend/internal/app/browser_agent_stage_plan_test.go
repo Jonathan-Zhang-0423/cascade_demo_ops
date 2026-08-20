@@ -579,6 +579,53 @@ func (s *memoryStageEventSink) Append(_ context.Context, event model.StageExecut
 	return nil
 }
 
+func (s *memoryStageEventSink) Events() []model.StageExecutionEvent {
+	return append([]model.StageExecutionEvent{}, s.events...)
+}
+
+type resumableStageExecutor struct {
+	executeCalls    int
+	revalidateCalls int
+	revalidatePass  bool
+}
+
+func (e *resumableStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	e.executeCalls++
+	return BrowserAgentStageActionResult{Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "result", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: fmt.Sprintf("execute_%d", e.executeCalls), Kind: model.EvidenceKindBrowserTrace}}}, nil
+}
+
+func (e *resumableStageExecutor) RevalidateStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	e.revalidateCalls++
+	return BrowserAgentStageActionResult{Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "checkpoint", Passed: e.revalidatePass}}}, EvidenceRefs: []model.EvidenceRef{{ID: fmt.Sprintf("revalidate_%d", e.revalidateCalls), Kind: model.EvidenceKindBrowserTrace}}}, nil
+}
+
+func TestBrowserAgentStageOrchestratorResumesCompletedStagesWithoutReplayingActions(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	orchestrator := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{})
+	plan, err := orchestrator.Prepare(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &memoryStageEventSink{}
+	executor := &resumableStageExecutor{revalidatePass: true}
+	if _, err := orchestrator.Run(context.Background(), plan, stubStageObserver{}, executor, sink); err != nil {
+		t.Fatal(err)
+	}
+	firstExecuteCalls := executor.executeCalls
+	resumed, err := orchestrator.Run(context.Background(), plan, stubStageObserver{}, executor, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.executeCalls != firstExecuteCalls || executor.revalidateCalls != len(plan.Stages) || len(resumed.Events) != len(plan.Stages) {
+		t.Fatalf("checkpoint resume replayed actions or skipped revalidation: execute=%d revalidate=%d events=%+v", executor.executeCalls, executor.revalidateCalls, resumed.Events)
+	}
+	for _, event := range resumed.Events {
+		if event.EventType != model.StageExecutionEventStageResumed {
+			t.Fatalf("resume audit event is missing: %+v", resumed.Events)
+		}
+	}
+}
+
 type stubStageVerifier struct {
 	decision model.ValidationDecision
 	calls    int

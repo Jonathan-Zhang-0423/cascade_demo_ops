@@ -169,6 +169,16 @@ type RuntimeObservation = {
   assertions?: Array<{ kind: string; passed: boolean; actual?: string }>;
   target_geometry?: BrowserTargetGeometry;
   target_resolution_attempts?: BrowserTargetResolutionAttempt[];
+  state_fingerprint?: BrowserStateFingerprint;
+};
+
+type BrowserStateFingerprint = {
+  origin?: string;
+  route_template?: string;
+  document_digest?: string;
+  aria_digest?: string;
+  frame_digests?: Record<string, string>;
+  observed_at: string;
 };
 
 export type BrowserTargetResolutionAttempt = {
@@ -751,6 +761,7 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
 export async function revalidateBrowserAgentStage(request: BrowserAgentStageRequest): Promise<BrowserAgentStageResult> {
   const session = requiredSession(request.session_id);
   validateStage(request.stage);
+  await ensureStageExecutionRoute(session, request.stage);
   await waitForCaptureWindow(session.page, request.stage);
   const assertions = await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID);
   const artifact = await captureScreenshot(session, request.stage, "revalidate");
@@ -1525,6 +1536,7 @@ function screenshotEvidence(artifact: ArtifactRef, stage: BrowserAgentWorkerStag
 }
 
 async function observation(page: any, source: RuntimeObservation["source"], assertions: NonNullable<RuntimeObservation["assertions"]>, targetGeometry?: BrowserTargetGeometry, resolutionAttempts: BrowserTargetResolutionAttempt[] = []): Promise<RuntimeObservation> {
+  const stateFingerprint = await browserStateFingerprint(page);
   return {
     source,
     url: safeURL(page.url()),
@@ -1532,6 +1544,33 @@ async function observation(page: any, source: RuntimeObservation["source"], asse
     assertions,
     ...(targetGeometry ? { target_geometry: targetGeometry } : {}),
     ...(resolutionAttempts.length > 0 ? { target_resolution_attempts: resolutionAttempts } : {}),
+    state_fingerprint: stateFingerprint,
+  };
+}
+
+async function browserStateFingerprint(page: any): Promise<BrowserStateFingerprint> {
+  const url = new URL(safeURL(page.url()));
+  const digests = await page.evaluate(() => {
+    const hash = (value: string) => {
+      let state = 2166136261;
+      for (let index = 0; index < value.length; index++) state = Math.imul(state ^ value.charCodeAt(index), 16777619);
+      return (state >>> 0).toString(16).padStart(8, "0");
+    };
+    const documentValue = String((globalThis as any).document?.documentElement?.outerHTML || "");
+    const ariaValue = Array.from((globalThis as any).document?.querySelectorAll?.("[role],[aria-label],[aria-labelledby]") || [])
+      .map((element: any) => `${element.getAttribute("role") || ""}|${element.getAttribute("aria-label") || ""}|${element.getAttribute("aria-labelledby") || ""}`)
+      .join("\n");
+    const frames = Array.from((globalThis as any).document?.querySelectorAll?.("iframe") || [])
+      .map((frame: any, index: number) => [`frame_${index}`, hash(String(frame.getAttribute("src") || "inline"))]);
+    return { documentDigest: hash(documentValue), ariaDigest: hash(ariaValue), frameDigests: Object.fromEntries(frames) };
+  }).catch(() => ({ documentDigest: "unavailable", ariaDigest: "unavailable", frameDigests: {} }));
+  return {
+    origin: url.origin,
+    route_template: normalizeRoutePath(url.pathname).replace(/\b[0-9a-f]{8,}\b/gi, ":id").replace(/\/\d+(?=\/|$)/g, "/:id"),
+    document_digest: digests.documentDigest,
+    aria_digest: digests.ariaDigest,
+    frame_digests: digests.frameDigests,
+    observed_at: new Date().toISOString(),
   };
 }
 

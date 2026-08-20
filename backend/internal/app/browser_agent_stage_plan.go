@@ -205,6 +205,20 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		PatchLedger:       make([]model.RuntimePatchLedgerEntry, 0),
 	}
 	sequence := int64(0)
+	completedStages := map[string]model.StageExecutionEvent{}
+	if history, ok := sink.(stageExecutionEventHistory); ok {
+		for _, event := range history.Events() {
+			if event.RunID != plan.RunID || event.SourcePackageID != plan.SourcePackageID || event.SourceBundleHashSHA256 != plan.SourceBundleHashSHA256 || event.PolicyHashSHA256 != plan.PolicyHashSHA256 {
+				continue
+			}
+			if event.Sequence > sequence {
+				sequence = event.Sequence
+			}
+			if event.EventType == model.StageExecutionEventStageCompleted {
+				completedStages[event.StageID] = event
+			}
+		}
+	}
 	attemptByStage := make(map[string]int, len(plan.Stages))
 	for _, stage := range plan.Stages {
 		attemptByStage[stage.ID] = 1
@@ -235,6 +249,22 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		stageEventStart := len(result.Events)
 		if err := ctx.Err(); err != nil {
 			return result, err
+		}
+		if completedEvent, completed := completedStages[stage.ID]; completed {
+			revalidator, ok := executor.(BrowserAgentStageOutcomeRevalidator)
+			if !ok {
+				return result, newRuntimeExecutionError("browser_agent_checkpoint_revalidation_unavailable", fmt.Errorf("completed stage %s requires non-action revalidation", stage.ID))
+			}
+			revalidated, revalidateErr := revalidator.RevalidateStage(ctx, plan, stage)
+			if revalidateErr == nil && validResumedStageObservation(revalidated, completedEvent.Observation) {
+				if err := appendEvent(stage, model.StageExecutionEventStageResumed, revalidated.Observation, revalidated.EvidenceRefs); err != nil {
+					return result, err
+				}
+				continue
+			}
+			if stageReplayPolicy(stage) == model.InteractionReplayOnceEffect {
+				return result, newRuntimeExecutionError("browser_agent_once_effect_replay_denied", fmt.Errorf("completed once-effect stage %s no longer matches its checkpoint and cannot be replayed", stage.ID))
+			}
 		}
 		if err := appendEvent(stage, model.StageExecutionEventStageStarted, nil, nil); err != nil {
 			return result, err
@@ -429,6 +459,49 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		}
 	}
 	return result, nil
+}
+
+func validResumedStageObservation(result BrowserAgentStageActionResult, previous *model.RuntimeObservation) bool {
+	if result.Observation == nil || !runtimeObservationIsRealEvidence(result.Observation.Source) || len(result.EvidenceRefs) == 0 {
+		return false
+	}
+	if sameBrowserStateFingerprint(previous, result.Observation) {
+		return true
+	}
+	if len(result.Observation.Assertions) == 0 {
+		return false
+	}
+	for _, assertion := range result.Observation.Assertions {
+		if !assertion.Passed {
+			return false
+		}
+	}
+	return true
+}
+
+func sameBrowserStateFingerprint(previous, current *model.RuntimeObservation) bool {
+	if previous == nil || current == nil || previous.StateFingerprint == nil || current.StateFingerprint == nil {
+		return false
+	}
+	left, right := previous.StateFingerprint, current.StateFingerprint
+	return left.Origin != "" && left.Origin == right.Origin && left.RouteTemplate != "" && left.RouteTemplate == right.RouteTemplate && left.DocumentDigest != "" && left.DocumentDigest == right.DocumentDigest && left.ARIADigest != "" && left.ARIADigest == right.ARIADigest
+}
+
+func stageReplayPolicy(stage BrowserAgentRuntimeStage) model.InteractionReplayPolicy {
+	if stage.InteractionContract != nil && stage.InteractionContract.ReplayPolicy != "" {
+		return stage.InteractionContract.ReplayPolicy
+	}
+	if len(stage.Interactions) == 0 {
+		return model.InteractionReplayObserveOnly
+	}
+	switch stage.Interactions[0].Kind {
+	case model.GraphActionWait, model.GraphActionInspect, model.GraphActionAssert:
+		return model.InteractionReplayObserveOnly
+	case model.GraphActionFill, model.GraphActionSelect:
+		return model.InteractionReplayIdempotentWrite
+	default:
+		return model.InteractionReplayOnceEffect
+	}
 }
 
 func warningOnlyRepairDecisionCanContinue(report model.ValidationReport, observation *model.RuntimeObservation) bool {
@@ -920,7 +993,7 @@ func browserAgentRouteTemplateSegment(value string) bool {
 func normalizeBrowserAgentRoute(value string) string {
 	value = strings.TrimSpace(value)
 	if parsed, err := url.Parse(value); err == nil {
-		// Absolute origins (for example https://cascadeai.cn) represent the
+		// Absolute origins (for example https://product.example) represent the
 		// site root. Keep route matching semantics identical for absolute URLs
 		// and path-only routes so an initial session navigation is allowed by a
 		// root scope entry ("/").

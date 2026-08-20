@@ -25,6 +25,7 @@ const (
 	StageExecutionEventOutcomeObserved      StageExecutionEventType = "outcome_observed"
 	StageExecutionEventRepairProposed       StageExecutionEventType = "repair_proposed"
 	StageExecutionEventRepairApplied        StageExecutionEventType = "repair_applied"
+	StageExecutionEventStageResumed         StageExecutionEventType = "stage_resumed"
 	StageExecutionEventStageCompleted       StageExecutionEventType = "stage_completed"
 	StageExecutionEventStageFailed          StageExecutionEventType = "stage_failed"
 )
@@ -86,6 +87,17 @@ type RuntimeObservation struct {
 	Assertions               []RuntimeAssertion               `json:"assertions,omitempty"`
 	TargetGeometry           *BrowserTargetGeometry           `json:"target_geometry,omitempty"`
 	TargetResolutionAttempts []BrowserTargetResolutionAttempt `json:"target_resolution_attempts,omitempty"`
+	StateFingerprint         *BrowserStateFingerprint         `json:"state_fingerprint,omitempty"`
+}
+
+type BrowserStateFingerprint struct {
+	Origin             string            `json:"origin,omitempty"`
+	RouteTemplate      string            `json:"route_template,omitempty"`
+	DocumentDigest     string            `json:"document_digest,omitempty"`
+	ARIADigest         string            `json:"aria_digest,omitempty"`
+	VisualRegionDigest string            `json:"visual_region_digest,omitempty"`
+	FrameDigests       map[string]string `json:"frame_digests,omitempty"`
+	ObservedAt         time.Time         `json:"observed_at"`
 }
 
 // BrowserTargetResolutionAttempt is a redacted locator diagnostic. It records
@@ -405,7 +417,7 @@ func validStageExecutionEventType(value StageExecutionEventType) bool {
 	switch value {
 	case StageExecutionEventStageStarted, StageExecutionEventObservationCollected, StageExecutionEventTargetResolved,
 		StageExecutionEventActionStarted, StageExecutionEventActionCompleted, StageExecutionEventOutcomeObserved,
-		StageExecutionEventRepairProposed, StageExecutionEventRepairApplied, StageExecutionEventStageCompleted,
+		StageExecutionEventRepairProposed, StageExecutionEventRepairApplied, StageExecutionEventStageResumed, StageExecutionEventStageCompleted,
 		StageExecutionEventStageFailed:
 		return true
 	default:

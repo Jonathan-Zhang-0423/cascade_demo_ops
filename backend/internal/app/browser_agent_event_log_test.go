@@ -11,7 +11,8 @@ import (
 )
 
 func TestStageEventAuditLogIsAppendOnlyOrderedAndIdempotent(t *testing.T) {
-	log, err := newStageEventAuditLog(t.TempDir(), "job_1")
+	directory := t.TempDir()
+	log, err := newStageEventAuditLog(directory, "job_1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +53,16 @@ func TestStageEventAuditLogIsAppendOnlyOrderedAndIdempotent(t *testing.T) {
 	}
 	if artifact.SHA256 == "" || artifact.SizeBytes == 0 || !artifact.Sensitive || artifact.MimeType != "application/x-ndjson" {
 		t.Fatalf("unexpected stage event artifact: %+v", artifact)
+	}
+	reloaded, err := newStageEventAuditLog(directory, "job_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Count() != 2 || len(reloaded.Events()) != 2 {
+		t.Fatalf("existing audit history was not restored: count=%d events=%d", reloaded.Count(), len(reloaded.Events()))
+	}
+	if err := reloaded.Append(context.Background(), auditTestEvent("event_3", 3)); err != nil {
+		t.Fatalf("restored sequence did not continue monotonically: %v", err)
 	}
 }
 

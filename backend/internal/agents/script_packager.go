@@ -2552,7 +2552,7 @@ func interactionContractForStep(step model.ScriptStep, node *model.GraphNode, ta
 		SchemaVersion: model.InteractionContractSchemaVersion,
 		ContractID:    "interaction_" + shortHash(step.NodeID+"|"+string(step.Action.Type)+"|"+target.SemanticID),
 		SemanticGoal:  firstNonEmpty(step.BusinessValue, step.ExpectedOutcome, step.Title),
-		Archetype:     model.ProductArchetypeUnknown, ActionKind: step.Action.Type, ReplayPolicy: interactionReplayPolicy(step.Action.Type), TargetSemanticID: target.SemanticID,
+		Archetype:     model.ProductArchetypeUnknown, ActionKind: step.Action.Type, ReplayPolicy: interactionReplayPolicy(step.Action.Type), TargetSemanticID: target.SemanticID, ActionTarget: step.Action.Target,
 		Preconditions: preconditions, ExpectedTransitions: predicates, EvidenceRefs: evidence, NonDestructive: true,
 	}
 	if err := model.ValidateInteractionContract(*contract); err != nil {
