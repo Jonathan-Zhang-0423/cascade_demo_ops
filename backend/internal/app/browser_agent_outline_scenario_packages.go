@@ -78,7 +78,11 @@ func controlledOutlineBase(fixturePath, baseURL, packageID, projectID, contextID
 	base.PackageID, base.ProjectID = packageID, projectID
 	base.ProjectContextSummary.ContextID = contextID
 	base.ProjectContextSummary.Name = name
-	base.ProjectContextSummary.ProductURL = baseURL
+	// The worker opens the session at the package product URL before the first
+	// stage runs. The declared product entry for controlled scenarios is the
+	// first approved workspace route, so the session starts inside the allowed
+	// route scope without widening allowed_routes.
+	base.ProjectContextSummary.ProductURL = baseURL + "/app"
 	base.RecordingRunSpec.RunID, base.RecordingRunSpec.BaseURL, base.RecordingRunSpec.AllowedDomains = runID, baseURL, []string{domain}
 	base.RecordingRunSpec.Timeline.TargetDurationSec = 8
 	base.RecordingRunSpec.Outputs.OutputFormats = []string{"mp4"}

@@ -706,7 +706,7 @@ func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver
 	recordingSensitive := true
 	return driver.BrowserAgentWorkerOpenRequest{
 		SessionID: safePathSegment(request.CloudJobID), OutputDir: request.RecordingOutputDir,
-		InitialURL: initialBrowserAgentSessionURL(request),
+		InitialURL: firstNonEmptyString(request.Package.ProjectContextSummary.ProductURL, request.Package.RecordingRunSpec.BaseURL),
 		Browser: driver.BrowserAgentWorkerBrowser{
 			Engine: request.Package.RecordingRunSpec.Browser.Engine, Headless: request.Package.RecordingRunSpec.Browser.Headless,
 			Viewport: viewport, RecordVideo: request.Package.RecordingRunSpec.Outputs.RawRecording,
@@ -720,26 +720,6 @@ func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver
 		MaskSelectors:         uniqueStrings(maskSelectors),
 		RecordingSensitive:    &recordingSensitive,
 	}
-}
-
-// initialBrowserAgentSessionURL picks the session entry URL. The worker opens
-// the session at this URL before executing the first stage, and the route
-// policy applies to it. When the first stage already navigates to its own
-// approved route, opening there directly keeps the session inside the allowed
-// route scope without widening the allowed-routes contract itself. Packages
-// whose first stage does not navigate fall back to the declared base URL,
-// which the App packaging rules already include in the allowed route scope.
-func initialBrowserAgentSessionURL(request BrowserAgentOutlineRunRequest) string {
-	fallback := firstNonEmptyString(request.Package.ProjectContextSummary.ProductURL, request.Package.RecordingRunSpec.BaseURL)
-	if len(request.RuntimePlan.Stages) == 0 {
-		return fallback
-	}
-	for _, interaction := range request.RuntimePlan.Stages[0].Interactions {
-		if interaction.Kind == model.GraphActionNavigate && strings.TrimSpace(interaction.Target.URL) != "" {
-			return interaction.Target.URL
-		}
-	}
-	return fallback
 }
 
 func workerStageFromRuntime(stage BrowserAgentRuntimeStage) driver.BrowserAgentWorkerStage {
