@@ -29,9 +29,11 @@ func TestSeedance25ProviderAdapterPinsOfficialModelAndEntersCommonReview(t *test
 		t.Fatal(err)
 	}
 	outputDir := t.TempDir()
+	checkpointedTaskID := ""
 	result, err := adapter.Execute(context.Background(), GeneratedShotProviderExecutionRequest{
 		Intent: validGeneratedShotIntent(), GenerationAuthorized: true, AuthorizationRef: "approval://seedance-2.5/1",
 		IdempotencyKey: "seedance-2.5-idempotency", AdmissionScope: "final-film:seedance-2.5", OutputDir: outputDir,
+		OnTaskSubmitted: func(taskID string) error { checkpointedTaskID = taskID; return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +41,7 @@ func TestSeedance25ProviderAdapterPinsOfficialModelAndEntersCommonReview(t *test
 	if client.lastRequest.Model != Seedance25ServerModel || client.lastRequest.GenerateAudio || !client.lastRequest.ReturnLastFrame {
 		t.Fatalf("unexpected Seedance 2.5 request: %+v", client.lastRequest)
 	}
-	if result.Provider != GeneratedShotProviderSeedance25 || result.Candidate == nil || result.Candidate.Provider != GeneratedShotProviderSeedance25 || !result.StructuralReview.StructurallyEligible {
+	if checkpointedTaskID != "seedance_task_1" || result.Provider != GeneratedShotProviderSeedance25 || result.Candidate == nil || result.Candidate.Provider != GeneratedShotProviderSeedance25 || !result.StructuralReview.StructurallyEligible {
 		t.Fatalf("Seedance 2.5 did not enter common review contract: %+v", result)
 	}
 	if _, err := os.Stat(filepath.Join(outputDir, GeneratedShotProviderSeedance25, "seedance_task_1", "normalized.mp4")); err != nil {

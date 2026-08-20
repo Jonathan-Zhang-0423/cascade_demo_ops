@@ -121,16 +121,21 @@ func TestRunMiniMaxH3HarnessResumesWithoutCreatingAnotherTask(t *testing.T) {
 func TestRunMiniMaxH3HarnessUsesGovernedSubmitterForProductionGeneration(t *testing.T) {
 	client := &stubMiniMaxH3HarnessClient{}
 	submitter := &stubMiniMaxH3HarnessSubmitter{}
+	checkpointedTaskID := ""
 	result, err := RunMiniMaxH3Harness(t.Context(), validMiniMaxH3HarnessIntent(), MiniMaxH3HarnessOptions{
 		Client: client, Submitter: submitter, AdmissionScope: "project_1", IdempotencyKey: "intro_1_revision_1",
 		OutputDir: t.TempDir(), Resolution: "768P", GenerationPollAttempts: 1,
-		Downloader: &stubMiniMaxH3Downloader{content: []byte("original-video")}, Normalizer: &stubMiniMaxH3Normalizer{},
+		OnGenerationTaskSubmitted: func(taskID string) error { checkpointedTaskID = taskID; return nil },
+		Downloader:                &stubMiniMaxH3Downloader{content: []byte("original-video")}, Normalizer: &stubMiniMaxH3Normalizer{},
 	})
 	if err != nil || result.Status != "awaiting_human_content_review" || result.GenerationTaskID != "governed_generation" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	if submitter.calls != 1 || submitter.request.Scope != "project_1" || submitter.request.IdempotencyKey != "intro_1_revision_1" {
 		t.Fatalf("submitter=%+v", submitter)
+	}
+	if checkpointedTaskID != "governed_generation" {
+		t.Fatalf("generation task was not checkpointed before polling: %q", checkpointedTaskID)
 	}
 	if client.createCalls != 0 {
 		t.Fatalf("direct create calls=%d", client.createCalls)

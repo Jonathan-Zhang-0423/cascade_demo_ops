@@ -26,6 +26,13 @@ const (
 	FinalFilmJobCompletedWithoutGenerated  FinalFilmJobState = "completed_without_generated_track"
 	FinalFilmJobFailed                     FinalFilmJobState = "failed"
 	FinalFilmJobCancelled                  FinalFilmJobState = "cancelled"
+	FinalFilmJobAnalyzingEvidence          FinalFilmJobState = "analyzing_evidence"
+	FinalFilmJobPlanning                   FinalFilmJobState = "planning"
+	FinalFilmJobGeneratingPresentation     FinalFilmJobState = "generating_presentation"
+	FinalFilmJobQualityGate                FinalFilmJobState = "quality_gate"
+	FinalFilmJobComposing                  FinalFilmJobState = "composing"
+	FinalFilmJobAwaitingFinalReview        FinalFilmJobState = "awaiting_final_review"
+	FinalFilmJobRevisionRequested          FinalFilmJobState = "revision_requested"
 )
 
 type FinalFilmJob struct {
@@ -58,6 +65,14 @@ type FinalFilmJob struct {
 	FinalRender                FinalFilmRenderOutput          `json:"final_render,omitempty"`
 	FinalOutputValidation      *FinalFilmOutputValidation     `json:"final_output_validation,omitempty"`
 	LastError                  *FinalFilmJobError             `json:"last_error,omitempty"`
+	AutomationProfile          string                         `json:"automation_profile,omitempty"`
+	AutomationPolicy           *FinalFilmAutomationPolicy     `json:"automation_policy,omitempty"`
+	RunAuthorization           *FinalFilmRunAuthorization     `json:"run_authorization,omitempty"`
+	EvidenceDigest             *DirectorEvidenceDigest        `json:"evidence_digest,omitempty"`
+	QualityReports             []CandidateQualityReport       `json:"quality_reports,omitempty"`
+	ReviewPackage              *FinalFilmReviewPackage        `json:"review_package,omitempty"`
+	FinalReview                *FinalFilmFinalReview          `json:"final_review,omitempty"`
+	ProviderAttempts           []FinalFilmProviderAttempt     `json:"provider_attempts,omitempty"`
 }
 
 type FinalFilmRenderOutput struct {
@@ -70,17 +85,25 @@ type FinalFilmRenderOutput struct {
 }
 
 type FinalFilmOutputValidation struct {
-	Status                  string    `json:"status"`
-	VideoSHA256             string    `json:"video_sha256,omitempty"`
-	VideoSizeBytes          int64     `json:"video_size_bytes,omitempty"`
-	Width                   int       `json:"width,omitempty"`
-	Height                  int       `json:"height,omitempty"`
-	FPS                     float64   `json:"fps,omitempty"`
-	DurationMS              int       `json:"duration_ms,omitempty"`
-	CompositorQualityStatus string    `json:"compositor_quality_status,omitempty"`
-	RequirementReportStatus string    `json:"requirement_report_status,omitempty"`
-	CheckedAt               time.Time `json:"checked_at"`
-	Error                   string    `json:"error,omitempty"`
+	Status                   string    `json:"status"`
+	VideoSHA256              string    `json:"video_sha256,omitempty"`
+	VideoSizeBytes           int64     `json:"video_size_bytes,omitempty"`
+	Width                    int       `json:"width,omitempty"`
+	Height                   int       `json:"height,omitempty"`
+	FPS                      float64   `json:"fps,omitempty"`
+	DurationMS               int       `json:"duration_ms,omitempty"`
+	CompositorQualityStatus  string    `json:"compositor_quality_status,omitempty"`
+	RequirementReportStatus  string    `json:"requirement_report_status,omitempty"`
+	CheckedAt                time.Time `json:"checked_at"`
+	Error                    string    `json:"error,omitempty"`
+	QualityAnalysisAvailable bool      `json:"quality_analysis_available,omitempty"`
+	BlackDurationMS          int       `json:"black_duration_ms,omitempty"`
+	FreezeDurationMS         int       `json:"freeze_duration_ms,omitempty"`
+	SilenceDurationMS        int       `json:"silence_duration_ms,omitempty"`
+	VerifiedSilence          bool      `json:"verified_silence,omitempty"`
+	IntegratedLUFS           float64   `json:"integrated_lufs,omitempty"`
+	TruePeakDB               float64   `json:"true_peak_db,omitempty"`
+	AudioCodec               string    `json:"audio_codec,omitempty"`
 }
 
 type FinalFilmJobError struct {

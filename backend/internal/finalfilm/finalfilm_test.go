@@ -458,6 +458,11 @@ func (f *fakeGeneratedShotProvider) Execute(_ context.Context, request media.Gen
 		originalDigest, normalizedDigest = strings.Repeat("d", 64), strings.Repeat("e", 64)
 	}
 	taskID := "task_" + request.Intent.IntentID
+	if request.ResumeProviderTaskID == "" && request.OnTaskSubmitted != nil {
+		if err := request.OnTaskSubmitted(taskID); err != nil {
+			return media.GeneratedShotProviderExecutionResult{ProviderTaskID: taskID}, err
+		}
+	}
 	candidate := media.GeneratedShotCandidate{
 		SchemaVersion: media.GeneratedShotCandidateSchemaVersion, CandidateID: "candidate_" + request.Intent.IntentID,
 		IntentID: request.Intent.IntentID, Provider: media.GeneratedShotProviderMiniMaxH3, ProviderTaskID: taskID,
@@ -499,7 +504,8 @@ func (f *fakeFinalFilmRenderer) ProbeMedia(_ context.Context, request executor.M
 	return executor.MediaProbeResult{
 		Path: request.Path, SizeBytes: 1000, SHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		MimeType: "video/mp4", Format: "mp4", DurationMS: 9000, VideoCodec: "h264", Width: 1920, Height: 1080,
-		FPS: 29.79, PixelFormat: "yuv420p", FFProbeAvailable: true,
+		FPS: 29.79, PixelFormat: "yuv420p", FFProbeAvailable: true, QualityAnalysisAvailable: true,
+		IntegratedLUFS: -16, TruePeakDB: -1.2,
 	}, nil
 }
 
@@ -550,7 +556,7 @@ func newFinalFilmTestService(t *testing.T) (*Service, *fakeFinalFilmRenderer) {
 	}
 	service, err := NewService(ServiceOptions{
 		Store: NewFileStore(filepath.Join(root, "jobs")), Renderer: renderer, OutputRoot: filepath.Join(root, "outputs"),
-		Providers: registry,
+		Providers: registry, SkillRoot: filepath.Join("..", "..", "..", "skills", "final-film"),
 		Now:       func() time.Time { sequence++; return time.Unix(int64(100+sequence), 0) },
 		NewID: func(prefix string) (string, error) {
 			sequence++

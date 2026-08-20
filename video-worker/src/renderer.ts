@@ -2585,7 +2585,8 @@ function outputDurationMS(plan: DemoEditPlan): number {
 
 function shotOutputDurationMS(shot: DemoEditShot): number {
   if (isStillShot(shot)) return Math.max(0, shot.output_duration_ms ?? 0);
-  return shot.source_time_range_ms ? Math.max(0, shot.source_time_range_ms[1] - shot.source_time_range_ms[0]) : 0;
+  const sourceDurationMS = shot.source_time_range_ms ? Math.max(0, shot.source_time_range_ms[1] - shot.source_time_range_ms[0]) : 0;
+  return Math.max(0, Math.round(sourceDurationMS / playbackSpeedForOperations(shot.operations ?? [])));
 }
 
 export function validateEditPlan(request: { catalog: AssetTimelineCatalog; edit_plan: DemoEditPlan }): DemoEditPlanValidationReport {
@@ -3045,7 +3046,7 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
       const artifact = findDemoArtifactByID(catalog, shot.source_artifact_id) || (still ? undefined : fallbackArtifact);
       const sourcePath = artifact?.local_path || (artifact?.uri ? filePathFromURI(artifact.uri) : undefined);
       const sourceRange = still ? undefined : shot.source_time_range_ms || sourceRangeForStep(catalog, shot.source_step_id);
-      const durationMS = still ? Math.max(0, shot.output_duration_ms ?? 0) : sourceRange ? Math.max(0, sourceRange[1] - sourceRange[0]) : 0;
+      const sourceDurationMS = still ? Math.max(0, shot.output_duration_ms ?? 0) : sourceRange ? Math.max(0, sourceRange[1] - sourceRange[0]) : 0;
       const operations = (shot.operations || []).map((operation) => operation.type);
       const editOperations = (shot.operations || []).map((operation) => ({
         type: operation.type,
@@ -3058,6 +3059,8 @@ function buildCompositorShotPlan(catalog: AssetTimelineCatalog, editPlan: DemoEd
         ...(operation.speed !== undefined ? { speed: operation.speed } : {}),
         ...(operation.style !== undefined ? { style: operation.style } : {}),
       }));
+      const playbackSpeed = playbackSpeedForOperations(editOperations);
+      const durationMS = still ? sourceDurationMS : Math.max(1, Math.round(sourceDurationMS / playbackSpeed));
       const sourceOverlays = shot.overlays || [];
       const overlays = sourceOverlays.map((overlay) => {
         const plannedOverlay: CompositorShot["overlays"][number] = { type: overlay.type };
@@ -3479,7 +3482,14 @@ function buildVideoOperationFilters(operations: CompositorShot["edit_operations"
         break;
       }
       case "pan": filters.push("crop=iw*0.94:ih*0.94:iw*0.03:ih*0.03"); break;
-      case "speed": { const speed = boundedNumber(operation.speed ?? 1, 1, 0.5, 2); if (Math.abs(speed - 1) > 0.001) { filters.push(`setpts=PTS/${speed.toFixed(3)}`); audioTempo = `atempo=${speed.toFixed(3)}`; } break; }
+      case "speed": {
+        const speed = boundedNumber(operation.speed ?? 1, 1, 0.5, 12);
+        if (Math.abs(speed - 1) > 0.001) {
+          filters.push(`setpts=PTS/${speed.toFixed(3)}`);
+          audioTempo = atempoFilterChain(speed);
+        }
+        break;
+      }
       case "transition": filters.push(`fade=t=in:st=0:d=${Math.min(0.4, Math.max(0.1, durationMS / 1000)).toFixed(3)}`); break;
       case "color_grade": filters.push("eq=contrast=1.03:saturation=1.04:brightness=0.01"); break;
       // Regional privacy blur is composed in composeWithFFmpeg after the
@@ -3488,6 +3498,24 @@ function buildVideoOperationFilters(operations: CompositorShot["edit_operations"
     }
   }
   return { filters, audioTempo };
+}
+
+function playbackSpeedForOperations(operations: Array<{ type: string; speed?: number }>): number {
+  const operation = [...operations].reverse().find((candidate) => candidate.type === "speed");
+  return boundedNumber(operation?.speed ?? 1, 1, 0.5, 12);
+}
+
+// FFmpeg atempo accepts one factor only in [0.5, 2]. Chaining legal factors
+// keeps 4-12x wait compression synchronized with the accelerated video.
+export function atempoFilterChain(speed: number): string {
+  let remaining = boundedNumber(speed, 1, 0.5, 12);
+  const factors: number[] = [];
+  while (remaining > 2.0001) {
+    factors.push(2);
+    remaining /= 2;
+  }
+  if (Math.abs(remaining - 1) > 0.0001 || factors.length === 0) factors.push(remaining);
+  return factors.map((factor) => `atempo=${factor.toFixed(3)}`).join(",");
 }
 
 function normalizedShapeNumber(value: number | undefined, fallback: number): number {
@@ -3653,8 +3681,9 @@ async function composeWithFFmpeg(
     if (!still && !shot.source_time_range_ms) continue;
     const [startMS, endMS] = shot.source_time_range_ms ?? [0, shot.duration_ms];
     const segmentStartMS = still ? 0 : startMS;
-    const segmentDurationMS = still ? shot.duration_ms : endMS - startMS;
-    if (segmentDurationMS <= 0) {
+    const sourceDurationMS = still ? shot.duration_ms : endMS - startMS;
+    const segmentDurationMS = shot.duration_ms;
+    if (sourceDurationMS <= 0 || segmentDurationMS <= 0) {
       continue;
     }
     const segmentPath = path.join(segmentsDir, `${String(index + 1).padStart(3, "0")}_${safeName(shot.id)}${extension}`);
@@ -3667,7 +3696,7 @@ async function composeWithFFmpeg(
       outputFPS = fps;
       videoFilters.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p`);
     }
-    const operationFilterResult = buildVideoOperationFilters(shot.edit_operations, segmentDurationMS);
+    const operationFilterResult = buildVideoOperationFilters(shot.edit_operations, sourceDurationMS);
     videoFilters.unshift(...operationFilterResult.filters);
     const captionCues = [
       ...captionCuesForShot(shot),
@@ -3685,8 +3714,8 @@ async function composeWithFFmpeg(
     let useSourceAudio = false;
     const ffmpegArgs = still
       ? [
-          "-y", "-loop", "1", "-framerate", String(outputFPS), "-t", secondsArg(segmentDurationMS), "-i", shot.source_path,
-          "-f", "lavfi", "-t", secondsArg(segmentDurationMS), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+          "-y", "-loop", "1", "-framerate", String(outputFPS), "-t", secondsArg(sourceDurationMS), "-i", shot.source_path,
+          "-f", "lavfi", "-t", secondsArg(sourceDurationMS), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
         ]
       : ["-y", "-i", shot.source_path];
     if (!still) {
@@ -3700,7 +3729,7 @@ async function composeWithFFmpeg(
     }
     if (!still) ffmpegArgs.push("-ss", secondsArg(segmentStartMS));
     ffmpegArgs.push(
-      "-t", secondsArg(segmentDurationMS),
+      "-t", secondsArg(sourceDurationMS),
       "-map", useSourceAudio ? "0:a:0" : "1:a:0",
     );
     if (blurOverlays.length > 0) {
@@ -3768,7 +3797,7 @@ async function composeWithFFmpeg(
       return { rendered: false, error: "missing_single_segment" };
     }
     await copyFile(onlySegmentPath, videoPath);
-    return applyNarrationsAndGlobalCaptions(ffmpegPath, outputDir, videoPath, extension, codec, audioCodec, catalog, editPlan, {
+    return applyNarrationsAndGlobalCaptions(ffmpegPath, outputDir, videoPath, extension, codec, audioCodec, catalog, editPlan, renderProfile?.mode === "final", {
       source_master_preserved: true,
       segment_video_encode_passes: 1,
       concat_video_mode: "not_applicable",
@@ -3788,7 +3817,7 @@ async function composeWithFFmpeg(
   if (concatResult.code !== 0) {
     return { rendered: false, error: compactProcessError("ffmpeg_concat_failed", concatResult) };
   }
-  return applyNarrationsAndGlobalCaptions(ffmpegPath, outputDir, videoPath, extension, codec, audioCodec, catalog, editPlan, {
+  return applyNarrationsAndGlobalCaptions(ffmpegPath, outputDir, videoPath, extension, codec, audioCodec, catalog, editPlan, renderProfile?.mode === "final", {
     source_master_preserved: true,
     segment_video_encode_passes: 1,
     concat_video_mode: "stream_copy",
@@ -3850,9 +3879,10 @@ async function applyNarrationsAndGlobalCaptions(
   audioCodec: VideoCodecConfig,
   catalog?: AssetTimelineCatalog,
   editPlan?: DemoEditPlan,
+  normalizeLoudness = false,
   encodingAudit?: VideoEncodingAudit,
 ): Promise<{ rendered: boolean; error?: string; video_codec?: string; audio_codec?: string; encoding_audit?: VideoEncodingAudit }> {
-  if (!editPlan || !hasAudioPostProcessingWork(editPlan)) {
+  if (!editPlan || (!hasAudioPostProcessingWork(editPlan) && !normalizeLoudness)) {
     return {
       rendered: true,
       video_codec: videoCodec.name,
@@ -3860,10 +3890,12 @@ async function applyNarrationsAndGlobalCaptions(
       ...(encodingAudit ? { encoding_audit: encodingAudit } : {}),
     };
   }
-  if (!catalog) {
+  if (hasAudioPostProcessingWork(editPlan) && !catalog) {
     return { rendered: false, error: "missing_catalog_for_audio_post_process" };
   }
-  const narrationPlan = await buildNarrationRenderInputs(catalog, editPlan);
+  const narrationPlan: { inputs?: NarrationRenderInput[]; error?: string } = catalog
+    ? await buildNarrationRenderInputs(catalog, editPlan)
+    : { inputs: [] };
   if (!narrationPlan.inputs) {
     return { rendered: false, error: narrationPlan.error || "invalid_narration_plan" };
   }
@@ -3877,6 +3909,7 @@ async function applyNarrationsAndGlobalCaptions(
   }
 
   const filters: string[] = [];
+  let outputAudioLabel = "0:a:0";
   if (narrationPlan.inputs.length > 0) {
     filters.push(`[0:a]volume='${duckedSourceVolumeExpression(narrationPlan.inputs)}':eval=frame,asetpts=PTS-STARTPTS[base_audio]`);
     const narrationLabels: string[] = [];
@@ -3889,17 +3922,25 @@ async function applyNarrationsAndGlobalCaptions(
         `[${index + 1}:a]atrim=start=${secondsArg(narration.source_time_range_ms[0])}:end=${secondsArg(narration.source_time_range_ms[1])},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=${(narration.volume_percent / 100).toFixed(2)},adelay=${Math.round(narration.output_time_range_ms[0])}|${Math.round(narration.output_time_range_ms[0])}[${label}]`,
       );
     });
+    const mixedLabel = normalizeLoudness ? "mixed_audio_pre_normalize" : "mixed_audio";
     // Keep the portable amix option set. Older FFmpeg builds do not support
     // normalize=, while duration=first preserves the rendered video timeline.
-    filters.push(`[base_audio]${narrationLabels.join("")}amix=inputs=${narrationPlan.inputs.length + 1}:duration=first[mixed_audio]`);
+    filters.push(`[base_audio]${narrationLabels.join("")}amix=inputs=${narrationPlan.inputs.length + 1}:duration=first[${mixedLabel}]`);
+    outputAudioLabel = `[${mixedLabel}]`;
+  }
+  if (normalizeLoudness) {
+    const inputLabel = narrationPlan.inputs.length > 0 ? "[mixed_audio_pre_normalize]" : "[0:a]";
+    filters.push(`${inputLabel}loudnorm=I=-16:TP=-1:LRA=11[normalized_audio]`);
+    outputAudioLabel = "[normalized_audio]";
   }
 
   if (filters.length > 0) {
     ffmpegArgs.push("-filter_complex", filters.join(";"));
   }
   // Global captions are burned into each segment during its only video encode.
-  // Narration changes audio only, so preserve the already-rendered video bitstream.
-  ffmpegArgs.push("-map", "0:v:0", "-map", narrationPlan.inputs.length > 0 ? "[mixed_audio]" : "0:a:0", "-c:v", "copy", "-c:a", audioCodec.name, ...audioCodec.args, "-movflags", "+faststart", postProcessPath);
+  // Narration and final loudness normalization change audio only, so preserve
+  // the already-rendered video bitstream.
+  ffmpegArgs.push("-map", "0:v:0", "-map", outputAudioLabel, "-c:v", "copy", "-c:a", audioCodec.name, ...audioCodec.args, "-movflags", "+faststart", postProcessPath);
   const result = await runCommand(ffmpegPath, ffmpegArgs);
   if (result.code !== 0) {
     return { rendered: false, error: compactProcessError("ffmpeg_audio_caption_post_process_failed", result) };

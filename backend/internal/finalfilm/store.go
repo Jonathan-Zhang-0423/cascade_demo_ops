@@ -23,6 +23,7 @@ type Store interface {
 	TransitionJob(context.Context, string, int, model.FinalFilmJob, model.FinalFilmEvent) error
 	AppendEvent(context.Context, model.FinalFilmEvent) error
 	ListEvents(context.Context, string) ([]model.FinalFilmEvent, error)
+	ListJobs(context.Context) ([]model.FinalFilmJob, error)
 }
 
 type fileEnvelope struct {
@@ -163,6 +164,41 @@ func (s *FileStore) ListEvents(ctx context.Context, jobID string) ([]model.Final
 		return nil, err
 	}
 	return append([]model.FinalFilmEvent{}, envelope.Events...), nil
+}
+
+func (s *FileStore) ListJobs(ctx context.Context) ([]model.FinalFilmJob, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := os.ReadDir(s.root)
+	if errors.Is(err, os.ErrNotExist) {
+		return []model.FinalFilmJob{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	jobs := []model.FinalFilmJob{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path, pathErr := s.jobPath(entry.Name())
+		if pathErr != nil {
+			continue
+		}
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil, readErr
+		}
+		var envelope fileEnvelope
+		if jsonErr := json.Unmarshal(payload, &envelope); jsonErr != nil {
+			return nil, jsonErr
+		}
+		jobs = append(jobs, envelope.Job)
+	}
+	return jobs, nil
 }
 
 func (s *FileStore) readUnlocked(jobID string) (fileEnvelope, string, error) {

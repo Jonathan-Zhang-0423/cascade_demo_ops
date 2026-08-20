@@ -44,8 +44,10 @@ func (s *Service) SubmitDirectorPlan(ctx context.Context, jobID string, expected
 	if job.Revision != expectedRevision {
 		return model.FinalFilmJob{}, fmt.Errorf("%w: expected %d current %d", ErrRevisionConflict, expectedRevision, job.Revision)
 	}
-	if job.State != model.FinalFilmJobAwaitingGenerationApproval || job.GenerationAuthorized {
-		return model.FinalFilmJob{}, errors.New("director plan requires an unapproved job awaiting generation approval")
+	manualState := job.State == model.FinalFilmJobAwaitingGenerationApproval && job.AutomationProfile == ""
+	automatedState := job.State == model.FinalFilmJobPlanning && job.AutomationProfile == model.FinalFilmAutomationProfileGuidedDemoV1
+	if (!manualState && !automatedState) || job.GenerationAuthorized {
+		return model.FinalFilmJob{}, errors.New("director plan requires an eligible unapproved planning job")
 	}
 	if err := model.ValidateFinalFilmDirectorPlan(plan, job.JobID, job.Constraints, job.PresentationIntents); err != nil {
 		return model.FinalFilmJob{}, fmt.Errorf("validate director generated-shot plan: %w", err)
@@ -67,6 +69,9 @@ func (s *Service) SubmitDirectorPlan(ctx context.Context, jobID string, expected
 	next.Revision++
 	next.UpdatedAt = now
 	next.Phase = "director_generated_shot_plan_ready"
+	if automatedState {
+		next.Phase = "automated_director_plan_ready"
+	}
 	next.DirectorPlan = &plan
 	next.GeneratedTrack = raw
 	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "Director 展示镜头规格已校验并锁定，等待生成授权", map[string]any{

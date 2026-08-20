@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -169,7 +170,14 @@ func effectiveTargetDuration(plan model.DemoEditPlan) int {
 		if shot.OutputDurationMS > 0 {
 			total += shot.OutputDurationMS
 		} else if shot.SourceTimeRangeMS != nil {
-			total += shot.SourceTimeRangeMS[1] - shot.SourceTimeRangeMS[0]
+			speed := 1.0
+			for index := len(shot.Operations) - 1; index >= 0; index-- {
+				if shot.Operations[index].Type == model.EditOperationSpeed && shot.Operations[index].Speed != nil {
+					speed = math.Max(0.5, math.Min(12, *shot.Operations[index].Speed))
+					break
+				}
+			}
+			total += int(math.Round(float64(shot.SourceTimeRangeMS[1]-shot.SourceTimeRangeMS[0]) / speed))
 		}
 	}
 	return total

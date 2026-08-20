@@ -23,6 +23,13 @@ export interface MediaProbeResult {
   fps?: number;
   pixel_format?: string;
   ffprobe_available: boolean;
+  quality_analysis_available?: boolean;
+  black_duration_ms?: number;
+  freeze_duration_ms?: number;
+  silence_duration_ms?: number;
+  verified_silence?: boolean;
+  integrated_lufs?: number;
+  true_peak_db?: number;
 }
 
 const SUPPORTED_EXTENSIONS = new Map([
@@ -107,7 +114,33 @@ export async function probeMediaFile(request: MediaProbeRequest): Promise<MediaP
   }
   const audioCodec = stringValue(audio?.codec_name);
   if (audioCodec) result.audio_codec = audioCodec;
+  const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
+  const quality = await runCommand(ffmpegPath, [
+    "-hide_banner", "-nostats", "-i", inputPath,
+    "-vf", "blackdetect=d=0.1:pix_th=0.10,freezedetect=n=-50dB:d=0.5",
+    ...(audio ? ["-af", "ebur128=peak=true,silencedetect=noise=-50dB:d=0.5"] : []),
+    "-f", "null", "-",
+  ]);
+  if (quality.code === 0) applyFFmpegQualityAnalysis(result, quality.stderr || quality.stdout);
   return result;
+}
+
+export function applyFFmpegQualityAnalysis(result: MediaProbeResult, output: string): void {
+  result.quality_analysis_available = true;
+  result.black_duration_ms = sumDurations(output, /black_duration:([0-9]+(?:\.[0-9]+)?)/g);
+  result.freeze_duration_ms = sumDurations(output, /freeze_duration:\s*([0-9]+(?:\.[0-9]+)?)/g);
+  result.silence_duration_ms = sumDurations(output, /silence_duration:\s*([0-9]+(?:\.[0-9]+)?)/g);
+  result.verified_silence = (result.duration_ms ?? 0) > 0 && result.silence_duration_ms >= Math.max(0, (result.duration_ms ?? 0) - 500);
+  const loudness = [...output.matchAll(/\bI:\s*(-?[0-9]+(?:\.[0-9]+)?)\s*LUFS/g)].at(-1)?.[1];
+  const peak = [...output.matchAll(/\bPeak:\s*(-?[0-9]+(?:\.[0-9]+)?)\s*dBFS/g)].at(-1)?.[1];
+  if (loudness !== undefined && Number.isFinite(Number(loudness))) result.integrated_lufs = Number(loudness);
+  if (peak !== undefined && Number.isFinite(Number(peak))) result.true_peak_db = Number(peak);
+}
+
+function sumDurations(output: string, pattern: RegExp): number {
+  let total = 0;
+  for (const match of output.matchAll(pattern)) total += Number(match[1] ?? 0);
+  return Math.max(0, Math.round(total * 1000));
 }
 
 export function applyFFmpegProbeFallback(result: MediaProbeResult, output: string): void {

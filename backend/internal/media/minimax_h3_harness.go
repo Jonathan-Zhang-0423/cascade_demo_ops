@@ -35,6 +35,7 @@ type MiniMaxH3HarnessOptions struct {
 	GenerationPollAttempts      int
 	GenerationPollInterval      time.Duration
 	ExistingGenerationTaskID    string
+	OnGenerationTaskSubmitted   func(string) error
 	Timeout                     time.Duration
 	Downloader                  MiniMaxH3OutputDownloader
 	Normalizer                  MiniMaxH3MediaNormalizer
@@ -203,6 +204,11 @@ func RunMiniMaxH3Harness(ctx context.Context, intent GeneratedShotIntent, option
 	}
 	result.GenerationTaskID = createStage.TaskID
 	result.Stages = append(result.Stages, createStage)
+	if existingTaskID == "" && options.OnGenerationTaskSubmitted != nil {
+		if checkpointErr := options.OnGenerationTaskSubmitted(result.GenerationTaskID); checkpointErr != nil {
+			return fail("generation_task_checkpoint_failed", checkpointErr)
+		}
+	}
 
 	pipeline := CompleteMiniMaxH3Task(ctx, createStage.TaskID, MiniMaxH3PipelineOptions{
 		Client: options.Client, Downloader: options.Downloader, Normalizer: options.Normalizer,

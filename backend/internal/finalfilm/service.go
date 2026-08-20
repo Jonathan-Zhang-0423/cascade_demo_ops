@@ -32,6 +32,7 @@ type ServiceOptions struct {
 	Providers       *media.GeneratedShotProviderRegistry
 	ProviderTimeout time.Duration
 	Planner         DirectorPlanner
+	SkillRoot       string
 }
 
 type Service struct {
@@ -43,16 +44,18 @@ type Service struct {
 	providers       *media.GeneratedShotProviderRegistry
 	providerTimeout time.Duration
 	planner         DirectorPlanner
+	directorSkills  map[string]DirectorSkillRuntime
 }
 
 type CreateJobRequest struct {
-	EditorSessionID string
-	EditorRevision  int
-	SourcePackageID string
-	Catalog         model.AssetTimelineCatalog
-	BaselinePlan    model.DemoEditPlan
-	Intents         []model.PresentationGenerationIntent
-	RenderProfile   model.EditorRenderProfile
+	EditorSessionID   string
+	EditorRevision    int
+	SourcePackageID   string
+	Catalog           model.AssetTimelineCatalog
+	BaselinePlan      model.DemoEditPlan
+	Intents           []model.PresentationGenerationIntent
+	RenderProfile     model.EditorRenderProfile
+	AutomationProfile string
 }
 
 func NewService(options ServiceOptions) (*Service, error) {
@@ -74,7 +77,15 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if providerTimeout <= 0 {
 		providerTimeout = 20 * time.Minute
 	}
-	return &Service{store: options.Store, renderer: options.Renderer, outputRoot: filepath.Clean(options.OutputRoot), now: now, newID: newID, providers: options.Providers, providerTimeout: providerTimeout, planner: options.Planner}, nil
+	var skills map[string]DirectorSkillRuntime
+	if strings.TrimSpace(options.SkillRoot) != "" {
+		var err error
+		skills, err = LoadDirectorSkillRuntimes(options.SkillRoot)
+		if err != nil {
+			return nil, fmt.Errorf("load final film Director skills: %w", err)
+		}
+	}
+	return &Service{store: options.Store, renderer: options.Renderer, outputRoot: filepath.Clean(options.OutputRoot), now: now, newID: newID, providers: options.Providers, providerTimeout: providerTimeout, planner: options.Planner, directorSkills: skills}, nil
 }
 
 // CreateJob compiles and validates all immutable fact-track constraints before
@@ -88,6 +99,27 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 		return model.FinalFilmJob{}, errors.New("a complete render_profile is required")
 	}
 	now := s.now().UTC()
+	automationProfile := strings.TrimSpace(request.AutomationProfile)
+	var automationPolicy *model.FinalFilmAutomationPolicy
+	if automationProfile != "" {
+		if automationProfile != model.FinalFilmAutomationProfileGuidedDemoV1 {
+			return model.FinalFilmJob{}, errors.New("unsupported final film automation_profile")
+		}
+		policy := model.DefaultFinalFilmAutomationPolicy()
+		if err := model.ValidateFinalFilmAutomationPolicy(policy); err != nil {
+			return model.FinalFilmJob{}, err
+		}
+		if len(s.directorSkills) != len(requiredDirectorSkills) {
+			return model.FinalFilmJob{}, errors.New("guided-demo-v1 requires the complete versioned Director skill registry")
+		}
+		for skillID, version := range policy.SkillVersions {
+			if runtime, ok := s.directorSkills[skillID]; !ok || runtime.Version != version {
+				return model.FinalFilmJob{}, fmt.Errorf("guided-demo-v1 Director skill %s must be version %s", skillID, version)
+			}
+		}
+		request.Intents = guidedDemoPresentationIntents(request.Catalog)
+		automationPolicy = &policy
+	}
 	constraints, err := CompileStoryboardConstraints(ConstraintCompileInput{
 		SourcePackageID: request.SourcePackageID, Catalog: request.Catalog, BaselinePlan: request.BaselinePlan,
 		Intents: request.Intents, Canvas: model.RenderCanvas{Width: request.RenderProfile.Width, Height: request.RenderProfile.Height, FPS: request.RenderProfile.FPS, Format: request.RenderProfile.Format}, Now: now,
@@ -112,6 +144,7 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 		State: model.FinalFilmJobBaselineReady, Phase: "baseline_validated", Revision: 1, CreatedAt: now, UpdatedAt: now,
 		Constraints: constraints, Catalog: request.Catalog, BaselinePlan: request.BaselinePlan,
 		RenderProfile: request.RenderProfile, PresentationIntents: append([]model.PresentationGenerationIntent{}, request.Intents...),
+		AutomationProfile: automationProfile, AutomationPolicy: automationPolicy,
 	}
 	if err := ValidateJob(job); err != nil {
 		return model.FinalFilmJob{}, err
@@ -134,8 +167,9 @@ func (s *Service) RunBaseline(ctx context.Context, jobID string) (model.FinalFil
 	if err != nil {
 		return model.FinalFilmJob{}, err
 	}
-	if job.State != model.FinalFilmJobBaselineReady {
-		return model.FinalFilmJob{}, fmt.Errorf("baseline render requires state %s, got %s", model.FinalFilmJobBaselineReady, job.State)
+	baselineEligible := job.State == model.FinalFilmJobBaselineReady || (job.State == model.FinalFilmJobAnalyzingEvidence && job.AutomationProfile == model.FinalFilmAutomationProfileGuidedDemoV1 && job.RunAuthorization != nil)
+	if !baselineEligible {
+		return model.FinalFilmJob{}, fmt.Errorf("baseline render requires an eligible baseline state, got %s", job.State)
 	}
 	rendering := job
 	rendering.State = model.FinalFilmJobRenderingBaseline
@@ -172,7 +206,11 @@ func (s *Service) RunBaseline(ctx context.Context, jobID string) (model.FinalFil
 		PlanID: job.BaselinePlan.PlanID, PlanRevision: job.EditorRevision, CompletedAt: completedAt,
 	}
 	message := "确定性事实轨基线已完成"
-	if len(job.PresentationIntents) > 0 {
+	if job.AutomationProfile == model.FinalFilmAutomationProfileGuidedDemoV1 {
+		next.State = model.FinalFilmJobAnalyzingEvidence
+		next.Phase = "baseline_ready_analyzing_evidence"
+		message = "事实轨基线已完成，开始自动提取导演证据"
+	} else if len(job.PresentationIntents) > 0 {
 		next.State = model.FinalFilmJobAwaitingGenerationApproval
 		next.Phase = "baseline_ready_awaiting_generation_approval"
 		message = "事实轨基线已完成，等待可选展示镜头生成授权"
@@ -302,6 +340,14 @@ func ValidateJob(job model.FinalFilmJob) error {
 	}
 	if err := model.ValidatePresentationGenerationIntents(job.PresentationIntents); err != nil {
 		return err
+	}
+	if job.AutomationProfile != "" {
+		if job.AutomationPolicy == nil || job.AutomationProfile != model.FinalFilmAutomationProfileGuidedDemoV1 {
+			return errors.New("automated final film job requires a supported server policy")
+		}
+		if err := model.ValidateFinalFilmAutomationPolicy(*job.AutomationPolicy); err != nil {
+			return err
+		}
 	}
 	if job.GenerationAuthorized && job.GenerationAuthorizedAt.IsZero() {
 		return errors.New("authorized generation requires an authorization timestamp")

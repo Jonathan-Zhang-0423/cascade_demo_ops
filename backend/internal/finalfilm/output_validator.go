@@ -46,6 +46,10 @@ func validateFinalFilmOutput(ctx context.Context, renderer Renderer, result exec
 	}
 	validation.VideoSizeBytes = probe.SizeBytes
 	validation.Width, validation.Height, validation.FPS, validation.DurationMS = probe.Width, probe.Height, probe.FPS, probe.DurationMS
+	validation.QualityAnalysisAvailable, validation.BlackDurationMS, validation.FreezeDurationMS = probe.QualityAnalysisAvailable, probe.BlackDurationMS, probe.FreezeDurationMS
+	validation.SilenceDurationMS, validation.VerifiedSilence = probe.SilenceDurationMS, probe.VerifiedSilence
+	validation.IntegratedLUFS, validation.TruePeakDB = probe.IntegratedLUFS, probe.TruePeakDB
+	validation.AudioCodec = probe.AudioCodec
 	if !probe.FFProbeAvailable || probe.SizeBytes <= 0 || probe.DurationMS <= 0 {
 		return fail(errors.New("final video probe lacks ffprobe, integrity, size, or duration evidence"))
 	}

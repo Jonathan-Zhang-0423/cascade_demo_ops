@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { audioVolumeExpression, globalCaptionCuesForOutputWindow, render, validateEditPlan, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
+import { atempoFilterChain, audioVolumeExpression, globalCaptionCuesForOutputWindow, render, validateEditPlan, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
 
 const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
 const ffmpegAvailable = spawnSync(ffmpegPath, ["-version"], { stdio: "ignore", windowsHide: true }).status === 0;
@@ -72,6 +72,21 @@ function plan(): DemoEditPlan {
 }
 
 describe("editor audio policy", () => {
+  it("decomposes 4-12x speed into legal FFmpeg atempo factors", () => {
+    expect(atempoFilterChain(8)).toBe("atempo=2.000,atempo=2.000,atempo=2.000");
+    expect(atempoFilterChain(12)).toBe("atempo=2.000,atempo=2.000,atempo=2.000,atempo=1.500");
+    expect(atempoFilterChain(0.5)).toBe("atempo=0.500");
+  });
+
+  it("uses speed-adjusted output duration for timeline validation", () => {
+    const accelerated = plan();
+    accelerated.shots[0]!.operations = [{ type: "speed", speed: 8 }];
+    accelerated.caption_cues = [{ id: "fits", output_range_ms: [0, 250], text: "Compressed wait", source: "model_confirmed" }];
+    expect(validateEditPlan({ catalog, edit_plan: accelerated }).valid).toBe(true);
+    accelerated.caption_cues[0]!.output_range_ms = [0, 251];
+    expect(validateEditPlan({ catalog, edit_plan: accelerated }).errors.map((item) => item.code)).toContain("invalid_caption_cue_range");
+  });
+
   it("keeps legacy plans valid with source audio defaults", () => {
     expect(validateEditPlan({ catalog, edit_plan: plan() }).valid).toBe(true);
   });

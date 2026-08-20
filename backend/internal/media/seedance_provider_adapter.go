@@ -142,6 +142,11 @@ func (a *Seedance20ProviderAdapter) Execute(ctx context.Context, request Generat
 		}
 		result.ProviderTaskID = strings.TrimSpace(created.Response.ID)
 		initial = created
+		if request.OnTaskSubmitted != nil {
+			if checkpointErr := request.OnTaskSubmitted(result.ProviderTaskID); checkpointErr != nil {
+				return fail("provider_task_checkpoint_failed", checkpointErr)
+			}
+		}
 	}
 	videoURL, providerStatus, err := a.waitForOutput(ctx, result.ProviderTaskID, initial)
 	if err != nil {

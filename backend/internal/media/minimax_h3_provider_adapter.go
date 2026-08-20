@@ -100,6 +100,7 @@ func (a *MiniMaxH3ProviderAdapter) Execute(ctx context.Context, request Generate
 		UseContextIR: a.options.UseContextIR, ContextIRPollAttempts: a.options.ContextIRPollAttempts,
 		ContextIRPollInterval: a.options.ContextIRPollInterval, GenerationPollAttempts: a.options.GenerationPollAttempts,
 		GenerationPollInterval: a.options.GenerationPollInterval, Timeout: request.Timeout,
+		ExistingGenerationTaskID: request.ResumeProviderTaskID, OnGenerationTaskSubmitted: request.OnTaskSubmitted,
 		Downloader: a.options.Downloader, Normalizer: a.options.Normalizer, Now: a.options.Now,
 	})
 	result.ProviderTaskID = harness.GenerationTaskID

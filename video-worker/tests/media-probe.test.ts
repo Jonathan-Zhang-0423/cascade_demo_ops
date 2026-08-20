@@ -3,9 +3,21 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { applyFFmpegProbeFallback, probeMediaFile, type MediaProbeResult } from "../src/media-probe.js";
+import { applyFFmpegProbeFallback, applyFFmpegQualityAnalysis, probeMediaFile, type MediaProbeResult } from "../src/media-probe.js";
 
 describe("FFmpeg media probe fallback", () => {
+  it("summarizes black, freeze, loudness, and true peak evidence", () => {
+    const result = { path: "x.mp4", file_name: "x.mp4", size_bytes: 1, sha256: "x", mime_type: "video/mp4", ffprobe_available: true, duration_ms: 5000 } as MediaProbeResult;
+    applyFFmpegQualityAnalysis(result, [
+      "black_start:0 black_end:0.2 black_duration:0.2",
+      "black_start:2 black_end:2.1 black_duration:0.1",
+      "freeze_start:4", "freeze_end:5.2 | freeze_duration: 1.2",
+      "silence_start:0", "silence_end:5 | silence_duration: 5",
+      "I: -16.4 LUFS", "Peak: -1.3 dBFS",
+    ].join("\n"));
+    expect(result).toMatchObject({ quality_analysis_available: true, black_duration_ms: 300, freeze_duration_ms: 1200, silence_duration_ms: 5000, verified_silence: true, integrated_lufs: -16.4, true_peak_db: -1.3 });
+  });
+
   it("extracts duration and stream metadata without ffprobe", () => {
     const result: MediaProbeResult = {
       path: "D:\\media\\source.mp4",

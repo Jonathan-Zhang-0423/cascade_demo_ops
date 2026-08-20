@@ -29,6 +29,7 @@ type GeneratedShotProviderExecutionRequest struct {
 	OutputDir            string              `json:"output_dir"`
 	Timeout              time.Duration       `json:"timeout"`
 	ResumeProviderTaskID string              `json:"resume_provider_task_id,omitempty"`
+	OnTaskSubmitted      func(string) error  `json:"-"`
 }
 
 type GeneratedShotProviderExecutionResult struct {

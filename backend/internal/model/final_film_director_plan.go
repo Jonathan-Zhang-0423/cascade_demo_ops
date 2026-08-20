@@ -9,19 +9,25 @@ import (
 	"time"
 )
 
-const FinalFilmDirectorPlanSchemaVersion = "demoops.final_film_director_plan.v1"
+const (
+	FinalFilmDirectorPlanLegacySchemaVersion = "demoops.final_film_director_plan.v1"
+	FinalFilmDirectorPlanSchemaVersion       = "demoops.final_film_director_plan.v2"
+)
 
 // FinalFilmDirectorPlan is the audited boundary between Director and provider
 // execution. It describes presentation-only shots, but deliberately cannot
 // select a video provider, model, endpoint, or bind a factual workflow step.
 type FinalFilmDirectorPlan struct {
-	SchemaVersion   string                   `json:"schema_version"`
-	PlanID          string                   `json:"plan_id"`
-	JobID           string                   `json:"job_id"`
-	ConstraintSetID string                   `json:"constraint_set_id"`
-	DirectorRunID   string                   `json:"director_run_id"`
-	GeneratedAt     time.Time                `json:"generated_at"`
-	Specs           []FinalFilmGeneratedSpec `json:"specs"`
+	SchemaVersion     string                   `json:"schema_version"`
+	PlanID            string                   `json:"plan_id"`
+	JobID             string                   `json:"job_id"`
+	ConstraintSetID   string                   `json:"constraint_set_id"`
+	DirectorRunID     string                   `json:"director_run_id"`
+	GeneratedAt       time.Time                `json:"generated_at"`
+	Specs             []FinalFilmGeneratedSpec `json:"specs"`
+	AutomationProfile string                   `json:"automation_profile,omitempty"`
+	EvidenceDigestID  string                   `json:"evidence_digest_id,omitempty"`
+	StoryPlan         *DirectorStoryPlan       `json:"story_plan,omitempty"`
 }
 
 type FinalFilmGeneratedSpec struct {
@@ -57,8 +63,16 @@ func FinalFilmPromptSHA256(prompt string) string {
 }
 
 func ValidateFinalFilmDirectorPlan(plan FinalFilmDirectorPlan, jobID string, constraints StoryboardConstraintSet, intents []PresentationGenerationIntent) error {
-	if plan.SchemaVersion != FinalFilmDirectorPlanSchemaVersion {
+	if plan.SchemaVersion != FinalFilmDirectorPlanSchemaVersion && plan.SchemaVersion != FinalFilmDirectorPlanLegacySchemaVersion {
 		return errors.New("unsupported final film director plan schema")
+	}
+	if plan.AutomationProfile != "" {
+		if plan.AutomationProfile != FinalFilmAutomationProfileGuidedDemoV1 || strings.TrimSpace(plan.EvidenceDigestID) == "" || plan.StoryPlan == nil {
+			return errors.New("automated director plan requires profile, evidence digest, and story plan")
+		}
+		if err := ValidateDirectorStoryPlan(*plan.StoryPlan, FinalFilmDurationRange{MinMS: 90_000, MaxMS: 120_000}); err != nil {
+			return err
+		}
 	}
 	if strings.TrimSpace(plan.PlanID) == "" || strings.TrimSpace(plan.DirectorRunID) == "" || plan.GeneratedAt.IsZero() {
 		return errors.New("director plan identity, run identity, and generated_at are required")
