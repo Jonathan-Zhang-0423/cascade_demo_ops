@@ -42,6 +42,8 @@ func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
 		{intent: "项目名称：俄罗斯方块", want: "俄罗斯方块"},
 		{intent: "新建名为“俄罗斯方块”的项目，要求 Agent 实际生成代码", want: "俄罗斯方块"},
 		{intent: "登录、创建俄罗斯方块项目、等待 Agent 真正编写完代码", want: "俄罗斯方块"},
+		{intent: "新建项目入口，项目需求必须精确填写为“贪吃蛇游戏”", want: "贪吃蛇游戏"},
+		{intent: "在“今天你想做什么？”输入“贪吃蛇游戏”，然后点击构建", want: "贪吃蛇游戏"},
 		{intent: "新建项目 启动 Agent 实际构建", want: ""},
 		{intent: "新建项目（13秒，构建模式）", want: ""},
 	}

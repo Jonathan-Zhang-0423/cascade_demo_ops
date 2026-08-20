@@ -133,6 +133,9 @@ func validateDualFinalMP4Delivery(ctx context.Context, service DeliveryRenderSer
 			return fmt.Errorf("dual_delivery_invalid: duplicate deliverable %q", deliverable.ID)
 		}
 		seen[deliverable.ID] = true
+		if err := validateRequiredDualDeliveryProfile(deliverable); err != nil {
+			return err
+		}
 		if err := validateFinalMP4Delivery(ctx, service, &deliverable.Profile, RenderResult{VideoPath: deliverable.VideoPath}); err != nil {
 			return fmt.Errorf("dual_delivery_%s: %w", deliverable.ID, err)
 		}
@@ -143,6 +146,29 @@ func validateDualFinalMP4Delivery(ctx context.Context, service DeliveryRenderSer
 		}
 	}
 	return nil
+}
+
+func validateRequiredDualDeliveryProfile(deliverable RenderDeliverable) error {
+	expected, ok := requiredDualDeliveryProfiles()[deliverable.ID]
+	if !ok {
+		return fmt.Errorf("dual_delivery_invalid: unexpected deliverable %q", deliverable.ID)
+	}
+	profile := deliverable.Profile
+	if profile.Width != expected.Width || profile.Height != expected.Height || profile.FPS != expected.FPS || !strings.EqualFold(strings.TrimSpace(profile.Format), expected.Format) {
+		return fmt.Errorf("dual_delivery_profile_mismatch: %s got=%dx%d@%d/%s want=%dx%d@%d/%s", deliverable.ID, profile.Width, profile.Height, profile.FPS, profile.Format, expected.Width, expected.Height, expected.FPS, expected.Format)
+	}
+	return nil
+}
+
+func requiredDualDeliveryProfiles() map[string]model.EditorRenderProfile {
+	return map[string]model.EditorRenderProfile{
+		model.MediaOutputProfileMaster2K: {
+			ID: model.MediaOutputProfileMaster2K, Width: 2560, Height: 1440, FPS: 30, Format: "mp4",
+		},
+		model.MediaOutputProfileDelivery1080: {
+			ID: model.MediaOutputProfileDelivery1080, Width: 1920, Height: 1080, FPS: 30, Format: "mp4",
+		},
+	}
 }
 
 func validateBrowserAgentEvidenceMaster(ctx context.Context, service DeliveryRenderService, source *model.ClientExecutionPackage, recording *model.RecordingResultPackage) error {

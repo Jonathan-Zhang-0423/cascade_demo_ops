@@ -237,7 +237,7 @@ func (p *TOSAssetPublisher) objectKey(sourcePackageID string, index int, item mo
 
 func normalizeTOSAssetPublisherConfig(config TOSAssetPublisherConfig) TOSAssetPublisherConfig {
 	config.AccessKey, config.SecretKey = strings.TrimSpace(config.AccessKey), strings.TrimSpace(config.SecretKey)
-	config.Endpoint, config.Region, config.Bucket = strings.TrimSpace(config.Endpoint), strings.TrimSpace(config.Region), strings.TrimSpace(config.Bucket)
+	config.Endpoint, config.APIEndpoint, config.Region, config.Bucket = strings.TrimSpace(config.Endpoint), strings.TrimSpace(config.APIEndpoint), strings.TrimSpace(config.Region), strings.TrimSpace(config.Bucket)
 	config.Prefix = strings.Trim(strings.TrimSpace(config.Prefix), "/")
 	if config.Prefix == "" {
 		config.Prefix = "ark-media"

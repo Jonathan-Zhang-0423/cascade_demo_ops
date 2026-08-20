@@ -48,8 +48,17 @@ func Seedance25ReadinessFromEnv(getenv func(string) string, commandReady func(st
 	ttl, validTTL := seedance25TOSPresignTTL(getenv("VOLC_TOS_SIGNED_URL_TTL_SEC"))
 	report.add("tos_signed_url_ttl_30m_to_24h", validTTL, "signed URL TTL is checked without recording its configured value")
 	_ = ttl // retained for future structured diagnostics without exposing runtime configuration.
+	policy, policyErr := Seedance25AdmissionPolicyFromEnv(getenv)
+	report.add("seedance_2_5_admission_policy", policyErr == nil, seedance25AdmissionReadinessDetail(policy, policyErr))
 	report.Ready = checksPassedExcept(report.Checks, "")
 	return report
+}
+
+func seedance25AdmissionReadinessDetail(policy Seedance25AdmissionPolicy, err error) string {
+	if err != nil {
+		return "Server-owned Seedance 2.5 concurrency/RPM policy is invalid; no credential or request data is recorded"
+	}
+	return "Server-owned admission active: max_concurrent=" + strconv.Itoa(policy.MaxConcurrent) + ", create_task_rpm=" + strconv.Itoa(policy.MaxRequestsPerWindow) + ", idempotency_ttl_sec=" + strconv.FormatInt(int64(policy.IdempotencyTTL.Seconds()), 10)
 }
 
 func (r *Seedance25ReadinessReport) add(name string, passed bool, detail string) {

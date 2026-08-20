@@ -22,6 +22,21 @@ func finalFilmProviderRegistry(runtime config.AppRuntimeConfig) (*media.Generate
 	return registry, nil
 }
 
+// finalFilmAssetPublisher is intentionally absent when private TOS is not
+// fully configured. The FinalFilm Seedance bridge then records a concrete
+// preparation failure and keeps the fact-track baseline deliverable.
+func finalFilmAssetPublisher() media.AssetPublisher {
+	config, configured := media.TOSAssetPublisherConfigFromEnv(os.Getenv)
+	if !configured {
+		return nil
+	}
+	publisher, err := media.NewTOSAssetPublisher(config, time.Now)
+	if err != nil {
+		return nil
+	}
+	return publisher
+}
+
 func registerFinalFilmH3(registry *media.GeneratedShotProviderRegistry, runtime config.AppRuntimeConfig) error {
 	client, harnessConfig, configErr := finalFilmMiniMaxH3Client()
 	if configErr != nil {
@@ -57,11 +72,20 @@ func registerFinalFilmSeedance25(registry *media.GeneratedShotProviderRegistry, 
 	reason := "Seedance 2.5 final-film adapter requires real Ark mode, configured credentials, explicit CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true, and SEEDANCE_MODEL=doubao-seedance-2-5-260628"
 	options := media.Seedance25ProviderAdapterOptions{Enabled: enabled, DisabledReason: reason}
 	if enabled {
+		policy, policyErr := media.Seedance25AdmissionPolicyFromEnv(os.Getenv)
+		if policyErr != nil {
+			return policyErr
+		}
+		admission, admissionErr := media.NewSeedance25AdmissionGate(policy, nil)
+		if admissionErr != nil {
+			return admissionErr
+		}
 		options.Client = media.NewClient(runtime, http.DefaultClient)
 		options.Downloader = media.HTTPMiniMaxH3OutputDownloader{Client: http.DefaultClient}
 		options.Normalizer = media.FFmpegMiniMaxH3MediaNormalizer{FFmpegPath: runtime.FFmpegPath, FFprobePath: runtime.FFprobePath}
 		options.PollAttempts = 180
 		options.PollInterval = 5 * time.Second
+		options.Admission = admission
 	}
 	adapter, err := media.NewSeedance25ProviderAdapter(options)
 	if err != nil {

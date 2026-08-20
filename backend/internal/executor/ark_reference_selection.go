@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
 )
 
 const SeedanceReferenceSelectionSchemaVersion = "demoops.seedance_reference_selection.v1"
+const SeedanceReferencePublicationPlanSchemaVersion = "demoops.seedance_reference_publication_plan.v1"
 
 // SeedanceReferenceSelection binds a model input window to one passed stage of
 // the authoritative raw recording. It has no provider, publication, approval,
@@ -27,6 +29,52 @@ type SeedanceReferenceSelection struct {
 	ReferenceWindowRangeMS model.MillisecondRange `json:"reference_window_range_ms"`
 	SelectionStrategy      string                 `json:"selection_strategy"`
 	Policy                 string                 `json:"policy"`
+}
+
+// BuildSeedanceReferencePublicationPlan converts one verified, normalized
+// local reference derivative into a private-TOS publication plan. It has no
+// upload or provider-call authority; callers must pass the plan to the
+// configured AssetPublisher and retain its result before compiling a provider
+// request.
+func BuildSeedanceReferencePublicationPlan(catalog *model.AssetTimelineCatalog, selection SeedanceReferenceSelection, reference model.DirectorMaterialRef, sourcePackageID, taskID string, retention model.MediaTOSRetentionPreference, now time.Time) (model.ArkAssetPublicationPlan, error) {
+	if catalog == nil {
+		return model.ArkAssetPublicationPlan{}, errors.New("asset timeline catalog is required for reference publication")
+	}
+	if selection.Status != "selected" {
+		return model.ArkAssetPublicationPlan{}, errors.New("selected Seedance reference is required for publication")
+	}
+	expected, err := SelectSeedanceReferenceWindow(catalog, selection.SourceStepID)
+	if err != nil {
+		return model.ArkAssetPublicationPlan{}, err
+	}
+	if expected.SchemaVersion != selection.SchemaVersion || expected.Status != selection.Status || expected.RecordingArtifactID != selection.RecordingArtifactID || expected.SourceStepID != selection.SourceStepID || expected.VerifiedStageRangeMS[0] != selection.VerifiedStageRangeMS[0] || expected.VerifiedStageRangeMS[1] != selection.VerifiedStageRangeMS[1] || expected.ReferenceWindowRangeMS[0] != selection.ReferenceWindowRangeMS[0] || expected.ReferenceWindowRangeMS[1] != selection.ReferenceWindowRangeMS[1] {
+		return model.ArkAssetPublicationPlan{}, errors.New("Seedance reference selection does not match verified timeline evidence")
+	}
+	if strings.TrimSpace(reference.ID) == "" || strings.TrimSpace(reference.URI) == "" || !strings.EqualFold(strings.TrimSpace(reference.MimeType), "video/mp4") {
+		return model.ArkAssetPublicationPlan{}, errors.New("normalized local Seedance reference must include an id, URI, and video/mp4 MIME type")
+	}
+	if reference.IncludeInDemo {
+		return model.ArkAssetPublicationPlan{}, errors.New("model reference derivative cannot be included in the delivered demo")
+	}
+	if strings.TrimSpace(sourcePackageID) == "" || strings.TrimSpace(taskID) == "" {
+		return model.ArkAssetPublicationPlan{}, errors.New("source package and provider task IDs are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return model.ArkAssetPublicationPlan{
+		SchemaVersion: SeedanceReferencePublicationPlanSchemaVersion,
+		PlanID: "seedance_reference_publication_" + safeID(sourcePackageID+"_"+selection.SourceStepID), CreatedAt: now.UTC(),
+		Mode: "seedance_2_5_reference_preflight", SourcePackageID: sourcePackageID,
+		Status: "ready_after_publication", PublicationStrategy: "private_tos_presigned_url", URLTTLHours: 1,
+		TOSRetention: retention,
+		Items: []model.ArkAssetPublicationItem{{
+			Ref: reference, TaskIDs: []string{taskID}, Usage: "seedance_reference_video", Required: true,
+			AcceptedMimeTypes: []string{"video/mp4"}, NeedsPublication: true, NeedsConversion: false,
+			RecommendedFileName: safeID(reference.ID) + ".mp4", Status: "ready_after_publication",
+		}},
+		Notes: []string{"Reference is bound to a passed Browser Agent stage and is model-input-only; publication does not approve or include generated output."},
+	}, nil
 }
 
 // SelectSeedanceReferenceWindow requires an explicitly requested passed stage.

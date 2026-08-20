@@ -200,3 +200,12 @@
 - [ ] 汇报新增 App 问题、仍阻断问题、App 已修复问题和 Server 自身问题。
 - [ ] 明确哪些兼容措施仅用于本地测试，哪些属于生产 Server 能力。
 - [ ] 不提交 `.cascade-dev`、账号凭据、截图中的敏感信息或临时验收包。
+# 新增问题：认证入口 page-scan 证据未进入正式 App 包（2026-08-20）
+
+- 复现入口：`scripts/run-app-server-e2e-unattended.ps1`，使用当前 App 代码、真实 `http://127.0.0.1:5000/app` 页面和本地 opaque credential ref。
+- App 返回：`login_entry_evidence_missing: stage "business_stage_session_setup" does not bind the approved authentication entry route to formal page-scan evidence`。
+- 已确认：模型 readiness、Direct TLS/Gateway/Worker 配对、真实登录页只读截图均正常；Server 未改写 App 包，也未启动正式 Server 执行。
+- 判定：App 产包链缺少或未绑定认证入口的 `source_kind=page_scan`、`observed_url=/login`、`observed_page_role=authentication`、认证表单证据及其 `evidence_id`/digest。
+- 影响：App 原始包无法通过自身 formal outline consistency 门禁，因而不能安全进入 Direct API、Browser Agent 或视频编辑链路。
+- 建议 App 侧修复：在正式包生成前完成当前页面的只读认证入口扫描，将邮箱入口、密码表单、提交控件和登录成功 workspace marker 作为同一认证证据链写入 package；保持 `business_stage_session_setup` 的 entry route 与 page-scan route 一致。不得由 Server 伪造或补写这些字段。
+- Server 侧状态：无需修改验证规则；Server 应继续 fail-closed，并保留该阻断、原始请求和关联日志。

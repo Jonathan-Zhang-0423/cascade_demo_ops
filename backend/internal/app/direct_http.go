@@ -109,6 +109,11 @@ func (s *DirectHTTPServer) handleDirectHealth(w http.ResponseWriter, r *http.Req
 		s.directError(w, http.StatusUnauthorized, "unauthorized", "bootstrap token is required")
 		return
 	}
+	// server_time must use the RFC3339 time representation expected by the App
+	// client; a Unix millisecond number makes json.Decoder reject the complete
+	// health response and leaves an otherwise healthy Direct Gateway unreachable.
+	// worker_readiness remains a Gateway observability extension outside the
+	// shared App protocol type.
 	s.directJSON(w, http.StatusOK, map[string]any{
 		"protocol_version":                          direct.ProtocolVersion,
 		"crypto_suite":                              direct.CryptoSuite,
@@ -117,14 +122,14 @@ func (s *DirectHTTPServer) handleDirectHealth(w http.ResponseWriter, r *http.Req
 		"supported_runtimes":                        []string{model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
 		"supported_worker_protocol_versions":        []string{direct.WorkerProtocolVersion},
 		"supported_outcome_verifier_rules_versions": []string{direct.OutcomeVerifierRulesVersion},
-		"capabilities": map[string]any{
+		"capabilities": map[string]bool{
 			"manual_login_checkpoint":         false,
 			"gateway_state_persistence":       s.gateway.PersistenceEnabled(),
 			"credential_envelope_persistence": false,
 		},
-		"active_lease_count": s.gateway.ActiveLeaseCount(),
-		"server_time":        time.Now().UnixMilli(),
-		"worker_readiness":   s.workerReadiness(),
+		"active_leases":    s.gateway.ActiveLeaseCount(),
+		"server_time":      time.Now().UTC(),
+		"worker_readiness": s.workerReadiness(),
 	})
 }
 

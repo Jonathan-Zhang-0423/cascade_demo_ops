@@ -28,8 +28,12 @@ go run ./cmd/directpreflight `
 - video-worker entry 存在；
 - Node、FFmpeg、FFprobe 可执行；
 - Direct Gateway 所需五个环境变量均已配置；
+- Gateway 控制面固定使用 TLS `18443`，installation 独占数据端口为 `24000-24031`，Worker 固定为 loopback `127.0.0.1:18444`；
+- bootstrap token 与 Worker token 均至少 32 个字符；预检只记录是否满足，不记录值；
 - TLS 证书与私钥可解析且相互匹配、证书在有效期内，并覆盖配置的 Gateway 主机；
 - 输出脱敏 preflight JSON，不写入 token 或密钥值。
+
+`directpreflight`、`directgateway` 和独立 `directworker` 都会按顺序加载仓库根目录及 `backend` 目录的 `.env`、`.env.local`，且不会覆盖进程已经显式设置的环境变量。实际 token 与私钥文件必须保持在忽略规则保护下，不能提交到仓库。
 
 ## 重要边界
 

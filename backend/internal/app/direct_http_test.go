@@ -32,6 +32,13 @@ func TestDirectHealthRequiresBootstrapToken(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("authorized status = %d body=%s", response.Code, response.Body.String())
 	}
+	var health model.DirectHealthResponse
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		t.Fatalf("health response must decode as the shared protocol type: %v body=%s", err, response.Body.String())
+	}
+	if health.ProtocolVersion != model.DirectTransportProtocolVersion || health.ServerTime.IsZero() {
+		t.Fatalf("unexpected typed health response: %+v", health)
+	}
 }
 
 func TestDirectPackageIdempotencyConflictUsesStableHTTPError(t *testing.T) {

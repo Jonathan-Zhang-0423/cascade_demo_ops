@@ -86,6 +86,53 @@ func TestFormalResultArtifactContentsRejectValidationRunReportForAnotherReplayMa
 	}
 }
 
+func TestValidateDualDeliveryArtifactsRejectsManifestWithSwappedProfiles(t *testing.T) {
+	source := model.ClientExecutionPackage{RecordingRunSpec: model.RecordingRunSpec{Outputs: model.RecordingOutputRequest{FinalVideo: true}}}
+	preferences := model.DefaultMediaDeliveryPreferences()
+	source.ProjectContextSummary.MediaDeliveryPreferences = &preferences
+	root := t.TempDir()
+	uploaded := map[string]artifactRecord{}
+	add := func(id, kind, mime string, data []byte) model.ArtifactRef {
+		path := filepath.Join(root, id)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		artifact := model.DirectArtifact{ArtifactID: id, Kind: kind, MimeType: mime, FileName: id, SHA256: model.SHA256Hex(data), SizeBytes: int64(len(data))}
+		uploaded[id] = artifactRecord{Artifact: artifact, Path: path}
+		return model.ArtifactRef{ID: id, Kind: kind, MimeType: mime, SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes}
+	}
+	master := add("master", "final_video_final_master_2k", "video/mp4", []byte("master"))
+	delivery := add("delivery", "final_video_final_delivery_1080p", "video/mp4", []byte("delivery"))
+	hash := model.SHA256Hex([]byte("manifest-entry"))
+	document := dualDeliveryManifest{
+		SchemaVersion: "demoops.deliverables_manifest.v1", Status: "complete",
+		RequiredProfiles: []dualDeliveryProfile{
+			{ID: model.MediaOutputProfileMaster2K, Width: 2560, Height: 1440, FPS: 30, Format: "mp4"},
+			{ID: model.MediaOutputProfileDelivery1080, Width: 1920, Height: 1080, FPS: 30, Format: "mp4"},
+		},
+		Deliverables: []dualDeliveryManifestItem{
+			{ID: model.MediaOutputProfileMaster2K, Status: "complete", Profile: dualDeliveryProfile{ID: model.MediaOutputProfileMaster2K, Width: 2560, Height: 1440, FPS: 30, Format: "mp4"}, SHA256: hash, SizeBytes: 1},
+			{ID: model.MediaOutputProfileDelivery1080, Status: "complete", Profile: dualDeliveryProfile{ID: model.MediaOutputProfileDelivery1080, Width: 1920, Height: 1080, FPS: 30, Format: "mp4"}, SHA256: hash, SizeBytes: 1},
+		},
+	}
+	manifestData, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := add("manifest", "deliverables_manifest", "application/json", manifestData)
+	result := model.RecordingResultPackage{GeneratedAssets: []model.ArtifactRef{master, delivery, manifest}}
+	if err := validateDualDeliveryArtifacts(result, source, uploaded); err != nil {
+		t.Fatalf("valid dual delivery manifest was rejected: %v", err)
+	}
+	document.Deliverables[0].Profile = dualDeliveryProfile{ID: model.MediaOutputProfileMaster2K, Width: 1920, Height: 1080, FPS: 30, Format: "mp4"}
+	record := uploaded[manifest.ID]
+	rewriteStructuredArtifact(t, &record, document)
+	uploaded[manifest.ID] = record
+	if err := validateDualDeliveryArtifacts(result, source, uploaded); err == nil {
+		t.Fatal("dual delivery manifest with swapped profile labels was accepted")
+	}
+}
+
 func formalResultContentFixture(t *testing.T) (model.ClientExecutionPackage, model.RecordingResultPackage, map[string]artifactRecord) {
 	t.Helper()
 	source := loadDirectPackageFixture(t)

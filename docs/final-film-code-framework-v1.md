@@ -42,6 +42,18 @@ H3 与 Seedance 2.5 是并列 Provider，不形成“一个失败自动调用另
 
 ## Seedance 2.5 官方请求合同
 
+### 真实页面素材进入模型前的受控路径
+
+Browser Agent 的原始录屏仍是事实证据，不能直接替换或自动写入成片轨道。若 Director 计划明确选择一个已通过的阶段作为 Seedance 参考，Server 按以下顺序处理：
+
+1. `SelectSeedanceReferenceWindow` 绑定 `passed` 阶段和原始录屏时间范围；
+2. `MaterializeSeedanceReferenceWindow` 只生成本地、规范化的 MP4 模型参考副本；
+3. `BuildSeedanceReferencePublicationPlan` 生成 `demoops.seedance_reference_publication_plan.v1`，要求 `video/mp4`、`include_in_demo=false`、显式任务 ID 和 30 天 TOS 保留确认；
+4. TOS Publisher 使用 SDK 上传 Endpoint（`VOLC_TOS_API_ENDPOINT`），并用 Ark 私有预签名 Endpoint（`VOLC_TOS_ENDPOINT`）生成 `ivolces.com` URL；
+5. 只有发布结果 `can_use_for_real_call=true` 后，才允许编译 Seedance 请求。候选仍必须经过结构审计和人工内容审核。
+
+该桥接不会修改 App 包、Validation Agent 规则或事实轨道，也不会把模型候选自动纳入 DemoEditPlan。
+
 当前合同来自 2026-08-18 提供的最新方舟官方示例：
 
 - endpoint：`POST /api/v3/contents/generations/tasks`
@@ -105,6 +117,8 @@ CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true
 ```
 
 `SEEDANCE_API_KEY` 只从 `.env`/进程环境读取，不能出现在请求日志、审计事件或 Git 中。配置密钥并不代表生成授权；每个作业仍需持久化的 `generation_authorized` 和 `authorization_ref`。H3 的价格预算门禁继续独立生效；Seedance 2.5 当前通过时长上限、引用上限、显式作业授权和独立 feature flag 控制使用量，待官方计费维度确认后再增加硬价格门禁。
+
+Seedance 2.5 还由 Server 侧 admission gate 管控。`CASCADE_SEEDANCE25_MAX_CONCURRENT` 和 `CASCADE_SEEDANCE25_CREATE_TASK_RPM` 分别限制处理中任务和每分钟创建任务数；缺省采用保守的个人层 `3 / 180`。同一 `admission_scope + idempotency_key` 在任务未终态时只能恢复既有任务的 GET 查询，不能创建第二个任务；终态才释放并发。运维确认企业账号或 Endpoint 配额后，可以在忽略的运行时环境中调整阈值，不能由 App 包传入。
 
 ## 验收标准
 

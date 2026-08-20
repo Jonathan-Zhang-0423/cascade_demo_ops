@@ -124,6 +124,10 @@ if (-not [bool]$modelReadiness.ready) {
   $failedTasks = @($modelReadiness.diagnostics | Where-Object { -not [bool]$_.ok } | ForEach-Object { [string]$_.task })
   throw "Engine model readiness is false; formal App package generation and Chromium execution remain prohibited. Failed tasks: $($failedTasks -join ', ')"
 }
+$runtimeHealth = Invoke-BridgeJson -Method GET -Uri "$EngineBaseUrl/v1/desktop/runtime-health"
+if (-not [bool]$runtimeHealth.node_runtime_configured -or -not [bool]$runtimeHealth.sidecars.'video-worker') {
+  throw "Engine Node/video-worker runtime is not configured. Refusing to generate an App package from screenshot fallback evidence; restart the Engine Server with NODE_BINARY_PATH and NODE_WORKER_PATH."
+}
 $email = [string]$env:CASCADE_DEV_VISIBLE_LOGIN_EMAIL
 $password = [string]$env:CASCADE_DEV_VISIBLE_LOGIN_PASSWORD
 if ([string]::IsNullOrWhiteSpace($CredentialRefName) -or $CredentialRefName -match '[/\\:\x00\r\n]') {
@@ -199,11 +203,44 @@ $zhPhone = Decode-Utf8Base64 "5omL5py65Y+3"
 # actual screenshot as an annotated source so it can bind the missing textarea
 # and submit-button interactions to page evidence.
 $evidenceScreenshotPath = Join-Path (Get-Location) "artifacts\dev-test-only\input-evidence\new-project-dialog-after.png"
+$loginEvidenceScreenshotPath = Join-Path (Get-Location) "artifacts\dev-test-only\input-evidence\login-entry.png"
 $webpageScreenshots = @()
+if (Test-Path -LiteralPath $loginEvidenceScreenshotPath -PathType Leaf) {
+  $loginEvidenceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $loginEvidenceScreenshotPath).Hash.ToLowerInvariant()
+  $loginEvidenceInfo = Get-Item -LiteralPath $loginEvidenceScreenshotPath
+  $webpageScreenshots += @{
+    id = "evidence_authentication_entry"
+    url = ([Uri]$TargetUrl).GetLeftPart([System.UriPartial]::Authority) + "/login"
+    title = "Cascade AI - Login"
+    page_role = "authentication"
+    artifact = @{
+      id = "artifact_evidence_authentication_entry"
+      kind = "webpage_screenshot"
+      uri = ([Uri]$loginEvidenceScreenshotPath).AbsoluteUri
+      mime_type = "image/png"
+      sha256 = $loginEvidenceHash
+      size_bytes = [int64]$loginEvidenceInfo.Length
+    }
+    sequence_id = "authentication_entry"
+    step_hint = "Use the approved authentication entry route before entering the local credential reference."
+    ocr_text = "登录 Cascade AI 邮箱登录 手机号登录 GitHub 账号登录 微信登录"
+    vision_summary = "Real Cascade AI authentication entry page with email, phone, GitHub, and WeChat login options; no credential values are visible."
+    annotations = @(
+      @{ id = "annotation_authentication_email_entry"; kind = "click"; label = "Email login"; description = "Select the approved email authentication route."; selector_hint = "button[type='button']" }
+    )
+    metadata = @{
+      observed_url = (([Uri]$TargetUrl).GetLeftPart([System.UriPartial]::Authority) + "/login")
+      observed_route_template = "/login"
+      observed_page_role = "authentication"
+      observed_form_role = "authentication_entry"
+      capture_scope = "server_test_input_only"
+    }
+  }
+}
 if (Test-Path -LiteralPath $evidenceScreenshotPath -PathType Leaf) {
   $evidenceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $evidenceScreenshotPath).Hash.ToLowerInvariant()
   $evidenceInfo = Get-Item -LiteralPath $evidenceScreenshotPath
-  $webpageScreenshots = @(@{
+  $webpageScreenshots += @{
     id = "evidence_new_project_dialog_after"
     url = $TargetUrl
     title = "Cascade AI — Build Apps with AI"
@@ -236,7 +273,7 @@ if (Test-Path -LiteralPath $evidenceScreenshotPath -PathType Leaf) {
         selector_hint = "[data-testid='button-create-project']"
       }
     )
-  })
+  }
 }
 
 # This is the existing App formal orchestration path exposed by the local

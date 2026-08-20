@@ -589,11 +589,30 @@ var intentProjectNamePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`project\s+(?:named|called)\s+([a-z0-9][a-z0-9 _-]{0,47})`),
 }
 
+// A project-idea field may legitimately contain a full user requirement rather
+// than a short project title. Prefer its explicit fill instruction over a
+// nearby navigation phrase such as “新建项目入口”; the latter is an action
+// label, never a user-provided value.
+var intentProjectInputValuePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt)|今天你想做什么)[^，。；;,\n]{0,64}?(?:输入|填写|填入|fill)\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
+	regexp.MustCompile(`(?:输入|填写|填入)\s*(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt))\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
+}
+
 var intentDurationOnlyPattern = regexp.MustCompile(`^\d+(?:\.\d+)?\s*(?:秒|s|sec|secs|second|seconds)$`)
 var intentProjectDetailsPattern = regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?项目\s*[（(]([^）)]{1,96})[）)]`)
 
 func intentProjectName(intentText string) string {
 	intentText = normalizeIntentText(intentText)
+	for _, pattern := range intentProjectInputValuePatterns {
+		for _, match := range pattern.FindAllStringSubmatch(intentText, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			if candidate := normalizeIntentProjectNameCandidate(match[1]); candidate != "" {
+				return candidate
+			}
+		}
+	}
 	for _, match := range intentProjectDetailsPattern.FindAllStringSubmatch(intentText, -1) {
 		if len(match) < 2 {
 			continue

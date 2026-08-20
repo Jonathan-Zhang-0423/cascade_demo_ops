@@ -27,8 +27,8 @@ func TestBuildReportServerFixtureReadyWithoutLeakingEnvironmentValues(t *testing
 	certPath, keyPath := writeTestCertificate(t, time.Unix(0, 0), "fixture.gateway.invalid")
 	secrets := map[string]string{
 		"CASCADE_DIRECT_PUBLIC_HOST":     "fixture.gateway.invalid:18443",
-		"CASCADE_DIRECT_BOOTSTRAP_TOKEN": "bootstrap-secret-must-not-leak",
-		"CASCADE_DIRECT_WORKER_TOKEN":    "worker-secret-must-not-leak",
+		"CASCADE_DIRECT_BOOTSTRAP_TOKEN": "bootstrap-secret-must-not-leak-0123456789",
+		"CASCADE_DIRECT_WORKER_TOKEN":    "worker-secret-must-not-leak-0123456789",
 		"CASCADE_DIRECT_TLS_CERT":        certPath,
 		"CASCADE_DIRECT_TLS_KEY":         keyPath,
 	}
@@ -59,8 +59,8 @@ func TestBuildReportRejectsMismatchedTLSKeyPair(t *testing.T) {
 	certPath, _ := writeTestCertificate(t, time.Unix(0, 0), "localhost")
 	_, otherKeyPath := writeTestCertificate(t, time.Unix(0, 0), "localhost")
 	t.Setenv("CASCADE_DIRECT_PUBLIC_HOST", "localhost:18443")
-	t.Setenv("CASCADE_DIRECT_BOOTSTRAP_TOKEN", "configured")
-	t.Setenv("CASCADE_DIRECT_WORKER_TOKEN", "configured")
+	t.Setenv("CASCADE_DIRECT_BOOTSTRAP_TOKEN", "configured-bootstrap-token-0123456789")
+	t.Setenv("CASCADE_DIRECT_WORKER_TOKEN", "configured-worker-token-012345678901")
 	t.Setenv("CASCADE_DIRECT_TLS_CERT", certPath)
 	t.Setenv("CASCADE_DIRECT_TLS_KEY", otherKeyPath)
 	r := buildReport(preflightOptions{Fixture: fixture, Worker: runtimeFile, Node: runtimeFile, FFmpeg: runtimeFile, FFprobe: runtimeFile}, time.Unix(0, 0))
@@ -77,8 +77,8 @@ func TestBuildReportRejectsCertificateForDifferentPublicHost(t *testing.T) {
 	}
 	certPath, keyPath := writeTestCertificate(t, time.Unix(0, 0), "localhost")
 	t.Setenv("CASCADE_DIRECT_PUBLIC_HOST", "other.example:18443")
-	t.Setenv("CASCADE_DIRECT_BOOTSTRAP_TOKEN", "configured")
-	t.Setenv("CASCADE_DIRECT_WORKER_TOKEN", "configured")
+	t.Setenv("CASCADE_DIRECT_BOOTSTRAP_TOKEN", "configured-bootstrap-token-0123456789")
+	t.Setenv("CASCADE_DIRECT_WORKER_TOKEN", "configured-worker-token-012345678901")
 	t.Setenv("CASCADE_DIRECT_TLS_CERT", certPath)
 	t.Setenv("CASCADE_DIRECT_TLS_KEY", keyPath)
 	r := buildReport(preflightOptions{Fixture: fixture, Worker: runtimeFile, Node: runtimeFile, FFmpeg: runtimeFile, FFprobe: runtimeFile}, time.Unix(0, 0))
@@ -141,9 +141,11 @@ func TestBuildReportMissingFFmpegIsNotReady(t *testing.T) {
 	if err := os.WriteFile(runtimeFile, []byte("test-only"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range requiredGatewayEnvironment {
-		t.Setenv(name, "configured-for-test")
-	}
+	t.Setenv("CASCADE_DIRECT_PUBLIC_HOST", "localhost:18443")
+	t.Setenv("CASCADE_DIRECT_BOOTSTRAP_TOKEN", "configured-bootstrap-token-0123456789")
+	t.Setenv("CASCADE_DIRECT_WORKER_TOKEN", "configured-worker-token-012345678901")
+	t.Setenv("CASCADE_DIRECT_TLS_CERT", "configured-for-test")
+	t.Setenv("CASCADE_DIRECT_TLS_KEY", "configured-for-test")
 	missing := filepath.Join(t.TempDir(), "ffmpeg-missing")
 	r := buildReport(preflightOptions{Fixture: fixture, Worker: runtimeFile, Node: runtimeFile, FFmpeg: missing, FFprobe: runtimeFile}, time.Unix(0, 0))
 	if r.Ready || r.AppFormalRun {
@@ -160,6 +162,24 @@ func TestBuildReportMissingFFmpegIsNotReady(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("ffmpeg readiness check missing")
+	}
+}
+
+func TestBuildReportRejectsWrongGatewayControlPortAndShortTokens(t *testing.T) {
+	fixture := repositoryFixture(t)
+	runtimeFile := filepath.Join(t.TempDir(), "runtime-ready")
+	if err := os.WriteFile(runtimeFile, []byte("test-only"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	certPath, keyPath := writeTestCertificate(t, time.Unix(0, 0), "localhost")
+	t.Setenv("CASCADE_DIRECT_PUBLIC_HOST", "localhost:18442")
+	t.Setenv("CASCADE_DIRECT_BOOTSTRAP_TOKEN", "too-short")
+	t.Setenv("CASCADE_DIRECT_WORKER_TOKEN", "also-short")
+	t.Setenv("CASCADE_DIRECT_TLS_CERT", certPath)
+	t.Setenv("CASCADE_DIRECT_TLS_KEY", keyPath)
+	r := buildReport(preflightOptions{Fixture: fixture, Worker: runtimeFile, Node: runtimeFile, FFmpeg: runtimeFile, FFprobe: runtimeFile}, time.Unix(0, 0))
+	if r.Ready || checkPassed(r, "gateway_control_tls_port") || checkPassed(r, "env_cascade_direct_bootstrap_token") || checkPassed(r, "env_cascade_direct_worker_token") {
+		t.Fatalf("invalid topology or short secrets must block readiness: %+v", r)
 	}
 }
 
