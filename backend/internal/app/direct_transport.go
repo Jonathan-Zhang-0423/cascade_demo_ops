@@ -392,6 +392,9 @@ func bindDirectExecutionPackageOrigin(build ClientExecutionPackageBuild, install
 	if err := model.ValidateClientExecutionPackageForCloudExecution(&pkg); err != nil {
 		return ClientExecutionPackageBuild{}, err
 	}
+	if err := model.ValidateClientExecutionPackageForDirectExecution(&pkg); err != nil {
+		return ClientExecutionPackageBuild{}, fmt.Errorf("direct origin-bound package validation: %w", err)
+	}
 	digest, err := model.DigestCanonicalJSON(pkg)
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err

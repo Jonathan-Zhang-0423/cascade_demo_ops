@@ -576,7 +576,7 @@ func (c *smokeClient) signedDataJSON(ctx context.Context, method, path string, b
 	req.Header.Set("X-Cascade-Timestamp", strconv.FormatInt(ts, 10))
 	req.Header.Set("X-Cascade-Nonce", nonce)
 	req.Header.Set("X-Cascade-Body-SHA256", digest)
-	req.Header.Set("X-Cascade-Signature", direct.SignDataRequest(method, path, ts, nonce, digest, c.lease.LeaseToken, c.lease.InstallationID))
+	req.Header.Set("X-Cascade-Signature", direct.SignDataRequest(method, path, ts, nonce, digest, c.lease.LeaseToken, c.lease.InstallationID, c.lease.LeaseID, c.lease.DataPort))
 	return c.doJSON(req, output)
 }
 
