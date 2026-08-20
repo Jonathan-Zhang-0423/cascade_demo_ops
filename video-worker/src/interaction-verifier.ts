@@ -22,6 +22,7 @@ type InteractionGoal = {
   keywords?: string[];
   required?: boolean;
   business?: boolean;
+  input_value?: string;
 };
 
 type InteractionCandidate = {
@@ -182,6 +183,10 @@ export async function verifyInteractions(request: VerifyInteractionRequest): Pro
     }
     const safeTransitions = await applySafeStateTransitions(page, request, timeout);
     diagnostics.safe_state_transitions = safeTransitions;
+    const discoveredTransition = await applyDiscoveredNewProjectTransition(page, request.intent_goals || [], request, timeout);
+    if (discoveredTransition) safeTransitions.push(discoveredTransition);
+    const projectInputTransition = await applyDiscoveredProjectInput(page, request.intent_goals || [], request, timeout);
+    if (projectInputTransition) safeTransitions.push(projectInputTransition);
     if (safeTransitions.some((value) => value.startsWith("applied:"))) {
       currentURL = page.url();
       pageTitle = await page.title().catch(() => "");
@@ -284,6 +289,120 @@ async function applySafeStateTransitions(page: any, request: VerifyInteractionRe
   return transitions;
 }
 
+async function applyDiscoveredNewProjectTransition(
+  page: any,
+  goals: InteractionGoal[],
+  request: VerifyInteractionRequest,
+  timeout: number,
+): Promise<string> {
+  const explicitlyRequested = goals.some((goal) => {
+    if (!goal.required || !goal.business || normalizeAction(goal.kind) !== "click") return false;
+    const semantic = normalizeSelectorText(`${goal.label || ""} ${(goal.keywords || []).join(" ")}`);
+    return /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
+  });
+  if (!explicitlyRequested || isURLForbiddenByScope(page.url(), request)) return "";
+
+  const creationInputVisible = await page.locator("input, textarea").evaluateAll((elements: any[]) => elements.some((element) => {
+    const html = element as any;
+    const rect = html.getBoundingClientRect();
+    const style = (globalThis as any).getComputedStyle(html);
+    const semantic = String([
+      element.getAttribute("data-testid"), element.getAttribute("data-test"), element.getAttribute("data-cy"),
+      element.getAttribute("name"), element.getAttribute("aria-label"), element.getAttribute("placeholder"),
+    ].filter(Boolean).join(" ")).toLowerCase();
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" &&
+      /(project[-_ ]?(idea|name|prompt)|(idea|name|prompt)[-_ ]?project|项目.{0,4}(需求|名称|描述))/.test(semantic);
+  })).catch(() => false);
+  if (creationInputVisible) return "already_visible:new_project_creation";
+
+  const controls = await page.locator("button, [role='button']").evaluateAll((elements: any[]) => elements.slice(0, 120).map((element) => {
+    const html = element as any;
+    const rect = html.getBoundingClientRect();
+    const style = (globalThis as any).getComputedStyle(html);
+    return {
+      text: String(html.innerText || html.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120),
+      testid: element.getAttribute("data-testid") || element.getAttribute("data-test") || element.getAttribute("data-cy") || "",
+      aria: element.getAttribute("aria-label") || "",
+      id: element.getAttribute("id") || "",
+      visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none",
+      disabled: Boolean((html as any).disabled) || element.getAttribute("aria-disabled") === "true",
+    };
+  })).catch(() => []);
+
+  const candidates = controls
+    .filter((control: any) => control.visible && !control.disabled)
+    .map((control: any) => {
+      const semantic = normalizeSelectorText(`${control.text} ${control.aria} ${control.testid} ${control.id}`);
+      let selector = "";
+      if (control.testid) selector = `[data-testid="${escapeCSSString(control.testid)}"]`;
+      else if (control.aria) selector = `[aria-label="${escapeCSSString(control.aria)}"]`;
+      else if (control.id && /^[A-Za-z][\w-]*$/.test(control.id)) selector = `#${control.id}`;
+      const requested = /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
+      const staleEntity = /(card-project-|text-project-name-|emoji-project-|project-menu-|project-list|dashboard-page)/i.test(semantic);
+      const score = (control.testid ? 100 : control.aria ? 70 : control.id ? 50 : 0) + (/button-new-project|new-project-button|create-project-button/i.test(semantic) ? 80 : 0);
+      return { selector, semantic, requested, staleEntity, score };
+    })
+    .filter((candidate: any) => candidate.selector && candidate.requested && !candidate.staleEntity && !looksLikeDestructiveControl(candidate.semantic) && !looksLikeControlPlaneSignal(candidate.semantic))
+    .sort((left: any, right: any) => right.score - left.score);
+  if (candidates.length === 0 || (candidates.length > 1 && candidates[0].score === candidates[1].score)) return "";
+
+  const clicked = await page.locator(candidates[0].selector).first().click({ timeout: Math.min(timeout, 4000) }).then(() => true).catch(() => false);
+  if (!clicked) return "discovered_failed:new_project_entry";
+  await waitForPageEvidenceReady(page, Math.min(timeout, 5000));
+  if (isURLForbiddenByScope(page.url(), request)) return "discovered_result_scope_rejected:new_project_entry";
+  return "applied:discovered_new_project_entry";
+}
+
+async function applyDiscoveredProjectInput(
+  page: any,
+  goals: InteractionGoal[],
+  request: VerifyInteractionRequest,
+  timeout: number,
+): Promise<string> {
+  const goal = goals.find((candidate) => {
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
+    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "fill" &&
+      typeof candidate.input_value === "string" && candidate.input_value.trim().length > 0 && candidate.input_value.length <= 512 &&
+      /(项目需求|项目名称|project idea|project prompt|project name|input-project-idea)/i.test(semantic) &&
+      !/(password|passwd|secret|token|api key|密码|口令|密钥|令牌)/i.test(candidate.input_value);
+  });
+  if (!goal || isURLForbiddenByScope(page.url(), request)) return "";
+
+  const controls = await page.locator("input, textarea").evaluateAll((elements: any[]) => elements.slice(0, 80).map((element) => {
+    const html = element as any;
+    const rect = html.getBoundingClientRect();
+    const style = (globalThis as any).getComputedStyle(html);
+    const semantic = String([
+      element.getAttribute("data-testid"), element.getAttribute("data-test"), element.getAttribute("data-cy"),
+      element.getAttribute("name"), element.getAttribute("aria-label"), element.getAttribute("placeholder"),
+    ].filter(Boolean).join(" ")).toLowerCase();
+    const testid = element.getAttribute("data-testid") || element.getAttribute("data-test") || element.getAttribute("data-cy") || "";
+    const name = element.getAttribute("name") || "";
+    return {
+      testid,
+      name,
+      tag: String(html.tagName || "input").toLowerCase(),
+      semantic,
+      eligible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" &&
+        !html.disabled && !html.readOnly && !["password", "hidden", "file"].includes(String(html.type || "").toLowerCase()),
+      score: (testid ? 100 : 40) + (/(project[-_ ]?(idea|name|prompt)|(idea|name|prompt)[-_ ]?project|项目.{0,4}(需求|名称|描述))/.test(semantic) ? 100 : 0),
+    };
+  })).catch(() => []);
+  const resolvedControls = controls.map((control: any) => ({
+    ...control,
+    selector: control.testid ? `[data-testid="${escapeCSSString(control.testid)}"]` : control.name ? `${control.tag}[name="${escapeCSSString(control.name)}"]` : "",
+  }));
+  const candidates = resolvedControls.filter((control: any) => control.eligible && control.selector && control.score >= 140).sort((left: any, right: any) => right.score - left.score);
+  if (candidates.length === 0) {
+    return "discovered_unavailable:project_creation_input";
+  }
+  if (candidates.length > 1 && candidates[0].score === candidates[1].score) return "discovered_ambiguous:project_creation_input";
+  const filled = await page.locator(candidates[0].selector).first().fill(goal.input_value!.trim(), { timeout: Math.min(timeout, 4000) }).then(() => true).catch(() => false);
+  if (!filled) return "discovered_failed:project_creation_input";
+  await page.waitForTimeout(250);
+  return "applied:discovered_project_creation_input";
+}
+
 async function discoverBusinessActions(
   page: any,
   goals: InteractionGoal[],
@@ -324,6 +443,7 @@ async function discoverBusinessActions(
 
   const scored = visibleControls
     .filter((control: any) => control.visible && !control.disabled)
+    .filter((control: any) => isSemanticallyInteractiveControl(control))
     .filter((control: any) => !isURLForbiddenByScope(control.attrs?.href, request))
     .map((control: any) => {
       const label = accessibleControlName(control);
@@ -339,7 +459,7 @@ async function discoverBusinessActions(
 
   const now = new Date().toISOString();
   const sourceDigest = await pageEvidenceDigest(page, pageURL);
-  return scored.map((item: any, index: number) => {
+  const actions = scored.map((item: any, index: number) => {
     const id = `browser_discovered_${index + 1}_${hashText(`${item.selector}|${item.label}`)}`;
     const result: VerifiedInteractionCandidate = {
       id,
@@ -367,6 +487,78 @@ async function discoverBusinessActions(
     }
     return result;
   });
+  const resultStates = await discoverProjectCreationResultStates(page, goals, pageURL, pageTitle, scanID, sourceDigest, now);
+  return [...actions, ...resultStates];
+}
+
+async function discoverProjectCreationResultStates(
+  page: any,
+  goals: InteractionGoal[],
+  pageURL: string,
+  pageTitle: string,
+  scanID: string,
+  sourceDigest: string,
+  observedAt: string,
+): Promise<VerifiedInteractionCandidate[]> {
+  const goal = goals.find((candidate) => {
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
+    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "click" &&
+      /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
+  });
+  if (!goal) return [];
+  const states = await page.locator("dialog, [role='dialog'], [data-testid*='dialog' i], [data-testid*='modal' i]").evaluateAll((elements: any[]) => elements.slice(0, 40).map((element) => {
+    const html = element as any;
+    const rect = html.getBoundingClientRect();
+    const style = (globalThis as any).getComputedStyle(html);
+    return {
+      text: String(html.innerText || html.textContent || "").trim().replace(/\s+/g, " ").slice(0, 160),
+      testid: element.getAttribute("data-testid") || element.getAttribute("data-test") || element.getAttribute("data-cy") || "",
+      aria: element.getAttribute("aria-label") || "",
+      id: element.getAttribute("id") || "",
+      role: element.getAttribute("role") || "dialog",
+      visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none",
+    };
+  })).catch(() => []);
+  return states.flatMap((state: any, index: number) => {
+    const semantic = normalizeSelectorText(`${state.text} ${state.testid} ${state.aria} ${state.id}`);
+    if (!state.visible || !/(new[-_ ]?project|create[-_ ]?project|新建项目|创建项目|今天你想做什么)/i.test(semantic)) return [];
+    const selector = state.testid ? `[data-testid="${escapeCSSString(state.testid)}"]` : state.aria ? `[aria-label="${escapeCSSString(state.aria)}"]` : state.id && /^[A-Za-z][\w-]*$/.test(state.id) ? `#${state.id}` : "";
+    if (!selector) return [];
+    const id = `browser_state_${index + 1}_${hashText(`${selector}|${state.text}`)}`;
+    return [{
+      id,
+      intent_goal_id: goal.id,
+      label: state.text || state.aria || "New project dialog",
+      kind: "inspect",
+      selector,
+      url: pageURL,
+      status: "verified" as const,
+      visible: true,
+      enabled: true,
+      editable: false,
+      page_url: pageURL,
+      page_title: pageTitle,
+      message: "safe-state scan verified the visible result container independently from action controls",
+      verified_at: observedAt,
+      evidence_id: selectorEvidenceID(scanID, id, selector),
+      source_kind: "page_scan" as const,
+      source_digest: sourceDigest,
+      observed_role: state.role || "dialog",
+      observed_accessible_name: state.text || state.aria || "New project dialog",
+      observed_url: pageURL,
+      observed_route_template: new URL(pageURL).pathname,
+      observed_page_role: "product",
+      observed_form_role: "generic",
+      evidence_digest_sha256: sourceDigest,
+      observed_at: observedAt,
+    }];
+  });
+}
+
+function isSemanticallyInteractiveControl(control: any): boolean {
+  const tag = String(control?.tag || "").toLowerCase();
+  const role = String(control?.attrs?.role || "").toLowerCase();
+  return ["button", "a", "input", "textarea", "select"].includes(tag) || ["button", "link", "textbox", "combobox", "checkbox", "radio"].includes(role);
 }
 
 async function discoverBusinessActionsAcrossSafePages(

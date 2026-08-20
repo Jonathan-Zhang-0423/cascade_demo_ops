@@ -85,7 +85,7 @@ func (s *Service) ApplyGeneratedPatches(ctx context.Context, jobID string, expec
 		}
 		return fallback, nil
 	}
-	outputValidation, outputErr := validateFinalFilmOutput(ctx, s.renderer, result, job.RenderProfile, s.now().UTC())
+	outputValidation, outputErr := validateFinalFilmOutput(ctx, s.renderer, result, job.RenderProfile, finalPlan, s.requireTestNarration, s.now().UTC())
 	if outputErr != nil {
 		fallback := rendering
 		fallback.Revision++

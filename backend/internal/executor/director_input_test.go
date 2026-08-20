@@ -565,7 +565,7 @@ func TestNewArkMediaGenerationResultRegistersProviderURLsAsCandidateArtifacts(t 
 	if video == nil || video.Kind != "generated_video_candidate" || video.MimeType != "video/mp4" || video.Metadata["include_in_demo"] != false {
 		t.Fatalf("unexpected video candidate artifact: %+v", video)
 	}
-	if video.Metadata["source_material_policy"] != "non_authoritative_generated_candidate" || video.Metadata["task_id"] != "task_1" {
+	if video.Metadata["source_material_policy"] != "non_authoritative_generated_candidate" || video.Metadata["provider"] != "seedance" || video.Metadata["model"] != "doubao-seedance-2-0-260128" || video.Metadata["task_id"] != "task_1" {
 		t.Fatalf("candidate artifact must preserve provider metadata and boundary: %+v", video.Metadata)
 	}
 	lastFrame := findArtifactByURI(result.CandidateArtifacts, "https://assets.example.com/generated/last-frame.png")
@@ -688,6 +688,9 @@ func TestNewArkMediaGenerationResultWithOptionsPollsAndDownloadsCandidateArtifac
 	}
 	if normalized.Metadata["provider_original_artifact_id"] != downloaded.ID || normalized.Metadata["artifact_variant"] != "normalized" || normalized.Metadata["normalization_profile"] != media.GeneratedShotNormalizationProfile {
 		t.Fatalf("normalized derivative metadata mismatch: %+v", normalized.Metadata)
+	}
+	if normalized.Metadata["provider"] != "seedance" || normalized.Metadata["model"] != "doubao-seedance-2-0-260128" || normalized.Metadata["task_id"] != "task_download" {
+		t.Fatalf("normalized derivative must retain provider identity: %+v", normalized.Metadata)
 	}
 
 	review := ReviewArkMediaCandidateAssets(&source, &result, time.Date(2026, 7, 15, 20, 0, 2, 0, time.UTC))

@@ -2500,6 +2500,20 @@ func nodeVerifiedForBusinessAction(node *model.GraphNode) bool {
 	if node == nil {
 		return false
 	}
+	// Business-stage nodes are synthesized from the App's approved planning
+	// layer and therefore do not carry the legacy verified_interaction_id.
+	// Accept them only when the exact executable selector is independently
+	// bound to complete, live page-scan provenance.
+	if node.ActionSpec != nil {
+		selector := firstNonEmpty(node.ActionSpec.Target.Selector, node.Selector)
+		for _, candidate := range node.ActionSpec.Target.SelectorAlternatives {
+			if strings.EqualFold(strings.TrimSpace(candidate.SourceKind), "page_scan") &&
+				model.SelectorCandidateHasFormalProvenance(candidate) &&
+				selectorCandidateMatchesValue(candidate, selector) {
+				return true
+			}
+		}
+	}
 	if node.Metadata == nil {
 		return false
 	}
@@ -2568,6 +2582,12 @@ func ensureRequiredValidationsForStep(node *model.GraphNode, action model.Script
 			Severity:  "blocking",
 			Required:  true,
 		})
+	case model.GraphActionPress:
+		out = append(out, model.ValidationSpec{
+			ID: "validate_keyboard_change_" + node.ID, Kind: "page_changed",
+			Target: action.Target, Assertion: firstNonEmpty(node.ExpectedOutcome, "键盘操作后页面画面必须发生变化"),
+			Expected: true, Severity: "blocking", Required: true,
+		})
 	case model.GraphActionWait, model.GraphActionInspect:
 		stageKind := businessStageKindForNode(node)
 		if stageKind != model.BusinessStageKindSessionSetup && stageKind != model.BusinessStageKindObserveProgress && stageKind != model.BusinessStageKindFinalObserve {
@@ -2607,7 +2627,7 @@ func hasRequiredValidation(validations []model.ValidationSpec) bool {
 
 func validationKindAllowedForBrowserAgent(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
 		return true
 	default:
 		return false
@@ -2989,7 +3009,9 @@ func scriptQualityFromGraph(graph *model.DemoWorkflowGraph) scriptQualityReport 
 		if actionType == model.GraphActionAssert && !selectorUsableForBlockingAssertion(selector) {
 			report.BlockingAssertRisk++
 		}
-		if isBusinessAction(actionType) && selectorUsableForBusinessAction(selector) && nodeVerifiedForBusinessAction(node) {
+		if actionType == model.GraphActionPress && node.ActionSpec != nil && len(approvedKeyboardKeys(node.ActionSpec.Parameters)) > 0 && graphNodeHasPageChangedValidation(node) {
+			report.ExecutableActionCount++
+		} else if isBusinessAction(actionType) && selectorUsableForBusinessAction(selector) && nodeVerifiedForBusinessAction(node) {
 			report.ExecutableActionCount++
 		} else if isBusinessAction(actionType) {
 			report.Warnings = append(report.Warnings, "业务动作缺少稳定且已验证的 selector，上传前应补充页面扫描、截图标注或 data-testid/role/name 证据。")
@@ -2997,7 +3019,7 @@ func scriptQualityFromGraph(graph *model.DemoWorkflowGraph) scriptQualityReport 
 	}
 	report.ObservationOnly = report.ExecutableActionCount == 0
 	if report.ObservationOnly {
-		report.Blockers = append(report.Blockers, "当前执行图没有 click/fill/select/upload/api_call 等已验证真实业务动作，不能自动上传录制。请确认需求目标能在产品页面中找到可见、可用、可解释的控件证据。")
+		report.Blockers = append(report.Blockers, "当前执行图没有 click/fill/select/upload/press/api_call 等已验证真实业务动作，不能自动上传录制。请确认需求目标能在产品页面中找到可见、可用、可解释的控件或键盘验证证据。")
 	}
 	if report.GenericSelectorCount > 0 {
 		report.Warnings = append(report.Warnings, "检测到 body/main/section/div 等泛 selector，业务动作不会使用这些 selector 作为 blocking 目标。")
@@ -3053,11 +3075,23 @@ func softenBlockingValidations(validations []model.ValidationSpec) []model.Valid
 
 func isBusinessAction(action model.GraphActionType) bool {
 	switch action {
-	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
+	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionPress, model.GraphActionAPICall:
 		return true
 	default:
 		return false
 	}
+}
+
+func graphNodeHasPageChangedValidation(node *model.GraphNode) bool {
+	if node == nil {
+		return false
+	}
+	for _, validation := range node.Validations {
+		if validation.Required && validation.Kind == "page_changed" && validation.Expected == true {
+			return true
+		}
+	}
+	return false
 }
 
 func scriptSafetyPolicy(project *model.ProjectContext, graph *model.DemoWorkflowGraph) model.ScriptSafetyPolicy {

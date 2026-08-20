@@ -66,8 +66,8 @@ func NewGeneratedShotOrchestration(orchestrationID string, intent GeneratedShotI
 	if preflight.IntentID != intent.IntentID {
 		return GeneratedShotOrchestrationRecord{}, generatedShotOrchestrationError("preflight", "generated_orchestration_preflight_invalid", "preflight must bind the intent and remain non-executable")
 	}
-	if mode == GeneratedShotCandidateSetModeComparison && !generatedShotPreflightHasProviders(preflight, GeneratedShotProviderSeedance20, GeneratedShotProviderMiniMaxH3) {
-		return GeneratedShotOrchestrationRecord{}, generatedShotOrchestrationError("preflight.providers", "generated_orchestration_comparison_preflight_incomplete", "comparison preflight must evaluate Seedance 2.0 and MiniMax-H3 independently")
+	if mode == GeneratedShotCandidateSetModeComparison && (!generatedShotPreflightHasSeedance(preflight) || !generatedShotPreflightHasProviders(preflight, GeneratedShotProviderMiniMaxH3)) {
+		return GeneratedShotOrchestrationRecord{}, generatedShotOrchestrationError("preflight.providers", "generated_orchestration_comparison_preflight_incomplete", "comparison preflight must evaluate Seedance and MiniMax-H3 independently")
 	}
 	if now.IsZero() {
 		return GeneratedShotOrchestrationRecord{}, generatedShotOrchestrationError("updated_at", "generated_orchestration_time_missing", "updated_at is required")
@@ -216,6 +216,15 @@ func generatedShotPreflightHasProviders(report GeneratedShotPreflightReport, pro
 		}
 	}
 	return true
+}
+
+func generatedShotPreflightHasSeedance(report GeneratedShotPreflightReport) bool {
+	for _, provider := range report.Providers {
+		if isGeneratedShotSeedanceProvider(provider.Provider) {
+			return true
+		}
+	}
+	return false
 }
 
 func asGeneratedShotOrchestrationValidationError(err error) *GeneratedShotOrchestrationValidationError {

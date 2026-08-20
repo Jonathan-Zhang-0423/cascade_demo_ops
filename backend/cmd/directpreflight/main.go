@@ -10,9 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/direct"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -54,6 +57,15 @@ func main() {
 	ffprobe := flag.String("ffprobe", "ffprobe", "FFprobe executable")
 	out := flag.String("output", "artifacts/direct-preflight/latest/preflight.json", "preflight report path")
 	flag.Parse()
+	// Match all other local media/Direct commands: load repository dotenv files
+	// without overriding explicit process environment. The report still records
+	// only presence, never values or private-key material.
+	if cwd, err := os.Getwd(); err == nil {
+		repoRoot := config.DiscoverDevRepoRoot(cwd)
+		if err := config.LoadDotEnvFiles(config.DefaultDotEnvPaths(repoRoot)...); err != nil {
+			fatal(err)
+		}
+	}
 
 	r := buildReport(preflightOptions{Fixture: *fixture, Worker: *worker, Node: *node, FFmpeg: *ffmpeg, FFprobe: *ffprobe}, time.Now())
 	if err := os.MkdirAll(filepath.Dir(*out), 0o700); err != nil {
@@ -96,8 +108,18 @@ func buildReport(options preflightOptions, now time.Time) report {
 	r.add("ffprobe_ready", commandReady(options.FFprobe), options.FFprobe)
 	for _, env := range requiredGatewayEnvironment {
 		value := strings.TrimSpace(os.Getenv(env))
-		r.add("env_"+strings.ToLower(env), value != "", "required for Gateway; value not recorded")
+		passed := value != ""
+		detail := "required for Gateway; value not recorded"
+		if env == "CASCADE_DIRECT_BOOTSTRAP_TOKEN" || env == "CASCADE_DIRECT_WORKER_TOKEN" {
+			passed = len(value) >= 32
+			detail = "required Gateway secret must contain at least 32 characters; value not recorded"
+		}
+		r.add("env_"+strings.ToLower(env), passed, detail)
 	}
+	publicHost := strings.TrimSpace(os.Getenv("CASCADE_DIRECT_PUBLIC_HOST"))
+	r.add("gateway_control_tls_port", directPublicHostUsesControlPort(publicHost), "public host must use Direct TLS control port 18443; host not recorded")
+	r.add("gateway_installation_data_ports", direct.DataPortMin == 24000 && direct.DataPortMax == 24031, "Server reserves installation-exclusive TLS data ports 24000-24031")
+	r.add("gateway_worker_loopback", direct.WorkerPort == 18444, "Worker API is fixed to loopback 127.0.0.1:18444")
 	certPath := strings.TrimSpace(os.Getenv("CASCADE_DIRECT_TLS_CERT"))
 	keyPath := strings.TrimSpace(os.Getenv("CASCADE_DIRECT_TLS_KEY"))
 	r.add("tls_cert_file", certPath != "" && fileExists(certPath), "TLS certificate path must point to a regular file; value not recorded")
@@ -124,6 +146,15 @@ func buildReport(options preflightOptions, now time.Time) report {
 		}
 	}
 	return r
+}
+
+func directPublicHostUsesControlPort(value string) bool {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil || strings.TrimSpace(host) == "" {
+		return false
+	}
+	parsed, err := strconv.Atoi(port)
+	return err == nil && parsed == direct.ControlPort
 }
 
 func loadTLSCertificate(certPath, keyPath string) (*tls.Certificate, *x509.Certificate, error) {

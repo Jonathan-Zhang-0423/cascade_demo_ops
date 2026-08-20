@@ -786,6 +786,28 @@ func assertFinding(t *testing.T, validation model.ExecutableScriptValidation, co
 	t.Fatalf("expected finding containing %q, got %+v", contains, validation.Findings)
 }
 
+func TestNodeVerifiedForBusinessActionAcceptsExactFormalPageScanBinding(t *testing.T) {
+	candidate := formalPageScanBusinessTarget("button-new-project", "click", "button", "新建项目")
+	stage := model.BusinessStage{
+		ID: "business_stage_new_project_entry", Kind: model.BusinessStageKindBusinessAction,
+		Action:  model.BusinessActionSemantics{Type: string(model.GraphActionClick), Label: "点击新建项目入口"},
+		Targets: []model.BusinessTargetCandidate{candidate},
+	}
+	target := businessStageActionTarget(stage, "https://app.example.com")
+	node := &model.GraphNode{
+		Selector:   target.Selector,
+		ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Target: target},
+		Metadata:   map[string]any{"verification_status": "business_stage_plan"},
+	}
+	if !nodeVerifiedForBusinessAction(node) {
+		t.Fatal("exact page-scan selector provenance should verify a synthesized business-stage action")
+	}
+	node.ActionSpec.Target.Selector = "[data-testid='different-control']"
+	if nodeVerifiedForBusinessAction(node) {
+		t.Fatal("formal provenance for a different selector must not verify the action")
+	}
+}
+
 func executableBundleFixtures() (*model.ProjectContext, *model.MultimodalUnderstandingReport, *model.ProductMap, *model.DemoWorkflowGraph) {
 	project := &model.ProjectContext{
 		ID:                 "project_bundle",

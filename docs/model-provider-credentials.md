@@ -22,7 +22,7 @@ Runtime 会预设公开官方端点，仍可通过对应 `*_BASE_URL` 覆盖：
 | Kimi | `https://api.moonshot.cn/v1` | Moonshot/Kimi OpenAI 兼容端点 |
 | MiniMax | `https://api.minimaxi.com/v1` | MiniMax OpenAI SDK 文档端点 |
 | MiniMax-H3 视频 Sidecar | `https://api.minimaxi.com` | H3 V2 视频生成端点；当前未注册到正式路由 |
-| Seedance | `https://ark.cn-beijing.volces.com/api/v3` | 火山方舟 Ark 端点，默认用于 Seedance 2.0 视频能力 |
+| Seedance | `https://ark.cn-beijing.volces.com/api/v3` | 火山方舟 Ark 端点，默认用于 Seedance 2.5 视频能力 |
 | 豆包 / Ark | `https://ark.cn-beijing.volces.com/api/v3` | 与 Seedance 共用 Ark 网关 |
 | DeepSeek | `https://api.deepseek.com` | DeepSeek OpenAI 兼容端点 |
 

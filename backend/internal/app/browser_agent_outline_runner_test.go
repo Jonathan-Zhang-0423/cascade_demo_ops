@@ -227,6 +227,24 @@ func validationReportHasCheckCode(report model.ValidationReport, code string, pa
 	return false
 }
 
+func TestPreExecutionRepairAllowedRunsOnlyWithoutBlockingChecks(t *testing.T) {
+	warning := model.ValidationReport{
+		Decision: model.ValidationDecisionRepairAllowed,
+		Checks:   []model.ValidationCheck{{Severity: model.FindingSeverityWarning, Passed: false}},
+	}
+	if !preExecutionValidationAllowsRun(warning) {
+		t.Fatal("repair_allowed with warning-only findings should enter bounded runtime repair")
+	}
+	warning.Checks = append(warning.Checks, model.ValidationCheck{Severity: model.FindingSeverityBlocking, Passed: false})
+	if preExecutionValidationAllowsRun(warning) {
+		t.Fatal("repair_allowed must not bypass a blocking pre-execution finding")
+	}
+	if preExecutionValidationAllowsRun(model.ValidationReport{Decision: model.ValidationDecisionStopAndReport}) ||
+		preExecutionValidationAllowsRun(model.ValidationReport{Decision: model.ValidationDecisionReunderstandingRequired}) {
+		t.Fatal("hard-stop pre-execution decisions must remain blocking")
+	}
+}
+
 func TestLocalBrowserAgentOutlineRunnerPostValidationStopsDelivery(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	pkg.RecordingRunSpec.Outputs.FinalVideo = false

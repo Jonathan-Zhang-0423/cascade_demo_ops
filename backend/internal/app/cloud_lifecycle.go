@@ -102,6 +102,7 @@ type CloudPackagePreflightResult struct {
 	AllowedDomains              []string                     `json:"allowed_domains,omitempty"`
 	Warnings                    []string                     `json:"warnings"`
 	Readiness                   *BrowserAgentReadinessReport `json:"browser_agent_readiness,omitempty"`
+	Diagnostics                 *PackagePreflightDiagnostics `json:"package_diagnostics,omitempty"`
 	Message                     string                       `json:"message"`
 }
 
@@ -503,12 +504,14 @@ func compactProjectContextForPrepareResponse(project *model.ProjectContext) *mod
 		UpdatedAt:          project.UpdatedAt,
 	}
 	if project.Inputs != nil {
+		preferences := model.NormalizeMediaDeliveryPreferences(project.Inputs.MediaDeliveryPreferences)
 		out.Inputs = &model.ProjectInputBundle{
 			ProductURLs:                   project.Inputs.ProductURLs,
 			Repositories:                  compactRepositoriesForPrepareResponse(project.Inputs.Repositories),
 			Credentials:                   project.Inputs.Credentials,
 			Requirements:                  project.Inputs.Requirements,
 			PresentationGenerationIntents: append([]model.PresentationGenerationIntent{}, project.Inputs.PresentationGenerationIntents...),
+			MediaDeliveryPreferences:      &preferences,
 			RawUserPrompt:                 truncateForUpload(project.Inputs.RawUserPrompt, 1000),
 			RequirementDocuments:          compactRequirementDocumentsForPrepareResponse(project.Inputs.RequirementDocuments),
 		}
@@ -1119,7 +1122,7 @@ func buildClientExecutionPackageFromState(state *orchestrator.CascadeState, orgI
 		return ClientExecutionPackageBuild{}, errors.New("project must have context, workflow graph, script document, and executable bundle")
 	}
 	if !scriptDocumentHasBusinessAction(state.ScriptDocument) {
-		return ClientExecutionPackageBuild{}, errors.New("执行包没有真实业务动作，已阻止上传服务器录制。请补充页面扫描、截图标注或稳定 selector，使脚本包含 click/fill/select/upload/api_call 等至少一个有效步骤。")
+		return ClientExecutionPackageBuild{}, errors.New("执行包没有真实业务动作，已阻止上传服务器录制。请补充页面扫描、截图标注或稳定 selector，使脚本包含 click/fill/select/upload/press/api_call 等至少一个有效步骤。")
 	}
 	orgID = firstNonEmptyString(orgID, defaultDesktopOrgID)
 	project := state.ProjectContext
@@ -1531,7 +1534,7 @@ func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model
 		Assets:        compactAssetManifestForUpload(graph.Assets),
 		Nodes:         []*model.GraphNode{},
 		Edges:         []*model.GraphEdge{},
-		EvidenceRefs:  compactEvidenceRefsForUpload(graph.EvidenceRefs, 4),
+		EvidenceRefs:  compactEvidenceRefsForUpload(graph.EvidenceRefs, 2),
 		CreatedAt:     graph.CreatedAt,
 		UpdatedAt:     graph.UpdatedAt,
 	}
@@ -1544,12 +1547,10 @@ func minimalWorkflowGraphForUpload(graph *model.DemoWorkflowGraph, bundle *model
 		out.Nodes = append(out.Nodes, &model.GraphNode{
 			ID:              nodeID,
 			Action:          string(step.Action.Type),
-			ExpectedOutcome: truncateForUpload(step.ExpectedOutcome, 200),
+			ExpectedOutcome: truncateForUpload(step.ExpectedOutcome, 120),
 			Type:            model.GraphNodeTypeAction,
-			Title:           truncateForUpload(firstNonEmptyString(step.Title, step.NodeID), 120),
-			Goal:            truncateForUpload(step.BusinessValue, 200),
-			PageRef:         firstNonEmptyString(step.PageTarget.URL, step.Action.Target.URL),
-			EvidenceRefs:    compactEvidenceRefsForUpload(step.EvidenceRefs, 3),
+			Title:           truncateForUpload(firstNonEmptyString(step.Title, step.NodeID), 80),
+			EvidenceRefs:    compactEvidenceRefsForUpload(step.EvidenceRefs, 1),
 			Validations:     compactValidationsForUpload(step.Validations),
 			DurationHintMS:  step.Timing.DurationMS,
 			Metadata: map[string]any{
@@ -1584,20 +1585,18 @@ func stepBusinessStageID(bundle *model.ExecutableRecordingScriptBundle, nodeID s
 }
 
 func compactValidationsForUpload(values []model.ValidationSpec) []model.ValidationSpec {
-	out := make([]model.ValidationSpec, 0, 2)
 	for _, value := range values {
 		if !value.Required {
 			continue
 		}
-		value.Assertion = truncateForUpload(value.Assertion, 160)
-		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 2)
+		value.Assertion = truncateForUpload(value.Assertion, 100)
+		value.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(value.Target.SelectorAlternatives, 1)
+		value.Target.EvidenceRefs = compactEvidenceRefsForUpload(value.Target.EvidenceRefs, 1)
+		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 1)
 		value.RepairPolicy = nil
-		out = append(out, value)
-		if len(out) == 2 {
-			break
-		}
+		return []model.ValidationSpec{value}
 	}
-	return out
+	return nil
 }
 
 func compactWorkflowIntentForUpload(intent *model.WorkflowIntent) *model.WorkflowIntent {
@@ -1615,14 +1614,14 @@ func compactWorkflowIntentForUpload(intent *model.WorkflowIntent) *model.Workflo
 }
 
 func compactGraphRequirementsForUpload(values []model.GraphRequirement) []model.GraphRequirement {
-	out := make([]model.GraphRequirement, 0, minInt(len(values), 16))
+	out := make([]model.GraphRequirement, 0, minInt(len(values), 6))
 	for _, value := range values {
-		if len(out) >= 16 {
+		if len(out) >= 6 {
 			break
 		}
-		value.Description = truncateForUpload(value.Description, 240)
-		value.NodeRefs = limitStringsForUpload(value.NodeRefs, 8)
-		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 3)
+		value.Description = truncateForUpload(value.Description, 160)
+		value.NodeRefs = limitStringsForUpload(value.NodeRefs, 4)
+		value.EvidenceRefs = compactEvidenceRefsForUpload(value.EvidenceRefs, 1)
 		out = append(out, value)
 	}
 	return out
@@ -1789,6 +1788,7 @@ func compactScriptStepForUpload(step *model.ScriptStep) {
 	if step == nil {
 		return
 	}
+	promoteRequiredValidationSelectorProvenanceForUpload(step)
 	step.BusinessValue = truncateForUpload(step.BusinessValue, 240)
 	step.ExpectedOutcome = truncateForUpload(step.ExpectedOutcome, 240)
 	step.EvidenceRefs = compactEvidenceRefsForUpload(step.EvidenceRefs, 3)
@@ -1811,6 +1811,30 @@ func compactScriptStepForUpload(step *model.ScriptStep) {
 	step.Narrative.Callout = truncateForUpload(step.Narrative.Callout, 120)
 }
 
+func promoteRequiredValidationSelectorProvenanceForUpload(step *model.ScriptStep) {
+	if step == nil || len(step.Action.Target.SelectorAlternatives) > 0 {
+		return
+	}
+	for _, validation := range step.Validations {
+		if !validation.Required {
+			continue
+		}
+		for _, candidate := range validation.Target.SelectorAlternatives {
+			if !model.SelectorCandidateHasFormalProvenance(candidate) || !selectorCandidateMatchesUploadTarget(candidate, step.Action.Target) {
+				continue
+			}
+			step.Action.Target.SelectorAlternatives = append(step.Action.Target.SelectorAlternatives, candidate)
+		}
+	}
+}
+
+func selectorCandidateMatchesUploadTarget(candidate model.SelectorCandidate, target model.ActionTarget) bool {
+	if strings.EqualFold(strings.TrimSpace(candidate.Kind), "testid") && strings.EqualFold(strings.TrimSpace(candidate.Value), strings.TrimSpace(target.TestID)) && strings.TrimSpace(target.TestID) != "" {
+		return true
+	}
+	return strings.TrimSpace(candidate.Value) != "" && strings.EqualFold(strings.TrimSpace(candidate.Value), strings.TrimSpace(target.Selector))
+}
+
 func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {
 	if plan == nil {
 		return
@@ -1829,7 +1853,9 @@ func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {
 		stage.WaitConditions = limitStringsForUpload(stage.WaitConditions, 4)
 		stage.CapturePoints = limitStringsForUpload(stage.CapturePoints, 4)
 		stage.RiskNotes = limitStringsForUpload(stage.RiskNotes, 3)
+		stage.InvestigationQuestionRefs = compactInvestigationQuestionRefsForUpload(stage.InvestigationQuestionRefs, 1)
 		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 3)
+		stage.CandidateRoutes = compactRouteCandidatesForUpload(stage.CandidateRoutes, stage.EntryRoute, stage.TargetRoute)
 		stage.Interaction.EvidenceRefs = compactEvidenceRefsForUpload(stage.Interaction.EvidenceRefs, 2)
 		stage.Interaction.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(stage.Interaction.Target.SelectorAlternatives, 2)
 		stage.Interaction.Target.EvidenceRefs = compactEvidenceRefsForUpload(stage.Interaction.Target.EvidenceRefs, 2)
@@ -1868,17 +1894,26 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 		stage.CapturePoints = limitStringsForUpload(stage.CapturePoints, 4)
 		stage.CanModify = compactContractFieldsForUpload(stage.CanModify, []string{"selector"}, 8)
 		stage.MustPreserve = compactContractFieldsForUpload(stage.MustPreserve, []string{"success_state", "safety_policy"}, 8)
+		stage.InvestigationQuestionRefs = compactInvestigationQuestionRefsForUpload(stage.InvestigationQuestionRefs, 1)
 		stage.EvidenceRefs = compactEvidenceRefsForUpload(stage.EvidenceRefs, 3)
+		stage.CandidateRoutes = compactRouteCandidatesForUpload(stage.CandidateRoutes, stage.EntryRoute, stage.Route)
 		if stage.TargetContract != nil {
 			compactTargetContractForUpload(stage.TargetContract)
 		}
-		if len(stage.Components) > 3 {
-			stage.Components = stage.Components[:3]
+		if len(stage.Components) > 1 {
+			stage.Components = stage.Components[:1]
 		}
 		for j := range stage.Components {
 			component := &stage.Components[j]
-			component.SelectorAlternatives = compactSelectorCandidatesForUpload(component.SelectorAlternatives, 2)
-			component.EvidenceRefs = compactEvidenceRefsForUpload(component.EvidenceRefs, 2)
+			selectorLimit := 1
+			if stage.StageKind == model.BusinessStageKindSessionSetup {
+				// Two-step authentication needs both the approved method chooser and
+				// the authentication-form submit candidate. The credential broker
+				// will still reject either candidate if its formal provenance is absent.
+				selectorLimit = 2
+			}
+			component.SelectorAlternatives = compactSelectorCandidatesForUpload(component.SelectorAlternatives, selectorLimit)
+			component.EvidenceRefs = compactEvidenceRefsForUpload(component.EvidenceRefs, 1)
 		}
 		if len(stage.Interactions) > 1 {
 			stage.Interactions = stage.Interactions[:1]
@@ -1888,7 +1923,11 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 			interaction.EvidenceRefs = compactEvidenceRefsForUpload(interaction.EvidenceRefs, 2)
 			interaction.WaitConditions = limitStringsForUpload(interaction.WaitConditions, 3)
 			interaction.Target.SelectorAlternatives = compactSelectorCandidatesForUpload(interaction.Target.SelectorAlternatives, 2)
-			interaction.Target.EvidenceRefs = compactEvidenceRefsForUpload(interaction.Target.EvidenceRefs, 2)
+			targetEvidenceLimit := 2
+			if stage.StageKind == model.BusinessStageKindSessionSetup {
+				targetEvidenceLimit = 3
+			}
+			interaction.Target.EvidenceRefs = compactEvidenceRefsForUpload(interaction.Target.EvidenceRefs, targetEvidenceLimit)
 		}
 	}
 	outline.UncertaintyReport = compactStageUncertaintiesForUpload(outline.UncertaintyReport, 4)
@@ -1915,6 +1954,55 @@ func compactContractFieldsForUpload(values, required []string, limit int) []stri
 	}
 	for _, value := range values {
 		add(value)
+	}
+	return out
+}
+
+func compactInvestigationQuestionRefsForUpload(refs []model.InvestigationQuestionRef, limit int) []model.InvestigationQuestionRef {
+	if limit <= 0 || len(refs) == 0 {
+		return nil
+	}
+	out := make([]model.InvestigationQuestionRef, 0, minInt(len(refs), limit))
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		ref.ID = strings.TrimSpace(ref.ID)
+		if ref.ID == "" || seen[ref.ID] {
+			continue
+		}
+		seen[ref.ID] = true
+		ref.IntentLabel = truncateForUpload(ref.IntentLabel, 80)
+		ref.EvidenceSummary = truncateForUpload(ref.EvidenceSummary, 100)
+		ref.RemainingGaps = limitStringsForUpload(ref.RemainingGaps, 1)
+		// Tool-call IDs and detailed next-action recipes are local investigation
+		// trace. The server only needs the question, status, confirmed evidence,
+		// and any remaining gap to decide whether bounded runtime observation is
+		// still necessary.
+		ref.NextActions = nil
+		ref.ToolCallIDs = nil
+		out = append(out, ref)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func compactRouteCandidatesForUpload(candidates []model.BrowserAgentRouteCandidate, fixedRoutes ...string) []model.BrowserAgentRouteCandidate {
+	for _, route := range fixedRoutes {
+		if strings.TrimSpace(route) != "" {
+			return nil
+		}
+	}
+	if len(candidates) > 2 {
+		candidates = candidates[:2]
+	}
+	out := make([]model.BrowserAgentRouteCandidate, len(candidates))
+	for i, candidate := range candidates {
+		candidate.Name = truncateForUpload(candidate.Name, 80)
+		candidate.Source = truncateForUpload(candidate.Source, 80)
+		candidate.MatchedKeyword = truncateForUpload(candidate.MatchedKeyword, 80)
+		candidate.EvidenceRefs = compactEvidenceRefsForUpload(candidate.EvidenceRefs, 1)
+		out[i] = candidate
 	}
 	return out
 }
@@ -2203,6 +2291,15 @@ func scriptDocumentHasBusinessAction(doc *model.ExecutionScriptDocument) bool {
 		switch step.Action.Type {
 		case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
 			return true
+		case model.GraphActionPress:
+			if !step.NonDestructive || !model.ApprovedKeyboardActionParameters(step.Action.Parameters) {
+				continue
+			}
+			for _, validation := range step.Validations {
+				if validation.Required && validation.Kind == "page_changed" && validation.Expected == true {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -2231,7 +2328,7 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 			"business_action_missing",
 			model.FindingSeverityBlocking,
 			"execution package has no real business action",
-			"Add page scan evidence or stable selectors so the script includes click/fill/select/upload/api_call.",
+			"Add page scan evidence or stable selectors so the script includes click/fill/select/upload/press/api_call.",
 		))
 	}
 	if state != nil && state.ScriptReadinessReport != nil && !state.ScriptReadinessReport.CanProceed {
@@ -2423,7 +2520,7 @@ func preflightSourceBinding(state *orchestrator.CascadeState, pkg *model.ClientE
 		finding := packagePreflightFinding("source_binding_missing", model.FindingSeverityBlocking, "网页与源码的来源绑定评估缺失", "重新运行本地分析，再生成执行包。")
 		return &finding
 	}
-	if assessment.EffectiveMode == model.ProductSourceModeMixed && assessment.Status != model.ProductSourceBindingMatched {
+	if assessment.EffectiveMode == model.ProductSourceModeMixed && !model.ProductSourceBindingAllowsMixed(assessment.Status) {
 		finding := packagePreflightFinding("product_source_mismatch", model.FindingSeverityBlocking, "网页与源码来源不匹配", "更换网页或源码；也可以显式选择仅使用网页证据。")
 		return &finding
 	}
@@ -2733,6 +2830,10 @@ func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) 
 			sessionSetupCount++
 		case model.BusinessStageKindBusinessAction, model.BusinessStageKindBusinessInput, model.BusinessStageKindModeSelection, model.BusinessStageKindBusinessSubmit:
 			coreBusinessCount++
+		default:
+			if stageIsVerifiedKeyboardBusinessAction(bundle, stage) {
+				coreBusinessCount++
+			}
 		}
 		if stage.StageKind != model.BusinessStageKindSessionSetup && stageLooksLikeLoginOrCredential(stage) {
 			findings = append(findings, packagePreflightFinding(
@@ -2792,6 +2893,23 @@ func preflightBusinessStageKinds(bundle *model.ExecutableRecordingScriptBundle) 
 		))
 	}
 	return findings
+}
+
+func stageIsVerifiedKeyboardBusinessAction(bundle *model.ExecutableRecordingScriptBundle, stage model.StageApprovalStage) bool {
+	if bundle == nil || bundle.PlanJSON == nil || stage.Interaction.Kind != model.GraphActionPress || !stage.Interaction.NonDestructive || !model.ApprovedKeyboardActionParameters(stage.Interaction.Parameters) {
+		return false
+	}
+	for _, step := range bundle.PlanJSON.Steps {
+		if step.NodeID != stage.NodeID || step.Action.Type != model.GraphActionPress || !step.NonDestructive || !model.ApprovedKeyboardActionParameters(step.Action.Parameters) {
+			continue
+		}
+		for _, validation := range step.Validations {
+			if validation.Required && validation.Kind == "page_changed" && validation.Expected == true {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func stageLooksLikeLoginOrCredential(stage model.StageApprovalStage) bool {
@@ -2864,7 +2982,7 @@ func stageEvidenceRequired(stage model.StageApprovalStage) bool {
 
 func browserAgentStepNeedsValidation(step model.ScriptStep) bool {
 	switch step.Action.Type {
-	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall:
+	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionAPICall, model.GraphActionPress:
 		return true
 	case model.GraphActionWait, model.GraphActionInspect:
 		return step.StageKind == model.BusinessStageKindSessionSetup || step.StageKind == model.BusinessStageKindObserveProgress || step.StageKind == model.BusinessStageKindFinalObserve
@@ -2879,7 +2997,7 @@ func browserAgentStepHasRequiredValidation(step model.ScriptStep) bool {
 			continue
 		}
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
 			return true
 		}
 	}
@@ -3063,7 +3181,7 @@ func envelopeForClientExecutionPackage(pkg model.ClientExecutionPackage, now tim
 		},
 		Policy: model.ExchangePackagePolicy{
 			ReplayProtection:       true,
-			MaxExecutionWindowSec:  900,
+			MaxExecutionWindowSec:  30 * 60,
 			DeletePayloadAfterRun:  true,
 			HumanApprovalRequired:  true,
 			StructureSummaryOnly:   true,
@@ -3095,6 +3213,7 @@ func projectContextSummaryForPackage(project *model.ProjectContext, state *orche
 		AccessPolicy:                  project.AccessPolicy,
 		SecurityPolicy:                project.SecurityPolicy,
 		PresentationGenerationIntents: presentationGenerationIntentsForPackage(project),
+		MediaDeliveryPreferences:      mediaDeliveryPreferencesForPackage(project),
 		InputFingerprints:             inputFingerprints,
 	}
 }
@@ -3104,6 +3223,18 @@ func presentationGenerationIntentsForPackage(project *model.ProjectContext) []mo
 		return nil
 	}
 	return append([]model.PresentationGenerationIntent{}, project.Inputs.PresentationGenerationIntents...)
+}
+
+func mediaDeliveryPreferencesForPackage(project *model.ProjectContext) *model.MediaDeliveryPreferences {
+	if project == nil {
+		return nil
+	}
+	var configured *model.MediaDeliveryPreferences
+	if project.Inputs != nil {
+		configured = project.Inputs.MediaDeliveryPreferences
+	}
+	preferences := model.NormalizeMediaDeliveryPreferences(configured)
+	return &preferences
 }
 
 func productMapSummaryForPackage(project *model.ProjectContext, productMap *model.ProductMap) model.ProductMapSummary {
@@ -3344,7 +3475,8 @@ func isAbsoluteHTTPURL(value string) bool {
 func receivedAssetIDs(deliverables []model.ExecutionDeliverable) []string {
 	out := []string{}
 	for _, deliverable := range deliverables {
-		if deliverable.Kind == "demo_video" && deliverable.ID != "" {
+		kind := strings.ToLower(strings.TrimSpace(deliverable.Kind))
+		if deliverable.ID != "" && (kind == "demo_video" || kind == "final_video_final_master_2k" || kind == "final_video_final_delivery_1080p" || kind == "deliverables_manifest") {
 			out = append(out, deliverable.ID)
 		}
 	}

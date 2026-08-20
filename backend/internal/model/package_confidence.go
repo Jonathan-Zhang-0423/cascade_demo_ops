@@ -74,9 +74,16 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 		summary.SourceBindingMode = pkg.SourceBindingSummary.EffectiveMode
 	}
 	requiredRequirements, coveredRequirements := 0, 0
+	terminalRepairScope := terminalPlayableRepairRequirementScope(pkg)
 	if pkg.WorkflowGraph != nil {
 		for _, requirement := range pkg.WorkflowGraph.Requirements {
-			if !requirement.Required {
+			if !requirement.Required || !requirementAppliesToClientBrowserExecution(requirement) {
+				continue
+			}
+			// A terminal repair deliberately reuses evidence from the completed
+			// source run. Only requirements retained on its four resume/verify
+			// nodes belong to this supplemental browser package.
+			if terminalRepairScope && len(requirement.NodeRefs) == 0 {
 				continue
 			}
 			requiredRequirements++
@@ -213,6 +220,33 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 	}
 	summary.AssessmentHash = hash
 	return summary, nil
+}
+
+func terminalPlayableRepairRequirementScope(pkg *ClientExecutionPackage) bool {
+	return pkg != nil && pkg.WorkflowGraph != nil && strings.HasPrefix(pkg.WorkflowGraph.ID, "graph_terminal_playable_repair_") &&
+		pkg.ExecutableScriptBundle != nil && pkg.ExecutableScriptBundle.RepairLineage != nil && strings.TrimSpace(pkg.ExecutableScriptBundle.RepairLineage.SourceResultID) != ""
+}
+
+// The client execution package covers browser interaction and recording. It
+// deliberately retains downstream Director/video/editing requirements in the
+// workflow graph for traceability, but those are assessed by the final-film
+// pipeline and must not make an otherwise executable browser package fail its
+// own requirement-coverage gate.
+func requirementAppliesToClientBrowserExecution(requirement GraphRequirement) bool {
+	text := strings.ToLower(strings.TrimSpace(requirement.Description))
+	return !containsAnyPackageRequirementSignal(text,
+		"导演", "director", "seedance", "minimax h3", "h3 模型", "h3模型",
+		"ffmpeg", "视频模型", "成片", "后期", "剪辑合成", "final film", "final mp4",
+	)
+}
+
+func containsAnyPackageRequirementSignal(text string, values ...string) bool {
+	for _, value := range values {
+		if strings.Contains(text, strings.ToLower(value)) {
+			return true
+		}
+	}
+	return false
 }
 
 func packageRequirementCovered(pkg *ClientExecutionPackage, requirement GraphRequirement) bool {
@@ -427,7 +461,7 @@ func bestEvidenceQuality(refs []EvidenceRef, binding *SourceBindingSummary) floa
 		case EvidenceKindWebScreenshot, EvidenceKindScreenshotOCR, EvidenceKindVisionFinding:
 			quality = .82
 		case EvidenceKindSourceCode, EvidenceKindCodeSnapshot, EvidenceKindRepoSnapshot:
-			if binding != nil && binding.Status == ProductSourceBindingMatched && binding.EffectiveMode == ProductSourceModeMixed {
+			if binding != nil && ProductSourceBindingAllowsMixed(binding.Status) && binding.EffectiveMode == ProductSourceModeMixed {
 				quality = .7
 			}
 		case EvidenceKindRequirementDoc:

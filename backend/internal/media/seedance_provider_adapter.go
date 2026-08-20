@@ -22,15 +22,40 @@ type Seedance20ProviderAdapterOptions struct {
 	PollInterval     time.Duration
 	MaxDownloadBytes int64
 	Now              func() time.Time
+	// Admission is used by Seedance 2.5 to enforce Server-owned account and
+	// endpoint task limits. Seedance 2.0 callers leave it nil.
+	Admission *Seedance25AdmissionGate
 }
+
+type Seedance25ProviderAdapterOptions = Seedance20ProviderAdapterOptions
 
 type Seedance20ProviderAdapter struct {
-	options Seedance20ProviderAdapterOptions
+	options  Seedance20ProviderAdapterOptions
+	compiler GeneratedShotProviderCompiler
+	provider string
+	model    string
+	label    string
 }
 
+// Seedance25ProviderAdapter reuses the Ark asynchronous task transport and
+// FFmpeg normalization pipeline while keeping a versioned compiler/profile.
+type Seedance25ProviderAdapter struct{ *Seedance20ProviderAdapter }
+
 func NewSeedance20ProviderAdapter(options Seedance20ProviderAdapterOptions) (*Seedance20ProviderAdapter, error) {
+	return newSeedanceProviderAdapter(options, Seedance20GeneratedShotCompiler{}, GeneratedShotProviderSeedance20, Seedance20ServerModel, "Seedance 2.0")
+}
+
+func NewSeedance25ProviderAdapter(options Seedance25ProviderAdapterOptions) (*Seedance25ProviderAdapter, error) {
+	adapter, err := newSeedanceProviderAdapter(options, Seedance25GeneratedShotCompiler{}, GeneratedShotProviderSeedance25, Seedance25ServerModel, "Seedance 2.5")
+	if err != nil {
+		return nil, err
+	}
+	return &Seedance25ProviderAdapter{Seedance20ProviderAdapter: adapter}, nil
+}
+
+func newSeedanceProviderAdapter(options Seedance20ProviderAdapterOptions, compiler GeneratedShotProviderCompiler, provider, model, label string) (*Seedance20ProviderAdapter, error) {
 	if options.Enabled && (options.Client == nil || options.Downloader == nil || options.Normalizer == nil) {
-		return nil, errors.New("enabled Seedance 2.0 provider adapter requires client, downloader, and normalizer")
+		return nil, fmt.Errorf("enabled %s provider adapter requires client, downloader, and normalizer", label)
 	}
 	if options.PollAttempts <= 0 {
 		options.PollAttempts = 180
@@ -44,39 +69,39 @@ func NewSeedance20ProviderAdapter(options Seedance20ProviderAdapterOptions) (*Se
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	return &Seedance20ProviderAdapter{options: options}, nil
+	return &Seedance20ProviderAdapter{options: options, compiler: compiler, provider: provider, model: model, label: label}, nil
 }
 
 func (a *Seedance20ProviderAdapter) Descriptor() GeneratedShotProviderDescriptor {
 	reason := strings.TrimSpace(a.options.DisabledReason)
 	if !a.options.Enabled && reason == "" {
-		reason = "Seedance 2.0 provider adapter is disabled by Server policy"
+		reason = a.label + " provider adapter is disabled by Server policy"
 	}
 	return GeneratedShotProviderDescriptor{
-		Provider: GeneratedShotProviderSeedance20, Model: Seedance20ServerModel,
-		ProfileVersion: (Seedance20GeneratedShotCompiler{}).Profile().ProfileVersion,
+		Provider: a.provider, Model: a.model,
+		ProfileVersion: a.compiler.Profile().ProfileVersion,
 		Enabled:        a.options.Enabled, Reason: reason,
 	}
 }
 
 func (a *Seedance20ProviderAdapter) Profile() GeneratedShotCapabilityProfile {
-	return (Seedance20GeneratedShotCompiler{}).Profile()
+	return a.compiler.Profile()
 }
 
 func (a *Seedance20ProviderAdapter) Preflight(_ context.Context, intent GeneratedShotIntent) GeneratedShotProviderPreflight {
-	report := PreflightGeneratedShotIntent(intent, []GeneratedShotProviderCompiler{Seedance20GeneratedShotCompiler{}}, []GeneratedShotProviderAvailability{{
-		Provider: GeneratedShotProviderSeedance20, Enabled: a.options.Enabled, Reason: a.Descriptor().Reason,
+	report := PreflightGeneratedShotIntent(intent, []GeneratedShotProviderCompiler{a.compiler}, []GeneratedShotProviderAvailability{{
+		Provider: a.provider, Enabled: a.options.Enabled, Reason: a.Descriptor().Reason,
 	}})
 	if len(report.Providers) == 0 {
-		return GeneratedShotProviderPreflight{Provider: GeneratedShotProviderSeedance20, FailureCode: "provider_preflight_missing", FailureMessage: "Seedance 2.0 preflight produced no provider result"}
+		return GeneratedShotProviderPreflight{Provider: a.provider, FailureCode: "provider_preflight_missing", FailureMessage: a.label + " preflight produced no provider result"}
 	}
 	return report.Providers[0]
 }
 
 func (a *Seedance20ProviderAdapter) Execute(ctx context.Context, request GeneratedShotProviderExecutionRequest) (GeneratedShotProviderExecutionResult, error) {
 	result := GeneratedShotProviderExecutionResult{
-		SchemaVersion: GeneratedShotProviderExecutionSchemaVersion, Provider: GeneratedShotProviderSeedance20,
-		Model: Seedance20ServerModel, IntentID: request.Intent.IntentID, Status: GeneratedShotFailureContinue,
+		SchemaVersion: GeneratedShotProviderExecutionSchemaVersion, Provider: a.provider,
+		Model: a.model, IntentID: request.Intent.IntentID, Status: GeneratedShotFailureContinue,
 		FailurePolicy: GeneratedShotFailureContinue,
 	}
 	fail := func(class string, err error) (GeneratedShotProviderExecutionResult, error) {
@@ -99,27 +124,58 @@ func (a *Seedance20ProviderAdapter) Execute(ctx context.Context, request Generat
 	if !preflight.Selectable {
 		return fail(firstNonEmpty(preflight.FailureCode, "provider_preflight_failed"), errors.New(preflight.FailureMessage))
 	}
-	compiled, err := (Seedance20GeneratedShotCompiler{}).Compile(request.Intent)
+	compiled, err := a.compiler.Compile(request.Intent)
 	if err != nil {
 		return fail("provider_request_compile_failed", err)
+	}
+	var admission *Seedance25AdmissionLease
+	if a.provider == GeneratedShotProviderSeedance25 && a.options.Admission != nil {
+		admission, err = a.options.Admission.Acquire(request.AdmissionScope, request.IdempotencyKey, compiled.Request)
+		if err != nil {
+			var admissionErr *Seedance25AdmissionError
+			if errors.As(err, &admissionErr) {
+				return fail(admissionErr.Code, err)
+			}
+			return fail("seedance_2_5_admission_failed", err)
+		}
+		if strings.TrimSpace(request.ResumeProviderTaskID) == "" && admission.ResumeProviderTaskID != "" {
+			request.ResumeProviderTaskID = admission.ResumeProviderTaskID
+		}
+	}
+	terminal := false
+	if admission != nil {
+		defer func() { admission.Finish(terminal) }()
 	}
 	if request.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, request.Timeout)
 		defer cancel()
 	}
-	created, err := a.options.Client.CreateContentGenerationTask(ctx, compiled.Request)
-	if err != nil {
-		return fail(firstNonEmpty(created.Trace.ErrorClass, "provider_create_failed"), err)
+	initial := ContentGenerationTaskResult{}
+	result.ProviderTaskID = strings.TrimSpace(request.ResumeProviderTaskID)
+	if result.ProviderTaskID == "" {
+		created, createErr := a.options.Client.CreateContentGenerationTask(ctx, compiled.Request)
+		if createErr != nil {
+			if admission != nil {
+				admission.Abort()
+			}
+			return fail(firstNonEmpty(created.Trace.ErrorClass, "provider_create_failed"), createErr)
+		}
+		if created.Response == nil || strings.TrimSpace(created.Response.ID) == "" {
+			return fail("provider_task_id_missing", fmt.Errorf("%s create response is missing task ID", a.label))
+		}
+		result.ProviderTaskID = strings.TrimSpace(created.Response.ID)
+		if admission != nil {
+			admission.BindProviderTask(result.ProviderTaskID)
+		}
+		initial = created
 	}
-	if created.Response == nil || strings.TrimSpace(created.Response.ID) == "" {
-		return fail("provider_task_id_missing", errors.New("Seedance 2.0 create response is missing task ID"))
-	}
-	result.ProviderTaskID = strings.TrimSpace(created.Response.ID)
-	videoURL, providerStatus, err := a.waitForOutput(ctx, result.ProviderTaskID, created)
+	videoURL, providerStatus, err := a.waitForOutput(ctx, result.ProviderTaskID, initial)
 	if err != nil {
+		terminal = seedanceTaskStatusTerminal(providerStatus)
 		return fail("provider_task_"+firstNonEmpty(providerStatus, "failed"), err)
 	}
+	terminal = true
 	candidate, review, err := a.persistCandidate(ctx, request, result.ProviderTaskID, videoURL)
 	if err != nil {
 		return fail("provider_output_processing_failed", err)
@@ -128,6 +184,15 @@ func (a *Seedance20ProviderAdapter) Execute(ctx context.Context, request Generat
 	result.StructuralReview = &review
 	result.Status = GeneratedShotCandidateReadyForReview
 	return result, nil
+}
+
+func seedanceTaskStatusTerminal(status string) bool {
+	switch normalizeSeedanceTaskStatus(status) {
+	case "succeeded", "failed", "cancelled", "expired":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *Seedance20ProviderAdapter) waitForOutput(ctx context.Context, taskID string, initial ContentGenerationTaskResult) (string, string, error) {
@@ -140,7 +205,7 @@ func (a *Seedance20ProviderAdapter) waitForOutput(ctx context.Context, taskID st
 			}
 			switch status {
 			case "failed", "cancelled", "expired":
-				return "", status, fmt.Errorf("Seedance 2.0 task ended with status %s", status)
+				return "", status, fmt.Errorf("%s task ended with status %s", a.label, status)
 			}
 		}
 		if attempt == a.options.PollAttempts {
@@ -161,11 +226,11 @@ func (a *Seedance20ProviderAdapter) waitForOutput(ctx context.Context, taskID st
 		}
 		current = queried
 	}
-	return "", "pending", errors.New("Seedance 2.0 poll limit reached before output became available")
+	return "", "pending", fmt.Errorf("%s poll limit reached before output became available", a.label)
 }
 
 func (a *Seedance20ProviderAdapter) persistCandidate(ctx context.Context, request GeneratedShotProviderExecutionRequest, taskID, videoURL string) (GeneratedShotCandidate, GeneratedShotStructuralReview, error) {
-	taskDir := filepath.Join(request.OutputDir, GeneratedShotProviderSeedance20, safeMiniMaxH3PathPart(taskID))
+	taskDir := filepath.Join(request.OutputDir, a.provider, safeMiniMaxH3PathPart(taskID))
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		return GeneratedShotCandidate{}, GeneratedShotStructuralReview{}, err
 	}
@@ -186,10 +251,10 @@ func (a *Seedance20ProviderAdapter) persistCandidate(ctx context.Context, reques
 	if strings.EqualFold(normalizedHash, downloaded.SHA256) {
 		return GeneratedShotCandidate{}, GeneratedShotStructuralReview{}, errors.New("normalized Seedance artifact must be distinct from provider original")
 	}
-	candidateID := "candidate_seedance_" + shortStableID(request.Intent.IntentID+":"+taskID)
+	candidateID := "candidate_" + safeMiniMaxH3PathPart(a.provider) + "_" + shortStableID(request.Intent.IntentID+":"+taskID)
 	candidate := GeneratedShotCandidate{
 		SchemaVersion: GeneratedShotCandidateSchemaVersion, CandidateID: candidateID, IntentID: request.Intent.IntentID,
-		Provider: GeneratedShotProviderSeedance20, ProviderTaskID: taskID, Status: GeneratedShotCandidateReadyForReview,
+		Provider: a.provider, ProviderTaskID: taskID, Status: GeneratedShotCandidateReadyForReview,
 		FailurePolicy: GeneratedShotFailureContinue, NonAuthoritative: true, PresentationOnly: true, RequiresExplicitReview: true,
 		OriginalArtifact:   GeneratedShotCandidateArtifact{Role: "original", Path: downloaded.Path, MimeType: downloaded.MimeType, SHA256: downloaded.SHA256, SizeBytes: downloaded.SizeBytes, Probe: seedanceProbe(originalProbe)},
 		NormalizedArtifact: GeneratedShotCandidateArtifact{Role: "normalized", Path: normalizedPath, MimeType: "video/mp4", SHA256: normalizedHash, SizeBytes: normalizedSize, Probe: seedanceProbe(normalizedProbe), NormalizationStatus: "ok", NormalizationProfile: GeneratedShotNormalizationProfile},
@@ -205,7 +270,7 @@ func (a *Seedance20ProviderAdapter) persistCandidate(ctx context.Context, reques
 }
 
 func (a *Seedance20ProviderAdapter) Cancel(context.Context, string) error {
-	return errors.New("Seedance 2.0 cancellation is unavailable in the current Ark client")
+	return fmt.Errorf("%s cancellation is unavailable in the current Ark client", a.label)
 }
 
 func seedanceProbe(probe MiniMaxH3MediaProbe) GeneratedShotMediaProbe {

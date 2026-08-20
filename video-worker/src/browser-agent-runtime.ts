@@ -228,9 +228,10 @@ type BrowserAgentSession = {
 	maskSelectors: string[];
 	recordingSensitive: boolean;
 	recordTrace: boolean;
-	traceActive: boolean;
+  traceActive: boolean;
 	openedAtMS: number;
 	targetGeometryByArtifactID: Map<string, BrowserTargetGeometry>;
+	visualChangeByNodeID: Map<string, boolean>;
   taskSecrets: Record<string, BrowserAgentTaskSecret>;
 };
 
@@ -244,6 +245,8 @@ const targetProbeTimeoutMS = 2_000;
 const defaultViewport = { width: 2560, height: 1440 };
 const actionTimeoutMS = 10_000;
 const screenshotTimeoutMS = 8_000;
+const standardValidationTimeoutMS = 30_000;
+const finalCompletionValidationTimeoutMS = 20 * 60 * 1000;
 const secretInputMaskSelector = '[data-cascade-secret-input="true"]';
 
 export async function openBrowserAgentSession(request: BrowserAgentOpenRequest): Promise<{ session_id: string; runtime_versions: Record<string, string> }> {
@@ -284,6 +287,9 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	if (recordTrace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   const page = await context.newPage();
   const video = page.video?.();
+  // Playwright begins page video capture with this browser session. Keep this
+  // origin so every later target geometry can be mapped back to the raw WebM.
+  const openedAtMS = Date.now();
   const session: BrowserAgentSession = {
     id: sessionID,
     browser,
@@ -303,8 +309,9 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	recordingSensitive: request.recording_sensitive ?? true,
 	recordTrace,
 	traceActive: recordTrace,
-	openedAtMS: Date.now(),
+	openedAtMS,
 	targetGeometryByArtifactID: new Map(),
+	visualChangeByNodeID: new Map(),
     taskSecrets: validatedTaskSecrets(request.task_secrets),
   };
   await page.route("**/*", async (route: any) => {
@@ -603,7 +610,7 @@ export async function captureTargetGeometry(
 // route and runtime validations, not to a clickable DOM target. Mutating and
 // element-assertion actions still fail closed unless a unique target resolves.
 export function interactionRequiresResolvedTarget(kind: string): boolean {
-  return !["navigate", "wait", "inspect"].includes(String(kind || "").trim().toLowerCase());
+  return !["navigate", "wait", "inspect", "press"].includes(String(kind || "").trim().toLowerCase());
 }
 
 export function validatedStageSecretValues(stage: BrowserAgentWorkerStage, provided?: Record<string, string>): Record<string, string> {
@@ -678,7 +685,7 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
     assertions.push({ kind: `action_${interaction.kind}_completed`, passed: true, actual: request.stage.target_contract.semantic_id });
   }
   await waitForCaptureWindow(session.page, request.stage);
-  assertions.push(...await evaluateRequiredValidations(session.page, request.stage));
+  assertions.push(...await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID));
   const artifact = await captureScreenshot(session, request.stage, "after");
   const evidence = screenshotEvidence(artifact, request.stage, "执行后结果证据");
   return {
@@ -699,7 +706,7 @@ export async function revalidateBrowserAgentStage(request: BrowserAgentStageRequ
   const session = requiredSession(request.session_id);
   validateStage(request.stage);
   await waitForCaptureWindow(session.page, request.stage);
-  const assertions = await evaluateRequiredValidations(session.page, request.stage);
+  const assertions = await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID);
   const artifact = await captureScreenshot(session, request.stage, "revalidate");
   const evidence = screenshotEvidence(artifact, request.stage, "修复截图时机后的结果证据");
   return {
@@ -737,7 +744,13 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
       recordingPath,
       "video/webm",
       undefined,
-      { include_in_demo: true, redaction_applied: true, mask_selector_count: session.maskSelectors.length },
+      {
+        include_in_demo: true,
+        redaction_applied: true,
+        mask_selector_count: session.maskSelectors.length,
+        recording_timebase_schema_version: "demoops.browser_recording_timebase.v1",
+        recording_started_at_unix_ms: session.openedAtMS,
+      },
       session.recordingSensitive,
     ));
   }
@@ -791,6 +804,28 @@ async function executeInteraction(
     await waitForPageSettled(session.page, Math.min(timeout, 5_000));
     return;
   }
+  if (interaction.kind === "press") {
+    const keys = approvedKeyboardKeys(interaction.parameters);
+    if (keys.length === 0) throw new Error(`browser_agent_keyboard_keys_not_approved: ${stage.node_id}`);
+    let playableTarget: PlayableSurfaceTarget | undefined;
+    if (booleanParameter(interaction.parameters, "focus_preview", false)) {
+		  playableTarget = await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target);
+    }
+    const before = await visualDigest(session.page, playableTarget?.digestTarget);
+    const delayMS = numericParameter(interaction.parameters, "inter_key_delay_ms", 350, 100, 1_000);
+    const digests = new Set<string>([before]);
+    for (const key of keys) {
+      if (playableTarget?.keyboardTarget?.press) {
+        await playableTarget.keyboardTarget.press(key, { timeout }).catch(async () => session.page.keyboard.press(key));
+      } else {
+        await session.page.keyboard.press(key);
+      }
+      await session.page.waitForTimeout(delayMS);
+      digests.add(await visualDigest(session.page, playableTarget?.digestTarget));
+    }
+    session.visualChangeByNodeID.set(stage.node_id, digests.size > 1);
+    return;
+  }
   const resolved = await resolveTarget(session.page, stage, interaction, true, resolutionAttempts);
   if (interaction.secret_ref) await prepareSecretTarget(session, resolved.locator);
   const targetArtifact = await captureScreenshot(session, stage, "target");
@@ -798,6 +833,8 @@ async function executeInteraction(
   if (!targetGeometry) throw new Error(`browser_agent_target_geometry_unavailable: ${stage.node_id}`);
   targetArtifact.metadata.target_geometry = targetGeometry;
   session.targetGeometryByArtifactID.set(targetArtifact.id, targetGeometry);
+	const trackVisualChange = interactionRequiresVisualChangeEvidence(stage, interaction.kind);
+	const visualDigestBefore = trackVisualChange ? await pageVisualDigest(session.page) : "";
   if (interaction.kind === "click") {
     await resolved.locator.click({ timeout });
   } else if (interaction.kind === "fill") {
@@ -816,7 +853,14 @@ async function executeInteraction(
     throw new Error(`browser_agent_action_not_supported: ${interaction.kind}`);
   }
   await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+	if (trackVisualChange) {
+		session.visualChangeByNodeID.set(stage.node_id, visualDigestBefore !== await pageVisualDigest(session.page));
+	}
   return { geometry: targetGeometry, artifact: targetArtifact };
+}
+
+export function interactionRequiresVisualChangeEvidence(stage: BrowserAgentWorkerStage, interactionKind: string): boolean {
+	return interactionKind === "click" && (stage.validations || []).some((validation) => validation.required && validation.kind === "page_changed");
 }
 
 export function recoveredScreenshotMetadata(
@@ -1105,10 +1149,14 @@ async function valueWithin<T>(promise: Promise<T>, timeoutMS: number, fallback: 
   }
 }
 
-export async function evaluateRequiredValidations(page: any, stage: BrowserAgentWorkerStage): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
+export async function evaluateRequiredValidations(
+  page: any,
+  stage: BrowserAgentWorkerStage,
+  visualChangeByNodeID?: ReadonlyMap<string, boolean>,
+): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   for (const validation of (stage.validations || []).filter((item) => item.required)) {
-    const timeout = Math.max(250, Math.min(30_000, validation.timeout_ms || actionTimeoutMS));
+    const timeout = validationTimeoutMilliseconds(stage, validation);
     let passed = false;
     let actual = "not_satisfied";
     try {
@@ -1132,7 +1180,7 @@ export async function evaluateRequiredValidations(page: any, stage: BrowserAgent
         actual = String(readyState);
       } else if (validation.kind === "element_visible") {
         const locator = locatorForValidation(page, validation);
-        passed = await locator.first().isVisible({ timeout }).catch(() => false);
+        passed = await waitForLocatorVisible(locator, timeout);
         actual = passed ? "visible" : "not_visible";
         if (!passed && await evidenceBoundFormControlOutcomeVerified(page, stage)) {
           // The App may retain a pre-scan result selector while its approved
@@ -1160,7 +1208,7 @@ export async function evaluateRequiredValidations(page: any, stage: BrowserAgent
         actual = passed ? "hidden" : "visible";
       } else if (validation.kind === "text_contains") {
         const expected = scalarExpected(validation);
-        passed = Boolean(expected) && await page.locator("body").evaluate((element: any, value: string) => String(element.innerText || "").includes(value), String(expected)).catch(() => false);
+        passed = Boolean(expected) && await waitForPageText(page, String(expected), timeout);
         actual = passed ? "matched" : "not_matched";
       } else if (validation.kind === "attribute_equals") {
         const locator = locatorForValidation(page, validation).first();
@@ -1185,6 +1233,16 @@ export async function evaluateRequiredValidations(page: any, stage: BrowserAgent
         const title = await page.title();
         passed = Boolean(expected) && title.includes(expected);
         actual = redactText(title);
+      } else if (validation.kind === "page_changed") {
+        passed = visualChangeByNodeID?.get(stage.node_id) === true;
+		actual = passed ? "visual_changed_after_approved_action" : "no_verified_visual_change";
+      } else if (validation.kind === "playable_surface_visible") {
+		const target = validation.target || {};
+		const hasBoundTarget = Boolean(target.test_id || target.selector || target.role || target.label || target.text);
+		const boundTargetVisible = !hasBoundTarget || await waitForLocatorVisible(locatorForValidation(page, validation), timeout);
+        const result = await waitForPlayableSurface(page, timeout);
+		passed = boundTargetVisible && result.surface && result.score && result.controls;
+		actual = `bound_target=${boundTargetVisible};surface=${result.surface};score=${result.score};controls=${result.controls}`;
       } else {
         actual = "unsupported_required_validation";
       }
@@ -1195,6 +1253,44 @@ export async function evaluateRequiredValidations(page: any, stage: BrowserAgent
     assertions.push({ kind: `required_${validation.kind}:${validation.id}`, passed, actual });
   }
   return assertions;
+}
+
+export function validationTimeoutMilliseconds(stage: BrowserAgentWorkerStage, validation: BrowserAgentValidation): number {
+  const requested = Math.max(250, Math.trunc(Number(validation.timeout_ms) || actionTimeoutMS));
+  if (requested <= standardValidationTimeoutMS) return requested;
+  if (!longCompletionValidationAllowed(stage, validation)) return standardValidationTimeoutMS;
+  return Math.min(requested, finalCompletionValidationTimeoutMS);
+}
+
+function longCompletionValidationAllowed(stage: BrowserAgentWorkerStage, validation: BrowserAgentValidation): boolean {
+  if (stage.stage_kind !== "final_observe" || stage.target_contract?.destructive) return false;
+  if (!stage.interactions.length || stage.interactions.some((interaction) => !["wait", "inspect"].includes(String(interaction.kind || "").toLowerCase()))) return false;
+  return validation.kind === "element_visible" || validation.kind === "text_contains";
+}
+
+async function waitForLocatorVisible(locator: any, timeout: number): Promise<boolean> {
+  const first = locator.first();
+  if (typeof first.waitFor === "function") {
+    try {
+      await first.waitFor({ state: "visible", timeout });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return first.isVisible({ timeout }).catch(() => false);
+}
+
+async function waitForPageText(page: any, expected: string, timeout: number): Promise<boolean> {
+  if (typeof page.waitForFunction === "function") {
+    try {
+      await page.waitForFunction((value: string) => String((globalThis as any).document?.body?.innerText || "").includes(value), expected, { timeout });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return page.locator("body").evaluate((element: any, value: string) => String(element.innerText || "").includes(value), expected).catch(() => false);
 }
 
 function approvedObservationRouteTemplateVerified(
@@ -1718,6 +1814,118 @@ function numericParameter(parameters: Record<string, unknown> | undefined, key: 
   const value = Number(parameters?.[key]);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function booleanParameter(parameters: Record<string, unknown> | undefined, key: string, fallback: boolean): boolean {
+  const value = parameters?.[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (value.trim().toLowerCase() === "true") return true;
+    if (value.trim().toLowerCase() === "false") return false;
+  }
+  return fallback;
+}
+
+export function approvedKeyboardKeys(parameters: Record<string, unknown> | undefined): string[] {
+  const raw = parameters?.keys;
+  const values = Array.isArray(raw)
+    ? raw.map((value) => typeof value === "string" ? value.trim() : "")
+    : typeof raw === "string" ? raw.split(/[;,\s]+/).map((value) => value.trim()) : [];
+  const keys = values.filter(Boolean);
+  const allowed = new Set(["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp"]);
+  if (keys.length === 0 || keys.length > 8 || keys.some((key) => !allowed.has(key))) return [];
+  return keys;
+}
+
+async function pageVisualDigest(page: any): Promise<string> {
+  const bytes = await page.screenshot({ type: "png", animations: "disabled", caret: "hide", timeout: screenshotTimeoutMS });
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function visualDigest(page: any, locator?: any): Promise<string> {
+  if (locator?.screenshot) {
+    const bytes = await locator.screenshot({ type: "png", animations: "disabled", caret: "hide", timeout: screenshotTimeoutMS }).catch(() => undefined);
+    if (bytes) return createHash("sha256").update(bytes).digest("hex");
+  }
+  return pageVisualDigest(page);
+}
+
+type PlayableSurfaceEvidence = { surface: boolean; score: boolean; controls: boolean };
+type PlayableSurfaceTarget = PlayableSurfaceEvidence & { digestTarget: any; keyboardTarget: any };
+
+export function classifyPlayableSurfaceFrame(text: string, surface: boolean): PlayableSurfaceEvidence {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+  return {
+    surface,
+    score: surface && /得分|分数|score|lines|行数/.test(normalized),
+    controls: surface && /方向键|左右|旋转|操作|arrow|keyboard|controls|move|rotate|←|→|↓|↑/.test(normalized),
+  };
+}
+
+async function playableSurfaceTargetOnce(page: any): Promise<PlayableSurfaceTarget | undefined> {
+  const frames = typeof page.frames === "function" ? page.frames() : [page];
+  const surfaceSelectors = ["canvas:visible", '[data-testid*="board" i]:visible', '[class*="game-board" i]:visible', '[class*="board" i]:visible', '[class*="tetris" i]:visible'];
+  for (const frame of frames) {
+    const body = frame.locator?.("body");
+    const frameText = await body?.innerText({ timeout: 750 }).catch(() => "") || "";
+    for (const selector of surfaceSelectors) {
+      const locator = frame.locator?.(selector)?.first();
+      const surfaceVisible = await locator?.isVisible({ timeout: 500 }).catch(() => false) || false;
+      const evidence = classifyPlayableSurfaceFrame(frameText, surfaceVisible);
+      if (evidence.surface && evidence.score && evidence.controls) {
+        return { ...evidence, digestTarget: locator, keyboardTarget: body || locator };
+      }
+    }
+  }
+  return undefined;
+}
+
+async function waitForPlayableSurfaceTarget(page: any, timeout: number): Promise<PlayableSurfaceTarget | undefined> {
+  const deadline = Date.now() + Math.max(250, Math.min(timeout, standardValidationTimeoutMS));
+  do {
+    const target = await playableSurfaceTargetOnce(page);
+    if (target) return target;
+    await page.waitForTimeout?.(250);
+  } while (Date.now() < deadline);
+  return undefined;
+}
+
+async function focusLargestPlayableSurface(page: any, timeout: number, target?: BrowserAgentInteraction["target"]): Promise<PlayableSurfaceTarget | undefined> {
+	if (target?.test_id) {
+		const approved = page.getByTestId(target.test_id).first();
+		if (await approved.isVisible({ timeout: Math.min(timeout, 1_500) }).catch(() => false)) {
+			await approved.click({ timeout }).catch(() => undefined);
+			await page.waitForTimeout(150);
+		}
+	}
+  const playable = await waitForPlayableSurfaceTarget(page, timeout);
+  if (!playable) return undefined;
+  await playable.digestTarget.click({ timeout }).catch(() => undefined);
+  await page.waitForTimeout(150);
+  return playable;
+}
+
+async function waitForPlayableSurface(page: any, timeout: number): Promise<{ surface: boolean; score: boolean; controls: boolean }> {
+  const deadline = Date.now() + Math.max(250, Math.min(timeout, standardValidationTimeoutMS));
+  let latest = { surface: false, score: false, controls: false };
+  do {
+    const frames = typeof page.frames === "function" ? page.frames() : [page];
+    for (const frame of frames) {
+      const frameText = await frame.locator?.("body")?.innerText({ timeout: 750 }).catch(() => "") || "";
+      for (const selector of ["canvas:visible", '[data-testid*="board" i]:visible', '[class*="game-board" i]:visible', '[class*="board" i]:visible', '[class*="tetris" i]:visible']) {
+        const surface = await frame.locator?.(selector)?.first()?.isVisible({ timeout: 500 }).catch(() => false) || false;
+        const evidence = classifyPlayableSurfaceFrame(frameText, surface);
+        latest = {
+          surface: latest.surface || evidence.surface,
+          score: latest.score || evidence.score,
+          controls: latest.controls || evidence.controls,
+        };
+        if (evidence.surface && evidence.score && evidence.controls) return evidence;
+      }
+    }
+    await page.waitForTimeout?.(250);
+  } while (Date.now() < deadline);
+  return latest;
 }
 
 function forbiddenName(actual: string, forbidden: string[]): boolean {

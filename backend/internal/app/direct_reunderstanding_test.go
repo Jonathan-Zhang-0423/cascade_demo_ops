@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
@@ -27,6 +28,103 @@ func TestPersistCloudResultDoesNotUpgradeOrdinaryBrowserActionFailure(t *testing
 	}
 	if persisted.ExecutionPackageGeneration != 0 || persisted.DesktopCloudRun == nil || persisted.DesktopCloudRun.Stage != "failed" || persisted.DesktopCloudRun.BlockingErrorCode != "" || persisted.DesktopCloudRun.RequiresReapproval {
 		t.Fatalf("ordinary Browser Agent action failure was incorrectly upgraded: %+v", persisted.DesktopCloudRun)
+	}
+}
+
+func TestPersistCloudResultUpgradesStoppedRequiredAppAssertion(t *testing.T) {
+	service, states, state, build := newDirectReunderstandingTestState(t)
+	result := directReunderstandingFailedResult(build, false)
+	result.ValidationReports = []model.ValidationReport{{
+		Decision: model.ValidationDecisionStopAndReport,
+		Checks: []model.ValidationCheck{{
+			ID: "check_app_assertion", Code: "REQUIRED_ASSERTION_FAILED", NodeID: build.Package.ExecutableScriptBundle.PlanJSON.Steps[0].NodeID,
+			Severity: model.FindingSeverityBlocking, Required: true, Summary: "approved App assertion did not match the real page", ResponsibilityDomain: model.ValidationCheckDomainApp,
+		}},
+	}}
+	if err := service.persistCloudResult(t.Context(), state.ProjectID, defaultDesktopOrgID, result); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := states.Load(t.Context(), state.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.DesktopCloudRun == nil || persisted.DesktopCloudRun.Stage != "reunderstanding_required" || persisted.DesktopCloudRun.BlockingErrorCode != "reunderstanding_required" || len(persisted.DesktopCloudRun.ReunderstandingIssues) != 1 {
+		t.Fatalf("required App-owned stopped assertion was not promoted to formal re-understanding: %+v", persisted.DesktopCloudRun)
+	}
+}
+
+func TestDirectReunderstandingIssuesDeduplicateByStableIdentity(t *testing.T) {
+	issue := model.DirectReunderstandingIssue{Code: "REQUIRED_ASSERTION_FAILED", NodeID: "mode", Required: true, ResponsibilityDomain: model.ValidationCheckDomainApp}
+	issues := withDirectIssueIDs([]model.DirectReunderstandingIssue{issue, issue})
+	if len(issues) != 1 || issues[0].IssueID == "" {
+		t.Fatalf("duplicate validation summaries must collapse to one stable issue: %+v", issues)
+	}
+}
+
+func TestTerminalPlayableVerificationRepairGraphResumesExactBuiltProject(t *testing.T) {
+	const (
+		projectID  = "project_terminal_repair"
+		projectURL = "https://app.example.com/project/already-built"
+	)
+	node := func(id string, kind model.BusinessStageKind, action model.GraphActionType) *model.GraphNode {
+		return &model.GraphNode{
+			ID: id, Type: model.GraphNodeTypeAction, Title: id, Action: string(action), PageRef: "/project/:id",
+			ActionSpec: &model.GraphAction{Type: action, Target: model.ActionTarget{URL: "https://app.example.com/project/:id"}},
+			Metadata:   map[string]any{"business_stage_id": id, "business_stage_kind": string(kind), "non_destructive": true},
+		}
+	}
+	graph := model.NewDemoWorkflowGraph("graph_original", projectID, "https://app.example.com/login")
+	graph.Nodes = []*model.GraphNode{
+		node("business_stage_session_setup", model.BusinessStageKindSessionSetup, model.GraphActionNavigate),
+		node("business_stage_new_project_entry", model.BusinessStageKindBusinessAction, model.GraphActionClick),
+		node("business_stage_final_observe", model.BusinessStageKindFinalObserve, model.GraphActionInspect),
+		node("business_stage_playable_preview", model.BusinessStageKindFinalObserve, model.GraphActionInspect),
+		node("business_stage_verify_playable_controls", model.BusinessStageKindFinalObserve, model.GraphActionPress),
+	}
+	state := &orchestrator.CascadeState{ProjectContext: &model.ProjectContext{ID: projectID, ProductURL: "https://app.example.com", ForbiddenPages: []string{"/admin"}}, WorkflowGraph: graph}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{FailedNodeID: "business_stage_verify_playable_controls", CurrentURL: projectURL}}
+	repaired, eligible, err := terminalPlayableVerificationRepairGraph(state, result, time.Date(2026, 8, 19, 17, 0, 0, 0, time.UTC))
+	if err != nil || !eligible {
+		t.Fatalf("terminal repair was not created: eligible=%v err=%v", eligible, err)
+	}
+	if repaired.ID == graph.ID || len(repaired.Nodes) != 4 || len(repaired.Edges) != 3 {
+		t.Fatalf("terminal repair retained the wrong workflow shape: id=%q nodes=%d edges=%d", repaired.ID, len(repaired.Nodes), len(repaired.Edges))
+	}
+	resume := repaired.Nodes[1]
+	if resume.ID != "business_stage_final_observe" || resume.ActionSpec.Type != model.GraphActionNavigate || resume.ActionSpec.Target.URL != projectURL {
+		t.Fatalf("terminal repair does not navigate to the exact completed project: %+v", resume)
+	}
+	if repaired.Nodes[3].Type != model.GraphNodeTypeEnd {
+		t.Fatalf("keyboard verification is not the terminal node: %+v", repaired.Nodes[3])
+	}
+	foreign := result
+	foreign.FailureDiagnostic = &model.ScriptFailureDiagnostic{FailedNodeID: "business_stage_verify_playable_controls", CurrentURL: "https://evil.example/project/already-built"}
+	if _, eligible, err := terminalPlayableVerificationRepairGraph(state, foreign, time.Now()); !eligible || err == nil {
+		t.Fatalf("foreign failure URL was accepted: eligible=%v err=%v", eligible, err)
+	}
+	navigationFailure := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
+		FailedNodeID: "business_stage_final_observe", FailedStepOrder: 2, CurrentURL: "https://app.example.com/app",
+		Error: model.AgentError{Code: "browser_agent_observation_failed"},
+	}}
+	retried, eligible, err := terminalPlayableVerificationRepairGraph(&orchestrator.CascadeState{ProjectContext: state.ProjectContext, WorkflowGraph: repaired}, navigationFailure, time.Now())
+	if err != nil || !eligible {
+		t.Fatalf("terminal navigation failure was not converted to dashboard-card resume: eligible=%v err=%v", eligible, err)
+	}
+	resume = retried.Nodes[1]
+	if resume.ActionSpec.Type != model.GraphActionClick || resume.PageRef != "/app" || resume.ActionSpec.Target.TestID != "card-project-already-built" {
+		t.Fatalf("terminal navigation repair did not click the exact completed project card: %+v", resume)
+	}
+}
+
+func TestDirectIssuesPromoteTerminalRepairNavigationFailure(t *testing.T) {
+	bundle := &model.ExecutableRecordingScriptBundle{RepairLineage: &model.ScriptRepairLineage{SourceResultID: "source_result"}}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
+		FailedNodeID: "business_stage_final_observe", FailedStepOrder: 2,
+		Error: model.AgentError{Code: "browser_agent_observation_failed"},
+	}}
+	issues := directIssuesFromFailedResult(result, bundle)
+	if len(issues) != 1 || !issues[0].Required || issues[0].ResponsibilityDomain != model.ValidationCheckDomainApp || issues[0].StageID != "stage_step_02_business_stage_final_observe" {
+		t.Fatalf("terminal repair navigation failure was not promoted to an App repair issue: %+v", issues)
 	}
 }
 
@@ -76,6 +174,17 @@ func TestDirectFailureReunderstandingLifecycleAndIdempotency(t *testing.T) {
 	idempotent, err := service.ReunderstandDirectBrowserAgentFailure(t.Context(), state.ProjectID, request)
 	if err != nil || idempotent.NewPackageID != repaired.NewPackageID || idempotent.PackageDigestSHA256 != repaired.PackageDigestSHA256 {
 		t.Fatalf("same idempotency request did not return the same draft: result=%+v err=%v", idempotent, err)
+	}
+	repaired.State.DesktopCloudRun.Stage = "reunderstanding_incomplete"
+	repaired.State.DesktopCloudRun.Status = "failed"
+	repaired.State.DesktopCloudRun.BlockingErrorCode = "reunderstanding_incomplete"
+	repaired.State.DesktopCloudRun.PackageID = ""
+	if err := states.Save(t.Context(), repaired.State); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := service.ReunderstandDirectBrowserAgentFailure(t.Context(), state.ProjectID, request)
+	if err != nil || recovered.State.DesktopCloudRun.Stage != "local_generated" || recovered.State.DesktopCloudRun.Status != "not_uploaded" || recovered.State.DesktopCloudRun.BlockingErrorCode != "" || recovered.State.DesktopCloudRun.PackageID != repaired.NewPackageID {
+		t.Fatalf("idempotent repair did not recover persisted package-gate state: result=%+v err=%v", recovered, err)
 	}
 	bridge := &DesktopBridge{service: service}
 	wails := bridge.ReunderstandDirectBrowserAgentFailure(state.ProjectID, request)

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cascade-demoops/backend/internal/model"
 )
@@ -73,7 +74,11 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		})
 	}
 
-	projectName := intentProjectName(intentText)
+	// Project names are user-provided values. Never infer them from the
+	// normalized intent graph because that graph also contains action kinds,
+	// selector aliases, and other generated metadata that may follow a phrase
+	// such as "new project".
+	projectName := intentProjectName(businessStageExplicitRequirementText(project, brief, report))
 	wantsNewProject := containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != ""
 	if wantsNewProject {
 		builder.addStage(stageSpec{
@@ -112,21 +117,32 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		}
 	}
 
-	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") {
+	wantsDirectBuildMode := containsAnyNormalized(intentText, "实际构建", "直接构建", "直接生成", "direct build", "build directly")
+	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") || wantsDirectBuildMode {
+		modeTitle := "选择构建模式"
+		modeObjective := "在项目创建流程中选择构建模式。"
+		modeSuccess := "构建模式已被选中，后续可以启动 agent 构建。"
+		modeKeywords := []string{"构建模式", "build mode", "builder mode", "构建", "mode"}
+		if wantsDirectBuildMode {
+			modeTitle = "切换为直接构建模式"
+			modeObjective = "关闭仅规划模式，让项目提交后直接启动 agent 生成可运行代码。"
+			modeSuccess = "仅规划模式已关闭，项目将以直接构建模式启动。"
+			modeKeywords = append(modeKeywords, "计划", "规划", "plan", "direct build", "实际构建", "直接构建")
+		}
 		builder.addStage(stageSpec{
 			id:            "select_build_mode",
 			kind:          model.BusinessStageKindModeSelection,
-			title:         "选择构建模式",
-			objective:     "在项目创建流程中选择构建模式。",
+			title:         modeTitle,
+			objective:     modeObjective,
 			actionType:    string(model.GraphActionClick),
 			actionLabel:   "选择构建模式",
 			inputSemantic: "build_mode",
-			successState:  "构建模式已被选中，后续可以启动 agent 构建。",
+			successState:  modeSuccess,
 			routeState:    model.BusinessRouteStateCreationFlow,
 			entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
 			expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
 			durationMS:    durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"),
-			keywords:      []string{"构建模式", "build mode", "builder mode", "构建", "mode"},
+			keywords:      modeKeywords,
 			capture:       []string{"构建模式选项", "已选择构建模式"},
 		})
 	}
@@ -171,6 +187,8 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		})
 	}
 
+	wantsCompletion := wantsBuildCompletion(intentText)
+
 	if len(builder.stages) == 0 && intentIsObservationOnly(intentText) {
 		builder.addStage(stageSpec{
 			id:             "observation_only",
@@ -208,22 +226,71 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		})
 	}
 
+	finalObjective := "停留在最终业务页面，截图并让观众看清楚当前结果。"
+	finalSuccessState := "最终业务状态保持可观察。"
+	finalKeywords := []string{"结果", "状态", "预览", "详情", "result", "preview", "detail"}
+	if wantsCompletion {
+		finalObjective = "轮询等待明确的 Agent 构建完成结果，完成后停留在最终业务页面并截图。"
+		finalSuccessState = "页面出现由产品代码证据绑定的 Agent 构建完成结果，而不是仅有加载状态或构建中状态。"
+		finalKeywords = append(finalKeywords, "构建完成", "全部步骤完成", "编写完成", "build complete", "build_complete", "all complete", "all steps", "build-result", "completed")
+	}
 	builder.addStage(stageSpec{
 		id:             "final_observe",
 		kind:           model.BusinessStageKindFinalObserve,
 		title:          "收束并观察最终状态",
-		objective:      "停留在最终业务页面，截图并让观众看清楚当前结果。",
+		objective:      finalObjective,
 		actionType:     string(model.GraphActionInspect),
 		actionLabel:    "观察最终状态",
-		successState:   "最终业务状态保持可观察。",
+		successState:   finalSuccessState,
 		routeState:     builder.finalRouteState(),
 		entryRoute:     builder.finalEntryRoute(),
 		expectedRoute:  builder.finalEntryRoute(),
 		durationMS:     durationMSForIntentKeywords(intentText, "最终", "收束", "结果", "状态", "预览", "详情", "final", "result", "preview", "detail"),
-		keywords:       []string{"结果", "状态", "预览", "详情", "result", "preview", "detail"},
+		keywords:       finalKeywords,
 		capture:        []string{"最终状态截图"},
 		nonDestructive: true,
 	})
+
+	if wantsPlayableKeyboardVerification(intentText) {
+		playableName := firstNonEmpty(projectName, "游戏")
+		builder.addStage(stageSpec{
+			id:             "playable_preview",
+			kind:           model.BusinessStageKindFinalObserve,
+			title:          "打开并核验" + playableName + "试玩界面",
+			objective:      "确认最终预览中真实显示" + playableName + "棋盘、得分和键盘操作说明。",
+			actionType:     string(model.GraphActionInspect),
+			actionLabel:    "核验可试玩预览",
+			successState:   playableName + "棋盘、得分和方向/旋转操作说明均可见。",
+			routeState:     builder.finalRouteState(),
+			entryRoute:     builder.finalEntryRoute(),
+			expectedRoute:  builder.finalEntryRoute(),
+			durationMS:     5000,
+			keywords:       []string{"俄罗斯方块", "棋盘", "得分", "操作说明", "预览", "tetris", "board", "score", "controls", "preview"},
+			capture:        []string{playableName + "棋盘", "得分", "键盘操作说明"},
+			nonDestructive: true,
+		})
+		builder.addStage(stageSpec{
+			id:            "verify_playable_controls",
+			kind:          model.BusinessStageKindFinalObserve,
+			title:         "用键盘实际试玩" + playableName,
+			objective:     "依次按左、右、下和旋转键，核验方块位置或形状确实发生画面变化。",
+			actionType:    string(model.GraphActionPress),
+			actionLabel:   "按方向键试玩",
+			successState:  "按键后棋盘画面发生变化，证明游戏可由键盘实际操作。",
+			routeState:    builder.finalRouteState(),
+			entryRoute:    builder.finalEntryRoute(),
+			expectedRoute: builder.finalEntryRoute(),
+			durationMS:    6000,
+			keywords:      []string{"按左", "按右", "按下", "旋转", "方向键", "键盘", "试玩", "位置", "形状", "ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp"},
+			capture:       []string{"按键前棋盘", "按键后棋盘变化"},
+			parameters: map[string]string{
+				"keys":               "ArrowLeft,ArrowRight,ArrowDown,ArrowUp",
+				"inter_key_delay_ms": "350",
+				"focus_preview":      "true",
+			},
+			nonDestructive: true,
+		})
+	}
 
 	return builder.plan(), nil
 }
@@ -244,6 +311,7 @@ type stageSpec struct {
 	durationMS     int
 	keywords       []string
 	capture        []string
+	parameters     map[string]string
 	nonDestructive bool
 }
 
@@ -251,6 +319,8 @@ type intentDurationHint struct {
 	ValueMS    int
 	Context    string
 	CenterRune int
+	Maximum    bool
+	FinalFilm  bool
 }
 
 var intentDurationPattern = regexp.MustCompile(`(?i)(\d+)\s*(毫秒|ms|秒|s|sec|secs|second|seconds|分钟|mins|minutes|min|m)`)
@@ -272,7 +342,11 @@ func durationMSForIntentKeywords(intentText string, keywords ...string) int {
 	}
 	best := 0
 	bestDistance := 0
+	hasFinalFilmPipeline := durationIntentHasFinalFilmPipeline(normalized)
 	for _, hint := range hints {
+		if hint.Maximum || hint.FinalFilm || (hasFinalFilmPipeline && hint.ValueMS >= 60*1000) {
+			continue
+		}
 		distance, ok := nearestKeywordDistance(normalized, hint.CenterRune, keywords)
 		if !ok || distance > maxDurationKeywordDistanceRunes {
 			continue
@@ -283,6 +357,12 @@ func durationMSForIntentKeywords(intentText string, keywords ...string) int {
 		}
 	}
 	return best
+}
+
+func durationIntentHasFinalFilmPipeline(text string) bool {
+	return containsAnyNormalized(text, "ffmpeg") && containsAnyNormalized(text,
+		"最终 mp4", "最终mp4", "最终成片", "合成为最终成片", "合成最终成片", "final mp4", "final film",
+	)
 }
 
 func requiredObservationDurationMS(intentText string) int {
@@ -304,6 +384,9 @@ func durationHintsFromIntent(intentText string) []intentDurationHint {
 		if len(match) < 6 {
 			continue
 		}
+		if durationMatchEmbeddedInIdentifier(normalized, match) {
+			continue
+		}
 		value, err := strconv.Atoi(normalized[match[2]:match[3]])
 		if err != nil || value <= 0 {
 			continue
@@ -321,9 +404,99 @@ func durationHintsFromIntent(intentText string) []intentDurationHint {
 			ValueMS:    durationMS,
 			Context:    string(runes[windowStart:windowEnd]),
 			CenterRune: (startRune + endRune) / 2,
+			Maximum:    durationHintIsMaximum(runes, startRune, endRune),
+			FinalFilm:  durationHintIsFinalFilm(runes, startRune, endRune),
 		})
 	}
 	return out
+}
+
+func durationMatchEmbeddedInIdentifier(text string, match []int) bool {
+	if len(match) < 6 || match[0] < 0 || match[1] < 0 {
+		return true
+	}
+	if match[0] > 0 {
+		previous, _ := utf8.DecodeLastRuneInString(text[:match[0]])
+		if isASCIIIdentifierRune(previous) {
+			return true
+		}
+	}
+	unit := strings.ToLower(text[match[4]:match[5]])
+	if unit != "毫秒" && unit != "秒" && unit != "分钟" && match[1] < len(text) {
+		next, _ := utf8.DecodeRuneInString(text[match[1]:])
+		if isASCIIIdentifierRune(next) {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIIdentifierRune(value rune) bool {
+	return value == '_' || (value >= '0' && value <= '9') || (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z')
+}
+
+func durationHintIsFinalFilm(runes []rune, startRune int, endRune int) bool {
+	windowStart := maxInt(0, startRune-20)
+	windowEnd := minInt(len(runes), endRune+20)
+	context := normalizeIntentText(string(runes[windowStart:windowEnd]))
+	return containsAnyNormalized(context,
+		"最终成片", "成片时长", "最终输出", "输出 mp4", "输出mp4", "最终 mp4", "最终mp4", "mp4 成片", "mp4成片", "ffmpeg",
+		"真实操作演示", "演示时长", "整段演示", "完整演示", "演示视频", "编码演示", "产出一条", "节奏清晰",
+		"final film", "final video", "final mp4", "video duration",
+	)
+}
+
+func durationHintIsMaximum(runes []rune, startRune int, endRune int) bool {
+	windowStart := maxInt(0, startRune-14)
+	windowEnd := minInt(len(runes), endRune+10)
+	context := normalizeIntentText(string(runes[windowStart:windowEnd]))
+	return containsAnyNormalized(context,
+		"最多", "至多", "不超过", "最大", "上限", "超时", "最长", "max", "maximum", "up to", "timeout", "at most",
+	)
+}
+
+const maxBuildCompletionWaitMS = 20 * 60 * 1000
+
+func wantsBuildCompletion(intentText string) bool {
+	text := normalizeIntentText(intentText)
+	return containsAnyNormalized(text,
+		"等待 agent 真正", "等待agent真正", "直到 agent", "直到agent", "构建完成", "编写完", "编写完成",
+		"全部步骤完成", "所有步骤完成", "明确 build_complete", "build_complete", "build complete", "all_complete",
+		"all complete", "all steps complete", "wait until complete", "wait for completion",
+	)
+}
+
+func completionWaitTimeoutMS(intentText string) int {
+	if !wantsBuildCompletion(intentText) {
+		return 0
+	}
+	best := 0
+	normalized := normalizeIntentText(intentText)
+	keywords := []string{"等待", "直到", "构建完成", "编写完", "完成", "build_complete", "build complete", "all complete", "wait", "timeout"}
+	for _, hint := range durationHintsFromIntent(intentText) {
+		if !hint.Maximum {
+			continue
+		}
+		if distance, ok := nearestKeywordDistance(normalized, hint.CenterRune, keywords); !ok || distance > maxDurationKeywordDistanceRunes+8 {
+			continue
+		}
+		best = maxInt(best, hint.ValueMS)
+	}
+	if best <= 0 {
+		best = maxBuildCompletionWaitMS
+	}
+	return minInt(best, maxBuildCompletionWaitMS)
+}
+
+func wantsPlayableKeyboardVerification(intentText string) bool {
+	text := normalizeIntentText(intentText)
+	keyboardRequested := containsAnyNormalized(text,
+		"键盘", "方向键", "按左", "按右", "按下", "旋转", "arrowleft", "arrowright", "arrowdown", "arrowup", "keyboard",
+	)
+	playableResultRequested := containsAnyNormalized(text,
+		"实际可玩", "实际试玩", "试玩", "可操作", "俄罗斯方块", "tetris", "棋盘", "方块位置", "方块形状", "playable",
+	)
+	return keyboardRequested && playableResultRequested
 }
 
 func nearestKeywordDistance(normalizedIntent string, centerRune int, keywords []string) (int, bool) {
@@ -426,6 +599,10 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 			expectedRoute = workspace
 		}
 	}
+	if observedRoute := observedCreationControlRoute(spec.id, targets); observedRoute != "" {
+		entryRoute = observedRoute
+		expectedRoute = observedRoute
+	}
 	stage := model.BusinessStage{
 		ID:                       stageID,
 		Order:                    order,
@@ -445,6 +622,7 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 			SuccessState:   spec.successState,
 			WaitConditions: businessStageWaitConditions(spec),
 			CapturePoints:  spec.capture,
+			Parameters:     spec.parameters,
 			NonDestructive: businessStageIsApprovedNonDestructive(spec),
 		},
 		Targets:              targets,
@@ -454,6 +632,29 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		Confidence:           businessStageConfidence(spec, targets, requirements),
 	}
 	b.stages = append(b.stages, stage)
+}
+
+func observedCreationControlRoute(stageID string, targets []model.BusinessTargetCandidate) string {
+	if stageID != "new_project_entry" && stageID != "project_name_input" && stageID != "select_build_mode" {
+		return ""
+	}
+	for _, target := range targets {
+		candidates := []string{}
+		if target.IsVerified {
+			candidates = append(candidates, target.URL, target.Route)
+		}
+		for _, alternative := range target.Alternatives {
+			if alternative.SourceKind == "page_scan" || alternative.Source == "page_scan" {
+				candidates = append(candidates, alternative.ObservedURL, alternative.ObservedRouteTemplate)
+			}
+		}
+		for _, candidate := range candidates {
+			if route := routePathFromCandidate(candidate); route != "" {
+				return route
+			}
+		}
+	}
+	return ""
 }
 
 func authenticationEntryRouteFromTargets(targets []model.BusinessTargetCandidate) string {
@@ -562,6 +763,7 @@ type businessTargetSource struct {
 func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTargetCandidate {
 	targets := []model.BusinessTargetCandidate{}
 	targets = append(targets, s.targetsFromVerifiedPlan(spec)...)
+	targets = append(targets, s.targetsFromCodeSnapshots(spec)...)
 	targets = append(targets, s.targetsFromFeatureTrace(spec)...)
 	targets = append(targets, s.resultTargetsForStage(spec)...)
 	targets = uniqueBusinessTargetCandidates(targets)
@@ -571,18 +773,85 @@ func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTa
 	return targets
 }
 
+func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.BusinessTargetCandidate {
+	preferredTestID := ""
+	switch spec.id {
+	case "final_observe":
+		preferredTestID = "build-result-card"
+	case "playable_preview", "verify_playable_controls":
+		preferredTestID = "preview-iframe"
+	default:
+		return nil
+	}
+	if s.report == nil || len(s.report.CodeSnapshots) == 0 {
+		return nil
+	}
+	selector := "[data-testid='" + preferredTestID + "']"
+	out := []model.BusinessTargetCandidate{}
+	for _, snapshot := range s.report.CodeSnapshots {
+		for _, component := range snapshot.Components {
+			for _, hint := range component.SelectorHints {
+				if testIDFromSelector(hint) != preferredTestID {
+					continue
+				}
+				label := firstNonEmpty(component.Name, spec.actionLabel)
+				out = append(out, model.BusinessTargetCandidate{
+					ID:                 "target_code_" + shortHash(spec.id+component.ID+selector),
+					Label:              label,
+					Kind:               spec.actionType,
+					Selector:           selector,
+					TestID:             preferredTestID,
+					Route:              spec.entryRoute,
+					ComponentRef:       firstNonEmpty(component.ID, component.Name),
+					SelectorScore:      96,
+					Confidence:         maxFloat64(component.Confidence, 0.76),
+					IsVerified:         false,
+					VerificationStatus: "code_evidence",
+					VerificationSource: "local_code_snapshot",
+					EvidenceRefs:       component.EvidenceRefs,
+					Alternatives:       selectorProvenanceCandidates(selector, spec.actionType, label, "source_scan", snapshot.SourceDigestSHA256, "", snapshot.CreatedAt, component.EvidenceRefs, component.Confidence),
+				})
+				break
+			}
+		}
+		for _, insight := range snapshot.Selectors {
+			if testIDFromSelector(insight.Value) != preferredTestID {
+				continue
+			}
+			label := firstNonEmpty(spec.actionLabel, labelFromSelector(selector))
+			out = append(out, model.BusinessTargetCandidate{
+				ID:                 "target_code_selector_" + shortHash(spec.id+insight.FilePathHashSHA256+selector),
+				Label:              label,
+				Kind:               spec.actionType,
+				Selector:           selector,
+				TestID:             preferredTestID,
+				Route:              spec.entryRoute,
+				SelectorScore:      int(maxFloat64(insight.StabilityScore*100, 92)),
+				Confidence:         maxFloat64(insight.Confidence, 0.76),
+				IsVerified:         false,
+				VerificationStatus: "code_evidence",
+				VerificationSource: "local_code_snapshot",
+				EvidenceRefs:       insight.EvidenceRefs,
+				Alternatives:       selectorProvenanceCandidates(selector, spec.actionType, label, "source_scan", snapshot.SourceDigestSHA256, "", snapshot.CreatedAt, insight.EvidenceRefs, insight.Confidence),
+			})
+		}
+	}
+	return out
+}
+
 func (s businessTargetSource) resultTargetsForStage(spec stageSpec) []model.BusinessTargetCandidate {
 	if spec.id != "new_project_entry" || s.verifiedPlan == nil {
 		return nil
 	}
 	out := []model.BusinessTargetCandidate{}
 	for _, action := range s.verifiedPlan.Actions {
-		text := strings.Join([]string{action.ID, action.Label, action.Selector, action.ComponentRef, action.ExpectedOutcome, action.SuccessState}, " ")
-		if action.VerificationStatus != "verified" || !containsAnyNormalized(text,
-			"dialog-new-project", "new-project-dialog", "create-project-dialog", "input-project-idea", "project-idea", "项目弹窗", "项目表单", "项目名称") {
+		if action.VerificationStatus != "verified" {
 			continue
 		}
 		candidate := businessTargetFromVerifiedAction(action)
+		if !isExplicitNewProjectResultCandidate(candidate) {
+			continue
+		}
 		candidate.ID = "result_" + candidate.ID
 		out = append(out, candidate)
 	}
@@ -778,6 +1047,16 @@ func businessProbeAllowedForStage(spec stageSpec, probe model.InteractionProbe) 
 
 func businessActionMatchesStage(spec stageSpec, label string, kind string, selector string, value string, componentRef string) bool {
 	text := strings.Join([]string{label, kind, selector, value, componentRef}, " ")
+	labelText := normalizeIntentText(label)
+	selectorText := normalizeIntentText(strings.Join([]string{selector, componentRef}, " "))
+	if spec.kind == model.BusinessStageKindFinalObserve {
+		if spec.id == "final_observe" && containsAnyNormalized(text, "build-result-card", "build result", "build_complete", "all_complete", "构建完成", "全部步骤完成") {
+			return true
+		}
+		if spec.id == "playable_preview" && containsAnyNormalized(text, "preview-iframe", "preview panel", "playable", "tetris", "棋盘", "得分") {
+			return true
+		}
+	}
 	wantAction := model.GraphActionType(spec.actionType)
 	gotAction := graphActionTypeFromKind(kind, selector)
 	if wantAction != "" && gotAction != wantAction {
@@ -785,13 +1064,21 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 	}
 	switch spec.id {
 	case "new_project_entry":
-		return containsAnyNormalized(text, "new project", "create project", "new-project", "create-project", "新建项目", "创建项目", "新增项目")
+		if containsAnyNormalized(selectorText, "button-create-project", "create-project-button") && !containsAnyNormalized(selectorText, "button-new-project", "new-project-button") {
+			return false
+		}
+		return containsAnyNormalized(labelText, "new project", "create project", "新建项目", "创建项目", "新增项目") ||
+			containsAnyNormalized(selectorText, "button-new-project", "new-project-button", "new-project-entry", "create-project-entry")
 	case "project_name_input":
-		return containsAnyNormalized(text, "project name", "project-name", "项目名称", "项目名", spec.inputValue)
+		return containsAnyNormalized(text, "project name", "project-name", "project idea", "project-idea", "project prompt", "project-prompt", "项目名称", "项目名", "项目需求", "需求描述", "idea", "prompt", spec.inputValue)
 	case "select_build_mode":
-		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "构建模式")
+		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "mode plan", "mode-plan", "plan mode", "plan-mode", "构建模式", "规划模式", "计划模式")
 	case "start_agent_build":
-		return containsAnyNormalized(text, "start build", "start-build", "run build", "generate app", "启动 agent", "启动agent", "启动构建", "开始构建", "开始生成")
+		if containsAnyNormalized(labelText+" "+selectorText, "build mode", "build-mode", "builder mode", "mode-plan", "plan-mode", "构建模式", "规划模式", "计划模式") {
+			return false
+		}
+		return containsAnyNormalized(labelText, "build", "generate", "run", "start", "构建", "生成", "启动", "开始") ||
+			containsAnyNormalized(selectorText, "button-create-project", "create-project-button", "start-build", "run-build", "generate-app")
 	}
 	if containsAnyNormalized(text, spec.keywords...) {
 		return true
@@ -1073,6 +1360,26 @@ func businessStageIntentText(project *model.ProjectContext, brief *model.Require
 		for _, goal := range intelligence.DemoIntent.Goals {
 			parts = append(parts, goal.Label, goal.Kind, goal.PreferredAction, goal.TargetPageHint, goal.SuccessState, strings.Join(goal.TargetKeywords, " "))
 		}
+	}
+	return normalizeIntentText(strings.Join(parts, " "))
+}
+
+func businessStageExplicitRequirementText(project *model.ProjectContext, brief *model.RequirementBrief, report *model.MultimodalUnderstandingReport) string {
+	parts := []string{}
+	if project != nil {
+		parts = append(parts, project.ProductDescription, strings.Join(project.MustShow, " "), strings.Join(project.MustNotShow, " "))
+		if project.Inputs != nil {
+			parts = append(parts, project.Inputs.RawUserPrompt)
+			for _, doc := range project.Inputs.RequirementDocuments {
+				parts = append(parts, doc.Title, doc.Body)
+			}
+		}
+	}
+	if brief != nil {
+		parts = append(parts, brief.Scenario, brief.Objective, strings.Join(brief.MustShow, " "), strings.Join(brief.MustNotShow, " "))
+	}
+	if report != nil && report.RequirementBrief != nil {
+		parts = append(parts, report.RequirementBrief.Scenario, report.RequirementBrief.Objective)
 	}
 	return normalizeIntentText(strings.Join(parts, " "))
 }

@@ -18,6 +18,7 @@ import (
 	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/finalfilm"
 	"cascade-demoops/backend/internal/llm"
+	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/storage"
@@ -179,9 +180,13 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	if err != nil {
 		return nil, err
 	}
+	finalFilmPublisher := finalFilmAssetPublisher()
 	finalFilmService, err := finalfilm.NewService(finalfilm.ServiceOptions{
 		Store: finalfilm.NewFileStore(filepath.Join(runtime.DataRoot, "final_film_jobs")), Renderer: service.editorWorker,
 		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"), Providers: providerRegistry, Planner: newFinalFilmDirectorPlanner(llmRouter),
+		AssetPublisher: finalFilmPublisher, ReferenceNormalizer: media.FFmpegMiniMaxH3MediaNormalizer{FFmpegPath: runtime.FFmpegPath, FFprobePath: runtime.FFprobePath},
+		ReferenceRetention:   model.DefaultMediaDeliveryPreferences().TOSRetention,
+		RequireTestNarration: strings.TrimSpace(os.Getenv("CASCADE_ACCEPTANCE_REQUIRE_NARRATION")) == "1",
 	})
 	if err != nil {
 		return nil, err
@@ -356,7 +361,7 @@ func (s *Service) GetSourceBinding(ctx context.Context, projectID string) (*mode
 }
 
 func (s *Service) DecideSourceBinding(ctx context.Context, projectID string, request SourceBindingDecisionRequest) (*orchestrator.CascadeState, error) {
-	if request.Decision != "continue_page_only" {
+	if request.Decision != "continue_page_only" && request.Decision != "confirm_mixed" {
 		return nil, errors.New("unsupported source binding decision")
 	}
 	if strings.TrimSpace(request.IdempotencyKey) == "" {
@@ -372,7 +377,10 @@ func (s *Service) DecideSourceBinding(ctx context.Context, projectID string, req
 	if request.AssessmentHash == "" || request.AssessmentHash != state.SourceBinding.AssessmentHash {
 		return nil, &SourceBindingStaleError{}
 	}
-	if state.SourceBinding.Decision == request.Decision && state.SourceBinding.EffectiveMode == model.ProductSourceModePageOnly {
+	if request.Decision == "confirm_mixed" && state.SourceBinding.Status != model.ProductSourceBindingUnverified && state.SourceBinding.Status != model.ProductSourceBindingConfirmed {
+		return nil, errors.New("confirm_mixed is allowed only for an unverified source binding without a detected mismatch")
+	}
+	if state.SourceBinding.Decision == request.Decision && (state.SourceBinding.EffectiveMode == model.ProductSourceModePageOnly || state.SourceBinding.EffectiveMode == model.ProductSourceModeMixed) {
 		return state, nil
 	}
 	if state.ProjectContext == nil {
@@ -530,6 +538,11 @@ func (s *Service) SaveProjectInput(ctx context.Context, projectID string, inputs
 	if err := model.ValidatePresentationGenerationIntents(inputs.PresentationGenerationIntents); err != nil {
 		return nil, err
 	}
+	preferences := model.NormalizeMediaDeliveryPreferences(inputs.MediaDeliveryPreferences)
+	if err := model.ValidateMediaDeliveryPreferences(&preferences); err != nil {
+		return nil, err
+	}
+	inputs.MediaDeliveryPreferences = &preferences
 	state, err := s.states.Load(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -759,6 +772,7 @@ func executionPackagePreflightResult(pkg model.ClientExecutionPackage) CloudPack
 			}
 		}
 	}
+	result.Diagnostics = packagePreflightDiagnostics(pkg)
 	return result
 }
 

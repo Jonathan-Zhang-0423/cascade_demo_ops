@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,6 +20,13 @@ import (
 )
 
 func main() {
+	cwd, err := os.Getwd()
+	must(err)
+	repoRoot := config.DiscoverDevRepoRoot(cwd)
+	// Direct commands must resolve the same ignored local configuration as the
+	// media preflights. Without this, a valid .env was silently ignored unless
+	// every variable had also been exported into the current shell.
+	must(config.LoadDotEnvFiles(config.DefaultDotEnvPaths(repoRoot)...))
 	controlAddr := flag.String("control-addr", fmt.Sprintf(":%d", direct.ControlPort), "public TLS control/data router address")
 	workerAddr := flag.String("worker-addr", fmt.Sprintf("127.0.0.1:%d", direct.WorkerPort), "loopback Worker address")
 	baseHost := flag.String("public-host", os.Getenv("CASCADE_DIRECT_PUBLIC_HOST"), "approved public Gateway hostname")
@@ -35,9 +43,10 @@ func main() {
 	if *workerAddr != fmt.Sprintf("127.0.0.1:%d", direct.WorkerPort) {
 		fatal(fmt.Errorf("worker address must remain 127.0.0.1:%d", direct.WorkerPort))
 	}
-	cwd, err := os.Getwd()
-	must(err)
-	runtime, err := config.RuntimeConfigFromEnvWithRoot(config.DiscoverDevRepoRoot(cwd))
+	if err := validateControlAddr(*controlAddr); err != nil {
+		fatal(err)
+	}
+	runtime, err := config.RuntimeConfigFromEnvWithRoot(repoRoot)
 	must(err)
 	service, err := app.NewService(runtime, store.NewFileStateStore(filepath.Join(runtime.DataRoot, "direct_gateway_state")))
 	must(err)
@@ -86,6 +95,17 @@ func main() {
 	for _, server := range dataServers {
 		_ = server.Shutdown(ctx)
 	}
+}
+
+func validateControlAddr(value string) error {
+	_, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return fmt.Errorf("control address must include Direct TLS port %d", direct.ControlPort)
+	}
+	if port != fmt.Sprintf("%d", direct.ControlPort) {
+		return fmt.Errorf("control address must use Direct TLS port %d", direct.ControlPort)
+	}
+	return nil
 }
 
 func must(err error) {

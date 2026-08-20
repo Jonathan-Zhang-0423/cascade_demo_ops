@@ -539,6 +539,17 @@ type LocalDirectJobStatus = {
 	updated_at: string;
 };
 
+type LocalDirectCredentialReceipt = {
+	protocol_version: string;
+	job_id: string;
+	package_id: string;
+	grant_id: string;
+	secret_ref: string;
+	status: string;
+	stage: string;
+	accepted_at: string;
+};
+
 type LocalDirectReleaseResult = {
   released: boolean;
   lease?: { lease_id?: string; data_port?: number; expires_at?: string };
@@ -1005,15 +1016,30 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       return this.loadProject(projectID);
     },
     async loadProject(projectID) {
-      const cached = projects.get(projectID);
-      if (cached) {
-        return ok(cached);
-      }
-      const result = await requestLocal<LocalCascadeState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}`);
-      if (!result.ok || !result.data) {
-        return { ok: false, error: result.error ?? "未找到项目" };
-      }
-      const workspace = workspaceFromCascadeState(result.data, createProjectDraftWorkspace("product_demo"));
+	  let workspace = projects.get(projectID);
+	  if (!workspace) {
+		const result = await requestLocal<LocalCascadeState>(baseURL, `/v1/desktop/projects/${encodeURIComponent(projectID)}`);
+		if (!result.ok || !result.data) {
+		  return { ok: false, error: result.error ?? "未找到项目" };
+		}
+		workspace = workspaceFromCascadeState(result.data, createProjectDraftWorkspace("product_demo"));
+	  }
+	  const previewIncomplete = Boolean(workspace.executableScriptBundle) && (
+		!workspace.packagePreview.packageDigest?.trim() ||
+		!workspace.packagePreview.approvalSubjectDigest?.trim() ||
+		!workspace.packagePreview.confidenceAssessmentHash?.trim() ||
+		workspace.packagePreview.buildStatus !== "draft"
+	  );
+	  if (previewIncomplete) {
+		const buildResult = await requestLocal<LocalClientExecutionPackageBuild>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/client-execution-package`, {
+		  method: "POST",
+		  body: JSON.stringify({ org_id: orgID }),
+		});
+		if (buildResult.ok && buildResult.data) {
+		  cloudBuilds.set(workspace.id, buildResult.data);
+		  workspace = workspaceWithPreparedBuild(workspace, buildResult.data);
+		}
+	  }
       projects.set(workspace.id, workspace);
       return ok(workspace);
     },
@@ -1141,10 +1167,21 @@ export function createLocalBridgeClient(baseURL: string = defaultLocalBridgeURL)
       const jobID = workspace.cloudRun.cloudJobID;
       if (!jobID) return { ok: false, error: "缺少 Browser Agent job id，无法轮询服务器状态" };
       const query = `?job_id=${encodeURIComponent(jobID)}`;
-      const result = await requestLocal<LocalDirectJobStatus>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/status${query}`);
+	  let result = await requestLocal<LocalDirectJobStatus>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/status${query}`);
       if (!result.ok || !result.data) {
         return bridgeFailure(result.error ?? "轮询 Browser Agent 执行状态失败", result.errorInfo);
       }
+	  if (result.data.status === "awaiting_credentials" && result.data.next_action === "upload_credential_envelope" && result.data.requires_reapproval !== true) {
+		const restored = await requestLocal<LocalDirectCredentialReceipt>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/credentials/reupload`, {
+		  method: "POST",
+		  body: JSON.stringify({ job_id: jobID }),
+		});
+		if (!restored.ok || !restored.data || restored.data.job_id !== jobID || restored.data.status !== "queued") {
+		  return bridgeFailure(restored.error ?? "Browser Agent 临时凭据安全重传失败", restored.errorInfo);
+		}
+		result = await requestLocal<LocalDirectJobStatus>(baseURL, `/v1/desktop/projects/${encodeURIComponent(workspace.id)}/browser-agent-direct/status${query}`);
+		if (!result.ok || !result.data) return bridgeFailure(result.error ?? "凭据重传后状态确认失败", result.errorInfo);
+	  }
       let next = workspaceWithDirectStatus(workspace, result.data);
       if (result.data.result_package_id && isTerminalLocalStatus(result.data.status)) {
         const resultPackage = await this.getResultPackage(next);
@@ -1369,7 +1406,7 @@ export function createMockBridgeClient(): DesktopBridgeClient {
       planning: { provider: "kimi", model: "kimi-k2.7-code", providerOverride: "CASCADE_PLANNING_PROVIDER", modelOverride: "CASCADE_PLANNING_MODEL" },
       code_reading: { provider: "glm", model: "glm-5.2", providerOverride: "CASCADE_CODE_READING_PROVIDER", modelOverride: "CASCADE_CODE_READING_MODEL" },
       multimodal_understanding: { provider: "minimax", model: "minimax-m3", providerOverride: "CASCADE_MULTIMODAL_PROVIDER", modelOverride: "CASCADE_MULTIMODAL_MODEL" },
-      video_operation: { provider: "seedance", model: "seedance-2.0", providerOverride: "CASCADE_VIDEO_PROVIDER", modelOverride: "CASCADE_VIDEO_MODEL" },
+      video_operation: { provider: "seedance", model: "seedance-2.5", providerOverride: "CASCADE_VIDEO_PROVIDER", modelOverride: "CASCADE_VIDEO_MODEL" },
     },
     cloudExchange: {
       configured: mockControlPlaneURL !== "",
@@ -1452,7 +1489,7 @@ export function createMockBridgeClient(): DesktopBridgeClient {
         mockDiagnostic("kimi", "planning", "kimi-k2.7-code"),
         mockDiagnostic("glm", "code_reading", "glm-5.2"),
         mockDiagnostic("minimax", "multimodal_understanding", "minimax-m3"),
-        mockDiagnostic("seedance", "video_operation", "seedance-2.0"),
+        mockDiagnostic("seedance", "video_operation", "seedance-2.5"),
       ]);
     },
     async preflightExecutionPackage(workspace) {
@@ -2341,7 +2378,7 @@ function workspaceWithPreparedBuild(workspace: ProjectWorkspaceView, build: Loca
 	  ...(sourceSnapshotAt ? { sourceSnapshotAt } : {}),
 	  ...(pageScanAt ? { pageScanAt } : {}),
 	  ...(stalenessStatus === "current" || stalenessStatus === "inputs_newer_than_plan" ? { stalenessStatus } : {}),
-	  blockedReasons: build.package.confidence_summary?.blocking_reasons ?? workspace.packagePreview.blockedReasons,
+	  blockedReasons: build.package.confidence_summary ? (build.package.confidence_summary.blocking_reasons ?? []) : workspace.packagePreview.blockedReasons,
     },
     cloudRun: {
 	  ...cloudRunBase,
@@ -4300,7 +4337,7 @@ function roleFromAction(action: string): string {
   if (action === "select") {
     return "combobox";
   }
-  if (action === "navigate" || action === "inspect" || action === "assert" || action === "wait") {
+  if (action === "navigate" || action === "inspect" || action === "assert" || action === "wait" || action === "press") {
     return "region";
   }
   return "button";
@@ -4337,7 +4374,7 @@ function stageKindFromAction(action: string): string {
   if (action === "fill" || action === "upload") return "business_input";
   if (action === "select") return "mode_selection";
   if (action === "wait") return "observe_progress";
-  if (action === "assert" || action === "inspect") return "final_observe";
+  if (action === "assert" || action === "inspect" || action === "press") return "final_observe";
   return "business_action";
 }
 

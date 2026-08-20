@@ -129,6 +129,11 @@ func (b *DesktopBridge) DirectBrowserAgentStatus(projectID, jobID string) Bridge
 	return bridgeValue(result, err)
 }
 
+func (b *DesktopBridge) ReuploadDirectBrowserAgentCredential(projectID, jobID string) BridgeResponse {
+	result, err := b.service.ReuploadDirectCredential(context.Background(), projectID, jobID)
+	return bridgeValue(result, err)
+}
+
 func (b *DesktopBridge) DirectBrowserAgentResult(projectID, jobID string) BridgeResponse {
 	result, err := b.service.GetDirectResult(context.Background(), projectID, jobID)
 	return bridgeValue(result, err)

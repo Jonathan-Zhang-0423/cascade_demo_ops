@@ -20,6 +20,8 @@ type PageInteractionVerifierAgent struct {
 	manager *sidecar.Manager
 }
 
+const pageInteractionVerifierTimeoutMS = 60 * 1000
+
 func NewPageInteractionVerifierAgent() *PageInteractionVerifierAgent {
 	return &PageInteractionVerifierAgent{}
 }
@@ -113,12 +115,13 @@ type interactionVerifierRequest struct {
 }
 
 type interactionVerifierGoal struct {
-	ID       string   `json:"id,omitempty"`
-	Label    string   `json:"label,omitempty"`
-	Kind     string   `json:"kind,omitempty"`
-	Keywords []string `json:"keywords,omitempty"`
-	Required bool     `json:"required,omitempty"`
-	Business bool     `json:"business,omitempty"`
+	ID         string   `json:"id,omitempty"`
+	Label      string   `json:"label,omitempty"`
+	Kind       string   `json:"kind,omitempty"`
+	Keywords   []string `json:"keywords,omitempty"`
+	Required   bool     `json:"required,omitempty"`
+	Business   bool     `json:"business,omitempty"`
+	InputValue string   `json:"input_value,omitempty"`
 }
 
 type interactionVerifierItem struct {
@@ -206,8 +209,13 @@ func (a *PageInteractionVerifierAgent) verifyWithSidecar(ctx context.Context, pr
 	}
 	var response interactionVerifierResponse
 	err := a.manager.CallJSONRPC(ctx, spec, "verify_interactions", interactionVerifierRequest{
-		ProductURL:           project.ProductURL,
-		TimeoutMS:            20000,
+		ProductURL: project.ProductURL,
+		// Production product pages can keep DOMContentLoaded pending while
+		// authentication/runtime chunks warm up. Twenty seconds produced a false
+		// page_unreachable result on an otherwise healthy page, discarding formal
+		// login and business-control evidence. Keep this bounded but give the real
+		// browser scan enough time to reach the authenticated workspace.
+		TimeoutMS:            pageInteractionVerifierTimeoutMS,
 		Headless:             true,
 		AllowedDomains:       allowedDomainsFromScope(project, intelligence.RunIntentScope),
 		ForbiddenPaths:       intelligence.RunIntentScope.ForbiddenPathPrefixes,
@@ -239,11 +247,20 @@ func verifierSafeStateTransitions(project *model.ProjectContext, intelligence *m
 			containsAnyNormalized(semanticText, "delete", "remove", "destroy", "payment", "pay", "billing", "purchase", "refund", "permission", "role", "api key", "secret", "token", "删除", "移除", "销毁", "支付", "购买", "退款", "账单", "权限", "角色", "密钥", "令牌") {
 			continue
 		}
-		for _, target := range stage.Targets {
-			if strings.TrimSpace(target.Selector) == "" || !isURLAllowedByRunScope(intelligence.RunIntentScope, target.URL) ||
-				isControlPlaneSignal(intelligence.RunIntentScope, target.URL, target.Label, target.Selector) {
+		bestIndex := -1
+		for index, target := range stage.Targets {
+			targetURL := firstNonEmpty(target.URL, stage.EntryRoute, project.ProductURL)
+			if strings.TrimSpace(target.Selector) == "" || !isExplicitNewProjectEntryCandidate(target) ||
+				!isURLAllowedByRunScope(intelligence.RunIntentScope, targetURL) ||
+				isControlPlaneSignal(intelligence.RunIntentScope, targetURL, target.Label, target.Selector) {
 				continue
 			}
+			if bestIndex < 0 || businessStageTargetRank(stage, target) > businessStageTargetRank(stage, stage.Targets[bestIndex]) {
+				bestIndex = index
+			}
+		}
+		if bestIndex >= 0 {
+			target := stage.Targets[bestIndex]
 			return []interactionVerifierItem{{
 				ID: stage.ID, IntentGoalID: target.IntentGoalID, Label: firstNonEmpty(target.Label, stage.Action.Label),
 				Kind: string(model.GraphActionClick), Selector: target.Selector, URL: firstNonEmpty(target.URL, stage.EntryRoute, project.ProductURL),
@@ -364,6 +381,9 @@ func fallbackPlanFromExplicitIntent(project *model.ProjectContext, intelligence 
 	if containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "run build", "start build", "生成") ||
 		containsAnyNormalized(intentText, "构建") {
 		add(intentSelectorAction(project, candidates, "intent_start_agent_build", "启动 agent 实际构建", "click", "启动 agent 构建", "agent 已开始根据需求实际构建项目。", durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "agent", "智能体", "构建", "build", "run", "start"), true, []string{"agent", "智能体", "开始构建", "实际构建", "生成", "build", "run", "start"}))
+	}
+	if wantsBuildCompletion(intentText) {
+		add(intentSelectorAction(project, candidates, "intent_agent_build_complete", "Agent 构建完成结果", "inspect", "等待产品明确报告构建完成", "Agent 构建已完成且最终结果可见。", 0, true, []string{"build-result", "build complete", "build_complete", "all complete", "completed", "构建完成", "全部步骤完成", "完成结果"}))
 	}
 	if waitMS := requiredObservationDurationMS(intentText); waitMS > 0 {
 		add(intentWaitAction(project, "intent_agent_build_wait", fmt.Sprintf("等待 agent 实际构建 %d 秒", waitMS/1000), "持续观察 agent 构建过程，等待结果逐步出现。", waitMS, true))
@@ -559,8 +579,23 @@ func explicitDemoIntentText(project *model.ProjectContext, intelligence *model.P
 var intentProjectNamePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?:项目名称|项目名)\s*(?:为|是|[:：=])\s*([^，。；;,\n]{1,48})`),
 	regexp.MustCompile(`(?:项目名称|项目名)\s*([^，。；;,\n\s（(]{1,48})`),
+	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?(?:名为|名称为|项目名为)\s*[“”"'‘’]*([^“”"'‘’，。；;,\n]{1,48})[“”"'‘’]*(?:的)?项目`),
+	// Chinese requests commonly put the desired name before “项目”, for
+	// example “创建俄罗斯方块项目”. Match that form before the generic
+	// “创建项目 <token>” form so the following operation (“启动 Agent”) is
+	// never mistaken for the project name.
+	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?([^，。；;,\n\s（）()]{1,32})项目`),
 	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?项目\s*([^，。；;,\n\s（(]{1,48})`),
 	regexp.MustCompile(`project\s+(?:named|called)\s+([a-z0-9][a-z0-9 _-]{0,47})`),
+}
+
+// A project-idea field may legitimately contain a full user requirement rather
+// than a short project title. Prefer its explicit fill instruction over a
+// nearby navigation phrase such as “新建项目入口”; the latter is an action
+// label, never a user-provided value.
+var intentProjectInputValuePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt)|今天你想做什么)[^，。；;,\n]{0,64}?(?:输入|填写|填入|fill)\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
+	regexp.MustCompile(`(?:输入|填写|填入)\s*(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt))\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
 }
 
 var intentDurationOnlyPattern = regexp.MustCompile(`^\d+(?:\.\d+)?\s*(?:秒|s|sec|secs|second|seconds)$`)
@@ -568,6 +603,16 @@ var intentProjectDetailsPattern = regexp.MustCompile(`(?:新建|创建|新增)(?
 
 func intentProjectName(intentText string) string {
 	intentText = normalizeIntentText(intentText)
+	for _, pattern := range intentProjectInputValuePatterns {
+		for _, match := range pattern.FindAllStringSubmatch(intentText, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			if candidate := normalizeIntentProjectNameCandidate(match[1]); candidate != "" {
+				return candidate
+			}
+		}
+	}
 	for _, match := range intentProjectDetailsPattern.FindAllStringSubmatch(intentText, -1) {
 		if len(match) < 2 {
 			continue
@@ -596,6 +641,7 @@ func normalizeIntentProjectNameCandidate(value string) string {
 	if candidate == "" || intentDurationOnlyPattern.MatchString(candidate) || containsAnyNormalized(candidate,
 		"新建项目", "创建项目", "新增项目", "new project", "create project",
 		"构建模式", "build mode", "builder mode", "等待", "wait", "agent", "智能体",
+		"启动", "开始", "输入", "填写", "选择", "打开", "进入", "查看", "提交", "创建", "新建", "新增",
 	) {
 		return ""
 	}
@@ -799,7 +845,10 @@ func verifiedProbeSemanticallyValid(result interactionVerifierResult, probe mode
 		if want == "business_action" || want == "auth" || want == "" {
 			return true
 		}
-		return graphActionTypeFromKind(kind, probe.Selector) == model.GraphActionType(want)
+		if graphActionTypeFromKind(kind, probe.Selector) == model.GraphActionType(want) {
+			return true
+		}
+		return want == string(model.GraphActionClick) && isVerifiedNewProjectResultState(result, kind)
 	}
 	return false
 }
@@ -875,15 +924,28 @@ func verifierGoals(intelligence *model.ProjectIntelligencePack) []interactionVer
 			continue
 		}
 		goals = append(goals, interactionVerifierGoal{
-			ID:       goal.ID,
-			Label:    goal.Label,
-			Kind:     firstNonEmpty(goal.PreferredAction, goal.Kind),
-			Keywords: goal.TargetKeywords,
-			Required: goal.Required,
-			Business: goal.BusinessCritical,
+			ID:         goal.ID,
+			Label:      goal.Label,
+			Kind:       firstNonEmpty(goal.PreferredAction, goal.Kind),
+			Keywords:   goal.TargetKeywords,
+			Required:   goal.Required,
+			Business:   goal.BusinessCritical,
+			InputValue: verifierGoalInputValue(goal),
 		})
 	}
 	return goals
+}
+
+func verifierGoalInputValue(goal model.DemoIntentGoal) string {
+	if goal.ID != "intent_project_requirement_input" || goal.PreferredAction != "fill" || !goal.Required || !goal.BusinessCritical {
+		return ""
+	}
+	const prefix = "填写项目需求："
+	value := strings.TrimSpace(strings.TrimPrefix(goal.Label, prefix))
+	if value == goal.Label || value == "" || len([]rune(value)) > 512 || containsAnyNormalized(value, "password", "passwd", "secret", "token", "api key", "密码", "口令", "密钥", "令牌") {
+		return ""
+	}
+	return value
 }
 
 func probeFromVerifierResult(result interactionVerifierResult, byID map[string]model.InteractionProbe) model.InteractionProbe {
@@ -891,6 +953,7 @@ func probeFromVerifierResult(result interactionVerifierResult, byID map[string]m
 		return probe
 	}
 	kind := firstNonEmpty(result.Kind, actionKindFromSelector(result.Selector))
+	business := isBusinessAction(graphActionTypeFromKind(kind, result.Selector)) || isVerifiedNewProjectResultState(result, kind)
 	return model.InteractionProbe{
 		ID:             firstNonEmpty(result.ID, "probe_browser_scan_"+shortHash(result.Selector+result.Label)),
 		IntentGoalID:   result.IntentGoalID,
@@ -900,11 +963,25 @@ func probeFromVerifierResult(result interactionVerifierResult, byID map[string]m
 		URL:            result.PageURL,
 		RouteRef:       safeID("route", pathFromURL(result.PageURL)),
 		Source:         "browser_scan_discovery",
-		IsBusiness:     isBusinessAction(graphActionTypeFromKind(kind, result.Selector)),
+		IsBusiness:     business,
 		IsChrome:       actionLooksLikeChromeControl(result.Label, result.Selector),
 		SelectorScore:  selectorQualityScore(result.Selector),
 		WaitConditions: []string{"domcontentloaded"},
 	}
+}
+
+// A discovered dialog is not an action by itself, but it is independent
+// post-action evidence for the approved new-project click. Preserve only this
+// narrowly identified result state in the verified business plan so graph
+// validation does not have to reuse a later input/action selector.
+func isVerifiedNewProjectResultState(result interactionVerifierResult, kind string) bool {
+	if graphActionTypeFromKind(kind, result.Selector) != model.GraphActionInspect || !strings.EqualFold(strings.TrimSpace(result.ObservedRole), "dialog") {
+		return false
+	}
+	goal := normalizeIntentText(result.IntentGoalID)
+	semantic := normalizeIntentText(strings.Join([]string{result.Label, result.ObservedAccessibleName, result.Selector}, " "))
+	return containsAnyNormalized(goal, "new project", "create project", "new_project", "create_project") &&
+		containsAnyNormalized(semantic, "new project", "create project", "new-project", "create-project", "新建项目", "创建项目", "今天你想做什么")
 }
 
 func formalSelectorCandidates(values []model.SelectorCandidate) []model.SelectorCandidate {

@@ -32,6 +32,13 @@ func TestDirectHealthRequiresBootstrapToken(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("authorized status = %d body=%s", response.Code, response.Body.String())
 	}
+	var health model.DirectHealthResponse
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		t.Fatalf("health response must decode as the shared protocol type: %v body=%s", err, response.Body.String())
+	}
+	if health.ProtocolVersion != model.DirectTransportProtocolVersion || health.ServerTime.IsZero() {
+		t.Fatalf("unexpected typed health response: %+v", health)
+	}
 }
 
 func TestDirectPackageIdempotencyConflictUsesStableHTTPError(t *testing.T) {
@@ -890,7 +897,7 @@ func TestDirectServerControlledFixtureUploadOnly(t *testing.T) {
 	if leaseResponse.Code != http.StatusCreated {
 		t.Fatalf("fixture lease status=%d body=%s", leaseResponse.Code, leaseResponse.Body.String())
 	}
-	var lease direct.DirectPortLease
+	var lease model.DirectPortLease
 	if err := json.Unmarshal(leaseResponse.Body.Bytes(), &lease); err != nil {
 		t.Fatal(err)
 	}
@@ -917,7 +924,7 @@ func TestDirectServerControlledFixtureUploadOnly(t *testing.T) {
 	pkg.SafetyReport.HumanApproval.ApprovedByInstallationID = lease.InstallationID
 	pkg.SafetyReport.HumanApproval.ApprovalSchemaVersion = model.UserApprovalSchemaVersion
 	pkg.SafetyReport.HumanApproval.PlanDigestSHA256 = pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
-	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256, err = model.ComputeApprovalSubjectDigestsSHA256(pkg)
+	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256, err = model.ComputePackageApprovalComponentDigests(pkg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -947,7 +954,7 @@ func TestDirectServerControlledFixtureUploadOnly(t *testing.T) {
 	uploadHTTP.Header.Set("X-Cascade-Timestamp", fmt.Sprint(stamp))
 	uploadHTTP.Header.Set("X-Cascade-Nonce", nonce)
 	uploadHTTP.Header.Set("X-Cascade-Body-SHA256", digest)
-	uploadHTTP.Header.Set("X-Cascade-Signature", direct.SignDataRequest(http.MethodPost, (&url.URL{Path: uploadPath}).EscapedPath(), stamp, nonce, digest, lease.LeaseToken, lease.InstallationID))
+	uploadHTTP.Header.Set("X-Cascade-Signature", direct.SignDataRequest(http.MethodPost, (&url.URL{Path: uploadPath}).EscapedPath(), stamp, nonce, digest, lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort))
 	uploadResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(uploadResponse, uploadHTTP)
 	if uploadResponse.Code != http.StatusOK {
@@ -961,7 +968,7 @@ func TestDirectServerControlledFixtureUploadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var receipt direct.DirectPackageReceipt
+	var receipt model.DirectPackageReceipt
 	if err := json.Unmarshal(receiptPlain, &receipt); err != nil {
 		t.Fatal(err)
 	}
@@ -1074,7 +1081,7 @@ func finalizeDirectFixtureApproval(t *testing.T, pkg *model.ClientExecutionPacka
 	t.Helper()
 	pkg.SafetyReport.HumanApproval.PlanDigestSHA256 = pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
 	var err error
-	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256, err = model.ComputeApprovalSubjectDigestsSHA256(*pkg)
+	pkg.SafetyReport.HumanApproval.SubjectDigestsSHA256, err = model.ComputePackageApprovalComponentDigests(*pkg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1108,7 +1115,7 @@ func uploadDirectHTTPPackageFixture(t *testing.T, server *DirectHTTPServer, leas
 	request.Header.Set("X-Cascade-Timestamp", fmt.Sprint(stamp))
 	request.Header.Set("X-Cascade-Nonce", nonce)
 	request.Header.Set("X-Cascade-Body-SHA256", digest)
-	request.Header.Set("X-Cascade-Signature", direct.SignDataRequest(http.MethodPost, (&url.URL{Path: path}).EscapedPath(), stamp, nonce, digest, lease.LeaseToken, lease.InstallationID))
+	request.Header.Set("X-Cascade-Signature", direct.SignDataRequest(http.MethodPost, (&url.URL{Path: path}).EscapedPath(), stamp, nonce, digest, lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort))
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 	return response

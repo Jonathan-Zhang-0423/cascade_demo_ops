@@ -1,10 +1,20 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { audioVolumeExpression, globalCaptionCuesForOutputWindow, render, validateEditPlan, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
+
+const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
+const ffmpegAvailable = spawnSync(ffmpegPath, ["-version"], { stdio: "ignore", windowsHide: true }).status === 0;
+const renderWithFFmpeg = ffmpegAvailable ? it : it.skip;
+
+function runFFmpeg(args: string[]): void {
+  const result = spawnSync(ffmpegPath, args, { encoding: "utf8", windowsHide: true });
+  if (result.status !== 0) throw new Error(`ffmpeg fixture failed: ${result.stderr || result.stdout || result.error?.message || "unknown error"}`);
+}
 
 const catalog: AssetTimelineCatalog = {
   schema_version: "demoops.asset_timeline_catalog.v1",
@@ -209,4 +219,47 @@ describe("editor audio policy", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  renderWithFFmpeg("mixes confirmed narration into both final delivery profiles", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-dual-narration-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const narrationPath = path.join(root, "narration.wav");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "2", "-c:v", "mpeg4", "-c:a", "aac", recordingPath]);
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=24000", "-t", "1.5", "-c:a", "pcm_s16le", narrationPath]);
+
+      const renderCatalog: AssetTimelineCatalog = structuredClone(catalog);
+      renderCatalog.artifacts[0] = { ...renderCatalog.artifacts[0], uri: pathToFileURL(recordingPath).href, local_path: recordingPath };
+      renderCatalog.artifacts[2] = { ...renderCatalog.artifacts[2], uri: pathToFileURL(narrationPath).href, local_path: narrationPath, duration_ms: 1500 };
+      const editPlan = plan();
+      editPlan.narrations = [{
+        id: "intro", source_artifact_id: "narration_1", source_time_range_ms: [0, 1500], output_time_range_ms: [200, 1700],
+        volume_percent: 100, duck_source_audio: true, duck_source_to_percent: 30, source: "tts_confirmed",
+      }];
+
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: renderCatalog,
+        edit_plan: editPlan,
+        delivery_profiles: [
+          { id: "final_master_2k", mode: "final", width: 2560, height: 1440, fps: 30, format: "mp4" },
+          { id: "final_delivery_1080p", mode: "final", width: 1920, height: 1080, fps: 30, format: "mp4" },
+        ],
+      });
+
+      expect(result.delivery_status).toBe("complete");
+      expect(result.deliverables).toHaveLength(2);
+      for (const deliverable of result.deliverables || []) {
+        expect(deliverable.status).toBe("complete");
+        expect((await stat(deliverable.video_path)).size).toBeGreaterThan(0);
+        const probe = spawnSync(ffmpegPath, ["-hide_banner", "-i", deliverable.video_path], { encoding: "utf8", windowsHide: true });
+        expect(`${probe.stdout}\n${probe.stderr}`).toMatch(/Audio:/);
+        const manifest = JSON.parse(await readFile(deliverable.render_manifest_path, "utf8"));
+        expect(manifest.compositor.applied_operations).toContain("narration");
+        expect(manifest.compositor.encoding_audit.post_process_video_mode).toBe("stream_copy");
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

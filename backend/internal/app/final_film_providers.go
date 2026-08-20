@@ -16,10 +16,25 @@ func finalFilmProviderRegistry(runtime config.AppRuntimeConfig) (*media.Generate
 	if err := registerFinalFilmH3(registry, runtime); err != nil {
 		return nil, err
 	}
-	if err := registerFinalFilmSeedance(registry, runtime); err != nil {
+	if err := registerFinalFilmSeedance25(registry, runtime); err != nil {
 		return nil, err
 	}
 	return registry, nil
+}
+
+// finalFilmAssetPublisher is intentionally absent when private TOS is not
+// fully configured. The FinalFilm Seedance bridge then records a concrete
+// preparation failure and keeps the fact-track baseline deliverable.
+func finalFilmAssetPublisher() media.AssetPublisher {
+	config, configured := media.TOSAssetPublisherConfigFromEnv(os.Getenv)
+	if !configured {
+		return nil
+	}
+	publisher, err := media.NewTOSAssetPublisher(config, time.Now)
+	if err != nil {
+		return nil
+	}
+	return publisher
 }
 
 func registerFinalFilmH3(registry *media.GeneratedShotProviderRegistry, runtime config.AppRuntimeConfig) error {
@@ -51,20 +66,28 @@ func registerFinalFilmH3(registry *media.GeneratedShotProviderRegistry, runtime 
 	return registry.Register(adapter)
 }
 
-func registerFinalFilmSeedance(registry *media.GeneratedShotProviderRegistry, runtime config.AppRuntimeConfig) error {
+func registerFinalFilmSeedance25(registry *media.GeneratedShotProviderRegistry, runtime config.AppRuntimeConfig) error {
 	credential := runtime.ModelProviders[config.ModelProviderSeedance]
-	route := runtime.ModelTaskRoutes[config.ModelTaskVideoOperation]
-	enabled := runtime.ArkMediaMode == config.ArkMediaModeReal && credential.Enabled && strings.EqualFold(strings.TrimSpace(os.Getenv("CASCADE_SEEDANCE_FINAL_FILM_ENABLED")), "true") && route.Provider == config.ModelProviderSeedance && route.Model == media.Seedance20ServerModel
-	reason := "Seedance 2.0 final-film adapter requires real Ark mode, configured credentials, explicit CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true, and the exact video route"
-	options := media.Seedance20ProviderAdapterOptions{Enabled: enabled, DisabledReason: reason}
+	enabled := runtime.ArkMediaMode == config.ArkMediaModeReal && credential.Enabled && strings.EqualFold(strings.TrimSpace(os.Getenv("CASCADE_SEEDANCE_FINAL_FILM_ENABLED")), "true") && credential.DefaultModel == media.Seedance25ServerModel
+	reason := "Seedance 2.5 final-film adapter requires real Ark mode, configured credentials, explicit CASCADE_SEEDANCE_FINAL_FILM_ENABLED=true, and SEEDANCE_MODEL=doubao-seedance-2-5-260628"
+	options := media.Seedance25ProviderAdapterOptions{Enabled: enabled, DisabledReason: reason}
 	if enabled {
+		policy, policyErr := media.Seedance25AdmissionPolicyFromEnv(os.Getenv)
+		if policyErr != nil {
+			return policyErr
+		}
+		admission, admissionErr := media.NewSeedance25AdmissionGate(policy, nil)
+		if admissionErr != nil {
+			return admissionErr
+		}
 		options.Client = media.NewClient(runtime, http.DefaultClient)
 		options.Downloader = media.HTTPMiniMaxH3OutputDownloader{Client: http.DefaultClient}
 		options.Normalizer = media.FFmpegMiniMaxH3MediaNormalizer{FFmpegPath: runtime.FFmpegPath, FFprobePath: runtime.FFprobePath}
 		options.PollAttempts = 180
 		options.PollInterval = 5 * time.Second
+		options.Admission = admission
 	}
-	adapter, err := media.NewSeedance20ProviderAdapter(options)
+	adapter, err := media.NewSeedance25ProviderAdapter(options)
 	if err != nil {
 		return err
 	}

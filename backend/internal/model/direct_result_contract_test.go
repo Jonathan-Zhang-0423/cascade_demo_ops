@@ -31,6 +31,34 @@ func TestFormalCompletedResultRequiresRequestedAuditArtifacts(t *testing.T) {
 	}
 }
 
+func TestFormalCompletedResultRequiresBothApprovedDeliveryProfiles(t *testing.T) {
+	source, result := completeFormalOutlineResult()
+	preferences := DefaultMediaDeliveryPreferences()
+	source.ProjectContextSummary.MediaDeliveryPreferences = &preferences
+	if err := ValidateFormalRecordingResultArtifacts(result, source); err == nil || !strings.Contains(err.Error(), "result_missing_final_master_2k") {
+		t.Fatalf("missing 2K delivery must block formal completion, got %v", err)
+	}
+	hash := strings.Repeat("c", 64)
+	result.GeneratedAssets = append(result.GeneratedAssets,
+		ArtifactRef{ID: "master", Kind: "final_video_final_master_2k", URI: "direct://master", MimeType: "video/mp4", SHA256: hash, SizeBytes: 10},
+	)
+	if err := ValidateFormalRecordingResultArtifacts(result, source); err == nil || !strings.Contains(err.Error(), "result_missing_final_delivery_1080p") {
+		t.Fatalf("missing 1080p delivery must block formal completion, got %v", err)
+	}
+	result.GeneratedAssets = append(result.GeneratedAssets,
+		ArtifactRef{ID: "delivery", Kind: "final_video_final_delivery_1080p", URI: "direct://delivery", MimeType: "video/mp4", SHA256: hash, SizeBytes: 10},
+	)
+	if err := ValidateFormalRecordingResultArtifacts(result, source); err == nil || !strings.Contains(err.Error(), "result_missing_deliverables_manifest") {
+		t.Fatalf("missing delivery manifest must block formal completion, got %v", err)
+	}
+	result.GeneratedAssets = append(result.GeneratedAssets,
+		ArtifactRef{ID: "manifest", Kind: "deliverables_manifest", URI: "direct://manifest", MimeType: "application/json", SHA256: hash, SizeBytes: 10},
+	)
+	if err := ValidateFormalRecordingResultArtifacts(result, source); err != nil {
+		t.Fatalf("complete dual-profile formal result was rejected: %v", err)
+	}
+}
+
 func TestFormalOutlineResultRequiresReplayAndEditorHandoffArtifacts(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -122,5 +150,19 @@ func TestFormalFailedResultRequiresTraceableDiagnostic(t *testing.T) {
 	result.FailureDiagnostic = &ScriptFailureDiagnostic{ScreenshotRefs: []PackageArtifactDescriptor{{ID: "shot", Kind: "screenshot", URI: "direct://shot"}}}
 	if err := ValidateFormalRecordingResultArtifacts(result, source); err != nil {
 		t.Fatalf("traceable failed result was rejected: %v", err)
+	}
+}
+
+func TestFormalInfrastructureFailureCanExplicitlyDeclareBrowserEvidenceUnavailable(t *testing.T) {
+	result := &RecordingResultPackage{
+		Status: RecordingResultStatusFailed,
+		FailureDiagnostic: &ScriptFailureDiagnostic{
+			Error:                      AgentError{Code: "outcome_pre_verification_failed"},
+			RedactionReport:            DiagnosticRedactionReport{Applied: true},
+			BrowserEvidenceUnavailable: true,
+		},
+	}
+	if err := ValidateFormalRecordingResultArtifacts(result, &ClientExecutionPackage{}); err != nil {
+		t.Fatalf("explicit infrastructure failure was rejected: %v", err)
 	}
 }

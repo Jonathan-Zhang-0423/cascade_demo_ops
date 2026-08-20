@@ -89,39 +89,42 @@ type DesktopCloudRunState struct {
 	// PackageID is the authoritative Browser Agent package identity. The
 	// exchange_package_id field below remains only as a v1 persisted-state
 	// compatibility key for older projects.
-	PackageID                   string                             `json:"package_id,omitempty"`
-	ExchangePackageID           string                             `json:"exchange_package_id,omitempty"`
-	CloudJobID                  string                             `json:"cloud_job_id,omitempty"`
-	Status                      string                             `json:"status,omitempty"`
-	Stage                       string                             `json:"stage,omitempty"`
-	Message                     string                             `json:"message,omitempty"`
-	WaitingReason               string                             `json:"waiting_reason,omitempty"`
-	BlockingErrorCode           string                             `json:"blocking_error_code,omitempty"`
-	NextAction                  string                             `json:"next_action,omitempty"`
-	RequiresReapproval          bool                               `json:"requires_reapproval,omitempty"`
-	ReunderstandingIssues       []model.DirectReunderstandingIssue `json:"reunderstanding_issues,omitempty"`
-	ProgressPercent             int                                `json:"progress_percent,omitempty"`
-	LastEventID                 string                             `json:"last_event_id,omitempty"`
-	StageHistory                []model.ExecutionStageEvent        `json:"stage_history,omitempty"`
-	FailureSummary              *model.ExecutionFailureSummary     `json:"failure_summary,omitempty"`
-	Error                       *model.AgentError                  `json:"error,omitempty"`
-	ResultPackageID             string                             `json:"result_package_id,omitempty"`
-	ResultPackage               *model.RecordingResultPackage      `json:"result_package,omitempty"`
-	DiagnosticDigestSHA256      string                             `json:"diagnostic_digest_sha256,omitempty"`
-	ResultDownloaded            bool                               `json:"result_downloaded,omitempty"`
-	AckedAt                     *time.Time                         `json:"acked_at,omitempty"`
-	DownloadedAssets            []DesktopDownloadedAssetState      `json:"downloaded_assets,omitempty"`
-	DirectArtifacts             []model.DirectArtifact             `json:"direct_artifacts,omitempty"`
-	ResultReview                *DesktopResultReviewState          `json:"result_review,omitempty"`
-	PackageDigestSHA256         string                             `json:"package_digest_sha256,omitempty"`
-	GraphDigestSHA256           string                             `json:"graph_digest_sha256,omitempty"`
-	ApprovalSubjectDigestSHA256 string                             `json:"approval_subject_digest_sha256,omitempty"`
-	ConfidenceAssessmentHash    string                             `json:"confidence_assessment_hash,omitempty"`
-	BundleHashSHA256            string                             `json:"bundle_hash_sha256,omitempty"`
-	PlanHashSHA256              string                             `json:"plan_hash_sha256,omitempty"`
-	LastRepairSourceID          string                             `json:"last_repair_source_result_id,omitempty"`
-	RepairHistory               []DesktopDirectRepairAuditState    `json:"repair_history,omitempty"`
-	UpdatedAt                   time.Time                          `json:"updated_at"`
+	PackageID              string                             `json:"package_id,omitempty"`
+	ExchangePackageID      string                             `json:"exchange_package_id,omitempty"`
+	CloudJobID             string                             `json:"cloud_job_id,omitempty"`
+	Status                 string                             `json:"status,omitempty"`
+	Stage                  string                             `json:"stage,omitempty"`
+	Message                string                             `json:"message,omitempty"`
+	WaitingReason          string                             `json:"waiting_reason,omitempty"`
+	BlockingErrorCode      string                             `json:"blocking_error_code,omitempty"`
+	NextAction             string                             `json:"next_action,omitempty"`
+	RequiresReapproval     bool                               `json:"requires_reapproval,omitempty"`
+	ReunderstandingIssues  []model.DirectReunderstandingIssue `json:"reunderstanding_issues,omitempty"`
+	ProgressPercent        int                                `json:"progress_percent,omitempty"`
+	LastEventID            string                             `json:"last_event_id,omitempty"`
+	StageHistory           []model.ExecutionStageEvent        `json:"stage_history,omitempty"`
+	FailureSummary         *model.ExecutionFailureSummary     `json:"failure_summary,omitempty"`
+	Error                  *model.AgentError                  `json:"error,omitempty"`
+	ResultPackageID        string                             `json:"result_package_id,omitempty"`
+	ResultPackage          *model.RecordingResultPackage      `json:"result_package,omitempty"`
+	DiagnosticDigestSHA256 string                             `json:"diagnostic_digest_sha256,omitempty"`
+	ResultDownloaded       bool                               `json:"result_downloaded,omitempty"`
+	AckedAt                *time.Time                         `json:"acked_at,omitempty"`
+	DownloadedAssets       []DesktopDownloadedAssetState      `json:"downloaded_assets,omitempty"`
+	DirectArtifacts        []model.DirectArtifact             `json:"direct_artifacts,omitempty"`
+	// DirectCredentialGrants contains approval-bound references and scopes only;
+	// plaintext usernames/passwords remain exclusively in the local vault.
+	DirectCredentialGrants      []model.CredentialGrant         `json:"direct_credential_grants,omitempty"`
+	ResultReview                *DesktopResultReviewState       `json:"result_review,omitempty"`
+	PackageDigestSHA256         string                          `json:"package_digest_sha256,omitempty"`
+	GraphDigestSHA256           string                          `json:"graph_digest_sha256,omitempty"`
+	ApprovalSubjectDigestSHA256 string                          `json:"approval_subject_digest_sha256,omitempty"`
+	ConfidenceAssessmentHash    string                          `json:"confidence_assessment_hash,omitempty"`
+	BundleHashSHA256            string                          `json:"bundle_hash_sha256,omitempty"`
+	PlanHashSHA256              string                          `json:"plan_hash_sha256,omitempty"`
+	LastRepairSourceID          string                          `json:"last_repair_source_result_id,omitempty"`
+	RepairHistory               []DesktopDirectRepairAuditState `json:"repair_history,omitempty"`
+	UpdatedAt                   time.Time                       `json:"updated_at"`
 }
 
 type DesktopDirectRepairAuditState struct {

@@ -186,6 +186,61 @@ describe("desktop bridge contract", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+	it("hydrates authoritative package preview digests when reopening a generated project", async () => {
+		const workspace = createWorkspace("product_demo");
+		const bundle = {
+			id: "bundle_generated",
+			script_manifest: { runtime: "browser-agent-outline-v1" },
+			approval_markdown: { inline_markdown: "# Generated" },
+			reproducibility: { graph_hash_sha256: "sha256:graph", plan_hash_sha256: "sha256:plan", bundle_hash_sha256: "sha256:bundle" },
+		} as never;
+		const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+			if (url.endsWith(`/v1/desktop/projects/${workspace.id}`)) {
+				return bridgeJSON({
+					project_id: workspace.id,
+					current_node: "HumanApprove",
+					status: "awaiting_human_approval",
+					project_context: { id: workspace.id, product_url: workspace.productURL, target_audience: workspace.targetAudience, inputs: workspace.inputBundle },
+					workflow_graph: workspace.planReview.graph,
+					executable_script_bundle: bundle,
+					script_document: workspace.scriptDocument,
+				});
+			}
+			expect(url).toBe(`http://127.0.0.1:4317/v1/desktop/projects/${workspace.id}/client-execution-package`);
+			expect(init?.method).toBe("POST");
+			return bridgeJSON({
+				org_id: "org_desktop",
+				project_id: workspace.id,
+				package: {
+					package_id: "pkg_hydrated",
+					workflow_graph: workspace.planReview.graph,
+					executable_script_bundle: bundle,
+					confidence_summary: { assessment_hash: "sha256:confidence", readiness: "review_required", overall_score: 0.91, warnings: ["soft budget"] },
+					metadata: { staleness_status: "current" },
+				},
+				build_status: "draft",
+				approval_subject_digest_sha256: "sha256:approval",
+				package_digest_sha256: "sha256:package",
+				size_report: { algorithm_version: "v1", total_bytes: 1024, section_bytes: {}, stage_count: 8, evidence_count: 8, selector_count: 4 },
+			});
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await createLocalBridgeClient("http://127.0.0.1:4317").loadProject(workspace.id);
+
+		expect(result.ok).toBe(true);
+			expect(result.data?.packagePreview).toMatchObject({
+			packageID: "pkg_hydrated",
+			packageDigest: "sha256:package",
+			approvalSubjectDigest: "sha256:approval",
+			confidenceAssessmentHash: "sha256:confidence",
+			readiness: "review_required",
+				buildStatus: "draft",
+				blockedReasons: [],
+		});
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+
   it("stores the Browser Agent token through the direct bridge and returns only redacted health", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
 	  if (url.endsWith("/v1/desktop/browser-agent-direct")) {
@@ -749,6 +804,41 @@ describe("desktop bridge contract", () => {
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/review",
 	  "http://127.0.0.1:4317/v1/desktop/projects/project_product_demo/browser-agent-direct/release",
 	]);
+  });
+
+  it("securely reuploads an expired one-time credential envelope without reapproval", async () => {
+	const workspace = createWorkspace("product_demo");
+	const running = {
+	  ...workspace,
+	  cloudRun: { ...workspace.cloudRun, packageID: "pkg_recover", exchangePackageID: "pkg_recover", cloudJobID: "job_recover", status: "running" as const },
+	};
+	let statusReads = 0;
+	const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+	  if (url.includes("/browser-agent-direct/status")) {
+		statusReads++;
+		return bridgeJSON(statusReads === 1 ? {
+		  protocol_version: "cascade.browser_agent_direct.v1", job_id: "job_recover", package_id: "pkg_recover",
+		  status: "awaiting_credentials", stage: "credential_reupload_required", next_action: "upload_credential_envelope",
+		  requires_reapproval: false, progress_percent: 5, updated_at: "2026-08-18T11:00:00Z",
+		} : {
+		  protocol_version: "cascade.browser_agent_direct.v1", job_id: "job_recover", package_id: "pkg_recover",
+		  status: "queued", stage: "browser_agent_queue", progress_percent: 5, updated_at: "2026-08-18T11:00:01Z",
+		});
+	  }
+	  if (url.includes("/browser-agent-direct/credentials/reupload")) {
+		expect(init?.method).toBe("POST");
+		expect(JSON.parse(String(init?.body))).toEqual({ job_id: "job_recover" });
+		return bridgeJSON({ protocol_version: "cascade.browser_agent_direct.v1", job_id: "job_recover", package_id: "pkg_recover", grant_id: "grant_login", secret_ref: "credential://demo/ref", status: "queued", stage: "browser_agent_queue", accepted_at: "2026-08-18T11:00:01Z" });
+	  }
+	  throw new Error(`unexpected URL ${url}`);
+	});
+	vi.stubGlobal("fetch", fetchMock);
+
+	const result = await createLocalBridgeClient("http://127.0.0.1:4317").pollCloudRun(running);
+	expect(result.ok).toBe(true);
+	expect(result.data?.cloudRun.status).toBe("queued");
+	expect(result.data?.cloudRun.requiresReapproval).not.toBe(true);
+	expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("maps local dev bridge execution packages into the workspace approval view", async () => {

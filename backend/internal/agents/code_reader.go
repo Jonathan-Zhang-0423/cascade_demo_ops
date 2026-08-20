@@ -1268,13 +1268,14 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 		call.FallbackReason = llmFallbackReason(err, modelTrace)
 		return fallback, call
 	}
-	queries := codeInvestigationQueriesFromLLM(output, budget, questions)
-	if len(queries) == 0 {
+	plannedQueries := codeInvestigationQueriesFromLLM(output, budget, questions)
+	if len(plannedQueries) == 0 {
 		call.OutputSummary = fmt.Sprintf("模型未返回有效查询，使用确定性查询计划 %d 条。", len(fallback))
 		call.SelectedFileCount = len(fallback)
 		call.FallbackReason = "empty_llm_plan"
 		return fallback, call
 	}
+	queries := append(requirementCriticalInvestigationQueries(fallback), plannedQueries...)
 	queries = append(queries, fallback...)
 	queries = dedupeCodeInvestigationQueries(queries)
 	if budget.DrilldownRounds > 0 && len(queries) > budget.DrilldownRounds {
@@ -1285,6 +1286,19 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 	call.SelectedFileCount = len(queries)
 	call.Confidence = maxFloat(0.68, output.Confidence)
 	return queries, call
+}
+
+func requirementCriticalInvestigationQueries(queries []codeInvestigationQuery) []codeInvestigationQuery {
+	out := []codeInvestigationQuery{}
+	for _, wanted := range []string{"question_result_anchors", "question_build_completion", "question_playable_result"} {
+		for _, query := range queries {
+			if query.questionID == wanted {
+				out = append(out, query)
+				break
+			}
+		}
+	}
+	return out
 }
 
 func llmFallbackReason(err error, trace *llm.CallTrace) string {
@@ -1398,6 +1412,40 @@ func buildCodeInvestigationQuestions(project *model.ProjectContext, brief *model
 			QueryTerms:       terms,
 			Status:           "open",
 		})
+	}
+	resultAnchorTerms := []string{}
+	if wantsBuildCompletion(intentText) {
+		resultAnchorTerms = append(resultAnchorTerms, "build-result-card")
+	}
+	if wantsPlayableKeyboardVerification(intentText) {
+		resultAnchorTerms = append(resultAnchorTerms, "preview-iframe")
+	}
+	if len(resultAnchorTerms) > 0 {
+		add(
+			"question_result_anchors",
+			"最终结果代码锚点",
+			"哪些精确的稳定 selector 可以证明构建完成并定位可玩预览？",
+			resultAnchorTerms,
+			[]string{"component_or_selector"},
+		)
+	}
+	if wantsBuildCompletion(intentText) {
+		add(
+			"question_build_completion",
+			"Agent 构建完成结果",
+			"Agent 全部步骤完成时，哪个结果组件、稳定 selector 和状态分支可以确定性证明构建完成？",
+			[]string{"build-result-card", "build result", "build_complete", "all_complete", "all complete", "全部步骤完成", "构建完成", "completed"},
+			[]string{"component_or_selector", "style_or_state"},
+		)
+	}
+	if wantsPlayableKeyboardVerification(intentText) {
+		add(
+			"question_playable_result",
+			"可玩预览与键盘结果",
+			"最终预览容器、iframe/canvas、得分和键盘事件由哪些组件与稳定 selector 实现？",
+			[]string{"preview-iframe", "preview panel", "iframe", "canvas", "tetris", "score", "ArrowLeft", "ArrowDown"},
+			[]string{"component_or_selector", "style_or_state"},
+		)
 	}
 	if containsAnyNormalized(intentText, "登录", "登陆", "login", "signin", "邮箱", "密码") {
 		add(
@@ -1937,7 +1985,7 @@ func codeIntentTextParts(project *model.ProjectContext, brief *model.Requirement
 
 func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidateFile, selectedKeys map[string]bool, query codeInvestigationQuery, budget model.CodeReadBudget) (codeSearchResult, error) {
 	result := codeSearchResult{}
-	for _, candidate := range candidates {
+	for _, candidate := range prioritizeCodeCandidatesForQuery(candidates, query) {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
@@ -1984,10 +2032,83 @@ func searchCodeCandidatesForQuery(ctx context.Context, candidates []codeCandidat
 		}
 		return result.matches[i].score > result.matches[j].score
 	})
-	if budget.ToolSearchResultLimit > 0 && len(result.matches) > budget.ToolSearchResultLimit {
-		result.matches = result.matches[:budget.ToolSearchResultLimit]
-	}
+	result.matches = limitCodeSearchMatchesForQuery(result.matches, query.terms, budget.ToolSearchResultLimit)
 	return result, nil
+}
+
+func prioritizeCodeCandidatesForQuery(candidates []codeCandidateFile, query codeInvestigationQuery) []codeCandidateFile {
+	ordered := append([]codeCandidateFile(nil), candidates...)
+	pathTerms := codeSearchPathTerms(query.terms)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		left := keywordMatchScore(pathTerms, filepath.ToSlash(ordered[i].rel), ordered[i].name)*1000 + ordered[i].score
+		right := keywordMatchScore(pathTerms, filepath.ToSlash(ordered[j].rel), ordered[j].name)*1000 + ordered[j].score
+		if left == right {
+			return filepath.ToSlash(ordered[i].rel) < filepath.ToSlash(ordered[j].rel)
+		}
+		return left > right
+	})
+	return ordered
+}
+
+func codeSearchPathTerms(terms []string) []string {
+	out := append([]string(nil), terms...)
+	replacer := strings.NewReplacer("-", " ", "_", " ", ".", " ", "/", " ", "\\", " ")
+	for _, term := range terms {
+		switch strings.ToLower(strings.TrimSpace(term)) {
+		case "build-result-card":
+			out = append(out, "plan", "chat", "agent")
+		case "preview-iframe":
+			out = append(out, "preview", "panel")
+		}
+		for _, part := range strings.Fields(replacer.Replace(term)) {
+			part = strings.TrimSpace(part)
+			if len(part) >= 4 {
+				out = append(out, part)
+			}
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func limitCodeSearchMatchesForQuery(matches []codeSearchMatch, terms []string, limit int) []codeSearchMatch {
+	if limit <= 0 || len(matches) <= limit {
+		return matches
+	}
+	selected := make([]codeSearchMatch, 0, limit)
+	selectedPaths := map[string]bool{}
+	for _, term := range terms {
+		for _, match := range matches {
+			if !containsStringFold(match.terms, term) || selectedPaths[match.candidate.rel] {
+				continue
+			}
+			selected = append(selected, match)
+			selectedPaths[match.candidate.rel] = true
+			break
+		}
+		if len(selected) >= limit {
+			return selected
+		}
+	}
+	for _, match := range matches {
+		if selectedPaths[match.candidate.rel] {
+			continue
+		}
+		selected = append(selected, match)
+		selectedPaths[match.candidate.rel] = true
+		if len(selected) >= limit {
+			break
+		}
+	}
+	return selected
+}
+
+func containsStringFold(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(wanted)) {
+			return true
+		}
+	}
+	return false
 }
 
 func budgetForRemainingToolSearch(budget model.CodeReadBudget, searched int) (model.CodeReadBudget, bool) {

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { EditorSession } from "./editor";
 import { buildFinalFilmIntent, createFinalFilmClient } from "./finalFilm";
-import type { FinalFilmCandidate, FinalFilmEvent, FinalFilmJob, FinalFilmPurpose, FinalFilmSelection } from "./finalFilm";
+import type { FinalFilmCandidate, FinalFilmEvent, FinalFilmJob, FinalFilmProvider, FinalFilmPurpose, FinalFilmSelection } from "./finalFilm";
 
 type SafetyKey = "purpose" | "ui" | "facts" | "text" | "references";
 
@@ -26,7 +26,7 @@ export function FinalFilmPanel({ session, onClose }: { session: EditorSession; o
   const [safety, setSafety] = useState<Record<SafetyKey, boolean>>({ purpose: false, ui: false, facts: false, text: false, references: false });
   const [reviewReason, setReviewReason] = useState("已在本地播放器完整检查，内容仅作展示用途。");
   const [anchorByIntent, setAnchorByIntent] = useState<Record<string, string>>({});
-  const [preferredProvider, setPreferredProvider] = useState<"minimax-h3" | "seedance-2.0">("minimax-h3");
+  const [preferredProvider, setPreferredProvider] = useState<FinalFilmProvider>("minimax-h3");
 
   const track = job?.generated_track;
   const pendingCandidate = track?.candidates?.find((candidate) => !track.content_reviews?.some((review) => review.candidate_id === candidate.candidate_id));
@@ -197,11 +197,11 @@ function EditorApproval({ job, selection, purpose, anchor, busy, onAnchor, onApp
   return <section className="final-film-card final-film-explicit"><h3>Editor 独立批准</h3><p>候选已通过内容审核和选择，但此操作只授权创建补丁，不会自动应用或渲染。</p><dl><div><dt>用途</dt><dd>{purposeLabel(purpose)}</dd></div><div><dt>候选</dt><dd>{selection.selected_candidate_id}</dd></div><div><dt>位置</dt><dd>{placementForPurpose(purpose)}</dd></div><div><dt>目标计划</dt><dd>{job.baseline_plan.plan_id} · editor r{job.editor_revision}</dd></div></dl>{needsAnchor ? <label className="studio-field"><span>插入到哪个事实步骤之后</span><select value={anchor} onChange={(event) => onAnchor(event.target.value)}>{anchors.map((stepID) => <option key={stepID} value={stepID}>{stepID}</option>)}</select></label> : null}<button className="studio-primary-button" disabled={Boolean(busy) || (needsAnchor && !anchor)} onClick={onApprove}>批准创建非事实轨补丁</button></section>;
 }
 
-function primaryAction(job: FinalFilmJob, client: ReturnType<typeof createFinalFilmClient>, run: (name: string, operation: () => Promise<Awaited<ReturnType<typeof client.get>>>) => Promise<void>, preferredProvider: "minimax-h3" | "seedance-2.0", onProvider: (provider: "minimax-h3" | "seedance-2.0") => void) {
+function primaryAction(job: FinalFilmJob, client: ReturnType<typeof createFinalFilmClient>, run: (name: string, operation: () => Promise<Awaited<ReturnType<typeof client.get>>>) => Promise<void>, preferredProvider: FinalFilmProvider, onProvider: (provider: FinalFilmProvider) => void) {
   if (job.state === "baseline_ready") return { title: "渲染事实轨基线", detail: "先完成无需任何视频模型的确定性基线；之后生成失败仍可交付它。", label: "渲染 baseline", run: () => run("baseline", () => client.renderBaseline(job.job_id)), secondary: null };
   if (job.state === "awaiting_generation_approval" && !job.director_plan) return { title: "Director 制定受控展示方案", detail: "模型只选择视觉风格、运动与色板枚举；服务端负责安全提示词、时长、比例和引用锁定。", label: "运行 Director 规划", run: () => run("director", () => client.planDirector(job.job_id, job.revision)), secondary: null };
   if (job.state === "awaiting_generation_approval" && job.director_plan) return { title: "生成费用与权限确认", detail: `Director 计划 ${job.director_plan.plan_id} 已锁定。只有点击批准后，Server 才能调用视频 Provider。`, label: "批准本次生成", run: () => run("authorize", () => client.decideGeneration(job.job_id, job.revision, true)), secondary: <button className="studio-ghost-button" onClick={() => void run("reject", () => client.decideGeneration(job.job_id, job.revision, false, "用户选择仅交付事实轨基线"))}>拒绝生成并使用 baseline</button> };
-  if (job.state === "generating_candidates") return { title: "执行视频候选生成", detail: "Server 将重新检查显式授权、幂等键、Provider capability 和输出目录；H3 还会检查价格预算，Seedance 还要求独立 final-film opt-in。", label: `开始真实 ${preferredProvider === "minimax-h3" ? "H3" : "Seedance 2.0"} workflow`, run: () => run("generate", () => client.generate(job.job_id, job.revision, preferredProvider)), secondary: <label className="studio-field"><span>本次 Provider</span><select value={preferredProvider} onChange={(event) => onProvider(event.target.value as "minimax-h3" | "seedance-2.0")}><option value="minimax-h3">MiniMax H3</option><option value="seedance-2.0">Seedance 2.0</option></select></label> };
+  if (job.state === "generating_candidates") return { title: "执行视频候选生成", detail: "Server 将重新检查显式授权、幂等键、Provider capability 和输出目录；H3 还会检查价格预算，Seedance 还要求独立 final-film opt-in。", label: `开始真实 ${preferredProvider === "minimax-h3" ? "H3" : "Seedance 2.5"} workflow`, run: () => run("generate", () => client.generate(job.job_id, job.revision, preferredProvider)), secondary: <label className="studio-field"><span>本次 Provider</span><select value={preferredProvider} onChange={(event) => onProvider(event.target.value as FinalFilmProvider)}><option value="minimax-h3">MiniMax H3</option><option value="seedance-2.5">Seedance 2.5</option></select></label> };
   return undefined;
 }
 

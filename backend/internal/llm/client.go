@@ -763,7 +763,11 @@ func (r *Router) shouldFallback(class string, err error) bool {
 	case config.LLMModeDeterministic:
 		return true
 	case config.LLMModeReal:
-		return class == errorClassJSONParse
+		// Real mode means the routed provider is attempted first; it must not
+		// turn an optional enrichment timeout into a total loss of the already
+		// constructed deterministic plan. Credential/configuration errors remain
+		// hard failures because they are not classified as transient here.
+		return class == errorClassJSONParse || r.policy.AllowsFallback(class, err)
 	default:
 		return r.policy.AllowsFallback(class, err)
 	}

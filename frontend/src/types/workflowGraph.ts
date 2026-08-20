@@ -31,6 +31,7 @@ export type GraphActionType =
   | "fill"
   | "select"
   | "upload"
+  | "press"
   | "wait"
   | "assert"
   | "inspect"

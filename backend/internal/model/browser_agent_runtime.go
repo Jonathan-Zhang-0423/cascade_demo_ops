@@ -488,9 +488,16 @@ type BrowserAgentValidationContext struct {
 	EffectivePolicyHashSHA256 string
 	AllowedDomains            []string
 	ForbiddenActions          []string
-	WorkflowGraph             *DemoWorkflowGraph
-	Plan                      *ExecutionScriptDocument
-	StageApprovalPlan         *StageApprovalPlan
-	ScriptOutline             *BrowserAgentScriptOutline
-	BrowserAgentContract      *BrowserAgentContract
+	// Readiness validation must see the same package-owned business summary and
+	// credential grant metadata that Intake approved. Omitting these fields can
+	// turn a valid secret reference into a false credential_grant_missing
+	// blocker before Chromium starts.
+	ProjectContextSummary ProjectContextSummary
+	ProductMapSummary     ProductMapSummary
+	CredentialGrants      []CredentialGrant
+	WorkflowGraph         *DemoWorkflowGraph
+	Plan                  *ExecutionScriptDocument
+	StageApprovalPlan     *StageApprovalPlan
+	ScriptOutline         *BrowserAgentScriptOutline
+	BrowserAgentContract  *BrowserAgentContract
 }

@@ -47,14 +47,16 @@ type Client struct {
 }
 
 type ContentGenerationTaskRequest struct {
-	Model           string        `json:"model,omitempty"`
-	Content         []ContentPart `json:"content,omitempty"`
-	Resolution      string        `json:"resolution,omitempty"`
-	Ratio           string        `json:"ratio,omitempty"`
-	Duration        int           `json:"duration,omitempty"`
-	GenerateAudio   bool          `json:"generate_audio"`
-	ReturnLastFrame bool          `json:"return_last_frame"`
-	Watermark       bool          `json:"watermark"`
+	Model                 string        `json:"model,omitempty"`
+	Content               []ContentPart `json:"content,omitempty"`
+	OmniReferenceTaskType string        `json:"omni_reference_task_type,omitempty"`
+	Resolution            string        `json:"resolution,omitempty"`
+	Ratio                 string        `json:"ratio,omitempty"`
+	Duration              int           `json:"duration,omitempty"`
+	GenerateAudio         bool          `json:"generate_audio"`
+	ReturnLastFrame       bool          `json:"return_last_frame"`
+	Watermark             bool          `json:"watermark"`
+	OutputFormat          string        `json:"output_format,omitempty"`
 }
 
 type ContentPart struct {

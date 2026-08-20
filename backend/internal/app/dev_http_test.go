@@ -661,7 +661,7 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payload) > 256*1024 {
+	if len(payload) > 240*1024 {
 		t.Fatalf("outline upload package too large: %d bytes", len(payload))
 	}
 	if build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.AssessmentHash == "" || build.ApprovalSubjectDigestSHA256 == "" || build.SizeReport.TotalBytes == 0 {
@@ -669,6 +669,179 @@ func TestBuildClientExecutionPackageUsesMinimalBrowserAgentOutlinePayload(t *tes
 	}
 	if build.Package.WorkflowGraph.Intent == nil || build.Package.WorkflowGraph.Assets == nil {
 		t.Fatalf("compact workflow graph lost director intent or assets: %+v", build.Package.WorkflowGraph)
+	}
+}
+
+func TestBrowserAgentUploadViewCompactsInvestigationTraceAndRedundantRoutes(t *testing.T) {
+	questions := []model.InvestigationQuestionRef{
+		{
+			ID:              "question_result",
+			IntentLabel:     strings.Repeat("result ", 20),
+			Status:          "answered",
+			EvidenceSummary: strings.Repeat("confirmed source evidence ", 20),
+			RemainingGaps:   []string{"first gap", "second gap", "third gap"},
+			NextActions:     []model.CodeInvestigationNextAction{{Tool: "code_search", Reason: strings.Repeat("detail ", 40)}},
+			ToolCallIDs:     []string{"tool_1", "tool_2"},
+			Confidence:      0.93,
+		},
+	}
+	routes := []model.BrowserAgentRouteCandidate{{Route: "/project/:id", EvidenceRefs: []model.EvidenceRef{{ID: "ev_route", Summary: strings.Repeat("route ", 50)}}}}
+	plan := &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+		EntryRoute: "/project/:id", CandidateRoutes: routes, InvestigationQuestionRefs: questions,
+	}}}
+	outline := &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{
+		Route: "/project/:id", CandidateRoutes: routes, InvestigationQuestionRefs: questions,
+	}}}
+
+	compactStageApprovalPlanForUpload(plan)
+	compactBrowserAgentOutlineForUpload(outline)
+
+	for name, refs := range map[string][]model.InvestigationQuestionRef{
+		"stage plan": plan.Stages[0].InvestigationQuestionRefs,
+		"outline":    outline.Stages[0].InvestigationQuestionRefs,
+	} {
+		if len(refs) != 1 || refs[0].ID != "question_result" || refs[0].Status != "answered" || refs[0].Confidence != 0.93 {
+			t.Fatalf("%s lost compact investigation identity: %+v", name, refs)
+		}
+		if refs[0].NextActions != nil || refs[0].ToolCallIDs != nil || len(refs[0].RemainingGaps) != 1 || len([]rune(refs[0].EvidenceSummary)) > 100 {
+			t.Fatalf("%s retained oversized local investigation trace: %+v", name, refs[0])
+		}
+	}
+	if plan.Stages[0].CandidateRoutes != nil || outline.Stages[0].CandidateRoutes != nil {
+		t.Fatalf("fixed routes must not duplicate candidate routes in upload view: plan=%+v outline=%+v", plan.Stages[0].CandidateRoutes, outline.Stages[0].CandidateRoutes)
+	}
+}
+
+func TestCompactScriptStepPromotesMatchingFormalValidationSelector(t *testing.T) {
+	observedAt := time.Now().UTC()
+	candidate := model.SelectorCandidate{
+		Kind: "testid", Value: "preview-iframe", EvidenceID: "ev_preview", SourceKind: "source_scan",
+		SourceDigest: "sha256:preview", ObservedRole: "iframe", ObservedAccessibleName: "Preview",
+		ObservedAt: &observedAt, EvidenceRefs: []model.EvidenceRef{{ID: "ev_preview", Kind: model.EvidenceKindSourceCode}},
+	}
+	step := model.ScriptStep{
+		Action: model.ScriptActionInstruction{Type: model.GraphActionPress, Target: model.ActionTarget{
+			Selector: "[data-testid='preview-iframe']", TestID: "preview-iframe",
+		}},
+		Validations: []model.ValidationSpec{{Required: true, Target: model.ActionTarget{SelectorAlternatives: []model.SelectorCandidate{candidate}}}},
+	}
+
+	compactScriptStepForUpload(&step)
+
+	if len(step.Action.Target.SelectorAlternatives) != 1 || step.Action.Target.SelectorAlternatives[0].EvidenceID != "ev_preview" {
+		t.Fatalf("matching formal validation selector was not promoted to the action target: %+v", step.Action.Target.SelectorAlternatives)
+	}
+}
+
+func TestOutlineUploadKeepsTwoStepAuthenticationProvenance(t *testing.T) {
+	observedAt := time.Now().UTC()
+	refEntry := model.EvidenceRef{ID: "ev_email_method", Kind: model.EvidenceKindBrowserScan}
+	refSubmit := model.EvidenceRef{ID: "ev_login_submit", Kind: model.EvidenceKindBrowserScan}
+	candidate := func(value, evidenceID, name, pageRole, formRole string, ref model.EvidenceRef) model.SelectorCandidate {
+		return model.SelectorCandidate{
+			Kind: "css", Value: value, EvidenceID: evidenceID, SourceKind: "page_scan", SourceDigest: "sha256:" + evidenceID,
+			ObservedRole: "button", ObservedAccessibleName: name, ObservedURL: "https://app.example.com/login",
+			ObservedPageRole: pageRole, ObservedFormRole: formRole, EvidenceDigestSHA256: "sha256:" + evidenceID,
+			ObservedAt: &observedAt, EvidenceRefs: []model.EvidenceRef{ref},
+		}
+	}
+	entry := candidate("button[type='button']", refEntry.ID, "邮箱登录", "product", "none", refEntry)
+	submit := candidate("button[type='submit']", refSubmit.ID, "登录", "authentication", "authentication", refSubmit)
+	outline := &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{
+		StageKind: model.BusinessStageKindSessionSetup,
+		Components: []model.BrowserAgentComponentTarget{{
+			SelectorAlternatives: []model.SelectorCandidate{entry, submit}, EvidenceRefs: []model.EvidenceRef{refEntry, refSubmit},
+		}},
+		Interactions: []model.BrowserAgentInteraction{{Target: model.ActionTarget{
+			SelectorAlternatives: []model.SelectorCandidate{entry, submit}, EvidenceRefs: []model.EvidenceRef{refEntry, refSubmit},
+		}}},
+	}}}
+
+	compactBrowserAgentOutlineForUpload(outline)
+	bound := evidenceBoundSelectorCandidates(outline.Stages[0].Components, outline.Stages[0].Interactions)
+
+	if len(bound) != 2 {
+		t.Fatalf("two-step authentication provenance was not retained: %+v", bound)
+	}
+	foundSubmit := false
+	for _, item := range bound {
+		foundSubmit = foundSubmit || item.ObservedPageRole == "authentication" && item.ObservedFormRole == "authentication"
+	}
+	if !foundSubmit {
+		t.Fatalf("authentication form submit provenance is missing: %+v", bound)
+	}
+}
+
+func TestBrowserAgentPreflightAcceptsPlayableAndKeyboardValidations(t *testing.T) {
+	tests := []model.ScriptStep{
+		{
+			NodeID: "business_stage_playable_preview", StageKind: model.BusinessStageKindFinalObserve,
+			Action:      model.ScriptActionInstruction{Type: model.GraphActionInspect},
+			Validations: []model.ValidationSpec{{Kind: "playable_surface_visible", Expected: true, Required: true}},
+		},
+		{
+			NodeID: "business_stage_verify_playable_controls", StageKind: model.BusinessStageKindFinalObserve,
+			Action:      model.ScriptActionInstruction{Type: model.GraphActionPress},
+			Validations: []model.ValidationSpec{{Kind: "page_changed", Expected: true, Required: true}},
+		},
+	}
+	for _, step := range tests {
+		if !browserAgentStepNeedsValidation(step) || !browserAgentStepHasRequiredValidation(step) {
+			t.Fatalf("playable browser-agent step must pass required-validation preflight: %+v", step)
+		}
+	}
+}
+
+func TestScriptDocumentTreatsOnlyBoundedVerifiedKeyboardPlayAsBusinessAction(t *testing.T) {
+	valid := model.ScriptStep{
+		NodeID: "business_stage_verify_playable_controls", NonDestructive: true,
+		Action: model.ScriptActionInstruction{Type: model.GraphActionPress, Parameters: map[string]any{
+			"keys": "ArrowLeft,ArrowRight,ArrowDown,ArrowUp",
+		}},
+		Validations: []model.ValidationSpec{{Kind: "page_changed", Expected: true, Required: true}},
+	}
+	if !scriptDocumentHasBusinessAction(&model.ExecutionScriptDocument{Steps: []model.ScriptStep{valid}}) {
+		t.Fatal("bounded gameplay keyboard verification was not accepted as a real business action")
+	}
+	invalidKey := valid
+	invalidKey.Action.Parameters = map[string]any{"keys": "Control+L"}
+	if scriptDocumentHasBusinessAction(&model.ExecutionScriptDocument{Steps: []model.ScriptStep{invalidKey}}) {
+		t.Fatal("arbitrary keyboard shortcut was accepted as a real business action")
+	}
+	missingEvidence := valid
+	missingEvidence.Validations = nil
+	if scriptDocumentHasBusinessAction(&model.ExecutionScriptDocument{Steps: []model.ScriptStep{missingEvidence}}) {
+		t.Fatal("keyboard action without required visual-change evidence was accepted")
+	}
+}
+
+func TestBusinessStagePreflightCountsVerifiedFinalKeyboardPlayAsCoreAction(t *testing.T) {
+	step := model.ScriptStep{
+		NodeID: "business_stage_verify_playable_controls", StageKind: model.BusinessStageKindFinalObserve, NonDestructive: true,
+		Action: model.ScriptActionInstruction{Type: model.GraphActionPress, Parameters: map[string]any{
+			"keys": "ArrowLeft,ArrowRight,ArrowDown,ArrowUp",
+		}},
+		Validations: []model.ValidationSpec{{Kind: "page_changed", Expected: true, Required: true}},
+	}
+	bundle := &model.ExecutableRecordingScriptBundle{
+		PlanJSON: &model.ExecutionScriptDocument{Steps: []model.ScriptStep{step}},
+		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+			NodeID: step.NodeID, StageKind: model.BusinessStageKindFinalObserve,
+			Interaction: model.BrowserAgentInteraction{Kind: model.GraphActionPress, Parameters: step.Action.Parameters, NonDestructive: true},
+		}}},
+	}
+	for _, finding := range preflightBusinessStageKinds(bundle) {
+		if finding.ID == "business_stage_missing" {
+			t.Fatalf("verified gameplay keyboard action was rejected as observation-only: %+v", finding)
+		}
+	}
+	bundle.StageApprovalPlan.Stages[0].Interaction.Parameters = map[string]any{"keys": "Control+L"}
+	foundMissing := false
+	for _, finding := range preflightBusinessStageKinds(bundle) {
+		foundMissing = foundMissing || finding.ID == "business_stage_missing"
+	}
+	if !foundMissing {
+		t.Fatal("arbitrary keyboard shortcut was counted as a core business stage")
 	}
 }
 

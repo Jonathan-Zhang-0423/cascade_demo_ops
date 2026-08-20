@@ -64,7 +64,7 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 				return &OutlineConsistencyError{Code: "authentication_context_unverified", NodeID: step.NodeID, Reason: "does not prove an authentication page and password-bearing authentication form, or includes marketing email semantics"}
 			}
 			if !stageHasLoginSuccessValidation(step, stage, outline) {
-				return &OutlineConsistencyError{Code: "login_success_validation_missing", NodeID: step.NodeID, Reason: "requires both a post-login route assertion and an authenticated workspace element assertion"}
+				return &OutlineConsistencyError{Code: "login_success_validation_missing", NodeID: step.NodeID, Reason: "requires a post-login route assertion bound to formal browser-scan evidence, or that route plus a formally observed authenticated-page element assertion"}
 			}
 		}
 		if step.RuntimeAdaptive {
@@ -402,29 +402,50 @@ func stageHasVerifiedAuthenticationContext(step ScriptStep, stage StageApprovalS
 
 func stageHasLoginSuccessValidation(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) bool {
 	authRoute := firstNonEmptyOutlineRoute(step.PageTarget.URL, stage.EntryRoute, outline.Route)
-	hasPostLoginRoute := false
-	hasWorkspaceState := false
 	for _, validation := range step.Validations {
-		if !validation.Required {
+		if !validation.Required || validation.Kind != "url_matches" {
 			continue
 		}
-		if validation.Kind == "url_matches" {
-			target := strings.TrimSpace(validation.Target.URL)
-			if target == "" {
-				if expected, ok := validation.Expected.(string); ok {
-					target = strings.TrimSpace(expected)
-				}
+		target := strings.TrimSpace(validation.Target.URL)
+		if target == "" {
+			if expected, ok := validation.Expected.(string); ok {
+				target = strings.TrimSpace(expected)
 			}
-			if target != "" && authRoute != "" && !routesEquivalent(target, authRoute) {
-				hasPostLoginRoute = true
-			}
+		}
+		if target == "" || authRoute == "" || routesEquivalent(target, authRoute) {
 			continue
 		}
-		if validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != "" {
-			hasWorkspaceState = true
+		if evidenceRefsIncludeFormalBrowserScan(validation.EvidenceRefs) || stageHasFormallyObservedPostLoginElement(step, target) {
+			return true
 		}
 	}
-	return hasPostLoginRoute && hasWorkspaceState
+	return false
+}
+
+func evidenceRefsIncludeFormalBrowserScan(refs []EvidenceRef) bool {
+	for _, ref := range refs {
+		if ref.Kind == EvidenceKindBrowserScan && strings.TrimSpace(ref.ID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func stageHasFormallyObservedPostLoginElement(step ScriptStep, postLoginRoute string) bool {
+	for _, validation := range step.Validations {
+		if !validation.Required || validation.Kind == "url_matches" {
+			continue
+		}
+		for _, candidate := range validation.Target.SelectorAlternatives {
+			if candidate.SourceKind != "page_scan" || !SelectorCandidateHasFormalProvenance(candidate) {
+				continue
+			}
+			if candidate.ObservedURL != "" && routesEquivalent(candidate.ObservedURL, postLoginRoute) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func marketingAuthenticationName(value string) bool {
@@ -615,7 +636,51 @@ func runtimeAdaptiveTargetDiscoverable(step ScriptStep, stage StageApprovalStage
 	hasSemanticHints := contract != nil && (len(contract.AllowedRoles) > 0 || len(contract.AllowedNames) > 0 || strings.TrimSpace(contract.ComponentRef) != "")
 	hasRoute := step.Action.Type == GraphActionNavigate && (target.URL != "" || step.PageTarget.URL != "")
 	hasRoute = hasRoute || stage.EntryRoute != "" || stage.TargetRoute != "" || stage.TargetRouteTemplate != "" || len(stage.CandidateRoutes) > 0
+	if step.Action.Type == GraphActionPress {
+		return hasRoute && approvedKeyboardActionParameters(step.Action.Parameters)
+	}
 	return hasRoute && (hasLocator || hasSemanticHints || step.Action.Type == GraphActionNavigate)
+}
+
+func approvedKeyboardActionParameters(parameters map[string]any) bool {
+	raw, ok := parameters["keys"]
+	if !ok {
+		return false
+	}
+	keys := []string{}
+	switch value := raw.(type) {
+	case string:
+		keys = strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' || r == ' ' })
+	case []string:
+		keys = append(keys, value...)
+	case []any:
+		for _, item := range value {
+			text, ok := item.(string)
+			if !ok {
+				return false
+			}
+			keys = append(keys, text)
+		}
+	default:
+		return false
+	}
+	if len(keys) == 0 || len(keys) > 8 {
+		return false
+	}
+	allowed := map[string]bool{"ArrowLeft": true, "ArrowRight": true, "ArrowDown": true, "ArrowUp": true}
+	for _, key := range keys {
+		if !allowed[strings.TrimSpace(key)] {
+			return false
+		}
+	}
+	return true
+}
+
+// ApprovedKeyboardActionParameters exposes the same bounded arrow-key policy
+// to package gates so an evidence-backed gameplay verification is treated as
+// a real business action without admitting arbitrary keyboard shortcuts.
+func ApprovedKeyboardActionParameters(parameters map[string]any) bool {
+	return approvedKeyboardActionParameters(parameters)
 }
 
 func validRuntimeAdaptiveCapturePlan(plan *BrowserAgentCapturePlan) bool {
@@ -639,7 +704,7 @@ func stepHasDeterministicBrowserAgentValidation(step ScriptStep) bool {
 		hasTarget := validation.Target.URL != "" || validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != ""
 		hasExpected := strings.TrimSpace(validation.Assertion) != "" || validation.Expected != nil
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
 			if hasTarget || hasExpected {
 				return true
 			}
@@ -668,7 +733,7 @@ func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool 
 	hasTarget := validation.Target.URL != "" || validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != ""
 	hasExpected := strings.TrimSpace(validation.Assertion) != "" || validation.Expected != nil
 	switch validation.Kind {
-	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
 		return hasTarget || hasExpected
 	default:
 		return false
@@ -676,6 +741,9 @@ func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool 
 }
 
 func validationProvesBusinessOutcome(step ScriptStep, validation ValidationSpec) bool {
+	if step.Action.Type == GraphActionPress {
+		return validation.Kind == "page_changed" && validation.Expected == true && approvedKeyboardActionParameters(step.Action.Parameters)
+	}
 	if step.StageKind == BusinessStageKindBusinessInput || (step.Action.Type == GraphActionFill && step.StageKind != BusinessStageKindSessionSetup) {
 		if validation.Kind != "value_equals" {
 			return false

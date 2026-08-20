@@ -28,6 +28,9 @@ func validateFormalResultArtifactContents(result model.RecordingResultPackage, s
 	if err := validateFormalResultExecutionBindings(result, source, uploaded); err != nil {
 		return err
 	}
+	if err := validateDualDeliveryArtifacts(result, source, uploaded); err != nil {
+		return err
+	}
 	if err := validateStageEventLogContents(result, source, uploaded); err != nil {
 		return err
 	}
@@ -39,6 +42,134 @@ func validateFormalResultArtifactContents(result model.RecordingResultPackage, s
 		if err := validateValidationRunReportContents(result, source, manifest, uploaded); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateDualDeliveryArtifacts(result model.RecordingResultPackage, source model.ClientExecutionPackage, uploaded map[string]artifactRecord) error {
+	if !source.RecordingRunSpec.Outputs.FinalVideo || !model.RequiresDualMediaDelivery(&source) {
+		return nil
+	}
+	for _, requirement := range []struct {
+		kind string
+		mime string
+		name string
+	}{
+		{kind: "final_video_final_master_2k", mime: "video/mp4", name: "2K final MP4"},
+		{kind: "final_video_final_delivery_1080p", mime: "video/mp4", name: "1080p final MP4"},
+		{kind: "deliverables_manifest", mime: "application/json", name: "deliverables manifest"},
+	} {
+		artifact, ok := findResultArtifactByKind(result, requirement.kind)
+		if !ok {
+			return fmt.Errorf("result is missing required %s", requirement.name)
+		}
+		upload, ok := uploaded[artifact.ID]
+		if !ok || !strings.EqualFold(strings.TrimSpace(upload.Artifact.MimeType), requirement.mime) {
+			return fmt.Errorf("required %s was not uploaded with the expected MIME type", requirement.name)
+		}
+	}
+	manifest, ok := findResultArtifactByKind(result, "deliverables_manifest")
+	if !ok {
+		return fmt.Errorf("result is missing required deliverables manifest")
+	}
+	record, ok := uploaded[manifest.ID]
+	if !ok {
+		return fmt.Errorf("deliverables manifest upload is missing")
+	}
+	return validateDualDeliveryManifest(record)
+}
+
+type dualDeliveryManifest struct {
+	SchemaVersion    string                     `json:"schema_version"`
+	Status           string                     `json:"status"`
+	RequiredProfiles []dualDeliveryProfile      `json:"required_profiles"`
+	Deliverables     []dualDeliveryManifestItem `json:"deliverables"`
+}
+
+type dualDeliveryProfile struct {
+	ID     string `json:"id"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	FPS    int    `json:"fps"`
+	Format string `json:"format"`
+}
+
+type dualDeliveryManifestItem struct {
+	ID        string              `json:"id"`
+	Status    string              `json:"status"`
+	Profile   dualDeliveryProfile `json:"profile"`
+	SHA256    string              `json:"sha256"`
+	SizeBytes int64               `json:"size_bytes"`
+}
+
+func validateDualDeliveryManifest(record artifactRecord) error {
+	data, err := readStructuredResultArtifact(record)
+	if err != nil {
+		return fmt.Errorf("deliverables manifest cannot be read: %w", err)
+	}
+	var manifest dualDeliveryManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("deliverables manifest contains invalid JSON: %w", err)
+	}
+	if manifest.SchemaVersion != "demoops.deliverables_manifest.v1" || !strings.EqualFold(strings.TrimSpace(manifest.Status), "complete") {
+		return fmt.Errorf("deliverables manifest schema or completion status is invalid")
+	}
+	expected := requiredDualDeliveryManifestProfiles()
+	if err := validateDualDeliveryProfileSet(manifest.RequiredProfiles, expected, "required_profiles"); err != nil {
+		return err
+	}
+	if len(manifest.Deliverables) != len(expected) {
+		return fmt.Errorf("deliverables manifest must contain exactly %d deliverables", len(expected))
+	}
+	seen := map[string]bool{}
+	for _, item := range manifest.Deliverables {
+		if seen[item.ID] {
+			return fmt.Errorf("deliverables manifest contains duplicate deliverable %q", safeSegment(item.ID))
+		}
+		seen[item.ID] = true
+		if !strings.EqualFold(strings.TrimSpace(item.Status), "complete") || len(strings.TrimSpace(item.SHA256)) != 64 || item.SizeBytes <= 0 {
+			return fmt.Errorf("deliverables manifest deliverable %q is incomplete or lacks checksum metadata", safeSegment(item.ID))
+		}
+		if err := validateOneDualDeliveryProfile(item.Profile, item.ID, expected, "deliverable"); err != nil {
+			return err
+		}
+	}
+	for id := range expected {
+		if !seen[id] {
+			return fmt.Errorf("deliverables manifest is missing required deliverable %q", id)
+		}
+	}
+	return nil
+}
+
+func requiredDualDeliveryManifestProfiles() map[string]dualDeliveryProfile {
+	return map[string]dualDeliveryProfile{
+		model.MediaOutputProfileMaster2K:     {ID: model.MediaOutputProfileMaster2K, Width: 2560, Height: 1440, FPS: 30, Format: "mp4"},
+		model.MediaOutputProfileDelivery1080: {ID: model.MediaOutputProfileDelivery1080, Width: 1920, Height: 1080, FPS: 30, Format: "mp4"},
+	}
+}
+
+func validateDualDeliveryProfileSet(profiles []dualDeliveryProfile, expected map[string]dualDeliveryProfile, field string) error {
+	if len(profiles) != len(expected) {
+		return fmt.Errorf("deliverables manifest %s must contain exactly %d profiles", field, len(expected))
+	}
+	seen := map[string]bool{}
+	for _, profile := range profiles {
+		if seen[profile.ID] {
+			return fmt.Errorf("deliverables manifest %s contains duplicate profile %q", field, safeSegment(profile.ID))
+		}
+		seen[profile.ID] = true
+		if err := validateOneDualDeliveryProfile(profile, profile.ID, expected, field); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateOneDualDeliveryProfile(profile dualDeliveryProfile, id string, expected map[string]dualDeliveryProfile, field string) error {
+	want, ok := expected[id]
+	if !ok || profile.ID != id || profile.Width != want.Width || profile.Height != want.Height || profile.FPS != want.FPS || !strings.EqualFold(strings.TrimSpace(profile.Format), want.Format) {
+		return fmt.Errorf("deliverables manifest %s profile is invalid for %q", field, safeSegment(id))
 	}
 	return nil
 }

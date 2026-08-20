@@ -36,11 +36,16 @@ type worker struct {
 	runTimeout time.Duration
 }
 
+const (
+	workerHTTPTimeout         = 15 * time.Minute
+	workerFinalizationTimeout = 20 * time.Minute
+)
+
 func main() {
 	baseURL := flag.String("gateway-url", env("CASCADE_DIRECT_WORKER_GATEWAY_URL", "http://127.0.0.1:18444"), "loopback gateway Worker API")
 	outputRoot := flag.String("output-root", env("CASCADE_DIRECT_WORKER_OUTPUT_ROOT", "/var/lib/cascade-browser-agent/worker"), "ephemeral Browser Agent output root")
 	poll := flag.Duration("poll-interval", envDuration("CASCADE_DIRECT_WORKER_POLL_INTERVAL", 2*time.Second), "job poll interval")
-	runTimeout := flag.Duration("run-timeout", envDuration("CASCADE_DIRECT_WORKER_RUN_TIMEOUT", 20*time.Minute), "maximum runtime per job")
+	runTimeout := flag.Duration("run-timeout", envDuration("CASCADE_DIRECT_WORKER_RUN_TIMEOUT", 45*time.Minute), "maximum runtime per job")
 	flag.Parse()
 	parsed, err := url.Parse(strings.TrimRight(*baseURL, "/"))
 	must(err)
@@ -64,7 +69,7 @@ func main() {
 	runtimeConfig.LogRoot = filepath.Join(root, "logs")
 	service, err := app.NewService(runtimeConfig, store.NewFileStateStore(filepath.Join(runtimeConfig.DataRoot, "projects")))
 	must(err)
-	runner := &worker{service: service, client: &http.Client{Timeout: 2 * time.Minute}, baseURL: strings.TrimRight(*baseURL, "/"), token: token, outputRoot: root, poll: *poll, runTimeout: *runTimeout}
+	runner := &worker{service: service, client: &http.Client{Timeout: workerHTTPTimeout}, baseURL: strings.TrimRight(*baseURL, "/"), token: token, outputRoot: root, poll: *poll, runTimeout: *runTimeout}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	fmt.Fprintln(os.Stdout, "Cascade Browser Agent direct worker started; gateway=loopback")
@@ -140,18 +145,31 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 		fmt.Fprintln(os.Stderr, "execution failed job=", safeID(job.JobID), "class=browser_agent_execution_failed")
 		return
 	}
+	finalizeCtx, finalizeCancel := workerFinalizationContext(parent)
+	defer finalizeCancel()
 	for _, file := range files {
-		if err := w.uploadArtifact(ctx, job.JobID, file); err != nil {
-			fmt.Fprintln(os.Stderr, "artifact upload failed job=", safeID(job.JobID), "class=artifact_upload_failed")
+		if err := w.uploadArtifact(finalizeCtx, job.JobID, file); err != nil {
+			fmt.Fprintln(os.Stderr, "artifact upload failed job=", safeID(job.JobID), "artifact=", safeID(file.Artifact.ID), "size_bytes=", file.Artifact.SizeBytes, "class=artifact_upload_failed", "gateway_code=", gatewayErrorCode(err))
 			return
 		}
 	}
-	if err := w.submitResult(ctx, job.JobID, result); err != nil {
-		fmt.Fprintln(os.Stderr, "result submit failed job=", safeID(job.JobID), "class=result_submit_failed")
+	if err := w.submitResult(finalizeCtx, job.JobID, result); err != nil {
+		diagnosticCode := "none"
+		if result.FailureDiagnostic != nil {
+			diagnosticCode = safeID(result.FailureDiagnostic.Error.Code)
+		}
+		fmt.Fprintln(os.Stderr, "result submit failed job=", safeID(job.JobID), "class=result_submit_failed", "gateway_code=", gatewayErrorCode(err), "result_status=", safeID(string(result.Status)), "diagnostic_code=", diagnosticCode)
 		return
 	}
 	completed = true
 	fmt.Fprintln(os.Stdout, "job completed job=", safeID(job.JobID), "artifacts=", len(files))
+}
+
+func workerFinalizationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	// Execution may legitimately consume its full budget while producing a
+	// structured failure package. Detach cancellation for the bounded result
+	// handoff so an expired browser context cannot make the diagnostic vanish.
+	return context.WithTimeout(context.WithoutCancel(parent), workerFinalizationTimeout)
 }
 
 func (w *worker) release(ctx context.Context, jobID, reason string) error {
@@ -262,7 +280,39 @@ func (w *worker) request(ctx context.Context, method, path string, body io.Reade
 
 func responseError(response *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	return fmt.Errorf("worker gateway HTTP %d: %s", response.StatusCode, redactError(errors.New(string(data))))
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(data, &payload)
+	return &workerGatewayError{status: response.StatusCode, code: safeID(payload.Error.Code)}
+}
+
+type workerGatewayError struct {
+	status int
+	code   string
+}
+
+func (e *workerGatewayError) Error() string {
+	return fmt.Sprintf("worker gateway HTTP %d code=%s", e.status, firstNonEmptyWorker(e.code, "unknown"))
+}
+
+func gatewayErrorCode(err error) string {
+	var gatewayErr *workerGatewayError
+	if errors.As(err, &gatewayErr) {
+		return firstNonEmptyWorker(gatewayErr.code, "unknown")
+	}
+	return "network_error"
+}
+
+func firstNonEmptyWorker(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 func clearCredentialMap(values map[string]model.DirectCredentialValue) {
 	for key, value := range values {

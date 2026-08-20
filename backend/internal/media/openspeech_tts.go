@@ -1,10 +1,12 @@
 package media
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +26,7 @@ import (
 
 const (
 	defaultOpenSpeechTTSBaseURL     = "https://openspeech.bytedance.com"
+	defaultOpenSpeechTTSPlanURL     = "https://openspeech.bytedance.com/api/v3/plan/tts/unidirectional"
 	openSpeechTTSSubmitPath         = "/api/v3/tts/submit?Action=SubmitAsyncTtsTask&Version=2022-01-01"
 	openSpeechTTSQueryPath          = "/api/v3/tts/query?Action=QueryAsyncTtsResult&Version=2022-01-01"
 	openSpeechTTSSuccessCode        = 20000000
@@ -32,8 +35,10 @@ const (
 
 type openSpeechTTSConfig struct {
 	BaseURL         string
+	AgentPlanURL    string
 	AppID           string
 	AccessKey       string
+	AgentPlanAPIKey string
 	ResourceID      string
 	DefaultSpeaker  string
 	OutputDir       string
@@ -44,18 +49,22 @@ type openSpeechTTSConfig struct {
 }
 
 type openSpeechTTSRequest struct {
-	User struct {
-		UID string `json:"uid"`
-	} `json:"user"`
+	User      openSpeechTTSUser              `json:"user"`
 	UniqueID  string                         `json:"unique_id"`
 	ReqParams openSpeechTTSRequestParameters `json:"req_params"`
+}
+
+type openSpeechTTSUser struct {
+	UID string `json:"uid"`
 }
 
 type openSpeechTTSRequestParameters struct {
 	Text        string                   `json:"text"`
 	Speaker     string                   `json:"speaker"`
 	AudioParams openSpeechTTSAudioParams `json:"audio_params"`
-	Additions   map[string]any           `json:"additions,omitempty"`
+	// OpenSpeech TTS v3 accepts additions as a JSON-encoded string. Sending a
+	// JSON object yields provider code 55000000 (map-to-string conversion).
+	Additions string `json:"additions,omitempty"`
 }
 
 type openSpeechTTSAudioParams struct {
@@ -64,6 +73,7 @@ type openSpeechTTSAudioParams struct {
 	SpeechRate      int    `json:"speech_rate"`
 	LoudnessRate    int    `json:"loudness_rate"`
 	EnableTimestamp bool   `json:"enable_timestamp"`
+	EnableSubtitle  bool   `json:"enable_subtitle"`
 }
 
 type openSpeechTTSResponse struct {
@@ -82,8 +92,10 @@ type openSpeechTTSResultData struct {
 
 type openSpeechTTSSentence struct {
 	Text      string  `json:"text,omitempty"`
+	BeginTime float64 `json:"begin_time,omitempty"`
+	EndTime   float64 `json:"end_time,omitempty"`
 	StartTime float64 `json:"startTime,omitempty"`
-	EndTime   float64 `json:"endTime,omitempty"`
+	LegacyEnd float64 `json:"endTime,omitempty"`
 }
 
 type audioProbeResult struct {
@@ -95,9 +107,14 @@ type audioProbeResult struct {
 
 func openSpeechTTSConfigFromEnv(runtime config.AppRuntimeConfig) openSpeechTTSConfig {
 	return openSpeechTTSConfig{
-		BaseURL:         envDefault("VOLC_TTS_BASE_URL", defaultOpenSpeechTTSBaseURL),
-		AppID:           strings.TrimSpace(os.Getenv("VOLC_TTS_APP_ID")),
-		AccessKey:       strings.TrimSpace(os.Getenv("VOLC_TTS_ACCESS_KEY")),
+		BaseURL:      envDefault("VOLC_TTS_BASE_URL", defaultOpenSpeechTTSBaseURL),
+		AgentPlanURL: envDefault("VOLC_TTS_AGENT_PLAN_BASE_URL", defaultOpenSpeechTTSPlanURL),
+		AppID:        strings.TrimSpace(os.Getenv("VOLC_TTS_APP_ID")),
+		AccessKey:    strings.TrimSpace(os.Getenv("VOLC_TTS_ACCESS_KEY")),
+		// The existing local setup uses VOLC_TTS_ACCESS_KEY for the Agent Plan
+		// key. Prefer the explicit name, but accept that alias without ever
+		// sending legacy X-Api-Access-Key headers.
+		AgentPlanAPIKey: firstNonEmpty(os.Getenv("VOLC_TTS_AGENT_PLAN_API_KEY"), os.Getenv("VOLC_TTS_ACCESS_KEY")),
 		ResourceID:      envDefault("VOLC_TTS_RESOURCE_ID", "seed-tts-2.0"),
 		DefaultSpeaker:  strings.TrimSpace(os.Getenv("VOLC_TTS_SPEAKER")),
 		OutputDir:       envDefault("CASCADE_TTS_OUTPUT_DIR", filepath.Join(runtime.ArtifactRoot, "audio-model", "tts-candidates")),
@@ -113,89 +130,160 @@ func (c *AudioClient) processDoubaoTTS(ctx context.Context, request AudioModelIn
 		trace.ErrorClass = classifyTTSConfigError(err)
 		return nil, trace, err
 	}
+	return c.processDoubaoAgentPlanTTS(ctx, request, trace)
+}
+
+// processDoubaoAgentPlanTTS is the only real TTS route. The older task API
+// remains below only to preserve historical fixtures; it is never a billing
+// fallback because Agent Plan credentials and endpoints are distinct.
+func (c *AudioClient) processDoubaoAgentPlanTTS(ctx context.Context, request AudioModelInput, trace ArkMediaCallTrace) (*AudioModelProviderResponse, ArkMediaCallTrace, error) {
 	requestID, err := randomOpaqueID("tts")
 	if err != nil {
 		trace.ErrorClass = "request_id_failed"
 		return nil, trace, err
 	}
-	body := openSpeechTTSRequest{UniqueID: requestID}
-	body.User.UID = "cascade-server"
-	body.ReqParams = openSpeechTTSRequestParameters{
-		Text:    request.Text,
-		Speaker: firstNonEmpty(request.VoiceID, c.tts.DefaultSpeaker),
-		AudioParams: openSpeechTTSAudioParams{
-			Format:          firstNonEmpty(request.OutputFormat, "mp3"),
-			SampleRate:      positiveOrDefault(request.SampleRateHZ, 24000),
-			SpeechRate:      speechRateForTTS(request.Speed),
-			LoudnessRate:    boundedOptionInt(request.Options, "loudness_rate", 0, -50, 100),
-			EnableTimestamp: true,
-		},
-		Additions: map[string]any{"silence_duration": boundedOptionInt(request.Options, "silence_duration", 300, 0, 3000)},
+	additions, err := json.Marshal(map[string]int{"silence_duration": boundedOptionInt(request.Options, "silence_duration", 0, 0, 3000)})
+	if err != nil {
+		trace.ErrorClass = "request_marshal_failed"
+		return nil, trace, err
 	}
-
-	submitEndpoint := openSpeechEndpoint(c.tts.BaseURL, openSpeechTTSSubmitPath)
-	trace = newTrace(c.mode, config.ModelProviderDoubao, c.tts.ResourceID, http.MethodPost, submitEndpoint)
-	var submit openSpeechTTSResponse
-	trace, err = c.doOpenSpeechTTSJSON(ctx, submitEndpoint, requestID, body, &submit, trace)
+	body := openSpeechTTSRequest{
+		User:     openSpeechTTSUser{UID: "server-" + requestID},
+		UniqueID: requestID,
+		ReqParams: openSpeechTTSRequestParameters{
+			Text:    request.Text,
+			Speaker: firstNonEmpty(request.VoiceID, c.tts.DefaultSpeaker),
+			AudioParams: openSpeechTTSAudioParams{
+				Format:         firstNonEmpty(request.OutputFormat, "mp3"),
+				SampleRate:     positiveOrDefault(request.SampleRateHZ, 24000),
+				SpeechRate:     speechRateForTTS(request.Speed),
+				LoudnessRate:   boundedOptionInt(request.Options, "loudness_rate", 0, -50, 100),
+				EnableSubtitle: true,
+			},
+			Additions: string(additions),
+		},
+	}
+	trace = newTrace(c.mode, config.ModelProviderDoubao, c.tts.ResourceID, http.MethodPost, c.tts.AgentPlanURL)
+	output, transcript, trace, err := c.doOpenSpeechAgentPlanChunked(ctx, requestID, body, trace)
 	if err != nil {
 		return nil, trace, err
 	}
-	if err := validateOpenSpeechTTSResponse(submit); err != nil {
-		trace.ErrorClass = "provider_submit_failed"
-		return nil, trace, err
-	}
-	if strings.TrimSpace(submit.Data.TaskID) == "" {
-		trace.ErrorClass = "provider_response_invalid"
-		return nil, trace, errors.New("OpenSpeech TTS submit response is missing task_id")
-	}
+	output.Transcript = transcript
+	return &AudioModelProviderResponse{Status: "succeeded", Output: output}, trace, nil
+}
 
-	providerResponse := &AudioModelProviderResponse{TaskID: submit.Data.TaskID, Status: ttsTaskStatus(submit.Data.TaskStatus)}
-	current := submit
-	for attempt := 0; attempt < c.tts.PollAttempts && current.Data.TaskStatus == 1; attempt++ {
-		if attempt > 0 || c.tts.PollInterval > 0 {
-			if err := c.sleep(ctx, c.tts.PollInterval); err != nil {
-				trace.ErrorClass = "poll_cancelled"
-				return providerResponse, trace, err
+type openSpeechPlanChunk struct {
+	Code     int    `json:"code"`
+	Message  string `json:"message,omitempty"`
+	Data     string `json:"data"`
+	Sentence struct {
+		Text  string `json:"text"`
+		Words []struct {
+			Word      string  `json:"word"`
+			StartTime float64 `json:"startTime"`
+			EndTime   float64 `json:"endTime"`
+		} `json:"words"`
+	} `json:"sentence"`
+}
+
+func (c *AudioClient) doOpenSpeechAgentPlanChunked(ctx context.Context, requestID string, payload openSpeechTTSRequest, trace ArkMediaCallTrace) (*AudioModelOutput, []AudioModelTranscriptSegment, ArkMediaCallTrace, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		trace.ErrorClass = "request_marshal_failed"
+		return nil, nil, trace, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tts.AgentPlanURL, bytes.NewReader(encoded))
+	if err != nil {
+		trace.ErrorClass = "request_build_failed"
+		return nil, nil, trace, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", c.tts.AgentPlanAPIKey)
+	req.Header.Set("X-Api-Resource-Id", c.tts.ResourceID)
+	req.Header.Set("X-Api-Request-Id", requestID)
+	req.Header.Set("X-Control-Require-Usage-Tokens-Return", "text_words")
+	started := time.Now()
+	resp, err := c.http.Do(req)
+	trace.LatencyMS = int(time.Since(started).Milliseconds())
+	if err != nil {
+		trace.ErrorClass = "http_error"
+		return nil, nil, trace, redactStrings(err, c.tts.AgentPlanAPIKey)
+	}
+	defer resp.Body.Close()
+	trace.HTTPStatus = resp.StatusCode
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		trace.ErrorClass = fmt.Sprintf("http_%d", resp.StatusCode)
+		return nil, nil, trace, openSpeechTTSHTTPError(resp.StatusCode, data, c.tts.AgentPlanAPIKey)
+	}
+	var audio bytes.Buffer
+	transcript := []AudioModelTranscriptSegment{}
+	finished := false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 4096), 2<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "data:") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		}
+		if line == "" || strings.HasPrefix(line, "event:") {
+			continue
+		}
+		var chunk openSpeechPlanChunk
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			trace.ErrorClass = "response_parse_failed"
+			return nil, nil, trace, errors.New("OpenSpeech Agent Plan TTS returned invalid stream JSON")
+		}
+		if chunk.Code != 0 && chunk.Code != openSpeechTTSSuccessCode {
+			trace.ErrorClass = "provider_stream_failed"
+			return nil, nil, trace, fmt.Errorf("OpenSpeech Agent Plan TTS provider code %d: %s", chunk.Code, sanitizedProviderMessage(chunk.Message))
+		}
+		if chunk.Data != "" {
+			decoded, err := base64.StdEncoding.DecodeString(chunk.Data)
+			if err != nil {
+				trace.ErrorClass = "audio_decode_failed"
+				return nil, nil, trace, errors.New("OpenSpeech Agent Plan TTS returned invalid base64 audio")
+			}
+			if int64(audio.Len()+len(decoded)) > c.tts.MaxDownloadSize {
+				trace.ErrorClass = "candidate_too_large"
+				return nil, nil, trace, errors.New("OpenSpeech Agent Plan TTS candidate exceeds size limit")
+			}
+			audio.Write(decoded)
+		}
+		if len(chunk.Sentence.Words) > 0 {
+			start, end := subtitleBounds(chunk.Sentence.Words)
+			if end > start {
+				transcript = append(transcript, AudioModelTranscriptSegment{StartMS: start, EndMS: end, Text: chunk.Sentence.Text})
 			}
 		}
-		queryEndpoint := openSpeechEndpoint(c.tts.BaseURL, openSpeechTTSQueryPath)
-		queryTrace := newTrace(c.mode, config.ModelProviderDoubao, c.tts.ResourceID, http.MethodPost, queryEndpoint)
-		var query openSpeechTTSResponse
-		queryTrace, err = c.doOpenSpeechTTSJSON(ctx, queryEndpoint, requestID, map[string]string{"task_id": submit.Data.TaskID}, &query, queryTrace)
-		trace = queryTrace
-		if err != nil {
-			return providerResponse, trace, err
+		if chunk.Code == openSpeechTTSSuccessCode {
+			finished = true
 		}
-		if err := validateOpenSpeechTTSResponse(query); err != nil {
-			trace.ErrorClass = "provider_query_failed"
-			return providerResponse, trace, err
-		}
-		current = query
-		providerResponse.Status = ttsTaskStatus(current.Data.TaskStatus)
 	}
-	if current.Data.TaskStatus == 1 {
-		trace.ErrorClass = "poll_exhausted"
-		return providerResponse, trace, errors.New("OpenSpeech TTS task did not complete within the polling limit")
+	if err := scanner.Err(); err != nil {
+		trace.ErrorClass = "response_read_failed"
+		return nil, nil, trace, errors.New("OpenSpeech Agent Plan TTS stream could not be read")
 	}
-	if current.Data.TaskStatus != 2 {
-		trace.ErrorClass = "provider_task_failed"
-		providerResponse.Error = &ProviderError{Code: "tts_task_failed", Message: sanitizedProviderMessage(current.Data.ErrorMessage)}
-		return providerResponse, trace, errors.New("OpenSpeech TTS task failed")
+	if !finished || audio.Len() == 0 {
+		trace.ErrorClass = "provider_response_incomplete"
+		return nil, nil, trace, errors.New("OpenSpeech Agent Plan TTS stream completed without usable audio")
 	}
-	if strings.TrimSpace(current.Data.AudioURL) == "" {
-		trace.ErrorClass = "provider_response_invalid"
-		return providerResponse, trace, errors.New("OpenSpeech TTS completed response is missing audio_url")
-	}
-
-	output, err := c.downloadAndProbeTTSCandidate(ctx, current.Data.AudioURL, body.ReqParams.AudioParams.Format, requestID)
+	output, err := c.writeAndProbeTTSCandidate(ctx, audio.Bytes(), payload.ReqParams.AudioParams.Format, requestID)
 	if err != nil {
-		trace.ErrorClass = "candidate_download_or_probe_failed"
-		return providerResponse, trace, err
+		trace.ErrorClass = "candidate_probe_failed"
+		return nil, nil, trace, err
 	}
-	output.Transcript = transcriptFromTTSSentences(current.Data.Sentences)
-	providerResponse.Status = "succeeded"
-	providerResponse.Output = output
-	return providerResponse, trace, nil
+	return output, transcript, trace, nil
+}
+
+func subtitleBounds(words []struct {
+	Word      string  `json:"word"`
+	StartTime float64 `json:"startTime"`
+	EndTime   float64 `json:"endTime"`
+}) (int, int) {
+	start := int(words[0].StartTime*1000 + 0.5)
+	end := int(words[len(words)-1].EndTime*1000 + 0.5)
+	return start, end
 }
 
 func (c *AudioClient) doOpenSpeechTTSJSON(ctx context.Context, endpoint, requestID string, payload, target any, trace ArkMediaCallTrace) (ArkMediaCallTrace, error) {
@@ -230,7 +318,7 @@ func (c *AudioClient) doOpenSpeechTTSJSON(ctx context.Context, endpoint, request
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		trace.ErrorClass = fmt.Sprintf("http_%d", resp.StatusCode)
-		return trace, fmt.Errorf("OpenSpeech TTS HTTP %d", resp.StatusCode)
+		return trace, openSpeechTTSHTTPError(resp.StatusCode, data, c.tts.AppID, c.tts.AccessKey)
 	}
 	if err := json.Unmarshal(data, target); err != nil {
 		trace.ErrorClass = "response_parse_failed"
@@ -304,6 +392,40 @@ func (c *AudioClient) downloadAndProbeTTSCandidate(ctx context.Context, rawURL, 
 	}, nil
 }
 
+func (c *AudioClient) writeAndProbeTTSCandidate(ctx context.Context, audio []byte, format, requestID string) (*AudioModelOutput, error) {
+	if len(audio) == 0 || int64(len(audio)) > c.tts.MaxDownloadSize {
+		return nil, errors.New("OpenSpeech Agent Plan TTS candidate is empty or oversized")
+	}
+	if err := os.MkdirAll(c.tts.OutputDir, 0o700); err != nil {
+		return nil, err
+	}
+	ext := normalizedAudioExtension(format)
+	temporaryPath := filepath.Join(c.tts.OutputDir, "."+requestID+ext+".partial")
+	finalPath := filepath.Join(c.tts.OutputDir, requestID+ext)
+	if err := os.WriteFile(temporaryPath, audio, 0o600); err != nil {
+		return nil, err
+	}
+	probe, err := c.probe(ctx, c.tts.FFprobePath, temporaryPath)
+	if err != nil {
+		_ = os.Remove(temporaryPath)
+		return nil, fmt.Errorf("OpenSpeech Agent Plan TTS candidate media validation failed: %w", err)
+	}
+	if err := os.Rename(temporaryPath, finalPath); err != nil {
+		_ = os.Remove(temporaryPath)
+		return nil, err
+	}
+	digest := sha256.Sum256(audio)
+	return &AudioModelOutput{
+		AssetRef:     "candidate://tts/" + hex.EncodeToString(digest[:]),
+		LocalPath:    finalPath,
+		MimeType:     probe.MimeType,
+		DurationMS:   probe.DurationMS,
+		SampleRateHZ: probe.SampleRateHZ,
+		Channels:     probe.Channels,
+		SHA256:       hex.EncodeToString(digest[:]),
+	}, nil
+}
+
 func probeAudioCandidate(ctx context.Context, ffprobePath, candidatePath string) (audioProbeResult, error) {
 	command := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type,sample_rate,channels:format=duration,format_name", "-of", "json", candidatePath)
 	data, err := command.Output()
@@ -333,11 +455,8 @@ func probeAudioCandidate(ctx context.Context, ffprobePath, candidatePath string)
 }
 
 func validateOpenSpeechTTSConfig(value openSpeechTTSConfig, request AudioModelInput) error {
-	if strings.TrimSpace(value.AppID) == "" {
-		return errors.New("VOLC_TTS_APP_ID is missing")
-	}
-	if strings.TrimSpace(value.AccessKey) == "" {
-		return errors.New("VOLC_TTS_ACCESS_KEY is missing")
+	if strings.TrimSpace(value.AgentPlanAPIKey) == "" {
+		return errors.New("VOLC_TTS_AGENT_PLAN_API_KEY is missing")
 	}
 	if strings.TrimSpace(value.ResourceID) == "" {
 		return errors.New("VOLC_TTS_RESOURCE_ID is missing")
@@ -345,8 +464,8 @@ func validateOpenSpeechTTSConfig(value openSpeechTTSConfig, request AudioModelIn
 	if firstNonEmpty(request.VoiceID, value.DefaultSpeaker) == "" {
 		return errors.New("VOLC_TTS_SPEAKER or request voice_id is missing")
 	}
-	if parsed, err := url.Parse(value.BaseURL); err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" {
-		return errors.New("VOLC_TTS_BASE_URL must be absolute HTTPS")
+	if parsed, err := url.Parse(value.AgentPlanURL); err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" || parsed.Path != "/api/v3/plan/tts/unidirectional" {
+		return errors.New("VOLC_TTS_AGENT_PLAN_BASE_URL must be the Agent Plan HTTPS unidirectional endpoint")
 	}
 	if request.Pitch != 0 {
 		return errors.New("OpenSpeech TTS v1 does not support pitch; omit it")
@@ -364,8 +483,16 @@ func validateOpenSpeechTTSResponse(response openSpeechTTSResponse) error {
 func transcriptFromTTSSentences(values []openSpeechTTSSentence) []AudioModelTranscriptSegment {
 	result := make([]AudioModelTranscriptSegment, 0, len(values))
 	for _, value := range values {
-		start := int(value.StartTime*1000 + 0.5)
-		end := int(value.EndTime*1000 + 0.5)
+		startValue := value.BeginTime
+		if startValue == 0 {
+			startValue = value.StartTime
+		}
+		endValue := value.EndTime
+		if endValue == 0 {
+			endValue = value.LegacyEnd
+		}
+		start := int(startValue*1000 + 0.5)
+		end := int(endValue*1000 + 0.5)
 		if end <= start {
 			continue
 		}
@@ -490,6 +617,9 @@ func boundedEnvInt(name string, fallback, minimum, maximum int) int {
 }
 func classifyTTSConfigError(err error) string {
 	message := err.Error()
+	if strings.Contains(message, "AGENT_PLAN") {
+		return "tts_agent_plan_key_missing"
+	}
 	if strings.Contains(message, "APP_ID") {
 		return "tts_app_id_missing"
 	}
@@ -510,6 +640,22 @@ func sanitizedProviderMessage(value string) string {
 		value = value[:200]
 	}
 	return value
+}
+
+// openSpeechTTSHTTPError preserves a short provider diagnostic for a blocked
+// candidate run while removing locally configured credentials. It never
+// records request payloads, generated IDs, task IDs, or download URLs.
+func openSpeechTTSHTTPError(status int, body []byte, sensitive ...string) error {
+	message := sanitizedProviderMessage(string(body))
+	for _, value := range sensitive {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, "[redacted]")
+		}
+	}
+	if message == "" {
+		return fmt.Errorf("OpenSpeech TTS HTTP %d", status)
+	}
+	return fmt.Errorf("OpenSpeech TTS HTTP %d: %s", status, message)
 }
 func redactStrings(err error, values ...string) error {
 	if err == nil {

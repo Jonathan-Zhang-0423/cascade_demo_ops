@@ -14,11 +14,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cascade-demoops/backend/internal/config"
 )
 
 const workerProtocolVersion = "cascade.browser_agent_worker.v1"
 
 func main() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatal(err.Error())
+	}
+	repoRoot := config.DiscoverDevRepoRoot(cwd)
+	if err := config.LoadDotEnvFiles(config.DefaultDotEnvPaths(repoRoot)...); err != nil {
+		fatal(err.Error())
+	}
 	baseURL := flag.String("gateway-url", "http://127.0.0.1:18444", "loopback Worker API URL")
 	poll := flag.Duration("poll-interval", 500*time.Millisecond, "queue poll interval")
 	flag.Parse()

@@ -114,6 +114,28 @@ func TestPackageRequirementCoverageRequiresNodeValidationAndEvidence(t *testing.
 	}
 }
 
+func TestTerminalPlayableRepairScopesCoverageToRetainedRequirements(t *testing.T) {
+	pkg := confidenceFixture(t)
+	pkg.WorkflowGraph.ID = "graph_terminal_playable_repair_1"
+	pkg.ExecutableScriptBundle.RepairLineage = &ScriptRepairLineage{SourceResultID: "result_completed_source"}
+	pkg.WorkflowGraph.Requirements = []GraphRequirement{{ID: "already_completed_creation", Kind: "must_show", Description: "创建项目", Required: true}}
+	summary, err := AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 1 {
+		t.Fatalf("terminal repair should not re-cover requirements outside its retained nodes: %+v", summary)
+	}
+	pkg.ExecutableScriptBundle.RepairLineage = nil
+	summary, err = AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 0 {
+		t.Fatalf("ordinary packages must still cover every browser requirement: %+v", summary)
+	}
+}
+
 func TestPackageConfidenceIgnoresSafetyConstraintsForPositiveCoverage(t *testing.T) {
 	pkg := confidenceFixture(t)
 	pkg.WorkflowGraph.Requirements = []GraphRequirement{
@@ -126,6 +148,31 @@ func TestPackageConfidenceIgnoresSafetyConstraintsForPositiveCoverage(t *testing
 	}
 	if summary.RequirementCoverage != 1 {
 		t.Fatalf("safety constraints must not reduce positive requirement coverage: %+v", summary)
+	}
+}
+
+func TestPackageConfidenceScopesPostProductionRequirementsOutsideBrowserPackage(t *testing.T) {
+	pkg := confidenceFixture(t)
+	pkg.WorkflowGraph.Requirements = []GraphRequirement{
+		{ID: "director", Kind: "must_show", Description: "导演模型制定脚本并由 Seedance 2.5 生成候选，FFmpeg 合成最终 MP4 成片", Required: true},
+	}
+	summary, err := AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 1 {
+		t.Fatalf("post-production requirements belong to final-film assessment, not browser-package coverage: %+v", summary)
+	}
+
+	pkg.WorkflowGraph.Requirements = []GraphRequirement{
+		{ID: "playable", Kind: "must_show", Description: "按左、右、下和旋转键后方块位置或形状变化", Required: true},
+	}
+	summary, err = AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 0 {
+		t.Fatalf("an unmapped browser/playability requirement must still block browser-package coverage: %+v", summary)
 	}
 }
 

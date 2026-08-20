@@ -330,6 +330,14 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 				return result, newRuntimeExecutionError("outcome_verification_failed", err)
 			}
 			result.ValidationReports = append(result.ValidationReports, report)
+			if normalized, ok := normalizeWarningOnlyRepairDecision(report, actionResult.Observation, actionResult.EvidenceRefs); ok {
+				// The legacy Validation Agent maps warning-only feedback to
+				// repair_allowed even when every browser assertion passed. With no
+				// concrete failing check there is nothing safe to patch; retain the
+				// warning report and continue instead of inventing a repair proposal.
+				report = normalized
+				result.ValidationReports[len(result.ValidationReports)-1] = report
+			}
 			if report.Decision == model.ValidationDecisionRepairAllowed {
 				proposer, ok := o.verifier.(BrowserAgentStageRepairProposer)
 				if !ok {
@@ -422,6 +430,42 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	return result, nil
 }
 
+func warningOnlyRepairDecisionCanContinue(report model.ValidationReport, observation *model.RuntimeObservation) bool {
+	if report.Decision != model.ValidationDecisionRepairAllowed || observation == nil || len(report.Checks) == 0 || len(observation.Assertions) == 0 {
+		return false
+	}
+	hasWarning := false
+	for _, check := range report.Checks {
+		if check.Passed {
+			continue
+		}
+		if check.Severity != model.FindingSeverityWarning || (check.Code != string(model.ValidationResultTypeWarning) && check.Code != string(model.ValidationResultTypeUncertainty)) {
+			return false
+		}
+		hasWarning = true
+	}
+	if !hasWarning {
+		return false
+	}
+	for _, assertion := range observation.Assertions {
+		if !assertion.Passed {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeWarningOnlyRepairDecision(report model.ValidationReport, observation *model.RuntimeObservation, evidence []model.EvidenceRef) (model.ValidationReport, bool) {
+	if !warningOnlyRepairDecisionCanContinue(report, observation) || len(evidence) == 0 {
+		return report, false
+	}
+	report.Decision = model.ValidationDecisionContinue
+	if len(report.EvidenceRefs) == 0 {
+		report.EvidenceRefs = append([]model.EvidenceRef{}, evidence...)
+	}
+	return report, true
+}
+
 func runtimeActionForStage(stage BrowserAgentRuntimeStage) *model.RuntimeAction {
 	action := model.RuntimeAction{TargetSemanticID: stage.TargetContract.SemanticID}
 	if stage.ManualSessionCheckpoint {
@@ -506,8 +550,36 @@ func boundedEntryWaitMilliseconds(condition string) (int, bool) {
 func currentStageSelector(stage BrowserAgentRuntimeStage) string {
 	for _, component := range stage.Components {
 		if stage.TargetContract.ComponentRef == "" || component.ComponentRef == stage.TargetContract.ComponentRef {
-			return component.Selector
+			if selector := strings.TrimSpace(component.Selector); selector != "" {
+				return selector
+			}
+			if testID := strings.TrimSpace(component.TestID); testID != "" {
+				return "testid:" + testID
+			}
+			if role := strings.TrimSpace(component.Role); role != "" {
+				name := firstNonEmptyString(component.Name, component.Label, component.Text)
+				if name != "" {
+					return "role:" + role + ":name:" + strings.TrimSpace(name)
+				}
+			}
 		}
+	}
+	for _, interaction := range stage.Interactions {
+		if selector := strings.TrimSpace(interaction.Target.Selector); selector != "" {
+			return selector
+		}
+		if testID := strings.TrimSpace(interaction.Target.TestID); testID != "" {
+			return "testid:" + testID
+		}
+		if role := strings.TrimSpace(interaction.Target.Role); role != "" {
+			name := firstNonEmptyString(interaction.Target.Label, interaction.Target.Text)
+			if name != "" {
+				return "role:" + role + ":name:" + strings.TrimSpace(name)
+			}
+		}
+	}
+	if semanticID := strings.TrimSpace(stage.TargetContract.SemanticID); semanticID != "" {
+		return "semantic:" + semanticID
 	}
 	return ""
 }
@@ -864,7 +936,7 @@ func deniedBrowserAgentPolicy(code string, reason string) BrowserAgentPolicyDeci
 func browserAgentActionTypeAllowed(action model.GraphActionType) bool {
 	switch action {
 	case model.GraphActionNavigate, model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect,
-		model.GraphActionUpload, model.GraphActionWait, model.GraphActionAssert, model.GraphActionInspect:
+		model.GraphActionUpload, model.GraphActionWait, model.GraphActionAssert, model.GraphActionInspect, model.GraphActionPress:
 		return true
 	default:
 		return false

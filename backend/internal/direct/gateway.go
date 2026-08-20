@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -93,10 +94,11 @@ func (g *Gateway) Allocate(request DirectLeaseRequest) (DirectPortLease, error) 
 	defer g.mu.Unlock()
 	if id := g.byInstall[request.InstallationID]; id != "" {
 		if existing := g.leases[id]; existing != nil && !existing.Released && time.UnixMilli(existing.ExpiresAt).After(now) {
-			before := existing.ServerTime
+			beforeTime, beforeURL := existing.ServerTime, existing.DataURL
 			existing.ServerTime = now.UnixMilli()
+			existing.DataURL = directDataURL(g.baseHost, existing.DataPort)
 			if err := g.persistLocked(); err != nil {
-				existing.ServerTime = before
+				existing.ServerTime, existing.DataURL = beforeTime, beforeURL
 				return DirectPortLease{}, err
 			}
 			return existing.DirectPortLease, nil
@@ -126,11 +128,7 @@ func (g *Gateway) Allocate(request DirectLeaseRequest) (DirectPortLease, error) 
 	if err != nil {
 		return DirectPortLease{}, err
 	}
-	host := g.baseHost
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	value := DirectPortLease{LeaseID: leaseID, InstallationID: request.InstallationID, DataURL: fmt.Sprintf("https://%s:%d", host, port), DataPort: port, LeaseToken: token, IssuedAt: now.UnixMilli(), ExpiresAt: now.Add(g.ttl).UnixMilli(), CryptoSuite: CryptoSuite, ServerTime: now.UnixMilli()}
+	value := DirectPortLease{LeaseID: leaseID, InstallationID: request.InstallationID, DataURL: directDataURL(g.baseHost, port), DataPort: port, LeaseToken: token, IssuedAt: now.UnixMilli(), ExpiresAt: now.Add(g.ttl).UnixMilli(), CryptoSuite: CryptoSuite, ServerTime: now.UnixMilli()}
 	g.leases[leaseID] = &Lease{DirectPortLease: value, PublicKey: pub}
 	g.byInstall[request.InstallationID] = leaseID
 	reboundJobs := map[string]string{}
@@ -152,6 +150,26 @@ func (g *Gateway) Allocate(request DirectLeaseRequest) (DirectPortLease, error) 
 		return DirectPortLease{}, err
 	}
 	return value, nil
+}
+
+// directDataHostname removes the fixed TLS control port before a dedicated
+// data-plane port is appended. CASCADE_DIRECT_PUBLIC_HOST is allowed to carry
+// the control address (for example 127.0.0.1:18443), but a lease data URL must
+// contain exactly one port in the installation range.
+func directDataHostname(value string) string {
+	value = strings.TrimSpace(value)
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return host
+	}
+	return value
+}
+
+func directDataURL(baseHost string, port int) string {
+	host := directDataHostname(baseHost)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("https://%s:%d", host, port)
 }
 
 func (g *Gateway) Lease(id string) (*Lease, error) {

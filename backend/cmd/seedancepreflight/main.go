@@ -1,10 +1,11 @@
 // Command seedancepreflight performs one small, explicitly authorized real
-// Seedance task using a selected local reference asset. It never changes an
+// Seedance 2.5 task using a selected local reference asset. It never changes an
 // edit plan and writes only redacted task/output metadata.
 package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,8 +14,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +29,9 @@ import (
 func main() {
 	source := flag.String("source", "", "local source_reference.mp4")
 	taskIDFlag := flag.String("task-id", "", "resume polling an existing Seedance task without creating a new task")
+	ffmpegFlag := flag.String("ffmpeg", "", "ffmpeg executable used to normalize downloaded candidates")
+	ffprobeFlag := flag.String("ffprobe", "", "ffprobe executable used to validate a new local reference before upload")
+	retentionAck := flag.Bool("tos-retention-ack", false, "confirm the client acknowledged the standard 30-day private-TOS retention before a new upload")
 	outDir := flag.String("output", "artifacts/seedance-preflight/latest", "candidate output directory")
 	pollAttempts := flag.Int("poll-attempts", 20, "maximum task polls")
 	pollInterval := flag.Duration("poll-interval", 5*time.Second, "delay between polls")
@@ -50,16 +56,38 @@ func main() {
 	defer cancel()
 	client := media.NewClient(runtime, nil)
 	created := time.Now().UTC()
-	audit := map[string]any{"schema_version": "cascade.seedance_preflight.v1", "created_at": created, "provider": config.ModelProviderSeedance, "model": runtime.ModelProviders[config.ModelProviderSeedance].DefaultModel, "real_call_made": false, "review_state": "candidate_only", "provider_output_adopted": false, "inserted_into_demo_edit_plan": false}
+	retention := model.DefaultMediaDeliveryPreferences().TOSRetention
+	retention.ClientDisclosureAcknowledged = *retentionAck
+	audit := map[string]any{"schema_version": "cascade.seedance_preflight.v1", "created_at": created, "last_checked_at": created, "provider": config.ModelProviderSeedance, "model": runtime.ModelProviders[config.ModelProviderSeedance].DefaultModel, "real_call_made": false, "review_state": "candidate_only", "provider_output_adopted": false, "inserted_into_demo_edit_plan": false, "tos_retention": retention}
+	if taskID != "" {
+		previous, err := readExistingAudit(*outDir)
+		fatalIf(err)
+		if previous != nil {
+			audit = previous
+		}
+		audit["task_id"] = taskID
+		audit["task_resumed"] = true
+		audit["last_checked_at"] = created
+	}
 	if taskID == "" {
 		info, err := os.Stat(*source)
 		fatalIf(err)
 		if info.IsDir() {
 			fatal(errors.New("source must be a file"))
 		}
+		probe, err := probeSeedanceReference(ctx, firstNonEmpty(*ffprobeFlag, runtime.FFprobePath, "ffprobe"), *source)
+		audit["source_probe"] = probe
+		if err != nil {
+			audit["status"] = "source_preflight_failed"
+			audit["error_class"] = "source_reference_invalid"
+			writeJSON(*outDir, "seedance_audit.json", audit)
+			fatal(err)
+		}
+		sourcePackageID := seedancePreflightSourcePackageID(created)
+		audit["source_package_id"] = sourcePackageID
 		plan := model.ArkAssetPublicationPlan{
 			SchemaVersion: model.ArkAssetPublicationPlanSchemaVersion, PlanID: "seedance_preflight_publication",
-			CreatedAt: time.Now().UTC(), Mode: "real_preflight", SourcePackageID: "seedance_preflight",
+			CreatedAt: time.Now().UTC(), Mode: "real_preflight", SourcePackageID: sourcePackageID, TOSRetention: retention,
 			Items: []model.ArkAssetPublicationItem{{
 				Ref:     model.DirectorMaterialRef{ID: "source_reference_video", Kind: "raw_recording", URI: *source, MimeType: "video/mp4"},
 				TaskIDs: []string{"seedance_preflight"}, Usage: "presentation_reference", Required: true,
@@ -76,14 +104,14 @@ func main() {
 		fatalIf(err)
 		if !pub.CanUseForRealCall || len(pub.Items) == 0 || pub.Items[0].ProposedPublicRef == nil {
 			writeJSON(*outDir, "publication_result.json", pub)
+			if publicationRequiresRetentionAck(pub) {
+				fatal(errors.New("TOS publication is blocked until the client acknowledges standard 30-day retention; rerun with -tos-retention-ack only after that acknowledgement"))
+			}
 			fatal(errors.New("TOS publication did not produce a provider-ready URL"))
 		}
 		ref := pub.Items[0].ProposedPublicRef
-		request := media.ContentGenerationTaskRequest{
-			Model:      runtime.ModelProviders[config.ModelProviderSeedance].DefaultModel,
-			Content:    []media.ContentPart{{Type: "text", Text: "Create a concise presentation-only transition from the supplied product recording. Do not invent UI or business actions."}, {Type: "video_url", VideoURL: &media.MediaURL{URL: ref.URI}, Role: "reference_video"}},
-			Resolution: "1080p", Ratio: "16:9", Duration: 5, GenerateAudio: false, ReturnLastFrame: true, Watermark: false,
-		}
+		request := seedancePreflightRequest(runtime.ModelProviders[config.ModelProviderSeedance].DefaultModel, ref.URI)
+		audit["request_profile"] = seedancePreflightRequestProfile(request)
 		initial, err := client.CreateContentGenerationTask(ctx, request)
 		audit["provider"] = initial.Provider
 		audit["model"] = initial.Model
@@ -103,9 +131,6 @@ func main() {
 			writeJSON(*outDir, "seedance_audit.json", audit)
 			fatal(errors.New("Seedance response missing task id"))
 		}
-	} else {
-		audit["task_id"] = taskID
-		audit["task_resumed"] = true
 	}
 	lastProviderStatus := ""
 	for attempt := 1; attempt <= *pollAttempts; attempt++ {
@@ -134,11 +159,34 @@ func main() {
 				path := download(ctx, raw, filepath.Join(*outDir, fmt.Sprintf("candidate-%02d", index+1)))
 				candidateFiles = append(candidateFiles, filepath.Base(path))
 			}
+			normalizedFiles, normalizationErrors, normalizationProbes := normalizeCandidateFiles(ctx, candidateFiles, *outDir, *ffmpegFlag, *ffprobeFlag, runtime)
 			audit["candidate_url_count"] = len(urls)
 			audit["candidate_files"] = candidateFiles
-			audit["status"] = "candidate_downloaded"
+			audit["normalized_candidate_files"] = normalizedFiles
+			audit["normalization_probes"] = normalizationProbes
+			artifactManifest := candidateArtifactManifest(candidateFiles, normalizedFiles, *outDir)
+			audit["candidate_artifacts"] = artifactManifest
+			audit["candidate_integrity_verified"] = candidateArtifactManifestVerified(artifactManifest)
+			if len(normalizationErrors) > 0 {
+				audit["normalization_errors"] = normalizationErrors
+			} else {
+				delete(audit, "normalization_errors")
+			}
+			if len(normalizedFiles) > 0 && candidateArtifactManifestVerified(artifactManifest) {
+				audit["status"] = "candidate_downloaded_and_normalized"
+			} else if len(normalizedFiles) > 0 {
+				audit["status"] = "candidate_downloaded_integrity_failed"
+			} else {
+				audit["status"] = "candidate_downloaded_normalization_failed"
+			}
 			writeJSON(*outDir, "seedance_audit.json", audit)
-			fmt.Printf("Seedance preflight passed; candidate_count=%d; audit=%s\n", len(urls), filepath.Join(*outDir, "seedance_audit.json"))
+			if len(normalizedFiles) > 0 && candidateArtifactManifestVerified(artifactManifest) {
+				fmt.Printf("Seedance preflight passed; candidate_count=%d; normalized_count=%d; audit=%s\n", len(urls), len(normalizedFiles), filepath.Join(*outDir, "seedance_audit.json"))
+			} else if len(normalizedFiles) > 0 {
+				fmt.Printf("Seedance candidate downloaded but integrity verification failed; candidate_count=%d; audit=%s\n", len(urls), filepath.Join(*outDir, "seedance_audit.json"))
+			} else {
+				fmt.Printf("Seedance candidate downloaded but normalization failed; candidate_count=%d; audit=%s\n", len(urls), filepath.Join(*outDir, "seedance_audit.json"))
+			}
 			return
 		}
 		if terminal(lastProviderStatus) {
@@ -158,12 +206,212 @@ func main() {
 	fmt.Printf("Seedance task is still pending; provider_status=%s; audit=%s\n", lastProviderStatus, filepath.Join(*outDir, "seedance_audit.json"))
 }
 
+func publicationRequiresRetentionAck(result model.ArkAssetPublicationResult) bool {
+	for _, blocker := range result.Blockers {
+		if blocker.Code == "tos_retention_client_ack_required" {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeCandidateFiles(ctx context.Context, candidateFiles []string, outputDir, ffmpegPath, ffprobePath string, runtime config.AppRuntimeConfig) ([]string, []string, []map[string]any) {
+	normalizer := media.FFmpegMiniMaxH3MediaNormalizer{
+		FFmpegPath:  firstNonEmpty(ffmpegPath, runtime.FFmpegPath, os.Getenv("CASCADE_FFMPEG_PATH"), "ffmpeg"),
+		FFprobePath: firstNonEmpty(ffprobePath, runtime.FFprobePath, os.Getenv("CASCADE_FFPROBE_PATH"), "ffprobe"),
+	}
+	normalized := []string{}
+	errorsFound := []string{}
+	probes := []map[string]any{}
+	for _, candidate := range candidateFiles {
+		if !strings.EqualFold(filepath.Ext(candidate), ".mp4") {
+			continue
+		}
+		source := filepath.Join(outputDir, candidate)
+		destination := normalizedCandidatePath(source)
+		if _, statErr := os.Stat(destination); statErr == nil {
+			if removeErr := os.Remove(destination); removeErr != nil {
+				errorsFound = append(errorsFound, fmt.Sprintf("%s: existing normalized artifact could not be replaced: %v", candidate, removeErr))
+				continue
+			}
+		} else if !os.IsNotExist(statErr) {
+			errorsFound = append(errorsFound, fmt.Sprintf("%s: normalized artifact destination could not be checked: %v", candidate, statErr))
+			continue
+		}
+		originalProbe, normalizedProbe, err := normalizer.Normalize(ctx, source, destination)
+		if err != nil {
+			errorsFound = append(errorsFound, fmt.Sprintf("%s: %v", candidate, err))
+			continue
+		}
+		normalized = append(normalized, filepath.Base(destination))
+		probes = append(probes, map[string]any{"source_file": filepath.Base(source), "normalized_file": filepath.Base(destination), "original_probe": originalProbe, "normalized_probe": normalizedProbe})
+	}
+	return normalized, errorsFound, probes
+}
+
+func normalizedCandidatePath(source string) string {
+	extension := filepath.Ext(source)
+	return strings.TrimSuffix(source, extension) + ".normalized.mp4"
+}
+
+// candidateArtifactManifest records immutable local evidence for each provider
+// download and its normalized derivative. It is review metadata only; it does
+// not grant approval or alter a DemoEditPlan.
+func candidateArtifactManifest(candidateFiles, normalizedFiles []string, outputDir string) []map[string]any {
+	normalizedSet := make(map[string]bool, len(normalizedFiles))
+	for _, name := range normalizedFiles {
+		normalizedSet[strings.ToLower(filepath.Base(name))] = true
+	}
+	manifest := make([]map[string]any, 0, len(candidateFiles)+len(normalizedFiles))
+	appendArtifact := func(name string, normalized bool) {
+		path := filepath.Join(outputDir, name)
+		entry := map[string]any{"file": filepath.Base(name), "path": path, "normalized": normalized}
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			entry["size_bytes"] = info.Size()
+			if digest, err := sha256File(path); err == nil {
+				entry["sha256"] = digest
+			} else {
+				entry["integrity_error"] = err.Error()
+			}
+		} else if err != nil {
+			entry["integrity_error"] = err.Error()
+		}
+		manifest = append(manifest, entry)
+	}
+	for _, name := range candidateFiles {
+		appendArtifact(name, false)
+	}
+	for _, name := range normalizedFiles {
+		if !normalizedSet[strings.ToLower(filepath.Base(name))] {
+			continue
+		}
+		appendArtifact(name, true)
+	}
+	return manifest
+}
+
+func sha256File(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func candidateArtifactManifestVerified(manifest []map[string]any) bool {
+	if len(manifest) == 0 {
+		return false
+	}
+	for _, entry := range manifest {
+		if _, ok := entry["integrity_error"]; ok {
+			return false
+		}
+		if strings.TrimSpace(fmt.Sprint(entry["sha256"])) == "" || entry["size_bytes"] == nil {
+			return false
+		}
+	}
+	return true
+}
+
+type seedanceReferenceProbe struct {
+	DurationSec float64 `json:"duration_sec"`
+	VideoCodec  string  `json:"video_codec"`
+}
+
+func probeSeedanceReference(ctx context.Context, ffprobePath, source string) (seedanceReferenceProbe, error) {
+	result := seedanceReferenceProbe{}
+	command := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name", "-of", "json", source)
+	output, err := command.Output()
+	if err != nil {
+		return result, fmt.Errorf("source ffprobe failed: %w", err)
+	}
+	var response struct {
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+			CodecName string `json:"codec_name"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(output, &response); err != nil {
+		return result, fmt.Errorf("source ffprobe returned invalid JSON: %w", err)
+	}
+	duration, err := strconv.ParseFloat(strings.TrimSpace(response.Format.Duration), 64)
+	if err != nil || duration <= 0 {
+		return result, errors.New("source reference has no valid duration")
+	}
+	result.DurationSec = duration
+	for _, stream := range response.Streams {
+		if stream.CodecType == "video" {
+			result.VideoCodec = strings.ToLower(strings.TrimSpace(stream.CodecName))
+			break
+		}
+	}
+	if result.VideoCodec != "h264" && result.VideoCodec != "hevc" {
+		return result, errors.New("source reference video codec must be H.264 or H.265/HEVC")
+	}
+	if duration < 2 || duration > 15 {
+		return result, fmt.Errorf("source reference duration %.3fs is outside the Seedance 2.0 2-15 second limit", duration)
+	}
+	return result, nil
+}
+
+func seedancePreflightSourcePackageID(created time.Time) string {
+	return fmt.Sprintf("seedance_preflight_%d", created.UTC().UnixNano())
+}
+
+// seedancePreflightRequest deliberately has no execution authority. It keeps
+// the existing 2.0 request shape intact while compiling the documented 2.5
+// reference-task fields when that exact model is configured.
+func seedancePreflightRequest(modelName string, referenceURL string) media.ContentGenerationTaskRequest {
+	request := media.ContentGenerationTaskRequest{
+		Model: strings.TrimSpace(modelName),
+		Content: []media.ContentPart{
+			{Type: "text", Text: "Create a concise presentation-only transition from the supplied product recording. Do not invent UI or business actions."},
+			{Type: "video_url", VideoURL: &media.MediaURL{URL: strings.TrimSpace(referenceURL)}, Role: "reference_video"},
+		},
+		Resolution: "1080p", Ratio: "16:9", Duration: 5, GenerateAudio: false, ReturnLastFrame: true, Watermark: false,
+	}
+	if request.Model == media.Seedance25ServerModel {
+		request.OmniReferenceTaskType = "reference"
+		request.OutputFormat = "mp4"
+	}
+	return request
+}
+
+// seedancePreflightRequestProfile is audit-safe: it intentionally excludes
+// content, source URL, signed query parameters, and credentials.
+func seedancePreflightRequestProfile(request media.ContentGenerationTaskRequest) map[string]any {
+	return map[string]any{
+		"model": request.Model, "omni_reference_task_type": request.OmniReferenceTaskType,
+		"resolution": request.Resolution, "ratio": request.Ratio, "duration": request.Duration,
+		"generate_audio": request.GenerateAudio, "return_last_frame": request.ReturnLastFrame,
+		"watermark": request.Watermark, "output_format": request.OutputFormat,
+	}
+}
+
 func responseID(value *media.ContentGenerationTaskResponse) string {
 	if value == nil {
 		return ""
 	}
 	return strings.TrimSpace(value.ID)
 }
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func responseStatus(value *media.ContentGenerationTaskResponse) string {
 	if value == nil {
 		return ""
@@ -264,6 +512,25 @@ func writeJSON(dir, name string, value any) {
 	data, err := json.MarshalIndent(value, "", "  ")
 	fatalIf(err)
 	fatalIf(os.WriteFile(filepath.Join(dir, name), append(data, '\n'), 0o600))
+}
+
+func readExistingAudit(dir string) (map[string]any, error) {
+	path := filepath.Join(dir, "seedance_audit.json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var audit map[string]any
+	if err := json.Unmarshal(data, &audit); err != nil {
+		return nil, fmt.Errorf("decode existing Seedance audit: %w", err)
+	}
+	if audit == nil || strings.TrimSpace(fmt.Sprint(audit["schema_version"])) != "cascade.seedance_preflight.v1" {
+		return nil, errors.New("existing Seedance audit has an unsupported schema")
+	}
+	return audit, nil
 }
 func fatalIf(err error) {
 	if err != nil {

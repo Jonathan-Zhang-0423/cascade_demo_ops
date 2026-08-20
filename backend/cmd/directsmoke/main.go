@@ -148,7 +148,7 @@ func normalizeServerControlledFixture(original []byte, pkg model.ClientExecution
 	pkg.SafetyReport.HumanApproval.ApprovedByInstallationID = installationID
 	pkg.SafetyReport.HumanApproval.ApprovalSchemaVersion = model.UserApprovalSchemaVersion
 	pkg.SafetyReport.HumanApproval.PlanDigestSHA256 = pkg.ExecutableScriptBundle.Reproducibility.PlanHashSHA256
-	subjectDigests, err := model.ComputeApprovalSubjectDigestsSHA256(pkg)
+	subjectDigests, err := model.ComputePackageApprovalComponentDigests(pkg)
 	if err != nil {
 		return nil, pkg, err
 	}
@@ -576,7 +576,7 @@ func (c *smokeClient) signedDataJSON(ctx context.Context, method, path string, b
 	req.Header.Set("X-Cascade-Timestamp", strconv.FormatInt(ts, 10))
 	req.Header.Set("X-Cascade-Nonce", nonce)
 	req.Header.Set("X-Cascade-Body-SHA256", digest)
-	req.Header.Set("X-Cascade-Signature", direct.SignDataRequest(method, path, ts, nonce, digest, c.lease.LeaseToken, c.lease.InstallationID))
+	req.Header.Set("X-Cascade-Signature", direct.SignDataRequest(method, path, ts, nonce, digest, c.lease.LeaseToken, c.lease.InstallationID, c.lease.LeaseID, c.lease.DataPort))
 	return c.doJSON(req, output)
 }
 

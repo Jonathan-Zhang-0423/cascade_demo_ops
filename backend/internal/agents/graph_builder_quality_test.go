@@ -35,6 +35,34 @@ func TestGraphBuilderPrefersExecutableBusinessSelector(t *testing.T) {
 	}
 }
 
+func TestFinalBuildCompletionValidationUsesEvidenceBoundResultAndLongPoll(t *testing.T) {
+	now := time.Now().UTC()
+	evidence := model.EvidenceRef{ID: "ev_build_result", Kind: model.EvidenceKindCodeSnapshot, Confidence: 0.9}
+	candidate := model.SelectorCandidate{
+		Kind: "testid", Value: "build-result-card", EvidenceID: evidence.ID, SourceKind: "source_scan",
+		SourceDigest: "sha256:build-result", ObservedRole: "region", ObservedAccessibleName: "Build completed",
+		ObservedAt: &now, EvidenceRefs: []model.EvidenceRef{evidence},
+	}
+	stage := model.BusinessStage{
+		ID: "business_stage_final_observe", Kind: model.BusinessStageKindFinalObserve,
+		UserIntent: "等待 Agent 真正编写完代码，直到全部步骤完成，最多 20 分钟。",
+		EntryRoute: "/project/:id", ExpectedRouteAfterAction: "/project/:id",
+		Action: model.BusinessActionSemantics{SuccessState: "Agent 构建完成结果可见"},
+		Targets: []model.BusinessTargetCandidate{{
+			ID: "intent_agent_build_complete", Label: "Agent 构建完成结果", Kind: "inspect",
+			Selector: "[data-testid='build-result-card']", TestID: "build-result-card", SelectorScore: 100,
+			EvidenceRefs: []model.EvidenceRef{evidence}, Alternatives: []model.SelectorCandidate{candidate},
+		}},
+	}
+	validation := businessStageValidation(stage, model.GraphActionInspect, businessStageActionTarget(stage, "https://app.example.com"), true)
+	if validation.Kind != "element_visible" || validation.Target.TestID != "build-result-card" || validation.TimeoutMS != maxBuildCompletionWaitMS {
+		t.Fatalf("completion validation must poll the evidence-bound result, got %+v", validation)
+	}
+	if validation.Target.URL != "" {
+		t.Fatalf("completion validation must not accept the build route by itself: %+v", validation.Target)
+	}
+}
+
 func TestSessionSetupValidationUsesPostLoginStateNotEmailActionTarget(t *testing.T) {
 	stage := model.BusinessStage{
 		ID: "business_stage_session_setup", Kind: model.BusinessStageKindSessionSetup,
@@ -45,6 +73,18 @@ func TestSessionSetupValidationUsesPostLoginStateNotEmailActionTarget(t *testing
 	validation := businessStageValidation(stage, model.GraphActionFill, target, true)
 	if validation.Kind != "url_matches" || validation.Target.URL != "/app" || validation.Target.Selector != "" || validation.Expected != "/app" {
 		t.Fatalf("session validation reused the login/waitlist action target: %+v", validation)
+	}
+}
+
+func TestSessionSetupGraphDoesNotInventAnUnscannedWorkspaceElement(t *testing.T) {
+	stage := model.BusinessStage{
+		ID: "business_stage_session_setup", Kind: model.BusinessStageKindSessionSetup,
+		EntryRoute: "/login", ExpectedRouteAfterAction: "/app",
+		Action: model.BusinessActionSemantics{SuccessState: "登录完成，页面进入工作台或目标业务页面。", NonDestructive: true},
+	}
+	node := graphNodeFromBusinessStage(&model.ProjectContext{}, stage, "https://product.example/login", "")
+	if len(node.Validations) != 1 || node.Validations[0].Kind != "url_matches" || node.Validations[0].Target.URL != "/app" {
+		t.Fatalf("session setup must keep only the evidence-bound post-login route validation: %+v", node.Validations)
 	}
 }
 
@@ -73,7 +113,7 @@ func TestModeSelectionValidationDoesNotReuseClickedControl(t *testing.T) {
 		Action: model.BusinessActionSemantics{SuccessState: "Agent 模式已选中"},
 	}
 	validation := businessStageValidation(stage, model.GraphActionClick, model.ActionTarget{Selector: "[data-testid='mode-agent']"}, true)
-	if validation.Kind != "text_contains" || validation.Target.Selector != "" || validation.Expected != "Agent 模式已选中" {
+	if validation.Kind != "page_changed" || validation.Target.Selector != "" || validation.Expected != true {
 		t.Fatalf("mode validation reused the action target instead of the success state: %+v", validation)
 	}
 }
@@ -279,6 +319,8 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 		validatedNode("business_stage_start_build", model.BusinessStageKindBusinessSubmit),
 		validatedNode("business_stage_observe_progress", model.BusinessStageKindObserveProgress),
 		validatedNode("business_stage_final_observe", model.BusinessStageKindFinalObserve),
+		validatedNode("business_stage_playable_preview", model.BusinessStageKindFinalObserve),
+		validatedNode("business_stage_verify_playable_controls", model.BusinessStageKindFinalObserve),
 		{ID: "business_stage_unverified_submit", Metadata: map[string]any{"business_stage_kind": string(model.BusinessStageKindBusinessSubmit)}, EvidenceRefs: evidence},
 	}}
 	project := &model.ProjectContext{Inputs: &model.ProjectInputBundle{Requirements: []model.DemoRequirement{
@@ -286,6 +328,10 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 		{ID: "create", Kind: "must_show", Description: "新建项目并填写项目名称", Required: true},
 		{ID: "start", Kind: "must_show", Description: "Agent 已启动", Required: true},
 		{ID: "result", Kind: "must_show", Description: "最终实际运行效果", Required: true},
+		{ID: "complete", Kind: "must_show", Description: "最多等待 20 分钟直到 Agent 构建完成", Required: true},
+		{ID: "poll_complete", Kind: "must_show", Description: "持续轮询直到所有构建步骤完成或出现明确 build_complete", Required: true},
+		{ID: "playable", Kind: "must_show", Description: "最终预览显示俄罗斯方块棋盘、得分和操作说明", Required: true},
+		{ID: "keyboard", Kind: "must_show", Description: "用方向键实际试玩并确认方块位置发生变化", Required: true},
 		{ID: "secret", Kind: "must_not_show", Description: "不得显示密码", Required: true},
 	}}}
 
@@ -294,6 +340,9 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 	want := map[string]string{
 		"login": "business_stage_session_setup", "create": "business_stage_new_project_entry",
 		"start": "business_stage_start_build", "result": "business_stage_final_observe",
+		"complete": "business_stage_final_observe", "playable": "business_stage_playable_preview",
+		"poll_complete": "business_stage_final_observe",
+		"keyboard":      "business_stage_verify_playable_controls",
 	}
 	for _, requirement := range graph.Requirements {
 		if requirement.Kind != "must_show" {

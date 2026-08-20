@@ -107,9 +107,68 @@ func RenderClientExecutionRecordingResult(ctx context.Context, service DeliveryR
 	if err := validateFinalMP4Delivery(ctx, service, renderRequest.RenderProfile, renderResult); err != nil {
 		return RenderRequest{}, RenderResult{}, err
 	}
+	if renderResult.DeliveryStatus == "complete" {
+		if err := validateDualFinalMP4Delivery(ctx, service, renderResult); err != nil {
+			return RenderRequest{}, RenderResult{}, err
+		}
+	}
 	AttachRenderResultArtifacts(source, recording, renderResult, recording.CreatedAt)
 	reportPipelineProgress(request, "quality_validation", "Validating required-step coverage, media decodability, redaction, and output checksums.", 98)
 	return renderRequest, renderResult, nil
+}
+
+func validateDualFinalMP4Delivery(ctx context.Context, service DeliveryRenderService, result RenderResult) error {
+	if result.DeliveryStatus != "complete" {
+		return errors.New("dual_delivery_incomplete: delivery status is not complete")
+	}
+	if len(result.Deliverables) != 2 {
+		return fmt.Errorf("dual_delivery_incomplete: got %d deliverables, want 2", len(result.Deliverables))
+	}
+	seen := map[string]bool{}
+	for _, deliverable := range result.Deliverables {
+		if deliverable.Status != "complete" || deliverable.VideoPath == "" {
+			return fmt.Errorf("dual_delivery_incomplete: deliverable %q is not complete", deliverable.ID)
+		}
+		if seen[deliverable.ID] {
+			return fmt.Errorf("dual_delivery_invalid: duplicate deliverable %q", deliverable.ID)
+		}
+		seen[deliverable.ID] = true
+		if err := validateRequiredDualDeliveryProfile(deliverable); err != nil {
+			return err
+		}
+		if err := validateFinalMP4Delivery(ctx, service, &deliverable.Profile, RenderResult{VideoPath: deliverable.VideoPath}); err != nil {
+			return fmt.Errorf("dual_delivery_%s: %w", deliverable.ID, err)
+		}
+	}
+	for _, id := range []string{"final_master_2k", "final_delivery_1080p"} {
+		if !seen[id] {
+			return fmt.Errorf("dual_delivery_incomplete: missing %s", id)
+		}
+	}
+	return nil
+}
+
+func validateRequiredDualDeliveryProfile(deliverable RenderDeliverable) error {
+	expected, ok := requiredDualDeliveryProfiles()[deliverable.ID]
+	if !ok {
+		return fmt.Errorf("dual_delivery_invalid: unexpected deliverable %q", deliverable.ID)
+	}
+	profile := deliverable.Profile
+	if profile.Width != expected.Width || profile.Height != expected.Height || profile.FPS != expected.FPS || !strings.EqualFold(strings.TrimSpace(profile.Format), expected.Format) {
+		return fmt.Errorf("dual_delivery_profile_mismatch: %s got=%dx%d@%d/%s want=%dx%d@%d/%s", deliverable.ID, profile.Width, profile.Height, profile.FPS, profile.Format, expected.Width, expected.Height, expected.FPS, expected.Format)
+	}
+	return nil
+}
+
+func requiredDualDeliveryProfiles() map[string]model.EditorRenderProfile {
+	return map[string]model.EditorRenderProfile{
+		model.MediaOutputProfileMaster2K: {
+			ID: model.MediaOutputProfileMaster2K, Width: 2560, Height: 1440, FPS: 30, Format: "mp4",
+		},
+		model.MediaOutputProfileDelivery1080: {
+			ID: model.MediaOutputProfileDelivery1080, Width: 1920, Height: 1080, FPS: 30, Format: "mp4",
+		},
+	}
 }
 
 func validateBrowserAgentEvidenceMaster(ctx context.Context, service DeliveryRenderService, source *model.ClientExecutionPackage, recording *model.RecordingResultPackage) error {
@@ -386,8 +445,21 @@ func renderArtifactsFromResult(source *model.ClientExecutionPackage, renderResul
 		{path: renderResult.CandidateAssetEditPatchPath, kind: "candidate_asset_edit_plan_patch", mimeFallback: "application/json", role: "candidate_asset_edit_plan_patch"},
 		{path: renderResult.ValidationReportPath, kind: "demo_edit_plan_validation", mimeFallback: "application/json", role: "render_validation"},
 		{path: renderResult.RenderManifestPath, kind: "render_manifest", mimeFallback: "application/json", role: "render_manifest"},
+		{path: renderResult.DeliveryManifestPath, kind: "deliverables_manifest", mimeFallback: "application/json", role: "deliverables_manifest"},
 		{path: renderResult.MediaNormalizationReportPath, kind: "media_normalization_report", mimeFallback: "application/json", role: "media_normalization"},
 		{path: renderResult.RequirementReportPath, kind: "requirement_satisfaction_report", mimeFallback: "application/json", role: "requirement_satisfaction"},
+	}
+	for _, deliverable := range renderResult.Deliverables {
+		if strings.TrimSpace(deliverable.VideoPath) == "" {
+			continue
+		}
+		specs = append(specs, renderArtifactSpec{
+			path:          deliverable.VideoPath,
+			kind:          "final_video_" + deliverable.ID,
+			mimeFallback:  "video/mp4",
+			role:          deliverable.ID,
+			includeInDemo: true,
+		})
 	}
 	artifacts := []model.ArtifactRef{}
 	for _, spec := range specs {

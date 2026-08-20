@@ -6,6 +6,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 )
@@ -244,7 +247,11 @@ func (s *Service) DirectTransportStatus(ctx context.Context) (DirectTransportRun
 	if controlURL == "" || tokenErr != nil {
 		return view, nil
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	client, err := s.directHTTPClient(10 * time.Second)
+	if err != nil {
+		view.ErrorClass = "tls_configuration"
+		return view, nil
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, controlURL+"/v1/direct/health", nil)
 	if err != nil {
 		return view, err
@@ -384,6 +391,9 @@ func bindDirectExecutionPackageOrigin(build ClientExecutionPackageBuild, install
 	}
 	if err := model.ValidateClientExecutionPackageForCloudExecution(&pkg); err != nil {
 		return ClientExecutionPackageBuild{}, err
+	}
+	if err := model.ValidateClientExecutionPackageForDirectExecution(&pkg); err != nil {
+		return ClientExecutionPackageBuild{}, fmt.Errorf("direct origin-bound package validation: %w", err)
 	}
 	digest, err := model.DigestCanonicalJSON(pkg)
 	if err != nil {
@@ -572,7 +582,11 @@ func (s *Service) releaseDirectLeaseRemote(ctx context.Context, lease model.Dire
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+token)
 	httpRequest.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(httpRequest)
+	client, err := s.directHTTPClient(30 * time.Second)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(httpRequest)
 	if err != nil {
 		return err
 	}
@@ -658,6 +672,52 @@ func (s *Service) GetDirectExecutionStatus(ctx context.Context, projectID, jobID
 		return status, err
 	}
 	return status, nil
+}
+
+// ReuploadDirectCredential restores the one-time in-memory credential grant
+// after a Worker release or Gateway restart. It reuses only the approved grant
+// identity/scope and reads the secret value afresh from the local vault; it
+// never requires another package approval and never persists plaintext.
+func (s *Service) ReuploadDirectCredential(ctx context.Context, projectID, jobID string) (model.DirectCredentialReceipt, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return model.DirectCredentialReceipt{}, err
+	}
+	run := state.DesktopCloudRun
+	if run == nil || run.Transport != directTransportStateName || strings.TrimSpace(jobID) == "" || run.CloudJobID != jobID || run.PackageID == "" || run.PackageDigestSHA256 == "" {
+		return model.DirectCredentialReceipt{}, errors.New("direct Browser Agent credential recovery does not match the active job")
+	}
+	lease, err := s.loadDirectLease(projectID)
+	if err != nil {
+		return model.DirectCredentialReceipt{}, err
+	}
+	grants := append([]model.CredentialGrant(nil), run.DirectCredentialGrants...)
+	if len(grants) == 0 {
+		// Compatibility for jobs uploaded before direct_credential_grants became
+		// restart-safe state: rebuild only the non-secret grant metadata.
+		draft, buildErr := s.BuildClientExecutionPackage(ctx, projectID, firstNonEmptyString(run.OrgID, defaultDesktopOrgID))
+		if buildErr != nil {
+			return model.DirectCredentialReceipt{}, buildErr
+		}
+		grants = append(grants, draft.Package.CredentialGrants...)
+	}
+	build := ClientExecutionPackageBuild{PackageDigestSHA256: run.PackageDigestSHA256}
+	build.Package.PackageID = run.PackageID
+	build.Package.CredentialGrants = grants
+	receipt := model.DirectPackageReceipt{JobID: jobID, PackageID: run.PackageID, PackageDigest: run.PackageDigestSHA256}
+	accepted, err := s.uploadDirectCredential(ctx, lease, receipt, build)
+	if err != nil {
+		return accepted, err
+	}
+	status := model.DirectJobStatus{
+		ProtocolVersion: model.DirectTransportProtocolVersion, JobID: jobID, PackageID: run.PackageID,
+		Status: accepted.Status, Stage: accepted.Stage, Message: "Credential grant was securely restored from the local vault.",
+		ProgressPercent: 5, UpdatedAt: accepted.AcceptedAt,
+	}
+	if err := s.persistDirectStatus(ctx, projectID, status); err != nil {
+		return accepted, err
+	}
+	return accepted, nil
 }
 
 func (s *Service) GetDirectResult(ctx context.Context, projectID, jobID string) (model.RecordingResultPackage, error) {
@@ -940,7 +1000,11 @@ func (s *Service) acquireDirectLease(ctx context.Context, projectID string) (mod
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+token)
 	httpRequest.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(httpRequest)
+	client, err := s.directHTTPClient(30 * time.Second)
+	if err != nil {
+		return model.DirectPortLease{}, err
+	}
+	response, err := client.Do(httpRequest)
 	if err != nil {
 		return model.DirectPortLease{}, fmt.Errorf("direct Browser Agent lease failed: %w", err)
 	}
@@ -1046,7 +1110,11 @@ func (s *Service) directDataRequest(ctx context.Context, lease model.DirectPortL
 	request.Header.Set("X-Cascade-Nonce", nonce)
 	request.Header.Set("X-Cascade-Body-SHA256", digest)
 	request.Header.Set("X-Cascade-Signature", signature)
-	response, err := (&http.Client{Timeout: 60 * time.Second}).Do(request)
+	client, err := s.directHTTPClient(60 * time.Second)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return err
 	}
@@ -1066,6 +1134,35 @@ func (s *Service) directDataRequest(ctx context.Context, lease model.DirectPortL
 		return err
 	}
 	return model.DecryptDirectTransportJSON(encrypted, lease, responseType, model.DirectTransportDirectionResult, time.Now().UTC(), target)
+}
+
+// directHTTPClient keeps production on the operating-system trust store. A
+// development Server may explicitly add a local Direct CA certificate, but it
+// never disables certificate verification. This supports the self-signed
+// certificate generated by directcert without broadening production trust.
+func (s *Service) directHTTPClient(timeout time.Duration) (*http.Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	caFile := strings.TrimSpace(os.Getenv("CASCADE_DIRECT_DEV_TLS_CA_FILE"))
+	if caFile == "" {
+		return &http.Client{Timeout: timeout, Transport: transport}, nil
+	}
+	if s.runtime.Profile != config.ProfileDev {
+		return nil, errors.New("CASCADE_DIRECT_DEV_TLS_CA_FILE is allowed only in the dev profile")
+	}
+	pemBytes, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read Direct development CA file: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, errors.New("Direct development CA file does not contain a PEM certificate")
+	}
+	transport.TLSClientConfig.RootCAs = pool
+	return &http.Client{Timeout: timeout, Transport: transport}, nil
 }
 
 func (s *Service) loadDirectLease(projectID string) (model.DirectPortLease, error) {
@@ -1125,6 +1222,7 @@ func (s *Service) persistDirectUpload(ctx context.Context, projectID string, bui
 		run.AckedAt = nil
 		run.DownloadedAssets = nil
 		run.DirectArtifacts = nil
+		run.DirectCredentialGrants = append([]model.CredentialGrant(nil), build.Package.CredentialGrants...)
 		run.ResultReview = nil
 		state.ErrorMessage = ""
 	})
@@ -1179,11 +1277,17 @@ func withDirectIssueIDs(issues []model.DirectReunderstandingIssue) []model.Direc
 	if len(issues) == 0 {
 		return nil
 	}
-	out := append([]model.DirectReunderstandingIssue(nil), issues...)
-	for index := range out {
-		if strings.TrimSpace(out[index].IssueID) == "" {
-			out[index].IssueID = model.StableDirectReunderstandingIssueID(out[index])
+	out := make([]model.DirectReunderstandingIssue, 0, len(issues))
+	seen := map[string]bool{}
+	for _, issue := range issues {
+		if strings.TrimSpace(issue.IssueID) == "" {
+			issue.IssueID = model.StableDirectReunderstandingIssueID(issue)
 		}
+		if seen[issue.IssueID] {
+			continue
+		}
+		seen[issue.IssueID] = true
+		out = append(out, issue)
 	}
 	return out
 }

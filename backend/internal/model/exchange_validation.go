@@ -147,7 +147,7 @@ func ValidateClientExecutionPackageForDirectExecution(pkg *ClientExecutionPackag
 	if strings.TrimSpace(approval.ApprovalSchemaVersion) != UserApprovalSchemaVersion {
 		return directPackageValidationError("approval_digest_mismatch", fmt.Sprintf("direct execution approval_schema_version must be %q", UserApprovalSchemaVersion))
 	}
-	expectedSubjectDigests, err := ComputeApprovalSubjectDigestsSHA256(*pkg)
+	expectedSubjectDigests, err := ComputePackageApprovalComponentDigests(*pkg)
 	if err != nil {
 		return directPackageValidationError("approval_digest_mismatch", "direct execution approval subject objects are incomplete")
 	}
@@ -335,7 +335,7 @@ func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, sour
 		}
 		if len(result.FailureDiagnostic.ScreenshotRefs) == 0 && len(result.FailureDiagnostic.TraceRefs) == 0 {
 			code := strings.ToLower(strings.TrimSpace(result.FailureDiagnostic.Error.Code))
-			infrastructure := strings.Contains(code, "session_start") || strings.Contains(code, "worker_missing") || strings.Contains(code, "node_missing") || strings.Contains(code, "stage_event_audit") || strings.Contains(code, "result_packaging") || strings.Contains(code, "render_failed") || strings.Contains(code, "infrastructure")
+			infrastructure := result.FailureDiagnostic.BrowserEvidenceUnavailable || strings.Contains(code, "session_start") || strings.Contains(code, "worker_missing") || strings.Contains(code, "node_missing") || strings.Contains(code, "stage_event_audit") || strings.Contains(code, "result_packaging") || strings.Contains(code, "render_failed") || strings.Contains(code, "infrastructure") || strings.Contains(code, "outcome_pre_verification") || strings.Contains(code, "outline_runner_unavailable")
 			if !infrastructure {
 				return errors.New("failed_result_missing_evidence: formal failed result requires screenshot or trace evidence")
 			}
@@ -399,6 +399,17 @@ func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, sour
 		if err := requireArtifact("result_missing_demo_edit_plan", "demo_edit_plan"); err != nil {
 			return err
 		}
+		if RequiresDualMediaDelivery(source) {
+			if err := requireArtifact("result_missing_final_master_2k", "final_video_final_master_2k"); err != nil {
+				return err
+			}
+			if err := requireArtifact("result_missing_final_delivery_1080p", "final_video_final_delivery_1080p"); err != nil {
+				return err
+			}
+			if err := requireArtifact("result_missing_deliverables_manifest", "deliverables_manifest"); err != nil {
+				return err
+			}
+		}
 	}
 	if source.RecordingRunSpec.Outputs.Trace {
 		if err := requireArtifact("result_missing_browser_trace", "browser_trace", "execution_trace"); err != nil {
@@ -417,6 +428,19 @@ func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, sour
 		return errors.New("result_missing_stage_event_log: stage_event_log_ref must include sha256 and size_bytes")
 	}
 	return nil
+}
+
+// RequiresDualMediaDelivery reports whether this package uses the approved
+// two-file delivery contract. Both formal validation and client-facing status
+// summaries must use this one predicate.
+func RequiresDualMediaDelivery(source *ClientExecutionPackage) bool {
+	if source == nil || source.ProjectContextSummary.MediaDeliveryPreferences == nil {
+		return false
+	}
+	preferences := NormalizeMediaDeliveryPreferences(source.ProjectContextSummary.MediaDeliveryPreferences)
+	return len(preferences.OutputProfiles) == 2 &&
+		preferences.OutputProfiles[0].ID == MediaOutputProfileMaster2K &&
+		preferences.OutputProfiles[1].ID == MediaOutputProfileDelivery1080
 }
 
 // ValidateLocalTestRecordingResultPackageForRender is deliberately separate
@@ -560,7 +584,7 @@ func validateSourceBindingSummary(pkg *ClientExecutionPackage) error {
 	if summary.SchemaVersion != ProductSourceBindingAssessmentSchemaVersion || summary.AssessmentHash == "" {
 		return errors.New("source_binding_summary is invalid")
 	}
-	if summary.EffectiveMode == ProductSourceModeBlocked || summary.EffectiveMode == ProductSourceModeMixed && summary.Status != ProductSourceBindingMatched {
+	if summary.EffectiveMode == ProductSourceModeBlocked || summary.EffectiveMode == ProductSourceModeMixed && !ProductSourceBindingAllowsMixed(summary.Status) {
 		return errors.New("product_source_mismatch: source binding does not allow mixed execution evidence")
 	}
 	if summary.EffectiveMode == ProductSourceModePageOnly && ClientPackageContainsSourceDerivedExecutionEvidence(pkg) {
@@ -929,7 +953,7 @@ func stageHasEvidence(stage StageApprovalStage) bool {
 
 func stepRequiresBrowserAgentValidation(step ScriptStep) bool {
 	switch step.Action.Type {
-	case GraphActionNavigate, GraphActionClick, GraphActionFill, GraphActionSelect, GraphActionUpload, GraphActionAPICall:
+	case GraphActionNavigate, GraphActionClick, GraphActionFill, GraphActionSelect, GraphActionUpload, GraphActionPress, GraphActionAPICall:
 		return true
 	case GraphActionWait, GraphActionInspect:
 		return step.StageKind == BusinessStageKindSessionSetup || step.StageKind == BusinessStageKindObserveProgress || step.StageKind == BusinessStageKindFinalObserve
@@ -944,7 +968,7 @@ func stepHasRequiredBrowserAgentValidation(step ScriptStep) bool {
 			continue
 		}
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "playable_surface_visible":
 			return true
 		}
 	}

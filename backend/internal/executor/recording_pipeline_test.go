@@ -498,6 +498,20 @@ func TestValidateFinalMP4DeliveryEnforcesRequested2KProfile(t *testing.T) {
 	}
 }
 
+func TestValidateDualFinalMP4DeliveryRejectsSwappedProfileLabels(t *testing.T) {
+	result := RenderResult{
+		DeliveryStatus: "complete",
+		Deliverables: []RenderDeliverable{
+			{ID: model.MediaOutputProfileMaster2K, Status: "complete", VideoPath: "master.mp4", Profile: model.EditorRenderProfile{Width: 1920, Height: 1080, FPS: 30, Format: "mp4"}},
+			{ID: model.MediaOutputProfileDelivery1080, Status: "complete", VideoPath: "delivery.mp4", Profile: model.EditorRenderProfile{Width: 2560, Height: 1440, FPS: 30, Format: "mp4"}},
+		},
+	}
+	err := validateDualFinalMP4Delivery(t.Context(), &fakeRecordingRenderService{}, result)
+	if err == nil || !strings.Contains(err.Error(), "dual_delivery_profile_mismatch: final_master_2k") {
+		t.Fatalf("swapped profile labels must block dual delivery, got %v", err)
+	}
+}
+
 func TestValidateFinalMP4DeliveryRejectsUnsatisfiedRequirementReport(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "final.mp4")

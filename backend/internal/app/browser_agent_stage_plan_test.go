@@ -44,6 +44,12 @@ func TestCompileBrowserAgentRuntimePlanKeepsApprovedStageOrderAndSemantics(t *te
 	}
 }
 
+func TestBrowserAgentPolicyAllowsApprovedKeyboardPress(t *testing.T) {
+	if !browserAgentActionTypeAllowed(model.GraphActionPress) {
+		t.Fatal("approved non-destructive keyboard press must be executable by the Browser Agent policy")
+	}
+}
+
 func TestBrowserAgentReadinessAcceptsCompleteFixture(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	report := browserAgentReadiness(&pkg)
@@ -147,6 +153,30 @@ func TestBrowserAgentReadinessDetectsApprovedActionIdentityReuse(t *testing.T) {
 	report := browserAgentReadiness(&pkg)
 	if report.CanRun || (!browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_action_identity") && !browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_approved_action_evidence")) {
 		t.Fatalf("expected action identity reuse blocker, got: %+v", report)
+	}
+}
+
+func TestBrowserAgentReadinessAcceptsIndependentResultComponentWithSharedStageEvidence(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	stage := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1]
+	stage.StageKind = model.BusinessStageKindBusinessAction
+	stage.TargetContract.ComponentRef = "new-project-action"
+	step := &pkg.ExecutableScriptBundle.PlanJSON.Steps[1]
+	step.Action.Type = model.GraphActionClick
+	step.Action.Target = model.ActionTarget{
+		Selector: `[data-testid="button-new-project"]`, TestID: "button-new-project", EvidenceRefs: stage.TargetContract.EvidenceRefs,
+	}
+	step.Validations = []model.ValidationSpec{{
+		ID: "after_click", Kind: "element_visible", Target: model.ActionTarget{Selector: `[data-testid="dialog-new-project"]`, TestID: "dialog-new-project"}, Required: true,
+	}}
+	pkg.ExecutableScriptBundle.ScriptOutline.Stages[1].Components = []model.BrowserAgentComponentTarget{
+		{ComponentRef: "new-project-action", Selector: `[data-testid="button-new-project"]`, TestID: "button-new-project", EvidenceRefs: stage.TargetContract.EvidenceRefs},
+		{Selector: `[data-testid="dialog-new-project"]`, TestID: "dialog-new-project", EvidenceRefs: stage.TargetContract.EvidenceRefs},
+	}
+
+	report := browserAgentReadiness(&pkg)
+	if browserAgentReadinessHasBlocker(report, "post_action_validation_reuses_approved_action_evidence") {
+		t.Fatalf("independent result-state component was misclassified as the approved action: %+v", report)
 	}
 }
 
@@ -431,6 +461,26 @@ func TestBrowserAgentStageOrchestratorAppliesOnlyWorkerVerifiedSelectorAlternati
 	}
 }
 
+func TestCurrentStageSelectorFallsBackToApprovedSemanticLocator(t *testing.T) {
+	stage := BrowserAgentRuntimeStage{
+		TargetContract: model.BrowserAgentTargetContract{SemanticID: "invite-member", ComponentRef: "component:invite-button"},
+		Components: []model.BrowserAgentComponentTarget{{
+			ComponentRef: "component:invite-button",
+			Role:         "button",
+			Name:         "Invite teammate",
+			TestID:       "invite-member",
+		}},
+	}
+	if got := currentStageSelector(stage); got != "testid:invite-member" {
+		t.Fatalf("approved test id should identify the pre-repair locator, got %q", got)
+	}
+
+	stage.Components[0].TestID = ""
+	if got := currentStageSelector(stage); got != "role:button:name:Invite teammate" {
+		t.Fatalf("approved role and name should identify the pre-repair locator, got %q", got)
+	}
+}
+
 func TestBrowserAgentStageOrchestratorStopsWithoutWorkerVerifiedAlternative(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	plan, err := compileBrowserAgentRuntimePlan(&pkg)
@@ -532,6 +582,37 @@ func (s *memoryStageEventSink) Append(_ context.Context, event model.StageExecut
 type stubStageVerifier struct {
 	decision model.ValidationDecision
 	calls    int
+}
+
+func TestWarningOnlyRepairDecisionContinuesAfterPassedBrowserAssertions(t *testing.T) {
+	report := model.ValidationReport{
+		SchemaVersion: model.ValidationReportSchemaVersion, ReportID: "warning_report", RunID: "run_warning",
+		SourcePackageID: "pkg_warning", SourceBundleHashSHA256: "bundle_warning", PolicyHashSHA256: "policy_warning",
+		Phase: model.ValidationPhaseRuntimeStage, NodeID: "node_warning", StageID: "stage_warning",
+		Decision: model.ValidationDecisionRepairAllowed, PassRate: .5, OverallConfidence: .8,
+		EvidenceQuality: model.RuntimeObservationAssertion, CreatedAt: timeNowUTC(),
+		Checks: []model.ValidationCheck{{ID: "warning_check", Kind: "warning", Code: string(model.ValidationResultTypeWarning), Severity: model.FindingSeverityWarning, Passed: false, Summary: "warning-only compatibility check"}},
+	}
+	observation := &model.RuntimeObservation{Assertions: []model.RuntimeAssertion{{Kind: "element_visible", Passed: true}}}
+	if !warningOnlyRepairDecisionCanContinue(report, observation) {
+		t.Fatal("warning-only compatibility feedback should not require an invented repair proposal")
+	}
+	normalized, ok := normalizeWarningOnlyRepairDecision(report, observation, []model.EvidenceRef{{ID: "runtime_screenshot", Kind: model.EvidenceKindWebScreenshot}})
+	if !ok || normalized.Decision != model.ValidationDecisionContinue || len(normalized.EvidenceRefs) != 1 {
+		t.Fatalf("normalized continue report must retain real runtime evidence: %+v", normalized)
+	}
+	if err := normalized.Validate(); err != nil {
+		t.Fatalf("normalized continue report must satisfy the formal report contract: %v", err)
+	}
+	report.Checks = append(report.Checks, model.ValidationCheck{Severity: model.FindingSeverityBlocking, Passed: false})
+	if warningOnlyRepairDecisionCanContinue(report, observation) {
+		t.Fatal("blocking findings must not bypass runtime repair or stop policy")
+	}
+	report.Checks = report.Checks[:1]
+	observation.Assertions[0].Passed = false
+	if warningOnlyRepairDecisionCanContinue(report, observation) {
+		t.Fatal("failed browser assertions must not be normalized to continue")
+	}
 }
 
 type countingStageExecutor struct{ calls int }

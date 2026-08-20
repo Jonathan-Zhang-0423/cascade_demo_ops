@@ -61,6 +61,11 @@ $env:CASCADE_ARK_MEDIA_POLL_ATTEMPTS = "20"
 $env:CASCADE_ARK_MEDIA_POLL_INTERVAL_MS = "3000"
 ```
 
+Before a real candidate upload, run `tospreflight` and require its read-only
+lifecycle result to be `verified`. The Seedance preflight command defaults to
+blocking publication; pass `-tos-retention-ack` only after the client has
+explicitly acknowledged the 30-day policy.
+
 `CASCADE_LLM_MODE` and `CASCADE_ARK_MEDIA_MODE` are independent. The first
 controls planning/understanding LLM calls; the second alone enables Seedance
 media calls after all source-asset gates pass. Keeping the first deterministic
@@ -99,9 +104,10 @@ an administrator or all-buckets policy.
 }
 ```
 
-In the TOS console, create a lifecycle rule named `delete-ark-media-1d` for
-prefix `ark-media/`, with deletion after one day. This rule must not target the
-entire bucket.
+In the TOS console, create a lifecycle rule named `delete-ark-media-30d` for
+prefix `ark-media/`, with deletion after 30 days. This rule must not target the
+entire bucket. The Server's standard retention gate requires the client to
+acknowledge this 30-day policy before any real publication.
 
 ## Preconditions the Server Verifies
 
@@ -141,4 +147,5 @@ provider is slow, rejects the request, or returns no downloadable candidate.
 For the initial Seedance reference, keep each MP4/MOV to 2-15 seconds,
 480P/720P/1080P, H.264/H.265, no more than 50 MB, and no more than three
 videos with a combined duration of 15 seconds. Configure a TOS lifecycle rule
-to delete only `ark-media/` objects after one day.
+to delete only `ark-media/` objects after 30 days, and verify it with
+`tospreflight` before the provider call.

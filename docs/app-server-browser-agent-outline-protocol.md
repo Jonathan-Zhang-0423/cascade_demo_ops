@@ -453,7 +453,7 @@ demoops.browser_agent_contract.v1
 
 ## 模型生成展示候选兼容性补充（2026-08-05）
 
-模型生成展示候选已经拆分为独立公共协议：[App ↔ Server 生成展示视频能力协议](app-server-generated-video-capability-protocol.md)。本文件不再承载 Seedance 2.0 或 MiniMax-H3 的参数、模式和素材限制，避免把 Provider 专属能力混入 Browser Agent 执行包协议。
+模型生成展示候选已经拆分为独立公共协议：[App ↔ Server 生成展示视频能力协议](app-server-generated-video-capability-protocol.md)。本文件不再承载 Seedance 2.5 或 MiniMax-H3 的参数、模式和素材限制，避免把 Provider 专属能力混入 Browser Agent 执行包协议。
 
 当前兼容性结论保持不变：
 
@@ -466,7 +466,7 @@ demoops.browser_agent_contract.v1
 
 Provider 内部协议分别维护：
 
-- [Seedance 2.0 视频生成内部协议](seedance-2-0-video-generation.md)
+- [Seedance 2.5 FinalFilm 接入说明](seedance-2-5-video-generation.md)
 - [MiniMax-H3 视频生成接入说明](minimax-h3-video-generation.md)
 
 ## 错误格式

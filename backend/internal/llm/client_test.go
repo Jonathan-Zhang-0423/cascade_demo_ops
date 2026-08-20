@@ -481,6 +481,31 @@ func TestRouterRealModeFallsBackOnJSONParseFailure(t *testing.T) {
 	}
 }
 
+func TestRouterRealModeFallsBackOnProviderTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(250 * time.Millisecond):
+		}
+	}))
+	defer server.Close()
+
+	runtime := testRuntime(config.ModelProviderKimi, server.URL)
+	runtime.LLMMode = config.LLMModeReal
+	router := NewRouter(runtime)
+	router.http.Timeout = 25 * time.Millisecond
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	trace, err := router.GenerateJSON(context.Background(), config.ModelTaskPlanning, JSONRequest{System: "s", User: "u"}, &out)
+	if !IsDeterministicFallback(err) {
+		t.Fatalf("expected real mode timeout to retain the deterministic plan, got trace=%+v err=%v", trace, err)
+	}
+	if trace == nil || trace.FallbackReason != errorClassTimeout || trace.ErrorClass != errorClassTimeout {
+		t.Fatalf("expected a redacted timeout fallback trace, got %+v", trace)
+	}
+}
+
 func TestProviderErrorsAreRedacted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad key sk-secret-value Authorization bearer-secret"}`, http.StatusUnauthorized)

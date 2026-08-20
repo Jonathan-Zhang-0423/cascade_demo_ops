@@ -105,3 +105,37 @@ func TestConvertReadinessToValidationChecks(t *testing.T) {
 	}
 }
 
+func TestPreExecutionReadinessPreservesApprovedCredentialGrants(t *testing.T) {
+	const secretRef = "credential://demo/login"
+	pkg := &model.ClientExecutionPackage{
+		PackageID: "pkg_with_login",
+		CredentialGrants: []model.CredentialGrant{{
+			GrantID: "grant_login", CloudSecretRef: secretRef,
+			AllowedDomains: []string{"example.test"}, AllowedOperations: []string{"login"},
+		}},
+		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
+			PlanJSON: &model.ExecutionScriptDocument{Steps: []model.ScriptStep{{
+				NodeID: "node_login", Action: model.ScriptActionInstruction{Type: model.GraphActionFill, SecretRef: secretRef},
+				Validations: []model.ValidationSpec{{Kind: "page_loaded", Required: true}},
+			}}},
+			StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+				NodeID: "node_login", StageKind: model.BusinessStageKindBusinessInput,
+				Interaction: model.BrowserAgentInteraction{Kind: model.GraphActionFill, SecretRef: secretRef},
+			}}},
+			ScriptOutline: &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{
+				NodeID: "node_login", StageKind: model.BusinessStageKindBusinessInput,
+				Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionFill, SecretRef: secretRef}},
+			}}},
+		},
+	}
+
+	validationContext := validationContextFromPackage(pkg)
+	if len(validationContext.CredentialGrants) != 1 || validationContext.CredentialGrants[0].CloudSecretRef != secretRef {
+		t.Fatalf("validation context lost the approved credential grant: %+v", validationContext.CredentialGrants)
+	}
+	for _, check := range convertReadinessToValidationChecks(validationContext) {
+		if check.Code == "credential_grant_missing" {
+			t.Fatalf("pre-execution readiness created a false credential blocker: %+v", check)
+		}
+	}
+}

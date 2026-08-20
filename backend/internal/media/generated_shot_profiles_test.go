@@ -56,6 +56,43 @@ func TestGeneratedShotCompilersProduceIndependentProviderRequests(t *testing.T) 
 	}
 }
 
+func TestSeedance25CompilerUsesOfficialReferenceFieldsWithoutEnablingCalls(t *testing.T) {
+	intent := validGeneratedShotIntent()
+	intent.References = []GeneratedShotReference{
+		{ArtifactID: "image_1", URI: "https://bucket.tos-cn-beijing.ivolces.com/reference.png?signature=redacted", MimeType: "image/png", Usage: GeneratedShotReferenceGeneral},
+		{ArtifactID: "video_1", URI: "https://bucket.tos-cn-beijing.ivolces.com/reference.mp4?signature=redacted", MimeType: "video/mp4", Usage: GeneratedShotReferenceGeneral},
+	}
+	compiled, err := (Seedance25GeneratedShotCompiler{}).Compile(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.DryRunOnly || compiled.Provider != GeneratedShotProviderSeedance25 || compiled.Model != Seedance25ServerModel {
+		t.Fatalf("compiled safety envelope = %+v", compiled)
+	}
+	request := compiled.Request
+	if request.OmniReferenceTaskType != "reference" || request.OutputFormat != "mp4" || request.Resolution != "1080p" || request.GenerateAudio || request.Watermark || !request.ReturnLastFrame {
+		t.Fatalf("Seedance 2.5 request = %+v", request)
+	}
+	if len(request.Content) != 3 || request.Content[1].Role != "reference_image" || request.Content[1].ImageURL == nil || request.Content[2].Role != "reference_video" || request.Content[2].VideoURL == nil {
+		t.Fatalf("Seedance 2.5 content = %+v", request.Content)
+	}
+}
+
+func TestSeedance25CompilerLocksFrameModeToAdaptive(t *testing.T) {
+	intent := validGeneratedShotIntent()
+	intent.AspectRatio = "16:9"
+	intent.References = []GeneratedShotReference{{
+		ArtifactID: "first", URI: "https://assets.example.test/first.png", MimeType: "image/png", Usage: GeneratedShotReferenceFirstFrame,
+	}}
+	compiled, err := (Seedance25GeneratedShotCompiler{}).Compile(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Request.Ratio != "adaptive" || compiled.Request.OmniReferenceTaskType != "auto" || compiled.Request.Content[1].Role != "first_frame" {
+		t.Fatalf("Seedance 2.5 frame request = %+v", compiled.Request)
+	}
+}
+
 func TestGeneratedShotProviderProfilesRejectDifferentBoundaries(t *testing.T) {
 	vertical := validGeneratedShotIntent()
 	vertical.AspectRatio = "9:16"
@@ -88,8 +125,9 @@ func TestGeneratedShotProfilesRejectLastFrameOnlyBeforeCompilation(t *testing.T)
 		ArtifactID: "last", URI: "https://assets.example.test/last.png", MimeType: "image/png", Usage: GeneratedShotReferenceLastFrame,
 	}}
 	for name, compiler := range map[string]GeneratedShotProviderCompiler{
-		"seedance": Seedance20GeneratedShotCompiler{},
-		"h3":       MiniMaxH3GeneratedShotCompiler{},
+		"seedance-2.0": Seedance20GeneratedShotCompiler{},
+		"seedance-2.5": Seedance25GeneratedShotCompiler{},
+		"h3":           MiniMaxH3GeneratedShotCompiler{},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := compiler.Compile(intent); err == nil {
