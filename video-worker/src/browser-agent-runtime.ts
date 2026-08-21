@@ -1550,6 +1550,10 @@ export async function evaluateRequiredValidations(
         const value = await locatorForValidation(page, validation).first().inputValue({ timeout }).catch(() => undefined);
         passed = value !== undefined && String(value) === String(expected ?? "");
         actual = passed ? "matched" : "not_matched";
+        if (!passed && await structuralInputValueEquals(page, stage, expected, timeout)) {
+          passed = true;
+          actual = "structural_input_value_verified";
+        }
       } else if (validation.kind === "element_count") {
         const expected = Number(scalarExpected(validation));
         const count = await locatorForValidation(page, validation).count();
@@ -2204,6 +2208,23 @@ function booleanParameter(parameters: Record<string, unknown> | undefined, key: 
     if (value.trim().toLowerCase() === "false") return false;
   }
   return fallback;
+}
+
+async function structuralInputValueEquals(page: any, stage: BrowserAgentWorkerStage, expected: unknown, timeout: number): Promise<boolean> {
+  const interaction = (stage.interactions || []).find((candidate) => candidate.kind === "fill" || candidate.kind === "select");
+  if (!interaction || String(interaction.value ?? "") !== String(expected ?? "")) return false;
+  const structural = structuralInputLocator(page, stage, interaction);
+  if (!structural) return false;
+  const count = await withTimeout(structural.locator.count(), targetProbeTimeoutMS, 0);
+  if (count !== 1) return false;
+  const unique = structural.locator.first();
+  if (!await withTimeout(unique.isVisible({ timeout: Math.min(timeout, 750) }), targetProbeTimeoutMS, false)) return false;
+  const semantics = await withTimeout(compactElementSemantics(unique), targetProbeTimeoutMS, { role: "", name: "" });
+  if (forbiddenName(semantics.name, stage.target_contract.forbidden_names || [])) return false;
+  const allowedRoles = (stage.target_contract.allowed_roles || []).map((value) => value.trim().toLowerCase()).filter(Boolean);
+  if (!allowedRoles.includes(semantics.role)) return false;
+  const value = await unique.inputValue({ timeout }).catch(() => undefined);
+  return value !== undefined && String(value) === String(expected ?? "");
 }
 
 function stringArrayParameter(parameters: Record<string, unknown> | undefined, key: string, max: number): string[] {

@@ -677,6 +677,50 @@ describe("browser agent required validations", () => {
     }]);
   });
 
+  it("verifies the exact value on the same unique modal input used by structural runtime binding", async () => {
+    const stale = { first: () => ({ inputValue: async () => undefined }) };
+    const current = {
+      count: async () => 1,
+      first: () => ({
+        isVisible: async () => true,
+        evaluate: async () => ({ role: "textbox", name: "Runtime placeholder" }),
+        inputValue: async () => "full approved product request",
+      }),
+    };
+    const assertions = await evaluateRequiredValidations({
+      getByLabel: () => stale,
+      locator: () => current,
+    }, {
+      id: "stage_fill",
+      order: 1,
+      node_id: "primary_request_input",
+      target_contract: {
+        semantic_id: "primary_request_input",
+        allowed_roles: ["textbox"],
+        allowed_names: ["Approved semantic request"],
+        destructive: false,
+      },
+      interactions: [{
+        kind: "fill",
+        target: { label: "Approved semantic request" },
+        value: "full approved product request",
+        non_destructive: true,
+      }],
+      validations: [{
+        id: "approved_value",
+        kind: "value_equals",
+        target: { label: "Approved semantic request" },
+        expected: "full approved product request",
+        required: true,
+      }],
+    });
+    expect(assertions).toEqual([{
+      kind: "required_value_equals:approved_value",
+      passed: true,
+      actual: "structural_input_value_verified",
+    }]);
+  });
+
   it("does not accept a mismatched value or a non-evidence-bound fill selector", async () => {
     const current = {
       count: async () => 1,
