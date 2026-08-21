@@ -8,23 +8,24 @@ import (
 )
 
 type LegExecutionRequest struct {
-	RunID             string
-	LegID             string
-	Kind              string
-	ProjectName       string
-	BuildPrompt       string
-	TargetURL         string
-	CredentialRef     string
-	AuthorizationRef  string
-	BrowserAttempt    int
-	Checkpoint        *Checkpoint
-	ExistingArtifacts []ArtifactRef
-	FinalFilm         *FinalFilmBinding
-	RunReport         RunReport
-	ProductSpec       ProductSpec
-	ObservationPlan   ObservationPlan
-	InteractionPlan   InteractionPlan
-	VisualCallBudget  int
+	RunID              string
+	LegID              string
+	Kind               string
+	ProjectName        string
+	BuildPrompt        string
+	TargetURL          string
+	CredentialRef      string
+	AuthorizationRef   string
+	BrowserAttempt     int
+	Checkpoint         *Checkpoint
+	ExistingArtifacts  []ArtifactRef
+	FinalFilm          *FinalFilmBinding
+	RunReport          RunReport
+	ProductSpec        ProductSpec
+	ObservationPlan    ObservationPlan
+	InteractionPlan    InteractionPlan
+	VisualCallBudget   int
+	WorkflowTemplateID string
 }
 
 type LegExecutionUpdate struct {
@@ -123,6 +124,7 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 		BrowserAttempt: leg.BrowserAttempt, Checkpoint: leg.Checkpoint, ExistingArtifacts: append([]ArtifactRef{}, leg.ArtifactRefs...), FinalFilm: run.FinalFilm,
 		RunReport: *buildReport(run), ProductSpec: run.ProductSpec, ObservationPlan: run.ObservationPlan,
 		InteractionPlan: run.InteractionPlan, VisualCallBudget: run.Budget.VisualCallsPerRun - leg.VisualCallsUsed,
+		WorkflowTemplateID: run.WorkflowTemplate,
 	}
 	emit := func(update LegExecutionUpdate) error {
 		current, getErr := r.service.GetRun(ctx, runID)

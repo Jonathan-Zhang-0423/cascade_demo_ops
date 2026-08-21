@@ -87,6 +87,7 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 			KnowledgeSources:              knowledgeSourcesFromInputs(input),
 			Requirements:                  structuredDemoRequirements(input.Requirements, mustShow, mustNotShow, input.ForbiddenPages, input.ForbiddenData),
 			InteractionContracts:          append([]model.InteractionContract{}, input.InteractionContracts...),
+			WorkflowExecution:             input.WorkflowExecution,
 			PresentationGenerationIntents: append([]model.PresentationGenerationIntent{}, input.PresentationGenerationIntents...),
 			RawUserPrompt:                 productDescription,
 			Scenarios: []model.DemoScenario{

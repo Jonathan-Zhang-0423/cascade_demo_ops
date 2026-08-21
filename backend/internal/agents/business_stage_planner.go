@@ -78,8 +78,12 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 	// normalized intent graph because that graph also contains action kinds,
 	// selector aliases, and other generated metadata that may follow a phrase
 	// such as "new project".
+	workflowHints := workflowExecutionHints(project)
 	projectName := intentProjectName(businessStageExplicitRequirementText(project, brief, report))
-	wantsNewProject := containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != ""
+	if projectName == "" && workflowHints != nil && workflowHints.RequiresFreshEntity {
+		projectName = strings.TrimSpace(workflowHints.EntityName)
+	}
+	wantsNewProject := containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != "" || (workflowHints != nil && workflowHints.RequiresFreshEntity)
 	if wantsNewProject {
 		builder.addStage(stageSpec{
 			id:            "new_project_entry",
@@ -96,28 +100,44 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			keywords:      []string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project"},
 			capture:       []string{"工作台项目入口", "新建项目流程"},
 		})
-		if projectName != "" {
+		if projectName != "" || (workflowHints != nil && workflowHints.PrimaryInputSemantic != "") {
+			inputSemantic := "project_name"
+			inputValue := projectName
+			inputTitle := "填写项目名称"
+			inputObjective := "把演示项目名称填写为“" + projectName + "”。"
+			inputSuccess := "项目名称已填写为“" + projectName + "”。"
+			inputKeywords := []string{"项目名称", "项目名", "project name", "name", projectName}
+			inputCapture := []string{"项目名称输入框", "已填写的项目名称"}
+			if workflowHints != nil && workflowHints.PrimaryInputSemantic != "" {
+				inputSemantic = workflowHints.PrimaryInputSemantic
+				inputValue = project.ProductDescription
+				inputTitle = "填写主要请求"
+				inputObjective = "把已冻结的主要请求原样填写到创建流程。"
+				inputSuccess = "主要请求已原样填写，等待提交。"
+				inputKeywords = []string{"需求", "描述", "想法", "request", "description", "idea", "prompt", "textarea"}
+				inputCapture = []string{"主要请求输入框", "已填写的主要请求"}
+			}
 			builder.addStage(stageSpec{
 				id:            "project_name_input",
 				kind:          model.BusinessStageKindBusinessInput,
-				title:         "填写项目名称",
-				objective:     "把演示项目名称填写为“" + projectName + "”。",
+				title:         inputTitle,
+				objective:     inputObjective,
 				actionType:    string(model.GraphActionFill),
-				actionLabel:   "填写项目名称",
-				inputSemantic: "project_name",
-				inputValue:    projectName,
-				successState:  "项目名称已填写为“" + projectName + "”。",
+				actionLabel:   inputTitle,
+				inputSemantic: inputSemantic,
+				inputValue:    inputValue,
+				successState:  inputSuccess,
 				routeState:    model.BusinessRouteStateCreationFlow,
 				entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
 				expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
 				durationMS:    durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", projectName),
-				keywords:      []string{"项目名称", "项目名", "project name", "name", projectName},
-				capture:       []string{"项目名称输入框", "已填写的项目名称"},
+				keywords:      inputKeywords,
+				capture:       inputCapture,
 			})
 		}
 	}
 
-	wantsDirectBuildMode := containsAnyNormalized(intentText, "实际构建", "直接构建", "直接生成", "direct build", "build directly")
+	wantsDirectBuildMode := containsAnyNormalized(intentText, "实际构建", "直接构建", "直接生成", "direct build", "build directly") || (workflowHints != nil && workflowHints.DirectExecution)
 	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") || wantsDirectBuildMode {
 		modeTitle := "选择构建模式"
 		modeObjective := "在项目创建流程中选择构建模式。"
@@ -147,7 +167,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		})
 	}
 
-	wantsBuild := containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "启动构建", "run build", "start build", "生成", "构建")
+	wantsBuild := containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "启动构建", "run build", "start build", "生成", "构建") || (workflowHints != nil && workflowHints.RequiresSubmission)
 	if wantsBuild {
 		builder.addStage(stageSpec{
 			id:            "start_agent_build",
@@ -167,7 +187,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 	}
 
 	waitMS := requiredObservationDurationMS(intentText)
-	wantsObservation := containsAnyNormalized(intentText, "等待", "观察", "看实际发生", "看发生了什么", "实际构建演示", "构建演示", "progress", "log", "observe")
+	wantsObservation := containsAnyNormalized(intentText, "等待", "观察", "看实际发生", "看发生了什么", "实际构建演示", "构建演示", "progress", "log", "observe") || (workflowHints != nil && workflowHints.ObserveAsyncResult)
 	if waitMS > 0 || wantsObservation {
 		builder.addStage(stageSpec{
 			id:             "observe_agent_progress",
@@ -187,7 +207,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		})
 	}
 
-	wantsCompletion := wantsBuildCompletion(intentText)
+	wantsCompletion := wantsBuildCompletion(intentText) || (workflowHints != nil && workflowHints.ObserveAsyncResult)
 
 	if len(builder.stages) == 0 && intentIsObservationOnly(intentText) {
 		builder.addStage(stageSpec{
@@ -331,6 +351,13 @@ type stageSpec struct {
 	parameters          map[string]string
 	nonDestructive      bool
 	interactionContract *model.InteractionContract
+}
+
+func workflowExecutionHints(project *model.ProjectContext) *model.WorkflowExecutionHints {
+	if project == nil || project.Inputs == nil {
+		return nil
+	}
+	return project.Inputs.WorkflowExecution
 }
 
 type intentDurationHint struct {
@@ -1076,9 +1103,9 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 	}
 	switch spec.id {
 	case "new_project_entry":
-		return containsAnyNormalized(labelText+" "+selectorText, "new project", "create project", "新建项目", "创建项目", "新增项目")
+		return containsAnyNormalized(labelText+" "+selectorText, "new project", "create project", "create new project", "新建项目", "创建项目", "创建新项目", "新增项目")
 	case "project_name_input":
-		return containsAnyNormalized(text, "project name", "project-name", "project idea", "project-idea", "project prompt", "project-prompt", "项目名称", "项目名", "项目需求", "需求描述", "idea", "prompt", spec.inputValue)
+		return containsAnyNormalized(text, "project name", "project-name", "project idea", "project-idea", "project prompt", "project-prompt", "项目名称", "项目名", "项目需求", "构建需求", "需求描述", "description", "describe", "idea", "prompt", spec.inputValue)
 	case "select_build_mode":
 		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "mode plan", "mode-plan", "plan mode", "plan-mode", "构建模式", "规划模式", "计划模式")
 	case "start_agent_build":

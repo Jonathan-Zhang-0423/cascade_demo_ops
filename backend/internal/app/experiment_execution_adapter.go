@@ -90,6 +90,10 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		MustShow: interactionSemanticGoals(request.InteractionPlan), MustNotShow: append([]string{}, request.ProductSpec.ForbiddenOutcomes...),
 		InteractionContracts: interactionContracts,
 		AllowedDomains:       []string{parsed.Hostname()}, DemoCredentialRef: request.CredentialRef,
+		WorkflowExecution: &model.WorkflowExecutionHints{
+			TaskPackID: request.WorkflowTemplateID, RequiresFreshEntity: true, EntityName: request.ProjectName,
+			PrimaryInputSemantic: "product_spec", DirectExecution: true, RequiresSubmission: true, ObserveAsyncResult: true,
+		},
 	}
 	prepared, err := a.service.PrepareProductRun(ctx, CloudLifecycleRequest{UserInput: &input})
 	if err != nil || prepared.State == nil || prepared.Build == nil || prepared.Build.Package.ConfidenceSummary == nil {

@@ -317,6 +317,48 @@ func TestBusinessStagePlannerActualBuildDisablesPlanFirstMode(t *testing.T) {
 	}
 }
 
+func TestBusinessStagePlannerUsesTaskPackOperationShapeWithoutKeywordRouting(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "构建一款精致、响应式、可直接交互的数字产品。"
+	project.Inputs = &model.ProjectInputBundle{WorkflowExecution: &model.WorkflowExecutionHints{
+		TaskPackID: "async-product-build-demo-v1", RequiresFreshEntity: true, EntityName: "流光演示版",
+		PrimaryInputSemantic: "product_spec", DirectExecution: true, RequiresSubmission: true, ObserveAsyncResult: true,
+	}}
+	verified := &model.VerifiedInteractionPlan{Actions: []model.VerifiedInteractionAction{
+		{ID: "entry", Label: "创建新项目", Kind: "click", Selector: "[data-testid='create-entry']", IsBusiness: true, VerificationStatus: "verified"},
+		{ID: "request", Label: "Describe what to build", Kind: "fill", Selector: "[data-testid='request-input']", IsBusiness: true, VerificationStatus: "verified"},
+		{ID: "mode", Label: "Plan mode", Kind: "click", Selector: "[data-testid='mode-control']", IsBusiness: true, VerificationStatus: "verified"},
+		{ID: "submit", Label: "Start build", Kind: "click", Selector: "[data-testid='submit-build']", IsBusiness: true, VerificationStatus: "verified"},
+	}}
+
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, graphQualityIntelligence(), verified)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSelectors := map[string]string{
+		"business_stage_new_project_entry":  "[data-testid='create-entry']",
+		"business_stage_project_name_input": "[data-testid='request-input']",
+		"business_stage_select_build_mode":  "[data-testid='mode-control']",
+		"business_stage_start_agent_build":  "[data-testid='submit-build']",
+	}
+	for _, stage := range plan.Stages {
+		want, ok := wantSelectors[stage.ID]
+		if !ok {
+			continue
+		}
+		if len(stage.Targets) == 0 || stage.Targets[0].Selector != want {
+			t.Fatalf("Task Pack stage %s did not bind its semantic target: %+v", stage.ID, stage.Targets)
+		}
+		if stage.ID == "business_stage_project_name_input" && (stage.Action.InputSemantic != "product_spec" || stage.Action.InputValue != project.ProductDescription) {
+			t.Fatalf("Task Pack primary input did not preserve the frozen product specification: %+v", stage.Action)
+		}
+		delete(wantSelectors, stage.ID)
+	}
+	if len(wantSelectors) != 0 {
+		t.Fatalf("Task Pack operation shape omitted required stages: %v", wantSelectors)
+	}
+}
+
 func TestBusinessStagePlannerCreatesRequirementDrivenProjectStages(t *testing.T) {
 	project := graphQualityProject()
 	project.ProductDescription = "演示登录 7 秒，新建项目 13 秒，项目名称2048，选择构建模式，启动 agent 实际构建，并等待 45 秒观察。"

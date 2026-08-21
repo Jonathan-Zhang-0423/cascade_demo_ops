@@ -88,10 +88,24 @@ type ProjectInputBundle struct {
 	Scenarios                     []DemoScenario                 `json:"scenarios,omitempty"`
 	Requirements                  []DemoRequirement              `json:"requirements,omitempty"`
 	InteractionContracts          []InteractionContract          `json:"interaction_contracts,omitempty"`
+	WorkflowExecution             *WorkflowExecutionHints        `json:"workflow_execution,omitempty"`
 	PresentationGenerationIntents []PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
 	MediaDeliveryPreferences      *MediaDeliveryPreferences      `json:"media_delivery_preferences,omitempty"`
 	RawUserPrompt                 string                         `json:"raw_user_prompt,omitempty"`
 	Metadata                      map[string]any                 `json:"metadata,omitempty"`
+}
+
+// WorkflowExecutionHints carries the already-selected Task Pack semantics into
+// compatibility planners. It describes the operation shape, never a hostname,
+// route, selector, or product keyword.
+type WorkflowExecutionHints struct {
+	TaskPackID           string `json:"task_pack_id,omitempty"`
+	RequiresFreshEntity  bool   `json:"requires_fresh_entity,omitempty"`
+	EntityName           string `json:"entity_name,omitempty"`
+	PrimaryInputSemantic string `json:"primary_input_semantic,omitempty"`
+	DirectExecution      bool   `json:"direct_execution,omitempty"`
+	RequiresSubmission   bool   `json:"requires_submission,omitempty"`
+	ObserveAsyncResult   bool   `json:"observe_async_result,omitempty"`
 }
 
 type PresentationGenerationIntent struct {
