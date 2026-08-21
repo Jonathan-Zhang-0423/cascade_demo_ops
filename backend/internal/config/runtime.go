@@ -266,11 +266,25 @@ func modelTaskRoutesFromEnv() map[ModelTask]ModelTaskRoute {
 	}
 	routes := make(map[ModelTask]ModelTaskRoute, len(defaults))
 	for _, route := range defaults {
-		if provider := os.Getenv(route.ProviderOverride); provider != "" {
-			route.Provider = ModelProvider(provider)
+		providerOverride := os.Getenv(route.ProviderOverride)
+		modelOverride := os.Getenv(route.ModelOverride)
+		// Browser visual observation predates the dedicated temporal observer.
+		// Preserve the existing deployment knobs as aliases so adding the new
+		// task route cannot silently move a configured vision workload to a
+		// text-only default model. The dedicated names always take precedence.
+		if route.Task == ModelTaskBrowserVisualObservation {
+			if providerOverride == "" {
+				providerOverride = os.Getenv("CASCADE_BROWSER_VISION_PROVIDER")
+			}
+			if modelOverride == "" {
+				modelOverride = os.Getenv("CASCADE_BROWSER_VISION_MODEL")
+			}
 		}
-		if modelName := os.Getenv(route.ModelOverride); modelName != "" {
-			route.Model = modelName
+		if providerOverride != "" {
+			route.Provider = ModelProvider(providerOverride)
+		}
+		if modelOverride != "" {
+			route.Model = modelOverride
 		}
 		routes[route.Task] = route
 	}

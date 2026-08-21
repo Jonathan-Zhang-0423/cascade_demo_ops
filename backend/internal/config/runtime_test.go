@@ -169,6 +169,38 @@ func TestRuntimeConfigAllowsModelTaskRouteOverrides(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigBrowserVisualObservationHonorsLegacyVisionAliases(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("CASCADE_BROWSER_VISION_PROVIDER", "glm")
+	t.Setenv("CASCADE_BROWSER_VISION_MODEL", "glm-4.5v")
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := cfg.ModelTaskRoutes[ModelTaskBrowserVisualObservation]
+	if route.Provider != ModelProviderGLM || route.Model != "glm-4.5v" {
+		t.Fatalf("browser visual observation alias route = %+v", route)
+	}
+}
+
+func TestRuntimeConfigBrowserVisualObservationDedicatedOverridesWin(t *testing.T) {
+	clearModelProviderEnv(t)
+	t.Setenv("CASCADE_BROWSER_VISION_PROVIDER", "glm")
+	t.Setenv("CASCADE_BROWSER_VISION_MODEL", "glm-4.5v")
+	t.Setenv("CASCADE_VISUAL_OBSERVER_PROVIDER", "minimax")
+	t.Setenv("CASCADE_VISUAL_OBSERVER_MODEL", "minimax-vision-test")
+
+	cfg, err := RuntimeConfigFromEnvWithRoot(filepath.Join("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := cfg.ModelTaskRoutes[ModelTaskBrowserVisualObservation]
+	if route.Provider != ModelProviderMinimax || route.Model != "minimax-vision-test" {
+		t.Fatalf("dedicated browser visual observation route = %+v", route)
+	}
+}
+
 func TestRuntimeConfigAlwaysReservesDomesticProviderSlots(t *testing.T) {
 	clearModelProviderEnv(t)
 
@@ -548,6 +580,10 @@ func clearModelProviderEnv(t *testing.T) {
 		"CASCADE_CODE_READING_MODEL",
 		"CASCADE_MULTIMODAL_PROVIDER",
 		"CASCADE_MULTIMODAL_MODEL",
+		"CASCADE_VISUAL_OBSERVER_PROVIDER",
+		"CASCADE_VISUAL_OBSERVER_MODEL",
+		"CASCADE_BROWSER_VISION_PROVIDER",
+		"CASCADE_BROWSER_VISION_MODEL",
 		"CASCADE_VIDEO_PROVIDER",
 		"CASCADE_VIDEO_MODEL",
 		"CASCADE_LLM_MODE",
