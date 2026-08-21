@@ -2434,11 +2434,11 @@ func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *mode
 		))
 	}
 	if outlineRuntime {
-		if data, err := json.Marshal(pkg); err == nil && len(data) > 256*1024 {
+		if data, err := json.Marshal(pkg); err == nil && len(data) > model.MaxClientExecutionPackageBytes {
 			findings = append(findings, packagePreflightFinding(
 				"package_size_exceeded",
 				model.FindingSeverityBlocking,
-				fmt.Sprintf("browser-agent outline package is too large: %d bytes", len(data)),
+				fmt.Sprintf("browser-agent outline package is too large: %d bytes (limit %d bytes)", len(data), model.MaxClientExecutionPackageBytes),
 				"Upload only markdown, stage JSON, browser-agent outline, contract, hashes, and compact evidence refs.",
 			))
 		}

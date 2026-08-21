@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// MaxClientExecutionPackageBytes bounds structured execution metadata at the
+// product admission layer. Binary evidence, screenshots, DOM snapshots, traces,
+// and media must still travel as Artifact references rather than inline JSON.
+const MaxClientExecutionPackageBytes = 512 * 1024
+
 type DirectPackageValidationError struct {
 	Code    string
 	Message string
@@ -102,8 +107,8 @@ func ValidateClientExecutionPackageForCloudExecution(pkg *ClientExecutionPackage
 	}
 	if data, err := json.Marshal(pkg); err != nil {
 		return err
-	} else if len(data) > 256*1024 {
-		return errors.New("package_size_exceeded: client execution package exceeds 256 KiB")
+	} else if len(data) > MaxClientExecutionPackageBytes {
+		return fmt.Errorf("package_size_exceeded: client execution package exceeds %d KiB", MaxClientExecutionPackageBytes/1024)
 	}
 	if err := validateClientExecutionPackageContents(pkg); err != nil {
 		return err
@@ -296,8 +301,8 @@ func ValidateClientExecutionPackageForLocalTestWaiver(pkg *ClientExecutionPackag
 	}
 	if data, err := json.Marshal(pkg); err != nil {
 		return err
-	} else if len(data) > 256*1024 {
-		return errors.New("package_size_exceeded: client execution package exceeds 256 KiB")
+	} else if len(data) > MaxClientExecutionPackageBytes {
+		return fmt.Errorf("package_size_exceeded: client execution package exceeds %d KiB", MaxClientExecutionPackageBytes/1024)
 	}
 	if pkg.SafetyReport.AllowedToUpload {
 		return errors.New("local test waiver requires safety_report.allowed_to_upload=false")
