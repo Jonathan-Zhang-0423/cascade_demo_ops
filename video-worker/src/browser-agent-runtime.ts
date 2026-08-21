@@ -1273,38 +1273,36 @@ function structuralModalSubmitLocator(page: any, stage: BrowserAgentWorkerStage,
   const roles = new Set((stage.target_contract.allowed_roles || []).map((value) => value.trim().toLowerCase()));
   if (!roles.has("button")) return undefined;
   return {
-    strategy: "active_modal_unique_submit",
-    locator: page.locator('[role="dialog"] button[type="submit"], dialog button[type="submit"], [aria-modal="true"] button[type="submit"]'),
+    strategy: "active_modal_unique_primary_action",
+    locator: page.locator('[role="dialog"] button, dialog button, [aria-modal="true"] button'),
   };
 }
 
 async function resolveUniqueVisibleStructuralSubmitTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget | undefined> {
-  const count = await withTimeout(locator.count(), targetProbeTimeoutMS, 0);
-  if (count !== 1) {
-    attempts.push(targetResolutionAttempt(strategy, count, false, false, false, count === 0 ? "no_candidates" : "ambiguous"));
-    return undefined;
-  }
-  const unique = locator.first();
-  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) {
-    attempts.push(targetResolutionAttempt(strategy, count, true, false, false, "not_visible"));
-    return undefined;
-  }
-  if (await withTimeout(unique.isDisabled(), targetProbeTimeoutMS, true)) {
-    attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "role_mismatch", false));
-    return undefined;
-  }
-  const semantics = await withTimeout(compactElementSemantics(unique), targetProbeTimeoutMS, { role: "", name: "" });
-  if (!normalizeElementName(semantics.name) || forbiddenName(semantics.name, contract.forbidden_names || [])) {
-    attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "forbidden_name", false, false));
-    return undefined;
-  }
   const allowedRoles = (contract.allowed_roles || []).map((value) => value.trim().toLowerCase()).filter(Boolean);
-  if (!allowedRoles.includes(semantics.role)) {
-    attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "role_mismatch", false));
+  const rawCount = await withTimeout(locator.count(), targetProbeTimeoutMS, 0);
+  const eligible: Array<{ locator: any; semantics: { role: string; name: string } }> = [];
+  for (let index = 0; index < Math.min(rawCount, 32); index += 1) {
+    const candidate = locator.nth(index);
+    if (!await withTimeout(candidate.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
+    if (await withTimeout(candidate.isDisabled(), targetProbeTimeoutMS, true)) continue;
+    const semantics = await withTimeout(compactElementSemantics(candidate), targetProbeTimeoutMS, { role: "", name: "" });
+    if (!allowedRoles.includes(semantics.role)) continue;
+    if (!normalizeElementName(semantics.name) || structuralAbortActionName(semantics.name)) continue;
+    if (forbiddenName(semantics.name, contract.forbidden_names || [])) continue;
+    eligible.push({ locator: candidate, semantics });
+  }
+  if (eligible.length !== 1) {
+    attempts.push(targetResolutionAttempt(strategy, eligible.length, false, false, false, eligible.length === 0 ? "no_candidates" : "ambiguous"));
     return undefined;
   }
-  attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "resolved", true, true));
-  return { locator: unique, strategy };
+  attempts.push(targetResolutionAttempt(strategy, 1, true, true, false, "resolved", true, true));
+  return { locator: eligible[0]!.locator, strategy };
+}
+
+function structuralAbortActionName(value: string): boolean {
+  const normalized = normalizeElementName(value);
+  return new Set(["cancel", "close", "dismiss", "back", "abort", "取消", "关闭", "返回", "放弃"]).has(normalized);
 }
 
 async function resolveUniqueVisibleStructuralInputTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget | undefined> {

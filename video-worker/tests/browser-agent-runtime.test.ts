@@ -512,13 +512,14 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 
   it("binds the unique enabled submit control for an approved once-effect modal action", async () => {
     const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const submitButton = {
+      isVisible: async () => true,
+      isDisabled: async () => false,
+      evaluate: async () => ({ role: "button", name: "Create" }),
+    };
     const submit = {
       count: async () => 1,
-      first: () => ({
-        isVisible: async () => true,
-        isDisabled: async () => false,
-        evaluate: async () => ({ role: "button", name: "Create" }),
-      }),
+      nth: () => submitButton,
     };
     const page = {
       getByRole: () => absent,
@@ -553,9 +554,9 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     };
 
     const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
-    expect(resolved.strategy).toBe("active_modal_unique_submit");
+    expect(resolved.strategy).toBe("active_modal_unique_primary_action");
     expect(attempts).toContainEqual(expect.objectContaining({
-      strategy: "active_modal_unique_submit",
+      strategy: "active_modal_unique_primary_action",
       candidate_count: 1,
       role_allowed: true,
       outcome: "resolved",
@@ -564,13 +565,14 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 
   it("does not structurally bind a disabled once-effect submit control", async () => {
     const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const disabledButton = {
+      isVisible: async () => true,
+      isDisabled: async () => true,
+      evaluate: async () => ({ role: "button", name: "Create" }),
+    };
     const disabled = {
       count: async () => 1,
-      first: () => ({
-        isVisible: async () => true,
-        isDisabled: async () => true,
-        evaluate: async () => ({ role: "button", name: "Create" }),
-      }),
+      nth: () => disabledButton,
     };
     const page = {
       getByRole: () => absent,
@@ -605,9 +607,56 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 
     await expect(resolveTarget(page, stage, stage.interactions[0], false, attempts)).rejects.toThrow("browser_agent_target_not_resolved");
     expect(attempts).toContainEqual(expect.objectContaining({
-      strategy: "active_modal_unique_submit",
-      outcome: "role_mismatch",
+      strategy: "active_modal_unique_primary_action",
+      outcome: "no_candidates",
     }));
+  });
+
+  it("filters modal exit controls and non-button roles before binding the unique primary action", async () => {
+    const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const candidates = [
+      { role: "button", name: "Close" },
+      { role: "button", name: "Cancel" },
+      { role: "combobox", name: "Framework" },
+      { role: "button", name: "Create" },
+    ].map((semantics) => ({
+      isVisible: async () => true,
+      isDisabled: async () => false,
+      evaluate: async () => semantics,
+    }));
+    const page = {
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => ({ count: async () => candidates.length, nth: (index: number) => candidates[index] }),
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_submit",
+      order: 3,
+      node_id: "submit_request",
+      target_contract: {
+        semantic_id: "submit_request",
+        allowed_roles: ["button"],
+        allowed_names: ["Approved abstract submit intent"],
+        destructive: false,
+      },
+      interaction_contract: {
+        schema_version: "demoops.interaction_contract.v1" as const,
+        contract_id: "contract_submit",
+        semantic_goal: "submit the approved request",
+        action_kind: "click",
+        replay_policy: "once_effect" as const,
+        target_semantic_id: "submit_request",
+        expected_transitions: [],
+        non_destructive: true,
+      },
+      interactions: [{ kind: "click", non_destructive: true }],
+    };
+
+    const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
+    expect(resolved.strategy).toBe("active_modal_unique_primary_action");
   });
 });
 
