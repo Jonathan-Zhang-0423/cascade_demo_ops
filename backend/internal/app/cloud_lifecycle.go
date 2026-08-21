@@ -2081,6 +2081,8 @@ func compactSelectorCandidatesForUpload(candidates []model.SelectorCandidate, li
 		}
 		seen[key] = true
 		candidate.Source = truncateForUpload(candidate.Source, 80)
+		candidate.SourceDigest = canonicalSHA256ForUpload(candidate.SourceDigest)
+		candidate.EvidenceDigestSHA256 = canonicalSHA256ForUpload(candidate.EvidenceDigestSHA256)
 		candidate.EvidenceRefs = compactEvidenceRefsForUpload(candidate.EvidenceRefs, 1)
 		out = append(out, candidate)
 		if len(out) >= limit {
@@ -2088,6 +2090,11 @@ func compactSelectorCandidatesForUpload(candidates []model.SelectorCandidate, li
 		}
 	}
 	return out
+}
+
+func canonicalSHA256ForUpload(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.TrimPrefix(value, "sha256:")
 }
 
 func selectorUploadPriority(candidate model.SelectorCandidate) float64 {

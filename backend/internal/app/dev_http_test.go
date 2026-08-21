@@ -716,9 +716,11 @@ func TestBrowserAgentUploadViewCompactsInvestigationTraceAndRedundantRoutes(t *t
 
 func TestCompactScriptStepPromotesMatchingFormalValidationSelector(t *testing.T) {
 	observedAt := time.Now().UTC()
+	digest := model.SHA256Hex([]byte("preview selector provenance"))
 	candidate := model.SelectorCandidate{
 		Kind: "testid", Value: "preview-iframe", EvidenceID: "ev_preview", SourceKind: "source_scan",
-		SourceDigest: "sha256:preview", ObservedRole: "iframe", ObservedAccessibleName: "Preview",
+		SourceDigest: "sha256:" + digest, EvidenceDigestSHA256: "sha256:" + digest,
+		ObservedRole: "iframe", ObservedAccessibleName: "Preview",
 		ObservedAt: &observedAt, EvidenceRefs: []model.EvidenceRef{{ID: "ev_preview", Kind: model.EvidenceKindSourceCode}},
 	}
 	step := model.ScriptStep{
@@ -732,6 +734,9 @@ func TestCompactScriptStepPromotesMatchingFormalValidationSelector(t *testing.T)
 
 	if len(step.Action.Target.SelectorAlternatives) != 1 || step.Action.Target.SelectorAlternatives[0].EvidenceID != "ev_preview" {
 		t.Fatalf("matching formal validation selector was not promoted to the action target: %+v", step.Action.Target.SelectorAlternatives)
+	}
+	if got := step.Action.Target.SelectorAlternatives[0]; got.SourceDigest != digest || got.EvidenceDigestSHA256 != digest {
+		t.Fatalf("selector provenance digests were not canonicalized for Direct intake: %+v", got)
 	}
 }
 
