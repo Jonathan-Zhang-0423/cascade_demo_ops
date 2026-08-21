@@ -387,6 +387,45 @@ func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int
 	return next, nil
 }
 
+// Cancel terminates a non-terminal experiment without replaying or otherwise
+// touching any external effect. It is deliberately revision-bound so an
+// operator cannot cancel a newer phase based on a stale projection.
+func (s *Service) Cancel(ctx context.Context, runID string, expectedRevision int, reason string) (Run, error) {
+	run, err := s.store.Get(ctx, strings.TrimSpace(runID))
+	if err != nil {
+		return Run{}, err
+	}
+	if run.Revision != expectedRevision {
+		return Run{}, ErrRevisionConflict
+	}
+	if terminalRunState(run.State) {
+		return Run{}, errors.New("terminal experiment run cannot be canceled")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "experiment canceled by operator"
+	}
+	next := run
+	next.State, next.Phase = RunStateCanceled, "canceled"
+	next.Waiting = nil
+	for index := range next.Legs {
+		if !terminalRunState(next.Legs[index].State) {
+			next.Legs[index].State = RunStateCanceled
+			next.Legs[index].Phase = "canceled"
+		}
+	}
+	next.LastError = &RunError{Code: "experiment_canceled", Message: reason, Retryable: false, Responsibility: "operator"}
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	next.TerminalAt = next.UpdatedAt
+	next.Report = buildReport(next)
+	event := s.event(next, "run_canceled", "实验已停止；不会恢复或重放外部动作", "", nil)
+	if err := s.store.Transition(ctx, run.RunID, run.Revision, next, event); err != nil {
+		return Run{}, err
+	}
+	return next, nil
+}
+
 func (s *Service) RecordVisualCall(ctx context.Context, runID string, expectedRevision int, legID string, evidenceRefs []string) (Run, error) {
 	run, err := s.store.Get(ctx, runID)
 	if err != nil {

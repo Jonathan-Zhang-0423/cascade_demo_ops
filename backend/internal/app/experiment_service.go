@@ -11,6 +11,11 @@ type ExperimentResumeRequest struct {
 	ExpectedRevision int `json:"expected_revision"`
 }
 
+type ExperimentCancelRequest struct {
+	ExpectedRevision int    `json:"expected_revision"`
+	Reason           string `json:"reason,omitempty"`
+}
+
 type ExperimentFinalReviewRequest struct {
 	ExpectedRevision  int    `json:"expected_revision"`
 	FinalFilmRevision int    `json:"final_film_revision"`
@@ -54,6 +59,19 @@ func (s *Service) ResumeExperimentRun(ctx context.Context, runID string, expecte
 		s.enqueueExperimentRun(run.RunID)
 	}
 	return run, err
+}
+
+func (s *Service) CancelExperimentRun(ctx context.Context, runID string, request ExperimentCancelRequest) (experiment.Run, error) {
+	if s == nil || s.experiments == nil {
+		return experiment.Run{}, errors.New("experiment coordinator is unavailable")
+	}
+	s.experimentRunMu.Lock()
+	cancel := s.experimentRunCancels[runID]
+	s.experimentRunMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return s.experiments.Cancel(ctx, runID, request.ExpectedRevision, request.Reason)
 }
 
 func (s *Service) enqueueExperimentRun(runID string) {

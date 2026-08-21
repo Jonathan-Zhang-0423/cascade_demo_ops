@@ -223,6 +223,14 @@ func (s *DevHTTPServer) handleExperimentRunRoute(w http.ResponseWriter, r *http.
 		}
 		run, err := s.service.ResumeExperimentRun(r.Context(), runID, request.ExpectedRevision)
 		writeBridgeValue(w, run, err)
+	case r.Method == http.MethodPost && suffix == "/cancel":
+		var request ExperimentCancelRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		run, err := s.service.CancelExperimentRun(r.Context(), runID, request)
+		writeBridgeValue(w, run, err)
 	case r.Method == http.MethodPost && suffix == "/final-review":
 		var request ExperimentFinalReviewRequest
 		if err := decodeJSON(r, &request); err != nil {

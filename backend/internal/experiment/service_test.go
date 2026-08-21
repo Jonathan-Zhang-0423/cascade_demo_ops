@@ -85,6 +85,27 @@ func TestUncertainOnceEffectDefersInsteadOfReplaying(t *testing.T) {
 	}
 }
 
+func TestCancelTerminatesRunWithoutCreatingEffects(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateRunning, "plan_review")
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateWaitingExternal, "plan_review")
+
+	canceled, err := service.Cancel(t.Context(), run.RunID, run.Revision, "pre-submit package gate failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canceled.State != RunStateCanceled || canceled.Phase != "canceled" || canceled.Legs[0].State != RunStateCanceled || canceled.Legs[1].State != RunStateCanceled {
+		t.Fatalf("run was not fully canceled: %+v", canceled)
+	}
+	if canceled.Legs[0].Checkpoint != nil || canceled.Legs[0].TargetSubmissions != 0 || canceled.ProviderCallsUsed != 0 || canceled.Report == nil || canceled.Report.Valid {
+		t.Fatalf("cancel created or concealed experiment effects: %+v", canceled)
+	}
+	if _, err := service.Resume(t.Context(), canceled.RunID, canceled.Revision); err == nil {
+		t.Fatal("canceled run must not be resumable")
+	}
+}
+
 func TestVisualCallBudgetIsHardBound(t *testing.T) {
 	service := testService(t)
 	run := mustCreateRun(t, service)
