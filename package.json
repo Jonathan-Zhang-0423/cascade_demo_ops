@@ -23,6 +23,7 @@
 	"validate:director-skills": "node scripts/validate-director-skills.mjs",
 	"validate:site-neutral-core": "node scripts/validate-site-neutral-core.mjs",
 	"validate:execution-port": "node scripts/validate-execution-port-contracts.mjs",
+	"validate:task-packs": "node scripts/validate-task-pack-contracts.mjs",
 	"harness:minimax-h3": "cd backend && go run ./cmd/minimaxh3harness",
     "build:desktop:win": "node scripts/build-desktop.mjs windows",
 	"build:desktop:wails": "node scripts/build-wails-desktop.mjs",

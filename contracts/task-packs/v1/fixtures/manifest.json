@@ -1,0 +1,16 @@
+{
+  "valid": [
+    { "schema": "product-spec.schema.json", "fixture": "../../../../experiments/2048-v2/product-spec.json" },
+    { "schema": "build-observation-plan.schema.json", "fixture": "../../../../experiments/2048-v2/build-observation-plan.json" },
+    { "schema": "interaction-evidence-plan.schema.json", "fixture": "../../../../experiments/2048-v2/interaction-evidence-plan.json" },
+    { "schema": "experiment-run-report.schema.json", "fixture": "valid/experiment-run-report.json" },
+    { "schema": "temporal-visual-observation.schema.json", "fixture": "valid/temporal-visual-observation.json" }
+  ],
+  "invalid": [
+    { "schema": "product-spec.schema.json", "fixture": "invalid/product-spec-too-weak.json" },
+    { "schema": "build-observation-plan.schema.json", "fixture": "invalid/observation-plan-fast-poll.json" },
+    { "schema": "interaction-evidence-plan.schema.json", "fixture": "invalid/interaction-plan-no-evidence.json" },
+    { "schema": "experiment-run-report.schema.json", "fixture": "invalid/report-provider-over-budget.json" },
+    { "schema": "temporal-visual-observation.schema.json", "fixture": "invalid/temporal-observation-inline-image.json" }
+  ]
+}

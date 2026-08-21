@@ -1,0 +1,15 @@
+{
+  "schema_version": "demoops.experiment_definition.v1",
+  "definition_id": "interactive_async_build_v2",
+  "workflow_template_id": "async-product-build-demo-v1",
+  "short_goal": "构建一款适合产品演示的精致响应式 2048 网页游戏",
+  "main_project_name": "2048 流光演示版",
+  "recovery_project_name": "2048 流光恢复版",
+  "product_spec_ref": "product-spec.json",
+  "build_observation_plan_ref": "build-observation-plan.json",
+  "interaction_evidence_plan_ref": "interaction-evidence-plan.json",
+  "run_set": ["main", "recovery"],
+  "recovery_injection_phase": "once_effect_committed",
+  "main_target_duration_ms": { "min": 100000, "max": 110000 },
+  "authorization_budget": { "target_submissions": 2, "final_film_jobs": 1, "provider_calls": 8, "visual_calls_per_run": 12 }
+}

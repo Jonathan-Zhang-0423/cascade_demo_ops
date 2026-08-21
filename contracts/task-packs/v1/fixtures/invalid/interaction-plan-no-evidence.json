@@ -1,0 +1,6 @@
+{
+  "schema_version": "demoops.interaction_evidence_plan.v1",
+  "plan_id": "no_evidence",
+  "surface_kind": "runtime_discovered",
+  "steps": [{ "step_id": "move", "semantic_intent": "Move item", "replay_policy": "once_effect", "preconditions": [], "expected_changes": [], "evidence_slots": [] }]
+}

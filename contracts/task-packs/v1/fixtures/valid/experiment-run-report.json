@@ -1,0 +1,16 @@
+{
+  "schema_version": "demoops.experiment_run_report.v1",
+  "run_id": "experiment_run_fixture",
+  "valid": true,
+  "scores": { "orchestration": 100, "product": 92, "evidence": 95, "film": 90, "recovery": 100 },
+  "human_interventions": [
+    { "kind": "start_authorization", "allowed": true, "occurred_at": "2026-08-21T10:00:00Z" },
+    { "kind": "final_review", "allowed": true, "occurred_at": "2026-08-21T10:20:00Z" }
+  ],
+  "model_consumption": { "visual_calls": 5, "provider_calls": 4 },
+  "once_effect_records": [
+    { "effect_id": "submit_build", "status": "confirmed", "evidence_refs": ["evidence_submit_result"] }
+  ],
+  "artifact_refs": [{ "artifact_id": "artifact_final_video", "revision": 1, "role": "final_video" }],
+  "automation_attribution": { "out_of_band_browser_actions": 0, "allowed_human_gates": 2, "system_actions": 14 }
+}

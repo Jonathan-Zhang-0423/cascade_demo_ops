@@ -1,0 +1,23 @@
+{
+  "schema_version": "demoops.workflow_template.v1",
+  "template_id": "async-product-build-demo-v1",
+  "template_version": "1.0.0",
+  "task_pack": "async-builder",
+  "selection_signals": ["user_goal", "interaction_structure", "interaction_surface", "result_type"],
+  "nodes": [
+    { "node_id": "freeze_product_spec", "module_id": "source-intelligence", "capability": "compile_product_spec", "depends_on": [], "input_roles": ["user_goal"], "output_roles": ["product_spec"], "replay_policy": "observe_only" },
+    { "node_id": "observe_builder_surface", "module_id": "surface-validation", "capability": "describe_async_builder", "depends_on": ["freeze_product_spec"], "input_roles": ["product_spec"], "output_roles": ["surface_observation", "interaction_contracts"], "replay_policy": "observe_only" },
+    { "node_id": "compile_execution_plan", "module_id": "plan-review", "capability": "compile_interaction_plan", "depends_on": ["observe_builder_surface"], "input_roles": ["product_spec", "surface_observation"], "output_roles": ["execution_plan", "gate_decision"], "replay_policy": "observe_only" },
+    { "node_id": "open_creation_surface", "module_id": "execution-capture", "capability": "open_semantic_surface", "depends_on": ["compile_execution_plan"], "input_roles": ["execution_plan"], "output_roles": ["creation_surface"], "replay_policy": "idempotent_write" },
+    { "node_id": "fill_product_spec", "module_id": "execution-capture", "capability": "fill_product_spec", "depends_on": ["open_creation_surface"], "input_roles": ["product_spec", "creation_surface"], "output_roles": ["filled_spec_evidence"], "replay_policy": "idempotent_write" },
+    { "node_id": "configure_direct_execution", "module_id": "execution-capture", "capability": "configure_execution_mode", "depends_on": ["fill_product_spec"], "input_roles": ["execution_plan"], "output_roles": ["execution_mode_evidence"], "replay_policy": "idempotent_write" },
+    { "node_id": "submit_build", "module_id": "execution-capture", "capability": "submit_async_build", "depends_on": ["configure_direct_execution"], "input_roles": ["filled_spec_evidence", "execution_mode_evidence"], "output_roles": ["once_effect_checkpoint", "build_entry_evidence"], "replay_policy": "once_effect" },
+    { "node_id": "observe_build", "module_id": "execution-capture", "capability": "observe_build_lifecycle", "depends_on": ["submit_build"], "input_roles": ["build_entry_evidence"], "output_roles": ["build_observations", "preview_candidate"], "replay_policy": "observe_only" },
+    { "node_id": "verify_interactive_result", "module_id": "execution-capture", "capability": "verify_interactive_surface", "depends_on": ["observe_build"], "input_roles": ["preview_candidate", "interaction_contracts"], "output_roles": ["interaction_evidence", "recording_segments"], "replay_policy": "idempotent_write" },
+    { "node_id": "materialize_fact_track", "module_id": "execution-capture", "capability": "materialize_fact_track", "depends_on": ["verify_interactive_result"], "input_roles": ["recording_segments", "interaction_evidence"], "output_roles": ["fact_track", "evidence_digest"], "replay_policy": "observe_only" },
+    { "node_id": "compose_final_film", "module_id": "director-media", "capability": "compose_guided_demo", "depends_on": ["materialize_fact_track"], "input_roles": ["fact_track", "evidence_digest"], "output_roles": ["final_film", "review_package"], "replay_policy": "once_effect", "optional": true }
+  ],
+  "gates": ["admission", "data_access", "evidence_readiness", "plan_approval", "execution_policy", "outcome", "materialization", "provider_spend", "media_quality", "final_review"],
+  "budget": { "max_runtime_ms": 1800000, "max_attempts": 2, "max_provider_calls": 8, "max_event_bytes": 65536 },
+  "fallback": { "on_module_failure": "waiting_input", "on_generated_media_failure": "fact_track" }
+}

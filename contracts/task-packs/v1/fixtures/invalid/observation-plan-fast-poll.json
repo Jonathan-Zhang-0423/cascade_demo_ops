@@ -1,0 +1,12 @@
+{
+  "schema_version": "demoops.build_observation_plan.v1",
+  "plan_id": "fast_poll",
+  "initial_phase": "request_submitted",
+  "terminal_phase": "preview_ready",
+  "transitions": [],
+  "heartbeat_ms": 1000,
+  "warn_after_ms": 300000,
+  "defer_after_ms": 600000,
+  "max_visual_calls": 100,
+  "required_terminal_channels": 1
+}

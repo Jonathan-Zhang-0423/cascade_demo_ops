@@ -1,0 +1,13 @@
+{
+  "schema_version": "demoops.temporal_visual_observation.v1",
+  "sequence": 1,
+  "phase": "request_submitted",
+  "transition": "request_submitted",
+  "decision": "continue",
+  "confidence": 0.5,
+  "criteria": [],
+  "visible_evidence": [],
+  "current_screenshot_artifact_ref": "data:image/png;base64,AAAA",
+  "evidence_kinds": ["visual"],
+  "material_changed": false
+}

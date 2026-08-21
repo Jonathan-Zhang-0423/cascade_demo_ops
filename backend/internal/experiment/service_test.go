@@ -1,0 +1,207 @@
+package experiment
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestCreateRunFreezesTwoLegsAndIsIdempotent(t *testing.T) {
+	service := testService(t)
+	request := testCreateRequest()
+	run, err := service.CreateRun(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.State != RunStateQueued || run.Phase != "product_spec_frozen" || len(run.Legs) != 2 || run.Legs[0].Kind != "main" || run.Legs[1].Kind != "recovery" {
+		t.Fatalf("unexpected frozen run: %+v", run)
+	}
+	if run.Legs[0].ProjectName == run.Legs[1].ProjectName || run.Legs[0].BuildPrompt == run.Legs[1].BuildPrompt {
+		t.Fatalf("main and recovery identities were not kept distinct: %+v", run.Legs)
+	}
+	for _, term := range targetPromptForbiddenTerms {
+		if strings.Contains(strings.ToLower(run.Legs[0].BuildPrompt), strings.ToLower(term)) {
+			t.Fatalf("target prompt leaked internal term %q: %s", term, run.Legs[0].BuildPrompt)
+		}
+	}
+	again, err := service.CreateRun(context.Background(), request)
+	if err != nil || again.RunID != run.RunID {
+		t.Fatalf("idempotent create returned a new run: run=%+v err=%v", again, err)
+	}
+	request.TargetURL = "https://other.example.test/app"
+	if _, err := service.CreateRun(context.Background(), request); err == nil {
+		t.Fatal("idempotency key reuse for a different target must fail")
+	}
+}
+
+func TestConfirmedOnceEffectResumesObserveOnlyWithoutReplay(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateRunning, "creating_target")
+	legID := run.Legs[0].LegID
+	started, err := service.BeginOnceEffect(context.Background(), run.RunID, run.Revision, legID, "submit_build", "target_submission", "idem-submit-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := service.CommitOnceEffect(context.Background(), run.RunID, CommitOnceEffectRequest{
+		ExpectedRevision: started.Revision, LegID: legID, EffectID: "submit_build", StateFingerprintRef: "artifact://fingerprint/main", ResultEntryRef: "artifact://result/entry",
+		EvidenceRefs: []string{"evidence_submit_result"}, SegmentRefs: []ArtifactRef{{ArtifactID: "artifact_segment_before", Revision: 1, Role: "recording_segment"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.Legs[0].TargetSubmissions != 1 || committed.Legs[0].Checkpoint.OnceEffects[0].Status != "confirmed" {
+		t.Fatalf("once-effect was not committed: %+v", committed.Legs[0])
+	}
+	if _, err := service.BeginOnceEffect(context.Background(), run.RunID, committed.Revision, legID, "submit_build", "target_submission", "idem-submit-001"); err == nil {
+		t.Fatal("confirmed once-effect must never start again")
+	}
+	resumed, err := service.Resume(context.Background(), run.RunID, committed.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Legs[0].Phase != "resume_observe_only" || resumed.Legs[0].BrowserAttempt != 2 || resumed.Legs[0].TargetSubmissions != 1 {
+		t.Fatalf("confirmed recovery replayed or lost the checkpoint: %+v", resumed.Legs[0])
+	}
+}
+
+func TestUncertainOnceEffectDefersInsteadOfReplaying(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateRunning, "creating_target")
+	started, err := service.BeginOnceEffect(context.Background(), run.RunID, run.Revision, run.Legs[0].LegID, "submit_build", "target_submission", "idem-submit-002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := service.Resume(context.Background(), run.RunID, started.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.State != RunStateWaitingInput || resumed.Phase != "once_effect_uncertain" || resumed.Waiting == nil || resumed.Legs[0].TargetSubmissions != 0 {
+		t.Fatalf("uncertain effect did not fail closed: %+v", resumed)
+	}
+}
+
+func TestVisualCallBudgetIsHardBound(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	legID := run.Legs[0].LegID
+	for index := 0; index < run.Budget.VisualCallsPerRun; index++ {
+		var err error
+		run, err = service.RecordVisualCall(context.Background(), run.RunID, run.Revision, legID, []string{"evidence_visual"})
+		if err != nil {
+			t.Fatalf("visual call %d failed: %v", index+1, err)
+		}
+	}
+	if _, err := service.RecordVisualCall(context.Background(), run.RunID, run.Revision, legID, []string{"evidence_over_budget"}); err == nil {
+		t.Fatal("visual call beyond the frozen budget must fail")
+	}
+}
+
+func TestFinalFilmBindingIsUniqueAndProviderConsumptionIsMonotonic(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	bound, err := service.BindFinalFilm(t.Context(), run.RunID, run.Revision, "film-main", 3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BindFinalFilm(t.Context(), run.RunID, bound.Revision, "film-other", 1, 2); err == nil {
+		t.Fatal("a second FinalFilm job must be rejected")
+	}
+	if _, err := service.BindFinalFilm(t.Context(), run.RunID, bound.Revision, "film-main", 4, 1); err == nil {
+		t.Fatal("provider consumption must not decrease")
+	}
+	updated, err := service.BindFinalFilm(t.Context(), run.RunID, bound.Revision, "film-main", 4, 4)
+	if err != nil || updated.ProviderCallsUsed != 4 || updated.FinalFilm.Revision != 4 {
+		t.Fatalf("same job progress binding failed: run=%+v err=%v", updated, err)
+	}
+}
+
+func TestOutOfBandHumanActionInvalidatesAttribution(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	invalid, err := service.RecordHumanIntervention(t.Context(), run.RunID, run.Revision, run.Legs[0].LegID, "manual_browser_input", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invalid.State != RunStateFailed || invalid.Report == nil || invalid.Report.Valid || invalid.Report.Automation.OutOfBandBrowserActions != 1 {
+		t.Fatalf("out-of-band input did not invalidate the run: %+v", invalid)
+	}
+}
+
+func TestLegArtifactsAreVersionedAndDeduplicated(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	artifact := ArtifactRef{ArtifactID: "artifact-keyframe-1", Revision: 1, Role: "temporal_keyframe"}
+	first, err := service.AppendLegArtifacts(t.Context(), run.RunID, run.Revision, run.Legs[0].LegID, []ArtifactRef{artifact}, "keyframe_materialized", "keyframe stored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.AppendLegArtifacts(t.Context(), run.RunID, first.Revision, run.Legs[0].LegID, []ArtifactRef{artifact}, "keyframe_reobserved", "keyframe already stored")
+	if err != nil || len(second.Legs[0].ArtifactRefs) != 1 {
+		t.Fatalf("artifact append was not idempotent: run=%+v err=%v", second, err)
+	}
+}
+
+func TestFileStoreRejectsOversizedInlineEvent(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	next := run
+	next.Revision++
+	next.UpdatedAt = next.UpdatedAt.Add(time.Second)
+	event := Event{SchemaVersion: EventSchemaVersion, EventID: "event_oversized", RunID: run.RunID, Type: "bad_inline_evidence", State: run.State, Phase: run.Phase, Summary: strings.Repeat("x", MaxEventBodyBytes), CreatedAt: next.UpdatedAt}
+	if err := service.store.Transition(context.Background(), run.RunID, run.Revision, next, event); err == nil {
+		t.Fatal("oversized event body must be rejected")
+	}
+}
+
+func testService(t *testing.T) *Service {
+	t.Helper()
+	nextID := 0
+	service, err := NewService(ServiceOptions{
+		Store: NewFileStore(t.TempDir()), DefinitionRoot: filepath.Join("..", "..", "..", "experiments"),
+		Now: func() time.Time { return time.Date(2026, 8, 21, 10, 0, nextID, 0, time.UTC) },
+		NewID: func(prefix string) (string, error) {
+			nextID++
+			return prefix + "_test_" + strings.Repeat("x", nextID), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func testCreateRequest() CreateRunRequest {
+	return CreateRunRequest{DefinitionRef: "2048-v2", TargetURL: "https://target.example.test/app", CredentialRef: "secret://demo/account", AuthorizationRef: "approval://experiment/start", IdempotencyKey: "experiment-idem-001"}
+}
+
+func mustCreateRun(t *testing.T, service *Service) Run {
+	t.Helper()
+	run, err := service.CreateRun(context.Background(), testCreateRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func mustTransitionLeg(t *testing.T, service *Service, run Run, legID string, state RunState, phase string) Run {
+	t.Helper()
+	next, err := service.TransitionLeg(context.Background(), run.RunID, LegTransitionRequest{ExpectedRevision: run.Revision, LegID: legID, State: state, Phase: phase, EventType: "test_transition", Summary: "test transition"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return next
+}
+
+func TestStoreRevisionConflict(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	_, err := service.Resume(context.Background(), run.RunID, run.Revision+1)
+	if !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("expected revision conflict, got %v", err)
+	}
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cascade-demoops.local/contracts/task-packs/v1/build-observation-plan.schema.json",
+  "title": "DemoOps Build Observation Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "plan_id", "initial_phase", "terminal_phase", "transitions", "heartbeat_ms", "warn_after_ms", "defer_after_ms", "max_visual_calls", "required_terminal_channels"],
+  "properties": {
+    "schema_version": { "const": "demoops.build_observation_plan.v1" },
+    "plan_id": { "$ref": "../../execution-port/v1/common.schema.json#/$defs/identifier" },
+    "initial_phase": { "const": "request_submitted" },
+    "terminal_phase": { "const": "preview_ready" },
+    "transitions": {
+      "type": "array", "minItems": 4, "maxItems": 16,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["from", "to", "evidence_kinds"],
+        "properties": {
+          "from": { "$ref": "#/$defs/phase" },
+          "to": { "$ref": "#/$defs/phase" },
+          "evidence_kinds": { "type": "array", "minItems": 1, "maxItems": 6, "uniqueItems": true, "items": { "enum": ["dom", "aria", "url", "network", "visual", "frame", "interaction"] } }
+        }
+      }
+    },
+    "heartbeat_ms": { "type": "integer", "minimum": 30000, "maximum": 90000 },
+    "warn_after_ms": { "type": "integer", "minimum": 60000, "maximum": 1200000 },
+    "defer_after_ms": { "type": "integer", "minimum": 120000, "maximum": 1800000 },
+    "max_visual_calls": { "type": "integer", "minimum": 1, "maximum": 24 },
+    "required_terminal_channels": { "type": "integer", "minimum": 2, "maximum": 4 },
+    "failure_signals": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 3, "maxLength": 240 } }
+  },
+  "$defs": {
+    "phase": { "enum": ["request_submitted", "plan_ready", "execution_active", "preview_candidate", "preview_ready", "blocked", "terminal_failed", "unknown"] }
+  }
+}

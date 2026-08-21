@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://demoops.local/contracts/task-packs/v1/temporal-visual-observation.schema.json",
+  "title": "TemporalVisualObservation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "sequence", "phase", "transition", "decision", "confidence", "criteria", "visible_evidence", "current_screenshot_artifact_ref", "evidence_kinds", "material_changed"],
+  "properties": {
+    "schema_version": { "const": "demoops.temporal_visual_observation.v1" },
+    "sequence": { "type": "integer", "minimum": 1, "maximum": 12 },
+    "phase": { "$ref": "#/$defs/phase" },
+    "transition": { "$ref": "#/$defs/phase" },
+    "decision": { "enum": ["continue", "advance", "succeed", "fail", "defer"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "criteria": {
+      "type": "array", "maxItems": 24,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "status", "evidence_refs"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "status": { "enum": ["met", "unmet", "unknown"] },
+          "evidence_refs": { "type": "array", "maxItems": 4, "items": { "type": "string", "minLength": 1, "maxLength": 256 } }
+        }
+      }
+    },
+    "visible_evidence": { "type": "array", "maxItems": 12, "items": { "type": "string", "minLength": 1, "maxLength": 400 } },
+    "blocking_reason": { "type": "string", "maxLength": 1000 },
+    "previous_keyframe_artifact_ref": { "type": "string", "minLength": 1, "maxLength": 256, "not": { "pattern": "^data:" } },
+    "current_screenshot_artifact_ref": { "type": "string", "minLength": 1, "maxLength": 256, "not": { "pattern": "^data:" } },
+    "evidence_kinds": { "type": "array", "uniqueItems": true, "items": { "enum": ["dom", "aria", "url", "network", "visual", "frame", "interaction"] } },
+    "material_changed": { "type": "boolean" },
+    "explicit_terminal_failure": { "type": "boolean" }
+  },
+  "$defs": {
+    "phase": { "enum": ["request_submitted", "plan_ready", "execution_active", "preview_candidate", "preview_ready", "blocked", "terminal_failed", "unknown"] }
+  }
+}

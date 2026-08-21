@@ -12,13 +12,19 @@ const roots = [
 	resolve("backend", "internal", "app", "direct_reunderstanding.go"),
 	resolve("backend", "internal", "app", "browser_agent_stage_plan.go"),
 	resolve("backend", "internal", "app", "browser_agent_event_log.go"),
+	resolve("backend", "internal", "app", "experiment_execution_adapter.go"),
+	resolve("backend", "internal", "app", "experiment_service.go"),
+	resolve("backend", "internal", "driver", "browser_agent.go"),
   resolve("backend", "internal", "finalfilm"),
+  resolve("backend", "internal", "experiment"),
   resolve("video-worker", "src", "browser-agent-runtime.ts"),
+  resolve("video-worker", "src", "temporal-visual-observer.ts"),
   resolve("video-worker", "src", "interaction-verifier.ts"),
   resolve("skills", "final-film"),
+  resolve("contracts", "task-packs", "v1", "async-product-build-demo-v1.json"),
 ];
 const forbidden = [
-  "cascadeai.cn", "tetris", "俄罗斯方块", "dialog-new-project", "preview-iframe", "card-project-",
+  "cascadeai.cn", "2048", "tetris", "俄罗斯方块", "dialog-new-project", "preview-iframe", "card-project-",
   "build-result-card", "playable_preview", "verify_playable_controls", "/project/:id",
 ];
 const files = [];

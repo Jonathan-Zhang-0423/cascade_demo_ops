@@ -1,0 +1,12 @@
+{
+  "schema_version": "demoops.product_spec_artifact.v1",
+  "spec_id": "weak_spec",
+  "title": "Game",
+  "objective": "Build a game",
+  "audience": "demo",
+  "requirements": [],
+  "visual_direction": { "theme": "dark", "palette": ["blue"], "motion": "none" },
+  "interaction_requirements": [],
+  "observable_acceptance": [],
+  "forbidden_outcomes": []
+}

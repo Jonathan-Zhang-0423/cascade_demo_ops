@@ -1,0 +1,11 @@
+{
+  "schema_version": "demoops.experiment_run_report.v1",
+  "run_id": "over_budget",
+  "valid": false,
+  "scores": { "orchestration": 0, "product": 0, "evidence": 0, "film": 0, "recovery": 0 },
+  "human_interventions": [],
+  "model_consumption": { "visual_calls": 25, "provider_calls": 9 },
+  "once_effect_records": [],
+  "artifact_refs": [],
+  "automation_attribution": { "out_of_band_browser_actions": 0, "allowed_human_gates": 0, "system_actions": 0 }
+}

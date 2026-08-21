@@ -1,0 +1,17 @@
+{
+  "schema_version": "demoops.temporal_visual_observation.v1",
+  "sequence": 4,
+  "phase": "preview_candidate",
+  "transition": "preview_ready",
+  "decision": "succeed",
+  "confidence": 0.94,
+  "criteria": [
+    { "id": "result_visible", "status": "met", "evidence_refs": ["artifact:keyframe:4"] },
+    { "id": "result_changed", "status": "met", "evidence_refs": ["artifact:keyframe:3", "artifact:keyframe:4"] }
+  ],
+  "visible_evidence": ["A complete result surface is visible and differs from the prior keyframe."],
+  "previous_keyframe_artifact_ref": "artifact:keyframe:3",
+  "current_screenshot_artifact_ref": "artifact:keyframe:4",
+  "evidence_kinds": ["visual", "dom"],
+  "material_changed": true
+}

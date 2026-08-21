@@ -39,6 +39,13 @@ const steps = [
     group: "node",
   },
   {
+    name: "Task Pack contract validation",
+    command: process.execPath,
+    args: [resolve(root, "scripts", "validate-task-pack-contracts.mjs")],
+    cwd: root,
+    group: "node",
+  },
+  {
     name: "Go version",
     ...goStep("version"),
     cwd: backendDir,
