@@ -1,0 +1,21 @@
+{
+  "schema_version": "demoops.execution_event.v1",
+  "event_id": "event-provider-submitted-001",
+  "workflow_id": "workflow-001",
+  "module_run_id": "run-director-media-001",
+  "sequence": 14,
+  "event_type": "provider_call_submitted",
+  "occurred_at": "2026-08-21T11:10:00Z",
+  "state_before": "running",
+  "state_after": "waiting_external",
+  "phase": "provider_polling",
+  "progress_percent": 62,
+  "summary": "Provider task accepted; future recovery must resume the persisted external task.",
+  "checkpoint_ref": "checkpoint://checkpoint-provider-001",
+  "evidence_refs": ["evidence-provider-receipt-001"],
+  "artifact_refs": [],
+  "metrics": {
+    "provider_attempt": 1,
+    "provider_calls_used": 1
+  }
+}

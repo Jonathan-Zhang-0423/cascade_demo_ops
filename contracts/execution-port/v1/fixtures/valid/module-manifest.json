@@ -1,0 +1,32 @@
+{
+  "schema_version": "demoops.module_manifest.v1",
+  "module_id": "execution-capture",
+  "module_version": "1.0.0",
+  "protocol_versions": ["demoops.execution_port.v1"],
+  "capabilities": ["browser.observe", "browser.execute", "recording.capture"],
+  "input_roles": [
+    {
+      "role": "approved_execution_bundle",
+      "required": true,
+      "max_data_class": "customer_business_data",
+      "media_types": ["application/json"]
+    }
+  ],
+  "output_roles": [
+    {
+      "role": "recording_result",
+      "required": true,
+      "max_data_class": "sensitive_artifact",
+      "media_types": ["application/json", "video/mp4"]
+    }
+  ],
+  "supported_replay_policies": ["observe_only", "idempotent_write", "once_effect"],
+  "risk_classes": ["read_only", "write_low", "write_high"],
+  "required_permissions": ["browser.session", "artifact.write"],
+  "transports": ["in_process", "jsonrpc_stdio", "http_sse"],
+  "limits": {
+    "max_event_bytes": 65536,
+    "max_input_artifacts": 128,
+    "max_output_artifacts": 512
+  }
+}

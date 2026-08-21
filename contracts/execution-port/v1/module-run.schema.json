@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cascade-demoops.local/contracts/execution-port/v1/module-run.schema.json",
+  "title": "DemoOps Module Run v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "module_run_id",
+    "workflow_id",
+    "workflow_template_id",
+    "module_id",
+    "module_version",
+    "attempt",
+    "state",
+    "phase",
+    "progress_percent",
+    "replay_policy",
+    "input_artifact_refs",
+    "output_artifact_refs",
+    "active_gate_refs",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "demoops.module_run.v1" },
+    "module_run_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "workflow_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "workflow_template_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "module_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "module_version": { "$ref": "common.schema.json#/$defs/version" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 20 },
+    "state": { "$ref": "common.schema.json#/$defs/runState" },
+    "phase": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "progress_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "replay_policy": { "$ref": "common.schema.json#/$defs/replayPolicy" },
+    "waiting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason_code", "owner", "next_operation"],
+      "properties": {
+        "reason_code": { "$ref": "common.schema.json#/$defs/identifier" },
+        "owner": { "enum": ["user", "module", "platform", "provider", "operator"] },
+        "next_operation": { "enum": ["provide_input", "resume_run", "cancel_run", "inspect_artifacts"] },
+        "expires_at": { "$ref": "common.schema.json#/$defs/timestamp" }
+      }
+    },
+    "input_artifact_refs": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "common.schema.json#/$defs/artifactRef" }
+    },
+    "output_artifact_refs": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "common.schema.json#/$defs/artifactRef" }
+    },
+    "active_gate_refs": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 3, "maxLength": 256 }
+    },
+    "checkpoint": { "$ref": "common.schema.json#/$defs/checkpointRef" },
+    "error": { "$ref": "common.schema.json#/$defs/error" },
+    "created_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "updated_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "started_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "terminal_at": { "$ref": "common.schema.json#/$defs/timestamp" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "enum": ["waiting_input", "waiting_external"] } } },
+      "then": { "required": ["waiting"] }
+    },
+    {
+      "if": { "properties": { "state": { "enum": ["succeeded", "failed", "canceled", "expired"] } } },
+      "then": { "required": ["terminal_at"] }
+    },
+    {
+      "if": { "properties": { "state": { "const": "failed" } } },
+      "then": { "required": ["error"] }
+    },
+    {
+      "if": { "properties": { "state": { "const": "succeeded" } } },
+      "then": { "properties": { "progress_percent": { "const": 100 } } }
+    }
+  ]
+}

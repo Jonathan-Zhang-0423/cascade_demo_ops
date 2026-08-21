@@ -22,6 +22,7 @@
     "smoke:validate-server-render": "node scripts/smoke-validate-server-render.mjs",
 	"validate:director-skills": "node scripts/validate-director-skills.mjs",
 	"validate:site-neutral-core": "node scripts/validate-site-neutral-core.mjs",
+	"validate:execution-port": "node scripts/validate-execution-port-contracts.mjs",
 	"harness:minimax-h3": "cd backend && go run ./cmd/minimaxh3harness",
     "build:desktop:win": "node scripts/build-desktop.mjs windows",
 	"build:desktop:wails": "node scripts/build-wails-desktop.mjs",
@@ -39,6 +40,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

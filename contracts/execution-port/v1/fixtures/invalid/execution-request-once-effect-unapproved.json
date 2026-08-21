@@ -1,0 +1,19 @@
+{
+  "schema_version": "demoops.execution_request.v1",
+  "request_id": "request-unapproved-001",
+  "idempotency_key": "workflow-001:once-effect:attempt-1",
+  "workflow_id": "workflow-001",
+  "workflow_template_id": "generic-goal-driven-v1",
+  "module_id": "execution-capture",
+  "module_version": "1.0.0",
+  "attempt": 1,
+  "capability": "browser.execute",
+  "replay_policy": "once_effect",
+  "input_artifact_refs": [],
+  "config_ref": "config://execution/default",
+  "policy_ref": "policy://execution/internal-v1",
+  "authorization_refs": [],
+  "budget": { "max_runtime_ms": 60000, "max_attempts": 1, "max_event_bytes": 65536 },
+  "deadline_at": "2026-08-21T12:00:00Z",
+  "trace_context": { "trace_id": "trace-unapproved-001", "correlation_id": "correlation-unapproved-001" }
+}

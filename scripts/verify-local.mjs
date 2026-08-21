@@ -32,6 +32,13 @@ const steps = [
     group: "node",
   },
   {
+    name: "Execution port contract validation",
+    command: process.execPath,
+    args: [resolve(root, "scripts", "validate-execution-port-contracts.mjs")],
+    cwd: root,
+    group: "node",
+  },
+  {
     name: "Go version",
     ...goStep("version"),
     cwd: backendDir,
@@ -238,6 +245,7 @@ function printHelp() {
   console.log(`Usage: pnpm verify [-- --skip-go|--go-only|--node-only|--wsl-go|--wsl-proxy=7897]
 
 Runs the strict local validation suite:
+  - director skill, site-neutral core, and execution-port contract validation
   - go version
   - go build ./...
   - go test ./...

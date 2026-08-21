@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cascade-demoops.local/contracts/execution-port/v1/execution-event.schema.json",
+  "title": "DemoOps Execution Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "workflow_id",
+    "module_run_id",
+    "sequence",
+    "event_type",
+    "occurred_at",
+    "phase",
+    "progress_percent",
+    "summary",
+    "evidence_refs",
+    "artifact_refs"
+  ],
+  "properties": {
+    "schema_version": { "const": "demoops.execution_event.v1" },
+    "event_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "workflow_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "module_run_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "event_type": {
+      "enum": [
+        "run_created",
+        "run_admitted",
+        "state_changed",
+        "phase_changed",
+        "gate_evaluated",
+        "checkpoint_saved",
+        "checkpoint_restored",
+        "artifact_published",
+        "artifact_deleted",
+        "provider_call_admitted",
+        "provider_call_submitted",
+        "provider_call_completed",
+        "sensitive_data_accessed",
+        "authorization_changed",
+        "input_requested",
+        "warning",
+        "run_succeeded",
+        "run_failed",
+        "run_canceled",
+        "run_expired",
+        "final_review_recorded",
+        "audit_summary"
+      ]
+    },
+    "occurred_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "state_before": { "$ref": "common.schema.json#/$defs/runState" },
+    "state_after": { "$ref": "common.schema.json#/$defs/runState" },
+    "phase": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "progress_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "gate_decision_ref": { "type": "string", "minLength": 3, "maxLength": 256 },
+    "checkpoint_ref": { "type": "string", "minLength": 3, "maxLength": 256 },
+    "evidence_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 3, "maxLength": 256 }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "common.schema.json#/$defs/artifactRef" }
+    },
+    "error": { "$ref": "common.schema.json#/$defs/error" },
+    "metrics": {
+      "type": "object",
+      "maxProperties": 24,
+      "additionalProperties": { "type": "number" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "event_type": { "const": "run_failed" } } },
+      "then": { "required": ["error"] }
+    },
+    {
+      "if": { "properties": { "event_type": { "const": "gate_evaluated" } } },
+      "then": { "required": ["gate_decision_ref"] }
+    },
+    {
+      "if": { "properties": { "event_type": { "enum": ["checkpoint_saved", "checkpoint_restored"] } } },
+      "then": { "required": ["checkpoint_ref"] }
+    },
+    {
+      "if": { "properties": { "event_type": { "const": "provider_call_submitted" } } },
+      "then": { "required": ["checkpoint_ref"] }
+    }
+  ]
+}

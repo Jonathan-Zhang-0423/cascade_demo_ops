@@ -1,0 +1,74 @@
+{
+  "schema_version": "demoops.workflow_template.v1",
+  "template_id": "interactive-application-v1",
+  "template_version": "1.0.0",
+  "task_pack": "interactive-application",
+  "selection_signals": [
+    "user_goal",
+    "interaction_structure",
+    "interaction_surface",
+    "evidence_requirement",
+    "risk_requirement",
+    "result_type"
+  ],
+  "nodes": [
+    {
+      "node_id": "surface-facts",
+      "module_id": "surface-validation",
+      "capability": "surface.observe",
+      "depends_on": [],
+      "input_roles": ["user_goal"],
+      "output_roles": ["surface_evidence"],
+      "replay_policy": "observe_only"
+    },
+    {
+      "node_id": "plan-review",
+      "module_id": "plan-review",
+      "capability": "workflow.compile",
+      "depends_on": ["surface-facts"],
+      "input_roles": ["surface_evidence"],
+      "output_roles": ["approved_execution_bundle"],
+      "replay_policy": "idempotent_write"
+    },
+    {
+      "node_id": "execution-capture",
+      "module_id": "execution-capture",
+      "capability": "browser.execute",
+      "depends_on": ["plan-review"],
+      "input_roles": ["approved_execution_bundle"],
+      "output_roles": ["recording_result"],
+      "replay_policy": "once_effect"
+    },
+    {
+      "node_id": "director-media",
+      "module_id": "director-media",
+      "capability": "finalfilm.compose",
+      "depends_on": ["execution-capture"],
+      "input_roles": ["recording_result"],
+      "output_roles": ["review_package"],
+      "replay_policy": "idempotent_write"
+    }
+  ],
+  "gates": [
+    "admission",
+    "data_access",
+    "plan_approval",
+    "execution_policy",
+    "outcome",
+    "materialization",
+    "provider_spend",
+    "media_quality",
+    "final_review"
+  ],
+  "budget": {
+    "max_runtime_ms": 1800000,
+    "max_attempts": 2,
+    "max_provider_calls": 4,
+    "max_cost_minor_units": 10000,
+    "max_event_bytes": 65536
+  },
+  "fallback": {
+    "on_module_failure": "use_verified_checkpoint",
+    "on_generated_media_failure": "fact_track"
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cascade-demoops.local/contracts/execution-port/v1/workflow-template.schema.json",
+  "title": "DemoOps Workflow Template v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "template_id",
+    "template_version",
+    "task_pack",
+    "selection_signals",
+    "nodes",
+    "gates",
+    "budget",
+    "fallback"
+  ],
+  "properties": {
+    "schema_version": { "const": "demoops.workflow_template.v1" },
+    "template_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "template_version": { "$ref": "common.schema.json#/$defs/version" },
+    "task_pack": {
+      "enum": [
+        "async-builder",
+        "crud-form",
+        "dashboard-analytics",
+        "canvas-editor",
+        "interactive-application",
+        "generic-goal-driven",
+        "legacy-cascade-flow-v1"
+      ]
+    },
+    "selection_signals": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "user_goal",
+          "feature_capability",
+          "interaction_structure",
+          "interaction_surface",
+          "evidence_requirement",
+          "risk_requirement",
+          "result_type"
+        ]
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "module_id", "capability", "depends_on", "input_roles", "output_roles", "replay_policy"],
+        "properties": {
+          "node_id": { "$ref": "common.schema.json#/$defs/identifier" },
+          "module_id": { "$ref": "common.schema.json#/$defs/identifier" },
+          "capability": { "$ref": "common.schema.json#/$defs/identifier" },
+          "depends_on": {
+            "type": "array",
+            "maxItems": 63,
+            "uniqueItems": true,
+            "items": { "$ref": "common.schema.json#/$defs/identifier" }
+          },
+          "input_roles": {
+            "type": "array",
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1, "maxLength": 96 }
+          },
+          "output_roles": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1, "maxLength": 96 }
+          },
+          "replay_policy": { "$ref": "common.schema.json#/$defs/replayPolicy" },
+          "optional": { "type": "boolean" }
+        }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "admission",
+          "data_access",
+          "evidence_readiness",
+          "plan_approval",
+          "execution_policy",
+          "outcome",
+          "materialization",
+          "provider_spend",
+          "media_quality",
+          "final_review"
+        ]
+      }
+    },
+    "budget": { "$ref": "common.schema.json#/$defs/budget" },
+    "fallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["on_module_failure", "on_generated_media_failure"],
+      "properties": {
+        "on_module_failure": { "enum": ["stop", "waiting_input", "use_verified_checkpoint"] },
+        "on_generated_media_failure": { "enum": ["fact_track", "stop"] }
+      }
+    }
+  }
+}

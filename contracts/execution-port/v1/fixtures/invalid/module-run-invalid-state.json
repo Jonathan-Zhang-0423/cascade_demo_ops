@@ -1,0 +1,18 @@
+{
+  "schema_version": "demoops.module_run.v1",
+  "module_run_id": "run-invalid-state-001",
+  "workflow_id": "workflow-001",
+  "workflow_template_id": "generic-goal-driven-v1",
+  "module_id": "surface-validation",
+  "module_version": "1.0.0",
+  "attempt": 1,
+  "state": "awaiting_credentials",
+  "phase": "credential_wait",
+  "progress_percent": 10,
+  "replay_policy": "observe_only",
+  "input_artifact_refs": [],
+  "output_artifact_refs": [],
+  "active_gate_refs": [],
+  "created_at": "2026-08-21T11:00:00Z",
+  "updated_at": "2026-08-21T11:01:00Z"
+}

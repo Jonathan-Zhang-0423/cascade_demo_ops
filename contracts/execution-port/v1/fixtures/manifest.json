@@ -1,0 +1,19 @@
+{
+  "schema_version": "demoops.execution_port_fixture_manifest.v1",
+  "fixtures": [
+    { "file": "valid/module-manifest.json", "schema": "module-manifest.schema.json", "valid": true },
+    { "file": "valid/workflow-template.json", "schema": "workflow-template.schema.json", "valid": true },
+    { "file": "valid/execution-request.json", "schema": "execution-request.schema.json", "valid": true },
+    { "file": "valid/module-run-waiting-external.json", "schema": "module-run.schema.json", "valid": true },
+    { "file": "valid/execution-event.json", "schema": "execution-event.schema.json", "valid": true },
+    { "file": "valid/gate-decision.json", "schema": "gate-decision.schema.json", "valid": true },
+    { "file": "valid/artifact-descriptor.json", "schema": "artifact-descriptor.schema.json", "valid": true },
+    { "file": "invalid/module-manifest-credential-output.json", "schema": "module-manifest.schema.json", "valid": false },
+    { "file": "invalid/workflow-template-hostname-router.json", "schema": "workflow-template.schema.json", "valid": false },
+    { "file": "invalid/execution-request-once-effect-unapproved.json", "schema": "execution-request.schema.json", "valid": false },
+    { "file": "invalid/module-run-invalid-state.json", "schema": "module-run.schema.json", "valid": false },
+    { "file": "invalid/execution-event-inline-secret.json", "schema": "execution-event.schema.json", "valid": false },
+    { "file": "invalid/gate-decision-block-without-remediation.json", "schema": "gate-decision.schema.json", "valid": false },
+    { "file": "invalid/artifact-descriptor-secret.json", "schema": "artifact-descriptor.schema.json", "valid": false }
+  ]
+}

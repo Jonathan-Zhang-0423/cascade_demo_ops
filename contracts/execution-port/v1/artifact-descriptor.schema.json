@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cascade-demoops.local/contracts/execution-port/v1/artifact-descriptor.schema.json",
+  "title": "DemoOps Artifact Descriptor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "revision",
+    "role",
+    "media_type",
+    "data_class",
+    "purpose",
+    "source",
+    "storage_scope",
+    "uri",
+    "size_bytes",
+    "required",
+    "sensitive",
+    "retention",
+    "cross_boundary",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "demoops.artifact_descriptor.v1" },
+    "artifact_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "role": { "type": "string", "minLength": 1, "maxLength": 96 },
+    "media_type": { "type": "string", "pattern": "^[a-z0-9.+-]+/[a-z0-9.+-]+$" },
+    "data_class": {
+      "enum": ["public_config", "operational_metadata", "customer_business_data", "sensitive_artifact"]
+    },
+    "purpose": { "type": "string", "minLength": 3, "maxLength": 256 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["module_run_id"],
+      "properties": {
+        "module_run_id": { "$ref": "common.schema.json#/$defs/identifier" },
+        "external_task_id": { "$ref": "common.schema.json#/$defs/identifier" },
+        "source_artifact_refs": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "common.schema.json#/$defs/artifactRef" }
+        }
+      }
+    },
+    "storage_scope": { "enum": ["module_workspace", "project_artifacts", "remote_job", "review_package"] },
+    "uri": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 2048,
+      "pattern": "^(artifact|direct|review|managed)://"
+    },
+    "size_bytes": { "type": "integer", "minimum": 0 },
+    "required": { "type": "boolean" },
+    "sensitive": { "type": "boolean" },
+    "retention": { "$ref": "common.schema.json#/$defs/retention" },
+    "cross_boundary": { "type": "boolean" },
+    "digest": { "$ref": "common.schema.json#/$defs/digest" },
+    "created_at": { "$ref": "common.schema.json#/$defs/timestamp" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "cross_boundary": { "const": true } } },
+      "then": { "required": ["digest"] }
+    },
+    {
+      "if": { "properties": { "data_class": { "const": "sensitive_artifact" } } },
+      "then": { "properties": { "sensitive": { "const": true } } }
+    }
+  ]
+}

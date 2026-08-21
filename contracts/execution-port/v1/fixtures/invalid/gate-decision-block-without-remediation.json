@@ -1,0 +1,13 @@
+{
+  "schema_version": "demoops.gate_decision.v1",
+  "gate_id": "gate-blocked-001",
+  "gate_type": "execution_policy",
+  "decision": "block",
+  "owner": "platform",
+  "reason_code": "route_outside_policy",
+  "summary": "The requested route is outside the approved policy.",
+  "workflow_id": "workflow-001",
+  "module_run_id": "run-execution-001",
+  "next_operation": "cancel_run",
+  "evaluated_at": "2026-08-21T11:00:00Z"
+}

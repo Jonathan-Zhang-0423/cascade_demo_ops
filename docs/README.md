@@ -2,6 +2,15 @@
 
 - [Browser Agent 直连部署手册](browser-agent-direct-deployment.md)：App 正式执行主链路、Ubuntu 网关、专属端口、Worker 对接与真实验收门禁。
 
+## 模块化工作流与通用执行端口
+
+- [当前全工作链路代码审计（2026-08-21）](./architecture/current-system-workflow-audit-2026-08-21.md)
+- [安全数据与门禁治理规范 v1](./architecture/safety-data-governance-v1.md)
+- [模块化工作流重构方案 v1](./architecture/modular-workflow-refactor-v1.md)
+- [通用执行端口协议 v1](./protocols/universal-execution-port-v1.md)
+
+以上文档共同定义下一阶段的模块化迁移基线：以传输无关 Lifecycle Kernel 统一 Go 进程内、Browser Worker JSON-RPC 和远端 HTTP/SSE 运行语义；现有 v1 协议通过 Adapter 保持兼容。机器契约和正反例位于 `contracts/execution-port/v1/`，使用 `pnpm validate:execution-port` 校验。
+
 ## Server 侧权威架构
 
 - [Server 侧 Browser Agent、执行与本地视频编辑系统架构 v2](./server-browser-agent-execution-editor-architecture-v2.md)

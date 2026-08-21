@@ -1,0 +1,22 @@
+{
+  "schema_version": "demoops.workflow_template.v1",
+  "template_id": "site-specific-template",
+  "template_version": "1.0.0",
+  "task_pack": "generic-goal-driven",
+  "selection_signals": ["user_goal"],
+  "hostname": "target.example",
+  "nodes": [
+    {
+      "node_id": "observe",
+      "module_id": "surface-validation",
+      "capability": "surface.observe",
+      "depends_on": [],
+      "input_roles": ["user_goal"],
+      "output_roles": ["surface_evidence"],
+      "replay_policy": "observe_only"
+    }
+  ],
+  "gates": ["admission"],
+  "budget": { "max_runtime_ms": 60000, "max_attempts": 1, "max_event_bytes": 65536 },
+  "fallback": { "on_module_failure": "stop", "on_generated_media_failure": "fact_track" }
+}

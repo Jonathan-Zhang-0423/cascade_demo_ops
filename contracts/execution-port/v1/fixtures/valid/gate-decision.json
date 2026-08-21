@@ -1,0 +1,18 @@
+{
+  "schema_version": "demoops.gate_decision.v1",
+  "gate_id": "gate-provider-spend-001",
+  "gate_type": "provider_spend",
+  "decision": "defer",
+  "owner": "provider",
+  "reason_code": "provider_task_running",
+  "summary": "The authorized provider task is still running; no new call is permitted.",
+  "workflow_id": "workflow-001",
+  "module_run_id": "run-director-media-001",
+  "revision": 1,
+  "evidence_refs": ["evidence-provider-receipt-001"],
+  "artifact_refs": [],
+  "remediation": "Resume polling the persisted external task ID.",
+  "next_operation": "resume_run",
+  "evaluated_at": "2026-08-21T11:15:00Z",
+  "expires_at": "2026-08-21T13:00:00Z"
+}

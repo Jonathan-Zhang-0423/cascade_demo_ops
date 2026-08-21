@@ -26,6 +26,8 @@ The shipped Desktop execution path is the direct Browser Agent transport. The re
 
 Documentation:
 
+- [Modular workflow architecture package](./docs/architecture/modular-workflow-refactor-v1.md)
+- [Universal execution port protocol v1](./docs/protocols/universal-execution-port-v1.md)
 - [Server-side v2 authoritative architecture](./docs/server-browser-agent-execution-editor-architecture-v2.md)
 - [Documentation index and v1 migration status](./docs/README.md)
 - [Local Demo Editor MVP](./docs/local-demo-editor-mvp.md)

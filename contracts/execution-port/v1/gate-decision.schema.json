@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cascade-demoops.local/contracts/execution-port/v1/gate-decision.schema.json",
+  "title": "DemoOps Gate Decision v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "gate_id",
+    "gate_type",
+    "decision",
+    "owner",
+    "reason_code",
+    "summary",
+    "workflow_id",
+    "module_run_id",
+    "evaluated_at",
+    "next_operation"
+  ],
+  "properties": {
+    "schema_version": { "const": "demoops.gate_decision.v1" },
+    "gate_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "gate_type": {
+      "enum": [
+        "admission",
+        "data_access",
+        "evidence_readiness",
+        "plan_approval",
+        "execution_policy",
+        "outcome",
+        "materialization",
+        "provider_spend",
+        "media_quality",
+        "final_review"
+      ]
+    },
+    "decision": { "enum": ["pass", "warn", "block", "defer"] },
+    "owner": { "enum": ["user", "module", "platform", "provider", "operator"] },
+    "reason_code": { "$ref": "common.schema.json#/$defs/identifier" },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "workflow_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "module_run_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "evidence_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 3, "maxLength": 256 }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "common.schema.json#/$defs/artifactRef" }
+    },
+    "remediation": { "type": "string", "maxLength": 1024 },
+    "next_operation": {
+      "enum": ["none", "provide_input", "resume_run", "cancel_run", "inspect_artifacts", "request_approval"]
+    },
+    "evaluated_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "expires_at": { "$ref": "common.schema.json#/$defs/timestamp" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "decision": { "enum": ["block", "defer"] } } },
+      "then": { "required": ["remediation"] }
+    }
+  ]
+}

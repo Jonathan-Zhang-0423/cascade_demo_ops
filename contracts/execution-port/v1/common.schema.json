@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cascade-demoops.local/contracts/execution-port/v1/common.schema.json",
+  "title": "DemoOps Execution Port Common Types v1",
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "dataClass": {
+      "enum": [
+        "public_config",
+        "operational_metadata",
+        "customer_business_data",
+        "sensitive_artifact",
+        "credential_secret"
+      ]
+    },
+    "replayPolicy": {
+      "enum": ["observe_only", "idempotent_write", "once_effect"]
+    },
+    "runState": {
+      "enum": [
+        "created",
+        "admitted",
+        "queued",
+        "running",
+        "waiting_input",
+        "waiting_external",
+        "succeeded",
+        "failed",
+        "canceled",
+        "expired"
+      ]
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "revision"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/identifier" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "role": { "type": "string", "minLength": 1, "maxLength": 96 }
+      }
+    },
+    "authorizationRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "kind"],
+      "properties": {
+        "ref": { "type": "string", "minLength": 8, "maxLength": 256 },
+        "kind": {
+          "enum": ["user_approval", "credential_grant", "provider_spend", "operator_override"]
+        },
+        "expires_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_runtime_ms", "max_attempts", "max_event_bytes"],
+      "properties": {
+        "max_runtime_ms": { "type": "integer", "minimum": 1000, "maximum": 86400000 },
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "max_provider_calls": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "max_cost_minor_units": { "type": "integer", "minimum": 0 },
+        "max_event_bytes": { "type": "integer", "minimum": 1024, "maximum": 65536 }
+      }
+    },
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "value"],
+      "properties": {
+        "algorithm": { "const": "sha256" },
+        "value": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["ephemeral", "expires_at", "project_lifetime", "user_managed"] },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "delete_on_terminal": { "type": "boolean" },
+        "policy_ref": { "type": "string", "minLength": 3, "maxLength": 256 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "expires_at" } } },
+          "then": { "required": ["expires_at"] }
+        }
+      ]
+    },
+    "checkpointRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkpoint_id",
+        "module_run_id",
+        "attempt",
+        "verified_phase",
+        "replay_policy",
+        "created_at"
+      ],
+      "properties": {
+        "checkpoint_id": { "$ref": "#/$defs/identifier" },
+        "module_run_id": { "$ref": "#/$defs/identifier" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "verified_phase": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "state_fingerprint_ref": { "type": "string", "minLength": 3, "maxLength": 256 },
+        "external_task_ids": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/identifier" },
+          "uniqueItems": true
+        },
+        "artifact_refs": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/artifactRef" }
+        },
+        "once_effect_records": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["effect_id", "status"],
+            "properties": {
+              "effect_id": { "$ref": "#/$defs/identifier" },
+              "status": { "enum": ["not_started", "started", "confirmed", "uncertain"] },
+              "idempotency_key": { "type": "string", "minLength": 8, "maxLength": 256 },
+              "evidence_refs": {
+                "type": "array",
+                "maxItems": 32,
+                "items": { "type": "string", "minLength": 3, "maxLength": 256 }
+              }
+            }
+          }
+        },
+        "replay_policy": { "$ref": "#/$defs/replayPolicy" },
+        "created_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "category", "message", "retryable", "responsibility"],
+      "properties": {
+        "code": { "$ref": "#/$defs/identifier" },
+        "category": {
+          "enum": [
+            "invalid_input",
+            "policy_blocked",
+            "authorization_required",
+            "authorization_expired",
+            "dependency_unavailable",
+            "external_timeout",
+            "target_unresolved",
+            "validation_failed",
+            "artifact_unavailable",
+            "quality_failed",
+            "budget_exhausted",
+            "internal_error"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "retryable": { "type": "boolean" },
+        "responsibility": { "enum": ["user", "module", "platform", "provider", "operator"] },
+        "gate_decision_ref": { "type": "string", "minLength": 3, "maxLength": 256 },
+        "evidence_refs": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 3, "maxLength": 256 }
+        },
+        "safe_details": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        }
+      }
+    },
+    "traceContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trace_id", "correlation_id"],
+      "properties": {
+        "trace_id": { "$ref": "#/$defs/identifier" },
+        "correlation_id": { "$ref": "#/$defs/identifier" },
+        "parent_run_id": { "$ref": "#/$defs/identifier" }
+      }
+    }
+  }
+}
