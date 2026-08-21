@@ -7,7 +7,7 @@ description: Design provider-neutral presentation shots for a factual demo and c
 
 Design moving chapter packaging that complements, but never impersonates, the product.
 
-Skill version: `1.0.0`.
+Skill version: `1.1.0`.
 
 ## Workflow
 

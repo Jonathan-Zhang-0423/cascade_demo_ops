@@ -1,4 +1,4 @@
 interface:
   display_name: "Director Timeline Compose"
   short_description: "Compile deterministic EDL, captions, audio, and FFmpeg"
-  default_prompt: "Compile the supplied factual story and approved presentation candidates into a deterministic EDL."
+  default_prompt: "Use $director-timeline-compose to compile the supplied factual story and approved presentation candidates into a deterministic EDL."

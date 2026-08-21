@@ -7,11 +7,11 @@ description: Run, inspect, recover, and forward-test the guided H3/Seedance/FFmp
 
 Operate the complete guided final-film flow without bypassing its factual evidence boundary.
 
-Skill version: `1.0.0`.
+Skill version: `1.1.0`.
 
 ## Procedure
 
-1. Read `references/runbook.md` and the four Director skills alongside this harness.
+1. Read `references/runbook.md`, `references/modular-experiment-runbook.md`, and the four Director skills alongside this harness.
 2. Confirm the job uses `guided-demo-v1`, a 90-120 second target, and server-owned H3/Seedance provider policy.
 3. Load provider credentials through the application's existing `.env` configuration. Never print secrets or copy a key into logs, prompts, job JSON, or Skill files.
 4. Start with `POST /v1/final-film/jobs/{id}/run`, one authorization reference, and a call budget no larger than the server policy.

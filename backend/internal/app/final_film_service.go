@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 
 	"cascade-demoops/backend/internal/finalfilm"
@@ -16,6 +17,7 @@ type FinalFilmCreateRequest struct {
 	SourcePackageID     string                               `json:"source_package_id,omitempty"`
 	PresentationIntents []model.PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
 	AutomationProfile   string                               `json:"automation_profile,omitempty"`
+	ReviewSupplements   []model.FinalFilmReviewSupplement    `json:"review_supplements,omitempty"`
 }
 
 type FinalFilmGenerationDecisionRequest struct {
@@ -96,11 +98,27 @@ func (s *Service) CreateFinalFilmJob(ctx context.Context, request FinalFilmCreat
 	if sourcePackageID == "" {
 		sourcePackageID = "editor_session:" + session.SessionID
 	}
+	if err := validateFinalFilmReviewSupplementRoots(s.runtime.ArtifactRoot, request.ReviewSupplements); err != nil {
+		return model.FinalFilmJob{}, err
+	}
 	return s.finalFilm.CreateJob(ctx, finalfilm.CreateJobRequest{
 		EditorSessionID: session.SessionID, EditorRevision: session.Revision, SourcePackageID: sourcePackageID,
 		Catalog: session.AssetCatalog, BaselinePlan: session.EditPlan, Intents: request.PresentationIntents, RenderProfile: session.FinalProfile,
 		AutomationProfile: request.AutomationProfile,
+		ReviewSupplements: request.ReviewSupplements,
 	})
+}
+
+func validateFinalFilmReviewSupplementRoots(root string, supplements []model.FinalFilmReviewSupplement) error {
+	root = filepath.Clean(root)
+	for _, supplement := range supplements {
+		path := filepath.Clean(strings.TrimSpace(supplement.SourcePath))
+		relative, err := filepath.Rel(root, path)
+		if err != nil || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return errors.New("final film review supplement escapes artifact root")
+		}
+	}
+	return nil
 }
 
 func (s *Service) RunFinalFilmBaseline(ctx context.Context, jobID string) (model.FinalFilmJob, error) {

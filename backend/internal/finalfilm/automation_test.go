@@ -76,8 +76,25 @@ func TestRepositoryDirectorSkillRuntimesLoadWithoutSiteBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runtimes) != 5 || runtimes["final-film-director-harness"].Version != "1.0.0" {
+	if len(runtimes) != 5 || runtimes["final-film-director-harness"].Version != "1.1.0" {
 		t.Fatalf("unexpected Director skill registry: %+v", runtimes)
+	}
+}
+
+func TestReviewSupplementsRejectTraversalDuplicateAndReservedManifest(t *testing.T) {
+	for name, supplements := range map[string][]model.FinalFilmReviewSupplement{
+		"traversal":         {{Role: "product_spec", SourcePath: "source.json", RelativePath: "../source.json", Required: true}},
+		"duplicate role":    {{Role: "plan", SourcePath: "a.json", RelativePath: "experiment/a.json"}, {Role: "plan", SourcePath: "b.json", RelativePath: "experiment/b.json"}},
+		"reserved manifest": {{Role: "manifest", SourcePath: "manifest.json", RelativePath: "experiment/manifest.json"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateReviewSupplements(supplements); err == nil {
+				t.Fatal("expected review supplement validation failure")
+			}
+		})
+	}
+	if err := validateReviewSupplements([]model.FinalFilmReviewSupplement{{Role: "product_spec", SourcePath: "source.json", RelativePath: "experiment/product-spec.json", Required: true}}); err != nil {
+		t.Fatalf("valid review supplement rejected: %v", err)
 	}
 }
 
@@ -139,7 +156,8 @@ func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	baselinePath := filepath.Join(root, "baseline.mp4")
 	finalPath := filepath.Join(root, "final.mp4")
 	manifestPath := filepath.Join(root, "render-manifest.json")
-	for path, data := range map[string]string{rawPath: "raw", baselinePath: "baseline", finalPath: "final", manifestPath: `{}`} {
+	supplementPath := filepath.Join(root, "experiment-plan.json")
+	for path, data := range map[string]string{rawPath: "raw", baselinePath: "baseline", finalPath: "final", manifestPath: `{}`, supplementPath: `{"plan":"bounded"}`} {
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -153,6 +171,7 @@ func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	job.FinalRender.VideoPath, job.FinalRender.RenderManifestPath = finalPath, manifestPath
 	job.FinalOutputValidation = &model.FinalFilmOutputValidation{VideoSHA256: "stored-output-digest"}
 	job.FinalPlan = &baseline
+	job.ReviewSupplements = []model.FinalFilmReviewSupplement{{Role: "experiment_observation_plan", SourcePath: supplementPath, RelativePath: "experiment/build-observation-plan.json", Required: true}}
 	record := GeneratedTrackRecord{SchemaVersion: generatedTrackRecordSchemaVersion, DirectorPlanID: "director_package"}
 	job.Revision++
 	pkg, err := service.buildReviewPackage(context.Background(), job, record)
@@ -161,6 +180,13 @@ func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	}
 	if _, err := os.Stat(pkg.ZIPPath); err != nil || len(pkg.Files) < 7 {
 		t.Fatalf("review package is incomplete: %+v err=%v", pkg, err)
+	}
+	foundSupplement := false
+	for _, file := range pkg.Files {
+		foundSupplement = foundSupplement || file.Role == "experiment_observation_plan" && file.RelativePath == "experiment/build-observation-plan.json"
+	}
+	if !foundSupplement {
+		t.Fatalf("experiment review supplement is missing: %+v", pkg.Files)
 	}
 	firstZIP, err := os.ReadFile(pkg.ZIPPath)
 	if err != nil {

@@ -186,9 +186,9 @@ func DefaultFinalFilmAutomationPolicy() FinalFilmAutomationPolicy {
 			MaxAttemptsPerSlot: 2, FailurePolicy: PresentationGenerationFailureContinue,
 		},
 		SkillVersions: map[string]string{
-			"director-evidence-story": "1.0.0", "director-generated-shots": "1.0.0",
-			"director-timeline-compose": "1.0.0", "director-quality-gate": "1.0.0",
-			"final-film-director-harness": "1.0.0",
+			"director-evidence-story": "1.1.0", "director-generated-shots": "1.1.0",
+			"director-timeline-compose": "1.1.0", "director-quality-gate": "1.1.0",
+			"final-film-director-harness": "1.1.0",
 		},
 		MaxProviderCalls: 8,
 	}

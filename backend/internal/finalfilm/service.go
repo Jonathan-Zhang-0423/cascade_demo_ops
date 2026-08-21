@@ -56,6 +56,7 @@ type CreateJobRequest struct {
 	Intents           []model.PresentationGenerationIntent
 	RenderProfile     model.EditorRenderProfile
 	AutomationProfile string
+	ReviewSupplements []model.FinalFilmReviewSupplement
 }
 
 func NewService(options ServiceOptions) (*Service, error) {
@@ -145,6 +146,10 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 		Constraints: constraints, Catalog: request.Catalog, BaselinePlan: request.BaselinePlan,
 		RenderProfile: request.RenderProfile, PresentationIntents: append([]model.PresentationGenerationIntent{}, request.Intents...),
 		AutomationProfile: automationProfile, AutomationPolicy: automationPolicy,
+		ReviewSupplements: append([]model.FinalFilmReviewSupplement{}, request.ReviewSupplements...),
+	}
+	if err := validateReviewSupplements(job.ReviewSupplements); err != nil {
+		return model.FinalFilmJob{}, err
 	}
 	if err := ValidateJob(job); err != nil {
 		return model.FinalFilmJob{}, err

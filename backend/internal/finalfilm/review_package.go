@@ -91,6 +91,11 @@ func (s *Service) buildReviewPackage(ctx context.Context, job model.FinalFilmJob
 			return model.FinalFilmReviewPackage{}, err
 		}
 	}
+	for _, supplement := range job.ReviewSupplements {
+		if err := add(supplement.Role, supplement.SourcePath, supplement.RelativePath, "", supplement.Required); err != nil {
+			return model.FinalFilmReviewPackage{}, err
+		}
+	}
 	events, err := s.store.ListEvents(ctx, job.JobID)
 	if err != nil {
 		return model.FinalFilmReviewPackage{}, fmt.Errorf("load final film events for review package: %w", err)
@@ -141,6 +146,24 @@ func (s *Service) buildReviewPackage(ctx context.Context, job model.FinalFilmJob
 func deterministicReviewPackageID(jobID string, revision int) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(jobID) + fmt.Sprintf("\x00%d", revision)))
 	return "review_package_" + hex.EncodeToString(sum[:12])
+}
+
+func validateReviewSupplements(supplements []model.FinalFilmReviewSupplement) error {
+	seenRoles := map[string]bool{}
+	seenPaths := map[string]bool{}
+	for _, supplement := range supplements {
+		role := strings.TrimSpace(supplement.Role)
+		source := strings.TrimSpace(supplement.SourcePath)
+		relative := filepath.Clean(strings.TrimSpace(supplement.RelativePath))
+		if role == "" || source == "" || relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return errors.New("final film review supplement identity or relative path is invalid")
+		}
+		if seenRoles[role] || seenPaths[relative] || strings.EqualFold(filepath.Base(relative), "manifest.json") {
+			return errors.New("final film review supplement role or path is duplicated or reserved")
+		}
+		seenRoles[role], seenPaths[relative] = true, true
+	}
+	return nil
 }
 
 type finalRenderSidecar struct{ role, path string }

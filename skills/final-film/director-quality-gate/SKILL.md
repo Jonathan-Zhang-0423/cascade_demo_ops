@@ -7,11 +7,11 @@ description: Evaluate H3 or Seedance presentation candidates, produce CandidateQ
 
 Convert technical and visual evidence into a bounded decision.
 
-Skill version: `1.0.0`.
+Skill version: `1.1.0`.
 
 ## Candidate Gate
 
-1. Read `references/quality-thresholds.md`.
+1. Read `references/quality-thresholds.md` and `references/interactive-proof-gate.md`.
 2. Require successful decode and normalized MP4/H.264/yuv420p/1920x1080/CFR30 evidence.
 3. Check duration drift, empty/black/frozen output, first/last frames, motion, adjacent-shot continuity, fake UI, bad readable text, and unsupported claims. A generated moving shot fails if aggregate black exceeds 0.5 seconds or an unintended freeze exceeds 1.0 second.
 4. Write concrete findings, score, provider, intent, candidate, and attempt into `CandidateQualityReport`.

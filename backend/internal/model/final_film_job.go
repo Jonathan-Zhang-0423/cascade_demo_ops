@@ -73,6 +73,17 @@ type FinalFilmJob struct {
 	ReviewPackage              *FinalFilmReviewPackage        `json:"review_package,omitempty"`
 	FinalReview                *FinalFilmFinalReview          `json:"final_review,omitempty"`
 	ProviderAttempts           []FinalFilmProviderAttempt     `json:"provider_attempts,omitempty"`
+	ReviewSupplements          []FinalFilmReviewSupplement    `json:"review_supplements,omitempty"`
+}
+
+// FinalFilmReviewSupplement binds an experiment-owned, already materialized
+// artifact into the immutable review package. SourcePath is local runtime
+// metadata and is accepted only after the App constrains it to ArtifactRoot.
+type FinalFilmReviewSupplement struct {
+	Role         string `json:"role"`
+	SourcePath   string `json:"source_path"`
+	RelativePath string `json:"relative_path"`
+	Required     bool   `json:"required"`
 }
 
 type FinalFilmRenderOutput struct {

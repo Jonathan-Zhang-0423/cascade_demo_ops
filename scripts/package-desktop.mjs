@@ -68,6 +68,7 @@ copyIfExists(videoWorkerDist, resolve(resourceRoot, "sidecars", "video-worker", 
 copyVideoWorkerRuntimeDependencies(resolve(resourceRoot, "sidecars", "video-worker", "node_modules"));
 copyIfExists(webDist, resolve(resourceRoot, "web"));
 copyIfExists(resolve("skills", "final-film"), resolve(resourceRoot, "skills", "final-film"));
+copyIfExists(resolve("experiments"), resolve(resourceRoot, "experiments"));
 copyIfExists(process.execPath, bundledNodePath);
 copyMediaRuntime(sourceFFmpegPath, bundledFFmpegPath, "ffmpeg");
 copyMediaRuntime(sourceFFprobePath, bundledFFprobePath, "ffprobe");
@@ -103,6 +104,7 @@ const runtimeManifest = {
   runtimes,
   web: "web",
   director_skills: "skills/final-film",
+  experiments: "experiments",
   updates: {
     channel: releaseChannel,
     manifest_url: updateManifestURL,

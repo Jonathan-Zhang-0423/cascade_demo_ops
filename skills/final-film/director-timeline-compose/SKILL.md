@@ -7,11 +7,11 @@ description: Compile a factual story plan and accepted presentation candidates i
 
 Create a deterministic edit plan whose factual source bindings remain auditable.
 
-Skill version: `1.0.0`.
+Skill version: `1.1.0`.
 
 ## Workflow
 
-1. Read `references/edl-contract.md`.
+1. Read `references/edl-contract.md` and `references/interactive-evidence-edl.md`.
 2. Copy the factual plan. Never change fact source artifact IDs, source step IDs, source ranges, or required order.
 3. Apply 4-12x speed only to evidenced wait ranges. Use legal FFmpeg `atempo` factors; 8x becomes `2,2,2`.
 4. Insert accepted generated candidates only at their declared before-first, after-last, or after-step anchor.
