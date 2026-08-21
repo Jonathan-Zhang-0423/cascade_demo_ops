@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/credentialstore"
+	"cascade-demoops/backend/internal/experiment"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
@@ -1803,6 +1805,51 @@ func TestServerAcceptanceAPIRejectsNonLocalClients(t *testing.T) {
 
 func newTestDevHTTPServer(t *testing.T) *DevHTTPServer {
 	return newTestDevHTTPServerWithEnvironment(t, "test")
+}
+
+func TestExperimentRunHTTPCreateGetEventsAndResumeUseUnifiedProjection(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	server := newTestDevHTTPServerWithRepository(t, repoRoot)
+	body := `{"definition_ref":"2048-v2","target_url":"https://target.example.test/app","credential_ref":"credential://demo/experiment","authorization_ref":"approval://experiment/start","idempotency_key":"http-experiment-idem-001"}`
+	createRequest := httptest.NewRequest(http.MethodPost, "/v1/experiment-runs", strings.NewReader(body))
+	createRequest.Header.Set("Content-Type", "application/json")
+	createResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createResponse, createRequest)
+	var createdEnvelope BridgeResponse
+	if err := json.Unmarshal(createResponse.Body.Bytes(), &createdEnvelope); err != nil || !createdEnvelope.OK {
+		t.Fatalf("experiment create failed: envelope=%+v err=%v body=%s", createdEnvelope, err, createResponse.Body.String())
+	}
+	var created experiment.Run
+	if err := json.Unmarshal(createdEnvelope.Data, &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.State != experiment.RunStateQueued || created.Phase != "product_spec_frozen" {
+		t.Fatalf("unexpected unified run projection: %+v", created)
+	}
+
+	for _, endpoint := range []string{"", "/events"} {
+		request := httptest.NewRequest(http.MethodGet, "/v1/experiment-runs/"+created.RunID+endpoint, nil)
+		if endpoint == "/events" {
+			request.Header.Set("Accept", "text/event-stream")
+		}
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s failed: %s", endpoint, response.Body.String())
+		}
+		if endpoint == "/events" && (!strings.Contains(response.Body.String(), "event: execution_event") || !strings.Contains(response.Body.String(), "id: 1")) {
+			t.Fatalf("SSE projection is incomplete: %s", response.Body.String())
+		}
+	}
+
+	resume := httptest.NewRequest(http.MethodPost, "/v1/experiment-runs/"+created.RunID+"/resume", strings.NewReader(fmt.Sprintf(`{"expected_revision":%d}`, created.Revision)))
+	resume.Header.Set("Content-Type", "application/json")
+	resumeResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resumeResponse, resume)
+	var resumeEnvelope BridgeResponse
+	if err := json.Unmarshal(resumeResponse.Body.Bytes(), &resumeEnvelope); err != nil || !resumeEnvelope.OK {
+		t.Fatalf("experiment resume failed: envelope=%+v err=%v body=%s", resumeEnvelope, err, resumeResponse.Body.String())
+	}
 }
 
 func newTestDevHTTPServerWithEnvironment(t *testing.T, environment string) *DevHTTPServer {

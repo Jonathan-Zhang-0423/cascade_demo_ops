@@ -71,6 +71,11 @@ type DirectTransportUploadRequest struct {
 	ConfidenceAssessmentHash    string `json:"confidence_assessment_hash"`
 	RiskConfirmed               bool   `json:"risk_confirmed"`
 	IdempotencyKey              string `json:"idempotency_key"`
+	// RecoveryInjectionPhase is accepted only from the in-process experiment
+	// adapter. It asks the remote runtime to stop after a durable once-effect
+	// checkpoint so resume semantics can be verified without changing actions.
+	RecoveryInjectionPhase string         `json:"-"`
+	RuntimeMetadata        map[string]any `json:"-"`
 }
 
 type DirectTransportUploadResult struct {
@@ -318,6 +323,12 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 	if err != nil {
 		return DirectTransportUploadResult{}, err
 	}
+	if strings.TrimSpace(request.RecoveryInjectionPhase) != "" || len(request.RuntimeMetadata) > 0 {
+		build, err = bindExperimentRuntimeMetadata(build, request.RecoveryInjectionPhase, request.RuntimeMetadata)
+		if err != nil {
+			return DirectTransportUploadResult{}, err
+		}
+	}
 	lease, err := s.acquireDirectLease(ctx, projectID)
 	if err != nil {
 		return DirectTransportUploadResult{}, err
@@ -360,6 +371,61 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 	}
 	cleanLease = false
 	return DirectTransportUploadResult{Build: build, Lease: directLeaseView(lease), Receipt: receipt, CredentialReceipt: credentialReceipt}, nil
+}
+
+func bindExperimentRuntimeMetadata(build ClientExecutionPackageBuild, phase string, metadata map[string]any) (ClientExecutionPackageBuild, error) {
+	phase = strings.TrimSpace(phase)
+	if phase != "" && phase != "once_effect_committed" {
+		return ClientExecutionPackageBuild{}, errors.New("unsupported recovery injection phase")
+	}
+	encoded, err := json.Marshal(build.Package)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	var pkg model.ClientExecutionPackage
+	if err := json.Unmarshal(encoded, &pkg); err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	if pkg.Metadata == nil {
+		pkg.Metadata = map[string]any{}
+	}
+	if phase != "" {
+		pkg.Metadata["recovery_injection_phase"] = phase
+	}
+	allowed := map[string]bool{
+		"experiment_run_id": true, "experiment_leg_id": true, "observation_plan": true,
+		"interaction_plan": true, "visual_call_budget": true,
+	}
+	for key, value := range metadata {
+		if !allowed[key] {
+			return ClientExecutionPackageBuild{}, fmt.Errorf("unsupported experiment runtime metadata %q", key)
+		}
+		pkg.Metadata[key] = value
+	}
+	confidence, err := model.AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	if confidence.Readiness == model.PackageReadinessBlocked {
+		return ClientExecutionPackageBuild{}, errors.New("recovery injection made the package confidence assessment blocked")
+	}
+	pkg.ConfidenceSummary = confidence
+	approvalDigest, err := refreshPackageApprovalDigests(&pkg)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	if err := model.ValidateClientExecutionPackageForCloudExecution(&pkg); err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	digest, err := model.DigestCanonicalJSON(pkg)
+	if err != nil {
+		return ClientExecutionPackageBuild{}, err
+	}
+	build.Package = pkg
+	build.ApprovalSubjectDigestSHA256 = approvalDigest
+	build.PackageDigestSHA256 = digest
+	build.SizeReport = packageSizeReportForPackage(pkg)
+	return build, nil
 }
 
 func bindDirectExecutionPackageOrigin(build ClientExecutionPackageBuild, installationID string) (ClientExecutionPackageBuild, error) {

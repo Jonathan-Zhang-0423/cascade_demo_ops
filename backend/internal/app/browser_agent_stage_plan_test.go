@@ -626,6 +626,47 @@ func TestBrowserAgentStageOrchestratorResumesCompletedStagesWithoutReplayingActi
 	}
 }
 
+func TestBrowserAgentStageOrchestratorInjectedRestartResumesCommittedOnceEffectWithoutReplay(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	orchestrator := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{})
+	plan, err := orchestrator.Prepare(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Stages = plan.Stages[:1]
+	plan.Stages[0].InteractionContract = &model.InteractionContract{ReplayPolicy: model.InteractionReplayOnceEffect}
+	plan.InterruptAfterFirstOnceEffect = true
+	sink := &memoryStageEventSink{}
+	executor := &resumableStageExecutor{revalidatePass: true}
+
+	if _, err := orchestrator.Run(context.Background(), plan, stubStageObserver{}, executor, sink); runtimeExecutionErrorCode(err) != runtimeErrorWorkerRestartInjected {
+		t.Fatalf("first run must stop only after the once-effect checkpoint is committed: %v", err)
+	}
+	if executor.executeCalls != 1 {
+		t.Fatalf("first run must execute the once-effect exactly once, got %d", executor.executeCalls)
+	}
+	completed := 0
+	for _, event := range sink.events {
+		if event.EventType == model.StageExecutionEventStageCompleted {
+			completed++
+		}
+	}
+	if completed != 1 {
+		t.Fatalf("restart injection must happen after one durable stage_completed event: %+v", sink.events)
+	}
+
+	resumed, err := orchestrator.Run(context.Background(), plan, stubStageObserver{}, executor, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.executeCalls != 1 || executor.revalidateCalls != 1 {
+		t.Fatalf("resumed run must revalidate without replay: execute=%d revalidate=%d", executor.executeCalls, executor.revalidateCalls)
+	}
+	if len(resumed.Events) != 1 || resumed.Events[0].EventType != model.StageExecutionEventStageResumed {
+		t.Fatalf("resumed run must emit one auditable stage_resumed event: %+v", resumed.Events)
+	}
+}
+
 type stubStageVerifier struct {
 	decision model.ValidationDecision
 	calls    int

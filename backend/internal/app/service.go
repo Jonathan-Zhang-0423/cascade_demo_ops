@@ -16,6 +16,7 @@ import (
 	"cascade-demoops/backend/internal/credentialstore"
 	"cascade-demoops/backend/internal/driver"
 	"cascade-demoops/backend/internal/executor"
+	"cascade-demoops/backend/internal/experiment"
 	"cascade-demoops/backend/internal/finalfilm"
 	"cascade-demoops/backend/internal/llm"
 	"cascade-demoops/backend/internal/model"
@@ -47,6 +48,12 @@ type Service struct {
 	editorJobsMu          sync.Mutex
 	editorJobs            map[string]editorRenderTask
 	finalFilm             *finalfilm.Service
+	experiments           *experiment.Service
+	experimentRunner      *experiment.Runner
+	experimentAdapter     experiment.LegExecutionAdapter
+	experimentRunMu       sync.Mutex
+	experimentRunCancels  map[string]context.CancelFunc
+	experimentAutoStart   bool
 	outlineRunner         BrowserAgentOutlineRunner
 	sourceRefsMu          sync.RWMutex
 	sourceRefs            map[string]LocalSourceRef
@@ -195,6 +202,28 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	}
 	service.finalFilm = finalFilmService
 	service.finalFilm.ResumeRunnableAutomations()
+	experimentRoot := filepath.Join(runtime.DevRepoRoot, "experiments")
+	if runtime.Profile == config.ProfileDesktop {
+		experimentRoot = filepath.Join(runtime.ResourceRoot, "experiments")
+	}
+	if info, statErr := os.Stat(experimentRoot); statErr != nil || !info.IsDir() {
+		experimentRoot = filepath.Join(runtime.DevRepoRoot, "experiments")
+	}
+	experimentService, err := experiment.NewService(experiment.ServiceOptions{
+		Store: experiment.NewFileStore(filepath.Join(runtime.DataRoot, "experiment_runs")), DefinitionRoot: experimentRoot,
+	})
+	if err != nil {
+		return nil, err
+	}
+	service.experiments = experimentService
+	experimentRunner, err := experiment.NewRunner(experimentService)
+	if err != nil {
+		return nil, err
+	}
+	service.experimentRunner = experimentRunner
+	service.experimentAdapter = newAppExperimentExecutionAdapter(service)
+	service.experimentRunCancels = map[string]context.CancelFunc{}
+	service.experimentAutoStart = runtime.Environment != "test" && strings.TrimSpace(os.Getenv("CASCADE_EXPERIMENT_AUTO_RUN")) == "1"
 	// Production cloud intake receives only encrypted payload references. Local
 	// and test runtimes retain inline payloads solely for deterministic fixtures
 	// and never relax the production transport rule.
@@ -222,6 +251,9 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	service.SetBrowserAgentOutcomeVerifier(adapter)
 
 	service.loadLocalSourceRefs()
+	if service.experimentAutoStart {
+		service.resumeRunnableExperiments()
+	}
 	return service, nil
 }
 

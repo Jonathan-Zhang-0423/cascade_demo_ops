@@ -64,6 +64,9 @@ func (s *Service) RunDirectBrowserAgentJobWithCredentials(ctx context.Context, p
 		Package: pkg, CloudJobID: jobID, RecordingOutputDir: recordingDir, RenderOutputDir: renderDir,
 		ResultCreatedAt: time.Now().UTC(), Progress: progress, TaskSecrets: taskSecrets,
 	})
+	if runErr != nil && runtimeExecutionErrorCode(runErr) == runtimeErrorWorkerRestartInjected {
+		return model.RecordingResultPackage{}, nil, runErr
+	}
 	if runErr != nil {
 		result, err = directWorkerFailureResult(pkg, jobID, runErr)
 		if err != nil {

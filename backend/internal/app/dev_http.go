@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -19,6 +20,7 @@ import (
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/credentialstore"
+	"cascade-demoops/backend/internal/experiment"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 )
@@ -168,9 +170,86 @@ func (s *DevHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("/v1/editor/sessions/", s.handleEditorSessionRoute)
 	mux.HandleFunc("POST /v1/final-film/jobs", s.handleFinalFilmJobs)
 	mux.HandleFunc("/v1/final-film/jobs/", s.handleFinalFilmJobRoute)
+	mux.HandleFunc("POST /v1/experiment-runs", s.handleExperimentRuns)
+	mux.HandleFunc("/v1/experiment-runs/", s.handleExperimentRunRoute)
 	s.registerExchangeBootstrapRoutes(mux)
 	s.registerDevExchangeRoutes(mux)
 	return withDevLogging(withDevCORS(mux))
+}
+
+func (s *DevHTTPServer) handleExperimentRuns(w http.ResponseWriter, r *http.Request) {
+	var request experiment.CreateRunRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBridgeValue(w, nil, err)
+		return
+	}
+	run, err := s.service.CreateExperimentRun(r.Context(), request)
+	writeBridgeValue(w, run, err)
+}
+
+func (s *DevHTTPServer) handleExperimentRunRoute(w http.ResponseWriter, r *http.Request) {
+	const prefix = "/v1/experiment-runs/"
+	remainder := strings.TrimPrefix(r.URL.Path, prefix)
+	parts := strings.SplitN(remainder, "/", 2)
+	runID := strings.TrimSpace(parts[0])
+	if runID == "" || strings.Contains(runID, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	suffix := ""
+	if len(parts) == 2 {
+		suffix = "/" + strings.Trim(parts[1], "/")
+	}
+	switch {
+	case r.Method == http.MethodGet && suffix == "":
+		run, err := s.service.GetExperimentRun(r.Context(), runID)
+		writeBridgeValue(w, run, err)
+	case r.Method == http.MethodGet && suffix == "/events":
+		events, err := s.service.ListExperimentEvents(r.Context(), runID)
+		if err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		if strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream") {
+			writeExperimentEventStream(w, events)
+			return
+		}
+		writeBridgeValue(w, events, nil)
+	case r.Method == http.MethodPost && suffix == "/resume":
+		var request ExperimentResumeRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		run, err := s.service.ResumeExperimentRun(r.Context(), runID, request.ExpectedRevision)
+		writeBridgeValue(w, run, err)
+	case r.Method == http.MethodPost && suffix == "/final-review":
+		var request ExperimentFinalReviewRequest
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		run, err := s.service.RecordExperimentFinalReview(r.Context(), runID, request)
+		writeBridgeValue(w, run, err)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func writeExperimentEventStream(w http.ResponseWriter, events []experiment.Event) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	for _, event := range events {
+		payload, err := json.Marshal(event)
+		if err != nil {
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "id: %d\nevent: execution_event\ndata: %s\n\n", event.Sequence, payload)
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func (s *DevHTTPServer) handleFinalFilmJobs(w http.ResponseWriter, r *http.Request) {

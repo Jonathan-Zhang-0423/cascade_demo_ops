@@ -88,6 +88,12 @@ func (s *DirectHTTPServer) RunDirectJob(ctx context.Context, jobID string) error
 		},
 	})
 	if err != nil {
+		if runtimeExecutionErrorCode(err) == runtimeErrorWorkerRestartInjected {
+			if _, releaseErr := s.gateway.ReleaseWorkerClaim(jobID); releaseErr != nil {
+				return fmt.Errorf("release injected recovery worker claim: %w", releaseErr)
+			}
+			return err
+		}
 		failedResult, packageErr := s.directRuntimeFailureResult(ctx, &pkg, jobID, recordingDir, result, err, time.Now().UTC())
 		if packageErr != nil {
 			_ = s.gateway.FailJob(jobID, runtimeExecutionErrorCode(err))

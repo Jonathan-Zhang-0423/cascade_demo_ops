@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"cascade-demoops/backend/internal/driver"
@@ -86,6 +87,9 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 		runtimePlan, err := orchestrator.Prepare(request.Package)
 		if err != nil {
 			return model.RecordingResultPackage{}, err
+		}
+		if value, ok := request.Package.Metadata["recovery_injection_phase"].(string); ok && strings.TrimSpace(value) == "once_effect_committed" {
+			runtimePlan.InterruptAfterFirstOnceEffect = true
 		}
 		eventSink, err := newStageEventAuditLog(request.RecordingOutputDir, request.CloudJobID)
 		if err != nil {

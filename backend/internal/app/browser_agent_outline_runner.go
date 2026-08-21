@@ -145,6 +145,9 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	for _, artifact := range closeResult.Artifacts {
 		stageRuntime.artifacts[artifact.ID] = artifact
 	}
+	if runErr != nil && runtimeExecutionErrorCode(runErr) == runtimeErrorWorkerRestartInjected {
+		return model.RecordingResultPackage{}, runErr
+	}
 	if runResult.AuditError != nil {
 		return model.RecordingResultPackage{}, newRuntimeExecutionError("stage_event_audit_unavailable", runResult.AuditError)
 	}

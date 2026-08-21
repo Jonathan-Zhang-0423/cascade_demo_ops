@@ -14,6 +14,7 @@ import (
 const (
 	runtimeErrorBrowserAgentContractViolation = "browser_agent_contract_violation"
 	runtimeErrorBrowserAgentPolicyDenied      = "browser_agent_policy_denied"
+	runtimeErrorWorkerRestartInjected         = "worker_restart_after_once_effect"
 )
 
 type BrowserAgentRuntimePlan struct {
@@ -35,6 +36,10 @@ type BrowserAgentRuntimePlan struct {
 	ForbiddenActions     []string
 	RepairPolicy         model.BrowserAgentRepairPolicy
 	Stages               []BrowserAgentRuntimeStage
+	// InterruptAfterFirstOnceEffect is an internal recovery-test hook carried
+	// only by an explicitly authorized experiment package. It never changes
+	// action selection or replay semantics.
+	InterruptAfterFirstOnceEffect bool
 }
 
 type BrowserAgentRuntimeStage struct {
@@ -206,6 +211,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	}
 	sequence := int64(0)
 	completedStages := map[string]model.StageExecutionEvent{}
+	interruptionConsumed := false
 	if history, ok := sink.(stageExecutionEventHistory); ok {
 		for _, event := range history.Events() {
 			if event.RunID != plan.RunID || event.SourcePackageID != plan.SourcePackageID || event.SourceBundleHashSHA256 != plan.SourceBundleHashSHA256 || event.PolicyHashSHA256 != plan.PolicyHashSHA256 {
@@ -216,6 +222,9 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			}
 			if event.EventType == model.StageExecutionEventStageCompleted {
 				completedStages[event.StageID] = event
+			}
+			if event.EventType == model.StageExecutionEventStageResumed {
+				interruptionConsumed = true
 			}
 		}
 	}
@@ -259,6 +268,9 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			if revalidateErr == nil && validResumedStageObservation(revalidated, completedEvent.Observation) {
 				if err := appendEvent(stage, model.StageExecutionEventStageResumed, revalidated.Observation, revalidated.EvidenceRefs); err != nil {
 					return result, err
+				}
+				if stageReplayPolicy(stage) == model.InteractionReplayOnceEffect {
+					interruptionConsumed = true
 				}
 				continue
 			}
@@ -456,6 +468,10 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		}
 		if err := appendEvent(stage, model.StageExecutionEventStageCompleted, actionResult.Observation, actionResult.EvidenceRefs); err != nil {
 			return result, err
+		}
+		if plan.InterruptAfterFirstOnceEffect && !interruptionConsumed && stageReplayPolicy(stage) == model.InteractionReplayOnceEffect {
+			interruptionConsumed = true
+			return result, newRuntimeExecutionError(runtimeErrorWorkerRestartInjected, errors.New("authorized recovery experiment interrupted the worker after a committed once-effect checkpoint"))
 		}
 	}
 	return result, nil
