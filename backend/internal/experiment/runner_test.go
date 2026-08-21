@@ -34,6 +34,12 @@ func (a scriptedLegAdapter) ExecuteLeg(_ context.Context, request LegExecutionRe
 	if err := emit(LegExecutionUpdate{Kind: "once_effect_started", EffectID: "submit", EffectKind: "target_submission", IdempotencyKey: "submit-idempotency-001"}); err != nil {
 		return err
 	}
+	if a.mode == "rejected_before_admission" {
+		if err := emit(LegExecutionUpdate{Kind: "once_effect_rejected", EffectID: "submit", Summary: "package rejected before admission"}); err != nil {
+			return err
+		}
+		return &AdapterError{Code: "package_rejected", Phase: "package_submit", State: RunStateWaitingExternal, Retryable: true}
+	}
 	*a.submissions++
 	if a.mode == "unknown_after_click" {
 		return &AdapterError{Code: "once_effect_result_unknown", EffectID: "submit", EvidenceRefs: []string{"click-evidence"}, Cause: errors.New("connection lost before result")}
@@ -45,6 +51,32 @@ func (a scriptedLegAdapter) ExecuteLeg(_ context.Context, request LegExecutionRe
 		return &AdapterError{Code: "worker_restart_injected", Phase: "worker_restart_recovery", State: RunStateWaitingExternal, Retryable: true}
 	}
 	return emit(LegExecutionUpdate{Kind: "artifacts", Artifacts: []ArtifactRef{{ArtifactID: "fact-track", Revision: 1, Role: "fact_track"}}})
+}
+
+func TestRunnerAuthoritativePreAdmissionRejectionClearsOnceEffect(t *testing.T) {
+	service := testService(t)
+	runner, _ := NewRunner(service)
+	run := mustCreateRun(t, service)
+	submissions := 0
+
+	result, err := runner.RunLeg(t.Context(), run.RunID, run.Legs[0].LegID, scriptedLegAdapter{mode: "rejected_before_admission", submissions: &submissions})
+	if err == nil || result.State != RunStateWaitingExternal || result.Phase != "package_submit" || submissions != 0 {
+		t.Fatalf("authoritative rejection projection mismatch: run=%+v submissions=%d err=%v", result, submissions, err)
+	}
+	if result.Legs[0].Checkpoint != nil || result.Legs[0].TargetSubmissions != 0 {
+		t.Fatalf("pre-admission rejection left a replay-blocking once-effect: %+v", result.Legs[0])
+	}
+	events, err := service.ListEvents(t.Context(), run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		found = found || event.Type == "once_effect_rejected"
+	}
+	if !found {
+		t.Fatalf("pre-admission rejection was not audited: %+v", events)
+	}
 }
 
 func TestRunnerRecoveryAfterCommittedWorkerRestartDoesNotResubmit(t *testing.T) {

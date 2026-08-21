@@ -319,6 +319,52 @@ func (s *Service) BindOnceEffectExternalTask(ctx context.Context, runID string, 
 	return next, nil
 }
 
+// RejectOnceEffect clears a started record only when the external system has
+// returned an authoritative pre-admission rejection. It must never be used for
+// a timeout, connection loss, or any response that could have hidden a receipt.
+func (s *Service) RejectOnceEffect(ctx context.Context, runID string, expectedRevision int, legID, effectID, summary string) (Run, error) {
+	run, err := s.store.Get(ctx, runID)
+	if err != nil {
+		return Run{}, err
+	}
+	if run.Revision != expectedRevision || strings.TrimSpace(effectID) == "" {
+		return Run{}, errors.New("once-effect rejection requires current revision and effect identity")
+	}
+	index := legIndex(run, legID)
+	if index < 0 || run.Legs[index].Checkpoint == nil {
+		return Run{}, errors.New("once-effect checkpoint was not found")
+	}
+	next := run
+	checkpoint := next.Legs[index].Checkpoint
+	kept := make([]OnceEffectRecord, 0, len(checkpoint.OnceEffects))
+	found := false
+	for _, record := range checkpoint.OnceEffects {
+		if record.EffectID == effectID && record.Status == "started" && strings.TrimSpace(record.ExternalTaskRef) == "" {
+			found = true
+			continue
+		}
+		kept = append(kept, record)
+	}
+	if !found {
+		return Run{}, errors.New("only an unbound started once-effect can be rejected")
+	}
+	checkpoint.OnceEffects = kept
+	if len(checkpoint.OnceEffects) == 0 && len(checkpoint.SegmentRefs) == 0 && checkpoint.StateFingerprintRef == "" && checkpoint.ResultEntryRef == "" {
+		next.Legs[index].Checkpoint = nil
+	}
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		summary = "外部系统在任务接收前明确拒绝 once-effect"
+	}
+	event := s.event(next, "once_effect_rejected", summary, legID, nil)
+	if err := s.store.Transition(ctx, run.RunID, run.Revision, next, event); err != nil {
+		return Run{}, err
+	}
+	return next, nil
+}
+
 func (s *Service) MarkOnceEffectUncertain(ctx context.Context, runID string, expectedRevision int, legID, effectID string, evidenceRefs []string, failures ...*RunError) (Run, error) {
 	run, err := s.store.Get(ctx, runID)
 	if err != nil {

@@ -386,7 +386,7 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 	}
 	var receipt model.DirectPackageReceipt
 	if err := s.directDataRequest(ctx, lease, http.MethodPost, "/v1/direct/packages", message, "package_receipt", &receipt); err != nil {
-		return DirectTransportUploadResult{}, directUploadError("package_submit", true, "", err)
+		return DirectTransportUploadResult{}, directUploadError("package_submit", directRequestMayHaveBeenAdmitted(err), "", err)
 	}
 	if receipt.PackageID != build.Package.PackageID || receipt.PackageDigest != build.PackageDigestSHA256 {
 		return DirectTransportUploadResult{}, directUploadError("package_receipt", true, receipt.JobID, errors.New("direct Browser Agent receipt does not match the approved package"))
@@ -420,6 +420,17 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 		}
 	}
 	return DirectTransportUploadResult{Build: build, Lease: directLeaseView(lease), Receipt: receipt, CredentialReceipt: credentialReceipt}, nil
+}
+
+func directRequestMayHaveBeenAdmitted(err error) bool {
+	var responseErr *directTransportHTTPError
+	if errors.As(err, &responseErr) {
+		// A complete HTTP rejection is authoritative: the Gateway handled the
+		// request and did not create a job. Network/protocol failures remain
+		// uncertain because a receipt may have been lost after admission.
+		return responseErr.StatusCode < 400 || responseErr.StatusCode >= 500
+	}
+	return true
 }
 
 func bindExperimentRuntimeMetadata(build ClientExecutionPackageBuild, phase string, metadata map[string]any) (ClientExecutionPackageBuild, error) {

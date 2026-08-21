@@ -44,21 +44,44 @@ func TestExperimentDirectBindingRoundTripAndRuntimeMetadataStayInProcessOnly(t *
 
 func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(t *testing.T) {
 	loaded, err := experiment.LoadDefinition("../../../experiments", "2048-v2")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	contracts, err := compileExperimentInteractionContracts(loaded.InteractionPlan)
-	if err != nil { t.Fatal(err) }
-	if len(contracts) != len(loaded.InteractionPlan.Steps) { t.Fatalf("contracts=%d steps=%d", len(contracts), len(loaded.InteractionPlan.Steps)) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contracts) != len(loaded.InteractionPlan.Steps) {
+		t.Fatalf("contracts=%d steps=%d", len(contracts), len(loaded.InteractionPlan.Steps))
+	}
 	wantActions := []model.GraphActionType{model.GraphActionInspect, model.GraphActionPress, model.GraphActionInspect, model.GraphActionClick, model.GraphActionGesture, model.GraphActionClick}
 	for index, contract := range contracts {
-		if contract.ActionKind != wantActions[index] { t.Fatalf("contract %d action=%s want=%s", index, contract.ActionKind, wantActions[index]) }
-		if contract.Parameters["evidence_step_id"] != loaded.InteractionPlan.Steps[index].StepID { t.Fatalf("contract %d lost evidence step binding", index) }
-		if err := model.ValidateInteractionContract(contract); err != nil { t.Fatalf("contract %d invalid: %v", index, err) }
+		if contract.ActionKind != wantActions[index] {
+			t.Fatalf("contract %d action=%s want=%s", index, contract.ActionKind, wantActions[index])
+		}
+		if contract.Parameters["evidence_step_id"] != loaded.InteractionPlan.Steps[index].StepID {
+			t.Fatalf("contract %d lost evidence step binding", index)
+		}
+		if err := model.ValidateInteractionContract(contract); err != nil {
+			t.Fatalf("contract %d invalid: %v", index, err)
+		}
 	}
-	if got := contracts[1].ExpectedTransitions; !interactionPredicatesContain(got, "distinct_actions_observed") || !interactionPredicatesContain(got, "frame_surface_changed") { t.Fatalf("direction proof predicates=%+v", got) }
-	if got := contracts[4].ExpectedTransitions; !interactionPredicatesContain(got, "input_modality_used") { t.Fatalf("touch proof predicates=%+v", got) }
+	if got := contracts[1].ExpectedTransitions; !interactionPredicatesContain(got, "distinct_actions_observed") || !interactionPredicatesContain(got, "frame_surface_changed") {
+		t.Fatalf("direction proof predicates=%+v", got)
+	}
+	if got := contracts[2].ExpectedTransitions; !interactionPredicatesContain(got, "numeric_increased") || !interactionPredicatesContain(got, "state_changed") {
+		t.Fatalf("numeric proof predicates=%+v", got)
+	}
+	if got := contracts[4].ExpectedTransitions; !interactionPredicatesContain(got, "input_modality_used") {
+		t.Fatalf("touch proof predicates=%+v", got)
+	}
 }
 
 func interactionPredicatesContain(values []model.InteractionPredicate, kind string) bool {
-	for _, value := range values { if value.Kind == kind { return true } }
+	for _, value := range values {
+		if value.Kind == kind {
+			return true
+		}
+	}
 	return false
 }

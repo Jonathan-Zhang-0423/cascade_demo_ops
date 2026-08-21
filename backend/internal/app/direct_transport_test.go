@@ -28,6 +28,18 @@ import (
 	"cascade-demoops/backend/internal/store"
 )
 
+func TestDirectRequestAdmissionCertaintyUsesAuthoritativeHTTPRejection(t *testing.T) {
+	if directRequestMayHaveBeenAdmitted(&directTransportHTTPError{StatusCode: http.StatusBadRequest, Code: "package_validation_failed"}) {
+		t.Fatal("complete 4xx validation response must prove that no Direct job was admitted")
+	}
+	if !directRequestMayHaveBeenAdmitted(&directTransportHTTPError{StatusCode: http.StatusInternalServerError, Code: "internal_error"}) {
+		t.Fatal("5xx response must remain uncertain because admission may have completed")
+	}
+	if !directRequestMayHaveBeenAdmitted(errors.New("connection reset")) {
+		t.Fatal("network/protocol failure must remain uncertain")
+	}
+}
+
 func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *testing.T) {
 	root := t.TempDir()
 	port := reserveDirectAppTestPort(t)

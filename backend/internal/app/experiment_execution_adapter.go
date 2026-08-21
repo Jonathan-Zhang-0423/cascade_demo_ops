@@ -127,6 +127,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 				return &experiment.AdapterError{Code: "direct_upload_post_admission_failed", Phase: staged.Stage, State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{staged.ExternalTaskRef}, Cause: err}
 			}
 			if !staged.MayHaveBeenAdmitted {
+				_ = emit(experiment.LegExecutionUpdate{Kind: "once_effect_rejected", EffectID: "target_submit", Summary: "Direct Gateway 在创建外部任务前明确拒绝执行包"})
 				return &experiment.AdapterError{Code: "direct_upload_preflight_failed", Phase: staged.Stage, State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
 			}
 		}
@@ -204,6 +205,11 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan) ([]m
 		}
 		if step.Action.Kind == "observe" && !hasSpecializedProof {
 			appendPredicate("interactive_surface_visible", true)
+		} else if step.Action.Kind == "observe" {
+			// Keep a transport-v1-compatible state transition alongside richer
+			// proof predicates. Older admission validators can recognize this
+			// without weakening the specialized worker-side evidence gate.
+			appendPredicate("state_changed", true)
 		} else if step.Action.Kind != "observe" {
 			for _, change := range step.ExpectedChanges {
 				switch change {
