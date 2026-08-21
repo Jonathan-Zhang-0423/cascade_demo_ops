@@ -1219,7 +1219,67 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
       : await resolveUniqueVisibleContractTarget(candidate.locator, candidate.strategy, contract, attempts);
     if (resolved) return resolved;
   }
+  const structuralInput = structuralInputLocator(page, stage, interaction);
+  if (structuralInput) {
+    seen.add(structuralInput.strategy);
+    const resolved = await resolveUniqueVisibleStructuralInputTarget(
+      structuralInput.locator,
+      structuralInput.strategy,
+      contract,
+      attempts,
+    );
+    if (resolved) return resolved;
+  }
   throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=${[...seen].join(",") || "none"}`);
+}
+
+// A newly opened modal often contains an input that could not have appeared in
+// the pre-action page scan. For non-destructive fill/select actions, permit the
+// unique editable control inside the active modal as a structural binding. The
+// fallback is deliberately role- and cardinality-bound: it cannot select page
+// content, buttons, destructive controls, or one of several ambiguous fields.
+function structuralInputLocator(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction): { strategy: string; locator: any } | undefined {
+  if (stage.target_contract.destructive || interaction.non_destructive === false) return undefined;
+  const roles = new Set((stage.target_contract.allowed_roles || []).map((value) => value.trim().toLowerCase()));
+  if (interaction.kind === "fill" && roles.has("textbox")) {
+    return {
+      strategy: "active_modal_unique_textbox",
+      locator: page.locator('[role="dialog"] textarea, dialog textarea, [aria-modal="true"] textarea, [role="dialog"] input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]), dialog input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]), [aria-modal="true"] input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"])'),
+    };
+  }
+  if (interaction.kind === "select" && roles.has("combobox")) {
+    return {
+      strategy: "active_modal_unique_combobox",
+      locator: page.locator('[role="dialog"] select, dialog select, [aria-modal="true"] select, [role="dialog"] [role="combobox"], dialog [role="combobox"], [aria-modal="true"] [role="combobox"]'),
+    };
+  }
+  return undefined;
+}
+
+async function resolveUniqueVisibleStructuralInputTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget | undefined> {
+  const count = await withTimeout(locator.count(), targetProbeTimeoutMS, 0);
+  if (count !== 1) {
+    attempts.push(targetResolutionAttempt(strategy, count, false, false, false, count === 0 ? "no_candidates" : "ambiguous"));
+    return undefined;
+  }
+  const unique = locator.first();
+  if (!await withTimeout(unique.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, false, false, "not_visible"));
+    return undefined;
+  }
+  const semantics = await withTimeout(compactElementSemantics(unique), targetProbeTimeoutMS, { role: "", name: "" });
+  if (forbiddenName(semantics.name, contract.forbidden_names || [])) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "forbidden_name", false, false));
+    throw new Error(`browser_agent_forbidden_target_name: ${contract.semantic_id}`);
+  }
+  const allowedRoles = (contract.allowed_roles || []).map((value) => value.trim().toLowerCase()).filter(Boolean);
+  const roleAllowed = allowedRoles.includes(semantics.role);
+  if (!roleAllowed) {
+    attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "role_mismatch", false));
+    return undefined;
+  }
+  attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "resolved", true, true));
+  return { locator: unique, strategy };
 }
 
 // This is the only discovery step allowed after the primary locator fails.

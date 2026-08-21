@@ -436,6 +436,79 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     }));
     expect(JSON.stringify(attempts)).not.toContain("[data-testid='build']");
   });
+
+  it("binds a unique textbox structurally when it appears only inside the newly opened modal", async () => {
+    const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const textbox = {
+      count: async () => 1,
+      first: () => ({
+        isVisible: async () => true,
+        evaluate: async () => ({ role: "textbox", name: "Runtime placeholder" }),
+      }),
+    };
+    const page = {
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => textbox,
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_primary_input",
+      order: 2,
+      node_id: "primary_input",
+      target_contract: {
+        semantic_id: "primary_input",
+        allowed_roles: ["textbox"],
+        allowed_names: ["Approved semantic request"],
+        forbidden_names: ["Delete"],
+        destructive: false,
+      },
+      interactions: [{ kind: "fill", value: "preserve exactly", non_destructive: true }],
+    };
+
+    const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
+    expect(resolved.strategy).toBe("active_modal_unique_textbox");
+    expect(attempts).toContainEqual(expect.objectContaining({
+      strategy: "active_modal_unique_textbox",
+      candidate_count: 1,
+      role_allowed: true,
+      outcome: "resolved",
+    }));
+  });
+
+  it("fails closed when multiple modal textboxes make structural input binding ambiguous", async () => {
+    const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const ambiguous = { count: async () => 2, first: () => ({ isVisible: async () => true }) };
+    const page = {
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => ambiguous,
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_primary_input",
+      order: 2,
+      node_id: "primary_input",
+      target_contract: {
+        semantic_id: "primary_input",
+        allowed_roles: ["textbox"],
+        allowed_names: ["Approved semantic request"],
+        destructive: false,
+      },
+      interactions: [{ kind: "fill", value: "preserve exactly", non_destructive: true }],
+    };
+
+    await expect(resolveTarget(page, stage, stage.interactions[0], false, attempts)).rejects.toThrow("browser_agent_target_not_resolved");
+    expect(attempts).toContainEqual(expect.objectContaining({
+      strategy: "active_modal_unique_textbox",
+      candidate_count: 2,
+      outcome: "ambiguous",
+    }));
+  });
 });
 
 describe("browser agent required validations", () => {
