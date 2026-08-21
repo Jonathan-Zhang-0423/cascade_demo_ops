@@ -299,6 +299,11 @@ type BrowserAgentSession = {
 	latestNumericIncrease: boolean;
 	latestFrameChange: boolean;
 	temporalSnapshotsByScopeID: Map<string, OutcomeSnapshot>;
+  // A verified action may move an application from its entry route to a
+  // newly-created result route. Subsequent non-navigation stages must keep
+  // that live route instead of treating their planning-time entry route as a
+  // command to navigate backwards.
+  continuationURL?: string;
   taskSecrets: Record<string, BrowserAgentTaskSecret>;
 };
 
@@ -835,6 +840,7 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   const networkSettled = await session.page.waitForLoadState?.("networkidle", { timeout: 2_000 }).then(() => true).catch(() => false) ?? false;
   const outcomeAfter = await captureOutcomeSnapshot(session.page);
   const changes = compareOutcomeSnapshots(outcomeBefore, outcomeAfter, networkSettled);
+  if (changes.url) session.continuationURL = outcomeAfter.url;
   const proof = session.interactionProofByNodeID.get(request.stage.node_id) || {};
   const recipe = String(request.stage.interactions[0]?.parameters?.action_recipe || "");
   if (recipe === "observe" && (request.stage.validations || []).some((validation) => validation.kind === "numeric_increased")) {
@@ -2118,14 +2124,22 @@ function clearTaskSecrets(values: Record<string, BrowserAgentTaskSecret>): void 
   }
 }
 
-export function stageExecutionTargetURL(stage: BrowserAgentWorkerStage, currentURL: string): string | undefined {
+export function stageExecutionTargetURL(stage: BrowserAgentWorkerStage, currentURL: string, continuationURL?: string): string | undefined {
+  const explicitNavigation = stage.interactions.some((interaction) => interaction.kind === "navigate");
+  if (!explicitNavigation && continuationURL && currentURL !== "about:blank") {
+    try {
+      if (new URL(currentURL).origin === new URL(continuationURL).origin) return undefined;
+    } catch {
+      // Invalid URLs are handled by the normal target and policy validation.
+    }
+  }
   const target = String(stage.url || stage.route || stage.entry_route || "").trim();
   if (!target) return undefined;
   return absoluteTargetURL(target, currentURL, stage.url);
 }
 
 async function ensureStageExecutionRoute(session: BrowserAgentSession, stage: BrowserAgentWorkerStage): Promise<void> {
-  const targetURL = stageExecutionTargetURL(stage, session.page.url());
+  const targetURL = stageExecutionTargetURL(stage, session.page.url(), session.continuationURL);
   if (!targetURL) return;
   if (urlMatches(session.page.url(), targetURL)) {
     const currentError = urlPolicyError(session.page.url(), session, false);

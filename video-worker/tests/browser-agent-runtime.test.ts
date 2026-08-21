@@ -197,6 +197,22 @@ describe("browser agent navigation policy", () => {
     }, "about:blank");
     expect(urlPolicyError(target!, session, false)).toContain("domain_not_allowed");
   });
+
+  it("preserves a verified same-origin result route for later non-navigation stages", () => {
+    expect(stageExecutionTargetURL({
+      id: "stage-observe", order: 3, node_id: "observe", entry_route: "/app",
+      url: "https://app.example.com/app", target_contract: { semantic_id: "result", destructive: false },
+      interactions: [{ kind: "inspect", non_destructive: true }],
+    }, "https://app.example.com/results/runtime-42", "https://app.example.com/results/runtime-42")).toBeUndefined();
+  });
+
+  it("honors explicit navigation even after a verified route transition", () => {
+    expect(stageExecutionTargetURL({
+      id: "stage-return", order: 4, node_id: "return", entry_route: "/app",
+      url: "https://app.example.com/app", target_contract: { semantic_id: "entry", destructive: false },
+      interactions: [{ kind: "navigate", non_destructive: true }],
+    }, "https://app.example.com/results/runtime-42", "https://app.example.com/results/runtime-42")).toBe("https://app.example.com/app");
+  });
 });
 
 describe("browser agent App-evidence-bound selector semantics", () => {
