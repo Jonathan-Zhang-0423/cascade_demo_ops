@@ -157,6 +157,33 @@ func TestSemanticValidationRejectsVisibleClickedControlAsOutcome(t *testing.T) {
 	}
 }
 
+func TestSemanticValidationAcceptsBoundedKeyboardSurfaceChange(t *testing.T) {
+	step := ScriptStep{
+		StageKind: BusinessStageKindFinalObserve,
+		Action: ScriptActionInstruction{
+			Type:       GraphActionPress,
+			Parameters: map[string]any{"keys": "ArrowLeft,ArrowRight"},
+		},
+		Validations: []ValidationSpec{{
+			ID: "surface_change", Kind: "frame_surface_changed", Required: true, Expected: true,
+		}},
+	}
+	if !stepHasSemanticallyValidBrowserAgentValidation(step) {
+		t.Fatal("a bounded keyboard action with a frame before/after change must prove the business outcome")
+	}
+
+	step.Validations[0].Kind = "element_visible"
+	if stepHasSemanticallyValidBrowserAgentValidation(step) {
+		t.Fatal("a visible keyboard target must not substitute for observed surface change")
+	}
+
+	step.Validations[0].Kind = "visual_region_changed"
+	step.Action.Parameters = nil
+	if stepHasSemanticallyValidBrowserAgentValidation(step) {
+		t.Fatal("an unbounded keyboard action must not pass even with a visual change assertion")
+	}
+}
+
 func TestValidateBrowserAgentOutlineConsistencyRejectsBusinessInputValueDrift(t *testing.T) {
 	bundle := consistentOutlineBundleForTest()
 	step := &bundle.PlanJSON.Steps[0]

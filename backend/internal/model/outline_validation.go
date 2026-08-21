@@ -742,7 +742,15 @@ func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool 
 
 func validationProvesBusinessOutcome(step ScriptStep, validation ValidationSpec) bool {
 	if step.Action.Type == GraphActionPress {
-		return validation.Kind == "page_changed" && validation.Expected == true && approvedKeyboardActionParameters(step.Action.Parameters)
+		// Keyboard interaction may be bounded to the whole page, a DOM-backed
+		// visual region, or an iframe/canvas surface. All three assertions prove
+		// an observed before/after result; mere visibility of the action target
+		// does not. Keep the approved key-list requirement independent of the
+		// observer chosen by the selected archetype.
+		changeObserver := validation.Kind == "page_changed" ||
+			validation.Kind == "visual_region_changed" ||
+			validation.Kind == "frame_surface_changed"
+		return changeObserver && validation.Expected == true && approvedKeyboardActionParameters(step.Action.Parameters)
 	}
 	if step.StageKind == BusinessStageKindBusinessInput || (step.Action.Type == GraphActionFill && step.StageKind != BusinessStageKindSessionSetup) {
 		if validation.Kind != "value_equals" {
