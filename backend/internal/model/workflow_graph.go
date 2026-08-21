@@ -37,6 +37,7 @@ const (
 	GraphActionSelect   GraphActionType = "select"
 	GraphActionUpload   GraphActionType = "upload"
 	GraphActionPress    GraphActionType = "press"
+	GraphActionGesture  GraphActionType = "gesture"
 	GraphActionWait     GraphActionType = "wait"
 	GraphActionAssert   GraphActionType = "assert"
 	GraphActionInspect  GraphActionType = "inspect"
@@ -142,27 +143,28 @@ type GraphNode struct {
 	HasZoom         bool   `json:"has_zoom"`
 	RetryPolicy     int    `json:"retry_policy"`
 
-	Type           GraphNodeType      `json:"type,omitempty"`
-	Title          string             `json:"title,omitempty"`
-	Goal           string             `json:"goal,omitempty"`
-	Description    string             `json:"description,omitempty"`
-	ActorRole      string             `json:"actor_role,omitempty"`
-	PageRef        string             `json:"page_ref,omitempty"`
-	FeatureRefs    []string           `json:"feature_refs,omitempty"`
-	ActionSpec     *GraphAction       `json:"action_spec,omitempty"`
-	StateBefore    []StateAssertion   `json:"state_before,omitempty"`
-	StateAfter     []StateAssertion   `json:"state_after,omitempty"`
-	Validations    []ValidationSpec   `json:"validations,omitempty"`
-	Narrative      *NarrativeCue      `json:"narrative,omitempty"`
-	Capture        *CaptureSpec       `json:"capture,omitempty"`
-	Assets         []AssetRef         `json:"assets,omitempty"`
-	EvidenceRefs   []EvidenceRef      `json:"evidence_refs,omitempty"`
-	Alternatives   []AlternativePath  `json:"alternatives,omitempty"`
-	FailurePolicy  *NodeFailurePolicy `json:"failure_policy,omitempty"`
-	DurationHintMS int                `json:"duration_hint_ms,omitempty"`
-	Sensitive      bool               `json:"sensitive,omitempty"`
-	Tags           []string           `json:"tags,omitempty"`
-	Metadata       map[string]any     `json:"metadata,omitempty"`
+	Type                GraphNodeType        `json:"type,omitempty"`
+	Title               string               `json:"title,omitempty"`
+	Goal                string               `json:"goal,omitempty"`
+	Description         string               `json:"description,omitempty"`
+	ActorRole           string               `json:"actor_role,omitempty"`
+	PageRef             string               `json:"page_ref,omitempty"`
+	FeatureRefs         []string             `json:"feature_refs,omitempty"`
+	ActionSpec          *GraphAction         `json:"action_spec,omitempty"`
+	StateBefore         []StateAssertion     `json:"state_before,omitempty"`
+	StateAfter          []StateAssertion     `json:"state_after,omitempty"`
+	Validations         []ValidationSpec     `json:"validations,omitempty"`
+	Narrative           *NarrativeCue        `json:"narrative,omitempty"`
+	Capture             *CaptureSpec         `json:"capture,omitempty"`
+	Assets              []AssetRef           `json:"assets,omitempty"`
+	EvidenceRefs        []EvidenceRef        `json:"evidence_refs,omitempty"`
+	Alternatives        []AlternativePath    `json:"alternatives,omitempty"`
+	FailurePolicy       *NodeFailurePolicy   `json:"failure_policy,omitempty"`
+	DurationHintMS      int                  `json:"duration_hint_ms,omitempty"`
+	Sensitive           bool                 `json:"sensitive,omitempty"`
+	Tags                []string             `json:"tags,omitempty"`
+	Metadata            map[string]any       `json:"metadata,omitempty"`
+	InteractionContract *InteractionContract `json:"interaction_contract,omitempty"`
 }
 
 type GraphAction struct {

@@ -320,7 +320,7 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 	if strings.HasPrefix(state.WorkflowGraph.ID, "graph_terminal_interaction_repair_") && failedAction == model.GraphActionNavigate {
 		return nil, true, fmt.Errorf("terminal interaction repair could not restore the previously observed runtime route")
 	}
-	isTerminalInteraction := failedAction == model.GraphActionPress || failedAction == model.GraphActionInspect || failedAction == model.GraphActionWait
+	isTerminalInteraction := failedAction == model.GraphActionPress || failedAction == model.GraphActionGesture || failedAction == model.GraphActionInspect || failedAction == model.GraphActionWait
 	if !isTerminalInteraction {
 		return nil, false, nil
 	}
@@ -343,7 +343,7 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 			break
 		}
 		action := candidate.ActionSpec.Type
-		if action != model.GraphActionInspect && action != model.GraphActionWait && action != model.GraphActionPress {
+		if action != model.GraphActionInspect && action != model.GraphActionWait && action != model.GraphActionPress && action != model.GraphActionGesture {
 			break
 		}
 		resumeIndex--
@@ -386,7 +386,7 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 		if node == nil || node.ActionSpec == nil {
 			continue
 		}
-		if index > resumeIndex && node.ActionSpec.Type != model.GraphActionInspect && node.ActionSpec.Type != model.GraphActionWait && node.ActionSpec.Type != model.GraphActionPress {
+		if index > resumeIndex && node.ActionSpec.Type != model.GraphActionInspect && node.ActionSpec.Type != model.GraphActionWait && node.ActionSpec.Type != model.GraphActionPress && node.ActionSpec.Type != model.GraphActionGesture {
 			return nil, true, fmt.Errorf("terminal interaction repair would replay a non-observation action %s", node.ID)
 		}
 		node.Type = model.GraphNodeTypeAction

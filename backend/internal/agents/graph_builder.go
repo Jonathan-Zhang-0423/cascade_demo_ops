@@ -501,6 +501,14 @@ func (a *GraphBuilderAgent) generateGraphFromBusinessStagePlan(ctx context.Conte
 func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.BusinessStage, entryPoint string, featureID string) *model.GraphNode {
 	actionType := businessStageGraphActionType(stage)
 	target := businessStageActionTarget(stage, entryPoint)
+	if stage.InteractionContract != nil {
+		actionType = stage.InteractionContract.ActionKind
+		contractTarget := stage.InteractionContract.ActionTarget
+		if contractTarget.URL == "" {
+			contractTarget.URL = urlForBusinessStage(stage, entryPoint)
+		}
+		target = contractTarget
+	}
 	selector := target.Selector
 	targetURL := firstNonEmpty(target.URL, urlForBusinessStage(stage, entryPoint))
 	if target.URL == "" {
@@ -552,6 +560,12 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	}
 	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup || stage.Kind == model.BusinessStageKindFinalObserve
 	validations := []model.ValidationSpec{businessStageValidation(stage, actionType, target, required)}
+	if stage.InteractionContract != nil {
+		validations = validations[:0]
+		for _, predicate := range stage.InteractionContract.ExpectedTransitions {
+			validations = append(validations, model.ValidationSpec{ID: predicate.ID, Kind: predicate.Kind, Target: predicate.Target, Expected: predicate.Expected, Assertion: stage.InteractionContract.SemanticGoal, TimeoutMS: predicate.TimeoutMS, Severity: "blocking", Required: predicate.Required, EvidenceRefs: predicate.EvidenceRefs, RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 1}})
+		}
+	}
 	if required && (validations[0].Kind == "page_changed" || validations[0].Kind == "frame_surface_changed" || validations[0].Kind == "interactive_surface_visible" || validations[0].Kind == "playable_surface_visible") {
 		route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute)
 		if route != "" {
@@ -589,6 +603,11 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	parameters := map[string]any{}
 	for key, value := range stage.Action.Parameters {
 		parameters[key] = value
+	}
+	if stage.InteractionContract != nil {
+		for key, value := range stage.InteractionContract.Parameters {
+			parameters[key] = value
+		}
 	}
 	return &model.GraphNode{
 		ID:              stage.ID,
@@ -652,10 +671,11 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 				MaxAttempts:         2,
 			},
 		},
-		DurationHintMS: stage.DurationMS,
-		Sensitive:      stage.Kind == model.BusinessStageKindSessionSetup,
-		Tags:           uniqueStrings([]string{"business_stage_plan", string(stage.Kind), string(stage.RouteState)}),
-		Metadata:       metadata,
+		DurationHintMS:      stage.DurationMS,
+		Sensitive:           stage.Kind == model.BusinessStageKindSessionSetup,
+		Tags:                uniqueStrings([]string{"business_stage_plan", string(stage.Kind), string(stage.RouteState)}),
+		Metadata:            metadata,
+		InteractionContract: stage.InteractionContract,
 	}
 }
 
@@ -1464,6 +1484,8 @@ func declaredGraphActionType(kind string) model.GraphActionType {
 		return model.GraphActionUpload
 	case "press", "keypress", "keyboard", "key_press":
 		return model.GraphActionPress
+	case "gesture", "swipe", "touch_swipe":
+		return model.GraphActionGesture
 	case "wait":
 		return model.GraphActionWait
 	case "navigate":
@@ -2123,6 +2145,8 @@ func validGraphAction(value string) model.GraphActionType {
 		return model.GraphActionUpload
 	case model.GraphActionPress:
 		return model.GraphActionPress
+	case model.GraphActionGesture:
+		return model.GraphActionGesture
 	case model.GraphActionWait:
 		return model.GraphActionWait
 	case model.GraphActionAssert:
@@ -2385,6 +2409,8 @@ func graphActionTypeFromKind(kind string, selector string) model.GraphActionType
 		return model.GraphActionUpload
 	case "press", "keypress", "keyboard", "key_press":
 		return model.GraphActionPress
+	case "gesture", "swipe", "touch_swipe":
+		return model.GraphActionGesture
 	case "wait":
 		return model.GraphActionWait
 	case "assert", "validate":

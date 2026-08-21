@@ -101,6 +101,7 @@ type InteractionContract = {
   action_kind: string;
   replay_policy: "observe_only" | "idempotent_write" | "once_effect";
   target_semantic_id: string;
+  parameters?: Record<string, unknown>;
   preconditions?: InteractionPredicate[];
   expected_transitions: InteractionPredicate[];
   non_destructive: boolean;
@@ -253,7 +254,14 @@ type OutcomeChangeEvidence = {
   aria: boolean;
   frame: boolean;
   networkSettled: boolean;
+  distinctActions?: number;
+  numericIncreased?: boolean;
+  restoreSimilarity?: number;
+  inputModality?: string;
+  stateVariants?: number;
 };
+
+type InteractionProofEvidence = Pick<OutcomeChangeEvidence, "distinctActions" | "numericIncreased" | "restoreSimilarity" | "inputModality" | "stateVariants">;
 
 type OutcomeSnapshot = {
   url: string;
@@ -286,6 +294,10 @@ type BrowserAgentSession = {
 	targetGeometryByArtifactID: Map<string, BrowserTargetGeometry>;
 	visualChangeByNodeID: Map<string, boolean>;
 	outcomeChangesByNodeID: Map<string, OutcomeChangeEvidence>;
+	interactionProofByNodeID: Map<string, InteractionProofEvidence>;
+	interactionStateHistory: string[];
+	latestNumericIncrease: boolean;
+	latestFrameChange: boolean;
 	temporalSnapshotsByScopeID: Map<string, OutcomeSnapshot>;
   taskSecrets: Record<string, BrowserAgentTaskSecret>;
 };
@@ -385,6 +397,10 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	targetGeometryByArtifactID: new Map(),
 	visualChangeByNodeID: new Map(),
 	outcomeChangesByNodeID: new Map(),
+	interactionProofByNodeID: new Map(),
+	interactionStateHistory: [],
+	latestNumericIncrease: false,
+	latestFrameChange: false,
 	temporalSnapshotsByScopeID: new Map(),
     taskSecrets: validatedTaskSecrets(request.task_secrets),
   };
@@ -740,7 +756,7 @@ export async function captureTargetGeometry(
 // route and runtime validations, not to a clickable DOM target. Mutating and
 // element-assertion actions still fail closed unless a unique target resolves.
 export function interactionRequiresResolvedTarget(kind: string): boolean {
-  return !["navigate", "wait", "inspect", "press"].includes(String(kind || "").trim().toLowerCase());
+  return !["navigate", "wait", "inspect", "press", "gesture"].includes(String(kind || "").trim().toLowerCase());
 }
 
 export function validatedStageSecretValues(stage: BrowserAgentWorkerStage, provided?: Record<string, string>): Record<string, string> {
@@ -819,6 +835,13 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   const networkSettled = await session.page.waitForLoadState?.("networkidle", { timeout: 2_000 }).then(() => true).catch(() => false) ?? false;
   const outcomeAfter = await captureOutcomeSnapshot(session.page);
   const changes = compareOutcomeSnapshots(outcomeBefore, outcomeAfter, networkSettled);
+  const proof = session.interactionProofByNodeID.get(request.stage.node_id) || {};
+  const recipe = String(request.stage.interactions[0]?.parameters?.action_recipe || "");
+  if (recipe === "observe" && (request.stage.validations || []).some((validation) => validation.kind === "numeric_increased")) {
+    proof.numericIncreased = session.latestNumericIncrease;
+    if (session.latestFrameChange) changes.frame = true;
+  }
+  Object.assign(changes, proof);
   session.outcomeChangesByNodeID.set(request.stage.node_id, changes);
   if (changes.visual) session.visualChangeByNodeID.set(request.stage.node_id, true);
   assertions.push(...await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID));
@@ -999,6 +1022,9 @@ async function executeInteraction(
 		  playableTarget = await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target);
     }
     const before = await visualDigest(session.page, playableTarget?.digestTarget);
+    const numericBefore = await visibleNumericValues(session.page);
+    const stateBefore = await interactiveStateDigest(session.page, playableTarget?.digestTarget);
+    if (stateBefore) session.interactionStateHistory.push(stateBefore);
     const delayMS = numericParameter(interaction.parameters, "inter_key_delay_ms", 350, 100, 1_000);
     const digests = new Set<string>([before]);
     for (const key of keys) {
@@ -1009,8 +1035,61 @@ async function executeInteraction(
       }
       await session.page.waitForTimeout(delayMS);
       digests.add(await visualDigest(session.page, playableTarget?.digestTarget));
+      const state = await interactiveStateDigest(session.page, playableTarget?.digestTarget);
+      if (state) session.interactionStateHistory.push(state);
     }
-    session.visualChangeByNodeID.set(stage.node_id, digests.size > 1);
+    const numericAfter = await visibleNumericValues(session.page);
+    const numericIncreased = numericSeriesIncreased(numericBefore, numericAfter);
+    const changed = digests.size > 1;
+    session.latestNumericIncrease = numericIncreased;
+    session.latestFrameChange = changed;
+    session.interactionProofByNodeID.set(stage.node_id, { distinctActions: new Set(keys).size, numericIncreased });
+    session.visualChangeByNodeID.set(stage.node_id, changed);
+    return;
+  }
+  if (interaction.kind === "gesture") {
+    if (String(interaction.parameters?.viewport || "") === "mobile") await session.page.setViewportSize({ width: 390, height: 844 });
+    const target = await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target);
+    const box = await target?.digestTarget?.boundingBox?.().catch(() => undefined);
+    if (!target || !box) throw new Error(`browser_agent_gesture_surface_not_resolved: ${stage.node_id}`);
+    const direction = String(interaction.parameters?.swipe_direction || "");
+    const start = { x: box.x + box.width * .65, y: box.y + box.height * .55 };
+    const delta = Math.max(60, Math.min(box.width, box.height) * .35);
+    const end = { x: start.x + (direction === "right" ? delta : direction === "left" ? -delta : 0), y: start.y + (direction === "down" ? delta : direction === "up" ? -delta : 0) };
+    if (!["left", "right", "up", "down"].includes(direction)) throw new Error(`browser_agent_gesture_direction_not_approved: ${stage.node_id}`);
+    const before = await visualDigest(session.page, target.digestTarget);
+    const cdp = await session.context.newCDPSession?.(session.page).catch(() => undefined);
+    if (cdp) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: start.x, y: start.y }] });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: end.x, y: end.y }] });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await cdp.detach?.().catch(() => undefined);
+    } else {
+      await target.digestTarget.dispatchEvent("pointerdown", { pointerType: "touch", clientX: start.x, clientY: start.y });
+      await target.digestTarget.dispatchEvent("pointermove", { pointerType: "touch", clientX: end.x, clientY: end.y });
+      await target.digestTarget.dispatchEvent("pointerup", { pointerType: "touch", clientX: end.x, clientY: end.y });
+    }
+    await session.page.waitForTimeout(500);
+    const changed = before !== await visualDigest(session.page, target.digestTarget);
+    session.latestFrameChange = changed;
+    session.interactionProofByNodeID.set(stage.node_id, { inputModality: "touch" });
+    session.visualChangeByNodeID.set(stage.node_id, changed);
+    return;
+  }
+  if (interaction.kind === "click" && String(interaction.parameters?.action_recipe || "") === "activate_state_variants") {
+    const names = stringArrayParameter(interaction.parameters, "allowed_names", 8);
+    const roles = stringArrayParameter(interaction.parameters, "allowed_roles", 8);
+    const observed = new Set<string>();
+    for (const name of names) {
+      const locator = await firstVisibleSemanticLocator(session.page, roles, name, timeout);
+      if (!locator) continue;
+      await locator.click({ timeout });
+      await session.page.waitForTimeout(400);
+      observed.add(await interactiveStateDigest(session.page));
+    }
+    session.interactionProofByNodeID.set(stage.node_id, { stateVariants: [...observed].filter(Boolean).length });
+    session.latestFrameChange = observed.size > 0;
+    session.visualChangeByNodeID.set(stage.node_id, observed.size > 0);
     return;
   }
   const resolved = await resolveTarget(session.page, stage, interaction, true, resolutionAttempts);
@@ -1040,6 +1119,11 @@ async function executeInteraction(
     throw new Error(`browser_agent_action_not_supported: ${interaction.kind}`);
   }
   await waitForPageSettled(session.page, Math.min(timeout, 5_000));
+	if (interaction.kind === "click" && String(interaction.parameters?.action_recipe || "") === "activate_control") {
+		const restored = await interactiveStateDigest(session.page);
+		const history = session.interactionStateHistory.slice(0, -1);
+		session.interactionProofByNodeID.set(stage.node_id, { restoreSimilarity: restored && history.includes(restored) ? 1 : 0 });
+	}
 	if (trackVisualChange) {
 		session.visualChangeByNodeID.set(stage.node_id, visualDigestBefore !== await pageVisualDigest(session.page));
 	}
@@ -1435,6 +1519,19 @@ export async function evaluateRequiredValidations(
       } else if (validation.kind === "network_settled") {
         passed = outcomeChangesByNodeID?.get(stage.node_id)?.networkSettled === true;
         actual = passed ? "network_settled" : "network_not_settled";
+      } else if (validation.kind === "distinct_actions_observed") {
+        const count = outcomeChangesByNodeID?.get(stage.node_id)?.distinctActions || 0;
+        passed = count >= Number(scalarExpected(validation) || 1); actual = String(count);
+      } else if (validation.kind === "numeric_increased") {
+        passed = outcomeChangesByNodeID?.get(stage.node_id)?.numericIncreased === true; actual = passed ? "numeric_increased" : "numeric_not_increased";
+      } else if (validation.kind === "approximate_state_restored") {
+        const similarity = outcomeChangesByNodeID?.get(stage.node_id)?.restoreSimilarity || 0;
+        passed = similarity >= Number(scalarExpected(validation) || 1); actual = String(similarity);
+      } else if (validation.kind === "input_modality_used") {
+        actual = String(outcomeChangesByNodeID?.get(stage.node_id)?.inputModality || ""); passed = actual === String(scalarExpected(validation) || "");
+      } else if (validation.kind === "state_variants_observed") {
+        const count = outcomeChangesByNodeID?.get(stage.node_id)?.stateVariants || 0;
+        passed = count >= Number(scalarExpected(validation) || 1); actual = String(count);
       } else if (validation.kind === "playable_surface_visible" || validation.kind === "interactive_surface_visible") {
 		const target = validation.target || {};
 		const hasBoundTarget = Boolean(target.test_id || target.selector || target.role || target.label || target.text);
@@ -2047,6 +2144,57 @@ function booleanParameter(parameters: Record<string, unknown> | undefined, key: 
     if (value.trim().toLowerCase() === "false") return false;
   }
   return fallback;
+}
+
+function stringArrayParameter(parameters: Record<string, unknown> | undefined, key: string, max: number): string[] {
+  const raw = parameters?.[key];
+  const values = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[;,]+/) : [];
+  return values.map((value) => typeof value === "string" ? value.trim() : "").filter(Boolean).slice(0, max);
+}
+
+async function firstVisibleSemanticLocator(page: any, roles: string[], name: string, timeout: number): Promise<any | undefined> {
+  for (const frame of (typeof page.frames === "function" ? page.frames() : [page])) {
+    for (const role of (roles.length ? roles : ["button"])) {
+      const locator = frame.getByRole?.(role, { name, exact: false })?.first();
+      if (locator && await locator.isVisible({ timeout: Math.min(timeout, 1_500) }).catch(() => false)) return locator;
+    }
+    const locator = frame.getByText?.(name, { exact: false })?.first();
+    if (locator && await locator.isVisible({ timeout: Math.min(timeout, 1_500) }).catch(() => false)) return locator;
+  }
+  return undefined;
+}
+
+async function visibleNumericValues(page: any): Promise<number[]> {
+  const values: number[] = [];
+  for (const frame of (typeof page.frames === "function" ? page.frames() : [page])) {
+    const frameValues = await frame.evaluate(() => {
+      const doc = (globalThis as any).document;
+      if (!doc) return [];
+      const nodes = Array.from(doc.querySelectorAll('[role="status"], [aria-live], [role="application"], main')).slice(0, 64) as any[];
+      return nodes.flatMap((node) => String(node.innerText || node.textContent || "").match(/\b\d{1,9}\b/g) || []).map(Number).filter(Number.isFinite).slice(0, 256);
+    }).catch(() => [] as number[]);
+    values.push(...frameValues);
+  }
+  return values;
+}
+
+function numericSeriesIncreased(before: number[], after: number[]): boolean {
+  if (!before.length || !after.length) return false;
+  const beforeSorted = [...before].sort((a, b) => a - b);
+  const afterSorted = [...after].sort((a, b) => a - b);
+  return Math.max(...afterSorted) > Math.max(...beforeSorted) || afterSorted.reduce((sum, value) => sum + value, 0) > beforeSorted.reduce((sum, value) => sum + value, 0);
+}
+
+async function interactiveStateDigest(page: any, locator?: any): Promise<string> {
+  let value = "";
+  if (locator?.evaluate) {
+    value = await locator.evaluate((element: any) => `${element.innerText || element.textContent || ""}|${element.getAttribute?.("aria-label") || ""}`).catch(() => "");
+  }
+  if (!value) {
+    const target = await interactiveSurfaceTargetOnce(page);
+    value = await target?.digestTarget?.evaluate?.((element: any) => `${element.innerText || element.textContent || ""}|${element.getAttribute?.("aria-label") || ""}`).catch(() => "") || "";
+  }
+  return value ? createHash("sha256").update(String(value).replace(/\s+/g, " ").trim()).digest("hex") : "";
 }
 
 export function approvedKeyboardKeys(parameters: Record<string, unknown> | undefined): string[] {

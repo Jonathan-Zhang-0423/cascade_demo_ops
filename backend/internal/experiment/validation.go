@@ -106,7 +106,7 @@ func ValidateInteractionPlan(value InteractionPlan) error {
 	}
 	seen := map[string]bool{}
 	for _, step := range value.Steps {
-		if strings.TrimSpace(step.StepID) == "" || seen[step.StepID] || strings.TrimSpace(step.SemanticIntent) == "" || len(step.ExpectedChanges) == 0 || len(step.EvidenceSlots) == 0 || len(step.ProofRequirements) == 0 {
+		if strings.TrimSpace(step.StepID) == "" || seen[step.StepID] || strings.TrimSpace(step.SemanticIntent) == "" || len(step.ExpectedChanges) == 0 || len(step.EvidenceSlots) == 0 || len(step.ProofRequirements) == 0 || !validInteractionAction(step.Action) {
 			return errors.New("interaction evidence step is incomplete or duplicated")
 		}
 		if step.ReplayPolicy != ReplayObserveOnly && step.ReplayPolicy != ReplayIdempotentWrite && step.ReplayPolicy != ReplayOnceEffect {
@@ -120,6 +120,24 @@ func ValidateInteractionPlan(value InteractionPlan) error {
 		seen[step.StepID] = true
 	}
 	return nil
+}
+
+func validInteractionAction(value InteractionAction) bool {
+	if strings.TrimSpace(value.TargetSemanticID) == "" {
+		return false
+	}
+	switch value.Kind {
+	case "observe":
+		return len(value.Keys) == 0 && value.SwipeDirection == ""
+	case "keyboard_sequence":
+		return len(value.Keys) > 0 && len(value.Keys) <= 12
+	case "activate_control", "activate_state_variants":
+		return len(value.AllowedNames) > 0 && len(value.AllowedNames) <= 8
+	case "touch_swipe":
+		return value.SwipeDirection == "left" || value.SwipeDirection == "right" || value.SwipeDirection == "up" || value.SwipeDirection == "down"
+	default:
+		return false
+	}
 }
 
 func validProofRequirement(value ProofRequirement) bool {

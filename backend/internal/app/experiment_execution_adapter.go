@@ -80,11 +80,16 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "source_intelligence", Summary: "冻结的产品规格已交给兼容理解 Adapter"}); err != nil {
 		return err
 	}
+	interactionContracts, err := compileExperimentInteractionContracts(request.InteractionPlan)
+	if err != nil {
+		return &experiment.AdapterError{Code: "interaction_contract_compile_failed", Phase: "plan_review", State: experiment.RunStateFailed, Retryable: false, Cause: err}
+	}
 	input := orchestrator.UserInput{
 		Mode: model.AppModeWeb, ProductURL: request.TargetURL, ProductDescription: request.BuildPrompt,
 		TargetDurationSec: 105, TargetAudience: request.ProductSpec.Audience, BrandTone: request.ProductSpec.VisualDirection.Theme,
 		MustShow: interactionSemanticGoals(request.InteractionPlan), MustNotShow: append([]string{}, request.ProductSpec.ForbiddenOutcomes...),
-		AllowedDomains: []string{parsed.Hostname()}, DemoCredentialRef: request.CredentialRef,
+		InteractionContracts: interactionContracts,
+		AllowedDomains:       []string{parsed.Hostname()}, DemoCredentialRef: request.CredentialRef,
 	}
 	prepared, err := a.service.PrepareProductRun(ctx, CloudLifecycleRequest{UserInput: &input})
 	if err != nil || prepared.State == nil || prepared.Build == nil || prepared.Build.Package.ConfidenceSummary == nil {
@@ -136,6 +141,113 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		return err
 	}
 	return a.completeDirectLeg(ctx, request, prepared.State.ProjectID, jobID, status, true, emit)
+}
+
+func compileExperimentInteractionContracts(plan experiment.InteractionPlan) ([]model.InteractionContract, error) {
+	if err := experiment.ValidateInteractionPlan(plan); err != nil {
+		return nil, err
+	}
+	result := make([]model.InteractionContract, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		ref := model.EvidenceRef{ID: "ev_interaction_plan_" + step.StepID, Kind: model.EvidenceKindUserInput, Summary: "结构化交互证据计划", FieldPath: "interaction_plan.steps." + step.StepID, Confidence: 1}
+		actionKind := model.GraphActionInspect
+		switch step.Action.Kind {
+		case "keyboard_sequence":
+			actionKind = model.GraphActionPress
+		case "activate_control", "activate_state_variants":
+			actionKind = model.GraphActionClick
+		case "touch_swipe":
+			actionKind = model.GraphActionGesture
+		}
+		target := model.ActionTarget{EvidenceRefs: []model.EvidenceRef{ref}}
+		if len(step.Action.AllowedRoles) > 0 {
+			target.Role = step.Action.AllowedRoles[0]
+		}
+		if len(step.Action.AllowedNames) > 0 {
+			target.Label = step.Action.AllowedNames[0]
+			target.Text = step.Action.AllowedNames[0]
+		}
+		parameters := map[string]any{
+			"evidence_step_id": step.StepID, "evidence_slots": append([]string{}, step.EvidenceSlots...),
+			"max_attempts": step.MaxAttempts, "action_recipe": step.Action.Kind,
+		}
+		if len(step.Action.Keys) > 0 {
+			parameters["keys"] = append([]string{}, step.Action.Keys...)
+			parameters["focus_preview"] = true
+		}
+		if len(step.Action.AllowedRoles) > 0 {
+			parameters["allowed_roles"] = append([]string{}, step.Action.AllowedRoles...)
+		}
+		if len(step.Action.AllowedNames) > 0 {
+			parameters["allowed_names"] = append([]string{}, step.Action.AllowedNames...)
+		}
+		if step.Action.SwipeDirection != "" {
+			parameters["swipe_direction"] = step.Action.SwipeDirection
+		}
+		if step.Action.Viewport != "" {
+			parameters["viewport"] = step.Action.Viewport
+		}
+		predicates := []model.InteractionPredicate{}
+		seenKinds := map[string]bool{}
+		appendPredicate := func(kind string, expected any) {
+			if kind == "" || seenKinds[kind] {
+				return
+			}
+			seenKinds[kind] = true
+			predicates = append(predicates, model.InteractionPredicate{ID: "proof_" + step.StepID + "_" + kind, Kind: kind, Target: target, Expected: expected, Required: true, TimeoutMS: 12000, EvidenceRefs: []model.EvidenceRef{ref}})
+		}
+		hasSpecializedProof := false
+		for _, proof := range step.ProofRequirements {
+			if proof.Kind != "all_evidence_slots" && proof.Kind != "region_changed" {
+				hasSpecializedProof = true
+			}
+		}
+		if step.Action.Kind == "observe" && !hasSpecializedProof {
+			appendPredicate("interactive_surface_visible", true)
+		} else if step.Action.Kind != "observe" {
+			for _, change := range step.ExpectedChanges {
+				switch change {
+				case "aria":
+					appendPredicate("aria_changed", true)
+				case "visual":
+					appendPredicate("visual_region_changed", true)
+				case "frame", "interaction":
+					appendPredicate("frame_surface_changed", true)
+				case "network":
+					appendPredicate("network_settled", true)
+				case "dom":
+					appendPredicate("dom_changed", true)
+				case "url":
+					appendPredicate("page_changed", true)
+				}
+			}
+		}
+		for _, proof := range step.ProofRequirements {
+			switch proof.Kind {
+			case "distinct_actions":
+				appendPredicate("distinct_actions_observed", proof.MinCount)
+			case "numeric_increase":
+				appendPredicate("numeric_increased", true)
+			case "approximate_state_restore":
+				appendPredicate("approximate_state_restored", proof.MinSimilarity)
+			case "input_modality":
+				appendPredicate("input_modality_used", proof.Modality)
+			case "state_variants":
+				appendPredicate("state_variants_observed", proof.MinCount)
+			}
+		}
+		contract := model.InteractionContract{
+			SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "experiment_interaction_" + step.StepID,
+			SemanticGoal: step.SemanticIntent, Archetype: model.ProductArchetypeInteractive, ActionKind: actionKind,
+			ReplayPolicy: model.InteractionReplayPolicy(step.ReplayPolicy), TargetSemanticID: step.Action.TargetSemanticID,
+			ActionTarget: target, Parameters: parameters, ExpectedTransitions: predicates, EvidenceRefs: []model.EvidenceRef{ref}, NonDestructive: true,
+		}
+		if err := model.ValidateInteractionContract(contract); err != nil {
+			return nil, fmt.Errorf("%s: %w", step.StepID, err)
+		}
+		result = append(result, contract)
+	}
+	return result, nil
 }
 
 func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, request experiment.LegExecutionRequest, projectID, jobID string, status model.DirectJobStatus, commitEffect bool, emit func(experiment.LegExecutionUpdate) error) error {

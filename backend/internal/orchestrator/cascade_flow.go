@@ -186,6 +186,7 @@ type UserInput struct {
 	MustShow                      []string                             `json:"must_show,omitempty"`
 	MustNotShow                   []string                             `json:"must_not_show,omitempty"`
 	Requirements                  []model.DemoRequirement              `json:"requirements,omitempty"`
+	InteractionContracts          []model.InteractionContract          `json:"interaction_contracts,omitempty"`
 	PresentationGenerationIntents []model.PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
 	ForbiddenPages                []string                             `json:"forbidden_pages,omitempty"`
 	ForbiddenData                 []string                             `json:"forbidden_data,omitempty"`

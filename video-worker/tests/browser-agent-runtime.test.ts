@@ -130,10 +130,27 @@ describe("browser agent credential broker boundary", () => {
     expect(interactionRequiresResolvedTarget("wait")).toBe(false);
     expect(interactionRequiresResolvedTarget("inspect")).toBe(false);
 		expect(interactionRequiresResolvedTarget("press")).toBe(false);
+		expect(interactionRequiresResolvedTarget("gesture")).toBe(false);
     expect(interactionRequiresResolvedTarget("click")).toBe(true);
     expect(interactionRequiresResolvedTarget("fill")).toBe(true);
     expect(interactionRequiresResolvedTarget("assert")).toBe(true);
   });
+
+	it("evaluates structured interaction proof observers from bounded runtime evidence", async () => {
+		const stage: any = {
+			id: "proof-stage", node_id: "proof-node", target_contract: { semantic_id: "surface", destructive: false }, interactions: [{ kind: "press", non_destructive: true }],
+			validations: [
+				{ id: "distinct", kind: "distinct_actions_observed", required: true, expected: 2 },
+				{ id: "numeric", kind: "numeric_increased", required: true, expected: true },
+				{ id: "restore", kind: "approximate_state_restored", required: true, expected: .9 },
+				{ id: "modality", kind: "input_modality_used", required: true, expected: "touch" },
+				{ id: "variants", kind: "state_variants_observed", required: true, expected: 2 },
+			],
+		};
+		const outcomes: any = new Map([[stage.node_id, { distinctActions: 2, numericIncreased: true, restoreSimilarity: 1, inputModality: "touch", stateVariants: 2 }]]);
+		const assertions = await evaluateRequiredValidations({}, stage, new Map(), outcomes);
+		expect(assertions.every((value) => value.passed)).toBe(true);
+	});
 
 	it("accepts only the four approved gameplay keys", () => {
 		expect(approvedKeyboardKeys({ keys: "ArrowLeft,ArrowRight,ArrowDown,ArrowUp" })).toEqual(["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp"]);

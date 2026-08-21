@@ -2483,7 +2483,17 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 			EvidenceRefs:    node.EvidenceRefs,
 			Blocking:        isBlockingScriptStep(node, action.Type, validations),
 		}
-		step.InteractionContract = interactionContractForStep(step, node, targetContract, evidenceForInteractionContract(node, action, validations))
+		if node.InteractionContract != nil {
+			contract := *node.InteractionContract
+			contract.ActionKind = action.Type
+			contract.ActionTarget = action.Target
+			contract.Parameters = action.Parameters
+			if model.ValidateInteractionContract(contract) == nil {
+				step.InteractionContract = &contract
+			}
+		} else {
+			step.InteractionContract = interactionContractForStep(step, node, targetContract, evidenceForInteractionContract(node, action, validations))
+		}
 		steps = append(steps, step)
 		if routeContract.ExpectedRouteAfterAction != "" {
 			previousRoute = routeContract.ExpectedRouteAfterAction
@@ -2548,7 +2558,7 @@ func interactionContractForStep(step model.ScriptStep, node *model.GraphNode, ta
 		SchemaVersion: model.InteractionContractSchemaVersion,
 		ContractID:    "interaction_" + shortHash(step.NodeID+"|"+string(step.Action.Type)+"|"+target.SemanticID),
 		SemanticGoal:  firstNonEmpty(step.BusinessValue, step.ExpectedOutcome, step.Title),
-		Archetype:     model.ProductArchetypeUnknown, ActionKind: step.Action.Type, ReplayPolicy: interactionReplayPolicy(step.Action.Type), TargetSemanticID: target.SemanticID, ActionTarget: step.Action.Target,
+		Archetype:     model.ProductArchetypeUnknown, ActionKind: step.Action.Type, ReplayPolicy: interactionReplayPolicy(step.Action.Type), TargetSemanticID: target.SemanticID, ActionTarget: step.Action.Target, Parameters: step.Action.Parameters,
 		Preconditions: preconditions, ExpectedTransitions: predicates, EvidenceRefs: evidence, NonDestructive: true,
 	}
 	if err := model.ValidateInteractionContract(*contract); err != nil {
@@ -2666,6 +2676,12 @@ func ensureRequiredValidationsForStep(node *model.GraphNode, action model.Script
 			Target: action.Target, Assertion: firstNonEmpty(node.ExpectedOutcome, "键盘操作后页面画面必须发生变化"),
 			Expected: true, Severity: "blocking", Required: true,
 		})
+	case model.GraphActionGesture:
+		out = append(out, model.ValidationSpec{
+			ID: "validate_gesture_change_" + node.ID, Kind: "frame_surface_changed",
+			Target: action.Target, Assertion: firstNonEmpty(node.ExpectedOutcome, "手势操作后交互区域必须发生变化"),
+			Expected: true, Severity: "blocking", Required: true,
+		})
 	case model.GraphActionWait, model.GraphActionInspect:
 		stageKind := businessStageKindForNode(node)
 		if stageKind != model.BusinessStageKindSessionSetup && stageKind != model.BusinessStageKindObserveProgress && stageKind != model.BusinessStageKindFinalObserve {
@@ -2705,7 +2721,7 @@ func hasRequiredValidation(validations []model.ValidationSpec) bool {
 
 func validationKindAllowedForBrowserAgent(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "numeric_increased", "approximate_state_restored", "input_modality_used", "state_variants_observed", "distinct_actions_observed", "interactive_surface_visible", "playable_surface_visible":
 		return true
 	default:
 		return false
@@ -2717,8 +2733,26 @@ func targetContractForStep(step model.ScriptStep, node *model.GraphNode, evidenc
 	if contract == nil {
 		return nil
 	}
+	if node != nil && node.InteractionContract != nil && strings.TrimSpace(node.InteractionContract.TargetSemanticID) != "" {
+		contract.SemanticID = node.InteractionContract.TargetSemanticID
+		contract.AllowedNames = uniqueStrings(append(contract.AllowedNames, interactionParameterStrings(node.InteractionContract.Parameters["allowed_names"])...))
+		contract.AllowedRoles = uniqueStrings(append(contract.AllowedRoles, interactionParameterStrings(node.InteractionContract.Parameters["allowed_roles"])...))
+	}
 	contract.EvidenceRefs = uniqueEvidenceRefs(append(contract.EvidenceRefs, evidence...))
 	return contract
+}
+
+func interactionParameterStrings(value any) []string {
+	result := []string{}
+	switch typed := value.(type) {
+	case []string:
+		result = append(result, typed...)
+	case []any:
+		for _, item := range typed { if text, ok := item.(string); ok { result = append(result, text) } }
+	case string:
+		result = strings.FieldsFunc(typed, func(value rune) bool { return value == ',' || value == ';' })
+	}
+	return uniqueStrings(result)
 }
 
 func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstruction, pageTarget model.ScriptPageTarget, validations []model.ValidationSpec) *model.BrowserAgentTargetContract {
@@ -3153,7 +3187,7 @@ func softenBlockingValidations(validations []model.ValidationSpec) []model.Valid
 
 func isBusinessAction(action model.GraphActionType) bool {
 	switch action {
-	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionPress, model.GraphActionAPICall:
+	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionPress, model.GraphActionGesture, model.GraphActionAPICall:
 		return true
 	default:
 		return false

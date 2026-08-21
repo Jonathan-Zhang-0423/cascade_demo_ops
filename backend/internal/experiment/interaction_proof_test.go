@@ -29,8 +29,8 @@ func TestInteractiveExperimentProofRequiresEveryDeclaredCapability(t *testing.T)
 
 func TestInteractionProofRejectsInlineEvidenceAndAttemptOverflow(t *testing.T) {
 	plan := InteractionPlan{SchemaVersion: InteractionPlanSchemaVersion, PlanID: "plan-test", SurfaceKind: "canvas", Steps: []InteractionStep{
-		{StepID: "step-one", SemanticIntent: "prove changed state", ReplayPolicy: ReplayIdempotentWrite, ExpectedChanges: []string{"frame"}, EvidenceSlots: []string{"before", "after"}, ProofRequirements: []ProofRequirement{{Kind: "region_changed"}}, MaxAttempts: 2},
-		{StepID: "step-two", SemanticIntent: "prove visible state", ReplayPolicy: ReplayObserveOnly, ExpectedChanges: []string{"visual"}, EvidenceSlots: []string{"state"}, ProofRequirements: []ProofRequirement{{Kind: "all_evidence_slots"}}},
+		{StepID: "step-one", SemanticIntent: "prove changed state", ReplayPolicy: ReplayIdempotentWrite, ExpectedChanges: []string{"frame"}, EvidenceSlots: []string{"before", "after"}, ProofRequirements: []ProofRequirement{{Kind: "region_changed"}}, Action: InteractionAction{Kind: "keyboard_sequence", TargetSemanticID: "surface", Keys: []string{"ArrowLeft"}}, MaxAttempts: 2},
+		{StepID: "step-two", SemanticIntent: "prove visible state", ReplayPolicy: ReplayObserveOnly, ExpectedChanges: []string{"visual"}, EvidenceSlots: []string{"state"}, ProofRequirements: []ProofRequirement{{Kind: "all_evidence_slots"}}, Action: InteractionAction{Kind: "observe", TargetSemanticID: "surface"}},
 	}}
 	report, err := ValidateInteractionProof(plan, []InteractionProofResult{
 		{StepID: "step-one", AttemptCount: 3, EvidenceKinds: []string{"frame"}, EvidenceBySlot: map[string]string{"before": "data:image/png;base64,AAAA", "after": "artifact:after"}, RegionChanged: true},

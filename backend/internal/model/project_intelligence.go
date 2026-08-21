@@ -151,6 +151,7 @@ type BusinessStage struct {
 	Uncertainties            []StageUncertainty        `json:"uncertainties,omitempty"`
 	EvidenceRefs             []EvidenceRef             `json:"evidence_refs,omitempty"`
 	Confidence               float64                   `json:"confidence,omitempty"`
+	InteractionContract      *InteractionContract      `json:"interaction_contract,omitempty"`
 }
 
 type BusinessActionSemantics struct {

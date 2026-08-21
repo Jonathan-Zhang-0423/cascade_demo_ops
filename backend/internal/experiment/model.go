@@ -133,7 +133,21 @@ type InteractionStep struct {
 	ExpectedChanges   []string           `json:"expected_changes"`
 	EvidenceSlots     []string           `json:"evidence_slots"`
 	ProofRequirements []ProofRequirement `json:"proof_requirements"`
+	Action            InteractionAction  `json:"action"`
 	MaxAttempts       int                `json:"max_attempts,omitempty"`
+}
+
+// InteractionAction is a site-neutral execution recipe. Product-specific
+// accessible names and key choices belong to the experiment fixture, while
+// the generic planner only compiles the declared action and evidence contract.
+type InteractionAction struct {
+	Kind             string   `json:"kind"`
+	TargetSemanticID string   `json:"target_semantic_id"`
+	AllowedRoles     []string `json:"allowed_roles,omitempty"`
+	AllowedNames     []string `json:"allowed_names,omitempty"`
+	Keys             []string `json:"keys,omitempty"`
+	SwipeDirection   string   `json:"swipe_direction,omitempty"`
+	Viewport         string   `json:"viewport,omitempty"`
 }
 
 type ProofRequirement struct {

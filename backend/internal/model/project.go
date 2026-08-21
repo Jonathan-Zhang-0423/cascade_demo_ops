@@ -87,6 +87,7 @@ type ProjectInputBundle struct {
 	BrandKit                      *BrandKit                      `json:"brand_kit,omitempty"`
 	Scenarios                     []DemoScenario                 `json:"scenarios,omitempty"`
 	Requirements                  []DemoRequirement              `json:"requirements,omitempty"`
+	InteractionContracts          []InteractionContract          `json:"interaction_contracts,omitempty"`
 	PresentationGenerationIntents []PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
 	MediaDeliveryPreferences      *MediaDeliveryPreferences      `json:"media_delivery_preferences,omitempty"`
 	RawUserPrompt                 string                         `json:"raw_user_prompt,omitempty"`

@@ -953,7 +953,7 @@ func stageHasEvidence(stage StageApprovalStage) bool {
 
 func stepRequiresBrowserAgentValidation(step ScriptStep) bool {
 	switch step.Action.Type {
-	case GraphActionNavigate, GraphActionClick, GraphActionFill, GraphActionSelect, GraphActionUpload, GraphActionPress, GraphActionAPICall:
+	case GraphActionNavigate, GraphActionClick, GraphActionFill, GraphActionSelect, GraphActionUpload, GraphActionPress, GraphActionGesture, GraphActionAPICall:
 		return true
 	case GraphActionWait, GraphActionInspect:
 		return step.StageKind == BusinessStageKindSessionSetup || step.StageKind == BusinessStageKindObserveProgress || step.StageKind == BusinessStageKindFinalObserve
@@ -968,7 +968,7 @@ func stepHasRequiredBrowserAgentValidation(step ScriptStep) bool {
 			continue
 		}
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "numeric_increased", "approximate_state_restored", "input_modality_used", "state_variants_observed", "distinct_actions_observed", "interactive_surface_visible", "playable_surface_visible":
 			return true
 		}
 	}

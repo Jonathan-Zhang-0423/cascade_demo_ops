@@ -13,7 +13,7 @@
       "type": "array", "minItems": 2, "maxItems": 32,
       "items": {
         "type": "object", "additionalProperties": false,
-        "required": ["step_id", "semantic_intent", "replay_policy", "preconditions", "expected_changes", "evidence_slots", "proof_requirements"],
+        "required": ["step_id", "semantic_intent", "replay_policy", "preconditions", "expected_changes", "evidence_slots", "proof_requirements", "action"],
         "properties": {
           "step_id": { "$ref": "../../execution-port/v1/common.schema.json#/$defs/identifier" },
           "semantic_intent": { "type": "string", "minLength": 3, "maxLength": 320 },
@@ -32,6 +32,19 @@
                 "modality": { "enum": ["keyboard", "pointer", "touch"] },
                 "min_similarity": { "type": "number", "minimum": 0.5, "maximum": 1 }
               }
+            }
+          },
+          "action": {
+            "type": "object", "additionalProperties": false,
+            "required": ["kind", "target_semantic_id"],
+            "properties": {
+              "kind": { "enum": ["observe", "keyboard_sequence", "activate_control", "touch_swipe", "activate_state_variants"] },
+              "target_semantic_id": { "$ref": "../../execution-port/v1/common.schema.json#/$defs/identifier" },
+              "allowed_roles": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 2, "maxLength": 64 } },
+              "allowed_names": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 96 } },
+              "keys": { "type": "array", "maxItems": 12, "items": { "type": "string", "minLength": 1, "maxLength": 32 } },
+              "swipe_direction": { "enum": ["left", "right", "up", "down"] },
+              "viewport": { "enum": ["current", "mobile"] }
             }
           },
           "max_attempts": { "type": "integer", "minimum": 1, "maximum": 12 }

@@ -291,6 +291,8 @@ func writeScriptStep(builder *strings.Builder, doc *model.ExecutionScriptDocumen
 			builder.WriteString("  await ctx.page.keyboard.press(" + jsString(key) + ");\n")
 			builder.WriteString("  await ctx.page.waitForTimeout(350);\n")
 		}
+	case model.GraphActionGesture:
+		builder.WriteString("  await ctx.log.info(\"bounded gesture is delegated to browser-agent runtime\", { nodeId: " + jsString(step.NodeID) + " });\n")
 	case model.GraphActionWait:
 		if selector != "" {
 			builder.WriteString("  await ctx.page.locator(" + jsString(selector) + ").waitFor({ timeout: " + fmt.Sprint(timeoutMS) + " });\n")
@@ -525,7 +527,7 @@ func preActionPauseMS(actionType model.GraphActionType, durationMS int) int {
 		return 0
 	}
 	switch actionType {
-	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionPress:
+	case model.GraphActionClick, model.GraphActionFill, model.GraphActionSelect, model.GraphActionUpload, model.GraphActionPress, model.GraphActionGesture:
 		return 1200
 	case model.GraphActionInspect, model.GraphActionWait:
 		return 0

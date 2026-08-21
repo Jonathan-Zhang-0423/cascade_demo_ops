@@ -251,7 +251,24 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		nonDestructive: true,
 	})
 
-	if wantsInteractiveSurfaceVerification(intentText) {
+	structuredContracts := []model.InteractionContract{}
+	if project.Inputs != nil {
+		structuredContracts = project.Inputs.InteractionContracts
+	}
+	if len(structuredContracts) > 0 {
+		for _, contract := range structuredContracts {
+			builder.addStage(stageSpec{
+				id: "contract_" + contract.ContractID, kind: model.BusinessStageKindFinalObserve,
+				title: "验证交互证据：" + contract.SemanticGoal, objective: contract.SemanticGoal,
+				actionType: string(contract.ActionKind), actionLabel: contract.SemanticGoal,
+				successState: "结构化交互契约的必需结果变化已通过独立证据验证。",
+				routeState:   builder.finalRouteState(), entryRoute: builder.finalEntryRoute(), expectedRoute: builder.finalEntryRoute(),
+				durationMS: 6000, keywords: intentKeywordsForText(contract.SemanticGoal),
+				capture: []string{"交互前状态", "交互后证据"}, nonDestructive: contract.NonDestructive,
+				interactionContract: &contract,
+			})
+		}
+	} else if wantsInteractiveSurfaceVerification(intentText) {
 		interactiveName := firstNonEmpty(projectName, "交互结果")
 		builder.addStage(stageSpec{
 			id:             "interactive_surface_observe",
@@ -296,23 +313,24 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 }
 
 type stageSpec struct {
-	id             string
-	kind           model.BusinessStageKind
-	title          string
-	objective      string
-	actionType     string
-	actionLabel    string
-	inputSemantic  string
-	inputValue     string
-	successState   string
-	routeState     model.BusinessRouteState
-	entryRoute     string
-	expectedRoute  string
-	durationMS     int
-	keywords       []string
-	capture        []string
-	parameters     map[string]string
-	nonDestructive bool
+	id                  string
+	kind                model.BusinessStageKind
+	title               string
+	objective           string
+	actionType          string
+	actionLabel         string
+	inputSemantic       string
+	inputValue          string
+	successState        string
+	routeState          model.BusinessRouteState
+	entryRoute          string
+	expectedRoute       string
+	durationMS          int
+	keywords            []string
+	capture             []string
+	parameters          map[string]string
+	nonDestructive      bool
+	interactionContract *model.InteractionContract
 }
 
 type intentDurationHint struct {
@@ -587,6 +605,9 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 	stageID := "business_stage_" + spec.id
 	targets := b.source.targetsForStage(spec)
 	evidence := evidenceRefsForBusinessTargets(targets)
+	if spec.interactionContract != nil {
+		evidence = append(evidence, spec.interactionContract.EvidenceRefs...)
+	}
 	requirements := b.source.evidenceRequirementsForStage(spec, targets)
 	uncertainties := businessStageUncertainties(spec, requirements, evidence)
 	entryRoute := firstNonEmpty(spec.entryRoute, "/")
@@ -630,6 +651,7 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		Uncertainties:        uncertainties,
 		EvidenceRefs:         uniqueEvidenceRefs(evidence),
 		Confidence:           businessStageConfidence(spec, targets, requirements),
+		InteractionContract:  spec.interactionContract,
 	}
 	b.stages = append(b.stages, stage)
 }

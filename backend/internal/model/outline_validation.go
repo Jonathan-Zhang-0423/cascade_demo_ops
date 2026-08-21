@@ -639,6 +639,9 @@ func runtimeAdaptiveTargetDiscoverable(step ScriptStep, stage StageApprovalStage
 	if step.Action.Type == GraphActionPress {
 		return hasRoute && approvedKeyboardActionParameters(step.Action.Parameters)
 	}
+	if step.Action.Type == GraphActionGesture {
+		return hasRoute && approvedGestureActionParameters(step.Action.Parameters)
+	}
 	return hasRoute && (hasLocator || hasSemanticHints || step.Action.Type == GraphActionNavigate)
 }
 
@@ -683,6 +686,16 @@ func ApprovedKeyboardActionParameters(parameters map[string]any) bool {
 	return approvedKeyboardActionParameters(parameters)
 }
 
+func approvedGestureActionParameters(parameters map[string]any) bool {
+	direction, _ := parameters["swipe_direction"].(string)
+	viewport, _ := parameters["viewport"].(string)
+	return (direction == "left" || direction == "right" || direction == "up" || direction == "down") && (viewport == "" || viewport == "current" || viewport == "mobile")
+}
+
+func ApprovedGestureActionParameters(parameters map[string]any) bool {
+	return approvedGestureActionParameters(parameters)
+}
+
 func validRuntimeAdaptiveCapturePlan(plan *BrowserAgentCapturePlan) bool {
 	return plan != nil && strings.TrimSpace(plan.Intent) != "" && (strings.TrimSpace(plan.PrimaryArtifact) != "" || len(plan.RequiredAssets) > 0)
 }
@@ -704,7 +717,7 @@ func stepHasDeterministicBrowserAgentValidation(step ScriptStep) bool {
 		hasTarget := validation.Target.URL != "" || validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != ""
 		hasExpected := strings.TrimSpace(validation.Assertion) != "" || validation.Expected != nil
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "numeric_increased", "approximate_state_restored", "input_modality_used", "state_variants_observed", "distinct_actions_observed", "interactive_surface_visible", "playable_surface_visible":
 			if hasTarget || hasExpected {
 				return true
 			}
@@ -733,7 +746,7 @@ func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool 
 	hasTarget := validation.Target.URL != "" || validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != ""
 	hasExpected := strings.TrimSpace(validation.Assertion) != "" || validation.Expected != nil
 	switch validation.Kind {
-	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "numeric_increased", "approximate_state_restored", "input_modality_used", "state_variants_observed", "distinct_actions_observed", "interactive_surface_visible", "playable_surface_visible":
 		return hasTarget || hasExpected
 	default:
 		return false
@@ -741,7 +754,7 @@ func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool 
 }
 
 func validationProvesBusinessOutcome(step ScriptStep, validation ValidationSpec) bool {
-	if step.Action.Type == GraphActionPress {
+	if step.Action.Type == GraphActionPress || step.Action.Type == GraphActionGesture {
 		// Keyboard interaction may be bounded to the whole page, a DOM-backed
 		// visual region, or an iframe/canvas surface. All three assertions prove
 		// an observed before/after result; mere visibility of the action target
@@ -750,7 +763,11 @@ func validationProvesBusinessOutcome(step ScriptStep, validation ValidationSpec)
 		changeObserver := validation.Kind == "page_changed" ||
 			validation.Kind == "visual_region_changed" ||
 			validation.Kind == "frame_surface_changed"
-		return changeObserver && validation.Expected == true && approvedKeyboardActionParameters(step.Action.Parameters)
+		parametersApproved := approvedKeyboardActionParameters(step.Action.Parameters)
+		if step.Action.Type == GraphActionGesture {
+			parametersApproved = approvedGestureActionParameters(step.Action.Parameters)
+		}
+		return changeObserver && validation.Expected == true && parametersApproved
 	}
 	if step.StageKind == BusinessStageKindBusinessInput || (step.Action.Type == GraphActionFill && step.StageKind != BusinessStageKindSessionSetup) {
 		if validation.Kind != "value_equals" {

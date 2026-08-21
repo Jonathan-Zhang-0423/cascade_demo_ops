@@ -28,6 +28,11 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 	if err := model.ValidatePresentationGenerationIntents(input.PresentationGenerationIntents); err != nil {
 		return nil, err
 	}
+	for _, contract := range input.InteractionContracts {
+		if err := model.ValidateInteractionContract(contract); err != nil {
+			return nil, fmt.Errorf("invalid interaction contract %q: %w", contract.ContractID, err)
+		}
+	}
 	hasProductURL := strings.TrimSpace(input.ProductURL) != ""
 	hasCode := strings.TrimSpace(input.GitRepoURL) != "" || strings.TrimSpace(input.LocalRepoPath) != "" || len(input.Code) > 0
 	hasRequirements := strings.TrimSpace(input.ProductDescription) != "" || len(input.RequirementDocuments) > 0
@@ -81,6 +86,7 @@ func (a *InputContextAgent) BuildProjectContext(ctx context.Context, input orche
 			WebpageScreenshots:            input.WebpageScreenshots,
 			KnowledgeSources:              knowledgeSourcesFromInputs(input),
 			Requirements:                  structuredDemoRequirements(input.Requirements, mustShow, mustNotShow, input.ForbiddenPages, input.ForbiddenData),
+			InteractionContracts:          append([]model.InteractionContract{}, input.InteractionContracts...),
 			PresentationGenerationIntents: append([]model.PresentationGenerationIntent{}, input.PresentationGenerationIntents...),
 			RawUserPrompt:                 productDescription,
 			Scenarios: []model.DemoScenario{

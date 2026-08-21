@@ -31,6 +31,7 @@ type InteractionContract struct {
 	ReplayPolicy        InteractionReplayPolicy `json:"replay_policy"`
 	TargetSemanticID    string                  `json:"target_semantic_id"`
 	ActionTarget        ActionTarget            `json:"action_target,omitempty"`
+	Parameters          map[string]any          `json:"parameters,omitempty"`
 	Preconditions       []InteractionPredicate  `json:"preconditions,omitempty"`
 	ExpectedTransitions []InteractionPredicate  `json:"expected_transitions"`
 	EvidenceRefs        []EvidenceRef           `json:"evidence_refs"`
@@ -62,6 +63,9 @@ var interactionPredicateKinds = map[string]bool{
 	"state_changed": true, "page_changed": true,
 	"dom_changed": true, "aria_changed": true, "network_settled": true,
 	"visual_region_changed": true, "frame_surface_changed": true,
+	"numeric_increased": true, "approximate_state_restored": true,
+	"input_modality_used": true, "state_variants_observed": true,
+	"distinct_actions_observed":   true,
 	"interactive_surface_visible": true,
 	// Decode-only compatibility for packages produced before the generic
 	// interactive surface contract was introduced.
