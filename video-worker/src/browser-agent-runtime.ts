@@ -2451,6 +2451,11 @@ export function classifyInteractiveSurfaceFrame(surface: boolean, stateful: bool
   return { surface, stateful: surface && stateful, focusable: surface && focusable };
 }
 
+export function classifyDOMInteractiveSurface(interactiveCount: number, width: number, height: number): InteractiveSurfaceEvidence {
+  const surface = Number.isFinite(interactiveCount) && interactiveCount >= 2 && width >= 120 && height >= 80;
+  return classifyInteractiveSurfaceFrame(surface, surface, surface);
+}
+
 export function classifyPlayableSurfaceFrame(text: string, surface: boolean): PlayableSurfaceEvidence {
   void text;
   // Compatibility alias: old packages used this name, but the runtime no
@@ -2464,7 +2469,8 @@ async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceT
     '[role="application"]:visible', "canvas:visible",
     '[contenteditable="true"]:visible', '[role="grid"]:visible', '[tabindex]:visible',
   ];
-  for (const frame of frames) {
+  for (let frameIndex = 0; frameIndex < frames.length; frameIndex++) {
+    const frame = frames[frameIndex];
     const body = frame.locator?.("body");
     for (const selector of surfaceSelectors) {
       const locator = frame.locator?.(selector)?.first();
@@ -2477,6 +2483,23 @@ async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceT
       if (evidence.surface && evidence.stateful) {
         return { ...evidence, digestTarget: locator, keyboardTarget: body || locator };
       }
+    }
+    const embeddedFrame = typeof page.mainFrame === "function" ? frame !== page.mainFrame() : frames.length > 1 && frameIndex > 0;
+    if (embeddedFrame && body?.evaluate) {
+      const profile = await body.evaluate(() => {
+        const doc = (globalThis as any).document;
+        const win = (globalThis as any).window;
+        const candidates = Array.from(doc?.querySelectorAll?.('button,input,select,textarea,a[href],[role="button"],[role="switch"],[role="slider"],[role="textbox"],[tabindex]') || []) as any[];
+        const visible = candidates.filter((element) => {
+          const style = win?.getComputedStyle?.(element);
+          const rect = element.getBoundingClientRect?.();
+          return !element.disabled && style?.display !== "none" && style?.visibility !== "hidden" && Number(rect?.width || 0) > 1 && Number(rect?.height || 0) > 1;
+        }).length;
+        const rect = doc?.body?.getBoundingClientRect?.();
+        return { interactiveCount: visible, width: Number(rect?.width || 0), height: Number(rect?.height || 0) };
+      }).catch(() => ({ interactiveCount: 0, width: 0, height: 0 }));
+      const evidence = classifyDOMInteractiveSurface(profile.interactiveCount, profile.width, profile.height);
+      if (evidence.surface) return { ...evidence, digestTarget: body, keyboardTarget: body };
     }
   }
   return undefined;

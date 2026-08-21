@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, captureTargetGeometry, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -684,6 +684,9 @@ describe("browser agent required validations", () => {
 		expect(classifyPlayableSurfaceFrame("Score 0 Controls ArrowLeft ArrowRight", true)).toEqual({ surface: true, score: true, controls: true });
 		expect(classifyPlayableSurfaceFrame("Score 0 Controls ArrowLeft ArrowRight", false)).toEqual({ surface: false, score: false, controls: false });
 		expect(classifyPlayableSurfaceFrame("Build completed. Score and keyboard controls are ready.", false)).toEqual({ surface: false, score: false, controls: false });
+		expect(classifyDOMInteractiveSurface(2, 640, 480)).toEqual({ surface: true, stateful: true, focusable: true });
+		expect(classifyDOMInteractiveSurface(0, 640, 480)).toEqual({ surface: false, stateful: false, focusable: false });
+		expect(classifyDOMInteractiveSurface(4, 80, 60)).toEqual({ surface: false, stateful: false, focusable: false });
 	});
 
 	it("requires the App-bound frame before accepting interactive surface evidence", async () => {
