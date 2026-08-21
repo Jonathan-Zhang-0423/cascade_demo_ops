@@ -80,7 +80,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "source_intelligence", Summary: "冻结的产品规格已交给兼容理解 Adapter"}); err != nil {
 		return err
 	}
-	interactionContracts, err := compileExperimentInteractionContracts(request.InteractionPlan)
+	interactionContracts, err := compileExperimentInteractionContracts(request.InteractionPlan, request.ObservationPlan)
 	if err != nil {
 		return &experiment.AdapterError{Code: "interaction_contract_compile_failed", Phase: "plan_review", State: experiment.RunStateFailed, Retryable: false, Cause: err}
 	}
@@ -148,7 +148,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	return a.completeDirectLeg(ctx, request, prepared.State.ProjectID, jobID, status, true, emit)
 }
 
-func compileExperimentInteractionContracts(plan experiment.InteractionPlan) ([]model.InteractionContract, error) {
+func compileExperimentInteractionContracts(plan experiment.InteractionPlan, observationPlan experiment.ObservationPlan) ([]model.InteractionContract, error) {
 	if err := experiment.ValidateInteractionPlan(plan); err != nil {
 		return nil, err
 	}
@@ -199,7 +199,11 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan) ([]m
 				return
 			}
 			seenKinds[kind] = true
-			predicates = append(predicates, model.InteractionPredicate{ID: "proof_" + step.StepID + "_" + kind, Kind: kind, Target: target, Expected: expected, Required: true, TimeoutMS: 12000, EvidenceRefs: []model.EvidenceRef{ref}})
+			timeoutMS := 12000
+			if kind == "interactive_surface_visible" && step.ReplayPolicy == experiment.ReplayObserveOnly && observationPlan.DeferAfterMS > timeoutMS {
+				timeoutMS = observationPlan.DeferAfterMS
+			}
+			predicates = append(predicates, model.InteractionPredicate{ID: "proof_" + step.StepID + "_" + kind, Kind: kind, Target: target, Expected: expected, Required: true, TimeoutMS: timeoutMS, EvidenceRefs: []model.EvidenceRef{ref}})
 		}
 		hasSpecializedProof := false
 		for _, proof := range step.ProofRequirements {

@@ -1689,7 +1689,7 @@ export function validationTimeoutMilliseconds(stage: BrowserAgentWorkerStage, va
 function longCompletionValidationAllowed(stage: BrowserAgentWorkerStage, validation: BrowserAgentValidation): boolean {
   if (stage.stage_kind !== "final_observe" || stage.target_contract?.destructive) return false;
   if (!stage.interactions.length || stage.interactions.some((interaction) => !["wait", "inspect"].includes(String(interaction.kind || "").toLowerCase()))) return false;
-  return validation.kind === "element_visible" || validation.kind === "text_contains";
+  return validation.kind === "element_visible" || validation.kind === "text_contains" || validation.kind === "interactive_surface_visible" || validation.kind === "playable_surface_visible";
 }
 
 async function waitForLocatorVisible(locator: any, timeout: number): Promise<boolean> {
@@ -2461,7 +2461,7 @@ export function classifyPlayableSurfaceFrame(text: string, surface: boolean): Pl
 async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceTarget | undefined> {
   const frames = typeof page.frames === "function" ? page.frames() : [page];
   const surfaceSelectors = [
-    '[role="application"]:visible', "canvas:visible", "iframe:visible",
+    '[role="application"]:visible', "canvas:visible",
     '[contenteditable="true"]:visible', '[role="grid"]:visible', '[tabindex]:visible',
   ];
   for (const frame of frames) {

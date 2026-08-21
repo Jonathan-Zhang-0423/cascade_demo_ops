@@ -47,7 +47,7 @@ func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(
 	if err != nil {
 		t.Fatal(err)
 	}
-	contracts, err := compileExperimentInteractionContracts(loaded.InteractionPlan)
+	contracts, err := compileExperimentInteractionContracts(loaded.InteractionPlan, loaded.ObservationPlan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,6 +68,9 @@ func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(
 	}
 	if got := contracts[1].ExpectedTransitions; !interactionPredicatesContain(got, "distinct_actions_observed") || !interactionPredicatesContain(got, "frame_surface_changed") {
 		t.Fatalf("direction proof predicates=%+v", got)
+	}
+	if got := contracts[0].ExpectedTransitions[0].TimeoutMS; got != int(loaded.ObservationPlan.DeferAfterMS) {
+		t.Fatalf("surface readiness timeout=%d want observation defer budget=%d", got, loaded.ObservationPlan.DeferAfterMS)
 	}
 	if got := contracts[2].ExpectedTransitions; !interactionPredicatesContain(got, "numeric_increased") || !interactionPredicatesContain(got, "state_changed") {
 		t.Fatalf("numeric proof predicates=%+v", got)
