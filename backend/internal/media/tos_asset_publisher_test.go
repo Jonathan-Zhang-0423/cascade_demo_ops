@@ -114,6 +114,18 @@ func TestTOSAssetPublisherConfigFromEnvDoesNotRequireStaticPublicURL(t *testing.
 	}
 }
 
+func TestTOSAssetPublisherConfigFromEnvSeparatesAPIUploadAndArkPresignEndpoints(t *testing.T) {
+	values := map[string]string{
+		"VOLC_TOS_ACCESS_KEY": "ak", "VOLC_TOS_SECRET_KEY": "sk",
+		"VOLC_TOS_ENDPOINT": " tos-cn-beijing.ivolces.com ", "VOLC_TOS_API_ENDPOINT": " tos-cn-beijing.volces.com ",
+		"VOLC_TOS_REGION": "cn-beijing", "VOLC_TOS_BUCKET": "bucket",
+	}
+	config, configured := TOSAssetPublisherConfigFromEnv(func(key string) string { return values[key] })
+	if !configured || config.Endpoint != "tos-cn-beijing.ivolces.com" || config.APIEndpoint != "tos-cn-beijing.volces.com" {
+		t.Fatalf("endpoints were not normalized separately: %+v configured=%t", config, configured)
+	}
+}
+
 func TestTOSAssetPublisherRequiresRetentionAcknowledgement(t *testing.T) {
 	fake := &fakeTOSObjectClient{}
 	publisher := newTOSAssetPublisherForClient(TOSAssetPublisherConfig{Bucket: "cascade-ark-media-test"}, fake, func() time.Time {

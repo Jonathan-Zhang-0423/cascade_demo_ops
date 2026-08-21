@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -141,7 +140,10 @@ func HashSHA256(data []byte) string { sum := sha256.Sum256(data); return hex.Enc
 
 func InstallationID(publicKey ed25519.PublicKey) string {
 	sum := sha256.Sum256(publicKey)
-	return "direct_install_" + hex.EncodeToString(sum[:])[:16]
+	// Keep the wire identity byte-for-byte compatible with the Server Direct
+	// transport. A lease is signed by this key, so both ends must derive the
+	// same stable identifier before the Gateway can accept it.
+	return "direct_install_" + hex.EncodeToString(sum[:])[:32]
 }
 
 func LeaseRequestSigningBytes(r DirectLeaseRequest) []byte {
@@ -173,18 +175,17 @@ func VerifyLeaseRequest(r DirectLeaseRequest, now time.Time, seen *NonceSet) (ed
 	return key, nil
 }
 
-func RequestMACKey(leaseToken, installationID string) []byte {
-	sum := sha256.Sum256([]byte(leaseToken + "\x00" + installationID))
-	return sum[:]
-}
-
-func SignDataRequest(method, escapedPath string, timestamp int64, nonce, bodyDigest, leaseToken, installationID string) string {
-	mac := hmac.New(sha256.New, RequestMACKey(leaseToken, installationID))
-	mac.Write([]byte(strings.Join([]string{method, escapedPath, strconv.FormatInt(timestamp, 10), nonce, bodyDigest}, "\n")))
+func SignDataRequest(method, escapedPath string, timestamp int64, nonce, bodyDigest, leaseToken, installationID, leaseID string, port int) string {
+	key, err := deriveWireKey(leaseToken, installationID, leaseID, port, timestamp, "app_to_browser_agent", "request-auth", "request-auth")
+	if err != nil {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(strings.Join([]string{strings.ToUpper(strings.TrimSpace(method)), strings.TrimSpace(escapedPath), strconv.FormatInt(timestamp, 10), strings.TrimSpace(nonce), strings.ToLower(strings.TrimSpace(bodyDigest))}, "\n")))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func VerifyDataRequest(req *http.Request, body []byte, leaseToken, installationID string, now time.Time, seen *NonceSet) error {
+func VerifyDataRequest(req *http.Request, body []byte, leaseToken, installationID, leaseID string, port int, now time.Time, seen *NonceSet) error {
 	ts, err := strconv.ParseInt(req.Header.Get("X-Cascade-Timestamp"), 10, 64)
 	if err != nil {
 		return errors.New("missing direct timestamp")
@@ -197,7 +198,7 @@ func VerifyDataRequest(req *http.Request, body []byte, leaseToken, installationI
 	if nonce == "" || !hmac.Equal([]byte(digest), []byte(req.Header.Get("X-Cascade-Body-SHA256"))) {
 		return errors.New("direct request body digest mismatch")
 	}
-	want := SignDataRequest(req.Method, req.URL.EscapedPath(), ts, nonce, digest, leaseToken, installationID)
+	want := SignDataRequest(req.Method, req.URL.EscapedPath(), ts, nonce, digest, leaseToken, installationID, leaseID, port)
 	if subtle.ConstantTimeCompare([]byte(strings.ToLower(want)), []byte(strings.ToLower(req.Header.Get("X-Cascade-Signature")))) != 1 {
 		return errors.New("invalid direct request signature")
 	}
@@ -207,30 +208,34 @@ func VerifyDataRequest(req *http.Request, body []byte, leaseToken, installationI
 	return nil
 }
 
-func DeriveMessageKey(leaseToken, installationID, leaseID string, port int, timestamp int64) ([]byte, error) {
-	info := []byte(fmt.Sprintf("%s|%s|%s|%d|%d", ProtocolVersion, installationID, leaseID, port, timestamp))
-	extract := hmac.New(sha256.New, []byte(installationID))
+func deriveWireKey(leaseToken, installationID, leaseID string, port int, timestamp int64, direction, messageType, messageID string) ([]byte, error) {
+	if strings.TrimSpace(leaseToken) == "" || strings.TrimSpace(installationID) == "" || strings.TrimSpace(leaseID) == "" || port < 1 || port > 65535 {
+		return nil, errors.New("direct transport key binding is incomplete")
+	}
+	salt := sha256.Sum256([]byte(strings.Join([]string{ProtocolVersion, installationID, leaseID, strconv.Itoa(port), strconv.FormatInt(timestamp, 10)}, "\x00")))
+	info := []byte(strings.Join([]string{direction, messageType, messageID}, "\x00"))
+	extract := hmac.New(sha256.New, salt[:])
 	extract.Write([]byte(leaseToken))
 	prk := extract.Sum(nil)
-	var block, okm []byte
+	var previous, okm []byte
 	for counter := byte(1); len(okm) < 32; counter++ {
 		expand := hmac.New(sha256.New, prk)
-		expand.Write(block)
+		expand.Write(previous)
 		expand.Write(info)
 		expand.Write([]byte{counter})
-		block = expand.Sum(nil)
-		okm = append(okm, block...)
+		previous = expand.Sum(nil)
+		okm = append(okm, previous...)
 	}
 	return okm[:32], nil
 }
 
 func aad(m DirectEncryptedMessage, port int) []byte {
-	return []byte(strings.Join([]string{m.ProtocolVersion, m.LeaseID, strconv.Itoa(port), m.MessageID, m.MessageType, m.Direction, strconv.FormatInt(m.TimestampUnixMS, 10), m.NonceBase64, m.PlaintextDigestSHA256, m.CryptoSuite}, "|"))
+	return []byte(strings.Join([]string{m.ProtocolVersion, m.LeaseID, strconv.Itoa(port), m.MessageID, m.MessageType, m.Direction, strconv.FormatInt(m.TimestampUnixMS, 10), m.NonceBase64, m.PlaintextDigestSHA256, m.CryptoSuite}, "\n"))
 }
 
 func EncryptMessage(leaseToken, installationID, leaseID string, port int, messageID, messageType, direction string, plaintext []byte, now time.Time) (DirectEncryptedMessage, error) {
 	ts := now.UnixMilli()
-	key, err := DeriveMessageKey(leaseToken, installationID, leaseID, port, ts)
+	key, err := deriveWireKey(leaseToken, installationID, leaseID, port, ts, direction, messageType, messageID)
 	if err != nil {
 		return DirectEncryptedMessage{}, err
 	}
@@ -259,7 +264,7 @@ func (m DirectEncryptedMessage) Decrypt(leaseToken, installationID string, port 
 	if err != nil || len(nonce) != 12 {
 		return nil, errors.New("invalid direct message nonce")
 	}
-	key, err := DeriveMessageKey(leaseToken, installationID, m.LeaseID, port, m.TimestampUnixMS)
+	key, err := deriveWireKey(leaseToken, installationID, m.LeaseID, port, m.TimestampUnixMS, m.Direction, m.MessageType, m.MessageID)
 	if err != nil {
 		return nil, err
 	}

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -12,7 +15,61 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"cascade-demoops/backend/internal/model"
 )
+
+func TestInstallationIDUsesServerCompatibleSHA256Prefix(t *testing.T) {
+	publicKey := ed25519.PublicKey(bytes.Repeat([]byte{0x5a}, ed25519.PublicKeySize))
+	sum := sha256.Sum256(publicKey)
+	want := "direct_install_" + hex.EncodeToString(sum[:])[:32]
+	if got := InstallationID(publicKey); got != want {
+		t.Fatalf("installation id = %q, want %q", got, want)
+	}
+}
+
+func TestGatewayLeaseUsesDedicatedDataPortNotControlPortSuffix(t *testing.T) {
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	gateway := NewGateway("127.0.0.1:18443", time.Hour)
+	gateway.now = func() time.Time { return now }
+	lease, err := gateway.Allocate(signedLeaseRequest(t, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://127.0.0.1:24000"; lease.DataURL != want {
+		t.Fatalf("data URL = %q, want %q", lease.DataURL, want)
+	}
+}
+
+func TestWireCryptoMatchesServerDirectTransport(t *testing.T) {
+	now := time.Date(2026, 8, 20, 1, 2, 3, 0, time.UTC)
+	lease := model.DirectPortLease{ProtocolVersion: model.DirectTransportProtocolVersion, LeaseID: "lease-wire", InstallationID: "direct_install_wire", DataURL: "https://127.0.0.1:24000", DataPort: 24000, LeaseToken: "wire-token", ExpiresAt: now.Add(time.Hour), CryptoSuite: model.DirectTransportCryptoSuite}
+	body := []byte(`{"package_id":"wire"}`)
+	message, err := EncryptMessage(lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort, "message-wire", "client_execution_package", "app_to_browser_agent", body, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serverMessage model.DirectEncryptedMessage
+	if err := json.Unmarshal(encoded, &serverMessage); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := model.DecryptDirectTransportBytes(serverMessage, lease, "client_execution_package", model.DirectTransportDirectionUpload, now)
+	if err != nil || !bytes.Equal(plain, body) {
+		t.Fatalf("server decrypt = %q, %v", plain, err)
+	}
+	digest := HashSHA256(body)
+	want, err := model.DirectTransportRequestSignature(lease, http.MethodPost, "/v1/direct/packages", now.UnixMilli(), "nonce-wire", digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := SignDataRequest(http.MethodPost, "/v1/direct/packages", now.UnixMilli(), "nonce-wire", digest, lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort); got != want {
+		t.Fatalf("request signature = %q, want %q", got, want)
+	}
+}
 
 func signedLeaseRequest(t *testing.T, now time.Time) DirectLeaseRequest {
 	t.Helper()
@@ -77,12 +134,12 @@ func TestDataRequestSignatureAndReplay(t *testing.T) {
 	req.Header.Set("X-Cascade-Timestamp", "1786323723000")
 	req.Header.Set("X-Cascade-Nonce", "request-1")
 	req.Header.Set("X-Cascade-Body-SHA256", HashSHA256(body))
-	req.Header.Set("X-Cascade-Signature", SignDataRequest(req.Method, path, now.UnixMilli(), "request-1", HashSHA256(body), "lease-token", "install-1"))
+	req.Header.Set("X-Cascade-Signature", SignDataRequest(req.Method, path, now.UnixMilli(), "request-1", HashSHA256(body), "lease-token", "install-1", "lease-1", 24000))
 	seen := NewNonceSet()
-	if err := VerifyDataRequest(req, body, "lease-token", "install-1", now, seen); err != nil {
+	if err := VerifyDataRequest(req, body, "lease-token", "install-1", "lease-1", 24000, now, seen); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyDataRequest(req, body, "lease-token", "install-1", now, seen); err != ErrReplay {
+	if err := VerifyDataRequest(req, body, "lease-token", "install-1", "lease-1", 24000, now, seen); err != ErrReplay {
 		t.Fatalf("replay err = %v", err)
 	}
 }

@@ -22,6 +22,8 @@ CASCADE_DIRECT_STATE_PATH
 
 未设置时，Gateway 使用运行时数据目录下的 `direct_gateway_state/direct-v1-snapshot.json`。快照采用原子替换、`0600` 文件模式（Windows 下同时继承运行时数据目录 ACL）保存 lease、普通 job、结果和 artifact；不会保存 credential envelope、业务账号密码、Cookie 或登录 Token。lease token 属于恢复加密数据口所需的 Gateway 协议状态，会保存在受保护快照中且不得写入日志。需要凭据的任务在 Gateway 重启后统一回到 `awaiting_credentials`，必须由 App 重新上传短期 envelope。
 
+Gateway 与独立 Worker 会自动加载仓库根目录和 `backend` 目录的 `.env`、`.env.local`，进程中已显式设置的变量优先。`CASCADE_DIRECT_PUBLIC_HOST` 必须带 `:18443`；两个 token 均应不少于 32 个字符。
+
 ```powershell
 go run ./cmd/directgateway
 ```

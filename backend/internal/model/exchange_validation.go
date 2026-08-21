@@ -147,7 +147,7 @@ func ValidateClientExecutionPackageForDirectExecution(pkg *ClientExecutionPackag
 	if strings.TrimSpace(approval.ApprovalSchemaVersion) != UserApprovalSchemaVersion {
 		return directPackageValidationError("approval_digest_mismatch", fmt.Sprintf("direct execution approval_schema_version must be %q", UserApprovalSchemaVersion))
 	}
-	expectedSubjectDigests, err := ComputeApprovalSubjectDigestsSHA256(*pkg)
+	expectedSubjectDigests, err := ComputePackageApprovalComponentDigests(*pkg)
 	if err != nil {
 		return directPackageValidationError("approval_digest_mismatch", "direct execution approval subject objects are incomplete")
 	}

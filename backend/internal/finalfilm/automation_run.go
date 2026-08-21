@@ -391,7 +391,7 @@ func (s *Service) finishAutomatedComposition(ctx context.Context, job model.Fina
 	if err != nil {
 		return model.FinalFilmJob{}, err
 	}
-	outputValidation, err := validateFinalFilmOutput(ctx, s.renderer, result, job.RenderProfile, s.now().UTC())
+	outputValidation, err := validateFinalFilmOutput(ctx, s.renderer, result, job.RenderProfile, plan, s.requireTestNarration, s.now().UTC())
 	if err == nil && (outputValidation.DurationMS < job.AutomationPolicy.TargetDuration.MinMS || outputValidation.DurationMS > job.AutomationPolicy.TargetDuration.MaxMS) {
 		err = fmt.Errorf("automated final duration %dms is outside 90-120 seconds", outputValidation.DurationMS)
 	}

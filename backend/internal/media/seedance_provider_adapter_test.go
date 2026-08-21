@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type stubSeedanceVideoClient struct {
@@ -67,6 +68,33 @@ func TestSeedance25ProviderAdapterResumesWithoutCreatingAnotherTask(t *testing.T
 	}
 	if client.createCalls != 0 || client.pollCalls != 1 || result.ProviderTaskID != "seedance_task_1" {
 		t.Fatalf("resume should query exactly once without creating: client=%+v result=%+v", client, result)
+	}
+}
+
+func TestSeedance25ProviderAdapterAdmissionResumesTimedOutTaskWithoutSecondCreate(t *testing.T) {
+	client := &seedancePendingThenSucceededClient{}
+	gate, err := NewSeedance25AdmissionGate(Seedance25AdmissionPolicy{MaxConcurrent: 1, Window: time.Minute, MaxRequestsPerWindow: 1, IdempotencyTTL: time.Hour}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewSeedance25ProviderAdapter(Seedance25ProviderAdapterOptions{Enabled: true, Client: client, Downloader: stubSeedanceDownloader{}, Normalizer: stubSeedanceNormalizer{}, PollAttempts: 1, PollInterval: time.Nanosecond, Admission: gate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := GeneratedShotProviderExecutionRequest{Intent: validGeneratedShotIntent(), GenerationAuthorized: true, AuthorizationRef: "approval://admission/1", IdempotencyKey: "admission-key", AdmissionScope: "final-film:admission", OutputDir: t.TempDir()}
+	if _, err := adapter.Execute(context.Background(), request); err == nil {
+		t.Fatal("first call should stop while provider task is pending")
+	}
+	if client.createCalls != 1 || gate.Snapshot().Concurrent != 1 {
+		t.Fatalf("pending remote task was not reserved: client=%+v admission=%+v", client, gate.Snapshot())
+	}
+	client.succeed = true
+	result, err := adapter.Execute(context.Background(), request)
+	if err != nil || result.ProviderTaskID != "seedance_task_pending" || client.createCalls != 1 {
+		t.Fatalf("same idempotency key created a duplicate task: result=%+v err=%v client=%+v", result, err, client)
+	}
+	if gate.Snapshot().Concurrent != 0 {
+		t.Fatalf("terminal provider task did not release concurrency: %+v", gate.Snapshot())
 	}
 }
 
@@ -163,4 +191,21 @@ func (failingSeedanceClient) CreateContentGenerationTask(context.Context, Conten
 }
 func (failingSeedanceClient) GetContentGenerationTask(context.Context, string) (ContentGenerationTaskResult, error) {
 	return ContentGenerationTaskResult{}, errors.New("poll failed")
+}
+
+type seedancePendingThenSucceededClient struct {
+	createCalls int
+	succeed     bool
+}
+
+func (c *seedancePendingThenSucceededClient) CreateContentGenerationTask(context.Context, ContentGenerationTaskRequest) (ContentGenerationTaskResult, error) {
+	c.createCalls++
+	return ContentGenerationTaskResult{Response: &ContentGenerationTaskResponse{ID: "seedance_task_pending", Status: "queued"}}, nil
+}
+
+func (c *seedancePendingThenSucceededClient) GetContentGenerationTask(context.Context, string) (ContentGenerationTaskResult, error) {
+	if !c.succeed {
+		return ContentGenerationTaskResult{Response: &ContentGenerationTaskResponse{ID: "seedance_task_pending", Status: "queued"}}, nil
+	}
+	return ContentGenerationTaskResult{Response: &ContentGenerationTaskResponse{ID: "seedance_task_pending", Status: "succeeded", Output: map[string]any{"content": map[string]any{"video_url": "https://cdn.example.test/seedance.mp4"}}}}, nil
 }

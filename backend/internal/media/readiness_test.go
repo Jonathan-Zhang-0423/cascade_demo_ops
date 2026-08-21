@@ -10,7 +10,7 @@ func TestMediaReadinessDoesNotCallNetworkAndRedactsValues(t *testing.T) {
 		"CASCADE_FFMPEG_PATH": "C:\\secret\\ffmpeg.exe", "CASCADE_FFPROBE_PATH": "C:\\secret\\ffprobe.exe",
 		"SEEDANCE_API_KEY": "secret-seedance", "SEEDANCE_BASE_URL": "https://ark.example/api/v3", "SEEDANCE_MODEL": "doubao-seedance-test",
 		"VOLC_TOS_ACCESS_KEY": "secret-ak", "VOLC_TOS_SECRET_KEY": "secret-sk", "VOLC_TOS_ENDPOINT": "tos-cn-beijing.volces.com", "VOLC_TOS_REGION": "cn-beijing", "VOLC_TOS_BUCKET": "bucket",
-		"VOLC_TTS_APP_ID": "app", "VOLC_TTS_ACCESS_KEY": "secret-tts", "VOLC_TTS_RESOURCE_ID": "seed-tts-2.0", "VOLC_TTS_SPEAKER": "voice",
+		"VOLC_TTS_ACCESS_KEY": "secret-tts", "VOLC_TTS_RESOURCE_ID": "seed-tts-2.0", "VOLC_TTS_SPEAKER": "voice",
 	}
 	checks := 0
 	r := MediaReadinessFromEnv(func(name string) string { return values[name] }, func(name string) bool { checks++; return true })
@@ -34,7 +34,7 @@ func TestMediaReadinessReportsMissingTTSAndRealMode(t *testing.T) {
 	if r.Ready || r.VideoReady || r.TTSReady {
 		t.Fatal("non-real media mode must block video readiness and missing TTS must remain visible")
 	}
-	for _, name := range []string{"ark_media_mode_real", "tts_app_id_configured", "tts_access_key_configured", "tts_speaker_configured"} {
+	for _, name := range []string{"ark_media_mode_real", "tts_agent_plan_api_key_configured", "tts_speaker_configured"} {
 		found := false
 		for _, check := range r.Checks {
 			if check.Name == name {

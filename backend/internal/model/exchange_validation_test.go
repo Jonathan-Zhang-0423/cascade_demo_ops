@@ -51,7 +51,7 @@ func TestValidateClientExecutionPackageForDirectExecutionRejectsIncompleteOrStal
 			mutate: func(pkg *ClientExecutionPackage) {
 				mutateFirstSelectorCandidateForTest(t, pkg, func(candidate *SelectorCandidate) { candidate.EvidenceID = "" })
 				recomputeDirectPackageHashesForTest(t, pkg)
-				subjectDigests, err := ComputeApprovalSubjectDigestsSHA256(*pkg)
+				subjectDigests, err := ComputePackageApprovalComponentDigests(*pkg)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -146,7 +146,7 @@ func approvedDirectOutlinePackage(t *testing.T) ClientExecutionPackage {
 	for _, stage := range pkg.ExecutableScriptBundle.StageApprovalPlan.Stages {
 		pkg.SafetyReport.HumanApproval.ReviewedNodeIDs = append(pkg.SafetyReport.HumanApproval.ReviewedNodeIDs, stage.NodeID)
 	}
-	subjectDigests, err := ComputeApprovalSubjectDigestsSHA256(pkg)
+	subjectDigests, err := ComputePackageApprovalComponentDigests(pkg)
 	if err != nil {
 		t.Fatal(err)
 	}

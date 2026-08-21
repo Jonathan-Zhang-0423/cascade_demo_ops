@@ -40,7 +40,9 @@ func main() {
 		must(fmt.Errorf("TOS configuration is missing; configure VOLC_TOS_* locally before running this command"))
 	}
 
-	client, err := tos.NewClientV2(tosConfig.Endpoint, tos.WithRegion(tosConfig.Region), tos.WithCredentials(tos.NewStaticCredentials(tosConfig.AccessKey, tosConfig.SecretKey)))
+	// Uploads must use the SDK/API endpoint. VOLC_TOS_ENDPOINT can deliberately
+	// differ because it is reserved for Ark-compatible private signed GET URLs.
+	client, err := tos.NewClientV2(tosPreflightAPIEndpoint(tosConfig), tos.WithRegion(tosConfig.Region), tos.WithCredentials(tos.NewStaticCredentials(tosConfig.AccessKey, tosConfig.SecretKey)))
 	must(err)
 
 	nonce := make([]byte, 16)
@@ -125,6 +127,13 @@ func main() {
 	fmt.Printf("lifecycle_prefix=%s\n", lifecycleVerification.ExpectedPrefix)
 	fmt.Printf("lifecycle_days=%d\n", lifecycleVerification.ExpectedDays)
 	fmt.Printf("lifecycle_rule_id=%s\n", lifecycleVerification.MatchedRuleID)
+}
+
+func tosPreflightAPIEndpoint(config media.TOSAssetPublisherConfig) string {
+	if strings.TrimSpace(config.APIEndpoint) != "" {
+		return strings.TrimSpace(config.APIEndpoint)
+	}
+	return strings.TrimSpace(config.Endpoint)
 }
 
 func must(err error) {

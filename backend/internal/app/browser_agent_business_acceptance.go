@@ -192,7 +192,9 @@ func controlledBusinessAcceptancePackage(fixturePath, baseURL string) (model.Cli
 	base.PackageID, base.ProjectID = "pkg_controlled_business_outline", "project_controlled_business"
 	base.ProjectContextSummary.ContextID = "ctx_controlled_business"
 	base.ProjectContextSummary.Name = "Controlled project-builder business flow"
-	base.ProjectContextSummary.ProductURL = baseURL
+	// Session entry must stay inside the approved route scope: the product URL
+	// is the first workspace route, not the bare base origin.
+	base.ProjectContextSummary.ProductURL = baseURL + "/app"
 	base.RecordingRunSpec.RunID, base.RecordingRunSpec.BaseURL, base.RecordingRunSpec.AllowedDomains = "run_controlled_business", baseURL, []string{domain}
 	base.RecordingRunSpec.Timeline.TargetDurationSec = 8
 	// This fixture exercises the production delivery contract: an MP4 final

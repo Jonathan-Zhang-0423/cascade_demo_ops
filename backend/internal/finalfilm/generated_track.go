@@ -20,20 +20,21 @@ import (
 const generatedTrackRecordSchemaVersion = "demoops.final_film_generated_track.v1"
 
 type GeneratedTrackRecord struct {
-	SchemaVersion     string                                       `json:"schema_version"`
-	DirectorPlanID    string                                       `json:"director_plan_id"`
-	Intents           []media.GeneratedShotIntent                  `json:"intents"`
-	Executions        []media.GeneratedShotProviderExecutionResult `json:"executions,omitempty"`
-	Candidates        []media.GeneratedShotCandidate               `json:"candidates,omitempty"`
-	StructuralReviews []media.GeneratedShotStructuralReview        `json:"structural_reviews,omitempty"`
-	ContentReviews    []media.GeneratedShotContentReview           `json:"content_reviews,omitempty"`
-	CandidateSets     []media.GeneratedShotCandidateSet            `json:"candidate_sets,omitempty"`
-	Selections        []media.GeneratedShotSelection               `json:"selections,omitempty"`
-	EditorApprovals   []media.GeneratedShotEditorApproval          `json:"editor_approvals,omitempty"`
-	EditorAssetRefs   []media.GeneratedShotEditorAssetRef          `json:"editor_asset_refs,omitempty"`
-	PatchProposals    []media.GeneratedShotEditPlanPatchProposal   `json:"patch_proposals,omitempty"`
-	StartedAt         time.Time                                    `json:"started_at,omitempty"`
-	UpdatedAt         time.Time                                    `json:"updated_at"`
+	SchemaVersion           string                                       `json:"schema_version"`
+	DirectorPlanID          string                                       `json:"director_plan_id"`
+	Intents                 []media.GeneratedShotIntent                  `json:"intents"`
+	SeedanceReferenceAudits []SeedanceReferenceAudit                     `json:"seedance_reference_audits,omitempty"`
+	Executions              []media.GeneratedShotProviderExecutionResult `json:"executions,omitempty"`
+	Candidates              []media.GeneratedShotCandidate               `json:"candidates,omitempty"`
+	StructuralReviews       []media.GeneratedShotStructuralReview        `json:"structural_reviews,omitempty"`
+	ContentReviews          []media.GeneratedShotContentReview           `json:"content_reviews,omitempty"`
+	CandidateSets           []media.GeneratedShotCandidateSet            `json:"candidate_sets,omitempty"`
+	Selections              []media.GeneratedShotSelection               `json:"selections,omitempty"`
+	EditorApprovals         []media.GeneratedShotEditorApproval          `json:"editor_approvals,omitempty"`
+	EditorAssetRefs         []media.GeneratedShotEditorAssetRef          `json:"editor_asset_refs,omitempty"`
+	PatchProposals          []media.GeneratedShotEditPlanPatchProposal   `json:"patch_proposals,omitempty"`
+	StartedAt               time.Time                                    `json:"started_at,omitempty"`
+	UpdatedAt               time.Time                                    `json:"updated_at"`
 }
 
 func (s *Service) SubmitDirectorPlan(ctx context.Context, jobID string, expectedRevision int, plan model.FinalFilmDirectorPlan) (model.FinalFilmJob, error) {
@@ -147,9 +148,33 @@ func (s *Service) RunGeneratedCandidates(ctx context.Context, jobID string, expe
 			})
 			continue
 		}
+		if adapter.Descriptor().Provider != media.GeneratedShotProviderSeedance25 && hasOpaqueAssetReference(intent) {
+			record.Executions = append(record.Executions, media.GeneratedShotProviderExecutionResult{
+				SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: adapter.Descriptor().Provider,
+				Model: adapter.Descriptor().Model, IntentID: intent.IntentID, Status: media.GeneratedShotFailureContinue,
+				FailurePolicy: media.GeneratedShotFailureContinue, ErrorClass: "provider_reference_unpublished",
+				ErrorMessage: "local asset:// references can only be published by the Seedance 2.5 reference bridge",
+			})
+			continue
+		}
+		providerIntent := intent
+		if adapter.Descriptor().Provider == media.GeneratedShotProviderSeedance25 {
+			operationID := generatedShotIdempotencyKey(job, intent)
+			prepared, audit, prepareErr := s.prepareSeedance25Reference(ctx, job, intent, operationID)
+			record.SeedanceReferenceAudits = append(record.SeedanceReferenceAudits, audit)
+			if prepareErr != nil {
+				record.Executions = append(record.Executions, media.GeneratedShotProviderExecutionResult{
+					SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: adapter.Descriptor().Provider,
+					Model: adapter.Descriptor().Model, IntentID: intent.IntentID, Status: media.GeneratedShotFailureContinue,
+					FailurePolicy: media.GeneratedShotFailureContinue, ErrorClass: "seedance_reference_preparation_failed", ErrorMessage: prepareErr.Error(),
+				})
+				continue
+			}
+			providerIntent = prepared
+		}
 		idempotencyKey := generatedShotIdempotencyKey(job, intent)
 		result, executeErr := adapter.Execute(ctx, media.GeneratedShotProviderExecutionRequest{
-			Intent: intent, GenerationAuthorized: true, AuthorizationRef: job.GenerationAuthorizationRef,
+			Intent: providerIntent, GenerationAuthorized: true, AuthorizationRef: job.GenerationAuthorizationRef,
 			IdempotencyKey: idempotencyKey, AdmissionScope: job.JobID,
 			OutputDir: filepath.Join(s.outputRoot, job.JobID, "generated", intent.IntentID, adapter.Descriptor().Provider),
 			Timeout:   s.providerTimeout,
@@ -157,6 +182,12 @@ func (s *Service) RunGeneratedCandidates(ctx context.Context, jobID string, expe
 		if executeErr != nil && result.ErrorMessage == "" {
 			result.ErrorMessage = executeErr.Error()
 		}
+		// Provider adapters can include request URLs in transport errors. A
+		// Seedance private-TOS URL is a short-lived credential, so the durable
+		// generated-track audit may retain the classification but never such a
+		// location. The job/intent/operation identities already provide the
+		// operator with a safe correlation path into secured provider telemetry.
+		result = redactGeneratedProviderExecutionFailure(result)
 		record.Executions = append(record.Executions, result)
 		if result.Candidate == nil {
 			continue
@@ -206,6 +237,41 @@ func (s *Service) RunGeneratedCandidates(ctx context.Context, jobID string, expe
 	return next, nil
 }
 
+func redactGeneratedProviderExecutionFailure(result media.GeneratedShotProviderExecutionResult) media.GeneratedShotProviderExecutionResult {
+	message := strings.TrimSpace(result.ErrorMessage)
+	if message == "" || !containsPrivateExecutionLocation(message) {
+		return result
+	}
+	if strings.TrimSpace(result.ErrorClass) == "" {
+		result.ErrorClass = "provider_call_failed"
+	}
+	result.ErrorMessage = "provider call did not produce a candidate; inspect secured provider telemetry using the job, intent, and operation identities"
+	return result
+}
+
+func containsPrivateExecutionLocation(value string) bool {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "http://") || strings.Contains(lower, "https://") || strings.Contains(lower, "file://") || strings.Contains(lower, "x-tos-") {
+		return true
+	}
+	for index := 0; index+2 < len(value); index++ {
+		isDrive := (value[index] >= 'a' && value[index] <= 'z') || (value[index] >= 'A' && value[index] <= 'Z')
+		if isDrive && value[index+1] == ':' && (value[index+2] == '\\' || value[index+2] == '/') {
+			return true
+		}
+	}
+	return false
+}
+
+func hasOpaqueAssetReference(intent media.GeneratedShotIntent) bool {
+	for _, ref := range intent.References {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(ref.URI)), "asset://") {
+			return true
+		}
+	}
+	return false
+}
+
 func compileGeneratedShotIntents(job model.FinalFilmJob, plan model.FinalFilmDirectorPlan) ([]media.GeneratedShotIntent, error) {
 	artifacts := make(map[string]model.TimelineArtifact, len(job.Catalog.Artifacts))
 	for _, artifact := range job.Catalog.Artifacts {
@@ -227,10 +293,25 @@ func compileGeneratedShotIntents(job model.FinalFilmJob, plan model.FinalFilmDir
 			uri := strings.TrimSpace(artifact.URI)
 			parsed, parseErr := url.Parse(uri)
 			if parseErr != nil || !strings.EqualFold(parsed.Scheme, "https") || strings.TrimSpace(parsed.Host) == "" {
-				return nil, fmt.Errorf("reference artifact %s must be published as an HTTPS provider-readable asset before generation", artifactID)
+				// A local raw recording is allowed to cross the persisted Director
+				// boundary only as an opaque Server-owned asset reference. The
+				// Seedance 2.5 bridge resolves it to a short-lived private-TOS URL
+				// immediately before the provider call. No other local artifact may
+				// use this escape hatch.
+				if strings.EqualFold(strings.TrimSpace(artifact.Kind), "raw_recording") {
+					uri = "asset://" + artifact.ID
+				} else {
+					return nil, fmt.Errorf("reference artifact %s must be published as an HTTPS provider-readable asset before generation", artifactID)
+				}
+			}
+			mimeType := artifact.MimeType
+			if strings.EqualFold(strings.TrimSpace(artifact.Kind), "raw_recording") && strings.HasPrefix(uri, "asset://") {
+				// The persisted binding describes the eventual normalized MP4
+				// derivative, not the browser recorder's WebM container.
+				mimeType = "video/mp4"
 			}
 			intent.References = append(intent.References, media.GeneratedShotReference{
-				ArtifactID: artifact.ID, URI: uri, MimeType: artifact.MimeType, Usage: media.GeneratedShotReferenceGeneral,
+				ArtifactID: artifact.ID, URI: uri, MimeType: mimeType, Usage: media.GeneratedShotReferenceGeneral,
 			})
 		}
 		if err := media.ValidateGeneratedShotIntent(intent); err != nil {

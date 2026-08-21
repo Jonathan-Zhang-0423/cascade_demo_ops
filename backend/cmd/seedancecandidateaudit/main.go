@@ -83,7 +83,7 @@ func readAudit(path string) (preflightAudit, error) {
 	if err := json.Unmarshal(data, &audit); err != nil {
 		return preflightAudit{}, err
 	}
-	if audit.Provider != "seedance" && audit.Provider != "seedance-2.0" {
+	if audit.Provider != "seedance" && audit.Provider != "seedance-2.0" && audit.Provider != "seedance-2.5" {
 		return preflightAudit{}, fmt.Errorf("audit provider is not Seedance: %q", audit.Provider)
 	}
 	if audit.Status != "candidate_downloaded_and_normalized" {

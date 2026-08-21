@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net"
 	"net/http"
@@ -164,6 +165,30 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	}
 	if !persisted.DesktopCloudRun.ResultDownloaded || persisted.DesktopCloudRun.AckedAt == nil || persisted.DesktopCloudRun.ResultReview == nil || persisted.DesktopCloudRun.ResultReview.Decision != string(model.ResultReviewApproved) {
 		t.Fatalf("verified direct download and local review were not persisted: %+v", persisted.DesktopCloudRun)
+	}
+}
+
+func TestDirectHTTPClientAllowsExplicitDevelopmentCAOnly(t *testing.T) {
+	certificate := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer certificate.Close()
+	certPath := filepath.Join(t.TempDir(), "direct-dev-ca.pem")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CASCADE_DIRECT_DEV_TLS_CA_FILE", certPath)
+
+	dev := &Service{runtime: config.AppRuntimeConfig{Profile: config.ProfileDev}}
+	client, err := dev.directHTTPClient(time.Second)
+	if err != nil || client.Transport.(*http.Transport).TLSClientConfig.RootCAs == nil {
+		t.Fatalf("development CA was not accepted: client=%v err=%v", client != nil, err)
+	}
+	if client.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("development CA must not disable TLS certificate verification")
+	}
+
+	production := &Service{runtime: config.AppRuntimeConfig{Profile: config.ProfileDesktop}}
+	if _, err := production.directHTTPClient(time.Second); err == nil {
+		t.Fatal("production profile accepted CASCADE_DIRECT_DEV_TLS_CA_FILE")
 	}
 }
 
@@ -823,11 +848,12 @@ func directAppTestResult(t *testing.T, job directtransport.WorkerJob, artifacts 
 
 func uploadDirectAppFormalArtifacts(t *testing.T, gateway *directtransport.Gateway, job directtransport.WorkerJob, mediaBytes []byte) []model.DirectArtifact {
 	t.Helper()
+	manifestBytes := directAppDeliverablesManifestBytes(t, mediaBytes)
 	artifacts := []model.DirectArtifact{
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_video", "final.mp4", "video/mp4", "final_demo", "demo_video", mediaBytes),
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_master_2k", "final_master_2k.mp4", "video/mp4", "final_master_2k", "final_video_final_master_2k", mediaBytes),
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_delivery_1080p", "final_delivery_1080p.mp4", "video/mp4", "final_delivery_1080p", "final_video_final_delivery_1080p", mediaBytes),
-		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_deliverables_manifest", "deliverables_manifest.json", "application/json", "deliverables_manifest", "deliverables_manifest", []byte("{}\n")),
+		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_deliverables_manifest", "deliverables_manifest.json", "application/json", "deliverables_manifest", "deliverables_manifest", manifestBytes),
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_raw_recording", "recording.webm", "video/webm", "raw_recording", "raw_recording", mediaBytes),
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_trace", "trace.zip", "application/zip", "browser_trace", "browser_trace", mediaBytes),
 		uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_screenshot", "stage.png", "image/png", "stage_evidence", "screenshot", mediaBytes),
@@ -837,9 +863,31 @@ func uploadDirectAppFormalArtifacts(t *testing.T, gateway *directtransport.Gatew
 	eventBytes := directAppStageEventLogBytes(t, job)
 	artifacts = append(artifacts, uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_events", "events.jsonl", "application/x-ndjson", "stage_event_log", "browser_agent_stage_event_log", eventBytes))
 	provisional := directAppTestResult(t, job, artifacts)
-	manifestBytes := directAppReplayManifestBytes(t, job, provisional)
-	artifacts = append(artifacts, uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_replay_manifest", "replay-manifest.json", "application/json", "replay_manifest", "replay_manifest", manifestBytes))
+	replayManifestBytes := directAppReplayManifestBytes(t, job, provisional)
+	artifacts = append(artifacts, uploadDirectWorkerArtifact(t, gateway, job.JobID, "artifact_replay_manifest", "replay-manifest.json", "application/json", "replay_manifest", "replay_manifest", replayManifestBytes))
 	return artifacts
+}
+
+func directAppDeliverablesManifestBytes(t *testing.T, mediaBytes []byte) []byte {
+	t.Helper()
+	digest := model.SHA256Hex(mediaBytes)
+	manifest := map[string]any{
+		"schema_version": "demoops.deliverables_manifest.v1",
+		"status":         "complete",
+		"required_profiles": []map[string]any{
+			{"id": model.MediaOutputProfileMaster2K, "width": 2560, "height": 1440, "fps": 30, "format": "mp4"},
+			{"id": model.MediaOutputProfileDelivery1080, "width": 1920, "height": 1080, "fps": 30, "format": "mp4"},
+		},
+		"deliverables": []map[string]any{
+			{"id": model.MediaOutputProfileMaster2K, "status": "complete", "profile": map[string]any{"id": model.MediaOutputProfileMaster2K, "width": 2560, "height": 1440, "fps": 30, "format": "mp4"}, "sha256": digest, "size_bytes": int64(len(mediaBytes))},
+			{"id": model.MediaOutputProfileDelivery1080, "status": "complete", "profile": map[string]any{"id": model.MediaOutputProfileDelivery1080, "width": 1920, "height": 1080, "fps": 30, "format": "mp4"}, "sha256": digest, "size_bytes": int64(len(mediaBytes))},
+		},
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(data, '\n')
 }
 
 func directAppStageEventLogBytes(t *testing.T, job directtransport.WorkerJob) []byte {

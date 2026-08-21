@@ -109,6 +109,11 @@ func (s *DirectHTTPServer) handleDirectHealth(w http.ResponseWriter, r *http.Req
 		s.directError(w, http.StatusUnauthorized, "unauthorized", "bootstrap token is required")
 		return
 	}
+	// server_time must use the RFC3339 time representation expected by the App
+	// client; a Unix millisecond number makes json.Decoder reject the complete
+	// health response and leaves an otherwise healthy Direct Gateway unreachable.
+	// worker_readiness remains a Gateway observability extension outside the
+	// shared App protocol type.
 	s.directJSON(w, http.StatusOK, map[string]any{
 		"protocol_version":                          direct.ProtocolVersion,
 		"crypto_suite":                              direct.CryptoSuite,
@@ -117,14 +122,14 @@ func (s *DirectHTTPServer) handleDirectHealth(w http.ResponseWriter, r *http.Req
 		"supported_runtimes":                        []string{model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
 		"supported_worker_protocol_versions":        []string{direct.WorkerProtocolVersion},
 		"supported_outcome_verifier_rules_versions": []string{direct.OutcomeVerifierRulesVersion},
-		"capabilities": map[string]any{
+		"capabilities": map[string]bool{
 			"manual_login_checkpoint":         false,
 			"gateway_state_persistence":       s.gateway.PersistenceEnabled(),
 			"credential_envelope_persistence": false,
 		},
-		"active_lease_count": s.gateway.ActiveLeaseCount(),
-		"server_time":        time.Now().UnixMilli(),
-		"worker_readiness":   s.workerReadiness(),
+		"active_leases":    s.gateway.ActiveLeaseCount(),
+		"server_time":      time.Now().UTC(),
+		"worker_readiness": s.workerReadiness(),
 	})
 }
 
@@ -143,7 +148,9 @@ func (s *DirectHTTPServer) handleDirectLease(w http.ResponseWriter, r *http.Requ
 		s.directError(w, directStatus(err), directCode(err), err.Error())
 		return
 	}
-	s.directJSON(w, http.StatusCreated, lease)
+	// The Gateway keeps compact Unix-millisecond timestamps internally, while
+	// Direct API v1 uses RFC3339 timestamps on the App-facing wire contract.
+	s.directJSON(w, http.StatusCreated, directLeaseWireView(lease))
 }
 
 func (s *DirectHTTPServer) handleDirectLeaseRelease(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +193,7 @@ func (s *DirectHTTPServer) directMessage(r *http.Request) (direct.DirectEncrypte
 			return message, nil, nil, errors.New("direct request used a data port not assigned to this lease")
 		}
 	}
-	if err := direct.VerifyDataRequest(r, body, lease.LeaseToken, lease.InstallationID, time.Now(), s.gateway.Nonces()); err != nil {
+	if err := direct.VerifyDataRequest(r, body, lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort, time.Now(), s.gateway.Nonces()); err != nil {
 		return message, nil, nil, err
 	}
 	if err := direct.ValidateMessageFreshness(message, time.Now(), s.gateway.Nonces()); err != nil {
@@ -208,7 +215,7 @@ func (s *DirectHTTPServer) directReadRequest(r *http.Request) (*direct.Lease, er
 	if err != nil {
 		return nil, err
 	}
-	if err := direct.VerifyDataRequest(r, nil, lease.LeaseToken, lease.InstallationID, time.Now(), s.gateway.Nonces()); err != nil {
+	if err := direct.VerifyDataRequest(r, nil, lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort, time.Now(), s.gateway.Nonces()); err != nil {
 		return nil, err
 	}
 	return lease, nil
@@ -260,7 +267,7 @@ func (s *DirectHTTPServer) handleDirectPackage(w http.ResponseWriter, r *http.Re
 		s.directError(w, directStatus(err), directCode(err), err.Error())
 		return
 	}
-	s.encryptedResponse(w, lease, "package_receipt", message.MessageID, receipt)
+	s.encryptedResponse(w, lease, "package_receipt", message.MessageID, directPackageReceiptWireView(receipt, pkg.Reproducibility.PackageHashSHA256))
 }
 
 func (s *DirectHTTPServer) handleDirectCredentials(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +280,7 @@ func (s *DirectHTTPServer) handleDirectCredentials(w http.ResponseWriter, r *htt
 		s.directError(w, http.StatusBadRequest, "invalid_message_type", "credential envelope message metadata is invalid")
 		return
 	}
-	var envelope direct.DirectCredentialEnvelope
+	var envelope model.DirectCredentialEnvelope
 	if err := json.Unmarshal(plain, &envelope); err != nil {
 		s.directError(w, http.StatusBadRequest, "invalid_credential_envelope", "invalid credential envelope")
 		return
@@ -283,15 +290,50 @@ func (s *DirectHTTPServer) handleDirectCredentials(w http.ResponseWriter, r *htt
 		s.directError(w, directStatus(err), directCode(err), err.Error())
 		return
 	}
-	if err := validateDirectCredentialEnvelopeAgainstPackage(job, envelope); err != nil {
+	internalEnvelope, err := directCredentialEnvelopeFromWire(envelope, job)
+	if err != nil {
 		s.directError(w, http.StatusBadRequest, "credential_scope_mismatch", err.Error())
 		return
 	}
-	if err := s.gateway.StoreCredential(r.PathValue("job_id"), lease.LeaseID, envelope); err != nil {
+	if err := validateDirectCredentialEnvelopeAgainstPackage(job, internalEnvelope); err != nil {
+		s.directError(w, http.StatusBadRequest, "credential_scope_mismatch", err.Error())
+		return
+	}
+	if err := s.gateway.StoreCredential(r.PathValue("job_id"), lease.LeaseID, internalEnvelope); err != nil {
 		s.directError(w, directStatus(err), directCode(err), err.Error())
 		return
 	}
-	s.encryptedResponse(w, lease, "credential_receipt", message.MessageID, map[string]any{"accepted": true, "job_id": envelope.JobID})
+	s.encryptedResponse(w, lease, "credential_receipt", message.MessageID, model.DirectCredentialReceipt{
+		ProtocolVersion: model.DirectTransportProtocolVersion, JobID: envelope.JobID, PackageID: envelope.PackageID,
+		GrantID: envelope.GrantID, SecretRef: envelope.SecretRef, Status: "queued", Stage: "package_received", AcceptedAt: time.Now().UTC(),
+	})
+}
+
+func directLeaseWireView(lease direct.DirectPortLease) model.DirectPortLease {
+	return model.DirectPortLease{ProtocolVersion: model.DirectTransportProtocolVersion, LeaseID: lease.LeaseID, InstallationID: lease.InstallationID,
+		DataURL: lease.DataURL, DataPort: lease.DataPort, LeaseToken: lease.LeaseToken, IssuedAt: time.UnixMilli(lease.IssuedAt).UTC(),
+		ExpiresAt: time.UnixMilli(lease.ExpiresAt).UTC(), CryptoSuite: lease.CryptoSuite, ServerTime: time.UnixMilli(lease.ServerTime).UTC()}
+}
+
+func directPackageReceiptWireView(receipt direct.DirectPackageReceipt, approvedDigest string) model.DirectPackageReceipt {
+	return model.DirectPackageReceipt{ProtocolVersion: model.DirectTransportProtocolVersion, JobID: receipt.JobID, PackageID: receipt.PackageID,
+		PackageDigest: approvedDigest, Status: receipt.Status, Stage: receipt.Stage, AcceptedAt: time.UnixMilli(receipt.CreatedAtUnixMS).UTC()}
+}
+
+func directCredentialEnvelopeFromWire(envelope model.DirectCredentialEnvelope, job *direct.Job) (direct.DirectCredentialEnvelope, error) {
+	if job == nil || envelope.PackageDigest != job.SourcePackageDigest {
+		return direct.DirectCredentialEnvelope{}, errors.New("credential package_digest does not match the approved package")
+	}
+	if envelope.Credential.SecretRef != "" && envelope.Credential.SecretRef != envelope.SecretRef {
+		return direct.DirectCredentialEnvelope{}, errors.New("credential value secret_ref does not match envelope")
+	}
+	if envelope.Credential.ExpiresAt.IsZero() || !envelope.Credential.ExpiresAt.Equal(envelope.ExpiresAt) {
+		return direct.DirectCredentialEnvelope{}, errors.New("credential expiry does not match envelope")
+	}
+	return direct.DirectCredentialEnvelope{JobID: envelope.JobID, PackageID: envelope.PackageID, PackageSHA256: job.PackageSHA256,
+		GrantID: envelope.GrantID, SecretRef: envelope.SecretRef, InstallationID: envelope.InstallationID, LeaseID: envelope.LeaseID,
+		AllowedDomains: append([]string(nil), envelope.AllowedDomains...), AllowedOperations: append([]string(nil), envelope.AllowedOperations...),
+		ExpiresAtUnixMS: envelope.ExpiresAt.UnixMilli(), Secret: envelope.Credential.Password}, nil
 }
 
 func validateDirectCredentialEnvelopeAgainstPackage(job *direct.Job, envelope direct.DirectCredentialEnvelope) error {
@@ -364,12 +406,20 @@ func (s *DirectHTTPServer) handleDirectAck(w http.ResponseWriter, r *http.Reques
 		s.directError(w, http.StatusBadRequest, "invalid_message_type", "result ack message metadata is invalid")
 		return
 	}
-	var request direct.DirectResultAckRequest
+	var request model.DirectResultAckRequest
 	if err := json.Unmarshal(plain, &request); err != nil {
 		s.directError(w, http.StatusBadRequest, "invalid_ack", "invalid result ack")
 		return
 	}
-	receipt, err := s.gateway.AckResult(request.JobID, lease.LeaseID, request)
+	if request.ProtocolVersion != model.DirectTransportProtocolVersion || request.InstallationID != lease.InstallationID {
+		s.directError(w, http.StatusConflict, "ack_binding_invalid", "result ack does not match the active lease")
+		return
+	}
+	receipt, err := s.gateway.AckResult(request.JobID, lease.LeaseID, direct.DirectResultAckRequest{
+		ProtocolVersion: request.ProtocolVersion, InstallationID: request.InstallationID, JobID: request.JobID,
+		ResultPackageID: request.ResultPackageID, ReceivedArtifactIDs: request.ReceivedArtifactIDs,
+		VerifiedChecksums: request.VerifiedChecksums, AckedAt: request.AckedAt,
+	})
 	if err != nil {
 		code := "ack_binding_invalid"
 		if strings.Contains(err.Error(), "incomplete") {
@@ -380,7 +430,10 @@ func (s *DirectHTTPServer) handleDirectAck(w http.ResponseWriter, r *http.Reques
 		s.directError(w, http.StatusConflict, code, err.Error())
 		return
 	}
-	s.encryptedResponse(w, lease, "result_ack_receipt", message.MessageID, receipt)
+	s.encryptedResponse(w, lease, "result_ack_receipt", message.MessageID, model.DirectResultAckReceipt{
+		ProtocolVersion: receipt.ProtocolVersion, JobID: receipt.JobID, ResultPackageID: receipt.ResultPackageID,
+		ReceivedArtifactIDs: receipt.ReceivedArtifactIDs, VerifiedChecksums: receipt.VerifiedChecksums, AckedAt: receipt.AckedAt,
+	})
 }
 
 func (s *DirectHTTPServer) handleDirectArtifactWhole(w http.ResponseWriter, r *http.Request) {
@@ -410,7 +463,18 @@ func (s *DirectHTTPServer) handleDirectJobMessage(w http.ResponseWriter, r *http
 		s.encryptedResponse(w, lease, "recording_result", "result_"+jobID, json.RawMessage(job.ResultJSON))
 		return
 	}
-	s.encryptedResponse(w, lease, "job_status", "status_"+jobID, job.Status)
+	s.encryptedResponse(w, lease, "job_status", "status_"+jobID, directJobStatusWireView(job.Status, job))
+}
+
+func directJobStatusWireView(status direct.DirectJobStatus, job *direct.Job) model.DirectJobStatus {
+	artifacts := make([]model.DirectArtifact, 0, len(job.Artifacts))
+	for _, artifact := range job.Artifacts {
+		descriptor := artifact.Descriptor
+		artifacts = append(artifacts, model.DirectArtifact{ArtifactID: descriptor.ArtifactID, Kind: descriptor.Kind, MimeType: descriptor.MimeType, SHA256: descriptor.SHA256, SizeBytes: descriptor.Size})
+	}
+	return model.DirectJobStatus{ProtocolVersion: model.DirectTransportProtocolVersion, JobID: status.JobID, PackageID: status.PackageID,
+		Status: status.Status, Stage: status.Stage, ProgressPercent: status.Progress, ResultPackageID: status.ResultPackageID,
+		Artifacts: artifacts, UpdatedAt: time.UnixMilli(status.UpdatedAtUnixMS).UTC()}
 }
 
 func (s *DirectHTTPServer) handleDirectArtifactChunk(w http.ResponseWriter, r *http.Request) {

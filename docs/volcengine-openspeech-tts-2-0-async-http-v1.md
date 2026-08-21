@@ -1,5 +1,20 @@
 # 豆包语音合成 2.0：异步 HTTP TTS 接口基线
 
+## 2026-08-20 implementation evidence
+
+- The Server candidate preflight reached OpenSpeech successfully after the
+  local network policy was lifted.
+- The provider rejected object-valued `additions` with code `55000000`.
+  The active adapter now sends `additions` as a JSON-encoded string, while
+  `speech_rate` and `loudness_rate` are sent in `audio_params`.
+- The active adapter now sends a Server-generated opaque `user.uid` and
+  `unique_id`, and queries with `task_id`.
+- The current real response is `55000000: load grant: requested grant not
+  found in SaaS storage`. This is an OpenSpeech console grant issue for the
+  configured TTS App ID / Access Key / Seed-TTS 2.0 resource, not a network
+  or request-body issue. Do not mark TTS as accepted until the grant is
+  restored and the candidate download plus FFprobe preflight succeeds.
+
 状态：待真实账户验收。  
 来源：`C:\Users\15193\Desktop\豆包TTS技术文档\TTS技术文档.txt`（2026-08-19 整理）。  
 适用范围：Server 生成演示视频时的候选旁白合成；不得作为 Browser Agent 业务步骤成功的证据。

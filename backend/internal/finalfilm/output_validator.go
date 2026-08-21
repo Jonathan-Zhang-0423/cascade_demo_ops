@@ -30,7 +30,7 @@ type finalFilmRenderManifest struct {
 	} `json:"requirement_satisfaction_report"`
 }
 
-func validateFinalFilmOutput(ctx context.Context, renderer Renderer, result executor.RenderResult, profile model.EditorRenderProfile, checkedAt time.Time) (model.FinalFilmOutputValidation, error) {
+func validateFinalFilmOutput(ctx context.Context, renderer Renderer, result executor.RenderResult, profile model.EditorRenderProfile, plan model.DemoEditPlan, requireTestNarration bool, checkedAt time.Time) (model.FinalFilmOutputValidation, error) {
 	validation := model.FinalFilmOutputValidation{Status: "failed", CheckedAt: checkedAt.UTC()}
 	fail := func(err error) (model.FinalFilmOutputValidation, error) {
 		validation.Error = err.Error()
@@ -62,6 +62,19 @@ func validateFinalFilmOutput(ctx context.Context, renderer Renderer, result exec
 	}
 	if !strings.Contains(strings.ToLower(probe.Format), "mp4") || !strings.EqualFold(probe.VideoCodec, "h264") || !strings.EqualFold(probe.PixelFormat, "yuv420p") {
 		return fail(errors.New("final video must be MP4/H.264/yuv420p"))
+	}
+	if requireTestNarration {
+		if strings.TrimSpace(probe.AudioCodec) == "" {
+			return fail(errors.New("test narration acceptance requires an audio stream"))
+		}
+		if len(plan.Narrations) == 0 {
+			return fail(errors.New("test narration acceptance requires a narration clip"))
+		}
+		for _, narration := range plan.Narrations {
+			if narration.Source != "tts_confirmed" {
+				return fail(errors.New("test narration acceptance requires tts_confirmed narration"))
+			}
+		}
 	}
 	data, err := os.ReadFile(result.RenderManifestPath)
 	if err != nil {
