@@ -615,7 +615,7 @@ describe("browser agent App-evidence-bound selector semantics", () => {
   it("filters modal exit controls and non-button roles before binding the unique primary action", async () => {
     const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
     const candidates = [
-      { role: "button", name: "Close" },
+      { role: "button", name: "X" },
       { role: "button", name: "Cancel" },
       { role: "combobox", name: "Framework" },
       { role: "button", name: "Create" },
