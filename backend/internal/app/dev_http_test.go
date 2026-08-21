@@ -714,6 +714,21 @@ func TestBrowserAgentUploadViewCompactsInvestigationTraceAndRedundantRoutes(t *t
 	}
 }
 
+func TestCompactStageApprovalPlanPreservesApprovedInputValue(t *testing.T) {
+	approvedValue := strings.Repeat("完整产品规格必须原样传递。", 80)
+	plan := &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+		NodeID:       "primary_request_input",
+		Interaction:  model.BrowserAgentInteraction{Kind: model.GraphActionFill, Value: approvedValue},
+		InputContent: []model.StageInputContent{{Kind: "fill", Value: approvedValue}},
+	}}}
+
+	compactStageApprovalPlanForUpload(plan)
+
+	if got := plan.Stages[0].InputContent[0].Value; got != approvedValue {
+		t.Fatalf("upload compaction changed the approved input value: got %d bytes want %d", len(got), len(approvedValue))
+	}
+}
+
 func TestCompactScriptStepPromotesMatchingFormalValidationSelector(t *testing.T) {
 	observedAt := time.Now().UTC()
 	digest := model.SHA256Hex([]byte("preview selector provenance"))

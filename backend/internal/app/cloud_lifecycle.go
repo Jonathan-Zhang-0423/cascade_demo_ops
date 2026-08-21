@@ -1866,7 +1866,6 @@ func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {
 		compactInteractionContractForUpload(stage.InteractionContract)
 		for j := range stage.InputContent {
 			stage.InputContent[j].EvidenceRefs = compactEvidenceRefsForUpload(stage.InputContent[j].EvidenceRefs, 1)
-			stage.InputContent[j].Value = truncateForUpload(stage.InputContent[j].Value, 120)
 		}
 	}
 	plan.UncertaintyReport = compactStageUncertaintiesForUpload(plan.UncertaintyReport, 4)
