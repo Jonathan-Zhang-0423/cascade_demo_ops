@@ -2048,17 +2048,19 @@ func compactInteractionContractForUpload(contract *model.InteractionContract) {
 	}
 	contract.SemanticGoal = truncateForUpload(contract.SemanticGoal, 180)
 	contract.EvidenceRefs = compactEvidenceRefsForUpload(contract.EvidenceRefs, 1)
-	contract.ActionTarget.EvidenceRefs = nil
-	contract.ActionTarget.SelectorAlternatives = compactSelectorCandidatesForUpload(contract.ActionTarget.SelectorAlternatives, 1)
+	// The executable action/interaction beside this contract is the canonical
+	// carrier for parameters and target provenance. Keeping another copy in all
+	// three upload views (plan, approval stages, and outline stages) only expands
+	// the transport package and can drift from the action that the worker runs.
+	contract.Parameters = nil
+	contract.ActionTarget = model.ActionTarget{}
 	for index := range contract.Preconditions {
 		contract.Preconditions[index].EvidenceRefs = nil
-		contract.Preconditions[index].Target.EvidenceRefs = nil
-		contract.Preconditions[index].Target.SelectorAlternatives = compactSelectorCandidatesForUpload(contract.Preconditions[index].Target.SelectorAlternatives, 1)
+		contract.Preconditions[index].Target = model.ActionTarget{}
 	}
 	for index := range contract.ExpectedTransitions {
 		contract.ExpectedTransitions[index].EvidenceRefs = nil
-		contract.ExpectedTransitions[index].Target.EvidenceRefs = nil
-		contract.ExpectedTransitions[index].Target.SelectorAlternatives = compactSelectorCandidatesForUpload(contract.ExpectedTransitions[index].Target.SelectorAlternatives, 1)
+		contract.ExpectedTransitions[index].Target = model.ActionTarget{}
 	}
 }
 

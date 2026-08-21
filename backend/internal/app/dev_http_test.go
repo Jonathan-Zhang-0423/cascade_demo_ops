@@ -735,6 +735,39 @@ func TestCompactScriptStepPromotesMatchingFormalValidationSelector(t *testing.T)
 	}
 }
 
+func TestCompactInteractionContractKeepsSemanticsWithoutDuplicatingActionPayload(t *testing.T) {
+	contract := &model.InteractionContract{
+		SchemaVersion:    model.InteractionContractSchemaVersion,
+		ContractID:       "contract_interaction_proof",
+		SemanticGoal:     "Prove the approved interaction changes the observed result surface.",
+		Archetype:        model.ProductArchetypeInteractive,
+		ActionKind:       model.GraphActionPress,
+		ReplayPolicy:     model.InteractionReplayObserveOnly,
+		TargetSemanticID: "surface_primary",
+		ActionTarget: model.ActionTarget{
+			Role: "region", SelectorAlternatives: []model.SelectorCandidate{{Kind: "role", Value: "region"}},
+		},
+		Parameters: map[string]any{"keys": []any{"ArrowLeft", "ArrowRight"}},
+		ExpectedTransitions: []model.InteractionPredicate{{
+			ID: "result_changed", Kind: "frame_surface_changed", Required: true,
+			Target: model.ActionTarget{Role: "region"},
+		}},
+		EvidenceRefs:   []model.EvidenceRef{{ID: "ev_interaction", Kind: model.EvidenceKindBrowserScan}},
+		NonDestructive: true,
+	}
+
+	compactInteractionContractForUpload(contract)
+
+	if contract.Parameters != nil || contract.ActionTarget.Role != "" || contract.ActionTarget.Selector != "" ||
+		len(contract.ActionTarget.SelectorAlternatives) != 0 || contract.ExpectedTransitions[0].Target.Role != "" ||
+		contract.ExpectedTransitions[0].Target.Selector != "" || len(contract.ExpectedTransitions[0].Target.SelectorAlternatives) != 0 {
+		t.Fatalf("compact contract retained duplicated action payload: %+v", contract)
+	}
+	if err := model.ValidateInteractionContract(*contract); err != nil {
+		t.Fatalf("compact contract lost executable semantics: %v", err)
+	}
+}
+
 func TestOutlineUploadKeepsTwoStepAuthenticationProvenance(t *testing.T) {
 	observedAt := time.Now().UTC()
 	refEntry := model.EvidenceRef{ID: "ev_email_method", Kind: model.EvidenceKindBrowserScan}
