@@ -2484,17 +2484,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 			EvidenceRefs:    node.EvidenceRefs,
 			Blocking:        isBlockingScriptStep(node, action.Type, validations),
 		}
-		if node.InteractionContract != nil {
-			contract := *node.InteractionContract
-			contract.ActionKind = action.Type
-			contract.ActionTarget = action.Target
-			contract.Parameters = action.Parameters
-			if model.ValidateInteractionContract(contract) == nil {
-				step.InteractionContract = &contract
-			}
-		} else {
-			step.InteractionContract = interactionContractForStep(step, node, targetContract, evidenceForInteractionContract(node, action, validations))
-		}
+		step.InteractionContract = compiledInteractionContractForStep(step, node, targetContract, evidenceForInteractionContract(node, action, validations))
 		steps = append(steps, step)
 		if routeContract.ExpectedRouteAfterAction != "" {
 			previousRoute = routeContract.ExpectedRouteAfterAction
@@ -2511,6 +2501,22 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 		}
 	}
 	return steps
+}
+
+func compiledInteractionContractForStep(step model.ScriptStep, node *model.GraphNode, target *model.BrowserAgentTargetContract, evidence []model.EvidenceRef) *model.InteractionContract {
+	if node != nil && node.InteractionContract != nil {
+		contract := *node.InteractionContract
+		contract.ActionKind = step.Action.Type
+		contract.ActionTarget = step.Action.Target
+		contract.Parameters = step.Action.Parameters
+		if model.ValidateInteractionContract(contract) == nil {
+			return &contract
+		}
+	}
+	// A partially structured planner contract must not erase the generic
+	// executable contract. Recompile it from the approved action, outcome
+	// validations, and evidence so replay semantics remain explicit.
+	return interactionContractForStep(step, node, target, evidence)
 }
 
 func evidenceForInteractionContract(node *model.GraphNode, action model.ScriptActionInstruction, validations []model.ValidationSpec) []model.EvidenceRef {

@@ -75,6 +75,43 @@ func TestStructuredInteractionTargetContractKeepsSemanticIDAcrossCompilation(t *
 	}
 }
 
+func TestCompiledInteractionContractFallsBackWhenPlannerContractIsInvalid(t *testing.T) {
+	node := &model.GraphNode{
+		ID: "submit_request",
+		InteractionContract: &model.InteractionContract{
+			SchemaVersion: model.InteractionContractSchemaVersion,
+			ContractID:    "invalid_planner_contract",
+			SemanticGoal:  "submit the approved request",
+			// Missing replay policy and expected transitions on purpose.
+			TargetSemanticID: "primary_submit",
+			NonDestructive:    true,
+		},
+		EvidenceRefs: []model.EvidenceRef{{ID: "approved_request", Kind: model.EvidenceKindUserInput}},
+	}
+	step := model.ScriptStep{
+		NodeID:         node.ID,
+		NonDestructive: true,
+		BusinessValue:  "submit the approved request",
+		Action:         model.ScriptActionInstruction{Type: model.GraphActionClick},
+		Validations: []model.ValidationSpec{{
+			ID: "result_changed", Kind: "page_changed", Required: true,
+			EvidenceRefs: []model.EvidenceRef{{ID: "approved_request", Kind: model.EvidenceKindUserInput}},
+		}},
+	}
+	target := &model.BrowserAgentTargetContract{SemanticID: "primary_submit", AllowedRoles: []string{"button"}, Destructive: false}
+
+	contract := compiledInteractionContractForStep(step, node, target, node.EvidenceRefs)
+	if contract == nil {
+		t.Fatal("invalid planner contract should fall back to a generic executable contract")
+	}
+	if contract.ReplayPolicy != model.InteractionReplayOnceEffect {
+		t.Fatalf("submit click must compile as once_effect, got %q", contract.ReplayPolicy)
+	}
+	if err := model.ValidateInteractionContract(*contract); err != nil {
+		t.Fatalf("fallback interaction contract is invalid: %v", err)
+	}
+}
+
 func TestScriptPackagerUsesDeterministicApprovalMarkdown(t *testing.T) {
 	project, report, productMap, graph := executableBundleFixtures()
 	pkg, err := NewScriptPackagerAgentWithLLM(failingMarkdownLLM{}).PackageScript(context.Background(), project, report, productMap, graph)
