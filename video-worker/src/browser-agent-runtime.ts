@@ -1303,7 +1303,9 @@ async function resolveUniqueVisibleStructuralSubmitTarget(locator: any, strategy
 function structuralAbortActionName(value: string): boolean {
   const normalized = normalizeElementName(value);
   if (!/[\p{L}\p{N}]/u.test(normalized)) return true;
-  return new Set(["x", "cancel", "close", "dismiss", "back", "abort", "取消", "关闭", "返回", "放弃"]).has(normalized);
+  if (["取消", "关闭", "返回", "放弃"].some((token) => normalized.includes(token))) return true;
+  if (/(?:^|\s)(?:cancel|close|dismiss|back|abort)(?:\s|$)/i.test(normalized)) return true;
+  return normalized === "x" || (/^(?:x|×|✕)\s+/u.test(normalized) && normalized.length <= 32);
 }
 
 async function resolveUniqueVisibleStructuralInputTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget | undefined> {
