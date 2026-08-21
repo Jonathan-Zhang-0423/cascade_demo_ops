@@ -60,6 +60,21 @@ func TestScriptPackagerEmitsValidExecutableBundle(t *testing.T) {
 	}
 }
 
+func TestStructuredInteractionTargetContractKeepsSemanticIDAcrossCompilation(t *testing.T) {
+	node := &model.GraphNode{ID: "node-proof", InteractionContract: &model.InteractionContract{
+		SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "contract-proof", SemanticGoal: "prove state", Archetype: model.ProductArchetypeInteractive,
+		ActionKind: model.GraphActionInspect, ReplayPolicy: model.InteractionReplayObserveOnly, TargetSemanticID: "primary_surface",
+		ExpectedTransitions: []model.InteractionPredicate{{ID: "visible", Kind: "interactive_surface_visible", Expected: true, Required: true}},
+		EvidenceRefs:        []model.EvidenceRef{{ID: "evidence", Kind: model.EvidenceKindUserInput}}, NonDestructive: true,
+		Parameters: map[string]any{"allowed_roles": []string{"main", "application"}},
+	}}
+	contract := targetContractForNode(node, model.ScriptActionInstruction{Type: model.GraphActionInspect}, model.ScriptPageTarget{URL: "https://product.example"}, []model.ValidationSpec{{ID: "visible", Kind: "interactive_surface_visible", Expected: true, Required: true}})
+	applyNodeInteractionTargetContract(contract, node)
+	if contract == nil || contract.SemanticID != "primary_surface" || len(contract.AllowedRoles) != 2 {
+		t.Fatalf("semantic target contract drifted: %+v", contract)
+	}
+}
+
 func TestScriptPackagerUsesDeterministicApprovalMarkdown(t *testing.T) {
 	project, report, productMap, graph := executableBundleFixtures()
 	pkg, err := NewScriptPackagerAgentWithLLM(failingMarkdownLLM{}).PackageScript(context.Background(), project, report, productMap, graph)

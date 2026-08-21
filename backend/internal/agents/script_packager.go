@@ -2456,6 +2456,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 		}
 		validations = ensureRequiredValidationsForStep(node, action, target, validations)
 		targetContract := targetContractForNode(node, action, target, validations)
+		applyNodeInteractionTargetContract(targetContract, node)
 		nonDestructive := targetContract != nil && !targetContract.Destructive
 		if node.Metadata != nil {
 			if approved, ok := node.Metadata["non_destructive"].(bool); ok {
@@ -2733,13 +2734,18 @@ func targetContractForStep(step model.ScriptStep, node *model.GraphNode, evidenc
 	if contract == nil {
 		return nil
 	}
-	if node != nil && node.InteractionContract != nil && strings.TrimSpace(node.InteractionContract.TargetSemanticID) != "" {
-		contract.SemanticID = node.InteractionContract.TargetSemanticID
-		contract.AllowedNames = uniqueStrings(append(contract.AllowedNames, interactionParameterStrings(node.InteractionContract.Parameters["allowed_names"])...))
-		contract.AllowedRoles = uniqueStrings(append(contract.AllowedRoles, interactionParameterStrings(node.InteractionContract.Parameters["allowed_roles"])...))
-	}
+	applyNodeInteractionTargetContract(contract, node)
 	contract.EvidenceRefs = uniqueEvidenceRefs(append(contract.EvidenceRefs, evidence...))
 	return contract
+}
+
+func applyNodeInteractionTargetContract(contract *model.BrowserAgentTargetContract, node *model.GraphNode) {
+	if contract == nil || node == nil || node.InteractionContract == nil || strings.TrimSpace(node.InteractionContract.TargetSemanticID) == "" {
+		return
+	}
+	contract.SemanticID = node.InteractionContract.TargetSemanticID
+	contract.AllowedNames = uniqueStrings(append(contract.AllowedNames, interactionParameterStrings(node.InteractionContract.Parameters["allowed_names"])...))
+	contract.AllowedRoles = uniqueStrings(append(contract.AllowedRoles, interactionParameterStrings(node.InteractionContract.Parameters["allowed_roles"])...))
 }
 
 func interactionParameterStrings(value any) []string {
@@ -2748,7 +2754,11 @@ func interactionParameterStrings(value any) []string {
 	case []string:
 		result = append(result, typed...)
 	case []any:
-		for _, item := range typed { if text, ok := item.(string); ok { result = append(result, text) } }
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
 	case string:
 		result = strings.FieldsFunc(typed, func(value rune) bool { return value == ',' || value == ';' })
 	}
