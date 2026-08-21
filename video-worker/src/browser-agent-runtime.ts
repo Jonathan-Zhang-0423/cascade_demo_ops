@@ -850,7 +850,7 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   Object.assign(changes, proof);
   session.outcomeChangesByNodeID.set(request.stage.node_id, changes);
   if (changes.visual) session.visualChangeByNodeID.set(request.stage.node_id, true);
-  assertions.push(...await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID));
+  assertions.push(...await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID, session.continuationURL));
   const artifact = await captureScreenshot(session, request.stage, "after");
   const evidence = screenshotEvidence(artifact, request.stage, "执行后结果证据");
   return {
@@ -872,7 +872,7 @@ export async function revalidateBrowserAgentStage(request: BrowserAgentStageRequ
   validateStage(request.stage);
   await ensureStageExecutionRoute(session, request.stage);
   await waitForCaptureWindow(session.page, request.stage);
-  const assertions = await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID);
+  const assertions = await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID, session.continuationURL);
   const artifact = await captureScreenshot(session, request.stage, "revalidate");
   const evidence = screenshotEvidence(artifact, request.stage, "修复截图时机后的结果证据");
   return {
@@ -1547,6 +1547,7 @@ export async function evaluateRequiredValidations(
   stage: BrowserAgentWorkerStage,
   visualChangeByNodeID?: ReadonlyMap<string, boolean>,
   outcomeChangesByNodeID?: ReadonlyMap<string, OutcomeChangeEvidence>,
+  continuationURL?: string,
 ): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   for (const validation of (stage.validations || []).filter((item) => item.required)) {
@@ -1558,6 +1559,10 @@ export async function evaluateRequiredValidations(
         const expected = validation.target?.url || scalarExpected(validation) || stage.url || stage.route;
         actual = safeURL(page.url());
         passed = Boolean(expected) && urlMatches(page.url(), String(expected));
+        if (!passed && approvedContinuationRouteVerified(page.url(), stage, expected, continuationURL)) {
+          passed = true;
+          actual = `verified_route_continuity:${safeURL(page.url())}`;
+        }
         if (!passed && approvedObservationRouteTemplateVerified(page, stage, validation, expected)) {
           // App pre-scan evidence can retain the entry-page URL while the same
           // approved observation stage declares the runtime-created route it
@@ -2275,6 +2280,26 @@ function booleanParameter(parameters: Record<string, unknown> | undefined, key: 
     if (value.trim().toLowerCase() === "false") return false;
   }
   return fallback;
+}
+
+function approvedContinuationRouteVerified(
+  currentURL: string,
+  stage: BrowserAgentWorkerStage,
+  expected: unknown,
+  continuationURL?: string,
+): boolean {
+  if (!continuationURL || !expected || stage.interactions.some((interaction) => interaction.kind === "navigate")) return false;
+  try {
+    const current = new URL(currentURL);
+    const continuation = new URL(continuationURL);
+    if (current.origin !== continuation.origin) return false;
+    const planningAnchor = String(stage.url || stage.route || stage.entry_route || "").trim();
+    if (!planningAnchor) return false;
+    const anchorURL = absoluteTargetURL(planningAnchor, currentURL, stage.url);
+    return Boolean(anchorURL) && urlMatches(anchorURL!, String(expected));
+  } catch {
+    return false;
+  }
 }
 
 async function structuralInputValueEquals(page: any, stage: BrowserAgentWorkerStage, expected: unknown, timeout: number): Promise<boolean> {

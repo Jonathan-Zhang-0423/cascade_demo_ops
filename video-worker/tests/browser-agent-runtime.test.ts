@@ -1003,6 +1003,48 @@ describe("browser agent required validations", () => {
     }]);
   });
 
+  it("accepts a verified same-origin continuation when url validation only repeats the planning entry anchor", async () => {
+    const stage = {
+      id: "stage_observe",
+      order: 5,
+      node_id: "observe_build",
+      url: "https://app.example.com/app",
+      entry_route: "/app",
+      target_contract: { semantic_id: "observe_build", destructive: false },
+      interactions: [{ kind: "wait", non_destructive: true }],
+      validations: [{ id: "entry_anchor", kind: "url_matches", target: { url: "https://app.example.com/app" }, required: true }],
+    };
+    const assertions = await evaluateRequiredValidations(
+      { url: () => "https://app.example.com/results/runtime-42" },
+      stage,
+      undefined,
+      undefined,
+      "https://app.example.com/results/runtime-42",
+    );
+    expect(assertions[0]).toMatchObject({ passed: true, actual: "verified_route_continuity:https://app.example.com/results/runtime-42" });
+  });
+
+  it("does not use continuation evidence for a distinct expected route", async () => {
+    const stage = {
+      id: "stage_preview",
+      order: 6,
+      node_id: "observe_preview",
+      url: "https://app.example.com/app",
+      entry_route: "/app",
+      target_contract: { semantic_id: "preview", destructive: false },
+      interactions: [{ kind: "wait", non_destructive: true }],
+      validations: [{ id: "preview_route", kind: "url_matches", target: { url: "https://app.example.com/preview/:id" }, required: true }],
+    };
+    const assertions = await evaluateRequiredValidations(
+      { url: () => "https://app.example.com/results/runtime-42" },
+      stage,
+      undefined,
+      undefined,
+      "https://app.example.com/results/runtime-42",
+    );
+    expect(assertions[0]?.passed).toBe(false);
+  });
+
   it("does not use observation route binding for wrong routes, changed validation URLs, or mutating actions", async () => {
     const stage = {
       id: "stage_observe",
