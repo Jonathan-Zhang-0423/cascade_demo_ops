@@ -1,6 +1,24 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, captureTargetGeometry, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, captureTargetGeometry, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, ensureDesiredToggleState, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, observableToggleState, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveTargetWithinApprovedWait, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+
+describe("browser visual polling terminal gate", () => {
+  const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
+    schema_version: "demoops.browser_visual_observation.v1" as const,
+    decision,
+    confidence,
+    summary: "visible evidence",
+    observed_at: "2026-08-20T08:00:00Z",
+  });
+
+  it("requires two consecutive high-confidence terminal observations", () => {
+    expect(confirmedBrowserVisualTerminalDecision([verdict("succeeded", 0.99)])).toBeUndefined();
+    expect(confirmedBrowserVisualTerminalDecision([verdict("succeeded", 0.99), verdict("unknown", 0.99), verdict("succeeded", 0.99)])).toBeUndefined();
+    expect(confirmedBrowserVisualTerminalDecision([verdict("succeeded", 0.89), verdict("succeeded", 0.99)])).toBeUndefined();
+    expect(confirmedBrowserVisualTerminalDecision([verdict("succeeded", 0.95), verdict("succeeded", 0.96)])).toBe("succeeded");
+    expect(confirmedBrowserVisualTerminalDecision([verdict("failed", 0.95), verdict("failed", 0.96)])).toBe("failed");
+  });
+});
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -179,6 +197,68 @@ describe("browser agent navigation policy", () => {
       target_contract: { semantic_id: "foreign", destructive: false }, interactions: [{ kind: "click", non_destructive: true }],
     }, "about:blank");
     expect(urlPolicyError(target!, session, false)).toContain("domain_not_allowed");
+  });
+
+  it("preserves a newly allocated runtime route when the approved observer requests continuity", () => {
+    expect(stageExecutionTargetURL({
+      id: "stage-progress", order: 6, node_id: "progress", entry_route: "/dashboard",
+      target_contract: { semantic_id: "progress", destructive: false },
+      interactions: [{ kind: "wait", non_destructive: true, parameters: { preserve_current_route: "true" } }],
+    }, "https://app.example.com/projects/new-id")).toBeUndefined();
+  });
+});
+
+describe("browser agent idempotent toggle semantics", () => {
+  it("does not click a toggle already in the requested state", async () => {
+    let clicks = 0;
+    const locator = { isChecked: async () => false, click: async () => { clicks += 1; } };
+    expect(await observableToggleState(locator)).toBe(false);
+    expect(await ensureDesiredToggleState(locator, false)).toBe(false);
+    expect(clicks).toBe(0);
+  });
+
+  it("clicks once and verifies the requested state", async () => {
+    let checked = true;
+    let clicks = 0;
+    const locator = {
+      isChecked: async () => checked,
+      click: async () => { checked = false; clicks += 1; },
+    };
+    expect(await ensureDesiredToggleState(locator, false)).toBe(true);
+    expect(clicks).toBe(1);
+    expect(checked).toBe(false);
+  });
+
+  it("observes and updates a checkbox through its evidence-bound label", async () => {
+    let checked = true;
+    let clicks = 0;
+    const locator = {
+      isChecked: async () => { throw new Error("label is not a checkbox"); },
+      evaluate: async () => checked,
+      click: async () => { checked = false; clicks += 1; },
+    };
+    expect(await observableToggleState(locator)).toBe(true);
+    expect(await ensureDesiredToggleState(locator, false)).toBe(true);
+    expect(clicks).toBe(1);
+    expect(checked).toBe(false);
+  });
+
+  it("fails closed when toggle state is not observable", async () => {
+    const locator = { isChecked: async () => { throw new Error("not a checkbox"); }, getAttribute: async () => null, click: async () => undefined };
+    await expect(ensureDesiredToggleState(locator, false)).rejects.toThrow("browser_agent_toggle_state_unobservable");
+  });
+
+  it("uses a scoped visual observer for custom toggles without DOM state", async () => {
+    let clicks = 0;
+    const observations = [true, false];
+    const locator = {
+      isChecked: async () => { throw new Error("custom button"); },
+      evaluate: async () => null,
+      getAttribute: async () => null,
+      click: async () => { clicks += 1; },
+    };
+    expect(await ensureDesiredToggleState(locator, false, 10_000, async () => observations.shift())).toBe(true);
+    expect(clicks).toBe(1);
   });
 });
 
@@ -419,6 +499,38 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     }));
     expect(JSON.stringify(attempts)).not.toContain("[data-testid='build']");
   });
+
+	it("waits for one uniquely named approved async continuation control", async () => {
+		let probes = 0;
+		const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+		const delayed = {
+			count: async () => ++probes >= 2 ? 1 : 0,
+			first: () => ({ isVisible: async () => true, evaluate: async () => ({ role: "button", name: "Build here" }) }),
+		};
+		const page = {
+			getByRole: (role: string, options: { name: string }) => role === "button" && options.name === "Build here" ? delayed : absent,
+			getByTestId: () => absent,
+			getByLabel: () => absent,
+			getByText: () => absent,
+			locator: () => absent,
+			waitForTimeout: async () => undefined,
+		};
+		const stage = {
+			id: "stage_continue",
+			order: 6,
+			node_id: "async_build_continue",
+			target_contract: { semantic_id: "continue_build", allowed_roles: ["button", "link"], allowed_names: ["Build here"], destructive: false },
+			interactions: [{ kind: "click", target: {}, parameters: { target_wait_timeout_ms: "1000" }, non_destructive: true }],
+		};
+		const attempts: BrowserTargetResolutionAttempt[] = [];
+
+		const resolved = await resolveTargetWithinApprovedWait(page, stage, stage.interactions[0], attempts);
+
+		expect(resolved.strategy).toBe("role:button+approved_name");
+		expect(probes).toBeGreaterThanOrEqual(2);
+		expect(attempts).toContainEqual(expect.objectContaining({ outcome: "no_candidates" }));
+		expect(attempts).toContainEqual(expect.objectContaining({ outcome: "resolved" }));
+	});
 });
 
 describe("browser agent required validations", () => {

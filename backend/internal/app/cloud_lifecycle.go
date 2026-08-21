@@ -1788,6 +1788,11 @@ func compactScriptStepForUpload(step *model.ScriptStep) {
 	if step == nil {
 		return
 	}
+	// InteractionContract is a local/forward-runtime contract. The deployed
+	// browser-agent-outline-v1 canonical decoder predates this optional field;
+	// sending it would make its decoded canonical subdocument differ from the
+	// App hash. The equivalent v1 validations remain in the immutable wire plan.
+	step.InteractionContract = nil
 	promoteRequiredValidationSelectorProvenanceForUpload(step)
 	step.BusinessValue = truncateForUpload(step.BusinessValue, 240)
 	step.ExpectedOutcome = truncateForUpload(step.ExpectedOutcome, 240)
@@ -1843,6 +1848,7 @@ func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {
 	plan.EvidenceRefs = compactEvidenceRefsForUpload(plan.EvidenceRefs, 8)
 	for i := range plan.Stages {
 		stage := &plan.Stages[i]
+		stage.InteractionContract = nil
 		stage.Objective = truncateForUpload(stage.Objective, 240)
 		stage.BusinessIntent = truncateForUpload(stage.BusinessIntent, 240)
 		stage.SuccessState = truncateForUpload(stage.SuccessState, 240)
@@ -1864,7 +1870,10 @@ func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {
 		}
 		for j := range stage.InputContent {
 			stage.InputContent[j].EvidenceRefs = compactEvidenceRefsForUpload(stage.InputContent[j].EvidenceRefs, 1)
-			stage.InputContent[j].Value = truncateForUpload(stage.InputContent[j].Value, 120)
+			// InputContent, Interaction, plan action, and outline interaction are
+			// four immutable views of the same user-approved fill value. Truncating
+			// only this view creates value drift and can also turn an actionable
+			// product specification back into an ambiguous fragment.
 		}
 	}
 	plan.UncertaintyReport = compactStageUncertaintiesForUpload(plan.UncertaintyReport, 4)
@@ -1888,6 +1897,7 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 	outline.ImmutableFields = limitStringsForUpload(outline.ImmutableFields, 12)
 	for i := range outline.Stages {
 		stage := &outline.Stages[i]
+		stage.InteractionContract = nil
 		stage.Objective = truncateForUpload(stage.Objective, 240)
 		stage.SuccessState = truncateForUpload(stage.SuccessState, 240)
 		stage.WaitConditions = limitStringsForUpload(stage.WaitConditions, 4)
@@ -2034,7 +2044,7 @@ func compactTargetContractForUpload(contract *model.BrowserAgentTargetContract) 
 	}
 	contract.Purpose = truncateForUpload(contract.Purpose, 180)
 	contract.AllowedRoles = limitStringsForUpload(contract.AllowedRoles, 4)
-	contract.AllowedNames = limitStringsForUpload(contract.AllowedNames, 6)
+	contract.AllowedNames = limitStringsForUpload(contract.AllowedNames, 12)
 	contract.ForbiddenNames = limitStringsForUpload(contract.ForbiddenNames, 6)
 	contract.EvidenceRefs = compactEvidenceRefsForUpload(contract.EvidenceRefs, 2)
 }
@@ -3024,7 +3034,7 @@ func browserAgentStepHasRequiredValidation(step model.ScriptStep) bool {
 			continue
 		}
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "checked_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
 			return true
 		}
 	}

@@ -886,6 +886,19 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 			s.events.CopyProjectEvents(projectID, state.ProjectID)
 		}
 		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodPost && suffix == "/execution-package/resume":
+		startedAt := time.Now()
+		log.Printf("dev_bridge execution_package_resume_start project_id=%s", projectID)
+		state, err := s.service.ResumeExecutionPackagePackaging(r.Context(), projectID)
+		if err != nil {
+			log.Printf("dev_bridge execution_package_resume_error project_id=%s elapsed_ms=%d error=%s", projectID, time.Since(startedAt).Milliseconds(), err)
+		} else {
+			log.Printf("dev_bridge execution_package_resume_done project_id=%s node=%s status=%s elapsed_ms=%d", projectID, state.CurrentNode, state.Status, time.Since(startedAt).Milliseconds())
+		}
+		writeBridgeValue(w, state, err)
+	case r.Method == http.MethodPost && suffix == "/execution-package/replan":
+		state, err := s.service.ResumeExecutionPackagePlanning(r.Context(), projectID)
+		writeBridgeValue(w, state, err)
 	case r.Method == http.MethodGet && suffix == "/execution-package":
 		state, err := s.service.LoadProject(r.Context(), projectID)
 		writeBridgeValue(w, state, err)
@@ -919,6 +932,16 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 		writeBridgeValue(w, result, err)
 	case r.Method == http.MethodGet && suffix == "/browser-agent-direct/status":
 		status, err := s.service.GetDirectExecutionStatus(r.Context(), projectID, r.URL.Query().Get("job_id"))
+		writeBridgeValue(w, status, err)
+	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/cancel":
+		var request struct {
+			JobID string `json:"job_id"`
+		}
+		if err := decodeJSON(r, &request); err != nil {
+			writeBridgeValue(w, nil, err)
+			return
+		}
+		status, err := s.service.CancelDirectExecution(r.Context(), projectID, request.JobID)
 		writeBridgeValue(w, status, err)
 	case r.Method == http.MethodPost && suffix == "/browser-agent-direct/credentials/reupload":
 		var request struct {

@@ -704,7 +704,7 @@ func stepHasDeterministicBrowserAgentValidation(step ScriptStep) bool {
 		hasTarget := validation.Target.URL != "" || validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != ""
 		hasExpected := strings.TrimSpace(validation.Assertion) != "" || validation.Expected != nil
 		switch validation.Kind {
-		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
+		case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "checked_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
 			if hasTarget || hasExpected {
 				return true
 			}
@@ -733,7 +733,7 @@ func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool 
 	hasTarget := validation.Target.URL != "" || validation.Target.Selector != "" || validation.Target.TestID != "" || validation.Target.Role != "" || validation.Target.Label != "" || validation.Target.Text != ""
 	hasExpected := strings.TrimSpace(validation.Assertion) != "" || validation.Expected != nil
 	switch validation.Kind {
-	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "checked_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
 		return hasTarget || hasExpected
 	default:
 		return false
@@ -742,7 +742,15 @@ func deterministicValidationHasTargetOrExpected(validation ValidationSpec) bool 
 
 func validationProvesBusinessOutcome(step ScriptStep, validation ValidationSpec) bool {
 	if step.Action.Type == GraphActionPress {
-		return validation.Kind == "page_changed" && validation.Expected == true && approvedKeyboardActionParameters(step.Action.Parameters)
+		if validation.Expected != true || !approvedKeyboardActionParameters(step.Action.Parameters) {
+			return false
+		}
+		switch validation.Kind {
+		case "page_changed", "visual_region_changed", "frame_surface_changed":
+			return true
+		default:
+			return false
+		}
 	}
 	if step.StageKind == BusinessStageKindBusinessInput || (step.Action.Type == GraphActionFill && step.StageKind != BusinessStageKindSessionSetup) {
 		if validation.Kind != "value_equals" {
@@ -757,6 +765,11 @@ func validationProvesBusinessOutcome(step ScriptStep, validation ValidationSpec)
 		return true
 	}
 	if step.Action.Type == GraphActionClick {
+		if validation.Kind == "checked_equals" {
+			desired, declared := step.Action.Parameters["desired_checked"]
+			expected, ok := validation.Expected.(bool)
+			return declared && ok && expected == strings.EqualFold(strings.TrimSpace(fmt.Sprint(desired)), "true")
+		}
 		if actionAndValidationTargetEquivalent(step.Action.Target, validation.Target) {
 			switch validation.Kind {
 			case "element_visible", "text_contains", "element_count":

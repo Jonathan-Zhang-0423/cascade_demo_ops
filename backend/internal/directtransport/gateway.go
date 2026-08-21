@@ -128,6 +128,12 @@ type WorkerReleaseRequest struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+type WorkerJobControl struct {
+	JobID           string `json:"job_id"`
+	Status          string `json:"status"`
+	CancelRequested bool   `json:"cancel_requested"`
+}
+
 func NewGateway(config Config) (*Gateway, error) {
 	if config.ControlAddr == "" {
 		config.ControlAddr = "0.0.0.0:18443"
@@ -271,6 +277,7 @@ func (g *Gateway) WorkerHandler() http.Handler {
 	mux.HandleFunc("PUT /v1/worker/jobs/{job_id}/artifacts/{artifact_id}", g.workerAuth(g.handleWorkerArtifact))
 	mux.HandleFunc("POST /v1/worker/jobs/{job_id}/credentials/consume", g.workerAuth(g.handleWorkerCredentialConsume))
 	mux.HandleFunc("POST /v1/worker/jobs/{job_id}/release", g.workerAuth(g.handleWorkerRelease))
+	mux.HandleFunc("GET /v1/worker/jobs/{job_id}/control", g.workerAuth(g.handleWorkerControl))
 	return securityHeaders(mux)
 }
 
@@ -450,6 +457,7 @@ func (g *Gateway) dataHandler(lease *leaseRuntime) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/direct/packages", func(w http.ResponseWriter, r *http.Request) { g.handlePackage(w, r, lease) })
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/credentials", func(w http.ResponseWriter, r *http.Request) { g.handleCredential(w, r, lease) })
+	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/cancel", func(w http.ResponseWriter, r *http.Request) { g.handleJobCancel(w, r, lease) })
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/ack", func(w http.ResponseWriter, r *http.Request) { g.handleResultAck(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}", func(w http.ResponseWriter, r *http.Request) { g.handleJobStatus(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/result", func(w http.ResponseWriter, r *http.Request) { g.handleJobResult(w, r, lease) })
@@ -710,6 +718,38 @@ func (g *Gateway) handleJobStatus(w http.ResponseWriter, r *http.Request, lease 
 		return
 	}
 	g.writeEncrypted(w, http.StatusOK, lease, "job_status", record.Status)
+}
+
+func (g *Gateway) handleJobCancel(w http.ResponseWriter, r *http.Request, lease *leaseRuntime) {
+	if err := g.authenticateDataRequest(r, lease, nil); err != nil {
+		writeError(w, http.StatusUnauthorized, "direct_request_invalid", err.Error())
+		return
+	}
+	jobID := r.PathValue("job_id")
+	g.mu.Lock()
+	record, ok := g.jobs[jobID]
+	if !ok || record.InstallationID == "" || record.InstallationID != lease.lease.InstallationID {
+		g.mu.Unlock()
+		writeError(w, http.StatusNotFound, "job_not_found", "Browser Agent job was not found.")
+		return
+	}
+	if !directJobTerminal(record.Status.Status) {
+		record.Credential = nil
+		record.CredentialGrantID = ""
+		record.Status.Status = "canceled"
+		record.Status.Stage = "canceled_by_app"
+		record.Status.Message = "The App canceled this Browser Agent job."
+		record.Status.BlockingErrorCode = "job_canceled_by_app"
+		record.Status.UpdatedAt = g.now().UTC()
+		if err := g.persistJob(record); err != nil {
+			g.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, "job_state_write_failed", "Canceled job state could not be persisted.")
+			return
+		}
+	}
+	status := record.Status
+	g.mu.Unlock()
+	g.writeEncrypted(w, http.StatusOK, lease, "job_status", status)
 }
 
 func (g *Gateway) handleJobResult(w http.ResponseWriter, r *http.Request, lease *leaseRuntime) {
@@ -1219,6 +1259,19 @@ func (g *Gateway) handleWorkerRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, record.Status)
+}
+
+func (g *Gateway) handleWorkerControl(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	record, ok := g.jobs[r.PathValue("job_id")]
+	if !ok {
+		g.mu.Unlock()
+		writeError(w, http.StatusNotFound, "job_not_found", "Job was not found.")
+		return
+	}
+	control := WorkerJobControl{JobID: record.Status.JobID, Status: record.Status.Status, CancelRequested: record.Status.Status == "canceled"}
+	g.mu.Unlock()
+	writeJSON(w, http.StatusOK, control)
 }
 
 func (g *Gateway) handleWorkerStatus(w http.ResponseWriter, r *http.Request) {

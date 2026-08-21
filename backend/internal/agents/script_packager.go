@@ -2455,6 +2455,8 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 			validations = softenBlockingValidations(validations)
 		}
 		validations = ensureRequiredValidationsForStep(node, action, target, validations)
+		contractValidations := append([]model.ValidationSpec{}, validations...)
+		validations = v1WireCompatibleValidations(validations)
 		targetContract := targetContractForNode(node, action, target, validations)
 		nonDestructive := targetContract != nil && !targetContract.Destructive
 		if node.Metadata != nil {
@@ -2483,7 +2485,7 @@ func scriptStepsFromGraph(graph *model.DemoWorkflowGraph, intelligence *model.Pr
 			EvidenceRefs:    node.EvidenceRefs,
 			Blocking:        isBlockingScriptStep(node, action.Type, validations),
 		}
-		step.InteractionContract = interactionContractForStep(step, node, targetContract, evidenceForInteractionContract(node, action, validations))
+		step.InteractionContract = interactionContractForStep(step, node, targetContract, evidenceForInteractionContract(node, action, contractValidations), contractValidations)
 		steps = append(steps, step)
 		if routeContract.ExpectedRouteAfterAction != "" {
 			previousRoute = routeContract.ExpectedRouteAfterAction
@@ -2512,18 +2514,22 @@ func evidenceForInteractionContract(node *model.GraphNode, action model.ScriptAc
 	return uniqueEvidenceRefs(refs)
 }
 
-func interactionContractForStep(step model.ScriptStep, node *model.GraphNode, target *model.BrowserAgentTargetContract, evidence []model.EvidenceRef) *model.InteractionContract {
+func interactionContractForStep(step model.ScriptStep, node *model.GraphNode, target *model.BrowserAgentTargetContract, evidence []model.EvidenceRef, contractValidations []model.ValidationSpec) *model.InteractionContract {
 	if node == nil || target == nil || target.Destructive || !step.NonDestructive || len(evidence) == 0 {
 		return nil
 	}
-	predicates := make([]model.InteractionPredicate, 0, len(step.Validations))
-	for _, validation := range step.Validations {
+	predicates := make([]model.InteractionPredicate, 0, len(contractValidations))
+	for _, validation := range contractValidations {
 		if !validation.Required || !validationKindAllowedForBrowserAgent(validation.Kind) {
 			continue
 		}
 		kind := strings.TrimSpace(validation.Kind)
 		if kind == "playable_surface_visible" {
 			kind = "interactive_surface_visible"
+		} else if kind == "page_changed" && step.Action.Type == model.GraphActionPress {
+			kind = "frame_surface_changed"
+		} else if kind == "page_changed" && step.StageKind == model.BusinessStageKindBusinessSubmit {
+			kind = "dom_changed"
 		}
 		predicates = append(predicates, model.InteractionPredicate{
 			ID: validation.ID, Kind: kind, Target: validation.Target, Expected: validation.Expected,
@@ -2555,6 +2561,23 @@ func interactionContractForStep(step model.ScriptStep, node *model.GraphNode, ta
 		return nil
 	}
 	return contract
+}
+
+// v1WireCompatibleValidations keeps the immutable client package consumable by
+// already deployed browser-agent-outcome-verifier-rules-v1 servers. Richer
+// observer intent remains available in InteractionContract; this transport
+// projection never changes the approved action, target, input, or evidence.
+func v1WireCompatibleValidations(validations []model.ValidationSpec) []model.ValidationSpec {
+	result := append([]model.ValidationSpec{}, validations...)
+	for index := range result {
+		switch strings.TrimSpace(result[index].Kind) {
+		case "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed":
+			result[index].Kind = "page_changed"
+		case "interactive_surface_visible":
+			result[index].Kind = "playable_surface_visible"
+		}
+	}
+	return result
 }
 
 func interactionReplayPolicy(action model.GraphActionType) model.InteractionReplayPolicy {
@@ -2705,7 +2728,7 @@ func hasRequiredValidation(validations []model.ValidationSpec) bool {
 
 func validationKindAllowedForBrowserAgent(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
+	case "url_matches", "element_visible", "element_hidden", "text_contains", "attribute_equals", "value_equals", "checked_equals", "element_count", "page_title_contains", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible":
 		return true
 	default:
 		return false
@@ -2733,6 +2756,15 @@ func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstr
 		firstNonEmpty(target.TestID, target.Role, target.Label, target.Text, target.Selector, node.Title),
 	}, "|")
 	allowedNames := accessibleNamesForActionTarget(target)
+	if node.Metadata != nil && node.Metadata["runtime_adaptive"] == true && action.Type == model.GraphActionClick {
+		if raw, ok := action.Parameters["approved_accessible_names"].(string); ok {
+			for _, name := range strings.Split(raw, "|") {
+				if name = strings.TrimSpace(name); name != "" {
+					allowedNames = append(allowedNames, name)
+				}
+			}
+		}
+	}
 	if len(allowedNames) == 0 && (action.Type == model.GraphActionNavigate || action.Type == model.GraphActionWait || action.Type == model.GraphActionInspect) {
 		allowedNames = uniqueStrings(nonEmptyStrings(target.Label, target.Text, node.Title))
 	}
@@ -2753,13 +2785,27 @@ func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstr
 		SemanticID:     "semantic_" + shortHash(semanticSeed),
 		Purpose:        firstNonEmpty(node.Goal, node.Description, node.ExpectedOutcome, node.Title),
 		AllowedRoles:   uniqueStrings(allowedRoles),
-		AllowedNames:   limitStrings(uniqueStrings(allowedNames), 12),
+		AllowedNames:   limitStrings(uniqueStringsStable(allowedNames), 12),
 		ForbiddenNames: []string{"删除", "移除", "支付", "账单", "API Key", "Delete", "Remove", "Pay", "Billing"},
 		ComponentRef:   firstNonEmpty(target.ComponentRef, firstString(node.FeatureRefs, ""), node.PageRef),
 		Destructive:    destructiveActionText(node.Title + " " + node.Goal + " " + node.Description + " " + target.Label + " " + target.Text),
 		EvidenceRefs:   uniqueEvidenceRefs(append(append([]model.EvidenceRef{}, node.EvidenceRefs...), target.EvidenceRefs...)),
 		Confidence:     0.76,
 	}
+}
+
+func uniqueStringsStable(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
 }
 
 func accessibleNamesForActionTarget(target model.ActionTarget) []string {

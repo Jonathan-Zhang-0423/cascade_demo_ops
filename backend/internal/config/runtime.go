@@ -75,10 +75,11 @@ type ModelProviderCredential struct {
 type ModelTask string
 
 const (
-	ModelTaskPlanning                ModelTask = "planning"
-	ModelTaskCodeReading             ModelTask = "code_reading"
-	ModelTaskMultimodalUnderstanding ModelTask = "multimodal_understanding"
-	ModelTaskVideoOperation          ModelTask = "video_operation"
+	ModelTaskPlanning                 ModelTask = "planning"
+	ModelTaskCodeReading              ModelTask = "code_reading"
+	ModelTaskMultimodalUnderstanding  ModelTask = "multimodal_understanding"
+	ModelTaskBrowserVisualObservation ModelTask = "browser_visual_observation"
+	ModelTaskVideoOperation           ModelTask = "video_operation"
 )
 
 type ModelTaskRoute struct {
@@ -247,6 +248,13 @@ func modelTaskRoutesFromEnv() map[ModelTask]ModelTaskRoute {
 			Model:            "minimax-m3",
 			ProviderOverride: "CASCADE_MULTIMODAL_PROVIDER",
 			ModelOverride:    "CASCADE_MULTIMODAL_MODEL",
+		},
+		{
+			Task:             ModelTaskBrowserVisualObservation,
+			Provider:         ModelProviderGLM,
+			Model:            "glm-4.5v",
+			ProviderOverride: "CASCADE_BROWSER_VISION_PROVIDER",
+			ModelOverride:    "CASCADE_BROWSER_VISION_MODEL",
 		},
 		{
 			Task:             ModelTaskVideoOperation,

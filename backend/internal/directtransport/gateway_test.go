@@ -100,6 +100,64 @@ func TestGatewayAllocatesDedicatedPortAndHandsValidatedPackageToWorker(t *testin
 	}
 }
 
+func TestGatewayCancelsOneJobAndExposesWorkerControl(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	port := reserveTestPort(t)
+	gateway, err := NewGateway(Config{
+		ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1",
+		DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true,
+		BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close(context.Background()) })
+	lease := requestTestLease(t, gateway, now)
+	pkg := loadDirectPackageFixture(t)
+	bindTestDirectPackageOrigin(&pkg, lease.InstallationID)
+	receipt := uploadTestPackage(t, lease, pkg, now, "message_cancel_package", "request_cancel_package")
+	request, err := http.NewRequest(http.MethodPost, lease.DataURL+"/v1/direct/jobs/"+receipt.JobID+"/cancel", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signDirectRequest(t, request, lease, nil, now, "request_cancel_job")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(response.Body)
+		t.Fatalf("cancel status %d: %s", response.StatusCode, payload)
+	}
+	var encrypted model.DirectEncryptedMessage
+	if err := json.NewDecoder(response.Body).Decode(&encrypted); err != nil {
+		t.Fatal(err)
+	}
+	var status model.DirectJobStatus
+	if err := model.DecryptDirectTransportJSON(encrypted, lease, "job_status", model.DirectTransportDirectionResult, now, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "canceled" || status.Stage != "canceled_by_app" || status.BlockingErrorCode != "job_canceled_by_app" {
+		t.Fatalf("unexpected canceled status: %+v", status)
+	}
+	controlRequest := httptest.NewRequest(http.MethodGet, "/v1/worker/jobs/"+receipt.JobID+"/control", nil)
+	controlRequest.Header.Set("Authorization", "Bearer "+testWorkerToken)
+	controlResponse := httptest.NewRecorder()
+	gateway.WorkerHandler().ServeHTTP(controlResponse, controlRequest)
+	if controlResponse.Code != http.StatusOK {
+		t.Fatalf("control status %d: %s", controlResponse.Code, controlResponse.Body.String())
+	}
+	var control WorkerJobControl
+	if err := json.Unmarshal(controlResponse.Body.Bytes(), &control); err != nil {
+		t.Fatal(err)
+	}
+	if !control.CancelRequested || control.JobID != receipt.JobID || control.Status != "canceled" {
+		t.Fatalf("unexpected worker control: %+v", control)
+	}
+}
+
 func TestGatewayRejectsLeaseAndPackageReplay(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	port := reserveTestPort(t)

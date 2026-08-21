@@ -552,8 +552,16 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 	}
 	required := businessStageKindIsCoreForGraph(stage.Kind) || stage.Kind == model.BusinessStageKindSessionSetup || stage.Kind == model.BusinessStageKindFinalObserve
 	validations := []model.ValidationSpec{businessStageValidation(stage, actionType, target, required)}
-	if required && (validations[0].Kind == "page_changed" || validations[0].Kind == "frame_surface_changed" || validations[0].Kind == "interactive_surface_visible" || validations[0].Kind == "playable_surface_visible") {
-		route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute)
+	if required && !businessStagePreservesCurrentRoute(stage) && (validations[0].Kind == "page_changed" || validations[0].Kind == "frame_surface_changed" || validations[0].Kind == "interactive_surface_visible" || validations[0].Kind == "playable_surface_visible") {
+		// A page_changed assertion explicitly allows the action to leave its
+		// entry route.  Reusing that pre-action route as a post-action anchor
+		// makes a successful navigation fail when the destination is a newly
+		// allocated, previously unobservable route.  Only an explicitly
+		// observed/declared destination may constrain such a transition.
+		route := strings.TrimSpace(stage.ExpectedRouteAfterAction)
+		if route == "" && validations[0].Kind != "page_changed" {
+			route = strings.TrimSpace(stage.EntryRoute)
+		}
 		if route != "" {
 			validations = append(validations, model.ValidationSpec{
 				ID:           "validate_readiness_anchor_" + stage.ID,
@@ -870,16 +878,25 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		// the planner's prose as DOM text. Prove the user-visible state transition
 		// with the same bounded visual-diff assertion used for keyboard controls;
 		// graph compilation adds an independent approved-route readiness anchor.
-		kind = "page_changed"
-		target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
-		expected = true
+		if desired, ok := stage.Action.Parameters["desired_checked"]; ok {
+			kind = "checked_equals"
+			expected = strings.EqualFold(strings.TrimSpace(desired), "true")
+		} else {
+			kind = "page_changed"
+			target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+			expected = true
+		}
 	} else if stage.Kind == model.BusinessStageKindBusinessSubmit {
 		if strings.TrimSpace(stage.ExpectedRouteAfterAction) != "" && normalizeRouteTemplate(stage.ExpectedRouteAfterAction) != normalizeRouteTemplate(stage.EntryRoute) {
 			kind = "url_matches"
 			target = model.ActionTarget{URL: stage.ExpectedRouteAfterAction}
 			expected = stage.ExpectedRouteAfterAction
 		} else {
-			kind = "dom_changed"
+			// page_changed is the v1 wire-compatible aggregate observer. The
+			// InteractionContract compiler retains the narrower dom_changed
+			// intent for newer runtimes while older Direct workers can still
+			// verify a real post-submit DOM/ARIA/visual transition.
+			kind = "page_changed"
 			target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
 			expected = true
 		}
@@ -898,16 +915,26 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		}
 		timeoutMS = completionWaitTimeoutMS(stage.UserIntent)
 	} else if action == model.GraphActionPress {
-		kind = "frame_surface_changed"
+		// Keep the executable v1 validation compatible with deployed Direct
+		// workers; the richer frame_surface_changed observer is dual-written
+		// into InteractionContract by the package compiler.
+		kind = "page_changed"
 		if target.Selector == "" && target.TestID == "" && target.Role == "" {
 			target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
 		}
 		expected = true
 	} else if stage.Kind == model.BusinessStageKindFinalObserve && strings.TrimPrefix(stage.ID, "business_stage_") == "interactive_surface_observe" {
-		kind = "interactive_surface_visible"
+		// Legacy v1 calls this playable_surface_visible. It is kept only at
+		// the transport boundary and is compiled to the site-neutral
+		// interactive_surface_visible InteractionContract predicate.
+		kind = "playable_surface_visible"
 		if target.Selector == "" && target.TestID == "" && target.Role == "" {
 			target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
 		}
+		expected = true
+	} else if (action == model.GraphActionWait || action == model.GraphActionInspect) && businessStagePreservesCurrentRoute(stage) {
+		kind = "page_changed"
+		target = model.ActionTarget{}
 		expected = true
 	} else if action == model.GraphActionWait || action == model.GraphActionInspect {
 		if route := firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute); route != "" {
@@ -935,6 +962,10 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		EvidenceRefs: stage.EvidenceRefs,
 		RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2},
 	}
+}
+
+func businessStagePreservesCurrentRoute(stage model.BusinessStage) bool {
+	return strings.EqualFold(strings.TrimSpace(stage.Action.Parameters["preserve_current_route"]), "true")
 }
 
 func businessStageCompletionTarget(stage model.BusinessStage) (model.ActionTarget, bool) {
@@ -2551,7 +2582,7 @@ func requirementPreferredNodeIDs(description string) map[string]int {
 		preferred["business_stage_interactive_surface_change"] = 1000
 	case match("最终预览", "交互区域", "操作说明", "试玩", "可玩", "canvas", "controls", "playable", "interactive"):
 		preferred["business_stage_interactive_surface_observe"] = 1000
-	case match("持续轮询", "轮询直到", "步骤完成", "最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "build_complete", "maximum", "timeout", "wait until complete"):
+	case match("持续轮询", "轮询直到", "长轮询", "定期截图", "视觉理解证据", "视觉轮询", "每分钟", "步骤完成", "最多", "至多", "不超过", "最长", "超时", "构建完成", "全部步骤完成", "编写完", "build_complete", "periodic screenshot", "visual observation", "visual polling", "maximum", "timeout", "wait until complete"):
 		preferred["business_stage_final_observe"] = 1000
 	}
 	return preferred

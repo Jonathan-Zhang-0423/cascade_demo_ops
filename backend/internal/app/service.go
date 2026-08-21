@@ -527,6 +527,62 @@ func (s *Service) RegenerateExecutionPackage(ctx context.Context, projectID stri
 	return s.CreateProject(ctx, input)
 }
 
+// ResumeExecutionPackagePackaging rebuilds only the deterministic package
+// documents after a ScriptPackage validation failure or before an unsubmitted
+// draft receives approval. It deliberately refuses every execution checkpoint
+// so callers cannot repeat discovery, browser actions, or provider-billed work
+// under the guise of a resume.
+func (s *Service) ResumeExecutionPackagePackaging(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	failedPackaging := state.CurrentNode == orchestrator.NodeScriptPackage && state.Status == orchestrator.FlowStatusFailed
+	unsubmittedDraft := state.CurrentNode == orchestrator.NodeHumanApprove && state.Status == orchestrator.FlowStatusAwaitingHuman && !state.Approved && state.DesktopCloudRun == nil
+	if !failedPackaging && !unsubmittedDraft {
+		return nil, errors.New("execution package resume requires a failed ScriptPackage checkpoint or an unsubmitted approval draft")
+	}
+	if state.ProjectContext == nil || state.UnderstandingReport == nil || state.ProductMap == nil || state.ProjectIntelligence == nil || state.WorkflowGraph == nil {
+		return nil, errors.New("execution package resume checkpoint is incomplete")
+	}
+
+	next, err := s.flow.RepackageReviewedGraph(ctx, state, state.WorkflowGraph)
+	if err != nil {
+		state.Status = orchestrator.FlowStatusFailed
+		state.ErrorMessage = err.Error()
+		if saveErr := s.states.Save(ctx, state); saveErr != nil {
+			return nil, saveErr
+		}
+		return state, err
+	}
+	if err := s.states.Save(ctx, next); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// ResumeExecutionPackagePlanning recompiles the business stages, graph, and
+// package from cached verified evidence. It is intentionally limited to an
+// unsubmitted approval draft so no browser action or provider-billed step can
+// be repeated through this repair path.
+func (s *Service) ResumeExecutionPackagePlanning(ctx context.Context, projectID string) (*orchestrator.CascadeState, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if state.CurrentNode != orchestrator.NodeHumanApprove || state.Status != orchestrator.FlowStatusAwaitingHuman || state.Approved || state.DesktopCloudRun != nil {
+		return nil, errors.New("execution package replan requires an unsubmitted approval draft")
+	}
+	next, err := s.flow.ReplanAndRepackageFromCachedEvidence(ctx, state)
+	if err != nil {
+		return state, err
+	}
+	if err := s.states.Save(ctx, next); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
 func stateHasNoCoreBusinessAction(state *orchestrator.CascadeState) bool {
 	if state == nil {
 		return true

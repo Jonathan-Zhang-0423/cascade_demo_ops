@@ -576,6 +576,10 @@ func explicitDemoIntentText(project *model.ProjectContext, intelligence *model.P
 }
 
 var intentProjectNamePatterns = []*regexp.Regexp{
+	// Prefer an explicitly quoted entity before any generic "new project ..."
+	// operation wording. This supports names containing spaces while keeping
+	// instructions such as "新建项目并保持需求原文" out of form values.
+	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?(?:全新)?(?:的)?\s*[“"'‘]([^”"'’\n]{1,48})[”"'’](?:的)?项目`),
 	regexp.MustCompile(`(?:项目名称|项目名)\s*(?:为|是|[:：=])\s*([^，。；;,\n]{1,48})`),
 	regexp.MustCompile(`(?:项目名称|项目名)\s*([^，。；;,\n\s（(]{1,48})`),
 	regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?(?:名为|名称为|项目名为)\s*[“”"'‘’]*([^“”"'‘’，。；;,\n]{1,48})[“”"'‘’]*(?:的)?项目`),
@@ -624,6 +628,11 @@ func normalizeIntentProjectNameCandidate(value string) string {
 		"启动", "开始", "输入", "填写", "选择", "打开", "进入", "查看", "提交", "创建", "新建", "新增",
 	) {
 		return ""
+	}
+	for _, prefix := range []string{"并", "且", "然后", "随后", "接着", "同时", "and ", "then "} {
+		if strings.HasPrefix(strings.ToLower(candidate), prefix) {
+			return ""
+		}
 	}
 	return candidate
 }

@@ -103,10 +103,11 @@ func TestRuntimeConfigDefaultsModelTaskRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := map[ModelTask]ModelTaskRoute{
-		ModelTaskPlanning:                {Provider: ModelProviderKimi, Model: "kimi-k2.7-code"},
-		ModelTaskCodeReading:             {Provider: ModelProviderGLM, Model: "glm-5.2"},
-		ModelTaskMultimodalUnderstanding: {Provider: ModelProviderMinimax, Model: "minimax-m3"},
-		ModelTaskVideoOperation:          {Provider: ModelProviderSeedance, Model: "doubao-seedance-2-5-260628"},
+		ModelTaskPlanning:                 {Provider: ModelProviderKimi, Model: "kimi-k2.7-code"},
+		ModelTaskCodeReading:              {Provider: ModelProviderGLM, Model: "glm-5.2"},
+		ModelTaskMultimodalUnderstanding:  {Provider: ModelProviderMinimax, Model: "minimax-m3"},
+		ModelTaskBrowserVisualObservation: {Provider: ModelProviderGLM, Model: "glm-4.5v"},
+		ModelTaskVideoOperation:           {Provider: ModelProviderSeedance, Model: "doubao-seedance-2-5-260628"},
 	}
 	for task, want := range expected {
 		got := cfg.ModelTaskRoutes[task]

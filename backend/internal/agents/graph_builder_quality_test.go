@@ -118,6 +118,54 @@ func TestModeSelectionValidationDoesNotReuseClickedControl(t *testing.T) {
 	}
 }
 
+func TestGenericOutcomeObserversCompileToV1WireCompatibleValidations(t *testing.T) {
+	tests := []struct {
+		name   string
+		stage  model.BusinessStage
+		action model.GraphActionType
+		kind   string
+	}{
+		{
+			name:   "submit DOM change",
+			stage:  model.BusinessStage{ID: "business_stage_submit", Kind: model.BusinessStageKindBusinessSubmit, EntryRoute: "/workspace", ExpectedRouteAfterAction: "/workspace"},
+			action: model.GraphActionClick, kind: "page_changed",
+		},
+		{
+			name:   "keyboard frame change",
+			stage:  model.BusinessStage{ID: "business_stage_interactive_surface_change", Kind: model.BusinessStageKindFinalObserve, EntryRoute: "/workspace"},
+			action: model.GraphActionPress, kind: "page_changed",
+		},
+		{
+			name:   "interactive surface",
+			stage:  model.BusinessStage{ID: "business_stage_interactive_surface_observe", Kind: model.BusinessStageKindFinalObserve, EntryRoute: "/workspace"},
+			action: model.GraphActionInspect, kind: "playable_surface_visible",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			validation := businessStageValidation(test.stage, test.action, model.ActionTarget{URL: "/workspace"}, true)
+			if validation.Kind != test.kind || validation.Expected != true {
+				t.Fatalf("unexpected v1 validation: %+v", validation)
+			}
+		})
+	}
+}
+
+func TestScriptPackagerProjectsGenericObserversToV1WithoutMutatingInput(t *testing.T) {
+	input := []model.ValidationSpec{
+		{ID: "dom", Kind: "dom_changed", Expected: true, Required: true},
+		{ID: "frame", Kind: "frame_surface_changed", Expected: true, Required: true},
+		{ID: "surface", Kind: "interactive_surface_visible", Expected: true, Required: true},
+	}
+	wire := v1WireCompatibleValidations(input)
+	if wire[0].Kind != "page_changed" || wire[1].Kind != "page_changed" || wire[2].Kind != "playable_surface_visible" {
+		t.Fatalf("unexpected v1 projection: %+v", wire)
+	}
+	if input[0].Kind != "dom_changed" || input[1].Kind != "frame_surface_changed" || input[2].Kind != "interactive_surface_visible" {
+		t.Fatalf("v1 projection mutated generic observer input: %+v", input)
+	}
+}
+
 func TestGraphBuilderBlocksWhenOnlyGenericSelectorExists(t *testing.T) {
 	project := graphQualityProject()
 	productMap := graphQualityProductMap(
@@ -330,6 +378,7 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 		{ID: "result", Kind: "must_show", Description: "最终实际运行效果", Required: true},
 		{ID: "complete", Kind: "must_show", Description: "最多等待 20 分钟直到 Agent 构建完成", Required: true},
 		{ID: "poll_complete", Kind: "must_show", Description: "持续轮询直到所有构建步骤完成或出现明确 build_complete", Required: true},
+		{ID: "visual_poll", Kind: "must_show", Description: "长轮询期间约每分钟保留一次视觉理解证据", Required: true},
 		{ID: "playable", Kind: "must_show", Description: "最终预览显示俄罗斯方块棋盘、得分和操作说明", Required: true},
 		{ID: "keyboard", Kind: "must_show", Description: "用方向键实际试玩并确认方块位置发生变化", Required: true},
 		{ID: "secret", Kind: "must_not_show", Description: "不得显示密码", Required: true},
@@ -342,6 +391,7 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 		"start": "business_stage_start_build", "result": "business_stage_final_observe",
 		"complete": "business_stage_final_observe", "playable": "business_stage_interactive_surface_observe",
 		"poll_complete": "business_stage_final_observe",
+		"visual_poll":   "business_stage_final_observe",
 		"keyboard":      "business_stage_interactive_surface_change",
 	}
 	for _, requirement := range graph.Requirements {
@@ -371,6 +421,24 @@ func TestBindGraphRequirementsDropsEmptyStaleRefsAndKeepsMissingEvidenceBlocked(
 
 	if len(graph.Requirements) != 1 || len(graph.Requirements[0].NodeRefs) != 0 || len(graph.Requirements[0].EvidenceRefs) != 1 || graph.Requirements[0].EvidenceRefs[0].Kind != model.EvidenceKindUserInput {
 		t.Fatalf("an unmapped node must stay blocked while retaining requirement provenance: %+v", graph.Requirements)
+	}
+}
+
+func TestGraphNodeDoesNotReuseEntryRouteAfterUnboundedPageChange(t *testing.T) {
+	stage := model.BusinessStage{
+		ID:         "business_stage_submit_dynamic",
+		Kind:       model.BusinessStageKindBusinessSubmit,
+		EntryRoute: "/workspace",
+		Action: model.BusinessActionSemantics{
+			Type:           string(model.GraphActionClick),
+			NonDestructive: true,
+			SuccessState:   "A newly allocated detail page is visible.",
+		},
+		EvidenceRefs: []model.EvidenceRef{{ID: "ev_submit", Kind: model.EvidenceKindBrowserScan}},
+	}
+	node := graphNodeFromBusinessStage(&model.ProjectContext{}, stage, "/workspace", "")
+	if len(node.Validations) != 1 || node.Validations[0].Kind != "page_changed" {
+		t.Fatalf("dynamic page transition must not inherit a stale entry-route anchor: %+v", node.Validations)
 	}
 }
 

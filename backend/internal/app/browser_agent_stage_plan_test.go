@@ -58,6 +58,16 @@ func TestBrowserAgentReadinessAcceptsCompleteFixture(t *testing.T) {
 	}
 }
 
+func TestRequiredBrowserValidationAcceptsRuntimeObserverKinds(t *testing.T) {
+	for _, kind := range []string{"checked_equals", "page_changed", "state_changed", "dom_changed", "aria_changed", "network_settled", "visual_region_changed", "frame_surface_changed", "interactive_surface_visible", "playable_surface_visible"} {
+		t.Run(kind, func(t *testing.T) {
+			if !requiredBrowserValidation([]model.ValidationSpec{{Kind: kind, Required: true}}) {
+				t.Fatalf("runtime-supported observer %q must satisfy the readiness gate", kind)
+			}
+		})
+	}
+}
+
 func TestBrowserAgentReadinessRejectsWorkspaceWaitWithoutTransitionOrValidation(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	stage := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[0]

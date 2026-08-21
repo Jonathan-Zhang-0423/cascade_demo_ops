@@ -57,7 +57,7 @@ type InteractionPredicate struct {
 
 var interactionPredicateKinds = map[string]bool{
 	"url_matches": true, "element_visible": true, "element_hidden": true,
-	"text_contains": true, "attribute_equals": true, "value_equals": true,
+	"text_contains": true, "attribute_equals": true, "value_equals": true, "checked_equals": true,
 	"element_count": true, "page_title_contains": true,
 	"state_changed": true, "page_changed": true,
 	"dom_changed": true, "aria_changed": true, "network_settled": true,

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { launchOptionsWithProxy } from "./playwright-proxy.js";
@@ -281,7 +281,22 @@ type BrowserAgentSession = {
 	targetGeometryByArtifactID: Map<string, BrowserTargetGeometry>;
 	visualChangeByNodeID: Map<string, boolean>;
 	outcomeChangesByNodeID: Map<string, OutcomeChangeEvidence>;
+	toggleStateByNodeID: Map<string, boolean>;
+	visionPollArtifactsByNodeID: Map<string, ArtifactRef[]>;
+	visionPollEvidenceByNodeID: Map<string, EvidenceRef[]>;
+	visionVerdictsByNodeID: Map<string, BrowserVisualObservation[]>;
   taskSecrets: Record<string, BrowserAgentTaskSecret>;
+};
+
+export type BrowserVisualObservation = {
+	schema_version: "demoops.browser_visual_observation.v1";
+	decision: "in_progress" | "succeeded" | "failed" | "unknown";
+	confidence: number;
+	summary: string;
+	visible_evidence?: string[];
+	blocking_reason?: string;
+	model_trace?: Record<string, unknown>;
+	observed_at: string;
 };
 
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
@@ -362,6 +377,10 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	targetGeometryByArtifactID: new Map(),
 	visualChangeByNodeID: new Map(),
 	outcomeChangesByNodeID: new Map(),
+	toggleStateByNodeID: new Map(),
+	visionPollArtifactsByNodeID: new Map(),
+	visionPollEvidenceByNodeID: new Map(),
+	visionVerdictsByNodeID: new Map(),
     taskSecrets: validatedTaskSecrets(request.task_secrets),
   };
   await page.route("**/*", async (route: any) => {
@@ -566,8 +585,6 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   await ensureStageExecutionRoute(session, request.stage);
   const action = request.stage.interactions[0];
   await waitForObservationWindow(session.page, request.stage);
-  // Preserve redacted evidence even when semantic target resolution fails.
-  const artifact = await captureScreenshot(session, request.stage, "before");
   let resolved: ResolvedTarget | undefined;
   let approvedAlternative: { kind: string; value: string } | undefined;
 	let targetGeometry: BrowserTargetGeometry | undefined;
@@ -576,12 +593,7 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   const resolutionAttempts: BrowserTargetResolutionAttempt[] = [];
   if (action && interactionRequiresResolvedTarget(action.kind)) {
     try {
-      resolved = await resolveTarget(session.page, request.stage, action, false, resolutionAttempts);
-		targetGeometry = await captureTargetGeometry(session, request.stage, resolved, artifact.id);
-		if (!targetGeometry) {
-			resolved = undefined;
-			resolutionFailure = `browser_agent_target_not_resolved: ${request.stage.node_id}; strategies=target_geometry_unavailable`;
-		}
+      resolved = await resolveTargetWithinApprovedWait(session.page, request.stage, action, resolutionAttempts, false);
     } catch (error) {
       if (!isTargetResolutionFailure(error)) throw error;
       resolutionFailure = safeResolutionFailure(error);
@@ -591,6 +603,17 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
 		}
     }
   }
+	// Capture the state in which resolution succeeded or finally timed out.
+	// This preserves failure evidence while keeping successful target geometry
+	// bound to the same page state rather than a screenshot taken minutes ago.
+	const artifact = await captureScreenshot(session, request.stage, "before");
+	if (resolved) {
+		targetGeometry = await captureTargetGeometry(session, request.stage, resolved, artifact.id);
+		if (!targetGeometry) {
+			resolved = undefined;
+			resolutionFailure = `browser_agent_target_not_resolved: ${request.stage.node_id}; strategies=target_geometry_unavailable`;
+		}
+	}
   const evidence = screenshotEvidence(artifact, request.stage, "执行前页面观察");
   const assertions = resolutionAssertions(resolved?.strategy, resolutionFailure, safeURL(session.page.url()));
   return {
@@ -741,13 +764,14 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   const changes = compareOutcomeSnapshots(outcomeBefore, outcomeAfter, networkSettled);
   session.outcomeChangesByNodeID.set(request.stage.node_id, changes);
   if (changes.visual) session.visualChangeByNodeID.set(request.stage.node_id, true);
-  assertions.push(...await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID));
+  assertions.push(...await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID, session));
   const artifact = await captureScreenshot(session, request.stage, "after");
   const evidence = screenshotEvidence(artifact, request.stage, "执行后结果证据");
+	const visualPoll = drainVisionPollEvidence(session, request.stage.node_id);
   return {
     observation: await observation(session.page, "browser_assertion", assertions, targetGeometry, resolutionAttempts),
-    evidence_refs: [...targetEvidence, evidence],
-    artifacts: [...targetArtifacts, artifact],
+    evidence_refs: [...targetEvidence, ...visualPoll.evidence, evidence],
+    artifacts: [...targetArtifacts, ...visualPoll.artifacts, artifact],
     target_resolved: true,
   };
   } finally {
@@ -763,13 +787,14 @@ export async function revalidateBrowserAgentStage(request: BrowserAgentStageRequ
   validateStage(request.stage);
   await ensureStageExecutionRoute(session, request.stage);
   await waitForCaptureWindow(session.page, request.stage);
-  const assertions = await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID);
+  const assertions = await evaluateRequiredValidations(session.page, request.stage, session.visualChangeByNodeID, session.outcomeChangesByNodeID, session);
   const artifact = await captureScreenshot(session, request.stage, "revalidate");
   const evidence = screenshotEvidence(artifact, request.stage, "修复截图时机后的结果证据");
+	const visualPoll = drainVisionPollEvidence(session, request.stage.node_id);
   return {
     observation: await observation(session.page, "browser_assertion", assertions),
-    evidence_refs: [evidence],
-    artifacts: [artifact],
+    evidence_refs: [...visualPoll.evidence, evidence],
+    artifacts: [...visualPoll.artifacts, artifact],
     target_resolved: true,
   };
 }
@@ -784,17 +809,20 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   try {
     if (session.traceActive) await settleWithin(session.context.tracing.stop({ path: session.tracePath }), 8_000);
   } finally {
-    // Playwright can flush the WebM/trace successfully while a browser close
-    // promise remains pending. Keep cleanup inside the Server RPC deadline so
-    // already-written evidence can still be returned.
-    await settleWithin(session.context.close(), 10_000);
-    await settleWithin(session.browser.close(), 3_000);
+		// Do not return an artifact reference while Chromium is still appending
+		// recording bytes. The previous bounded best-effort close let a 3.4 MB
+		// provisional WebM grow to 40 MB after its digest had been calculated.
+		const contextClosed = await valueWithin(session.context.close().then(() => true).catch(() => false), 8 * 60_000, false);
+		if (!contextClosed) throw new Error("browser_agent_recording_finalize_timeout");
+		const browserClosed = await valueWithin(session.browser.close().then(() => true).catch(() => false), 60_000, false);
+		if (!browserClosed) throw new Error("browser_agent_browser_close_timeout");
   }
   if (await fileExists(session.tracePath)) {
     artifacts.push(await artifactRef(`artifact_${session.id}_trace`, "browser_trace", session.tracePath, "application/zip", undefined, { include_in_demo: false }));
   }
   recordingPath = recordingPathPromise ? await valueWithin(recordingPathPromise, 3_000, undefined) : undefined;
   if (recordingPath && await fileExists(recordingPath)) {
+		if (!await waitForFileStable(recordingPath, 3, 750)) throw new Error("browser_agent_recording_not_stable");
     artifacts.unshift(await artifactRef(
       `artifact_${session.id}_recording`,
       "raw_recording",
@@ -883,17 +911,28 @@ async function executeInteraction(
     session.visualChangeByNodeID.set(stage.node_id, digests.size > 1);
     return;
   }
-  const resolved = await resolveTarget(session.page, stage, interaction, true, resolutionAttempts);
+	const resolved = await resolveTargetWithinApprovedWait(session.page, stage, interaction, resolutionAttempts);
   if (interaction.secret_ref) await prepareSecretTarget(session, resolved.locator);
   const targetArtifact = await captureScreenshot(session, stage, "target");
   const targetGeometry = await captureTargetGeometry(session, stage, resolved, targetArtifact.id);
   if (!targetGeometry) throw new Error(`browser_agent_target_geometry_unavailable: ${stage.node_id}`);
   targetArtifact.metadata.target_geometry = targetGeometry;
   session.targetGeometryByArtifactID.set(targetArtifact.id, targetGeometry);
-	const trackVisualChange = interactionRequiresVisualChangeEvidence(stage, interaction.kind);
+  const trackVisualChange = interactionRequiresVisualChangeEvidence(stage, interaction.kind);
 	const visualDigestBefore = trackVisualChange ? await pageVisualDigest(session.page) : "";
   if (interaction.kind === "click") {
-    await resolved.locator.click({ timeout });
+    const desiredChecked = optionalBooleanParameter(interaction.parameters, "desired_checked");
+    if (desiredChecked === undefined) {
+      await resolved.locator.click({ timeout });
+    } else {
+      await ensureDesiredToggleState(
+        resolved.locator,
+        desiredChecked,
+        timeout,
+        () => observeToggleStateWithVision(session, stage, resolved.locator, desiredChecked),
+      );
+		session.toggleStateByNodeID.set(stage.node_id, desiredChecked);
+    }
   } else if (interaction.kind === "fill") {
     if (interaction.input_ref && !interaction.secret_ref && interaction.value === undefined) throw new Error("browser_agent_input_ref_requires_resolver");
     const value = interaction.secret_ref ? requiredStageSecretValue(interaction.secret_ref, secretValues) : interaction.value || "";
@@ -1214,6 +1253,7 @@ export async function evaluateRequiredValidations(
   stage: BrowserAgentWorkerStage,
   visualChangeByNodeID?: ReadonlyMap<string, boolean>,
   outcomeChangesByNodeID?: ReadonlyMap<string, OutcomeChangeEvidence>,
+	session?: BrowserAgentSession,
 ): Promise<Array<{ kind: string; passed: boolean; actual?: string }>> {
   const assertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   for (const validation of (stage.validations || []).filter((item) => item.required)) {
@@ -1261,8 +1301,14 @@ export async function evaluateRequiredValidations(
         actual = passed ? "hidden" : "visible";
       } else if (validation.kind === "text_contains") {
         const expected = scalarExpected(validation);
-        passed = Boolean(expected) && await waitForPageText(page, String(expected), timeout);
-        actual = passed ? "matched" : "not_matched";
+		if (expected && session && timeout > browserVisionPollingIntervalMS()) {
+			const result = await waitForPageTextWithVisualObservation(session, stage, String(expected), timeout);
+			passed = result.passed;
+			actual = result.actual;
+		} else {
+			passed = Boolean(expected) && await waitForPageText(page, String(expected), timeout);
+			actual = passed ? "matched" : "not_matched";
+		}
       } else if (validation.kind === "attribute_equals") {
         const locator = locatorForValidation(page, validation).first();
         const expectedObject = objectExpected(validation.expected);
@@ -1276,6 +1322,14 @@ export async function evaluateRequiredValidations(
         const value = await locatorForValidation(page, validation).first().inputValue({ timeout }).catch(() => undefined);
         passed = value !== undefined && String(value) === String(expected ?? "");
         actual = passed ? "matched" : "not_matched";
+      } else if (validation.kind === "checked_equals") {
+        const expected = Boolean(scalarExpected(validation));
+		let value = await observableToggleState(locatorForValidation(page, validation).first(), timeout);
+		if (value === undefined && session?.toggleStateByNodeID.has(stage.node_id)) {
+			value = session.toggleStateByNodeID.get(stage.node_id);
+		}
+        passed = value !== undefined && value === expected;
+        actual = value === undefined ? "toggle_state_unobservable" : String(value);
       } else if (validation.kind === "element_count") {
         const expected = Number(scalarExpected(validation));
         const count = await locatorForValidation(page, validation).count();
@@ -1360,6 +1414,302 @@ async function waitForPageText(page: any, expected: string, timeout: number): Pr
     }
   }
   return page.locator("body").evaluate((element: any, value: string) => String(element.innerText || "").includes(value), expected).catch(() => false);
+}
+
+export async function resolveTargetWithinApprovedWait(
+	page: any,
+	stage: BrowserAgentWorkerStage,
+	interaction: BrowserAgentInteraction,
+	attempts: BrowserTargetResolutionAttempt[],
+	allowSelectorAlternatives = true,
+): Promise<ResolvedTarget> {
+	const waitMS = numericParameter(interaction.parameters, "target_wait_timeout_ms", 0, 0, 180_000);
+	const deadline = Date.now() + waitMS;
+	let lastError: unknown;
+	do {
+		try {
+			return await resolveTarget(page, stage, interaction, allowSelectorAlternatives, attempts);
+		} catch (error) {
+			lastError = error;
+		}
+		if (Date.now() >= deadline) break;
+		await page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
+	} while (Date.now() < deadline);
+	throw lastError instanceof Error ? lastError : new Error(`browser_agent_target_not_resolved: ${stage.node_id}`);
+}
+
+async function waitForFileStable(filePath: string, requiredStableChecks: number, intervalMS: number): Promise<boolean> {
+	let previousSize = -1;
+	let stableChecks = 0;
+	for (let attempt = 0; attempt < requiredStableChecks + 8; attempt++) {
+		const size = await stat(filePath).then((value) => value.size).catch(() => -1);
+		if (size > 0 && size === previousSize) {
+			stableChecks++;
+			if (stableChecks >= requiredStableChecks) return true;
+		} else {
+			stableChecks = 0;
+		}
+		previousSize = size;
+		await new Promise((resolve) => setTimeout(resolve, intervalMS));
+	}
+	return false;
+}
+
+type BrowserVisionObserverConfig = { url: string; token: string; intervalMS: number };
+
+function browserVisionPollingIntervalMS(): number {
+	const requested = Math.trunc(Number(process.env.CASCADE_BROWSER_VISION_INTERVAL_MS) || 60_000);
+	return Math.max(30_000, Math.min(requested, 90_000));
+}
+
+function browserVisionObserverConfig(): BrowserVisionObserverConfig | undefined {
+	const value = String(process.env.CASCADE_BROWSER_VISION_OBSERVER_URL || "").trim();
+	const token = String(process.env.CASCADE_BROWSER_VISION_OBSERVER_TOKEN || "").trim();
+	if (!value || token.length < 32) return undefined;
+	try {
+		const url = new URL(value);
+		if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "::1"].includes(url.hostname) || url.username || url.password) return undefined;
+		return { url: url.toString(), token, intervalMS: browserVisionPollingIntervalMS() };
+	} catch {
+		return undefined;
+	}
+}
+
+export function confirmedBrowserVisualTerminalDecision(observations: BrowserVisualObservation[], minimumConfidence = 0.9): "succeeded" | "failed" | undefined {
+	if (observations.length < 2) return undefined;
+	const latest = observations[observations.length - 1]!;
+	const previous = observations[observations.length - 2]!;
+	if ((latest.decision !== "succeeded" && latest.decision !== "failed") || latest.decision !== previous.decision) return undefined;
+	if (latest.confidence < minimumConfidence || previous.confidence < minimumConfidence) return undefined;
+	return latest.decision;
+}
+
+async function waitForPageTextWithVisualObservation(
+	session: BrowserAgentSession,
+	stage: BrowserAgentWorkerStage,
+	expected: string,
+	timeout: number,
+): Promise<{ passed: boolean; actual: string }> {
+	const config = browserVisionObserverConfig();
+	if (!config) {
+		return { passed: await waitForPageText(session.page, expected, timeout), actual: "visual_observer_unconfigured_deterministic_fallback" };
+	}
+	const deadline = Date.now() + timeout;
+	while (Date.now() < deadline) {
+		const remaining = deadline - Date.now();
+		if (await waitForPageText(session.page, expected, Math.min(config.intervalMS, remaining))) {
+			return { passed: true, actual: "matched" };
+		}
+		if (Date.now() >= deadline) break;
+		const observation = await captureAndUnderstandVisionPoll(session, stage, config, timeout - Math.max(0, deadline - Date.now()));
+		const history = session.visionVerdictsByNodeID.get(stage.node_id) || [];
+		history.push(observation);
+		session.visionVerdictsByNodeID.set(stage.node_id, history);
+		const confirmed = confirmedBrowserVisualTerminalDecision(history);
+		if (confirmed === "succeeded") return { passed: true, actual: "visual_observer_succeeded_twice" };
+		if (confirmed === "failed") return { passed: false, actual: "visual_observer_failed_twice" };
+	}
+	return { passed: false, actual: "not_matched;visual_observer_not_terminal" };
+}
+
+async function captureAndUnderstandVisionPoll(
+	session: BrowserAgentSession,
+	stage: BrowserAgentWorkerStage,
+	config: BrowserVisionObserverConfig,
+	elapsedMS: number,
+): Promise<BrowserVisualObservation> {
+	const sequence = (session.visionVerdictsByNodeID.get(stage.node_id)?.length || 0) + 1;
+	const suffix = `vision-poll-${String(sequence).padStart(3, "0")}`;
+	const screenshotName = `stage-${String(stage.order).padStart(3, "0")}-${safeName(stage.node_id)}-${suffix}.png`;
+	const screenshotPath = path.join(session.outputDir, screenshotName);
+	const masks = session.maskSelectors.filter(Boolean).map((selector) => session.page.locator(selector));
+	await session.page.screenshot({ path: screenshotPath, fullPage: false, mask: masks, timeout: screenshotTimeoutMS });
+	const screenshotBytes = await readFile(screenshotPath);
+	const response = await requestBrowserVisualObservation(config, {
+		schema_version: "demoops.browser_visual_observation.v1",
+		observation_kind: "task_terminal",
+		run_id: session.id,
+		stage_id: stage.id,
+		node_id: stage.node_id,
+		stage_order: stage.order,
+		sequence,
+		elapsed_ms: elapsedMS,
+		semantic_goal: stage.interaction_contract?.semantic_goal || stage.objective || stage.target_contract.semantic_id,
+		expected_state: stage.success_state || stage.objective || stage.target_contract.semantic_id,
+		current_url: safeURL(session.page.url()),
+		page_title: redactText(await session.page.title().catch(() => "")),
+		screenshot_data_uri: `data:image/png;base64,${screenshotBytes.toString("base64")}`,
+	});
+	const observationName = `stage-${String(stage.order).padStart(3, "0")}-${safeName(stage.node_id)}-${suffix}.json`;
+	const observationPath = path.join(session.outputDir, observationName);
+	await writeFile(observationPath, JSON.stringify(response, null, 2), { encoding: "utf8", mode: 0o600 });
+	const screenshotArtifact = await artifactRef(
+		`artifact_${safeName(session.id)}_${safeName(stage.node_id)}_${suffix}`,
+		"browser_visual_poll_screenshot",
+		screenshotPath,
+		"image/png",
+		stage.node_id,
+		{ include_in_demo: false, presentation_only: false, capture_phase: "vision_poll", sequence, decision: response.decision, confidence: response.confidence },
+		session.recordingSensitive,
+	);
+	const observationArtifact = await artifactRef(
+		`artifact_${safeName(session.id)}_${safeName(stage.node_id)}_${suffix}_observation`,
+		"browser_visual_observation",
+		observationPath,
+		"application/json",
+		stage.node_id,
+		{ include_in_demo: false, presentation_only: false, sequence, screenshot_artifact_id: screenshotArtifact.id },
+		session.recordingSensitive,
+	);
+	const artifacts = session.visionPollArtifactsByNodeID.get(stage.node_id) || [];
+	artifacts.push(screenshotArtifact, observationArtifact);
+	session.visionPollArtifactsByNodeID.set(stage.node_id, artifacts);
+	const evidence = session.visionPollEvidenceByNodeID.get(stage.node_id) || [];
+	evidence.push({
+		id: `evidence_${screenshotArtifact.id}`,
+		kind: "webpage_screenshot",
+		summary: `第 ${sequence} 次视觉轮询：${redactText(response.summary)}`,
+		artifact_id: screenshotArtifact.id,
+		confidence: response.confidence,
+	});
+	session.visionPollEvidenceByNodeID.set(stage.node_id, evidence);
+	return response;
+}
+
+async function requestBrowserVisualObservation(config: BrowserVisionObserverConfig, body: Record<string, unknown>): Promise<BrowserVisualObservation> {
+	let lastError: unknown;
+	for (let attempt = 1; attempt <= 3; attempt += 1) {
+		try {
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), 50_000);
+			try {
+				const result = await fetch(config.url, {
+					method: "POST",
+					headers: { "Authorization": `Bearer ${config.token}`, "Content-Type": "application/json" },
+					body: JSON.stringify(body),
+					signal: controller.signal,
+				});
+				if (!result.ok) throw new Error(`observer_http_${result.status}`);
+				const response = await result.json() as BrowserVisualObservation;
+				if (!validBrowserVisualObservation(response)) throw new Error("observer_response_invalid");
+				return response;
+			} finally {
+				clearTimeout(timer);
+			}
+		} catch (error) {
+			lastError = error;
+			if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1_500 * attempt));
+		}
+	}
+	return {
+		schema_version: "demoops.browser_visual_observation.v1",
+		decision: "unknown",
+		confidence: 0,
+		summary: "视觉观察服务暂不可用；继续使用确定性页面验证。",
+		blocking_reason: redactText(String(lastError instanceof Error ? lastError.message : lastError)),
+		observed_at: new Date().toISOString(),
+	};
+}
+
+async function observeToggleStateWithVision(
+	session: BrowserAgentSession,
+	stage: BrowserAgentWorkerStage,
+	locator: any,
+	desired: boolean,
+): Promise<boolean | undefined> {
+	const config = browserVisionObserverConfig();
+	if (!config) return undefined;
+	const existing = session.visionPollArtifactsByNodeID.get(stage.node_id) || [];
+	const sequence = Math.floor(existing.length / 2) + 1;
+	const suffix = `toggle-state-${String(sequence).padStart(3, "0")}`;
+	const screenshotName = `stage-${String(stage.order).padStart(3, "0")}-${safeName(stage.node_id)}-${suffix}.png`;
+	const screenshotPath = path.join(session.outputDir, screenshotName);
+	const box = await locator.boundingBox?.().catch(() => undefined);
+	const viewport = session.page.viewportSize?.() || defaultViewport;
+	if (box && box.width > 0 && box.height > 0 && viewport?.width > 0 && viewport?.height > 0) {
+		const width = Math.min(viewport.width, Math.max(512, Math.ceil(box.width + 128)));
+		const height = Math.min(viewport.height, Math.max(256, Math.ceil(box.height + 192)));
+		const x = Math.max(0, Math.min(viewport.width - width, box.x + box.width / 2 - width / 2));
+		const y = Math.max(0, Math.min(viewport.height - height, box.y + box.height / 2 - height / 2));
+		await session.page.screenshot({
+			path: screenshotPath,
+			type: "png",
+			clip: { x, y, width, height },
+			animations: "disabled",
+			caret: "hide",
+			timeout: screenshotTimeoutMS,
+		});
+	} else {
+		await locator.screenshot({ path: screenshotPath, type: "png", animations: "disabled", caret: "hide", timeout: screenshotTimeoutMS });
+	}
+	const screenshotBytes = await readFile(screenshotPath);
+	const response = await requestBrowserVisualObservation(config, {
+		schema_version: "demoops.browser_visual_observation.v1",
+		observation_kind: "toggle_state",
+		run_id: session.id,
+		stage_id: stage.id,
+		node_id: stage.node_id,
+		stage_order: stage.order,
+		sequence,
+		elapsed_ms: Math.max(0, Date.now() - session.openedAtMS),
+		semantic_goal: stage.interaction_contract?.semantic_goal || stage.objective || stage.target_contract.semantic_id,
+		expected_state: desired ? "The exact cropped toggle is visibly checked/on/selected." : "The exact cropped toggle is visibly unchecked/off/unselected.",
+		expected_boolean: desired,
+		current_url: safeURL(session.page.url()),
+		page_title: redactText(await session.page.title().catch(() => "")),
+		screenshot_data_uri: `data:image/png;base64,${screenshotBytes.toString("base64")}`,
+	});
+	const observationName = `stage-${String(stage.order).padStart(3, "0")}-${safeName(stage.node_id)}-${suffix}.json`;
+	const observationPath = path.join(session.outputDir, observationName);
+	await writeFile(observationPath, JSON.stringify(response, null, 2), { encoding: "utf8", mode: 0o600 });
+	const screenshotArtifact = await artifactRef(
+		`artifact_${safeName(session.id)}_${safeName(stage.node_id)}_${suffix}`,
+		"browser_visual_toggle_screenshot",
+		screenshotPath,
+		"image/png",
+		stage.node_id,
+		{ include_in_demo: false, presentation_only: false, capture_phase: "toggle_state", sequence, desired, decision: response.decision, confidence: response.confidence },
+		session.recordingSensitive,
+	);
+	const observationArtifact = await artifactRef(
+		`artifact_${safeName(session.id)}_${safeName(stage.node_id)}_${suffix}_observation`,
+		"browser_visual_observation",
+		observationPath,
+		"application/json",
+		stage.node_id,
+		{ include_in_demo: false, presentation_only: false, observation_kind: "toggle_state", sequence, screenshot_artifact_id: screenshotArtifact.id },
+		session.recordingSensitive,
+	);
+	existing.push(screenshotArtifact, observationArtifact);
+	session.visionPollArtifactsByNodeID.set(stage.node_id, existing);
+	const evidence = session.visionPollEvidenceByNodeID.get(stage.node_id) || [];
+	evidence.push({
+		id: `evidence_${screenshotArtifact.id}`,
+		kind: "webpage_screenshot",
+		summary: `目标控件视觉状态核验：${redactText(response.summary)}`,
+		artifact_id: screenshotArtifact.id,
+		confidence: response.confidence,
+	});
+	session.visionPollEvidenceByNodeID.set(stage.node_id, evidence);
+	if (response.confidence < 0.85) return undefined;
+	if (response.decision === "succeeded") return desired;
+	if (response.decision === "failed") return !desired;
+	return undefined;
+}
+
+function validBrowserVisualObservation(value: BrowserVisualObservation): boolean {
+	return value?.schema_version === "demoops.browser_visual_observation.v1" &&
+		["in_progress", "succeeded", "failed", "unknown"].includes(value.decision) &&
+		Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1 &&
+		Boolean(String(value.summary || "").trim()) && Boolean(String(value.observed_at || "").trim());
+}
+
+function drainVisionPollEvidence(session: BrowserAgentSession, nodeID: string): { artifacts: ArtifactRef[]; evidence: EvidenceRef[] } {
+	const artifacts = session.visionPollArtifactsByNodeID.get(nodeID) || [];
+	const evidence = session.visionPollEvidenceByNodeID.get(nodeID) || [];
+	session.visionPollArtifactsByNodeID.delete(nodeID);
+	session.visionPollEvidenceByNodeID.delete(nodeID);
+	return { artifacts, evidence };
 }
 
 function approvedObservationRouteTemplateVerified(
@@ -1775,12 +2125,18 @@ function clearTaskSecrets(values: Record<string, BrowserAgentTaskSecret>): void 
 }
 
 export function stageExecutionTargetURL(stage: BrowserAgentWorkerStage, currentURL: string): string | undefined {
+  if (booleanParameter(stage.interactions?.[0]?.parameters, "preserve_current_route", false)) return undefined;
   const target = String(stage.url || stage.route || stage.entry_route || "").trim();
   if (!target) return undefined;
   return absoluteTargetURL(target, currentURL, stage.url);
 }
 
 async function ensureStageExecutionRoute(session: BrowserAgentSession, stage: BrowserAgentWorkerStage): Promise<void> {
+  if (booleanParameter(stage.interactions?.[0]?.parameters, "preserve_current_route", false)) {
+    const currentError = urlPolicyError(session.page.url(), session, false);
+    if (currentError) throw new Error(currentError);
+    return;
+  }
   const targetURL = stageExecutionTargetURL(stage, session.page.url());
   if (!targetURL) return;
   if (urlMatches(session.page.url(), targetURL)) {
@@ -1917,6 +2273,91 @@ function booleanParameter(parameters: Record<string, unknown> | undefined, key: 
     if (value.trim().toLowerCase() === "false") return false;
   }
   return fallback;
+}
+
+function optionalBooleanParameter(parameters: Record<string, unknown> | undefined, key: string): boolean | undefined {
+  const value = parameters?.[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (value.trim().toLowerCase() === "true") return true;
+    if (value.trim().toLowerCase() === "false") return false;
+  }
+  return undefined;
+}
+
+export async function observableToggleState(locator: any, timeout = actionTimeoutMS): Promise<boolean | undefined> {
+  const checked = await locator.isChecked?.({ timeout: Math.min(timeout, 2_000) }).catch(() => undefined);
+  if (typeof checked === "boolean") return checked;
+
+  // The evidence-bound target is often the accessible label (or a text node inside
+  // it) rather than the native checkbox itself. Resolve only DOM relationships
+  // owned by that target so the observation remains site-independent and cannot
+  // drift to an unrelated toggle elsewhere on the page.
+  const relatedState = await locator.evaluate?.((element: any) => {
+    const parseToggle = (candidate: any): boolean | null => {
+      if (!candidate) return null;
+      const input = candidate as any;
+      if (input.tagName?.toLowerCase() === "input" && ["checkbox", "radio"].includes(String(input.type || "").toLowerCase())) {
+        return Boolean(input.checked);
+      }
+      for (const attribute of ["aria-checked", "aria-pressed"]) {
+        const value = candidate.getAttribute?.(attribute);
+        if (value === "true") return true;
+        if (value === "false") return false;
+      }
+      const state = String(candidate.getAttribute?.("data-state") || "").toLowerCase();
+      if (["checked", "on", "selected", "active"].includes(state)) return true;
+      if (["unchecked", "off", "unselected", "inactive"].includes(state)) return false;
+      return null;
+    };
+
+    const direct = parseToggle(element);
+    if (direct !== null) return direct;
+
+    const label = element.closest?.("label") as any;
+    const associated = label?.control || null;
+    const associatedState = parseToggle(associated);
+    if (associatedState !== null) return associatedState;
+
+    const descendant = element.querySelector?.('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="switch"], [aria-checked], [aria-pressed], [data-state]') || null;
+    const descendantState = parseToggle(descendant);
+    if (descendantState !== null) return descendantState;
+
+    let ancestor = element.parentElement;
+    for (let depth = 0; ancestor && depth < 4; depth += 1, ancestor = ancestor.parentElement) {
+      const ancestorState = parseToggle(ancestor);
+      if (ancestorState !== null) return ancestorState;
+    }
+    return null;
+  }).catch(() => null);
+  if (typeof relatedState === "boolean") return relatedState;
+
+  for (const attribute of ["aria-checked", "aria-pressed"]) {
+    const value = await locator.getAttribute?.(attribute, { timeout: Math.min(timeout, 2_000) }).catch(() => null);
+    if (value === "true") return true;
+    if (value === "false") return false;
+  }
+  const state = String(await locator.getAttribute?.("data-state", { timeout: Math.min(timeout, 2_000) }).catch(() => "") || "").toLowerCase();
+  if (["checked", "on", "selected", "active"].includes(state)) return true;
+  if (["unchecked", "off", "unselected", "inactive"].includes(state)) return false;
+  return undefined;
+}
+
+export async function ensureDesiredToggleState(
+	locator: any,
+	desired: boolean,
+	timeout = actionTimeoutMS,
+	visualObserver?: () => Promise<boolean | undefined>,
+): Promise<boolean> {
+	let current = await observableToggleState(locator, timeout);
+	if (current === undefined && visualObserver) current = await visualObserver();
+	if (current === undefined) throw new Error("browser_agent_toggle_state_unobservable");
+	if (current === desired) return false;
+	await locator.click({ timeout });
+	let updated = await observableToggleState(locator, timeout);
+	if (updated === undefined && visualObserver) updated = await visualObserver();
+	if (updated !== desired) throw new Error("browser_agent_toggle_state_not_applied");
+  return true;
 }
 
 export function approvedKeyboardKeys(parameters: Record<string, unknown> | undefined): string[] {

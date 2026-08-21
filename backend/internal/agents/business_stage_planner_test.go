@@ -41,8 +41,10 @@ func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
 		{intent: "项目名称为2026", want: "2026"},
 		{intent: "项目名称：俄罗斯方块", want: "俄罗斯方块"},
 		{intent: "新建名为“俄罗斯方块”的项目，要求 Agent 实际生成代码", want: "俄罗斯方块"},
+		{intent: "新建一个全新的“2048 视觉验证版”项目，等待完成", want: "2048 视觉验证版"},
 		{intent: "登录、创建俄罗斯方块项目、等待 Agent 真正编写完代码", want: "俄罗斯方块"},
 		{intent: "新建项目 启动 Agent 实际构建", want: ""},
+		{intent: "点击新建项目并保持2048需求原文", want: ""},
 		{intent: "新建项目（13秒，构建模式）", want: ""},
 	}
 	for _, test := range tests {
@@ -97,6 +99,9 @@ func TestCompletionWaitUsesMaximumAsTimeoutNotCaptureDuration(t *testing.T) {
 	if got := completionWaitTimeoutMS("等待 Agent 构建完成"); got != maxBuildCompletionWaitMS {
 		t.Fatalf("default completion timeout=%d, want %d", got, maxBuildCompletionWaitMS)
 	}
+	if got := completionWaitTimeoutMS("持续观察直到出现明确完成结果，再打开最终预览"); got != maxBuildCompletionWaitMS {
+		t.Fatalf("semantic terminal-state timeout=%d, want %d", got, maxBuildCompletionWaitMS)
+	}
 	if got := completionWaitTimeoutMS("停留在项目详情页查看状态"); got != 0 {
 		t.Fatalf("ordinary final observation must not receive a long poll, got %d", got)
 	}
@@ -135,23 +140,30 @@ func TestBusinessStagePlannerAddsBoundedKeyboardPlayabilityVerification(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	var preview, keyboard *model.BusinessStage
+	var submit, observe, preview, keyboard *model.BusinessStage
 	for index := range plan.Stages {
 		switch plan.Stages[index].ID {
+		case "business_stage_start_agent_build":
+			submit = &plan.Stages[index]
+		case "business_stage_observe_agent_progress":
+			observe = &plan.Stages[index]
 		case "business_stage_interactive_surface_observe":
 			preview = &plan.Stages[index]
 		case "business_stage_interactive_surface_change":
 			keyboard = &plan.Stages[index]
 		}
 	}
-	if preview == nil || keyboard == nil {
+	if submit == nil || observe == nil || preview == nil || keyboard == nil {
 		t.Fatalf("playability stages missing: %+v", plan.Stages)
+	}
+	if submit.ExpectedRouteAfterAction != "" || observe.Action.Parameters["preserve_current_route"] != "true" || preview.Action.Parameters["preserve_current_route"] != "true" {
+		t.Fatalf("unobserved allocated result route must be preserved at runtime: submit=%+v observe=%+v preview=%+v", submit, observe, preview)
 	}
 	if keyboard.Action.Type != string(model.GraphActionPress) || keyboard.Action.Parameters["keys"] != "ArrowLeft,ArrowRight,ArrowDown,ArrowUp" || !keyboard.Action.NonDestructive {
 		t.Fatalf("keyboard stage is not strictly bounded: %+v", keyboard)
 	}
 	node := graphNodeFromBusinessStage(project, *keyboard, project.ProductURL, "feature_playable")
-	if node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionPress || len(node.Validations) != 2 || node.Validations[0].Kind != "frame_surface_changed" || !node.Validations[0].Required || node.Validations[1].Kind != "url_matches" || !node.Validations[1].Required {
+	if node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionPress || len(node.Validations) != 1 || node.Validations[0].Kind != "page_changed" || !node.Validations[0].Required || len(node.StateAfter) != 1 || node.StateAfter[0].Kind != "frame_surface_changed" {
 		t.Fatalf("keyboard graph node must require visual-change evidence: %+v", node)
 	}
 }
@@ -305,13 +317,52 @@ func TestBusinessStagePlannerActualBuildDisablesPlanFirstMode(t *testing.T) {
 		case "business_stage_project_name_input":
 			foundInput = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='input-project-idea']"
 		case "business_stage_select_build_mode":
-			foundMode = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='button-mode-plan']" && strings.Contains(stage.Objective, "关闭仅规划模式")
+			foundMode = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='button-mode-plan']" && strings.Contains(stage.Objective, "关闭仅规划模式") && stage.Action.Parameters["desired_checked"] == "false"
 			node := graphNodeFromBusinessStage(project, stage, project.ProductURL, "feature_direct_build")
-			modeHasVisualValidation = stage.EntryRoute == "/app" && stage.ExpectedRouteAfterAction == "/app" && len(node.Validations) == 2 && node.Validations[0].Kind == "page_changed" && node.Validations[0].Expected == true && node.Validations[1].Kind == "url_matches" && node.Validations[1].Target.URL == "/app"
+			modeHasVisualValidation = stage.EntryRoute == "/app" && stage.ExpectedRouteAfterAction == "/app" && len(node.Validations) == 1 && node.Validations[0].Kind == "checked_equals" && node.Validations[0].Expected == false
 		}
 	}
 	if !foundInput || !foundMode || !modeHasVisualValidation {
 		t.Fatalf("actual build must bind the project idea input and disable plan-first mode: %+v", plan.Stages)
+	}
+}
+
+func TestBusinessStagePlannerCompilesIdeaFieldIntoTargetSiteBuildPrompt(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductDescription = "点击新建项目后，让目标 Agent 实际生成可运行的数字合并网页游戏，随后录制视频。"
+	project.MustShow = []string{
+		"目标产品需求必须要求实现数字合并玩法和撤销能力",
+		"打开最终预览并确认方格棋盘、实时分数和操作说明可见",
+		"实际执行至少两个不同方向的键盘移动",
+		"长轮询期间每分钟保留截图证据",
+		"使用 H3 片头、Seedance 转场和 FFmpeg 合成成片",
+		"assets can be traced to graph nodes",
+		"graph can be approved",
+		"rehearsal pass rate is at least 90%",
+	}
+	verified := &model.VerifiedInteractionPlan{Actions: []model.VerifiedInteractionAction{
+		{ID: "idea", Label: "Project idea", Kind: "fill", URL: "https://app.example.com/app", Selector: "[data-testid='input-project-idea']", IsBusiness: true, VerificationStatus: "verified"},
+	}}
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, graphQualityIntelligence(), verified)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input *model.BusinessStage
+	for index := range plan.Stages {
+		if plan.Stages[index].ID == "business_stage_project_name_input" {
+			input = &plan.Stages[index]
+			break
+		}
+	}
+	if input == nil {
+		t.Fatal("project requirement input stage is missing")
+	}
+	value := input.Action.InputValue
+	if input.Action.InputSemantic != "project_requirement" || !strings.Contains(value, "请直接从零构建") || !strings.Contains(value, "数字合并网页游戏") || !strings.Contains(value, "实现数字合并玩法和撤销能力") || !strings.Contains(value, "方格棋盘") || !strings.Contains(value, "键盘移动") {
+		t.Fatalf("idea field did not receive an actionable product specification: %+v", input.Action)
+	}
+	if strings.Contains(strings.ToLower(value), "seedance") || strings.Contains(strings.ToLower(value), "ffmpeg") || strings.Contains(strings.ToLower(value), "rehearsal") || strings.Contains(strings.ToLower(value), "graph can") || strings.Contains(value, "每分钟") || strings.Contains(value, "目标产品需求必须要求") {
+		t.Fatalf("internal harness instructions leaked into the target-site prompt: %s", value)
 	}
 }
 
@@ -355,6 +406,7 @@ func TestBusinessStagePlannerCreatesRequirementDrivenProjectStages(t *testing.T)
 		model.BusinessStageKindBusinessInput,
 		model.BusinessStageKindModeSelection,
 		model.BusinessStageKindBusinessSubmit,
+		model.BusinessStageKindBusinessSubmit,
 		model.BusinessStageKindObserveProgress,
 		model.BusinessStageKindFinalObserve,
 	}
@@ -369,13 +421,13 @@ func TestBusinessStagePlannerCreatesRequirementDrivenProjectStages(t *testing.T)
 			t.Fatalf("stage %d must not add an unconditional networkidle wait: %+v", i, plan.Stages[i].Action.WaitConditions)
 		}
 	}
-	for _, index := range []int{1, 2, 3, 4} {
+	for _, index := range []int{1, 2, 3, 4, 5} {
 		if !plan.Stages[index].Action.NonDestructive {
 			t.Fatalf("approved project-creation stage must be non-destructive: %+v", plan.Stages[index])
 		}
 	}
-	if plan.CoreBusinessStageCount != 4 {
-		t.Fatalf("expected 4 core business stages, got %d", plan.CoreBusinessStageCount)
+	if plan.CoreBusinessStageCount != 5 {
+		t.Fatalf("expected 5 core business stages, got %d", plan.CoreBusinessStageCount)
 	}
 	inputStage := plan.Stages[2]
 	if inputStage.Action.InputValue != "2048" || inputStage.Kind != model.BusinessStageKindBusinessInput {
@@ -387,7 +439,14 @@ func TestBusinessStagePlannerCreatesRequirementDrivenProjectStages(t *testing.T)
 	if got := plan.Stages[1].DurationMS; got != 13000 {
 		t.Fatalf("new project stage must preserve explicit user duration, got %d", got)
 	}
-	observeStage := plan.Stages[5]
+	continuationStage := plan.Stages[5]
+	if continuationStage.ID != "business_stage_async_build_continue" || continuationStage.Action.Parameters["target_wait_timeout_ms"] != "180000" || !strings.Contains(continuationStage.Action.Parameters["approved_accessible_names"], "Build here") {
+		t.Fatalf("async builder continuation contract is incomplete: %+v", continuationStage)
+	}
+	if len(continuationStage.Targets) != 0 {
+		t.Fatalf("initial create/submit target leaked into the post-plan continuation stage: %+v", continuationStage.Targets)
+	}
+	observeStage := plan.Stages[6]
 	if observeStage.DurationMS != 45000 || observeStage.Action.Type != string(model.GraphActionWait) {
 		t.Fatalf("observe stage must preserve explicit wait semantics, got %+v", observeStage)
 	}

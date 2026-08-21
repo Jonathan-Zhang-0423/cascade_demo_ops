@@ -678,6 +678,29 @@ func (f *CascadeFlow) RepackageReviewedGraph(ctx context.Context, state *Cascade
 	return state, nil
 }
 
+// ReplanAndRepackageFromCachedEvidence reruns only deterministic business-stage
+// planning, graph compilation, and package generation. It reuses the already
+// verified requirement/code/page evidence and must be called only before a
+// draft is approved or submitted.
+func (f *CascadeFlow) ReplanAndRepackageFromCachedEvidence(ctx context.Context, state *CascadeState) (*CascadeState, error) {
+	if state == nil || state.ProjectContext == nil || state.RequirementBrief == nil || state.UnderstandingReport == nil || state.ProductMap == nil || state.ProjectIntelligence == nil || state.VerifiedInteractionPlan == nil {
+		return state, errors.New("cached execution planning evidence is incomplete")
+	}
+	if f.deps.BusinessStagePlanner == nil || f.deps.GraphBuilder == nil || f.deps.ScriptPackager == nil {
+		return state, errors.New("execution planning dependencies are unavailable")
+	}
+	stagePlan, err := f.deps.BusinessStagePlanner.PlanBusinessStages(ctx, state.ProjectContext, state.RequirementBrief, state.UnderstandingReport, state.ProductMap, state.ProjectIntelligence, state.VerifiedInteractionPlan)
+	if err != nil {
+		return state, err
+	}
+	state.ProjectIntelligence.BusinessStagePlan = stagePlan
+	graph, err := f.deps.GraphBuilder.GenerateGraph(ctx, state.ProjectContext, state.ProductMap, state.UnderstandingReport, state.ProjectIntelligence)
+	if err != nil {
+		return state, err
+	}
+	return f.RepackageReviewedGraph(ctx, state, graph)
+}
+
 func fail(state *CascadeState, err error) *CascadeState {
 	if state == nil {
 		state = &CascadeState{}

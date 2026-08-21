@@ -96,22 +96,23 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			keywords:      []string{"新建项目", "创建项目", "新增项目", "new project", "create project", "project"},
 			capture:       []string{"工作台项目入口", "新建项目流程"},
 		})
-		if projectName != "" {
+		if projectName != "" || businessVerifiedPlanHasRequirementPrompt(verifiedPlan) {
+			inputLabel := firstNonEmpty(projectName, "已确认的目标产品规格")
 			builder.addStage(stageSpec{
 				id:            "project_name_input",
 				kind:          model.BusinessStageKindBusinessInput,
 				title:         "填写项目名称",
-				objective:     "把演示项目名称填写为“" + projectName + "”。",
+				objective:     "把新建项目所需内容填写为“" + inputLabel + "”。",
 				actionType:    string(model.GraphActionFill),
 				actionLabel:   "填写项目名称",
 				inputSemantic: "project_name",
 				inputValue:    projectName,
-				successState:  "项目名称已填写为“" + projectName + "”。",
+				successState:  "新建项目所需内容已填写为“" + inputLabel + "”。",
 				routeState:    model.BusinessRouteStateCreationFlow,
 				entryRoute:    firstNonEmpty(routeHints.creation, routeHints.workspace),
 				expectedRoute: firstNonEmpty(routeHints.creation, routeHints.workspace),
 				durationMS:    durationMSForIntentKeywords(intentText, "项目名称", "项目名", "project name", projectName),
-				keywords:      []string{"项目名称", "项目名", "project name", "name", projectName},
+				keywords:      []string{"项目名称", "项目名", "项目需求", "需求描述", "project name", "project idea", "prompt", "description", "name", projectName},
 				capture:       []string{"项目名称输入框", "已填写的项目名称"},
 			})
 		}
@@ -129,6 +130,10 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			modeSuccess = "仅规划模式已关闭，项目将以直接构建模式启动。"
 			modeKeywords = append(modeKeywords, "计划", "规划", "plan", "direct build", "实际构建", "直接构建")
 		}
+		modeParameters := map[string]string(nil)
+		if wantsDirectBuildMode {
+			modeParameters = map[string]string{"desired_checked": "false"}
+		}
 		builder.addStage(stageSpec{
 			id:            "select_build_mode",
 			kind:          model.BusinessStageKindModeSelection,
@@ -144,6 +149,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			durationMS:    durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"),
 			keywords:      modeKeywords,
 			capture:       []string{"构建模式选项", "已选择构建模式"},
+			parameters:    modeParameters,
 		})
 	}
 
@@ -164,7 +170,35 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			keywords:      []string{"agent", "智能体", "开始构建", "启动构建", "实际构建", "生成", "构建", "build", "run", "start", "generate"},
 			capture:       []string{"启动构建按钮", "构建开始状态"},
 		})
+		// Async builders commonly acknowledge the initial request by producing a
+		// task plan, then expose one explicit non-destructive continuation control
+		// before code execution begins. Approve that semantic continuation as a
+		// separate once-effect stage; the runtime still requires one unique visible
+		// button/link with an exact approved accessible name and an independent
+		// post-click state change.
+		builder.addStage(stageSpec{
+			id:             "async_build_continue",
+			kind:           model.BusinessStageKindBusinessSubmit,
+			title:          "继续执行已确认的构建计划",
+			objective:      "如果异步构建器在提交需求后展示已生成计划，则点击唯一的继续、执行或开始构建控件，让实际代码构建继续；不得点击修改、取消或破坏性控件。",
+			actionType:     string(model.GraphActionClick),
+			actionLabel:    "继续执行构建",
+			successState:   "页面从计划确认状态进入实际执行、编码、构建进度或结果状态。",
+			routeState:     model.BusinessRouteStateBuildRunning,
+			entryRoute:     firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail, routeHints.workspace),
+			expectedRoute:  firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail),
+			durationMS:     0,
+			keywords:       []string{"继续构建", "开始构建", "执行计划", "确认并构建", "build here", "build now", "execute plan", "run plan", "continue build", "proceed"},
+			capture:        []string{"计划确认状态", "开始实际构建后的页面变化"},
+			nonDestructive: true,
+			parameters: map[string]string{
+				"preserve_current_route":    "true",
+				"target_wait_timeout_ms":    "180000",
+				"approved_accessible_names": "在此构建|Build here|开始构建|Build now|执行计划|Execute plan|继续构建|Continue build|立即构建|Start building|确认并构建|Run plan|Continue|Proceed",
+			},
+		})
 	}
+	preserveAllocatedBuildRoute := wantsBuild && strings.TrimSpace(routeHints.buildRunning) == "" && strings.TrimSpace(routeHints.projectDetail) == ""
 
 	waitMS := requiredObservationDurationMS(intentText)
 	wantsObservation := containsAnyNormalized(intentText, "等待", "观察", "看实际发生", "看发生了什么", "实际构建演示", "构建演示", "progress", "log", "observe")
@@ -184,6 +218,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			keywords:       []string{"构建进度", "构建日志", "agent", "智能体", "progress", "log", "preview", "build"},
 			capture:        []string{"构建过程", "构建日志或预览变化"},
 			nonDestructive: true,
+			parameters:     preserveCurrentRouteParameters(preserveAllocatedBuildRoute),
 		})
 	}
 
@@ -249,6 +284,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		keywords:       finalKeywords,
 		capture:        []string{"最终状态截图"},
 		nonDestructive: true,
+		parameters:     preserveCurrentRouteParameters(preserveAllocatedBuildRoute),
 	})
 
 	if wantsInteractiveSurfaceVerification(intentText) {
@@ -268,6 +304,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			keywords:       []string{"交互", "可操作", "画布", "预览", "interactive", "canvas", "iframe", "controls", "preview"},
 			capture:        []string{"交互区域", "操作前运行时状态"},
 			nonDestructive: true,
+			parameters:     preserveCurrentRouteParameters(preserveAllocatedBuildRoute),
 		})
 		builder.addStage(stageSpec{
 			id:            "interactive_surface_change",
@@ -283,16 +320,36 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			durationMS:    6000,
 			keywords:      []string{"方向键", "键盘", "交互", "操作", "keyboard", "interactive"},
 			capture:       []string{"操作前交互区域", "操作后视觉变化"},
-			parameters: map[string]string{
+			parameters: mergeBusinessStageParameters(preserveCurrentRouteParameters(preserveAllocatedBuildRoute), map[string]string{
 				"keys":               "ArrowLeft,ArrowRight,ArrowDown,ArrowUp",
 				"inter_key_delay_ms": "350",
 				"focus_preview":      "true",
-			},
+			}),
 			nonDestructive: true,
 		})
 	}
 
 	return builder.plan(), nil
+}
+
+func preserveCurrentRouteParameters(enabled bool) map[string]string {
+	if !enabled {
+		return nil
+	}
+	return map[string]string{"preserve_current_route": "true"}
+}
+
+func mergeBusinessStageParameters(values ...map[string]string) map[string]string {
+	merged := map[string]string{}
+	for _, value := range values {
+		for key, item := range value {
+			merged[key] = item
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 type stageSpec struct {
@@ -461,6 +518,7 @@ func wantsBuildCompletion(intentText string) bool {
 	text := normalizeIntentText(intentText)
 	return containsAnyNormalized(text,
 		"等待 agent 真正", "等待agent真正", "直到 agent", "直到agent", "构建完成", "编写完", "编写完成",
+		"直到出现明确完成", "直到明确完成", "等待明确完成", "明确完成结果", "明确成功或失败", "明确完成或失败",
 		"全部步骤完成", "所有步骤完成", "明确 build_complete", "build_complete", "build complete", "all_complete",
 		"all complete", "all steps complete", "wait until complete", "wait for completion",
 	)
@@ -586,11 +644,32 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 	order := len(b.stages) + 1
 	stageID := "business_stage_" + spec.id
 	targets := b.source.targetsForStage(spec)
+	if spec.id == "async_build_continue" {
+		targets = filterAsyncBuildContinuationTargets(targets)
+	}
+	if spec.id == "project_name_input" && businessTargetsDescribeRequirementPrompt(targets) {
+		if compiled := compileTargetSiteBuildPrompt(b.project, b.source.brief, spec.inputValue); compiled != "" {
+			spec.title = "填写项目需求"
+			spec.objective = "把已确认的目标产品规格原样填写到新建项目需求输入框。"
+			spec.actionLabel = "填写项目需求"
+			spec.inputSemantic = "project_requirement"
+			spec.inputValue = compiled
+			spec.successState = "目标产品规格已完整填写，内容保持原样且可以直接开始构建。"
+			spec.keywords = append(spec.keywords, "项目需求", "需求描述", "project idea", "project prompt", "idea", "prompt", "description")
+			spec.capture = []string{"项目需求输入框", "已填写的目标产品规格"}
+		}
+	}
 	evidence := evidenceRefsForBusinessTargets(targets)
 	requirements := b.source.evidenceRequirementsForStage(spec, targets)
 	uncertainties := businessStageUncertainties(spec, requirements, evidence)
 	entryRoute := firstNonEmpty(spec.entryRoute, "/")
 	expectedRoute := firstNonEmpty(spec.expectedRoute, spec.entryRoute, "/")
+	if spec.kind == model.BusinessStageKindBusinessSubmit && strings.TrimSpace(spec.expectedRoute) == "" {
+		// The submit control is observed on its pre-action page. When source or
+		// runtime evidence cannot reveal an allocated result route, that entry
+		// route must not be reused as the post-action destination.
+		expectedRoute = ""
+	}
 	if spec.kind == model.BusinessStageKindSessionSetup {
 		if observed := authenticationEntryRouteFromTargets(targets); observed != "" {
 			entryRoute = observed
@@ -632,6 +711,156 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		Confidence:           businessStageConfidence(spec, targets, requirements),
 	}
 	b.stages = append(b.stages, stage)
+}
+
+func filterAsyncBuildContinuationTargets(targets []model.BusinessTargetCandidate) []model.BusinessTargetCandidate {
+	result := []model.BusinessTargetCandidate{}
+	for _, target := range targets {
+		semantic := normalizeIntentText(strings.Join([]string{target.Label, target.Text, target.TestID, target.Selector, target.ComponentRef}, " "))
+		for _, alternative := range target.Alternatives {
+			semantic += " " + normalizeIntentText(strings.Join([]string{alternative.ObservedAccessibleName, alternative.Value}, " "))
+		}
+		if containsAnyNormalized(semantic,
+			"在此构建", "继续构建", "开始构建", "立即构建", "确认并构建", "执行计划",
+			"build here", "build-here", "build now", "build-now", "continue build", "execute plan", "execute-plan", "run plan", "run-plan", "proceed", "resume",
+		) {
+			result = append(result, target)
+		}
+	}
+	return result
+}
+
+func businessTargetsDescribeRequirementPrompt(targets []model.BusinessTargetCandidate) bool {
+	parts := []string{}
+	for _, target := range targets {
+		parts = append(parts, target.Label, target.Selector, target.Text, target.TestID, target.ComponentRef, target.Role)
+		for _, alternative := range target.Alternatives {
+			parts = append(parts, alternative.Value, alternative.ObservedAccessibleName, alternative.ObservedRole)
+		}
+	}
+	text := normalizeIntentText(strings.Join(parts, " "))
+	return containsAnyNormalized(text,
+		"project idea", "project prompt", "project requirement", "requirements", "description", "what do you want to build",
+		"项目需求", "需求描述", "项目描述", "想构建", "想创建", "idea", "prompt", "textarea",
+	)
+}
+
+func businessVerifiedPlanHasRequirementPrompt(plan *model.VerifiedInteractionPlan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, action := range plan.Actions {
+		if !strings.EqualFold(strings.TrimSpace(action.Kind), string(model.GraphActionFill)) {
+			continue
+		}
+		if businessTargetsDescribeRequirementPrompt([]model.BusinessTargetCandidate{businessTargetFromVerifiedAction(action)}) {
+			return true
+		}
+	}
+	return false
+}
+
+func compileTargetSiteBuildPrompt(project *model.ProjectContext, brief *model.RequirementBrief, fallbackName string) string {
+	if project == nil {
+		return ""
+	}
+	subject := targetBuildSubject(project.ProductDescription)
+	if subject == "" && project.Inputs != nil {
+		subject = targetBuildSubject(project.Inputs.RawUserPrompt)
+	}
+	if subject == "" {
+		subject = strings.TrimSpace(fallbackName)
+	}
+	if subject == "" {
+		return ""
+	}
+	requirements := targetProductRequirements(project.MustShow)
+	if brief != nil {
+		requirements = append(requirements, targetProductRequirements(brief.MustShow)...)
+	}
+	requirements = uniqueNormalizedStrings(requirements)
+	var builder strings.Builder
+	builder.WriteString("请直接从零构建并完成一个可运行的")
+	builder.WriteString(subject)
+	builder.WriteString("。不要询问已有项目状态，不要只输出计划、分析或说明；请立即实现实际产品结果。")
+	if len(requirements) > 0 {
+		builder.WriteString("核心产品验收要求：")
+		builder.WriteString(strings.Join(requirements, "；"))
+		builder.WriteString("。")
+	}
+	builder.WriteString("完成后请在当前产品预览中提供可直接使用和交互的结果。")
+	return strings.TrimSpace(builder.String())
+}
+
+func targetBuildSubject(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	markers := []string{"实际生成", "直接生成", "从零构建", "实际构建", "创建", "开发", "生成", "构建", "create", "build", "develop", "generate"}
+	lower := strings.ToLower(value)
+	for _, marker := range markers {
+		index := strings.Index(lower, strings.ToLower(marker))
+		if index < 0 {
+			continue
+		}
+		candidate := strings.TrimSpace(value[index+len(marker):])
+		if cut := strings.IndexAny(candidate, "，。；;,.\n\r"); cut >= 0 {
+			candidate = strings.TrimSpace(candidate[:cut])
+		}
+		candidate = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(candidate, "一个"), "一款"), "可运行的"))
+		if candidate != "" && !containsAnyNormalized(candidate, "演示视频", "最终成片", "事实素材", "导演模型") {
+			return limitRunes(candidate, 180)
+		}
+	}
+	return ""
+}
+
+func targetProductRequirements(values []string) []string {
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || containsAnyNormalized(value,
+			"登录", "凭据", "新建项目", "站内agent", "计划模式", "仅规划模式", "构建进度", "代码构建状态", "等待明确", "轮询", "截图", "视觉模型",
+			"事实证据", "录制", "导演", "视频", "成片", "片头", "片尾", "转场", "h3", "seedance", "ffmpeg", "demoops",
+			"assets can be traced to graph nodes", "graph can be approved", "rehearsal pass rate",
+		) {
+			continue
+		}
+		for _, prefix := range []string{"目标产品需求必须要求", "目标产品需求要求", "目标产品必须", "产品必须"} {
+			value = strings.TrimSpace(strings.TrimPrefix(value, prefix))
+		}
+		if value == "" {
+			continue
+		}
+		result = append(result, limitRunes(value, 220))
+	}
+	return result
+}
+
+func uniqueNormalizedStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, value := range values {
+		key := normalizeIntentText(value)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, strings.TrimSpace(value))
+	}
+	return result
+}
+
+func limitRunes(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > limit {
+		runes = runes[:limit]
+	}
+	return string(runes)
 }
 
 func observedCreationControlRoute(stageID string, targets []model.BusinessTargetCandidate) string {

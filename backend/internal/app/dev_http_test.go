@@ -62,6 +62,77 @@ func TestDevHTTPBridgeGeneratesExecutionPackage(t *testing.T) {
 	}
 }
 
+func TestDevHTTPBridgeResumesOnlyFailedScriptPackagingCheckpoint(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	body, err := json.Marshal(ExecutionPackageRequest{UserInput: &orchestrator.UserInput{
+		ProjectID:          "resume-script-package",
+		Mode:               model.AppModeDesktop,
+		ProductURL:         "https://app.example.com",
+		ProductDescription: "展示一个可交互产品的真实操作结果。",
+		TargetAudience:     "产品团队",
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInput()},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	state.CurrentNode = orchestrator.NodeScriptPackage
+	state.Status = orchestrator.FlowStatusFailed
+	state.ErrorMessage = "deterministic validation failed"
+	state.ScriptDocument = nil
+	state.ExecutableScriptBundle = nil
+	if err := server.service.states.Save(t.Context(), &state); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/"+url.PathEscape(state.ProjectID)+"/execution-package/resume", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected resume status %d: %s", response.Code, response.Body.String())
+	}
+	var bridge BridgeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if !bridge.OK {
+		t.Fatalf("resume failed: %s", bridge.Error)
+	}
+	var resumed orchestrator.CascadeState
+	if err := json.Unmarshal(bridge.Data, &resumed); err != nil {
+		t.Fatal(err)
+	}
+	if resumed.CurrentNode != orchestrator.NodeHumanApprove || resumed.Status != orchestrator.FlowStatusAwaitingHuman || resumed.ExecutableScriptBundle == nil {
+		t.Fatalf("unexpected resumed state: node=%s status=%s bundle=%t", resumed.CurrentNode, resumed.Status, resumed.ExecutableScriptBundle != nil)
+	}
+
+	// Repackaging an unsubmitted approval draft is deterministic and idempotent.
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/"+url.PathEscape(state.ProjectID)+"/execution-package/resume", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if !bridge.OK {
+		t.Fatalf("idempotent draft repackage failed: %+v", bridge)
+	}
+
+	resumed.CurrentNode = orchestrator.NodeExecuteRehearse
+	resumed.Status = orchestrator.FlowStatusRunning
+	if err := server.service.states.Save(t.Context(), &resumed); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/desktop/projects/"+url.PathEscape(state.ProjectID)+"/execution-package/resume", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if bridge.OK || !strings.Contains(bridge.Error, "unsubmitted approval draft") {
+		t.Fatalf("expected execution-checkpoint resume rejection, got %+v", bridge)
+	}
+}
+
 func TestDevHTTPBridgeClientPackagePreflightIsLocalAndDigestBound(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	input := orchestrator.UserInput{
@@ -709,6 +780,37 @@ func TestBrowserAgentUploadViewCompactsInvestigationTraceAndRedundantRoutes(t *t
 	}
 	if plan.Stages[0].CandidateRoutes != nil || outline.Stages[0].CandidateRoutes != nil {
 		t.Fatalf("fixed routes must not duplicate candidate routes in upload view: plan=%+v outline=%+v", plan.Stages[0].CandidateRoutes, outline.Stages[0].CandidateRoutes)
+	}
+}
+
+func TestBrowserAgentUploadViewPreservesApprovedBusinessInputValue(t *testing.T) {
+	approved := strings.Repeat("从运行时需求生成的完整产品规格。", 20)
+	plan := &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+		StageKind:    model.BusinessStageKindBusinessInput,
+		Interaction:  model.BrowserAgentInteraction{Kind: model.GraphActionFill, Value: approved},
+		InputContent: []model.StageInputContent{{Kind: string(model.GraphActionFill), Value: approved}},
+	}}}
+
+	compactStageApprovalPlanForUpload(plan)
+
+	if got := plan.Stages[0].InputContent[0].Value; got != approved {
+		t.Fatalf("approved input value changed during upload compaction: got %q", got)
+	}
+}
+
+func TestBrowserAgentV1UploadViewOmitsForwardInteractionContracts(t *testing.T) {
+	contract := &model.InteractionContract{SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "interaction_demo"}
+	pkg := &model.ClientExecutionPackage{ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
+		ScriptManifest:    model.ExecutableScriptManifest{Runtime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1},
+		PlanJSON:          &model.ExecutionScriptDocument{Steps: []model.ScriptStep{{InteractionContract: contract}}},
+		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{InteractionContract: contract}}},
+		ScriptOutline:     &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{InteractionContract: contract}}},
+	}}
+
+	applyBrowserAgentOutlineUploadView(pkg)
+	bundle := pkg.ExecutableScriptBundle
+	if bundle.PlanJSON.Steps[0].InteractionContract != nil || bundle.StageApprovalPlan.Stages[0].InteractionContract != nil || bundle.ScriptOutline.Stages[0].InteractionContract != nil {
+		t.Fatalf("v1 upload retained a forward-only interaction contract: %+v", bundle)
 	}
 }
 

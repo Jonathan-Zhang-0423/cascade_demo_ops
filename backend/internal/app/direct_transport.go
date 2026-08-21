@@ -675,6 +675,42 @@ func (s *Service) GetDirectExecutionStatus(ctx context.Context, projectID, jobID
 	return status, nil
 }
 
+// CancelDirectExecution transitions exactly one approved Direct job to a
+// terminal canceled state. The remote Worker observes the control flag and
+// cancels its browser context without replaying or requeueing the package.
+func (s *Service) CancelDirectExecution(ctx context.Context, projectID, jobID string) (model.DirectJobStatus, error) {
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil || state.DesktopCloudRun == nil || state.DesktopCloudRun.Transport != directTransportStateName {
+		return model.DirectJobStatus{}, errors.New("direct Browser Agent run is unavailable")
+	}
+	run := state.DesktopCloudRun
+	if strings.TrimSpace(jobID) == "" || run.CloudJobID != jobID {
+		return model.DirectJobStatus{}, errors.New("direct Browser Agent cancel job binding mismatch")
+	}
+	lease, err := s.directLeaseForRequest(ctx, projectID)
+	if err != nil {
+		return model.DirectJobStatus{}, err
+	}
+	path := "/v1/direct/jobs/" + url.PathEscape(jobID) + "/cancel"
+	var status model.DirectJobStatus
+	err = s.directDataRequest(ctx, lease, http.MethodPost, path, nil, "job_status", &status)
+	if err != nil && shouldRenewDirectLease(err) {
+		if lease, err = s.acquireDirectLease(ctx, projectID); err == nil {
+			err = s.directDataRequest(ctx, lease, http.MethodPost, path, nil, "job_status", &status)
+		}
+	}
+	if err != nil {
+		return status, err
+	}
+	if status.JobID != jobID || status.Status != "canceled" {
+		return status, errors.New("direct Browser Agent cancel response mismatch")
+	}
+	if err := s.persistDirectStatus(ctx, projectID, status); err != nil {
+		return status, err
+	}
+	return status, nil
+}
+
 // ReuploadDirectCredential restores the one-time in-memory credential grant
 // after a Worker release or Gateway restart. It reuses only the approved grant
 // identity/scope and reads the secret value afresh from the local vault; it

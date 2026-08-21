@@ -117,6 +117,9 @@ func (w *worker) claim(ctx context.Context) (directtransport.WorkerJob, bool, er
 func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	ctx, cancel := context.WithTimeout(parent, w.runTimeout)
 	defer cancel()
+	stopControlPoll := make(chan struct{})
+	defer close(stopControlPoll)
+	go w.cancelWhenRequested(ctx, cancel, job.JobID, stopControlPoll)
 	completed := false
 	defer func() {
 		if !completed {
@@ -141,6 +144,10 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	}
 	result, files, err := w.service.RunDirectBrowserAgentJobWithCredentials(ctx, &job.Package, job.JobID, jobRoot, credentials, progress)
 	clearCredentialMap(credentials)
+	if canceled, _ := w.cancelRequested(context.WithoutCancel(parent), job.JobID); canceled {
+		fmt.Fprintln(os.Stdout, "job canceled job=", safeID(job.JobID))
+		return
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "execution failed job=", safeID(job.JobID), "class=browser_agent_execution_failed")
 		return
@@ -163,6 +170,43 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	}
 	completed = true
 	fmt.Fprintln(os.Stdout, "job completed job=", safeID(job.JobID), "artifacts=", len(files))
+}
+
+func (w *worker) cancelWhenRequested(ctx context.Context, cancel context.CancelFunc, jobID string, stop <-chan struct{}) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-ticker.C:
+			pollCtx, pollCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			canceled, _ := w.cancelRequested(pollCtx, jobID)
+			pollCancel()
+			if canceled {
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+func (w *worker) cancelRequested(ctx context.Context, jobID string) (bool, error) {
+	response, err := w.request(ctx, http.MethodGet, "/v1/worker/jobs/"+url.PathEscape(jobID)+"/control", nil, nil)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return false, responseError(response)
+	}
+	var control directtransport.WorkerJobControl
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&control); err != nil {
+		return false, err
+	}
+	return control.CancelRequested, nil
 }
 
 func workerFinalizationContext(parent context.Context) (context.Context, context.CancelFunc) {
