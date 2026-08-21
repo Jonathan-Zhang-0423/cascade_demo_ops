@@ -632,6 +632,7 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 	stageID := "business_stage_" + spec.id
 	targets := b.source.targetsForStage(spec)
 	evidence := evidenceRefsForBusinessTargets(targets)
+	evidence = append(evidence, approvedWorkflowEvidenceRefs(b.project)...)
 	if spec.interactionContract != nil {
 		evidence = append(evidence, spec.interactionContract.EvidenceRefs...)
 	}
@@ -681,6 +682,25 @@ func (b *businessStagePlanBuilder) addStage(spec stageSpec) {
 		InteractionContract:  spec.interactionContract,
 	}
 	b.stages = append(b.stages, stage)
+}
+
+func approvedWorkflowEvidenceRefs(project *model.ProjectContext) []model.EvidenceRef {
+	if project == nil {
+		return nil
+	}
+	refs := append([]model.EvidenceRef{}, project.KnowledgeRefs...)
+	if project.Inputs == nil {
+		return uniqueEvidenceRefs(refs)
+	}
+	for _, requirement := range project.Inputs.Requirements {
+		if requirement.Required {
+			refs = append(refs, requirement.EvidenceRefs...)
+		}
+	}
+	for _, contract := range project.Inputs.InteractionContracts {
+		refs = append(refs, contract.EvidenceRefs...)
+	}
+	return uniqueEvidenceRefs(refs)
 }
 
 func observedCreationControlRoute(stageID string, targets []model.BusinessTargetCandidate) string {

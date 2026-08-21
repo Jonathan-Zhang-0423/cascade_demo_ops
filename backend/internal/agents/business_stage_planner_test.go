@@ -323,7 +323,10 @@ func TestBusinessStagePlannerUsesTaskPackOperationShapeWithoutKeywordRouting(t *
 	project.Inputs = &model.ProjectInputBundle{WorkflowExecution: &model.WorkflowExecutionHints{
 		TaskPackID: "async-product-build-demo-v1", RequiresFreshEntity: true, EntityName: "流光演示版",
 		PrimaryInputSemantic: "product_spec", DirectExecution: true, RequiresSubmission: true, ObserveAsyncResult: true,
-	}}
+	}, Requirements: []model.DemoRequirement{{
+		ID: "approved_product_spec", Kind: "must_show", Description: project.ProductDescription, Required: true,
+		EvidenceRefs: []model.EvidenceRef{{ID: "approved_product_spec_evidence", Kind: model.EvidenceKindUserInput}},
+	}}}
 	verified := &model.VerifiedInteractionPlan{Actions: []model.VerifiedInteractionAction{
 		{ID: "entry", Label: "创建新项目", Kind: "click", Selector: "[data-testid='create-entry']", IsBusiness: true, VerificationStatus: "verified"},
 		{ID: "request", Label: "Describe what to build", Kind: "fill", Selector: "[data-testid='request-input']", IsBusiness: true, VerificationStatus: "verified"},
@@ -351,6 +354,9 @@ func TestBusinessStagePlannerUsesTaskPackOperationShapeWithoutKeywordRouting(t *
 		}
 		if stage.ID == "business_stage_project_name_input" && (stage.Action.InputSemantic != "product_spec" || stage.Action.InputValue != project.ProductDescription) {
 			t.Fatalf("Task Pack primary input did not preserve the frozen product specification: %+v", stage.Action)
+		}
+		if len(stage.EvidenceRefs) == 0 || stage.EvidenceRefs[0].ID != "approved_product_spec_evidence" {
+			t.Fatalf("Task Pack stage %s lost its approved workflow evidence: %+v", stage.ID, stage.EvidenceRefs)
 		}
 		delete(wantSelectors, stage.ID)
 	}
