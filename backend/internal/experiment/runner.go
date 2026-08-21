@@ -176,7 +176,8 @@ func (r *Runner) handleAdapterError(ctx context.Context, runID, legID string, er
 		return Run{}, getErr
 	}
 	if adapterErr.Code == "once_effect_result_unknown" && strings.TrimSpace(adapterErr.EffectID) != "" {
-		next, markErr := r.service.MarkOnceEffectUncertain(ctx, runID, run.Revision, legID, adapterErr.EffectID, adapterErr.EvidenceRefs)
+		failure := adapterRunError(adapterErr)
+		next, markErr := r.service.MarkOnceEffectUncertain(ctx, runID, run.Revision, legID, adapterErr.EffectID, adapterErr.EvidenceRefs, &failure)
 		if markErr != nil {
 			return next, markErr
 		}
@@ -190,11 +191,25 @@ func (r *Runner) handleAdapterError(ctx context.Context, runID, legID string, er
 	if phase == "" {
 		phase = strings.TrimSpace(adapterErr.Code)
 	}
-	next, transitionErr := r.service.TransitionLeg(ctx, runID, LegTransitionRequest{ExpectedRevision: run.Revision, LegID: legID, State: state, Phase: phase, EventType: "module_interrupted", Summary: "执行模块已按确定性故障策略停止", EvidenceRefs: adapterErr.EvidenceRefs})
+	failure := adapterRunError(adapterErr)
+	next, transitionErr := r.service.TransitionLeg(ctx, runID, LegTransitionRequest{ExpectedRevision: run.Revision, LegID: legID, State: state, Phase: phase, EventType: "module_interrupted", Summary: "执行模块已按确定性故障策略停止", EvidenceRefs: adapterErr.EvidenceRefs, LastError: &failure})
 	if transitionErr != nil {
 		return Run{}, transitionErr
 	}
 	return next, adapterErr
+}
+
+func adapterRunError(value *AdapterError) RunError {
+	message := strings.TrimSpace(value.Error())
+	const maxAdapterErrorMessageBytes = 2 << 10
+	if len(message) > maxAdapterErrorMessageBytes {
+		message = message[:maxAdapterErrorMessageBytes]
+	}
+	responsibility := "system"
+	if value.State == RunStateWaitingExternal {
+		responsibility = "external"
+	}
+	return RunError{Code: value.Code, Message: message, Retryable: value.Retryable, Responsibility: responsibility, EvidenceRefs: append([]string{}, value.EvidenceRefs...)}
 }
 
 func validateLegAdapterManifest(manifest ModuleManifest) error {

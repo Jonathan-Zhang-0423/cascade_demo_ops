@@ -76,11 +76,31 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	if build.Package.ConfidenceSummary == nil || build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked {
 		t.Fatalf("draft is blocked: %+v", build.Package.ConfidenceSummary)
 	}
-	upload, err := service.UploadDirectExecutionPackage(t.Context(), state.ProjectID, DirectTransportUploadRequest{OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256, ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: build.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true, IdempotencyKey: "direct-tetris-approval"})
+	beforeSubmitCalled := false
+	admittedCalled := false
+	upload, err := service.UploadDirectExecutionPackage(t.Context(), state.ProjectID, DirectTransportUploadRequest{
+		OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256, ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256,
+		ConfidenceAssessmentHash: build.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true, IdempotencyKey: "direct-tetris-approval",
+		BeforePackageSubmit: func() error {
+			beforeSubmitCalled = true
+			return nil
+		},
+		AfterPackageAdmitted: func(receipt model.DirectPackageReceipt) error {
+			admittedCalled = true
+			persisted, loadErr := states.Load(t.Context(), state.ProjectID)
+			if loadErr != nil {
+				return loadErr
+			}
+			if persisted.DesktopCloudRun == nil || persisted.DesktopCloudRun.CloudJobID != receipt.JobID {
+				return errors.New("package receipt was not persisted before admission callback")
+			}
+			return nil
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if upload.Build.BuildStatus != "approved" || upload.Receipt.JobID == "" || upload.Lease.DataPort != port {
+	if !beforeSubmitCalled || !admittedCalled || upload.Build.BuildStatus != "approved" || upload.Receipt.JobID == "" || upload.Lease.DataPort != port {
 		t.Fatalf("unexpected direct upload: %+v", upload)
 	}
 
@@ -590,9 +610,20 @@ func TestAppDirectTransportReleasesLeaseWhenPackageUploadFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.UploadDirectExecutionPackage(t.Context(), state.ProjectID, DirectTransportUploadRequest{OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256, ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: build.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true, IdempotencyKey: "direct-upload-failure"})
+	beforeSubmitCalled := false
+	admittedCalled := false
+	_, err = service.UploadDirectExecutionPackage(t.Context(), state.ProjectID, DirectTransportUploadRequest{
+		OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256, ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256,
+		ConfidenceAssessmentHash: build.Package.ConfidenceSummary.AssessmentHash, RiskConfirmed: true, IdempotencyKey: "direct-upload-failure",
+		BeforePackageSubmit:  func() error { beforeSubmitCalled = true; return nil },
+		AfterPackageAdmitted: func(model.DirectPackageReceipt) error { admittedCalled = true; return nil },
+	})
 	if err == nil {
 		t.Fatal("package upload unexpectedly reached the unavailable advertised data host")
+	}
+	var staged *directUploadStageError
+	if !errors.As(err, &staged) || staged.Stage != "package_submit" || !staged.MayHaveBeenAdmitted || !beforeSubmitCalled || admittedCalled {
+		t.Fatalf("failed package submission did not preserve the admission boundary: staged=%+v before=%t admitted=%t err=%v", staged, beforeSubmitCalled, admittedCalled, err)
 	}
 	releaseMu.Lock()
 	releases := releaseCount

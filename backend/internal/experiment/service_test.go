@@ -22,6 +22,9 @@ func TestCreateRunFreezesTwoLegsAndIsIdempotent(t *testing.T) {
 	if run.Legs[0].ProjectName == run.Legs[1].ProjectName || run.Legs[0].BuildPrompt == run.Legs[1].BuildPrompt {
 		t.Fatalf("main and recovery identities were not kept distinct: %+v", run.Legs)
 	}
+	if !strings.Contains(run.Legs[0].ProjectName, "·") || !strings.Contains(run.Legs[0].BuildPrompt, run.Legs[0].ProjectName) {
+		t.Fatalf("real-run project identity was not made unique and bound into the target prompt: %+v", run.Legs[0])
+	}
 	for _, term := range targetPromptForbiddenTerms {
 		if strings.Contains(strings.ToLower(run.Legs[0].BuildPrompt), strings.ToLower(term)) {
 			t.Fatalf("target prompt leaked internal term %q: %s", term, run.Legs[0].BuildPrompt)

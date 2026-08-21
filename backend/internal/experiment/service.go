@@ -60,15 +60,17 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 	if err != nil {
 		return Run{}, fmt.Errorf("load experiment definition: %w", err)
 	}
-	mainPrompt, err := CompileBuildPrompt(loaded.ProductSpec, loaded.Definition.MainProjectName)
-	if err != nil {
-		return Run{}, err
-	}
-	recoveryPrompt, err := CompileBuildPrompt(loaded.ProductSpec, loaded.Definition.RecoveryProjectName)
-	if err != nil {
-		return Run{}, err
-	}
 	runID, err := s.newID("experiment")
+	if err != nil {
+		return Run{}, err
+	}
+	mainProjectName := uniqueExperimentProjectName(loaded.Definition.MainProjectName, runID)
+	recoveryProjectName := uniqueExperimentProjectName(loaded.Definition.RecoveryProjectName, runID)
+	mainPrompt, err := CompileBuildPrompt(loaded.ProductSpec, mainProjectName)
+	if err != nil {
+		return Run{}, err
+	}
+	recoveryPrompt, err := CompileBuildPrompt(loaded.ProductSpec, recoveryProjectName)
 	if err != nil {
 		return Run{}, err
 	}
@@ -80,8 +82,8 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 		State: RunStateQueued, Phase: "product_spec_frozen", Revision: 1, Budget: loaded.Definition.AuthorizationBudget,
 		ProductSpec: loaded.ProductSpec, ObservationPlan: loaded.ObservationPlan, InteractionPlan: loaded.InteractionPlan,
 		Legs: []RunLeg{
-			{LegID: runID + ":main", Kind: "main", ProjectName: loaded.Definition.MainProjectName, BuildPrompt: mainPrompt, State: RunStateQueued, Phase: "awaiting_execution", BrowserAttempt: 1},
-			{LegID: runID + ":recovery", Kind: "recovery", ProjectName: loaded.Definition.RecoveryProjectName, BuildPrompt: recoveryPrompt, State: RunStateCreated, Phase: "awaiting_main_completion", BrowserAttempt: 1},
+			{LegID: runID + ":main", Kind: "main", ProjectName: mainProjectName, BuildPrompt: mainPrompt, State: RunStateQueued, Phase: "awaiting_execution", BrowserAttempt: 1},
+			{LegID: runID + ":recovery", Kind: "recovery", ProjectName: recoveryProjectName, BuildPrompt: recoveryPrompt, State: RunStateCreated, Phase: "awaiting_main_completion", BrowserAttempt: 1},
 		},
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -93,6 +95,17 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 		return Run{}, err
 	}
 	return run, nil
+}
+
+func uniqueExperimentProjectName(base, runID string) string {
+	base, runID = strings.TrimSpace(base), strings.TrimSpace(runID)
+	if len(runID) > 6 {
+		runID = runID[len(runID)-6:]
+	}
+	if runID == "" {
+		return base
+	}
+	return base + " · " + strings.ToUpper(runID)
 }
 
 func (s *Service) GetRun(ctx context.Context, runID string) (Run, error) {
@@ -115,6 +128,7 @@ type LegTransitionRequest struct {
 	EventType        string
 	Summary          string
 	EvidenceRefs     []string
+	LastError        *RunError
 }
 
 func (s *Service) TransitionLeg(ctx context.Context, runID string, request LegTransitionRequest) (Run, error) {
@@ -134,6 +148,11 @@ func (s *Service) TransitionLeg(ctx context.Context, runID string, request LegTr
 	}
 	next := run
 	next.Legs[index].State, next.Legs[index].Phase = request.State, strings.TrimSpace(request.Phase)
+	if request.LastError != nil {
+		failure := *request.LastError
+		failure.EvidenceRefs = append([]string{}, request.LastError.EvidenceRefs...)
+		next.LastError = &failure
+	}
 	next.State, next.Phase = aggregateRunState(next)
 	if next.State == RunStateWaitingInput && next.Waiting == nil {
 		next.Waiting = &WaitingState{Reason: "实验等待人工输入或最终终审", Responsibility: "user", NextAction: "查看当前 phase 和 Gate 证据"}
@@ -300,7 +319,7 @@ func (s *Service) BindOnceEffectExternalTask(ctx context.Context, runID string, 
 	return next, nil
 }
 
-func (s *Service) MarkOnceEffectUncertain(ctx context.Context, runID string, expectedRevision int, legID, effectID string, evidenceRefs []string) (Run, error) {
+func (s *Service) MarkOnceEffectUncertain(ctx context.Context, runID string, expectedRevision int, legID, effectID string, evidenceRefs []string, failures ...*RunError) (Run, error) {
 	run, err := s.store.Get(ctx, runID)
 	if err != nil {
 		return Run{}, err
@@ -328,6 +347,11 @@ func (s *Service) MarkOnceEffectUncertain(ctx context.Context, runID string, exp
 	next.Legs[index].State, next.Legs[index].Phase = RunStateWaitingInput, "once_effect_uncertain"
 	next.State, next.Phase = RunStateWaitingInput, "once_effect_uncertain"
 	next.Waiting = &WaitingState{Reason: "once-effect 的外部结果无法确认", Responsibility: "user", NextAction: "确认目标实体是否已经创建；系统不会自动重放"}
+	if len(failures) > 0 && failures[0] != nil {
+		failure := *failures[0]
+		failure.EvidenceRefs = append([]string{}, failures[0].EvidenceRefs...)
+		next.LastError = &failure
+	}
 	next.Revision++
 	next.UpdatedAt = s.now().UTC()
 	event := s.event(next, "once_effect_uncertain", "once-effect 状态不确定，已停止自动重放", legID, evidenceRefs)

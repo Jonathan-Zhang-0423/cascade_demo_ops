@@ -122,6 +122,9 @@ func TestRunnerFaultPoliciesAreDeterministic(t *testing.T) {
 			if err == nil || result.State != test.state || result.Phase != test.phase {
 				t.Fatalf("fault projection mismatch: run=%+v err=%v", result, err)
 			}
+			if result.LastError == nil || result.LastError.Code == "" || result.LastError.Message == "" {
+				t.Fatalf("fault cause was not preserved in the unified run projection: %+v", result.LastError)
+			}
 			if test.mode == "unknown_after_click" && (result.Legs[0].Checkpoint == nil || result.Legs[0].Checkpoint.OnceEffects[0].Status != "uncertain") {
 				t.Fatalf("unknown result was not persisted as uncertain: %+v", result.Legs[0])
 			}

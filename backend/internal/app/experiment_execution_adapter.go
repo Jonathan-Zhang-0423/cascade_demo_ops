@@ -94,9 +94,6 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		return err
 	}
 	effectKey := "submit-" + safePathSegment(request.RunID) + "-" + safePathSegment(request.LegID)
-	if err := emit(experiment.LegExecutionUpdate{Kind: "once_effect_started", EffectID: "target_submit", EffectKind: "target_submission", IdempotencyKey: effectKey}); err != nil {
-		return err
-	}
 	runtimeMetadata := map[string]any{
 		"experiment_run_id": request.RunID, "experiment_leg_id": request.LegID,
 		"observation_plan": request.ObservationPlan, "interaction_plan": request.InteractionPlan,
@@ -111,14 +108,26 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		ApprovalSubjectDigestSHA256: prepared.Build.ApprovalSubjectDigestSHA256,
 		ConfidenceAssessmentHash:    prepared.Build.Package.ConfidenceSummary.AssessmentHash,
 		RiskConfirmed:               true, IdempotencyKey: effectKey, RecoveryInjectionPhase: recoveryPhase, RuntimeMetadata: runtimeMetadata,
+		BeforePackageSubmit: func() error {
+			return emit(experiment.LegExecutionUpdate{Kind: "once_effect_started", EffectID: "target_submit", EffectKind: "target_submission", IdempotencyKey: effectKey})
+		},
+		AfterPackageAdmitted: func(receipt model.DirectPackageReceipt) error {
+			return emit(experiment.LegExecutionUpdate{Kind: "once_effect_admitted", EffectID: "target_submit", ExternalTaskRef: "direct:" + prepared.State.ProjectID + ":" + receipt.JobID, EvidenceRefs: []string{receipt.JobID}})
+		},
 	})
 	if err != nil {
+		var staged *directUploadStageError
+		if errors.As(err, &staged) {
+			if staged.ExternalTaskRef != "" {
+				return &experiment.AdapterError{Code: "direct_upload_post_admission_failed", Phase: staged.Stage, State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{staged.ExternalTaskRef}, Cause: err}
+			}
+			if !staged.MayHaveBeenAdmitted {
+				return &experiment.AdapterError{Code: "direct_upload_preflight_failed", Phase: staged.Stage, State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
+			}
+		}
 		return &experiment.AdapterError{Code: "once_effect_result_unknown", Phase: "target_submission", State: experiment.RunStateWaitingInput, Retryable: false, EffectID: "target_submit", Cause: err}
 	}
 	jobID := upload.Receipt.JobID
-	if err := emit(experiment.LegExecutionUpdate{Kind: "once_effect_admitted", EffectID: "target_submit", ExternalTaskRef: "direct:" + prepared.State.ProjectID + ":" + jobID, EvidenceRefs: []string{jobID}}); err != nil {
-		return err
-	}
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "request_submitted", Summary: "目标提交已被 Direct Gateway 接收", EvidenceRefs: []string{jobID}}); err != nil {
 		return err
 	}

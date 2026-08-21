@@ -79,6 +79,29 @@ type DirectTransportUploadRequest struct {
 	// checkpoint so resume semantics can be verified without changing actions.
 	RecoveryInjectionPhase string         `json:"-"`
 	RuntimeMetadata        map[string]any `json:"-"`
+	// BeforePackageSubmit durably records the caller's once-effect checkpoint
+	// after all local validation has passed and immediately before the first
+	// remote package request. AfterPackageAdmitted persists the returned job ID
+	// before credential delivery or any later fallible work.
+	BeforePackageSubmit  func() error                           `json:"-"`
+	AfterPackageAdmitted func(model.DirectPackageReceipt) error `json:"-"`
+}
+
+type directUploadStageError struct {
+	Stage               string
+	MayHaveBeenAdmitted bool
+	ExternalTaskRef     string
+	Err                 error
+}
+
+func (e *directUploadStageError) Error() string { return e.Stage + ": " + e.Err.Error() }
+func (e *directUploadStageError) Unwrap() error { return e.Err }
+
+func directUploadError(stage string, mayHaveBeenAdmitted bool, externalTaskRef string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &directUploadStageError{Stage: stage, MayHaveBeenAdmitted: mayHaveBeenAdmitted, ExternalTaskRef: strings.TrimSpace(externalTaskRef), Err: err}
 }
 
 type DirectTransportUploadResult struct {
@@ -323,22 +346,22 @@ func directSliceContains(values []string, target string) bool {
 
 func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID string, request DirectTransportUploadRequest) (DirectTransportUploadResult, error) {
 	if strings.TrimSpace(request.PackageDigestSHA256) == "" {
-		return DirectTransportUploadResult{}, errors.New("direct Browser Agent upload requires the authoritative package digest")
+		return DirectTransportUploadResult{}, directUploadError("request_validation", false, "", errors.New("direct Browser Agent upload requires the authoritative package digest"))
 	}
 	approval := CloudUploadInitRequest{OrgID: request.OrgID, ProjectID: projectID, PackageDigestSHA256: request.PackageDigestSHA256, ApprovalSubjectDigestSHA256: request.ApprovalSubjectDigestSHA256, ConfidenceAssessmentHash: request.ConfidenceAssessmentHash, RiskConfirmed: request.RiskConfirmed, IdempotencyKey: request.IdempotencyKey}
 	build, err := s.ApproveClientExecutionPackage(ctx, projectID, firstNonEmptyString(request.OrgID, defaultDesktopOrgID), approval)
 	if err != nil {
-		return DirectTransportUploadResult{}, err
+		return DirectTransportUploadResult{}, directUploadError("approval", false, "", err)
 	}
 	if strings.TrimSpace(request.RecoveryInjectionPhase) != "" || len(request.RuntimeMetadata) > 0 {
 		build, err = bindExperimentRuntimeMetadata(build, request.RecoveryInjectionPhase, request.RuntimeMetadata)
 		if err != nil {
-			return DirectTransportUploadResult{}, err
+			return DirectTransportUploadResult{}, directUploadError("runtime_metadata", false, "", err)
 		}
 	}
 	lease, err := s.acquireDirectLease(ctx, projectID)
 	if err != nil {
-		return DirectTransportUploadResult{}, err
+		return DirectTransportUploadResult{}, directUploadError("lease_acquisition", false, "", err)
 	}
 	cleanLease := true
 	defer func() {
@@ -349,34 +372,53 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 	}()
 	build, err = bindDirectExecutionPackageOrigin(build, lease.InstallationID)
 	if err != nil {
-		return DirectTransportUploadResult{}, err
+		return DirectTransportUploadResult{}, directUploadError("origin_binding", false, "", err)
 	}
 	messageID := "package_" + shortID(build.PackageDigestSHA256+request.IdempotencyKey)
 	message, err := model.EncryptDirectTransportJSON(build.Package, lease, messageID, "client_execution_package", model.DirectTransportDirectionUpload, time.Now().UTC())
 	if err != nil {
-		return DirectTransportUploadResult{}, err
+		return DirectTransportUploadResult{}, directUploadError("package_encryption", false, "", err)
+	}
+	if request.BeforePackageSubmit != nil {
+		if err := request.BeforePackageSubmit(); err != nil {
+			return DirectTransportUploadResult{}, directUploadError("before_submit_checkpoint", false, "", err)
+		}
 	}
 	var receipt model.DirectPackageReceipt
 	if err := s.directDataRequest(ctx, lease, http.MethodPost, "/v1/direct/packages", message, "package_receipt", &receipt); err != nil {
-		return DirectTransportUploadResult{}, err
+		return DirectTransportUploadResult{}, directUploadError("package_submit", true, "", err)
 	}
 	if receipt.PackageID != build.Package.PackageID || receipt.PackageDigest != build.PackageDigestSHA256 {
-		return DirectTransportUploadResult{}, errors.New("direct Browser Agent receipt does not match the approved package")
+		return DirectTransportUploadResult{}, directUploadError("package_receipt", true, receipt.JobID, errors.New("direct Browser Agent receipt does not match the approved package"))
+	}
+	// The package receipt is the first authoritative external task binding.
+	// Persist it before credential delivery so an App crash can always recover
+	// the admitted job without resubmitting the package.
+	if err := s.persistDirectUpload(ctx, projectID, build, lease, receipt); err != nil {
+		return DirectTransportUploadResult{}, directUploadError("receipt_persistence", true, receipt.JobID, err)
+	}
+	cleanLease = false
+	if request.AfterPackageAdmitted != nil {
+		if err := request.AfterPackageAdmitted(receipt); err != nil {
+			return DirectTransportUploadResult{}, directUploadError("external_task_checkpoint", true, receipt.JobID, err)
+		}
 	}
 	var credentialReceipt *model.DirectCredentialReceipt
 	if len(build.Package.CredentialGrants) > 0 {
 		value, err := s.uploadDirectCredential(ctx, lease, receipt, build)
 		if err != nil {
-			return DirectTransportUploadResult{}, err
+			return DirectTransportUploadResult{}, directUploadError("credential_delivery", true, receipt.JobID, err)
 		}
 		credentialReceipt = &value
 		receipt.Status = value.Status
 		receipt.Stage = value.Stage
+		if err := s.persistDirectStatus(ctx, projectID, model.DirectJobStatus{
+			ProtocolVersion: model.DirectTransportProtocolVersion, JobID: receipt.JobID, PackageID: receipt.PackageID,
+			Status: value.Status, Stage: value.Stage, Message: "Credential grant was securely delivered.", ProgressPercent: 5, UpdatedAt: value.AcceptedAt,
+		}); err != nil {
+			return DirectTransportUploadResult{}, directUploadError("credential_status_persistence", true, receipt.JobID, err)
+		}
 	}
-	if err := s.persistDirectUpload(ctx, projectID, build, lease, receipt); err != nil {
-		return DirectTransportUploadResult{}, err
-	}
-	cleanLease = false
 	return DirectTransportUploadResult{Build: build, Lease: directLeaseView(lease), Receipt: receipt, CredentialReceipt: credentialReceipt}, nil
 }
 
