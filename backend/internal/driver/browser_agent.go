@@ -109,6 +109,22 @@ type BrowserAgentWorkerStageResult struct {
 	SuggestedWaitCondition       string                   `json:"suggested_wait_condition,omitempty"`
 }
 
+type BrowserAgentTemporalCaptureRequest struct {
+	ScopeID  string `json:"scope_id"`
+	Sequence int    `json:"sequence"`
+	Phase    string `json:"phase"`
+	Reason   string `json:"reason"`
+}
+
+type BrowserAgentTemporalCaptureResult struct {
+	Artifact        model.ArtifactRef             `json:"artifact"`
+	Fingerprint     model.BrowserStateFingerprint `json:"fingerprint"`
+	MaterialChange  bool                          `json:"material_change"`
+	ChangedChannels []string                      `json:"changed_channels"`
+	CurrentURL      string                        `json:"current_url"`
+	PageTitle       string                        `json:"page_title"`
+}
+
 // BrowserAgentWorkerStatus is deliberately limited to redacted page metadata.
 // It never returns storage state, cookies, page HTML, or form values.
 type BrowserAgentWorkerStatus struct {
@@ -215,6 +231,15 @@ func (s *BrowserAgentWorkerSession) Revalidate(ctx context.Context, stage Browse
 func (s *BrowserAgentWorkerSession) Status(ctx context.Context) (BrowserAgentWorkerStatus, error) {
 	var result BrowserAgentWorkerStatus
 	err := s.call(ctx, "browser_agent_status", map[string]string{"session_id": s.sessionID}, &result)
+	return result, err
+}
+
+func (s *BrowserAgentWorkerSession) CaptureTemporal(ctx context.Context, request BrowserAgentTemporalCaptureRequest) (BrowserAgentTemporalCaptureResult, error) {
+	var result BrowserAgentTemporalCaptureResult
+	err := s.call(ctx, "browser_agent_temporal_capture", map[string]any{
+		"session_id": s.sessionID, "scope_id": request.ScopeID, "sequence": request.Sequence,
+		"phase": request.Phase, "reason": request.Reason,
+	}, &result)
 	return result, err
 }
 

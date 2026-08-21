@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { launchOptionsWithProxy } from "./playwright-proxy.js";
@@ -238,12 +239,15 @@ export type BrowserAgentStageResult = {
 
 export type BrowserAgentCloseResult = {
   recording_path?: string;
+  recording_segment_paths?: string[];
+  recording_segment_manifest_path?: string;
   trace_path?: string;
   artifacts: ArtifactRef[];
   runtime_versions: Record<string, string>;
 };
 
 type OutcomeChangeEvidence = {
+  url: boolean;
   visual: boolean;
   dom: boolean;
   aria: boolean;
@@ -252,6 +256,7 @@ type OutcomeChangeEvidence = {
 };
 
 type OutcomeSnapshot = {
+  url: string;
   visualDigest: string;
   domDigest: string;
   ariaDigest: string;
@@ -281,7 +286,25 @@ type BrowserAgentSession = {
 	targetGeometryByArtifactID: Map<string, BrowserTargetGeometry>;
 	visualChangeByNodeID: Map<string, boolean>;
 	outcomeChangesByNodeID: Map<string, OutcomeChangeEvidence>;
+	temporalSnapshotsByScopeID: Map<string, OutcomeSnapshot>;
   taskSecrets: Record<string, BrowserAgentTaskSecret>;
+};
+
+export type BrowserAgentTemporalCaptureRequest = {
+  session_id: string;
+  scope_id: string;
+  sequence: number;
+  phase: string;
+  reason: "submitted" | "heartbeat" | "material_change" | "manual_probe";
+};
+
+export type BrowserAgentTemporalCaptureResult = {
+  artifact: ArtifactRef;
+  fingerprint: BrowserStateFingerprint;
+  material_change: boolean;
+  changed_channels: Array<"url" | "visual" | "dom" | "aria" | "frame">;
+  current_url: string;
+  page_title: string;
 };
 
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
@@ -362,6 +385,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	targetGeometryByArtifactID: new Map(),
 	visualChangeByNodeID: new Map(),
 	outcomeChangesByNodeID: new Map(),
+	temporalSnapshotsByScopeID: new Map(),
     taskSecrets: validatedTaskSecrets(request.task_secrets),
   };
   await page.route("**/*", async (route: any) => {
@@ -392,6 +416,62 @@ export async function browserAgentSessionStatus(request: { session_id: string })
   // Keep this endpoint intentionally metadata-only: it is used to hand a
   // manually authenticated, isolated browser back to the local test harness.
   return { url: safeURL(session.page.url()), title: redactText(await session.page.title().catch(() => "")) };
+}
+
+// Captures a bounded, redacted keyframe for the temporal visual harness. The
+// PNG is returned only as an ArtifactRef; callers must never inline it in an
+// execution event or model prompt. Change detection is intentionally semantic
+// and site-neutral: it compares visual, DOM, ARIA, and frame surfaces without
+// interpreting page copy or approving an action.
+export async function captureBrowserAgentTemporalObservation(request: BrowserAgentTemporalCaptureRequest): Promise<BrowserAgentTemporalCaptureResult> {
+  const session = requiredSession(request.session_id);
+  const scopeID = safeName(request.scope_id);
+  if (!scopeID || !Number.isInteger(request.sequence) || request.sequence < 1) throw new Error("browser_agent_temporal_capture_identity_invalid");
+  if (!request.phase?.trim() || !["submitted", "heartbeat", "material_change", "manual_probe"].includes(request.reason)) {
+    throw new Error("browser_agent_temporal_capture_context_invalid");
+  }
+  const policyError = urlPolicyError(session.page.url(), session, false);
+  if (policyError) throw new Error(policyError);
+
+  const snapshot = await captureOutcomeSnapshot(session.page);
+  const previous = session.temporalSnapshotsByScopeID.get(scopeID);
+  const change = previous ? compareOutcomeSnapshots(previous, snapshot, false) : { url: true, visual: true, dom: true, aria: true, frame: Boolean(snapshot.frameDigest), networkSettled: false };
+  const changedChannels = (["url", "visual", "dom", "aria", "frame"] as const).filter((channel) => change[channel]);
+  session.temporalSnapshotsByScopeID.set(scopeID, snapshot);
+
+  const fileName = `temporal-${scopeID}-${String(request.sequence).padStart(3, "0")}-${safeName(request.reason)}.png`;
+  const filePath = path.join(session.outputDir, fileName);
+  const masks = session.maskSelectors.filter(Boolean).map((selector) => session.page.locator(selector));
+  await session.page.screenshot({ path: filePath, fullPage: false, mask: masks, animations: "disabled", caret: "hide", timeout: screenshotTimeoutMS });
+  const currentURL = safeURL(session.page.url());
+  const title = redactText(await session.page.title().catch(() => ""));
+  const artifact = await artifactRef(
+    `artifact_${safeName(session.id)}_${scopeID}_temporal_${request.sequence}`,
+    "temporal_observation_keyframe",
+    filePath,
+    "image/png",
+    undefined,
+    {
+      include_in_demo: request.reason !== "heartbeat" || changedChannels.length > 0,
+      presentation_only: true,
+      observation_scope_id: scopeID,
+      observation_sequence: request.sequence,
+      observation_phase: request.phase,
+      capture_reason: request.reason,
+      changed_channels: changedChannels,
+      current_url: currentURL,
+      page_title: title,
+    },
+    false,
+  );
+  return {
+    artifact,
+    fingerprint: await browserStateFingerprint(session.page),
+    material_change: previous === undefined || changedChannels.length > 0,
+    changed_channels: changedChannels,
+    current_url: currentURL,
+    page_title: title,
+  };
 }
 
 // This intentionally narrow RPC is used only to open the local dev/test
@@ -795,6 +875,27 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   }
   recordingPath = recordingPathPromise ? await valueWithin(recordingPathPromise, 3_000, undefined) : undefined;
   if (recordingPath && await fileExists(recordingPath)) {
+    const segmentEntries = (await readdir(session.outputDir).catch(() => [] as string[])).filter((entry) => /^recording-segment-\d+\.webm$/i.test(entry));
+    const segmentPath = path.join(session.outputDir, `recording-segment-${String(segmentEntries.length + 1).padStart(3, "0")}.webm`);
+    if (path.resolve(recordingPath) !== path.resolve(segmentPath)) await rename(recordingPath, segmentPath);
+    recordingPath = segmentPath;
+  }
+  const recordingSegmentPaths = (await readdir(session.outputDir).catch(() => [] as string[]))
+    .filter((entry) => /^recording-segment-\d+\.webm$/i.test(entry)).sort().map((entry) => path.join(session.outputDir, entry));
+  let segmentManifestPath: string | undefined;
+  if (recordingSegmentPaths.length > 0) {
+    segmentManifestPath = path.join(session.outputDir, "recording-segments.json");
+    await writeFile(segmentManifestPath, JSON.stringify({
+      schema_version: "demoops.browser_recording_segments.v1",
+      segment_count: recordingSegmentPaths.length,
+      segments: recordingSegmentPaths.map((segmentPath, index) => ({ order: index + 1, file_name: path.basename(segmentPath) })),
+    }, null, 2) + "\n", { mode: 0o600 });
+    if (recordingSegmentPaths.length > 1) {
+      const stitchedPath = path.join(session.outputDir, "recording-stitched.webm");
+      if (await stitchRecordingSegments(recordingSegmentPaths, stitchedPath, session.outputDir)) recordingPath = stitchedPath;
+    }
+  }
+  if (recordingPath && await fileExists(recordingPath)) {
     artifacts.unshift(await artifactRef(
       `artifact_${session.id}_recording`,
       "raw_recording",
@@ -811,6 +912,19 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
       session.recordingSensitive,
     ));
   }
+  for (let index = 0; index < recordingSegmentPaths.length; index++) {
+    const segmentPath = recordingSegmentPaths[index]!;
+    artifacts.push(await artifactRef(
+      `artifact_${session.id}_recording_segment_${index + 1}`,
+      "recording_segment",
+      segmentPath,
+      "video/webm",
+      undefined,
+      { include_in_demo: true, segment_order: index + 1, segment_count: recordingSegmentPaths.length, redaction_applied: true },
+      session.recordingSensitive,
+    ));
+  }
+  if (segmentManifestPath) artifacts.push(await artifactRef(`artifact_${session.id}_recording_segments`, "recording_segment_manifest", segmentManifestPath, "application/json", undefined, { include_in_demo: false }, false));
   // Failed observations may throw after their before-capture. Recover every
   // stage screenshot here so the Server can build a protocol failure package.
   for (const entry of await readdir(session.outputDir).catch(() => [] as string[])) {
@@ -831,10 +945,26 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   }
   return {
     ...(recordingPath ? { recording_path: recordingPath } : {}),
+    ...(recordingSegmentPaths.length > 0 ? { recording_segment_paths: recordingSegmentPaths } : {}),
+    ...(segmentManifestPath ? { recording_segment_manifest_path: segmentManifestPath } : {}),
     trace_path: session.tracePath,
     artifacts,
     runtime_versions: { runner: "playwright-browser-agent", browser: session.engine },
   };
+}
+
+async function stitchRecordingSegments(segmentPaths: string[], outputPath: string, outputDir: string): Promise<boolean> {
+  const executable = String(process.env.CASCADE_FFMPEG_PATH || "").trim();
+  if (!executable || segmentPaths.length < 2) return false;
+  const concatPath = path.join(outputDir, "recording-segments.ffconcat");
+  const quote = (value: string) => value.replace(/'/g, "'\\''");
+  await writeFile(concatPath, "ffconcat version 1.0\n" + segmentPaths.map((value) => `file '${quote(path.resolve(value).replace(/\\/g, "/"))}'`).join("\n") + "\n", { mode: 0o600 });
+  return new Promise<boolean>((resolve) => {
+    const child = spawn(executable, ["-hide_banner", "-loglevel", "error", "-y", "-safe", "0", "-f", "concat", "-i", concatPath, "-map", "0:v:0", "-map", "0:a?", "-c", "copy", outputPath], { windowsHide: true, stdio: "ignore" });
+    const timer = setTimeout(() => { child.kill(); resolve(false); }, 30_000);
+    child.once("error", () => { clearTimeout(timer); resolve(false); });
+    child.once("exit", (code) => { clearTimeout(timer); resolve(code === 0); });
+  });
 }
 
 async function executeInteraction(
@@ -1965,6 +2095,7 @@ async function captureOutcomeSnapshot(page: any): Promise<OutcomeSnapshot> {
   const surface = await interactiveSurfaceTargetOnce(page);
   const frameDigest = surface ? await visualDigest(page, surface.digestTarget) : "";
   return {
+    url: safeURL(page.url()),
     visualDigest: fullVisualDigest,
     domDigest: createHash("sha256").update(domParts.join("\n")).digest("hex"),
     ariaDigest: createHash("sha256").update(ariaParts.join("\n")).digest("hex"),
@@ -1974,6 +2105,7 @@ async function captureOutcomeSnapshot(page: any): Promise<OutcomeSnapshot> {
 
 function compareOutcomeSnapshots(before: OutcomeSnapshot, after: OutcomeSnapshot, networkSettled: boolean): OutcomeChangeEvidence {
   return {
+    url: before.url !== after.url,
     visual: before.visualDigest !== after.visualDigest,
     dom: before.domDigest !== after.domDigest,
     aria: before.ariaDigest !== after.ariaDigest,

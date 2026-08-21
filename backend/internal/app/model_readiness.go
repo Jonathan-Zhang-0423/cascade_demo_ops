@@ -23,7 +23,7 @@ type ModelReadinessFinding struct {
 	Message    string               `json:"message"`
 }
 
-// ModelReadinessView is a server-owned preflight summary for the four model
+// ModelReadinessView is a server-owned preflight summary for the model
 // routes required by the App planning and Server media pipeline.
 type ModelReadinessView struct {
 	SchemaVersion string                  `json:"schema_version"`
@@ -39,6 +39,7 @@ var requiredModelTasks = []config.ModelTask{
 	config.ModelTaskPlanning,
 	config.ModelTaskCodeReading,
 	config.ModelTaskMultimodalUnderstanding,
+	config.ModelTaskBrowserVisualObservation,
 	config.ModelTaskVideoOperation,
 }
 
