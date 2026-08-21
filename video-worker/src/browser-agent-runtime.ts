@@ -1286,8 +1286,9 @@ async function resolveUniqueVisibleStructuralSubmitTarget(locator: any, strategy
     const candidate = locator.nth(index);
     if (!await withTimeout(candidate.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
     if (await withTimeout(candidate.isDisabled(), targetProbeTimeoutMS, true)) continue;
-    const semantics = await withTimeout(compactElementSemantics(candidate), targetProbeTimeoutMS, { role: "", name: "" });
+    const semantics = await withTimeout(compactElementSemantics(candidate), targetProbeTimeoutMS, { role: "", name: "", siblingButtonCount: 0 });
     if (!allowedRoles.includes(semantics.role)) continue;
+    if ((semantics.siblingButtonCount || 0) < 2) continue;
     if (!normalizeElementName(semantics.name) || structuralAbortActionName(semantics.name)) continue;
     if (forbiddenName(semantics.name, contract.forbidden_names || [])) continue;
     eligible.push({ locator: candidate, semantics });
@@ -2477,7 +2478,7 @@ function forbiddenName(actual: string, forbidden: string[]): boolean {
   return Boolean(normalized) && forbidden.some((value) => normalized.includes(value.trim().toLowerCase()));
 }
 
-async function compactElementSemantics(locator: any): Promise<{ role: string; name: string }> {
+async function compactElementSemantics(locator: any): Promise<{ role: string; name: string; siblingButtonCount?: number }> {
   const result = await locator.evaluate((element: any) => {
     const explicitRole = String(element.getAttribute?.("role") || "").trim().toLowerCase();
     const tag = String(element.tagName || "").toLowerCase();
@@ -2498,9 +2499,10 @@ async function compactElementSemantics(locator: any): Promise<{ role: string; na
     // value as a changed target identity and reject the same approved control.
     const fallbackText = formControl ? inputButtonName : (element.innerText || element.textContent || "");
     const name = String(element.getAttribute?.("aria-label") || labels || fallbackText || "").trim();
-    return { role, name };
-  }).catch(() => ({ role: "", name: "" }));
-  return { role: String(result.role || "").toLowerCase(), name: redactText(String(result.name || "")) };
+    const siblingButtonCount = Array.from(element.parentElement?.children || []).filter((candidate: any) => String(candidate.tagName || "").toLowerCase() === "button").length;
+    return { role, name, siblingButtonCount };
+  }).catch(() => ({ role: "", name: "", siblingButtonCount: 0 }));
+  return { role: String(result.role || "").toLowerCase(), name: redactText(String(result.name || "")), siblingButtonCount: Number(result.siblingButtonCount || 0) };
 }
 
 function semanticsAllowed(actual: { role: string; name: string }, contract: BrowserAgentTargetContract): boolean {

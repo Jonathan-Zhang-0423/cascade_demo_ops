@@ -515,7 +515,7 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     const submitButton = {
       isVisible: async () => true,
       isDisabled: async () => false,
-      evaluate: async () => ({ role: "button", name: "Create" }),
+      evaluate: async () => ({ role: "button", name: "Create", siblingButtonCount: 2 }),
     };
     const submit = {
       count: async () => 1,
@@ -568,7 +568,7 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     const disabledButton = {
       isVisible: async () => true,
       isDisabled: async () => true,
-      evaluate: async () => ({ role: "button", name: "Create" }),
+      evaluate: async () => ({ role: "button", name: "Create", siblingButtonCount: 2 }),
     };
     const disabled = {
       count: async () => 1,
@@ -615,10 +615,11 @@ describe("browser agent App-evidence-bound selector semantics", () => {
   it("filters modal exit controls and non-button roles before binding the unique primary action", async () => {
     const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
     const candidates = [
-      { role: "button", name: "X close dialog" },
-      { role: "button", name: "Cancel" },
-      { role: "combobox", name: "Framework" },
-      { role: "button", name: "Create" },
+      { role: "button", name: "Plan", siblingButtonCount: 1 },
+      { role: "combobox", name: "Framework", siblingButtonCount: 1 },
+      { role: "button", name: "Cancel", siblingButtonCount: 2 },
+      { role: "button", name: "Create", siblingButtonCount: 2 },
+      { role: "button", name: "X close dialog", siblingButtonCount: 1 },
     ].map((semantics) => ({
       isVisible: async () => true,
       isDisabled: async () => false,
