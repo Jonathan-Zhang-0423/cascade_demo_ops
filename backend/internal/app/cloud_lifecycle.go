@@ -1798,6 +1798,7 @@ func compactScriptStepForUpload(step *model.ScriptStep) {
 	if step.TargetContract != nil {
 		compactTargetContractForUpload(step.TargetContract)
 	}
+	compactInteractionContractForUpload(step.InteractionContract)
 	for i := range step.Validations {
 		compactValidationForUpload(&step.Validations[i])
 	}
@@ -1862,6 +1863,7 @@ func compactStageApprovalPlanForUpload(plan *model.StageApprovalPlan) {
 		if stage.TargetContract != nil {
 			compactTargetContractForUpload(stage.TargetContract)
 		}
+		compactInteractionContractForUpload(stage.InteractionContract)
 		for j := range stage.InputContent {
 			stage.InputContent[j].EvidenceRefs = compactEvidenceRefsForUpload(stage.InputContent[j].EvidenceRefs, 1)
 			stage.InputContent[j].Value = truncateForUpload(stage.InputContent[j].Value, 120)
@@ -1900,6 +1902,7 @@ func compactBrowserAgentOutlineForUpload(outline *model.BrowserAgentScriptOutlin
 		if stage.TargetContract != nil {
 			compactTargetContractForUpload(stage.TargetContract)
 		}
+		compactInteractionContractForUpload(stage.InteractionContract)
 		if len(stage.Components) > 1 {
 			stage.Components = stage.Components[:1]
 		}
@@ -2037,6 +2040,26 @@ func compactTargetContractForUpload(contract *model.BrowserAgentTargetContract) 
 	contract.AllowedNames = limitStringsForUpload(contract.AllowedNames, 6)
 	contract.ForbiddenNames = limitStringsForUpload(contract.ForbiddenNames, 6)
 	contract.EvidenceRefs = compactEvidenceRefsForUpload(contract.EvidenceRefs, 2)
+}
+
+func compactInteractionContractForUpload(contract *model.InteractionContract) {
+	if contract == nil {
+		return
+	}
+	contract.SemanticGoal = truncateForUpload(contract.SemanticGoal, 180)
+	contract.EvidenceRefs = compactEvidenceRefsForUpload(contract.EvidenceRefs, 1)
+	contract.ActionTarget.EvidenceRefs = nil
+	contract.ActionTarget.SelectorAlternatives = compactSelectorCandidatesForUpload(contract.ActionTarget.SelectorAlternatives, 1)
+	for index := range contract.Preconditions {
+		contract.Preconditions[index].EvidenceRefs = nil
+		contract.Preconditions[index].Target.EvidenceRefs = nil
+		contract.Preconditions[index].Target.SelectorAlternatives = compactSelectorCandidatesForUpload(contract.Preconditions[index].Target.SelectorAlternatives, 1)
+	}
+	for index := range contract.ExpectedTransitions {
+		contract.ExpectedTransitions[index].EvidenceRefs = nil
+		contract.ExpectedTransitions[index].Target.EvidenceRefs = nil
+		contract.ExpectedTransitions[index].Target.SelectorAlternatives = compactSelectorCandidatesForUpload(contract.ExpectedTransitions[index].Target.SelectorAlternatives, 1)
+	}
 }
 
 func compactSelectorCandidatesForUpload(candidates []model.SelectorCandidate, limit int) []model.SelectorCandidate {
