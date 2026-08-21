@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, captureTargetGeometry, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, captureTargetGeometry, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
@@ -774,6 +774,7 @@ describe("browser agent required validations", () => {
     const validation = { id: "build_complete", kind: "element_visible", target: { test_id: "build-result-card" }, required: true, timeout_ms: 1_200_000 };
     expect(validationTimeoutMilliseconds(finalStage, validation)).toBe(1_200_000);
     expect(validationTimeoutMilliseconds(finalStage, { ...validation, kind: "interactive_surface_visible", timeout_ms: 600_000 })).toBe(600_000);
+    expect(interactiveSurfacePollTimeout(600_000)).toBe(600_000);
     expect(validationTimeoutMilliseconds({ ...finalStage, stage_kind: "business_submit", interactions: [{ kind: "click", non_destructive: true }] }, validation)).toBe(30_000);
     expect(validationTimeoutMilliseconds(finalStage, { ...validation, timeout_ms: 9_999_999 })).toBe(1_200_000);
 

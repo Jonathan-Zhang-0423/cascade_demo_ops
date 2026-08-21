@@ -2483,7 +2483,7 @@ async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceT
 }
 
 async function waitForPlayableSurfaceTarget(page: any, timeout: number): Promise<PlayableSurfaceTarget | undefined> {
-  const deadline = Date.now() + Math.max(250, Math.min(timeout, standardValidationTimeoutMS));
+  const deadline = Date.now() + interactiveSurfacePollTimeout(timeout);
   do {
     const target = await interactiveSurfaceTargetOnce(page);
     if (target) return target;
@@ -2542,6 +2542,13 @@ async function compactElementSemantics(locator: any): Promise<{ role: string; na
     return { role, name, siblingButtonCount };
   }).catch(() => ({ role: "", name: "", siblingButtonCount: 0 }));
   return { role: String(result.role || "").toLowerCase(), name: redactText(String(result.name || "")), siblingButtonCount: Number(result.siblingButtonCount || 0) };
+}
+
+export function interactiveSurfacePollTimeout(timeout: number): number {
+  // The caller has already applied the stage-kind safety policy in
+  // validationTimeoutMilliseconds. Preserve an admitted long final-observe
+  // budget here instead of silently truncating it back to the standard probe.
+  return Math.max(250, Math.min(timeout, finalCompletionValidationTimeoutMS));
 }
 
 function semanticsAllowed(actual: { role: string; name: string }, contract: BrowserAgentTargetContract): boolean {
