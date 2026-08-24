@@ -223,8 +223,11 @@ func AssessClientExecutionPackage(pkg *ClientExecutionPackage) (*PackageConfiden
 }
 
 func terminalPlayableRepairRequirementScope(pkg *ClientExecutionPackage) bool {
-	return pkg != nil && pkg.WorkflowGraph != nil && strings.HasPrefix(pkg.WorkflowGraph.ID, "graph_terminal_playable_repair_") &&
-		pkg.ExecutableScriptBundle != nil && pkg.ExecutableScriptBundle.RepairLineage != nil && strings.TrimSpace(pkg.ExecutableScriptBundle.RepairLineage.SourceResultID) != ""
+	if pkg == nil || pkg.WorkflowGraph == nil || pkg.ExecutableScriptBundle == nil || pkg.ExecutableScriptBundle.RepairLineage == nil || strings.TrimSpace(pkg.ExecutableScriptBundle.RepairLineage.SourceResultID) == "" {
+		return false
+	}
+	return strings.HasPrefix(pkg.WorkflowGraph.ID, "graph_terminal_playable_repair_") ||
+		strings.HasPrefix(pkg.WorkflowGraph.ID, "graph_terminal_interaction_repair_")
 }
 
 // The client execution package covers browser interaction and recording. It

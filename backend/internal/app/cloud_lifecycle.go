@@ -2327,13 +2327,25 @@ func scriptDocumentHasBusinessAction(doc *model.ExecutionScriptDocument) bool {
 				continue
 			}
 			for _, validation := range step.Validations {
-				if validation.Required && validation.Kind == "page_changed" && validation.Expected == true {
+				if validation.Required && verifiedKeyboardOutcomeValidation(validation) {
 					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+func verifiedKeyboardOutcomeValidation(validation model.ValidationSpec) bool {
+	if validation.Expected != true {
+		return false
+	}
+	switch validation.Kind {
+	case "page_changed", "frame_surface_changed", "visual_region_changed", "dom_changed", "aria_changed":
+		return true
+	default:
+		return false
+	}
 }
 
 func preflightClientExecutionPackage(state *orchestrator.CascadeState, pkg *model.ClientExecutionPackage) []model.AgentFinding {

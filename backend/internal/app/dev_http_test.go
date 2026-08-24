@@ -868,6 +868,19 @@ func TestScriptDocumentTreatsOnlyBoundedVerifiedKeyboardPlayAsBusinessAction(t *
 	if scriptDocumentHasBusinessAction(&model.ExecutionScriptDocument{Steps: []model.ScriptStep{missingEvidence}}) {
 		t.Fatal("keyboard action without required visual-change evidence was accepted")
 	}
+	contractEvidence := valid
+	contractEvidence.Validations = []model.ValidationSpec{
+		{Kind: "frame_surface_changed", Expected: true, Required: true},
+		{Kind: "distinct_actions_observed", Expected: 2, Required: true},
+	}
+	if !scriptDocumentHasBusinessAction(&model.ExecutionScriptDocument{Steps: []model.ScriptStep{contractEvidence}}) {
+		t.Fatal("bounded keyboard action with a required frame-change contract was not accepted")
+	}
+	nonOutcomeEvidence := valid
+	nonOutcomeEvidence.Validations = []model.ValidationSpec{{Kind: "url_matches", Expected: "/app", Required: true}}
+	if scriptDocumentHasBusinessAction(&model.ExecutionScriptDocument{Steps: []model.ScriptStep{nonOutcomeEvidence}}) {
+		t.Fatal("bounded keyboard action without an outcome-change proof was accepted")
+	}
 }
 
 func TestBusinessStagePreflightCountsVerifiedFinalKeyboardPlayAsCoreAction(t *testing.T) {
