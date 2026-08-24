@@ -90,6 +90,7 @@ type BrowserAgentWorkerStage struct {
 	PreferredSelectorAlternative      *model.SelectorCandidate            `json:"preferred_selector_alternative,omitempty"`
 	EvidenceBoundSelectorAlternatives []model.SelectorCandidate           `json:"evidence_bound_selector_alternatives,omitempty"`
 	SuggestedWaitCondition            string                              `json:"suggested_wait_condition,omitempty"`
+	CheckpointRestore                 bool                                `json:"checkpoint_restore,omitempty"`
 }
 
 type BrowserAgentWorkerStageRequest struct {

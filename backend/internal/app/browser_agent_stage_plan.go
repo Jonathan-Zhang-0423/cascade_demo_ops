@@ -77,6 +77,10 @@ type BrowserAgentRuntimeStage struct {
 	// ManualSessionCheckpoint exists only in a dev-visible post-login runtime
 	// copy. It never changes the App package or the formal runtime plan.
 	ManualSessionCheckpoint bool
+	// CheckpointRestore is runtime-only and is never written back to the
+	// approved package. It binds a resume observation to the exact URL already
+	// recorded in the append-only stage audit log.
+	CheckpointRestore bool
 }
 
 type BrowserAgentActionIntent struct {
@@ -211,6 +215,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	}
 	sequence := int64(0)
 	completedStages := map[string]model.StageExecutionEvent{}
+	latestCompletedOrder := 0
 	interruptionConsumed := false
 	if history, ok := sink.(stageExecutionEventHistory); ok {
 		for _, event := range history.Events() {
@@ -222,6 +227,11 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			}
 			if event.EventType == model.StageExecutionEventStageCompleted {
 				completedStages[event.StageID] = event
+				for _, stage := range plan.Stages {
+					if stage.ID == event.StageID && stage.Order > latestCompletedOrder {
+						latestCompletedOrder = stage.Order
+					}
+				}
 			}
 			if event.EventType == model.StageExecutionEventStageResumed {
 				interruptionConsumed = true
@@ -260,12 +270,22 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			return result, err
 		}
 		if completedEvent, completed := completedStages[stage.ID]; completed {
+			if stage.Order < latestCompletedOrder {
+				if err := appendEvent(stage, model.StageExecutionEventStageResumed, completedEvent.Observation, completedEvent.EvidenceRefs); err != nil {
+					return result, err
+				}
+				if stageReplayPolicy(stage) == model.InteractionReplayOnceEffect {
+					interruptionConsumed = true
+				}
+				continue
+			}
 			revalidator, ok := executor.(BrowserAgentStageOutcomeRevalidator)
 			if !ok {
 				return result, newRuntimeExecutionError("browser_agent_checkpoint_revalidation_unavailable", fmt.Errorf("completed stage %s requires non-action revalidation", stage.ID))
 			}
-			revalidated, revalidateErr := revalidator.RevalidateStage(ctx, plan, stage)
-			if revalidateErr == nil && validResumedStageObservation(revalidated, completedEvent.Observation) {
+			checkpointStage := bindRuntimeStageToCheckpoint(stage, completedEvent.Observation)
+			revalidated, revalidateErr := revalidator.RevalidateStage(ctx, plan, checkpointStage)
+			if revalidateErr == nil && validResumedStageObservation(revalidated, completedEvent.Observation, stageReplayPolicy(stage)) {
 				if err := appendEvent(stage, model.StageExecutionEventStageResumed, revalidated.Observation, revalidated.EvidenceRefs); err != nil {
 					return result, err
 				}
@@ -477,11 +497,14 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	return result, nil
 }
 
-func validResumedStageObservation(result BrowserAgentStageActionResult, previous *model.RuntimeObservation) bool {
+func validResumedStageObservation(result BrowserAgentStageActionResult, previous *model.RuntimeObservation, replayPolicy model.InteractionReplayPolicy) bool {
 	if result.Observation == nil || !runtimeObservationIsRealEvidence(result.Observation.Source) || len(result.EvidenceRefs) == 0 {
 		return false
 	}
 	if sameBrowserStateFingerprint(previous, result.Observation) {
+		return true
+	}
+	if replayPolicy == model.InteractionReplayOnceEffect && sameExactObservedURL(previous, result.Observation) {
 		return true
 	}
 	if len(result.Observation.Assertions) == 0 {
@@ -493,6 +516,56 @@ func validResumedStageObservation(result BrowserAgentStageActionResult, previous
 		}
 	}
 	return true
+}
+
+func sameExactObservedURL(previous, current *model.RuntimeObservation) bool {
+	if previous == nil || current == nil {
+		return false
+	}
+	left, leftErr := url.Parse(strings.TrimSpace(previous.URL))
+	right, rightErr := url.Parse(strings.TrimSpace(current.URL))
+	return leftErr == nil && rightErr == nil && left.Scheme != "" && left.Scheme == right.Scheme && left.Host == right.Host && left.EscapedPath() != "" && left.EscapedPath() == right.EscapedPath()
+}
+
+func bindRuntimeStageToCheckpoint(stage BrowserAgentRuntimeStage, observation *model.RuntimeObservation) BrowserAgentRuntimeStage {
+	if observation == nil || strings.TrimSpace(observation.URL) == "" {
+		return stage
+	}
+	checkpointURL := strings.TrimSpace(observation.URL)
+	oldAnchors := []string{stage.URL, stage.Route, stage.EntryRoute}
+	stage.URL, stage.Route, stage.EntryRoute = checkpointURL, checkpointURL, checkpointURL
+	stage.CheckpointRestore = true
+	for index := range stage.Validations {
+		validation := &stage.Validations[index]
+		if validation.Kind != "url_matches" {
+			continue
+		}
+		expected := strings.TrimSpace(firstNonEmptyString(validation.Target.URL, fmt.Sprint(validation.Expected)))
+		for _, anchor := range oldAnchors {
+			if expected != "" && strings.TrimSpace(anchor) != "" && routeTargetsEquivalent(expected, anchor, checkpointURL) {
+				validation.Target.URL = checkpointURL
+				validation.Expected = checkpointURL
+				break
+			}
+		}
+	}
+	return stage
+}
+
+func routeTargetsEquivalent(left, right, base string) bool {
+	leftURL, leftErr := url.Parse(strings.TrimSpace(left))
+	rightURL, rightErr := url.Parse(strings.TrimSpace(right))
+	baseURL, baseErr := url.Parse(strings.TrimSpace(base))
+	if leftErr != nil || rightErr != nil || baseErr != nil {
+		return false
+	}
+	if !leftURL.IsAbs() {
+		leftURL = baseURL.ResolveReference(leftURL)
+	}
+	if !rightURL.IsAbs() {
+		rightURL = baseURL.ResolveReference(rightURL)
+	}
+	return leftURL.Scheme == rightURL.Scheme && leftURL.Host == rightURL.Host && strings.TrimSuffix(leftURL.Path, "/") == strings.TrimSuffix(rightURL.Path, "/")
 }
 
 func sameBrowserStateFingerprint(previous, current *model.RuntimeObservation) bool {

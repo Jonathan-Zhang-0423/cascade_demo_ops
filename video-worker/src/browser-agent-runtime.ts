@@ -134,6 +134,7 @@ export type BrowserAgentWorkerStage = {
   validations?: BrowserAgentValidation[];
   preferred_selector_alternative?: BrowserAgentSelectorCandidate;
   evidence_bound_selector_alternatives?: BrowserAgentSelectorCandidate[];
+  checkpoint_restore?: boolean;
 };
 
 export type BrowserAgentOpenRequest = {
@@ -2149,12 +2150,14 @@ async function ensureStageExecutionRoute(session: BrowserAgentSession, stage: Br
   if (urlMatches(session.page.url(), targetURL)) {
     const currentError = urlPolicyError(session.page.url(), session, false);
     if (currentError) throw new Error(currentError);
+    if (stage.checkpoint_restore) session.continuationURL = session.page.url();
     return;
   }
   await navigateWithinSessionPolicy(session, targetURL, "domcontentloaded", actionTimeoutMS);
   if (!urlMatches(session.page.url(), targetURL)) {
     throw new Error(`browser_agent_stage_route_not_reached: ${stage.node_id}`);
   }
+  if (stage.checkpoint_restore) session.continuationURL = session.page.url();
 }
 
 async function navigateWithinSessionPolicy(

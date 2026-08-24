@@ -739,6 +739,7 @@ func workerStageFromRuntime(stage BrowserAgentRuntimeStage) driver.BrowserAgentW
 		Validations:                       append([]model.ValidationSpec{}, stage.Validations...),
 		PreferredSelectorAlternative:      stage.PreferredSelectorAlternative,
 		EvidenceBoundSelectorAlternatives: append([]model.SelectorCandidate{}, stage.EvidenceBoundSelectorAlternatives...),
+		CheckpointRestore:                 stage.CheckpointRestore,
 	}
 }
 
@@ -755,10 +756,10 @@ func browserAgentStepResults(plan BrowserAgentRuntimePlan, events []model.StageE
 			if event.EventType == model.StageExecutionEventStageStarted {
 				result.StartedAt = event.OccurredAt
 			}
-			if event.EventType == model.StageExecutionEventStageCompleted {
+			if event.EventType == model.StageExecutionEventStageCompleted || event.EventType == model.StageExecutionEventStageResumed {
 				result.CompletedAt = event.OccurredAt
 			}
-			if event.EventType == model.StageExecutionEventOutcomeObserved && event.Observation != nil {
+			if (event.EventType == model.StageExecutionEventOutcomeObserved || event.EventType == model.StageExecutionEventStageResumed) && event.Observation != nil {
 				copy := *event.Observation
 				outcome = &copy
 			}

@@ -616,13 +616,25 @@ func TestBrowserAgentStageOrchestratorResumesCompletedStagesWithoutReplayingActi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if executor.executeCalls != firstExecuteCalls || executor.revalidateCalls != len(plan.Stages) || len(resumed.Events) != len(plan.Stages) {
+	if executor.executeCalls != firstExecuteCalls || executor.revalidateCalls != 1 || len(resumed.Events) != len(plan.Stages) {
 		t.Fatalf("checkpoint resume replayed actions or skipped revalidation: execute=%d revalidate=%d events=%+v", executor.executeCalls, executor.revalidateCalls, resumed.Events)
 	}
 	for _, event := range resumed.Events {
 		if event.EventType != model.StageExecutionEventStageResumed {
 			t.Fatalf("resume audit event is missing: %+v", resumed.Events)
 		}
+	}
+}
+
+func TestBindRuntimeStageToCheckpointUsesExactAuditedRouteWithoutChangingAction(t *testing.T) {
+	stage := BrowserAgentRuntimeStage{
+		ID: "stage-observe", Order: 2, NodeID: "observe", URL: "https://app.example/app", Route: "/app", EntryRoute: "/app",
+		Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionInspect, NonDestructive: true}},
+		Validations:  []model.ValidationSpec{{ID: "entry", Kind: "url_matches", Target: model.ActionTarget{URL: "/app"}, Expected: "/app", Required: true}},
+	}
+	bound := bindRuntimeStageToCheckpoint(stage, &model.RuntimeObservation{URL: "https://app.example/results/runtime-42"})
+	if !bound.CheckpointRestore || bound.URL != "https://app.example/results/runtime-42" || bound.Validations[0].Target.URL != bound.URL || bound.Interactions[0].Kind != model.GraphActionInspect {
+		t.Fatalf("checkpoint route binding changed action semantics or missed the exact audited route: %+v", bound)
 	}
 }
 
