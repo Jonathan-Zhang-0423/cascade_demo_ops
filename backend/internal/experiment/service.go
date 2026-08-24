@@ -440,17 +440,42 @@ func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int
 	next := run
 	next.State, next.Phase = RunStateQueued, "resume_checkpoint_verification"
 	next.Waiting = nil
+	next.LastError = nil
+	resumeIndex, resumePhase := -1, ""
 	for index := range next.Legs {
-		if next.Legs[index].State == RunStateWaitingExternal || next.Legs[index].State == RunStateRunning || next.Legs[index].Phase == "once_effect_committed" {
-			next.Legs[index].State = RunStateQueued
-			next.Legs[index].Phase = "resume_observe_only"
-			next.Legs[index].BrowserAttempt++
+		leg := &next.Legs[index]
+		if terminalRunState(leg.State) || leg.Checkpoint == nil {
+			continue
+		}
+		for _, record := range leg.Checkpoint.OnceEffects {
+			switch {
+			case record.Status == "confirmed":
+				resumeIndex, resumePhase = index, "resume_observe_only"
+			case record.Status == "started" && strings.TrimSpace(record.ExternalTaskRef) != "" && resumeIndex < 0:
+				resumeIndex, resumePhase = index, "resume_external_task"
+			}
+		}
+		if resumeIndex == index {
 			break
 		}
 	}
+	if resumeIndex < 0 {
+		for index := range next.Legs {
+			if next.Legs[index].State == RunStateWaitingExternal || next.Legs[index].State == RunStateRunning {
+				resumeIndex, resumePhase = index, "resume_checkpoint_verification"
+				break
+			}
+		}
+	}
+	if resumeIndex < 0 {
+		return Run{}, errors.New("experiment has no resumable active leg")
+	}
+	next.Legs[resumeIndex].State = RunStateQueued
+	next.Legs[resumeIndex].Phase = resumePhase
+	next.Legs[resumeIndex].BrowserAttempt++
 	next.Revision++
 	next.UpdatedAt = s.now().UTC()
-	event := s.event(next, "run_resumed", "从已确认 checkpoint 恢复；已完成 once-effect 将被跳过", "", nil)
+	event := s.event(next, "run_resumed", "从已绑定 checkpoint 恢复；调度器只续接原活动腿", next.Legs[resumeIndex].LegID, nil)
 	if err := s.store.Transition(ctx, run.RunID, run.Revision, next, event); err != nil {
 		return Run{}, err
 	}

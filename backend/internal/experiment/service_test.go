@@ -88,6 +88,35 @@ func TestUncertainOnceEffectDefersInsteadOfReplaying(t *testing.T) {
 	}
 }
 
+func TestResumeBoundExternalTaskSelectsWaitingMainLeg(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateRunning, "target_submission")
+	legID := run.Legs[0].LegID
+	started, err := service.BeginOnceEffect(context.Background(), run.RunID, run.Revision, legID, "target_submit", "target_submission", "idem-bound-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := service.BindOnceEffectExternalTask(context.Background(), run.RunID, started.Revision, legID, "target_submit", "direct:project-one:job-one", []string{"job-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := service.TransitionLeg(context.Background(), run.RunID, LegTransitionRequest{ExpectedRevision: bound.Revision, LegID: legID, State: RunStateWaitingInput, Phase: "observation_deferred", EventType: "module_interrupted", Summary: "waiting for external result"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := service.Resume(context.Background(), run.RunID, waiting.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Legs[0].State != RunStateQueued || resumed.Legs[0].Phase != "resume_external_task" || resumed.Legs[0].BrowserAttempt != 2 {
+		t.Fatalf("bound main leg was not resumed: %+v", resumed.Legs)
+	}
+	if resumed.Legs[1].State != RunStateCreated || resumed.Legs[1].Phase != "awaiting_main_completion" {
+		t.Fatalf("unreached recovery leg was scheduled instead of main: %+v", resumed.Legs)
+	}
+}
+
 func TestCancelTerminatesRunWithoutCreatingEffects(t *testing.T) {
 	service := testService(t)
 	run := mustCreateRun(t, service)
