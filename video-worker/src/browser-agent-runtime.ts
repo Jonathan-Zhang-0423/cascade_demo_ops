@@ -351,7 +351,7 @@ const defaultViewport = { width: 2560, height: 1440 };
 const actionTimeoutMS = 10_000;
 const screenshotTimeoutMS = 8_000;
 const standardValidationTimeoutMS = 30_000;
-const finalCompletionValidationTimeoutMS = 20 * 60 * 1000;
+const finalCompletionValidationTimeoutMS = 35 * 60 * 1000;
 const secretInputMaskSelector = '[data-cascade-secret-input="true"]';
 
 export async function openBrowserAgentSession(request: BrowserAgentOpenRequest): Promise<{ session_id: string; runtime_versions: Record<string, string> }> {
@@ -1801,6 +1801,10 @@ export function browserVisualNextDelayMultiplier(decision: BrowserVisualObservat
 	return decision === "succeeded" || decision === "failed" ? 1 : 3;
 }
 
+export function browserVisualRefreshDue(startedAtMS: number, nowMS: number, refreshAfterMS: number, refreshed: boolean): boolean {
+	return !refreshed && refreshAfterMS > 0 && nowMS - startedAtMS >= refreshAfterMS;
+}
+
 async function waitForPlayableSurfaceWithVisualObservation(
 	session: BrowserAgentSession,
 	stage: BrowserAgentWorkerStage,
@@ -1811,8 +1815,17 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	const deadline = Date.now() + interactiveSurfacePollTimeout(timeout);
 	const requireVisualTerminal = stage.interaction_contract?.parameters?.require_visual_terminal_confirmation === true;
 	const { heartbeatLimit } = browserVisualObservationAllocation(config.maxCalls, requireVisualTerminal);
+	const startedAtMS = Date.now();
+	const refreshAfterMS = Math.max(0, Math.trunc(Number(stage.interaction_contract?.parameters?.refresh_after_ms) || 0));
+	let refreshed = false;
 	let nextCaptureAt = Date.now();
 	while (Date.now() < deadline) {
+		if (requireVisualTerminal && browserVisualRefreshDue(startedAtMS, Date.now(), refreshAfterMS, refreshed)) {
+			refreshed = true;
+			await session.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+			await waitForPageSettled(session.page, 5_000);
+			nextCaptureAt = Date.now();
+		}
 		const target = await interactiveSurfaceTargetOnce(session.page);
 		if (target) {
 			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];

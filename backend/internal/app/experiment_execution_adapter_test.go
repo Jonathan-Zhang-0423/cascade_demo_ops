@@ -71,11 +71,14 @@ func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(
 	if got := contracts[1].ExpectedTransitions; !interactionPredicatesContain(got, "distinct_actions_observed") || !interactionPredicatesContain(got, "frame_surface_changed") {
 		t.Fatalf("direction proof predicates=%+v", got)
 	}
-	if got := contracts[0].ExpectedTransitions[0].TimeoutMS; got != int(loaded.ObservationPlan.DeferAfterMS) {
+	if got := contracts[0].ExpectedTransitions[0].TimeoutMS; got != int(loaded.ObservationPlan.DeferAfterMS)+120_000 {
 		t.Fatalf("surface readiness timeout=%d want observation defer budget=%d", got, loaded.ObservationPlan.DeferAfterMS)
 	}
 	if contracts[0].Parameters["require_visual_terminal_confirmation"] != true {
 		t.Fatalf("surface readiness must bind deterministic and repeated visual terminal channels: %+v", contracts[0].Parameters)
+	}
+	if contracts[0].Parameters["refresh_after_ms"] != float64(loaded.ObservationPlan.DeferAfterMS) && contracts[0].Parameters["refresh_after_ms"] != loaded.ObservationPlan.DeferAfterMS {
+		t.Fatalf("surface readiness must bind the requested refresh point: %+v", contracts[0].Parameters)
 	}
 	if got := contracts[2].ExpectedTransitions; !interactionPredicatesContain(got, "numeric_increased") || !interactionPredicatesContain(got, "state_changed") {
 		t.Fatalf("numeric proof predicates=%+v", got)

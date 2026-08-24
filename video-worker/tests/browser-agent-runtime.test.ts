@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -16,10 +16,12 @@ describe("browser visual polling terminal evidence", () => {
   });
 
   it("reserves terminal-candidate calls instead of spending the whole budget on unchanged heartbeats", () => {
-	expect(browserVisualObservationAllocation(6, true)).toEqual({ heartbeatLimit: 1, terminalReserve: 5 });
+    expect(browserVisualObservationAllocation(6, true)).toEqual({ heartbeatLimit: 1, terminalReserve: 5 });
     expect(browserVisualObservationAllocation(6, false)).toEqual({ heartbeatLimit: 6, terminalReserve: 0 });
-	expect(browserVisualNextDelayMultiplier("in_progress")).toBe(3);
-	expect(browserVisualNextDelayMultiplier("succeeded")).toBe(1);
+    expect(browserVisualNextDelayMultiplier("in_progress")).toBe(3);
+    expect(browserVisualNextDelayMultiplier("succeeded")).toBe(1);
+    expect(browserVisualRefreshDue(1_000, 31_000, 30_000, false)).toBe(true);
+    expect(browserVisualRefreshDue(1_000, 31_000, 30_000, true)).toBe(false);
   });
 });
 
@@ -798,9 +800,10 @@ describe("browser agent required validations", () => {
     const validation = { id: "build_complete", kind: "element_visible", target: { test_id: "build-result-card" }, required: true, timeout_ms: 1_200_000 };
     expect(validationTimeoutMilliseconds(finalStage, validation)).toBe(1_200_000);
     expect(validationTimeoutMilliseconds(finalStage, { ...validation, kind: "interactive_surface_visible", timeout_ms: 600_000 })).toBe(600_000);
+    expect(validationTimeoutMilliseconds(finalStage, { ...validation, kind: "interactive_surface_visible", timeout_ms: 1_920_000 })).toBe(1_920_000);
     expect(interactiveSurfacePollTimeout(600_000)).toBe(600_000);
     expect(validationTimeoutMilliseconds({ ...finalStage, stage_kind: "business_submit", interactions: [{ kind: "click", non_destructive: true }] }, validation)).toBe(30_000);
-    expect(validationTimeoutMilliseconds(finalStage, { ...validation, timeout_ms: 9_999_999 })).toBe(1_200_000);
+    expect(validationTimeoutMilliseconds(finalStage, { ...validation, timeout_ms: 9_999_999 })).toBe(2_100_000);
 
     let waitOptions: unknown;
     const assertions = await evaluateRequiredValidations({

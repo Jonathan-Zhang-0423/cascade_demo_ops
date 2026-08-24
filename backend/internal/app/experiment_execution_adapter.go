@@ -224,7 +224,7 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan, obse
 			seenKinds[kind] = true
 			timeoutMS := 12000
 			if kind == "interactive_surface_visible" && step.ReplayPolicy == experiment.ReplayObserveOnly && observationPlan.DeferAfterMS > timeoutMS {
-				timeoutMS = observationPlan.DeferAfterMS
+				timeoutMS = observationPlan.DeferAfterMS + int((2*time.Minute)/time.Millisecond)
 			}
 			predicates = append(predicates, model.InteractionPredicate{ID: "proof_" + step.StepID + "_" + kind, Kind: kind, Target: target, Expected: expected, Required: true, TimeoutMS: timeoutMS, EvidenceRefs: []model.EvidenceRef{ref}})
 		}
@@ -239,6 +239,7 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan, obse
 			// deterministic surface plus repeated visual confirmation that the
 			// requested product is complete and generation is no longer active.
 			parameters["require_visual_terminal_confirmation"] = true
+			parameters["refresh_after_ms"] = observationPlan.DeferAfterMS
 		}
 		if step.Action.Kind == "observe" && !hasSpecializedProof {
 			appendPredicate("interactive_surface_visible", true)
@@ -417,7 +418,10 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 			warned = true
 			_ = emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "build_progress_warning", Summary: "五分钟内未观察到足够进展，继续在预算内等待", EvidenceRefs: []string{jobID}})
 		}
-		if elapsed >= time.Duration(plan.DeferAfterMS)*time.Millisecond {
+		// The Browser Worker owns the refresh and two-minute post-refresh
+		// observation window. Keep the outer Direct poll alive long enough that
+		// it cannot cancel the inner lifecycle gate first.
+		if elapsed >= time.Duration(plan.DeferAfterMS)*time.Millisecond+3*time.Minute {
 			return status, &experiment.AdapterError{Code: "observation_deadline_reached", Phase: "observation_deferred", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: []string{jobID}}
 		}
 		select {
