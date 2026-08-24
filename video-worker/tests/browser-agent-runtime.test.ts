@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, browserVisualObservationAllocation, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, browserVisualObservationAllocation, browserVisualTerminalCandidateMaterialChanged, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -18,6 +18,13 @@ describe("browser visual polling terminal evidence", () => {
   it("reserves terminal-candidate calls instead of spending the whole budget on unchanged heartbeats", () => {
     expect(browserVisualObservationAllocation(6, true)).toEqual({ heartbeatLimit: 3, terminalReserve: 3 });
     expect(browserVisualObservationAllocation(6, false)).toEqual({ heartbeatLimit: 6, terminalReserve: 0 });
+  });
+
+  it("ignores pixel-only churn but admits structural terminal candidates", () => {
+    const snapshot = { url: "https://example.test/result", visualDigest: "pixels-a", domDigest: "dom-a", ariaDigest: "aria-a", frameDigest: "frame-a" };
+    expect(browserVisualTerminalCandidateMaterialChanged(snapshot, { ...snapshot, visualDigest: "pixels-b" })).toBe(false);
+    expect(browserVisualTerminalCandidateMaterialChanged(snapshot, { ...snapshot, domDigest: "dom-b" })).toBe(true);
+    expect(browserVisualTerminalCandidateMaterialChanged(undefined, snapshot)).toBe(true);
   });
 });
 

@@ -1797,6 +1797,18 @@ export function browserVisualObservationAllocation(maxCalls: number, requireVisu
 	return { heartbeatLimit: Math.max(1, bounded - terminalReserve), terminalReserve };
 }
 
+export function browserVisualTerminalCandidateMaterialChanged(before: OutcomeSnapshot | undefined, after: OutcomeSnapshot): boolean {
+	if (!before) return true;
+	// Pixel-only churn can come from cursors, clocks, or progress animation.
+	// Preserve terminal calls for a structural, accessible, route, or bound
+	// frame change. One unchanged follow-up remains allowed after a terminal
+	// verdict so that success or failure can be independently confirmed.
+	return before.url !== after.url
+		|| before.domDigest !== after.domDigest
+		|| before.ariaDigest !== after.ariaDigest
+		|| before.frameDigest !== after.frameDigest;
+}
+
 async function waitForPlayableSurfaceWithVisualObservation(
 	session: BrowserAgentSession,
 	stage: BrowserAgentWorkerStage,
@@ -1807,6 +1819,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	const deadline = Date.now() + interactiveSurfacePollTimeout(timeout);
 	const requireVisualTerminal = stage.interaction_contract?.parameters?.require_visual_terminal_confirmation === true;
 	const { heartbeatLimit } = browserVisualObservationAllocation(config.maxCalls, requireVisualTerminal);
+	const budgetScopeID = `vision_terminal_budget:${stage.node_id}`;
 	let nextCaptureAt = Date.now();
 	while (Date.now() < deadline) {
 		const target = await interactiveSurfaceTargetOnce(session.page);
@@ -1824,7 +1837,17 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			if (terminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
 			if (terminal === "failed") return { surface: false, score: false, controls: false };
 			if (Date.now() >= nextCaptureAt && existing.length < config.maxCalls) {
-				await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
+				const snapshot = await captureOutcomeSnapshot(session.page);
+				const previousSnapshot = session.temporalSnapshotsByScopeID.get(budgetScopeID);
+				const latestDecision = existing[existing.length - 1]?.decision;
+				const confirmingTerminal = latestDecision === "succeeded" || latestDecision === "failed";
+				const maySpend = existing.length < heartbeatLimit
+					|| confirmingTerminal
+					|| browserVisualTerminalCandidateMaterialChanged(previousSnapshot, snapshot);
+				if (maySpend) {
+					session.temporalSnapshotsByScopeID.set(budgetScopeID, snapshot);
+					await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
+				}
 				nextCaptureAt = Date.now() + config.intervalMS;
 				const updatedTerminal = confirmedBrowserVisualTerminalDecision(session.visionVerdictsByNodeID.get(stage.node_id) || []);
 				if (updatedTerminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
@@ -1835,6 +1858,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			}
 		}
 		if (!target && Date.now() >= nextCaptureAt && (session.visionVerdictsByNodeID.get(stage.node_id)?.length || 0) < heartbeatLimit) {
+			session.temporalSnapshotsByScopeID.set(budgetScopeID, await captureOutcomeSnapshot(session.page));
 			await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
 			nextCaptureAt = Date.now() + config.intervalMS;
 		}
