@@ -1791,6 +1791,12 @@ export function confirmedBrowserVisualTerminalDecision(observations: BrowserVisu
 	return latest.decision;
 }
 
+export function browserVisualObservationAllocation(maxCalls: number, requireVisualTerminal: boolean): { heartbeatLimit: number; terminalReserve: number } {
+	const bounded = Math.max(1, Math.min(12, Math.trunc(Number(maxCalls) || 1)));
+	const terminalReserve = requireVisualTerminal ? Math.min(3, Math.max(1, bounded - 1)) : 0;
+	return { heartbeatLimit: Math.max(1, bounded - terminalReserve), terminalReserve };
+}
+
 async function waitForPlayableSurfaceWithVisualObservation(
 	session: BrowserAgentSession,
 	stage: BrowserAgentWorkerStage,
@@ -1799,18 +1805,36 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	const config = browserVisionObserverConfig();
 	if (!config) return waitForPlayableSurface(session.page, timeout);
 	const deadline = Date.now() + interactiveSurfacePollTimeout(timeout);
+	const requireVisualTerminal = stage.interaction_contract?.parameters?.require_visual_terminal_confirmation === true;
+	const { heartbeatLimit } = browserVisualObservationAllocation(config.maxCalls, requireVisualTerminal);
 	let nextCaptureAt = Date.now();
 	while (Date.now() < deadline) {
 		const target = await interactiveSurfaceTargetOnce(session.page);
 		if (target) {
-			// Capture the terminal candidate once for the visual Gate. The
-			// deterministic surface remains the channel that admits success.
-			if ((session.visionVerdictsByNodeID.get(stage.node_id)?.length || 0) < config.maxCalls) {
-				await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
+			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
+			if (!requireVisualTerminal) {
+				// Compatibility mode: the visual result is supporting evidence and
+				// the deterministic surface remains the admitting channel.
+				if (existing.length < config.maxCalls) {
+					await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
+				}
+				return { surface: true, score: target.stateful, controls: target.focusable };
 			}
-			return { surface: true, score: target.stateful, controls: target.focusable };
+			const terminal = confirmedBrowserVisualTerminalDecision(existing);
+			if (terminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
+			if (terminal === "failed") return { surface: false, score: false, controls: false };
+			if (Date.now() >= nextCaptureAt && existing.length < config.maxCalls) {
+				await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
+				nextCaptureAt = Date.now() + config.intervalMS;
+				const updatedTerminal = confirmedBrowserVisualTerminalDecision(session.visionVerdictsByNodeID.get(stage.node_id) || []);
+				if (updatedTerminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
+				if (updatedTerminal === "failed") return { surface: false, score: false, controls: false };
+			}
+			if ((session.visionVerdictsByNodeID.get(stage.node_id)?.length || 0) >= config.maxCalls) {
+				return { surface: false, score: false, controls: false };
+			}
 		}
-		if (Date.now() >= nextCaptureAt && (session.visionVerdictsByNodeID.get(stage.node_id)?.length || 0) < config.maxCalls) {
+		if (!target && Date.now() >= nextCaptureAt && (session.visionVerdictsByNodeID.get(stage.node_id)?.length || 0) < heartbeatLimit) {
 			await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
 			nextCaptureAt = Date.now() + config.intervalMS;
 		}

@@ -1,6 +1,7 @@
 param(
   [string]$AppBaseURL = "http://127.0.0.1:4318",
   [string]$TargetURL = "https://cascadeai.cn/app",
+  [string]$UserGoal = "构建一款适合产品演示的精致响应式 2048 网页游戏",
   [Parameter(Mandatory = $true)][string]$CredentialRef,
   [string]$AuthorizationRef = ("approval://experiment/2048-v2/" + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),
   [string]$OutputDirectory = ""
@@ -10,6 +11,7 @@ $ErrorActionPreference = "Stop"
 $idempotencyKey = "experiment-2048-v2-" + [Guid]::NewGuid().ToString("N")
 $body = @{
   definition_ref = "2048-v2"
+  user_goal = $UserGoal
   target_url = $TargetURL
   credential_ref = $CredentialRef
   authorization_ref = $AuthorizationRef

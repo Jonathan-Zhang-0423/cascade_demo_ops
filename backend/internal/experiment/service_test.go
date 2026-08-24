@@ -19,11 +19,11 @@ func TestCreateRunFreezesTwoLegsAndIsIdempotent(t *testing.T) {
 	if run.State != RunStateQueued || run.Phase != "product_spec_frozen" || len(run.Legs) != 2 || run.Legs[0].Kind != "main" || run.Legs[1].Kind != "recovery" {
 		t.Fatalf("unexpected frozen run: %+v", run)
 	}
-	if run.Legs[0].ProjectName == run.Legs[1].ProjectName || run.Legs[0].BuildPrompt == run.Legs[1].BuildPrompt {
+	if run.Legs[0].ProjectName == run.Legs[1].ProjectName || run.Legs[0].BuildPrompt != request.UserGoal || run.Legs[1].BuildPrompt != request.UserGoal {
 		t.Fatalf("main and recovery identities were not kept distinct: %+v", run.Legs)
 	}
-	if !strings.Contains(run.Legs[0].ProjectName, "·") || !strings.Contains(run.Legs[0].BuildPrompt, run.Legs[0].ProjectName) {
-		t.Fatalf("real-run project identity was not made unique and bound into the target prompt: %+v", run.Legs[0])
+	if !strings.Contains(run.Legs[0].ProjectName, "·") || run.UserGoal != request.UserGoal {
+		t.Fatalf("real-run project identity and one-sentence goal were not kept separate: %+v", run.Legs[0])
 	}
 	for _, term := range targetPromptForbiddenTerms {
 		if strings.Contains(strings.ToLower(run.Legs[0].BuildPrompt), strings.ToLower(term)) {
@@ -229,7 +229,7 @@ func testService(t *testing.T) *Service {
 }
 
 func testCreateRequest() CreateRunRequest {
-	return CreateRunRequest{DefinitionRef: "2048-v2", TargetURL: "https://target.example.test/app", CredentialRef: "secret://demo/account", AuthorizationRef: "approval://experiment/start", IdempotencyKey: "experiment-idem-001"}
+	return CreateRunRequest{DefinitionRef: "2048-v2", UserGoal: "Create a polished responsive product from this single sentence.", TargetURL: "https://target.example.test/app", CredentialRef: "secret://demo/account", AuthorizationRef: "approval://experiment/start", IdempotencyKey: "experiment-idem-001"}
 }
 
 func mustCreateRun(t *testing.T, service *Service) Run {

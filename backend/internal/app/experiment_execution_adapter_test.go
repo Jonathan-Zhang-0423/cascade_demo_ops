@@ -74,11 +74,28 @@ func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(
 	if got := contracts[0].ExpectedTransitions[0].TimeoutMS; got != int(loaded.ObservationPlan.DeferAfterMS) {
 		t.Fatalf("surface readiness timeout=%d want observation defer budget=%d", got, loaded.ObservationPlan.DeferAfterMS)
 	}
+	if contracts[0].Parameters["require_visual_terminal_confirmation"] != true {
+		t.Fatalf("surface readiness must bind deterministic and repeated visual terminal channels: %+v", contracts[0].Parameters)
+	}
 	if got := contracts[2].ExpectedTransitions; !interactionPredicatesContain(got, "numeric_increased") || !interactionPredicatesContain(got, "state_changed") {
 		t.Fatalf("numeric proof predicates=%+v", got)
 	}
 	if got := contracts[4].ExpectedTransitions; !interactionPredicatesContain(got, "input_modality_used") {
 		t.Fatalf("touch proof predicates=%+v", got)
+	}
+}
+
+func TestExperimentProductEvidenceSummaryStaysInternalAndDetailed(t *testing.T) {
+	loaded, err := experiment.LoadDefinition("../../../experiments", "2048-v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := experimentProductEvidenceSummary(loaded.ProductSpec)
+	if !strings.Contains(summary, loaded.ProductSpec.Objective) || !strings.Contains(summary, loaded.ProductSpec.Requirements[0].Statement) || !strings.Contains(summary, loaded.ProductSpec.ObservableAcceptance[0].Statement) {
+		t.Fatalf("internal visual evidence summary lost required details: %s", summary)
+	}
+	if len([]rune(summary)) > 4096 {
+		t.Fatalf("internal visual evidence summary is unbounded: %d", len([]rune(summary)))
 	}
 }
 

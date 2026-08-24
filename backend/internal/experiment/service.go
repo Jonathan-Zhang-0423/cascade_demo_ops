@@ -44,21 +44,28 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 		return Run{}, err
 	}
 	request.DefinitionRef = strings.TrimSpace(request.DefinitionRef)
+	request.UserGoal = strings.TrimSpace(request.UserGoal)
 	request.TargetURL = strings.TrimSpace(request.TargetURL)
 	request.CredentialRef = strings.TrimSpace(request.CredentialRef)
 	request.AuthorizationRef = strings.TrimSpace(request.AuthorizationRef)
 	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
-	if existing, ok, err := s.store.FindByIdempotencyKey(ctx, request.IdempotencyKey); err != nil {
-		return Run{}, err
-	} else if ok {
-		if existing.DefinitionRef != request.DefinitionRef || existing.TargetURL != request.TargetURL || existing.CredentialRef != request.CredentialRef || existing.AuthorizationRef != request.AuthorizationRef {
-			return Run{}, errors.New("idempotency_key is already bound to a different experiment request")
-		}
-		return existing, nil
-	}
 	loaded, err := LoadDefinition(s.definitionRoot, request.DefinitionRef)
 	if err != nil {
 		return Run{}, fmt.Errorf("load experiment definition: %w", err)
+	}
+	if request.UserGoal == "" {
+		request.UserGoal = strings.TrimSpace(loaded.Definition.ShortGoal)
+	}
+	if _, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal); err != nil {
+		return Run{}, fmt.Errorf("validate one-sentence user goal: %w", err)
+	}
+	if existing, ok, err := s.store.FindByIdempotencyKey(ctx, request.IdempotencyKey); err != nil {
+		return Run{}, err
+	} else if ok {
+		if existing.DefinitionRef != request.DefinitionRef || existing.UserGoal != request.UserGoal || existing.TargetURL != request.TargetURL || existing.CredentialRef != request.CredentialRef || existing.AuthorizationRef != request.AuthorizationRef {
+			return Run{}, errors.New("idempotency_key is already bound to a different experiment request")
+		}
+		return existing, nil
 	}
 	runID, err := s.newID("experiment")
 	if err != nil {
@@ -66,18 +73,18 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 	}
 	mainProjectName := uniqueExperimentProjectName(loaded.Definition.MainProjectName, runID)
 	recoveryProjectName := uniqueExperimentProjectName(loaded.Definition.RecoveryProjectName, runID)
-	mainPrompt, err := CompileBuildPrompt(loaded.ProductSpec, mainProjectName)
+	mainPrompt, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal)
 	if err != nil {
 		return Run{}, err
 	}
-	recoveryPrompt, err := CompileBuildPrompt(loaded.ProductSpec, recoveryProjectName)
+	recoveryPrompt, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal)
 	if err != nil {
 		return Run{}, err
 	}
 	now := s.now().UTC()
 	run := Run{
 		SchemaVersion: RunSchemaVersion, RunID: runID, DefinitionRef: request.DefinitionRef, DefinitionID: loaded.Definition.DefinitionID,
-		WorkflowTemplate: loaded.Definition.WorkflowTemplateID, TargetURL: request.TargetURL, CredentialRef: request.CredentialRef,
+		WorkflowTemplate: loaded.Definition.WorkflowTemplateID, UserGoal: request.UserGoal, TargetURL: request.TargetURL, CredentialRef: request.CredentialRef,
 		AuthorizationRef: request.AuthorizationRef, IdempotencyKey: request.IdempotencyKey,
 		State: RunStateQueued, Phase: "product_spec_frozen", Revision: 1, Budget: loaded.Definition.AuthorizationBudget,
 		ProductSpec: loaded.ProductSpec, ObservationPlan: loaded.ObservationPlan, InteractionPlan: loaded.InteractionPlan,

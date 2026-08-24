@@ -203,6 +203,43 @@ func TestRouterGLMDisablesThinkingForStructuredOutput(t *testing.T) {
 	}
 }
 
+func TestRouterGenerateMultimodalTextDisablesJSONCoercion(t *testing.T) {
+	var responseFormat any
+	var userText string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		responseFormat = payload["response_format"]
+		messages, _ := payload["messages"].([]any)
+		if len(messages) == 2 {
+			user, _ := messages[1].(map[string]any)
+			content, _ := user["content"].([]any)
+			if len(content) > 0 {
+				part, _ := content[0].(map[string]any)
+				userText, _ = part["text"].(string)
+			}
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"DECISION=IN_PROGRESS"}}]}`))
+	}))
+	defer server.Close()
+
+	runtime := testRuntime(config.ModelProviderGLM, server.URL)
+	runtime.ModelTaskRoutes[config.ModelTaskBrowserVisualObservation] = config.ModelTaskRoute{
+		Task: config.ModelTaskBrowserVisualObservation, Provider: config.ModelProviderGLM, Model: "glm-4.5v",
+	}
+	text, _, err := NewRouter(runtime).GenerateMultimodalText(context.Background(), config.ModelTaskBrowserVisualObservation, MultimodalRequest{
+		System: "system", User: "LINE_PROTOCOL", Images: []ImageInput{{URL: "https://example.com/screenshot.png"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if responseFormat != nil || userText != "LINE_PROTOCOL" || text != "DECISION=IN_PROGRESS" {
+		t.Fatalf("text fallback retained JSON coercion: response_format=%+v user=%q text=%q", responseFormat, userText, text)
+	}
+}
+
 func TestDecodeJSONContentIgnoresTrailingModelText(t *testing.T) {
 	var out struct {
 		Summary string `json:"summary"`

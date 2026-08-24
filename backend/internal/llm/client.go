@@ -63,6 +63,10 @@ type MultimodalRequest struct {
 	SchemaName  string
 	MaxTokens   int
 	Temperature float64
+	// TextMode disables JSON response-format coercion for a bounded fallback
+	// parser. Structured callers should leave it false and use
+	// GenerateMultimodal.
+	TextMode bool
 }
 
 type ImageInput struct {
@@ -295,7 +299,11 @@ func (a openAICompatibleAdapter) BuildTextPayload(route config.ModelTaskRoute, r
 }
 
 func (a openAICompatibleAdapter) BuildMultimodalPayload(route config.ModelTaskRoute, req MultimodalRequest) any {
-	content := []openAIContentPart{{Type: "text", Text: appendJSONInstruction(req.User, req.SchemaName, "")}}
+	userText := req.User
+	if !req.TextMode {
+		userText = appendJSONInstruction(req.User, req.SchemaName, "")
+	}
+	content := []openAIContentPart{{Type: "text", Text: userText}}
 	for _, image := range req.Images {
 		ref := firstNonEmpty(image.DataURI, image.URL)
 		if ref == "" {
@@ -304,11 +312,13 @@ func (a openAICompatibleAdapter) BuildMultimodalPayload(route config.ModelTaskRo
 		content = append(content, openAIContentPart{Type: "image_url", ImageURL: &openAIImageURL{URL: ref}})
 	}
 	payload := openAIChatRequest{
-		Model:          route.Model,
-		Messages:       []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: content}},
-		Temperature:    req.Temperature,
-		MaxTokens:      req.MaxTokens,
-		ResponseFormat: &openAIResponseFormat{Type: "json_object"},
+		Model:       route.Model,
+		Messages:    []openAIMessage{{Role: "system", Content: req.System}, {Role: "user", Content: content}},
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+	}
+	if !req.TextMode {
+		payload.ResponseFormat = &openAIResponseFormat{Type: "json_object"}
 	}
 	applyProviderRequestOptions(a.provider, route.Model, &payload)
 	return payload
@@ -336,7 +346,11 @@ func (a minimaxAdapter) BuildTextPayload(route config.ModelTaskRoute, req TextRe
 }
 
 func (a minimaxAdapter) BuildMultimodalPayload(route config.ModelTaskRoute, req MultimodalRequest) any {
-	content := []openAIContentPart{{Type: "text", Text: appendJSONInstruction(req.User, req.SchemaName, "")}}
+	userText := req.User
+	if !req.TextMode {
+		userText = appendJSONInstruction(req.User, req.SchemaName, "")
+	}
+	content := []openAIContentPart{{Type: "text", Text: userText}}
 	for _, image := range req.Images {
 		ref := firstNonEmpty(image.DataURI, image.URL)
 		if ref == "" {
@@ -711,6 +725,26 @@ func (r *Router) GenerateMultimodal(ctx context.Context, task config.ModelTask, 
 		return traceWithFallback(trace, errorClassJSONParse), ErrDeterministicRequired{Reason: errorClassJSONParse}
 	}
 	return trace, nil
+}
+
+// GenerateMultimodalText preserves image input while allowing a caller-owned,
+// bounded text protocol to recover from a provider that ignores or mangles
+// JSON response mode. It never changes routes or silently falls back to a
+// different provider.
+func (r *Router) GenerateMultimodalText(ctx context.Context, task config.ModelTask, req MultimodalRequest) (string, *CallTrace, error) {
+	if r == nil {
+		return "", nil, ErrDeterministicRequired{Reason: "llm router not configured"}
+	}
+	route, provider, trace, err := r.resolve(task)
+	if err != nil {
+		return "", trace, err
+	}
+	req.TextMode = true
+	text, callTrace, err := r.callMultimodal(ctx, route, provider, req)
+	if callTrace != nil {
+		trace = callTrace
+	}
+	return text, trace, err
 }
 
 func (r *Router) resolve(task config.ModelTask) (config.ModelTaskRoute, config.ModelProviderCredential, *CallTrace, error) {

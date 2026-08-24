@@ -106,7 +106,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	runtimeMetadata := map[string]any{
 		"experiment_run_id": request.RunID, "experiment_leg_id": request.LegID,
 		"observation_plan": request.ObservationPlan, "interaction_plan": request.InteractionPlan,
-		"visual_call_budget": request.VisualCallBudget, "expected_product_summary": request.BuildPrompt,
+		"visual_call_budget": request.VisualCallBudget, "expected_product_summary": experimentProductEvidenceSummary(request.ProductSpec),
 	}
 	recoveryPhase := ""
 	if request.Kind == "recovery" {
@@ -146,6 +146,29 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		return err
 	}
 	return a.completeDirectLeg(ctx, request, prepared.State.ProjectID, jobID, status, true, emit)
+}
+
+func experimentProductEvidenceSummary(spec experiment.ProductSpec) string {
+	parts := []string{
+		"Objective: " + strings.TrimSpace(spec.Objective),
+		"Visual theme: " + strings.TrimSpace(spec.VisualDirection.Theme),
+		"Motion: " + strings.TrimSpace(spec.VisualDirection.Motion),
+	}
+	for _, requirement := range spec.Requirements {
+		parts = append(parts, "Required: "+strings.TrimSpace(requirement.Statement))
+	}
+	for _, requirement := range spec.InteractionRequirements {
+		parts = append(parts, "Interaction: "+strings.TrimSpace(requirement.Statement))
+	}
+	for _, criterion := range spec.ObservableAcceptance {
+		if criterion.Required {
+			parts = append(parts, "Acceptance: "+strings.TrimSpace(criterion.Statement))
+		}
+	}
+	for _, forbidden := range spec.ForbiddenOutcomes {
+		parts = append(parts, "Forbidden: "+strings.TrimSpace(forbidden))
+	}
+	return truncateForUpload(strings.Join(parts, "\n"), 4096)
 }
 
 func compileExperimentInteractionContracts(plan experiment.InteractionPlan, observationPlan experiment.ObservationPlan) ([]model.InteractionContract, error) {
@@ -210,6 +233,12 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan, obse
 			if proof.Kind != "all_evidence_slots" && proof.Kind != "region_changed" {
 				hasSpecializedProof = true
 			}
+		}
+		if step.Action.Kind == "observe" && step.ReplayPolicy == experiment.ReplayObserveOnly && !hasSpecializedProof {
+			// Async interactive results require two independent channels: a
+			// deterministic surface plus repeated visual confirmation that the
+			// requested product is complete and generation is no longer active.
+			parameters["require_visual_terminal_confirmation"] = true
 		}
 		if step.Action.Kind == "observe" && !hasSpecializedProof {
 			appendPredicate("interactive_surface_visible", true)

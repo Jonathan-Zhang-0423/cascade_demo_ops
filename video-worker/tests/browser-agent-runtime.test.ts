@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, browserVisualObservationAllocation, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -13,6 +13,11 @@ describe("browser visual polling terminal evidence", () => {
     expect(confirmedBrowserVisualTerminalDecision([verdict("succeeded", 0.99), verdict("unknown", 0.99), verdict("succeeded", 0.99)])).toBeUndefined();
     expect(confirmedBrowserVisualTerminalDecision([verdict("succeeded", 0.89), verdict("succeeded", 0.99)])).toBeUndefined();
     expect(confirmedBrowserVisualTerminalDecision([verdict("failed", 0.95), verdict("failed", 0.96)])).toBe("failed");
+  });
+
+  it("reserves terminal-candidate calls instead of spending the whole budget on unchanged heartbeats", () => {
+    expect(browserVisualObservationAllocation(6, true)).toEqual({ heartbeatLimit: 3, terminalReserve: 3 });
+    expect(browserVisualObservationAllocation(6, false)).toEqual({ heartbeatLimit: 6, terminalReserve: 0 });
   });
 });
 

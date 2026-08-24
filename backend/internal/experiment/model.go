@@ -159,6 +159,7 @@ type ProofRequirement struct {
 
 type CreateRunRequest struct {
 	DefinitionRef    string `json:"definition_ref"`
+	UserGoal         string `json:"user_goal,omitempty"`
 	TargetURL        string `json:"target_url"`
 	CredentialRef    string `json:"credential_ref"`
 	AuthorizationRef string `json:"authorization_ref"`
@@ -171,6 +172,7 @@ type Run struct {
 	DefinitionRef     string              `json:"definition_ref"`
 	DefinitionID      string              `json:"definition_id"`
 	WorkflowTemplate  string              `json:"workflow_template_id"`
+	UserGoal          string              `json:"user_goal"`
 	TargetURL         string              `json:"target_url"`
 	CredentialRef     string              `json:"credential_ref"`
 	AuthorizationRef  string              `json:"authorization_ref"`
