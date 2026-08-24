@@ -200,8 +200,8 @@ function findingCodes(findings) {
 
 function printHelp() {
   console.log(`Usage:
-  node scripts/validate-server-render.mjs <render-dir>
-  node scripts/validate-server-render.mjs --render-dir .cascade-dev/artifacts/exchange/xpkg_.../render
+  node tests/server-e2e/scripts/validate-server-render.mjs <render-dir>
+  node tests/server-e2e/scripts/validate-server-render.mjs --render-dir .cascade-dev/artifacts/exchange/xpkg_.../render
 
 Checks a completed server replay render directory for production-ready media:
   - final video exists and matches expected container

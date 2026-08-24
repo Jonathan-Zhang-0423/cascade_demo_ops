@@ -39,6 +39,11 @@ type browserAgentWorkerAutoLoginSession interface {
 	BeginExecutionRecording(context.Context) error
 }
 
+func isLocalDevTestEnvironment(environment string) bool {
+	value := strings.ToLower(strings.TrimSpace(environment))
+	return value == "development" || value == "test"
+}
+
 type browserAgentWorkerSessionFactory func(context.Context, driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error)
 
 type localBrowserAgentOutlineRunner struct {
@@ -143,7 +148,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		}
 	}()
 	if request.AutoLoginUsername != "" || request.AutoLoginPassword != "" {
-		if r.service.runtime.Profile != config.ProfileDev || request.AutoLoginUsername == "" || request.AutoLoginPassword == "" {
+		if r.service.runtime.Profile != config.ProfileDev || !isLocalDevTestEnvironment(r.service.runtime.Environment) || request.AutoLoginUsername == "" || request.AutoLoginPassword == "" {
 			return model.RecordingResultPackage{}, newRuntimeExecutionError("direct_auto_login_unavailable", errors.New("automatic Direct login is permitted only for an explicit dev session with complete credentials"))
 		}
 		autoLoginSession, ok := session.(browserAgentWorkerAutoLoginSession)

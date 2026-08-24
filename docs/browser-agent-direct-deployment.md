@@ -29,6 +29,11 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../
 sha256sum ../dist/server/linux-amd64/browser-agent-gateway ../dist/server/linux-amd64/browser-agent-direct-worker
 ```
 
+The repository production build entry point is `pnpm build:backend` (or
+`node scripts/build-server-production.mjs`). It compiles only the two binaries
+above and the formal `video-worker`; Dev HTTP, smoke, fixture, waiver and
+visible-browser commands are test-only and are not deployable outputs.
+
 ARM64 服务器使用 `GOARCH=arm64`。服务器还需安装 Node.js、FFmpeg/ffprobe 和 Chromium 系统依赖。构建 Worker 时必须把浏览器安装到明确的受管目录，不能落在 root 的默认缓存：
 
 ```bash

@@ -372,7 +372,7 @@ $globalReasonHashes = @(Get-UnscopedBlockingReasonHashes @($package.confidence_s
 $manifest.approved_node_ids = $nodeIds
 $manifest.approved_blocking_reason_hashes = $globalReasonHashes
 $auditPath = Join-Path $outputRoot "app-package-outline-audit.json"
-$auditScript = Join-Path (Get-Location) "scripts\audit-app-browser-agent-package.mjs"
+$auditScript = Join-Path (Get-Location) "tests\server-e2e\scripts\audit-app-browser-agent-package.mjs"
 if (-not (Test-Path -LiteralPath $auditScript -PathType Leaf)) {
   throw "App package audit script is missing: $auditScript"
 }
