@@ -71,3 +71,12 @@ func TestBrowserVisualObservationDoesNotFailOnIncompletePage(t *testing.T) {
 		t.Fatalf("missing progress became terminal failure: %+v", result)
 	}
 }
+
+func TestBrowserVisualObserverFailureCodeOnlyExposesSafeClass(t *testing.T) {
+	if got := browserVisualObserverFailureCode(&llm.CallTrace{ErrorClass: "http_503"}); got != "observer_model_unavailable_http_503" {
+		t.Fatalf("safe provider class was not retained: %q", got)
+	}
+	if got := browserVisualObserverFailureCode(&llm.CallTrace{ErrorClass: "secret=value"}); got != "observer_model_unavailable" {
+		t.Fatalf("unsafe provider detail escaped the observer boundary: %q", got)
+	}
+}

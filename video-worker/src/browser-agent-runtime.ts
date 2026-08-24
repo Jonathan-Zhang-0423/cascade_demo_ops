@@ -1885,7 +1885,11 @@ async function requestBrowserVisualObservation(config: BrowserVisionObserverConf
 				headers: { "Authorization": `Bearer ${config.token}`, "Content-Type": "application/json" },
 				body: JSON.stringify(body), signal: controller.signal,
 			});
-			if (!result.ok) throw new Error(`observer_http_${result.status}`);
+			if (!result.ok) {
+				const detail = await result.json().catch(() => ({})) as { error?: unknown };
+				const safeCode = String(detail.error || "").trim();
+				throw new Error(/^[a-z0-9_-]{1,128}$/.test(safeCode) ? safeCode : `observer_http_${result.status}`);
+			}
 			const response = await result.json() as BrowserVisualObservation;
 			if (!validBrowserVisualObservation(response)) throw new Error("observer_response_invalid");
 			return response;

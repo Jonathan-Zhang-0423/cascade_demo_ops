@@ -30,6 +30,19 @@ func TestWorkerFinalizationContextOutlivesExpiredExecutionContext(t *testing.T) 
 	}
 }
 
+func TestWorkerInterruptionIsDistinctFromExecutionTimeout(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	execution, cancelExecution := context.WithCancel(parent)
+	cancelExecution()
+	if workerWasInterrupted(parent) {
+		t.Fatal("an execution-local timeout must not be treated as a service restart")
+	}
+	cancelParent()
+	if !workerWasInterrupted(parent) || execution.Err() == nil {
+		t.Fatal("a process-level cancellation must release the job for checkpoint recovery")
+	}
+}
+
 func TestWorkerClaimRejectsProtocolMismatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/worker/jobs/claim" || request.Header.Get("Authorization") != "Bearer worker-test-token" {

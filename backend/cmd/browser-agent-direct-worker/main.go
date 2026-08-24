@@ -145,6 +145,16 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 		fmt.Fprintln(os.Stderr, "execution failed job=", safeID(job.JobID), "class=browser_agent_execution_failed")
 		return
 	}
+	// A service restart cancels the process-level context. The browser runtime
+	// may still return a well-formed failure package while unwinding, but that
+	// package describes an infrastructure interruption rather than a terminal
+	// product result. Let the deferred release return the job to the credential
+	// gate so a new worker can reclaim its persisted checkpoint without
+	// publishing a false terminal failure or replaying once-effects.
+	if workerWasInterrupted(parent) {
+		fmt.Fprintln(os.Stdout, "job interrupted; releasing for checkpoint recovery job=", safeID(job.JobID))
+		return
+	}
 	finalizeCtx, finalizeCancel := workerFinalizationContext(parent)
 	defer finalizeCancel()
 	for _, file := range files {
@@ -163,6 +173,10 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	}
 	completed = true
 	fmt.Fprintln(os.Stdout, "job completed job=", safeID(job.JobID), "artifacts=", len(files))
+}
+
+func workerWasInterrupted(parent context.Context) bool {
+	return parent != nil && parent.Err() != nil
 }
 
 func workerFinalizationContext(parent context.Context) (context.Context, context.CancelFunc) {

@@ -195,7 +195,11 @@ func startBrowserVisualObserverBridge(parent context.Context, client llm.Client,
 		}, &output)
 		cancel()
 		if callErr != nil {
-			writeBrowserVisualObserverError(w, http.StatusServiceUnavailable, "observer_model_unavailable")
+			code := browserVisualObserverFailureCode(trace)
+			if progress != nil {
+				progress("browser_visual_observation", fmt.Sprintf("第 %d 阶段的第 %d 张视觉观察暂不可用（%s）。", request.StageOrder, request.Sequence, code), min(84, 40+request.StageOrder*44/max(1, stageCount)))
+			}
+			writeBrowserVisualObserverError(w, http.StatusServiceUnavailable, code)
 			return
 		}
 		response, err := normalizeBrowserVisualObservation(output, trace)
@@ -210,6 +214,26 @@ func startBrowserVisualObserverBridge(parent context.Context, client llm.Client,
 	go func() { _ = bridge.server.Serve(listener) }()
 	go func() { <-parent.Done(); bridge.Close() }()
 	return bridge, nil
+}
+
+func browserVisualObserverFailureCode(trace *llm.CallTrace) string {
+	const prefix = "observer_model_unavailable"
+	if trace == nil {
+		return prefix
+	}
+	class := strings.ToLower(strings.TrimSpace(trace.ErrorClass))
+	if class == "" {
+		class = strings.ToLower(strings.TrimSpace(trace.FallbackReason))
+	}
+	if class == "" || len(class) > 64 {
+		return prefix
+	}
+	for _, char := range class {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '_' && char != '-' {
+			return prefix
+		}
+	}
+	return prefix + "_" + class
 }
 
 func validateBrowserVisualObservationRequest(request browserVisualObservationRequest) error {
