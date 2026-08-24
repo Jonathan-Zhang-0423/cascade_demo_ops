@@ -340,11 +340,12 @@ func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadRes
 			SchemaVersion string  `json:"schema_version"`
 			Decision      string  `json:"decision"`
 			Confidence    float64 `json:"confidence"`
+			ProviderCalls int     `json:"provider_calls_used"`
 		}
 		if err := json.Unmarshal(data, &observation); err != nil || observation.SchemaVersion != browserVisualObservationSchemaVersion {
 			return calls, terminal, &experiment.AdapterError{Code: "live_visual_observation_invalid", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false, Cause: err}
 		}
-		calls++
+		calls += max(1, observation.ProviderCalls)
 		if observation.Decision == "succeeded" && observation.Confidence >= .85 {
 			terminal = true
 		}

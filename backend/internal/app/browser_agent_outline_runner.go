@@ -120,7 +120,9 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		workerEnvironment["CASCADE_BROWSER_VISION_OBSERVER_URL"] = visualObserver.URL
 		workerEnvironment["CASCADE_BROWSER_VISION_OBSERVER_TOKEN"] = visualObserver.Token
 		workerEnvironment["CASCADE_BROWSER_VISION_INTERVAL_MS"] = "60000"
-		workerEnvironment["CASCADE_BROWSER_VISION_MAX_CALLS"] = "12"
+		// Each observation may use one bounded fallback provider call. Six
+		// screenshots therefore preserve the experiment's twelve-call ceiling.
+		workerEnvironment["CASCADE_BROWSER_VISION_MAX_CALLS"] = "6"
 		worker := driver.NewBrowserAgentWorker(r.service.nodeBinaryForExecution(), workerPath, workerEnvironment)
 		factory = func(ctx context.Context, open driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
 			return worker.Open(ctx, open)

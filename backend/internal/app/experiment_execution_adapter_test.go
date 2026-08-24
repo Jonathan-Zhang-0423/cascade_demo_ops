@@ -84,16 +84,16 @@ func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(
 
 func TestRecordLiveBrowserVisualObservationsCountsCallsAndRequiresConfidentTerminal(t *testing.T) {
 	dir := t.TempDir()
-	write := func(name, decision string, confidence float64) CloudDeliverableDownloadResult {
+	write := func(name, decision string, confidence float64, providerCalls int) CloudDeliverableDownloadResult {
 		path := filepath.Join(dir, name+".json")
-		payload, _ := json.Marshal(map[string]any{"schema_version": browserVisualObservationSchemaVersion, "decision": decision, "confidence": confidence})
+		payload, _ := json.Marshal(map[string]any{"schema_version": browserVisualObservationSchemaVersion, "decision": decision, "confidence": confidence, "provider_calls_used": providerCalls})
 		if err := os.WriteFile(path, payload, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return CloudDeliverableDownloadResult{ArtifactID: name, Kind: "browser_visual_observation", LocalPath: path}
 	}
 	downloads := []CloudDeliverableDownloadResult{
-		write("unknown", "unknown", 0), write("weak", "succeeded", .7), write("terminal", "succeeded", .93),
+		write("unknown", "unknown", 0, 2), write("weak", "succeeded", .7, 1), write("terminal", "succeeded", .93, 1),
 		{ArtifactID: "screenshot", Kind: "browser_visual_poll_screenshot", LocalPath: filepath.Join(dir, "ignored.png")},
 	}
 	emitted := 0
@@ -104,7 +104,7 @@ func TestRecordLiveBrowserVisualObservationsCountsCallsAndRequiresConfidentTermi
 		emitted++
 		return nil
 	})
-	if err != nil || calls != 3 || emitted != 3 || !terminal {
+	if err != nil || calls != 4 || emitted != 3 || !terminal {
 		t.Fatalf("live observations calls=%d emitted=%d terminal=%t err=%v", calls, emitted, terminal, err)
 	}
 }

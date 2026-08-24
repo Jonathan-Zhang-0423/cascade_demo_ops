@@ -336,6 +336,7 @@ export type BrowserVisualObservation = {
 	visible_evidence?: string[];
 	blocking_reason?: string;
 	model_trace?: Record<string, unknown>;
+	provider_calls_used?: number;
 	observed_at: string;
 };
 
@@ -1886,9 +1887,15 @@ async function requestBrowserVisualObservation(config: BrowserVisionObserverConf
 				body: JSON.stringify(body), signal: controller.signal,
 			});
 			if (!result.ok) {
-				const detail = await result.json().catch(() => ({})) as { error?: unknown };
+				const detail = await result.json().catch(() => ({})) as { error?: unknown; provider_calls_used?: unknown };
 				const safeCode = String(detail.error || "").trim();
-				throw new Error(/^[a-z0-9_-]{1,128}$/.test(safeCode) ? safeCode : `observer_http_${result.status}`);
+				return {
+					schema_version: "demoops.browser_visual_observation.v1", decision: "unknown", confidence: 0,
+					summary: "视觉观察服务暂不可用；继续使用确定性页面验证。",
+					blocking_reason: /^[a-z0-9_-]{1,128}$/.test(safeCode) ? safeCode : `observer_http_${result.status}`,
+					provider_calls_used: Math.max(1, Math.min(2, Number(detail.provider_calls_used) || 1)),
+					observed_at: new Date().toISOString(),
+				};
 			}
 			const response = await result.json() as BrowserVisualObservation;
 			if (!validBrowserVisualObservation(response)) throw new Error("observer_response_invalid");
@@ -1900,7 +1907,7 @@ async function requestBrowserVisualObservation(config: BrowserVisionObserverConf
 		return {
 			schema_version: "demoops.browser_visual_observation.v1", decision: "unknown", confidence: 0,
 			summary: "视觉观察服务暂不可用；继续使用确定性页面验证。",
-			blocking_reason: redactText(error instanceof Error ? error.message : String(error)), observed_at: new Date().toISOString(),
+			blocking_reason: redactText(error instanceof Error ? error.message : String(error)), provider_calls_used: 1, observed_at: new Date().toISOString(),
 		};
 	}
 }
