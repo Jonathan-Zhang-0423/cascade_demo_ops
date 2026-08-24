@@ -74,7 +74,7 @@
       "additionalProperties": false,
       "required": ["max_event_bytes", "max_input_artifacts", "max_output_artifacts"],
       "properties": {
-        "max_event_bytes": { "const": 65536 },
+        "max_event_bytes": { "const": 524288 },
         "max_input_artifacts": { "type": "integer", "minimum": 1, "maximum": 1024 },
         "max_output_artifacts": { "type": "integer", "minimum": 1, "maximum": 1024 }
       }

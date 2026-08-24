@@ -227,7 +227,7 @@ func validateEventSize(event Event) error {
 		return err
 	}
 	if len(payload) > MaxEventBodyBytes {
-		return errors.New("experiment event exceeds 64 KiB; store large evidence as an artifact reference")
+		return errors.New("experiment event exceeds 512 KiB; store large evidence as an artifact reference")
 	}
 	return nil
 }

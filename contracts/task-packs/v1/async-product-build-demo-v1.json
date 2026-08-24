@@ -18,6 +18,6 @@
     { "node_id": "compose_final_film", "module_id": "director-media", "capability": "compose_guided_demo", "depends_on": ["materialize_fact_track"], "input_roles": ["fact_track", "evidence_digest"], "output_roles": ["final_film", "review_package"], "replay_policy": "once_effect", "optional": true }
   ],
   "gates": ["admission", "data_access", "evidence_readiness", "plan_approval", "execution_policy", "outcome", "materialization", "provider_spend", "media_quality", "final_review"],
-  "budget": { "max_runtime_ms": 1800000, "max_attempts": 2, "max_provider_calls": 8, "max_event_bytes": 65536 },
+  "budget": { "max_runtime_ms": 1800000, "max_attempts": 2, "max_provider_calls": 8, "max_event_bytes": 524288 },
   "fallback": { "on_module_failure": "waiting_input", "on_generated_media_failure": "fact_track" }
 }

@@ -133,7 +133,7 @@ Execution Event 必须包含：
 
 规则：
 
-- 单事件规范化 JSON 最大 64 KiB。
+- 单事件规范化 JSON 最大 512 KiB。
 - 大型截图、DOM、Trace、模型响应和媒体必须使用 Artifact refs。
 - 高频轮询只记录首次、状态变化、末次和异常摘要，不记录每次候选集合。
 - `WatchEvents(after_sequence)` 必须保证不丢失已持久化事件；重连允许重复读取，调用方按 event ID 去重。

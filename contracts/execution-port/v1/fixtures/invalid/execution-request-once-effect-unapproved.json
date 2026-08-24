@@ -13,7 +13,7 @@
   "config_ref": "config://execution/default",
   "policy_ref": "policy://execution/internal-v1",
   "authorization_refs": [],
-  "budget": { "max_runtime_ms": 60000, "max_attempts": 1, "max_event_bytes": 65536 },
+  "budget": { "max_runtime_ms": 60000, "max_attempts": 1, "max_event_bytes": 524288 },
   "deadline_at": "2026-08-21T12:00:00Z",
   "trace_context": { "trace_id": "trace-unapproved-001", "correlation_id": "correlation-unapproved-001" }
 }

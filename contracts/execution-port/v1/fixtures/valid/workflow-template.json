@@ -65,7 +65,7 @@
     "max_attempts": 2,
     "max_provider_calls": 4,
     "max_cost_minor_units": 10000,
-    "max_event_bytes": 65536
+    "max_event_bytes": 524288
   },
   "fallback": {
     "on_module_failure": "use_verified_checkpoint",

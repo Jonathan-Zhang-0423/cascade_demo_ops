@@ -180,7 +180,7 @@ requirement-brief:r3
 
 - 任一模块可独立启动、取消、等待、恢复并解释当前 Gate。
 - Worker 重启、重复请求和凭据重传不重复 once-effect 或 Provider 计费。
-- 事件正文不超过 64 KiB，大型证据全部引用 Artifact。
+- 事件正文不超过 512 KiB，大型证据全部引用 Artifact。
 - 五类 Task Pack 在 hostname、路由、文案、DOM 层级和 iframe/canvas 组合变化下保持相同选择。
 - 通用内核静态扫描不得出现产品域名、具体游戏名、固定项目路由或站点 selector。
 - 旧链与新 Adapter 的 required facts、结果状态和必需 Artifact 一致。

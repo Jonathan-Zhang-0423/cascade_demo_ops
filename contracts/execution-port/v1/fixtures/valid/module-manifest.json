@@ -25,7 +25,7 @@
   "required_permissions": ["browser.session", "artifact.write"],
   "transports": ["in_process", "jsonrpc_stdio", "http_sse"],
   "limits": {
-    "max_event_bytes": 65536,
+    "max_event_bytes": 524288,
     "max_input_artifacts": 128,
     "max_output_artifacts": 512
   }

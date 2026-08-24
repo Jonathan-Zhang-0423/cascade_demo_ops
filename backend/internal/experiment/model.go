@@ -11,7 +11,7 @@ const (
 	EventSchemaVersion               = "demoops.execution_event.v1"
 	ReportSchemaVersion              = "demoops.experiment_run_report.v1"
 	WorkflowTemplateAsyncProductDemo = "async-product-build-demo-v1"
-	MaxEventBodyBytes                = 64 * 1024
+	MaxEventBodyBytes                = 512 * 1024
 )
 
 type RunState string

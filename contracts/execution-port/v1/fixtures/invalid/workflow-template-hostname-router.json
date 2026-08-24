@@ -17,6 +17,6 @@
     }
   ],
   "gates": ["admission"],
-  "budget": { "max_runtime_ms": 60000, "max_attempts": 1, "max_event_bytes": 65536 },
+  "budget": { "max_runtime_ms": 60000, "max_attempts": 1, "max_event_bytes": 524288 },
   "fallback": { "on_module_failure": "stop", "on_generated_media_failure": "fact_track" }
 }

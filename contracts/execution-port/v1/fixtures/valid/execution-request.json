@@ -22,7 +22,7 @@
     "max_attempts": 1,
     "max_provider_calls": 0,
     "max_cost_minor_units": 0,
-    "max_event_bytes": 65536
+    "max_event_bytes": 524288
   },
   "deadline_at": "2026-08-21T12:30:00Z",
   "trace_context": {
