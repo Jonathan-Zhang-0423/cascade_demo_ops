@@ -56,7 +56,7 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 	if request.UserGoal == "" {
 		request.UserGoal = strings.TrimSpace(loaded.Definition.ShortGoal)
 	}
-	if _, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal); err != nil {
+	if _, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal, loaded.Definition.BuildDeliveryProfile); err != nil {
 		return Run{}, fmt.Errorf("validate one-sentence user goal: %w", err)
 	}
 	if existing, ok, err := s.store.FindByIdempotencyKey(ctx, request.IdempotencyKey); err != nil {
@@ -73,11 +73,11 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 	}
 	mainProjectName := uniqueExperimentProjectName(loaded.Definition.MainProjectName, runID)
 	recoveryProjectName := uniqueExperimentProjectName(loaded.Definition.RecoveryProjectName, runID)
-	mainPrompt, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal)
+	mainPrompt, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal, loaded.Definition.BuildDeliveryProfile)
 	if err != nil {
 		return Run{}, err
 	}
-	recoveryPrompt, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal)
+	recoveryPrompt, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal, loaded.Definition.BuildDeliveryProfile)
 	if err != nil {
 		return Run{}, err
 	}

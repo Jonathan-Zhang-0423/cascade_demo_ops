@@ -45,7 +45,7 @@
 6. 跨进程、跨机器、上传下载和 Provider 边界必须验证身份、用途、大小、媒体类型及完整性。沿用现有 SHA-256 实现，不引入新的摘要体系。
 7. Provider 调用必须先持久化 admission、预算、attempt 上限和外部 task ID；恢复只能 poll/resume 已有任务。
 8. 日志、错误、事件和模型 prompt 禁止包含 Cookie、Authorization、Storage 原值、密码、API Key、私钥和完整未脱敏 HTML。
-9. 大型截图、DOM、Trace、录屏和媒体只通过 Artifact 引用传递。单个 Execution Event 的规范化 JSON 不得超过 512 KiB。
+9. 大型截图、DOM、Trace、录屏和媒体只通过 Artifact 引用传递。单个 Execution Event 在 512 KiB 时预警并优先外置证据，1 MiB 为不可突破的硬上限。
 10. 所有授权、阻断、敏感数据读取、Provider 消费、Artifact 发布/删除和最终终审必须产生结构化审计事件。
 
 ## 5. 环境策略档位

@@ -11,7 +11,9 @@ const (
 	EventSchemaVersion               = "demoops.execution_event.v1"
 	ReportSchemaVersion              = "demoops.experiment_run_report.v1"
 	WorkflowTemplateAsyncProductDemo = "async-product-build-demo-v1"
-	MaxEventBodyBytes                = 512 * 1024
+	BuildDeliveryPortableSingleHTML  = "portable-single-document-web-v1"
+	MaxEventBodyBytes                = 1024 * 1024
+	EventBodyWarningBytes            = 512 * 1024
 )
 
 type RunState string
@@ -47,6 +49,7 @@ type Definition struct {
 	ProductSpecRef         string              `json:"product_spec_ref"`
 	ObservationPlanRef     string              `json:"build_observation_plan_ref"`
 	InteractionPlanRef     string              `json:"interaction_evidence_plan_ref"`
+	BuildDeliveryProfile   string              `json:"build_delivery_profile,omitempty"`
 	RunSet                 []string            `json:"run_set"`
 	RecoveryInjectionPhase string              `json:"recovery_injection_phase"`
 	MainTargetDurationMS   DurationRange       `json:"main_target_duration_ms"`
@@ -71,6 +74,7 @@ type ProductSpec struct {
 	Title                   string                `json:"title"`
 	Objective               string                `json:"objective"`
 	Audience                string                `json:"audience"`
+	BuildBrief              string                `json:"build_brief,omitempty"`
 	Requirements            []ProductRequirement  `json:"requirements"`
 	VisualDirection         VisualDirection       `json:"visual_direction"`
 	InteractionRequirements []ProductRequirement  `json:"interaction_requirements"`

@@ -157,7 +157,7 @@ func (o *TemporalVisualObserver) Observe(ctx context.Context, request VisualObse
 		return TemporalVisualObservation{}, err
 	}
 	if len(data) > MaxEventBodyBytes {
-		return TemporalVisualObservation{}, errors.New("temporal visual observation artifact exceeds 512 KiB")
+		return TemporalVisualObservation{}, errors.New("temporal visual observation artifact exceeds the 1 MiB hard limit")
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		return TemporalVisualObservation{}, err

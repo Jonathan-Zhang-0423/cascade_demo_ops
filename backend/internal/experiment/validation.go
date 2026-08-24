@@ -44,6 +44,9 @@ func ValidateDefinition(value Definition) error {
 	if strings.TrimSpace(value.MainProjectName) == "" || strings.TrimSpace(value.RecoveryProjectName) == "" || value.MainProjectName == value.RecoveryProjectName {
 		return errors.New("main and recovery project names must be distinct")
 	}
+	if value.BuildDeliveryProfile != "" && value.BuildDeliveryProfile != BuildDeliveryPortableSingleHTML {
+		return errors.New("experiment build delivery profile is unsupported")
+	}
 	for _, ref := range []string{value.ProductSpecRef, value.ObservationPlanRef, value.InteractionPlanRef} {
 		if !safeRelativeJSONRef(ref) {
 			return errors.New("experiment artifact refs must be sibling JSON files")
@@ -61,6 +64,11 @@ func ValidateProductSpec(value ProductSpec) error {
 	}
 	if strings.TrimSpace(value.VisualDirection.Theme) == "" || len(value.VisualDirection.Palette) < 2 || strings.TrimSpace(value.VisualDirection.Motion) == "" {
 		return errors.New("product spec visual direction is incomplete")
+	}
+	if brief := strings.TrimSpace(value.BuildBrief); brief != "" {
+		if len([]rune(brief)) < 10 || len([]rune(brief)) > 140 || strings.ContainsAny(brief, "\r\n") || containsPromptForbiddenTerm(brief) {
+			return errors.New("product spec build brief must be one concise provider-safe clause")
+		}
 	}
 	seen := map[string]bool{}
 	for _, requirement := range append(append([]ProductRequirement{}, value.Requirements...), value.InteractionRequirements...) {
@@ -175,7 +183,7 @@ func ValidateRun(value Run) error {
 	return nil
 }
 
-func CompileBuildPrompt(value ProductSpec, userGoal string) (string, error) {
+func CompileBuildPrompt(value ProductSpec, userGoal string, deliveryProfiles ...string) (string, error) {
 	if err := ValidateProductSpec(value); err != nil {
 		return "", err
 	}
@@ -195,24 +203,40 @@ func CompileBuildPrompt(value ProductSpec, userGoal string) (string, error) {
 	if len([]rune(userGoal)) > 240 {
 		return "", errors.New("compiled target prompt exceeds the allowed size")
 	}
+	deliveryProfile := ""
+	if len(deliveryProfiles) > 0 {
+		deliveryProfile = strings.TrimSpace(deliveryProfiles[0])
+	}
+	if deliveryProfile != "" && deliveryProfile != BuildDeliveryPortableSingleHTML {
+		return "", errors.New("unsupported build delivery profile")
+	}
+	limit := 240
 	clauses := []string{compactBuildPromptClause(userGoal)}
-	for _, requirement := range value.Requirements {
-		if requirement.Priority == "must" {
-			clauses = appendConciseBuildClause(clauses, requirement.Statement, 240)
-			if len(clauses) >= 3 {
+	if brief := compactBuildPromptClause(value.BuildBrief); brief != "" {
+		limit = 180
+		clauses = appendConciseBuildClause(clauses, brief, limit)
+	} else {
+		for _, requirement := range value.Requirements {
+			if requirement.Priority == "must" {
+				clauses = appendConciseBuildClause(clauses, requirement.Statement, limit)
+				if len(clauses) >= 3 {
+					break
+				}
+			}
+		}
+		clauses = appendConciseBuildClause(clauses, value.VisualDirection.Theme+"，"+value.VisualDirection.Motion, limit)
+		for _, requirement := range value.InteractionRequirements {
+			clauses = appendConciseBuildClause(clauses, requirement.Statement, limit)
+			if len(clauses) >= 6 {
 				break
 			}
 		}
 	}
-	clauses = appendConciseBuildClause(clauses, value.VisualDirection.Theme+"，"+value.VisualDirection.Motion, 240)
-	for _, requirement := range value.InteractionRequirements {
-		clauses = appendConciseBuildClause(clauses, requirement.Statement, 240)
-		if len(clauses) >= 6 {
-			break
-		}
+	if deliveryProfile == BuildDeliveryPortableSingleHTML {
+		clauses = appendConciseBuildClause(clauses, "将界面、样式和逻辑内联在单个HTML入口中，确保可直接预览", limit)
 	}
 	prompt := strings.Join(clauses, "；") + "。"
-	if containsPromptForbiddenTerm(prompt) || len([]rune(prompt)) > 240 {
+	if containsPromptForbiddenTerm(prompt) || len([]rune(prompt)) > limit {
 		return "", errors.New("compiled target prompt violates the concise downstream boundary")
 	}
 	return prompt, nil

@@ -74,7 +74,7 @@
         "max_attempts": { "type": "integer", "minimum": 1, "maximum": 20 },
         "max_provider_calls": { "type": "integer", "minimum": 0, "maximum": 100 },
         "max_cost_minor_units": { "type": "integer", "minimum": 0 },
-        "max_event_bytes": { "type": "integer", "minimum": 1024, "maximum": 524288 }
+        "max_event_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576 }
       }
     },
     "digest": {

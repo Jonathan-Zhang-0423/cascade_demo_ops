@@ -17,4 +17,4 @@ This directory is the machine-readable companion to `docs/protocols/universal-ex
 
 Transport adapters may wrap these objects with authentication or encryption metadata, but must not change their lifecycle, Gate, replay or error semantics.
 
-Run `pnpm validate:execution-port` from the repository root. The validator compiles every Draft 2020-12 schema, checks all positive and negative fixtures, validates the sample DAG, rejects site-specific router fields, enforces state transitions/event sequencing, and checks the 512 KiB canonical event limit.
+Run `pnpm validate:execution-port` from the repository root. The validator compiles every Draft 2020-12 schema, checks all positive and negative fixtures, validates the sample DAG, rejects site-specific router fields, enforces state transitions/event sequencing, and checks the 1 MiB canonical event hard limit. Workflow budgets should normally warn or externalize evidence at 512 KiB.

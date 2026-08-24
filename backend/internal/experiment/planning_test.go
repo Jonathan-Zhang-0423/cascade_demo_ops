@@ -86,16 +86,17 @@ func TestTaskPackSelectionIgnoresHostRouteAndCopy(t *testing.T) {
 
 func TestCompileBuildPromptKeepsTargetBriefConciseAndAcceptanceInternal(t *testing.T) {
 	spec := validProductSpecFixture()
+	spec.BuildBrief = "Core state, persistence, undo, keyboard and touch input in a polished responsive interface"
 	spec.ResponsiveRequirements = []string{"Keep the primary surface usable on a narrow viewport", "A second internal verification detail"}
 	userGoal := "Create a polished responsive experience in one sentence."
-	prompt, err := CompileBuildPrompt(spec, userGoal)
+	prompt, err := CompileBuildPrompt(spec, userGoal, BuildDeliveryPortableSingleHTML)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prompt == userGoal || !strings.HasPrefix(prompt, strings.TrimSuffix(userGoal, ".")+"；") || len([]rune(prompt)) > 240 || strings.Contains(prompt, "\n") {
+	if prompt == userGoal || !strings.HasPrefix(prompt, strings.TrimSuffix(userGoal, ".")+"；") || len([]rune(prompt)) > 180 || strings.Contains(prompt, "\n") {
 		t.Fatalf("compiled target brief is not a single concise user sentence: %s", prompt)
 	}
-	for _, requiredDetail := range []string{spec.Requirements[0].Statement, spec.InteractionRequirements[0].Statement, spec.VisualDirection.Theme} {
+	for _, requiredDetail := range []string{spec.BuildBrief, "单个HTML入口"} {
 		if !strings.Contains(prompt, strings.TrimRight(requiredDetail, "。.!！；; ")) {
 			t.Fatalf("concise compiled intent lost a high-priority product detail %q: %s", requiredDetail, prompt)
 		}

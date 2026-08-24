@@ -47,10 +47,10 @@ func (p *ProductSpecPlanner) Generate(ctx context.Context, shortGoal string) (Pr
 		return ProductSpec{}, errors.New("short product goal is required and must be bounded")
 	}
 	request := llm.JSONRequest{
-		System:     "You compile a product request into a provider-neutral ProductSpecArtifact. Return only structured product requirements, visual direction, interaction and responsive requirements, observable acceptance criteria, and forbidden outcomes. Do not mention the execution harness, recording, screenshots, visual polling, audit, credentials, video generation, media providers, or post-production. Acceptance criteria must be observable through visual plus DOM/ARIA/route/network evidence and must not contain selectors or hostnames.",
+		System:     "You compile a product request into a provider-neutral ProductSpecArtifact. Return structured product requirements plus build_brief: one concise clause of at most 140 characters containing only the product capabilities, visual direction, and interactions that the builder must implement. Keep detailed acceptance criteria internal to the artifact. Do not mention the execution harness, recording, screenshots, visual polling, audit, credentials, video generation, media providers, or post-production. Acceptance criteria must be observable through visual plus DOM/ARIA/route/network evidence and must not contain selectors or hostnames.",
 		User:       "Compile this short product goal into demoops.product_spec_artifact.v1:\n" + shortGoal,
 		SchemaName: ProductSpecSchemaVersion, MaxTokens: 3000, Temperature: 0.2,
-		ResponseHint: `{"schema_version":"demoops.product_spec_artifact.v1","spec_id":"product_spec_generated","title":"...","objective":"...","audience":"...","requirements":[{"id":"requirement_1","statement":"...","priority":"must"}],"visual_direction":{"theme":"...","palette":["..."],"motion":"..."},"interaction_requirements":[{"id":"interaction_1","statement":"...","priority":"must"}],"responsive_requirements":["..."],"observable_acceptance":[{"id":"criterion_1","statement":"...","evidence_kinds":["visual","dom"],"required":true}],"forbidden_outcomes":["..."]}`,
+		ResponseHint: `{"schema_version":"demoops.product_spec_artifact.v1","spec_id":"product_spec_generated","title":"...","objective":"...","audience":"...","build_brief":"one concise builder-facing product clause","requirements":[{"id":"requirement_1","statement":"...","priority":"must"}],"visual_direction":{"theme":"...","palette":["..."],"motion":"..."},"interaction_requirements":[{"id":"interaction_1","statement":"...","priority":"must"}],"responsive_requirements":["..."],"observable_acceptance":[{"id":"criterion_1","statement":"...","evidence_kinds":["visual","dom"],"required":true}],"forbidden_outcomes":["..."]}`,
 	}
 	var lastErr error
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -91,7 +91,7 @@ func ValidateProductSpecQuality(spec ProductSpec) error {
 		}
 		seen[criterion.ID] = true
 	}
-	serialized := strings.ToLower(fmt.Sprintf("%s %+v %+v %+v %+v %+v %+v", spec.Objective, spec.Requirements, spec.VisualDirection, spec.InteractionRequirements, spec.ResponsiveRequirements, spec.ObservableAcceptance, spec.ForbiddenOutcomes))
+	serialized := strings.ToLower(fmt.Sprintf("%s %s %+v %+v %+v %+v %+v %+v", spec.Objective, spec.BuildBrief, spec.Requirements, spec.VisualDirection, spec.InteractionRequirements, spec.ResponsiveRequirements, spec.ObservableAcceptance, spec.ForbiddenOutcomes))
 	for _, forbidden := range []string{"demoops", "h3", "seedance", "ffmpeg", "visual polling", "screenshot polling", "credential", "selector", "hostname"} {
 		if strings.Contains(serialized, forbidden) {
 			return fmt.Errorf("product specification leaks harness term %q", forbidden)
