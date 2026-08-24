@@ -84,6 +84,23 @@ func TestTaskPackSelectionIgnoresHostRouteAndCopy(t *testing.T) {
 	}
 }
 
+func TestCompileBuildPromptKeepsTargetBriefConciseAndAcceptanceInternal(t *testing.T) {
+	spec := validProductSpecFixture()
+	spec.ResponsiveRequirements = []string{"Keep the primary surface usable on a narrow viewport", "A second internal verification detail"}
+	prompt, err := CompileBuildPrompt(spec, "Demo Product")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(prompt)) > 1200 || !strings.Contains(prompt, "Demo Product") || !strings.Contains(prompt, spec.Requirements[0].Statement) {
+		t.Fatalf("compiled target brief is missing product identity or is not concise: %s", prompt)
+	}
+	for _, internalDetail := range []string{spec.Audience, spec.ObservableAcceptance[0].Statement, spec.ForbiddenOutcomes[0], spec.ResponsiveRequirements[1]} {
+		if strings.Contains(prompt, internalDetail) {
+			t.Fatalf("internal planning or acceptance detail leaked into target brief %q: %s", internalDetail, prompt)
+		}
+	}
+}
+
 func validProductSpecFixture() ProductSpec {
 	return ProductSpec{
 		SchemaVersion: ProductSpecSchemaVersion, SpecID: "spec-test", Title: "Interactive product", Objective: "Create a polished responsive experience", Audience: "Product evaluators",

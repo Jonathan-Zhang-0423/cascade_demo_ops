@@ -187,45 +187,45 @@ func CompileBuildPrompt(value ProductSpec, projectName string) (string, error) {
 	lines := []string{
 		fmt.Sprintf("请直接构建并完成一款名为《%s》的可运行网页产品。", projectName),
 		"产品目标：" + strings.TrimSpace(value.Objective),
-		"目标受众：" + strings.TrimSpace(value.Audience),
-		"核心功能：",
+		"必须具备：",
 	}
-	for _, requirement := range value.Requirements {
+	for _, requirement := range prioritizedPromptRequirements(value.Requirements, 5) {
 		lines = append(lines, "- "+strings.TrimSpace(requirement.Statement))
 	}
-	lines = append(lines, "交互要求：")
-	for _, requirement := range value.InteractionRequirements {
+	lines = append(lines, "交互：")
+	for _, requirement := range prioritizedPromptRequirements(value.InteractionRequirements, 3) {
 		lines = append(lines, "- "+strings.TrimSpace(requirement.Statement))
 	}
 	lines = append(lines,
-		"视觉方向："+strings.TrimSpace(value.VisualDirection.Theme)+"；配色："+strings.Join(value.VisualDirection.Palette, "、")+"；动效："+strings.TrimSpace(value.VisualDirection.Motion)+"。",
+		"视觉："+strings.TrimSpace(value.VisualDirection.Theme)+"；"+strings.Join(value.VisualDirection.Palette, "、")+"；"+strings.TrimSpace(value.VisualDirection.Motion)+"。",
 	)
 	if len(value.ResponsiveRequirements) > 0 {
-		lines = append(lines, "响应式与可用性：")
-		for _, requirement := range value.ResponsiveRequirements {
-			lines = append(lines, "- "+strings.TrimSpace(requirement))
-		}
+		lines = append(lines, "响应式："+strings.TrimSpace(value.ResponsiveRequirements[0]))
 	}
-	lines = append(lines, "可观察验收：")
-	for _, criterion := range value.ObservableAcceptance {
-		if criterion.Required {
-			lines = append(lines, "- "+strings.TrimSpace(criterion.Statement))
-		}
-	}
-	for _, outcome := range value.ForbiddenOutcomes {
-		if !containsPromptForbiddenTerm(outcome) {
-			lines = append(lines, "不得出现："+strings.TrimSpace(outcome))
-		}
-	}
-	lines = append(lines, "不要只输出计划、分析、说明或静态占位页；请直接实现并在当前预览中提供完整可交互结果。")
+	lines = append(lines, "请直接实现，并在当前预览中展示完整可交互结果。")
 	prompt := strings.Join(lines, "\n")
 	if containsPromptForbiddenTerm(prompt) {
 		return "", errors.New("compiled target prompt contains an internal harness term")
 	}
-	if len([]rune(prompt)) > 6000 {
+	if len([]rune(prompt)) > 1200 {
 		return "", errors.New("compiled target prompt exceeds the allowed size")
 	}
 	return prompt, nil
+}
+
+func prioritizedPromptRequirements(requirements []ProductRequirement, limit int) []ProductRequirement {
+	result := make([]ProductRequirement, 0, limit)
+	for _, priority := range []string{"must", "should", "could"} {
+		for _, requirement := range requirements {
+			if len(result) >= limit {
+				return result
+			}
+			if strings.EqualFold(strings.TrimSpace(requirement.Priority), priority) && strings.TrimSpace(requirement.Statement) != "" {
+				result = append(result, requirement)
+			}
+		}
+	}
+	return result
 }
 
 type LoadedDefinition struct {

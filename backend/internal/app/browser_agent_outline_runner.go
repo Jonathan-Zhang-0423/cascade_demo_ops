@@ -132,7 +132,9 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier)
 	startedAt := timeNowUTC()
 	runResult, runErr := orchestrator.Run(ctx, request.RuntimePlan, stageRuntime, stageRuntime, request.EventSink)
-	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 15*time.Second)
+	// A long Playwright recording can take minutes to finalize. Keep the RPC
+	// alive until Chromium closes and the Worker verifies a stable file size.
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Minute)
 	closeResult, closeErr := session.Close(cleanupCtx)
 	cancelCleanup()
 	closed = true

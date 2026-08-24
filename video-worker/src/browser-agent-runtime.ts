@@ -894,17 +894,20 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   try {
     if (session.traceActive) await settleWithin(session.context.tracing.stop({ path: session.tracePath }), 8_000);
   } finally {
-    // Playwright can flush the WebM/trace successfully while a browser close
-    // promise remains pending. Keep cleanup inside the Server RPC deadline so
-    // already-written evidence can still be returned.
-    await settleWithin(session.context.close(), 10_000);
-    await settleWithin(session.browser.close(), 3_000);
+    // Chromium finalizes a long Playwright recording only while closing its
+    // context. Never hash or upload the provisional WebM while ffmpeg is still
+    // appending bytes; keep the outer RPC bounded by the Go cleanup deadline.
+    const contextClosed = await valueWithin(session.context.close().then(() => true).catch(() => false), 8 * 60_000, false);
+    if (!contextClosed) throw new Error("browser_agent_recording_finalize_timeout");
+    const browserClosed = await valueWithin(session.browser.close().then(() => true).catch(() => false), 60_000, false);
+    if (!browserClosed) throw new Error("browser_agent_browser_close_timeout");
   }
   if (await fileExists(session.tracePath)) {
     artifacts.push(await artifactRef(`artifact_${session.id}_trace`, "browser_trace", session.tracePath, "application/zip", undefined, { include_in_demo: false }));
   }
   recordingPath = recordingPathPromise ? await valueWithin(recordingPathPromise, 3_000, undefined) : undefined;
   if (recordingPath && await fileExists(recordingPath)) {
+    if (!await waitForFileStable(recordingPath, 3, 750)) throw new Error("browser_agent_recording_not_stable");
     const segmentEntries = (await readdir(session.outputDir).catch(() => [] as string[])).filter((entry) => /^recording-segment-\d+\.webm$/i.test(entry));
     const segmentPath = path.join(session.outputDir, `recording-segment-${String(segmentEntries.length + 1).padStart(3, "0")}.webm`);
     if (path.resolve(recordingPath) !== path.resolve(segmentPath)) await rename(recordingPath, segmentPath);
@@ -981,6 +984,23 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
     artifacts,
     runtime_versions: { runner: "playwright-browser-agent", browser: session.engine },
   };
+}
+
+async function waitForFileStable(filePath: string, requiredStableChecks: number, intervalMS: number): Promise<boolean> {
+  let previousSize = -1;
+  let stableChecks = 0;
+  for (let attempt = 0; attempt < requiredStableChecks + 8; attempt++) {
+    const size = await stat(filePath).then((value) => value.size).catch(() => -1);
+    if (size > 0 && size === previousSize) {
+      stableChecks++;
+      if (stableChecks >= requiredStableChecks) return true;
+    } else {
+      stableChecks = 0;
+    }
+    previousSize = size;
+    await new Promise((resolve) => setTimeout(resolve, intervalMS));
+  }
+  return false;
 }
 
 async function stitchRecordingSegments(segmentPaths: string[], outputPath: string, outputDir: string): Promise<boolean> {
