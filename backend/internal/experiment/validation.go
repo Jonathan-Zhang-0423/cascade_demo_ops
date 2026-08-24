@@ -180,9 +180,9 @@ func CompileBuildPrompt(value ProductSpec, userGoal string) (string, error) {
 		return "", err
 	}
 	userGoal = strings.TrimSpace(userGoal)
-	// The target product receives the same one-sentence experience a user is
-	// evaluating. Detailed ProductSpec requirements, acceptance criteria,
-	// safety rules, and director concerns remain internal DemoOps artifacts.
+	// The user supplies only one sentence. DemoOps may compile that intent into
+	// one concise downstream sentence, but never dumps the ProductSpec,
+	// acceptance matrix, safety rules, or director concerns into the builder.
 	if len([]rune(userGoal)) < 10 {
 		return "", errors.New("one-sentence user goal is too short")
 	}
@@ -195,7 +195,44 @@ func CompileBuildPrompt(value ProductSpec, userGoal string) (string, error) {
 	if len([]rune(userGoal)) > 240 {
 		return "", errors.New("compiled target prompt exceeds the allowed size")
 	}
-	return userGoal, nil
+	clauses := []string{compactBuildPromptClause(userGoal)}
+	for _, requirement := range value.Requirements {
+		if requirement.Priority == "must" {
+			clauses = appendConciseBuildClause(clauses, requirement.Statement, 240)
+			if len(clauses) >= 3 {
+				break
+			}
+		}
+	}
+	clauses = appendConciseBuildClause(clauses, value.VisualDirection.Theme+"，"+value.VisualDirection.Motion, 240)
+	for _, requirement := range value.InteractionRequirements {
+		clauses = appendConciseBuildClause(clauses, requirement.Statement, 240)
+		if len(clauses) >= 6 {
+			break
+		}
+	}
+	prompt := strings.Join(clauses, "；") + "。"
+	if containsPromptForbiddenTerm(prompt) || len([]rune(prompt)) > 240 {
+		return "", errors.New("compiled target prompt violates the concise downstream boundary")
+	}
+	return prompt, nil
+}
+
+func appendConciseBuildClause(clauses []string, value string, limit int) []string {
+	clause := compactBuildPromptClause(value)
+	if clause == "" {
+		return clauses
+	}
+	candidate := strings.Join(append(append([]string{}, clauses...), clause), "；") + "。"
+	if len([]rune(candidate)) > limit {
+		return clauses
+	}
+	return append(clauses, clause)
+}
+
+func compactBuildPromptClause(value string) string {
+	value = strings.TrimSpace(value)
+	return strings.TrimRight(value, "。.!！；; ")
 }
 
 type LoadedDefinition struct {

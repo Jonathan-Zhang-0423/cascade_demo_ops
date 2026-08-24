@@ -92,10 +92,15 @@ func TestCompileBuildPromptKeepsTargetBriefConciseAndAcceptanceInternal(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prompt != userGoal || len([]rune(prompt)) > 240 || strings.Contains(prompt, "\n") {
+	if prompt == userGoal || !strings.HasPrefix(prompt, strings.TrimSuffix(userGoal, ".")+"；") || len([]rune(prompt)) > 240 || strings.Contains(prompt, "\n") {
 		t.Fatalf("compiled target brief is not a single concise user sentence: %s", prompt)
 	}
-	for _, internalDetail := range []string{spec.Audience, spec.Requirements[0].Statement, spec.InteractionRequirements[0].Statement, spec.VisualDirection.Theme, spec.ObservableAcceptance[0].Statement, spec.ForbiddenOutcomes[0], spec.ResponsiveRequirements[1]} {
+	for _, requiredDetail := range []string{spec.Requirements[0].Statement, spec.InteractionRequirements[0].Statement, spec.VisualDirection.Theme} {
+		if !strings.Contains(prompt, strings.TrimRight(requiredDetail, "。.!！；; ")) {
+			t.Fatalf("concise compiled intent lost a high-priority product detail %q: %s", requiredDetail, prompt)
+		}
+	}
+	for _, internalDetail := range []string{spec.Audience, spec.ObservableAcceptance[0].Statement, spec.ForbiddenOutcomes[0], spec.ResponsiveRequirements[1]} {
 		if strings.Contains(prompt, internalDetail) {
 			t.Fatalf("internal planning or acceptance detail leaked into target brief %q: %s", internalDetail, prompt)
 		}
