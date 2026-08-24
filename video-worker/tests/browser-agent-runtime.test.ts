@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -235,6 +235,38 @@ describe("browser agent navigation policy", () => {
       url: "https://app.example.com/app", target_contract: { semantic_id: "entry", destructive: false },
       interactions: [{ kind: "navigate", non_destructive: true }],
     }, "https://app.example.com/results/runtime-42", "https://app.example.com/results/runtime-42")).toBe("https://app.example.com/app");
+  });
+});
+
+describe("same-origin redirected result recovery", () => {
+  const candidate = (overrides: Partial<{ index: number; tag: string; role: string; href: string; attributes: string[]; cursor: string; area: number }> = {}) => ({
+    index: 0, tag: "div", role: "", href: "", attributes: ["entity-result_abcdefgh"], cursor: "pointer", area: 40_000, ...overrides,
+  });
+
+  it("uses the opaque target identity without a hostname, route, selector, or label rule", () => {
+    expect(selectRedirectedResultEntryCandidate(
+      "https://app.example.test/collection",
+      "https://app.example.test/result/result_abcdefgh",
+      [candidate()],
+    )).toBe(0);
+  });
+
+  it("rejects destructive siblings and fails closed on ambiguous identity matches", () => {
+    expect(selectRedirectedResultEntryCandidate(
+      "https://app.example.test/collection",
+      "https://app.example.test/result/result_abcdefgh",
+      [candidate({ index: 2, attributes: ["rename-result_abcdefgh"] }), candidate({ index: 3 })],
+    )).toBe(3);
+    expect(selectRedirectedResultEntryCandidate(
+      "https://app.example.test/collection",
+      "https://app.example.test/result/result_abcdefgh",
+      [candidate({ index: 4 }), candidate({ index: 5 })],
+    )).toBeUndefined();
+  });
+
+  it("does not cross origins or infer identity from short path segments", () => {
+    expect(selectRedirectedResultEntryCandidate("https://one.example/list", "https://two.example/result/result_abcdefgh", [candidate()])).toBeUndefined();
+    expect(selectRedirectedResultEntryCandidate("https://app.example/list", "https://app.example/result/short", [candidate({ attributes: ["short"] })])).toBeUndefined();
   });
 });
 

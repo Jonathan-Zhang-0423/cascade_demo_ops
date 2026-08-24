@@ -2422,8 +2422,103 @@ async function navigateWithinSessionPolicy(
   if (policyError) throw new Error(policyError);
   await session.page.goto(targetURL, { waitUntil: loadState, timeout });
   await waitForPageSettled(session.page);
-  const finalPolicyError = urlPolicyError(session.page.url(), session, false);
+  let finalPolicyError = urlPolicyError(session.page.url(), session, false);
   if (finalPolicyError) throw new Error(finalPolicyError);
+  if (!urlMatches(session.page.url(), targetURL)) {
+    await recoverRedirectedResultEntry(session.page, targetURL, Math.min(timeout, 8_000));
+    finalPolicyError = urlPolicyError(session.page.url(), session, false);
+    if (finalPolicyError) throw new Error(finalPolicyError);
+  }
+}
+
+type RedirectedResultEntryCandidate = {
+  index: number;
+  tag: string;
+  role: string;
+  href: string;
+  attributes: string[];
+  cursor: string;
+  area: number;
+};
+
+/**
+ * Select a result entry after a SPA has rejected a valid deep link and sent the
+ * browser back to a same-origin collection page. Selection is based only on
+ * the opaque identity already present in the approved target URL. It does not
+ * know a product name, hostname, route template, selector, or business label.
+ */
+export function selectRedirectedResultEntryCandidate(
+  currentURL: string,
+  targetURL: string,
+  candidates: RedirectedResultEntryCandidate[],
+): number | undefined {
+  let current: URL;
+  let target: URL;
+  try {
+    current = new URL(currentURL);
+    target = new URL(targetURL);
+  } catch {
+    return undefined;
+  }
+  if (current.origin !== target.origin || current.href === target.href) return undefined;
+  const token = target.pathname.split("/").filter(Boolean).at(-1) || "";
+  if (token.length < 8 || !/^[a-z0-9_-]+$/i.test(token)) return undefined;
+  const destructive = /(?:delete|remove|destroy|trash|rename|edit|删除|移除|销毁|重命名|编辑)/i;
+  const scored = candidates.flatMap((candidate) => {
+    if (!Number.isFinite(candidate.area) || candidate.area < 64) return [];
+    const identity = [candidate.tag, candidate.role, ...candidate.attributes].join(" ");
+    if (destructive.test(identity)) return [];
+    const values = candidate.attributes.map((value) => String(value || ""));
+    let score = 0;
+    if (candidate.href) {
+      try {
+        const href = new URL(candidate.href, current);
+        if (href.origin === target.origin && href.pathname === target.pathname) score = 1_000;
+      } catch {
+        // A malformed live href is simply not identity evidence.
+      }
+    }
+    if (values.some((value) => value === target.href || value === target.pathname)) score = Math.max(score, 900);
+    if (values.some((value) => value.includes(target.pathname))) score = Math.max(score, 800);
+    if (values.some((value) => value === token)) score = Math.max(score, 700);
+    if (values.some((value) => value.includes(token))) score = Math.max(score, 600);
+    if (score === 0) return [];
+    if (candidate.cursor === "pointer") score += 100;
+    if (candidate.tag === "a") score += 80;
+    if (candidate.role === "link" || candidate.role === "button") score += 40;
+    score += Math.min(20, Math.round(Math.log2(Math.max(1, candidate.area))));
+    return [{ index: candidate.index, score }];
+  }).sort((left, right) => right.score - left.score || left.index - right.index);
+  if (scored.length === 0 || (scored[1] && scored[1].score === scored[0]!.score)) return undefined;
+  return scored[0]!.index;
+}
+
+export async function recoverRedirectedResultEntry(page: any, targetURL: string, timeoutMS = 8_000): Promise<boolean> {
+  if (urlMatches(page.url(), targetURL)) return true;
+  const locator = page.locator?.("body *");
+  if (!locator?.evaluateAll) return false;
+  const candidates = await locator.evaluateAll((elements: any[]) => elements.map((element, index) => {
+    const style = (globalThis as any).getComputedStyle?.(element);
+    const rect = element.getBoundingClientRect?.();
+    const visible = Boolean(rect && rect.width > 0 && rect.height > 0 && style?.display !== "none" && style?.visibility !== "hidden" && Number(style?.opacity ?? 1) > 0);
+    if (!visible) return undefined;
+    return {
+      index,
+      tag: String(element.tagName || "").toLowerCase(),
+      role: String(element.getAttribute?.("role") || "").toLowerCase(),
+      href: String(element.href || element.getAttribute?.("href") || ""),
+      attributes: Array.from(element.attributes || []).map((attribute: any) => String(attribute.value || "")),
+      cursor: String(style?.cursor || ""),
+      area: Number(rect.width) * Number(rect.height),
+    };
+  }).filter(Boolean));
+  const index = selectRedirectedResultEntryCandidate(page.url(), targetURL, candidates);
+  if (index === undefined) return false;
+  const candidate = locator.nth(index);
+  await candidate.scrollIntoViewIfNeeded?.().catch(() => undefined);
+  await candidate.click({ timeout: timeoutMS });
+  await waitForPageSettled(page, Math.min(timeoutMS, 5_000));
+  return urlMatches(page.url(), targetURL);
 }
 
 function safeURL(value: string): string {
@@ -2650,7 +2745,10 @@ async function captureOutcomeSnapshot(page: any): Promise<OutcomeSnapshot> {
     const snapshot = await frame.evaluate(() => {
       const doc = (globalThis as any).document;
       if (!doc) return { dom: "", aria: "" };
-      const elements = Array.from(doc.querySelectorAll("body *")).slice(0, 800) as any[];
+      // Include the body itself: srcdoc/embedded surfaces commonly publish
+      // their semantic lifecycle on body[role]/body[aria-*], while their
+      // descendant structure remains unchanged.
+      const elements = Array.from(doc.querySelectorAll("body,body *")).slice(0, 800) as any[];
       const dom = elements.map((element) => [
         String(element.tagName || "").toLowerCase(),
         String(element.getAttribute?.("role") || ""),
