@@ -30,6 +30,15 @@ type browserAgentWorkerCredentialSession interface {
 	ExecuteWithSecrets(context.Context, driver.BrowserAgentWorkerStage, map[string]string) (driver.BrowserAgentWorkerStageResult, error)
 }
 
+// browserAgentWorkerAutoLoginSession is used only by the explicit local-dev
+// Direct acceptance path. The credentials travel over the private Worker RPC
+// and are cleared before the approved stage plan, audit trace, and video are
+// produced.
+type browserAgentWorkerAutoLoginSession interface {
+	AutoLoginDevVisible(context.Context, string, string) (driver.BrowserAgentWorkerStatus, error)
+	BeginExecutionRecording(context.Context) error
+}
+
 type browserAgentWorkerSessionFactory func(context.Context, driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error)
 
 type localBrowserAgentOutlineRunner struct {
@@ -88,6 +97,14 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 
 	openRequest := browserAgentWorkerOpenRequest(request)
 	openRequest.TaskSecrets = request.TaskSecrets
+	// Automatic local-dev login must happen before Playwright trace collection;
+	// the Worker starts the trace explicitly after the credential fields have
+	// been submitted. Video remains protected by the installed mask selectors.
+	var autoLoginErr error
+	if request.AutoLoginUsername != "" || request.AutoLoginPassword != "" {
+		recordTrace := false
+		openRequest.RecordTrace = &recordTrace
+	}
 	// Only the Server-created local fixture contains no customer material. Real
 	// App packages keep their raw recording sensitive by default.
 	if request.Package.Metadata["producer"] == "server_controlled_business_acceptance" &&
@@ -125,6 +142,23 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 			_ = session.Abort()
 		}
 	}()
+	if request.AutoLoginUsername != "" || request.AutoLoginPassword != "" {
+		if r.service.runtime.Profile != config.ProfileDev || request.AutoLoginUsername == "" || request.AutoLoginPassword == "" {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("direct_auto_login_unavailable", errors.New("automatic Direct login is permitted only for an explicit dev session with complete credentials"))
+		}
+		autoLoginSession, ok := session.(browserAgentWorkerAutoLoginSession)
+		if !ok {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("direct_auto_login_unavailable", errors.New("browser-agent worker does not support local automatic login"))
+		}
+		loginCtx, cancelLogin := context.WithTimeout(ctx, 75*time.Second)
+		_, loginErr := autoLoginSession.AutoLoginDevVisible(loginCtx, request.AutoLoginUsername, request.AutoLoginPassword)
+		cancelLogin()
+		request.AutoLoginUsername, request.AutoLoginPassword = "", ""
+		autoLoginErr = loginErr
+		if err := autoLoginSession.BeginExecutionRecording(ctx); err != nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("direct_recording_start_failed", err)
+		}
+	}
 
 	stageRuntime := &localBrowserAgentStageRuntime{
 		session: session, credentialResolver: request.CredentialResolver, progress: request.Progress, stageCount: len(request.RuntimePlan.Stages), artifacts: map[string]model.ArtifactRef{}, taskSecretRefs: taskSecretRefSet(request.TaskSecrets),
@@ -132,6 +166,13 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	orchestrator := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, verifier)
 	startedAt := timeNowUTC()
 	runResult, runErr := orchestrator.Run(ctx, request.RuntimePlan, stageRuntime, stageRuntime, request.EventSink)
+	// On automatic-login failure, still execute the first approved observation
+	// and close normally. This produces masked screenshot/trace evidence showing
+	// the actual page state instead of returning before any replayable artifact
+	// exists. The terminal error retains the distinct login failure code.
+	if autoLoginErr != nil {
+		runErr = newRuntimeExecutionError("direct_auto_login_failed", autoLoginErr)
+	}
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 15*time.Second)
 	closeResult, closeErr := session.Close(cleanupCtx)
 	cancelCleanup()

@@ -65,6 +65,12 @@ type BrowserAgentAcceptanceCheck struct {
 	Actual string `json:"actual,omitempty"`
 }
 
+// The controlled protocol suite executes five base scenarios plus two bounded
+// repair scenarios. A three-minute suite budget expires during healthy runs on
+// Windows hosts before the final repair evidence can be packaged. Eight minutes
+// retains a safety limit while allowing normal Windows FFmpeg variance.
+const browserAgentAcceptanceSuiteTimeout = 8 * time.Minute
+
 type BrowserAgentAcceptanceView struct {
 	Ready      bool                          `json:"ready"`
 	CanRun     bool                          `json:"can_run"`
@@ -114,7 +120,7 @@ func (s *Service) RunBrowserAgentAcceptance(ctx context.Context) (BrowserAgentAc
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return BrowserAgentAcceptanceView{}, err
 	}
-	runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	runCtx, cancel := context.WithTimeout(ctx, browserAgentAcceptanceSuiteTimeout)
 	defer cancel()
 	report, err := s.runProtocolBrowserAgentAcceptance(runCtx, fixturePath)
 	if err != nil {
@@ -199,7 +205,7 @@ func readBrowserAgentAcceptanceReport(path string) (BrowserAgentAcceptanceReport
 func (s *Service) runProtocolBrowserAgentAcceptance(ctx context.Context, fixturePath string) (BrowserAgentAcceptanceReport, error) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Acceptance Dashboard</title></head><body><main aria-label="Dashboard"><h1>Dashboard</h1><button type="button" data-testid="invite-member">Invite teammate</button><p id="status">Waiting</p></main><script>document.querySelector('[data-testid="invite-member"]').addEventListener('click',()=>document.querySelector('#status').textContent='Invite flow starts')</script></body></html>`))
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Acceptance Dashboard</title></head><body><main aria-label="Dashboard"><h1>Dashboard</h1><button type="button" data-testid="invite-member">Invite teammate</button><p id="status">Waiting</p></main><script>document.querySelector('[data-testid="invite-member"]').addEventListener('click',()=>{document.querySelector('#status').textContent='Invite flow starts';const dialog=document.createElement('section');dialog.dataset.testid='invite-dialog';dialog.setAttribute('role','dialog');dialog.textContent='Invite teammate';document.body.appendChild(dialog)})</script></body></html>`))
 	}))
 	defer server.Close()
 
@@ -273,7 +279,7 @@ func (s *Service) runProtocolBrowserAgentAcceptance(ctx context.Context, fixture
 		failed := make([]string, 0, len(report.Scenarios))
 		for _, scenario := range report.Scenarios {
 			if scenario.Verdict != "passed" {
-				failed = append(failed, scenario.ID)
+				failed = append(failed, scenario.ID+":"+scenario.Actual)
 			}
 		}
 		return BrowserAgentAcceptanceReport{}, fmt.Errorf("protocol browser-agent acceptance failed: %s", strings.Join(failed, ", "))
@@ -408,7 +414,11 @@ func protocolAcceptanceSuccessScenario(run protocolAcceptanceRun) BrowserAgentAc
 	hasFinalVideo := protocolAcceptanceHasArtifact(run.Result, "demo_video")
 	strictReports := hasStrictBrowserAgentValidationReports(run.Result, 2)
 	passed := run.Status.Status == model.ExchangePackageStatusCompleted && run.Result.Status == model.RecordingResultStatusGenerated && strictReports && hasFinalVideo && run.Acknowledged && run.DeliveryAcknowledged
-	return BrowserAgentAcceptanceScenario{ID: "success_navigation_click", Description: "完整协议链：Intake 校验、导航、语义点击、结果包和交付确认", Expected: "任务完成，两个 Stage 均有真实验证、最终视频、结果包和 ack", Actual: acceptanceActual(passed), Verdict: acceptanceVerdict(passed), ActionExecuted: true, Evidence: protocolAcceptanceArtifacts(run.Result), Assertions: []BrowserAgentAcceptanceCheck{{Kind: "exchange_status", Passed: run.Status.Status == model.ExchangePackageStatusCompleted, Actual: string(run.Status.Status)}, {Kind: "strict_validation_reports", Passed: strictReports, Actual: fmt.Sprintf("%d", len(run.Result.ValidationReports))}, {Kind: "final_video", Passed: hasFinalVideo, Actual: "demo_video"}, {Kind: "result_package", Passed: run.Result.Status == model.RecordingResultStatusGenerated, Actual: string(run.Result.Status)}, {Kind: "delivery_ack", Passed: run.Acknowledged && run.DeliveryAcknowledged, Actual: "acknowledged"}}}
+	actual := acceptanceActual(passed)
+	if !passed {
+		actual = fmt.Sprintf("exchange_status=%s,result_status=%s,strict_reports=%t(%d),demo_video=%t,delivery_ack=%t", run.Status.Status, run.Result.Status, strictReports, len(run.Result.ValidationReports), hasFinalVideo, run.Acknowledged && run.DeliveryAcknowledged)
+	}
+	return BrowserAgentAcceptanceScenario{ID: "success_navigation_click", Description: "完整协议链：Intake 校验、导航、语义点击、结果包和交付确认", Expected: "任务完成，两个 Stage 均有真实验证、最终视频、结果包和 ack", Actual: actual, Verdict: acceptanceVerdict(passed), ActionExecuted: true, Evidence: protocolAcceptanceArtifacts(run.Result), Assertions: []BrowserAgentAcceptanceCheck{{Kind: "exchange_status", Passed: run.Status.Status == model.ExchangePackageStatusCompleted, Actual: string(run.Status.Status)}, {Kind: "strict_validation_reports", Passed: strictReports, Actual: fmt.Sprintf("%d", len(run.Result.ValidationReports))}, {Kind: "final_video", Passed: hasFinalVideo, Actual: "demo_video"}, {Kind: "result_package", Passed: run.Result.Status == model.RecordingResultStatusGenerated, Actual: string(run.Result.Status)}, {Kind: "delivery_ack", Passed: run.Acknowledged && run.DeliveryAcknowledged, Actual: "acknowledged"}}}
 }
 
 func hasStrictBrowserAgentValidationReports(result model.RecordingResultPackage, stageCount int) bool {

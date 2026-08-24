@@ -24,6 +24,8 @@ const (
 type executionRuntimeRequest struct {
 	Package            *model.ClientExecutionPackage
 	CredentialResolver browserAgentCredentialResolver
+	AutoLoginUsername  string
+	AutoLoginPassword  string
 	CloudJobID         string
 	RecordingOutputDir string
 	RenderOutputDir    string
@@ -39,6 +41,10 @@ type BrowserAgentOutlineRunRequest struct {
 	Package            *model.ClientExecutionPackage
 	RuntimePlan        BrowserAgentRuntimePlan
 	CredentialResolver browserAgentCredentialResolver
+	// Auto-login values are Direct Worker in-memory inputs. They are never
+	// serialized into the App package, stage plan, event stream, or result.
+	AutoLoginUsername  string
+	AutoLoginPassword  string
 	CloudJobID         string
 	RecordingOutputDir string
 	RenderOutputDir    string
@@ -92,7 +98,7 @@ func (r executionRuntimeRouter) Run(ctx context.Context, request executionRuntim
 			return model.RecordingResultPackage{}, newRuntimeExecutionError("stage_event_audit_unavailable", err)
 		}
 		result, err := r.outline.Run(ctx, BrowserAgentOutlineRunRequest{
-			Package: request.Package, RuntimePlan: runtimePlan, CredentialResolver: request.CredentialResolver, CloudJobID: request.CloudJobID,
+			Package: request.Package, RuntimePlan: runtimePlan, CredentialResolver: request.CredentialResolver, AutoLoginUsername: request.AutoLoginUsername, AutoLoginPassword: request.AutoLoginPassword, CloudJobID: request.CloudJobID,
 			RecordingOutputDir: request.RecordingOutputDir, RenderOutputDir: request.RenderOutputDir,
 			ResultCreatedAt: request.ResultCreatedAt, Progress: request.Progress, EventSink: eventSink, TaskSecrets: request.TaskSecrets,
 		})

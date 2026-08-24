@@ -63,6 +63,25 @@ func TestFinalBuildCompletionValidationUsesEvidenceBoundResultAndLongPoll(t *tes
 	}
 }
 
+func TestFinalObserveDoesNotReuseUnrelatedPageScanControlAsExecutionRoute(t *testing.T) {
+	stage := model.BusinessStage{
+		ID: "business_stage_final_observe", Kind: model.BusinessStageKindFinalObserve,
+		EntryRoute: "/project/:id", ExpectedRouteAfterAction: "/project/:id",
+		Action: model.BusinessActionSemantics{Label: "等待构建完成", SuccessState: "构建完成结果可见"},
+		Targets: []model.BusinessTargetCandidate{{
+			ID: "unrelated_project_idea", URL: "https://product.example/app", Kind: "inspect",
+			Selector: "[data-testid='input-project-idea']", TestID: "input-project-idea",
+		}},
+	}
+	target := businessStageActionTarget(stage, "https://product.example/app")
+	if target.URL != "https://product.example/project/:id" {
+		t.Fatalf("final observation must retain its stage entry route, got %+v", target)
+	}
+	if target.Selector != "" || target.TestID != "" {
+		t.Fatalf("unrelated page-scan control must not become a final-observe action target: %+v", target)
+	}
+}
+
 func TestSessionSetupValidationUsesPostLoginStateNotEmailActionTarget(t *testing.T) {
 	stage := model.BusinessStage{
 		ID: "business_stage_session_setup", Kind: model.BusinessStageKindSessionSetup,

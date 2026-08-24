@@ -313,6 +313,30 @@ $state = Invoke-BridgeJson -Method POST -Uri $preparePath -Body $appRequest
 $projectId = [string]$state.project_id
 if ([string]::IsNullOrWhiteSpace($projectId)) { throw "App formal package generation returned no project_id" }
 
+# The local source is read-only and has already been supplied as part of the
+# formal App request. When the product page lacks a matching deployment or
+# repository identity signal, the App deliberately returns `unverified` rather
+# than silently mixing page and source evidence. This unattended command is an
+# explicit App-side decision point: confirm only that non-mismatch state, write
+# the decision to the project audit trail, then regenerate the immutable package.
+$sourceBinding = Invoke-BridgeJson -Method GET -Uri "$EngineBaseUrl/v1/desktop/projects/$([Uri]::EscapeDataString($projectId))/source-binding"
+if ([string]$sourceBinding.status -eq "unverified") {
+  if ([string]::IsNullOrWhiteSpace([string]$sourceBinding.assessment_hash)) {
+    throw "App source binding is unverified without an assessment hash; refusing to produce a mixed-evidence package"
+  }
+  $confirmed = Invoke-BridgeJson -Method POST -Uri "$EngineBaseUrl/v1/desktop/projects/$([Uri]::EscapeDataString($projectId))/source-binding/decisions" -Body @{
+    decision = "confirm_mixed"
+    assessment_hash = [string]$sourceBinding.assessment_hash
+    idempotency_key = "unattended-formal-source-binding-$stamp"
+  }
+  $projectId = [string]$confirmed.project_id
+  if ([string]::IsNullOrWhiteSpace($projectId)) { throw "App source-binding confirmation returned no project_id" }
+  $sourceBinding = Invoke-BridgeJson -Method GET -Uri "$EngineBaseUrl/v1/desktop/projects/$([Uri]::EscapeDataString($projectId))/source-binding"
+}
+if ([string]$sourceBinding.effective_mode -ne "mixed" -or ([string]$sourceBinding.status -ne "matched" -and [string]$sourceBinding.status -ne "confirmed")) {
+  throw "App source binding remains ineligible for formal mixed-evidence package: status=$($sourceBinding.status), mode=$($sourceBinding.effective_mode)"
+}
+
 $buildPath = "$EngineBaseUrl/v1/desktop/projects/$([Uri]::EscapeDataString($projectId))/client-execution-package"
 $build = Invoke-BridgeJson -Method POST -Uri $buildPath -Body @{ org_id = "org_desktop" }
 $package = $build.package

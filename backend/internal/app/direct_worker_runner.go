@@ -57,6 +57,7 @@ func (s *DirectHTTPServer) RunDirectJob(ctx context.Context, jobID string) error
 	}
 	secretRefs := directPackageSecretRefs(&pkg)
 	var credentialResolver browserAgentCredentialResolver
+	autoLoginUsername, autoLoginPassword := "", ""
 	if len(secretRefs) == 1 {
 		envelope, consumeErr := s.gateway.ConsumeCredential(jobID)
 		if consumeErr != nil {
@@ -67,7 +68,9 @@ func (s *DirectHTTPServer) RunDirectJob(ctx context.Context, jobID string) error
 			_ = s.gateway.FailJob(jobID, "credential_scope_mismatch")
 			return errors.New("consumed Direct credential does not match the approved package secret_ref")
 		}
+		autoLoginUsername, autoLoginPassword = envelope.Username, envelope.Secret
 		broker, brokerErr := newOneTimeBrowserAgentCredentialBroker(envelope.SecretRef, envelope.Secret)
+		envelope.Username = ""
 		envelope.Secret = ""
 		if brokerErr != nil {
 			_ = s.gateway.FailJob(jobID, "credential_broker_unavailable")
@@ -81,7 +84,7 @@ func (s *DirectHTTPServer) RunDirectJob(ctx context.Context, jobID string) error
 	renderDir := filepath.Join(root, "render")
 	router := newExecutionRuntimeRouter(localLegacyPlaywrightRunner{service: s.service}, s.service.outlineRunner)
 	result, err := router.Run(ctx, executionRuntimeRequest{
-		Package: &pkg, CredentialResolver: credentialResolver, CloudJobID: jobID, RecordingOutputDir: recordingDir, RenderOutputDir: renderDir,
+		Package: &pkg, CredentialResolver: credentialResolver, AutoLoginUsername: autoLoginUsername, AutoLoginPassword: autoLoginPassword, CloudJobID: jobID, RecordingOutputDir: recordingDir, RenderOutputDir: renderDir,
 		ResultCreatedAt: time.Now().UTC(),
 		Progress: func(stage, message string, progress int) {
 			_ = s.gateway.UpdateJob(jobID, progress, stage)

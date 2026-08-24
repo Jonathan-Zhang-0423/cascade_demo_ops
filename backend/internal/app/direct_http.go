@@ -330,10 +330,13 @@ func directCredentialEnvelopeFromWire(envelope model.DirectCredentialEnvelope, j
 	if envelope.Credential.ExpiresAt.IsZero() || !envelope.Credential.ExpiresAt.Equal(envelope.ExpiresAt) {
 		return direct.DirectCredentialEnvelope{}, errors.New("credential expiry does not match envelope")
 	}
+	if strings.TrimSpace(envelope.Credential.Username) == "" || envelope.Credential.Password == "" {
+		return direct.DirectCredentialEnvelope{}, errors.New("credential username and password are required")
+	}
 	return direct.DirectCredentialEnvelope{JobID: envelope.JobID, PackageID: envelope.PackageID, PackageSHA256: job.PackageSHA256,
 		GrantID: envelope.GrantID, SecretRef: envelope.SecretRef, InstallationID: envelope.InstallationID, LeaseID: envelope.LeaseID,
 		AllowedDomains: append([]string(nil), envelope.AllowedDomains...), AllowedOperations: append([]string(nil), envelope.AllowedOperations...),
-		ExpiresAtUnixMS: envelope.ExpiresAt.UnixMilli(), Secret: envelope.Credential.Password}, nil
+		ExpiresAtUnixMS: envelope.ExpiresAt.UnixMilli(), Username: envelope.Credential.Username, Secret: envelope.Credential.Password}, nil
 }
 
 func validateDirectCredentialEnvelopeAgainstPackage(job *direct.Job, envelope direct.DirectCredentialEnvelope) error {

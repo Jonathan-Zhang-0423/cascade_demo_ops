@@ -100,6 +100,33 @@ func TestDecideSourceBindingIsIdempotentAfterMixedConfirmation(t *testing.T) {
 	}
 }
 
+func TestDecideSourceBindingPersistsMixedConfirmationWithoutReanalysis(t *testing.T) {
+	ctx := context.Background()
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := sourceBindingDecisionState("project-confirm-without-rerun", "assessment-current")
+	state.SourceBinding.Status = model.ProductSourceBindingUnverified
+	state.SourceBinding.EffectiveMode = model.ProductSourceModePageOnly
+	state.ProjectIntelligence = &model.ProjectIntelligencePack{ProjectID: state.ProjectID, SourceBinding: state.SourceBinding}
+	if err := states.Save(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.DecideSourceBinding(ctx, state.ProjectID, SourceBindingDecisionRequest{Decision: "confirm_mixed", AssessmentHash: "assessment-current", IdempotencyKey: "decision-confirm-once"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != state || got.SourceBinding.Status != model.ProductSourceBindingConfirmed || got.SourceBinding.EffectiveMode != model.ProductSourceModeMixed || got.ProjectContext.SourceBinding != got.SourceBinding || got.ProjectIntelligence.SourceBinding != got.SourceBinding {
+		t.Fatalf("mixed confirmation did not persist the same audited state: %+v", got)
+	}
+	persisted, err := states.Load(ctx, state.ProjectID)
+	if err != nil || persisted.SourceBinding.Status != model.ProductSourceBindingConfirmed || persisted.SourceBinding.Decision != "confirm_mixed" {
+		t.Fatalf("mixed confirmation was not saved: state=%+v err=%v", persisted, err)
+	}
+}
+
 func sourceBindingDecisionState(projectID, assessmentHash string) *orchestrator.CascadeState {
 	assessment := &model.ProductSourceBindingAssessment{
 		SchemaVersion: model.ProductSourceBindingAssessmentSchemaVersion,

@@ -120,6 +120,73 @@ type ResultArtifactFile struct {
 	MimeType string
 }
 
+// devEphemeralDirectSession is deliberately process-local. It is enabled only
+// by an explicit development environment variable for automated local Direct
+// acceptance runs where Windows Credential Manager is unavailable (for
+// example, a non-interactive service session). It never persists a token,
+// installation identity, or lease to disk and is not available to desktop or
+// production profiles.
+type devEphemeralDirectSession struct {
+	mu       sync.RWMutex
+	token    string
+	identity []byte
+	leases   map[string][]byte
+}
+
+func (d *devEphemeralDirectSession) storeToken(value string) error {
+	if strings.TrimSpace(value) != d.token {
+		return errors.New("dev Direct session token is injected at process start and cannot be replaced through the API")
+	}
+	return nil
+}
+
+func (d *devEphemeralDirectSession) readToken() (string, error) {
+	if d.token == "" {
+		return "", errors.New("dev Direct session token is unavailable")
+	}
+	return d.token, nil
+}
+
+func (d *devEphemeralDirectSession) storeIdentity(value []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.identity = append(d.identity[:0], value...)
+	return nil
+}
+
+func (d *devEphemeralDirectSession) readIdentity() ([]byte, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if len(d.identity) == 0 {
+		return nil, errors.New("dev Direct session identity is unavailable")
+	}
+	return append([]byte(nil), d.identity...), nil
+}
+
+func (d *devEphemeralDirectSession) storeLease(projectID string, value []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.leases[projectID] = append([]byte(nil), value...)
+	return nil
+}
+
+func (d *devEphemeralDirectSession) readLease(projectID string) ([]byte, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	value := d.leases[projectID]
+	if len(value) == 0 {
+		return nil, errors.New("dev Direct session lease is unavailable")
+	}
+	return append([]byte(nil), value...), nil
+}
+
+func (d *devEphemeralDirectSession) deleteLease(projectID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.leases, projectID)
+	return nil
+}
+
 func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Service, error) {
 	if states == nil {
 		states = store.NewMemoryStateStore()
@@ -171,6 +238,20 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 		readDirectLease:     credentialstore.ReadDirectBrowserAgentLease,
 		deleteDirectLease:   credentialstore.DeleteDirectBrowserAgentLease,
 		readDemoCredential:  credentialstore.ReadDemoCredential,
+	}
+	if runtime.Profile == config.ProfileDev {
+		if token := strings.TrimSpace(os.Getenv("CASCADE_DIRECT_DEV_EPHEMERAL_TOKEN")); token != "" {
+			session := &devEphemeralDirectSession{token: token, leases: map[string][]byte{}}
+			service.storeDirectToken = session.storeToken
+			service.readDirectToken = session.readToken
+			service.deleteDirectToken = func() error { return nil }
+			service.storeDirectIdentity = session.storeIdentity
+			service.readDirectIdentity = session.readIdentity
+			service.storeDirectLease = session.storeLease
+			service.readDirectLease = session.readLease
+			service.deleteDirectLease = session.deleteLease
+			service.directTransportURL = strings.TrimRight(strings.TrimSpace(os.Getenv("CASCADE_DIRECT_DEV_CONTROL_URL")), "/")
+		}
 	}
 	service.controlPlaneURL = loadPersistedControlPlaneURL(runtime.DataRoot)
 	service.devVisibleBrowserAgent = newDevVisibleBrowserAgentManager(service)
@@ -386,14 +467,28 @@ func (s *Service) DecideSourceBinding(ctx context.Context, projectID string, req
 	if state.ProjectContext == nil {
 		return nil, errors.New("project context is missing")
 	}
-	input, err := userInputFromProjectContext(state.ProjectContext)
-	if err != nil {
+	// A binding decision approves how already-read, immutable evidence may be
+	// combined. It is not a request to reread the product, call models again, or
+	// mutate the future package. Re-running the entire flow here used to make a
+	// single confirmation depend on several slow model calls and could cancel
+	// halfway through, despite the assessment hash already proving which evidence
+	// the decision applies to. Persist the explicit decision, then let package
+	// export produce a fresh digest from this state.
+	state.SourceBinding.Decision = request.Decision
+	if request.Decision == "confirm_mixed" {
+		state.SourceBinding.Status = model.ProductSourceBindingConfirmed
+		state.SourceBinding.EffectiveMode = model.ProductSourceModeMixed
+	} else {
+		state.SourceBinding.EffectiveMode = model.ProductSourceModePageOnly
+	}
+	state.ProjectContext.SourceBinding = state.SourceBinding
+	if state.ProjectIntelligence != nil {
+		state.ProjectIntelligence.SourceBinding = state.SourceBinding
+	}
+	if err := s.states.Save(ctx, state); err != nil {
 		return nil, err
 	}
-	input.ProjectID = projectID
-	input.SourceBindingDecision = request.Decision
-	input.SourceBindingHash = request.AssessmentHash
-	return s.CreateProject(ctx, input)
+	return state, nil
 }
 
 type SourceBindingStaleError struct{}
