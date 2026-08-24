@@ -139,3 +139,35 @@ func TestProtocolBrowserAgentAcceptanceRunsCompleteServerPath(t *testing.T) {
 		t.Fatalf("protocol acceptance gate did not pass: %+v", view)
 	}
 }
+
+func TestProtocolBrowserAgentAcceptanceBaseSuccessScenarioCompletes(t *testing.T) {
+	service := newTestDevHTTPServer(t).service
+	service.runtime.DevRepoRoot = filepath.Join("..", "..", "..")
+	if path := os.Getenv("CASCADE_FFMPEG_PATH"); path != "" {
+		service.runtime.FFmpegPath = path
+	}
+	if path := os.Getenv("CASCADE_FFPROBE_PATH"); path != "" {
+		service.runtime.FFprobePath = path
+	}
+	if !commandReady(service.runtime.FFmpegPath) || checkCommandReady(firstNonEmptyString(service.runtime.FFprobePath, "ffprobe")) != nil {
+		t.Skip("protocol acceptance diagnostics require FFmpeg and ffprobe")
+	}
+	service.editorWorker = driver.NewLocalDriver(service.nodeBinaryForExecution(), service.localVideoWorkerPath(), service.videoWorkerEnvironment())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Acceptance Dashboard</title></head><body><main aria-label="Dashboard"><h1>Dashboard</h1><button type="button" data-testid="invite-member">Invite teammate</button><p id="status">Waiting</p></main><script>document.querySelector('[data-testid="invite-member"]').addEventListener('click',()=>{document.querySelector('#status').textContent='Invite flow starts';const dialog=document.createElement('section');dialog.dataset.testid='invite-dialog';dialog.setAttribute('role','dialog');dialog.textContent='Invite teammate';document.body.appendChild(dialog)})</script></body></html>`))
+	}))
+	defer server.Close()
+	pkg, err := protocolAcceptancePackage(service.browserAgentAcceptanceFixturePath(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := service.runProtocolAcceptanceScenario(t.Context(), pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario := protocolAcceptanceSuccessScenario(run)
+	if scenario.Verdict != "passed" {
+		t.Fatalf("base protocol success scenario failed: %s assertions=%+v failure=%+v artifacts=%+v", scenario.Actual, scenario.Assertions, run.Result.FailureDiagnostic, run.Result.GeneratedAssets)
+	}
+}

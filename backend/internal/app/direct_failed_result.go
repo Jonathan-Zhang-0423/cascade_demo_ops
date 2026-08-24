@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -33,10 +34,10 @@ func (s *DirectHTTPServer) directRuntimeFailureResult(ctx context.Context, pkg *
 	diagnostic := &model.ScriptFailureDiagnostic{
 		ID: "diag_" + safePathSegment(stage.NodeID), SchemaVersion: model.ScriptFailureDiagnosticSchemaVersion,
 		SourcePackageID: pkg.PackageID, CloudJobID: jobID, FailedNodeID: stage.NodeID, FailedStepOrder: stage.Order, Attempt: 1,
-		Error:           model.AgentError{Code: code, Message: "Server runtime failed before browser evidence was available."},
-		RedactionReport: model.DiagnosticRedactionReport{Applied: true, PolicyRef: pkg.PackageID + ".redactions", FullHTMLIncluded: false},
+		Error:                      model.AgentError{Code: code, Message: "Server runtime failed before browser evidence was available."},
+		RedactionReport:            model.DiagnosticRedactionReport{Applied: true, PolicyRef: pkg.PackageID + ".redactions", FullHTMLIncluded: false},
 		BrowserEvidenceUnavailable: browserEvidenceUnavailable,
-		CapturedAt:      createdAt,
+		CapturedAt:                 createdAt,
 	}
 	// Embed blocking ValidationReports into diagnostic (Phase 2).
 	if len(blockingReports) > 0 {
@@ -61,7 +62,10 @@ func (s *DirectHTTPServer) directRuntimeFailureResult(ctx context.Context, pkg *
 	}
 	eventLog, err := newStageEventAuditLog(recordingDir, jobID)
 	if err != nil || eventLog == nil {
-		return model.RecordingResultPackage{}, errors.New("cannot create Direct infrastructure failure event log")
+		if err != nil {
+			return model.RecordingResultPackage{}, fmt.Errorf("cannot create Direct infrastructure failure event log: %w", err)
+		}
+		return model.RecordingResultPackage{}, errors.New("cannot create Direct infrastructure failure event log: recording directory is empty")
 	}
 	event := model.StageExecutionEvent{
 		SchemaVersion: model.StageExecutionEventSchemaVersion, EventID: "event_" + safePathSegment(jobID) + "_infrastructure_failed",

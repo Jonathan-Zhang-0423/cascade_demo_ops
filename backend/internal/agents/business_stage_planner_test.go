@@ -44,6 +44,8 @@ func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
 		{intent: "登录、创建俄罗斯方块项目、等待 Agent 真正编写完代码", want: "俄罗斯方块"},
 		{intent: "新建项目入口，项目需求必须精确填写为“贪吃蛇游戏”", want: "贪吃蛇游戏"},
 		{intent: "在“今天你想做什么？”输入“贪吃蛇游戏”，然后点击构建", want: "贪吃蛇游戏"},
+		{intent: "Fill the project-idea field with the exact value: 贪吃蛇游戏. Then click Build.", want: "贪吃蛇游戏"},
+		{intent: "2. Fill the project-idea field with the exact value: 贪吃蛇游戏\n3. Click Build.", want: "贪吃蛇游戏"},
 		{intent: "新建项目 启动 Agent 实际构建", want: ""},
 		{intent: "新建项目（13秒，构建模式）", want: ""},
 	}
@@ -51,6 +53,13 @@ func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
 		if got := intentProjectName(test.intent); got != test.want {
 			t.Fatalf("intentProjectName(%q)=%q, want %q", test.intent, got, test.want)
 		}
+	}
+}
+
+func TestBusinessStageExplicitRequirementPreservesNumberedInstructionBoundary(t *testing.T) {
+	project := &model.ProjectContext{ProductDescription: "2. Fill the project-idea field with the exact value: 贪吃蛇游戏\n3. Click Build."}
+	if got := intentProjectName(businessStageExplicitRequirementText(project, nil, nil)); got != "贪吃蛇游戏" {
+		t.Fatalf("numbered formal requirement leaked into project value: %q", got)
 	}
 }
 
@@ -262,6 +271,36 @@ func TestDemoIntentDerivesAtomicProjectCreationGoalsFromCompoundLoginRequirement
 	if !foundInput {
 		t.Fatalf("page verifier did not receive the bounded approved project input value: %+v", verifier)
 	}
+}
+
+func TestDemoIntentDerivesExactChineseProjectIdeaFromFormalE2ERequirement(t *testing.T) {
+	state := &ProjectUnderstandingState{Project: &model.ProjectContext{
+		ID:                 "project_formal_chinese_e2e",
+		ProductDescription: "目标页面：http://127.0.0.1:5000/app\n必须按以下顺序执行：\n1. 点击“新建项目”。\n2. 在“今天你想做什么？”输入“贪吃蛇游戏”。\n3. 点击“构建”。\n禁止复制 Token。",
+		MustShow:           []string{"新建项目入口", "贪吃蛇游戏", "构建按钮", "构建完成状态"},
+	}}
+	intent := demoIntentFromState(state)
+	goals := map[string]model.DemoIntentGoal{}
+	for _, goal := range intent.Goals {
+		goals[goal.ID] = goal
+	}
+	input, ok := goals["intent_project_requirement_input"]
+	if !ok || input.PreferredAction != "fill" || input.Label != "填写项目需求：贪吃蛇游戏" {
+		t.Fatalf("formal Chinese requirement lost its exact project idea: %+v", intent.Goals)
+	}
+	if _, ok := goals["intent_new_project_entry"]; !ok {
+		t.Fatalf("formal Chinese requirement did not derive new-project entry: %+v", intent.Goals)
+	}
+	if _, ok := goals["intent_start_agent_build"]; !ok {
+		t.Fatalf("formal Chinese requirement did not derive Build click: %+v", intent.Goals)
+	}
+	verifier := verifierGoals(&model.ProjectIntelligencePack{DemoIntent: intent})
+	for _, goal := range verifier {
+		if goal.ID == "intent_project_requirement_input" && goal.InputValue == "贪吃蛇游戏" {
+			return
+		}
+	}
+	t.Fatalf("page verifier did not receive the exact approved Chinese value: %+v", verifier)
 }
 
 func TestBusinessStagePlannerDoesNotInferProjectNameFromDerivedIntentMetadata(t *testing.T) {

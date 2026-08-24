@@ -298,7 +298,7 @@ async function applyDiscoveredNewProjectTransition(
   const explicitlyRequested = goals.some((goal) => {
     if (!goal.required || !goal.business || normalizeAction(goal.kind) !== "click") return false;
     const semantic = normalizeSelectorText(`${goal.label || ""} ${(goal.keywords || []).join(" ")}`);
-    return /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
+    return isNewProjectSemantic(semantic);
   });
   if (!explicitlyRequested || isURLForbiddenByScope(page.url(), request)) return "";
 
@@ -337,7 +337,7 @@ async function applyDiscoveredNewProjectTransition(
       if (control.testid) selector = `[data-testid="${escapeCSSString(control.testid)}"]`;
       else if (control.aria) selector = `[aria-label="${escapeCSSString(control.aria)}"]`;
       else if (control.id && /^[A-Za-z][\w-]*$/.test(control.id)) selector = `#${control.id}`;
-      const requested = /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
+      const requested = isNewProjectSemantic(semantic);
       const staleEntity = /(card-project-|text-project-name-|emoji-project-|project-menu-|project-list|dashboard-page)/i.test(semantic);
       const score = (control.testid ? 100 : control.aria ? 70 : control.id ? 50 : 0) + (/button-new-project|new-project-button|create-project-button/i.test(semantic) ? 80 : 0);
       return { selector, semantic, requested, staleEntity, score };
@@ -363,7 +363,7 @@ async function applyDiscoveredProjectInput(
     const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
     return candidate.required && candidate.business && normalizeAction(candidate.kind) === "fill" &&
       typeof candidate.input_value === "string" && candidate.input_value.trim().length > 0 && candidate.input_value.length <= 512 &&
-      /(项目需求|项目名称|project idea|project prompt|project name|input-project-idea)/i.test(semantic) &&
+      isProjectIdeaSemantic(semantic) &&
       !/(password|passwd|secret|token|api key|密码|口令|密钥|令牌)/i.test(candidate.input_value);
   });
   if (!goal || isURLForbiddenByScope(page.url(), request)) return "";
@@ -502,8 +502,7 @@ async function discoverProjectCreationResultStates(
 ): Promise<VerifiedInteractionCandidate[]> {
   const goal = goals.find((candidate) => {
     const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
-    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "click" &&
-      /(新建项目|创建项目|新增项目|new project|create project)/i.test(semantic);
+    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "click" && isNewProjectSemantic(semantic);
   });
   if (!goal) return [];
   const states = await page.locator("dialog, [role='dialog'], [data-testid*='dialog' i], [data-testid*='modal' i]").evaluateAll((elements: any[]) => elements.slice(0, 40).map((element) => {
@@ -717,8 +716,18 @@ function selectorEvidenceID(scanID: string, candidateID: string, selector: strin
   return `ev_browser_scan_${hashText(`${scanID}|${candidateID}|${selector}`)}`;
 }
 
+// Direct API v1 uses a bare lowercase SHA-256 value. Adding an algorithm
+// prefix makes otherwise valid selector provenance fail formal intake.
 function sha256Text(value: string): string {
-  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function isNewProjectSemantic(value: string): boolean {
+  return /(新建项目|创建项目|新增项目|new project|create project)/i.test(value);
+}
+
+function isProjectIdeaSemantic(value: string): boolean {
+  return /(项目需求|项目名称|今天你想做什么|project idea|project prompt|project name|input-project-idea)/i.test(value);
 }
 
 function selectorForControl(control: any, label: string): string {

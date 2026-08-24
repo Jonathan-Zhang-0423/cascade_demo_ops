@@ -1381,7 +1381,10 @@ func businessStageExplicitRequirementText(project *model.ProjectContext, brief *
 	if report != nil && report.RequirementBrief != nil {
 		parts = append(parts, report.RequirementBrief.Scenario, report.RequirementBrief.Objective)
 	}
-	return normalizeIntentText(strings.Join(parts, " "))
+	// This text is used only to extract user-supplied literal values. Preserve
+	// line boundaries so numbered formal instructions cannot be concatenated
+	// into the value of the preceding fill instruction.
+	return strings.Join(parts, "\n")
 }
 
 func intentIsObservationOnly(intentText string) bool {

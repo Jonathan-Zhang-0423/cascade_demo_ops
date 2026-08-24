@@ -693,6 +693,15 @@ func businessStageActionTarget(stage model.BusinessStage, entryPoint string) mod
 			exact.URL = target.URL
 			return exact
 		}
+		// A final observation executes from the business-stage entry route.  Do
+		// not repurpose an arbitrary page-scan control (for example, the project
+		// idea input on /app) as its action target merely because no exact
+		// completion anchor is available.  Completion is separately asserted by
+		// businessStageValidation; retaining the entry route keeps all execution
+		// layers honest about where the bounded observation occurs.
+		target.Label = stage.Action.Label
+		target.Text = stage.Action.Label
+		return target
 	}
 	if len(stage.Targets) == 0 {
 		target.Label = stage.Action.Label

@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const root = await mkdtemp(path.join(tmpdir(), "cascade-validate-server-render-"));
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const validator = path.join(repoRoot, "scripts", "validate-server-render.mjs");
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const validator = path.join(repoRoot, "tests", "server-e2e", "scripts", "validate-server-render.mjs");
 
 try {
   const passingDir = path.join(root, "passing", "render");

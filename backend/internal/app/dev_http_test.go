@@ -322,6 +322,60 @@ func TestDevHTTPExecutionPackageResolvesOnlyOpaqueCredentialRef(t *testing.T) {
 	}
 }
 
+func TestDevHTTPExecutionPackagePreservesOpaqueCredentialRefAcrossDirectPackage(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestDevHTTPServerWithRepository(t, repoRoot)
+	server.readDemoCredential = func(ref string) (credentialstore.DemoCredential, error) {
+		if ref != "unattended-e2e" {
+			return credentialstore.DemoCredential{}, errors.New("credential not found")
+		}
+		return credentialstore.DemoCredential{Username: "private-user@example.test", Password: "private-password"}, nil
+	}
+	product := newAuthenticatedWorkspaceTestServer(t)
+	productURL := product.URL + "/login"
+	input := orchestrator.UserInput{
+		Mode:               model.AppModeDesktop,
+		ProductURL:         productURL,
+		LocalRepoPath:      repoRoot,
+		ProductDescription: "登录后新建项目，填写贪吃蛇游戏并点击 Build。",
+		TargetAudience:     "产品团队",
+		AllowedDomains:     []string{"127.0.0.1"},
+		WebpageScreenshots: []model.WebpageScreenshotInput{verifiedActionScreenshotInputForURL(productURL)},
+	}
+	body, err := json.Marshal(ExecutionPackageRequest{
+		UserInput:     &input,
+		CredentialRef: "credential://demo/unattended-e2e",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := postExecutionPackage(t, server, body)
+	if state.ProjectContext == nil || state.ProjectContext.DemoAccount == nil {
+		t.Fatalf("expected a credential-bound project context: %+v", state.ProjectContext)
+	}
+	const wantRef = "credential://demo/unattended-e2e"
+	if state.ProjectContext.DemoAccount.UsernameSecretRef != wantRef || state.ProjectContext.DemoAccount.PasswordSecretRef != wantRef {
+		t.Fatalf("project lost opaque credential ref: %+v", state.ProjectContext.DemoAccount)
+	}
+	build, err := buildClientExecutionPackageFromState(&state, "org_test", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(build.Package.CredentialGrants) != 1 || build.Package.CredentialGrants[0].CloudSecretRef != wantRef {
+		t.Fatalf("direct credential grant drifted from App reference: %+v", build.Package.CredentialGrants)
+	}
+	refs := directPackageSecretRefs(&build.Package)
+	if len(refs) != 1 || refs[0] != wantRef {
+		t.Fatalf("direct action credential ref drifted from App grant: %v", refs)
+	}
+	if err := validateDirectPackageCredentialRefs(&build.Package); err != nil {
+		t.Fatalf("App-generated direct package should validate its credential grant: %v", err)
+	}
+}
+
 func TestDevHTTPExecutionPackageRejectsMalformedCredentialRef(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	for _, ref := range []string{"demo/unattended", "credential://demo/", "credential://demo/bad/ref"} {

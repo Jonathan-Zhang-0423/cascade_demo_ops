@@ -1,6 +1,6 @@
 # Direct 无人值守 App→Server 端到端验收编排 v1
 
-本说明对应 `scripts/run-app-server-e2e-unattended.ps1`，仅用于本机
+本说明对应 `tests/server-e2e/scripts/run-app-server-e2e-unattended.ps1`，仅用于本机
 `ProfileDev`/development 测试。它不修改 App 规则，不修改 Validation Agent 或
 OutcomeVerifier，也不把测试包标记为正式生产交换成功。
 
@@ -46,7 +46,7 @@ Trace、截图、视频或结果 JSON。自动登录失败时 fail-closed。
 
 ```powershell
 cd D:\Engine-7-8
-.\scripts\run-app-server-e2e-unattended.ps1
+.\tests\server-e2e\scripts\run-app-server-e2e-unattended.ps1
 ```
 
 输出目录中的 `client_execution_package.json` 是 App 原始包，

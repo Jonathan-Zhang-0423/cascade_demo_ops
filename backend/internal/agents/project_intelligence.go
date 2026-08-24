@@ -998,7 +998,11 @@ func appendDerivedProjectCreationGoals(goals []model.DemoIntentGoal, state *Proj
 			goals = append(goals, goal)
 		}
 	}
-	if containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "新建名为", "创建名为", "new project", "create project") || intentProjectName(intentText) != "" {
+	// This is the App-side boundary that derives atomic Browser Agent goals.
+	// It must recognize the real UTF-8 vocabulary used by product requests,
+	// rather than reducing a required Chinese flow to a generic click goal.
+	if containsAnyNormalized(intentText,
+		"新建项目", "创建项目", "新增项目", "新建名为", "创建名为", "new project", "create project") || intentProjectName(intentText) != "" {
 		appendGoal(model.DemoIntentGoal{
 			ID:               "intent_new_project_entry",
 			Label:            "进入新建项目流程",
