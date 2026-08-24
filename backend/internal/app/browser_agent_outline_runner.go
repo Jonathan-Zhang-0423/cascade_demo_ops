@@ -98,6 +98,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		openRequest.RecordingSensitive = &recordingSensitive
 	}
 	factory := r.sessionFactory
+	var visualObserver *browserVisualObserverBridge
 	if factory == nil {
 		workerPath := r.service.localVideoWorkerPath()
 		if workerPath == "" {
@@ -109,7 +110,18 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		if err := checkCommandReady(r.service.nodeBinaryForExecution()); err != nil {
 			return model.RecordingResultPackage{}, newRuntimeExecutionError(runtimeErrorNodeMissing, err)
 		}
-		worker := driver.NewBrowserAgentWorker(r.service.nodeBinaryForExecution(), workerPath, r.service.videoWorkerEnvironment())
+		var observerErr error
+		visualObserver, observerErr = startBrowserVisualObserverBridge(ctx, r.service.llm, len(request.RuntimePlan.Stages), request.Progress)
+		if observerErr != nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_visual_observer_unavailable", observerErr)
+		}
+		defer visualObserver.Close()
+		workerEnvironment := r.service.videoWorkerEnvironment()
+		workerEnvironment["CASCADE_BROWSER_VISION_OBSERVER_URL"] = visualObserver.URL
+		workerEnvironment["CASCADE_BROWSER_VISION_OBSERVER_TOKEN"] = visualObserver.Token
+		workerEnvironment["CASCADE_BROWSER_VISION_INTERVAL_MS"] = "60000"
+		workerEnvironment["CASCADE_BROWSER_VISION_MAX_CALLS"] = "12"
+		worker := driver.NewBrowserAgentWorker(r.service.nodeBinaryForExecution(), workerPath, workerEnvironment)
 		factory = func(ctx context.Context, open driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
 			return worker.Open(ctx, open)
 		}

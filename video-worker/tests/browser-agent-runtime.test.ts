@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { approvedKeyboardKeys, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+
+describe("browser visual polling terminal evidence", () => {
+  const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
+    schema_version: "demoops.browser_visual_observation.v1" as const,
+    decision, confidence, summary: "bounded visible evidence", observed_at: "2026-08-24T00:00:00Z",
+  });
+
+  it("requires two consecutive high-confidence terminal observations", () => {
+    expect(confirmedBrowserVisualTerminalDecision([verdict("succeeded", 0.99)])).toBeUndefined();
+    expect(confirmedBrowserVisualTerminalDecision([verdict("succeeded", 0.99), verdict("unknown", 0.99), verdict("succeeded", 0.99)])).toBeUndefined();
+    expect(confirmedBrowserVisualTerminalDecision([verdict("succeeded", 0.89), verdict("succeeded", 0.99)])).toBeUndefined();
+    expect(confirmedBrowserVisualTerminalDecision([verdict("failed", 0.95), verdict("failed", 0.96)])).toBe("failed");
+  });
+});
 
 describe("browser agent target resolution feedback", () => {
   it("keeps an unresolved target as a failed structured assertion", () => {
