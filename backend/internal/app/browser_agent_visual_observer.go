@@ -201,7 +201,11 @@ func startBrowserVisualObserverBridge(parent context.Context, client llm.Client,
 			providerCalls++
 			output = browserVisualObservationModelOutput{}
 			fallbackCtx, fallbackCancel := context.WithTimeout(r.Context(), 45*time.Second)
-			trace, callErr = client.GenerateMultimodal(fallbackCtx, config.ModelTaskMultimodalUnderstanding, modelRequest, &output)
+			// Retry through the same explicitly configured vision route. Remote
+			// Browser Workers intentionally carry only that short-lived provider
+			// credential; falling through to an unrelated route can silently turn
+			// a recoverable JSON-shape error into api_key_missing.
+			trace, callErr = client.GenerateMultimodal(fallbackCtx, config.ModelTaskBrowserVisualObservation, modelRequest, &output)
 			fallbackCancel()
 		}
 		if callErr != nil {
